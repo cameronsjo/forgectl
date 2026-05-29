@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -24,16 +25,19 @@ func Execute(ctx context.Context) error {
 	closer := config.SetupLogger(cfg)
 	defer closer.Close()
 
+	slog.Debug("Starting forgectl.", "version", meta.Version)
 	tmuxClient := tmux.New(exec.OSRunner{})
 	projClient := projects.New(exec.OSRunner{})
-	root := newRoot(tmuxClient, projClient)
+	root := newRoot(tmuxClient, projClient, cfg)
 	args := normalizeArgs(os.Args[1:])
 	noIcons := cfg.NoIcons || hasNoIcons(args)
 
 	if shouldLaunchTUI(root, args) {
+		slog.Debug("Launching TUI.", "no_icons", noIcons)
 		return runAction(ctx, tmuxClient, noIcons)
 	}
 
+	slog.Debug("Dispatching to command verb.", "verb", args)
 	root.SetArgs(args)
 	return fang.Execute(ctx, root,
 		fang.WithVersion(meta.Version),
@@ -47,7 +51,12 @@ func Execute(ctx context.Context) error {
 func runAction(ctx context.Context, client *tmux.Client, noIcons bool) error {
 	act, err := tui.Run(ctx, client, noIcons)
 	if err != nil {
+		slog.Error("Failed to run TUI.", "error", err)
 		return err
+	}
+	if act.Kind == tui.ActionNone {
+		slog.Debug("TUI exited with no action.")
+		return nil
 	}
 	return dispatchAction(ctx, client, act)
 }
@@ -57,10 +66,13 @@ func runAction(ctx context.Context, client *tmux.Client, noIcons bool) error {
 func dispatchAction(ctx context.Context, client *tmux.Client, act tui.Action) error {
 	switch act.Kind {
 	case tui.ActionAttach:
+		slog.Debug("Dispatching attach action.", "target", act.Target)
 		return client.AttachOrSwitch(ctx, act.Target)
 	case tui.ActionPick:
+		slog.Debug("Dispatching pick action.", "target", act.Target)
 		return client.Pick(ctx, act.Target)
 	case tui.ActionLast:
+		slog.Debug("Dispatching last session action.")
 		return client.LastSession(ctx)
 	}
 	return nil

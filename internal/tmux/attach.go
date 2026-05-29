@@ -15,16 +15,12 @@ import (
 func (c *Client) AttachOrSwitch(ctx context.Context, target string) error {
 	inside := c.InsideTmux()
 	slog.Debug("Preparing to attach.", "target", target, "inside_tmux", inside)
+	var err error
 	if inside {
-		_, err := c.run.Run(ctx, c.tmuxBin, "switch-client", "-t", target)
-		if err != nil {
-			slog.Error("Failed to attach.", "target", target, "error", err)
-			return err
-		}
-		slog.Debug("Successfully attached.", "target", target)
-		return nil
+		_, err = c.run.Run(ctx, c.tmuxBin, "switch-client", "-t", target)
+	} else {
+		err = c.run.RunInteractive(ctx, c.tmuxBin, "attach-session", "-t", target)
 	}
-	err := c.run.RunInteractive(ctx, c.tmuxBin, "attach-session", "-t", target)
 	if err != nil {
 		slog.Error("Failed to attach.", "target", target, "error", err)
 	} else {

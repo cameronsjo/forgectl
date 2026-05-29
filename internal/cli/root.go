@@ -6,6 +6,7 @@ package cli
 import (
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/tmux"
@@ -13,7 +14,7 @@ import (
 
 // newRoot builds the root command tree. Each domain module registers its
 // parent command here (tmux, projects today; pr/k8s later).
-func newRoot(tmuxClient *tmux.Client, projClient *projects.Client) *cobra.Command {
+func newRoot(tmuxClient *tmux.Client, projClient *projects.Client, cfg config.Config) *cobra.Command {
 	root := &cobra.Command{
 		Use:     meta.AppName,
 		Short:   meta.Tagline,
@@ -31,7 +32,7 @@ func newRoot(tmuxClient *tmux.Client, projClient *projects.Client) *cobra.Comman
 
 	root.AddCommand(newTmuxCmd(tmuxClient))
 	root.AddCommand(newProjectsCmd(projClient))
-	root.AddCommand(newConfigCmd())
+	root.AddCommand(newConfigCmd(cfg))
 
 	return root
 }

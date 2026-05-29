@@ -104,18 +104,17 @@ func openLogWriter(logFile string) (io.Writer, io.Closer) {
 		return os.Stderr, nopCloser{}
 	}
 
-	var logDir, path string
+	var path string
 	if logFile == "" {
 		p, err := autoLogPath()
 		if err != nil {
 			return os.Stderr, nopCloser{}
 		}
 		path = p
-		logDir = filepath.Dir(path)
 	} else {
 		path = logFile
-		logDir = filepath.Dir(path)
 	}
+	logDir := filepath.Dir(path)
 
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		return os.Stderr, nopCloser{}
@@ -134,14 +133,24 @@ func openLogWriter(logFile string) (io.Writer, io.Closer) {
 	return f, f
 }
 
+// configDir returns the OS config base directory for forgectl
+// (os.UserConfigDir()/forgectl). Shared by ConfigPath and autoLogPath.
+func configDir() (string, error) {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "forgectl"), nil
+}
+
 // autoLogPath returns today's log file path inside the config dir. No side effects.
 func autoLogPath() (string, error) {
-	dir, err := os.UserConfigDir()
+	dir, err := configDir()
 	if err != nil {
 		return "", err
 	}
 	name := "forgectl-" + time.Now().Format("2006-01-02") + ".log"
-	return filepath.Join(dir, "forgectl", name), nil
+	return filepath.Join(dir, name), nil
 }
 
 // pruneOldLogs deletes forgectl-YYYY-MM-DD.log files in dir that are older
@@ -174,11 +183,11 @@ func pruneOldLogs(dir string) {
 
 // ConfigPath returns the expected config file path.
 func ConfigPath() (string, error) {
-	dir, err := os.UserConfigDir()
+	dir, err := configDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "forgectl", "config.toml"), nil
+	return filepath.Join(dir, "config.toml"), nil
 }
 
 // nopCloser is an io.Closer that does nothing — stdlib io.NopCloser wraps
