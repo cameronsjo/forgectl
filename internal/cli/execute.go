@@ -10,6 +10,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/meta"
+	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 	"github.com/cameronsjo/forgectl/internal/tui"
 )
@@ -18,12 +19,13 @@ import (
 // then either opens the TUI (bare invoke or an unrecognized verb — the thumb-
 // mode affordance) or hands off to fang for styled help/errors/version.
 func Execute(ctx context.Context) error {
-	client := tmux.New(exec.OSRunner{})
-	root := newRoot(client)
+	tmuxClient := tmux.New(exec.OSRunner{})
+	projClient := projects.New(exec.OSRunner{})
+	root := newRoot(tmuxClient, projClient)
 	args := normalizeArgs(os.Args[1:])
 
 	if shouldLaunchTUI(root, args) {
-		return runAction(ctx, client, hasNoIcons(args))
+		return runAction(ctx, tmuxClient, hasNoIcons(args))
 	}
 
 	root.SetArgs(args)

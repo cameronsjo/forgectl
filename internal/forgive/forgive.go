@@ -18,6 +18,12 @@ func Normalize(s string) string {
 	return strings.TrimRight(lower, " \t.,!?;:")
 }
 
+// ProjectAliases maps each canonical projects verb to its accepted aliases.
+// Same single-source-of-truth pattern as TmuxAliases.
+var ProjectAliases = map[string][]string{
+	"pick": {"p", "open"},
+}
+
 // TmuxAliases maps each canonical tmux verb to its accepted aliases. This is
 // the single source of truth: internal/cli builds cobra command Aliases by
 // iterating this map, and Canonical uses it for known-verb detection in the

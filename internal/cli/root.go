@@ -1,17 +1,19 @@
-// Package cli holds the thin Cobra verbs layered over internal/tmux. Commands
-// parse flags and call ops; they hold no tmux logic of their own.
+// Package cli holds the thin Cobra verbs layered over internal/tmux and
+// internal/projects. Commands parse flags and call ops; they hold no domain
+// logic of their own.
 package cli
 
 import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/meta"
+	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
-// newRoot builds the root command tree over the given client. Each module
-// registers its parent command here (tmux today; pr/k8s later).
-func newRoot(client *tmux.Client) *cobra.Command {
+// newRoot builds the root command tree. Each domain module registers its
+// parent command here (tmux, projects today; pr/k8s later).
+func newRoot(tmuxClient *tmux.Client, projClient *projects.Client) *cobra.Command {
 	root := &cobra.Command{
 		Use:     meta.AppName,
 		Short:   meta.Tagline,
@@ -27,7 +29,8 @@ func newRoot(client *tmux.Client) *cobra.Command {
 	// Honored by the TUI and the tree verb; swaps Nerd Font glyphs for ASCII.
 	root.PersistentFlags().Bool("no-icons", false, "use ASCII markers instead of Nerd Font glyphs")
 
-	root.AddCommand(newTmuxCmd(client))
+	root.AddCommand(newTmuxCmd(tmuxClient))
+	root.AddCommand(newProjectsCmd(projClient))
 
 	return root
 }
