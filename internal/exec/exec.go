@@ -7,9 +7,11 @@ package exec
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // Runner abstracts running an external command. Two modes:
@@ -28,26 +30,35 @@ type OSRunner struct{}
 // Run executes name+args and returns trimmed stdout. On failure the returned
 // error wraps stderr so callers (and fang's styled error output) stay useful.
 func (OSRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	slog.Debug("Preparing to run command.", "cmd", name, "args", args)
+	start := time.Now()
+
 	cmd := exec.CommandContext(ctx, name, args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			slog.Error("Failed to run command.", "cmd", name, "stderr", msg, "error", err)
 			return "", &CommandError{Name: name, Args: args, Stderr: msg, Err: err}
 		}
+		slog.Error("Failed to run command.", "cmd", name, "error", err)
 		return "", &CommandError{Name: name, Args: args, Err: err}
 	}
+	slog.Debug("Successfully ran command.", "cmd", name, "duration", time.Since(start).Round(time.Millisecond))
 	return strings.TrimRight(string(out), "\n"), nil
 }
 
 // RunInteractive wires the child to the real stdio so it can drive the tty.
 func (OSRunner) RunInteractive(ctx context.Context, name string, args ...string) error {
+	slog.Debug("Preparing to run interactive command.", "cmd", name, "args", args)
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	err := cmd.Run()
+	slog.Debug("Interactive command exited.", "cmd", name, "error", err)
+	return err
 }
 
 // CommandError carries enough context to debug a failed shell-out without

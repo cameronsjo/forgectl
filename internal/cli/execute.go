@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/fang"
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/projects"
@@ -19,13 +20,18 @@ import (
 // then either opens the TUI (bare invoke or an unrecognized verb — the thumb-
 // mode affordance) or hands off to fang for styled help/errors/version.
 func Execute(ctx context.Context) error {
+	cfg := config.Load()
+	closer := config.SetupLogger(cfg)
+	defer closer.Close()
+
 	tmuxClient := tmux.New(exec.OSRunner{})
 	projClient := projects.New(exec.OSRunner{})
 	root := newRoot(tmuxClient, projClient)
 	args := normalizeArgs(os.Args[1:])
+	noIcons := cfg.NoIcons || hasNoIcons(args)
 
 	if shouldLaunchTUI(root, args) {
-		return runAction(ctx, tmuxClient, hasNoIcons(args))
+		return runAction(ctx, tmuxClient, noIcons)
 	}
 
 	root.SetArgs(args)
@@ -43,6 +49,12 @@ func runAction(ctx context.Context, client *tmux.Client, noIcons bool) error {
 	if err != nil {
 		return err
 	}
+	return dispatchAction(ctx, client, act)
+}
+
+// dispatchAction routes a TUI action to the appropriate client call. Separated
+// from runAction so it can be unit-tested without a real terminal.
+func dispatchAction(ctx context.Context, client *tmux.Client, act tui.Action) error {
 	switch act.Kind {
 	case tui.ActionAttach:
 		return client.AttachOrSwitch(ctx, act.Target)

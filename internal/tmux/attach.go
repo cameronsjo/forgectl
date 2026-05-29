@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"log/slog"
 )
 
 // AttachOrSwitch is the single path every session/window jump goes through.
@@ -12,11 +13,24 @@ import (
 // must go through the interactive Runner path. This inside/outside split is
 // the bit the old bash `s` script got subtly wrong.
 func (c *Client) AttachOrSwitch(ctx context.Context, target string) error {
-	if c.InsideTmux() {
+	inside := c.InsideTmux()
+	slog.Debug("Preparing to attach.", "target", target, "inside_tmux", inside)
+	if inside {
 		_, err := c.run.Run(ctx, c.tmuxBin, "switch-client", "-t", target)
-		return err
+		if err != nil {
+			slog.Error("Failed to attach.", "target", target, "error", err)
+			return err
+		}
+		slog.Debug("Successfully attached.", "target", target)
+		return nil
 	}
-	return c.run.RunInteractive(ctx, c.tmuxBin, "attach-session", "-t", target)
+	err := c.run.RunInteractive(ctx, c.tmuxBin, "attach-session", "-t", target)
+	if err != nil {
+		slog.Error("Failed to attach.", "target", target, "error", err)
+	} else {
+		slog.Debug("Successfully attached.", "target", target)
+	}
+	return err
 }
 
 // LastSession jumps to the last-used session. Inside tmux, tmux already tracks

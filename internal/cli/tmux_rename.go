@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"log/slog"
 
 	"github.com/spf13/cobra"
 
@@ -19,9 +20,12 @@ func newTmuxRenameCmd(client *tmux.Client) *cobra.Command {
 			if !client.HasSession(cmd.Context(), oldName) {
 				return fmt.Errorf("no such session: %s", oldName)
 			}
+			slog.Debug("Preparing to rename session.", "from", oldName, "to", newName)
 			if err := client.RenameSession(cmd.Context(), oldName, newName); err != nil {
+				slog.Error("Failed to rename session.", "from", oldName, "to", newName, "error", err)
 				return err
 			}
+			slog.Info("Successfully renamed session.", "from", oldName, "to", newName)
 			fmt.Fprintf(cmd.OutOrStdout(), "renamed %s → %s\n", oldName, newName)
 			return nil
 		},

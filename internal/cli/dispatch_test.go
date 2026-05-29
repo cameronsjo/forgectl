@@ -63,6 +63,12 @@ func TestShouldLaunchTUI(t *testing.T) {
 		{"help flag stays with fang", []string{"--help"}, false},
 		{"completion command does not launch", []string{"completion", "zsh"}, false},
 		{"bare tmux module does not launch here", []string{"tmux"}, false},
+		// Flag-only invocations: flags alone (including --no-icons) route to fang, not TUI
+		{"no-icons flag alone stays with fang", []string{"--no-icons"}, false},
+		// Flag + known verb: --no-icons should not prevent Cobra dispatch
+		{"no-icons plus known verb stays with cobra", []string{"--no-icons", "tmux", "ls"}, false},
+		// Flag + unknown verb still routes to TUI
+		{"no-icons plus unknown verb launches TUI", []string{"--no-icons", "frobnicate"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

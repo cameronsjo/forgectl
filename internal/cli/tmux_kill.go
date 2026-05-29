@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"log/slog"
 
 	"github.com/spf13/cobra"
 
@@ -37,15 +38,21 @@ func newTmuxKillCmd(client *tmux.Client) *cobra.Command {
 				}
 			}
 			if others {
+				slog.Debug("Preparing to kill others.", "keep", name)
 				if err := client.KillOthers(cmd.Context(), name); err != nil {
+					slog.Error("Failed to kill others.", "keep", name, "error", err)
 					return err
 				}
+				slog.Info("Successfully killed others.", "keep", name)
 				fmt.Fprintf(out, "killed all sessions except %s\n", name)
 				return nil
 			}
+			slog.Debug("Preparing to kill session.", "session", name)
 			if err := client.KillSession(cmd.Context(), name); err != nil {
+				slog.Error("Failed to kill session.", "session", name, "error", err)
 				return err
 			}
+			slog.Info("Successfully killed session.", "session", name)
 			fmt.Fprintf(out, "killed %s\n", name)
 			return nil
 		},

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -298,7 +299,11 @@ func (m *model) toMenu() {
 }
 
 func (m *model) enterPick() {
-	names, _ := m.client.SeshList(m.ctx)
+	names, err := m.client.SeshList(m.ctx)
+	if err != nil {
+		slog.Error("Failed to load sesh sessions.", "error", err)
+		m.status = styleDanger.Render("✗ sesh: " + err.Error())
+	}
 	items := make([]list.Item, 0, len(names))
 	for _, n := range names {
 		items = append(items, pickItem(n))
@@ -309,7 +314,11 @@ func (m *model) enterPick() {
 }
 
 func (m *model) enterSessions() {
-	sessions, _ := m.client.ListSessions(m.ctx)
+	sessions, err := m.client.ListSessions(m.ctx)
+	if err != nil {
+		slog.Error("Failed to load sessions.", "error", err)
+		m.status = styleDanger.Render("✗ tmux: " + err.Error())
+	}
 	items := make([]list.Item, 0, len(sessions))
 	for _, s := range sessions {
 		items = append(items, sessionItem{s})
@@ -320,7 +329,11 @@ func (m *model) enterSessions() {
 }
 
 func (m *model) enterWindows() {
-	windows, _ := m.client.ListWindows(m.ctx)
+	windows, err := m.client.ListWindows(m.ctx)
+	if err != nil {
+		slog.Error("Failed to load windows.", "error", err)
+		m.status = styleDanger.Render("✗ tmux: " + err.Error())
+	}
 	items := make([]list.Item, 0, len(windows))
 	for _, w := range windows {
 		items = append(items, windowItem{w})
@@ -331,7 +344,11 @@ func (m *model) enterWindows() {
 }
 
 func (m *model) enterTree() {
-	out, _ := m.client.Tree(m.ctx, !m.noIcons)
+	out, err := m.client.Tree(m.ctx, !m.noIcons)
+	if err != nil {
+		slog.Error("Failed to load tree.", "error", err)
+		m.status = styleDanger.Render("✗ tmux: " + err.Error())
+	}
 	m.tree.SetContent(out)
 	m.tree.GotoTop()
 	m.title = "tree"
