@@ -13,9 +13,8 @@ import (
 // icon-aware rendering is the TUI's job (M5); this is the power-mode glance.
 func newTmuxLsCmd(client *tmux.Client) *cobra.Command {
 	return &cobra.Command{
-		Use:     "ls",
-		Aliases: []string{"l", "list", "sessions"},
-		Short:   "List tmux sessions",
+		Use:   "ls",
+		Short: "List tmux sessions",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			sessions, err := client.ListSessions(cmd.Context())

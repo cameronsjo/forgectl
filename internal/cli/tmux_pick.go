@@ -13,9 +13,8 @@ import (
 // TUI picker (M5) is the zero-typing no-arg experience.
 func newTmuxPickCmd(client *tmux.Client) *cobra.Command {
 	return &cobra.Command{
-		Use:     "pick [name]",
-		Aliases: []string{"p", "go", "n", "new"},
-		Short:   "Connect to or smart-create a session (via sesh)",
+		Use:   "pick [name]",
+		Short: "Connect to or smart-create a session (via sesh)",
 		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {

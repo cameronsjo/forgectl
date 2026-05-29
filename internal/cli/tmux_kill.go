@@ -12,9 +12,8 @@ import (
 func newTmuxKillCmd(client *tmux.Client) *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
-		Use:     "kill <session>",
-		Aliases: []string{"k", "rm", "delete", "x"},
-		Short:   "Kill a session",
+		Use:   "kill <session>",
+		Short: "Kill a session",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
