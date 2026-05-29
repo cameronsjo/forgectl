@@ -11,8 +11,9 @@ import (
 func newTmuxCmd(client *tmux.Client) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "tmux",
-		Aliases: []string{"tm", "t"},
+		Aliases: []string{"tm"},
 		Short:   "Wrangle tmux sessions, windows, and panes",
 	}
+	cmd.AddCommand(newTmuxLsCmd(client))
 	return cmd
 }
