@@ -41,6 +41,7 @@ const (
 	sessionsMode
 	windowsMode
 	treeMode
+	cheatMode
 	formMode
 )
 
@@ -120,6 +121,7 @@ func (m model) menuItems() []list.Item {
 		menuItem{"Windows", "jump to any window, any session", func(g glyphSet) string { return g.Window }},
 		menuItem{"Tree", "the whole layout at a glance", func(g glyphSet) string { return g.Tree }},
 		menuItem{"Last", "back to the last session", func(g glyphSet) string { return g.Last }},
+		menuItem{"Cheatsheet", "tmux terms + the keys that matter", func(g glyphSet) string { return g.Cheat }},
 	}
 }
 
@@ -137,7 +139,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case formMode:
 		return m.updateForm(msg)
-	case treeMode:
+	case treeMode, cheatMode:
 		return m.updateTree(msg)
 	default:
 		return m.updateList(msg)
@@ -226,6 +228,8 @@ func (m model) activate(index int) (tea.Model, tea.Cmd) {
 		case 4:
 			m.action = Action{Kind: ActionLast}
 			return m, tea.Quit
+		case 5:
+			m.enterCheat()
 		}
 		return m, nil
 	case pickMode:
@@ -328,6 +332,13 @@ func (m *model) enterTree() {
 	m.mode = treeMode
 }
 
+func (m *model) enterCheat() {
+	m.tree.SetContent(Cheatsheet(m.noIcons))
+	m.tree.GotoTop()
+	m.title = "cheatsheet"
+	m.mode = cheatMode
+}
+
 func (m *model) setList(items []list.Item) {
 	m.l.ResetFilter()
 	m.l.SetItems(items)
@@ -391,7 +402,7 @@ func (m model) View() string {
 	header := m.headerView()
 	var body string
 	switch m.mode {
-	case treeMode:
+	case treeMode, cheatMode:
 		body = m.tree.View()
 	case formMode:
 		body = m.form.View()
@@ -411,7 +422,7 @@ func (m model) footerView() string {
 	var hint string
 	switch m.mode {
 	case menuMode:
-		hint = "1-5 / enter select · q quit"
+		hint = "1-6 / enter select · q quit"
 	case sessionsMode:
 		if narrow {
 			hint = "↑↓ · enter attach · k kill · r rename · q back"
@@ -420,7 +431,7 @@ func (m model) footerView() string {
 		}
 	case pickMode, windowsMode:
 		hint = "↑↓ · 1-9 · enter select · / filter · q back"
-	case treeMode:
+	case treeMode, cheatMode:
 		hint = "↑↓ scroll · q back"
 	case formMode:
 		hint = "enter confirm · esc cancel"

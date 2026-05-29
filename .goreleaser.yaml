@@ -57,6 +57,9 @@ brews:
   - repository:
       owner: cameronsjo
       name: homebrew-tap
+      # PAT with contents:write on the tap repo — the default GITHUB_TOKEN only
+      # reaches the current repo, so the cross-repo formula push needs this.
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     directory: Formula
     homepage: "https://github.com/cameronsjo/forgectl"
     description: "Personal tmux/dev-experience CLI for the headless workbench (supersedes the bash `s` script)"

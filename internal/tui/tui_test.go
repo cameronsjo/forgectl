@@ -25,7 +25,7 @@ func sized(m model, w, h int) model {
 func TestMenuViewRenders(t *testing.T) {
 	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true), 80, 24)
 	view := m.View()
-	for _, want := range []string{"forgectl", "Pick", "Sessions", "Windows", "Tree", "Last"} {
+	for _, want := range []string{"forgectl", "Pick", "Sessions", "Windows", "Tree", "Last", "Cheatsheet"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("menu view missing %q\n%s", want, view)
 		}
@@ -50,6 +50,27 @@ func TestNumberKeyNavigatesAndAttaches(t *testing.T) {
 	m = out.(model)
 	if m.action.Kind != ActionAttach || m.action.Target != "alpha" {
 		t.Errorf("expected attach alpha, got %+v", m.action)
+	}
+}
+
+func TestCheatFromMenu(t *testing.T) {
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true), 80, 24)
+	out, _ := m.Update(key("6")) // Cheatsheet
+	m = out.(model)
+	if m.mode != cheatMode {
+		t.Fatalf("expected cheatMode after '6', got %v", m.mode)
+	}
+	if !strings.Contains(m.View(), "pane") {
+		t.Errorf("cheat view should explain 'pane'")
+	}
+}
+
+func TestCheatsheetContent(t *testing.T) {
+	cs := Cheatsheet(true)
+	for _, want := range []string{"session", "window", "pane", "prefix |", "Ctrl+Space"} {
+		if !strings.Contains(cs, want) {
+			t.Errorf("cheatsheet missing %q", want)
+		}
 	}
 }
 

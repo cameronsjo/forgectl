@@ -49,6 +49,7 @@ type glyphSet struct {
 	Last     string
 	Kill     string
 	Rename   string
+	Cheat    string
 }
 
 var iconGlyphs = glyphSet{
@@ -63,6 +64,7 @@ var iconGlyphs = glyphSet{
 	Last:     "", // nf-fa-undo
 	Kill:     "", // nf-fa-trash
 	Rename:   "", // nf-fa-pencil
+	Cheat:    "", // nf-fa-book
 }
 
 var asciiGlyphs = glyphSet{
@@ -77,6 +79,7 @@ var asciiGlyphs = glyphSet{
 	Last:     "-",
 	Kill:     "x",
 	Rename:   "r",
+	Cheat:    "?",
 }
 
 // pickGlyphs returns the active glyph set, honoring an explicit --no-icons

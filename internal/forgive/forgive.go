@@ -30,6 +30,7 @@ var TmuxAliases = map[string][]string{
 	"windows": {"w"},
 	"tree":    {"t"},
 	"last":    {"-", "last"},
+	"cheat":   {"keys"},
 }
 
 // aliasToCanonical is a reverse lookup: alias -> canonical verb.
