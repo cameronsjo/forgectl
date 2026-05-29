@@ -31,14 +31,10 @@ func newConfigCmd() *cobra.Command {
 			if logLevel == "" {
 				logLevel = "off"
 			}
-			logFile := cfg.LogFile
-			if logFile == "" {
-				logFile = "(auto)"
-			}
 
 			fmt.Fprintf(out, "  no_icons   %v\n", cfg.NoIcons)
 			fmt.Fprintf(out, "  log_level  %s\n", logLevel)
-			fmt.Fprintf(out, "  log_file   %s\n", logFile)
+			fmt.Fprintf(out, "  log_file   %s\n", config.ResolvedLogPath(cfg.LogFile))
 			return nil
 		},
 	}
