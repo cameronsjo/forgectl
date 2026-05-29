@@ -29,7 +29,7 @@ var TmuxAliases = map[string][]string{
 	"rename":  {"mv", "rn"},
 	"windows": {"w"},
 	"tree":    {"t"},
-	"last":    {"-", "last"},
+	"last":    {"-"},
 	"cheat":   {"keys"},
 }
 

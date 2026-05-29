@@ -71,6 +71,11 @@ type model struct {
 	pendingOp     opKind
 	pendingTarget string
 
+	// status is a transient one-line result of the last mutation (kill/rename),
+	// shown in the footer — green on success, red on failure. Cleared when the
+	// user starts the next action.
+	status string
+
 	action Action
 }
 
@@ -286,6 +291,7 @@ func (m model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 // --- screen transitions (synchronous loads; tmux calls are local + fast) ---
 
 func (m *model) toMenu() {
+	m.status = ""
 	m.title = "menu"
 	m.setList(m.menuItems())
 	m.mode = menuMode
@@ -346,6 +352,7 @@ func (m *model) setList(items []list.Item) {
 }
 
 func (m model) startConfirm(op opKind, target string) (tea.Model, tea.Cmd) {
+	m.status = ""
 	prompt := fmt.Sprintf("Kill session %q?", target)
 	if op == opKillOthers {
 		prompt = fmt.Sprintf("Kill ALL sessions except %q?", target)
@@ -360,6 +367,7 @@ func (m model) startConfirm(op opKind, target string) (tea.Model, tea.Cmd) {
 }
 
 func (m model) startRename(target string) (tea.Model, tea.Cmd) {
+	m.status = ""
 	m.pendingOp = opRename
 	m.pendingTarget = target
 	m.form = huh.NewForm(huh.NewGroup(
@@ -373,18 +381,28 @@ func (m *model) applyPending() {
 	switch m.pendingOp {
 	case opKill:
 		if m.form.GetBool("ok") {
-			_ = m.client.KillSession(m.ctx, m.pendingTarget)
+			m.setStatus(m.client.KillSession(m.ctx, m.pendingTarget), "killed "+m.pendingTarget)
 		}
 	case opKillOthers:
 		if m.form.GetBool("ok") {
-			_ = m.client.KillOthers(m.ctx, m.pendingTarget)
+			m.setStatus(m.client.KillOthers(m.ctx, m.pendingTarget), "kept only "+m.pendingTarget)
 		}
 	case opRename:
 		if name := m.form.GetString("name"); name != "" {
-			_ = m.client.RenameSession(m.ctx, m.pendingTarget, name)
+			m.setStatus(m.client.RenameSession(m.ctx, m.pendingTarget, name), "renamed "+m.pendingTarget+" → "+name)
 		}
 	}
 	m.pendingOp = opNone
+}
+
+// setStatus records a transient footer message: the error (red) if non-nil,
+// otherwise the success text (green).
+func (m *model) setStatus(err error, ok string) {
+	if err != nil {
+		m.status = styleDanger.Render("✗ " + err.Error())
+		return
+	}
+	m.status = styleOK.Render("✓ " + ok)
 }
 
 func (m model) formWidth() int {
@@ -435,6 +453,9 @@ func (m model) footerView() string {
 		hint = "↑↓ scroll · q back"
 	case formMode:
 		hint = "enter confirm · esc cancel"
+	}
+	if m.status != "" {
+		return m.status + "\n" + styleMuted.Render(hint)
 	}
 	return styleMuted.Render(hint)
 }

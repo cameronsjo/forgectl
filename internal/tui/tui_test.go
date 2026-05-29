@@ -74,6 +74,31 @@ func TestCheatsheetContent(t *testing.T) {
 	}
 }
 
+func TestKillOthersEntersConfirm(t *testing.T) {
+	// "2" → Sessions (one session via fake), then "K" → kill-others confirm form
+	// with the right pending op + target. (Driving the huh form to completion is
+	// out of scope; this locks the wiring.)
+	fake := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
+		return "alpha" + sep + "1" + sep + "0" + sep + "1700000000" + sep + "/tmp", nil
+	}}
+	m := sized(newModel(context.Background(), tmux.New(fake), true), 80, 24)
+
+	out, _ := m.Update(key("2"))
+	m = out.(model)
+	out, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("K")})
+	m = out.(model)
+
+	if m.mode != formMode {
+		t.Fatalf("expected formMode after 'K', got %v", m.mode)
+	}
+	if m.pendingOp != opKillOthers {
+		t.Errorf("expected opKillOthers, got %v", m.pendingOp)
+	}
+	if m.pendingTarget != "alpha" {
+		t.Errorf("expected target alpha, got %q", m.pendingTarget)
+	}
+}
+
 func TestLastFromMenu(t *testing.T) {
 	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true), 80, 24)
 	out, _ := m.Update(key("5")) // Last

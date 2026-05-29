@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"os"
+	"strings"
 
 	"github.com/charmbracelet/fang"
 	"github.com/spf13/cobra"
@@ -112,10 +113,10 @@ func findChild(parent *cobra.Command, name string) *cobra.Command {
 }
 
 // hasNoIcons detects the --no-icons flag in raw argv (the pre-Cobra TUI launch
-// path can't read parsed flags yet).
+// path can't read parsed flags yet). Matches both bare and --no-icons=<v> forms.
 func hasNoIcons(args []string) bool {
 	for _, a := range args {
-		if a == "--no-icons" {
+		if a == "--no-icons" || strings.HasPrefix(a, "--no-icons=") {
 			return true
 		}
 	}

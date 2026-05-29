@@ -48,6 +48,8 @@ func (c *Client) mostRecentSession(ctx context.Context) (string, error) {
 		}
 		return "", err
 	}
+	// -1 (not 0) so a session that has never been attached (last_attached=0)
+	// still beats the sentinel and gets picked when it's the only candidate.
 	best, bestTS := "", -1
 	for _, line := range splitLines(out) {
 		f := splitFields(line)

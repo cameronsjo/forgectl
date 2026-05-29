@@ -131,6 +131,19 @@ func TestLastSession_Inside(t *testing.T) {
 	argsEqual(t, call.Args, []string{"switch-client", "-l"})
 }
 
+func TestLastSession_OutsideAllZeroTimestamps(t *testing.T) {
+	// Every session never-attached (ts=0). The -1 sentinel means the first row
+	// still wins (0 > -1), so we attach deterministically rather than to "".
+	fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) {
+		return "0" + sep + "first" + "\n" + "0" + sep + "second", nil
+	}}
+	c := New(fake, WithInsideTmux(func() bool { return false }))
+	if err := c.LastSession(context.Background()); err != nil {
+		t.Fatalf("LastSession: %v", err)
+	}
+	argsEqual(t, fake.Last().Args, []string{"attach-session", "-t", "first"})
+}
+
 func TestLastSession_OutsideAttachesMostRecent(t *testing.T) {
 	// Outside tmux: pick the greatest session_last_attached, then attach.
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
