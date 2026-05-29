@@ -15,7 +15,7 @@ func newTmuxLsCmd(client *tmux.Client) *cobra.Command {
 	return &cobra.Command{
 		Use:   "ls",
 		Short: "List tmux sessions",
-		Args:    cobra.NoArgs,
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			sessions, err := client.ListSessions(cmd.Context())
 			if err != nil {

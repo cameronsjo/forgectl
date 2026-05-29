@@ -13,7 +13,7 @@ func newTmuxRenameCmd(client *tmux.Client) *cobra.Command {
 	return &cobra.Command{
 		Use:   "rename <old> <new>",
 		Short: "Rename a session",
-		Args:    cobra.ExactArgs(2),
+		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			oldName, newName := args[0], args[1]
 			if !client.HasSession(cmd.Context(), oldName) {

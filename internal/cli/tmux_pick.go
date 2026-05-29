@@ -15,7 +15,7 @@ func newTmuxPickCmd(client *tmux.Client) *cobra.Command {
 	return &cobra.Command{
 		Use:   "pick [name]",
 		Short: "Connect to or smart-create a session (via sesh)",
-		Args:    cobra.MaximumNArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
 				return client.Pick(cmd.Context(), args[0])

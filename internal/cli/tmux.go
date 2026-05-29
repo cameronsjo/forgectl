@@ -20,6 +20,9 @@ func newTmuxCmd(client *tmux.Client) *cobra.Command {
 		newTmuxPickCmd(client),
 		newTmuxKillCmd(client),
 		newTmuxRenameCmd(client),
+		newTmuxWindowsCmd(client),
+		newTmuxTreeCmd(client),
+		newTmuxLastCmd(client),
 	)
 	applyAliases(cmd)
 	return cmd

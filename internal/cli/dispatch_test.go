@@ -53,14 +53,14 @@ func TestCobraAliasResolution(t *testing.T) {
 	root := newTmuxCmd(client)
 
 	cases := map[string]string{
-		"rm":   "kill",
-		"k":    "kill",
-		"x":    "kill",
-		"mv":   "rename",
-		"rn":   "rename",
-		"l":    "ls",
-		"p":    "pick",
-		"new":  "pick",
+		"rm":  "kill",
+		"k":   "kill",
+		"x":   "kill",
+		"mv":  "rename",
+		"rn":  "rename",
+		"l":   "ls",
+		"p":   "pick",
+		"new": "pick",
 	}
 	for alias, wantName := range cases {
 		t.Run(alias, func(t *testing.T) {
