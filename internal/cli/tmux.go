@@ -14,6 +14,12 @@ func newTmuxCmd(client *tmux.Client) *cobra.Command {
 		Use:     "tmux",
 		Aliases: []string{"tm"},
 		Short:   "Wrangle tmux sessions, windows, and panes",
+		// `forgectl tmux` with no verb opens the tmux menu (the same TUI as a
+		// bare invoke — tmux is the only module today).
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			noIcons, _ := cmd.Flags().GetBool("no-icons")
+			return runAction(cmd.Context(), client, noIcons)
+		},
 	}
 	cmd.AddCommand(
 		newTmuxLsCmd(client),

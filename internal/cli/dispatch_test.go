@@ -46,6 +46,32 @@ func TestNormalizeArgs_DoesNotMutateInput(t *testing.T) {
 	}
 }
 
+func TestShouldLaunchTUI(t *testing.T) {
+	root := newRoot(tmux.New(&exec.FakeRunner{}))
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"bare invoke", []string{}, true},
+		{"unknown top-level verb", []string{"frobnicate"}, true},
+		{"unknown tmux subverb", []string{"tmux", "frobnicate"}, true},
+		{"known verb does not launch", []string{"tmux", "ls"}, false},
+		{"known alias does not launch", []string{"tmux", "kill", "x"}, false},
+		{"version flag stays with fang", []string{"--version"}, false},
+		{"help flag stays with fang", []string{"--help"}, false},
+		{"completion command does not launch", []string{"completion", "zsh"}, false},
+		{"bare tmux module does not launch here", []string{"tmux"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldLaunchTUI(root, tc.args); got != tc.want {
+				t.Errorf("shouldLaunchTUI(%v) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCobraAliasResolution verifies the registry-driven Cobra aliases resolve
 // — root.Find(["tmux","rm"]) must land on the kill command.
 func TestCobraAliasResolution(t *testing.T) {

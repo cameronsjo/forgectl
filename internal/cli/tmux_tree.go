@@ -13,12 +13,12 @@ import (
 // --no-icons or NO_COLOR is set (M5 promotes this to a shared, persistent
 // preference across the TUI and the other read verbs).
 func newTmuxTreeCmd(client *tmux.Client) *cobra.Command {
-	var noIcons bool
-	cmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   "tree",
 		Short: "Show the session → window → pane tree",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			noIcons, _ := cmd.Flags().GetBool("no-icons") // persistent root flag
 			icons := !noIcons && os.Getenv("NO_COLOR") == ""
 			out, err := client.Tree(cmd.Context(), icons)
 			if err != nil {
@@ -28,6 +28,4 @@ func newTmuxTreeCmd(client *tmux.Client) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&noIcons, "no-icons", false, "use ASCII markers instead of Nerd Font glyphs")
-	return cmd
 }
