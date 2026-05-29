@@ -51,6 +51,27 @@ func parseSessions(out string) []Session {
 	return sessions
 }
 
+// HasSession reports whether a session named name exists. It keys off
+// has-session's exit code, never string-matching output — so a session
+// literally named "no server running" can't fool it.
+func (c *Client) HasSession(ctx context.Context, name string) bool {
+	_, err := c.run.Run(ctx, c.tmuxBin, "has-session", "-t", name)
+	return err == nil
+}
+
+// RenameSession renames a session. Argv order is (old, new): the -t flag
+// targets the session to rename, the trailing arg is its new name.
+func (c *Client) RenameSession(ctx context.Context, oldName, newName string) error {
+	_, err := c.run.Run(ctx, c.tmuxBin, "rename-session", "-t", oldName, newName)
+	return err
+}
+
+// KillSession kills the named session.
+func (c *Client) KillSession(ctx context.Context, name string) error {
+	_, err := c.run.Run(ctx, c.tmuxBin, "kill-session", "-t", name)
+	return err
+}
+
 // isNoServer reports whether err is tmux complaining that no server is running.
 func isNoServer(err error) bool {
 	var cmdErr *exec.CommandError

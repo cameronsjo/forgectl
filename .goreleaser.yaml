@@ -1,0 +1,75 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: forgectl
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: .
+    binary: forgectl
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/cameronsjo/forgectl/internal/meta.Version={{.Version}}
+      - -X github.com/cameronsjo/forgectl/internal/meta.Commit={{.Commit}}
+      - -X github.com/cameronsjo/forgectl/internal/meta.Date={{.Date}}
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+
+brews:
+  - repository:
+      owner: cameronsjo
+      name: homebrew-tap
+    directory: Formula
+    homepage: "https://github.com/cameronsjo/forgectl"
+    description: "Personal tmux/dev-experience CLI for the headless workbench (supersedes the bash `s` script)"
+    license: "MIT"
+    install: |
+      bin.install "forgectl"
+    test: |
+      system "#{bin}/forgectl", "--version"
+
+release:
+  github:
+    owner: cameronsjo
+    name: forgectl
+  draft: false
+  prerelease: auto
+  name_template: "v{{.Version}}"

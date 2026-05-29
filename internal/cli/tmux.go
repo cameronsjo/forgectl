@@ -14,6 +14,11 @@ func newTmuxCmd(client *tmux.Client) *cobra.Command {
 		Aliases: []string{"tm"},
 		Short:   "Wrangle tmux sessions, windows, and panes",
 	}
-	cmd.AddCommand(newTmuxLsCmd(client))
+	cmd.AddCommand(
+		newTmuxLsCmd(client),
+		newTmuxPickCmd(client),
+		newTmuxKillCmd(client),
+		newTmuxRenameCmd(client),
+	)
 	return cmd
 }
