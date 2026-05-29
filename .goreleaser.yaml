@@ -25,7 +25,7 @@ builds:
       - -X github.com/cameronsjo/forgectl/internal/meta.Date={{.Date}}
 
 archives:
-  - format: tar.gz
+  - formats: ["tar.gz"]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
@@ -53,21 +53,28 @@ changelog:
     - title: Others
       order: 999
 
-brews:
-  - repository:
+# Homebrew formulae (`brews`) were removed in goreleaser v2.16 in favor of
+# casks, so forgectl ships as a cask. `brew install cameronsjo/tap/forgectl`
+# resolves it the same way.
+homebrew_casks:
+  - name: forgectl
+    repository:
       owner: cameronsjo
       name: homebrew-tap
       # PAT with contents:write on the tap repo — the default GITHUB_TOKEN only
-      # reaches the current repo, so the cross-repo formula push needs this.
+      # reaches the current repo, so the cross-repo cask push needs this.
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    directory: Formula
+    directory: Casks
     homepage: "https://github.com/cameronsjo/forgectl"
     description: "Personal tmux/dev-experience CLI for the headless workbench (supersedes the bash `s` script)"
-    license: "MIT"
-    install: |
-      bin.install "forgectl"
-    test: |
-      system "#{bin}/forgectl", "--version"
+    # The binary is unsigned; strip the quarantine bit so it runs without a
+    # Gatekeeper prompt on machines that pull it from the tap.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/forgectl"]
+          end
 
 release:
   github:

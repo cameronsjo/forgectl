@@ -16,14 +16,15 @@ brew install cameronsjo/tap/forgectl
 ## Usage
 
 ```sh
-forgectl              # open TUI menu (thumb mode)
-forgectl tmux ls      # list sessions
-forgectl tmux pick    # fuzzy-pick a session and switch
-forgectl tmux kill    # kill a named session
-forgectl tmux rename  # rename current session
-forgectl tmux windows # list windows in current session
-forgectl tmux tree    # session/window tree
-forgectl tmux last    # switch to last session
+forgectl                   # open TUI menu (thumb mode)
+forgectl tmux ls           # list sessions
+forgectl tmux pick [name]  # connect/smart-create via sesh (no name → list)
+forgectl tmux kill <name>  # kill a session (--others keeps only it)
+forgectl tmux rename <old> <new>
+forgectl tmux windows      # list windows across all sessions
+forgectl tmux tree         # session → window → pane tree
+forgectl tmux last         # jump to the last-used session
+forgectl tmux cheat        # tmux terms + the keys that matter
 ```
 
 The `fx` alias is available after install:
