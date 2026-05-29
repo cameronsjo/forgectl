@@ -28,7 +28,7 @@ type Config struct {
 // Load reads the config file. If the file is missing or unreadable it returns
 // defaults (no-icons=false, log-level=off) without error.
 func Load() Config {
-	path, err := configPath()
+	path, err := ConfigPath()
 	if err != nil {
 		return Config{}
 	}
@@ -99,7 +99,8 @@ func openLogWriter(logFile string) (io.Writer, io.Closer) {
 	return f, f
 }
 
-func configPath() (string, error) {
+// ConfigPath returns the expected config file path.
+func ConfigPath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err

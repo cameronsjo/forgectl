@@ -31,6 +31,7 @@ func newRoot(tmuxClient *tmux.Client, projClient *projects.Client) *cobra.Comman
 
 	root.AddCommand(newTmuxCmd(tmuxClient))
 	root.AddCommand(newProjectsCmd(projClient))
+	root.AddCommand(newConfigCmd())
 
 	return root
 }
