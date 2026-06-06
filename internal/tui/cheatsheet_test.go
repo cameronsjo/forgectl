@@ -38,6 +38,15 @@ func TestCheatsheet_ContainsKeyBindings(t *testing.T) {
 	}
 }
 
+func TestCheatsheet_ContainsThreeWordsDiagram(t *testing.T) {
+	got := Cheatsheet(false)
+	// The nested box should be present (top-left corner is a reliable marker
+	// that survives the colored label substitution).
+	if !strings.Contains(got, "┌") {
+		t.Error("Cheatsheet() missing the session→window→pane diagram")
+	}
+}
+
 func TestCheatsheet_NoIconsModeProducesSameStructure(t *testing.T) {
 	withIcons := Cheatsheet(false)
 	noIcons := Cheatsheet(true)

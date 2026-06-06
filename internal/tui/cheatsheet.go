@@ -23,6 +23,7 @@ func Cheatsheet(noIcons bool) string {
 	}
 
 	section("The three words")
+	b.WriteString(threeWordsDiagram() + "\n\n")
 	row("session", "a whole workspace — survives disconnect")
 	row("window", "a tab inside a session")
 	row("pane", "a split inside a window — two things at once")
@@ -50,5 +51,35 @@ func Cheatsheet(noIcons bool) string {
 	row("prefix d", "detach — leave it all running")
 	row(meta.AppName, "this menu: pick · jump · tree · kill")
 
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// threeWordsDiagram renders the session→window→pane nesting as a box, so the
+// "three words" land visually before the definitions do. Every line is the same
+// display width; the colored label spans are zero-width ANSI, so alignment holds
+// regardless of NO_COLOR (Lip Gloss drops the codes there). Box-drawing glyphs
+// are plain Unicode, not Nerd Font — they render even in --no-icons terminals.
+func threeWordsDiagram() string {
+	lines := []string{
+		"┌─ session ─────────────────────┐",
+		"│  ┌─ window ─┐  ┌─ window ─┐   │",
+		"│  │pane pane │  │   pane   │   │",
+		"│  └──────────┘  └──────────┘   │",
+		"└──── detach: it keeps running ─┘",
+	}
+	// Borders stay default-fg; only the three words carry color. Muting the
+	// whole block first would break — a styled label's trailing reset (\x1b[0m)
+	// also ends the mute, leaving the rest of that line uncolored. None of the
+	// words is a substring of another, so the replacements don't collide;
+	// "pane" recolors all three occurrences.
+	block := strings.Join(lines, "\n")
+	block = strings.ReplaceAll(block, "session", styleAccent.Render("session"))
+	block = strings.ReplaceAll(block, "window", styleCyan.Render("window"))
+	block = strings.ReplaceAll(block, "pane", styleActive.Render("pane"))
+
+	var b strings.Builder
+	for _, ln := range strings.Split(block, "\n") {
+		b.WriteString("  " + ln + "\n")
+	}
 	return strings.TrimRight(b.String(), "\n")
 }

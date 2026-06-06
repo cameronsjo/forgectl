@@ -457,17 +457,17 @@ func (m model) footerView() string {
 	var hint string
 	switch m.mode {
 	case menuMode:
-		hint = "1-6 / enter select · q quit"
+		hint = "1-6 / enter select · q/esc quit"
 	case sessionsMode:
 		if narrow {
-			hint = "↑↓ · enter attach · k kill · r rename · q back"
+			hint = "↑↓ · enter attach · k kill · r rename · q/esc back"
 		} else {
-			hint = "↑↓ move · 1-9 jump · enter attach · k kill · K kill-others · r rename · / filter · q back"
+			hint = "↑↓ move · 1-9 jump · enter attach · k kill · K kill-others · r rename · / filter · q/esc back"
 		}
 	case pickMode, windowsMode:
-		hint = "↑↓ · 1-9 · enter select · / filter · q back"
+		hint = "↑↓ · 1-9 · enter select · / filter · q/esc back"
 	case treeMode, cheatMode:
-		hint = "↑↓ scroll · q back"
+		hint = "↑↓ scroll · q/esc back"
 	case formMode:
 		hint = "enter confirm · esc cancel"
 	}
