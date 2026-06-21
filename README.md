@@ -65,3 +65,11 @@ log_file  = ""      # "" = auto (daily-rotated file); "-" = stderr; or an explic
 Logging is **off by default**. Set `log_level` to `debug` for the full narrative (every tmux/sesh subprocess, with timing) or `info` for just the success/failure story. Logs follow an action-oriented pattern — `Preparing to…` / `Successfully…` / `Failed to…` — so they read top-to-bottom when something goes sideways.
 
 With `log_file = ""` (the default target once a level is set), forgectl writes to a daily file — `forgectl-YYYY-MM-DD.log` — in the config dir and prunes any such file older than 7 days on startup. Set `log_file = "-"` to log to stderr instead, or give an explicit path to opt out of rotation.
+
+## License
+
+[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) — source-available, not OSI open source.
+
+Noncommercial use is free: use it, modify it, fork it, share it. Commercial use — shipping it inside a product, redistribution for commercial gain, or any need for support or warranty — requires a commercial license. Reach out to Cameron Sjo to arrange one; all commercial rights are reserved.
+
+Versions previously released under MIT remain available under MIT — relicensing binds only future releases, not anything already published.
