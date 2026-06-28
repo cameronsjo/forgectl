@@ -26,6 +26,14 @@ forgectl tmux tree         # session → window → pane tree
 forgectl tmux last         # jump to the last-used session
 forgectl tmux cheat        # tmux terms + the keys that matter
 forgectl config            # show active config + resolved paths (alias: cfg)
+
+# projects — cross-host project inventory (alias: proj)
+forgectl projects list [query]           # list all projects: local clones + github.com/cameronsjo + git.sjo.lol/cameron
+forgectl projects list --json            # machine-readable JSON (safe to pipe; degradation notes go to stderr)
+forgectl projects list --host github     # filter to one host: github | gitea
+forgectl projects list --host gitea forge  # host filter + name substring
+forgectl projects pick [query]           # interactive picker across the full inventory; clones uncloned repos before opening (aliases: p, open)
+forgectl projects                        # shorthand for pick (no args → TUI selector)
 ```
 
 The `fx` alias is available after install:
@@ -41,9 +49,16 @@ fx tmux ls
 forgectl tmux pick
     └── delegates session selection to sesh
             └── hands off to tmux
+
+forgectl projects list / pick
+    ├── local clone walk (git remote get-url)
+    ├── gh repo list (github.com/cameronsjo) ─┐ concurrent
+    └── tea repo ls  (git.sjo.lol/cameron)   ─┘
 ```
 
 `sesh` handles the smarts — path discovery, named sessions, zoxide integration. `forgectl` provides the stable verbs and the thumb-friendly TUI on top.
+
+`projects` builds a unified inventory across local clones, GitHub, and the self-hosted Gitea. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean.
 
 ## Configuration
 
