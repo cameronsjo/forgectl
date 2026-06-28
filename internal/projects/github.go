@@ -2,38 +2,65 @@ package projects
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"strings"
+	"log/slog"
 )
 
-// githubSearch returns repo names from `gh repo list` that match query
-// (case-insensitive substring match). Returns empty slice when gh is absent.
-func githubSearch(ctx context.Context, run interface {
+// githubOwner is the GitHub account whose repos the inventory enumerates.
+const githubOwner = "cameronsjo"
+
+// githubList returns structured records for every repo owned by githubOwner via
+// `gh repo list --json`. Archived repos are included — the inventory is a finder,
+// and you may still want to open an archived project. Returns the command error
+// on failure so Inventory can note the degraded host; a JSON parse failure is
+// treated the same way.
+func githubList(ctx context.Context, run interface {
 	Run(context.Context, string, ...string) (string, error)
-}, query string) ([]string, error) {
-	out, err := run.Run(ctx, "gh", "repo", "list",
-		"--no-archived", "--limit", "1000", "--json", "name", "--jq", ".[].name")
+}) ([]Repo, error) {
+	slog.Debug("Preparing to fetch GitHub repos.", "owner", githubOwner)
+	out, err := run.Run(ctx, "gh", "repo", "list", githubOwner,
+		"--limit", "1000", "--json", "name,sshUrl,isPrivate")
 	if err != nil {
-		// gh not installed or no auth — treat as no results.
-		return nil, nil
+		slog.Error("Failed to fetch GitHub repos.", "owner", githubOwner, "error", err)
+		return nil, err
 	}
-	var matches []string
-	for _, name := range strings.Split(out, "\n") {
-		name = strings.TrimSpace(name)
-		if name != "" && strings.Contains(strings.ToLower(name), strings.ToLower(query)) {
-			matches = append(matches, name)
-		}
+
+	var raw []struct {
+		Name      string `json:"name"`
+		SSHURL    string `json:"sshUrl"`
+		IsPrivate bool   `json:"isPrivate"`
 	}
-	return matches, nil
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		slog.Error("Failed to parse GitHub JSON.", "owner", githubOwner, "error", err)
+		return nil, fmt.Errorf("parsing gh repo list JSON: %w", err)
+	}
+
+	repos := make([]Repo, 0, len(raw))
+	for _, r := range raw {
+		repos = append(repos, Repo{
+			Host:    "github",
+			Owner:   githubOwner,
+			Name:    r.Name,
+			SSHURL:  r.SSHURL,
+			Private: r.IsPrivate,
+		})
+	}
+	slog.Info("Successfully fetched GitHub repos.", "owner", githubOwner, "count", len(repos))
+	return repos, nil
 }
 
-// cloneRepo runs `gh repo clone name dest` and returns an error on failure.
+// cloneRepo runs `gh repo clone name dest` and returns an error on failure. It
+// keeps gh's credential handling for github.com clones (vs. a bare git clone).
 func cloneRepo(ctx context.Context, run interface {
 	Run(context.Context, string, ...string) (string, error)
 }, name, dest string) error {
+	slog.Debug("Preparing to clone from GitHub.", "repo", name, "dest", dest)
 	_, err := run.Run(ctx, "gh", "repo", "clone", name, dest)
 	if err != nil {
+		slog.Error("Failed to clone from GitHub.", "repo", name, "dest", dest, "error", err)
 		return fmt.Errorf("gh repo clone %s: %w", name, err)
 	}
+	slog.Info("Successfully cloned from GitHub.", "repo", name, "dest", dest)
 	return nil
 }
