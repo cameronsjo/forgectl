@@ -10,3 +10,6 @@ coverage.*
 
 # Editor / OS
 .DS_Store
+
+# Cadence continuation briefs (session-local)
+.claude/intros/
