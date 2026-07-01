@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -30,6 +31,26 @@ func Execute(ctx context.Context) error {
 	projClient := projects.New(exec.OSRunner{})
 	root := newRoot(tmuxClient, projClient, cfg)
 	args := normalizeArgs(os.Args[1:])
+
+	// The launcher intercept runs before TUI/fang routing: `forgectl launch …`
+	// (and its `cl` alias) must reach claude byte-clean for builder/agents
+	// passthrough and open the interview when bare, bypassing Cobra flag
+	// parsing. Own-verbs (which/edit/init/doctor/help) fall through to fang for
+	// styled help. Only an inert global flag (--no-icons) may precede the token —
+	// a root --help/--version must reach fang, not be skipped into the launcher.
+	if rest, ok := launchIntercept(args); ok {
+		if handled, err := runLaunch(cfg, rest); handled {
+			// This path bypasses fang, which is what prints styled errors for
+			// the normal command tree. Print here so an intercept error (e.g. a
+			// bad FORGECTL_CLAUDE_BIN from ClaudePath) doesn't exit non-zero with
+			// empty stderr — mirrors claunch's original main().
+			if err != nil {
+				fmt.Fprintln(os.Stderr, meta.AppName+": "+err.Error())
+			}
+			return err
+		}
+	}
+
 	noIcons := cfg.NoIcons || hasNoIcons(args)
 
 	if shouldLaunchTUI(root, args) {
@@ -111,6 +132,25 @@ func shouldLaunchTUI(root *cobra.Command, args []string) bool {
 		}
 	}
 	return false
+}
+
+// launchIntercept returns the args following a leading `launch`/`cl` command
+// token — allowing only inert global flags (--no-icons) before it — or ok=false
+// when this invocation isn't a launcher passthrough. A root flag such as
+// --help/--version is NOT inert: encountering one disables the shortcut so fang
+// can handle it, rather than skipping past it into the launcher.
+func launchIntercept(args []string) (rest []string, ok bool) {
+	for i, a := range args {
+		switch {
+		case a == "launch" || a == "cl":
+			return args[i+1:], true
+		case a == "--no-icons" || strings.HasPrefix(a, "--no-icons="):
+			continue
+		default:
+			return nil, false
+		}
+	}
+	return nil, false
 }
 
 // firstNonFlag returns the first non-flag token and its index (or "", -1).
