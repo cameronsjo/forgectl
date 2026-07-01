@@ -30,10 +30,11 @@ const logKeepDays = 7
 //	match = "~/Projects/minute"
 //	model = "sonnet"
 type Config struct {
-	NoIcons  bool         `toml:"no_icons"`
-	LogLevel string       `toml:"log_level"`
-	LogFile  string       `toml:"log_file"`
-	Launch   LaunchConfig `toml:"launch"`
+	NoIcons  bool           `toml:"no_icons"`
+	LogLevel string         `toml:"log_level"`
+	LogFile  string         `toml:"log_file"`
+	Launch   LaunchConfig   `toml:"launch"`
+	Workflow WorkflowConfig `toml:"workflow"`
 }
 
 // LaunchConfig is the [launch] section: base defaults plus directory-keyed
@@ -71,6 +72,19 @@ type LaunchProject struct {
 // the launcher uses to fall back to a legacy claunch.conf.
 func (lc LaunchConfig) IsZero() bool {
 	return len(lc.Projects) == 0 && lc.Defaults.isZero()
+}
+
+// WorkflowConfig is the [workflow] section: the default strip-list the
+// `strip` step falls back to when a workflow file's [[step]] omits `globs`.
+// #20 will source this from quarantine instead; until then it's the one
+// config-driven knob the DSL exposes.
+type WorkflowConfig struct {
+	StripGlobs []string `toml:"strip_globs"`
+}
+
+// IsZero reports whether the [workflow] section was absent or empty.
+func (wc WorkflowConfig) IsZero() bool {
+	return len(wc.StripGlobs) == 0
 }
 
 // isZero reports whether no [launch.defaults] value was set. LaunchDefaults
@@ -262,6 +276,18 @@ func ConfigPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "config.toml"), nil
+}
+
+// WorkflowsDir returns ~/.config/forgectl/workflows — the user workflow
+// directory `workflow run <name>` checks before the embedded built-ins. It
+// derives from the same configDir() base as every other forgectl path, so the
+// two never drift.
+func WorkflowsDir() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "workflows"), nil
 }
 
 // LegacyLaunchPath returns the legacy claunch config location, honoring

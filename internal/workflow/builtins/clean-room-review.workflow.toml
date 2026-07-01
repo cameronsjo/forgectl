@@ -1,0 +1,34 @@
+# ~/.config/forgectl/workflows/clean-room-review.workflow.toml
+dsl_version = 1                 # grammar contract — parser refuses an unknown version
+name        = "clean-room-review"
+version     = "1.0.0"           # this workflow's own semver (provenance for signing / registry)
+description = "Sandbox a repo, strip agent-instruction files, launch a claude review, collect."
+
+[params]
+repo    = { required = true,          help = "owner/repo or local path" }
+branch  = { default  = "main",        help = "ref to review" }
+skill   = { default  = "code-review", help = "claude skill to run" }
+posture = { default  = "",            help = "launch posture/model pin override" }
+
+[[step]]
+uses = "worktree"          # exports ${workspace}; clone fallback for a remote repo
+repo = "${repo}"
+ref  = "${branch}"
+
+[[step]]
+uses  = "strip"            # the clean-room control; omit globs → configured default set
+globs = ["CLAUDE.md", "AGENTS.md", ".claude/", ".cursor/rules", ".github/copilot-instructions.md"]
+
+[[step]]
+uses    = "launch"         # exports ${review}; mode sync = wait+collect, surface = fire into tmux/cmux
+skill   = "${skill}"
+posture = "${posture}"
+mode    = "sync"
+
+[[step]]
+uses = "collect"
+from = "${review}"
+to   = "${workspace}/../review.md"
+
+[[step]]
+uses = "teardown"          # rm the sandbox

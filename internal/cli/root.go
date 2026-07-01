@@ -34,6 +34,7 @@ func newRoot(tmuxClient *tmux.Client, projClient *projects.Client, cfg config.Co
 	root.AddCommand(newProjectsCmd(projClient))
 	root.AddCommand(newConfigCmd(cfg))
 	root.AddCommand(newLaunchCmd(cfg))
+	root.AddCommand(newWorkflowCmd(cfg))
 
 	return root
 }

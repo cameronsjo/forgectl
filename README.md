@@ -43,6 +43,11 @@ forgectl launch which              # show the profile resolved for the current d
 forgectl launch init               # scaffold the [launch] section into config.toml
 forgectl launch edit               # open config.toml in $EDITOR
 forgectl launch doctor             # check claude availability + launch config validity
+
+# workflow — run declarative workflows composing forgectl's other verbs (alias: flow)
+forgectl workflow run <name>              # run a workflow by name
+forgectl workflow run <name> --dry-run    # print the resolved plan, run nothing
+forgectl workflow list                    # show resolvable workflow names
 ```
 
 The `fx` alias is available after install:
