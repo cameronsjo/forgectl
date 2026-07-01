@@ -34,6 +34,15 @@ forgectl projects list --host github     # filter to one host: github | gitea
 forgectl projects list --host gitea forge  # host filter + name substring
 forgectl projects pick [query]           # interactive picker across the full inventory; clones uncloned repos before opening (aliases: p, open)
 forgectl projects                        # shorthand for pick (no args → TUI selector)
+
+# launch — per-project Claude Code launcher (alias: cl)
+forgectl launch                    # interactive launcher: pick Model + New/Resume/Fork, then exec claude
+forgectl launch <claude args…>     # apply the project profile, then pass your args straight through
+forgectl launch agents --json      # pure passthrough (byte-clean); posture injected only when interactive
+forgectl launch which              # show the profile resolved for the current directory (alias: config)
+forgectl launch init               # scaffold the [launch] section into config.toml
+forgectl launch edit               # open config.toml in $EDITOR
+forgectl launch doctor             # check claude availability + launch config validity
 ```
 
 The `fx` alias is available after install:
@@ -80,3 +89,34 @@ log_file  = ""      # "" = auto (daily-rotated file); "-" = stderr; or an explic
 Logging is **off by default**. Set `log_level` to `debug` for the full narrative (every tmux/sesh subprocess, with timing) or `info` for just the success/failure story. Logs follow an action-oriented pattern — `Preparing to…` / `Successfully…` / `Failed to…` — so they read top-to-bottom when something goes sideways.
 
 With `log_file = ""` (the default target once a level is set), forgectl writes to a daily file — `forgectl-YYYY-MM-DD.log` — in the config dir and prunes any such file older than 7 days on startup. Set `log_file = "-"` to log to stderr instead, or give an explicit path to opt out of rotation.
+
+### launch — per-project Claude Code profiles
+
+`forgectl launch` resolves a posture from the `[launch]` section of the same `config.toml`, runs a short guided launch, then **execs** `claude` in place (via `syscall.Exec`, so Ctrl-C, the TTY, and the exit code pass through untouched). Scaffold the section with `forgectl launch init`.
+
+```toml
+[launch.defaults]
+model           = "opus"     # claude --model value (alias or full id)
+permission_mode = "plan"     # launch always starts in plan
+allow_danger    = true       # adds --allow-dangerously-skip-permissions (reachable, not on)
+# binary_path   = ""         # explicit claude path; $FORGECTL_CLAUDE_BIN overrides this
+
+[[launch.project]]
+match           = "~/Projects/minute"
+model           = "sonnet"
+env             = { OTEL_EXPORTER = "otlp" }
+add_dir         = ["~/Projects/minute/shared"]
+```
+
+Resolution expands `~`, picks the `[[launch.project]]` whose `match` is the **longest path-prefix** of the real working directory, and merges it over `[launch.defaults]` — scalars: project wins when set; `env`: merged, project wins on collisions; `add_dir`: concatenated and de-duplicated. No match falls back to defaults alone. Inspect the result with `forgectl launch which`.
+
+**Design invariants** (verified against `claude` v2.1.183):
+
+- **Injected posture first, user args last** — a user-supplied flag (e.g. `--model`) overrides the profile because Claude Code is last-flag-wins.
+- **`agents` is special** — only the agents-valid subset is injected; on `--json`/`--help`/`-h` it is pure passthrough (no banner on stdout) so `forgectl launch agents --json | jq` stays byte-clean.
+
+**Choosing the `claude` binary** (precedence): `$FORGECTL_CLAUDE_BIN` → `[launch.defaults] binary_path` → `claude` on `$PATH`. An explicit path that is missing or non-executable is a clear error, not a silent PATH fallback.
+
+**Zero-migration grace** — if `config.toml` has no `[launch]` section, forgectl still reads a legacy `~/.config/claunch/claunch.conf` (the `[launch]` section is the same `[defaults]` + `[[project]]` shape, just namespaced). `forgectl launch init` writes the native section for the one-time cutover.
+
+> Absorbed from the standalone `claunch` tool. A `claunch='forgectl launch'` shell alias preserves the old muscle memory.

@@ -25,6 +25,13 @@ var ProjectAliases = map[string][]string{
 	"list": {"l", "ls", "find"},
 }
 
+// LaunchAliases maps each canonical launch subcommand to its accepted aliases.
+// The `cl` shorthand for the launch group itself is a Cobra alias on the parent
+// command (see newLaunchCmd), not a subcommand alias, so it is not listed here.
+var LaunchAliases = map[string][]string{
+	"which": {"config"},
+}
+
 // TmuxAliases maps each canonical tmux verb to its accepted aliases. This is
 // the single source of truth: internal/cli builds cobra command Aliases by
 // iterating this map, and Canonical uses it for known-verb detection in the
