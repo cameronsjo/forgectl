@@ -1,6 +1,6 @@
 # forgectl
 
-Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. First module is tmux. Supersedes the ad-hoc bash `s` script. Delegates smart session-naming to `sesh`.
+Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) is growing into the **workbench forge**: composable modules — tmux, projects, launch, workflow — with a declarative workflow DSL as the composition layer.
 
 Built for two hands and one thumb:
 
@@ -46,6 +46,7 @@ forgectl launch doctor             # check claude availability + launch config v
 
 # workflow — run declarative workflows composing forgectl's other verbs (alias: flow)
 forgectl workflow run <name>              # run a workflow by name
+forgectl workflow run <name> --param k=v  # override a workflow param (repeatable)
 forgectl workflow run <name> --dry-run    # print the resolved plan, run nothing
 forgectl workflow list                    # show resolvable workflow names
 ```
@@ -68,11 +69,17 @@ forgectl projects list / pick
     ├── local clone walk (git remote get-url)
     ├── gh repo list (github.com/cameronsjo) ─┐ concurrent
     └── tea repo ls  (git.sjo.lol/cameron)   ─┘
+
+forgectl workflow run <name>
+    └── parse a TOML step list → resolve params → plan (--dry-run stops here)
+            └── execute: each step drives an existing seam (git, launch, tmux)
 ```
 
 `sesh` handles the smarts — path discovery, named sessions, zoxide integration. `forgectl` provides the stable verbs and the thumb-friendly TUI on top.
 
 `projects` builds a unified inventory across local clones, GitHub, and the self-hosted Gitea. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean.
+
+`workflow` is the composition layer — a declarative TOML step list forgectl parses, plans, and executes through the same seams the hand-run verbs use. `--dry-run` prints the fully resolved plan without running a step. User workflows live in `workflows/` under the config dir (paths below), overriding shipped built-ins of the same name. Until workflow signing lands, treat a workflow file like a shell script: run only what you authored or reviewed.
 
 ## Configuration
 
@@ -80,6 +87,8 @@ Optional. forgectl runs with sensible defaults and no config file. To persist pr
 
 - macOS: `~/Library/Application Support/forgectl/config.toml`
 - Linux: `~/.config/forgectl/config.toml`
+
+User workflow files share the same base: `<config dir>/workflows/<name>.workflow.toml`.
 
 ```toml
 no_icons  = false   # use ASCII markers instead of Nerd Font glyphs
