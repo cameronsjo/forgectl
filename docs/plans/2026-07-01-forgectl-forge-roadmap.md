@@ -58,7 +58,7 @@ spike in Now** to push the risk uphill before #10/#16 commit to its shape.
 - **#14** — `forgectl audit` (prompt-injection surface + secret hygiene) — needs quarantine (#20); security posture, not blocking.
 - **#18** — `forgectl doctor` & `upgrade` — ecosystem health + safe self-update; boundary vs the `update` command (#25).
 - **#21–#27** — the utility absorptions (`proxy`, `k8s`, `docker`, `pip`, `update`, `y`, `mcp`) — haziest / most optional; `proxy`/`k8s`/`mcp` branch on `net` (#19).
-- **`cameronsjo/claude-configurations#196`** — `forgectl env` fail-closed C/R/U/D (ADR-0026), implements here; relates to `proxy` (#21).
+- **`cameronsjo/claude-configurations#196`** — `forgectl env` fail-closed C/R/U/D (claude-configurations ADR-0026 — not forgectl's own ADR series), implements here; relates to `proxy` (#21).
 
 ## Verification / done
 
