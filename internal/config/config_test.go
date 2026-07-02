@@ -29,6 +29,9 @@ package config
 //   [x] Unhappy: missing file → zero-value defaults, no error
 //   [x] Unhappy: malformed TOML → zero-value defaults, no error
 //
+// WorkflowsDir (Classification: configuration)
+//   [x] Happy: WorkflowsDir → <configdir>/forgectl/workflows, same base as ConfigPath
+//
 // SetupLogger (Classification: I/O boundary)
 //   [x] Happy: level "off" → non-nil closer, Close() == nil
 //   [x] Happy: real level + file → log line lands in the file, closer closes it
@@ -268,6 +271,18 @@ func TestConfigPath(t *testing.T) {
 	want := filepath.Join(dir, "forgectl", "config.toml")
 	if got != want {
 		t.Errorf("ConfigPath() = %q, want %q", got, want)
+	}
+}
+
+func TestWorkflowsDir(t *testing.T) {
+	dir := redirectConfigDir(t)
+	got, err := WorkflowsDir()
+	if err != nil {
+		t.Fatalf("WorkflowsDir: %v", err)
+	}
+	want := filepath.Join(dir, "forgectl", "workflows")
+	if got != want {
+		t.Errorf("WorkflowsDir() = %q, want %q", got, want)
 	}
 }
 

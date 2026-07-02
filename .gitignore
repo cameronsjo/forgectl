@@ -11,5 +11,7 @@ coverage.*
 # Editor / OS
 .DS_Store
 
-# Cadence continuation briefs (session-local)
+# Cadence / subagent session-local scratch
 .claude/intros/
+.claude/agent-memory/
+.claude/test-output/

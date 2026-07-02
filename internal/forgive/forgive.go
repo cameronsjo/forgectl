@@ -32,6 +32,14 @@ var LaunchAliases = map[string][]string{
 	"which": {"config"},
 }
 
+// WorkflowAliases maps each canonical workflow subcommand to its accepted
+// aliases. The `flow` shorthand for the workflow group itself is a Cobra
+// alias on the parent command (see newWorkflowCmd), not a subcommand alias,
+// so it is not listed here.
+var WorkflowAliases = map[string][]string{
+	"run": {"r"},
+}
+
 // TmuxAliases maps each canonical tmux verb to its accepted aliases. This is
 // the single source of truth: internal/cli builds cobra command Aliases by
 // iterating this map, and Canonical uses it for known-verb detection in the
