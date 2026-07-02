@@ -17,6 +17,12 @@ is already local, and falls back to **`git clone`** into a temp dir for a remote
 Both go through `exec.Runner`, mirroring the existing `internal/projects` clone. `teardown` removes
 the temp dir (and, for a worktree, prunes it).
 
+An explicit **`clone` step always clones — even for a local repo** — so an author's isolation
+request is honored, never silently downgraded to a worktree. The difference is real: a worktree's
+`.git` file points back at the source checkout (shared object store), so code executed inside the
+sandbox (hooks, tests) can reach the real repo; a clone carries no such back-pointer. `worktree`
+is the cheap default for reviewing your own refs; `clone` is full isolation on request.
+
 The `strip` runner resolves globs **only inside `${workspace}`** and rejects `..`/absolute paths —
 a path-escape guard, since `strip` deletes files.
 

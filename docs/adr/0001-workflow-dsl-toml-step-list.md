@@ -19,7 +19,7 @@ Workflow files are **TOML**, with steps as an ordered `[[step]]` array of tables
 
 ## Alternatives considered
 
-- **TOML step list (chosen).** Pros: forgectl already depends on `pelletier/go-toml/v2` for its
+- **TOML step list (chosen).** Pros: forgectl already depends on `BurntSushi/toml` for its
   config (no new dependency), matches the house config idiom, human-editable, comments-friendly,
   and a flat text file is trivial to hash + sign. Cons: array-of-tables (`[[step]]`) is slightly
   verbose for long workflows.
@@ -34,7 +34,10 @@ Workflow files are **TOML**, with steps as an ordered `[[step]]` array of tables
 
 ## Consequences
 
-- The parser is a thin `toml.Decode` into a `Workflow` struct — minimal new machinery.
+- The parser is a thin `toml.Decode` into a `Workflow` struct — minimal new machinery. The decode
+  is **strict**: an unknown key is a parse error, so a typo'd field (e.g. `glob` for `globs`)
+  can't silently no-op, and a newer grammar's fields can't be silently ignored under an older
+  `dsl_version` (0004).
 - Signing (#10) operates on the raw file bytes; a one-byte edit invalidates the signature.
 - A future need for richer control flow (conditionals, loops) will strain a flat step list; if
   that arrives, it bumps `dsl_version` (0004) rather than breaking existing files.

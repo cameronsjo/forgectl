@@ -45,5 +45,10 @@ runs and captures output (`${review}`); `mode = "surface"` hands the session to 
 
 - The executor is `FakeRunner`-testable exactly like `tmux`/`projects`: assert the composed argv
   sequence, assert `--dry-run` issues zero `Runner` calls.
-- #10 integrates by supplying a real `Verifier` — no executor change.
+- #10 integrates by supplying a real `Verifier` — no executor change. When it does, verification
+  SHOULD run on the **raw file bytes before the TOML decode** (authenticate-before-parse): the
+  `Verify` signature already takes the file, so hoisting it ahead of `parse` needs no interface
+  change, only plumbing — the spike's CLI passes the workflow *name* to the no-op verifier and
+  lets `Resolve` consume the bytes internally, so #10 rewires resolution to hand the verifier the
+  bytes first.
 - The shared `Context` + `${}` interpolation is new machinery the spike must implement and test.

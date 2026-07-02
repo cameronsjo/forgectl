@@ -102,37 +102,59 @@ func resolveParams(declared map[string]Param, cliParams map[string]string) (map[
 
 // planStep interpolates every field of one Step against ctx.
 func planStep(ctx *Context, s Step) (PlanStep, error) {
-	var err error
-	ps := PlanStep{Uses: s.Uses}
+	return interpolatePlanStep(ctx, PlanStep{
+		Uses:    s.Uses,
+		Repo:    s.Repo,
+		Ref:     s.Ref,
+		Globs:   s.Globs,
+		Skill:   s.Skill,
+		Posture: s.Posture,
+		Mode:    s.Mode,
+		From:    s.From,
+		To:      s.To,
+		Cmd:     s.Cmd,
+		Args:    s.Args,
+	})
+}
 
-	if ps.Mode, err = ctx.Interpolate(s.Mode); err != nil {
+// interpolatePlanStep resolves every ${} reference in a step's fields against
+// ctx. It runs twice per step: once at plan time (where a deferred export
+// passes through as the literal ${name}), and again in Executor.Run against
+// the live Context just before dispatch — where nothing is deferred, so a
+// reference to an export whose step hasn't run yet fails loudly instead of
+// reaching a command as the literal string "${name}".
+func interpolatePlanStep(ctx *Context, in PlanStep) (PlanStep, error) {
+	var err error
+	ps := PlanStep{Uses: in.Uses}
+
+	if ps.Mode, err = ctx.Interpolate(in.Mode); err != nil {
 		return PlanStep{}, err
 	}
-	if ps.Repo, err = ctx.Interpolate(s.Repo); err != nil {
+	if ps.Repo, err = ctx.Interpolate(in.Repo); err != nil {
 		return PlanStep{}, err
 	}
-	if ps.Ref, err = ctx.Interpolate(s.Ref); err != nil {
+	if ps.Ref, err = ctx.Interpolate(in.Ref); err != nil {
 		return PlanStep{}, err
 	}
-	if ps.Globs, err = ctx.InterpolateAll(s.Globs); err != nil {
+	if ps.Globs, err = ctx.InterpolateAll(in.Globs); err != nil {
 		return PlanStep{}, err
 	}
-	if ps.Skill, err = ctx.Interpolate(s.Skill); err != nil {
+	if ps.Skill, err = ctx.Interpolate(in.Skill); err != nil {
 		return PlanStep{}, err
 	}
-	if ps.Posture, err = ctx.Interpolate(s.Posture); err != nil {
+	if ps.Posture, err = ctx.Interpolate(in.Posture); err != nil {
 		return PlanStep{}, err
 	}
-	if ps.From, err = ctx.Interpolate(s.From); err != nil {
+	if ps.From, err = ctx.Interpolate(in.From); err != nil {
 		return PlanStep{}, err
 	}
-	if ps.To, err = ctx.Interpolate(s.To); err != nil {
+	if ps.To, err = ctx.Interpolate(in.To); err != nil {
 		return PlanStep{}, err
 	}
-	if ps.Cmd, err = ctx.Interpolate(s.Cmd); err != nil {
+	if ps.Cmd, err = ctx.Interpolate(in.Cmd); err != nil {
 		return PlanStep{}, err
 	}
-	if ps.Args, err = ctx.InterpolateAll(s.Args); err != nil {
+	if ps.Args, err = ctx.InterpolateAll(in.Args); err != nil {
 		return PlanStep{}, err
 	}
 	return ps, nil

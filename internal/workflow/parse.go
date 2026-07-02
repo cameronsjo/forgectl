@@ -9,6 +9,7 @@ package workflow
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -100,9 +101,23 @@ func Parse(data []byte) (Workflow, error) {
 	}
 
 	var wf Workflow
-	if _, err := toml.Decode(string(data), &wf); err != nil {
+	md, err := toml.Decode(string(data), &wf)
+	if err != nil {
 		slog.Error("Failed to parse workflow: malformed TOML.", "dslVersion", versionProbe.DSLVersion, "error", err)
 		return Workflow{}, fmt.Errorf("parse workflow: %w", err)
+	}
+	// The full decode is strict: an unknown key is refused, not ignored. A
+	// typo'd field would otherwise silently no-op — on a `strip` step, a
+	// misspelled `globs` means silently falling back to the default strip-list
+	// in the one step that is a security control — and a newer grammar's
+	// fields must not be silently dropped under an older dsl_version.
+	if undecoded := md.Undecoded(); len(undecoded) > 0 {
+		keys := make([]string, len(undecoded))
+		for i, k := range undecoded {
+			keys[i] = k.String()
+		}
+		slog.Warn("Rejecting workflow: unknown keys.", "keys", keys)
+		return Workflow{}, fmt.Errorf("parse workflow: unknown key(s) %s — a typo, or a field from a newer dsl_version?", strings.Join(keys, ", "))
 	}
 	slog.Debug("Successfully parsed workflow.", "name", wf.Name, "version", wf.Version, "stepCount", len(wf.Steps))
 	return wf, nil

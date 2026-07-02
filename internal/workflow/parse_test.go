@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -74,6 +75,30 @@ cmd = "echo"
 	}
 	if uerr.Got != 99 {
 		t.Errorf("Got = %d, want 99", uerr.Got)
+	}
+}
+
+func TestParse_UnknownKeyRejected(t *testing.T) {
+	// The decode is strict: a typo'd field must be a parse error, not a silent
+	// no-op. `glob` (for `globs`) on a strip step is the sharp case — ignored,
+	// it would silently fall back to the default strip-list in the one step
+	// that is a security control.
+	data := []byte(`
+dsl_version = 1
+name = "typo"
+version = "1.0.0"
+
+[[step]]
+uses = "strip"
+glob = ["CLAUDE.md"]
+`)
+
+	_, err := Parse(data)
+	if err == nil {
+		t.Fatal("expected an unknown-key error for a typo'd field, got nil")
+	}
+	if !strings.Contains(err.Error(), "glob") {
+		t.Errorf("error should name the unknown key, got: %v", err)
 	}
 }
 

@@ -265,12 +265,10 @@ func TestExecutor_NotYetWiredSteps(t *testing.T) {
 	}
 }
 
-// TestExecutor_CloneVerb_RoutesToWorktreeStepAndExportsWorkspace covers the
-// newly-registered "clone" uses value: the registry maps it to worktreeStep
-// (same runner as "worktree") and it must export ${workspace} exactly like
-// worktree does. A remote-looking repo string (not a local path) exercises
-// the git-clone branch of worktreeStep rather than "worktree add".
-func TestExecutor_CloneVerb_RoutesToWorktreeStepAndExportsWorkspace(t *testing.T) {
+// TestExecutor_CloneVerb_ClonesAndExportsWorkspace covers the "clone" uses
+// value on a remote-looking repo: it must git-clone and export ${workspace}
+// exactly like worktree does.
+func TestExecutor_CloneVerb_ClonesAndExportsWorkspace(t *testing.T) {
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
 			return "", nil
@@ -311,8 +309,120 @@ func TestExecutor_CloneVerb_RoutesToWorktreeStepAndExportsWorkspace(t *testing.T
 	if !ok || workspace == "" {
 		t.Fatal("clone step must export ${workspace}, same as worktree")
 	}
-	// worktreeStep created the dir via os.MkdirTemp; clean it up.
+	// The sandbox step created the dir via os.MkdirTemp; clean it up.
 	t.Cleanup(func() { _ = os.RemoveAll(workspace) })
+}
+
+// TestExecutor_CloneVerb_ClonesLocalRepo locks the worktree/clone verb split:
+// an explicit `clone` on a LOCAL repo path must git-clone (full isolation on
+// request — no shared object store, no .git back-pointer to the source
+// checkout), never silently downgrade to a worktree.
+func TestExecutor_CloneVerb_ClonesLocalRepo(t *testing.T) {
+	repoDir := t.TempDir()
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			return "", nil
+		},
+	}
+
+	plan := Plan{Name: "clone-local", Steps: []PlanStep{{Uses: "clone", Repo: repoDir}}}
+	wctx := NewContext(nil)
+	exe := NewExecutor(fake)
+	if err := exe.Run(context.Background(), plan, wctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(fake.Calls) != 1 {
+		t.Fatalf("expected 1 Runner call (git clone), got %d: %+v", len(fake.Calls), fake.Calls)
+	}
+	call := fake.Calls[0]
+	if call.Name != "git" || len(call.Args) == 0 || call.Args[0] != "clone" {
+		t.Errorf("explicit clone on a local repo must git-clone, got %s %v", call.Name, call.Args)
+	}
+	if workspace, ok := wctx.Get("workspace"); ok && workspace != "" {
+		t.Cleanup(func() { _ = os.RemoveAll(workspace) })
+	}
+}
+
+// TestExecutor_Run_ResolvesExportsAtExecuteTime locks the design contract that
+// a deferred ${export} reference resolves during execute: a `run` step
+// consuming ${workspace} must receive the actual sandbox path as its argv,
+// never the literal string "${workspace}".
+func TestExecutor_Run_ResolvesExportsAtExecuteTime(t *testing.T) {
+	repoDir := t.TempDir()
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			return "", nil
+		},
+	}
+
+	wf := Workflow{
+		DSLVersion: 1,
+		Name:       "export-consumer",
+		Steps: []Step{
+			{Uses: "worktree", Repo: repoDir},
+			{Uses: "run", Cmd: "echo", Args: []string{"${workspace}"}},
+			{Uses: "teardown"},
+		},
+	}
+	plan, err := BuildPlan(wf, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	// At plan time the export is deferred, so the arg is still the literal.
+	if got := plan.Steps[1].Args[0]; got != "${workspace}" {
+		t.Fatalf("plan-time arg = %q, want the deferred literal ${workspace}", got)
+	}
+
+	exe := NewExecutor(fake)
+	wctx := NewContext(nil)
+	if err := exe.Run(context.Background(), plan, wctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	workspace, ok := wctx.Get("workspace")
+	if !ok || workspace == "" {
+		t.Fatal("worktree step must export ${workspace}")
+	}
+	if len(fake.Calls) != 2 {
+		t.Fatalf("expected 2 Runner calls (worktree add, echo), got %d: %+v", len(fake.Calls), fake.Calls)
+	}
+	echoCall := fake.Calls[1]
+	if echoCall.Name != "echo" {
+		t.Errorf("call.Name = %q, want echo", echoCall.Name)
+	}
+	if len(echoCall.Args) != 1 || echoCall.Args[0] != workspace {
+		t.Errorf("echo args = %v, want the resolved workspace %q — a literal ${workspace} means execute-time interpolation didn't run", echoCall.Args, workspace)
+	}
+}
+
+// TestExecutor_Run_ForwardReferenceFails covers the other side of execute-time
+// resolution: consuming an export BEFORE the step that produces it has run
+// must be a hard error — never a command executed with a literal "${...}".
+func TestExecutor_Run_ForwardReferenceFails(t *testing.T) {
+	repoDir := t.TempDir()
+	fake := &exec.FakeRunner{}
+
+	wf := Workflow{
+		DSLVersion: 1,
+		Name:       "forward-ref",
+		Steps: []Step{
+			{Uses: "run", Cmd: "echo", Args: []string{"${workspace}"}},
+			{Uses: "worktree", Repo: repoDir},
+		},
+	}
+	plan, err := BuildPlan(wf, nil)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err) // plan-time deferral keeps this buildable
+	}
+
+	exe := NewExecutor(fake)
+	if err := exe.Run(context.Background(), plan, NewContext(nil)); err == nil {
+		t.Fatal("expected a hard error for a forward reference, got nil")
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("no command may run with an unresolved ${workspace}, got calls: %+v", fake.Calls)
+	}
 }
 
 // TestExecutor_Worktree_RejectsOptionLikeRepoRef locks the git-argument-

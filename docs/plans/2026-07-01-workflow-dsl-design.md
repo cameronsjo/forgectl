@@ -81,7 +81,7 @@ new machinery.
 
 | `uses` | Delegates to | Exports | Notes |
 |---|---|---|---|
-| `worktree` / `clone` | git via `exec.Runner` | `${workspace}` | worktree into `os.MkdirTemp` (local) or `git clone` (remote), mirroring `internal/projects` clone |
+| `worktree` / `clone` | git via `exec.Runner` | `${workspace}` | `worktree`: worktree into `os.MkdirTemp` (local) or `git clone` fallback (remote). An explicit `clone` **always clones, even locally** — full isolation on request, no `.git` back-pointer to the source checkout |
 | `strip` | `os.RemoveAll` on resolved globs in `${workspace}` | — | the clean-room control; only ever mutates the sandbox, never the real checkout |
 | `run` | `exec.Runner.Run(cmd…)` | stdout (optional capture) | arbitrary command escape hatch |
 | `launch` | `internal/launch` | `${review}` (sync) | sync = Run + capture; surface = hand to `internal/tmux`/cmux |
@@ -116,13 +116,24 @@ before the `worktree` step has run) is marked deferred and renders as the litera
 at plan time, left for `execute` to resolve once that step's export lands. Any other unresolved
 `${}` reference — a typo, a param that was never declared — is a plan-time error.
 
+At execute time, the Executor **re-interpolates every step's fields against the live Context**
+just before dispatch. Nothing is deferred at that point, so a forward reference — consuming an
+export before the step that produces it has run — fails loudly, and no command ever receives a
+literal `${...}` string as an argument.
+
+(#10 note: the real `Verifier` runs on **raw file bytes** and should be hoisted ahead of `parse`
+— authenticate-before-parse. `Verify` already takes the file, so it's a plumbing change, not an
+interface change; see ADR-0002.)
+
 ### Versioning (dual axis)
 
 - **`dsl_version`** — the grammar contract. The parser reads it before anything else and gates on
   a `SupportedDSLVersions` set; an unknown version is a typed refusal *before* planning, so a
   tampered file claiming a newer grammar can't slip unparsed steps past an older executor. New
   step verbs / fields bump the DSL version; existing signed files keep parsing under their
-  declared version.
+  declared version. The decode is **strict**: an unknown key is a parse error, so a typo'd field
+  (`glob` for `globs`) can't silently no-op, and a newer grammar's fields can't be silently
+  ignored under an older `dsl_version`.
 - **`version`** — the workflow's own semver, author-bumped. It's the provenance handle: #10's
   attestation signs over `name@version` + file hash, #17's registry pins it, #16's dogfood
   reconciles against it on re-run. Editing a signed workflow bumps `version` and re-signs.
@@ -180,6 +191,10 @@ Workflow files: `~/.config/forgectl/workflows/*.workflow.toml`; shipped built-in
 
 ## Risks
 
+- **Pre-#10 trust model** — until signing lands, a workflow file is exactly as trusted as a shell
+  script (`run` is arbitrary command execution): run only workflows you authored or reviewed. The
+  user-dir-overrides-builtin resolution belongs in #10's threat model too — a same-name user file
+  silently replaces a shipped (eventually signed) built-in.
 - **Grammar churn** — if the executed grammar proves wrong, #10/#16 churn. The skeleton's job is to
   execute a real (if trivial) workflow so the grammar is validated, not just parsed.
 - **Sandbox safety** — `strip` deletes files; it must resolve globs *inside* `${workspace}` only. A

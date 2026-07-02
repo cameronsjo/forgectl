@@ -94,8 +94,8 @@ func NewExecutor(run exec.Runner, opts ...Option) *Executor {
 func defaultRegistry(stripGlobs []string) StepRegistry {
 	return StepRegistry{
 		"run":      {Runner: runStep},
-		"worktree": {Runner: worktreeStep, Exports: []string{"workspace"}},
-		"clone":    {Runner: worktreeStep, Exports: []string{"workspace"}},
+		"worktree": {Runner: newSandboxStep(false), Exports: []string{"workspace"}},
+		"clone":    {Runner: newSandboxStep(true), Exports: []string{"workspace"}},
 		"strip":    {Runner: newStripStep(stripGlobs)},
 		"teardown": {Runner: teardownStep},
 		"launch":   {Runner: notYetWiredStep, Exports: []string{"review"}},
@@ -118,8 +118,19 @@ func (e *Executor) Run(ctx context.Context, plan Plan, wctx *Context) error {
 			slog.Error("Unknown step verb.", "stepIndex", i, "stepUse", step.Uses)
 			return fmt.Errorf("step %d: unknown step verb %q", i, step.Uses)
 		}
+		// Re-interpolate the step's fields against the live Context: exports
+		// earlier steps produced (${workspace}, ${review}) resolve here, where
+		// nothing is deferred — so a forward reference (consuming an export
+		// before its step has run) is a hard error, never a literal "${...}"
+		// handed to a command.
+		resolved, err := interpolatePlanStep(wctx, step)
+		if err != nil {
+			slog.Error("Failed to resolve step exports.", "stepIndex", i, "stepUse", step.Uses, "error", err)
+			cleanupSandbox(wctx)
+			return fmt.Errorf("step %d (%s): %w", i, step.Uses, err)
+		}
 		slog.Debug("Executing step.", "stepIndex", i, "stepUse", step.Uses)
-		if err := def.Runner(ctx, e.run, wctx, step); err != nil {
+		if err := def.Runner(ctx, e.run, wctx, resolved); err != nil {
 			slog.Error("Step execution failed.", "stepIndex", i, "stepUse", step.Uses, "error", err)
 			// A mid-workflow failure skips the explicit teardown step, so best-
 			// effort remove the sandbox here to avoid leaking a temp checkout.
@@ -166,63 +177,69 @@ func runStep(ctx context.Context, run exec.Runner, _ *Context, step PlanStep) er
 	return err
 }
 
-// worktreeStep sandboxes a repo into a fresh os.MkdirTemp dir: a `git
-// worktree add` for a local repo, falling back to `git clone` for a remote
-// owner/repo (ADR-0003). It exports ${workspace}.
-func worktreeStep(ctx context.Context, run exec.Runner, wctx *Context, step PlanStep) error {
-	if step.Repo == "" {
-		slog.Warn("Worktree step missing required repo field.")
-		return errors.New("worktree step requires repo")
-	}
-	// A workflow file's repo/ref reach git as positional args. A leading '-'
-	// would be parsed as a git option (e.g. repo="--upload-pack=…" turns a
-	// clone into arbitrary command execution). Workflow files are shared and,
-	// in the spike, unsigned (#10), so reject option-like values outright.
-	if err := rejectOptionLike("repo", step.Repo); err != nil {
-		return err
-	}
-	if err := rejectOptionLike("ref", step.Ref); err != nil {
-		return err
-	}
-	slog.Debug("Preparing to create workspace sandbox.", "repo", step.Repo, "ref", step.Ref)
-
-	dir, err := os.MkdirTemp("", "forgectl-workflow-*")
-	if err != nil {
-		slog.Error("Failed to create sandbox directory.", "error", err)
-		return fmt.Errorf("create sandbox dir: %w", err)
-	}
-	slog.Debug("Created sandbox directory.", "sandbox", dir)
-
-	ref := step.Ref
-	if ref == "" {
-		ref = "HEAD"
-	}
-
-	if isLocalRepo(step.Repo) {
-		slog.Debug("Detected local repo, using git worktree.", "repo", step.Repo, "ref", ref)
-		// -- ends option parsing so a crafted dir/ref can't inject a flag.
-		if _, err := run.Run(ctx, "git", "-C", step.Repo, "worktree", "add", "--", dir, ref); err != nil {
-			slog.Error("Failed to create git worktree.", "repo", step.Repo, "sandbox", dir, "ref", ref, "error", err)
-			return fmt.Errorf("git worktree add: %w", err)
+// newSandboxStep builds the worktree/clone StepRunner: sandbox a repo into a
+// fresh os.MkdirTemp dir and export ${workspace} (ADR-0003). The two verbs
+// share the runner but differ deliberately: `worktree` (alwaysClone=false)
+// uses a cheap `git worktree add` for a local repo — shared object store, a
+// .git file pointing back at the source checkout — and falls back to `git
+// clone` for a remote; an explicit `clone` (alwaysClone=true) ALWAYS clones,
+// even for a local path, so an author's full-isolation request is honored
+// rather than silently downgraded to a linked worktree.
+func newSandboxStep(alwaysClone bool) StepRunner {
+	return func(ctx context.Context, run exec.Runner, wctx *Context, step PlanStep) error {
+		if step.Repo == "" {
+			slog.Warn("Sandbox step missing required repo field.")
+			return errors.New("worktree/clone step requires repo")
 		}
-	} else {
-		slog.Debug("Detected remote repo, using git clone.", "repo", step.Repo, "ref", step.Ref)
-		// Clone the default branch when no ref was given; git clone --branch
-		// wants a real branch/tag name, so "HEAD" can't stand in for it. The --
-		// separator ends option parsing before the repo/dir positionals.
-		args := []string{"clone", "--", step.Repo, dir}
-		if step.Ref != "" {
-			args = []string{"clone", "--branch", step.Ref, "--", step.Repo, dir}
+		// A workflow file's repo/ref reach git as positional args. A leading '-'
+		// would be parsed as a git option (e.g. repo="--upload-pack=…" turns a
+		// clone into arbitrary command execution). Workflow files are shared and,
+		// in the spike, unsigned (#10), so reject option-like values outright.
+		if err := rejectOptionLike("repo", step.Repo); err != nil {
+			return err
 		}
-		if _, err := run.Run(ctx, "git", args...); err != nil {
-			slog.Error("Failed to clone remote repo.", "repo", step.Repo, "sandbox", dir, "error", err)
-			return fmt.Errorf("git clone: %w", err)
+		if err := rejectOptionLike("ref", step.Ref); err != nil {
+			return err
 		}
-	}
+		slog.Debug("Preparing to create workspace sandbox.", "repo", step.Repo, "ref", step.Ref, "alwaysClone", alwaysClone)
 
-	wctx.Set("workspace", dir)
-	slog.Debug("Successfully created workspace sandbox.", "repo", step.Repo, "workspace", dir)
-	return nil
+		dir, err := os.MkdirTemp("", "forgectl-workflow-*")
+		if err != nil {
+			slog.Error("Failed to create sandbox directory.", "error", err)
+			return fmt.Errorf("create sandbox dir: %w", err)
+		}
+		slog.Debug("Created sandbox directory.", "sandbox", dir)
+
+		if !alwaysClone && isLocalRepo(step.Repo) {
+			ref := step.Ref
+			if ref == "" {
+				ref = "HEAD"
+			}
+			slog.Debug("Sandboxing local repo via git worktree.", "repo", step.Repo, "ref", ref)
+			// -- ends option parsing so a crafted dir/ref can't inject a flag.
+			if _, err := run.Run(ctx, "git", "-C", step.Repo, "worktree", "add", "--", dir, ref); err != nil {
+				slog.Error("Failed to create git worktree.", "repo", step.Repo, "sandbox", dir, "ref", ref, "error", err)
+				return fmt.Errorf("git worktree add: %w", err)
+			}
+		} else {
+			slog.Debug("Sandboxing repo via git clone.", "repo", step.Repo, "ref", step.Ref)
+			// Clone the default branch when no ref was given; git clone --branch
+			// wants a real branch/tag name, so "HEAD" can't stand in for it. The --
+			// separator ends option parsing before the repo/dir positionals.
+			args := []string{"clone", "--", step.Repo, dir}
+			if step.Ref != "" {
+				args = []string{"clone", "--branch", step.Ref, "--", step.Repo, dir}
+			}
+			if _, err := run.Run(ctx, "git", args...); err != nil {
+				slog.Error("Failed to clone repo.", "repo", step.Repo, "sandbox", dir, "error", err)
+				return fmt.Errorf("git clone: %w", err)
+			}
+		}
+
+		wctx.Set("workspace", dir)
+		slog.Debug("Successfully created workspace sandbox.", "repo", step.Repo, "workspace", dir)
+		return nil
+	}
 }
 
 // isLocalRepo reports whether repo looks like a filesystem path (vs. an
