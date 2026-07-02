@@ -22,6 +22,14 @@ func Normalize(s string) string {
 // Same single-source-of-truth pattern as TmuxAliases.
 var ProjectAliases = map[string][]string{
 	"pick": {"p", "open"},
+	"list": {"l", "ls", "find"},
+}
+
+// LaunchAliases maps each canonical launch subcommand to its accepted aliases.
+// The `cl` shorthand for the launch group itself is a Cobra alias on the parent
+// command (see newLaunchCmd), not a subcommand alias, so it is not listed here.
+var LaunchAliases = map[string][]string{
+	"which": {"config"},
 }
 
 // TmuxAliases maps each canonical tmux verb to its accepted aliases. This is

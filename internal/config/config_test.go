@@ -40,6 +40,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -274,7 +275,7 @@ func TestLoad(t *testing.T) {
 	t.Run("missing file returns defaults", func(t *testing.T) {
 		redirectConfigDir(t) // empty temp config dir → no config.toml
 		got := Load()
-		if (got != Config{}) {
+		if !reflect.DeepEqual(got, Config{}) {
 			t.Errorf("Load() with no file = %+v, want zero-value Config", got)
 		}
 	})
@@ -292,7 +293,7 @@ func TestLoad(t *testing.T) {
 
 		got := Load()
 		want := Config{NoIcons: true, LogLevel: "debug", LogFile: "-"}
-		if got != want {
+		if !reflect.DeepEqual(got, want) {
 			t.Errorf("Load() = %+v, want %+v", got, want)
 		}
 	})
@@ -308,7 +309,7 @@ func TestLoad(t *testing.T) {
 			t.Fatalf("write config: %v", err)
 		}
 		got := Load()
-		if (got != Config{}) {
+		if !reflect.DeepEqual(got, Config{}) {
 			t.Errorf("Load() with malformed file = %+v, want zero-value Config", got)
 		}
 	})

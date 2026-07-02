@@ -14,12 +14,13 @@ func newProjectsCmd(client *projects.Client) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "projects",
 		Aliases: []string{"proj"},
-		Short:   "Discover and open local projects (with GitHub clone-on-miss)",
+		Short:   "Find and open projects across local, GitHub, and Gitea (clones on demand)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return newProjectsPickCmd(client).RunE(cmd, nil)
 		},
 	}
 	cmd.AddCommand(newProjectsPickCmd(client))
+	cmd.AddCommand(newProjectsListCmd(client))
 	applyProjectAliases(cmd)
 	return cmd
 }

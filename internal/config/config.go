@@ -23,24 +23,98 @@ const logKeepDays = 7
 //	no_icons  = false
 //	log_level = "off"   # off | debug | info | warn | error
 //	log_file  = ""      # empty = auto (daily rotation, 7 days kept); "-" = stderr
+//
+//	[launch.defaults]    # per-project Claude Code launcher (forgectl launch)
+//	model = "opus"
+//	[[launch.project]]
+//	match = "~/Projects/minute"
+//	model = "sonnet"
 type Config struct {
-	NoIcons  bool   `toml:"no_icons"`
-	LogLevel string `toml:"log_level"`
-	LogFile  string `toml:"log_file"`
+	NoIcons  bool         `toml:"no_icons"`
+	LogLevel string       `toml:"log_level"`
+	LogFile  string       `toml:"log_file"`
+	Launch   LaunchConfig `toml:"launch"`
 }
 
-// Load reads the config file. If the file is missing or unreadable it returns
-// defaults (no-icons=false, log-level=off) without error.
+// LaunchConfig is the [launch] section: base defaults plus directory-keyed
+// project overrides for the `forgectl launch` command group. The resolution
+// logic (longest-prefix match, merge) lives in internal/launch — this package
+// owns only the on-disk schema.
+type LaunchConfig struct {
+	Defaults LaunchDefaults  `toml:"defaults"`
+	Projects []LaunchProject `toml:"project"`
+}
+
+// LaunchDefaults is [launch.defaults]: the base posture applied when no project
+// matches (and the floor a matching project overrides). AllowDanger is a pointer
+// so an explicit `false` is distinguishable from "unset".
+type LaunchDefaults struct {
+	Model          string            `toml:"model"`
+	PermissionMode string            `toml:"permission_mode"`
+	AllowDanger    *bool             `toml:"allow_danger"`
+	Env            map[string]string `toml:"env"`
+	AddDir         []string          `toml:"add_dir"`
+	BinaryPath     string            `toml:"binary_path"` // explicit claude path; env FORGECTL_CLAUDE_BIN wins
+}
+
+// LaunchProject is one [[launch.project]] directory-keyed override block.
+type LaunchProject struct {
+	Match          string            `toml:"match"`
+	Model          string            `toml:"model"`
+	PermissionMode string            `toml:"permission_mode"`
+	AllowDanger    *bool             `toml:"allow_danger"`
+	Env            map[string]string `toml:"env"`
+	AddDir         []string          `toml:"add_dir"`
+}
+
+// IsZero reports whether the [launch] section was absent or empty — the signal
+// the launcher uses to fall back to a legacy claunch.conf.
+func (lc LaunchConfig) IsZero() bool {
+	return len(lc.Projects) == 0 && lc.Defaults.isZero()
+}
+
+// isZero reports whether no [launch.defaults] value was set. LaunchDefaults
+// holds maps/slices, so it is not comparable with == — check each field.
+func (d LaunchDefaults) isZero() bool {
+	return d.Model == "" && d.PermissionMode == "" && d.AllowDanger == nil &&
+		len(d.Env) == 0 && len(d.AddDir) == 0 && d.BinaryPath == ""
+}
+
+// Load reads the config file. A missing file is not an error — it yields
+// defaults. On a malformed file, Load logs a loud warning instead of silently
+// returning a zero Config (which would also wipe the [launch] profiles); it
+// returns whatever the decoder populated before erroring. Load runs before
+// SetupLogger, so the warning reaches the default stderr handler regardless of
+// the configured log_level.
 func Load() Config {
 	path, err := ConfigPath()
 	if err != nil {
 		return Config{}
 	}
 	var cfg Config
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
-		return Config{}
+	if _, err := toml.DecodeFile(path, &cfg); err != nil && !os.IsNotExist(err) {
+		slog.Warn("Failed to decode config file; using built-in defaults for unreadable sections.",
+			"path", path, "error", err)
 	}
 	return cfg
+}
+
+// Validate decodes the config file and returns any parse error. A missing file
+// is valid (built-in defaults). Used by `forgectl launch doctor` to surface a
+// malformed config that Load() tolerated with a warning.
+func Validate() error {
+	path, err := ConfigPath()
+	if err != nil {
+		return err
+	}
+	var cfg Config
+	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // SetupLogger configures the global slog default from cfg and returns a Closer
@@ -188,6 +262,60 @@ func ConfigPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "config.toml"), nil
+}
+
+// LegacyLaunchPath returns the legacy claunch config location, honoring
+// $XDG_CONFIG_HOME. Retained so `forgectl launch` keeps reading an existing
+// ~/.config/claunch/claunch.conf until the user migrates the profiles into the
+// [launch] section of config.toml (via `forgectl launch init`).
+func LegacyLaunchPath() (string, error) {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "claunch", "claunch.conf"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", "claunch", "claunch.conf"), nil
+}
+
+// LoadLegacyLaunch reads a legacy claunch.conf into a LaunchConfig — the same
+// TOML shape as [launch] ([defaults] + [[project]]). It returns (cfg, true)
+// only when a file was found and decoded; a missing file yields (zero, false),
+// and a malformed file is logged and treated as absent.
+func LoadLegacyLaunch() (LaunchConfig, bool) {
+	path, err := LegacyLaunchPath()
+	if err != nil {
+		return LaunchConfig{}, false
+	}
+	var lc LaunchConfig
+	if _, err := toml.DecodeFile(path, &lc); err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("Failed to decode legacy claunch config; ignoring it.", "path", path, "error", err)
+		}
+		return LaunchConfig{}, false
+	}
+	return lc, true
+}
+
+// ValidateLegacyLaunch decodes the legacy claunch.conf and returns any parse
+// error. A missing file is valid (nil). LoadLegacyLaunch collapses a malformed
+// file to (zero, false), indistinguishable from absent — so `forgectl launch
+// doctor` uses this to surface a broken legacy file instead of misreporting it
+// as "no profiles configured".
+func ValidateLegacyLaunch() error {
+	path, err := LegacyLaunchPath()
+	if err != nil {
+		return err
+	}
+	var lc LaunchConfig
+	if _, err := toml.DecodeFile(path, &lc); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // nopCloser is an io.Closer that does nothing — stdlib io.NopCloser wraps

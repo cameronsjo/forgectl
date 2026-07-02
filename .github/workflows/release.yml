@@ -19,7 +19,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version: '1.25'
 
       # Mint a short-lived token scoped to the tap repo via the GitHub App
       # (RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY), instead of a long-lived PAT.
