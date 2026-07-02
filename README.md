@@ -120,3 +120,11 @@ Resolution expands `~`, picks the `[[launch.project]]` whose `match` is the **lo
 **Zero-migration grace** — if `config.toml` has no `[launch]` section, forgectl still reads a legacy `~/.config/claunch/claunch.conf` (the `[launch]` section is the same `[defaults]` + `[[project]]` shape, just namespaced). `forgectl launch init` writes the native section for the one-time cutover.
 
 > Absorbed from the standalone `claunch` tool. A `claunch='forgectl launch'` shell alias preserves the old muscle memory.
+
+## License
+
+[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) — source-available, not OSI open source.
+
+Noncommercial use is free: use it, modify it, fork it, share it. Commercial use — shipping it inside a product, redistribution for commercial gain, or any need for support or warranty — requires a commercial license. Reach out to Cameron Sjo to arrange one; all commercial rights are reserved.
+
+Versions previously released under MIT remain available under MIT — relicensing binds only future releases, not anything already published.

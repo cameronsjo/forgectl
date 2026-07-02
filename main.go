@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
 // Command forgectl is a personal dev-experience CLI for the headless
 // workbench. Bare invocation opens a TUI menu (thumb mode); typed verbs drive
 // it directly (power mode). See internal/cli and internal/tui.
