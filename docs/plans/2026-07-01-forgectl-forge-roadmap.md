@@ -13,7 +13,7 @@ v0.5.0. Provenance: epic #1, sub-epic #3, umbrella `cameronsjo/claude-configurat
 
 ## Critical path (the spine)
 
-#9 → #12 → #10 → #29
+Spine: #9 → #12 → #10 → #29
 
 The spine is the **platform** — a workflow DSL (#9), the board that feeds it (#12), the signing
 that makes executable workflows trustworthy (#10), and the flagship `pr` reviewer (#29) as the
