@@ -29,8 +29,9 @@ toolset (git, claude, tmux) — orchestration as data, not one-off scripts.
   forgectl workflow run <name> --dry-run    print the resolved plan, run nothing
   forgectl workflow list                    show resolvable workflow names
 
-Workflow files live in ~/.config/forgectl/workflows/<name>.workflow.toml, or
-fall back to a shipped built-in of the same name.`,
+Workflow files live in <config-dir>/workflows/<name>.workflow.toml — the same
+base as config.toml (macOS: ~/Library/Application Support/forgectl, Linux:
+~/.config/forgectl) — or fall back to a shipped built-in of the same name.`,
 	}
 	cmd.AddCommand(
 		newWorkflowRunCmd(cfg),

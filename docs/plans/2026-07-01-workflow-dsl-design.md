@@ -38,7 +38,7 @@ A workflow file is a name + typed params + an ordered `[[step]]` array. `${var}`
 params and prior-step exports.
 
 ```toml
-# ~/.config/forgectl/workflows/clean-room-review.workflow.toml
+# <config-dir>/workflows/clean-room-review.workflow.toml
 dsl_version = 1                 # grammar contract — parser refuses an unknown version
 name        = "clean-room-review"
 version     = "1.0.0"           # this workflow's own semver (provenance for signing / registry)
@@ -161,8 +161,10 @@ stub; registered in `root.go` via `AddCommand`; `flow` alias through the `forgiv
 `internal/config` — a `[workflow]` section for the default strip-list (and, later, #10's trust
 store), added as one tagged struct field per the existing `LaunchConfig` pattern.
 
-Workflow files: `~/.config/forgectl/workflows/*.workflow.toml`; shipped built-ins embedded via
-`go:embed`; `run <name>` resolves name → file, user dir overriding a built-in of the same name.
+Workflow files: `<config-dir>/workflows/*.workflow.toml` — the same `os.UserConfigDir()` base as
+`config.toml` (macOS `~/Library/Application Support/forgectl`, Linux `~/.config/forgectl`);
+shipped built-ins embedded via `go:embed`; `run <name>` resolves name → file, user dir overriding
+a built-in of the same name.
 
 ## Spike scope (what the walking skeleton builds)
 

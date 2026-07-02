@@ -18,9 +18,10 @@ import (
 var builtinFS embed.FS
 
 // Resolve locates a workflow by name: a user file under
-// ~/.config/forgectl/workflows/<name>.workflow.toml takes precedence over an
-// embedded built-in of the same name (design doc: "user dir overriding a
-// built-in of the same name"), and parses whichever is found.
+// <config-dir>/workflows/<name>.workflow.toml (config.WorkflowsDir — macOS:
+// ~/Library/Application Support/forgectl, Linux: ~/.config/forgectl) takes
+// precedence over an embedded built-in of the same name (design doc: "user
+// dir overriding a built-in of the same name"), and parses whichever is found.
 func Resolve(name string) (Workflow, error) {
 	slog.Debug("Resolving workflow by name.", "workflowName", name)
 
@@ -59,9 +60,10 @@ func userWorkflowPath(name string) (string, bool) {
 	return path, true
 }
 
-// userWorkflowDir returns ~/.config/forgectl/workflows, or "" if
-// undeterminable. It defers to config.WorkflowsDir so the path is defined in
-// exactly one place (internal/config).
+// userWorkflowDir returns the user workflow directory (the OS config dir's
+// forgectl/workflows), or "" if undeterminable. It defers to
+// config.WorkflowsDir so the path is defined in exactly one place
+// (internal/config).
 func userWorkflowDir() string {
 	dir, err := config.WorkflowsDir()
 	if err != nil {

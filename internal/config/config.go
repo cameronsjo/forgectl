@@ -278,10 +278,11 @@ func ConfigPath() (string, error) {
 	return filepath.Join(dir, "config.toml"), nil
 }
 
-// WorkflowsDir returns ~/.config/forgectl/workflows — the user workflow
-// directory `workflow run <name>` checks before the embedded built-ins. It
-// derives from the same configDir() base as every other forgectl path, so the
-// two never drift.
+// WorkflowsDir returns the user workflow directory `workflow run <name>`
+// checks before the embedded built-ins: <os.UserConfigDir()>/forgectl/workflows
+// (macOS: ~/Library/Application Support/forgectl/workflows; Linux:
+// ~/.config/forgectl/workflows). It derives from the same configDir() base as
+// every other forgectl path, so the two never drift.
 func WorkflowsDir() (string, error) {
 	dir, err := configDir()
 	if err != nil {
