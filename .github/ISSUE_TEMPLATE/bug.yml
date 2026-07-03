@@ -1,0 +1,35 @@
+name: Bug / fix
+description: Something behaves wrong — a skill, hook, command, or script that misfires.
+title: "fix(forgectl): "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part is broken? (Set the title prefix to match.)
+      options: [forgectl, claunch, other]
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction / evidence
+      description: Minimal steps or a console transcript. Redact sensitive paths, hostnames, emails.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis or notes
+      description: Suspected root cause, related code paths, or a workaround. Optional.
+    validations:
+      required: false
