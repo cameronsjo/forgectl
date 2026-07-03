@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/cameronsjo/forgectl#readme
+    about: Command reference and configuration.
+  - name: cadence plugins / methodology
+    url: https://github.com/cameronsjo/cadence/issues
+    about: A cadence skill, command, or plugin (private tracker).
+  - name: cadence-hooks binary
+    url: https://github.com/cameronsjo/cadence-hooks/issues
+    about: Guard logic and the enforcement binary.

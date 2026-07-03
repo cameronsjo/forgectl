@@ -1,0 +1,46 @@
+name: Feedback (session friction)
+description: A cadence hook, skill, or methodology created friction. Mirrors /cadence:feedback output.
+title: "feedback(forgectl): "
+labels: ["feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Converge human-filed and flywheel-filed feedback on one shape. Evidence should be
+        transcript-free — a redacted command + output, not a session dump.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part produced the friction? (Set the title prefix to match.)
+      options: [forgectl, claunch, other]
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: What surfaced it
+      options: [Hook fired in error, Skill fought me, Methodology / rhythm friction, Docs wrong or missing, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The friction — what fired, what you were doing when it did.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence (redacted, transcript-free)
+      description: The command + output, or the hook message. Redact paths, hostnames, emails.
+      render: shell
+    validations:
+      required: false

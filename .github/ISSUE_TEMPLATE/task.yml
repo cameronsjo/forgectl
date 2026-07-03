@@ -1,0 +1,26 @@
+name: Task / chore
+description: Maintenance, docs, tests, refactor, release, or housekeeping.
+title: "chore(forgectl): "
+labels: ["chore"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      description: Adjust the title prefix to match (chore / docs / test / refactor).
+      options: [chore, docs, test, refactor, release]
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options: [forgectl, claunch, other]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What needs doing
+    validations:
+      required: true
