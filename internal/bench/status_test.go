@@ -81,6 +81,22 @@ func TestCheckHearth_DegradedOnProbeFailure(t *testing.T) {
 	}
 }
 
+func TestCheckHearth_DegradedOnUnhealthyContainer(t *testing.T) {
+	t.Setenv("HEARTH_DIR", "")
+	cfg := config.Config{Bench: config.BenchConfig{HearthDir: "/x/hearth"}}
+	runner := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
+		return `{"Service":"a","State":"running","Health":"healthy"}` + "\n" +
+			`{"Service":"b","State":"running","Health":"unhealthy"}`, nil
+	}}
+
+	// All endpoints reachable, all containers running — but one is unhealthy.
+	c := checkHearth(context.Background(), cfg, runner, &fakeProber{code: 200})
+
+	if c.State != StateDegraded {
+		t.Fatalf("state = %q, reason = %q; want degraded (a running-but-unhealthy container)", c.State, c.Reason)
+	}
+}
+
 func TestCheckHearth_EndpointOverrideChangesProbe(t *testing.T) {
 	t.Setenv("HEARTH_DIR", "")
 	cfg := config.Config{Bench: config.BenchConfig{HearthDir: "/x/hearth", OTLPEndpoint: "http://collector:9999"}}
@@ -263,24 +279,26 @@ func TestCheckFlux_DegradedWhenBoardUnreachable(t *testing.T) {
 
 func TestParseComposePS(t *testing.T) {
 	cases := []struct {
-		name              string
-		in                string
-		wantTotal, wantUp int
+		name                             string
+		in                               string
+		wantTotal, wantUp, wantUnhealthy int
 	}{
-		{"ndjson all running", twoRunning, 2, 2},
-		{"ndjson mixed", `{"Service":"a","State":"running"}` + "\n" + `{"Service":"b","State":"exited"}`, 2, 1},
-		{"json array", `[{"Service":"a","State":"running"},{"Service":"b","State":"running"}]`, 2, 2},
-		{"empty", "", 0, 0},
-		{"whitespace", "  \n  ", 0, 0},
+		{"ndjson all running healthy", twoRunning, 2, 2, 0},
+		{"ndjson mixed", `{"Service":"a","State":"running"}` + "\n" + `{"Service":"b","State":"exited"}`, 2, 1, 0},
+		{"json array", `[{"Service":"a","State":"running"},{"Service":"b","State":"running"}]`, 2, 2, 0},
+		{"running but unhealthy", `{"Service":"a","State":"running","Health":"healthy"}` + "\n" + `{"Service":"b","State":"running","Health":"unhealthy"}`, 2, 2, 1},
+		{"empty", "", 0, 0, 0},
+		{"whitespace", "  \n  ", 0, 0, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			total, up, err := parseComposePS(tc.in)
+			total, up, unhealthy, err := parseComposePS(tc.in)
 			if err != nil {
 				t.Fatalf("parseComposePS: %v", err)
 			}
-			if total != tc.wantTotal || up != tc.wantUp {
-				t.Errorf("got total=%d up=%d, want total=%d up=%d", total, up, tc.wantTotal, tc.wantUp)
+			if total != tc.wantTotal || up != tc.wantUp || unhealthy != tc.wantUnhealthy {
+				t.Errorf("got total=%d up=%d unhealthy=%d, want total=%d up=%d unhealthy=%d",
+					total, up, unhealthy, tc.wantTotal, tc.wantUp, tc.wantUnhealthy)
 			}
 		})
 	}
@@ -288,9 +306,9 @@ func TestParseComposePS(t *testing.T) {
 
 func TestOTLPTarget(t *testing.T) {
 	cases := map[string]string{
-		"http://localhost:16317":   "tcp://localhost:16317",
-		"localhost:16317":          "tcp://localhost:16317",
-		"https://collector:4317":   "tcp://collector:4317",
+		"http://localhost:16317":    "tcp://localhost:16317",
+		"localhost:16317":           "tcp://localhost:16317",
+		"https://collector:4317":    "tcp://collector:4317",
 		"http://127.0.0.1:16317/v1": "tcp://127.0.0.1:16317",
 	}
 	for in, want := range cases {

@@ -77,7 +77,7 @@ func checkHearth(ctx context.Context, cfg config.Config, runner exec.Runner, pro
 		c.Reason = "docker compose unavailable: " + firstLine(err.Error())
 		return c
 	}
-	total, running, perr := parseComposePS(out)
+	total, running, unhealthy, perr := parseComposePS(out)
 	if perr != nil {
 		c.State = StateDegraded
 		c.Reason = "could not parse `docker compose ps` output"
@@ -89,6 +89,9 @@ func checkHearth(ctx context.Context, cfg config.Config, runner exec.Runner, pro
 		return c
 	}
 	c.Details = append(c.Details, fmt.Sprintf("compose: %d/%d running", running, total))
+	if unhealthy > 0 {
+		c.Details = append(c.Details, fmt.Sprintf("compose: %d unhealthy", unhealthy))
+	}
 
 	// Frozen transport + UIs. Evaluate every probe (no short-circuit) so the card
 	// shows the full picture in one pass.
@@ -97,7 +100,8 @@ func checkHearth(ctx context.Context, cfg config.Config, runner exec.Runner, pro
 	grafanaOK := recordHTTP(ctx, probe, "grafana.localhost", "http://grafana.localhost", &c)
 	otlpOK := recordTCP(ctx, probe, "otlp "+strings.TrimPrefix(otlp, "tcp://"), otlp, &c)
 
-	if running == total && hearthOK && grafanaOK && otlpOK {
+	// A container that is running but failing its Docker healthcheck is not "up".
+	if running == total && unhealthy == 0 && hearthOK && grafanaOK && otlpOK {
 		c.State = StateOK
 		c.Reason = fmt.Sprintf("%d services up, endpoints reachable", total)
 	} else {
@@ -216,19 +220,21 @@ type composeContainer struct {
 	Health  string `json:"Health"`
 }
 
-// parseComposePS counts total and running containers from `docker compose ps
-// --format json`, tolerating both the newline-delimited-objects form (current
-// compose) and a JSON array (older versions). Empty output is zero containers,
-// not an error.
-func parseComposePS(out string) (total, running int, err error) {
+// parseComposePS counts total, running, and running-but-unhealthy containers
+// from `docker compose ps --format json`, tolerating both the
+// newline-delimited-objects form (current compose) and a JSON array (older
+// versions). A container reports unhealthy only when it has a Docker
+// healthcheck; a running container with no healthcheck ("" Health) is not
+// counted unhealthy. Empty output is zero containers, not an error.
+func parseComposePS(out string) (total, running, unhealthy int, err error) {
 	out = strings.TrimSpace(out)
 	if out == "" {
-		return 0, 0, nil
+		return 0, 0, 0, nil
 	}
 	var containers []composeContainer
 	if strings.HasPrefix(out, "[") {
 		if err := json.Unmarshal([]byte(out), &containers); err != nil {
-			return 0, 0, err
+			return 0, 0, 0, err
 		}
 	} else {
 		for _, line := range strings.Split(out, "\n") {
@@ -238,7 +244,7 @@ func parseComposePS(out string) (total, running int, err error) {
 			}
 			var cc composeContainer
 			if err := json.Unmarshal([]byte(line), &cc); err != nil {
-				return 0, 0, err
+				return 0, 0, 0, err
 			}
 			containers = append(containers, cc)
 		}
@@ -247,9 +253,12 @@ func parseComposePS(out string) (total, running int, err error) {
 		total++
 		if cc.State == "running" {
 			running++
+			if cc.Health == "unhealthy" {
+				unhealthy++
+			}
 		}
 	}
-	return total, running, nil
+	return total, running, unhealthy, nil
 }
 
 // otlpTarget turns an OTLP endpoint (http://host:port or host:port) into a

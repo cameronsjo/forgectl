@@ -38,15 +38,27 @@ type httpProber struct {
 	client *http.Client
 }
 
-// NewHTTPProber returns the production Prober with a short per-probe timeout.
+// NewHTTPProber returns the production Prober with a short per-probe timeout. A
+// health probe never follows redirects — the status code of the first response
+// is all it needs, and following a redirect off localhost would be surprising.
 func NewHTTPProber() Prober {
-	return httpProber{client: &http.Client{Timeout: probeTimeout}}
+	return httpProber{client: &http.Client{
+		Timeout: probeTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}}
 }
 
 // Probe dispatches on the target scheme: tcp:// does a bare connect, everything
 // else an HTTP GET.
 func (h httpProber) Probe(ctx context.Context, target string) (int, error) {
 	if addr, ok := strings.CutPrefix(target, "tcp://"); ok {
+		// Bound the connect explicitly: the caller's context often carries no
+		// deadline, and a filtered (silently dropped) port would otherwise stall
+		// on the OS SYN-retry window rather than probeTimeout.
+		ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+		defer cancel()
 		var d net.Dialer
 		conn, err := d.DialContext(ctx, "tcp", addr)
 		if err != nil {

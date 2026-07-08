@@ -117,13 +117,6 @@ type BenchConfig struct {
 	Telemetry    bool   `toml:"telemetry"`
 }
 
-// IsZero reports whether the [bench] section was absent or empty — no dirs, no
-// transport overrides, telemetry off.
-func (bc BenchConfig) IsZero() bool {
-	return bc.HearthDir == "" && bc.ChronicleDir == "" &&
-		bc.OTLPEndpoint == "" && bc.OTLPProtocol == "" && !bc.Telemetry
-}
-
 // ResolvedHearthDir resolves the hearth checkout: the configured value, else
 // $HEARTH_DIR, else empty (the signal to degrade to not-configured). A leading
 // ~/ is expanded.
