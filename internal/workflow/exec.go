@@ -11,6 +11,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/quarantine"
+	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
 // ErrNotYetWired is returned by a step runner that is registered but not yet
@@ -152,7 +153,7 @@ func cleanupSandbox(wctx *Context) {
 	if !ok || ws == "" {
 		return
 	}
-	if err := os.RemoveAll(ws); err != nil {
+	if err := sandbox.Teardown(context.Background(), nil, ws); err != nil {
 		slog.Warn("Failed to clean up sandbox after error.", "workspace", ws, "error", err)
 		return
 	}
@@ -186,72 +187,13 @@ func runStep(ctx context.Context, run exec.Runner, _ *Context, step PlanStep) er
 // rather than silently downgraded to a linked worktree.
 func newSandboxStep(alwaysClone bool) StepRunner {
 	return func(ctx context.Context, run exec.Runner, wctx *Context, step PlanStep) error {
-		if step.Repo == "" {
-			slog.Warn("Sandbox step missing required repo field.")
-			return errors.New("worktree/clone step requires repo")
-		}
-		// A workflow file's repo/ref reach git as positional args. A leading '-'
-		// would be parsed as a git option (e.g. repo="--upload-pack=…" turns a
-		// clone into arbitrary command execution). Workflow files are shared and,
-		// in the spike, unsigned (#10), so reject option-like values outright.
-		if err := rejectOptionLike("repo", step.Repo); err != nil {
-			return err
-		}
-		if err := rejectOptionLike("ref", step.Ref); err != nil {
-			return err
-		}
-		slog.Debug("Preparing to create workspace sandbox.", "repo", step.Repo, "ref", step.Ref, "alwaysClone", alwaysClone)
-
-		dir, err := os.MkdirTemp("", "forgectl-workflow-*")
+		dir, err := sandbox.Sandbox(ctx, run, step.Repo, step.Ref, alwaysClone)
 		if err != nil {
-			slog.Error("Failed to create sandbox directory.", "error", err)
-			return fmt.Errorf("create sandbox dir: %w", err)
+			return err
 		}
-		slog.Debug("Created sandbox directory.", "sandbox", dir)
-
-		if !alwaysClone && isLocalRepo(step.Repo) {
-			ref := step.Ref
-			if ref == "" {
-				ref = "HEAD"
-			}
-			slog.Debug("Sandboxing local repo via git worktree.", "repo", step.Repo, "ref", ref)
-			// -- ends option parsing so a crafted dir/ref can't inject a flag.
-			if _, err := run.Run(ctx, "git", "-C", step.Repo, "worktree", "add", "--", dir, ref); err != nil {
-				slog.Error("Failed to create git worktree.", "repo", step.Repo, "sandbox", dir, "ref", ref, "error", err)
-				return fmt.Errorf("git worktree add: %w", err)
-			}
-		} else {
-			slog.Debug("Sandboxing repo via git clone.", "repo", step.Repo, "ref", step.Ref)
-			// Clone the default branch when no ref was given; git clone --branch
-			// wants a real branch/tag name, so "HEAD" can't stand in for it. The --
-			// separator ends option parsing before the repo/dir positionals.
-			args := []string{"clone", "--", step.Repo, dir}
-			if step.Ref != "" {
-				args = []string{"clone", "--branch", step.Ref, "--", step.Repo, dir}
-			}
-			if _, err := run.Run(ctx, "git", args...); err != nil {
-				slog.Error("Failed to clone repo.", "repo", step.Repo, "sandbox", dir, "error", err)
-				return fmt.Errorf("git clone: %w", err)
-			}
-		}
-
 		wctx.Set("workspace", dir)
-		slog.Debug("Successfully created workspace sandbox.", "repo", step.Repo, "workspace", dir)
 		return nil
 	}
-}
-
-// isLocalRepo reports whether repo looks like a filesystem path (vs. an
-// owner/repo remote reference) — an absolute/relative path, or one that
-// exists on disk.
-func isLocalRepo(repo string) bool {
-	if strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, "./") || strings.HasPrefix(repo, "../") || repo == "." {
-		return true
-	}
-	if _, err := os.Stat(repo); err == nil {
-		return true
-	}
-	return false
 }
 
 // newStripStep builds the `strip` StepRunner, closing over the default
@@ -293,7 +235,7 @@ func newStripStep(defaultGlobs []string) StepRunner {
 				// A pattern with no ".." can still reach outside via a symlink
 				// (e.g. a matched dir that links to /etc); re-check every match's
 				// real path before deleting through it.
-				if !withinWorkspace(workspace, target) {
+				if !sandbox.WithinWorkspace(workspace, target) {
 					slog.Error("Strip match escapes workspace; refusing.", "glob", g, "target", target)
 					return fmt.Errorf("strip match %q escapes workspace", target)
 				}
@@ -307,36 +249,6 @@ func newStripStep(defaultGlobs []string) StepRunner {
 		slog.Debug("Successfully stripped paths from workspace.", "workspace", workspace, "globCount", len(globs))
 		return nil
 	}
-}
-
-// withinWorkspace reports whether target, after resolving symlinks, stays
-// inside workspace. filepath.Glob can match a symlink whose target escapes the
-// sandbox; deleting through it would reach outside ${workspace}, so every match
-// is re-checked here before removal.
-func withinWorkspace(workspace, target string) bool {
-	realWS, err := filepath.EvalSymlinks(workspace)
-	if err != nil {
-		realWS = workspace
-	}
-	realTarget, err := filepath.EvalSymlinks(target)
-	if err != nil {
-		realTarget = target
-	}
-	rel, err := filepath.Rel(realWS, realTarget)
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// rejectOptionLike guards a value that becomes a positional git argument: a
-// leading '-' would be parsed as a git option, so an unsigned shared workflow
-// could smuggle a flag (e.g. --upload-pack) into a clone/worktree invocation.
-func rejectOptionLike(field, value string) error {
-	if strings.HasPrefix(value, "-") {
-		return fmt.Errorf("workflow %s %q must not begin with '-'", field, value)
-	}
-	return nil
 }
 
 // validateStripGlob rejects a glob that could escape ${workspace}: an
@@ -362,17 +274,11 @@ func validateStripGlob(g string) error {
 // teardownStep removes the sandbox dir. It is idempotent: a missing
 // ${workspace} value or an already-removed dir is not an error, so teardown
 // is safe to run after a partial failure (ADR-0003).
-func teardownStep(_ context.Context, _ exec.Runner, wctx *Context, _ PlanStep) error {
+func teardownStep(ctx context.Context, run exec.Runner, wctx *Context, _ PlanStep) error {
 	workspace, ok := wctx.Get("workspace")
 	if !ok || workspace == "" {
 		slog.Debug("Teardown: no workspace context, nothing to remove.")
 		return nil
 	}
-	slog.Debug("Preparing to tear down workspace.", "workspace", workspace)
-	if err := os.RemoveAll(workspace); err != nil {
-		slog.Error("Failed to tear down workspace.", "workspace", workspace, "error", err)
-		return fmt.Errorf("teardown %s: %w", workspace, err)
-	}
-	slog.Debug("Successfully tore down workspace.", "workspace", workspace)
-	return nil
+	return sandbox.Teardown(ctx, run, workspace)
 }
