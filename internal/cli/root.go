@@ -9,12 +9,13 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/projects"
+	"github.com/cameronsjo/forgectl/internal/quarantine"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // newRoot builds the root command tree. Each domain module registers its
 // parent command here (tmux, projects today; pr/k8s later).
-func newRoot(tmuxClient *tmux.Client, projClient *projects.Client, cfg config.Config) *cobra.Command {
+func newRoot(tmuxClient *tmux.Client, projClient *projects.Client, quarantineClient *quarantine.Client, cfg config.Config) *cobra.Command {
 	root := &cobra.Command{
 		Use:     meta.AppName,
 		Short:   meta.Tagline,
@@ -36,6 +37,7 @@ func newRoot(tmuxClient *tmux.Client, projClient *projects.Client, cfg config.Co
 	root.AddCommand(newLaunchCmd(cfg))
 	root.AddCommand(newWorkflowCmd(cfg))
 	root.AddCommand(newNetCmd(cfg))
+	root.AddCommand(newQuarantineCmd(quarantineClient))
 
 	return root
 }
