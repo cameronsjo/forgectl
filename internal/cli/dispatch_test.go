@@ -7,6 +7,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/projects"
+	"github.com/cameronsjo/forgectl/internal/quarantine"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -49,7 +50,7 @@ func TestNormalizeArgs_DoesNotMutateInput(t *testing.T) {
 }
 
 func TestShouldLaunchTUI(t *testing.T) {
-	root := newRoot(tmux.New(&exec.FakeRunner{}), projects.New(&exec.FakeRunner{}), config.Config{})
+	root := newRoot(tmux.New(&exec.FakeRunner{}), projects.New(&exec.FakeRunner{}), quarantine.New(&exec.FakeRunner{}), config.Config{})
 	cases := []struct {
 		name string
 		args []string

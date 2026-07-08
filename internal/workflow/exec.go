@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/quarantine"
 )
 
 // ErrNotYetWired is returned by a step runner that is registered but not yet
@@ -36,12 +37,10 @@ type StepRegistry map[string]StepDef
 
 // defaultStripGlobs is the clean-room control's built-in fallback strip-list,
 // used when a `strip` step omits `globs` AND no config default is set
-// (design doc: "omit globs → configured default set"). #20 will source this
-// from quarantine instead; the spike uses this fixed default (mirroring the
-// reference clean-room-review.workflow.toml).
-var defaultStripGlobs = []string{
-	"CLAUDE.md", "AGENTS.md", ".claude/", ".cursor/rules", ".github/copilot-instructions.md",
-}
+// (design doc: "omit globs → configured default set"). Sourced from
+// quarantine.DefaultTargets (#20) — the same canonical instruction-file list
+// quarantine's reversible Hide uses — so the two controls never drift.
+var defaultStripGlobs = quarantine.DefaultTargets
 
 // Executor runs a Plan's steps in order through one constructor-injected
 // exec.Runner (mirrors tmux.New / projects.New), threading a shared Context

@@ -76,8 +76,9 @@ func (lc LaunchConfig) IsZero() bool {
 
 // WorkflowConfig is the [workflow] section: the default strip-list the
 // `strip` step falls back to when a workflow file's [[step]] omits `globs`.
-// #20 will source this from quarantine instead; until then it's the one
-// config-driven knob the DSL exposes.
+// Its own built-in fallback is now sourced from quarantine.DefaultTargets
+// (#20); this section remains the one config-driven override the DSL
+// exposes.
 type WorkflowConfig struct {
 	StripGlobs []string `toml:"strip_globs"`
 }
