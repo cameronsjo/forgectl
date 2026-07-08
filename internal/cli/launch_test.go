@@ -66,7 +66,28 @@ const stubClaude = `#!/usr/bin/env bash
   for a in "$@"; do echo "$a"; done
   echo ARGS_END
   echo "OTEL_EXPORTER=${OTEL_EXPORTER:-}"
+  echo "CLAUDE_CODE_ENABLE_TELEMETRY=${CLAUDE_CODE_ENABLE_TELEMETRY:-}"
+  echo "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+  echo "OTEL_EXPORTER_OTLP_PROTOCOL=${OTEL_EXPORTER_OTLP_PROTOCOL:-}"
 } > "$FORGECTL_TEST_OUT"
+`
+
+// telemetryConfigTemplate is nativeConfigTemplate plus an opt-in [bench]
+// telemetry block and a profile env override on the OTLP endpoint — so the
+// harness can assert both that telemetry is injected and that a profile value
+// wins over the injected default.
+const telemetryConfigTemplate = `[launch.defaults]
+model = "opus"
+permission_mode = "plan"
+allow_danger = true
+
+[[launch.project]]
+match = "%s"
+model = "sonnet"
+env = { OTEL_EXPORTER_OTLP_ENDPOINT = "http://profile-wins:9999" }
+
+[bench]
+telemetry = true
 `
 
 const nativeConfigTemplate = `[launch.defaults]
@@ -112,6 +133,45 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("mkdir config dir: %v", err)
 	}
 	body := fmt.Sprintf(nativeConfigTemplate, cwd, cwd)
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config.toml: %v", err)
+	}
+
+	return &harness{
+		bin:     builtBinPath,
+		cwd:     cwd,
+		binDir:  binDir,
+		outFile: outFile,
+		env: []string{
+			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"HOME=" + base,
+			"XDG_CONFIG_HOME=" + base,
+			"FORGECTL_TEST_OUT=" + outFile,
+		},
+	}
+}
+
+// newTelemetryHarness builds a harness whose config.toml enables [bench]
+// telemetry (and sets a profile env override on the OTLP endpoint), so a launch
+// exercises the injection + profile-wins precedence end to end.
+func newTelemetryHarness(t *testing.T) *harness {
+	t.Helper()
+
+	cwd, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve symlinks on temp cwd: %v", err)
+	}
+	binDir := t.TempDir()
+	outFile := filepath.Join(t.TempDir(), "claude.out")
+	base := t.TempDir()
+
+	writeStubClaude(t, binDir)
+
+	cfgPath := childConfigPath(base)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	body := fmt.Sprintf(telemetryConfigTemplate, cwd)
 	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
 		t.Fatalf("write config.toml: %v", err)
 	}
@@ -288,7 +348,49 @@ func stripFromPath(env []string, dir string) []string {
 	return out
 }
 
+// recordedEnv returns the value of key the stub claude observed in its
+// environment (empty string when unset).
+func (h *harness) recordedEnv(t *testing.T, key string) string {
+	t.Helper()
+	data, err := os.ReadFile(h.outFile)
+	if err != nil {
+		t.Fatalf("read claude out file: %v", err)
+	}
+	for _, l := range strings.Split(string(data), "\n") {
+		if v, ok := strings.CutPrefix(l, key+"="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
 // --- tests ---------------------------------------------------------------
+
+func TestIntegration_Launch_InjectsTelemetryEnv(t *testing.T) {
+	h := newTelemetryHarness(t)
+	h.run(t, "-p", "hi")
+
+	if got := h.recordedEnv(t, "CLAUDE_CODE_ENABLE_TELEMETRY"); got != "1" {
+		t.Errorf("CLAUDE_CODE_ENABLE_TELEMETRY = %q, want 1", got)
+	}
+	// Injected default, no profile override.
+	if got := h.recordedEnv(t, "OTEL_EXPORTER_OTLP_PROTOCOL"); got != "grpc" {
+		t.Errorf("OTEL_EXPORTER_OTLP_PROTOCOL = %q, want grpc", got)
+	}
+	// Profile env must win over the injected default endpoint.
+	if got := h.recordedEnv(t, "OTEL_EXPORTER_OTLP_ENDPOINT"); got != "http://profile-wins:9999" {
+		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %q, want the profile override to win", got)
+	}
+}
+
+func TestIntegration_Launch_NoTelemetryWhenDisabled(t *testing.T) {
+	h := newHarness(t) // native config has no [bench] section
+	h.run(t, "-p", "hi")
+
+	if got := h.recordedEnv(t, "CLAUDE_CODE_ENABLE_TELEMETRY"); got != "" {
+		t.Errorf("CLAUDE_CODE_ENABLE_TELEMETRY = %q, want empty when telemetry is off", got)
+	}
+}
 
 func TestIntegration_Builder_AppliesProfileAndPassesThrough(t *testing.T) {
 	h := newHarness(t)
