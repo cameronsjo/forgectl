@@ -21,6 +21,8 @@ reimplements one.
 
   forgectl bench status          aggregate health card across all components
   forgectl bench status --json   machine-readable, for scripts
+  forgectl bench up              bring up the configured services
+  forgectl bench open [target]   open a bench UI (hearth | grafana)
 
 Configure it in the [bench] section of config.toml (macOS: ~/Library/Application
 Support/forgectl/config.toml). Unset components degrade to "not-configured"
@@ -28,6 +30,8 @@ rather than erroring.`,
 	}
 	cmd.AddCommand(
 		newBenchStatusCmd(cfg),
+		newBenchUpCmd(cfg),
+		newBenchOpenCmd(cfg),
 	)
 	applyBenchAliases(cmd)
 	return cmd
