@@ -29,12 +29,26 @@ const logKeepDays = 7
 //	[[launch.project]]
 //	match = "~/Projects/minute"
 //	model = "sonnet"
+//
+//	[net]                # forgectl net — cached internal-network reachability probe
+//	probe_host = "1.1.1.1"
+//	probe_port = 443
+//	ttl_seconds = 60
+//	timeout_ms = 1000
+//	[bench]              # interop with the local bench (forgectl bench)
+//	hearth_dir    = "~/Projects/hearth"      # else $HEARTH_DIR
+//	chronicle_dir = "~/Projects/chronicle"   # else $CHRONICLE_DIR
+//	otlp_endpoint = "http://localhost:16317" # hearth's frozen OTLP transport
+//	otlp_protocol = "grpc"
+//	telemetry     = false                    # opt-in: inject OTLP env into launches
 type Config struct {
 	NoIcons  bool           `toml:"no_icons"`
 	LogLevel string         `toml:"log_level"`
 	LogFile  string         `toml:"log_file"`
 	Launch   LaunchConfig   `toml:"launch"`
 	Workflow WorkflowConfig `toml:"workflow"`
+	Net      NetConfig      `toml:"net"`
+	Bench    BenchConfig    `toml:"bench"`
 }
 
 // LaunchConfig is the [launch] section: base defaults plus directory-keyed
@@ -86,6 +100,107 @@ type WorkflowConfig struct {
 // IsZero reports whether the [workflow] section was absent or empty.
 func (wc WorkflowConfig) IsZero() bool {
 	return len(wc.StripGlobs) == 0
+}
+
+// NetConfig is the [net] section: the endpoint `forgectl net` probes for
+// internal-network reachability, and how long a cached answer stays fresh.
+// A zero value means "section absent" — internal/net's Client applies its own
+// built-in defaults (probe_host 1.1.1.1, probe_port 443, ttl_seconds 60,
+// timeout_ms 1000) for whichever fields are left unset.
+type NetConfig struct {
+	ProbeHost  string `toml:"probe_host"`
+	ProbePort  int    `toml:"probe_port"`
+	TTLSeconds int    `toml:"ttl_seconds"`
+	TimeoutMs  int    `toml:"timeout_ms"`
+}
+
+// IsZero reports whether the [net] section was absent or empty.
+func (nc NetConfig) IsZero() bool {
+	return nc.ProbeHost == "" && nc.ProbePort == 0 && nc.TTLSeconds == 0 && nc.TimeoutMs == 0
+}
+
+// Baked defaults for hearth's frozen OTLP transport. These are the values a
+// hearth-on-Colima collector listens on out of the box; a user overrides them
+// in [bench] only when running a non-default endpoint.
+const (
+	DefaultOTLPEndpoint = "http://localhost:16317"
+	DefaultOTLPProtocol = "grpc"
+)
+
+// BenchConfig is the [bench] section: how forgectl discovers and wires the
+// local bench (hearth telemetry stack, chronicle transcript retention). Repo
+// paths fall back to environment variables and degrade to empty when unset; the
+// OTLP transport carries baked defaults so a zero config still points at a
+// standard hearth. Mirrors WorkflowConfig — this package owns only the on-disk
+// schema, not the probing logic (that lives in internal/bench).
+type BenchConfig struct {
+	HearthDir    string `toml:"hearth_dir"`
+	ChronicleDir string `toml:"chronicle_dir"`
+	OTLPEndpoint string `toml:"otlp_endpoint"` // default http://localhost:16317
+	OTLPProtocol string `toml:"otlp_protocol"` // default grpc
+	Telemetry    bool   `toml:"telemetry"`
+}
+
+// ResolvedHearthDir resolves the hearth checkout: the configured value, else
+// $HEARTH_DIR, else empty (the signal to degrade to not-configured). A leading
+// ~/ is expanded.
+func (bc BenchConfig) ResolvedHearthDir() string {
+	return resolveDir(bc.HearthDir, "HEARTH_DIR")
+}
+
+// ResolvedChronicleDir resolves the chronicle checkout: the configured value,
+// else $CHRONICLE_DIR, else empty. A leading ~/ is expanded.
+func (bc BenchConfig) ResolvedChronicleDir() string {
+	return resolveDir(bc.ChronicleDir, "CHRONICLE_DIR")
+}
+
+// ResolvedOTLPEndpoint returns the configured OTLP endpoint or the baked
+// default when unset.
+func (bc BenchConfig) ResolvedOTLPEndpoint() string {
+	if bc.OTLPEndpoint != "" {
+		return bc.OTLPEndpoint
+	}
+	return DefaultOTLPEndpoint
+}
+
+// ResolvedOTLPProtocol returns the configured OTLP protocol or the baked
+// default when unset.
+func (bc BenchConfig) ResolvedOTLPProtocol() string {
+	if bc.OTLPProtocol != "" {
+		return bc.OTLPProtocol
+	}
+	return DefaultOTLPProtocol
+}
+
+// resolveDir picks the configured value, falls back to an environment variable,
+// and expands a leading ~/. An empty result means "unconfigured" — callers
+// degrade rather than error.
+func resolveDir(configured, envVar string) string {
+	dir := configured
+	if dir == "" {
+		dir = os.Getenv(envVar)
+	}
+	if dir == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return dir
+	}
+	return expandTilde(dir, home)
+}
+
+// expandTilde expands a leading ~ or ~/ to the home directory. Mirrors the
+// launcher's helper (internal/launch) — kept local so config stays a
+// lower-level package with no launch import.
+func expandTilde(path, home string) string {
+	if path == "~" {
+		return home
+	}
+	if strings.HasPrefix(path, "~/") {
+		return filepath.Join(home, path[2:])
+	}
+	return path
 }
 
 // isZero reports whether no [launch.defaults] value was set. LaunchDefaults
@@ -290,6 +405,19 @@ func WorkflowsDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "workflows"), nil
+}
+
+// NetCachePath returns the on-disk path for the internal/net reachability
+// cache: <os.UserConfigDir()>/forgectl/net-cache.json (macOS: ~/Library/
+// Application Support/forgectl/net-cache.json; Linux: ~/.config/forgectl/
+// net-cache.json). It derives from the same configDir() base as ConfigPath
+// and WorkflowsDir, so all three never drift.
+func NetCachePath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "net-cache.json"), nil
 }
 
 // LegacyLaunchPath returns the legacy claunch config location, honoring

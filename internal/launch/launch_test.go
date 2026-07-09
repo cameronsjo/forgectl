@@ -115,6 +115,30 @@ func TestMergeEnv_EmptyExtra_ReturnsBase(t *testing.T) {
 	}
 }
 
+func TestMergeMaps_OverWins(t *testing.T) {
+	base := map[string]string{"A": "1", "B": "2"}
+	over := map[string]string{"B": "override", "C": "3"}
+	got := MergeMaps(base, over)
+	want := map[string]string{"A": "1", "B": "override", "C": "3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("MergeMaps = %v, want %v", got, want)
+	}
+}
+
+func TestMergeMaps_BothEmpty_ReturnsNil(t *testing.T) {
+	if got := MergeMaps(nil, nil); got != nil {
+		t.Errorf("MergeMaps(nil, nil) = %v, want nil", got)
+	}
+}
+
+func TestMergeMaps_NilBase_ReturnsOverContents(t *testing.T) {
+	over := map[string]string{"A": "1"}
+	got := MergeMaps(nil, over)
+	if !reflect.DeepEqual(got, over) {
+		t.Errorf("MergeMaps(nil, over) = %v, want %v", got, over)
+	}
+}
+
 func containsStr(haystack []string, needle string) bool {
 	for _, s := range haystack {
 		if s == needle {
