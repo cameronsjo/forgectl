@@ -298,6 +298,18 @@ func TestPrSessionsDir(t *testing.T) {
 	}
 }
 
+func TestPrReviewedPath(t *testing.T) {
+	dir := redirectConfigDir(t)
+	got, err := PrReviewedPath()
+	if err != nil {
+		t.Fatalf("PrReviewedPath: %v", err)
+	}
+	want := filepath.Join(dir, "forgectl", "pr-reviewed.json")
+	if got != want {
+		t.Errorf("PrReviewedPath() = %q, want %q", got, want)
+	}
+}
+
 func TestLoad(t *testing.T) {
 	t.Run("missing file returns defaults", func(t *testing.T) {
 		redirectConfigDir(t) // empty temp config dir → no config.toml

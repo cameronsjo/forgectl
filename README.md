@@ -35,6 +35,20 @@ forgectl projects list --host gitea forge  # host filter + name substring
 forgectl projects pick [query]           # interactive picker across the full inventory; clones uncloned repos before opening (aliases: p, open)
 forgectl projects                        # shorthand for pick (no args → TUI selector)
 
+# pr — clean-room pull-request review (the flagship review family)
+forgectl pr <ref>                        # prepare + launch an isolated, deny-by-default review (owner/repo#N, a PR URL, or a bare N)
+forgectl pr <ref> --dry-run              # resolve + print the plan, create nothing
+forgectl pr prs                          # cross-repo open PRs (authored, assigned, review-requested); reviewed rows dimmed
+forgectl pr prs --json                   # machine-readable JSON (safe to pipe; notes go to stderr)
+forgectl pr dash                         # dashboard: active reviews, PRs awaiting you, your open PRs
+forgectl pr pick                         # multiselect open PRs → spin up reviews in bulk (reviewed PRs skipped)
+forgectl pr reviewed mark <ref>          # mark a PR reviewed (dims it until the PR sees new activity)
+forgectl pr reviewed unmark <ref>        # clear a PR's reviewed mark
+forgectl pr reviewed sync                # prune reviewed marks for PRs that are no longer open
+forgectl pr list                         # list active clean-room review sessions
+forgectl pr attach <breadcrumb>          # jump to a review window (also: open <b>, teardown <b>)
+forgectl pr keys                         # tmux cheatsheet for driving a review
+
 # launch — per-project Claude Code launcher (alias: cl)
 forgectl launch                    # interactive launcher: pick Model + New/Resume/Fork, then exec claude
 forgectl launch <claude args…>     # apply the project profile, then pass your args straight through
@@ -79,6 +93,11 @@ forgectl projects list / pick
 forgectl workflow run <name>
     └── parse a TOML step list → resolve params → plan (--dry-run stops here)
             └── execute: each step drives an existing seam (git, launch, tmux)
+
+forgectl pr prs / dash / pick
+    ├── gh search prs (authored / assigned / review-requested) ─┐ concurrent
+    │   dimmed against a local reviewed-state store ────────────┘
+    └── pick → PrepareMany (same-repo checkouts serialized) → clean-room launch
 ```
 
 `sesh` handles the smarts — path discovery, named sessions, zoxide integration. `forgectl` provides the stable verbs and the thumb-friendly TUI on top.
