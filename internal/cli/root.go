@@ -42,6 +42,7 @@ func newRoot(tmuxClient *tmux.Client, projClient *projects.Client, quarantineCli
 	root.AddCommand(newPrCmd(cfg))
 	root.AddCommand(newPipCmd())
 	root.AddCommand(newDockerCmd(cfg))
+	root.AddCommand(newBranchCmd(cfg))
 
 	return root
 }
