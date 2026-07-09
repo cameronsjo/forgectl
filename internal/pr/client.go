@@ -9,7 +9,7 @@ import (
 )
 
 // defaultTmuxSession is the tmux session the review windows live under. A
-// window is targeted as "<session>:pr-<N>". Overridable for tests via
+// window is targeted as "<session>:pr-<owner>-<N>". Overridable for tests via
 // WithTmuxSession.
 const defaultTmuxSession = "forgectl"
 
