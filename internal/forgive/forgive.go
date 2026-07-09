@@ -61,6 +61,13 @@ var DockerAliases = map[string][]string{
 // verb->aliases map iterated by an applyXAliases helper.
 var BranchAliases = []string{"br"}
 
+// CleanAliases lists shorthand Cobra aliases for the `clean` command itself.
+// Same shape as BranchAliases: clean has no subverbs (PR-1 ships it flat,
+// mirroring branch), so this is a plain slice, not a verb->aliases map.
+// "cl" is already claimed by the launch command group (see LaunchAliases'
+// doc comment) — "cln" avoids the collision.
+var CleanAliases = []string{"cln"}
+
 // TmuxAliases maps each canonical tmux verb to its accepted aliases. This is
 // the single source of truth: internal/cli builds cobra command Aliases by
 // iterating this map, and Canonical uses it for known-verb detection in the

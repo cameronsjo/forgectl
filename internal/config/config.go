@@ -44,6 +44,9 @@ const logKeepDays = 7
 //	[docker]             # forgectl docker — git-derived build/run/shell
 //	default_platform = "linux/amd64" # --platform default when the flag is omitted
 //	label_template    = ""           # extra "key=value" OCI label appended to every build
+//	[clean]              # forgectl clean — dep/build-dir reclaim
+//	default_root = "~/Projects"      # --root default when the flag is omitted
+//	default_type = ""                # --type default: node|python|go|build, "" = all
 type Config struct {
 	NoIcons  bool           `toml:"no_icons"`
 	LogLevel string         `toml:"log_level"`
@@ -53,6 +56,7 @@ type Config struct {
 	Net      NetConfig      `toml:"net"`
 	Bench    BenchConfig    `toml:"bench"`
 	Docker   DockerConfig   `toml:"docker"`
+	Clean    CleanConfig    `toml:"clean"`
 }
 
 // LaunchConfig is the [launch] section: base defaults plus directory-keyed
@@ -134,6 +138,20 @@ type DockerConfig struct {
 // IsZero reports whether the [docker] section was absent or empty.
 func (dc DockerConfig) IsZero() bool {
 	return dc.DefaultPlatform == "" && dc.LabelTemplate == ""
+}
+
+// CleanConfig is the [clean] section: the default root and --type filter
+// `forgectl clean` uses when the corresponding flag is omitted. A zero value
+// means "section absent" — internal/clean's Client falls back to its own
+// built-in default (~/Projects, every Kind) for whichever fields are unset.
+type CleanConfig struct {
+	DefaultRoot string `toml:"default_root"`
+	DefaultType string `toml:"default_type"`
+}
+
+// IsZero reports whether the [clean] section was absent or empty.
+func (cc CleanConfig) IsZero() bool {
+	return cc.DefaultRoot == "" && cc.DefaultType == ""
 }
 
 // Baked defaults for hearth's frozen OTLP transport. These are the values a
