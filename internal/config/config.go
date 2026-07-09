@@ -30,6 +30,11 @@ const logKeepDays = 7
 //	match = "~/Projects/minute"
 //	model = "sonnet"
 //
+//	[net]                # forgectl net — cached internal-network reachability probe
+//	probe_host = "1.1.1.1"
+//	probe_port = 443
+//	ttl_seconds = 60
+//	timeout_ms = 1000
 //	[bench]              # interop with the local bench (forgectl bench)
 //	hearth_dir    = "~/Projects/hearth"      # else $HEARTH_DIR
 //	chronicle_dir = "~/Projects/chronicle"   # else $CHRONICLE_DIR
@@ -42,6 +47,7 @@ type Config struct {
 	LogFile  string         `toml:"log_file"`
 	Launch   LaunchConfig   `toml:"launch"`
 	Workflow WorkflowConfig `toml:"workflow"`
+	Net      NetConfig      `toml:"net"`
 	Bench    BenchConfig    `toml:"bench"`
 }
 
@@ -93,6 +99,23 @@ type WorkflowConfig struct {
 // IsZero reports whether the [workflow] section was absent or empty.
 func (wc WorkflowConfig) IsZero() bool {
 	return len(wc.StripGlobs) == 0
+}
+
+// NetConfig is the [net] section: the endpoint `forgectl net` probes for
+// internal-network reachability, and how long a cached answer stays fresh.
+// A zero value means "section absent" — internal/net's Client applies its own
+// built-in defaults (probe_host 1.1.1.1, probe_port 443, ttl_seconds 60,
+// timeout_ms 1000) for whichever fields are left unset.
+type NetConfig struct {
+	ProbeHost  string `toml:"probe_host"`
+	ProbePort  int    `toml:"probe_port"`
+	TTLSeconds int    `toml:"ttl_seconds"`
+	TimeoutMs  int    `toml:"timeout_ms"`
+}
+
+// IsZero reports whether the [net] section was absent or empty.
+func (nc NetConfig) IsZero() bool {
+	return nc.ProbeHost == "" && nc.ProbePort == 0 && nc.TTLSeconds == 0 && nc.TimeoutMs == 0
 }
 
 // Baked defaults for hearth's frozen OTLP transport. These are the values a
@@ -381,6 +404,19 @@ func WorkflowsDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "workflows"), nil
+}
+
+// NetCachePath returns the on-disk path for the internal/net reachability
+// cache: <os.UserConfigDir()>/forgectl/net-cache.json (macOS: ~/Library/
+// Application Support/forgectl/net-cache.json; Linux: ~/.config/forgectl/
+// net-cache.json). It derives from the same configDir() base as ConfigPath
+// and WorkflowsDir, so all three never drift.
+func NetCachePath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "net-cache.json"), nil
 }
 
 // LegacyLaunchPath returns the legacy claunch config location, honoring
