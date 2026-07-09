@@ -41,6 +41,9 @@ const logKeepDays = 7
 //	otlp_endpoint = "http://localhost:16317" # hearth's frozen OTLP transport
 //	otlp_protocol = "grpc"
 //	telemetry     = false                    # opt-in: inject OTLP env into launches
+//	[docker]             # forgectl docker — git-derived build/run/shell
+//	default_platform = "linux/amd64" # --platform default when the flag is omitted
+//	label_template    = ""           # extra "key=value" OCI label appended to every build
 type Config struct {
 	NoIcons  bool           `toml:"no_icons"`
 	LogLevel string         `toml:"log_level"`
@@ -49,6 +52,7 @@ type Config struct {
 	Workflow WorkflowConfig `toml:"workflow"`
 	Net      NetConfig      `toml:"net"`
 	Bench    BenchConfig    `toml:"bench"`
+	Docker   DockerConfig   `toml:"docker"`
 }
 
 // LaunchConfig is the [launch] section: base defaults plus directory-keyed
@@ -117,6 +121,19 @@ type NetConfig struct {
 // IsZero reports whether the [net] section was absent or empty.
 func (nc NetConfig) IsZero() bool {
 	return nc.ProbeHost == "" && nc.ProbePort == 0 && nc.TTLSeconds == 0 && nc.TimeoutMs == 0
+}
+
+// DockerConfig is the [docker] section: build-time defaults for `forgectl
+// docker build`. A zero value means "section absent" — internal/docker's
+// Client falls back to no --platform flag and no extra label.
+type DockerConfig struct {
+	DefaultPlatform string `toml:"default_platform"`
+	LabelTemplate   string `toml:"label_template"` // "key=value" appended to every build
+}
+
+// IsZero reports whether the [docker] section was absent or empty.
+func (dc DockerConfig) IsZero() bool {
+	return dc.DefaultPlatform == "" && dc.LabelTemplate == ""
 }
 
 // Baked defaults for hearth's frozen OTLP transport. These are the values a
@@ -418,6 +435,21 @@ func NetCachePath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "net-cache.json"), nil
+}
+
+// DockerLastTagPath returns the on-disk path for the `forgectl docker`
+// last-built-tag cache: <os.UserConfigDir()>/forgectl/docker-lasttag (macOS:
+// ~/Library/Application Support/forgectl/docker-lasttag; Linux:
+// ~/.config/forgectl/docker-lasttag). It derives from the same configDir()
+// base as ConfigPath/NetCachePath, so all three never drift. `run`/`shell`
+// read this to reuse the tag `build` most recently produced when --tag is
+// omitted.
+func DockerLastTagPath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "docker-lasttag"), nil
 }
 
 // PrReviewedPath returns the on-disk path for the `forgectl pr` reviewed-state
