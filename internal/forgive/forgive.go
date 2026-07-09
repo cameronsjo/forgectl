@@ -21,8 +21,9 @@ func Normalize(s string) string {
 // ProjectAliases maps each canonical projects verb to its accepted aliases.
 // Same single-source-of-truth pattern as TmuxAliases.
 var ProjectAliases = map[string][]string{
-	"pick": {"p", "open"},
-	"list": {"l", "ls", "find"},
+	"pick":  {"p", "open"},
+	"list":  {"l", "ls", "find"},
+	"clone": {"c"},
 }
 
 // LaunchAliases maps each canonical launch subcommand to its accepted aliases.

@@ -33,10 +33,16 @@ func New(run exec.Runner) *Client {
 	return &Client{Dir: dir, run: run}
 }
 
-// Discover returns all immediate subdirectories of Dir as Projects, each
-// annotated with their git working-tree status. Non-git dirs get a zero
-// GitStatus (Label() returns "[clean]" which we suppress for non-git dirs
-// via the empty-label path in DisplayLine).
+// Discover returns every project found under Dir, covering both layouts in
+// play during the canonical-layout transition:
+//
+//   - legacy flat clones: Dir/<repo>               (.git at the top level)
+//   - canonical clones:   Dir/<host>/<owner>/<repo> (.git three levels down)
+//
+// A top-level entry is walked as a canonical host bucket only when it
+// contains at least one owner/repo path that bottoms out in a git repo;
+// otherwise it's treated as a flat project itself, so legacy discovery
+// (including non-git dirs, which still get a zero GitStatus) is unchanged.
 func (c *Client) Discover(ctx context.Context) ([]Project, error) {
 	if _, err := os.Stat(c.Dir); err != nil {
 		return nil, fmt.Errorf("projects directory not found: %s", c.Dir)
@@ -50,21 +56,71 @@ func (c *Client) Discover(ctx context.Context) ([]Project, error) {
 		if !e.IsDir() {
 			continue
 		}
-		dir := filepath.Join(c.Dir, e.Name())
-		isGit := false
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-			isGit = true
+		top := filepath.Join(c.Dir, e.Name())
+		if isGitRepo(top) {
+			projects = append(projects, c.discoverProject(ctx, e.Name(), top))
+			continue
 		}
-		p := Project{Name: e.Name(), Dir: dir}
-		if isGit {
-			p.Status = gitStatus(ctx, c.run, dir)
+		if canon := c.discoverCanonicalHost(ctx, top); len(canon) > 0 {
+			projects = append(projects, canon...)
+			continue
 		}
-		projects = append(projects, p)
+		projects = append(projects, c.discoverProject(ctx, e.Name(), top))
 	}
 	sort.Slice(projects, func(i, j int) bool {
 		return projects[i].Name < projects[j].Name
 	})
 	return projects, nil
+}
+
+// discoverCanonicalHost walks a potential host bucket (Dir/<host>) two levels
+// deep — owner, then repo — collecting every repo dir with a .git marker.
+// Returns nil when the bucket contains no such repos, signalling the caller
+// to fall back to treating the bucket itself as a flat legacy project (e.g. a
+// plain non-git directory like a scratch notes folder).
+func (c *Client) discoverCanonicalHost(ctx context.Context, hostDir string) []Project {
+	ownerEntries, err := os.ReadDir(hostDir)
+	if err != nil {
+		return nil
+	}
+	var out []Project
+	for _, oe := range ownerEntries {
+		if !oe.IsDir() {
+			continue
+		}
+		ownerDir := filepath.Join(hostDir, oe.Name())
+		repoEntries, err := os.ReadDir(ownerDir)
+		if err != nil {
+			continue
+		}
+		for _, re := range repoEntries {
+			if !re.IsDir() {
+				continue
+			}
+			repoDir := filepath.Join(ownerDir, re.Name())
+			if !isGitRepo(repoDir) {
+				continue
+			}
+			out = append(out, c.discoverProject(ctx, re.Name(), repoDir))
+		}
+	}
+	return out
+}
+
+// discoverProject builds a Project for dir, populating GitStatus when dir is
+// a git repo (gitStatus itself no-ops to a zero value for non-git dirs).
+func (c *Client) discoverProject(ctx context.Context, name, dir string) Project {
+	p := Project{Name: name, Dir: dir}
+	if isGitRepo(dir) {
+		p.Status = gitStatus(ctx, c.run, dir)
+	}
+	return p
+}
+
+// isGitRepo reports whether dir has a .git marker.
+func isGitRepo(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
 }
 
 // Open creates a new detached tmux session named after dir's basename (or
@@ -205,27 +261,35 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 	return out, notes, nil
 }
 
-// Clone checks out a remote Repo into Dir, dispatching by host, and returns the
-// local destination path. A repo already present on disk is a no-op (returns its
+// Clone checks out a remote Repo into the canonical Dir/host/owner/name layout
+// (see canonicalDest), dispatching by host, and returns the local destination
+// path. A repo already present at its canonical dest is a no-op (returns its
 // path). github.com clones go through gh (credential handling); everything else
 // clones the SSH URL directly.
+//
+// New clones always land in the canonical layout — the flat legacy layout is a
+// read-side (Discover) affordance only, so existing on-disk clones stay
+// findable without new clones perpetuating the collision-prone flat tree.
 func (c *Client) Clone(ctx context.Context, r Repo) (string, error) {
 	slog.Debug("Preparing to clone repo.", "host", r.Host, "owner", r.Owner, "name", r.Name)
-	if !validRepoName(r.Name) {
-		return "", fmt.Errorf("refusing to clone %s/%s: unsafe repo name %q", r.Host, r.Owner, r.Name)
+	if !validPathSegment(r.Host) || !validPathSegment(r.Owner) || !validPathSegment(r.Name) {
+		return "", fmt.Errorf("refusing to clone %s/%s/%s: unsafe path segment", r.Host, r.Owner, r.Name)
 	}
-	dest := filepath.Join(c.Dir, r.Name)
+	dest := canonicalDest(c.Dir, r.Host, r.Owner, r.Name)
 	if _, err := os.Stat(dest); err == nil {
 		// Something is already at dest. Only treat it as "already cloned" when it
-		// really is THIS repo — a same-name repo from the other host must not
-		// silently open the wrong checkout (github/homeclaw vs gitea/homeclaw both
-		// want ~/Projects/homeclaw in a flat layout).
+		// really is THIS repo — the canonical layout already separates repos by
+		// host/owner, so a mismatch here means dest was populated by hand (or the
+		// remote origin changed), not a bare-name collision.
 		if c.originMatches(ctx, dest, r) {
 			slog.Debug("Repo already cloned, skipping clone.", "dest", dest, "name", r.Name)
 			return dest, nil
 		}
 		return "", fmt.Errorf("%s already exists but its origin is a different repo; "+
-			"%s/%s collides by name — clone it elsewhere by hand", dest, r.Host, r.Owner)
+			"%s/%s/%s collides — clone it elsewhere by hand", dest, r.Host, r.Owner, r.Name)
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return "", fmt.Errorf("creating canonical clone parent dirs for %s: %w", dest, err)
 	}
 	switch r.Host {
 	case "github":
@@ -244,13 +308,21 @@ func (c *Client) Clone(ctx context.Context, r Repo) (string, error) {
 	return dest, nil
 }
 
-// validRepoName rejects names that would escape or collapse the projects dir
-// when joined onto it (empty → the dir itself; "/"/".." → traversal). Remote
-// hosts never produce such names, but the guard keeps a malformed list row from
-// turning a clone into a path-traversal or a tmux session on the projects root.
-func validRepoName(name string) bool {
-	return name != "" && name != "." && name != ".." &&
-		!strings.ContainsAny(name, "/\\")
+// canonicalDest returns the canonical clone destination dir/host/owner/name,
+// lowercased to mirror Repo.Key() — the filesystem tree is the mirror of the
+// dedup identity, so "where is it cloned" and "what is it" never disagree.
+func canonicalDest(dir, host, owner, name string) string {
+	return filepath.Join(dir, strings.ToLower(host), strings.ToLower(owner), strings.ToLower(name))
+}
+
+// validPathSegment rejects a host/owner/name value that would escape or
+// collapse the projects dir when joined onto it (empty → the dir itself;
+// "/"/".." → traversal). Remote hosts never produce such values, but the guard
+// keeps a malformed list row (or a hand-crafted Repo) from turning a clone
+// into a path-traversal or a tmux session on the projects root.
+func validPathSegment(s string) bool {
+	return s != "" && s != "." && s != ".." &&
+		!strings.ContainsAny(s, "/\\")
 }
 
 // originMatches reports whether the git checkout at dir has an origin remote that
