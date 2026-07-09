@@ -286,6 +286,18 @@ func TestWorkflowsDir(t *testing.T) {
 	}
 }
 
+func TestPrSessionsDir(t *testing.T) {
+	dir := redirectConfigDir(t)
+	got, err := PrSessionsDir()
+	if err != nil {
+		t.Fatalf("PrSessionsDir: %v", err)
+	}
+	want := filepath.Join(dir, "forgectl", "pr-sessions")
+	if got != want {
+		t.Errorf("PrSessionsDir() = %q, want %q", got, want)
+	}
+}
+
 func TestLoad(t *testing.T) {
 	t.Run("missing file returns defaults", func(t *testing.T) {
 		redirectConfigDir(t) // empty temp config dir → no config.toml
