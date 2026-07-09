@@ -14,6 +14,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/projects"
+	"github.com/cameronsjo/forgectl/internal/quarantine"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 	"github.com/cameronsjo/forgectl/internal/tui"
 )
@@ -29,7 +30,8 @@ func Execute(ctx context.Context) error {
 	slog.Debug("Starting forgectl.", "version", meta.Version)
 	tmuxClient := tmux.New(exec.OSRunner{})
 	projClient := projects.New(exec.OSRunner{})
-	root := newRoot(tmuxClient, projClient, cfg)
+	quarantineClient := quarantine.New(exec.OSRunner{})
+	root := newRoot(tmuxClient, projClient, quarantineClient, cfg)
 	args := normalizeArgs(os.Args[1:])
 
 	// The launcher intercept runs before TUI/fang routing: `forgectl launch …`
