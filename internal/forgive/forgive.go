@@ -54,6 +54,13 @@ var DockerAliases = map[string][]string{
 	"shell": {"sh", "attach"},
 }
 
+// BranchAliases lists shorthand Cobra aliases for the `branch` command
+// itself. Unlike TmuxAliases/DockerAliases/etc., branch has no subverbs (see
+// internal/branch's package doc for why it ships flat), so this is a plain
+// slice applied directly as Cobra's Aliases field rather than a
+// verb->aliases map iterated by an applyXAliases helper.
+var BranchAliases = []string{"br"}
+
 // TmuxAliases maps each canonical tmux verb to its accepted aliases. This is
 // the single source of truth: internal/cli builds cobra command Aliases by
 // iterating this map, and Canonical uses it for known-verb detection in the
