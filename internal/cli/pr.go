@@ -23,6 +23,9 @@ const prAgentEnv = "FORGECTL_PR_AGENT"
 func newPrCmd(cfg config.Config) *cobra.Command {
 	client := pr.New(exec.OSRunner{})
 	netClient := netpkg.New(exec.OSRunner{}, netpkg.WithNetConfig(cfg.Net))
+	// err discarded: a failed config-dir lookup yields "", which LoadReviewed
+	// reads as an empty store and persist() rejects loudly — never a silent bad write.
+	reviewedPath, _ := config.PrReviewedPath()
 
 	var (
 		agent    string
@@ -89,6 +92,13 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 			if err := client.Launch(ctx, sess, cfg); err != nil {
 				return err
 			}
+			// CLI-layer courtesy note: an explicitly named ref is always a
+			// deliberate launch (never skipped — that's the picker's job), but
+			// flag it if we've marked it reviewed before. No session.go change.
+			if at, ok := pr.LoadReviewed(reviewedPath).ReviewedAt(ref); ok {
+				fmt.Fprintf(cmd.ErrOrStderr(), "note: previously marked reviewed (%s ago)\n",
+					time.Since(at).Round(time.Minute))
+			}
 			fmt.Fprintf(out, "prepared clean-room review of %s\n", sess.Ref.String())
 			fmt.Fprintf(out, "  workspace: %s\n", sess.Workspace)
 			fmt.Fprintf(out, "  breadcrumb: %s\n", sess.Path)
@@ -106,6 +116,10 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 		newPrTeardownCmd(client),
 		newPrCleanupCmd(client),
 		newPrKeysCmd(),
+		newPrPrsCmd(client),
+		newPrDashCmd(client),
+		newPrPickCmd(client, cfg),
+		newPrReviewedCmd(client),
 	)
 	return cmd
 }

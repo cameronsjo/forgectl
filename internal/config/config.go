@@ -420,6 +420,20 @@ func NetCachePath() (string, error) {
 	return filepath.Join(dir, "net-cache.json"), nil
 }
 
+// PrReviewedPath returns the on-disk path for the `forgectl pr` reviewed-state
+// store: <os.UserConfigDir()>/forgectl/pr-reviewed.json (macOS: ~/Library/
+// Application Support/forgectl/pr-reviewed.json; Linux: ~/.config/forgectl/
+// pr-reviewed.json). It derives from the same configDir() base as every other
+// forgectl path, so they never drift. The store maps a PR's "owner/repo#N"
+// breadcrumb form to the timestamp it was last marked reviewed (internal/pr).
+func PrReviewedPath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "pr-reviewed.json"), nil
+}
+
 // PrSessionsDir returns the forgectl-owned directory that holds `forgectl pr`
 // session breadcrumbs: <os.UserConfigDir()>/forgectl/pr-sessions (macOS:
 // ~/Library/Application Support/forgectl/pr-sessions; Linux:
