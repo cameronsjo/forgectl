@@ -14,14 +14,17 @@ import (
 	"time"
 )
 
-// Runner abstracts running an external command. Two modes:
+// Runner abstracts running an external command. Three modes:
 //
 //   - Run captures stdout for parsing (list-sessions, has-session, …).
 //   - RunInteractive hands the controlling tty to the child process, required
 //     by attach-session and `sesh connect`, which take over the terminal.
+//   - RunWithInput pipes a string into the child's stdin and captures stdout,
+//     for commands that read from stdin rather than argv (pbcopy).
 type Runner interface {
 	Run(ctx context.Context, name string, args ...string) (string, error)
 	RunInteractive(ctx context.Context, name string, args ...string) error
+	RunWithInput(ctx context.Context, stdin string, name string, args ...string) (string, error)
 }
 
 // OSRunner is the production Runner: it actually spawns processes.
@@ -46,6 +49,30 @@ func (OSRunner) Run(ctx context.Context, name string, args ...string) (string, e
 		return "", &CommandError{Name: name, Args: args, Err: err}
 	}
 	slog.Debug("Successfully ran command.", "cmd", name, "duration", time.Since(start).Round(time.Millisecond))
+	return strings.TrimRight(string(out), "\n"), nil
+}
+
+// RunWithInput executes name+args with stdin piped in and returns trimmed
+// stdout. Same error-wrapping behavior as Run; the only difference is the
+// child reads from stdin instead of relying purely on argv (e.g. pbcopy).
+func (OSRunner) RunWithInput(ctx context.Context, stdin string, name string, args ...string) (string, error) {
+	slog.Debug("Preparing to run command with stdin.", "cmd", name, "args", args)
+	start := time.Now()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = strings.NewReader(stdin)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			slog.Error("Failed to run command with stdin.", "cmd", name, "stderr", msg, "error", err)
+			return "", &CommandError{Name: name, Args: args, Stderr: msg, Err: err}
+		}
+		slog.Error("Failed to run command with stdin.", "cmd", name, "error", err)
+		return "", &CommandError{Name: name, Args: args, Err: err}
+	}
+	slog.Debug("Successfully ran command with stdin.", "cmd", name, "duration", time.Since(start).Round(time.Millisecond))
 	return strings.TrimRight(string(out), "\n"), nil
 }
 
