@@ -49,6 +49,15 @@ func newLaunchDoctorCmd(cfg config.Config) *cobra.Command {
 				fmt.Fprintf(out, "%s launch config: %s (%d project profile(s))\n", launchOKMark, src, len(lc.Projects))
 			}
 
+			// Bench telemetry injection is informational, not a health signal —
+			// off is a valid choice (a machine with no local collector).
+			if cfg.Bench.Telemetry {
+				fmt.Fprintf(out, "%s telemetry: on → %s (%s)\n", launchOKMark,
+					cfg.Bench.ResolvedOTLPEndpoint(), cfg.Bench.ResolvedOTLPProtocol())
+			} else {
+				fmt.Fprintf(out, "%s telemetry: off (enable with [bench].telemetry = true)\n", launchWarnMark)
+			}
+
 			if !healthy {
 				return fmt.Errorf("doctor found problems")
 			}

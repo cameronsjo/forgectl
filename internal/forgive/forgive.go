@@ -40,6 +40,11 @@ var WorkflowAliases = map[string][]string{
 	"run": {"r"},
 }
 
+// BenchAliases maps each canonical bench subcommand to its accepted aliases.
+var BenchAliases = map[string][]string{
+	"status": {"health", "st"},
+}
+
 // TmuxAliases maps each canonical tmux verb to its accepted aliases. This is
 // the single source of truth: internal/cli builds cobra command Aliases by
 // iterating this map, and Canonical uses it for known-verb detection in the

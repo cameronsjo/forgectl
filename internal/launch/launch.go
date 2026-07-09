@@ -110,6 +110,23 @@ func MergeEnv(base []string, extra map[string]string) []string {
 	return out
 }
 
+// MergeMaps overlays over onto base, returning a new map in which over's keys
+// win. Either argument may be nil/empty. Used to layer the profile env over
+// injected bench defaults so a user-set profile value beats an injected one.
+func MergeMaps(base, over map[string]string) map[string]string {
+	if len(base) == 0 && len(over) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(base)+len(over))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range over {
+		out[k] = v
+	}
+	return out
+}
+
 // Banner writes the informational "→ claude …" line. It always goes to stderr so
 // it never corrupts piped stdout (e.g. `forgectl launch agents --json | jq`).
 func Banner(w io.Writer, args []string) {

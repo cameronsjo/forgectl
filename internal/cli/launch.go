@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/forgive"
 	"github.com/cameronsjo/forgectl/internal/launch"
@@ -140,7 +141,11 @@ func launchExec(cfg config.Config, args []string) error {
 		claudeArgs = launch.BuilderArgs(profile, args)
 	}
 
-	env := launch.MergeEnv(os.Environ(), profile.Env)
+	// Layer the profile env over the opt-in bench telemetry block (profile wins),
+	// then merge that over the process env. When telemetry is off, TelemetryEnv is
+	// nil and this reduces to the profile env alone.
+	extra := launch.MergeMaps(bench.TelemetryEnv(cfg), profile.Env)
+	env := launch.MergeEnv(os.Environ(), extra)
 	slog.Debug("Preparing to exec claude.", "path", claudePath, "argc", len(claudeArgs), "match", profile.Match)
 	return launch.Exec(claudePath, claudeArgs, env)
 }
