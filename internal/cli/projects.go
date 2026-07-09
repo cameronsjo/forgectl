@@ -21,6 +21,7 @@ func newProjectsCmd(client *projects.Client) *cobra.Command {
 	}
 	cmd.AddCommand(newProjectsPickCmd(client))
 	cmd.AddCommand(newProjectsListCmd(client))
+	cmd.AddCommand(newProjectsCloneCmd(client))
 	applyProjectAliases(cmd)
 	return cmd
 }
