@@ -68,6 +68,13 @@ var BranchAliases = []string{"br"}
 // doc comment) — "cln" avoids the collision.
 var CleanAliases = []string{"cln"}
 
+// YAliases maps each canonical `y` subcommand to its accepted aliases. Same
+// single-source-of-truth pattern as DockerAliases.
+var YAliases = map[string][]string{
+	"copy":  {"c"},
+	"paste": {"p"},
+}
+
 // TmuxAliases maps each canonical tmux verb to its accepted aliases. This is
 // the single source of truth: internal/cli builds cobra command Aliases by
 // iterating this map, and Canonical uses it for known-verb detection in the
