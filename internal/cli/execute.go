@@ -127,8 +127,12 @@ func shouldLaunchTUI(root *cobra.Command, args []string) bool {
 	if child == nil {
 		return true // unknown top-level verb → menu
 	}
-	// Known command group with an unrecognized leftover subverb → menu.
-	if len(child.Commands()) > 0 {
+	// Known command group with an unrecognized leftover subverb → menu — but
+	// only when the parent does NOT itself take a positional. A parent like
+	// `pr <ref>` legitimately accepts an argument that is not a subcommand, so
+	// its args must reach Cobra/fang rather than being mistaken for menu garbage;
+	// a pure group like `tmux` treats an unknown token as a bad subverb → menu.
+	if len(child.Commands()) > 0 && !parentTakesArg(child) {
 		if sub, _ := firstNonFlag(args[idx+1:]); sub != "" && findChild(child, sub) == nil {
 			return true
 		}
@@ -163,6 +167,16 @@ func firstNonFlag(args []string) (string, int) {
 		}
 	}
 	return "", -1
+}
+
+// parentTakesArg reports whether cmd's own invocation accepts a positional
+// argument, as declared by a placeholder (`<…>` or `[…]`) after the verb in its
+// Use line — e.g. `pr <ref>` takes one, `tmux` does not. This is what lets a
+// runnable parent's positional reach Cobra instead of being menu-routed as an
+// unknown subverb.
+func parentTakesArg(cmd *cobra.Command) bool {
+	_, rest, _ := strings.Cut(cmd.Use, " ")
+	return strings.ContainsAny(rest, "<[")
 }
 
 // findChild resolves name against a command's subcommands by name or alias.

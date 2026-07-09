@@ -420,6 +420,21 @@ func NetCachePath() (string, error) {
 	return filepath.Join(dir, "net-cache.json"), nil
 }
 
+// PrSessionsDir returns the forgectl-owned directory that holds `forgectl pr`
+// session breadcrumbs: <os.UserConfigDir()>/forgectl/pr-sessions (macOS:
+// ~/Library/Application Support/forgectl/pr-sessions; Linux:
+// ~/.config/forgectl/pr-sessions). It derives from the same configDir() base
+// as ConfigPath/WorkflowsDir/NetCachePath, so all four never drift. The
+// breadcrumb location check (internal/pr) enforces that a breadcrumb path
+// resolves to inside this dir before any `git -C <workspace>` can run.
+func PrSessionsDir() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "pr-sessions"), nil
+}
+
 // LegacyLaunchPath returns the legacy claunch config location, honoring
 // $XDG_CONFIG_HOME. Retained so `forgectl launch` keeps reading an existing
 // ~/.config/claunch/claunch.conf until the user migrates the profiles into the

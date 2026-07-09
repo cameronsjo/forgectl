@@ -61,6 +61,10 @@ func TestShouldLaunchTUI(t *testing.T) {
 		{"unknown tmux subverb", []string{"tmux", "frobnicate"}, true},
 		{"known verb does not launch", []string{"tmux", "ls"}, false},
 		{"known alias does not launch", []string{"tmux", "kill", "x"}, false},
+		// A runnable parent that takes a positional (`pr <ref>`) must dispatch its
+		// arg to Cobra, not be mistaken for an unknown subverb → menu.
+		{"pr with ref positional stays with cobra", []string{"pr", "owner/repo#1"}, false},
+		{"pr known subverb does not launch", []string{"pr", "list"}, false},
 		{"version flag stays with fang", []string{"--version"}, false},
 		{"help flag stays with fang", []string{"--help"}, false},
 		{"completion command does not launch", []string{"completion", "zsh"}, false},
