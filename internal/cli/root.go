@@ -37,6 +37,7 @@ func newRoot(tmuxClient *tmux.Client, projClient *projects.Client, quarantineCli
 	root.AddCommand(newLaunchCmd(cfg))
 	root.AddCommand(newWorkflowCmd(cfg))
 	root.AddCommand(newNetCmd(cfg))
+	root.AddCommand(newBenchCmd(cfg))
 	root.AddCommand(newQuarantineCmd(quarantineClient))
 	root.AddCommand(newPrCmd(cfg))
 
