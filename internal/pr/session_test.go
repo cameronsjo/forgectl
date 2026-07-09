@@ -14,8 +14,10 @@ package pr
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -137,6 +139,83 @@ func TestPrepare_IncompleteRefRefused(t *testing.T) {
 	}
 	if len(fake.Calls) != 0 {
 		t.Errorf("incomplete ref should not shell out; got %+v", fake.Calls)
+	}
+}
+
+// TestSandboxAndQuarantine_SandboxFailureWrapped covers the extracted helper's
+// first failure branch (Prepare and PrepareLocal now share this code, so a
+// regression here breaks both callers identically). A `git worktree add`
+// failure must surface as "sandbox: …" and never reach quarantine.
+func TestSandboxAndQuarantine_SandboxFailureWrapped(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			if name == "git" && contains(args, "worktree") {
+				return "", errors.New("boom")
+			}
+			return "", nil
+		},
+	}
+	c := testClient(t, fake)
+
+	ws, err := c.sandboxAndQuarantine(context.Background(), t.TempDir(), "HEAD", false)
+	if err == nil {
+		t.Fatal("expected an error from a failing git worktree add")
+	}
+	if ws != "" {
+		t.Errorf("workspace = %q, want empty on failure", ws)
+	}
+	if !strings.HasPrefix(err.Error(), "sandbox:") {
+		t.Errorf("error = %q, want a \"sandbox:\" prefix", err.Error())
+	}
+	if strings.Contains(err.Error(), "quarantine") {
+		t.Errorf("error = %q, must not mention quarantine — Sandbox failed before quarantine ran", err.Error())
+	}
+}
+
+// TestSandboxAndQuarantine_QuarantineFailureTearsDownWorkspace covers the
+// second failure branch: when quarantine.Hide errors, sandboxAndQuarantine
+// must tear the freshly created workspace back down and return the wrapped
+// error, not leak a half-quarantined directory to either caller.
+func TestSandboxAndQuarantine_QuarantineFailureTearsDownWorkspace(t *testing.T) {
+	var capturedDir string
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			if name == "git" && contains(args, "worktree") {
+				for i, a := range args {
+					if a == "--" && i+1 < len(args) {
+						capturedDir = args[i+1]
+					}
+				}
+				// Pre-seed both CLAUDE.md and its already-quarantined destination so
+				// quarantine.Hide refuses to clobber and returns an error, without
+				// relying on OS-specific rename-onto-nonempty-dir semantics.
+				if err := os.WriteFile(filepath.Join(capturedDir, "CLAUDE.md"), []byte("x"), 0o644); err != nil {
+					return "", err
+				}
+				if err := os.WriteFile(filepath.Join(capturedDir, "CLAUDE.md.quarantined"), []byte("x"), 0o644); err != nil {
+					return "", err
+				}
+			}
+			return "", nil
+		},
+	}
+	c := testClient(t, fake)
+
+	ws, err := c.sandboxAndQuarantine(context.Background(), t.TempDir(), "HEAD", false)
+	if err == nil {
+		t.Fatalf("expected a quarantine failure, got workspace %q", ws)
+	}
+	if ws != "" {
+		t.Errorf("workspace = %q, want empty on failure", ws)
+	}
+	if !strings.Contains(err.Error(), "quarantine workspace") {
+		t.Errorf("error = %q, want it to mention quarantine workspace", err.Error())
+	}
+	if capturedDir == "" {
+		t.Fatal("test bug: never captured the sandboxed workspace dir")
+	}
+	if _, statErr := os.Stat(capturedDir); !os.IsNotExist(statErr) {
+		t.Errorf("workspace %q should be torn down after a quarantine failure; stat err = %v", capturedDir, statErr)
 	}
 }
 

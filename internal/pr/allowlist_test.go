@@ -62,6 +62,90 @@ func TestWriteAllowlist(t *testing.T) {
 	}
 }
 
+// TestAllowReadOnly_LayersRgAndGhReadsOverBaseReadOnly covers the
+// baseReadOnly extraction: PR-mode's allowReadOnly must still carry every
+// baseReadOnly entry (the shared surface) plus exactly rg and the read-only
+// gh reads (baseReadOnly deliberately excludes rg — ripgrep's --pre flag is a
+// command-execution primitive local mode's no-approval-gate posture can't
+// accept), with no accidental loss or duplication from the append-based
+// composition.
+func TestAllowReadOnly_LayersRgAndGhReadsOverBaseReadOnly(t *testing.T) {
+	for _, want := range baseReadOnly {
+		if !contains(allowReadOnly, want) {
+			t.Errorf("allowReadOnly missing shared baseReadOnly entry %q", want)
+		}
+	}
+	for _, want := range []string{"Bash(rg:*)", "Bash(gh pr view:*)", "Bash(gh pr diff:*)", "Bash(gh pr checks:*)"} {
+		if !contains(allowReadOnly, want) {
+			t.Errorf("allowReadOnly missing entry %q", want)
+		}
+	}
+	if len(allowReadOnly) != len(baseReadOnly)+4 {
+		t.Errorf("allowReadOnly has %d entries, want exactly baseReadOnly (%d) + rg + 3 gh reads", len(allowReadOnly), len(baseReadOnly))
+	}
+}
+
+// TestLocalAllowReadOnly_IsExactlyBaseReadOnly covers the other extraction
+// consumer: local mode grants no rg (no approval-gate backstop) and no gh
+// entries at all, i.e. localAllowReadOnly must equal baseReadOnly exactly
+// (not allowReadOnly, which layers rg + gh reads on top).
+func TestLocalAllowReadOnly_IsExactlyBaseReadOnly(t *testing.T) {
+	if len(localAllowReadOnly) != len(baseReadOnly) {
+		t.Fatalf("localAllowReadOnly has %d entries, want %d (== baseReadOnly)", len(localAllowReadOnly), len(baseReadOnly))
+	}
+	for i, want := range baseReadOnly {
+		if localAllowReadOnly[i] != want {
+			t.Errorf("localAllowReadOnly[%d] = %q, want %q", i, localAllowReadOnly[i], want)
+		}
+	}
+	for _, a := range localAllowReadOnly {
+		if strings.Contains(a, "gh") {
+			t.Errorf("localAllowReadOnly must grant no gh entries; found %q", a)
+		}
+		if strings.Contains(a, "rg") {
+			t.Errorf("localAllowReadOnly must grant no rg (command-execution primitive); found %q", a)
+		}
+	}
+}
+
+// TestWriteLocalAllowlist_WritesLocalProfileSettings covers writeLocalAllowlist
+// (mirrors writeAllowlist, but through the new shared writeSettings core):
+// the file must land at the same path writeAllowlist uses, and decode back to
+// exactly localProfile's permissions.
+func TestWriteLocalAllowlist_WritesLocalProfileSettings(t *testing.T) {
+	ws := t.TempDir()
+	findingsDir := filepath.Join(t.TempDir(), "findings")
+
+	path, err := writeLocalAllowlist(ws, findingsDir)
+	if err != nil {
+		t.Fatalf("writeLocalAllowlist: %v", err)
+	}
+	want := filepath.Join(ws, ".claude", "settings.local.json")
+	if path != want {
+		t.Errorf("path = %q, want %q", path, want)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var s allowlistSettings
+	if err := json.Unmarshal(data, &s); err != nil {
+		t.Fatalf("unmarshal settings: %v", err)
+	}
+
+	wantPerms := localProfile(findingsDir)
+	if s.Permissions.DefaultMode != wantPerms.DefaultMode {
+		t.Errorf("DefaultMode = %q, want %q", s.Permissions.DefaultMode, wantPerms.DefaultMode)
+	}
+	if !equalArgs(s.Permissions.Allow, wantPerms.Allow) {
+		t.Errorf("Allow = %v, want %v", s.Permissions.Allow, wantPerms.Allow)
+	}
+	if !equalArgs(s.Permissions.Deny, wantPerms.Deny) {
+		t.Errorf("Deny = %v, want %v", s.Permissions.Deny, wantPerms.Deny)
+	}
+}
+
 func contains(ss []string, want string) bool {
 	for _, s := range ss {
 		if s == want {

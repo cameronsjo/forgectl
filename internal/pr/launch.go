@@ -19,10 +19,28 @@ const reviewPrompt = "Review this pull request as a clean-room reviewer. " +
 	"(Critical / Important / Nit) with file:line and a concrete fix. " +
 	"Do NOT post, comment, merge, or push anything — output the review only."
 
-// windowName is the tmux window name for a review session: "pr-<N>".
-func windowName(ref Ref) string { return fmt.Sprintf("pr-%d", ref.Number) }
+// localReviewPrompt seeds a local (offline) review — there is no PR to post
+// to, so it directs findings to the writable escape-hatch dir (named
+// explicitly, since that path is the one thing tying the prompt to the
+// scoped Write(findingsDir/**) allowlist grant) instead of a PostReview
+// approval gate.
+func localReviewPrompt(findingsDir string) string {
+	return "Review the committed changes in this working tree as a clean-room " +
+		"reviewer. Inspect the diff and the checked-out tree, then write your " +
+		"findings (by severity: Critical / Important / Nit, with file:line and a " +
+		"concrete fix) to a file under " + findingsDir + " — the only directory you " +
+		"may write to. Do NOT post, comment, merge, or push anything, and do not " +
+		"attempt any network access — output the review only, to that file."
+}
 
-// windowTarget is the tmux target "<session>:pr-<N>" for select/attach.
+// windowName is the tmux window name for a review session: "pr-<owner>-<N>".
+// Owner is included, not just Number: a local-mode Ref (Owner "local", Number
+// derived from a hex oid prefix) and a real PR-mode Ref can otherwise land on
+// the identical "pr-<N>" name whenever the derived number happens to match a
+// live PR number — Number alone is not unique across the two Ref kinds.
+func windowName(ref Ref) string { return fmt.Sprintf("pr-%s-%d", ref.Owner, ref.Number) }
+
+// windowTarget is the tmux target "<session>:pr-<owner>-<N>" for select/attach.
 func (c *Client) windowTarget(ref Ref) string {
 	return c.tmuxSession + ":" + windowName(ref)
 }
@@ -63,7 +81,16 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	profile := launch.Resolve(cfg.Launch, sess.Workspace)
 	profile.AllowDanger = false
 	profile.PermissionMode = "plan"
-	claudeArgs := launch.BuilderArgs(profile, []string{"-p", reviewPrompt})
+
+	prompt := reviewPrompt
+	if sess.Local {
+		// Grant --add-dir for the escape-hatch findings dir. Without this, the
+		// permission-scoped Write(<dir>/**) allowlist rule is moot — Claude Code
+		// won't expose a path outside the launch cwd at all.
+		profile.AddDir = append(profile.AddDir, sess.FindingsDir)
+		prompt = localReviewPrompt(sess.FindingsDir)
+	}
+	claudeArgs := launch.BuilderArgs(profile, []string{"-p", prompt})
 
 	args := []string{
 		"new-window",
@@ -88,8 +115,20 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 // returns true. In headless / non-interactive mode the gate is not shown at
 // all: the review is staged (returned as not-posted), never auto-posted.
 //
+// A Local session is refused outright: there is no PR to post to, and
+// sess.Ref.Slug() for a local session resolves to the synthetic "local/<oid>"
+// identity — posting against it would fire an unintended `gh pr review`
+// network call, breaking the offline guarantee `pr local` exists to provide.
+// The check is doubled — sess.Local (set fresh by PrepareLocal, never
+// restored on breadcrumb reload) OR sess.Ref.IsLocal() (persisted, so it
+// still catches a reload-reconstituted Session, e.g. from a future verb
+// built on the loadSession pattern that Local's zero-value would miss).
+//
 // It returns whether a post actually fired.
 func (c *Client) PostReview(ctx context.Context, sess Session, review string, headless bool) (posted bool, err error) {
+	if sess.Local || sess.Ref.IsLocal() {
+		return false, fmt.Errorf("cannot post a review for a local session %q: there is no PR to post to", sess.Ref.String())
+	}
 	if headless || !c.isTTY() {
 		slog.Info("Non-interactive/headless: staging review, not posting.", "ref", sess.Ref.String())
 		return false, nil

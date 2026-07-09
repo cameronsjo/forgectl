@@ -24,6 +24,13 @@ type Session struct {
 	Path      string // breadcrumb path; "" on dry-run
 	CreatedAt time.Time
 	DryRun    bool
+
+	// Local and FindingsDir are populated only in-process by PrepareLocal —
+	// never persisted to Breadcrumb, so they are meaningful on a freshly
+	// prepared Session and zero-valued after a reload via List/Attach/Teardown
+	// (same pattern HeadRef/HeadOid/HeadRepo already follow).
+	Local       bool
+	FindingsDir string // the one path outside Workspace the local review agent may write
 }
 
 // PrepareOpts are the knobs for one Prepare call.
@@ -91,18 +98,11 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 		return Session{}, err
 	}
 
-	workspace, err := sandbox.Sandbox(ctx, c.run, repoURL, view.HeadRefName, true)
+	workspace, err := c.sandboxAndQuarantine(ctx, repoURL, view.HeadRefName, true)
 	if err != nil {
-		return Session{}, fmt.Errorf("sandbox PR head: %w", err)
+		return Session{}, err
 	}
 	sess.Workspace = workspace
-
-	// Reversible clean-room control: hide any AI-instruction files the fetched
-	// tree may carry before the review agent can read them.
-	if _, err := quarantine.New(c.run).Hide(ctx, workspace, quarantine.SuffixQuarantined, quarantine.DefaultTargets, false); err != nil {
-		_ = sandbox.Teardown(ctx, c.run, workspace)
-		return Session{}, fmt.Errorf("quarantine workspace: %w", err)
-	}
 
 	if _, err := writeAllowlist(workspace); err != nil {
 		_ = sandbox.Teardown(ctx, c.run, workspace)
@@ -124,6 +124,24 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 
 	slog.Info("Successfully prepared clean-room review.", "ref", ref.String(), "workspace", workspace)
 	return sess, nil
+}
+
+// sandboxAndQuarantine creates the workspace via sandbox.Sandbox and
+// quarantines any AI-instruction files it may carry — the shared head of
+// Prepare's and PrepareLocal's clean-room pipeline, so the security-critical
+// sequence (and its teardown-on-failure discipline) has exactly one owner. On
+// failure it tears down whatever it created before returning.
+func (c *Client) sandboxAndQuarantine(ctx context.Context, repo, ref string, alwaysClone bool) (string, error) {
+	workspace, err := sandbox.Sandbox(ctx, c.run, repo, ref, alwaysClone)
+	if err != nil {
+		return "", fmt.Errorf("sandbox: %w", err)
+	}
+	if _, err := quarantine.New(c.run).Hide(ctx, workspace, quarantine.SuffixQuarantined, quarantine.DefaultTargets, false); err != nil {
+		// best-effort: don't let cleanup's own error shadow the error already being returned
+		_ = sandbox.Teardown(ctx, c.run, workspace)
+		return "", fmt.Errorf("quarantine workspace: %w", err)
+	}
+	return workspace, nil
 }
 
 // viewPR fetches the head metadata for ref via gh. The PR number is a positional

@@ -20,6 +20,8 @@ package pr
 //   [x] Bare N resolves owner/repo from `gh repo view`
 //   [x] Bare N falls back to `git remote get-url origin` when gh fails
 //   [x] Origin owner/repo outside the charset is rejected
+//   [x] A typed ref with owner "local" is refused (reserved sentinel)
+//   [x] A resolved origin owner "local" is refused (reserved sentinel)
 
 import (
 	"context"
@@ -159,5 +161,51 @@ func TestResolveRef_BadOriginRejected(t *testing.T) {
 	c := New(fake)
 	if got, err := c.ResolveRef(context.Background(), "42"); err == nil {
 		t.Errorf("ResolveRef with hostile origin = %+v, want error", got)
+	}
+}
+
+// TestResolveRef_LocalOwnerReserved verifies the windowName/PostReview
+// disambiguation guarantee holds: a real PR reference can never resolve to
+// owner "local", since localRef's synthetic Refs key off exactly that value.
+func TestResolveRef_LocalOwnerReserved(t *testing.T) {
+	t.Run("typed directly", func(t *testing.T) {
+		fake := &exec.FakeRunner{}
+		c := New(fake)
+		if got, err := c.ResolveRef(context.Background(), "local/repo#5"); err == nil {
+			t.Errorf("ResolveRef(\"local/repo#5\") = %+v, want error (reserved owner)", got)
+		}
+		if len(fake.Calls) != 0 {
+			t.Errorf("a rejected owner should not shell out; got %+v", fake.Calls)
+		}
+	})
+	t.Run("resolved from origin", func(t *testing.T) {
+		fake := &exec.FakeRunner{
+			RunFunc: func(name string, args []string) (string, error) {
+				if name == "gh" {
+					return "local/somerepo", nil
+				}
+				return "", errors.New("unexpected call")
+			},
+		}
+		c := New(fake)
+		if got, err := c.ResolveRef(context.Background(), "42"); err == nil {
+			t.Errorf("ResolveRef with origin owner \"local\" = %+v, want error", got)
+		}
+	})
+}
+
+// TestParseRef_LocalOwnerStillPermitted verifies ParseRef itself stays
+// permissive for owner "local" — the reservation is enforced only in
+// ResolveRef. This is required for breadcrumb reload: validateBreadcrumb
+// calls ParseRef directly on a synthetic local Ref's String(), which contains
+// owner "local".
+func TestParseRef_LocalOwnerStillPermitted(t *testing.T) {
+	got, err := ParseRef("local/abc1234#1")
+	if err != nil {
+		t.Fatalf("ParseRef(\"local/abc1234#1\") unexpected error: %v", err)
+	}
+	want := Ref{Owner: "local", Repo: "abc1234", Number: 1}
+	if got != want {
+		t.Errorf("ParseRef(\"local/abc1234#1\") = %+v, want %+v", got, want)
 	}
 }

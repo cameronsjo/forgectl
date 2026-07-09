@@ -45,6 +45,7 @@ human approval gate.
   forgectl pr owner/repo#42        prepare + launch a review
   forgectl pr 42                   same, resolving owner/repo from origin
   forgectl pr <ref> --dry-run      resolve + print the plan, create nothing
+  forgectl pr local                offline review of local committed changes
   forgectl pr list                 list active review sessions
   forgectl pr attach <breadcrumb>  jump to a review window
   forgectl pr open <breadcrumb>    open a shell in the clean room
@@ -78,10 +79,7 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 
 			out := cmd.OutOrStdout()
 			if dryRun {
-				displayAgent := resolveAgent(agent)
-				if displayAgent == "" {
-					displayAgent = "claude (default, inline-seeded)"
-				}
+				displayAgent := agentDisplayLabel(resolveAgent(agent))
 				fmt.Fprintf(out, "plan: review %s\n", sess.Ref.String())
 				fmt.Fprintf(out, "  head: %s @ %s (%s)\n", sess.HeadRef, sess.HeadOid, sess.HeadRepo)
 				fmt.Fprintf(out, "  agent: %s\n", displayAgent)
@@ -110,6 +108,7 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve and print the plan without creating anything")
 
 	cmd.AddCommand(
+		newPrLocalCmd(client, cfg),
 		newPrListCmd(client),
 		newPrAttachCmd(client),
 		newPrOpenCmd(client),
@@ -130,6 +129,16 @@ func resolveAgent(flag string) string {
 		return flag
 	}
 	return os.Getenv(prAgentEnv)
+}
+
+// agentDisplayLabel renders agent for dry-run plan output, substituting a
+// descriptive default when it's empty — shared by `pr <ref>` and `pr local`
+// so the two dry-run plans can't silently diverge on this label.
+func agentDisplayLabel(agent string) string {
+	if agent == "" {
+		return "claude (default, inline-seeded)"
+	}
+	return agent
 }
 
 func newPrListCmd(client *pr.Client) *cobra.Command {

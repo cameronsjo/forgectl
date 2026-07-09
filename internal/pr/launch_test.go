@@ -8,12 +8,16 @@ package pr
 //   [x] Headless → staged only, no gate shown, no post
 //   [x] Non-interactive (no TTY) → staged only, no post
 //   [x] Approval granted (+TTY, not headless) → posts with exact argv
+//   [x] Local session → refused outright, NO Runner call at all
 // Launch (Classification: ops layer, tmux dispatch)
 //   [x] Agent A (InlineSeeded) → tmux new-window argv with claude + -p prompt
 //   [x] Agent A hardened: no --allow-dangerously-skip-permissions, --permission-mode plan
 //       (even though the launch default posture is AllowDanger=true)
 //   [x] Agent B (BareTUIEscalation) → "not yet wired" error, NO tmux call
 //   [x] Dry-run session (no workspace) → refused
+// windowName (Classification: tmux window identity)
+//   [x] Includes Owner, not just Number — a local-mode Ref and a PR-mode Ref
+//       that derive the same Number must not collide on window name
 
 import (
 	"context"
@@ -34,6 +38,56 @@ func postClient(fake *exec.FakeRunner, approve bool, tty bool) *Client {
 }
 
 var testSess = Session{Ref: Ref{Owner: "o", Repo: "r", Number: 9}, Workspace: "/tmp/forgectl-x"}
+
+func TestPostReview_LocalSessionRefused(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	c := postClient(fake, true, true) // approve=true, tty=true — must still refuse
+	localSess := Session{Ref: Ref{Owner: "local", Repo: "abc1234", Number: 1}, Workspace: "/tmp/forgectl-x", Local: true}
+
+	posted, err := c.PostReview(context.Background(), localSess, "the review", false)
+	if err == nil {
+		t.Fatal("expected PostReview to refuse a local session")
+	}
+	if posted {
+		t.Error("a local session must never post")
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("no argv should reach the Runner for a local session; got %+v", fake.Calls)
+	}
+}
+
+// TestPostReview_ReloadedLocalSessionStillRefused guards the reload path: a
+// Session reconstituted from a breadcrumb (loadSession) always zero-values
+// Local to false, same as HeadRef/HeadOid. The guard must still catch this
+// case via the persisted Ref.IsLocal(), or a future verb built on the
+// loadSession pattern would silently defeat PostReview's safety invariant.
+func TestPostReview_ReloadedLocalSessionStillRefused(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	c := postClient(fake, true, true)
+	reloaded := Session{Ref: Ref{Owner: "local", Repo: "abc1234", Number: 1}, Workspace: "/tmp/forgectl-x"} // Local: false, as loadSession produces
+
+	posted, err := c.PostReview(context.Background(), reloaded, "the review", false)
+	if err == nil {
+		t.Fatal("expected PostReview to refuse a reload-reconstituted local session")
+	}
+	if posted || len(fake.Calls) != 0 {
+		t.Errorf("posted=%v calls=%+v, want refused with zero Runner calls", posted, fake.Calls)
+	}
+}
+
+func TestWindowName_OwnerDistinguishesLocalFromPRMode(t *testing.T) {
+	// A local-mode Ref and a PR-mode Ref that derive the identical Number must
+	// not collide on tmux window name — Owner ("local" vs a real GitHub owner)
+	// is what disambiguates them.
+	local := Ref{Owner: "local", Repo: "abc1234", Number: 42}
+	prMode := Ref{Owner: "someowner", Repo: "somerepo", Number: 42}
+	if windowName(local) == windowName(prMode) {
+		t.Errorf("windowName collided: local=%q prMode=%q", windowName(local), windowName(prMode))
+	}
+	if windowName(local) != "pr-local-42" {
+		t.Errorf("windowName(local) = %q, want %q", windowName(local), "pr-local-42")
+	}
+}
 
 func TestPostReview_DeclinedDoesNotPost(t *testing.T) {
 	fake := &exec.FakeRunner{}
@@ -114,7 +168,7 @@ func TestLaunch_InlineDispatch(t *testing.T) {
 	if call.Name != "tmux" || call.Args[0] != "new-window" {
 		t.Fatalf("expected tmux new-window; got %+v", call)
 	}
-	if !contains(call.Args, "pr-42") || !contains(call.Args, ws) || !contains(call.Args, claudeBin) {
+	if !contains(call.Args, "pr-o-42") || !contains(call.Args, ws) || !contains(call.Args, claudeBin) {
 		t.Errorf("tmux argv missing window/workspace/claude: %v", call.Args)
 	}
 	if !contains(call.Args, "-p") || !contains(call.Args, reviewPrompt) {
@@ -156,6 +210,53 @@ func TestLaunch_AgentBNotWired(t *testing.T) {
 	}
 	if len(fake.Calls) != 0 {
 		t.Errorf("not-yet-wired agent must issue ZERO Runner calls; got %+v", fake.Calls)
+	}
+}
+
+func TestLaunchInline_LocalSessionAddsFindingsDirAndPrompt(t *testing.T) {
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
+
+	findingsDir := t.TempDir()
+
+	// Local session: --add-dir must carry findingsDir, and the prompt must be
+	// the local (offline) variant, not the PR reviewPrompt.
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	ws := fakeWorkspace(t)
+	localSess := Session{Ref: Ref{Owner: "local", Repo: "abc1234", Number: 1}, Workspace: ws, Agent: "claude", Local: true, FindingsDir: findingsDir}
+
+	if err := c.Launch(context.Background(), localSess, config.Config{}); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	call := fake.Last()
+	if !argPair(call.Args, "--add-dir", findingsDir) {
+		t.Errorf("local session argv missing --add-dir %s: %v", findingsDir, call.Args)
+	}
+	if !contains(call.Args, localReviewPrompt(findingsDir)) {
+		t.Errorf("local session argv missing localReviewPrompt: %v", call.Args)
+	}
+	if contains(call.Args, reviewPrompt) {
+		t.Errorf("local session must not use the PR reviewPrompt: %v", call.Args)
+	}
+
+	// Non-local session: no --add-dir for any findings-shaped path, PR prompt used.
+	fake2 := &exec.FakeRunner{}
+	c2 := New(fake2, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	ws2 := fakeWorkspace(t)
+	prSess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: ws2, Agent: "claude"}
+	if err := c2.Launch(context.Background(), prSess, config.Config{}); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	call2 := fake2.Last()
+	if contains(call2.Args, "--add-dir") {
+		t.Errorf("non-local session argv must not carry --add-dir: %v", call2.Args)
+	}
+	if !contains(call2.Args, reviewPrompt) {
+		t.Errorf("non-local session argv missing reviewPrompt: %v", call2.Args)
 	}
 }
 
