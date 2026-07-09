@@ -185,6 +185,29 @@ func TestScan_GitNeverMatchedOrDescended(t *testing.T) {
 	}
 }
 
+func TestScan_NestedGitRepoInsideMatchedDir_NeverReported(t *testing.T) {
+	// Regression: a matched dir ("build") that is NOT itself a git repo but
+	// CONTAINS one nested a level or more deeper — e.g. someone's real
+	// checkout placed inside a directory that happens to match a reclaim
+	// name. hasOwnGit's old immediate-child-only check missed this
+	// entirely: Scan pruned descent into "build" on the name match, so
+	// nothing downstream (findProjectRoot walks upward only; the delete
+	// path's containsGitComponent inspects only the target's OWN path) ever
+	// saw the nested .git either. This must never be reported as a target.
+	root := t.TempDir()
+	build := filepath.Join(root, "proj", "build")
+	mustWriteFile(t, filepath.Join(build, "my-experiment", ".git", "HEAD"), 5)
+	mustWriteFile(t, filepath.Join(build, "my-experiment", "real-file.txt"), 999)
+
+	report, err := Scan(ScanOptions{Root: root})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(report.Targets) != 0 {
+		t.Fatalf("expected 0 targets — a matched dir containing a nested git repo must never be a reclaim target, got %+v", report.Targets)
+	}
+}
+
 func TestScan_GitDirNeverTraversed_EvenAsAncestorMatch(t *testing.T) {
 	root := t.TempDir()
 	// A bare .git directory sitting directly under a scanned project; it must

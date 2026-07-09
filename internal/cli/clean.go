@@ -94,12 +94,19 @@ func runClean(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.CleanOp
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
-	// Dry-run scan/classify first regardless of --apply — the confirmation
-	// prompt below needs a real total to show, and this is also how a plain
-	// `forgectl clean` (no --apply) gets its report.
+	// Scan exactly ONCE, up front, regardless of --apply — both the preview
+	// classification below and (if confirmed) the apply pass reuse this
+	// SAME Report. Re-scanning between preview and apply would let the
+	// filesystem move in between (a target added, removed, or resized),
+	// silently making the deleted set differ from what the user confirmed.
+	resolvedRoot, report, err := client.ScanReport(opts)
+	if err != nil {
+		return err
+	}
+
 	previewOpts := opts
 	previewOpts.Apply = false
-	preview, err := client.Clean(ctx, previewOpts)
+	preview, err := client.ApplyReport(ctx, resolvedRoot, report, previewOpts)
 	if err != nil {
 		return err
 	}
@@ -126,16 +133,18 @@ func runClean(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.CleanOp
 		return nil
 	}
 
-	result, err := client.Clean(ctx, opts)
+	result, err := client.ApplyReport(ctx, resolvedRoot, report, opts)
 	if err != nil {
 		return err
 	}
 
 	fmt.Fprintln(out)
+	failed := 0
 	for _, item := range result.Items {
 		switch {
 		case item.Err != nil:
 			fmt.Fprintf(out, "FAILED  %s: %v\n", item.Path, item.Err)
+			failed++
 		case item.Skipped:
 			// Already printed in the preview pass above; apply-phase output
 			// only needs to report what actually happened to a delete
@@ -145,6 +154,13 @@ func runClean(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.CleanOp
 		}
 	}
 	fmt.Fprintf(out, "\nreclaimed %s\n", formatBytes(result.TotalReclaimed))
+	if failed > 0 {
+		// A partial delete failure must not exit 0 — a scripted caller
+		// reading only the exit code needs to see that not everything
+		// reported above actually reclaimed. Each failure was already
+		// printed individually above; this is the aggregate signal.
+		return fmt.Errorf("%d target(s) failed to reclaim", failed)
+	}
 	return nil
 }
 

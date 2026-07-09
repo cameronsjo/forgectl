@@ -30,6 +30,10 @@ package clean
 //   [x] Edge: a matched dir that is ITSELF a git working tree (.git as its
 //       own immediate child) is never added to the Report at all — not even
 //       as a --force-overridable skip, since guarantee #1 is unconditional
+//   [x] Edge: a matched dir containing a git working tree NESTED deeper
+//       inside it (e.g. build/my-experiment/.git — a real checkout placed
+//       inside a dir that happens to match a reclaim name) is likewise never
+//       added to the Report — the immediate-child case alone isn't enough
 //   [x] Edge: a symlinked directory is never followed — matched-name or not,
 //       inside or pointing outside root
 //   [x] Edge: --older-than excludes a target newer than the cutoff from the
@@ -210,19 +214,30 @@ func Scan(opts ScanOptions) (Report, error) {
 			return nil
 		}
 
-		if hasOwnGit(path) {
-			// Guarantee #1, strict form: a matched dir that is ITSELF a git
-			// working tree (has .git as an immediate child — e.g. a
-			// dependency someone accidentally vendored with its VCS
+		if hasNestedGit(path) {
+			// Guarantee #1, strict form: a matched dir that contains a git
+			// working tree ANYWHERE inside it — as its own immediate .git
+			// (e.g. a dependency someone accidentally vendored with its VCS
 			// metadata intact, or a repo that just happens to be named
-			// "dist"/"build"/etc.) is never treated as a reclaim target at
-			// all, unconditionally. This is deliberately NOT the same gate
-			// as the (force-overridable) dirty-tree check in clean.go: "never
+			// "dist"/"build"/etc.), or nested deeper (e.g.
+			// build/my-experiment/.git — a real checkout someone happened to
+			// place inside a dir that also matches a reclaim name) — is
+			// never treated as a reclaim target at all, unconditionally.
+			// This is deliberately NOT the same gate as the
+			// (force-overridable) dirty-tree check in clean.go: "never
 			// delete .git, not the directory itself, not anything inside it"
 			// is one of the four non-negotiable guarantees, so it can't be
 			// bypassed by --force the way an ordinary dirty tree can. The dir
 			// is simply never added to the Report — not listed, not sized,
 			// not skipped-with-a-reason — because it was never a candidate.
+			// A nested .git this deep is exactly the case a bare
+			// immediate-child check (the prior hasOwnGit) missed: Scan
+			// prunes descent on a name match BEFORE this point, so nothing
+			// downstream (findProjectRoot's upward-only walk, delete's
+			// containsGitComponent on the target's OWN path) ever sees it —
+			// this check is the only place in the package positioned to
+			// catch it, which is why it has to look downward, not just at
+			// the immediate child.
 			return fs.SkipDir
 		}
 
@@ -282,12 +297,37 @@ func dirSize(root string) int64 {
 	return total
 }
 
-// hasOwnGit reports whether dir directly contains a .git entry — used by
-// Scan to unconditionally refuse a matched target that is itself a git
-// working tree (guarantee #1's strict form; see the call site's comment).
-func hasOwnGit(dir string) bool {
-	_, err := os.Stat(filepath.Join(dir, ".git"))
-	return err == nil
+// hasNestedGit reports whether dir contains a .git entry anywhere within
+// it — as its own immediate child, or nested arbitrarily deep (e.g. a real
+// checkout someone placed inside a dir that happens to match a reclaim
+// name, like build/my-experiment/.git) — used by Scan to unconditionally
+// refuse a matched target containing a git working tree anywhere inside
+// (guarantee #1's strict form; see the call site's comment). Matches a
+// .git DIRECTORY (a normal repo root) or a .git FILE (a worktree/submodule
+// gitdir pointer) — either one means real, addressable git state lives
+// there.
+//
+// This is the one deliberate exception to Scan's own prune-on-match
+// performance strategy: it walks dir's full subtree rather than stopping at
+// the first level, because correctness on a path that ends in os.RemoveAll
+// outweighs the extra walk cost for the (typically much smaller) set of
+// dirs that actually match a reclaim name in the first place. The walk
+// exits at the first .git found (fs.SkipAll) rather than always completing.
+func hasNestedGit(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// A permission-denied or vanished entry doesn't change the
+			// answer either way — best-effort, keep walking.
+			return nil
+		}
+		if d.Name() == ".git" {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 // findProjectRoot walks up from path (a matched target dir) toward root

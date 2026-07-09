@@ -16,6 +16,11 @@ package clean
 //   [x] Safety #1: .git is never a scan/delete target, even nested inside a
 //       dir that coincidentally shares a target name (delegated to Scan;
 //       reasserted here end-to-end through the real Client.Clean path)
+//   [x] Safety #1: a matched dir CONTAINING a git repo nested deeper than an
+//       immediate child (e.g. build/my-experiment/.git) also survives
+//       --apply --force end-to-end — the regression Finding #1 of the
+//       security review caught (delegated to Scan's hasNestedGit; reasserted
+//       here through the real delete path, not just Scan's own unit test)
 //   [x] Safety #2: a symlink pointing outside --root is never followed or
 //       deleted (delegated to Scan; reasserted end-to-end)
 //   [x] Safety #4: delete() refuses a path that WithinWorkspace rejects,
@@ -26,6 +31,13 @@ package clean
 //   [x] WithCleanConfig / WithRoot / WithTypes options apply only when the
 //       corresponding config/option field is non-empty, matching the
 //       fill-in-defaults shape internal/net's WithNetConfig uses
+//
+// ScanReport / ApplyReport (Classification: scan/apply split, real temp-dir
+// fixture — added post-security-review to fix Finding #3, a preview/apply
+// re-scan mismatch)
+//   [x] ApplyReport, given an ALREADY-SCANNED Report, deletes exactly that
+//       Report's targets even after the filesystem changes underneath it —
+//       proving apply reuses the confirmed scan rather than re-walking root
 
 import (
 	"context"
@@ -268,6 +280,78 @@ func TestClean_GitNeverAScanOrDeleteTarget_EndToEnd(t *testing.T) {
 	}
 }
 
+func TestClean_NestedGitRepoInsideMatchedDir_NeverDeleted_EndToEnd(t *testing.T) {
+	statusErrors = map[string]error{}
+	root := t.TempDir()
+	// "build" is NOT itself a git repo, but contains one nested a level
+	// deeper — end-to-end through Client.Clean with --apply --force, both
+	// the outer "build" dir and the nested repo's contents must survive.
+	build := filepath.Join(root, "proj", "build")
+	nestedGitHead := filepath.Join(build, "my-experiment", ".git", "HEAD")
+	mustWriteFile(t, nestedGitHead, 5)
+	mustWriteFile(t, filepath.Join(build, "my-experiment", "real-file.txt"), 999)
+
+	run := fakeGitRunner(nil)
+	c := New(run, WithRoot(root))
+
+	result, err := c.Clean(context.Background(), CleanOptions{Apply: true, Force: true})
+	if err != nil {
+		t.Fatalf("Clean: %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("a dir containing a nested git repo must never appear as an Item at all, got %+v", result.Items)
+	}
+	if _, err := os.Stat(build); err != nil {
+		t.Errorf("build (contains a nested git repo) must survive --apply --force, stat error: %v", err)
+	}
+	if _, err := os.Stat(nestedGitHead); err != nil {
+		t.Errorf("the nested .git contents must survive, stat error: %v", err)
+	}
+}
+
+func TestScanReport_ThenApplyReport_ReusesOriginalTargets_NotRescanned(t *testing.T) {
+	statusErrors = map[string]error{}
+	root := t.TempDir()
+	original := filepath.Join(root, "proj", "node_modules")
+	mustWriteFile(t, filepath.Join(original, "leaf.js"), 100)
+
+	run := fakeGitRunner(nil)
+	c := New(run, WithRoot(root))
+
+	resolvedRoot, report, err := c.ScanReport(CleanOptions{})
+	if err != nil {
+		t.Fatalf("ScanReport: %v", err)
+	}
+	if len(report.Targets) != 1 {
+		t.Fatalf("expected exactly 1 scanned target, got %d: %+v", len(report.Targets), report.Targets)
+	}
+
+	// Mutate the filesystem AFTER the scan, BEFORE apply — a new reclaimable
+	// target appears that was never part of the confirmed Report.
+	lateArrival := filepath.Join(root, "proj2", "node_modules")
+	mustWriteFile(t, filepath.Join(lateArrival, "leaf.js"), 200)
+
+	result, err := c.ApplyReport(context.Background(), resolvedRoot, report, CleanOptions{Apply: true})
+	if err != nil {
+		t.Fatalf("ApplyReport: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("ApplyReport must act ONLY on the original scanned Report, got %d item(s): %+v", len(result.Items), result.Items)
+	}
+	// Compare against the Report's own resolved path (captured before the
+	// delete removes it) rather than re-resolving `original` now — it no
+	// longer exists on disk to resolve.
+	if want := report.Targets[0].Path; result.Items[0].Path != want {
+		t.Errorf("Path = %q, want the originally-scanned target %q", result.Items[0].Path, want)
+	}
+	if _, err := os.Stat(original); !os.IsNotExist(err) {
+		t.Errorf("the originally-scanned target should have been deleted, stat error: %v", err)
+	}
+	if _, err := os.Stat(lateArrival); err != nil {
+		t.Errorf("a target that appeared AFTER the scan must survive an apply pass driven by the earlier Report, stat error: %v", err)
+	}
+}
+
 func TestClean_SymlinkOutsideRoot_NeverDeleted(t *testing.T) {
 	statusErrors = map[string]error{}
 	root := t.TempDir()
@@ -329,6 +413,37 @@ func TestClient_Delete_RefusesGitComponent(t *testing.T) {
 	}
 	if _, err := os.Stat(gitDir); err != nil {
 		t.Errorf(".git must survive a refused delete, stat error: %v", err)
+	}
+}
+
+// TestClient_Delete_RefusesTargetSwappedForSymlink is a direct unit test of
+// delete()'s post-review Lstat guard: Scan never yields a symlink as a
+// Target (it fs.SkipDirs every symlinked directory), so a target that IS a
+// symlink at delete time can only be a post-scan swap — refuse it rather
+// than following it into some OTHER inside-root directory the scan never
+// actually vetted (security review Finding #2's residual).
+func TestClient_Delete_RefusesTargetSwappedForSymlink(t *testing.T) {
+	root := t.TempDir()
+	victim := filepath.Join(root, "victim-repo")
+	mustWriteFile(t, filepath.Join(victim, "real-file.txt"), 999)
+
+	// The "target" delete() is asked to remove no longer exists as a real
+	// directory — it's now a symlink pointing at some OTHER inside-root
+	// directory, simulating a swap that happened after Scan ran.
+	swapped := filepath.Join(root, "build")
+	if err := os.Symlink(victim, swapped); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	c := New(&exec.FakeRunner{})
+	if err := c.delete(root, swapped); err == nil {
+		t.Fatal("delete() should refuse a target that is a symlink at delete time")
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("the symlink's target (victim-repo) must survive a refused delete, stat error: %v", err)
+	}
+	if _, err := os.Lstat(swapped); err != nil {
+		t.Errorf("the swapped symlink itself must survive too (delete() must not partially act), lstat error: %v", err)
 	}
 }
 

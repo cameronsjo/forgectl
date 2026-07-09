@@ -169,31 +169,31 @@ type Result struct {
 	TotalReclaimed int64
 }
 
-// Clean scans opts.Root (or the Client's configured default) for reclaimable
-// dep/build dirs, skips anything inside a dirty git tree unless opts.Force,
-// and — only when opts.Apply — deletes the rest, reporting actual reclaimed
-// bytes. A dry run (the default) never calls os.RemoveAll; TotalReclaimed
-// stays zero and every filesystem entry Scan found is left exactly as it
-// was — asserted in clean_test.go against a real temp-dir fixture, not just
-// documented here.
-func (c *Client) Clean(ctx context.Context, opts CleanOptions) (Result, error) {
+// ScanReport resolves opts.Root/Types against the Client's defaults and runs
+// Scan exactly once, with no dirty-tree check and no deletion. It exists so
+// a caller that needs to show a preview before a confirmation prompt (the
+// CLI) and then apply can hand the SAME Report to ApplyReport for both —
+// otherwise a re-scan between preview and apply could see a filesystem that
+// changed in between (a target added, removed, or resized), so what gets
+// deleted would silently differ from what the user confirmed.
+func (c *Client) ScanReport(opts CleanOptions) (resolvedRoot string, report Report, err error) {
 	root := opts.Root
 	if root == "" {
 		root = c.root
 	}
 	if root == "" {
-		return Result{}, fmt.Errorf("no root to scan: pass --root, set [clean] default_root, or ensure the home directory is resolvable")
+		return "", Report{}, fmt.Errorf("no root to scan: pass --root, set [clean] default_root, or ensure the home directory is resolvable")
 	}
 	root = expandTilde(root, c.home)
 
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
-		return Result{}, fmt.Errorf("resolve root %s: %w", root, err)
+		return "", Report{}, fmt.Errorf("resolve root %s: %w", root, err)
 	}
 	// Resolve symlinks in root itself up front, once, so every containment
 	// check downstream (Scan's walk, delete's WithinWorkspace re-check)
 	// compares against the exact same real path.
-	resolvedRoot, err := filepath.EvalSymlinks(absRoot)
+	resolvedRoot, err = filepath.EvalSymlinks(absRoot)
 	if err != nil {
 		// A root that doesn't exist yet (or a dangling symlink) isn't a
 		// reclaim-safety concern — Scan itself will fail below with a clear
@@ -208,17 +208,47 @@ func (c *Client) Clean(ctx context.Context, opts CleanOptions) (Result, error) {
 	}
 
 	slog.Debug("Preparing to scan for reclaimable directories.",
-		"root", resolvedRoot, "types", types, "olderThan", opts.OlderThan, "apply", opts.Apply, "force", opts.Force)
+		"root", resolvedRoot, "types", types, "olderThan", opts.OlderThan)
 
-	report, err := Scan(ScanOptions{
+	report, err = Scan(ScanOptions{
 		Root:      resolvedRoot,
 		Types:     types,
 		OlderThan: opts.OlderThan,
 	})
 	if err != nil {
 		slog.Error("Failed to scan for reclaimable directories.", "root", resolvedRoot, "error", err)
-		return Result{}, fmt.Errorf("scan %s: %w", resolvedRoot, err)
+		return "", Report{}, fmt.Errorf("scan %s: %w", resolvedRoot, err)
 	}
+	return resolvedRoot, report, nil
+}
+
+// Clean scans opts.Root (or the Client's configured default) for reclaimable
+// dep/build dirs, skips anything inside a dirty git tree unless opts.Force,
+// and — only when opts.Apply — deletes the rest, reporting actual reclaimed
+// bytes. A dry run (the default) never calls os.RemoveAll; TotalReclaimed
+// stays zero and every filesystem entry Scan found is left exactly as it
+// was — asserted in clean_test.go against a real temp-dir fixture, not just
+// documented here.
+//
+// Clean always scans fresh (via ScanReport) — callers that need a preview
+// and a subsequent apply pass to see the identical target set (the CLI's
+// confirm-then-delete flow) should call ScanReport once and use ApplyReport
+// for both passes instead of calling Clean twice.
+func (c *Client) Clean(ctx context.Context, opts CleanOptions) (Result, error) {
+	resolvedRoot, report, err := c.ScanReport(opts)
+	if err != nil {
+		return Result{}, err
+	}
+	return c.ApplyReport(ctx, resolvedRoot, report, opts)
+}
+
+// ApplyReport classifies and — only when opts.Apply — deletes every target
+// in an already-scanned report, against resolvedRoot (as returned by
+// ScanReport). Splitting this out of Clean is what lets the CLI scan once,
+// show a preview, confirm, then apply against that exact same target list.
+func (c *Client) ApplyReport(ctx context.Context, resolvedRoot string, report Report, opts CleanOptions) (Result, error) {
+	slog.Debug("Preparing to classify and apply scanned targets.",
+		"root", resolvedRoot, "matched", len(report.Targets), "apply", opts.Apply, "force", opts.Force)
 
 	result := Result{}
 	// Memoized per project root: a project with several matched targets
@@ -270,7 +300,7 @@ func (c *Client) Clean(ctx context.Context, opts CleanOptions) (Result, error) {
 		result.Items = append(result.Items, item)
 	}
 
-	slog.Info("Successfully scanned for reclaimable directories.",
+	slog.Info("Successfully classified and applied scanned targets.",
 		"root", resolvedRoot, "matched", len(report.Targets), "reclaimable", result.TotalReclaimable, "apply", opts.Apply)
 	return result, nil
 }
@@ -291,13 +321,41 @@ func (c *Client) delete(root, target string) error {
 		// too rather than trusted from upstream.
 		return fmt.Errorf("refusing to delete %s: .git is never a reclaim target", target)
 	}
-	if !sandbox.WithinWorkspace(root, target) {
+	// Scan never yields a symlink as a Target — it fs.SkipDirs every
+	// symlinked directory during the walk. So if target IS a symlink right
+	// now, that can only mean it was swapped in AFTER the scan (a
+	// TOCTOU/race scenario, e.g. a local writer replacing a matched dir with
+	// a symlink to some OTHER inside-root path between ScanReport and this
+	// delete call). Refuse outright rather than resolving through it: an
+	// earlier version of this guard resolved target and deleted the
+	// resolved path, which closed an intermediate-component swap but opened
+	// a narrower one — a swapped FINAL component would resolve to, and pass
+	// WithinWorkspace for, a real inside-root directory the scan never
+	// actually vetted (its own .git check ran against the ORIGINAL
+	// contents). Refusing on Lstat here closes both directions without
+	// following anything.
+	if fi, err := os.Lstat(target); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to delete %s: became a symlink after scanning (possible race)", target)
+	}
+	// Resolve once and use the SAME resolved path for both the containment
+	// check and the removal itself. WithinWorkspace resolves symlinks
+	// internally to decide safety, but calling os.RemoveAll on the
+	// UNRESOLVED target afterward would leave a TOCTOU gap for any symlinked
+	// INTERMEDIATE path component (target itself is already confirmed not
+	// to be a symlink above). Falls back to the unresolved path on error
+	// (e.g. target vanished mid-run), matching WithinWorkspace's own
+	// fallback.
+	resolved := target
+	if r, err := filepath.EvalSymlinks(target); err == nil {
+		resolved = r
+	}
+	if !sandbox.WithinWorkspace(root, resolved) {
 		return fmt.Errorf("refusing to delete %s: resolves outside root %s", target, root)
 	}
 
-	slog.Debug("Preparing to reclaim directory.", "path", target)
-	if err := os.RemoveAll(target); err != nil {
-		return fmt.Errorf("remove %s: %w", target, err)
+	slog.Debug("Preparing to reclaim directory.", "path", resolved)
+	if err := os.RemoveAll(resolved); err != nil {
+		return fmt.Errorf("remove %s: %w", resolved, err)
 	}
 	return nil
 }
