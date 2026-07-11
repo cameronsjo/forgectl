@@ -20,8 +20,11 @@ type SyncOptions struct {
 	Machine     string
 	MetricsDir  string
 	RunbooksDir string
-	DryRun      bool // read + transform + count; no DB connection
-	Full        bool // bypass the lastMessageId watermark, re-upsert everything
+	// SyncthingConfig overrides the discovered Syncthing config.xml path
+	// (tests, non-standard installs). Empty = platform default discovery.
+	SyncthingConfig string
+	DryRun          bool // read + transform + count; no DB connection
+	Full            bool // bypass the lastMessageId watermark, re-upsert everything
 }
 
 // Receipt is the completeness accounting a sync prints — the contract that a
@@ -85,6 +88,10 @@ func (o SyncOptions) Resolve(cfg config.SessionsConfig) (SyncOptions, error) {
 func Sync(ctx context.Context, opts SyncOptions) (*Receipt, error) {
 	slog.Info("Preparing sessions sync.", "metrics_dir", opts.MetricsDir,
 		"runbooks_dir", opts.RunbooksDir, "machine", opts.Machine, "dry_run", opts.DryRun)
+
+	if err := enforceSyncthingGuard(opts); err != nil {
+		return nil, err
+	}
 
 	sessionRows, commitRows, receipt, err := extract(opts)
 	if err != nil {
@@ -167,6 +174,39 @@ func Sync(ctx context.Context, opts SyncOptions) (*Receipt, error) {
 		"unchanged", receipt.SessionsUnchanged, "missing", len(receipt.Missing),
 		"runbooks", receipt.RunbooksUpserted, "pruned", receipt.RunbooksPruned)
 	return receipt, nil
+}
+
+// enforceSyncthingGuard runs the Syncthing-blobs-only check on every sync
+// (dry-run included — it needs no DB). A folder covering a JSONL root fails
+// the sync loudly: proceeding would index a WAL that Syncthing is about to
+// fork into .sync-conflict-* divergence. The guard's own faults (no config,
+// unparseable config) fail open with a warning — a broken check must not
+// block the operation it protects.
+func enforceSyncthingGuard(opts SyncOptions) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		slog.Warn("Syncthing guard could not resolve home directory — proceeding unguarded.", "error", err)
+		return nil
+	}
+	configPath := opts.SyncthingConfig
+	if configPath == "" {
+		configPath = DefaultSyncthingConfigPath(home)
+	}
+	if configPath == "" {
+		slog.Debug("No Syncthing config on this machine — nothing syncs, guard passes.")
+		return nil
+	}
+	violations, err := CheckSyncthingFolders(configPath, home)
+	if err != nil {
+		slog.Warn("Syncthing guard could not inspect the config — proceeding unguarded; verify by hand.", "error", err, "config", configPath)
+		return nil
+	}
+	if len(violations) > 0 {
+		slog.Error("Syncthing is carrying a JSONL ledger root — refusing to sync until the share is removed.", "violations", len(violations), "config", configPath)
+		return fmt.Errorf("syncthing-blobs-only guard: %s (JSONL is the WAL — a synced ledger silently forks into .sync-conflict-* divergence; remove the share, then re-run)", strings.Join(violations, "; "))
+	}
+	slog.Debug("Syncthing guard passed — no folder covers a JSONL root.", "config", configPath)
+	return nil
 }
 
 // extract reads both JSONL ledgers. Split out so the WAL-read half is

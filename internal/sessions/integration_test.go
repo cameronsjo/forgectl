@@ -69,11 +69,14 @@ func TestIntegrationSyncIdempotencyAndSearch(t *testing.T) {
 		Machine:     "it-machine",
 		MetricsDir:  filepath.Join("testdata", "metrics"),
 		RunbooksDir: filepath.Join("testdata", "runbooks"),
+		// Hermetic: never read the live machine's Syncthing config in tests.
+		SyncthingConfig: filepath.Join("testdata", "syncthing-clean.xml"),
 	}
 
 	// Dry-run first: counts, no writes.
 	dry, err := Sync(ctx, SyncOptions{Machine: "it-machine",
-		MetricsDir: opts.MetricsDir, RunbooksDir: opts.RunbooksDir, DryRun: true})
+		MetricsDir: opts.MetricsDir, RunbooksDir: opts.RunbooksDir,
+		SyncthingConfig: opts.SyncthingConfig, DryRun: true})
 	if err != nil {
 		t.Fatalf("dry-run: %v", err)
 	}
@@ -114,7 +117,8 @@ func TestIntegrationSyncIdempotencyAndSearch(t *testing.T) {
 
 	// --full bypasses the watermark but stays idempotent on session_id.
 	full, err := Sync(ctx, SyncOptions{DSN: dsn, Machine: "it-machine",
-		MetricsDir: opts.MetricsDir, RunbooksDir: opts.RunbooksDir, Full: true})
+		MetricsDir: opts.MetricsDir, RunbooksDir: opts.RunbooksDir,
+		SyncthingConfig: opts.SyncthingConfig, Full: true})
 	if err != nil {
 		t.Fatalf("full sync: %v", err)
 	}
@@ -163,17 +167,20 @@ func TestIntegrationRunbookPruneRespectsEmptyCorpus(t *testing.T) {
 	defer cancel()
 	mart := prepMart(t, ctx, dsn)
 
+	cleanST := filepath.Join("testdata", "syncthing-clean.xml")
 	// Seed the index from the fixture corpus.
 	if _, err := Sync(ctx, SyncOptions{DSN: dsn, Machine: "m1",
-		MetricsDir:  filepath.Join("testdata", "metrics"),
-		RunbooksDir: filepath.Join("testdata", "runbooks")}); err != nil {
+		MetricsDir:      filepath.Join("testdata", "metrics"),
+		RunbooksDir:     filepath.Join("testdata", "runbooks"),
+		SyncthingConfig: cleanST}); err != nil {
 		t.Fatalf("seed sync: %v", err)
 	}
 
 	// A machine with NO corpus must leave the shared index untouched.
 	if _, err := Sync(ctx, SyncOptions{DSN: dsn, Machine: "m2",
-		MetricsDir:  filepath.Join("testdata", "metrics"),
-		RunbooksDir: filepath.Join("testdata", "does-not-exist")}); err != nil {
+		MetricsDir:      filepath.Join("testdata", "metrics"),
+		RunbooksDir:     filepath.Join("testdata", "does-not-exist"),
+		SyncthingConfig: cleanST}); err != nil {
 		t.Fatalf("corpus-less sync: %v", err)
 	}
 	var n int
@@ -194,7 +201,8 @@ func TestIntegrationRunbookPruneRespectsEmptyCorpus(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec, err := Sync(ctx, SyncOptions{DSN: dsn, Machine: "m1",
-		MetricsDir: filepath.Join("testdata", "metrics"), RunbooksDir: tmp})
+		MetricsDir: filepath.Join("testdata", "metrics"), RunbooksDir: tmp,
+		SyncthingConfig: cleanST})
 	if err != nil {
 		t.Fatalf("prune sync: %v", err)
 	}

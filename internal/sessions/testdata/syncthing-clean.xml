@@ -1,0 +1,6 @@
+<configuration>
+    <folder id="claude-memory" label="Claude Memory" path="~/.claude-memory" type="sendreceive"></folder>
+    <defaults>
+        <folder id="" label="" path="" type="sendreceive"></folder>
+    </defaults>
+</configuration>

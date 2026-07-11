@@ -60,6 +60,11 @@ Cost attribution follows ADR-0017: a session with commits is priced from
 commits.jsonl (grouped by parentSessionId//sessionId), never recomputed; the
 SessionEnd total from sessions.jsonl is the fallback.
 
+Every run enforces the Syncthing-blobs-only guard first: a Syncthing folder
+covering ~/.claude/metrics or ~/.claude/cadence/sessions fails the sync (a
+synced JSONL ledger forks into .sync-conflict-* divergence). A missing or
+unreadable Syncthing config warns and proceeds.
+
 The run ends with a completeness receipt:
   N local sessions found -> M upserted (K unchanged) -> reconciled
 Any local session absent from the mart after the flush prints as MISSING and
@@ -88,6 +93,7 @@ the command exits non-zero — a skipped session is never silent.
 	cmd.Flags().StringVar(&opts.Machine, "machine", "", "provenance label (default: [sessions] machine, then short hostname)")
 	cmd.Flags().StringVar(&opts.MetricsDir, "metrics-dir", "", "JSONL WAL directory (default: ~/.claude/metrics)")
 	cmd.Flags().StringVar(&opts.RunbooksDir, "runbooks-dir", "", "runbook markdown corpus (default: ~/.claude/cadence/runbooks)")
+	cmd.Flags().StringVar(&opts.SyncthingConfig, "syncthing-config", "", "Syncthing config.xml for the blobs-only guard (default: platform discovery)")
 	return cmd
 }
 
