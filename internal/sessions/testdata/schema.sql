@@ -13,9 +13,13 @@
 -- Idempotent: safe to re-apply (CREATE ... IF NOT EXISTS throughout).
 -- Apply: psql "$MART_DSN" -f schema.sql
 --
--- pg_trgm ships in postgres:17-alpine; CREATE EXTENSION needs owner/superuser
--- privileges, so provisioning applies this file as the database owner
--- (see initdb/01-init.sh + README).
+-- pg_trgm ships in postgres:17-alpine. CREATE EXTENSION needs CREATE on the
+-- DATABASE (superuser in practice) — the `mart` app role does NOT hold that.
+-- The line below works for `mart` only because initdb/01-init.sh already
+-- created the extension as superuser, so IF NOT EXISTS no-ops before any
+-- permission check. On the reuse-an-existing-server path, a superuser must
+-- run `CREATE EXTENSION IF NOT EXISTS pg_trgm;` in the mart database FIRST
+-- (see README Phase 2 step 1) or this apply fails permission-denied.
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
@@ -37,7 +41,9 @@ CREATE TABLE IF NOT EXISTS session (
     cost_usd            numeric,
     -- Which ledger priced the row: 'commits.jsonl' (ADR-0017 canonical
     -- root-session aggregation) or 'sessions.jsonl' (SessionEnd total).
-    cost_source         text,
+    -- NULL = unpriced (a session with no cost row anywhere).
+    cost_source         text
+        CHECK (cost_source IN ('commits.jsonl', 'sessions.jsonl')),
     committed           boolean,
     -- Incremental-sync cursor/watermark: the last transcript message id the
     -- ETL has seen for this session. Lets a sync skip already-synced tails.
@@ -66,6 +72,11 @@ CREATE TABLE IF NOT EXISTS runbooks (
     machine     text NOT NULL,
     created_at  timestamptz NOT NULL DEFAULT now(),
     updated_at  timestamptz NOT NULL DEFAULT now(),
+    -- The 512 KiB cap guards the tsvector 1 MiB hard limit for pathological
+    -- documents. The sibling trigram index below spans the FULL text — the
+    -- two search paths deliberately cover different spans past the cap
+    -- (ranked search truncates; substring fallback doesn't). Runbooks are
+    -- small markdown; the cap exists for safety, not as a working range.
     search      tsvector GENERATED ALWAYS AS (
         setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
         setweight(to_tsvector('english', left(full_text, 524288)), 'B')
