@@ -69,9 +69,13 @@ func SearchPRs(ctx context.Context, run exec.Runner, opts SearchOpts) (prs []PR,
 	if err != nil {
 		return nil, false, err
 	}
-	prs, err = parseSearchPRs(out)
+	prs, rawCount, err := parseSearchPRs(out)
 	if err != nil {
 		return nil, false, err
 	}
-	return prs, len(prs) >= limit, nil
+	// Truncation is judged on the RAW response size, not the filtered length:
+	// a hostile row skipped out of an exactly-full response must still read as
+	// a capped query, or the sentinel goes silent right when the inventory is
+	// big enough to matter.
+	return prs, rawCount >= limit, nil
 }

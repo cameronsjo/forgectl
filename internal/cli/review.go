@@ -16,15 +16,22 @@ const defaultReviewOwner = "cameronsjo"
 // group. It builds its own source over a fresh runner (mirrors newPrCmd's
 // self-contained client lifecycle).
 func newReviewCmd(cfg config.Config) *cobra.Command {
-	owners := cfg.Review.Owners
-	if len(owners) == 0 {
-		owners = []string{defaultReviewOwner}
-	}
-	src := review.NewGitHub(exec.OSRunner{}, owners)
+	src := review.NewGitHub(exec.OSRunner{}, resolveReviewOwners(cfg))
 	// err discarded: "" degrades to an empty store on read (LoadReviewed), and
 	// the write verbs fail loudly via persist()'s path=="" guard.
 	reviewedPath, _ := config.ReviewReviewedPath()
 	return newReviewCmdForSource(src, reviewedPath)
+}
+
+// resolveReviewOwners applies the [review] owners config, falling back to the
+// built-in default owner when the section is absent or empty. Split out of
+// newReviewCmd so the one piece of wiring logic the test seam bypasses is
+// itself unit-testable.
+func resolveReviewOwners(cfg config.Config) []string {
+	if len(cfg.Review.Owners) > 0 {
+		return cfg.Review.Owners
+	}
+	return []string{defaultReviewOwner}
 }
 
 // newReviewCmdForSource builds the command tree over an explicit source and

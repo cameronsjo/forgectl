@@ -189,13 +189,17 @@ func (c *Client) searchPRs(ctx context.Context, whoFlag string) ([]PR, bool, err
 // out-of-charset, or otherwise invalid row is skipped (logged), never fatal.
 // gh output flows into the same git/gh sinks as user-typed refs; the two paths
 // must not drift (breadcrumbFilename relies on this invariant).
-func parseSearchPRs(jsonOut string) ([]PR, error) {
+//
+// rawCount is the PRE-filter row count — the truncation sentinel compares IT
+// (not the filtered length) against --limit, so a skipped hostile row at an
+// exactly-full response can never silence the cap.
+func parseSearchPRs(jsonOut string) (prs []PR, rawCount int, err error) {
 	if strings.TrimSpace(jsonOut) == "" {
-		return nil, nil
+		return nil, 0, nil
 	}
 	var raw []ghSearchPR
 	if err := json.Unmarshal([]byte(jsonOut), &raw); err != nil {
-		return nil, fmt.Errorf("parse gh search prs output: %w", err)
+		return nil, 0, fmt.Errorf("parse gh search prs output: %w", err)
 	}
 	out := make([]PR, 0, len(raw))
 	for _, r := range raw {
@@ -224,7 +228,7 @@ func parseSearchPRs(jsonOut string) ([]PR, error) {
 			URL:       r.URL,
 		})
 	}
-	return out, nil
+	return out, len(raw), nil
 }
 
 // sortPRs orders PRs deterministically by (slug, number) — the same

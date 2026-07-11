@@ -41,12 +41,12 @@ func searchRow(nameWithOwner string, number int) string {
 func TestParseSearchPRs(t *testing.T) {
 	t.Run("valid rows parse into PRs", func(t *testing.T) {
 		out := "[" + searchRow("cameronsjo/forgectl", 42) + "]"
-		prs, err := parseSearchPRs(out)
+		prs, rawCount, err := parseSearchPRs(out)
 		if err != nil {
 			t.Fatalf("parseSearchPRs: %v", err)
 		}
-		if len(prs) != 1 {
-			t.Fatalf("got %d PRs, want 1", len(prs))
+		if len(prs) != 1 || rawCount != 1 {
+			t.Fatalf("got %d PRs (raw %d), want 1/1", len(prs), rawCount)
 		}
 		got := prs[0]
 		if got.Ref.String() != "cameronsjo/forgectl#42" {
@@ -62,34 +62,74 @@ func TestParseSearchPRs(t *testing.T) {
 	})
 
 	t.Run("empty output → nil, no error", func(t *testing.T) {
-		prs, err := parseSearchPRs("   ")
+		prs, rawCount, err := parseSearchPRs("   ")
 		if err != nil {
 			t.Fatalf("parseSearchPRs(empty): %v", err)
 		}
-		if prs != nil {
-			t.Errorf("empty output: got %+v, want nil", prs)
+		if prs != nil || rawCount != 0 {
+			t.Errorf("empty output: got (%+v, %d), want (nil, 0)", prs, rawCount)
 		}
 	})
 
 	t.Run("malformed JSON → error", func(t *testing.T) {
-		if _, err := parseSearchPRs("{not an array"); err == nil {
+		if _, _, err := parseSearchPRs("{not an array"); err == nil {
 			t.Error("malformed JSON: want error, got nil")
 		}
 	})
 
-	t.Run("out-of-charset row skipped, valid kept", func(t *testing.T) {
-		// A nameWithOwner with a space cannot pass splitSlug/reOwner.
+	t.Run("out-of-charset row skipped, valid kept, rawCount pre-filter", func(t *testing.T) {
+		// A nameWithOwner with a space cannot pass splitSlug/RefFromParts.
 		bad := searchRow("bad owner/repo", 1)
 		good := searchRow("cameronsjo/forgectl", 2)
 		out := "[" + bad + "," + good + "]"
-		prs, err := parseSearchPRs(out)
+		prs, rawCount, err := parseSearchPRs(out)
 		if err != nil {
 			t.Fatalf("parseSearchPRs: %v", err)
 		}
 		if len(prs) != 1 || prs[0].Ref.Number != 2 {
 			t.Errorf("want only the valid row (#2), got %+v", prs)
 		}
+		// The truncation sentinel keys off rawCount, so it must count the
+		// skipped row too.
+		if rawCount != 2 {
+			t.Errorf("rawCount = %d, want 2 (pre-filter)", rawCount)
+		}
 	})
+}
+
+// TestPRs_QueriesCarryExplicitLimit pins the truncation fix at the discovery
+// layer (the plan-named regression net): every @me query PRs fans out must
+// pass an explicit --limit (gh's silent default of 30 rows was capping
+// pr prs/dash), and the argv otherwise keeps the pre-extraction shape.
+func TestPRs_QueriesCarryExplicitLimit(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "[]", nil
+	}}
+	client := New(fake)
+	if _, _, err := client.PRs(context.Background()); err != nil {
+		t.Fatalf("PRs: %v", err)
+	}
+	if len(fake.Calls) != 3 {
+		t.Fatalf("got %d gh calls, want 3", len(fake.Calls))
+	}
+	seen := map[string]bool{}
+	for _, call := range fake.Calls {
+		argv := strings.Join(call.Args, " ")
+		if !strings.Contains(argv, "--limit 200") {
+			t.Errorf("query missing explicit --limit: %s", argv)
+		}
+		for _, want := range []string{"search prs", "@me", "--state open", "--json"} {
+			if !strings.Contains(argv, want) {
+				t.Errorf("argv missing %q: %s", want, argv)
+			}
+		}
+		seen[searchWhoFlag(call.Args)] = true
+	}
+	for _, flag := range []string{"--author", "--assignee", "--review-requested"} {
+		if !seen[flag] {
+			t.Errorf("missing %s query among calls", flag)
+		}
+	}
 }
 
 func TestPRs_UnionDedupSorted(t *testing.T) {

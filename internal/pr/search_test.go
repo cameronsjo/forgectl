@@ -75,6 +75,27 @@ func TestSearchPRs_TruncationFlag(t *testing.T) {
 	}
 }
 
+// TestSearchPRs_TruncationCountsSkippedRows pins the sentinel to the RAW
+// response size: an exactly-full response with one hostile (skipped) row must
+// still read as truncated — the filtered length is one short of the limit, and
+// comparing THAT would silence the cap precisely when it matters.
+func TestSearchPRs_TruncationCountsSkippedRows(t *testing.T) {
+	full := "[" + searchRow("bad owner/repo", 1) + "," + searchRow("cameronsjo/forgectl", 2) + "]"
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return full, nil
+	}}
+	prs, truncated, err := SearchPRs(context.Background(), fake, SearchOpts{Owner: "cameronsjo", Limit: 2})
+	if err != nil {
+		t.Fatalf("SearchPRs: %v", err)
+	}
+	if len(prs) != 1 {
+		t.Fatalf("got %d parsed PRs, want 1 (hostile row skipped)", len(prs))
+	}
+	if !truncated {
+		t.Error("exactly-full raw response must report truncated=true even when a row was skipped")
+	}
+}
+
 func TestSearchPRs_RefusesBadOpts(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	cases := []struct {
@@ -105,7 +126,7 @@ func TestParseSearchPRs_Labels(t *testing.T) {
 		`"isDraft":true,"state":"OPEN",` +
 		`"labels":[{"name":"auto:execute"},{"name":"enhancement"}],` +
 		`"repository":{"nameWithOwner":"cameronsjo/forgectl"}}`
-	prs, err := parseSearchPRs("[" + row + "]")
+	prs, _, err := parseSearchPRs("[" + row + "]")
 	if err != nil {
 		t.Fatalf("parseSearchPRs: %v", err)
 	}

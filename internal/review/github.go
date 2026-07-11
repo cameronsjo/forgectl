@@ -168,11 +168,13 @@ func (g *GitHub) searchIssues(ctx context.Context, owner string) ([]Item, bool, 
 	if err != nil {
 		return nil, false, err
 	}
-	items, err := parseSearchIssues(out)
+	items, rawCount, err := parseSearchIssues(out)
 	if err != nil {
 		return nil, false, err
 	}
-	return items, len(items) >= searchLimit, nil
+	// Raw-count comparison, mirroring pr.SearchPRs: a skipped hostile row in an
+	// exactly-full response must not silence the truncation sentinel.
+	return items, rawCount >= searchLimit, nil
 }
 
 // parseSearchIssues decodes `gh search issues --json` output into Items.
@@ -182,13 +184,16 @@ func (g *GitHub) searchIssues(ctx context.Context, owner string) ([]Item, bool, 
 // excludes PRs by default, but the guard keeps Kind honest if that default
 // ever shifts (dedupe-by-Key already prevents a double render; this prevents
 // a mislabeled one).
-func parseSearchIssues(jsonOut string) ([]Item, error) {
+//
+// rawCount is the PRE-filter row count for the truncation sentinel (see
+// searchIssues).
+func parseSearchIssues(jsonOut string) (items []Item, rawCount int, err error) {
 	if strings.TrimSpace(jsonOut) == "" {
-		return nil, nil
+		return nil, 0, nil
 	}
 	var raw []ghSearchIssue
 	if err := json.Unmarshal([]byte(jsonOut), &raw); err != nil {
-		return nil, fmt.Errorf("parse gh search issues output: %w", err)
+		return nil, 0, fmt.Errorf("parse gh search issues output: %w", err)
 	}
 	out := make([]Item, 0, len(raw))
 	for _, r := range raw {
@@ -218,5 +223,5 @@ func parseSearchIssues(jsonOut string) ([]Item, error) {
 		item.URL = r.URL
 		out = append(out, item)
 	}
-	return out, nil
+	return out, len(raw), nil
 }

@@ -175,21 +175,27 @@ func TestParseSearchIssues_HostileRows(t *testing.T) {
 	pullSmuggle := strings.Replace(issueRow("cameronsjo/forgectl", 2), "/issues/2", "/pull/2", 1)
 	good := issueRow("cameronsjo/forgectl", 3)
 
-	items, err := parseSearchIssues("[" + bad + "," + pullSmuggle + "," + good + "]")
+	items, rawCount, err := parseSearchIssues("[" + bad + "," + pullSmuggle + "," + good + "]")
 	if err != nil {
 		t.Fatalf("parseSearchIssues: %v", err)
 	}
 	if len(items) != 1 || items[0].Number != 3 {
 		t.Errorf("want only the valid issue row (#3), got %+v", items)
 	}
+	// The truncation sentinel keys off the PRE-filter count: skipped hostile
+	// rows must still count, or an exactly-full response with one bad row
+	// would silence the cap.
+	if rawCount != 3 {
+		t.Errorf("rawCount = %d, want 3 (pre-filter)", rawCount)
+	}
 }
 
 func TestParseSearchIssues_MalformedAndEmpty(t *testing.T) {
-	if _, err := parseSearchIssues("{not an array"); err == nil {
+	if _, _, err := parseSearchIssues("{not an array"); err == nil {
 		t.Error("malformed JSON: want error, got nil")
 	}
-	items, err := parseSearchIssues("   ")
-	if err != nil || items != nil {
-		t.Errorf("empty output: want (nil, nil), got (%+v, %v)", items, err)
+	items, rawCount, err := parseSearchIssues("   ")
+	if err != nil || items != nil || rawCount != 0 {
+		t.Errorf("empty output: want (nil, 0, nil), got (%+v, %d, %v)", items, rawCount, err)
 	}
 }

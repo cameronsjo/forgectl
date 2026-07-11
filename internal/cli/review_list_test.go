@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/review"
 )
@@ -192,6 +193,17 @@ func TestReviewCmd_KindAndRepoFilters(t *testing.T) {
 	cmd.SetArgs([]string{"--kind", "bogus"})
 	if err := cmd.ExecuteContext(context.Background()); err == nil {
 		t.Error("invalid --kind must be an error")
+	}
+}
+
+func TestResolveReviewOwners(t *testing.T) {
+	var cfg config.Config
+	if got := resolveReviewOwners(cfg); len(got) != 1 || got[0] != defaultReviewOwner {
+		t.Errorf("absent [review] section: got %v, want [%s]", got, defaultReviewOwner)
+	}
+	cfg.Review.Owners = []string{"someoneelse", "cameronsjo"}
+	if got := resolveReviewOwners(cfg); len(got) != 2 || got[0] != "someoneelse" {
+		t.Errorf("configured owners must win: got %v", got)
 	}
 }
 
