@@ -122,15 +122,24 @@ func (m *Mart) UpsertSessions(ctx context.Context, rows []SessionRow) error {
 // post-flush reconcile that turns a silently-skipped session into a loud
 // MISSING line on the receipt.
 func (m *Mart) PresentIDs(ctx context.Context, ids []string) (map[string]bool, error) {
-	wm, err := m.Watermarks(ctx, ids)
-	if err != nil {
-		return nil, fmt.Errorf("reconcile present ids: %w", err)
+	if len(ids) == 0 {
+		return map[string]bool{}, nil
 	}
-	out := make(map[string]bool, len(wm))
-	for id := range wm {
+	rows, err := m.conn.Query(ctx,
+		`SELECT session_id FROM session WHERE session_id = ANY($1)`, ids)
+	if err != nil {
+		return nil, schemaHint(fmt.Errorf("reconcile present ids: %w", err))
+	}
+	defer rows.Close()
+	out := make(map[string]bool, len(ids))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan present id: %w", err)
+		}
 		out[id] = true
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // UpsertRunbooks rebuilds the derived full-text index from the scanned corpus
@@ -184,8 +193,10 @@ type SearchHit struct {
 }
 
 // SearchRunbooks runs a websearch-syntax full-text query over the index,
-// falling back to a trigram ILIKE scan when the tsquery matches nothing
-// (typo'd or partial tokens — the pg_trgm GIN index carries the fallback).
+// falling back to a trigram ILIKE scan when the tsquery matches nothing.
+// The fallback treats the whole query as ONE literal substring — it rescues
+// a partial or typo'd single token (the pg_trgm GIN index carries it), not a
+// multi-word phrase that happens to be split across the document.
 func (m *Mart) SearchRunbooks(ctx context.Context, query, project string, limit int) ([]SearchHit, error) {
 	hits, err := m.scanHits(ctx, `
 		SELECT path, coalesce(title,''), coalesce(project,''), coalesce(type,''), machine,

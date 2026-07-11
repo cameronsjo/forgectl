@@ -30,7 +30,8 @@ type Receipt struct {
 	SessionsFound     int
 	SessionsUpserted  int
 	SessionsUnchanged int      // watermark matched; skipped as already-synced
-	InvalidRows       int      // ledger rows with no sessionId — cannot index
+	InvalidRows       int      // sessions.jsonl rows with no sessionId — cannot index
+	CommitRowsDropped int      // commits.jsonl rows with no session id — cannot attribute
 	LedgerLinesBad    int      // unparseable JSONL lines across both ledgers
 	Missing           []string // local sessions absent from the mart post-flush
 	RunbooksFound     int
@@ -87,14 +88,18 @@ func Sync(ctx context.Context, opts SyncOptions) (*Receipt, error) {
 
 	sessionRows, commitRows, receipt, err := extract(opts)
 	if err != nil {
+		slog.Error("Encountered ledger read failure while extracting the WAL.", "error", err, "metrics_dir", opts.MetricsDir)
 		return nil, err
 	}
-	rows, invalid := BuildSessions(sessionRows, RootCostMap(commitRows), opts.Machine)
+	att := RootCostMap(commitRows)
+	rows, invalid := BuildSessions(sessionRows, att, opts.Machine)
 	receipt.SessionsFound = len(rows)
 	receipt.InvalidRows = invalid
+	receipt.CommitRowsDropped = att.Dropped
 
 	runbooks, err := ScanRunbooks(opts.RunbooksDir, opts.Machine)
 	if err != nil {
+		slog.Error("Encountered corpus scan failure while indexing runbooks.", "error", err, "runbooks_dir", opts.RunbooksDir)
 		return nil, err
 	}
 	receipt.RunbooksFound = len(runbooks)
@@ -111,6 +116,7 @@ func Sync(ctx context.Context, opts SyncOptions) (*Receipt, error) {
 
 	mart, err := ConnectMart(ctx, opts.DSN)
 	if err != nil {
+		slog.Error("Failed to reach the mart — the JSONL WAL is untouched and drains on the next reachable run.", "error", err)
 		return nil, err
 	}
 	defer mart.Close(ctx)
@@ -119,10 +125,12 @@ func Sync(ctx context.Context, opts SyncOptions) (*Receipt, error) {
 	if !opts.Full {
 		toUpsert, receipt.SessionsUnchanged, err = skipUnchanged(ctx, mart, rows)
 		if err != nil {
+			slog.Error("Encountered watermark query failure while partitioning sessions.", "error", err, "sessions", len(rows))
 			return nil, err
 		}
 	}
 	if err := mart.UpsertSessions(ctx, toUpsert); err != nil {
+		slog.Error("Encountered upsert failure while flushing sessions — nothing partial is committed.", "error", err, "attempted", len(toUpsert))
 		return nil, err
 	}
 	receipt.SessionsUpserted = len(toUpsert)
@@ -135,6 +143,7 @@ func Sync(ctx context.Context, opts SyncOptions) (*Receipt, error) {
 	}
 	present, err := mart.PresentIDs(ctx, ids)
 	if err != nil {
+		slog.Error("Encountered reconcile failure while verifying flushed sessions.", "error", err, "sessions", len(ids))
 		return nil, err
 	}
 	for _, id := range ids {
@@ -142,9 +151,13 @@ func Sync(ctx context.Context, opts SyncOptions) (*Receipt, error) {
 			receipt.Missing = append(receipt.Missing, id)
 		}
 	}
+	if len(receipt.Missing) > 0 {
+		slog.Error("Reconcile found sessions absent from the mart after flush — expected every local session present.", "missing", len(receipt.Missing))
+	}
 
 	receipt.RunbooksPruned, err = mart.UpsertRunbooks(ctx, runbooks)
 	if err != nil {
+		slog.Error("Encountered runbook index failure while rebuilding the full-text index.", "error", err, "runbooks", len(runbooks))
 		return nil, err
 	}
 	receipt.RunbooksUpserted = len(runbooks)

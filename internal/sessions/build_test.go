@@ -17,9 +17,11 @@ func ts(s string) *time.Time {
 
 func TestRootCostMap(t *testing.T) {
 	tests := []struct {
-		name string
-		rows []LedgerRow
-		want map[string]float64
+		name          string
+		rows          []LedgerRow
+		wantCosts     map[string]float64
+		wantCommitted []string
+		wantDropped   int
 	}{
 		{
 			name: "groups by parentSessionId when present, else sessionId (ADR-0017)",
@@ -28,27 +30,41 @@ func TestRootCostMap(t *testing.T) {
 				{SessionID: "child-2", ParentSessionID: "root-a", CostUSD: f64(0.5)},
 				{SessionID: "root-b", CostUSD: f64(2.0)},
 			},
-			want: map[string]float64{"root-a": 2.0, "root-b": 2.0},
+			wantCosts:     map[string]float64{"root-a": 2.0, "root-b": 2.0},
+			wantCommitted: []string{"root-a", "root-b"},
 		},
 		{
-			name: "rows without cost or id contribute nothing",
+			name: "costless row still proves committedness; id-less row is counted dropped",
 			rows: []LedgerRow{
 				{SessionID: "x"},
 				{CostUSD: f64(9.9)},
 			},
-			want: map[string]float64{},
+			wantCosts:     map[string]float64{},
+			wantCommitted: []string{"x"},
+			wantDropped:   1,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := RootCostMap(tt.rows)
-			if len(got) != len(tt.want) {
-				t.Fatalf("got %d roots, want %d: %v", len(got), len(tt.want), got)
+			if len(got.Costs) != len(tt.wantCosts) {
+				t.Fatalf("got %d cost roots, want %d: %v", len(got.Costs), len(tt.wantCosts), got.Costs)
 			}
-			for k, v := range tt.want {
-				if got[k] != v {
-					t.Errorf("root %s: got %v, want %v", k, got[k], v)
+			for k, v := range tt.wantCosts {
+				if got.Costs[k] != v {
+					t.Errorf("root %s: got %v, want %v", k, got.Costs[k], v)
 				}
+			}
+			if len(got.Committed) != len(tt.wantCommitted) {
+				t.Fatalf("got %d committed roots, want %d: %v", len(got.Committed), len(tt.wantCommitted), got.Committed)
+			}
+			for _, id := range tt.wantCommitted {
+				if !got.Committed[id] {
+					t.Errorf("root %s should be committed", id)
+				}
+			}
+			if got.Dropped != tt.wantDropped {
+				t.Errorf("dropped = %d, want %d", got.Dropped, tt.wantDropped)
 			}
 		})
 	}
@@ -71,9 +87,12 @@ func TestBuildSessionsMergeAndCost(t *testing.T) {
 		// A row with no sessionId is invalid, surfaced not swallowed.
 		{Repo: "gamma"},
 	}
-	rootCost := map[string]float64{"s2": 4.25}
+	att := CommitAttribution{
+		Costs:     map[string]float64{"s2": 4.25},
+		Committed: map[string]bool{"s2": true},
+	}
 
-	rows, invalid := BuildSessions(ledger, rootCost, "test-machine")
+	rows, invalid := BuildSessions(ledger, att, "test-machine")
 
 	if invalid != 1 {
 		t.Errorf("invalid = %d, want 1", invalid)
@@ -109,8 +128,25 @@ func TestBuildSessionsMergeAndCost(t *testing.T) {
 }
 
 func TestBuildSessionsEmptyLedger(t *testing.T) {
-	rows, invalid := BuildSessions(nil, map[string]float64{}, "m")
+	rows, invalid := BuildSessions(nil, RootCostMap(nil), "m")
 	if len(rows) != 0 || invalid != 0 {
 		t.Errorf("empty ledger should build nothing: rows=%d invalid=%d", len(rows), invalid)
+	}
+}
+
+func TestBuildSessionsCommittedWithoutCost(t *testing.T) {
+	// A commit row with no costUsd must still mark the session committed;
+	// pricing then falls back to the SessionEnd total.
+	ledger := []LedgerRow{{SessionID: "s9", CostUSD: f64(1.1)}}
+	att := RootCostMap([]LedgerRow{{SessionID: "s9"}})
+	rows, _ := BuildSessions(ledger, att, "m")
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows", len(rows))
+	}
+	if !rows[0].Committed {
+		t.Errorf("costless commit row must still mark committed")
+	}
+	if rows[0].CostSource != CostFromSessions || *rows[0].CostUSD != 1.1 {
+		t.Errorf("pricing should fall back to sessions.jsonl: %+v", rows[0])
 	}
 }

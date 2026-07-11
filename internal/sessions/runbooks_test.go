@@ -1,6 +1,11 @@
 package sessions
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestParseRunbook(t *testing.T) {
 	tests := []struct {
@@ -46,6 +51,12 @@ func TestParseRunbook(t *testing.T) {
 			content: "---\ntitle: \"Quoted Title\"\n---\nbody\n",
 			want:    RunbookRow{Path: "p/q.md", Slug: "q", Title: "Quoted Title", Project: "p"},
 		},
+		{
+			name:    "CRLF-authored frontmatter still parses",
+			path:    "p/crlf.md",
+			content: "---\r\ntitle: CRLF Title\r\n---\r\nbody\r\n",
+			want:    RunbookRow{Path: "p/crlf.md", Slug: "crlf", Title: "CRLF Title", Project: "p"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -72,5 +83,34 @@ func TestScanRunbooksMissingRootIsEmpty(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Errorf("expected no rows, got %d", len(rows))
+	}
+}
+
+func TestScanRunbooksSkipsSymlinks(t *testing.T) {
+	// A planted .md symlink must never be followed — following it would read
+	// the TARGET into the shared mart (the exfiltration vector from review).
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("do-not-index"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	corpus := t.TempDir()
+	if err := os.WriteFile(filepath.Join(corpus, "real.md"), []byte("# Real\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(corpus, "planted.md")); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := ScanRunbooks(corpus, "m")
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Slug != "real" {
+		t.Fatalf("expected only the real file, got %+v", rows)
+	}
+	for _, r := range rows {
+		if strings.Contains(r.FullText, "do-not-index") {
+			t.Fatalf("symlink target content leaked into the index")
+		}
 	}
 }

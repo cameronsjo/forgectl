@@ -29,22 +29,38 @@ const (
 	CostFromSessions = "sessions.jsonl"
 )
 
+// CommitAttribution is the ADR-0017 fold over commits.jsonl: per-root cost
+// sums, the set of roots that committed at all (a commit row with no cost
+// still proves committedness), and a count of rows that carried no session id
+// — surfaced on the receipt, never silently dropped.
+type CommitAttribution struct {
+	Costs     map[string]float64
+	Committed map[string]bool
+	Dropped   int
+}
+
 // RootCostMap aggregates commits.jsonl per ADR-0017: cost groups by the ROOT
-// session (parentSessionId when present, else sessionId), summed. A session
-// present in this map is priced from commits and is `committed`.
-func RootCostMap(commitRows []LedgerRow) map[string]float64 {
-	out := make(map[string]float64)
+// session (parentSessionId when present, else sessionId), summed.
+func RootCostMap(commitRows []LedgerRow) CommitAttribution {
+	att := CommitAttribution{
+		Costs:     make(map[string]float64),
+		Committed: make(map[string]bool),
+	}
 	for _, r := range commitRows {
 		root := r.ParentSessionID
 		if root == "" {
 			root = r.SessionID
 		}
-		if root == "" || r.CostUSD == nil {
+		if root == "" {
+			att.Dropped++
 			continue
 		}
-		out[root] += *r.CostUSD
+		att.Committed[root] = true
+		if r.CostUSD != nil {
+			att.Costs[root] += *r.CostUSD
+		}
 	}
-	return out
+	return att
 }
 
 // BuildSessions folds the sessions.jsonl ledger into one row per session_id.
@@ -60,7 +76,7 @@ func RootCostMap(commitRows []LedgerRow) map[string]float64 {
 //
 // Rows with no sessionId cannot be indexed; they come back in `invalid` so
 // the receipt can surface them instead of swallowing.
-func BuildSessions(ledger []LedgerRow, rootCost map[string]float64, machine string) (rows []SessionRow, invalid int) {
+func BuildSessions(ledger []LedgerRow, att CommitAttribution, machine string) (rows []SessionRow, invalid int) {
 	type acc struct {
 		latest  LedgerRow
 		firstTs *time.Time
@@ -102,12 +118,12 @@ func BuildSessions(ledger []LedgerRow, rootCost map[string]float64, machine stri
 			Tokens:        a.latest.Tokens,
 			LastMessageID: a.latest.LastMessageID,
 		}
-		if cost, ok := rootCost[id]; ok {
+		row.Committed = att.Committed[id]
+		if cost, ok := att.Costs[id]; ok {
 			// ADR-0017: never recompute when a commit exists.
 			c := cost
 			row.CostUSD = &c
 			row.CostSource = CostFromCommits
-			row.Committed = true
 		} else if a.latest.CostUSD != nil {
 			row.CostUSD = a.latest.CostUSD
 			row.CostSource = CostFromSessions

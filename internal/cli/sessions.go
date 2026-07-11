@@ -3,6 +3,8 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -97,8 +99,8 @@ func printReceipt(cmd *cobra.Command, r *sessions.Receipt) error {
 	if r.DryRun {
 		mode = " (dry-run: no database connection made)"
 	}
-	fmt.Fprintf(out, "%d local sessions found -> %d upserted (%d unchanged, %d invalid, %d bad ledger lines)%s\n",
-		r.SessionsFound, r.SessionsUpserted, r.SessionsUnchanged, r.InvalidRows, r.LedgerLinesBad, mode)
+	fmt.Fprintf(out, "%d local sessions found -> %d upserted (%d unchanged, %d invalid, %d dropped commit rows, %d bad ledger lines)%s\n",
+		r.SessionsFound, r.SessionsUpserted, r.SessionsUnchanged, r.InvalidRows, r.CommitRowsDropped, r.LedgerLinesBad, mode)
 	fmt.Fprintf(out, "%d runbooks found -> %d indexed, %d pruned\n",
 		r.RunbooksFound, r.RunbooksUpserted, r.RunbooksPruned)
 	if r.DryRun {
@@ -150,8 +152,12 @@ machine can find a runbook or field report it did not author.
 				return nil
 			}
 			for _, h := range hits {
+				// Indexed content is untrusted at print time — strip control
+				// bytes so a hostile title/snippet can't smuggle terminal
+				// escape sequences to the operator's shell.
 				fmt.Fprintf(out, "%s\t%s\t[%s]\t(%s, indexed by %s)\n\t%s\n",
-					h.Path, h.Title, h.Type, h.Project, h.Machine, h.Snippet)
+					sanitizeTerm(h.Path), sanitizeTerm(h.Title), sanitizeTerm(h.Type),
+					sanitizeTerm(h.Project), sanitizeTerm(h.Machine), sanitizeTerm(h.Snippet))
 			}
 			return nil
 		},
@@ -160,4 +166,15 @@ machine can find a runbook or field report it did not author.
 	cmd.Flags().StringVar(&project, "project", "", "restrict matches to one project")
 	cmd.Flags().IntVar(&limit, "limit", 10, "maximum hits to return")
 	return cmd
+}
+
+// sanitizeTerm replaces control bytes (everything unicode.IsControl except
+// tab) with spaces so mart-indexed content renders inert in the terminal.
+func sanitizeTerm(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\t' || !unicode.IsControl(r) {
+			return r
+		}
+		return ' '
+	}, s)
 }

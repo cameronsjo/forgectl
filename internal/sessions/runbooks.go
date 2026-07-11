@@ -46,6 +46,13 @@ func ScanRunbooks(root, machine string) ([]RunbookRow, error) {
 		if err != nil {
 			return err
 		}
+		// Never follow symlinks: os.ReadFile would read the TARGET, letting a
+		// planted .md symlink exfiltrate an arbitrary local file (~/.pgpass,
+		// a key) into the shared cross-machine mart. Real files only.
+		if d.Type()&fs.ModeSymlink != 0 {
+			slog.Warn("Skipping symlink in runbook corpus — only regular files are indexed.", "path", path)
+			return nil
+		}
 		if d.IsDir() || !strings.HasSuffix(strings.ToLower(d.Name()), ".md") {
 			return nil
 		}
@@ -115,9 +122,13 @@ func ParseRunbook(relPath, content, machine string) RunbookRow {
 
 // splitFrontmatter extracts scalar `key: value` pairs from a leading YAML
 // frontmatter block (`---` ... `---`). Nested/multiline values are skipped,
-// not parsed — the four keys the index consumes are all scalars.
+// not parsed — the four keys the index consumes are all scalars. CRLF fences
+// are tolerated (the corpus syncs across macOS/Windows/WSL).
 func splitFrontmatter(content string) (map[string]string, string, bool) {
 	rest, found := strings.CutPrefix(content, "---\n")
+	if !found {
+		rest, found = strings.CutPrefix(content, "---\r\n")
+	}
 	if !found {
 		return nil, content, false
 	}
@@ -135,7 +146,7 @@ func splitFrontmatter(content string) (map[string]string, string, bool) {
 		if !ok || strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
 			continue
 		}
-		val = strings.TrimSpace(val)
+		val = strings.TrimSpace(val) // also drops a CRLF line's trailing \r
 		val = strings.Trim(val, `"'`)
 		if val != "" {
 			fm[strings.TrimSpace(key)] = val
