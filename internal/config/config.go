@@ -47,6 +47,9 @@ const logKeepDays = 7
 //	[clean]              # forgectl clean — dep/build-dir reclaim
 //	default_root = "~/Projects"      # --root default when the flag is omitted
 //	default_type = ""                # --type default: node|python|go|build, "" = all
+//	[sessions]           # forgectl sessions — cross-machine operational mart ETL
+//	dsn     = "postgres://mart@192.168.1.8:5433/sessions_mart" # password via ~/.pgpass; env FORGECTL_SESSIONS_DSN wins
+//	machine = ""                     # provenance label; default: short hostname
 type Config struct {
 	NoIcons  bool           `toml:"no_icons"`
 	LogLevel string         `toml:"log_level"`
@@ -57,6 +60,7 @@ type Config struct {
 	Bench    BenchConfig    `toml:"bench"`
 	Docker   DockerConfig   `toml:"docker"`
 	Clean    CleanConfig    `toml:"clean"`
+	Sessions SessionsConfig `toml:"sessions"`
 }
 
 // LaunchConfig is the [launch] section: base defaults plus directory-keyed
@@ -152,6 +156,26 @@ type CleanConfig struct {
 // IsZero reports whether the [clean] section was absent or empty.
 func (cc CleanConfig) IsZero() bool {
 	return cc.DefaultRoot == "" && cc.DefaultType == ""
+}
+
+// SessionsConfig is the [sessions] section: how `forgectl sessions` reaches
+// the cross-machine operational mart (an always-on Postgres holding the
+// session index + runbook full-text index). A zero value means "section
+// absent" — internal/sessions applies its own defaults (metrics/runbooks
+// under ~/.claude, machine from the short hostname) and requires a DSN from
+// FORGECTL_SESSIONS_DSN or --dsn. The DSN SHOULD omit the password: pgx
+// resolves it from ~/.pgpass (libpq-compatible), keeping the secret outside
+// the repo and the config file.
+type SessionsConfig struct {
+	DSN         string `toml:"dsn"`          // e.g. postgres://mart@192.168.1.8:5433/sessions_mart
+	Machine     string `toml:"machine"`      // provenance label; default: short hostname
+	MetricsDir  string `toml:"metrics_dir"`  // default ~/.claude/metrics
+	RunbooksDir string `toml:"runbooks_dir"` // default ~/.claude/cadence/runbooks
+}
+
+// IsZero reports whether the [sessions] section was absent or empty.
+func (sc SessionsConfig) IsZero() bool {
+	return sc.DSN == "" && sc.Machine == "" && sc.MetricsDir == "" && sc.RunbooksDir == ""
 }
 
 // Baked defaults for hearth's frozen OTLP transport. These are the values a
