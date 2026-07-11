@@ -29,7 +29,7 @@ type Ref struct {
 
 // localOwnerSentinel is the reserved Owner value localRef (local.go) uses to
 // mark a synthetic, offline-review Ref. It must never be assignable to a real
-// PR ref — see IsLocal and the reservation check in refFrom/ResolveRef —
+// PR ref — see IsLocal and the reservation check in RefFromParts/ResolveRef —
 // otherwise a real GitHub owner literally named "local" could produce a Ref
 // indistinguishable from a local-mode session, defeating the window-name and
 // PostReview guards that key off it.
@@ -85,10 +85,10 @@ func ParseRef(s string) (Ref, error) {
 		return Ref{}, fmt.Errorf("empty PR reference")
 	}
 	if m := reSlug.FindStringSubmatch(s); m != nil {
-		return refFrom(m[1], m[2], m[3])
+		return RefFromParts(m[1], m[2], m[3])
 	}
 	if m := reURL.FindStringSubmatch(s); m != nil {
-		return refFrom(m[1], m[2], m[3])
+		return RefFromParts(m[1], m[2], m[3])
 	}
 	if m := reBare.FindStringSubmatch(s); m != nil {
 		n, err := parseNumber(m[1])
@@ -100,10 +100,16 @@ func ParseRef(s string) (Ref, error) {
 	return Ref{}, fmt.Errorf("unrecognized PR reference %q (want owner/repo#N, a github.com PR URL, or a bare number)", s)
 }
 
-// refFrom builds a validated Ref from regex-captured components. The owner and
-// repo already passed the anchored charset; ".." is impossible under that
-// class but rejected explicitly for defense in depth.
-func refFrom(owner, repo, num string) (Ref, error) {
+// RefFromParts builds a validated Ref from separate owner/repo/number strings.
+// It is the ONE anchored validator every reference path shares: ParseRef feeds
+// it regex captures, the discovery parser feeds it gh-output fields, and
+// internal/review feeds it un-prevalidated issue/PR rows — so it re-checks the
+// anchored charset itself rather than assuming a caller already did. ".." is
+// impossible under that class but rejected explicitly for defense in depth.
+func RefFromParts(owner, repo, num string) (Ref, error) {
+	if !reOwner.MatchString(owner) || !reOwner.MatchString(repo) {
+		return Ref{}, fmt.Errorf("reference owner/repo %q/%q outside allowed charset", owner, repo)
+	}
 	if owner == ".." || repo == ".." {
 		return Ref{}, fmt.Errorf("PR reference must not contain %q", "..")
 	}
@@ -177,6 +183,14 @@ func (c *Client) ResolveRef(ctx context.Context, s string) (Ref, error) {
 
 // reOwner matches a single owner or repo component in isolation (anchored).
 var reOwner = regexp.MustCompile(`^` + ownerRepoClass + `$`)
+
+// ValidOwnerRepoPart reports whether s is usable as a single owner or repo
+// argv component: the anchored charset plus the leading-'-' and ".." guards
+// RefFromParts applies — for callers that must vet a config-sourced value
+// before it becomes an argv (the --owner scoping in search paths).
+func ValidOwnerRepoPart(s string) bool {
+	return reOwner.MatchString(s) && !strings.HasPrefix(s, "-") && s != ".."
+}
 
 // resolveOrigin asks gh for the cwd repo's owner/name, falling back to parsing
 // the git origin URL. Both paths run through the Runner seam.

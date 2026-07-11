@@ -65,6 +65,12 @@ func TestShouldLaunchTUI(t *testing.T) {
 		// arg to Cobra, not be mistaken for an unknown subverb → menu.
 		{"pr with ref positional stays with cobra", []string{"pr", "owner/repo#1"}, false},
 		{"pr known subverb does not launch", []string{"pr", "list"}, false},
+		// A group whose parent takes value-flags: the flag VALUE is a non-flag
+		// token and must reach Cobra, not be mistaken for an unknown subverb →
+		// menu (the review Use line declares this via its [--…] placeholders).
+		{"review repo-flag value stays with cobra", []string{"review", "--json", "--repo", "owner/name"}, false},
+		{"review kind-flag value stays with cobra", []string{"review", "--kind", "issue"}, false},
+		{"review known subverb does not launch", []string{"review", "mark", "owner/repo#1"}, false},
 		{"version flag stays with fang", []string{"--version"}, false},
 		{"help flag stays with fang", []string{"--help"}, false},
 		{"completion command does not launch", []string{"completion", "zsh"}, false},

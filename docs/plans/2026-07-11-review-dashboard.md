@@ -101,10 +101,11 @@ when EVERY source fails (all-degraded = no data to render; mirror the spirit of
 **`github.go`** — the GitHub source over `exec.Runner`:
 
 - Construction: `NewGitHub(run exec.Runner, owners []string)`.
-- Queries per owner: `gh search issues --owner <o> --state open --json <fields> --limit 500`
-  and `gh search prs --owner <o> --state open --json <fields> --limit 500`. Owner values come
-  from config (validated against the same anchored owner charset as `internal/pr` — config is
-  low-trust input to an argv).
+- Queries per owner: `gh search issues --owner <o> --state open --json <fields> --limit 1000`
+  and `gh search prs --owner <o> --state open --json <fields> --limit 1000` (gh's max — the
+  live inventory measured 611 open issues at first run, past the originally planned 500).
+  Owner values come from config (validated against the same anchored owner charset as
+  `internal/pr` — config is low-trust input to an argv).
 - **Deliberately `--owner`-scoped, NOT `@me`:** this is the owner-wide inventory view;
   `pr dash`/`pr prs` keep their involvement scoping.
 - Issue JSON fields: `number,title,url,author,updatedAt,state,labels,repository`. PR fields:

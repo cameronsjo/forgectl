@@ -50,6 +50,8 @@ const logKeepDays = 7
 //	[sessions]           # forgectl sessions — cross-machine operational mart ETL
 //	dsn     = "postgres://mart@192.168.1.8:5433/sessions_mart" # password via ~/.pgpass; env FORGECTL_SESSIONS_DSN wins
 //	machine = ""                     # provenance label; default: short hostname
+//	[review]             # forgectl review — cross-project work inventory
+//	owners = ["cameronsjo"]          # gh search --owner scope; default cameronsjo
 type Config struct {
 	NoIcons  bool           `toml:"no_icons"`
 	LogLevel string         `toml:"log_level"`
@@ -61,6 +63,7 @@ type Config struct {
 	Docker   DockerConfig   `toml:"docker"`
 	Clean    CleanConfig    `toml:"clean"`
 	Sessions SessionsConfig `toml:"sessions"`
+	Review   ReviewConfig   `toml:"review"`
 }
 
 // LaunchConfig is the [launch] section: base defaults plus directory-keyed
@@ -176,6 +179,19 @@ type SessionsConfig struct {
 // IsZero reports whether the [sessions] section was absent or empty.
 func (sc SessionsConfig) IsZero() bool {
 	return sc.DSN == "" && sc.Machine == "" && sc.MetricsDir == "" && sc.RunbooksDir == ""
+}
+
+// ReviewConfig is the [review] section: which owners `forgectl review` fans
+// its gh searches across. A zero value means "section absent" — the CLI layer
+// applies its built-in default owner. Owner values are low-trust argv input;
+// the search layer validates them against the anchored owner charset.
+type ReviewConfig struct {
+	Owners []string `toml:"owners"`
+}
+
+// IsZero reports whether the [review] section was absent or empty.
+func (rc ReviewConfig) IsZero() bool {
+	return len(rc.Owners) == 0
 }
 
 // Baked defaults for hearth's frozen OTLP transport. These are the values a
@@ -506,6 +522,20 @@ func PrReviewedPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "pr-reviewed.json"), nil
+}
+
+// ReviewReviewedPath returns the on-disk path for the `forgectl review`
+// reviewed-state store: <os.UserConfigDir()>/forgectl/review-reviewed.json.
+// Deliberately separate from PrReviewedPath's store — review keys are
+// host-qualified ("github.com/owner/repo#N") and span issues, so sharing the
+// pr file would mix two key dialects in one map. Same configDir() base as
+// every other forgectl path, so they never drift.
+func ReviewReviewedPath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "review-reviewed.json"), nil
 }
 
 // PrSessionsDir returns the forgectl-owned directory that holds `forgectl pr`
