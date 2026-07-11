@@ -1,0 +1,2 @@
+{"sessionId":"11111111-1111-1111-1111-111111111111","costUsd":0.5,"commitHashAfter":"aaaa","branch":"main","repo":"hearth"}
+{"sessionId":"subagent-child","parentSessionId":"11111111-1111-1111-1111-111111111111","costUsd":1.25,"commitHashAfter":"bbbb","branch":"main","repo":"hearth"}
