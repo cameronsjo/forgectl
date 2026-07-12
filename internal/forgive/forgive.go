@@ -18,14 +18,6 @@ func Normalize(s string) string {
 	return strings.TrimRight(lower, " \t.,!?;:")
 }
 
-// ProjectAliases maps each canonical projects verb to its accepted aliases.
-// Same single-source-of-truth pattern as TmuxAliases.
-var ProjectAliases = map[string][]string{
-	"pick":  {"p", "open"},
-	"list":  {"l", "ls", "find"},
-	"clone": {"c"},
-}
-
 // LaunchAliases maps each canonical launch subcommand to its accepted aliases.
 // The `cl` shorthand for the launch group itself is a Cobra alias on the parent
 // command (see newLaunchCmd), not a subcommand alias, so it is not listed here.

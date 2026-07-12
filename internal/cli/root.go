@@ -9,7 +9,6 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/module"
-	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -49,7 +48,6 @@ func newRoot(deps module.Deps) *cobra.Command {
 
 	// Hand-wired groups awaiting manifest conversion.
 	root.AddCommand(newTmuxCmd(tmux.New(deps.Runner)))
-	root.AddCommand(newProjectsCmd(projects.New(deps.Runner)))
 	root.AddCommand(newConfigCmd(deps.Cfg))
 	root.AddCommand(newLaunchCmd(deps.Cfg))
 	root.AddCommand(newWorkflowCmd(deps.Cfg))
