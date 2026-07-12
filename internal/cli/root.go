@@ -9,7 +9,6 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/module"
-	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // newRoot builds the root command tree: registry-driven modules first
@@ -47,7 +46,6 @@ func newRoot(deps module.Deps) *cobra.Command {
 	}
 
 	// Hand-wired groups awaiting manifest conversion.
-	root.AddCommand(newTmuxCmd(tmux.New(deps.Runner)))
 	root.AddCommand(newLaunchCmd(deps.Cfg))
 	root.AddCommand(newWorkflowCmd(deps.Cfg))
 	root.AddCommand(newPrCmd(deps.Cfg))

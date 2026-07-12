@@ -13,6 +13,7 @@ import "github.com/cameronsjo/forgectl/internal/module"
 // gate, this comment is just the pointer (ADR-0005 §Tier policy).
 func allModules() []module.Manifest {
 	return []module.Manifest{
+		tmuxModule,
 		projectsModule,
 		configModule,
 		netModule,

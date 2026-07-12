@@ -4,8 +4,6 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
-
-	"github.com/cameronsjo/forgectl/internal/forgive"
 )
 
 // TestApplyAliases_SkipsDashAndSelfName pins the two skip rules the shared
@@ -45,7 +43,7 @@ func TestApplyAliases_TmuxLastSurface(t *testing.T) {
 	for _, name := range []string{"ls", "pick", "kill", "rename", "windows", "tree", "last", "cheat"} {
 		parent.AddCommand(&cobra.Command{Use: name})
 	}
-	applyAliases(parent, forgive.TmuxAliases)
+	applyAliases(parent, tmuxAliases)
 
 	for _, sub := range parent.Commands() {
 		if sub.Name() == "last" {
