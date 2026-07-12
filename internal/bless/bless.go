@@ -1,6 +1,7 @@
 package bless
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -55,40 +56,134 @@ func SignEnvelope(ctx context.Context, b Blesser, label, keyID string, d Domain,
 	}, nil
 }
 
+// ErrAnchorExists reports that AnchorPath already holds an anchor. Installing
+// never overwrites: replacing a live root of trust must be a deliberate,
+// visible act (a `sudo rm` the human types), never a side effect of re-running
+// `trust init`.
+var ErrAnchorExists = errors.New("a trust anchor is already installed")
+
+// anchorInstallScript is the privileged half of the anchor install, run under
+// one interactive sudo. It is assembled at init from the AnchorPath constant
+// alone — no caller input, and nothing an agent controls, ever reaches the
+// script TEXT. The key arrives as the positional "$1".
+//
+// The shape is the whole security argument, so it is worth spelling out. The
+// adversary is a same-UID local agent with ordinary file and exec access: it
+// cannot become root, but it CAN write any file this user can write, at any
+// moment — including while the human is typing a sudo password. So the anchor
+// must never be staged anywhere the agent can reach:
+//
+//   - The key travels through ARGV, not a file. Argv is fixed at exec time;
+//     there is no window in which its contents can be swapped. (The anchor is a
+//     PUBLIC key — integrity is the only requirement, so its visibility in `ps`
+//     costs nothing.)
+//   - `set -C` (noclobber) turns the `>` redirect into an O_EXCL create. That
+//     fails if the anchor already exists AND refuses to follow a symlink planted
+//     at that path, so the write is atomic and cannot be redirected.
+//   - The explicit `-e`/`-L` test in front gives that refusal a clean exit code
+//     (3) instead of a generic redirect failure, so the CLI can report it
+//     precisely. It tests `-L` as well because a DANGLING symlink is invisible to
+//     `-e` — noclobber still refuses it, but with the generic code.
+//   - A symlinked parent directory is refused outright (exit 4). Planting it
+//     requires write access to /etc, i.e. root — out of scope — but the check is
+//     free and closes the write-through-symlink shape completely.
+var anchorInstallScript = "set -eu\n" +
+	"umask 022\n" +
+	"ANCHOR='" + AnchorPath + "'\n" +
+	"DIR='" + filepath.Dir(AnchorPath) + "'\n" +
+	`if [ -L "$DIR" ]; then exit 4; fi
+if [ -e "$ANCHOR" ] || [ -L "$ANCHOR" ]; then exit 3; fi
+mkdir -p "$DIR"
+chown root:wheel "$DIR"
+chmod 0755 "$DIR"
+set -C
+printf '%s\n' "$1" > "$ANCHOR"
+chown root:wheel "$ANCHOR"
+chmod 0644 "$ANCHOR"
+`
+
+// readAnchorFile reads the anchor back for the post-install check. It is a
+// package var solely so same-package tests can point the read-back at a temp
+// file; production always reads the compiled-in AnchorPath, and nothing outside
+// this package (least of all an agent) can reassign it.
+var readAnchorFile = func() ([]byte, error) { return os.ReadFile(AnchorPath) }
+
 // InstallAnchor writes the anchor public key to the compiled-in AnchorPath as a
-// single base64 line, root-owned and non-writable, via two interactive sudo
-// legs (the human types the password): first `install -d` to create the parent
-// directory, then `install` to place the file. It never removes or overwrites —
-// the refuse-if-exists guard lives in the CLI layer, so InstallAnchor is a pure
-// write and the temp file is always cleaned up.
+// single base64 line, root-owned and world-readable, through ONE interactive
+// sudo leg (the human types the password) that carries the key in argv and
+// creates the file atomically. See anchorInstallScript for why that shape is
+// load-bearing. Installing never overwrites: an existing anchor is
+// ErrAnchorExists.
+//
+// After the privileged leg returns, the anchor is read back and compared against
+// the key we meant to install. The sudo leg is the only trusted step in the
+// sequence; the read-back proves nothing raced us between the enrollment and the
+// install, and turns any surprise into a loud refusal rather than a silently
+// wrong root of trust.
 func InstallAnchor(ctx context.Context, run exec.Runner, pubDER []byte) error {
-	line := base64.StdEncoding.EncodeToString(pubDER) + "\n"
-
-	tmp, err := os.CreateTemp("", "forgectl-anchor-*.pub")
+	// Refuse to install anything that is not a key we would later accept — a
+	// malformed anchor is unrecoverable without root.
+	want, err := canonicalPubDER(pubDER)
 	if err != nil {
-		return fmt.Errorf("create temp anchor file: %w", err)
+		return fmt.Errorf("anchor key: %w", err)
 	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
+	b64 := base64.StdEncoding.EncodeToString(pubDER)
 
-	if _, err := tmp.WriteString(line); err != nil {
-		tmp.Close() //nolint:errcheck
-		return fmt.Errorf("write temp anchor file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp anchor file: %w", err)
-	}
-
-	anchorDir := filepath.Dir(AnchorPath)
 	slog.Debug("Preparing to install trust anchor.", "path", AnchorPath)
-	if err := run.RunInteractive(ctx, "sudo", "install", "-d", "-o", "root", "-g", "wheel", "-m", "0755", anchorDir); err != nil {
-		return fmt.Errorf("create anchor directory %s: %w", anchorDir, err)
-	}
-	if err := run.RunInteractive(ctx, "sudo", "install", "-o", "root", "-g", "wheel", "-m", "0644", tmpPath, AnchorPath); err != nil {
+	if err := run.RunInteractive(ctx, "sudo", "sh", "-c", anchorInstallScript, "_", b64); err != nil {
+		switch code, ok := exitCodeOf(err); {
+		case ok && code == 3:
+			return fmt.Errorf("%w at %s: remove it with 'sudo rm %s' before re-initializing", ErrAnchorExists, AnchorPath, AnchorPath)
+		case ok && code == 4:
+			return fmt.Errorf("install anchor: %s is a symlink; refusing to write the root of trust through it", filepath.Dir(AnchorPath))
+		}
 		return fmt.Errorf("install anchor %s: %w", AnchorPath, err)
 	}
-	slog.Debug("Successfully installed trust anchor.", "path", AnchorPath)
+
+	got, err := readAnchorFile()
+	if err != nil {
+		return fmt.Errorf("verify installed anchor: read %s: %w", AnchorPath, err)
+	}
+	gotPub, err := ParseAnchorFile(got)
+	if err != nil {
+		return fmt.Errorf("verify installed anchor %s: %w", AnchorPath, err)
+	}
+	gotDER, err := EncodePublicKey(gotPub)
+	if err != nil {
+		return fmt.Errorf("verify installed anchor %s: %w", AnchorPath, err)
+	}
+	if !bytes.Equal(gotDER, want) {
+		return fmt.Errorf(
+			"the trust anchor now at %s is NOT the key that was just enrolled (installed %s, expected %s) — "+
+				"something replaced it mid-install; remove it with 'sudo rm %s' and re-run trust init",
+			AnchorPath, Fingerprint(gotDER), Fingerprint(want), AnchorPath)
+	}
+
+	slog.Debug("Successfully installed trust anchor.", "path", AnchorPath, "keyID", Fingerprint(want))
 	return nil
+}
+
+// canonicalPubDER parses a PKIX DER public key and re-encodes it, yielding the
+// canonical byte form. Comparing canonical forms means the post-install check
+// answers "is this the same KEY" rather than "are these the same bytes".
+func canonicalPubDER(der []byte) ([]byte, error) {
+	pub, err := ParsePublicKey(der)
+	if err != nil {
+		return nil, err
+	}
+	return EncodePublicKey(pub)
+}
+
+// exitCodeOf walks the error chain for anything exposing ExitCode() int — the
+// shape exec.CommandError unwraps to (os/exec's *ExitError), and the shape tests
+// inject. It is how both the helper's and the install script's typed exit codes
+// are read back.
+func exitCodeOf(err error) (int, bool) {
+	var coded interface{ ExitCode() int }
+	if errors.As(err, &coded) {
+		return coded.ExitCode(), true
+	}
+	return 0, false
 }
 
 // StepCheck is the bless-time view of one workflow step, decoupled from

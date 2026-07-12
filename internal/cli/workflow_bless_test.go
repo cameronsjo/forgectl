@@ -51,7 +51,7 @@ func TestWorkflowBless_HappyPath(t *testing.T) {
 	keyID := bless.Fingerprint(pubDER)
 
 	swapTrustStorer(t, fakeTrustStorer{store: enrolledStore(keyID, pubDER)})
-	cliFakeHelperEnv(t)
+	cliFakeHelper(t)
 
 	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
 		switch args[0] {
@@ -216,7 +216,7 @@ args = ["-C", "${workspace}", "check"]
 	pubDER := cliPubDER(t, key)
 	keyID := bless.Fingerprint(pubDER)
 	swapTrustStorer(t, fakeTrustStorer{store: enrolledStore(keyID, pubDER)})
-	cliFakeHelperEnv(t)
+	cliFakeHelper(t)
 
 	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
 		switch args[0] {
@@ -277,7 +277,7 @@ func TestWorkflowBless_NotEnrolledKeyRefused(t *testing.T) {
 	peerPub := cliPubDER(t, peer)
 	peerID := bless.Fingerprint(peerPub)
 	swapTrustStorer(t, fakeTrustStorer{store: enrolledStore(peerID, peerPub)})
-	cliFakeHelperEnv(t)
+	cliFakeHelper(t)
 
 	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
 		switch args[0] {
@@ -319,9 +319,27 @@ func TestWorkflowTrustInit_RefusesWhenAnchorExists(t *testing.T) {
 	}
 }
 
+// spyAnchorInstall swaps the privileged anchor write for a recorder, returning
+// the slice it appends each installed key to. A unit test cannot create a
+// root-owned /etc file, and the real InstallAnchor now reads the anchor back to
+// detect a raced write — so the CLI tests exercise the trust-init FLOW here and
+// leave the argv + read-back assertions to internal/bless's own tests.
+func spyAnchorInstall(t *testing.T, fail error) *[][]byte {
+	t.Helper()
+	var calls [][]byte
+	prev := installAnchor
+	installAnchor = func(_ context.Context, _ exec.Runner, pubDER []byte) error {
+		calls = append(calls, pubDER)
+		return fail
+	}
+	t.Cleanup(func() { installAnchor = prev })
+	return &calls
+}
+
 func TestWorkflowTrustInit_HappyPath(t *testing.T) {
 	cliRedirectConfigDir(t)
-	cliFakeHelperEnv(t)
+	cliFakeHelper(t)
+	anchorCallsPtr := spyAnchorInstall(t, nil)
 	// Point the refuse-check at a guaranteed-absent path so the test is
 	// hermetic even on a machine that has really run trust init.
 	absent := filepath.Join(t.TempDir(), "no-anchor.pub")
@@ -364,21 +382,22 @@ func TestWorkflowTrustInit_HappyPath(t *testing.T) {
 		t.Errorf("trust store sidecar not written: %v", err)
 	}
 
-	// The anchor install legs must go through the interactive (sudo) path.
-	var sawInteractiveSudo bool
-	for _, c := range fake.Calls {
-		if c.Name == "sudo" && c.Interactive {
-			sawInteractiveSudo = true
-		}
+	// The anchor is installed LAST, after the key and store exist — so a
+	// cancelled sudo leaves reusable material (see the resume test). The argv it
+	// builds, and its post-install read-back, are pinned by internal/bless's own
+	// tests; here we assert the flow reached it with the enrolled key.
+	anchorCalls := *anchorCallsPtr
+	if len(anchorCalls) != 1 {
+		t.Fatalf("expected exactly one anchor install, got %d", len(anchorCalls))
 	}
-	if !sawInteractiveSudo {
-		t.Error("expected an interactive sudo call for the anchor install")
+	if string(anchorCalls[0]) != string(pubDER) {
+		t.Error("anchor install did not receive the enrolled public key")
 	}
 }
 
 func TestWorkflowTrustInit_CancelledSudoResumes(t *testing.T) {
 	cliRedirectConfigDir(t)
-	cliFakeHelperEnv(t)
+	cliFakeHelper(t)
 	absent := filepath.Join(t.TempDir(), "no-anchor.pub")
 	old := anchorStatPath
 	anchorStatPath = absent
@@ -413,9 +432,22 @@ func TestWorkflowTrustInit_CancelledSudoResumes(t *testing.T) {
 		}}
 	}
 
-	// Run 1: the interactive sudo (InstallAnchor) is cancelled.
+	// The anchor write fails the first time (the human cancels the sudo prompt)
+	// and succeeds on the resume — the point of the test is that run 1 leaves the
+	// key and store REUSABLE, so run 2 completes the anchor leg alone.
+	var anchorAttempts int
+	prevInstall := installAnchor
+	installAnchor = func(_ context.Context, _ exec.Runner, _ []byte) error {
+		anchorAttempts++
+		if anchorAttempts == 1 {
+			return errors.New("sudo: cancelled by user")
+		}
+		return nil
+	}
+	t.Cleanup(func() { installAnchor = prevInstall })
+
+	// Run 1: the anchor install is cancelled.
 	fake1 := makeFake()
-	fake1.InteractiveErr = errors.New("sudo: cancelled by user")
 	cmd1 := newWorkflowTrustInitCmd(module.Deps{Runner: fake1})
 	cmd1.SetOut(new(bytes.Buffer))
 	cmd1.SetErr(new(bytes.Buffer))
@@ -439,6 +471,9 @@ func TestWorkflowTrustInit_CancelledSudoResumes(t *testing.T) {
 	}
 	if enrollCalls < 2 {
 		t.Errorf("expected the resume run to re-attempt enroll, calls = %d", enrollCalls)
+	}
+	if anchorAttempts != 2 {
+		t.Errorf("expected the anchor install to be attempted on both runs, got %d", anchorAttempts)
 	}
 }
 

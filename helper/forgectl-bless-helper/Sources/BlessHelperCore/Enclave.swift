@@ -28,7 +28,19 @@ public enum Enclave {
         try keyDirectory().appendingPathComponent("\(label).key", isDirectory: false)
     }
 
-    static func writeBlob(_ data: Data, to url: URL) throws {
+    /// Create the key blob EXCLUSIVELY: O_CREAT|O_EXCL means exactly one caller
+    /// can win, so two concurrent `enroll` runs can never both mint a key and
+    /// have the second silently replace the first's blob. That race is not
+    /// cosmetic — the loser still receives a public key back (and may see it
+    /// enrolled or anchored), while every later signature comes from the winner's
+    /// key, so an enrolled public key would quietly stop matching the key that
+    /// actually signs. The loser now gets the existing-label error (exit 3)
+    /// instead, exactly as if the key had already existed.
+    ///
+    /// O_EXCL also refuses to follow a symlink at the target path, so the blob
+    /// cannot be redirected. Mode is 0600 (fchmod, not the umask-filtered open
+    /// mode); the directory stays 0700.
+    static func createBlobExclusively(_ data: Data, at url: URL, label: String) throws {
         let dir = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(
             at: dir,
@@ -37,9 +49,44 @@ public enum Enclave {
         // Enforce 0700 even if the directory already existed.
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o700], ofItemAtPath: dir.path)
-        try data.write(to: url, options: [.atomic])
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600], ofItemAtPath: url.path)
+
+        let fd = url.path.withCString { open($0, O_CREAT | O_EXCL | O_WRONLY, 0o600) }
+        if fd < 0 {
+            let code = errno
+            if code == EEXIST {
+                throw HelperError.with(
+                    code: 3,
+                    "key '\(label)' already exists at \(url.path); refusing to overwrite")
+            }
+            throw HelperError.with(
+                code: 1,
+                "failed to create key blob at \(url.path): \(String(cString: strerror(code)))")
+        }
+        defer { close(fd) }
+
+        // The open mode is filtered by umask; force exactly 0600 on the fd we own.
+        if fchmod(fd, 0o600) != 0 {
+            throw HelperError.with(
+                code: 1,
+                "failed to set permissions on key blob at \(url.path): \(String(cString: strerror(errno)))")
+        }
+
+        try data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
+            guard let base = buffer.baseAddress, buffer.count > 0 else {
+                throw HelperError.with(code: 1, "refusing to persist an empty key blob")
+            }
+            var written = 0
+            while written < buffer.count {
+                let n = write(fd, base.advanced(by: written), buffer.count - written)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    throw HelperError.with(
+                        code: 1,
+                        "failed to write key blob at \(url.path): \(String(cString: strerror(errno)))")
+                }
+                written += n
+            }
+        }
     }
 
     // MARK: - Access control
@@ -65,6 +112,11 @@ public enum Enclave {
     /// Create a fresh SE key, persist its sealed blob, and return the public key
     /// as base64(std) of PKIX DER. Creation requires no user presence; presence
     /// is only enforced at signing time. Refuses to overwrite an existing blob.
+    ///
+    /// The existence check below is only a fast, legible path to the exit-3
+    /// error; the guarantee lives in createBlobExclusively, whose O_EXCL create
+    /// is what makes concurrent enrolls safe. A losing racer's freshly minted
+    /// enclave key is simply never persisted, so it can never sign anything.
     public static func enroll(label: String) throws -> String {
         guard SecureEnclave.isAvailable else {
             throw HelperError.with(code: 1, "Secure Enclave is not available on this machine")
@@ -83,7 +135,7 @@ public enum Enclave {
             throw HelperError.with(
                 code: 1, "failed to create Secure Enclave key: \(error.localizedDescription)")
         }
-        try writeBlob(key.dataRepresentation, to: url)
+        try createBlobExclusively(key.dataRepresentation, at: url, label: label)
         return key.publicKey.derRepresentation.base64EncodedString()
     }
 
