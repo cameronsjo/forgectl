@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -139,7 +140,33 @@ func TestInstallAnchor_TwoSudoLegs(t *testing.T) {
 	}
 }
 
-func TestCheckRunStepParamRefs(t *testing.T) {
+// runStep / stripStep / launchStep / worktreeStep build StepChecks shaped like
+// the ones the CLI maps out of the real registry — the guarded-field sets are
+// the registry's (run: Cmd+Args, strip: Globs, launch: Skill/Mode/Posture,
+// worktree: none), so this table stays honest about which fields are scanned.
+func runStep(cmd string, args ...string) StepCheck {
+	return StepCheck{Uses: "run", Guarded: map[string][]string{"Cmd": {cmd}, "Args": args}}
+}
+
+func stripStep(globs ...string) StepCheck {
+	return StepCheck{Uses: "strip", Guarded: map[string][]string{"Globs": globs}}
+}
+
+func launchStep(skill, mode, posture string) StepCheck {
+	return StepCheck{
+		Uses:    "launch",
+		Exports: []string{"review"},
+		Guarded: map[string][]string{"Skill": {skill}, "Mode": {mode}, "Posture": {posture}},
+	}
+}
+
+// worktreeStep has NO guarded fields — repo/ref merely name data, so a ${param}
+// there is the intended parameterization, not an injection.
+func worktreeStep() StepCheck {
+	return StepCheck{Uses: "worktree", Exports: []string{"workspace"}}
+}
+
+func TestCheckGuardedParamRefs(t *testing.T) {
 	tests := []struct {
 		name    string
 		steps   []StepCheck
@@ -148,14 +175,14 @@ func TestCheckRunStepParamRefs(t *testing.T) {
 	}{
 		{
 			name:    "run step with no refs is fine",
-			steps:   []StepCheck{{Uses: "run", Cmd: "make", Args: []string{"build"}}},
+			steps:   []StepCheck{runStep("make", "build")},
 			wantErr: false,
 		},
 		{
 			name: "param colliding with an export name is refused",
 			steps: []StepCheck{
-				{Uses: "worktree", Exports: []string{"workspace"}},
-				{Uses: "run", Cmd: "make", Args: []string{"-C", "${workspace}"}},
+				worktreeStep(),
+				runStep("make", "-C", "${workspace}"),
 			},
 			params:  []string{"workspace"},
 			wantErr: true,
@@ -163,8 +190,8 @@ func TestCheckRunStepParamRefs(t *testing.T) {
 		{
 			name: "param colliding with a LATER step's export is still refused",
 			steps: []StepCheck{
-				{Uses: "run", Cmd: "make"},
-				{Uses: "launch", Exports: []string{"review"}},
+				runStep("make"),
+				launchStep("code-review", "sync", ""),
 			},
 			params:  []string{"review"},
 			wantErr: true,
@@ -172,70 +199,127 @@ func TestCheckRunStepParamRefs(t *testing.T) {
 		{
 			name: "non-colliding params are fine",
 			steps: []StepCheck{
-				{Uses: "worktree", Exports: []string{"workspace"}},
-				{Uses: "run", Cmd: "make", Args: []string{"-C", "${workspace}"}},
+				worktreeStep(),
+				runStep("make", "-C", "${workspace}"),
 			},
 			params:  []string{"repo", "branch"},
 			wantErr: false,
 		},
 		{
 			name:    "run cmd references a param",
-			steps:   []StepCheck{{Uses: "run", Cmd: "${evil}"}},
+			steps:   []StepCheck{runStep("${evil}")},
 			wantErr: true,
 		},
 		{
 			name:    "run arg references a param",
-			steps:   []StepCheck{{Uses: "run", Cmd: "make", Args: []string{"-C", "${evil}"}}},
+			steps:   []StepCheck{runStep("make", "-C", "${evil}")},
 			wantErr: true,
 		},
 		{
 			name: "run step may reference an earlier step's export",
 			steps: []StepCheck{
-				{Uses: "worktree", Exports: []string{"workspace"}},
-				{Uses: "run", Cmd: "make", Args: []string{"-C", "${workspace}"}},
+				worktreeStep(),
+				runStep("make", "-C", "${workspace}"),
 			},
 			wantErr: false,
 		},
 		{
 			name: "run step may not reference a later step's export",
 			steps: []StepCheck{
-				{Uses: "run", Cmd: "make", Args: []string{"-C", "${workspace}"}},
-				{Uses: "worktree", Exports: []string{"workspace"}},
+				runStep("make", "-C", "${workspace}"),
+				worktreeStep(),
 			},
 			wantErr: true,
 		},
 		{
 			name: "run step may not reference its own export",
 			steps: []StepCheck{
-				{Uses: "run", Cmd: "echo", Args: []string{"${self}"}, Exports: []string{"self"}},
+				{Uses: "run", Exports: []string{"self"}, Guarded: map[string][]string{"Cmd": {"echo"}, "Args": {"${self}"}}},
 			},
 			wantErr: true,
 		},
 		{
 			name:    "unterminated ${ is refused",
-			steps:   []StepCheck{{Uses: "run", Cmd: "echo ${oops"}},
+			steps:   []StepCheck{runStep("echo ${oops")},
 			wantErr: true,
-		},
-		{
-			name: "non-run step's fields are not scanned",
-			steps: []StepCheck{
-				{Uses: "worktree", Cmd: "${repo}", Args: []string{"${branch}"}},
-			},
-			wantErr: false,
 		},
 		{
 			name: "multiple earlier exports all allowed",
 			steps: []StepCheck{
-				{Uses: "worktree", Exports: []string{"workspace"}},
-				{Uses: "launch", Exports: []string{"review"}},
-				{Uses: "run", Cmd: "process", Args: []string{"${workspace}", "${review}"}},
+				worktreeStep(),
+				launchStep("code-review", "sync", ""),
+				runStep("process", "${workspace}", "${review}"),
 			},
+			wantErr: false,
+		},
+
+		// strip.globs — the clean-room redaction list IS a security control, so a
+		// param in it would let an agent narrow the strip-list at run time.
+		{
+			name:    "strip globs reference a param",
+			steps:   []StepCheck{worktreeStep(), stripStep("CLAUDE.md", "${sneaky}")},
+			params:  []string{"sneaky"},
+			wantErr: true,
+		},
+		{
+			name:    "strip globs may reference an earlier step's export",
+			steps:   []StepCheck{worktreeStep(), stripStep("${workspace}/CLAUDE.md")},
+			wantErr: false,
+		},
+		{
+			name:    "strip globs with no refs are fine",
+			steps:   []StepCheck{worktreeStep(), stripStep("CLAUDE.md", ".claude/")},
+			wantErr: false,
+		},
+		{
+			name:    "unterminated ${ in strip globs is refused",
+			steps:   []StepCheck{stripStep("${oops")},
+			wantErr: true,
+		},
+
+		// launch.skill / mode / posture steer what the launched agent DOES.
+		{
+			name:    "launch skill references a param",
+			steps:   []StepCheck{launchStep("${skill}", "sync", "")},
+			params:  []string{"skill"},
+			wantErr: true,
+		},
+		{
+			name:    "launch mode references a param",
+			steps:   []StepCheck{launchStep("code-review", "${mode}", "")},
+			params:  []string{"mode"},
+			wantErr: true,
+		},
+		{
+			name:    "launch posture references a param",
+			steps:   []StepCheck{launchStep("code-review", "sync", "${posture}")},
+			params:  []string{"posture"},
+			wantErr: true,
+		},
+		{
+			name:    "launch fields may reference an earlier step's export",
+			steps:   []StepCheck{worktreeStep(), launchStep("${workspace}", "sync", "")},
+			wantErr: false,
+		},
+		{
+			name:    "launch fields with no refs are fine",
+			steps:   []StepCheck{launchStep("code-review", "sync", "opus")},
+			wantErr: false,
+		},
+
+		// The counterweight: params MUST keep flowing into non-guarded data
+		// fields. `workflow run clean-room-review --param repo=owner/x` is the
+		// feature — do not "harden" this away.
+		{
+			name:    "param in a worktree repo/ref is the intended parameterization",
+			steps:   []StepCheck{worktreeStep(), stripStep("CLAUDE.md"), runStep("make", "-C", "${workspace}")},
+			params:  []string{"repo", "branch"},
 			wantErr: false,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := CheckRunStepParamRefs(tc.steps, tc.params)
+			err := CheckGuardedParamRefs(tc.steps, tc.params)
 			if tc.wantErr && err == nil {
 				t.Fatal("expected an error, got nil")
 			}
@@ -243,5 +327,22 @@ func TestCheckRunStepParamRefs(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+// TestCheckGuardedParamRefs_ErrorNamesFieldAndRef pins the error text: an author
+// staring at a refusal needs the step index, the FIELD, and the offending ref.
+func TestCheckGuardedParamRefs_ErrorNamesFieldAndRef(t *testing.T) {
+	err := CheckGuardedParamRefs([]StepCheck{
+		worktreeStep(),
+		stripStep("CLAUDE.md", "${sneaky}"),
+	}, []string{"sneaky"})
+	if err == nil {
+		t.Fatal("expected a refusal")
+	}
+	for _, want := range []string{"step 1", "strip", "Globs", "sneaky"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
 	}
 }

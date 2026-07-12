@@ -45,9 +45,19 @@ func NewExecutor(run exec.Runner, registry StepRegistry, opts ...Option) *Execut
 // and the collect stub (spike scope). strip belongs to the quarantine module
 // and launch to the launch module — contributed through NewRegistry, not
 // listed here (ADR-0005's verb redistribution).
+//
+// GuardedFields (step.Def) is declared here, at the one place each verb is
+// defined, so the bless-time injection guard's model of danger can never drift
+// from the runner that actually executes the verb. `run` is the arbitrary-exec
+// escape hatch: its cmd and args choose what runs, so both are guarded.
+// worktree/clone take repo/ref, which merely NAME data — parameterizing them
+// (`--param repo=owner/x`) is the feature, and the sandbox contains what they
+// fetch. teardown reads only ${workspace} from the Context. collect's from/to
+// are likewise data paths under the same rule (it is an unwired stub; when it
+// is implemented, re-judge whether `to` is a write sink worth guarding).
 func builtinRegistry() StepRegistry {
 	return StepRegistry{
-		"run":      {Runner: runStep},
+		"run":      {Runner: runStep, GuardedFields: []string{"Cmd", "Args"}},
 		"worktree": {Runner: newSandboxStep(false), Exports: []string{"workspace"}},
 		"clone":    {Runner: newSandboxStep(true), Exports: []string{"workspace"}},
 		"teardown": {Runner: teardownStep},

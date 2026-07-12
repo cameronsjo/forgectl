@@ -13,6 +13,13 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
+// KeyLabel is the compiled-in label for this machine's blessing key — the one
+// Secure Enclave key `workflow trust init` mints and every `workflow bless`
+// signs under. A constant (not configurable): the ceremony key's identity is
+// part of the trust surface, and a settable label would let an agent point the
+// signer at a key of its choosing.
+const KeyLabel = "forgectl-bless"
+
 // Blesser is the user-presence signing seam. Enroll mints a new presence-gated
 // key, PublicKey fetches an existing one, and Sign produces a signature over a
 // pre-computed tagged digest — the blesser never sees the file, only the digest,

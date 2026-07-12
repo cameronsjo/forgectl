@@ -23,13 +23,35 @@ var ErrNotYetWired = errors.New("step not yet wired")
 // for later steps (worktree exports ${workspace}, launch exports ${review}).
 type Runner func(ctx context.Context, run exec.Runner, wctx *Context, s PlanStep) error
 
-// Def is a step verb's definition: the runner that executes it and the
-// variables it exports into the Context. Declaring both together keeps a
-// verb's execution and its plan-time exports from drifting apart — adding a
-// verb is one registry entry.
+// Def is a step verb's definition: the runner that executes it, the variables
+// it exports into the Context, and the fields whose values must never carry a
+// CLI param in a blessed workflow. Declaring all three together keeps a verb's
+// execution, its plan-time exports, and its injection surface from drifting
+// apart — adding a verb is one registry entry.
 type Def struct {
 	Runner  Runner
 	Exports []string
+
+	// GuardedFields names this verb's param-hostile fields by their PlanStep Go
+	// field name ("Cmd", "Args", "Globs", "Skill", …). A blessing signs a
+	// workflow FILE's bytes, but ${} references interpolate at run time — so a
+	// field whose value drives execution or enforces a security control must not
+	// be runtime-injectable, or the human blessed one thing and the agent runs
+	// another. `workflow bless` refuses any ${param} in these fields (only an
+	// earlier step's export, which is step-produced rather than CLI-supplied, is
+	// allowed).
+	//
+	// The rule when adding a verb: if a field's value chooses WHAT RUNS (run's
+	// cmd/args), WHAT A LAUNCHED AGENT DOES (launch's skill/mode/posture), or
+	// WHAT A SECURITY CONTROL COVERS (strip's globs — the clean-room redaction
+	// list), it is guarded. A field that merely names DATA (worktree's repo/ref)
+	// is NOT guarded: `--param repo=owner/x` is the intended parameterization,
+	// and the sandbox plus the strip-list — not the blessing — are what contain
+	// whatever that repo holds.
+	//
+	// A name here that is not a real step field is a hard error at bless time,
+	// never a silent skip: a typo must not quietly disable the guard.
+	GuardedFields []string
 }
 
 // Registry maps a step's `uses` value to its definition.

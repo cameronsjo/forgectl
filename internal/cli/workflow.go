@@ -8,10 +8,17 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/bless"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/step"
 	"github.com/cameronsjo/forgectl/internal/workflow"
 )
+
+// verifierFactory builds the Verifier the run and verify paths consult. It is a
+// package-level var purely as a TEST SEAM — tests swap it for a spy or a fake;
+// it is never user-configurable (the trust it roots on is the compiled-in
+// anchor). Production always returns the real user-presence verifier.
+var verifierFactory = func() workflow.Verifier { return bless.NewVerifier() }
 
 // workflowAliases maps each canonical workflow subcommand to its accepted
 // aliases — migrated here from forgive.WorkflowAliases at conversion. The
@@ -74,6 +81,9 @@ base as config.toml (macOS: ~/Library/Application Support/forgectl, Linux:
 	cmd.AddCommand(
 		newWorkflowRunCmd(deps),
 		newWorkflowListCmd(),
+		newWorkflowBlessCmd(deps),
+		newWorkflowVerifyCmd(),
+		newWorkflowTrustCmd(deps),
 	)
 	applyAliases(cmd, workflowAliases)
 	return cmd
@@ -97,14 +107,23 @@ func newWorkflowRunCmd(deps module.Deps) *cobra.Command {
 				return err
 			}
 
-			wf, err := workflow.Resolve(name)
+			// Read the workflow bytes exactly ONCE, verify that buffer, and
+			// parse the SAME buffer — no re-read between check and use closes
+			// TOCTOU by construction (ADR-0006). Built-ins are compiled into
+			// the trust surface and dry-run executes nothing, so both skip the
+			// blessing gate deliberately.
+			src, err := workflow.Load(name)
 			if err != nil {
 				return err
 			}
-
-			verifier := workflow.AllowAllVerifier{}
-			if err := verifier.Verify(name); err != nil {
-				return fmt.Errorf("verify workflow %q: %w", name, err)
+			if !src.Builtin && !dryRun {
+				if err := verifierFactory().Verify(src.Path, src.Data); err != nil {
+					return fmt.Errorf("workflow %q: %w", name, err)
+				}
+			}
+			wf, err := workflow.Parse(src.Data)
+			if err != nil {
+				return err
 			}
 
 			// One merged registry serves BOTH BuildPlan and the Executor —
