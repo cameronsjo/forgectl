@@ -51,6 +51,11 @@ var (
 	ErrBadDigest = errors.New("helper rejected the digest")
 	// ErrNoBlesser: no helper binary is available on this machine.
 	ErrNoBlesser = errors.New("blessing helper not found")
+	// ErrKeyNotPresenceGated: the helper's presence probe found the key can sign
+	// WITHOUT user presence. A planted, non-presence key at the compiled-in label
+	// is exactly how an agent gets its own key anointed as the anchor during
+	// bootstrap, so this must abort trust init and blessing — never be reused.
+	ErrKeyNotPresenceGated = errors.New("key is not presence-gated and may have been planted")
 )
 
 // HelperBlesser drives forgectl-bless-helper over the exec.Runner seam. The
@@ -102,17 +107,6 @@ var resolveSelf = func() (string, error) {
 // key. The env var would buy a dev seam that the build already provides — the
 // verification scripts build forgectl and the helper into one directory as
 // siblings — at the cost of the entire threat model.
-// NewHelperBlesserAt binds a HelperBlesser to an explicit helper path, skipping
-// discovery. Production never calls it — NewHelperBlesser owns the sibling
-// lookup — but tests in other packages need to drive the real argv/stdin/JSON
-// contract through a FakeRunner without a helper on disk. This is a Go
-// constructor, callable only from code compiled into the binary; it is NOT a
-// runtime override an agent can reach (the distinction that made the old
-// FORGECTL_BLESS_HELPER env var a root-of-trust compromise).
-func NewHelperBlesserAt(run exec.Runner, path string) *HelperBlesser {
-	return &HelperBlesser{run: run, path: path}
-}
-
 func NewHelperBlesser(run exec.Runner) (*HelperBlesser, error) {
 	self, err := resolveSelf()
 	if err != nil {
@@ -216,6 +210,8 @@ func mapHelperError(err error) error {
 			return fmt.Errorf("%w: %v", ErrKeyNotFound, err)
 		case 5:
 			return fmt.Errorf("%w: %v", ErrBadDigest, err)
+		case 6:
+			return fmt.Errorf("%w: %v", ErrKeyNotPresenceGated, err)
 		}
 	}
 	return err

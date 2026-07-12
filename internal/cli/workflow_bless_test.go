@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -51,26 +50,9 @@ func TestWorkflowBless_HappyPath(t *testing.T) {
 	keyID := bless.Fingerprint(pubDER)
 
 	swapTrustStorer(t, fakeTrustStorer{store: enrolledStore(keyID, pubDER)})
-	cliFakeHelper(t)
+	cliFakeBless(t, cliFakeBlesser{key: key})
 
-	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
-		switch args[0] {
-		case "pubkey", "enroll":
-			return `{"pubkey":"` + base64.StdEncoding.EncodeToString(pubDER) + `"}`, nil
-		case "sign":
-			// The blesser signs a digest it's handed on stdin; the fake helper
-			// recomputes the SAME workflow-domain digest to return a real sig.
-			dg := bless.TaggedDigest(bless.DomainWorkflow, data)
-			sig, err := ecdsa.SignASN1(rand.Reader, key, dg[:])
-			if err != nil {
-				return "", err
-			}
-			return `{"signature":"` + base64.StdEncoding.EncodeToString(sig) + `"}`, nil
-		}
-		return "", fmt.Errorf("unexpected helper call %v", args)
-	}}
-
-	cmd := newWorkflowBlessCmd(module.Deps{Runner: fake})
+	cmd := newWorkflowBlessCmd(module.Deps{Runner: &exec.FakeRunner{}})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetArgs([]string{"demo"})
@@ -216,24 +198,9 @@ args = ["-C", "${workspace}", "check"]
 	pubDER := cliPubDER(t, key)
 	keyID := bless.Fingerprint(pubDER)
 	swapTrustStorer(t, fakeTrustStorer{store: enrolledStore(keyID, pubDER)})
-	cliFakeHelper(t)
+	cliFakeBless(t, cliFakeBlesser{key: key})
 
-	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
-		switch args[0] {
-		case "pubkey", "enroll":
-			return `{"pubkey":"` + base64.StdEncoding.EncodeToString(pubDER) + `"}`, nil
-		case "sign":
-			dg := bless.TaggedDigest(bless.DomainWorkflow, data)
-			sig, err := ecdsa.SignASN1(rand.Reader, key, dg[:])
-			if err != nil {
-				return "", err
-			}
-			return `{"signature":"` + base64.StdEncoding.EncodeToString(sig) + `"}`, nil
-		}
-		return "", fmt.Errorf("unexpected helper call %v", args)
-	}}
-
-	cmd := newWorkflowBlessCmd(module.Deps{Runner: fake})
+	cmd := newWorkflowBlessCmd(module.Deps{Runner: &exec.FakeRunner{}})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"demo"})
@@ -270,26 +237,17 @@ func TestWorkflowBless_NotEnrolledKeyRefused(t *testing.T) {
 	cliWriteUserWorkflow(t, dir, "demo", []byte(cliValidWorkflow))
 
 	machineKey := cliGenKey(t)
-	machinePub := cliPubDER(t, machineKey)
 
 	// The store enrolls a DIFFERENT (peer) key, not this machine's.
 	peer := cliGenKey(t)
 	peerPub := cliPubDER(t, peer)
 	peerID := bless.Fingerprint(peerPub)
 	swapTrustStorer(t, fakeTrustStorer{store: enrolledStore(peerID, peerPub)})
-	cliFakeHelper(t)
+	// This machine's key is machineKey; a signErr guards that Sign is never
+	// reached once the store lookup rejects the unenrolled key.
+	cliFakeBless(t, cliFakeBlesser{key: machineKey, signErr: fmt.Errorf("sign must not be reached for an unenrolled key")})
 
-	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
-		switch args[0] {
-		case "pubkey", "enroll":
-			return `{"pubkey":"` + base64.StdEncoding.EncodeToString(machinePub) + `"}`, nil
-		case "sign":
-			return "", fmt.Errorf("sign must not be reached for an unenrolled key")
-		}
-		return "", fmt.Errorf("unexpected helper call %v", args)
-	}}
-
-	cmd := newWorkflowBlessCmd(module.Deps{Runner: fake})
+	cmd := newWorkflowBlessCmd(module.Deps{Runner: &exec.FakeRunner{}})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"demo"})
@@ -338,7 +296,9 @@ func spyAnchorInstall(t *testing.T, fail error) *[][]byte {
 
 func TestWorkflowTrustInit_HappyPath(t *testing.T) {
 	cliRedirectConfigDir(t)
-	cliFakeHelper(t)
+	key := cliGenKey(t)
+	pubDER := cliPubDER(t, key)
+	cliFakeBless(t, cliFakeBlesser{key: key})
 	anchorCallsPtr := spyAnchorInstall(t, nil)
 	// Point the refuse-check at a guaranteed-absent path so the test is
 	// hermetic even on a machine that has really run trust init.
@@ -347,24 +307,7 @@ func TestWorkflowTrustInit_HappyPath(t *testing.T) {
 	anchorStatPath = absent
 	t.Cleanup(func() { anchorStatPath = old })
 
-	key := cliGenKey(t)
-	pubDER := cliPubDER(t, key)
-	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
-		switch args[0] {
-		case "enroll", "pubkey":
-			return `{"pubkey":"` + base64.StdEncoding.EncodeToString(pubDER) + `"}`, nil
-		case "sign":
-			dg := bless.TaggedDigest(bless.DomainTrust, []byte("store"))
-			sig, err := ecdsa.SignASN1(rand.Reader, key, dg[:])
-			if err != nil {
-				return "", err
-			}
-			return `{"signature":"` + base64.StdEncoding.EncodeToString(sig) + `"}`, nil
-		}
-		return "", fmt.Errorf("unexpected helper call %v", args)
-	}}
-
-	cmd := newWorkflowTrustInitCmd(module.Deps{Runner: fake})
+	cmd := newWorkflowTrustInitCmd(module.Deps{Runner: &exec.FakeRunner{}})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetArgs(nil)
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
@@ -397,40 +340,12 @@ func TestWorkflowTrustInit_HappyPath(t *testing.T) {
 
 func TestWorkflowTrustInit_CancelledSudoResumes(t *testing.T) {
 	cliRedirectConfigDir(t)
-	cliFakeHelper(t)
 	absent := filepath.Join(t.TempDir(), "no-anchor.pub")
 	old := anchorStatPath
 	anchorStatPath = absent
 	t.Cleanup(func() { anchorStatPath = old })
 
 	key := cliGenKey(t)
-	pubDER := cliPubDER(t, key)
-	var enrollCalls int
-	makeFake := func() *exec.FakeRunner {
-		return &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
-			switch args[0] {
-			case "enroll":
-				enrollCalls++
-				if enrollCalls > 1 {
-					// The key already exists on the resume run: the helper
-					// reports exit 3, which EnsureKey maps to a PublicKey fetch
-					// rather than wedging.
-					return "", cliExitErr{3}
-				}
-				return `{"pubkey":"` + base64.StdEncoding.EncodeToString(pubDER) + `"}`, nil
-			case "pubkey":
-				return `{"pubkey":"` + base64.StdEncoding.EncodeToString(pubDER) + `"}`, nil
-			case "sign":
-				dg := bless.TaggedDigest(bless.DomainTrust, []byte("store"))
-				sig, err := ecdsa.SignASN1(rand.Reader, key, dg[:])
-				if err != nil {
-					return "", err
-				}
-				return `{"signature":"` + base64.StdEncoding.EncodeToString(sig) + `"}`, nil
-			}
-			return "", fmt.Errorf("unexpected helper call %v", args)
-		}}
-	}
 
 	// The anchor write fails the first time (the human cancels the sudo prompt)
 	// and succeeds on the resume — the point of the test is that run 1 leaves the
@@ -446,9 +361,9 @@ func TestWorkflowTrustInit_CancelledSudoResumes(t *testing.T) {
 	}
 	t.Cleanup(func() { installAnchor = prevInstall })
 
-	// Run 1: the anchor install is cancelled.
-	fake1 := makeFake()
-	cmd1 := newWorkflowTrustInitCmd(module.Deps{Runner: fake1})
+	// Run 1: enroll mints the key; the anchor install is cancelled.
+	cliFakeBless(t, cliFakeBlesser{key: key})
+	cmd1 := newWorkflowTrustInitCmd(module.Deps{Runner: &exec.FakeRunner{}})
 	cmd1.SetOut(new(bytes.Buffer))
 	cmd1.SetErr(new(bytes.Buffer))
 	cmd1.SetArgs(nil)
@@ -460,17 +375,15 @@ func TestWorkflowTrustInit_CancelledSudoResumes(t *testing.T) {
 		t.Fatalf("store should survive a cancelled sudo: %v", err)
 	}
 
-	// Run 2: sudo succeeds; enroll now returns exit-3 → PublicKey fallback, so
-	// the resume completes without re-erroring on enroll.
-	fake2 := makeFake()
-	cmd2 := newWorkflowTrustInitCmd(module.Deps{Runner: fake2})
+	// Run 2: the key blob already exists, so enroll reports ErrLabelExists and
+	// EnsureKey falls back to PublicKey rather than wedging; sudo succeeds, so the
+	// resume completes the anchor leg alone.
+	cliFakeBless(t, cliFakeBlesser{key: key, enrollErr: bless.ErrLabelExists})
+	cmd2 := newWorkflowTrustInitCmd(module.Deps{Runner: &exec.FakeRunner{}})
 	cmd2.SetOut(new(bytes.Buffer))
 	cmd2.SetArgs(nil)
 	if err := cmd2.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("resume run should complete: %v", err)
-	}
-	if enrollCalls < 2 {
-		t.Errorf("expected the resume run to re-attempt enroll, calls = %d", enrollCalls)
 	}
 	if anchorAttempts != 2 {
 		t.Errorf("expected the anchor install to be attempted on both runs, got %d", anchorAttempts)

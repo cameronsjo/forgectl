@@ -193,6 +193,7 @@ func TestHelperBlesser_ExitCodeMapping(t *testing.T) {
 		{3, ErrLabelExists},
 		{4, ErrKeyNotFound},
 		{5, ErrBadDigest},
+		{6, ErrKeyNotPresenceGated},
 	}
 	for _, tc := range tests {
 		fake := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
