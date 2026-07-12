@@ -16,6 +16,7 @@ func allModules() []module.Manifest {
 		tmuxModule,
 		projectsModule,
 		configModule,
+		launchModule,
 		netModule,
 		yModule,
 		pipModule,

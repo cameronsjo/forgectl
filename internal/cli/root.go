@@ -46,7 +46,6 @@ func newRoot(deps module.Deps) *cobra.Command {
 	}
 
 	// Hand-wired groups awaiting manifest conversion.
-	root.AddCommand(newLaunchCmd(deps.Cfg))
 	root.AddCommand(newWorkflowCmd(deps.Cfg))
 	root.AddCommand(newPrCmd(deps.Cfg))
 

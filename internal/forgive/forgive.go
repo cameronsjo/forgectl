@@ -20,13 +20,6 @@ func Normalize(s string) string {
 	return strings.TrimRight(lower, " \t.,!?;:")
 }
 
-// LaunchAliases maps each canonical launch subcommand to its accepted aliases.
-// The `cl` shorthand for the launch group itself is a Cobra alias on the parent
-// command (see newLaunchCmd), not a subcommand alias, so it is not listed here.
-var LaunchAliases = map[string][]string{
-	"which": {"config"},
-}
-
 // WorkflowAliases maps each canonical workflow subcommand to its accepted
 // aliases. The `flow` shorthand for the workflow group itself is a Cobra
 // alias on the parent command (see newWorkflowCmd), not a subcommand alias,
