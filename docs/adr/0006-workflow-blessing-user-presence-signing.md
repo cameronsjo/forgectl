@@ -119,6 +119,20 @@ actually mattered**, and both were bootstrap bugs — the moment the root of tru
 Both let a same-UID agent get **its own key installed as the root-owned anchor** — total
 bypass, no root and no password required.
 
+A **third**, found by adversarial dogfooding (planting a key and running the real helper) and
+independently confirmed by a second review pass, was the sharpest: the key-blob directory is
+agent-writable and SE key **creation needs no presence**, so an agent mints its own
+*non-presence* key, writes the blob at the compiled-in label, and waits. `trust init`'s
+idempotent-enroll fallback (added so a cancelled-sudo run could resume) then enrolls the
+agent's key, signs the store with it **silently** — no Touch ID, because it isn't
+presence-gated — and anchors it. The convenience affordance was the exploit; it could not tell
+its own prior key from an agent's plant. **Fix:** the helper *proves* a key is presence-gated
+before trusting it — a signature attempted under `LAContext.interactionNotAllowed = true`
+succeeds for a non-presence key and throws `-1004` for a presence-gated one (a discriminator
+that needs no human and shows no UI, verified on hardware); `pubkey`/`sign` refuse a
+non-presence key (exit 6 → `ErrKeyNotPresenceGated`), which `EnsureKey` propagates rather than
+reusing.
+
 The reason two reviewers walked past #2 is worth naming: the code carried a confident doc
 comment asserting the override was *"deliberate and safe — it redirects only the SIGN side."*
 That sentence was wrong, and it read as evidence. A comment claiming a security property is a
@@ -130,8 +144,23 @@ bug. Both fixes are now pinned by regression tests
 
 Generalizable: **a trust system's weakest moment is its bootstrap.** Steady-state verification
 got the most design attention and held up; establishment — where there is not yet a store to
-check against — is where both compromises lived. Review the ceremony that *creates* trust at
-least as hard as the one that *checks* it.
+check against — is where *all three* compromises lived. Review the ceremony that *creates*
+trust at least as hard as the one that *checks* it.
+
+### Residual: binary integrity is assumed (tracked, not yet closed)
+
+The sibling-discovery fix assumes the helper binary *at* the sibling path is trustworthy. On
+Apple Silicon the default Homebrew prefix (`/opt/homebrew`) is **user-owned**, so a same-UID
+agent can overwrite `forgectl-bless-helper` — or `forgectl` itself — with an ad-hoc-signed
+impostor and win the same bootstrap by a different door. This is at the edge of the threat
+boundary: if the install prefix is agent-writable, the always-on `forgectl` binary (which runs
+the pure-Go verify path in-process) is equally rewritable, so binary integrity is a base
+assumption of the whole feature, not something the code can enforce against a same-UID
+adversary without a Developer ID signature (which the spike's off-ramp declined to buy) or a
+root-owned install path. **Stated, not silently assumed:** the guarantee holds only where
+forgectl and its helper are installed to a location the invoking user's agents cannot
+overwrite. Closing it for the default brew install is tracked as a follow-on (Developer ID
+signing + `codesign` verification before exec, or a root-owned `libexec`).
 
 ## Consequences
 

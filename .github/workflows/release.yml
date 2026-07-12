@@ -7,7 +7,10 @@ on:
 
 jobs:
   goreleaser:
-    runs-on: ubuntu-latest
+    # macOS, not ubuntu: the bless helper is a Swift package and needs an Apple
+    # toolchain. The Go cross-build for linux/{amd64,arm64} still works from
+    # here — every target is CGO_ENABLED=0.
+    runs-on: macos-latest
     permissions:
       contents: write
     steps:
@@ -20,6 +23,48 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25'
+
+      # The helper reports the release version from its own `version` verb, so
+      # stamp it from the tag before compiling. Mirrors the -X ldflags the Go
+      # binary gets from goreleaser.
+      - name: Stamp helper version
+        working-directory: helper/forgectl-bless-helper
+        run: |
+          set -euo pipefail
+          swift --version
+          cat > Sources/BlessHelperCore/Version.swift <<EOF
+          // This file is trivially regenerable: a later release PR overwrites it with the
+          // version derived from the release tag. Keep it a single top-level constant.
+          public let helperVersion = "${GITHUB_REF_NAME#v}"
+          EOF
+          cat Sources/BlessHelperCore/Version.swift
+
+      # Build the helper universal (arm64 + x86_64) so one cask serves Apple
+      # Silicon and Intel, ad-hoc sign it (a Secure Enclave key needs *a*
+      # signature — a stable one is what binds the key to this binary), and
+      # stage it where .goreleaser.yaml's darwin archive picks it up.
+      - name: Build bless helper (universal)
+        working-directory: helper/forgectl-bless-helper
+        run: |
+          set -euo pipefail
+          swift build -c release --arch arm64 --arch x86_64
+          BIN="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/forgectl-bless-helper"
+          codesign -s - -f "$BIN"
+          mkdir -p "$GITHUB_WORKSPACE/dist-helper"
+          cp "$BIN" "$GITHUB_WORKSPACE/dist-helper/forgectl-bless-helper"
+          # Fail the release rather than quietly shipping a single-arch helper
+          # to half the Mac users.
+          ARCHS="$(lipo -archs "$GITHUB_WORKSPACE/dist-helper/forgectl-bless-helper")"
+          echo "helper archs: $ARCHS"
+          case " $ARCHS " in
+            *" x86_64 "*) ;;
+            *) echo "::error::bless helper is not universal (got: $ARCHS)"; exit 1 ;;
+          esac
+          case " $ARCHS " in
+            *" arm64 "*) ;;
+            *) echo "::error::bless helper is not universal (got: $ARCHS)"; exit 1 ;;
+          esac
+          codesign -dv "$GITHUB_WORKSPACE/dist-helper/forgectl-bless-helper"
 
       # Mint a short-lived token scoped to the tap repo via the GitHub App
       # (RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY), instead of a long-lived PAT.
