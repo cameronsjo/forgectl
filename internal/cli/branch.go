@@ -7,17 +7,28 @@ import (
 	"github.com/spf13/cobra"
 
 	branchpkg "github.com/cameronsjo/forgectl/internal/branch"
-	"github.com/cameronsjo/forgectl/internal/config"
-	"github.com/cameronsjo/forgectl/internal/exec"
-	"github.com/cameronsjo/forgectl/internal/forgive"
+	"github.com/cameronsjo/forgectl/internal/module"
 )
 
-// newBranchCmd builds `forgectl branch` — mirrors newNetCmd/newDockerCmd in
-// building its own exec.Runner rather than sharing another domain's client
-// lifecycle. Ships flat (no `forgectl git` parent) — see internal/branch's
-// package doc for why.
-func newBranchCmd(cfg config.Config) *cobra.Command {
-	client := branchpkg.New(exec.OSRunner{})
+// branchGroupAliases is branch's shorthand surface ("br") — migrated here
+// from forgive.BranchAliases at conversion. branch ships flat (no subverbs),
+// so this is a plain slice on the command itself, not a SubAliases map. A
+// separate var (not a manifest-routed read) because newBranchCmdForClient
+// also sets it — see yAliases for the initialization-cycle reason.
+var branchGroupAliases = []string{"br"}
+
+// branchModule declares the branch-pruning extension (ADR-0005).
+var branchModule = module.Manifest{
+	Name:         "branch",
+	Tier:         module.TierExtension,
+	GroupAliases: branchGroupAliases,
+	New:          newBranchCmd,
+}
+
+// newBranchCmd builds `forgectl branch` over the registry Deps. Ships flat
+// (no `forgectl git` parent) — see internal/branch's package doc for why.
+func newBranchCmd(deps module.Deps) *cobra.Command {
+	client := branchpkg.New(deps.Runner)
 	return newBranchCmdForClient(client)
 }
 
@@ -32,7 +43,7 @@ func newBranchCmdForClient(client *branchpkg.Client) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:     "branch",
-		Aliases: forgive.BranchAliases,
+		Aliases: branchGroupAliases,
 		Short:   "Prune stale/orphaned git branches (dry-run by default)",
 		Long: `branch enumerates local and/or remote-tracking branches, classifies each as
 safe-to-delete, blocked, or needs-attention against SERVER-SIDE PR truth — never

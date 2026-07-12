@@ -54,13 +54,6 @@ var DockerAliases = map[string][]string{
 	"shell": {"sh", "attach"},
 }
 
-// BranchAliases lists shorthand Cobra aliases for the `branch` command
-// itself. Unlike TmuxAliases/DockerAliases/etc., branch has no subverbs (see
-// internal/branch's package doc for why it ships flat), so this is a plain
-// slice applied directly as Cobra's Aliases field rather than a
-// verb->aliases map iterated by an applyXAliases helper.
-var BranchAliases = []string{"br"}
-
 // CleanAliases lists shorthand Cobra aliases for the `clean` command itself.
 // Same shape as BranchAliases: clean has no subverbs (PR-1 ships it flat,
 // mirroring branch), so this is a plain slice, not a verb->aliases map.
