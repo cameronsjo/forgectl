@@ -3,14 +3,31 @@ package cli
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/cameronsjo/forgectl/internal/config"
-	"github.com/cameronsjo/forgectl/internal/forgive"
+	"github.com/cameronsjo/forgectl/internal/module"
 )
 
-// newBenchCmd builds the `bench` parent command. Verbs are attached as
-// subcommands: `status` reports aggregate health across the local bench.
-// Mirrors newWorkflowCmd's parent/subcommand shape.
-func newBenchCmd(cfg config.Config) *cobra.Command {
+// benchAliases is the single source of truth for bench's subverb shorthands —
+// migrated here from forgive.BenchAliases at conversion. Separate var for the
+// same initialization-cycle reason as yAliases.
+var benchAliases = map[string][]string{
+	"status": {"health", "st"},
+}
+
+// benchModule declares the local-bench interop extension (ADR-0005): owns
+// the [bench] config section.
+var benchModule = module.Manifest{
+	Name:       "bench",
+	Tier:       module.TierExtension,
+	ConfigKey:  "bench",
+	SubAliases: benchAliases,
+	New:        newBenchCmd,
+}
+
+// newBenchCmd builds the `bench` parent command over the registry Deps.
+// Verbs are attached as subcommands: `status` reports aggregate health
+// across the local bench. Mirrors newWorkflowCmd's parent/subcommand shape.
+func newBenchCmd(deps module.Deps) *cobra.Command {
+	cfg := deps.Cfg
 	cmd := &cobra.Command{
 		Use:   "bench",
 		Short: "Discover and health-check the local dev bench (hearth, chronicle, flux)",
@@ -33,6 +50,6 @@ rather than erroring.`,
 		newBenchUpCmd(cfg),
 		newBenchOpenCmd(cfg),
 	)
-	applyAliases(cmd, forgive.BenchAliases)
+	applyAliases(cmd, benchAliases)
 	return cmd
 }

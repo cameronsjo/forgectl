@@ -19,5 +19,6 @@ func allModules() []module.Manifest {
 		branchModule,
 		cleanModule,
 		dockerModule,
+		benchModule,
 	}
 }
