@@ -38,25 +38,8 @@ clipboard without shelling out directly. macOS only.
 		newYCopyCmd(client),
 		newYPasteCmd(client),
 	)
-	applyYAliases(cmd)
+	applyAliases(cmd, forgive.YAliases)
 	return cmd
-}
-
-// applyYAliases sets each y subcommand's Cobra aliases from the forgive
-// registry — the single source of truth (mirrors applyDockerAliases).
-func applyYAliases(parent *cobra.Command) {
-	for _, sub := range parent.Commands() {
-		var valid []string
-		for _, alias := range forgive.YAliases[sub.Name()] {
-			if alias == sub.Name() {
-				continue
-			}
-			valid = append(valid, alias)
-		}
-		if len(valid) > 0 {
-			sub.Aliases = valid
-		}
-	}
 }
 
 // newYCopyCmd builds `y copy`.

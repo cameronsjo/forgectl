@@ -33,23 +33,6 @@ rather than erroring.`,
 		newBenchUpCmd(cfg),
 		newBenchOpenCmd(cfg),
 	)
-	applyBenchAliases(cmd)
+	applyAliases(cmd, forgive.BenchAliases)
 	return cmd
-}
-
-// applyBenchAliases sets each bench subcommand's Cobra aliases from the forgive
-// registry — the single source of truth (mirrors applyWorkflowAliases).
-func applyBenchAliases(parent *cobra.Command) {
-	for _, sub := range parent.Commands() {
-		var valid []string
-		for _, alias := range forgive.BenchAliases[sub.Name()] {
-			if alias == sub.Name() {
-				continue
-			}
-			valid = append(valid, alias)
-		}
-		if len(valid) > 0 {
-			sub.Aliases = valid
-		}
-	}
 }

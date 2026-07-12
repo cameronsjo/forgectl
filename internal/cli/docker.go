@@ -43,25 +43,8 @@ omitted. Configure defaults in the [docker] section of config.toml (macOS:
 		newDockerRunCmd(client),
 		newDockerShellCmd(client),
 	)
-	applyDockerAliases(cmd)
+	applyAliases(cmd, forgive.DockerAliases)
 	return cmd
-}
-
-// applyDockerAliases sets each docker subcommand's Cobra aliases from the
-// forgive registry — the single source of truth (mirrors applyBenchAliases).
-func applyDockerAliases(parent *cobra.Command) {
-	for _, sub := range parent.Commands() {
-		var valid []string
-		for _, alias := range forgive.DockerAliases[sub.Name()] {
-			if alias == sub.Name() {
-				continue
-			}
-			valid = append(valid, alias)
-		}
-		if len(valid) > 0 {
-			sub.Aliases = valid
-		}
-	}
 }
 
 // newDockerBuildCmd builds `docker build`.

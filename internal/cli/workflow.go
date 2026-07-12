@@ -37,25 +37,8 @@ base as config.toml (macOS: ~/Library/Application Support/forgectl, Linux:
 		newWorkflowRunCmd(cfg),
 		newWorkflowListCmd(),
 	)
-	applyWorkflowAliases(cmd)
+	applyAliases(cmd, forgive.WorkflowAliases)
 	return cmd
-}
-
-// applyWorkflowAliases sets each workflow subcommand's Cobra aliases from the
-// forgive registry — mirrors applyLaunchAliases.
-func applyWorkflowAliases(parent *cobra.Command) {
-	for _, sub := range parent.Commands() {
-		var valid []string
-		for _, alias := range forgive.WorkflowAliases[sub.Name()] {
-			if alias == sub.Name() {
-				continue
-			}
-			valid = append(valid, alias)
-		}
-		if len(valid) > 0 {
-			sub.Aliases = valid
-		}
-	}
 }
 
 // newWorkflowRunCmd builds `forgectl workflow run <name> [--dry-run]

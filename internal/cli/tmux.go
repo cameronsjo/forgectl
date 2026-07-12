@@ -31,25 +31,6 @@ func newTmuxCmd(client *tmux.Client) *cobra.Command {
 		newTmuxLastCmd(client),
 		newTmuxCheatCmd(),
 	)
-	applyAliases(cmd)
+	applyAliases(cmd, forgive.TmuxAliases)
 	return cmd
-}
-
-// applyAliases sets each tmux subcommand's Cobra aliases from the forgive
-// registry — the single source of truth. Tokens that aren't valid standalone
-// Cobra command names (the "-" last-session shorthand) are skipped here; the
-// argv normalizer in dispatch.go handles those before Cobra ever sees them.
-func applyAliases(parent *cobra.Command) {
-	for _, sub := range parent.Commands() {
-		var valid []string
-		for _, alias := range forgive.TmuxAliases[sub.Name()] {
-			if alias == "-" || alias == sub.Name() {
-				continue
-			}
-			valid = append(valid, alias)
-		}
-		if len(valid) > 0 {
-			sub.Aliases = valid
-		}
-	}
 }

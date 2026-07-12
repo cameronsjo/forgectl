@@ -71,25 +71,8 @@ with "forgectl launch init".`,
 		newLaunchInitCmd(),
 		newLaunchDoctorCmd(cfg),
 	)
-	applyLaunchAliases(cmd)
+	applyAliases(cmd, forgive.LaunchAliases)
 	return cmd
-}
-
-// applyLaunchAliases sets each launch subcommand's Cobra aliases from the
-// forgive registry — the single source of truth (mirrors applyAliases).
-func applyLaunchAliases(parent *cobra.Command) {
-	for _, sub := range parent.Commands() {
-		var valid []string
-		for _, alias := range forgive.LaunchAliases[sub.Name()] {
-			if alias == sub.Name() {
-				continue
-			}
-			valid = append(valid, alias)
-		}
-		if len(valid) > 0 {
-			sub.Aliases = valid
-		}
-	}
 }
 
 // runLaunch dispatches a `forgectl launch …` invocation. Own-verbs return

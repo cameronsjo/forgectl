@@ -22,23 +22,6 @@ func newProjectsCmd(client *projects.Client) *cobra.Command {
 	cmd.AddCommand(newProjectsPickCmd(client))
 	cmd.AddCommand(newProjectsListCmd(client))
 	cmd.AddCommand(newProjectsCloneCmd(client))
-	applyProjectAliases(cmd)
+	applyAliases(cmd, forgive.ProjectAliases)
 	return cmd
-}
-
-// applyProjectAliases sets each projects subcommand's Cobra aliases from the
-// forgive registry — mirrors applyAliases in tmux.go.
-func applyProjectAliases(parent *cobra.Command) {
-	for _, sub := range parent.Commands() {
-		var valid []string
-		for _, alias := range forgive.ProjectAliases[sub.Name()] {
-			if alias == sub.Name() {
-				continue
-			}
-			valid = append(valid, alias)
-		}
-		if len(valid) > 0 {
-			sub.Aliases = valid
-		}
-	}
 }
