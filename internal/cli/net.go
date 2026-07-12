@@ -7,16 +7,25 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/cameronsjo/forgectl/internal/config"
-	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/module"
 	netpkg "github.com/cameronsjo/forgectl/internal/net"
 )
 
-// newNetCmd builds `forgectl net` — mirrors newLaunchCmd/newWorkflowCmd in
-// building its own exec.Runner rather than sharing the tmux/projects client
-// lifecycle (net has no TUI-side consumer).
-func newNetCmd(cfg config.Config) *cobra.Command {
-	client := netpkg.New(exec.OSRunner{}, netpkg.WithNetConfig(cfg.Net))
+// netModule declares the net extension (ADR-0005): the [net] config section's
+// owner, no alias surface. The conversion template for ConfigKey-owning
+// modules.
+var netModule = module.Manifest{
+	Name:      "net",
+	Tier:      module.TierExtension,
+	ConfigKey: "net",
+	New:       newNetCmd,
+}
+
+// newNetCmd builds `forgectl net` over the registry Deps — the client comes
+// from deps.Runner (OSRunner in Execute, FakeRunner in tests), configured
+// from the [net] section this module claims.
+func newNetCmd(deps module.Deps) *cobra.Command {
+	client := netpkg.New(deps.Runner, netpkg.WithNetConfig(deps.Cfg.Net))
 	return newNetCmdForClient(client)
 }
 

@@ -1,21 +1,24 @@
-// Package cli holds the thin Cobra verbs layered over internal/tmux and
-// internal/projects. Commands parse flags and call ops; they hold no domain
-// logic of their own.
+// Package cli holds the thin Cobra verbs layered over the domain packages
+// (internal/tmux, internal/projects, …). Commands parse flags and call ops;
+// they hold no domain logic of their own. Command groups register through the
+// module registry in modules.go (ADR-0005).
 package cli
 
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/meta"
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/quarantine"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
-// newRoot builds the root command tree. Each domain module registers its
-// parent command here (tmux, projects today; pr/k8s later).
-func newRoot(tmuxClient *tmux.Client, projClient *projects.Client, quarantineClient *quarantine.Client, cfg config.Config) *cobra.Command {
+// newRoot builds the root command tree: registry-driven modules first
+// (allModules), then the groups not yet converted to manifests, hand-wired.
+// The hybrid is migration state — each conversion moves one AddCommand into
+// the loop until only the loop remains.
+func newRoot(deps module.Deps) *cobra.Command {
 	root := &cobra.Command{
 		Use:     meta.AppName,
 		Short:   meta.Tagline,
@@ -31,22 +34,28 @@ func newRoot(tmuxClient *tmux.Client, projClient *projects.Client, quarantineCli
 	// Honored by the TUI and the tree verb; swaps Nerd Font glyphs for ASCII.
 	root.PersistentFlags().Bool("no-icons", false, "use ASCII markers instead of Nerd Font glyphs")
 
-	root.AddCommand(newTmuxCmd(tmuxClient))
-	root.AddCommand(newProjectsCmd(projClient))
-	root.AddCommand(newConfigCmd(cfg))
-	root.AddCommand(newLaunchCmd(cfg))
-	root.AddCommand(newWorkflowCmd(cfg))
-	root.AddCommand(newNetCmd(cfg))
-	root.AddCommand(newBenchCmd(cfg))
-	root.AddCommand(newQuarantineCmd(quarantineClient))
-	root.AddCommand(newPrCmd(cfg))
+	for _, m := range allModules() {
+		cmd := m.New(deps)
+		cmd.Aliases = append(cmd.Aliases, m.GroupAliases...)
+		applyAliases(cmd, m.SubAliases)
+		root.AddCommand(cmd)
+	}
+
+	// Hand-wired groups awaiting manifest conversion.
+	root.AddCommand(newTmuxCmd(tmux.New(deps.Runner)))
+	root.AddCommand(newProjectsCmd(projects.New(deps.Runner)))
+	root.AddCommand(newConfigCmd(deps.Cfg))
+	root.AddCommand(newLaunchCmd(deps.Cfg))
+	root.AddCommand(newWorkflowCmd(deps.Cfg))
+	root.AddCommand(newBenchCmd(deps.Cfg))
+	root.AddCommand(newQuarantineCmd(quarantine.New(deps.Runner)))
+	root.AddCommand(newPrCmd(deps.Cfg))
 	root.AddCommand(newPipCmd())
-	root.AddCommand(newDockerCmd(cfg))
-	root.AddCommand(newBranchCmd(cfg))
-	root.AddCommand(newCleanCmd(cfg))
-	root.AddCommand(newYCmd(cfg))
-	root.AddCommand(newSessionsCmd(cfg))
-	root.AddCommand(newReviewCmd(cfg))
+	root.AddCommand(newDockerCmd(deps.Cfg))
+	root.AddCommand(newBranchCmd(deps.Cfg))
+	root.AddCommand(newCleanCmd(deps.Cfg))
+	root.AddCommand(newSessionsCmd(deps.Cfg))
+	root.AddCommand(newReviewCmd(deps.Cfg))
 
 	return root
 }

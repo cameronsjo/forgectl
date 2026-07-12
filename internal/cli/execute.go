@@ -13,8 +13,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/meta"
-	"github.com/cameronsjo/forgectl/internal/projects"
-	"github.com/cameronsjo/forgectl/internal/quarantine"
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 	"github.com/cameronsjo/forgectl/internal/tui"
 )
@@ -28,10 +27,13 @@ func Execute(ctx context.Context) error {
 	defer closer.Close()
 
 	slog.Debug("Starting forgectl.", "version", meta.Version)
+	deps := module.Deps{Cfg: cfg, Runner: exec.OSRunner{}}
+	// The bare-invoke TUI/runAction path keeps its own tmux client — clients
+	// are stateless wrappers over the Runner, so a second instance is free and
+	// the TUI stays decoupled from the module registry (ADR-0005: the menu is
+	// a tmux session jumper, not a command palette).
 	tmuxClient := tmux.New(exec.OSRunner{})
-	projClient := projects.New(exec.OSRunner{})
-	quarantineClient := quarantine.New(exec.OSRunner{})
-	root := newRoot(tmuxClient, projClient, quarantineClient, cfg)
+	root := newRoot(deps)
 	args := normalizeArgs(os.Args[1:])
 
 	// The launcher intercept runs before TUI/fang routing: `forgectl launch …`

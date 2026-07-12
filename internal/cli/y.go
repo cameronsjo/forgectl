@@ -7,17 +7,32 @@ import (
 	"github.com/spf13/cobra"
 
 	clippkg "github.com/cameronsjo/forgectl/internal/clip"
-	"github.com/cameronsjo/forgectl/internal/config"
-	"github.com/cameronsjo/forgectl/internal/exec"
-	"github.com/cameronsjo/forgectl/internal/forgive"
+	"github.com/cameronsjo/forgectl/internal/module"
 )
 
-// newYCmd builds `forgectl y` — mirrors newDockerCmd/newBranchCmd in
-// building its own exec.Runner rather than sharing another domain's client
-// lifecycle. Clipboard half of issue #26 only; the shell-history-reading
-// half is deferred.
-func newYCmd(cfg config.Config) *cobra.Command {
-	client := clippkg.New(exec.OSRunner{})
+// yAliases is the single source of truth for y's c/p shorthands — migrated
+// here from forgive.YAliases at conversion. A separate var (not a literal
+// inside yModule) because newYCmdForClient also applies it: routing that read
+// through yModule would be an initialization cycle (manifest → constructor →
+// manifest).
+var yAliases = map[string][]string{
+	"copy":  {"c"},
+	"paste": {"p"},
+}
+
+// yModule declares the y (clipboard) extension (ADR-0005) — the conversion
+// template for SubAliases modules.
+var yModule = module.Manifest{
+	Name:       "y",
+	Tier:       module.TierExtension,
+	SubAliases: yAliases,
+	New:        newYCmd,
+}
+
+// newYCmd builds `forgectl y` over the registry Deps. Clipboard half of
+// issue #26 only; the shell-history-reading half is deferred.
+func newYCmd(deps module.Deps) *cobra.Command {
+	client := clippkg.New(deps.Runner)
 	return newYCmdForClient(client)
 }
 
@@ -38,7 +53,7 @@ clipboard without shelling out directly. macOS only.
 		newYCopyCmd(client),
 		newYPasteCmd(client),
 	)
-	applyAliases(cmd, forgive.YAliases)
+	applyAliases(cmd, yAliases)
 	return cmd
 }
 
