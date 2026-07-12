@@ -44,6 +44,11 @@ var (
 	ErrBadDigest = errors.New("helper rejected the digest")
 	// ErrNoBlesser: no helper binary is available on this machine.
 	ErrNoBlesser = errors.New("blessing helper not found")
+	// ErrKeyNotPresenceGated: the helper's presence probe found the key can sign
+	// WITHOUT user presence. A planted, non-presence key at the compiled-in label
+	// is exactly how an agent gets its own key anointed as the anchor during
+	// bootstrap, so this must abort trust init and blessing — never be reused.
+	ErrKeyNotPresenceGated = errors.New("key is not presence-gated and may have been planted")
 )
 
 // HelperBlesser drives forgectl-bless-helper over the exec.Runner seam. The
@@ -198,6 +203,8 @@ func mapHelperError(err error) error {
 			return fmt.Errorf("%w: %v", ErrKeyNotFound, err)
 		case 5:
 			return fmt.Errorf("%w: %v", ErrBadDigest, err)
+		case 6:
+			return fmt.Errorf("%w: %v", ErrKeyNotPresenceGated, err)
 		}
 	}
 	return err

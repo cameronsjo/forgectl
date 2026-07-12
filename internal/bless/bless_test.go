@@ -69,6 +69,32 @@ func TestEnsureKey_PropagatesOtherErrors(t *testing.T) {
 	}
 }
 
+// TestEnsureKey_PlantedKeyAbortsBootstrap reproduces the planted-key bypass at
+// the Go seam: an agent drops a non-presence key at the compiled-in label, so
+// Enroll fails ErrLabelExists (the blob already exists) and the idempotent
+// fallback calls PublicKey — where the helper's presence probe rejects the key
+// with exit 6. EnsureKey MUST propagate ErrKeyNotPresenceGated so trust init
+// aborts rather than anointing the agent's key as the anchor.
+func TestEnsureKey_PlantedKeyAbortsBootstrap(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		switch args[0] {
+		case "enroll":
+			return "", exitErr{3} // blob already on disk (planted)
+		case "pubkey":
+			return "", exitErr{6} // presence probe: not presence-gated
+		}
+		return "", nil
+	}}
+	hb := fakeHelper(t, fake)
+
+	if _, err := EnsureKey(context.Background(), hb, "l"); !errors.Is(err, ErrKeyNotPresenceGated) {
+		t.Fatalf("EnsureKey = %v, want ErrKeyNotPresenceGated propagated (a planted key must abort bootstrap)", err)
+	}
+	if fake.Last().Args[0] != "pubkey" {
+		t.Errorf("expected the pubkey fallback to run, got %v", fake.Last().Args)
+	}
+}
+
 func TestSignEnvelope_AssemblesAndRoundTripsThroughVerify(t *testing.T) {
 	env := newTestEnv(t)
 	wf := env.writeWorkflow(t, workflowData)
@@ -144,17 +170,25 @@ func TestInstallAnchor_SingleSudoLegCarriesKeyInArgv(t *testing.T) {
 	if !c.Interactive {
 		t.Error("the sudo leg must be Interactive (the human types the password)")
 	}
-	if c.Name != "sudo" {
-		t.Errorf("leg name = %q, want sudo", c.Name)
+	// sudo MUST be invoked by absolute path: a bare "sudo" resolves via the
+	// human's PATH, which an agent can poison (a fake sudo phishes the password).
+	if c.Name != sudoPath {
+		t.Errorf("leg name = %q, want the absolute %q (a bare name is PATH-hijackable)", c.Name, sudoPath)
+	}
+	if !filepath.IsAbs(c.Name) {
+		t.Errorf("sudo must be invoked by an absolute path, got %q", c.Name)
 	}
 
-	// argv is: sh -c <script> _ <b64key>
+	// argv is: /bin/sh -c <script> _ <b64key> — the inner shell is absolute too.
 	b64 := base64.StdEncoding.EncodeToString(pubDER)
 	if len(c.Args) != 5 {
 		t.Fatalf("argv = %v, want 5 elements (sh -c <script> _ <b64key>)", c.Args)
 	}
-	if c.Args[0] != "sh" || c.Args[1] != "-c" {
-		t.Errorf("argv must invoke sh -c, got %v %v", c.Args[0], c.Args[1])
+	if c.Args[0] != shPath || c.Args[1] != "-c" {
+		t.Errorf("argv must invoke %s -c, got %v %v", shPath, c.Args[0], c.Args[1])
+	}
+	if !filepath.IsAbs(c.Args[0]) {
+		t.Errorf("the inner shell must be invoked by an absolute path, got %q", c.Args[0])
 	}
 	if c.Args[3] != "_" {
 		t.Errorf("argv[3] = %q, want the \"_\" $0 placeholder", c.Args[3])

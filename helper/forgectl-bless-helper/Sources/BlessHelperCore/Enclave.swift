@@ -107,6 +107,86 @@ public enum Enclave {
         return control
     }
 
+    // MARK: - Presence gate
+
+    /// A fixed dummy digest for the presence probe. Its value is irrelevant — the
+    /// probe never uses the signature, only whether signing SUCCEEDS at all.
+    static let probeDigest = [UInt8](repeating: 0, count: 32)
+
+    /// Reject any key that is not presence-gated. This closes a silent
+    /// root-of-trust bypass: the key-blob directory is user-writable and SE key
+    /// CREATION needs no presence, so an agent can mint a key with a non-presence
+    /// access control (`[.privateKeyUsage]`, no `.userPresence`), drop its sealed
+    /// blob at the compiled-in label, and let the human's own `trust init`
+    /// enroll→pubkey-fallback anoint the AGENT's key as the anchor — signed
+    /// SILENTLY, with no Touch ID prompt ever appearing.
+    ///
+    /// The discriminator needs NO human interaction. Load the key under a fresh
+    /// LAContext with `interactionNotAllowed = true` and try to sign a dummy
+    /// digest:
+    ///   - A non-presence key SIGNS with no UI → it is planted → reject (exit 6).
+    ///   - A presence key CANNOT sign non-interactively; LocalAuthentication
+    ///     refuses with an "interaction not allowed" error — no UI, no prompt —
+    ///     which is the tell that the presence gate is real → return normally.
+    ///   - Anything else at this gate is untrustworthy → fail closed (exit 6).
+    ///
+    /// There is deliberately no flag or env var that can skip this probe.
+    public static func assertPresenceGated(label: String) throws {
+        let url = try keyURL(label: label)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw HelperError.with(code: 4, "key '\(label)' not found at \(url.path)")
+        }
+        let blob = try Data(contentsOf: url)
+
+        let context = LAContext()
+        context.interactionNotAllowed = true
+
+        do {
+            let key = try SecureEnclave.P256.Signing.PrivateKey(
+                dataRepresentation: blob, authenticationContext: context)
+            _ = try key.signature(for: RawSHA256Digest(bytes: probeDigest))
+        } catch {
+            // Reaching here means signing did NOT succeed non-interactively. If the
+            // failure is the "interaction not allowed" refusal, the presence gate
+            // is real and this is the good path. Classify by domain/code, never by
+            // message text, so the verdict holds across system locales.
+            if isPresenceGateSignal(error) {
+                return
+            }
+            // Any other failure at this gate: we cannot PROVE the key is
+            // presence-gated, so we must not trust it.
+            throw HelperError.with(
+                code: 6,
+                "cannot verify key '\(label)' is presence-gated: \(error.localizedDescription)")
+        }
+
+        // Signing SUCCEEDED with interaction disallowed → the key has no presence
+        // requirement. This is the planted-key tell.
+        throw HelperError.with(
+            code: 6,
+            "key '\(label)' is not presence-gated — it may have been planted; "
+                + "remove \(url.path) and re-run (if you did not create a key, this may be tampering)")
+    }
+
+    /// Whether an error from the non-interactive probe is the "interaction not
+    /// allowed / required" refusal — the signal that a presence gate is active.
+    /// LocalAuthentication surfaces it in its own error domain (the observed
+    /// LAError -1004); depending on OS version the SecKey signing op can instead
+    /// surface it as the Security-framework `errSecInteractionNotAllowed`
+    /// OSStatus. Both mean the same thing: the key refused to sign without a
+    /// human, i.e. it is genuinely presence-gated.
+    static func isPresenceGateSignal(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == LAError.errorDomain {
+            return true
+        }
+        if nsError.domain == NSOSStatusErrorDomain
+            && nsError.code == Int(errSecInteractionNotAllowed) {
+            return true
+        }
+        return false
+    }
+
     // MARK: - Verbs
 
     /// Create a fresh SE key, persist its sealed blob, and return the public key
@@ -117,6 +197,10 @@ public enum Enclave {
     /// error; the guarantee lives in createBlobExclusively, whose O_EXCL create
     /// is what makes concurrent enrolls safe. A losing racer's freshly minted
     /// enclave key is simply never persisted, so it can never sign anything.
+    ///
+    /// After persisting, self-check that the key we just created is presence-gated
+    /// (defense in depth — proves the access control took, and that nothing
+    /// swapped the blob between the write and the check).
     public static func enroll(label: String) throws -> String {
         guard SecureEnclave.isAvailable else {
             throw HelperError.with(code: 1, "Secure Enclave is not available on this machine")
@@ -136,16 +220,22 @@ public enum Enclave {
                 code: 1, "failed to create Secure Enclave key: \(error.localizedDescription)")
         }
         try createBlobExclusively(key.dataRepresentation, at: url, label: label)
+        try assertPresenceGated(label: label)
         return key.publicKey.derRepresentation.base64EncodedString()
     }
 
     /// Load the sealed blob and return its public key as base64(std) of PKIX DER.
-    /// Deriving the public key needs no authentication context and no presence.
+    /// Deriving the public key needs no authentication context and no presence —
+    /// but this is the path `trust init`'s enroll→fallback and blessing both use
+    /// to learn a key's identity, so it MUST first prove the key is presence-gated
+    /// (see assertPresenceGated). Returning the pubkey of a planted non-presence
+    /// key is exactly how that key becomes the anchor.
     public static func pubkey(label: String) throws -> String {
         let url = try keyURL(label: label)
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw HelperError.with(code: 4, "key '\(label)' not found at \(url.path)")
         }
+        try assertPresenceGated(label: label)
         let blob = try Data(contentsOf: url)
         let key: SecureEnclave.P256.Signing.PrivateKey
         do {
@@ -160,6 +250,11 @@ public enum Enclave {
     /// Sign a raw 32-byte digest with the SE key. Every signature demands human
     /// presence (Touch ID / account password); a cancel or auth failure is
     /// reported as exit 2. Returns the ASN.1 DER signature as base64(std).
+    ///
+    /// The key's presence gate is probed FIRST (no UI for a real key — it fails
+    /// the non-interactive probe fast), so a planted non-presence key is rejected
+    /// here too, not only at bootstrap. Only then does the real, interactive
+    /// signature run.
     public static func sign(label: String, digest: [UInt8]) throws -> String {
         guard SecureEnclave.isAvailable else {
             throw HelperError.with(code: 1, "Secure Enclave is not available on this machine")
@@ -168,6 +263,7 @@ public enum Enclave {
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw HelperError.with(code: 4, "key '\(label)' not found at \(url.path)")
         }
+        try assertPresenceGated(label: label)
         let blob = try Data(contentsOf: url)
 
         let context = LAContext()

@@ -20,6 +20,13 @@ import (
 // run already minted the key, so we fall back to fetching its public key. This
 // makes enrollment idempotent — re-running `trust init` never wedges on an
 // exit-3 "label exists".
+//
+// That idempotent fallback is also the seam a planted key rides in on: an agent
+// drops a non-presence key at the compiled-in label, Enroll hits ErrLabelExists,
+// and the fallback would otherwise hand back the AGENT's public key to be
+// anointed as the anchor. The helper's presence probe turns that into
+// ErrKeyNotPresenceGated on the PublicKey call, and EnsureKey propagates every
+// fallback error unchanged — a planted key MUST abort bootstrap, never be reused.
 func EnsureKey(ctx context.Context, b Blesser, label string) ([]byte, error) {
 	der, err := b.Enroll(ctx, label)
 	if err == nil {
@@ -27,7 +34,11 @@ func EnsureKey(ctx context.Context, b Blesser, label string) ([]byte, error) {
 	}
 	if errors.Is(err, ErrLabelExists) {
 		slog.Debug("Key label already exists; reusing existing key.", "label", label)
-		return b.PublicKey(ctx, label)
+		der, perr := b.PublicKey(ctx, label)
+		if perr != nil {
+			return nil, perr
+		}
+		return der, nil
 	}
 	return nil, err
 }
@@ -101,6 +112,19 @@ chown root:wheel "$ANCHOR"
 chmod 0644 "$ANCHOR"
 `
 
+// sudoPath and shPath are ABSOLUTE by design. A bare "sudo"/"sh" would be
+// resolved via LookPath against the invoking human's PATH — which an agent can
+// poison (append `export PATH=/tmp/evil:$PATH` to ~/.zshrc, the same in-scope
+// vector the helper env-override fix closed) to drop a fake `sudo` that phishes
+// the human's password. Pinning the absolute path means forgectl always reaches
+// the real system sudo; from there sudoers `secure_path` sanitizes the child's
+// PATH, so the inner `sh` (also absolute, for symmetry) and its `mkdir`/`chown`/
+// `chmod`/`printf` resolve from a trusted PATH rather than the agent's.
+const (
+	sudoPath = "/usr/bin/sudo"
+	shPath   = "/bin/sh"
+)
+
 // readAnchorFile reads the anchor back for the post-install check. It is a
 // package var solely so same-package tests can point the read-back at a temp
 // file; production always reads the compiled-in AnchorPath, and nothing outside
@@ -129,7 +153,7 @@ func InstallAnchor(ctx context.Context, run exec.Runner, pubDER []byte) error {
 	b64 := base64.StdEncoding.EncodeToString(pubDER)
 
 	slog.Debug("Preparing to install trust anchor.", "path", AnchorPath)
-	if err := run.RunInteractive(ctx, "sudo", "sh", "-c", anchorInstallScript, "_", b64); err != nil {
+	if err := run.RunInteractive(ctx, sudoPath, shPath, "-c", anchorInstallScript, "_", b64); err != nil {
 		switch code, ok := exitCodeOf(err); {
 		case ok && code == 3:
 			return fmt.Errorf("%w at %s: remove it with 'sudo rm %s' before re-initializing", ErrAnchorExists, AnchorPath, AnchorPath)
