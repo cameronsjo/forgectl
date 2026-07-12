@@ -14,6 +14,7 @@ import "github.com/cameronsjo/forgectl/internal/module"
 func allModules() []module.Manifest {
 	return []module.Manifest{
 		projectsModule,
+		configModule,
 		netModule,
 		yModule,
 		pipModule,

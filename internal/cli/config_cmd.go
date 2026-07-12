@@ -9,9 +9,22 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
+	"github.com/cameronsjo/forgectl/internal/module"
 )
 
-func newConfigCmd(cfg config.Config) *cobra.Command {
+// configModule declares the config display core module (ADR-0005).
+// ConfigKey is deliberately empty: this module RENDERS the whole config, it
+// owns no section — ownership belongs to the domain module each section
+// configures.
+var configModule = module.Manifest{
+	Name:         "config",
+	Tier:         module.TierCore,
+	GroupAliases: []string{"cfg"},
+	New:          newConfigCmd,
+}
+
+func newConfigCmd(deps module.Deps) *cobra.Command {
+	cfg := deps.Cfg
 	return &cobra.Command{
 		Use:     "config",
 		Short:   "Show the active configuration and config file path",
