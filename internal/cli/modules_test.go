@@ -12,12 +12,14 @@ package cli
 
 import (
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/workflow"
 )
 
 // moduleTokens returns a module's claimed top-level token set — Name ∪
@@ -109,6 +111,133 @@ func TestModules_CommandTreeSmoke(t *testing.T) {
 		}
 		if cmd.Short == "" {
 			t.Errorf("module %q: command has no Short (the manifest deliberately has no Summary — Short is the one description)", m.Name)
+		}
+	}
+}
+
+// TestModules_CompletenessPins is THE growth gate (ADR-0005 §Tier policy):
+// a new module enters as TierExtension and edits these pins in the same
+// diff; a tier promotion edits the core set and notes the evidence in the
+// ADR. The pin is a deliberate speed bump, not a cap.
+func TestModules_CompletenessPins(t *testing.T) {
+	mods := allModules()
+
+	const wantCount = 16
+	if len(mods) != wantCount {
+		t.Errorf("allModules() has %d modules, want %d — adding a module means editing this pin deliberately (ADR-0005)", len(mods), wantCount)
+	}
+
+	wantNames := map[string]bool{
+		"tmux": true, "projects": true, "config": true, "launch": true,
+		"workflow": true, "pr": true, "net": true, "bench": true,
+		"quarantine": true, "pip": true, "docker": true, "branch": true,
+		"clean": true, "y": true, "sessions": true, "review": true,
+	}
+	got := map[string]bool{}
+	for _, m := range mods {
+		got[m.Name] = true
+		if !wantNames[m.Name] {
+			t.Errorf("unexpected module %q — add it to the name pin deliberately", m.Name)
+		}
+	}
+	for name := range wantNames {
+		if !got[name] {
+			t.Errorf("module %q missing from allModules()", name)
+		}
+	}
+
+	wantCore := map[string]bool{
+		"tmux": true, "projects": true, "launch": true,
+		"workflow": true, "pr": true, "config": true,
+	}
+	for _, m := range mods {
+		if isCore := m.Tier == module.TierCore; isCore != wantCore[m.Name] {
+			t.Errorf("module %q tier = %v, want core=%v — promotion/demotion edits this pin plus an ADR note", m.Name, m.Tier, wantCore[m.Name])
+		}
+	}
+}
+
+// TestModules_ConfigClaimsBijection completes the ownership contract at full
+// conversion: every struct-kind config section is claimed by exactly one
+// module (validity and single-ownership are covered by
+// TestModules_ConfigClaimsAreValidSubset; this adds "none unclaimed").
+func TestModules_ConfigClaimsBijection(t *testing.T) {
+	sections := configStructSections(t)
+	claimed := map[string]bool{}
+	for _, m := range allModules() {
+		if m.ConfigKey != "" {
+			claimed[m.ConfigKey] = true
+		}
+	}
+	for s := range sections {
+		if !claimed[s] {
+			t.Errorf("config section %q has no owning module — assign a ConfigKey", s)
+		}
+	}
+}
+
+// varRefRe matches ${name} references in workflow step fields.
+var varRefRe = regexp.MustCompile(`\$\{([^}]+)\}`)
+
+// stepVarRefs collects every ${var} reference across one step's fields.
+func stepVarRefs(s workflow.Step) []string {
+	fields := []string{s.Repo, s.Ref, s.Skill, s.Posture, s.Mode, s.From, s.To, s.Cmd}
+	fields = append(fields, s.Globs...)
+	fields = append(fields, s.Args...)
+	var out []string
+	for _, f := range fields {
+		for _, m := range varRefRe.FindAllStringSubmatch(f, -1) {
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
+// TestBuiltinWorkflows_VocabularyCovered is the data-plane safety net
+// (ADR-0005): every embedded builtin workflow must be fully served by the
+// engine builtins ∪ the default modules' step contributions — each `uses`
+// verb registered, and each consumed ${export} provided by a param or an
+// earlier step's exports. Its failures NAME which builtin a module eviction
+// would break.
+func TestBuiltinWorkflows_VocabularyCovered(t *testing.T) {
+	deps := module.Deps{Runner: &exec.FakeRunner{}}
+	reg, err := workflow.NewRegistry(stepContributions(deps)...)
+	if err != nil {
+		t.Fatalf("NewRegistry over default module contributions: %v", err)
+	}
+
+	names, err := workflow.ListBuiltins()
+	if err != nil {
+		t.Fatalf("ListBuiltins: %v", err)
+	}
+	if len(names) == 0 {
+		t.Fatal("no embedded builtins — the coverage net has nothing to hold")
+	}
+
+	for _, name := range names {
+		wf, err := workflow.ResolveBuiltin(name)
+		if err != nil {
+			t.Errorf("parse builtin %q: %v", name, err)
+			continue
+		}
+		available := map[string]bool{}
+		for p := range wf.Params {
+			available[p] = true
+		}
+		for i, s := range wf.Steps {
+			def, ok := reg[s.Uses]
+			if !ok {
+				t.Errorf("builtin %q step %d: verb %q is not in builtins ∪ default module contributions — evicting its contributor breaks this builtin", name, i, s.Uses)
+				continue
+			}
+			for _, ref := range stepVarRefs(s) {
+				if !available[ref] {
+					t.Errorf("builtin %q step %d (%s): consumes ${%s}, which no param or earlier step's exports provide", name, i, s.Uses, ref)
+				}
+			}
+			for _, exp := range def.Exports {
+				available[exp] = true
+			}
 		}
 	}
 }

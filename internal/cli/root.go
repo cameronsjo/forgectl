@@ -11,10 +11,9 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 )
 
-// newRoot builds the root command tree: registry-driven modules first
-// (allModules), then the groups not yet converted to manifests, hand-wired.
-// The hybrid is migration state — each conversion moves one AddCommand into
-// the loop until only the loop remains.
+// newRoot builds the root command tree from the module registry
+// (allModules) — every command group registers through its manifest
+// (ADR-0005).
 func newRoot(deps module.Deps) *cobra.Command {
 	root := &cobra.Command{
 		Use:     meta.AppName,
@@ -44,9 +43,6 @@ func newRoot(deps module.Deps) *cobra.Command {
 		applyAliases(cmd, m.SubAliases)
 		root.AddCommand(cmd)
 	}
-
-	// Hand-wired groups awaiting manifest conversion.
-	root.AddCommand(newPrCmd(deps.Cfg))
 
 	return root
 }
