@@ -14,28 +14,6 @@ import (
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
-// ErrNotYetWired is returned by a step runner that is registered but not yet
-// implemented in the spike (launch, collect — full clean-room execution is
-// the follow-on, per the design doc's spike scope).
-var ErrNotYetWired = errors.New("step not yet wired")
-
-// StepRunner executes one resolved PlanStep against ctx, using run for any
-// process it needs to shell out to. It may call ctx.Set to export variables
-// for later steps (worktree exports ${workspace}, launch exports ${review}).
-type StepRunner func(ctx context.Context, run exec.Runner, wctx *Context, step PlanStep) error
-
-// StepDef is a step verb's definition: the runner that executes it and the
-// variables it exports into the Context. Declaring both together keeps a
-// verb's execution (Executor.Run) and its plan-time exports (BuildPlan) from
-// drifting apart — adding a verb is one entry in defaultRegistry.
-type StepDef struct {
-	Runner  StepRunner
-	Exports []string
-}
-
-// StepRegistry maps a step's `uses` value to its definition.
-type StepRegistry map[string]StepDef
-
 // defaultStripGlobs is the clean-room control's built-in fallback strip-list,
 // used when a `strip` step omits `globs` AND no config default is set
 // (design doc: "omit globs → configured default set"). Sourced from

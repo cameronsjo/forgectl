@@ -5,25 +5,9 @@ import (
 	"log/slog"
 )
 
-// PlanStep is one fully-resolved step: every ${} reference that could be
-// resolved from params (prior-step exports resolve later, during execute,
-// since they don't exist yet at plan time) has been interpolated. Plan is the
-// artifact --dry-run prints and never executes.
-type PlanStep struct {
-	Uses    string
-	Repo    string
-	Ref     string
-	Globs   []string
-	Skill   string
-	Posture string
-	Mode    string
-	From    string
-	To      string
-	Cmd     string
-	Args    []string
-}
-
 // Plan is the ordered, resolved step sequence a workflow run will execute.
+// Its PlanStep elements are the neutral step contract's type (internal/step),
+// aliased into this package — see context.go's alias block.
 type Plan struct {
 	Name    string
 	Version string
