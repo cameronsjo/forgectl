@@ -54,27 +54,53 @@ type HelperBlesser struct {
 	path string
 }
 
-// NewHelperBlesser locates the helper and returns a HelperBlesser bound to it.
-// Discovery: FORGECTL_BLESS_HELPER wins (the dev seam — point it at a locally
-// built helper); otherwise the helper is expected next to the running binary
-// (filepath.Dir(os.Executable())). If the resolved path does not exist on disk,
-// it returns ErrNoBlesser so callers can degrade to a "no blessing backend"
-// message rather than a raw exec failure.
+// helperName is the helper binary's filename. It is always looked up as a
+// sibling of the running executable — exactly how the cask lays the two binaries
+// out — and never anywhere else.
+const helperName = "forgectl-bless-helper"
+
+// resolveSelf returns the real path of the running executable, resolving any
+// symlink (Homebrew links its binaries into bin/, so os.Executable() alone would
+// point at the link and the sibling lookup would miss the Cellar/libexec dir
+// where the helper actually sits).
 //
-// FORGECTL_BLESS_HELPER being agent-settable is deliberate and safe: it
-// redirects only the SIGN side. A rogue helper can mint signatures, but only
-// under keys absent from the anchor-signed trust store — the verify path
-// rejects them with ErrUnknownKey — and it can never satisfy userPresence for
-// a genuinely enrolled key. The verify path reads no environment at all.
-func NewHelperBlesser(run exec.Runner) (*HelperBlesser, error) {
-	path := os.Getenv("FORGECTL_BLESS_HELPER")
-	if path == "" {
-		self, err := os.Executable()
-		if err != nil {
-			return nil, fmt.Errorf("%w: locate own executable: %v", ErrNoBlesser, err)
-		}
-		path = filepath.Join(filepath.Dir(self), "forgectl-bless-helper")
+// It is a package var solely so same-package tests can aim the sibling lookup at
+// a temp dir. Nothing outside this package — and nothing an agent can influence
+// at runtime — can reassign it.
+var resolveSelf = func() (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
 	}
+	real, err := filepath.EvalSymlinks(self)
+	if err != nil {
+		return "", err
+	}
+	return real, nil
+}
+
+// NewHelperBlesser locates the helper and returns a HelperBlesser bound to it.
+// The helper is ALWAYS a sibling of the running executable. If it is not there,
+// NewHelperBlesser returns ErrNoBlesser so callers can degrade to a "no blessing
+// backend" message rather than a raw exec failure.
+//
+// There is deliberately NO environment override for this path, and adding one
+// back would be a root-of-trust compromise, not a convenience. The helper serves
+// Enroll and PublicKey as well as Sign, and `trust init` calls Enroll at the one
+// moment when no trust store exists yet — so whatever public key the helper
+// hands back BECOMES the anchor. An agent that can set an env var (a line
+// appended to a shell rc file is well within a same-UID agent's reach) could
+// therefore have the human's own sudo install the AGENT's key as the root of
+// trust, with no Touch ID prompt ever appearing: a fake helper simply returns a
+// key. The env var would buy a dev seam that the build already provides — the
+// verification scripts build forgectl and the helper into one directory as
+// siblings — at the cost of the entire threat model.
+func NewHelperBlesser(run exec.Runner) (*HelperBlesser, error) {
+	self, err := resolveSelf()
+	if err != nil {
+		return nil, fmt.Errorf("%w: locate own executable: %v", ErrNoBlesser, err)
+	}
+	path := filepath.Join(filepath.Dir(self), helperName)
 	if _, err := os.Stat(path); err != nil {
 		return nil, fmt.Errorf("%w: %s: %v", ErrNoBlesser, path, err)
 	}
@@ -158,15 +184,12 @@ func decodeStrictJSON(s string, v any) error {
 	return dec.Decode(v)
 }
 
-// mapHelperError translates the helper's typed exit codes into sentinels by
-// walking the error chain for anything exposing ExitCode() int. exec.CommandError
-// unwraps to *exec.ExitError (os/exec), whose promoted ExitCode satisfies this;
-// tests inject any type with an ExitCode method. A non-exit error (or an
-// unmapped code) passes through unchanged.
+// mapHelperError translates the helper's typed exit codes into sentinels (see
+// exitCodeOf for how the code is read off the error chain). A non-exit error, or
+// an unmapped code, passes through unchanged.
 func mapHelperError(err error) error {
-	var coded interface{ ExitCode() int }
-	if errors.As(err, &coded) {
-		switch coded.ExitCode() {
+	if code, ok := exitCodeOf(err); ok {
+		switch code {
 		case 2:
 			return fmt.Errorf("%w: %v", ErrCancelled, err)
 		case 3:
