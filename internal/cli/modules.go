@@ -17,5 +17,6 @@ func allModules() []module.Manifest {
 		yModule,
 		pipModule,
 		branchModule,
+		cleanModule,
 	}
 }

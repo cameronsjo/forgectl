@@ -8,18 +8,30 @@ import (
 	"github.com/spf13/cobra"
 
 	cleanpkg "github.com/cameronsjo/forgectl/internal/clean"
-	"github.com/cameronsjo/forgectl/internal/config"
-	"github.com/cameronsjo/forgectl/internal/exec"
-	"github.com/cameronsjo/forgectl/internal/forgive"
+	"github.com/cameronsjo/forgectl/internal/module"
 )
 
-// newCleanCmd builds `forgectl clean` — mirrors newBranchCmd/newDockerCmd in
-// building its own exec.Runner rather than sharing another domain's client
-// lifecycle. Ships flat (no subverbs), same as branch — PR-1 is dep/build-dir
-// reclaim only; package-manager caches and docker prune are issue #4's
-// follow-on PR.
-func newCleanCmd(cfg config.Config) *cobra.Command {
-	client := cleanpkg.New(exec.OSRunner{}, cleanpkg.WithCleanConfig(cfg.Clean))
+// cleanGroupAliases is clean's shorthand surface ("cln" — "cl" is claimed by
+// launch) — migrated here from forgive.CleanAliases at conversion. Flat
+// command, plain slice; separate var for the same initialization-cycle
+// reason as yAliases.
+var cleanGroupAliases = []string{"cln"}
+
+// cleanModule declares the dep/build-dir reclaim extension (ADR-0005): owns
+// the [clean] config section.
+var cleanModule = module.Manifest{
+	Name:         "clean",
+	Tier:         module.TierExtension,
+	ConfigKey:    "clean",
+	GroupAliases: cleanGroupAliases,
+	New:          newCleanCmd,
+}
+
+// newCleanCmd builds `forgectl clean` over the registry Deps. Ships flat (no
+// subverbs), same as branch — PR-1 is dep/build-dir reclaim only;
+// package-manager caches and docker prune are issue #4's follow-on PR.
+func newCleanCmd(deps module.Deps) *cobra.Command {
+	client := cleanpkg.New(deps.Runner, cleanpkg.WithCleanConfig(deps.Cfg.Clean))
 	return newCleanCmdForClient(client)
 }
 
@@ -37,7 +49,7 @@ func newCleanCmdForClient(client *cleanpkg.Client) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:     "clean",
-		Aliases: forgive.CleanAliases,
+		Aliases: cleanGroupAliases,
 		Short:   "Reclaim dep/build directories under a project root (dry-run by default)",
 		Long: `clean scans --root (default ~/Projects) for reclaimable dependency and
 build-output directories — node_modules, .venv/venv, __pycache__, target,

@@ -58,7 +58,6 @@ func newRoot(deps module.Deps) *cobra.Command {
 	root.AddCommand(newQuarantineCmd(quarantine.New(deps.Runner)))
 	root.AddCommand(newPrCmd(deps.Cfg))
 	root.AddCommand(newDockerCmd(deps.Cfg))
-	root.AddCommand(newCleanCmd(deps.Cfg))
 	root.AddCommand(newSessionsCmd(deps.Cfg))
 	root.AddCommand(newReviewCmd(deps.Cfg))
 
