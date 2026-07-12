@@ -20,14 +20,6 @@ func Normalize(s string) string {
 	return strings.TrimRight(lower, " \t.,!?;:")
 }
 
-// WorkflowAliases maps each canonical workflow subcommand to its accepted
-// aliases. The `flow` shorthand for the workflow group itself is a Cobra
-// alias on the parent command (see newWorkflowCmd), not a subcommand alias,
-// so it is not listed here.
-var WorkflowAliases = map[string][]string{
-	"run": {"r"},
-}
-
 // Resolver resolves raw tokens against one module's canonical-verb →
 // aliases map (the same shape Manifest.SubAliases and the shared
 // applyAliases helper use). It replaces the old package-level Canonical,

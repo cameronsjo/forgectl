@@ -8,16 +8,54 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/cameronsjo/forgectl/internal/config"
-	"github.com/cameronsjo/forgectl/internal/exec"
-	"github.com/cameronsjo/forgectl/internal/forgive"
+	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/step"
 	"github.com/cameronsjo/forgectl/internal/workflow"
 )
+
+// workflowAliases maps each canonical workflow subcommand to its accepted
+// aliases — migrated here from forgive.WorkflowAliases at conversion. The
+// `flow` group shorthand is a GroupAlias on the manifest. Separate var for
+// the same initialization-cycle reason as yAliases.
+var workflowAliases = map[string][]string{
+	"run": {"r"},
+}
+
+// workflowModule declares the workflow engine core module (ADR-0005): owns
+// the [workflow] config section. It contributes no Steps itself — the engine
+// owns the builtins directly; modules contribute through NewRegistry. A
+// constructor rather than a var: its run command aggregates every module's
+// Steps via allModules(), and a package-level var would close that loop into
+// an initialization cycle (var → constructor → stepContributions →
+// allModules → var); a function-only cycle is legal.
+func workflowModule() module.Manifest {
+	return module.Manifest{
+		Name:         "workflow",
+		Tier:         module.TierCore,
+		ConfigKey:    "workflow",
+		GroupAliases: []string{"flow"},
+		SubAliases:   workflowAliases,
+		New:          newWorkflowCmd,
+	}
+}
+
+// stepContributions aggregates every module's data-plane step contribution
+// for workflow.NewRegistry. Each module's registry is passed separately so
+// NewRegistry can name cross-module collisions, never last-wins them.
+func stepContributions(deps module.Deps) []step.Registry {
+	var out []step.Registry
+	for _, m := range allModules() {
+		if m.Steps != nil {
+			out = append(out, m.Steps(deps))
+		}
+	}
+	return out
+}
 
 // newWorkflowCmd builds the `workflow` parent command (alias `flow`). Verbs
 // are attached as subcommands: `run` executes a workflow file, `list` shows
 // the resolvable names. Mirrors newLaunchCmd's parent/subcommand shape.
-func newWorkflowCmd(cfg config.Config) *cobra.Command {
+func newWorkflowCmd(deps module.Deps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "workflow",
 		Aliases: []string{"flow"},
@@ -34,16 +72,16 @@ base as config.toml (macOS: ~/Library/Application Support/forgectl, Linux:
 ~/.config/forgectl) — or fall back to a shipped built-in of the same name.`,
 	}
 	cmd.AddCommand(
-		newWorkflowRunCmd(cfg),
+		newWorkflowRunCmd(deps),
 		newWorkflowListCmd(),
 	)
-	applyAliases(cmd, forgive.WorkflowAliases)
+	applyAliases(cmd, workflowAliases)
 	return cmd
 }
 
 // newWorkflowRunCmd builds `forgectl workflow run <name> [--dry-run]
 // [--param k=v]...`.
-func newWorkflowRunCmd(cfg config.Config) *cobra.Command {
+func newWorkflowRunCmd(deps module.Deps) *cobra.Command {
 	var dryRun bool
 	var rawParams []string
 
@@ -69,7 +107,15 @@ func newWorkflowRunCmd(cfg config.Config) *cobra.Command {
 				return fmt.Errorf("verify workflow %q: %w", name, err)
 			}
 
-			plan, err := workflow.BuildPlan(wf, params)
+			// One merged registry serves BOTH BuildPlan and the Executor —
+			// the plan-time deferral of a module verb's exports (launch's
+			// ${review}) and run-time dispatch can't drift (ADR-0005).
+			registry, err := workflow.NewRegistry(stepContributions(deps)...)
+			if err != nil {
+				return err
+			}
+
+			plan, err := workflow.BuildPlan(wf, params, registry)
 			if err != nil {
 				return err
 			}
@@ -80,8 +126,7 @@ func newWorkflowRunCmd(cfg config.Config) *cobra.Command {
 				return nil
 			}
 
-			exe := workflow.NewExecutor(exec.OSRunner{},
-				workflow.WithDefaultStripGlobs(cfg.Workflow.StripGlobs))
+			exe := workflow.NewExecutor(deps.Runner, registry)
 			wctx := workflow.NewContext(nil)
 			for k, v := range params {
 				wctx.Set(k, v)

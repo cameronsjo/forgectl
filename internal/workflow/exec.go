@@ -5,30 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
-	"github.com/cameronsjo/forgectl/internal/quarantine"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
-
-// defaultStripGlobs is the clean-room control's built-in fallback strip-list,
-// used when a `strip` step omits `globs` AND no config default is set
-// (design doc: "omit globs → configured default set"). Sourced from
-// quarantine.DefaultTargets (#20) — the same canonical instruction-file list
-// quarantine's reversible Hide uses — so the two controls never drift.
-var defaultStripGlobs = quarantine.DefaultTargets
 
 // Executor runs a Plan's steps in order through one constructor-injected
 // exec.Runner (mirrors tmux.New / projects.New), threading a shared Context
 // so steps compose on each other's exports.
 type Executor struct {
-	run               exec.Runner
-	registry          StepRegistry
-	dryRun            bool
-	defaultStripGlobs []string
+	run      exec.Runner
+	registry StepRegistry
+	dryRun   bool
 }
 
 // Option configures an Executor at construction.
@@ -40,45 +28,49 @@ func WithDryRun(dryRun bool) Option {
 	return func(e *Executor) { e.dryRun = dryRun }
 }
 
-// WithDefaultStripGlobs overrides the strip-list a `strip` step falls back to
-// when its own `globs` field is empty — wired from config.WorkflowConfig by
-// the CLI layer. An empty slice is ignored (the built-in default still
-// applies).
-func WithDefaultStripGlobs(globs []string) Option {
-	return func(e *Executor) {
-		if len(globs) > 0 {
-			e.defaultStripGlobs = globs
-		}
-	}
-}
-
-// NewExecutor builds an Executor over the given Runner, registering the
-// built-in step verbs. Mirrors tmux.New(run exec.Runner, opts...). The registry
-// is built once, after options apply, so WithDefaultStripGlobs feeds the strip
-// runner its configured strip-list without rebuilding the registry.
-func NewExecutor(run exec.Runner, opts ...Option) *Executor {
-	e := &Executor{run: run, defaultStripGlobs: defaultStripGlobs}
+// NewExecutor builds an Executor over the given Runner and step registry.
+// The registry is the MERGED vocabulary from NewRegistry — the same one
+// BuildPlan reads exports from, so plan-time deferral and run-time dispatch
+// can never drift (ADR-0005).
+func NewExecutor(run exec.Runner, registry StepRegistry, opts ...Option) *Executor {
+	e := &Executor{run: run, registry: registry}
 	for _, opt := range opts {
 		opt(e)
 	}
-	e.registry = defaultRegistry(e.defaultStripGlobs)
 	return e
 }
 
-// defaultRegistry returns the built-in step vocabulary. run/worktree/clone/
-// strip/teardown are implemented for the spike; launch/collect are registered
-// but return ErrNotYetWired (design doc spike scope). Each verb's runner and
-// exports are declared together so they can't drift.
-func defaultRegistry(stripGlobs []string) StepRegistry {
+// builtinRegistry returns the engine-owned step vocabulary: the generic
+// escape hatch (run), the sandbox-backed verbs (worktree/clone/teardown),
+// and the collect stub (spike scope). strip belongs to the quarantine module
+// and launch to the launch module — contributed through NewRegistry, not
+// listed here (ADR-0005's verb redistribution).
+func builtinRegistry() StepRegistry {
 	return StepRegistry{
 		"run":      {Runner: runStep},
 		"worktree": {Runner: newSandboxStep(false), Exports: []string{"workspace"}},
 		"clone":    {Runner: newSandboxStep(true), Exports: []string{"workspace"}},
-		"strip":    {Runner: newStripStep(stripGlobs)},
 		"teardown": {Runner: teardownStep},
-		"launch":   {Runner: notYetWiredStep, Exports: []string{"review"}},
 		"collect":  {Runner: notYetWiredStep},
 	}
+}
+
+// NewRegistry merges the engine built-ins with module step contributions
+// into the one registry BuildPlan AND NewExecutor consume. Any collision —
+// a module shadowing a builtin, or two modules claiming the same verb — is
+// an error, never a silent last-wins (each contribution is passed
+// separately so cross-module collisions are visible here).
+func NewRegistry(contributions ...StepRegistry) (StepRegistry, error) {
+	merged := builtinRegistry()
+	for _, contributed := range contributions {
+		for name, def := range contributed {
+			if _, exists := merged[name]; exists {
+				return nil, fmt.Errorf("step verb %q registered twice (module collides with a builtin or another module)", name)
+			}
+			merged[name] = def
+		}
+	}
+	return merged, nil
 }
 
 // Run executes plan's steps in order. In dry-run mode it returns immediately
@@ -138,7 +130,8 @@ func cleanupSandbox(wctx *Context) {
 	slog.Debug("Cleaned up sandbox after error.", "workspace", ws)
 }
 
-// notYetWiredStep backs the launch/collect registry entries for the spike.
+// notYetWiredStep backs the collect registry entry for the spike (launch's
+// stub lives with its module: internal/launch/steps.go).
 func notYetWiredStep(context.Context, exec.Runner, *Context, PlanStep) error {
 	return ErrNotYetWired
 }
@@ -172,81 +165,6 @@ func newSandboxStep(alwaysClone bool) StepRunner {
 		wctx.Set("workspace", dir)
 		return nil
 	}
-}
-
-// newStripStep builds the `strip` StepRunner, closing over the default
-// strip-list to fall back to when a step omits `globs` (design doc: "omit
-// globs → configured default set"). Globs are resolved ONLY inside
-// ${workspace} — a path-escape guard rejects any glob containing ".." or an
-// absolute path, per ADR-0003's "correctness-and-security requirement, spike
-// or not".
-func newStripStep(defaultGlobs []string) StepRunner {
-	return func(_ context.Context, _ exec.Runner, wctx *Context, step PlanStep) error {
-		workspace, ok := wctx.Get("workspace")
-		if !ok || workspace == "" {
-			slog.Warn("Strip step missing workspace context (requires worktree/clone step to run first).")
-			return errors.New("strip step requires ${workspace} (run after a worktree/clone step)")
-		}
-
-		globs := step.Globs
-		if len(globs) == 0 {
-			globs = defaultGlobs
-		}
-
-		slog.Debug("Preparing to strip paths from workspace.", "workspace", workspace, "globCount", len(globs), "globs", globs)
-		for _, g := range globs {
-			if err := validateStripGlob(g); err != nil {
-				slog.Warn("Invalid strip glob.", "glob", g, "error", err)
-				return err
-			}
-			// Expand the pattern so a real glob (e.g. *.md) removes every match,
-			// not only a file literally named "*.md". The strip-list is a
-			// security control, so under-stripping would weaken the clean-room
-			// defense. A literal entry that doesn't exist yields no matches — a
-			// no-op, matching the pre-glob behavior.
-			matches, err := filepath.Glob(filepath.Join(workspace, filepath.Clean(g)))
-			if err != nil {
-				slog.Warn("Bad strip pattern.", "glob", g, "error", err)
-				return fmt.Errorf("strip pattern %q: %w", g, err)
-			}
-			for _, target := range matches {
-				// A pattern with no ".." can still reach outside via a symlink
-				// (e.g. a matched dir that links to /etc); re-check every match's
-				// real path before deleting through it.
-				if !sandbox.WithinWorkspace(workspace, target) {
-					slog.Error("Strip match escapes workspace; refusing.", "glob", g, "target", target)
-					return fmt.Errorf("strip match %q escapes workspace", target)
-				}
-				slog.Debug("Removing path.", "glob", g, "target", target)
-				if err := os.RemoveAll(target); err != nil {
-					slog.Error("Failed to remove path.", "glob", g, "target", target, "error", err)
-					return fmt.Errorf("strip %s: %w", g, err)
-				}
-			}
-		}
-		slog.Debug("Successfully stripped paths from workspace.", "workspace", workspace, "globCount", len(globs))
-		return nil
-	}
-}
-
-// validateStripGlob rejects a glob that could escape ${workspace}: an
-// absolute path, or any ".." path-traversal segment.
-func validateStripGlob(g string) error {
-	if g == "" {
-		return errors.New("strip glob must not be empty")
-	}
-	if filepath.IsAbs(g) {
-		return fmt.Errorf("strip glob %q must not be absolute", g)
-	}
-	// Normalize Windows separators so a "..\" segment is caught on any OS, then
-	// reject any ".." path segment wherever it appears.
-	normalized := strings.ReplaceAll(filepath.Clean(g), "\\", "/")
-	for _, seg := range strings.Split(normalized, "/") {
-		if seg == ".." {
-			return fmt.Errorf("strip glob %q must not traverse outside the workspace", g)
-		}
-	}
-	return nil
 }
 
 // teardownStep removes the sandbox dir. It is idempotent: a missing

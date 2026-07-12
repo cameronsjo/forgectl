@@ -11,6 +11,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/step"
 )
 
 // launchAliases maps each canonical launch subcommand to its accepted
@@ -34,6 +35,9 @@ var launchModule = module.Manifest{
 	GroupAliases: []string{"cl"},
 	SubAliases:   launchAliases,
 	New:          newLaunchCmd,
+	Steps: func(module.Deps) step.Registry {
+		return launch.Steps()
+	},
 }
 
 // ownLaunchVerbs are the canonical `forgectl launch <verb>` tokens handled by

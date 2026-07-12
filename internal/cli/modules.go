@@ -17,6 +17,7 @@ func allModules() []module.Manifest {
 		projectsModule,
 		configModule,
 		launchModule,
+		workflowModule(),
 		netModule,
 		yModule,
 		pipModule,

@@ -4,16 +4,19 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
+// Strip-step behavior tests live with their owning module now —
+// internal/quarantine/steps_test.go (ADR-0005's verb redistribution).
+
 // TestExecutor_TrivialWorkflow_ComposedArgv runs a worktree → strip →
 // teardown workflow through a FakeRunner and asserts the exact composed argv
 // git receives for the worktree step (strip/teardown touch the filesystem
-// directly, not the Runner, so they're covered by the sandbox test below).
+// directly, not the Runner, so they're covered by the quarantine/sandbox
+// tests).
 func TestExecutor_TrivialWorkflow_ComposedArgv(t *testing.T) {
 	repoDir := t.TempDir()
 
@@ -33,12 +36,12 @@ func TestExecutor_TrivialWorkflow_ComposedArgv(t *testing.T) {
 		},
 	}
 
-	plan, err := BuildPlan(wf, map[string]string{"repo": repoDir, "branch": "HEAD"})
+	plan, err := BuildPlan(wf, map[string]string{"repo": repoDir, "branch": "HEAD"}, testRegistry(t))
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
 
-	exe := NewExecutor(fake)
+	exe := NewExecutor(fake, testRegistry(t))
 	wctx := NewContext(nil)
 	if err := exe.Run(context.Background(), plan, wctx); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -78,12 +81,12 @@ func TestExecutor_RunOnlyWorkflow_ComposedArgv(t *testing.T) {
 		},
 	}
 
-	plan, err := BuildPlan(wf, map[string]string{"who": "world"})
+	plan, err := BuildPlan(wf, map[string]string{"who": "world"}, testRegistry(t))
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
 
-	exe := NewExecutor(fake)
+	exe := NewExecutor(fake, testRegistry(t))
 	wctx := NewContext(nil)
 	if err := exe.Run(context.Background(), plan, wctx); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -116,12 +119,12 @@ func TestExecutor_DryRun_ZeroRunnerCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	plan, err := BuildPlan(wf, map[string]string{"repo": "cameronsjo/forgectl"})
+	plan, err := BuildPlan(wf, map[string]string{"repo": "cameronsjo/forgectl"}, testRegistry(t))
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
 
-	exe := NewExecutor(fake, WithDryRun(true))
+	exe := NewExecutor(fake, testRegistry(t), WithDryRun(true))
 	wctx := NewContext(nil)
 	if err := exe.Run(context.Background(), plan, wctx); err != nil {
 		t.Fatalf("Run (dry-run): %v", err)
@@ -129,99 +132,6 @@ func TestExecutor_DryRun_ZeroRunnerCalls(t *testing.T) {
 
 	if len(fake.Calls) != 0 {
 		t.Fatalf("dry-run must issue zero Runner calls, got %d: %+v", len(fake.Calls), fake.Calls)
-	}
-}
-
-// TestExecutor_Strip_DeletesOnlyConfiguredGlobsInsideWorkspace plants files in
-// a real os.MkdirTemp sandbox (not FakeRunner — strip/teardown touch the
-// filesystem directly) and verifies strip removes only the configured globs,
-// leaving everything else untouched.
-func TestExecutor_Strip_DeletesOnlyConfiguredGlobsInsideWorkspace(t *testing.T) {
-	workspace, err := os.MkdirTemp("", "forgectl-strip-test-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	defer os.RemoveAll(workspace)
-
-	plant := func(rel, content string) {
-		full := filepath.Join(workspace, rel)
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			t.Fatalf("MkdirAll %s: %v", rel, err)
-		}
-		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-			t.Fatalf("WriteFile %s: %v", rel, err)
-		}
-	}
-	plant("CLAUDE.md", "agent instructions")
-	plant(".claude/settings.json", "{}")
-	plant("README.md", "keep me")
-	plant("src/main.go", "package main")
-
-	fake := &exec.FakeRunner{}
-	exe := NewExecutor(fake)
-	wctx := NewContext(nil)
-	wctx.Set("workspace", workspace)
-
-	plan := Plan{
-		Name: "strip-only",
-		Steps: []PlanStep{
-			{Uses: "strip", Globs: []string{"CLAUDE.md", ".claude/"}},
-		},
-	}
-	if err := exe.Run(context.Background(), plan, wctx); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(workspace, "CLAUDE.md")); !os.IsNotExist(err) {
-		t.Errorf("CLAUDE.md should have been stripped, stat err = %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(workspace, ".claude")); !os.IsNotExist(err) {
-		t.Errorf(".claude/ should have been stripped, stat err = %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(workspace, "README.md")); err != nil {
-		t.Errorf("README.md should survive strip, stat err = %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(workspace, "src", "main.go")); err != nil {
-		t.Errorf("src/main.go should survive strip, stat err = %v", err)
-	}
-	if len(fake.Calls) != 0 {
-		t.Errorf("strip must not shell out, got %d Runner calls: %+v", len(fake.Calls), fake.Calls)
-	}
-}
-
-// TestExecutor_Strip_RejectsPathEscape is the ADR-0003 security requirement:
-// a glob attempting to escape ${workspace} via ".." or an absolute path must
-// be refused, never deleted.
-func TestExecutor_Strip_RejectsPathEscape(t *testing.T) {
-	workspace, err := os.MkdirTemp("", "forgectl-strip-escape-test-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	defer os.RemoveAll(workspace)
-
-	sentinel := filepath.Join(filepath.Dir(workspace), "forgectl-strip-escape-sentinel")
-	if err := os.WriteFile(sentinel, []byte("must survive"), 0o644); err != nil {
-		t.Fatalf("WriteFile sentinel: %v", err)
-	}
-	defer os.Remove(sentinel)
-
-	exe := NewExecutor(&exec.FakeRunner{})
-	wctx := NewContext(nil)
-	wctx.Set("workspace", workspace)
-
-	cases := []PlanStep{
-		{Uses: "strip", Globs: []string{"../" + filepath.Base(sentinel)}},
-		{Uses: "strip", Globs: []string{sentinel}}, // absolute path
-	}
-	for _, step := range cases {
-		plan := Plan{Name: "escape-attempt", Steps: []PlanStep{step}}
-		if err := exe.Run(context.Background(), plan, wctx); err == nil {
-			t.Errorf("expected a path-escape error for globs %v, got nil", step.Globs)
-		}
-	}
-
-	if _, err := os.Stat(sentinel); err != nil {
-		t.Errorf("sentinel outside workspace must survive, stat err = %v", err)
 	}
 }
 
@@ -234,7 +144,7 @@ func TestExecutor_Teardown_Idempotent(t *testing.T) {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
 
-	exe := NewExecutor(&exec.FakeRunner{})
+	exe := NewExecutor(&exec.FakeRunner{}, testRegistry(t))
 	wctx := NewContext(nil)
 	wctx.Set("workspace", workspace)
 
@@ -250,10 +160,11 @@ func TestExecutor_Teardown_Idempotent(t *testing.T) {
 	}
 }
 
-// TestExecutor_NotYetWiredSteps confirms launch/collect are registered but
-// return the sentinel error rather than panicking or silently no-opping.
+// TestExecutor_NotYetWiredSteps confirms launch (module-contributed) and
+// collect (builtin) are registered but return the sentinel error rather than
+// panicking or silently no-opping.
 func TestExecutor_NotYetWiredSteps(t *testing.T) {
-	exe := NewExecutor(&exec.FakeRunner{})
+	exe := NewExecutor(&exec.FakeRunner{}, testRegistry(t))
 	wctx := NewContext(nil)
 
 	for _, uses := range []string{"launch", "collect"} {
@@ -262,6 +173,21 @@ func TestExecutor_NotYetWiredSteps(t *testing.T) {
 		if !errors.Is(err, ErrNotYetWired) {
 			t.Errorf("%s step: expected ErrNotYetWired, got %v", uses, err)
 		}
+	}
+}
+
+// TestExecutor_UnknownVerbWithoutContribution pins the eviction story's
+// failure mode: an executor built over the bare builtins (no module
+// contributions) must fail loudly on a module-owned verb like strip.
+func TestExecutor_UnknownVerbWithoutContribution(t *testing.T) {
+	reg, err := NewRegistry()
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	exe := NewExecutor(&exec.FakeRunner{}, reg)
+	plan := Plan{Name: "no-strip", Steps: []PlanStep{{Uses: "strip"}}}
+	if err := exe.Run(context.Background(), plan, NewContext(nil)); err == nil {
+		t.Fatal("expected an unknown-verb error for strip without quarantine's contribution")
 	}
 }
 
@@ -283,12 +209,12 @@ func TestExecutor_CloneVerb_ClonesAndExportsWorkspace(t *testing.T) {
 		},
 	}
 
-	plan, err := BuildPlan(wf, nil)
+	plan, err := BuildPlan(wf, nil, testRegistry(t))
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
 
-	exe := NewExecutor(fake)
+	exe := NewExecutor(fake, testRegistry(t))
 	wctx := NewContext(nil)
 	if err := exe.Run(context.Background(), plan, wctx); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -327,7 +253,7 @@ func TestExecutor_CloneVerb_ClonesLocalRepo(t *testing.T) {
 
 	plan := Plan{Name: "clone-local", Steps: []PlanStep{{Uses: "clone", Repo: repoDir}}}
 	wctx := NewContext(nil)
-	exe := NewExecutor(fake)
+	exe := NewExecutor(fake, testRegistry(t))
 	if err := exe.Run(context.Background(), plan, wctx); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -365,7 +291,7 @@ func TestExecutor_Run_ResolvesExportsAtExecuteTime(t *testing.T) {
 			{Uses: "teardown"},
 		},
 	}
-	plan, err := BuildPlan(wf, nil)
+	plan, err := BuildPlan(wf, nil, testRegistry(t))
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
@@ -374,7 +300,7 @@ func TestExecutor_Run_ResolvesExportsAtExecuteTime(t *testing.T) {
 		t.Fatalf("plan-time arg = %q, want the deferred literal ${workspace}", got)
 	}
 
-	exe := NewExecutor(fake)
+	exe := NewExecutor(fake, testRegistry(t))
 	wctx := NewContext(nil)
 	if err := exe.Run(context.Background(), plan, wctx); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -411,12 +337,12 @@ func TestExecutor_Run_ForwardReferenceFails(t *testing.T) {
 			{Uses: "worktree", Repo: repoDir},
 		},
 	}
-	plan, err := BuildPlan(wf, nil)
+	plan, err := BuildPlan(wf, nil, testRegistry(t))
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err) // plan-time deferral keeps this buildable
 	}
 
-	exe := NewExecutor(fake)
+	exe := NewExecutor(fake, testRegistry(t))
 	if err := exe.Run(context.Background(), plan, NewContext(nil)); err == nil {
 		t.Fatal("expected a hard error for a forward reference, got nil")
 	}
@@ -440,7 +366,7 @@ func TestExecutor_Worktree_RejectsOptionLikeRepoRef(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &exec.FakeRunner{}
-			exe := NewExecutor(fake)
+			exe := NewExecutor(fake, testRegistry(t))
 			plan := Plan{Name: "inject", Steps: []PlanStep{tc.step}}
 			if err := exe.Run(context.Background(), plan, NewContext(nil)); err == nil {
 				t.Fatal("expected rejection of an option-like value, got nil")
@@ -449,74 +375,5 @@ func TestExecutor_Worktree_RejectsOptionLikeRepoRef(t *testing.T) {
 				t.Errorf("git must not run for a rejected value, got calls: %+v", fake.Calls)
 			}
 		})
-	}
-}
-
-// TestExecutor_Strip_ExpandsGlobPattern verifies the strip-list is a real glob:
-// a "*.md" pattern removes every match, not only a file literally named "*.md".
-func TestExecutor_Strip_ExpandsGlobPattern(t *testing.T) {
-	workspace, err := os.MkdirTemp("", "forgectl-strip-glob-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	defer os.RemoveAll(workspace)
-
-	for _, f := range []string{"a.md", "b.md", "keep.txt"} {
-		if err := os.WriteFile(filepath.Join(workspace, f), []byte("x"), 0o644); err != nil {
-			t.Fatalf("WriteFile %s: %v", f, err)
-		}
-	}
-
-	exe := NewExecutor(&exec.FakeRunner{})
-	wctx := NewContext(nil)
-	wctx.Set("workspace", workspace)
-	plan := Plan{Name: "glob-strip", Steps: []PlanStep{{Uses: "strip", Globs: []string{"*.md"}}}}
-	if err := exe.Run(context.Background(), plan, wctx); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	for _, gone := range []string{"a.md", "b.md"} {
-		if _, err := os.Stat(filepath.Join(workspace, gone)); !os.IsNotExist(err) {
-			t.Errorf("%s should be stripped by *.md, stat err = %v", gone, err)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(workspace, "keep.txt")); err != nil {
-		t.Errorf("keep.txt should survive a *.md strip, stat err = %v", err)
-	}
-}
-
-// TestExecutor_Strip_RefusesSymlinkEscape covers the glob-via-symlink vector: a
-// pattern with no ".." can still match through a symlink pointing outside
-// ${workspace}. withinWorkspace must refuse to delete through it.
-func TestExecutor_Strip_RefusesSymlinkEscape(t *testing.T) {
-	workspace, err := os.MkdirTemp("", "forgectl-strip-symlink-ws-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp workspace: %v", err)
-	}
-	defer os.RemoveAll(workspace)
-
-	external, err := os.MkdirTemp("", "forgectl-strip-symlink-ext-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp external: %v", err)
-	}
-	defer os.RemoveAll(external)
-
-	victim := filepath.Join(external, "victim.md")
-	if err := os.WriteFile(victim, []byte("must survive"), 0o644); err != nil {
-		t.Fatalf("WriteFile victim: %v", err)
-	}
-	if err := os.Symlink(external, filepath.Join(workspace, "sub")); err != nil {
-		t.Skipf("symlink unsupported: %v", err)
-	}
-
-	exe := NewExecutor(&exec.FakeRunner{})
-	wctx := NewContext(nil)
-	wctx.Set("workspace", workspace)
-	plan := Plan{Name: "symlink-escape", Steps: []PlanStep{{Uses: "strip", Globs: []string{"sub/*.md"}}}}
-	if err := exe.Run(context.Background(), plan, wctx); err == nil {
-		t.Error("expected refusal to strip through a workspace symlink escaping the sandbox")
-	}
-	if _, err := os.Stat(victim); err != nil {
-		t.Errorf("external victim.md must survive, stat err = %v", err)
 	}
 }

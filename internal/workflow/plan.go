@@ -22,7 +22,11 @@ type Plan struct {
 // variables until execute merges in each step's exports — so BuildPlan
 // returns an error only for a genuinely unresolvable reference (unknown
 // param name, missing required param).
-func BuildPlan(wf Workflow, cliParams map[string]string) (Plan, error) {
+//
+// registry is the MERGED vocabulary from NewRegistry — the same one the
+// Executor runs — so a module-contributed verb's exports (launch's
+// ${review}) defer at plan time exactly like a builtin's (ADR-0005).
+func BuildPlan(wf Workflow, cliParams map[string]string, registry StepRegistry) (Plan, error) {
 	slog.Debug("Preparing to build plan.", "workflowName", wf.Name, "workflowVersion", wf.Version, "stepCount", len(wf.Steps))
 
 	resolved, err := resolveParams(wf.Params, cliParams)
@@ -37,10 +41,9 @@ func BuildPlan(wf Workflow, cliParams map[string]string) (Plan, error) {
 	// references a not-yet-produced export (e.g. ${workspace} before the
 	// worktree step runs) renders as the literal ${...} at plan time and is
 	// resolved during execute. The export vocabulary comes from the same
-	// registry the Executor runs, so a verb's exports live in one place.
-	reg := defaultRegistry(nil) // nil: exports are glob-independent; runners are unused here
+	// merged registry the Executor runs, so a verb's exports live in one place.
 	for _, s := range wf.Steps {
-		for _, exp := range reg[s.Uses].Exports {
+		for _, exp := range registry[s.Uses].Exports {
 			ctx.Defer(exp)
 		}
 	}

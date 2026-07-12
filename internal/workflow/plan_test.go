@@ -12,7 +12,7 @@ func TestBuildPlan_EmbeddedCleanRoomReview(t *testing.T) {
 		t.Fatalf("Parse: %v", err)
 	}
 
-	plan, err := BuildPlan(wf, map[string]string{"repo": "cameronsjo/forgectl"})
+	plan, err := BuildPlan(wf, map[string]string{"repo": "cameronsjo/forgectl"}, testRegistry(t))
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestBuildPlan_MissingRequiredParam(t *testing.T) {
 	}
 
 	// repo is required and not supplied.
-	if _, err := BuildPlan(wf, nil); err == nil {
+	if _, err := BuildPlan(wf, nil, testRegistry(t)); err == nil {
 		t.Fatal("expected an error for missing required param repo")
 	}
 }
@@ -70,7 +70,7 @@ func TestBuildPlan_UnknownVariable(t *testing.T) {
 			{Uses: "run", Cmd: "echo", Args: []string{"${nope}"}},
 		},
 	}
-	if _, err := BuildPlan(wf, nil); err == nil {
+	if _, err := BuildPlan(wf, nil, testRegistry(t)); err == nil {
 		t.Fatal("expected an error for an unresolved ${nope} reference")
 	}
 }
