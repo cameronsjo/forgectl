@@ -9,13 +9,25 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/sessions"
 )
 
-// newSessionsCmd builds `forgectl sessions` — the cross-machine operational
-// mart ETL and its query surface. Mirrors the house pattern: this layer parses
-// flags and prints receipts; internal/sessions owns the logic.
-func newSessionsCmd(cfg config.Config) *cobra.Command {
+// sessionsModule declares the operational-mart ETL extension (ADR-0005):
+// owns the [sessions] config section, no alias surface.
+var sessionsModule = module.Manifest{
+	Name:      "sessions",
+	Tier:      module.TierExtension,
+	ConfigKey: "sessions",
+	New:       newSessionsCmd,
+}
+
+// newSessionsCmd builds `forgectl sessions` over the registry Deps — the
+// cross-machine operational mart ETL and its query surface. Mirrors the house
+// pattern: this layer parses flags and prints receipts; internal/sessions
+// owns the logic. (No Runner use: the domain package speaks pgx, not argv.)
+func newSessionsCmd(deps module.Deps) *cobra.Command {
+	cfg := deps.Cfg
 	cmd := &cobra.Command{
 		Use:   "sessions",
 		Short: "Sync local session ledgers into the operational mart and query it",

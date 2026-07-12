@@ -20,5 +20,6 @@ func allModules() []module.Manifest {
 		cleanModule,
 		dockerModule,
 		benchModule,
+		sessionsModule,
 	}
 }
