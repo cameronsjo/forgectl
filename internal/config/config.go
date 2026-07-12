@@ -482,6 +482,20 @@ func WorkflowsDir() (string, error) {
 	return filepath.Join(dir, "workflows"), nil
 }
 
+// TrustStorePath returns the on-disk path for the workflow-blessing trust
+// store: <os.UserConfigDir()>/forgectl/trust.toml (macOS: ~/Library/Application
+// Support/forgectl/trust.toml; Linux: ~/.config/forgectl/trust.toml). It derives
+// from the same configDir() base as ConfigPath/NetCachePath, so all of them
+// never drift. The store lists enrolled machine keys and is itself a blessed
+// file — its .blessing sidecar sits alongside it (internal/bless).
+func TrustStorePath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "trust.toml"), nil
+}
+
 // NetCachePath returns the on-disk path for the internal/net reachability
 // cache: <os.UserConfigDir()>/forgectl/net-cache.json (macOS: ~/Library/
 // Application Support/forgectl/net-cache.json; Linux: ~/.config/forgectl/

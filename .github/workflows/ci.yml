@@ -15,7 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        # Pinned to a commit SHA: a mutable tag is a supply-chain seam. This job
+        # only builds and tests, so it keeps no credential in .git/config either.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -39,3 +43,23 @@ jobs:
             echo "$unformatted"
             exit 1
           fi
+
+  helper:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: helper/forgectl-bless-helper
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test

@@ -3,6 +3,8 @@ package workflow
 import (
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 )
 
 // Plan is the ordered, resolved step sequence a workflow run will execute.
@@ -36,6 +38,21 @@ func BuildPlan(wf Workflow, cliParams map[string]string, registry StepRegistry) 
 	}
 	slog.Debug("Resolved workflow params.", "paramCount", len(resolved))
 
+	// Params and exports share ONE variable namespace at execution time (the
+	// Context), and an export only overwrites its name if its step actually
+	// Sets it — so a param named after an export could survive into later
+	// steps if an exporting step ever succeeded without setting it. That would
+	// let a CLI-supplied value ride a name the bless-time injection guard
+	// (#10) trusts as step-produced. Refuse the collision outright.
+	for i, s := range wf.Steps {
+		for _, exp := range registry[s.Uses].Exports {
+			if _, isParam := wf.Params[exp]; isParam {
+				slog.Error("Param name collides with a step export.", "workflowName", wf.Name, "param", exp, "stepIndex", i, "stepUse", s.Uses)
+				return Plan{}, fmt.Errorf("param %q collides with the %q export of step %d (%s): params and step exports share one namespace", exp, exp, i, s.Uses)
+			}
+		}
+	}
+
 	ctx := NewContext(resolved)
 	// Mark every variable a step exports as deferred, so a field that
 	// references a not-yet-produced export (e.g. ${workspace} before the
@@ -63,11 +80,29 @@ func BuildPlan(wf Workflow, cliParams map[string]string, registry StepRegistry) 
 }
 
 // resolveParams merges cliParams over each declared param's default and
-// enforces required params (ADR-0002). A cliParam not declared in the
-// workflow is passed through as-is — it becomes available to ${} references
-// but isn't validated against a Param declaration.
+// enforces required params (ADR-0002). An undeclared --param is REJECTED rather
+// than passed through: nothing should silently accept a param the workflow never
+// declared, and (with blessing, #10) an unchecked passthrough would be an
+// agent-controllable injection into a blessed run step's ${} references. Unknown
+// names are sorted so the error message is deterministic when several are given.
 func resolveParams(declared map[string]Param, cliParams map[string]string) (map[string]string, error) {
-	out := make(map[string]string, len(declared)+len(cliParams))
+	var unknown []string
+	for name := range cliParams {
+		if _, ok := declared[name]; !ok {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		slog.Debug("Rejecting undeclared params.", "params", unknown)
+		quoted := make([]string, len(unknown))
+		for i, name := range unknown {
+			quoted[i] = fmt.Sprintf("%q", name)
+		}
+		return nil, fmt.Errorf("unknown param %s: not declared by this workflow", strings.Join(quoted, ", "))
+	}
+
+	out := make(map[string]string, len(declared))
 	for name, p := range declared {
 		if v, ok := cliParams[name]; ok {
 			out[name] = v
@@ -78,11 +113,6 @@ func resolveParams(declared map[string]Param, cliParams map[string]string) (map[
 			return nil, fmt.Errorf("missing required param %q", name)
 		}
 		out[name] = p.Default
-	}
-	for name, v := range cliParams {
-		if _, ok := declared[name]; !ok {
-			out[name] = v
-		}
 	}
 	return out, nil
 }

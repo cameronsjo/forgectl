@@ -1,0 +1,256 @@
+package bless
+
+import (
+	"encoding/base64"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+var workflowData = []byte("dsl_version = 1\nname = \"x\"\nversion = \"1.0.0\"\n")
+
+func TestVerify_RoundTrip(t *testing.T) {
+	env := newTestEnv(t)
+	wf := env.writeWorkflow(t, workflowData)
+	env.bless(t, wf, workflowData)
+	if err := env.verifier().Verify(wf, workflowData); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+}
+
+func TestVerify_TamperedData(t *testing.T) {
+	env := newTestEnv(t)
+	wf := env.writeWorkflow(t, workflowData)
+	env.bless(t, wf, workflowData)
+	// The blessing covers workflowData; verify against a one-byte edit.
+	tampered := append([]byte{}, workflowData...)
+	tampered[0] ^= 0x01
+	err := env.verifier().Verify(wf, tampered)
+	if !errors.Is(err, ErrTampered) {
+		t.Fatalf("Verify tampered = %v, want ErrTampered", err)
+	}
+}
+
+func TestVerify_MissingSidecar(t *testing.T) {
+	env := newTestEnv(t)
+	wf := env.writeWorkflow(t, workflowData)
+	// No env.bless — no sidecar exists.
+	err := env.verifier().Verify(wf, workflowData)
+	if !errors.Is(err, ErrUnblessed) {
+		t.Fatalf("Verify unblessed = %v, want ErrUnblessed", err)
+	}
+}
+
+func TestVerify_UnknownKey(t *testing.T) {
+	env := newTestEnv(t)
+	wf := env.writeWorkflow(t, workflowData)
+	// Sign with a key that is NOT in the store.
+	stray := genKey(t)
+	sidecar := Envelope{
+		Schema:    EnvelopeSchema,
+		Algo:      AlgoECDSAP256SHA256,
+		KeyID:     Fingerprint(mustPubDER(t, &stray.PublicKey)),
+		Signature: signB64(t, stray, DomainWorkflow, workflowData),
+		SignedAt:  fixedTime.Format(time.RFC3339),
+	}
+	writeFile(t, SidecarPath(wf), mustEncodeEnvelope(t, sidecar))
+	err := env.verifier().Verify(wf, workflowData)
+	if !errors.Is(err, ErrUnknownKey) {
+		t.Fatalf("Verify unknown-key = %v, want ErrUnknownKey", err)
+	}
+}
+
+func TestVerify_MalformedSidecarIsTampered(t *testing.T) {
+	env := newTestEnv(t)
+	wf := env.writeWorkflow(t, workflowData)
+	writeFile(t, SidecarPath(wf), []byte("this is not valid envelope toml {"))
+	err := env.verifier().Verify(wf, workflowData)
+	if !errors.Is(err, ErrTampered) {
+		t.Fatalf("Verify malformed sidecar = %v, want ErrTampered", err)
+	}
+}
+
+func TestVerify_StoreBytesTampered(t *testing.T) {
+	env := newTestEnv(t)
+	wf := env.writeWorkflow(t, workflowData)
+	env.bless(t, wf, workflowData)
+	// Rewrite the store bytes after it was signed: the anchor signature no
+	// longer matches.
+	writeFile(t, env.storePath, append(env.storeBytes, []byte("\n# tampered\n")...))
+	err := env.verifier().Verify(wf, workflowData)
+	if !errors.Is(err, ErrTrustStoreInvalid) {
+		t.Fatalf("Verify tampered-store = %v, want ErrTrustStoreInvalid", err)
+	}
+}
+
+func TestVerify_StoreSidecarKeyIDMismatch(t *testing.T) {
+	env := newTestEnv(t)
+	wf := env.writeWorkflow(t, workflowData)
+	env.bless(t, wf, workflowData)
+	// Re-sign the store with a DIFFERENT key and advertise that key's id — the
+	// store sidecar's key_id no longer equals the anchor fingerprint.
+	other := genKey(t)
+	badStoreEnv := Envelope{
+		Schema:    EnvelopeSchema,
+		Algo:      AlgoECDSAP256SHA256,
+		KeyID:     Fingerprint(mustPubDER(t, &other.PublicKey)),
+		Signature: signB64(t, other, DomainTrust, env.storeBytes),
+		SignedAt:  fixedTime.Format(time.RFC3339),
+	}
+	writeFile(t, SidecarPath(env.storePath), mustEncodeEnvelope(t, badStoreEnv))
+	err := env.verifier().Verify(wf, workflowData)
+	if !errors.Is(err, ErrTrustStoreInvalid) {
+		t.Fatalf("Verify store-keyid-mismatch = %v, want ErrTrustStoreInvalid", err)
+	}
+}
+
+func TestVerify_AnchorFailures(t *testing.T) {
+	env := newTestEnv(t)
+	wf := env.writeWorkflow(t, workflowData)
+	env.bless(t, wf, workflowData)
+
+	t.Run("ownership check fails", func(t *testing.T) {
+		v := env.verifier()
+		v.anchorCheck = func(string) error { return errors.New("not root-owned") }
+		if err := v.Verify(wf, workflowData); !errors.Is(err, ErrNoAnchor) {
+			t.Fatalf("Verify = %v, want ErrNoAnchor", err)
+		}
+	})
+	t.Run("anchor file missing", func(t *testing.T) {
+		v := env.verifier()
+		v.anchorPath = filepath.Join(env.dir, "does-not-exist")
+		if err := v.Verify(wf, workflowData); !errors.Is(err, ErrNoAnchor) {
+			t.Fatalf("Verify = %v, want ErrNoAnchor", err)
+		}
+	})
+	t.Run("anchor file unparseable", func(t *testing.T) {
+		bad := filepath.Join(env.dir, "bad-anchor")
+		writeFile(t, bad, []byte("not base64 !!!"))
+		v := env.verifier()
+		v.anchorPath = bad
+		if err := v.Verify(wf, workflowData); !errors.Is(err, ErrNoAnchor) {
+			t.Fatalf("Verify = %v, want ErrNoAnchor", err)
+		}
+	})
+}
+
+func TestVerify_TrustStoreMissing(t *testing.T) {
+	env := newTestEnv(t)
+	wf := env.writeWorkflow(t, workflowData)
+	env.bless(t, wf, workflowData)
+	if err := os.Remove(env.storePath); err != nil {
+		t.Fatalf("remove store: %v", err)
+	}
+	if err := env.verifier().Verify(wf, workflowData); !errors.Is(err, ErrTrustStoreInvalid) {
+		t.Fatalf("Verify missing-store = %v, want ErrTrustStoreInvalid", err)
+	}
+}
+
+// TestVerify_DomainSeparation proves a signature made under one domain cannot
+// authenticate the other: a workflow blessing signed under the TRUST domain
+// fails, and a trust-store signed under the WORKFLOW domain fails.
+func TestVerify_DomainSeparation(t *testing.T) {
+	t.Run("workflow sig under trust domain is rejected", func(t *testing.T) {
+		env := newTestEnv(t)
+		wf := env.writeWorkflow(t, workflowData)
+		// Sign the workflow with the enrolled key but under the WRONG (trust) domain.
+		sidecar := Envelope{
+			Schema:    EnvelopeSchema,
+			Algo:      AlgoECDSAP256SHA256,
+			KeyID:     env.signerID,
+			Signature: signB64(t, env.signerKey, DomainTrust, workflowData),
+			SignedAt:  fixedTime.Format(time.RFC3339),
+		}
+		writeFile(t, SidecarPath(wf), mustEncodeEnvelope(t, sidecar))
+		if err := env.verifier().Verify(wf, workflowData); !errors.Is(err, ErrTampered) {
+			t.Fatalf("Verify = %v, want ErrTampered (wrong-domain workflow sig)", err)
+		}
+	})
+
+	t.Run("trust-store sig under workflow domain is rejected", func(t *testing.T) {
+		env := newTestEnv(t)
+		wf := env.writeWorkflow(t, workflowData)
+		env.bless(t, wf, workflowData)
+		// Re-sign the store under the WRONG (workflow) domain with the anchor key.
+		badStoreEnv := Envelope{
+			Schema:    EnvelopeSchema,
+			Algo:      AlgoECDSAP256SHA256,
+			KeyID:     env.anchorFP,
+			Signature: signB64(t, env.anchorKey, DomainWorkflow, env.storeBytes),
+			SignedAt:  fixedTime.Format(time.RFC3339),
+		}
+		writeFile(t, SidecarPath(env.storePath), mustEncodeEnvelope(t, badStoreEnv))
+		if err := env.verifier().Verify(wf, workflowData); !errors.Is(err, ErrTrustStoreInvalid) {
+			t.Fatalf("Verify = %v, want ErrTrustStoreInvalid (wrong-domain store sig)", err)
+		}
+	})
+}
+
+// TestVerify_StoreEntryFingerprintMismatch proves the defense-in-depth check
+// on store identity claims: an anchor-signed store whose entry records a key_id
+// that does not fingerprint its own pubkey is refused — verification never
+// proceeds on a key looked up by a false id, even though only broken enrollment
+// tooling (not an agent) could produce such a store.
+func TestVerify_StoreEntryFingerprintMismatch(t *testing.T) {
+	env := newTestEnv(t)
+	wf := env.writeWorkflow(t, workflowData)
+	env.bless(t, wf, workflowData)
+
+	// Swap the enrolled entry's pubkey for a different key's, keeping the
+	// original key_id, and re-sign the store with the real anchor key.
+	store, err := DecodeStore(env.storeBytes)
+	if err != nil {
+		t.Fatalf("decode store: %v", err)
+	}
+	imposter := genKey(t)
+	for i := range store.Keys {
+		if store.Keys[i].KeyID == env.signerID {
+			store.Keys[i].Pubkey = base64.StdEncoding.EncodeToString(mustPubDER(t, &imposter.PublicKey))
+		}
+	}
+	badBytes, err := EncodeStore(store)
+	if err != nil {
+		t.Fatalf("encode store: %v", err)
+	}
+	badStoreEnv := Envelope{
+		Schema:    EnvelopeSchema,
+		Algo:      AlgoECDSAP256SHA256,
+		KeyID:     env.anchorFP,
+		Signature: signB64(t, env.anchorKey, DomainTrust, badBytes),
+		SignedAt:  fixedTime.Format(time.RFC3339),
+	}
+	writeFile(t, env.storePath, badBytes)
+	writeFile(t, SidecarPath(env.storePath), mustEncodeEnvelope(t, badStoreEnv))
+
+	err = env.verifier().Verify(wf, workflowData)
+	if !errors.Is(err, ErrTrustStoreInvalid) {
+		t.Fatalf("Verify fingerprint-mismatch = %v, want ErrTrustStoreInvalid", err)
+	}
+}
+
+func TestVerify_UsesOnlyProvidedData(t *testing.T) {
+	// Verify must never re-read the workflow file — TOCTOU is closed by the
+	// caller. Bless a set of bytes, delete the file, and confirm Verify still
+	// succeeds against the in-memory bytes it was handed.
+	env := newTestEnv(t)
+	wf := env.writeWorkflow(t, workflowData)
+	env.bless(t, wf, workflowData)
+	if err := os.Remove(wf); err != nil {
+		t.Fatalf("remove workflow file: %v", err)
+	}
+	if err := env.verifier().Verify(wf, workflowData); err != nil {
+		t.Fatalf("Verify after removing the workflow file: %v", err)
+	}
+}
+
+func TestNewVerifier_AnchorPathCompiledIn(t *testing.T) {
+	const want = "/etc/forgectl/trust-anchor.pub"
+	if AnchorPath != want {
+		t.Errorf("AnchorPath = %q, want %q", AnchorPath, want)
+	}
+	if got := NewVerifier().anchorPath; got != want {
+		t.Errorf("NewVerifier().anchorPath = %q, want %q", got, want)
+	}
+}
