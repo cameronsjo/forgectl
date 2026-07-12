@@ -107,17 +107,6 @@ var resolveSelf = func() (string, error) {
 // key. The env var would buy a dev seam that the build already provides — the
 // verification scripts build forgectl and the helper into one directory as
 // siblings — at the cost of the entire threat model.
-// NewHelperBlesserAt binds a HelperBlesser to an explicit helper path, skipping
-// discovery. Production never calls it — NewHelperBlesser owns the sibling
-// lookup — but tests in other packages need to drive the real argv/stdin/JSON
-// contract through a FakeRunner without a helper on disk. This is a Go
-// constructor, callable only from code compiled into the binary; it is NOT a
-// runtime override an agent can reach (the distinction that made the old
-// FORGECTL_BLESS_HELPER env var a root-of-trust compromise).
-func NewHelperBlesserAt(run exec.Runner, path string) *HelperBlesser {
-	return &HelperBlesser{run: run, path: path}
-}
-
 func NewHelperBlesser(run exec.Runner) (*HelperBlesser, error) {
 	self, err := resolveSelf()
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"os"
@@ -120,27 +121,53 @@ func cliPubDER(t *testing.T, k *ecdsa.PrivateKey) []byte {
 	return der
 }
 
-// cliFakeHelperEnv points FORGECTL_BLESS_HELPER at a real (dummy) on-disk file
-// so bless.NewHelperBlesser's existence check passes; the FakeRunner supplies
-// the canned replies.
-// cliFakeHelper points the bless verbs at a HelperBlesser driven by the test's
-// FakeRunner, preserving coverage of the real argv/stdin/JSON contract.
-//
-// It swaps the in-process blesserFactory — deliberately NOT an environment
-// variable. FORGECTL_BLESS_HELPER was removed because it also served Enroll and
-// PublicKey, and `trust init` enrolls at the one moment no trust store exists:
-// an agent that exported it could have the human's own sudo anchor the AGENT's
-// key. A package var is reachable only from code linked into this test binary,
-// so injectability returns without the hole.
-// The factory is handed deps.Runner (the test's FakeRunner) at call time, so the
-// helper needs no runner argument of its own.
-func cliFakeHelper(t *testing.T) {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "forgectl-bless-helper")
-	prev := blesserFactory
-	blesserFactory = func(run exec.Runner) (bless.Blesser, error) {
-		return bless.NewHelperBlesserAt(run, path), nil
+// cliFakeBlesser is a test Blesser that signs with an in-test key. The CLI tests
+// exercise CLI logic (ceremony flow, error surfacing, sidecar writing) — the
+// real HelperBlesser's argv/stdin/JSON/exit-code contract is covered by
+// internal/bless's own tests, so the CLI layer needs only *some* Blesser, not a
+// real path-taking one. Constructing it here (rather than a `bless.NewHelper
+// BlesserAt`) keeps the bless package from exporting a path-taking constructor
+// that a future caller could turn back into the removed injectable-helper hole.
+type cliFakeBlesser struct {
+	key       *ecdsa.PrivateKey
+	enrollErr error // simulate ErrLabelExists to drive the EnsureKey fallback
+	pubErr    error // simulate ErrKeyNotPresenceGated / ErrKeyNotFound
+	signErr   error // simulate ErrCancelled
+}
+
+func (f cliFakeBlesser) pubDER() ([]byte, error) { return x509.MarshalPKIXPublicKey(&f.key.PublicKey) }
+
+func (f cliFakeBlesser) Enroll(context.Context, string) ([]byte, error) {
+	if f.enrollErr != nil {
+		return nil, f.enrollErr
 	}
+	return f.pubDER()
+}
+
+func (f cliFakeBlesser) PublicKey(context.Context, string) ([]byte, error) {
+	if f.pubErr != nil {
+		return nil, f.pubErr
+	}
+	return f.pubDER()
+}
+
+func (f cliFakeBlesser) Sign(_ context.Context, _ string, digest [32]byte) ([]byte, error) {
+	if f.signErr != nil {
+		return nil, f.signErr
+	}
+	return ecdsa.SignASN1(rand.Reader, f.key, digest[:])
+}
+
+// cliFakeBless installs a cliFakeBlesser via the in-process blesserFactory — a
+// package var, deliberately NOT an environment variable (FORGECTL_BLESS_HELPER
+// was removed precisely because an agent could export it to poison the trust
+// bootstrap; a package var is reachable only from code linked into this test
+// binary). The blesser signs any digest it is handed with b.key, so a store or
+// workflow blessing verifies under that key regardless of domain.
+func cliFakeBless(t *testing.T, b cliFakeBlesser) {
+	t.Helper()
+	prev := blesserFactory
+	blesserFactory = func(exec.Runner) (bless.Blesser, error) { return b, nil }
 	t.Cleanup(func() { blesserFactory = prev })
 }
 
