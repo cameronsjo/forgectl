@@ -147,6 +147,11 @@ func shouldLaunchTUI(root *cobra.Command, args []string) bool {
 // when this invocation isn't a launcher passthrough. A root flag such as
 // --help/--version is NOT inert: encountering one disables the shortcut so fang
 // can handle it, rather than skipping past it into the launcher.
+//
+// The "launch"/"cl" literals deliberately do NOT read launchModule — this
+// intercept is host-owned dispatch-pipeline plumbing, not module surface
+// (ADR-0005 §Future work). TestLaunchIntercept_MatchesLaunchModuleTokens pins
+// the literals against the manifest so a GroupAliases change can't drift.
 func launchIntercept(args []string) (rest []string, ok bool) {
 	for i, a := range args {
 		switch {

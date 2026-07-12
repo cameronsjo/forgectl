@@ -40,6 +40,10 @@ func newRoot(deps module.Deps) *cobra.Command {
 				cmd.Aliases = append(cmd.Aliases, a)
 			}
 		}
+		// Deliberate re-application, not dead code: constructors with a
+		// SubAliases surface also self-apply (their test seams need the
+		// aliases), and applyAliases overwrites with the same map, so this
+		// copy is the safety net for any constructor that doesn't.
 		applyAliases(cmd, m.SubAliases)
 		root.AddCommand(cmd)
 	}

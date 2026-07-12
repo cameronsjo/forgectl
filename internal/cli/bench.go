@@ -27,7 +27,6 @@ var benchModule = module.Manifest{
 // Verbs are attached as subcommands: `status` reports aggregate health
 // across the local bench. Mirrors newWorkflowCmd's parent/subcommand shape.
 func newBenchCmd(deps module.Deps) *cobra.Command {
-	cfg := deps.Cfg
 	cmd := &cobra.Command{
 		Use:   "bench",
 		Short: "Discover and health-check the local dev bench (hearth, chronicle, flux)",
@@ -46,9 +45,9 @@ Support/forgectl/config.toml). Unset components degrade to "not-configured"
 rather than erroring.`,
 	}
 	cmd.AddCommand(
-		newBenchStatusCmd(cfg),
-		newBenchUpCmd(cfg),
-		newBenchOpenCmd(cfg),
+		newBenchStatusCmd(deps),
+		newBenchUpCmd(deps),
+		newBenchOpenCmd(deps),
 	)
 	applyAliases(cmd, benchAliases)
 	return cmd

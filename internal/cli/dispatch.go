@@ -19,7 +19,9 @@ type argvForgiveness struct {
 // manifests declaring ArgvTokens participate. That is tmux alone today —
 // extending argv forgiveness to every module is a flagged opt-in follow-on
 // (ADR-0005), so the table stays behavior-identical to the old hardcoded
-// tmux path.
+// tmux path. NOTE for the second ArgvTokens module: the multi-module loop
+// below and a resolver over a nil SubAliases map are currently unexercised —
+// add dedicated argvModules() tests alongside that module.
 func argvModules() []argvForgiveness {
 	var out []argvForgiveness
 	for _, m := range allModules() {

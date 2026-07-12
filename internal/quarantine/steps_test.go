@@ -177,6 +177,35 @@ func TestStrip_MissingWorkspaceErrors(t *testing.T) {
 	}
 }
 
+// TestSteps_NonEmptyDefaultGlobsOverrideDefaultTargets pins the other side
+// of the config seam: a configured [workflow] strip_globs list REPLACES
+// DefaultTargets as the fallback. If the len==0 guard or the assignment
+// direction in Steps ever inverted, a user's override would silently stop
+// taking effect (always DefaultTargets) with the suite green — this is the
+// test that goes red instead.
+func TestSteps_NonEmptyDefaultGlobsOverrideDefaultTargets(t *testing.T) {
+	workspace := t.TempDir()
+	for _, f := range []string{"CLAUDE.md", "custom.md"} {
+		if err := os.WriteFile(filepath.Join(workspace, f), []byte("x"), 0o644); err != nil {
+			t.Fatalf("WriteFile %s: %v", f, err)
+		}
+	}
+
+	def := Steps([]string{"custom.md"})["strip"]
+	wctx := step.NewContext(nil)
+	wctx.Set("workspace", workspace)
+	// No step-level globs → the configured override applies, NOT DefaultTargets.
+	if err := def.Runner(context.Background(), &exec.FakeRunner{}, wctx, step.PlanStep{Uses: "strip"}); err != nil {
+		t.Fatalf("strip: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "custom.md")); !os.IsNotExist(err) {
+		t.Errorf("custom.md (the configured override) should have been stripped, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "CLAUDE.md")); err != nil {
+		t.Errorf("CLAUDE.md must SURVIVE when a configured override replaces DefaultTargets, stat err = %v", err)
+	}
+}
+
 // TestSteps_DefaultGlobsFallBackToDefaultTargets pins the config seam: an
 // empty default list falls back to the canonical DefaultTargets, so the
 // destructive strip and the reversible Hide can never drift.
