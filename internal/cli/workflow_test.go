@@ -123,13 +123,25 @@ func cliPubDER(t *testing.T, k *ecdsa.PrivateKey) []byte {
 // cliFakeHelperEnv points FORGECTL_BLESS_HELPER at a real (dummy) on-disk file
 // so bless.NewHelperBlesser's existence check passes; the FakeRunner supplies
 // the canned replies.
-func cliFakeHelperEnv(t *testing.T) {
+// cliFakeHelper points the bless verbs at a HelperBlesser driven by the test's
+// FakeRunner, preserving coverage of the real argv/stdin/JSON contract.
+//
+// It swaps the in-process blesserFactory — deliberately NOT an environment
+// variable. FORGECTL_BLESS_HELPER was removed because it also served Enroll and
+// PublicKey, and `trust init` enrolls at the one moment no trust store exists:
+// an agent that exported it could have the human's own sudo anchor the AGENT's
+// key. A package var is reachable only from code linked into this test binary,
+// so injectability returns without the hole.
+// The factory is handed deps.Runner (the test's FakeRunner) at call time, so the
+// helper needs no runner argument of its own.
+func cliFakeHelper(t *testing.T) {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "forgectl-bless-helper")
-	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatalf("write dummy helper: %v", err)
+	path := filepath.Join(t.TempDir(), "forgectl-bless-helper")
+	prev := blesserFactory
+	blesserFactory = func(run exec.Runner) (bless.Blesser, error) {
+		return bless.NewHelperBlesserAt(run, path), nil
 	}
-	t.Setenv("FORGECTL_BLESS_HELPER", p)
+	t.Cleanup(func() { blesserFactory = prev })
 }
 
 // cliExitErr mimics os/exec.ExitError's ExitCode so mapHelperError's errors.As

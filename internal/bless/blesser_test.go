@@ -10,14 +10,34 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
-// fakeHelper points FORGECTL_BLESS_HELPER at a real (dummy) on-disk file so
-// NewHelperBlesser's existence check passes, and binds a FakeRunner so no real
-// process runs.
+// stubSelf points the executable-resolution seam at path for the test's
+// lifetime. It is how a test controls where the helper's SIBLING lookup lands —
+// there is no environment override, by design (see
+// TestNewHelperBlesser_EnvVarCannotRedirectHelper).
+func stubSelf(t *testing.T, path string) {
+	t.Helper()
+	prev := resolveSelf
+	resolveSelf = func() (string, error) { return path, nil }
+	t.Cleanup(func() { resolveSelf = prev })
+}
+
+// siblingHelper writes a dummy helper into a fresh temp dir, aims the seam at a
+// fake forgectl binary in that same dir, and returns the helper's path.
+func siblingHelper(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, helperName)
+	writeFile(t, p, []byte("#!/bin/sh\n"))
+	stubSelf(t, filepath.Join(dir, "forgectl"))
+	return p
+}
+
+// fakeHelper puts a real (dummy) helper next to the (stubbed) running executable
+// so NewHelperBlesser's existence check passes, and binds a FakeRunner so no
+// real process runs.
 func fakeHelper(t *testing.T, run exec.Runner) *HelperBlesser {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "forgectl-bless-helper")
-	writeFile(t, p, []byte("#!/bin/sh\n"))
-	t.Setenv("FORGECTL_BLESS_HELPER", p)
+	p := siblingHelper(t)
 	hb, err := NewHelperBlesser(run)
 	if err != nil {
 		t.Fatalf("NewHelperBlesser: %v", err)
@@ -29,9 +49,44 @@ func fakeHelper(t *testing.T, run exec.Runner) *HelperBlesser {
 }
 
 func TestNewHelperBlesser_MissingHelper(t *testing.T) {
-	t.Setenv("FORGECTL_BLESS_HELPER", filepath.Join(t.TempDir(), "absent"))
+	// A temp dir with NO helper beside the executable.
+	stubSelf(t, filepath.Join(t.TempDir(), "forgectl"))
 	if _, err := NewHelperBlesser(&exec.FakeRunner{}); !errors.Is(err, ErrNoBlesser) {
 		t.Fatalf("NewHelperBlesser = %v, want ErrNoBlesser", err)
+	}
+}
+
+// TestNewHelperBlesser_EnvVarCannotRedirectHelper is the regression pin for the
+// removed FORGECTL_BLESS_HELPER override — a root-of-trust vulnerability, not a
+// dev convenience.
+//
+// The helper serves Enroll and PublicKey, not only Sign. `trust init` calls
+// Enroll when NO trust store exists yet, so the key the helper returns BECOMES
+// the anchor. An env var is fully within a same-UID agent's reach (one appended
+// line in a shell rc file), so an agent-settable helper path let the agent
+// supply the key that the human's own sudo then installed as the root of trust —
+// no Touch ID prompt required, since a fake helper just prints a key.
+//
+// Discovery must therefore be the executable's sibling and nothing else. If this
+// test ever fails, the override is back and blessing is defeated.
+func TestNewHelperBlesser_EnvVarCannotRedirectHelper(t *testing.T) {
+	// The attacker's helper, named by the env var that used to win.
+	decoy := filepath.Join(t.TempDir(), helperName)
+	writeFile(t, decoy, []byte("#!/bin/sh\necho '{\"pubkey\":\"attacker\"}'\n"))
+	t.Setenv("FORGECTL_BLESS_HELPER", decoy)
+
+	// The real helper, beside the running binary.
+	want := siblingHelper(t)
+
+	hb, err := NewHelperBlesser(&exec.FakeRunner{})
+	if err != nil {
+		t.Fatalf("NewHelperBlesser: %v", err)
+	}
+	if hb.path == decoy {
+		t.Fatal("FORGECTL_BLESS_HELPER redirected helper discovery — the trust bootstrap is compromised")
+	}
+	if hb.path != want {
+		t.Fatalf("helper path = %q, want the executable's sibling %q", hb.path, want)
 	}
 }
 

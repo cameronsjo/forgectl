@@ -14,6 +14,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/bless"
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/workflow"
 )
@@ -42,6 +43,26 @@ var trustStorerFactory = func() trustStorer { return bless.NewVerifier() }
 // package var ONLY as a TEST SEAM (InstallAnchor always writes the real
 // compiled-in path via sudo) and is never user-configurable.
 var anchorStatPath = bless.AnchorPath
+
+// blesserFactory builds the ceremony Blesser. It is an in-process package var —
+// a TEST SEAM only — and deliberately NOT an environment variable: bless once
+// honored FORGECTL_BLESS_HELPER, and because that override also served Enroll
+// and PublicKey, an agent that wrote an export into a shell profile could have
+// the human's own `trust init` enroll the AGENT's key as the root-owned anchor
+// (no Touch ID prompt would even appear). A Go package var cannot be reached
+// from outside the process — only test code linked into the test binary can
+// swap it — so testability costs nothing here. Production always resolves the
+// helper as a sibling of the running executable.
+var blesserFactory = func(run exec.Runner) (bless.Blesser, error) {
+	return bless.NewHelperBlesser(run)
+}
+
+// installAnchor is the privileged anchor write, injected as a package var so the
+// trust-init FLOW (key → store → anchor last; resume after a cancelled sudo) can
+// be tested without a root-owned /etc file. The argv construction and the
+// post-install read-back it performs are covered by internal/bless's own tests.
+// Test seam only — production always calls the real bless.InstallAnchor.
+var installAnchor = bless.InstallAnchor
 
 // newWorkflowBlessCmd builds `forgectl workflow bless <name>`: the human-presence
 // ceremony that signs a user workflow file's exact bytes so `workflow run` will
@@ -132,7 +153,7 @@ func runWorkflowBless(cmd *cobra.Command, deps module.Deps, name string) error {
 	}
 
 	// 6. This machine must hold a blessing key AND be enrolled in the store.
-	blesser, err := bless.NewHelperBlesser(deps.Runner)
+	blesser, err := blesserFactory(deps.Runner)
 	if err != nil {
 		return err
 	}
@@ -241,7 +262,7 @@ func runTrustInit(cmd *cobra.Command, deps module.Deps) error {
 
 	// 2. Ensure this machine's blessing key (idempotent — reuses an existing
 	//    key so a re-run after a cancelled sudo never wedges).
-	blesser, err := bless.NewHelperBlesser(deps.Runner)
+	blesser, err := blesserFactory(deps.Runner)
 	if err != nil {
 		return err
 	}
@@ -297,7 +318,7 @@ func runTrustInit(cmd *cobra.Command, deps module.Deps) error {
 
 	// 5. Install the root-owned anchor LAST (interactive sudo).
 	fmt.Fprintln(out, "Installing the root-owned trust anchor — sudo may prompt…")
-	if err := bless.InstallAnchor(ctx, deps.Runner, pubDER); err != nil {
+	if err := installAnchor(ctx, deps.Runner, pubDER); err != nil {
 		return fmt.Errorf("install trust anchor: %w", err)
 	}
 	fmt.Fprintf(out, "Trust anchor installed: %s\nThis machine is now the trust root and first blesser.\n", bless.AnchorPath)
