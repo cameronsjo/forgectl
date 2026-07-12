@@ -23,6 +23,7 @@ type PR struct {
 	Author    string
 	State     string
 	IsDraft   bool
+	Labels    []string
 	UpdatedAt time.Time
 	URL       string
 }
@@ -37,8 +38,9 @@ type Dashboard struct {
 }
 
 // prSearchFields is the --json field set every `gh search prs` query requests.
-// repository is fetched for nameWithOwner → Ref; updatedAt drives the un-dim.
-const prSearchFields = "number,title,url,author,updatedAt,isDraft,state,repository"
+// repository is fetched for nameWithOwner → Ref; updatedAt drives the un-dim;
+// labels ride for the review surface (pr prs/dash simply ignore them).
+const prSearchFields = "number,title,url,author,updatedAt,isDraft,state,repository,labels"
 
 // prepareConcurrency bounds the total number of in-flight git checkouts across
 // a PrepareMany fan-out, so a large multiselect doesn't spawn one git process
@@ -53,9 +55,12 @@ type ghSearchPR struct {
 	Author struct {
 		Login string `json:"login"`
 	} `json:"author"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-	IsDraft    bool      `json:"isDraft"`
-	State      string    `json:"state"`
+	UpdatedAt time.Time `json:"updatedAt"`
+	IsDraft   bool      `json:"isDraft"`
+	State     string    `json:"state"`
+	Labels    []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
 	Repository struct {
 		NameWithOwner string `json:"nameWithOwner"`
 	} `json:"repository"`
@@ -63,11 +68,13 @@ type ghSearchPR struct {
 
 // prQueryResult carries one gh-search query's outcome across the fan-out
 // channel in PRs and Dash: its label (for a degradation note), the parsed rows,
-// and any error.
+// whether the query hit its --limit (a truncation note, not a failure), and
+// any error.
 type prQueryResult struct {
-	label string
-	prs   []PR
-	err   error
+	label     string
+	prs       []PR
+	truncated bool
+	err       error
 }
 
 // PRs returns the union of open PRs you authored, are assigned, or have been
@@ -89,8 +96,8 @@ func (c *Client) PRs(ctx context.Context) ([]PR, []string, error) {
 	for _, q := range queries {
 		q := q
 		go func() {
-			prs, err := c.searchPRs(ctx, q.flag)
-			ch <- prQueryResult{q.label, prs, err}
+			prs, truncated, err := c.searchPRs(ctx, q.flag)
+			ch <- prQueryResult{q.label, prs, truncated, err}
 		}()
 	}
 
@@ -102,6 +109,9 @@ func (c *Client) PRs(ctx context.Context) ([]PR, []string, error) {
 			slog.Warn("PR query degraded.", "query", res.label, "error", res.err)
 			notes = append(notes, fmt.Sprintf("%s: %v", res.label, res.err))
 			continue
+		}
+		if res.truncated {
+			notes = append(notes, fmt.Sprintf("%s: results may be truncated at %d", res.label, DefaultSearchLimit))
 		}
 		for _, p := range res.prs {
 			byRef[p.Ref.String()] = p
@@ -133,12 +143,12 @@ func (c *Client) Dash(ctx context.Context) (Dashboard, []string, error) {
 	const sections = 2
 	ch := make(chan prQueryResult, sections)
 	go func() {
-		prs, err := c.searchPRs(ctx, "--review-requested")
-		ch <- prQueryResult{"awaiting-you", prs, err}
+		prs, truncated, err := c.searchPRs(ctx, "--review-requested")
+		ch <- prQueryResult{"awaiting-you", prs, truncated, err}
 	}()
 	go func() {
-		prs, err := c.searchPRs(ctx, "--author")
-		ch <- prQueryResult{"your-open", prs, err}
+		prs, truncated, err := c.searchPRs(ctx, "--author")
+		ch <- prQueryResult{"your-open", prs, truncated, err}
 	}()
 
 	dash := Dashboard{ActiveReviews: active}
@@ -148,6 +158,9 @@ func (c *Client) Dash(ctx context.Context) (Dashboard, []string, error) {
 			slog.Warn("Dashboard section degraded.", "section", res.label, "error", res.err)
 			notes = append(notes, fmt.Sprintf("%s: %v", res.label, res.err))
 			continue
+		}
+		if res.truncated {
+			notes = append(notes, fmt.Sprintf("%s: results may be truncated at %d", res.label, DefaultSearchLimit))
 		}
 		sortPRs(res.prs)
 		switch res.label {
@@ -162,32 +175,31 @@ func (c *Client) Dash(ctx context.Context) (Dashboard, []string, error) {
 }
 
 // searchPRs runs one open-PR search scoped to @me by whoFlag (--author,
-// --assignee, or --review-requested) and parses the rows. The flag and its
-// literal "@me" value are the only variable argv, so nothing hostile reaches
-// the shell-out.
-func (c *Client) searchPRs(ctx context.Context, whoFlag string) ([]PR, error) {
-	out, err := c.run.Run(ctx, "gh", "search", "prs",
-		whoFlag, "@me",
-		"--state", "open",
-		"--json", prSearchFields)
-	if err != nil {
-		return nil, err
-	}
-	return parseSearchPRs(out)
+// --assignee, or --review-requested) through the shared SearchPRs helper
+// (search.go) — the one invocation/parse path this surface shares with
+// internal/review's owner-wide fan-out.
+func (c *Client) searchPRs(ctx context.Context, whoFlag string) ([]PR, bool, error) {
+	return SearchPRs(ctx, c.run, SearchOpts{WhoFlag: whoFlag})
 }
 
 // parseSearchPRs decodes `gh search prs --json` output into PRs. gh output is
 // hostile input: each row's owner/repo (from repository.nameWithOwner) is
-// re-validated against the anchored owner/repo charset AND routed through the
-// canonical refFrom validator, so an unparseable, out-of-charset, or otherwise
-// invalid row is skipped (logged), never fatal.
-func parseSearchPRs(jsonOut string) ([]PR, error) {
+// routed through the canonical RefFromParts validator (anchored charset plus
+// the ".."/leading-"-"/positive-number guards), so an unparseable,
+// out-of-charset, or otherwise invalid row is skipped (logged), never fatal.
+// gh output flows into the same git/gh sinks as user-typed refs; the two paths
+// must not drift (breadcrumbFilename relies on this invariant).
+//
+// rawCount is the PRE-filter row count — the truncation sentinel compares IT
+// (not the filtered length) against --limit, so a skipped hostile row at an
+// exactly-full response can never silence the cap.
+func parseSearchPRs(jsonOut string) (prs []PR, rawCount int, err error) {
 	if strings.TrimSpace(jsonOut) == "" {
-		return nil, nil
+		return nil, 0, nil
 	}
 	var raw []ghSearchPR
 	if err := json.Unmarshal([]byte(jsonOut), &raw); err != nil {
-		return nil, fmt.Errorf("parse gh search prs output: %w", err)
+		return nil, 0, fmt.Errorf("parse gh search prs output: %w", err)
 	}
 	out := make([]PR, 0, len(raw))
 	for _, r := range raw {
@@ -196,18 +208,14 @@ func parseSearchPRs(jsonOut string) ([]PR, error) {
 			slog.Warn("Skipping PR with unparseable repository.", "nameWithOwner", r.Repository.NameWithOwner)
 			continue
 		}
-		if !reOwner.MatchString(owner) || !reOwner.MatchString(repo) {
-			slog.Warn("Skipping PR with out-of-charset owner/repo.", "owner", owner, "repo", repo)
-			continue
-		}
-		// Route through refFrom — the same validator the CLI ref path uses — so
-		// the discovery path applies the identical ".."/leading-"-"/positive-
-		// number guards. gh output flows into the same git/gh sinks; the two
-		// paths must not drift (breadcrumbFilename relies on this invariant).
-		ref, err := refFrom(owner, repo, strconv.Itoa(r.Number))
+		ref, err := RefFromParts(owner, repo, strconv.Itoa(r.Number))
 		if err != nil {
 			slog.Warn("Skipping PR with invalid ref.", "nameWithOwner", r.Repository.NameWithOwner, "number", r.Number, "error", err)
 			continue
+		}
+		labels := make([]string, 0, len(r.Labels))
+		for _, l := range r.Labels {
+			labels = append(labels, l.Name)
 		}
 		out = append(out, PR{
 			Ref:       ref,
@@ -215,11 +223,12 @@ func parseSearchPRs(jsonOut string) ([]PR, error) {
 			Author:    r.Author.Login,
 			State:     r.State,
 			IsDraft:   r.IsDraft,
+			Labels:    labels,
 			UpdatedAt: r.UpdatedAt,
 			URL:       r.URL,
 		})
 	}
-	return out, nil
+	return out, len(raw), nil
 }
 
 // sortPRs orders PRs deterministically by (slug, number) — the same

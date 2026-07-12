@@ -65,31 +65,39 @@ func LoadReviewed(path string, opts ...ReviewedOption) *ReviewedStore {
 }
 
 // Mark stamps ref as reviewed at the current clock and persists the store.
-func (s *ReviewedStore) Mark(ref Ref) error {
-	slog.Debug("Preparing to mark PR reviewed.", "ref", ref.String())
-	s.at[ref.String()] = s.now()
+func (s *ReviewedStore) Mark(ref Ref) error { return s.MarkKey(ref.String()) }
+
+// MarkKey is Mark for a caller that keys entries by an arbitrary canonical
+// string (internal/review's host-qualified "host/owner/repo#N" keys) rather
+// than a Ref. The Ref methods delegate here — one write path, two key shapes.
+func (s *ReviewedStore) MarkKey(key string) error {
+	slog.Debug("Preparing to mark reviewed.", "key", key)
+	s.at[key] = s.now()
 	if err := s.persist(); err != nil {
-		slog.Error("Failed to mark PR reviewed.", "ref", ref.String(), "error", err)
+		slog.Error("Failed to mark reviewed.", "key", key, "error", err)
 		return err
 	}
-	slog.Info("Successfully marked PR reviewed.", "ref", ref.String())
+	slog.Info("Successfully marked reviewed.", "key", key)
 	return nil
 }
 
 // Unmark clears ref's reviewed mark and persists. A ref that was never marked
 // is a no-op — no write fires.
-func (s *ReviewedStore) Unmark(ref Ref) error {
-	slog.Debug("Preparing to unmark PR reviewed.", "ref", ref.String())
-	if _, ok := s.at[ref.String()]; !ok {
-		slog.Debug("Skipping unmark: PR was not marked reviewed.", "ref", ref.String())
+func (s *ReviewedStore) Unmark(ref Ref) error { return s.UnmarkKey(ref.String()) }
+
+// UnmarkKey is Unmark for string-keyed callers (see MarkKey).
+func (s *ReviewedStore) UnmarkKey(key string) error {
+	slog.Debug("Preparing to unmark reviewed.", "key", key)
+	if _, ok := s.at[key]; !ok {
+		slog.Debug("Skipping unmark: entry was not marked reviewed.", "key", key)
 		return nil
 	}
-	delete(s.at, ref.String())
+	delete(s.at, key)
 	if err := s.persist(); err != nil {
-		slog.Error("Failed to unmark PR reviewed.", "ref", ref.String(), "error", err)
+		slog.Error("Failed to unmark reviewed.", "key", key, "error", err)
 		return err
 	}
-	slog.Info("Successfully unmarked PR reviewed.", "ref", ref.String())
+	slog.Info("Successfully unmarked reviewed.", "key", key)
 	return nil
 }
 
@@ -98,7 +106,14 @@ func (s *ReviewedStore) Unmark(ref Ref) error {
 // updatedAt) makes a previously-marked PR read as unreviewed again — the
 // auto-un-dim falls out of this comparison, so there is no separate un-dim path.
 func (s *ReviewedStore) IsReviewed(ref Ref, latestActivity time.Time) bool {
-	at, ok := s.at[ref.String()]
+	return s.IsReviewedKey(ref.String(), latestActivity)
+}
+
+// IsReviewedKey is IsReviewed for string-keyed callers (see MarkKey) — the
+// identical timestamp comparison, so issues and PRs share the auto-un-dim
+// semantics exactly.
+func (s *ReviewedStore) IsReviewedKey(key string, latestActivity time.Time) bool {
+	at, ok := s.at[key]
 	if !ok {
 		return false
 	}
@@ -117,10 +132,19 @@ func (s *ReviewedStore) ReviewedAt(ref Ref) (time.Time, bool) {
 // anything changed. It keeps the store from growing without bound as PRs close
 // and merge — `pr reviewed sync` feeds it the current open set.
 func (s *ReviewedStore) Sync(openRefs []Ref) error {
-	slog.Debug("Preparing to sync reviewed store.", "storeSize", len(s.at), "openCount", len(openRefs))
-	open := make(map[string]bool, len(openRefs))
-	for _, r := range openRefs {
-		open[r.String()] = true
+	keys := make([]string, len(openRefs))
+	for i, r := range openRefs {
+		keys[i] = r.String()
+	}
+	return s.SyncKeys(keys)
+}
+
+// SyncKeys is Sync for string-keyed callers (see MarkKey).
+func (s *ReviewedStore) SyncKeys(openKeys []string) error {
+	slog.Debug("Preparing to sync reviewed store.", "storeSize", len(s.at), "openCount", len(openKeys))
+	open := make(map[string]bool, len(openKeys))
+	for _, k := range openKeys {
+		open[k] = true
 	}
 	changed := false
 	pruned := 0
@@ -132,14 +156,14 @@ func (s *ReviewedStore) Sync(openRefs []Ref) error {
 		}
 	}
 	if !changed {
-		slog.Debug("Skipping sync: no changes to store.", "openCount", len(openRefs))
+		slog.Debug("Skipping sync: no changes to store.", "openCount", len(openKeys))
 		return nil
 	}
 	if err := s.persist(); err != nil {
-		slog.Error("Failed to sync reviewed store.", "openCount", len(openRefs), "pruned", pruned, "error", err)
+		slog.Error("Failed to sync reviewed store.", "openCount", len(openKeys), "pruned", pruned, "error", err)
 		return err
 	}
-	slog.Info("Successfully synced reviewed store.", "openCount", len(openRefs), "pruned", pruned)
+	slog.Info("Successfully synced reviewed store.", "openCount", len(openKeys), "pruned", pruned)
 	return nil
 }
 
