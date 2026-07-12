@@ -5,17 +5,32 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/cameronsjo/forgectl/internal/config"
 	dockerpkg "github.com/cameronsjo/forgectl/internal/docker"
-	"github.com/cameronsjo/forgectl/internal/exec"
-	"github.com/cameronsjo/forgectl/internal/forgive"
+	"github.com/cameronsjo/forgectl/internal/module"
 )
 
-// newDockerCmd builds `forgectl docker` — mirrors newNetCmd/newPipCmd in
-// building its own exec.Runner rather than sharing another domain's client
-// lifecycle.
-func newDockerCmd(cfg config.Config) *cobra.Command {
-	client := dockerpkg.New(exec.OSRunner{}, dockerpkg.WithDockerConfig(cfg.Docker))
+// dockerAliases is the single source of truth for docker's subverb
+// shorthands — migrated here from forgive.DockerAliases at conversion.
+// Separate var for the same initialization-cycle reason as yAliases.
+var dockerAliases = map[string][]string{
+	"build": {"b"},
+	"run":   {"r"},
+	"shell": {"sh", "attach"},
+}
+
+// dockerModule declares the docker build/run/shell extension (ADR-0005):
+// owns the [docker] config section.
+var dockerModule = module.Manifest{
+	Name:       "docker",
+	Tier:       module.TierExtension,
+	ConfigKey:  "docker",
+	SubAliases: dockerAliases,
+	New:        newDockerCmd,
+}
+
+// newDockerCmd builds `forgectl docker` over the registry Deps.
+func newDockerCmd(deps module.Deps) *cobra.Command {
+	client := dockerpkg.New(deps.Runner, dockerpkg.WithDockerConfig(deps.Cfg.Docker))
 	return newDockerCmdForClient(client)
 }
 
@@ -43,7 +58,7 @@ omitted. Configure defaults in the [docker] section of config.toml (macOS:
 		newDockerRunCmd(client),
 		newDockerShellCmd(client),
 	)
-	applyAliases(cmd, forgive.DockerAliases)
+	applyAliases(cmd, dockerAliases)
 	return cmd
 }
 

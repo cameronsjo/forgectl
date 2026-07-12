@@ -46,14 +46,6 @@ var BenchAliases = map[string][]string{
 	"status": {"health", "st"},
 }
 
-// DockerAliases maps each canonical docker subcommand to its accepted
-// aliases. Same single-source-of-truth pattern as BenchAliases.
-var DockerAliases = map[string][]string{
-	"build": {"b"},
-	"run":   {"r"},
-	"shell": {"sh", "attach"},
-}
-
 // TmuxAliases maps each canonical tmux verb to its accepted aliases. This is
 // the single source of truth: internal/cli builds cobra command Aliases by
 // iterating this map, and Canonical uses it for known-verb detection in the
