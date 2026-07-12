@@ -59,10 +59,11 @@ func NewVerifier() *Verifier {
 	}
 }
 
-// Verify checks that data (the workflow file's bytes, read exactly once by the
-// caller) was blessed. It follows a strict fail-closed order and never re-reads
-// the workflow file — TOCTOU is closed by construction because the caller hands
-// in the same bytes it will later parse.
+// TrustedStore establishes the root of trust and returns the authenticated
+// trust store — the fail-closed steps 1–3 of Verify, factored out so the exact
+// order lives in one place and callers that need the enrolled-key set (the
+// `workflow bless` / `trust list` verbs) reach it without re-implementing the
+// anchor→store chain.
 //
 // Order:
 //  1. Anchor ownership: regular file, root-owned, not group/world-writable.
@@ -71,65 +72,79 @@ func NewVerifier() *Verifier {
 //  3. Authenticate the trust store BEFORE parsing it: its sidecar must be signed
 //     by the anchor (trust domain) and name the anchor's key id; only then is the
 //     store TOML decoded, and its anchor_key_id must match too.
-//  4. Authenticate the workflow blessing: the sidecar must exist (else
-//     unblessed), decode cleanly, name a key the store knows, and carry a
-//     signature that verifies over the workflow-domain tagged digest of data.
-func (v *Verifier) Verify(path string, data []byte) error {
+func (v *Verifier) TrustedStore() (Store, error) {
 	// (1) Anchor ownership.
 	if err := v.anchorCheck(v.anchorPath); err != nil {
-		return fmt.Errorf("%w: %v", ErrNoAnchor, err)
+		return Store{}, fmt.Errorf("%w: %v", ErrNoAnchor, err)
 	}
 
 	// (2) Parse the anchor and fingerprint its canonical PKIX DER.
 	anchorBytes, err := os.ReadFile(v.anchorPath)
 	if err != nil {
-		return fmt.Errorf("%w: read anchor %s: %v", ErrNoAnchor, v.anchorPath, err)
+		return Store{}, fmt.Errorf("%w: read anchor %s: %v", ErrNoAnchor, v.anchorPath, err)
 	}
 	anchorPub, err := ParseAnchorFile(anchorBytes)
 	if err != nil {
-		return fmt.Errorf("%w: parse anchor %s: %v", ErrNoAnchor, v.anchorPath, err)
+		return Store{}, fmt.Errorf("%w: parse anchor %s: %v", ErrNoAnchor, v.anchorPath, err)
 	}
 	anchorDER, err := EncodePublicKey(anchorPub)
 	if err != nil {
-		return fmt.Errorf("%w: encode anchor key: %v", ErrNoAnchor, err)
+		return Store{}, fmt.Errorf("%w: encode anchor key: %v", ErrNoAnchor, err)
 	}
 	anchorFP := Fingerprint(anchorDER)
 
 	// (3) Authenticate-before-parse the trust store.
 	storePath, err := v.trustStorePath()
 	if err != nil {
-		return fmt.Errorf("%w: resolve trust store path: %v", ErrTrustStoreInvalid, err)
+		return Store{}, fmt.Errorf("%w: resolve trust store path: %v", ErrTrustStoreInvalid, err)
 	}
 	storeBytes, err := os.ReadFile(storePath)
 	if err != nil {
-		return fmt.Errorf("%w: read trust store %s: %v", ErrTrustStoreInvalid, storePath, err)
+		return Store{}, fmt.Errorf("%w: read trust store %s: %v", ErrTrustStoreInvalid, storePath, err)
 	}
 	storeSidecar, err := os.ReadFile(SidecarPath(storePath))
 	if err != nil {
-		return fmt.Errorf("%w: read trust store sidecar: %v", ErrTrustStoreInvalid, err)
+		return Store{}, fmt.Errorf("%w: read trust store sidecar: %v", ErrTrustStoreInvalid, err)
 	}
 	storeEnv, err := DecodeEnvelope(storeSidecar)
 	if err != nil {
-		return fmt.Errorf("%w: trust store sidecar: %v", ErrTrustStoreInvalid, err)
+		return Store{}, fmt.Errorf("%w: trust store sidecar: %v", ErrTrustStoreInvalid, err)
 	}
 	if storeEnv.KeyID != anchorFP {
-		return fmt.Errorf("%w: trust store signed by %s, not the anchor %s", ErrTrustStoreInvalid, storeEnv.KeyID, anchorFP)
+		return Store{}, fmt.Errorf("%w: trust store signed by %s, not the anchor %s", ErrTrustStoreInvalid, storeEnv.KeyID, anchorFP)
 	}
 	storeSig, err := base64.StdEncoding.DecodeString(storeEnv.Signature)
 	if err != nil {
-		return fmt.Errorf("%w: trust store signature is not valid base64: %v", ErrTrustStoreInvalid, err)
+		return Store{}, fmt.Errorf("%w: trust store signature is not valid base64: %v", ErrTrustStoreInvalid, err)
 	}
 	storeDigest := TaggedDigest(DomainTrust, storeBytes)
 	if !ecdsa.VerifyASN1(anchorPub, storeDigest[:], storeSig) {
-		return fmt.Errorf("%w: trust store signature does not verify under the anchor key", ErrTrustStoreInvalid)
+		return Store{}, fmt.Errorf("%w: trust store signature does not verify under the anchor key", ErrTrustStoreInvalid)
 	}
 	// Signature passed — only now is it safe to parse the store bytes.
 	store, err := DecodeStore(storeBytes)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrTrustStoreInvalid, err)
+		return Store{}, fmt.Errorf("%w: %v", ErrTrustStoreInvalid, err)
 	}
 	if store.AnchorKeyID != anchorFP {
-		return fmt.Errorf("%w: store anchor_key_id %s does not match the anchor %s", ErrTrustStoreInvalid, store.AnchorKeyID, anchorFP)
+		return Store{}, fmt.Errorf("%w: store anchor_key_id %s does not match the anchor %s", ErrTrustStoreInvalid, store.AnchorKeyID, anchorFP)
+	}
+	return store, nil
+}
+
+// Verify checks that data (the workflow file's bytes, read exactly once by the
+// caller) was blessed. It follows a strict fail-closed order and never re-reads
+// the workflow file — TOCTOU is closed by construction because the caller hands
+// in the same bytes it will later parse.
+//
+// Steps 1–3 (anchor → authenticated store) are TrustedStore; step 4 here
+// authenticates the workflow blessing: the sidecar must exist (else unblessed),
+// decode cleanly, name a key the store knows, and carry a signature that
+// verifies over the workflow-domain tagged digest of data.
+func (v *Verifier) Verify(path string, data []byte) error {
+	store, err := v.TrustedStore()
+	if err != nil {
+		return err
 	}
 
 	// (4) Authenticate the workflow blessing against the trusted store.

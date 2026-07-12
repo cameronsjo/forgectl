@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -211,22 +212,33 @@ func exitCodeOf(err error) (int, bool) {
 
 // StepCheck is the bless-time view of one workflow step, decoupled from
 // internal/workflow so this package never imports the parser it protects. The
-// CLI layer (PR 2) maps parsed steps into StepChecks. Uses selects the runner;
-// Exports names the variables the step will contribute; Cmd/Args are the
-// interpolation surface that CheckRunStepParamRefs guards for `run` steps.
+// CLI layer maps parsed steps into StepChecks through the same merged step
+// registry the executor runs.
+//
+// Exports names the variables the step will contribute. Guarded holds the step
+// verb's param-hostile fields (step.Def.GuardedFields) keyed by field name, with
+// each field's string value(s) — a scalar field contributes one element, a slice
+// field (Args, Globs) contributes all of them. It is the registry, not this
+// package, that decides which fields are guarded: the guard's model of danger
+// must come from the same place that maps a verb to its runner, or a renamed or
+// newly-added exec verb would silently escape it.
+//
+// Uses is carried for error messages only — no rule keys on it.
 type StepCheck struct {
 	Uses    string
 	Exports []string
-	Cmd     string
-	Args    []string
+	Guarded map[string][]string
 }
 
-// CheckRunStepParamRefs is the bless-time param-injection refusal. A blessing
-// covers file bytes, but `run` steps interpolate ${...} at run time — so a
-// ${param} in a blessed run step would be an agent-controllable injection into
-// approved bytes. The rule: in a `run` step, every ${name} in cmd or args must
-// resolve to an export declared by an EARLIER step; anything else (a CLI param,
-// or an export from a later step) is refused. Non-run steps are unrestricted.
+// CheckGuardedParamRefs is the bless-time param-injection refusal. A blessing
+// covers file BYTES, but ${...} references interpolate at RUN time — so a
+// ${param} in a step's guarded field (see step.Def.GuardedFields: what runs,
+// what a launched agent does, what a security control covers) would be an
+// agent-controllable injection into human-approved bytes. The rule: in a guarded
+// field, every ${name} must resolve to an export declared by an EARLIER step;
+// anything else (a CLI param, or an export from a later step) is refused.
+// Non-guarded fields — a worktree step's repo/ref — are unrestricted, because
+// naming the data a blessed pattern operates on is the intended parameterization.
 //
 // params is the workflow's declared param names. A param whose name collides
 // with ANY step's export is refused outright: params and exports share one
@@ -237,9 +249,9 @@ type StepCheck struct {
 //
 // The ${...} extraction mirrors internal/step.Context.Interpolate byte-for-byte:
 // find "${", take the FIRST "}" after it, name is everything between (no charset
-// restriction); an unterminated "${" is a fail-closed error. A drift test tying
-// this to the interpolator lands in PR 2.
-func CheckRunStepParamRefs(steps []StepCheck, params []string) error {
+// restriction); an unterminated "${" is a fail-closed error.
+// TestBlessRefExtractionMatchesInterpolate pins the two scanners together.
+func CheckGuardedParamRefs(steps []StepCheck, params []string) error {
 	exported := make(map[string]bool)
 	for _, s := range steps {
 		for _, exp := range s.Exports {
@@ -254,24 +266,23 @@ func CheckRunStepParamRefs(steps []StepCheck, params []string) error {
 
 	allowed := make(map[string]bool)
 	for i, s := range steps {
-		if s.Uses == "run" {
-			refs, err := extractRefs(s.Cmd)
-			if err != nil {
-				return fmt.Errorf("step %d cmd: %w", i, err)
-			}
-			for _, ref := range refs {
-				if !allowed[ref] {
-					return fmt.Errorf("step %d cmd references ${%s}: params are forbidden in blessed run steps; only exports from earlier steps are allowed", i, ref)
-				}
-			}
-			for j, arg := range s.Args {
-				refs, err := extractRefs(arg)
+		// Field names sorted so a step with several offending fields always
+		// reports the same one.
+		fields := make([]string, 0, len(s.Guarded))
+		for f := range s.Guarded {
+			fields = append(fields, f)
+		}
+		sort.Strings(fields)
+
+		for _, field := range fields {
+			for _, value := range s.Guarded[field] {
+				refs, err := extractRefs(value)
 				if err != nil {
-					return fmt.Errorf("step %d args[%d]: %w", i, j, err)
+					return fmt.Errorf("step %d (%s) field %s: %w", i, s.Uses, field, err)
 				}
 				for _, ref := range refs {
 					if !allowed[ref] {
-						return fmt.Errorf("step %d args[%d] references ${%s}: params are forbidden in blessed run steps; only exports from earlier steps are allowed", i, j, ref)
+						return fmt.Errorf("step %d (%s) field %s references ${%s}: params are forbidden in a blessed step's guarded fields; only exports from earlier steps are allowed", i, s.Uses, field, ref)
 					}
 				}
 			}

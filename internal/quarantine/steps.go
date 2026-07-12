@@ -26,7 +26,11 @@ func Steps(defaultGlobs []string) step.Registry {
 		globs = DefaultTargets
 	}
 	return step.Registry{
-		"strip": {Runner: newStripStep(globs)},
+		// Globs is guarded (step.Def.GuardedFields): the strip-list IS the
+		// clean-room control, so a ${param} in it would let an agent narrow the
+		// redaction set at run time against an already-blessed file — smuggling a
+		// repo's CLAUDE.md past the strip and into the reviewer.
+		"strip": {Runner: newStripStep(globs), GuardedFields: []string{"Globs"}},
 	}
 }
 

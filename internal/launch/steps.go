@@ -14,7 +14,15 @@ import (
 // quarantine's strip.
 func Steps() step.Registry {
 	return step.Registry{
-		"launch": {Runner: launchStepStub, Exports: []string{"review"}},
+		// Skill/Mode/Posture are guarded (step.Def.GuardedFields): they steer what
+		// the launched agent DOES — which skill it runs, whether it runs
+		// synchronously or is fired off, which model/posture it takes. A ${param}
+		// in any of them is an agent choosing the behavior of a blessed launch.
+		"launch": {
+			Runner:        launchStepStub,
+			Exports:       []string{"review"},
+			GuardedFields: []string{"Skill", "Mode", "Posture"},
+		},
 	}
 }
 
