@@ -36,7 +36,14 @@ func newRoot(deps module.Deps) *cobra.Command {
 
 	for _, m := range allModules() {
 		cmd := m.New(deps)
-		cmd.Aliases = append(cmd.Aliases, m.GroupAliases...)
+		// Append-if-absent: a constructor may already set its group alias in
+		// its own literal (the ForClient test seams pin that surface), so the
+		// manifest declaration must not duplicate it.
+		for _, a := range m.GroupAliases {
+			if !cmd.HasAlias(a) {
+				cmd.Aliases = append(cmd.Aliases, a)
+			}
+		}
 		applyAliases(cmd, m.SubAliases)
 		root.AddCommand(cmd)
 	}
@@ -50,7 +57,6 @@ func newRoot(deps module.Deps) *cobra.Command {
 	root.AddCommand(newBenchCmd(deps.Cfg))
 	root.AddCommand(newQuarantineCmd(quarantine.New(deps.Runner)))
 	root.AddCommand(newPrCmd(deps.Cfg))
-	root.AddCommand(newPipCmd())
 	root.AddCommand(newDockerCmd(deps.Cfg))
 	root.AddCommand(newBranchCmd(deps.Cfg))
 	root.AddCommand(newCleanCmd(deps.Cfg))
