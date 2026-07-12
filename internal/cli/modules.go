@@ -21,5 +21,6 @@ func allModules() []module.Manifest {
 		dockerModule,
 		benchModule,
 		sessionsModule,
+		reviewModule,
 	}
 }

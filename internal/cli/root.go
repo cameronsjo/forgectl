@@ -56,7 +56,6 @@ func newRoot(deps module.Deps) *cobra.Command {
 	root.AddCommand(newWorkflowCmd(deps.Cfg))
 	root.AddCommand(newQuarantineCmd(quarantine.New(deps.Runner)))
 	root.AddCommand(newPrCmd(deps.Cfg))
-	root.AddCommand(newReviewCmd(deps.Cfg))
 
 	return root
 }
