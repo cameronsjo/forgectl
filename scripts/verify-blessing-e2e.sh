@@ -40,12 +40,16 @@ expect_refusal() {
         fail "$desc — command SUCCEEDED but should have been refused"
         return
     fi
-    if [[ "$out" != *"$want"* ]]; then
+    if [[ -n "$want" && "$out" != *"$want"* ]]; then
         fail "$desc — refused, but the reason did not mention '$want'"
         note "actual: ${out//$'\n'/ }"
         return
     fi
-    pass "$desc — refused: ${want}"
+    if [[ -n "$want" ]]; then
+        pass "$desc — refused: ${want}"
+    else
+        pass "$desc — refused"
+    fi
 }
 
 expect_success() {
@@ -101,8 +105,12 @@ rm -f "$SIDECAR"
 note "authored an unblessed workflow at $WF_FILE"
 
 # ---------------------------------------------------------------------------
-step "1. An unblessed workflow is REFUSED (and the message names the fix)"
-expect_refusal "run unblessed" "workflow bless" "$FORGECTL" workflow run "$WF_NAME"
+step "1. An unblessed workflow is REFUSED (fail closed)"
+# The exact reason depends on trust state: before `trust init` an unblessed run
+# fails at the anchor check ("trust anchor is missing"); once trust exists it
+# fails at the sidecar check with the bless hint. Here we only assert it is
+# refused — step 3b pins the bless-hint message once the trust chain is valid.
+expect_refusal "run unblessed" "" "$FORGECTL" workflow run "$WF_NAME"
 
 step "2. --dry-run is allowed unsigned (it executes nothing)"
 expect_success "dry-run unblessed" "$FORGECTL" workflow run "$WF_NAME" --dry-run
@@ -122,6 +130,11 @@ else
 fi
 
 expect_success "trust list shows the enrolled key" "$FORGECTL" workflow trust list
+
+step "3b. With trust established, an unblessed run names the fix"
+# Now the anchor and store are valid, so an unblessed run reaches the sidecar
+# check and the refusal names the exact command that fixes it.
+expect_refusal "unblessed run names 'workflow bless'" "workflow bless" "$FORGECTL" workflow run "$WF_NAME"
 
 step "4. Bless the workflow (Touch ID) — then it runs"
 printf '%s  A Touch ID prompt is expected now.%s\n' "$DIM" "$RESET"
