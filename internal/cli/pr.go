@@ -8,7 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
-	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/module"
 	netpkg "github.com/cameronsjo/forgectl/internal/net"
 	"github.com/cameronsjo/forgectl/internal/pr"
 )
@@ -17,12 +17,21 @@ import (
 // --agent is not passed. Mirrors FORGECTL_CLAUDE_BIN's env-over-config posture.
 const prAgentEnv = "FORGECTL_PR_AGENT"
 
-// newPrCmd builds `forgectl pr` — the clean-room PR review command group. It
-// builds its own pr/net clients (mirrors newNetCmd/newWorkflowCmd) rather than
-// sharing the tmux/projects client lifecycle.
-func newPrCmd(cfg config.Config) *cobra.Command {
-	client := pr.New(exec.OSRunner{})
-	netClient := netpkg.New(exec.OSRunner{}, netpkg.WithNetConfig(cfg.Net))
+// prModule declares the clean-room PR review core module (ADR-0005): no
+// config section of its own (it reads [net] for the reachability probe; net
+// owns that section), no alias surface.
+var prModule = module.Manifest{
+	Name: "pr",
+	Tier: module.TierCore,
+	New:  newPrCmd,
+}
+
+// newPrCmd builds `forgectl pr` over the registry Deps — the clean-room PR
+// review command group, building its own pr/net clients from deps.Runner.
+func newPrCmd(deps module.Deps) *cobra.Command {
+	cfg := deps.Cfg
+	client := pr.New(deps.Runner)
+	netClient := netpkg.New(deps.Runner, netpkg.WithNetConfig(cfg.Net))
 	// err discarded: a failed config-dir lookup yields "", which LoadReviewed
 	// reads as an empty store and persist() rejects loudly — never a silent bad write.
 	reviewedPath, _ := config.PrReviewedPath()

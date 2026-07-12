@@ -1,21 +1,20 @@
-// Package cli holds the thin Cobra verbs layered over internal/tmux and
-// internal/projects. Commands parse flags and call ops; they hold no domain
-// logic of their own.
+// Package cli holds the thin Cobra verbs layered over the domain packages
+// (internal/tmux, internal/projects, …). Commands parse flags and call ops;
+// they hold no domain logic of their own. Command groups register through the
+// module registry in modules.go (ADR-0005).
 package cli
 
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/meta"
-	"github.com/cameronsjo/forgectl/internal/projects"
-	"github.com/cameronsjo/forgectl/internal/quarantine"
-	"github.com/cameronsjo/forgectl/internal/tmux"
+	"github.com/cameronsjo/forgectl/internal/module"
 )
 
-// newRoot builds the root command tree. Each domain module registers its
-// parent command here (tmux, projects today; pr/k8s later).
-func newRoot(tmuxClient *tmux.Client, projClient *projects.Client, quarantineClient *quarantine.Client, cfg config.Config) *cobra.Command {
+// newRoot builds the root command tree from the module registry
+// (allModules) — every command group registers through its manifest
+// (ADR-0005).
+func newRoot(deps module.Deps) *cobra.Command {
 	root := &cobra.Command{
 		Use:     meta.AppName,
 		Short:   meta.Tagline,
@@ -31,22 +30,23 @@ func newRoot(tmuxClient *tmux.Client, projClient *projects.Client, quarantineCli
 	// Honored by the TUI and the tree verb; swaps Nerd Font glyphs for ASCII.
 	root.PersistentFlags().Bool("no-icons", false, "use ASCII markers instead of Nerd Font glyphs")
 
-	root.AddCommand(newTmuxCmd(tmuxClient))
-	root.AddCommand(newProjectsCmd(projClient))
-	root.AddCommand(newConfigCmd(cfg))
-	root.AddCommand(newLaunchCmd(cfg))
-	root.AddCommand(newWorkflowCmd(cfg))
-	root.AddCommand(newNetCmd(cfg))
-	root.AddCommand(newBenchCmd(cfg))
-	root.AddCommand(newQuarantineCmd(quarantineClient))
-	root.AddCommand(newPrCmd(cfg))
-	root.AddCommand(newPipCmd())
-	root.AddCommand(newDockerCmd(cfg))
-	root.AddCommand(newBranchCmd(cfg))
-	root.AddCommand(newCleanCmd(cfg))
-	root.AddCommand(newYCmd(cfg))
-	root.AddCommand(newSessionsCmd(cfg))
-	root.AddCommand(newReviewCmd(cfg))
+	for _, m := range allModules() {
+		cmd := m.New(deps)
+		// Append-if-absent: a constructor may already set its group alias in
+		// its own literal (the ForClient test seams pin that surface), so the
+		// manifest declaration must not duplicate it.
+		for _, a := range m.GroupAliases {
+			if !cmd.HasAlias(a) {
+				cmd.Aliases = append(cmd.Aliases, a)
+			}
+		}
+		// Deliberate re-application, not dead code: constructors with a
+		// SubAliases surface also self-apply (their test seams need the
+		// aliases), and applyAliases overwrites with the same map, so this
+		// copy is the safety net for any constructor that doesn't.
+		applyAliases(cmd, m.SubAliases)
+		root.AddCommand(cmd)
+	}
 
 	return root
 }

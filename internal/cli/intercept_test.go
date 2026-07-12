@@ -38,3 +38,23 @@ func TestLaunchIntercept(t *testing.T) {
 		})
 	}
 }
+
+// TestLaunchIntercept_MatchesLaunchModuleTokens ties launchIntercept's
+// hardcoded "launch"/"cl" literals to the manifest. The intercept is
+// deliberately host-owned (ADR-0005 §Future work) and does not read
+// launchModule at runtime — this test is the drift net: if Name or
+// GroupAliases ever change, the intercept must be updated in the same diff.
+func TestLaunchIntercept_MatchesLaunchModuleTokens(t *testing.T) {
+	tokens := append([]string{launchModule.Name}, launchModule.GroupAliases...)
+	for _, tok := range tokens {
+		if _, ok := launchIntercept([]string{tok, "-p", "hi"}); !ok {
+			t.Errorf("launchIntercept does not recognize manifest token %q — its hardcoded literals drifted from launchModule", tok)
+		}
+	}
+	// The manifest side must not grow tokens the intercept was never taught:
+	// pin the exact surface the literals implement.
+	want := []string{"launch", "cl"}
+	if !reflect.DeepEqual(tokens, want) {
+		t.Errorf("launchModule token surface = %v, want %v — update launchIntercept's literals and this pin together", tokens, want)
+	}
+}

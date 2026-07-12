@@ -6,8 +6,26 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/quarantine"
+	"github.com/cameronsjo/forgectl/internal/step"
 )
+
+// quarantineModule declares the instruction-file quarantine extension
+// (ADR-0005): no config section, no alias surface. It contributes the strip
+// step verb to the data plane — the destructive sibling of its reversible
+// Hide — reading the [workflow] strip_globs fallback from config (the
+// section stays workflow-owned; reading is not claiming).
+var quarantineModule = module.Manifest{
+	Name: "quarantine",
+	Tier: module.TierExtension,
+	New: func(deps module.Deps) *cobra.Command {
+		return newQuarantineCmd(quarantine.New(deps.Runner))
+	},
+	Steps: func(deps module.Deps) step.Registry {
+		return quarantine.Steps(deps.Cfg.Workflow.StripGlobs)
+	},
+}
 
 // quarantineFlags backs the flag set shared by the quarantine parent command
 // and its hide/restore/status subverbs. Each command owns its own instance —

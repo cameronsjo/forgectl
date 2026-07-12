@@ -9,9 +9,36 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/config"
-	"github.com/cameronsjo/forgectl/internal/forgive"
 	"github.com/cameronsjo/forgectl/internal/launch"
+	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/step"
 )
+
+// launchAliases maps each canonical launch subcommand to its accepted
+// aliases — migrated here from forgive.LaunchAliases at conversion. The `cl`
+// shorthand for the group itself is a GroupAlias on the manifest (and a
+// Cobra alias in newLaunchCmd's literal), not listed here. Separate var for
+// the same initialization-cycle reason as yAliases.
+var launchAliases = map[string][]string{
+	"which": {"config"},
+}
+
+// launchModule declares the Claude Code launcher core module (ADR-0005):
+// owns the [launch] config section. The pre-Cobra launchIntercept in
+// execute.go stays host-owned and hardcoded — it is dispatch-pipeline
+// plumbing, not module surface (ADR-0005 §Future work). The launch step
+// stub's contribution arrives with the step-plane inversion.
+var launchModule = module.Manifest{
+	Name:         "launch",
+	Tier:         module.TierCore,
+	ConfigKey:    "launch",
+	GroupAliases: []string{"cl"},
+	SubAliases:   launchAliases,
+	New:          newLaunchCmd,
+	Steps: func(module.Deps) step.Registry {
+		return launch.Steps()
+	},
+}
 
 // ownLaunchVerbs are the canonical `forgectl launch <verb>` tokens handled by
 // the Cobra launch subtree (styled help/usage) rather than passed through to
@@ -23,14 +50,14 @@ var ownLaunchVerbs = map[string]bool{
 }
 
 // isOwnLaunchVerb reports whether tok routes to the Cobra launch subtree — a
-// canonical own-verb, or any subcommand alias registered in
-// forgive.LaunchAliases (the single source of truth, so a new alias there is
-// recognized here without a matching edit).
+// canonical own-verb, or any subcommand alias registered in launchAliases
+// (the single source of truth, so a new alias there is recognized here
+// without a matching edit).
 func isOwnLaunchVerb(tok string) bool {
 	if ownLaunchVerbs[tok] {
 		return true
 	}
-	for _, aliases := range forgive.LaunchAliases {
+	for _, aliases := range launchAliases {
 		for _, a := range aliases {
 			if a == tok {
 				return true
@@ -44,7 +71,8 @@ func isOwnLaunchVerb(tok string) bool {
 // attached as subcommands for styled help; the bare/builder/agents passthrough
 // is intercepted in Execute before Cobra ever parses, so
 // `forgectl launch --model sonnet -p hi` stays byte-clean.
-func newLaunchCmd(cfg config.Config) *cobra.Command {
+func newLaunchCmd(deps module.Deps) *cobra.Command {
+	cfg := deps.Cfg
 	cmd := &cobra.Command{
 		Use:     "launch [claude args…]",
 		Aliases: []string{"cl"},
@@ -71,25 +99,8 @@ with "forgectl launch init".`,
 		newLaunchInitCmd(),
 		newLaunchDoctorCmd(cfg),
 	)
-	applyLaunchAliases(cmd)
+	applyAliases(cmd, launchAliases)
 	return cmd
-}
-
-// applyLaunchAliases sets each launch subcommand's Cobra aliases from the
-// forgive registry — the single source of truth (mirrors applyAliases).
-func applyLaunchAliases(parent *cobra.Command) {
-	for _, sub := range parent.Commands() {
-		var valid []string
-		for _, alias := range forgive.LaunchAliases[sub.Name()] {
-			if alias == sub.Name() {
-				continue
-			}
-			valid = append(valid, alias)
-		}
-		if len(valid) > 0 {
-			sub.Aliases = valid
-		}
-	}
 }
 
 // runLaunch dispatches a `forgectl launch …` invocation. Own-verbs return

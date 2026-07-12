@@ -1,7 +1,9 @@
-// Package forgive normalizes user input and owns the canonical tmux verb
-// registry, so the CLI shrugs off iOS autocorrect noise and fat-fingered
-// aliases. Pure stdlib by design — the cobra wiring that consumes this lives
-// in internal/cli.
+// Package forgive normalizes user input so the CLI shrugs off iOS
+// autocorrect noise and fat-fingered aliases. Pure stdlib and
+// data-parameterized by design: the alias vocabularies live with their
+// modules (internal/cli manifests, ADR-0005); this package owns only the
+// normalization mechanics — Normalize plus the Resolver built over a
+// module's map.
 package forgive
 
 import "strings"
@@ -18,102 +20,37 @@ func Normalize(s string) string {
 	return strings.TrimRight(lower, " \t.,!?;:")
 }
 
-// ProjectAliases maps each canonical projects verb to its accepted aliases.
-// Same single-source-of-truth pattern as TmuxAliases.
-var ProjectAliases = map[string][]string{
-	"pick":  {"p", "open"},
-	"list":  {"l", "ls", "find"},
-	"clone": {"c"},
+// Resolver resolves raw tokens against one module's canonical-verb →
+// aliases map (the same shape Manifest.SubAliases and the shared
+// applyAliases helper use). It replaces the old package-level Canonical,
+// which was hardwired to the tmux vocabulary.
+type Resolver struct {
+	canonical map[string][]string
+	aliasTo   map[string]string
 }
 
-// LaunchAliases maps each canonical launch subcommand to its accepted aliases.
-// The `cl` shorthand for the launch group itself is a Cobra alias on the parent
-// command (see newLaunchCmd), not a subcommand alias, so it is not listed here.
-var LaunchAliases = map[string][]string{
-	"which": {"config"},
-}
-
-// WorkflowAliases maps each canonical workflow subcommand to its accepted
-// aliases. The `flow` shorthand for the workflow group itself is a Cobra
-// alias on the parent command (see newWorkflowCmd), not a subcommand alias,
-// so it is not listed here.
-var WorkflowAliases = map[string][]string{
-	"run": {"r"},
-}
-
-// BenchAliases maps each canonical bench subcommand to its accepted aliases.
-var BenchAliases = map[string][]string{
-	"status": {"health", "st"},
-}
-
-// DockerAliases maps each canonical docker subcommand to its accepted
-// aliases. Same single-source-of-truth pattern as BenchAliases.
-var DockerAliases = map[string][]string{
-	"build": {"b"},
-	"run":   {"r"},
-	"shell": {"sh", "attach"},
-}
-
-// BranchAliases lists shorthand Cobra aliases for the `branch` command
-// itself. Unlike TmuxAliases/DockerAliases/etc., branch has no subverbs (see
-// internal/branch's package doc for why it ships flat), so this is a plain
-// slice applied directly as Cobra's Aliases field rather than a
-// verb->aliases map iterated by an applyXAliases helper.
-var BranchAliases = []string{"br"}
-
-// CleanAliases lists shorthand Cobra aliases for the `clean` command itself.
-// Same shape as BranchAliases: clean has no subverbs (PR-1 ships it flat,
-// mirroring branch), so this is a plain slice, not a verb->aliases map.
-// "cl" is already claimed by the launch command group (see LaunchAliases'
-// doc comment) — "cln" avoids the collision.
-var CleanAliases = []string{"cln"}
-
-// YAliases maps each canonical `y` subcommand to its accepted aliases. Same
-// single-source-of-truth pattern as DockerAliases.
-var YAliases = map[string][]string{
-	"copy":  {"c"},
-	"paste": {"p"},
-}
-
-// TmuxAliases maps each canonical tmux verb to its accepted aliases. This is
-// the single source of truth: internal/cli builds cobra command Aliases by
-// iterating this map, and Canonical uses it for known-verb detection in the
-// unknown-verb -> TUI fallthrough.
-var TmuxAliases = map[string][]string{
-	"ls":      {"l", "list", "sessions"},
-	"pick":    {"p", "go", "n", "new"},
-	"kill":    {"k", "rm", "delete", "x"},
-	"rename":  {"mv", "rn"},
-	"windows": {"w"},
-	"tree":    {"t"},
-	"last":    {"-"},
-	"cheat":   {"keys"},
-}
-
-// aliasToCanonical is a reverse lookup: alias -> canonical verb.
-// Built once at package init from TmuxAliases.
-var aliasToCanonical map[string]string
-
-func init() {
-	aliasToCanonical = make(map[string]string)
-	for canonical, aliases := range TmuxAliases {
-		for _, alias := range aliases {
-			aliasToCanonical[alias] = canonical
+// NewResolver builds a Resolver over a canonical-verb → aliases map.
+func NewResolver(aliases map[string][]string) *Resolver {
+	r := &Resolver{canonical: aliases, aliasTo: make(map[string]string)}
+	for canon, as := range aliases {
+		for _, a := range as {
+			r.aliasTo[a] = canon
 		}
 	}
+	return r
 }
 
-// Canonical resolves a raw token (already user-supplied, not yet normalized)
-// to its canonical tmux verb. It normalizes the token first. If the token is
-// itself a canonical verb, it returns (verb, true). If it is a registered
-// alias, it returns the canonical verb it maps to, true. Otherwise it returns
+// Canonical resolves a raw token (user-supplied, not yet normalized) to its
+// canonical verb. It normalizes the token first. If the token is itself a
+// canonical verb, it returns (verb, true). If it is a registered alias, it
+// returns the canonical verb it maps to, true. Otherwise it returns
 // ("", false) — the signal the caller uses to fall through to the TUI.
-func Canonical(token string) (canonical string, known bool) {
+func (r *Resolver) Canonical(token string) (canonical string, known bool) {
 	normalized := Normalize(token)
-	if _, isCanonical := TmuxAliases[normalized]; isCanonical {
+	if _, isCanonical := r.canonical[normalized]; isCanonical {
 		return normalized, true
 	}
-	if canon, ok := aliasToCanonical[normalized]; ok {
+	if canon, ok := r.aliasTo[normalized]; ok {
 		return canon, true
 	}
 	return "", false

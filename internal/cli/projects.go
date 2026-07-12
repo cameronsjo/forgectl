@@ -3,9 +3,30 @@ package cli
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/cameronsjo/forgectl/internal/forgive"
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/projects"
 )
+
+// projectAliases is the single source of truth for projects' subverb
+// shorthands — migrated here from forgive.ProjectAliases at conversion.
+// Separate var for the same initialization-cycle reason as yAliases.
+var projectAliases = map[string][]string{
+	"pick":  {"p", "open"},
+	"list":  {"l", "ls", "find"},
+	"clone": {"c"},
+}
+
+// projectsModule declares the projects core module (ADR-0005): daily
+// project-jumping verbs, "proj" group shorthand.
+var projectsModule = module.Manifest{
+	Name:         "projects",
+	Tier:         module.TierCore,
+	GroupAliases: []string{"proj"},
+	SubAliases:   projectAliases,
+	New: func(deps module.Deps) *cobra.Command {
+		return newProjectsCmd(projects.New(deps.Runner))
+	},
+}
 
 // newProjectsCmd builds the `projects` parent command. The bare `forgectl projects`
 // (or `forgectl proj`) invocation runs the interactive picker — same zero-typing
@@ -22,23 +43,6 @@ func newProjectsCmd(client *projects.Client) *cobra.Command {
 	cmd.AddCommand(newProjectsPickCmd(client))
 	cmd.AddCommand(newProjectsListCmd(client))
 	cmd.AddCommand(newProjectsCloneCmd(client))
-	applyProjectAliases(cmd)
+	applyAliases(cmd, projectAliases)
 	return cmd
-}
-
-// applyProjectAliases sets each projects subcommand's Cobra aliases from the
-// forgive registry — mirrors applyAliases in tmux.go.
-func applyProjectAliases(parent *cobra.Command) {
-	for _, sub := range parent.Commands() {
-		var valid []string
-		for _, alias := range forgive.ProjectAliases[sub.Name()] {
-			if alias == sub.Name() {
-				continue
-			}
-			valid = append(valid, alias)
-		}
-		if len(valid) > 0 {
-			sub.Aliases = valid
-		}
-	}
 }

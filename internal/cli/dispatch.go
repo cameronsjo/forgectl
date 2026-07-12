@@ -6,13 +6,44 @@ import (
 	"github.com/cameronsjo/forgectl/internal/forgive"
 )
 
-// tmuxModuleTokens are the accepted spellings of the tmux module (matched after
-// normalization, so "Tmux." also lands here).
-var tmuxModuleTokens = map[string]bool{"tmux": true, "tm": true}
+// argvForgiveness is one module's pre-Cobra argv surface: the spellings that
+// converge on its canonical name, and the resolver that canonicalizes the
+// verb that follows.
+type argvForgiveness struct {
+	name     string
+	tokens   map[string]bool
+	resolver *forgive.Resolver
+}
 
-// normalizeArgs rewrites a fat-fingered or iOS-autocorrected tmux verb to its
-// canonical form before Cobra parses, so "LS." and "Kill," resolve and "rm"
-// maps to kill. Only the module token and the verb that follows it are
+// argvModules derives the forgiveness table from the module registry: only
+// manifests declaring ArgvTokens participate. That is tmux alone today —
+// extending argv forgiveness to every module is a flagged opt-in follow-on
+// (ADR-0005), so the table stays behavior-identical to the old hardcoded
+// tmux path. NOTE for the second ArgvTokens module: the multi-module loop
+// below and a resolver over a nil SubAliases map are currently unexercised —
+// add dedicated argvModules() tests alongside that module.
+func argvModules() []argvForgiveness {
+	var out []argvForgiveness
+	for _, m := range allModules() {
+		if len(m.ArgvTokens) == 0 {
+			continue
+		}
+		tokens := map[string]bool{m.Name: true}
+		for _, t := range m.ArgvTokens {
+			tokens[t] = true
+		}
+		out = append(out, argvForgiveness{
+			name:     m.Name,
+			tokens:   tokens,
+			resolver: forgive.NewResolver(m.SubAliases),
+		})
+	}
+	return out
+}
+
+// normalizeArgs rewrites a fat-fingered or iOS-autocorrected module verb to
+// its canonical form before Cobra parses, so "LS." and "Kill," resolve and
+// "rm" maps to kill. Only the module token and the verb that follows it are
 // touched. Flags pass through untouched (so "--bogus" stays a strict flag
 // error), and an unrecognized verb is left as-is — that's the signal the M5
 // TUI fallthrough keys off.
@@ -20,6 +51,7 @@ func normalizeArgs(args []string) []string {
 	out := make([]string, len(args))
 	copy(out, args)
 
+	mods := argvModules()
 	for i, tok := range out {
 		if tok == "--" {
 			break // POSIX end-of-flags: everything after is positional, leave it
@@ -32,8 +64,11 @@ func normalizeArgs(args []string) []string {
 		// `forgectl LS.` — isn't matched here; it falls through to shouldLaunchTUI
 		// and opens the menu, which is the intended thumb-mode behavior.)
 		mod := forgive.Normalize(tok)
-		if tmuxModuleTokens[mod] {
-			out[i] = "tmux" // converge every spelling/alias on the canonical module
+		for _, fm := range mods {
+			if !fm.tokens[mod] {
+				continue
+			}
+			out[i] = fm.name // converge every spelling/alias on the canonical module
 			for j := i + 1; j < len(out); j++ {
 				if out[j] == "--" {
 					break // stop at end-of-flags; don't rewrite positional args
@@ -41,11 +76,12 @@ func normalizeArgs(args []string) []string {
 				if isFlag(out[j]) {
 					continue
 				}
-				if canon, known := forgive.Canonical(out[j]); known {
+				if canon, known := fm.resolver.Canonical(out[j]); known {
 					out[j] = canon
 				}
 				break
 			}
+			break
 		}
 		break
 	}

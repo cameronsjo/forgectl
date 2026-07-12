@@ -72,6 +72,18 @@ func userWorkflowDir() string {
 	return dir
 }
 
+// ResolveBuiltin parses an embedded built-in by name, bypassing the user
+// directory — the data-plane coverage test uses it so a user override on the
+// developer's machine can't mask a builtin's vocabulary. Resolve remains the
+// runtime path.
+func ResolveBuiltin(name string) (Workflow, error) {
+	data, err := builtinFS.ReadFile("builtins/" + name + ".workflow.toml")
+	if err != nil {
+		return Workflow{}, fmt.Errorf("builtin workflow %q: %w", name, err)
+	}
+	return Parse(data)
+}
+
 // ListBuiltins returns the names of every embedded built-in workflow (without
 // the .workflow.toml suffix) — used by `workflow list`.
 func ListBuiltins() ([]string, error) {

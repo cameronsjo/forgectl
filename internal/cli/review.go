@@ -4,7 +4,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
-	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/review"
 )
 
@@ -12,11 +12,19 @@ import (
 // absent or empty.
 const defaultReviewOwner = "cameronsjo"
 
-// newReviewCmd builds `forgectl review` — the cross-project work-inventory
-// group. It builds its own source over a fresh runner (mirrors newPrCmd's
-// self-contained client lifecycle).
-func newReviewCmd(cfg config.Config) *cobra.Command {
-	src := review.NewGitHub(exec.OSRunner{}, resolveReviewOwners(cfg))
+// reviewModule declares the cross-project work-inventory extension
+// (ADR-0005): owns the [review] config section, no alias surface.
+var reviewModule = module.Manifest{
+	Name:      "review",
+	Tier:      module.TierExtension,
+	ConfigKey: "review",
+	New:       newReviewCmd,
+}
+
+// newReviewCmd builds `forgectl review` over the registry Deps — the gh
+// source comes from deps.Runner (mirrors the other module constructors).
+func newReviewCmd(deps module.Deps) *cobra.Command {
+	src := review.NewGitHub(deps.Runner, resolveReviewOwners(deps.Cfg))
 	// err discarded: "" degrades to an empty store on read (LoadReviewed), and
 	// the write verbs fail loudly via persist()'s path=="" guard.
 	reviewedPath, _ := config.ReviewReviewedPath()

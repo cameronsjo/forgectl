@@ -30,7 +30,23 @@ func TestNormalize(t *testing.T) {
 	}
 }
 
-func TestCanonical(t *testing.T) {
+// testAliases mirrors the tmux vocabulary (internal/cli's tmuxAliases) — the
+// richest real map, kept inline because forgive cannot import cli. The
+// resolver semantics under test are map-independent; the cases are the same
+// ones the old package-level Canonical carried.
+var testAliases = map[string][]string{
+	"ls":      {"l", "list", "sessions"},
+	"pick":    {"p", "go", "n", "new"},
+	"kill":    {"k", "rm", "delete", "x"},
+	"rename":  {"mv", "rn"},
+	"windows": {"w"},
+	"tree":    {"t"},
+	"last":    {"-"},
+	"cheat":   {"keys"},
+}
+
+func TestResolverCanonical(t *testing.T) {
+	r := NewResolver(testAliases)
 	tests := []struct {
 		input     string
 		wantCanon string
@@ -54,7 +70,7 @@ func TestCanonical(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(fmt.Sprintf("%q", tc.input), func(t *testing.T) {
-			gotCanon, gotKnown := Canonical(tc.input)
+			gotCanon, gotKnown := r.Canonical(tc.input)
 			if gotCanon != tc.wantCanon || gotKnown != tc.wantKnown {
 				t.Errorf("Canonical(%q) = (%q, %v), want (%q, %v)",
 					tc.input, gotCanon, gotKnown, tc.wantCanon, tc.wantKnown)
@@ -63,13 +79,14 @@ func TestCanonical(t *testing.T) {
 	}
 }
 
-// TestAllAliasesResolve verifies every alias in TmuxAliases resolves to its
-// canonical key, preventing registry drift.
-func TestAllAliasesResolve(t *testing.T) {
-	for canonical, aliases := range TmuxAliases {
+// TestResolverAllAliasesResolve verifies every alias in a map resolves to its
+// canonical key, preventing reverse-lookup drift inside NewResolver.
+func TestResolverAllAliasesResolve(t *testing.T) {
+	r := NewResolver(testAliases)
+	for canonical, aliases := range testAliases {
 		for _, alias := range aliases {
 			t.Run(fmt.Sprintf("%s->%s", alias, canonical), func(t *testing.T) {
-				gotCanon, gotKnown := Canonical(alias)
+				gotCanon, gotKnown := r.Canonical(alias)
 				if !gotKnown {
 					t.Errorf("Canonical(%q): expected known=true, got false", alias)
 				}

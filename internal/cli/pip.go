@@ -5,14 +5,21 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/module"
 	pippkg "github.com/cameronsjo/forgectl/internal/pip"
 )
 
-// newPipCmd builds `forgectl pip` — mirrors newNetCmd in building its own
-// exec.Runner rather than sharing another domain's client lifecycle.
-func newPipCmd() *cobra.Command {
-	client := pippkg.New(exec.OSRunner{})
+// pipModule declares the pip.conf-editor extension (ADR-0005): no config
+// section, no alias surface.
+var pipModule = module.Manifest{
+	Name: "pip",
+	Tier: module.TierExtension,
+	New:  newPipCmd,
+}
+
+// newPipCmd builds `forgectl pip` over the registry Deps.
+func newPipCmd(deps module.Deps) *cobra.Command {
+	client := pippkg.New(deps.Runner)
 	return newPipCmdForClient(client)
 }
 
