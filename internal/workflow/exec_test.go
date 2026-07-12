@@ -29,6 +29,7 @@ func TestExecutor_TrivialWorkflow_ComposedArgv(t *testing.T) {
 	wf := Workflow{
 		DSLVersion: 1,
 		Name:       "trivial",
+		Params:     map[string]Param{"repo": {Required: true}, "branch": {Default: "main"}},
 		Steps: []Step{
 			{Uses: "worktree", Repo: "${repo}", Ref: "${branch}"},
 			{Uses: "strip", Globs: []string{"CLAUDE.md"}},
@@ -76,6 +77,7 @@ func TestExecutor_RunOnlyWorkflow_ComposedArgv(t *testing.T) {
 	wf := Workflow{
 		DSLVersion: 1,
 		Name:       "run-only",
+		Params:     map[string]Param{"who": {Required: true}},
 		Steps: []Step{
 			{Uses: "run", Cmd: "echo", Args: []string{"hello", "${who}"}},
 		},

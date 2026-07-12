@@ -8,6 +8,9 @@
 *.out
 coverage.*
 
+# Swift (bless ceremony helper)
+helper/forgectl-bless-helper/.build/
+
 # Editor / OS
 .DS_Store
 
