@@ -37,6 +37,22 @@ the command).
   invoked through the `exec.Runner` seam; it signs a 32-byte digest blind and never sees the
   file. The **verify path is pure Go** (stdlib `crypto/ecdsa` + PKIX) — `CGO_ENABLED=0`
   untouched, verification works on any platform the trust material reaches.
+  The helper is resolved **only** as a sibling of the running executable. There is
+  deliberately **no environment override** for that path: the helper serves `Enroll` and
+  `PublicKey` as well as `Sign`, and `trust init` enrolls at the one moment no trust store
+  exists yet — so whatever public key the helper returns *becomes the anchor*. An agent that
+  can append an `export` to a shell rc file (well within a same-UID adversary's reach) would
+  otherwise have the human's own `sudo` install the **agent's** key as the root of trust, with
+  no Touch ID prompt ever appearing. Injectability for tests lives in in-process Go vars,
+  which nothing outside the process can reach.
+- **The anchor is written from argv, never from a file the invoking user can rewrite.** A
+  single interactive `sudo sh -c` leg receives the base64 public key as a positional argument
+  and creates the anchor under `set -C` (noclobber → `O_EXCL`: atomic, refuses an existing
+  file, refuses a symlink), then the install is **read back and compared** to the key we meant
+  to install. Staging through a temp file would leave it writable across the *interactive sudo
+  wait* — seconds while the human types a password — and a same-UID agent could swap its
+  contents so `sudo` rooted the attacker's key. The anchor is a **public** key, so carrying it
+  in argv costs no confidentiality and buys immutability at exec time.
 - **Domain-separated pre-image:** `sha256("forgectl-bless-v1:workflow\n" ‖ bytes)` for
   workflows, `sha256("forgectl-bless-v1:trust\n" ‖ bytes)` for the trust store — a workflow
   signature can never be replayed as a trust-store signature or vice versa.
@@ -89,6 +105,33 @@ the command).
   and drags the ceremony into the always-on binary; the helper split keeps verify pure Go.
 - **Warn-mode default.** Rejected: warnings print to a terminal the agent, not the human, is
   reading.
+
+## What review caught (recorded, because the misses are instructive)
+
+Three reviews ran: a security lens, a code-quality lens, and CodeRabbit. The first two cleared
+the trust core and found real but narrower issues. **CodeRabbit found the two bugs that
+actually mattered**, and both were bootstrap bugs — the moment the root of trust is
+*established*, not the steady state it protects:
+
+1. The anchor staged through a user-writable temp file across the interactive sudo wait.
+2. The helper-path env override, which also served enrollment.
+
+Both let a same-UID agent get **its own key installed as the root-owned anchor** — total
+bypass, no root and no password required.
+
+The reason two reviewers walked past #2 is worth naming: the code carried a confident doc
+comment asserting the override was *"deliberate and safe — it redirects only the SIGN side."*
+That sentence was wrong, and it read as evidence. A comment claiming a security property is a
+**claim, not a proof**; it should carry the argument, or it becomes the thing that hides the
+bug. Both fixes are now pinned by regression tests
+(`TestNewHelperBlesser_EnvVarCannotRedirectHelper`,
+`TestInstallAnchor_SingleSudoLegCarriesKeyInArgv`,
+`TestInstallAnchor_PostVerifyCatchesSwappedKey`).
+
+Generalizable: **a trust system's weakest moment is its bootstrap.** Steady-state verification
+got the most design attention and held up; establishment — where there is not yet a store to
+check against — is where both compromises lived. Review the ceremony that *creates* trust at
+least as hard as the one that *checks* it.
 
 ## Consequences
 
