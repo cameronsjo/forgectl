@@ -111,7 +111,7 @@ when EVERY source fails (all-degraded = no data to render; mirror the spirit of
 - Issue JSON fields: `number,title,url,author,updatedAt,state,labels,repository`. PR fields:
   the existing `prSearchFields` + `labels`.
 - Truncation sentinel: when one query returns exactly its `--limit` rows, append a note
-  (`"issues(<owner>): results may be truncated at 500"`) — never silently cap.
+  (`"issues(<owner>): results may be truncated at 1000"`) — never silently cap.
 - Parsing: hostile-input discipline identical to `parseSearchPRs` — validate owner/repo
   charset per row, skip-and-log invalid rows, never fatal.
 

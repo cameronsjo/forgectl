@@ -141,6 +141,24 @@ func TestGitHubItems_NoOwners(t *testing.T) {
 	}
 }
 
+// TestGitHubItems_RejectsMalformedOwner pins the documented enforcement point
+// for low-trust config input: a malformed owner must be refused by both legs
+// BEFORE any argv reaches the Runner (every query fails → Items errors), and
+// zero gh processes may spawn.
+func TestGitHubItems_RejectsMalformedOwner(t *testing.T) {
+	for _, owner := range []string{"bad owner", "-cameronsjo"} {
+		t.Run(owner, func(t *testing.T) {
+			fake := &exec.FakeRunner{}
+			if _, _, err := NewGitHub(fake, []string{owner}).Items(context.Background()); err == nil {
+				t.Error("malformed owner must be an error")
+			}
+			if len(fake.Calls) != 0 {
+				t.Errorf("malformed owner must never reach the Runner; saw %d calls", len(fake.Calls))
+			}
+		})
+	}
+}
+
 func TestGitHubItems_TruncationNote(t *testing.T) {
 	// Serve exactly searchLimit issue rows so the leg reports truncation.
 	rows := make([]string, searchLimit)

@@ -33,6 +33,12 @@ func runReviewList(cmd *cobra.Command, src review.Source, reviewedPath string, a
 	}
 
 	items = filterItems(items, kind, repo)
+	// An unresolvable store path degrades reads to an empty store (house
+	// pattern), but for THIS view that silently renders every item as
+	// unreviewed — say so instead of misreporting.
+	if reviewedPath == "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "note: reviewed-store path unavailable; reviewed state not shown")
+	}
 	store := pr.LoadReviewed(reviewedPath)
 	if asJSON {
 		return emitReviewJSON(cmd.OutOrStdout(), items, store)

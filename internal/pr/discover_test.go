@@ -193,6 +193,57 @@ func TestPRs_DegradedQueryBecomesNote(t *testing.T) {
 	}
 }
 
+// TestDash_QueriesCarryExplicitLimitAndTruncationNote is the Dash-side twin of
+// TestPRs_QueriesCarryExplicitLimit: both dashboard queries must pass an
+// explicit --limit, and an exactly-full response must surface a truncation
+// note per section rather than silently capping.
+func TestDash_QueriesCarryExplicitLimitAndTruncationNote(t *testing.T) {
+	rows := make([]string, DefaultSearchLimit)
+	for i := range rows {
+		rows[i] = searchRow("cameronsjo/forgectl", i+1)
+	}
+	full := "[" + strings.Join(rows, ",") + "]"
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "gh" && len(args) >= 2 && args[0] == "search" && args[1] == "prs" {
+			return full, nil
+		}
+		return "", nil
+	}}
+	client := New(fake, WithSessionsDir(t.TempDir()))
+
+	_, notes, err := client.Dash(context.Background())
+	if err != nil {
+		t.Fatalf("Dash: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, call := range fake.Calls {
+		if call.Name != "gh" {
+			continue
+		}
+		argv := strings.Join(call.Args, " ")
+		if !strings.Contains(argv, "--limit 200") {
+			t.Errorf("dash query missing explicit --limit: %s", argv)
+		}
+		seen[searchWhoFlag(call.Args)] = true
+	}
+	for _, flag := range []string{"--author", "--review-requested"} {
+		if !seen[flag] {
+			t.Errorf("missing %s dashboard query", flag)
+		}
+	}
+	for _, section := range []string{"awaiting-you", "your-open"} {
+		found := false
+		for _, n := range notes {
+			if strings.Contains(n, section) && strings.Contains(n, "truncated") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("want a %s truncation note, got %v", section, notes)
+		}
+	}
+}
+
 // searchWhoFlag extracts the who-scope flag (--author/--assignee/
 // --review-requested) from a `gh search prs …` argv.
 func searchWhoFlag(args []string) string {

@@ -75,7 +75,6 @@ func (g *GitHub) Items(ctx context.Context) ([]Item, []string, error) {
 
 	ch := make(chan ghQueryResult, len(queries))
 	for _, q := range queries {
-		q := q
 		go func() {
 			items, truncated, err := q.run(ctx, q.owner)
 			ch <- ghQueryResult{q.label, items, truncated, err}

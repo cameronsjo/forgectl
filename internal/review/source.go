@@ -38,7 +38,6 @@ func Aggregate(ctx context.Context, sources ...Source) ([]Item, []string, error)
 
 	ch := make(chan sourceResult, len(sources))
 	for _, src := range sources {
-		src := src
 		go func() {
 			items, notes, err := src.Items(ctx)
 			ch <- sourceResult{src.Name(), items, notes, err}

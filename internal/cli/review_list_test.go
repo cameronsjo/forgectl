@@ -105,8 +105,15 @@ func TestReviewCmd_JSON_EmptyIsArray(t *testing.T) {
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("review --json empty: %v", err)
 	}
+	var rows []reviewRowJSON
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatalf("empty --json not valid JSON: %v\n%s", err, stdout.String())
+	}
+	if len(rows) != 0 {
+		t.Errorf("empty --json: want 0 rows, got %+v", rows)
+	}
 	if got := strings.TrimSpace(stdout.String()); !strings.HasPrefix(got, "[") {
-		t.Errorf("empty --json: want array, got %q", got)
+		t.Errorf("empty --json: want array (never null), got %q", got)
 	}
 }
 
