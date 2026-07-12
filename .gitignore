@@ -2,6 +2,9 @@
 /forgectl
 /fx
 /dist/
+# Staged bless helper — the release workflow builds it here for goreleaser's
+# darwin archive to pick up.
+/dist-helper/
 
 # Go
 *.test

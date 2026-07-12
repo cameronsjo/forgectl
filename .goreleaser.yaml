@@ -7,26 +7,70 @@ before:
   hooks:
     - go mod tidy
 
+# The build is split by OS purely so the archives can be: `archives[].ids`
+# selects BUILD ids, so a darwin-only archive (the one carrying the Swift bless
+# helper) needs a darwin-only build to point at. The two builds are otherwise
+# identical — the ldflags anchor keeps the version injection from drifting.
 builds:
-  - main: .
+  - id: forgectl-linux
+    main: .
     binary: forgectl
     env:
       - CGO_ENABLED=0
     goos:
       - linux
-      - darwin
     goarch:
       - amd64
       - arm64
-    ldflags:
+    ldflags: &ldflags
       - -s -w
       - -X github.com/cameronsjo/forgectl/internal/meta.Version={{.Version}}
       - -X github.com/cameronsjo/forgectl/internal/meta.Commit={{.Commit}}
       - -X github.com/cameronsjo/forgectl/internal/meta.Date={{.Date}}
 
+  - id: forgectl-darwin
+    main: .
+    binary: forgectl
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags: *ldflags
+
 archives:
-  - formats: ["tar.gz"]
+  # Linux ships the Go binary alone — `workflow bless` is macOS-only (it needs
+  # the Secure Enclave), so the helper would be dead weight. Linux still
+  # verifies blessings: that path is pure Go.
+  - id: linux
+    ids:
+      - forgectl-linux
+    formats: ["tar.gz"]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+  # macOS additionally carries forgectl-bless-helper (a universal, ad-hoc-signed
+  # Swift binary staged by the release workflow at dist-helper/). It must sit at
+  # the archive ROOT: the Go side discovers it as a sibling of its own
+  # executable — filepath.Join(filepath.Dir(os.Executable()), …) — which holds
+  # both in the extracted archive and in the cask (Homebrew symlinks both
+  # binaries into the same bin dir).
+  - id: darwin
+    ids:
+      - forgectl-darwin
+    formats: ["tar.gz"]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      # Declaring `files` at all REPLACES goreleaser's built-in default list, so
+      # these three are re-stated or the darwin archives quietly ship without a
+      # LICENSE (the linux archives, which take the default, would still have
+      # one — an easy divergence to miss).
+      - LICENSE*
+      - README*
+      - CHANGELOG*
+      - src: dist-helper/forgectl-bless-helper
+        strip_parent: true
 
 checksum:
   name_template: 'checksums.txt'
@@ -58,6 +102,10 @@ changelog:
 # resolves it the same way.
 homebrew_casks:
   - name: forgectl
+    # A cask is macOS-only, so it feeds off the darwin archive — the one that
+    # carries the bless helper.
+    ids:
+      - darwin
     repository:
       owner: cameronsjo
       name: homebrew-tap
@@ -67,13 +115,21 @@ homebrew_casks:
     directory: Casks
     homepage: "https://github.com/cameronsjo/forgectl"
     description: "Personal tmux/dev-experience CLI for the headless workbench (supersedes the bash `s` script)"
-    # The binary is unsigned; strip the quarantine bit so it runs without a
-    # Gatekeeper prompt on machines that pull it from the tap.
+    # Both binaries are linked into the Homebrew bin: forgectl shells out to
+    # forgectl-bless-helper for the Touch ID ceremony and finds it as a sibling
+    # of its own executable.
+    binaries:
+      - forgectl
+      - forgectl-bless-helper
+    # Neither binary carries a Developer ID signature (the helper is ad-hoc
+    # signed, which is enough for a Secure Enclave key but not for Gatekeeper),
+    # so strip the quarantine bit on both or the first run prompts.
     hooks:
       post:
         install: |
           if OS.mac?
             system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/forgectl"]
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/forgectl-bless-helper"]
           end
 
 release:
