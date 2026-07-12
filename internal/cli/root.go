@@ -10,7 +10,6 @@ import (
 	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/projects"
-	"github.com/cameronsjo/forgectl/internal/quarantine"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -54,7 +53,6 @@ func newRoot(deps module.Deps) *cobra.Command {
 	root.AddCommand(newConfigCmd(deps.Cfg))
 	root.AddCommand(newLaunchCmd(deps.Cfg))
 	root.AddCommand(newWorkflowCmd(deps.Cfg))
-	root.AddCommand(newQuarantineCmd(quarantine.New(deps.Runner)))
 	root.AddCommand(newPrCmd(deps.Cfg))
 
 	return root
