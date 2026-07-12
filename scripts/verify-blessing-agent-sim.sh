@@ -210,6 +210,50 @@ must_refuse "\${param} in strip globs refused at bless time" \
     "$FORGECTL" workflow bless agent-sim-sneaky
 rm -f "$SNEAKY"
 
+step "(i) Plant a non-presence key at the real label, then use the helper"
+# The sharpest bootstrap attack: key CREATION needs no presence, and the key-blob
+# dir is agent-writable. An agent mints its OWN non-presence Secure Enclave key at
+# the compiled-in label; if the helper trusted it, trust init would anchor it and
+# every future bless would sign SILENTLY. The helper must PROVE presence-gating
+# (probe under interactionNotAllowed) and refuse a planted key (exit 6).
+HELPER="$BIN_DIR/forgectl-bless-helper"
+KEYDIR="$CFG/bless-keys"
+PLANTER="$(dirname "$0")/../../../scratchpad/se-spike/spike2"  # throwaway blob minter, if present
+mkdir -p "$KEYDIR"
+if [[ -x "$HELPER" ]] && command -v swiftc >/dev/null 2>&1; then
+    # Mint a non-presence blob at the real label using a tiny inline Swift minter
+    # (self-contained so the check needs no external artifact).
+    MINT="$BIN_DIR/mint.swift"
+    cat > "$MINT" <<'SWIFT'
+import Foundation
+import CryptoKit
+import Security
+let path = CommandLine.arguments[1]
+var err: Unmanaged<CFError>?
+let ac = SecAccessControlCreateWithFlags(kCFAllocatorDefault,
+    kSecAttrAccessibleWhenUnlockedThisDeviceOnly, [.privateKeyUsage], &err)!
+let key = try! SecureEnclave.P256.Signing.PrivateKey(accessControl: ac)  // NO .userPresence
+try! key.dataRepresentation.write(to: URL(fileURLWithPath: path))
+SWIFT
+    if swiftc -O "$MINT" -o "$BIN_DIR/mint" 2>/dev/null && codesign -s - -f "$BIN_DIR/mint" 2>/dev/null \
+       && "$BIN_DIR/mint" "$KEYDIR/forgectl-bless.key" 2>/dev/null; then
+        out=$("$HELPER" pubkey --label forgectl-bless 2>&1); rc=$?
+        if (( rc == 0 )); then
+            bypass "planted non-presence key ACCEPTED by pubkey — silent-bless bootstrap is open"
+        else
+            held "planted non-presence key refused by pubkey (exit $rc)"
+            note "refused: $(printf '%s' "$out" | first_line -)"
+        fi
+        rm -f "$KEYDIR/forgectl-bless.key"
+    else
+        note "SKIPPED — could not mint an SE key on this host (no Secure Enclave?)"
+        skipped=$((skipped + 1))
+    fi
+else
+    note "SKIPPED — helper or swiftc unavailable"
+    skipped=$((skipped + 1))
+fi
+
 printf '\n%s================================%s\n' "$BOLD" "$RESET"
 if (( bypassed > 0 )); then
     printf '%sVERDICT: BYPASS FOUND%s — %d held, %d BYPASSED. Do not merge.\n' "$RED" "$RESET" "$held" "$bypassed"
