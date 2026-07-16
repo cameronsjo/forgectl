@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>{{if .DocTitle}}{{.DocTitle}} · {{end}}forgectl docs</title>
+<link rel="stylesheet" href="/assets/artificer.css"/>
+<link rel="stylesheet" href="/assets/chroma.css"/>
+<script src="/assets/artificer-theme.js" defer></script>
+</head>
+<body class="surface-tool">
+<div class="page-shell">
+  <header class="appbar">
+    <a class="appbar__brand wordmark" href="/">forgectl docs</a>
+    <div class="appbar__spacer"></div>
+    <div class="appbar__actions">
+      <button class="theme-toggle" data-theme-toggle aria-label="Toggle theme"></button>
+    </div>
+  </header>
+  <div class="split-pane" style="gap:0;min-height:calc(100vh - 52px)">
+    <aside style="border-right:1px solid var(--border);display:flex;flex-direction:column">
+      <div class="field" style="padding:var(--s-sm)">
+        <label class="field__label" for="doc-filter">Filter</label>
+        <input class="input" id="doc-filter" type="search" placeholder="Filter docs…" autocomplete="off"/>
+      </div>
+      <nav class="sidenav" aria-label="Indexed docs" style="border-radius:0;border:0;flex:1;overflow-y:auto">
+        {{range .Groups}}
+        <div class="sidenav__group">{{.Root}}</div>
+        {{range .Docs}}
+        <a href="{{.Href}}" data-filter-text="{{.FilterText}}"{{if .Current}} aria-current="page"{{end}}><span class="label">{{.Title}}</span></a>
+        {{end}}
+        {{end}}
+      </nav>
+    </aside>
+    <main class="surface-document container container--lg" style="padding:var(--s-xl)">
+      {{if .Content}}{{.Content}}{{else}}
+      <div class="empty-state">
+        <h2>No doc selected</h2>
+        <p>Choose a document from the sidebar to start reading.</p>
+      </div>
+      {{end}}
+    </main>
+  </div>
+</div>
+<script>
+(function () {
+  var input = document.getElementById("doc-filter");
+  var links = document.querySelectorAll(".sidenav a");
+  var groups = document.querySelectorAll(".sidenav__group");
+  input.addEventListener("input", function () {
+    var q = input.value.trim().toLowerCase();
+    links.forEach(function (a) {
+      var hay = a.getAttribute("data-filter-text") || "";
+      a.style.display = (q === "" || hay.indexOf(q) !== -1) ? "" : "none";
+    });
+    groups.forEach(function (g) {
+      var sib = g.nextElementSibling;
+      var anyVisible = false;
+      while (sib && !sib.classList.contains("sidenav__group")) {
+        if (sib.tagName === "A" && sib.style.display !== "none") { anyVisible = true; }
+        sib = sib.nextElementSibling;
+      }
+      g.style.display = anyVisible ? "" : "none";
+    });
+  });
+})();
+</script>
+</body>
+</html>

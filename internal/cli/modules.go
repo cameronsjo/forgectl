@@ -30,5 +30,6 @@ func allModules() []module.Manifest {
 		reviewModule,
 		quarantineModule,
 		envModule,
+		docsModule,
 	}
 }
