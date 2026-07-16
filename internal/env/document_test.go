@@ -200,6 +200,82 @@ func TestDocument_MultilinePEM_SetReencodesEscapedSingleLine(t *testing.T) {
 	}
 }
 
+func TestDocument_AmbiguousQuotedTrailer_MalformedNoLeak(t *testing.T) {
+	// The verbatim-leak case from the review: an inline-JSON value whose
+	// body itself contains unescaped double quotes. findClosingQuote closes
+	// on the FIRST bare '"' — right after "{" — leaving everything after it
+	// (real JSON body, including a live-looking secret) as a non-comment
+	// trailer.
+	const sentinel = "sk_live_S3NTINEL"
+	src := `GCP_CREDS="{"type":"service_account","private_key":"` + sentinel + `"}"` + "\n"
+
+	doc, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(doc.Lines) != 1 || doc.Lines[0].Kind != KindMalformed {
+		t.Fatalf("Lines = %+v, want a single KindMalformed line", doc.Lines)
+	}
+
+	redacted := string(doc.Redacted())
+	if want := "****\n"; redacted != want {
+		t.Errorf("Redacted() = %q, want %q", redacted, want)
+	}
+	for _, leak := range []string{sentinel, "type", "service_account", "private_key"} {
+		assertNoSecretInOutput(t, leak, "", redacted)
+	}
+}
+
+func TestDocument_AmbiguousSingleQuoteApostrophe_MalformedNoLeak(t *testing.T) {
+	// A single-quoted value containing an apostrophe: bash does no escape
+	// handling inside single quotes (correctly, per decodeQuotedBody), so
+	// the apostrophe closes the quote early and everything after it is an
+	// ambiguous, non-comment trailer.
+	const secretTail = "word-battery-S3NTINEL"
+	src := "DB_PASSWORD='p@ss'" + secretTail + "'\n"
+
+	doc, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(doc.Lines) != 1 || doc.Lines[0].Kind != KindMalformed {
+		t.Fatalf("Lines = %+v, want a single KindMalformed line", doc.Lines)
+	}
+
+	redacted := string(doc.Redacted())
+	if want := "****\n"; redacted != want {
+		t.Errorf("Redacted() = %q, want %q", redacted, want)
+	}
+	assertNoSecretInOutput(t, secretTail, "", redacted)
+}
+
+func TestDocument_QuotedRealTrailingComment_StillRoundTripsAndRedacts(t *testing.T) {
+	// The non-ambiguous case must be unaffected: a genuine trailing comment
+	// after a quoted value (first non-space byte of the trailer is '#')
+	// still parses as KindPair, round-trips byte-for-byte, and redact keeps
+	// the comment while masking the value.
+	const sentinel = "s3ntinel-VALUE-77x"
+	src := "export BAZ=\"" + sentinel + "\"   # trailing comment\n"
+
+	doc, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(doc.Lines) != 1 || doc.Lines[0].Kind != KindPair {
+		t.Fatalf("Lines = %+v, want a single KindPair line", doc.Lines)
+	}
+	if got := string(doc.Bytes()); got != src {
+		t.Errorf("Bytes() = %q, want %q", got, src)
+	}
+
+	redacted := string(doc.Redacted())
+	want := "export BAZ=****   # trailing comment\n"
+	if redacted != want {
+		t.Errorf("Redacted() = %q, want %q", redacted, want)
+	}
+	assertNoSecretInOutput(t, sentinel, "", redacted)
+}
+
 func TestDocument_Keys_DedupAndExcludesMalformed(t *testing.T) {
 	src := "FOO=1\n" +
 		"BAR=2\n" +

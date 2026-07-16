@@ -232,6 +232,22 @@ func parseLine(data []byte, pos int) (Line, int) {
 		inline = lastContent[rel:]
 	}
 
+	// A non-empty, non-comment trailer after the closing quote means the
+	// choice of "which quote closes the value" is ambiguous — bash itself
+	// treats quote-adjacent text as concatenation (a"b"c is one word), so
+	// the trailer could belong to the value, not a comment. Parse refuses
+	// rather than guessing: guessing wrong is a security AND correctness
+	// bug at once — Get would silently return the TRUNCATED prefix (a user
+	// copies a broken credential believing it's whole) while redact prints
+	// the untouched trailer as if it were safe comment text, verbatim —
+	// leaking everything after the ambiguous close (e.g. embedded JSON
+	// with its own internal quotes, or a single-quoted value containing an
+	// apostrophe). Refusing an ambiguous line beats silently truncating
+	// it.
+	if trailer := strings.TrimLeft(inline, " \t"); trailer != "" && trailer[0] != '#' {
+		return Line{Kind: KindMalformed, Raw: rawLines}, finalNext
+	}
+
 	value := decodeQuotedBody(data[bodyStart:closeIdx], quote)
 
 	return Line{
