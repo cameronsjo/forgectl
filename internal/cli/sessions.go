@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -60,6 +61,30 @@ func resolveDSN(flagDSN string, cfg config.SessionsConfig) string {
 		return env
 	}
 	return cfg.DSN
+}
+
+// withMart runs fn against an open mart connection, closing it after — the
+// resolve-DSN-or-die + connect-or-die preamble the query verbs (search, why,
+// last) all share. An empty DSN is a usage error, never a nil connection.
+func withMart(cmd *cobra.Command, dsn string, cfg config.SessionsConfig, fn func(*sessions.Mart) error) error {
+	resolved := resolveDSN(dsn, cfg)
+	if resolved == "" {
+		return fmt.Errorf("no mart DSN: set [sessions] dsn in config, FORGECTL_SESSIONS_DSN, or --dsn")
+	}
+	mart, err := sessions.ConnectMart(cmd.Context(), resolved)
+	if err != nil {
+		return err
+	}
+	defer mart.Close(cmd.Context())
+	return fn(mart)
+}
+
+// writeJSON encodes v as indented JSON to out — the shared --json emitter for
+// the query verbs' stable, pipeable output.
+func writeJSON(out io.Writer, v any) error {
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
 }
 
 func newSessionsSyncCmd(cfg config.Config) *cobra.Command {
@@ -155,33 +180,26 @@ machine can find a runbook or field report it did not author.
   forgectl sessions search --project cadence "worktree guard"`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resolved := resolveDSN(dsn, cfg.Sessions)
-			if resolved == "" {
-				return fmt.Errorf("no mart DSN: set [sessions] dsn in config, FORGECTL_SESSIONS_DSN, or --dsn")
-			}
-			mart, err := sessions.ConnectMart(cmd.Context(), resolved)
-			if err != nil {
-				return err
-			}
-			defer mart.Close(cmd.Context())
-			hits, err := mart.SearchRunbooks(cmd.Context(), args[0], project, limit)
-			if err != nil {
-				return err
-			}
-			out := cmd.OutOrStdout()
-			if len(hits) == 0 {
-				fmt.Fprintln(out, "no runbooks matched")
+			return withMart(cmd, dsn, cfg.Sessions, func(mart *sessions.Mart) error {
+				hits, err := mart.SearchRunbooks(cmd.Context(), args[0], project, limit)
+				if err != nil {
+					return err
+				}
+				out := cmd.OutOrStdout()
+				if len(hits) == 0 {
+					fmt.Fprintln(out, "no runbooks matched")
+					return nil
+				}
+				for _, h := range hits {
+					// Indexed content is untrusted at print time — strip control
+					// bytes so a hostile title/snippet can't smuggle terminal
+					// escape sequences to the operator's shell.
+					fmt.Fprintf(out, "%s\t%s\t[%s]\t(%s, indexed by %s)\n\t%s\n",
+						sanitizeTerm(h.Path), sanitizeTerm(h.Title), sanitizeTerm(h.Type),
+						sanitizeTerm(h.Project), sanitizeTerm(h.Machine), sanitizeTerm(h.Snippet))
+				}
 				return nil
-			}
-			for _, h := range hits {
-				// Indexed content is untrusted at print time — strip control
-				// bytes so a hostile title/snippet can't smuggle terminal
-				// escape sequences to the operator's shell.
-				fmt.Fprintf(out, "%s\t%s\t[%s]\t(%s, indexed by %s)\n\t%s\n",
-					sanitizeTerm(h.Path), sanitizeTerm(h.Title), sanitizeTerm(h.Type),
-					sanitizeTerm(h.Project), sanitizeTerm(h.Machine), sanitizeTerm(h.Snippet))
-			}
-			return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&dsn, "dsn", "", "mart DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
@@ -223,24 +241,17 @@ NARRATIVE lookup, not a VCS touch history:
   forgectl sessions why "colima" --json | jq .`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resolved := resolveDSN(dsn, cfg.Sessions)
-			if resolved == "" {
-				return fmt.Errorf("no mart DSN: set [sessions] dsn in config, FORGECTL_SESSIONS_DSN, or --dsn")
-			}
-			mart, err := sessions.ConnectMart(cmd.Context(), resolved)
-			if err != nil {
-				return err
-			}
-			defer mart.Close(cmd.Context())
-			hits, err := mart.WhySessions(cmd.Context(), args[0], project, limit)
-			if err != nil {
-				return err
-			}
-			// Degradation note to stderr keeps stdout clean for --json pipes.
-			fmt.Fprintln(cmd.ErrOrStderr(),
-				"note: narrative lookup over the runbook corpus — intent is a runbook title, "+
-					"key decisions a text snippet; the mart indexes no per-file edit history")
-			return printWhyHits(cmd, hits, asJSON)
+			return withMart(cmd, dsn, cfg.Sessions, func(mart *sessions.Mart) error {
+				hits, err := mart.WhySessions(cmd.Context(), args[0], project, limit)
+				if err != nil {
+					return err
+				}
+				// Degradation note to stderr keeps stdout clean for --json pipes.
+				fmt.Fprintln(cmd.ErrOrStderr(),
+					"note: narrative lookup over the runbook corpus — intent is a runbook title, "+
+						"key decisions a text snippet; the mart indexes no per-file edit history")
+				return printWhyHits(cmd, hits, asJSON)
+			})
 		},
 	}
 	cmd.Flags().StringVar(&dsn, "dsn", "", "mart DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
@@ -274,23 +285,16 @@ Honest degradations:
   forgectl sessions last cadence --json | jq .`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resolved := resolveDSN(dsn, cfg.Sessions)
-			if resolved == "" {
-				return fmt.Errorf("no mart DSN: set [sessions] dsn in config, FORGECTL_SESSIONS_DSN, or --dsn")
-			}
-			mart, err := sessions.ConnectMart(cmd.Context(), resolved)
-			if err != nil {
-				return err
-			}
-			defer mart.Close(cmd.Context())
-			summary, err := mart.LastSession(cmd.Context(), args[0])
-			if err != nil {
-				return err
-			}
-			fmt.Fprintln(cmd.ErrOrStderr(),
-				"note: sign-off state is inferred from commits + authored runbooks; "+
-					"the mart has no explicit outro flag")
-			return printLastSession(cmd, args[0], summary, asJSON)
+			return withMart(cmd, dsn, cfg.Sessions, func(mart *sessions.Mart) error {
+				summary, err := mart.LastSession(cmd.Context(), args[0])
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.ErrOrStderr(),
+					"note: sign-off state is inferred from commits + authored runbooks; "+
+						"the mart has no explicit outro flag")
+				return printLastSession(cmd, args[0], summary, asJSON)
+			})
 		},
 	}
 	cmd.Flags().StringVar(&dsn, "dsn", "", "mart DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
@@ -312,23 +316,23 @@ type whyDTO struct {
 	KeyDecisions string `json:"key_decisions,omitempty"`
 }
 
-// printWhyHits renders `sessions why` results. --json emits a stable array to
-// stdout (the encoder escapes any control bytes); the human path tab-lays each
-// session and strips control bytes so untrusted mart content stays inert.
+// printWhyHits renders `sessions why` results. Both paths strip control bytes
+// from mart-sourced fields: encoding/json only escapes 0x00–0x1F, so DEL and
+// the C1 range (0x80–0x9F, including 0x9B = single-byte CSI) would otherwise
+// reach a terminal raw through --json. sanitizeTerm's unicode.IsControl check
+// catches them; the JSON path must call it explicitly.
 func printWhyHits(cmd *cobra.Command, hits []sessions.WhyHit, asJSON bool) error {
 	out := cmd.OutOrStdout()
 	if asJSON {
 		dto := make([]whyDTO, 0, len(hits))
 		for _, h := range hits {
 			dto = append(dto, whyDTO{
-				SessionID: h.SessionID, Date: fmtTs(h.LastTs), Repo: h.Project,
-				Model: h.Model, Committed: h.Committed, RunbookType: h.Type,
-				Intent: h.Title, Link: h.Path, KeyDecisions: h.Snippet,
+				SessionID: sanitizeTerm(h.SessionID), Date: fmtTs(h.LastTs), Repo: sanitizeTerm(h.Project),
+				Model: sanitizeTerm(h.Model), Committed: h.Committed, RunbookType: sanitizeTerm(h.Type),
+				Intent: sanitizeTerm(h.Title), Link: sanitizeTerm(h.Path), KeyDecisions: sanitizeTerm(h.Snippet),
 			})
 		}
-		enc := json.NewEncoder(out)
-		enc.SetIndent("", "  ")
-		return enc.Encode(dto)
+		return writeJSON(out, dto)
 	}
 	if len(hits) == 0 {
 		fmt.Fprintln(out, "no sessions matched")
@@ -365,21 +369,21 @@ type lastDTO struct {
 
 // printLastSession renders `sessions last`. A repo with no session is a clean
 // miss: null in --json (any jq can test it), a friendly line otherwise.
+// Mart-sourced fields are control-byte-stripped on both paths (see printWhyHits
+// for why the JSON encoder alone is insufficient).
 func printLastSession(cmd *cobra.Command, repo string, s *sessions.SessionSummary, asJSON bool) error {
 	out := cmd.OutOrStdout()
 	if asJSON {
-		enc := json.NewEncoder(out)
-		enc.SetIndent("", "  ")
 		if s == nil {
-			return enc.Encode(nil)
+			return writeJSON(out, nil)
 		}
 		arts := make([]artifactDTO, 0, len(s.Artifacts))
 		for _, a := range s.Artifacts {
-			arts = append(arts, artifactDTO{Type: a.Type, Title: a.Title, Path: a.Path})
+			arts = append(arts, artifactDTO{Type: sanitizeTerm(a.Type), Title: sanitizeTerm(a.Title), Path: sanitizeTerm(a.Path)})
 		}
-		return enc.Encode(lastDTO{
-			SessionID: s.SessionID, Repo: s.Project, Branch: s.GitBranch, Model: s.Model,
-			Machine: s.Machine, FirstTs: fmtTs(s.FirstTs), LastTs: fmtTs(s.LastTs),
+		return writeJSON(out, lastDTO{
+			SessionID: sanitizeTerm(s.SessionID), Repo: sanitizeTerm(s.Project), Branch: sanitizeTerm(s.GitBranch), Model: sanitizeTerm(s.Model),
+			Machine: sanitizeTerm(s.Machine), FirstTs: fmtTs(s.FirstTs), LastTs: fmtTs(s.LastTs),
 			Committed: s.Committed, Artifacts: arts,
 		})
 	}

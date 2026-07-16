@@ -125,6 +125,39 @@ func TestPrintWhyHits_HumanSanitizesControlBytes(t *testing.T) {
 	}
 }
 
+// encoding/json escapes only 0x00-0x1F, so DEL (U+007F) and the C1 range
+// (U+0080-U+009F, incl. U+009B = single-byte CSI) would reach a terminal raw
+// through --json unless the DTO builder strips them. Plant both in mart-sourced
+// fields (via rune constants, to keep the source clean ASCII) and assert the
+// emitted JSON carries neither raw byte.
+func TestPrintWhyHits_JSONStripsC1AndDEL(t *testing.T) {
+	c1, del := string(rune(0x9b)), string(rune(0x7f))
+	hits := []sessions.WhyHit{{
+		SessionID: "s1", Project: "p", LastTs: ptrTime("2026-07-09T11:00:00Z"),
+		Title: "ti" + c1 + "tle", Path: "p/x.md", Snippet: "sni" + del + "ppet",
+	}}
+	stdout, _ := renderCmd(t, func(cmd *cobra.Command) error {
+		return printWhyHits(cmd, hits, true)
+	})
+	if strings.ContainsRune(stdout, 0x9b) || strings.ContainsRune(stdout, 0x7f) {
+		t.Errorf("C1/DEL leaked into why --json output: %q", stdout)
+	}
+}
+
+func TestPrintLastSession_JSONStripsC1AndDEL(t *testing.T) {
+	c1, del := string(rune(0x9b)), string(rune(0x7f))
+	s := &sessions.SessionSummary{
+		SessionID: "s1", Project: "p", LastTs: ptrTime("2026-07-10T08:15:00Z"),
+		Artifacts: []sessions.Artifact{{Type: "handoff", Title: "ti" + c1 + "tle", Path: "p/x" + del + ".md"}},
+	}
+	stdout, _ := renderCmd(t, func(cmd *cobra.Command) error {
+		return printLastSession(cmd, "p", s, true)
+	})
+	if strings.ContainsRune(stdout, 0x9b) || strings.ContainsRune(stdout, 0x7f) {
+		t.Errorf("C1/DEL leaked into last --json output: %q", stdout)
+	}
+}
+
 func TestPrintLastSession_JSON(t *testing.T) {
 	s := &sessions.SessionSummary{
 		SessionID: "33333333-3333-3333-3333-333333333333",
