@@ -25,7 +25,8 @@ const StateSchema = 1
 // RunState is the persisted checkpoint for the LAST run of one workflow — the
 // sidecar `workflow run --resume` replays and `workflow status` renders. One
 // file per workflow name under config.WorkflowStateDir(); a fresh successful
-// run clears it, a failed run leaves it for the next resume.
+// run clears it, a failed run leaves it for the next resume. Full design and
+// rationale: docs/adr/0007-workflow-checkpoint-resume.md.
 //
 // DefinitionHash pins the exact workflow-file bytes the checkpoints belong to.
 // Resume refuses outright when the current file's hash differs — a changed (or
@@ -142,6 +143,7 @@ func ensureStateDir() (string, error) {
 // LoadState reads the run-state sidecar for name. A missing file is not an error
 // — it yields (zero, false, nil), the "never run / already cleared" signal.
 func LoadState(name string) (RunState, bool, error) {
+	slog.Debug("Loading workflow run state.", "workflow", name)
 	path, err := StatePath(name)
 	if err != nil {
 		return RunState{}, false, err
@@ -149,6 +151,7 @@ func LoadState(name string) (RunState, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			slog.Debug("No saved run state found.", "workflow", name)
 			return RunState{}, false, nil
 		}
 		return RunState{}, false, fmt.Errorf("read workflow state %q: %w", name, err)
@@ -160,6 +163,7 @@ func LoadState(name string) (RunState, bool, error) {
 	if st.Schema > StateSchema {
 		return RunState{}, false, fmt.Errorf("workflow state %q has schema %d, newer than this binary understands (%d)", name, st.Schema, StateSchema)
 	}
+	slog.Debug("Loaded workflow run state.", "workflow", name, "runID", st.RunID, "stepsCheckpointed", len(st.Steps))
 	return st, true, nil
 }
 
@@ -191,6 +195,9 @@ func WriteState(st RunState) error {
 	// After a successful rename tmpName no longer exists, so this is a no-op.
 	defer os.Remove(tmpName) //nolint:errcheck
 
+	// Each failure path below Closes tmp best-effort: we are already returning the
+	// causal (write/chmod/sync) error, so a Close error would only mask it, and
+	// the deferred os.Remove above discards the temp file regardless.
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close() //nolint:errcheck
 		return fmt.Errorf("write temp state file: %w", err)
@@ -263,14 +270,15 @@ func ResumeFrom(prior RunState, plan Plan) int {
 // a ${export} that only a SKIPPED (checkpointed) step produces. It returns that
 // export's name and the consuming step's index.
 //
-// This is the guard that keeps resume from weakening the blessing ceremony. A
-// step's exports (e.g. worktree's ${workspace}) are ephemeral run outputs, not
-// signed inputs — and a failed run tears its sandbox down, so the value is gone
-// anyway. Rather than rehydrate an export from the unsigned sidecar into a
-// resumed step's field (which could inject an attacker-chosen value into a
-// blessing-guarded field), resume refuses up front with a clear message telling
-// the user to run fresh. Exports produced by a step that itself re-runs during
-// the resume are fine — those are freshly, legitimately produced.
+// This is the guard that keeps resume from weakening the blessing ceremony
+// (ADR-0007's export-refusal decision). A step's exports (e.g. worktree's
+// ${workspace}) are ephemeral run outputs, not signed inputs — and a failed run
+// tears its sandbox down, so the value is gone anyway. Rather than rehydrate an
+// export from the unsigned sidecar into a resumed step's field (which could
+// inject an attacker-chosen value into a blessing-guarded field), resume refuses
+// up front with a clear message telling the user to run fresh. Exports produced
+// by a step that itself re-runs during the resume are fine — those are freshly,
+// legitimately produced.
 func MissingResumeExport(plan Plan, resumeFrom int, registry StepRegistry) (name string, stepIndex int, missing bool) {
 	// Every export name the plan can produce, and whether a resumed step
 	// (re)produces it before the step that references it.

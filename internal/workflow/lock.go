@@ -3,6 +3,7 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -36,10 +37,12 @@ func LockPath(name string) (string, error) {
 // AcquireRunLock takes a non-blocking exclusive advisory lock on a workflow's
 // lock file, so only one run/resume of that workflow proceeds at a time. A
 // second concurrent run fails fast with ErrWorkflowRunning rather than
-// interleaving state writes. On a platform without advisory locking the lock is
-// a documented no-op (see flock_other.go) — the caller still gets a RunLock to
-// Release.
+// interleaving state writes — the single-file sidecar would otherwise be
+// clobbered by an overlapping run (ADR-0007's Concurrency rationale). On a
+// platform without advisory locking the lock is a documented no-op (see
+// flock_other.go) — the caller still gets a RunLock to Release.
 func AcquireRunLock(name string) (*RunLock, error) {
+	slog.Debug("Preparing to acquire workflow run lock.", "workflow", name)
 	path, err := LockPath(name)
 	if err != nil {
 		return nil, err
@@ -56,6 +59,9 @@ func AcquireRunLock(name string) (*RunLock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open workflow lock %s: %w", path, err)
 	}
+	// Both failure paths below Close f best-effort: we are already returning the
+	// causal error, so surfacing a Close error would only mask it — the fd is
+	// released regardless, and on failure no lock is held to leak.
 	locked, err := flockTryExclusive(f)
 	if err != nil {
 		f.Close() //nolint:errcheck

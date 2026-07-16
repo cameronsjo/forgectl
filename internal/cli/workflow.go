@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -163,6 +164,7 @@ func newWorkflowRunCmd(deps module.Deps) *cobra.Command {
 			// lock held for the whole run makes a second concurrent invocation fail
 			// fast rather than interleave. dry-run took its early return above, so
 			// it never contends. Acquired before any state read/write.
+			slog.Debug("Preparing to acquire workflow execution lock.", "workflow", name)
 			lock, err := workflow.AcquireRunLock(name)
 			if err != nil {
 				return err
@@ -214,23 +216,29 @@ func resumeOptions(out io.Writer, name string, data []byte, plan workflow.Plan, 
 	defHash := workflow.DefinitionHash(data)
 
 	if !resume {
+		slog.Debug("Preparing fresh workflow run (no resume).", "workflow", name)
 		recorder := workflow.NewStateRecorder(name, workflow.NewRunID(now), defHash, now)
 		return []workflow.Option{workflow.WithRecorder(recorder)}, nil
 	}
 
+	slog.Debug("Preparing to resume workflow run.", "workflow", name)
 	prior, ok, err := workflow.LoadState(name)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
+		slog.Warn("Resume requested but no saved run state found.", "workflow", name)
 		return nil, fmt.Errorf("workflow %q has no saved run state to resume — run it without --resume first", name)
 	}
 	if prior.DefinitionHash != defHash {
+		slog.Warn("Resume refused due to definition change.", "workflow", name, "priorHash", prior.DefinitionHash, "currentHash", defHash)
 		return nil, fmt.Errorf("workflow %q changed since its checkpointed run — run it fresh (without --resume); a resume never replays across an edited definition", name)
 	}
+	slog.Debug("Definition hash validation passed.", "workflow", name, "hash", defHash)
 
 	resumeFrom := workflow.ResumeFrom(prior, plan)
 	if resumeFrom >= len(plan.Steps) {
+		slog.Debug("All steps already complete; clearing state.", "workflow", name, "stepsCompleted", len(prior.Steps))
 		if err := workflow.ClearState(name); err != nil {
 			return nil, err
 		}
@@ -243,10 +251,13 @@ func resumeOptions(out io.Writer, name string, data []byte, plan workflow.Plan, 
 	// a blessing-guarded field. The user runs fresh instead (which is also the
 	// only correct thing when the export was a torn-down sandbox).
 	if exp, idx, missing := workflow.MissingResumeExport(plan, resumeFrom, registry); missing {
+		slog.Warn("Resume refused due to missing export dependency.", "workflow", name, "export", exp, "stepIndex", idx+1)
 		return nil, fmt.Errorf("workflow %q cannot be resumed: step %d needs ${%s} from an earlier checkpointed step, and a step's outputs cannot be reconstructed on resume — run it fresh (without --resume)", name, idx+1, exp)
 	}
+	slog.Debug("Export validation passed.", "workflow", name, "resumeFrom", resumeFrom)
 
 	recorder := workflow.NewResumeRecorder(prior, resumeFrom, now)
+	slog.Info("Resume checkpoint validation complete.", "workflow", name, "resumingFromStep", resumeFrom+1, "totalSteps", len(plan.Steps))
 	fmt.Fprintf(out, "resuming workflow %q from step %d of %d\n", name, resumeFrom+1, len(plan.Steps))
 	return []workflow.Option{workflow.WithResumeFrom(resumeFrom), workflow.WithRecorder(recorder)}, nil
 }

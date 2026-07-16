@@ -156,6 +156,7 @@ func (e *Executor) Run(ctx context.Context, plan Plan, wctx *Context) error {
 				slog.Error("Failed to record step checkpoint.", "stepIndex", i, "stepUse", step.Uses, "error", err)
 				return fmt.Errorf("step %d (%s): record checkpoint: %w", i, step.Uses, err)
 			}
+			slog.Debug("Successfully recorded step checkpoint.", "stepIndex", i, "stepUse", step.Uses)
 		}
 	}
 	slog.Info("Successfully executed workflow plan.", "workflowName", plan.Name, "stepCount", len(plan.Steps))
