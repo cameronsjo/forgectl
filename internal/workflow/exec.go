@@ -10,13 +10,24 @@ import (
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
+// Recorder is notified as each step completes so a run can be checkpointed for
+// `--resume`. A nil Recorder (the default) disables checkpointing — plain
+// `workflow run` without resume behaves exactly as before. It is handed the
+// PLAN-TIME step (params resolved, prior-step exports still the literal ${name})
+// so the input hash it records is stable across runs.
+type Recorder interface {
+	Record(index int, s PlanStep) error
+}
+
 // Executor runs a Plan's steps in order through one constructor-injected
 // exec.Runner (mirrors tmux.New / projects.New), threading a shared Context
 // so steps compose on each other's exports.
 type Executor struct {
-	run      exec.Runner
-	registry StepRegistry
-	dryRun   bool
+	run        exec.Runner
+	registry   StepRegistry
+	dryRun     bool
+	recorder   Recorder
+	resumeFrom int
 }
 
 // Option configures an Executor at construction.
@@ -26,6 +37,20 @@ type Option func(*Executor)
 // so zero Runner calls are issued.
 func WithDryRun(dryRun bool) Option {
 	return func(e *Executor) { e.dryRun = dryRun }
+}
+
+// WithRecorder attaches a Recorder that is called after each step succeeds, so
+// a crash mid-workflow leaves a resumable checkpoint on disk.
+func WithRecorder(r Recorder) Option {
+	return func(e *Executor) { e.recorder = r }
+}
+
+// WithResumeFrom skips the first `from` steps: their checkpoints were validated
+// by the caller (matching definition hash and per-step input hash), so they are
+// treated as already complete and not re-executed. Steps at or after `from` run
+// normally. Zero (the default) executes the whole plan.
+func WithResumeFrom(from int) Option {
+	return func(e *Executor) { e.resumeFrom = from }
 }
 
 // NewExecutor builds an Executor over the given Runner and step registry.
@@ -93,6 +118,10 @@ func (e *Executor) Run(ctx context.Context, plan Plan, wctx *Context) error {
 		return nil
 	}
 	for i, step := range plan.Steps {
+		if i < e.resumeFrom {
+			slog.Debug("Skipping checkpointed step (resume).", "stepIndex", i, "stepUse", step.Uses)
+			continue
+		}
 		def, ok := e.registry[step.Uses]
 		if !ok {
 			slog.Error("Unknown step verb.", "stepIndex", i, "stepUse", step.Uses)
@@ -118,6 +147,16 @@ func (e *Executor) Run(ctx context.Context, plan Plan, wctx *Context) error {
 			return fmt.Errorf("step %d (%s): %w", i, step.Uses, err)
 		}
 		slog.Debug("Step completed.", "stepIndex", i, "stepUse", step.Uses)
+
+		// Checkpoint AFTER the step succeeds — the recorder hashes the plan-time
+		// step (params baked in, exports still literal) and durably persists the
+		// updated state, so a crash before the next step leaves a resumable mark.
+		if e.recorder != nil {
+			if err := e.recorder.Record(i, step); err != nil {
+				slog.Error("Failed to record step checkpoint.", "stepIndex", i, "stepUse", step.Uses, "error", err)
+				return fmt.Errorf("step %d (%s): record checkpoint: %w", i, step.Uses, err)
+			}
+		}
 	}
 	slog.Info("Successfully executed workflow plan.", "workflowName", plan.Name, "stepCount", len(plan.Steps))
 	return nil
