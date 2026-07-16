@@ -46,8 +46,10 @@ const (
 type Line struct {
 	Kind Kind
 	// Raw holds the verbatim source line(s) this Line came from, terminator
-	// stripped. Len > 1 only for a multiline quoted KindPair. Bytes emits
-	// Raw byte-for-byte for any Line that hasn't been touched by Set.
+	// stripped. Len > 1 for a multiline quoted KindPair, or for a
+	// KindMalformed region spanning an unterminated quote through EOF.
+	// Bytes emits Raw byte-for-byte for any Line that hasn't been touched
+	// by Set.
 	Raw []string
 
 	// Export, Key, Value, Quote, and Inline are populated only for KindPair
@@ -201,10 +203,24 @@ func parseLine(data []byte, pos int) (Line, int) {
 
 	closeIdx, ok := findClosingQuote(data, bodyStart, quote)
 	if !ok {
-		// Unterminated quote: lenient — this one physical line is
-		// malformed rather than consuming the rest of the file hunting for
-		// a closer that never arrives.
-		return Line{Kind: KindMalformed, Raw: []string{content}}, next
+		// Unterminated quote at EOF: consume every remaining physical
+		// line — from the opening line through EOF — as ONE KindMalformed
+		// region. Splitting this into "opening line malformed,
+		// continuation lines reparse independently" let a continuation
+		// line that happens to be assignment-shaped and ValidKey-passing
+		// (a base64 body line, say) reparse as its own KindPair —
+		// redactPair then prints l.Key, a slice of key material, straight
+		// through both redact and keys. None of the remaining file
+		// content is safe to treat as anything but "part of the value
+		// that never closed".
+		var rawLines []string
+		cursor := pos
+		for cursor < len(data) {
+			c, n, _ := readPhysicalLine(data, cursor)
+			rawLines = append(rawLines, c)
+			cursor = n
+		}
+		return Line{Kind: KindMalformed, Raw: rawLines}, len(data)
 	}
 
 	// Walk physical lines from pos until the one containing closeIdx —
@@ -479,21 +495,24 @@ func redactPair(l Line) string {
 	return b.String()
 }
 
-// redactMalformed masks a malformed line in its ENTIRETY — a constant
-// "****", no pre-'=' preservation at all. It used to keep everything before
-// the first '=' on the theory that a key name can't be secret; that
-// under-masks two real cases: (1) an unterminated quoted value at EOF makes
-// Parse return KindMalformed for the OPENING line, and the value's
-// continuation lines then reparse independently as KindMalformed too — a
+// redactMalformed masks a malformed line (or, for an unterminated quoted
+// region, the whole multi-line span — see parseLine's findClosingQuote
+// branch) in its ENTIRETY — a constant "****", no pre-'=' preservation at
+// all, and no per-physical-line breakdown. It used to keep everything
+// before the first '=' on the theory that a key name can't be secret; that
+// under-masks two real cases: (1) an unterminated quoted value at EOF — a
 // truncated PEM's base64 body lines contain '=' padding, so preserving
 // "everything before the first '='" preserved the base64 prefix and leaked
-// key material; (2) a hand-mangled assignment whose key portion itself
-// contains secret-ish text. Redaction's failure is asymmetric —
-// under-masking leaks a secret permanently into a transcript, over-masking
-// only costs legibility — and KindMalformed is exactly where hand-mangled
-// input lands, which is redact's primary audience. A blank line never
-// reaches here (Parse classifies it KindBlank), but the check is kept
-// explicit rather than assumed.
+// key material (this is why parseLine now consumes the ENTIRE unterminated
+// region as one Line, rather than letting a ValidKey-passing body line
+// reparse independently into its own KindPair, whose Key redactPair would
+// then print straight through); (2) a hand-mangled assignment whose key
+// portion itself contains secret-ish text. Redaction's failure is
+// asymmetric — under-masking leaks a secret permanently into a transcript,
+// over-masking only costs legibility — and KindMalformed is exactly where
+// hand-mangled input lands, which is redact's primary audience. A blank
+// line never reaches here (Parse classifies it KindBlank), but the check is
+// kept explicit rather than assumed.
 func redactMalformed(l Line) string {
 	if strings.TrimSpace(l.Raw[0]) == "" {
 		return l.Raw[0]

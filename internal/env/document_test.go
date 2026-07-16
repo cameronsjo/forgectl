@@ -542,25 +542,23 @@ func TestDocument_Redacted_MalformedMasked(t *testing.T) {
 
 func TestRedacted_TruncatedPEM_MasksAllBodyLines(t *testing.T) {
 	// An unterminated double-quoted multiline value: the opening line's
-	// quote never closes before EOF, so Parse returns KindMalformed for the
-	// OPENING line (lenient — see findClosingQuote), and every base64-shaped
-	// body line then reparses independently as its own KindMalformed line.
-	// Real base64 padding ('=') and non-key characters ('/') in those body
-	// lines are exactly the shape that leaked under the old "preserve
-	// everything before the first '='" behavior. The header label below is
-	// deliberately non-standard ("TESTHDR" rather than "PRIVATE KEY") so
-	// this fixture doesn't itself read as a live PEM to secret-scanning
-	// tooling — the parser's handling is identical either way, since it
-	// never inspects the label text.
+	// quote never closes before EOF. Both body lines below are PURE
+	// [A-Za-z0-9_] — deliberately valid-key-shaped and ValidKey-passing —
+	// the exact case a prior fixture dodged by hand-tuning a '/' into one
+	// body line so it would fail ValidKey and reparse as its own malformed
+	// line anyway. This fixture proves the real fix: parseLine now consumes
+	// the ENTIRE unterminated region (opening line through EOF) as ONE
+	// KindMalformed Line, so a body line's shape is irrelevant — it's never
+	// independently reparsed at all, let alone into a KindPair whose Key
+	// redactPair would print. The header label is deliberately non-standard
+	// ("TESTHDR" rather than "PRIVATE KEY") so this fixture doesn't itself
+	// read as a live PEM to secret-scanning tooling — the parser's handling
+	// is identical either way, since it never inspects the label text.
 	const (
 		header = `KEY="-----BEGIN TESTHDR-----`
 		body1  = "TUlJRXZRSUJBREFOQmdrcWhraUc5dzBCQVFFRkFBU0NCS2N3Z2dTakFnRUFBb0lC"
+		body2  = "QVFDN1ZKVFV0OVVzOGNLQmM1ZolWldsNUxYUm9hWE10YVhNdGJtOTBMV0V0Y21WMFlXNXU"
 	)
-	// body2 deliberately contains a '/' (real base64's non-key alphabet)
-	// before its trailing "==" padding — the concatenation just makes the
-	// '/' visually unambiguous in source; ValidKey must reject the '/'-
-	// bearing prefix so this line lands on the malformed path too.
-	body2 := "QVFDN1ZKVFV0OVVzOGNLQi" + "/" + "jM1Z5WldsNUxYUm9hWE10YVhNdGJtOTBMV0V0Y21W=="
 	src := header + "\n" + body1 + "\n" + body2
 
 	doc, err := Parse(strings.NewReader(src))
@@ -568,19 +566,26 @@ func TestRedacted_TruncatedPEM_MasksAllBodyLines(t *testing.T) {
 		t.Fatalf("Parse: %v", err)
 	}
 
-	for _, l := range doc.Lines {
-		if l.Kind != KindMalformed {
-			t.Fatalf("line %q has Kind %v, want KindMalformed (fixture must exercise the malformed path)", l.Raw, l.Kind)
-		}
+	// The whole unterminated region collapses into ONE Line, not one per
+	// physical source line.
+	if len(doc.Lines) != 1 || doc.Lines[0].Kind != KindMalformed {
+		t.Fatalf("Lines = %+v, want a single KindMalformed line spanning all 3 physical lines", doc.Lines)
+	}
+	if len(doc.Lines[0].Raw) != 3 {
+		t.Errorf("Raw has %d physical lines, want 3 (opening line through EOF)", len(doc.Lines[0].Raw))
 	}
 
 	redacted := string(doc.Redacted())
-	want := "****\n****\n****"
+	want := "****"
 	if redacted != want {
 		t.Errorf("Redacted() = %q, want %q", redacted, want)
 	}
 	for _, leak := range []string{"TESTHDR", "KEY=", body1, body2} {
 		assertNoSecretInOutput(t, leak, "", redacted)
+	}
+
+	if keys := doc.Keys(); len(keys) != 0 {
+		t.Errorf("Keys() = %v, want none — an unterminated region must never surface as a key", keys)
 	}
 }
 
