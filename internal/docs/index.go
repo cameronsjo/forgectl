@@ -52,6 +52,11 @@ type Doc struct {
 	// RelPath is the doc's path relative to its root, always forward-slash
 	// separated regardless of host OS — it's used as a URL path segment.
 	RelPath string
+	// AbsPath is the doc's canonical, symlink-resolved absolute path — the
+	// same value ResolveInRoot would produce for this doc's RelPath. It is
+	// the join key Index.Resolve uses to confirm a resolved request path was
+	// actually indexed (see Index.pathIndex); never sent to the client.
+	AbsPath string
 	// Title is the doc's first level-1 ("# ") heading, or its filename
 	// (without extension) if none is found.
 	Title string
@@ -65,6 +70,12 @@ type Doc struct {
 type Index struct {
 	roots []Root
 	docs  []Doc
+	// pathIndex is the set of every Doc.AbsPath, built once in NewIndex.
+	// Resolve consults it so the SAME predicate that decided what's in the
+	// sidenav (walkRoot's hidden/vendor-dir exclusions, symlinked-file
+	// exclusion) also decides what's servable — a directory excluded from
+	// the walk must not remain reachable by a direct URL guess.
+	pathIndex map[string]bool
 }
 
 // NewIndex builds an Index over paths, each of which is either a directory
@@ -107,6 +118,11 @@ func NewIndex(paths []string) (*Index, error) {
 	}
 
 	sort.Slice(idx.docs, func(i, j int) bool { return idx.docs[i].ModTime.After(idx.docs[j].ModTime) })
+
+	idx.pathIndex = make(map[string]bool, len(idx.docs))
+	for _, d := range idx.docs {
+		idx.pathIndex[d.AbsPath] = true
+	}
 	return idx, nil
 }
 
@@ -159,6 +175,7 @@ func indexFileRoot(labels map[string]bool, file string) (Root, Doc, error) {
 	doc := Doc{
 		RootLabel: label,
 		RelPath:   base,
+		AbsPath:   real,
 		Title:     titleFor(real, base),
 		ModTime:   fi.ModTime(),
 	}
@@ -211,6 +228,20 @@ func walkRoot(root Root) ([]Doc, error) {
 			return nil
 		}
 
+		// Resolve through EvalSymlinks (rather than trusting that a
+		// symlink-free walk under an already-canonical root produces an
+		// already-canonical path) so Doc.AbsPath is byte-identical to
+		// whatever ResolveInRoot computes for the same file at request
+		// time — that identity is what lets Resolve's pathIndex membership
+		// check work at all. A file that vanishes or becomes unreadable
+		// between WalkDir's stat and this call is skipped, not a hard
+		// index-build failure.
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return nil
+		}
+		resolved = filepath.Clean(resolved)
+
 		rel, err := filepath.Rel(root.Path, path)
 		if err != nil {
 			return err
@@ -223,6 +254,7 @@ func walkRoot(root Root) ([]Doc, error) {
 		docs = append(docs, Doc{
 			RootLabel: root.Label,
 			RelPath:   filepath.ToSlash(rel),
+			AbsPath:   resolved,
 			Title:     titleFor(path, rel),
 			ModTime:   info.ModTime(),
 		})
@@ -288,15 +320,30 @@ func (idx *Index) Find(rootLabel, relPath string) (Doc, bool) {
 // have.
 var ErrRootNotFound = errors.New("no such docs root")
 
+// ErrNotIndexed indicates a resolved path is a real, in-root, allowed-
+// extension file that nonetheless was never added to the index — e.g. it
+// lives under a directory walkRoot excludes (.git, node_modules, vendor, any
+// dot-directory). Without this check, Resolve re-derives a path straight
+// from the filesystem and would happily serve a file the sidenav deliberately
+// hides; membership in the index is what makes "excluded from the walk" and
+// "not servable" the same guarantee instead of two claims that can drift
+// apart.
+var ErrNotIndexed = errors.New("file was not indexed")
+
 // Resolve maps a (rootLabel, relPath) URL pair to a safe, on-disk absolute
 // path: it looks up rootLabel among the indexed Roots, then runs relPath
 // through the full ResolveInRoot traversal chain (security.go) against that
-// root's canonical path, and finally checks the resolved path's extension
-// against AllowedExt. For a single-file root (Root.OnlyFile set), any
-// resolution other than that exact file is rejected — naming one file on
-// the command line must not grant access to its siblings. Any failure
-// returns a wrapped error; the HTTP layer maps all of them to 404 without
-// distinguishing the cause to the client.
+// root's canonical path, checks the resolved path's extension against
+// AllowedExt, and finally requires the resolved path to be a member of
+// idx.pathIndex — the exact set walkRoot/indexFileRoot populated at index
+// build time. That last check is what closes the gap between "hidden from
+// the sidenav" and "not servable": Resolve never re-derives servability from
+// the live filesystem independently of what was actually indexed. For a
+// single-file root (Root.OnlyFile set), any resolution other than that exact
+// file is also rejected — naming one file on the command line must not grant
+// access to its siblings. Any failure returns a wrapped error; the HTTP
+// layer maps all of them to 404 without distinguishing the cause to the
+// client.
 func (idx *Index) Resolve(rootLabel, relPath string) (string, error) {
 	for _, r := range idx.roots {
 		if r.Label != rootLabel {
@@ -311,6 +358,9 @@ func (idx *Index) Resolve(rootLabel, relPath string) (string, error) {
 		}
 		if !AllowedExt(resolved) {
 			return "", ErrDisallowedExt
+		}
+		if !idx.pathIndex[resolved] {
+			return "", ErrNotIndexed
 		}
 		return resolved, nil
 	}

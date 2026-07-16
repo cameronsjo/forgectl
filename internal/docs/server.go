@@ -15,9 +15,12 @@ const recentCount = 5
 // NewHandler builds the complete `forgectl docs serve` HTTP handler over an
 // already-built Index: the doc-shell page, per-doc routes, and the two
 // embedded static assets. It is the docs package's sole exported handler
-// constructor — security policy (Host allowlist, bearer token) is the
-// caller's job via internal/httpsrv middleware wrapped around this handler,
-// not something this package decides for itself.
+// constructor — security POLICY (Host allowlist, bearer token — anything a
+// caller might configure differently) is the caller's job via internal/
+// httpsrv middleware wrapped around this handler. X-Content-Type-Options is
+// different: it's a fixed, no-config hardening default for every response
+// this handler ever produces, so it's applied here rather than pushed out
+// as an opt-in caller concern.
 func NewHandler(idx *Index) http.Handler {
 	mux := http.NewServeMux()
 
@@ -28,7 +31,21 @@ func NewHandler(idx *Index) http.Handler {
 	mux.HandleFunc("GET /doc/{root}/{rest...}", handleDoc(idx))
 	mux.HandleFunc("GET /{$}", handleIndexRoot(idx))
 
-	return mux
+	return noSniff(mux)
+}
+
+// noSniff sets X-Content-Type-Options: nosniff on every response. Cheap
+// defense-in-depth: it stops a browser from MIME-sniffing a response body
+// into a different content type than the Content-Type header declares (the
+// classic vector is a browser deciding a text/plain or text/css response is
+// actually HTML/JS and executing it) — irrelevant for the sanitized doc HTML
+// this handler serves deliberately, but free insurance against a future
+// response type this handler doesn't anticipate today.
+func noSniff(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func serveStaticCSS(body []byte) http.HandlerFunc {

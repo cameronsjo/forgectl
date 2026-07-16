@@ -14,6 +14,8 @@
 package httpsrv
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"net"
 	"net/http"
 	"strings"
@@ -71,11 +73,22 @@ func HostAllowlist(allowed []string) func(http.Handler) http.Handler {
 // wiring this in — BearerToken has no "auth optional" mode of its own, so a
 // caller that doesn't need auth simply never adds this middleware to its
 // chain.
+//
+// The comparison hashes both the expected and presented values (SHA-256)
+// before running subtle.ConstantTimeCompare on the two fixed-size digests,
+// rather than comparing the raw header bytes directly. Two reasons: a plain
+// `!=`/bytes.Equal short-circuits on the first differing byte, leaking the
+// correct token one byte at a time to an attacker who can measure response
+// timing; and ConstantTimeCompare itself returns immediately when its inputs
+// have different lengths, which would leak the token's length if compared
+// raw. Hashing first makes both sides always exactly 32 bytes, so neither
+// the content nor the length of the caller-supplied header influences timing.
 func BearerToken(token string) func(http.Handler) http.Handler {
-	want := "Bearer " + token
+	want := sha256.Sum256([]byte("Bearer " + token))
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != want {
+			got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+			if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}

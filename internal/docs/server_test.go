@@ -10,6 +10,7 @@ package docs
 //   [x] Unhappy (security): an unknown root label 404s
 //   [x] Unhappy (security): a disallowed extension under a known root 404s
 //   [x] Happy: the sidenav lists the indexed doc with a matching href
+//   [x] Happy: every response carries X-Content-Type-Options: nosniff
 
 import (
 	"net/http"
@@ -154,5 +155,21 @@ func TestServer_Sidenav_ListsIndexedDoc(t *testing.T) {
 	wantHref := `href="/doc/` + label + `/welcome.md"`
 	if !strings.Contains(rec.Body.String(), wantHref) {
 		t.Errorf("sidenav missing %q in body: %s", wantHref, rec.Body.String())
+	}
+}
+
+func TestServer_ResponsesCarryNoSniffHeader(t *testing.T) {
+	idx, label := testIndex(t)
+	h := NewHandler(idx)
+
+	paths := []string{"/", "/doc/" + label + "/welcome.md", "/assets/artificer.css"}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Errorf("X-Content-Type-Options = %q, want %q", got, "nosniff")
+			}
+		})
 	}
 }

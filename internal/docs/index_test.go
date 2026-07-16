@@ -22,6 +22,9 @@ package docs
 //   [x] Unhappy: an unknown root label is rejected
 //   [x] Unhappy: a traversal attempt against a known root is rejected
 //   [x] Unhappy: a disallowed extension under a known root is rejected
+//   [x] Unhappy: a file that exists on disk but lives under an excluded dir
+//       (.trash, node_modules, vendor, .git, any dot-dir) is not servable by
+//       a direct URL, even though the traversal chain alone would resolve it
 
 import (
 	"errors"
@@ -205,6 +208,52 @@ func TestIndex_Resolve_Traversal_Rejected(t *testing.T) {
 	_, err = idx.Resolve(label, "../../../../etc/passwd")
 	if !errors.Is(err, ErrOutsideRoot) {
 		t.Errorf("Resolve traversal: err = %v, want ErrOutsideRoot", err)
+	}
+}
+
+// TestIndex_Resolve_ExcludedDir_NotServableByDirectURL is the regression
+// test for the "walkRoot's exclusions are UI-only" finding: a markdown file
+// that walkRoot deliberately skips (hidden dot-dir, node_modules, vendor,
+// .git) must ALSO be unreachable through Resolve by a direct, correctly-
+// spelled request — not merely absent from the sidenav. Each file here
+// genuinely exists on disk (unlike the traversal tests, which target
+// nonexistent paths) so the assertion pins the exact failure mode
+// (ErrNotIndexed, from the pathIndex membership check) rather than
+// accidentally passing via ErrOutsideRoot/a stat failure.
+func TestIndex_Resolve_ExcludedDir_NotServableByDirectURL(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "readme.md"), "# Kept")
+
+	cases := []string{
+		".trash/deleted-secret.md",
+		"node_modules/dep/readme.md",
+		"vendor/pkg/readme.md",
+		".git/COMMIT_EDITMSG.md",
+		".hidden/note.md",
+	}
+	for _, rel := range cases {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(rel)), "# Should never be servable")
+	}
+
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	label := idx.Roots()[0].Label
+
+	// Confidence check: the walk really did skip these — List() proves the
+	// UI-hiding half of the contract still works.
+	if len(idx.List()) != 1 {
+		t.Fatalf("List() = %+v, want exactly [readme.md] (excluded dirs must not be indexed)", idx.List())
+	}
+
+	for _, rel := range cases {
+		t.Run(rel, func(t *testing.T) {
+			_, err := idx.Resolve(label, rel)
+			if !errors.Is(err, ErrNotIndexed) {
+				t.Errorf("Resolve(%q, %q): err = %v, want ErrNotIndexed — an excluded-dir file that exists on disk must still 404, not be served", label, rel, err)
+			}
+		})
 	}
 }
 
