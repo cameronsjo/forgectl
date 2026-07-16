@@ -32,8 +32,9 @@ package env
 //   [x] A quoted value's inline trailing comment is kept
 //   [x] An unquoted value's trailing "#…" is masked WITH the value (no
 //       comment boundary exists for a bare assignment)
-//   [x] A malformed assignment-shaped line masks everything after its
-//       first '='
+//   [x] A malformed line is masked in its ENTIRETY, not just after its
+//       first '=' — including a truncated multiline quoted value whose
+//       base64 body lines contain '=' padding
 //   [x] A missing trailing newline is reproduced
 //
 // ValidKey (Classification: pure predicate, adversarial input)
@@ -450,12 +451,61 @@ func TestDocument_Redacted_MalformedMasked(t *testing.T) {
 	}
 
 	redacted := string(doc.Redacted())
-	want := "1BAD=****\n" +
-		"not an assignment at all\n"
+	// Whole-line masking (security hardening): the malformed key "1BAD" is
+	// no longer preserved before the '=' either — there's nothing about a
+	// line this package couldn't parse as an assignment that's safe to
+	// treat as "the key portion".
+	want := "****\n" +
+		"****\n"
 	if redacted != want {
 		t.Errorf("Redacted() = %q, want %q", redacted, want)
 	}
 	assertNoSecretInOutput(t, sentinel, "", redacted)
+	assertNoSecretInOutput(t, "1BAD", "", redacted)
+}
+
+func TestRedacted_TruncatedPEM_MasksAllBodyLines(t *testing.T) {
+	// An unterminated double-quoted multiline value: the opening line's
+	// quote never closes before EOF, so Parse returns KindMalformed for the
+	// OPENING line (lenient — see findClosingQuote), and every base64-shaped
+	// body line then reparses independently as its own KindMalformed line.
+	// Real base64 padding ('=') and non-key characters ('/') in those body
+	// lines are exactly the shape that leaked under the old "preserve
+	// everything before the first '='" behavior. The header label below is
+	// deliberately non-standard ("TESTHDR" rather than "PRIVATE KEY") so
+	// this fixture doesn't itself read as a live PEM to secret-scanning
+	// tooling — the parser's handling is identical either way, since it
+	// never inspects the label text.
+	const (
+		header = `KEY="-----BEGIN TESTHDR-----`
+		body1  = "TUlJRXZRSUJBREFOQmdrcWhraUc5dzBCQVFFRkFBU0NCS2N3Z2dTakFnRUFBb0lC"
+	)
+	// body2 deliberately contains a '/' (real base64's non-key alphabet)
+	// before its trailing "==" padding — the concatenation just makes the
+	// '/' visually unambiguous in source; ValidKey must reject the '/'-
+	// bearing prefix so this line lands on the malformed path too.
+	body2 := "QVFDN1ZKVFV0OVVzOGNLQi" + "/" + "jM1Z5WldsNUxYUm9hWE10YVhNdGJtOTBMV0V0Y21W=="
+	src := header + "\n" + body1 + "\n" + body2
+
+	doc, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	for _, l := range doc.Lines {
+		if l.Kind != KindMalformed {
+			t.Fatalf("line %q has Kind %v, want KindMalformed (fixture must exercise the malformed path)", l.Raw, l.Kind)
+		}
+	}
+
+	redacted := string(doc.Redacted())
+	want := "****\n****\n****"
+	if redacted != want {
+		t.Errorf("Redacted() = %q, want %q", redacted, want)
+	}
+	for _, leak := range []string{"TESTHDR", "KEY=", body1, body2} {
+		assertNoSecretInOutput(t, leak, "", redacted)
+	}
 }
 
 func TestDocument_Redacted_NoTrailingNewlineReproduced(t *testing.T) {

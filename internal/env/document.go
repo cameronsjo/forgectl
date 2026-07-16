@@ -34,8 +34,8 @@ const (
 	KindPair
 	// KindMalformed is anything else — non-blank, non-comment, and either
 	// missing an '=' or naming a key ValidKey rejects. Parse is lenient here
-	// (it doesn't error) so `redact` can still mask a malformed assignment's
-	// right-hand side rather than leaving it unmasked.
+	// (it doesn't error) so `redact` can still mask a malformed line in its
+	// entirety rather than leaving it unmasked.
 	KindMalformed
 )
 
@@ -416,9 +416,10 @@ func (d *Document) lineNumber(idx int) int {
 
 // Redacted renders the Document with every value masked: a fixed 4-char
 // "****", no length hint, quotes dropped. Comments, blanks, and ordering
-// are reproduced verbatim; a malformed assignment-shaped line masks
-// everything after its first '='. A multiline quoted pair collapses to ONE
-// "KEY=****" line — its continuation lines never print.
+// are reproduced verbatim; a malformed line is masked in its ENTIRETY (see
+// redactMalformed for why "preserve everything before the first '='" isn't
+// safe). A multiline quoted pair collapses to ONE "KEY=****" line — its
+// continuation lines never print.
 func (d *Document) Redacted() []byte {
 	term := "\n"
 	if d.crlf {
@@ -462,15 +463,26 @@ func redactPair(l Line) string {
 	return b.String()
 }
 
-// redactMalformed masks everything after a malformed line's first '=' — a
-// key that failed validation can't leak a value either. A malformed line
-// with no '=' at all (not assignment-shaped) has nothing to mask.
+// redactMalformed masks a malformed line in its ENTIRETY — a constant
+// "****", no pre-'=' preservation at all. It used to keep everything before
+// the first '=' on the theory that a key name can't be secret; that
+// under-masks two real cases: (1) an unterminated quoted value at EOF makes
+// Parse return KindMalformed for the OPENING line, and the value's
+// continuation lines then reparse independently as KindMalformed too — a
+// truncated PEM's base64 body lines contain '=' padding, so preserving
+// "everything before the first '='" preserved the base64 prefix and leaked
+// key material; (2) a hand-mangled assignment whose key portion itself
+// contains secret-ish text. Redaction's failure is asymmetric —
+// under-masking leaks a secret permanently into a transcript, over-masking
+// only costs legibility — and KindMalformed is exactly where hand-mangled
+// input lands, which is redact's primary audience. A blank line never
+// reaches here (Parse classifies it KindBlank), but the check is kept
+// explicit rather than assumed.
 func redactMalformed(l Line) string {
-	raw := l.Raw[0]
-	if idx := strings.IndexByte(raw, '='); idx >= 0 {
-		return raw[:idx+1] + "****"
+	if strings.TrimSpace(l.Raw[0]) == "" {
+		return l.Raw[0]
 	}
-	return raw
+	return "****"
 }
 
 // bareValueRE matches a value safe to write unquoted.
