@@ -79,6 +79,13 @@ forgectl sessions sync --dry-run          # read + count the local JSONL WAL; no
 forgectl sessions sync                    # idempotent upsert into the mart + rebuild the runbook index
 forgectl sessions sync --full             # bypass the lastMessageId watermark, re-upsert everything
 forgectl sessions search "<query>"        # full-text search the mart's runbook index from any machine
+
+# env — safe .env management: key names visible, values never (see § env below)
+forgectl env keys [--file .env]                             # list KEY names only — never values
+forgectl env set KEY [--file .env] [--clipboard]             # value from piped stdin, no-echo prompt, or clipboard — never argv
+forgectl env get KEY --clipboard [--file .env]               # value to clipboard only; no print path exists
+forgectl env check [--file .env] [--example .env.example]    # missing/extra keys, names only; exit 1 iff missing
+forgectl env redact [--file .env]                            # print file with values masked ****
 ```
 
 The `fx` alias is available after install:
@@ -87,6 +94,34 @@ The `fx` alias is available after install:
 fx                    # same as bare forgectl — opens the TUI
 fx tmux ls
 ```
+
+### env — safe .env management
+
+`forgectl env` touches `.env` files without ever putting a secret value in argv, terminal output, or a session transcript: key names are always visible, values never print. It's built for agent-driven workflows — an agent can be trusted with the tool even though it can't be trusted to keep a value out of its own transcript, because the tool structurally never hands one back.
+
+**Blessed value producers** for `env set`, non-inline patterns first:
+
+```sh
+op read op://vault/item/field | forgectl env set API_KEY   # 1Password by composition
+forgectl env set API_KEY < value.txt                       # from a file
+forgectl env set API_KEY --clipboard                       # from the clipboard
+forgectl env set API_KEY                                   # interactive, no echo
+```
+
+**Never inline the secret in the producing command itself** — `printf 'secret' | forgectl env set KEY` puts the value in *that command's own* argv and shell history/transcript. forgectl can't close a channel it doesn't own; the pipe's left-hand side is your responsibility, not `env set`'s.
+
+**Residual risk — read before relying on `--clipboard`:**
+
+- Clipboard contents are readable by every local process, and clipboard managers (Raycast, Maccy, Alfred, Paste) persist history to disk by default — a `get --clipboard`'d secret can outlive the command that copied it. Clear it: paste over the clipboard with something innocuous, or purge the specific entry from your clipboard manager's history (each has its own delete/clear-history command).
+- **Accepted, not fixed, in v1:** a hardlink read (`ln /outside/secret ./x.env`) can read a file outside the intended tree — but creating the hardlink already implies filesystem access, so this adds nothing an attacker with that access didn't already have; the *write* path is neutralized (`writeAtomic` renames a fresh inode, so a pre-existing hardlink to the target never receives the new content). A TOCTOU window exists between `Locate` and the write — accepted for a local, single-operator CLI; openat-style hardening is overkill here.
+- **Agent-write threat model, one line:** running `env set`/`env get` under an agent grants that agent write authority over repo-contained env files for the duration of the session — containment (refuses outside the git repo), 0600 permissions, and atomic writes bound the blast radius, but they don't remove the authority itself.
+
+**Safety notes:**
+
+- Values never appear in argv, stdout, or log output — every value-bearing operation lives inside the domain package, not the CLI layer.
+- Every write lands at `0600`; a looser pre-existing mode is tightened and reported (`tightened <file> to 0600`) rather than silently left alone.
+- `--file` is refused unless it resolves inside the current git repository (walk-up `.git` detection, symlink-escape checked) — no editing a `.env` outside the repo you're working in.
+- `--clipboard` is macOS-only (shells out to `pbcopy`/`pbpaste`); it errors clearly on other platforms rather than silently no-op'ing.
 
 ## How it fits together
 
