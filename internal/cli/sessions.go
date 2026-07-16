@@ -336,7 +336,7 @@ func printWhyHits(cmd *cobra.Command, hits []sessions.WhyHit, asJSON bool) error
 	}
 	for _, h := range hits {
 		fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\n",
-			h.SessionID, humanTs(h.LastTs), sanitizeTerm(h.Project), sanitizeTerm(h.Model))
+			sanitizeTerm(h.SessionID), humanTs(h.LastTs), sanitizeTerm(h.Project), sanitizeTerm(h.Model))
 		fmt.Fprintf(out, "\t%s · %s\n", sanitizeTerm(h.Type), sanitizeTerm(h.Title))
 		fmt.Fprintf(out, "\t%s\n", sanitizeTerm(h.Path))
 		fmt.Fprintf(out, "\t%s\n", sanitizeTerm(h.Snippet))
@@ -392,7 +392,7 @@ func printLastSession(cmd *cobra.Command, repo string, s *sessions.SessionSummar
 		committed = "committed"
 	}
 	fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\t%s\n",
-		s.SessionID, humanTs(s.LastTs), sanitizeTerm(s.Project), sanitizeTerm(s.GitBranch), committed)
+		sanitizeTerm(s.SessionID), humanTs(s.LastTs), sanitizeTerm(s.Project), sanitizeTerm(s.GitBranch), committed)
 	if s.Model != "" || s.Machine != "" {
 		fmt.Fprintf(out, "\t%s on %s\n", sanitizeTerm(s.Model), sanitizeTerm(s.Machine))
 	}

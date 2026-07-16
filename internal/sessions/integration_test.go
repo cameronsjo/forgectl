@@ -232,6 +232,46 @@ func TestIntegrationWhyAndLast(t *testing.T) {
 	if miss != nil {
 		t.Errorf("last on an unknown repo should be nil, got %+v", miss)
 	}
+
+	// Newest-first ordering needs TWO distinct sessions in ONE project to mean
+	// anything — the seeded fixture has one session per repo, so ORDER BY
+	// last_ts is untested by the assertions above. Insert a second project with
+	// an older and a newer session (and a query-matching runbook for each,
+	// linked by session_id) directly — raw INSERTs, so UpsertRunbooks's corpus
+	// prune doesn't wipe the seeded hearth/cadence rows the checks above rely on.
+	if _, err := mart.conn.Exec(ctx, `
+		INSERT INTO session (session_id, machine, project, git_branch, last_ts, synced_at) VALUES
+			('widget-old', 'it-machine', 'widget', 'main',     '2026-07-01T09:00:00Z', now()),
+			('widget-new', 'it-machine', 'widget', 'feat/new', '2026-07-02T09:00:00Z', now())`); err != nil {
+		t.Fatalf("seed widget sessions: %v", err)
+	}
+	if _, err := mart.conn.Exec(ctx, `
+		INSERT INTO runbooks (session_id, project, title, type, path, full_text, machine) VALUES
+			('widget-old', 'widget', 'Gizmo old', 'field-report', 'widget/gizmo-old.md', 'the gizmo tuning approach, older take', 'it-machine'),
+			('widget-new', 'widget', 'Gizmo new', 'handoff',      'widget/gizmo-new.md', 'the gizmo tuning approach, newer take', 'it-machine')`); err != nil {
+		t.Fatalf("seed widget runbooks: %v", err)
+	}
+
+	// why: both sessions match "gizmo" — the newer session must sort first.
+	gz, err := mart.WhySessions(ctx, "gizmo", "", 5)
+	if err != nil {
+		t.Fatalf("why gizmo: %v", err)
+	}
+	if len(gz) != 2 {
+		t.Fatalf("why should find both gizmo sessions, got %+v", gz)
+	}
+	if gz[0].SessionID != "widget-new" || gz[1].SessionID != "widget-old" {
+		t.Errorf("why must order newest-first: got %s then %s", gz[0].SessionID, gz[1].SessionID)
+	}
+
+	// last: with two sessions in one project, the newer one wins.
+	lw, err := mart.LastSession(ctx, "widget")
+	if err != nil {
+		t.Fatalf("last widget: %v", err)
+	}
+	if lw == nil || lw.SessionID != "widget-new" || lw.GitBranch != "feat/new" {
+		t.Errorf("last must pick the newest same-project session: %+v", lw)
+	}
 }
 
 func TestIntegrationRunbookPruneRespectsEmptyCorpus(t *testing.T) {

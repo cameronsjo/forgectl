@@ -52,7 +52,7 @@ func TestPrintWhyHits_JSON(t *testing.T) {
 	hits := []sessions.WhyHit{{
 		SessionID: "11111111-1111-1111-1111-111111111111",
 		Project:   "hearth", Model: "claude-fable-5",
-		LastTs:    ptrTime("2026-07-09T11:00:00Z"), Committed: true,
+		LastTs: ptrTime("2026-07-09T11:00:00Z"), Committed: true,
 		Title: "Colima split brain", Type: "field-report",
 		Path: "hearth/colima-split-brain.md", Snippet: "phantom <<default>> VM",
 	}}
@@ -87,6 +87,17 @@ func TestPrintWhyHits_JSON_OmitsMissingDate(t *testing.T) {
 	}
 }
 
+// The --json path for no hits must emit an empty JSON array, not null — a
+// pipe consumer can iterate it without a null guard.
+func TestPrintWhyHits_JSONEmpty(t *testing.T) {
+	stdout, _ := renderCmd(t, func(cmd *cobra.Command) error {
+		return printWhyHits(cmd, nil, true)
+	})
+	if strings.TrimSpace(stdout) != "[]" {
+		t.Errorf("empty --json result must be [], got %q", stdout)
+	}
+}
+
 func TestPrintWhyHits_HumanEmpty(t *testing.T) {
 	stdout, _ := renderCmd(t, func(cmd *cobra.Command) error {
 		return printWhyHits(cmd, nil, false)
@@ -100,7 +111,7 @@ func TestPrintWhyHits_HumanEmpty(t *testing.T) {
 // is stripped before it reaches the terminal.
 func TestPrintWhyHits_HumanSanitizesControlBytes(t *testing.T) {
 	hits := []sessions.WhyHit{{
-		SessionID: "s1", Project: "p", LastTs: ptrTime("2026-07-09T11:00:00Z"),
+		SessionID: "s1\x1bpwned", Project: "p", LastTs: ptrTime("2026-07-09T11:00:00Z"),
 		Title: "safe\x1b]0;pwned\x07title", Path: "p/x.md", Snippet: "ok",
 	}}
 	stdout, _ := renderCmd(t, func(cmd *cobra.Command) error {
