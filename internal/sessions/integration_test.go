@@ -161,6 +161,79 @@ func TestIntegrationSyncIdempotencyAndSearch(t *testing.T) {
 	}
 }
 
+// TestIntegrationWhyAndLast exercises the path/topic recency query surface
+// (`sessions why` / `sessions last`) against the seeded fixture corpus. It pins
+// the honest degradation too: a runbook lacking a session_id frontmatter key
+// (worktree-entry-posture.md) cannot be attributed to a session, so `why` never
+// surfaces it even though `search` can.
+func TestIntegrationWhyAndLast(t *testing.T) {
+	dsn := martDSN(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	mart := prepMart(t, ctx, dsn)
+
+	if _, err := Sync(ctx, SyncOptions{DSN: dsn, Machine: "it-machine",
+		MetricsDir:      filepath.Join("testdata", "metrics"),
+		RunbooksDir:     filepath.Join("testdata", "runbooks"),
+		SyncthingConfig: filepath.Join("testdata", "syncthing-clean.xml")}); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+
+	// why: a topic in a session_id-linked runbook resolves to its author.
+	hits, err := mart.WhySessions(ctx, "colima split brain", "", 5)
+	if err != nil {
+		t.Fatalf("why: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("why should find exactly the authoring session, got %+v", hits)
+	}
+	if hits[0].SessionID != "11111111-1111-1111-1111-111111111111" ||
+		hits[0].Project != "hearth" || hits[0].Type != "field-report" ||
+		hits[0].Path != "hearth/colima-split-brain.md" {
+		t.Errorf("why hit fields off: %+v", hits[0])
+	}
+
+	// why: the project filter is exact (colima's runbook is hearth, not cadence).
+	if h, _ := mart.WhySessions(ctx, "colima split brain", "cadence", 5); len(h) != 0 {
+		t.Errorf("why project filter leaked: %+v", h)
+	}
+
+	// why: a runbook with NO session_id can't be attributed to a session — the
+	// documented degradation, pinned. (worktree-entry-posture.md has no
+	// session_id frontmatter, so `why` cannot name a predecessor for it.)
+	if h, _ := mart.WhySessions(ctx, "worktree entry posture", "", 5); len(h) != 0 {
+		t.Errorf("why should not attribute a session_id-less runbook: %+v", h)
+	}
+
+	// last: newest session per repo, with latest-wins scalar fields.
+	last, err := mart.LastSession(ctx, "cadence")
+	if err != nil {
+		t.Fatalf("last cadence: %v", err)
+	}
+	if last == nil || last.SessionID != "22222222-2222-2222-2222-222222222222" ||
+		last.GitBranch != "feat/late" {
+		t.Errorf("last cadence off: %+v", last)
+	}
+
+	// last: a session with a session_id-linked runbook lists it as an artifact.
+	hearth, err := mart.LastSession(ctx, "hearth")
+	if err != nil {
+		t.Fatalf("last hearth: %v", err)
+	}
+	if hearth == nil || len(hearth.Artifacts) != 1 || hearth.Artifacts[0].Type != "field-report" {
+		t.Errorf("last hearth should carry its field-report artifact: %+v", hearth)
+	}
+
+	// last: a repo with no sessions is a clean (nil, nil) miss, never an error.
+	miss, err := mart.LastSession(ctx, "does-not-exist")
+	if err != nil {
+		t.Fatalf("last miss should not error: %v", err)
+	}
+	if miss != nil {
+		t.Errorf("last on an unknown repo should be nil, got %+v", miss)
+	}
+}
+
 func TestIntegrationRunbookPruneRespectsEmptyCorpus(t *testing.T) {
 	dsn := martDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

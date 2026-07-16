@@ -238,6 +238,166 @@ func (m *Mart) scanHits(ctx context.Context, sql string, args ...any) ([]SearchH
 	return hits, rows.Err()
 }
 
+// WhyHit is one predecessor session attributed to a topic through a runbook it
+// authored — the "why did you do X" answer for one session. Because the mart
+// ingests no per-file edit history, the attribution is narrative: a runbook
+// (field report, handoff, plan) whose text matches the query AND whose
+// frontmatter session_id names this session. Title stands in for intent, the
+// snippet for key decisions, and Path is the local corpus link — the mart
+// carries no dedicated intent, decisions, or URL fields.
+type WhyHit struct {
+	SessionID string
+	Project   string
+	Model     string
+	LastTs    *time.Time
+	Committed bool
+	// The highest-ranked matching runbook this session authored.
+	Title   string
+	Type    string
+	Path    string
+	Snippet string
+}
+
+// WhySessions returns the most recent sessions whose authored runbooks match
+// the query, newest first (by last_ts). A runbook links to a session through
+// its session_id frontmatter (an INNER join): a runbook with no session_id
+// can't name a session to ask "why", so it never appears here — it stays
+// findable via SearchRunbooks. One row per session; the highest-ranked
+// matching runbook represents it. The tsquery path handles topics; a trigram
+// ILIKE fallback rescues a literal path or partial token the english parser
+// mangles (dots, slashes), which is what lets a `<path>` argument match at all.
+func (m *Mart) WhySessions(ctx context.Context, query, project string, limit int) ([]WhyHit, error) {
+	hits, err := m.scanWhyHits(ctx, `
+		SELECT session_id, project, model, last_ts, committed, title, type, path, snippet FROM (
+			SELECT DISTINCT ON (r.session_id)
+				s.session_id, coalesce(s.project,'') AS project, coalesce(s.model,'') AS model,
+				s.last_ts, coalesce(s.committed,false) AS committed,
+				coalesce(r.title,'') AS title, coalesce(r.type,'') AS type, r.path,
+				ts_rank(r.search, q) AS rank,
+				ts_headline('english', r.full_text, q,
+					'MaxWords=20, MinWords=8, StartSel=<<, StopSel=>>') AS snippet
+			FROM runbooks r
+			JOIN session s ON s.session_id = r.session_id,
+			     websearch_to_tsquery('english', $1) AS q
+			WHERE r.search @@ q AND ($2 = '' OR s.project = $2)
+			ORDER BY r.session_id, rank DESC
+		) ranked
+		ORDER BY last_ts DESC NULLS LAST
+		LIMIT $3`, query, project, limit)
+	if err != nil || len(hits) > 0 {
+		return hits, err
+	}
+	slog.Debug("Why full-text query matched nothing, falling back to trigram scan.", "query", query)
+	return m.scanWhyHits(ctx, `
+		SELECT session_id, project, model, last_ts, committed, title, type, path, snippet FROM (
+			SELECT DISTINCT ON (r.session_id)
+				s.session_id, coalesce(s.project,'') AS project, coalesce(s.model,'') AS model,
+				s.last_ts, coalesce(s.committed,false) AS committed,
+				coalesce(r.title,'') AS title, coalesce(r.type,'') AS type, r.path,
+				left(r.full_text, 160) AS snippet
+			FROM runbooks r
+			JOIN session s ON s.session_id = r.session_id
+			WHERE r.full_text ILIKE '%' || $1 || '%' AND ($2 = '' OR s.project = $2)
+			ORDER BY r.session_id, r.updated_at DESC
+		) ranked
+		ORDER BY last_ts DESC NULLS LAST
+		LIMIT $3`, query, project, limit)
+}
+
+func (m *Mart) scanWhyHits(ctx context.Context, sql string, args ...any) ([]WhyHit, error) {
+	rows, err := m.conn.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, schemaHint(fmt.Errorf("query why sessions: %w", err))
+	}
+	defer rows.Close()
+	var hits []WhyHit
+	for rows.Next() {
+		var h WhyHit
+		if err := rows.Scan(&h.SessionID, &h.Project, &h.Model, &h.LastTs, &h.Committed,
+			&h.Title, &h.Type, &h.Path, &h.Snippet); err != nil {
+			return nil, fmt.Errorf("scan why hit: %w", err)
+		}
+		hits = append(hits, h)
+	}
+	return hits, rows.Err()
+}
+
+// Artifact is one runbook a session authored — a narrative it left behind.
+type Artifact struct {
+	Type  string
+	Title string
+	Path  string
+}
+
+// SessionSummary is a session-table row plus the runbook artifacts it authored
+// — the answer to "the most recent session in this repo and what it left
+// behind". There is no explicit outro/lifecycle flag in the mart: Committed
+// reports whether the session produced commits, and Artifacts is the set of
+// runbooks (by type) it authored — a handoff or field-report among them is the
+// closest signal of a clean sign-off.
+type SessionSummary struct {
+	SessionID string
+	Project   string
+	GitBranch string
+	Model     string
+	Machine   string
+	FirstTs   *time.Time
+	LastTs    *time.Time
+	Committed bool
+	Artifacts []Artifact
+}
+
+// LastSession returns the most recent session in a repo (by last_ts) and the
+// runbook artifacts it authored. The repo match is exact against `project`
+// (mirroring search's project filter). Returns (nil, nil) when the repo has no
+// sessions in the mart — a clean miss the caller reports without erroring.
+func (m *Mart) LastSession(ctx context.Context, repo string) (*SessionSummary, error) {
+	var s SessionSummary
+	err := m.conn.QueryRow(ctx, `
+		SELECT session_id, coalesce(project,''), coalesce(git_branch,''),
+		       coalesce(model,''), machine, first_ts, last_ts, coalesce(committed,false)
+		FROM session
+		WHERE project = $1
+		ORDER BY last_ts DESC NULLS LAST
+		LIMIT 1`, repo).
+		Scan(&s.SessionID, &s.Project, &s.GitBranch, &s.Model, &s.Machine,
+			&s.FirstTs, &s.LastTs, &s.Committed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, schemaHint(fmt.Errorf("query last session for %q: %w", repo, err))
+	}
+	arts, err := m.sessionArtifacts(ctx, s.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	s.Artifacts = arts
+	return &s, nil
+}
+
+// sessionArtifacts lists the runbooks a session authored (linked by
+// session_id), ordered for a stable receipt.
+func (m *Mart) sessionArtifacts(ctx context.Context, sessionID string) ([]Artifact, error) {
+	rows, err := m.conn.Query(ctx, `
+		SELECT coalesce(type,''), coalesce(title,''), path
+		FROM runbooks WHERE session_id = $1
+		ORDER BY type, path`, sessionID)
+	if err != nil {
+		return nil, schemaHint(fmt.Errorf("query session artifacts: %w", err))
+	}
+	defer rows.Close()
+	var arts []Artifact
+	for rows.Next() {
+		var a Artifact
+		if err := rows.Scan(&a.Type, &a.Title, &a.Path); err != nil {
+			return nil, fmt.Errorf("scan artifact row: %w", err)
+		}
+		arts = append(arts, a)
+	}
+	return arts, rows.Err()
+}
+
 // nullable maps "" to SQL NULL so empty optional strings don't masquerade as
 // real values in the index.
 func nullable(s string) *string {
