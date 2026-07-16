@@ -32,6 +32,22 @@ func errInvalidKey() error {
 	return fmt.Errorf("key must match %s; values are piped or --clipboard, never argv", validKeyPattern)
 }
 
+// errKeyNotFound is the "no such key" refusal, and it names the FILE rather
+// than the key that missed. The asymmetry is deliberate: a key the file
+// actually holds is safe to name (the file already carries that name, so an
+// error repeating it discloses nothing new), but a key that is NOT in the
+// file is precisely the token that may not be a key at all. A secret pasted
+// into the key slot — `env get sk_live_51H8xY2eZvKYlo2C --clipboard`, an
+// utterly ordinary typo — passes ValidKey, because plenty of real API keys
+// match [A-Za-z_][A-Za-z0-9_]*. Echoing the miss would then write the secret
+// straight into stderr and the session transcript, which is the one outcome
+// this whole package exists to prevent. "Not found" is the branch where the
+// argument is least likely to be a key name, so it is the branch that must
+// stay quietest.
+func errKeyNotFound(realPath string) error {
+	return fmt.Errorf("no such key in %s (run `forgectl env keys` to list them)", realPath)
+}
+
 // Client is the domain entry point for forgectl env's clipboard-touching
 // operations. It wraps *clip.Client rather than exec.Runner directly — env
 // shells nothing of its own; the clipboard is its only non-filesystem
@@ -66,7 +82,7 @@ func (c *Client) CopyValue(ctx context.Context, cwd, file, key string) error {
 	}
 	value, ok := doc.Get(key)
 	if !ok {
-		return fmt.Errorf("key %q not found", key)
+		return errKeyNotFound(realPath)
 	}
 	return c.clip.Copy(ctx, value)
 }

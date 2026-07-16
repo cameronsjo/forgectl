@@ -22,6 +22,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/clip"
@@ -68,6 +69,9 @@ func TestCopyValue_MissingKey_Errors(t *testing.T) {
 	}
 	if len(fake.Calls) != 0 {
 		t.Errorf("clipboard was touched %d times, want 0 (missing key must fail before pbcopy)", len(fake.Calls))
+	}
+	if strings.Contains(err.Error(), "MISSING") {
+		t.Errorf("error %q echoes the missing key; a not-found token may be a secret pasted into the key slot", err.Error())
 	}
 }
 

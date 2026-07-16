@@ -576,6 +576,39 @@ func TestEnvGetCmd_HostileArgvValue_RefusedNoArgumentEcho(t *testing.T) {
 	assertNoSecretInOutput(t, hostileValue, stdout.String(), stderr.String(), err.Error())
 }
 
+// TestEnvGetCmd_KeyShapedSecret_RefusedNoArgumentEcho is the sibling of the
+// test above, and the sharper of the two: the sentinel here is a VALID key
+// shape, so it sails past ValidKey and reaches the not-found branch instead
+// of the rule-only refusal. Plenty of real API keys are pure
+// [A-Za-z_][A-Za-z0-9_]* — a Stripe-style sk_live_… among them — so a user
+// pasting a value into the key slot lands exactly here. The not-found error
+// must name the file, never the token that missed.
+func TestEnvGetCmd_KeyShapedSecret_RefusedNoArgumentEcho(t *testing.T) {
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("OTHER=1\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+
+	const keyShapedSecret = "sk_live_S3NTINEL_valid_key_shape"
+	client, _ := envFixture()
+	cmd := newEnvCmdForClient(client)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"get", keyShapedSecret, "--clipboard"})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("get with a key-shaped secret returned nil error, want a refusal")
+	}
+	if strings.Contains(err.Error(), keyShapedSecret) {
+		t.Errorf("error %q echoes the missing key — a value pasted into the key slot would leak", err.Error())
+	}
+	assertNoSecretInOutput(t, keyShapedSecret, stdout.String(), stderr.String(), err.Error())
+}
+
 // --- check ---
 
 func TestEnvCheckCmd_NoDrift_ExitZero(t *testing.T) {
