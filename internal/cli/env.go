@@ -14,6 +14,11 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 )
 
+// confirmAnyFile is the --any-file confirmation seam — a package-level var
+// (mirrors isTerminal/readPassword above) so a test can stub the huh prompt
+// without a real tty, rather than exercising confirm() itself.
+var confirmAnyFile = confirm
+
 // isTerminal and readPassword are package-level seams over the REAL
 // process stdin (not cmd.InOrStdin(), which tests point at a fake reader
 // for the piped-stdin branch) — a test can't hand `set`'s interactive
@@ -27,6 +32,34 @@ var (
 		return string(b), err
 	}
 )
+
+// resolveAllowAnyFile decides the allowAnyFile bool env.Locate consults,
+// enforcing the --any-file escape hatch's TTY gate. A flag an agent can
+// type is not a bound on an agent — the threat this whole command defends
+// against is an injected agent driving forgectl into writing an arbitrary
+// repo file (.git/config, .envrc, a Makefile — any KEY=value-shaped sink),
+// and an agent can pass --any-file exactly as easily as it can pass --file.
+// What it cannot do is answer an interactive confirmation a human grants in
+// seconds — so the TTY gate, not the flag, is the actual bound. When
+// anyFile is false this is a no-op (the ordinary env-file-name check in
+// Locate applies); when anyFile is true it either refuses outright (no
+// tty) or gates the skip on an explicit "yes".
+func resolveAllowAnyFile(anyFile bool, file string) (bool, error) {
+	if !anyFile {
+		return false, nil
+	}
+	if !isTerminal() {
+		return false, errors.New("--any-file requires an interactive terminal")
+	}
+	ok, err := confirmAnyFile(fmt.Sprintf("%s is not a recognized env file (.env, .env.*, or *.env) — operate on it anyway?", file))
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, fmt.Errorf("refusing %s: --any-file confirmation declined", file)
+	}
+	return true, nil
+}
 
 // envKeyPattern documents ValidKey's regex for CLI-side error messages —
 // duplicated from internal/env's own (unexported) copy rather than
@@ -54,6 +87,7 @@ func newEnvCmd(deps module.Deps) *cobra.Command {
 // newYCmdForClient/newDockerCmdForClient) without going through newEnvCmd.
 func newEnvCmdForClient(client *envpkg.Client) *cobra.Command {
 	var file string
+	var anyFile bool
 
 	cmd := &cobra.Command{
 		Use: "env",
@@ -90,13 +124,14 @@ Never inline the secret in the producing command itself
 argv and transcript; forgectl can't close a channel it doesn't own.`,
 	}
 	cmd.PersistentFlags().StringVar(&file, "file", ".env", "path to the .env file")
+	cmd.PersistentFlags().BoolVar(&anyFile, "any-file", false, "allow a --file that isn't .env/.env.*/*.env, after an interactive confirmation (requires a tty)")
 
 	cmd.AddCommand(
-		newEnvKeysCmd(&file),
-		newEnvSetCmd(client, &file),
-		newEnvGetCmd(client, &file),
-		newEnvCheckCmd(&file),
-		newEnvRedactCmd(&file),
+		newEnvKeysCmd(&file, &anyFile),
+		newEnvSetCmd(client, &file, &anyFile),
+		newEnvGetCmd(client, &file, &anyFile),
+		newEnvCheckCmd(&file, &anyFile),
+		newEnvRedactCmd(&file, &anyFile),
 	)
 	return cmd
 }
@@ -119,7 +154,7 @@ func readDocument(realPath string) (*envpkg.Document, error) {
 }
 
 // newEnvKeysCmd builds `env keys`.
-func newEnvKeysCmd(file *string) *cobra.Command {
+func newEnvKeysCmd(file *string, anyFile *bool) *cobra.Command {
 	return &cobra.Command{
 		Use:   "keys",
 		Short: "List KEY names — never values",
@@ -129,7 +164,11 @@ func newEnvKeysCmd(file *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			realPath, exists, err := envpkg.Locate(*file, cwd)
+			allow, err := resolveAllowAnyFile(*anyFile, *file)
+			if err != nil {
+				return err
+			}
+			realPath, exists, err := envpkg.Locate(*file, cwd, allow)
 			if err != nil {
 				return err
 			}
@@ -161,7 +200,7 @@ func newEnvKeysCmd(file *string) *cobra.Command {
 }
 
 // newEnvSetCmd builds `env set`.
-func newEnvSetCmd(client *envpkg.Client, file *string) *cobra.Command {
+func newEnvSetCmd(client *envpkg.Client, file *string, anyFile *bool) *cobra.Command {
 	var clipboard bool
 
 	cmd := &cobra.Command{
@@ -182,17 +221,21 @@ func newEnvSetCmd(client *envpkg.Client, file *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			allow, err := resolveAllowAnyFile(*anyFile, *file)
+			if err != nil {
+				return err
+			}
 
 			var tightened bool
 			if clipboard {
-				tightened, err = client.SetFromClipboard(cmd.Context(), cwd, *file, key)
+				tightened, err = client.SetFromClipboard(cmd.Context(), cwd, *file, key, allow)
 			} else {
 				var value string
 				value, err = resolveSetValue(cmd, key)
 				if err != nil {
 					return err
 				}
-				tightened, err = client.SetValue(cwd, *file, key, value)
+				tightened, err = client.SetValue(cwd, *file, key, value, allow)
 			}
 			if err != nil {
 				return err
@@ -233,7 +276,7 @@ func resolveSetValue(cmd *cobra.Command, key string) (string, error) {
 }
 
 // newEnvGetCmd builds `env get`.
-func newEnvGetCmd(client *envpkg.Client, file *string) *cobra.Command {
+func newEnvGetCmd(client *envpkg.Client, file *string, anyFile *bool) *cobra.Command {
 	var clipboard bool
 
 	cmd := &cobra.Command{
@@ -249,7 +292,11 @@ func newEnvGetCmd(client *envpkg.Client, file *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := client.CopyValue(cmd.Context(), cwd, *file, key); err != nil {
+			allow, err := resolveAllowAnyFile(*anyFile, *file)
+			if err != nil {
+				return err
+			}
+			if err := client.CopyValue(cmd.Context(), cwd, *file, key, allow); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "copied %s to clipboard\n", key)
@@ -261,7 +308,7 @@ func newEnvGetCmd(client *envpkg.Client, file *string) *cobra.Command {
 }
 
 // newEnvCheckCmd builds `env check`.
-func newEnvCheckCmd(file *string) *cobra.Command {
+func newEnvCheckCmd(file *string, anyFile *bool) *cobra.Command {
 	var example string
 
 	cmd := &cobra.Command{
@@ -274,7 +321,11 @@ func newEnvCheckCmd(file *string) *cobra.Command {
 				return err
 			}
 
-			fileReal, fileExists, err := envpkg.Locate(*file, cwd)
+			allowFile, err := resolveAllowAnyFile(*anyFile, *file)
+			if err != nil {
+				return err
+			}
+			fileReal, fileExists, err := envpkg.Locate(*file, cwd, allowFile)
 			if err != nil {
 				return err
 			}
@@ -286,7 +337,11 @@ func newEnvCheckCmd(file *string) *cobra.Command {
 				return err
 			}
 
-			exampleReal, exampleExists, err := envpkg.Locate(example, cwd)
+			allowExample, err := resolveAllowAnyFile(*anyFile, example)
+			if err != nil {
+				return err
+			}
+			exampleReal, exampleExists, err := envpkg.Locate(example, cwd, allowExample)
 			if err != nil {
 				return err
 			}
@@ -334,7 +389,7 @@ func printSection(out io.Writer, header string, keys []string) {
 }
 
 // newEnvRedactCmd builds `env redact`.
-func newEnvRedactCmd(file *string) *cobra.Command {
+func newEnvRedactCmd(file *string, anyFile *bool) *cobra.Command {
 	return &cobra.Command{
 		Use:   "redact",
 		Short: "Print --file with every value masked (****)",
@@ -344,7 +399,11 @@ func newEnvRedactCmd(file *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			realPath, exists, err := envpkg.Locate(*file, cwd)
+			allow, err := resolveAllowAnyFile(*anyFile, *file)
+			if err != nil {
+				return err
+			}
+			realPath, exists, err := envpkg.Locate(*file, cwd, allow)
 			if err != nil {
 				return err
 			}

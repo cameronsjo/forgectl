@@ -64,12 +64,14 @@ func NewClient(clipClient *clip.Client) *Client {
 // CopyValue resolves key's value in file and copies it to the system
 // clipboard. The value is never returned — this is the domain half of
 // `get`'s structural "no print path exists" guarantee; the CLI command
-// only ever learns whether this call succeeded.
-func (c *Client) CopyValue(ctx context.Context, cwd, file, key string) error {
+// only ever learns whether this call succeeded. allowAnyFile is threaded
+// straight through to Locate — see its doc comment and the CLI's
+// resolveAllowAnyFile for the --any-file TTY-gated escape hatch.
+func (c *Client) CopyValue(ctx context.Context, cwd, file, key string, allowAnyFile bool) error {
 	if !ValidKey(key) {
 		return errInvalidKey()
 	}
-	realPath, exists, err := Locate(file, cwd)
+	realPath, exists, err := Locate(file, cwd, allowAnyFile)
 	if err != nil {
 		return err
 	}
@@ -92,11 +94,11 @@ func (c *Client) CopyValue(ctx context.Context, cwd, file, key string) error {
 // sources, both already resolved to a plain string by the CLI layer before
 // this is called. SetFromClipboard is the clipboard-sourced sibling that
 // shares this exact pipeline after its own clip.Paste.
-func (c *Client) SetValue(cwd, file, key, value string) (tightened bool, err error) {
+func (c *Client) SetValue(cwd, file, key, value string, allowAnyFile bool) (tightened bool, err error) {
 	if !ValidKey(key) {
 		return false, errInvalidKey()
 	}
-	return c.commitSet(cwd, file, key, value)
+	return c.commitSet(cwd, file, key, value, allowAnyFile)
 }
 
 // SetFromClipboard pastes the current clipboard contents and runs them
@@ -104,7 +106,7 @@ func (c *Client) SetValue(cwd, file, key, value string) (tightened bool, err err
 // paste — "ValidKey first, refuse before touching the file or reading
 // input" applies to the clipboard source exactly as it does to stdin: a
 // hostile key argument must never even trigger a clipboard read.
-func (c *Client) SetFromClipboard(ctx context.Context, cwd, file, key string) (tightened bool, err error) {
+func (c *Client) SetFromClipboard(ctx context.Context, cwd, file, key string, allowAnyFile bool) (tightened bool, err error) {
 	if !ValidKey(key) {
 		return false, errInvalidKey()
 	}
@@ -112,7 +114,7 @@ func (c *Client) SetFromClipboard(ctx context.Context, cwd, file, key string) (t
 	if err != nil {
 		return false, err
 	}
-	return c.commitSet(cwd, file, key, value)
+	return c.commitSet(cwd, file, key, value, allowAnyFile)
 }
 
 // commitSet is the shared `set` tail once key is already validated and
@@ -120,8 +122,8 @@ func (c *Client) SetFromClipboard(ctx context.Context, cwd, file, key string) (t
 // doesn't exist yet) → strip exactly one trailing "\n" or "\r\n" off
 // rawValue → refuse an empty result → Document.Set (refuses a duplicate
 // key) → Bytes → writeAtomic.
-func (c *Client) commitSet(cwd, file, key, rawValue string) (tightened bool, err error) {
-	realPath, exists, err := Locate(file, cwd)
+func (c *Client) commitSet(cwd, file, key, rawValue string, allowAnyFile bool) (tightened bool, err error) {
+	realPath, exists, err := Locate(file, cwd, allowAnyFile)
 	if err != nil {
 		return false, err
 	}

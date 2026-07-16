@@ -852,6 +852,187 @@ func TestEnvRedactCmd_MissingFile_Errors(t *testing.T) {
 
 // --- containment (representative) ---
 
+// --- --any-file / non-env-file refusal (RCE fix) ---
+
+func TestEnvCmds_NonEnvFile_Refused(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"keys", []string{"keys", "--file", ".git/config"}},
+		{"get", []string{"get", "KEY", "--clipboard", "--file", ".git/config"}},
+		{"redact", []string{"redact", "--file", ".git/config"}},
+		{"check", []string{"check", "--file", ".git/config"}},
+		{"set", []string{"set", "INJECTED", "--file", ".git/config"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			repo := t.TempDir()
+			initEnvGitRepo(t, repo)
+			const original = "[core]\n\trepositoryformatversion = 0\n"
+			gitConfig := filepath.Join(repo, ".git", "config")
+			if err := os.WriteFile(gitConfig, []byte(original), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			t.Chdir(repo)
+			forceNonTTY(t)
+
+			client, _ := envFixture()
+			cmd := newEnvCmdForClient(client)
+			cmd.SetIn(strings.NewReader("payload\n"))
+			cmd.SetOut(new(bytes.Buffer))
+			cmd.SetErr(new(bytes.Buffer))
+			cmd.SetArgs(c.args)
+
+			if err := cmd.ExecuteContext(context.Background()); err == nil {
+				t.Fatalf("%s --file .git/config returned nil error, want a refusal", c.name)
+			}
+			got, err := os.ReadFile(gitConfig)
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			if string(got) != original {
+				t.Errorf(".git/config content changed: %q, want unchanged %q", got, original)
+			}
+		})
+	}
+}
+
+func TestEnvKeysCmd_EnvShapedNames_Accepted(t *testing.T) {
+	names := []string{".env", ".env.local", ".env.prod", "prod.env"}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			repo := t.TempDir()
+			initEnvGitRepo(t, repo)
+			if err := os.WriteFile(filepath.Join(repo, name), []byte("A=1\n"), 0o600); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			t.Chdir(repo)
+
+			client, _ := envFixture()
+			cmd := newEnvCmdForClient(client)
+			var stdout bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetErr(new(bytes.Buffer))
+			cmd.SetArgs([]string{"keys", "--file", name})
+
+			if err := cmd.ExecuteContext(context.Background()); err != nil {
+				t.Fatalf("keys --file %s: %v", name, err)
+			}
+			if want := "A\n"; stdout.String() != want {
+				t.Errorf("stdout = %q, want %q", stdout.String(), want)
+			}
+		})
+	}
+}
+
+func TestEnvSetCmd_AnyFile_NonTTY_RefusedOutright(t *testing.T) {
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	const original = "[core]\n"
+	gitConfig := filepath.Join(repo, ".git", "config")
+	if err := os.WriteFile(gitConfig, []byte(original), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+	forceNonTTY(t) // isTerminal() == false — --any-file must refuse before ever prompting
+
+	client, _ := envFixture()
+	cmd := newEnvCmdForClient(client)
+	cmd.SetIn(strings.NewReader("value\n"))
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"set", "KEY", "--file", ".git/config", "--any-file"})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("set --any-file with no tty returned nil error, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "interactive terminal") {
+		t.Errorf("error = %q, want it to name the tty requirement", err.Error())
+	}
+	got, rerr := os.ReadFile(gitConfig)
+	if rerr != nil {
+		t.Fatalf("ReadFile: %v", rerr)
+	}
+	if string(got) != original {
+		t.Errorf(".git/config content changed: %q, want unchanged %q", got, original)
+	}
+}
+
+func TestEnvSetCmd_AnyFile_TTYConfirmedYes_Allowed(t *testing.T) {
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	gitConfig := filepath.Join(repo, ".git", "config")
+	if err := os.WriteFile(gitConfig, []byte("[core]\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+	// forceTTYWithPassword stubs BOTH isTerminal and readPassword: isTerminal
+	// gates the --any-file confirmation AND resolveSetValue's own
+	// interactive-prompt branch, so a real tty stub for one is a real tty
+	// stub for the other too — readPassword must be stubbed alongside it.
+	forceTTYWithPassword(t, "value1", nil)
+
+	prevConfirm := confirmAnyFile
+	confirmAnyFile = func(string) (bool, error) { return true, nil }
+	t.Cleanup(func() { confirmAnyFile = prevConfirm })
+
+	client, _ := envFixture()
+	cmd := newEnvCmdForClient(client)
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"set", "KEY", "--file", ".git/config", "--any-file"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("set --any-file with confirmation stubbed yes: %v", err)
+	}
+	got, err := os.ReadFile(gitConfig)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if want := "[core]\nKEY=value1\n"; string(got) != want {
+		t.Errorf(".git/config content = %q, want %q", got, want)
+	}
+}
+
+func TestEnvSetCmd_AnyFile_TTYConfirmedNo_Refused(t *testing.T) {
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	const original = "[core]\n"
+	gitConfig := filepath.Join(repo, ".git", "config")
+	if err := os.WriteFile(gitConfig, []byte(original), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+
+	prevTerm := isTerminal
+	isTerminal = func() bool { return true }
+	t.Cleanup(func() { isTerminal = prevTerm })
+
+	prevConfirm := confirmAnyFile
+	confirmAnyFile = func(string) (bool, error) { return false, nil }
+	t.Cleanup(func() { confirmAnyFile = prevConfirm })
+
+	client, _ := envFixture()
+	cmd := newEnvCmdForClient(client)
+	cmd.SetIn(strings.NewReader("value1\n"))
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"set", "KEY", "--file", ".git/config", "--any-file"})
+
+	if err := cmd.ExecuteContext(context.Background()); err == nil {
+		t.Fatal("set --any-file with confirmation declined returned nil error, want a refusal")
+	}
+	got, rerr := os.ReadFile(gitConfig)
+	if rerr != nil {
+		t.Fatalf("ReadFile: %v", rerr)
+	}
+	if string(got) != original {
+		t.Errorf(".git/config content changed: %q, want unchanged %q", got, original)
+	}
+}
+
 func TestEnvKeysCmd_OutsideRepo_Refused(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")

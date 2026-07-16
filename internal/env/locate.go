@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
@@ -14,9 +15,28 @@ import (
 // errNotInRepo is returned when no .git entry is found walking up from cwd.
 var errNotInRepo = errors.New("not inside a git repository")
 
+// IsEnvFileName reports whether base — a file's basename, not a full path —
+// looks like an env file: exactly ".env", ".env."-prefixed (.env.local,
+// .env.prod, .env.staging, .env.example), or ".env"-suffixed (prod.env).
+// This is repo-MEMBERSHIP's missing sibling check: Locate proves a --file
+// is inside the repo, never that it's an env file at all. Without this,
+// `forgectl env set sshCommand --file .git/config` writes a bare unquoted
+// value that is ALSO valid git-config syntax — core.sshCommand — arbitrary
+// execution on the next `git fetch`. .envrc (direnv executes it) and
+// Makefile (KEY=value is valid make) are equivalent sinks, which is why a
+// .git-only blocklist would be insufficient; an allowlist is the only sound
+// shape here. Exported so the CLI can consult it for the --any-file
+// confirmation prompt's message.
+func IsEnvFileName(base string) bool {
+	return base == ".env" || strings.HasPrefix(base, ".env.") || strings.HasSuffix(base, ".env")
+}
+
 // Locate resolves fileFlag (a --file value, absolute or relative to cwd)
 // into its real, symlink-resolved path, refusing anything that isn't
-// contained inside the git repository forgectl is running in:
+// contained inside the git repository forgectl is running in AND doesn't
+// look like an env file (see IsEnvFileName) — unless allowAnyFile is true,
+// which the CLI only ever sets after an interactive --any-file confirmation
+// (see internal/cli/env.go's resolveAllowAnyFile):
 //
 //  1. Absolutize fileFlag against cwd.
 //  2. Walk up from cwd for a .git entry (directory or file — a worktree's
@@ -27,14 +47,17 @@ var errNotInRepo = errors.New("not inside a git repository")
 //     must already exist) and join the file's base name back on.
 //  4. Re-check containment of the resolved path inside the resolved root
 //     via sandbox.WithinWorkspace — the existing, tested primitive already
-//     used by clean/quarantine/pr. This is the check that actually matters:
-//     it catches both a literal ../ escape and a symlink (existing file, or
-//     an intermediate directory) that resolves outside the repo.
+//     used by clean/quarantine/pr. This catches both a literal ../ escape
+//     and a symlink (existing file, or an intermediate directory) that
+//     resolves outside the repo.
+//  5. Unless allowAnyFile, refuse anything whose RESOLVED basename isn't
+//     IsEnvFileName — checked post-symlink-resolution so a symlink named
+//     ".env" can't launder a non-env target past this check.
 //
 // A new file is allowed exactly when its parent directory resolves inside
 // the repo; exists reports false so callers know they're about to create,
 // not overwrite.
-func Locate(fileFlag, cwd string) (realPath string, exists bool, err error) {
+func Locate(fileFlag, cwd string, allowAnyFile bool) (realPath string, exists bool, err error) {
 	if fileFlag == "" {
 		return "", false, errors.New("env: file path required")
 	}
@@ -73,6 +96,10 @@ func Locate(fileFlag, cwd string) (realPath string, exists bool, err error) {
 
 	if !sandbox.WithinWorkspace(realRoot, real) {
 		return "", false, fmt.Errorf("refusing %s: outside repository %s", filepath.Base(abs), realRoot)
+	}
+
+	if !allowAnyFile && !IsEnvFileName(filepath.Base(real)) {
+		return "", false, fmt.Errorf("refusing %s: not an env file (want .env, .env.*, or *.env)", filepath.Base(real))
 	}
 
 	return real, exists, nil

@@ -17,6 +17,7 @@ package env
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -52,7 +53,7 @@ func TestLocate_InRepo_OK(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	real, exists, err := Locate(".env.prod", root)
+	real, exists, err := Locate(".env.prod", root, false)
 	if err != nil {
 		t.Fatalf("Locate: %v", err)
 	}
@@ -68,7 +69,7 @@ func TestLocate_NewFileInRepo_Allowed(t *testing.T) {
 	root := t.TempDir()
 	initGitRepo(t, root)
 
-	real, exists, err := Locate(".env.new", root)
+	real, exists, err := Locate(".env.new", root, false)
 	if err != nil {
 		t.Fatalf("Locate: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestLocate_WorktreeGitFile_OK(t *testing.T) {
 		t.Fatalf("WriteFile .git: %v", err)
 	}
 
-	_, exists, err := Locate(".env", root)
+	_, exists, err := Locate(".env", root, false)
 	if err != nil {
 		t.Fatalf("Locate: %v", err)
 	}
@@ -100,7 +101,7 @@ func TestLocate_WorktreeGitFile_OK(t *testing.T) {
 func TestLocate_NotARepo_Refused(t *testing.T) {
 	root := t.TempDir() // no .git anywhere up from here
 
-	_, _, err := Locate(".env", root)
+	_, _, err := Locate(".env", root, false)
 	if err == nil {
 		t.Fatal("Locate outside any git repo returned nil error, want a refusal")
 	}
@@ -121,7 +122,7 @@ func TestLocate_OutsideRepo_Refused(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	_, _, err := Locate("../outside/secret.env", repo)
+	_, _, err := Locate("../outside/secret.env", repo, false)
 	if err == nil {
 		t.Fatal("Locate with a ../ escape returned nil error, want a refusal")
 	}
@@ -141,9 +142,102 @@ func TestLocate_SymlinkedFileEscape_Refused(t *testing.T) {
 		t.Skipf("symlink unsupported: %v", err)
 	}
 
-	_, _, err := Locate(".env", repo)
+	_, _, err := Locate(".env", repo, false)
 	if err == nil {
 		t.Fatal("Locate through a symlinked file escaping the repo returned nil error, want a refusal")
+	}
+}
+
+func TestIsEnvFileName_Allowlist(t *testing.T) {
+	cases := []struct {
+		base string
+		want bool
+	}{
+		{".env", true},
+		{".env.local", true},
+		{".env.prod", true},
+		{".env.staging", true},
+		{".env.example", true},
+		{"prod.env", true},
+		{"config", false},
+		{".gitconfig", false},
+		{"Makefile", false},
+		// .envrc starts with ".env" but not ".env." (no separating dot
+		// before "rc"), and doesn't end with ".env" either — it's a real
+		// RCE sink (direnv executes it) and must NOT be on the allowlist.
+		{".envrc", false},
+	}
+	for _, c := range cases {
+		if got := IsEnvFileName(c.base); got != c.want {
+			t.Errorf("IsEnvFileName(%q) = %v, want %v", c.base, got, c.want)
+		}
+	}
+}
+
+func TestLocate_EnvShapedNames_Accepted(t *testing.T) {
+	names := []string{".env", ".env.local", ".env.prod", "prod.env"}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			initGitRepo(t, root)
+			if err := os.WriteFile(filepath.Join(root, name), []byte("KEY=1\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+
+			_, exists, err := Locate(name, root, false)
+			if err != nil {
+				t.Fatalf("Locate(%q): %v", name, err)
+			}
+			if !exists {
+				t.Errorf("exists = false, want true for %q", name)
+			}
+		})
+	}
+}
+
+func TestLocate_NonEnvFile_Refused(t *testing.T) {
+	repo := t.TempDir()
+	initGitRepo(t, repo)
+	const original = "[core]\n\trepositoryformatversion = 0\n"
+	gitConfig := filepath.Join(repo, ".git", "config")
+	if err := os.WriteFile(gitConfig, []byte(original), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, _, err := Locate(".git/config", repo, false)
+	if err == nil {
+		t.Fatal("Locate against .git/config returned nil error, want a refusal (not an env file)")
+	}
+	if !strings.Contains(err.Error(), "not an env file") {
+		t.Errorf("error = %q, want it to name the not-an-env-file rule", err.Error())
+	}
+
+	got, rerr := os.ReadFile(gitConfig)
+	if rerr != nil {
+		t.Fatalf("ReadFile: %v", rerr)
+	}
+	if string(got) != original {
+		t.Errorf(".git/config content changed: %q, want unchanged %q", got, original)
+	}
+}
+
+func TestLocate_NonEnvFile_AllowAnyFileSkipsCheck(t *testing.T) {
+	repo := t.TempDir()
+	initGitRepo(t, repo)
+	gitConfig := filepath.Join(repo, ".git", "config")
+	if err := os.WriteFile(gitConfig, []byte("[core]\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	real, exists, err := Locate(".git/config", repo, true)
+	if err != nil {
+		t.Fatalf("Locate with allowAnyFile=true: %v", err)
+	}
+	if !exists {
+		t.Error("exists = false, want true")
+	}
+	if want := filepath.Join(resolvedPath(t, repo), ".git", "config"); real != want {
+		t.Errorf("real = %q, want %q", real, want)
 	}
 }
 
@@ -161,7 +255,7 @@ func TestLocate_SymlinkedDirEscape_Refused(t *testing.T) {
 	// PARENT (escape, a symlink to outside) must still be re-checked for
 	// containment rather than trusted just because it's "inside" repo
 	// lexically.
-	_, _, err := Locate(filepath.Join("escape", ".env"), repo)
+	_, _, err := Locate(filepath.Join("escape", ".env"), repo, false)
 	if err == nil {
 		t.Fatal("Locate through a symlinked directory escaping the repo returned nil error, want a refusal")
 	}
