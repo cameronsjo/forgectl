@@ -48,6 +48,26 @@ func (c *Context) Get(name string) (string, bool) {
 	return v, ok
 }
 
+// nextRef locates the next ${name} in s at or after from. It returns the name,
+// the index of the opening "${", the index just past the closing "}", and
+// whether one was found. unterminated is true when a "${" has no closing "}" —
+// the one case Interpolate treats as an error while Refs simply stops. It is the
+// single boundary scanner both Interpolate and Refs share, so they can never
+// disagree on what counts as a reference.
+func nextRef(s string, from int) (name string, start, after int, ok, unterminated bool) {
+	idx := strings.Index(s[from:], "${")
+	if idx < 0 {
+		return "", 0, 0, false, false
+	}
+	start = from + idx
+	end := strings.Index(s[start:], "}")
+	if end < 0 {
+		return "", start, 0, false, true
+	}
+	end += start
+	return s[start+2 : end], start, end + 1, true, false
+}
+
 // Interpolate resolves every ${var} reference in s against the Context. A
 // reference to a deferred export passes through as the literal ${var}; any
 // other unresolved variable is an error — referencing a param or export that
@@ -60,32 +80,45 @@ func (c *Context) Interpolate(s string) (string, error) {
 	var b strings.Builder
 	i := 0
 	for i < len(s) {
-		start := strings.Index(s[i:], "${")
-		if start == -1 {
+		name, start, after, ok, unterminated := nextRef(s, i)
+		if unterminated {
+			return "", fmt.Errorf("unterminated ${...} in %q", s)
+		}
+		if !ok {
 			b.WriteString(s[i:])
 			break
 		}
-		start += i
 		b.WriteString(s[i:start])
-
-		end := strings.Index(s[start:], "}")
-		if end == -1 {
-			return "", fmt.Errorf("unterminated ${...} in %q", s)
-		}
-		end += start
-
-		name := s[start+2 : end]
-		switch val, ok := c.Get(name); {
-		case ok:
+		switch val, has := c.Get(name); {
+		case has:
 			b.WriteString(val)
 		case c.deferred[name]:
 			b.WriteString("${" + name + "}")
 		default:
 			return "", fmt.Errorf("unknown variable ${%s} in %q", name, s)
 		}
-		i = end + 1
+		i = after
 	}
 	return b.String(), nil
+}
+
+// Refs returns the names of every ${name} reference in s, using the same
+// boundary scan as Interpolate. A malformed/unterminated reference is skipped —
+// Interpolate is the authority that errors on those. It is a package function
+// (no Context state needed) so the workflow engine's export-safety scan and
+// interpolation share one parser.
+func Refs(s string) []string {
+	var out []string
+	i := 0
+	for i < len(s) {
+		name, _, after, ok, unterminated := nextRef(s, i)
+		if !ok || unterminated {
+			break
+		}
+		out = append(out, name)
+		i = after
+	}
+	return out
 }
 
 // InterpolateAll resolves ${} references across a slice of strings, e.g. a

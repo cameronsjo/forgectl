@@ -2,11 +2,45 @@ package workflow
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 )
+
+// TestEnsureStateDir_RefusesSymlinkedStateDir pins the SEC-1 hardening: a
+// pre-planted symlink at the .state path (a same-user adversary redirecting all
+// state + lock I/O) is refused by both the write and lock paths, and no I/O
+// leaks into the symlink target.
+func TestEnsureStateDir_RefusesSymlinkedStateDir(t *testing.T) {
+	dir := redirectStateDir(t)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
+	target := t.TempDir()
+	if err := os.Symlink(target, dir); err != nil {
+		t.Fatalf("plant symlink at state dir: %v", err)
+	}
+
+	if err := WriteState(RunState{Schema: StateSchema, Workflow: "demo"}); err == nil ||
+		!strings.Contains(err.Error(), "not a real directory") {
+		t.Fatalf("WriteState must refuse a symlinked state dir, got %v", err)
+	}
+	if _, err := AcquireRunLock("demo"); err == nil ||
+		!strings.Contains(err.Error(), "not a real directory") {
+		t.Fatalf("AcquireRunLock must refuse a symlinked state dir, got %v", err)
+	}
+
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("no I/O may be redirected into the symlink target, found %v", entries)
+	}
+}
 
 // redirectStateDir points os.UserConfigDir (via config.WorkflowStateDir) at a
 // temp HOME on both macOS and Linux, and returns the resolved state directory.

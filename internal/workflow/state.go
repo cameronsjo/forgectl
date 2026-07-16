@@ -2,7 +2,6 @@ package workflow
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -14,6 +13,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/digest"
 )
 
 // StateSchema is the run-state sidecar's schema version. It is bumped only on an
@@ -58,32 +58,34 @@ type StepState struct {
 // DefinitionHash is the canonical content hash of a workflow file's raw bytes,
 // used to pin a RunState to the exact definition it checkpointed.
 func DefinitionHash(data []byte) string {
-	sum := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return digest.SHA256(data)
 }
 
 // HashPlanStep hashes a step's plan-time inputs into a stable digest. Fields are
-// joined with a NUL separator so ("a","b") and ("ab","") can't collide, and the
-// order is fixed so the same inputs always hash the same. Prior-step exports are
-// still the literal ${name} at plan time, so they contribute a stable token
-// rather than a per-run sandbox path — resume compares like with like.
+// drawn from the step's shared field enumeration (so a new field can't be added
+// to interpolation but silently missed here) and joined with a NUL separator so
+// ("a","b") and ("ab","") can't collide; the order is fixed so identical inputs
+// always hash the same. Uses (the verb selector) is included as step identity;
+// prior-step exports are still the literal ${name} at plan time, so they
+// contribute a stable token rather than a per-run sandbox path — resume compares
+// like with like.
 func HashPlanStep(s PlanStep) string {
 	var b strings.Builder
-	write := func(parts ...string) {
-		for _, p := range parts {
-			b.WriteString(p)
-			b.WriteByte(0)
+	writeNUL := func(v string) { b.WriteString(v); b.WriteByte(0) }
+
+	writeNUL("uses")
+	writeNUL(s.Uses)
+	for _, v := range s.ScalarFields() {
+		writeNUL(v)
+	}
+	for _, vals := range s.SliceFields() {
+		// A per-slice marker keeps [] , ["a"] from colliding with ["a"] , [].
+		writeNUL("slice")
+		for _, v := range vals {
+			writeNUL(v)
 		}
 	}
-	write(s.Uses, s.Repo, s.Ref, s.Skill, s.Posture, s.Mode, s.From, s.To, s.Cmd)
-	b.WriteString("globs")
-	b.WriteByte(0)
-	write(s.Globs...)
-	b.WriteString("args")
-	b.WriteByte(0)
-	write(s.Args...)
-	sum := sha256.Sum256([]byte(b.String()))
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return digest.SHA256([]byte(b.String()))
 }
 
 // NewRunID mints a sortable run identifier: a UTC timestamp plus a short random
@@ -110,6 +112,31 @@ func StatePath(name string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, name+".state.toml"), nil
+}
+
+// ensureStateDir returns the workflow state directory, creating it (0700) if
+// absent — but first REFUSES a pre-planted non-directory at that path. A
+// same-user adversary (the pre-blessing-agent threat model of ADR-0006/0007)
+// could otherwise symlink <config-dir>/workflows/.state at a directory of their
+// choosing and redirect every run-state and lock file there. Lstat does not
+// follow the link, so a symlink (or a plain file) is caught before any MkdirAll
+// or open. Shared by WriteState and AcquireRunLock.
+func ensureStateDir() (string, error) {
+	dir, err := config.WorkflowStateDir()
+	if err != nil {
+		return "", err
+	}
+	if info, err := os.Lstat(dir); err == nil {
+		if !info.IsDir() {
+			return "", fmt.Errorf("workflow state path %s is not a real directory (a symlink or file is planted there) — refusing to use it", dir)
+		}
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("stat workflow state dir %s: %w", dir, err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create workflow state dir %s: %w", dir, err)
+	}
+	return dir, nil
 }
 
 // LoadState reads the run-state sidecar for name. A missing file is not an error
@@ -146,9 +173,9 @@ func WriteState(st RunState) error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create workflow state dir %s: %w", dir, err)
+	dir, err := ensureStateDir()
+	if err != nil {
+		return err
 	}
 	data, err := encodeState(st)
 	if err != nil {
@@ -269,6 +296,9 @@ func MissingResumeExport(plan Plan, resumeFrom int, registry StepRegistry) (name
 }
 
 // stepVarRefs returns every ${name} variable referenced across a step's fields.
+// It draws the fields from the shared enumeration (ScalarFields/SliceFields) and
+// the reference names from step.Refs (Interpolate's own boundary scanner), so it
+// stays aligned with both the field set and the interpolation grammar.
 //
 // BLIND SPOT (deliberate): this scan is TEXTUAL — it finds ${...} literals in
 // interpolated fields only. A verb that consumes an export at RUNTIME via
@@ -281,36 +311,13 @@ func MissingResumeExport(plan Plan, resumeFrom int, registry StepRegistry) (name
 // this textual scan.
 func stepVarRefs(s PlanStep) []string {
 	var out []string
-	add := func(vals ...string) {
-		for _, v := range vals {
-			out = append(out, parseRefs(v)...)
-		}
+	for _, v := range s.ScalarFields() {
+		out = append(out, Refs(v)...)
 	}
-	add(s.Repo, s.Ref, s.Skill, s.Posture, s.Mode, s.From, s.To, s.Cmd)
-	add(s.Globs...)
-	add(s.Args...)
-	return out
-}
-
-// parseRefs extracts the names inside every ${name} in s. A malformed or
-// unterminated reference is ignored here — the interpolator (context.go) is the
-// authority that rejects those at plan/execute time.
-func parseRefs(s string) []string {
-	var out []string
-	i := 0
-	for {
-		start := strings.Index(s[i:], "${")
-		if start < 0 {
-			break
+	for _, vals := range s.SliceFields() {
+		for _, v := range vals {
+			out = append(out, Refs(v)...)
 		}
-		start += i
-		end := strings.Index(s[start:], "}")
-		if end < 0 {
-			break
-		}
-		end += start
-		out = append(out, s[start+2:end])
-		i = end + 1
 	}
 	return out
 }

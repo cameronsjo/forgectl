@@ -44,10 +44,15 @@ func AcquireRunLock(name string) (*RunLock, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, fmt.Errorf("create workflow state dir: %w", err)
+	if _, err := ensureStateDir(); err != nil {
+		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	// O_NOFOLLOW (unix) refuses a pre-planted <name>.lock symlink — the one file
+	// here opened directly rather than via CreateTemp+Rename. The .state dir
+	// itself is guarded against a symlink by ensureStateDir above; together they
+	// cover the path. On non-unix lockOpenExtraFlags is 0 (the lock is a
+	// documented no-op there anyway).
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|lockOpenExtraFlags, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open workflow lock %s: %w", path, err)
 	}
