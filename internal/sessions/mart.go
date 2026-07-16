@@ -267,6 +267,10 @@ type WhyHit struct {
 // ILIKE fallback rescues a literal path or partial token the english parser
 // mangles (dots, slashes), which is what lets a `<path>` argument match at all.
 func (m *Mart) WhySessions(ctx context.Context, query, project string, limit int) ([]WhyHit, error) {
+	slog.Debug("Preparing to query sessions for narrative match", "query", query, "project", project, "limit", limit)
+	// The snippet parameters (ts_headline MaxWords/MinWords/selectors, the
+	// 160-char trigram-fallback preview) mirror SearchRunbooks so `why` and
+	// `search` render a match identically.
 	hits, err := m.scanWhyHits(ctx, `
 		SELECT session_id, project, model, last_ts, committed, title, type, path, snippet FROM (
 			SELECT DISTINCT ON (r.session_id)
@@ -352,6 +356,7 @@ type SessionSummary struct {
 // (mirroring search's project filter). Returns (nil, nil) when the repo has no
 // sessions in the mart — a clean miss the caller reports without erroring.
 func (m *Mart) LastSession(ctx context.Context, repo string) (*SessionSummary, error) {
+	slog.Debug("Preparing to query last session", "repo", repo)
 	var s SessionSummary
 	err := m.conn.QueryRow(ctx, `
 		SELECT session_id, coalesce(project,''), coalesce(git_branch,''),

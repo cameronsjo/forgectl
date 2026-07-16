@@ -87,6 +87,8 @@ forgectl sessions sync --dry-run          # read + count the local JSONL WAL; no
 forgectl sessions sync                    # idempotent upsert into the mart + rebuild the runbook index
 forgectl sessions sync --full             # bypass the lastMessageId watermark, re-upsert everything
 forgectl sessions search "<query>"        # full-text search the mart's runbook index from any machine
+forgectl sessions why "<path|topic>"      # recent sessions whose runbooks explain a path or topic, newest first
+forgectl sessions last <repo>             # the newest session in a repo + the artifacts it left behind
 
 # env — safe .env management: key names visible, values never (see § env below)
 forgectl env keys [--file .env]                             # list KEY names only — never values

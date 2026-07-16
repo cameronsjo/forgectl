@@ -332,6 +332,9 @@ func printWhyHits(cmd *cobra.Command, hits []sessions.WhyHit, asJSON bool) error
 				Intent: sanitizeTerm(h.Title), Link: sanitizeTerm(h.Path), KeyDecisions: sanitizeTerm(h.Snippet),
 			})
 		}
+		if len(hits) > 0 {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Found %d sessions\n", len(hits))
+		}
 		return writeJSON(out, dto)
 	}
 	if len(hits) == 0 {
@@ -345,6 +348,7 @@ func printWhyHits(cmd *cobra.Command, hits []sessions.WhyHit, asJSON bool) error
 		fmt.Fprintf(out, "\t%s\n", sanitizeTerm(h.Path))
 		fmt.Fprintf(out, "\t%s\n", sanitizeTerm(h.Snippet))
 	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "Found %d sessions\n", len(hits))
 	return nil
 }
 
