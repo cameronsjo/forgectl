@@ -155,6 +155,20 @@ func newWorkflowRunCmd(deps module.Deps) *cobra.Command {
 				return nil
 			}
 
+			// Serialize concurrent runs of the SAME workflow: the run-state
+			// sidecar is a single file rewritten in full after each step, so two
+			// overlapping runs would clobber each other's checkpoints (run B's
+			// step-0 write landing after run A's step-2 regresses the file, so a
+			// later --resume silently re-executes steps A already ran). An advisory
+			// lock held for the whole run makes a second concurrent invocation fail
+			// fast rather than interleave. dry-run took its early return above, so
+			// it never contends. Acquired before any state read/write.
+			lock, err := workflow.AcquireRunLock(name)
+			if err != nil {
+				return err
+			}
+			defer lock.Release()
+
 			wctx := workflow.NewContext(nil)
 			for k, v := range params {
 				wctx.Set(k, v)
@@ -299,9 +313,11 @@ func newWorkflowStatusCmd() *cobra.Command {
 
 			// If the definition changed since this run, --resume will refuse it
 			// (a resume never replays across an edited file) — say so up front.
+			// The hash covers the WHOLE file, so any byte change invalidates every
+			// checkpoint, not just the edited step.
 			if src, err := workflow.Load(name); err == nil {
 				if workflow.DefinitionHash(src.Data) != state.DefinitionHash {
-					fmt.Fprintf(out, "  note: %s has changed since this run — resume will be refused; run it fresh\n", name)
+					fmt.Fprintf(out, "  note: %s has changed since this run (any edit to the file invalidates every checkpoint) — resume will be refused; run it fresh\n", name)
 				}
 			}
 			return nil

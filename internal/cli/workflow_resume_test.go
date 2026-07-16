@@ -3,11 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/cameronsjo/forgectl/internal/bless"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/workflow"
@@ -124,6 +126,83 @@ func TestWorkflowRun_ResumeSkipsCompletedSteps(t *testing.T) {
 	}
 	if _, ok, _ := workflow.LoadState("multi"); ok {
 		t.Error("state must be cleared after a successful resume")
+	}
+}
+
+// TestWorkflowRun_ResumeRefusedWhenUnblessed proves resume re-verifies the
+// blessing: a workflow whose file is no longer blessed is refused on --resume
+// exactly as on a fresh run, even with a fully resumable checkpoint on disk. If
+// a future change skipped verification on the resume path, this fails loudly.
+func TestWorkflowRun_ResumeRefusedWhenUnblessed(t *testing.T) {
+	dir := cliRedirectConfigDir(t)
+	cliWriteUserWorkflow(t, dir, "multi", []byte(cliMultiWorkflow))
+
+	// Seed a resumable checkpoint via a partial run that passes verification.
+	swapVerifier(t, fakeVerifier{})
+	if _, err := execRun(t, failOn("step-two"), "multi"); err == nil {
+		t.Fatal("seed run should fail at step-two")
+	}
+	if _, ok, _ := workflow.LoadState("multi"); !ok {
+		t.Fatal("expected a checkpoint to resume from")
+	}
+
+	// The file is now "unblessed" — resume must refuse before executing anything.
+	swapVerifier(t, fakeVerifier{err: fmt.Errorf("%w: run 'forgectl workflow bless multi'", bless.ErrUnblessed)})
+	runner := &exec.FakeRunner{}
+	_, err := execRun(t, runner, "multi", "--resume")
+	if !errors.Is(err, bless.ErrUnblessed) {
+		t.Fatalf("resume must re-verify the blessing and refuse; got %v", err)
+	}
+	if len(runner.Calls) != 0 {
+		t.Errorf("no step may run when the blessing fails, got %+v", runner.Calls)
+	}
+}
+
+// TestWorkflowRun_ResumeRefusedWhenTampered is the tampered-signature counterpart
+// of the unblessed case: a resume over a workflow whose signature no longer
+// verifies is refused.
+func TestWorkflowRun_ResumeRefusedWhenTampered(t *testing.T) {
+	dir := cliRedirectConfigDir(t)
+	cliWriteUserWorkflow(t, dir, "multi", []byte(cliMultiWorkflow))
+
+	swapVerifier(t, fakeVerifier{})
+	if _, err := execRun(t, failOn("step-two"), "multi"); err == nil {
+		t.Fatal("seed run should fail at step-two")
+	}
+
+	swapVerifier(t, fakeVerifier{err: fmt.Errorf("%w: workflow signature does not verify", bless.ErrTampered)})
+	runner := &exec.FakeRunner{}
+	_, err := execRun(t, runner, "multi", "--resume")
+	if !errors.Is(err, bless.ErrTampered) {
+		t.Fatalf("resume must refuse a tampered workflow; got %v", err)
+	}
+	if len(runner.Calls) != 0 {
+		t.Errorf("no step may run when the signature fails, got %+v", runner.Calls)
+	}
+}
+
+// TestWorkflowRun_ConcurrentRunRefused proves the advisory lock serializes runs
+// of the same workflow: while one holds the lock, a second run fails fast rather
+// than clobbering the shared state sidecar, and the lock frees on release.
+func TestWorkflowRun_ConcurrentRunRefused(t *testing.T) {
+	dir := cliRedirectConfigDir(t)
+	cliWriteUserWorkflow(t, dir, "multi", []byte(cliMultiWorkflow))
+	swapVerifier(t, fakeVerifier{})
+
+	held, err := workflow.AcquireRunLock("multi")
+	if err != nil {
+		t.Fatalf("acquire lock: %v", err)
+	}
+
+	_, err = execRun(t, &exec.FakeRunner{}, "multi")
+	if !errors.Is(err, workflow.ErrWorkflowRunning) {
+		t.Fatalf("a run while the lock is held must fail with ErrWorkflowRunning; got %v", err)
+	}
+
+	// Once released, a run proceeds normally.
+	held.Release()
+	if _, err := execRun(t, &exec.FakeRunner{}, "multi"); err != nil {
+		t.Fatalf("run after lock release should succeed: %v", err)
 	}
 }
 

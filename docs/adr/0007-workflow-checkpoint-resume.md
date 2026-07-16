@@ -32,6 +32,15 @@ the leading run of already-completed, unchanged steps.**
   rename, so a crash leaves either the old state or the new one, never a truncated file and never
   a window with neither. Checkpoints are written only *after* a step succeeds; a fully successful
   run clears the sidecar.
+- **Concurrency:** the sidecar is a single file rewritten in full after each step, so two
+  overlapping runs of the same workflow would clobber each other's checkpoints (run B's step-0
+  write landing after run A's step-2 regresses the file, and a later `--resume` re-executes steps
+  A already ran — silent duplication of non-idempotent steps). A run/resume takes a non-blocking
+  exclusive advisory lock (`flock`) on `<name>.lock` in the state directory for its whole duration;
+  a second concurrent run of the same workflow fails fast with `ErrWorkflowRunning` rather than
+  interleaving. `workflow` is positioned as an orchestration primitive a scheduler may double-invoke,
+  so the guard is worth the small plumbing. `flock` keys on the open file description (concurrent
+  runs contend even in one process); on a non-unix GOOS the guard degrades to a documented no-op.
 
 ### Blessing is re-verified, and definition drift refuses resume
 
@@ -70,3 +79,7 @@ fresh run.
   by design, not a limitation to fix later.
 - A future export-composing resume would require authenticating the sidecar (a signed checkpoint),
   which is out of scope here.
+- **Suggested follow-up:** the temp-file + fsync + rename durability pattern used here is not yet
+  applied to the blessing/trust-store writes (`internal/bless`), which still write in place. Porting
+  the atomic-write helper there would give the same crash-safety to those files. Out of scope for
+  this change.

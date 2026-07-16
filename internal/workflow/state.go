@@ -269,6 +269,16 @@ func MissingResumeExport(plan Plan, resumeFrom int, registry StepRegistry) (name
 }
 
 // stepVarRefs returns every ${name} variable referenced across a step's fields.
+//
+// BLIND SPOT (deliberate): this scan is TEXTUAL — it finds ${...} literals in
+// interpolated fields only. A verb that consumes an export at RUNTIME via
+// wctx.Get(...) with no ${name} in its file (teardownStep reads
+// wctx.Get("workspace") directly) is invisible to it. That is currently benign
+// only because teardown is null-safe — a missing workspace is a no-op. A future
+// context-consuming verb that is NOT null-safe would reintroduce a real
+// resume-time bug this guard would miss. If you add such a verb, extend
+// MissingResumeExport to consult the registry for runtime consumers, not just
+// this textual scan.
 func stepVarRefs(s PlanStep) []string {
 	var out []string
 	add := func(vals ...string) {
