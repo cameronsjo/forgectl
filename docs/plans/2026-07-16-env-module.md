@@ -6,7 +6,9 @@
 
 Agent-driven workflows constantly touch `.env` files, and today that means secrets landing in terminal output and session transcripts, or a human doing it by hand. forgectl#82 (open, unstarted) specs an `env` command group that makes `.env` management **safe to delegate to an agent**: key names visible, values never. Cameron needs it now ("immediate ask but I want it right" — speed and need set priority, not quality), scoped this session to: **full file surface, zero secret-manager coupling** — plain `.env` family kept simple, 1Password playing nicely *by composition* (`op read op://… | forgectl env set KEY`), never by dependency.
 
-forgectl has no `.env` code today (verified). Greenfield Extension-tier module alongside the existing **17** command groups (docs module landed recently — pin goes **17→18**, not 16→17).
+forgectl has no `.env` code today (verified). Greenfield Extension-tier module alongside the existing **16** command groups on `origin/main` — pin goes **16→17**.
+
+> **Corrected during execution (2026-07-16).** This plan originally said 17 groups / pin 17→18, and three panel seats independently "CONFIRMED" it. All three read the forgectl **main checkout**, which is parked on the unmerged `feat/docs-serve-pr1` branch (it carries a `docsModule`); `origin/main` has 16 and `wantCount = 16`. Agreement across seats is not independence when they share a working tree. Verify live-state claims with `git show origin/main:<path>`, never the checkout.
 
 **Security-sensitive:** secrets-handling surface. Security seat ran at plan review (floor seat); a **control-level security review gates the merge** (§ Security gate). Security review work routes to Opus.
 
@@ -45,7 +47,7 @@ Extension-tier module `env`, mirroring `y` (client-injection seam) and `clean` (
 
 - `internal/env/` — domain package, no cobra. Takes `*clip.Client` (NOT `exec.Runner` — env shells nothing itself; the clipboard is its only non-filesystem effect). **Value-bearing operations live inside the domain** (`CopyValue`, `SetFromClipboard`) so plaintext never crosses the domain→CLI boundary — structural, not review-enforced.
 - `internal/cli/env.go` — `envModule` manifest (`Tier: Extension`, `ConfigKey: ""` — stateless), `newEnvCmd(deps)` + `newEnvCmdForClient(client)` test seam, five subcommands, package-level seam vars `isTerminal`/`readPassword` (overridable in tests).
-- Register in `internal/cli/modules.go` `allModules()`; pins in `modules_test.go`: `wantCount` **17→18**, add `"env"` to `wantNames`, NOT in `wantCore`.
+- Register in `internal/cli/modules.go` `allModules()`; pins in `modules_test.go`: `wantCount` **16→17** (against `origin/main` — see the Context correction), add `"env"` to `wantNames`, NOT in `wantCore`. If this branch is later rebased onto a main that has absorbed `feat/docs-serve-pr1`, the pin needs re-bumping.
 
 ### Document model (`internal/env/document.go`) — hand-rolled, line-based, parse-to-fields
 
@@ -101,7 +103,7 @@ No value ever passed to `slog`, error strings, argv, or Runner args (`pbcopy` va
 ## Files
 
 **Create:** `internal/env/{document,env,locate,write}.go` + co-located `*_test.go`; `internal/cli/env.go` + `internal/cli/env_test.go`.
-**Modify:** `internal/cli/modules.go` (register), `internal/cli/modules_test.go` (pins 17→18 + `"env"`), `README.md` (`### env` block).
+**Modify:** `internal/cli/modules.go` (register), `internal/cli/modules_test.go` (pins 16→17 + `"env"`), `README.md` (`### env` block).
 **Reuse verbatim (do not modify):** `internal/clip/clip.go`, `internal/exec/exec.go`, `internal/module/module.go`, **`internal/sandbox/sandbox.go` (`WithinWorkspace`)**.
 
 ## Commit sequence (one PR)
@@ -109,7 +111,7 @@ No value ever passed to `slog`, error strings, argv, or Runner args (`pbcopy` va
 1. `env: line-based .env document model` — parse/render/keys/get/set/redact/validate/diff incl. multiline quoted values + tests.
 2. `env: safety rails + atomic 0600 write` — `Locate` (walk-up + `sandbox.WithinWorkspace`), `writeAtomic` + tests.
 3. `env: clipboard-backed get/set` — `CopyValue`, `SetFromClipboard` + tests.
-4. `env: CLI surface + module registration` — five subcommands, TTY seam, `envModule`, pins 17→18 + CLI tests.
+4. `env: CLI surface + module registration` — five subcommands, TTY seam, `envModule`, pins 16→17 + CLI tests.
 5. `env: docs` — README section + help text (blessed producers, anti-inline warning, residual-risk notes).
 
 Each commit green on: `go build ./... && go vet ./... && gofmt -l . && go test ./...` (Go 1.25, no golangci).
