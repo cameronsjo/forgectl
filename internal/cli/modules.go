@@ -29,5 +29,6 @@ func allModules() []module.Manifest {
 		sessionsModule,
 		reviewModule,
 		quarantineModule,
+		envModule,
 	}
 }

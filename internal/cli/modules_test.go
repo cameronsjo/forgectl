@@ -122,7 +122,7 @@ func TestModules_CommandTreeSmoke(t *testing.T) {
 func TestModules_CompletenessPins(t *testing.T) {
 	mods := allModules()
 
-	const wantCount = 16
+	const wantCount = 17
 	if len(mods) != wantCount {
 		t.Errorf("allModules() has %d modules, want %d — adding a module means editing this pin deliberately (ADR-0005)", len(mods), wantCount)
 	}
@@ -132,6 +132,7 @@ func TestModules_CompletenessPins(t *testing.T) {
 		"workflow": true, "pr": true, "net": true, "bench": true,
 		"quarantine": true, "pip": true, "docker": true, "branch": true,
 		"clean": true, "y": true, "sessions": true, "review": true,
+		"env": true,
 	}
 	got := map[string]bool{}
 	for _, m := range mods {
