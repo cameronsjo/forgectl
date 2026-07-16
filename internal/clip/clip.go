@@ -29,6 +29,10 @@ type Client struct {
 	// goos is runtime.GOOS by default; overridable via WithGOOS so tests can
 	// exercise the non-Darwin guard path without needing to run on Linux/Windows.
 	goos string
+
+	// sensitive suppresses the "bytes" length field from Copy/Paste's log
+	// lines — see WithSensitive.
+	sensitive bool
 }
 
 // Option configures a Client at construction.
@@ -38,6 +42,17 @@ type Option func(*Client)
 // hook so the non-Darwin guard path can be exercised on any host.
 func WithGOOS(goos string) Option {
 	return func(c *Client) { c.goos = goos }
+}
+
+// WithSensitive suppresses the byte-length ("bytes", N) field from Copy and
+// Paste's success/preparing log lines. Length is itself signal about a
+// secret (a JWT and a 4-digit PIN log distinguishably even with the value
+// masked), so a caller handling secret values opts into omitting it — the
+// log line itself is kept, only the length is dropped. Additive and
+// opt-in: a Client built without this option keeps its current logging
+// unchanged (the y module's existing behavior doesn't move).
+func WithSensitive() Option {
+	return func(c *Client) { c.sensitive = true }
 }
 
 // New builds a Client over the given Runner.
@@ -58,12 +73,20 @@ func (c *Client) Copy(ctx context.Context, s string) error {
 		return errMacOSOnly
 	}
 
-	slog.Debug("Preparing to copy to clipboard.", "bytes", len(s))
+	if c.sensitive {
+		slog.Debug("Preparing to copy to clipboard.")
+	} else {
+		slog.Debug("Preparing to copy to clipboard.", "bytes", len(s))
+	}
 	if _, err := c.run.RunWithInput(ctx, s, "pbcopy"); err != nil {
 		slog.Error("Failed to copy to clipboard.", "error", err)
 		return err
 	}
-	slog.Info("Successfully copied to clipboard.", "bytes", len(s))
+	if c.sensitive {
+		slog.Info("Successfully copied to clipboard.")
+	} else {
+		slog.Info("Successfully copied to clipboard.", "bytes", len(s))
+	}
 	return nil
 }
 
@@ -79,6 +102,10 @@ func (c *Client) Paste(ctx context.Context) (string, error) {
 		slog.Error("Failed to paste from clipboard.", "error", err)
 		return "", err
 	}
-	slog.Info("Successfully pasted from clipboard.", "bytes", len(out))
+	if c.sensitive {
+		slog.Info("Successfully pasted from clipboard.")
+	} else {
+		slog.Info("Successfully pasted from clipboard.", "bytes", len(out))
+	}
 	return out, nil
 }

@@ -78,7 +78,11 @@ var envModule = module.Manifest{
 
 // newEnvCmd builds `forgectl env` over the registry Deps.
 func newEnvCmd(deps module.Deps) *cobra.Command {
-	client := envpkg.NewClient(clippkg.New(deps.Runner))
+	// clippkg.WithSensitive() suppresses the clipboard client's byte-length
+	// log field — env's whole reason to exist is that a value never
+	// prints, and a length is itself signal about a secret (the plan
+	// declines a partial-redact reveal for the exact same reason).
+	client := envpkg.NewClient(clippkg.New(deps.Runner, clippkg.WithSensitive()))
 	return newEnvCmdForClient(client)
 }
 

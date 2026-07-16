@@ -54,12 +54,14 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	clippkg "github.com/cameronsjo/forgectl/internal/clip"
 	envpkg "github.com/cameronsjo/forgectl/internal/env"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/module"
 )
 
 // initEnvGitRepo makes dir a real (enough) git repo for env.Locate's
@@ -473,6 +475,72 @@ func TestEnvSetCmd_DuplicateKey_Refused(t *testing.T) {
 	if err := cmd.ExecuteContext(context.Background()); err == nil {
 		t.Fatal("set against a duplicate key returned nil error, want a refusal")
 	}
+}
+
+func TestEnvSetCmd_EmptyStdin_KeyShapedSecretArg_NoTokenEcho(t *testing.T) {
+	// The sibling of TestEnvGetCmd_KeyShapedSecret_RefusedNoArgumentEcho:
+	// a plausible real secret pasted into the KEY argument slot
+	// (sk_live_… is a valid ValidKey shape) with empty stdin. Nothing is
+	// ever written on this path, so the argument never becomes a key in
+	// any file — the error must not name it either.
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	t.Chdir(repo)
+	forceNonTTY(t)
+	slogBuf := captureSlog(t)
+
+	const keyShapedSecret = "sk_live_51H8xY2eZvKYlo2C"
+	client, _ := envFixture()
+	cmd := newEnvCmdForClient(client)
+	cmd.SetIn(strings.NewReader(""))
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"set", keyShapedSecret})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("set with empty stdin and a key-shaped-secret argument returned nil error, want a refusal")
+	}
+	if strings.Contains(err.Error(), keyShapedSecret) {
+		t.Errorf("error %q echoes the argument — nothing was written, so it may not be a key at all", err.Error())
+	}
+	if _, statErr := os.Stat(filepath.Join(repo, ".env")); !os.IsNotExist(statErr) {
+		t.Error("a file was created despite the empty-value refusal")
+	}
+	assertNoSecretInOutput(t, keyShapedSecret, stdout.String(), stderr.String(), slogBuf.String(), err.Error())
+}
+
+// TestNewEnvCmd_ClipWiredWithSensitive proves the PRODUCTION wiring
+// (newEnvCmd, not the test-only newEnvCmdForClient) constructs its clip
+// client with clippkg.WithSensitive() — envFixture's raw client bypasses
+// this wiring entirely, so it can't stand in for this assertion.
+func TestNewEnvCmd_ClipWiredWithSensitive(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("clip.Client's Darwin-only guard would fail this test on a non-macOS runner regardless of the wiring under test")
+	}
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	const sentinel = "s3ntinel-VALUE-77x"
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("KEY="+sentinel+"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+	slogBuf := captureSlog(t)
+
+	fake := &exec.FakeRunner{}
+	cmd := newEnvCmd(module.Deps{Runner: fake})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"get", "KEY", "--clipboard"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(slogBuf.String(), "bytes=") {
+		t.Errorf("slog output = %q, want no byte-length field — newEnvCmd must wire clip.WithSensitive()", slogBuf.String())
+	}
+	assertNoSecretInOutput(t, sentinel, slogBuf.String())
 }
 
 // --- get ---

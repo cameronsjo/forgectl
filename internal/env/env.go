@@ -10,6 +10,7 @@ package env
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -134,7 +135,17 @@ func (c *Client) commitSet(cwd, file, key, rawValue string, allowAnyFile bool) (
 
 	value := stripTrailingNewline(rawValue)
 	if value == "" {
-		return false, fmt.Errorf("empty value; refusing to set %s to empty — edit the file directly if intended", key)
+		// Names no token — same class as errKeyNotFound's asymmetry above.
+		// Nothing is written on this path, so key never becomes a key in
+		// any file; if key is actually a secret pasted into the wrong slot
+		// (`env set sk_live_51H8xY2eZvKYlo2C` with empty stdin), naming it
+		// here would echo it straight into stderr and the transcript. This
+		// is deliberately asymmetric with `set`'s SUCCESS path (which DOES
+		// name key): a value that's about to be WRITTEN as a key is
+		// already going into the file regardless, so the success message
+		// discloses nothing new; a value that's refused before any write
+		// is the one case where the argument might not be a key at all.
+		return false, errors.New("empty value; refusing to set an empty value — edit the file directly if intended")
 	}
 
 	if err := doc.Set(key, value); err != nil {
