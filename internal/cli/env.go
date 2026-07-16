@@ -300,23 +300,37 @@ func newEnvCheckCmd(file *string) *cobra.Command {
 
 			missing, extra := envpkg.Diff(fileDoc, exampleDoc)
 			out := cmd.OutOrStdout()
-			fmt.Fprintln(out, "missing:")
-			for _, k := range missing {
-				fmt.Fprintln(out, "  "+k)
-			}
-			fmt.Fprintln(out, "extra:")
-			for _, k := range extra {
-				fmt.Fprintln(out, "  "+k)
-			}
+			// Only print a section that has names under it — a bare
+			// "extra:" header with nothing beneath reads as a truncated
+			// list rather than as "there are none".
+			printSection(out, "missing:", missing)
+			printSection(out, "extra:", extra)
 
 			if len(missing) > 0 {
 				return fmt.Errorf("%d missing key(s) in %s", len(missing), *file)
+			}
+			if len(extra) == 0 {
+				// Clean: stdout stays empty so a caller can treat any
+				// output as drift, and the reassurance goes to stderr.
+				fmt.Fprintf(cmd.ErrOrStderr(), "%s matches %s\n", *file, example)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&example, "example", ".env.example", "path to the example file to check against")
 	return cmd
+}
+
+// printSection writes a check section and its key names, and writes
+// nothing at all when there are none.
+func printSection(out io.Writer, header string, keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	fmt.Fprintln(out, header)
+	for _, k := range keys {
+		fmt.Fprintln(out, "  "+k)
+	}
 }
 
 // newEnvRedactCmd builds `env redact`.

@@ -624,16 +624,54 @@ func TestEnvCheckCmd_NoDrift_ExitZero(t *testing.T) {
 
 	client, _ := envFixture()
 	cmd := newEnvCmdForClient(client)
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
-	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetErr(&stderr)
 	cmd.SetArgs([]string{"check"})
 
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "missing:") || !strings.Contains(stdout.String(), "extra:") {
-		t.Errorf("stdout = %q, want missing:/extra: headers", stdout.String())
+	// A clean check writes NOTHING to stdout: any stdout at all means
+	// drift, so a caller can gate on emptiness without parsing. An empty
+	// "extra:" header printed under a clean run reads as a truncated list
+	// rather than as "there are none".
+	if stdout.String() != "" {
+		t.Errorf("stdout = %q, want empty on a clean check", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "matches") {
+		t.Errorf("stderr = %q, want a match confirmation", stderr.String())
+	}
+}
+
+func TestEnvCheckCmd_ExtraOnly_PrintsOnlyExtraSection(t *testing.T) {
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("A=1\nLOCAL_ONLY=2\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".env.example"), []byte("A=\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+
+	client, _ := envFixture()
+	cmd := newEnvCmdForClient(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"check"})
+
+	// Extra keys are reported but never fail: a local-only secret is
+	// ordinary and benign.
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("extra-only drift returned %v, want nil (extra must not fail)", err)
+	}
+	if strings.Contains(stdout.String(), "missing:") {
+		t.Errorf("stdout = %q, want no missing: section when nothing is missing", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "extra:") || !strings.Contains(stdout.String(), "LOCAL_ONLY") {
+		t.Errorf("stdout = %q, want the extra: section naming LOCAL_ONLY", stdout.String())
 	}
 }
 
