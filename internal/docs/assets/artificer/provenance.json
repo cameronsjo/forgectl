@@ -1,0 +1,22 @@
+{
+  "source": "cameronsjo/artificer",
+  "version": "0.19.0",
+  "resolvedFrom": "../../artificer-design-system/package.json",
+  "vendoredAt": "2026-07-16T17:09:58.857Z",
+  "files": {
+    "artificer-editorial.css": "a1427b59d067bd44ddce0144afeb8ccd681cf3e7e35a8e808476a3730b8de7e6",
+    "artificer-focus.js": "4d3c0e830d653ba6329af19909ecedad61c39df58f5646470b2a4748a54b416b",
+    "artificer-icons.js": "cfce8733fbc6d7780dffb3257574193571c119af4ecb0e2b6b664463fd1882c0",
+    "artificer-options.js": "42ac7f5ef40ba5e9ab0200918643a4250cdde3e8acb0635de47a2af80254e1ba",
+    "artificer-tabs.js": "baca4a848f6c3f06a24cf267e70469c0300c7a2c44f113d7f2f7d3dd6d513607",
+    "artificer-texture.css": "75a966cc21783b81aaf700b53d1dce085e05cce9dfb1f2c2e7c41c33394684f7",
+    "artificer-theme.js": "6c74ae83b3478e0d7c53ba75aa7b1f20aa150d2f5517f675a1c9afc304d3d671",
+    "artificer-tree.js": "77f206ac0f513ccfdfe08f579b3969d416b51408613f801521e0291686685181",
+    "artificer-whimsy.css": "53f5ace5110daaafedcc7e883064e389f93ca7f4e96992ffcb0c6d0ea89187f7",
+    "artificer-whimsy.js": "c52595d564148b52535621e82eb5a90cf1a60dc1e4e2d53219e40e51860fefd5",
+    "artificer.css": "0f309efa033d5fa0651c5942de883213adccf0c39b01e18624098e0c59244114",
+    "print.css": "5626d042b576f9f987f7a95154e6a6b4da45b51f0bcf468918359625ad02946f",
+    "tokens.json": "48740a223f53e41f109f36f0d544169b9afbcdf3748907bd6a96d21bb2dd8a1c",
+    "ARTIFICER-CHEATSHEET.md": "8a7d6ec46c6ff0d8fa734a541999c028e5b18467eeb262ecd6a19e3ea2d82180"
+  }
+}

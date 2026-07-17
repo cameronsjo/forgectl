@@ -1,0 +1,153 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   ARTIFICER · Texture · v0.12.0  (the third — and ceiling — sanctioned carve)
+   ─────────────────────────────────────────────────────────────────────────
+   Artificer's surfaces are flat solid fills by doctrine. This file is the
+   bounded place that relaxes that — material honesty, not decoration. Read
+   themes/CLAUDE.md § Texture and themes/_research/lane1-texture-decision.md
+   before reaching for it.
+
+   The rule the system kept saying but never drew: the dark floor is "ink", the
+   light floor is "paper", the language is apothecary / deco / speakeasy. These
+   tokens make that literal — WITHOUT adding hue (grain is desaturated; lines
+   are drawn from --border/--fg only) and WITHOUT motion (texture is static;
+   page-grain travels with the page, it does not animate).
+
+   Opt-in only. The class IS the switch — a surface is flat until you reach for
+   a texture. HARD BOUNDS (enforced by taste, documented here):
+     • Never on data, status, or errors — same load-bearing exclusion as Whimsy.
+     • One texture per surface. Don't stack grain + line + depth.
+     • Heroes stay flat + type-led. The flowing wordmark IS the hero's texture;
+       a grain/plate field behind a full-bleed hero fights it. (Page-grain is
+       the one exception — a whole-page substrate, opt-in, capped at "whisper".)
+     • Web layer only. The editor themes are generated from the palette and
+       cannot carry CSS texture — themes/_build.mjs never sees this file.
+
+   Depends on artificer.css (--border, --fg, --accent, --bg-raised, --radius-*,
+   --dur-max, --ease, --shadow-overlay).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── knobs ─────────────────────────────────────────────────────────────── */
+  --tex-dot-gap:        14px;   /* dot-matrix lattice pitch. Sweet spot 14; 12–16. */
+  --tex-fiber-strength: 0.5;   /* document-fiber intensity (0–1).               */
+  --tex-paper-grain:    0.22;  /* page-grain level. 0.22 = Faint · 0.45 = Whisper. */
+  --tex-line-ink:       var(--border);  /* deco lines are token ink, never raw color. */
+  --tex-line-a:         70%;   /* line ink alpha (dark).                */
+
+  /* Desaturated fiber noise — the paper/ink tooth. No hue, blended into surface. */
+  --tex-noise-fiber: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23f)'/%3E%3C/svg%3E");
+  /* Page-grain speckle — noise baked as ALPHA so it shows with normal
+     compositing (blend-mode independent, renders reliably). Light grains on
+     ink; the light-theme block below swaps to ink grains on paper. */
+  --tex-speckle: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='s'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='matrix' values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 1 0 0 0 0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='1.1' intercept='-0.45'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23s)'/%3E%3C/svg%3E");
+}
+
+/* Light (paper) retunes — the lines read too strong on cream with the dark
+   --border at full alpha and pick up a bluish cast; ride the border ink softer.
+   The page-grain speckle inverts to ink grains so it shows on paper. */
+:root[data-theme="light"] {
+  --tex-line-a: 68%;
+  --tex-speckle: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='s'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='matrix' values='0 0 0 0 0.12 0 0 0 0 0.11 0 0 0 0 0.20 1 0 0 0 0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='1.1' intercept='-0.45'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23s)'/%3E%3C/svg%3E");
+}
+
+/* ═══ 1 · GRAIN ═══════════════════════════════════════════════════════════
+   Two grains for two surfaces. Dots = engineered lattice for TOOL surfaces.
+   Fiber = irregular paper tooth for DOCUMENT surfaces. Both desaturated. */
+
+/* dot-matrix — regular lattice, never mottles type. Pitch on --tex-dot-gap. */
+.tex-dots { position: relative; isolation: isolate; }
+.tex-dots::after {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background-image: radial-gradient(circle at center,
+    color-mix(in oklab, var(--fg) 52%, transparent) 0.5px, transparent 1.1px);
+  background-size: var(--tex-dot-gap) var(--tex-dot-gap);
+  opacity: 0.5;
+}
+
+/* fiber — desaturated noise blended into the surface (overlay on ink, soft-
+   light on paper) so it modulates value without adding hue. */
+.tex-grain { position: relative; isolation: isolate; }
+.tex-grain::after {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background-image: var(--tex-noise-fiber); background-size: 160px 160px;
+  mix-blend-mode: overlay;
+  opacity: calc(var(--tex-fiber-strength) * 0.5);
+}
+:root[data-theme="light"] .tex-grain::after { mix-blend-mode: soft-light; opacity: calc(var(--tex-fiber-strength) * 0.85); }
+
+/* ═══ 2 · PAGE-GRAIN (optional · whole-page substrate) ════════════════════
+   A faint "printed on something" layer under the WHOLE page. Put .tex-paper on
+   the page wrapper (a positioned ancestor of your content); it lays a speckle
+   pseudo-element behind everything that SCROLLS WITH the page (absolute, not
+   fixed — a fixed grain reads as dirt on glass when content slides past it).
+   Two levels only: Faint (default) and .tex-paper--whisper. Nothing louder
+   ships — Subtle/Medium were explicitly rejected. Content must establish its
+   own stacking context above the grain. */
+.tex-paper { position: relative; }
+.tex-paper > * { position: relative; z-index: 1; }
+.tex-paper::before {
+  content: ""; position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background-image: var(--tex-speckle); background-size: 150px 150px;
+  opacity: var(--tex-paper-grain);
+}
+.tex-paper--whisper { --tex-paper-grain: 0.45; }
+
+/* ═══ 3 · DECO LINE-TEXTURE (ink, not material) ═══════════════════════════
+   Hatch / cross / flute / pinstripe — drawn ONLY from token ink, so they add
+   no color and sidestep the no-raw-color rule entirely. Editorial, not
+   material. Best on empty states, section bands, card/aside spines. */
+.tex-line { position: relative; isolation: isolate; }
+.tex-line::after {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+}
+:root[data-theme="light"] .tex-line::after { opacity: 0.55; }  /* paper reads softer */
+
+/* hatch — fine diagonal apothecary tooth */
+.tex-line--hatch::after {
+  background-image: repeating-linear-gradient(45deg,
+    transparent 0 7px,
+    color-mix(in oklab, var(--tex-line-ink) var(--tex-line-a), transparent) 7px 8px);
+}
+/* cross — hatch on both diagonals */
+.tex-line--cross::after {
+  background-image:
+    repeating-linear-gradient(45deg,  transparent 0 7px, color-mix(in oklab, var(--tex-line-ink) var(--tex-line-a), transparent) 7px 8px),
+    repeating-linear-gradient(-45deg, transparent 0 7px, color-mix(in oklab, var(--tex-line-ink) var(--tex-line-a), transparent) 7px 8px);
+}
+/* flute — paired vertical hairlines, the speakeasy column */
+.tex-line--flute::after {
+  background-image: repeating-linear-gradient(90deg,
+    transparent 0 13px,
+    color-mix(in oklab, var(--fg) 9%, transparent) 13px 14px,
+    transparent 14px 16px,
+    color-mix(in oklab, var(--fg) 9%, transparent) 16px 17px);
+}
+:root[data-theme="light"] .tex-line--flute::after {
+  background-image: repeating-linear-gradient(90deg,
+    transparent 0 13px,
+    color-mix(in oklab, var(--tex-line-ink) var(--tex-line-a), transparent) 13px 14px,
+    transparent 14px 16px,
+    color-mix(in oklab, var(--tex-line-ink) var(--tex-line-a), transparent) 16px 17px);
+}
+/* pinstripe — even single hairlines, tailoring not architecture */
+.tex-line--pinstripe::after {
+  background-image: repeating-linear-gradient(90deg,
+    transparent 0 15px,
+    color-mix(in oklab, var(--tex-line-ink) var(--tex-line-a), transparent) 15px 16px);
+}
+
+/* ═══ 4 · RAISED (outer-glow depth) ═══════════════════════════════════════
+   The one sanctioned elevation beyond the functional --shadow-overlay. The
+   card FACE stays flat (no interior gradient — that "uniform glow" look is a
+   canonical no); depth is a soft halo bleeding to the bottom-right, entirely
+   outside the border. A raised tile lit from outside. */
+.tex-raised {
+  box-shadow: 4px 6px 14px 1px rgba(0,0,0,.20), 9px 12px 30px 2px rgba(0,0,0,.14);
+}
+:root[data-theme="light"] .tex-raised {
+  box-shadow: 4px 6px 14px 1px rgba(32,32,62,.13), 9px 12px 30px 2px rgba(32,32,62,.09);
+}
+
+/* ═══ Reduced-motion ══════════════════════════════════════════════════════
+   Texture is static by design, so there is nothing to stop. Page-grain travels
+   with native scroll only — it has no animation. Documented for completeness. */

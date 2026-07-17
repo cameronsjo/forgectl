@@ -52,6 +52,9 @@ const logKeepDays = 7
 //	machine = ""                     # provenance label; default: short hostname
 //	[review]             # forgectl review — cross-project work inventory
 //	owners = ["cameronsjo"]          # gh search --owner scope; default cameronsjo
+//	[docs]               # forgectl docs — local markdown reader
+//	roots = ["~/Projects/notes"]     # extra root dirs indexed alongside cwd/./docs
+//	addr  = "127.0.0.1:4712"         # --addr default when the flag is omitted
 type Config struct {
 	NoIcons  bool           `toml:"no_icons"`
 	LogLevel string         `toml:"log_level"`
@@ -64,6 +67,7 @@ type Config struct {
 	Clean    CleanConfig    `toml:"clean"`
 	Sessions SessionsConfig `toml:"sessions"`
 	Review   ReviewConfig   `toml:"review"`
+	Docs     DocsConfig     `toml:"docs"`
 }
 
 // LaunchConfig is the [launch] section: base defaults plus directory-keyed
@@ -192,6 +196,21 @@ type ReviewConfig struct {
 // IsZero reports whether the [review] section was absent or empty.
 func (rc ReviewConfig) IsZero() bool {
 	return len(rc.Owners) == 0
+}
+
+// DocsConfig is the [docs] section: extra root directories `forgectl docs`
+// indexes alongside its built-in defaults (cwd, ./docs), and the bind address
+// `serve` uses when --addr is omitted. A zero value means "section absent" —
+// internal/docs applies its own built-in defaults for whichever fields are
+// unset.
+type DocsConfig struct {
+	Roots []string `toml:"roots"`
+	Addr  string   `toml:"addr"`
+}
+
+// IsZero reports whether the [docs] section was absent or empty.
+func (dc DocsConfig) IsZero() bool {
+	return len(dc.Roots) == 0 && dc.Addr == ""
 }
 
 // Baked defaults for hearth's frozen OTLP transport. These are the values a
