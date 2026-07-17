@@ -86,6 +86,7 @@ forgectl env set KEY [--file .env] [--clipboard]             # value from piped 
 forgectl env get KEY --clipboard [--file .env]               # value to clipboard only; no print path exists
 forgectl env check [--file .env] [--example .env.example]    # missing/extra keys, names only; exit 1 iff missing
 forgectl env redact [--file .env]                            # print file with values masked ****
+#   --file must name an env file (.env, .env.*, *.env); --any-file overrides, TTY-confirmed only
 ```
 
 The `fx` alias is available after install:
@@ -114,14 +115,17 @@ forgectl env set API_KEY                                   # interactive, no ech
 
 - Clipboard contents are readable by every local process, and clipboard managers (Raycast, Maccy, Alfred, Paste) persist history to disk by default — a `get --clipboard`'d secret can outlive the command that copied it. Clear it: paste over the clipboard with something innocuous, or purge the specific entry from your clipboard manager's history (each has its own delete/clear-history command).
 - **Accepted, not fixed, in v1:** a hardlink read (`ln /outside/secret ./x.env`) can read a file outside the intended tree — but creating the hardlink already implies filesystem access, so this adds nothing an attacker with that access didn't already have; the *write* path is neutralized (`writeAtomic` renames a fresh inode, so a pre-existing hardlink to the target never receives the new content). A TOCTOU window exists between `Locate` and the write — accepted for a local, single-operator CLI; openat-style hardening is overkill here.
-- **Agent-write threat model, one line:** running `env set`/`env get` under an agent grants that agent write authority over repo-contained env files for the duration of the session — containment (refuses outside the git repo), 0600 permissions, and atomic writes bound the blast radius, but they don't remove the authority itself.
+- **Agent-write threat model, one line:** running `env set`/`env get` under an agent grants that agent write authority over repo-contained **env files** for the duration of the session — containment (refuses outside the git repo), the env-file-name rule (below), 0600 permissions, and atomic writes bound the blast radius, but they don't remove the authority itself.
 
 **Safety notes:**
 
 - Values never appear in argv, stdout, or log output — every value-bearing operation lives inside the domain package, not the CLI layer.
 - Every write lands at `0600`; a looser pre-existing mode is tightened and reported (`tightened <file> to 0600`) rather than silently left alone.
 - `--file` is refused unless it resolves inside the current git repository (walk-up `.git` detection, symlink-escape checked) — no editing a `.env` outside the repo you're working in.
+- **`--file` must also name an env file** — `.env`, `.env.*` (`.env.local`, `.env.prod`, `.env.staging`, `.env.example`), or `*.env`. Repo-containment alone is not a bound worth having: `.git/config` is inside the repo, and `KEY=value` is valid git-config syntax, so an unconstrained `--file` turns `env set` into `core.sshCommand` — arbitrary code execution on the next `git fetch`. `.envrc` (direnv executes it) and `Makefile` (`KEY=value` is valid make) are the same shape. A blocklist would be whack-a-mole against every future execute-on-read format, so the allowlist is the bound. The point of this tool is to be the thing you hand an agent *instead of* raw shell; it must not be a shell in a trench coat.
+- **`--any-file` overrides that rule, and only a human can use it.** It requires an interactive confirmation on a real terminal; with no TTY — every agent, every CI job, every piped invocation — it refuses outright. A flag an agent can type is not a bound on an agent; the TTY gate is the bound, and the flag is just how a human reaches it.
 - `--clipboard` is macOS-only (shells out to `pbcopy`/`pbpaste`); it errors clearly on other platforms rather than silently no-op'ing.
+- Secret **lengths** stay out of the logs too: `env` builds its clipboard client with `clip.WithSensitive()`, which drops the byte-count the clipboard layer otherwise logs at `info`. A length is signal — it distinguishes key types and tracks rotations — which is the same reason `redact` masks to a fixed `****` rather than revealing length.
 
 ## How it fits together
 
