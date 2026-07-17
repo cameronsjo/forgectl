@@ -248,32 +248,33 @@ func parseLine(data []byte, pos int) (Line, int) {
 		inline = lastContent[rel:]
 	}
 
-	// A non-empty, non-comment trailer after the closing quote means the
-	// choice of "which quote closes the value" is ambiguous — bash itself
-	// treats quote-adjacent text as concatenation (a"b"c is one word), so
-	// the trailer could belong to the value, not a comment. Parse refuses
-	// rather than guessing: guessing wrong is a security AND correctness
-	// bug at once — Get would silently return the TRUNCATED prefix (a user
-	// copies a broken credential believing it's whole) while redact prints
-	// the untouched trailer as if it were safe comment text, verbatim —
-	// leaking everything after the ambiguous close (e.g. embedded JSON
-	// with its own internal quotes, or a single-quoted value containing an
-	// apostrophe). Refusing an ambiguous line beats silently truncating
-	// it.
+	// What follows the closing quote decides whether this is a clean pair
+	// with a comment, or an ambiguous line we must refuse. The rule is the
+	// shell's own: a '#' begins a comment ONLY when it is preceded by
+	// whitespace. `KEY="v" # note` is value `v` plus a comment; `KEY="v"#x`
+	// is the single concatenated word `v#x` — the '#' glued to the close is
+	// value data, not a comment marker (bash: `a"b"#c` is one word). So:
 	//
-	// A leading '#' is NOT enough to trust the trailer as a comment. The one
-	// thing this line has proven is that it contains an unescaped copy of the
-	// value's own quote character; on that line a '#' is no more reliably a
-	// comment boundary than any other byte. `KEY="{"#k":"secret"}"` closes at
-	// the quote after `{`, and its `#k":"secret"}"` trailer would be printed
-	// verbatim. So a '#'-led trailer is a comment only when it holds NO
-	// further copy of the value's own quote char — that further quote is the
-	// exact tell that the close we picked was a guess. A genuine comment
-	// (`API="v" # note`, or even `KEY='v' # say "hi"` — a different quote
-	// char) carries none and is preserved; anything else masks whole.
-	if trailer := strings.TrimLeft(inline, " \t"); trailer != "" {
-		ambiguous := trailer[0] != '#' || strings.IndexByte(trailer, quote) >= 0
-		if ambiguous {
+	//   - trailer empty or all-whitespace  → clean pair (benign trailing ws)
+	//   - whitespace, then '#', then …     → clean pair, that tail is a comment
+	//   - anything else (a '#' glued to the close, non-'#' text, or a '#'
+	//     reached without crossing whitespace) → the close is ambiguous
+	//
+	// Refusing the ambiguous line (KindMalformed, masked whole) beats the
+	// two ways guessing fails at once: redact would print the trailer as if
+	// it were safe comment text — leaking a secret glued after the quote
+	// (`KEY="v"#sk_live_…`, embedded JSON, a single-quoted value with an
+	// apostrophe) — while Get would hand back the TRUNCATED prefix, a broken
+	// credential a caller copies believing it whole. An earlier fix keyed on
+	// the value's own quote char reappearing in the trailer; that was the
+	// wrong tell — a glued secret carrying no quote sailed straight through.
+	// Whitespace-before-'#' is the discriminator that actually holds.
+	if inline != "" {
+		trimmed := strings.TrimLeft(inline, " \t")
+		hadLeadingSpace := len(trimmed) < len(inline)
+		allWhitespace := trimmed == ""
+		isComment := hadLeadingSpace && strings.HasPrefix(trimmed, "#")
+		if !allWhitespace && !isComment {
 			return Line{Kind: KindMalformed, Raw: rawLines}, finalNext
 		}
 	}

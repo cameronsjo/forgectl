@@ -249,20 +249,25 @@ func TestDocument_AmbiguousSingleQuoteApostrophe_MalformedNoLeak(t *testing.T) {
 	assertNoSecretInOutput(t, secretTail, "", redacted)
 }
 
-func TestDocument_HashTrailerWithOwnQuote_MalformedNoLeak(t *testing.T) {
-	// The residual from the second review: a trailer that STARTS with '#'
-	// but is not a comment — the value's own quote character appears again
-	// inside it, which is the tell that the close we picked was a guess. A
-	// leading '#' must not buy the trailer trust on the one line that has
-	// proven it holds an unescaped quote. Each case carries a secret AFTER
-	// the '#'; none may reach the redacted output.
+func TestDocument_HashGluedToClose_MalformedNoLeak(t *testing.T) {
+	// The residual across two review passes: a '#' glued directly to the
+	// closing quote is bash CONCATENATION (`KEY="v"#x` is the single word
+	// v#x), not a comment — the trailer is value data and must never reach
+	// redact's output. The discriminator is whitespace BEFORE the '#', not
+	// anything about quote chars: every case here carries a secret glued
+	// after a '#' with no preceding space, and most have no further copy of
+	// the value's own quote (the exact shape that slipped past the earlier
+	// same-quote-char fix — drop the stray closing quote and the leak
+	// returned).
 	cases := []struct {
 		name, src, sentinel string
 	}{
-		{"json_hash_key", `KEY="{"#note":"` + "sk_live_HASHLEAK_A" + `"}"` + "\n", "sk_live_HASHLEAK_A"},
-		{"double_quote_frag", `TOKEN="abc"#frag-` + "sk_live_HASHLEAK_B" + `"` + "\n", "sk_live_HASHLEAK_B"},
-		{"url_fragment_quote", `URL="https://h/p"#s-` + "S3NTINEL_HASHLEAK_C" + `"` + "\n", "S3NTINEL_HASHLEAK_C"},
-		{"single_quote_hash", "DB='p@ss'#tail-" + "S3NTINEL_HASHLEAK_D" + "'\n", "S3NTINEL_HASHLEAK_D"},
+		{"double_no_trailing_quote", "TOKEN=\"abc\"#frag-sk_live_GLUE_A\n", "sk_live_GLUE_A"},
+		{"url_fragment_no_quote", "URL=\"https://h/p\"#s-S3NTINEL_GLUE_B\n", "S3NTINEL_GLUE_B"},
+		{"plain_glued", "KEY=\"v\"#sk_live_GLUE_C\n", "sk_live_GLUE_C"},
+		{"single_quote_glued", "DB='pw'#glued-sk_live_GLUE_D\n", "sk_live_GLUE_D"},
+		{"space_after_hash_only", "X=\"v\"# sk_live_GLUE_E\n", "sk_live_GLUE_E"},
+		{"json_internal_quote", `KEY="{"#note":"sk_live_GLUE_F"}"` + "\n", "sk_live_GLUE_F"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -278,23 +283,26 @@ func TestDocument_HashTrailerWithOwnQuote_MalformedNoLeak(t *testing.T) {
 				t.Errorf("Redacted() = %q, want %q", redacted, want)
 			}
 			assertNoSecretInOutput(t, tc.sentinel, "", redacted)
-			// The correctness half: Get must not hand back a truncated value.
-			if v, ok := doc.Get("KEY"); ok {
-				t.Errorf("Get returned %q for an ambiguous line; want not-found", v)
+			// Correctness half: Get must not hand back a truncated prefix.
+			for _, k := range []string{"TOKEN", "URL", "KEY", "DB", "X"} {
+				if v, ok := doc.Get(k); ok {
+					t.Errorf("Get(%s) returned %q for an ambiguous line; want not-found", k, v)
+				}
 			}
 		})
 	}
 }
 
-func TestDocument_CommentWithDifferentQuoteChar_Preserved(t *testing.T) {
-	// The precision boundary: a genuine comment may contain the OTHER quote
-	// char without making the value's close ambiguous. A double-quoted value
-	// closed cleanly, then `# say "hi"` — the '"' here does not reopen the
-	// value's own single... nor vice-versa. These must stay KindPair with the
-	// comment preserved, or the fix has over-masked legitimate input.
+func TestDocument_WhitespaceLedComment_Preserved(t *testing.T) {
+	// The precision boundary: a genuine comment is separated from the close
+	// by whitespace and may contain any quote char in its text. These must
+	// stay KindPair and round-trip byte-for-byte, or the fix has over-masked
+	// legitimate input. Trailing whitespace with no comment is benign too.
 	cases := []string{
-		`API="v" # it's fine` + "\n",    // double-quoted value, apostrophe in comment
-		"NOTE='v' # say \"hi\" there\n", // single-quoted value, double-quote in comment
+		`API="v" # it's fine` + "\n",    // apostrophe in the comment
+		"NOTE='v' # say \"hi\" there\n", // double-quote in the comment
+		"PLAIN=\"v\"   # spaced\n",      // several spaces before #
+		"TAIL=\"v\"   \n",               // trailing whitespace, no comment
 	}
 	for _, src := range cases {
 		doc, err := Parse(strings.NewReader(src))
