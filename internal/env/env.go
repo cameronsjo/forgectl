@@ -186,7 +186,7 @@ func parseFile(realPath string) (*Document, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", realPath, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	doc, err := Parse(f)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", realPath, err)

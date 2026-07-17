@@ -28,7 +28,7 @@ Behavior spec (complete — implementer resolves nothing else against intuition)
 - **`set KEY`**: `Args: ExactArgs(1)`. `ValidKey` first — refuse before touching the file or reading input. Source selection: `--clipboard` given → clipboard (wins even if stdin is also piped — deterministic, no exclusion error); else stdin not a TTY → read all of stdin; else interactive **no-echo prompt** (`Value for KEY: ` via `term.ReadPassword`). Strip exactly one trailing `\n` and a preceding `\r` from stdin/clipboard input (Windows-clipboard paste leaves no stray `\r`); prompt path returns no newline; interior whitespace never trimmed. **Empty value (zero bytes after strip) → refuse** (`empty value; refusing to set KEY to empty — edit the file directly if intended`). Duplicate key in file → **refuse**, naming lines (`duplicate key "KEY" at lines N,M; resolve manually`). Success prints `set KEY in <file>` (+ tighten note) — never the value.
 - **`get KEY --clipboard`**: `--clipboard` **required**; absent → error, copy nothing, print nothing. Present → value to clipboard; stdout gets only `copied KEY to clipboard`. Missing key → error naming the key only. **No value-print code path exists** — the "refuses TTY/pipe" property is structural.
 - **`check`**: compare key sets of `--file` vs `--example` (default `.env.example`), names only, sorted output under `missing:` / `extra:` headers. **Exit 1 iff any missing key; extra keys are reported but exit 0** (local-only secrets are benign). Missing `--example` file → its own clear error (`example file <path> not found`), nonzero, distinct from drift. Missing `--file` → same treatment. No `--strict`/`--missing-only` flags in v1 (declined — YAGNI; see Alternatives).
-- **`redact`**: masked file to stdout: every pair renders `KEY=****` (or `export KEY=****`) — **fixed 4-char mask, quotes dropped, no length hint**. Inline trailing comment preserved only when the value was quoted (unambiguous boundary); after an unquoted value, `#…` is part of the value → masked with it. Malformed assignment-shaped lines mask everything after the first `=` (lenient masking — a malformed key can't leak a value). Comments/blanks/order verbatim; EOL style + missing trailing newline reproduced. Missing file → error.
+- **`redact`**: masked file to stdout: every pair renders `KEY=****` (or `export KEY=****`) — **fixed 4-char mask, quotes dropped, no length hint**. Inline trailing comment preserved only when the value was quoted (unambiguous boundary); after an unquoted value, `#…` is part of the value → masked with it. **Corrected post-ship (shipped behavior, not this draft's original text):** a malformed assignment-shaped line masks **WHOLE** — the entire line collapses to a single `****`, with no "everything before the first `=`" preservation. That earlier scheme under-masked two real cases: an unterminated quoted value at EOF (a truncated PEM's base64 body lines contain `=` padding, so keeping the pre-`=` prefix leaked key material) and a hand-mangled assignment whose key portion is itself secret-ish. Comments/blanks/order verbatim; EOL style + missing trailing newline reproduced. Missing file → error.
 - **Refusal-message discipline (all commands):** an error must never echo the rejected *argument* — `env set KEY=VALUE` (typo'd value inside the key arg) and `env get VALUE`-shaped mistakes would otherwise leak via stderr. Errors name the *rule* (`key must match [A-Za-z_][A-Za-z0-9_]*; values are piped or --clipboard, never argv`), the *key name* (only when it validated), and *paths* — never the offending token, never a value.
 
 The `set` long help documents the blessed patterns, non-inline producers first:
@@ -82,15 +82,20 @@ func Diff(file, example *Document) (missing, extra []string)
 
 ### Safety rails (`internal/env/locate.go`)
 
+**Corrected post-ship (shipped behavior, not this draft's original text):** `Locate` grew an `allowAnyFile bool` param (the `--any-file` escape hatch) and now enforces the env-filename allowlist itself rather than leaving it to callers; its resolution steps 1-4 below were extracted into an exported `ResolveTarget(fileFlag, cwd string) (resolved string, exists bool, err error)` so the CLI's `--any-file` confirmation can bind to the canonical resolved path (`internal/cli/env.go`'s `resolveAllowAnyFile`) without a second, divergent resolution implementation — `Locate` is now a thin wrapper: call `ResolveTarget`, then apply the name check.
+
 ```go
-func Locate(fileFlag, cwd string) (realPath string, exists bool, err error)
+func ResolveTarget(fileFlag, cwd string) (resolved string, exists bool, err error)
+func Locate(fileFlag, cwd string, allowAnyFile bool) (realPath string, exists bool, err error)
 ```
 
 1. Absolutize `--file` against cwd.
 2. Repo root: pure-Go **walk-up** for a `.git` entry (dir or file — worktrees); none → refuse (`not inside a git repository`). (Verified: no existing up-walk helper in forgectl; this part is genuinely new.)
 3. `EvalSymlinks` the root; resolve the file (`EvalSymlinks` the file if it exists — follows a symlinked `.env` to its real target; else its parent dir, which must exist, + base name).
 4. **Containment: call `sandbox.WithinWorkspace(root, real)`** (`internal/sandbox/sandbox.go:111-125`) — the existing, tested primitive already used by clean/quarantine/pr; do **not** reimplement `Rel`+`..` checking. (Decision: reuse over a standalone security-critical copy — one audited containment mechanism in the binary beats five; if sandbox ever changes for worktree reasons, its four existing security-relevant call sites break too, so env is not uniquely coupled.)
-5. New files allowed when the parent resolves inside the repo; read commands error clearly on a missing file.
+5. **Corrected post-ship:** an EXISTING target that resolves to anything other than a regular file (a directory, a FIFO) is refused — `EvalSymlinks` resolves both fine, but handing either to `parseFile`'s `os.Open` errors oddly (directory) or blocks forever (FIFO with no writer).
+6. Unless `allowAnyFile`, refuse anything whose RESOLVED basename isn't `IsEnvFileName`.
+7. New files allowed when the parent resolves inside the repo; read commands error clearly on a missing file.
 
 ### Write discipline (`internal/env/write.go`)
 
@@ -104,7 +109,7 @@ No value ever passed to `slog`, error strings, argv, or Runner args (`pbcopy` va
 
 **Create:** `internal/env/{document,env,locate,write}.go` + co-located `*_test.go`; `internal/cli/env.go` + `internal/cli/env_test.go`.
 **Modify:** `internal/cli/modules.go` (register), `internal/cli/modules_test.go` (pins 16→17 + `"env"`), `README.md` (`### env` block).
-**Reuse verbatim (do not modify):** `internal/clip/clip.go`, `internal/exec/exec.go`, `internal/module/module.go`, **`internal/sandbox/sandbox.go` (`WithinWorkspace`)**.
+**Reuse (do not modify):** `internal/exec/exec.go`, `internal/module/module.go`, **`internal/sandbox/sandbox.go` (`WithinWorkspace`)**. **Corrected post-ship:** `internal/clip/clip.go` is NOT reused verbatim — it gained a `WithSensitive()` option (env's clipboard client is built with it, suppressing the byte-length field the clipboard layer otherwise logs at `info`, since a length is itself signal about a secret).
 
 ## Commit sequence (one PR)
 
