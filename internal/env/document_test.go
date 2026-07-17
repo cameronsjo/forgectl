@@ -493,7 +493,7 @@ func TestDocument_Set_HostileKey_RefusedNoLineMutation(t *testing.T) {
 		// shape is NOT required here (this key contains no '\n'/'=' of its
 		// own, but IS the class of hostile-shaped argument Set must never
 		// echo regardless of which ValidKey rule it trips, or none at all).
-		"secret-shaped": "sk_live_51H8xY2eZvKYlo2C\ninjected=line",
+		"secret-shaped": "SEKRIT_valuelikelooking_ab12cd34\ninjected=line",
 	}
 	for name, key := range cases {
 		t.Run(name, func(t *testing.T) {

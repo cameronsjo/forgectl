@@ -86,7 +86,6 @@ func ResolveTarget(fileFlag, cwd string) (resolved string, exists bool, err erro
 		return "", false, fmt.Errorf("resolve repository root %s: %w", root, err)
 	}
 
-	resolved = ""
 	if r, rerr := filepath.EvalSymlinks(abs); rerr == nil {
 		resolved = r
 		exists = true

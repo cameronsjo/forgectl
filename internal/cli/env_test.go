@@ -489,7 +489,7 @@ func TestEnvSetCmd_EmptyStdin_KeyShapedSecretArg_NoTokenEcho(t *testing.T) {
 	forceNonTTY(t)
 	slogBuf := captureSlog(t)
 
-	const keyShapedSecret = "sk_live_51H8xY2eZvKYlo2C"
+	const keyShapedSecret = "SEKRIT_valuelikelooking_ab12cd34"
 	client, _ := envFixture()
 	cmd := newEnvCmdForClient(client)
 	cmd.SetIn(strings.NewReader(""))
