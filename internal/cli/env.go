@@ -49,7 +49,11 @@ func resolveAllowAnyFile(anyFile bool, file string) (bool, error) {
 		return false, nil
 	}
 	if !isTerminal() {
-		return false, errors.New("--any-file requires an interactive terminal")
+		// Phrased to lead with a word, not the flag: fang title-cases the
+		// first token when it renders an error, so "--any-file requires …"
+		// reaches the user as "--Any-File requires …" — a flag spelling
+		// that does not exist and that someone will reasonably try to type.
+		return false, errors.New("an interactive terminal is required for --any-file")
 	}
 	ok, err := confirmAnyFile(fmt.Sprintf("%s is not a recognized env file (.env, .env.*, or *.env) — operate on it anyway?", file))
 	if err != nil {
