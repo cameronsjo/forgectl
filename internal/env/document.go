@@ -14,6 +14,7 @@ package env
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -431,7 +432,21 @@ func (d *Document) Get(key string) (string, bool) {
 // but Redacted always renders straight from these fields regardless of
 // dirty state, so stale Quote/Inline would otherwise leak a comment that no
 // longer corresponds to anything.
+//
+// Set is EXPORTED and renders key verbatim into the file (see encode) — a
+// key containing '\n' or '=' would corrupt the file or inject an extra
+// line/assignment. internal/cli already validates via ValidKey before ever
+// calling into this package, but Set re-checks here as defense-in-depth at
+// the exported package boundary: a direct domain-package caller (present or
+// future, inside or outside this repo) gets the same guarantee without
+// having to know the CLI enforces it upstream. The error is deliberately
+// generic — never key itself — for the same reason errInvalidKey never
+// echoes its argument: a key-shaped secret could be the argument.
 func (d *Document) Set(key, value string) error {
+	if !ValidKey(key) {
+		return errors.New("invalid key")
+	}
+
 	var idxs []int
 	for i, l := range d.Lines {
 		if l.Kind == KindPair && l.Key == key {

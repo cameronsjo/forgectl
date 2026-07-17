@@ -22,6 +22,11 @@ package env
 //       when the source had no trailing newline
 //   [x] A key appearing more than once is refused, naming every line it
 //       appears on — and never echoes the rejected value
+//   [x] A hostile key (embedded '\n', embedded '=', or a secret-shaped
+//       invalid key) is refused BEFORE any line search or mutation, and the
+//       error never echoes any part of the key — defense-in-depth at Set's
+//       exported boundary, since encode() would otherwise render key
+//       verbatim into the file
 //   [x] encode() picks bare vs single- vs double-quote correctly
 //   [x] Double-quote escape order is pinned (backslash, then '"', then '$',
 //       then newline) — round-trips through a real Parse, not just the
@@ -477,6 +482,52 @@ func TestDocument_Set_DuplicateKeyRefusedNamingLines(t *testing.T) {
 	// Refused — the document must be untouched.
 	if got := string(doc.Bytes()); got != src {
 		t.Errorf("Bytes() after refused Set = %q, want unchanged %q", got, src)
+	}
+}
+
+func TestDocument_Set_HostileKey_RefusedNoLineMutation(t *testing.T) {
+	cases := map[string]string{
+		"embedded newline": "FOO\nBAR",
+		"embedded equals":  "FOO=BAR",
+		// A plausible real secret pasted into the key slot — valid ValidKey
+		// shape is NOT required here (this key contains no '\n'/'=' of its
+		// own, but IS the class of hostile-shaped argument Set must never
+		// echo regardless of which ValidKey rule it trips, or none at all).
+		"secret-shaped": "sk_live_51H8xY2eZvKYlo2C\ninjected=line",
+	}
+	for name, key := range cases {
+		t.Run(name, func(t *testing.T) {
+			src := "# header\nFOO=1\n"
+			doc, err := Parse(strings.NewReader(src))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+
+			err = doc.Set(key, "value")
+			if err == nil {
+				t.Fatalf("Set(%q) returned nil error, want a refusal", key)
+			}
+			if strings.Contains(err.Error(), key) {
+				t.Errorf("error %q echoes the rejected key", err.Error())
+			}
+			// Every line of key's own content must also be absent — an
+			// embedded-newline key could otherwise leak piecewise even if
+			// the whole string never matches.
+			for _, line := range strings.Split(key, "\n") {
+				if line == "" {
+					continue
+				}
+				if strings.Contains(err.Error(), line) {
+					t.Errorf("error %q echoes a line of the rejected key: %q", err.Error(), line)
+				}
+			}
+
+			// Refused before any line search or mutation — the document
+			// must be byte-for-byte untouched.
+			if got := string(doc.Bytes()); got != src {
+				t.Errorf("Bytes() after refused Set = %q, want unchanged %q", got, src)
+			}
+		})
 	}
 }
 
