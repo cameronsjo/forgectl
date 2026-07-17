@@ -105,6 +105,16 @@ func ValidKey(key string) bool {
 // byte-verbatim round-trip of every untouched line (see Bytes): comments,
 // blanks, ordering, `export` prefixes, quote style, inline comments on
 // quoted values, CRLF vs LF, and a missing trailing newline.
+//
+// One documented exception: line-ending style is detected once, from the
+// file's first terminator, and applied to the whole document on render. A
+// file whose lines UNIFORMLY use CRLF or uniformly use LF round-trips
+// byte-for-byte; a file that MIXES the two is normalized to the first
+// terminator seen when Bytes re-renders (which only happens on a Set-driven
+// write). Per-line terminator fidelity for a mixed-ending file is tracked
+// as a follow-up; a mixed-ending .env is rare and the normalization is
+// lossless as to content — only the line endings of otherwise-untouched
+// lines change.
 func Parse(r io.Reader) (*Document, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {

@@ -819,6 +819,27 @@ func TestEnvCheckCmd_MissingExampleFile_DistinctError(t *testing.T) {
 	}
 }
 
+func TestEnvCheckCmd_MissingFile_Errors(t *testing.T) {
+	// The sibling of the missing-example case: --file itself absent (an
+	// example present) must error too, before any drift comparison.
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, ".env.example"), []byte("A=\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+
+	client, _ := envFixture()
+	cmd := newEnvCmdForClient(client)
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"check"})
+
+	if err := cmd.ExecuteContext(context.Background()); err == nil {
+		t.Fatal("check with a missing --file returned nil error, want a refusal")
+	}
+}
+
 func TestEnvCheckCmd_FileAndExampleFlagsCompose(t *testing.T) {
 	repo := t.TempDir()
 	initEnvGitRepo(t, repo)
@@ -1098,6 +1119,44 @@ func TestEnvSetCmd_AnyFile_TTYConfirmedNo_Refused(t *testing.T) {
 	}
 	if string(got) != original {
 		t.Errorf(".git/config content changed: %q, want unchanged %q", got, original)
+	}
+}
+
+func TestEnvCheckCmd_AnyFile_ConfirmsBothFileAndExample(t *testing.T) {
+	// check resolves --file AND --example, so --any-file must gate each
+	// independently — two confirmations when both are non-env-named. This
+	// pins that the confirm seam is consulted twice, once per path, rather
+	// than a single gate covering both.
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, "file.cfg"), []byte("A=1\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "example.cfg"), []byte("A=\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile example: %v", err)
+	}
+	t.Chdir(repo)
+
+	prevTerm := isTerminal
+	isTerminal = func() bool { return true }
+	t.Cleanup(func() { isTerminal = prevTerm })
+
+	var confirmed []string
+	prevConfirm := confirmAnyFile
+	confirmAnyFile = func(msg string) (bool, error) { confirmed = append(confirmed, msg); return true, nil }
+	t.Cleanup(func() { confirmAnyFile = prevConfirm })
+
+	client, _ := envFixture()
+	cmd := newEnvCmdForClient(client)
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"check", "--file", "file.cfg", "--example", "example.cfg", "--any-file"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("check --any-file with both confirmations stubbed yes: %v", err)
+	}
+	if len(confirmed) != 2 {
+		t.Errorf("confirmAnyFile called %d time(s), want 2 (once per non-env path)", len(confirmed))
 	}
 }
 

@@ -25,8 +25,8 @@ var errNotInRepo = errors.New("not inside a git repository")
 // execution on the next `git fetch`. .envrc (direnv executes it) and
 // Makefile (KEY=value is valid make) are equivalent sinks, which is why a
 // .git-only blocklist would be insufficient; an allowlist is the only sound
-// shape here. Exported so the CLI can consult it for the --any-file
-// confirmation prompt's message.
+// shape here. Exported so the rule has a single home the tests pin directly
+// (locate_test.go) rather than only through Locate's many-branched path.
 func IsEnvFileName(base string) bool {
 	return base == ".env" || strings.HasPrefix(base, ".env.") || strings.HasSuffix(base, ".env")
 }
