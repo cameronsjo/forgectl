@@ -249,6 +249,67 @@ func TestDocument_AmbiguousSingleQuoteApostrophe_MalformedNoLeak(t *testing.T) {
 	assertNoSecretInOutput(t, secretTail, "", redacted)
 }
 
+func TestDocument_HashTrailerWithOwnQuote_MalformedNoLeak(t *testing.T) {
+	// The residual from the second review: a trailer that STARTS with '#'
+	// but is not a comment — the value's own quote character appears again
+	// inside it, which is the tell that the close we picked was a guess. A
+	// leading '#' must not buy the trailer trust on the one line that has
+	// proven it holds an unescaped quote. Each case carries a secret AFTER
+	// the '#'; none may reach the redacted output.
+	cases := []struct {
+		name, src, sentinel string
+	}{
+		{"json_hash_key", `KEY="{"#note":"` + "sk_live_HASHLEAK_A" + `"}"` + "\n", "sk_live_HASHLEAK_A"},
+		{"double_quote_frag", `TOKEN="abc"#frag-` + "sk_live_HASHLEAK_B" + `"` + "\n", "sk_live_HASHLEAK_B"},
+		{"url_fragment_quote", `URL="https://h/p"#s-` + "S3NTINEL_HASHLEAK_C" + `"` + "\n", "S3NTINEL_HASHLEAK_C"},
+		{"single_quote_hash", "DB='p@ss'#tail-" + "S3NTINEL_HASHLEAK_D" + "'\n", "S3NTINEL_HASHLEAK_D"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, err := Parse(strings.NewReader(tc.src))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if len(doc.Lines) != 1 || doc.Lines[0].Kind != KindMalformed {
+				t.Fatalf("Lines = %+v, want a single KindMalformed line", doc.Lines)
+			}
+			redacted := string(doc.Redacted())
+			if want := "****\n"; redacted != want {
+				t.Errorf("Redacted() = %q, want %q", redacted, want)
+			}
+			assertNoSecretInOutput(t, tc.sentinel, "", redacted)
+			// The correctness half: Get must not hand back a truncated value.
+			if v, ok := doc.Get("KEY"); ok {
+				t.Errorf("Get returned %q for an ambiguous line; want not-found", v)
+			}
+		})
+	}
+}
+
+func TestDocument_CommentWithDifferentQuoteChar_Preserved(t *testing.T) {
+	// The precision boundary: a genuine comment may contain the OTHER quote
+	// char without making the value's close ambiguous. A double-quoted value
+	// closed cleanly, then `# say "hi"` — the '"' here does not reopen the
+	// value's own single... nor vice-versa. These must stay KindPair with the
+	// comment preserved, or the fix has over-masked legitimate input.
+	cases := []string{
+		`API="v" # it's fine` + "\n",    // double-quoted value, apostrophe in comment
+		"NOTE='v' # say \"hi\" there\n", // single-quoted value, double-quote in comment
+	}
+	for _, src := range cases {
+		doc, err := Parse(strings.NewReader(src))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", src, err)
+		}
+		if len(doc.Lines) != 1 || doc.Lines[0].Kind != KindPair {
+			t.Fatalf("Parse(%q): Lines = %+v, want a single KindPair", src, doc.Lines)
+		}
+		if got := string(doc.Bytes()); got != src {
+			t.Errorf("Bytes() = %q, want byte-identical round-trip %q", got, src)
+		}
+	}
+}
+
 func TestDocument_QuotedRealTrailingComment_StillRoundTripsAndRedacts(t *testing.T) {
 	// The non-ambiguous case must be unaffected: a genuine trailing comment
 	// after a quoted value (first non-space byte of the trailer is '#')

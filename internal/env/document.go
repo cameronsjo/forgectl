@@ -260,8 +260,22 @@ func parseLine(data []byte, pos int) (Line, int) {
 	// with its own internal quotes, or a single-quoted value containing an
 	// apostrophe). Refusing an ambiguous line beats silently truncating
 	// it.
-	if trailer := strings.TrimLeft(inline, " \t"); trailer != "" && trailer[0] != '#' {
-		return Line{Kind: KindMalformed, Raw: rawLines}, finalNext
+	//
+	// A leading '#' is NOT enough to trust the trailer as a comment. The one
+	// thing this line has proven is that it contains an unescaped copy of the
+	// value's own quote character; on that line a '#' is no more reliably a
+	// comment boundary than any other byte. `KEY="{"#k":"secret"}"` closes at
+	// the quote after `{`, and its `#k":"secret"}"` trailer would be printed
+	// verbatim. So a '#'-led trailer is a comment only when it holds NO
+	// further copy of the value's own quote char — that further quote is the
+	// exact tell that the close we picked was a guess. A genuine comment
+	// (`API="v" # note`, or even `KEY='v' # say "hi"` — a different quote
+	// char) carries none and is preserved; anything else masks whole.
+	if trailer := strings.TrimLeft(inline, " \t"); trailer != "" {
+		ambiguous := trailer[0] != '#' || strings.IndexByte(trailer, quote) >= 0
+		if ambiguous {
+			return Line{Kind: KindMalformed, Raw: rawLines}, finalNext
+		}
 	}
 
 	value := decodeQuotedBody(data[bodyStart:closeIdx], quote)
