@@ -1160,6 +1160,84 @@ func TestEnvCheckCmd_AnyFile_ConfirmsBothFileAndExample(t *testing.T) {
 	}
 }
 
+// TestResolveAllowAnyFile_SymlinkBindsToResolvedPath is the regression test
+// for the fix binding --any-file's confirmation to the CANONICAL resolved
+// path rather than the raw --file argument: a `.env` symlinked to
+// `.git/config` must prompt with the real target, or a human approving
+// "--file .env --any-file" would be confirming a file they never saw.
+func TestResolveAllowAnyFile_SymlinkBindsToResolvedPath(t *testing.T) {
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	gitConfig := filepath.Join(repo, ".git", "config")
+	if err := os.WriteFile(gitConfig, []byte("[core]\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	link := filepath.Join(repo, ".env")
+	if err := os.Symlink(gitConfig, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	prevTerm := isTerminal
+	isTerminal = func() bool { return true }
+	t.Cleanup(func() { isTerminal = prevTerm })
+
+	var gotMsg string
+	prevConfirm := confirmAnyFile
+	confirmAnyFile = func(msg string) (bool, error) { gotMsg = msg; return true, nil }
+	t.Cleanup(func() { confirmAnyFile = prevConfirm })
+
+	allow, err := resolveAllowAnyFile(true, ".env", repo)
+	if err != nil {
+		t.Fatalf("resolveAllowAnyFile: %v", err)
+	}
+	if !allow {
+		t.Error("allow = false, want true")
+	}
+	if !strings.Contains(gotMsg, filepath.Join(".git", "config")) {
+		t.Errorf("confirm message = %q, want it to contain the RESOLVED path %s", gotMsg, filepath.Join(".git", "config"))
+	}
+	// The prompt's own boilerplate legitimately contains the substring
+	// ".env" ("…is not a recognized env file (.env, .env.*, or *.env)…"),
+	// so this checks for the RAW ARGUMENT quoted as the prompt's subject
+	// (the old, buggy form) rather than a bare ".env" substring match.
+	if strings.Contains(gotMsg, `".env" is not a recognized`) {
+		t.Errorf("confirm message = %q, want it bound to the resolved path, not the raw --file argument %q", gotMsg, ".env")
+	}
+}
+
+// TestResolveAllowAnyFile_EnvNamedTarget_NoConfirmation proves an
+// already-env-named resolved target skips the confirmation seam entirely —
+// Locate's own name check would pass it regardless of --any-file, so a
+// prompt would be pure noise (and, on a non-tty run, a spurious refusal).
+func TestResolveAllowAnyFile_EnvNamedTarget_NoConfirmation(t *testing.T) {
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("A=1\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	calls := 0
+	prevConfirm := confirmAnyFile
+	confirmAnyFile = func(string) (bool, error) { calls++; return true, nil }
+	t.Cleanup(func() { confirmAnyFile = prevConfirm })
+	// isTerminal is deliberately left at its real value: if the confirm
+	// seam were reached at all on a non-tty test run, the TTY gate would
+	// refuse before ever calling confirmAnyFile — so allow=true with 0
+	// calls proves the env-named short-circuit fired, not just that the
+	// prompt was skipped for some other reason.
+
+	allow, err := resolveAllowAnyFile(true, ".env", repo)
+	if err != nil {
+		t.Fatalf("resolveAllowAnyFile: %v", err)
+	}
+	if !allow {
+		t.Error("allow = false, want true (an env-named target needs no confirmation)")
+	}
+	if calls != 0 {
+		t.Errorf("confirmAnyFile called %d time(s), want 0 for an already-env-named target", calls)
+	}
+}
+
 func TestEnvKeysCmd_OutsideRepo_Refused(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")

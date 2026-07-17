@@ -13,11 +13,17 @@ package env
 //   [x] Refused: a symlinked FILE whose target resolves outside the repo
 //   [x] Refused: a symlinked intermediate DIRECTORY whose target resolves
 //       outside the repo (the not-yet-existing-file path)
+//   [x] Refused: an existing target that resolves to a directory, not a
+//       regular file
+//   [x] Refused: an existing target that resolves to a FIFO, not a regular
+//       file
 
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -145,6 +151,47 @@ func TestLocate_SymlinkedFileEscape_Refused(t *testing.T) {
 	_, _, err := Locate(".env", repo, false)
 	if err == nil {
 		t.Fatal("Locate through a symlinked file escaping the repo returned nil error, want a refusal")
+	}
+}
+
+func TestLocate_ExistingDirectory_Refused(t *testing.T) {
+	root := t.TempDir()
+	initGitRepo(t, root)
+	// A directory named ".env" — EvalSymlinks resolves it fine (it's not a
+	// symlink issue), but it is not a regular file: os.Open/parseFile on a
+	// directory errors oddly rather than reading it as .env content.
+	if err := os.Mkdir(filepath.Join(root, ".env"), 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	_, _, err := Locate(".env", root, false)
+	if err == nil {
+		t.Fatal("Locate against a directory target returned nil error, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("error = %q, want it to name the regular-file rule", err.Error())
+	}
+}
+
+func TestLocate_ExistingFIFO_Refused(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("FIFOs are a unix concept; forgectl only ships linux/darwin builds")
+	}
+	root := t.TempDir()
+	initGitRepo(t, root)
+	fifoPath := filepath.Join(root, ".env")
+	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
+		t.Skipf("Mkfifo unsupported in this environment: %v", err)
+	}
+
+	// A FIFO with no writer would block os.Open/parseFile forever — Locate
+	// must refuse it before any caller ever opens it.
+	_, _, err := Locate(".env", root, false)
+	if err == nil {
+		t.Fatal("Locate against a FIFO target returned nil error, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("error = %q, want it to name the regular-file rule", err.Error())
 	}
 }
 

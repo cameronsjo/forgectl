@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -40,13 +41,29 @@ var (
 // repo file (.git/config, .envrc, a Makefile — any KEY=value-shaped sink),
 // and an agent can pass --any-file exactly as easily as it can pass --file.
 // What it cannot do is answer an interactive confirmation a human grants in
-// seconds — so the TTY gate, not the flag, is the actual bound. When
-// anyFile is false this is a no-op (the ordinary env-file-name check in
-// Locate applies); when anyFile is true it either refuses outright (no
-// tty) or gates the skip on an explicit "yes".
-func resolveAllowAnyFile(anyFile bool, file string) (bool, error) {
+// seconds — so the TTY gate, not the flag, is the actual bound.
+//
+// When anyFile is false this is a no-op (the ordinary env-file-name check
+// in Locate applies). When anyFile is true, file is resolved to its
+// CANONICAL path first (env.ResolveTarget — the exact symlink-following,
+// repo-containing resolution Locate itself performs) so the confirmation a
+// human grants is bound to what will actually be touched, not the raw
+// --file argument: a `.env` symlinked to `.git/config` must prompt with
+// ".git/config", never ".env" — prompting with the raw argument would let a
+// human approve a file they never saw. A resolved target that's already
+// env-named needs no confirmation at all (Locate's own name check would
+// pass it regardless), so that case returns allow=true without ever
+// consulting confirmAnyFile.
+func resolveAllowAnyFile(anyFile bool, file, cwd string) (bool, error) {
 	if !anyFile {
 		return false, nil
+	}
+	resolved, _, err := envpkg.ResolveTarget(file, cwd)
+	if err != nil {
+		return false, err
+	}
+	if envpkg.IsEnvFileName(filepath.Base(resolved)) {
+		return true, nil
 	}
 	if !isTerminal() {
 		// Phrased to lead with a word, not the flag: fang title-cases the
@@ -55,12 +72,12 @@ func resolveAllowAnyFile(anyFile bool, file string) (bool, error) {
 		// that does not exist and that someone will reasonably try to type.
 		return false, errors.New("an interactive terminal is required for --any-file")
 	}
-	ok, err := confirmAnyFile(fmt.Sprintf("%s is not a recognized env file (.env, .env.*, or *.env) — operate on it anyway?", file))
+	ok, err := confirmAnyFile(fmt.Sprintf("%q is not a recognized env file (.env, .env.*, or *.env) — operate on it anyway?", resolved))
 	if err != nil {
 		return false, err
 	}
 	if !ok {
-		return false, fmt.Errorf("refusing %s: --any-file confirmation declined", file)
+		return false, fmt.Errorf("refusing %s: --any-file confirmation declined", filepath.Base(resolved))
 	}
 	return true, nil
 }
@@ -172,7 +189,7 @@ func newEnvKeysCmd(file *string, anyFile *bool) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			allow, err := resolveAllowAnyFile(*anyFile, *file)
+			allow, err := resolveAllowAnyFile(*anyFile, *file, cwd)
 			if err != nil {
 				return err
 			}
@@ -229,7 +246,7 @@ func newEnvSetCmd(client *envpkg.Client, file *string, anyFile *bool) *cobra.Com
 			if err != nil {
 				return err
 			}
-			allow, err := resolveAllowAnyFile(*anyFile, *file)
+			allow, err := resolveAllowAnyFile(*anyFile, *file, cwd)
 			if err != nil {
 				return err
 			}
@@ -300,7 +317,7 @@ func newEnvGetCmd(client *envpkg.Client, file *string, anyFile *bool) *cobra.Com
 			if err != nil {
 				return err
 			}
-			allow, err := resolveAllowAnyFile(*anyFile, *file)
+			allow, err := resolveAllowAnyFile(*anyFile, *file, cwd)
 			if err != nil {
 				return err
 			}
@@ -329,7 +346,7 @@ func newEnvCheckCmd(file *string, anyFile *bool) *cobra.Command {
 				return err
 			}
 
-			allowFile, err := resolveAllowAnyFile(*anyFile, *file)
+			allowFile, err := resolveAllowAnyFile(*anyFile, *file, cwd)
 			if err != nil {
 				return err
 			}
@@ -345,7 +362,7 @@ func newEnvCheckCmd(file *string, anyFile *bool) *cobra.Command {
 				return err
 			}
 
-			allowExample, err := resolveAllowAnyFile(*anyFile, example)
+			allowExample, err := resolveAllowAnyFile(*anyFile, example, cwd)
 			if err != nil {
 				return err
 			}
@@ -407,7 +424,7 @@ func newEnvRedactCmd(file *string, anyFile *bool) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			allow, err := resolveAllowAnyFile(*anyFile, *file)
+			allow, err := resolveAllowAnyFile(*anyFile, *file, cwd)
 			if err != nil {
 				return err
 			}

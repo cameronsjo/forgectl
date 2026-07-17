@@ -31,12 +31,14 @@ func IsEnvFileName(base string) bool {
 	return base == ".env" || strings.HasPrefix(base, ".env.") || strings.HasSuffix(base, ".env")
 }
 
-// Locate resolves fileFlag (a --file value, absolute or relative to cwd)
-// into its real, symlink-resolved path, refusing anything that isn't
-// contained inside the git repository forgectl is running in AND doesn't
-// look like an env file (see IsEnvFileName) — unless allowAnyFile is true,
-// which the CLI only ever sets after an interactive --any-file confirmation
-// (see internal/cli/env.go's resolveAllowAnyFile):
+// ResolveTarget performs Locate's resolution steps — everything except the
+// env-file-name allowlist — so a caller can learn the CANONICAL path a
+// --file argument resolves to before deciding whether an allowlist bypass
+// even needs a confirmation (see internal/cli/env.go's
+// resolveAllowAnyFile, which binds its --any-file prompt to this return
+// value rather than the raw, possibly-symlinked argument). Locate itself is
+// a thin wrapper: call ResolveTarget, then apply the name check — ONE
+// resolution implementation, not two.
 //
 //  1. Absolutize fileFlag against cwd.
 //  2. Walk up from cwd for a .git entry (directory or file — a worktree's
@@ -50,14 +52,17 @@ func IsEnvFileName(base string) bool {
 //     used by clean/quarantine/pr. This catches both a literal ../ escape
 //     and a symlink (existing file, or an intermediate directory) that
 //     resolves outside the repo.
-//  5. Unless allowAnyFile, refuse anything whose RESOLVED basename isn't
-//     IsEnvFileName — checked post-symlink-resolution so a symlink named
-//     ".env" can't launder a non-env target past this check.
+//  5. For an EXISTING target, refuse anything that isn't a regular file.
+//     filepath.EvalSymlinks happily resolves a directory or a FIFO; handing
+//     either to parseFile's os.Open would either error strangely (a
+//     directory) or block forever (a FIFO with no writer). A not-yet-
+//     existing target (the set-new-file path) has nothing to stat, so it's
+//     unaffected.
 //
 // A new file is allowed exactly when its parent directory resolves inside
 // the repo; exists reports false so callers know they're about to create,
 // not overwrite.
-func Locate(fileFlag, cwd string, allowAnyFile bool) (realPath string, exists bool, err error) {
+func ResolveTarget(fileFlag, cwd string) (resolved string, exists bool, err error) {
 	if fileFlag == "" {
 		return "", false, errors.New("env: file path required")
 	}
@@ -81,9 +86,9 @@ func Locate(fileFlag, cwd string, allowAnyFile bool) (realPath string, exists bo
 		return "", false, fmt.Errorf("resolve repository root %s: %w", root, err)
 	}
 
-	real := ""
+	resolved = ""
 	if r, rerr := filepath.EvalSymlinks(abs); rerr == nil {
-		real = r
+		resolved = r
 		exists = true
 	} else {
 		parent := filepath.Dir(abs)
@@ -91,18 +96,43 @@ func Locate(fileFlag, cwd string, allowAnyFile bool) (realPath string, exists bo
 		if perr != nil {
 			return "", false, fmt.Errorf("resolve parent directory of %s: %w", filepath.Base(abs), perr)
 		}
-		real = filepath.Join(realParent, filepath.Base(abs))
+		resolved = filepath.Join(realParent, filepath.Base(abs))
 	}
 
-	if !sandbox.WithinWorkspace(realRoot, real) {
+	if !sandbox.WithinWorkspace(realRoot, resolved) {
 		return "", false, fmt.Errorf("refusing %s: outside repository %s", filepath.Base(abs), realRoot)
 	}
 
-	if !allowAnyFile && !IsEnvFileName(filepath.Base(real)) {
-		return "", false, fmt.Errorf("refusing %s: not an env file (want .env, .env.*, or *.env)", filepath.Base(real))
+	if exists {
+		fi, serr := os.Lstat(resolved)
+		if serr != nil {
+			return "", false, fmt.Errorf("stat %s: %w", filepath.Base(resolved), serr)
+		}
+		if !fi.Mode().IsRegular() {
+			return "", false, fmt.Errorf("refusing %s: not a regular file", filepath.Base(resolved))
+		}
 	}
 
-	return real, exists, nil
+	return resolved, exists, nil
+}
+
+// Locate resolves fileFlag via ResolveTarget, then — unless allowAnyFile is
+// true — refuses anything whose RESOLVED basename isn't IsEnvFileName,
+// checked post-symlink-resolution so a symlink named ".env" can't launder a
+// non-env target past this check. allowAnyFile is the CLI's --any-file
+// escape hatch, only ever set true after an interactive confirmation (see
+// internal/cli/env.go's resolveAllowAnyFile).
+func Locate(fileFlag, cwd string, allowAnyFile bool) (realPath string, exists bool, err error) {
+	resolved, exists, err := ResolveTarget(fileFlag, cwd)
+	if err != nil {
+		return "", false, err
+	}
+
+	if !allowAnyFile && !IsEnvFileName(filepath.Base(resolved)) {
+		return "", false, fmt.Errorf("refusing %s: not an env file (want .env, .env.*, or *.env)", filepath.Base(resolved))
+	}
+
+	return resolved, exists, nil
 }
 
 // findRepoRoot walks up from start looking for a .git entry — a directory
