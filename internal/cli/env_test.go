@@ -30,12 +30,16 @@ package cli
 //   [x] Unhappy: a missing key errors
 //   [x] Unhappy: a `get VALUE`-shaped mistake echoes nothing
 //
-// check
+// check (forgectl#104/#105: typed exit codes + --json)
 //   [x] Happy: no drift → exit 0
-//   [x] Unhappy: a missing key → exit 1
-//   [x] Happy: an extra key is reported but stays exit 0
-//   [x] Unhappy: a missing --example file is its own distinct error
+//   [x] Unhappy: a missing key → exit 1 (drift)
+//   [x] Unhappy: an extra-only key → exit 1 (drift), reported under extra:
+//   [x] Unhappy: a missing --file → exit 2, distinct from drift
+//   [x] Unhappy: a missing --example file → exit 2, distinct from drift
 //   [x] Happy: --file and --example compose
+//   [x] Happy: --json emits {"missing":[...],"extra":[...]} on a clean check
+//   [x] Happy: --json reports missing/extra names, still exit 1
+//   [x] Happy: --json arrays are [] (never null) on a clean check
 //
 // redact
 //   [x] Happy: masks values; a multiline PEM-shaped fixture leaves no body
@@ -51,6 +55,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -730,10 +735,14 @@ func TestEnvCheckCmd_ExtraOnly_PrintsOnlyExtraSection(t *testing.T) {
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"check"})
 
-	// Extra keys are reported but never fail: a local-only secret is
-	// ordinary and benign.
-	if err := cmd.ExecuteContext(context.Background()); err != nil {
-		t.Fatalf("extra-only drift returned %v, want nil (extra must not fail)", err)
+	// forgectl#104: drift is missing AND/OR extra — an extra-only key is
+	// still reported keys-only, but it now fails the check (exit 1) too.
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("extra-only drift returned nil error, want exit 1 (drift)")
+	}
+	if code := ExitCode(err); code != 1 {
+		t.Errorf("ExitCode(err) = %d, want 1 (drift, not an absent-file failure)", code)
 	}
 	if strings.Contains(stdout.String(), "missing:") {
 		t.Errorf("stdout = %q, want no missing: section when nothing is missing", stdout.String())
@@ -765,12 +774,15 @@ func TestEnvCheckCmd_MissingKey_ExitOne(t *testing.T) {
 	if err == nil {
 		t.Fatal("check with a missing key returned nil error, want exit 1")
 	}
+	if code := ExitCode(err); code != 1 {
+		t.Errorf("ExitCode(err) = %d, want 1 (drift)", code)
+	}
 	if !strings.Contains(stdout.String(), "  B") {
 		t.Errorf("stdout = %q, want the missing key B reported under missing:", stdout.String())
 	}
 }
 
-func TestEnvCheckCmd_ExtraKey_ReportedExitZero(t *testing.T) {
+func TestEnvCheckCmd_ExtraKey_ReportedExitOne(t *testing.T) {
 	repo := t.TempDir()
 	initEnvGitRepo(t, repo)
 	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("A=1\nLOCAL_ONLY=2\n"), 0o600); err != nil {
@@ -788,15 +800,21 @@ func TestEnvCheckCmd_ExtraKey_ReportedExitZero(t *testing.T) {
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"check"})
 
-	if err := cmd.ExecuteContext(context.Background()); err != nil {
-		t.Fatalf("unexpected error (extra keys must not fail check): %v", err)
+	// forgectl#104: extra keys are still reported (an agent needs the
+	// names), but they now count as drift — exit 1, not exit 0.
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("check with an extra key returned nil error, want exit 1 (drift)")
+	}
+	if code := ExitCode(err); code != 1 {
+		t.Errorf("ExitCode(err) = %d, want 1 (drift)", code)
 	}
 	if !strings.Contains(stdout.String(), "  LOCAL_ONLY") {
 		t.Errorf("stdout = %q, want LOCAL_ONLY reported under extra:", stdout.String())
 	}
 }
 
-func TestEnvCheckCmd_MissingExampleFile_DistinctError(t *testing.T) {
+func TestEnvCheckCmd_MissingExampleFile_ExitTwo(t *testing.T) {
 	repo := t.TempDir()
 	initEnvGitRepo(t, repo)
 	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("A=1\n"), 0o600); err != nil {
@@ -817,11 +835,17 @@ func TestEnvCheckCmd_MissingExampleFile_DistinctError(t *testing.T) {
 	if !strings.Contains(err.Error(), "example file") {
 		t.Errorf("error %q, want it to name the example file distinctly from a drift failure", err.Error())
 	}
+	// forgectl#104: an absent file is a distinct failure class from drift —
+	// exit 2, not the exit 1 a missing/extra key comparison produces.
+	if code := ExitCode(err); code != 2 {
+		t.Errorf("ExitCode(err) = %d, want 2 (absent file, not drift)", code)
+	}
 }
 
-func TestEnvCheckCmd_MissingFile_Errors(t *testing.T) {
+func TestEnvCheckCmd_MissingFile_ExitTwo(t *testing.T) {
 	// The sibling of the missing-example case: --file itself absent (an
-	// example present) must error too, before any drift comparison.
+	// example present) must error too, before any drift comparison, with
+	// the same distinct exit code.
 	repo := t.TempDir()
 	initEnvGitRepo(t, repo)
 	if err := os.WriteFile(filepath.Join(repo, ".env.example"), []byte("A=\n"), 0o600); err != nil {
@@ -835,8 +859,90 @@ func TestEnvCheckCmd_MissingFile_Errors(t *testing.T) {
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"check"})
 
-	if err := cmd.ExecuteContext(context.Background()); err == nil {
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
 		t.Fatal("check with a missing --file returned nil error, want a refusal")
+	}
+	if code := ExitCode(err); code != 2 {
+		t.Errorf("ExitCode(err) = %d, want 2 (absent file, not drift)", code)
+	}
+}
+
+func TestEnvCheckCmd_JSON_Clean_EmptyArraysNotNull(t *testing.T) {
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("A=1\nB=2\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".env.example"), []byte("A=\nB=\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+
+	client, _ := envFixture()
+	cmd := newEnvCmdForClient(client)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"check", "--json"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var got checkJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout = %q, not valid JSON: %v", stdout.String(), err)
+	}
+	if got.Missing == nil || len(got.Missing) != 0 {
+		t.Errorf("Missing = %#v, want a non-nil empty slice", got.Missing)
+	}
+	if got.Extra == nil || len(got.Extra) != 0 {
+		t.Errorf("Extra = %#v, want a non-nil empty slice", got.Extra)
+	}
+	// --json suppresses the human "matches" reassurance too — a caller
+	// parsing stdout as JSON must not see it interleaved with prose, and
+	// nothing about a clean check needs to reach stderr either.
+	if stderr.String() != "" {
+		t.Errorf("stderr = %q, want empty in --json mode", stderr.String())
+	}
+}
+
+func TestEnvCheckCmd_JSON_Drift_ReportsNamesAndExitsOne(t *testing.T) {
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("A=1\nLOCAL_ONLY=2\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".env.example"), []byte("A=\nB=\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+
+	client, _ := envFixture()
+	cmd := newEnvCmdForClient(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"check", "--json"})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("check --json with drift returned nil error, want exit 1")
+	}
+	if code := ExitCode(err); code != 1 {
+		t.Errorf("ExitCode(err) = %d, want 1 (drift)", code)
+	}
+
+	var got checkJSON
+	if jsonErr := json.Unmarshal(stdout.Bytes(), &got); jsonErr != nil {
+		t.Fatalf("stdout = %q, not valid JSON: %v", stdout.String(), jsonErr)
+	}
+	if len(got.Missing) != 1 || got.Missing[0] != "B" {
+		t.Errorf("Missing = %#v, want [\"B\"]", got.Missing)
+	}
+	if len(got.Extra) != 1 || got.Extra[0] != "LOCAL_ONLY" {
+		t.Errorf("Extra = %#v, want [\"LOCAL_ONLY\"]", got.Extra)
 	}
 }
 
