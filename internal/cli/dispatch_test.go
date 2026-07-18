@@ -89,6 +89,40 @@ func TestShouldLaunchTUI(t *testing.T) {
 	}
 }
 
+// TestDecideRoute covers the headless TTY gate (forgectl#103): a menu-eligible
+// invocation (bare, unknown top-level verb, or unknown subverb) opens the TUI
+// only when tty is true; headless, it must route through Cobra/fang instead
+// so cobra's own "unknown command" + "did you mean" suggestion path runs
+// rather than silently opening the menu and exiting 0. tty is a plain bool
+// here (not a real isatty call) so this never needs a real terminal.
+func TestDecideRoute(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	cases := []struct {
+		name string
+		args []string
+		tty  bool
+		want menuRoute
+	}{
+		{"bare invoke, tty draws the menu", []string{}, true, routeTUI},
+		{"bare invoke, headless routes to cobra", []string{}, false, routeHeadlessMenu},
+		{"unknown top-level verb, tty draws the menu (kept)", []string{"frobnicate"}, true, routeTUI},
+		{"unknown top-level verb, headless routes to cobra", []string{"frobnicate"}, false, routeHeadlessMenu},
+		{"unknown tmux subverb, tty draws the menu", []string{"tmux", "frobnicate"}, true, routeTUI},
+		{"unknown tmux subverb, headless routes to cobra", []string{"tmux", "frobnicate"}, false, routeHeadlessMenu},
+		{"known verb dispatches regardless of tty (interactive)", []string{"tmux", "ls"}, true, routeDispatch},
+		{"known verb dispatches regardless of tty (headless)", []string{"tmux", "ls"}, false, routeDispatch},
+		{"version flag dispatches even headless", []string{"--version"}, false, routeDispatch},
+		{"help flag dispatches even headless", []string{"--help"}, false, routeDispatch},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := decideRoute(root, tc.args, tc.tty); got != tc.want {
+				t.Errorf("decideRoute(%v, tty=%v) = %v, want %v", tc.args, tc.tty, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCobraAliasResolution verifies the registry-driven Cobra aliases resolve
 // — root.Find(["tmux","rm"]) must land on the kill command.
 func TestCobraAliasResolution(t *testing.T) {
