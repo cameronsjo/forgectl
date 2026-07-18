@@ -89,10 +89,16 @@ func TestHasSession_ExitCode(t *testing.T) {
 	argsEqual(t, present.Last().Args, []string{"has-session", "-t", "alpha"})
 }
 
+// fakeLookPathFound always resolves — used by tests that exercise sesh
+// delegation but must not depend on a real sesh binary on PATH.
+func fakeLookPathFound(bin string) (string, error) {
+	return "/usr/bin/" + bin, nil
+}
+
 func TestPick_DelegatesToSesh(t *testing.T) {
 	// Pick must shell out to `sesh connect <name>` interactively (it takes the tty).
 	fake := &exec.FakeRunner{}
-	c := New(fake, WithBins("tmux", "sesh"))
+	c := New(fake, WithBins("tmux", "sesh"), WithLookPath(fakeLookPathFound))
 	if err := c.Pick(context.Background(), "projectx"); err != nil {
 		t.Fatalf("Pick: %v", err)
 	}
@@ -110,11 +116,32 @@ func TestSeshList_Parse(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) {
 		return "main\nprojectx\n~/Projects/foo", nil
 	}}
-	c := New(fake, WithBins("tmux", "sesh"))
+	c := New(fake, WithBins("tmux", "sesh"), WithLookPath(fakeLookPathFound))
 	names, err := c.SeshList(context.Background())
 	if err != nil {
 		t.Fatalf("SeshList: %v", err)
 	}
 	argsEqual(t, names, []string{"main", "projectx", "~/Projects/foo"})
 	argsEqual(t, fake.Last().Args, []string{"list"})
+}
+
+func TestPick_SeshNotFound(t *testing.T) {
+	// Without sesh on PATH, both sesh-delegating calls must fail with a clear,
+	// attributed error rather than shelling out and letting exec.Runner's
+	// generic not-found error surface unattributed.
+	notFound := func(string) (string, error) {
+		return "", errors.New("exec: \"sesh\": executable file not found in $PATH")
+	}
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithBins("tmux", "sesh"), WithLookPath(notFound))
+
+	if err := c.Pick(context.Background(), "projectx"); err == nil {
+		t.Fatal("Pick: expected error when sesh is not on PATH")
+	}
+	if _, err := c.SeshList(context.Background()); err == nil {
+		t.Fatal("SeshList: expected error when sesh is not on PATH")
+	}
+	if last := fake.Last(); last.Name != "" {
+		t.Errorf("expected no exec call when the sesh guard fails, got %+v", last)
+	}
 }

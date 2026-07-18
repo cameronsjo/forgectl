@@ -5,7 +5,9 @@
 package tmux
 
 import (
+	"fmt"
 	"os"
+	osexec "os/exec"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -20,6 +22,11 @@ type Client struct {
 	// (the bit the old bash `s` script got subtly wrong). Defaults to a live
 	// check of $TMUX.
 	insideTmux func() bool
+
+	// lookPath resolves a binary name to a PATH entry — injectable (like
+	// insideTmux) so tests don't require a real sesh on PATH. Defaults to
+	// os/exec.LookPath.
+	lookPath func(string) (string, error)
 }
 
 // Option configures a Client at construction.
@@ -38,6 +45,12 @@ func WithBins(tmuxBin, seshBin string) Option {
 	}
 }
 
+// WithLookPath overrides the PATH-resolution check sesh calls use to confirm
+// sesh is installed — used in tests to avoid depending on a real sesh binary.
+func WithLookPath(fn func(string) (string, error)) Option {
+	return func(c *Client) { c.lookPath = fn }
+}
+
 // New builds a Client over the given Runner.
 func New(run exec.Runner, opts ...Option) *Client {
 	c := &Client{
@@ -47,11 +60,23 @@ func New(run exec.Runner, opts ...Option) *Client {
 		insideTmux: func() bool {
 			return os.Getenv("TMUX") != ""
 		},
+		lookPath: osexec.LookPath,
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
 	return c
+}
+
+// checkSeshAvailable confirms sesh resolves on PATH before a sesh-delegating
+// call shells out to it, giving a clear "sesh not found" error instead of
+// letting exec.Runner's generic not-found error surface unattributed.
+// Mirrors ClaudePath's guard in internal/launch.
+func (c *Client) checkSeshAvailable() error {
+	if _, err := c.lookPath(c.seshBin); err != nil {
+		return fmt.Errorf("sesh not found on PATH: %w", err)
+	}
+	return nil
 }
 
 // InsideTmux reports whether we're running inside a tmux client (so jumps use
