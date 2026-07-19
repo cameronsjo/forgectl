@@ -47,6 +47,9 @@ func newLaunchDoctorCmd(cfg config.Config) *cobra.Command {
 				}
 			default:
 				fmt.Fprintf(out, "%s launch config: %s (%d project profile(s))\n", launchOKMark, src, len(lc.Projects))
+				if w := legacyShadowWarning(cfg); w != "" {
+					fmt.Fprintf(out, "%s %s\n", launchWarnMark, w)
+				}
 			}
 
 			// Bench telemetry injection is informational, not a health signal —

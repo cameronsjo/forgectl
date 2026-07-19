@@ -118,6 +118,9 @@ func runLaunch(cfg config.Config, rest []string) (handled bool, err error) {
 // the requested mode, merges env, and execs claude in place. On success it does
 // not return (syscall.Exec replaces the process).
 func launchExec(cfg config.Config, args []string) error {
+	if w := legacyShadowWarning(cfg); w != "" {
+		fmt.Fprintln(os.Stderr, "forgectl: "+w)
+	}
 	lc, _ := resolveLaunchConfig(cfg)
 
 	cwd, err := os.Getwd()
@@ -159,6 +162,38 @@ func launchExec(cfg config.Config, args []string) error {
 	env := launch.MergeEnv(os.Environ(), extra)
 	slog.Debug("Preparing to exec claude.", "path", claudePath, "argc", len(claudeArgs), "match", profile.Match)
 	return launch.Exec(claudePath, claudeArgs, env)
+}
+
+// legacyShadowWarning reports the one-line #114 fallback-cliff warning when
+// config.toml declares a live [launch] section AND a legacy claunch.conf is
+// still present on disk. resolveLaunchConfig returns config.toml's [launch]
+// wholesale the instant it's non-zero — even a bare [launch.defaults]
+// binary_path — so any [[project]] profiles left in the legacy file are
+// silently orphaned: no error, no stderr, exit 0. This is presence-not-parse
+// (mirroring LoadLegacyLaunch's treatment of a malformed legacy file as
+// absent): the warning fires on the legacy file merely existing, regardless
+// of whether it would even parse, because either way it's being ignored.
+// Returns "" when there's nothing to warn about.
+//
+// The remedy MUST point at `forgectl launch edit`, not `launch init`: init's
+// own RunE refuses with "config already has a [launch] section" (see
+// launch_init.go) whenever cfg.Launch is non-zero — which is exactly the only
+// state this warning ever fires in. Pointing at init here would be a
+// guaranteed dead end.
+func legacyShadowWarning(cfg config.Config) string {
+	if cfg.Launch.IsZero() {
+		return "" // legacy honored, nothing shadowed
+	}
+	path, err := config.LegacyLaunchPath()
+	if err != nil {
+		return ""
+	}
+	if _, err := os.Stat(path); err != nil {
+		return "" // no legacy file present — nothing to shadow
+	}
+	return "legacy claunch config at " + path + " is present but ignored — config.toml's " +
+		"[launch] section takes precedence; migrate its profiles into [launch] and remove it " +
+		"(edit it with `forgectl launch edit`)"
 }
 
 // resolveLaunchConfig returns the [launch] section from config.toml plus a
