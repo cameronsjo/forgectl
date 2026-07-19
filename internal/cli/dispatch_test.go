@@ -79,6 +79,7 @@ func TestShouldLaunchTUI(t *testing.T) {
 		{"no-icons plus known verb stays with cobra", []string{"--no-icons", "tmux", "ls"}, false},
 		// Flag + unknown verb still routes to TUI
 		{"no-icons plus unknown verb launches TUI", []string{"--no-icons", "frobnicate"}, true},
+		{"bare version verb stays with cobra", []string{"version"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
