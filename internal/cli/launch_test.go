@@ -515,6 +515,70 @@ func TestIntegration_LegacyFallback(t *testing.T) {
 	}
 }
 
+// newBareHarness builds a harness with no legacy claunch.conf and, when
+// writeConfig is true, a config.toml that declares no [launch] section — so
+// `which`'s terminal fallback branch is exercised for both a present file
+// lacking [launch] and a truly absent file (#57).
+func newBareHarness(t *testing.T, writeConfig bool) *harness {
+	t.Helper()
+
+	cwd, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve symlinks on temp cwd: %v", err)
+	}
+	binDir := t.TempDir()
+	outFile := filepath.Join(t.TempDir(), "claude.out")
+	base := t.TempDir()
+
+	writeStubClaude(t, binDir)
+
+	if writeConfig {
+		cfgPath := childConfigPath(base)
+		if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+			t.Fatalf("mkdir config dir: %v", err)
+		}
+		if err := os.WriteFile(cfgPath, []byte("[bench]\ntelemetry = true\n"), 0o644); err != nil {
+			t.Fatalf("write config.toml (no [launch] section): %v", err)
+		}
+	}
+
+	return &harness{
+		bin:     builtBinPath,
+		cwd:     cwd,
+		binDir:  binDir,
+		outFile: outFile,
+		env: []string{
+			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"HOME=" + base,
+			"XDG_CONFIG_HOME=" + base,
+			"FORGECTL_TEST_OUT=" + outFile,
+		},
+	}
+}
+
+func TestIntegration_Which_ConfigSourceLabel(t *testing.T) {
+	t.Run("file present, no [launch] section", func(t *testing.T) {
+		h := newBareHarness(t, true)
+		stdout, _ := h.run(t, "which")
+
+		if !strings.Contains(stdout, "no [launch] section") {
+			t.Errorf("which output missing %q; got:\n%s", "no [launch] section", stdout)
+		}
+		if strings.Contains(stdout, "(missing") {
+			t.Errorf("which output unexpectedly contains %q for a present config; got:\n%s", "(missing", stdout)
+		}
+	})
+
+	t.Run("file truly absent", func(t *testing.T) {
+		h := newBareHarness(t, false)
+		stdout, _ := h.run(t, "which")
+
+		if !strings.Contains(stdout, "missing") {
+			t.Errorf("which output missing %q; got:\n%s", "missing", stdout)
+		}
+	})
+}
+
 // --- small local helpers (avoid extra imports for one-line ops) ----------
 
 func equalArgs(a, b []string) bool {

@@ -176,5 +176,11 @@ func resolveLaunchConfig(cfg config.Config) (config.LaunchConfig, string) {
 		return legacy, path + " (legacy)"
 	}
 	path, _ := config.ConfigPath()
+	if _, err := os.Stat(path); err == nil {
+		// config.toml exists but declares no [launch] section (and there is no
+		// legacy claunch.conf). Distinguish this from a truly absent file so the
+		// label doesn't send the reader chasing a phantom missing-file problem (#57).
+		return cfg.Launch, path + " (no [launch] section — built-in defaults)"
+	}
 	return cfg.Launch, path + " (missing — built-in defaults)"
 }
