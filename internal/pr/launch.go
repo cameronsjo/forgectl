@@ -100,7 +100,7 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	profile.PermissionMode = "plan"
 
 	prompt := reviewPrompt
-	if sess.Local {
+	if sess.Ref.IsLocal() {
 		// Grant --add-dir for the escape-hatch findings dir. Without this, the
 		// permission-scoped Write(<dir>/**) allowlist rule is moot — Claude Code
 		// won't expose a path outside the launch cwd at all.
@@ -132,18 +132,17 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 // returns true. In headless / non-interactive mode the gate is not shown at
 // all: the review is staged (returned as not-posted), never auto-posted.
 //
-// A Local session is refused outright: there is no PR to post to, and
-// sess.Ref.Slug() for a local session resolves to the synthetic "local/<oid>"
-// identity — posting against it would fire an unintended `gh pr review`
-// network call, breaking the offline guarantee `pr local` exists to provide.
-// The check is doubled — sess.Local (set fresh by PrepareLocal, never
-// restored on breadcrumb reload) OR sess.Ref.IsLocal() (persisted, so it
-// still catches a reload-reconstituted Session, e.g. from a future verb
-// built on the loadSession pattern that Local's zero-value would miss).
+// A local (offline) review session is refused outright: there is no PR to
+// post to, and sess.Ref.Slug() for a local session resolves to the synthetic
+// "local/<oid>" identity — posting against it would fire an unintended
+// `gh pr review` network call, breaking the offline guarantee `pr local`
+// exists to provide. Ref.IsLocal() is the reload-safe predicate (persisted
+// via Ref.Owner) — it still catches a reload-reconstituted Session, e.g.
+// from a future verb built on the loadSession pattern.
 //
 // It returns whether a post actually fired.
 func (c *Client) PostReview(ctx context.Context, sess Session, review string, headless bool) (posted bool, err error) {
-	if sess.Local || sess.Ref.IsLocal() {
+	if sess.Ref.IsLocal() {
 		return false, fmt.Errorf("cannot post a review for a local session %q: there is no PR to post to", sess.Ref.String())
 	}
 	if headless || !c.isTTY() {

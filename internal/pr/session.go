@@ -25,11 +25,10 @@ type Session struct {
 	CreatedAt time.Time
 	DryRun    bool
 
-	// Local and FindingsDir are populated only in-process by PrepareLocal —
-	// never persisted to Breadcrumb, so they are meaningful on a freshly
-	// prepared Session and zero-valued after a reload via List/Attach/Teardown
-	// (same pattern HeadRef/HeadOid/HeadRepo already follow).
-	Local       bool
+	// FindingsDir is populated only in-process by PrepareLocal — never
+	// persisted to Breadcrumb, so it is meaningful on a freshly prepared
+	// Session and zero-valued after a reload via List/Attach/Teardown (same
+	// pattern HeadRef/HeadOid/HeadRepo already follow).
 	FindingsDir string // the one path outside Workspace the local review agent may write
 }
 

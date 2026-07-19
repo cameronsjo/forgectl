@@ -46,8 +46,8 @@ func (r Ref) String() string { return fmt.Sprintf("%s/%s#%d", r.Owner, r.Repo, r
 func (r Ref) Complete() bool { return r.Owner != "" && r.Repo != "" }
 
 // IsLocal reports whether ref identifies a synthetic local (offline) review
-// session rather than a real PR — the canonical, persisted-and-reload-safe
-// signal (unlike Session.Local, which is never restored from a breadcrumb).
+// session rather than a real PR — persisted via Ref.Owner, so it survives a
+// breadcrumb reload and is the canonical locality predicate.
 func (r Ref) IsLocal() bool { return r.Owner == localOwnerSentinel }
 
 // GitHub owner/repo charset: letters, digits, dot, underscore, hyphen. Kept

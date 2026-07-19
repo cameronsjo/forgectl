@@ -54,7 +54,7 @@ func TestPrepareLocal_DryRunCreatesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrepareLocal dry-run: %v", err)
 	}
-	if !sess.Local {
+	if !sess.Ref.IsLocal() {
 		t.Error("dry-run session should be marked Local")
 	}
 	if sess.Workspace != "" || sess.Path != "" || sess.FindingsDir != "" {
