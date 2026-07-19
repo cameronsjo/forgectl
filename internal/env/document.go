@@ -52,6 +52,14 @@ type Line struct {
 	// Bytes emits Raw byte-for-byte for any Line that hasn't been touched
 	// by Set.
 	Raw []string
+	// term holds each physical line's own terminator, parallel to Raw:
+	// "\r\n", "\n", or "" only for a final unterminated physical line (EOF
+	// with no trailing newline). Bytes and Redacted reproduce each
+	// untouched line's OWN terminator from this rather than one style for
+	// the whole document — the per-line fidelity a mixed CRLF/LF file
+	// needs. Unexported: it's a rendering-fidelity detail, not part of the
+	// Kind/Export/Key/Value/Quote/Inline surface callers reason about.
+	term []string
 
 	// Export, Key, Value, Quote, and Inline are populated only for KindPair
 	// (and, partially, for error-tolerant masking of KindMalformed via Raw).
@@ -75,15 +83,19 @@ type Line struct {
 }
 
 // Document is a parsed .env file: an ordered list of Lines plus the two
-// whole-file properties (line-ending style, trailing-newline presence)
-// needed to reproduce an untouched file byte-for-byte.
+// whole-file properties (dominant line-ending style, trailing-newline
+// presence) needed to reproduce an untouched file byte-for-byte. Per-line
+// terminator fidelity lives on each Line (see Line.term); crlf below is only
+// the DEFAULT used for a new or fallback terminator, not what every line
+// necessarily uses.
 type Document struct {
 	Lines []Line
 
-	// crlf is detected from the file's FIRST line terminator and applied
-	// uniformly on render — matching the pinned "preserve CRLF" behavior
-	// for consistently-terminated files; a document is not expected to mix
-	// terminator styles.
+	// crlf reports whether CRLF is the MAJORITY line terminator across the
+	// file. It supplies the default terminator for a Set-appended line and
+	// the fallback for any Line whose own term is unset — it is not applied
+	// uniformly to every line; each untouched Line reproduces its own
+	// recorded terminator instead (see Bytes).
 	crlf bool
 	// finalNL reports whether the source had a trailing newline after its
 	// last line. Set-append always leaves this true (an appended pair line
@@ -105,17 +117,21 @@ func ValidKey(key string) bool {
 // Parse reads a .env-format document, preserving everything needed for a
 // byte-verbatim round-trip of every untouched line (see Bytes): comments,
 // blanks, ordering, `export` prefixes, quote style, inline comments on
-// quoted values, CRLF vs LF, and a missing trailing newline.
+// quoted values, and a missing trailing newline — including PER-LINE CRLF
+// vs LF fidelity: each physical line records its own terminator (Line.term),
+// so a file that MIXES CRLF and LF lines round-trips every untouched line
+// byte-for-byte regardless of which other line a Set touches. A Set-dirty
+// or newly-appended line takes the file's DOMINANT terminator (majority
+// across all lines; see dominantEOL) rather than any specific neighbor's.
 //
-// One documented exception: line-ending style is detected once, from the
-// file's first terminator, and applied to the whole document on render. A
-// file whose lines UNIFORMLY use CRLF or uniformly use LF round-trips
-// byte-for-byte; a file that MIXES the two is normalized to the first
-// terminator seen when Bytes re-renders (which only happens on a Set-driven
-// write). Per-line terminator fidelity for a mixed-ending file is tracked
-// as a follow-up; a mixed-ending .env is rare and the normalization is
-// lossless as to content — only the line endings of otherwise-untouched
-// lines change.
+// One deliberate non-goal: line splitting is on '\n' only, so a lone '\r'
+// is never itself a terminator. A "classic Mac" (bare-CR-only) file parses
+// as a SINGLE physical line — the '\r' bytes are ordinary content — and
+// round-trips byte-verbatim as long as it's untouched, but collapses (like
+// any other line) the moment a Set re-encodes it. Recognizing bare CR as a
+// terminator is a materially riskier parser-model change (CR, LF, and CRLF
+// would all need independent tracking), and such files are effectively
+// extinct.
 func Parse(r io.Reader) (*Document, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -125,7 +141,7 @@ func Parse(r io.Reader) (*Document, error) {
 	if len(data) == 0 {
 		return doc, nil
 	}
-	doc.crlf, doc.finalNL = detectEOL(data)
+	doc.crlf, doc.finalNL = dominantEOL(data)
 
 	pos := 0
 	for pos < len(data) {
@@ -136,45 +152,64 @@ func Parse(r io.Reader) (*Document, error) {
 	return doc, nil
 }
 
-// detectEOL inspects data's first line terminator for CRLF vs LF, and
-// whether the file ends with a trailing newline. data must be non-empty.
-func detectEOL(data []byte) (crlf, finalNL bool) {
-	if idx := bytes.IndexByte(data, '\n'); idx > 0 && data[idx-1] == '\r' {
-		crlf = true
+// dominantEOL scans every line terminator in data and reports whether CRLF
+// is the MAJORITY style (a tie favors LF) — this is the default terminator
+// Bytes uses for a Set-dirty or appended line, and the fallback for any
+// Line whose own recorded terminator is empty. It also reports whether the
+// file ends with a trailing newline. data must be non-empty.
+func dominantEOL(data []byte) (crlf, finalNL bool) {
+	var crlfCount, lfCount int
+	for pos := 0; pos < len(data); {
+		idx := bytes.IndexByte(data[pos:], '\n')
+		if idx < 0 {
+			break
+		}
+		end := pos + idx
+		if end > pos && data[end-1] == '\r' {
+			crlfCount++
+		} else {
+			lfCount++
+		}
+		pos = end + 1
 	}
+	crlf = crlfCount > lfCount
 	finalNL = data[len(data)-1] == '\n'
 	return crlf, finalNL
 }
 
 // readPhysicalLine returns the content of the physical line starting at pos
-// (terminator stripped, CR stripped if present), and the position right
-// after its terminator — or len(data) if pos's line has no trailing
-// newline (the last line of a file missing a final newline).
-func readPhysicalLine(data []byte, pos int) (content string, next int, hasNL bool) {
+// (terminator stripped, CR stripped if present), that line's own terminator
+// — "\r\n", "\n", or "" if pos's line has no trailing newline (the last
+// line of a file missing a final newline) — and the position right after
+// the terminator (or len(data) in the no-newline case).
+func readPhysicalLine(data []byte, pos int) (content, term string, next int) {
 	idx := bytes.IndexByte(data[pos:], '\n')
 	if idx < 0 {
-		return string(data[pos:]), len(data), false
+		return string(data[pos:]), "", len(data)
 	}
 	end := pos + idx
 	raw := data[pos:end]
 	if len(raw) > 0 && raw[len(raw)-1] == '\r' {
 		raw = raw[:len(raw)-1]
+		term = "\r\n"
+	} else {
+		term = "\n"
 	}
-	return string(raw), end + 1, true
+	return string(raw), term, end + 1
 }
 
 // parseLine classifies the physical (or, for a multiline quoted pair,
 // physical-lines-spanning) line starting at pos, returning the Line and the
 // data offset right after everything it consumed.
 func parseLine(data []byte, pos int) (Line, int) {
-	content, next, _ := readPhysicalLine(data, pos)
+	content, term, next := readPhysicalLine(data, pos)
 	trimmed := strings.TrimLeft(content, " \t")
 
 	if trimmed == "" {
-		return Line{Kind: KindBlank, Raw: []string{content}}, next
+		return Line{Kind: KindBlank, Raw: []string{content}, term: []string{term}}, next
 	}
 	if trimmed[0] == '#' {
-		return Line{Kind: KindComment, Raw: []string{content}}, next
+		return Line{Kind: KindComment, Raw: []string{content}, term: []string{term}}, next
 	}
 
 	rest := trimmed
@@ -190,11 +225,11 @@ func parseLine(data []byte, pos int) (Line, int) {
 
 	eq := strings.IndexByte(rest, '=')
 	if eq < 0 {
-		return Line{Kind: KindMalformed, Raw: []string{content}}, next
+		return Line{Kind: KindMalformed, Raw: []string{content}, term: []string{term}}, next
 	}
 	key := rest[:eq]
 	if !ValidKey(key) {
-		return Line{Kind: KindMalformed, Raw: []string{content}}, next
+		return Line{Kind: KindMalformed, Raw: []string{content}, term: []string{term}}, next
 	}
 	valuePart := rest[eq+1:]
 
@@ -202,7 +237,7 @@ func parseLine(data []byte, pos int) (Line, int) {
 		// Bare value: the entire remainder of the line, verbatim — no
 		// comment boundary exists for an unquoted assignment (a trailing
 		// "# …" is part of the value, per the redact spec).
-		return Line{Kind: KindPair, Raw: []string{content}, Export: export, Key: key, Value: valuePart}, next
+		return Line{Kind: KindPair, Raw: []string{content}, term: []string{term}, Export: export, Key: key, Value: valuePart}, next
 	}
 
 	quote := valuePart[0]
@@ -224,27 +259,29 @@ func parseLine(data []byte, pos int) (Line, int) {
 		// through both redact and keys. None of the remaining file
 		// content is safe to treat as anything but "part of the value
 		// that never closed".
-		var rawLines []string
+		var rawLines, terms []string
 		cursor := pos
 		for cursor < len(data) {
-			c, n, _ := readPhysicalLine(data, cursor)
+			c, tm, n := readPhysicalLine(data, cursor)
 			rawLines = append(rawLines, c)
+			terms = append(terms, tm)
 			cursor = n
 		}
-		return Line{Kind: KindMalformed, Raw: rawLines}, len(data)
+		return Line{Kind: KindMalformed, Raw: rawLines, term: terms}, len(data)
 	}
 
 	// Walk physical lines from pos until the one containing closeIdx —
 	// exactly one iteration for an ordinary same-line-closed value, more
 	// than one for a multiline quoted value (a PEM key, a cert, embedded
 	// JSON with literal newlines).
-	var rawLines []string
+	var rawLines, terms []string
 	cursor := pos
 	var lastContent string
 	var lastStart, finalNext int
 	for {
-		c, n, _ := readPhysicalLine(data, cursor)
+		c, tm, n := readPhysicalLine(data, cursor)
 		rawLines = append(rawLines, c)
+		terms = append(terms, tm)
 		if closeIdx < n {
 			lastContent = c
 			lastStart = cursor
@@ -286,7 +323,7 @@ func parseLine(data []byte, pos int) (Line, int) {
 		allWhitespace := trimmed == ""
 		isComment := hadLeadingSpace && strings.HasPrefix(trimmed, "#")
 		if !allWhitespace && !isComment {
-			return Line{Kind: KindMalformed, Raw: rawLines}, finalNext
+			return Line{Kind: KindMalformed, Raw: rawLines, term: terms}, finalNext
 		}
 	}
 
@@ -295,6 +332,7 @@ func parseLine(data []byte, pos int) (Line, int) {
 	return Line{
 		Kind:   KindPair,
 		Raw:    rawLines,
+		term:   terms,
 		Export: export,
 		Key:    key,
 		Value:  value,
@@ -363,30 +401,63 @@ func decodeQuotedBody(body []byte, quote byte) string {
 	return b.String()
 }
 
+// boundaryTerm returns l's own boundary terminator — the terminator
+// recorded for its LAST physical source line — falling back to def when
+// that terminator was never recorded (empty): a Line parsed as the file's
+// final, unterminated line, later followed by a Set-appended Line, has no
+// terminator of its own left to reproduce at that position.
+func boundaryTerm(l Line, def string) string {
+	if n := len(l.term); n > 0 && l.term[n-1] != "" {
+		return l.term[n-1]
+	}
+	return def
+}
+
 // Bytes renders the Document back to .env text. Every Line untouched by Set
-// is emitted from Raw byte-for-byte (joined by the detected line
-// terminator); a Line touched by Set is re-rendered from its Export/Key/
-// Value fields via encode. The document's CRLF/no-trailing-newline
-// properties are reproduced regardless of which lines were touched.
+// is emitted from Raw byte-for-byte, each physical line followed by its OWN
+// recorded terminator (see Line.term) — this is what gives a mixed CRLF/LF
+// file per-line fidelity rather than one style for the whole document. A
+// Line touched by Set is re-rendered from its Export/Key/Value fields via
+// encode, followed by its boundary terminator (its term's last entry,
+// carried over from before the edit — see Set). A recorded terminator that
+// reads empty on a line that ISN'T actually the file's last physical line
+// (e.g. a formerly-last, no-final-newline line that a later Set-append
+// pushed off the end) falls back to the document's dominant default. The
+// document's trailing-newline presence (finalNL) still gates only the very
+// last physical emission, regardless of which lines were touched.
 func (d *Document) Bytes() []byte {
-	term := "\n"
+	defaultTerm := "\n"
 	if d.crlf {
-		term = "\r\n"
+		defaultTerm = "\r\n"
 	}
 	var b bytes.Buffer
+	last := len(d.Lines) - 1
 	for i, l := range d.Lines {
-		var phys []string
+		isLastLine := i == last
 		if l.dirty {
-			phys = []string{encode(l.Export, l.Key, l.Value)}
-		} else {
-			phys = l.Raw
-		}
-		for j, p := range phys {
-			b.WriteString(p)
-			last := i == len(d.Lines)-1 && j == len(phys)-1
-			if !last || d.finalNL {
-				b.WriteString(term)
+			b.WriteString(encode(l.Export, l.Key, l.Value))
+			if !isLastLine || d.finalNL {
+				b.WriteString(boundaryTerm(l, defaultTerm))
 			}
+			continue
+		}
+		lastPhys := len(l.Raw) - 1
+		for j, p := range l.Raw {
+			b.WriteString(p)
+			if isLastLine && j == lastPhys {
+				if d.finalNL {
+					b.WriteString(boundaryTerm(l, defaultTerm))
+				}
+				continue
+			}
+			t := ""
+			if j < len(l.term) {
+				t = l.term[j]
+			}
+			if t == "" {
+				t = defaultTerm
+			}
+			b.WriteString(t)
 		}
 	}
 	return b.Bytes()
@@ -468,7 +539,11 @@ func (d *Document) Set(key, value string) error {
 		d.Lines[i].dirty = true
 		return nil
 	}
-	d.Lines = append(d.Lines, Line{Kind: KindPair, Key: key, Value: value, dirty: true})
+	defaultTerm := "\n"
+	if d.crlf {
+		defaultTerm = "\r\n"
+	}
+	d.Lines = append(d.Lines, Line{Kind: KindPair, Key: key, Value: value, dirty: true, term: []string{defaultTerm}})
 	// An appended pair line always ends in a newline — this is the ONE new
 	// line in the file, not a re-render of an existing one, so there's no
 	// prior "no trailing newline" convention to preserve for it.
@@ -491,11 +566,14 @@ func (d *Document) lineNumber(idx int) int {
 // are reproduced verbatim; a malformed line is masked in its ENTIRETY (see
 // redactMalformed for why "preserve everything before the first '='" isn't
 // safe). A multiline quoted pair collapses to ONE "KEY=****" line — its
-// continuation lines never print.
+// continuation lines never print. Each rendered line ends in its OWN
+// boundary terminator (see boundaryTerm) rather than one style for the
+// whole document — display-only consistency with Bytes on a mixed
+// CRLF/LF file.
 func (d *Document) Redacted() []byte {
-	term := "\n"
+	defaultTerm := "\n"
 	if d.crlf {
-		term = "\r\n"
+		defaultTerm = "\r\n"
 	}
 	var b bytes.Buffer
 	n := len(d.Lines)
@@ -511,7 +589,7 @@ func (d *Document) Redacted() []byte {
 		}
 		b.WriteString(rendered)
 		if i != n-1 || d.finalNL {
-			b.WriteString(term)
+			b.WriteString(boundaryTerm(l, defaultTerm))
 		}
 	}
 	return b.Bytes()
