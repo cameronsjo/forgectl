@@ -52,10 +52,14 @@ func prLocalFakeRunner() *exec.FakeRunner {
 }
 
 // newPrLocalTestClient builds a pr.Client over fake with a throwaway
-// breadcrumb dir, mirroring internal/pr's testClient helper.
+// breadcrumb dir and a throwaway findings dir, mirroring internal/pr's
+// testClient helper. WithFindingsDir is required, not cosmetic: without it a
+// real (non-dry-run) PrepareLocal falls back to config.PrFindingsDir() and
+// would create a findings dir under the developer's REAL config dir every
+// time this test runs.
 func newPrLocalTestClient(t *testing.T, fake *exec.FakeRunner) *pr.Client {
 	t.Helper()
-	return pr.New(fake, pr.WithSessionsDir(t.TempDir()))
+	return pr.New(fake, pr.WithSessionsDir(t.TempDir()), pr.WithFindingsDir(t.TempDir()))
 }
 
 func TestPrLocalCmd_DryRun_DefaultsPathAndPrintsPlan(t *testing.T) {
@@ -165,8 +169,11 @@ func TestPrLocalCmd_RealRun_PrintsWorkspaceFindingsBreadcrumb(t *testing.T) {
 	if _, ok := findCLICall(fake.Calls, "tmux"); !ok {
 		t.Error("real run should dispatch through tmux (Launch)")
 	}
-	// Workspace/findings dirs land under the OS temp root (sandbox.Sandbox,
-	// os.MkdirTemp), outside t.TempDir()'s auto-cleanup — remove them by hand.
+	// The workspace lands under the OS temp root (sandbox.Sandbox,
+	// os.MkdirTemp); the findings dir lands under this test's injected
+	// WithFindingsDir(t.TempDir()) and would be covered by that auto-cleanup
+	// on its own, but removing both by hand here keeps this test's cleanup
+	// independent of that injection detail.
 	for _, line := range strings.Split(body, "\n") {
 		for _, prefix := range []string{"  workspace: ", "  findings: "} {
 			if p, ok := strings.CutPrefix(line, prefix); ok {

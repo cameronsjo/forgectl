@@ -9,6 +9,9 @@ package pr
 //   [x] Real: the worktree ref is the resolved HEAD oid, not the literal "HEAD"
 //   [x] localRef output round-trips through ParseRef (the Number<=0 failure mode)
 //   [x] The findings dir is a sibling of workspace, never nested inside it
+//   [x] The findings dir is created under the client's durable findingsDir
+//       (config.PrFindingsDir by default), not a sibling of the OS-temp
+//       workspace, and keeps the forgectl-findings- prefix
 // localProfile (Classification: deny-by-default security control, broader than PR mode)
 //   [x] Denies every gh subcommand; grants none
 //   [x] Exactly one scoped Write(findingsDir/**) grant; no bare "Write" in deny
@@ -16,6 +19,7 @@ package pr
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -184,6 +188,28 @@ func TestPrepareLocal_FindingsDirOutsideWorkspace(t *testing.T) {
 
 	if sandbox.WithinWorkspace(sess.Workspace, sess.FindingsDir) {
 		t.Errorf("findings dir %q must be a sibling of workspace %q, not nested inside it", sess.FindingsDir, sess.Workspace)
+	}
+}
+
+func TestPrepareLocal_FindingsDirIsDurable(t *testing.T) {
+	fake := localGitRunner()
+	c := testClient(t, fake)
+	path := t.TempDir()
+
+	sess, err := c.PrepareLocal(context.Background(), path, PrepareLocalOpts{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("PrepareLocal: %v", err)
+	}
+	t.Cleanup(func() {
+		os.RemoveAll(sess.Workspace)
+		os.RemoveAll(sess.FindingsDir)
+	})
+
+	if got, want := filepath.Dir(sess.FindingsDir), c.FindingsDir(); got != want {
+		t.Errorf("findings dir parent = %q, want the client's durable findingsDir %q", got, want)
+	}
+	if !strings.HasPrefix(filepath.Base(sess.FindingsDir), findingsDirPrefix) {
+		t.Errorf("findings dir %q lacks the %q prefix", sess.FindingsDir, findingsDirPrefix)
 	}
 }
 

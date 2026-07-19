@@ -586,6 +586,22 @@ func PrSessionsDir() (string, error) {
 	return filepath.Join(dir, "pr-sessions"), nil
 }
 
+// PrFindingsDir returns the forgectl-owned directory that holds `forgectl pr`
+// local-review findings: <os.UserConfigDir()>/forgectl/pr-findings (macOS:
+// ~/Library/Application Support/forgectl/pr-findings; Linux:
+// ~/.config/forgectl/pr-findings). It derives from the same configDir() base
+// as ConfigPath/WorkflowsDir/PrSessionsDir, so all of them never drift.
+// Findings are the deliverable of a local clean-room review and must outlive
+// the disposable workspace, so they live here rather than under the OS temp
+// root.
+func PrFindingsDir() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "pr-findings"), nil
+}
+
 // LegacyLaunchPath returns the legacy claunch config location, honoring
 // $XDG_CONFIG_HOME. Retained so `forgectl launch` keeps reading an existing
 // ~/.config/claunch/claunch.conf until the user migrates the profiles into the
