@@ -61,7 +61,6 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 		Agent:     opts.Agent,
 		CreatedAt: time.Now().UTC(),
 		DryRun:    opts.DryRun,
-		Local:     true,
 	}
 
 	if opts.DryRun {

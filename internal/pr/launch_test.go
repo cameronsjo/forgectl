@@ -44,7 +44,7 @@ var testSess = Session{Ref: Ref{Owner: "o", Repo: "r", Number: 9}, Workspace: "/
 func TestPostReview_LocalSessionRefused(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := postClient(fake, true, true) // approve=true, tty=true — must still refuse
-	localSess := Session{Ref: Ref{Owner: "local", Repo: "abc1234", Number: 1}, Workspace: "/tmp/forgectl-x", Local: true}
+	localSess := Session{Ref: Ref{Owner: "local", Repo: "abc1234", Number: 1}, Workspace: "/tmp/forgectl-x"}
 
 	posted, err := c.PostReview(context.Background(), localSess, "the review", false)
 	if err == nil {
@@ -59,14 +59,15 @@ func TestPostReview_LocalSessionRefused(t *testing.T) {
 }
 
 // TestPostReview_ReloadedLocalSessionStillRefused guards the reload path: a
-// Session reconstituted from a breadcrumb (loadSession) always zero-values
-// Local to false, same as HeadRef/HeadOid. The guard must still catch this
-// case via the persisted Ref.IsLocal(), or a future verb built on the
-// loadSession pattern would silently defeat PostReview's safety invariant.
+// Session reconstituted from a breadcrumb (loadSession) never carries any
+// in-process-only fields, same as HeadRef/HeadOid. The guard must still
+// catch this case via the persisted Ref.IsLocal(), or a future verb built on
+// the loadSession pattern would silently defeat PostReview's safety
+// invariant.
 func TestPostReview_ReloadedLocalSessionStillRefused(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := postClient(fake, true, true)
-	reloaded := Session{Ref: Ref{Owner: "local", Repo: "abc1234", Number: 1}, Workspace: "/tmp/forgectl-x"} // Local: false, as loadSession produces
+	reloaded := Session{Ref: Ref{Owner: "local", Repo: "abc1234", Number: 1}, Workspace: "/tmp/forgectl-x"} // as loadSession produces
 
 	posted, err := c.PostReview(context.Background(), reloaded, "the review", false)
 	if err == nil {
@@ -260,7 +261,7 @@ func TestLaunchInline_LocalSessionAddsFindingsDirAndPrompt(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	ws := fakeWorkspace(t)
-	localSess := Session{Ref: Ref{Owner: "local", Repo: "abc1234", Number: 1}, Workspace: ws, Agent: "claude", Local: true, FindingsDir: findingsDir}
+	localSess := Session{Ref: Ref{Owner: "local", Repo: "abc1234", Number: 1}, Workspace: ws, Agent: "claude", FindingsDir: findingsDir}
 
 	if err := c.Launch(context.Background(), localSess, config.Config{}); err != nil {
 		t.Fatalf("Launch: %v", err)
