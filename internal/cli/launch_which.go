@@ -30,6 +30,9 @@ func newLaunchWhichCmd(cfg config.Config) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("determine working directory: %w", err)
 			}
+			if w := legacyShadowWarning(cfg); w != "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), "forgectl: "+w)
+			}
 			lc, src := resolveLaunchConfig(cfg)
 			printLaunchProfile(cmd.OutOrStdout(), launch.Resolve(lc, cwd), cwd, src)
 			return nil

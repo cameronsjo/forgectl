@@ -111,6 +111,10 @@ type harness struct {
 	binDir  string
 	outFile string
 	env     []string
+	// base is the fake HOME/XDG_CONFIG_HOME root, set only by harnesses that
+	// need to reconstruct a config path later (e.g. newShadowHarness asserting
+	// the legacy path never leaks into `which` output).
+	base string
 }
 
 // newHarness builds a harness with a native config.toml (a [launch.project]
@@ -236,6 +240,74 @@ model = "sonnet"
 		cwd:     cwd,
 		binDir:  binDir,
 		outFile: outFile,
+		env: []string{
+			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"HOME=" + base,
+			"XDG_CONFIG_HOME=" + base,
+			"FORGECTL_TEST_OUT=" + outFile,
+		},
+	}
+}
+
+// shadowConfigTemplate is a minimal [launch] section — defaults only, no
+// [[project]] entries — used alongside a legacy claunch.conf to reproduce
+// #114's shadow scenario: config.toml's [launch] is non-zero, so
+// resolveLaunchConfig returns it wholesale and never looks at the legacy
+// file, silently orphaning any [[project]] profiles recorded there.
+const shadowConfigTemplate = `[launch.defaults]
+model = "opus"
+permission_mode = "plan"
+allow_danger = true
+`
+
+// newShadowHarness is newLegacyHarness plus a config.toml with a live
+// [launch] section — the fallback-cliff scenario (#114). The legacy
+// claunch.conf is present and well-formed, but config.toml's [launch] takes
+// precedence and shadows it entirely.
+func newShadowHarness(t *testing.T) *harness {
+	t.Helper()
+
+	cwd, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve symlinks on temp cwd: %v", err)
+	}
+	binDir := t.TempDir()
+	outFile := filepath.Join(t.TempDir(), "claude.out")
+	base := t.TempDir()
+
+	writeStubClaude(t, binDir)
+
+	cfgPath := childConfigPath(base)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(shadowConfigTemplate), 0o644); err != nil {
+		t.Fatalf("write config.toml: %v", err)
+	}
+
+	legacyPath := legacyConfigPath(base)
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatalf("mkdir legacy config dir: %v", err)
+	}
+	legacyBody := fmt.Sprintf(`[defaults]
+model = "opus"
+permission_mode = "plan"
+allow_danger = true
+
+[[project]]
+match = "%s"
+model = "sonnet"
+`, cwd)
+	if err := os.WriteFile(legacyPath, []byte(legacyBody), 0o644); err != nil {
+		t.Fatalf("write legacy claunch.conf: %v", err)
+	}
+
+	return &harness{
+		bin:     builtBinPath,
+		cwd:     cwd,
+		binDir:  binDir,
+		outFile: outFile,
+		base:    base,
 		env: []string{
 			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"HOME=" + base,
@@ -512,6 +584,83 @@ func TestIntegration_LegacyFallback(t *testing.T) {
 
 	if !strings.Contains(stdout, "sonnet") {
 		t.Errorf("which output missing %q (expected fallback to legacy claunch.conf); got:\n%s", "sonnet", stdout)
+	}
+}
+
+// TestIntegration_LaunchShadow_WhichWarns covers #114: a legacy claunch.conf
+// present alongside a config.toml [launch] section is silently shadowed
+// (config.toml wins wholesale, its [[project]] profiles ignored, no
+// diagnostic). `which` should warn on stderr while keeping stdout parseable
+// and free of the now-irrelevant legacy path.
+func TestIntegration_LaunchShadow_WhichWarns(t *testing.T) {
+	h := newShadowHarness(t)
+	stdout, stderr := h.run(t, "which")
+
+	if !strings.Contains(stderr, "present but ignored") {
+		t.Errorf("stderr = %q, want it to contain %q", stderr, "present but ignored")
+	}
+	if !strings.Contains(stdout, "matched") || !strings.Contains(stdout, "(defaults only)") {
+		t.Errorf("which stdout missing %q / %q; got:\n%s", "matched", "(defaults only)", stdout)
+	}
+	legacyPath := legacyConfigPath(h.base)
+	if strings.Contains(stdout, legacyPath) {
+		t.Errorf("which stdout unexpectedly contains the shadowed legacy path %q; got:\n%s", legacyPath, stdout)
+	}
+}
+
+// TestIntegration_LaunchShadow_DoctorWarns covers #114 for `doctor`: the
+// shadow is a warning, not a failure — doctor must still exit 0.
+func TestIntegration_LaunchShadow_DoctorWarns(t *testing.T) {
+	h := newShadowHarness(t)
+	stdout, _ := h.run(t, "doctor")
+
+	if !strings.Contains(stdout, "present but ignored") {
+		t.Errorf("doctor stdout missing %q; got:\n%s", "present but ignored", stdout)
+	}
+}
+
+// TestIntegration_LaunchShadow_ExecWarns covers #114 for the bare exec path:
+// the warning fires on stderr and the config.toml profile (not the shadowed
+// legacy sonnet profile) is what actually reaches claude.
+func TestIntegration_LaunchShadow_ExecWarns(t *testing.T) {
+	h := newShadowHarness(t)
+	_, stderr := h.run(t, "-p", "hi")
+
+	if !strings.Contains(stderr, "present but ignored") {
+		t.Errorf("stderr = %q, want it to contain %q", stderr, "present but ignored")
+	}
+	got := h.recordedArgs(t)
+	want := []string{
+		"--permission-mode", "plan",
+		"--allow-dangerously-skip-permissions",
+		"--model", "opus",
+		"-p", "hi",
+	}
+	if !equalArgs(got, want) {
+		t.Errorf("recorded args = %v, want %v (config.toml defaults, not the shadowed legacy sonnet profile)", got, want)
+	}
+}
+
+// TestIntegration_LegacyFallback_NoShadowWarning is a negative control: when
+// config.toml has no [launch] section at all, the legacy file is genuinely
+// honored (not shadowed) and must not trigger the #114 warning.
+func TestIntegration_LegacyFallback_NoShadowWarning(t *testing.T) {
+	h := newLegacyHarness(t)
+	_, stderr := h.run(t, "which")
+
+	if strings.Contains(stderr, "present but ignored") {
+		t.Errorf("stderr = %q, want no shadow warning when config.toml has no [launch] section", stderr)
+	}
+}
+
+// TestIntegration_Which_NoShadowWarningWithoutLegacy is a negative control:
+// no legacy claunch.conf exists at all, so there's nothing to shadow.
+func TestIntegration_Which_NoShadowWarningWithoutLegacy(t *testing.T) {
+	h := newHarness(t)
+	_, stderr := h.run(t, "which")
+
+	if strings.Contains(stderr, "present but ignored") {
+		t.Errorf("stderr = %q, want no shadow warning when no legacy claunch.conf exists", stderr)
 	}
 }
 
