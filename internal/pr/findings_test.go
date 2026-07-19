@@ -6,11 +6,25 @@ package pr
 //   [x] Returns one entry per direct-child findings dir
 //   [x] Absent findings dir returns (nil, nil), mirroring List's os.IsNotExist handling
 //
-// FindingsCleanup (Classification: deletion guard — no path parameter, containment-checked)
+// findingsRemovalCandidate (Classification: pure decision — the actual containment guard)
+//   [x] Rejects a path outside findingsDir even with isDir forced true (the
+//       branch a real symlink entry never reaches, since a real DirEntry's
+//       IsDir() is already false for a symlink — this is the direct proof
+//       the containment check itself works, independent of that filter)
+//   [x] Accepts a contained, old-enough directory
+//
+// FindingsCleanup (Classification: deletion guard — no path parameter)
 //   [x] Only removes dirs older than the cutoff
 //   [x] Dry-run (apply=false) reports what would be removed and deletes nothing
-//   [x] An escaping symlink at the top level is skipped, never removed
+//   [x] A top-level symlink is skipped, never removed (via the isDir filter —
+//       see findingsRemovalCandidate's doc comment for why containment is a
+//       second, currently-unreached line of defense for this exact case)
 //   [x] A plain file at the top level is ignored, never removed
+//
+// FindingsRemove (Classification: TOCTOU-safe apply over an explicit, already-confirmed set)
+//   [x] Removes exactly the given paths
+//   [x] A path that stopped qualifying since the confirm (already gone) is
+//       skipped, not treated as an error
 
 import (
 	"os"
@@ -99,7 +113,14 @@ func TestFindingsCleanup_DryRunDeletesNothing(t *testing.T) {
 	}
 }
 
-func TestFindingsCleanup_SkipsEscapingSymlink(t *testing.T) {
+func TestFindingsCleanup_SkipsTopLevelSymlink(t *testing.T) {
+	// This proves the observed BEHAVIOR (a symlink at the top level is never
+	// removed) — the MECHANISM is the isDir filter in findingsRemovalCandidate,
+	// not the containment check: a real os.DirEntry's IsDir() is false for a
+	// symlink even when it targets a directory, so this symlink never reaches
+	// sandbox.WithinWorkspace at all. TestFindingsRemovalCandidate_* below
+	// exercises the containment check directly, with isDir forced true, since
+	// this test structurally can't.
 	dir := t.TempDir()
 	outside := t.TempDir()
 	c := New(nil, WithFindingsDir(dir))
@@ -110,8 +131,8 @@ func TestFindingsCleanup_SkipsEscapingSymlink(t *testing.T) {
 	}
 	old := time.Now().Add(-48 * time.Hour)
 	// Lutimes isn't portable via os.Chtimes (it follows the symlink), so age
-	// the link's target instead — if the guard were broken this would still
-	// be old enough to match the cutoff.
+	// the link's target instead — if the isDir filter were broken this would
+	// still be old enough to match the cutoff.
 	if err := os.Chtimes(outside, old, old); err != nil {
 		t.Fatalf("Chtimes: %v", err)
 	}
@@ -121,10 +142,41 @@ func TestFindingsCleanup_SkipsEscapingSymlink(t *testing.T) {
 		t.Fatalf("FindingsCleanup: %v", err)
 	}
 	if len(removed) != 0 {
-		t.Errorf("FindingsCleanup removed %v, want the escaping symlink skipped", removed)
+		t.Errorf("FindingsCleanup removed %v, want the top-level symlink skipped", removed)
 	}
 	if _, err := os.Lstat(link); err != nil {
 		t.Errorf("symlink %q was removed, want it left alone: %v", link, err)
+	}
+}
+
+func TestFindingsRemovalCandidate_RejectsPathOutsideFindingsDir(t *testing.T) {
+	findingsDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "elsewhere")
+	old := time.Now().Add(-48 * time.Hour)
+	cutoff := time.Now().Add(-24 * time.Hour)
+
+	// isDir forced true: this is the case a real symlink entry never
+	// produces (DirEntry.IsDir() is false for a symlink), so this is the
+	// only way to exercise the containment branch directly and prove it
+	// independently rejects an escaping path rather than silently passing.
+	if got := findingsRemovalCandidate(findingsDir, outside, true, old, cutoff); got {
+		t.Errorf("findingsRemovalCandidate(%q, %q, isDir=true, ...) = true, want false (outside findingsDir)", findingsDir, outside)
+	}
+}
+
+func TestFindingsRemovalCandidate_AcceptsOldContainedDir(t *testing.T) {
+	findingsDir := t.TempDir()
+	contained := filepath.Join(findingsDir, findingsDirPrefix+"old")
+	// sandbox.WithinWorkspace resolves EvalSymlinks on both sides; findingsDir
+	// (a real, existing t.TempDir()) resolves through macOS's /var ->
+	// /private/var symlink, so contained must exist too, or the two sides
+	// resolve asymmetrically and a genuinely-contained path reads as escaping.
+	mustMkdir(t, contained)
+	old := time.Now().Add(-48 * time.Hour)
+	cutoff := time.Now().Add(-24 * time.Hour)
+
+	if got := findingsRemovalCandidate(findingsDir, contained, true, old, cutoff); !got {
+		t.Errorf("findingsRemovalCandidate(%q, %q, isDir=true, old, ...) = false, want true (contained + old enough)", findingsDir, contained)
 	}
 }
 
@@ -150,6 +202,55 @@ func TestFindingsCleanup_IgnoresPlainFile(t *testing.T) {
 	}
 	if _, err := os.Stat(file); err != nil {
 		t.Errorf("file %q was removed, want it left alone: %v", file, err)
+	}
+}
+
+func TestFindingsRemove_RemovesGivenPaths(t *testing.T) {
+	dir := t.TempDir()
+	c := New(nil, WithFindingsDir(dir))
+
+	a := filepath.Join(dir, findingsDirPrefix+"a")
+	b := filepath.Join(dir, findingsDirPrefix+"b")
+	mustMkdir(t, a)
+	mustMkdir(t, b)
+
+	removed, err := c.FindingsRemove([]string{a, b})
+	if err != nil {
+		t.Fatalf("FindingsRemove: %v", err)
+	}
+	if len(removed) != 2 {
+		t.Fatalf("FindingsRemove removed %v, want both paths", removed)
+	}
+	for _, p := range []string{a, b} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%q still exists after FindingsRemove", p)
+		}
+	}
+}
+
+func TestFindingsRemove_SkipsPathThatNoLongerQualifies(t *testing.T) {
+	// Simulates the TOCTOU gap between a preview scan and the confirmed
+	// apply: one path was already removed out-of-band before FindingsRemove
+	// runs. It must be skipped with a note, not treated as an error, and
+	// must not cause the other (still-valid) path to be re-scanned or
+	// dropped.
+	dir := t.TempDir()
+	c := New(nil, WithFindingsDir(dir))
+
+	gone := filepath.Join(dir, findingsDirPrefix+"gone")
+	stillHere := filepath.Join(dir, findingsDirPrefix+"still-here")
+	mustMkdir(t, stillHere)
+	// gone is never created — stands in for "removed between preview and apply".
+
+	removed, err := c.FindingsRemove([]string{gone, stillHere})
+	if err != nil {
+		t.Fatalf("FindingsRemove: %v", err)
+	}
+	if len(removed) != 1 || removed[0] != stillHere {
+		t.Fatalf("FindingsRemove removed %v, want only %q", removed, stillHere)
+	}
+	if _, err := os.Stat(stillHere); !os.IsNotExist(err) {
+		t.Errorf("%q still exists, want it removed", stillHere)
 	}
 }
 
