@@ -49,6 +49,31 @@ package env
 // Diff (Classification: pure comparison)
 //   [x] Reports missing (in example, not file) and extra (in file, not
 //       example) key sets, sorted
+//
+// Mixed-EOL fidelity (Classification: pure parse/render, byte-verbatim
+// round trip — per-line, not whole-document)
+//   [x] A mixed CRLF-first file's untouched lines keep their OWN
+//       terminator when a different line is Set — CRLF stays CRLF, LF
+//       stays LF
+//   [x] Same, LF-first
+//   [x] Appending a new key to a mixed file gives the new line the
+//       DOMINANT terminator; existing lines are unaffected
+//   [x] Setting an existing CRLF line and an existing LF line in the same
+//       document — each keeps its own terminator
+//   [x] A multiline quoted value inside a mixed file round-trips
+//       byte-exact untouched, and collapses to one line with the correct
+//       boundary terminator when Set
+//   [x] No-final-newline regression on a mixed file
+//   [x] A CR-only ("classic Mac") file is a documented non-goal: it
+//       round-trips byte-verbatim untouched (parsed as ONE physical line,
+//       since split is on '\n' only) and collapses on Set
+//   [x] An exact CRLF/LF tie in dominantEOL favors LF (the documented
+//       winner) on append, without disturbing either existing line's own
+//       terminator
+//   [x] Appending after a no-final-newline last line reproduces the
+//       correct dominant terminator for both the formerly-last line (whose
+//       own recorded terminator was empty) and the new line, in both
+//       CRLF-dominant and LF-dominant flavors
 
 import (
 	"bytes"
@@ -767,5 +792,251 @@ func TestDiff_MissingAndExtra(t *testing.T) {
 	}
 	if len(extra) != 1 || extra[0] != "A" {
 		t.Errorf("extra = %v, want [A]", extra)
+	}
+}
+
+func TestDocument_Set_MixedEOL_CRLFFirst_PreservesUntouchedLine(t *testing.T) {
+	// A precedes B; A is CRLF, B is LF. Setting A must not rewrite B's
+	// terminator to match A's (the bug: detectEOL keyed on the FIRST
+	// terminator, and Bytes joined every line with that one style).
+	src := "A=1\r\nB=2\n"
+
+	doc, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := doc.Set("A", "x"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	want := "A=x\r\nB=2\n"
+	got := doc.Bytes()
+	if !bytes.Equal(got, []byte(want)) {
+		t.Errorf("Bytes() = %x (%q), want %x (%q)", got, got, []byte(want), want)
+	}
+}
+
+func TestDocument_Set_MixedEOL_LFFirst_PreservesUntouchedLine(t *testing.T) {
+	// Inverse of the above: A is LF, B is CRLF. Setting A must leave B's
+	// CRLF terminator alone.
+	src := "A=1\nB=2\r\n"
+
+	doc, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := doc.Set("A", "x"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	want := "A=x\nB=2\r\n"
+	got := doc.Bytes()
+	if !bytes.Equal(got, []byte(want)) {
+		t.Errorf("Bytes() = %x (%q), want %x (%q)", got, got, []byte(want), want)
+	}
+}
+
+func TestDocument_DominantEOL_ExactTieFavorsLF(t *testing.T) {
+	// Exactly one CRLF-terminated line and one LF-terminated line — an
+	// exact tie. dominantEOL documents LF as the tie-break winner, so an
+	// appended new key gets LF, and both existing lines must keep their OWN
+	// terminators regardless of the tie result.
+	src := "A=1\r\nB=2\n"
+
+	doc, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if doc.crlf {
+		t.Error("crlf = true, want false (exact tie favors LF)")
+	}
+
+	if err := doc.Set("C", "3"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	want := "A=1\r\nB=2\nC=3\n"
+	got := doc.Bytes()
+	if !bytes.Equal(got, []byte(want)) {
+		t.Errorf("Bytes() = %x (%q), want %x (%q)", got, got, []byte(want), want)
+	}
+}
+
+func TestDocument_Set_AppendAfterNoFinalNewlineLine_DominantFlavors(t *testing.T) {
+	// A mixed file whose LAST line has no trailing newline at all — that
+	// line's own recorded terminator is "". Setting a NEW key appends a
+	// line after it, so the formerly-last line is no longer last: its
+	// empty term must fall back to the file's DOMINANT terminator (see
+	// Bytes), and the appended line gets that same dominant default.
+	// finalNL flips true (an appended pair line always ends in a newline)
+	// regardless of dominance flavor.
+	cases := []struct {
+		name, src, want string
+	}{
+		{
+			name: "CRLF_dominant",
+			src:  "A=1\r\nB=2\r\nC=3", // two CRLF, zero LF terminators
+			want: "A=1\r\nB=2\r\nC=3\r\nD=4\r\n",
+		},
+		{
+			name: "LF_dominant",
+			src:  "A=1\nB=2\nC=3", // two LF, zero CRLF terminators
+			want: "A=1\nB=2\nC=3\nD=4\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, err := Parse(strings.NewReader(tc.src))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if doc.finalNL {
+				t.Fatal("finalNL = true, want false before Set (source has no trailing newline)")
+			}
+
+			if err := doc.Set("D", "4"); err != nil {
+				t.Fatalf("Set: %v", err)
+			}
+			if !doc.finalNL {
+				t.Error("finalNL = false after append, want true")
+			}
+
+			got := doc.Bytes()
+			if !bytes.Equal(got, []byte(tc.want)) {
+				t.Errorf("Bytes() = %x (%q), want %x (%q)", got, got, []byte(tc.want), tc.want)
+			}
+		})
+	}
+}
+
+func TestDocument_Set_MixedEOL_AppendGetsDominantTerminator(t *testing.T) {
+	// Two CRLF lines, one LF line — CRLF is the dominant style. A new key
+	// appended to this mixed file should get CRLF; the three existing lines
+	// must keep their own terminators unchanged.
+	src := "A=1\r\nB=2\nC=3\r\n"
+
+	doc, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := doc.Set("D", "4"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	want := "A=1\r\nB=2\nC=3\r\nD=4\r\n"
+	got := doc.Bytes()
+	if !bytes.Equal(got, []byte(want)) {
+		t.Errorf("Bytes() = %x (%q), want %x (%q)", got, got, []byte(want), want)
+	}
+}
+
+func TestDocument_Set_MixedEOL_BothLinesEditedKeepOwnTerminator(t *testing.T) {
+	// Set an existing CRLF line AND an existing LF line in the same
+	// document — each dirty re-render must reproduce its OWN original
+	// boundary terminator, not the other's.
+	src := "A=1\r\nB=2\n"
+
+	doc, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := doc.Set("A", "x"); err != nil {
+		t.Fatalf("Set(A): %v", err)
+	}
+	if err := doc.Set("B", "y"); err != nil {
+		t.Fatalf("Set(B): %v", err)
+	}
+
+	want := "A=x\r\nB=y\n"
+	got := doc.Bytes()
+	if !bytes.Equal(got, []byte(want)) {
+		t.Errorf("Bytes() = %x (%q), want %x (%q)", got, got, []byte(want), want)
+	}
+}
+
+func TestDocument_MixedEOL_MultilineQuoted_RoundTripAndSetCollapse(t *testing.T) {
+	// A multiline quoted value living inside a mixed-EOL file: untouched it
+	// must round-trip byte-exact (including its own internal terminators),
+	// and a Set must collapse it to one line ending in ITS boundary
+	// terminator (CRLF here), leaving the LF sibling line untouched.
+	src := "PRE=1\r\n" +
+		"PEM=\"" + pemFixture + "\"\r\n" +
+		"POST=2\n"
+
+	doc, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := doc.Bytes(); !bytes.Equal(got, []byte(src)) {
+		t.Errorf("Bytes() = %x (%q), want %x (%q)", got, got, []byte(src), src)
+	}
+
+	if err := doc.Set("PEM", pemFixture); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	want := "PRE=1\r\n" +
+		"PEM=\"" + strings.ReplaceAll(pemFixture, "\n", `\n`) + "\"\r\n" +
+		"POST=2\n"
+	got := doc.Bytes()
+	if !bytes.Equal(got, []byte(want)) {
+		t.Errorf("Bytes() after Set = %x (%q), want %x (%q)", got, got, []byte(want), want)
+	}
+}
+
+func TestDocument_MixedEOL_NoFinalNewlineRegression(t *testing.T) {
+	// A mixed file whose last line has no trailing newline at all — the
+	// finalNL gate must still hold once per-line terminator tracking is
+	// added.
+	src := "A=1\r\nB=2"
+
+	doc, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if doc.finalNL {
+		t.Error("finalNL = true, want false")
+	}
+	if got := doc.Bytes(); !bytes.Equal(got, []byte(src)) {
+		t.Errorf("Bytes() = %x (%q), want %x (%q)", got, got, []byte(src), src)
+	}
+
+	if err := doc.Set("A", "x"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	want := "A=x\r\nB=2"
+	if got := doc.Bytes(); !bytes.Equal(got, []byte(want)) {
+		t.Errorf("Bytes() after Set = %x (%q), want %x (%q)", got, got, []byte(want), want)
+	}
+}
+
+func TestDocument_CROnly_PathologicalInput_RoundTripsUntouchedThenCollapsesOnSet(t *testing.T) {
+	// A bare-CR ("classic Mac", pre-OSX) line-ending file: split is on '\n'
+	// only, so a lone '\r' is never treated as a terminator. This is a
+	// documented non-goal, not a silent corruption — the whole file parses
+	// as ONE physical line (the '\r' bytes are just ordinary content), and
+	// it round-trips byte-verbatim as long as it's untouched. A Set still
+	// collapses it (re-encoding through this package's own quoting, which
+	// has no concept of a bare-CR terminator) — that collapse, not
+	// preservation, is the intended behavior here.
+	src := "A=1\rB=2\rC=3"
+
+	doc, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(doc.Lines) != 1 {
+		t.Fatalf("Lines = %+v, want exactly 1 (no '\\n' in the source, so no split at all)", doc.Lines)
+	}
+	if got := doc.Bytes(); !bytes.Equal(got, []byte(src)) {
+		t.Errorf("Bytes() = %x (%q), want %x (%q) — untouched CR-only round trip", got, got, []byte(src), src)
+	}
+
+	// The whole line is malformed (no '=' at the very start makes it a
+	// KindPair only if 'A' were the sole content — here the value literally
+	// contains "\rB=2\rC=3", so Get still resolves key A with that whole
+	// tail as its value; this proves parse treated \r as plain content
+	// rather than crashing or mis-splitting).
+	if v, ok := doc.Get("A"); !ok || v != "1\rB=2\rC=3" {
+		t.Errorf("Get(A) = %q, %v, want %q, true (documented: bare CR is not a terminator)", v, ok, "1\rB=2\rC=3")
 	}
 }
