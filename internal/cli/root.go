@@ -48,5 +48,10 @@ func newRoot(deps module.Deps) *cobra.Command {
 		root.AddCommand(cmd)
 	}
 
+	// Bare `version` fell through to the TUI after the module refactor moved
+	// version onto fang's --version flag only (ADR-0005); restore it as a
+	// leaf verb outside the registry, alongside --version.
+	root.AddCommand(newVersionCmd())
+
 	return root
 }
