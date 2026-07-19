@@ -174,6 +174,12 @@ func launchExec(cfg config.Config, args []string) error {
 // absent): the warning fires on the legacy file merely existing, regardless
 // of whether it would even parse, because either way it's being ignored.
 // Returns "" when there's nothing to warn about.
+//
+// The remedy MUST point at `forgectl launch edit`, not `launch init`: init's
+// own RunE refuses with "config already has a [launch] section" (see
+// launch_init.go) whenever cfg.Launch is non-zero — which is exactly the only
+// state this warning ever fires in. Pointing at init here would be a
+// guaranteed dead end.
 func legacyShadowWarning(cfg config.Config) string {
 	if cfg.Launch.IsZero() {
 		return "" // legacy honored, nothing shadowed
@@ -187,7 +193,7 @@ func legacyShadowWarning(cfg config.Config) string {
 	}
 	return "legacy claunch config at " + path + " is present but ignored — config.toml's " +
 		"[launch] section takes precedence; migrate its profiles into [launch] and remove it " +
-		"(see `forgectl launch init`)"
+		"(edit it with `forgectl launch edit`)"
 }
 
 // resolveLaunchConfig returns the [launch] section from config.toml plus a
