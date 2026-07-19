@@ -74,12 +74,28 @@ This never touches the disposable review workspace or a live session — only
 findings dirs under the durable findings store.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateFindingsOlderThan(olderThan); err != nil {
+				return err
+			}
 			return runPrFindingsCleanup(cmd, client, olderThan, apply)
 		},
 	}
-	cmd.Flags().DurationVar(&olderThan, "older-than", defaultFindingsOlderThan, "only consider findings dirs older than this")
+	cmd.Flags().DurationVar(&olderThan, "older-than", defaultFindingsOlderThan, "only consider findings dirs older than this (>= 0; 0 reclaims everything)")
 	cmd.Flags().BoolVar(&apply, "apply", false, "delete matched findings dirs, after a confirmation prompt")
 	return cmd
+}
+
+// validateFindingsOlderThan rejects a strictly-negative --older-than before
+// any scan runs. A typo like -24h would push FindingsCleanup's cutoff into
+// the future, and findingsRemovalCandidate would then treat essentially
+// every findings dir — even one created seconds ago — as reclaimable. Zero
+// stays valid: it is the explicit "reclaim everything" cutoff, and is still
+// gated by the same --apply + confirm() prompt as any other value.
+func validateFindingsOlderThan(d time.Duration) error {
+	if d < 0 {
+		return fmt.Errorf("--older-than %s must not be negative (0 means reclaim everything)", d)
+	}
+	return nil
 }
 
 // runPrFindingsCleanup scans exactly ONCE via FindingsCleanup(olderThan,

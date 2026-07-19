@@ -14,12 +14,18 @@ package cli
 //       gate, whether or not --apply is passed (no huh prompt reachable in
 //       a non-tty test — mirrors clean_test.go's precedent of not exercising
 //       the CLI-level apply+confirm path directly)
+//   [x] Unhappy: a negative --older-than errors before any scan runs (a typo
+//       like -24h would push the cutoff into the future and make everything
+//       look reclaimable)
+//   [x] Happy: --older-than 0 passes validation (0 is the explicit "reclaim
+//       everything" cutoff, still gated by --apply/confirm like any other)
 
 import (
 	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,6 +96,61 @@ func TestPrFindingsCleanupCmd_DryRun_ReportsAndDeletesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(oldDir); err != nil {
 		t.Errorf("dry-run deleted %q, want it left alone: %v", oldDir, err)
+	}
+}
+
+func TestPrFindingsCleanupCmd_NegativeOlderThan_ErrorsWithoutScanning(t *testing.T) {
+	// oldDir exists solely to prove a negative --older-than never gets the
+	// chance to treat it as reclaimable: if validateFindingsOlderThan didn't
+	// run before the scan, this dir would show up in a "reclaimable" report
+	// instead of the command erroring out. Mirrors clean_test.go's
+	// TestCleanCmd_InvalidType_RejectedBeforeScan precedent of asserting
+	// only the error, not stdout — cobra's own usage-on-error text lands on
+	// OutOrStdout() too, so asserting stdout is empty would be asserting
+	// cobra's behavior, not this command's.
+	dir := t.TempDir()
+	oldDir := filepath.Join(dir, "forgectl-findings-old")
+	if err := os.MkdirAll(oldDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	client := pr.New(nil, pr.WithFindingsDir(dir))
+
+	cmd := newPrFindingsCmd(client)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"cleanup", "--older-than=-24h"})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("expected an error for a negative --older-than, got nil")
+	}
+	if !strings.Contains(err.Error(), "must not be negative") {
+		t.Errorf("error = %q, want it to mention the negative-duration rejection", err.Error())
+	}
+	if strings.Contains(stdout.String(), oldDir) {
+		t.Errorf("stdout contains %q — the scan ran despite the negative --older-than; got:\n%s", oldDir, stdout.String())
+	}
+}
+
+func TestPrFindingsCleanupCmd_ZeroOlderThan_PassesValidation(t *testing.T) {
+	dir := t.TempDir()
+	oldDir := filepath.Join(dir, "forgectl-findings-old")
+	if err := os.MkdirAll(oldDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	client := pr.New(nil, pr.WithFindingsDir(dir))
+
+	cmd := newPrFindingsCmd(client)
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"cleanup", "--older-than=0"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out.String(), oldDir) {
+		t.Errorf("output missing %q; --older-than 0 should treat everything as reclaimable; got:\n%s", oldDir, out.String())
 	}
 }
 
