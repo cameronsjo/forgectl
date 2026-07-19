@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/charmbracelet/huh"
 
@@ -33,14 +34,30 @@ func localReviewPrompt(findingsDir string) string {
 		"attempt any network access — output the review only, to that file."
 }
 
-// windowName is the tmux window name for a review session: "pr-<owner>-<N>".
-// Owner is included, not just Number: a local-mode Ref (Owner "local", Number
-// derived from a hex oid prefix) and a real PR-mode Ref can otherwise land on
-// the identical "pr-<N>" name whenever the derived number happens to match a
-// live PR number — Number alone is not unique across the two Ref kinds.
-func windowName(ref Ref) string { return fmt.Sprintf("pr-%s-%d", ref.Owner, ref.Number) }
+// windowName is the tmux window name for a review session:
+// "pr-<owner>-<sanitized repo>-<N>". Owner is included, not just Number: a
+// local-mode Ref (Owner "local", Number derived from a hex oid prefix) and a
+// real PR-mode Ref can otherwise land on the identical "pr-<N>" name whenever
+// the derived number happens to match a live PR number — Number alone is not
+// unique across the two Ref kinds. Repo is included too: two repos under the
+// same owner (o/a#42 and o/b#42) still collide on "pr-<owner>-<N>" — Owner
+// alone is not unique across repos.
+//
+// The repo component has its dots replaced with hyphens. Empirically, tmux
+// target strings split on "." as the window.pane separator: a window
+// literally named "pr-o-foo.bar-42" mis-resolves `select-window -t
+// sess:pr-o-foo.bar-42` to window="pr-o-foo", pane="bar-42" instead of
+// matching (or cleanly failing to match) the window — functional breakage
+// for a legal GitHub repo name. Sanitizing accepts a narrower, purely
+// cosmetic recollision (repos "a.b" and "a-b" under the same owner sharing
+// a window) in exchange for correct targeting, which is the greater good.
+func windowName(ref Ref) string {
+	repo := strings.ReplaceAll(ref.Repo, ".", "-")
+	return fmt.Sprintf("pr-%s-%s-%d", ref.Owner, repo, ref.Number)
+}
 
-// windowTarget is the tmux target "<session>:pr-<owner>-<N>" for select/attach.
+// windowTarget is the tmux target "<session>:pr-<owner>-<sanitized repo>-<N>"
+// for select/attach.
 func (c *Client) windowTarget(ref Ref) string {
 	return c.tmuxSession + ":" + windowName(ref)
 }

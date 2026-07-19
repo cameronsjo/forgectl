@@ -18,6 +18,8 @@ package pr
 // windowName (Classification: tmux window identity)
 //   [x] Includes Owner, not just Number — a local-mode Ref and a PR-mode Ref
 //       that derive the same Number must not collide on window name
+//   [x] Includes Repo, not just Owner — two repos under one owner that derive
+//       the same Number must not collide on window name
 
 import (
 	"context"
@@ -84,8 +86,39 @@ func TestWindowName_OwnerDistinguishesLocalFromPRMode(t *testing.T) {
 	if windowName(local) == windowName(prMode) {
 		t.Errorf("windowName collided: local=%q prMode=%q", windowName(local), windowName(prMode))
 	}
-	if windowName(local) != "pr-local-42" {
-		t.Errorf("windowName(local) = %q, want %q", windowName(local), "pr-local-42")
+	if windowName(local) != "pr-local-abc1234-42" {
+		t.Errorf("windowName(local) = %q, want %q", windowName(local), "pr-local-abc1234-42")
+	}
+}
+
+// TestWindowName_RepoDistinguishesCrossRepo guards the cross-repo collision
+// this fix targets: two repos under the same owner (o/a#42 and o/b#42) must
+// not collide on tmux window name — Repo is what disambiguates them, since
+// Owner and Number alone are identical between the two Refs.
+func TestWindowName_RepoDistinguishesCrossRepo(t *testing.T) {
+	a := Ref{Owner: "o", Repo: "a", Number: 42}
+	b := Ref{Owner: "o", Repo: "b", Number: 42}
+	if windowName(a) == windowName(b) {
+		t.Errorf("windowName collided across repos: a=%q b=%q", windowName(a), windowName(b))
+	}
+	if windowName(a) != "pr-o-a-42" {
+		t.Errorf("windowName(a) = %q, want %q", windowName(a), "pr-o-a-42")
+	}
+	if windowTarget := (&Client{tmuxSession: "forgectl"}).windowTarget(a); windowTarget != "forgectl:"+windowName(a) {
+		t.Errorf("windowTarget(a) = %q, want %q", windowTarget, "forgectl:"+windowName(a))
+	}
+}
+
+// TestWindowName_SanitizesDotsInRepo guards against a tmux target-parsing
+// hazard: a literal "." in a window name is mis-resolved by tmux as the
+// window.pane separator (empirically verified: `select-window -t
+// sess:pr-o-foo.bar-42` resolves to window="pr-o-foo", pane="bar-42", not
+// the intended window). A dotted repo name (legal on GitHub) must have its
+// dots replaced so the resulting window name targets cleanly.
+func TestWindowName_SanitizesDotsInRepo(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "foo.bar", Number: 42}
+	if got, want := windowName(ref), "pr-o-foo-bar-42"; got != want {
+		t.Errorf("windowName(dotted repo) = %q, want %q", got, want)
 	}
 }
 
@@ -168,7 +201,7 @@ func TestLaunch_InlineDispatch(t *testing.T) {
 	if call.Name != "tmux" || call.Args[0] != "new-window" {
 		t.Fatalf("expected tmux new-window; got %+v", call)
 	}
-	if !contains(call.Args, "pr-o-42") || !contains(call.Args, ws) || !contains(call.Args, claudeBin) {
+	if !contains(call.Args, "pr-o-r-42") || !contains(call.Args, ws) || !contains(call.Args, claudeBin) {
 		t.Errorf("tmux argv missing window/workspace/claude: %v", call.Args)
 	}
 	if !contains(call.Args, "-p") || !contains(call.Args, reviewPrompt) {
