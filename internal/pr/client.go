@@ -24,6 +24,12 @@ type Client struct {
 	// loaded path resolves to inside it. Injectable for tests.
 	sessionsDir string
 
+	// findingsDir is the forgectl-owned directory (config.PrFindingsDir) that
+	// holds `forgectl pr local` findings — the deliverable of a local
+	// clean-room review, which must outlive the disposable workspace.
+	// Injectable for tests.
+	findingsDir string
+
 	// tmuxSession is the session under which review windows are created.
 	tmuxSession string
 
@@ -45,6 +51,12 @@ type Option func(*Client)
 // config.PrSessionsDir()) — used in tests to point at a temp dir.
 func WithSessionsDir(dir string) Option {
 	return func(c *Client) { c.sessionsDir = dir }
+}
+
+// WithFindingsDir overrides the local-review findings directory (default:
+// config.PrFindingsDir()) — used in tests to point at a temp dir.
+func WithFindingsDir(dir string) Option {
+	return func(c *Client) { c.findingsDir = dir }
 }
 
 // WithTmuxSession overrides the tmux session review windows are created under.
@@ -74,6 +86,9 @@ func New(run exec.Runner, opts ...Option) *Client {
 	if dir, err := config.PrSessionsDir(); err == nil {
 		c.sessionsDir = dir
 	}
+	if dir, err := config.PrFindingsDir(); err == nil {
+		c.findingsDir = dir
+	}
 	for _, opt := range opts {
 		opt(c)
 	}
@@ -82,6 +97,9 @@ func New(run exec.Runner, opts ...Option) *Client {
 
 // SessionsDir returns the resolved breadcrumb directory.
 func (c *Client) SessionsDir() string { return c.sessionsDir }
+
+// FindingsDir returns the resolved local-review findings directory.
+func (c *Client) FindingsDir() string { return c.findingsDir }
 
 // tempPrefix is the os.MkdirTemp prefix sandbox uses for every workspace
 // ("forgectl-workflow-*"); the breadcrumb content check requires a workspace

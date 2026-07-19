@@ -60,6 +60,7 @@ human approval gate.
   forgectl pr open <breadcrumb>    open a shell in the clean room
   forgectl pr teardown <breadcrumb>  discard a session (alias: close)
   forgectl pr cleanup <YYYY-MM-DD>   discard all sessions from a day
+  forgectl pr findings list|cleanup  reclaim durable local-review findings
   forgectl pr keys                 tmux-review cheatsheet
 
 The <ref> is validated by an anchored regex: owner/repo#N, a github.com PR
@@ -123,6 +124,7 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 		newPrOpenCmd(client),
 		newPrTeardownCmd(client),
 		newPrCleanupCmd(client),
+		newPrFindingsCmd(client),
 		newPrKeysCmd(),
 		newPrPrsCmd(client),
 		newPrDashCmd(client),

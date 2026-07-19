@@ -85,10 +85,21 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	}
 	sess.Workspace = workspace
 
-	// The escape-hatch dir is a fresh, unpredictable sibling of workspace under
-	// the OS temp root — not a deterministic/reusable name, which would invite
-	// a symlink-pre-plant race.
-	findingsDir, err := os.MkdirTemp(filepath.Dir(workspace), findingsDirPrefix)
+	// The escape-hatch dir lives under the client's durable findings dir
+	// (config.PrFindingsDir by default) rather than as a sibling of workspace
+	// under the OS temp root: findings are the deliverable of a local review
+	// and must outlive the disposable workspace, so an OS tmp sweep (or the
+	// same-run teardown path) must never be able to take them with it. The
+	// name still carries a fresh, unpredictable random suffix rather than a
+	// deterministic/reusable one, which would invite a symlink-pre-plant
+	// race — 0700 ownership on the parent dir closes the rest of that gap
+	// (a world-writable sticky tmp dir has no such protection).
+	if err := os.MkdirAll(c.findingsDir, 0o700); err != nil {
+		_ = sandbox.Teardown(ctx, c.run, workspace)
+		slog.Error("Failed to create findings root dir.", "dir", c.findingsDir, "error", err)
+		return Session{}, fmt.Errorf("create findings root dir: %w", err)
+	}
+	findingsDir, err := os.MkdirTemp(c.findingsDir, findingsDirPrefix)
 	if err != nil {
 		// best-effort: don't let cleanup's own error shadow the error already being returned
 		_ = sandbox.Teardown(ctx, c.run, workspace)

@@ -40,6 +40,7 @@ func testClient(t *testing.T, fake *exec.FakeRunner) *Client {
 	t.Helper()
 	return New(fake,
 		WithSessionsDir(t.TempDir()),
+		WithFindingsDir(t.TempDir()),
 		WithApprover(func(string) (bool, error) { return false, nil }),
 		WithTTYCheck(func() bool { return false }),
 	)

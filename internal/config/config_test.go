@@ -298,6 +298,18 @@ func TestPrSessionsDir(t *testing.T) {
 	}
 }
 
+func TestPrFindingsDir(t *testing.T) {
+	dir := redirectConfigDir(t)
+	got, err := PrFindingsDir()
+	if err != nil {
+		t.Fatalf("PrFindingsDir: %v", err)
+	}
+	want := filepath.Join(dir, "forgectl", "pr-findings")
+	if got != want {
+		t.Errorf("PrFindingsDir() = %q, want %q", got, want)
+	}
+}
+
 func TestPrReviewedPath(t *testing.T) {
 	dir := redirectConfigDir(t)
 	got, err := PrReviewedPath()
