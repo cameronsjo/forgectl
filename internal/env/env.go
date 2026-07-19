@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 
@@ -122,36 +123,57 @@ func (c *Client) SetFromClipboard(ctx context.Context, cwd, file, key string, al
 // value already sourced: Locate → Parse (an empty Document when the file
 // doesn't exist yet) → strip exactly one trailing "\n" or "\r\n" off
 // rawValue → refuse an empty result → Document.Set (refuses a duplicate
-// key) → Bytes → writeAtomic.
+// key) → Bytes → writeAtomic. Locate stays outside the lock — its path
+// resolution is deterministic and doesn't touch realPath's content — but
+// its `exists` return is filesystem STATE, not a path, and is deliberately
+// discarded here: loadOrEmpty re-derives existence itself, under the lock,
+// by attempting the open. Trusting the pre-lock `exists` would reopen the
+// exact race withFileLock exists to close, just on the new-file branch —
+// two concurrent sets against a not-yet-existing file both observe
+// exists=false before either acquires the lock, so the second to acquire
+// would still load a fresh empty Document and silently discard the first
+// caller's already-written key. See lock_unix.go's doc comment for the
+// existing-file half of this same race.
 func (c *Client) commitSet(cwd, file, key, rawValue string, allowAnyFile bool) (tightened bool, err error) {
-	realPath, exists, err := Locate(file, cwd, allowAnyFile)
-	if err != nil {
-		return false, err
-	}
-	doc, err := loadOrEmpty(realPath, exists)
+	realPath, _, err := Locate(file, cwd, allowAnyFile)
 	if err != nil {
 		return false, err
 	}
 
-	value := stripTrailingNewline(rawValue)
-	if value == "" {
-		// Names no token — same class as errKeyNotFound's asymmetry above.
-		// Nothing is written on this path, so key never becomes a key in
-		// any file; if key is actually a secret pasted into the wrong slot
-		// (`env set sk_live_51H8xY2eZvKYlo2C` with empty stdin), naming it
-		// here would echo it straight into stderr and the transcript. This
-		// is deliberately asymmetric with `set`'s SUCCESS path (which DOES
-		// name key): a value that's about to be WRITTEN as a key is
-		// already going into the file regardless, so the success message
-		// discloses nothing new; a value that's refused before any write
-		// is the one case where the argument might not be a key at all.
-		return false, errors.New("empty value; refusing to set an empty value — edit the file directly if intended")
-	}
+	err = withFileLock(realPath, func() error {
+		doc, loadErr := loadOrEmpty(realPath)
+		if loadErr != nil {
+			return loadErr
+		}
 
-	if err := doc.Set(key, value); err != nil {
+		value := stripTrailingNewline(rawValue)
+		if value == "" {
+			// Names no token — same class as errKeyNotFound's asymmetry
+			// above. Nothing is written on this path, so key never becomes
+			// a key in any file; if key is actually a secret pasted into
+			// the wrong slot (`env set sk_live_51H8xY2eZvKYlo2C` with empty
+			// stdin), naming it here would echo it straight into stderr
+			// and the transcript. This is deliberately asymmetric with
+			// `set`'s SUCCESS path (which DOES name key): a value that's
+			// about to be WRITTEN as a key is already going into the file
+			// regardless, so the success message discloses nothing new; a
+			// value that's refused before any write is the one case where
+			// the argument might not be a key at all.
+			return errors.New("empty value; refusing to set an empty value — edit the file directly if intended")
+		}
+
+		if setErr := doc.Set(key, value); setErr != nil {
+			return setErr
+		}
+
+		var writeErr error
+		tightened, writeErr = writeAtomic(realPath, doc.Bytes())
+		return writeErr
+	})
+	if err != nil {
 		return false, err
 	}
-	return writeAtomic(realPath, doc.Bytes())
+	return tightened, nil
 }
 
 // stripTrailingNewline removes exactly one trailing "\n" or "\r\n" from
@@ -171,13 +193,28 @@ func stripTrailingNewline(s string) string {
 }
 
 // loadOrEmpty parses realPath, or returns a fresh empty Document when the
-// file doesn't exist yet (Locate already confirmed its parent directory is
-// inside the repo — this is the "new file" branch of `set`).
-func loadOrEmpty(realPath string, exists bool) (*Document, error) {
-	if !exists {
+// file doesn't exist. Existence is decided HERE, by the open itself, never
+// by a caller-supplied boolean: called from inside commitSet's withFileLock
+// closure, this is the point in the pipeline where "does the file exist" is
+// no longer stale — Locate's own `exists` return was a pre-lock snapshot
+// that a concurrent writer can invalidate between the check and the lock
+// acquisition (Locate already confirmed the parent directory is inside the
+// repo, so a not-yet-existing target is otherwise fine to treat as the
+// "new file" branch of `set`).
+func loadOrEmpty(realPath string) (*Document, error) {
+	f, err := os.Open(realPath)
+	if errors.Is(err, fs.ErrNotExist) {
 		return &Document{}, nil
 	}
-	return parseFile(realPath)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", realPath, err)
+	}
+	defer func() { _ = f.Close() }()
+	doc, err := Parse(f)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", realPath, err)
+	}
+	return doc, nil
 }
 
 // parseFile opens and parses realPath. Errors carry the path only.

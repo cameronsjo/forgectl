@@ -11,6 +11,9 @@
 *.out
 coverage.*
 
+# env set's flock sibling — created next to whatever .env file was locked
+*.env.lock
+
 # Swift (bless ceremony helper)
 helper/forgectl-bless-helper/.build/
 
