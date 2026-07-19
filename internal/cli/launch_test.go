@@ -515,6 +515,90 @@ func TestIntegration_LegacyFallback(t *testing.T) {
 	}
 }
 
+// newBareHarness builds a harness with no legacy claunch.conf. When
+// configBody is non-empty, it's written verbatim as config.toml (used to
+// exercise `which`'s terminal fallback branch for a present file lacking
+// [launch], including an explicit-but-empty [launch] section); when empty, no
+// config.toml is written at all, exercising the truly-absent-file case (#57).
+func newBareHarness(t *testing.T, configBody string) *harness {
+	t.Helper()
+
+	cwd, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve symlinks on temp cwd: %v", err)
+	}
+	binDir := t.TempDir()
+	outFile := filepath.Join(t.TempDir(), "claude.out")
+	base := t.TempDir()
+
+	writeStubClaude(t, binDir)
+
+	if configBody != "" {
+		cfgPath := childConfigPath(base)
+		if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+			t.Fatalf("mkdir config dir: %v", err)
+		}
+		if err := os.WriteFile(cfgPath, []byte(configBody), 0o644); err != nil {
+			t.Fatalf("write config.toml: %v", err)
+		}
+	}
+
+	return &harness{
+		bin:     builtBinPath,
+		cwd:     cwd,
+		binDir:  binDir,
+		outFile: outFile,
+		env: []string{
+			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"HOME=" + base,
+			"XDG_CONFIG_HOME=" + base,
+			"FORGECTL_TEST_OUT=" + outFile,
+		},
+	}
+}
+
+func TestIntegration_Which_ConfigSourceLabel(t *testing.T) {
+	t.Run("file present, no [launch] section", func(t *testing.T) {
+		h := newBareHarness(t, "[bench]\ntelemetry = true\n")
+		stdout, _ := h.run(t, "which")
+
+		if !strings.Contains(stdout, "no [launch] section") {
+			t.Errorf("which output missing %q; got:\n%s", "no [launch] section", stdout)
+		}
+		if strings.Contains(stdout, "(missing") {
+			t.Errorf("which output unexpectedly contains %q for a present config; got:\n%s", "(missing", stdout)
+		}
+	})
+
+	// An explicit-but-empty [launch] header (no keys under it) still yields
+	// cfg.Launch.IsZero() == true, so this lands in the same terminal branch
+	// as a config that omits [launch] entirely — the current label reads
+	// slightly loosely here ("no [launch] section" when a section header IS
+	// present but empty), but it still points the reader at the right file.
+	// Pinning this boundary makes any future resolveLaunchConfig change to
+	// this case a deliberate one, not an accidental drift.
+	t.Run("file present, explicit empty [launch] section", func(t *testing.T) {
+		h := newBareHarness(t, "[launch]\n\n[bench]\ntelemetry = true\n")
+		stdout, _ := h.run(t, "which")
+
+		if !strings.Contains(stdout, "no [launch] section") {
+			t.Errorf("which output missing %q; got:\n%s", "no [launch] section", stdout)
+		}
+		if strings.Contains(stdout, "(missing") {
+			t.Errorf("which output unexpectedly contains %q for a present config; got:\n%s", "(missing", stdout)
+		}
+	})
+
+	t.Run("file truly absent", func(t *testing.T) {
+		h := newBareHarness(t, "")
+		stdout, _ := h.run(t, "which")
+
+		if !strings.Contains(stdout, "missing") {
+			t.Errorf("which output missing %q; got:\n%s", "missing", stdout)
+		}
+	})
+}
+
 // --- small local helpers (avoid extra imports for one-line ops) ----------
 
 func equalArgs(a, b []string) bool {

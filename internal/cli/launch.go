@@ -176,5 +176,18 @@ func resolveLaunchConfig(cfg config.Config) (config.LaunchConfig, string) {
 		return legacy, path + " (legacy)"
 	}
 	path, _ := config.ConfigPath()
-	return cfg.Launch, path + " (missing — built-in defaults)"
+	switch _, err := os.Stat(path); {
+	case err == nil:
+		// config.toml exists but declares no [launch] section (and there is no
+		// legacy claunch.conf). Distinguish this from a truly absent file so the
+		// label doesn't send the reader chasing a phantom missing-file problem (#57).
+		return cfg.Launch, path + " (no [launch] section — built-in defaults)"
+	case os.IsNotExist(err):
+		return cfg.Launch, path + " (missing — built-in defaults)"
+	default:
+		// A permission failure (or other stat error) is not the same as an
+		// absent file — surface it distinctly rather than let it masquerade
+		// as "missing" and send the reader chasing the wrong fix.
+		return cfg.Launch, path + " (unreadable: " + err.Error() + " — built-in defaults)"
+	}
 }
