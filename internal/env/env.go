@@ -122,36 +122,51 @@ func (c *Client) SetFromClipboard(ctx context.Context, cwd, file, key string, al
 // value already sourced: Locate → Parse (an empty Document when the file
 // doesn't exist yet) → strip exactly one trailing "\n" or "\r\n" off
 // rawValue → refuse an empty result → Document.Set (refuses a duplicate
-// key) → Bytes → writeAtomic.
+// key) → Bytes → writeAtomic. Locate stays outside the lock (it doesn't
+// touch realPath's content); the parse-through-write span runs inside
+// withFileLock so a concurrent commitSet against the same file can't parse
+// a stale Document and clobber the other's write with its own rename — see
+// lock_unix.go's doc comment for the race this closes.
 func (c *Client) commitSet(cwd, file, key, rawValue string, allowAnyFile bool) (tightened bool, err error) {
 	realPath, exists, err := Locate(file, cwd, allowAnyFile)
 	if err != nil {
 		return false, err
 	}
-	doc, err := loadOrEmpty(realPath, exists)
+
+	err = withFileLock(realPath, func() error {
+		doc, loadErr := loadOrEmpty(realPath, exists)
+		if loadErr != nil {
+			return loadErr
+		}
+
+		value := stripTrailingNewline(rawValue)
+		if value == "" {
+			// Names no token — same class as errKeyNotFound's asymmetry
+			// above. Nothing is written on this path, so key never becomes
+			// a key in any file; if key is actually a secret pasted into
+			// the wrong slot (`env set sk_live_51H8xY2eZvKYlo2C` with empty
+			// stdin), naming it here would echo it straight into stderr
+			// and the transcript. This is deliberately asymmetric with
+			// `set`'s SUCCESS path (which DOES name key): a value that's
+			// about to be WRITTEN as a key is already going into the file
+			// regardless, so the success message discloses nothing new; a
+			// value that's refused before any write is the one case where
+			// the argument might not be a key at all.
+			return errors.New("empty value; refusing to set an empty value — edit the file directly if intended")
+		}
+
+		if setErr := doc.Set(key, value); setErr != nil {
+			return setErr
+		}
+
+		var writeErr error
+		tightened, writeErr = writeAtomic(realPath, doc.Bytes())
+		return writeErr
+	})
 	if err != nil {
 		return false, err
 	}
-
-	value := stripTrailingNewline(rawValue)
-	if value == "" {
-		// Names no token — same class as errKeyNotFound's asymmetry above.
-		// Nothing is written on this path, so key never becomes a key in
-		// any file; if key is actually a secret pasted into the wrong slot
-		// (`env set sk_live_51H8xY2eZvKYlo2C` with empty stdin), naming it
-		// here would echo it straight into stderr and the transcript. This
-		// is deliberately asymmetric with `set`'s SUCCESS path (which DOES
-		// name key): a value that's about to be WRITTEN as a key is
-		// already going into the file regardless, so the success message
-		// discloses nothing new; a value that's refused before any write
-		// is the one case where the argument might not be a key at all.
-		return false, errors.New("empty value; refusing to set an empty value — edit the file directly if intended")
-	}
-
-	if err := doc.Set(key, value); err != nil {
-		return false, err
-	}
-	return writeAtomic(realPath, doc.Bytes())
+	return tightened, nil
 }
 
 // stripTrailingNewline removes exactly one trailing "\n" or "\r\n" from
