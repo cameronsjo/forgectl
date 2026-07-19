@@ -132,7 +132,7 @@ func TestModules_CompletenessPins(t *testing.T) {
 		"workflow": true, "pr": true, "net": true, "bench": true,
 		"quarantine": true, "pip": true, "docker": true, "branch": true,
 		"clean": true, "y": true, "sessions": true, "review": true,
-		"env": true,
+		"env":  true,
 		"docs": true,
 	}
 	got := map[string]bool{}
