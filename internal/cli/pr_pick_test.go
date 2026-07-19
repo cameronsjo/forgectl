@@ -99,8 +99,8 @@ func TestLaunchPicked_SkipsReviewedLaunchesRest(t *testing.T) {
 	}
 
 	windows := tmuxWindows(fake.Calls)
-	if !containsStr(windows, "pr-cameronsjo-7") {
-		t.Errorf("non-dimmed PR #7 should have launched (window pr-cameronsjo-7); windows=%v", windows)
+	if !containsStr(windows, "pr-cameronsjo-forgectl-7") {
+		t.Errorf("non-dimmed PR #7 should have launched (window pr-cameronsjo-forgectl-7); windows=%v", windows)
 	}
 	if containsStr(windows, "pr-cameronsjo-42") {
 		t.Errorf("reviewed PR #42 must be skipped at launch; windows=%v", windows)
