@@ -3,12 +3,12 @@ package bless
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/digest"
 )
 
 // ParsePublicKey decodes a PKIX-DER public key and enforces the ONE key shape
@@ -47,8 +47,7 @@ func EncodePublicKey(pub *ecdsa.PublicKey) ([]byte, error) {
 // the raw bytes as given — callers pass the same PKIX DER they store, so the
 // fingerprint an anchor advertises matches the one a store entry records.
 func Fingerprint(der []byte) string {
-	sum := sha256.Sum256(der)
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return digest.SHA256(der)
 }
 
 // ParseAnchorFile decodes an anchor file: a single base64-std line of PKIX DER,

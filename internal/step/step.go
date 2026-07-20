@@ -74,3 +74,71 @@ type PlanStep struct {
 	Cmd     string
 	Args    []string
 }
+
+// scalarFieldPtrs returns pointers to every interpolable SCALAR string field, in
+// a fixed order. Uses is deliberately excluded — it is the verb selector, never
+// ${}-interpolated. This is the single enumeration the three consumers of a
+// step's fields share (plan-time interpolation, input hashing, and the
+// export-safety scan), so a field added to the struct but forgotten in one place
+// can't silently drop out of the others.
+func (s *PlanStep) scalarFieldPtrs() []*string {
+	return []*string{&s.Repo, &s.Ref, &s.Skill, &s.Posture, &s.Mode, &s.From, &s.To, &s.Cmd}
+}
+
+// sliceFieldPtrs returns pointers to every interpolable SLICE field, in a fixed
+// order — the slice counterpart of scalarFieldPtrs.
+func (s *PlanStep) sliceFieldPtrs() []*[]string {
+	return []*[]string{&s.Globs, &s.Args}
+}
+
+// ScalarFields returns the values of every interpolable scalar field, in the
+// shared fixed order. Read-only consumers (hashing, the export scan) use this.
+func (s PlanStep) ScalarFields() []string {
+	ptrs := (&s).scalarFieldPtrs()
+	out := make([]string, len(ptrs))
+	for i, p := range ptrs {
+		out[i] = *p
+	}
+	return out
+}
+
+// SliceFields returns the values of every interpolable slice field, in the
+// shared fixed order.
+func (s PlanStep) SliceFields() [][]string {
+	ptrs := (&s).sliceFieldPtrs()
+	out := make([][]string, len(ptrs))
+	for i, p := range ptrs {
+		out[i] = *p
+	}
+	return out
+}
+
+// Interpolate resolves every interpolable field of the step in place against
+// interp (a per-field string transform, e.g. Context.Interpolate). Uses is left
+// untouched. It walks the shared field enumeration, so interpolation, hashing,
+// and the export scan can never disagree on which fields carry ${} references.
+func (s *PlanStep) Interpolate(interp func(string) (string, error)) error {
+	for _, p := range s.scalarFieldPtrs() {
+		v, err := interp(*p)
+		if err != nil {
+			return err
+		}
+		*p = v
+	}
+	for _, p := range s.sliceFieldPtrs() {
+		in := *p
+		if len(in) == 0 {
+			continue
+		}
+		out := make([]string, len(in))
+		for i, v := range in {
+			r, err := interp(v)
+			if err != nil {
+				return err
+			}
+			out[i] = r
+		}
+		*p = out
+	}
+	return nil
+}

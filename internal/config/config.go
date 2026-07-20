@@ -501,6 +501,21 @@ func WorkflowsDir() (string, error) {
 	return filepath.Join(dir, "workflows"), nil
 }
 
+// WorkflowStateDir returns the directory holding per-workflow run-state
+// sidecars that back `workflow run --resume` and `workflow status`:
+// <os.UserConfigDir()>/forgectl/workflows/.state (macOS: ~/Library/Application
+// Support/forgectl/workflows/.state; Linux: ~/.config/forgectl/workflows/.state).
+// It nests under WorkflowsDir so a user's workflow files and the run state that
+// tracks them share one base, and the leading dot keeps it out of the way of
+// the *.workflow.toml files the loader globs beside it.
+func WorkflowStateDir() (string, error) {
+	dir, err := WorkflowsDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, ".state"), nil
+}
+
 // TrustStorePath returns the on-disk path for the workflow-blessing trust
 // store: <os.UserConfigDir()>/forgectl/trust.toml (macOS: ~/Library/Application
 // Support/forgectl/trust.toml; Linux: ~/.config/forgectl/trust.toml). It derives

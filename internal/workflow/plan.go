@@ -141,37 +141,13 @@ func planStep(ctx *Context, s Step) (PlanStep, error) {
 // reference to an export whose step hasn't run yet fails loudly instead of
 // reaching a command as the literal string "${name}".
 func interpolatePlanStep(ctx *Context, in PlanStep) (PlanStep, error) {
-	var err error
-	ps := PlanStep{Uses: in.Uses}
-
-	if ps.Mode, err = ctx.Interpolate(in.Mode); err != nil {
-		return PlanStep{}, err
-	}
-	if ps.Repo, err = ctx.Interpolate(in.Repo); err != nil {
-		return PlanStep{}, err
-	}
-	if ps.Ref, err = ctx.Interpolate(in.Ref); err != nil {
-		return PlanStep{}, err
-	}
-	if ps.Globs, err = ctx.InterpolateAll(in.Globs); err != nil {
-		return PlanStep{}, err
-	}
-	if ps.Skill, err = ctx.Interpolate(in.Skill); err != nil {
-		return PlanStep{}, err
-	}
-	if ps.Posture, err = ctx.Interpolate(in.Posture); err != nil {
-		return PlanStep{}, err
-	}
-	if ps.From, err = ctx.Interpolate(in.From); err != nil {
-		return PlanStep{}, err
-	}
-	if ps.To, err = ctx.Interpolate(in.To); err != nil {
-		return PlanStep{}, err
-	}
-	if ps.Cmd, err = ctx.Interpolate(in.Cmd); err != nil {
-		return PlanStep{}, err
-	}
-	if ps.Args, err = ctx.InterpolateAll(in.Args); err != nil {
+	// Copy the struct, then interpolate every field through the SHARED field
+	// enumeration (step.PlanStep.Interpolate). Slice fields are replaced with
+	// fresh slices, so in's backing arrays are never mutated. Uses is not
+	// interpolated. Keeping the field list in one place means hashing and the
+	// export scan can never drift from what actually gets interpolated.
+	ps := in
+	if err := ps.Interpolate(ctx.Interpolate); err != nil {
 		return PlanStep{}, err
 	}
 	return ps, nil

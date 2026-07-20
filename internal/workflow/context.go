@@ -32,3 +32,7 @@ var ErrNotYetWired = step.ErrNotYetWired
 func NewContext(seed map[string]string) *Context {
 	return step.NewContext(seed)
 }
+
+// Refs returns the ${name} references in s, sharing Interpolate's boundary scan
+// (see step.Refs). New code should use step.Refs directly.
+var Refs = step.Refs

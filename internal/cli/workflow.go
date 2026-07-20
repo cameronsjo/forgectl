@@ -3,8 +3,10 @@ package cli
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -72,6 +74,9 @@ toolset (git, claude, tmux) — orchestration as data, not one-off scripts.
 
   forgectl workflow run <name>              run a workflow by name
   forgectl workflow run <name> --dry-run    print the resolved plan, run nothing
+  forgectl workflow run <name> --resume     resume the last run from its first
+                                            incomplete step
+  forgectl workflow status <name>           show the last run's checkpoint state
   forgectl workflow list                    show resolvable workflow names
 
 Workflow files live in <config-dir>/workflows/<name>.workflow.toml — the same
@@ -80,6 +85,7 @@ base as config.toml (macOS: ~/Library/Application Support/forgectl, Linux:
 	}
 	cmd.AddCommand(
 		newWorkflowRunCmd(deps),
+		newWorkflowStatusCmd(),
 		newWorkflowListCmd(),
 		newWorkflowBlessCmd(deps),
 		newWorkflowVerifyCmd(),
@@ -93,6 +99,7 @@ base as config.toml (macOS: ~/Library/Application Support/forgectl, Linux:
 // [--param k=v]...`.
 func newWorkflowRunCmd(deps module.Deps) *cobra.Command {
 	var dryRun bool
+	var resume bool
 	var rawParams []string
 
 	cmd := &cobra.Command{
@@ -101,6 +108,10 @@ func newWorkflowRunCmd(deps module.Deps) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
+
+			if dryRun && resume {
+				return fmt.Errorf("--dry-run and --resume are mutually exclusive: dry-run plans without running, resume continues a real run")
+			}
 
 			params, err := parseParams(rawParams)
 			if err != nil {
@@ -145,12 +156,43 @@ func newWorkflowRunCmd(deps module.Deps) *cobra.Command {
 				return nil
 			}
 
-			exe := workflow.NewExecutor(deps.Runner, registry)
+			// Serialize concurrent runs of the SAME workflow: the run-state
+			// sidecar is a single file rewritten in full after each step, so two
+			// overlapping runs would clobber each other's checkpoints (run B's
+			// step-0 write landing after run A's step-2 regresses the file, so a
+			// later --resume silently re-executes steps A already ran). An advisory
+			// lock held for the whole run makes a second concurrent invocation fail
+			// fast rather than interleave. dry-run took its early return above, so
+			// it never contends. Acquired before any state read/write.
+			slog.Debug("Preparing to acquire workflow execution lock.", "workflow", name)
+			lock, err := workflow.AcquireRunLock(name)
+			if err != nil {
+				return err
+			}
+			defer lock.Release()
+
 			wctx := workflow.NewContext(nil)
 			for k, v := range params {
 				wctx.Set(k, v)
 			}
+
+			opts, err := resumeOptions(out, name, src.Data, plan, registry, resume)
+			if err != nil {
+				return err
+			}
+			if opts == nil {
+				// A no-op resume of an already-complete run: nothing to execute.
+				return nil
+			}
+
+			exe := workflow.NewExecutor(deps.Runner, registry, opts...)
 			if err := exe.Run(cmd.Context(), plan, wctx); err != nil {
+				return err
+			}
+
+			// A fully successful run needs no checkpoint — clear it so the next
+			// run starts clean and `status` reflects reality.
+			if err := workflow.ClearState(name); err != nil {
 				return err
 			}
 			fmt.Fprintf(out, "workflow %q completed\n", plan.Name)
@@ -158,8 +200,74 @@ func newWorkflowRunCmd(deps module.Deps) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the resolved plan without running any step")
+	cmd.Flags().BoolVar(&resume, "resume", false, "resume the last run from its first incomplete step")
 	cmd.Flags().StringArrayVar(&rawParams, "param", nil, "workflow param as key=value (repeatable)")
 	return cmd
+}
+
+// resumeOptions decides how a run is executed and returns the Executor options
+// that carry that decision. For a fresh run it returns a WithRecorder that
+// checkpoints every step. For a resume it validates the saved state (present,
+// same definition, no checkpointed-export dependency) and returns
+// WithResumeFrom + a resume Recorder. A nil slice with a nil error is the
+// deliberate "already complete — nothing to do" signal the caller returns on.
+func resumeOptions(out io.Writer, name string, data []byte, plan workflow.Plan, registry step.Registry, resume bool) ([]workflow.Option, error) {
+	now := time.Now()
+	defHash := workflow.DefinitionHash(data)
+
+	if !resume {
+		slog.Debug("Preparing fresh workflow run (no resume).", "workflow", name)
+		// Clear any prior run's sidecar before this fresh run begins. The recorder
+		// does not persist until a step succeeds, so without this a fresh run that
+		// fails at step 0 would leave the PREVIOUS run's checkpoints in place and a
+		// later --resume could skip steps that never ran this time. Safe here: the
+		// caller holds the run lock before calling resumeOptions.
+		if err := workflow.ClearState(name); err != nil {
+			return nil, err
+		}
+		recorder := workflow.NewStateRecorder(name, workflow.NewRunID(now), defHash, now)
+		return []workflow.Option{workflow.WithRecorder(recorder)}, nil
+	}
+
+	slog.Debug("Preparing to resume workflow run.", "workflow", name)
+	prior, ok, err := workflow.LoadState(name)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		slog.Warn("Resume requested but no saved run state found.", "workflow", name)
+		return nil, fmt.Errorf("workflow %q has no saved run state to resume — run it without --resume first", name)
+	}
+	if prior.DefinitionHash != defHash {
+		slog.Warn("Resume refused due to definition change.", "workflow", name, "priorHash", prior.DefinitionHash, "currentHash", defHash)
+		return nil, fmt.Errorf("workflow %q changed since its checkpointed run — run it fresh (without --resume); a resume never replays across an edited definition", name)
+	}
+	slog.Debug("Definition hash validation passed.", "workflow", name, "hash", defHash)
+
+	resumeFrom := workflow.ResumeFrom(prior, plan)
+	if resumeFrom >= len(plan.Steps) {
+		slog.Debug("All steps already complete; clearing state.", "workflow", name, "stepsCompleted", len(prior.Steps))
+		if err := workflow.ClearState(name); err != nil {
+			return nil, err
+		}
+		fmt.Fprintf(out, "workflow %q is already complete — nothing to resume\n", name)
+		return nil, nil
+	}
+
+	// Refuse rather than reconstruct a checkpointed step's ephemeral export from
+	// the unsigned sidecar — that would let an attacker-writable state file feed
+	// a blessing-guarded field. The user runs fresh instead (which is also the
+	// only correct thing when the export was a torn-down sandbox).
+	if exp, idx, missing := workflow.MissingResumeExport(plan, resumeFrom, registry); missing {
+		slog.Warn("Resume refused due to missing export dependency.", "workflow", name, "export", exp, "stepIndex", idx+1)
+		return nil, fmt.Errorf("workflow %q cannot be resumed: step %d needs ${%s} from an earlier checkpointed step, and a step's outputs cannot be reconstructed on resume — run it fresh (without --resume)", name, idx+1, exp)
+	}
+	slog.Debug("Export validation passed.", "workflow", name, "resumeFrom", resumeFrom)
+
+	recorder := workflow.NewResumeRecorder(prior, resumeFrom, now)
+	slog.Info("Resume checkpoint validation complete.", "workflow", name, "resumingFromStep", resumeFrom+1, "totalSteps", len(plan.Steps))
+	fmt.Fprintf(out, "resuming workflow %q from step %d of %d\n", name, resumeFrom+1, len(plan.Steps))
+	return []workflow.Option{workflow.WithResumeFrom(resumeFrom), workflow.WithRecorder(recorder)}, nil
 }
 
 // newWorkflowListCmd builds `forgectl workflow list` — a stub that shows the
@@ -182,6 +290,59 @@ func newWorkflowListCmd() *cobra.Command {
 			sort.Strings(names)
 			for _, n := range names {
 				fmt.Fprintln(out, n)
+			}
+			return nil
+		},
+	}
+}
+
+// newWorkflowStatusCmd builds `forgectl workflow status <name>`: a read-only
+// view of the last run's per-step checkpoint state (what `--resume` would skip).
+// It touches no trust chain and prompts for nothing — it only reads the local
+// run-state sidecar.
+func newWorkflowStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status <name>",
+		Short: "Show the last run's per-step checkpoint state",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+			out := cmd.OutOrStdout()
+
+			state, ok, err := workflow.LoadState(name)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				fmt.Fprintf(out, "%s: no saved run state (never run, or last run completed cleanly)\n", name)
+				return nil
+			}
+
+			fmt.Fprintf(out, "%s — run %s\n", state.Workflow, state.RunID)
+			fmt.Fprintf(out, "  started: %s\n", state.StartedAt)
+			fmt.Fprintf(out, "  updated: %s\n", state.UpdatedAt)
+			if len(state.Steps) == 0 {
+				fmt.Fprintln(out, "  no steps checkpointed complete")
+			} else {
+				fmt.Fprintf(out, "  %d step(s) complete:\n", len(state.Steps))
+				for _, s := range state.Steps {
+					fmt.Fprintf(out, "    %d. %-10s done %s\n", s.Index+1, s.Uses, s.CompletedAt)
+				}
+			}
+
+			// If the definition changed since this run, --resume will refuse it
+			// (a resume never replays across an edited file) — say so up front.
+			// The hash covers the WHOLE file, so any byte change invalidates every
+			// checkpoint, not just the edited step.
+			if src, err := workflow.Load(name); err == nil {
+				if workflow.DefinitionHash(src.Data) != state.DefinitionHash {
+					fmt.Fprintf(out, "  note: %s has changed since this run (any edit to the file invalidates every checkpoint) — resume will be refused; run it fresh\n", name)
+				}
+			} else {
+				// The current definition is missing or unreadable — --resume can't
+				// proceed without it, so say so rather than silently dropping the
+				// error and implying a clean resume is available.
+				fmt.Fprintf(out, "  note: could not load the current definition of %s (%v) — resume is unavailable until it loads\n", name, err)
 			}
 			return nil
 		},

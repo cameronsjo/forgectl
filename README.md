@@ -62,6 +62,8 @@ forgectl launch doctor             # check claude availability + launch config v
 forgectl workflow run <name>              # run a workflow by name
 forgectl workflow run <name> --param k=v  # override a workflow param (repeatable)
 forgectl workflow run <name> --dry-run    # print the resolved plan, run nothing
+forgectl workflow run <name> --resume     # resume the last run from its first incomplete step
+forgectl workflow status <name>           # show the last run's per-step checkpoint state
 forgectl workflow list                    # show resolvable workflow names
 forgectl workflow bless <name>            # approve a user workflow's exact bytes (Touch ID; macOS only)
 forgectl workflow verify <name>           # check a workflow's blessing without running it
@@ -153,7 +155,7 @@ forgectl pr prs / dash / pick
 
 `projects` builds a unified inventory across local clones, GitHub, and the self-hosted Gitea. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean.
 
-`workflow` is the composition layer — a declarative TOML step list forgectl parses, plans, and executes through the same seams the hand-run verbs use. `--dry-run` prints the fully resolved plan without running a step. User workflows live in `workflows/` under the config dir (paths below), overriding shipped built-ins of the same name.
+`workflow` is the composition layer — a declarative TOML step list forgectl parses, plans, and executes through the same seams the hand-run verbs use. `--dry-run` prints the fully resolved plan without running a step. `--resume` picks a failed run back up from its first incomplete step, skipping the checkpointed steps whose inputs haven't changed, and `workflow status <name>` shows that checkpoint state; a resume re-verifies the blessing and refuses to replay across an edited definition. It also refuses when a step still to run needs an export that only a skipped step produced — a step's outputs aren't reconstructed from the sidecar, so those workflows must be run fresh. User workflows live in `workflows/` under the config dir (paths below), overriding shipped built-ins of the same name.
 
 A user workflow must be **blessed** before `workflow run` will execute it. `forgectl workflow bless <name>` signs the file's exact bytes behind a Touch ID (or account-password) presence ceremony, writing a `*.blessing` sidecar next to it; one changed byte invalidates the signature, so re-bless after every edit — that is the point. Built-in workflows are compiled into the binary and never need blessing.
 
