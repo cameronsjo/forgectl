@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -332,9 +333,15 @@ func newEnvGetCmd(client *envpkg.Client, file *string, anyFile *bool) *cobra.Com
 	return cmd
 }
 
-// newEnvCheckCmd builds `env check`.
+// newEnvCheckCmd builds `env check`. Exit codes are part of its contract
+// (forgectl#104): 2 means --file or --example is absent (nothing to
+// compare), 1 means the file and example were compared and differ (missing
+// and/or extra keys — either counts as drift), 0 means clean. --json
+// (forgectl#105) emits the same verdict as {"missing":[...],"extra":[...]}
+// on stdout instead of the human sections, under the identical exit codes.
 func newEnvCheckCmd(file *string, anyFile *bool) *cobra.Command {
 	var example string
+	var asJSON bool
 
 	cmd := &cobra.Command{
 		Use:   "check",
@@ -355,7 +362,7 @@ func newEnvCheckCmd(file *string, anyFile *bool) *cobra.Command {
 				return err
 			}
 			if !fileExists {
-				return fmt.Errorf("%s not found", fileReal)
+				return WithExitCode(fmt.Errorf("%s not found", fileReal), 2)
 			}
 			fileDoc, err := readDocument(fileReal)
 			if err != nil {
@@ -371,7 +378,7 @@ func newEnvCheckCmd(file *string, anyFile *bool) *cobra.Command {
 				return err
 			}
 			if !exampleExists {
-				return fmt.Errorf("example file %s not found", exampleReal)
+				return WithExitCode(fmt.Errorf("example file %s not found", exampleReal), 2)
 			}
 			exampleDoc, err := readDocument(exampleReal)
 			if err != nil {
@@ -379,25 +386,37 @@ func newEnvCheckCmd(file *string, anyFile *bool) *cobra.Command {
 			}
 
 			missing, extra := envpkg.Diff(fileDoc, exampleDoc)
-			out := cmd.OutOrStdout()
-			// Only print a section that has names under it — a bare
-			// "extra:" header with nothing beneath reads as a truncated
-			// list rather than as "there are none".
-			printSection(out, "missing:", missing)
-			printSection(out, "extra:", extra)
+			drift := len(missing) > 0 || len(extra) > 0
 
-			if len(missing) > 0 {
-				return fmt.Errorf("%d missing key(s) in %s", len(missing), *file)
+			if asJSON {
+				if err := writeCheckJSON(cmd.OutOrStdout(), missing, extra); err != nil {
+					return err
+				}
+			} else {
+				out := cmd.OutOrStdout()
+				// Only print a section that has names under it — a bare
+				// "extra:" header with nothing beneath reads as a truncated
+				// list rather than as "there are none".
+				printSection(out, "missing:", missing)
+				printSection(out, "extra:", extra)
+				if !drift {
+					// Clean: stdout stays empty so a caller can treat any
+					// output as drift, and the reassurance goes to stderr.
+					fmt.Fprintf(cmd.ErrOrStderr(), "%s matches %s\n", *file, example)
+				}
 			}
-			if len(extra) == 0 {
-				// Clean: stdout stays empty so a caller can treat any
-				// output as drift, and the reassurance goes to stderr.
-				fmt.Fprintf(cmd.ErrOrStderr(), "%s matches %s\n", *file, example)
+
+			if drift {
+				return WithExitCode(
+					fmt.Errorf("%d missing, %d extra key(s) between %s and %s", len(missing), len(extra), *file, example),
+					1,
+				)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&example, "example", ".env.example", "path to the example file to check against")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"missing":[...],"extra":[...]} to stdout instead of the human sections`)
 	return cmd
 }
 
@@ -411,6 +430,28 @@ func printSection(out io.Writer, header string, keys []string) {
 	for _, k := range keys {
 		fmt.Fprintln(out, "  "+k)
 	}
+}
+
+// checkJSON is the --json wire shape for `env check` (forgectl#105) — always
+// both keys, arrays never null, matching the `projects list --json`
+// empty-[] convention so a clean result reads as {"missing":[],"extra":[]}
+// rather than a null a caller must guard against.
+type checkJSON struct {
+	Missing []string `json:"missing"`
+	Extra   []string `json:"extra"`
+}
+
+// writeCheckJSON encodes missing/extra as checkJSON to out.
+func writeCheckJSON(out io.Writer, missing, extra []string) error {
+	if missing == nil {
+		missing = []string{}
+	}
+	if extra == nil {
+		extra = []string{}
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(checkJSON{Missing: missing, Extra: extra})
 }
 
 // newEnvRedactCmd builds `env redact`.

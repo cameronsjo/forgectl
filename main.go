@@ -14,6 +14,8 @@ import (
 
 func main() {
 	if err := cli.Execute(context.Background()); err != nil {
-		os.Exit(1)
+		// cli.ExitCode reads a command's opted-in typed exit code (see
+		// internal/cli/exitcode.go); everything else still exits 1.
+		os.Exit(cli.ExitCode(err))
 	}
 }
