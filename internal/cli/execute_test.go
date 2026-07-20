@@ -50,7 +50,12 @@ func TestDispatchAction(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &exec.FakeRunner{}
-			client := tmux.New(fake, tmux.WithInsideTmux(func() bool { return true }))
+			// Stub the sesh PATH check so the ActionPick case exercises the
+			// dispatch, not a real sesh binary (CI runners have none).
+			client := tmux.New(fake,
+				tmux.WithInsideTmux(func() bool { return true }),
+				tmux.WithLookPath(func(string) (string, error) { return "sesh", nil }),
+			)
 
 			if err := dispatchAction(ctx, client, tc.action); err != nil {
 				t.Fatalf("unexpected error: %v", err)

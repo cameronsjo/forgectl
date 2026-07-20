@@ -13,10 +13,13 @@ Built for two hands and one thumb:
 brew install cameronsjo/tap/forgectl
 ```
 
+Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against the self-hosted Gitea), `docker` (`bench status`/`up`, `docker build/run/shell`).
+
 ## Usage
 
 ```sh
 forgectl                   # open TUI menu (thumb mode)
+forgectl --help            # list every command group (non-interactive entrypoint)
 forgectl tmux ls           # list sessions
 forgectl tmux pick [name]  # connect/smart-create via sesh (no name → list)
 forgectl tmux kill <name>  # kill a session (--others keeps only it)
@@ -47,6 +50,7 @@ forgectl pr reviewed unmark <ref>        # clear a PR's reviewed mark
 forgectl pr reviewed sync                # prune reviewed marks for PRs that are no longer open
 forgectl pr list                         # list active clean-room review sessions
 forgectl pr attach <breadcrumb>          # jump to a review window (also: open <b>, teardown <b>)
+                                          #   <breadcrumb> is the session path `pr list` prints
 forgectl pr keys                         # tmux cheatsheet for driving a review
 
 # launch — per-project Claude Code launcher (alias: cl)
@@ -70,13 +74,15 @@ forgectl workflow verify <name>           # check a workflow's blessing without 
 forgectl workflow trust init              # install the trust anchor (one-time)
 forgectl workflow trust list              # show the enrolled keys
 
-# bench — discover, health-check, and wire the local dev bench (hearth, chronicle, flux)
+# bench — discover, health-check, and wire the local dev bench:
+#   hearth (telemetry stack), chronicle (transcript-retention layer), flux (task board)
 forgectl bench status                     # aggregate health card across all components
 forgectl bench status --json              # machine-readable JSON (safe to pipe)
 forgectl bench up                         # bring up the configured services via their own entrypoints
 forgectl bench open [target]              # open a bench UI (hearth | grafana; default hearth)
 
-# sessions — drain local session ledgers into the cross-machine operational mart
+# sessions — drain local session ledgers into the mart (a shared Postgres index
+# of every machine's session history, queried from any of them)
 forgectl sessions sync --dry-run          # read + count the local JSONL WAL; no DB connection
 forgectl sessions sync                    # idempotent upsert into the mart + rebuild the runbook index
 forgectl sessions sync --full             # bypass the lastMessageId watermark, re-upsert everything
@@ -86,14 +92,63 @@ forgectl sessions search "<query>"        # full-text search the mart's runbook 
 forgectl env keys [--file .env]                             # list KEY names only — never values
 forgectl env set KEY [--file .env] [--clipboard]             # value from piped stdin, no-echo prompt, or clipboard — never argv
 forgectl env get KEY --clipboard [--file .env]               # value to clipboard only; no print path exists
-forgectl env check [--file .env] [--example .env.example]    # missing/extra keys, names only; exit 1 iff missing
+forgectl env check [--file .env] [--example .env.example]    # missing/extra keys, names only (see § env below for exit codes)
 forgectl env redact [--file .env]                            # print file with values masked ****
 #   --file must name an env file (.env, .env.*, *.env); --any-file overrides, TTY-confirmed only
+
+# branch — prune stale/orphaned git branches (alias: br)
+forgectl branch                          # dry-run report: local + remote branches, classified against
+                                          #   server-side PR truth (safe-to-delete | blocked | needs-attention)
+forgectl branch --include-gone           # also surface upstream-gone branches with no server-confirmed merge
+forgectl branch --apply                  # DESTRUCTIVE: delete everything classified safe-to-delete,
+                                          #   after a confirmation prompt
+
+# clean — reclaim dep/build directories under a project root (alias: cln)
+forgectl clean                           # dry-run report against ~/Projects (node_modules, .venv, target, …)
+forgectl clean --type node               # only one type: node|python|go|build
+forgectl clean --apply                   # DESTRUCTIVE: delete everything reclaimable, after a confirmation
+                                          #   prompt (skips dirty git trees unless --force)
+
+# docker — build/run/shell images tagged from git repo/branch/sha
+forgectl docker build [context]          # build, tagging {repo}:{branch}-{sha} and :dev
+forgectl docker run [-- args...]         # run the built (or --tag) image
+forgectl docker shell                    # open a shell in the built (or --tag) image
+
+# docs — local markdown reader: render + serve an indexed doc set over loopback HTTP
+forgectl docs serve [dir|file ...]       # render + serve, loopback-only (DNS-rebinding-safe)
+forgectl docs serve --open               # also open the system browser
+forgectl docs list [dir|file ...]        # list the indexed docs, no server (--json for scripting)
+
+# net — check cached internal-network reachability
+forgectl net                             # show the cached (or freshly probed) answer
+forgectl net --refresh                   # force a new probe, bypassing the cache
+forgectl net --json                      # machine-readable output for scripting
+
+# pip — comment- and whitespace-preserving pip.conf editor
+forgectl pip remove                      # comment out [global] index-url (reversible)
+forgectl pip restore                     # un-comment whatever remove last tagged
+forgectl pip show                        # print the effective pip.conf
+
+# quarantine — reversibly hide AI-instruction files (CLAUDE.md, AGENTS.md, …) from a workspace
+forgectl quarantine                      # hide the default targets in cwd (same as `quarantine hide`)
+forgectl quarantine restore              # rename quarantined targets back
+forgectl quarantine status               # show which targets are hidden
+
+# review — cross-project work inventory: open issues and PRs across your repos
+forgectl review                          # unified table (reviewed rows dimmed)
+forgectl review --kind issue             # issues only (or: pr)
+forgectl review mark owner/repo#42       # mark an item reviewed
+
+# y — read/write the system clipboard (macOS only)
+echo hi | forgectl y copy                # copy stdin to the clipboard
+forgectl y paste                         # print the clipboard's current contents
 ```
 
-The `fx` alias is available after install:
+The cask doesn't stage an `fx` command — it's a shell alias you add yourself:
 
 ```sh
+alias fx=forgectl     # add to your shell rc
+
 fx                    # same as bare forgectl — opens the TUI
 fx tmux ls
 ```
@@ -101,6 +156,8 @@ fx tmux ls
 ### env — safe .env management
 
 `forgectl env` touches `.env` files without ever putting a secret value in argv, terminal output, or a session transcript: key names are always visible, values never print. It's built for agent-driven workflows — an agent can be trusted with the tool even though it can't be trusted to keep a value out of its own transcript, because the tool structurally never hands one back.
+
+**`env check`'s exit codes are part of its contract, not incidental:** exit `1` means the file and its example both exist but disagree — missing and/or extra keys (drift); exit `2` means either the env file or the `--example` file is absent, so no comparison could run at all. `env check --json` emits the drift as a single object on stdout, `{"missing":[...],"extra":[...]}`, for scripted callers.
 
 **Blessed value producers** for `env set`, non-inline patterns first:
 
