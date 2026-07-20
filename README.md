@@ -142,7 +142,7 @@ echo hi | forgectl y copy                # copy stdin to the clipboard
 forgectl y paste                         # print the clipboard's current contents
 ```
 
-The cask stages only the `forgectl` binary — `fx` is a shell alias you add yourself:
+The cask doesn't stage an `fx` command — it's a shell alias you add yourself:
 
 ```sh
 alias fx=forgectl     # add to your shell rc

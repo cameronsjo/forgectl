@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -135,11 +136,16 @@ func TestPick_SeshNotFound(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := New(fake, WithBins("tmux", "sesh"), WithLookPath(notFound))
 
+	const wantMsg = "sesh not found on PATH"
 	if err := c.Pick(context.Background(), "projectx"); err == nil {
 		t.Fatal("Pick: expected error when sesh is not on PATH")
+	} else if !strings.Contains(err.Error(), wantMsg) {
+		t.Errorf("Pick: error = %q, want it to contain %q (a regression to an unattributed runner error must fail)", err, wantMsg)
 	}
 	if _, err := c.SeshList(context.Background()); err == nil {
 		t.Fatal("SeshList: expected error when sesh is not on PATH")
+	} else if !strings.Contains(err.Error(), wantMsg) {
+		t.Errorf("SeshList: error = %q, want it to contain %q (a regression to an unattributed runner error must fail)", err, wantMsg)
 	}
 	if last := fake.Last(); last.Name != "" {
 		t.Errorf("expected no exec call when the sesh guard fails, got %+v", last)
