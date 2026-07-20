@@ -4,20 +4,20 @@ package cli
 
 import "errors"
 
-// ExitCoder is satisfied by an error that wants to drive main's os.Exit with
-// something other than the universal 1 — the same interface shape
-// internal/bless's exitCodeOf reads back off a helper subprocess's
-// *exec.ExitError, generalized here to the CLI's own RunE errors. A command
-// wires a failure class to a code with WithExitCode; main resolves the
-// final code with ExitCode. Errors that never opt in (the vast majority)
-// keep exiting 1, unchanged.
-type ExitCoder interface {
-	ExitCode() int
-}
-
-// codedError pairs err with the process exit code it should produce.
-// Unwrap keeps errors.Is/As working against the wrapped error, so wrapping
-// a sentinel for its exit code never hides it from other error-chain checks.
+// codedError pairs err with the process exit code it should produce. A command
+// wires a failure class to a code with WithExitCode; main resolves the final
+// code with ExitCode. Errors that never opt in (the vast majority) keep
+// exiting 1, unchanged.
+//
+// Unwrap keeps errors.Is/As working against the wrapped error, so wrapping a
+// sentinel for its exit code never hides it from other error-chain checks.
+//
+// ExitCode matches this CONCRETE type, deliberately not a bare
+// `interface{ ExitCode() int }`: stdlib's *exec.ExitError satisfies that shape,
+// so an interface match would leak a subprocess's exit code (an editor, a
+// `docker build` child) as forgectl's own for any command that wraps such an
+// error with %w — commands that never opted in. Only WithExitCode mints a
+// codedError, so gating on it keeps the opt-in explicit.
 type codedError struct {
 	err  error
 	code int
@@ -37,12 +37,12 @@ func WithExitCode(err error, code int) error {
 	return &codedError{err: err, code: code}
 }
 
-// ExitCode walks err's chain for an ExitCoder (see WithExitCode) and returns
-// its code, or 1 when err carries none — the default every command got
-// before typed exit codes existed. main calls this once, on whatever
-// Execute returns.
+// ExitCode walks err's chain for a codedError (see WithExitCode) and returns
+// its code, or 1 when err carries none — the default every command got before
+// typed exit codes existed, and what every command that never opts in still
+// gets. main calls this once, on whatever Execute returns.
 func ExitCode(err error) int {
-	var coded ExitCoder
+	var coded *codedError
 	if errors.As(err, &coded) {
 		return coded.ExitCode()
 	}
