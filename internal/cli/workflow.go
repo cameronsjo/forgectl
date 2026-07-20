@@ -217,6 +217,14 @@ func resumeOptions(out io.Writer, name string, data []byte, plan workflow.Plan, 
 
 	if !resume {
 		slog.Debug("Preparing fresh workflow run (no resume).", "workflow", name)
+		// Clear any prior run's sidecar before this fresh run begins. The recorder
+		// does not persist until a step succeeds, so without this a fresh run that
+		// fails at step 0 would leave the PREVIOUS run's checkpoints in place and a
+		// later --resume could skip steps that never ran this time. Safe here: the
+		// caller holds the run lock before calling resumeOptions.
+		if err := workflow.ClearState(name); err != nil {
+			return nil, err
+		}
 		recorder := workflow.NewStateRecorder(name, workflow.NewRunID(now), defHash, now)
 		return []workflow.Option{workflow.WithRecorder(recorder)}, nil
 	}
@@ -330,6 +338,11 @@ func newWorkflowStatusCmd() *cobra.Command {
 				if workflow.DefinitionHash(src.Data) != state.DefinitionHash {
 					fmt.Fprintf(out, "  note: %s has changed since this run (any edit to the file invalidates every checkpoint) — resume will be refused; run it fresh\n", name)
 				}
+			} else {
+				// The current definition is missing or unreadable — --resume can't
+				// proceed without it, so say so rather than silently dropping the
+				// error and implying a clean resume is available.
+				fmt.Fprintf(out, "  note: could not load the current definition of %s (%v) — resume is unavailable until it loads\n", name, err)
 			}
 			return nil
 		},

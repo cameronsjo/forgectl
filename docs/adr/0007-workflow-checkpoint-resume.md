@@ -29,9 +29,10 @@ the leading run of already-completed, unchanged steps.**
   present **and** whose `input_hash` still matches; execute from the first gap through the end. A
   step after a gap is never skipped — once an earlier step re-runs, everything downstream re-runs.
 - **Durability (recovery-path invariant):** each checkpoint write is temp-file + fsync + atomic
-  rename, so a crash leaves either the old state or the new one, never a truncated file and never
-  a window with neither. Checkpoints are written only *after* a step succeeds; a fully successful
-  run clears the sidecar.
+  rename + parent-directory fsync, so a crash leaves either the old state or the new one, never a
+  truncated file and never a window with neither — and the rename itself is flushed to stable
+  storage, not just atomic. Checkpoints are written only *after* a step succeeds; a fully
+  successful run clears the sidecar.
 - **Concurrency:** the sidecar is a single file rewritten in full after each step, so two
   overlapping runs of the same workflow would clobber each other's checkpoints (run B's step-0
   write landing after run A's step-2 regresses the file, and a later `--resume` re-executes steps

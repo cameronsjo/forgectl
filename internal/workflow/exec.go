@@ -154,6 +154,11 @@ func (e *Executor) Run(ctx context.Context, plan Plan, wctx *Context) error {
 		if e.recorder != nil {
 			if err := e.recorder.Record(i, step); err != nil {
 				slog.Error("Failed to record step checkpoint.", "stepIndex", i, "stepUse", step.Uses, "error", err)
+				// The step succeeded but its checkpoint didn't persist — abort the
+				// run like the failure paths above, and tear the sandbox down too so
+				// a recorder error doesn't leak the temp workspace the way a runner
+				// or interpolation failure wouldn't.
+				cleanupSandbox(wctx)
 				return fmt.Errorf("step %d (%s): record checkpoint: %w", i, step.Uses, err)
 			}
 			slog.Debug("Successfully recorded step checkpoint.", "stepIndex", i, "stepUse", step.Uses)

@@ -181,30 +181,9 @@ func TestWorkflowRun_ResumeRefusedWhenTampered(t *testing.T) {
 	}
 }
 
-// TestWorkflowRun_ConcurrentRunRefused proves the advisory lock serializes runs
-// of the same workflow: while one holds the lock, a second run fails fast rather
-// than clobbering the shared state sidecar, and the lock frees on release.
-func TestWorkflowRun_ConcurrentRunRefused(t *testing.T) {
-	dir := cliRedirectConfigDir(t)
-	cliWriteUserWorkflow(t, dir, "multi", []byte(cliMultiWorkflow))
-	swapVerifier(t, fakeVerifier{})
-
-	held, err := workflow.AcquireRunLock("multi")
-	if err != nil {
-		t.Fatalf("acquire lock: %v", err)
-	}
-
-	_, err = execRun(t, &exec.FakeRunner{}, "multi")
-	if !errors.Is(err, workflow.ErrWorkflowRunning) {
-		t.Fatalf("a run while the lock is held must fail with ErrWorkflowRunning; got %v", err)
-	}
-
-	// Once released, a run proceeds normally.
-	held.Release()
-	if _, err := execRun(t, &exec.FakeRunner{}, "multi"); err != nil {
-		t.Fatalf("run after lock release should succeed: %v", err)
-	}
-}
+// TestWorkflowRun_ConcurrentRunRefused lives in workflow_resume_unix_test.go: the
+// advisory lock it exercises is a documented no-op on !unix (flock_other.go), so
+// the concurrency assertion only holds where AcquireRunLock actually enforces it.
 
 // TestWorkflowRun_InputHashChangeForcesRerun: resuming with a different param
 // changes step 0's input hash, so the previously-completed step re-runs.

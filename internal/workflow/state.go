@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -80,8 +81,13 @@ func HashPlanStep(s PlanStep) string {
 		writeNUL(v)
 	}
 	for _, vals := range s.SliceFields() {
-		// A per-slice marker keeps [] , ["a"] from colliding with ["a"] , [].
-		writeNUL("slice")
+		// Length-prefix each slice so its boundary is a COUNT, not a sentinel
+		// string a value could equal. A fixed marker collided: with fields
+		// (Globs, Args), ["slice"],[] and [],["slice"] both emit the token run
+		// "slice","slice","slice". A count followed by exactly that many values
+		// makes structure→bytes injective, so changed step inputs can't keep the
+		// same checkpoint hash and be wrongly skipped on resume.
+		writeNUL(strconv.Itoa(len(vals)))
 		for _, v := range vals {
 			writeNUL(v)
 		}
@@ -216,7 +222,34 @@ func WriteState(st RunState) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("commit state file %s: %w", path, err)
 	}
+	// The rename is atomic, but the parent directory entry stays in the page
+	// cache until the directory itself is fsynced — so a crash right after the
+	// rename could still drop the new checkpoint and let a completed step re-run
+	// on resume. Flush the directory to make the rename durable, not just atomic.
+	if err := syncDir(dir); err != nil {
+		return err
+	}
 	slog.Debug("Wrote workflow run state.", "workflow", st.Workflow, "path", path, "stepCount", len(st.Steps))
+	return nil
+}
+
+// syncDir fsyncs a directory so a rename into it survives a crash. It is the
+// durability half of the atomic-rename write: os.Rename guarantees the file is
+// either fully there or not, syncDir guarantees the directory entry naming it is
+// on stable storage. Directory fsync is supported on forgectl's macOS/Linux
+// targets; an error is propagated rather than swallowed.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open state dir for durable rename %s: %w", dir, err)
+	}
+	if err := d.Sync(); err != nil {
+		d.Close() //nolint:errcheck
+		return fmt.Errorf("sync state dir %s: %w", dir, err)
+	}
+	if err := d.Close(); err != nil {
+		return fmt.Errorf("close state dir after sync %s: %w", dir, err)
+	}
 	return nil
 }
 

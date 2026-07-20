@@ -133,8 +133,11 @@ func TestStatePath_RejectsTraversal(t *testing.T) {
 
 func TestHashPlanStep_StableAndSensitive(t *testing.T) {
 	base := PlanStep{Uses: "run", Cmd: "echo", Args: []string{"a", "b"}}
-	if HashPlanStep(base) != HashPlanStep(base) {
-		t.Fatal("hash must be stable for identical inputs")
+	// Two SEPARATELY constructed but equivalent steps must hash the same — a
+	// self-comparison (base vs base) is tautological (SA4000) and proves nothing.
+	equivalent := PlanStep{Uses: "run", Cmd: "echo", Args: []string{"a", "b"}}
+	if HashPlanStep(base) != HashPlanStep(equivalent) {
+		t.Fatal("hash must be stable across separately constructed identical inputs")
 	}
 	changed := base
 	changed.Args = []string{"a", "c"}
@@ -146,6 +149,14 @@ func TestHashPlanStep_StableAndSensitive(t *testing.T) {
 	y := PlanStep{Uses: "run", Cmd: "a", Repo: "b"}
 	if HashPlanStep(x) == HashPlanStep(y) {
 		t.Error("field boundaries must not collide")
+	}
+	// A slice value equal to the boundary encoding must not shift a boundary.
+	// With the slice fields (Globs, Args), Globs=["slice"],Args=[] once collided
+	// with Globs=[],Args=["slice"] under a fixed "slice" marker.
+	sx := PlanStep{Uses: "run", Globs: []string{"slice"}}
+	sy := PlanStep{Uses: "run", Args: []string{"slice"}}
+	if HashPlanStep(sx) == HashPlanStep(sy) {
+		t.Error("slice-field boundaries must not collide with a value equal to the marker")
 	}
 }
 
