@@ -32,53 +32,36 @@ func seedWhyFixture(t *testing.T, ctx context.Context, mart *Mart) {
 	}
 }
 
-// An empty topic string produces an empty tsquery (no lexemes), so the
-// full-text path returns zero hits and WhySessions falls through to the
-// trigram fallback — whose ILIKE '%' || ” || '%' matches EVERY runbook's
-// full_text unconditionally. Pinning this: `forgectl sessions why ""` (e.g.
-// an unset shell variable interpolated into the argument) does not error or
-// return "no sessions matched" — it dumps the entire session_id-linked
-// corpus, up to --limit. Flagging this as a UX/safety gap worth a CLI-side
-// guard (reject a blank topic before it reaches the mart) rather than fixing
-// it here, since the brief is coverage, not a source change.
-func TestIntegrationWhyEmptyTopicReturnsFullCorpus(t *testing.T) {
+// An empty topic is rejected at the mart boundary. Without the guard it would
+// collapse to an empty tsquery, fall through to the trigram fallback, and
+// ILIKE '%' || ” || '%' would dump the entire session_id-linked corpus up to
+// --limit — an unset shell variable (`forgectl sessions why ""`) becoming a
+// corpus dump. WhySessions now refuses a blank query.
+func TestIntegrationWhyEmptyTopicRejected(t *testing.T) {
 	dsn := martDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	mart := prepMart(t, ctx, dsn)
 	seedWhyFixture(t, ctx, mart)
 
-	hits, err := mart.WhySessions(ctx, "", "", 10)
-	if err != nil {
-		t.Fatalf("empty topic should not error: %v", err)
-	}
-	if len(hits) != 1 {
-		t.Fatalf("empty topic should fall through to the trigram '%%%%' fallback and match the seeded session, got %d hits: %+v", len(hits), hits)
-	}
-	if hits[0].SessionID != "edge-1" {
-		t.Errorf("unexpected session matched by empty-topic fallback: %+v", hits[0])
+	if _, err := mart.WhySessions(ctx, "", "", 10); err == nil {
+		t.Fatal("empty topic must be rejected, got nil error (a blank query must not dump the corpus)")
 	}
 }
 
-// By contrast, a whitespace-only topic ALSO collapses to an empty tsquery
-// (no lexemes), so it takes the same trigram fallback path — but the ILIKE
-// pattern then requires that literal whitespace run to appear in full_text.
-// None of the seeded fixtures contain "   " (three spaces), so this must
-// return no hits: proof the fallback is a literal substring match, not a
-// second "matches everything" case merely because the source is blank-ish.
-func TestIntegrationWhyWhitespaceTopicMatchesNothing(t *testing.T) {
+// A whitespace-only topic trims to empty, so the blank-query guard rejects it
+// too — the guard is on the trimmed query, not just the literal empty string.
+// (Before the guard this took the trigram fallback and matched nothing, since
+// no fixture contains the literal whitespace run.)
+func TestIntegrationWhyWhitespaceTopicRejected(t *testing.T) {
 	dsn := martDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	mart := prepMart(t, ctx, dsn)
 	seedWhyFixture(t, ctx, mart)
 
-	hits, err := mart.WhySessions(ctx, "   ", "", 10)
-	if err != nil {
-		t.Fatalf("whitespace-only topic should not error: %v", err)
-	}
-	if len(hits) != 0 {
-		t.Errorf("whitespace-only topic should not literal-match any seeded runbook, got %+v", hits)
+	if _, err := mart.WhySessions(ctx, "   ", "", 10); err == nil {
+		t.Fatal("whitespace-only topic must be rejected, got nil error (it trims to blank)")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -268,6 +269,13 @@ type WhyHit struct {
 // mangles (dots, slashes), which is what lets a `<path>` argument match at all.
 func (m *Mart) WhySessions(ctx context.Context, query, project string, limit int) ([]WhyHit, error) {
 	slog.Debug("Preparing to query sessions for narrative match", "query", query, "project", project, "limit", limit)
+	// A blank query is meaningless for both paths: an empty tsquery matches
+	// nothing, and the ILIKE fallback would collapse to '%%' and dump the entire
+	// session-linked corpus (an unset shell variable becoming a corpus dump).
+	// Refuse it at the boundary so no caller can trip that.
+	if strings.TrimSpace(query) == "" {
+		return nil, fmt.Errorf("why query must not be blank")
+	}
 	// The snippet parameters (ts_headline MaxWords/MinWords/selectors, the
 	// 160-char trigram-fallback preview) mirror SearchRunbooks so `why` and
 	// `search` render a match identically.
@@ -284,9 +292,9 @@ func (m *Mart) WhySessions(ctx context.Context, query, project string, limit int
 			JOIN session s ON s.session_id = r.session_id,
 			     websearch_to_tsquery('english', $1) AS q
 			WHERE r.search @@ q AND ($2 = '' OR s.project = $2)
-			ORDER BY r.session_id, rank DESC
+			ORDER BY r.session_id, rank DESC, r.updated_at DESC NULLS LAST, r.path ASC
 		) ranked
-		ORDER BY last_ts DESC NULLS LAST
+		ORDER BY last_ts DESC NULLS LAST, session_id ASC
 		LIMIT $3`, query, project, limit)
 	if err != nil || len(hits) > 0 {
 		return hits, err
@@ -301,11 +309,20 @@ func (m *Mart) WhySessions(ctx context.Context, query, project string, limit int
 				left(r.full_text, 160) AS snippet
 			FROM runbooks r
 			JOIN session s ON s.session_id = r.session_id
-			WHERE r.full_text ILIKE '%' || $1 || '%' AND ($2 = '' OR s.project = $2)
-			ORDER BY r.session_id, r.updated_at DESC
+			WHERE r.full_text ILIKE '%' || $1 || '%' ESCAPE '\' AND ($2 = '' OR s.project = $2)
+			ORDER BY r.session_id, r.updated_at DESC NULLS LAST, r.path ASC
 		) ranked
-		ORDER BY last_ts DESC NULLS LAST
-		LIMIT $3`, query, project, limit)
+		ORDER BY last_ts DESC NULLS LAST, session_id ASC
+		LIMIT $3`, likeEscape(query), project, limit)
+}
+
+// likeEscape backslash-escapes the LIKE/ILIKE metacharacters (%, _, and the
+// escape char itself) so a caller-supplied string matches as a literal
+// substring under an `ESCAPE '\'` clause — otherwise a bare `%` dumps the whole
+// corpus and `foo_bar` matches `fooXbar`, contradicting the documented
+// literal-substring behavior of the `why` fallback.
+func likeEscape(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
 func (m *Mart) scanWhyHits(ctx context.Context, sql string, args ...any) ([]WhyHit, error) {
