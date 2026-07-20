@@ -46,6 +46,7 @@ around it assume a human.
 ## Findings by curve position
 
 ### [Innovator] — adopt · bar: claims trace to source
+
 - Blessing ceremony is real cryptographic engineering (SE P-256, per-signature
   `userPresence`, domain-separated pre-images, split Swift-signer/Go-verifier);
   `AllowAllVerifier` deleted outright as claimed.
@@ -57,6 +58,7 @@ around it assume a human.
   a non-agent-writable Homebrew prefix, which `/opt/homebrew` is not.
 
 ### [Visionary] — adopt · bar: the README lets a reader judge the trajectory accurately (it doesn't, in both directions)
+
 - Platform spine (DSL, blessing, launch absorption, env) is infrastructure,
   not paint.
 - Fleet epic (#81) is an explicitly empty placeholder — the multi-agent-estate
@@ -69,6 +71,7 @@ around it assume a human.
 —— the chasm ——
 
 ### [Pragmatist] — not yet · bar: README documents the whole shipped surface
+
 - ~9 undocumented command groups; the documented surface feels complete, which
   makes the omission disqualifying — the cold reader trusts the map.
 - No CHANGELOG (#34) and no quickstart across six releases.
@@ -79,6 +82,7 @@ around it assume a human.
   which groups are estate-bound.
 
 ### [Conservative] — not yet · bar: the first thing the README says to try must exist
+
 - **`fx` does not exist after the documented install** — the published cask
   stages only `forgectl`; the alias lives in the author's dotfiles.
 - Load-bearing nouns never defined: mart, hearth, chronicle, flux,
@@ -89,6 +93,7 @@ around it assume a human.
   flaky-SSH use case.
 
 ### [Skeptic] — not yet · bar: "read the README" and "know what forgectl does" are different activities
+
 - Independently measured the 42% doc gap and proved the drift is ongoing.
 - The pitch sentence doesn't match the scope: undisclosed destructive verbs,
   a docker wrapper, a pip.conf editor.
@@ -100,6 +105,7 @@ around it assume a human.
 - No written exit story for a 40k-LOC, 56-dependency, bus-factor-1 tool.
 
 ### [Agent] — off-curve — not yet · bar: the first natural probe must not trap
+
 - The TUI trap (headline, above); cobra's did-you-mean suggestions dead for
   top-level typos because the TUI intercepts unknown verbs first.
 - Universal exit 1; `env check` README claim false; helper's typed codes
@@ -120,7 +126,7 @@ around it assume a human.
 
 ## Merged Dismissed (9)
 
-- `Version = "dev"` beta smell — [Pragmatist][Visionary] verified
+- `Version = "dev"` beta smell — `Pragmatist`/`Visionary` verified
   goreleaser-ldflags resolves it; install path never shows "dev".
 - No OSI license — [Pragmatist] deliberate stop, located not condemned.
 - Bus factor 1 / no testimonials / SLA — [Pragmatist] wrong lens for a
@@ -131,7 +137,7 @@ around it assume a human.
   ADR trade-off.
 - Zero-config claim — [Conservative] verified live: sensible defaults, no
   crash.
-- `bench status` degradation — [Conservative][Agent] verified graceful,
+- `bench status` degradation — `Conservative`/`Agent` verified graceful,
   documented, machine-detectable, exit 0.
 - Open-issue count as instability — [Skeptic] active backlog on a
   personal tool is hygiene, not decay; 1 of 48 is `bug`-labeled.
