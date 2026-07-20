@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/fang"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -17,6 +19,23 @@ import (
 	"github.com/cameronsjo/forgectl/internal/tmux"
 	"github.com/cameronsjo/forgectl/internal/tui"
 )
+
+// errHeadlessMenuRoute is returned when a non-interactive invocation would
+// have opened the TUI menu but Cobra/fang handled it as a silent success
+// instead — a bare invoke, or a known parent swallowing an unrecognized
+// subverb into its own help, both print via flag.ErrHelp and return nil.
+// Left alone that would exit 0 having dispatched nothing; this turns it into
+// a failure so scripts/CI/an agent driving forgectl headlessly can tell.
+var errHeadlessMenuRoute = errors.New("forgectl: no command to run outside a terminal; see the usage above")
+
+// isInteractiveTTY is the TUI's TTY gate — package-level so decideRoute's
+// callers (and tests, via the plain-bool seam below) don't need a real
+// terminal. Bubble Tea needs both stdin (input) and stdout (the drawn
+// screen); env.go's isTerminal only gates a single stdin prompt, so this is
+// a separate check rather than a reuse of that seam.
+var isInteractiveTTY = func() bool {
+	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+}
 
 // Execute is the binary's entrypoint. It normalizes argv (forgiveness layer),
 // then either opens the TUI (bare invoke or an unrecognized verb — the thumb-
@@ -57,12 +76,36 @@ func Execute(ctx context.Context) error {
 
 	noIcons := cfg.NoIcons || hasNoIcons(args)
 
-	if shouldLaunchTUI(root, args) {
+	switch decideRoute(root, args, isInteractiveTTY()) {
+	case routeTUI:
 		slog.Debug("Launching TUI.", "no_icons", noIcons)
 		return runAction(ctx, tmuxClient, noIcons)
+	case routeHeadlessMenu:
+		// Route through Cobra/fang instead of the TUI: an unrecognized
+		// top-level verb hits cobra's own "unknown command" + "did you mean"
+		// suggestion path — previously unreachable, since the TUI intercepted
+		// unknown verbs before Cobra ever saw them — which already returns a
+		// non-nil error. A bare invoke or a bad subverb of a known parent
+		// prints help and returns nil instead; errHeadlessMenuRoute turns
+		// that into a failure so headless callers never read silence as
+		// success.
+		slog.Debug("Headless; routing to Cobra/fang instead of the TUI.", "verb", args)
+		root.SetOut(os.Stderr)
+		if err := execCommand(ctx, root, args); err != nil {
+			return err
+		}
+		return errHeadlessMenuRoute
+	default:
+		slog.Debug("Dispatching to command verb.", "verb", args)
+		return execCommand(ctx, root, args)
 	}
+}
 
-	slog.Debug("Dispatching to command verb.", "verb", args)
+// execCommand hands args to Cobra via fang, which renders styled help,
+// errors, and version output. Shared by the normal-dispatch and
+// headless-menu-route paths in Execute; the only difference between them is
+// where fang writes output, which the caller sets via root.SetOut first.
+func execCommand(ctx context.Context, root *cobra.Command, args []string) error {
 	root.SetArgs(args)
 	return fang.Execute(ctx, root,
 		fang.WithVersion(meta.Version),
@@ -140,6 +183,28 @@ func shouldLaunchTUI(root *cobra.Command, args []string) bool {
 		}
 	}
 	return false
+}
+
+// menuRoute is Execute's routing decision for a parsed argv.
+type menuRoute int
+
+const (
+	routeDispatch     menuRoute = iota // known verb — normal Cobra/fang dispatch
+	routeTUI                           // menu-eligible and interactive — draw the menu
+	routeHeadlessMenu                  // menu-eligible but non-interactive — Cobra/fang, no TUI
+)
+
+// decideRoute combines shouldLaunchTUI with the TTY gate, factored out as a
+// plain function over a bool so the headless decision is a unit-testable
+// seam rather than living inline with the real isatty call in Execute.
+func decideRoute(root *cobra.Command, args []string, tty bool) menuRoute {
+	if !shouldLaunchTUI(root, args) {
+		return routeDispatch
+	}
+	if tty {
+		return routeTUI
+	}
+	return routeHeadlessMenu
 }
 
 // launchIntercept returns the args following a leading `launch`/`cl` command
