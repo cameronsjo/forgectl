@@ -161,6 +161,119 @@ func TestIntegrationSyncIdempotencyAndSearch(t *testing.T) {
 	}
 }
 
+// TestIntegrationWhyAndLast exercises the path/topic recency query surface
+// (`sessions why` / `sessions last`) against the seeded fixture corpus. It pins
+// the honest degradation too: a runbook lacking a session_id frontmatter key
+// (worktree-entry-posture.md) cannot be attributed to a session, so `why` never
+// surfaces it even though `search` can.
+func TestIntegrationWhyAndLast(t *testing.T) {
+	dsn := martDSN(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	mart := prepMart(t, ctx, dsn)
+
+	if _, err := Sync(ctx, SyncOptions{DSN: dsn, Machine: "it-machine",
+		MetricsDir:      filepath.Join("testdata", "metrics"),
+		RunbooksDir:     filepath.Join("testdata", "runbooks"),
+		SyncthingConfig: filepath.Join("testdata", "syncthing-clean.xml")}); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+
+	// why: a topic in a session_id-linked runbook resolves to its author.
+	hits, err := mart.WhySessions(ctx, "colima split brain", "", 5)
+	if err != nil {
+		t.Fatalf("why: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("why should find exactly the authoring session, got %+v", hits)
+	}
+	if hits[0].SessionID != "11111111-1111-1111-1111-111111111111" ||
+		hits[0].Project != "hearth" || hits[0].Type != "field-report" ||
+		hits[0].Path != "hearth/colima-split-brain.md" {
+		t.Errorf("why hit fields off: %+v", hits[0])
+	}
+
+	// why: the project filter is exact (colima's runbook is hearth, not cadence).
+	if h, _ := mart.WhySessions(ctx, "colima split brain", "cadence", 5); len(h) != 0 {
+		t.Errorf("why project filter leaked: %+v", h)
+	}
+
+	// why: a runbook with NO session_id can't be attributed to a session — the
+	// documented degradation, pinned. (worktree-entry-posture.md has no
+	// session_id frontmatter, so `why` cannot name a predecessor for it.)
+	if h, _ := mart.WhySessions(ctx, "worktree entry posture", "", 5); len(h) != 0 {
+		t.Errorf("why should not attribute a session_id-less runbook: %+v", h)
+	}
+
+	// last: newest session per repo, with latest-wins scalar fields.
+	last, err := mart.LastSession(ctx, "cadence")
+	if err != nil {
+		t.Fatalf("last cadence: %v", err)
+	}
+	if last == nil || last.SessionID != "22222222-2222-2222-2222-222222222222" ||
+		last.GitBranch != "feat/late" {
+		t.Errorf("last cadence off: %+v", last)
+	}
+
+	// last: a session with a session_id-linked runbook lists it as an artifact.
+	hearth, err := mart.LastSession(ctx, "hearth")
+	if err != nil {
+		t.Fatalf("last hearth: %v", err)
+	}
+	if hearth == nil || len(hearth.Artifacts) != 1 || hearth.Artifacts[0].Type != "field-report" {
+		t.Errorf("last hearth should carry its field-report artifact: %+v", hearth)
+	}
+
+	// last: a repo with no sessions is a clean (nil, nil) miss, never an error.
+	miss, err := mart.LastSession(ctx, "does-not-exist")
+	if err != nil {
+		t.Fatalf("last miss should not error: %v", err)
+	}
+	if miss != nil {
+		t.Errorf("last on an unknown repo should be nil, got %+v", miss)
+	}
+
+	// Newest-first ordering needs TWO distinct sessions in ONE project to mean
+	// anything — the seeded fixture has one session per repo, so ORDER BY
+	// last_ts is untested by the assertions above. Insert a second project with
+	// an older and a newer session (and a query-matching runbook for each,
+	// linked by session_id) directly — raw INSERTs, so UpsertRunbooks's corpus
+	// prune doesn't wipe the seeded hearth/cadence rows the checks above rely on.
+	if _, err := mart.conn.Exec(ctx, `
+		INSERT INTO session (session_id, machine, project, git_branch, last_ts, synced_at) VALUES
+			('widget-old', 'it-machine', 'widget', 'main',     '2026-07-01T09:00:00Z', now()),
+			('widget-new', 'it-machine', 'widget', 'feat/new', '2026-07-02T09:00:00Z', now())`); err != nil {
+		t.Fatalf("seed widget sessions: %v", err)
+	}
+	if _, err := mart.conn.Exec(ctx, `
+		INSERT INTO runbooks (session_id, project, title, type, path, full_text, machine) VALUES
+			('widget-old', 'widget', 'Gizmo old', 'field-report', 'widget/gizmo-old.md', 'the gizmo tuning approach, older take', 'it-machine'),
+			('widget-new', 'widget', 'Gizmo new', 'handoff',      'widget/gizmo-new.md', 'the gizmo tuning approach, newer take', 'it-machine')`); err != nil {
+		t.Fatalf("seed widget runbooks: %v", err)
+	}
+
+	// why: both sessions match "gizmo" — the newer session must sort first.
+	gz, err := mart.WhySessions(ctx, "gizmo", "", 5)
+	if err != nil {
+		t.Fatalf("why gizmo: %v", err)
+	}
+	if len(gz) != 2 {
+		t.Fatalf("why should find both gizmo sessions, got %+v", gz)
+	}
+	if gz[0].SessionID != "widget-new" || gz[1].SessionID != "widget-old" {
+		t.Errorf("why must order newest-first: got %s then %s", gz[0].SessionID, gz[1].SessionID)
+	}
+
+	// last: with two sessions in one project, the newer one wins.
+	lw, err := mart.LastSession(ctx, "widget")
+	if err != nil {
+		t.Fatalf("last widget: %v", err)
+	}
+	if lw == nil || lw.SessionID != "widget-new" || lw.GitBranch != "feat/new" {
+		t.Errorf("last must pick the newest same-project session: %+v", lw)
+	}
+}
+
 func TestIntegrationRunbookPruneRespectsEmptyCorpus(t *testing.T) {
 	dsn := martDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
