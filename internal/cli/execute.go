@@ -107,10 +107,19 @@ func Execute(ctx context.Context) error {
 // where fang writes output, which the caller sets via root.SetOut first.
 func execCommand(ctx context.Context, root *cobra.Command, args []string) error {
 	root.SetArgs(args)
-	return fang.Execute(ctx, root,
-		fang.WithVersion(meta.Version),
-		fang.WithCommit(meta.Commit),
-	)
+	return fang.Execute(ctx, root, fangVersionOptions(meta.Version, meta.Commit)...)
+}
+
+// fangVersionOptions builds the fang.Option set that seeds root.Version
+// before Execute runs. Extracted so TestVersion_VerbMatchesFlagThroughFang
+// can call the exact same wiring instead of a parallel hand-rolled copy —
+// an option added here is automatically exercised by that regression guard
+// too.
+func fangVersionOptions(version, commit string) []fang.Option {
+	return []fang.Option{
+		fang.WithVersion(version),
+		fang.WithCommit(commit),
+	}
 }
 
 // runAction opens the TUI and performs whatever jump it selected. Jumps that
