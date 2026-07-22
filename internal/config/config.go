@@ -4,6 +4,8 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -632,32 +634,40 @@ func LegacyLaunchPath() (string, error) {
 	return filepath.Join(home, ".config", "claunch", "claunch.conf"), nil
 }
 
+// ErrNoLegacyLaunch signals that no legacy claunch.conf exists at the resolved
+// path — the expected "nothing to import / nothing to shadow" outcome, distinct
+// from a path-resolution or decode failure (which callers surface as real
+// errors). Test for it with errors.Is.
+var ErrNoLegacyLaunch = errors.New("no legacy claunch.conf found")
+
 // LoadLegacyLaunch reads a legacy claunch.conf into a LaunchConfig — the same
-// TOML shape as [launch] ([defaults] + [[project]]). It also returns the
-// resolved legacy path, so callers can report it without recomputing it via
-// LegacyLaunchPath(). It returns (cfg, path, true) only when a file was found
-// and decoded; a missing file yields (zero, path, false), and a malformed
-// file is logged and treated as absent.
-func LoadLegacyLaunch() (LaunchConfig, string, bool) {
+// TOML shape as [launch] ([defaults] + [[project]]) — and returns the resolved
+// legacy path alongside, so callers can report it without recomputing it via
+// LegacyLaunchPath(). The error distinguishes the three outcomes callers care
+// about: nil on success; ErrNoLegacyLaunch (wrapped with the path) when the file
+// is simply absent; and a wrapped path-resolution or decode error otherwise.
+// Callers decide leniency — resolveLaunchConfig ignores any error and falls
+// through to config.toml; runClaunchImport surfaces absent vs unreadable
+// distinctly.
+func LoadLegacyLaunch() (LaunchConfig, string, error) {
 	path, err := LegacyLaunchPath()
 	if err != nil {
-		return LaunchConfig{}, "", false
+		return LaunchConfig{}, "", fmt.Errorf("resolve legacy claunch path: %w", err)
 	}
 	var lc LaunchConfig
 	if _, err := toml.DecodeFile(path, &lc); err != nil {
-		if !os.IsNotExist(err) {
-			slog.Warn("Failed to decode legacy claunch config; ignoring it.", "path", path, "error", err)
+		if os.IsNotExist(err) {
+			return LaunchConfig{}, path, fmt.Errorf("%w at %s", ErrNoLegacyLaunch, path)
 		}
-		return LaunchConfig{}, path, false
+		return LaunchConfig{}, path, fmt.Errorf("read legacy claunch.conf at %s: %w", path, err)
 	}
-	return lc, path, true
+	return lc, path, nil
 }
 
 // ValidateLegacyLaunch decodes the legacy claunch.conf and returns any parse
-// error. A missing file is valid (nil). LoadLegacyLaunch collapses a malformed
-// file to (zero, false), indistinguishable from absent — so `forgectl launch
-// doctor` uses this to surface a broken legacy file instead of misreporting it
-// as "no profiles configured".
+// error. A missing file is valid (nil). `forgectl launch doctor` uses this as a
+// standalone health check to surface a broken legacy file instead of
+// misreporting it as "no profiles configured".
 func ValidateLegacyLaunch() error {
 	path, err := LegacyLaunchPath()
 	if err != nil {

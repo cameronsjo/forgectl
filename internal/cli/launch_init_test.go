@@ -59,9 +59,9 @@ func newLegacyHarnessWithBody(t *testing.T, legacyBody string) *harness {
 }
 
 // TestIntegration_LaunchInit_FromClaunch_Malformed covers runClaunchImport's
-// malformed-file branch: LoadLegacyLaunch collapses any decode failure to
-// (zero, false), indistinguishable from "file absent" -- ValidateLegacyLaunch
-// is what runClaunchImport calls to tell the two apart, so a syntactically
+// malformed-file branch: LoadLegacyLaunch returns a distinguishing error --
+// ErrNoLegacyLaunch when the file is absent, a wrapped decode error otherwise --
+// and runClaunchImport uses errors.Is to tell them apart, so a syntactically
 // broken claunch.conf must surface as "malformed", not be misreported as "no
 // legacy claunch.conf found".
 func TestIntegration_LaunchInit_FromClaunch_Malformed(t *testing.T) {
@@ -85,9 +85,9 @@ func TestIntegration_LaunchInit_FromClaunch_Malformed(t *testing.T) {
 // TestIntegration_LaunchInit_FromClaunch_EmptyLegacy covers the IsZero
 // refusal: a legacy claunch.conf that decodes cleanly (valid TOML, or no
 // content at all) but defines neither [defaults] nor any [[project]] has
-// nothing to import -- LoadLegacyLaunch returns (zero, true) for this case, a
-// different branch than both the RoundTrip (non-zero) and Malformed
-// (decode error) cases.
+// nothing to import -- LoadLegacyLaunch returns (zero, path, nil) for this case
+// (a clean decode of an empty/section-less file), a different branch than both
+// the RoundTrip (non-zero) and Malformed (decode error) cases.
 func TestIntegration_LaunchInit_FromClaunch_EmptyLegacy(t *testing.T) {
 	h := newLegacyHarnessWithBody(t, "")
 

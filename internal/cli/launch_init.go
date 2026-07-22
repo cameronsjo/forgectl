@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -83,12 +84,12 @@ func runClaunchImport(cmd *cobra.Command) error {
 		return err
 	}
 
-	lc, legacyPath, ok := config.LoadLegacyLaunch()
-	if !ok {
-		if verr := config.ValidateLegacyLaunch(); verr != nil {
-			return fmt.Errorf("legacy claunch.conf is malformed, not importing: %w", verr)
+	lc, legacyPath, err := config.LoadLegacyLaunch()
+	if err != nil {
+		if errors.Is(err, config.ErrNoLegacyLaunch) {
+			return err
 		}
-		return fmt.Errorf("no legacy claunch.conf found at %s", legacyPath)
+		return fmt.Errorf("legacy claunch.conf is malformed, not importing: %w", err)
 	}
 	if lc.IsZero() {
 		return fmt.Errorf("legacy claunch.conf at %s has no [defaults] or [[project]] to import", legacyPath)
