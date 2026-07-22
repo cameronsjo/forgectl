@@ -121,29 +121,25 @@ func StatePath(name string) (string, error) {
 	return filepath.Join(dir, name+".state.toml"), nil
 }
 
-// ensureStateDir returns the workflow state directory, creating it (0700) if
-// absent — but first REFUSES a pre-planted non-directory at that path. A
-// same-user adversary (the pre-blessing-agent threat model of ADR-0006/0007)
-// could otherwise symlink <config-dir>/workflows/.state at a directory of their
-// choosing and redirect every run-state and lock file there. Lstat does not
-// follow the link, so a symlink (or a plain file) is caught before any MkdirAll
-// or open. Shared by WriteState and AcquireRunLock.
-func ensureStateDir() (string, error) {
-	dir, err := config.WorkflowStateDir()
-	if err != nil {
-		return "", err
-	}
+// guardAndMakeStateDir refuses a pre-planted non-directory at dir — a same-user
+// adversary (the pre-blessing-agent threat model of ADR-0006/0007) could
+// otherwise symlink <config-dir>/workflows/.state at a directory of their choice
+// and redirect every run-state and lock file there. Lstat does not follow the
+// link, so a symlink (or a plain file) is caught before any MkdirAll or open;
+// the directory is then created 0o700 if absent. Shared by both openStateDir
+// builds so the refuse-symlink guard and its message stay defined exactly once.
+func guardAndMakeStateDir(dir string) error {
 	if info, err := os.Lstat(dir); err == nil {
 		if !info.IsDir() {
-			return "", fmt.Errorf("workflow state path %s is not a real directory (a symlink or file is planted there) — refusing to use it", dir)
+			return fmt.Errorf("workflow state path %s is not a real directory (a symlink or file is planted there) — refusing to use it", dir)
 		}
 	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("stat workflow state dir %s: %w", dir, err)
+		return fmt.Errorf("stat workflow state dir %s: %w", dir, err)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("create workflow state dir %s: %w", dir, err)
+		return fmt.Errorf("create workflow state dir %s: %w", dir, err)
 	}
-	return dir, nil
+	return nil
 }
 
 // LoadState reads the run-state sidecar for name. A missing file is not an error
@@ -183,27 +179,36 @@ func WriteState(st RunState) error {
 	if err != nil {
 		return err
 	}
-	dir, err := ensureStateDir()
-	if err != nil {
-		return err
-	}
 	data, err := encodeState(st)
 	if err != nil {
 		return err
 	}
 
-	tmp, err := os.CreateTemp(dir, st.Workflow+".state.*.tmp")
+	// Pin the state directory by an O_DIRECTORY|O_NOFOLLOW fd, then do every
+	// subsequent op (create / rename / dir-sync) openat-relative to it. A
+	// same-user adversary who swaps .state for a symlink after this handle opens
+	// cannot redirect the write — the fd already names the real inode (#128).
+	d, err := openStateDir()
+	if err != nil {
+		return err
+	}
+	// LIFO: register close BEFORE remove so the temp is unlinked first, then the
+	// dir handle closed — and so syncDir (below, not deferred) still runs on a
+	// live fd before close fires at return.
+	defer d.close() //nolint:errcheck
+
+	tmp, tmpName, err := d.createTemp(st.Workflow + ".state.*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temp state file: %w", err)
 	}
-	tmpName := tmp.Name()
 	// Best-effort cleanup of the temp file on any error path before the rename.
-	// After a successful rename tmpName no longer exists, so this is a no-op.
-	defer os.Remove(tmpName) //nolint:errcheck
+	// After a successful rename the temp no longer exists, so remove ignores the
+	// resulting ENOENT and this is a no-op.
+	defer d.remove(tmpName) //nolint:errcheck
 
 	// Each failure path below Closes tmp best-effort: we are already returning the
 	// causal (write/chmod/sync) error, so a Close error would only mask it, and
-	// the deferred os.Remove above discards the temp file regardless.
+	// the deferred remove above discards the temp file regardless.
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close() //nolint:errcheck
 		return fmt.Errorf("write temp state file: %w", err)
@@ -219,37 +224,19 @@ func WriteState(st RunState) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp state file: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	// The final name is the base of the StatePath already computed above — deriving
+	// it from path keeps the ".state.toml" convention defined only in StatePath.
+	if err := d.rename(tmpName, filepath.Base(path)); err != nil {
 		return fmt.Errorf("commit state file %s: %w", path, err)
 	}
 	// The rename is atomic, but the parent directory entry stays in the page
 	// cache until the directory itself is fsynced — so a crash right after the
 	// rename could still drop the new checkpoint and let a completed step re-run
 	// on resume. Flush the directory to make the rename durable, not just atomic.
-	if err := syncDir(dir); err != nil {
+	if err := d.syncDir(); err != nil {
 		return err
 	}
 	slog.Debug("Wrote workflow run state.", "workflow", st.Workflow, "path", path, "stepCount", len(st.Steps))
-	return nil
-}
-
-// syncDir fsyncs a directory so a rename into it survives a crash. It is the
-// durability half of the atomic-rename write: os.Rename guarantees the file is
-// either fully there or not, syncDir guarantees the directory entry naming it is
-// on stable storage. Directory fsync is supported on forgectl's macOS/Linux
-// targets; an error is propagated rather than swallowed.
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open state dir for durable rename %s: %w", dir, err)
-	}
-	if err := d.Sync(); err != nil {
-		d.Close() //nolint:errcheck
-		return fmt.Errorf("sync state dir %s: %w", dir, err)
-	}
-	if err := d.Close(); err != nil {
-		return fmt.Errorf("close state dir after sync %s: %w", dir, err)
-	}
 	return nil
 }
 
