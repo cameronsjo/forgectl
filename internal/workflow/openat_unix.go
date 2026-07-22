@@ -55,6 +55,10 @@ func openStateDir() (*stateDir, error) {
 	return &stateDir{fd: fd, path: dir}, nil
 }
 
+// randRead is the crypto-random source for temp-name suffixes; a package var so
+// tests can force guaranteed collisions to exercise the exhaustion branch.
+var randRead = rand.Read
+
 // createTemp creates a fresh temp file *at the dir fd* and returns the open file
 // plus its dir-relative name. pattern follows os.CreateTemp's convention (the
 // last '*' is where the random string lands). O_EXCL+O_NOFOLLOW makes the open
@@ -68,7 +72,7 @@ func (d *stateDir) createTemp(pattern string) (*os.File, string, error) {
 	const maxAttempts = 100
 	for range maxAttempts {
 		var rnd [8]byte
-		if _, err := rand.Read(rnd[:]); err != nil {
+		if _, err := randRead(rnd[:]); err != nil {
 			return nil, "", fmt.Errorf("generate random temp suffix: %w", err)
 		}
 		name := prefix + hex.EncodeToString(rnd[:]) + suffix
