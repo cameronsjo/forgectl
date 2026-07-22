@@ -205,10 +205,9 @@ func resolveLaunchConfig(cfg config.Config) (config.LaunchConfig, string) {
 		path, _ := config.ConfigPath()
 		return cfg.Launch, path
 	}
-	if legacy, ok := config.LoadLegacyLaunch(); ok {
-		path, _ := config.LegacyLaunchPath()
-		slog.Debug("Using legacy claunch config (no [launch] section in config.toml).", "path", path)
-		return legacy, path + " (legacy)"
+	if legacy, legacyPath, ok := config.LoadLegacyLaunch(); ok {
+		slog.Debug("Using legacy claunch config (no [launch] section in config.toml).", "path", legacyPath)
+		return legacy, legacyPath + " (legacy)"
 	}
 	path, _ := config.ConfigPath()
 	switch _, err := os.Stat(path); {
