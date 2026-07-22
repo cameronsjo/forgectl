@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -205,9 +206,14 @@ func resolveLaunchConfig(cfg config.Config) (config.LaunchConfig, string) {
 		path, _ := config.ConfigPath()
 		return cfg.Launch, path
 	}
-	if legacy, legacyPath, ok := config.LoadLegacyLaunch(); ok {
+	switch legacy, legacyPath, err := config.LoadLegacyLaunch(); {
+	case err == nil:
 		slog.Debug("Using legacy claunch config (no [launch] section in config.toml).", "path", legacyPath)
 		return legacy, legacyPath + " (legacy)"
+	case !errors.Is(err, config.ErrNoLegacyLaunch):
+		// A malformed or unreadable legacy file shouldn't block normal launch —
+		// warn and fall through to config.toml (an absent file is silent).
+		slog.Warn("Ignoring unreadable legacy claunch config.", "path", legacyPath, "error", err)
 	}
 	path, _ := config.ConfigPath()
 	switch _, err := os.Stat(path); {
