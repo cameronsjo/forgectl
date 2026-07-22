@@ -8,10 +8,6 @@ import (
 	"syscall"
 )
 
-// lockOpenExtraFlags refuses to follow a symlink at the lock path: a pre-planted
-// <name>.lock symlink is rejected (ELOOP) rather than opening its target.
-const lockOpenExtraFlags = syscall.O_NOFOLLOW
-
 // flockTryExclusive attempts a non-blocking exclusive advisory lock on f.
 // It returns (true, nil) when the lock was taken, (false, nil) when another
 // holder has it (EWOULDBLOCK), and a non-nil error for anything else. flock
