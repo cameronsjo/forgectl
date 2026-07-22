@@ -55,14 +55,10 @@ func newLaunchInitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if data, err := os.ReadFile(path); err == nil {
-				if hasLaunchSection(data) {
-					return fmt.Errorf("config already has a [launch] section at %s (edit it with `forgectl launch edit`)", path)
-				}
-			} else if !os.IsNotExist(err) {
-				return fmt.Errorf("read config %s: %w", path, err)
+			if err := refuseIfLaunchSection(path); err != nil {
+				return err
 			}
-			if err := appendToConfig(path, launchScaffold); err != nil {
+			if err := appendLaunchSection(path, launchScaffold); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Added a [launch] section to %s\n", path)
@@ -84,12 +80,8 @@ func runClaunchImport(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	if data, err := os.ReadFile(path); err == nil {
-		if hasLaunchSection(data) {
-			return fmt.Errorf("config already has a [launch] section at %s (edit it with `forgectl launch edit`); refusing to overwrite an existing launch profile", path)
-		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("read config %s: %w", path, err)
+	if err := refuseIfLaunchSection(path); err != nil {
+		return err
 	}
 
 	lc, ok := config.LoadLegacyLaunch()
@@ -120,7 +112,7 @@ func runClaunchImport(cmd *cobra.Command) error {
 	}
 	header := fmt.Sprintf("\n# ── launch: imported from %s (forgectl launch init --from-claunch) ──\n", legacyPath)
 
-	if err := appendToConfig(path, header+buf.String()); err != nil {
+	if err := appendLaunchSection(path, header+buf.String()); err != nil {
 		return err
 	}
 
@@ -129,11 +121,29 @@ func runClaunchImport(cmd *cobra.Command) error {
 	return nil
 }
 
-// appendToConfig appends content to the config.toml at path, creating the
-// parent directory and the file if absent. Both `launch init` and its
+// refuseIfLaunchSection errors when config.toml at path already has a
+// [launch] section — both `launch init` and its `--from-claunch` importer
+// refuse to run over an existing profile rather than risk overwriting it. A
+// missing file is not an error; the caller appends to it fresh.
+func refuseIfLaunchSection(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read config %s: %w", path, err)
+	}
+	if hasLaunchSection(data) {
+		return fmt.Errorf("config already has a [launch] section at %s (edit it with `forgectl launch edit`); refusing to overwrite an existing launch profile", path)
+	}
+	return nil
+}
+
+// appendLaunchSection appends content to the config.toml at path, creating
+// the parent directory and the file if absent. Both `launch init` and its
 // `--from-claunch` importer append a TOML block this way, preserving any
 // sections already in the file.
-func appendToConfig(path, content string) error {
+func appendLaunchSection(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
