@@ -5,6 +5,7 @@ package workflow
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -120,6 +121,50 @@ func TestStateDirOpenat_ClosesSymlinkSwapRace(t *testing.T) {
 			t.Errorf("openat ops must not follow the symlink into the attacker dir, found %v", entries)
 		}
 	})
+}
+
+// TestCreateTemp_ExhaustsAfterRepeatedCollisions forces every attempt to mint
+// the same name by stubbing the random source to a constant fill, so createTemp
+// must run out its bounded EEXIST retry loop and report exhaustion rather than
+// spinning forever or silently succeeding on a stale name.
+func TestCreateTemp_ExhaustsAfterRepeatedCollisions(t *testing.T) {
+	dir := redirectStateDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("create state dir: %v", err)
+	}
+
+	d, err := openStateDir()
+	if err != nil {
+		t.Fatalf("openStateDir: %v", err)
+	}
+	defer d.close() //nolint:errcheck
+
+	orig := randRead
+	randRead = func(b []byte) (int, error) {
+		for i := range b {
+			b[i] = 0
+		}
+		return len(b), nil
+	}
+	defer func() { randRead = orig }()
+
+	// First call succeeds and plants the colliding name; keep the file so the
+	// second call's every attempt hits the same EEXIST.
+	first, _, err := d.createTemp("demo.state.*.tmp")
+	if err != nil {
+		t.Fatalf("first createTemp: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first temp: %v", err)
+	}
+
+	_, _, err = d.createTemp("demo.state.*.tmp")
+	if err == nil {
+		t.Fatal("second createTemp: expected exhaustion error, got nil")
+	}
+	if !strings.Contains(err.Error(), "exhausted 100 attempts") {
+		t.Errorf("second createTemp: expected exhaustion error, got: %v", err)
+	}
 }
 
 // TestAcquireRunLock_LockFdIsCloexec is the CLOEXEC regression from the security
