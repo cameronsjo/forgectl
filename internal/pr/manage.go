@@ -70,7 +70,11 @@ func (c *Client) Attach(ctx context.Context, path string) error {
 	}
 	target := c.windowTarget(sess.Ref)
 	slog.Debug("Attaching to review window.", "target", target)
-	return c.run.RunInteractive(ctx, "tmux", "select-window", "-t", target)
+	if err := c.run.RunInteractive(ctx, "tmux", "select-window", "-t", target); err != nil {
+		return fmt.Errorf("select review window %q: %w — the window may predate a "+
+			"forgectl upgrade that renamed review windows; relaunch the review with `pr <ref>`", target, err)
+	}
+	return nil
 }
 
 // Open opens a fresh shell window rooted at the review workspace — a way into
