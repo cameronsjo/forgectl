@@ -633,22 +633,24 @@ func LegacyLaunchPath() (string, error) {
 }
 
 // LoadLegacyLaunch reads a legacy claunch.conf into a LaunchConfig — the same
-// TOML shape as [launch] ([defaults] + [[project]]). It returns (cfg, true)
-// only when a file was found and decoded; a missing file yields (zero, false),
-// and a malformed file is logged and treated as absent.
-func LoadLegacyLaunch() (LaunchConfig, bool) {
+// TOML shape as [launch] ([defaults] + [[project]]). It also returns the
+// resolved legacy path, so callers can report it without recomputing it via
+// LegacyLaunchPath(). It returns (cfg, path, true) only when a file was found
+// and decoded; a missing file yields (zero, path, false), and a malformed
+// file is logged and treated as absent.
+func LoadLegacyLaunch() (LaunchConfig, string, bool) {
 	path, err := LegacyLaunchPath()
 	if err != nil {
-		return LaunchConfig{}, false
+		return LaunchConfig{}, "", false
 	}
 	var lc LaunchConfig
 	if _, err := toml.DecodeFile(path, &lc); err != nil {
 		if !os.IsNotExist(err) {
 			slog.Warn("Failed to decode legacy claunch config; ignoring it.", "path", path, "error", err)
 		}
-		return LaunchConfig{}, false
+		return LaunchConfig{}, path, false
 	}
-	return lc, true
+	return lc, path, true
 }
 
 // ValidateLegacyLaunch decodes the legacy claunch.conf and returns any parse

@@ -84,20 +84,12 @@ func runClaunchImport(cmd *cobra.Command) error {
 		return err
 	}
 
-	lc, ok := config.LoadLegacyLaunch()
+	lc, legacyPath, ok := config.LoadLegacyLaunch()
 	if !ok {
 		if verr := config.ValidateLegacyLaunch(); verr != nil {
 			return fmt.Errorf("legacy claunch.conf is malformed, not importing: %w", verr)
 		}
-		legacyPath, lerr := config.LegacyLaunchPath()
-		if lerr != nil {
-			return lerr
-		}
 		return fmt.Errorf("no legacy claunch.conf found at %s", legacyPath)
-	}
-	legacyPath, err := config.LegacyLaunchPath()
-	if err != nil {
-		return err
 	}
 	if lc.IsZero() {
 		return fmt.Errorf("legacy claunch.conf at %s has no [defaults] or [[project]] to import", legacyPath)
