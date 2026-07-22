@@ -99,3 +99,60 @@ func TestIntegration_LaunchInit_FromClaunch_EmptyLegacy(t *testing.T) {
 		t.Errorf("stderr = %q, want it to contain %q", stderr, "no [defaults] or [[project]] to import")
 	}
 }
+
+// TestIntegration_LaunchInit_FromClaunch_PreservesOtherSections covers the new
+// appendToConfig helper's append-not-overwrite contract: importing into a
+// config.toml that already has an unrelated [bench] section must leave that
+// section intact rather than truncating or clobbering the file.
+func TestIntegration_LaunchInit_FromClaunch_PreservesOtherSections(t *testing.T) {
+	h := newLegacyHarness(t)
+
+	cfgPath := childConfigPath(h.base)
+	existing, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config.toml before import: %v", err)
+	}
+	withBench := string(existing) + "\n[bench]\ntelemetry = true\n"
+	if err := os.WriteFile(cfgPath, []byte(withBench), 0o644); err != nil {
+		t.Fatalf("write config.toml with [bench] section: %v", err)
+	}
+
+	h.run(t, "init", "--from-claunch")
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config.toml after import: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{"[bench]", "telemetry = true", "[launch.defaults]", "[[launch.project]]"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("config.toml missing %q after import (append clobbered existing content); got:\n%s", want, body)
+		}
+	}
+}
+
+// TestIntegration_LaunchInit_FromClaunch_ImportedProfileDrivesLaunch covers
+// end-to-end fidelity of the import: the legacy profile's fields, including
+// the AllowDanger *bool pointer field, must round-trip through the
+// toml.Encoder used by runClaunchImport (encode from the decoded LaunchConfig)
+// and then back through config.toml's own decode path, so a subsequent real
+// `launch` invocation resolves the exact same posture the legacy file
+// specified -- not just a written file that happens to contain the right
+// substrings.
+func TestIntegration_LaunchInit_FromClaunch_ImportedProfileDrivesLaunch(t *testing.T) {
+	h := newLegacyHarness(t)
+	h.run(t, "init", "--from-claunch")
+
+	h.run(t, "-p", "hi")
+
+	got := h.recordedArgs(t)
+	want := []string{
+		"--permission-mode", "plan",
+		"--allow-dangerously-skip-permissions",
+		"--model", "sonnet",
+		"-p", "hi",
+	}
+	if !equalArgs(got, want) {
+		t.Errorf("recorded args after import = %v, want %v (imported profile should drive launch identically to the legacy file it replaced)", got, want)
+	}
+}
