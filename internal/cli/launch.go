@@ -170,10 +170,10 @@ func launchExec(cfg config.Config, args []string) error {
 // still present on disk. resolveLaunchConfig returns config.toml's [launch]
 // wholesale the instant it's non-zero — even a bare [launch.defaults]
 // binary_path — so any [[project]] profiles left in the legacy file are
-// silently orphaned: no error, no stderr, exit 0. This is presence-not-parse
-// (mirroring LoadLegacyLaunch's treatment of a malformed legacy file as
-// absent): the warning fires on the legacy file merely existing, regardless
-// of whether it would even parse, because either way it's being ignored.
+// silently orphaned: no error, no stderr, exit 0. This is presence-not-parse:
+// the warning fires on the legacy file merely existing (its own os.Stat),
+// regardless of whether it would even parse, because either way it's being
+// ignored.
 // Returns "" when there's nothing to warn about.
 //
 // The remedy MUST point at `forgectl launch edit`, not `launch init`: init's
