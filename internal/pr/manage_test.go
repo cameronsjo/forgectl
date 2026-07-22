@@ -57,6 +57,9 @@ func TestAttach_MissingWindow_Hints(t *testing.T) {
 	if !strings.Contains(err.Error(), "predate a forgectl upgrade") {
 		t.Errorf("error = %q, want it to hint at a forgectl upgrade", err.Error())
 	}
+	if !strings.Contains(err.Error(), "relaunch the review with `pr <ref>`") {
+		t.Errorf("error = %q, want it to include the relaunch instruction", err.Error())
+	}
 	if !errors.Is(err, underlying) {
 		t.Errorf("error = %q, want it to wrap the underlying tmux error", err.Error())
 	}
