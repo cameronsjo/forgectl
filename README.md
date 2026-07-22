@@ -59,6 +59,7 @@ forgectl launch <claude args…>     # apply the project profile, then pass your
 forgectl launch agents --json      # pure passthrough (byte-clean); posture injected only when interactive
 forgectl launch which              # show the profile resolved for the current directory (alias: config)
 forgectl launch init               # scaffold the [launch] section into config.toml
+forgectl launch init --from-claunch # import an existing ~/.config/claunch/claunch.conf into config.toml
 forgectl launch edit               # open config.toml in $EDITOR
 forgectl launch doctor             # check claude availability + launch config validity
 
@@ -270,7 +271,7 @@ Resolution expands `~`, picks the `[[launch.project]]` whose `match` is the **lo
 
 **Choosing the `claude` binary** (precedence): `$FORGECTL_CLAUDE_BIN` → `[launch.defaults] binary_path` → `claude` on `$PATH`. An explicit path that is missing or non-executable is a clear error, not a silent PATH fallback.
 
-**Zero-migration grace** — if `config.toml` has no `[launch]` section, forgectl still reads a legacy `~/.config/claunch/claunch.conf` (the `[launch]` section is the same `[defaults]` + `[[project]]` shape, just namespaced). `forgectl launch init` writes the native section for the one-time cutover.
+**Zero-migration grace** — if `config.toml` has no `[launch]` section, forgectl still reads a legacy `~/.config/claunch/claunch.conf` (the `[launch]` section is the same `[defaults]` + `[[project]]` shape, just namespaced). `forgectl launch init` writes an empty native section for the one-time cutover; `forgectl launch init --from-claunch` migrates your existing legacy profiles into it, so `launch` stops falling back to the legacy file. Both refuse to overwrite an existing `[launch]` section.
 
 > Absorbed from the standalone `claunch` tool. A `claunch='forgectl launch'` shell alias preserves the old muscle memory.
 

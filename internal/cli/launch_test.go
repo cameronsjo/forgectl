@@ -240,6 +240,7 @@ model = "sonnet"
 		cwd:     cwd,
 		binDir:  binDir,
 		outFile: outFile,
+		base:    base,
 		env: []string{
 			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"HOME=" + base,
@@ -746,6 +747,64 @@ func TestIntegration_Which_ConfigSourceLabel(t *testing.T) {
 			t.Errorf("which output missing %q; got:\n%s", "missing", stdout)
 		}
 	})
+}
+
+// TestIntegration_LaunchInit_FromClaunch_RoundTrip covers #109: `launch init
+// --from-claunch` migrates an existing legacy claunch.conf into config.toml's
+// [launch] section, and the launcher stops falling back to the legacy file
+// once the import lands.
+func TestIntegration_LaunchInit_FromClaunch_RoundTrip(t *testing.T) {
+	h := newLegacyHarness(t)
+	h.run(t, "init", "--from-claunch")
+
+	cfgPath := childConfigPath(h.base)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config.toml after import: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{`[launch.defaults]`, `model = "opus"`, `[[launch.project]]`, h.cwd} {
+		if !strings.Contains(body, want) {
+			t.Errorf("config.toml missing %q after import; got:\n%s", want, body)
+		}
+	}
+
+	stdout, _ := h.run(t, "which")
+	if strings.Contains(stdout, "legacy") {
+		t.Errorf("which output still labels the profile legacy after import; got:\n%s", stdout)
+	}
+}
+
+// TestIntegration_LaunchInit_FromClaunch_Idempotent covers the refusal path:
+// a second import onto a config.toml that already has a [launch] section
+// errors instead of silently duplicating or overwriting it.
+func TestIntegration_LaunchInit_FromClaunch_Idempotent(t *testing.T) {
+	h := newLegacyHarness(t)
+	h.run(t, "init", "--from-claunch")
+
+	stderr, err := h.runExpectErr(t, nil, "init", "--from-claunch")
+	if err == nil {
+		t.Fatal("second `launch init --from-claunch` succeeded, want a refusal error")
+	}
+	if !strings.Contains(stderr, "already has a [launch] section") {
+		t.Errorf("stderr = %q, want it to contain %q", stderr, "already has a [launch] section")
+	}
+}
+
+// TestIntegration_LaunchInit_FromClaunch_NoLegacy covers the case where there
+// is nothing to import: no legacy claunch.conf exists at all.
+func TestIntegration_LaunchInit_FromClaunch_NoLegacy(t *testing.T) {
+	h := newBareHarness(t, "")
+
+	stderr, err := h.runExpectErr(t, nil, "init", "--from-claunch")
+	if err == nil {
+		t.Fatal("`launch init --from-claunch` succeeded with no legacy claunch.conf, want an error")
+	}
+	// fang (the styled-error renderer) capitalizes the message's first letter,
+	// so assert on a substring past the sentence-case-sensitive first word.
+	if !strings.Contains(stderr, "legacy claunch.conf found") {
+		t.Errorf("stderr = %q, want it to contain %q", stderr, "legacy claunch.conf found")
+	}
 }
 
 // --- small local helpers (avoid extra imports for one-line ops) ----------

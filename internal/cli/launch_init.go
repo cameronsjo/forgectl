@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -38,40 +41,124 @@ allow_danger    = true       # adds --allow-dangerously-skip-permissions (reacha
 `
 
 func newLaunchInitCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Scaffold the [launch] section into config.toml",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// GetBool only errors on an undefined or non-bool flag; from-claunch
+			// is registered as Bool below, so the error is unreachable here.
+			if fromClaunch, _ := cmd.Flags().GetBool("from-claunch"); fromClaunch {
+				return runClaunchImport(cmd)
+			}
 			path, err := config.ConfigPath()
 			if err != nil {
 				return err
 			}
-			if data, err := os.ReadFile(path); err == nil {
-				if hasLaunchSection(data) {
-					return fmt.Errorf("config already has a [launch] section at %s (edit it with `forgectl launch edit`)", path)
-				}
-			} else if !os.IsNotExist(err) {
-				return fmt.Errorf("read config %s: %w", path, err)
+			if err := refuseIfLaunchSection(path); err != nil {
+				return err
 			}
-			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-				return fmt.Errorf("create config directory: %w", err)
-			}
-			f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-			if err != nil {
-				return fmt.Errorf("open config: %w", err)
-			}
-			if _, err := f.WriteString(launchScaffold); err != nil {
-				_ = f.Close()
-				return fmt.Errorf("write launch scaffold: %w", err)
-			}
-			if err := f.Close(); err != nil {
-				return fmt.Errorf("close config: %w", err)
+			if err := appendLaunchSection(path, launchScaffold); err != nil {
+				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Added a [launch] section to %s\n", path)
 			return nil
 		},
 	}
+	cmd.Flags().Bool("from-claunch", false, "import an existing ~/.config/claunch/claunch.conf into config.toml")
+	return cmd
+}
+
+// runClaunchImport migrates an existing legacy ~/.config/claunch/claunch.conf
+// into config.toml's [launch] section, so `forgectl launch` stops falling
+// back to the legacy file. It refuses to run when config.toml already has a
+// [launch] section — import once, then edit config.toml directly.
+func runClaunchImport(cmd *cobra.Command) error {
+	slog.Debug("Preparing to import legacy claunch.conf into config.toml.")
+
+	path, err := config.ConfigPath()
+	if err != nil {
+		return err
+	}
+	if err := refuseIfLaunchSection(path); err != nil {
+		return err
+	}
+
+	lc, ok := config.LoadLegacyLaunch()
+	if !ok {
+		if verr := config.ValidateLegacyLaunch(); verr != nil {
+			return fmt.Errorf("legacy claunch.conf is malformed, not importing: %w", verr)
+		}
+		legacyPath, lerr := config.LegacyLaunchPath()
+		if lerr != nil {
+			return lerr
+		}
+		return fmt.Errorf("no legacy claunch.conf found at %s", legacyPath)
+	}
+	legacyPath, err := config.LegacyLaunchPath()
+	if err != nil {
+		return err
+	}
+	if lc.IsZero() {
+		return fmt.Errorf("legacy claunch.conf at %s has no [defaults] or [[project]] to import", legacyPath)
+	}
+	slog.Debug("Loaded legacy claunch.conf.", "path", legacyPath, "project_count", len(lc.Projects))
+
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(struct {
+		Launch config.LaunchConfig `toml:"launch"`
+	}{Launch: lc}); err != nil {
+		return fmt.Errorf("encode imported launch config: %w", err)
+	}
+	header := fmt.Sprintf("\n# ── launch: imported from %s (forgectl launch init --from-claunch) ──\n", legacyPath)
+
+	if err := appendLaunchSection(path, header+buf.String()); err != nil {
+		return err
+	}
+
+	slog.Info("Successfully imported legacy claunch.conf.", "legacy_path", legacyPath, "config_path", path, "project_count", len(lc.Projects))
+	fmt.Fprintf(cmd.OutOrStdout(), "Imported %d launch profile(s) from %s into %s\n", len(lc.Projects), legacyPath, path)
+	return nil
+}
+
+// refuseIfLaunchSection errors when config.toml at path already has a
+// [launch] section — both `launch init` and its `--from-claunch` importer
+// refuse to run over an existing profile rather than risk overwriting it. A
+// missing file is not an error; the caller appends to it fresh.
+func refuseIfLaunchSection(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read config %s: %w", path, err)
+	}
+	if hasLaunchSection(data) {
+		return fmt.Errorf("config already has a [launch] section at %s (edit it with `forgectl launch edit`); refusing to overwrite an existing launch profile", path)
+	}
+	return nil
+}
+
+// appendLaunchSection appends content to the config.toml at path, creating
+// the parent directory and the file if absent. Both `launch init` and its
+// `--from-claunch` importer append a TOML block this way, preserving any
+// sections already in the file.
+func appendLaunchSection(path, content string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open config: %w", err)
+	}
+	if _, err := f.WriteString(content); err != nil {
+		_ = f.Close() // the write error is the real failure; Close's is secondary
+		return fmt.Errorf("write config: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close config: %w", err)
+	}
+	return nil
 }
 
 // hasLaunchSection reports whether data already defines a [launch] table, by
