@@ -31,5 +31,6 @@ func allModules() []module.Manifest {
 		quarantineModule,
 		envModule,
 		docsModule,
+		initModule,
 	}
 }

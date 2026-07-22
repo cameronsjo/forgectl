@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
@@ -153,15 +152,10 @@ func appendLaunchSection(path, content string) error {
 	return nil
 }
 
-// hasLaunchSection reports whether data already defines a [launch] table, by
-// matching real TOML headers rather than a loose substring (which would also
-// fire on comments, string values, or an unrelated [launcher] table).
+// hasLaunchSection reports whether data already defines a [launch] table. It
+// delegates to the generalized hasSection (init_cmd.go) — the same real-TOML-
+// header match (rather than a loose substring that would also fire on comments,
+// string values, or an unrelated [launcher] table), specialized to [launch].
 func hasLaunchSection(data []byte) bool {
-	for _, line := range strings.Split(string(data), "\n") {
-		t := strings.TrimSpace(line)
-		if t == "[launch]" || strings.HasPrefix(t, "[launch.") || strings.HasPrefix(t, "[[launch.") {
-			return true
-		}
-	}
-	return false
+	return hasSection(data, "launch")
 }
