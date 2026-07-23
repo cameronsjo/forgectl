@@ -59,6 +59,13 @@ func (c *Client) PullAll(ctx context.Context, dir string) ([]PullResult, error) 
 	}
 	results := make([]PullResult, 0, len(projs))
 	for _, p := range projs {
+		// discoverDir includes plain non-git directories too (list/pick display
+		// them, and a non-git dir carries the same zero GitStatus as a clean
+		// repo). They are not repos to pull, so skip them — shelling `git pull`
+		// into a non-repo errors and would misreport as PullFailed.
+		if !isGitRepo(p.Dir) {
+			continue
+		}
 		if p.Status.Modified > 0 || p.Status.Untracked > 0 {
 			results = append(results, PullResult{Name: p.Name, Dir: p.Dir, Status: PullSkippedDirty})
 			continue
