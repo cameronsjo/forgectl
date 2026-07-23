@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"encoding/base64"
 	"errors"
@@ -57,8 +58,8 @@ var anchorStatPath = bless.AnchorPath
 // from outside the process — only test code linked into the test binary can
 // swap it — so testability costs nothing here. Production always resolves the
 // helper as a sibling of the running executable.
-var blesserFactory = func(run exec.Runner) (bless.Blesser, error) {
-	return bless.NewHelperBlesser(run)
+var blesserFactory = func(ctx context.Context, run exec.Runner) (bless.Blesser, error) {
+	return bless.NewHelperBlesser(ctx, run)
 }
 
 // installAnchor is the privileged anchor write, injected as a package var so the
@@ -157,7 +158,7 @@ func runWorkflowBless(cmd *cobra.Command, deps module.Deps, name string) error {
 	}
 
 	// 6. This machine must hold a blessing key AND be enrolled in the store.
-	blesser, err := blesserFactory(deps.Runner)
+	blesser, err := blesserFactory(ctx, deps.Runner)
 	if err != nil {
 		return err
 	}
@@ -267,7 +268,7 @@ func runTrustInit(cmd *cobra.Command, deps module.Deps) error {
 
 	// 2. Ensure this machine's blessing key (idempotent — reuses an existing
 	//    key so a re-run after a cancelled sudo never wedges).
-	blesser, err := blesserFactory(deps.Runner)
+	blesser, err := blesserFactory(ctx, deps.Runner)
 	if err != nil {
 		return err
 	}
@@ -377,7 +378,7 @@ func runTrustRebuild(cmd *cobra.Command, deps module.Deps) error {
 	//    rebuild must not MINT a key: no key means this machine never held the
 	//    anchor, so it cannot be the rebuilder. A key that can sign without
 	//    presence may have been planted, and must abort rather than be anointed.
-	blesser, err := blesserFactory(deps.Runner)
+	blesser, err := blesserFactory(ctx, deps.Runner)
 	if err != nil {
 		return err
 	}

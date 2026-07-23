@@ -167,7 +167,7 @@ func (f cliFakeBlesser) Sign(_ context.Context, _ string, digest [32]byte) ([]by
 func cliFakeBless(t *testing.T, b cliFakeBlesser) {
 	t.Helper()
 	prev := blesserFactory
-	blesserFactory = func(exec.Runner) (bless.Blesser, error) { return b, nil }
+	blesserFactory = func(context.Context, exec.Runner) (bless.Blesser, error) { return b, nil }
 	t.Cleanup(func() { blesserFactory = prev })
 }
 

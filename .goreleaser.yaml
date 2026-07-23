@@ -39,6 +39,14 @@ builds:
       - amd64
       - arm64
     ldflags: *ldflags
+    # Developer-ID sign the darwin forgectl binary once it is built. Guarded on
+    # APPLE_TEAM_ID (passed through from the release workflow, itself set only
+    # when the signing cert exists) so this is a pure no-op on unsigned/dev
+    # builds. {{ .Path }} arrives as $0 to keep the shell quoting simple. Only
+    # darwin — the linux build has no post-hook.
+    hooks:
+      post:
+        - cmd: sh -c 'if [ -n "$APPLE_TEAM_ID" ]; then codesign --sign "Developer ID Application" --options runtime --timestamp --force "$0"; fi' "{{ .Path }}"
 
 archives:
   # Linux ships the Go binary alone — `workflow bless` is macOS-only (it needs
@@ -121,9 +129,12 @@ homebrew_casks:
     binaries:
       - forgectl
       - forgectl-bless-helper
-    # Neither binary carries a Developer ID signature (the helper is ad-hoc
-    # signed, which is enough for a Secure Enclave key but not for Gatekeeper),
-    # so strip the quarantine bit on both or the first run prompts.
+    # Strip the quarantine bit on both binaries or the first run prompts. When a
+    # signing cert is configured the release Developer-ID signs both (the helper
+    # in the workflow, forgectl via the darwin build post-hook); until then, or on
+    # an unsigned build, they carry only an ad-hoc signature — enough for a Secure
+    # Enclave key but not for Gatekeeper — so the xattr strip is still required.
+    # Notarization would let this be dropped; it is not shipped yet.
     hooks:
       post:
         install: |
