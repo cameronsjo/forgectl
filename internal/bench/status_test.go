@@ -40,6 +40,9 @@ func (f *fakeProber) probed(target string) bool {
 const twoRunning = `{"Service":"caddy","State":"running","Health":"healthy"}
 {"Service":"loki","State":"running"}`
 
+const oneRestarting = `{"Service":"caddy","State":"running","Health":"healthy"}
+{"Service":"db","State":"restarting","Status":"Restarting (1) 6 minutes ago"}`
+
 func TestCheckHearth_OK(t *testing.T) {
 	t.Setenv("HEARTH_DIR", "")
 	cfg := config.Config{Bench: config.BenchConfig{HearthDir: "/x/hearth"}}
@@ -58,7 +61,7 @@ func TestCheckHearth_OK(t *testing.T) {
 	if len(runner.Calls) != 2 || runner.Calls[1].Name != "docker" {
 		t.Fatalf("calls = %+v; want [colima, docker]", runner.Calls)
 	}
-	wantArgs := []string{"compose", "-p", "hearth", "ps", "--format", "json"}
+	wantArgs := []string{"compose", "-p", "hearth", "ps", "--all", "--format", "json"}
 	if !equalStr(runner.Calls[1].Args, wantArgs) {
 		t.Errorf("docker args = %v, want %v", runner.Calls[1].Args, wantArgs)
 	}
@@ -147,6 +150,30 @@ func TestCheckHearth_DegradedOnUnhealthyContainer(t *testing.T) {
 
 	if c.State != StateDegraded {
 		t.Fatalf("state = %q, reason = %q; want degraded (a running-but-unhealthy container)", c.State, c.Reason)
+	}
+}
+
+func TestCheckHearth_DegradedOnRestartingContainer(t *testing.T) {
+	t.Setenv("HEARTH_DIR", "")
+	cfg := config.Config{Bench: config.BenchConfig{HearthDir: "/x/hearth"}}
+	runner := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
+		return oneRestarting, nil
+	}}
+
+	// All endpoints reachable — but a container is crash-looping.
+	c := checkHearth(context.Background(), cfg, runner, &fakeProber{code: 200})
+
+	if c.State != StateDegraded {
+		t.Fatalf("state = %q, reason = %q; want degraded (a restarting container)", c.State, c.Reason)
+	}
+	found := false
+	for _, d := range c.Details {
+		if strings.Contains(d, "restarting") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Details = %v, want a %q entry", c.Details, "restarting")
 	}
 }
 
@@ -332,26 +359,27 @@ func TestCheckFlux_DegradedWhenBoardUnreachable(t *testing.T) {
 
 func TestParseComposePS(t *testing.T) {
 	cases := []struct {
-		name                             string
-		in                               string
-		wantTotal, wantUp, wantUnhealthy int
+		name                                             string
+		in                                               string
+		wantTotal, wantUp, wantUnhealthy, wantRestarting int
 	}{
-		{"ndjson all running healthy", twoRunning, 2, 2, 0},
-		{"ndjson mixed", `{"Service":"a","State":"running"}` + "\n" + `{"Service":"b","State":"exited"}`, 2, 1, 0},
-		{"json array", `[{"Service":"a","State":"running"},{"Service":"b","State":"running"}]`, 2, 2, 0},
-		{"running but unhealthy", `{"Service":"a","State":"running","Health":"healthy"}` + "\n" + `{"Service":"b","State":"running","Health":"unhealthy"}`, 2, 2, 1},
-		{"empty", "", 0, 0, 0},
-		{"whitespace", "  \n  ", 0, 0, 0},
+		{"ndjson all running healthy", twoRunning, 2, 2, 0, 0},
+		{"ndjson mixed", `{"Service":"a","State":"running"}` + "\n" + `{"Service":"b","State":"exited"}`, 2, 1, 0, 0},
+		{"json array", `[{"Service":"a","State":"running"},{"Service":"b","State":"running"}]`, 2, 2, 0, 0},
+		{"running but unhealthy", `{"Service":"a","State":"running","Health":"healthy"}` + "\n" + `{"Service":"b","State":"running","Health":"unhealthy"}`, 2, 2, 1, 0},
+		{"restarting", `{"Service":"a","State":"running"}` + "\n" + `{"Service":"b","State":"restarting"}`, 2, 1, 0, 1},
+		{"empty", "", 0, 0, 0, 0},
+		{"whitespace", "  \n  ", 0, 0, 0, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			total, up, unhealthy, err := parseComposePS(tc.in)
+			total, up, unhealthy, restarting, err := parseComposePS(tc.in)
 			if err != nil {
 				t.Fatalf("parseComposePS: %v", err)
 			}
-			if total != tc.wantTotal || up != tc.wantUp || unhealthy != tc.wantUnhealthy {
-				t.Errorf("got total=%d up=%d unhealthy=%d, want total=%d up=%d unhealthy=%d",
-					total, up, unhealthy, tc.wantTotal, tc.wantUp, tc.wantUnhealthy)
+			if total != tc.wantTotal || up != tc.wantUp || unhealthy != tc.wantUnhealthy || restarting != tc.wantRestarting {
+				t.Errorf("got total=%d up=%d unhealthy=%d restarting=%d, want total=%d up=%d unhealthy=%d restarting=%d",
+					total, up, unhealthy, restarting, tc.wantTotal, tc.wantUp, tc.wantUnhealthy, tc.wantRestarting)
 			}
 		})
 	}

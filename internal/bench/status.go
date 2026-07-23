@@ -76,13 +76,13 @@ func checkHearth(ctx context.Context, cfg config.Config, runner exec.Runner, pro
 		c.Details = append(c.Details, fmt.Sprintf("disk: %d%%", pct))
 	}
 
-	out, err := runner.Run(ctx, "docker", "compose", "-p", hearthProject, "ps", "--format", "json")
+	out, err := runner.Run(ctx, "docker", "compose", "-p", hearthProject, "ps", "--all", "--format", "json")
 	if err != nil {
 		c.State = StateUnavailable
 		c.Reason = "docker compose unavailable: " + firstLine(err.Error())
 		return c
 	}
-	total, running, unhealthy, perr := parseComposePS(out)
+	total, running, unhealthy, restarting, perr := parseComposePS(out)
 	if perr != nil {
 		c.State = StateDegraded
 		c.Reason = "could not parse `docker compose ps` output"
@@ -96,6 +96,15 @@ func checkHearth(ctx context.Context, cfg config.Config, runner exec.Runner, pro
 	c.Details = append(c.Details, fmt.Sprintf("compose: %d/%d running", running, total))
 	if unhealthy > 0 {
 		c.Details = append(c.Details, fmt.Sprintf("compose: %d unhealthy", unhealthy))
+	}
+	if restarting > 0 {
+		c.Details = append(c.Details, fmt.Sprintf("compose: %d restarting", restarting))
+		// A restarting container is crash-looping — never "up", regardless of
+		// what any endpoint probe would report. Degrade now and skip the probes'
+		// network round-trips entirely.
+		c.State = StateDegraded
+		c.Reason = "hearth container crash-looping (see details)"
+		return c
 	}
 
 	// Frozen transport + UIs. Evaluate every probe (no short-circuit) so the card
@@ -147,7 +156,7 @@ func checkChronicle(ctx context.Context, cfg config.Config, runner exec.Runner) 
 	}
 
 	c.State = StateOK
-	c.Reason = "retention layer reachable"
+	c.Reason = "retention API reachable (container health not checked)"
 	// The 5-minute sync daemon is a macOS LaunchAgent; skip the check elsewhere.
 	if runtime.GOOS == "darwin" {
 		if _, err := runner.Run(ctx, "launchctl", "list", chronicleAgent); err != nil {
@@ -225,21 +234,23 @@ type composeContainer struct {
 	Health  string `json:"Health"`
 }
 
-// parseComposePS counts total, running, and running-but-unhealthy containers
-// from `docker compose ps --format json`, tolerating both the
+// parseComposePS counts total, running, running-but-unhealthy, and restarting
+// containers from `docker compose ps --all --format json`, tolerating both the
 // newline-delimited-objects form (current compose) and a JSON array (older
 // versions). A container reports unhealthy only when it has a Docker
 // healthcheck; a running container with no healthcheck ("" Health) is not
-// counted unhealthy. Empty output is zero containers, not an error.
-func parseComposePS(out string) (total, running, unhealthy int, err error) {
+// counted unhealthy. `--all` surfaces exited containers too (dropped from the
+// default `ps`, which would otherwise shrink total and mask a crash loop as
+// running==total). Empty output is zero containers, not an error.
+func parseComposePS(out string) (total, running, unhealthy, restarting int, err error) {
 	out = strings.TrimSpace(out)
 	if out == "" {
-		return 0, 0, 0, nil
+		return 0, 0, 0, 0, nil
 	}
 	var containers []composeContainer
 	if strings.HasPrefix(out, "[") {
 		if err := json.Unmarshal([]byte(out), &containers); err != nil {
-			return 0, 0, 0, err
+			return 0, 0, 0, 0, err
 		}
 	} else {
 		for _, line := range strings.Split(out, "\n") {
@@ -249,21 +260,24 @@ func parseComposePS(out string) (total, running, unhealthy int, err error) {
 			}
 			var cc composeContainer
 			if err := json.Unmarshal([]byte(line), &cc); err != nil {
-				return 0, 0, 0, err
+				return 0, 0, 0, 0, err
 			}
 			containers = append(containers, cc)
 		}
 	}
 	for _, cc := range containers {
 		total++
-		if cc.State == "running" {
+		switch cc.State {
+		case "running":
 			running++
 			if cc.Health == "unhealthy" {
 				unhealthy++
 			}
+		case "restarting":
+			restarting++
 		}
 	}
-	return total, running, unhealthy, nil
+	return total, running, unhealthy, restarting, nil
 }
 
 // otlpTarget turns an OTLP endpoint (http://host:port or host:port) into a
