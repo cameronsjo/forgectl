@@ -310,14 +310,8 @@ func runTrustInit(cmd *cobra.Command, deps module.Deps) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(storePath), 0o700); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
-	}
-	if err := os.WriteFile(storePath, storeBytes, 0o644); err != nil {
-		return fmt.Errorf("write trust store %s: %w", storePath, err)
-	}
-	if err := os.WriteFile(bless.SidecarPath(storePath), storeEnvBytes, 0o644); err != nil {
-		return fmt.Errorf("write trust store sidecar: %w", err)
+	if err := writeStoreAndSidecar(storePath, storeBytes, storeEnvBytes); err != nil {
+		return err
 	}
 	fmt.Fprintf(out, "Trust store written: %s\n", storePath)
 
@@ -410,14 +404,21 @@ func runTrustRebuild(cmd *cobra.Command, deps module.Deps) error {
 	//    a valid store enrolls exactly this machine's key (== the anchor). Once peer
 	//    enrollment ships, a rebuild would SILENTLY DROP any enrolled peer — so
 	//    refuse the moment a currently-valid store holds a key that is not this
-	//    machine's. A missing or invalid store is the normal recovery case and is
-	//    tolerated (that is what we are here to rebuild).
-	if store, serr := reader.TrustedStore(); serr == nil {
+	//    machine's. Only a GENUINELY ABSENT store (ErrTrustStoreMissing) is the clean
+	//    recovery case that proceeds silently; a store that exists but cannot be read
+	//    or verified — corruption, or a transient I/O error — might still enroll a
+	//    peer, so proceed (that is also a recovery case) but say so, never silently.
+	switch store, serr := reader.TrustedStore(); {
+	case serr == nil:
 		for _, k := range store.Keys {
 			if k.KeyID != keyID {
 				return fmt.Errorf("the current trust store also enrolls %s (%s); rebuilding would silently drop it — remove that peer deliberately before rebuilding, or re-establish trust (issue #86)", k.KeyID, k.Machine)
 			}
 		}
+	case errors.Is(serr, bless.ErrTrustStoreMissing):
+		// Genuinely absent — nothing to preserve, the normal recovery case.
+	default:
+		fmt.Fprintf(out, "NOTE: the existing trust store could not be verified (%v);\n      if it enrolled another machine, that enrollment will be dropped by this rebuild.\n", serr)
 	}
 
 	fmt.Fprintln(out, "WARNING: rebuild OVERWRITES the trust store, enrolling ONLY this machine.")
@@ -456,17 +457,76 @@ func runTrustRebuild(cmd *cobra.Command, deps module.Deps) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(storePath), 0o700); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
-	}
-	if err := os.WriteFile(storePath, storeBytes, 0o644); err != nil {
-		return fmt.Errorf("write trust store %s: %w", storePath, err)
-	}
-	if err := os.WriteFile(bless.SidecarPath(storePath), storeEnvBytes, 0o644); err != nil {
-		return fmt.Errorf("write trust store sidecar: %w", err)
+	if err := writeStoreAndSidecar(storePath, storeBytes, storeEnvBytes); err != nil {
+		return err
 	}
 	fmt.Fprintf(out, "Trust store rebuilt: %s\nEnrolled only this machine (%s). Any previously enrolled peer must be re-added.\n", storePath, keyID)
 	return nil
+}
+
+// writeStoreAndSidecar writes the trust store and its anchor-signed sidecar so a
+// partial write can never leave a store whose sidecar doesn't match it (issue
+// #86). The store is verified by re-checking its bytes against the sidecar
+// signature, so a half-written pair (new store + stale sidecar, or vice versa)
+// would fail verification and corrupt a previously-good store — the exact state
+// `trust rebuild` exists to fix. Both files are staged as temp files in the
+// store directory (the failure-prone write + fsync happens before any live file
+// is touched), then renamed into place back-to-back, shrinking the inconsistency
+// window to the single syscall between the two renames. Shared by trust init and
+// trust rebuild.
+func writeStoreAndSidecar(storePath string, storeBytes, sidecarBytes []byte) error {
+	if err := os.MkdirAll(filepath.Dir(storePath), 0o700); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+	storeTmp, err := stageTrustFile(storePath, storeBytes)
+	if err != nil {
+		return fmt.Errorf("stage trust store: %w", err)
+	}
+	defer os.Remove(storeTmp) // no-op once renamed away
+	sidecarPath := bless.SidecarPath(storePath)
+	sidecarTmp, err := stageTrustFile(sidecarPath, sidecarBytes)
+	if err != nil {
+		return fmt.Errorf("stage trust store sidecar: %w", err)
+	}
+	defer os.Remove(sidecarTmp)
+	if err := os.Rename(storeTmp, storePath); err != nil {
+		return fmt.Errorf("finalize trust store %s: %w", storePath, err)
+	}
+	if err := os.Rename(sidecarTmp, sidecarPath); err != nil {
+		return fmt.Errorf("finalize trust store sidecar: %w", err)
+	}
+	return nil
+}
+
+// stageTrustFile writes data to a 0644 temp file in target's directory (fsynced
+// and closed) and returns its path for a caller to rename into place. On any
+// failure it removes the temp file and returns the error.
+func stageTrustFile(target string, data []byte) (string, error) {
+	tmp, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".tmp-*")
+	if err != nil {
+		return "", err
+	}
+	name := tmp.Name()
+	cleanup := func(cause error) (string, error) {
+		_ = tmp.Close()
+		_ = os.Remove(name)
+		return "", cause
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return cleanup(fmt.Errorf("write %s: %w", name, err))
+	}
+	if err := tmp.Sync(); err != nil {
+		return cleanup(fmt.Errorf("sync %s: %w", name, err))
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(name)
+		return "", fmt.Errorf("close %s: %w", name, err)
+	}
+	if err := os.Chmod(name, 0o644); err != nil {
+		_ = os.Remove(name)
+		return "", fmt.Errorf("chmod %s: %w", name, err)
+	}
+	return name, nil
 }
 
 // newWorkflowTrustListCmd builds `forgectl workflow trust list`: print the

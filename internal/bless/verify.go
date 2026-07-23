@@ -32,6 +32,14 @@ var (
 	// ErrTrustStoreInvalid: the trust store is missing, unsigned by the anchor,
 	// or otherwise not trustworthy.
 	ErrTrustStoreInvalid = errors.New("trust store is missing or invalid")
+	// ErrTrustStoreMissing marks the specific case where the trust store file
+	// does not exist — a clean not-yet-created / deleted state — as distinct
+	// from a file that exists but is unreadable, unsigned, or corrupt. It wraps
+	// ErrTrustStoreInvalid, so existing errors.Is(err, ErrTrustStoreInvalid)
+	// checks still match; a caller that must tell genuine absence from a
+	// present-but-broken store (e.g. trust rebuild's peer-drop guard) tests for
+	// ErrTrustStoreMissing specifically.
+	ErrTrustStoreMissing = fmt.Errorf("%w (not found)", ErrTrustStoreInvalid)
 	// ErrNoAnchor: the compiled-in anchor is missing, not root-owned, or
 	// writable — the root of trust cannot be established.
 	ErrNoAnchor = errors.New("trust anchor is missing or not root-owned")
@@ -121,6 +129,11 @@ func (v *Verifier) TrustedStore() (Store, error) {
 	}
 	storeBytes, err := os.ReadFile(storePath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// Genuine absence — distinct from a present-but-unreadable store, so a
+			// caller can tell "nothing here" from "here but I can't read it".
+			return Store{}, fmt.Errorf("%w: %s", ErrTrustStoreMissing, storePath)
+		}
 		return Store{}, fmt.Errorf("%w: read trust store %s: %v", ErrTrustStoreInvalid, storePath, err)
 	}
 	storeSidecar, err := os.ReadFile(SidecarPath(storePath))

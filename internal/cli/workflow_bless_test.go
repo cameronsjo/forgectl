@@ -596,8 +596,9 @@ func TestWorkflowTrustRebuild_HappyPath(t *testing.T) {
 	pubDER := cliPubDER(t, key)
 	keyID := bless.Fingerprint(pubDER)
 
-	// Anchor is this machine's key; the store is gone (the recovery case).
-	swapTrustReader(t, fakeTrustReader{anchorFP: keyID, storeErr: bless.ErrTrustStoreInvalid})
+	// Anchor is this machine's key; the store is genuinely gone (the clean
+	// recovery case → ErrTrustStoreMissing, which proceeds without a verify note).
+	swapTrustReader(t, fakeTrustReader{anchorFP: keyID, storeErr: bless.ErrTrustStoreMissing})
 	spy := &rebuildSpyBlesser{t: t, key: key, pubDER: pubDER}
 	installBlesser(t, spy)
 	anchorCalls := spyAnchorInstall(t, nil)
@@ -619,7 +620,54 @@ func TestWorkflowTrustRebuild_HappyPath(t *testing.T) {
 	if !strings.Contains(out.String(), "OVERWRITES") {
 		t.Errorf("rebuild must print a loud overwrite warning, got %q", out.String())
 	}
+	if strings.Contains(out.String(), "could not be verified") {
+		t.Errorf("a genuinely-absent store must rebuild silently, but printed a verify note: %q", out.String())
+	}
 	// The written store re-verifies, enrolling ONLY this machine's key.
+	assertStoreVerifiesUnderAnchor(t, mustStorePath(t), key, keyID)
+	// The atomic write leaves no staged temp files behind.
+	assertNoTrustTempFiles(t, mustStorePath(t))
+}
+
+// assertNoTrustTempFiles fails if writeStoreAndSidecar left any staged temp file
+// in the store directory — they must all be renamed into place or cleaned up.
+func assertNoTrustTempFiles(t *testing.T, storePath string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(filepath.Dir(storePath), ".*.tmp-*"))
+	if err != nil {
+		t.Fatalf("glob temp files: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("writeStoreAndSidecar left staged temp files: %v", matches)
+	}
+}
+
+// TestWorkflowTrustRebuild_UnverifiableStoreProceedsWithNote covers the #86
+// robustness fix: a store that EXISTS but cannot be read or verified (corruption,
+// or a transient I/O error — surfaced as a non-Missing error) is still a recovery
+// case, so rebuild proceeds — but says so explicitly, never silently, because an
+// unreadable store might still enroll a peer the rebuild will drop.
+func TestWorkflowTrustRebuild_UnverifiableStoreProceedsWithNote(t *testing.T) {
+	cliRedirectConfigDir(t)
+	key := cliGenKey(t)
+	pubDER := cliPubDER(t, key)
+	keyID := bless.Fingerprint(pubDER)
+
+	// A present-but-unverifiable store surfaces as ErrTrustStoreInvalid (not Missing).
+	swapTrustReader(t, fakeTrustReader{anchorFP: keyID, storeErr: bless.ErrTrustStoreInvalid})
+	installBlesser(t, &rebuildSpyBlesser{t: t, key: key, pubDER: pubDER})
+	spyAnchorInstall(t, nil)
+
+	cmd := newWorkflowTrustRebuildCmd(module.Deps{Runner: &exec.FakeRunner{}})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs(nil)
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("rebuild over an unverifiable store must still recover: %v", err)
+	}
+	if !strings.Contains(out.String(), "could not be verified") {
+		t.Errorf("an unverifiable store must be noted, not silently overwritten, got %q", out.String())
+	}
 	assertStoreVerifiesUnderAnchor(t, mustStorePath(t), key, keyID)
 }
 
