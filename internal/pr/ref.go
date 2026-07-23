@@ -146,8 +146,9 @@ func parseNumber(s string) (int, error) {
 
 // ResolveRef parses s and, when it is a bare number, resolves Owner/Repo from
 // the cwd repo's origin through the Runner. The resolved owner/repo are
-// re-validated against the same anchored charset — `gh`/`git` output is itself
-// hostile input.
+// re-validated with ValidOwnerRepoPart — the same bundled guard the typed-ref
+// path applies (anchored charset plus the leading-'-' and ".." rejections) —
+// because `gh`/`git` output is itself hostile input.
 //
 // ResolveRef is the real entry point for a user-typed PR reference (the CLI's
 // `pr <ref>` command calls it, never bare ParseRef), so this is where
@@ -171,7 +172,7 @@ func (c *Client) ResolveRef(ctx context.Context, s string) (Ref, error) {
 	if err != nil {
 		return Ref{}, fmt.Errorf("resolve bare PR number against origin: %w", err)
 	}
-	if !reOwner.MatchString(owner) || !reOwner.MatchString(repo) {
+	if !ValidOwnerRepoPart(owner) || !ValidOwnerRepoPart(repo) {
 		return Ref{}, fmt.Errorf("origin owner/repo %q/%q outside allowed charset", owner, repo)
 	}
 	if owner == localOwnerSentinel {

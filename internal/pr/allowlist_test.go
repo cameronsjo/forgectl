@@ -62,6 +62,41 @@ func TestWriteAllowlist(t *testing.T) {
 	}
 }
 
+// TestDenyPosting_CoversMutatingGhGroups covers the defense-in-depth backstop:
+// denyPosting must hard-block every mutating gh command group, not just the
+// posting `gh pr` verbs — so a relaxed permission floor still can't reach
+// workflow/release/secret/variable/ruleset/issue/gist/repo/run. None of these
+// may overlap the read-only allow-list (that would silently revoke a read).
+func TestDenyPosting_CoversMutatingGhGroups(t *testing.T) {
+	mustDeny := []string{
+		"Bash(gh workflow:*)",
+		"Bash(gh release:*)",
+		"Bash(gh secret:*)",
+		"Bash(gh variable:*)",
+		"Bash(gh ruleset:*)",
+		"Bash(gh issue:*)",
+		"Bash(gh gist:*)",
+		"Bash(gh repo:*)",
+		"Bash(gh run:*)",
+		"Bash(gh auth:*)",
+		"Bash(gh config:*)",
+		"Bash(gh label:*)",
+		"Bash(gh project:*)",
+		"Bash(gh cache:*)",
+		"Bash(gh codespace:*)",
+		"Bash(gh extension:*)",
+		"Bash(gh alias:*)",
+	}
+	for _, d := range mustDeny {
+		if !contains(denyPosting, d) {
+			t.Errorf("denyPosting missing mutating gh group %q", d)
+		}
+		if contains(allowReadOnly, d) {
+			t.Errorf("deny entry %q also appears in allowReadOnly — a read would be silently revoked", d)
+		}
+	}
+}
+
 // TestAllowReadOnly_LayersRgAndGhReadsOverBaseReadOnly covers the
 // baseReadOnly extraction: PR-mode's allowReadOnly must still carry every
 // baseReadOnly entry (the shared surface) plus exactly rg and the read-only

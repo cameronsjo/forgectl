@@ -87,12 +87,15 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 	}
 
 	// The head repo owner/name and branch come from gh JSON — hostile input.
-	// They reach git as positionals; guard against an option-like value before
-	// sandbox does its own check.
-	repoURL := "https://github.com/" + headOwner + "/" + headName
-	if err := sandbox.RejectOptionLike("repo", repoURL); err != nil {
-		return Session{}, err
+	// The owner/name become path segments of a URL that reaches git as a
+	// positional, so validate each against the same anchored owner/repo charset
+	// guard the ref path uses (a RejectOptionLike on the assembled https:// URL
+	// is dead — it always begins with "https", never "-"). The branch reaches
+	// git as its own positional, so it still gets the option-like guard.
+	if !ValidOwnerRepoPart(headOwner) || !ValidOwnerRepoPart(headName) {
+		return Session{}, fmt.Errorf("PR head repo %q/%q outside allowed owner/repo charset", headOwner, headName)
 	}
+	repoURL := "https://github.com/" + headOwner + "/" + headName
 	if err := sandbox.RejectOptionLike("ref", view.HeadRefName); err != nil {
 		return Session{}, err
 	}
