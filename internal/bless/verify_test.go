@@ -149,6 +149,42 @@ func TestVerify_TrustStoreMissing(t *testing.T) {
 	}
 }
 
+// TestTrustedStore_MissingVsInvalid proves TrustedStore distinguishes a
+// genuinely-absent store (ErrTrustStoreMissing) from a present-but-unreadable
+// one (ErrTrustStoreInvalid only) — the distinction trust rebuild's peer-drop
+// guard relies on so a transient read error can't be mistaken for "no store,
+// safe to overwrite". Both cases still satisfy errors.Is(_, ErrTrustStoreInvalid)
+// for backward compatibility.
+func TestTrustedStore_MissingVsInvalid(t *testing.T) {
+	env := newTestEnv(t)
+	wf := env.writeWorkflow(t, workflowData)
+	env.bless(t, wf, workflowData)
+
+	// (a) genuinely absent → ErrTrustStoreMissing, and still ErrTrustStoreInvalid.
+	if err := os.Remove(env.storePath); err != nil {
+		t.Fatalf("remove store: %v", err)
+	}
+	_, err := env.verifier().TrustedStore()
+	if !errors.Is(err, ErrTrustStoreMissing) {
+		t.Errorf("absent store: TrustedStore = %v, want ErrTrustStoreMissing", err)
+	}
+	if !errors.Is(err, ErrTrustStoreInvalid) {
+		t.Errorf("absent store: ErrTrustStoreMissing must still wrap ErrTrustStoreInvalid, got %v", err)
+	}
+
+	// (b) present but corrupt → ErrTrustStoreInvalid, NOT Missing (it exists).
+	if err := os.WriteFile(env.storePath, []byte("not a valid trust store"), 0o644); err != nil {
+		t.Fatalf("write corrupt store: %v", err)
+	}
+	_, err = env.verifier().TrustedStore()
+	if !errors.Is(err, ErrTrustStoreInvalid) {
+		t.Errorf("corrupt store: TrustedStore = %v, want ErrTrustStoreInvalid", err)
+	}
+	if errors.Is(err, ErrTrustStoreMissing) {
+		t.Errorf("corrupt store: must NOT be ErrTrustStoreMissing (the file exists), got %v", err)
+	}
+}
+
 // TestVerify_DomainSeparation proves a signature made under one domain cannot
 // authenticate the other: a workflow blessing signed under the TRUST domain
 // fails, and a trust-store signed under the WORKFLOW domain fails.
