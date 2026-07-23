@@ -14,6 +14,7 @@ var projectAliases = map[string][]string{
 	"pick":     {"p", "open"},
 	"list":     {"l", "ls", "find"},
 	"clone":    {"c"},
+	"worktree": {"wt"},
 	"pull-all": {"pull"},
 }
 
@@ -44,6 +45,7 @@ func newProjectsCmd(client *projects.Client) *cobra.Command {
 	cmd.AddCommand(newProjectsPickCmd(client))
 	cmd.AddCommand(newProjectsListCmd(client))
 	cmd.AddCommand(newProjectsCloneCmd(client))
+	cmd.AddCommand(newProjectsWorktreeCmd(client))
 	cmd.AddCommand(newProjectsPullAllCmd(client))
 	applyAliases(cmd, projectAliases)
 	return cmd

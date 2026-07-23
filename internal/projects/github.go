@@ -75,3 +75,20 @@ func cloneRepo(ctx context.Context, run interface {
 	slog.Info("Successfully cloned from GitHub.", "repo", name, "dest", dest)
 	return nil
 }
+
+// cloneBareRepo runs `gh repo clone name dest -- --bare`, forwarding --bare to
+// the underlying git clone (gh passes post-`--` args straight through). It keeps
+// gh's credential handling for github.com, same as cloneRepo — the worktree
+// layout's bare-clone step.
+func cloneBareRepo(ctx context.Context, run interface {
+	Run(context.Context, string, ...string) (string, error)
+}, name, dest string) error {
+	slog.Debug("Preparing to bare-clone from GitHub.", "repo", name, "dest", dest)
+	_, err := run.Run(ctx, "gh", "repo", "clone", name, dest, "--", "--bare")
+	if err != nil {
+		slog.Error("Failed to bare-clone from GitHub.", "repo", name, "dest", dest, "error", err)
+		return fmt.Errorf("gh repo clone --bare %s: %w", name, err)
+	}
+	slog.Info("Successfully bare-cloned from GitHub.", "repo", name, "dest", dest)
+	return nil
+}
