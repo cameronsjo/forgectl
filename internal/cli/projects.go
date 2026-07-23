@@ -11,9 +11,10 @@ import (
 // shorthands — migrated here from forgive.ProjectAliases at conversion.
 // Separate var for the same initialization-cycle reason as yAliases.
 var projectAliases = map[string][]string{
-	"pick":  {"p", "open"},
-	"list":  {"l", "ls", "find"},
-	"clone": {"c"},
+	"pick":     {"p", "open"},
+	"list":     {"l", "ls", "find"},
+	"clone":    {"c"},
+	"pull-all": {"pull"},
 }
 
 // projectsModule declares the projects core module (ADR-0005): daily
@@ -43,6 +44,7 @@ func newProjectsCmd(client *projects.Client) *cobra.Command {
 	cmd.AddCommand(newProjectsPickCmd(client))
 	cmd.AddCommand(newProjectsListCmd(client))
 	cmd.AddCommand(newProjectsCloneCmd(client))
+	cmd.AddCommand(newProjectsPullAllCmd(client))
 	applyAliases(cmd, projectAliases)
 	return cmd
 }
