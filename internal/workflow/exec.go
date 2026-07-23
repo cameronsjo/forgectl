@@ -77,16 +77,19 @@ func NewExecutor(run exec.Runner, registry StepRegistry, opts ...Option) *Execut
 // escape hatch: its cmd and args choose what runs, so both are guarded.
 // worktree/clone take repo/ref, which merely NAME data — parameterizing them
 // (`--param repo=owner/x`) is the feature, and the sandbox contains what they
-// fetch. teardown reads only ${workspace} from the Context. collect's from/to
-// are likewise data paths under the same rule (it is an unwired stub; when it
-// is implemented, re-judge whether `to` is a write sink worth guarding).
+// fetch. teardown reads only ${workspace} from the Context. collect's `from`
+// merely names a data path to read, but `to` is a write DESTINATION: a ${param}
+// there would let an agent redirect where the human-blessed bytes land at run
+// time, so `to` is a guarded write sink. The guard is bless-time, so closing it
+// now — while collect is still an unwired stub — costs nothing and means the
+// sink is sealed before the runner that honors `to` ever ships.
 func builtinRegistry() StepRegistry {
 	return StepRegistry{
 		"run":      {Runner: runStep, GuardedFields: []string{"Cmd", "Args"}},
 		"worktree": {Runner: newSandboxStep(false), Exports: []string{"workspace"}},
 		"clone":    {Runner: newSandboxStep(true), Exports: []string{"workspace"}},
 		"teardown": {Runner: teardownStep},
-		"collect":  {Runner: notYetWiredStep},
+		"collect":  {Runner: notYetWiredStep, GuardedFields: []string{"To"}},
 	}
 }
 

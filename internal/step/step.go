@@ -42,12 +42,14 @@ type Def struct {
 	// allowed).
 	//
 	// The rule when adding a verb: if a field's value chooses WHAT RUNS (run's
-	// cmd/args), WHAT A LAUNCHED AGENT DOES (launch's skill/mode/posture), or
+	// cmd/args), WHAT A LAUNCHED AGENT DOES (launch's skill/mode/posture),
 	// WHAT A SECURITY CONTROL COVERS (strip's globs — the clean-room redaction
-	// list), it is guarded. A field that merely names DATA (worktree's repo/ref)
-	// is NOT guarded: `--param repo=owner/x` is the intended parameterization,
-	// and the sandbox plus the strip-list — not the blessing — are what contain
-	// whatever that repo holds.
+	// list), or WHERE OUTPUT IS WRITTEN (collect's to — the write-destination /
+	// path sink that chooses where produced bytes land), it is guarded. A field
+	// that merely names DATA to READ (worktree's repo/ref) is NOT guarded:
+	// `--param repo=owner/x` is the intended parameterization, and the sandbox
+	// plus the strip-list — not the blessing — are what contain whatever that
+	// repo holds.
 	//
 	// A name here that is not a real step field is a hard error at bless time,
 	// never a silent skip: a typo must not quietly disable the guard.
