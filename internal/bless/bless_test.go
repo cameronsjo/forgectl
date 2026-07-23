@@ -413,6 +413,14 @@ func worktreeStep() StepCheck {
 	return StepCheck{Uses: "worktree", Exports: []string{"workspace"}}
 }
 
+// collectStep guards only its `to` write-destination — mirroring the registry
+// (collect: GuardedFields ["To"]). `from` merely names a data path to read, so
+// it is not scanned; a ${param} in `to`, though, would redirect where the
+// human-blessed bytes land at run time.
+func collectStep(to string) StepCheck {
+	return StepCheck{Uses: "collect", Guarded: map[string][]string{"To": {to}}}
+}
+
 func TestCheckGuardedParamRefs(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -551,6 +559,25 @@ func TestCheckGuardedParamRefs(t *testing.T) {
 		{
 			name:    "launch fields with no refs are fine",
 			steps:   []StepCheck{launchStep("code-review", "sync", "opus")},
+			wantErr: false,
+		},
+
+		// collect.to is a write DESTINATION — a param there would redirect where
+		// the blessed bytes land at run time, so it is guarded like any other sink.
+		{
+			name:    "collect to references a param",
+			steps:   []StepCheck{worktreeStep(), collectStep("${dest}")},
+			params:  []string{"dest"},
+			wantErr: true,
+		},
+		{
+			name:    "collect to may reference an earlier step's export",
+			steps:   []StepCheck{worktreeStep(), collectStep("${workspace}/review.md")},
+			wantErr: false,
+		},
+		{
+			name:    "collect to with no refs is fine",
+			steps:   []StepCheck{worktreeStep(), collectStep("review.md")},
 			wantErr: false,
 		},
 
