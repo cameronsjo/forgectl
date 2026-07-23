@@ -132,6 +132,42 @@ func TestPrepare_RealDispatch(t *testing.T) {
 	}
 }
 
+// TestPrepare_MalformedHeadRepoRejected covers finding #3: the head repo
+// owner/name come from gh JSON (hostile input) and become path segments of the
+// clone URL. A malformed value — here a leading '-' owner and a ".." name —
+// must be rejected by the ValidOwnerRepoPart guard BEFORE any git clone runs,
+// not left to the dead RejectOptionLike-on-a-https-URL check that can never
+// fire.
+func TestPrepare_MalformedHeadRepoRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+	}{
+		{"leading dash owner", `{"headRefName":"feature-x","headRefOid":"deadbeef","headRepositoryOwner":{"login":"-evil"},"headRepository":{"name":"forgectl"}}`},
+		{"dotdot name", `{"headRefName":"feature-x","headRefOid":"deadbeef","headRepositoryOwner":{"login":"contributor"},"headRepository":{"name":".."}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &exec.FakeRunner{
+				RunFunc: func(name string, args []string) (string, error) {
+					if name == "gh" {
+						return tc.json, nil
+					}
+					return "", nil
+				},
+			}
+			c := testClient(t, fake)
+			ref := Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}
+			if _, err := c.Prepare(context.Background(), ref, PrepareOpts{Agent: "claude"}); err == nil {
+				t.Fatal("expected refusal for a malformed head repo owner/name")
+			}
+			if _, ok := findCall(fake.Calls, "git"); ok {
+				t.Error("git must not run when the head repo owner/name is malformed")
+			}
+		})
+	}
+}
+
 func TestPrepare_IncompleteRefRefused(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := testClient(t, fake)

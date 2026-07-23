@@ -91,6 +91,49 @@ func TestParseRef_Reject(t *testing.T) {
 	}
 }
 
+// FuzzParseRef exercises the pure ParseRef validator. On ANY non-error return
+// the number must be positive; and for a complete ref (slug/URL form) the
+// owner and repo must satisfy ValidOwnerRepoPart — the same anchored guard the
+// argv paths rely on — and the ref must round-trip through String()/ParseRef.
+// A bare-number ref (empty Owner/Repo) does not stringify to a re-parseable
+// form, so the round-trip and charset assertions apply only to complete refs.
+func FuzzParseRef(f *testing.F) {
+	for _, s := range []string{
+		"cameronsjo/forgectl#42",
+		"https://github.com/cameronsjo/forgectl/pull/7",
+		"42",
+		"a.b_c-d/e.f_g-h#1",
+		"-flag",
+		"../../etc",
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		ref, err := ParseRef(s)
+		if err != nil {
+			return
+		}
+		if ref.Number <= 0 {
+			t.Errorf("ParseRef(%q) accepted a non-positive number: %+v", s, ref)
+		}
+		if !ref.Complete() {
+			return // bare-number form: Owner/Repo empty by design
+		}
+		if !ValidOwnerRepoPart(ref.Owner) {
+			t.Errorf("ParseRef(%q) owner %q fails ValidOwnerRepoPart", s, ref.Owner)
+		}
+		if !ValidOwnerRepoPart(ref.Repo) {
+			t.Errorf("ParseRef(%q) repo %q fails ValidOwnerRepoPart", s, ref.Repo)
+		}
+		rt, err := ParseRef(ref.String())
+		if err != nil {
+			t.Errorf("ParseRef(%q).String()=%q failed to re-parse: %v", s, ref.String(), err)
+		} else if rt != ref {
+			t.Errorf("round-trip mismatch: %+v -> %q -> %+v", ref, ref.String(), rt)
+		}
+	})
+}
+
 func TestResolveRef_CompletePassthrough(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := New(fake)
@@ -150,17 +193,36 @@ func TestResolveRef_BareViaGitFallback(t *testing.T) {
 }
 
 func TestResolveRef_BadOriginRejected(t *testing.T) {
-	fake := &exec.FakeRunner{
-		RunFunc: func(name string, args []string) (string, error) {
-			if name == "gh" {
-				return "owner/repo;rm -rf", nil
-			}
-			return "", errors.New("unexpected")
-		},
+	// Each case is what resolveOrigin returns for a bare-number resolve. The
+	// origin is hostile input, so the resolved owner/repo must pass the SAME
+	// bundled guard (ValidOwnerRepoPart) the typed-ref path uses — anchored
+	// charset PLUS the leading-'-' and ".." rejections, not the bare charset
+	// regex alone (which admits both).
+	cases := []struct {
+		name   string
+		origin string // as returned by `gh repo view` (slug form)
+	}{
+		{"shell metachars", "owner/repo;rm -rf"},
+		{"leading dash owner", "-x/repo"}, // via a git@github.com:-x/repo.git origin
+		{"leading dash repo", "owner/-x"}, // symmetric: a repo component
+		{"dotdot owner", "../repo"},       // via a https://github.com/../repo.git origin
+		{"dotdot repo", "owner/.."},       // symmetric
 	}
-	c := New(fake)
-	if got, err := c.ResolveRef(context.Background(), "42"); err == nil {
-		t.Errorf("ResolveRef with hostile origin = %+v, want error", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &exec.FakeRunner{
+				RunFunc: func(name string, args []string) (string, error) {
+					if name == "gh" {
+						return tc.origin, nil
+					}
+					return "", errors.New("unexpected")
+				},
+			}
+			c := New(fake)
+			if got, err := c.ResolveRef(context.Background(), "42"); err == nil {
+				t.Errorf("ResolveRef with hostile origin %q = %+v, want error", tc.origin, got)
+			}
+		})
 	}
 }
 

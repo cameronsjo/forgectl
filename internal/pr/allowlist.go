@@ -58,17 +58,48 @@ var allowReadOnly = append(append([]string{}, baseReadOnly...),
 	"Bash(gh pr checks:*)",
 )
 
-// denyPosting explicitly denies every write/post/merge/push surface, so that
-// even if a permission mode is relaxed the agent still cannot post a review,
-// comment, merge, push, or fetch arbitrary URLs. Deny takes precedence over
-// allow in Claude Code's permission model, so these are hard blocks.
+// denyPosting is a best-effort defense-in-depth backstop, NOT the authoritative
+// gate. PR mode cannot blanket-deny `gh` (it must allow `gh pr view/diff/checks`,
+// and Deny takes precedence over Allow, so a `Bash(gh:*)` deny would clobber
+// those reads), so allowReadOnly — the deny-by-default allow-list — is what
+// actually confines the agent to read-only actions. This enumerated deny list
+// exists so that even if the DefaultMode "plan" floor is relaxed, the most
+// dangerous mutating/stateful surfaces stay hard-blocked: the posting `gh pr`
+// verbs, raw `gh api`, the mutating gh command groups enumerated below, git
+// push, git commit, arbitrary URL fetches, and the file/notebook write tools.
+// Completeness is deliberately NOT the claim — an enumeration can't cover every
+// gh subcommand without a blanket `gh:*` deny that would break the allowed
+// reads; the allow-list is the real gate. Deny takes precedence over allow in
+// Claude Code's permission model, so each entry is a hard block; none overlaps
+// allowReadOnly, so no read is affected.
 var denyPosting = []string{
 	"Bash(gh pr review:*)",
 	"Bash(gh pr comment:*)",
 	"Bash(gh pr merge:*)",
 	"Bash(gh pr close:*)",
 	"Bash(gh pr edit:*)",
+	"Bash(gh pr ready:*)",
+	"Bash(gh pr reopen:*)",
+	"Bash(gh pr lock:*)",
+	"Bash(gh pr unlock:*)",
 	"Bash(gh api:*)",
+	"Bash(gh workflow:*)",
+	"Bash(gh release:*)",
+	"Bash(gh secret:*)",
+	"Bash(gh variable:*)",
+	"Bash(gh ruleset:*)",
+	"Bash(gh issue:*)",
+	"Bash(gh gist:*)",
+	"Bash(gh repo:*)",
+	"Bash(gh run:*)",
+	"Bash(gh auth:*)",
+	"Bash(gh config:*)",
+	"Bash(gh label:*)",
+	"Bash(gh project:*)",
+	"Bash(gh cache:*)",
+	"Bash(gh codespace:*)",
+	"Bash(gh extension:*)",
+	"Bash(gh alias:*)",
 	"Bash(git push:*)",
 	"Bash(git commit:*)",
 	"Bash(curl:*)",

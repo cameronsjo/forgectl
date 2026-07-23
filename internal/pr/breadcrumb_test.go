@@ -18,8 +18,11 @@ package pr
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
 // fakeWorkspace makes a dir under the OS temp root with the forgectl- prefix —
@@ -117,6 +120,49 @@ func TestLoadBreadcrumb_ContentRejections(t *testing.T) {
 			}
 		})
 	}
+}
+
+// FuzzLoadBreadcrumb mutates breadcrumb JSON against a fixed session-state dir.
+// The security invariant: any breadcrumb the loader RETURNS (no error) must
+// point at a Workspace under the OS temp root carrying the forgectl- sandbox
+// prefix — the loader never yields a breadcrumb steering a later `git -C` at an
+// arbitrary path. Seeded with valid breadcrumbs pointing at a real sandbox dir.
+func FuzzLoadBreadcrumb(f *testing.F) {
+	sessionsDir := f.TempDir()
+	ws, err := os.MkdirTemp("", "forgectl-fuzz-*")
+	if err != nil {
+		f.Fatalf("mkdir workspace: %v", err)
+	}
+	f.Cleanup(func() { os.RemoveAll(ws) })
+
+	for _, s := range []string{
+		`{"workspace":"` + ws + `","ref":"cameronsjo/forgectl#42","agent":"claude","createdAt":"2026-07-08T00:00:00Z"}`,
+		`{"workspace":"` + ws + `","ref":"o/r#1","agent":"a","createdAt":"2026-07-08T00:00:00Z"}`,
+	} {
+		f.Add([]byte(s))
+	}
+
+	tmpRoot := osTempDir()
+	f.Fuzz(func(t *testing.T, body []byte) {
+		path := filepath.Join(sessionsDir, "bc.json")
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Skipf("write breadcrumb: %v", err)
+		}
+		bc, err := loadBreadcrumb(path, sessionsDir)
+		if err != nil {
+			return
+		}
+		if !sandbox.WithinWorkspace(tmpRoot, bc.Workspace) {
+			t.Errorf("loaded breadcrumb workspace %q is not under the OS temp root %q", bc.Workspace, tmpRoot)
+		}
+		real := bc.Workspace
+		if r, err := filepath.EvalSymlinks(bc.Workspace); err == nil {
+			real = r
+		}
+		if !strings.HasPrefix(filepath.Base(real), tempPrefix) {
+			t.Errorf("loaded breadcrumb workspace %q lacks the %q sandbox prefix", bc.Workspace, tempPrefix)
+		}
+	})
 }
 
 func TestLoadBreadcrumb_WorkspaceBadPrefix(t *testing.T) {
