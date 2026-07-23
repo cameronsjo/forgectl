@@ -32,5 +32,6 @@ func allModules() []module.Manifest {
 		envModule,
 		docsModule,
 		initModule,
+		preflightModule,
 	}
 }
