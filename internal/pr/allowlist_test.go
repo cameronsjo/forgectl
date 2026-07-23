@@ -63,12 +63,17 @@ func TestWriteAllowlist(t *testing.T) {
 }
 
 // TestDenyPosting_CoversMutatingGhGroups covers the defense-in-depth backstop:
-// denyPosting must hard-block every mutating gh command group, not just the
-// posting `gh pr` verbs — so a relaxed permission floor still can't reach
-// workflow/release/secret/variable/ruleset/issue/gist/repo/run. None of these
-// may overlap the read-only allow-list (that would silently revoke a read).
+// denyPosting must hard-block the mutating `gh pr` verbs AND every other
+// mutating gh command group — so a relaxed permission floor still can't reach
+// pr ready/reopen/lock/unlock or workflow/release/secret/variable/ruleset/
+// issue/gist/repo/run. None of these may overlap the read-only allow-list
+// (that would silently revoke a read).
 func TestDenyPosting_CoversMutatingGhGroups(t *testing.T) {
 	mustDeny := []string{
+		"Bash(gh pr ready:*)",
+		"Bash(gh pr reopen:*)",
+		"Bash(gh pr lock:*)",
+		"Bash(gh pr unlock:*)",
 		"Bash(gh workflow:*)",
 		"Bash(gh release:*)",
 		"Bash(gh secret:*)",

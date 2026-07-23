@@ -203,10 +203,10 @@ func TestResolveRef_BadOriginRejected(t *testing.T) {
 		origin string // as returned by `gh repo view` (slug form)
 	}{
 		{"shell metachars", "owner/repo;rm -rf"},
-		{"leading dash owner", "-x/repo"},   // via a git@github.com:-x/repo.git origin
-		{"leading dash repo", "owner/-x"},   // symmetric: a repo component
-		{"dotdot owner", "../repo"},         // via a https://github.com/../repo.git origin
-		{"dotdot repo", "owner/.."},         // symmetric
+		{"leading dash owner", "-x/repo"}, // via a git@github.com:-x/repo.git origin
+		{"leading dash repo", "owner/-x"}, // symmetric: a repo component
+		{"dotdot owner", "../repo"},       // via a https://github.com/../repo.git origin
+		{"dotdot repo", "owner/.."},       // symmetric
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
