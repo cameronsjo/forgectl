@@ -5,6 +5,7 @@ import (
 	"errors"
 	osexec "os/exec"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -52,17 +53,69 @@ func TestCheckHearth_OK(t *testing.T) {
 	if c.State != StateOK {
 		t.Fatalf("state = %q, reason = %q; want ok", c.State, c.Reason)
 	}
-	if len(runner.Calls) != 1 || runner.Calls[0].Name != "docker" {
-		t.Fatalf("first call = %+v; want a docker call", runner.Calls)
+	// hearthDiskPercent probes colima first (best-effort disk detail); the
+	// docker compose ps call that drives State follows it.
+	if len(runner.Calls) != 2 || runner.Calls[1].Name != "docker" {
+		t.Fatalf("calls = %+v; want [colima, docker]", runner.Calls)
 	}
 	wantArgs := []string{"compose", "-p", "hearth", "ps", "--format", "json"}
-	if !equalStr(runner.Calls[0].Args, wantArgs) {
-		t.Errorf("docker args = %v, want %v", runner.Calls[0].Args, wantArgs)
+	if !equalStr(runner.Calls[1].Args, wantArgs) {
+		t.Errorf("docker args = %v, want %v", runner.Calls[1].Args, wantArgs)
 	}
 	for _, target := range []string{"http://hearth.localhost", "http://grafana.localhost", "tcp://localhost:16317"} {
 		if !probe.probed(target) {
 			t.Errorf("expected a probe of %q; probed %v", target, probe.seen)
 		}
+	}
+}
+
+const dfDiskUsage42 = `Filesystem     1024-blocks      Used Available Capacity Mounted on
+/dev/root        61255636  23213456  34774804      42%  /var/lib/docker`
+
+func TestCheckHearth_DiskPercent(t *testing.T) {
+	t.Setenv("HEARTH_DIR", "")
+	cfg := config.Config{Bench: config.BenchConfig{HearthDir: "/x/hearth"}}
+	runner := &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		if name == "colima" {
+			return dfDiskUsage42, nil
+		}
+		return twoRunning, nil // docker
+	}}
+	probe := &fakeProber{code: 200}
+
+	c := checkHearth(context.Background(), cfg, runner, probe)
+
+	found := false
+	for _, d := range c.Details {
+		if d == "disk: 42%" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Details = %v, want a %q entry", c.Details, "disk: 42%")
+	}
+}
+
+func TestCheckHearth_DiskPercentOmittedWhenColimaFails(t *testing.T) {
+	t.Setenv("HEARTH_DIR", "")
+	cfg := config.Config{Bench: config.BenchConfig{HearthDir: "/x/hearth"}}
+	runner := &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		if name == "colima" {
+			return "", errors.New("colima: not running")
+		}
+		return twoRunning, nil // docker
+	}}
+	probe := &fakeProber{code: 200}
+
+	c := checkHearth(context.Background(), cfg, runner, probe)
+
+	for _, d := range c.Details {
+		if strings.HasPrefix(d, "disk:") {
+			t.Errorf("Details = %v, want no disk entry when colima fails", c.Details)
+		}
+	}
+	if c.State != StateOK {
+		t.Fatalf("state = %q, reason = %q; want ok (colima failure must not affect State)", c.State, c.Reason)
 	}
 }
 
