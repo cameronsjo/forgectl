@@ -57,19 +57,23 @@ const logKeepDays = 7
 //	[docs]               # forgectl docs — local markdown reader
 //	roots = ["~/Projects/notes"]     # extra root dirs indexed alongside cwd/./docs
 //	addr  = "127.0.0.1:4712"         # --addr default when the flag is omitted
+//	[preflight]          # forgectl preflight — plugin/catalog alignment
+//	catalog_path = ""    # override auto-locate; direct path to the generated catalog.md
+//	default_set  = []    # extra "plugin@marketplace" entries always folded into the core-tier target
 type Config struct {
-	NoIcons  bool           `toml:"no_icons"`
-	LogLevel string         `toml:"log_level"`
-	LogFile  string         `toml:"log_file"`
-	Launch   LaunchConfig   `toml:"launch"`
-	Workflow WorkflowConfig `toml:"workflow"`
-	Net      NetConfig      `toml:"net"`
-	Bench    BenchConfig    `toml:"bench"`
-	Docker   DockerConfig   `toml:"docker"`
-	Clean    CleanConfig    `toml:"clean"`
-	Sessions SessionsConfig `toml:"sessions"`
-	Review   ReviewConfig   `toml:"review"`
-	Docs     DocsConfig     `toml:"docs"`
+	NoIcons   bool            `toml:"no_icons"`
+	LogLevel  string          `toml:"log_level"`
+	LogFile   string          `toml:"log_file"`
+	Launch    LaunchConfig    `toml:"launch"`
+	Workflow  WorkflowConfig  `toml:"workflow"`
+	Net       NetConfig       `toml:"net"`
+	Bench     BenchConfig     `toml:"bench"`
+	Docker    DockerConfig    `toml:"docker"`
+	Clean     CleanConfig     `toml:"clean"`
+	Sessions  SessionsConfig  `toml:"sessions"`
+	Review    ReviewConfig    `toml:"review"`
+	Docs      DocsConfig      `toml:"docs"`
+	Preflight PreflightConfig `toml:"preflight"`
 }
 
 // LaunchConfig is the [launch] section: base defaults plus directory-keyed
@@ -213,6 +217,21 @@ type DocsConfig struct {
 // IsZero reports whether the [docs] section was absent or empty.
 func (dc DocsConfig) IsZero() bool {
 	return len(dc.Roots) == 0 && dc.Addr == ""
+}
+
+// PreflightConfig is the [preflight] section: `forgectl preflight`'s
+// deterministic alignment inputs. A zero value means "section absent" —
+// internal/preflight's LocateCatalog falls back to installed_plugins.json
+// and then a cache-dir glob, and DefaultSet contributes nothing beyond the
+// catalog's own core tier.
+type PreflightConfig struct {
+	CatalogPath string   `toml:"catalog_path"` // override auto-locate; direct path to the generated catalog.md
+	DefaultSet  []string `toml:"default_set"`  // extra "plugin@marketplace" entries always folded into the core-tier target, independent of catalog tier
+}
+
+// IsZero reports whether the [preflight] section was absent or empty.
+func (pc PreflightConfig) IsZero() bool {
+	return pc.CatalogPath == "" && len(pc.DefaultSet) == 0
 }
 
 // Baked defaults for hearth's frozen OTLP transport. These are the values a
