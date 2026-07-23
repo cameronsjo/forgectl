@@ -59,6 +59,41 @@ func NewVerifier() *Verifier {
 	}
 }
 
+// Anchor establishes the root of trust WITHOUT the store: it runs the
+// fail-closed steps 1–2 of Verify — the anchor ownership check and the anchor
+// key parse+fingerprint — and returns the parsed anchor key and its fingerprint.
+// It is factored out of TrustedStore so a caller that must reconstruct a MISSING
+// or corrupt store (the `trust rebuild` recovery verb) can reach the authenticated
+// anchor alone, when TrustedStore itself would fail on the very store it is trying
+// to rebuild. The read is uncached — every call re-reads and re-checks the anchor
+// from disk.
+//
+// Order:
+//  1. Anchor ownership: regular file, root-owned, not group/world-writable.
+//  2. Parse the anchor P-256 key; derive its fingerprint (the id the store and
+//     its signature must reference).
+func (v *Verifier) Anchor() (*ecdsa.PublicKey, string, error) {
+	// (1) Anchor ownership.
+	if err := v.anchorCheck(v.anchorPath); err != nil {
+		return nil, "", fmt.Errorf("%w: %v", ErrNoAnchor, err)
+	}
+
+	// (2) Parse the anchor and fingerprint its canonical PKIX DER.
+	anchorBytes, err := os.ReadFile(v.anchorPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("%w: read anchor %s: %v", ErrNoAnchor, v.anchorPath, err)
+	}
+	anchorPub, err := ParseAnchorFile(anchorBytes)
+	if err != nil {
+		return nil, "", fmt.Errorf("%w: parse anchor %s: %v", ErrNoAnchor, v.anchorPath, err)
+	}
+	anchorDER, err := EncodePublicKey(anchorPub)
+	if err != nil {
+		return nil, "", fmt.Errorf("%w: encode anchor key: %v", ErrNoAnchor, err)
+	}
+	return anchorPub, Fingerprint(anchorDER), nil
+}
+
 // TrustedStore establishes the root of trust and returns the authenticated
 // trust store — the fail-closed steps 1–3 of Verify, factored out so the exact
 // order lives in one place and callers that need the enrolled-key set (the
@@ -73,25 +108,11 @@ func NewVerifier() *Verifier {
 //     by the anchor (trust domain) and name the anchor's key id; only then is the
 //     store TOML decoded, and its anchor_key_id must match too.
 func (v *Verifier) TrustedStore() (Store, error) {
-	// (1) Anchor ownership.
-	if err := v.anchorCheck(v.anchorPath); err != nil {
-		return Store{}, fmt.Errorf("%w: %v", ErrNoAnchor, err)
-	}
-
-	// (2) Parse the anchor and fingerprint its canonical PKIX DER.
-	anchorBytes, err := os.ReadFile(v.anchorPath)
+	// (1)+(2) Anchor ownership, parse, and fingerprint — the uncached anchor read.
+	anchorPub, anchorFP, err := v.Anchor()
 	if err != nil {
-		return Store{}, fmt.Errorf("%w: read anchor %s: %v", ErrNoAnchor, v.anchorPath, err)
+		return Store{}, err
 	}
-	anchorPub, err := ParseAnchorFile(anchorBytes)
-	if err != nil {
-		return Store{}, fmt.Errorf("%w: parse anchor %s: %v", ErrNoAnchor, v.anchorPath, err)
-	}
-	anchorDER, err := EncodePublicKey(anchorPub)
-	if err != nil {
-		return Store{}, fmt.Errorf("%w: encode anchor key: %v", ErrNoAnchor, err)
-	}
-	anchorFP := Fingerprint(anchorDER)
 
 	// (3) Authenticate-before-parse the trust store.
 	storePath, err := v.trustStorePath()

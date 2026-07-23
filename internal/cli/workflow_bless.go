@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"crypto/ecdsa"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -28,9 +29,12 @@ var _ workflow.Verifier = (*bless.Verifier)(nil)
 // trustStorer is the trust-chain read seam the bless and trust-list verbs gate
 // on: it returns the authenticated enrolled-key set (Verify's steps 1–3). It is
 // distinct from verifierFactory because those verbs need the Store, not a
-// blessing check.
+// blessing check. Anchor exposes the anchor-only leg (steps 1–2) for the
+// `trust rebuild` verb, which must reach the authenticated anchor precisely when
+// TrustedStore would fail on the missing store it is rebuilding.
 type trustStorer interface {
 	TrustedStore() (bless.Store, error)
+	Anchor() (*ecdsa.PublicKey, string, error)
 }
 
 // trustStorerFactory builds the trust-chain reader. Like verifierFactory it is a
@@ -228,6 +232,7 @@ func newWorkflowTrustCmd(deps module.Deps) *cobra.Command {
 	}
 	cmd.AddCommand(
 		newWorkflowTrustInitCmd(deps),
+		newWorkflowTrustRebuildCmd(deps),
 		newWorkflowTrustListCmd(),
 	)
 	return cmd
@@ -322,6 +327,145 @@ func runTrustInit(cmd *cobra.Command, deps module.Deps) error {
 		return fmt.Errorf("install trust anchor: %w", err)
 	}
 	fmt.Fprintf(out, "Trust anchor installed: %s\nThis machine is now the trust root and first blesser.\n", bless.AnchorPath)
+	return nil
+}
+
+// newWorkflowTrustRebuildCmd builds `forgectl workflow trust rebuild`:
+// reconstruct a deleted or corrupted trust STORE from the still-installed
+// root-owned anchor, WITHOUT the two-sudo anchor rotation `trust init` forces.
+// The anchor key never changes on a store loss, so re-establishing it is
+// unnecessary ceremony; this verb rebuilds the store alone. It is a DISTINCT verb
+// from init on purpose — init refuses when an anchor is present, whereas rebuild
+// REQUIRES one.
+func newWorkflowTrustRebuildCmd(deps module.Deps) *cobra.Command {
+	return &cobra.Command{
+		Use:   "rebuild",
+		Short: "Rebuild the trust store from the installed anchor, enrolling only this machine",
+		Long: `rebuild reconstructs a deleted or corrupted trust store from the
+still-installed root-owned anchor, without touching the anchor (no sudo). Use it
+to recover when trust.toml is lost but the anchor at ` + bless.AnchorPath + ` is
+intact; use 'trust init' instead when the anchor itself is gone.
+
+The rebuilt store enrolls ONLY this machine's presence-gated key, reconstructed
+solely from the Secure Enclave — never read back out of the (now unauthenticated)
+old store. Only the machine that holds the anchor key may rebuild.
+
+WARNING: rebuild OVERWRITES the trust store. Any previously enrolled peer machine
+is dropped and must be re-added afterward.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runTrustRebuild(cmd, deps)
+		},
+	}
+}
+
+// runTrustRebuild reconstructs the trust store from the authenticated anchor
+// without rotating it. The load-bearing security boundary: the enrolled set is
+// reconstructed SOLELY from this machine's presence-gated key — never read back
+// out of the existing store, which is unauthenticated the moment its sidecar is
+// invalid. Reading Keys from it would let a same-UID agent pre-seed its own key
+// into the store for the human to re-sign under one presence prompt.
+func runTrustRebuild(cmd *cobra.Command, deps module.Deps) error {
+	out := cmd.OutOrStdout()
+	ctx := cmd.Context()
+
+	// 1. The anchor is the ONLY authority a rebuild trusts. Read + ownership-check
+	//    it directly via Anchor() — NOT TrustedStore(), which would fail on the
+	//    very store we are rebuilding. A missing or non-root anchor means there is
+	//    nothing to rebuild against: route the user to `trust init`.
+	reader := trustStorerFactory()
+	_, anchorFP, err := reader.Anchor()
+	if err != nil {
+		return trustChainError(err)
+	}
+
+	// 2. Fetch THIS machine's blessing key with PublicKey — NEVER EnsureKey. A
+	//    rebuild must not MINT a key: no key means this machine never held the
+	//    anchor, so it cannot be the rebuilder. A key that can sign without
+	//    presence may have been planted, and must abort rather than be anointed.
+	blesser, err := blesserFactory(deps.Runner)
+	if err != nil {
+		return err
+	}
+	pubDER, err := blesser.PublicKey(ctx, bless.KeyLabel)
+	if err != nil {
+		switch {
+		case errors.Is(err, bless.ErrKeyNotFound):
+			return fmt.Errorf("this machine has no blessing key — only the machine that holds the trust anchor can rebuild the store; run 'forgectl workflow trust init' on the anchor machine: %w", err)
+		case errors.Is(err, bless.ErrKeyNotPresenceGated):
+			return fmt.Errorf("this machine's blessing key is not presence-gated and may have been planted — refusing to rebuild the trust store around it: %w", err)
+		default:
+			return err
+		}
+	}
+	keyID := bless.Fingerprint(pubDER)
+
+	// 3. Only the anchor-holding machine may rebuild: this key must BE the anchor.
+	//    A mismatch means a peer (or an impostor) is invoking rebuild — refuse.
+	if keyID != anchorFP {
+		return fmt.Errorf("this machine's key %s is not the trust anchor %s — only the anchor-holding machine may rebuild the store", keyID, anchorFP)
+	}
+
+	// 4. Forward-coupling guard (issue #86). Today `trust add` is unimplemented, so
+	//    a valid store enrolls exactly this machine's key (== the anchor). Once peer
+	//    enrollment ships, a rebuild would SILENTLY DROP any enrolled peer — so
+	//    refuse the moment a currently-valid store holds a key that is not this
+	//    machine's. A missing or invalid store is the normal recovery case and is
+	//    tolerated (that is what we are here to rebuild).
+	if store, serr := reader.TrustedStore(); serr == nil {
+		for _, k := range store.Keys {
+			if k.KeyID != keyID {
+				return fmt.Errorf("the current trust store also enrolls %s (%s); rebuilding would silently drop it — remove that peer deliberately before rebuilding, or re-establish trust (issue #86)", k.KeyID, k.Machine)
+			}
+		}
+	}
+
+	fmt.Fprintln(out, "WARNING: rebuild OVERWRITES the trust store, enrolling ONLY this machine.")
+	fmt.Fprintln(out, "Any previously enrolled peer machine will be dropped and must be re-added.")
+
+	// 5. Reconstruct the store enrolling ONLY this machine's key — byte-identical
+	//    to `trust init` stage 3. The enrolled set comes SOLELY from the Secure
+	//    Enclave key fetched above; the old store's Keys are never read.
+	store := bless.Store{
+		Schema:      bless.StoreSchema,
+		AnchorKeyID: anchorFP,
+		Keys: []bless.TrustedKey{{
+			KeyID:   keyID,
+			Machine: shortHostname(),
+			Pubkey:  base64.StdEncoding.EncodeToString(pubDER),
+			AddedAt: time.Now().UTC().Format(time.RFC3339),
+		}},
+	}
+	storeBytes, err := bless.EncodeStore(store)
+	if err != nil {
+		return err
+	}
+
+	// 6. Sign the store (ONE presence prompt) and write it plus its sidecar. No
+	//    InstallAnchor, no sudo — the anchor is untouched.
+	fmt.Fprintln(out, "Signing the rebuilt trust store — approve the presence prompt…")
+	storeEnv, err := bless.SignEnvelope(ctx, blesser, bless.KeyLabel, anchorFP, bless.DomainTrust, storeBytes, time.Now())
+	if err != nil {
+		return err
+	}
+	storeEnvBytes, err := bless.EncodeEnvelope(storeEnv)
+	if err != nil {
+		return err
+	}
+	storePath, err := config.TrustStorePath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(storePath), 0o700); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+	if err := os.WriteFile(storePath, storeBytes, 0o644); err != nil {
+		return fmt.Errorf("write trust store %s: %w", storePath, err)
+	}
+	if err := os.WriteFile(bless.SidecarPath(storePath), storeEnvBytes, 0o644); err != nil {
+		return fmt.Errorf("write trust store sidecar: %w", err)
+	}
+	fmt.Fprintf(out, "Trust store rebuilt: %s\nEnrolled only this machine (%s). Any previously enrolled peer must be re-added.\n", storePath, keyID)
 	return nil
 }
 

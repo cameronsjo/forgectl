@@ -1,6 +1,7 @@
 package bless
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"os"
@@ -242,6 +243,114 @@ func TestVerify_UsesOnlyProvidedData(t *testing.T) {
 	}
 	if err := env.verifier().Verify(wf, workflowData); err != nil {
 		t.Fatalf("Verify after removing the workflow file: %v", err)
+	}
+}
+
+// TestAnchor_ReturnsAuthenticatedAnchor proves the factored-out steps 1–2 return
+// the installed anchor key and its fingerprint, and that the fingerprint is
+// exactly the one TrustedStore roots the store on — so factoring Anchor() out of
+// TrustedStore changed nothing observable.
+func TestAnchor_ReturnsAuthenticatedAnchor(t *testing.T) {
+	env := newTestEnv(t)
+	pub, fp, err := env.verifier().Anchor()
+	if err != nil {
+		t.Fatalf("Anchor: %v", err)
+	}
+	if fp != env.anchorFP {
+		t.Errorf("Anchor fingerprint = %q, want %q", fp, env.anchorFP)
+	}
+	if !bytes.Equal(mustPubDER(t, pub), mustPubDER(t, &env.anchorKey.PublicKey)) {
+		t.Error("Anchor returned a key that is not the installed anchor")
+	}
+	store, err := env.verifier().TrustedStore()
+	if err != nil {
+		t.Fatalf("TrustedStore: %v", err)
+	}
+	if store.AnchorKeyID != fp {
+		t.Errorf("TrustedStore anchor_key_id %q != Anchor fingerprint %q", store.AnchorKeyID, fp)
+	}
+}
+
+func TestAnchor_OwnershipCheckFails(t *testing.T) {
+	env := newTestEnv(t)
+	v := env.verifier()
+	v.anchorCheck = func(string) error { return errors.New("not root-owned") }
+	if _, _, err := v.Anchor(); !errors.Is(err, ErrNoAnchor) {
+		t.Fatalf("Anchor = %v, want ErrNoAnchor", err)
+	}
+}
+
+func TestAnchor_MissingFile(t *testing.T) {
+	env := newTestEnv(t)
+	v := env.verifier()
+	v.anchorPath = filepath.Join(env.dir, "does-not-exist")
+	if _, _, err := v.Anchor(); !errors.Is(err, ErrNoAnchor) {
+		t.Fatalf("Anchor = %v, want ErrNoAnchor", err)
+	}
+}
+
+// TestAnchor_UncachedReReadsDisk proves Anchor re-reads the anchor from disk on
+// every call: after corrupting the file a second call must fail, where a cached
+// read would still succeed. TrustedStore depends on this uncached read.
+func TestAnchor_UncachedReReadsDisk(t *testing.T) {
+	env := newTestEnv(t)
+	v := env.verifier()
+	if _, _, err := v.Anchor(); err != nil {
+		t.Fatalf("first Anchor: %v", err)
+	}
+	writeFile(t, env.anchorPath, []byte("not base64 !!!"))
+	if _, _, err := v.Anchor(); !errors.Is(err, ErrNoAnchor) {
+		t.Fatalf("second Anchor after corruption = %v, want ErrNoAnchor", err)
+	}
+}
+
+// TestTrustedStore_SingleMachineAnchorIsSigner proves a rebuild-SHAPED store — a
+// single key that is BOTH the anchor and the sole enrolled blesser, signed under
+// the trust domain by that key — verifies through the real TrustedStore path.
+// `trust rebuild` produces exactly this shape (anchor == the only enrolled key),
+// so this is the ground-truth that a rebuilt store re-verifies.
+func TestTrustedStore_SingleMachineAnchorIsSigner(t *testing.T) {
+	dir := t.TempDir()
+	key := genKey(t)
+	der := mustPubDER(t, &key.PublicKey)
+	fp := Fingerprint(der)
+
+	anchorPath := filepath.Join(dir, "trust-anchor.pub")
+	writeFile(t, anchorPath, []byte(base64.StdEncoding.EncodeToString(der)+"\n"))
+
+	store := Store{
+		Schema:      StoreSchema,
+		AnchorKeyID: fp,
+		Keys: []TrustedKey{{
+			KeyID:   fp,
+			Machine: "test",
+			Pubkey:  base64.StdEncoding.EncodeToString(der),
+			AddedAt: fixedTime.Format(time.RFC3339),
+		}},
+	}
+	storeBytes := mustEncodeStore(t, store)
+	storePath := filepath.Join(dir, "trust.toml")
+	writeFile(t, storePath, storeBytes)
+	storeEnv := Envelope{
+		Schema:    EnvelopeSchema,
+		Algo:      AlgoECDSAP256SHA256,
+		KeyID:     fp,
+		Signature: signB64(t, key, DomainTrust, storeBytes),
+		SignedAt:  fixedTime.Format(time.RFC3339),
+	}
+	writeFile(t, SidecarPath(storePath), mustEncodeEnvelope(t, storeEnv))
+
+	v := &Verifier{
+		anchorPath:     anchorPath,
+		anchorCheck:    func(string) error { return nil },
+		trustStorePath: func() (string, error) { return storePath, nil },
+	}
+	got, err := v.TrustedStore()
+	if err != nil {
+		t.Fatalf("rebuild-shaped store must verify via TrustedStore: %v", err)
+	}
+	if got.AnchorKeyID != fp || len(got.Keys) != 1 || got.Keys[0].KeyID != fp {
+		t.Errorf("TrustedStore = %+v, want single enrolled key %s == anchor", got, fp)
 	}
 }
 

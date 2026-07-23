@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -458,5 +459,308 @@ func TestBlessRefExtractionMatchesInterpolate(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// --- trust rebuild (#86) ---------------------------------------------------
+
+// Anchor lets the existing fakeTrustStorer satisfy the extended trustStorer
+// interface. The bless / trust-list tests that use fakeTrustStorer never call it;
+// rebuild tests drive fakeTrustReader, which controls the anchor and the store
+// legs independently.
+func (f fakeTrustStorer) Anchor() (*ecdsa.PublicKey, string, error) {
+	return nil, f.store.AnchorKeyID, f.err
+}
+
+// fakeTrustReader controls the anchor leg (Anchor) and the store leg
+// (TrustedStore) independently — the shape rebuild needs, where the anchor is
+// intact but the store is missing (storeErr set) or holds a peer.
+type fakeTrustReader struct {
+	anchorFP  string
+	anchorErr error
+	store     bless.Store
+	storeErr  error
+}
+
+func (f fakeTrustReader) Anchor() (*ecdsa.PublicKey, string, error) {
+	return nil, f.anchorFP, f.anchorErr
+}
+func (f fakeTrustReader) TrustedStore() (bless.Store, error) { return f.store, f.storeErr }
+
+func swapTrustReader(t *testing.T, r trustStorer) {
+	t.Helper()
+	old := trustStorerFactory
+	trustStorerFactory = func() trustStorer { return r }
+	t.Cleanup(func() { trustStorerFactory = old })
+}
+
+// rebuildSpyBlesser is a Blesser that FAILS THE TEST if Enroll is ever called —
+// the guard that rebuild never mints a key. PublicKey serves a canned key (or a
+// canned error, to drive the not-present / not-presence-gated branches); Sign
+// signs with key so a rebuilt store's crypto actually verifies.
+type rebuildSpyBlesser struct {
+	t       *testing.T
+	key     *ecdsa.PrivateKey
+	pubDER  []byte
+	pubErr  error
+	signErr error
+	signed  bool
+}
+
+func (b *rebuildSpyBlesser) Enroll(context.Context, string) ([]byte, error) {
+	b.t.Errorf("rebuild must NEVER Enroll — a rebuild must not mint a key")
+	return nil, errors.New("enroll is forbidden during rebuild")
+}
+func (b *rebuildSpyBlesser) PublicKey(context.Context, string) ([]byte, error) {
+	if b.pubErr != nil {
+		return nil, b.pubErr
+	}
+	return b.pubDER, nil
+}
+func (b *rebuildSpyBlesser) Sign(_ context.Context, _ string, digest [32]byte) ([]byte, error) {
+	if b.signErr != nil {
+		return nil, b.signErr
+	}
+	b.signed = true
+	return ecdsa.SignASN1(rand.Reader, b.key, digest[:])
+}
+
+func installBlesser(t *testing.T, b bless.Blesser) {
+	t.Helper()
+	prev := blesserFactory
+	blesserFactory = func(exec.Runner) (bless.Blesser, error) { return b, nil }
+	t.Cleanup(func() { blesserFactory = prev })
+}
+
+// assertStoreVerifiesUnderAnchor replays the TrustedStore checks against a store
+// the CLI wrote: the sidecar must name the anchor fingerprint, its signature must
+// verify under the anchor key over the trust-domain digest of the store bytes,
+// and the decoded store must root on that anchor and enroll exactly wantEnrolled.
+// (The real Verifier.TrustedStore reads the compiled-in AnchorPath, which has no
+// test seam — TestTrustedStore_SingleMachineAnchorIsSigner proves the same shape
+// passes the real path; here we prove the CLI produced that shape.)
+func assertStoreVerifiesUnderAnchor(t *testing.T, storePath string, anchorKey *ecdsa.PrivateKey, wantEnrolled string) {
+	t.Helper()
+	anchorFP := bless.Fingerprint(cliPubDER(t, anchorKey))
+	storeBytes, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("read rebuilt store: %v", err)
+	}
+	sidecar, err := os.ReadFile(bless.SidecarPath(storePath))
+	if err != nil {
+		t.Fatalf("read rebuilt store sidecar: %v", err)
+	}
+	env, err := bless.DecodeEnvelope(sidecar)
+	if err != nil {
+		t.Fatalf("decode store sidecar: %v", err)
+	}
+	if env.KeyID != anchorFP {
+		t.Errorf("store sidecar key_id = %q, want anchor %q", env.KeyID, anchorFP)
+	}
+	sig, err := base64.StdEncoding.DecodeString(env.Signature)
+	if err != nil {
+		t.Fatalf("store sidecar signature base64: %v", err)
+	}
+	dg := bless.TaggedDigest(bless.DomainTrust, storeBytes)
+	if !ecdsa.VerifyASN1(&anchorKey.PublicKey, dg[:], sig) {
+		t.Error("rebuilt store signature does not verify under the anchor key")
+	}
+	store, err := bless.DecodeStore(storeBytes)
+	if err != nil {
+		t.Fatalf("decode rebuilt store: %v", err)
+	}
+	if store.AnchorKeyID != anchorFP {
+		t.Errorf("rebuilt store anchor_key_id = %q, want %q", store.AnchorKeyID, anchorFP)
+	}
+	if len(store.Keys) != 1 || store.Keys[0].KeyID != wantEnrolled {
+		t.Errorf("rebuilt store enrolls %+v, want the single key %s", store.Keys, wantEnrolled)
+	}
+}
+
+func mustStorePath(t *testing.T) string {
+	t.Helper()
+	p, err := config.TrustStorePath()
+	if err != nil {
+		t.Fatalf("TrustStorePath: %v", err)
+	}
+	return p
+}
+
+// TestWorkflowTrustRebuild_HappyPath is guard (v) AND guard (i): the anchor is
+// intact, the store is missing, this machine's key IS the anchor — so rebuild
+// re-writes a store that re-verifies. The spy blesser fails the test if Enroll is
+// reached (never-mint), and spyAnchorInstall asserts the anchor is never touched.
+func TestWorkflowTrustRebuild_HappyPath(t *testing.T) {
+	cliRedirectConfigDir(t)
+	key := cliGenKey(t)
+	pubDER := cliPubDER(t, key)
+	keyID := bless.Fingerprint(pubDER)
+
+	// Anchor is this machine's key; the store is gone (the recovery case).
+	swapTrustReader(t, fakeTrustReader{anchorFP: keyID, storeErr: bless.ErrTrustStoreInvalid})
+	spy := &rebuildSpyBlesser{t: t, key: key, pubDER: pubDER}
+	installBlesser(t, spy)
+	anchorCalls := spyAnchorInstall(t, nil)
+
+	cmd := newWorkflowTrustRebuildCmd(module.Deps{Runner: &exec.FakeRunner{}})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs(nil)
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+
+	if !spy.signed {
+		t.Error("rebuild must sign the reconstructed store")
+	}
+	if len(*anchorCalls) != 0 {
+		t.Errorf("rebuild must NEVER install the anchor, got %d calls", len(*anchorCalls))
+	}
+	if !strings.Contains(out.String(), "OVERWRITES") {
+		t.Errorf("rebuild must print a loud overwrite warning, got %q", out.String())
+	}
+	// The written store re-verifies, enrolling ONLY this machine's key.
+	assertStoreVerifiesUnderAnchor(t, mustStorePath(t), key, keyID)
+}
+
+// TestWorkflowTrustRebuild_HardAbortsOnPlantedKey is guard (ii): a key that can
+// sign without presence (ErrKeyNotPresenceGated) must abort the rebuild — never
+// be anointed into a fresh store.
+func TestWorkflowTrustRebuild_HardAbortsOnPlantedKey(t *testing.T) {
+	cliRedirectConfigDir(t)
+	key := cliGenKey(t)
+	keyID := bless.Fingerprint(cliPubDER(t, key))
+	swapTrustReader(t, fakeTrustReader{anchorFP: keyID, storeErr: bless.ErrTrustStoreInvalid})
+	installBlesser(t, &rebuildSpyBlesser{t: t, key: key, pubErr: bless.ErrKeyNotPresenceGated})
+	spyAnchorInstall(t, nil)
+
+	cmd := newWorkflowTrustRebuildCmd(module.Deps{Runner: &exec.FakeRunner{}})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs(nil)
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || !errors.Is(err, bless.ErrKeyNotPresenceGated) {
+		t.Fatalf("rebuild = %v, want ErrKeyNotPresenceGated", err)
+	}
+	if _, serr := os.Stat(mustStorePath(t)); !os.IsNotExist(serr) {
+		t.Error("rebuild must not write a store when the key is not presence-gated")
+	}
+}
+
+// TestWorkflowTrustRebuild_RefusesWhenKeyIsNotAnchor is guard (iii): only the
+// anchor-holding machine may rebuild. A machine whose key is not the anchor is
+// refused, and no store is written.
+func TestWorkflowTrustRebuild_RefusesWhenKeyIsNotAnchor(t *testing.T) {
+	cliRedirectConfigDir(t)
+	machineKey := cliGenKey(t)
+	machinePub := cliPubDER(t, machineKey)
+
+	// The anchor is a DIFFERENT key than this machine holds.
+	anchorKey := cliGenKey(t)
+	anchorFP := bless.Fingerprint(cliPubDER(t, anchorKey))
+
+	swapTrustReader(t, fakeTrustReader{anchorFP: anchorFP, storeErr: bless.ErrTrustStoreInvalid})
+	installBlesser(t, &rebuildSpyBlesser{t: t, key: machineKey, pubDER: machinePub,
+		signErr: fmt.Errorf("sign must not be reached when this machine is not the anchor")})
+	spyAnchorInstall(t, nil)
+
+	cmd := newWorkflowTrustRebuildCmd(module.Deps{Runner: &exec.FakeRunner{}})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs(nil)
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not the trust anchor") {
+		t.Fatalf("rebuild = %v, want a not-the-anchor refusal", err)
+	}
+	if _, serr := os.Stat(mustStorePath(t)); !os.IsNotExist(serr) {
+		t.Error("rebuild must not write a store when this machine is not the anchor")
+	}
+}
+
+// TestWorkflowTrustRebuild_RefusesWhenNoAnchor is guard (iv): a missing or
+// non-root anchor means there is nothing to rebuild against — refuse and route
+// the user to `trust init`.
+func TestWorkflowTrustRebuild_RefusesWhenNoAnchor(t *testing.T) {
+	cliRedirectConfigDir(t)
+	swapTrustReader(t, fakeTrustReader{anchorErr: fmt.Errorf("%w: missing", bless.ErrNoAnchor)})
+	// A blesser that fails the test if reached — the anchor check gates before it.
+	installBlesser(t, &rebuildSpyBlesser{t: t, key: cliGenKey(t),
+		pubErr: fmt.Errorf("PublicKey must not be reached when there is no anchor")})
+	spyAnchorInstall(t, nil)
+
+	cmd := newWorkflowTrustRebuildCmd(module.Deps{Runner: &exec.FakeRunner{}})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs(nil)
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "trust init") {
+		t.Fatalf("rebuild = %v, want a no-anchor refusal routing to trust init", err)
+	}
+	if _, serr := os.Stat(mustStorePath(t)); !os.IsNotExist(serr) {
+		t.Error("rebuild must not write a store when there is no anchor")
+	}
+}
+
+// TestWorkflowTrustRebuild_RefusesWhenStoreEnrollsPeer is the forward-coupling
+// guard (SECURITY-REVIEW 3a): if a currently-valid store enrolls a peer machine,
+// rebuilding would SILENTLY DROP it — so refuse. Today `trust add` is
+// unimplemented (the single-machine invariant), so this exercises the guard
+// against a hand-built two-machine store.
+func TestWorkflowTrustRebuild_RefusesWhenStoreEnrollsPeer(t *testing.T) {
+	cliRedirectConfigDir(t)
+	key := cliGenKey(t)
+	pubDER := cliPubDER(t, key)
+	keyID := bless.Fingerprint(pubDER)
+
+	// A peer key enrolled ALONGSIDE this machine in a currently-valid store.
+	peer := cliGenKey(t)
+	peerPub := cliPubDER(t, peer)
+	peerID := bless.Fingerprint(peerPub)
+	twoMachine := bless.Store{
+		Schema:      bless.StoreSchema,
+		AnchorKeyID: keyID,
+		Keys: []bless.TrustedKey{
+			{KeyID: keyID, Machine: "self", Pubkey: base64.StdEncoding.EncodeToString(pubDER), AddedAt: "2026-07-12T00:00:00Z"},
+			{KeyID: peerID, Machine: "peer", Pubkey: base64.StdEncoding.EncodeToString(peerPub), AddedAt: "2026-07-12T00:00:00Z"},
+		},
+	}
+	swapTrustReader(t, fakeTrustReader{anchorFP: keyID, store: twoMachine})
+	installBlesser(t, &rebuildSpyBlesser{t: t, key: key, pubDER: pubDER,
+		signErr: fmt.Errorf("sign must not be reached when a peer would be dropped")})
+	spyAnchorInstall(t, nil)
+
+	cmd := newWorkflowTrustRebuildCmd(module.Deps{Runner: &exec.FakeRunner{}})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs(nil)
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || !strings.Contains(err.Error(), peerID) {
+		t.Fatalf("rebuild = %v, want a refusal naming the peer that would be dropped", err)
+	}
+}
+
+// TestTrust_NoPeerEnrollmentVerb_GuardsRebuild is the blocking coupling test
+// (SECURITY-REVIEW 3b). runTrustRebuild reconstructs the enrolled set SOLELY from
+// this machine's key, dropping any peer — safe ONLY while the single-machine
+// invariant holds (no `trust add`, no multi-key enrollment). If a peer-enrollment
+// verb ever ships under `trust`, this fails and forces a human to revisit
+// rebuild's drop-peer semantics before that feature lands (issue #86).
+func TestTrust_NoPeerEnrollmentVerb_GuardsRebuild(t *testing.T) {
+	cmd := newWorkflowTrustCmd(module.Deps{Runner: &exec.FakeRunner{}})
+	got := map[string]bool{}
+	for _, c := range cmd.Commands() {
+		got[c.Name()] = true
+	}
+	want := map[string]bool{"init": true, "rebuild": true, "list": true}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("trust is missing the %q subcommand", name)
+		}
+	}
+	for name := range got {
+		if !want[name] {
+			t.Fatalf("trust grew a %q subcommand — if this is peer enrollment (trust add / multi-key), "+
+				"revisit runTrustRebuild: it reconstructs a SINGLE-machine store and would silently drop peers (issue #86)", name)
+		}
 	}
 }
