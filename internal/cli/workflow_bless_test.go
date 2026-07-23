@@ -528,7 +528,7 @@ func (b *rebuildSpyBlesser) Sign(_ context.Context, _ string, digest [32]byte) (
 func installBlesser(t *testing.T, b bless.Blesser) {
 	t.Helper()
 	prev := blesserFactory
-	blesserFactory = func(exec.Runner) (bless.Blesser, error) { return b, nil }
+	blesserFactory = func(context.Context, exec.Runner) (bless.Blesser, error) { return b, nil }
 	t.Cleanup(func() { blesserFactory = prev })
 }
 

@@ -63,28 +63,25 @@ var (
 )
 
 // ExpectedTeamID is the Apple Developer Team ID the sibling helper's Developer-ID
-// signature must chain to. When non-empty, NewHelperBlesser runs `codesign
-// --verify --strict` against a requirement pinned to this Team ID and fails
-// closed (ErrHelperUntrusted) if the helper does not satisfy it — closing the
-// swap-the-helper hole that the sibling-lookup guard alone cannot (a same-UID
-// agent can drop a decoy at the sibling path, but cannot forge a Developer-ID
-// signature chaining to this Team ID).
+// signature must chain to. When non-empty, the helper's signature is checked
+// (verifyTrust) against a requirement pinned to this Team ID — at construction AND
+// immediately before every privileged exec — and any failure is fatal
+// (ErrHelperUntrusted). That closes the swap-the-helper hole the sibling-lookup
+// guard alone cannot: a same-UID agent can drop a decoy at the sibling path, but
+// cannot forge a Developer-ID signature chaining to this Team ID. Re-checking
+// before each exec (not only at construction) closes the TOCTOU window — a swap
+// after construction is caught before the swapped binary is ever run.
 //
-// It is DELIBERATELY empty in every build shipped today, which disables the gate
-// (an unsigned or ad-hoc helper is the norm in dev and source builds, and no
-// signed release exists yet). Arming it is a gated follow-up (forgectl#90, "PR3"):
-// a `-X …internal/bless.ExpectedTeamID=<team>` ldflag on the darwin build, landed
-// ONLY after a signed release is cut and the exact codesign requirement is
-// verified on-device (validate-before-apply). That order is intentional — a wrong
-// requirement string would fail-closed-brick blessing for every user, so the gate
-// stays dormant until its requirement is proven against a real signed artifact.
-//
-// KNOWN RESIDUAL when armed (forgectl#90): the verify below is TOCTOU against the
-// later helper execs (Enroll/PublicKey/Sign re-open path by name). A same-UID
-// agent that wins the race could swap the sibling after the check; macOS does not
-// re-enforce the OU==TeamID requirement at execve. Closing it (exec a held,
-// verified fd) is part of arming the gate and MUST land with the ldflag, never
-// after — an armed-but-TOCTOU gate is a false assurance.
+// It ships DELIBERATELY empty in every build today, which disables the gate — an
+// unsigned or ad-hoc helper is the norm in dev and source builds, and no signed
+// release exists yet. This is scaffolding awaiting arming, not a live control.
+// Arming is a separate, owner-gated follow-up (forgectl#90): a build-time
+// `-ldflags -X …internal/bless.ExpectedTeamID=<team>` injection on the darwin
+// build, landed ONLY after a signed release is cut and the exact codesign
+// requirement is verified on-device (validate-before-apply). The order is
+// load-bearing — a wrong requirement string fail-closed-bricks blessing for every
+// user — so the gate stays dormant until its requirement is proven against a real
+// signed artifact.
 var ExpectedTeamID = ""
 
 // HelperBlesser drives forgectl-bless-helper over the exec.Runner seam. The
@@ -145,17 +142,37 @@ func NewHelperBlesser(ctx context.Context, run exec.Runner) (*HelperBlesser, err
 	if _, err := os.Stat(path); err != nil {
 		return nil, fmt.Errorf("%w: %s: %v", ErrNoBlesser, path, err)
 	}
-	// Developer-ID trust gate. Dormant when ExpectedTeamID is empty (dev/source
-	// builds), it fails CLOSED on a signed release: the helper must satisfy a
-	// codesign requirement pinned to the release's Team ID, or it is refused as a
-	// swapped/tampered binary before it can Enroll, PublicKey, or Sign.
-	if ExpectedTeamID != "" {
-		req := fmt.Sprintf("anchor apple generic and certificate leaf[subject.OU] = %q", ExpectedTeamID)
-		if _, err := run.Run(ctx, "/usr/bin/codesign", "--verify", "--strict", "-R", req, path); err != nil {
-			return nil, fmt.Errorf("%w: %s: %v", ErrHelperUntrusted, path, err)
-		}
+	h := &HelperBlesser{run: run, path: path}
+	// Fail fast if the helper is already untrusted at construction. The same check
+	// re-runs before every privileged exec (verifyTrust), so this is defence in
+	// depth, not the sole gate — a swap AFTER construction is caught there.
+	if err := h.verifyTrust(ctx); err != nil {
+		return nil, err
 	}
-	return &HelperBlesser{run: run, path: path}, nil
+	return h, nil
+}
+
+// verifyTrust runs the Developer-ID codesign requirement against the resolved
+// helper path. It is a no-op when the gate is dormant (ExpectedTeamID == ""), and
+// it is called both at construction AND immediately before EVERY privileged helper
+// exec (Enroll/PublicKey/Sign). Re-checking the sibling path each time is what
+// closes the TOCTOU window: a same-UID agent that swaps the helper binary after
+// construction is caught before the swapped binary is ever executed, not merely at
+// first load (macOS does not re-enforce the OU==TeamID requirement at execve).
+// codesign re-reads the file from disk on each call, so the check reflects the
+// bytes that are about to run.
+func (h *HelperBlesser) verifyTrust(ctx context.Context) error {
+	if ExpectedTeamID == "" {
+		return nil
+	}
+	// ExpectedTeamID is a build-injected Apple Team ID ([A-Z0-9]{10}), so %q's
+	// Go-string quoting yields exactly the codesign requirement literal — no
+	// escaping surprises for this input class.
+	req := fmt.Sprintf("anchor apple generic and certificate leaf[subject.OU] = %q", ExpectedTeamID)
+	if _, err := h.run.Run(ctx, "/usr/bin/codesign", "--verify", "--strict", "-R", req, h.path); err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrHelperUntrusted, h.path, err)
+	}
+	return nil
 }
 
 // pubkeyReply and signatureReply are the frozen JSON shapes the helper emits.
@@ -172,6 +189,9 @@ type (
 
 // Enroll mints a new presence-gated key labelled label and returns its PKIX DER.
 func (h *HelperBlesser) Enroll(ctx context.Context, label string) ([]byte, error) {
+	if err := h.verifyTrust(ctx); err != nil {
+		return nil, err
+	}
 	out, err := h.run.Run(ctx, h.path, "enroll", "--label", label)
 	if err != nil {
 		return nil, mapHelperError(err)
@@ -181,6 +201,9 @@ func (h *HelperBlesser) Enroll(ctx context.Context, label string) ([]byte, error
 
 // PublicKey returns the PKIX DER of the existing key labelled label.
 func (h *HelperBlesser) PublicKey(ctx context.Context, label string) ([]byte, error) {
+	if err := h.verifyTrust(ctx); err != nil {
+		return nil, err
+	}
 	out, err := h.run.Run(ctx, h.path, "pubkey", "--label", label)
 	if err != nil {
 		return nil, mapHelperError(err)
@@ -192,6 +215,9 @@ func (h *HelperBlesser) PublicKey(ctx context.Context, label string) ([]byte, er
 // the frozen contract) to the helper and returns the ASN.1/DER ECDSA signature.
 // This is the call that triggers the Touch ID prompt.
 func (h *HelperBlesser) Sign(ctx context.Context, label string, digest [32]byte) ([]byte, error) {
+	if err := h.verifyTrust(ctx); err != nil {
+		return nil, err
+	}
 	stdin := base64.StdEncoding.EncodeToString(digest[:]) + "\n"
 	out, err := h.run.RunWithInput(ctx, stdin, h.path, "sign", "--label", label)
 	if err != nil {

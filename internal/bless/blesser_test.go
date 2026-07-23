@@ -160,6 +160,48 @@ func TestNewHelperBlesser_GateAcceptsSignedHelper(t *testing.T) {
 	}
 }
 
+// TestHelperBlesser_ReverifiesBeforeExec pins the TOCTOU-closing contract: the
+// signature is re-checked before EACH privileged exec, not only at construction.
+// Here codesign passes at construction (trusted helper) but a same-UID swap makes
+// the next verify fail — the pre-exec re-check must reject PublicKey with
+// ErrHelperUntrusted and must NOT execute the (swapped) helper afterward.
+func TestHelperBlesser_ReverifiesBeforeExec(t *testing.T) {
+	setExpectedTeamID(t, "TEAMTEST")
+	siblingHelper(t)
+
+	var codesignCalls int
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, _ []string) (string, error) {
+			if name == "/usr/bin/codesign" {
+				codesignCalls++
+				if codesignCalls == 1 {
+					return "", nil // construction: helper is trusted
+				}
+				return "", exitErr{1} // post-swap: helper no longer satisfies the requirement
+			}
+			return `{"pubkey":"AAAA"}`, nil // must never be reached after a failed re-verify
+		},
+	}
+
+	hb, err := NewHelperBlesser(context.Background(), fake)
+	if err != nil {
+		t.Fatalf("construction with a trusted helper should succeed: %v", err)
+	}
+
+	// The attacker swaps the sibling; the next privileged exec re-verifies first.
+	if _, err := hb.PublicKey(context.Background(), "l"); !errors.Is(err, ErrHelperUntrusted) {
+		t.Fatalf("PublicKey after swap = %v, want ErrHelperUntrusted", err)
+	}
+	if codesignCalls != 2 {
+		t.Fatalf("codesign ran %d time(s); want 2 (construction + pre-exec re-verify)", codesignCalls)
+	}
+	// The failed re-verify must short-circuit — the swapped helper's pubkey verb
+	// must never be executed, so the last recorded call is the codesign check.
+	if last := fake.Last(); last.Name != "/usr/bin/codesign" {
+		t.Fatalf("after a failed re-verify the last call was %q; the swapped helper must not run", last.Name)
+	}
+}
+
 func TestHelperBlesser_SignContract(t *testing.T) {
 	signer := genKey(t)
 	var digest [32]byte
