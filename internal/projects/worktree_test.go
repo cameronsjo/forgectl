@@ -168,6 +168,29 @@ func TestWorktree_DefaultBranchFallback(t *testing.T) {
 	}
 }
 
+func TestWorktree_DefaultBranchUnknownFallsBackToMain(t *testing.T) {
+	tmp := t.TempDir()
+	// git prints "HEAD branch: (unknown)" for a headless remote — it must be
+	// treated as absent, NOT used verbatim as a branch name.
+	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("(unknown)", false)}
+	c := &Client{Dir: tmp, run: fake}
+
+	if _, err := c.Worktree(context.Background(), Repo{
+		Host: "github", Owner: "cameronsjo", Name: "forgectl",
+	}, ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	base := canonicalDest(tmp, "github", "cameronsjo", "forgectl")
+	wantDir := filepath.Join(base, "main")
+	if !hasCall(fake.Calls, "git", "worktree add "+wantDir+" main") {
+		t.Errorf("expected (unknown) HEAD to fall back to main, calls: %+v", fake.Calls)
+	}
+	if hasCall(fake.Calls, "git", "worktree add "+filepath.Join(base, "(unknown)")) {
+		t.Error("(unknown) must never be used as a branch name")
+	}
+}
+
 func TestWorktree_WorktreeAddFallback(t *testing.T) {
 	tmp := t.TempDir()
 	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("", true)} // first add fails

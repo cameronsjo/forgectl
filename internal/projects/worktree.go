@@ -100,8 +100,8 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 
 // defaultBranch resolves the remote's default branch by parsing the
 // `HEAD branch:` line of `git remote show origin`, falling back to "main" when
-// the command fails or the line is absent (a bare repo just cloned from a
-// non-standard remote).
+// the command fails, the line is absent, or the remote HEAD is "(unknown)" (a
+// bare repo just cloned from a non-standard or headless remote).
 func defaultBranch(ctx context.Context, run interface {
 	Run(context.Context, string, ...string) (string, error)
 }, bareDir string) string {
@@ -110,7 +110,9 @@ func defaultBranch(ctx context.Context, run interface {
 		for _, line := range strings.Split(out, "\n") {
 			line = strings.TrimSpace(line)
 			if rest, ok := strings.CutPrefix(line, "HEAD branch:"); ok {
-				if b := strings.TrimSpace(rest); b != "" {
+				// git prints "HEAD branch: (unknown)" when the remote has no
+				// default branch set — treat it as absent and fall back to "main".
+				if b := strings.TrimSpace(rest); b != "" && b != "(unknown)" {
 					return b
 				}
 			}
