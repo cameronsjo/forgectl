@@ -203,6 +203,35 @@ func TestClone_DispatchesByHost(t *testing.T) {
 	})
 }
 
+// TestListOrg_RejectsUnsafeLogin guards the caller-supplied `--org` value: an
+// empty, traversal, or leading-'-' login must be refused before it becomes a
+// `gh` argv (a '-'-leading value would be read as a flag, not a positional).
+func TestListOrg_RejectsUnsafeLogin(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	c := &Client{Dir: t.TempDir(), run: fake}
+	for _, org := range []string{"", ".", "..", "a/b", "-x", "--all"} {
+		if _, err := c.ListOrg(context.Background(), org); err == nil {
+			t.Errorf("ListOrg(%q) should reject an unsafe login, got nil", org)
+		}
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("no gh command should run for an unsafe login; calls: %+v", fake.Calls)
+	}
+}
+
+func TestListOrg_ValidLoginLists(t *testing.T) {
+	out := `[{"isPrivate":false,"name":"claude-code","sshUrl":"git@github.com:anthropics/claude-code.git"}]`
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) { return out, nil }}
+	c := &Client{Dir: t.TempDir(), run: fake}
+	repos, err := c.ListOrg(context.Background(), "anthropics")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(repos) != 1 || repos[0].Owner != "anthropics" {
+		t.Errorf("ListOrg = %+v; want one repo owned by anthropics", repos)
+	}
+}
+
 func TestClone_RejectsUnsafeName(t *testing.T) {
 	tmp := t.TempDir()
 	fake := &exec.FakeRunner{}
@@ -423,7 +452,7 @@ func TestCanonicalDest_LowercasesAndMirrorsKey(t *testing.T) {
 // companion to TestClone_RejectsUnsafeHostOrOwner — asserts the guard
 // directly rather than only through Clone's side effects.
 func TestValidPathSegment_RejectsTraversalAndSeparators(t *testing.T) {
-	bad := []string{"", ".", "..", "../escape", "a/b", `a\b`}
+	bad := []string{"", ".", "..", "../escape", "a/b", `a\b`, "-flag", "--org"}
 	for _, s := range bad {
 		if validPathSegment(s) {
 			t.Errorf("validPathSegment(%q) = true, want false", s)
