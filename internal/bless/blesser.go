@@ -56,7 +56,33 @@ var (
 	// is exactly how an agent gets its own key anointed as the anchor during
 	// bootstrap, so this must abort trust init and blessing — never be reused.
 	ErrKeyNotPresenceGated = errors.New("key is not presence-gated and may have been planted")
+	// ErrHelperUntrusted: the sibling helper failed the compiled-in Developer-ID
+	// codesign requirement (see ExpectedTeamID). It exists but is not the binary
+	// this release signed — a swapped or tampered helper — so refuse to drive it.
+	ErrHelperUntrusted = errors.New("blessing helper failed the Developer-ID trust check")
 )
+
+// ExpectedTeamID is the Apple Developer Team ID the sibling helper's Developer-ID
+// signature must chain to. When non-empty, the helper's signature is checked
+// (verifyTrust) against a requirement pinned to this Team ID — at construction AND
+// immediately before every privileged exec — and any failure is fatal
+// (ErrHelperUntrusted). That closes the swap-the-helper hole the sibling-lookup
+// guard alone cannot: a same-UID agent can drop a decoy at the sibling path, but
+// cannot forge a Developer-ID signature chaining to this Team ID. Re-checking
+// before each exec (not only at construction) closes the TOCTOU window — a swap
+// after construction is caught before the swapped binary is ever run.
+//
+// It ships DELIBERATELY empty in every build today, which disables the gate — an
+// unsigned or ad-hoc helper is the norm in dev and source builds, and no signed
+// release exists yet. This is scaffolding awaiting arming, not a live control.
+// Arming is a separate, owner-gated follow-up (forgectl#90): a build-time
+// `-ldflags -X …internal/bless.ExpectedTeamID=<team>` injection on the darwin
+// build, landed ONLY after a signed release is cut and the exact codesign
+// requirement is verified on-device (validate-before-apply). The order is
+// load-bearing — a wrong requirement string fail-closed-bricks blessing for every
+// user — so the gate stays dormant until its requirement is proven against a real
+// signed artifact.
+var ExpectedTeamID = ""
 
 // HelperBlesser drives forgectl-bless-helper over the exec.Runner seam. The
 // helper does the actual Secure Enclave work; this side only frames the argv,
@@ -107,7 +133,7 @@ var resolveSelf = func() (string, error) {
 // key. The env var would buy a dev seam that the build already provides — the
 // verification scripts build forgectl and the helper into one directory as
 // siblings — at the cost of the entire threat model.
-func NewHelperBlesser(run exec.Runner) (*HelperBlesser, error) {
+func NewHelperBlesser(ctx context.Context, run exec.Runner) (*HelperBlesser, error) {
 	self, err := resolveSelf()
 	if err != nil {
 		return nil, fmt.Errorf("%w: locate own executable: %v", ErrNoBlesser, err)
@@ -116,7 +142,37 @@ func NewHelperBlesser(run exec.Runner) (*HelperBlesser, error) {
 	if _, err := os.Stat(path); err != nil {
 		return nil, fmt.Errorf("%w: %s: %v", ErrNoBlesser, path, err)
 	}
-	return &HelperBlesser{run: run, path: path}, nil
+	h := &HelperBlesser{run: run, path: path}
+	// Fail fast if the helper is already untrusted at construction. The same check
+	// re-runs before every privileged exec (verifyTrust), so this is defence in
+	// depth, not the sole gate — a swap AFTER construction is caught there.
+	if err := h.verifyTrust(ctx); err != nil {
+		return nil, err
+	}
+	return h, nil
+}
+
+// verifyTrust runs the Developer-ID codesign requirement against the resolved
+// helper path. It is a no-op when the gate is dormant (ExpectedTeamID == ""), and
+// it is called both at construction AND immediately before EVERY privileged helper
+// exec (Enroll/PublicKey/Sign). Re-checking the sibling path each time is what
+// closes the TOCTOU window: a same-UID agent that swaps the helper binary after
+// construction is caught before the swapped binary is ever executed, not merely at
+// first load (macOS does not re-enforce the OU==TeamID requirement at execve).
+// codesign re-reads the file from disk on each call, so the check reflects the
+// bytes that are about to run.
+func (h *HelperBlesser) verifyTrust(ctx context.Context) error {
+	if ExpectedTeamID == "" {
+		return nil
+	}
+	// ExpectedTeamID is a build-injected Apple Team ID ([A-Z0-9]{10}), so %q's
+	// Go-string quoting yields exactly the codesign requirement literal — no
+	// escaping surprises for this input class.
+	req := fmt.Sprintf("anchor apple generic and certificate leaf[subject.OU] = %q", ExpectedTeamID)
+	if _, err := h.run.Run(ctx, "/usr/bin/codesign", "--verify", "--strict", "-R", req, h.path); err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrHelperUntrusted, h.path, err)
+	}
+	return nil
 }
 
 // pubkeyReply and signatureReply are the frozen JSON shapes the helper emits.
@@ -133,6 +189,9 @@ type (
 
 // Enroll mints a new presence-gated key labelled label and returns its PKIX DER.
 func (h *HelperBlesser) Enroll(ctx context.Context, label string) ([]byte, error) {
+	if err := h.verifyTrust(ctx); err != nil {
+		return nil, err
+	}
 	out, err := h.run.Run(ctx, h.path, "enroll", "--label", label)
 	if err != nil {
 		return nil, mapHelperError(err)
@@ -142,6 +201,9 @@ func (h *HelperBlesser) Enroll(ctx context.Context, label string) ([]byte, error
 
 // PublicKey returns the PKIX DER of the existing key labelled label.
 func (h *HelperBlesser) PublicKey(ctx context.Context, label string) ([]byte, error) {
+	if err := h.verifyTrust(ctx); err != nil {
+		return nil, err
+	}
 	out, err := h.run.Run(ctx, h.path, "pubkey", "--label", label)
 	if err != nil {
 		return nil, mapHelperError(err)
@@ -153,6 +215,9 @@ func (h *HelperBlesser) PublicKey(ctx context.Context, label string) ([]byte, er
 // the frozen contract) to the helper and returns the ASN.1/DER ECDSA signature.
 // This is the call that triggers the Touch ID prompt.
 func (h *HelperBlesser) Sign(ctx context.Context, label string, digest [32]byte) ([]byte, error) {
+	if err := h.verifyTrust(ctx); err != nil {
+		return nil, err
+	}
 	stdin := base64.StdEncoding.EncodeToString(digest[:]) + "\n"
 	out, err := h.run.RunWithInput(ctx, stdin, h.path, "sign", "--label", label)
 	if err != nil {

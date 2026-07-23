@@ -38,7 +38,7 @@ func siblingHelper(t *testing.T) string {
 func fakeHelper(t *testing.T, run exec.Runner) *HelperBlesser {
 	t.Helper()
 	p := siblingHelper(t)
-	hb, err := NewHelperBlesser(run)
+	hb, err := NewHelperBlesser(context.Background(), run)
 	if err != nil {
 		t.Fatalf("NewHelperBlesser: %v", err)
 	}
@@ -51,7 +51,7 @@ func fakeHelper(t *testing.T, run exec.Runner) *HelperBlesser {
 func TestNewHelperBlesser_MissingHelper(t *testing.T) {
 	// A temp dir with NO helper beside the executable.
 	stubSelf(t, filepath.Join(t.TempDir(), "forgectl"))
-	if _, err := NewHelperBlesser(&exec.FakeRunner{}); !errors.Is(err, ErrNoBlesser) {
+	if _, err := NewHelperBlesser(context.Background(), &exec.FakeRunner{}); !errors.Is(err, ErrNoBlesser) {
 		t.Fatalf("NewHelperBlesser = %v, want ErrNoBlesser", err)
 	}
 }
@@ -78,7 +78,7 @@ func TestNewHelperBlesser_EnvVarCannotRedirectHelper(t *testing.T) {
 	// The real helper, beside the running binary.
 	want := siblingHelper(t)
 
-	hb, err := NewHelperBlesser(&exec.FakeRunner{})
+	hb, err := NewHelperBlesser(context.Background(), &exec.FakeRunner{})
 	if err != nil {
 		t.Fatalf("NewHelperBlesser: %v", err)
 	}
@@ -87,6 +87,118 @@ func TestNewHelperBlesser_EnvVarCannotRedirectHelper(t *testing.T) {
 	}
 	if hb.path != want {
 		t.Fatalf("helper path = %q, want the executable's sibling %q", hb.path, want)
+	}
+}
+
+// setExpectedTeamID pins the Developer-ID trust gate to id for the test's
+// lifetime and restores the prior value after. An empty id keeps the gate dormant
+// — the dev/source-build default.
+func setExpectedTeamID(t *testing.T, id string) {
+	t.Helper()
+	prev := ExpectedTeamID
+	ExpectedTeamID = id
+	t.Cleanup(func() { ExpectedTeamID = prev })
+}
+
+// TestNewHelperBlesser_GateDormantWhenTeamIDEmpty pins the no-op contract: with
+// ExpectedTeamID empty (dev/source builds), constructing a HelperBlesser must NOT
+// shell out to codesign at all. The gate is a genuine absence, not a verify that
+// happens to pass.
+func TestNewHelperBlesser_GateDormantWhenTeamIDEmpty(t *testing.T) {
+	siblingHelper(t)
+	fake := &exec.FakeRunner{}
+	if _, err := NewHelperBlesser(context.Background(), fake); err != nil {
+		t.Fatalf("NewHelperBlesser: %v", err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("gate ran %d command(s) with ExpectedTeamID empty, want 0: %+v", len(fake.Calls), fake.Calls)
+	}
+}
+
+// TestNewHelperBlesser_GateVerifiesWhenArmed pins the fail-closed contract: with a
+// Team ID set, construction issues `codesign --verify --strict` against a
+// requirement pinned to that Team ID, and a codesign failure surfaces as
+// ErrHelperUntrusted — the helper exists but is not the release-signed binary.
+func TestNewHelperBlesser_GateVerifiesWhenArmed(t *testing.T) {
+	setExpectedTeamID(t, "TEAMTEST")
+	p := siblingHelper(t)
+	fake := &exec.FakeRunner{
+		RunFunc: func(_ string, _ []string) (string, error) { return "", exitErr{1} },
+	}
+
+	_, err := NewHelperBlesser(context.Background(), fake)
+	if !errors.Is(err, ErrHelperUntrusted) {
+		t.Fatalf("NewHelperBlesser = %v, want ErrHelperUntrusted", err)
+	}
+
+	call := fake.Last()
+	if call.Name != "/usr/bin/codesign" {
+		t.Fatalf("gate ran %q, want /usr/bin/codesign", call.Name)
+	}
+	wantReq := `anchor apple generic and certificate leaf[subject.OU] = "TEAMTEST"`
+	wantArgs := []string{"--verify", "--strict", "-R", wantReq, p}
+	if !equalStrings(call.Args, wantArgs) {
+		t.Fatalf("gate argv = %v, want %v", call.Args, wantArgs)
+	}
+}
+
+// TestNewHelperBlesser_GateAcceptsSignedHelper pins the pass path: an armed gate
+// whose codesign check succeeds returns a usable blesser and no error.
+func TestNewHelperBlesser_GateAcceptsSignedHelper(t *testing.T) {
+	setExpectedTeamID(t, "TEAMTEST")
+	p := siblingHelper(t)
+	fake := &exec.FakeRunner{
+		RunFunc: func(_ string, _ []string) (string, error) { return "", nil },
+	}
+
+	hb, err := NewHelperBlesser(context.Background(), fake)
+	if err != nil {
+		t.Fatalf("NewHelperBlesser: %v", err)
+	}
+	if hb.path != p {
+		t.Fatalf("helper path = %q, want %q", hb.path, p)
+	}
+}
+
+// TestHelperBlesser_ReverifiesBeforeExec pins the TOCTOU-closing contract: the
+// signature is re-checked before EACH privileged exec, not only at construction.
+// Here codesign passes at construction (trusted helper) but a same-UID swap makes
+// the next verify fail — the pre-exec re-check must reject PublicKey with
+// ErrHelperUntrusted and must NOT execute the (swapped) helper afterward.
+func TestHelperBlesser_ReverifiesBeforeExec(t *testing.T) {
+	setExpectedTeamID(t, "TEAMTEST")
+	siblingHelper(t)
+
+	var codesignCalls int
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, _ []string) (string, error) {
+			if name == "/usr/bin/codesign" {
+				codesignCalls++
+				if codesignCalls == 1 {
+					return "", nil // construction: helper is trusted
+				}
+				return "", exitErr{1} // post-swap: helper no longer satisfies the requirement
+			}
+			return `{"pubkey":"AAAA"}`, nil // must never be reached after a failed re-verify
+		},
+	}
+
+	hb, err := NewHelperBlesser(context.Background(), fake)
+	if err != nil {
+		t.Fatalf("construction with a trusted helper should succeed: %v", err)
+	}
+
+	// The attacker swaps the sibling; the next privileged exec re-verifies first.
+	if _, err := hb.PublicKey(context.Background(), "l"); !errors.Is(err, ErrHelperUntrusted) {
+		t.Fatalf("PublicKey after swap = %v, want ErrHelperUntrusted", err)
+	}
+	if codesignCalls != 2 {
+		t.Fatalf("codesign ran %d time(s); want 2 (construction + pre-exec re-verify)", codesignCalls)
+	}
+	// The failed re-verify must short-circuit — the swapped helper's pubkey verb
+	// must never be executed, so the last recorded call is the codesign check.
+	if last := fake.Last(); last.Name != "/usr/bin/codesign" {
+		t.Fatalf("after a failed re-verify the last call was %q; the swapped helper must not run", last.Name)
 	}
 }
 

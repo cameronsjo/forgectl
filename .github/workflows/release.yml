@@ -13,6 +13,13 @@ jobs:
     runs-on: macos-latest
     permissions:
       contents: write
+    env:
+      # HAS_CERT selects Developer-ID signing over the ad-hoc fallback across the
+      # job. It is derived from a secret (secrets aren't usable directly in a step
+      # `if:`) and hoisted to JOB level so both the import step's `if:` and the
+      # build step's `run:` read one source — no duplicated expression, and the
+      # whole pipeline stays DORMANT until APPLE_CERTIFICATE_P12 is set.
+      HAS_CERT: ${{ secrets.APPLE_CERTIFICATE_P12 != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -23,6 +30,39 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25'
+
+      # Import the Developer-ID signing certificate into an ephemeral keychain so
+      # the helper and the darwin binaries can be Developer-ID signed. Gated on the
+      # job-level HAS_CERT, so the whole pipeline stays DORMANT until
+      # APPLE_CERTIFICATE_P12 is set: no cert, no import, and the build below falls
+      # back to an ad-hoc signature. Lifted from cameronsjo/minute's release
+      # workflow (a signed+notarized mac app) so the secret names match 1:1.
+      - name: Import signing certificate
+        if: env.HAS_CERT == 'true'
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # errexit so a failed `security import` fails the step — without it the
+          # trailing `rm -f` (always exit 0) would mask the failure and the build
+          # would go green, then codesign later against an un-imported identity.
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "$(security list-keychains -d user | tr -d '"')"
+
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          rm -f "$RUNNER_TEMP/certificate.p12"
 
       # The helper reports the release version from its own `version` verb, so
       # stamp it from the tag before compiling. Mirrors the -X ldflags the Go
@@ -49,7 +89,15 @@ jobs:
           set -euo pipefail
           swift build -c release --arch arm64 --arch x86_64
           BIN="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/forgectl-bless-helper"
-          codesign -s - -f "$BIN"
+          # A Secure Enclave key needs *a* stable signature to bind to this binary.
+          # With a cert present, use the real Developer-ID identity (hardened
+          # runtime + secure timestamp) so Gatekeeper accepts it; otherwise keep
+          # the ad-hoc signature that still satisfies the Secure Enclave.
+          if [ "$HAS_CERT" = "true" ]; then
+            codesign --sign "Developer ID Application" --options runtime --timestamp --force "$BIN"
+          else
+            codesign -s - -f "$BIN"
+          fi
           mkdir -p "$GITHUB_WORKSPACE/dist-helper"
           cp "$BIN" "$GITHUB_WORKSPACE/dist-helper/forgectl-bless-helper"
           # Fail the release rather than quietly shipping a single-arch helper
@@ -87,3 +135,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # App-minted, tap-scoped, short-lived — read by the homebrew_casks block.
           HOMEBREW_TAP_TOKEN: ${{ steps.tap-token.outputs.token }}
+          # Arms the darwin build's post-hook codesign. A SECRET (following
+          # cameronsjo/minute), empty until set, so the hook is a no-op until then.
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
