@@ -161,7 +161,13 @@ func locateViaInstalledPlugins(homeDir string) (path string, ok bool) {
 			continue
 		}
 		for _, r := range records {
-			if r.InstallPath == "" {
+			// installed_plugins.json is Claude Code's own file (already
+			// inside the locally-trusted ~/.claude tree), so this isn't a
+			// hostile-input boundary — but a well-formed installPath is
+			// always absolute, so a relative or empty one is a corrupt
+			// record, not a plugin location, and joining it verbatim would
+			// resolve relative to the process cwd instead.
+			if r.InstallPath == "" || !filepath.IsAbs(r.InstallPath) {
 				continue
 			}
 			if bestPath == "" || r.LastUpdated > bestWhen {

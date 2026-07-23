@@ -1,6 +1,10 @@
 package preflight
 
-import "sort"
+import (
+	"encoding/json"
+	"sort"
+	"strings"
+)
 
 // ChangeSet is the diff between a project's current effective enabledPlugins
 // and Cut A's computed target: the plugins to enable and the plugins to
@@ -57,4 +61,44 @@ func Target(catalogCore, committedProject map[string]bool) map[string]bool {
 		target[k] = v
 	}
 	return target
+}
+
+// FilterMarketplaces computes the extraKnownMarketplaces entries --apply may
+// safely write: for every plugin key in target with want=true, its
+// marketplace name (everything after "@") is looked up in trusted — the
+// caller's user/local-scope marketplace registry (see TrustedMarketplaces),
+// the ONLY legitimate provenance for a marketplace SOURCE (a github repo, a
+// local directory, …). Target's fold-in can pull in a plugin@marketplace
+// from a project's own committed .claude/settings.json (locked decision 2 —
+// "the repo baseline survives by inclusion"), but that fold-in must never be
+// able to inject the marketplace SOURCE that plugin resolves against: a
+// plugin can't load without a known marketplace, so smuggling in a
+// trusted-looking marketplace definition via a cloned repo's committed
+// settings.json is the actual attack surface, not the plugin name itself.
+//
+// A target plugin whose marketplace has no trusted registration is returned
+// in unregistered (sorted) instead of marketplaces — its enabledPlugins
+// entry still rides Target's fold-in, but preflight writes nothing for its
+// marketplace, so it stays invisible to nobody: the CLI surfaces
+// unregistered explicitly, and Claude Code's own install/marketplace-trust
+// gate keeps the plugin from loading until a human registers that
+// marketplace themselves.
+func FilterMarketplaces(target map[string]bool, trusted map[string]json.RawMessage) (marketplaces map[string]json.RawMessage, unregistered []string) {
+	marketplaces = map[string]json.RawMessage{}
+	for key, want := range target {
+		if !want {
+			continue
+		}
+		_, name, ok := strings.Cut(key, "@")
+		if !ok || name == "" {
+			continue
+		}
+		if src, known := trusted[name]; known {
+			marketplaces[name] = src
+		} else {
+			unregistered = append(unregistered, key)
+		}
+	}
+	sort.Strings(unregistered)
+	return marketplaces, unregistered
 }

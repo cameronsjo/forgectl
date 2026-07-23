@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 
 	"github.com/spf13/cobra"
 
@@ -60,9 +61,20 @@ scope's enabledPlugins is the whole answer, never merged with a lower one).
                                   set to .claude/settings.local.json
   forgectl preflight --json      machine-readable report for scripting
 
+WARNING: --apply writes the COMPLETE aligned set, not a delta — any
+plugin you currently have enabled that is neither catalog-core-tier NOR
+named in this project's own committed .claude/settings.json gets DISABLED
+for this project. On a project with no committed enabledPlugins at all,
+that means every plugin outside the catalog's core tier.
+
 preflight's only write target is .claude/settings.local.json — the
 personal, auto-gitignored override scope. The committed .claude/settings.json
-is read-only input, never touched.
+is read-only input, never touched. Marketplace SOURCES (extraKnownMarketplaces)
+written on --apply come ONLY from your own user/local settings — never from
+a project's committed file, so a cloned repo can enable a plugin name but
+can never register a marketplace on your behalf; an enabled plugin whose
+marketplace isn't already registered by you is reported, not silently
+skipped or silently trusted.
 
 Exit codes: 0 aligned (or --apply just made it so), 1 misaligned (dry-run
 only), 2 error.`,
@@ -114,14 +126,16 @@ only), 2 error.`,
 }
 
 // preflightReport bundles computePreflightReport's result: the located
-// catalog, the current/target enabledPlugins sets, the marketplaces to
-// carry forward on --apply, and the computed change-set.
+// catalog, the current/target enabledPlugins sets, the trust-filtered
+// marketplaces --apply will write, any target plugin whose marketplace has
+// no trusted registration, and the computed change-set.
 type preflightReport struct {
-	CatalogPath  string
-	Current      map[string]bool
-	Target       map[string]bool
-	Marketplaces map[string]json.RawMessage
-	ChangeSet    preflightpkg.ChangeSet
+	CatalogPath             string
+	Current                 map[string]bool
+	Target                  map[string]bool
+	Marketplaces            map[string]json.RawMessage
+	UnregisteredMarketplace []string
+	ChangeSet               preflightpkg.ChangeSet
 }
 
 // computePreflightReport runs the full scan: locate + parse the catalog,
@@ -156,21 +170,44 @@ func computePreflightReport(homeDir, projectDir string, cfg config.PreflightConf
 
 	current := preflightpkg.EffectiveEnabled(userDoc, projectDoc, localDoc)
 	target := preflightpkg.Target(core, projectDoc.EnabledPlugins)
-	marketplaces := preflightpkg.EffectiveMarketplaces(userDoc, projectDoc, localDoc)
+
+	// Marketplace SOURCES draw ONLY from user/local scope — never project.
+	// A cloned repo's committed .claude/settings.json can fold a plugin
+	// name into target above (locked decision 2), but it must never be
+	// able to smuggle in the marketplace SOURCE that plugin resolves
+	// against. See FilterMarketplaces/TrustedMarketplaces.
+	trusted := preflightpkg.TrustedMarketplaces(userDoc, localDoc)
+	marketplaces, unregistered := preflightpkg.FilterMarketplaces(target, trusted)
 
 	return preflightReport{
-		CatalogPath:  catalogPath,
-		Current:      current,
-		Target:       target,
-		Marketplaces: marketplaces,
-		ChangeSet:    preflightpkg.Diff(current, target),
+		CatalogPath:             catalogPath,
+		Current:                 current,
+		Target:                  target,
+		Marketplaces:            marketplaces,
+		UnregisteredMarketplace: unregistered,
+		ChangeSet:               preflightpkg.Diff(current, target),
 	}, nil
 }
 
-// printPreflightReport writes the human-readable report.
+// sortedMarketplaceNames returns m's keys sorted — the shared rendering
+// helper for both the human and --json report of what --apply will write to
+// extraKnownMarketplaces.
+func sortedMarketplaceNames(m map[string]json.RawMessage) []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// printPreflightReport writes the human-readable report. Marketplace
+// changes are always shown when present — even when enabledPlugins is
+// already aligned — because nothing about extraKnownMarketplaces may change
+// silently on --apply (the security fix this report format exists for).
 func printPreflightReport(out io.Writer, r preflightReport) {
 	fmt.Fprintf(out, "catalog: %s\n", r.CatalogPath)
-	if r.ChangeSet.Aligned() {
+	if r.ChangeSet.Aligned() && len(r.UnregisteredMarketplace) == 0 {
 		fmt.Fprintln(out, "aligned — no changes needed")
 		return
 	}
@@ -186,16 +223,30 @@ func printPreflightReport(out io.Writer, r preflightReport) {
 			fmt.Fprintf(out, "  - %s\n", p)
 		}
 	}
+	if len(r.Marketplaces) > 0 {
+		fmt.Fprintln(out, "marketplaces (written on --apply, from your own user/local settings):")
+		for _, name := range sortedMarketplaceNames(r.Marketplaces) {
+			fmt.Fprintf(out, "  %s\n", name)
+		}
+	}
+	if len(r.UnregisteredMarketplace) > 0 {
+		fmt.Fprintln(out, "enabled but marketplace unregistered — will not load until you register it yourself:")
+		for _, p := range r.UnregisteredMarketplace {
+			fmt.Fprintf(out, "  ! %s\n", p)
+		}
+	}
 }
 
-// preflightJSON is the --json wire shape for `preflight`. Enable/Disable
-// arrays are never null (checked below), matching the `env check --json`
-// empty-[] convention.
+// preflightJSON is the --json wire shape for `preflight`. Every array is
+// never null (checked below), matching the `env check --json` empty-[]
+// convention.
 type preflightJSON struct {
-	CatalogPath string   `json:"catalogPath"`
-	Aligned     bool     `json:"aligned"`
-	Enable      []string `json:"enable"`
-	Disable     []string `json:"disable"`
+	CatalogPath             string   `json:"catalogPath"`
+	Aligned                 bool     `json:"aligned"`
+	Enable                  []string `json:"enable"`
+	Disable                 []string `json:"disable"`
+	Marketplaces            []string `json:"marketplaces"`            // marketplace names --apply will write, sourced only from user/local settings
+	UnregisteredMarketplace []string `json:"unregisteredMarketplace"` // "plugin@marketplace" enabled but skipped — no trusted marketplace registration
 }
 
 // writePreflightJSON encodes r as preflightJSON to out.
@@ -207,12 +258,18 @@ func writePreflightJSON(out io.Writer, r preflightReport) error {
 	if disable == nil {
 		disable = []string{}
 	}
+	unregistered := r.UnregisteredMarketplace
+	if unregistered == nil {
+		unregistered = []string{}
+	}
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(preflightJSON{
-		CatalogPath: r.CatalogPath,
-		Aligned:     r.ChangeSet.Aligned(),
-		Enable:      enable,
-		Disable:     disable,
+		CatalogPath:             r.CatalogPath,
+		Aligned:                 r.ChangeSet.Aligned(),
+		Enable:                  enable,
+		Disable:                 disable,
+		Marketplaces:            sortedMarketplaceNames(r.Marketplaces),
+		UnregisteredMarketplace: unregistered,
 	})
 }

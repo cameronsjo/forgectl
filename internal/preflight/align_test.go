@@ -13,8 +13,15 @@ package preflight
 //   [x] Happy: committed project entries fold in alongside catalog core
 //   [x] Happy: a committed entry OVERRIDES the catalog default for the same key
 //   [x] Happy: nil committedProject leaves the catalog core set untouched
+//
+// FilterMarketplaces (Classification: pure — the marketplace-injection fix)
+//   [x] Happy: a target plugin whose marketplace IS trusted → its source lands in marketplaces
+//   [x] Sad: a target plugin whose marketplace is NOT trusted → key lands in unregistered, nothing written
+//   [x] Edge: a target key false is skipped entirely (not enabled, not unregistered)
+//   [x] Edge: two target plugins sharing one trusted marketplace both resolve, one entry
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 )
@@ -93,5 +100,54 @@ func TestTarget_NilCommittedLeavesCoreUntouched(t *testing.T) {
 	want := map[string]bool{"cadence@workbench": true}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Target() = %v, want %v", got, want)
+	}
+}
+
+func TestFilterMarketplaces_TrustedResolves(t *testing.T) {
+	target := map[string]bool{"cadence@workbench": true}
+	trusted := map[string]json.RawMessage{"workbench": json.RawMessage(`{"source":"github"}`)}
+
+	marketplaces, unregistered := FilterMarketplaces(target, trusted)
+	if len(unregistered) != 0 {
+		t.Errorf("unregistered = %v, want none", unregistered)
+	}
+	if _, ok := marketplaces["workbench"]; !ok {
+		t.Errorf("marketplaces = %v, want workbench present", marketplaces)
+	}
+}
+
+func TestFilterMarketplaces_UntrustedIsUnregistered(t *testing.T) {
+	target := map[string]bool{"evilplugin@evil-marketplace": true}
+	trusted := map[string]json.RawMessage{"workbench": json.RawMessage(`{}`)}
+
+	marketplaces, unregistered := FilterMarketplaces(target, trusted)
+	if len(marketplaces) != 0 {
+		t.Errorf("marketplaces = %v, want none written for an untrusted marketplace", marketplaces)
+	}
+	if !reflect.DeepEqual(unregistered, []string{"evilplugin@evil-marketplace"}) {
+		t.Errorf("unregistered = %v, want [evilplugin@evil-marketplace]", unregistered)
+	}
+}
+
+func TestFilterMarketplaces_FalseTargetSkipped(t *testing.T) {
+	target := map[string]bool{"cadence@workbench": false}
+	trusted := map[string]json.RawMessage{}
+
+	marketplaces, unregistered := FilterMarketplaces(target, trusted)
+	if len(marketplaces) != 0 || len(unregistered) != 0 {
+		t.Errorf("marketplaces=%v unregistered=%v, want both empty for a false target entry", marketplaces, unregistered)
+	}
+}
+
+func TestFilterMarketplaces_SharedMarketplaceOneEntry(t *testing.T) {
+	target := map[string]bool{"cadence@workbench": true, "cadence-voice@workbench": true}
+	trusted := map[string]json.RawMessage{"workbench": json.RawMessage(`{"source":"github"}`)}
+
+	marketplaces, unregistered := FilterMarketplaces(target, trusted)
+	if len(unregistered) != 0 {
+		t.Errorf("unregistered = %v, want none", unregistered)
+	}
+	if len(marketplaces) != 1 {
+		t.Errorf("marketplaces = %v, want exactly one entry (workbench, shared by both plugins)", marketplaces)
 	}
 }

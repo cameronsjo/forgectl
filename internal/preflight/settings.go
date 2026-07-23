@@ -78,9 +78,32 @@ func EffectiveEnabled(user, project, local Document) map[string]bool {
 	return map[string]bool{}
 }
 
-// EffectiveMarketplaces mirrors EffectiveEnabled for extraKnownMarketplaces.
+// EffectiveMarketplaces mirrors EffectiveEnabled for extraKnownMarketplaces —
+// the CURRENTLY effective registry across all three scopes, replace-not-merge.
+// Read-only / reporting use only: it includes PROJECT scope, so it must NEVER
+// be used to compute what --apply writes. See TrustedMarketplaces, which
+// deliberately excludes project for exactly that reason, and FilterMarketplaces,
+// which applies the resulting trust boundary to a target set.
 func EffectiveMarketplaces(user, project, local Document) map[string]json.RawMessage {
 	for _, doc := range []Document{local, project, user} {
+		if doc.Present && doc.Marketplaces != nil {
+			return doc.Marketplaces
+		}
+	}
+	return map[string]json.RawMessage{}
+}
+
+// TrustedMarketplaces resolves the marketplace SOURCE registry --apply may
+// draw from: local shadows user OUTRIGHT (replace, not merge — mirrors
+// EffectiveEnabled), but PROJECT scope is deliberately excluded. Unlike
+// enabledPlugins (which Target() folds a project's committed choices into,
+// per locked decision 2), a marketplace SOURCE is the actual thing a plugin
+// resolves against — folding a project-committed one in the same way would
+// let a cloned malicious repo's committed .claude/settings.json register an
+// attacker-controlled marketplace into the victim's local settings on a bare
+// --apply. FilterMarketplaces is what applies this registry to a target set.
+func TrustedMarketplaces(user, local Document) map[string]json.RawMessage {
+	for _, doc := range []Document{local, user} {
 		if doc.Present && doc.Marketplaces != nil {
 			return doc.Marketplaces
 		}
@@ -92,12 +115,13 @@ func EffectiveMarketplaces(user, project, local Document) map[string]json.RawMes
 // .claude/settings.local.json as a read-modify-write: every other top-level
 // key already on disk (permissions, hooks, a human's other local overrides,
 // …) is preserved untouched — only enabledPlugins and
-// extraKnownMarketplaces are replaced. Mirrors the
-// MkdirAll(0700)/MarshalIndent/WriteFile(0600) idiom internal/pr's
-// writeSettings uses for its own .claude/ write (allowlist.go), but as a
-// merge-preserving RMW rather than a whole-file overwrite — preflight's
-// local settings file is a shared, personal override surface it does not
-// own exclusively. Returns the path written.
+// extraKnownMarketplaces are replaced. The read-modify-write's own directory
+// creation mirrors allowlist.go's writeSettings (MkdirAll(0700)), but the
+// final write goes through writeLocalAtomic (temp file + rename, mirroring
+// internal/env's writeAtomic) rather than a bare os.WriteFile — this file
+// commonly also holds a human's other local overrides, so a crash or a
+// concurrent writer mid-write must never leave it half-written. Returns the
+// path written.
 func WriteLocal(projectDir string, enabled map[string]bool, marketplaces map[string]json.RawMessage) (string, error) {
 	dir := filepath.Join(projectDir, ".claude")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -137,8 +161,48 @@ func WriteLocal(projectDir string, enabled map[string]bool, marketplaces map[str
 	if err != nil {
 		return "", fmt.Errorf("marshal %s: %w", path, err)
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
-		return "", fmt.Errorf("write %s: %w", path, err)
+	if err := writeLocalAtomic(path, append(data, '\n')); err != nil {
+		return "", err
 	}
 	return path, nil
+}
+
+// writeLocalAtomic writes data to path by creating a temp file in the same
+// directory (0600 from creation — os.CreateTemp's own default, no chmod
+// window to close), writing, syncing, closing, then renaming over path. The
+// temp file is removed on any error before that final rename. Mirrors
+// internal/env's writeAtomic; simplified here since WriteLocal's caller
+// doesn't need the "was the prior file's mode loosened" signal env's version
+// tracks.
+func writeLocalAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+
+	tmp, err := os.CreateTemp(dir, ".settings.local-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp file in %s: %w", dir, err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}
+
+	if _, err := tmp.Write(data); err != nil {
+		cleanup()
+		return fmt.Errorf("write %s: %w", filepath.Base(path), err)
+	}
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return fmt.Errorf("sync %s: %w", filepath.Base(path), err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close %s: %w", filepath.Base(path), err)
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename into place %s: %w", filepath.Base(path), err)
+	}
+	return nil
 }

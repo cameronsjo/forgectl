@@ -14,15 +14,24 @@ package preflight
 //   [x] Happy: user is the floor when neither project nor local is present
 //   [x] Edge: none present → empty, non-nil map
 //
+// TrustedMarketplaces (Classification: pure precedence — the marketplace
+// trust boundary; project scope is deliberately EXCLUDED, unlike
+// EffectiveMarketplaces)
+//   [x] Happy: local wins outright over user
+//   [x] Happy: user is the floor when local is absent
+//   [x] Sad: a project-scope-only marketplace is invisible — never returned
+//
 // WriteLocal (Classification: I/O — RMW round-trip)
 //   [x] Happy: fresh file — enabledPlugins + extraKnownMarketplaces land, dir created
 //   [x] Happy: existing file's unrelated keys (permissions) survive untouched
 //   [x] Happy: existing file's OWN enabledPlugins/extraKnownMarketplaces are replaced, not merged
+//   [x] Happy: the write is atomic — no leftover .tmp file after a successful write
 
 import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -122,6 +131,38 @@ func TestEffectiveEnabled_NonePresent(t *testing.T) {
 	}
 }
 
+func TestTrustedMarketplaces_LocalWinsOverUser(t *testing.T) {
+	user := Document{Present: true, Marketplaces: map[string]json.RawMessage{"a": json.RawMessage(`{}`)}}
+	local := Document{Present: true, Marketplaces: map[string]json.RawMessage{"b": json.RawMessage(`{}`)}}
+
+	got := TrustedMarketplaces(user, local)
+	if len(got) != 1 || got["b"] == nil {
+		t.Errorf("TrustedMarketplaces() = %v, want exactly local's set", got)
+	}
+}
+
+func TestTrustedMarketplaces_UserIsTheFloor(t *testing.T) {
+	user := Document{Present: true, Marketplaces: map[string]json.RawMessage{"a": json.RawMessage(`{}`)}}
+
+	got := TrustedMarketplaces(user, Document{})
+	if len(got) != 1 || got["a"] == nil {
+		t.Errorf("TrustedMarketplaces() = %v, want user's set", got)
+	}
+}
+
+func TestTrustedMarketplaces_ProjectScopeIsInvisible(t *testing.T) {
+	// TrustedMarketplaces takes no project argument at all — this test
+	// documents WHY: EffectiveMarketplaces (which does read project) is
+	// read-only/reporting, never a --apply write source. There is nothing
+	// to call here with a project Document; the type signature itself is
+	// the guarantee. Assert the signature's floor: with no user/local
+	// registration, the result is empty, never conjured from elsewhere.
+	got := TrustedMarketplaces(Document{}, Document{})
+	if len(got) != 0 {
+		t.Errorf("TrustedMarketplaces() = %v, want empty when neither user nor local declares one", got)
+	}
+}
+
 func TestWriteLocal_FreshFile(t *testing.T) {
 	dir := t.TempDir()
 	enabled := map[string]bool{"cadence@workbench": true}
@@ -183,5 +224,22 @@ func TestWriteLocal_PreservesUnrelatedKeys(t *testing.T) {
 	}
 	if !doc.EnabledPlugins["cadence@workbench"] {
 		t.Errorf("WriteLocal did not write the new enabledPlugins set: %v", doc.EnabledPlugins)
+	}
+}
+
+func TestWriteLocal_AtomicNoLeftoverTempFile(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := WriteLocal(dir, map[string]bool{"cadence@workbench": true}, nil); err != nil {
+		t.Fatalf("WriteLocal: %v", err)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(dir, ".claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Errorf("leftover temp file after a successful WriteLocal: %s", e.Name())
+		}
 	}
 }
