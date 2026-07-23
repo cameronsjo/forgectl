@@ -44,10 +44,17 @@ func New(run exec.Runner) *Client {
 // otherwise it's treated as a flat project itself, so legacy discovery
 // (including non-git dirs, which still get a zero GitStatus) is unchanged.
 func (c *Client) Discover(ctx context.Context) ([]Project, error) {
-	if _, err := os.Stat(c.Dir); err != nil {
-		return nil, fmt.Errorf("projects directory not found: %s", c.Dir)
+	return c.discoverDir(ctx, c.Dir)
+}
+
+// discoverDir is Discover's dir-parameterized body — PullAll walks a
+// caller-supplied subtree (`pull-all [dir]`) the same way Discover walks
+// c.Dir, so the two share this implementation rather than diverging.
+func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error) {
+	if _, err := os.Stat(dir); err != nil {
+		return nil, fmt.Errorf("projects directory not found: %s", dir)
 	}
-	entries, err := os.ReadDir(c.Dir)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("reading projects directory: %w", err)
 	}
@@ -56,7 +63,7 @@ func (c *Client) Discover(ctx context.Context) ([]Project, error) {
 		if !e.IsDir() {
 			continue
 		}
-		top := filepath.Join(c.Dir, e.Name())
+		top := filepath.Join(dir, e.Name())
 		if isGitRepo(top) {
 			projects = append(projects, c.discoverProject(ctx, e.Name(), top))
 			continue
