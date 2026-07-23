@@ -8,6 +8,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -69,6 +70,10 @@ func checkHearth(ctx context.Context, cfg config.Config, runner exec.Runner, pro
 		c.State = StateNotConfigured
 		c.Reason = "set [bench].hearth_dir or $HEARTH_DIR"
 		return c
+	}
+
+	if pct, ok := hearthDiskPercent(ctx, runner); ok {
+		c.Details = append(c.Details, fmt.Sprintf("disk: %d%%", pct))
 	}
 
 	out, err := runner.Run(ctx, "docker", "compose", "-p", hearthProject, "ps", "--format", "json")
@@ -300,4 +305,39 @@ func firstLine(s string) string {
 		s = s[:i]
 	}
 	return strings.TrimSpace(s)
+}
+
+// dockerDataDir is where colima's Lima VM mounts the Docker data volume —
+// disk pressure there, not the host's, is what starves the hearth stack.
+const dockerDataDir = "/var/lib/docker"
+
+// hearthDiskPercent shells into the hearth VM and reads disk usage for
+// dockerDataDir via `df -Pk`. Any failure — colima unreachable, unexpected
+// output shape — is a silent (0, false): the disk line is best-effort detail,
+// never a reason to fail or degrade the component.
+func hearthDiskPercent(ctx context.Context, runner exec.Runner) (int, bool) {
+	out, err := runner.Run(ctx, "colima", "ssh", "--", "df", "-Pk", dockerDataDir)
+	if err != nil {
+		return 0, false
+	}
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	last := ""
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			last = strings.TrimSpace(lines[i])
+			break
+		}
+	}
+	if last == "" {
+		return 0, false
+	}
+	fields := strings.Fields(last)
+	if len(fields) < 5 {
+		return 0, false
+	}
+	pct, err := strconv.Atoi(strings.TrimSuffix(fields[4], "%"))
+	if err != nil {
+		return 0, false
+	}
+	return pct, true
 }
