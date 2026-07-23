@@ -167,6 +167,43 @@ func parseRemoteURL(raw string) (host, owner, name string) {
 	return canonicalHost(hostname), owner, name
 }
 
+// ParseCloneTarget interprets a `projects clone` positional argument as an
+// explicit clone target — a full git URL or a bare "owner/repo" shorthand —
+// bypassing the inventory/query search entirely (absorbs git-smart-clone's
+// URL-argument mode). Returns ok=false when arg parses as neither, so the
+// caller falls back to the existing query-search behavior.
+//
+// A recognized non-github URL carries the raw arg forward as SSHURL — Clone's
+// default-host branch clones it as a literal URL (cloneFromGitea runs a plain
+// `git clone`, not a Gitea-specific one, despite the name), so an https URL
+// works there too, not just ssh.
+func ParseCloneTarget(arg string) (Repo, bool) {
+	if host, owner, name := parseRemoteURL(arg); name != "" {
+		r := Repo{Host: host, Owner: owner, Name: name}
+		if host != "github" {
+			r.SSHURL = arg
+		}
+		return r, true
+	}
+	if owner, name, ok := splitOwnerRepo(arg); ok {
+		return Repo{Host: "github", Owner: owner, Name: name}, true
+	}
+	return Repo{}, false
+}
+
+// splitOwnerRepo splits a bare "owner/repo" shorthand (no scheme, no host) —
+// the shorthand for a GitHub clone, e.g. `projects clone anthropics/claude-code`.
+func splitOwnerRepo(s string) (owner, name string, ok bool) {
+	if strings.Count(s, "/") != 1 {
+		return "", "", false
+	}
+	owner, name, _ = strings.Cut(s, "/")
+	if !validPathSegment(owner) || !validPathSegment(name) {
+		return "", "", false
+	}
+	return owner, name, true
+}
+
 // canonicalHost maps a remote hostname to the inventory's short host token.
 func canonicalHost(hostname string) string {
 	switch {

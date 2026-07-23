@@ -9,6 +9,11 @@ package cli
 //   [x] Unhappy: no match anywhere for the query returns an error
 //   [x] Unhappy: empty inventory (no local/GitHub/Gitea repos at all) returns an error
 //   [x] Happy: degradation notes from Inventory appear on stderr, not stdout
+//   [x] Happy: an owner/repo-shaped arg clones directly, bypassing Inventory
+//   [x] Happy: --org bulk-clones every repo the org listing returns
+//   [x] Unhappy: --org combined with a query argument is rejected
+//   [x] Unhappy: --org listing failure propagates
+//   [x] Unhappy: --org with no repos returns an error
 //
 // pickRepo-driven paths (no args, or a query with multiple matches) are not
 // unit-tested here: they drive an interactive huh select, same convention as
@@ -126,6 +131,100 @@ func TestCloneCmd_EmptyInventory_ReturnsError(t *testing.T) {
 	err := cmd.ExecuteContext(context.Background())
 	if err == nil {
 		t.Fatal("expected an error for an empty inventory, got nil")
+	}
+}
+
+func TestCloneCmd_OwnerRepoArg_ClonesDirectlyBypassingInventory(t *testing.T) {
+	client := cloneFixture(t, func(name string, args []string) (string, error) {
+		if name == "gh" && len(args) >= 2 && args[0] == "repo" && args[1] == "clone" {
+			return "", nil
+		}
+		t.Fatalf("unexpected call bypassing direct clone: %s %v", name, args)
+		return "", nil
+	})
+	cmd := newProjectsCloneCmd(client)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"anthropics/claude-code"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "anthropics") || !strings.Contains(stdout.String(), "claude-code") {
+		t.Errorf("stdout should contain the clone dest, got: %q", stdout.String())
+	}
+}
+
+func TestCloneCmd_Org_BulkClonesEveryListedRepo(t *testing.T) {
+	orgJSON := `[{"name":"repo-a","sshUrl":"git@github.com:anthropics/repo-a.git","isPrivate":false},` +
+		`{"name":"repo-b","sshUrl":"git@github.com:anthropics/repo-b.git","isPrivate":false}]`
+	var cloned []string
+	client := cloneFixture(t, func(name string, args []string) (string, error) {
+		if name == "gh" && len(args) >= 2 && args[0] == "repo" && args[1] == "list" {
+			return orgJSON, nil
+		}
+		if name == "gh" && len(args) >= 2 && args[0] == "repo" && args[1] == "clone" {
+			cloned = append(cloned, args[2])
+			return "", nil
+		}
+		return "", nil
+	})
+	cmd := newProjectsCloneCmd(client)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--org", "anthropics"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cloned) != 2 {
+		t.Fatalf("cloned %d repos, want 2: %v", len(cloned), cloned)
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 2 {
+		t.Errorf("stdout should have one dest per line, got: %q", stdout.String())
+	}
+}
+
+func TestCloneCmd_OrgWithQueryArg_ReturnsError(t *testing.T) {
+	client := cloneFixture(t, twoHostRunFunc("[]", ""))
+	cmd := newProjectsCloneCmd(client)
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--org", "anthropics", "some-query"})
+
+	if err := cmd.ExecuteContext(context.Background()); err == nil {
+		t.Fatal("expected an error combining --org with a query argument, got nil")
+	}
+}
+
+func TestCloneCmd_OrgListFailure_Propagates(t *testing.T) {
+	client := cloneFixture(t, func(name string, args []string) (string, error) {
+		return "", errors.New("gh: not authenticated")
+	})
+	cmd := newProjectsCloneCmd(client)
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--org", "anthropics"})
+
+	if err := cmd.ExecuteContext(context.Background()); err == nil {
+		t.Fatal("expected the org listing error to propagate, got nil")
+	}
+}
+
+func TestCloneCmd_OrgNoRepos_ReturnsError(t *testing.T) {
+	client := cloneFixture(t, func(name string, args []string) (string, error) {
+		return "[]", nil
+	})
+	cmd := newProjectsCloneCmd(client)
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--org", "anthropics"})
+
+	if err := cmd.ExecuteContext(context.Background()); err == nil {
+		t.Fatal("expected an error for an org with no repos, got nil")
 	}
 }
 

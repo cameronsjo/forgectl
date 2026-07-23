@@ -261,6 +261,20 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 	return out, notes, nil
 }
 
+// ListOrg returns every GitHub repo owned by org (a user or org login), for
+// the bulk-clone path (`projects clone --org`). Unlike Inventory's githubList
+// (pinned to the const githubOwner), org is caller-supplied — so it's vetted
+// as a safe path segment before it becomes a `gh` argv: the guard rejects a
+// traversal value and a leading '-' that gh's cobra parser would read as a
+// flag rather than a positional. The result isn't merged with local/gitea
+// state — it's a plain listing to feed straight into Clone.
+func (c *Client) ListOrg(ctx context.Context, org string) ([]Repo, error) {
+	if !validPathSegment(org) {
+		return nil, fmt.Errorf("invalid GitHub org/user name %q", org)
+	}
+	return githubListOrg(ctx, c.run, org)
+}
+
 // Clone checks out a remote Repo into the canonical Dir/host/owner/name layout
 // (see canonicalDest), dispatching by host, and returns the local destination
 // path. A repo already present at its canonical dest is a no-op (returns its
@@ -317,11 +331,15 @@ func canonicalDest(dir, host, owner, name string) string {
 
 // validPathSegment rejects a host/owner/name value that would escape or
 // collapse the projects dir when joined onto it (empty → the dir itself;
-// "/"/".." → traversal). Remote hosts never produce such values, but the guard
-// keeps a malformed list row (or a hand-crafted Repo) from turning a clone
-// into a path-traversal or a tmux session on the projects root.
+// "/"/".." → traversal), or smuggle a flag into a `gh`/`git` argv (a leading
+// "-" would be read as an option, not a positional). Remote hosts never
+// produce such values, but the guard keeps a malformed list row, a
+// user-supplied clone target (`clone owner/repo`, `clone --org <login>`), or a
+// hand-crafted Repo from turning a clone into a path-traversal, a flag
+// injection, or a tmux session on the projects root.
 func validPathSegment(s string) bool {
 	return s != "" && s != "." && s != ".." &&
+		!strings.HasPrefix(s, "-") &&
 		!strings.ContainsAny(s, "/\\")
 }
 
