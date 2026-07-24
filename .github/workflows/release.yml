@@ -114,6 +114,13 @@ jobs:
           esac
           codesign -dv "$GITHUB_WORKSPACE/dist-helper/forgectl-bless-helper"
 
+      # The "Stamp helper version" step modifies the tracked Version.swift, which
+      # leaves the tree dirty and makes GoReleaser abort its clean-state check.
+      # The helper binary already embeds the stamped version (it's compiled in
+      # above), so the source file's job is done — restore it to clean the tree.
+      - name: Restore stamped version (clean tree for goreleaser)
+        run: git checkout -- helper/forgectl-bless-helper/Sources/BlessHelperCore/Version.swift
+
       # Mint a short-lived token scoped to the tap repo via the GitHub App
       # (RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY), instead of a long-lived PAT.
       # GoReleaser uses the default GITHUB_TOKEN for the forgectl release and
