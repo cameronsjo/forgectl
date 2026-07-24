@@ -114,6 +114,23 @@ jobs:
           esac
           codesign -dv "$GITHUB_WORKSPACE/dist-helper/forgectl-bless-helper"
 
+      # Fail-closed guard for the armed helper-trust gate (forgectl#90): every
+      # darwin release pins ExpectedTeamID=5H883FMW6H (.goreleaser.yaml), so the
+      # shipped helper MUST satisfy that pin or EVERY user's blessing is rejected
+      # (surfacing only at their Touch-ID prompt). A cert reissue under a different
+      # team, or a silent ad-hoc signing fallback, would violate that invariant —
+      # verify the built helper against the exact pin and fail the release on a
+      # mismatch rather than shipping a bricked forgectl. Runs unconditionally: an
+      # unsigned (HAS_CERT=false) build produces an ad-hoc helper that fails the
+      # pin, which SHOULD block the release since forgectl ships armed regardless.
+      # KEEP THIS TEAM ID IN SYNC with .goreleaser.yaml's ExpectedTeamID ldflag.
+      - name: Verify signed helper satisfies the armed Team ID pin
+        run: |
+          set -euo pipefail
+          codesign --verify --strict \
+            -R '=anchor apple generic and certificate leaf[subject.OU] = "5H883FMW6H"' \
+            "$GITHUB_WORKSPACE/dist-helper/forgectl-bless-helper"
+
       # The "Stamp helper version" step modifies the tracked Version.swift, which
       # leaves the tree dirty and makes GoReleaser abort its clean-state check.
       # The helper binary already embeds the stamped version (it's compiled in
