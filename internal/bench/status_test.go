@@ -302,6 +302,157 @@ func TestCheckChronicle_DegradedOnBadJSON(t *testing.T) {
 	}
 }
 
+func TestCheckChronicle_DegradedOnRestartingContainer(t *testing.T) {
+	t.Setenv("CHRONICLE_DIR", "")
+	cfg := config.Config{Bench: config.BenchConfig{ChronicleDir: "/x/chronicle"}}
+	runner := &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		switch name {
+		case "uv":
+			return chronicleJSON, nil
+		case "docker":
+			return oneRestarting, nil
+		default: // launchctl: loaded
+			return "", nil
+		}
+	}}
+
+	c := checkChronicle(context.Background(), cfg, runner)
+
+	if c.State != StateDegraded {
+		t.Fatalf("state = %q, reason = %q; want degraded", c.State, c.Reason)
+	}
+	if !strings.Contains(c.Reason, "crash-looping") {
+		t.Errorf("reason = %q, want it to mention crash-looping", c.Reason)
+	}
+	found := false
+	for _, d := range c.Details {
+		if strings.Contains(d, "restarting") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Details = %v, want a %q entry", c.Details, "restarting")
+	}
+}
+
+func TestCheckChronicle_DockerUnavailableKeepsHonestLabel(t *testing.T) {
+	t.Setenv("CHRONICLE_DIR", "")
+	cfg := config.Config{Bench: config.BenchConfig{ChronicleDir: "/x/chronicle"}}
+	runner := &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		switch name {
+		case "uv":
+			return chronicleJSON, nil
+		case "docker":
+			return "", errors.New("docker: command not found")
+		default: // launchctl: loaded
+			return "", nil
+		}
+	}}
+
+	c := checkChronicle(context.Background(), cfg, runner)
+
+	if c.State != StateOK {
+		t.Fatalf("state = %q, reason = %q; want ok", c.State, c.Reason)
+	}
+	if c.Reason != "retention API reachable (container health not checked)" {
+		t.Errorf("reason = %q, want the honest not-checked label", c.Reason)
+	}
+}
+
+func TestCheckChronicle_AllContainersHealthy(t *testing.T) {
+	t.Setenv("CHRONICLE_DIR", "")
+	cfg := config.Config{Bench: config.BenchConfig{ChronicleDir: "/x/chronicle"}}
+	runner := &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		switch name {
+		case "uv":
+			return chronicleJSON, nil
+		case "docker":
+			return twoRunning, nil
+		default: // launchctl: loaded
+			return "", nil
+		}
+	}}
+
+	c := checkChronicle(context.Background(), cfg, runner)
+
+	if c.State != StateOK {
+		t.Fatalf("state = %q, reason = %q; want ok", c.State, c.Reason)
+	}
+	if !strings.Contains(c.Reason, "containers healthy") {
+		t.Errorf("reason = %q, want it to mention containers healthy", c.Reason)
+	}
+	found := false
+	for _, d := range c.Details {
+		if d == "compose: 2/2 running" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Details = %v, want a %q entry", c.Details, "compose: 2/2 running")
+	}
+}
+
+func TestCheckChronicle_UnhealthyContainerDegrades(t *testing.T) {
+	t.Setenv("CHRONICLE_DIR", "")
+	cfg := config.Config{Bench: config.BenchConfig{ChronicleDir: "/x/chronicle"}}
+	runner := &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		switch name {
+		case "uv":
+			return chronicleJSON, nil
+		case "docker":
+			return `{"Service":"a","State":"running","Health":"healthy"}` + "\n" +
+				`{"Service":"db","State":"running","Health":"unhealthy"}`, nil
+		default: // launchctl: loaded
+			return "", nil
+		}
+	}}
+
+	c := checkChronicle(context.Background(), cfg, runner)
+
+	if c.State != StateDegraded {
+		t.Fatalf("state = %q, reason = %q; want degraded", c.State, c.Reason)
+	}
+	if !strings.Contains(c.Reason, "unhealthy") {
+		t.Errorf("reason = %q, want it to mention unhealthy", c.Reason)
+	}
+}
+
+func TestCheckChronicle_RestartingBeatsDaemonNotLoaded(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("LaunchAgent check is darwin-only")
+	}
+	t.Setenv("CHRONICLE_DIR", "")
+	cfg := config.Config{Bench: config.BenchConfig{ChronicleDir: "/x/chronicle"}}
+	runner := &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		switch name {
+		case "uv":
+			return chronicleJSON, nil
+		case "docker":
+			return oneRestarting, nil
+		default: // launchctl: not loaded
+			return "", errors.New("could not find service")
+		}
+	}}
+
+	c := checkChronicle(context.Background(), cfg, runner)
+
+	if c.State != StateDegraded {
+		t.Fatalf("state = %q; want degraded", c.State)
+	}
+	if !strings.Contains(c.Reason, "crash-looping") {
+		t.Errorf("reason = %q, want the container crash-loop reason to win over the daemon reason", c.Reason)
+	}
+	found := false
+	for _, d := range c.Details {
+		if d == "daemon: not loaded" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Details = %v, want a %q entry (daemon check still runs)", c.Details, "daemon: not loaded")
+	}
+}
+
 func TestCheckChronicle_NotConfigured(t *testing.T) {
 	t.Setenv("CHRONICLE_DIR", "")
 	if _, err := osexec.LookPath("chronicle"); err == nil {

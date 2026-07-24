@@ -22,6 +22,10 @@ const hearthProject = "hearth"
 // chronicleAgent is chronicle's frozen LaunchAgent label.
 const chronicleAgent = "local.chronicle-sync"
 
+// chronicleProject is chronicle's frozen compose project name (the
+// `sessions-db-*` stack) — queried by `-p` label like hearth.
+const chronicleProject = "sessions"
+
 // State is a component's resolved health — a small closed vocabulary rendered
 // with a glyph in the human card and carried verbatim in --json.
 type State string
@@ -157,12 +161,46 @@ func checkChronicle(ctx context.Context, cfg config.Config, runner exec.Runner) 
 
 	c.State = StateOK
 	c.Reason = "retention API reachable (container health not checked)"
+
+	// Corroborate against chronicle's DB containers before trusting the
+	// retention API's green — the bug this closes: chronicle showed OK while
+	// its DB (sessions-db-1) crash-looped underneath it. Unlike hearth, docker
+	// is corroboration-only here, not the component itself: when it's
+	// unavailable or reports no containers, keep the honest "not checked"
+	// reason rather than degrading on an inconclusive probe.
+	containerDegraded := false
+	if out, err := runner.Run(ctx, "docker", "compose", "-p", chronicleProject, "ps", "--all", "--format", "json"); err == nil {
+		if total, running, unhealthy, restarting, perr := parseComposePS(out); perr == nil && total > 0 {
+			switch {
+			case restarting > 0:
+				c.Details = append(c.Details, fmt.Sprintf("compose: %d restarting", restarting))
+				c.State = StateDegraded
+				c.Reason = "chronicle DB container crash-looping (see details)"
+				containerDegraded = true
+			case unhealthy > 0:
+				c.Details = append(c.Details, fmt.Sprintf("compose: %d unhealthy", unhealthy))
+				c.State = StateDegraded
+				c.Reason = "chronicle DB container unhealthy (see details)"
+				containerDegraded = true
+			default:
+				c.Details = append(c.Details, fmt.Sprintf("compose: %d/%d running", running, total))
+				c.Reason = fmt.Sprintf("retention API reachable, %d/%d containers healthy", running, total)
+			}
+		}
+	}
+
 	// The 5-minute sync daemon is a macOS LaunchAgent; skip the check elsewhere.
+	// A crash-looping/unhealthy DB is more fundamental than a not-loaded sync
+	// daemon, so once the container check has degraded the card its reason
+	// wins — the daemon check still runs and appends its detail, it just
+	// doesn't overwrite State/Reason.
 	if runtime.GOOS == "darwin" {
 		if _, err := runner.Run(ctx, "launchctl", "list", chronicleAgent); err != nil {
-			c.State = StateDegraded
-			c.Reason = "sync daemon (" + chronicleAgent + ") not loaded"
 			c.Details = append(c.Details, "daemon: not loaded")
+			if !containerDegraded {
+				c.State = StateDegraded
+				c.Reason = "sync daemon (" + chronicleAgent + ") not loaded"
+			}
 		} else {
 			c.Details = append(c.Details, "daemon: loaded")
 		}
