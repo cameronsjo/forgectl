@@ -27,6 +27,13 @@ builds:
       - -X github.com/cameronsjo/forgectl/internal/meta.Version={{.Version}}
       - -X github.com/cameronsjo/forgectl/internal/meta.Commit={{.Commit}}
       - -X github.com/cameronsjo/forgectl/internal/meta.Date={{.Date}}
+      # Arm the bless helper-trust gate (forgectl#90): forgectl verifies the
+      # sibling helper's Developer-ID signature against this Team ID before
+      # trusting the ceremony. Templated on .Os so ONLY the darwin build carries
+      # it — on linux it resolves to empty (gate dormant), and blessing creation
+      # is macOS-only anyway so it is inert there. The value is the verified
+      # Developer-ID Team ID (public — embedded in every signed binary, not a secret).
+      - -X github.com/cameronsjo/forgectl/internal/bless.ExpectedTeamID={{ if eq .Os "darwin" }}5H883FMW6H{{ end }}
 
   - id: forgectl-darwin
     main: .
