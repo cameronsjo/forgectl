@@ -60,13 +60,24 @@ func newConfigCmd(deps module.Deps) *cobra.Command {
 			// Resolve the actual exec target so the display honors the same
 			// precedence as launch (FORGECTL_CLAUDE_BIN > binary_path > PATH).
 			claudeBin, cerr := launch.ClaudePath(cfg.Launch.Defaults)
+			binaryLabel := "launch.claude_bin"
+			if ld.Harness == "codex" {
+				binaryLabel = "launch.codex_bin"
+				claudeBin, cerr = launch.CodexPath(cfg.Launch.Defaults)
+			}
 			if cerr != nil {
 				claudeBin = fmt.Sprintf("(unresolved: %s)", cerr)
 			}
-			fmt.Fprintf(out, "\n  launch.model         %s\n", ld.Model)
-			fmt.Fprintf(out, "  launch.permission    %s\n", ld.PermissionMode)
-			fmt.Fprintf(out, "  launch.allow_danger  %v\n", ld.AllowDanger)
-			fmt.Fprintf(out, "  launch.claude_bin    %s\n", claudeBin)
+			fmt.Fprintf(out, "\n  launch.harness       %s\n", ld.Harness)
+			fmt.Fprintf(out, "  launch.model         %s\n", ld.Model)
+			if ld.Harness == "codex" {
+				fmt.Fprintf(out, "  launch.approval      %s\n", ld.ApprovalPolicy)
+				fmt.Fprintf(out, "  launch.sandbox       %s\n", ld.Sandbox)
+			} else {
+				fmt.Fprintf(out, "  launch.permission    %s\n", ld.PermissionMode)
+				fmt.Fprintf(out, "  launch.allow_danger  %v\n", ld.AllowDanger)
+			}
+			fmt.Fprintf(out, "  %-20s %s\n", binaryLabel, claudeBin)
 			fmt.Fprintf(out, "  launch.projects      %d configured\n", len(cfg.Launch.Projects))
 
 			slog.Info("Successfully displayed configuration.", "no_icons", cfg.NoIcons, "log_level", logLevel)

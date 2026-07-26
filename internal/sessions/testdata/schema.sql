@@ -28,6 +28,10 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- NEVER part of the upsert key — session_id is a globally-unique UUID).
 CREATE TABLE IF NOT EXISTS session (
     session_id          text PRIMARY KEY,
+    schema_version      integer NOT NULL DEFAULT 0,
+    harness             text NOT NULL DEFAULT 'claude'
+        CHECK (harness IN ('claude', 'codex')),
+    source_format       text,
     machine             text NOT NULL,
     project             text,
     git_branch          text,
@@ -38,7 +42,12 @@ CREATE TABLE IF NOT EXISTS session (
     tokens_cache_create bigint,
     tokens_cache_read   bigint,
     tokens_output       bigint,
+    tokens_reasoning_output bigint,
+    tokens_total        bigint,
     cost_usd            numeric,
+    estimated_cost_usd  numeric,
+    pricing_source      text,
+    pricing_verified_at timestamptz,
     -- Which ledger priced the row: 'commits.jsonl' (ADR-0017 canonical
     -- root-session aggregation) or 'sessions.jsonl' (SessionEnd total).
     -- NULL = unpriced (a session with no cost row anywhere).
@@ -51,6 +60,14 @@ CREATE TABLE IF NOT EXISTS session (
     last_message_id     text,
     synced_at           timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE session ADD COLUMN IF NOT EXISTS schema_version integer NOT NULL DEFAULT 0;
+ALTER TABLE session ADD COLUMN IF NOT EXISTS harness text NOT NULL DEFAULT 'claude';
+ALTER TABLE session ADD COLUMN IF NOT EXISTS source_format text;
+ALTER TABLE session ADD COLUMN IF NOT EXISTS tokens_reasoning_output bigint;
+ALTER TABLE session ADD COLUMN IF NOT EXISTS tokens_total bigint;
+ALTER TABLE session ADD COLUMN IF NOT EXISTS estimated_cost_usd numeric;
+ALTER TABLE session ADD COLUMN IF NOT EXISTS pricing_source text;
+ALTER TABLE session ADD COLUMN IF NOT EXISTS pricing_verified_at timestamptz;
 CREATE INDEX IF NOT EXISTS session_machine_ts ON session (machine, first_ts);
 CREATE INDEX IF NOT EXISTS session_project_ts ON session (project, first_ts);
 

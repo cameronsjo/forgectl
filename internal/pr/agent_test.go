@@ -18,6 +18,7 @@ func TestLaunchPathFor(t *testing.T) {
 	}{
 		{"", InlineSeeded},
 		{"claude", InlineSeeded},
+		{"codex", CodexExec},
 		{"escalation", BareTUIEscalation},
 		{"totally-unknown", InlineSeeded},
 	}
@@ -36,5 +37,8 @@ func TestLaunchPathString(t *testing.T) {
 	}
 	if BareTUIEscalation.String() != "bare-tui-escalation" {
 		t.Errorf("BareTUIEscalation.String() = %q", BareTUIEscalation.String())
+	}
+	if CodexExec.String() != "codex-exec" {
+		t.Errorf("CodexExec.String() = %q", CodexExec.String())
 	}
 }

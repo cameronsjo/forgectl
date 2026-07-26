@@ -86,12 +86,18 @@ func (m *Mart) UpsertSessions(ctx context.Context, rows []SessionRow) error {
 	for _, r := range rows {
 		batch.Queue(`
 			INSERT INTO session (
-				session_id, machine, project, git_branch, model,
+				session_id, schema_version, harness, source_format,
+				machine, project, git_branch, model,
 				first_ts, last_ts,
 				tokens_input, tokens_cache_create, tokens_cache_read, tokens_output,
-				cost_usd, cost_source, committed, last_message_id, synced_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now())
+				tokens_reasoning_output, tokens_total,
+				cost_usd, estimated_cost_usd, pricing_source, pricing_verified_at,
+				cost_source, committed, last_message_id, synced_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23, now())
 			ON CONFLICT (session_id) DO UPDATE SET
+				schema_version = EXCLUDED.schema_version,
+				harness = EXCLUDED.harness,
+				source_format = EXCLUDED.source_format,
 				machine = EXCLUDED.machine,
 				project = EXCLUDED.project,
 				git_branch = EXCLUDED.git_branch,
@@ -102,15 +108,23 @@ func (m *Mart) UpsertSessions(ctx context.Context, rows []SessionRow) error {
 				tokens_cache_create = EXCLUDED.tokens_cache_create,
 				tokens_cache_read = EXCLUDED.tokens_cache_read,
 				tokens_output = EXCLUDED.tokens_output,
+				tokens_reasoning_output = EXCLUDED.tokens_reasoning_output,
+				tokens_total = EXCLUDED.tokens_total,
 				cost_usd = EXCLUDED.cost_usd,
+				estimated_cost_usd = EXCLUDED.estimated_cost_usd,
+				pricing_source = EXCLUDED.pricing_source,
+				pricing_verified_at = EXCLUDED.pricing_verified_at,
 				cost_source = EXCLUDED.cost_source,
 				committed = EXCLUDED.committed,
 				last_message_id = EXCLUDED.last_message_id,
 				synced_at = now()`,
-			r.SessionID, r.Machine, nullable(r.Project), nullable(r.GitBranch), nullable(r.Model),
+			r.SessionID, r.SchemaVersion, r.Harness, nullable(r.SourceFormat),
+			r.Machine, nullable(r.Project), nullable(r.GitBranch), nullable(r.Model),
 			r.FirstTs, r.LastTs,
 			r.Tokens.Input, r.Tokens.CacheCreate, r.Tokens.CacheRead, r.Tokens.Output,
-			r.CostUSD, nullable(r.CostSource), r.Committed, nullable(r.LastMessageID),
+			r.Tokens.ReasoningOutput, r.Tokens.Total,
+			r.CostUSD, r.EstimatedCostUSD, nullable(r.PricingSource), r.PricingVerifiedAt,
+			nullable(r.CostSource), r.Committed, nullable(r.LastMessageID),
 		)
 	}
 	if err := m.conn.SendBatch(ctx, batch).Close(); err != nil {

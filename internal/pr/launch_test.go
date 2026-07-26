@@ -247,6 +247,62 @@ func TestLaunch_AgentBNotWired(t *testing.T) {
 	}
 }
 
+func TestLaunch_CodexExecUsesCompensatingSandbox(t *testing.T) {
+	codexBin := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(codexBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("FORGECTL_CODEX_BIN", codexBin)
+
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	ws := fakeWorkspace(t)
+	sess := Session{
+		Ref:       Ref{Owner: "o", Repo: "r", Number: 42},
+		Workspace: ws,
+		Agent:     "codex",
+	}
+	if err := c.Launch(context.Background(), sess, config.Config{}); err != nil {
+		t.Fatalf("Launch Codex: %v", err)
+	}
+	args := fake.Last().Args
+	if !contains(args, codexBin) || !contains(args, "exec") {
+		t.Errorf("Codex review missing codex exec: %v", args)
+	}
+	if !argPair(args, "--sandbox", "read-only") ||
+		!argPair(args, "--config", `approval_policy="never"`) {
+		t.Errorf("Codex review is not read-only/never-approve: %v", args)
+	}
+}
+
+func TestLaunch_CodexLocalWritesOnlyWorkspaceAndFindings(t *testing.T) {
+	codexBin := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(codexBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("FORGECTL_CODEX_BIN", codexBin)
+	findings := t.TempDir()
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	sess := Session{
+		Ref:         Ref{Owner: "local", Repo: "abc1234", Number: 1},
+		Workspace:   fakeWorkspace(t),
+		Agent:       "codex",
+		FindingsDir: findings,
+	}
+	if err := c.Launch(context.Background(), sess, config.Config{}); err != nil {
+		t.Fatalf("Launch local Codex: %v", err)
+	}
+	args := fake.Last().Args
+	if !argPair(args, "--sandbox", "workspace-write") ||
+		!argPair(args, "--add-dir", findings) {
+		t.Errorf("local Codex sandbox did not scope findings: %v", args)
+	}
+	if !contains(args, localReviewPrompt(findings)) {
+		t.Errorf("local Codex prompt missing findings path: %v", args)
+	}
+}
+
 func TestLaunchInline_LocalSessionAddsFindingsDirAndPrompt(t *testing.T) {
 	claudeBin := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {

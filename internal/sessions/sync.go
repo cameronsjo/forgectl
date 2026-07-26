@@ -12,7 +12,7 @@ import (
 )
 
 // SyncOptions parameterizes one ETL run. Zero-valued fields fall back to the
-// [sessions] config section, then to built-in defaults (paths under ~/.claude,
+// [sessions] config section, then to built-in defaults (Cadence state home,
 // machine = short hostname). DSN has no built-in default — it comes from
 // --dsn, FORGECTL_SESSIONS_DSN, or config, resolved in the CLI layer.
 type SyncOptions struct {
@@ -20,6 +20,13 @@ type SyncOptions struct {
 	Machine     string
 	MetricsDir  string
 	RunbooksDir string
+	// LegacyMetricsDir is a read-only fallback used only when the corresponding
+	// stream is absent from MetricsDir.
+	LegacyMetricsDir string
+	// LegacyRunbooksDir is a read-only fallback used only when RunbooksDir
+	// itself is absent. An existing current corpus always wins, even if empty,
+	// so documents cannot be indexed twice during migration.
+	LegacyRunbooksDir string
 	// SyncthingConfig overrides the discovered Syncthing config.xml path
 	// (tests, non-standard installs). Empty = platform default discovery.
 	SyncthingConfig string
@@ -69,14 +76,28 @@ func (o SyncOptions) Resolve(cfg config.SessionsConfig) (SyncOptions, error) {
 	if o.MetricsDir == "" {
 		o.MetricsDir = cfg.MetricsDir
 	}
+	stateHome := os.Getenv("CADENCE_STATE_HOME")
+	if stateHome == "" {
+		if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
+			stateHome = filepath.Join(xdg, "cadence")
+		} else {
+			stateHome = filepath.Join(home, ".local", "state", "cadence")
+		}
+	}
 	if o.MetricsDir == "" {
-		o.MetricsDir = filepath.Join(home, ".claude", "metrics")
+		o.MetricsDir = filepath.Join(stateHome, "metrics")
+	}
+	if o.LegacyMetricsDir == "" {
+		o.LegacyMetricsDir = filepath.Join(home, ".claude", "metrics")
 	}
 	if o.RunbooksDir == "" {
 		o.RunbooksDir = cfg.RunbooksDir
 	}
 	if o.RunbooksDir == "" {
-		o.RunbooksDir = filepath.Join(home, ".claude", "cadence", "runbooks")
+		o.RunbooksDir = filepath.Join(stateHome, "runbooks")
+	}
+	if o.LegacyRunbooksDir == "" {
+		o.LegacyRunbooksDir = filepath.Join(home, ".claude", "cadence", "runbooks")
 	}
 	return o, nil
 }
@@ -104,9 +125,13 @@ func Sync(ctx context.Context, opts SyncOptions) (*Receipt, error) {
 	receipt.InvalidRows = invalid
 	receipt.CommitRowsDropped = att.Dropped
 
-	runbooks, err := ScanRunbooks(opts.RunbooksDir, opts.Machine)
+	runbooksDir, err := runbooksDirWithLegacy(opts)
 	if err != nil {
-		slog.Error("Encountered corpus scan failure while indexing runbooks.", "error", err, "runbooks_dir", opts.RunbooksDir)
+		return nil, err
+	}
+	runbooks, err := ScanRunbooks(runbooksDir, opts.Machine)
+	if err != nil {
+		slog.Error("Encountered corpus scan failure while indexing runbooks.", "error", err, "runbooks_dir", runbooksDir)
 		return nil, err
 	}
 	receipt.RunbooksFound = len(runbooks)
@@ -214,17 +239,45 @@ func enforceSyncthingGuard(opts SyncOptions) error {
 func extract(opts SyncOptions) (sessionRows, commitRows []LedgerRow, receipt *Receipt, err error) {
 	receipt = &Receipt{}
 	var skipped int
-	sessionRows, skipped, err = ReadLedger(filepath.Join(opts.MetricsDir, "sessions.jsonl"))
+	sessionRows, skipped, err = readLedgerWithLegacy(opts, "sessions.jsonl")
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	receipt.LedgerLinesBad += skipped
-	commitRows, skipped, err = ReadLedger(filepath.Join(opts.MetricsDir, "commits.jsonl"))
+	commitRows, skipped, err = readLedgerWithLegacy(opts, "commits.jsonl")
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	receipt.LedgerLinesBad += skipped
 	return sessionRows, commitRows, receipt, nil
+}
+
+func readLedgerWithLegacy(opts SyncOptions, filename string) ([]LedgerRow, int, error) {
+	current := filepath.Join(opts.MetricsDir, filename)
+	if _, err := os.Stat(current); err == nil || !os.IsNotExist(err) {
+		return ReadLedger(current)
+	}
+	legacy := filepath.Join(opts.LegacyMetricsDir, filename)
+	if legacy != current {
+		return ReadLedger(legacy)
+	}
+	return ReadLedger(current)
+}
+
+func runbooksDirWithLegacy(opts SyncOptions) (string, error) {
+	if _, err := os.Stat(opts.RunbooksDir); err == nil {
+		return opts.RunbooksDir, nil
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("stat runbooks root %s: %w", opts.RunbooksDir, err)
+	}
+	if opts.LegacyRunbooksDir != "" && opts.LegacyRunbooksDir != opts.RunbooksDir {
+		if _, err := os.Stat(opts.LegacyRunbooksDir); err == nil {
+			return opts.LegacyRunbooksDir, nil
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("stat legacy runbooks root %s: %w", opts.LegacyRunbooksDir, err)
+		}
+	}
+	return opts.RunbooksDir, nil
 }
 
 // skipUnchanged partitions rows by the mart's lastMessageId watermark: a

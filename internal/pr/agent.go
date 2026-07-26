@@ -13,6 +13,9 @@ const (
 	// permissions by typing — agent B. NOT YET WIRED: LaunchPathFor returns it
 	// for the named entry, but the dispatch path guards it with a clear error.
 	BareTUIEscalation
+	// CodexExec runs a non-interactive Codex clean-room review under Codex's
+	// native sandbox, independent of Claude settings.local.json.
+	CodexExec
 )
 
 // String renders a LaunchPath for logs and errors.
@@ -20,6 +23,8 @@ func (p LaunchPath) String() string {
 	switch p {
 	case BareTUIEscalation:
 		return "bare-tui-escalation"
+	case CodexExec:
+		return "codex-exec"
 	default:
 		return "inline-seeded"
 	}
@@ -32,6 +37,7 @@ func (p LaunchPath) String() string {
 var agentPaths = map[string]LaunchPath{
 	"":           InlineSeeded, // default → agent A
 	"claude":     InlineSeeded, // agent A, explicit
+	"codex":      CodexExec,
 	"escalation": BareTUIEscalation,
 }
 

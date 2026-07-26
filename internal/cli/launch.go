@@ -75,15 +75,15 @@ func isOwnLaunchVerb(tok string) bool {
 func newLaunchCmd(deps module.Deps) *cobra.Command {
 	cfg := deps.Cfg
 	cmd := &cobra.Command{
-		Use:     "launch [claude args…]",
+		Use:     "launch [harness args…]",
 		Aliases: []string{"cl"},
-		Short:   "Per-project launcher for Claude Code",
+		Short:   "Per-project launcher for Claude Code or Codex CLI",
 		Long: `launch resolves a per-project profile from your working directory,
-runs a short guided launch, then execs claude.
+runs a short guided launch, then execs the configured harness.
 
   forgectl launch                 interactive launcher (Model, New/Resume/Fork)
-  forgectl launch <claude args…>  apply the profile and pass your args through
-  forgectl launch agents …        inject the agents posture; passthrough on --json
+  forgectl launch <args…>          apply the profile and pass args through
+  forgectl launch agents …         Claude-only agent-management passthrough
 
 Run "forgectl launch which" to see the profile resolved for the current
 directory. Profiles live in the [launch] section of config.toml — scaffold one
@@ -130,12 +130,24 @@ func launchExec(cfg config.Config, args []string) error {
 	}
 	profile := launch.Resolve(lc, cwd)
 
-	claudePath, err := launch.ClaudePath(lc.Defaults)
+	if err := profile.Validate(); err != nil {
+		return err
+	}
+	if profile.Harness == "codex" && len(args) > 0 && args[0] == "agents" {
+		return fmt.Errorf(
+			"`launch agents` is Claude-only; install and invoke the Cadence role skills in Codex instead",
+		)
+	}
+
+	binaryPath, err := launch.ClaudePath(lc.Defaults)
+	if profile.Harness == "codex" {
+		binaryPath, err = launch.CodexPath(lc.Defaults)
+	}
 	if err != nil {
 		return err
 	}
 
-	var claudeArgs []string
+	var harnessArgs []string
 	switch {
 	case len(args) == 0:
 		choice := launch.Choice{Model: profile.Model, Mode: launch.New}
@@ -144,16 +156,24 @@ func launchExec(cfg config.Config, args []string) error {
 				return err
 			}
 		}
-		claudeArgs = launch.SessionArgs(profile, choice.Model, choice.Mode)
+		if profile.Harness == "codex" {
+			harnessArgs = launch.CodexSessionArgs(profile, choice.Model, choice.Mode)
+		} else {
+			harnessArgs = launch.SessionArgs(profile, choice.Model, choice.Mode)
+		}
 	case args[0] == "agents":
 		if launch.IsAgentsPassthrough(args) {
-			claudeArgs = args // byte-clean: no injection, no banner
+			harnessArgs = args // byte-clean: no injection, no banner
 		} else {
-			claudeArgs = launch.AgentsArgs(profile, args)
-			launch.Banner(os.Stderr, claudeArgs)
+			harnessArgs = launch.AgentsArgs(profile, args)
+			launch.Banner(os.Stderr, harnessArgs)
 		}
 	default:
-		claudeArgs = launch.BuilderArgs(profile, args)
+		if profile.Harness == "codex" {
+			harnessArgs = launch.CodexExecArgs(profile, args)
+		} else {
+			harnessArgs = launch.BuilderArgs(profile, args)
+		}
 	}
 
 	// Layer the profile env over the opt-in bench telemetry block (profile wins),
@@ -161,8 +181,8 @@ func launchExec(cfg config.Config, args []string) error {
 	// nil and this reduces to the profile env alone.
 	extra := launch.MergeMaps(bench.TelemetryEnv(cfg), profile.Env)
 	env := launch.MergeEnv(os.Environ(), extra)
-	slog.Debug("Preparing to exec claude.", "path", claudePath, "argc", len(claudeArgs), "match", profile.Match)
-	return launch.Exec(claudePath, claudeArgs, env)
+	slog.Debug("Preparing to exec harness.", "harness", profile.Harness, "path", binaryPath, "argc", len(harnessArgs), "match", profile.Match)
+	return launch.Exec(binaryPath, harnessArgs, env)
 }
 
 // legacyShadowWarning reports the one-line #114 fallback-cliff warning when

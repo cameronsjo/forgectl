@@ -485,6 +485,36 @@ func TestIntegration_Builder_AppliesProfileAndPassesThrough(t *testing.T) {
 	}
 }
 
+func TestIntegration_CodexBuilderAndAgentsGuidance(t *testing.T) {
+	h := newBareHarness(t, `[launch.defaults]
+harness = "codex"
+model = "gpt-5"
+approval_policy = "never"
+sandbox = "read-only"
+`)
+	if err := os.WriteFile(filepath.Join(h.binDir, "codex"), []byte(stubClaude), 0o755); err != nil {
+		t.Fatalf("write stub codex: %v", err)
+	}
+	h.run(t, "review this")
+	want := []string{
+		"exec", "--config", `approval_policy="never"`,
+		"--sandbox", "read-only", "--model", "gpt-5", "review this",
+	}
+	if got := h.recordedArgs(t); !equalArgs(got, want) {
+		t.Errorf("Codex args = %v, want %v", got, want)
+	}
+
+	stderr, err := h.runExpectErr(t, nil, "agents", "--json")
+	if err == nil {
+		t.Fatal("Codex launch agents passthrough should be rejected")
+	}
+	for _, wantText := range []string{"Claude-only", "Cadence role skills"} {
+		if !strings.Contains(stderr, wantText) {
+			t.Errorf("stderr missing %q: %s", wantText, stderr)
+		}
+	}
+}
+
 func TestIntegration_AgentsJSON_PurePassthrough(t *testing.T) {
 	h := newHarness(t)
 	stdout, _ := h.run(t, "agents", "--json")

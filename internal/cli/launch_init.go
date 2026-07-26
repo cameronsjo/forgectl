@@ -18,19 +18,24 @@ import (
 // `forgectl launch init`. Values mirror the built-in defaults so an untouched
 // scaffold is a no-op posture.
 const launchScaffold = `
-# ── launch: per-project Claude Code launcher (forgectl launch) ──────────────
+# ── launch: per-project Claude/Codex launcher (forgectl launch) ─────────────
 # Resolution: expand ~, pick the [[launch.project]] whose match is the longest
 # path-prefix of the real cwd, then merge over [launch.defaults].
-#   scalars (model, permission_mode, allow_danger): project wins when set
+#   scalars: project wins when set; Claude remains the compatibility default
 #   env: merged, project wins on key collisions
 #   add_dir: concatenated and de-duplicated
 # Inspect the resolved profile with:  forgectl launch which
 
 [launch.defaults]
-model           = "opus"     # claude --model value (alias or full id)
+harness         = "claude"   # "claude" (default) or "codex"
+model           = "opus"     # remove or replace with a Codex model when harness = "codex"
 permission_mode = "plan"     # launch always starts in plan
 allow_danger    = true       # adds --allow-dangerously-skip-permissions (reachable, not on)
 # binary_path   = ""         # explicit claude path; $FORGECTL_CLAUDE_BIN overrides this
+# Codex-native settings (used when harness = "codex"):
+# approval_policy  = "on-request"
+# sandbox          = "workspace-write"
+# codex_binary_path = ""      # $FORGECTL_CODEX_BIN overrides this
 
 # Per-project overrides — add as many [[launch.project]] blocks as you like.
 # [[launch.project]]

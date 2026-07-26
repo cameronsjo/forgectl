@@ -35,8 +35,8 @@ func newSessionsCmd(deps module.Deps) *cobra.Command {
 		Use:   "sessions",
 		Short: "Sync local session ledgers into the operational mart and query it",
 		Long: `sessions drains this machine's local JSONL write-ahead log
-(~/.claude/metrics/) and the runbook markdown corpus
-(~/.claude/cadence/runbooks/) into the cross-machine operational mart — an
+(Cadence XDG state, with read-only legacy ~/.claude fallbacks) and the runbook markdown corpus
+into the cross-machine operational mart — an
 always-on Postgres session index — and queries the runbook full-text index.
 
 JSONL is the WAL; Postgres is the index. Hooks only ever append locally, so an
@@ -102,7 +102,7 @@ commits.jsonl (grouped by parentSessionId//sessionId), never recomputed; the
 SessionEnd total from sessions.jsonl is the fallback.
 
 Every run enforces the Syncthing-blobs-only guard first: a Syncthing folder
-covering ~/.claude/metrics or ~/.claude/cadence/sessions fails the sync (a
+covering the Cadence metrics state, ~/.claude/metrics, or ~/.claude/cadence/sessions fails the sync (a
 synced JSONL ledger forks into .sync-conflict-* divergence). A missing or
 unreadable Syncthing config warns and proceeds.
 
@@ -132,8 +132,8 @@ the command exits non-zero — a skipped session is never silent.
 	cmd.Flags().BoolVar(&opts.Full, "full", false, "bypass the lastMessageId watermark and re-upsert every session")
 	cmd.Flags().StringVar(&opts.DSN, "dsn", "", "mart DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
 	cmd.Flags().StringVar(&opts.Machine, "machine", "", "provenance label (default: [sessions] machine, then short hostname)")
-	cmd.Flags().StringVar(&opts.MetricsDir, "metrics-dir", "", "JSONL WAL directory (default: ~/.claude/metrics)")
-	cmd.Flags().StringVar(&opts.RunbooksDir, "runbooks-dir", "", "runbook markdown corpus (default: ~/.claude/cadence/runbooks)")
+	cmd.Flags().StringVar(&opts.MetricsDir, "metrics-dir", "", "JSONL WAL directory (default: Cadence XDG state)")
+	cmd.Flags().StringVar(&opts.RunbooksDir, "runbooks-dir", "", "runbook markdown corpus (default: Cadence XDG state)")
 	cmd.Flags().StringVar(&opts.SyncthingConfig, "syncthing-config", "", "Syncthing config.xml for the blobs-only guard (default: platform discovery)")
 	return cmd
 }

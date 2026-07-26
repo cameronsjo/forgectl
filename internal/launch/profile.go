@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -9,12 +10,46 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 )
 
+// Validate rejects harness-native settings Codex itself would refuse.
+func (p Profile) Validate() error {
+	if p.Harness != "claude" && p.Harness != "codex" {
+		return fmt.Errorf("unsupported launch harness %q: want claude or codex", p.Harness)
+	}
+	if p.Harness == "codex" {
+		if oneOf(p.Model, "opus", "sonnet", "haiku") || strings.HasPrefix(p.Model, "claude-") {
+			return fmt.Errorf(
+				"Claude model %q cannot be used with Codex; remove model to use the Codex default or set a Codex model id",
+				p.Model,
+			)
+		}
+		if !oneOf(p.ApprovalPolicy, "untrusted", "on-request", "never") {
+			return fmt.Errorf("unsupported Codex approval_policy %q", p.ApprovalPolicy)
+		}
+		if !oneOf(p.Sandbox, "read-only", "workspace-write", "danger-full-access") {
+			return fmt.Errorf("unsupported Codex sandbox %q", p.Sandbox)
+		}
+	}
+	return nil
+}
+
+func oneOf(value string, choices ...string) bool {
+	for _, choice := range choices {
+		if value == choice {
+			return true
+		}
+	}
+	return false
+}
+
 // Profile is the fully resolved posture for one working directory — the on-disk
 // schema (config.LaunchConfig) reduced against the cwd.
 type Profile struct {
+	Harness        string
 	Model          string
 	PermissionMode string
 	AllowDanger    bool
+	ApprovalPolicy string
+	Sandbox        string
 	Env            map[string]string
 	AddDir         []string
 	Match          string // original `match` of the winning project; "" when defaults-only
@@ -23,9 +58,12 @@ type Profile struct {
 // Built-in fallbacks applied when a value is set neither by a project nor by
 // [launch.defaults] — and the entire posture when no config exists.
 const (
+	builtinHarness        = "claude"
 	builtinModel          = "opus"
 	builtinPermissionMode = "plan"
 	builtinAllowDanger    = true
+	builtinApprovalPolicy = "on-request"
+	builtinSandbox        = "workspace-write"
 )
 
 // Resolve picks the profile for cwd: it resolves symlinks best-effort, makes the
@@ -70,6 +108,12 @@ func resolve(lc config.LaunchConfig, cwd, home string) Profile {
 	}
 
 	if win != nil {
+		if win.Harness != "" {
+			if win.Harness != p.Harness && win.Model == "" {
+				p.Model = builtinModelForHarness(win.Harness)
+			}
+			p.Harness = win.Harness
+		}
 		if win.Model != "" {
 			p.Model = win.Model
 		}
@@ -78,6 +122,12 @@ func resolve(lc config.LaunchConfig, cwd, home string) Profile {
 		}
 		if win.AllowDanger != nil {
 			p.AllowDanger = *win.AllowDanger
+		}
+		if win.ApprovalPolicy != "" {
+			p.ApprovalPolicy = win.ApprovalPolicy
+		}
+		if win.Sandbox != "" {
+			p.Sandbox = win.Sandbox
 		}
 		p.Env = mergeEnv(p.Env, win.Env)
 		p.AddDir = dedupe(append(p.AddDir, expandAll(win.AddDir, home)...))
@@ -90,13 +140,24 @@ func resolve(lc config.LaunchConfig, cwd, home string) Profile {
 // defaultsProfile applies built-in fallbacks over [launch.defaults], with no
 // project matching. Shared by resolve and DefaultsProfile.
 func defaultsProfile(d config.LaunchDefaults, home string) Profile {
+	harness := firstNonEmpty(d.Harness, builtinHarness)
 	return Profile{
-		Model:          firstNonEmpty(d.Model, builtinModel),
+		Harness:        harness,
+		Model:          firstNonEmpty(d.Model, builtinModelForHarness(harness)),
 		PermissionMode: firstNonEmpty(d.PermissionMode, builtinPermissionMode),
 		AllowDanger:    boolOr(d.AllowDanger, builtinAllowDanger),
+		ApprovalPolicy: firstNonEmpty(d.ApprovalPolicy, builtinApprovalPolicy),
+		Sandbox:        firstNonEmpty(d.Sandbox, builtinSandbox),
 		Env:            mergeEnv(nil, d.Env),
 		AddDir:         expandAll(d.AddDir, home),
 	}
+}
+
+func builtinModelForHarness(harness string) string {
+	if harness == "codex" {
+		return ""
+	}
+	return builtinModel
 }
 
 // expandTilde expands a leading ~ or ~/ to the home directory. A bare "~user"

@@ -26,7 +26,7 @@ func Interview(p Profile) (Choice, error) {
 			huh.NewSelect[string]().
 				Title("Model").
 				Description("Resolved from your project profile — change it for this launch").
-				Options(huh.NewOptions(modelChoices(p.Model)...)...).
+				Options(modelOptions(p)...).
 				Value(&model),
 			huh.NewSelect[string]().
 				Title("Session").
@@ -43,6 +43,20 @@ func Interview(p Profile) (Choice, error) {
 		return Choice{}, err
 	}
 	return Choice{Model: model, Mode: sessionMode(session)}, nil
+}
+
+func modelOptions(p Profile) []huh.Option[string] {
+	if p.Harness == "codex" {
+		options := []huh.Option[string]{huh.NewOption("Codex default", "")}
+		if p.Model != "" {
+			options = append(
+				[]huh.Option[string]{huh.NewOption(p.Model, p.Model)},
+				options...,
+			)
+		}
+		return options
+	}
+	return huh.NewOptions(modelChoices(p.Model)...)
 }
 
 // IsInteractiveTTY reports whether both stdin and stdout are terminals — the

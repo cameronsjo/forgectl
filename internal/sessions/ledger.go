@@ -1,6 +1,6 @@
 // Package sessions is the ops layer for `forgectl sessions`: the idempotent
-// ETL that drains the local JSONL write-ahead log (~/.claude/metrics/) and
-// the runbook markdown corpus (~/.claude/cadence/runbooks/) into the
+// ETL that drains the local JSONL write-ahead log and runbook markdown corpus
+// from Cadence state (with read-only legacy ~/.claude fallbacks) into the
 // cross-machine operational mart — an always-on Postgres session index.
 //
 // Contract (docs/plans/2026-07-10-cadence-persistence-observability.md in
@@ -35,25 +35,33 @@ import (
 // LedgerRow is one line of sessions.jsonl or commits.jsonl — the superset of
 // the fields the operational index consumes. Unknown fields are ignored.
 type LedgerRow struct {
-	SessionID       string     `json:"sessionId"`
-	ParentSessionID string     `json:"parentSessionId"`
-	Repo            string     `json:"repo"`
-	Branch          string     `json:"branch"`
-	Model           string     `json:"model"`
-	CostUSD         *float64   `json:"costUsd"`
-	LastMessageID   string     `json:"lastMessageId"`
-	StartTs         *time.Time `json:"startTs"`
-	EndTs           *time.Time `json:"endTs"`
-	Ts              *time.Time `json:"ts"`
-	Tokens          Tokens     `json:"tokens"`
+	SchemaVersion     int        `json:"schemaVersion"`
+	Harness           string     `json:"harness"`
+	SourceFormat      string     `json:"sourceFormat"`
+	SessionID         string     `json:"sessionId"`
+	ParentSessionID   string     `json:"parentSessionId"`
+	Repo              string     `json:"repo"`
+	Branch            string     `json:"branch"`
+	Model             string     `json:"model"`
+	CostUSD           *float64   `json:"costUsd"`
+	EstimatedCostUSD  *float64   `json:"estimatedCostUsd"`
+	PricingSource     string     `json:"pricingSource"`
+	PricingVerifiedAt *time.Time `json:"pricingVerifiedAt"`
+	LastMessageID     string     `json:"lastMessageId"`
+	StartTs           *time.Time `json:"startTs"`
+	EndTs             *time.Time `json:"endTs"`
+	Ts                *time.Time `json:"ts"`
+	Tokens            Tokens     `json:"tokens"`
 }
 
 // Tokens is the per-row token quartet from the ledgers.
 type Tokens struct {
-	Input       int64 `json:"input"`
-	CacheCreate int64 `json:"cacheCreate"`
-	CacheRead   int64 `json:"cacheRead"`
-	Output      int64 `json:"output"`
+	Input           int64 `json:"input"`
+	CacheCreate     int64 `json:"cacheCreate"`
+	CacheRead       int64 `json:"cacheRead"`
+	Output          int64 `json:"output"`
+	ReasoningOutput int64 `json:"reasoningOutput"`
+	Total           int64 `json:"total"`
 }
 
 // ReadLedger reads a JSONL ledger, tolerating a missing file (the WAL may not

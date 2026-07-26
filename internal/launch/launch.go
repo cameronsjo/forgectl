@@ -70,6 +70,47 @@ func AgentsArgs(p Profile, agentArgs []string) []string {
 	return append(out, agentArgs[1:]...)
 }
 
+// CodexSessionArgs translates the launch interview modes to Codex-native
+// commands: codex, codex resume --last, and codex fork --last.
+func CodexSessionArgs(p Profile, model string, mode SessionMode) []string {
+	var args []string
+	switch mode {
+	case Resume:
+		args = append(args, "resume", "--last")
+	case Fork:
+		args = append(args, "fork", "--last")
+	}
+	args = append(args,
+		"--ask-for-approval", p.ApprovalPolicy,
+		"--sandbox", p.Sandbox,
+	)
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	for _, d := range p.AddDir {
+		args = append(args, "--add-dir", d)
+	}
+	return args
+}
+
+// CodexExecArgs runs a non-interactive Codex session. `codex exec` currently
+// accepts approval policy through its native config override rather than the
+// interactive `--ask-for-approval` flag.
+func CodexExecArgs(p Profile, userArgs []string) []string {
+	args := []string{
+		"exec",
+		"--config", fmt.Sprintf("approval_policy=%q", p.ApprovalPolicy),
+		"--sandbox", p.Sandbox,
+	}
+	if p.Model != "" {
+		args = append(args, "--model", p.Model)
+	}
+	for _, d := range p.AddDir {
+		args = append(args, "--add-dir", d)
+	}
+	return append(args, userArgs...)
+}
+
 // IsAgentsPassthrough reports whether `claude agents …` is a scripting/help
 // invocation that must reach claude byte-clean: no posture injection, no banner.
 func IsAgentsPassthrough(agentArgs []string) bool {
@@ -131,6 +172,11 @@ func MergeMaps(base, over map[string]string) map[string]string {
 // it never corrupts piped stdout (e.g. `forgectl launch agents --json | jq`).
 func Banner(w io.Writer, args []string) {
 	_, _ = fmt.Fprintln(w, "→ claude "+strings.Join(args, " "))
+}
+
+// HarnessBanner writes an informational launch line for either CLI.
+func HarnessBanner(w io.Writer, harness string, args []string) {
+	_, _ = fmt.Fprintln(w, "→ "+harness+" "+strings.Join(args, " "))
 }
 
 // Exec replaces the current process with claude. On success it never returns, so

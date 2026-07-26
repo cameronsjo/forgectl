@@ -102,10 +102,10 @@ default_type = ""           # empty = every kind; node|python|go|build
 // required, via config or $FORGECTL_SESSIONS_DSN) and machine's baked default
 // is the current machine's short hostname — neither is a value this template
 // can bake in without lying on a different machine, so both stay commented.
-// metrics_dir/runbooks_dir have home-joined baked defaults, but sync.go
+// metrics_dir/runbooks_dir have state-home-derived baked defaults, but sync.go
 // (internal/sessions/sync.go) reads a config-supplied value LITERALLY — it does
 // NOT expand ~ the way clean/bench do — so an active `metrics_dir =
-// "~/.claude/metrics"` would resolve to a directory named "~" and silently
+// "~/.local/state/cadence/metrics"` would resolve to a directory named "~" and silently
 // break `forgectl sessions sync` (every session skipped, exit 0). They stay
 // commented so the absent-key fallback (the correctly home-expanded default)
 // applies; the annotation warns anyone who uncomments to use an absolute path.
@@ -114,8 +114,8 @@ const sessionsScaffold = `
 [sessions]
 # dsn = "postgres://user@host:5433/sessions_mart" # or $FORGECTL_SESSIONS_DSN; required
 # machine = "" # default: short hostname
-# metrics_dir  = ""  # default: ~/.claude/metrics — set an ABSOLUTE path (~ is NOT expanded for this key)
-# runbooks_dir = ""  # default: ~/.claude/cadence/runbooks — set an ABSOLUTE path (~ is NOT expanded)
+# metrics_dir  = ""  # default: ${XDG_STATE_HOME:-~/.local/state}/cadence/metrics
+# runbooks_dir = ""  # default: ${XDG_STATE_HOME:-~/.local/state}/cadence/runbooks
 `
 
 // reviewScaffold is the [review] section. owners mirrors

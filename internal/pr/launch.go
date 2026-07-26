@@ -76,9 +76,50 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) er
 		return c.launchInline(ctx, sess, cfg)
 	case BareTUIEscalation:
 		return fmt.Errorf("agent %q (bare-TUI escalation) is not yet wired", sess.Agent)
+	case CodexExec:
+		return c.launchCodex(ctx, sess, cfg)
 	default:
 		return fmt.Errorf("unknown launch path %v for agent %q", path, sess.Agent)
 	}
+}
+
+// launchCodex dispatches `codex exec` with a tested compensating sandbox.
+// Remote PR reviews are read-only. Local reviews use workspace-write plus the
+// dedicated findings directory as their sole additional writable root.
+func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Config) error {
+	codexPath, err := launch.CodexPath(cfg.Launch.Defaults)
+	if err != nil {
+		return fmt.Errorf("resolve codex binary: %w", err)
+	}
+	resolved := launch.Resolve(cfg.Launch, sess.Workspace)
+	profile := launch.Profile{
+		Harness:        "codex",
+		ApprovalPolicy: "never",
+		Sandbox:        "read-only",
+	}
+	if resolved.Harness == "codex" {
+		profile.Model = resolved.Model
+	}
+	prompt := reviewPrompt
+	if sess.Ref.IsLocal() {
+		profile.Sandbox = "workspace-write"
+		profile.AddDir = []string{sess.FindingsDir}
+		prompt = localReviewPrompt(sess.FindingsDir)
+	}
+	codexArgs := launch.CodexExecArgs(profile, []string{prompt})
+	args := []string{
+		"new-window",
+		"-t", c.tmuxSession,
+		"-n", windowName(sess.Ref),
+		"-c", sess.Workspace,
+		"--", codexPath,
+	}
+	args = append(args, codexArgs...)
+	if _, err := c.run.Run(ctx, "tmux", args...); err != nil {
+		return fmt.Errorf("open Codex review window: %w", err)
+	}
+	slog.Info("Successfully dispatched Codex clean-room review.", "ref", sess.Ref.String(), "window", c.windowTarget(sess.Ref))
+	return nil
 }
 
 // launchInline composes the claude argv and opens it in a tmux window rooted

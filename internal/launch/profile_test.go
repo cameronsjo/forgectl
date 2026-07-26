@@ -120,6 +120,68 @@ func TestResolve_AllowDangerOverrideToFalse(t *testing.T) {
 	}
 }
 
+func TestResolve_CodexHarnessAndNativePosture(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{
+			Harness:        "codex",
+			Model:          "gpt-5",
+			ApprovalPolicy: "on-request",
+			Sandbox:        "workspace-write",
+		},
+		Projects: []config.LaunchProject{
+			{
+				Match:          "~/p",
+				ApprovalPolicy: "never",
+				Sandbox:        "read-only",
+			},
+		},
+	}
+	got := resolve(lc, "/home/me/p/repo", "/home/me")
+	if got.Harness != "codex" || got.Model != "gpt-5" ||
+		got.ApprovalPolicy != "never" || got.Sandbox != "read-only" {
+		t.Errorf("resolved Codex posture = %+v", got)
+	}
+}
+
+func TestResolve_CodexProjectDoesNotInheritClaudeDefaultModel(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Model: "opus"},
+		Projects: []config.LaunchProject{{
+			Match:   "~/p",
+			Harness: "codex",
+		}},
+	}
+	got := resolve(lc, "/home/me/p/repo", "/home/me")
+	if got.Model != "" {
+		t.Fatalf("Codex project inherited Claude model: %q", got.Model)
+	}
+}
+
+func TestProfileValidate_CodexEnums(t *testing.T) {
+	valid := Profile{
+		Harness:        "codex",
+		ApprovalPolicy: "never",
+		Sandbox:        "read-only",
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid profile: %v", err)
+	}
+	valid.ApprovalPolicy = "ask-sometimes"
+	if err := valid.Validate(); err == nil {
+		t.Fatal("invalid approval policy accepted")
+	}
+	valid.ApprovalPolicy = "never"
+	valid.Sandbox = "host-everything"
+	if err := valid.Validate(); err == nil {
+		t.Fatal("invalid sandbox accepted")
+	}
+	valid.Sandbox = "read-only"
+	valid.Model = "opus"
+	if err := valid.Validate(); err == nil {
+		t.Fatal("Claude model accepted for Codex")
+	}
+}
+
 func TestResolve_EnvMerge_ProjectWins(t *testing.T) {
 	lc := config.LaunchConfig{
 		Defaults: config.LaunchDefaults{Env: map[string]string{"A": "1", "B": "2"}},

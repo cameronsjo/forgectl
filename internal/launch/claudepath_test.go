@@ -3,6 +3,7 @@ package launch
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -46,4 +47,28 @@ func TestClaudePath_ExpandsTilde(t *testing.T) {
 			t.Errorf("ClaudePath = %q, want %q (env tilde expanded, wins over config)", got, stub)
 		}
 	})
+}
+
+func TestCodexPath_EnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FORGECTL_CODEX_BIN", path)
+	got, err := CodexPath(config.LaunchDefaults{})
+	if err != nil {
+		t.Fatalf("CodexPath: %v", err)
+	}
+	if got != path {
+		t.Errorf("CodexPath = %q, want %q", got, path)
+	}
+}
+
+func TestCodexPath_InvalidOverrideNamesSource(t *testing.T) {
+	t.Setenv("FORGECTL_CODEX_BIN", "/no/such/codex")
+	_, err := CodexPath(config.LaunchDefaults{})
+	if err == nil || !strings.Contains(err.Error(), "FORGECTL_CODEX_BIN") {
+		t.Fatalf("CodexPath error = %v, want source attribution", err)
+	}
 }

@@ -53,9 +53,15 @@ func printLaunchProfile(w io.Writer, p launch.Profile, cwd, confPath string) {
 		matched = launchDimStyle.Render("(defaults only)")
 	}
 	row("matched", matched)
+	row("harness", p.Harness)
 	row("model", p.Model)
-	row("permission", p.PermissionMode)
-	row("allow danger", fmt.Sprintf("%t", p.AllowDanger))
+	if p.Harness == "codex" {
+		row("approval", p.ApprovalPolicy)
+		row("sandbox", p.Sandbox)
+	} else {
+		row("permission", p.PermissionMode)
+		row("allow danger", fmt.Sprintf("%t", p.AllowDanger))
+	}
 
 	if len(p.Env) > 0 {
 		keys := launch.SortedEnvKeys(p.Env)
