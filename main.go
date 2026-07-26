@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-License-Identifier: Apache-2.0 WITH Commons-Clause
 
 // Command forgectl is a personal dev-experience CLI for the headless
 // workbench. Bare invocation opens a TUI menu (thumb mode); typed verbs drive

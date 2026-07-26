@@ -310,8 +310,8 @@ telemetry     = false                     # opt-in: inject OTLP env into `forgec
 
 ## License
 
-[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) — source-available, not OSI open source.
+[Apache-2.0](LICENSE) WITH [Commons Clause](https://commonsclause.com/) — source-available, not OSI open source.
 
-Noncommercial use is free: use it, modify it, fork it, share it. Commercial use — shipping it inside a product, redistribution for commercial gain, or any need for support or warranty — requires a commercial license. Reach out to Cameron Sjo to arrange one; all commercial rights are reserved.
+Use it, modify it, fork it, share it — including commercially and in-house at your company. The one restriction: you may not **sell** the software, meaning you may not provide it to third parties for a fee or other consideration (including paid hosting or consulting/support offerings) where the value derives substantially from forgectl's own functionality.
 
-Versions previously released under MIT remain available under MIT — relicensing binds only future releases, not anything already published.
+Relicensing binds only future releases, not anything already published: `v0.1.0`–`v0.5.0` remain available under MIT, and `v0.6.0`, `v0.7.0`, and `v0.7.1` remain available under PolyForm Noncommercial 1.0.0. Apache-2.0 with Commons Clause applies from the next release onward.
