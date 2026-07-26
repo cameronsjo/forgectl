@@ -276,8 +276,8 @@ Resolution expands `~`, picks the `[[launch.project]]` whose `match` is the **lo
 
 - **Injected posture first, user args last** — a user-supplied flag (e.g. `--model`) overrides the profile because Claude Code is last-flag-wins.
 - **`agents` is Claude-only** — Codex profiles reject the passthrough and point
-  to Cadence role skills. Claude retains its agents-valid injection and
-  byte-clean `--json`/`--help` passthrough.
+  out that no Codex adapter ships. Claude retains its agents-valid injection
+  and byte-clean `--json`/`--help` passthrough.
 
 **Choosing the binary** uses env → config → PATH:
 `FORGECTL_CLAUDE_BIN` / `binary_path` / `claude`, or

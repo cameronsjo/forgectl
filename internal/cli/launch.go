@@ -135,7 +135,7 @@ func launchExec(cfg config.Config, args []string) error {
 	}
 	if profile.Harness == "codex" && len(args) > 0 && args[0] == "agents" {
 		return fmt.Errorf(
-			"`launch agents` is Claude-only; install and invoke the Cadence role skills in Codex instead",
+			"`launch agents` is Claude-only and has no Codex adapter; invoke Codex directly or switch this launch profile to Claude",
 		)
 	}
 

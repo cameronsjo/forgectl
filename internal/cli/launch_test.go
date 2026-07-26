@@ -508,7 +508,7 @@ sandbox = "read-only"
 	if err == nil {
 		t.Fatal("Codex launch agents passthrough should be rejected")
 	}
-	for _, wantText := range []string{"Claude-only", "Cadence role skills"} {
+	for _, wantText := range []string{"Claude-only", "no Codex adapter"} {
 		if !strings.Contains(stderr, wantText) {
 			t.Errorf("stderr missing %q: %s", wantText, stderr)
 		}
