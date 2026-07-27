@@ -4,7 +4,7 @@ import "testing"
 
 // likeEscape must neutralize the LIKE/ILIKE metacharacters so a `why` fallback
 // query matches as a literal substring, not a pattern. A DB-free unit test:
-// the integration tests that exercise the query itself skip without a mart DSN.
+// the integration tests that exercise the query itself skip without a concordance DSN.
 func TestLikeEscape(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"plain", "plain"},

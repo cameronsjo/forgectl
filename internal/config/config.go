@@ -49,8 +49,8 @@ const logKeepDays = 7
 //	[clean]              # forgectl clean — dep/build-dir reclaim
 //	default_root = "~/Projects"      # --root default when the flag is omitted
 //	default_type = ""                # --type default: node|python|go|build, "" = all
-//	[sessions]           # forgectl sessions — cross-machine operational mart ETL
-//	dsn     = "postgres://user@host:5433/sessions_mart" # password via ~/.pgpass; env FORGECTL_SESSIONS_DSN wins
+//	[sessions]           # forgectl sessions — cross-machine operational concordance ETL
+//	dsn     = "postgres://user@host:5433/concordance" # password via ~/.pgpass; env FORGECTL_SESSIONS_DSN wins
 //	machine = ""                     # provenance label; default: short hostname
 //	[review]             # forgectl review — cross-project work inventory
 //	owners = ["cameronsjo"]          # gh search --owner scope; default cameronsjo
@@ -172,7 +172,7 @@ func (cc CleanConfig) IsZero() bool {
 }
 
 // SessionsConfig is the [sessions] section: how `forgectl sessions` reaches
-// the cross-machine operational mart (an always-on Postgres holding the
+// the cross-machine operational concordance (an always-on Postgres holding the
 // session index + runbook full-text index). A zero value means "section
 // absent" — internal/sessions applies its own defaults (metrics/runbooks
 // under ~/.claude, machine from the short hostname) and requires a DSN from
@@ -180,7 +180,7 @@ func (cc CleanConfig) IsZero() bool {
 // resolves it from ~/.pgpass (libpq-compatible), keeping the secret outside
 // the repo and the config file.
 type SessionsConfig struct {
-	DSN         string `toml:"dsn"`          // e.g. postgres://user@host:5433/sessions_mart
+	DSN         string `toml:"dsn"`          // e.g. postgres://user@host:5433/concordance
 	Machine     string `toml:"machine"`      // provenance label; default: short hostname
 	MetricsDir  string `toml:"metrics_dir"`  // default ~/.claude/metrics
 	RunbooksDir string `toml:"runbooks_dir"` // default ~/.claude/cadence/runbooks

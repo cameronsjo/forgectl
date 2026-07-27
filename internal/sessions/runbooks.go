@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// RunbookRow is one derived full-text index row bound for the mart's
+// RunbookRow is one derived full-text index row bound for the concordance's
 // `runbooks` table. Markdown is the source of truth (plan D4); these rows are
 // droppable and regenerable. Path is relative to the corpus root — the
 // upsert key, identical across machines syncing the same corpus.
@@ -27,7 +27,7 @@ type RunbookRow struct {
 // ScanRunbooks walks the corpus root for *.md files and parses each into an
 // index row. A missing root is not an error — the corpus may not exist on
 // this machine yet (its relocation is a downstream item); the sync stage then
-// leaves the mart's index untouched.
+// leaves the concordance's index untouched.
 func ScanRunbooks(root, machine string) ([]RunbookRow, error) {
 	info, err := os.Stat(root)
 	if os.IsNotExist(err) {
@@ -48,7 +48,7 @@ func ScanRunbooks(root, machine string) ([]RunbookRow, error) {
 		}
 		// Never follow symlinks: os.ReadFile would read the TARGET, letting a
 		// planted .md symlink exfiltrate an arbitrary local file (~/.pgpass,
-		// a key) into the shared cross-machine mart. Real files only.
+		// a key) into the shared cross-machine concordance. Real files only.
 		if d.Type()&fs.ModeSymlink != 0 {
 			slog.Warn("Skipping symlink in runbook corpus — only regular files are indexed.", "path", path)
 			return nil
