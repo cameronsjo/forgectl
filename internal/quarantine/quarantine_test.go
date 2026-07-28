@@ -6,6 +6,10 @@ package quarantine
 //   [x] Happy: PrefixUnderscore scheme renames CLAUDE.md -> _CLAUDE.md
 //   [x] Happy: SuffixQuarantined scheme renames CLAUDE.md -> CLAUDE.md.quarantined
 //   [x] Happy: nested target (.github/copilot-instructions.md) renames only the base name
+//   [x] Happy: a DIRECTORY target (.claude/) is renamed as a unit (_.claude),
+//       and a file inside it rides along with its content intact — issue
+//       #20's verification pass found no test exercising this path directly
+//       (only the separate destructive strip step's test touched it)
 //   [x] Happy: dry-run reports the planned Move but makes ZERO filesystem changes
 //   [x] Happy: a missing target is a no-op (skipped, not an error)
 //   [x] Unhappy: a target containing ".." is rejected before any rename
@@ -16,6 +20,8 @@ package quarantine
 // Restore (Classification: FS mutation, reversal)
 //   [x] Happy: Restore reverses Hide's moves exactly (round-trip)
 //   [x] Happy: Restore is idempotent — a missing quarantined path is a no-op
+//   [x] Happy: a quarantined DIRECTORY restores as a unit, its file's content
+//       round-tripping exactly (see TestHide_DirectoryTarget)
 //
 // DefaultTargets (Classification: pure data)
 //   [x] Happy: exported and non-empty
@@ -86,6 +92,64 @@ func TestHide_NestedTarget_RenamesOnlyBaseName(t *testing.T) {
 	}
 	if _, err := os.Stat(wantTo); err != nil {
 		t.Errorf("renamed nested file should exist, stat err = %v", err)
+	}
+}
+
+// TestHide_DirectoryTarget covers issue #20's verification-pass gap: no
+// test exercised a DIRECTORY quarantine target (.claude/, the default-list
+// entry every other DefaultTargets member is a plain file) end-to-end
+// through Hide AND Restore — only workflow's separate destructive strip
+// step's test touched a directory-shaped target. os.Rename on a directory
+// moves it (and everything inside) as a single filesystem unit; this
+// asserts that holds through both directions of quarantine.
+func TestHide_DirectoryTarget(t *testing.T) {
+	root := t.TempDir()
+	const settingsContent = `{"theme":"dark"}`
+	writeFile(t, filepath.Join(root, ".claude", "settings.json"), settingsContent)
+
+	c := New(&exec.FakeRunner{})
+	moves, err := c.Hide(context.Background(), root, PrefixUnderscore, []string{".claude/"}, false)
+	if err != nil {
+		t.Fatalf("Hide: %v", err)
+	}
+	if len(moves) != 1 {
+		t.Fatalf("expected 1 move, got %d: %+v", len(moves), moves)
+	}
+	wantTo := filepath.Join(root, "_.claude")
+	if moves[0].To != wantTo {
+		t.Errorf("move.To = %q, want %q", moves[0].To, wantTo)
+	}
+
+	info, err := os.Stat(wantTo)
+	if err != nil {
+		t.Fatalf("_.claude should exist after hide, stat err = %v", err)
+	}
+	if !info.IsDir() {
+		t.Errorf("_.claude should still be a directory, got mode %v", info.Mode())
+	}
+	if got := readFile(t, filepath.Join(wantTo, "settings.json")); got != settingsContent {
+		t.Errorf("settings.json content did not ride along with the directory rename, got %q, want %q", got, settingsContent)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".claude")); !os.IsNotExist(err) {
+		t.Errorf(".claude should be renamed away, stat err = %v", err)
+	}
+
+	if err := c.Restore(context.Background(), moves); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	restoredPath := filepath.Join(root, ".claude")
+	info, err = os.Stat(restoredPath)
+	if err != nil {
+		t.Fatalf(".claude should be restored, stat err = %v", err)
+	}
+	if !info.IsDir() {
+		t.Errorf("restored .claude should still be a directory, got mode %v", info.Mode())
+	}
+	if got := readFile(t, filepath.Join(restoredPath, "settings.json")); got != settingsContent {
+		t.Errorf("restored settings.json content = %q, want original content preserved (%q)", got, settingsContent)
+	}
+	if _, err := os.Stat(wantTo); !os.IsNotExist(err) {
+		t.Errorf("_.claude should be gone after restore, stat err = %v", err)
 	}
 }
 
