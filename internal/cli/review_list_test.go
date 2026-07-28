@@ -9,6 +9,8 @@ package cli
 //       dimmed (ANSI under a forced color profile), unreviewed plain
 //   [x] Happy: --kind/--repo filter rows; invalid --kind is an error
 //   [x] Happy: source notes land on stderr, not stdout
+//   [x] Unhappy: a hostile title/label/state/note (ESC + C0 mix, a raw tab)
+//       renders with no control bytes surviving (forgectl#162)
 
 import (
 	"bytes"
@@ -309,5 +311,98 @@ func TestReviewCmd_NotesOnStderr(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "note:") {
 		t.Errorf("degradation note missing from stderr: %q", stderr.String())
+	}
+}
+
+// TestReviewCmd_Table_HostileTitleSanitized pins forgectl#162 end-to-end: a
+// server-supplied title carrying an ESC-based cursor-control sequence (mixed
+// with other C0 bytes) must render with no control bytes surviving in the
+// human table output — the sink the issue calls out (review_list.go's
+// tabwriter render), not just the sanitizer function in isolation.
+func TestReviewCmd_Table_HostileTitleSanitized(t *testing.T) {
+	hostile := review.Item{
+		Kind: review.KindIssue, Host: review.GitHubHost, Owner: "cameronsjo", Repo: "alpha", Number: 1,
+		Title: "safe\x1b[2K\x1b[Gtitle\x00\x07end", Author: "cameronsjo", State: "open",
+		Labels:    []string{"a\x1bb"},
+		UpdatedAt: reviewTestTime,
+	}
+	src := fakeReviewSource{items: []review.Item{hostile}}
+	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"))
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("review: %v", err)
+	}
+
+	out := stdout.String()
+	for _, line := range strings.Split(out, "\n") {
+		if hasControlByte(line) {
+			t.Errorf("rendered table line still contains a control byte: %q", line)
+		}
+	}
+	if !strings.Contains(out, "safe") || !strings.Contains(out, "title") || !strings.Contains(out, "end") {
+		t.Errorf("sanitized title lost its visible content: %q", out)
+	}
+}
+
+// hasControlByte reports whether s contains any C0 control byte (0x00-0x1F)
+// or DEL (0x7F) — the set sanitizeCell is expected to have already removed
+// from anything it processed. Callers split multi-line output on "\n" first,
+// since that legitimate line separator is not itself hostile content.
+func hasControlByte(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// TestReviewStateLabel_TabSanitized pins that reviewStateLabel's output is
+// sanitized at its render call site: a hostile tracker State value carrying
+// a tab (which would otherwise inject a tabwriter column) must not survive
+// into the rendered STATE cell.
+func TestReviewStateLabel_TabSanitized(t *testing.T) {
+	hostile := review.Item{
+		Kind: review.KindIssue, Host: review.GitHubHost, Owner: "cameronsjo", Repo: "alpha", Number: 1,
+		Title: "title", Author: "cameronsjo", State: "open\tINJECTED",
+		UpdatedAt: reviewTestTime,
+	}
+	src := fakeReviewSource{items: []review.Item{hostile}}
+	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"))
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("review: %v", err)
+	}
+	if strings.Contains(stdout.String(), "\t") {
+		t.Errorf("hostile State must not inject a raw tab into the rendered table: %q", stdout.String())
+	}
+}
+
+// TestReviewCmd_HostileNoteSanitized pins the note-line sink the issue calls
+// out as having no sanitizer at all: a degradation note containing an ESC
+// sequence must not reach stderr with its control bytes intact.
+func TestReviewCmd_HostileNoteSanitized(t *testing.T) {
+	src := fakeReviewSource{
+		items: []review.Item{reviewItem(review.KindIssue, "alpha", 1)},
+		notes: []string{"issues(cameronsjo): tea: \x1b[2K\x1b[Guser does not exist"},
+	}
+	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"))
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("review (hostile note): %v", err)
+	}
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if hasControlByte(line) {
+			t.Errorf("stderr note line still contains a control byte: %q", line)
+		}
+	}
+	if !strings.Contains(stderr.String(), "user does not exist") {
+		t.Errorf("sanitized note lost its visible content: %q", stderr.String())
 	}
 }

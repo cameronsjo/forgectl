@@ -27,9 +27,12 @@ func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string
 	if err != nil {
 		return err
 	}
-	// Per-query degradation notes are diagnostics → stderr, never stdout.
+	// Per-query degradation notes are diagnostics → stderr, never stdout. A
+	// note can embed hostile content (a query label built from a config
+	// owner, or an error message that wraps CLI stderr verbatim), so it gets
+	// the same control-byte sanitization every rendered cell does.
 	for _, n := range notes {
-		fmt.Fprintln(cmd.ErrOrStderr(), "note: "+n)
+		fmt.Fprintln(cmd.ErrOrStderr(), "note: "+sanitizeCell(n))
 	}
 
 	items = filterItems(items, kind, repo)
@@ -124,7 +127,7 @@ func renderReviewTable(out, errOut io.Writer, items []review.Item, store *pr.Rev
 			it.Kind, it.Slug(), it.Number,
 			sanitizeCell(it.Title),
 			sanitizeCell(strings.Join(it.Labels, ",")),
-			reviewStateLabel(it)); err != nil {
+			sanitizeCell(reviewStateLabel(it))); err != nil {
 			return err
 		}
 	}

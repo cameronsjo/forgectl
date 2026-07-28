@@ -146,12 +146,24 @@ func renderPRTable(out, errOut io.Writer, prs []pr.PR, store *pr.ReviewedStore) 
 	return nil
 }
 
-// sanitizeCell strips tabs and newlines from a hostile gh-supplied string
-// (a PR title) so a crafted value can't inject tabwriter columns or extra
-// physical lines — either would break column alignment and, worse, the
-// post-flush per-row dim indexing that assumes one line per PR.
+// sanitizeCell strips terminal-control bytes from a hostile server-supplied
+// string (a title, label, or state — gh AND tea both feed this, and tea's
+// self-hosted Gitea is a weaker-trust origin where any account holder authors
+// titles) so a crafted value can't inject tabwriter columns, extra physical
+// lines, or raw cursor-control sequences into the rendered output. Either
+// would break column alignment and, worse, the post-flush per-row dim
+// indexing that assumes one line per row — or let a title rewrite arbitrary
+// parts of its own rendered line (e.g. "\x1b[2K\x1b[G..." clears and rewrites
+// the current line). Every C0 control byte (0x00-0x1F — includes ESC 0x1B,
+// tab, newline, CR) plus DEL (0x7F) is replaced with a space; everything
+// else, including printable non-ASCII/Unicode, passes through unchanged.
 func sanitizeCell(s string) string {
-	return strings.NewReplacer("\t", " ", "\n", " ", "\r", " ").Replace(s)
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // prStateLabel renders a PR's display state: "draft" for a draft, else the

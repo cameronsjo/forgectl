@@ -10,6 +10,10 @@ package cli
 //   [x] Happy: per-query degradation notes land on stderr, not stdout
 //
 // renderPRTable / emitPRsJSON are exercised through the command above.
+//
+// sanitizeCell (Classification: hostile-input parser)
+//   [x] Unhappy: every C0 control byte (incl. ESC) and DEL is replaced with a
+//       space; printable ASCII and Unicode pass through unchanged
 
 import (
 	"bytes"
@@ -186,5 +190,34 @@ func TestPrsCmd_DegradationNotesOnStderr(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "note:") {
 		t.Errorf("degradation note missing from stderr: %q", stderr.String())
+	}
+}
+
+// TestSanitizeCell_StripsAllC0AndDEL pins the hardened sanitizer (forgectl#162):
+// a crafted title carrying an ESC-based cursor-control sequence plus a mix of
+// other C0 bytes and DEL must come out with no control bytes at all, while
+// printable ASCII and Unicode survive untouched.
+func TestSanitizeCell_StripsAllC0AndDEL(t *testing.T) {
+	hostile := "safe\x1b[2K\x1b[Gtitle\x00\x01\x07\x7fend\tmore\nlines\rhere"
+	got := sanitizeCell(hostile)
+
+	for i := 0; i < 0x20; i++ {
+		if strings.ContainsRune(got, rune(i)) {
+			t.Errorf("sanitizeCell output still contains C0 byte 0x%02x: %q", i, got)
+		}
+	}
+	if strings.ContainsRune(got, 0x7f) {
+		t.Errorf("sanitizeCell output still contains DEL: %q", got)
+	}
+	for _, want := range []string{"safe", "title", "end", "more", "lines", "here"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("sanitizeCell dropped visible content %q: got %q", want, got)
+		}
+	}
+
+	// Printable Unicode (non-ASCII) must pass through unchanged.
+	unicodeTitle := "café émoji \U0001F600 done"
+	if got := sanitizeCell(unicodeTitle); got != unicodeTitle {
+		t.Errorf("sanitizeCell must not touch printable Unicode: got %q, want %q", got, unicodeTitle)
 	}
 }
