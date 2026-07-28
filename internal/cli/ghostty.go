@@ -91,7 +91,11 @@ func newGhosttyThemesCmd(client *ghosttypkg.Client) *cobra.Command {
 				if th.Active {
 					marker = "*"
 				}
-				fmt.Fprintf(w, "%s\t%s\n", marker, th.Name)
+				// sanitizeCell (pr_prs.go, forgectl#162): theme names are
+				// genuinely third-party once a theme pack is installed
+				// under ~/.config/ghostty/themes/, so a crafted name can't
+				// carry a raw control byte into the rendered table.
+				fmt.Fprintf(w, "%s\t%s\n", marker, sanitizeCell(th.Name))
 			}
 			return w.Flush()
 		},

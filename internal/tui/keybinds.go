@@ -30,8 +30,30 @@ func KeybindSheet(rows []ghostty.Keybind, noIcons bool) string {
 		if row.Comment != "" {
 			desc = row.Comment
 		}
-		b.WriteString("  " + triggerCol.Render(row.Trigger) + styleMuted.Render(desc) + "\n")
+		trigger := sanitizeControlBytes(row.Trigger)
+		desc = sanitizeControlBytes(desc)
+		b.WriteString("  " + triggerCol.Render(trigger) + styleMuted.Render(desc) + "\n")
 	}
 
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// sanitizeControlBytes strips terminal-control bytes from ghostty CLI output
+// (Trigger/Action/Comment all come from the `+list-keybinds` process, itself
+// echoing the user's config file verbatim) before it reaches the TTY, so a
+// crafted config entry can't inject cursor-control sequences or extra
+// physical lines into the rendered sheet. Mirrors internal/cli's sanitizeCell
+// (internal/cli/pr_prs.go:160, forgectl#162) — duplicated rather than
+// exported because tui and cli don't share a util package and the two
+// render different untrusted-input classes (a remote PR title vs. a local
+// config file) for the same reason (raw terminal output). Every C0 control
+// byte (0x00-0x1F, including ESC/tab/newline/CR) plus DEL (0x7F) becomes a
+// space; everything else, including printable Unicode, passes through.
+func sanitizeControlBytes(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
 }
