@@ -112,7 +112,9 @@ forgectl clean --type node               # only one type: node|python|go|build
 forgectl clean --apply                   # DESTRUCTIVE: delete everything reclaimable, after a confirmation
                                           #   prompt (skips dirty git trees unless --force)
 forgectl clean --caches --apply          # DESTRUCTIVE, opt-in: also clear detected package-manager
-                                          #   caches (npm/pnpm/pip/go/brew), each its own confirmation
+                                          #   caches (npm/pnpm/pip/go/brew) behind one confirmation;
+                                          #   brew ALSO removes old formula versions from the Cellar.
+                                          #   Not combinable with --type (it only filters dirs)
 forgectl clean --docker --apply          # DESTRUCTIVE, opt-in: also prune docker (containers/images/
                                           #   volumes/build cache), its own confirmation
 

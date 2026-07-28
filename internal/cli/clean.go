@@ -99,7 +99,9 @@ verb that clears only the cache.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if typeFlag != "" && (caches || docker) {
-				return fmt.Errorf("--type only filters the dep/build-dir pass; it cannot be combined with --caches or --docker (they scan a fixed target set, not one --type's node|python|go|build vocabulary describes)")
+				// Lead with a word, not the flag token: fang capitalizes the
+				// first letter of a styled error, and "--Type" is not a flag.
+				return fmt.Errorf("cannot combine --type with --caches or --docker: --type only filters the dep/build-dir pass (the other passes scan a fixed target set, not the node|python|go|build vocabulary)")
 			}
 			var types []cleanpkg.Kind
 			if typeFlag != "" {
