@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -77,14 +78,29 @@ A project with a dirty (uncommitted) git tree is skipped unless --force —
 a stray uncommitted file inside dist/ shouldn't be nuked silently. .git is
 never a target, and a symlinked directory is never followed out of --root.
 
---caches and --docker are OPT-IN, isolated passes that run independently of
-the dep/build-dir scan above and of each other: each gets its own dry-run
-preview and confirmation prompt, and one tool/category failing to prune
-never blocks the rest. They're opt-in because clearing a warm cache or
+--caches and --docker are OPT-IN passes that run independently of the
+dep/build-dir scan above and of each other — each gets its own dry-run
+preview and confirmation prompt, and a failure in one pass never prevents
+the others from running (their errors are combined and reported together,
+not short-circuited). They're opt-in because clearing a warm cache or
 pruning docker is slower and more disruptive than dep/build-dir reclaim,
-which only removes trivially regenerable output.`,
+which only removes trivially regenerable output.
+
+--type only filters the dep/build-dir pass (its node|python|go|build
+vocabulary doesn't describe a cache or a docker category) and cannot be
+combined with --caches or --docker.
+
+CAUTION: --caches' brew target runs plain "brew cleanup", which ALSO
+removes old versions of every installed formula/cask from the Cellar —
+not just Homebrew's download cache. A deliberately-retained older keg
+(e.g. an unlinked version kept for a known-good rollback) would be removed
+by this. The confirmation prompt names this explicitly; there is no brew
+verb that clears only the cache.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if typeFlag != "" && (caches || docker) {
+				return fmt.Errorf("--type only filters the dep/build-dir pass; it cannot be combined with --caches or --docker (they scan a fixed target set, not one --type's node|python|go|build vocabulary describes)")
+			}
 			var types []cleanpkg.Kind
 			if typeFlag != "" {
 				k, err := cleanpkg.ParseKind(typeFlag)
@@ -103,34 +119,38 @@ which only removes trivially regenerable output.`,
 		},
 	}
 	cmd.Flags().StringVar(&root, "root", "", "root directory to scan (default: ~/Projects, or [clean] default_root)")
-	cmd.Flags().StringVar(&typeFlag, "type", "", "only consider one type: node|python|go|build (default: all)")
+	cmd.Flags().StringVar(&typeFlag, "type", "", "only consider one type: node|python|go|build (default: all; cannot combine with --caches/--docker)")
 	cmd.Flags().DurationVar(&olderThan, "older-than", 0, "only consider targets older than this (e.g. 720h for 30 days)")
 	cmd.Flags().BoolVar(&apply, "apply", false, "delete reclaimable targets, after a confirmation prompt")
 	cmd.Flags().BoolVar(&force, "force", false, "also clean projects with a dirty/uncommitted git tree")
-	cmd.Flags().BoolVar(&caches, "caches", false, "also reclaim detected package-manager caches (npm/pnpm/pip/go/brew) — opt-in, isolated per tool")
+	cmd.Flags().BoolVar(&caches, "caches", false, "also reclaim detected package-manager caches (npm/pnpm/pip/go/brew) — opt-in, isolated per tool; brew ALSO clears old Cellar versions")
 	cmd.Flags().BoolVar(&docker, "docker", false, "also prune docker (containers/images/volumes/build cache) — opt-in, isolated per category")
 	return cmd
 }
 
 // runClean runs the dep/build-dir reclaim pass, then — only when requested
-// — the --caches and --docker opt-in passes, each fully isolated: they run
-// regardless of what the dep/build-dir pass found or decided (nothing to
-// reclaim, cancelled, whatever), and one failing never blocks the others.
+// — the --caches and --docker opt-in passes. All three ACTUALLY run
+// independently: each pass's error is collected rather than returned
+// immediately, so a failure (or a non-zero exit) in an earlier pass never
+// prevents a later one from running — every error is combined and
+// surfaced together at the end (errors.Join returns nil when errs is
+// empty, so the all-success case is unaffected).
 func runClean(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.CleanOptions, includeCaches, includeDocker bool) error {
+	var errs []error
 	if err := runCleanDirs(cmd, client, opts); err != nil {
-		return err
+		errs = append(errs, fmt.Errorf("dep/build-dir pass: %w", err))
 	}
 	if includeCaches {
 		if err := runCleanCaches(cmd, client, opts.Apply); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("caches pass: %w", err))
 		}
 	}
 	if includeDocker {
 		if err := runCleanDocker(cmd, client, opts.Apply); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("docker pass: %w", err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // runCleanDirs is the original dep/build-dir reclaim pass: scans, prints
@@ -235,7 +255,11 @@ func runCleanCaches(cmd *cobra.Command, client *cleanpkg.Client, apply bool) err
 		return nil
 	}
 
-	ok, err := confirm(fmt.Sprintf("Clear %s across %d package-manager cache(s)?", formatBytes(total), detected))
+	prompt := fmt.Sprintf("Clear %s across %d package-manager cache(s)?", formatBytes(total), detected)
+	if hasBrewTarget(items) {
+		prompt += " (brew's cleanup ALSO removes old formula/cask versions from the Cellar, not just its download cache)"
+	}
+	ok, err := confirm(prompt)
 	if err != nil {
 		return err
 	}
@@ -246,21 +270,51 @@ func runCleanCaches(cmd *cobra.Command, client *cleanpkg.Client, apply bool) err
 
 	result := client.PruneCaches(ctx, items)
 	failed := 0
+	var totalReclaimed int64
 	for _, item := range result {
 		switch {
 		case item.Skipped:
 			// Already printed in the preview pass above.
 		case item.Err != nil:
-			fmt.Fprintf(out, "FAILED  %s: %v\n", item.Kind, item.Err)
+			fmt.Fprintf(out, "FAILED  %s: %v\n", cacheDisplayName(item.Kind), item.Err)
 			failed++
 		case item.Applied:
-			fmt.Fprintf(out, "cleared %s (%s)\n", item.Kind, formatBytes(item.Size))
+			// Reclaimed is the ACTUAL measured delta (dirSize before vs
+			// after the prune), never the pre-prune Size estimate.
+			fmt.Fprintf(out, "cleared %s (%s)\n", cacheDisplayName(item.Kind), formatBytes(item.Reclaimed))
+			totalReclaimed += item.Reclaimed
 		}
 	}
+	fmt.Fprintf(out, "\nreclaimed %s\n", formatBytes(totalReclaimed))
 	if failed > 0 {
 		return fmt.Errorf("%d cache(s) failed to clear", failed)
 	}
 	return nil
+}
+
+// hasBrewTarget reports whether items includes a detected (non-skipped)
+// brew target — the CLI's signal to append the Cellar-impact caveat to the
+// confirmation prompt.
+func hasBrewTarget(items []cleanpkg.CacheItem) bool {
+	for _, item := range items {
+		if !item.Skipped && item.Kind == cleanpkg.CacheBrew {
+			return true
+		}
+	}
+	return false
+}
+
+// cacheDisplayName renders a human-facing label for kind — identical to the
+// bare Kind for every probe except brew, whose underlying `brew cleanup`
+// command ALSO removes old formula/cask versions from the Cellar, not just
+// its download cache. Disclosed here so the scan item, the confirmation
+// prompt (see hasBrewTarget above), and clean.go's Long help never promise
+// a narrower blast radius than the command actually has.
+func cacheDisplayName(kind cleanpkg.CacheKind) string {
+	if kind == cleanpkg.CacheBrew {
+		return "brew (cache + old Cellar versions)"
+	}
+	return string(kind)
 }
 
 // runCleanDocker is the --docker opt-in pass: a dry-run preview of docker's
@@ -302,6 +356,8 @@ func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool) err
 
 	result := client.PruneDocker(ctx, items)
 	failed := 0
+	var totalReclaimed int64
+	anyUnknown := false
 	for _, item := range result {
 		switch {
 		case item.Skipped:
@@ -309,10 +365,24 @@ func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool) err
 		case item.Err != nil:
 			fmt.Fprintf(out, "FAILED  %s: %v\n", item.Kind, item.Err)
 			failed++
+		case item.Applied && item.ReclaimedKnown:
+			// Reclaimed is parsed from docker's OWN prune-command output,
+			// never the pre-prune Reclaimable estimate.
+			fmt.Fprintf(out, "pruned %s (%s)\n", item.Kind, formatBytes(item.Reclaimed))
+			totalReclaimed += item.Reclaimed
 		case item.Applied:
-			fmt.Fprintf(out, "pruned %s\n", item.Kind)
+			// The prune succeeded, but its output had no parseable "Total"
+			// summary line (a docker version difference, an empty prune) —
+			// say so rather than silently reporting a fabricated zero.
+			fmt.Fprintf(out, "pruned %s (reclaimed size unknown — no parseable total in docker's output)\n", item.Kind)
+			anyUnknown = true
 		}
 	}
+	msg := fmt.Sprintf("\nreclaimed %s from docker", formatBytes(totalReclaimed))
+	if anyUnknown {
+		msg += " (at least — one or more categories' reclaimed size could not be parsed)"
+	}
+	fmt.Fprintln(out, msg)
 	if failed > 0 {
 		return fmt.Errorf("%d docker categories failed to prune", failed)
 	}
@@ -320,14 +390,17 @@ func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool) err
 }
 
 // printCacheItems prints the --caches dry-run report: one line per probed
-// tool, grouped by whether it was detected.
+// tool, grouped by whether it was detected. Uses cacheDisplayName (not the
+// bare Kind) so the Cellar-impact disclosure appears in the scan preview
+// too, not only the confirmation prompt — no fixed-width padding, since
+// brew's disclosed label is deliberately longer than the others.
 func printCacheItems(out io.Writer, items []cleanpkg.CacheItem) {
 	for _, item := range items {
 		if item.Skipped {
-			fmt.Fprintf(out, "skip  %-5s — %s\n", item.Kind, item.SkipReason)
+			fmt.Fprintf(out, "skip  %s — %s\n", cacheDisplayName(item.Kind), item.SkipReason)
 			continue
 		}
-		fmt.Fprintf(out, "%-5s %s — %s\n", item.Kind, item.Path, formatBytes(item.Size))
+		fmt.Fprintf(out, "%s %s — %s\n", cacheDisplayName(item.Kind), item.Path, formatBytes(item.Size))
 	}
 }
 

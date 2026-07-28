@@ -30,9 +30,16 @@ var dockerKindOrder = []DockerKind{DockerContainers, DockerImages, DockerVolumes
 
 // dockerPruneArgs is one prune command per category. `-f`/`-af` skips
 // docker's OWN interactive confirmation — forgectl's confirm() prompt
-// already gated this before PruneDocker is ever called — and the `until=`
-// filters mirror docker-cleanup.sh exactly, so only aged-out resources are
-// targeted rather than everything currently unused.
+// already gated this before PruneDocker is ever called. The `until=`
+// filters mirror docker-cleanup.sh, so containers/images/build-cache only
+// target aged-out resources — EXCEPT volumes: `docker volume prune` has NO
+// `until=` support at all (its only filter is `label=`), so this category
+// removes every currently-unused volume regardless of age, not just old
+// ones. Separately, on Docker Engine < 23 `volume prune` removed ALL unused
+// volumes including named ones, while 23+ narrowed the unfiltered default to
+// anonymous volumes only (named volumes need `-a` there). forgectl doesn't
+// detect or gate on the Engine version — this simply runs whatever the
+// local `docker` binary's own default does.
 var dockerPruneArgs = map[DockerKind][]string{
 	DockerContainers: {"container", "prune", "-f", "--filter", "until=24h"},
 	DockerImages:     {"image", "prune", "-af", "--filter", "until=168h"},
@@ -59,17 +66,21 @@ var dockerKindToType = map[DockerKind]string{
 }
 
 // dockerSizeUnits converts docker's human-readable size unit suffixes
-// ("800MB", "1.2GB") to a byte multiplier. docker's go-units formatter uses
-// decimal-looking labels (MB/GB, not MiB/GiB) but IEC (1024-based) values —
-// matched here rather than guessed at 1000-based, to stay consistent with
-// dirSize's own byte-accurate accounting elsewhere in this package.
+// ("800MB", "1.2GB") to a byte multiplier. docker's go-units HumanSize
+// formatter is DECIMAL (base 1000: kB/MB/GB), not IEC/binary (base 1024:
+// KiB/MiB/GiB) — confirmed against live `docker system df` output, whose
+// unit strings are lowercase-k ("kB"), the go-units decimal convention;
+// IEC units would render uppercase-K ("KiB"). An earlier version of this
+// map used 1024-based multipliers, which inflated every parsed figure by
+// up to ~10% (compounding at TB scale) — every prompt/report byte count
+// this package prints was silently wrong until this fix.
 var dockerSizeUnits = map[string]int64{
 	"B":  1,
-	"KB": 1024,
-	"MB": 1024 * 1024,
-	"GB": 1024 * 1024 * 1024,
-	"TB": 1024 * 1024 * 1024 * 1024,
-	"PB": 1024 * 1024 * 1024 * 1024 * 1024,
+	"KB": 1000,
+	"MB": 1000 * 1000,
+	"GB": 1000 * 1000 * 1000,
+	"TB": 1000 * 1000 * 1000 * 1000,
+	"PB": 1000 * 1000 * 1000 * 1000 * 1000,
 }
 
 // dockerDFRow is the on-the-wire shape of one `docker system df --format
@@ -104,6 +115,18 @@ type DockerItem struct {
 
 	Applied bool
 	Err     error
+
+	// Reclaimed is the ACTUAL bytes docker itself reported freeing, parsed
+	// from the prune command's own stdout summary line ("Total reclaimed
+	// space: 42B" for container/image/volume prune, "Total: 500MB" for
+	// builder prune) — never independently re-measured, and never the
+	// pre-prune Reclaimable estimate. ReclaimedKnown is false when Applied
+	// is false, OR when the prune succeeded but its output had no
+	// recognizable summary line (docker version differences, an empty
+	// prune) — callers must not treat a zero Reclaimed as "freed nothing"
+	// unless ReclaimedKnown is also true.
+	Reclaimed      int64
+	ReclaimedKnown bool
 }
 
 // ScanDocker reports each category's CURRENT reclaimable size via `docker
@@ -184,10 +207,41 @@ func parseDockerSize(s string) (int64, bool) {
 	return int64(f * float64(mult)), true
 }
 
+// parseReclaimedFromPruneOutput extracts the actual bytes docker itself
+// reports freeing from a prune command's own stdout. Every docker prune
+// subcommand ends its output with a summary line containing "otal"
+// (docker's exact wording varies across subcommands and versions — e.g.
+// "Total reclaimed space: 42B" for container/image/volume prune, "Total:
+// 500MB" for builder prune — matching on the substring rather than a fixed
+// phrase covers both) followed by a size token as its last field. Returns
+// (0, false) when no such line is found or its trailing token doesn't
+// parse — callers must then label the amount unknown rather than reporting
+// a fabricated zero as "nothing reclaimed".
+func parseReclaimedFromPruneOutput(out string) (int64, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(strings.ToLower(line), "otal") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if n, ok := parseDockerSize(fields[len(fields)-1]); ok {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
 // PruneDocker runs each non-skipped category's own prune command, ISOLATED
 // per category — mirrors docker-cleanup.sh's shape and PruneCaches' per-
 // target isolation: one category failing (docker restarting mid-run, a
 // permissions issue) never blocks the rest.
+//
+// Reclaimed is parsed from the prune command's own stdout (see
+// parseReclaimedFromPruneOutput), never taken from the pre-prune
+// Reclaimable estimate — issue #4's own acceptance criterion is "reports
+// actual reclaimed bytes".
 func (c *Client) PruneDocker(ctx context.Context, items []DockerItem) []DockerItem {
 	out := make([]DockerItem, len(items))
 	copy(out, items)
@@ -200,13 +254,18 @@ func (c *Client) PruneDocker(ctx context.Context, items []DockerItem) []DockerIt
 		if !ok {
 			continue
 		}
-		if _, err := c.run.Run(ctx, "docker", args...); err != nil {
+		pruneOut, err := c.run.Run(ctx, "docker", args...)
+		if err != nil {
 			out[i].Err = err
 			slog.Error("Failed to prune docker category.", "kind", out[i].Kind, "error", err)
 			continue
 		}
 		out[i].Applied = true
-		slog.Info("Successfully pruned docker category.", "kind", out[i].Kind, "reclaimable", out[i].Reclaimable)
+		if n, ok := parseReclaimedFromPruneOutput(pruneOut); ok {
+			out[i].Reclaimed = n
+			out[i].ReclaimedKnown = true
+		}
+		slog.Info("Successfully pruned docker category.", "kind", out[i].Kind, "reclaimed", out[i].Reclaimed, "reclaimedKnown", out[i].ReclaimedKnown)
 	}
 	return out
 }

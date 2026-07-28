@@ -18,6 +18,12 @@ package cli
 //       ZERO prune-command Runner calls — only `docker system df`
 //   [x] Happy: bare `clean` (neither flag) touches no cache/docker Runner
 //       calls at all — the opt-in passes are true opt-in, not always-run
+//   [x] Unhappy: --type combined with --caches or --docker is rejected
+//       before any scan runs (fix round: --type's node|python|go|build
+//       vocabulary doesn't describe a cache or docker category)
+//   [x] Invariant: a real failure in the dep/build-dir pass (scanning a
+//       nonexistent root) does not prevent the --caches pass from running
+//       (fix round: passes are now actually isolated, not just claimed to be)
 
 import (
 	"bytes"
@@ -100,6 +106,79 @@ func TestCleanCmd_InvalidType_RejectedBeforeScan(t *testing.T) {
 
 	if err := cmd.ExecuteContext(context.Background()); err == nil {
 		t.Fatal("expected an error for an unknown --type value")
+	}
+}
+
+// TestCleanCmd_TypeConflictsWithCachesOrDocker pins the fix-round decision:
+// --type only filters the dep/build-dir pass (its node|python|go|build
+// vocabulary doesn't describe a package-manager cache or a docker
+// category), so combining it with --caches or --docker is rejected before
+// any scan runs, rather than silently narrowing (or being silently
+// ignored by) the other passes.
+func TestCleanCmd_TypeConflictsWithCachesOrDocker(t *testing.T) {
+	for _, args := range [][]string{
+		{"--type", "node", "--caches"},
+		{"--type", "node", "--docker"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			root := t.TempDir()
+			fake := &exec.FakeRunner{}
+			client := cleanpkg.New(fake, cleanpkg.WithRoot(root))
+			cmd := newCleanCmdForClient(client)
+			var stdout, stderr bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			cmd.SetArgs(args)
+
+			if err := cmd.ExecuteContext(context.Background()); err == nil {
+				t.Fatal("expected an error combining --type with --caches/--docker")
+			}
+			if len(fake.Calls) != 0 {
+				t.Errorf("the conflict must be rejected before any scan runs; saw %d Runner calls: %+v", len(fake.Calls), fake.Calls)
+			}
+		})
+	}
+}
+
+// TestCleanCmd_DirsPassFailureDoesNotBlockCachesPass pins the fix-round
+// isolation fix: a real failure in the dep/build-dir pass must not prevent
+// the --caches pass from running — runClean collects each pass's error
+// rather than returning on the first one. The failure is forced by
+// unsetting HOME: with no --root flag and no [clean] default_root, a
+// Client built via New(fake) (no WithRoot) has an unresolvable default
+// root, and os.UserHomeDir() genuinely errors when $HOME is empty (Go's
+// os package treats an empty HOME identically to an unset one on Unix,
+// including macOS) — so ScanReport's "no root to scan" error is real, not
+// simulated. Scanning a merely-nonexistent PATH does NOT work for this:
+// Scan's walk is deliberately fail-safe and swallows a missing root
+// silently (see scan.go's WalkDir callback).
+func TestCleanCmd_DirsPassFailureDoesNotBlockCachesPass(t *testing.T) {
+	t.Setenv("HOME", "")
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "npm" {
+			return "/fake/npm/cache", nil
+		}
+		return "", nil
+	}}
+	client := cleanpkg.New(fake) // no WithRoot: root resolution genuinely fails
+	cmd := newCleanCmdForClient(client)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--caches"})
+
+	if err := cmd.ExecuteContext(context.Background()); err == nil {
+		t.Fatal("expected an error: no root to scan (HOME unset, no --root, no [clean] default_root)")
+	}
+
+	sawNpmLocate := false
+	for _, call := range fake.Calls {
+		if call.Name == "npm" {
+			sawNpmLocate = true
+		}
+	}
+	if !sawNpmLocate {
+		t.Error("the caches pass must still run despite the dep/build-dir pass failing (isolation) — no npm locate call was seen")
 	}
 }
 

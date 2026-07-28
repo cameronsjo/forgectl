@@ -4,8 +4,15 @@ package clean
 //
 // parseDockerSize (Classification: pure function)
 //   [x] Happy: each documented unit (B/KB/MB/GB/TB) parses to the correct
-//       byte count, including a fractional value ("1.2GB")
+//       DECIMAL (base 1000) byte count, including a fractional value
+//       ("1.5GB") — docker's go-units HumanSize is decimal, not IEC/1024
 //   [x] Unhappy: an unrecognized unit or unparseable number is (0, false)
+//
+// parseReclaimedFromPruneOutput (Classification: hostile-input parser)
+//   [x] Happy: both docker wordings parse ("Total reclaimed space: 42B" for
+//       container/image/volume prune, "Total:	500MB" for builder prune)
+//   [x] Unhappy: no "otal" line, or one whose trailing token doesn't parse,
+//       is (0, false)
 //
 // parseDockerDF (Classification: hostile-input parser over ndjson)
 //   [x] Happy: a well-formed `docker system df --format '{{json .}}'`
@@ -25,6 +32,10 @@ package clean
 //   [x] Invariant: a Skipped category is never attempted
 //   [x] Invariant: one category's prune failing does not block the others
 //       (isolation)
+//   [x] Happy: Reclaimed/ReclaimedKnown are parsed from the prune command's
+//       OWN stdout, never the pre-prune Reclaimable estimate
+//   [x] Unhappy: a successful prune whose output has no parseable total
+//       leaves ReclaimedKnown false (Applied stays true)
 
 import (
 	"context"
@@ -42,12 +53,12 @@ func TestParseDockerSize(t *testing.T) {
 		ok   bool
 	}{
 		{"0B", 0, true},
-		{"800MB", 800 * 1024 * 1024, true},
+		{"800MB", 800 * 1000 * 1000, true},
 		// 1.5 (not 1.2) keeps the expected byte count an exact integer —
-		// 1.2 * 1024^3 is not, so it can't be a compile-time int64 constant.
-		{"1.5GB", 1536 * 1024 * 1024, true},
-		{"5KB", 5 * 1024, true},
-		{"2TB", 2 * 1024 * 1024 * 1024 * 1024, true},
+		// 1.2 * 1000^3 is not, so it can't be a compile-time int64 constant.
+		{"1.5GB", 1500 * 1000 * 1000, true},
+		{"5KB", 5 * 1000, true},
+		{"2TB", 2 * 1000 * 1000 * 1000 * 1000, true},
 		{"nonsense", 0, false},
 		{"12XB", 0, false},
 		{"", 0, false},
@@ -60,6 +71,51 @@ func TestParseDockerSize(t *testing.T) {
 			}
 			if ok && got != tc.want {
 				t.Errorf("parseDockerSize(%q) = %d, want %d", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseReclaimedFromPruneOutput(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want int64
+		ok   bool
+	}{
+		{
+			name: "container/image/volume wording",
+			out:  "Deleted Containers:\nabc123\n\nTotal reclaimed space: 42B",
+			want: 42,
+			ok:   true,
+		},
+		{
+			name: "builder wording (no 'reclaimed space' phrase)",
+			out:  "Deleted build cache objects:\nabc\n\nTotal:\t500MB",
+			want: 500 * 1000 * 1000,
+			ok:   true,
+		},
+		{
+			name: "no total line at all",
+			out:  "Deleted Containers:\nabc123\n",
+			want: 0,
+			ok:   false,
+		},
+		{
+			name: "total line present but unparseable size",
+			out:  "Total reclaimed space: bogus",
+			want: 0,
+			ok:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseReclaimedFromPruneOutput(tc.out)
+			if ok != tc.ok {
+				t.Fatalf("ok = %v, want %v (got=%d)", ok, tc.ok, got)
+			}
+			if ok && got != tc.want {
+				t.Errorf("got %d, want %d", got, tc.want)
 			}
 		})
 	}
@@ -86,14 +142,14 @@ func TestParseDockerDF_HappyAllCategories(t *testing.T) {
 	for _, it := range items {
 		byKind[it.Kind] = it
 	}
-	if byKind[DockerImages].Reclaimable != 500*1024*1024 {
-		t.Errorf("Images reclaimable = %d, want %d", byKind[DockerImages].Reclaimable, 500*1024*1024)
+	if byKind[DockerImages].Reclaimable != 500*1000*1000 {
+		t.Errorf("Images reclaimable = %d, want %d", byKind[DockerImages].Reclaimable, 500*1000*1000)
 	}
-	if byKind[DockerContainers].Reclaimable != 10*1024*1024 {
-		t.Errorf("Containers reclaimable = %d, want %d", byKind[DockerContainers].Reclaimable, 10*1024*1024)
+	if byKind[DockerContainers].Reclaimable != 10*1000*1000 {
+		t.Errorf("Containers reclaimable = %d, want %d", byKind[DockerContainers].Reclaimable, 10*1000*1000)
 	}
-	if byKind[DockerVolumes].Reclaimable != int64(1.5*1024*1024*1024) {
-		t.Errorf("Volumes reclaimable = %d, want %d", byKind[DockerVolumes].Reclaimable, int64(1.5*1024*1024*1024))
+	if byKind[DockerVolumes].Reclaimable != int64(1.5*1000*1000*1000) {
+		t.Errorf("Volumes reclaimable = %d, want %d", byKind[DockerVolumes].Reclaimable, int64(1.5*1000*1000*1000))
 	}
 	if byKind[DockerBuildCache].Reclaimable != 0 {
 		t.Errorf("BuildCache reclaimable = %d, want 0", byKind[DockerBuildCache].Reclaimable)
@@ -116,7 +172,7 @@ func TestParseDockerDF_MalformedRowSkipped_OthersSurvive(t *testing.T) {
 	for _, it := range items {
 		byKind[it.Kind] = it
 	}
-	if byKind[DockerImages].Reclaimable != 500*1024*1024 {
+	if byKind[DockerImages].Reclaimable != 500*1000*1000 {
 		t.Errorf("Images row must still parse despite a malformed sibling row: %+v", byKind[DockerImages])
 	}
 	if !byKind[DockerContainers].Skipped {
@@ -141,8 +197,8 @@ func TestScanDocker_ParsesSuccessfulDF(t *testing.T) {
 	for _, it := range items {
 		byKind[it.Kind] = it
 	}
-	if byKind[DockerImages].Reclaimable != 500*1024*1024 {
-		t.Errorf("Images reclaimable = %d, want %d", byKind[DockerImages].Reclaimable, 500*1024*1024)
+	if byKind[DockerImages].Reclaimable != 500*1000*1000 {
+		t.Errorf("Images reclaimable = %d, want %d", byKind[DockerImages].Reclaimable, 500*1000*1000)
 	}
 }
 
@@ -237,5 +293,52 @@ func TestPruneDocker_OneFailureDoesNotBlockTheOthers(t *testing.T) {
 	}
 	if byKind[DockerImages].Err != nil || !byKind[DockerImages].Applied {
 		t.Errorf("images prune must still run despite containers' failure (isolation): %+v", byKind[DockerImages])
+	}
+}
+
+// TestPruneDocker_ParsesReclaimedFromOutput pins that Reclaimed comes from
+// docker's OWN prune-command stdout, never the pre-prune Reclaimable
+// estimate (seeded here to a value the parsed result must NOT match).
+func TestPruneDocker_ParsesReclaimedFromOutput(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		for _, a := range args {
+			if a == "container" {
+				return "Deleted Containers:\nabc\n\nTotal reclaimed space: 10MB", nil
+			}
+		}
+		return "", nil
+	}}
+	client := New(fake)
+
+	items := []DockerItem{{Kind: DockerContainers, Reclaimable: 999}}
+	result := client.PruneDocker(context.Background(), items)
+	if !result[0].Applied {
+		t.Fatalf("expected a successful prune, got %+v", result[0])
+	}
+	if !result[0].ReclaimedKnown {
+		t.Fatalf("expected ReclaimedKnown, got %+v", result[0])
+	}
+	if want := int64(10 * 1000 * 1000); result[0].Reclaimed != want {
+		t.Errorf("Reclaimed = %d, want %d (parsed from output, not the seeded Reclaimable estimate of 999)", result[0].Reclaimed, want)
+	}
+}
+
+// TestPruneDocker_ReclaimedUnknownWhenUnparseable pins the honest-unknown
+// path: a successful prune whose output has no parseable total leaves
+// ReclaimedKnown false (and Reclaimed zero) rather than fabricating either.
+func TestPruneDocker_ReclaimedUnknownWhenUnparseable(t *testing.T) {
+	fake := &exec.FakeRunner{} // returns "" for every call — no total line
+	client := New(fake)
+
+	items := []DockerItem{{Kind: DockerContainers, Reclaimable: 1}}
+	result := client.PruneDocker(context.Background(), items)
+	if !result[0].Applied {
+		t.Fatalf("prune must still be Applied even when its size can't be parsed: %+v", result[0])
+	}
+	if result[0].ReclaimedKnown {
+		t.Errorf("expected ReclaimedKnown=false when the prune output has no total line, got %+v", result[0])
+	}
+	if result[0].Reclaimed != 0 {
+		t.Errorf("Reclaimed should stay 0 when unknown, got %d", result[0].Reclaimed)
 	}
 }

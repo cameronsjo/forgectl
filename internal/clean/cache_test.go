@@ -15,11 +15,15 @@ package clean
 // Client.PruneCaches (Classification: I/O boundary, argv assertions via
 // FakeRunner)
 //   [x] Happy: each tool's prune command matches its documented argv exactly
+//       (brew: plain "brew cleanup", no -s)
 //   [x] Invariant: a Skipped item is never attempted — no Runner call for it
 //   [x] Invariant: one tool's prune failing does not prevent the others from
 //       being attempted and marked Applied (isolation)
 //   [x] Happy: Apply never touches ScanCaches' own detection — PruneCaches
 //       operates only on the items list handed to it
+//   [x] Happy: Reclaimed is the MEASURED post-prune delta (dirSize before
+//       vs after), not the pre-prune Size estimate
+//   [x] Boundary: Reclaimed is floored at zero when the cache doesn't shrink
 
 import (
 	"context"
@@ -142,7 +146,11 @@ func TestPruneCaches_ArgvMatchesDocumentedCommands(t *testing.T) {
 		CachePnpm: "pnpm store prune",
 		CachePip:  "pip cache purge",
 		CacheGo:   "go clean -cache",
-		CacheBrew: "brew cleanup -s",
+		// No -s (scrub): the fix round dropped it — see the doc comment on
+		// the brew cacheProbe. Note `brew cleanup` (with or without -s)
+		// still touches the Cellar, not just the cache; that's disclosed
+		// at the CLI layer (cacheDisplayName), not narrowed here.
+		CacheBrew: "brew cleanup",
 	}
 	if len(fake.Calls) != len(want) {
 		t.Fatalf("got %d Runner calls, want %d: %+v", len(fake.Calls), len(want), fake.Calls)
@@ -199,5 +207,61 @@ func TestPruneCaches_OneFailureDoesNotBlockTheOthers(t *testing.T) {
 	}
 	if byKind[CachePip].Err != nil || !byKind[CachePip].Applied {
 		t.Errorf("pip's prune must still run despite npm's failure (isolation): %+v", byKind[CachePip])
+	}
+}
+
+// TestPruneCaches_ReclaimedIsMeasuredDelta pins that Reclaimed comes from a
+// REAL post-prune dirSize measurement, not the pre-prune Size estimate —
+// the fake prune actually deletes a file in the fixture cache dir (via
+// os.Remove inside RunFunc), so a bug that reported the pre-prune Size
+// verbatim would be caught: it would report 1000, not the true 400 freed.
+func TestPruneCaches_ReclaimedIsMeasuredDelta(t *testing.T) {
+	cacheDir := t.TempDir()
+	keep := filepath.Join(cacheDir, "keep.bin")
+	freed := filepath.Join(cacheDir, "freed.bin")
+	if err := os.WriteFile(keep, make([]byte, 600), 0o644); err != nil {
+		t.Fatalf("seed keep.bin: %v", err)
+	}
+	if err := os.WriteFile(freed, make([]byte, 400), 0o644); err != nil {
+		t.Fatalf("seed freed.bin: %v", err)
+	}
+
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "npm" {
+			return "", os.Remove(freed)
+		}
+		return "", nil
+	}}
+	client := New(fake)
+
+	items := []CacheItem{{Kind: CacheNpm, Path: cacheDir, Size: 1000}}
+	result := client.PruneCaches(context.Background(), items)
+	if !result[0].Applied {
+		t.Fatalf("expected a successful prune, got %+v", result[0])
+	}
+	if result[0].Reclaimed != 400 {
+		t.Errorf("Reclaimed = %d, want 400 (the measured post-prune delta, not the pre-prune Size of 1000)", result[0].Reclaimed)
+	}
+}
+
+// TestPruneCaches_ReclaimedFlooredAtZero pins the non-negative floor: a
+// prune that succeeds without shrinking the directory must report 0
+// reclaimed, never a negative number.
+func TestPruneCaches_ReclaimedFlooredAtZero(t *testing.T) {
+	cacheDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cacheDir, "blob"), make([]byte, 500), 0o644); err != nil {
+		t.Fatalf("seed fixture: %v", err)
+	}
+
+	fake := &exec.FakeRunner{} // prune "succeeds" but touches nothing on disk
+	client := New(fake)
+
+	items := []CacheItem{{Kind: CacheNpm, Path: cacheDir, Size: 500}}
+	result := client.PruneCaches(context.Background(), items)
+	if !result[0].Applied {
+		t.Fatalf("expected a successful prune, got %+v", result[0])
+	}
+	if result[0].Reclaimed != 0 {
+		t.Errorf("Reclaimed = %d, want 0 when the cache directory didn't shrink", result[0].Reclaimed)
 	}
 }

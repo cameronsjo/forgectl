@@ -44,6 +44,14 @@ type CacheItem struct {
 	// successfully (Apply only). Err carries a failed prune attempt.
 	Applied bool
 	Err     error
+
+	// Reclaimed is the ACTUAL bytes freed, measured as dirSize(Path) taken
+	// again after a successful prune and subtracted from the pre-prune Size
+	// — never the pre-prune estimate. Clamped at zero: a prune that
+	// succeeds without shrinking the directory (or, in principle, a
+	// concurrent write growing it mid-run) reports 0 reclaimed rather than
+	// a negative number. Zero (and Applied false) before PruneCaches runs.
+	Reclaimed int64
 }
 
 // cacheProbe is how ScanCaches locates and PruneCaches reclaims one tool's
@@ -108,12 +116,26 @@ var defaultCacheProbes = []cacheProbe{
 		},
 	},
 	{
+		// CAUTION: `brew cleanup` (unlike every other probe in this table)
+		// does NOT confine itself to what --cache located and sized. It
+		// ALSO removes old versions of every installed formula/cask from
+		// the Cellar — a materially bigger blast radius than "clear the
+		// download cache" implies, and one that can destroy a
+		// deliberately-retained older keg (e.g. an unlinked version kept
+		// for a known-good rollback — see the colima unlinked-keg pattern).
+		// There is no brew verb that clears ONLY the cache, so this is
+		// disclosed rather than hidden: the CLI's scan-item label,
+		// confirmation prompt, and Long help all name the Cellar effect
+		// explicitly (see cacheDisplayName in internal/cli/clean.go). `-s`
+		// (scrub) is deliberately NOT passed — it additionally purges cached
+		// downloads for formulae that are still current, which this pass
+		// has no reason to force by default.
 		kind: CacheBrew,
 		locate: func(ctx context.Context, run exec.Runner) (string, bool) {
 			return locateViaCommand(ctx, run, "brew", "--cache")
 		},
 		prune: func(ctx context.Context, run exec.Runner) error {
-			_, err := run.Run(ctx, "brew", "cleanup", "-s")
+			_, err := run.Run(ctx, "brew", "cleanup")
 			return err
 		},
 	},
@@ -182,6 +204,13 @@ func (c *Client) ScanCaches(ctx context.Context, kinds []CacheKind) []CacheItem 
 // binary crashing) never prevents the rest from running. Only meaningful
 // behind the CLI's --apply + confirmation gate; ScanCaches alone is the
 // dry-run path and never mutates anything.
+//
+// Reclaimed is measured, not estimated: after a successful prune, the same
+// dirSize helper ScanCaches used is run again over Path, and the delta
+// (before minus after, floored at zero) becomes Reclaimed — issue #4's own
+// acceptance criterion is "reports actual reclaimed bytes", and the
+// pre-prune Size is only ever an estimate of what a tool's cache directory
+// held before its own command ran.
 func (c *Client) PruneCaches(ctx context.Context, items []CacheItem) []CacheItem {
 	out := make([]CacheItem, len(items))
 	copy(out, items)
@@ -199,13 +228,18 @@ func (c *Client) PruneCaches(ctx context.Context, items []CacheItem) []CacheItem
 		if !ok {
 			continue
 		}
+		before := out[i].Size
 		if err := probe.prune(ctx, c.run); err != nil {
 			out[i].Err = err
 			slog.Error("Failed to prune package-manager cache.", "kind", out[i].Kind, "path", out[i].Path, "error", err)
 			continue
 		}
 		out[i].Applied = true
-		slog.Info("Successfully pruned package-manager cache.", "kind", out[i].Kind, "path", out[i].Path, "size", out[i].Size)
+		after := dirSize(out[i].Path)
+		if after < before {
+			out[i].Reclaimed = before - after
+		}
+		slog.Info("Successfully pruned package-manager cache.", "kind", out[i].Kind, "path", out[i].Path, "reclaimed", out[i].Reclaimed)
 	}
 	return out
 }
