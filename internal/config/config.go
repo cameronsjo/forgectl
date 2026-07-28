@@ -542,6 +542,29 @@ func autoLogPath() (string, error) {
 // than logKeepDays days. Errors are silently ignored — log pruning is never
 // fatal.
 func pruneOldLogs(dir string) {
+	pruneLogsMatching(dir, "forgectl-", ".log", "2006-01-02")
+}
+
+// PruneUpdateLogs deletes update-YYYYMMDD-HHMMSS.log files in dir that are
+// older than logKeepDays days — `forgectl update`'s equivalent of
+// pruneOldLogs above, since its transcript logs use their own timestamped
+// naming (one file per run, not one per day) rather than the daily-rotated
+// scheme. Exported (unlike pruneOldLogs) because the update-logs directory
+// is opened from internal/cli, not this package; errors are silently
+// ignored — log pruning is never fatal. Safe to call regardless of whether
+// dir is the default (UpdateLogDir()) or a user override ([update] log_dir):
+// it only ever touches files matching this exact pattern, never anything
+// else that might share the directory.
+func PruneUpdateLogs(dir string) {
+	pruneLogsMatching(dir, "update-", ".log", "20060102-150405")
+}
+
+// pruneLogsMatching deletes files in dir named prefix+<timestamp>+suffix
+// whose embedded timestamp (parsed per layout) is older than logKeepDays —
+// the shared body behind pruneOldLogs (daily forgectl-*.log) and
+// PruneUpdateLogs (per-run update-*.log), which differ only in naming
+// scheme. Errors are silently ignored — log pruning is never fatal.
+func pruneLogsMatching(dir, prefix, suffix, layout string) {
 	cutoff := time.Now().AddDate(0, 0, -logKeepDays)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -552,11 +575,11 @@ func pruneOldLogs(dir string) {
 			continue
 		}
 		name := e.Name()
-		if !strings.HasPrefix(name, "forgectl-") || !strings.HasSuffix(name, ".log") {
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
 			continue
 		}
-		dateStr := strings.TrimSuffix(strings.TrimPrefix(name, "forgectl-"), ".log")
-		t, err := time.Parse("2006-01-02", dateStr)
+		dateStr := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
+		t, err := time.Parse(layout, dateStr)
 		if err != nil {
 			continue
 		}

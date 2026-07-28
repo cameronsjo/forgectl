@@ -2,6 +2,7 @@ package update
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -35,12 +36,22 @@ func DefaultSteps() []Step {
 	}
 }
 
-// brewStep: Check lists outdated formulae/casks (never mutates); Apply runs
-// the standard three-command weekly refresh in sequence — update (refresh
-// the formula index), upgrade (install newer versions), cleanup (reclaim
-// disk). Destructive: cleanup ALSO removes old Cellar versions of every
-// upgraded formula/cask, not just Homebrew's download cache (mirrors clean.go's
-// same brew-cleanup disclosure).
+// brewStep: Check lists outdated formulae (never mutates); Apply runs the
+// standard three-command weekly refresh in sequence — update (refresh the
+// formula index), upgrade --formula (install newer formula versions),
+// cleanup (reclaim disk). Destructive: cleanup ALSO removes old Cellar
+// versions of every upgraded formula, not just Homebrew's download cache
+// (mirrors clean.go's same brew-cleanup disclosure) — and since this step
+// runs upgrade immediately before cleanup in one pass, the very versions
+// cleanup removes are the rollback path for the upgrade that just ran.
+//
+// upgrade is scoped to --formula (casks excluded) deliberately: a bare `brew
+// upgrade` also upgrades casks, and a pkg-based cask upgrade can invoke sudo
+// or a GUI installer. This step has no stdin wired and is meant to run
+// unattended (cron, --yes), so a cask upgrade would either hang waiting for
+// input nobody can supply, or fail opaquely with no tty — the same reasoning
+// that keeps softwareupdate's OS installs manual and human-triggered. Cask
+// upgrades stay a manual `brew upgrade --cask` outside this tool.
 func brewStep() Step {
 	return Step{
 		Name:        StepBrew,
@@ -51,7 +62,7 @@ func brewStep() Step {
 		Apply: func(ctx context.Context, run exec.Runner) (string, error) {
 			return runSequence(ctx, run,
 				[]string{"brew", "update"},
-				[]string{"brew", "upgrade"},
+				[]string{"brew", "upgrade", "--formula"},
 				[]string{"brew", "cleanup"},
 			)
 		},
@@ -98,22 +109,32 @@ func goStep() Step {
 // mutates); Apply upgrades them in place. Destructive: `npm update -g`
 // mutates every globally-installed package to its latest matching version.
 //
-// Known quirk: `npm outdated` documents a non-zero exit whenever outdated
-// packages ARE found — that is npm's normal signal for "here's the
-// finding", not a broken check. Nothing here special-cases it: the shared
-// exec.Runner contract already treats any non-zero exit as an error, so a
-// routine "packages are outdated" day surfaces as this step's Result.Err on
-// `update check`. That's a known, accepted false-positive-shaped signal
-// (never a false negative) rather than something this step tries to
-// distinguish from a genuinely broken npm — per-step isolation (the
-// roster's whole point) means a noisy npm check never wedges brew/go/
-// softwareupdate's siblings.
+// Known quirk: `npm outdated` documents a non-zero exit (status 1) whenever
+// outdated packages ARE found — that is npm's normal signal for "here's the
+// finding", not a broken check. Check special-cases exactly that one exit
+// code: a real *exec.CommandError with ExitCode == 1 is remapped to success,
+// with its captured Output (the outdated-packages table — the actual
+// contract of `update check`) surfacing as the step's Result instead of
+// being reported as a failure. Any OTHER exit code (npm genuinely broken,
+// unreachable registry, …) still surfaces as an error, and a non-CommandError
+// error (e.g. npm not on PATH at all) never matches, so this narrow remap
+// can't paper over an npm that can't run. Apply doesn't need the same
+// treatment — `npm update -g` has no equivalent "exit nonzero to report a
+// normal finding" contract.
 func npmStep() Step {
 	return Step{
 		Name:        StepNpm,
 		Destructive: true,
 		Check: func(ctx context.Context, run exec.Runner) (string, error) {
-			return run.Run(ctx, "npm", "outdated", "-g")
+			out, err := run.Run(ctx, "npm", "outdated", "-g")
+			if err == nil {
+				return out, nil
+			}
+			var cmdErr *exec.CommandError
+			if errors.As(err, &cmdErr) && cmdErr.ExitCode == 1 {
+				return cmdErr.Output, nil
+			}
+			return out, err
 		},
 		Apply: func(ctx context.Context, run exec.Runner) (string, error) {
 			return run.Run(ctx, "npm", "update", "-g")

@@ -7,6 +7,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -31,7 +32,11 @@ type Runner interface {
 type OSRunner struct{}
 
 // Run executes name+args and returns trimmed stdout. On failure the returned
-// error wraps stderr so callers (and fang's styled error output) stay useful.
+// error wraps stderr so callers (and fang's styled error output) stay useful;
+// the child's captured stdout (if any) is never discarded — it rides along on
+// the returned *CommandError's Output field, since a nonzero exit doesn't
+// always mean the command produced nothing worth seeing (e.g. `npm outdated`
+// exits 1 precisely when its output has something to report).
 func (OSRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
 	slog.Debug("Preparing to run command.", "cmd", name, "args", args)
 	start := time.Now()
@@ -41,12 +46,13 @@ func (OSRunner) Run(ctx context.Context, name string, args ...string) (string, e
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
+		trimmed := strings.TrimRight(string(out), "\n")
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			slog.Error("Failed to run command.", "cmd", name, "stderr", msg, "error", err)
-			return "", &CommandError{Name: name, Args: args, Stderr: msg, Err: err}
+			return "", &CommandError{Name: name, Args: args, Stderr: msg, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
 		}
 		slog.Error("Failed to run command.", "cmd", name, "error", err)
-		return "", &CommandError{Name: name, Args: args, Err: err}
+		return "", &CommandError{Name: name, Args: args, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
 	}
 	slog.Debug("Successfully ran command.", "cmd", name, "duration", time.Since(start).Round(time.Millisecond))
 	return strings.TrimRight(string(out), "\n"), nil
@@ -65,12 +71,13 @@ func (OSRunner) RunWithInput(ctx context.Context, stdin string, name string, arg
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
+		trimmed := strings.TrimRight(string(out), "\n")
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			slog.Error("Failed to run command with stdin.", "cmd", name, "stderr", msg, "error", err)
-			return "", &CommandError{Name: name, Args: args, Stderr: msg, Err: err}
+			return "", &CommandError{Name: name, Args: args, Stderr: msg, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
 		}
 		slog.Error("Failed to run command with stdin.", "cmd", name, "error", err)
-		return "", &CommandError{Name: name, Args: args, Err: err}
+		return "", &CommandError{Name: name, Args: args, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
 	}
 	slog.Debug("Successfully ran command with stdin.", "cmd", name, "duration", time.Since(start).Round(time.Millisecond))
 	return strings.TrimRight(string(out), "\n"), nil
@@ -94,7 +101,22 @@ type CommandError struct {
 	Name   string
 	Args   []string
 	Stderr string
-	Err    error
+
+	// Output is the child's captured stdout, even though the command
+	// failed — a nonzero exit doesn't mean stdout was empty (npm's
+	// `outdated` subcommand, for one, exits 1 precisely when it has a
+	// table to report). Empty when the process produced no stdout, or
+	// never ran at all (e.g. the binary wasn't found).
+	Output string
+
+	// ExitCode is the child process's exit status when Err wraps a real
+	// *os/exec.ExitError, or -1 when the command never got that far (bad
+	// binary path, context cancellation, …) — callers that special-case a
+	// specific exit code (npmStep's Check) use this instead of unwrapping
+	// Err themselves.
+	ExitCode int
+
+	Err error
 }
 
 func (e *CommandError) Error() string {
@@ -109,3 +131,15 @@ func (e *CommandError) Error() string {
 }
 
 func (e *CommandError) Unwrap() error { return e.Err }
+
+// exitCodeOf extracts the process exit code from err via *os/exec.ExitError,
+// or -1 when err doesn't wrap one (the command never started, the context
+// was canceled, …) — -1 is never a real exit code, so it's a safe "unknown"
+// sentinel for callers comparing against a specific status.
+func exitCodeOf(err error) int {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
+}

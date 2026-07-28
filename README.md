@@ -154,13 +154,20 @@ forgectl review --kind issue             # issues only (or: pr)
 forgectl review mark owner/repo#42       # mark an item reviewed
 
 # update — weekly package-manager + OS maintenance, independently-scoped steps
-forgectl update check                    # report-only for every step (brew/softwareupdate/go/npm), no mutation
-forgectl update run                      # DESTRUCTIVE steps (brew, go, npm) are SKIPPED without --yes;
-                                          #   softwareupdate (check-only, never installs) still runs
-forgectl update run --yes                # actually apply brew update/upgrade/cleanup, go cache clean, npm update
+forgectl update check                    # report-only for every step (brew/softwareupdate/go/npm), no mutation —
+                                          #   each step's captured output (the actual finding) goes to stderr +
+                                          #   the log, and to --json's own per-step field
+forgectl update run                      # DESTRUCTIVE, one confirmation: brew (upgrade --formula/cleanup), go
+                                          #   (cache clean), npm (update) are SKIPPED without --yes; softwareupdate
+                                          #   (check-only, never installs) still runs. brew's cleanup ALSO removes
+                                          #   the Cellar versions upgrade just superseded (the rollback path), and
+                                          #   go's clean wipes the module cache machine-wide, for every project —
+                                          #   the prompt names both when the relevant step is selected
+forgectl update run --yes                # skip the prompt, apply the same effects non-interactively (cron/CI)
 forgectl update run --only brew,go       # restrict to a subset of the roster
-forgectl update run --json               # machine-readable summary to stdout ONLY; full transcript
-                                          #   streams to stderr + a timestamped log (update-logs/)
+forgectl update run --json               # machine-readable summary (with each step's output) to stdout ONLY;
+                                          #   the full per-step transcript goes to stderr + a timestamped log
+                                          #   (update-logs/, auto-pruned after 7 days)
 
 # y — read/write the system clipboard (macOS only)
 echo hi | forgectl y copy                # copy stdin to the clipboard

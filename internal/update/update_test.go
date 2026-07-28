@@ -155,6 +155,14 @@ func TestRun_PanicIsolatedToItsOwnResult(t *testing.T) {
 	if report.Results[1].Err != nil {
 		t.Errorf("sibling after the panic carries an error: %v", report.Results[1].Err)
 	}
+	// A panic must not become a zero exit: pin that the panicking step
+	// actually fails the report, not just that it carries a non-nil Err.
+	if !report.Failed() {
+		t.Error("Report.Failed() = false, want true (a panic must not become a zero exit)")
+	}
+	if err := report.Err(); err == nil {
+		t.Error("Report.Err() = nil, want the panic's error to surface")
+	}
 }
 
 func TestRun_OnlyFiltersRosterPreservingOrder(t *testing.T) {

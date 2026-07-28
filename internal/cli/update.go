@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -53,11 +54,28 @@ prevents the others from running.
                                      step non-interactively (cron/CI)
   forgectl update run --only brew,go   restrict to a subset of the roster
 
-Every run streams a full transcript to stderr and to a timestamped log file
+Every run writes a transcript to stderr and to a timestamped log file
 (default: ` + "`forgectl config`" + `'s config dir, update-logs/; override with
-[update] log_dir). stdout carries ONLY the summary — the per-step recap in
-human mode, or the ` + "`--json`" + ` machine-readable report — never the transcript,
-so ` + "`forgectl update run --json | jq`" + ` stays byte-clean.
+[update] log_dir): a status line per step as it finishes, plus that step's
+own captured output underneath it — for ` + "`check`" + `, the output IS the point
+(brew's outdated list, softwareupdate's available updates, npm's outdated
+table). Each step's line appears only once that step completes, not as its
+command runs — a slow step (a ten-minute ` + "`brew upgrade`" + `) prints nothing
+until it finishes, so the transcript streams step-by-step, not byte-by-byte.
+stdout carries ONLY the summary — the per-step recap in human mode, or the
+` + "`--json`" + ` machine-readable report (which repeats each step's captured
+output in its own field) — never the transcript, so
+` + "`forgectl update run --json | jq`" + ` stays byte-clean.
+
+CAUTION: run's destructive steps compound past their own individual risk.
+brew's upgrade and cleanup run back to back in the same pass, so cleanup
+removes the exact Cellar versions upgrade just superseded — the rollback
+path clean.go's own --caches disclosure names is gone before you'd notice
+upgrade broke something. go's cache clean wipes ` + "`~/go/pkg/mod`" + ` — the
+module cache — machine-wide, for every project, not just one; the next
+build of anything forces a full re-download. The confirmation prompt names
+these effects when the relevant step is selected — decline (or omit
+` + "`--yes`" + `) if you need to think about either first.
 
 Exit codes: 0 every selected step ok (or cleanly skipped), 1 one or more
 steps failed, 2 a harness error (bad --only name, log/report I/O failure).`,
@@ -107,7 +125,7 @@ func newUpdateRunCmd(client *updatepkg.Client, cfg config.UpdateConfig) *cobra.C
 			return runUpdatePass(cmd, client, cfg, updatepkg.Options{Yes: yes}, only, asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt and apply destructive steps (brew upgrade/cleanup, go clean, npm update) non-interactively — for cron/CI")
+	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt and apply destructive steps non-interactively (cron/CI) — brew upgrade --formula + cleanup (removes superseded Cellar versions), go clean (wipes the module cache machine-wide), npm update -g")
 	addRosterFlags(cmd, &only, &asJSON)
 	return cmd
 }
@@ -147,12 +165,34 @@ func confirmDestructiveBatch(client *updatepkg.Client, only []string, stderr io.
 	if !isTerminal() {
 		return false
 	}
-	ok, err := confirmUpdateDestructive(fmt.Sprintf("Apply %d destructive step(s) (%s)?", len(names), strings.Join(names, ", ")))
+	prompt := fmt.Sprintf("Apply %d destructive step(s) (%s)?", len(names), strings.Join(names, ", ")) + destructiveCaveat(names)
+	ok, err := confirmUpdateDestructive(prompt)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: confirmation prompt failed (%v); destructive step(s) will be skipped\n", err)
 		return false
 	}
 	return ok
+}
+
+// destructiveCaveat names the roster's two effects a bare step-name list
+// doesn't disclose — brew's upgrade+cleanup combo removing the very Cellar
+// versions it just superseded (the rollback path), and go clean wiping the
+// module cache for every project, not just one — appended to the
+// confirmation prompt so consent is informed about the blast radius, not
+// just which steps are selected. Mirrors clean.go's hasBrewTarget pattern:
+// the caveat only appears when the relevant step is actually in play.
+func destructiveCaveat(names []string) string {
+	var caveats []string
+	if slices.Contains(names, updatepkg.StepBrew) {
+		caveats = append(caveats, "brew's cleanup removes the Cellar versions upgrade just superseded — the rollback path")
+	}
+	if slices.Contains(names, updatepkg.StepGo) {
+		caveats = append(caveats, "go clean wipes the module cache machine-wide, for every project")
+	}
+	if len(caveats) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(caveats, "; ") + ")"
 }
 
 // runUpdatePass resolves --only against cfg's default roster and the
@@ -188,6 +228,7 @@ func runUpdatePass(cmd *cobra.Command, client *updatepkg.Client, cfg config.Upda
 
 	opts.OnStep = func(res updatepkg.Result) {
 		writeStepLine(transcript, res)
+		writeStepOutput(transcript, res)
 	}
 	report := client.Run(ctx, opts)
 
@@ -217,12 +258,12 @@ func runUpdatePass(cmd *cobra.Command, client *updatepkg.Client, cfg config.Upda
 func openTranscript(cfg config.UpdateConfig, stderr io.Writer) (w io.Writer, closeLog func(), path string) {
 	dir := cfg.LogDir
 	if dir == "" {
-		if d, err := config.UpdateLogDir(); err == nil {
-			dir = d
+		d, err := config.UpdateLogDir()
+		if err != nil {
+			fmt.Fprintf(stderr, "warning: could not determine update log directory: %v (continuing with stderr only)\n", err)
+			return stderr, func() {}, ""
 		}
-	}
-	if dir == "" {
-		return stderr, func() {}, ""
+		dir = d
 	}
 
 	name := "update-" + time.Now().Format("20060102-150405") + ".log"
@@ -232,6 +273,7 @@ func openTranscript(cfg config.UpdateConfig, stderr io.Writer) (w io.Writer, clo
 		fmt.Fprintf(stderr, "warning: could not open update log file %s: %v (continuing with stderr only)\n", logPath, err)
 		return stderr, func() {}, ""
 	}
+	config.PruneUpdateLogs(dir)
 	return io.MultiWriter(stderr, f), func() { _ = f.Close() }, logPath
 }
 
@@ -248,6 +290,22 @@ func writeStepLine(w io.Writer, res updatepkg.Result) {
 		fmt.Fprintf(w, "FAIL  %-15s (%s) %v\n", res.Name, dur, res.Err)
 	default:
 		fmt.Fprintf(w, "ok    %-15s (%s)\n", res.Name, dur)
+	}
+}
+
+// writeStepOutput writes a step's captured output to the transcript,
+// indented under its status line — the ONLY place this appears for a human
+// running `update` interactively: the final recap (printUpdateSummary)
+// stays a terse one-line-per-step summary, and it's the transcript (stderr
+// + the log file) that carries the actual deliverable, especially for
+// `check`, where a step's output IS the point. Omitted entirely when Output
+// is empty (a step that produced no stdout).
+func writeStepOutput(w io.Writer, res updatepkg.Result) {
+	if res.Output == "" {
+		return
+	}
+	for _, line := range strings.Split(res.Output, "\n") {
+		fmt.Fprintf(w, "      %s\n", line)
 	}
 }
 
@@ -287,7 +345,12 @@ type updateStepJSON struct {
 	SkipReason  string `json:"skipReason,omitempty"`
 	Failed      bool   `json:"failed"`
 	Error       string `json:"error,omitempty"`
-	DurationMs  int64  `json:"durationMs"`
+	// Output is the step's captured stdout — for `check`, this IS the
+	// deliverable (brew's outdated list, npm's outdated table, …), so a
+	// `--json` consumer must not have to go scrape the stderr transcript
+	// to get it.
+	Output     string `json:"output,omitempty"`
+	DurationMs int64  `json:"durationMs"`
 }
 
 // updateReportJSON is `update check`/`update run --json`'s stdout wire
@@ -310,6 +373,7 @@ func writeUpdateJSON(out io.Writer, report updatepkg.Report) error {
 			Skipped:     res.Skipped,
 			SkipReason:  res.SkipReason,
 			Failed:      res.Failed(),
+			Output:      res.Output,
 			DurationMs:  res.Duration.Milliseconds(),
 		}
 		if res.Err != nil {

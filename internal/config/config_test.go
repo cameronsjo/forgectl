@@ -191,6 +191,58 @@ func TestPruneOldLogs_MissingDirIsNoop(t *testing.T) {
 	pruneOldLogs(filepath.Join(t.TempDir(), "does-not-exist"))
 }
 
+func TestPruneUpdateLogs(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+
+	logName := func(d time.Time) string {
+		return "update-" + d.Format("20060102-150405") + ".log"
+	}
+	write := func(name string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	// Clearly older than the 7-day window → should be pruned.
+	oldA := logName(now.AddDate(0, 0, -10))
+	oldB := logName(now.AddDate(0, 0, -30))
+	// Within the window → should survive.
+	recent := logName(now.AddDate(0, 0, -2))
+	today := logName(now)
+	// Should never be touched, regardless of age.
+	keepers := []string{"other.log", "update-notadate.log", "update-.log", "README.md"}
+
+	write(oldA)
+	write(oldB)
+	write(recent)
+	write(today)
+	for _, k := range keepers {
+		write(k)
+	}
+
+	PruneUpdateLogs(dir)
+
+	gone := []string{oldA, oldB}
+	for _, name := range gone {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be pruned, but it survived (err=%v)", name, err)
+		}
+	}
+
+	survivors := append([]string{recent, today}, keepers...)
+	for _, name := range survivors {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("expected %s to survive, but it's gone: %v", name, err)
+		}
+	}
+}
+
+func TestPruneUpdateLogs_MissingDirIsNoop(t *testing.T) {
+	// Must not panic when the directory does not exist.
+	PruneUpdateLogs(filepath.Join(t.TempDir(), "does-not-exist"))
+}
+
 func TestOpenLogWriter(t *testing.T) {
 	t.Run("dash returns stderr and nop closer", func(t *testing.T) {
 		w, c := openLogWriter("-")

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -25,11 +26,11 @@ func fakeUpdateStep(name string, destructive bool, applyErr error) updatepkg.Ste
 			return run.Run(context.Background(), name, "check")
 		},
 		Apply: func(_ context.Context, run exec.Runner) (string, error) {
-			_, err := run.Run(context.Background(), name, "apply")
+			out, err := run.Run(context.Background(), name, "apply")
 			if err != nil {
-				return "", err
+				return out, err
 			}
-			return "", applyErr
+			return out, applyErr
 		},
 	}
 }
@@ -213,6 +214,110 @@ func TestUpdateRun_YesAppliesDestructiveSteps(t *testing.T) {
 	}
 }
 
+// TestConfirmDestructiveBatch_PromptNamesBrewAndGoCaveats pins that the
+// consent prompt discloses the two effects a bare step-name list doesn't:
+// brew's cleanup removing the Cellar versions upgrade just superseded, and
+// go clean wiping the module cache machine-wide.
+func TestConfirmDestructiveBatch_PromptNamesBrewAndGoCaveats(t *testing.T) {
+	prompts := stubConfirmSeams(t, true, func(string) (bool, error) { return true, nil })
+
+	fr := &exec.FakeRunner{}
+	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{
+		fakeUpdateStep("brew", true, nil),
+		fakeUpdateStep("go", true, nil),
+		fakeUpdateStep("npm", true, nil),
+	}))
+	cfg := config.UpdateConfig{LogDir: t.TempDir()}
+
+	if _, _, err := runUpdate(t, client, cfg, "run"); err != nil {
+		t.Fatalf("Execute() = %v (exit %d), want nil", err, ExitCode(err))
+	}
+	if len(*prompts) != 1 {
+		t.Fatalf("got %d prompt(s), want exactly 1", len(*prompts))
+	}
+	prompt := (*prompts)[0]
+	if !strings.Contains(prompt, "Cellar") {
+		t.Errorf("prompt %q missing the brew Cellar-keg caveat", prompt)
+	}
+	if !strings.Contains(prompt, "module cache") {
+		t.Errorf("prompt %q missing the go module-cache caveat", prompt)
+	}
+}
+
+// TestConfirmDestructiveBatch_NoCaveatWithoutBrewOrGo ensures the caveat
+// stays scoped to the steps actually selected — a roster with neither brew
+// nor go must not carry either disclosure.
+func TestConfirmDestructiveBatch_NoCaveatWithoutBrewOrGo(t *testing.T) {
+	prompts := stubConfirmSeams(t, true, func(string) (bool, error) { return true, nil })
+
+	fr := &exec.FakeRunner{}
+	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("npm", true, nil)}))
+	cfg := config.UpdateConfig{LogDir: t.TempDir()}
+
+	if _, _, err := runUpdate(t, client, cfg, "run"); err != nil {
+		t.Fatalf("Execute() = %v (exit %d), want nil", err, ExitCode(err))
+	}
+	if len(*prompts) != 1 {
+		t.Fatalf("got %d prompt(s), want exactly 1", len(*prompts))
+	}
+	if strings.Contains((*prompts)[0], "Cellar") || strings.Contains((*prompts)[0], "module cache") {
+		t.Errorf("prompt %q carries a brew/go caveat despite neither step being selected", (*prompts)[0])
+	}
+}
+
+// TestUpdateRun_JSONIncludesStepOutput pins Critical-1's --json half: a
+// step's captured output must reach the machine-readable report, not just
+// the stderr transcript, so a `--json | jq` consumer never has to go scrape
+// stderr to get `check`'s actual deliverable.
+func TestUpdateRun_JSONIncludesStepOutput(t *testing.T) {
+	const wantOutput = "some-pkg  1.0.0  2.0.0"
+	fr := &exec.FakeRunner{
+		RunFunc: func(string, []string) (string, error) { return wantOutput, nil },
+	}
+	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("brew", false, nil)}))
+	cfg := config.UpdateConfig{LogDir: t.TempDir()}
+
+	stdout, _, err := runUpdate(t, client, cfg, "check", "--json")
+	if err != nil {
+		t.Fatalf("Execute() = %v (exit %d), want nil", err, ExitCode(err))
+	}
+
+	var report struct {
+		Steps []struct {
+			Output string `json:"output"`
+		} `json:"steps"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("stdout is not clean JSON: %v\nstdout=%q", err, stdout)
+	}
+	if len(report.Steps) != 1 || report.Steps[0].Output != wantOutput {
+		t.Errorf("got steps=%+v, want one step with output %q", report.Steps, wantOutput)
+	}
+}
+
+// TestUpdateCheck_StdoutSummaryOmitsStepOutput pins the design split: full
+// output belongs on the transcript (stderr + log file) as each step
+// finishes, never duplicated into the terse final recap on stdout.
+func TestUpdateCheck_StdoutSummaryOmitsStepOutput(t *testing.T) {
+	const wantOutput = "some-pkg  1.0.0  2.0.0"
+	fr := &exec.FakeRunner{
+		RunFunc: func(string, []string) (string, error) { return wantOutput, nil },
+	}
+	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("brew", false, nil)}))
+	cfg := config.UpdateConfig{LogDir: t.TempDir()}
+
+	stdout, stderr, err := runUpdate(t, client, cfg, "check")
+	if err != nil {
+		t.Fatalf("Execute() = %v (exit %d), want nil", err, ExitCode(err))
+	}
+	if !strings.Contains(stderr, wantOutput) {
+		t.Errorf("stderr transcript missing the step's captured output: %q", stderr)
+	}
+	if strings.Contains(stdout, wantOutput) {
+		t.Errorf("stdout summary duplicates the transcript's raw output: %q", stdout)
+	}
+}
+
 func TestUpdateRun_FailedStepExitsOne(t *testing.T) {
 	fr := &exec.FakeRunner{}
 	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{
@@ -310,8 +415,16 @@ func TestUpdateRun_JSONStdoutIsByteClean(t *testing.T) {
 	}
 }
 
+// TestUpdateRun_WritesTimestampedLogFile pins that the log file carries a
+// step's ACTUAL command output, not just its name — asserting only
+// Contains("brew") would pass on the status line's step name alone even if
+// Result.Output never reached the transcript at all (the bug this test
+// caught nothing of, before writeStepOutput existed).
 func TestUpdateRun_WritesTimestampedLogFile(t *testing.T) {
-	fr := &exec.FakeRunner{}
+	const wantOutput = "cask-outdated-thing  1.0.0  1.1.0"
+	fr := &exec.FakeRunner{
+		RunFunc: func(string, []string) (string, error) { return wantOutput, nil },
+	}
 	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("brew", false, nil)}))
 	logDir := t.TempDir()
 	cfg := config.UpdateConfig{LogDir: logDir}
@@ -333,6 +446,9 @@ func TestUpdateRun_WritesTimestampedLogFile(t *testing.T) {
 	}
 	if !bytes.Contains(contents, []byte("brew")) {
 		t.Errorf("log file missing the step's transcript line: %q", string(contents))
+	}
+	if !bytes.Contains(contents, []byte(wantOutput)) {
+		t.Errorf("log file missing the step's actual command output: %q", string(contents))
 	}
 }
 
