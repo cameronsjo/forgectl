@@ -8,10 +8,6 @@ package cli
 //   [x] Happy: `--root` overrides the client's default root
 //   [x] Happy: an invalid `--type` value is rejected before any scan runs
 //   [x] Happy: the `cln` alias resolves to the clean command
-//   [x] Happy: --apply is never exercised here (it drives a huh confirmation
-//       prompt requiring a tty) — that path is covered end-to-end at the
-//       ops layer in internal/clean/clean_test.go, mirroring branch's split
-//       (no CLI-level apply+confirm test either)
 //   [x] Happy: --caches (dry run) prints the cache-scan section and issues
 //       ZERO prune-command Runner calls — only the locate/detect queries
 //   [x] Happy: --docker (dry run) prints the docker-scan section and issues
@@ -24,6 +20,23 @@ package cli
 //   [x] Invariant: a real failure in the dep/build-dir pass (scanning a
 //       nonexistent root) does not prevent the --caches pass from running
 //       (fix round: passes are now actually isolated, not just claimed to be)
+//   [x] Happy: --apply with confirmFn answering Yes reaches the caches
+//       pass's real prune command (fix round: forgectl#165 item 3 — confirm
+//       is now a package var, confirmFn, so this apply⇒confirm⇒prune seam
+//       is pinned by a test rather than only asserted in a comment; before
+//       the fix this scenario didn't even compile, since there was no way
+//       to substitute a fake confirm for huh's real tty prompt)
+//   [x] Unhappy: --apply with confirmFn answering No never reaches the
+//       prune command (forgectl#165 item 3, the seam's negative case)
+//   [x] Invariant: with --caches and --docker both set, a No to the caches
+//       prompt still lets the docker pass run its own preview and its own
+//       confirmation afterward — "No" cancels only the pass it answered,
+//       not the whole run (forgectl#165 item 1, now also disclosed in the
+//       Long help)
+//   [x] Unhappy: a docker preview with an unparseable size for one category
+//       reports "reclaimable size unknown", never "nothing to reclaim"
+//       (forgectl#165 item 6 — those two outcomes must not collapse into
+//       the same misleading message)
 
 import (
 	"bytes"
@@ -294,5 +307,285 @@ func TestCleanCmd_AliasResolvesToCanonicalVerb(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected \"cln\" among clean's aliases, got %v", cmd.Aliases)
+	}
+}
+
+// withConfirmFn overrides confirmFn for the duration of a test, restoring
+// the real confirm on cleanup — every caches/docker prompt in --apply mode
+// goes through this var (see confirm.go), which is what makes it fakeable
+// without a real tty at all.
+func withConfirmFn(t *testing.T, fn func(string) (bool, error)) {
+	t.Helper()
+	orig := confirmFn
+	confirmFn = fn
+	t.Cleanup(func() { confirmFn = orig })
+}
+
+// TestCleanCmd_CachesApply_ConfirmYes_ReachesPrune pins forgectl#165 item 3:
+// before confirmFn existed, confirm() called huh directly and there was no
+// way to drive --apply's confirm-then-prune path in a test at all (huh's
+// Run() needs a real tty). This is the seam's positive case — a Yes must
+// actually reach npm's prune command, not just the read-only locate query.
+func TestCleanCmd_CachesApply_ConfirmYes_ReachesPrune(t *testing.T) {
+	cacheDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cacheDir, "blob"), make([]byte, 1024), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "npm" {
+			return cacheDir, nil
+		}
+		return "", nil
+	}}
+	client := cleanpkg.New(fake, cleanpkg.WithRoot(t.TempDir()))
+	cmd := newCleanCmdForClient(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--caches", "--apply"})
+
+	withConfirmFn(t, func(string) (bool, error) { return true, nil })
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sawPrune := false
+	for _, call := range fake.Calls {
+		if call.Name == "npm" && strings.Contains(strings.Join(call.Args, " "), "cache clean") {
+			sawPrune = true
+		}
+	}
+	if !sawPrune {
+		t.Errorf("expected --apply with a Yes confirmation to reach \"npm cache clean --force\"; Runner calls: %+v", fake.Calls)
+	}
+}
+
+// TestCleanCmd_CachesApply_ConfirmNo_NeverPrunes is the seam's negative
+// case: a No must reach the confirmation prompt (proving the gate runs at
+// all) but never the prune command.
+func TestCleanCmd_CachesApply_ConfirmNo_NeverPrunes(t *testing.T) {
+	cacheDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cacheDir, "blob"), make([]byte, 1024), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "npm" {
+			return cacheDir, nil
+		}
+		return "", nil
+	}}
+	client := cleanpkg.New(fake, cleanpkg.WithRoot(t.TempDir()))
+	cmd := newCleanCmdForClient(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--caches", "--apply"})
+
+	promptSeen := false
+	withConfirmFn(t, func(string) (bool, error) {
+		promptSeen = true
+		return false, nil
+	})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !promptSeen {
+		t.Fatal("expected --apply to reach the confirmation prompt")
+	}
+	for _, call := range fake.Calls {
+		if call.Name == "npm" && strings.Contains(strings.Join(call.Args, " "), "cache clean") {
+			t.Errorf("a No confirmation must never reach the prune command; saw: %v", call.Args)
+		}
+	}
+	if !strings.Contains(stdout.String(), "cancelled") {
+		t.Errorf("expected \"cancelled\" on stdout, got: %q", stdout.String())
+	}
+}
+
+// TestCleanCmd_CachesCancelDoesNotAbortDockerPass pins forgectl#165 item 1:
+// a No to the caches pass's prompt only cancels THAT pass — with --docker
+// also requested, its own preview and its own confirmation prompt still run
+// afterward, rather than the whole command aborting on the first No. Every
+// confirmFn call in this test answers No, so NO prune command should ever
+// fire, but the docker section must still render.
+func TestCleanCmd_CachesCancelDoesNotAbortDockerPass(t *testing.T) {
+	cacheDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cacheDir, "blob"), make([]byte, 1024), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	dfOut := strings.Join([]string{
+		`{"Type":"Images","TotalCount":"1","Active":"0","Size":"1GB","Reclaimable":"500MB"}`,
+		`{"Type":"Containers","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+		`{"Type":"Local Volumes","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+		`{"Type":"Build Cache","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+	}, "\n")
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		switch name {
+		case "npm":
+			return cacheDir, nil
+		case "docker":
+			return dfOut, nil
+		}
+		return "", nil
+	}}
+	client := cleanpkg.New(fake, cleanpkg.WithRoot(t.TempDir()))
+	cmd := newCleanCmdForClient(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--caches", "--docker", "--apply"})
+
+	promptCount := 0
+	withConfirmFn(t, func(string) (bool, error) {
+		promptCount++
+		return false, nil // No, every time
+	})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if promptCount != 2 {
+		t.Errorf("expected 2 confirmation prompts (caches then docker), saw %d", promptCount)
+	}
+	if !strings.Contains(stdout.String(), "docker prune:") {
+		t.Errorf("expected the docker pass to still run its own preview after a No on the caches pass; got: %q", stdout.String())
+	}
+	for _, call := range fake.Calls {
+		if call.Name == "docker" && strings.Contains(strings.Join(call.Args, " "), "prune") {
+			t.Errorf("a No confirmation must never reach a prune command; saw docker %v", call.Args)
+		}
+	}
+}
+
+// TestCleanCmd_DockerFlag_UnparseableSize_ReportsUnknownNotNothing pins
+// forgectl#165 item 6: an unrecognized size unit for one docker category
+// (df DID report it, but the byte parse failed) must not collapse into
+// "nothing to reclaim" — that message is reserved for a GENUINE all-zero
+// total, and printing it under a nonzero-looking raw string shown one line
+// above was the exact self-contradiction reported.
+func TestCleanCmd_DockerFlag_UnparseableSize_ReportsUnknownNotNothing(t *testing.T) {
+	root := t.TempDir()
+	dfOut := strings.Join([]string{
+		`{"Type":"Images","TotalCount":"1","Active":"0","Size":"1GB","Reclaimable":"1.2XB (10%)"}`,
+		`{"Type":"Containers","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+		`{"Type":"Local Volumes","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+		`{"Type":"Build Cache","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+	}, "\n")
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "docker" {
+			return dfOut, nil
+		}
+		return "", nil
+	}}
+	client := cleanpkg.New(fake, cleanpkg.WithRoot(root))
+	cmd := newCleanCmdForClient(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--docker"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := stdout.String()
+	// Only the docker section's own verdict is under test here — the
+	// unrelated dep/build-dir pass (an empty --root) legitimately prints
+	// its own "nothing to reclaim" first, and that's not the bug.
+	dockerSection := got[strings.Index(got, "docker prune:"):]
+	if strings.Contains(dockerSection, "nothing to reclaim") {
+		t.Errorf("must not print \"nothing to reclaim\" in the docker section when a category's size failed to parse; docker section: %q", dockerSection)
+	}
+	if !strings.Contains(dockerSection, "reclaimable size unknown") {
+		t.Errorf("expected the unknown-size message in the docker section, got: %q", dockerSection)
+	}
+}
+
+// TestCleanCmd_DockerFlag_PartialUnparseable_PreviewAndPromptAgree is a
+// code-review catch: with a NONZERO total (Images parses to 500MB) AND a
+// separately unparseable category (Containers), the preview line must
+// disclose that the total is a lower bound — otherwise the flat "500MB
+// reclaimable from docker" preview would silently contradict the --apply
+// confirmation prompt below it, which (correctly) asks to prune "an
+// unknown amount" because `unknown` is true regardless of total.
+func TestCleanCmd_DockerFlag_PartialUnparseable_PreviewAndPromptAgree(t *testing.T) {
+	root := t.TempDir()
+	dfOut := strings.Join([]string{
+		`{"Type":"Images","TotalCount":"1","Active":"0","Size":"1GB","Reclaimable":"500MB"}`,
+		`{"Type":"Containers","TotalCount":"1","Active":"0","Size":"1GB","Reclaimable":"1.2XB (10%)"}`,
+		`{"Type":"Local Volumes","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+		`{"Type":"Build Cache","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+	}, "\n")
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "docker" {
+			return dfOut, nil
+		}
+		return "", nil
+	}}
+	client := cleanpkg.New(fake, cleanpkg.WithRoot(root))
+	cmd := newCleanCmdForClient(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--docker", "--apply"})
+
+	var gotPrompt string
+	withConfirmFn(t, func(p string) (bool, error) {
+		gotPrompt = p
+		return false, nil
+	})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := stdout.String()
+	dockerSection := got[strings.Index(got, "docker prune:"):]
+	if strings.Contains(dockerSection, "500MB reclaimable from docker\n") {
+		t.Errorf("preview must not print a bare total when another category's size is unparseable; docker section: %q", dockerSection)
+	}
+	if !strings.Contains(dockerSection, "at least") {
+		t.Errorf("expected the preview to disclose the total is a lower bound (\"at least\"), got: %q", dockerSection)
+	}
+	if !strings.Contains(gotPrompt, "unknown amount") {
+		t.Errorf("expected the confirmation prompt to also say the amount is unknown, got: %q", gotPrompt)
+	}
+}
+
+// TestCleanCmd_CachesApply_PnpmDetected_PromptCarriesMismatchCaveat pins
+// forgectl#165 item 2's runtime behavior, not just the source string: when
+// pnpm is a detected cache target, the --apply confirmation prompt text
+// itself must carry the preview/prune-mismatch caveat (ScanCaches sizes
+// pnpm's whole content-addressable store; `pnpm store prune` only reclaims
+// unreferenced packages).
+func TestCleanCmd_CachesApply_PnpmDetected_PromptCarriesMismatchCaveat(t *testing.T) {
+	cacheDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cacheDir, "blob"), make([]byte, 1024), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "pnpm" {
+			return cacheDir, nil
+		}
+		return "", nil
+	}}
+	client := cleanpkg.New(fake, cleanpkg.WithRoot(t.TempDir()))
+	cmd := newCleanCmdForClient(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--caches", "--apply"})
+
+	var gotPrompt string
+	withConfirmFn(t, func(p string) (bool, error) {
+		gotPrompt = p
+		return false, nil
+	})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(gotPrompt, "content-addressable store") {
+		t.Errorf("expected the pnpm preview/prune-mismatch caveat in the confirmation prompt, got: %q", gotPrompt)
 	}
 }

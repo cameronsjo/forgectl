@@ -13,6 +13,15 @@ import (
 // docker-cleanup.sh's shape (containers, then images, then volumes, then
 // build cache), reimplemented here behind the same dry-run/confirm/apply
 // gate every other clean target uses, instead of a standalone cron script.
+//
+// One deliberate divergence from that script: docker-cleanup.sh runs an
+// UNFILTERED `docker image prune -f` (dangling/untagged images, any age)
+// as its own separate step, in addition to the aged-out `image prune -af
+// --filter until=168h` this port carries below. That first step is
+// dropped here — dangling images younger than 7 days survive a forgectl
+// clean --docker run where the script would have removed them same-day —
+// safer (nothing not-yet-old is pruned), but undocumented until this
+// comment (forgectl#165 item 4).
 type DockerKind string
 
 const (
@@ -100,12 +109,21 @@ type DockerItem struct {
 	// Reclaimable is docker's own reported reclaimable size for this
 	// category (parsed from `docker system df`), in bytes — a best-effort
 	// parse of docker's own accounting, never independently re-measured.
-	// Zero when the parse failed or docker reported nothing.
+	// Zero when the parse failed or docker reported nothing — see
+	// ReclaimableKnown to tell those two zeros apart.
 	Reclaimable int64
 	// Reported is docker's raw size string ("1.2GB (66%)") for display when
 	// the byte parse didn't succeed cleanly, so the user still sees
 	// SOMETHING concrete rather than a silently wrong zero.
 	Reported string
+	// ReclaimableKnown is false when Reclaimable is a parse-failure zero
+	// (an unrecognized unit, or df reporting nothing for this row) rather
+	// than a genuine zero. Mirrors ReclaimedKnown below: callers must not
+	// treat Reclaimable==0 as "nothing here" unless this is also true — a
+	// preview that showed a nonzero Reported string for a category and then
+	// summed to "nothing to reclaim" overall was exactly this confusion
+	// (forgectl#165 item 6).
+	ReclaimableKnown bool
 
 	// Skipped is true when docker itself is unreachable (df failed) or this
 	// category didn't appear in df's output — every category skips
@@ -177,6 +195,7 @@ func parseDockerDF(out string) []DockerItem {
 		if fields := strings.Fields(row.Reclaimable); len(fields) > 0 {
 			if n, ok := parseDockerSize(fields[0]); ok {
 				item.Reclaimable = n
+				item.ReclaimableKnown = true
 			}
 		}
 		items = append(items, item)

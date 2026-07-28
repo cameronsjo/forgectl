@@ -86,6 +86,12 @@ not short-circuited). They're opt-in because clearing a warm cache or
 pruning docker is slower and more disruptive than dep/build-dir reclaim,
 which only removes trivially regenerable output.
 
+Answering "No" at any one of these prompts cancels ONLY that pass — with
+both --caches and --docker set, a "No" to the caches prompt still presents
+the docker prompt afterward, rather than aborting the whole run. Ctrl-C
+(or any prompt error) stops everything immediately; only an explicit "No"
+has this narrower, per-pass scope.
+
 --type only filters the dep/build-dir pass (its node|python|go|build
 vocabulary doesn't describe a cache or a docker category) and cannot be
 combined with --caches or --docker.
@@ -192,7 +198,7 @@ func runCleanDirs(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.Cle
 		return nil
 	}
 
-	ok, err := confirm(fmt.Sprintf("Delete %s across %d target(s)?", formatBytes(preview.TotalReclaimable), countReclaimable(preview.Items)))
+	ok, err := confirmFn(fmt.Sprintf("Delete %s across %d target(s)?", formatBytes(preview.TotalReclaimable), countReclaimable(preview.Items)))
 	if err != nil {
 		return err
 	}
@@ -258,10 +264,13 @@ func runCleanCaches(cmd *cobra.Command, client *cleanpkg.Client, apply bool) err
 	}
 
 	prompt := fmt.Sprintf("Clear %s across %d package-manager cache(s)?", formatBytes(total), detected)
-	if hasBrewTarget(items) {
+	if hasCacheKind(items, cleanpkg.CacheBrew) {
 		prompt += " (brew's cleanup ALSO removes old formula/cask versions from the Cellar, not just its download cache)"
 	}
-	ok, err := confirm(prompt)
+	if hasCacheKind(items, cleanpkg.CachePnpm) {
+		prompt += " (the pnpm figure sizes its WHOLE content-addressable store; store prune only removes unreferenced packages, so actual reclaim is typically much less)"
+	}
+	ok, err := confirmFn(prompt)
 	if err != nil {
 		return err
 	}
@@ -294,12 +303,15 @@ func runCleanCaches(cmd *cobra.Command, client *cleanpkg.Client, apply bool) err
 	return nil
 }
 
-// hasBrewTarget reports whether items includes a detected (non-skipped)
-// brew target — the CLI's signal to append the Cellar-impact caveat to the
-// confirmation prompt.
-func hasBrewTarget(items []cleanpkg.CacheItem) bool {
+// hasCacheKind reports whether items includes a detected (non-skipped)
+// target of the given kind — the CLI's signal to append a kind-specific
+// caveat to the confirmation prompt. Brew (old Cellar versions) and pnpm
+// (whole-store preview vs. partial prune) are both disclosed this way;
+// folded into one helper rather than a hasBrewTarget/hasPnpmTarget pair
+// that differed only in the Kind literal (forgectl#165 review).
+func hasCacheKind(items []cleanpkg.CacheItem, kind cleanpkg.CacheKind) bool {
 	for _, item := range items {
-		if !item.Skipped && item.Kind == cleanpkg.CacheBrew {
+		if !item.Skipped && item.Kind == kind {
 			return true
 		}
 	}
@@ -310,13 +322,17 @@ func hasBrewTarget(items []cleanpkg.CacheItem) bool {
 // bare Kind for every probe except brew, whose underlying `brew cleanup`
 // command ALSO removes old formula/cask versions from the Cellar, not just
 // its download cache. Disclosed here so the scan item, the confirmation
-// prompt (see hasBrewTarget above), and clean.go's Long help never promise
+// prompt (see hasCacheKind above), and clean.go's Long help never promise
 // a narrower blast radius than the command actually has.
 func cacheDisplayName(kind cleanpkg.CacheKind) string {
-	if kind == cleanpkg.CacheBrew {
+	switch kind {
+	case cleanpkg.CacheBrew:
 		return "brew (cache + old Cellar versions)"
+	case cleanpkg.CachePnpm:
+		return "pnpm (whole store — prune reclaims less, see below)"
+	default:
+		return string(kind)
 	}
-	return string(kind)
 }
 
 // runCleanDocker is the --docker opt-in pass: a dry-run preview of docker's
@@ -336,18 +352,40 @@ func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool) err
 		return nil
 	}
 	total := totalDockerReclaimable(items)
-	if total == 0 {
+	unknown := anyDockerReclaimableUnknown(items)
+	switch {
+	case total == 0 && !unknown:
+		// A GENUINE zero: every non-skipped category parsed cleanly to 0.
 		fmt.Fprintln(out, "nothing to reclaim")
 		return nil
+	case unknown && total == 0:
+		// NOT a genuine zero — one or more categories' size string (shown
+		// above) didn't parse, so the true total is unknown, not zero.
+		// Saying "nothing to reclaim" here would contradict a nonzero-
+		// looking line printed one line above it (forgectl#165 item 6).
+		fmt.Fprintln(out, "reclaimable size unknown for one or more categories (see above) — docker's own output didn't parse cleanly, so this is NOT reported as zero")
+	case unknown:
+		// total > 0 here, but ALSO unknown: at least one OTHER category's
+		// size didn't parse, so total only reflects the categories that DID
+		// — it's a lower bound, not the true amount. Without this case the
+		// preview printed a flat total with no caveat while the prompt below
+		// (which also keys off `unknown`) asked to prune "an unknown
+		// amount" — a preview/prompt mismatch caught in review.
+		fmt.Fprintf(out, "at least %s reclaimable from docker (one or more categories' size could not be parsed — see above)\n", formatBytes(total))
+	default:
+		fmt.Fprintf(out, "%s reclaimable from docker\n", formatBytes(total))
 	}
-	fmt.Fprintf(out, "%s reclaimable from docker\n", formatBytes(total))
 
 	if !apply {
 		fmt.Fprintln(out, "re-run with --apply to prune")
 		return nil
 	}
 
-	ok, err := confirm(fmt.Sprintf("Prune %s from docker (containers/images/volumes/build cache)?", formatBytes(total)))
+	promptSize := formatBytes(total)
+	if unknown {
+		promptSize = "an unknown amount (one or more categories' size could not be parsed — see above)"
+	}
+	ok, err := confirmFn(fmt.Sprintf("Prune %s from docker (containers/images/volumes/build cache)?", promptSize))
 	if err != nil {
 		return err
 	}
@@ -439,8 +477,17 @@ func printDockerItems(out io.Writer, items []cleanpkg.DockerItem) {
 			continue
 		}
 		size := formatBytes(item.Reclaimable)
-		if item.Reclaimable == 0 && item.Reported != "" {
-			size = item.Reported
+		if !item.ReclaimableKnown {
+			// ReclaimableKnown is the single source of truth for "did this
+			// row's size actually parse" (see docker.go) — a formatted
+			// Reclaimable of 0 here is a parse-failure placeholder, not a
+			// measurement, so show docker's own raw string instead of a
+			// "0 B" that would read as a genuine zero.
+			if item.Reported != "" {
+				size = item.Reported
+			} else {
+				size = "unknown"
+			}
 		}
 		fmt.Fprintf(out, "%-11s %s\n", item.Kind, size)
 	}
@@ -461,6 +508,19 @@ func totalDockerReclaimable(items []cleanpkg.DockerItem) int64 {
 func anyDockerDetected(items []cleanpkg.DockerItem) bool {
 	for _, item := range items {
 		if !item.Skipped {
+			return true
+		}
+	}
+	return false
+}
+
+// anyDockerReclaimableUnknown reports whether any non-skipped item's
+// preview size failed to parse (ReclaimableKnown false) — the signal that a
+// summed total of 0 is NOT a genuine "nothing to reclaim" and must be
+// reported as unknown instead (forgectl#165 item 6).
+func anyDockerReclaimableUnknown(items []cleanpkg.DockerItem) bool {
+	for _, item := range items {
+		if !item.Skipped && !item.ReclaimableKnown {
 			return true
 		}
 	}
