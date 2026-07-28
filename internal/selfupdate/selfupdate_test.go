@@ -122,7 +122,48 @@ func assertBrewArgv(t *testing.T, fr *exec.FakeRunner, want []string) {
 
 func assertNoAutoUpdate(t *testing.T, fr *exec.FakeRunner) {
 	t.Helper()
-	if fr.Last().Env["HOMEBREW_NO_AUTO_UPDATE"] != "1" {
-		t.Errorf("HOMEBREW_NO_AUTO_UPDATE not pinned on brew call: env = %+v", fr.Last().Env)
+	assertHomebrewSafeEnv(t, fr.Last())
+}
+
+// assertHomebrewSafeEnv pins the full hardened env set on one brew call:
+// HOMEBREW_NO_AUTO_UPDATE=1, plus HOMEBREW_ARTIFACT_DOMAIN,
+// HOMEBREW_CASK_OPTS, and HOMEBREW_BREW_GIT_REMOTE forced to "" — an
+// ambient value for any of the latter three (e.g. from a direnv-managed
+// .envrc) could redirect where the upgrade artifact or tap comes from on
+// the one command whose output is a new binary on $PATH.
+func assertHomebrewSafeEnv(t *testing.T, call exec.Call) {
+	t.Helper()
+	want := map[string]string{
+		"HOMEBREW_NO_AUTO_UPDATE":  "1",
+		"HOMEBREW_ARTIFACT_DOMAIN": "",
+		"HOMEBREW_CASK_OPTS":       "",
+		"HOMEBREW_BREW_GIT_REMOTE": "",
+	}
+	for k, v := range want {
+		if got, ok := call.Env[k]; !ok || got != v {
+			t.Errorf("%s = %q (present=%v), want %q — a security-relevant HOMEBREW_* var isn't pinned on this brew call", k, got, ok, v)
+		}
+	}
+}
+
+// TestBrewCalls_PinSecurityRelevantEnv exercises every brew-shelling entry
+// point in this package and confirms each pins the full hardened env, not
+// just HOMEBREW_NO_AUTO_UPDATE — a regression here would let an ambient
+// HOMEBREW_ARTIFACT_DOMAIN/CASK_OPTS/BREW_GIT_REMOTE redirect brew's
+// download or tap on `forgectl upgrade`, the one command whose output is a
+// new binary on $PATH.
+func TestBrewCalls_PinSecurityRelevantEnv(t *testing.T) {
+	fr := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) { return "", nil }}
+	if _, _, err := CheckOutdated(context.Background(), fr); err != nil {
+		t.Fatalf("CheckOutdated: %v", err)
+	}
+	assertHomebrewSafeEnv(t, fr.Last())
+
+	fr = &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) { return "", nil }}
+	if _, err := Upgrade(context.Background(), fr); err != nil {
+		t.Fatalf("Upgrade: %v", err)
+	}
+	for _, call := range fr.Calls {
+		assertHomebrewSafeEnv(t, call)
 	}
 }

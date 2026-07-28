@@ -122,3 +122,30 @@ func TestDoctorMark_CoversEveryState(t *testing.T) {
 // bench.Prober compile-time assertion — keeps fakeDoctorProber honest if
 // internal/bench's Prober interface ever grows a method.
 var _ bench.Prober = fakeDoctorProber{}
+
+// TestPrintDoctorReport_SanitizesForgedControlBytes pins the fix for output
+// forging: Detail/Hint carry captured stdout/stderr from external commands
+// (an untrusted tap, a compromised gh session), so a newline or an ANSI CSI
+// sequence embedded there could forge an extra well-formed check line, or
+// rewrite a real failure's line via a cursor-control escape (the exact
+// pr_prs.go/forgectl#162 defect class, reused here at doctor's own display
+// boundary). Before sanitizeCell was applied, this test's forged detail
+// would render as two lines, the second indistinguishable from a real
+// passing "gh" check.
+func TestPrintDoctorReport_SanitizesForgedControlBytes(t *testing.T) {
+	forged := "not logged in\nok    gh                 authenticated"
+	report := doctor.Report{Checks: []doctor.Check{
+		{Name: "gh", State: doctor.StateFail, Detail: forged, Hint: "run `gh auth login`\x1b[2Kforged hint line"},
+	}}
+
+	var out bytes.Buffer
+	printDoctorReport(&out, report)
+	rendered := out.String()
+
+	if bytes.Count([]byte(rendered), []byte("\n")) != 2 {
+		t.Errorf("rendered = %q, want exactly 2 newlines (one detail line + one hint line) — a forged \\n produced an extra line", rendered)
+	}
+	if bytes.Contains([]byte(rendered), []byte("\x1b")) {
+		t.Errorf("rendered = %q, want no raw ESC byte — a forged CSI sequence survived to the terminal", rendered)
+	}
+}

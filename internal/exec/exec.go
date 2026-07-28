@@ -34,6 +34,17 @@ type Runner interface {
 	RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (string, error)
 }
 
+// HomebrewNoAutoUpdate disables Homebrew's own implicit "auto-update and
+// refresh taps" behavior: several brew subcommands beyond `update` itself —
+// `outdated`, `upgrade`, `install`, `list --versions`, … — silently trigger
+// it on their own once the last auto-update is more than 24h stale. Every
+// brew-shelling caller in this repo (internal/update, internal/selfupdate)
+// merges this onto its RunWithEnv calls so brew's behavior stays
+// deterministic regardless of how stale the ambient Homebrew auto-update
+// timestamp happens to be — a single definition so the two callers can
+// never drift apart on the exact env shape.
+var HomebrewNoAutoUpdate = map[string]string{"HOMEBREW_NO_AUTO_UPDATE": "1"}
+
 // OSRunner is the production Runner: it actually spawns processes.
 type OSRunner struct{}
 

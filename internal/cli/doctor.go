@@ -104,11 +104,21 @@ func doctorMark(s doctor.State) string {
 // printDoctorReport writes one line per Check — glyph, name, detail — with
 // the hint (when present) on an indented line underneath, mirroring
 // launch_doctor.go's own per-line shape.
+//
+// Detail and Hint carry captured output from external commands (brew's
+// outdated line, a CommandError's stderr) — an untrusted tap or a
+// compromised gh session could embed a newline/CR or an ANSI CSI sequence
+// there to forge an additional well-formed check line, or overwrite a real
+// failure's line via a cursor-control escape. sanitizeCell (pr_prs.go,
+// forgectl#162's same fix for review render paths) neutralizes both classes
+// at this exact display boundary — the one place every check's output
+// converges before reaching a terminal. The --json path needs no such
+// treatment: encoding/json already escapes control bytes.
 func printDoctorReport(out io.Writer, report doctor.Report) {
 	for _, c := range report.Checks {
-		fmt.Fprintf(out, "%s %-18s %s\n", doctorMark(c.State), c.Name, c.Detail)
+		fmt.Fprintf(out, "%s %-18s %s\n", doctorMark(c.State), c.Name, sanitizeCell(c.Detail))
 		if c.Hint != "" {
-			fmt.Fprintf(out, "  %s\n", c.Hint)
+			fmt.Fprintf(out, "  %s\n", sanitizeCell(c.Hint))
 		}
 	}
 }

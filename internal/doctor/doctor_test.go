@@ -3,7 +3,9 @@ package doctor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
@@ -107,9 +109,25 @@ func TestCheckLogPath(t *testing.T) {
 		t.Errorf("stderr log: state = %q, detail = %q; want ok with detail", check.State, check.Detail)
 	}
 
+	// A fresh redirected config dir has no forgectl subdirectory yet — the
+	// auto log path's parent doesn't exist. checkLogPath must never create
+	// it (a health check has no side effect of its own; config.OpenAppendFile
+	// creates it on demand at the first real log write) — StateWarn, not
+	// StateFail, since it's created automatically the next time forgectl logs.
+	check = checkLogPath(Deps{Cfg: config.Config{}})
+	if check.State != StateWarn {
+		t.Errorf("auto log path, dir absent: state = %q, detail = %q; want warn", check.State, check.Detail)
+	}
+
+	// Once the directory exists (forgectl has logged before, or the operator
+	// created it), the same auto path resolves to StateOK.
+	autoPath := config.ResolvedLogPath("")
+	if err := os.MkdirAll(filepath.Dir(autoPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	check = checkLogPath(Deps{Cfg: config.Config{}})
 	if check.State != StateOK {
-		t.Errorf("auto log path: state = %q, detail = %q; want ok", check.State, check.Detail)
+		t.Errorf("auto log path, dir present: state = %q, detail = %q; want ok", check.State, check.Detail)
 	}
 }
 
@@ -179,6 +197,42 @@ func TestCheckTrustStore(t *testing.T) {
 	}}
 	if check := checkTrustStore(d); check.State != StateOK {
 		t.Errorf("present trust store: state = %q, want ok", check.State)
+	}
+}
+
+// TestCheckTrustStore_InvalidOrTamperedStoreFails pins the security-critical
+// distinction ErrTrustStoreMissing's own doc comment calls out: "I never
+// enrolled a key" (StateSkip — a valid, unconfigured install) must never
+// read the same as "my trust store failed to verify" or "my anchor is
+// missing/not root-owned" (StateFail — the exact conditions this check
+// exists to catch). Before this test existed, checkTrustStore collapsed
+// every TrustedStore error into StateSkip, so a tampered store or a
+// world-writable anchor silently reported "-" and left Report.Healthy()
+// true — the check answered the question wrongly rather than not answering
+// it. ErrTrustStoreMissing wraps ErrTrustStoreInvalid (bless/verify.go), so
+// the ordering in checkTrustStore matters: missing must be tested first, or
+// errors.Is(err, ErrTrustStoreInvalid) would match the missing case too and
+// silently restore the collapsed behavior while looking fixed.
+func TestCheckTrustStore_InvalidOrTamperedStoreFails(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"invalid/tampered store", bless.ErrTrustStoreInvalid},
+		{"wrapped invalid store", fmt.Errorf("trust store signed by X, not the anchor: %w", bless.ErrTrustStoreInvalid)},
+		{"missing or unowned anchor", bless.ErrNoAnchor},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := Deps{TrustedStore: func() (bless.Store, error) { return bless.Store{}, c.err }}
+			check := checkTrustStore(d)
+			if check.State != StateFail {
+				t.Errorf("state = %q, want fail — a tampered/invalid trust store must never read as skip", check.State)
+			}
+			if check.Hint == "" {
+				t.Error("Fail check has no remediation hint")
+			}
+		})
 	}
 }
 

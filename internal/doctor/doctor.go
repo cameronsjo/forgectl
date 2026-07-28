@@ -14,6 +14,7 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	osexec "os/exec"
@@ -144,9 +145,12 @@ func checkConfig(d Deps) Check {
 
 // checkLogPath resolves where forgectl would write its log (config.
 // ResolvedLogPath, the same resolution SetupLogger's openLogWriter applies)
-// and confirms the parent directory exists or can be created — never opens
-// or writes the log file itself, so running `doctor` has no side effect on
-// log rotation.
+// and reports whether its parent directory already exists — a read-only
+// Stat, never a mkdir: a health check must have no side effect of its own,
+// and config.OpenAppendFile already creates the directory on demand at the
+// first real log write, so doctor has nothing useful to create here. A
+// missing directory is StateWarn, not StateFail — it will be created
+// automatically the next time forgectl actually logs something.
 func checkLogPath(d Deps) Check {
 	path := config.ResolvedLogPath(d.Cfg.LogFile)
 	switch path {
@@ -155,22 +159,11 @@ func checkLogPath(d Deps) Check {
 	case "(unavailable)":
 		return Check{Name: "log path", State: StateFail, Detail: "config directory could not be resolved", Hint: "set [log_file] explicitly, or fix the config directory"}
 	}
-	if err := ensureParentDir(path); err != nil {
-		return Check{Name: "log path", State: StateFail, Detail: err.Error(), Hint: "create the log directory or fix its permissions"}
+	dir := filepath.Dir(path)
+	if _, err := os.Stat(dir); err != nil {
+		return Check{Name: "log path", State: StateWarn, Detail: fmt.Sprintf("%s does not exist yet", dir), Hint: "created automatically on the first log write; run any forgectl command to confirm"}
 	}
 	return Check{Name: "log path", State: StateOK, Detail: path}
-}
-
-// ensureParentDir creates path's parent directory if it doesn't already
-// exist — mirrors config.OpenAppendFile's own dir-creation step, but stops
-// short of opening the file itself, since a health check should never write
-// a log line as a side effect of running.
-func ensureParentDir(path string) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create log directory %s: %w", dir, err)
-	}
-	return nil
 }
 
 // checkBinary reports whether name resolves on PATH via d.LookPath — the
@@ -231,16 +224,32 @@ func fromBenchComponent(c bench.Component) Check {
 }
 
 // checkTrustStore reports whether the workflow-blessing trust store is
-// present and verifies under the compiled-in anchor (internal/bless). A
-// missing store or anchor is StateSkip, not StateFail — trust/blessing is
-// opt-in infrastructure for `workflow bless` users, not every forgectl
-// install.
+// present and verifies under the compiled-in anchor (internal/bless).
+//
+// A genuinely ABSENT store (bless.ErrTrustStoreMissing) is StateSkip, not
+// StateFail — trust/blessing is opt-in infrastructure for `workflow bless`
+// users, not every forgectl install. Any OTHER TrustedStore error —
+// bless.ErrTrustStoreInvalid (a corrupt sidecar, or a store signed by a key
+// other than the anchor) or bless.ErrNoAnchor (the compiled-in anchor is
+// missing, not root-owned, or group/world-writable) — is StateFail: these
+// are exactly the conditions this check exists to catch, and reporting them
+// as "-" (skip, Report.Healthy() still true) would answer the health
+// question wrongly rather than not answering it — worse than no check at
+// all on a security-relevant path.
+//
+// ErrTrustStoreMissing wraps ErrTrustStoreInvalid (see bless/verify.go), so
+// the missing check MUST run first: errors.Is(err, ErrTrustStoreInvalid)
+// alone would match the missing case too and collapse back to always-skip.
 func checkTrustStore(d Deps) Check {
 	store, err := d.TrustedStore()
-	if err != nil {
+	switch {
+	case err == nil:
+		return Check{Name: "trust store", State: StateOK, Detail: fmt.Sprintf("verified, %d enrolled key(s)", len(store.Keys))}
+	case errors.Is(err, bless.ErrTrustStoreMissing):
 		return Check{Name: "trust store", State: StateSkip, Detail: err.Error(), Hint: "run `forgectl workflow bless` to enroll a signing key, if you use blessed workflows"}
+	default:
+		return Check{Name: "trust store", State: StateFail, Detail: err.Error(), Hint: "the trust store or its root of trust failed to verify — see `forgectl workflow trust list` and bless/verify.go's error taxonomy"}
 	}
-	return Check{Name: "trust store", State: StateOK, Detail: fmt.Sprintf("verified, %d enrolled key(s)", len(store.Keys))}
 }
 
 // checkForgectlVersion reports the Homebrew tap's reachability and forgectl's

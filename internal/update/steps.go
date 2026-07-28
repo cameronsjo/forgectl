@@ -36,17 +36,16 @@ func DefaultSteps() []Step {
 	}
 }
 
-// homebrewNoAutoUpdate disables Homebrew's own implicit "auto-update and
-// refresh taps" behavior: several brew subcommands beyond `update` itself —
-// `outdated`, `upgrade`, `install`, `list --versions`, … — silently trigger
-// it on their own once the last auto-update is more than 24h stale. Without
-// this, `brew outdated` (brewStep's Check, documented as "no mutation,
-// always safe") can fetch and mutate local tap/formula-index state as a
-// side effect the caller never asked for and `update check` never disclosed.
+// homebrewNoAutoUpdate is exec.HomebrewNoAutoUpdate (the shared definition —
+// internal/selfupdate's own brew calls merge the same map, so the two
+// packages can never drift apart on the exact env shape). Without it,
+// `brew outdated` (brewStep's Check, documented as "no mutation, always
+// safe") can fetch and mutate local tap/formula-index state as a side
+// effect the caller never asked for and `update check` never disclosed.
 // Applied to every brew invocation in this step (Check and Apply alike) so
 // the roster's behavior is deterministic regardless of how stale the
 // ambient Homebrew auto-update timestamp happens to be.
-var homebrewNoAutoUpdate = map[string]string{"HOMEBREW_NO_AUTO_UPDATE": "1"}
+var homebrewNoAutoUpdate = exec.HomebrewNoAutoUpdate
 
 // brewStep: Check and Apply are both scoped to --formula — no cask is listed
 // or upgraded here. One residue: `brew cleanup` takes no --formula/--cask
