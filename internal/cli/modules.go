@@ -33,5 +33,6 @@ func allModules() []module.Manifest {
 		docsModule,
 		initModule,
 		preflightModule,
+		ghosttyModule,
 	}
 }

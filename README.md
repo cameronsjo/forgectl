@@ -133,6 +133,11 @@ forgectl net                             # show the cached (or freshly probed) a
 forgectl net --refresh                   # force a new probe, bypassing the cache
 forgectl net --json                      # machine-readable output for scripting
 
+# ghostty — theme + keybind reporting, parsed live from the ghostty CLI
+forgectl ghostty themes                  # custom themes, active one marked
+forgectl ghostty themes --all            # also list the themes bundled with ghostty
+forgectl ghostty cheat                   # keybind cheatsheet, parsed from +list-keybinds
+
 # pip — comment- and whitespace-preserving pip.conf editor
 forgectl pip remove                      # comment out [global] index-url (reversible)
 forgectl pip restore                     # un-comment whatever remove last tagged
