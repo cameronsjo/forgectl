@@ -6,14 +6,16 @@ import (
 )
 
 // Call records one invocation through a FakeRunner: the binary, its args,
-// whether it went through the interactive path, and — for RunWithInput —
-// what was piped into stdin. Tests assert on these to check command
-// construction (the argv tmux/sesh actually receive).
+// whether it went through the interactive path, — for RunWithInput — what
+// was piped into stdin, and — for RunWithEnv — the extra environment
+// variables passed. Tests assert on these to check command construction
+// (the argv tmux/sesh actually receive).
 type Call struct {
 	Name        string
 	Args        []string
 	Interactive bool
 	Input       string
+	Env         map[string]string
 }
 
 // FakeRunner is the test double for Runner. It records every Call and produces
@@ -51,6 +53,19 @@ func (f *FakeRunner) Run(_ context.Context, name string, args ...string) (string
 func (f *FakeRunner) RunWithInput(_ context.Context, stdin string, name string, args ...string) (string, error) {
 	f.mu.Lock()
 	f.Calls = append(f.Calls, Call{Name: name, Args: args, Input: stdin})
+	f.mu.Unlock()
+	if f.RunFunc != nil {
+		return f.RunFunc(name, args)
+	}
+	return "", nil
+}
+
+// RunWithEnv records the call (with Env set) and delegates to RunFunc, same
+// as Run — RunFunc doesn't see env, only name/args, so a test that needs to
+// branch on the env reads it back off Calls.
+func (f *FakeRunner) RunWithEnv(_ context.Context, env map[string]string, name string, args ...string) (string, error) {
+	f.mu.Lock()
+	f.Calls = append(f.Calls, Call{Name: name, Args: args, Env: env})
 	f.mu.Unlock()
 	if f.RunFunc != nil {
 		return f.RunFunc(name, args)

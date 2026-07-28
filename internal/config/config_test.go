@@ -191,6 +191,58 @@ func TestPruneOldLogs_MissingDirIsNoop(t *testing.T) {
 	pruneOldLogs(filepath.Join(t.TempDir(), "does-not-exist"))
 }
 
+func TestPruneUpdateLogs(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+
+	logName := func(d time.Time) string {
+		return "update-" + d.Format("20060102-150405") + ".log"
+	}
+	write := func(name string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	// Clearly older than the 7-day window → should be pruned.
+	oldA := logName(now.AddDate(0, 0, -10))
+	oldB := logName(now.AddDate(0, 0, -30))
+	// Within the window → should survive.
+	recent := logName(now.AddDate(0, 0, -2))
+	today := logName(now)
+	// Should never be touched, regardless of age.
+	keepers := []string{"other.log", "update-notadate.log", "update-.log", "README.md"}
+
+	write(oldA)
+	write(oldB)
+	write(recent)
+	write(today)
+	for _, k := range keepers {
+		write(k)
+	}
+
+	PruneUpdateLogs(dir)
+
+	gone := []string{oldA, oldB}
+	for _, name := range gone {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be pruned, but it survived (err=%v)", name, err)
+		}
+	}
+
+	survivors := append([]string{recent, today}, keepers...)
+	for _, name := range survivors {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("expected %s to survive, but it's gone: %v", name, err)
+		}
+	}
+}
+
+func TestPruneUpdateLogs_MissingDirIsNoop(t *testing.T) {
+	// Must not panic when the directory does not exist.
+	PruneUpdateLogs(filepath.Join(t.TempDir(), "does-not-exist"))
+}
+
 func TestOpenLogWriter(t *testing.T) {
 	t.Run("dash returns stderr and nop closer", func(t *testing.T) {
 		w, c := openLogWriter("-")
@@ -262,6 +314,53 @@ func TestOpenLogWriter(t *testing.T) {
 	})
 }
 
+func TestOpenAppendFile(t *testing.T) {
+	t.Run("creates nested dir and opens for append", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "nested", "sub", "out.log")
+		f, err := OpenAppendFile(path)
+		if err != nil {
+			t.Fatalf("OpenAppendFile: %v", err)
+		}
+		if _, err := f.WriteString("first\n"); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+
+		// Re-open (as a real second caller would) and confirm it appends
+		// rather than truncating.
+		f2, err := OpenAppendFile(path)
+		if err != nil {
+			t.Fatalf("second OpenAppendFile: %v", err)
+		}
+		if _, err := f2.WriteString("second\n"); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := f2.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		if string(got) != "first\nsecond\n" {
+			t.Errorf("contents = %q, want %q (append, not truncate)", string(got), "first\nsecond\n")
+		}
+	})
+
+	t.Run("unmkdir-able path returns an error", func(t *testing.T) {
+		blocker := filepath.Join(t.TempDir(), "iamafile")
+		if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+			t.Fatalf("seed blocker: %v", err)
+		}
+		if _, err := OpenAppendFile(filepath.Join(blocker, "sub", "out.log")); err == nil {
+			t.Error("OpenAppendFile under a non-directory parent = nil error, want an error")
+		}
+	})
+}
+
 func TestConfigPath(t *testing.T) {
 	dir := redirectConfigDir(t)
 	got, err := ConfigPath()
@@ -319,6 +418,30 @@ func TestPrReviewedPath(t *testing.T) {
 	want := filepath.Join(dir, "forgectl", "pr-reviewed.json")
 	if got != want {
 		t.Errorf("PrReviewedPath() = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateLogDir(t *testing.T) {
+	dir := redirectConfigDir(t)
+	got, err := UpdateLogDir()
+	if err != nil {
+		t.Fatalf("UpdateLogDir: %v", err)
+	}
+	want := filepath.Join(dir, "forgectl", "update-logs")
+	if got != want {
+		t.Errorf("UpdateLogDir() = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateConfig_IsZero(t *testing.T) {
+	if !(UpdateConfig{}).IsZero() {
+		t.Error("zero-value UpdateConfig.IsZero() = false, want true")
+	}
+	if (UpdateConfig{Roster: []string{"brew"}}).IsZero() {
+		t.Error("UpdateConfig with a Roster must not report IsZero")
+	}
+	if (UpdateConfig{LogDir: "/tmp/x"}).IsZero() {
+		t.Error("UpdateConfig with a LogDir must not report IsZero")
 	}
 }
 

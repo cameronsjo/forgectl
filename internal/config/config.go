@@ -65,6 +65,9 @@ const logKeepDays = 7
 //	[preflight]          # forgectl preflight — plugin/catalog alignment
 //	catalog_path = ""    # override auto-locate; direct path to the generated catalog.md
 //	default_set  = []    # extra "plugin@marketplace" entries always folded into the core-tier target
+//	[update]             # forgectl update — weekly package-manager + OS maintenance
+//	roster  = []          # step names to run when --only is omitted; empty = every roster step
+//	log_dir = ""          # transcript log directory; empty = <config dir>/update-logs
 type Config struct {
 	NoIcons   bool            `toml:"no_icons"`
 	LogLevel  string          `toml:"log_level"`
@@ -79,6 +82,7 @@ type Config struct {
 	Review    ReviewConfig    `toml:"review"`
 	Docs      DocsConfig      `toml:"docs"`
 	Preflight PreflightConfig `toml:"preflight"`
+	Update    UpdateConfig    `toml:"update"`
 }
 
 // LaunchConfig is the [launch] section: base defaults plus directory-keyed
@@ -260,6 +264,25 @@ type PreflightConfig struct {
 // IsZero reports whether the [preflight] section was absent or empty.
 func (pc PreflightConfig) IsZero() bool {
 	return pc.CatalogPath == "" && len(pc.DefaultSet) == 0
+}
+
+// UpdateConfig is the [update] section: `forgectl update`'s persisted
+// defaults. A zero value means "section absent" — internal/update's Client
+// runs its full built-in roster (DefaultSteps) and internal/cli falls back
+// to its own default log directory.
+type UpdateConfig struct {
+	// Roster names the steps to run when --only is omitted (matched against
+	// the roster's Step.Name values). Empty means every roster step — the
+	// same "unrestricted" meaning --only's absence has on the CLI.
+	Roster []string `toml:"roster"`
+	// LogDir overrides the default directory for the timestamped
+	// transcript log. Empty falls back to UpdateLogDir().
+	LogDir string `toml:"log_dir"`
+}
+
+// IsZero reports whether the [update] section was absent or empty.
+func (uc UpdateConfig) IsZero() bool {
+	return len(uc.Roster) == 0 && uc.LogDir == ""
 }
 
 // Baked defaults for hearth's frozen OTLP transport. These are the values a
@@ -461,23 +484,38 @@ func openLogWriter(logFile string) (io.Writer, io.Closer) {
 	} else {
 		path = logFile
 	}
-	logDir := filepath.Dir(path)
 
-	if err := os.MkdirAll(logDir, 0o700); err != nil {
-		return os.Stderr, nopCloser{}
-	}
-
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := OpenAppendFile(path)
 	if err != nil {
 		return os.Stderr, nopCloser{}
 	}
 
 	// Prune old daily log files (auto mode only; best-effort, non-fatal).
 	if logFile == "" {
-		pruneOldLogs(logDir)
+		pruneOldLogs(filepath.Dir(path))
 	}
 
 	return f, f
+}
+
+// OpenAppendFile ensures path's directory exists (MkdirAll 0700) and opens
+// path itself for append (O_CREATE|O_APPEND|O_WRONLY, 0600) — the shared
+// mkdir+open trio behind every forgectl log-file writer. Exported so a
+// module's own log-file plumbing (e.g. `forgectl update`'s per-run
+// transcript log) can reuse it instead of re-deriving the same two calls;
+// unlike openLogWriter, it returns the error rather than silently degrading,
+// since callers differ on what "silently degrading" should look like (a
+// bare fallback to stderr here, a warned fallback there).
+func OpenAppendFile(path string) (*os.File, error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("create log directory %s: %w", dir, err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open log file %s: %w", path, err)
+	}
+	return f, nil
 }
 
 // configDir returns the OS config base directory for forgectl
@@ -504,6 +542,29 @@ func autoLogPath() (string, error) {
 // than logKeepDays days. Errors are silently ignored — log pruning is never
 // fatal.
 func pruneOldLogs(dir string) {
+	pruneLogsMatching(dir, "forgectl-", ".log", "2006-01-02")
+}
+
+// PruneUpdateLogs deletes update-YYYYMMDD-HHMMSS.log files in dir that are
+// older than logKeepDays days — `forgectl update`'s equivalent of
+// pruneOldLogs above, since its transcript logs use their own timestamped
+// naming (one file per run, not one per day) rather than the daily-rotated
+// scheme. Exported (unlike pruneOldLogs) because the update-logs directory
+// is opened from internal/cli, not this package; errors are silently
+// ignored — log pruning is never fatal. Safe to call regardless of whether
+// dir is the default (UpdateLogDir()) or a user override ([update] log_dir):
+// it only ever touches files matching this exact pattern, never anything
+// else that might share the directory.
+func PruneUpdateLogs(dir string) {
+	pruneLogsMatching(dir, "update-", ".log", "20060102-150405")
+}
+
+// pruneLogsMatching deletes files in dir named prefix+<timestamp>+suffix
+// whose embedded timestamp (parsed per layout) is older than logKeepDays —
+// the shared body behind pruneOldLogs (daily forgectl-*.log) and
+// PruneUpdateLogs (per-run update-*.log), which differ only in naming
+// scheme. Errors are silently ignored — log pruning is never fatal.
+func pruneLogsMatching(dir, prefix, suffix, layout string) {
 	cutoff := time.Now().AddDate(0, 0, -logKeepDays)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -514,11 +575,11 @@ func pruneOldLogs(dir string) {
 			continue
 		}
 		name := e.Name()
-		if !strings.HasPrefix(name, "forgectl-") || !strings.HasSuffix(name, ".log") {
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
 			continue
 		}
-		dateStr := strings.TrimSuffix(strings.TrimPrefix(name, "forgectl-"), ".log")
-		t, err := time.Parse("2006-01-02", dateStr)
+		dateStr := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
+		t, err := time.Parse(layout, dateStr)
 		if err != nil {
 			continue
 		}
@@ -590,6 +651,20 @@ func NetCachePath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "net-cache.json"), nil
+}
+
+// UpdateLogDir returns the default directory for `forgectl update`'s
+// timestamped transcript logs: <os.UserConfigDir()>/forgectl/update-logs
+// (macOS: ~/Library/Application Support/forgectl/update-logs; Linux:
+// ~/.config/forgectl/update-logs). It derives from the same configDir()
+// base as every other forgectl path, so it never drifts from them. [update]
+// log_dir overrides this; callers should prefer that when set.
+func UpdateLogDir() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "update-logs"), nil
 }
 
 // DockerLastTagPath returns the on-disk path for the `forgectl docker`

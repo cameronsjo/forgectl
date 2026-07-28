@@ -13,7 +13,7 @@ Built for two hands and one thumb:
 brew install cameronsjo/tap/forgectl
 ```
 
-Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against the self-hosted Gitea, and `review` when `[review.gitea]` is enabled), `docker` (`bench status`/`up`, `docker build/run/shell`, and `clean --docker`), `npm`/`pnpm`/`pip`/`go`/`brew` (`clean --caches` — each is independently opt-in and skipped, not required, when absent).
+Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against the self-hosted Gitea, and `review` when `[review.gitea]` is enabled), `docker` (`bench status`/`up`, `docker build/run/shell`, and `clean --docker`), `npm`/`pnpm`/`pip`/`go`/`brew` (`clean --caches` — each is independently opt-in and skipped, not required, when absent). `update`'s roster shares that same `brew`/`go`/`npm` dependency (`softwareupdate` is a macOS built-in) — each step is independently scoped, so a missing tool fails only its own step, never the others.
 
 ## Usage
 
@@ -152,6 +152,26 @@ forgectl quarantine status               # show which targets are hidden
 forgectl review                          # unified table (reviewed rows dimmed)
 forgectl review --kind issue             # issues only (or: pr)
 forgectl review mark owner/repo#42       # mark an item reviewed
+
+# update — weekly package-manager + OS maintenance, independently-scoped steps
+forgectl update check                    # report-only for every step (brew/softwareupdate/go/npm), no mutation —
+                                          #   each step's captured output (the actual finding) goes to stderr +
+                                          #   the log, and to --json's own per-step field
+forgectl update run                      # DESTRUCTIVE, one confirmation: brew (upgrade --formula/cleanup), go
+                                          #   (cache clean), npm (update) are SKIPPED without --yes; softwareupdate
+                                          #   (check-only, never installs) still runs. brew's cleanup ALSO removes
+                                          #   the Cellar versions upgrade just superseded (the rollback path), and
+                                          #   go's clean wipes the module cache machine-wide, for every project —
+                                          #   the prompt names both when the relevant step is selected. brew is
+                                          #   --formula-scoped in BOTH check and run: casks are out of scope
+                                          #   entirely (a cask upgrade can hang on a sudo/GUI prompt this
+                                          #   unattended tool has no stdin to answer) — upgrade a cask yourself
+                                          #   with `brew upgrade --cask`
+forgectl update run --yes                # skip the prompt, apply the same effects non-interactively (cron/CI)
+forgectl update run --only brew,go       # restrict to a subset of the roster
+forgectl update run --json               # machine-readable summary (with each step's output) to stdout ONLY;
+                                          #   the full per-step transcript goes to stderr + a timestamped log
+                                          #   (update-logs/, auto-pruned after 7 days)
 
 # y — read/write the system clipboard (macOS only)
 echo hi | forgectl y copy                # copy stdin to the clipboard
