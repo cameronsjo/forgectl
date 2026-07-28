@@ -366,6 +366,44 @@ func TestLoad(t *testing.T) {
 	})
 }
 
+func TestReviewGiteaConfig_RoundTripAndIsZero(t *testing.T) {
+	var zero GiteaConfig
+	if !zero.IsZero() {
+		t.Errorf("zero-value GiteaConfig.IsZero() = false, want true")
+	}
+
+	dir := redirectConfigDir(t)
+	cfgDir := filepath.Join(dir, "forgectl")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	body := "[review]\nowners = [\"cameronsjo\"]\n" +
+		"[review.gitea]\nenabled = true\nhost = \"git.sjo.lol\"\nlogin = \"cameron\"\nowners = [\"cameron\"]\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got := Load()
+	want := ReviewConfig{
+		Owners: []string{"cameronsjo"},
+		Gitea: GiteaConfig{
+			Enabled: true,
+			Host:    "git.sjo.lol",
+			Login:   "cameron",
+			Owners:  []string{"cameron"},
+		},
+	}
+	if !reflect.DeepEqual(got.Review, want) {
+		t.Errorf("Load().Review = %+v, want %+v", got.Review, want)
+	}
+	if got.Review.Gitea.IsZero() {
+		t.Error("configured [review.gitea] must not report IsZero")
+	}
+	if got.Review.IsZero() {
+		t.Error("[review] with a configured Gitea section must not report IsZero")
+	}
+}
+
 func TestSetupLogger(t *testing.T) {
 	// SetupLogger mutates the global slog default — restore it afterward.
 	orig := slog.Default()

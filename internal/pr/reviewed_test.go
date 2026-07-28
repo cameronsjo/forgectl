@@ -21,6 +21,11 @@ package pr
 // Sync (Classification: data transformer + I/O)
 //   [x] Happy: prunes entries not in the open set, keeps open ones
 //   [x] Boundary: no change → no write
+//
+// SyncKeysScoped (Classification: data transformer + I/O)
+//   [x] Happy: prunes an active host's closed key, keeps its open key
+//   [x] Invariant: a key whose host has no active source is left untouched
+//       even though it is absent from openKeys
 
 import (
 	"os"
@@ -148,6 +153,37 @@ func TestReviewedStore_Sync_PrunesClosedRefs(t *testing.T) {
 		if _, ok := reloaded.ReviewedAt(testRef(n)); ok {
 			t.Errorf("Sync kept a closed ref (#%d)", n)
 		}
+	}
+}
+
+func TestReviewedStore_SyncKeysScoped_OnlyPrunesActiveHosts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "review-reviewed.json")
+	s := LoadReviewed(path, WithNow(func() time.Time { return time.Unix(0, 0) }))
+	for _, key := range []string{
+		"github.com/cameronsjo/forgectl#1", // active host, stays open
+		"github.com/cameronsjo/forgectl#2", // active host, now closed
+		"git.sjo.lol/cameron/forge#9",      // no active source this run
+	} {
+		if err := s.MarkKey(key); err != nil {
+			t.Fatalf("MarkKey %s: %v", key, err)
+		}
+	}
+
+	openKeys := []string{"github.com/cameronsjo/forgectl#1"}
+	activeHosts := []string{"github.com"}
+	if err := s.SyncKeysScoped(openKeys, activeHosts); err != nil {
+		t.Fatalf("SyncKeysScoped: %v", err)
+	}
+
+	reloaded := LoadReviewed(path)
+	if !reloaded.IsReviewedKey("github.com/cameronsjo/forgectl#1", time.Unix(0, 0)) {
+		t.Error("active host's open key must survive")
+	}
+	if reloaded.IsReviewedKey("github.com/cameronsjo/forgectl#2", time.Unix(0, 0)) {
+		t.Error("active host's closed key must be pruned")
+	}
+	if !reloaded.IsReviewedKey("git.sjo.lol/cameron/forge#9", time.Unix(0, 0)) {
+		t.Error("a key whose host has no active source must survive, even though it is absent from openKeys")
 	}
 }
 

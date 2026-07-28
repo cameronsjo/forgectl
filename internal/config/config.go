@@ -54,6 +54,11 @@ const logKeepDays = 7
 //	machine = ""                     # provenance label; default: short hostname
 //	[review]             # forgectl review — cross-project work inventory
 //	owners = ["cameronsjo"]          # gh search --owner scope; default cameronsjo
+//	[review.gitea]       # forgectl review — additional Gitea source (opt-in)
+//	enabled = false                  # false by default; the tea CLI must be on PATH
+//	host    = "git.sjo.lol"          # required when enabled
+//	login   = "cameron"              # optional; omitted → tea's own configured default login
+//	owners  = ["cameron"]            # tea --owner scope, independent of [review] owners
 //	[docs]               # forgectl docs — local markdown reader
 //	roots = ["~/Projects/notes"]     # extra root dirs indexed alongside cwd/./docs
 //	addr  = "127.0.0.1:4712"         # --addr default when the flag is omitted
@@ -192,16 +197,39 @@ func (sc SessionsConfig) IsZero() bool {
 }
 
 // ReviewConfig is the [review] section: which owners `forgectl review` fans
-// its gh searches across. A zero value means "section absent" — the CLI layer
-// applies its built-in default owner. Owner values are low-trust argv input;
-// the search layer validates them against the anchored owner charset.
+// its gh searches across, plus the opt-in Gitea source. A zero value means
+// "section absent" — the CLI layer applies its built-in default owner. Owner
+// values are low-trust argv input; the search layer validates them against
+// the anchored owner charset.
 type ReviewConfig struct {
-	Owners []string `toml:"owners"`
+	Owners []string    `toml:"owners"`
+	Gitea  GiteaConfig `toml:"gitea"`
 }
 
 // IsZero reports whether the [review] section was absent or empty.
 func (rc ReviewConfig) IsZero() bool {
-	return len(rc.Owners) == 0
+	return len(rc.Owners) == 0 && rc.Gitea.IsZero()
+}
+
+// GiteaConfig is the [review.gitea] section: forgectl review's opt-in second
+// source, a self-hosted Gitea instance enumerated over the tea CLI (Phase
+// C). A zero value means "section absent" or disabled — the review module
+// omits the source entirely rather than constructing one doomed to error at
+// Items() time. Host and Owners are low-trust config input headed for an
+// argv and a persisted store key: Host is validated at review.NewGitea
+// construction (an anchored hostname charset, since it lands in every
+// Item's Host field); Owners ride the same anchored owner/repo charset
+// every review/pr owner does, validated per-query in Items.
+type GiteaConfig struct {
+	Enabled bool     `toml:"enabled"`
+	Host    string   `toml:"host"`
+	Login   string   `toml:"login"`
+	Owners  []string `toml:"owners"`
+}
+
+// IsZero reports whether the [review.gitea] section was absent or empty.
+func (gc GiteaConfig) IsZero() bool {
+	return !gc.Enabled && gc.Host == "" && gc.Login == "" && len(gc.Owners) == 0
 }
 
 // DocsConfig is the [docs] section: extra root directories `forgectl docs`
