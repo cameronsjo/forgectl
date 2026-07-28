@@ -2,7 +2,7 @@ package cli
 
 // Test plan for review.go / review_list.go
 //
-// newReviewCmdForSource (Classification: API handler / cobra command)
+// newReviewCmdForSources (Classification: API handler / cobra command)
 //   [x] Happy: --json emits a valid array; reviewed field true for a marked
 //       key; labels [] never null; empty result → [] not null
 //   [x] Happy: human table lists KIND/REPO/#/TITLE/LABELS/STATE; reviewed row
@@ -64,7 +64,7 @@ func TestReviewCmd_JSON_ReviewedAndLabels(t *testing.T) {
 	reviewedPath := filepath.Join(t.TempDir(), "review-reviewed.json")
 	seedReviewedKey(t, reviewedPath, "github.com/cameronsjo/forgectl#76", reviewTestTime.Add(time.Hour))
 
-	cmd := newReviewCmdForSource(src, reviewedPath)
+	cmd := newReviewCmdForSources([]review.Source{src}, reviewedPath)
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -97,7 +97,7 @@ func TestReviewCmd_JSON_ReviewedAndLabels(t *testing.T) {
 }
 
 func TestReviewCmd_JSON_EmptyIsArray(t *testing.T) {
-	cmd := newReviewCmdForSource(fakeReviewSource{}, filepath.Join(t.TempDir(), "r.json"))
+	cmd := newReviewCmdForSources([]review.Source{fakeReviewSource{}}, filepath.Join(t.TempDir(), "r.json"))
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -126,7 +126,7 @@ func TestReviewCmd_Table_DimsReviewedRow(t *testing.T) {
 	reviewedPath := filepath.Join(t.TempDir(), "review-reviewed.json")
 	seedReviewedKey(t, reviewedPath, "github.com/cameronsjo/alpha#1", reviewTestTime.Add(time.Hour))
 
-	cmd := newReviewCmdForSource(src, reviewedPath)
+	cmd := newReviewCmdForSources([]review.Source{src}, reviewedPath)
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -169,7 +169,7 @@ func TestReviewCmd_KindAndRepoFilters(t *testing.T) {
 
 	run := func(args ...string) []reviewRowJSON {
 		t.Helper()
-		cmd := newReviewCmdForSource(src, filepath.Join(t.TempDir(), "r.json"))
+		cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"))
 		var stdout bytes.Buffer
 		cmd.SetOut(&stdout)
 		cmd.SetErr(new(bytes.Buffer))
@@ -194,7 +194,7 @@ func TestReviewCmd_KindAndRepoFilters(t *testing.T) {
 		t.Errorf("--repo filter: got %+v", rows)
 	}
 
-	cmd := newReviewCmdForSource(src, filepath.Join(t.TempDir(), "r.json"))
+	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"))
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"--kind", "bogus"})
@@ -219,7 +219,7 @@ func TestReviewCmd_NotesOnStderr(t *testing.T) {
 		items: []review.Item{reviewItem(review.KindIssue, "alpha", 1)},
 		notes: []string{"issues(cameronsjo): gh: rate limited"},
 	}
-	cmd := newReviewCmdForSource(src, filepath.Join(t.TempDir(), "r.json"))
+	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"))
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)

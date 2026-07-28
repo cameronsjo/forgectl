@@ -16,14 +16,14 @@ import (
 )
 
 // runReviewList is the bare `forgectl review` body: aggregate, filter, render.
-func runReviewList(cmd *cobra.Command, src review.Source, reviewedPath string, asJSON bool, kind, repo string) error {
+func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string, asJSON bool, kind, repo string) error {
 	switch kind {
 	case "", string(review.KindIssue), string(review.KindPR):
 	default:
 		return fmt.Errorf("invalid --kind %q (want issue or pr)", kind)
 	}
 
-	items, notes, err := review.Aggregate(cmd.Context(), src)
+	items, notes, err := review.Aggregate(cmd.Context(), srcs...)
 	if err != nil {
 		return err
 	}

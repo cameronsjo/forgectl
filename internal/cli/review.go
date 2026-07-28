@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"log/slog"
+
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -22,13 +24,18 @@ var reviewModule = module.Manifest{
 }
 
 // newReviewCmd builds `forgectl review` over the registry Deps — the gh
-// source comes from deps.Runner (mirrors the other module constructors).
+// source comes from deps.Runner (mirrors the other module constructors), and
+// the Gitea source (Phase C) is appended only when [review.gitea] is enabled
+// and configured with a host.
 func newReviewCmd(deps module.Deps) *cobra.Command {
-	src := review.NewGitHub(deps.Runner, resolveReviewOwners(deps.Cfg))
+	srcs := []review.Source{review.NewGitHub(deps.Runner, resolveReviewOwners(deps.Cfg))}
+	if src, ok := resolveGiteaSource(deps); ok {
+		srcs = append(srcs, src)
+	}
 	// err discarded: "" degrades to an empty store on read (LoadReviewed), and
 	// the write verbs fail loudly via persist()'s path=="" guard.
 	reviewedPath, _ := config.ReviewReviewedPath()
-	return newReviewCmdForSource(src, reviewedPath)
+	return newReviewCmdForSources(srcs, reviewedPath)
 }
 
 // resolveReviewOwners applies the [review] owners config, falling back to the
@@ -42,9 +49,42 @@ func resolveReviewOwners(cfg config.Config) []string {
 	return []string{defaultReviewOwner}
 }
 
-// newReviewCmdForSource builds the command tree over an explicit source and
+// resolveGiteaSource builds the Gitea review source from [review.gitea] when
+// it is enabled and a host is configured; ok is false otherwise, and the
+// caller omits the source entirely rather than constructing one doomed to
+// error at Items() time. A malformed host (caught by review.NewGitea) also
+// degrades to omission — logged loudly, since a config typo should not take
+// down the whole `review` command.
+func resolveGiteaSource(deps module.Deps) (src review.Source, ok bool) {
+	gc := deps.Cfg.Review.Gitea
+	if !gc.Enabled || gc.Host == "" {
+		return nil, false
+	}
+	g, err := review.NewGitea(deps.Runner, gc.Host, gc.Login, gc.Owners)
+	if err != nil {
+		slog.Warn("Gitea review source misconfigured; omitting from review.", "host", gc.Host, "error", err)
+		return nil, false
+	}
+	return g, true
+}
+
+// extraHosts collects the non-github hosts contributed by srcs — any source
+// that exposes a Host() string (Gitea does) — for the allowlist mark/unmark
+// pass to review.ParseWorkRefForHosts, so a host-qualified ref is only
+// accepted for a host actually wired up as a review source.
+func extraHosts(srcs []review.Source) []string {
+	var hosts []string
+	for _, src := range srcs {
+		if h, ok := src.(interface{ Host() string }); ok {
+			hosts = append(hosts, h.Host())
+		}
+	}
+	return hosts
+}
+
+// newReviewCmdForSources builds the command tree over explicit sources and a
 // reviewed-store path — the test seam (mirrors newPrPrsCmdForClient).
-func newReviewCmdForSource(src review.Source, reviewedPath string) *cobra.Command {
+func newReviewCmdForSources(srcs []review.Source, reviewedPath string) *cobra.Command {
 	var (
 		asJSON bool
 		kind   string
@@ -64,6 +104,11 @@ owners ([review] owners in config.toml; default cameronsjo) — the whole work
 inventory, rendered live from gh. Nothing is copied or synced; the only local
 state is the reviewed-marks file, and new activity on an item auto-un-dims it.
 
+An optional second source, a self-hosted Gitea instance, joins the inventory
+when [review.gitea] sets enabled = true and a host (enumerated over the tea
+CLI). Its items use host-qualified refs: "host/owner/repo#N" or a Gitea
+issue/pull URL, alongside the plain "owner/repo#N" github.com form.
+
   forgectl review                       unified table (reviewed rows dimmed)
   forgectl review --json                machine-readable output
   forgectl review --kind issue          issues only (or: pr)
@@ -73,17 +118,18 @@ state is the reviewed-marks file, and new activity on an item auto-un-dims it.
   forgectl review sync                  prune marks for closed items`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runReviewList(cmd, src, reviewedPath, asJSON, kind, repo)
+			return runReviewList(cmd, srcs, reviewedPath, asJSON, kind, repo)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
 	cmd.Flags().StringVar(&kind, "kind", "", "filter by kind: issue or pr")
 	cmd.Flags().StringVar(&repo, "repo", "", "filter to one owner/name repo")
 
+	hosts := extraHosts(srcs)
 	cmd.AddCommand(
-		newReviewMarkCmd(reviewedPath),
-		newReviewUnmarkCmd(reviewedPath),
-		newReviewSyncCmd(src, reviewedPath),
+		newReviewMarkCmd(reviewedPath, hosts),
+		newReviewUnmarkCmd(reviewedPath, hosts),
+		newReviewSyncCmd(srcs, reviewedPath),
 	)
 	return cmd
 }

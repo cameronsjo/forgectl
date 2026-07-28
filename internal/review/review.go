@@ -82,32 +82,86 @@ func SortItems(items []Item) {
 // trailing slash), FULLY anchored like every ref regex in internal/pr.
 var reWorkURL = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/(?:issues|pull)/([0-9]+)/?$`)
 
-// ParseWorkRef normalizes a user-typed work reference — "owner/repo#N" or a
-// full github.com issue/pull URL — to the host-qualified reviewed-store key.
-// Validation rides pr.RefFromParts, the one anchored validator, so mark/unmark
-// input gets the identical charset and guard checks as every other ref path.
+// reGitHubSlug matches the unqualified default-host slug form: owner/repo#N
+// (exactly two slash-delimited segments before the '#').
+var reGitHubSlug = regexp.MustCompile(`^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)#([0-9]+)$`)
+
+// reHostSlug matches a host-qualified slug form: host/owner/repo#N (three
+// segments before the '#'). Distinct from reGitHubSlug by segment count, so
+// the two never collide on the same input.
+var reHostSlug = regexp.MustCompile(`^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)#([0-9]+)$`)
+
+// reHostWorkURL matches a fully-qualified issue/pull(s) URL against ANY host
+// — github.com's "pull" and Gitea's "pulls" are both accepted by the regex;
+// the allowlist check happens after extraction, in ParseWorkRefForHosts, not
+// in the pattern itself.
+var reHostWorkURL = regexp.MustCompile(`^https://([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/(?:issues|pulls?)/([0-9]+)/?$`)
+
+// ParseWorkRef normalizes a user-typed work reference for the default host,
+// github.com — "owner/repo#N" or a full github.com issue/pull URL — to the
+// host-qualified reviewed-store key. It is ParseWorkRefForHosts with no
+// extra hosts configured; see that function for the host-qualified form
+// multi-source setups (Gitea) need.
 func ParseWorkRef(s string) (key string, err error) {
+	return ParseWorkRefForHosts(s, nil)
+}
+
+// ParseWorkRefForHosts normalizes a user-typed work reference the same way
+// ParseWorkRef does, plus two host-qualified forms — "host/owner/repo#N" and
+// a full issue/pull(s) URL against a non-github host — gated on hosts, the
+// caller-supplied allowlist of configured non-github hosts (mark/unmark pass
+// their configured Gitea host through here). github.com is always accepted
+// regardless of hosts. Every extracted owner/repo/number still rides
+// pr.RefFromParts, the one anchored validator every ref path shares.
+func ParseWorkRefForHosts(s string, hosts []string) (key string, err error) {
 	s = strings.Trim(s, " \t")
 	if s == "" {
 		return "", fmt.Errorf("empty work reference")
 	}
 	if m := reWorkURL.FindStringSubmatch(s); m != nil {
-		ref, err := pr.RefFromParts(m[1], m[2], m[3])
-		if err != nil {
-			return "", err
-		}
-		return GitHubHost + "/" + ref.String(), nil
+		return workKey(GitHubHost, m[1], m[2], m[3])
 	}
-	if owner, rest, ok := strings.Cut(s, "/"); ok {
-		if repo, num, ok := strings.Cut(rest, "#"); ok {
-			ref, err := pr.RefFromParts(owner, repo, num)
-			if err != nil {
-				return "", err
-			}
-			return GitHubHost + "/" + ref.String(), nil
+	if m := reGitHubSlug.FindStringSubmatch(s); m != nil {
+		return workKey(GitHubHost, m[1], m[2], m[3])
+	}
+	if m := reHostWorkURL.FindStringSubmatch(s); m != nil {
+		if !hostAllowed(m[1], hosts) {
+			return "", fmt.Errorf("work reference host %q is not configured", m[1])
+		}
+		return workKey(m[1], m[2], m[3], m[4])
+	}
+	if m := reHostSlug.FindStringSubmatch(s); m != nil {
+		if !hostAllowed(m[1], hosts) {
+			return "", fmt.Errorf("work reference host %q is not configured", m[1])
+		}
+		return workKey(m[1], m[2], m[3], m[4])
+	}
+	return "", fmt.Errorf("unrecognized work reference %q (want owner/repo#N, host/owner/repo#N, or an issue/PR URL)", s)
+}
+
+// workKey validates owner/repo/num through pr.RefFromParts and renders the
+// host-qualified reviewed-store key.
+func workKey(host, owner, repo, num string) (string, error) {
+	ref, err := pr.RefFromParts(owner, repo, num)
+	if err != nil {
+		return "", err
+	}
+	return host + "/" + ref.String(), nil
+}
+
+// hostAllowed reports whether host is acceptable for a host-qualified work
+// ref: github.com always is; anything else must appear in hosts, the
+// caller-supplied allowlist of configured review sources.
+func hostAllowed(host string, hosts []string) bool {
+	if host == GitHubHost {
+		return true
+	}
+	for _, h := range hosts {
+		if h == host {
+			return true
 		}
 	}
-	return "", fmt.Errorf("unrecognized work reference %q (want owner/repo#N or a github.com issue/PR URL)", s)
+	return false
 }
 
 // itemFromParts builds a validated Item core from hostile tracker fields,

@@ -9,13 +9,13 @@ import (
 	"github.com/cameronsjo/forgectl/internal/review"
 )
 
-func newReviewMarkCmd(reviewedPath string) *cobra.Command {
+func newReviewMarkCmd(reviewedPath string, hosts []string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "mark <ref>",
 		Short: "Mark a work item reviewed (dims it until it sees new activity)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			key, err := review.ParseWorkRef(args[0])
+			key, err := review.ParseWorkRefForHosts(args[0], hosts)
 			if err != nil {
 				return err
 			}
@@ -29,13 +29,13 @@ func newReviewMarkCmd(reviewedPath string) *cobra.Command {
 	}
 }
 
-func newReviewUnmarkCmd(reviewedPath string) *cobra.Command {
+func newReviewUnmarkCmd(reviewedPath string, hosts []string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "unmark <ref>",
 		Short: "Clear a work item's reviewed mark (un-dims it)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			key, err := review.ParseWorkRef(args[0])
+			key, err := review.ParseWorkRefForHosts(args[0], hosts)
 			if err != nil {
 				return err
 			}
@@ -49,13 +49,13 @@ func newReviewUnmarkCmd(reviewedPath string) *cobra.Command {
 	}
 }
 
-func newReviewSyncCmd(src review.Source, reviewedPath string) *cobra.Command {
+func newReviewSyncCmd(srcs []review.Source, reviewedPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "sync",
 		Short: "Prune reviewed marks for work items that are no longer open",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			items, notes, err := review.Aggregate(cmd.Context(), src)
+			items, notes, err := review.Aggregate(cmd.Context(), srcs...)
 			if err != nil {
 				return err
 			}
