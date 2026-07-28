@@ -358,12 +358,20 @@ func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool) err
 		// A GENUINE zero: every non-skipped category parsed cleanly to 0.
 		fmt.Fprintln(out, "nothing to reclaim")
 		return nil
-	case total == 0 && unknown:
+	case unknown && total == 0:
 		// NOT a genuine zero — one or more categories' size string (shown
 		// above) didn't parse, so the true total is unknown, not zero.
 		// Saying "nothing to reclaim" here would contradict a nonzero-
 		// looking line printed one line above it (forgectl#165 item 6).
 		fmt.Fprintln(out, "reclaimable size unknown for one or more categories (see above) — docker's own output didn't parse cleanly, so this is NOT reported as zero")
+	case unknown:
+		// total > 0 here, but ALSO unknown: at least one OTHER category's
+		// size didn't parse, so total only reflects the categories that DID
+		// — it's a lower bound, not the true amount. Without this case the
+		// preview printed a flat total with no caveat while the prompt below
+		// (which also keys off `unknown`) asked to prune "an unknown
+		// amount" — a preview/prompt mismatch caught in review.
+		fmt.Fprintf(out, "at least %s reclaimable from docker (one or more categories' size could not be parsed — see above)\n", formatBytes(total))
 	default:
 		fmt.Fprintf(out, "%s reclaimable from docker\n", formatBytes(total))
 	}

@@ -501,3 +501,91 @@ func TestCleanCmd_DockerFlag_UnparseableSize_ReportsUnknownNotNothing(t *testing
 		t.Errorf("expected the unknown-size message in the docker section, got: %q", dockerSection)
 	}
 }
+
+// TestCleanCmd_DockerFlag_PartialUnparseable_PreviewAndPromptAgree is a
+// code-review catch: with a NONZERO total (Images parses to 500MB) AND a
+// separately unparseable category (Containers), the preview line must
+// disclose that the total is a lower bound — otherwise the flat "500MB
+// reclaimable from docker" preview would silently contradict the --apply
+// confirmation prompt below it, which (correctly) asks to prune "an
+// unknown amount" because `unknown` is true regardless of total.
+func TestCleanCmd_DockerFlag_PartialUnparseable_PreviewAndPromptAgree(t *testing.T) {
+	root := t.TempDir()
+	dfOut := strings.Join([]string{
+		`{"Type":"Images","TotalCount":"1","Active":"0","Size":"1GB","Reclaimable":"500MB"}`,
+		`{"Type":"Containers","TotalCount":"1","Active":"0","Size":"1GB","Reclaimable":"1.2XB (10%)"}`,
+		`{"Type":"Local Volumes","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+		`{"Type":"Build Cache","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+	}, "\n")
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "docker" {
+			return dfOut, nil
+		}
+		return "", nil
+	}}
+	client := cleanpkg.New(fake, cleanpkg.WithRoot(root))
+	cmd := newCleanCmdForClient(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--docker", "--apply"})
+
+	var gotPrompt string
+	withConfirmFn(t, func(p string) (bool, error) {
+		gotPrompt = p
+		return false, nil
+	})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := stdout.String()
+	dockerSection := got[strings.Index(got, "docker prune:"):]
+	if strings.Contains(dockerSection, "500MB reclaimable from docker\n") {
+		t.Errorf("preview must not print a bare total when another category's size is unparseable; docker section: %q", dockerSection)
+	}
+	if !strings.Contains(dockerSection, "at least") {
+		t.Errorf("expected the preview to disclose the total is a lower bound (\"at least\"), got: %q", dockerSection)
+	}
+	if !strings.Contains(gotPrompt, "unknown amount") {
+		t.Errorf("expected the confirmation prompt to also say the amount is unknown, got: %q", gotPrompt)
+	}
+}
+
+// TestCleanCmd_CachesApply_PnpmDetected_PromptCarriesMismatchCaveat pins
+// forgectl#165 item 2's runtime behavior, not just the source string: when
+// pnpm is a detected cache target, the --apply confirmation prompt text
+// itself must carry the preview/prune-mismatch caveat (ScanCaches sizes
+// pnpm's whole content-addressable store; `pnpm store prune` only reclaims
+// unreferenced packages).
+func TestCleanCmd_CachesApply_PnpmDetected_PromptCarriesMismatchCaveat(t *testing.T) {
+	cacheDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cacheDir, "blob"), make([]byte, 1024), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "pnpm" {
+			return cacheDir, nil
+		}
+		return "", nil
+	}}
+	client := cleanpkg.New(fake, cleanpkg.WithRoot(t.TempDir()))
+	cmd := newCleanCmdForClient(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--caches", "--apply"})
+
+	var gotPrompt string
+	withConfirmFn(t, func(p string) (bool, error) {
+		gotPrompt = p
+		return false, nil
+	})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(gotPrompt, "content-addressable store") {
+		t.Errorf("expected the pnpm preview/prune-mismatch caveat in the confirmation prompt, got: %q", gotPrompt)
+	}
+}
