@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -45,9 +46,11 @@ func TestBrewStep_CheckRunsOutdated(t *testing.T) {
 	if len(fr.Calls) != 1 {
 		t.Fatalf("got %d calls, want 1", len(fr.Calls))
 	}
-	got := argvOf(fr.Calls[0])
-	want := []string{"brew", "outdated"}
-	assertArgv(t, got, want)
+	// --formula mirrors Apply's own scope: Check and Apply must agree on
+	// what's in play, or an outdated cask shows up in every weekly check
+	// forever with `update run --yes` never able to clear it.
+	assertArgv(t, argvOf(fr.Calls[0]), []string{"brew", "outdated", "--formula"})
+	assertHomebrewNoAutoUpdate(t, fr.Calls[0])
 }
 
 func TestBrewStep_ApplyRunsUpdateUpgradeCleanupInOrder(t *testing.T) {
@@ -64,6 +67,20 @@ func TestBrewStep_ApplyRunsUpdateUpgradeCleanupInOrder(t *testing.T) {
 	// (--yes/cron) with no stdin wired to answer either.
 	assertArgv(t, argvOf(fr.Calls[1]), []string{"brew", "upgrade", "--formula"})
 	assertArgv(t, argvOf(fr.Calls[2]), []string{"brew", "cleanup"})
+	for _, c := range fr.Calls {
+		assertHomebrewNoAutoUpdate(t, c)
+	}
+}
+
+// assertHomebrewNoAutoUpdate pins that every brew invocation carries
+// HOMEBREW_NO_AUTO_UPDATE=1 — without it, brew's own implicit
+// update-and-tap-refresh behavior can turn a documented "no mutation,
+// always safe" Check into a side-effecting one.
+func assertHomebrewNoAutoUpdate(t *testing.T, c exec.Call) {
+	t.Helper()
+	if c.Env["HOMEBREW_NO_AUTO_UPDATE"] != "1" {
+		t.Errorf("call %+v missing HOMEBREW_NO_AUTO_UPDATE=1", c)
+	}
 }
 
 func TestBrewStep_ApplyStopsAtFirstFailure(t *testing.T) {
@@ -178,6 +195,31 @@ func TestNpmStep_CheckStillFailsOnOtherExitCodes(t *testing.T) {
 		}
 		if _, err := npmStep().Check(context.Background(), fr); err == nil {
 			t.Error("Check = nil error, want the exit-2 failure to surface")
+		}
+	})
+
+	// The load-bearing case: exit 1 with EMPTY stdout is npm's ordinary
+	// failure shape (e.g. an unreachable registry — dropped VPN, wrong
+	// proxy, npmjs outage), not the "found packages" shape. Matching on
+	// ExitCode alone (the pre-fix version of this remap) would swallow
+	// this into a silent "ok npm" — a broken check reporting green. The
+	// real diagnostic (stderr) must still surface in the error.
+	t.Run("exit code 1 with empty output is npm's ordinary failure, not a finding", func(t *testing.T) {
+		fr := &exec.FakeRunner{
+			RunFunc: func(name string, args []string) (string, error) {
+				return "", &exec.CommandError{
+					Name: name, Args: args, ExitCode: 1, Output: "",
+					Stderr: "npm error code ECONNREFUSED",
+					Err:    errors.New("exit status 1"),
+				}
+			},
+		}
+		_, err := npmStep().Check(context.Background(), fr)
+		if err == nil {
+			t.Fatal("Check = nil error, want the exit-1-empty-output failure to surface (not remapped to success)")
+		}
+		if !strings.Contains(err.Error(), "ECONNREFUSED") {
+			t.Errorf("Check error = %q, want it to carry the stderr diagnostic", err.Error())
 		}
 	})
 

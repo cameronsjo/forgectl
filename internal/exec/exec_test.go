@@ -41,6 +41,34 @@ func TestOSRunner_RunWithInput_FailingCommand_WrapsStderr(t *testing.T) {
 	}
 }
 
+// TestOSRunner_RunWithEnv_SetsEnvironmentVariable proves the mechanism the
+// HOMEBREW_NO_AUTO_UPDATE fix depends on: RunWithEnv's env map must actually
+// reach the child process, not just get recorded by a test double. Real
+// subprocess, no FakeRunner.
+func TestOSRunner_RunWithEnv_SetsEnvironmentVariable(t *testing.T) {
+	out, err := (OSRunner{}).RunWithEnv(context.Background(), map[string]string{"FORGECTL_TEST_VAR": "present"}, "sh", "-c", "echo $FORGECTL_TEST_VAR")
+	if err != nil {
+		t.Fatalf("RunWithEnv: %v", err)
+	}
+	if out != "present" {
+		t.Errorf("RunWithEnv output = %q, want %q", out, "present")
+	}
+}
+
+// TestOSRunner_RunWithEnv_InheritsAmbientEnvironment confirms RunWithEnv
+// merges onto the inherited environment (os.Environ()) rather than
+// replacing it — the child must still see PATH etc.
+func TestOSRunner_RunWithEnv_InheritsAmbientEnvironment(t *testing.T) {
+	t.Setenv("FORGECTL_TEST_AMBIENT", "inherited")
+	out, err := (OSRunner{}).RunWithEnv(context.Background(), map[string]string{"FORGECTL_TEST_VAR": "present"}, "sh", "-c", "echo $FORGECTL_TEST_AMBIENT-$FORGECTL_TEST_VAR")
+	if err != nil {
+		t.Fatalf("RunWithEnv: %v", err)
+	}
+	if out != "inherited-present" {
+		t.Errorf("RunWithEnv output = %q, want %q", out, "inherited-present")
+	}
+}
+
 func TestFakeRunner_RunWithInput_RecordsInputOnCall(t *testing.T) {
 	fake := &FakeRunner{}
 

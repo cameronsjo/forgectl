@@ -36,31 +36,50 @@ func DefaultSteps() []Step {
 	}
 }
 
-// brewStep: Check lists outdated formulae (never mutates); Apply runs the
-// standard three-command weekly refresh in sequence — update (refresh the
-// formula index), upgrade --formula (install newer formula versions),
-// cleanup (reclaim disk). Destructive: cleanup ALSO removes old Cellar
-// versions of every upgraded formula, not just Homebrew's download cache
-// (mirrors clean.go's same brew-cleanup disclosure) — and since this step
-// runs upgrade immediately before cleanup in one pass, the very versions
-// cleanup removes are the rollback path for the upgrade that just ran.
+// homebrewNoAutoUpdate disables Homebrew's own implicit "auto-update and
+// refresh taps" behavior: several brew subcommands beyond `update` itself —
+// `outdated`, `upgrade`, `install`, `list --versions`, … — silently trigger
+// it on their own once the last auto-update is more than 24h stale. Without
+// this, `brew outdated` (brewStep's Check, documented as "no mutation,
+// always safe") can fetch and mutate local tap/formula-index state as a
+// side effect the caller never asked for and `update check` never disclosed.
+// Applied to every brew invocation in this step (Check and Apply alike) so
+// the roster's behavior is deterministic regardless of how stale the
+// ambient Homebrew auto-update timestamp happens to be.
+var homebrewNoAutoUpdate = map[string]string{"HOMEBREW_NO_AUTO_UPDATE": "1"}
+
+// brewStep: Check and Apply are both scoped to --formula — casks are out of
+// scope for this step entirely, not just for Apply. Check lists outdated
+// formulae (never mutates, HOMEBREW_NO_AUTO_UPDATE pinned — see above);
+// Apply runs the standard three-command weekly refresh in sequence — update
+// (refresh the formula index), upgrade --formula (install newer formula
+// versions), cleanup (reclaim disk). Destructive: cleanup ALSO removes old
+// Cellar versions of every upgraded formula, not just Homebrew's download
+// cache (mirrors clean.go's same brew-cleanup disclosure) — and since this
+// step runs upgrade immediately before cleanup in one pass, the very
+// versions cleanup removes are the rollback path for the upgrade that just
+// ran.
 //
 // upgrade is scoped to --formula (casks excluded) deliberately: a bare `brew
 // upgrade` also upgrades casks, and a pkg-based cask upgrade can invoke sudo
 // or a GUI installer. This step has no stdin wired and is meant to run
 // unattended (cron, --yes), so a cask upgrade would either hang waiting for
 // input nobody can supply, or fail opaquely with no tty — the same reasoning
-// that keeps softwareupdate's OS installs manual and human-triggered. Cask
-// upgrades stay a manual `brew upgrade --cask` outside this tool.
+// that keeps softwareupdate's OS installs manual and human-triggered. Check
+// mirrors that same scope rather than reporting on what Apply can never
+// act on: a bare `brew outdated` also lists casks, and an outdated cask
+// would otherwise show up in every weekly check forever with nothing
+// explaining why `update run --yes` never clears it. Cask upgrades stay a
+// manual `brew upgrade --cask` outside this tool.
 func brewStep() Step {
 	return Step{
 		Name:        StepBrew,
 		Destructive: true,
 		Check: func(ctx context.Context, run exec.Runner) (string, error) {
-			return run.Run(ctx, "brew", "outdated")
+			return run.RunWithEnv(ctx, homebrewNoAutoUpdate, "brew", "outdated", "--formula")
 		},
 		Apply: func(ctx context.Context, run exec.Runner) (string, error) {
-			return runSequence(ctx, run,
+			return runSequence(ctx, run, homebrewNoAutoUpdate,
 				[]string{"brew", "update"},
 				[]string{"brew", "upgrade", "--formula"},
 				[]string{"brew", "cleanup"},
@@ -111,16 +130,25 @@ func goStep() Step {
 //
 // Known quirk: `npm outdated` documents a non-zero exit (status 1) whenever
 // outdated packages ARE found — that is npm's normal signal for "here's the
-// finding", not a broken check. Check special-cases exactly that one exit
-// code: a real *exec.CommandError with ExitCode == 1 is remapped to success,
-// with its captured Output (the outdated-packages table — the actual
-// contract of `update check`) surfacing as the step's Result instead of
-// being reported as a failure. Any OTHER exit code (npm genuinely broken,
-// unreachable registry, …) still surfaces as an error, and a non-CommandError
-// error (e.g. npm not on PATH at all) never matches, so this narrow remap
-// can't paper over an npm that can't run. Apply doesn't need the same
-// treatment — `npm update -g` has no equivalent "exit nonzero to report a
-// normal finding" contract.
+// finding", not a broken check. Check special-cases exactly that shape: a
+// real *exec.CommandError with ExitCode == 1 AND a non-empty Output is
+// remapped to success, with the captured Output (the outdated-packages
+// table — the actual contract of `update check`) surfacing as the step's
+// Result instead of being reported as a failure.
+//
+// Both conditions are load-bearing, not just the exit code: exit 1 is ALSO
+// npm's ordinary failure code (e.g. an unreachable registry — a dropped VPN,
+// a wrong proxy, an npmjs outage — exits 1 with EMPTY stdout and the real
+// error on stderr). Matching on ExitCode alone would remap that failure to
+// a silent "ok npm" too: `update check` would exit 0 and the only
+// diagnostic (stderr) would never surface, on a check that never actually
+// ran. Requiring Output != "" is what keeps the remap narrow to the one
+// shape npm actually produces for "found something to report" — any other
+// exit code, an exit-1-with-empty-output failure, or a non-CommandError
+// error (e.g. npm not on PATH at all) all still surface as a real error,
+// carrying whatever stderr CommandError captured. Apply doesn't need the
+// same treatment — `npm update -g` has no equivalent "exit nonzero to
+// report a normal finding" contract.
 func npmStep() Step {
 	return Step{
 		Name:        StepNpm,
@@ -131,7 +159,7 @@ func npmStep() Step {
 				return out, nil
 			}
 			var cmdErr *exec.CommandError
-			if errors.As(err, &cmdErr) && cmdErr.ExitCode == 1 {
+			if errors.As(err, &cmdErr) && cmdErr.ExitCode == 1 && cmdErr.Output != "" {
 				return cmdErr.Output, nil
 			}
 			return out, err
@@ -142,19 +170,28 @@ func npmStep() Step {
 	}
 }
 
-// runSequence runs each argv in order, stopping at the first failure.
-// Output from every command that ran (including the failing one) is joined
-// with blank lines, so a partial-sequence failure (e.g. `brew update`
-// succeeds, `brew upgrade` fails) still reports what already happened
-// rather than only the failure.
-func runSequence(ctx context.Context, run exec.Runner, argvs ...[]string) (string, error) {
+// runSequence runs each argv in order (with env merged onto each
+// invocation's environment), stopping at the first failure. Output from
+// every command that ran — including the failing one — is joined with
+// blank lines, so a partial-sequence failure (e.g. `brew update` succeeds,
+// `brew upgrade` fails) still reports what already happened rather than
+// only the failure. The failing command's own output doesn't come back on
+// Runner.Run's own return value (that's always "" on error, by contract —
+// see exec.OSRunner.Run) — it's recovered from the returned
+// *exec.CommandError's Output field instead, which is where a failed
+// command's captured stdout actually lives.
+func runSequence(ctx context.Context, run exec.Runner, env map[string]string, argvs ...[]string) (string, error) {
 	var parts []string
 	for _, argv := range argvs {
-		out, err := run.Run(ctx, argv[0], argv[1:]...)
+		out, err := run.RunWithEnv(ctx, env, argv[0], argv[1:]...)
 		if out != "" {
 			parts = append(parts, out)
 		}
 		if err != nil {
+			var cmdErr *exec.CommandError
+			if errors.As(err, &cmdErr) && cmdErr.Output != "" {
+				parts = append(parts, cmdErr.Output)
+			}
 			return strings.Join(parts, "\n\n"), fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
 		}
 	}

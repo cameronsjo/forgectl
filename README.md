@@ -162,7 +162,11 @@ forgectl update run                      # DESTRUCTIVE, one confirmation: brew (
                                           #   (check-only, never installs) still runs. brew's cleanup ALSO removes
                                           #   the Cellar versions upgrade just superseded (the rollback path), and
                                           #   go's clean wipes the module cache machine-wide, for every project —
-                                          #   the prompt names both when the relevant step is selected
+                                          #   the prompt names both when the relevant step is selected. brew is
+                                          #   --formula-scoped in BOTH check and run: casks are out of scope
+                                          #   entirely (a cask upgrade can hang on a sudo/GUI prompt this
+                                          #   unattended tool has no stdin to answer) — upgrade a cask yourself
+                                          #   with `brew upgrade --cask`
 forgectl update run --yes                # skip the prompt, apply the same effects non-interactively (cron/CI)
 forgectl update run --only brew,go       # restrict to a subset of the roster
 forgectl update run --json               # machine-readable summary (with each step's output) to stdout ONLY;

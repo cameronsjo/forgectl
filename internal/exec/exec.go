@@ -15,17 +15,23 @@ import (
 	"time"
 )
 
-// Runner abstracts running an external command. Three modes:
+// Runner abstracts running an external command. Four modes:
 //
 //   - Run captures stdout for parsing (list-sessions, has-session, …).
 //   - RunInteractive hands the controlling tty to the child process, required
 //     by attach-session and `sesh connect`, which take over the terminal.
 //   - RunWithInput pipes a string into the child's stdin and captures stdout,
 //     for commands that read from stdin rather than argv (pbcopy).
+//   - RunWithEnv captures stdout like Run, with extra environment variables
+//     merged on top of the inherited environment — for a command whose
+//     behavior needs pinning regardless of the caller's ambient env (e.g.
+//     `HOMEBREW_NO_AUTO_UPDATE=1`, so `brew outdated` can't silently trigger
+//     Homebrew's own implicit update-and-tap-refresh as a side effect).
 type Runner interface {
 	Run(ctx context.Context, name string, args ...string) (string, error)
 	RunInteractive(ctx context.Context, name string, args ...string) error
 	RunWithInput(ctx context.Context, stdin string, name string, args ...string) (string, error)
+	RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (string, error)
 }
 
 // OSRunner is the production Runner: it actually spawns processes.
@@ -38,48 +44,53 @@ type OSRunner struct{}
 // always mean the command produced nothing worth seeing (e.g. `npm outdated`
 // exits 1 precisely when its output has something to report).
 func (OSRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
-	slog.Debug("Preparing to run command.", "cmd", name, "args", args)
-	start := time.Now()
-
-	cmd := exec.CommandContext(ctx, name, args...)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		trimmed := strings.TrimRight(string(out), "\n")
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			slog.Error("Failed to run command.", "cmd", name, "stderr", msg, "error", err)
-			return "", &CommandError{Name: name, Args: args, Stderr: msg, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
-		}
-		slog.Error("Failed to run command.", "cmd", name, "error", err)
-		return "", &CommandError{Name: name, Args: args, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
-	}
-	slog.Debug("Successfully ran command.", "cmd", name, "duration", time.Since(start).Round(time.Millisecond))
-	return strings.TrimRight(string(out), "\n"), nil
+	return runAndWrap(exec.CommandContext(ctx, name, args...), "Preparing to run command.", "Successfully ran command.", "Failed to run command.", name, args)
 }
 
 // RunWithInput executes name+args with stdin piped in and returns trimmed
 // stdout. Same error-wrapping behavior as Run; the only difference is the
 // child reads from stdin instead of relying purely on argv (e.g. pbcopy).
 func (OSRunner) RunWithInput(ctx context.Context, stdin string, name string, args ...string) (string, error) {
-	slog.Debug("Preparing to run command with stdin.", "cmd", name, "args", args)
-	start := time.Now()
-
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = strings.NewReader(stdin)
+	return runAndWrap(cmd, "Preparing to run command with stdin.", "Successfully ran command with stdin.", "Failed to run command with stdin.", name, args)
+}
+
+// RunWithEnv executes name+args with env merged on top of the inherited
+// environment (os.Environ()) and returns trimmed stdout. Same error-wrapping
+// behavior as Run; the only difference is the child's environment.
+func (OSRunner) RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = os.Environ()
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	return runAndWrap(cmd, "Preparing to run command with environment overrides.", "Successfully ran command with environment overrides.", "Failed to run command with environment overrides.", name, args)
+}
+
+// runAndWrap runs an already-configured *exec.Cmd (Stdin/Env set by the
+// caller, Stderr not yet wired) and converts its outcome into the Runner
+// contract: trimmed stdout on success, or a *CommandError — carrying stderr,
+// the captured stdout, and the exit code — on failure. Shared body behind
+// Run, RunWithInput, and RunWithEnv, which differ only in how they configure
+// cmd beforehand and which log messages they use.
+func runAndWrap(cmd *exec.Cmd, preparingMsg, successMsg, failureMsg, name string, args []string) (string, error) {
+	slog.Debug(preparingMsg, "cmd", name, "args", args)
+	start := time.Now()
+
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
 		trimmed := strings.TrimRight(string(out), "\n")
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			slog.Error("Failed to run command with stdin.", "cmd", name, "stderr", msg, "error", err)
+			slog.Error(failureMsg, "cmd", name, "stderr", msg, "error", err)
 			return "", &CommandError{Name: name, Args: args, Stderr: msg, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
 		}
-		slog.Error("Failed to run command with stdin.", "cmd", name, "error", err)
+		slog.Error(failureMsg, "cmd", name, "error", err)
 		return "", &CommandError{Name: name, Args: args, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
 	}
-	slog.Debug("Successfully ran command with stdin.", "cmd", name, "duration", time.Since(start).Round(time.Millisecond))
+	slog.Debug(successMsg, "cmd", name, "duration", time.Since(start).Round(time.Millisecond))
 	return strings.TrimRight(string(out), "\n"), nil
 }
 
