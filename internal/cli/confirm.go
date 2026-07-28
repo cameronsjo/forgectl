@@ -20,8 +20,12 @@ func confirm(prompt string) (bool, error) {
 
 // confirmFn is confirm, exposed as a package-level var so tests can
 // substitute a fake — huh.NewConfirm().Run() requires a real tty, which is
-// exactly what a test doesn't have. Production callers go through this var
-// (never confirm directly) so the fix-round apply⇒confirm⇒prune tests in
-// clean_test.go can pin that a Yes reaches the prune commands and a No
-// never does (forgectl#165 item 3 — previously untestable, and untested).
+// exactly what a test doesn't have. Only clean.go's three call sites go
+// through this var so far — branch.go, pr_findings.go, and tmux_kill.go
+// still call confirm() directly, and their own apply⇒confirm⇒delete paths
+// are exactly as untestable as clean's was. Migrating them is a real
+// follow-up (a five-file refactor, not this fix), but it's out of scope
+// for forgectl#165 — this var exists to make clean_test.go's
+// apply⇒confirm⇒prune tests possible (item 3), not to be a universal seam
+// yet.
 var confirmFn = confirm
