@@ -19,6 +19,12 @@ package clean
 //       response maps every category to its DockerKind, parsing Reclaimable
 //   [x] Unhappy: a malformed row is skipped; the other rows still parse
 //   [x] Unhappy: a category df didn't report at all comes back Skipped
+//   [x] Unhappy: a genuine "0B" row is ReclaimableKnown=true; an
+//       unrecognized-unit row that ALSO parses to 0 is ReclaimableKnown=
+//       false — the two zeros must stay distinguishable (fix round:
+//       forgectl#165 item 6, a summed total of 0 that mixed both zeros
+//       together printed "nothing to reclaim" under a nonzero-looking raw
+//       string it had just shown)
 //
 // Client.ScanDocker (Classification: I/O boundary over FakeRunner)
 //   [x] Happy: a successful `docker system df` call is parsed via
@@ -124,6 +130,58 @@ func TestParseReclaimedFromPruneOutput(t *testing.T) {
 // dfRow renders one `docker system df --format '{{json .}}'` ndjson line.
 func dfRow(typ, reclaimable string) string {
 	return `{"Type":"` + typ + `","TotalCount":"1","Active":"0","Size":"1GB","Reclaimable":"` + reclaimable + `"}`
+}
+
+// TestParseDockerDF_UnrecognizedUnit_ReclaimableKnownFalse pins the
+// forgectl#165 item 6 fix: "1.2XB" isn't a unit parseDockerSize recognizes,
+// so it parses to (0, false) — that failure must surface as
+// ReclaimableKnown=false, not be silently indistinguishable from a real
+// "0B". Reported must still carry the raw string so the CLI can show the
+// user SOMETHING concrete.
+func TestParseDockerDF_UnrecognizedUnit_ReclaimableKnownFalse(t *testing.T) {
+	out := dfRow("Images", "1.2XB (10%)")
+
+	items := parseDockerDF(out)
+	byKind := map[DockerKind]DockerItem{}
+	for _, it := range items {
+		byKind[it.Kind] = it
+	}
+
+	img := byKind[DockerImages]
+	if img.Skipped {
+		t.Fatalf("Images must not be Skipped — df DID report it, just with an unparseable size: %+v", img)
+	}
+	if img.Reclaimable != 0 {
+		t.Errorf("Reclaimable = %d, want 0 (unparseable defaults to zero)", img.Reclaimable)
+	}
+	if img.ReclaimableKnown {
+		t.Error("ReclaimableKnown = true for an unrecognized unit, want false — this zero is not a genuine zero")
+	}
+	if img.Reported != "1.2XB (10%)" {
+		t.Errorf("Reported = %q, want the raw string preserved", img.Reported)
+	}
+}
+
+// TestParseDockerDF_GenuineZero_ReclaimableKnownTrue is
+// UnrecognizedUnit's counterpart: a real "0B" must parse cleanly and come
+// back ReclaimableKnown=true, so a total that sums only genuine zeros still
+// reports "nothing to reclaim" correctly.
+func TestParseDockerDF_GenuineZero_ReclaimableKnownTrue(t *testing.T) {
+	out := dfRow("Build Cache", "0B")
+
+	items := parseDockerDF(out)
+	var bc DockerItem
+	for _, it := range items {
+		if it.Kind == DockerBuildCache {
+			bc = it
+		}
+	}
+	if bc.Reclaimable != 0 {
+		t.Errorf("Reclaimable = %d, want 0", bc.Reclaimable)
+	}
+	if !bc.ReclaimableKnown {
+		t.Error("ReclaimableKnown = false for a genuine \"0B\", want true — a real zero must stay distinguishable from a parse failure")
+	}
 }
 
 func TestParseDockerDF_HappyAllCategories(t *testing.T) {

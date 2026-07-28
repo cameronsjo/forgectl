@@ -106,6 +106,15 @@ var defaultCacheProbes = []cacheProbe{
 		},
 	},
 	{
+		// Only `-cache` (the build cache) is cleared here — issue #4 asked
+		// for `-cache`/`-modcache` both, but `-modcache` wipes GOPATH's
+		// entire downloaded-module store, which every project on the
+		// machine has to refetch from the network on its next build. That's
+		// a materially more expensive/disruptive reclaim than this probe's
+		// peers (npm/pnpm/pip/brew caches all just re-download on demand
+		// too, but Go's modcache is typically the largest and slowest to
+		// rebuild). Deliberately narrowed, not an oversight — no separate
+		// opt-in for `-modcache` yet (forgectl#165 item 5).
 		kind: CacheGo,
 		locate: func(ctx context.Context, run exec.Runner) (string, bool) {
 			return locateViaCommand(ctx, run, "go", "env", "GOCACHE")
