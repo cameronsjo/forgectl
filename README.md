@@ -13,7 +13,7 @@ Built for two hands and one thumb:
 brew install cameronsjo/tap/forgectl
 ```
 
-Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against the self-hosted Gitea, and `review` when `[review.gitea]` is enabled), `docker` (`bench status`/`up`, `docker build/run/shell`, and `clean --docker`), `npm`/`pnpm`/`pip`/`go`/`brew` (`clean --caches` — each is independently opt-in and skipped, not required, when absent).
+Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against the self-hosted Gitea, and `review` when `[review.gitea]` is enabled), `docker` (`bench status`/`up`, `docker build/run/shell`, and `clean --docker`), `npm`/`pnpm`/`pip`/`go`/`brew` (`clean --caches` — each is independently opt-in and skipped, not required, when absent). `update`'s roster shares that same `brew`/`go`/`npm` dependency (`softwareupdate` is a macOS built-in) — each step is independently scoped, so a missing tool fails only its own step, never the others.
 
 ## Usage
 
@@ -152,6 +152,15 @@ forgectl quarantine status               # show which targets are hidden
 forgectl review                          # unified table (reviewed rows dimmed)
 forgectl review --kind issue             # issues only (or: pr)
 forgectl review mark owner/repo#42       # mark an item reviewed
+
+# update — weekly package-manager + OS maintenance, independently-scoped steps
+forgectl update check                    # report-only for every step (brew/softwareupdate/go/npm), no mutation
+forgectl update run                      # DESTRUCTIVE steps (brew, go, npm) are SKIPPED without --yes;
+                                          #   softwareupdate (check-only, never installs) still runs
+forgectl update run --yes                # actually apply brew update/upgrade/cleanup, go cache clean, npm update
+forgectl update run --only brew,go       # restrict to a subset of the roster
+forgectl update run --json               # machine-readable summary to stdout ONLY; full transcript
+                                          #   streams to stderr + a timestamped log (update-logs/)
 
 # y — read/write the system clipboard (macOS only)
 echo hi | forgectl y copy                # copy stdin to the clipboard

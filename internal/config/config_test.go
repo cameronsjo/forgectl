@@ -322,6 +322,30 @@ func TestPrReviewedPath(t *testing.T) {
 	}
 }
 
+func TestUpdateLogDir(t *testing.T) {
+	dir := redirectConfigDir(t)
+	got, err := UpdateLogDir()
+	if err != nil {
+		t.Fatalf("UpdateLogDir: %v", err)
+	}
+	want := filepath.Join(dir, "forgectl", "update-logs")
+	if got != want {
+		t.Errorf("UpdateLogDir() = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateConfig_IsZero(t *testing.T) {
+	if !(UpdateConfig{}).IsZero() {
+		t.Error("zero-value UpdateConfig.IsZero() = false, want true")
+	}
+	if (UpdateConfig{Roster: []string{"brew"}}).IsZero() {
+		t.Error("UpdateConfig with a Roster must not report IsZero")
+	}
+	if (UpdateConfig{LogDir: "/tmp/x"}).IsZero() {
+		t.Error("UpdateConfig with a LogDir must not report IsZero")
+	}
+}
+
 func TestLoad(t *testing.T) {
 	t.Run("missing file returns defaults", func(t *testing.T) {
 		redirectConfigDir(t) // empty temp config dir → no config.toml

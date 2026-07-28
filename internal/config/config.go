@@ -65,6 +65,9 @@ const logKeepDays = 7
 //	[preflight]          # forgectl preflight — plugin/catalog alignment
 //	catalog_path = ""    # override auto-locate; direct path to the generated catalog.md
 //	default_set  = []    # extra "plugin@marketplace" entries always folded into the core-tier target
+//	[update]             # forgectl update — weekly package-manager + OS maintenance
+//	roster  = []          # step names to run when --only is omitted; empty = every roster step
+//	log_dir = ""          # transcript log directory; empty = <config dir>/update-logs
 type Config struct {
 	NoIcons   bool            `toml:"no_icons"`
 	LogLevel  string          `toml:"log_level"`
@@ -79,6 +82,7 @@ type Config struct {
 	Review    ReviewConfig    `toml:"review"`
 	Docs      DocsConfig      `toml:"docs"`
 	Preflight PreflightConfig `toml:"preflight"`
+	Update    UpdateConfig    `toml:"update"`
 }
 
 // LaunchConfig is the [launch] section: base defaults plus directory-keyed
@@ -260,6 +264,25 @@ type PreflightConfig struct {
 // IsZero reports whether the [preflight] section was absent or empty.
 func (pc PreflightConfig) IsZero() bool {
 	return pc.CatalogPath == "" && len(pc.DefaultSet) == 0
+}
+
+// UpdateConfig is the [update] section: `forgectl update`'s persisted
+// defaults. A zero value means "section absent" — internal/update's Client
+// runs its full built-in roster (DefaultSteps) and internal/cli falls back
+// to its own default log directory.
+type UpdateConfig struct {
+	// Roster names the steps to run when --only is omitted (matched against
+	// the roster's Step.Name values). Empty means every roster step — the
+	// same "unrestricted" meaning --only's absence has on the CLI.
+	Roster []string `toml:"roster"`
+	// LogDir overrides the default directory for the timestamped
+	// transcript log. Empty falls back to UpdateLogDir().
+	LogDir string `toml:"log_dir"`
+}
+
+// IsZero reports whether the [update] section was absent or empty.
+func (uc UpdateConfig) IsZero() bool {
+	return len(uc.Roster) == 0 && uc.LogDir == ""
 }
 
 // Baked defaults for hearth's frozen OTLP transport. These are the values a
@@ -590,6 +613,20 @@ func NetCachePath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "net-cache.json"), nil
+}
+
+// UpdateLogDir returns the default directory for `forgectl update`'s
+// timestamped transcript logs: <os.UserConfigDir()>/forgectl/update-logs
+// (macOS: ~/Library/Application Support/forgectl/update-logs; Linux:
+// ~/.config/forgectl/update-logs). It derives from the same configDir()
+// base as every other forgectl path, so it never drifts from them. [update]
+// log_dir overrides this; callers should prefer that when set.
+func UpdateLogDir() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "update-logs"), nil
 }
 
 // DockerLastTagPath returns the on-disk path for the `forgectl docker`
