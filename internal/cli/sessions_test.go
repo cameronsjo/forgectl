@@ -14,7 +14,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/sessions"
 )
 
-// ptrTime is a test helper for the mart's nullable timestamps.
+// ptrTime is a test helper for the concordance's nullable timestamps.
 func ptrTime(s string) *time.Time {
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
@@ -76,7 +76,7 @@ func TestPrintWhyHits_JSON(t *testing.T) {
 }
 
 // A hit with no timestamp must omit the date key rather than emit a blank or
-// bogus value — the omitempty contract for a nullable mart column.
+// bogus value — the omitempty contract for a nullable concordance column.
 func TestPrintWhyHits_JSON_OmitsMissingDate(t *testing.T) {
 	hits := []sessions.WhyHit{{SessionID: "s1", Project: "p", Path: "p/x.md"}}
 	stdout, _ := renderCmd(t, func(cmd *cobra.Command) error {
@@ -107,7 +107,7 @@ func TestPrintWhyHits_HumanEmpty(t *testing.T) {
 	}
 }
 
-// Untrusted mart content must render inert: a control byte in a title/snippet
+// Untrusted concordance content must render inert: a control byte in a title/snippet
 // is stripped before it reaches the terminal.
 func TestPrintWhyHits_HumanSanitizesControlBytes(t *testing.T) {
 	hits := []sessions.WhyHit{{
@@ -127,7 +127,7 @@ func TestPrintWhyHits_HumanSanitizesControlBytes(t *testing.T) {
 
 // encoding/json escapes only 0x00-0x1F, so DEL (U+007F) and the C1 range
 // (U+0080-U+009F, incl. U+009B = single-byte CSI) would reach a terminal raw
-// through --json unless the DTO builder strips them. Plant both in mart-sourced
+// through --json unless the DTO builder strips them. Plant both in concordance-sourced
 // fields (via rune constants, to keep the source clean ASCII) and assert the
 // emitted JSON carries neither raw byte.
 func TestPrintWhyHits_JSONStripsC1AndDEL(t *testing.T) {

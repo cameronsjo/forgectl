@@ -82,12 +82,12 @@ forgectl bench status --json              # machine-readable JSON (safe to pipe)
 forgectl bench up                         # bring up the configured services via their own entrypoints
 forgectl bench open [target]              # open a bench UI (hearth | grafana; default hearth)
 
-# sessions — drain local session ledgers into the mart (a shared Postgres index
+# sessions — drain local session ledgers into the concordance (a shared Postgres index
 # of every machine's session history, queried from any of them)
 forgectl sessions sync --dry-run          # read + count the local JSONL WAL; no DB connection
-forgectl sessions sync                    # idempotent upsert into the mart + rebuild the runbook index
+forgectl sessions sync                    # idempotent upsert into the concordance + rebuild the runbook index
 forgectl sessions sync --full             # bypass the lastMessageId watermark, re-upsert everything
-forgectl sessions search "<query>"        # full-text search the mart's runbook index from any machine
+forgectl sessions search "<query>"        # full-text search the concordance's runbook index from any machine
 forgectl sessions why "<path|topic>"      # recent sessions whose runbooks explain a path or topic, newest first
 forgectl sessions last <repo>             # the newest session in a repo + the artifacts it left behind
 

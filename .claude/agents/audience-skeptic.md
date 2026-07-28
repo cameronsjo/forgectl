@@ -44,9 +44,9 @@ The case against:
 
 - The counterfactual: would the bash `s` script and claunch have done fine?
   What does one 95-commit binary break that six small scripts couldn't?
-- New failure surface: a workflow DSL, a trust store, a Postgres mart, a Swift
-  helper — each is something that can now fail. Where's the evidence the
-  complexity pays?
+- New failure surface: a workflow DSL, a trust store, a Postgres
+  concordance, a Swift helper — each is something that can now fail. Where's
+  the evidence the complexity pays?
 - Coupling as fragility: hardcoded personal hosts/orgs, companion-tool
   assumptions — what happens the day one estate piece moves?
 - Bus factor 1 with a source-available (not OSI) license: what's the exit story?

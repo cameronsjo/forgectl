@@ -88,7 +88,7 @@ func TestScanRunbooksMissingRootIsEmpty(t *testing.T) {
 
 func TestScanRunbooksSkipsSymlinks(t *testing.T) {
 	// A planted .md symlink must never be followed — following it would read
-	// the TARGET into the shared mart (the exfiltration vector from review).
+	// the TARGET into the shared concordance (the exfiltration vector from review).
 	outside := t.TempDir()
 	secret := filepath.Join(outside, "secret.txt")
 	if err := os.WriteFile(secret, []byte("do-not-index"), 0o600); err != nil {

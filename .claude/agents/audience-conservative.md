@@ -42,7 +42,7 @@ tools (sesh, claude CLI, hearth/chronicle/flux) and macOS-only hardware
 Assumed context, literally:
 
 - README jargon with no definition on first use ("bench," "blessing,"
-  "clean-room," "mart," "workbench forge").
+  "clean-room," "concordance," "workbench forge").
 - The zero-config claim: run the cold path — what actually happens on a
   machine without sesh/claude/hearth? Which errors teach and which assume?
 - Thumb mode with zero prior knowledge: is bare `forgectl` self-explanatory?

@@ -36,7 +36,7 @@ type Receipt struct {
 	InvalidRows       int      // sessions.jsonl rows with no sessionId — cannot index
 	CommitRowsDropped int      // commits.jsonl rows with no session id — cannot attribute
 	LedgerLinesBad    int      // unparseable JSONL lines across both ledgers
-	Missing           []string // local sessions absent from the mart post-flush
+	Missing           []string // local sessions absent from the concordance post-flush
 	RunbooksFound     int
 	RunbooksUpserted  int
 	RunbooksPruned    int64
@@ -81,7 +81,7 @@ func (o SyncOptions) Resolve(cfg config.SessionsConfig) (SyncOptions, error) {
 	return o, nil
 }
 
-// Sync is one idempotent ETL run: drain the local JSONL WAL into the mart's
+// Sync is one idempotent ETL run: drain the local JSONL WAL into the concordance's
 // session index and rebuild the runbook full-text index from the markdown
 // corpus. Read-only against every local file; a failed or killed run leaves
 // the WAL intact for the next drain.
@@ -118,37 +118,37 @@ func Sync(ctx context.Context, opts SyncOptions) (*Receipt, error) {
 		return receipt, nil
 	}
 	if opts.DSN == "" {
-		return nil, fmt.Errorf("no mart DSN: set [sessions] dsn in config, FORGECTL_SESSIONS_DSN, or --dsn (or use --dry-run)")
+		return nil, fmt.Errorf("no concordance DSN: set [sessions] dsn in config, FORGECTL_SESSIONS_DSN, or --dsn (or use --dry-run)")
 	}
 
-	mart, err := ConnectMart(ctx, opts.DSN)
+	concordance, err := ConnectConcordance(ctx, opts.DSN)
 	if err != nil {
-		slog.Error("Failed to reach the mart — the JSONL WAL is untouched and drains on the next reachable run.", "error", err)
+		slog.Error("Failed to reach the concordance — the JSONL WAL is untouched and drains on the next reachable run.", "error", err)
 		return nil, err
 	}
-	defer mart.Close(ctx)
+	defer concordance.Close(ctx)
 
 	toUpsert := rows
 	if !opts.Full {
-		toUpsert, receipt.SessionsUnchanged, err = skipUnchanged(ctx, mart, rows)
+		toUpsert, receipt.SessionsUnchanged, err = skipUnchanged(ctx, concordance, rows)
 		if err != nil {
 			slog.Error("Encountered watermark query failure while partitioning sessions.", "error", err, "sessions", len(rows))
 			return nil, err
 		}
 	}
-	if err := mart.UpsertSessions(ctx, toUpsert); err != nil {
+	if err := concordance.UpsertSessions(ctx, toUpsert); err != nil {
 		slog.Error("Encountered upsert failure while flushing sessions — nothing partial is committed.", "error", err, "attempted", len(toUpsert))
 		return nil, err
 	}
 	receipt.SessionsUpserted = len(toUpsert)
 
-	// Reconcile: every local session must now exist in the mart. Anything
+	// Reconcile: every local session must now exist in the concordance. Anything
 	// absent is a MISSING line, never a silent skip.
 	ids := make([]string, len(rows))
 	for i, r := range rows {
 		ids[i] = r.SessionID
 	}
-	present, err := mart.PresentIDs(ctx, ids)
+	present, err := concordance.PresentIDs(ctx, ids)
 	if err != nil {
 		slog.Error("Encountered reconcile failure while verifying flushed sessions.", "error", err, "sessions", len(ids))
 		return nil, err
@@ -159,10 +159,10 @@ func Sync(ctx context.Context, opts SyncOptions) (*Receipt, error) {
 		}
 	}
 	if len(receipt.Missing) > 0 {
-		slog.Error("Reconcile found sessions absent from the mart after flush — expected every local session present.", "missing", len(receipt.Missing))
+		slog.Error("Reconcile found sessions absent from the concordance after flush — expected every local session present.", "missing", len(receipt.Missing))
 	}
 
-	receipt.RunbooksPruned, err = mart.UpsertRunbooks(ctx, runbooks)
+	receipt.RunbooksPruned, err = concordance.UpsertRunbooks(ctx, runbooks)
 	if err != nil {
 		slog.Error("Encountered runbook index failure while rebuilding the full-text index.", "error", err, "runbooks", len(runbooks))
 		return nil, err
@@ -227,16 +227,16 @@ func extract(opts SyncOptions) (sessionRows, commitRows []LedgerRow, receipt *Re
 	return sessionRows, commitRows, receipt, nil
 }
 
-// skipUnchanged partitions rows by the mart's lastMessageId watermark: a
+// skipUnchanged partitions rows by the concordance's lastMessageId watermark: a
 // session whose cursor already matches is an already-synced tail. The
 // watermark is an optimization only — matching rows are skipped, everything
 // else re-upserts idempotently on session_id.
-func skipUnchanged(ctx context.Context, mart *Mart, rows []SessionRow) (toUpsert []SessionRow, unchanged int, err error) {
+func skipUnchanged(ctx context.Context, concordance *Concordance, rows []SessionRow) (toUpsert []SessionRow, unchanged int, err error) {
 	ids := make([]string, len(rows))
 	for i, r := range rows {
 		ids[i] = r.SessionID
 	}
-	watermarks, err := mart.Watermarks(ctx, ids)
+	watermarks, err := concordance.Watermarks(ctx, ids)
 	if err != nil {
 		return nil, 0, err
 	}

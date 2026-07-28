@@ -110,9 +110,9 @@ default_type = ""           # empty = every kind; node|python|go|build
 // commented so the absent-key fallback (the correctly home-expanded default)
 // applies; the annotation warns anyone who uncomments to use an absolute path.
 const sessionsScaffold = `
-# ── sessions: cross-machine operational mart ETL (forgectl sessions) ───────
+# ── sessions: cross-machine operational concordance ETL (forgectl sessions) ───────
 [sessions]
-# dsn = "postgres://user@host:5433/sessions_mart" # or $FORGECTL_SESSIONS_DSN; required
+# dsn = "postgres://user@host:5433/concordance" # or $FORGECTL_SESSIONS_DSN; required
 # machine = "" # default: short hostname
 # metrics_dir  = ""  # default: ~/.claude/metrics — set an ABSOLUTE path (~ is NOT expanded for this key)
 # runbooks_dir = ""  # default: ~/.claude/cadence/runbooks — set an ABSOLUTE path (~ is NOT expanded)

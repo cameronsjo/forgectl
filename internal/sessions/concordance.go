@@ -12,40 +12,40 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// connectTimeout bounds how long a sync waits for an unreachable mart — an
+// connectTimeout bounds how long a sync waits for an unreachable concordance — an
 // offline laptop must fail fast and leave the JSONL WAL to drain later, never
 // hang a hook or a cron flush.
 const connectTimeout = 5 * time.Second
 
-// Mart is the thin Postgres seam. It owns no decision logic — build.go and
-// runbooks.go decide what rows exist; Mart moves them.
-type Mart struct {
+// Concordance is the thin Postgres seam. It owns no decision logic — build.go and
+// runbooks.go decide what rows exist; Concordance moves them.
+type Concordance struct {
 	conn *pgx.Conn
 }
 
-// ConnectMart opens a single connection to the operational mart. The DSN
+// ConnectConcordance opens a single connection to the operational concordance. The DSN
 // SHOULD omit the password: pgx resolves ~/.pgpass (libpq-compatible), so the
 // secret stays outside repos and config files.
-func ConnectMart(ctx context.Context, dsn string) (*Mart, error) {
+func ConnectConcordance(ctx context.Context, dsn string) (*Concordance, error) {
 	ctx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("connect to mart (JSONL WAL is untouched; re-run when reachable): %w", err)
+		return nil, fmt.Errorf("connect to concordance (JSONL WAL is untouched; re-run when reachable): %w", err)
 	}
-	slog.Debug("Successfully connected to the operational mart.")
-	return &Mart{conn: conn}, nil
+	slog.Debug("Successfully connected to the operational concordance.")
+	return &Concordance{conn: conn}, nil
 }
 
 // Close releases the connection.
-func (m *Mart) Close(ctx context.Context) error { return m.conn.Close(ctx) }
+func (c *Concordance) Close(ctx context.Context) error { return c.conn.Close(ctx) }
 
 // schemaHint decorates undefined-table errors (SQLSTATE 42P01) so a fresh
-// mart points the operator at the canonical DDL instead of a bare SQL error.
+// concordance points the operator at the canonical DDL instead of a bare SQL error.
 func schemaHint(err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
-		return fmt.Errorf("%w — mart schema missing; apply scripts/sessions-mart/schema.sql (cameronsjo/claude-configurations)", err)
+		return fmt.Errorf("%w — concordance schema missing; apply scripts/concordance/schema.sql (cameronsjo/claude-configurations)", err)
 	}
 	return err
 }
@@ -53,11 +53,11 @@ func schemaHint(err error) error {
 // Watermarks returns session_id -> last_message_id for the given ids — the
 // incremental-sync cursor. Sessions whose local watermark matches are
 // already-synced tails the ETL skips.
-func (m *Mart) Watermarks(ctx context.Context, ids []string) (map[string]string, error) {
+func (c *Concordance) Watermarks(ctx context.Context, ids []string) (map[string]string, error) {
 	if len(ids) == 0 {
 		return map[string]string{}, nil
 	}
-	rows, err := m.conn.Query(ctx,
+	rows, err := c.conn.Query(ctx,
 		`SELECT session_id, coalesce(last_message_id, '') FROM session WHERE session_id = ANY($1)`, ids)
 	if err != nil {
 		return nil, schemaHint(fmt.Errorf("query watermarks: %w", err))
@@ -78,7 +78,7 @@ func (m *Mart) Watermarks(ctx context.Context, ids []string) (map[string]string,
 // (machine is provenance, never part of the key). Batched in one implicit
 // transaction: a killed connection mid-flush rolls back cleanly and the next
 // run drains the same WAL.
-func (m *Mart) UpsertSessions(ctx context.Context, rows []SessionRow) error {
+func (c *Concordance) UpsertSessions(ctx context.Context, rows []SessionRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -113,20 +113,20 @@ func (m *Mart) UpsertSessions(ctx context.Context, rows []SessionRow) error {
 			r.CostUSD, nullable(r.CostSource), r.Committed, nullable(r.LastMessageID),
 		)
 	}
-	if err := m.conn.SendBatch(ctx, batch).Close(); err != nil {
+	if err := c.conn.SendBatch(ctx, batch).Close(); err != nil {
 		return schemaHint(fmt.Errorf("upsert %d session rows: %w", len(rows), err))
 	}
 	return nil
 }
 
-// PresentIDs reports which of the given session ids exist in the mart — the
+// PresentIDs reports which of the given session ids exist in the concordance — the
 // post-flush reconcile that turns a silently-skipped session into a loud
 // MISSING line on the receipt.
-func (m *Mart) PresentIDs(ctx context.Context, ids []string) (map[string]bool, error) {
+func (c *Concordance) PresentIDs(ctx context.Context, ids []string) (map[string]bool, error) {
 	if len(ids) == 0 {
 		return map[string]bool{}, nil
 	}
-	rows, err := m.conn.Query(ctx,
+	rows, err := c.conn.Query(ctx,
 		`SELECT session_id FROM session WHERE session_id = ANY($1)`, ids)
 	if err != nil {
 		return nil, schemaHint(fmt.Errorf("reconcile present ids: %w", err))
@@ -148,7 +148,7 @@ func (m *Mart) PresentIDs(ctx context.Context, ids []string) (map[string]bool, e
 // file no longer exists in the corpus. The prune runs ONLY when the scan
 // found at least one file — an absent or empty corpus on this machine must
 // not wipe an index another machine populated.
-func (m *Mart) UpsertRunbooks(ctx context.Context, rows []RunbookRow) (deleted int64, err error) {
+func (c *Concordance) UpsertRunbooks(ctx context.Context, rows []RunbookRow) (deleted int64, err error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}
@@ -172,17 +172,17 @@ func (m *Mart) UpsertRunbooks(ctx context.Context, rows []RunbookRow) (deleted i
 			nullable(r.Type), r.Path, r.FullText, r.Machine,
 		)
 	}
-	if err := m.conn.SendBatch(ctx, batch).Close(); err != nil {
+	if err := c.conn.SendBatch(ctx, batch).Close(); err != nil {
 		return 0, schemaHint(fmt.Errorf("upsert %d runbook rows: %w", len(rows), err))
 	}
-	tag, err := m.conn.Exec(ctx, `DELETE FROM runbooks WHERE path <> ALL($1)`, paths)
+	tag, err := c.conn.Exec(ctx, `DELETE FROM runbooks WHERE path <> ALL($1)`, paths)
 	if err != nil {
 		return 0, schemaHint(fmt.Errorf("prune vanished runbooks: %w", err))
 	}
 	return tag.RowsAffected(), nil
 }
 
-// SearchHit is one full-text match from the mart's runbook index.
+// SearchHit is one full-text match from the concordance's runbook index.
 type SearchHit struct {
 	Path    string
 	Title   string
@@ -198,8 +198,8 @@ type SearchHit struct {
 // The fallback treats the whole query as ONE literal substring — it rescues
 // a partial or typo'd single token (the pg_trgm GIN index carries it), not a
 // multi-word phrase that happens to be split across the document.
-func (m *Mart) SearchRunbooks(ctx context.Context, query, project string, limit int) ([]SearchHit, error) {
-	hits, err := m.scanHits(ctx, `
+func (c *Concordance) SearchRunbooks(ctx context.Context, query, project string, limit int) ([]SearchHit, error) {
+	hits, err := c.scanHits(ctx, `
 		SELECT path, coalesce(title,''), coalesce(project,''), coalesce(type,''), machine,
 		       ts_rank(search, q) AS rank,
 		       ts_headline('english', full_text, q,
@@ -212,7 +212,7 @@ func (m *Mart) SearchRunbooks(ctx context.Context, query, project string, limit 
 		return hits, err
 	}
 	slog.Debug("Full-text query matched nothing, falling back to trigram scan.", "query", query)
-	return m.scanHits(ctx, `
+	return c.scanHits(ctx, `
 		SELECT path, coalesce(title,''), coalesce(project,''), coalesce(type,''), machine,
 		       0::float4 AS rank,
 		       left(full_text, 160) AS snippet
@@ -222,8 +222,8 @@ func (m *Mart) SearchRunbooks(ctx context.Context, query, project string, limit 
 		LIMIT $3`, query, project, limit)
 }
 
-func (m *Mart) scanHits(ctx context.Context, sql string, args ...any) ([]SearchHit, error) {
-	rows, err := m.conn.Query(ctx, sql, args...)
+func (c *Concordance) scanHits(ctx context.Context, sql string, args ...any) ([]SearchHit, error) {
+	rows, err := c.conn.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, schemaHint(fmt.Errorf("search runbooks: %w", err))
 	}
@@ -240,11 +240,11 @@ func (m *Mart) scanHits(ctx context.Context, sql string, args ...any) ([]SearchH
 }
 
 // WhyHit is one predecessor session attributed to a topic through a runbook it
-// authored — the "why did you do X" answer for one session. Because the mart
+// authored — the "why did you do X" answer for one session. Because the concordance
 // ingests no per-file edit history, the attribution is narrative: a runbook
 // (field report, handoff, plan) whose text matches the query AND whose
 // frontmatter session_id names this session. Title stands in for intent, the
-// snippet for key decisions, and Path is the local corpus link — the mart
+// snippet for key decisions, and Path is the local corpus link — the concordance
 // carries no dedicated intent, decisions, or URL fields.
 type WhyHit struct {
 	SessionID string
@@ -267,7 +267,7 @@ type WhyHit struct {
 // matching runbook represents it. The tsquery path handles topics; a trigram
 // ILIKE fallback rescues a literal path or partial token the english parser
 // mangles (dots, slashes), which is what lets a `<path>` argument match at all.
-func (m *Mart) WhySessions(ctx context.Context, query, project string, limit int) ([]WhyHit, error) {
+func (c *Concordance) WhySessions(ctx context.Context, query, project string, limit int) ([]WhyHit, error) {
 	slog.Debug("Preparing to query sessions for narrative match", "query", query, "project", project, "limit", limit)
 	// A blank query is meaningless for both paths: an empty tsquery matches
 	// nothing, and the ILIKE fallback would collapse to '%%' and dump the entire
@@ -279,7 +279,7 @@ func (m *Mart) WhySessions(ctx context.Context, query, project string, limit int
 	// The snippet parameters (ts_headline MaxWords/MinWords/selectors, the
 	// 160-char trigram-fallback preview) mirror SearchRunbooks so `why` and
 	// `search` render a match identically.
-	hits, err := m.scanWhyHits(ctx, `
+	hits, err := c.scanWhyHits(ctx, `
 		SELECT session_id, project, model, last_ts, committed, title, type, path, snippet FROM (
 			SELECT DISTINCT ON (r.session_id)
 				s.session_id, coalesce(s.project,'') AS project, coalesce(s.model,'') AS model,
@@ -300,7 +300,7 @@ func (m *Mart) WhySessions(ctx context.Context, query, project string, limit int
 		return hits, err
 	}
 	slog.Debug("Why full-text query matched nothing, falling back to trigram scan.", "query", query)
-	return m.scanWhyHits(ctx, `
+	return c.scanWhyHits(ctx, `
 		SELECT session_id, project, model, last_ts, committed, title, type, path, snippet FROM (
 			SELECT DISTINCT ON (r.session_id)
 				s.session_id, coalesce(s.project,'') AS project, coalesce(s.model,'') AS model,
@@ -325,8 +325,8 @@ func likeEscape(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
-func (m *Mart) scanWhyHits(ctx context.Context, sql string, args ...any) ([]WhyHit, error) {
-	rows, err := m.conn.Query(ctx, sql, args...)
+func (c *Concordance) scanWhyHits(ctx context.Context, sql string, args ...any) ([]WhyHit, error) {
+	rows, err := c.conn.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, schemaHint(fmt.Errorf("query why sessions: %w", err))
 	}
@@ -352,7 +352,7 @@ type Artifact struct {
 
 // SessionSummary is a session-table row plus the runbook artifacts it authored
 // — the answer to "the most recent session in this repo and what it left
-// behind". There is no explicit outro/lifecycle flag in the mart: Committed
+// behind". There is no explicit outro/lifecycle flag in the concordance: Committed
 // reports whether the session produced commits, and Artifacts is the set of
 // runbooks (by type) it authored — a handoff or field-report among them is the
 // closest signal of a clean sign-off.
@@ -371,11 +371,11 @@ type SessionSummary struct {
 // LastSession returns the most recent session in a repo (by last_ts) and the
 // runbook artifacts it authored. The repo match is exact against `project`
 // (mirroring search's project filter). Returns (nil, nil) when the repo has no
-// sessions in the mart — a clean miss the caller reports without erroring.
-func (m *Mart) LastSession(ctx context.Context, repo string) (*SessionSummary, error) {
+// sessions in the concordance — a clean miss the caller reports without erroring.
+func (c *Concordance) LastSession(ctx context.Context, repo string) (*SessionSummary, error) {
 	slog.Debug("Preparing to query last session", "repo", repo)
 	var s SessionSummary
-	err := m.conn.QueryRow(ctx, `
+	err := c.conn.QueryRow(ctx, `
 		SELECT session_id, coalesce(project,''), coalesce(git_branch,''),
 		       coalesce(model,''), machine, first_ts, last_ts, coalesce(committed,false)
 		FROM session
@@ -390,7 +390,7 @@ func (m *Mart) LastSession(ctx context.Context, repo string) (*SessionSummary, e
 	if err != nil {
 		return nil, schemaHint(fmt.Errorf("query last session for %q: %w", repo, err))
 	}
-	arts, err := m.sessionArtifacts(ctx, s.SessionID)
+	arts, err := c.sessionArtifacts(ctx, s.SessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -400,8 +400,8 @@ func (m *Mart) LastSession(ctx context.Context, repo string) (*SessionSummary, e
 
 // sessionArtifacts lists the runbooks a session authored (linked by
 // session_id), ordered for a stable receipt.
-func (m *Mart) sessionArtifacts(ctx context.Context, sessionID string) ([]Artifact, error) {
-	rows, err := m.conn.Query(ctx, `
+func (c *Concordance) sessionArtifacts(ctx context.Context, sessionID string) ([]Artifact, error) {
+	rows, err := c.conn.Query(ctx, `
 		SELECT coalesce(type,''), coalesce(title,''), path
 		FROM runbooks WHERE session_id = $1
 		ORDER BY type, path`, sessionID)

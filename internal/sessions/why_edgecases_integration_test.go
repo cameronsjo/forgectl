@@ -6,7 +6,7 @@ package sessions
 // newest-first ordering across two sessions). This file adds: an empty query
 // string, a whitespace-only query string, absurd --limit values (0 and
 // negative), and a non-ASCII (CJK + emoji) query through the tsquery path.
-// Same FORGECTL_TEST_MART_DSN gate and testdata fixtures as the sibling file.
+// Same FORGECTL_TEST_CONCORDANCE_DSN gate and testdata fixtures as the sibling file.
 
 import (
 	"context"
@@ -17,14 +17,14 @@ import (
 // seedWhyFixture inserts one session with two authored runbooks — a plain
 // ASCII one and a CJK+emoji one — so the edge-case tests below have known
 // rows to query against without depending on the shared testdata corpus.
-func seedWhyFixture(t *testing.T, ctx context.Context, mart *Mart) {
+func seedWhyFixture(t *testing.T, ctx context.Context, concordance *Concordance) {
 	t.Helper()
-	if _, err := mart.conn.Exec(ctx, `
+	if _, err := concordance.conn.Exec(ctx, `
 		INSERT INTO session (session_id, machine, project, git_branch, last_ts, synced_at)
 		VALUES ('edge-1', 'it-machine', 'edgeproj', 'main', '2026-07-11T09:00:00Z', now())`); err != nil {
 		t.Fatalf("seed session: %v", err)
 	}
-	if _, err := mart.conn.Exec(ctx, `
+	if _, err := concordance.conn.Exec(ctx, `
 		INSERT INTO runbooks (session_id, project, title, type, path, full_text, machine) VALUES
 			('edge-1', 'edgeproj', 'ASCII plan', 'plan', 'edgeproj/ascii.md', 'a plain ascii runbook about widgets', 'it-machine'),
 			('edge-1', 'edgeproj', 'CJK plan', 'plan', 'edgeproj/cjk.md', '咖啡 workflow discussion with an emoji 🔥 test', 'it-machine')`); err != nil {
@@ -32,19 +32,19 @@ func seedWhyFixture(t *testing.T, ctx context.Context, mart *Mart) {
 	}
 }
 
-// An empty topic is rejected at the mart boundary. Without the guard it would
+// An empty topic is rejected at the concordance boundary. Without the guard it would
 // collapse to an empty tsquery, fall through to the trigram fallback, and
 // ILIKE '%' || ” || '%' would dump the entire session_id-linked corpus up to
 // --limit — an unset shell variable (`forgectl sessions why ""`) becoming a
 // corpus dump. WhySessions now refuses a blank query.
 func TestIntegrationWhyEmptyTopicRejected(t *testing.T) {
-	dsn := martDSN(t)
+	dsn := concordanceDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	mart := prepMart(t, ctx, dsn)
-	seedWhyFixture(t, ctx, mart)
+	concordance := prepConcordance(t, ctx, dsn)
+	seedWhyFixture(t, ctx, concordance)
 
-	if _, err := mart.WhySessions(ctx, "", "", 10); err == nil {
+	if _, err := concordance.WhySessions(ctx, "", "", 10); err == nil {
 		t.Fatal("empty topic must be rejected, got nil error (a blank query must not dump the corpus)")
 	}
 }
@@ -54,13 +54,13 @@ func TestIntegrationWhyEmptyTopicRejected(t *testing.T) {
 // (Before the guard this took the trigram fallback and matched nothing, since
 // no fixture contains the literal whitespace run.)
 func TestIntegrationWhyWhitespaceTopicRejected(t *testing.T) {
-	dsn := martDSN(t)
+	dsn := concordanceDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	mart := prepMart(t, ctx, dsn)
-	seedWhyFixture(t, ctx, mart)
+	concordance := prepConcordance(t, ctx, dsn)
+	seedWhyFixture(t, ctx, concordance)
 
-	if _, err := mart.WhySessions(ctx, "   ", "", 10); err == nil {
+	if _, err := concordance.WhySessions(ctx, "   ", "", 10); err == nil {
 		t.Fatal("whitespace-only topic must be rejected, got nil error (it trims to blank)")
 	}
 }
@@ -70,13 +70,13 @@ func TestIntegrationWhyWhitespaceTopicRejected(t *testing.T) {
 // panic or a silently-empty result. Pin that WhySessions surfaces it as a Go
 // error the CLI layer can report, rather than crashing or hanging.
 func TestIntegrationWhyNegativeLimitErrors(t *testing.T) {
-	dsn := martDSN(t)
+	dsn := concordanceDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	mart := prepMart(t, ctx, dsn)
-	seedWhyFixture(t, ctx, mart)
+	concordance := prepConcordance(t, ctx, dsn)
+	seedWhyFixture(t, ctx, concordance)
 
-	if _, err := mart.WhySessions(ctx, "widgets", "", -1); err == nil {
+	if _, err := concordance.WhySessions(ctx, "widgets", "", -1); err == nil {
 		t.Error("negative limit should surface a Postgres error, got nil")
 	}
 }
@@ -85,13 +85,13 @@ func TestIntegrationWhyNegativeLimitErrors(t *testing.T) {
 // result on BOTH the full-text and trigram-fallback paths — not an error,
 // not a panic, even though a match exists.
 func TestIntegrationWhyZeroLimitReturnsEmpty(t *testing.T) {
-	dsn := martDSN(t)
+	dsn := concordanceDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	mart := prepMart(t, ctx, dsn)
-	seedWhyFixture(t, ctx, mart)
+	concordance := prepConcordance(t, ctx, dsn)
+	seedWhyFixture(t, ctx, concordance)
 
-	hits, err := mart.WhySessions(ctx, "widgets", "", 0)
+	hits, err := concordance.WhySessions(ctx, "widgets", "", 0)
 	if err != nil {
 		t.Fatalf("zero limit should not error: %v", err)
 	}
@@ -107,13 +107,13 @@ func TestIntegrationWhyZeroLimitReturnsEmpty(t *testing.T) {
 // unicode.IsLetter-shaped input is a first-class query, not just something
 // sanitizeTerm has to render safely on the way back out.
 func TestIntegrationWhyUnicodeTopic(t *testing.T) {
-	dsn := martDSN(t)
+	dsn := concordanceDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	mart := prepMart(t, ctx, dsn)
-	seedWhyFixture(t, ctx, mart)
+	concordance := prepConcordance(t, ctx, dsn)
+	seedWhyFixture(t, ctx, concordance)
 
-	hits, err := mart.WhySessions(ctx, "咖啡", "", 10)
+	hits, err := concordance.WhySessions(ctx, "咖啡", "", 10)
 	if err != nil {
 		t.Fatalf("CJK topic: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestIntegrationWhyUnicodeTopic(t *testing.T) {
 		t.Fatalf("CJK topic should rank-match the CJK runbook, got %+v", hits)
 	}
 
-	hits, err = mart.WhySessions(ctx, "🔥", "", 10)
+	hits, err = concordance.WhySessions(ctx, "🔥", "", 10)
 	if err != nil {
 		t.Fatalf("emoji topic: %v", err)
 	}
