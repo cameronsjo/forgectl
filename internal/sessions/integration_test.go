@@ -16,7 +16,7 @@ package sessions
 //
 // Run (example):
 //   docker run -d --name concordance-it -p 15544:5432 -e POSTGRES_PASSWORD=it \
-//     -e POSTGRES_DB=concordance postgres:17-alpine
+//     -e POSTGRES_DB=concordance postgres:18-alpine
 //   FORGECTL_TEST_CONCORDANCE_DSN='postgres://postgres:it@127.0.0.1:15544/concordance' \
 //     go test ./internal/sessions/ -run Integration -v
 
