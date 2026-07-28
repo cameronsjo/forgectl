@@ -167,7 +167,9 @@ func sanitizeCell(s string) string {
 }
 
 // prStateLabel renders a PR's display state: "draft" for a draft, else the
-// lowercased gh state ("open").
+// lowercased gh state ("open"). Deliberately not sanitizeCell-wrapped, unlike
+// reviewStateLabel: p.State comes only from GitHub's API, which constrains PR
+// state to an enum — reviewStateLabel additionally ingests free-text Gitea state.
 func prStateLabel(p pr.PR) string {
 	if p.IsDraft {
 		return "draft"
