@@ -84,7 +84,11 @@ func newReviewSyncCmd(srcs []review.Source, reviewedPath string) *cobra.Command 
 				keys[i] = it.Key()
 			}
 			store := pr.LoadReviewed(reviewedPath)
-			if err := store.SyncKeys(keys); err != nil {
+			// Host-scoped: a mark whose host has no active source THIS run
+			// (Gitea disabled, or simply not passed into srcs) is left
+			// untouched rather than pruned as "not in the open set" — see
+			// activeHosts and SyncKeysScoped.
+			if err := store.SyncKeysScoped(keys, activeHosts(srcs)); err != nil {
 				return fmt.Errorf("sync reviewed store: %w", err)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "synced reviewed store against %d open items\n", len(keys))

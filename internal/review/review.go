@@ -86,16 +86,23 @@ var reWorkURL = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9._-]+)/([A-Z
 // (exactly two slash-delimited segments before the '#').
 var reGitHubSlug = regexp.MustCompile(`^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)#([0-9]+)$`)
 
-// reHostSlug matches a host-qualified slug form: host/owner/repo#N (three
-// segments before the '#'). Distinct from reGitHubSlug by segment count, so
-// the two never collide on the same input.
-var reHostSlug = regexp.MustCompile(`^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)#([0-9]+)$`)
+// hostSeg is the host-segment pattern shared by reHostSlug and
+// reHostWorkURL: a bare hostname plus an OPTIONAL ":port", matching what
+// reGiteaHost (internal/review/gitea.go) actually allows to be configured —
+// a Gitea instance on a non-default port produces "host:port" keys, and both
+// host-qualified forms must be able to parse them back.
+const hostSeg = `[A-Za-z0-9._-]+(?::[0-9]{1,5})?`
+
+// reHostSlug matches a host-qualified slug form: host[:port]/owner/repo#N
+// (three segments before the '#'). Distinct from reGitHubSlug by segment
+// count, so the two never collide on the same input.
+var reHostSlug = regexp.MustCompile(`^(` + hostSeg + `)/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)#([0-9]+)$`)
 
 // reHostWorkURL matches a fully-qualified issue/pull(s) URL against ANY host
 // — github.com's "pull" and Gitea's "pulls" are both accepted by the regex;
 // the allowlist check happens after extraction, in ParseWorkRefForHosts, not
 // in the pattern itself.
-var reHostWorkURL = regexp.MustCompile(`^https://([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/(?:issues|pulls?)/([0-9]+)/?$`)
+var reHostWorkURL = regexp.MustCompile(`^https://(` + hostSeg + `)/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/(?:issues|pulls?)/([0-9]+)/?$`)
 
 // ParseWorkRef normalizes a user-typed work reference for the default host,
 // github.com — "owner/repo#N" or a full github.com issue/pull URL — to the

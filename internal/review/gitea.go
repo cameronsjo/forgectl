@@ -75,7 +75,6 @@ func (g *Gitea) Items(ctx context.Context) ([]Item, []string, error) {
 
 	ch := make(chan giteaQueryResult, len(g.owners))
 	for _, owner := range g.owners {
-		owner := owner
 		go func() {
 			items, truncated, err := g.issuesForOwner(ctx, owner)
 			ch <- giteaQueryResult{fmt.Sprintf("gitea(%s)", owner), items, truncated, err}
@@ -114,14 +113,22 @@ func (g *Gitea) issuesForOwner(ctx context.Context, owner string) ([]Item, bool,
 	if !pr.ValidOwnerRepoPart(owner) {
 		return nil, false, fmt.Errorf("owner %q outside allowed charset", owner)
 	}
-	out, err := g.run.Run(ctx, "tea", "issues", "list",
+	args := []string{"issues", "list",
 		"--owner", owner,
 		"--kind", "all",
 		"--state", "open",
 		"--output", "json",
 		"--fields", "index,kind,state,author,url,title,updated,labels,owner,repo",
 		"--limit", fmt.Sprint(searchLimit),
-		"--login", g.login)
+	}
+	// login is optional config: omit the flag entirely rather than pass an
+	// empty value, so an unset login falls back to tea's own default
+	// (whatever `tea login` last configured) instead of forcing an empty
+	// string tea would have to interpret itself.
+	if g.login != "" {
+		args = append(args, "--login", g.login)
+	}
+	out, err := g.run.Run(ctx, "tea", args...)
 	if err != nil {
 		return nil, false, err
 	}

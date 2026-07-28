@@ -6,6 +6,8 @@ package review
 //   [x] Happy: one issues(--kind all) query per owner, --owner-scoped with an
 //       explicit --limit, --login, --kind all, --output json; rows map to
 //       Items with labels
+//   [x] Happy: an empty configured login omits --login entirely (falls back
+//       to tea's own configured default)
 //   [x] Unhappy: a degraded owner becomes a note, the other owner's rows
 //       survive
 //   [x] Unhappy: every owner query failed → error; zero owners → error
@@ -14,6 +16,7 @@ package review
 //
 // NewGitea (Classification: constructor guard)
 //   [x] Unhappy: a malformed host is rejected at construction
+//   [x] Happy: a host:port construction is accepted
 //
 // parseTeaIssues (Classification: hostile-input parser)
 //   [x] Unhappy: non-numeric index, out-of-charset repo, and unknown kind
@@ -24,8 +27,10 @@ package review
 // ParseWorkRefForHosts (Classification: hostile-input parser)
 //   [x] Happy: host-qualified slug and URL forms normalize for a configured
 //       host; github.com forms still work unchanged
+//   [x] Happy: a configured host:port parses both slug and URL forms
 //   [x] Unhappy: an unconfigured host is rejected; a host-qualified ref is
-//       rejected entirely when no hosts are configured
+//       rejected entirely when no hosts are configured; an unlisted
+//       host:port is rejected even though it is well-formed
 
 import (
 	"context"
@@ -113,6 +118,28 @@ func TestGiteaItems_BothKindsMapped(t *testing.T) {
 		}
 		if !strings.Contains(argv, "--output json") {
 			t.Errorf("query missing --output json: %s", argv)
+		}
+	}
+}
+
+// TestGiteaItems_EmptyLoginOmitsFlag pins Fix D: an unconfigured (empty)
+// login must omit --login from the argv entirely, not pass an empty value —
+// tea should fall back to its own configured default login.
+func TestGiteaItems_EmptyLoginOmitsFlag(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "[]", nil
+	}}
+
+	g, err := NewGitea(fake, "git.sjo.lol", "", []string{"cameron"})
+	if err != nil {
+		t.Fatalf("NewGitea: %v", err)
+	}
+	if _, _, err := g.Items(context.Background()); err != nil {
+		t.Fatalf("Items: %v", err)
+	}
+	for _, call := range fake.Calls {
+		if argAfter(call.Args, "--login") != "" || strings.Contains(strings.Join(call.Args, " "), "--login") {
+			t.Errorf("empty login must omit --login entirely: %v", call.Args)
 		}
 	}
 }
@@ -224,6 +251,20 @@ func TestNewGitea_RejectsMalformedHost(t *testing.T) {
 	}
 }
 
+// TestNewGitea_AcceptsPortedHost pins Fix B's premise: a host:port
+// construction succeeds (reGiteaHost already allowed this) — the bug was
+// that ParseWorkRefForHosts couldn't parse the resulting keys back, fixed
+// separately (TestParseWorkRefForHosts_PortedHost).
+func TestNewGitea_AcceptsPortedHost(t *testing.T) {
+	g, err := NewGitea(&exec.FakeRunner{}, "git.sjo.lol:3000", "cameron", []string{"cameron"})
+	if err != nil {
+		t.Fatalf("NewGitea with host:port: %v", err)
+	}
+	if g.Host() != "git.sjo.lol:3000" {
+		t.Errorf("Host() = %q, want git.sjo.lol:3000", g.Host())
+	}
+}
+
 func TestParseTeaIssues_HostileRows(t *testing.T) {
 	const host = "git.sjo.lol"
 	badIndex := `{"index":"abc","kind":"Issue","state":"open","author":"cameron","url":"https://git.sjo.lol/cameronsjo/forgectl/issues/1","title":"t1","updated":"2026-07-09T12:00:00Z","labels":"","owner":"cameronsjo","repo":"forgectl"}`
@@ -313,5 +354,38 @@ func TestParseWorkRefForHosts(t *testing.T) {
 	// this is exactly ParseWorkRef's behavior.
 	if _, err := ParseWorkRefForHosts("git.sjo.lol/cameron/forgectl#12", nil); err == nil {
 		t.Error("host-qualified ref must be rejected when no hosts are configured")
+	}
+}
+
+// TestParseWorkRefForHosts_PortedHost pins Fix B: a configured host:port
+// (NewGitea already accepts constructing one) must parse back through both
+// the slug and URL forms, and an unlisted host:port is rejected even though
+// it is otherwise well-formed.
+func TestParseWorkRefForHosts_PortedHost(t *testing.T) {
+	hosts := []string{"git.sjo.lol:3000"}
+	want := "git.sjo.lol:3000/cameron/forgectl#12"
+	for _, in := range []string{
+		"git.sjo.lol:3000/cameron/forgectl#12",
+		"https://git.sjo.lol:3000/cameron/forgectl/issues/12",
+		"https://git.sjo.lol:3000/cameron/forgectl/pulls/12",
+	} {
+		got, err := ParseWorkRefForHosts(in, hosts)
+		if err != nil {
+			t.Errorf("ParseWorkRefForHosts(%q): %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("ParseWorkRefForHosts(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	// A different, unlisted host:port is rejected even though well-formed.
+	for _, in := range []string{
+		"git.sjo.lol:4000/cameron/forgectl#12",
+		"https://git.sjo.lol:4000/cameron/forgectl/issues/12",
+	} {
+		if _, err := ParseWorkRefForHosts(in, hosts); err == nil {
+			t.Errorf("ParseWorkRefForHosts(%q): unlisted host:port must be rejected", in)
+		}
 	}
 }

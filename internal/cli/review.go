@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"log/slog"
+	"fmt"
 
 	"github.com/spf13/cobra"
 
@@ -26,16 +26,48 @@ var reviewModule = module.Manifest{
 // newReviewCmd builds `forgectl review` over the registry Deps — the gh
 // source comes from deps.Runner (mirrors the other module constructors), and
 // the Gitea source (Phase C) is appended only when [review.gitea] is enabled
-// and configured with a host.
+// and configured with a host. A configured-but-invalid [review.gitea]
+// section fails the WHOLE command tree (see newReviewConfigErrorCmd) rather
+// than silently narrowing to GitHub-only — module.Manifest.New has no error
+// return, so this is the seam that surfaces the config error to the user.
 func newReviewCmd(deps module.Deps) *cobra.Command {
 	srcs := []review.Source{review.NewGitHub(deps.Runner, resolveReviewOwners(deps.Cfg))}
-	if src, ok := resolveGiteaSource(deps); ok {
-		srcs = append(srcs, src)
+	giteaSrc, ok, err := resolveGiteaSource(deps)
+	if err != nil {
+		return newReviewConfigErrorCmd(err)
+	}
+	if ok {
+		srcs = append(srcs, giteaSrc)
 	}
 	// err discarded: "" degrades to an empty store on read (LoadReviewed), and
 	// the write verbs fail loudly via persist()'s path=="" guard.
 	reviewedPath, _ := config.ReviewReviewedPath()
 	return newReviewCmdForSources(srcs, reviewedPath)
+}
+
+// newReviewConfigErrorCmd builds a `review` command tree whose every leaf —
+// the bare command, mark, unmark, sync — fails immediately with err, before
+// touching the reviewed store or shelling out. Used when [review.gitea] is
+// configured (non-zero) but invalid: silently omitting the source (the prior
+// behavior) let a host typo pass unnoticed, and — worse — let review sync's
+// host-scoped prune leave every git.sjo.lol mark stranded with no active
+// source to protect it. A config error must be loud, not a warn-and-omit.
+func newReviewConfigErrorCmd(err error) *cobra.Command {
+	fail := func(*cobra.Command, []string) error {
+		return fmt.Errorf("review: invalid [review.gitea] config: %w", err)
+	}
+	cmd := &cobra.Command{
+		Use:   "review [--kind issue|pr] [--repo <owner/name>]",
+		Short: "Cross-project work inventory: open issues and PRs across your repos",
+		Args:  cobra.NoArgs,
+		RunE:  fail,
+	}
+	cmd.AddCommand(
+		&cobra.Command{Use: "mark <ref>", Args: cobra.ExactArgs(1), RunE: fail},
+		&cobra.Command{Use: "unmark <ref>", Args: cobra.ExactArgs(1), RunE: fail},
+		&cobra.Command{Use: "sync", Args: cobra.NoArgs, RunE: fail},
+	)
+	return cmd
 }
 
 // resolveReviewOwners applies the [review] owners config, falling back to the
@@ -49,23 +81,33 @@ func resolveReviewOwners(cfg config.Config) []string {
 	return []string{defaultReviewOwner}
 }
 
-// resolveGiteaSource builds the Gitea review source from [review.gitea] when
-// it is enabled and a host is configured; ok is false otherwise, and the
-// caller omits the source entirely rather than constructing one doomed to
-// error at Items() time. A malformed host (caught by review.NewGitea) also
-// degrades to omission — logged loudly, since a config typo should not take
-// down the whole `review` command.
-func resolveGiteaSource(deps module.Deps) (src review.Source, ok bool) {
+// resolveGiteaSource builds the Gitea review source from [review.gitea].
+// Three outcomes:
+//   - disabled (Enabled == false, whatever else is set) → (nil, false, nil):
+//     the caller silently omits the source — this covers both a genuinely
+//     absent/empty section and a deliberately-off one, matching the pre-Gitea
+//     behavior exactly.
+//   - Enabled == true but Host is empty, or Host fails review.NewGitea's
+//     charset validation → (nil, false, err): an ERROR, not a warn-and-omit.
+//     A config typo must not silently narrow the review inventory — and,
+//     because review sync's prune is host-scoped, a silently-omitted host
+//     would leave every mark for that host permanently stranded (never
+//     eligible for pruning, but never re-verified as open either) with no
+//     visible signal that anything was wrong.
+//   - Enabled == true, Host valid → (src, true, nil).
+func resolveGiteaSource(deps module.Deps) (src review.Source, ok bool, err error) {
 	gc := deps.Cfg.Review.Gitea
-	if !gc.Enabled || gc.Host == "" {
-		return nil, false
+	if !gc.Enabled {
+		return nil, false, nil
+	}
+	if gc.Host == "" {
+		return nil, false, fmt.Errorf("[review.gitea] enabled = true but host is empty")
 	}
 	g, err := review.NewGitea(deps.Runner, gc.Host, gc.Login, gc.Owners)
 	if err != nil {
-		slog.Warn("Gitea review source misconfigured; omitting from review.", "host", gc.Host, "error", err)
-		return nil, false
+		return nil, false, err
 	}
-	return g, true
+	return g, true, nil
 }
 
 // extraHosts collects the non-github hosts contributed by srcs — any source
@@ -80,6 +122,15 @@ func extraHosts(srcs []review.Source) []string {
 		}
 	}
 	return hosts
+}
+
+// activeHosts is extraHosts plus github.com — github.com is always active
+// because newReviewCmd always includes a GitHub source unconditionally.
+// review sync uses this as the host-scoping allowlist for SyncKeysScoped: a
+// host outside this set has no active source THIS run, so its marks are
+// never eligible for pruning (see newReviewSyncCmd).
+func activeHosts(srcs []review.Source) []string {
+	return append([]string{review.GitHubHost}, extraHosts(srcs)...)
 }
 
 // newReviewCmdForSources builds the command tree over explicit sources and a

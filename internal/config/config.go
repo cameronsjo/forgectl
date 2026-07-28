@@ -57,7 +57,7 @@ const logKeepDays = 7
 //	[review.gitea]       # forgectl review — additional Gitea source (opt-in)
 //	enabled = false                  # false by default; the tea CLI must be on PATH
 //	host    = "git.sjo.lol"          # required when enabled
-//	login   = "cameron"              # tea --login value
+//	login   = "cameron"              # optional; omitted → tea's own configured default login
 //	owners  = ["cameron"]            # tea --owner scope, independent of [review] owners
 //	[docs]               # forgectl docs — local markdown reader
 //	roots = ["~/Projects/notes"]     # extra root dirs indexed alongside cwd/./docs

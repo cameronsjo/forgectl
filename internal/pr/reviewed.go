@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -164,6 +165,52 @@ func (s *ReviewedStore) SyncKeys(openKeys []string) error {
 		return err
 	}
 	slog.Info("Successfully synced reviewed store.", "openCount", len(openKeys), "pruned", pruned)
+	return nil
+}
+
+// SyncKeysScoped is SyncKeys restricted to a set of active host prefixes: an
+// entry is only eligible for pruning when its key's host segment (the
+// substring before the first '/' — internal/review's keys are host-qualified,
+// "host/owner/repo#N") is in activeHosts. Entries for a host with no active
+// source in this run are left untouched, whatever openKeys says — openKeys
+// only reflects the sources that actually ran, and a host that was merely
+// omitted (a disabled or misconfigured second source, say) is NOT the same
+// as "everything on that host closed"; pruning against a partial universe
+// would silently wipe out every mark for the omitted host. Callers with a
+// single, unqualified key dialect (internal/pr's own "owner/repo#N" keys,
+// which carry no host segment at all) should keep using SyncKeys.
+func (s *ReviewedStore) SyncKeysScoped(openKeys []string, activeHosts []string) error {
+	slog.Debug("Preparing to sync reviewed store (host-scoped).", "storeSize", len(s.at), "openCount", len(openKeys), "activeHosts", activeHosts)
+	active := make(map[string]bool, len(activeHosts))
+	for _, h := range activeHosts {
+		active[h] = true
+	}
+	open := make(map[string]bool, len(openKeys))
+	for _, k := range openKeys {
+		open[k] = true
+	}
+	changed := false
+	pruned := 0
+	for key := range s.at {
+		host, _, _ := strings.Cut(key, "/")
+		if !active[host] {
+			continue // host has no active source this run — never eligible for pruning
+		}
+		if !open[key] {
+			delete(s.at, key)
+			changed = true
+			pruned++
+		}
+	}
+	if !changed {
+		slog.Debug("Skipping sync: no changes to store.", "openCount", len(openKeys))
+		return nil
+	}
+	if err := s.persist(); err != nil {
+		slog.Error("Failed to sync reviewed store.", "openCount", len(openKeys), "pruned", pruned, "error", err)
+		return err
+	}
+	slog.Info("Successfully synced reviewed store.", "openCount", len(openKeys), "pruned", pruned, "activeHosts", activeHosts)
 	return nil
 }
 

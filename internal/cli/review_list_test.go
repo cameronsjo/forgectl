@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/review"
 )
@@ -211,6 +213,82 @@ func TestResolveReviewOwners(t *testing.T) {
 	cfg.Review.Owners = []string{"someoneelse", "cameronsjo"}
 	if got := resolveReviewOwners(cfg); len(got) != 2 || got[0] != "someoneelse" {
 		t.Errorf("configured owners must win: got %v", got)
+	}
+}
+
+// TestResolveGiteaSource pins the three outcomes: disabled (whatever else is
+// set) is silently omitted; enabled-but-broken is an error, never a warn-and-
+// omit; a valid config builds a source whose Host() feeds extraHosts.
+func TestResolveGiteaSource(t *testing.T) {
+	deps := func(gc config.GiteaConfig) module.Deps {
+		var cfg config.Config
+		cfg.Review.Gitea = gc
+		return module.Deps{Cfg: cfg, Runner: &exec.FakeRunner{}}
+	}
+
+	t.Run("absent section is silently omitted", func(t *testing.T) {
+		src, ok, err := resolveGiteaSource(deps(config.GiteaConfig{}))
+		if err != nil || ok || src != nil {
+			t.Errorf("absent: got (%v, %v, %v), want (nil, false, nil)", src, ok, err)
+		}
+	})
+
+	t.Run("disabled with other fields set is still silently omitted", func(t *testing.T) {
+		src, ok, err := resolveGiteaSource(deps(config.GiteaConfig{Host: "git.sjo.lol", Owners: []string{"cameron"}}))
+		if err != nil || ok || src != nil {
+			t.Errorf("disabled: got (%v, %v, %v), want (nil, false, nil)", src, ok, err)
+		}
+	})
+
+	t.Run("enabled with empty host is an error", func(t *testing.T) {
+		_, ok, err := resolveGiteaSource(deps(config.GiteaConfig{Enabled: true}))
+		if err == nil || ok {
+			t.Errorf("enabled+empty host: want an error, got ok=%v err=%v", ok, err)
+		}
+	})
+
+	t.Run("enabled with a malformed host is an error", func(t *testing.T) {
+		_, ok, err := resolveGiteaSource(deps(config.GiteaConfig{Enabled: true, Host: "bad host"}))
+		if err == nil || ok {
+			t.Errorf("enabled+malformed host: want an error, got ok=%v err=%v", ok, err)
+		}
+	})
+
+	t.Run("valid config builds a source whose Host feeds extraHosts", func(t *testing.T) {
+		src, ok, err := resolveGiteaSource(deps(config.GiteaConfig{
+			Enabled: true, Host: "git.sjo.lol", Login: "cameron", Owners: []string{"cameron"},
+		}))
+		if err != nil || !ok || src == nil {
+			t.Fatalf("valid config: got (%v, %v, %v), want a source", src, ok, err)
+		}
+		if hosts := extraHosts([]review.Source{src}); len(hosts) != 1 || hosts[0] != "git.sjo.lol" {
+			t.Errorf("extraHosts = %v, want [git.sjo.lol]", hosts)
+		}
+	})
+}
+
+// TestNewReviewCmd_GiteaConfigError pins that a configured-but-invalid
+// [review.gitea] fails the WHOLE `review` command tree — bare, mark, unmark,
+// sync all return the same config error — rather than silently narrowing to
+// GitHub-only.
+func TestNewReviewCmd_GiteaConfigError(t *testing.T) {
+	var cfg config.Config
+	cfg.Review.Gitea = config.GiteaConfig{Enabled: true} // enabled, no host: invalid
+	deps := module.Deps{Cfg: cfg, Runner: &exec.FakeRunner{}}
+
+	for _, args := range [][]string{
+		{},
+		{"mark", "cameronsjo/forgectl#1"},
+		{"unmark", "cameronsjo/forgectl#1"},
+		{"sync"},
+	} {
+		cmd := newReviewCmd(deps)
+		cmd.SetOut(new(bytes.Buffer))
+		cmd.SetErr(new(bytes.Buffer))
+		cmd.SetArgs(args)
+		if err := cmd.ExecuteContext(context.Background()); err == nil {
+			t.Errorf("args %v: want config error, got nil", args)
+		}
 	}
 }
 
