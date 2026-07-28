@@ -48,8 +48,11 @@ func DefaultSteps() []Step {
 // ambient Homebrew auto-update timestamp happens to be.
 var homebrewNoAutoUpdate = map[string]string{"HOMEBREW_NO_AUTO_UPDATE": "1"}
 
-// brewStep: Check and Apply are both scoped to --formula — casks are out of
-// scope for this step entirely, not just for Apply. Check lists outdated
+// brewStep: Check and Apply are both scoped to --formula — no cask is listed
+// or upgraded here. One residue: `brew cleanup` takes no --formula/--cask
+// switch, so it still prunes stale cask DOWNLOADS. Old-version deletion stays
+// formula-only, which is what keeps the Cellar-rollback caveat below exact.
+// Check lists outdated
 // formulae (never mutates, HOMEBREW_NO_AUTO_UPDATE pinned — see above);
 // Apply runs the standard three-command weekly refresh in sequence — update
 // (refresh the formula index), upgrade --formula (install newer formula
@@ -159,7 +162,7 @@ func npmStep() Step {
 				return out, nil
 			}
 			var cmdErr *exec.CommandError
-			if errors.As(err, &cmdErr) && cmdErr.ExitCode == 1 && cmdErr.Output != "" {
+			if errors.As(err, &cmdErr) && cmdErr.ExitCode == 1 && strings.TrimSpace(cmdErr.Output) != "" {
 				return cmdErr.Output, nil
 			}
 			return out, err

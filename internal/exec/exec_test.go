@@ -69,6 +69,33 @@ func TestOSRunner_RunWithEnv_InheritsAmbientEnvironment(t *testing.T) {
 	}
 }
 
+// TestOSRunner_RunWithEnv_OverridesAmbientValue pins the case the merge test
+// above cannot reach: an appended var whose key ALREADY exists in the ambient
+// environment must win. That is exactly why brewStep pins
+// HOMEBREW_NO_AUTO_UPDATE=1 — a user who exported it as 0 would otherwise keep
+// the auto-update mutation the pin exists to stop.
+func TestOSRunner_RunWithEnv_OverridesAmbientValue(t *testing.T) {
+	t.Setenv("FORGECTL_TEST_OVERRIDE", "ambient")
+
+	out, err := (OSRunner{}).RunWithEnv(context.Background(), map[string]string{"FORGECTL_TEST_OVERRIDE": "appended"}, "sh", "-c", "echo $FORGECTL_TEST_OVERRIDE")
+	if err != nil {
+		t.Fatalf("RunWithEnv: %v", err)
+	}
+	if out != "appended" {
+		t.Errorf("appended value did not win over the ambient one: got %q, want %q", out, "appended")
+	}
+
+	// Control: without the append, the child sees the ambient value — so the
+	// assertion above is testing the override, not a coincidence.
+	ctrl, err := (OSRunner{}).Run(context.Background(), "sh", "-c", "echo $FORGECTL_TEST_OVERRIDE")
+	if err != nil {
+		t.Fatalf("Run (control): %v", err)
+	}
+	if ctrl != "ambient" {
+		t.Errorf("control output = %q, want %q", ctrl, "ambient")
+	}
+}
+
 func TestFakeRunner_RunWithInput_RecordsInputOnCall(t *testing.T) {
 	fake := &FakeRunner{}
 
