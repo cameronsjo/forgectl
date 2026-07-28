@@ -35,5 +35,7 @@ func allModules() []module.Manifest {
 		preflightModule,
 		ghosttyModule,
 		updateModule,
+		doctorModule,
+		upgradeModule,
 	}
 }

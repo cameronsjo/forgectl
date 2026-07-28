@@ -173,6 +173,17 @@ forgectl update run --json               # machine-readable summary (with each s
                                           #   the full per-step transcript goes to stderr + a timestamped log
                                           #   (update-logs/, auto-pruned after 7 days)
 
+# doctor — ecosystem health check: claude, tmux/ghostty/cmux, gh auth, config,
+#   the local bench (hearth/chronicle/flux), the trust store, forgectl's own currency
+forgectl doctor                          # one line per check, with a remediation hint on any warn/fail
+forgectl doctor --json                   # machine-readable report for scripting
+
+# upgrade — update forgectl itself via the Homebrew tap (never `go build` over the brew-linked binary)
+forgectl upgrade                         # brew update + brew upgrade --cask forgectl; brew owns the checksum + atomic install
+forgectl upgrade --check                 # report whether an update is available, no mutation
+                                          #   a source build (go build/go run) WARNS instead of attempting anything —
+                                          #   there's no cask install to manage
+
 # y — read/write the system clipboard (macOS only)
 echo hi | forgectl y copy                # copy stdin to the clipboard
 forgectl y paste                         # print the clipboard's current contents
