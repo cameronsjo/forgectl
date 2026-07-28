@@ -12,12 +12,19 @@ package cli
 //       prompt requiring a tty) — that path is covered end-to-end at the
 //       ops layer in internal/clean/clean_test.go, mirroring branch's split
 //       (no CLI-level apply+confirm test either)
+//   [x] Happy: --caches (dry run) prints the cache-scan section and issues
+//       ZERO prune-command Runner calls — only the locate/detect queries
+//   [x] Happy: --docker (dry run) prints the docker-scan section and issues
+//       ZERO prune-command Runner calls — only `docker system df`
+//   [x] Happy: bare `clean` (neither flag) touches no cache/docker Runner
+//       calls at all — the opt-in passes are true opt-in, not always-run
 
 import (
 	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	cleanpkg "github.com/cameronsjo/forgectl/internal/clean"
@@ -93,6 +100,106 @@ func TestCleanCmd_InvalidType_RejectedBeforeScan(t *testing.T) {
 
 	if err := cmd.ExecuteContext(context.Background()); err == nil {
 		t.Fatal("expected an error for an unknown --type value")
+	}
+}
+
+// TestCleanCmd_CachesFlag_DryRun_NoPruneCalls pins --caches' dry-run
+// contract: the section renders and every probed tool is "detected" (the
+// fake serves a path for each), but with no --apply, PruneCaches must never
+// be reached — only each tool's read-only locate query.
+func TestCleanCmd_CachesFlag_DryRun_NoPruneCalls(t *testing.T) {
+	root := t.TempDir() // empty: nothing for the dep/build-dir pass to find
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		switch name {
+		case "npm", "pnpm", "pip", "go", "brew":
+			return "/fake/cache/" + name, nil
+		}
+		return "", nil
+	}}
+	client := cleanpkg.New(fake, cleanpkg.WithRoot(root))
+	cmd := newCleanCmdForClient(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--caches"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "package-manager caches:") {
+		t.Errorf("expected the caches section header, got: %q", stdout.String())
+	}
+	for _, call := range fake.Calls {
+		argv := strings.Join(call.Args, " ")
+		for _, mutating := range []string{"cache clean", "store prune", "cache purge", "clean -cache", "cleanup -s"} {
+			if strings.Contains(argv, mutating) {
+				t.Errorf("dry run (--caches, no --apply) must never prune; saw %s %q", call.Name, argv)
+			}
+		}
+	}
+}
+
+// TestCleanCmd_DockerFlag_DryRun_NoPruneCalls mirrors the caches test for
+// --docker: the section renders from a successful `docker system df`, but
+// with no --apply, PruneDocker must never be reached.
+func TestCleanCmd_DockerFlag_DryRun_NoPruneCalls(t *testing.T) {
+	root := t.TempDir()
+	dfOut := strings.Join([]string{
+		`{"Type":"Images","TotalCount":"1","Active":"0","Size":"1GB","Reclaimable":"500MB"}`,
+		`{"Type":"Containers","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+		`{"Type":"Local Volumes","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+		`{"Type":"Build Cache","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+	}, "\n")
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "docker" {
+			return dfOut, nil
+		}
+		return "", nil
+	}}
+	client := cleanpkg.New(fake, cleanpkg.WithRoot(root))
+	cmd := newCleanCmdForClient(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--docker"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "docker prune:") {
+		t.Errorf("expected the docker section header, got: %q", stdout.String())
+	}
+	for _, call := range fake.Calls {
+		if call.Name != "docker" {
+			continue
+		}
+		if strings.Contains(strings.Join(call.Args, " "), "prune") {
+			t.Errorf("dry run (--docker, no --apply) must never prune; saw docker %v", call.Args)
+		}
+	}
+}
+
+// TestCleanCmd_NoFlags_NeverTouchesCachesOrDocker pins that --caches/--docker
+// are true opt-in: the bare command must never invoke any of the
+// cache/docker tools at all, not even their read-only locate/df queries.
+func TestCleanCmd_NoFlags_NeverTouchesCachesOrDocker(t *testing.T) {
+	root := t.TempDir()
+	fake := &exec.FakeRunner{}
+	client := cleanpkg.New(fake, cleanpkg.WithRoot(root))
+	cmd := newCleanCmdForClient(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, call := range fake.Calls {
+		switch call.Name {
+		case "npm", "pnpm", "pip", "go", "brew", "docker":
+			t.Errorf("bare clean (no --caches/--docker) must never touch %s; saw call: %v", call.Name, call.Args)
+		}
 	}
 }
 

@@ -13,7 +13,7 @@ Built for two hands and one thumb:
 brew install cameronsjo/tap/forgectl
 ```
 
-Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against the self-hosted Gitea, and `review` when `[review.gitea]` is enabled), `docker` (`bench status`/`up`, `docker build/run/shell`).
+Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against the self-hosted Gitea, and `review` when `[review.gitea]` is enabled), `docker` (`bench status`/`up`, `docker build/run/shell`, and `clean --docker`), `npm`/`pnpm`/`pip`/`go`/`brew` (`clean --caches` — each is independently opt-in and skipped, not required, when absent).
 
 ## Usage
 
@@ -111,6 +111,10 @@ forgectl clean                           # dry-run report against ~/Projects (no
 forgectl clean --type node               # only one type: node|python|go|build
 forgectl clean --apply                   # DESTRUCTIVE: delete everything reclaimable, after a confirmation
                                           #   prompt (skips dirty git trees unless --force)
+forgectl clean --caches --apply          # DESTRUCTIVE, opt-in: also clear detected package-manager
+                                          #   caches (npm/pnpm/pip/go/brew), each its own confirmation
+forgectl clean --docker --apply          # DESTRUCTIVE, opt-in: also prune docker (containers/images/
+                                          #   volumes/build cache), its own confirmation
 
 # docker — build/run/shell images tagged from git repo/branch/sha
 forgectl docker build [context]          # build, tagging {repo}:{branch}-{sha} and :dev

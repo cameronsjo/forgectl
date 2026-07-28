@@ -6,12 +6,14 @@
 // nothing of Cobra — that decoupling is the house pattern (see internal/net,
 // internal/branch, internal/docker).
 //
-// PR-1 scope only: dep/build-dir reclaim. Package-manager caches (npm/pip/go
-// build cache/brew) and docker prune are explicitly out of scope here —
-// issue #4's follow-on PR.
+// This file is PR-1 scope: dep/build-dir reclaim under --root. cache.go and
+// docker.go are PR-2 (issue #4's follow-on): opt-in package-manager cache
+// and docker prune, reached only through their OWN tool commands — never
+// os.RemoveAll — so none of the guarantees below apply to them; they have
+// no filesystem containment surface to protect in the first place.
 //
-// This is a delete-adjacent package. Every os.RemoveAll call in it is
-// preceded by:
+// This file is delete-adjacent. Every os.RemoveAll call in it is preceded
+// by:
 //  1. Scan (scan.go) never having matched or descended into .git.
 //  2. Scan never having followed a symlink out of --root.
 //  3. A dirty-tree skip unless --force (gitDirty below).
