@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/bless"
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/doctor"
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -26,10 +28,28 @@ func runDoctor(t *testing.T, d doctor.Deps, args ...string) (stdout string, err 
 
 // allOKDeps builds a doctor.Deps whose every seam reports a passing check —
 // the baseline both tests below mutate one field of.
+//
+// checkClaude does NOT consult Deps.LookPath — it goes through
+// launch.ClaudePath, which resolves $FORGECTL_CLAUDE_BIN, then
+// [launch.defaults].binary_path, then a REAL os/exec.LookPath("claude") as
+// its last resort. Stubbing Deps.LookPath alone leaves that PATH lookup
+// live, so a "checks all pass" test would only pass on a machine that
+// happens to have claude installed — exactly the bug this comment now
+// guards against (CI has no claude on PATH; this test was green locally by
+// environmental luck, not by construction). Pointing binary_path at a fake
+// executable makes checkClaude deterministic the same way TestCheckClaude
+// (doctor package) already does, instead of depending on the runner's PATH.
 func allOKDeps(t *testing.T) doctor.Deps {
 	t.Helper()
 	redirectDoctorConfigDir(t)
+
+	fakeClaude := t.TempDir() + "/claude"
+	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
 	return doctor.Deps{
+		Cfg:    config.Config{Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{BinaryPath: fakeClaude}}},
 		Runner: &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) { return "ok", nil }},
 		LookPath: func(name string) (string, error) {
 			return "/usr/bin/" + name, nil

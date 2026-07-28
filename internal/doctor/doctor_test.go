@@ -271,10 +271,24 @@ func TestCheckForgectlVersion(t *testing.T) {
 // makes Report.Healthy() false even though every other check passes.
 func TestRun_AggregatesAllChecksAndFailsOnAnyFailure(t *testing.T) {
 	redirectConfigDir(t)
+	// FORGECTL_CLAUDE_BIN outranks [launch.defaults].binary_path (see
+	// launch.ClaudePath's precedence order) — clear it, same as
+	// TestCheckClaude, so an operator's ambient override can't change
+	// whether the claude check passes here. The test only asserts on gh's
+	// own state, but leaving claude's outcome to whatever happens to be on
+	// PATH is exactly the class of defect this comment now guards against
+	// (a test that would read as broken on a machine without claude
+	// installed, purely by coincidence rather than by construction).
+	t.Setenv("FORGECTL_CLAUDE_BIN", "")
 	meta.Version = "dev" // skip the brew/version check — not under test here
 
+	fakeClaude := t.TempDir() + "/claude"
+	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
 	d := Deps{
-		Cfg:      config.Config{},
+		Cfg:      config.Config{Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{BinaryPath: fakeClaude}}},
 		Runner:   &exec.FakeRunner{},
 		LookPath: fakeLookPath("tmux", "ghostty", "cmux"), // gh deliberately absent
 		TrustedStore: func() (bless.Store, error) {
