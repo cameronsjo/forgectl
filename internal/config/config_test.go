@@ -262,6 +262,53 @@ func TestOpenLogWriter(t *testing.T) {
 	})
 }
 
+func TestOpenAppendFile(t *testing.T) {
+	t.Run("creates nested dir and opens for append", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "nested", "sub", "out.log")
+		f, err := OpenAppendFile(path)
+		if err != nil {
+			t.Fatalf("OpenAppendFile: %v", err)
+		}
+		if _, err := f.WriteString("first\n"); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+
+		// Re-open (as a real second caller would) and confirm it appends
+		// rather than truncating.
+		f2, err := OpenAppendFile(path)
+		if err != nil {
+			t.Fatalf("second OpenAppendFile: %v", err)
+		}
+		if _, err := f2.WriteString("second\n"); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := f2.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		if string(got) != "first\nsecond\n" {
+			t.Errorf("contents = %q, want %q (append, not truncate)", string(got), "first\nsecond\n")
+		}
+	})
+
+	t.Run("unmkdir-able path returns an error", func(t *testing.T) {
+		blocker := filepath.Join(t.TempDir(), "iamafile")
+		if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+			t.Fatalf("seed blocker: %v", err)
+		}
+		if _, err := OpenAppendFile(filepath.Join(blocker, "sub", "out.log")); err == nil {
+			t.Error("OpenAppendFile under a non-directory parent = nil error, want an error")
+		}
+	})
+}
+
 func TestConfigPath(t *testing.T) {
 	dir := redirectConfigDir(t)
 	got, err := ConfigPath()

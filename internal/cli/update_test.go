@@ -64,7 +64,32 @@ func TestUpdateCheck_NeverMutatesEvenDestructiveSteps(t *testing.T) {
 	}
 }
 
-func TestUpdateRun_DestructiveStepSkippedWithoutYes(t *testing.T) {
+// stubConfirmSeams overrides isTerminal and confirmUpdateDestructive for the
+// duration of the test, restoring both via t.Cleanup — the pattern env_test.go
+// already uses for the identical isTerminal/confirmAnyFile seam pair.
+func stubConfirmSeams(t *testing.T, terminal bool, confirmFn func(string) (bool, error)) *[]string {
+	t.Helper()
+	prevTerm := isTerminal
+	isTerminal = func() bool { return terminal }
+	t.Cleanup(func() { isTerminal = prevTerm })
+
+	var prompts []string
+	prevConfirm := confirmUpdateDestructive
+	confirmUpdateDestructive = func(msg string) (bool, error) {
+		prompts = append(prompts, msg)
+		return confirmFn(msg)
+	}
+	t.Cleanup(func() { confirmUpdateDestructive = prevConfirm })
+	return &prompts
+}
+
+// TestUpdateRun_NoYes_NoTTY_SkipsWithoutPrompting covers path 1 of 3: no
+// --yes and no terminal — the destructive step is skipped, and the
+// confirmation seam is never even invoked (there's nothing to ask a
+// non-interactive caller).
+func TestUpdateRun_NoYes_NoTTY_SkipsWithoutPrompting(t *testing.T) {
+	prompts := stubConfirmSeams(t, false, func(string) (bool, error) { return true, nil })
+
 	fr := &exec.FakeRunner{}
 	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("brew", true, nil)}))
 	cfg := config.UpdateConfig{LogDir: t.TempDir()}
@@ -76,6 +101,9 @@ func TestUpdateRun_DestructiveStepSkippedWithoutYes(t *testing.T) {
 	if len(fr.Calls) != 0 {
 		t.Errorf("destructive step's Apply command ran without --yes: %+v", fr.Calls)
 	}
+	if len(*prompts) != 0 {
+		t.Errorf("confirmation prompt fired with no terminal: %v", *prompts)
+	}
 	if !bytes.Contains([]byte(stdout), []byte("skip")) {
 		t.Errorf("stdout summary missing a skip line: %q", stdout)
 	}
@@ -84,7 +112,91 @@ func TestUpdateRun_DestructiveStepSkippedWithoutYes(t *testing.T) {
 	}
 }
 
+// TestUpdateRun_NoYes_TTY_ConfirmAccepts_Applies covers path 2 of 3: no
+// --yes, a real terminal, and the user accepts the prompt — the destructive
+// step applies exactly as if --yes had been passed.
+func TestUpdateRun_NoYes_TTY_ConfirmAccepts_Applies(t *testing.T) {
+	prompts := stubConfirmSeams(t, true, func(string) (bool, error) { return true, nil })
+
+	fr := &exec.FakeRunner{}
+	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("brew", true, nil)}))
+	cfg := config.UpdateConfig{LogDir: t.TempDir()}
+
+	stdout, _, err := runUpdate(t, client, cfg, "run")
+	if err != nil {
+		t.Fatalf("Execute() = %v (exit %d), want nil", err, ExitCode(err))
+	}
+	if len(fr.Calls) != 1 || fr.Calls[0].Args[len(fr.Calls[0].Args)-1] != "apply" {
+		t.Errorf("expected the Apply command to run once after accepting the prompt, got %+v", fr.Calls)
+	}
+	if len(*prompts) != 1 {
+		t.Fatalf("got %d prompt(s), want exactly 1", len(*prompts))
+	}
+	if !bytes.Contains([]byte((*prompts)[0]), []byte("brew")) {
+		t.Errorf("prompt %q does not name the affected step", (*prompts)[0])
+	}
+	if !bytes.Contains([]byte(stdout), []byte("1 ok, 0 skipped, 0 failed")) {
+		t.Errorf("stdout summary shows a skip despite the prompt being accepted: %q", stdout)
+	}
+}
+
+// TestUpdateRun_NoYes_TTY_ConfirmDeclines_Skips covers path 3 of 3: no
+// --yes, a real terminal, and the user declines — the destructive step is
+// skipped exactly as it would be with no terminal at all.
+func TestUpdateRun_NoYes_TTY_ConfirmDeclines_Skips(t *testing.T) {
+	prompts := stubConfirmSeams(t, true, func(string) (bool, error) { return false, nil })
+
+	fr := &exec.FakeRunner{}
+	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("brew", true, nil)}))
+	cfg := config.UpdateConfig{LogDir: t.TempDir()}
+
+	stdout, _, err := runUpdate(t, client, cfg, "run")
+	if err != nil {
+		t.Fatalf("Execute() = %v (exit %d), want nil (a decline is not a failure)", err, ExitCode(err))
+	}
+	if len(fr.Calls) != 0 {
+		t.Errorf("destructive step's Apply command ran despite declining the prompt: %+v", fr.Calls)
+	}
+	if len(*prompts) != 1 {
+		t.Fatalf("got %d prompt(s), want exactly 1", len(*prompts))
+	}
+	if !bytes.Contains([]byte(stdout), []byte("skip")) {
+		t.Errorf("stdout summary missing a skip line after declining: %q", stdout)
+	}
+}
+
+// TestUpdateRun_NoYes_TTY_ConfirmPromptErrors_FailsClosedToSkip asserts that
+// a prompt failure (e.g. huh erroring out despite isTerminal() reporting
+// true) resolves to a skip, never a harness error — the same fail-closed
+// behavior as declining.
+func TestUpdateRun_NoYes_TTY_ConfirmPromptErrors_FailsClosedToSkip(t *testing.T) {
+	stubConfirmSeams(t, true, func(string) (bool, error) { return false, errors.New("no tty available") })
+
+	fr := &exec.FakeRunner{}
+	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("brew", true, nil)}))
+	cfg := config.UpdateConfig{LogDir: t.TempDir()}
+
+	_, stderr, err := runUpdate(t, client, cfg, "run")
+	if err != nil {
+		t.Fatalf("Execute() = %v (exit %d), want nil (a failed prompt fails closed, not as a harness error)", err, ExitCode(err))
+	}
+	if len(fr.Calls) != 0 {
+		t.Errorf("destructive step's Apply command ran despite a failed prompt: %+v", fr.Calls)
+	}
+	if !bytes.Contains([]byte(stderr), []byte("warning")) {
+		t.Errorf("stderr missing a warning about the failed prompt: %q", stderr)
+	}
+}
+
+// TestUpdateRun_YesAppliesDestructiveSteps confirms --yes both applies the
+// destructive step AND never invokes the confirmation seam at all (explicit
+// consent short-circuits the prompt entirely, even on a real terminal).
 func TestUpdateRun_YesAppliesDestructiveSteps(t *testing.T) {
+	prompts := stubConfirmSeams(t, true, func(string) (bool, error) {
+		t.Fatal("confirmation prompt must not fire when --yes is passed")
+		return false, nil
+	})
+
 	fr := &exec.FakeRunner{}
 	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("brew", true, nil)}))
 	cfg := config.UpdateConfig{LogDir: t.TempDir()}
@@ -95,6 +207,9 @@ func TestUpdateRun_YesAppliesDestructiveSteps(t *testing.T) {
 	}
 	if len(fr.Calls) != 1 || fr.Calls[0].Args[len(fr.Calls[0].Args)-1] != "apply" {
 		t.Errorf("expected the Apply command to run once, got %+v", fr.Calls)
+	}
+	if len(*prompts) != 0 {
+		t.Errorf("confirmation prompt fired despite --yes: %v", *prompts)
 	}
 }
 

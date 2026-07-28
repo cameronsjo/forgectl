@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -45,10 +44,13 @@ SCOPED steps: one step's failure is recorded on that step alone and never
 prevents the others from running.
 
   forgectl update check            report-only, no mutation, safe to run any time
-  forgectl update run               destructive steps are SKIPPED (and reported as
-                                     skipped) without --yes; non-destructive steps
-                                     (softwareupdate) still run
-  forgectl update run --yes         actually apply every destructive step
+  forgectl update run               INTERACTIVE: a destructive step prompts once
+                                     for the whole batch — decline (or no
+                                     terminal) skips them, reported as skipped;
+                                     non-destructive steps (softwareupdate)
+                                     always run regardless
+  forgectl update run --yes         skip the prompt — apply every destructive
+                                     step non-interactively (cron/CI)
   forgectl update run --only brew,go   restrict to a subset of the roster
 
 Every run streams a full transcript to stderr and to a timestamped log file
@@ -105,7 +107,7 @@ func newUpdateRunCmd(client *updatepkg.Client, cfg config.UpdateConfig) *cobra.C
 			return runUpdatePass(cmd, client, cfg, updatepkg.Options{Yes: yes}, only, asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&yes, "yes", false, "actually apply destructive steps (brew upgrade/cleanup, go clean, npm update); without it, they are skipped and reported as skipped")
+	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt and apply destructive steps (brew upgrade/cleanup, go clean, npm update) non-interactively — for cron/CI")
 	addRosterFlags(cmd, &only, &asJSON)
 	return cmd
 }
@@ -118,8 +120,44 @@ func addRosterFlags(cmd *cobra.Command, only *[]string, asJSON *bool) {
 	cmd.Flags().BoolVar(asJSON, "json", false, "emit a machine-readable summary to stdout")
 }
 
+// confirmUpdateDestructive is `update run`'s confirmation seam — mirrors
+// confirmAnyFile (env.go): a package-level var so a test can stub the huh
+// prompt without a real tty, rather than exercising confirm() itself.
+var confirmUpdateDestructive = confirm
+
+// confirmDestructiveBatch decides whether a bare `update run` (no --yes)
+// should treat its destructive steps as consented-to, following the house
+// preview→confirm→apply convention (internal/cli/confirm.go; clean.go,
+// branch.go). Three outcomes, all returning false except the one explicit
+// yes:
+//   - nothing destructive in the selected subset → nothing to gate, false
+//     (moot either way — Options.Yes only affects destructive steps)
+//   - a real terminal → one prompt naming every affected step; declining,
+//     or the prompt itself erroring, both resolve to false
+//   - no terminal → false without ever prompting
+//
+// false is never treated as an error here — it leaves the destructive
+// steps exactly as Skipped as they were before this gate existed
+// (Options.Yes simply stays unset), never a harness failure.
+func confirmDestructiveBatch(client *updatepkg.Client, only []string, stderr io.Writer) bool {
+	names := client.DestructiveStepNames(only)
+	if len(names) == 0 {
+		return false
+	}
+	if !isTerminal() {
+		return false
+	}
+	ok, err := confirmUpdateDestructive(fmt.Sprintf("Apply %d destructive step(s) (%s)?", len(names), strings.Join(names, ", ")))
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: confirmation prompt failed (%v); destructive step(s) will be skipped\n", err)
+		return false
+	}
+	return ok
+}
+
 // runUpdatePass resolves --only against cfg's default roster and the
-// client's real step names, opens the transcript (stderr + a timestamped
+// client's real step names, gates any destructive step behind --yes or an
+// interactive confirmation, opens the transcript (stderr + a timestamped
 // log file, best-effort), runs the roster, prints the summary (JSON or
 // human), and maps the outcome to an exit code.
 func runUpdatePass(cmd *cobra.Command, client *updatepkg.Client, cfg config.UpdateConfig, opts updatepkg.Options, only []string, asJSON bool) error {
@@ -129,10 +167,18 @@ func runUpdatePass(cmd *cobra.Command, client *updatepkg.Client, cfg config.Upda
 	if len(resolvedOnly) == 0 {
 		resolvedOnly = cfg.Roster
 	}
-	if err := validateOnly(resolvedOnly, client.StepNames()); err != nil {
+	if err := client.ValidateOnly(resolvedOnly); err != nil {
 		return WithExitCode(err, 2)
 	}
 	opts.Only = resolvedOnly
+
+	// `update check` (CheckOnly) never applies anything, so it never needs
+	// this gate. `update run --yes` already carries explicit consent — no
+	// prompt. Only a bare `update run` with a destructive step selected
+	// reaches the confirmation.
+	if !opts.CheckOnly && !opts.Yes && confirmDestructiveBatch(client, resolvedOnly, cmd.ErrOrStderr()) {
+		opts.Yes = true
+	}
 
 	transcript, closeLog, logPath := openTranscript(cfg, cmd.ErrOrStderr())
 	defer closeLog()
@@ -160,37 +206,14 @@ func runUpdatePass(cmd *cobra.Command, client *updatepkg.Client, cfg config.Upda
 	return nil
 }
 
-// validateOnly errors when a requested step name matches nothing in the
-// real roster — a typo (or a stale [update] roster entry after a roster
-// change) should surface as a clear harness error, not silently run an
-// empty subset.
-func validateOnly(only []string, valid []string) error {
-	if len(only) == 0 {
-		return nil
-	}
-	validSet := make(map[string]bool, len(valid))
-	for _, name := range valid {
-		validSet[name] = true
-	}
-	var unknown []string
-	for _, name := range only {
-		if !validSet[name] {
-			unknown = append(unknown, name)
-		}
-	}
-	if len(unknown) == 0 {
-		return nil
-	}
-	return fmt.Errorf("unknown --only step(s) %s — roster is %s", strings.Join(unknown, ", "), strings.Join(valid, ", "))
-}
-
 // openTranscript returns a writer that duplicates every transcript line to
 // stderr and to a timestamped log file, plus a closer and the log file's
-// path (empty if the file couldn't be opened). Opening the log file is
-// best-effort — mirrors config.SetupLogger's own fallback: an unwritable
-// log directory degrades to stderr-only rather than failing the whole
-// command, since the transcript itself (not the log copy) is the thing a
-// caller actually depends on.
+// path (empty if the file couldn't be opened). Opening the log file reuses
+// config.OpenAppendFile's shared mkdir+open trio (the same one
+// config.SetupLogger's own log file goes through); this caller's fallback
+// differs from SetupLogger's own silent one — it warns to stderr before
+// degrading, since the transcript here is the CLI's whole point, not an
+// incidental side channel.
 func openTranscript(cfg config.UpdateConfig, stderr io.Writer) (w io.Writer, closeLog func(), path string) {
 	dir := cfg.LogDir
 	if dir == "" {
@@ -201,14 +224,10 @@ func openTranscript(cfg config.UpdateConfig, stderr io.Writer) (w io.Writer, clo
 	if dir == "" {
 		return stderr, func() {}, ""
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		fmt.Fprintf(stderr, "warning: could not create update log directory %s: %v (continuing with stderr only)\n", dir, err)
-		return stderr, func() {}, ""
-	}
 
 	name := "update-" + time.Now().Format("20060102-150405") + ".log"
 	logPath := filepath.Join(dir, name)
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := config.OpenAppendFile(logPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: could not open update log file %s: %v (continuing with stderr only)\n", logPath, err)
 		return stderr, func() {}, ""

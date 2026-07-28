@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -136,14 +137,62 @@ func New(run exec.Runner, opts ...Option) *Client {
 	return c
 }
 
-// StepNames returns the Client's roster names, in order — used by the CLI
-// layer to validate --only against the real roster and to render --help.
+// StepNames returns the Client's roster names, in order — used by callers
+// that need the raw roster (validation, --help rendering).
 func (c *Client) StepNames() []string {
 	names := make([]string, len(c.steps))
 	for i, s := range c.steps {
 		names[i] = s.Name
 	}
 	return names
+}
+
+// DestructiveStepNames returns, in roster order, the names of steps in the
+// selected subset (only's semantics match Run's — same filter, same "empty
+// means everything") whose Destructive is true. A caller that needs to
+// decide whether to prompt before a run (and what to name in that prompt)
+// uses this instead of re-deriving the filter itself.
+func (c *Client) DestructiveStepNames(only []string) []string {
+	var names []string
+	for _, s := range selectSteps(c.steps, only) {
+		if s.Destructive {
+			names = append(names, s.Name)
+		}
+	}
+	return names
+}
+
+// ValidateOnly errors when a requested step name matches nothing in the
+// Client's roster — a typo (or a stale [update] roster entry after a
+// roster change) should surface as a clear error, not silently run an
+// empty subset. Exposed on Client — not left to the CLI layer alone — so
+// any future non-CLI consumer of this package gets the same validation for
+// free (mirrors internal/clean's ParseKind: validated in-package, surfaced
+// by the caller).
+func (c *Client) ValidateOnly(only []string) error {
+	return validateOnly(only, c.StepNames())
+}
+
+// validateOnly is ValidateOnly's pure body: only ⊆ valid, or a named error
+// listing what didn't match plus the full valid set.
+func validateOnly(only []string, valid []string) error {
+	if len(only) == 0 {
+		return nil
+	}
+	validSet := make(map[string]bool, len(valid))
+	for _, name := range valid {
+		validSet[name] = true
+	}
+	var unknown []string
+	for _, name := range only {
+		if !validSet[name] {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	return fmt.Errorf("unknown step name(s) %s — roster is %s", strings.Join(unknown, ", "), strings.Join(valid, ", "))
 }
 
 // Run executes the Client's roster (or Options.Only's subset, in roster
@@ -218,9 +267,8 @@ func logStepOutcome(name, phase string, res Result) {
 
 // selectSteps filters steps to only's names, preserving roster order. Empty
 // only returns every step unchanged. A name in only that matches nothing in
-// steps is silently absent from the result — the CLI layer is responsible
-// for validating --only against Client.StepNames() and erroring on an
-// unknown name before Run is ever called.
+// steps is silently absent from the result — callers that need to reject an
+// unknown name outright should call ValidateOnly before Run.
 func selectSteps(steps []Step, only []string) []Step {
 	if len(only) == 0 {
 		return steps

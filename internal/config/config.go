@@ -484,23 +484,38 @@ func openLogWriter(logFile string) (io.Writer, io.Closer) {
 	} else {
 		path = logFile
 	}
-	logDir := filepath.Dir(path)
 
-	if err := os.MkdirAll(logDir, 0o700); err != nil {
-		return os.Stderr, nopCloser{}
-	}
-
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := OpenAppendFile(path)
 	if err != nil {
 		return os.Stderr, nopCloser{}
 	}
 
 	// Prune old daily log files (auto mode only; best-effort, non-fatal).
 	if logFile == "" {
-		pruneOldLogs(logDir)
+		pruneOldLogs(filepath.Dir(path))
 	}
 
 	return f, f
+}
+
+// OpenAppendFile ensures path's directory exists (MkdirAll 0700) and opens
+// path itself for append (O_CREATE|O_APPEND|O_WRONLY, 0600) — the shared
+// mkdir+open trio behind every forgectl log-file writer. Exported so a
+// module's own log-file plumbing (e.g. `forgectl update`'s per-run
+// transcript log) can reuse it instead of re-deriving the same two calls;
+// unlike openLogWriter, it returns the error rather than silently degrading,
+// since callers differ on what "silently degrading" should look like (a
+// bare fallback to stderr here, a warned fallback there).
+func OpenAppendFile(path string) (*os.File, error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("create log directory %s: %w", dir, err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open log file %s: %w", path, err)
+	}
+	return f, nil
 }
 
 // configDir returns the OS config base directory for forgectl

@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -202,6 +203,58 @@ func TestStepNames(t *testing.T) {
 	names := c.StepNames()
 	if len(names) != 2 || names[0] != "a" || names[1] != "b" {
 		t.Errorf("StepNames() = %v, want [a b]", names)
+	}
+}
+
+func TestDestructiveStepNames(t *testing.T) {
+	fr := &exec.FakeRunner{}
+	c := New(fr, WithSteps([]Step{
+		fakeStep("brew", true, nil, nil),
+		fakeStep("softwareupdate", false, nil, nil),
+		fakeStep("npm", true, nil, nil),
+	}))
+
+	t.Run("full roster", func(t *testing.T) {
+		got := c.DestructiveStepNames(nil)
+		if len(got) != 2 || got[0] != "brew" || got[1] != "npm" {
+			t.Errorf("DestructiveStepNames(nil) = %v, want [brew npm] (roster order)", got)
+		}
+	})
+
+	t.Run("restricted by only", func(t *testing.T) {
+		got := c.DestructiveStepNames([]string{"softwareupdate"})
+		if len(got) != 0 {
+			t.Errorf("DestructiveStepNames restricted to a non-destructive step = %v, want empty", got)
+		}
+	})
+
+	t.Run("only names a destructive step", func(t *testing.T) {
+		got := c.DestructiveStepNames([]string{"npm", "softwareupdate"})
+		if len(got) != 1 || got[0] != "npm" {
+			t.Errorf("got %v, want [npm]", got)
+		}
+	})
+}
+
+func TestClient_ValidateOnly(t *testing.T) {
+	fr := &exec.FakeRunner{}
+	c := New(fr, WithSteps([]Step{
+		fakeStep("brew", false, nil, nil),
+		fakeStep("go", false, nil, nil),
+	}))
+
+	if err := c.ValidateOnly(nil); err != nil {
+		t.Errorf("ValidateOnly(nil) = %v, want nil", err)
+	}
+	if err := c.ValidateOnly([]string{"brew", "go"}); err != nil {
+		t.Errorf("ValidateOnly with every valid name = %v, want nil", err)
+	}
+	err := c.ValidateOnly([]string{"brew", "not-a-step"})
+	if err == nil {
+		t.Fatal("ValidateOnly with an unknown name = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "not-a-step") {
+		t.Errorf("error %q does not name the offending step", err.Error())
 	}
 }
 
