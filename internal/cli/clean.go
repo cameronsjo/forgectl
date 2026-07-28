@@ -264,10 +264,10 @@ func runCleanCaches(cmd *cobra.Command, client *cleanpkg.Client, apply bool) err
 	}
 
 	prompt := fmt.Sprintf("Clear %s across %d package-manager cache(s)?", formatBytes(total), detected)
-	if hasBrewTarget(items) {
+	if hasCacheKind(items, cleanpkg.CacheBrew) {
 		prompt += " (brew's cleanup ALSO removes old formula/cask versions from the Cellar, not just its download cache)"
 	}
-	if hasPnpmTarget(items) {
+	if hasCacheKind(items, cleanpkg.CachePnpm) {
 		prompt += " (the pnpm figure sizes its WHOLE content-addressable store; store prune only removes unreferenced packages, so actual reclaim is typically much less)"
 	}
 	ok, err := confirmFn(prompt)
@@ -303,27 +303,15 @@ func runCleanCaches(cmd *cobra.Command, client *cleanpkg.Client, apply bool) err
 	return nil
 }
 
-// hasBrewTarget reports whether items includes a detected (non-skipped)
-// brew target — the CLI's signal to append the Cellar-impact caveat to the
-// confirmation prompt.
-func hasBrewTarget(items []cleanpkg.CacheItem) bool {
+// hasCacheKind reports whether items includes a detected (non-skipped)
+// target of the given kind — the CLI's signal to append a kind-specific
+// caveat to the confirmation prompt. Brew (old Cellar versions) and pnpm
+// (whole-store preview vs. partial prune) are both disclosed this way;
+// folded into one helper rather than a hasBrewTarget/hasPnpmTarget pair
+// that differed only in the Kind literal (forgectl#165 review).
+func hasCacheKind(items []cleanpkg.CacheItem, kind cleanpkg.CacheKind) bool {
 	for _, item := range items {
-		if !item.Skipped && item.Kind == cleanpkg.CacheBrew {
-			return true
-		}
-	}
-	return false
-}
-
-// hasPnpmTarget reports whether items includes a detected (non-skipped)
-// pnpm target — the CLI's signal to append the preview/prune-mismatch
-// caveat to the confirmation prompt: ScanCaches sizes pnpm's WHOLE
-// content-addressable store, but `pnpm store prune` only removes packages
-// no project references anymore, so the prompt's advertised size can be
-// far larger than what actually gets reclaimed (forgectl#165 item 2).
-func hasPnpmTarget(items []cleanpkg.CacheItem) bool {
-	for _, item := range items {
-		if !item.Skipped && item.Kind == cleanpkg.CachePnpm {
+		if !item.Skipped && item.Kind == kind {
 			return true
 		}
 	}
@@ -334,7 +322,7 @@ func hasPnpmTarget(items []cleanpkg.CacheItem) bool {
 // bare Kind for every probe except brew, whose underlying `brew cleanup`
 // command ALSO removes old formula/cask versions from the Cellar, not just
 // its download cache. Disclosed here so the scan item, the confirmation
-// prompt (see hasBrewTarget above), and clean.go's Long help never promise
+// prompt (see hasCacheKind above), and clean.go's Long help never promise
 // a narrower blast radius than the command actually has.
 func cacheDisplayName(kind cleanpkg.CacheKind) string {
 	switch kind {
@@ -481,8 +469,17 @@ func printDockerItems(out io.Writer, items []cleanpkg.DockerItem) {
 			continue
 		}
 		size := formatBytes(item.Reclaimable)
-		if item.Reclaimable == 0 && item.Reported != "" {
-			size = item.Reported
+		if !item.ReclaimableKnown {
+			// ReclaimableKnown is the single source of truth for "did this
+			// row's size actually parse" (see docker.go) — a formatted
+			// Reclaimable of 0 here is a parse-failure placeholder, not a
+			// measurement, so show docker's own raw string instead of a
+			// "0 B" that would read as a genuine zero.
+			if item.Reported != "" {
+				size = item.Reported
+			} else {
+				size = "unknown"
+			}
 		}
 		fmt.Fprintf(out, "%-11s %s\n", item.Kind, size)
 	}
