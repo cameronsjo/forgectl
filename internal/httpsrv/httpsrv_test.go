@@ -132,14 +132,16 @@ func TestBearerToken_WrongOrMissingToken_Rejected401(t *testing.T) {
 // unit test can't reliably provide; what this pins is that the fix didn't
 // change accept/reject behavior for any of these shapes.
 func TestBearerToken_NearMissAndLengthVariants_AllRejected(t *testing.T) {
-	const real = "correct-horse-battery-staple-0123456789"
-	h := BearerToken(real)(okHandler())
+	// Named wantToken, not "real": `real` is a predeclared Go identifier (the
+	// complex-number accessor), and shadowing it trips the predeclared linter.
+	const wantToken = "correct-horse-battery-staple-0123456789"
+	h := BearerToken(wantToken)(okHandler())
 
 	cases := map[string]string{
-		"prefix match, last byte wrong": "Bearer " + real[:len(real)-1] + "X",
-		"prefix match, then truncated":  "Bearer " + real[:len(real)-5],
+		"prefix match, last byte wrong": "Bearer " + wantToken[:len(wantToken)-1] + "X",
+		"prefix match, then truncated":  "Bearer " + wantToken[:len(wantToken)-5],
 		"much shorter than real token":  "Bearer x",
-		"much longer than real token":   "Bearer " + real + strings.Repeat("Y", 100),
+		"much longer than real token":   "Bearer " + wantToken + strings.Repeat("Y", 100),
 		"empty bearer value":            "Bearer ",
 	}
 	for name, header := range cases {

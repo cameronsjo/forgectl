@@ -81,8 +81,15 @@ func HostAllowlist(allowed []string) func(http.Handler) http.Handler {
 // correct token one byte at a time to an attacker who can measure response
 // timing; and ConstantTimeCompare itself returns immediately when its inputs
 // have different lengths, which would leak the token's length if compared
-// raw. Hashing first makes both sides always exactly 32 bytes, so neither
-// the content nor the length of the caller-supplied header influences timing.
+// raw. Hashing first makes both sides always exactly 32 bytes, so the compare
+// step reveals nothing about the token's content or length.
+//
+// The guarantee is scoped to the SECRET, not to total request time: SHA-256
+// cost scales with input size, so a caller can still learn how long its own
+// header was from how long hashing it took. That is not a leak — the attacker
+// supplied that header and already knows its length. What no measurement
+// reveals is any property of the expected token, which is the only thing being
+// protected here.
 func BearerToken(token string) func(http.Handler) http.Handler {
 	want := sha256.Sum256([]byte("Bearer " + token))
 	return func(next http.Handler) http.Handler {
