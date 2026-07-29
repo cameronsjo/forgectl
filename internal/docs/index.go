@@ -79,12 +79,28 @@ type Index struct {
 	paths []string
 	roots []Root
 	docs  []Doc
-	// pathIndex is the set of every Doc.AbsPath, built once in NewIndex.
-	// Resolve consults it so the SAME predicate that decided what's in the
-	// sidenav (walkRoot's hidden/vendor-dir exclusions, symlinked-file
-	// exclusion) also decides what's servable — a directory excluded from
-	// the walk must not remain reachable by a direct URL guess.
-	pathIndex map[string]bool
+	// pathIndex is the set of every indexed (root label, absolute path) pair,
+	// built once in NewIndex. Resolve consults it so the SAME predicate that
+	// decided what's in the sidenav (walkRoot's hidden/vendor-dir exclusions,
+	// symlinked-file exclusion) also decides what's servable — a directory
+	// excluded from the walk must not remain reachable by a direct URL guess.
+	//
+	// Membership is keyed by ROOT as well as path, not by path alone. Roots may
+	// legitimately overlap: naming a normally-excluded directory (say a
+	// vault's .trash) as its own root is explicit consent to index it, but that
+	// consent belongs to that root's URL namespace only. A single global set of
+	// absolute paths would let the child root's consent leak sideways into the
+	// parent root's namespace, where the same file is still deliberately hidden
+	// from the sidenav — reopening the excluded-directory leak through
+	// configuration instead of through code.
+	pathIndex map[docKey]bool
+}
+
+// docKey identifies one indexed document by the root it was indexed under plus
+// its canonical absolute path. Both halves are required: see Index.pathIndex.
+type docKey struct {
+	rootLabel string
+	absPath   string
 }
 
 // NewIndex builds an Index over paths, each of which is either a directory
@@ -128,9 +144,9 @@ func NewIndex(paths []string) (*Index, error) {
 
 	sort.Slice(idx.docs, func(i, j int) bool { return idx.docs[i].ModTime.After(idx.docs[j].ModTime) })
 
-	idx.pathIndex = make(map[string]bool, len(idx.docs))
+	idx.pathIndex = make(map[docKey]bool, len(idx.docs))
 	for _, d := range idx.docs {
-		idx.pathIndex[d.AbsPath] = true
+		idx.pathIndex[docKey{rootLabel: d.RootLabel, absPath: d.AbsPath}] = true
 	}
 	return idx, nil
 }
@@ -384,9 +400,9 @@ var ErrNotIndexed = errors.New("file was not indexed")
 // path: it looks up rootLabel among the indexed Roots, then runs relPath
 // through the full ResolveInRoot traversal chain (security.go) against that
 // root's canonical path, checks the resolved path's extension against
-// AllowedExt, and finally requires the resolved path to be a member of
-// idx.pathIndex — the exact set walkRoot/indexFileRoot populated at index
-// build time. That last check is what closes the gap between "hidden from
+// AllowedExt, and finally requires the (root label, resolved path) PAIR to be a
+// member of idx.pathIndex — the exact set walkRoot/indexFileRoot populated at
+// index build time. That last check is what closes the gap between "hidden from
 // the sidenav" and "not servable": Resolve never re-derives servability from
 // the live filesystem independently of what was actually indexed. For a
 // single-file root (Root.OnlyFile set), any resolution other than that exact
@@ -409,7 +425,9 @@ func (idx *Index) Resolve(rootLabel, relPath string) (string, error) {
 		if !AllowedExt(resolved) {
 			return "", ErrDisallowedExt
 		}
-		if !idx.pathIndex[resolved] {
+		// Keyed on r.Label, so a file indexed under a DIFFERENT (possibly
+		// overlapping) root does not satisfy membership for this one.
+		if !idx.pathIndex[docKey{rootLabel: r.Label, absPath: resolved}] {
 			return "", ErrNotIndexed
 		}
 		return resolved, nil

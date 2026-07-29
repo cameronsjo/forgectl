@@ -257,6 +257,44 @@ func TestIndex_Resolve_ExcludedDir_NotServableByDirectURL(t *testing.T) {
 	}
 }
 
+// Overlapping-root variant of the test above, and the reason pathIndex is
+// keyed by root rather than by path alone. Naming a normally-excluded
+// directory as a root of its own is legitimate consent to index it — but that
+// consent is scoped to THAT root's URL namespace. If membership were a single
+// global set of absolute paths, indexing the child would also make the file
+// reachable through the PARENT root's URL, where the sidenav still (correctly)
+// hides it — reopening the excluded-directory leak by configuration rather
+// than by code.
+func TestIndex_Resolve_ExcludedDirIndexedAsItsOwnRoot_NotServableViaParentRoot(t *testing.T) {
+	parent := t.TempDir()
+	writeFile(t, filepath.Join(parent, "readme.md"), "# Kept")
+	trash := filepath.Join(parent, ".trash")
+	writeFile(t, filepath.Join(trash, "deleted-secret.md"), "# Should never be servable via the parent")
+
+	// Both the parent AND the excluded child are configured roots.
+	idx, err := NewIndex([]string{parent, trash})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	roots := idx.Roots()
+	if len(roots) != 2 {
+		t.Fatalf("Roots() = %+v, want 2 roots", roots)
+	}
+	parentLabel, trashLabel := roots[0].Label, roots[1].Label
+
+	// Naming .trash explicitly does grant access through ITS OWN root — that is
+	// the consent half of the contract, and it must keep working.
+	if _, err := idx.Resolve(trashLabel, "deleted-secret.md"); err != nil {
+		t.Errorf("Resolve(%q, %q) = %v, want nil — a directory named explicitly as a root is indexed under that root", trashLabel, "deleted-secret.md", err)
+	}
+
+	// But it must NOT be reachable through the parent root's namespace, where
+	// the walk deliberately skipped it.
+	if _, err := idx.Resolve(parentLabel, ".trash/deleted-secret.md"); !errors.Is(err, ErrNotIndexed) {
+		t.Errorf("Resolve(%q, %q): err = %v, want ErrNotIndexed — indexing a child root must not make its files servable through the parent root's URL", parentLabel, ".trash/deleted-secret.md", err)
+	}
+}
+
 func TestIndex_Resolve_DisallowedExtension_Rejected(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "page.md"), "# Page")
