@@ -6,8 +6,16 @@
 <title>{{if .DocTitle}}{{.DocTitle}} · {{end}}forgectl docs</title>
 <link rel="stylesheet" href="/assets/artificer.css"/>
 <link rel="stylesheet" href="/assets/chroma.css"/>
+<link rel="stylesheet" href="/assets/diagram.css"/>
 <script src="/assets/artificer-theme.js" defer></script>
 <script src="/assets/reload.js" defer></script>
+<script src="/assets/artificer-tree.js" defer></script>
+<!-- mermaid must be parsed before its init script runs; both are deferred, and
+     deferred scripts execute in document order, so this ordering is the
+     dependency declaration. -->
+<script src="/assets/mermaid.min.js" defer></script>
+<script src="/assets/mermaid-init.js" defer></script>
+<script src="/assets/svg-panzoom.js" defer></script>
 </head>
 <body class="surface-tool">
 <div class="page-shell">

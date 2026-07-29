@@ -31,8 +31,15 @@ workbench — no terminal-specific rendering, no popping between windows.
 
   forgectl docs serve [dir|file ...]     render + serve an indexed doc set
   forgectl docs serve --open             also open the system browser
+  forgectl docs open [path]              point the browser at a doc on the
+                                         already-running reader
   forgectl docs list [dir|file ...]      list the indexed docs, no server
   forgectl docs list --json              machine-readable output for scripts
+
+Diagrams render in the page: a fenced code block tagged mermaid becomes a live
+diagram themed from the same Artificer tokens as the rest of the reader, and
+both those and inline SVG pan and zoom (drag to pan, modifier-scroll or
+click-then-scroll to zoom, double-click or 0 to reset).
 
 With no arguments, both verbs index cwd, ./docs (if present), and
 $CADENCE_FIELD_REPORTS_DIR (if set), plus any extra roots configured in the
@@ -42,11 +49,14 @@ line replaces that default set entirely.
 
 The server binds loopback-only by default and rejects any request whose
 Host header isn't 127.0.0.1/localhost/::1 — DNS rebinding defense, not just
-a bind-address restriction. Live reload (SSE), mermaid, and pan/zoom SVG are
-staged as follow-on PRs (#93 PR2/PR3); this is render + index only.`,
+a bind-address restriction. Binding --addr to a non-loopback address adds that
+address to the allowlist and REQUIRES a bearer token, generating one if you did
+not pass --token: exposing the reader to the network and authenticating it are
+one decision, never two.`,
 	}
 	cmd.AddCommand(
 		newDocsServeCmd(deps),
+		newDocsOpenCmd(deps),
 		newDocsListCmd(deps),
 	)
 	return cmd

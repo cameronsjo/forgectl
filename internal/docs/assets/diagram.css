@@ -1,0 +1,64 @@
+/* Diagram viewport chrome for `forgectl docs serve`.
+   Everything here is layout and affordance only — every COLOR comes from the
+   Artificer tokens, so this file never has a palette to drift from. */
+
+.dia-viewport {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 6px);
+  background: var(--bg-raised);
+  margin: var(--s-md, 1rem) 0;
+  /* Tall enough that a zoomed diagram has somewhere to go, short enough that it
+     does not push the surrounding prose off the screen. */
+  min-height: 12rem;
+  max-height: 80vh;
+  cursor: grab;
+  touch-action: none; /* pointer events drive panning; let them through */
+}
+
+.dia-viewport:focus-visible {
+  outline: 2px solid var(--accent, var(--fg));
+  outline-offset: 2px;
+}
+
+.dia-viewport.is-panning {
+  cursor: grabbing;
+}
+
+.dia-stage {
+  transform-origin: 0 0;
+  /* No transition: a transition on transform makes wheel-zoom feel like it is
+     lagging behind the cursor, because each tick animates from the previous
+     value instead of tracking. */
+  will-change: transform;
+}
+
+.dia-stage > svg {
+  display: block;
+  max-width: none; /* the viewport clips; the SVG must not pre-shrink itself */
+}
+
+/* Diagram source before mermaid replaces it, and the fallback if the bundle
+   never loads. Reads as a code block rather than as broken output. */
+pre.mermaid {
+  font-family: var(--font-mono);
+  font-size: var(--t-body-sm-size, 0.875rem);
+  color: var(--fg-secondary);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 6px);
+  padding: var(--s-md, 1rem);
+  overflow-x: auto;
+}
+
+/* Once mermaid has rendered, the <pre> is a diagram host, not a code block. */
+pre.mermaid[data-processed] {
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dia-stage { will-change: auto; }
+}

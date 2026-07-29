@@ -11,10 +11,22 @@ package docs
 //   [x] Unhappy (security): a disallowed extension under a known root 404s
 //   [x] Happy: the sidenav lists the indexed doc with a matching href
 //   [x] Happy: every response carries X-Content-Type-Options: nosniff
+//
+// handleLocate (Classification: security-sensitive — membership disclosure)
+//   [x] Unhappy: a missing "path" query param 400s
+//   [x] Unhappy: a path that cannot be resolved (does not exist on disk) 404s
+//   [x] Unhappy: a real, resolvable path that was never indexed 404s
+//   [x] Happy: an indexed doc's absolute path 200s with {root, rel, title}
+//   [x] Unhappy (security): a file under an excluded directory (.trash/) 404s
+//              EVEN THOUGH it exists on disk — membership disclosure must
+//              follow the same exclusion the walk applies, not raw
+//              filesystem existence
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -163,6 +175,109 @@ func TestServer_Sidenav_ListsIndexedDoc(t *testing.T) {
 	wantHref := `href="/doc/` + label + `/welcome.md"`
 	if !strings.Contains(rec.Body.String(), wantHref) {
 		t.Errorf("sidenav missing %q in body: %s", wantHref, rec.Body.String())
+	}
+}
+
+func TestServer_Locate_MissingPath_400s(t *testing.T) {
+	idx, _ := testIndex(t)
+	h := testHandler(idx)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/locate", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestServer_Locate_UnresolvablePath_404s(t *testing.T) {
+	idx, _ := testIndex(t)
+	h := testHandler(idx)
+
+	q := url.Values{"path": []string{filepath.Join(t.TempDir(), "never-created.md")}}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/locate?"+q.Encode(), nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestServer_Locate_PathNotInIndex_404s(t *testing.T) {
+	idx, _ := testIndex(t)
+	h := testHandler(idx)
+
+	// A real file that exists on disk but was never indexed (a different,
+	// unconfigured directory) must still 404 — handleLocate answers
+	// membership in THIS index, not "does this path exist on disk".
+	dir := t.TempDir()
+	outside := filepath.Join(dir, "outside.md")
+	writeFile(t, outside, "# Outside")
+	resolved, err := filepath.EvalSymlinks(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	q := url.Values{"path": []string{resolved}}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/locate?"+q.Encode(), nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestServer_Locate_IndexedDoc_200sWithRootRelTitle(t *testing.T) {
+	idx, label := testIndex(t)
+	h := testHandler(idx)
+
+	doc, ok := idx.Find(label, "welcome.md")
+	if !ok {
+		t.Fatal("fixture doc \"welcome.md\" not found in the index")
+	}
+
+	q := url.Values{"path": []string{doc.AbsPath}}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/locate?"+q.Encode(), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var got locateResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.Root != label || got.Rel != "welcome.md" || got.Title != "Welcome" {
+		t.Errorf("locate response = %+v, want {Root:%q Rel:welcome.md Title:Welcome}", got, label)
+	}
+}
+
+// TestServer_Locate_ExcludedDir_404sEvenThoughFileExistsOnDisk is the
+// handleLocate sibling of TestIndex_Resolve_ExcludedDir_NotServableByDirectURL:
+// a file that genuinely exists under a directory walkRoot deliberately skips
+// (.trash) must not be locatable, even by a caller who already knows its
+// exact absolute path. Confirming membership for such a file would leak that
+// something is hidden there — a stranger who already possesses the path
+// learns whether the reader is quietly aware of it.
+func TestServer_Locate_ExcludedDir_404sEvenThoughFileExistsOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "kept.md"), "# Kept")
+	trashFile := filepath.Join(dir, ".trash", "deleted-secret.md")
+	writeFile(t, trashFile, "# Should never be located")
+
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	h := testHandler(idx)
+
+	resolved, err := filepath.EvalSymlinks(trashFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	q := url.Values{"path": []string{resolved}}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/locate?"+q.Encode(), nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d for a file under an excluded directory — handleLocate must not disclose membership for files walkRoot deliberately skipped, even though the file genuinely exists on disk", rec.Code, http.StatusNotFound)
 	}
 }
 

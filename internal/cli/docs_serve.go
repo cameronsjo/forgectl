@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	docspkg "github.com/cameronsjo/forgectl/internal/docs"
 	"github.com/cameronsjo/forgectl/internal/httpsrv"
 	"github.com/cameronsjo/forgectl/internal/module"
@@ -24,6 +28,7 @@ const shutdownGrace = 5 * time.Second
 func newDocsServeCmd(deps module.Deps) *cobra.Command {
 	var addr string
 	var openFlag bool
+	var token string
 
 	cmd := &cobra.Command{
 		Use:   "serve [dir|file ...]",
@@ -38,19 +43,45 @@ func newDocsServeCmd(deps module.Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runDocsServe(cmd, deps, idx, addr, openFlag)
+			return runDocsServe(cmd, deps, idx, addr, openFlag, token)
 		},
 	}
 	cmd.Flags().StringVar(&addr, "addr", "", "bind address (default: [docs].addr, else 127.0.0.1 with a random port)")
 	cmd.Flags().BoolVar(&openFlag, "open", false, "open the system browser once the server is listening")
+	cmd.Flags().StringVar(&token, "token", "", "require this bearer token on every request (generated automatically when --addr is not loopback)")
 	return cmd
+}
+
+// allowedHosts returns the Host-header allowlist for a bind address: the
+// loopback defaults, plus the bound host itself when it is not loopback.
+//
+// Without the addition, binding to a LAN or Tailscale address would serve a 403
+// to every request — the request's Host header would carry that address, which
+// DefaultAllowedHosts does not list. The allowlist's job is blocking
+// DNS-rebinding (a hostile page resolving its own domain to 127.0.0.1 to reach
+// this server through the victim's browser), and adding the address the operator
+// explicitly chose to bind does not weaken that: an attacker's page still cannot
+// present a Host header outside this list.
+func allowedHosts(bindAddr string) []string {
+	allowed := append([]string(nil), httpsrv.DefaultAllowedHosts...)
+	if httpsrv.IsLoopbackAddr(bindAddr) {
+		return allowed
+	}
+	host, _, err := net.SplitHostPort(bindAddr)
+	if err != nil {
+		host = bindAddr
+	}
+	if host = strings.Trim(host, "[]"); host != "" {
+		allowed = append(allowed, host)
+	}
+	return allowed
 }
 
 // runDocsServe binds the listener, wires the Host-allowlist middleware
 // (forgectl#93 security-chain item 1) around the docs handler, and serves
 // until the command's context is canceled (Ctrl-C/SIGTERM) or the server
 // itself fails to start.
-func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addrFlag string, openFlag bool) error {
+func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addrFlag string, openFlag bool, tokenFlag string) error {
 	bindAddr := addrFlag
 	if bindAddr == "" {
 		bindAddr = deps.Cfg.Docs.Addr
@@ -68,7 +99,31 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 	store := docspkg.NewStore(idx)
 	events := docspkg.NewBroker()
 
-	handler := httpsrv.Chain(docspkg.NewHandler(store, events), httpsrv.HostAllowlist(httpsrv.DefaultAllowedHosts))
+	// Token policy lives HERE, not in internal/httpsrv, which deliberately
+	// leaves it to the caller. The rule: loopback needs no token; anything else
+	// requires one, and if the operator did not supply one we generate it rather
+	// than starting unauthenticated. This is the case the reader's own
+	// acceptance bar creates — reaching the reader from a phone over Tailscale
+	// means binding off 127.0.0.1, which turns a loopback exposure into a
+	// network one. Making that flip silently drop authentication would be the
+	// worst possible default, so exposure and authentication are decided
+	// together, in one place.
+	token := tokenFlag
+	if token == "" && !httpsrv.IsLoopbackAddr(bindAddr) {
+		generated, err := httpsrv.GenerateToken()
+		if err != nil {
+			return err
+		}
+		token = generated
+	}
+
+	middleware := []func(http.Handler) http.Handler{
+		httpsrv.HostAllowlist(allowedHosts(bindAddr)),
+	}
+	if token != "" {
+		middleware = append(middleware, httpsrv.BearerToken(token))
+	}
+	handler := httpsrv.Chain(docspkg.NewHandler(store, events), middleware...)
 	srv := &http.Server{
 		Handler: handler,
 
@@ -100,7 +155,29 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "forgectl docs: serving %d doc(s) across %d root(s)\n", len(idx.List()), len(idx.Roots()))
 	fmt.Fprintf(out, "  %s\n", url)
+	if token != "" {
+		fmt.Fprintf(out, "  auth: bearer token required (%s)\n", token)
+	}
 	fmt.Fprintln(out, "  Ctrl-C to stop")
+
+	// Publish the resolved address so `docs open` can steer this server. Written
+	// only now, because the default bind uses port 0 and the port is not knowable
+	// before the listener resolves it. A failure here costs discovery, not
+	// serving, so it warns rather than aborting.
+	if infoPath, err := config.DocsServerPath(); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: cannot locate the docs-server discovery file: %v\n", err)
+	} else {
+		info := docspkg.ServerInfo{Addr: ln.Addr().String(), Token: token, PID: os.Getpid()}
+		if err := docspkg.WriteServerInfo(infoPath, info); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: `forgectl docs open` will not find this server: %v\n", err)
+		} else {
+			defer func() {
+				if err := docspkg.RemoveServerInfo(infoPath); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not remove %s: %v\n", infoPath, err)
+				}
+			}()
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

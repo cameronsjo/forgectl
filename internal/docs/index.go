@@ -383,6 +383,23 @@ func (idx *Index) Find(rootLabel, relPath string) (Doc, bool) {
 	return Doc{}, false
 }
 
+// FindByAbsPath returns the indexed Doc whose canonical absolute path is
+// absPath. It is how `docs open` turns a path the operator typed into the
+// (root, relPath) pair a URL needs, WITHOUT reimplementing root matching or the
+// exclusion rules on the client side — the index that decided what is servable
+// is the thing being asked.
+//
+// absPath must already be canonical (symlink-resolved); callers get that from
+// CanonicalizeRoot or filepath.EvalSymlinks.
+func (idx *Index) FindByAbsPath(absPath string) (Doc, bool) {
+	for _, d := range idx.docs {
+		if d.AbsPath == absPath {
+			return d, true
+		}
+	}
+	return Doc{}, false
+}
+
 // ErrRootNotFound indicates a request named a root label the index doesn't
 // have.
 var ErrRootNotFound = errors.New("no such docs root")
