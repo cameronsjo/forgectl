@@ -180,7 +180,7 @@ func TestEvents_ClientDisconnect_UnregistersSubscriber(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	resp, err := srv.Client().Do(req)
+	resp, err := srv.Client().Do(req) //nolint:bodyclose // closed explicitly below, mid-test, to trigger the disconnect
 	if err != nil {
 		t.Fatalf("GET %s: %v", eventsPath, err)
 	}

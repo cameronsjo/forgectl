@@ -129,6 +129,18 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 
 	store := docspkg.NewStore(idx)
 	events := docspkg.NewBroker()
+	// Backstop for every exit path that is NOT the signal path below —
+	// principally srv.Serve returning an unexpected error, which would otherwise
+	// leave SSE handlers parked on their subscriber channels until process
+	// teardown.
+	//
+	// This does NOT replace the explicit events.Close() before srv.Shutdown, and
+	// must not be "simplified" into it. A deferred call runs after the return
+	// expression is evaluated, so on the shutdown path the defer alone would fire
+	// only once Shutdown had already returned — reinstating the full-grace hang
+	// it exists to prevent. Both are correct together because Close is
+	// idempotent: whichever runs first does the work.
+	defer events.Close()
 
 	token, err := resolveToken(tokenFlag, bindAddr)
 	if err != nil {
