@@ -77,6 +77,37 @@ func allowedHosts(bindAddr string) []string {
 	return allowed
 }
 
+// resolveToken decides the bearer token a docs server should require, given the
+// operator's --token flag and the address being bound.
+//
+// The rule: loopback needs no token; anything else requires one, and if the
+// operator did not supply one it is GENERATED rather than starting
+// unauthenticated. This is the case the reader's own acceptance bar creates —
+// reaching the reader from a phone over Tailscale means binding off 127.0.0.1,
+// which turns a loopback exposure into a network one. Letting that flip silently
+// drop authentication would be the worst available default, so exposure and
+// authentication are one decision made in one place.
+//
+// The policy lives in the CLI rather than internal/httpsrv, which deliberately
+// leaves "under what condition is auth required?" to its caller.
+//
+// It is a named function rather than an inline conditional in runDocsServe
+// specifically so a test can exercise THIS code. The off-loopback path cannot be
+// tested end-to-end without binding a real network interface during the test
+// run, and a test that re-implemented the conditional to avoid that would pass
+// whether or not the server actually followed it — the failure mode where a
+// green test proves nothing about production. Extracting it means the test and
+// the server read the same rule.
+func resolveToken(tokenFlag, bindAddr string) (string, error) {
+	if tokenFlag != "" {
+		return tokenFlag, nil // an operator-supplied token is never replaced
+	}
+	if httpsrv.IsLoopbackAddr(bindAddr) {
+		return "", nil
+	}
+	return httpsrv.GenerateToken()
+}
+
 // runDocsServe binds the listener, wires the Host-allowlist middleware
 // (forgectl#93 security-chain item 1) around the docs handler, and serves
 // until the command's context is canceled (Ctrl-C/SIGTERM) or the server
@@ -99,22 +130,9 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 	store := docspkg.NewStore(idx)
 	events := docspkg.NewBroker()
 
-	// Token policy lives HERE, not in internal/httpsrv, which deliberately
-	// leaves it to the caller. The rule: loopback needs no token; anything else
-	// requires one, and if the operator did not supply one we generate it rather
-	// than starting unauthenticated. This is the case the reader's own
-	// acceptance bar creates — reaching the reader from a phone over Tailscale
-	// means binding off 127.0.0.1, which turns a loopback exposure into a
-	// network one. Making that flip silently drop authentication would be the
-	// worst possible default, so exposure and authentication are decided
-	// together, in one place.
-	token := tokenFlag
-	if token == "" && !httpsrv.IsLoopbackAddr(bindAddr) {
-		generated, err := httpsrv.GenerateToken()
-		if err != nil {
-			return err
-		}
-		token = generated
+	token, err := resolveToken(tokenFlag, bindAddr)
+	if err != nil {
+		return err
 	}
 
 	middleware := []func(http.Handler) http.Handler{

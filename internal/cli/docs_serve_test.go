@@ -21,9 +21,11 @@ package cli
 //   [x] Happy: a non-loopback bind with no --token requires a generated token
 //   [x] Happy: a loopback bind needs no generated token
 //   [x] Happy: an explicit --token is never silently replaced, even off loopback
-//   The exposed half of this policy is pinned via tokenRequiredByPolicy, a
-//   direct mirror of runDocsServe's own conditional — see that helper's
-//   comment for why an end-to-end exposed bind is deliberately not exercised.
+//   [x] Happy: two generated tokens differ
+//   These call resolveToken — the same function runDocsServe calls — so they
+//   fail if the server's rule regresses. An end-to-end EXPOSED bind is
+//   deliberately not exercised: it would open a real network port during the
+//   test run. The loopback half is covered end-to-end as well, above.
 
 import (
 	"bytes"
@@ -224,46 +226,71 @@ func TestAllowedHosts_Loopback_NoAddition(t *testing.T) {
 	}
 }
 
-// tokenRequiredByPolicy mirrors the token-generation conditional inside
-// runDocsServe (docs_serve.go: "token == "" && !httpsrv.IsLoopbackAddr(bindAddr)").
+// The token-policy tests below call resolveToken — the SAME function
+// runDocsServe calls — rather than re-implementing its conditional here.
 //
-// It is a deliberate duplication, not a call into runDocsServe, because the
-// real conditional lives inline in a function whose exposed-address path
-// can't be driven end-to-end without binding a real, network-reachable
-// listener off loopback — something a test suite must not do. The loopback
-// half of the SAME decision IS exercised end-to-end, through a real running
-// server, by TestRunDocsServe_Loopback_NoBearerTokenRequired above. This
-// helper covers the exposed half that a real bind can't safely reach, and
-// pins the formula so a future edit to it is a visible, deliberate choice
-// rather than a silent drift between this test and the source.
-func tokenRequiredByPolicy(tokenFlag, bindAddr string) bool {
-	return tokenFlag == "" && !httpsrv.IsLoopbackAddr(bindAddr)
-}
+// That distinction is the point. The off-loopback path cannot be driven
+// end-to-end without binding a real network-reachable listener during the test
+// run, which a suite must not do; and a test that copied the conditional to work
+// around that would stay green after the server's own rule changed, which is
+// worse than no test because it reads as coverage. Extracting the policy into
+// resolveToken means these tests fail when the server's behavior regresses. The
+// loopback half is ALSO covered end-to-end through a real running server by
+// TestRunDocsServe_Loopback_NoBearerTokenRequired above.
 
-func TestTokenPolicy_NonLoopbackWithoutFlag_RequiresGeneration(t *testing.T) {
-	cases := []string{"0.0.0.0:3590", "192.168.1.10:3590", "100.64.1.2:3590"}
-	for _, addr := range cases {
+func TestResolveToken_NonLoopbackWithoutFlag_GeneratesAToken(t *testing.T) {
+	for _, addr := range []string{"0.0.0.0:3590", "192.168.1.10:3590", "100.64.1.2:3590", ":3590"} {
 		t.Run(addr, func(t *testing.T) {
-			if !tokenRequiredByPolicy("", addr) {
-				t.Errorf("tokenRequiredByPolicy(\"\", %q) = false, want true — binding off loopback without an explicit --token must generate one rather than start unauthenticated", addr)
+			got, err := resolveToken("", addr)
+			if err != nil {
+				t.Fatalf("resolveToken(\"\", %q): %v", addr, err)
+			}
+			if got == "" {
+				t.Errorf("resolveToken(\"\", %q) = \"\", want a generated token — binding off loopback must never start unauthenticated", addr)
 			}
 		})
 	}
 }
 
-func TestTokenPolicy_Loopback_NoGenerationNeeded(t *testing.T) {
-	cases := []string{"127.0.0.1:3590", "localhost:3590"}
-	for _, addr := range cases {
+func TestResolveToken_Loopback_ReturnsNoToken(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:3590", "127.0.0.1:0", "localhost:3590", "[::1]:3590"} {
 		t.Run(addr, func(t *testing.T) {
-			if tokenRequiredByPolicy("", addr) {
-				t.Errorf("tokenRequiredByPolicy(\"\", %q) = true, want false — a loopback bind needs no auth by default", addr)
+			got, err := resolveToken("", addr)
+			if err != nil {
+				t.Fatalf("resolveToken(\"\", %q): %v", addr, err)
+			}
+			if got != "" {
+				t.Errorf("resolveToken(\"\", %q) = %q, want \"\" — a loopback bind needs no auth by default", addr, got)
 			}
 		})
 	}
 }
 
-func TestTokenPolicy_ExplicitTokenFlag_NeverRegeneratesEvenOffLoopback(t *testing.T) {
-	if tokenRequiredByPolicy("operator-supplied", "192.168.1.10:3590") {
-		t.Error("tokenRequiredByPolicy with an explicit --token = true, want false — an operator-supplied token must not be silently replaced by a generated one")
+func TestResolveToken_ExplicitFlag_IsNeverReplaced(t *testing.T) {
+	const supplied = "operator-supplied-token"
+	for _, addr := range []string{"192.168.1.10:3590", "127.0.0.1:3590"} {
+		t.Run(addr, func(t *testing.T) {
+			got, err := resolveToken(supplied, addr)
+			if err != nil {
+				t.Fatalf("resolveToken(%q, %q): %v", supplied, addr, err)
+			}
+			if got != supplied {
+				t.Errorf("resolveToken(%q, %q) = %q, want the supplied token unchanged — an operator's token must not be silently replaced", supplied, addr, got)
+			}
+		})
+	}
+}
+
+func TestResolveToken_GeneratedTokensDiffer(t *testing.T) {
+	first, err := resolveToken("", "192.168.1.10:3590")
+	if err != nil {
+		t.Fatalf("resolveToken: %v", err)
+	}
+	second, err := resolveToken("", "192.168.1.10:3590")
+	if err != nil {
+		t.Fatalf("resolveToken: %v", err)
+	}
+	if first == second {
+		t.Errorf("two generated tokens are identical (%q) — a predictable token is not a token", first)
 	}
 }
