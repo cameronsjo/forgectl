@@ -4,8 +4,9 @@
 // loopback HTTP. It knows nothing of Cobra — that decoupling is the house
 // pattern (see internal/tmux, internal/net).
 //
-// PR1 scope only: render + index, no live reload, no mermaid/pan-zoom SVG
-// (forgectl#93 stages those as PR2/PR3).
+// Current scope: render, index, and live reload (a filesystem Watcher rebuilds
+// the Index and notifies browsers over SSE). Mermaid and pan/zoom SVG are still
+// outstanding — forgectl#93 stages those separately.
 package docs
 
 import (
