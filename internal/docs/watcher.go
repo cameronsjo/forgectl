@@ -79,7 +79,7 @@ func (w *Watcher) register(idx *Index) {
 	for _, root := range idx.Roots() {
 		err := filepath.WalkDir(root.Path, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
-				return nil // unreadable subtree: skip it, keep the rest of the walk
+				return nil //nolint:nilerr // unreadable subtree: skip it, keep the rest of the walk
 			}
 			if !d.IsDir() {
 				return nil

@@ -72,6 +72,15 @@ func handleEvents(events *Broker) http.HandlerFunc {
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(http.StatusOK)
 
+		// Subscribe BEFORE writing the initial frame, not after. A Publish that
+		// landed between the flush and the subscription would be delivered to
+		// nobody for this client — the channel would not exist yet — so the
+		// browser would sit on an open stream having silently missed the reload
+		// that prompted it. Subscribing first cannot fail and costs nothing, and
+		// it makes the window zero rather than small.
+		sub, cancel := events.Subscribe()
+		defer cancel()
+
 		rc := http.NewResponseController(w)
 		// A comment frame proves the stream is live before any file changes, so
 		// EventSource fires onopen and the client stops waiting.
@@ -82,9 +91,6 @@ func handleEvents(events *Broker) http.HandlerFunc {
 			slog.Debug("docs: SSE stream could not be flushed; live reload unavailable for this client.", "error", err)
 			return
 		}
-
-		sub, cancel := events.Subscribe()
-		defer cancel()
 
 		for {
 			select {
