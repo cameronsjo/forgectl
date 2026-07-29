@@ -1,15 +1,38 @@
 ---
 name: launch-auto-exit
 date: 2026-07-28
-status: awaiting-ruling
+status: probe-authorized
+ruled: 2026-07-29
 issue: cameronsjo/forgectl#153
 ---
 
-# `forgectl launch --auto-exit` — design space and recommendation (#153)
+# `forgectl launch --auto-exit` — probe first, build gated on the result (#153)
 
-**Status: awaiting ruling. No implementation is authorized by this document.** It verifies
-what forgectl does today, lays out three concrete designs, and names the decisions Cameron
-must make before a build is dispatched.
+**Status: probe-authorized. No supervision or shim code is authorized by this document.** The
+only currently-authorized step is the probe below. Everything past it is gated on the probe's
+result, not a live design decision to pick from today.
+
+## Architectural position (shared with #167 / #168)
+
+forgectl remains an exec-and-replace tool. `forgectl launch` execs into claude and does not
+return, and this plan does not change that. Neither this feature nor its companion changes it
+either — no persistent foreground supervisor, no shell-integration shim, in
+`plan/26-y-shell-history` (PR cameronsjo/forgectl#167) or `plan/153-launch-auto-exit` (PR
+cameronsjo/forgectl#168). Any future change to that posture is a separate, deliberate decision,
+made only after a probe demonstrates today's architecture cannot serve the need. This document
+*is* that probe for the launch half.
+
+## Unresolved scoping question (blocking, stated up front)
+
+**No in-repo caller launches unattended today.** The workflow step-plane registers a `launch`
+verb but it is a stub returning `step.ErrNotYetWired` (`internal/launch/steps.go:15-32`). The
+one place forgectl spawns claude non-interactively is `pr.launchInline`
+(`internal/pr/launch.go:88-127`), which deliberately avoids `launch.Exec` and instead opens a
+`tmux new-window` running `claude -p <prompt>` — the `-p` fallback #153 wants to escape. So
+**who this feature is for is not decided**: an external orchestrator, the future workflow
+step-plane, or `pr`'s review sessions replacing `claude -p`. This is not a detail to fill in
+during implementation — it changes whether any supervision code belongs in forgectl at all, and
+it is unresolved independent of the probe below.
 
 ## The ask (issue #153, verbatim intent)
 
@@ -21,7 +44,7 @@ SIGTERM the session when it appears, and let "the existing timeout" reap a sessi
 never touches the marker. The issue flags its own confidence as *likely approach*, and asks
 for a per-session (tmpdir-keyed) marker path so concurrent launches never collide.
 
-## Verified current state
+## Verified current state (corrected premises)
 
 Read against `origin/main` at `bb2e681` in a clean worktree.
 
@@ -33,20 +56,21 @@ through untouched. This is the one documented exception to routing process execu
 internal/exec.Runner — Runner spawns a child, whereas the launcher must *become* claude."
 The README repeats the guarantee (`README.md:255`).
 
-**Consequence: there is no forgectl process left alive to poll a marker or send a signal.**
-The issue's "poll + SIGTERM" step has no host. Any design that keeps a poller must either
-abandon `syscall.Exec` for the auto-exit path or move the poller somewhere outside forgectl.
-This is the single largest thing the issue does not account for.
+**Consequence: no forgectl process survives to poll a marker or send a signal.** `syscall.Exec`
+replaces the forgectl process image with claude's — there is no host left for the issue's
+proposed "poll + SIGTERM" step. That mechanism cannot be bolted onto the current `launch` path;
+it would require abandoning `syscall.Exec` for the auto-exit path, which is exactly the change
+the architectural position above declines pending the probe.
 
-**There is no "existing timeout" on the launch path.** A repo-wide grep for `Timeout` outside
-tests returns only `internal/bench/probe.go` (a 2s HTTP reachability probe),
-`internal/net/net.go` (dial timeout), `internal/config/config.go` (the net section's
-`timeout_ms`), `internal/cli/docs_serve.go` (HTTP shutdown grace), and
-`internal/sessions/concordance.go` (a 5s connect timeout). None of them is on
-`forgectl launch`. The nearest reaper is `pr.Client.Cleanup(ctx, date)`
-(`internal/pr/teardown.go:105`) — a **manual, date-keyed** sweep of review breadcrumbs, not a
-timer, and it belongs to the `pr` module, not `launch`. **The issue's backstop premise is
-false as written**: the reap timeout does not exist and would have to be built.
+**There is no "existing timeout" on the launch path — the issue's backstop premise is false as
+written.** A repo-wide grep for `Timeout` outside tests returns only `internal/bench/probe.go`
+(a 2s HTTP reachability probe), `internal/net/net.go` (dial timeout), `internal/config/config.go`
+(the net section's `timeout_ms`), `internal/cli/docs_serve.go` (HTTP shutdown grace), and
+`internal/sessions/concordance.go` (a 5s connect timeout). None of them is on `forgectl launch`.
+The nearest reaper is `pr.Client.Cleanup(ctx, date)` (`internal/pr/teardown.go:105`) — a
+**manual, date-keyed** sweep of review breadcrumbs, not a timer, and it belongs to the `pr`
+module, not `launch`. If a build is ever authorized, the reap timeout has to be built from
+scratch; nothing today backstops it.
 
 **No marker, system-prompt, or signal machinery exists in launch.** Greps for `marker`,
 `append-system-prompt` / `AppendSystemPrompt`, and `SIGTERM` / `syscall.Kill` find nothing in
@@ -54,204 +78,136 @@ false as written**: the reap timeout does not exist and would have to be built.
 `SessionArgs`, `BuilderArgs`, `AgentsArgs` (`internal/launch/launch.go:28-71`) — and there is
 today no seam for injecting a flag pair into `SessionArgs`.
 
-**No in-repo caller launches unattended today.** The workflow step-plane registers a `launch`
-verb but it is a stub returning `step.ErrNotYetWired` (`internal/launch/steps.go:15-32`). The
-one place forgectl spawns claude non-interactively is `pr.launchInline`
-(`internal/pr/launch.go:88-127`), which deliberately avoids `launch.Exec` ("which would
-replace this process") and instead opens a `tmux new-window` running `claude -p <prompt>` —
-i.e. the `-p` fallback #153 wants to escape. **So the feature has no consumer inside forgectl
-yet.** Who it is for is a ruling, not a detail (see below).
+**Session state on disk has a precedent to copy, if a build is ever authorized.** `pr` writes
+JSON breadcrumbs to a `sessionsDir` with `0o700` (`internal/pr/breadcrumb.go:39-47`) and
+validates on load that the path resolves *inside* that dir before trusting it (`loadBreadcrumb`,
+`breadcrumb.go:69-79`). Any marker/state directory this feature might introduce should reuse
+that containment discipline rather than invent a second one.
 
-**Session state on disk has a precedent to copy.** `pr` writes JSON breadcrumbs to a
-`sessionsDir` with `0o700` (`internal/pr/breadcrumb.go:39-47`) and validates on load that the
-path resolves *inside* that dir before trusting it (`loadBreadcrumb`, `breadcrumb.go:69-79`).
-Any marker/state directory this feature introduces should reuse that containment discipline
-rather than invent a second one.
+**Config seam, if a build is ever authorized.** `[launch.defaults]` is `config.LaunchDefaults`
+and `[[launch.project]]` is `config.LaunchProject` (`internal/config/config.go:88-113`), reduced
+to a `launch.Profile` (`internal/launch/profile.go:14-21`). A per-project auto-exit default has
+an obvious home here; a CLI flag does not, because bare/builder launches are intercepted
+**pre-Cobra** (`launchIntercept`, `internal/cli/execute.go:64`, `219-229`) and passed to claude
+verbatim — `--auto-exit` would be handed to claude as an unknown flag unless the intercept learns
+to strip it first.
 
-**Config seam.** `[launch.defaults]` is `config.LaunchDefaults` and `[[launch.project]]` is
-`config.LaunchProject` (`internal/config/config.go:88-113`), reduced to a `launch.Profile`
-(`internal/launch/profile.go:14-21`). A per-project auto-exit default has an obvious home
-here; a CLI flag does not, because bare/builder launches are intercepted **pre-Cobra**
-(`launchIntercept`, `internal/cli/execute.go:64`, `219-229`) and passed to claude verbatim —
-`--auto-exit` would be handed to claude as an unknown flag unless the intercept learns to
-strip it first. That is a real, small piece of work the issue does not mention.
+**Session *identity* is already solvable natively — only completion detection is an open
+problem.** `claude agents --json` prints active sessions (interactive and background) with `pid`,
+`sessionId`, and `status`, probed live on this machine (claude 2.1.220): `--all` additionally
+includes completed background sessions. If forgectl mints the UUID and passes `--session-id`, a
+watcher can find the exact `pid` without any marker file. What `agents --json` cannot tell you is
+completion — `status: "idle"` is what every session sitting at its prompt reports, done or not.
 
-### Platform facts, probed on this machine (claude 2.1.220)
+## The probe (the only currently-authorized step)
 
-- `--append-system-prompt <prompt>` exists.
-- `--session-id <uuid>` exists ("Use a specific session ID for the conversation").
-- `--bg` / `--background` exists: "Start the session as a background agent and return
-  immediately (manage with `claude agents`)".
-- `claude agents --json` prints **active sessions (interactive and background)** as JSON and
-  "does not require a TTY". A live probe returned objects with `pid`, `cwd`, `kind`
-  (`"interactive"`), `startedAt`, `sessionId`, `name`, and `status` (observed: `"idle"`).
-  `--all` additionally includes completed background sessions.
-- `Stop`, `SessionEnd`, `SessionStart`, and `SubagentStop` are real hook events, and
-  `--settings <file-or-json>` can inject hook wiring per launch.
+**Question: does `claude --bg` already provide unattended launch while preserving subscription
+billing and interactive posture?**
 
-The `agents --json` finding matters: **session identity is already solvable natively.** If
-forgectl mints the UUID and passes `--session-id`, a supervisor can find the exact `pid` to
-signal without any marker file. What `agents --json` cannot tell you is *completion* —
-`status: "idle"` is what every session sitting at its prompt reports, done or not. Marker or
-no marker, the completion signal has to be a **deliberate act by the session**; the marker
-scheme's real job is that, not identity.
+`--bg` / `--background` exists on this machine's claude (2.1.220): "Start the session as a
+background agent and return immediately (manage with `claude agents`)." `claude agents --json
+--all` reports completion for background sessions. If `--bg` preserves subscription billing and
+the interactive posture (`--ide`, plan mode, the TUI) that #153 is trying to keep, most of this
+feature collapses: forgectl injects `--bg --session-id <uuid>`, prints the id, and exits, and
+`claude agents` owns reaping. No supervisor, no marker, no shim.
 
-## Design space
+This probe gates everything below. Run it before any code is written. If `--bg` clears the bar,
+the sections below are moot and #153 closes as "solved upstream, thin passthrough only." If it
+does not — because billing degrades, or interactive posture is unavailable in `--bg` mode, or
+both — the questions below become live, in the priority order given.
+
+## Design space (reference only — none of this is authorized until the probe returns)
+
+The three designs below were sketched before the probe was identified as the correct first step.
+They remain useful as a map of what "if the probe fails" looks like, but none is a live choice
+today.
 
 ### Option A — supervisor fork (loom's shape, adapted to forgectl)
 
 `--auto-exit` switches the launch path off `syscall.Exec`: forgectl mints a UUID, injects
 `--session-id <uuid> --append-system-prompt "<touch instruction>"`, spawns claude as a child
 with the TTY inherited, then polls the per-session marker path and SIGTERMs the child when it
-appears (or when the deadline passes).
+appears (or when the deadline passes). This is the option the architectural position forecloses
+by default — it introduces the repo's first long-lived foreground supervisor and gives up the
+`syscall.Exec` guarantee (Ctrl-C, TTY ownership, SIGWINCH, SIGTSTP, exit-code propagation all
+become forgectl's problem). It would only be reconsidered if the probe fails *and* Option B is
+also ruled out.
 
-- **Pro:** closest to the issue and to loom's proven behavior; one process tree; forgectl owns
-  the exit code and can report *why* it ended (marker vs deadline), which is the deterministic
-  completion signal callers actually want.
-- **Con:** it breaks the documented `syscall.Exec` guarantee for this path. Ctrl-C, TTY
-  ownership, terminal resize (SIGWINCH), suspend (SIGTSTP), and exit-code propagation all
-  become forgectl's problem, and getting an interactive TUI child right is materially harder
-  than the poll loop the issue describes. It also introduces the repo's first long-lived
-  foreground supervisor.
-- **Failure modes:** forgectl killed while claude runs → orphaned session, nothing ever reaps
-  it; claude crashes → poller must notice child exit and not hang to the deadline; marker
-  written but session busy in a tool call → SIGTERM lands mid-write.
+### Option B — hook-driven marker plus native identity
 
-### Option B — hook-driven marker plus native identity (recommended)
+Same injected instruction, but the marker is written by a **`Stop` hook** wired in via a
+generated `--settings` JSON, not by the model reaching for a Bash tool as its final act.
+Supervision stays decoupled: forgectl mints `--session-id`, so any watcher — a
+`forgectl launch wait` verb, or an external orchestrator — resolves the session's `pid` from
+`claude agents --json` and signals it. Bare `forgectl launch --auto-exit` keeps `syscall.Exec`
+when no watcher is requested. This does not introduce a foreground supervisor inside `launch`
+itself, so it is the design most compatible with the architectural position if the probe fails —
+but it is still gated behind the probe, since if `--bg` works, none of this is needed.
 
-Same injected instruction, but the marker is written by a **`Stop` hook** that forgectl wires
-in via a generated `--settings` JSON, not by the model reaching for a Bash tool. The
-supervision half is decoupled: forgectl still mints `--session-id`, so *any* watcher —
-forgectl's own optional `launch wait` verb, or an external orchestrator — can resolve the
-session's `pid` from `claude agents --json` and signal it. Bare `forgectl launch --auto-exit`
-keeps `syscall.Exec` when no watcher is requested; the marker simply becomes an artifact the
-caller can wait on.
+### Option C — the probe's own success path
 
-- **Pro:** the marker's *write* stops depending on model obedience — a hook fires
-  deterministically, so "no marker" now means "the session never stopped", not "the model
-  forgot". Identity comes from the platform instead of a filename convention. The
-  `syscall.Exec` guarantee survives for the common case. Splits cleanly into two shippable
-  PRs (emit the marker + session id; then the optional waiter).
-- **Con:** `Stop` fires at the end of **every** assistant turn, not once at task end — so the
-  hook alone signals *idle*, not *done*. Distinguishing them needs the injected instruction to
-  write a sentinel the hook keys off (model does the small deliberate act; hook does the
-  durable write), which is more moving parts than Option A. Also couples forgectl to Claude
-  Code's hook schema and to `--settings` merge semantics, both of which move under it.
-- **Failure modes:** a user's own settings already wire `Stop` → merge conflict or double-fire;
-  `agents --json` shape changes → identity lookup breaks silently; session ends without ever
-  going through `Stop` (hard kill) → no marker, deadline is the only backstop.
+Treat #153 as already solved upstream: `--auto-exit` becomes a thin posture that injects
+`--bg --session-id <uuid>`, prints the id, and exits. This is Option C from the prior draft,
+folded into "what the probe returning yes looks like" rather than a separate design to weigh
+against A and B.
 
-### Option C — don't build a supervisor; adopt `--bg` and `claude agents`
+## Gated questions (not live until the probe returns)
 
-Treat #153 as already solved upstream. `--bg` starts the session as a background agent and
-returns immediately; `claude agents --json --all` reports completion. `--auto-exit` becomes a
-thin posture: forgectl injects `--bg --session-id <uuid>`, prints the id, and exits. Reaping
-is `claude agents`' problem.
+These were previously presented as seven parallel open decisions. They are not independent —
+each is downstream of the probe and of the unresolved scoping question above — so they are
+listed here in gated order rather than as things to rule on today.
 
-- **Pro:** zero new supervision code, zero signal handling, no marker scheme at all, and it
-  rides a first-party mechanism that will keep improving. forgectl already has an `agents`
-  passthrough posture (`internal/launch/launch.go:64-83`) to build on.
-- **Con:** a background agent is **not** the interactive session the issue is trying to
-  preserve. Whether `--bg` retains subscription billing and the full interactive posture
-  (`--ide`, plan mode, the TUI) is *unverified* — and that premise is the entire point of
-  #153. It also gives up forgectl's own deterministic "marker present = finished" contract in
-  favor of whatever `agents --json` reports.
-- **Failure modes:** if `--bg` degrades billing or capability, the feature is a regression
-  disguised as a simplification; if it doesn't, most of #153 is dead weight.
+1. **Blocking, independent of the probe: who is this for?** See "Unresolved scoping question"
+   above. Answer before anything else, regardless of the probe's result.
+2. **The probe itself.** Run it. Its result determines whether anything below applies.
+3. **If the probe fails — may the auto-exit path abandon `syscall.Exec`?** This is the
+   architectural line the ruling holds by default. Option A requires yes; Option B does not.
+   Reopening it requires the probe to have failed *and* a case that Option B is insufficient.
+4. **If a build proceeds — marker scheme: model-writes or hook-writes?** Model-writes (the
+   issue's proposal) is simpler but depends on obedience. Hook-writes is deterministic but needs
+   a sentinel to distinguish turn-end from task-end (the `Stop` hook fires every turn, not once
+   at task end) and couples forgectl to `--settings` merge semantics.
+5. **If a build proceeds — reap timeout: default value and escalation.** No existing timeout
+   exists to lean on; one has to be built in the same PR or a marker-less session hangs
+   unbounded. Decide the default duration, whether it is configurable per `[[launch.project]]`,
+   and whether escalation is SIGTERM-only or SIGTERM-then-SIGKILL after a grace window.
+6. **If a build proceeds — what does the caller see?** Is "reaped by deadline" a nonzero exit
+   code, or the same exit as a clean finish with the distinction only in the marker's presence?
+7. **If a build proceeds — auto-exit vs Resume/Fork.** A caller-minted `--session-id` cannot
+   coexist with `--resume` (`SessionArgs`, `internal/launch/launch.go:34-39`). Force `New`
+   silently, or refuse the combination with an error?
 
-### Cross-cutting failure modes (any option)
+### Cross-cutting failure modes (apply to any option, if a build ever proceeds)
 
 - **A session that outlives its marker.** The marker says "I'm done"; the process may still be
-  finishing a tool call. Every design needs a grace window between marker-observed and
-  SIGKILL, and needs to decide whether a session that ignores SIGTERM is escalated or left.
+  finishing a tool call. Any design needs a grace window between marker-observed and SIGKILL.
 - **A session that never touches its marker.** With no launch timeout in the repo today, this
-  is an *unbounded* hang unless a deadline ships in the same PR. The deadline is not optional
-  polish — it is load-bearing, and it does not currently exist.
+  is an *unbounded* hang unless a deadline ships in the same PR.
 - **Crash before the marker.** Indistinguishable from "still working" to a pure marker poller.
-  Watching the pid (Option A: child exit; Option B/C: `agents --json` disappearance) is what
-  separates them; a marker-only design cannot.
+  Watching the pid (child exit, or `agents --json` disappearance) is what separates them.
 - **Stale markers.** A marker path reused across runs makes a *previous* run's success look
-  like this run's. The per-session UUID keying the issue asks for fixes this only if the
-  marker is created fresh and the directory is swept; `pr`'s date-keyed `Cleanup` is the
-  precedent for the sweep.
-- **Marker path as a trust boundary.** Whatever writes the marker is instructed by an injected
-  prompt or a hook. The path must be validated as *inside* forgectl's state dir before it is
-  acted on — reuse `sandbox.WithinWorkspace` the way `loadBreadcrumb` does
-  (`internal/pr/breadcrumb.go:78`), rather than trusting a path that came back from the
-  session.
-- **`--auto-exit` collides with Resume/Fork.** `SessionArgs` emits `--resume` /
-  `--resume --fork-session` (`internal/launch/launch.go:34-39`); a caller-minted
-  `--session-id` is incompatible with resuming an existing conversation. Auto-exit almost
-  certainly has to force `New`, or refuse.
+  like this run's. Per-session UUID keying plus a fresh-create-and-sweep pattern (`pr`'s
+  date-keyed `Cleanup` is the precedent) fixes this.
+- **Marker path as a trust boundary.** Whatever writes the marker must be validated as *inside*
+  forgectl's state dir before it is acted on — reuse `sandbox.WithinWorkspace` the way
+  `loadBreadcrumb` does (`internal/pr/breadcrumb.go:78`).
 - **The pre-Cobra intercept.** `--auto-exit` must be stripped in `launchIntercept` before argv
   reaches claude, and must not disturb the byte-clean `agents --json` passthrough
   (`IsAgentsPassthrough`, `internal/launch/launch.go:75-83`).
 
-## Recommendation
+## Ruling record
 
-**Option B, sequenced as two PRs, and only after the ruling on who this is for.**
-
-The reasoning is that #153 conflates two problems that have different best answers. *Identity
-and reaping* are already solved by the platform — `--session-id` plus `claude agents --json`
-gives an exact pid, no filename convention required — so forgectl should not build a bespoke
-scheme for that half. *Completion* genuinely needs a deliberate act by the session, and there
-the marker is the right primitive; making a `Stop` hook do the durable write (rather than
-trusting the model to remember a Bash call as its final act) converts the weakest link from
-model obedience into deterministic wiring.
-
-Option A is rejected as the first move because it trades forgectl's cleanest architectural
-guarantee — `launch` *becomes* claude, so the TTY story is free — for a supervision loop, and
-it does so before any in-repo caller needs it. Option C is not rejected, it is **unverified**:
-if `--bg` preserves subscription billing and the interactive posture, it is strictly better
-than both, and that probe is cheap. It should be run *before* any build is dispatched.
-
-Splitting the work keeps the risky half optional:
-
-- **PR 1 (low risk, `syscall.Exec` preserved).** `--auto-exit` injects `--session-id <uuid>`
-  and the `Stop`-hook `--settings` wiring, creates the per-session state dir, strips the flag
-  in `launchIntercept`, forces `New` mode, and prints the session id and marker path to
-  stderr. Exit behavior is unchanged; the launch simply becomes *observable*.
-- **PR 2 (the supervision half, only if PR 1's signal proves insufficient).** A separate
-  `forgectl launch wait --session <uuid> [--deadline <dur>]` that polls the marker and
-  `agents --json`, then SIGTERMs with a grace window. Keeping it a distinct verb means the
-  supervisor is a process the *caller* chose to run, and `forgectl launch` itself never stops
-  being an exec.
-
-## Awaiting ruling
-
-Cameron must decide these before a build is dispatched. Items 1-3 are blocking; 4-7 shape the
-build.
-
-1. **Who is this for?** No in-repo caller launches unattended today (the workflow `launch`
-   step is `ErrNotYetWired`). Is `--auto-exit` for (a) an external orchestrator, (b) the future
-   workflow step-plane, or (c) `pr`'s review sessions — replacing the `claude -p` in
-   `pr.launchInline`? The answer changes whether the supervisor belongs in forgectl at all.
-2. **Probe `--bg` first, or skip it?** Option C collapses most of this feature if `--bg`
-   preserves subscription billing and the interactive posture. That is a cheap, unverified
-   premise sitting under the whole issue. Ruling: run the probe before building, or rule it
-   out on other grounds.
-3. **May the auto-exit path abandon `syscall.Exec`?** This is the architectural line. Option A
-   requires yes; Option B's PR 1 requires no. Answering it decides whether forgectl grows its
-   first foreground supervisor.
-4. **Marker scheme: who writes it — model or hook?** Model-writes (issue's proposal) is simpler
-   and matches loom, but depends on obedience. Hook-writes is deterministic but needs a
-   sentinel to distinguish turn-end from task-end and couples forgectl to `--settings` merge
-   behavior. Related: does the marker live under forgectl's state dir (validated with
-   `sandbox.WithinWorkspace`, per `pr`'s breadcrumbs) or an OS tmpdir as #153 suggests?
-5. **Reap timeout: default value, and what happens when it fires.** There is no existing
-   timeout to lean on — one has to be built in the same PR or a marker-less session hangs
-   unbounded. Decide the default duration, whether it is configurable per `[[launch.project]]`,
-   and the escalation: SIGTERM only, or SIGTERM then SIGKILL after a grace window (and how
-   long).
-6. **What does the caller see?** Is "reaped by deadline" a nonzero exit code (deterministic
-   "suspect" signal, per the issue), or the same exit as a clean finish with the distinction
-   only in the marker's presence? This is the actual contract callers integrate against.
-7. **Auto-exit vs Resume/Fork.** A caller-minted `--session-id` cannot coexist with `--resume`.
-   Force `New` silently, or refuse the combination with an error?
+The owner ruled on the shared architectural fork between this plan and #26 on 2026-07-29:
+**forgectl stays exec-replace; it does not grow a foreground supervisor or a shell shim until a
+probe proves one necessary.** For this plan, that ruling both settles Decision 3 from the prior
+draft (no, `syscall.Exec` may not be abandoned by default) and identifies the probe above as the
+correct first move — it was already recommended in the prior draft, but this revision makes it
+the *only* authorized step rather than one of three co-equal open questions.
 
 ## Provenance
 
 Verified against `cameronsjo/forgectl@bb2e681` (`origin/main`) in worktree
 `plan/153-launch-auto-exit`. Platform flags and the `claude agents --json` shape were probed
 live against claude 2.1.220 on this machine on 2026-07-27; those are version-bounded
-observations, not contracts — re-probe before building on them.
+observations, not contracts — re-probe before building on them, and re-probe `--bg` specifically
+as part of the probe step above.
