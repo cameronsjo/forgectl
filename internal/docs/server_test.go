@@ -5,7 +5,7 @@ package docs
 // NewHandler (Classification: API handler)
 //   [x] Happy: "/" renders the shell with the empty-state
 //   [x] Happy: a valid /doc/{root}/{rest} renders the doc's content
-//   [x] Happy: static assets (artificer.css, artificer-theme.js, chroma.css) are served
+//   [x] Happy: static assets (artificer.css, artificer-theme.js, reload.js, chroma.css) are served
 //   [x] Unhappy (security): a traversal attempt through the HTTP route 404s
 //   [x] Unhappy (security): an unknown root label 404s
 //   [x] Unhappy (security): a disallowed extension under a known root 404s
@@ -32,9 +32,17 @@ func testIndex(t *testing.T) (*Index, string) {
 	return idx, idx.Roots()[0].Label
 }
 
+// testHandler wraps idx in the Store/Broker pair NewHandler now takes, for the
+// majority of tests that exercise a static index and never touch live reload.
+// Tests that DO care about swapping or streaming build their own Store/Broker
+// so they can reach them.
+func testHandler(idx *Index) http.Handler {
+	return NewHandler(NewStore(idx), NewBroker())
+}
+
 func TestServer_Root_RendersEmptyState(t *testing.T) {
 	idx, _ := testIndex(t)
-	h := NewHandler(idx)
+	h := testHandler(idx)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -49,7 +57,7 @@ func TestServer_Root_RendersEmptyState(t *testing.T) {
 
 func TestServer_ValidDoc_RendersContent(t *testing.T) {
 	idx, label := testIndex(t)
-	h := NewHandler(idx)
+	h := testHandler(idx)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/doc/"+label+"/welcome.md", nil))
@@ -68,9 +76,9 @@ func TestServer_ValidDoc_RendersContent(t *testing.T) {
 
 func TestServer_StaticAssets_Served(t *testing.T) {
 	idx, _ := testIndex(t)
-	h := NewHandler(idx)
+	h := testHandler(idx)
 
-	for _, path := range []string{"/assets/artificer.css", "/assets/artificer-theme.js", "/assets/chroma.css"} {
+	for _, path := range []string{"/assets/artificer.css", "/assets/artificer-theme.js", "/assets/reload.js", "/assets/chroma.css"} {
 		t.Run(path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
@@ -104,7 +112,7 @@ func doRequestFollowingOneRedirect(t *testing.T, h http.Handler, path string) *h
 
 func TestServer_TraversalAttempt_404s(t *testing.T) {
 	idx, label := testIndex(t)
-	h := NewHandler(idx)
+	h := testHandler(idx)
 
 	cases := []string{
 		"/doc/" + label + "/../../../../../../etc/passwd",
@@ -125,7 +133,7 @@ func TestServer_TraversalAttempt_404s(t *testing.T) {
 
 func TestServer_UnknownRoot_404s(t *testing.T) {
 	idx, _ := testIndex(t)
-	h := NewHandler(idx)
+	h := testHandler(idx)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/doc/no-such-root/welcome.md", nil))
@@ -136,7 +144,7 @@ func TestServer_UnknownRoot_404s(t *testing.T) {
 
 func TestServer_DisallowedExtension_404s(t *testing.T) {
 	idx, label := testIndex(t)
-	h := NewHandler(idx)
+	h := testHandler(idx)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/doc/"+label+"/secret.env", nil))
@@ -147,7 +155,7 @@ func TestServer_DisallowedExtension_404s(t *testing.T) {
 
 func TestServer_Sidenav_ListsIndexedDoc(t *testing.T) {
 	idx, label := testIndex(t)
-	h := NewHandler(idx)
+	h := testHandler(idx)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -160,7 +168,7 @@ func TestServer_Sidenav_ListsIndexedDoc(t *testing.T) {
 
 func TestServer_ResponsesCarryNoSniffHeader(t *testing.T) {
 	idx, label := testIndex(t)
-	h := NewHandler(idx)
+	h := testHandler(idx)
 
 	paths := []string{"/", "/doc/" + label + "/welcome.md", "/assets/artificer.css"}
 	for _, path := range paths {

@@ -4,8 +4,9 @@
 // loopback HTTP. It knows nothing of Cobra — that decoupling is the house
 // pattern (see internal/tmux, internal/net).
 //
-// PR1 scope only: render + index, no live reload, no mermaid/pan-zoom SVG
-// (forgectl#93 stages those as PR2/PR3).
+// Current scope: render, index, and live reload (a filesystem Watcher rebuilds
+// the Index and notifies browsers over SSE). Mermaid and pan/zoom SVG are still
+// outstanding — forgectl#93 stages those separately.
 package docs
 
 import (
@@ -65,9 +66,18 @@ type Doc struct {
 }
 
 // Index holds a closed set of Roots and the Docs discovered under them at
-// construction time. It does not watch the filesystem — a changed tree needs
-// a fresh NewIndex (live reload is forgectl#93 PR2).
+// construction time. An Index is never mutated in place: a changed tree
+// produces a whole new Index (Rebuild), which the live-reload Watcher installs
+// by pointer swap (Store). That immutability is what lets handlers read one
+// without synchronization.
 type Index struct {
+	// paths is the caller's original, pre-canonicalization argument list, kept
+	// so Rebuild can reproduce this index from the same request the caller
+	// actually made. Re-deriving it from roots would be subtly wrong: a Root's
+	// Path is canonical and, for a single-file root, is the file's PARENT
+	// directory — rebuilding from that would silently widen a "serve this one
+	// file" root into "serve its whole directory".
+	paths []string
 	roots []Root
 	docs  []Doc
 	// pathIndex is the set of every indexed (root label, absolute path) pair,
@@ -102,7 +112,7 @@ type docKey struct {
 // extension is a hard error — a docs server should never silently start
 // with fewer roots than the caller asked for.
 func NewIndex(paths []string) (*Index, error) {
-	idx := &Index{}
+	idx := &Index{paths: append([]string(nil), paths...)}
 	labels := map[string]bool{}
 
 	for _, p := range paths {
@@ -218,6 +228,28 @@ var hiddenOrVendorDir = map[string]bool{
 	"vendor":       true,
 }
 
+// excludedDir reports whether a directory with this base name must never be
+// descended into. It is deliberately a single named predicate rather than an
+// inline condition, because it has TWO callers that must agree byte-for-byte:
+// walkRoot (which decides what lands in the index, and therefore — since
+// Resolve gates on pathIndex membership — what is servable at all) and the
+// live-reload Watcher (which decides which subtrees it registers and which
+// events it acts on). This repo already shipped one security bug from exactly
+// this kind of drift: the exclusions were UI-only in walkRoot while Resolve
+// re-derived servability from the filesystem, so an excluded file was hidden
+// from the sidenav yet served on a direct URL guess. A watcher carrying its
+// own copy of the rule would reintroduce the same class of gap — a write
+// under .trash/ waking the reader up, or a genuine doc silently not
+// triggering reload.
+//
+// Callers apply this to a directory's BASE name, and must exempt a root's own
+// path: a user may legitimately point a root at a dot-directory (or at a
+// directory literally named "vendor"), and naming it explicitly is consent to
+// index it. Only directories discovered BENEATH a root are subject to it.
+func excludedDir(name string) bool {
+	return hiddenOrVendorDir[name] || strings.HasPrefix(name, ".")
+}
+
 // walkRoot discovers markdown files under root. It does not follow symlinks
 // for either directories or files during the walk — fs.WalkDir already
 // doesn't descend into a symlinked directory, and a symlinked file is
@@ -232,7 +264,7 @@ func walkRoot(root Root) ([]Doc, error) {
 			return err
 		}
 		if d.IsDir() {
-			if path != root.Path && (hiddenOrVendorDir[d.Name()] || strings.HasPrefix(d.Name(), ".")) {
+			if path != root.Path && excludedDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -302,6 +334,25 @@ func titleFor(absPath, relPath string) string {
 	}
 	base := filepath.Base(relPath)
 	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
+// Rebuild re-walks this index's original root arguments and returns a fresh
+// Index, leaving the receiver untouched. It is how live reload picks up files
+// that were created, deleted, renamed, or retitled since the last build.
+//
+// Rebuilding through NewIndex — rather than patching the existing index in
+// place — is deliberate: NewIndex is the only code path that populates
+// pathIndex, and pathIndex membership is what Resolve uses to decide whether a
+// path is servable at all. An incremental "just add the changed file" update
+// would be a second, parallel implementation of the exclusion rules, which is
+// exactly the drift that produced the excluded-directory leak this reader
+// already had to fix once. One builder, one gate.
+//
+// A rebuild can legitimately fail (a root was renamed or unmounted while the
+// server was running). Callers SHOULD keep serving the previous index in that
+// case rather than tearing the server down.
+func (idx *Index) Rebuild() (*Index, error) {
+	return NewIndex(idx.paths)
 }
 
 // Roots returns the indexed roots in configuration order.

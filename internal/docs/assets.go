@@ -21,6 +21,14 @@ var artificerCSS []byte
 //go:embed assets/artificer/artificer-theme.js
 var artificerThemeJS []byte
 
+// reloadJS is this repo's own live-reload client (not vendored) — the browser
+// half of the SSE loop in server.go/watcher.go. Embedded per-file alongside the
+// vendored assets above for the same reason they are: only files the UI actually
+// links become servable.
+//
+//go:embed assets/reload.js
+var reloadJS []byte
+
 //go:embed templates/shell.html.tmpl
 var shellTemplateSrc string
 
