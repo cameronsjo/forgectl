@@ -65,8 +65,36 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 	}
 	defer ln.Close() //nolint:errcheck // best-effort; Shutdown below already closes it on the success path
 
-	handler := httpsrv.Chain(docspkg.NewHandler(idx), httpsrv.HostAllowlist(httpsrv.DefaultAllowedHosts))
-	srv := &http.Server{Handler: handler}
+	store := docspkg.NewStore(idx)
+	events := docspkg.NewBroker()
+
+	handler := httpsrv.Chain(docspkg.NewHandler(store, events), httpsrv.HostAllowlist(httpsrv.DefaultAllowedHosts))
+	srv := &http.Server{
+		Handler: handler,
+
+		// ReadHeaderTimeout bounds the slowloris shape (a client that opens a
+		// connection and dribbles headers forever). Safe for SSE: it covers
+		// only the request head, which the browser sends in full up front.
+		ReadHeaderTimeout: 10 * time.Second,
+
+		// IdleTimeout reaps keep-alive connections that are between requests.
+		// An active SSE stream is not idle, so this does not touch it.
+		IdleTimeout: 120 * time.Second,
+
+		// WriteTimeout is deliberately left at 0 (no deadline), and this MUST
+		// stay that way. It is an absolute deadline on the whole response
+		// write, measured from when the request head is read — not an
+		// inactivity timeout. A live-reload SSE stream is a single response
+		// that stays open for as long as the reader keeps the tab open, so ANY
+		// non-zero value silently severs every stream that outlives it, and the
+		// only symptom is a page that quietly stops updating after N seconds.
+		// Setting it here is the natural-looking hardening change to make, and
+		// this comment exists so the next person to reach for it (or for a lint
+		// rule that asks for it) sees why not. A future non-streaming route
+		// that genuinely wants a write deadline should set one PER REQUEST via
+		// http.NewResponseController(w).SetWriteDeadline, which leaves the
+		// stream handlers alone.
+	}
 
 	url := "http://" + ln.Addr().String() + "/"
 	out := cmd.OutOrStdout()
@@ -76,6 +104,18 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Live reload is best-effort: if the OS refuses a watcher (descriptor
+	// limits, an exotic filesystem), the reader still serves — it just stops
+	// refreshing on its own. Failing the whole command over it would be a worse
+	// trade than a warning.
+	if watcher, err := docspkg.NewWatcher(store, events); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: live reload unavailable: %v\n", err)
+	} else {
+		defer watcher.Close() //nolint:errcheck // best-effort resource release on exit
+		go watcher.Run(ctx)
+		fmt.Fprintln(out, "  live reload: on")
+	}
 
 	if openFlag {
 		if err := docspkg.OpenBrowser(ctx, deps.Runner, url); err != nil {
@@ -88,6 +128,15 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 
 	select {
 	case <-ctx.Done():
+		// Close the broker BEFORE Shutdown, never after. Shutdown waits for
+		// in-flight requests to finish, and an SSE stream never finishes on its
+		// own — so with an open reader tab, Shutdown would block the full
+		// shutdownGrace every single time and Ctrl-C would appear to hang for
+		// five seconds with nothing printed to explain it. Closing the broker
+		// first releases every /events handler, so the streams drain and
+		// Shutdown returns as soon as real requests are done.
+		events.Close()
+
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)

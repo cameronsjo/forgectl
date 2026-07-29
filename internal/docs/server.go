@@ -1,7 +1,9 @@
 package docs
 
 import (
+	"fmt"
 	"html/template"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -21,17 +23,86 @@ const recentCount = 5
 // different: it's a fixed, no-config hardening default for every response
 // this handler ever produces, so it's applied here rather than pushed out
 // as an opt-in caller concern.
-func NewHandler(idx *Index) http.Handler {
+// events is where the live-reload SSE stream is served. Declared as a constant
+// because the embedded reload client (assets/reload.js) must agree with it.
+const eventsPath = "/events"
+
+// reloadMessage is the single SSE payload the server ever sends. The client
+// treats any message as "re-read this page", so the content carries no
+// information the client acts on differently — it exists to be legible in
+// devtools and in a curl of the endpoint.
+const reloadMessage = "reload"
+
+func NewHandler(store *Store, events *Broker) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /assets/artificer.css", serveStaticCSS(artificerCSS))
 	mux.HandleFunc("GET /assets/artificer-theme.js", serveStaticJS(artificerThemeJS))
+	mux.HandleFunc("GET /assets/reload.js", serveStaticJS(reloadJS))
 	mux.HandleFunc("GET /assets/chroma.css", serveStaticCSS(ChromaCSS()))
 
-	mux.HandleFunc("GET /doc/{root}/{rest...}", handleDoc(idx))
-	mux.HandleFunc("GET /{$}", handleIndexRoot(idx))
+	mux.HandleFunc("GET "+eventsPath, handleEvents(events))
+	mux.HandleFunc("GET /doc/{root}/{rest...}", handleDoc(store))
+	mux.HandleFunc("GET /{$}", handleIndexRoot(store))
 
 	return noSniff(mux)
+}
+
+// handleEvents streams reload notifications to one browser as Server-Sent
+// Events. It returns — releasing the connection — as soon as the client
+// disconnects (request context canceled) or the Broker is closed at shutdown.
+//
+// Flushing goes through http.NewResponseController rather than a
+// w.(http.Flusher) type assertion. The assertion form is the older idiom and it
+// is brittle: any middleware that wraps the ResponseWriter without forwarding
+// Flush turns SSE into a stream that buffers forever, and the failure mode is a
+// page that simply never updates. ResponseController unwraps through wrappers.
+func handleEvents(events *Broker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if events == nil {
+			http.NotFound(w, r) // live reload not enabled for this server
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Connection", "keep-alive")
+		// Defense in depth against a reverse proxy buffering the stream into
+		// uselessness; harmless when nothing is proxying.
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+
+		rc := http.NewResponseController(w)
+		// A comment frame proves the stream is live before any file changes, so
+		// EventSource fires onopen and the client stops waiting.
+		if _, err := io.WriteString(w, ": connected\n\n"); err != nil {
+			return
+		}
+		if err := rc.Flush(); err != nil {
+			slog.Debug("docs: SSE stream could not be flushed; live reload unavailable for this client.", "error", err)
+			return
+		}
+
+		sub, cancel := events.Subscribe()
+		defer cancel()
+
+		for {
+			select {
+			case <-r.Context().Done():
+				return // browser navigated away or closed the tab
+			case msg, ok := <-sub:
+				if !ok {
+					return // broker closed: server is shutting down
+				}
+				if _, err := fmt.Fprintf(w, "data: %s\n\n", msg); err != nil {
+					return
+				}
+				if err := rc.Flush(); err != nil {
+					return
+				}
+			}
+		}
+	}
 }
 
 // noSniff sets X-Content-Type-Options: nosniff on every response. Cheap
@@ -66,9 +137,9 @@ func serveStaticJS(body []byte) http.HandlerFunc {
 
 // handleIndexRoot renders the shell with the empty-state content — "/"
 // itself never resolves to a specific doc.
-func handleIndexRoot(idx *Index) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		renderShell(w, idx, pageContext{})
+func handleIndexRoot(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		renderShell(w, store.Current(), pageContext{})
 	}
 }
 
@@ -78,10 +149,16 @@ func handleIndexRoot(idx *Index) http.HandlerFunc {
 // to the same 404; the docs-serving surface never distinguishes the reason
 // to the client (forgectl#93's stated posture: a stranger on the loopback
 // interface gets no hints about why a path didn't resolve).
-func handleDoc(idx *Index) http.HandlerFunc {
+func handleDoc(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		root := r.PathValue("root")
 		rest := r.PathValue("rest")
+
+		// Load the index ONCE per request. Re-reading store.Current() later in
+		// this handler would let a live-reload swap land mid-response, so the
+		// doc could be resolved against one tree and the sidenav built from
+		// another.
+		idx := store.Current()
 
 		absPath, err := idx.Resolve(root, rest)
 		if err != nil {
