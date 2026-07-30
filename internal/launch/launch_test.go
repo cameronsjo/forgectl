@@ -41,6 +41,40 @@ func TestSessionArgs_Fork_ImpliesResume(t *testing.T) {
 	}
 }
 
+func TestResumeArgs_TargetsTheGivenSession(t *testing.T) {
+	p := Profile{PermissionMode: "plan", AllowDanger: true, AddDir: []string{"/x"}}
+	got := ResumeArgs(p, "opus", "abc-123", false)
+	want := []string{
+		"--permission-mode", "plan", "--allow-dangerously-skip-permissions",
+		"--ide", "--exclude-dynamic-system-prompt-sections", "--model", "opus",
+		"--resume", "abc-123", "--add-dir", "/x",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ResumeArgs =\n  %v\nwant\n  %v", got, want)
+	}
+}
+
+// The distinction that earned ResumeArgs its own function: SessionArgs appends
+// a BARE --resume, which opens Claude Code's own picker. `forgectl resume` has
+// already picked, so the id must follow the flag.
+func TestResumeArgs_PassesTheIDUnlikeSessionArgs(t *testing.T) {
+	p := Profile{PermissionMode: "plan"}
+	if got := SessionArgs(p, "opus", Resume); containsStr(got, "abc-123") {
+		t.Fatalf("SessionArgs unexpectedly carries a session id: %v", got)
+	}
+	if got := ResumeArgs(p, "opus", "abc-123", false); !containsSeq(got, []string{"--resume", "abc-123"}) {
+		t.Errorf("ResumeArgs must pass the id straight after --resume, got %v", got)
+	}
+}
+
+func TestResumeArgs_ForkAppendsForkSession(t *testing.T) {
+	p := Profile{PermissionMode: "plan"}
+	got := ResumeArgs(p, "opus", "abc-123", true)
+	if !containsSeq(got, []string{"--resume", "abc-123", "--fork-session"}) {
+		t.Errorf("ResumeArgs(fork) missing expected seq, got %v", got)
+	}
+}
+
 func TestBuilderArgs_ProfileFirst_UserArgsLast(t *testing.T) {
 	p := Profile{PermissionMode: "plan", AllowDanger: true, Model: "sonnet", AddDir: []string{"/s"}}
 	got := BuilderArgs(p, []string{"-p", "hi"})

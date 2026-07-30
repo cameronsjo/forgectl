@@ -37,5 +37,6 @@ func allModules() []module.Manifest {
 		updateModule,
 		doctorModule,
 		upgradeModule,
+		resumeModule,
 	}
 }

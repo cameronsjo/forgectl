@@ -24,3 +24,4 @@ helper/forgectl-bless-helper/.build/
 .claude/intros/
 .claude/agent-memory/
 .claude/test-output/
+.claude/sessions/

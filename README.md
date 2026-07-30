@@ -63,6 +63,15 @@ forgectl launch init --from-claunch # import an existing ~/.config/claunch/claun
 forgectl launch edit               # open config.toml in $EDITOR
 forgectl launch doctor             # check claude availability + launch config validity
 
+# resume — get back into a Claude Code session after a terminal restart
+forgectl resume                    # pick from recent sessions across every repo, then resume in place
+forgectl resume forgectl           # filter by repo, name, cwd, or id; exactly one hit resumes it
+forgectl resume --fork             # branch a new session off the transcript instead of continuing it
+forgectl resume ls                 # list without acting
+forgectl resume ls --json          # machine-readable JSON (safe to pipe; counts go to stderr)
+forgectl resume snapshot           # capture what a live session's exit would destroy
+forgectl resume snapshot --quiet   # same, silent — the form a Stop hook uses
+
 # workflow — run declarative workflows composing forgectl's other verbs (alias: flow)
 forgectl workflow run <name>              # run a workflow by name
 forgectl workflow run <name> --param k=v  # override a workflow param (repeatable)
@@ -230,6 +239,37 @@ forgectl env set API_KEY                                   # interactive, no ech
 - **`--any-file` overrides that rule, and only a human can use it.** It requires an interactive confirmation on a real terminal; with no TTY — every agent, every CI job, every piped invocation — it refuses outright. A flag an agent can type is not a bound on an agent; the TTY gate is the bound, and the flag is just how a human reaches it.
 - `--clipboard` is macOS-only (shells out to `pbcopy`/`pbpaste`); it errors clearly on other platforms rather than silently no-op'ing.
 - Secret **lengths** stay out of the logs too: `env` builds its clipboard client with `clip.WithSensitive()`, which drops the byte-count the clipboard layer otherwise logs at `info`. A length is signal — it distinguishes key types and tracks rotations — which is the same reason `redact` masks to a fixed `****` rather than revealing length.
+
+### resume — getting back in after a terminal restart
+
+A terminal restart costs three steps otherwise: find the folder, run `claude --resume`, then recognize the session in a picker that shows neither repo nor branch. `forgectl resume` collapses that to one command from a cold terminal — it lists recent sessions across *every* repo with name, repo, branch, and last activity, and lands you back inside the one you pick, in the right directory, with its task list restored.
+
+**Identity is read, never persisted.** Claude Code's prompt history and per-project transcripts already carry the session id, cwd, branch, and title indefinitely — so there is no daemon and no poller here, just a reader. Two things genuinely do not survive a session's exit, and `resume snapshot` is what captures them:
+
+- the `/rename` name, which lives only in the live-process registry;
+- the task bodies, which Claude Code deletes when a session ends.
+
+Wire the capture to a `Stop` hook so every turn refreshes it. It is cheap, idempotent, and **always exits 0** — a failed snapshot must never become a failed turn:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "forgectl resume snapshot --quiet" }] }
+    ]
+  }
+}
+```
+
+Snapshots live in `<os.UserConfigDir()>/forgectl/resume-sessions/`, one JSON file per session, alongside every other forgectl store.
+
+**Notes:**
+
+- **A running session is refused, not resumed.** Two Claude Code processes on one transcript corrupts it, so `resume` errors out and names the live pid. Pass `--fork` to branch a new session off it instead.
+- **The task store never shrinks to follow Claude Code.** A snapshot taken after a session exits legitimately sees fewer tasks than one taken before, so bodies are merged by task id and retained — dropping to the live set would discard exactly what the feature exists to rescue.
+- **Restore never overwrites.** A task file the live session owns always wins, and `.highwatermark` is raised but never lowered, so a resumed session is never handed an id already on disk. Running it repeatedly is a no-op.
+- **The resumed session gets its own project's posture.** `[launch]` profile resolution is a pure function of the config and a directory, so resuming into another repo picks up that repo's model, permission mode, and `--add-dir` set for free.
+- `forgectl doctor` carries a `resume tasks` check. Task rescue depends on Claude Code naming per-session task directories after the session id — verified behavior, not a guarantee — and the check warns if that ever stops being true, so rescue cannot silently degrade to writing where nothing reads.
 
 ## How it fits together
 
