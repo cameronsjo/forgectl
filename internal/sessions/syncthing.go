@@ -14,7 +14,7 @@ import (
 // NEVER the append-only JSONL ledgers. Three machines appending to a synced
 // JSONL produce silent .sync-conflict-* divergence, corrupting the WAL the
 // whole ETL rests on. Every `sessions sync` run re-checks before touching the
-// mart, so a misconfigured share fails the sync loudly instead of slowly
+// concordance, so a misconfigured share fails the sync loudly instead of slowly
 // poisoning the ledger.
 //
 // Failure posture (resiliency rule): the CONDITION fails closed — a folder

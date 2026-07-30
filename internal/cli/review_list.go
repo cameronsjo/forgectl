@@ -16,20 +16,23 @@ import (
 )
 
 // runReviewList is the bare `forgectl review` body: aggregate, filter, render.
-func runReviewList(cmd *cobra.Command, src review.Source, reviewedPath string, asJSON bool, kind, repo string) error {
+func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string, asJSON bool, kind, repo string) error {
 	switch kind {
 	case "", string(review.KindIssue), string(review.KindPR):
 	default:
 		return fmt.Errorf("invalid --kind %q (want issue or pr)", kind)
 	}
 
-	items, notes, err := review.Aggregate(cmd.Context(), src)
+	items, notes, err := review.Aggregate(cmd.Context(), srcs...)
 	if err != nil {
 		return err
 	}
-	// Per-query degradation notes are diagnostics → stderr, never stdout.
+	// Per-query degradation notes are diagnostics → stderr, never stdout. A
+	// note can embed hostile content (a query label built from a config
+	// owner, or an error message that wraps CLI stderr verbatim), so it gets
+	// the same control-byte sanitization every rendered cell does.
 	for _, n := range notes {
-		fmt.Fprintln(cmd.ErrOrStderr(), "note: "+n)
+		fmt.Fprintln(cmd.ErrOrStderr(), "note: "+sanitizeCell(n))
 	}
 
 	items = filterItems(items, kind, repo)
@@ -124,7 +127,7 @@ func renderReviewTable(out, errOut io.Writer, items []review.Item, store *pr.Rev
 			it.Kind, it.Slug(), it.Number,
 			sanitizeCell(it.Title),
 			sanitizeCell(strings.Join(it.Labels, ",")),
-			reviewStateLabel(it)); err != nil {
+			sanitizeCell(reviewStateLabel(it))); err != nil {
 			return err
 		}
 	}

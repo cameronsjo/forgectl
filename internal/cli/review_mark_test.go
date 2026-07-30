@@ -25,7 +25,7 @@ import (
 // execReview runs a review subcommand against src/store and returns stdout+stderr.
 func execReview(t *testing.T, src review.Source, reviewedPath string, args ...string) (string, string, error) {
 	t.Helper()
-	cmd := newReviewCmdForSource(src, reviewedPath)
+	cmd := newReviewCmdForSources([]review.Source{src}, reviewedPath)
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -85,6 +85,31 @@ func TestReviewSync_PrunesClosedItems(t *testing.T) {
 	}
 	if store.IsReviewedKey("github.com/cameronsjo/alpha#2", reviewTestTime) {
 		t.Error("closed item's mark must be pruned")
+	}
+}
+
+// TestReviewSync_OmittedHostUntouched pins Fix A's host-scoped prune: when
+// Gitea has no active source this run (the fake source stands in for
+// GitHub-only, matching production's always-active github.com), an existing
+// git.sjo.lol mark must survive sync even though it never appears in the
+// open set — that host simply wasn't queried, which is not the same as
+// "everything on it closed".
+func TestReviewSync_OmittedHostUntouched(t *testing.T) {
+	reviewedPath := filepath.Join(t.TempDir(), "review-reviewed.json")
+	seedReviewedKey(t, reviewedPath, "github.com/cameronsjo/alpha#1", reviewTestTime)
+	seedReviewedKey(t, reviewedPath, "git.sjo.lol/cameron/forge#9", reviewTestTime)
+
+	src := fakeReviewSource{items: []review.Item{reviewItem(review.KindIssue, "alpha", 1)}}
+	if _, _, err := execReview(t, src, reviewedPath, "sync"); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	store := pr.LoadReviewed(reviewedPath)
+	if !store.IsReviewedKey("github.com/cameronsjo/alpha#1", reviewTestTime) {
+		t.Error("active host's open item's mark must survive sync")
+	}
+	if !store.IsReviewedKey("git.sjo.lol/cameron/forge#9", reviewTestTime) {
+		t.Error("a host with no active source this run must be left untouched by sync")
 	}
 }
 

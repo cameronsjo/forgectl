@@ -1,6 +1,6 @@
 package sessions
 
-// Integration suite for the mart ETL — the executable form of the plan's
+// Integration suite for the concordance ETL — the executable form of the plan's
 // Phase 3 acceptance gates (docs/plans/2026-07-10-cadence-persistence-
 // observability.md in cameronsjo/claude-configurations):
 //
@@ -10,14 +10,14 @@ package sessions
 //   - rows carry the correct machine
 //   - the runbook index populates from markdown and answers full-text queries
 //
-// Gated on FORGECTL_TEST_MART_DSN — point it at a THROWAWAY postgres with the
-// mart schema applied (testdata/schema.sql mirrors the canonical DDL). Tables
+// Gated on FORGECTL_TEST_CONCORDANCE_DSN — point it at a THROWAWAY postgres with the
+// concordance schema applied (testdata/schema.sql mirrors the canonical DDL). Tables
 // are truncated at test start.
 //
 // Run (example):
-//   docker run -d --name mart-it -p 15544:5432 -e POSTGRES_PASSWORD=it \
-//     -e POSTGRES_DB=sessions_mart postgres:17-alpine
-//   FORGECTL_TEST_MART_DSN='postgres://postgres:it@127.0.0.1:15544/sessions_mart' \
+//   docker run -d --name concordance-it -p 15544:5432 -e POSTGRES_PASSWORD=it \
+//     -e POSTGRES_DB=concordance postgres:18-alpine
+//   FORGECTL_TEST_CONCORDANCE_DSN='postgres://postgres:it@127.0.0.1:15544/concordance' \
 //     go test ./internal/sessions/ -run Integration -v
 
 import (
@@ -28,41 +28,41 @@ import (
 	"time"
 )
 
-func martDSN(t *testing.T) string {
+func concordanceDSN(t *testing.T) string {
 	t.Helper()
-	dsn := os.Getenv("FORGECTL_TEST_MART_DSN")
+	dsn := os.Getenv("FORGECTL_TEST_CONCORDANCE_DSN")
 	if dsn == "" {
-		t.Skip("FORGECTL_TEST_MART_DSN unset; skipping mart integration test")
+		t.Skip("FORGECTL_TEST_CONCORDANCE_DSN unset; skipping concordance integration test")
 	}
 	return dsn
 }
 
-func prepMart(t *testing.T, ctx context.Context, dsn string) *Mart {
+func prepConcordance(t *testing.T, ctx context.Context, dsn string) *Concordance {
 	t.Helper()
-	mart, err := ConnectMart(ctx, dsn)
+	concordance, err := ConnectConcordance(ctx, dsn)
 	if err != nil {
-		t.Fatalf("connect throwaway mart: %v", err)
+		t.Fatalf("connect throwaway concordance: %v", err)
 	}
-	t.Cleanup(func() { _ = mart.Close(context.Background()) })
+	t.Cleanup(func() { _ = concordance.Close(context.Background()) })
 
 	schema, err := os.ReadFile(filepath.Join("testdata", "schema.sql"))
 	if err != nil {
 		t.Fatalf("read schema fixture: %v", err)
 	}
-	if _, err := mart.conn.Exec(ctx, string(schema)); err != nil {
+	if _, err := concordance.conn.Exec(ctx, string(schema)); err != nil {
 		t.Fatalf("apply schema fixture: %v", err)
 	}
-	if _, err := mart.conn.Exec(ctx, `TRUNCATE session, runbooks RESTART IDENTITY`); err != nil {
+	if _, err := concordance.conn.Exec(ctx, `TRUNCATE session, runbooks RESTART IDENTITY`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
-	return mart
+	return concordance
 }
 
 func TestIntegrationSyncIdempotencyAndSearch(t *testing.T) {
-	dsn := martDSN(t)
+	dsn := concordanceDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	mart := prepMart(t, ctx, dsn)
+	concordance := prepConcordance(t, ctx, dsn)
 
 	opts := SyncOptions{
 		DSN:         dsn,
@@ -84,7 +84,7 @@ func TestIntegrationSyncIdempotencyAndSearch(t *testing.T) {
 		t.Fatalf("dry-run receipt off: %+v", dry)
 	}
 	var n int
-	if err := mart.conn.QueryRow(ctx, `SELECT count(*) FROM session`).Scan(&n); err != nil || n != 0 {
+	if err := concordance.conn.QueryRow(ctx, `SELECT count(*) FROM session`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("dry-run must not write (count=%d, err=%v)", n, err)
 	}
 
@@ -111,7 +111,7 @@ func TestIntegrationSyncIdempotencyAndSearch(t *testing.T) {
 	if second.SessionsUpserted != 0 || second.SessionsUnchanged != 3 {
 		t.Fatalf("second sync must skip all watermarked sessions: %+v", second)
 	}
-	if err := mart.conn.QueryRow(ctx, `SELECT count(*) FROM session`).Scan(&n); err != nil || n != 3 {
+	if err := concordance.conn.QueryRow(ctx, `SELECT count(*) FROM session`).Scan(&n); err != nil || n != 3 {
 		t.Fatalf("row count drifted after re-run (count=%d, err=%v)", n, err)
 	}
 
@@ -125,14 +125,14 @@ func TestIntegrationSyncIdempotencyAndSearch(t *testing.T) {
 	if full.SessionsUpserted != 3 {
 		t.Fatalf("--full should re-upsert everything: %+v", full)
 	}
-	if err := mart.conn.QueryRow(ctx, `SELECT count(*) FROM session`).Scan(&n); err != nil || n != 3 {
+	if err := concordance.conn.QueryRow(ctx, `SELECT count(*) FROM session`).Scan(&n); err != nil || n != 3 {
 		t.Fatalf("--full multiplied rows (count=%d, err=%v)", n, err)
 	}
 
-	// Provenance and ADR-0017 cost attribution landed in the mart.
+	// Provenance and ADR-0017 cost attribution landed in the concordance.
 	var machine, costSource string
 	var committed bool
-	err = mart.conn.QueryRow(ctx,
+	err = concordance.conn.QueryRow(ctx,
 		`SELECT machine, cost_source, committed FROM session
 		 WHERE session_id = '11111111-1111-1111-1111-111111111111'`).
 		Scan(&machine, &costSource, &committed)
@@ -145,7 +145,7 @@ func TestIntegrationSyncIdempotencyAndSearch(t *testing.T) {
 	}
 
 	// Full-text search finds a runbook by keyword (the Phase 4 query path).
-	hits, err := mart.SearchRunbooks(ctx, "colima split brain", "", 5)
+	hits, err := concordance.SearchRunbooks(ctx, "colima split brain", "", 5)
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -153,10 +153,10 @@ func TestIntegrationSyncIdempotencyAndSearch(t *testing.T) {
 		t.Fatalf("search missed the known runbook: %+v", hits)
 	}
 	// Project filter excludes it; trigram fallback tolerates a partial token.
-	if hits, _ = mart.SearchRunbooks(ctx, "colima split brain", "otherproj", 5); len(hits) != 0 {
+	if hits, _ = concordance.SearchRunbooks(ctx, "colima split brain", "otherproj", 5); len(hits) != 0 {
 		t.Errorf("project filter leaked: %+v", hits)
 	}
-	if hits, err = mart.SearchRunbooks(ctx, "colim", "", 5); err != nil || len(hits) == 0 {
+	if hits, err = concordance.SearchRunbooks(ctx, "colim", "", 5); err != nil || len(hits) == 0 {
 		t.Errorf("trigram fallback missed partial token (err=%v hits=%v)", err, hits)
 	}
 }
@@ -167,10 +167,10 @@ func TestIntegrationSyncIdempotencyAndSearch(t *testing.T) {
 // (worktree-entry-posture.md) cannot be attributed to a session, so `why` never
 // surfaces it even though `search` can.
 func TestIntegrationWhyAndLast(t *testing.T) {
-	dsn := martDSN(t)
+	dsn := concordanceDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	mart := prepMart(t, ctx, dsn)
+	concordance := prepConcordance(t, ctx, dsn)
 
 	if _, err := Sync(ctx, SyncOptions{DSN: dsn, Machine: "it-machine",
 		MetricsDir:      filepath.Join("testdata", "metrics"),
@@ -180,7 +180,7 @@ func TestIntegrationWhyAndLast(t *testing.T) {
 	}
 
 	// why: a topic in a session_id-linked runbook resolves to its author.
-	hits, err := mart.WhySessions(ctx, "colima split brain", "", 5)
+	hits, err := concordance.WhySessions(ctx, "colima split brain", "", 5)
 	if err != nil {
 		t.Fatalf("why: %v", err)
 	}
@@ -194,19 +194,19 @@ func TestIntegrationWhyAndLast(t *testing.T) {
 	}
 
 	// why: the project filter is exact (colima's runbook is hearth, not cadence).
-	if h, _ := mart.WhySessions(ctx, "colima split brain", "cadence", 5); len(h) != 0 {
+	if h, _ := concordance.WhySessions(ctx, "colima split brain", "cadence", 5); len(h) != 0 {
 		t.Errorf("why project filter leaked: %+v", h)
 	}
 
 	// why: a runbook with NO session_id can't be attributed to a session — the
 	// documented degradation, pinned. (worktree-entry-posture.md has no
 	// session_id frontmatter, so `why` cannot name a predecessor for it.)
-	if h, _ := mart.WhySessions(ctx, "worktree entry posture", "", 5); len(h) != 0 {
+	if h, _ := concordance.WhySessions(ctx, "worktree entry posture", "", 5); len(h) != 0 {
 		t.Errorf("why should not attribute a session_id-less runbook: %+v", h)
 	}
 
 	// last: newest session per repo, with latest-wins scalar fields.
-	last, err := mart.LastSession(ctx, "cadence")
+	last, err := concordance.LastSession(ctx, "cadence")
 	if err != nil {
 		t.Fatalf("last cadence: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestIntegrationWhyAndLast(t *testing.T) {
 	}
 
 	// last: a session with a session_id-linked runbook lists it as an artifact.
-	hearth, err := mart.LastSession(ctx, "hearth")
+	hearth, err := concordance.LastSession(ctx, "hearth")
 	if err != nil {
 		t.Fatalf("last hearth: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestIntegrationWhyAndLast(t *testing.T) {
 	}
 
 	// last: a repo with no sessions is a clean (nil, nil) miss, never an error.
-	miss, err := mart.LastSession(ctx, "does-not-exist")
+	miss, err := concordance.LastSession(ctx, "does-not-exist")
 	if err != nil {
 		t.Fatalf("last miss should not error: %v", err)
 	}
@@ -239,13 +239,13 @@ func TestIntegrationWhyAndLast(t *testing.T) {
 	// an older and a newer session (and a query-matching runbook for each,
 	// linked by session_id) directly — raw INSERTs, so UpsertRunbooks's corpus
 	// prune doesn't wipe the seeded hearth/cadence rows the checks above rely on.
-	if _, err := mart.conn.Exec(ctx, `
+	if _, err := concordance.conn.Exec(ctx, `
 		INSERT INTO session (session_id, machine, project, git_branch, last_ts, synced_at) VALUES
 			('widget-old', 'it-machine', 'widget', 'main',     '2026-07-01T09:00:00Z', now()),
 			('widget-new', 'it-machine', 'widget', 'feat/new', '2026-07-02T09:00:00Z', now())`); err != nil {
 		t.Fatalf("seed widget sessions: %v", err)
 	}
-	if _, err := mart.conn.Exec(ctx, `
+	if _, err := concordance.conn.Exec(ctx, `
 		INSERT INTO runbooks (session_id, project, title, type, path, full_text, machine) VALUES
 			('widget-old', 'widget', 'Gizmo old', 'field-report', 'widget/gizmo-old.md', 'the gizmo tuning approach, older take', 'it-machine'),
 			('widget-new', 'widget', 'Gizmo new', 'handoff',      'widget/gizmo-new.md', 'the gizmo tuning approach, newer take', 'it-machine')`); err != nil {
@@ -253,7 +253,7 @@ func TestIntegrationWhyAndLast(t *testing.T) {
 	}
 
 	// why: both sessions match "gizmo" — the newer session must sort first.
-	gz, err := mart.WhySessions(ctx, "gizmo", "", 5)
+	gz, err := concordance.WhySessions(ctx, "gizmo", "", 5)
 	if err != nil {
 		t.Fatalf("why gizmo: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestIntegrationWhyAndLast(t *testing.T) {
 	}
 
 	// last: with two sessions in one project, the newer one wins.
-	lw, err := mart.LastSession(ctx, "widget")
+	lw, err := concordance.LastSession(ctx, "widget")
 	if err != nil {
 		t.Fatalf("last widget: %v", err)
 	}
@@ -275,10 +275,10 @@ func TestIntegrationWhyAndLast(t *testing.T) {
 }
 
 func TestIntegrationRunbookPruneRespectsEmptyCorpus(t *testing.T) {
-	dsn := martDSN(t)
+	dsn := concordanceDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	mart := prepMart(t, ctx, dsn)
+	concordance := prepConcordance(t, ctx, dsn)
 
 	cleanST := filepath.Join("testdata", "syncthing-clean.xml")
 	// Seed the index from the fixture corpus.
@@ -297,7 +297,7 @@ func TestIntegrationRunbookPruneRespectsEmptyCorpus(t *testing.T) {
 		t.Fatalf("corpus-less sync: %v", err)
 	}
 	var n int
-	if err := mart.conn.QueryRow(ctx, `SELECT count(*) FROM runbooks`).Scan(&n); err != nil || n != 2 {
+	if err := concordance.conn.QueryRow(ctx, `SELECT count(*) FROM runbooks`).Scan(&n); err != nil || n != 2 {
 		t.Fatalf("corpus-less machine wiped the shared index (count=%d, err=%v)", n, err)
 	}
 
@@ -322,7 +322,7 @@ func TestIntegrationRunbookPruneRespectsEmptyCorpus(t *testing.T) {
 	if rec.RunbooksPruned != 1 {
 		t.Errorf("expected exactly 1 pruned row, got %d", rec.RunbooksPruned)
 	}
-	if err := mart.conn.QueryRow(ctx, `SELECT count(*) FROM runbooks`).Scan(&n); err != nil || n != 1 {
+	if err := concordance.conn.QueryRow(ctx, `SELECT count(*) FROM runbooks`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("prune left wrong count (count=%d, err=%v)", n, err)
 	}
 }

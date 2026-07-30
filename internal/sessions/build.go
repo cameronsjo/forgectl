@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// SessionRow is one operational-index row bound for the mart's `session`
-// table. Field shapes mirror the mart schema (scripts/sessions-mart/schema.sql
+// SessionRow is one operational-index row bound for the concordance's `session`
+// table. Field shapes mirror the concordance schema (scripts/concordance/schema.sql
 // in cameronsjo/claude-configurations).
 type SessionRow struct {
 	SchemaVersion     int

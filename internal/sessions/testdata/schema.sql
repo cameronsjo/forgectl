@@ -1,7 +1,7 @@
--- TEST FIXTURE — mirror of the canonical mart DDL.
--- Canonical: cameronsjo/claude-configurations scripts/sessions-mart/schema.sql
+-- TEST FIXTURE — mirror of the canonical concordance DDL.
+-- Canonical: cameronsjo/claude-configurations scripts/concordance/schema.sql
 -- If integration tests fail on a schema mismatch, re-copy from canonical.
--- Cadence cross-machine operational mart — canonical DDL.
+-- Cadence cross-machine operational concordance — canonical DDL.
 -- Plan: docs/plans/2026-07-10-cadence-persistence-observability.md (D3).
 --
 -- Two tables only: an operational `session` index and a derived `runbooks`
@@ -11,14 +11,14 @@
 -- never migrated in.
 --
 -- Idempotent: safe to re-apply (CREATE ... IF NOT EXISTS throughout).
--- Apply: psql "$MART_DSN" -f schema.sql
+-- Apply: psql "$CONCORDANCE_DSN" -f schema.sql
 --
--- pg_trgm ships in postgres:17-alpine. CREATE EXTENSION needs CREATE on the
--- DATABASE (superuser in practice) — the `mart` app role does NOT hold that.
--- The line below works for `mart` only because initdb/01-init.sh already
+-- pg_trgm ships in postgres:18-alpine. CREATE EXTENSION needs CREATE on the
+-- DATABASE (superuser in practice) — the `concordance` app role does NOT hold that.
+-- The line below works for `concordance` only because initdb/01-init.sh already
 -- created the extension as superuser, so IF NOT EXISTS no-ops before any
 -- permission check. On the reuse-an-existing-server path, a superuser must
--- run `CREATE EXTENSION IF NOT EXISTS pg_trgm;` in the mart database FIRST
+-- run `CREATE EXTENSION IF NOT EXISTS pg_trgm;` in the concordance database FIRST
 -- (see README Phase 2 step 1) or this apply fails permission-denied.
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;

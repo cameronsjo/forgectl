@@ -22,6 +22,9 @@ package docs
 //   [x] Unhappy: an unknown root label is rejected
 //   [x] Unhappy: a traversal attempt against a known root is rejected
 //   [x] Unhappy: a disallowed extension under a known root is rejected
+//   [x] Unhappy: a file that exists on disk but lives under an excluded dir
+//       (.trash, node_modules, vendor, .git, any dot-dir) is not servable by
+//       a direct URL, even though the traversal chain alone would resolve it
 
 import (
 	"errors"
@@ -205,6 +208,90 @@ func TestIndex_Resolve_Traversal_Rejected(t *testing.T) {
 	_, err = idx.Resolve(label, "../../../../etc/passwd")
 	if !errors.Is(err, ErrOutsideRoot) {
 		t.Errorf("Resolve traversal: err = %v, want ErrOutsideRoot", err)
+	}
+}
+
+// TestIndex_Resolve_ExcludedDir_NotServableByDirectURL is the regression
+// test for the "walkRoot's exclusions are UI-only" finding: a markdown file
+// that walkRoot deliberately skips (hidden dot-dir, node_modules, vendor,
+// .git) must ALSO be unreachable through Resolve by a direct, correctly-
+// spelled request — not merely absent from the sidenav. Each file here
+// genuinely exists on disk (unlike the traversal tests, which target
+// nonexistent paths) so the assertion pins the exact failure mode
+// (ErrNotIndexed, from the pathIndex membership check) rather than
+// accidentally passing via ErrOutsideRoot/a stat failure.
+func TestIndex_Resolve_ExcludedDir_NotServableByDirectURL(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "readme.md"), "# Kept")
+
+	cases := []string{
+		".trash/deleted-secret.md",
+		"node_modules/dep/readme.md",
+		"vendor/pkg/readme.md",
+		".git/COMMIT_EDITMSG.md",
+		".hidden/note.md",
+	}
+	for _, rel := range cases {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(rel)), "# Should never be servable")
+	}
+
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	label := idx.Roots()[0].Label
+
+	// Confidence check: the walk really did skip these — List() proves the
+	// UI-hiding half of the contract still works.
+	if len(idx.List()) != 1 {
+		t.Fatalf("List() = %+v, want exactly [readme.md] (excluded dirs must not be indexed)", idx.List())
+	}
+
+	for _, rel := range cases {
+		t.Run(rel, func(t *testing.T) {
+			_, err := idx.Resolve(label, rel)
+			if !errors.Is(err, ErrNotIndexed) {
+				t.Errorf("Resolve(%q, %q): err = %v, want ErrNotIndexed — an excluded-dir file that exists on disk must still 404, not be served", label, rel, err)
+			}
+		})
+	}
+}
+
+// Overlapping-root variant of the test above, and the reason pathIndex is
+// keyed by root rather than by path alone. Naming a normally-excluded
+// directory as a root of its own is legitimate consent to index it — but that
+// consent is scoped to THAT root's URL namespace. If membership were a single
+// global set of absolute paths, indexing the child would also make the file
+// reachable through the PARENT root's URL, where the sidenav still (correctly)
+// hides it — reopening the excluded-directory leak by configuration rather
+// than by code.
+func TestIndex_Resolve_ExcludedDirIndexedAsItsOwnRoot_NotServableViaParentRoot(t *testing.T) {
+	parent := t.TempDir()
+	writeFile(t, filepath.Join(parent, "readme.md"), "# Kept")
+	trash := filepath.Join(parent, ".trash")
+	writeFile(t, filepath.Join(trash, "deleted-secret.md"), "# Should never be servable via the parent")
+
+	// Both the parent AND the excluded child are configured roots.
+	idx, err := NewIndex([]string{parent, trash})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	roots := idx.Roots()
+	if len(roots) != 2 {
+		t.Fatalf("Roots() = %+v, want 2 roots", roots)
+	}
+	parentLabel, trashLabel := roots[0].Label, roots[1].Label
+
+	// Naming .trash explicitly does grant access through ITS OWN root — that is
+	// the consent half of the contract, and it must keep working.
+	if _, err := idx.Resolve(trashLabel, "deleted-secret.md"); err != nil {
+		t.Errorf("Resolve(%q, %q) = %v, want nil — a directory named explicitly as a root is indexed under that root", trashLabel, "deleted-secret.md", err)
+	}
+
+	// But it must NOT be reachable through the parent root's namespace, where
+	// the walk deliberately skipped it.
+	if _, err := idx.Resolve(parentLabel, ".trash/deleted-secret.md"); !errors.Is(err, ErrNotIndexed) {
+		t.Errorf("Resolve(%q, %q): err = %v, want ErrNotIndexed — indexing a child root must not make its files servable through the parent root's URL", parentLabel, ".trash/deleted-secret.md", err)
 	}
 }
 

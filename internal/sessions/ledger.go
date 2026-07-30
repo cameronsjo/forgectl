@@ -1,7 +1,7 @@
 // Package sessions is the ops layer for `forgectl sessions`: the idempotent
 // ETL that drains the local JSONL write-ahead log and runbook markdown corpus
 // from Cadence state (with read-only legacy ~/.claude fallbacks) into the
-// cross-machine operational mart — an always-on Postgres session index.
+// cross-machine operational concordance — an always-on Postgres session index.
 //
 // Contract (docs/plans/2026-07-10-cadence-persistence-observability.md in
 // cameronsjo/claude-configurations):
@@ -12,14 +12,14 @@
 //   - Upsert key = session_id alone (a globally-unique UUID). `machine` is a
 //     provenance column, never part of the key.
 //   - lastMessageId is the incremental-sync cursor/watermark — sessions whose
-//     watermark already matches the mart are skipped, never re-keyed.
+//     watermark already matches the concordance are skipped, never re-keyed.
 //   - Cost attribution follows ADR-0017: per-session cost from commits.jsonl
 //     grouped by parentSessionId//sessionId, never recomputed when a commit
 //     exists; sessions.jsonl's SessionEnd total is the fallback.
 //
 // House pattern: the decision logic (ledger merge, cost attribution, runbook
 // parsing) is pure and lives in build.go/runbooks.go; the effects (Postgres
-// I/O) are isolated in mart.go; sync.go orchestrates. Cobra knows none of it
+// I/O) are isolated in concordance.go; sync.go orchestrates. Cobra knows none of it
 // (see internal/cli/sessions.go).
 package sessions
 

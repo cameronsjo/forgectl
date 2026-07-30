@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -22,13 +24,50 @@ var reviewModule = module.Manifest{
 }
 
 // newReviewCmd builds `forgectl review` over the registry Deps — the gh
-// source comes from deps.Runner (mirrors the other module constructors).
+// source comes from deps.Runner (mirrors the other module constructors), and
+// the Gitea source (Phase C) is appended only when [review.gitea] is enabled
+// and configured with a host. A configured-but-invalid [review.gitea]
+// section fails the WHOLE command tree (see newReviewConfigErrorCmd) rather
+// than silently narrowing to GitHub-only — module.Manifest.New has no error
+// return, so this is the seam that surfaces the config error to the user.
 func newReviewCmd(deps module.Deps) *cobra.Command {
-	src := review.NewGitHub(deps.Runner, resolveReviewOwners(deps.Cfg))
+	srcs := []review.Source{review.NewGitHub(deps.Runner, resolveReviewOwners(deps.Cfg))}
+	giteaSrc, ok, err := resolveGiteaSource(deps)
+	if err != nil {
+		return newReviewConfigErrorCmd(err)
+	}
+	if ok {
+		srcs = append(srcs, giteaSrc)
+	}
 	// err discarded: "" degrades to an empty store on read (LoadReviewed), and
 	// the write verbs fail loudly via persist()'s path=="" guard.
 	reviewedPath, _ := config.ReviewReviewedPath()
-	return newReviewCmdForSource(src, reviewedPath)
+	return newReviewCmdForSources(srcs, reviewedPath)
+}
+
+// newReviewConfigErrorCmd builds a `review` command tree whose every leaf —
+// the bare command, mark, unmark, sync — fails immediately with err, before
+// touching the reviewed store or shelling out. Used when [review.gitea] is
+// configured (non-zero) but invalid: silently omitting the source (the prior
+// behavior) let a host typo pass unnoticed, and — worse — let review sync's
+// host-scoped prune leave every git.sjo.lol mark stranded with no active
+// source to protect it. A config error must be loud, not a warn-and-omit.
+func newReviewConfigErrorCmd(err error) *cobra.Command {
+	fail := func(*cobra.Command, []string) error {
+		return fmt.Errorf("review: invalid [review.gitea] config: %w", err)
+	}
+	cmd := &cobra.Command{
+		Use:   "review [--kind issue|pr] [--repo <owner/name>]",
+		Short: "Cross-project work inventory: open issues and PRs across your repos",
+		Args:  cobra.NoArgs,
+		RunE:  fail,
+	}
+	cmd.AddCommand(
+		&cobra.Command{Use: "mark <ref>", Args: cobra.ExactArgs(1), RunE: fail},
+		&cobra.Command{Use: "unmark <ref>", Args: cobra.ExactArgs(1), RunE: fail},
+		&cobra.Command{Use: "sync", Args: cobra.NoArgs, RunE: fail},
+	)
+	return cmd
 }
 
 // resolveReviewOwners applies the [review] owners config, falling back to the
@@ -42,9 +81,61 @@ func resolveReviewOwners(cfg config.Config) []string {
 	return []string{defaultReviewOwner}
 }
 
-// newReviewCmdForSource builds the command tree over an explicit source and
+// resolveGiteaSource builds the Gitea review source from [review.gitea].
+// Three outcomes:
+//   - disabled (Enabled == false, whatever else is set) → (nil, false, nil):
+//     the caller silently omits the source — this covers both a genuinely
+//     absent/empty section and a deliberately-off one, matching the pre-Gitea
+//     behavior exactly.
+//   - Enabled == true but Host is empty, or Host fails review.NewGitea's
+//     charset validation → (nil, false, err): an ERROR, not a warn-and-omit.
+//     A config typo must not silently narrow the review inventory — and,
+//     because review sync's prune is host-scoped, a silently-omitted host
+//     would leave every mark for that host permanently stranded (never
+//     eligible for pruning, but never re-verified as open either) with no
+//     visible signal that anything was wrong.
+//   - Enabled == true, Host valid → (src, true, nil).
+func resolveGiteaSource(deps module.Deps) (src review.Source, ok bool, err error) {
+	gc := deps.Cfg.Review.Gitea
+	if !gc.Enabled {
+		return nil, false, nil
+	}
+	if gc.Host == "" {
+		return nil, false, fmt.Errorf("[review.gitea] enabled = true but host is empty")
+	}
+	g, err := review.NewGitea(deps.Runner, gc.Host, gc.Login, gc.Owners)
+	if err != nil {
+		return nil, false, err
+	}
+	return g, true, nil
+}
+
+// extraHosts collects the non-github hosts contributed by srcs — any source
+// that exposes a Host() string (Gitea does) — for the allowlist mark/unmark
+// pass to review.ParseWorkRefForHosts, so a host-qualified ref is only
+// accepted for a host actually wired up as a review source.
+func extraHosts(srcs []review.Source) []string {
+	var hosts []string
+	for _, src := range srcs {
+		if h, ok := src.(interface{ Host() string }); ok {
+			hosts = append(hosts, h.Host())
+		}
+	}
+	return hosts
+}
+
+// activeHosts is extraHosts plus github.com — github.com is always active
+// because newReviewCmd always includes a GitHub source unconditionally.
+// review sync uses this as the host-scoping allowlist for SyncKeysScoped: a
+// host outside this set has no active source THIS run, so its marks are
+// never eligible for pruning (see newReviewSyncCmd).
+func activeHosts(srcs []review.Source) []string {
+	return append([]string{review.GitHubHost}, extraHosts(srcs)...)
+}
+
+// newReviewCmdForSources builds the command tree over explicit sources and a
 // reviewed-store path — the test seam (mirrors newPrPrsCmdForClient).
-func newReviewCmdForSource(src review.Source, reviewedPath string) *cobra.Command {
+func newReviewCmdForSources(srcs []review.Source, reviewedPath string) *cobra.Command {
 	var (
 		asJSON bool
 		kind   string
@@ -64,6 +155,11 @@ owners ([review] owners in config.toml; default cameronsjo) — the whole work
 inventory, rendered live from gh. Nothing is copied or synced; the only local
 state is the reviewed-marks file, and new activity on an item auto-un-dims it.
 
+An optional second source, a self-hosted Gitea instance, joins the inventory
+when [review.gitea] sets enabled = true and a host (enumerated over the tea
+CLI). Its items use host-qualified refs: "host/owner/repo#N" or a Gitea
+issue/pull URL, alongside the plain "owner/repo#N" github.com form.
+
   forgectl review                       unified table (reviewed rows dimmed)
   forgectl review --json                machine-readable output
   forgectl review --kind issue          issues only (or: pr)
@@ -73,17 +169,18 @@ state is the reviewed-marks file, and new activity on an item auto-un-dims it.
   forgectl review sync                  prune marks for closed items`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runReviewList(cmd, src, reviewedPath, asJSON, kind, repo)
+			return runReviewList(cmd, srcs, reviewedPath, asJSON, kind, repo)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
 	cmd.Flags().StringVar(&kind, "kind", "", "filter by kind: issue or pr")
 	cmd.Flags().StringVar(&repo, "repo", "", "filter to one owner/name repo")
 
+	hosts := extraHosts(srcs)
 	cmd.AddCommand(
-		newReviewMarkCmd(reviewedPath),
-		newReviewUnmarkCmd(reviewedPath),
-		newReviewSyncCmd(src, reviewedPath),
+		newReviewMarkCmd(reviewedPath, hosts),
+		newReviewUnmarkCmd(reviewedPath, hosts),
+		newReviewSyncCmd(srcs, reviewedPath),
 	)
 	return cmd
 }

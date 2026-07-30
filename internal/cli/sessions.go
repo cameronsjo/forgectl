@@ -16,7 +16,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/sessions"
 )
 
-// sessionsModule declares the operational-mart ETL extension (ADR-0005):
+// sessionsModule declares the operational-concordance ETL extension (ADR-0005):
 // owns the [sessions] config section, no alias surface.
 var sessionsModule = module.Manifest{
 	Name:      "sessions",
@@ -26,17 +26,17 @@ var sessionsModule = module.Manifest{
 }
 
 // newSessionsCmd builds `forgectl sessions` over the registry Deps — the
-// cross-machine operational mart ETL and its query surface. Mirrors the house
+// cross-machine operational concordance ETL and its query surface. Mirrors the house
 // pattern: this layer parses flags and prints receipts; internal/sessions
 // owns the logic. (No Runner use: the domain package speaks pgx, not argv.)
 func newSessionsCmd(deps module.Deps) *cobra.Command {
 	cfg := deps.Cfg
 	cmd := &cobra.Command{
 		Use:   "sessions",
-		Short: "Sync local session ledgers into the operational mart and query it",
+		Short: "Sync local session ledgers into the operational concordance and query it",
 		Long: `sessions drains this machine's local JSONL write-ahead log
 (Cadence XDG state, with read-only legacy ~/.claude fallbacks) and the runbook markdown corpus
-into the cross-machine operational mart — an
+into the cross-machine operational concordance — an
 always-on Postgres session index — and queries the runbook full-text index.
 
 JSONL is the WAL; Postgres is the index. Hooks only ever append locally, so an
@@ -63,20 +63,20 @@ func resolveDSN(flagDSN string, cfg config.SessionsConfig) string {
 	return cfg.DSN
 }
 
-// withMart runs fn against an open mart connection, closing it after — the
+// withConcordance runs fn against an open concordance connection, closing it after — the
 // resolve-DSN-or-die + connect-or-die preamble the query verbs (search, why,
 // last) all share. An empty DSN is a usage error, never a nil connection.
-func withMart(cmd *cobra.Command, dsn string, cfg config.SessionsConfig, fn func(*sessions.Mart) error) error {
+func withConcordance(cmd *cobra.Command, dsn string, cfg config.SessionsConfig, fn func(*sessions.Concordance) error) error {
 	resolved := resolveDSN(dsn, cfg)
 	if resolved == "" {
-		return fmt.Errorf("no mart DSN: set [sessions] dsn in config, FORGECTL_SESSIONS_DSN, or --dsn")
+		return fmt.Errorf("no concordance DSN: set [sessions] dsn in config, FORGECTL_SESSIONS_DSN, or --dsn")
 	}
-	mart, err := sessions.ConnectMart(cmd.Context(), resolved)
+	concordance, err := sessions.ConnectConcordance(cmd.Context(), resolved)
 	if err != nil {
 		return err
 	}
-	defer mart.Close(cmd.Context())
-	return fn(mart)
+	defer concordance.Close(cmd.Context())
+	return fn(concordance)
 }
 
 // writeJSON encodes v as indented JSON to out — the shared --json emitter for
@@ -91,7 +91,7 @@ func newSessionsSyncCmd(cfg config.Config) *cobra.Command {
 	var opts sessions.SyncOptions
 	cmd := &cobra.Command{
 		Use:   "sync",
-		Short: "Drain local JSONL + runbook markdown into the mart (idempotent)",
+		Short: "Drain local JSONL + runbook markdown into the concordance (idempotent)",
 		Long: `sync upserts one operational row per local session (key: session_id alone;
 machine is provenance) and rebuilds the runbook full-text index from the
 markdown corpus. Idempotent: a second run reports the same sessions as
@@ -108,11 +108,11 @@ unreadable Syncthing config warns and proceeds.
 
 The run ends with a completeness receipt:
   N local sessions found -> M upserted (K unchanged) -> reconciled
-Any local session absent from the mart after the flush prints as MISSING and
+Any local session absent from the concordance after the flush prints as MISSING and
 the command exits non-zero — a skipped session is never silent.
 
   forgectl sessions sync --dry-run     read + count, no DB connection
-  forgectl sessions sync               drain into the configured mart
+  forgectl sessions sync               drain into the configured concordance
   forgectl sessions sync --full        ignore watermarks, re-upsert everything`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -130,7 +130,7 @@ the command exits non-zero — a skipped session is never silent.
 	}
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "read + transform + count; no DB connection")
 	cmd.Flags().BoolVar(&opts.Full, "full", false, "bypass the lastMessageId watermark and re-upsert every session")
-	cmd.Flags().StringVar(&opts.DSN, "dsn", "", "mart DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
+	cmd.Flags().StringVar(&opts.DSN, "dsn", "", "concordance DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
 	cmd.Flags().StringVar(&opts.Machine, "machine", "", "provenance label (default: [sessions] machine, then short hostname)")
 	cmd.Flags().StringVar(&opts.MetricsDir, "metrics-dir", "", "JSONL WAL directory (default: Cadence XDG state)")
 	cmd.Flags().StringVar(&opts.RunbooksDir, "runbooks-dir", "", "runbook markdown corpus (default: Cadence XDG state)")
@@ -157,9 +157,9 @@ func printReceipt(cmd *cobra.Command, r *sessions.Receipt) error {
 		for _, id := range r.Missing {
 			fmt.Fprintf(out, "MISSING %s\n", id)
 		}
-		return fmt.Errorf("reconcile failed: %d local sessions absent from the mart after flush", len(r.Missing))
+		return fmt.Errorf("reconcile failed: %d local sessions absent from the concordance after flush", len(r.Missing))
 	}
-	fmt.Fprintln(out, "reconciled: every local session is present in the mart")
+	fmt.Fprintln(out, "reconciled: every local session is present in the concordance")
 	return nil
 }
 
@@ -171,8 +171,8 @@ func newSessionsSearchCmd(cfg config.Config) *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "search <query>",
-		Short: "Full-text search the mart's runbook index",
-		Long: `search runs a websearch-syntax full-text query over the mart's runbooks
+		Short: "Full-text search the concordance's runbook index",
+		Long: `search runs a websearch-syntax full-text query over the concordance's runbooks
 index (title-weighted tsvector; trigram fallback for partial tokens), so any
 machine can find a runbook or field report it did not author.
 
@@ -180,8 +180,8 @@ machine can find a runbook or field report it did not author.
   forgectl sessions search --project cadence "worktree guard"`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withMart(cmd, dsn, cfg.Sessions, func(mart *sessions.Mart) error {
-				hits, err := mart.SearchRunbooks(cmd.Context(), args[0], project, limit)
+			return withConcordance(cmd, dsn, cfg.Sessions, func(concordance *sessions.Concordance) error {
+				hits, err := concordance.SearchRunbooks(cmd.Context(), args[0], project, limit)
 				if err != nil {
 					return err
 				}
@@ -202,7 +202,7 @@ machine can find a runbook or field report it did not author.
 			})
 		},
 	}
-	cmd.Flags().StringVar(&dsn, "dsn", "", "mart DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
+	cmd.Flags().StringVar(&dsn, "dsn", "", "concordance DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
 	cmd.Flags().StringVar(&project, "project", "", "restrict matches to one project")
 	cmd.Flags().IntVar(&limit, "limit", 10, "maximum hits to return")
 	return cmd
@@ -219,17 +219,17 @@ func newSessionsWhyCmd(cfg config.Config) *cobra.Command {
 		Use:   "why <path|topic>",
 		Short: "Recent sessions whose runbooks explain a path or topic, newest first",
 		Long: `why answers "which predecessor sessions touched this, and why" by searching
-the mart's runbook narrative corpus (field reports, handoffs, plans) for
+the concordance's runbook narrative corpus (field reports, handoffs, plans) for
 <path|topic> and reporting the sessions that authored the matches, newest
 first: session id, date, repo, model, the linking runbook, and a snippet.
 
-Honest degradations — the mart ingests no per-file edit history, so this is a
+Honest degradations — the concordance ingests no per-file edit history, so this is a
 NARRATIVE lookup, not a VCS touch history:
   - <path|topic> is matched against runbook TEXT. A literal path matches only
     where that path string appears in a runbook (the trigram fallback carries
     it) — there is no per-session list of edited files to match against.
   - "intent" is the matching runbook's title; "key decisions" is a text
-    snippet around the match. The mart has no dedicated intent or decisions
+    snippet around the match. The concordance has no dedicated intent or decisions
     field.
   - the link is a local corpus-relative runbook path, not a URL.
   - a session appears only when a runbook carries its session_id; a session
@@ -241,20 +241,20 @@ NARRATIVE lookup, not a VCS touch history:
   forgectl sessions why "colima" --json | jq .`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withMart(cmd, dsn, cfg.Sessions, func(mart *sessions.Mart) error {
-				hits, err := mart.WhySessions(cmd.Context(), args[0], project, limit)
+			return withConcordance(cmd, dsn, cfg.Sessions, func(concordance *sessions.Concordance) error {
+				hits, err := concordance.WhySessions(cmd.Context(), args[0], project, limit)
 				if err != nil {
 					return err
 				}
 				// Degradation note to stderr keeps stdout clean for --json pipes.
 				fmt.Fprintln(cmd.ErrOrStderr(),
 					"note: narrative lookup over the runbook corpus — intent is a runbook title, "+
-						"key decisions a text snippet; the mart indexes no per-file edit history")
+						"key decisions a text snippet; the concordance indexes no per-file edit history")
 				return printWhyHits(cmd, hits, asJSON)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&dsn, "dsn", "", "mart DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
+	cmd.Flags().StringVar(&dsn, "dsn", "", "concordance DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
 	cmd.Flags().StringVar(&project, "project", "", "restrict matches to one repo (exact)")
 	cmd.Flags().IntVar(&limit, "limit", 10, "maximum sessions to return")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON to stdout (stable; notes go to stderr)")
@@ -270,12 +270,12 @@ func newSessionsLastCmd(cfg config.Config) *cobra.Command {
 		Use:   "last <repo>",
 		Short: "The most recent session in a repo and the artifacts it left behind",
 		Long: `last reports the newest session (by end time) recorded for <repo> in the
-mart, plus the runbook artifacts it authored — the closest signal of its
+concordance, plus the runbook artifacts it authored — the closest signal of its
 sign-off state.
 
 Honest degradations:
   - <repo> matches the session's project EXACTLY.
-  - the mart has no explicit outro/lifecycle flag. "state" is inferred:
+  - the concordance has no explicit outro/lifecycle flag. "state" is inferred:
     'committed' reports whether the session produced commits, and the listed
     artifacts are the runbooks it authored (a handoff or field-report among
     them is the sign it wrapped up cleanly). No artifacts means it left no
@@ -285,19 +285,19 @@ Honest degradations:
   forgectl sessions last cadence --json | jq .`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return withMart(cmd, dsn, cfg.Sessions, func(mart *sessions.Mart) error {
-				summary, err := mart.LastSession(cmd.Context(), args[0])
+			return withConcordance(cmd, dsn, cfg.Sessions, func(concordance *sessions.Concordance) error {
+				summary, err := concordance.LastSession(cmd.Context(), args[0])
 				if err != nil {
 					return err
 				}
 				fmt.Fprintln(cmd.ErrOrStderr(),
 					"note: sign-off state is inferred from commits + authored runbooks; "+
-						"the mart has no explicit outro flag")
+						"the concordance has no explicit outro flag")
 				return printLastSession(cmd, args[0], summary, asJSON)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&dsn, "dsn", "", "mart DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
+	cmd.Flags().StringVar(&dsn, "dsn", "", "concordance DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON to stdout (stable; notes go to stderr)")
 	return cmd
 }
@@ -317,7 +317,7 @@ type whyDTO struct {
 }
 
 // printWhyHits renders `sessions why` results. Both paths strip control bytes
-// from mart-sourced fields: encoding/json only escapes 0x00–0x1F, so DEL and
+// from concordance-sourced fields: encoding/json only escapes 0x00–0x1F, so DEL and
 // the C1 range (0x80–0x9F, including 0x9B = single-byte CSI) would otherwise
 // reach a terminal raw through --json. sanitizeTerm's unicode.IsControl check
 // catches them; the JSON path must call it explicitly.
@@ -373,7 +373,7 @@ type lastDTO struct {
 
 // printLastSession renders `sessions last`. A repo with no session is a clean
 // miss: null in --json (any jq can test it), a friendly line otherwise.
-// Mart-sourced fields are control-byte-stripped on both paths (see printWhyHits
+// Concordance-sourced fields are control-byte-stripped on both paths (see printWhyHits
 // for why the JSON encoder alone is insufficient).
 func printLastSession(cmd *cobra.Command, repo string, s *sessions.SessionSummary, asJSON bool) error {
 	out := cmd.OutOrStdout()
@@ -415,7 +415,7 @@ func printLastSession(cmd *cobra.Command, repo string, s *sessions.SessionSummar
 	return nil
 }
 
-// fmtTs renders a nullable mart timestamp as RFC3339 UTC, or "" when the
+// fmtTs renders a nullable concordance timestamp as RFC3339 UTC, or "" when the
 // ledger carried no timestamp — omitempty then drops it from --json.
 func fmtTs(t *time.Time) string {
 	if t == nil {
@@ -434,7 +434,7 @@ func humanTs(t *time.Time) string {
 }
 
 // sanitizeTerm replaces control bytes (everything unicode.IsControl except
-// tab) with spaces so mart-indexed content renders inert in the terminal.
+// tab) with spaces so concordance-indexed content renders inert in the terminal.
 func sanitizeTerm(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '\t' || !unicode.IsControl(r) {

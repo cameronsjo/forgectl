@@ -1,0 +1,15 @@
+{
+  "_note": "Vendored third-party asset for the docs reader. Mirrors the provenance convention of assets/artificer/provenance.json. Update by re-copying a pinned release and regenerating this file.",
+  "files": [
+    {
+      "path": "mermaid.min.js",
+      "package": "mermaid",
+      "version": "11.12.3",
+      "license": "MIT",
+      "source": "npm registry tarball, dist/mermaid.min.js",
+      "sha256": "71dc54e481779b526de5e615c2eb00c99fa5acb75da9c5524d02e333d2fda89a",
+      "bytes": 2887239,
+      "why_vendored": "The reader must render diagrams with no network call. A CDN script tag would make opening a local document a third-party request, which is exactly the posture this tool is built to avoid."
+    }
+  ]
+}

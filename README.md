@@ -13,7 +13,7 @@ Built for two hands and one thumb:
 brew install cameronsjo/tap/forgectl
 ```
 
-Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against the self-hosted Gitea), `docker` (`bench status`/`up`, `docker build/run/shell`).
+Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against the self-hosted Gitea, and `review` when `[review.gitea]` is enabled), `docker` (`bench status`/`up`, `docker build/run/shell`, and `clean --docker`), `npm`/`pnpm`/`pip`/`go`/`brew` (`clean --caches` — each is independently opt-in and skipped, not required, when absent). `update`'s roster shares that same `brew`/`go`/`npm` dependency (`softwareupdate` is a macOS built-in) — each step is independently scoped, so a missing tool fails only its own step, never the others.
 
 ## Usage
 
@@ -82,12 +82,12 @@ forgectl bench status --json              # machine-readable JSON (safe to pipe)
 forgectl bench up                         # bring up the configured services via their own entrypoints
 forgectl bench open [target]              # open a bench UI (hearth | grafana; default hearth)
 
-# sessions — drain local session ledgers into the mart (a shared Postgres index
+# sessions — drain local session ledgers into the concordance (a shared Postgres index
 # of every machine's session history, queried from any of them)
 forgectl sessions sync --dry-run          # read + count the local JSONL WAL; no DB connection
-forgectl sessions sync                    # idempotent upsert into the mart + rebuild the runbook index
+forgectl sessions sync                    # idempotent upsert into the concordance + rebuild the runbook index
 forgectl sessions sync --full             # bypass the lastMessageId watermark, re-upsert everything
-forgectl sessions search "<query>"        # full-text search the mart's runbook index from any machine
+forgectl sessions search "<query>"        # full-text search the concordance's runbook index from any machine
 forgectl sessions why "<path|topic>"      # recent sessions whose runbooks explain a path or topic, newest first
 forgectl sessions last <repo>             # the newest session in a repo + the artifacts it left behind
 
@@ -111,6 +111,12 @@ forgectl clean                           # dry-run report against ~/Projects (no
 forgectl clean --type node               # only one type: node|python|go|build
 forgectl clean --apply                   # DESTRUCTIVE: delete everything reclaimable, after a confirmation
                                           #   prompt (skips dirty git trees unless --force)
+forgectl clean --caches --apply          # DESTRUCTIVE, opt-in: also clear detected package-manager
+                                          #   caches (npm/pnpm/pip/go/brew) behind one confirmation;
+                                          #   brew ALSO removes old formula versions from the Cellar.
+                                          #   Not combinable with --type (it only filters dirs)
+forgectl clean --docker --apply          # DESTRUCTIVE, opt-in: also prune docker (containers/images/
+                                          #   volumes/build cache), its own confirmation
 
 # docker — build/run/shell images tagged from git repo/branch/sha
 forgectl docker build [context]          # build, tagging {repo}:{branch}-{sha} and :dev
@@ -127,6 +133,11 @@ forgectl net                             # show the cached (or freshly probed) a
 forgectl net --refresh                   # force a new probe, bypassing the cache
 forgectl net --json                      # machine-readable output for scripting
 
+# ghostty — theme + keybind reporting, parsed live from the ghostty CLI
+forgectl ghostty themes                  # custom themes, active one marked
+forgectl ghostty themes --all            # also list the themes bundled with ghostty
+forgectl ghostty cheat                   # keybind cheatsheet, parsed from +list-keybinds
+
 # pip — comment- and whitespace-preserving pip.conf editor
 forgectl pip remove                      # comment out [global] index-url (reversible)
 forgectl pip restore                     # un-comment whatever remove last tagged
@@ -141,6 +152,37 @@ forgectl quarantine status               # show which targets are hidden
 forgectl review                          # unified table (reviewed rows dimmed)
 forgectl review --kind issue             # issues only (or: pr)
 forgectl review mark owner/repo#42       # mark an item reviewed
+
+# update — weekly package-manager + OS maintenance, independently-scoped steps
+forgectl update check                    # report-only for every step (brew/softwareupdate/go/npm), no mutation —
+                                          #   each step's captured output (the actual finding) goes to stderr +
+                                          #   the log, and to --json's own per-step field
+forgectl update run                      # DESTRUCTIVE, one confirmation: brew (upgrade --formula/cleanup), go
+                                          #   (cache clean), npm (update) are SKIPPED without --yes; softwareupdate
+                                          #   (check-only, never installs) still runs. brew's cleanup ALSO removes
+                                          #   the Cellar versions upgrade just superseded (the rollback path), and
+                                          #   go's clean wipes the module cache machine-wide, for every project —
+                                          #   the prompt names both when the relevant step is selected. brew is
+                                          #   --formula-scoped in BOTH check and run: casks are out of scope
+                                          #   entirely (a cask upgrade can hang on a sudo/GUI prompt this
+                                          #   unattended tool has no stdin to answer) — upgrade a cask yourself
+                                          #   with `brew upgrade --cask`
+forgectl update run --yes                # skip the prompt, apply the same effects non-interactively (cron/CI)
+forgectl update run --only brew,go       # restrict to a subset of the roster
+forgectl update run --json               # machine-readable summary (with each step's output) to stdout ONLY;
+                                          #   the full per-step transcript goes to stderr + a timestamped log
+                                          #   (update-logs/, auto-pruned after 7 days)
+
+# doctor — ecosystem health check: claude, tmux/ghostty/cmux, gh auth, config,
+#   the local bench (hearth/chronicle/flux), the trust store, forgectl's own currency
+forgectl doctor                          # one line per check, with a remediation hint on any warn/fail
+forgectl doctor --json                   # machine-readable report for scripting
+
+# upgrade — update forgectl itself via the Homebrew tap (never `go build` over the brew-linked binary)
+forgectl upgrade                         # brew update + brew upgrade --cask forgectl; brew owns the checksum + atomic install
+forgectl upgrade --check                 # report whether an update is available, no mutation
+                                          #   a source build (go build/go run) WARNS instead of attempting anything —
+                                          #   there's no cask install to manage
 
 # y — read/write the system clipboard (macOS only)
 echo hi | forgectl y copy                # copy stdin to the clipboard

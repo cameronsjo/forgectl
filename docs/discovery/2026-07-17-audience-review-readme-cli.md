@@ -85,7 +85,7 @@ around it assume a human.
 
 - **`fx` does not exist after the documented install** — the published cask
   stages only `forgectl`; the alias lives in the author's dotfiles.
-- Load-bearing nouns never defined: mart, hearth, chronicle, flux,
+- Load-bearing nouns never defined: concordance, hearth, chronicle, flux,
   `<breadcrumb>` (a filesystem path discoverable only by reading Go source).
 - Companion dependencies (`sesh`, `gh`, `tea`, `docker`) undeclared in
   Install; `sesh` lacks the `LookPath` guard `claude` gets.

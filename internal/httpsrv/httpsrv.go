@@ -14,6 +14,11 @@
 package httpsrv
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -71,17 +76,76 @@ func HostAllowlist(allowed []string) func(http.Handler) http.Handler {
 // wiring this in — BearerToken has no "auth optional" mode of its own, so a
 // caller that doesn't need auth simply never adds this middleware to its
 // chain.
+//
+// The comparison hashes both the expected and presented values (SHA-256)
+// before running subtle.ConstantTimeCompare on the two fixed-size digests,
+// rather than comparing the raw header bytes directly. Two reasons: a plain
+// `!=`/bytes.Equal short-circuits on the first differing byte, leaking the
+// correct token one byte at a time to an attacker who can measure response
+// timing; and ConstantTimeCompare itself returns immediately when its inputs
+// have different lengths, which would leak the token's length if compared
+// raw. Hashing first makes both sides always exactly 32 bytes, so the compare
+// step reveals nothing about the token's content or length.
+//
+// The guarantee is scoped to the SECRET, not to total request time: SHA-256
+// cost scales with input size, so a caller can still learn how long its own
+// header was from how long hashing it took. That is not a leak — the attacker
+// supplied that header and already knows its length. What no measurement
+// reveals is any property of the expected token, which is the only thing being
+// protected here.
 func BearerToken(token string) func(http.Handler) http.Handler {
-	want := "Bearer " + token
+	want := sha256.Sum256([]byte("Bearer " + token))
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != want {
+			got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+			if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// IsLoopbackAddr reports whether addr's host is a loopback address, i.e.
+// whether binding it exposes the server ONLY to this machine.
+//
+// It exists so a caller can make "is this exposed to the network?" an explicit
+// decision instead of a guess. Anything it cannot confidently classify as
+// loopback — an unparseable address, a hostname, the empty host that means
+// "bind every interface" — is reported as NOT loopback. That direction of
+// failure is the safe one: a caller using this to decide whether to require
+// authentication must err toward requiring it, never toward skipping it.
+func IsLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// No port, or malformed. Try the whole string as a bare host rather
+		// than assuming.
+		host = addr
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return false // ":3590" binds every interface, including public ones
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false // a hostname we cannot resolve here; assume exposed
+	}
+	return ip.IsLoopback()
+}
+
+// GenerateToken returns a cryptographically random bearer token, hex-encoded.
+// Used when a caller binds off loopback and therefore needs authentication it
+// was not given explicitly.
+func GenerateToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate token: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 // Chain composes middleware around h in the given order — mw[0] is

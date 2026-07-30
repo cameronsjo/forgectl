@@ -4,8 +4,9 @@
 // loopback HTTP. It knows nothing of Cobra — that decoupling is the house
 // pattern (see internal/tmux, internal/net).
 //
-// PR1 scope only: render + index, no live reload, no mermaid/pan-zoom SVG
-// (forgectl#93 stages those as PR2/PR3).
+// Current scope: render, index, and live reload (a filesystem Watcher rebuilds
+// the Index and notifies browsers over SSE). Mermaid and pan/zoom SVG are still
+// outstanding — forgectl#93 stages those separately.
 package docs
 
 import (
@@ -52,6 +53,11 @@ type Doc struct {
 	// RelPath is the doc's path relative to its root, always forward-slash
 	// separated regardless of host OS — it's used as a URL path segment.
 	RelPath string
+	// AbsPath is the doc's canonical, symlink-resolved absolute path — the
+	// same value ResolveInRoot would produce for this doc's RelPath. It is
+	// the join key Index.Resolve uses to confirm a resolved request path was
+	// actually indexed (see Index.pathIndex); never sent to the client.
+	AbsPath string
 	// Title is the doc's first level-1 ("# ") heading, or its filename
 	// (without extension) if none is found.
 	Title string
@@ -60,11 +66,42 @@ type Doc struct {
 }
 
 // Index holds a closed set of Roots and the Docs discovered under them at
-// construction time. It does not watch the filesystem — a changed tree needs
-// a fresh NewIndex (live reload is forgectl#93 PR2).
+// construction time. An Index is never mutated in place: a changed tree
+// produces a whole new Index (Rebuild), which the live-reload Watcher installs
+// by pointer swap (Store). That immutability is what lets handlers read one
+// without synchronization.
 type Index struct {
+	// paths is the caller's original, pre-canonicalization argument list, kept
+	// so Rebuild can reproduce this index from the same request the caller
+	// actually made. Re-deriving it from roots would be subtly wrong: a Root's
+	// Path is canonical and, for a single-file root, is the file's PARENT
+	// directory — rebuilding from that would silently widen a "serve this one
+	// file" root into "serve its whole directory".
+	paths []string
 	roots []Root
 	docs  []Doc
+	// pathIndex is the set of every indexed (root label, absolute path) pair,
+	// built once in NewIndex. Resolve consults it so the SAME predicate that
+	// decided what's in the sidenav (walkRoot's hidden/vendor-dir exclusions,
+	// symlinked-file exclusion) also decides what's servable — a directory
+	// excluded from the walk must not remain reachable by a direct URL guess.
+	//
+	// Membership is keyed by ROOT as well as path, not by path alone. Roots may
+	// legitimately overlap: naming a normally-excluded directory (say a
+	// vault's .trash) as its own root is explicit consent to index it, but that
+	// consent belongs to that root's URL namespace only. A single global set of
+	// absolute paths would let the child root's consent leak sideways into the
+	// parent root's namespace, where the same file is still deliberately hidden
+	// from the sidenav — reopening the excluded-directory leak through
+	// configuration instead of through code.
+	pathIndex map[docKey]bool
+}
+
+// docKey identifies one indexed document by the root it was indexed under plus
+// its canonical absolute path. Both halves are required: see Index.pathIndex.
+type docKey struct {
+	rootLabel string
+	absPath   string
 }
 
 // NewIndex builds an Index over paths, each of which is either a directory
@@ -75,7 +112,7 @@ type Index struct {
 // extension is a hard error — a docs server should never silently start
 // with fewer roots than the caller asked for.
 func NewIndex(paths []string) (*Index, error) {
-	idx := &Index{}
+	idx := &Index{paths: append([]string(nil), paths...)}
 	labels := map[string]bool{}
 
 	for _, p := range paths {
@@ -107,6 +144,11 @@ func NewIndex(paths []string) (*Index, error) {
 	}
 
 	sort.Slice(idx.docs, func(i, j int) bool { return idx.docs[i].ModTime.After(idx.docs[j].ModTime) })
+
+	idx.pathIndex = make(map[docKey]bool, len(idx.docs))
+	for _, d := range idx.docs {
+		idx.pathIndex[docKey{rootLabel: d.RootLabel, absPath: d.AbsPath}] = true
+	}
 	return idx, nil
 }
 
@@ -159,6 +201,7 @@ func indexFileRoot(labels map[string]bool, file string) (Root, Doc, error) {
 	doc := Doc{
 		RootLabel: label,
 		RelPath:   base,
+		AbsPath:   real,
 		Title:     titleFor(real, base),
 		ModTime:   fi.ModTime(),
 	}
@@ -185,6 +228,28 @@ var hiddenOrVendorDir = map[string]bool{
 	"vendor":       true,
 }
 
+// excludedDir reports whether a directory with this base name must never be
+// descended into. It is deliberately a single named predicate rather than an
+// inline condition, because it has TWO callers that must agree byte-for-byte:
+// walkRoot (which decides what lands in the index, and therefore — since
+// Resolve gates on pathIndex membership — what is servable at all) and the
+// live-reload Watcher (which decides which subtrees it registers and which
+// events it acts on). This repo already shipped one security bug from exactly
+// this kind of drift: the exclusions were UI-only in walkRoot while Resolve
+// re-derived servability from the filesystem, so an excluded file was hidden
+// from the sidenav yet served on a direct URL guess. A watcher carrying its
+// own copy of the rule would reintroduce the same class of gap — a write
+// under .trash/ waking the reader up, or a genuine doc silently not
+// triggering reload.
+//
+// Callers apply this to a directory's BASE name, and must exempt a root's own
+// path: a user may legitimately point a root at a dot-directory (or at a
+// directory literally named "vendor"), and naming it explicitly is consent to
+// index it. Only directories discovered BENEATH a root are subject to it.
+func excludedDir(name string) bool {
+	return hiddenOrVendorDir[name] || strings.HasPrefix(name, ".")
+}
+
 // walkRoot discovers markdown files under root. It does not follow symlinks
 // for either directories or files during the walk — fs.WalkDir already
 // doesn't descend into a symlinked directory, and a symlinked file is
@@ -199,7 +264,7 @@ func walkRoot(root Root) ([]Doc, error) {
 			return err
 		}
 		if d.IsDir() {
-			if path != root.Path && (hiddenOrVendorDir[d.Name()] || strings.HasPrefix(d.Name(), ".")) {
+			if path != root.Path && excludedDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -210,6 +275,20 @@ func walkRoot(root Root) ([]Doc, error) {
 		if !AllowedExt(path) {
 			return nil
 		}
+
+		// Resolve through EvalSymlinks (rather than trusting that a
+		// symlink-free walk under an already-canonical root produces an
+		// already-canonical path) so Doc.AbsPath is byte-identical to
+		// whatever ResolveInRoot computes for the same file at request
+		// time — that identity is what lets Resolve's pathIndex membership
+		// check work at all. A file that vanishes or becomes unreadable
+		// between WalkDir's stat and this call is skipped, not a hard
+		// index-build failure.
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return nil
+		}
+		resolved = filepath.Clean(resolved)
 
 		rel, err := filepath.Rel(root.Path, path)
 		if err != nil {
@@ -223,6 +302,7 @@ func walkRoot(root Root) ([]Doc, error) {
 		docs = append(docs, Doc{
 			RootLabel: root.Label,
 			RelPath:   filepath.ToSlash(rel),
+			AbsPath:   resolved,
 			Title:     titleFor(path, rel),
 			ModTime:   info.ModTime(),
 		})
@@ -256,6 +336,25 @@ func titleFor(absPath, relPath string) string {
 	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
+// Rebuild re-walks this index's original root arguments and returns a fresh
+// Index, leaving the receiver untouched. It is how live reload picks up files
+// that were created, deleted, renamed, or retitled since the last build.
+//
+// Rebuilding through NewIndex — rather than patching the existing index in
+// place — is deliberate: NewIndex is the only code path that populates
+// pathIndex, and pathIndex membership is what Resolve uses to decide whether a
+// path is servable at all. An incremental "just add the changed file" update
+// would be a second, parallel implementation of the exclusion rules, which is
+// exactly the drift that produced the excluded-directory leak this reader
+// already had to fix once. One builder, one gate.
+//
+// A rebuild can legitimately fail (a root was renamed or unmounted while the
+// server was running). Callers SHOULD keep serving the previous index in that
+// case rather than tearing the server down.
+func (idx *Index) Rebuild() (*Index, error) {
+	return NewIndex(idx.paths)
+}
+
 // Roots returns the indexed roots in configuration order.
 func (idx *Index) Roots() []Root {
 	out := make([]Root, len(idx.roots))
@@ -284,19 +383,51 @@ func (idx *Index) Find(rootLabel, relPath string) (Doc, bool) {
 	return Doc{}, false
 }
 
+// FindByAbsPath returns the indexed Doc whose canonical absolute path is
+// absPath. It is how `docs open` turns a path the operator typed into the
+// (root, relPath) pair a URL needs, WITHOUT reimplementing root matching or the
+// exclusion rules on the client side — the index that decided what is servable
+// is the thing being asked.
+//
+// absPath must already be canonical (symlink-resolved); callers get that from
+// CanonicalizeRoot or filepath.EvalSymlinks.
+func (idx *Index) FindByAbsPath(absPath string) (Doc, bool) {
+	for _, d := range idx.docs {
+		if d.AbsPath == absPath {
+			return d, true
+		}
+	}
+	return Doc{}, false
+}
+
 // ErrRootNotFound indicates a request named a root label the index doesn't
 // have.
 var ErrRootNotFound = errors.New("no such docs root")
 
+// ErrNotIndexed indicates a resolved path is a real, in-root, allowed-
+// extension file that nonetheless was never added to the index — e.g. it
+// lives under a directory walkRoot excludes (.git, node_modules, vendor, any
+// dot-directory). Without this check, Resolve re-derives a path straight
+// from the filesystem and would happily serve a file the sidenav deliberately
+// hides; membership in the index is what makes "excluded from the walk" and
+// "not servable" the same guarantee instead of two claims that can drift
+// apart.
+var ErrNotIndexed = errors.New("file was not indexed")
+
 // Resolve maps a (rootLabel, relPath) URL pair to a safe, on-disk absolute
 // path: it looks up rootLabel among the indexed Roots, then runs relPath
 // through the full ResolveInRoot traversal chain (security.go) against that
-// root's canonical path, and finally checks the resolved path's extension
-// against AllowedExt. For a single-file root (Root.OnlyFile set), any
-// resolution other than that exact file is rejected — naming one file on
-// the command line must not grant access to its siblings. Any failure
-// returns a wrapped error; the HTTP layer maps all of them to 404 without
-// distinguishing the cause to the client.
+// root's canonical path, checks the resolved path's extension against
+// AllowedExt, and finally requires the (root label, resolved path) PAIR to be a
+// member of idx.pathIndex — the exact set walkRoot/indexFileRoot populated at
+// index build time. That last check is what closes the gap between "hidden from
+// the sidenav" and "not servable": Resolve never re-derives servability from
+// the live filesystem independently of what was actually indexed. For a
+// single-file root (Root.OnlyFile set), any resolution other than that exact
+// file is also rejected — naming one file on the command line must not grant
+// access to its siblings. Any failure returns a wrapped error; the HTTP
+// layer maps all of them to 404 without distinguishing the cause to the
+// client.
 func (idx *Index) Resolve(rootLabel, relPath string) (string, error) {
 	for _, r := range idx.roots {
 		if r.Label != rootLabel {
@@ -311,6 +442,11 @@ func (idx *Index) Resolve(rootLabel, relPath string) (string, error) {
 		}
 		if !AllowedExt(resolved) {
 			return "", ErrDisallowedExt
+		}
+		// Keyed on r.Label, so a file indexed under a DIFFERENT (possibly
+		// overlapping) root does not satisfy membership for this one.
+		if !idx.pathIndex[docKey{rootLabel: r.Label, absPath: resolved}] {
+			return "", ErrNotIndexed
 		}
 		return resolved, nil
 	}
