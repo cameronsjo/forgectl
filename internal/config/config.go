@@ -725,6 +725,26 @@ func PrSessionsDir() (string, error) {
 	return filepath.Join(dir, "pr-sessions"), nil
 }
 
+// DocsServerPath returns the discovery file a running `forgectl docs serve`
+// writes so other commands can find and steer it:
+// <os.UserConfigDir()>/forgectl/docs-server.json (macOS: ~/Library/Application
+// Support/forgectl/docs-server.json; Linux: ~/.config/forgectl/
+// docs-server.json). It derives from the same configDir() base as every other
+// forgectl path, so none of them drift.
+//
+// The file exists because `docs open` STEERS an already-running reader rather
+// than launching one, and the bound address is not knowable in advance — the
+// default bind uses port 0, so the OS assigns it. It holds the resolved address
+// and, when one is in use, the bearer token; it is written after the listener
+// resolves and removed on shutdown.
+func DocsServerPath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "docs-server.json"), nil
+}
+
 // PrFindingsDir returns the forgectl-owned directory that holds `forgectl pr`
 // local-review findings: <os.UserConfigDir()>/forgectl/pr-findings (macOS:
 // ~/Library/Application Support/forgectl/pr-findings; Linux:

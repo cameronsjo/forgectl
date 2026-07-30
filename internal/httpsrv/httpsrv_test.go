@@ -18,10 +18,26 @@ package httpsrv
 //
 // Chain (Classification: helper)
 //   [x] Happy: middleware runs outermost-first
+//
+// IsLoopbackAddr (Classification: security gate — exposure classification,
+//              fails toward "exposed" on anything unclear)
+//   [x] Happy: 127.0.0.1:3590, 127.0.0.1, localhost:80, [::1]:3590, ::1, and
+//              another 127.x.x.x address are all loopback
+//   [x] Unhappy (security): 0.0.0.0:3590, ":3590" (every interface), a LAN
+//              address, a Tailscale-shaped 100.x.y.z address, an arbitrary
+//              hostname, and malformed input are all NOT loopback — the bias
+//              toward false is deliberate: a caller uses this to decide
+//              whether to REQUIRE authentication, so anything unclassifiable
+//              must read as exposed, never as safe
+//
+// GenerateToken (Classification: secret generation)
+//   [x] Happy: returns a 64-hex-char (32-byte) token
+//   [x] Happy: two calls return different tokens
 
 import (
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -173,5 +189,65 @@ func TestChain_RunsOutermostFirst(t *testing.T) {
 
 	if len(order) != 2 || order[0] != "outer" || order[1] != "inner" {
 		t.Errorf("order = %v, want [outer inner]", order)
+	}
+}
+
+func TestIsLoopbackAddr_LoopbackForms_True(t *testing.T) {
+	cases := []string{"127.0.0.1:3590", "127.0.0.1", "localhost:80", "[::1]:3590", "::1", "127.5.5.5:80"}
+	for _, addr := range cases {
+		t.Run(addr, func(t *testing.T) {
+			if !IsLoopbackAddr(addr) {
+				t.Errorf("IsLoopbackAddr(%q) = false, want true", addr)
+			}
+		})
+	}
+}
+
+// TestIsLoopbackAddr_NonLoopbackAndUnclassifiable_False pins the deliberate
+// bias documented on IsLoopbackAddr: anything this function cannot confirm is
+// loopback must come back false, never true. A caller wires authentication on
+// that boolean, so the failure direction that matters is "wrongly calls
+// something exposed loopback" — that's the one that would ship a server with
+// no auth reachable off the box. This test asserts every shape that bias is
+// meant to catch, not just the unambiguous ones.
+func TestIsLoopbackAddr_NonLoopbackAndUnclassifiable_False(t *testing.T) {
+	cases := []string{
+		"0.0.0.0:3590",          // every interface
+		":3590",                 // empty host = every interface
+		"192.168.1.10:3590",     // LAN address
+		"100.64.1.2:3590",       // Tailscale-shaped CGNAT range
+		"example.internal:3590", // arbitrary hostname, not resolved here
+		"::not-an-address::",    // malformed input
+	}
+	for _, addr := range cases {
+		t.Run(addr, func(t *testing.T) {
+			if IsLoopbackAddr(addr) {
+				t.Errorf("IsLoopbackAddr(%q) = true, want false — a caller decides whether to require auth from this, and an unclassifiable or non-loopback address must read as exposed", addr)
+			}
+		})
+	}
+}
+
+func TestGenerateToken_Returns64HexChars(t *testing.T) {
+	token, err := GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(token) {
+		t.Errorf("GenerateToken = %q, want 64 lowercase hex characters (32 random bytes)", token)
+	}
+}
+
+func TestGenerateToken_TwoCalls_Differ(t *testing.T) {
+	a, err := GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	b, err := GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	if a == b {
+		t.Errorf("two GenerateToken calls returned the same value %q, want independently random tokens", a)
 	}
 }

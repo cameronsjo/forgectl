@@ -1,12 +1,14 @@
 package docs
 
 import (
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -14,17 +16,9 @@ import (
 // recentCount is how many docs the "Recent" sidenav group shows.
 const recentCount = 5
 
-// NewHandler builds the complete `forgectl docs serve` HTTP handler over an
-// already-built Index: the doc-shell page, per-doc routes, and the two
-// embedded static assets. It is the docs package's sole exported handler
-// constructor — security POLICY (Host allowlist, bearer token — anything a
-// caller might configure differently) is the caller's job via internal/
-// httpsrv middleware wrapped around this handler. X-Content-Type-Options is
-// different: it's a fixed, no-config hardening default for every response
-// this handler ever produces, so it's applied here rather than pushed out
-// as an opt-in caller concern.
-// events is where the live-reload SSE stream is served. Declared as a constant
-// because the embedded reload client (assets/reload.js) must agree with it.
+// eventsPath is where the live-reload SSE stream is served. Declared as a
+// constant because the embedded reload client (assets/reload.js) must agree
+// with it.
 const eventsPath = "/events"
 
 // reloadMessage is the single SSE payload the server ever sends. The client
@@ -33,15 +27,98 @@ const eventsPath = "/events"
 // devtools and in a curl of the endpoint.
 const reloadMessage = "reload"
 
+// locatePath answers "which URL serves the file at this path?" for
+// `forgectl docs open`.
+const locatePath = "/api/locate"
+
+// locateResponse is the locate endpoint's payload. It deliberately does NOT
+// echo an absolute path: Doc.AbsPath is documented as never being sent to a
+// client, and the caller already knows the path it asked about.
+type locateResponse struct {
+	Root  string `json:"root"`
+	Rel   string `json:"rel"`
+	Title string `json:"title"`
+}
+
+// handleLocate maps an absolute filesystem path to the (root, rel) pair whose
+// URL serves it, or 404 when the running index does not contain that file.
+//
+// Why the server answers this instead of the client computing it: the index is
+// the single source of truth for what is servable — root labels (including the
+// numeric disambiguation two same-named roots get), the walk's directory
+// exclusions, and the single-file-root restriction all live here. A client that
+// built URLs by string-joining a path onto a root would happily produce a URL
+// for a file the server then refuses to serve, and would drift from the
+// exclusion rules the moment either side changed. It also reflects live reload
+// for free, because it reads the current index.
+//
+// On disclosure: this tells the caller whether a given path is indexed. That is
+// membership only — never content, and never a path the caller did not already
+// supply — and the caller is the operator on the same machine, reaching a
+// loopback server that requires a bearer token whenever it is bound anywhere
+// else. It hands a stranger nothing they could not learn by requesting the doc
+// URL directly.
+func handleLocate(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		raw := r.URL.Query().Get("path")
+		if raw == "" {
+			http.Error(w, "missing path", http.StatusBadRequest)
+			return
+		}
+
+		// Canonicalize the same way the indexer did, so the comparison is
+		// like-for-like. A path that cannot be resolved is simply not indexed.
+		resolved, err := filepath.EvalSymlinks(raw)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		resolved = filepath.Clean(resolved)
+
+		doc, ok := store.Current().FindByAbsPath(resolved)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if err := json.NewEncoder(w).Encode(locateResponse{
+			Root:  doc.RootLabel,
+			Rel:   doc.RelPath,
+			Title: doc.Title,
+		}); err != nil {
+			slog.Debug("docs: encoding locate response failed.", "error", err)
+		}
+	}
+}
+
+// NewHandler builds the complete `forgectl docs serve` HTTP handler over a
+// Store holding the current Index: the doc-shell page, per-doc routes, the
+// live-reload stream, the locate endpoint, and the embedded static assets. It is
+// the docs package's sole exported handler constructor — security POLICY (Host
+// allowlist, bearer token, anything a caller might configure differently) is the
+// caller's job via internal/httpsrv middleware wrapped around this handler.
+// X-Content-Type-Options is different: it's a fixed, no-config hardening default
+// for every response this handler ever produces, so it's applied here rather
+// than pushed out as an opt-in caller concern.
+//
+// A nil events Broker disables live reload — the stream endpoint 404s and
+// nothing else changes.
 func NewHandler(store *Store, events *Broker) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /assets/artificer.css", serveStaticCSS(artificerCSS))
 	mux.HandleFunc("GET /assets/artificer-theme.js", serveStaticJS(artificerThemeJS))
 	mux.HandleFunc("GET /assets/reload.js", serveStaticJS(reloadJS))
+	mux.HandleFunc("GET /assets/mermaid.min.js", serveStaticJS(mermaidJS))
+	mux.HandleFunc("GET /assets/mermaid-init.js", serveStaticJS(mermaidInitJS))
+	mux.HandleFunc("GET /assets/svg-panzoom.js", serveStaticJS(panZoomJS))
+	mux.HandleFunc("GET /assets/artificer-tree.js", serveStaticJS(artificerTreeJS))
 	mux.HandleFunc("GET /assets/chroma.css", serveStaticCSS(ChromaCSS()))
+	mux.HandleFunc("GET /assets/diagram.css", serveStaticCSS(diagramCSS))
 
 	mux.HandleFunc("GET "+eventsPath, handleEvents(events))
+	mux.HandleFunc("GET "+locatePath, handleLocate(store))
 	mux.HandleFunc("GET /doc/{root}/{rest...}", handleDoc(store))
 	mux.HandleFunc("GET /{$}", handleIndexRoot(store))
 

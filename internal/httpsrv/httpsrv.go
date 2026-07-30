@@ -14,8 +14,11 @@
 package httpsrv
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -102,6 +105,47 @@ func BearerToken(token string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// IsLoopbackAddr reports whether addr's host is a loopback address, i.e.
+// whether binding it exposes the server ONLY to this machine.
+//
+// It exists so a caller can make "is this exposed to the network?" an explicit
+// decision instead of a guess. Anything it cannot confidently classify as
+// loopback — an unparseable address, a hostname, the empty host that means
+// "bind every interface" — is reported as NOT loopback. That direction of
+// failure is the safe one: a caller using this to decide whether to require
+// authentication must err toward requiring it, never toward skipping it.
+func IsLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// No port, or malformed. Try the whole string as a bare host rather
+		// than assuming.
+		host = addr
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return false // ":3590" binds every interface, including public ones
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false // a hostname we cannot resolve here; assume exposed
+	}
+	return ip.IsLoopback()
+}
+
+// GenerateToken returns a cryptographically random bearer token, hex-encoded.
+// Used when a caller binds off loopback and therefore needs authentication it
+// was not given explicitly.
+func GenerateToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate token: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 // Chain composes middleware around h in the given order — mw[0] is
