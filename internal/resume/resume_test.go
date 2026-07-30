@@ -682,6 +682,32 @@ func TestSave_RejectsBadSessionID(t *testing.T) {
 	}
 }
 
+// TestLoad_RejectsAnIDThatDisagreesWithItsFilename covers the store's own
+// admission point. LoadAll keys on the id INSIDE the record, so a body that
+// disagreed with its filename would have put an unvalidated string into Scan's
+// session map — reaching transcript path joins and claude's argv, the exact
+// class the history and registry checks close.
+func TestLoad_RejectsAnIDThatDisagreesWithItsFilename(t *testing.T) {
+	dir := t.TempDir()
+	const name = "aaaabbbb-0000-0000-0000-000000000001"
+	body := `{"id":"../../../../etc/passwd","cwd":"/repo/evil","last_seen":"2026-07-30T00:00:00Z"}`
+	if err := os.WriteFile(filepath.Join(dir, name+".json"), []byte(body), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if _, ok := Load(dir, name); ok {
+		t.Error("Load accepted a record whose body id disagrees with its filename")
+	}
+	if got := LoadAll(dir); len(got) != 0 {
+		t.Errorf("LoadAll returned %d record(s), want 0", len(got))
+	}
+	for id := range LoadAll(dir) {
+		if !validSessionID(id) {
+			t.Errorf("LoadAll surfaced an invalid session id %q", id)
+		}
+	}
+}
+
 // TestScan_RejectsHostileIDsAtAdmission is the defense-in-depth check behind
 // the security review's shared root: ids are validated where they ENTER the
 // package, not at each of the several sinks they later reach (filepath.Join for

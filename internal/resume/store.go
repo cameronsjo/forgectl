@@ -57,7 +57,17 @@ func Load(dir, id string) (*Record, bool) {
 		return nil, false
 	}
 	var r Record
-	if json.Unmarshal(data, &r) != nil || r.ID == "" {
+	if json.Unmarshal(data, &r) != nil {
+		return nil, false
+	}
+	// The id inside the file is a THIRD entry point, distinct from the
+	// filename this function was handed. LoadAll keys its result on r.ID, so
+	// a record whose body disagreed with its filename would put an
+	// unvalidated string into Scan's session map — and from there into
+	// transcript path joins and claude's argv, which is exactly the class the
+	// admission checks in scanHistory and readRegistry close. Requiring the
+	// two to agree validates the body and rejects a mismatch in one step.
+	if r.ID != id {
 		return nil, false
 	}
 	return &r, true
