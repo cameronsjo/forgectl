@@ -548,16 +548,87 @@ func TestRepoName(t *testing.T) {
 	}
 }
 
-// TestDialect pins the classification the drift check rests on.
+// TestDialect pins the classification the drift check rests on. The unknown
+// case matters most: if a third naming convention read as DialectSession, the
+// tripwire would report no drift while Restore wrote where nothing reads.
 func TestDialect(t *testing.T) {
 	cases := map[string]string{
 		"0b0c37da-da2a-4e89-a65f-3e17640a68e5": DialectSession,
 		"session-571bdef3":                     DialectTeam,
+		"conv_01JABCDEF":                       DialectUnknown,
+		"tasklist.2026-07-30":                  DialectUnknown,
 	}
 	for name, want := range cases {
 		if got := Dialect(name); got != want {
 			t.Errorf("Dialect(%q) = %q, want %q", name, got, want)
 		}
+	}
+}
+
+// TestDriftCheck_FiresOnAnUnknownDialect is the case the tripwire exists for:
+// Claude Code moves to a naming convention forgectl has never seen, so no
+// per-session directory is left and Restore's target is dead.
+func TestDriftCheck_FiresOnAnUnknownDialect(t *testing.T) {
+	f := newFixture(t)
+	f.task(filepath.Join(f.Paths.tasksDir(), "conv_01JABCDEF"), "1", "future")
+	d := DriftCheck(f.Paths)
+	if !d.Drifted() {
+		t.Fatalf("DriftCheck = %+v, want drifted — an unrecognized dialect must not read as the safe one", d)
+	}
+	if d.Newest != DialectUnknown {
+		t.Errorf("Newest = %q, want %q", d.Newest, DialectUnknown)
+	}
+}
+
+// TestReadTranscript_SurvivesAnOverlongLine is the regression guard for a
+// bufio.Scanner trap: a token past the cap does not skip, it stops the scan
+// unrecoverably. A single pasted blob early in a transcript would then cost the
+// session both its branch and its title.
+func TestReadTranscript_SurvivesAnOverlongLine(t *testing.T) {
+	const id = "dddd4444-0000-0000-0000-000000000001"
+	f := newFixture(t)
+	cwd := t.TempDir()
+	huge := `{"type":"user","pasted":"` + strings.Repeat("x", transcriptBufSize*3) + `"}`
+	lines := []string{
+		huge,
+		`{"type":"user","gitBranch":"feat/after-the-blob"}`,
+		`{"type":"ai-title","aiTitle":"found-after-the-blob","sessionId":"` + id + `"}`,
+	}
+	f.write(filepath.Join(f.Paths.projectsDir(), slugify(cwd), id+".jsonl"),
+		strings.Join(lines, "\n")+"\n")
+
+	branch, title := readTranscript(f.Paths, id, cwd)
+	if branch != "feat/after-the-blob" {
+		t.Errorf("branch = %q, want it read from past the over-long line", branch)
+	}
+	if title != "found-after-the-blob" {
+		t.Errorf("title = %q, want it read from past the over-long line", title)
+	}
+}
+
+// TestScan_StoreLastSeenWidensLastActive covers the ordering asymmetry: a
+// snapshot is written every turn, so it can be newer than the last recorded
+// prompt — and after the registry entry is pruned it may be the only surviving
+// activity signal.
+func TestScan_StoreLastSeenWidensLastActive(t *testing.T) {
+	const stale = "eeee5555-0000-0000-0000-000000000001"
+	const fresh = "eeee5555-0000-0000-0000-000000000002"
+	f := newFixture(t)
+	now := time.Now()
+
+	// `fresh` has the OLDER prompt but a newer snapshot; it must still sort first.
+	f.history(fresh, "/repo/fresh", "old prompt", now.Add(-4*time.Hour))
+	f.history(stale, "/repo/stale", "newer prompt", now.Add(-2*time.Hour))
+	if err := Save(f.Paths.StoreDir, &Record{ID: fresh, Cwd: "/repo/fresh", LastSeen: now}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := Scan(f.Paths, Opts{})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(got) == 0 || got[0].ID != fresh {
+		t.Fatalf("first row = %q, want %q — a fresher snapshot must widen LastActive", firstID(got), fresh)
 	}
 }
 

@@ -38,14 +38,29 @@ import (
 const (
 	DialectSession = "session"
 	DialectTeam    = "team"
+	// DialectUnknown is a task-directory name matching neither known shape.
+	// It exists so the drift check can FIRE on a third convention instead of
+	// mistaking it for a dialect it recognizes.
+	DialectUnknown = "unknown"
 )
 
 // Dialect classifies one ~/.claude/tasks directory name.
+//
+// The unknown case is load-bearing, not defensive padding. Classifying by
+// "anything not prefixed session- is per-session" would make a future third
+// naming convention read as the very dialect Restore writes — so DriftCheck
+// would see a per-session directory that is not one, report no drift, and let
+// task rescue fail exactly as silently as the tripwire exists to prevent. A
+// per-session directory IS a session id, so it is checked by shape.
 func Dialect(name string) string {
-	if strings.HasPrefix(name, "session-") {
+	switch {
+	case strings.HasPrefix(name, "session-"):
 		return DialectTeam
+	case validSessionID(name):
+		return DialectSession
+	default:
+		return DialectUnknown
 	}
-	return DialectSession
 }
 
 // TaskDirFor returns the per-session task directory for an id — the path

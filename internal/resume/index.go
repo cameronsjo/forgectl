@@ -26,6 +26,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -173,6 +174,15 @@ func Scan(p Paths, opts Opts) ([]Session, error) {
 			s.TaskDir = snap.TaskDir
 			if s.Cwd == "" {
 				s.Cwd = snap.Cwd
+			}
+			// A snapshot is written at every turn end, so LastSeen can be
+			// newer than the last recorded prompt — and once the registry
+			// entry is pruned at process exit it may be the only surviving
+			// activity signal. Widening here (not just when the id is new)
+			// keeps a session from sorting below its true recency, or
+			// falling out of the limit cut altogether.
+			if snap.LastSeen.After(s.LastActive) {
+				s.LastActive = snap.LastSeen
 			}
 			if snap.Name != "" {
 				s.Name, s.NameSource = snap.Name, NameFromStore
@@ -361,11 +371,44 @@ type transcriptRecord struct {
 	AITitle   string `json:"aiTitle"`
 }
 
-// transcriptScanLimit bounds one transcript line. Transcript lines embed whole
-// message bodies and pasted blocks, so they run long; a line past this is one
-// the two fields we want are not on, and skipping it is cheaper than growing a
-// buffer to hold it.
-const transcriptScanLimit = 4 << 20 // 4 MiB
+// transcriptBufSize is the read buffer for a transcript line. Transcript lines
+// embed whole message bodies and pasted blocks, so some run far past this; a
+// longer line is skipped (see forEachLine) rather than buffered, since neither
+// field we want lives on one.
+const transcriptBufSize = 64 << 10 // 64 KiB
+
+// forEachLine calls fn for every line in r that fits the read buffer, skipping
+// any longer one and continuing.
+//
+// It uses bufio.Reader rather than bufio.Scanner deliberately. A Scanner with a
+// size cap does NOT skip an over-long token — it fails with ErrTooLong and stops
+// UNRECOVERABLY, returning false from every later Scan with the underlying
+// reader advanced an arbitrary distance. Against transcripts, where one pasted
+// blob can dwarf every other line, that turns a bound that reads like a safety
+// limit into a silent truncation point: the fields we want sit on ordinary short
+// records, and a single huge line early on would cost us all of them.
+func forEachLine(r io.Reader, fn func(line []byte) (stop bool)) {
+	br := bufio.NewReaderSize(r, transcriptBufSize)
+	for {
+		line, err := br.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) {
+			// Over-long line: drain to its newline and move on.
+			for errors.Is(err, bufio.ErrBufferFull) {
+				_, err = br.ReadSlice('\n')
+			}
+			if err != nil {
+				return
+			}
+			continue
+		}
+		if len(line) > 0 && fn(line) {
+			return
+		}
+		if err != nil {
+			return
+		}
+	}
+}
 
 // readTranscript pulls the git branch and the ai-title out of a session's
 // transcript.
@@ -392,18 +435,15 @@ func readTranscript(p Paths, id, cwd string) (branch, title string) {
 	}
 	defer func() { _ = f.Close() }()
 
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64<<10), transcriptScanLimit)
-	for sc.Scan() {
-		line := sc.Bytes()
+	forEachLine(f, func(line []byte) bool {
 		wantsBranch := branch == "" && bytes.Contains(line, []byte(`"gitBranch"`))
 		wantsTitle := title == "" && bytes.Contains(line, []byte(`"ai-title"`))
 		if !wantsBranch && !wantsTitle {
-			continue
+			return false
 		}
 		var rec transcriptRecord
 		if json.Unmarshal(line, &rec) != nil {
-			continue
+			return false
 		}
 		if wantsBranch && rec.GitBranch != "" {
 			branch = rec.GitBranch
@@ -411,10 +451,8 @@ func readTranscript(p Paths, id, cwd string) (branch, title string) {
 		if wantsTitle && rec.Type == "ai-title" && rec.AITitle != "" {
 			title = rec.AITitle
 		}
-		if branch != "" && title != "" {
-			break
-		}
-	}
+		return branch != "" && title != ""
+	})
 	return branch, title
 }
 

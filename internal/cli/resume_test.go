@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/resume"
 )
 
@@ -102,6 +103,38 @@ func TestSessionRow_LabelsLivenessAndTasks(t *testing.T) {
 	withTasks := resume.Session{ID: "id", Name: "parked", LastActive: time.Now(), Tasks: []resume.Task{{ID: "1"}, {ID: "2"}}}
 	if got := sessionRow(withTasks); !strings.Contains(got, "2 tasks") {
 		t.Errorf("row with tasks = %q, want the task count", got)
+	}
+}
+
+// TestResumeSession_RefusesLiveButNotWithFork pins the contract the error
+// message advertises. The refusal names the pid; --fork is a real escape from
+// it, not a suggestion — a fork only reads the transcript, so it does not
+// contend with the running session.
+func TestResumeSession_RefusesLiveButNotWithFork(t *testing.T) {
+	live := resume.Session{
+		ID: "aaaaaaaa-0000-0000-0000-000000000001", Cwd: "", // empty cwd stops it before exec
+		Live: true, Pid: 4242,
+	}
+	cmd := newResumeSnapshotCmd() // any command — only its out/err streams are used
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	err := resumeSession(cmd, config.Config{}, live, false)
+	if err == nil || !strings.Contains(err.Error(), "4242") {
+		t.Fatalf("continuing a live session returned %v, want a refusal naming pid 4242", err)
+	}
+
+	// With --fork the liveness refusal must NOT be what stops it; the empty
+	// cwd is, which proves execution got past the live check.
+	err = resumeSession(cmd, config.Config{}, live, true)
+	if err == nil {
+		t.Fatal("expected the empty-cwd error, got nil")
+	}
+	if strings.Contains(err.Error(), "4242") {
+		t.Errorf("--fork still hit the liveness refusal (%v) — the error message promises it does not", err)
+	}
+	if !strings.Contains(err.Error(), "working directory") {
+		t.Errorf("expected the empty-cwd error past the live check, got %v", err)
 	}
 }
 

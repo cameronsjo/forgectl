@@ -66,7 +66,7 @@ forgectl launch doctor             # check claude availability + launch config v
 # resume — get back into a Claude Code session after a terminal restart
 forgectl resume                    # pick from recent sessions across every repo, then resume in place
 forgectl resume forgectl           # filter by repo, name, cwd, or id; exactly one hit resumes it
-forgectl resume --fork             # branch a new session off the transcript instead of continuing it
+forgectl resume --fork             # branch a new session off the transcript — the only way into a still-running one
 forgectl resume ls                 # list without acting
 forgectl resume ls --json          # machine-readable JSON (safe to pipe; counts go to stderr)
 forgectl resume snapshot           # capture what a live session's exit would destroy
@@ -244,10 +244,12 @@ forgectl env set API_KEY                                   # interactive, no ech
 
 A terminal restart costs three steps otherwise: find the folder, run `claude --resume`, then recognize the session in a picker that shows neither repo nor branch. `forgectl resume` collapses that to one command from a cold terminal — it lists recent sessions across *every* repo with name, repo, branch, and last activity, and lands you back inside the one you pick, in the right directory, with its task list restored.
 
-**Identity is read, never persisted.** Claude Code's prompt history and per-project transcripts already carry the session id, cwd, branch, and title indefinitely — so there is no daemon and no poller here, just a reader. Two things genuinely do not survive a session's exit, and `resume snapshot` is what captures them:
+**Claude Code stays the source of truth for identity.** Its prompt history and per-project transcripts already carry the session id, cwd, branch, and title indefinitely — so there is no daemon and no poller here, just a reader over artifacts that already exist. Two things genuinely do not survive a session's exit, and `resume snapshot` is what captures them:
 
 - the `/rename` name, which lives only in the live-process registry;
 - the task bodies, which Claude Code deletes when a session ends.
+
+The snapshot record it writes does also carry recovery metadata — session id, cwd, version, timestamps, and the task-directory association — but that is a *cache with a known authority above it*, not a second source of truth: everything except the name, the tasks, and the task-directory pairing is re-derivable from Claude Code's own files.
 
 Wire the capture to a `Stop` hook so every turn refreshes it. It is cheap, idempotent, and **always exits 0** — a failed snapshot must never become a failed turn:
 
@@ -265,8 +267,8 @@ Snapshots live in `<os.UserConfigDir()>/forgectl/resume-sessions/`, one JSON fil
 
 **Notes:**
 
-- **A running session is refused, not resumed.** Two Claude Code processes on one transcript corrupts it, so `resume` errors out and names the live pid. Pass `--fork` to branch a new session off it instead.
-- **The task store never shrinks to follow Claude Code.** A snapshot taken after a session exits legitimately sees fewer tasks than one taken before, so bodies are merged by task id and retained — dropping to the live set would discard exactly what the feature exists to rescue.
+- **A running session is refused, not continued.** Two Claude Code processes on one transcript corrupts it, so `resume` errors out and names the live pid. `--fork` is the way in anyway — it branches a new session off the transcript, which only reads it. A forked session starts its own task list, so snapshotted tasks are reported rather than restored (its task directory is named after a session id that does not exist until after the exec).
+- **The task store never shrinks to follow Claude Code.** Snapshots merge by task id and retain what they have already captured, so a later pass seeing fewer tasks never discards the earlier ones — dropping to the live set would throw away exactly what the feature exists to rescue. This is a property of *repeated* snapshots taken while the session is alive: `snapshot` walks the live-process registry, so it cannot discover a session that has already exited. Without a prior snapshot, running it after a crash recovers nothing — which is why the `Stop` hook, not manual invocation, is the intended wiring.
 - **Restore never overwrites.** A task file the live session owns always wins, and `.highwatermark` is raised but never lowered, so a resumed session is never handed an id already on disk. Running it repeatedly is a no-op.
 - **The resumed session gets its own project's posture.** `[launch]` profile resolution is a pure function of the config and a directory, so resuming into another repo picks up that repo's model, permission mode, and `--add-dir` set for free.
 - `forgectl doctor` carries a `resume tasks` check. Task rescue depends on Claude Code naming per-session task directories after the session id — verified behavior, not a guarantee — and the check warns if that ever stops being true, so rescue cannot silently degrade to writing where nothing reads.

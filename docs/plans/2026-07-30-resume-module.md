@@ -19,7 +19,8 @@ changes the shape of the fix:
 | `~/.claude/history.jsonl` | **yes, indefinitely** | every prompt: `sessionId`, `project` (= cwd), `timestamp`, `display` |
 | `~/.claude/projects/<slug>/<id>.jsonl` | **yes** | `cwd`, `gitBranch`, and an `ai-title` record |
 | `~/.claude/sessions/<pid>.json` | **live only** | `sessionId`, `cwd`, `name` (the `/rename` name), `status`, `version`, `pid`, `kind` |
-| `~/.claude/tasks/session-<8hex>/<n>.json` | **deleted** | task bodies: `id, subject, description, activeForm, status, blocks, blockedBy` |
+| `~/.claude/tasks/<full-session-uuid>/<n>.json` | **deleted** | per-session task bodies: `id, subject, description, activeForm, status, blocks, blockedBy` |
+| `~/.claude/tasks/session-<8hex>/<n>.json` | **deleted** | the same bodies, for an agent team (see the dialect correction under Step 3) |
 | `<repo>/.claude/sessions/<name>.<id8>.json` | yes, per repo | lane name + declared branch |
 
 So **session identity is already durable** — it needs a *reader*, not a persister. Every
@@ -38,10 +39,20 @@ requires a real snapshot; rescuing identity does not.
 every recent session across every repo with its name, repo, branch, and last activity, and
 lands you back inside the one you pick, with its task list intact.
 
-**Tier:** Substantial. **Not** security-sensitive: read-only over `$HOME`-owned files, one
-new write-store under forgectl's own config dir, no new network or auth surface. The one
-hardening obligation is that disk-sourced strings reach a terminal — covered by reusing
-`sanitizeTerm`.
+**Tier:** Substantial. **Not** security-sensitive, but not read-only either — the write
+surface is worth stating precisely, since a threat model built on "read-only" would be
+wrong:
+
+- **Reads** the whole `~/.claude` session corpus (history, transcripts, registry, task
+  dirs, team configs).
+- **Writes** the snapshot store under forgectl's own config dir, **and** restores task
+  JSON back into `~/.claude/tasks/<session-id>/` — a write into Claude Code's own tree.
+  Restore never overwrites an existing file and only raises `.highwatermark`, which is
+  what keeps that write safe rather than merely small.
+- No new network, auth, or credential surface.
+
+The one hardening obligation is that disk-sourced strings reach a terminal — covered by
+reusing `sanitizeTerm` on both the text and `--json` paths.
 
 ---
 

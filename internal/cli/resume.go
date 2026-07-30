@@ -59,8 +59,11 @@ so every turn refreshes the snapshot:
   {"hooks":{"Stop":[{"hooks":[
     {"type":"command","command":"forgectl resume snapshot --quiet"}]}]}}
 
-A session whose process is still running is NOT resumable: two processes on one
-transcript corrupts it, so resume refuses and names the live pid.
+A session whose process is still running cannot be CONTINUED — two processes on
+one transcript corrupts it — so resume refuses and names the live pid. --fork
+gets you in anyway: it branches a new session off the transcript, which only
+reads it. A forked session starts its own task list, so snapshotted tasks are
+reported rather than restored.
 
 Exit codes: 0 resumed (or listed), 1 no session matched, the pick was
 cancelled, or the target is still live.`,
@@ -179,12 +182,15 @@ func sessionRow(s resume.Session) string {
 func resumeSession(cmd *cobra.Command, cfg config.Config, s resume.Session, fork bool) error {
 	errOut := cmd.ErrOrStderr()
 
-	// The one failure mode this feature introduces. Two claude processes on
-	// one transcript is corruption, not a resume — so it is refused rather
-	// than warned about, and the pid is named so the session is findable.
-	if s.Live {
+	// The one failure mode this feature introduces. Two claude processes
+	// CONTINUING one transcript is corruption, not a resume — so it is
+	// refused rather than warned about, and the pid is named so the session
+	// is findable. --fork is the documented way past it, and it is a real
+	// escape rather than a suggestion: a fork only READS the transcript and
+	// writes to a new session of its own, so it does not contend.
+	if s.Live && !fork {
 		return WithExitCode(fmt.Errorf(
-			"session %s is still running as pid %d — resuming it a second time would corrupt the transcript; switch to that terminal, or pass --fork to branch a new session off it",
+			"session %s is still running as pid %d — continuing it a second time would corrupt the transcript; switch to that terminal, or pass --fork to branch a new session off it",
 			sanitizeTerm(s.ID), s.Pid), 1)
 	}
 	if s.Cwd == "" {
@@ -193,14 +199,28 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, s resume.Session, fork
 
 	// Tasks go back BEFORE the exec: once syscall.Exec replaces this
 	// process there is no "after".
-	if paths, err := resumePaths(); err == nil {
-		switch res, err := resume.RestoreFor(paths, s.ID); {
-		case err != nil:
-			// A failed rescue must not block the resume — the session
-			// itself is the thing being recovered.
-			fmt.Fprintf(errOut, "forgectl: could not restore tasks: %v\n", err)
-		case res.Written > 0:
-			fmt.Fprintf(errOut, "forgectl: restored %d task(s)\n", res.Written)
+	//
+	// Not on a fork, though, and the reason is structural rather than
+	// cautious: a fork starts a NEW session id, so it reads a task directory
+	// whose name cannot be known until after the exec that creates it.
+	// Restoring into the original session's directory would write where the
+	// forked session never looks — and when the original is still live, that
+	// write lands in a directory it is actively using.
+	switch {
+	case fork:
+		if len(s.Tasks) > 0 {
+			fmt.Fprintf(errOut, "forgectl: %d snapshotted task(s) not restored — a fork starts a new session, which reads its own task list\n", len(s.Tasks))
+		}
+	default:
+		if paths, err := resumePaths(); err == nil {
+			switch res, err := resume.RestoreFor(paths, s.ID); {
+			case err != nil:
+				// A failed rescue must not block the resume — the
+				// session itself is the thing being recovered.
+				fmt.Fprintf(errOut, "forgectl: could not restore tasks: %v\n", err)
+			case res.Written > 0:
+				fmt.Fprintf(errOut, "forgectl: restored %d task(s)\n", res.Written)
+			}
 		}
 	}
 
@@ -381,8 +401,13 @@ func cell(s string, width int) string {
 	return s
 }
 
-// truncate clips a string to width runes, marking the clip.
+// truncate clips a string to width runes, marking the clip. A non-positive
+// width yields the empty string — unreachable from today's call sites, but
+// width-1 would otherwise slice to [:-1] and panic.
 func truncate(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
 	if len([]rune(s)) <= width {
 		return s
 	}
