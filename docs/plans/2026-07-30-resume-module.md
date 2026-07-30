@@ -121,6 +121,13 @@ Files:
   transcript `ai-title` > repo lane file > `""`. `history.jsonl` is the spine (it is the
   only global, append-only index); the transcript is opened **only** for sessions that
   survive the limit cut, so a 1208-file corpus is not parsed to show 10 rows.
+
+  **Corrected during execution:** the spine is not the whole skeleton. Prompts are
+  recorded under whichever session id was in force when they were typed, so a session
+  that arrived through `/clear` can be live and entirely absent from `history.jsonl` —
+  every currently-running session on this machine was, including this one. The store
+  **and the registry** therefore contribute ids of their own rather than only decorating
+  history's, and a registry `updatedAt` raises `LastActive` when it beats the last prompt.
 - **`registry.go`** — reads `~/.claude/sessions/*.json`; liveness via
   `syscall.Kill(pid, 0)` (treat `EPERM` as alive, `ESRCH` as dead). A stale file whose pid
   is dead is reported dead, never trusted for `status`.
@@ -138,13 +145,31 @@ Files:
   the task files **missing** from the live dir, then sets `.highwatermark` to the max id.
   A live session's own file always wins; we never overwrite.
 
-  **Version coupling.** Two dialects exist on disk: `tasks/session-<8hex>/` and
-  `tasks/<full-uuid>/`. Current Claude Code (2.1.220) writes the `session-<8hex>` form —
-  every July dir uses it — so `Restore` creates that. Marked with a `debt:` comment naming
-  the upgrade trigger: *if a future Claude Code reverts to the uuid dialect, restore writes
-  to a dir nothing reads.* A `forgectl doctor` check compares the newest task dir's dialect
-  against what `Restore` would write, so the drift surfaces loudly instead of silently
-  no-oping.
+  **Version coupling — corrected during execution (2026-07-30).** The plan had the two
+  dialects backwards, and the error was load-bearing enough to stop on. They are not old
+  and new; they are **per-session** and **per-team**, both current:
+
+  - `tasks/<full-session-uuid>/` is keyed on the session id. **199 of 199** such dirs on
+    this machine are exact session ids.
+  - `tasks/session-<8hex>/` is keyed on the **lead session id of an agent team**
+    (`~/.claude/teams/session-<8hex>/config.json`), which survives a `/clear` while the
+    session id rotates. Only **139 of 360** match any session-id prefix — this session's
+    own tasks were in `session-571bdef3/` while its id was `1557142e-…`.
+
+  Nothing on disk records the association durably: the transcript carries no team, agent,
+  or task-directory reference at all. So the store *is* that index — the first `Snapshot`
+  to see a live session beside its task dir writes the pairing down, and every later
+  `Restore` reads it back. `ResolveTaskDir` falls back to joining
+  `teams/*/config.json`'s member `cwd` against the session cwd, but only once, and only
+  for a live session.
+
+  `Restore` targets the **per-session** dir even when capture came from a team one,
+  because that is the dir a resumed session reads. Verified live rather than reasoned
+  about: a headless session wrote `tasks/<its id>/1.json`; `claude --resume <id>` kept the
+  same session id, reused that dir, saw the task through `TaskList`, and appended
+  `2.json`. The `debt:` comment names the remaining trigger — *if a future Claude Code
+  stops keying per-session dirs on the session id, restore writes where nothing reads* —
+  and `DriftCheck` (surfaced by `forgectl doctor`) is the tripwire.
 
 ## Step 4 — `internal/cli/resume.go` — the verb
 
@@ -221,7 +246,8 @@ is scope the user did not ask for.
 | Path | Change |
 |---|---|
 | `internal/resume/{index,registry,store,snapshot,tasks}.go` | new domain package |
-| `internal/resume/*_test.go` + `testdata/home/` | fixture `$HOME`: `history.jsonl`, `projects/`, `sessions/`, `tasks/` |
+| `internal/resume/*_test.go` | fixture `$HOME`, built programmatically rather than as checked-in `testdata/` — each test needs a different corner of the tree (a dead pid here, a team config there), and a builder makes each one state its own dependencies |
+| `internal/cli/resume_test.go` | render/sanitize coverage, plus the `resumePaths` seam that keeps `snapshot`'s test off the developer's real `~/.claude` |
 | `internal/cli/resume.go` | verb + `resumeModule` manifest |
 | `internal/cli/modules.go` | register `resumeModule` |
 | `internal/cli/modules_test.go` | completeness pins (ADR-0005 gate) |
@@ -254,6 +280,31 @@ Evidence required before any completion claim:
    run `forgectl resume`, pick the session, and confirm you land in the right cwd with the
    task list present.
 7. Pre-PR polish pass before the PR leaves draft.
+
+## Execution record (2026-07-30)
+
+Evidence for each verification item, in order:
+
+1. `gofmt -l ./internal` empty; `go build ./...` and `go vet ./...` clean.
+2. `go test ./...` green across every package.
+3. `forgectl resume ls --json` listed the live sessions with correct cwd, repo, branch,
+   pid, and `/rename` names; two rows cross-checked against `~/.claude/sessions/*.json`.
+   This is what surfaced the history-coverage gap above — before the registry fold-in, the
+   live sessions were missing entirely.
+4. `forgectl resume snapshot` → `snapshotted 7 live session(s), 11 task(s) held`. The store
+   record for this session carried its name, cwd, version, all 7 tasks, and
+   `task_dir: ~/.claude/tasks/session-571bdef3` — the team-dialect join, resolved on real
+   data. Round trip proved on the probe session: 2 real tasks captured, the directory
+   deleted, `RestoreFor` returned them byte-identical with `.highwatermark` = 2, and a
+   second run was a no-op (`written=0 skipped=2`).
+5. Live-session refusal: `forgectl resume <this id>` exited 1 naming pid 93657.
+6. End-to-end (quit the terminal, `forgectl resume`, land back in place) is the one item
+   only the operator can run — it needs the restart this feature exists for.
+7. Pre-PR polish pass before the PR left draft.
+
+Three defects came out of step 3 alone, none of which the fixtures could have caught: the
+history-coverage gap, a snapshot test that wrote to the real store, and picker columns
+padded in bytes rather than runes. Fixed in `44115da`.
 
 ## Alternatives declined
 

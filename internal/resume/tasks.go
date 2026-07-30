@@ -76,7 +76,26 @@ func ResolveTaskDir(p Paths, id, cwd, prior string) string {
 	if d := TaskDirFor(p, id); d != "" && isDir(d) {
 		return d
 	}
-	return teamTaskDirForCwd(p, cwd)
+	return teamTaskDirForCwd(p, cwd, claimedTaskDirs(p, id))
+}
+
+// claimedTaskDirs returns the task directories the store has already paired
+// with some OTHER session.
+//
+// Two sessions working in one checkout can each have a team, and cwd cannot
+// tell their task directories apart — so without this, the newest-first
+// heuristic could hand session A the directory already known to belong to
+// session B. That is worse than finding nothing: A's snapshot would absorb B's
+// tasks, and resuming A would inject them into A's own task list. An already
+// claimed directory is therefore off the table for everyone else.
+func claimedTaskDirs(p Paths, self string) map[string]bool {
+	claimed := map[string]bool{}
+	for id, rec := range LoadAll(p.StoreDir) {
+		if id != self && rec.TaskDir != "" {
+			claimed[rec.TaskDir] = true
+		}
+	}
+	return claimed
 }
 
 // teamConfig is the subset of ~/.claude/teams/<name>/config.json we read.
@@ -89,14 +108,16 @@ type teamConfig struct {
 }
 
 // teamTaskDirForCwd finds the most recently written team task directory whose
-// team has a member working in cwd.
+// team has a member working in cwd, ignoring any directory already claimed by
+// another session.
 //
 // This is a heuristic and is deliberately the LAST resort: two sessions in one
 // checkout can both have teams, and cwd cannot tell them apart. It only ever
 // runs for a live session during Snapshot, where "most recently written" is a
 // strong tiebreak — and whatever it picks is written to the store, so the
-// guess is made once and then read back as fact.
-func teamTaskDirForCwd(p Paths, cwd string) string {
+// guess is made once and then read back as fact. That last property is why the
+// claimed set matters: a wrong guess would otherwise harden into a wrong fact.
+func teamTaskDirForCwd(p Paths, cwd string, claimed map[string]bool) string {
 	if cwd == "" {
 		return ""
 	}
@@ -128,6 +149,9 @@ func teamTaskDirForCwd(p Paths, cwd string) string {
 			continue
 		}
 		dir := filepath.Join(p.tasksDir(), e.Name())
+		if claimed[dir] {
+			continue
+		}
 		fi, err := os.Stat(dir)
 		if err != nil || !fi.IsDir() {
 			continue

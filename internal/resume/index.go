@@ -22,6 +22,8 @@
 package resume
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -165,7 +167,7 @@ func Scan(p Paths, opts Opts) ([]Session, error) {
 
 	sessions := make([]*Session, 0, len(byID))
 	for _, s := range byID {
-		s.Repo = filepath.Base(s.Cwd)
+		s.Repo = repoName(s.Cwd)
 		if snap, ok := store[s.ID]; ok {
 			s.Tasks = snap.Tasks
 			s.TaskDir = snap.TaskDir
@@ -185,7 +187,7 @@ func Scan(p Paths, opts Opts) ([]Session, error) {
 		if e, ok := reg[s.ID]; ok {
 			s.Pid, s.Version, s.Live = e.Pid, e.Version, e.Live
 			if e.Cwd != "" {
-				s.Cwd, s.Repo = e.Cwd, filepath.Base(e.Cwd)
+				s.Cwd, s.Repo = e.Cwd, repoName(e.Cwd)
 			}
 			// The registry reports activity a prompt does not: a session
 			// working through a long turn has a fresh updatedAt and a
@@ -304,18 +306,32 @@ func scanHistory(path string) (map[string]*Session, error) {
 	return byID, nil
 }
 
-// promptWidth is how much of a prompt the picker can show on one row.
+// repoName is the picker's repo column. filepath.Base is not enough on its
+// own: it answers "." for an empty path, and a session recovered from a store
+// record with no cwd would show a bare dot where a repo name belongs.
+func repoName(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	return filepath.Base(cwd)
+}
+
+// promptWidth is how much of a prompt the picker can show on one row, in runes.
 const promptWidth = 90
 
 // firstLine reduces a prompt to a single truncated line. Prompts are
 // multi-line and carry pasted blocks; the picker has one row.
+//
+// The clip is by RUNE, not byte. A byte slice through a multi-byte character
+// leaves invalid UTF-8, which json.Marshal then silently rewrites to U+FFFD —
+// a mangled prompt in --json output with nothing to indicate why.
 func firstLine(s string) string {
 	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
 		s = s[:i]
 	}
 	s = strings.TrimSpace(s)
-	if len(s) > promptWidth {
-		return strings.TrimSpace(s[:promptWidth]) + "…"
+	if r := []rune(s); len(r) > promptWidth {
+		return strings.TrimSpace(string(r[:promptWidth])) + "…"
 	}
 	return s
 }
@@ -345,26 +361,48 @@ type transcriptRecord struct {
 	AITitle   string `json:"aiTitle"`
 }
 
+// transcriptScanLimit bounds one transcript line. Transcript lines embed whole
+// message bodies and pasted blocks, so they run long; a line past this is one
+// the two fields we want are not on, and skipping it is cheaper than growing a
+// buffer to hold it.
+const transcriptScanLimit = 4 << 20 // 4 MiB
+
 // readTranscript pulls the git branch and the ai-title out of a session's
-// transcript. It substring-prefilters before decoding: a transcript is mostly
-// message bodies, and only a small minority of lines carry either field.
+// transcript.
+//
+// It STREAMS rather than reading the file whole, and that is the point: a
+// transcript is tens of megabytes, both fields appear within the first handful
+// of records, and Scan calls this once per candidate session — up to
+// Limit*prefilterFactor of them when a filter is set. Reading each file into
+// memory first made the early exit below decorative: the I/O had already
+// happened. Streaming makes it real, so the common case touches a few kilobytes
+// per session instead of the whole file.
+//
+// The substring pre-filter is the second half: a transcript is almost entirely
+// message bodies, and only a small minority of lines carry either field, so
+// most lines are rejected without a JSON decode.
 func readTranscript(p Paths, id, cwd string) (branch, title string) {
 	path := transcriptPath(p, id, cwd)
 	if path == "" {
 		return "", ""
 	}
-	data, err := os.ReadFile(path) // #nosec G304 -- resolved under the caller's own ~/.claude/projects
+	f, err := os.Open(path) // #nosec G304 -- resolved under the caller's own ~/.claude/projects
 	if err != nil {
 		return "", ""
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		wantsBranch := branch == "" && strings.Contains(line, `"gitBranch"`)
-		wantsTitle := title == "" && strings.Contains(line, `"ai-title"`)
+	defer func() { _ = f.Close() }()
+
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), transcriptScanLimit)
+	for sc.Scan() {
+		line := sc.Bytes()
+		wantsBranch := branch == "" && bytes.Contains(line, []byte(`"gitBranch"`))
+		wantsTitle := title == "" && bytes.Contains(line, []byte(`"ai-title"`))
 		if !wantsBranch && !wantsTitle {
 			continue
 		}
 		var rec transcriptRecord
-		if json.Unmarshal([]byte(line), &rec) != nil {
+		if json.Unmarshal(line, &rec) != nil {
 			continue
 		}
 		if wantsBranch && rec.GitBranch != "" {

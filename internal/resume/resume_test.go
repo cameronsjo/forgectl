@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // The fixture $HOME is built programmatically rather than checked in as
@@ -477,6 +478,73 @@ func TestSnapshot_ResolvesTeamTaskDirByCwd(t *testing.T) {
 	}
 	if rres.Written != 1 {
 		t.Errorf("restored %d tasks, want 1", rres.Written)
+	}
+}
+
+// TestSnapshot_WillNotStealAnotherSessionsTaskDir covers the cross-contamination
+// the cwd heuristic would otherwise allow. Two sessions in one checkout each
+// have a team; cwd cannot tell their task directories apart, and the loser
+// would absorb the winner's tasks — then hand them to a resumed session as its
+// own.
+func TestSnapshot_WillNotStealAnotherSessionsTaskDir(t *testing.T) {
+	const idA = "aaaa1111-0000-0000-0000-000000000001"
+	const idB = "bbbb2222-0000-0000-0000-000000000002"
+	const teamDir = "session-abcd1234"
+	f := newFixture(t)
+	pinPids(t, map[int]bool{901: true})
+	cwd := t.TempDir()
+
+	f.history(idB, cwd, "prompt", time.Now())
+	f.registryFile(901, idB, cwd, "session-b")
+	f.write(filepath.Join(f.Paths.teamsDir(), teamDir, "config.json"),
+		`{"name":"`+teamDir+`","members":[{"cwd":"`+cwd+`"}]}`)
+	f.task(filepath.Join(f.Paths.tasksDir(), teamDir), "1", "belongs to A")
+
+	// Session A already owns that directory.
+	if err := Save(f.Paths.StoreDir, &Record{
+		ID: idA, Cwd: cwd, TaskDir: filepath.Join(f.Paths.tasksDir(), teamDir),
+	}); err != nil {
+		t.Fatalf("Save A: %v", err)
+	}
+
+	Snapshot(f.Paths, time.Now())
+
+	rec, ok := Load(f.Paths.StoreDir, idB)
+	if !ok {
+		t.Fatal("no record written for session B")
+	}
+	if rec.TaskDir != "" {
+		t.Errorf("session B claimed %q, which session A already owns — a wrong guess would harden into a wrong fact", rec.TaskDir)
+	}
+	if len(rec.Tasks) != 0 {
+		t.Errorf("session B absorbed %d of session A's tasks", len(rec.Tasks))
+	}
+}
+
+// TestFirstLine_ClipsByRune guards the --json path: a byte slice through a
+// multi-byte character leaves invalid UTF-8, which json.Marshal silently
+// rewrites to U+FFFD.
+func TestFirstLine_ClipsByRune(t *testing.T) {
+	got := firstLine(strings.Repeat("é", promptWidth+20))
+	if !utf8.ValidString(got) {
+		t.Fatalf("firstLine produced invalid UTF-8: %q", got)
+	}
+	if n := len([]rune(got)); n != promptWidth+1 { // +1 for the ellipsis
+		t.Errorf("firstLine clipped to %d runes, want %d", n, promptWidth+1)
+	}
+	if got := firstLine("first line\nsecond line"); got != "first line" {
+		t.Errorf("firstLine = %q, want just the first line", got)
+	}
+}
+
+// TestRepoName keeps a session with no recorded cwd from showing a bare "." in
+// the picker's repo column — filepath.Base's answer for an empty path.
+func TestRepoName(t *testing.T) {
+	if got := repoName(""); got != "" {
+		t.Errorf("repoName(\"\") = %q, want empty", got)
+	}
+	if got := repoName("/work/forgectl"); got != "forgectl" {
+		t.Errorf("repoName = %q, want forgectl", got)
 	}
 }
 
