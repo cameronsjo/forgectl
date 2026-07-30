@@ -181,12 +181,101 @@ func TestRender_SVGScriptTag_Stripped(t *testing.T) {
 	}
 }
 
-func TestRender_SVGForeignObject_Stripped(t *testing.T) {
-	out := renderOrFail(t, `<svg viewBox="0 0 10 10"><foreignObject width="10" height="10"><iframe src="http://evil.example"></iframe></foreignObject></svg>`+"\n")
+// The payload here is deliberately <img>, not <iframe>. An <iframe> version of
+// this test passes even with a policy that only DENIES the container, because
+// iframe happens to sit in bluemonday's built-in skip-content set — so it proved
+// nothing about our own policy. <img> is not in that set, which makes this test
+// actually exercise the SkipElementsContent call.
+func TestRender_SVGForeignObject_StrippedWithItsContents(t *testing.T) {
+	out := renderOrFail(t, `<svg viewBox="0 0 10 10"><foreignObject width="10" height="10"><img src="http://evil.example/beacon.png"></foreignObject></svg>`+"\n")
 
-	for _, forbidden := range []string{"foreignObject", "<iframe", "evil.example"} {
+	for _, forbidden := range []string{"foreignObject", "<img", "evil.example"} {
 		if strings.Contains(out, forbidden) {
-			t.Errorf("output retained %q — foreignObject is an escape hatch back to arbitrary HTML: %s", forbidden, out)
+			t.Errorf("output retained %q — denying foreignObject is not enough, its CONTENTS must go too or bluemonday hoists them into the surviving SVG: %s", forbidden, out)
+		}
+	}
+}
+
+// Every denied container, each with a payload that is NOT in bluemonday's own
+// skip-content set, so a regression in our skip list cannot hide behind its
+// defaults.
+func TestRender_DeniedSVGContainers_DropTheirSubtrees(t *testing.T) {
+	cases := map[string]string{
+		"foreignObject/img": `<svg viewBox="0 0 10 10"><foreignObject><img src="http://evil.example/a.png"></foreignObject></svg>`,
+		"foreignObject/a":   `<svg viewBox="0 0 10 10"><foreignObject><a href="http://evil.example/phish">Approve</a></foreignObject></svg>`,
+		"use/img":           `<svg viewBox="0 0 10 10"><use href="#x"><img src="http://evil.example/b.png"></use></svg>`,
+		"image/img":         `<svg viewBox="0 0 10 10"><image><img src="http://evil.example/c.png"></image></svg>`,
+		"animate/img":       `<svg viewBox="0 0 10 10"><animate><img src="http://evil.example/e.png"></animate></svg>`,
+		"filter/img":        `<svg viewBox="0 0 10 10"><filter><img src="http://evil.example/f.png"></filter></svg>`,
+		"pattern/img":       `<svg viewBox="0 0 10 10"><pattern><img src="http://evil.example/g.png"></pattern></svg>`,
+	}
+	for name, src := range cases {
+		t.Run(name, func(t *testing.T) {
+			out := renderOrFail(t, src+"\n")
+			if strings.Contains(out, "evil.example") {
+				t.Errorf("%s: a denied container's child survived and would fire a remote request: %s", name, out)
+			}
+		})
+	}
+}
+
+// An unclosed <title> consumes the rest of the document, and this pins what the
+// sanitizer can and cannot do about that.
+//
+// The consumption itself is NOT preventable here: golang.org/x/net/html
+// tokenizes <title> as RAW TEXT, so everything after it is already one text token
+// before any policy is consulted. No AllowElements/SkipElementsContent
+// combination can put it back — recovering it would mean pre-processing the
+// markdown source ahead of goldmark, which is a different change than this one.
+//
+// What the policy DOES control is which of two bad outcomes you get. With title
+// denied AND in the skip-content set, the swallowed region is DROPPED: the
+// document visibly ends early. Without the skip entry it would be retained as
+// title text — present in the DOM, rendered by no browser — so a reader would
+// believe they had read a document that was still hiding content. Truncation is
+// the better failure, and it is what this asserts.
+//
+// Also asserted: the swallowed region cannot inject anything. That is the part
+// that would actually be dangerous.
+func TestRender_SVGTitle_SwallowedContentIsDroppedNotHidden(t *testing.T) {
+	src := "# Visible heading\n\n<svg viewBox=\"0 0 1 1\"><title>\n\n## Second heading\n\nA paragraph.\n"
+	out := renderOrFail(t, src)
+
+	if !strings.Contains(out, "Visible heading") {
+		t.Errorf("content BEFORE the title was lost, which no tokenizer behavior justifies: %s", out)
+	}
+	// The swallowed region must not survive as invisible title text.
+	if strings.Contains(out, "Second heading") || strings.Contains(out, "A paragraph.") {
+		t.Errorf("swallowed content was retained inside <title> — present in the DOM but rendered by no browser, so the reader would think they had read the whole document: %s", out)
+	}
+	if strings.Contains(out, "<title") {
+		t.Errorf("a <title> element survived into the output: %s", out)
+	}
+}
+
+// The dangerous version of the above: markup hidden after an unclosed title must
+// not come back as live elements.
+func TestRender_SVGTitle_CannotSmuggleMarkup(t *testing.T) {
+	out := renderOrFail(t, "<svg viewBox=\"0 0 1 1\"><title></title><script>alert(1)</script>\n\n## Still renders\n")
+
+	if strings.Contains(out, "<script") || strings.Contains(out, "alert(") {
+		t.Errorf("a script following a closed <title> survived: %s", out)
+	}
+	if !strings.Contains(out, "Still renders") {
+		t.Errorf("a CLOSED title should not consume anything, but following content was lost: %s", out)
+	}
+}
+
+// <defs> and <mask> wrap definition-only geometry. If their tags are dropped
+// (which bluemonday does to an allowed element with zero surviving attributes),
+// that geometry is promoted to painted shapes and the diagram renders its own
+// mask as a visible rectangle.
+func TestRender_AttributelessSVGContainers_KeepTheirTags(t *testing.T) {
+	out := renderOrFail(t, `<svg viewBox="0 0 10 10"><defs><mask><rect width="1" height="1"/></mask></defs><g><rect width="9" height="9"/></g></svg>`+"\n")
+
+	for _, want := range []string{"<defs", "<mask", "<g"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("container %q lost its tag, so definition-only geometry becomes a painted shape: %s", want, out)
 		}
 	}
 }

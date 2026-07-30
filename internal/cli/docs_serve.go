@@ -48,7 +48,12 @@ func newDocsServeCmd(deps module.Deps) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&addr, "addr", "", "bind address (default: [docs].addr, else 127.0.0.1 with a random port)")
 	cmd.Flags().BoolVar(&openFlag, "open", false, "open the system browser once the server is listening")
-	cmd.Flags().StringVar(&token, "token", "", "require this bearer token on every request (generated automatically when --addr is not loopback)")
+	// The help text names the argv exposure because a caller cannot see it: a
+	// token passed here is visible to every local process via the process table
+	// (/proc/<pid>/cmdline on Linux, ps elsewhere). The GENERATED path never
+	// touches argv, so the safest usage is to pass no token and read the one the
+	// server prints.
+	cmd.Flags().StringVar(&token, "token", "", "require this bearer token on every request; visible to other local processes via the process table, so prefer omitting it and letting a non-loopback --addr generate one")
 	return cmd
 }
 
@@ -225,7 +230,15 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 	}
 
 	if openFlag {
-		if err := docspkg.OpenBrowser(ctx, deps.Runner, url); err != nil {
+		// Don't open a tab that is guaranteed to 401. A browser navigation cannot
+		// carry an Authorization header, so on a token-protected server --open
+		// would reliably produce an unauthorized page and leave the operator
+		// debugging the reader instead of reading. `docs open` already declines
+		// for exactly this reason; applying the same rule here keeps the two
+		// verbs consistent rather than correct in one place only.
+		if token != "" {
+			fmt.Fprintln(cmd.ErrOrStderr(), "note: not opening a browser — this server requires a bearer token, which a browser navigation cannot supply")
+		} else if err := docspkg.OpenBrowser(ctx, deps.Runner, url); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to open browser: %v\n", err)
 		}
 	}

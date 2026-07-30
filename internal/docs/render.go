@@ -73,8 +73,12 @@ func newSanitizer() *bluemonday.Policy {
 // svgPaint matches the values a paint-ish SVG attribute (fill, stroke,
 // stop-color) may carry: a keyword, a hex or rgb() color, or a same-document
 // url(#id) reference to a gradient or pattern. Anything else — notably a url()
-// pointing off-document — is dropped, so a diagram cannot become a tracking
-// beacon that reports when the doc was read.
+// pointing off-document — is dropped.
+//
+// Deliberately NOT claiming this makes the reader beacon-proof. It does not: an
+// ordinary markdown image reaches a remote URL by design under UGCPolicy. What
+// this narrows is the SVG surface specifically, so opening it adds no new
+// exfiltration path of its own.
 var svgPaint = regexp.MustCompile(`^(?i)(none|transparent|currentColor|inherit|#[0-9a-f]{3,8}|rgba?\([0-9.,%\s]+\)|[a-z]{3,20}|url\(#[\w.:-]+\))$`)
 
 // svgLocalRef matches an attribute that may ONLY reference something inside this
@@ -86,7 +90,11 @@ var svgLocalRef = regexp.MustCompile(`^(?i)(none|url\(#[\w.:-]+\))$`)
 // decimals, exponents, separators, and the unit suffixes SVG allows. Deliberately
 // value-shaped rather than permissive: it is what keeps a geometry attribute from
 // smuggling a function call or a url().
-var svgNumericish = regexp.MustCompile(`^[-+0-9.,eE\s]*(px|em|rem|pt|%)?$`)
+// At least one digit is required: the previous form also matched the empty
+// string and digit-free junk like "e", so an attribute named "numericish"
+// accepted nothing-at-all. Neither was dangerous (no function call, url, or
+// quote can pass), but a value-shaped constraint should reject non-values.
+var svgNumericish = regexp.MustCompile(`^[-+.,\s]*[0-9][-+0-9.,eE\s]*(px|em|rem|pt|%)?$`)
 
 // svgTransform matches the SVG transform functions and nothing else.
 var svgTransform = regexp.MustCompile(`^(?i)(\s*(matrix|translate|scale|rotate|skewX|skewY)\s*\([-+0-9.,eE\s]*\)\s*)+$`)
@@ -113,6 +121,31 @@ var svgTransform = regexp.MustCompile(`^(?i)(\s*(matrix|translate|scale|rotate|s
 //     for a local reader.
 //   - <style> — a style element inside SVG can reach out of the diagram and
 //     restyle the page, including hiding or overlaying content.
+//   - <title> and <desc> — x/net/html tokenizes <title> as RAW TEXT, so an
+//     UNCLOSED one swallows the remainder of the rendered document into
+//     unrendered title text. A document could then display something materially
+//     different from what it says, which is the single thing a reader whose whole
+//     job is "show me what this file actually says" must never do.
+//     role/aria-label on <svg> (allowed below) covers the accessible-name need.
+//
+// Denying an element is NOT sufficient on its own, and that is what makes the
+// SkipElementsContent call below load-bearing rather than decorative.
+// bluemonday drops a disallowed element's TAG but HOISTS ITS CHILDREN — a whole
+// subtree is discarded only for elements in its skip-content set. So denying
+// <foreignObject> alone turns
+//
+//	<svg><foreignObject><img src="http://evil/beacon.png"></foreignObject></svg>
+//
+// into <svg><img src="http://evil/beacon.png"></svg>; and because <img> and <a>
+// are HTML-breakout tags inside SVG, the browser makes those live HTML. The
+// containers therefore have to be named as skip-content so their contents leave
+// with them.
+//
+// Scoping this honestly: it is not a NEW capability. An ordinary markdown image
+// (![](http://evil/x.png)) reaches a remote URL by design under UGCPolicy, so a
+// document could already cause a request. What the skip set buys is that opening
+// the SVG surface does not silently widen the ways to do it — and that the
+// comments here stop asserting a guarantee the code did not have.
 //
 // The `style` ATTRIBUTE is likewise absent: AllowStyling above grants `class`
 // only, so a diagram styles itself through the Artificer token classes
@@ -126,11 +159,36 @@ func allowInlineSVG(p *bluemonday.Policy) {
 	// Structural and shape elements. No scripting, no animation, no external
 	// references — see the doc comment.
 	p.AllowElements(
-		"svg", "g", "defs", "symbol", "title", "desc",
+		"svg", "g", "defs", "symbol",
 		"path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
 		"text", "tspan",
 		"marker", "clipPath", "mask",
 		"linearGradient", "radialGradient", "stop",
+	)
+
+	// Discard these elements' CONTENTS along with their tags. Without this,
+	// bluemonday hoists a denied container's children into the surviving SVG —
+	// see the doc comment above for the <foreignObject><img> case this closes.
+	// "a" is deliberately absent: UGCPolicy allows <a> for ordinary markdown
+	// links, and an allowed element wins over a skip-content entry, so listing it
+	// would be a no-op that implies a guarantee we do not have. An <img> inside an
+	// SVG <a> therefore survives — identically to an ordinary markdown image, and
+	// for the same reason. That is the pre-existing UGCPolicy contract, not
+	// something this allowlist widens.
+	p.SkipElementsContent(
+		"foreignObject", "use", "image",
+		"animate", "animateTransform", "animatemotion", "set",
+		"filter", "pattern", "title", "desc",
+	)
+
+	// Grouping and definition containers legitimately carry no attributes.
+	// bluemonday drops an allowed element's tag when zero attributes survive
+	// unless it is opted in here — and for <defs>/<mask> that is not cosmetic:
+	// losing the wrapper promotes definition-only geometry into PAINTED shapes,
+	// so a masked diagram renders its mask as a visible rectangle.
+	p.AllowNoAttrs().OnElements(
+		"svg", "g", "defs", "symbol", "mask", "clipPath", "marker",
+		"path", "text", "tspan", "linearGradient", "radialGradient",
 	)
 
 	// The root element's framing attributes. viewBox is what makes pan/zoom
@@ -147,7 +205,17 @@ func allowInlineSVG(p *bluemonday.Policy) {
 		OnElements("line", "linearGradient")
 	p.AllowAttrs("cx", "cy", "r", "fr").Matching(svgNumericish).
 		OnElements("circle", "ellipse", "radialGradient")
-	p.AllowAttrs("transform").Matching(svgTransform).Globally()
+	// Scoped to non-root SVG elements rather than Globally(). On the OUTERMOST
+	// <svg>, transform is a presentation attribute mapping to CSS transform — an
+	// overlay primitive, which a document could use to scale a fake prompt over
+	// the page. The pan/zoom wrapper's overflow:hidden happens to clip that
+	// today, but that makes containment depend on a stylesheet and a script
+	// loading, which is not where a security boundary belongs.
+	p.AllowAttrs("transform").Matching(svgTransform).OnElements(
+		"g", "defs", "symbol", "mask", "clipPath", "marker",
+		"path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
+		"text", "tspan",
+	)
 
 	// Presentation. Paint values are constrained so a url() cannot leave the
 	// document.
