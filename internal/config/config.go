@@ -761,6 +761,25 @@ func PrFindingsDir() (string, error) {
 	return filepath.Join(dir, "pr-findings"), nil
 }
 
+// ResumeStoreDir returns the forgectl-owned directory that holds `forgectl
+// resume` session snapshots: <os.UserConfigDir()>/forgectl/resume-sessions
+// (macOS: ~/Library/Application Support/forgectl/resume-sessions; Linux:
+// ~/.config/forgectl/resume-sessions). It derives from the same configDir()
+// base as ConfigPath/PrSessionsDir/NetCachePath, so none of them drift.
+//
+// One JSON file per Claude Code session id. The store exists because two
+// things a session owns do NOT survive its exit: the /rename name, and the
+// task bodies under ~/.claude/tasks — Claude Code deletes those. It also
+// carries the session-id → task-directory association, which nothing on disk
+// records durably (internal/resume).
+func ResumeStoreDir() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "resume-sessions"), nil
+}
+
 // LegacyLaunchPath returns the legacy claunch config location, honoring
 // $XDG_CONFIG_HOME. Retained so `forgectl launch` keeps reading an existing
 // ~/.config/claunch/claunch.conf until the user migrates the profiles into the
