@@ -285,17 +285,22 @@ func scanHistory(path string) (map[string]*Session, error) {
 	defer func() { _ = f.Close() }()
 
 	byID := map[string]*Session{}
-	dec := json.NewDecoder(f)
-	for {
+	// Line-wise with a skip, NOT a json.Decoder stream. A Decoder does not
+	// resynchronize at line boundaries, so one corrupt record anywhere ends
+	// the whole read — and since history.jsonl is append-only, what that
+	// silently discards is everything AFTER the bad line: the newest
+	// sessions, which are exactly the ones the picker exists to show.
+	forEachLine(f, func(line []byte) bool {
 		var rec historyRecord
-		if err := dec.Decode(&rec); err != nil {
-			// A truncated or malformed tail ends the read; everything
-			// decoded so far still stands. history.jsonl is append-only
-			// and may be mid-write.
-			break
+		if json.Unmarshal(line, &rec) != nil {
+			return false
 		}
-		if rec.SessionID == "" {
-			continue
+		// Validate at the point of ADMISSION. Ids from this file flow on
+		// into filepath.Join (transcript lookup, task dirs) and into
+		// claude's argv, and guarding each of those sinks separately is how
+		// one gets missed — transcriptPath was exactly that miss.
+		if !validSessionID(rec.SessionID) {
+			return false
 		}
 		ts := time.UnixMilli(rec.Timestamp)
 		s, ok := byID[rec.SessionID]
@@ -304,7 +309,7 @@ func scanHistory(path string) (map[string]*Session, error) {
 				ID: rec.SessionID, Cwd: rec.Project,
 				LastPrompt: firstLine(rec.Display), LastActive: ts,
 			}
-			continue
+			return false
 		}
 		if ts.After(s.LastActive) {
 			s.LastActive, s.LastPrompt = ts, firstLine(rec.Display)
@@ -312,7 +317,8 @@ func scanHistory(path string) (map[string]*Session, error) {
 				s.Cwd = rec.Project
 			}
 		}
-	}
+		return false
+	})
 	return byID, nil
 }
 

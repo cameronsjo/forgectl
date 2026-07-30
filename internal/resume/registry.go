@@ -63,7 +63,10 @@ func readRegistry(dir string) map[string]RegistryEntry {
 			continue
 		}
 		var e RegistryEntry
-		if json.Unmarshal(data, &e) != nil || e.SessionID == "" {
+		// Same admission guard as scanHistory: a registry file is written by
+		// another process, and its session id flows on into path joins and
+		// claude's argv.
+		if json.Unmarshal(data, &e) != nil || !validSessionID(e.SessionID) {
 			continue
 		}
 		e.Live = pidAlive(e.Pid)

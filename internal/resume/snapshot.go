@@ -31,6 +31,10 @@ type SnapshotResult struct {
 // durable data is how a cache starts lying.
 func Snapshot(p Paths, now time.Time) SnapshotResult {
 	var res SnapshotResult
+	// Read the store's directory claims ONCE. This used to happen inside
+	// ResolveTaskDir, i.e. once per live session per turn, with every record
+	// carrying full task bodies.
+	claimed := ClaimedTaskDirs(p)
 	for _, e := range LiveEntries(p) {
 		prior, hadPrior := Load(p.StoreDir, e.SessionID)
 
@@ -49,11 +53,14 @@ func Snapshot(p Paths, now time.Time) SnapshotResult {
 		if hadPrior {
 			priorDir = prior.TaskDir
 		}
-		dir := ResolveTaskDir(p, e.SessionID, e.Cwd, priorDir)
+		dir := ResolveTaskDir(p, e.SessionID, e.Cwd, priorDir, claimed)
 		if dir != "" {
 			rec.TaskDir = dir
 			if priorDir != dir {
 				res.Learned++
+				// Claim it for the rest of this pass, so two live
+				// sessions in one checkout cannot both resolve to it.
+				claimed[dir] = e.SessionID
 			}
 		}
 

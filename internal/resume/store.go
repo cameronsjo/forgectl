@@ -155,11 +155,19 @@ func mergeTasks(prior, live []Task) []Task {
 	return out
 }
 
-// validSessionID guards every path built from an id. Session ids are uuids and
-// task-directory names are uuid-shaped; anything with a separator, a dot, or a
-// non-uuid byte in it is not one, and must never reach filepath.Join.
+// validSessionID guards every path built from an id AND every id that reaches
+// claude's argv. Session ids are uuids and task-directory names are
+// uuid-shaped; anything with a separator, a dot, or a non-uuid byte in it is
+// not one, and must never reach filepath.Join.
+//
+// The leading-dash rejection is the argv half, and it is not theoretical: the
+// hex-plus-dash charset alone admits "-c", "-d", and "-a", which reach
+// `claude --resume <id>` as flag-shaped tokens. Whether claude's parser would
+// actually treat one as a separate flag is unconfirmed — but the id is
+// disk-sourced, the check costs nothing, and a real session id never starts
+// with a dash.
 func validSessionID(id string) bool {
-	if id == "" || len(id) > 64 {
+	if id == "" || len(id) > 64 || id[0] == '-' {
 		return false
 	}
 	for _, r := range id {

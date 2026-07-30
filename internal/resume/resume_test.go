@@ -667,13 +667,95 @@ func TestDriftCheck(t *testing.T) {
 }
 
 // TestSave_RejectsBadSessionID keeps a store path from being built out of
-// anything but a session-id shape.
+// anything but a session-id shape. The leading-dash cases are the argv half:
+// "-c" and friends pass a bare hex-plus-dash charset and would reach
+// `claude --resume <id>` as flag-shaped tokens.
 func TestSave_RejectsBadSessionID(t *testing.T) {
 	dir := t.TempDir()
-	for _, bad := range []string{"", "../escape", "a/b", "id.with.dots", strings.Repeat("a", 65)} {
+	for _, bad := range []string{
+		"", "../escape", "a/b", "id.with.dots", strings.Repeat("a", 65),
+		"-c", "-d", "-a", "--fork-session",
+	} {
 		if err := Save(dir, &Record{ID: bad}); err == nil {
 			t.Errorf("Save accepted session id %q", bad)
 		}
+	}
+}
+
+// TestScan_RejectsHostileIDsAtAdmission is the defense-in-depth check behind
+// the security review's shared root: ids are validated where they ENTER the
+// package, not at each of the several sinks they later reach (filepath.Join for
+// transcripts and task dirs, and claude's argv).
+func TestScan_RejectsHostileIDsAtAdmission(t *testing.T) {
+	f := newFixture(t)
+	now := time.Now()
+	f.history("../../../../etc/passwd", "/repo/evil", "traversal", now)
+	f.history("-c", "/repo/flag", "flag-shaped", now)
+	f.history("ffffffff-0000-0000-0000-00000000900d", "/repo/good", "fine", now.Add(-time.Hour))
+
+	got, err := Scan(f.Paths, Opts{})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Scan admitted %d sessions, want only the well-formed one", len(got))
+	}
+	if got[0].Repo != "good" {
+		t.Errorf("admitted %q, want the well-formed session", got[0].Repo)
+	}
+}
+
+// TestScanHistory_SurvivesACorruptMiddleLine covers an availability bug that a
+// json.Decoder stream made invisible: a Decoder does not resynchronize at line
+// boundaries, so one bad record ended the whole read — and because the file is
+// append-only, what that discarded was everything NEWER than the corruption.
+func TestScanHistory_SurvivesACorruptMiddleLine(t *testing.T) {
+	const newest = "cafe0001-0000-0000-0000-000000000001"
+	f := newFixture(t)
+	now := time.Now()
+	f.history("cafe0002-0000-0000-0000-000000000002", "/repo/old", "old", now.Add(-2*time.Hour))
+
+	// A corrupt record lands between the old session and the newest one.
+	fh, err := os.OpenFile(f.Paths.historyPath(), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("open history: %v", err)
+	}
+	if _, err := fh.WriteString("{\"display\":\"truncated\",\n"); err != nil {
+		t.Fatalf("write corruption: %v", err)
+	}
+	_ = fh.Close()
+
+	f.history(newest, "/repo/new", "newest", now)
+
+	got, err := Scan(f.Paths, Opts{})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(got) == 0 || got[0].ID != newest {
+		t.Fatalf("first row = %q, want %q — a corrupt middle line must not hide everything after it", firstID(got), newest)
+	}
+}
+
+// TestRestore_WillNotFollowADanglingSymlink covers the specific hole in a
+// Stat-then-WriteFile pair: os.Stat on a DANGLING symlink errors, so the
+// already-present skip is missed and the write follows the link to create its
+// target somewhere else. O_EXCL refuses to follow it.
+func TestRestore_WillNotFollowADanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "victim.json")
+	if err := os.Symlink(outside, filepath.Join(dir, "1.json")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	res, err := Restore(dir, []Task{{ID: "1", Raw: json.RawMessage(`{"id":"1"}`)}})
+	if err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if _, err := os.Stat(outside); err == nil {
+		t.Fatal("Restore followed a dangling symlink and created the file outside the task directory")
+	}
+	if res.Written != 0 || res.Skipped != 1 {
+		t.Errorf("Restore wrote %d / skipped %d, want 0 / 1 — an existing entry always wins", res.Written, res.Skipped)
 	}
 }
 

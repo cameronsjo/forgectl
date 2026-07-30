@@ -125,6 +125,15 @@ func runResume(cmd *cobra.Command, cfg config.Config, filter string, limit int, 
 		if picked, err = pickSession(sessions); err != nil {
 			return WithExitCode(err, 1)
 		}
+	} else {
+		// A single filter hit execs without the picker, so nothing would
+		// otherwise show WHAT is about to be resumed. That matters more
+		// than convenience: resuming means chdir'ing into a directory read
+		// off disk and exec'ing claude there under a posture that defaults
+		// to --allow-dangerously-skip-permissions, at which point claude
+		// loads that directory's own .claude/settings.json — hooks
+		// included. The operator should see the target first.
+		fmt.Fprintf(cmd.ErrOrStderr(), "forgectl: one match — %s\n", sessionRow(picked))
 	}
 	return resumeSession(cmd, cfg, picked, fork)
 }
@@ -224,8 +233,18 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, s resume.Session, fork
 		}
 	}
 
+	// Confirm the target is a real directory before exec'ing into it, and
+	// sanitize BOTH the path and the error text on the way out. This is the
+	// most reachable escape sink in the file — os.Chdir fails precisely when
+	// the path is malformed — and %w would have re-printed the raw path a
+	// second time inside the wrapped *os.PathError, so sanitizing only s.Cwd
+	// would have left the hole open.
+	if fi, err := os.Stat(s.Cwd); err != nil || !fi.IsDir() {
+		return WithExitCode(fmt.Errorf("session %s records a working directory that is not there: %s",
+			sanitizeTerm(s.ID), sanitizeTerm(s.Cwd)), 1)
+	}
 	if err := os.Chdir(s.Cwd); err != nil {
-		return WithExitCode(fmt.Errorf("enter %s: %w", s.Cwd, err), 1)
+		return WithExitCode(fmt.Errorf("enter %s: %s", sanitizeTerm(s.Cwd), sanitizeTerm(err.Error())), 1)
 	}
 
 	lc, _ := resolveLaunchConfig(cfg)

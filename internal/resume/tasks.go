@@ -2,7 +2,9 @@ package resume
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -84,30 +86,35 @@ func TaskDirFor(p Paths, id string) string {
 //
 // An empty return means the session has no tasks on disk right now, which is
 // the normal state for one that has already exited.
-func ResolveTaskDir(p Paths, id, cwd, prior string) string {
+// claimed maps a task directory to the session id that owns it, so the cwd
+// heuristic can refuse to hand one session a directory another already has.
+// Snapshot builds it ONCE per pass and threads it through — it used to be
+// rebuilt per live session, which re-read the entire store on every turn of a
+// Stop hook.
+func ResolveTaskDir(p Paths, id, cwd, prior string, claimed map[string]string) string {
 	if prior != "" && isDir(prior) {
 		return prior
 	}
 	if d := TaskDirFor(p, id); d != "" && isDir(d) {
 		return d
 	}
-	return teamTaskDirForCwd(p, cwd, claimedTaskDirs(p, id))
+	return teamTaskDirForCwd(p, cwd, id, claimed)
 }
 
-// claimedTaskDirs returns the task directories the store has already paired
-// with some OTHER session.
+// ClaimedTaskDirs maps every task directory the store has already paired with a
+// session to that session's id.
 //
 // Two sessions working in one checkout can each have a team, and cwd cannot
 // tell their task directories apart — so without this, the newest-first
 // heuristic could hand session A the directory already known to belong to
 // session B. That is worse than finding nothing: A's snapshot would absorb B's
 // tasks, and resuming A would inject them into A's own task list. An already
-// claimed directory is therefore off the table for everyone else.
-func claimedTaskDirs(p Paths, self string) map[string]bool {
-	claimed := map[string]bool{}
+// claimed directory is therefore off the table for everyone but its owner.
+func ClaimedTaskDirs(p Paths) map[string]string {
+	claimed := map[string]string{}
 	for id, rec := range LoadAll(p.StoreDir) {
-		if id != self && rec.TaskDir != "" {
-			claimed[rec.TaskDir] = true
+		if rec.TaskDir != "" {
+			claimed[rec.TaskDir] = id
 		}
 	}
 	return claimed
@@ -132,7 +139,7 @@ type teamConfig struct {
 // strong tiebreak — and whatever it picks is written to the store, so the
 // guess is made once and then read back as fact. That last property is why the
 // claimed set matters: a wrong guess would otherwise harden into a wrong fact.
-func teamTaskDirForCwd(p Paths, cwd string, claimed map[string]bool) string {
+func teamTaskDirForCwd(p Paths, cwd, self string, claimed map[string]string) string {
 	if cwd == "" {
 		return ""
 	}
@@ -164,7 +171,7 @@ func teamTaskDirForCwd(p Paths, cwd string, claimed map[string]bool) string {
 			continue
 		}
 		dir := filepath.Join(p.tasksDir(), e.Name())
-		if claimed[dir] {
+		if owner, taken := claimed[dir]; taken && owner != self {
 			continue
 		}
 		fi, err := os.Stat(dir)
@@ -243,11 +250,6 @@ func Restore(dir string, tasks []Task) (RestoreResult, error) {
 		if !validTaskID(t.ID) {
 			continue
 		}
-		path := filepath.Join(dir, t.ID+".json")
-		if _, err := os.Stat(path); err == nil {
-			res.Skipped++
-			continue
-		}
 		body := t.Raw
 		if len(body) == 0 {
 			encoded, err := json.MarshalIndent(t, "", "  ")
@@ -256,8 +258,28 @@ func Restore(dir string, tasks []Task) (RestoreResult, error) {
 			}
 			body = encoded
 		}
-		if err := os.WriteFile(path, body, 0o600); err != nil {
+		// O_CREATE|O_EXCL rather than Stat-then-WriteFile. The two-step
+		// version had both a TOCTOU window and a symlink follow: a DANGLING
+		// symlink at this path makes os.Stat fail, so the "already present,
+		// skip" branch is missed and WriteFile then follows the link to
+		// create its target somewhere else entirely. O_EXCL refuses to
+		// follow a symlink and makes "exists" and "create" one atomic
+		// decision, so the never-overwrite rule holds against both.
+		f, err := os.OpenFile(filepath.Join(dir, t.ID+".json"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- t.ID is gated by validTaskID and dir is caller-resolved
+		if errors.Is(err, fs.ErrExist) {
+			res.Skipped++
+			continue
+		}
+		if err != nil {
 			return res, fmt.Errorf("restore task %s: %w", t.ID, err)
+		}
+		_, werr := f.Write(body)
+		cerr := f.Close()
+		if werr != nil {
+			return res, fmt.Errorf("restore task %s: %w", t.ID, werr)
+		}
+		if cerr != nil {
+			return res, fmt.Errorf("restore task %s: %w", t.ID, cerr)
 		}
 		res.Written++
 	}
