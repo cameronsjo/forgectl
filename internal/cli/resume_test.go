@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -137,10 +139,29 @@ func TestRelativeTime(t *testing.T) {
 	}
 }
 
+// pinResumePaths points the resume verb at a throwaway tree for one test.
+//
+// `resume snapshot` WRITES, so without this every `go test` run would capture
+// the developer's own live sessions into their real forgectl store.
+func pinResumePaths(t *testing.T) resume.Paths {
+	t.Helper()
+	root := t.TempDir()
+	p := resume.Paths{
+		ClaudeHome: filepath.Join(root, ".claude"),
+		StoreDir:   filepath.Join(root, "store"),
+	}
+	prev := resumePaths
+	resumePaths = func() (resume.Paths, error) { return p, nil }
+	t.Cleanup(func() { resumePaths = prev })
+	return p
+}
+
 // TestResumeSnapshot_AlwaysSucceeds pins the property that makes the Stop hook
 // safe: the capture verb never returns an error, whatever it finds, because a
-// failed snapshot must not become a failed turn.
+// failed snapshot must not become a failed turn. Here it finds an empty tree,
+// which is the harshest version of "whatever it finds".
 func TestResumeSnapshot_AlwaysSucceeds(t *testing.T) {
+	pinResumePaths(t)
 	cmd := newResumeSnapshotCmd()
 	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
@@ -154,6 +175,45 @@ func TestResumeSnapshot_AlwaysSucceeds(t *testing.T) {
 	}
 }
 
+// TestResumeSnapshot_StaysInsideItsPaths is the regression guard for the seam
+// itself: an earlier version of this test resolved the real paths and wrote
+// live snapshots into the developer's own store.
+func TestResumeSnapshot_StaysInsideItsPaths(t *testing.T) {
+	p := pinResumePaths(t)
+	cmd := newResumeSnapshotCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--quiet"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("resume snapshot: %v", err)
+	}
+	entries, err := os.ReadDir(p.StoreDir)
+	if err == nil && len(entries) != 0 {
+		t.Errorf("snapshot over an empty ~/.claude wrote %d store file(s), want 0", len(entries))
+	}
+}
+
+// TestResumeLs_EmptyTreeIsClean checks the cold-start path end to end through
+// the command, not just the renderer.
+func TestResumeLs_EmptyTreeIsClean(t *testing.T) {
+	pinResumePaths(t)
+	cmd := newResumeLsCmd()
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("resume ls --json on an empty tree: %v", err)
+	}
+	var got []sessionDTO
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("output is not valid JSON (%v): %q", err, out.String())
+	}
+	if len(got) != 0 {
+		t.Errorf("listed %d sessions from an empty tree, want 0", len(got))
+	}
+}
+
 // TestTruncate checks the column clip marks itself rather than silently
 // dropping characters.
 func TestTruncate(t *testing.T) {
@@ -163,5 +223,23 @@ func TestTruncate(t *testing.T) {
 	got := truncate("a-very-long-session-name", 10)
 	if len([]rune(got)) != 10 || !strings.HasSuffix(got, "…") {
 		t.Errorf("truncate = %q, want 10 runes ending in an ellipsis", got)
+	}
+}
+
+// TestCell_WidthIsRunesNotBytes is the regression guard for a real
+// misalignment: fmt's %-Ns pads by BYTES, so the three-byte ellipsis that
+// truncate appends overran the column on every clipped row.
+func TestCell_WidthIsRunesNotBytes(t *testing.T) {
+	cases := []string{
+		"short",                    // padded
+		"exactly-ten",              // near the boundary
+		"a-very-long-session-name", // clipped, gains an ellipsis
+		"süßölküche-lane-name",     // multi-byte, clipped
+	}
+	for _, in := range cases {
+		got := cell(in, 12)
+		if n := len([]rune(got)); n != 12 {
+			t.Errorf("cell(%q, 12) = %q — %d runes, want exactly 12", in, got, n)
+		}
 	}
 }

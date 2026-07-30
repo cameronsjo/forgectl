@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/huh"
@@ -81,12 +82,22 @@ cancelled, or the target is still live.`,
 	return cmd
 }
 
+// resumePaths is the location seam for every resume subcommand — a
+// package-level var so a test can point the whole verb at a fixture tree
+// (mirrors upgradeLookPath's seam pattern).
+//
+// It is not a convenience. `resume snapshot` WRITES, and without a seam its
+// test would run a real capture against the developer's own ~/.claude and
+// forgectl store — a unit test with production side effects on every machine
+// that runs `go test`.
+var resumePaths = resume.DefaultPaths
+
 // scanFor loads the resumable sessions matching filter. Live sessions are
 // included deliberately: hiding one would turn "you cannot resume this, it is
 // still running as pid N" into a silent "no session matched", which sends you
 // hunting for a session that is right there.
 func scanFor(filter string, limit int) ([]resume.Session, error) {
-	paths, err := resume.DefaultPaths()
+	paths, err := resumePaths()
 	if err != nil {
 		return nil, fmt.Errorf("locate session records: %w", err)
 	}
@@ -149,10 +160,10 @@ func sessionRow(s resume.Session) string {
 	if name == "" {
 		name = s.ID
 	}
-	row := fmt.Sprintf("%-28s %-22s %-18s %s",
-		truncate(sanitizeTerm(name), 28),
-		truncate(sanitizeTerm(s.Repo), 22),
-		truncate(sanitizeTerm(s.Branch), 18),
+	row := fmt.Sprintf("%s %s %s %s",
+		cell(sanitizeTerm(name), 28),
+		cell(sanitizeTerm(s.Repo), 22),
+		cell(sanitizeTerm(s.Branch), 18),
 		relativeTime(s.LastActive))
 	switch {
 	case s.Live:
@@ -182,7 +193,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, s resume.Session, fork
 
 	// Tasks go back BEFORE the exec: once syscall.Exec replaces this
 	// process there is no "after".
-	if paths, err := resume.DefaultPaths(); err == nil {
+	if paths, err := resumePaths(); err == nil {
 		switch res, err := resume.RestoreFor(paths, s.ID); {
 		case err != nil:
 			// A failed rescue must not block the resume — the session
@@ -329,7 +340,7 @@ never becomes a failed turn.`,
 // nothing it can encounter is worth breaking a turn over.
 func runResumeSnapshot(cmd *cobra.Command, quiet bool) {
 	errOut := cmd.ErrOrStderr()
-	paths, err := resume.DefaultPaths()
+	paths, err := resumePaths()
 	if err != nil {
 		fmt.Fprintf(errOut, "forgectl: snapshot skipped: %v\n", err)
 		return
@@ -354,7 +365,23 @@ func displayName(s resume.Session) string {
 	return s.ID
 }
 
-// truncate clips a column to width, marking the clip.
+// cell renders one fixed-width picker column: clipped if too long, padded if
+// too short, measured in runes throughout.
+//
+// fmt's %-28s cannot do this job here. Its width is in BYTES, and truncate's
+// ellipsis is three of them — so every clipped name overran its column and
+// knocked the rest of the row out of alignment, on exactly the rows a picker
+// most needs to stay readable. Session names and branches are non-ASCII often
+// enough that this is the normal case, not an edge one.
+func cell(s string, width int) string {
+	s = truncate(s, width)
+	if pad := width - len([]rune(s)); pad > 0 {
+		return s + strings.Repeat(" ", pad)
+	}
+	return s
+}
+
+// truncate clips a string to width runes, marking the clip.
 func truncate(s string, width int) string {
 	if len([]rune(s)) <= width {
 		return s

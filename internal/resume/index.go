@@ -144,14 +144,23 @@ func Scan(p Paths, opts Opts) ([]Session, error) {
 	reg := readRegistry(p.registryDir())
 	store := LoadAll(p.StoreDir)
 
-	// A session that exists only in the store (snapshotted, but its history
-	// lines have since been rotated away) is still resumable — fold it in
-	// rather than losing it to the spine's coverage.
+	// history.jsonl is the spine, but it is not the whole skeleton: a
+	// session's prompts are recorded against the id in force when they were
+	// typed, so a session that arrived through /clear can be live, real, and
+	// entirely absent from history (measured — every currently-running
+	// session on this machine was). Both other sources therefore contribute
+	// ids of their own rather than only decorating history's.
 	for id, snap := range store {
 		if _, ok := byID[id]; ok {
 			continue
 		}
 		byID[id] = &Session{ID: id, Cwd: snap.Cwd, LastActive: snap.LastSeen}
+	}
+	for id, e := range reg {
+		if _, ok := byID[id]; ok {
+			continue
+		}
+		byID[id] = &Session{ID: id, Cwd: e.Cwd, LastActive: e.Updated()}
 	}
 
 	sessions := make([]*Session, 0, len(byID))
@@ -177,6 +186,13 @@ func Scan(p Paths, opts Opts) ([]Session, error) {
 			s.Pid, s.Version, s.Live = e.Pid, e.Version, e.Live
 			if e.Cwd != "" {
 				s.Cwd, s.Repo = e.Cwd, filepath.Base(e.Cwd)
+			}
+			// The registry reports activity a prompt does not: a session
+			// working through a long turn has a fresh updatedAt and a
+			// stale last prompt, and "when was I last in this" is what
+			// the ordering answers.
+			if u := e.Updated(); u.After(s.LastActive) {
+				s.LastActive = u
 			}
 			// The registry's name is the /rename name straight from the
 			// live process: the highest authority there is.
