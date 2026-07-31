@@ -59,11 +59,14 @@ func newConfigCmd(deps module.Deps) *cobra.Command {
 			ld := launch.DefaultsProfile(cfg.Launch)
 			// Resolve the actual exec target so the display honors the same
 			// precedence as launch (FORGECTL_CLAUDE_BIN > binary_path > PATH).
-			claudeBin, cerr := launch.ClaudePath(cfg.Launch.Defaults)
+			var claudeBin string
+			var cerr error
 			binaryLabel := "launch.claude_bin"
 			if ld.Harness == "codex" {
 				binaryLabel = "launch.codex_bin"
 				claudeBin, cerr = launch.CodexPath(cfg.Launch.Defaults)
+			} else {
+				claudeBin, cerr = launch.ClaudePath(cfg.Launch.Defaults)
 			}
 			if cerr != nil {
 				claudeBin = fmt.Sprintf("(unresolved: %s)", cerr)

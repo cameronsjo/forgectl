@@ -2,6 +2,7 @@ package launch
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -183,6 +184,30 @@ func TestResolve_CodexProjectDoesNotInheritClaudeDefaultModel(t *testing.T) {
 	got := resolve(lc, "/home/me/p/repo", "/home/me")
 	if got.Model != "" {
 		t.Fatalf("Codex project inherited Claude model: %q", got.Model)
+	}
+}
+
+// TestProfileValidate_UnsupportedHarness covers Validate's first branch, which
+// had no test: an unknown harness must be rejected by name rather than falling
+// through to the Claude path, which is what a typo would otherwise get.
+func TestProfileValidate_UnsupportedHarness(t *testing.T) {
+	for _, harness := range []string{"gemini", "Codex", "claude ", ""} {
+		p := Profile{Harness: harness, Model: "gpt-5", ApprovalPolicy: "never", Sandbox: "read-only"}
+		err := p.Validate()
+		if err == nil {
+			t.Errorf("Validate() accepted unsupported harness %q", harness)
+			continue
+		}
+		if !strings.Contains(err.Error(), "want claude or codex") {
+			t.Errorf("Validate() for %q = %v, want the message to name the supported harnesses", harness, err)
+		}
+	}
+
+	for _, harness := range []string{"claude", "codex"} {
+		p := Profile{Harness: harness, ApprovalPolicy: "never", Sandbox: "read-only"}
+		if err := p.Validate(); err != nil {
+			t.Errorf("Validate() rejected supported harness %q: %v", harness, err)
+		}
 	}
 }
 

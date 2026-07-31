@@ -139,9 +139,11 @@ func launchExec(cfg config.Config, args []string) error {
 		)
 	}
 
-	binaryPath, err := launch.ClaudePath(lc.Defaults)
+	var binaryPath string
 	if profile.Harness == "codex" {
 		binaryPath, err = launch.CodexPath(lc.Defaults)
+	} else {
+		binaryPath, err = launch.ClaudePath(lc.Defaults)
 	}
 	if err != nil {
 		return err
@@ -158,6 +160,11 @@ func launchExec(cfg config.Config, args []string) error {
 		}
 		if profile.Harness == "codex" {
 			harnessArgs = launch.CodexSessionArgs(profile, choice.Model, choice.Mode)
+			// Codex has no equivalent of the Claude agents banner, so without
+			// this a Codex launch leaves no record of the argv it ran with —
+			// including the approval/sandbox posture, which is the part worth
+			// auditing. stderr, so piped stdout stays clean.
+			launch.HarnessBanner(os.Stderr, profile.Harness, harnessArgs)
 		} else {
 			harnessArgs = launch.SessionArgs(profile, choice.Model, choice.Mode)
 		}
@@ -171,6 +178,7 @@ func launchExec(cfg config.Config, args []string) error {
 	default:
 		if profile.Harness == "codex" {
 			harnessArgs = launch.CodexExecArgs(profile, args)
+			launch.HarnessBanner(os.Stderr, profile.Harness, harnessArgs)
 		} else {
 			harnessArgs = launch.BuilderArgs(profile, args)
 		}
