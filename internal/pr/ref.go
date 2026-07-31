@@ -27,13 +27,32 @@ type Ref struct {
 	Number int
 }
 
-// localOwnerSentinel is the reserved Owner value localRef (local.go) uses to
-// mark a synthetic, offline-review Ref. It must never be assignable to a real
-// PR ref — see IsLocal and the reservation check in RefFromParts/ResolveRef —
-// otherwise a real GitHub owner literally named "local" could produce a Ref
-// indistinguishable from a local-mode session, defeating the window-name and
-// PostReview guards that key off it.
+// localOwnerSentinel is the reserved Owner value newLocalRef (local.go) uses to
+// mark a synthetic, offline-review Ref.
+//
+// It is a SECURITY BOUNDARY, not a naming convention. IsLocal() keys off it,
+// and IsLocal() decides whether the Codex reviewer is refused
+// (CheckAgentForRef), whether PostReview may fire, and whether launchCodex
+// widens the sandbox from read-only to workspace-write. A real GitHub owner
+// literally named "local" that reached a Ref would therefore make a REMOTE
+// hostile head look like the operator's own tree.
+//
+// So the sentinel must not be spellable by external data. Every EXPORTED
+// construction route rejects it — ParseRef, RefFromParts, ResolveRef — and the
+// two unexported variants that must round-trip it (parseRefAllowingLocal for
+// breadcrumb reload, newLocalRef for construction) are the only ways in.
+// Grep for those two names to enumerate every path that can produce a local
+// Ref; there are no others.
 const localOwnerSentinel = "local"
+
+// errReservedLocalOwner is the shared refusal for an external attempt to spell
+// the sentinel, so every entry point reports it identically.
+func errReservedLocalOwner(owner string) error {
+	return fmt.Errorf(
+		"reference owner %q is reserved for local (offline) review sessions and cannot name a real repository",
+		owner,
+	)
+}
 
 // Slug renders the "owner/repo" form gh's --repo flag expects.
 func (r Ref) Slug() string { return r.Owner + "/" + r.Repo }
@@ -75,7 +94,25 @@ var (
 // ParseRef is pure and takes no Runner: origin resolution for the bare form is
 // a separate, Runner-backed step (ResolveRef) so the parse/validation surface
 // stays trivially unit-testable and side-effect-free.
+// It REJECTS the reserved local sentinel. Breadcrumb reload, which must
+// round-trip a synthetic local Ref's String(), uses parseRefAllowingLocal.
 func ParseRef(s string) (Ref, error) {
+	ref, err := parseRefAllowingLocal(s)
+	if err != nil {
+		return Ref{}, err
+	}
+	if ref.Owner == localOwnerSentinel {
+		return Ref{}, errReservedLocalOwner(ref.Owner)
+	}
+	return ref, nil
+}
+
+// parseRefAllowingLocal is ParseRef without the sentinel reservation — the
+// permissive core. ONLY the breadcrumb paths may call it: validateBreadcrumb
+// and loadSession re-parse a Ref this package itself wrote to its own sessions
+// dir, and a local session's breadcrumb legitimately carries owner "local".
+// Every other caller must use ParseRef.
+func parseRefAllowingLocal(s string) (Ref, error) {
 	// Trim only spaces/tabs — a convenience for copy-paste — but deliberately
 	// NOT newlines or other control bytes: a trailing '\n' must fail the anchored
 	// match (Go's $ is end-of-text) rather than be silently accepted, so an
@@ -85,10 +122,10 @@ func ParseRef(s string) (Ref, error) {
 		return Ref{}, fmt.Errorf("empty PR reference")
 	}
 	if m := reSlug.FindStringSubmatch(s); m != nil {
-		return RefFromParts(m[1], m[2], m[3])
+		return refFromPartsAllowingLocal(m[1], m[2], m[3])
 	}
 	if m := reURL.FindStringSubmatch(s); m != nil {
-		return RefFromParts(m[1], m[2], m[3])
+		return refFromPartsAllowingLocal(m[1], m[2], m[3])
 	}
 	if m := reBare.FindStringSubmatch(s); m != nil {
 		n, err := parseNumber(m[1])
@@ -107,17 +144,26 @@ func ParseRef(s string) (Ref, error) {
 // anchored charset itself rather than assuming a caller already did. ".." is
 // impossible under that class but rejected explicitly for defense in depth.
 func RefFromParts(owner, repo, num string) (Ref, error) {
+	ref, err := refFromPartsAllowingLocal(owner, repo, num)
+	if err != nil {
+		return Ref{}, err
+	}
+	if ref.Owner == localOwnerSentinel {
+		return Ref{}, errReservedLocalOwner(ref.Owner)
+	}
+	return ref, nil
+}
+
+// refFromPartsAllowingLocal is RefFromParts without the sentinel reservation —
+// the shared anchored validator. ONLY parseRefAllowingLocal and newLocalRef may
+// call it; every external-data path goes through RefFromParts.
+func refFromPartsAllowingLocal(owner, repo, num string) (Ref, error) {
 	if !reOwner.MatchString(owner) || !reOwner.MatchString(repo) {
 		return Ref{}, fmt.Errorf("reference owner/repo %q/%q outside allowed charset", owner, repo)
 	}
 	if owner == ".." || repo == ".." {
 		return Ref{}, fmt.Errorf("PR reference must not contain %q", "..")
 	}
-	// Deliberately NOT rejecting owner == localOwnerSentinel here: ParseRef
-	// must stay permissive so a synthetic local Ref's String() round-trips
-	// through it on breadcrumb reload (validateBreadcrumb calls ParseRef
-	// directly). The reservation is enforced one layer up, in ResolveRef —
-	// the actual entry point for a real, user-typed PR reference.
 	// The charset class permits '-' anywhere; a leading '-' would be option-like
 	// if it ever reached git/gh as a positional (and GitHub owners/repos cannot
 	// begin with '-' regardless). Reject it explicitly.
@@ -150,22 +196,16 @@ func parseNumber(s string) (int, error) {
 // path applies (anchored charset plus the leading-'-' and ".." rejections) —
 // because `gh`/`git` output is itself hostile input.
 //
-// ResolveRef is the real entry point for a user-typed PR reference (the CLI's
-// `pr <ref>` command calls it, never bare ParseRef), so this is where
-// localOwnerSentinel is enforced as reserved: an owner of "local" — whether
-// typed directly ("local/repo#5") or resolved from the cwd's origin — is
-// refused here, never in ParseRef itself (which must stay permissive so a
-// synthetic local Ref's String() still round-trips through it on breadcrumb
-// reload).
+// An owner of "local" is refused on both routes: a typed "local/repo#5" is
+// rejected by ParseRef, and an origin resolving to that owner is rejected
+// below (resolveOrigin's output does not pass through RefFromParts).
 func (c *Client) ResolveRef(ctx context.Context, s string) (Ref, error) {
 	ref, err := ParseRef(s)
 	if err != nil {
 		return Ref{}, err
 	}
 	if ref.Complete() {
-		if ref.Owner == localOwnerSentinel {
-			return Ref{}, fmt.Errorf("PR reference owner %q is reserved for local (offline) review sessions", localOwnerSentinel)
-		}
+		// No sentinel check needed: ParseRef already rejected it above.
 		return ref, nil
 	}
 	owner, repo, err := c.resolveOrigin(ctx)
@@ -175,8 +215,10 @@ func (c *Client) ResolveRef(ctx context.Context, s string) (Ref, error) {
 	if !ValidOwnerRepoPart(owner) || !ValidOwnerRepoPart(repo) {
 		return Ref{}, fmt.Errorf("origin owner/repo %q/%q outside allowed charset", owner, repo)
 	}
+	// resolveOrigin's output never passes through RefFromParts, so this path
+	// needs its own reservation check.
 	if owner == localOwnerSentinel {
-		return Ref{}, fmt.Errorf("origin owner %q is reserved for local (offline) review sessions", localOwnerSentinel)
+		return Ref{}, errReservedLocalOwner(owner)
 	}
 	ref.Owner, ref.Repo = owner, repo
 	return ref, nil

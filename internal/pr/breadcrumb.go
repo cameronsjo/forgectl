@@ -107,7 +107,10 @@ func validateBreadcrumb(bc Breadcrumb) error {
 	if bc.Ref == "" {
 		return fmt.Errorf("missing ref")
 	}
-	if _, err := ParseRef(bc.Ref); err != nil {
+	// parseRefAllowingLocal, not ParseRef: this re-parses a Ref this package
+	// wrote to its own sessions dir, and a local session's breadcrumb carries
+	// the reserved owner legitimately.
+	if _, err := parseRefAllowingLocal(bc.Ref); err != nil {
 		return fmt.Errorf("malformed ref %q: %w", bc.Ref, err)
 	}
 	if bc.CreatedAt.IsZero() {

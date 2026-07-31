@@ -53,7 +53,7 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 		return Session{}, fmt.Errorf("resolve local HEAD commit: %w", err)
 	}
 
-	ref := localRef(headOid)
+	ref := newLocalRef(headOid)
 	sess := Session{
 		Ref:       ref,
 		HeadRef:   headRef,
@@ -148,7 +148,7 @@ func (c *Client) teardownLocalArtifacts(ctx context.Context, workspace, findings
 	_ = os.RemoveAll(findingsDir)
 }
 
-// unparseableHexSentinel is the fallback Number for localRef when hexPart
+// unparseableHexSentinel is the fallback Number for newLocalRef when hexPart
 // fails to parse or parses to zero. hexPart is at most 6 hex digits, so any
 // successful parse is in [0, 0xFFFFFF]; this sentinel sits strictly above
 // that range so it can never collide with a legitimately parsed value (e.g.
@@ -156,15 +156,21 @@ func (c *Client) teardownLocalArtifacts(ctx context.Context, workspace, findings
 // with that).
 const unparseableHexSentinel = 0x1000000
 
-// localRef builds a synthetic Ref identity from a local HEAD oid: Owner is
+// localRef is the ONLY constructor that may produce a Ref carrying the
+// reserved sentinel. It builds the identity in-process from a local git oid —
+// nothing external reaches it — which is what makes locality unforgeable: the
+// exported routes (ParseRef, RefFromParts, ResolveRef) all refuse the
+// sentinel, so no gh response, config value, or user-typed string can spell it.
+//
+// It builds a synthetic Ref identity from a local HEAD oid: Owner is
 // localOwnerSentinel (reserved — see its doc in ref.go), Repo is a 7-char
 // short oid, and Number is derived from the oid's first 6 hex chars (always
 // positive — parseNumber rejects Number<=0, so a fixed 0 sentinel would fail
 // breadcrumb reload). Every component stays inside Ref's existing validated
-// charset, so ref.String() round-trips through ParseRef exactly like a real
-// PR ref. Deriving Number from the oid also keeps concurrent-session tmux
+// charset, so ref.String() round-trips through parseRefAllowingLocal exactly
+// like a real PR ref does through ParseRef. Deriving Number from the oid also keeps concurrent-session tmux
 // window names (pr-<owner>-<N>) distinct per commit under review.
-func localRef(oid string) Ref {
+func newLocalRef(oid string) Ref {
 	hexPart := truncate(oid, 6)
 	n, err := strconv.ParseInt(hexPart, 16, 64)
 	if err != nil || n <= 0 {

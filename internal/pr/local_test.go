@@ -7,7 +7,7 @@ package pr
 //       no worktree, no quarantine/allowlist write, no breadcrumb
 //   [x] Real: uses `git worktree add`, never `git clone`
 //   [x] Real: the worktree ref is the resolved HEAD oid, not the literal "HEAD"
-//   [x] localRef output round-trips through ParseRef (the Number<=0 failure mode)
+//   [x] newLocalRef output round-trips through parseRefAllowingLocal (the Number<=0 failure mode)
 //   [x] The findings dir is a sibling of workspace, never nested inside it
 //   [x] The findings dir is created under the client's durable findingsDir
 //       (config.PrFindingsDir by default), not a sibling of the OS-temp
@@ -149,7 +149,7 @@ func TestPrepareLocal_PinsToResolvedOid(t *testing.T) {
 	}
 }
 
-func TestPrepareLocal_BreadcrumbRoundTripsThroughParseRef(t *testing.T) {
+func TestPrepareLocal_BreadcrumbRoundTripsThroughInternalParser(t *testing.T) {
 	oids := []string{
 		localHeadOid,
 		"0000001234567890abcdef", // low-value hex prefix, still nonzero
@@ -157,17 +157,22 @@ func TestPrepareLocal_BreadcrumbRoundTripsThroughParseRef(t *testing.T) {
 		"abc",                    // shorter than 6/7 chars
 	}
 	for _, oid := range oids {
-		ref := localRef(oid)
+		ref := newLocalRef(oid)
 		if ref.Number <= 0 {
-			t.Errorf("localRef(%q).Number = %d, want > 0", oid, ref.Number)
+			t.Errorf("newLocalRef(%q).Number = %d, want > 0", oid, ref.Number)
 		}
-		got, err := ParseRef(ref.String())
+		// The breadcrumb reload path, which is the reason the round-trip must work.
+		got, err := parseRefAllowingLocal(ref.String())
 		if err != nil {
-			t.Errorf("ParseRef(%q) failed to round-trip: %v", ref.String(), err)
+			t.Errorf("parseRefAllowingLocal(%q) failed to round-trip: %v", ref.String(), err)
 			continue
 		}
 		if got != ref {
 			t.Errorf("round-trip mismatch: got %+v, want %+v", got, ref)
+		}
+		// The public parser must NOT accept it — that asymmetry is the control.
+		if _, err := ParseRef(ref.String()); err == nil {
+			t.Errorf("ParseRef(%q) accepted the reserved sentinel", ref.String())
 		}
 	}
 }
