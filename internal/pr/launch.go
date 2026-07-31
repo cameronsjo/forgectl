@@ -83,9 +83,14 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) er
 	}
 }
 
-// launchCodex dispatches `codex exec` with a tested compensating sandbox.
-// Remote PR reviews are read-only. Local reviews use workspace-write plus the
-// dedicated findings directory as their sole additional writable root.
+// launchCodex dispatches `codex exec` under Codex's native sandbox. Remote PR
+// reviews are read-only. Local reviews use workspace-write plus the dedicated
+// findings directory as an additional writable root.
+//
+// This posture bounds WRITES and network egress, not command execution: the
+// reviewer can run arbitrary shell and read the whole host filesystem. See
+// CodexExec in agent.go for the measured delta against agent A's allowlist and
+// why it is not closable from `codex exec` today.
 func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Config) error {
 	codexPath, err := launch.CodexPath(cfg.Launch.Defaults)
 	if err != nil {
