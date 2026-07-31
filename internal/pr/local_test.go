@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
@@ -339,5 +340,59 @@ func TestPrepareLocal_AllowsOrdinaryPaths(t *testing.T) {
 	}
 	if !sess.Ref.IsLocal() {
 		t.Errorf("expected a local ref, got %+v", sess.Ref)
+	}
+}
+
+// TestPrepareLocal_RefusesCleanRoomAcrossTMPDIRChange closes a one-variable
+// bypass of the clean-room guard. os.TempDir() reads $TMPDIR at CALL time,
+// while the workspace was created under the CREATING process's $TMPDIR — so
+//
+//	forgectl pr owner/repo#1                      # under /var/folders/…/T/
+//	TMPDIR=/tmp forgectl pr local --agent codex /var/folders/…/forgectl-workflow-abc
+//
+// made the temp-root comparison false and returned before the prefix scan ran.
+// The recorded breadcrumb workspace is an absolute path that does not move,
+// which is what makes the authoritative half $TMPDIR-independent.
+func TestPrepareLocal_RefusesCleanRoomAcrossTMPDIRChange(t *testing.T) {
+	// A workspace somewhere the *current* $TMPDIR will not cover.
+	elsewhere := t.TempDir()
+	workspace := filepath.Join(elsewhere, "forgectl-workflow-abc123")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+
+	sessionsDir := t.TempDir()
+	c := New(localGitRunner(), WithSessionsDir(sessionsDir), WithTmuxSession("forgectl"))
+
+	// Record the breadcrumb the way a real `forgectl pr <ref>` would.
+	ref := Ref{Owner: "o", Repo: "r", Number: 1}
+	if _, err := writeBreadcrumb(sessionsDir, ref, Breadcrumb{
+		Workspace: workspace,
+		Ref:       ref.String(),
+		Agent:     "claude",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("write breadcrumb: %v", err)
+	}
+
+	// Now point $TMPDIR somewhere else entirely, as the bypass did.
+	t.Setenv("TMPDIR", t.TempDir())
+
+	for _, tc := range []struct{ name, path string }{
+		{"the workspace itself", workspace},
+		{"a subdirectory of it", filepath.Join(workspace, "src")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.MkdirAll(tc.path, 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			_, err := c.PrepareLocal(context.Background(), tc.path, PrepareLocalOpts{Agent: "codex"})
+			if err == nil {
+				t.Fatal("a recorded clean-room workspace must be refused regardless of $TMPDIR")
+			}
+			if !strings.Contains(err.Error(), "clean-room workspace") {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
 	}
 }

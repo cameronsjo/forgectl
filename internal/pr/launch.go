@@ -198,6 +198,15 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 		profile.Harness = "claude"
 		profile.Model = launch.DefaultModelFor("claude")
 	}
+	// Drop the operator's ambient add_dir. launch.Resolve returns
+	// [launch.defaults].add_dir plus any project block matching the workspace,
+	// and BuilderArgs emits --add-dir for each — so `add_dir = ["~/notes"]`
+	// would hand the reviewer of a remote hostile head a root outside the clean
+	// room, defeating the deny-by-default workspace scoping for those paths.
+	// The local branch below re-adds exactly one entry, the findings dir.
+	// launchCodex builds a fresh Profile and inherits none; this is the
+	// inline half.
+	profile.AddDir = nil
 
 	prompt := reviewPrompt
 	if sess.Ref.IsLocal() {

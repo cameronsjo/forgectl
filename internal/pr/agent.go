@@ -103,8 +103,8 @@ func LaunchPathFor(agent string) LaunchPath {
 //     protect against and the Codex agent stays fully available.
 //
 // That justification is about content OWNERSHIP, while this function tests how
-// the Ref was CONSTRUCTED — two different predicates, and they only coincide
-// because two other guards hold them together. Both are load-bearing:
+// the Ref was CONSTRUCTED. They are different predicates. Two other guards keep
+// them from diverging, and both are load-bearing:
 //
 //   - localOwnerSentinel is unforgeable (ref.go), so external data cannot make
 //     a remote head present as local.
@@ -113,6 +113,20 @@ func LaunchPathFor(agent string) LaunchPath {
 //     head into "their own tree" by pointing local review at the sandbox.
 //
 // Weaken either and this refusal degrades from a boundary to a speed bump.
+//
+// ACCEPTED RESIDUAL — the predicates still do not fully coincide, and one gap
+// is deliberately left open:
+//
+//	forgectl pr local --agent codex <the operator's own repo, checked out to
+//	                                 a third party's head>
+//
+// e.g. after `gh pr checkout 123`. That path is the operator's TREE, which is
+// not the operator's CONTENT, and `gh pr checkout` is the ordinary way the two
+// diverge. It is not gateable by path provenance — the directory is genuinely
+// theirs — so this design does not gate it. PrepareLocal warns when HEAD is
+// detached, which covers the common shape of it without pretending to be a
+// control. Anyone extending this boundary should know the gap is known and
+// accepted, not overlooked.
 //
 // Returns nil when the pairing is allowed. Called at both ends of the pipeline
 // — Prepare, so an operator is stopped before a third party's head is ever
@@ -127,7 +141,8 @@ func CheckAgentForRef(agent string, ref Ref) error {
 			"and network access but NOT which commands run, so a prompt injection in a "+
 			"third-party diff could reach a shell with read access to your whole home "+
 			"directory — and `codex exec` exposes no way to confine that. Review this PR "+
-			"with `--agent claude` (the default), whose allowlist grants no shell at all",
+			"with `--agent claude` (the default), whose allowlist confines Bash to an "+
+			"enumerated read-only prefix set",
 		agent,
 	)
 }

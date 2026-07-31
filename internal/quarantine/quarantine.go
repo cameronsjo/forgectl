@@ -287,14 +287,24 @@ func (c *Client) Restore(_ context.Context, moves []Move) error {
 			}
 			return fmt.Errorf("stat %s: %w", m.To, err)
 		}
-		// Symmetric with Hide's anti-clobber guard: os.Rename silently
-		// overwrites. Teardown recomputes targets from the LIVE tree, so a file
-		// the review itself created at x/CLAUDE.md.quarantined would otherwise
-		// be renamed over a sibling x/CLAUDE.md. Confined to a disposable
-		// workspace today, but "restore" must never destroy.
+		// An occupied destination is WARNED, not fatal — deliberately asymmetric
+		// with Hide, which refuses.
+		//
+		// Hide runs before the review, on content that must survive; failing
+		// loud there costs nothing. Restore runs inside discard, which returns
+		// on error BEFORE sandbox.Teardown, the tmux kill, and the breadcrumb
+		// delete. Refusing here would trade a harmless overwrite — inside a
+		// directory os.RemoveAll'd two statements later — for a permanently
+		// stuck session: the workspace stays on disk holding fetched content,
+		// `pr list` keeps showing it, and every `pr teardown` retry fails
+		// identically. Reachable whenever a local Codex review (workspace-write)
+		// writes an instruction-file name into the tree it is reviewing.
+		//
+		// So: skip the rename, keep going, and leave a record.
 		if _, err := os.Lstat(m.From); err == nil {
-			slog.Error("Restore destination already exists; refusing to clobber.", "from", m.From, "to", m.To)
-			return fmt.Errorf("restore destination %q already exists", m.From)
+			slog.Warn("Restore destination already exists; leaving the quarantined copy in place.",
+				"from", m.From, "to", m.To)
+			continue
 		} else if !os.IsNotExist(err) {
 			return fmt.Errorf("stat %s: %w", m.From, err)
 		}
@@ -341,12 +351,24 @@ func computeMove(root string, scheme Scheme, target string) (Move, error) {
 // decorated (the pre-Hide case) is returned unchanged, so the walk yields the
 // same original-relative path in both directions — the property ExpandTargets
 // depends on for reversibility.
+// Matching is case-insensitive, because the walk that feeds it is: an exact
+// TrimSuffix would leave `src/AGENTS.md.QUARANTINED` undecorated to itself, and
+// Hide would then rename it to `…QUARANTINED.quarantined` — a name the teardown
+// walk no longer matches, breaking the reversibility this function exists to
+// preserve.
 func undecorate(scheme Scheme, base string) string {
+	lower := strings.ToLower(base)
 	switch scheme {
 	case SuffixQuarantined:
-		return strings.TrimSuffix(base, ".quarantined")
+		if strings.HasSuffix(lower, ".quarantined") {
+			return base[:len(base)-len(".quarantined")]
+		}
+		return base
 	default:
-		return strings.TrimPrefix(base, "_")
+		if strings.HasPrefix(lower, "_") {
+			return base[1:]
+		}
+		return base
 	}
 }
 

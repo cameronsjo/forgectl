@@ -532,3 +532,74 @@ func TestLaunch_LocalSessionWithoutFindingsDirRefused(t *testing.T) {
 		})
 	}
 }
+
+// TestLaunchInline_DropsAmbientAddDir guards the clean room's scoping. The
+// hardening block clears AllowDanger, PermissionMode, Harness and Model — and
+// must also clear AddDir, because launch.Resolve returns the operator's
+// [launch.defaults].add_dir and BuilderArgs emits --add-dir for each. Otherwise
+// `add_dir = ["~/notes"]` hands the reviewer of a REMOTE hostile head a root
+// outside the workspace.
+func TestLaunchInline_DropsAmbientAddDir(t *testing.T) {
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
+
+	cfg := config.Config{Launch: config.LaunchConfig{
+		Defaults: config.LaunchDefaults{AddDir: []string{"/private/notes", "/private/keys"}},
+	}}
+
+	// Remote PR review: no --add-dir at all.
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	prSess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
+	if err := c.Launch(context.Background(), prSess, cfg); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	args := fake.Last().Args
+	for _, leaked := range []string{"/private/notes", "/private/keys"} {
+		if contains(args, leaked) {
+			t.Errorf("ambient add_dir %q reached the clean-room reviewer: %v", leaked, args)
+		}
+	}
+	if contains(args, "--add-dir") {
+		t.Errorf("a remote review must grant no additional root: %v", args)
+	}
+
+	// Local review: exactly one --add-dir, the findings dir.
+	findings := t.TempDir()
+	fake2 := &exec.FakeRunner{}
+	c2 := New(fake2, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	localSess := Session{
+		Ref:         Ref{Owner: localOwnerSentinel, Repo: "abc1234", Number: 1},
+		Workspace:   fakeWorkspace(t),
+		Agent:       "claude",
+		FindingsDir: findings,
+	}
+	if err := c2.Launch(context.Background(), localSess, cfg); err != nil {
+		t.Fatalf("Launch local: %v", err)
+	}
+	args2 := fake2.Last().Args
+	if !argPair(args2, "--add-dir", findings) {
+		t.Errorf("local review lost its findings dir: %v", args2)
+	}
+	for _, leaked := range []string{"/private/notes", "/private/keys"} {
+		if contains(args2, leaked) {
+			t.Errorf("ambient add_dir %q survived into the local review: %v", leaked, args2)
+		}
+	}
+	if got := countArg(args2, "--add-dir"); got != 1 {
+		t.Errorf("expected exactly one --add-dir, got %d: %v", got, args2)
+	}
+}
+
+func countArg(args []string, want string) int {
+	n := 0
+	for _, a := range args {
+		if a == want {
+			n++
+		}
+	}
+	return n
+}

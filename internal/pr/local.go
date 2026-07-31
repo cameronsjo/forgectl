@@ -2,6 +2,7 @@ package pr
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -43,7 +44,7 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	if err := sandbox.RejectOptionLike("path", absPath); err != nil {
 		return Session{}, err
 	}
-	if err := rejectCleanRoomPath(absPath); err != nil {
+	if err := c.rejectCleanRoomPath(absPath); err != nil {
 		return Session{}, err
 	}
 	slog.Debug("Preparing local clean-room review.", "path", absPath, "dryRun", opts.DryRun)
@@ -55,6 +56,17 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	headOid, err := c.run.Run(ctx, "git", "-C", absPath, "rev-parse", "HEAD")
 	if err != nil {
 		return Session{}, fmt.Errorf("resolve local HEAD commit: %w", err)
+	}
+
+	// A detached HEAD is the ordinary shape of `gh pr checkout` — the operator's
+	// own tree sitting on a third party's commit. That is the one Codex path
+	// this design deliberately does not gate (see CheckAgentForRef's ACCEPTED
+	// RESIDUAL), because the directory is genuinely theirs. Warn rather than
+	// refuse: silence here would read as coverage.
+	if LaunchPathFor(opts.Agent) == CodexExec && headRef == "HEAD" {
+		slog.Warn("Local review is on a detached HEAD, which is what `gh pr checkout` leaves behind. "+
+			"If this commit came from someone else, the Codex reviewer is not confined against it — "+
+			"use --agent claude instead.", "path", absPath, "head", headOid)
 	}
 
 	ref := newLocalRef(headOid)
@@ -155,30 +167,112 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 // third party's head. Same hostile diff, same unconfined reviewer, one extra
 // command.
 //
-// The check mirrors validateWorkspace's: under the OS temp dir AND carrying the
-// sandbox prefix. Both halves are required — a user's own repo living somewhere
-// under the temp dir is legitimate, and the prefix alone would reject a
-// same-named directory anywhere on disk.
-func rejectCleanRoomPath(absPath string) error {
+// Two independent checks, because each covers the other's blind spot:
+//
+//  1. The LIVE BREADCRUMB SET — every Workspace this client has recorded in
+//     sessionsDir. This is the authoritative half and, critically, it is
+//     $TMPDIR-independent: os.TempDir() reads $TMPDIR at CALL time, so a
+//     workspace created under one $TMPDIR and attacked under another
+//     (`TMPDIR=/tmp forgectl pr local /var/folders/…/forgectl-workflow-abc`)
+//     slips past any temp-root comparison. The recorded absolute path does not
+//     move.
+//  2. The PREFIX SCAN — under the current temp root AND carrying the sandbox
+//     prefix, the pair validateWorkspace uses. This is the belt: it still
+//     catches a workspace whose breadcrumb was deleted, or one left by a
+//     different forgectl invocation with its own sessions dir.
+//
+// A breadcrumb that fails to load is skipped rather than fatal, matching List:
+// one corrupt file must not make every local review unreviewable. The prefix
+// scan still applies in that case.
+func (c *Client) rejectCleanRoomPath(absPath string) error {
 	real := absPath
 	if r, err := filepath.EvalSymlinks(absPath); err == nil {
 		real = r
 	}
-	if !sandbox.WithinWorkspace(osTempDir(), real) {
+	real = filepath.Clean(real)
+
+	if ws, ok := c.recordedWorkspaceFor(real); ok {
+		return cleanRoomError(absPath, ws)
+	}
+
+	// Belt: prefix scan, bounded at the temp root so a $TMPDIR whose own path
+	// happens to contain a "forgectl-*" component does not reject everything
+	// under it.
+	tempRoot := filepath.Clean(osTempDir())
+	if r, err := filepath.EvalSymlinks(tempRoot); err == nil {
+		tempRoot = r
+	}
+	if !sandbox.WithinWorkspace(tempRoot, real) {
 		return nil
 	}
-	for dir := filepath.Clean(real); ; dir = filepath.Dir(dir) {
+	for dir := real; dir != tempRoot; dir = filepath.Dir(dir) {
 		if strings.HasPrefix(filepath.Base(dir), tempPrefix) {
-			return fmt.Errorf(
-				"refusing to review %q: it is inside a forgectl clean-room workspace (%q), which holds content fetched from somewhere else. "+
-					"`pr local` reviews your own working tree — point it at your repo, not at a review sandbox",
-				absPath, dir,
-			)
+			return cleanRoomError(absPath, dir)
 		}
 		if parent := filepath.Dir(dir); parent == dir {
-			return nil
+			break
 		}
 	}
+	return nil
+}
+
+// recordedWorkspaceFor reports the recorded clean-room workspace that contains
+// real, if any. Comparison is on resolved absolute paths, so it holds across a
+// $TMPDIR change.
+//
+// It deliberately does NOT go through List/loadBreadcrumb. That path runs
+// validateBreadcrumb, whose workspace check requires the recorded directory to
+// sit under osTempDir() — which reads $TMPDIR at call time. So under exactly
+// the $TMPDIR change this guard exists to defeat, List() skips every
+// breadcrumb and the authoritative half would see nothing. (That same
+// dependency makes `pr list`, `pr teardown`, and `pr cleanup` go blind after a
+// $TMPDIR change; out of scope here, flagged separately.)
+//
+// Reading with the LOCATION guard but not the workspace-schema guard is safe
+// for this use: the recorded string is only ever compared against a candidate
+// path in order to REFUSE. It never becomes an argv, and a broader view here
+// can only refuse more, never act on more.
+func (c *Client) recordedWorkspaceFor(real string) (string, bool) {
+	entries, err := os.ReadDir(c.sessionsDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("Could not read session breadcrumbs while vetting a local review path.", "error", err)
+		}
+		return "", false
+	}
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		path := filepath.Join(c.sessionsDir, e.Name())
+		if !sandbox.WithinWorkspace(c.sessionsDir, path) {
+			continue // same location guard loadBreadcrumb applies first
+		}
+		data, err := os.ReadFile(path) //nolint:gosec // location-validated above
+		if err != nil {
+			continue
+		}
+		var bc Breadcrumb
+		if err := json.Unmarshal(data, &bc); err != nil || bc.Workspace == "" {
+			continue
+		}
+		ws := filepath.Clean(bc.Workspace)
+		if r, err := filepath.EvalSymlinks(ws); err == nil {
+			ws = r
+		}
+		if real == ws || sandbox.WithinWorkspace(ws, real) {
+			return ws, true
+		}
+	}
+	return "", false
+}
+
+func cleanRoomError(absPath, workspace string) error {
+	return fmt.Errorf(
+		"refusing to review %q: it is inside a forgectl clean-room workspace (%q), which holds content fetched from somewhere else. "+
+			"`pr local` reviews your own working tree — point it at your repo, not at a review sandbox",
+		absPath, workspace,
+	)
 }
 
 // teardownLocalArtifacts is PrepareLocal's failure-path cleanup: best-effort

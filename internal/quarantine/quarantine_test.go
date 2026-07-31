@@ -586,24 +586,40 @@ func TestExpandTargets_CaseVariantRoundTrip(t *testing.T) {
 	}
 }
 
-// TestRestore_RefusesToClobber mirrors Hide's anti-clobber guard. Teardown
-// recomputes targets from the LIVE tree, so a file the review itself created at
-// the quarantined name would otherwise be renamed over the original. "Restore"
-// must never destroy.
-func TestRestore_RefusesToClobber(t *testing.T) {
+// TestRestore_OccupiedDestinationIsNotFatal pins the asymmetry with Hide.
+// discard returns on a Restore error BEFORE sandbox.Teardown, the tmux kill,
+// and the breadcrumb delete — so a fatal Restore would permanently strand the
+// clean room: workspace on disk holding fetched content, `pr list` still
+// showing it, every `pr teardown` retry failing identically.
+//
+// Restore must therefore skip an occupied destination and keep going. It must
+// still not clobber.
+func TestRestore_OccupiedDestinationIsNotFatal(t *testing.T) {
 	root := t.TempDir()
 	original := filepath.Join(root, "CLAUDE.md")
 	quarantined := filepath.Join(root, "CLAUDE.md.quarantined")
 	writeFile(t, original, "the survivor")
 	writeFile(t, quarantined, "planted by the review")
 
+	// A second, unoccupied move must still be restored — the skip is per-move,
+	// not an abort.
+	otherOriginal := filepath.Join(root, "AGENTS.md")
+	otherQuarantined := filepath.Join(root, "AGENTS.md.quarantined")
+	writeFile(t, otherQuarantined, "legitimately quarantined")
+
 	c := New(&exec.FakeRunner{})
-	err := c.Restore(context.Background(), []Move{{From: original, To: quarantined}})
-	if err == nil {
-		t.Fatal("Restore must refuse to overwrite an existing destination")
+	err := c.Restore(context.Background(), []Move{
+		{From: original, To: quarantined},
+		{From: otherOriginal, To: otherQuarantined},
+	})
+	if err != nil {
+		t.Fatalf("an occupied destination must not fail teardown: %v", err)
 	}
 	if got := readFile(t, original); got != "the survivor" {
 		t.Errorf("Restore clobbered the original: %q", got)
+	}
+	if got := readFile(t, otherOriginal); got != "legitimately quarantined" {
+		t.Errorf("the unoccupied move was not restored: %q", got)
 	}
 }
 
@@ -622,5 +638,26 @@ func TestDefaultTargets_CoversClaudeLocal(t *testing.T) {
 	}
 	if !containsStr(got, filepath.Join("sub", "CLAUDE.local.md")) {
 		t.Errorf("nested CLAUDE.local.md not quarantined; got %v", got)
+	}
+}
+
+// TestUndecorate_CaseInsensitive guards the reversibility property. The walk
+// matches case-insensitively, so `src/AGENTS.md.QUARANTINED` reaches
+// undecorate; an exact TrimSuffix left it unchanged, Hide renamed it to
+// `…QUARANTINED.quarantined`, and the teardown walk no longer matched that.
+func TestUndecorate_CaseInsensitive(t *testing.T) {
+	for _, tc := range []struct {
+		scheme   Scheme
+		in, want string
+	}{
+		{SuffixQuarantined, "AGENTS.md.QUARANTINED", "AGENTS.md"},
+		{SuffixQuarantined, "AGENTS.md.quarantined", "AGENTS.md"},
+		{SuffixQuarantined, "AGENTS.md", "AGENTS.md"},
+		{PrefixUnderscore, "_AGENTS.md", "AGENTS.md"},
+		{PrefixUnderscore, "AGENTS.md", "AGENTS.md"},
+	} {
+		if got := undecorate(tc.scheme, tc.in); got != tc.want {
+			t.Errorf("undecorate(%v, %q) = %q, want %q", tc.scheme, tc.in, got, tc.want)
+		}
 	}
 }
