@@ -10,6 +10,8 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/resume"
 )
@@ -368,5 +370,63 @@ func TestSessionRowWidth_RespectsLayout(t *testing.T) {
 	}
 	if !strings.HasPrefix(narrow, "n         ") {
 		t.Errorf("narrow row = %q, want the name padded to 10", narrow)
+	}
+}
+
+// TestCell_MeasuresTerminalCellsNotRunes covers the alignment defect a rune
+// count reintroduces one layer below the fixed widths this branch removed: a
+// CJK ideograph or an emoji occupies TWO terminal cells, so a name carrying
+// them overflowed its column and shoved every column after it out of line.
+// Session names are arbitrary text from /rename or a model-generated ai-title,
+// so this is ordinary input, not an exotic one.
+func TestCell_MeasuresTerminalCellsNotRunes(t *testing.T) {
+	cases := []struct{ name, in string }{
+		{"ascii", "session"},
+		{"cjk", "会議のセッション"},
+		{"emoji", "ship 🚀 it"},
+		{"combining", "café"},             // precomposed
+		{"combining-decomposed", "café"}, // e + combining acute
+		{"mixed", "repo-会議-🚀"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for _, width := range []int{4, 8, 12, 20} {
+				got := cell(c.in, width)
+				if w := ansi.StringWidth(got); w != width {
+					t.Errorf("cell(%q, %d) occupies %d cells, want exactly %d (got %q)", c.in, width, w, width, got)
+				}
+			}
+		})
+	}
+}
+
+// TestSessionRowWidth_WideCharsKeepColumnsAligned is the property that matters
+// downstream: two rows rendered at one layout line up, whatever is in them.
+func TestSessionRowWidth_WideCharsKeepColumnsAligned(t *testing.T) {
+	l := rowLayout{name: 20, repo: 12, branch: 8}
+	ascii := sessionRowWidth(resume.Session{Name: "plain", Repo: "repo", Branch: "main", LastActive: time.Now()}, l)
+	wide := sessionRowWidth(resume.Session{Name: "会議のセッション", Repo: "リポ", Branch: "main", LastActive: time.Now()}, l)
+
+	// The time column starts at the same cell in both rows.
+	prefix := l.name + 1 + l.repo + 1 + l.branch + 1
+	if a, b := ansi.StringWidth(ascii[:len(ascii)-len("just now")]), ansi.StringWidth(wide[:len(wide)-len("just now")]); a != b || a != prefix {
+		t.Errorf("column prefixes differ: ascii=%d wide=%d, want both %d\n  %q\n  %q", a, b, prefix, ascii, wide)
+	}
+}
+
+// TestWriterWidth_NonTerminalIsZero pins the fallback: a buffer, pipe, or file
+// must report 0 so the layout stays fixed, even when the process's own stdout
+// is a terminal.
+func TestWriterWidth_NonTerminalIsZero(t *testing.T) {
+	if got := writerWidth(&bytes.Buffer{}); got != 0 {
+		t.Errorf("writerWidth(buffer) = %d, want 0", got)
+	}
+	f, err := os.CreateTemp(t.TempDir(), "w")
+	if err != nil {
+		t.Fatalf("temp file: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if got := writerWidth(f); got != 0 {
+		t.Errorf("writerWidth(file) = %d, want 0", got)
 	}
 }

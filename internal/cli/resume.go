@@ -12,6 +12,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
@@ -227,18 +228,34 @@ const (
 // output does not reflow depending on who is watching.
 var defaultLayout = rowLayout{name: 28, repo: 22, branch: 18}
 
-// terminalWidth reports the usable output width, or 0 when stdout is not a
-// terminal (piped, redirected, captured by a test).
-func terminalWidth() int {
-	if !term.IsTerminal(int(os.Stdout.Fd())) {
+// writerWidth reports the usable width of the writer actually being rendered
+// to, or 0 when it is not a terminal.
+//
+// Asking about os.Stdout would be the wrong question: printSessions renders to
+// cmd.OutOrStdout(), which a caller can redirect to a pipe, a file, or a test
+// buffer while the process's own stdout is still a tty. That combination would
+// have laid out piped output at terminal widths — reflow depending on who was
+// watching, which is exactly what the non-terminal fallback exists to prevent.
+func writerWidth(w io.Writer) int {
+	f, ok := w.(*os.File)
+	if !ok {
 		return 0
 	}
-	w, _, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil || w <= 0 {
+	fd := int(f.Fd())
+	if !term.IsTerminal(fd) {
 		return 0
 	}
-	return w
+	width, _, err := term.GetSize(fd)
+	if err != nil || width <= 0 {
+		return 0
+	}
+	return width
 }
+
+// terminalWidth reports the width of the process's own stdout — what the
+// picker renders to, since huh drives the terminal directly rather than a
+// writer we hand it.
+func terminalWidth() int { return writerWidth(os.Stdout) }
 
 // layoutFor sizes the columns to the CONTENT and then to the TERMINAL.
 //
@@ -254,8 +271,8 @@ func layoutFor(sessions []resume.Session, width int) rowLayout {
 	}
 	l := rowLayout{name: minNameCol, repo: minRepoCol, branch: minBranchCol}
 	for _, s := range sessions {
-		l.repo = max(l.repo, runeLen(s.Repo))
-		l.branch = max(l.branch, runeLen(s.Branch))
+		l.repo = max(l.repo, displayWidth(s.Repo))
+		l.branch = max(l.branch, displayWidth(s.Branch))
 	}
 	l.repo = min(l.repo, maxRepoCol)
 	l.branch = min(l.branch, maxBranchCol)
@@ -313,8 +330,15 @@ func sessionRowWidth(s resume.Session, l rowLayout) string {
 	return row
 }
 
-// runeLen counts display cells conservatively — runes, matching cell().
-func runeLen(s string) int { return len([]rune(s)) }
+// displayWidth measures a string in TERMINAL CELLS, not runes.
+//
+// The distinction is not pedantic here: a CJK ideograph or an emoji occupies
+// two cells, a combining mark occupies none, and a session name is arbitrary
+// text someone typed at /rename or a model generated as an ai-title. Measuring
+// runes made a name with wide characters overflow its column and shove every
+// column after it out of alignment — the exact defect the fixed widths were
+// replaced to fix, reintroduced one layer down.
+func displayWidth(s string) int { return ansi.StringWidth(s) }
 
 // resumeSession restores the session's tasks, moves into its directory, and
 // replaces this process with claude.
@@ -543,9 +567,10 @@ func printSessions(out, errOut io.Writer, sessions []resume.Session, asJSON bool
 		fmt.Fprintln(out, "no recent sessions")
 		return nil
 	}
-	// Same layout rule as the picker: sized to the terminal when there is
-	// one, fixed when the output is piped so a consumer sees stable columns.
-	l := layoutFor(sessions, terminalWidth())
+	// Same layout rule as the picker, but measured against the writer we are
+	// actually rendering to: sized to the terminal when there is one, fixed
+	// when the output is piped so a consumer sees stable columns.
+	l := layoutFor(sessions, writerWidth(out))
 	for _, s := range sessions {
 		fmt.Fprintln(out, sessionRowWidth(s, l))
 		fmt.Fprintf(out, "\t%s\n", sanitizeTerm(s.Cwd))
@@ -624,23 +649,26 @@ func displayName(s resume.Session) string {
 // enough that this is the normal case, not an edge one.
 func cell(s string, width int) string {
 	s = truncate(s, width)
-	if pad := width - len([]rune(s)); pad > 0 {
+	if pad := width - displayWidth(s); pad > 0 {
 		return s + strings.Repeat(" ", pad)
 	}
 	return s
 }
 
-// truncate clips a string to width runes, marking the clip. A non-positive
-// width yields the empty string — unreachable from today's call sites, but
-// width-1 would otherwise slice to [:-1] and panic.
+// truncate clips a string to width terminal CELLS, marking the clip with an
+// ellipsis. A non-positive width yields the empty string.
+//
+// ansi.Truncate does the cell accounting, which a rune slice cannot: it will
+// not split a double-width character across the boundary, and it does not
+// spend budget on zero-width combining marks.
 func truncate(s string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	if len([]rune(s)) <= width {
+	if displayWidth(s) <= width {
 		return s
 	}
-	return string([]rune(s)[:width-1]) + "…"
+	return ansi.Truncate(s, width, "…")
 }
 
 // relativeTime renders a timestamp the way the picker needs it: how long ago,

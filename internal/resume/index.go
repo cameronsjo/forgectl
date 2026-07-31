@@ -100,11 +100,15 @@ const (
 
 // Opts tunes a Scan.
 type Opts struct {
-	// Limit caps how many sessions are returned, newest first. Zero or
-	// negative means DefaultLimit — a computed limit that reaches 0 yields a
-	// full page, not an empty one, so callers deriving it should check.
-	// The cut happens BEFORE transcripts are opened, so a thousand-session
-	// corpus is not parsed to show ten rows.
+	// Limit caps how many sessions are returned. Zero or negative means
+	// DefaultLimit — a computed limit that reaches 0 yields a full page, not
+	// an empty one, so callers deriving it should check. The cut happens
+	// BEFORE transcripts are opened, so a thousand-session corpus is not
+	// parsed to show ten rows.
+	//
+	// Ordering is resumable-first, then newest-first WITHIN each group — not
+	// newest-first overall. A running session sorts below an older resumable
+	// one on purpose; see the sort in Scan.
 	Limit int
 	// Filter, when non-empty, keeps only sessions whose repo, name, or cwd
 	// contains it (case-insensitive). Applied before the limit cut.
