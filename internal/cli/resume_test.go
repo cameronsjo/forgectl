@@ -327,6 +327,24 @@ func TestLayoutFor_SizesToContentAndTerminal(t *testing.T) {
 		}
 	})
 
+	t.Run("a full row fits the terminal it was sized for", func(t *testing.T) {
+		// tailWidth is a reservation, not a measurement — if it undercounts,
+		// the widest real row wraps instead of clipping. Check the actual
+		// worst case: a month-old live session, whose time column is a full
+		// date AND which carries the longest annotation.
+		worst := resume.Session{
+			Name: strings.Repeat("n", 100), Repo: strings.Repeat("r", 100),
+			Branch: strings.Repeat("b", 100), Live: true, Pid: 123456,
+			LastActive: time.Now().Add(-90 * 24 * time.Hour),
+		}
+		for _, width := range []int{80, 100, 120, 160, 200} {
+			l := layoutFor([]resume.Session{worst}, width)
+			if n := len([]rune(sessionRowWidth(worst, l))); n > width {
+				t.Errorf("at %d columns the widest row rendered %d runes — it will wrap", width, n)
+			}
+		}
+	})
+
 	t.Run("a long repo does not starve the name", func(t *testing.T) {
 		long := []resume.Session{{Repo: strings.Repeat("r", 120), Branch: strings.Repeat("b", 120)}}
 		got := layoutFor(long, 120)

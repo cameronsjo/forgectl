@@ -215,12 +215,12 @@ const (
 	minNameCol, maxNameCol     = 16, 52
 	minRepoCol, maxRepoCol     = 8, 28
 	minBranchCol, maxBranchCol = 6, 24
-	// fallbackWidth is the assumed terminal width when the real one is
-	// unknowable — piped output, a closed tty, a CI log.
-	fallbackWidth = 100
-	// tailWidth reserves room for the relative time plus the widest
-	// trailing annotation ("  (running, pid 123456)").
-	tailWidth = 32
+	// tailWidth reserves the trailing columns the layout does not pad: the
+	// relative time at its widest (a bare "2026-07-30" once a session is over
+	// a month old, 10) plus the longest annotation ("  (running, pid 123456)",
+	// 23), with a little headroom. Undercounting here does not truncate — it
+	// wraps the row, which is worse.
+	tailWidth = 36
 )
 
 // defaultLayout is what a non-terminal render uses: stable widths, so piped
@@ -260,9 +260,29 @@ func layoutFor(sessions []resume.Session, width int) rowLayout {
 	l.repo = min(l.repo, maxRepoCol)
 	l.branch = min(l.branch, maxBranchCol)
 
-	// Three single-space separators between four columns.
-	spare := width - (l.repo + l.branch + tailWidth + 3)
-	l.name = min(max(spare, minNameCol), maxNameCol)
+	// Budget for the three padded columns: the terminal less the reserved
+	// tail and the three single-space separators between four columns.
+	avail := width - tailWidth - 3
+	if avail <= minNameCol+minRepoCol+minBranchCol {
+		// Genuinely too narrow for all three floors. Nothing fits; use the
+		// floors and let the terminal wrap rather than rendering columns so
+		// thin they identify nothing.
+		return rowLayout{name: minNameCol, repo: minRepoCol, branch: minBranchCol}
+	}
+
+	l.name = min(avail-l.repo-l.branch, maxNameCol)
+	if l.name < minNameCol {
+		// The content-sized repo and branch have squeezed the name below its
+		// floor. Take the space back from them — widest-capped first — rather
+		// than letting a long repo name push the row past the terminal, which
+		// wraps instead of clipping and is the worse failure.
+		deficit := minNameCol - l.name
+		give := min(deficit, l.branch-minBranchCol)
+		l.branch -= give
+		deficit -= give
+		l.repo -= min(deficit, l.repo-minRepoCol)
+		l.name = minNameCol
+	}
 	return l
 }
 
