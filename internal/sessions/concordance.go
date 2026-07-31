@@ -40,14 +40,43 @@ func ConnectConcordance(ctx context.Context, dsn string) (*Concordance, error) {
 // Close releases the connection.
 func (c *Concordance) Close(ctx context.Context) error { return c.conn.Close(ctx) }
 
-// schemaHint decorates undefined-table errors (SQLSTATE 42P01) so a fresh
-// concordance points the operator at the canonical DDL instead of a bare SQL error.
+// schemaHint decorates the two schema-drift errors an operator can actually
+// hit, so both point at the canonical DDL instead of surfacing as a bare pgx
+// error with no guidance.
+//
+//	42P01 undefined_table  — a fresh concordance that has never had the DDL applied
+//	42703 undefined_column — an EXISTING concordance running an older DDL
+//
+// 42703 is the more likely of the two in practice: UpsertSessions references
+// every column unconditionally, so the moment the schema grows a column, every
+// machine pointed at a not-yet-migrated concordance fails here. pgErr.ColumnName
+// is usually empty for 42703 (Postgres reports the column in the message, not
+// the field), so the message is included when the field is not populated.
 func schemaHint(err error) error {
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
-		return fmt.Errorf("%w — concordance schema missing; apply scripts/concordance/schema.sql (cameronsjo/claude-configurations)", err)
+	if !errors.As(err, &pgErr) {
+		return err
+	}
+	const applyDDL = "apply scripts/concordance/schema.sql (cameronsjo/claude-configurations)"
+	switch pgErr.Code {
+	case "42P01":
+		return fmt.Errorf("%w — concordance schema missing; %s", err, applyDDL)
+	case "42703":
+		return fmt.Errorf("%w — concordance schema is out of date (missing %s); %s", err, missingColumn(pgErr), applyDDL)
 	}
 	return err
+}
+
+// missingColumn names the undefined column for a 42703, preferring the
+// structured field and falling back to the server message that carries it.
+func missingColumn(pgErr *pgconn.PgError) string {
+	if pgErr.ColumnName != "" {
+		return "column " + pgErr.ColumnName
+	}
+	if pgErr.Message != "" {
+		return pgErr.Message
+	}
+	return "a column this build writes"
 }
 
 // Watermarks returns session_id -> last_message_id for the given ids — the
