@@ -57,13 +57,19 @@ type Profile struct {
 
 // Built-in fallbacks applied when a value is set neither by a project nor by
 // [launch.defaults] — and the entire posture when no config exists.
+//
+// builtinSandbox is "read-only" because it is the Codex analogue of
+// builtinPermissionMode's "plan": launch always starts in a posture that
+// cannot write. A bare `harness = "codex"` with nothing else set must not hand
+// `forgectl launch "<prompt>"` unattended write access to the whole checkout —
+// "workspace-write" is an explicit opt-up, exactly like allow_danger.
 const (
 	builtinHarness        = "claude"
 	builtinModel          = "opus"
 	builtinPermissionMode = "plan"
 	builtinAllowDanger    = true
 	builtinApprovalPolicy = "on-request"
-	builtinSandbox        = "workspace-write"
+	builtinSandbox        = "read-only"
 )
 
 // Resolve picks the profile for cwd: it resolves symlinks best-effort, makes the

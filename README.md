@@ -302,7 +302,7 @@ allow_danger    = true       # adds --allow-dangerously-skip-permissions (reacha
 # binary_path   = ""         # explicit claude path; $FORGECTL_CLAUDE_BIN overrides this
 # Codex settings when harness = "codex":
 # approval_policy   = "on-request"
-# sandbox           = "workspace-write"
+# sandbox           = "read-only"   # launch always starts non-writing; opt up to "workspace-write"
 # codex_binary_path = ""      # $FORGECTL_CODEX_BIN overrides this
 
 [[launch.project]]
@@ -320,6 +320,10 @@ Resolution expands `~`, picks the `[[launch.project]]` whose `match` is the **lo
 - **`agents` is Claude-only** — Codex profiles reject the passthrough and point
   out that no Codex adapter ships. Claude retains its agents-valid injection
   and byte-clean `--json`/`--help` passthrough.
+- **Launch always starts in a posture that cannot write** — `permission_mode =
+  "plan"` for Claude, `sandbox = "read-only"` for Codex. Both are opt-ups:
+  `allow_danger` makes bypass reachable, `sandbox = "workspace-write"` makes
+  the checkout writable. Neither is on by default.
 
 **Choosing the binary** uses env → config → PATH:
 `FORGECTL_CLAUDE_BIN` / `binary_path` / `claude`, or
@@ -328,6 +332,14 @@ Resolution expands `~`, picks the `[[launch.project]]` whose `match` is the **lo
 Codex modes translate to `codex`, `codex resume --last`, `codex fork --last`,
 and `codex exec`. Clean-room reviews accept `--agent codex` and use a native
 read-only or findings-scoped workspace sandbox.
+
+> **`--agent codex` is not equivalent to the default `--agent claude` review.**
+> The Claude clean room confines the reviewer to a deny-by-default allowlist
+> with no command-execution primitive. Codex's `--sandbox read-only` scopes
+> writes and network egress but not *which commands run*, so the Codex reviewer
+> can run arbitrary shell and read the whole host filesystem — and anything it
+> reads reaches the model provider as tool output. Prefer `--agent claude` for
+> untrusted third-party PR heads.
 
 **Zero-migration grace** — if `config.toml` has no `[launch]` section, forgectl still reads a legacy `~/.config/claunch/claunch.conf` (the `[launch]` section is the same `[defaults]` + `[[project]]` shape, just namespaced). `forgectl launch init` writes an empty native section for the one-time cutover; `forgectl launch init --from-claunch` migrates your existing legacy profiles into it, so `launch` stops falling back to the legacy file. Both refuse to overwrite an existing `[launch]` section.
 

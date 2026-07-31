@@ -29,6 +29,35 @@ func TestResolve_NoProjects_UsesBuiltinDefaults(t *testing.T) {
 	}
 }
 
+// TestResolve_BuiltinCodexPostureIsNonWriting pins the harness-default half of
+// the "launch always starts in plan" invariant. A user who sets only
+// `harness = "codex"` must not get unattended write access to the checkout, so
+// the built-in sandbox has to be read-only — workspace-write is an opt-up.
+func TestResolve_BuiltinCodexPostureIsNonWriting(t *testing.T) {
+	lc := config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "codex"}}
+	got := resolveAt(lc, "/home/u/somewhere")
+	if got.Harness != "codex" {
+		t.Fatalf("Harness = %q, want %q", got.Harness, "codex")
+	}
+	if got.Sandbox != "read-only" {
+		t.Errorf("Sandbox = %q, want %q — a bare codex profile must not be able to write", got.Sandbox, "read-only")
+	}
+	if got.ApprovalPolicy != "on-request" {
+		t.Errorf("ApprovalPolicy = %q, want %q", got.ApprovalPolicy, "on-request")
+	}
+}
+
+// TestDefaultsProfile_SandboxOptUp proves workspace-write is still reachable —
+// read-only is the default, not a ceiling.
+func TestDefaultsProfile_SandboxOptUp(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "workspace-write"},
+	}
+	if got := resolveAt(lc, "/home/u/somewhere"); got.Sandbox != "workspace-write" {
+		t.Errorf("Sandbox = %q, want %q", got.Sandbox, "workspace-write")
+	}
+}
+
 func TestResolve_DefaultsOverrideBuiltins(t *testing.T) {
 	no := false
 	lc := config.LaunchConfig{

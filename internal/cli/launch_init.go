@@ -34,7 +34,7 @@ allow_danger    = true       # adds --allow-dangerously-skip-permissions (reacha
 # binary_path   = ""         # explicit claude path; $FORGECTL_CLAUDE_BIN overrides this
 # Codex-native settings (used when harness = "codex"):
 # approval_policy  = "on-request"
-# sandbox          = "workspace-write"
+# sandbox          = "read-only"     # launch always starts non-writing
 # codex_binary_path = ""      # $FORGECTL_CODEX_BIN overrides this
 
 # Per-project overrides — add as many [[launch.project]] blocks as you like.
