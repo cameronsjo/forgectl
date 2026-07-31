@@ -8,7 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
@@ -164,19 +168,34 @@ func runResume(cmd *cobra.Command, cfg config.Config, filter string, limit int, 
 // pickSession runs the single-select. Options are keyed by session id so a
 // selection round-trips unambiguously (the same reason pickPRs keys on a ref).
 func pickSession(sessions []resume.Session) (resume.Session, error) {
+	w := layoutFor(sessions, terminalWidth())
 	opts := make([]huh.Option[string], len(sessions))
 	for i, s := range sessions {
-		opts[i] = huh.NewOption(sessionRow(s), s.ID)
+		label := sessionRowWidth(s, w)
+		// A running session cannot be continued, only forked — dimming says
+		// so before the selection does, the same way `pr pick` dims a PR it
+		// will skip.
+		if s.Live {
+			label = prDimStyle.Render(label)
+		}
+		opts[i] = huh.NewOption(label, s.ID)
 	}
+
+	// huh v1.0.0 binds Quit to ctrl+c ALONE (keymap.go:109), so Esc is
+	// unbound and does nothing — the picker reads as stuck to anyone who
+	// reaches for the conventional cancel key. Bind it.
+	km := huh.NewDefaultKeyMap()
+	km.Quit = key.NewBinding(key.WithKeys("ctrl+c", "esc"), key.WithHelp("esc", "cancel"))
+
 	var chosen string
 	err := huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
-				Title("Recent sessions — enter to resume").
+				Title("Recent sessions — enter to resume, esc to cancel").
 				Options(opts...).
 				Value(&chosen),
 		),
-	).Run()
+	).WithKeyMap(km).Run()
 	if err != nil {
 		return resume.Session{}, err
 	}
@@ -188,17 +207,119 @@ func pickSession(sessions []resume.Session) (resume.Session, error) {
 	return resume.Session{}, fmt.Errorf("no session selected")
 }
 
-// sessionRow renders one picker row. Every field is disk-sourced, so every
-// field goes through sanitizeTerm.
+// rowLayout is one render's column widths, in runes.
+type rowLayout struct{ name, repo, branch int }
+
+// Column bounds. The floors keep a column identifiable when space is tight;
+// the caps stop one long value from starving the others on a wide terminal.
+const (
+	minNameCol, maxNameCol     = 16, 52
+	minRepoCol, maxRepoCol     = 8, 28
+	minBranchCol, maxBranchCol = 6, 24
+	// tailWidth reserves the trailing columns the layout does not pad: the
+	// relative time at its widest (a bare "2026-07-30" once a session is over
+	// a month old, 10) plus the longest annotation ("  (running, pid 123456)",
+	// 23), with a little headroom. Undercounting here does not truncate — it
+	// wraps the row, which is worse.
+	tailWidth = 36
+)
+
+// defaultLayout is what a non-terminal render uses: stable widths, so piped
+// output does not reflow depending on who is watching.
+var defaultLayout = rowLayout{name: 28, repo: 22, branch: 18}
+
+// writerWidth reports the usable width of the writer actually being rendered
+// to, or 0 when it is not a terminal.
+//
+// Asking about os.Stdout would be the wrong question: printSessions renders to
+// cmd.OutOrStdout(), which a caller can redirect to a pipe, a file, or a test
+// buffer while the process's own stdout is still a tty. That combination would
+// have laid out piped output at terminal widths — reflow depending on who was
+// watching, which is exactly what the non-terminal fallback exists to prevent.
+func writerWidth(w io.Writer) int {
+	f, ok := w.(*os.File)
+	if !ok {
+		return 0
+	}
+	fd := int(f.Fd())
+	if !term.IsTerminal(fd) {
+		return 0
+	}
+	width, _, err := term.GetSize(fd)
+	if err != nil || width <= 0 {
+		return 0
+	}
+	return width
+}
+
+// terminalWidth reports the width of the process's own stdout — what the
+// picker renders to, since huh drives the terminal directly rather than a
+// writer we hand it.
+func terminalWidth() int { return writerWidth(os.Stdout) }
+
+// layoutFor sizes the columns to the CONTENT and then to the TERMINAL.
+//
+// Fixed widths were wrong in both directions at once: they clipped names that
+// would have fit on a wide terminal while padding the branch column to 18, so
+// a list where almost every branch is "main" spent a quarter of the row on
+// whitespace. Repo and branch are therefore measured against what is actually
+// in them, and the name — the column that identifies the row — takes whatever
+// is left over.
+func layoutFor(sessions []resume.Session, width int) rowLayout {
+	if width <= 0 {
+		return defaultLayout
+	}
+	l := rowLayout{name: minNameCol, repo: minRepoCol, branch: minBranchCol}
+	for _, s := range sessions {
+		l.repo = max(l.repo, displayWidth(s.Repo))
+		l.branch = max(l.branch, displayWidth(s.Branch))
+	}
+	l.repo = min(l.repo, maxRepoCol)
+	l.branch = min(l.branch, maxBranchCol)
+
+	// Budget for the three padded columns: the terminal less the reserved
+	// tail and the three single-space separators between four columns.
+	avail := width - tailWidth - 3
+	if avail <= minNameCol+minRepoCol+minBranchCol {
+		// Genuinely too narrow for all three floors. Nothing fits; use the
+		// floors and let the terminal wrap rather than rendering columns so
+		// thin they identify nothing.
+		return rowLayout{name: minNameCol, repo: minRepoCol, branch: minBranchCol}
+	}
+
+	l.name = min(avail-l.repo-l.branch, maxNameCol)
+	if l.name < minNameCol {
+		// The content-sized repo and branch have squeezed the name below its
+		// floor. Take the space back from them — widest-capped first — rather
+		// than letting a long repo name push the row past the terminal, which
+		// wraps instead of clipping and is the worse failure.
+		deficit := minNameCol - l.name
+		give := min(deficit, l.branch-minBranchCol)
+		l.branch -= give
+		deficit -= give
+		l.repo -= min(deficit, l.repo-minRepoCol)
+		l.name = minNameCol
+	}
+	return l
+}
+
+// sessionRow renders one picker row at the default layout — the shape tests
+// and non-terminal callers get.
 func sessionRow(s resume.Session) string {
+	return sessionRowWidth(s, defaultLayout)
+}
+
+// sessionRowWidth renders one row at an explicit layout. Every field is
+// disk-sourced, so every field goes through sanitizeTerm.
+func sessionRowWidth(s resume.Session, l rowLayout) string {
 	name := s.Name
 	if name == "" {
 		name = s.ID
 	}
 	row := fmt.Sprintf("%s %s %s %s",
-		cell(sanitizeTerm(name), 28),
-		cell(sanitizeTerm(s.Repo), 22),
-		cell(sanitizeTerm(s.Branch), 18),
+		cell(sanitizeTerm(name), l.name),
+		cell(sanitizeTerm(s.Repo), l.repo),
+		cell(sanitizeTerm(s.Branch), l.branch),
 		relativeTime(s.LastActive))
 	switch {
 	case s.Live:
@@ -208,6 +329,16 @@ func sessionRow(s resume.Session) string {
 	}
 	return row
 }
+
+// displayWidth measures a string in TERMINAL CELLS, not runes.
+//
+// The distinction is not pedantic here: a CJK ideograph or an emoji occupies
+// two cells, a combining mark occupies none, and a session name is arbitrary
+// text someone typed at /rename or a model generated as an ai-title. Measuring
+// runes made a name with wide characters overflow its column and shove every
+// column after it out of alignment — the exact defect the fixed widths were
+// replaced to fix, reintroduced one layer down.
+func displayWidth(s string) int { return ansi.StringWidth(s) }
 
 // resumeSession restores the session's tasks, moves into its directory, and
 // replaces this process with claude.
@@ -436,8 +567,12 @@ func printSessions(out, errOut io.Writer, sessions []resume.Session, asJSON bool
 		fmt.Fprintln(out, "no recent sessions")
 		return nil
 	}
+	// Same layout rule as the picker, but measured against the writer we are
+	// actually rendering to: sized to the terminal when there is one, fixed
+	// when the output is piped so a consumer sees stable columns.
+	l := layoutFor(sessions, writerWidth(out))
 	for _, s := range sessions {
-		fmt.Fprintln(out, sessionRow(s))
+		fmt.Fprintln(out, sessionRowWidth(s, l))
 		fmt.Fprintf(out, "\t%s\n", sanitizeTerm(s.Cwd))
 		if s.LastPrompt != "" {
 			fmt.Fprintf(out, "\t%s\n", sanitizeTerm(s.LastPrompt))
@@ -514,23 +649,26 @@ func displayName(s resume.Session) string {
 // enough that this is the normal case, not an edge one.
 func cell(s string, width int) string {
 	s = truncate(s, width)
-	if pad := width - len([]rune(s)); pad > 0 {
+	if pad := width - displayWidth(s); pad > 0 {
 		return s + strings.Repeat(" ", pad)
 	}
 	return s
 }
 
-// truncate clips a string to width runes, marking the clip. A non-positive
-// width yields the empty string — unreachable from today's call sites, but
-// width-1 would otherwise slice to [:-1] and panic.
+// truncate clips a string to width terminal CELLS, marking the clip with an
+// ellipsis. A non-positive width yields the empty string.
+//
+// ansi.Truncate does the cell accounting, which a rune slice cannot: it will
+// not split a double-width character across the boundary, and it does not
+// spend budget on zero-width combining marks.
 func truncate(s string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	if len([]rune(s)) <= width {
+	if displayWidth(s) <= width {
 		return s
 	}
-	return string([]rune(s)[:width-1]) + "…"
+	return ansi.Truncate(s, width, "…")
 }
 
 // relativeTime renders a timestamp the way the picker needs it: how long ago,
