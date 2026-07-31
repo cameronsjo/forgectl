@@ -63,9 +63,13 @@ func TestSchemaHint(t *testing.T) {
 			decorate: true,
 		},
 		{
-			name:     "undefined_column without ColumnName falls back to the message",
+			// Postgres reports 42703 with ColumnName empty (verified against
+			// postgres 18.4). The column name still reaches the operator, via the
+			// wrapped server message — and must NOT be echoed a second time.
+			name:     "undefined_column without ColumnName does not duplicate the message",
 			err:      &pgconn.PgError{Code: "42703", Message: `column "tokens_total" of relation "session" does not exist`},
 			want:     []string{"out of date", "tokens_total", ddl},
+			notWant:  []string{"missing column"},
 			decorate: true,
 		},
 		{
@@ -109,7 +113,7 @@ func TestSchemaHint_WrapsThroughAnIntermediateWrap(t *testing.T) {
 	wrapped := fmt.Errorf("upsert 12 session rows: %w", pgErr)
 
 	got := schemaHint(wrapped).Error()
-	for _, want := range []string{"upsert 12 session rows", "out of date", "column pricing_source", "scripts/concordance/schema.sql"} {
+	for _, want := range []string{"upsert 12 session rows", "out of date", "missing column pricing_source", "scripts/concordance/schema.sql"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("schemaHint(wrapped) = %q, want it to contain %q", got, want)
 		}

@@ -49,9 +49,7 @@ func (c *Concordance) Close(ctx context.Context) error { return c.conn.Close(ctx
 //
 // 42703 is the more likely of the two in practice: UpsertSessions references
 // every column unconditionally, so the moment the schema grows a column, every
-// machine pointed at a not-yet-migrated concordance fails here. pgErr.ColumnName
-// is usually empty for 42703 (Postgres reports the column in the message, not
-// the field), so the message is included when the field is not populated.
+// machine pointed at a not-yet-migrated concordance fails here.
 func schemaHint(err error) error {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
@@ -62,21 +60,26 @@ func schemaHint(err error) error {
 	case "42P01":
 		return fmt.Errorf("%w — concordance schema missing; %s", err, applyDDL)
 	case "42703":
-		return fmt.Errorf("%w — concordance schema is out of date (missing %s); %s", err, missingColumn(pgErr), applyDDL)
+		return fmt.Errorf("%w — concordance schema is out of date%s; %s", err, missingColumn(pgErr), applyDDL)
 	}
 	return err
 }
 
-// missingColumn names the undefined column for a 42703, preferring the
-// structured field and falling back to the server message that carries it.
+// missingColumn returns a parenthetical naming the undefined column, or "" when
+// there is nothing to add.
+//
+// Postgres reports 42703 with ColumnName EMPTY — verified against postgres 18.4:
+// the column is named in Message ("column \"schema_version\" of relation
+// \"session\" does not exist") and nowhere else. Since schemaHint wraps the
+// original error, that Message is already in the final string, so echoing it
+// here produced "…out of date (missing column "x" … does not exist)". Add the
+// parenthetical only when the structured field actually carries something the
+// wrapped message does not.
 func missingColumn(pgErr *pgconn.PgError) string {
-	if pgErr.ColumnName != "" {
-		return "column " + pgErr.ColumnName
+	if pgErr.ColumnName == "" {
+		return ""
 	}
-	if pgErr.Message != "" {
-		return pgErr.Message
-	}
-	return "a column this build writes"
+	return " (missing column " + pgErr.ColumnName + ")"
 }
 
 // Watermarks returns session_id -> last_message_id for the given ids — the
