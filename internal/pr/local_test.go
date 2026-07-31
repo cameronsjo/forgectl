@@ -213,6 +213,38 @@ func TestPrepareLocal_FindingsDirIsDurable(t *testing.T) {
 	}
 }
 
+// TestPrepareLocal_AllowlistOnlyForHarnessesThatReadIt pins the asymmetry:
+// .claude/settings.local.json is a Claude Code control, so a `--agent codex`
+// session must not get one. Writing it there would leave a file that looks
+// like the Codex reviewer's confinement and enforces nothing.
+func TestPrepareLocal_AllowlistOnlyForHarnessesThatReadIt(t *testing.T) {
+	for _, tc := range []struct {
+		agent string
+		want  bool
+	}{
+		{"claude", true},
+		{"", true}, // default → agent A
+		{"codex", false},
+	} {
+		t.Run("agent="+tc.agent, func(t *testing.T) {
+			c := testClient(t, localGitRunner())
+			sess, err := c.PrepareLocal(context.Background(), t.TempDir(), PrepareLocalOpts{Agent: tc.agent})
+			if err != nil {
+				t.Fatalf("PrepareLocal: %v", err)
+			}
+			t.Cleanup(func() {
+				os.RemoveAll(sess.Workspace)
+				os.RemoveAll(sess.FindingsDir)
+			})
+
+			_, statErr := os.Stat(filepath.Join(sess.Workspace, ".claude", "settings.local.json"))
+			if got := statErr == nil; got != tc.want {
+				t.Errorf("allowlist present = %v, want %v (agent %q)", got, tc.want, tc.agent)
+			}
+		})
+	}
+}
+
 func TestLocalProfile_DeniesAllNetworkCLI(t *testing.T) {
 	perms := localProfile("/tmp/forgectl-findings-test")
 	if !contains(perms.Deny, "Bash(gh:*)") {

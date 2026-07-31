@@ -107,9 +107,19 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	}
 	sess.FindingsDir = findingsDir
 
-	if _, err := writeLocalAllowlist(workspace, findingsDir); err != nil {
-		c.teardownLocalArtifacts(ctx, workspace, findingsDir)
-		return Session{}, err
+	// The allowlist is a Claude Code control: it lands in
+	// .claude/settings.local.json, which only Claude Code reads. Writing it for
+	// a session that will dispatch `codex exec` leaves a file that looks like an
+	// active control and enforces nothing — the next reader would reasonably
+	// mistake it for the Codex reviewer's confinement. Skip it on that path
+	// (LaunchPathFor is the same routing Launch uses, so the two cannot drift);
+	// what does and does not confine the Codex reviewer is documented on
+	// CodexExec in agent.go.
+	if LaunchPathFor(opts.Agent) != CodexExec {
+		if _, err := writeLocalAllowlist(workspace, findingsDir); err != nil {
+			c.teardownLocalArtifacts(ctx, workspace, findingsDir)
+			return Session{}, err
+		}
 	}
 
 	bc := Breadcrumb{

@@ -25,13 +25,31 @@ const reviewPrompt = "Review this pull request as a clean-room reviewer. " +
 // explicitly, since that path is the one thing tying the prompt to the
 // scoped Write(findingsDir/**) allowlist grant) instead of a PostReview
 // approval gate.
-func localReviewPrompt(findingsDir string) string {
+//
+// writesEnforced says whether the harness actually confines writes to
+// findingsDir. Under agent A it does: the workspace allowlist grants exactly
+// one Write(findingsDir/**) rule, and --add-dir is what makes that grant
+// reachable at all — so the prompt may state the restriction as fact. Under
+// Codex it does not: --add-dir adds a writable root ALONGSIDE an
+// already-writable workspace, and approval_policy="never" removes the prompt
+// that would otherwise surface a stray write. There the sentence is an
+// instruction, not a control, and it says so. Asserting an enforcement that
+// is not there is worse than asserting nothing — it invites a reader to trust
+// prose as a boundary.
+func localReviewPrompt(findingsDir string, writesEnforced bool) string {
+	scope := "Write your findings to a file under " + findingsDir + ", and write " +
+		"nothing anywhere else — nothing in this instruction restricts you, so treat " +
+		"it as a requirement of the task."
+	if writesEnforced {
+		scope = "Write your findings to a file under " + findingsDir +
+			" — the only directory you may write to."
+	}
 	return "Review the committed changes in this working tree as a clean-room " +
-		"reviewer. Inspect the diff and the checked-out tree, then write your " +
-		"findings (by severity: Critical / Important / Nit, with file:line and a " +
-		"concrete fix) to a file under " + findingsDir + " — the only directory you " +
-		"may write to. Do NOT post, comment, merge, or push anything, and do not " +
-		"attempt any network access — output the review only, to that file."
+		"reviewer. Inspect the diff and the checked-out tree, then report your " +
+		"findings by severity (Critical / Important / Nit, with file:line and a " +
+		"concrete fix). " + scope + " Do NOT post, comment, merge, or push " +
+		"anything, and do not attempt any network access — output the review only, " +
+		"to that file."
 }
 
 // windowName is the tmux window name for a review session:
@@ -109,7 +127,13 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 	if sess.Ref.IsLocal() {
 		profile.Sandbox = "workspace-write"
 		profile.AddDir = []string{sess.FindingsDir}
-		prompt = localReviewPrompt(sess.FindingsDir)
+		// writesEnforced=false: Codex's --add-dir widens an already-writable
+		// workspace rather than being the sole grant, so the findings-dir scope
+		// is an instruction here, not a control.
+		prompt = localReviewPrompt(sess.FindingsDir, false)
+	}
+	if err := profile.Validate(); err != nil {
+		return fmt.Errorf("codex review profile invalid: %w", err)
 	}
 	codexArgs := launch.CodexExecArgs(profile, []string{prompt})
 	args := []string{
@@ -151,7 +175,7 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 		// permission-scoped Write(<dir>/**) allowlist rule is moot — Claude Code
 		// won't expose a path outside the launch cwd at all.
 		profile.AddDir = append(profile.AddDir, sess.FindingsDir)
-		prompt = localReviewPrompt(sess.FindingsDir)
+		prompt = localReviewPrompt(sess.FindingsDir, true)
 	}
 	claudeArgs := launch.BuilderArgs(profile, []string{"-p", prompt})
 

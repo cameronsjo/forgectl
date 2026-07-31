@@ -25,6 +25,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -298,8 +299,36 @@ func TestLaunch_CodexLocalWritesOnlyWorkspaceAndFindings(t *testing.T) {
 		!argPair(args, "--add-dir", findings) {
 		t.Errorf("local Codex sandbox did not scope findings: %v", args)
 	}
-	if !contains(args, localReviewPrompt(findings)) {
+	if !contains(args, localReviewPrompt(findings, false)) {
 		t.Errorf("local Codex prompt missing findings path: %v", args)
+	}
+	// The Codex path must NOT claim the findings dir is the only writable one —
+	// nothing enforces that under `codex exec`, and prose that reads as a
+	// control is worse than none.
+	if contains(args, localReviewPrompt(findings, true)) {
+		t.Errorf("local Codex prompt asserts an unenforced write restriction: %v", args)
+	}
+}
+
+// TestLocalReviewPrompt_OnlyClaimsEnforcementWhenEnforced is the unit-level
+// guard on the same property: the "only directory you may write to" phrasing
+// is reserved for the harness that actually enforces it.
+func TestLocalReviewPrompt_OnlyClaimsEnforcementWhenEnforced(t *testing.T) {
+	const dir = "/tmp/findings-xyz"
+	const claim = "the only directory you may write to"
+
+	enforced := localReviewPrompt(dir, true)
+	if !strings.Contains(enforced, claim) {
+		t.Errorf("enforced prompt should state the restriction as fact: %q", enforced)
+	}
+	unenforced := localReviewPrompt(dir, false)
+	if strings.Contains(unenforced, claim) {
+		t.Errorf("unenforced prompt must not assert an enforcement: %q", unenforced)
+	}
+	for _, p := range []string{enforced, unenforced} {
+		if !strings.Contains(p, dir) {
+			t.Errorf("prompt must name the findings dir: %q", p)
+		}
 	}
 }
 
@@ -326,7 +355,7 @@ func TestLaunchInline_LocalSessionAddsFindingsDirAndPrompt(t *testing.T) {
 	if !argPair(call.Args, "--add-dir", findingsDir) {
 		t.Errorf("local session argv missing --add-dir %s: %v", findingsDir, call.Args)
 	}
-	if !contains(call.Args, localReviewPrompt(findingsDir)) {
+	if !contains(call.Args, localReviewPrompt(findingsDir, true)) {
 		t.Errorf("local session argv missing localReviewPrompt: %v", call.Args)
 	}
 	if contains(call.Args, reviewPrompt) {
