@@ -73,7 +73,14 @@ func (c *Client) discard(ctx context.Context, sess Session) error {
 	slog.Debug("Preparing to tear down review session.", "ref", sess.Ref.String(), "workspace", sess.Workspace)
 
 	// Restore quarantined files first, while the workspace still exists.
-	moves, err := quarantine.ComputeMoves(sess.Workspace, quarantine.SuffixQuarantined, quarantine.DefaultTargets)
+	// ExpandTargets is the same call sandboxAndQuarantine made, and it finds a
+	// nested target by its RENAMED form as readily as its original — so the
+	// target list recomputed here is byte-for-byte the one Hide worked from.
+	targets, err := quarantine.ExpandTargets(sess.Workspace, quarantine.SuffixQuarantined, quarantine.DefaultTargets)
+	if err != nil {
+		return fmt.Errorf("expand quarantine targets: %w", err)
+	}
+	moves, err := quarantine.ComputeMoves(sess.Workspace, quarantine.SuffixQuarantined, targets)
 	if err != nil {
 		return fmt.Errorf("recompute quarantine moves: %w", err)
 	}

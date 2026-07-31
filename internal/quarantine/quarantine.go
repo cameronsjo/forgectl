@@ -9,9 +9,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -59,8 +61,131 @@ type Move struct {
 // DefaultTargets is the canonical list of AI-instruction paths (relative to a
 // workspace root) that quarantine hides by default, and that workflow's
 // `strip` step falls back to when a step omits `globs`.
+//
+// Entries are literal relative paths. The two that agents read RECURSIVELY as
+// they descend a tree — see nestableBasenames — are expanded to every nested
+// match by ExpandTargets; the rest are root-level only, which is where they
+// are actually read from.
 var DefaultTargets = []string{
 	"CLAUDE.md", "AGENTS.md", ".claude/", ".cursor/rules", ".github/copilot-instructions.md",
+}
+
+// nestableBasenames are the instruction-file basenames a coding agent picks up
+// from ANY directory as it descends, not just the workspace root. Quarantining
+// only the root pair leaves a PR head carrying `src/AGENTS.md` or
+// `packages/api/CLAUDE.md` free to inject instructions into the review — the
+// exact thing the clean room exists to prevent.
+var nestableBasenames = map[string]bool{
+	"CLAUDE.md": true,
+	"AGENTS.md": true,
+}
+
+// skipDirNames are directories ExpandTargets never descends into. `.git` holds
+// no instruction file an agent reads, and walking a large object store on every
+// hide/restore/status is pure cost.
+var skipDirNames = map[string]bool{
+	".git": true,
+}
+
+// ExpandTargets resolves targets against root, replacing each bare nestable
+// basename ("CLAUDE.md", "AGENTS.md") with every match found by walking root.
+// Other entries — and any entry carrying a directory component, which is an
+// explicit path the caller meant literally — pass through untouched.
+//
+// It is direction-agnostic BY DESIGN, and that is what keeps quarantine
+// reversible. A match is recorded when the walk finds either the original
+// basename or its renamed form under scheme, and the returned path is always
+// the ORIGINAL relative path. So the same call produces the same target list
+// before Hide (tree holds `src/AGENTS.md`) and at teardown (tree holds
+// `src/AGENTS.md.quarantined`), and ComputeMoves reproduces exactly the Move
+// pairs Hide made.
+//
+// Each literal entry is preserved even with zero nested matches, so a caller
+// that pairs targets with moves by index (e.g. `quarantine status`) keeps a row
+// for a target that is simply absent.
+//
+// A walk error is not fatal: an unreadable subtree yields no matches rather
+// than failing the whole operation, which would strand a workspace mid-review.
+// Errors reaching root itself are returned.
+func ExpandTargets(root string, scheme Scheme, targets []string) ([]string, error) {
+	var nested []string
+	if wantsExpansion(targets) {
+		var err error
+		if nested, err = walkNestable(root, scheme, targets); err != nil {
+			return nil, err
+		}
+	}
+
+	out := make([]string, 0, len(targets)+len(nested))
+	seen := make(map[string]bool, len(targets)+len(nested))
+	for _, t := range append(append([]string{}, targets...), nested...) {
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+// wantsExpansion reports whether targets contains at least one bare nestable
+// basename — the only case that needs a walk at all.
+func wantsExpansion(targets []string) bool {
+	for _, t := range targets {
+		if nestableBasenames[t] {
+			return true
+		}
+	}
+	return false
+}
+
+// walkNestable returns the original relative paths of every NESTED match for
+// the nestable basenames present in targets. Root-level hits are excluded:
+// they are already in targets verbatim.
+func walkNestable(root string, scheme Scheme, targets []string) ([]string, error) {
+	want := make(map[string]string, len(targets)*2) // on-disk name -> original basename
+	for _, t := range targets {
+		if !nestableBasenames[t] {
+			continue
+		}
+		want[t] = t
+		want[filepath.Base(renamedPath(scheme, t))] = t
+	}
+
+	var found []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if path == root {
+				return err
+			}
+			return nil // unreadable subtree: skip it, don't fail the operation
+		}
+		if d.IsDir() {
+			if path != root && skipDirNames[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		original, ok := want[d.Name()]
+		if !ok {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		dir := filepath.Dir(rel)
+		if dir == "." {
+			return nil // root-level hit: already carried literally in targets
+		}
+		found = append(found, filepath.Join(dir, original))
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walk %s for nested instruction files: %w", root, err)
+	}
+	sort.Strings(found)
+	return found, nil
 }
 
 // Client hides and restores instruction files under a root directory. It

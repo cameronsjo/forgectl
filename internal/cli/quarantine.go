@@ -49,12 +49,20 @@ func (f *quarantineFlags) register(cmd *cobra.Command, includeDryRun bool) {
 }
 
 // resolvedTargets returns f.targets, falling back to the canonical
-// instruction-file list when the flag was omitted.
-func (f *quarantineFlags) resolvedTargets() []string {
-	if len(f.targets) == 0 {
-		return quarantine.DefaultTargets
+// instruction-file list when the flag was omitted, then expands the nestable
+// basenames against root so hide/restore/status all see the same nested
+// matches. Every verb goes through here, which is what stops the three from
+// drifting apart on what "the targets" means.
+func (f *quarantineFlags) resolvedTargets(root string) ([]string, error) {
+	targets := f.targets
+	if len(targets) == 0 {
+		targets = quarantine.DefaultTargets
 	}
-	return f.targets
+	scheme, err := quarantine.ParseScheme(f.scheme)
+	if err != nil {
+		return nil, err
+	}
+	return quarantine.ExpandTargets(root, scheme, targets)
 }
 
 // resolveQuarantineRoot returns root, or the current working directory when
@@ -152,7 +160,12 @@ func runQuarantineHide(cmd *cobra.Command, client *quarantine.Client, f *quarant
 		return fmt.Errorf("resolve quarantine root: %w", err)
 	}
 
-	moves, err := client.Hide(cmd.Context(), root, scheme, f.resolvedTargets(), f.dryRun)
+	targets, err := f.resolvedTargets(root)
+	if err != nil {
+		return err
+	}
+
+	moves, err := client.Hide(cmd.Context(), root, scheme, targets, f.dryRun)
 	if err != nil {
 		return err
 	}
@@ -185,7 +198,12 @@ func runQuarantineRestore(cmd *cobra.Command, client *quarantine.Client, f *quar
 		return fmt.Errorf("resolve quarantine root: %w", err)
 	}
 
-	moves, err := quarantine.ComputeMoves(root, scheme, f.resolvedTargets())
+	targets, err := f.resolvedTargets(root)
+	if err != nil {
+		return err
+	}
+
+	moves, err := quarantine.ComputeMoves(root, scheme, targets)
 	if err != nil {
 		return err
 	}
@@ -219,7 +237,10 @@ func runQuarantineStatus(cmd *cobra.Command, f *quarantineFlags) error {
 		return fmt.Errorf("resolve quarantine root: %w", err)
 	}
 
-	targets := f.resolvedTargets()
+	targets, err := f.resolvedTargets(root)
+	if err != nil {
+		return err
+	}
 	moves, err := quarantine.ComputeMoves(root, scheme, targets)
 	if err != nil {
 		return err

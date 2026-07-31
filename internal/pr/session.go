@@ -138,7 +138,16 @@ func (c *Client) sandboxAndQuarantine(ctx context.Context, repo, ref string, alw
 	if err != nil {
 		return "", fmt.Errorf("sandbox: %w", err)
 	}
-	if _, err := quarantine.New(c.run).Hide(ctx, workspace, quarantine.SuffixQuarantined, quarantine.DefaultTargets, false); err != nil {
+	// Expand the nestable basenames so a PR head carrying `src/AGENTS.md` is
+	// quarantined too, not just the root pair. Teardown recomputes through the
+	// same ExpandTargets call, which is what keeps this reversible.
+	targets, err := quarantine.ExpandTargets(workspace, quarantine.SuffixQuarantined, quarantine.DefaultTargets)
+	if err != nil {
+		// best-effort: don't let cleanup's own error shadow the error already being returned
+		_ = sandbox.Teardown(ctx, c.run, workspace)
+		return "", fmt.Errorf("expand quarantine targets: %w", err)
+	}
+	if _, err := quarantine.New(c.run).Hide(ctx, workspace, quarantine.SuffixQuarantined, targets, false); err != nil {
 		// best-effort: don't let cleanup's own error shadow the error already being returned
 		_ = sandbox.Teardown(ctx, c.run, workspace)
 		return "", fmt.Errorf("quarantine workspace: %w", err)

@@ -340,3 +340,184 @@ func readFile(t *testing.T, path string) string {
 	}
 	return string(b)
 }
+
+// --- ExpandTargets: nested instruction files (recursive quarantine) ---
+//
+// Test plan
+//   [x] A nested CLAUDE.md / AGENTS.md is discovered; the root literal survives
+//   [x] Non-nestable entries (.claude/, .cursor/rules, …) are never expanded
+//   [x] An explicit path target (one with a directory component) is literal
+//   [x] Discovery is direction-agnostic: the ALREADY-QUARANTINED tree yields
+//       the identical target list, which is what makes teardown reversible
+//   [x] .git is not walked
+//   [x] Full round-trip: Hide(expanded) then Restore(ComputeMoves(expanded))
+//       recomputed from scratch restores every nested file byte-for-byte
+
+func TestExpandTargets_FindsNestedInstructionFiles(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "AGENTS.md"), "root")
+	writeFile(t, filepath.Join(root, "src", "AGENTS.md"), "nested")
+	writeFile(t, filepath.Join(root, "packages", "api", "CLAUDE.md"), "deep")
+	writeFile(t, filepath.Join(root, "docs", "README.md"), "not an instruction file")
+
+	got, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets: %v", err)
+	}
+
+	for _, want := range []string{
+		"AGENTS.md",                       // root literal preserved
+		"CLAUDE.md",                       // absent at root, still preserved
+		filepath.Join("src", "AGENTS.md"), // nested
+		filepath.Join("packages", "api", "CLAUDE.md"), // deeply nested
+		".claude/", ".cursor/rules", ".github/copilot-instructions.md",
+	} {
+		if !containsStr(got, want) {
+			t.Errorf("ExpandTargets missing %q; got %v", want, got)
+		}
+	}
+	if containsStr(got, filepath.Join("docs", "README.md")) {
+		t.Errorf("ExpandTargets expanded a non-instruction file: %v", got)
+	}
+}
+
+// TestExpandTargets_OnlyExpandsNestableBasenames guards the blast radius: a
+// recursive sweep for `.cursor/rules` or an explicitly-pathed target would
+// quarantine files the caller never asked about.
+func TestExpandTargets_OnlyExpandsNestableBasenames(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "sub", ".github", "copilot-instructions.md"), "nested copilot")
+	writeFile(t, filepath.Join(root, "other", "src", "AGENTS.md"), "nested but explicitly pathed target")
+
+	// Non-nestable entry: never expanded, even though a nested match exists.
+	got, err := ExpandTargets(root, SuffixQuarantined, []string{".github/copilot-instructions.md"})
+	if err != nil {
+		t.Fatalf("ExpandTargets: %v", err)
+	}
+	if len(got) != 1 || got[0] != ".github/copilot-instructions.md" {
+		t.Errorf("non-nestable target was expanded: %v", got)
+	}
+
+	// An entry carrying a directory component is an explicit path — literal.
+	got, err = ExpandTargets(root, SuffixQuarantined, []string{filepath.Join("other", "src", "AGENTS.md")})
+	if err != nil {
+		t.Fatalf("ExpandTargets: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("explicitly-pathed target was expanded: %v", got)
+	}
+}
+
+// TestExpandTargets_SameListBeforeAndAfterHide is the property teardown
+// depends on. ComputeMoves recomputes from ExpandTargets against a workspace
+// whose files are already RENAMED; if discovery only matched original names it
+// would find nothing and silently leave nested files quarantined forever.
+func TestExpandTargets_SameListBeforeAndAfterHide(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "src", "AGENTS.md"), "nested")
+	writeFile(t, filepath.Join(root, "packages", "api", "CLAUDE.md"), "deep")
+
+	before, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets (before): %v", err)
+	}
+	if _, err := New(&exec.FakeRunner{}).Hide(context.Background(), root, SuffixQuarantined, before, false); err != nil {
+		t.Fatalf("Hide: %v", err)
+	}
+
+	after, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets (after): %v", err)
+	}
+	if !equalStrings(before, after) {
+		t.Errorf("target list changed across Hide:\n before = %v\n after  = %v", before, after)
+	}
+}
+
+func TestExpandTargets_SkipsGitDir(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".git", "objects", "AGENTS.md"), "must not be quarantined")
+
+	got, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets: %v", err)
+	}
+	if containsStr(got, filepath.Join(".git", "objects", "AGENTS.md")) {
+		t.Errorf("ExpandTargets walked into .git: %v", got)
+	}
+}
+
+// TestExpandTargets_NestedRoundTrip is the end-to-end reversibility proof:
+// hide with an expanded list, then restore from a target list recomputed from
+// scratch (exactly what teardown does — it holds no persisted Move list).
+func TestExpandTargets_NestedRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		filepath.Join(root, "AGENTS.md"):                    "root agents",
+		filepath.Join(root, "src", "AGENTS.md"):             "nested agents",
+		filepath.Join(root, "packages", "api", "CLAUDE.md"): "deep claude",
+		filepath.Join(root, "docs", "guide.md"):             "untouched",
+	}
+	for path, content := range files {
+		writeFile(t, path, content)
+	}
+
+	c := New(&exec.FakeRunner{})
+	hideTargets, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets (hide): %v", err)
+	}
+	if _, err := c.Hide(context.Background(), root, SuffixQuarantined, hideTargets, false); err != nil {
+		t.Fatalf("Hide: %v", err)
+	}
+
+	// Every instruction file is gone from its original path.
+	for path := range files {
+		if filepath.Base(path) == "guide.md" {
+			continue
+		}
+		if _, err := os.Lstat(path); err == nil {
+			t.Errorf("still present after Hide: %s", path)
+		}
+	}
+
+	// Teardown's exact sequence: recompute targets, recompute moves, restore.
+	restoreTargets, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets (restore): %v", err)
+	}
+	moves, err := ComputeMoves(root, SuffixQuarantined, restoreTargets)
+	if err != nil {
+		t.Fatalf("ComputeMoves: %v", err)
+	}
+	if err := c.Restore(context.Background(), moves); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	for path, want := range files {
+		if got := readFile(t, path); got != want {
+			t.Errorf("round-trip corrupted %s: got %q, want %q", path, got, want)
+		}
+	}
+}
+
+func containsStr(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
