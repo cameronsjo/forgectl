@@ -166,6 +166,12 @@ func builtinModelForHarness(harness string) string {
 	return builtinModel
 }
 
+// DefaultModelFor exposes the built-in model for a harness, for callers that
+// must re-derive it after forcing a harness — the clean-room review, which
+// dispatches claude regardless of the user's ambient profile and so cannot
+// carry a Codex model id across.
+func DefaultModelFor(harness string) string { return builtinModelForHarness(harness) }
+
 // expandTilde expands a leading ~ or ~/ to the home directory. A bare "~user"
 // form is left untouched (the launcher does not resolve other users' homes).
 func expandTilde(path, home string) string {

@@ -463,3 +463,72 @@ func TestLaunch_DryRunSessionRefused(t *testing.T) {
 		t.Error("a session with no workspace (dry-run) should be refused")
 	}
 }
+
+// TestLaunchInline_DoesNotInheritCodexModel guards the mirror of launchCodex's
+// existing harness check. The clean-room review dispatches `claude` regardless
+// of the operator's ambient launch profile, and `harness = "codex"` in
+// [launch.defaults] is a plausible config for exactly the users this work
+// targets — so without forcing the harness, a Codex model id reaches
+// `claude --model <that>`.
+func TestLaunchInline_DoesNotInheritCodexModel(t *testing.T) {
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
+
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
+
+	cfg := config.Config{Launch: config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Harness: "codex", Model: "gpt-5-codex"},
+	}}
+	if err := c.Launch(context.Background(), sess, cfg); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	args := fake.Last().Args
+	if contains(args, "gpt-5-codex") {
+		t.Errorf("a Codex model id reached `claude --model`: %v", args)
+	}
+	if !argPair(args, "--model", "opus") {
+		t.Errorf("expected the Claude default model, got: %v", args)
+	}
+}
+
+// TestLaunch_LocalSessionWithoutFindingsDirRefused covers the reload shape:
+// FindingsDir is not persisted, so a breadcrumb-reconstituted local session has
+// it empty. Dispatching would pass --add-dir "" and seed a prompt naming no
+// directory — a silently misconfigured review. It must fail loudly.
+func TestLaunch_LocalSessionWithoutFindingsDirRefused(t *testing.T) {
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
+
+	for _, agent := range []string{"claude", "codex"} {
+		t.Run("agent="+agent, func(t *testing.T) {
+			fake := &exec.FakeRunner{}
+			c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+			// As loadSession produces it: Ref restored, FindingsDir zero.
+			sess := Session{
+				Ref:       Ref{Owner: localOwnerSentinel, Repo: "abc1234", Number: 1},
+				Workspace: fakeWorkspace(t),
+				Agent:     agent,
+			}
+
+			err := c.Launch(context.Background(), sess, config.Config{})
+			if err == nil {
+				t.Fatal("a local session with no findings dir must be refused")
+			}
+			if !strings.Contains(err.Error(), "findings directory") {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if len(fake.Calls) != 0 {
+				t.Errorf("refusal must precede dispatch; got %+v", fake.Calls)
+			}
+		})
+	}
+}

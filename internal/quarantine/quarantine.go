@@ -67,7 +67,7 @@ type Move struct {
 // match by ExpandTargets; the rest are root-level only, which is where they
 // are actually read from.
 var DefaultTargets = []string{
-	"CLAUDE.md", "AGENTS.md", ".claude/", ".cursor/rules", ".github/copilot-instructions.md",
+	"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude/", ".cursor/rules", ".github/copilot-instructions.md",
 }
 
 // nestableBasenames are the instruction-file basenames a coding agent picks up
@@ -76,8 +76,9 @@ var DefaultTargets = []string{
 // `packages/api/CLAUDE.md` free to inject instructions into the review — the
 // exact thing the clean room exists to prevent.
 var nestableBasenames = map[string]bool{
-	"CLAUDE.md": true,
-	"AGENTS.md": true,
+	"CLAUDE.md":       true,
+	"CLAUDE.local.md": true,
+	"AGENTS.md":       true,
 }
 
 // skipDirNames are directories ExpandTargets never descends into. `.git` holds
@@ -285,6 +286,17 @@ func (c *Client) Restore(_ context.Context, moves []Move) error {
 				continue
 			}
 			return fmt.Errorf("stat %s: %w", m.To, err)
+		}
+		// Symmetric with Hide's anti-clobber guard: os.Rename silently
+		// overwrites. Teardown recomputes targets from the LIVE tree, so a file
+		// the review itself created at x/CLAUDE.md.quarantined would otherwise
+		// be renamed over a sibling x/CLAUDE.md. Confined to a disposable
+		// workspace today, but "restore" must never destroy.
+		if _, err := os.Lstat(m.From); err == nil {
+			slog.Error("Restore destination already exists; refusing to clobber.", "from", m.From, "to", m.To)
+			return fmt.Errorf("restore destination %q already exists", m.From)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("stat %s: %w", m.From, err)
 		}
 		if err := os.Rename(m.To, m.From); err != nil {
 			slog.Error("Failed to restore quarantined file.", "from", m.From, "to", m.To, "error", err)

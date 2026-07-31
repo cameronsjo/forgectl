@@ -585,3 +585,42 @@ func TestExpandTargets_CaseVariantRoundTrip(t *testing.T) {
 		t.Errorf("round-trip corrupted the case-variant file: %q", got)
 	}
 }
+
+// TestRestore_RefusesToClobber mirrors Hide's anti-clobber guard. Teardown
+// recomputes targets from the LIVE tree, so a file the review itself created at
+// the quarantined name would otherwise be renamed over the original. "Restore"
+// must never destroy.
+func TestRestore_RefusesToClobber(t *testing.T) {
+	root := t.TempDir()
+	original := filepath.Join(root, "CLAUDE.md")
+	quarantined := filepath.Join(root, "CLAUDE.md.quarantined")
+	writeFile(t, original, "the survivor")
+	writeFile(t, quarantined, "planted by the review")
+
+	c := New(&exec.FakeRunner{})
+	err := c.Restore(context.Background(), []Move{{From: original, To: quarantined}})
+	if err == nil {
+		t.Fatal("Restore must refuse to overwrite an existing destination")
+	}
+	if got := readFile(t, original); got != "the survivor" {
+		t.Errorf("Restore clobbered the original: %q", got)
+	}
+}
+
+// TestDefaultTargets_CoversClaudeLocal pins CLAUDE.local.md, which Claude Code
+// reads at the project root and which nests the same way CLAUDE.md does.
+func TestDefaultTargets_CoversClaudeLocal(t *testing.T) {
+	if !containsStr(DefaultTargets, "CLAUDE.local.md") {
+		t.Errorf("DefaultTargets omits CLAUDE.local.md: %v", DefaultTargets)
+	}
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "sub", "CLAUDE.local.md"), "nested local instructions")
+
+	got, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets: %v", err)
+	}
+	if !containsStr(got, filepath.Join("sub", "CLAUDE.local.md")) {
+		t.Errorf("nested CLAUDE.local.md not quarantined; got %v", got)
+	}
+}

@@ -95,6 +95,19 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) er
 	if err := CheckAgentForRef(sess.Agent, sess.Ref); err != nil {
 		return err
 	}
+	// FindingsDir is deliberately NOT persisted (see Session), so loadSession
+	// leaves it zero. A local dispatch on a reload would then pass --add-dir ""
+	// and seed a prompt reading "…to a file under , and write nothing anywhere
+	// else" — a silently misconfigured review rather than a failed one. Nothing
+	// calls Launch on a reload today; this makes the future verb that does fail
+	// loudly instead.
+	if sess.Ref.IsLocal() && sess.FindingsDir == "" {
+		return fmt.Errorf(
+			"local review session %s has no findings directory: it is not persisted in the breadcrumb, "+
+				"so a reloaded session cannot be dispatched — re-run `forgectl pr local`",
+			sess.Ref.String(),
+		)
+	}
 	switch path := LaunchPathFor(sess.Agent); path {
 	case InlineSeeded:
 		return c.launchInline(ctx, sess, cfg)
@@ -174,6 +187,17 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	profile := launch.Resolve(cfg.Launch, sess.Workspace)
 	profile.AllowDanger = false
 	profile.PermissionMode = "plan"
+	// The resolved profile is the user's ambient launch config, which may well
+	// be a Codex one — `harness = "codex"` in [launch.defaults] is exactly the
+	// config the Codex work targets. This dispatch is `claude` regardless, and
+	// BuilderArgs passes Model unconditionally, so a Codex model id would reach
+	// `claude --model <that>`. Force the harness and re-derive the model.
+	// launchCodex guards the mirror case (it adopts resolved.Model only when
+	// the resolved harness is codex); this is the other half.
+	if profile.Harness != "claude" {
+		profile.Harness = "claude"
+		profile.Model = launch.DefaultModelFor("claude")
+	}
 
 	prompt := reviewPrompt
 	if sess.Ref.IsLocal() {
