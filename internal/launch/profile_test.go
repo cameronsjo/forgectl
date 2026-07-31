@@ -2,6 +2,7 @@ package launch
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -26,6 +27,35 @@ func TestResolve_NoProjects_UsesBuiltinDefaults(t *testing.T) {
 	}
 	if got.Match != "" {
 		t.Errorf("Match = %q, want empty", got.Match)
+	}
+}
+
+// TestResolve_BuiltinCodexPostureIsNonWriting pins the harness-default half of
+// the "launch always starts in plan" invariant. A user who sets only
+// `harness = "codex"` must not get unattended write access to the checkout, so
+// the built-in sandbox has to be read-only — workspace-write is an opt-up.
+func TestResolve_BuiltinCodexPostureIsNonWriting(t *testing.T) {
+	lc := config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "codex"}}
+	got := resolveAt(lc, "/home/u/somewhere")
+	if got.Harness != "codex" {
+		t.Fatalf("Harness = %q, want %q", got.Harness, "codex")
+	}
+	if got.Sandbox != "read-only" {
+		t.Errorf("Sandbox = %q, want %q — a bare codex profile must not be able to write", got.Sandbox, "read-only")
+	}
+	if got.ApprovalPolicy != "on-request" {
+		t.Errorf("ApprovalPolicy = %q, want %q", got.ApprovalPolicy, "on-request")
+	}
+}
+
+// TestDefaultsProfile_SandboxOptUp proves workspace-write is still reachable —
+// read-only is the default, not a ceiling.
+func TestDefaultsProfile_SandboxOptUp(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "workspace-write"},
+	}
+	if got := resolveAt(lc, "/home/u/somewhere"); got.Sandbox != "workspace-write" {
+		t.Errorf("Sandbox = %q, want %q", got.Sandbox, "workspace-write")
 	}
 }
 
@@ -117,6 +147,92 @@ func TestResolve_AllowDangerOverrideToFalse(t *testing.T) {
 	got := resolveAt(lc, "/home/u/p")
 	if got.AllowDanger != false {
 		t.Errorf("AllowDanger = %v, want false", got.AllowDanger)
+	}
+}
+
+func TestResolve_CodexHarnessAndNativePosture(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{
+			Harness:        "codex",
+			Model:          "gpt-5",
+			ApprovalPolicy: "on-request",
+			Sandbox:        "workspace-write",
+		},
+		Projects: []config.LaunchProject{
+			{
+				Match:          "~/p",
+				ApprovalPolicy: "never",
+				Sandbox:        "read-only",
+			},
+		},
+	}
+	got := resolve(lc, "/home/me/p/repo", "/home/me")
+	if got.Harness != "codex" || got.Model != "gpt-5" ||
+		got.ApprovalPolicy != "never" || got.Sandbox != "read-only" {
+		t.Errorf("resolved Codex posture = %+v", got)
+	}
+}
+
+func TestResolve_CodexProjectDoesNotInheritClaudeDefaultModel(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Model: "opus"},
+		Projects: []config.LaunchProject{{
+			Match:   "~/p",
+			Harness: "codex",
+		}},
+	}
+	got := resolve(lc, "/home/me/p/repo", "/home/me")
+	if got.Model != "" {
+		t.Fatalf("Codex project inherited Claude model: %q", got.Model)
+	}
+}
+
+// TestProfileValidate_UnsupportedHarness covers Validate's first branch, which
+// had no test: an unknown harness must be rejected by name rather than falling
+// through to the Claude path, which is what a typo would otherwise get.
+func TestProfileValidate_UnsupportedHarness(t *testing.T) {
+	for _, harness := range []string{"gemini", "Codex", "claude ", ""} {
+		p := Profile{Harness: harness, Model: "gpt-5", ApprovalPolicy: "never", Sandbox: "read-only"}
+		err := p.Validate()
+		if err == nil {
+			t.Errorf("Validate() accepted unsupported harness %q", harness)
+			continue
+		}
+		if !strings.Contains(err.Error(), "want claude or codex") {
+			t.Errorf("Validate() for %q = %v, want the message to name the supported harnesses", harness, err)
+		}
+	}
+
+	for _, harness := range []string{"claude", "codex"} {
+		p := Profile{Harness: harness, ApprovalPolicy: "never", Sandbox: "read-only"}
+		if err := p.Validate(); err != nil {
+			t.Errorf("Validate() rejected supported harness %q: %v", harness, err)
+		}
+	}
+}
+
+func TestProfileValidate_CodexEnums(t *testing.T) {
+	valid := Profile{
+		Harness:        "codex",
+		ApprovalPolicy: "never",
+		Sandbox:        "read-only",
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid profile: %v", err)
+	}
+	valid.ApprovalPolicy = "ask-sometimes"
+	if err := valid.Validate(); err == nil {
+		t.Fatal("invalid approval policy accepted")
+	}
+	valid.ApprovalPolicy = "never"
+	valid.Sandbox = "host-everything"
+	if err := valid.Validate(); err == nil {
+		t.Fatal("invalid sandbox accepted")
+	}
+	valid.Sandbox = "read-only"
+	valid.Model = "opus"
+	if err := valid.Validate(); err == nil {
+		t.Fatal("Claude model accepted for Codex")
 	}
 }
 

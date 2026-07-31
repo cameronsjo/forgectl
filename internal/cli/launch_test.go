@@ -485,6 +485,36 @@ func TestIntegration_Builder_AppliesProfileAndPassesThrough(t *testing.T) {
 	}
 }
 
+func TestIntegration_CodexBuilderAndAgentsGuidance(t *testing.T) {
+	h := newBareHarness(t, `[launch.defaults]
+harness = "codex"
+model = "gpt-5"
+approval_policy = "never"
+sandbox = "read-only"
+`)
+	if err := os.WriteFile(filepath.Join(h.binDir, "codex"), []byte(stubClaude), 0o755); err != nil {
+		t.Fatalf("write stub codex: %v", err)
+	}
+	h.run(t, "review this")
+	want := []string{
+		"exec", "--config", `approval_policy="never"`,
+		"--sandbox", "read-only", "--model", "gpt-5", "review this",
+	}
+	if got := h.recordedArgs(t); !equalArgs(got, want) {
+		t.Errorf("Codex args = %v, want %v", got, want)
+	}
+
+	stderr, err := h.runExpectErr(t, nil, "agents", "--json")
+	if err == nil {
+		t.Fatal("Codex launch agents passthrough should be rejected")
+	}
+	for _, wantText := range []string{"Claude-only", "no Codex adapter"} {
+		if !strings.Contains(stderr, wantText) {
+			t.Errorf("stderr missing %q: %s", wantText, stderr)
+		}
+	}
+}
+
 func TestIntegration_AgentsJSON_PurePassthrough(t *testing.T) {
 	h := newHarness(t)
 	stdout, _ := h.run(t, "agents", "--json")
@@ -828,4 +858,98 @@ func containsArg(args []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// --- Codex-path CLI branches -------------------------------------------
+//
+// These three branches shipped with no CLI-level coverage: `launch which`'s
+// Codex rows, `launch doctor`'s Codex resolution and its invalid-profile
+// path, and the exec banner. Each is the only thing that tells an operator
+// what posture a Codex launch is actually running under.
+
+func codexHarness(t *testing.T, configBody string) *harness {
+	t.Helper()
+	h := newBareHarness(t, configBody)
+	if err := os.WriteFile(filepath.Join(h.binDir, "codex"), []byte(stubClaude), 0o755); err != nil {
+		t.Fatalf("write stub codex: %v", err)
+	}
+	return h
+}
+
+const codexConfig = `[launch.defaults]
+harness = "codex"
+model = "gpt-5"
+approval_policy = "never"
+sandbox = "read-only"
+`
+
+// TestIntegration_LaunchWhich_ShowsCodexPosture: `which` must surface the
+// approval/sandbox pair for a Codex profile, not Claude's permission-mode and
+// allow-danger rows — those are meaningless to Codex and would misreport the
+// posture the launch actually runs under.
+func TestIntegration_LaunchWhich_ShowsCodexPosture(t *testing.T) {
+	h := codexHarness(t, codexConfig)
+	stdout, _ := h.run(t, "which")
+
+	for _, want := range []string{"harness", "codex", "approval", "never", "sandbox", "read-only"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("`launch which` output missing %q:\n%s", want, stdout)
+		}
+	}
+	for _, forbidden := range []string{"permission", "allow danger"} {
+		if strings.Contains(stdout, forbidden) {
+			t.Errorf("`launch which` showed the Claude-only row %q for a Codex profile:\n%s", forbidden, stdout)
+		}
+	}
+}
+
+// TestIntegration_LaunchDoctor_ResolvesCodexBinary: doctor must resolve and
+// report the Codex binary, not silently check for claude.
+func TestIntegration_LaunchDoctor_ResolvesCodexBinary(t *testing.T) {
+	h := codexHarness(t, codexConfig)
+	stdout, _ := h.run(t, "doctor")
+
+	if !strings.Contains(stdout, "codex found:") {
+		t.Errorf("`launch doctor` did not report the resolved codex binary:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "claude found:") {
+		t.Errorf("`launch doctor` resolved claude for a Codex profile:\n%s", stdout)
+	}
+}
+
+// TestIntegration_LaunchDoctor_RejectsUnsupportedHarness: a typo'd harness
+// must be a doctor failure with a usable message, not a silent fall-through
+// to the Claude path.
+func TestIntegration_LaunchDoctor_RejectsUnsupportedHarness(t *testing.T) {
+	h := codexHarness(t, "[launch.defaults]\nharness = \"gemini\"\n")
+
+	stderr, err := h.runExpectErr(t, nil, "doctor")
+	if err == nil {
+		t.Fatal("`launch doctor` should fail on an unsupported harness")
+	}
+	stdout, _, _ := h.exec("doctor")
+	combined := stdout + stderr
+	for _, want := range []string{"launch profile invalid", "gemini", "want claude or codex"} {
+		if !strings.Contains(combined, want) {
+			t.Errorf("doctor output missing %q:\n%s", want, combined)
+		}
+	}
+}
+
+// TestIntegration_CodexExec_PrintsBannerToStderr: a Codex launch left no
+// record of the argv it ran with — including the approval/sandbox posture,
+// the part worth auditing. The banner goes to stderr so piped stdout stays
+// byte-clean.
+func TestIntegration_CodexExec_PrintsBannerToStderr(t *testing.T) {
+	h := codexHarness(t, codexConfig)
+	stdout, stderr := h.run(t, "review this")
+
+	for _, want := range []string{"→ codex", "exec", `approval_policy="never"`, "--sandbox", "read-only"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("Codex banner missing %q:\n%s", want, stderr)
+		}
+	}
+	if strings.Contains(stdout, "→ codex") {
+		t.Errorf("banner leaked into stdout, breaking byte-clean piping:\n%s", stdout)
+	}
 }

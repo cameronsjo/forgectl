@@ -9,18 +9,24 @@ import (
 // table. Field shapes mirror the concordance schema (scripts/concordance/schema.sql
 // in cameronsjo/claude-configurations).
 type SessionRow struct {
-	SessionID     string
-	Machine       string
-	Project       string
-	GitBranch     string
-	Model         string
-	FirstTs       *time.Time
-	LastTs        *time.Time
-	Tokens        Tokens
-	CostUSD       *float64
-	CostSource    string
-	Committed     bool
-	LastMessageID string
+	SchemaVersion     int
+	Harness           string
+	SourceFormat      string
+	SessionID         string
+	Machine           string
+	Project           string
+	GitBranch         string
+	Model             string
+	FirstTs           *time.Time
+	LastTs            *time.Time
+	Tokens            Tokens
+	CostUSD           *float64
+	EstimatedCostUSD  *float64
+	PricingSource     string
+	PricingVerifiedAt *time.Time
+	CostSource        string
+	Committed         bool
+	LastMessageID     string
 }
 
 // CostSource values recorded on each row — which ledger priced it.
@@ -34,17 +40,23 @@ const (
 // still proves committedness), and a count of rows that carried no session id
 // — surfaced on the receipt, never silently dropped.
 type CommitAttribution struct {
-	Costs     map[string]float64
-	Committed map[string]bool
-	Dropped   int
+	Costs             map[string]float64
+	EstimatedCosts    map[string]float64
+	PricingSources    map[string]string
+	PricingVerifiedAt map[string]*time.Time
+	Committed         map[string]bool
+	Dropped           int
 }
 
 // RootCostMap aggregates commits.jsonl per ADR-0017: cost groups by the ROOT
 // session (parentSessionId when present, else sessionId), summed.
 func RootCostMap(commitRows []LedgerRow) CommitAttribution {
 	att := CommitAttribution{
-		Costs:     make(map[string]float64),
-		Committed: make(map[string]bool),
+		Costs:             make(map[string]float64),
+		EstimatedCosts:    make(map[string]float64),
+		PricingSources:    make(map[string]string),
+		PricingVerifiedAt: make(map[string]*time.Time),
+		Committed:         make(map[string]bool),
 	}
 	for _, r := range commitRows {
 		root := r.ParentSessionID
@@ -58,6 +70,11 @@ func RootCostMap(commitRows []LedgerRow) CommitAttribution {
 		att.Committed[root] = true
 		if r.CostUSD != nil {
 			att.Costs[root] += *r.CostUSD
+		}
+		if r.EstimatedCostUSD != nil {
+			att.EstimatedCosts[root] += *r.EstimatedCostUSD
+			att.PricingSources[root] = r.PricingSource
+			att.PricingVerifiedAt[root] = r.PricingVerifiedAt
 		}
 	}
 	return att
@@ -108,6 +125,9 @@ func BuildSessions(ledger []LedgerRow, att CommitAttribution, machine string) (r
 	rows = make([]SessionRow, 0, len(byID))
 	for id, a := range byID {
 		row := SessionRow{
+			SchemaVersion: a.latest.SchemaVersion,
+			Harness:       a.latest.Harness,
+			SourceFormat:  a.latest.SourceFormat,
 			SessionID:     id,
 			Machine:       machine,
 			Project:       a.latest.Repo,
@@ -118,6 +138,9 @@ func BuildSessions(ledger []LedgerRow, att CommitAttribution, machine string) (r
 			Tokens:        a.latest.Tokens,
 			LastMessageID: a.latest.LastMessageID,
 		}
+		if row.Harness == "" {
+			row.Harness = "claude"
+		}
 		row.Committed = att.Committed[id]
 		if cost, ok := att.Costs[id]; ok {
 			// ADR-0017: never recompute when a commit exists.
@@ -126,6 +149,18 @@ func BuildSessions(ledger []LedgerRow, att CommitAttribution, machine string) (r
 			row.CostSource = CostFromCommits
 		} else if a.latest.CostUSD != nil {
 			row.CostUSD = a.latest.CostUSD
+			row.CostSource = CostFromSessions
+		}
+		if estimated, ok := att.EstimatedCosts[id]; ok {
+			value := estimated
+			row.EstimatedCostUSD = &value
+			row.PricingSource = att.PricingSources[id]
+			row.PricingVerifiedAt = att.PricingVerifiedAt[id]
+			row.CostSource = CostFromCommits
+		} else if a.latest.EstimatedCostUSD != nil {
+			row.EstimatedCostUSD = a.latest.EstimatedCostUSD
+			row.PricingSource = a.latest.PricingSource
+			row.PricingVerifiedAt = a.latest.PricingVerifiedAt
 			row.CostSource = CostFromSessions
 		}
 		rows = append(rows, row)

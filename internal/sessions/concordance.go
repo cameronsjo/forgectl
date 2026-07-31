@@ -40,14 +40,46 @@ func ConnectConcordance(ctx context.Context, dsn string) (*Concordance, error) {
 // Close releases the connection.
 func (c *Concordance) Close(ctx context.Context) error { return c.conn.Close(ctx) }
 
-// schemaHint decorates undefined-table errors (SQLSTATE 42P01) so a fresh
-// concordance points the operator at the canonical DDL instead of a bare SQL error.
+// schemaHint decorates the two schema-drift errors an operator can actually
+// hit, so both point at the canonical DDL instead of surfacing as a bare pgx
+// error with no guidance.
+//
+//	42P01 undefined_table  — a fresh concordance that has never had the DDL applied
+//	42703 undefined_column — an EXISTING concordance running an older DDL
+//
+// 42703 is the more likely of the two in practice: UpsertSessions references
+// every column unconditionally, so the moment the schema grows a column, every
+// machine pointed at a not-yet-migrated concordance fails here.
 func schemaHint(err error) error {
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
-		return fmt.Errorf("%w — concordance schema missing; apply scripts/concordance/schema.sql (cameronsjo/claude-configurations)", err)
+	if !errors.As(err, &pgErr) {
+		return err
+	}
+	const applyDDL = "apply scripts/concordance/schema.sql (cameronsjo/claude-configurations)"
+	switch pgErr.Code {
+	case "42P01":
+		return fmt.Errorf("%w — concordance schema missing; %s", err, applyDDL)
+	case "42703":
+		return fmt.Errorf("%w — concordance schema is out of date%s; %s", err, missingColumn(pgErr), applyDDL)
 	}
 	return err
+}
+
+// missingColumn returns a parenthetical naming the undefined column, or "" when
+// there is nothing to add.
+//
+// Postgres reports 42703 with ColumnName EMPTY — verified against postgres 18.4:
+// the column is named in Message ("column \"schema_version\" of relation
+// \"session\" does not exist") and nowhere else. Since schemaHint wraps the
+// original error, that Message is already in the final string, so echoing it
+// here produced "…out of date (missing column "x" … does not exist)". Add the
+// parenthetical only when the structured field actually carries something the
+// wrapped message does not.
+func missingColumn(pgErr *pgconn.PgError) string {
+	if pgErr.ColumnName == "" {
+		return ""
+	}
+	return " (missing column " + pgErr.ColumnName + ")"
 }
 
 // Watermarks returns session_id -> last_message_id for the given ids — the
@@ -86,12 +118,18 @@ func (c *Concordance) UpsertSessions(ctx context.Context, rows []SessionRow) err
 	for _, r := range rows {
 		batch.Queue(`
 			INSERT INTO session (
-				session_id, machine, project, git_branch, model,
+				session_id, schema_version, harness, source_format,
+				machine, project, git_branch, model,
 				first_ts, last_ts,
 				tokens_input, tokens_cache_create, tokens_cache_read, tokens_output,
-				cost_usd, cost_source, committed, last_message_id, synced_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now())
+				tokens_reasoning_output, tokens_total,
+				cost_usd, estimated_cost_usd, pricing_source, pricing_verified_at,
+				cost_source, committed, last_message_id, synced_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23, now())
 			ON CONFLICT (session_id) DO UPDATE SET
+				schema_version = EXCLUDED.schema_version,
+				harness = EXCLUDED.harness,
+				source_format = EXCLUDED.source_format,
 				machine = EXCLUDED.machine,
 				project = EXCLUDED.project,
 				git_branch = EXCLUDED.git_branch,
@@ -102,15 +140,23 @@ func (c *Concordance) UpsertSessions(ctx context.Context, rows []SessionRow) err
 				tokens_cache_create = EXCLUDED.tokens_cache_create,
 				tokens_cache_read = EXCLUDED.tokens_cache_read,
 				tokens_output = EXCLUDED.tokens_output,
+				tokens_reasoning_output = EXCLUDED.tokens_reasoning_output,
+				tokens_total = EXCLUDED.tokens_total,
 				cost_usd = EXCLUDED.cost_usd,
+				estimated_cost_usd = EXCLUDED.estimated_cost_usd,
+				pricing_source = EXCLUDED.pricing_source,
+				pricing_verified_at = EXCLUDED.pricing_verified_at,
 				cost_source = EXCLUDED.cost_source,
 				committed = EXCLUDED.committed,
 				last_message_id = EXCLUDED.last_message_id,
 				synced_at = now()`,
-			r.SessionID, r.Machine, nullable(r.Project), nullable(r.GitBranch), nullable(r.Model),
+			r.SessionID, r.SchemaVersion, r.Harness, nullable(r.SourceFormat),
+			r.Machine, nullable(r.Project), nullable(r.GitBranch), nullable(r.Model),
 			r.FirstTs, r.LastTs,
 			r.Tokens.Input, r.Tokens.CacheCreate, r.Tokens.CacheRead, r.Tokens.Output,
-			r.CostUSD, nullable(r.CostSource), r.Committed, nullable(r.LastMessageID),
+			r.Tokens.ReasoningOutput, r.Tokens.Total,
+			r.CostUSD, r.EstimatedCostUSD, nullable(r.PricingSource), r.PricingVerifiedAt,
+			nullable(r.CostSource), r.Committed, nullable(r.LastMessageID),
 		)
 	}
 	if err := c.conn.SendBatch(ctx, batch).Close(); err != nil {

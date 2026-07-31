@@ -7,7 +7,7 @@ package pr
 //       no worktree, no quarantine/allowlist write, no breadcrumb
 //   [x] Real: uses `git worktree add`, never `git clone`
 //   [x] Real: the worktree ref is the resolved HEAD oid, not the literal "HEAD"
-//   [x] localRef output round-trips through ParseRef (the Number<=0 failure mode)
+//   [x] newLocalRef output round-trips through parseRefAllowingLocal (the Number<=0 failure mode)
 //   [x] The findings dir is a sibling of workspace, never nested inside it
 //   [x] The findings dir is created under the client's durable findingsDir
 //       (config.PrFindingsDir by default), not a sibling of the OS-temp
@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
@@ -149,7 +150,7 @@ func TestPrepareLocal_PinsToResolvedOid(t *testing.T) {
 	}
 }
 
-func TestPrepareLocal_BreadcrumbRoundTripsThroughParseRef(t *testing.T) {
+func TestPrepareLocal_BreadcrumbRoundTripsThroughInternalParser(t *testing.T) {
 	oids := []string{
 		localHeadOid,
 		"0000001234567890abcdef", // low-value hex prefix, still nonzero
@@ -157,17 +158,22 @@ func TestPrepareLocal_BreadcrumbRoundTripsThroughParseRef(t *testing.T) {
 		"abc",                    // shorter than 6/7 chars
 	}
 	for _, oid := range oids {
-		ref := localRef(oid)
+		ref := newLocalRef(oid)
 		if ref.Number <= 0 {
-			t.Errorf("localRef(%q).Number = %d, want > 0", oid, ref.Number)
+			t.Errorf("newLocalRef(%q).Number = %d, want > 0", oid, ref.Number)
 		}
-		got, err := ParseRef(ref.String())
+		// The breadcrumb reload path, which is the reason the round-trip must work.
+		got, err := parseRefAllowingLocal(ref.String())
 		if err != nil {
-			t.Errorf("ParseRef(%q) failed to round-trip: %v", ref.String(), err)
+			t.Errorf("parseRefAllowingLocal(%q) failed to round-trip: %v", ref.String(), err)
 			continue
 		}
 		if got != ref {
 			t.Errorf("round-trip mismatch: got %+v, want %+v", got, ref)
+		}
+		// The public parser must NOT accept it — that asymmetry is the control.
+		if _, err := ParseRef(ref.String()); err == nil {
+			t.Errorf("ParseRef(%q) accepted the reserved sentinel", ref.String())
 		}
 	}
 }
@@ -213,6 +219,38 @@ func TestPrepareLocal_FindingsDirIsDurable(t *testing.T) {
 	}
 }
 
+// TestPrepareLocal_AllowlistOnlyForHarnessesThatReadIt pins the asymmetry:
+// .claude/settings.local.json is a Claude Code control, so a `--agent codex`
+// session must not get one. Writing it there would leave a file that looks
+// like the Codex reviewer's confinement and enforces nothing.
+func TestPrepareLocal_AllowlistOnlyForHarnessesThatReadIt(t *testing.T) {
+	for _, tc := range []struct {
+		agent string
+		want  bool
+	}{
+		{"claude", true},
+		{"", true}, // default → agent A
+		{"codex", false},
+	} {
+		t.Run("agent="+tc.agent, func(t *testing.T) {
+			c := testClient(t, localGitRunner())
+			sess, err := c.PrepareLocal(context.Background(), t.TempDir(), PrepareLocalOpts{Agent: tc.agent})
+			if err != nil {
+				t.Fatalf("PrepareLocal: %v", err)
+			}
+			t.Cleanup(func() {
+				os.RemoveAll(sess.Workspace)
+				os.RemoveAll(sess.FindingsDir)
+			})
+
+			_, statErr := os.Stat(filepath.Join(sess.Workspace, ".claude", "settings.local.json"))
+			if got := statErr == nil; got != tc.want {
+				t.Errorf("allowlist present = %v, want %v (agent %q)", got, tc.want, tc.agent)
+			}
+		})
+	}
+}
+
 func TestLocalProfile_DeniesAllNetworkCLI(t *testing.T) {
 	perms := localProfile("/tmp/forgectl-findings-test")
 	if !contains(perms.Deny, "Bash(gh:*)") {
@@ -250,5 +288,111 @@ func TestLocalProfile_FindingsDirIsOnlyWritablePath(t *testing.T) {
 	}
 	if contains(perms.Deny, "Write") {
 		t.Error(`deny list must not contain bare "Write" — it would clobber the scoped Write(findingsDir/**) allow grant`)
+	}
+}
+
+// TestPrepareLocal_RefusesCleanRoomWorkspace closes the laundering path around
+// the Codex refusal: `forgectl pr <ref>` (allowed, dispatches Claude) leaves a
+// workspace holding the third party's head, and `pr local --agent codex`
+// pointed at that workspace would review the same hostile diff with the
+// unconfined reviewer. `pr local` means the operator's own tree.
+func TestPrepareLocal_RefusesCleanRoomWorkspace(t *testing.T) {
+	cleanRoom, err := os.MkdirTemp("", "forgectl-workflow-*")
+	if err != nil {
+		t.Fatalf("make fake clean room: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(cleanRoom) })
+
+	for _, tc := range []struct{ name, path string }{
+		{"the workspace itself", cleanRoom},
+		{"a subdirectory of it", filepath.Join(cleanRoom, "src")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.MkdirAll(tc.path, 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			fake := localGitRunner()
+			c := testClient(t, fake)
+
+			_, err := c.PrepareLocal(context.Background(), tc.path, PrepareLocalOpts{Agent: "codex"})
+			if err == nil {
+				t.Fatal("PrepareLocal must refuse a path inside a clean-room workspace")
+			}
+			if !strings.Contains(err.Error(), "clean-room workspace") {
+				t.Errorf("unexpected error: %v", err)
+			}
+			// Behavioral: the refusal precedes every Runner call.
+			if len(fake.Calls) != 0 {
+				t.Errorf("refusal must precede any git call; got %+v", fake.Calls)
+			}
+		})
+	}
+}
+
+// TestPrepareLocal_AllowsOrdinaryPaths is the control — the guard must be
+// specific to forgectl's own sandboxes, not a blanket ban on temp dirs (t.TempDir
+// itself lives under the OS temp root).
+func TestPrepareLocal_AllowsOrdinaryPaths(t *testing.T) {
+	c := testClient(t, localGitRunner())
+	sess, err := c.PrepareLocal(context.Background(), t.TempDir(), PrepareLocalOpts{Agent: "codex", DryRun: true})
+	if err != nil {
+		t.Fatalf("an ordinary path must still be reviewable: %v", err)
+	}
+	if !sess.Ref.IsLocal() {
+		t.Errorf("expected a local ref, got %+v", sess.Ref)
+	}
+}
+
+// TestPrepareLocal_RefusesCleanRoomAcrossTMPDIRChange closes a one-variable
+// bypass of the clean-room guard. os.TempDir() reads $TMPDIR at CALL time,
+// while the workspace was created under the CREATING process's $TMPDIR — so
+//
+//	forgectl pr owner/repo#1                      # under /var/folders/…/T/
+//	TMPDIR=/tmp forgectl pr local --agent codex /var/folders/…/forgectl-workflow-abc
+//
+// made the temp-root comparison false and returned before the prefix scan ran.
+// The recorded breadcrumb workspace is an absolute path that does not move,
+// which is what makes the authoritative half $TMPDIR-independent.
+func TestPrepareLocal_RefusesCleanRoomAcrossTMPDIRChange(t *testing.T) {
+	// A workspace somewhere the *current* $TMPDIR will not cover.
+	elsewhere := t.TempDir()
+	workspace := filepath.Join(elsewhere, "forgectl-workflow-abc123")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+
+	sessionsDir := t.TempDir()
+	c := New(localGitRunner(), WithSessionsDir(sessionsDir), WithTmuxSession("forgectl"))
+
+	// Record the breadcrumb the way a real `forgectl pr <ref>` would.
+	ref := Ref{Owner: "o", Repo: "r", Number: 1}
+	if _, err := writeBreadcrumb(sessionsDir, ref, Breadcrumb{
+		Workspace: workspace,
+		Ref:       ref.String(),
+		Agent:     "claude",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("write breadcrumb: %v", err)
+	}
+
+	// Now point $TMPDIR somewhere else entirely, as the bypass did.
+	t.Setenv("TMPDIR", t.TempDir())
+
+	for _, tc := range []struct{ name, path string }{
+		{"the workspace itself", workspace},
+		{"a subdirectory of it", filepath.Join(workspace, "src")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.MkdirAll(tc.path, 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			_, err := c.PrepareLocal(context.Background(), tc.path, PrepareLocalOpts{Agent: "codex"})
+			if err == nil {
+				t.Fatal("a recorded clean-room workspace must be refused regardless of $TMPDIR")
+			}
+			if !strings.Contains(err.Error(), "clean-room workspace") {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
 	}
 }

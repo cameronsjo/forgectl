@@ -25,13 +25,31 @@ const reviewPrompt = "Review this pull request as a clean-room reviewer. " +
 // explicitly, since that path is the one thing tying the prompt to the
 // scoped Write(findingsDir/**) allowlist grant) instead of a PostReview
 // approval gate.
-func localReviewPrompt(findingsDir string) string {
+//
+// writesEnforced says whether the harness actually confines writes to
+// findingsDir. Under agent A it does: the workspace allowlist grants exactly
+// one Write(findingsDir/**) rule, and --add-dir is what makes that grant
+// reachable at all — so the prompt may state the restriction as fact. Under
+// Codex it does not: --add-dir adds a writable root ALONGSIDE an
+// already-writable workspace, and approval_policy="never" removes the prompt
+// that would otherwise surface a stray write. There the sentence is an
+// instruction, not a control, and it says so. Asserting an enforcement that
+// is not there is worse than asserting nothing — it invites a reader to trust
+// prose as a boundary.
+func localReviewPrompt(findingsDir string, writesEnforced bool) string {
+	scope := "Write your findings to a file under " + findingsDir + ", and write " +
+		"nothing anywhere else — nothing in this instruction restricts you, so treat " +
+		"it as a requirement of the task."
+	if writesEnforced {
+		scope = "Write your findings to a file under " + findingsDir +
+			" — the only directory you may write to."
+	}
 	return "Review the committed changes in this working tree as a clean-room " +
-		"reviewer. Inspect the diff and the checked-out tree, then write your " +
-		"findings (by severity: Critical / Important / Nit, with file:line and a " +
-		"concrete fix) to a file under " + findingsDir + " — the only directory you " +
-		"may write to. Do NOT post, comment, merge, or push anything, and do not " +
-		"attempt any network access — output the review only, to that file."
+		"reviewer. Inspect the diff and the checked-out tree, then report your " +
+		"findings by severity (Critical / Important / Nit, with file:line and a " +
+		"concrete fix). " + scope + " Do NOT post, comment, merge, or push " +
+		"anything, and do not attempt any network access — output the review only, " +
+		"to that file."
 }
 
 // windowName is the tmux window name for a review session:
@@ -71,14 +89,85 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) er
 	if sess.Workspace == "" {
 		return fmt.Errorf("cannot launch: session has no workspace (dry-run?)")
 	}
+	// Authoritative use-based guard. Prepare refuses the same pairing earlier so
+	// nothing is fetched, but this is the one every route reaches — including a
+	// Session reconstituted from a breadcrumb, which never re-enters Prepare.
+	if err := CheckAgentForRef(sess.Agent, sess.Ref); err != nil {
+		return err
+	}
+	// FindingsDir is deliberately NOT persisted (see Session), so loadSession
+	// leaves it zero. A local dispatch on a reload would then pass --add-dir ""
+	// and seed a prompt reading "…to a file under , and write nothing anywhere
+	// else" — a silently misconfigured review rather than a failed one. Nothing
+	// calls Launch on a reload today; this makes the future verb that does fail
+	// loudly instead.
+	if sess.Ref.IsLocal() && sess.FindingsDir == "" {
+		return fmt.Errorf(
+			"local review session %s has no findings directory: it is not persisted in the breadcrumb, "+
+				"so a reloaded session cannot be dispatched — re-run `forgectl pr local`",
+			sess.Ref.String(),
+		)
+	}
 	switch path := LaunchPathFor(sess.Agent); path {
 	case InlineSeeded:
 		return c.launchInline(ctx, sess, cfg)
 	case BareTUIEscalation:
 		return fmt.Errorf("agent %q (bare-TUI escalation) is not yet wired", sess.Agent)
+	case CodexExec:
+		return c.launchCodex(ctx, sess, cfg)
 	default:
 		return fmt.Errorf("unknown launch path %v for agent %q", path, sess.Agent)
 	}
+}
+
+// launchCodex dispatches `codex exec` under Codex's native sandbox. Remote PR
+// reviews are read-only. Local reviews use workspace-write plus the dedicated
+// findings directory as an additional writable root.
+//
+// This posture bounds WRITES and network egress, not command execution: the
+// reviewer can run arbitrary shell and read the whole host filesystem. See
+// CodexExec in agent.go for the measured delta against agent A's allowlist and
+// why it is not closable from `codex exec` today.
+func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Config) error {
+	codexPath, err := launch.CodexPath(cfg.Launch.Defaults)
+	if err != nil {
+		return fmt.Errorf("resolve codex binary: %w", err)
+	}
+	resolved := launch.Resolve(cfg.Launch, sess.Workspace)
+	profile := launch.Profile{
+		Harness:        "codex",
+		ApprovalPolicy: "never",
+		Sandbox:        "read-only",
+	}
+	if resolved.Harness == "codex" {
+		profile.Model = resolved.Model
+	}
+	prompt := reviewPrompt
+	if sess.Ref.IsLocal() {
+		profile.Sandbox = "workspace-write"
+		profile.AddDir = []string{sess.FindingsDir}
+		// writesEnforced=false: Codex's --add-dir widens an already-writable
+		// workspace rather than being the sole grant, so the findings-dir scope
+		// is an instruction here, not a control.
+		prompt = localReviewPrompt(sess.FindingsDir, false)
+	}
+	if err := profile.Validate(); err != nil {
+		return fmt.Errorf("codex review profile invalid: %w", err)
+	}
+	codexArgs := launch.CodexExecArgs(profile, []string{prompt})
+	args := []string{
+		"new-window",
+		"-t", c.tmuxSession,
+		"-n", windowName(sess.Ref),
+		"-c", sess.Workspace,
+		"--", codexPath,
+	}
+	args = append(args, codexArgs...)
+	if _, err := c.run.Run(ctx, "tmux", args...); err != nil {
+		return fmt.Errorf("open Codex review window: %w", err)
+	}
+	slog.Info("Successfully dispatched Codex clean-room review.", "ref", sess.Ref.String(), "window", c.windowTarget(sess.Ref))
+	return nil
 }
 
 // launchInline composes the claude argv and opens it in a tmux window rooted
@@ -98,6 +187,26 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	profile := launch.Resolve(cfg.Launch, sess.Workspace)
 	profile.AllowDanger = false
 	profile.PermissionMode = "plan"
+	// The resolved profile is the user's ambient launch config, which may well
+	// be a Codex one — `harness = "codex"` in [launch.defaults] is exactly the
+	// config the Codex work targets. This dispatch is `claude` regardless, and
+	// BuilderArgs passes Model unconditionally, so a Codex model id would reach
+	// `claude --model <that>`. Force the harness and re-derive the model.
+	// launchCodex guards the mirror case (it adopts resolved.Model only when
+	// the resolved harness is codex); this is the other half.
+	if profile.Harness != "claude" {
+		profile.Harness = "claude"
+		profile.Model = launch.DefaultModelFor("claude")
+	}
+	// Drop the operator's ambient add_dir. launch.Resolve returns
+	// [launch.defaults].add_dir plus any project block matching the workspace,
+	// and BuilderArgs emits --add-dir for each — so `add_dir = ["~/notes"]`
+	// would hand the reviewer of a remote hostile head a root outside the clean
+	// room, defeating the deny-by-default workspace scoping for those paths.
+	// The local branch below re-adds exactly one entry, the findings dir.
+	// launchCodex builds a fresh Profile and inherits none; this is the
+	// inline half.
+	profile.AddDir = nil
 
 	prompt := reviewPrompt
 	if sess.Ref.IsLocal() {
@@ -105,7 +214,7 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 		// permission-scoped Write(<dir>/**) allowlist rule is moot — Claude Code
 		// won't expose a path outside the launch cwd at all.
 		profile.AddDir = append(profile.AddDir, sess.FindingsDir)
-		prompt = localReviewPrompt(sess.FindingsDir)
+		prompt = localReviewPrompt(sess.FindingsDir, true)
 	}
 	claudeArgs := launch.BuilderArgs(profile, []string{"-p", prompt})
 

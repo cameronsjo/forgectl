@@ -2,11 +2,13 @@ package pr
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/sandbox"
@@ -42,6 +44,9 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	if err := sandbox.RejectOptionLike("path", absPath); err != nil {
 		return Session{}, err
 	}
+	if err := c.rejectCleanRoomPath(absPath); err != nil {
+		return Session{}, err
+	}
 	slog.Debug("Preparing local clean-room review.", "path", absPath, "dryRun", opts.DryRun)
 
 	headRef, err := c.run.Run(ctx, "git", "-C", absPath, "rev-parse", "--abbrev-ref", "HEAD")
@@ -53,7 +58,18 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 		return Session{}, fmt.Errorf("resolve local HEAD commit: %w", err)
 	}
 
-	ref := localRef(headOid)
+	// A detached HEAD is the ordinary shape of `gh pr checkout` — the operator's
+	// own tree sitting on a third party's commit. That is the one Codex path
+	// this design deliberately does not gate (see CheckAgentForRef's ACCEPTED
+	// RESIDUAL), because the directory is genuinely theirs. Warn rather than
+	// refuse: silence here would read as coverage.
+	if LaunchPathFor(opts.Agent) == CodexExec && headRef == "HEAD" {
+		slog.Warn("Local review is on a detached HEAD, which is what `gh pr checkout` leaves behind. "+
+			"If this commit came from someone else, the Codex reviewer is not confined against it — "+
+			"use --agent claude instead.", "path", absPath, "head", headOid)
+	}
+
+	ref := newLocalRef(headOid)
 	sess := Session{
 		Ref:       ref,
 		HeadRef:   headRef,
@@ -107,9 +123,19 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	}
 	sess.FindingsDir = findingsDir
 
-	if _, err := writeLocalAllowlist(workspace, findingsDir); err != nil {
-		c.teardownLocalArtifacts(ctx, workspace, findingsDir)
-		return Session{}, err
+	// The allowlist is a Claude Code control: it lands in
+	// .claude/settings.local.json, which only Claude Code reads. Writing it for
+	// a session that will dispatch `codex exec` leaves a file that looks like an
+	// active control and enforces nothing — the next reader would reasonably
+	// mistake it for the Codex reviewer's confinement. Skip it on that path
+	// (LaunchPathFor is the same routing Launch uses, so the two cannot drift);
+	// what does and does not confine the Codex reviewer is documented on
+	// CodexExec in agent.go.
+	if LaunchPathFor(opts.Agent) != CodexExec {
+		if _, err := writeLocalAllowlist(workspace, findingsDir); err != nil {
+			c.teardownLocalArtifacts(ctx, workspace, findingsDir)
+			return Session{}, err
+		}
 	}
 
 	bc := Breadcrumb{
@@ -129,6 +155,126 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	return sess, nil
 }
 
+// rejectCleanRoomPath refuses a `pr local` path that points into a forgectl
+// clean-room workspace.
+//
+// `pr local` exists to review the operator's OWN tree, and that premise is what
+// justifies keeping the unconfinable Codex reviewer available there. But the
+// verb takes an arbitrary path with no provenance test, so without this guard
+// the refusal of `--agent codex` on a remote head is a speed bump rather than a
+// boundary: run `forgectl pr <ref>` (which is allowed — it dispatches Claude),
+// then point `pr local --agent codex` at the workspace that now holds the
+// third party's head. Same hostile diff, same unconfined reviewer, one extra
+// command.
+//
+// Two independent checks, because each covers the other's blind spot:
+//
+//  1. The LIVE BREADCRUMB SET — every Workspace this client has recorded in
+//     sessionsDir. This is the authoritative half and, critically, it is
+//     $TMPDIR-independent: os.TempDir() reads $TMPDIR at CALL time, so a
+//     workspace created under one $TMPDIR and attacked under another
+//     (`TMPDIR=/tmp forgectl pr local /var/folders/…/forgectl-workflow-abc`)
+//     slips past any temp-root comparison. The recorded absolute path does not
+//     move.
+//  2. The PREFIX SCAN — under the current temp root AND carrying the sandbox
+//     prefix, the pair validateWorkspace uses. This is the belt: it still
+//     catches a workspace whose breadcrumb was deleted, or one left by a
+//     different forgectl invocation with its own sessions dir.
+//
+// A breadcrumb that fails to load is skipped rather than fatal, matching List:
+// one corrupt file must not make every local review unreviewable. The prefix
+// scan still applies in that case.
+func (c *Client) rejectCleanRoomPath(absPath string) error {
+	real := absPath
+	if r, err := filepath.EvalSymlinks(absPath); err == nil {
+		real = r
+	}
+	real = filepath.Clean(real)
+
+	if ws, ok := c.recordedWorkspaceFor(real); ok {
+		return cleanRoomError(absPath, ws)
+	}
+
+	// Belt: prefix scan, bounded at the temp root so a $TMPDIR whose own path
+	// happens to contain a "forgectl-*" component does not reject everything
+	// under it.
+	tempRoot := filepath.Clean(osTempDir())
+	if r, err := filepath.EvalSymlinks(tempRoot); err == nil {
+		tempRoot = r
+	}
+	if !sandbox.WithinWorkspace(tempRoot, real) {
+		return nil
+	}
+	for dir := real; dir != tempRoot; dir = filepath.Dir(dir) {
+		if strings.HasPrefix(filepath.Base(dir), tempPrefix) {
+			return cleanRoomError(absPath, dir)
+		}
+		if parent := filepath.Dir(dir); parent == dir {
+			break
+		}
+	}
+	return nil
+}
+
+// recordedWorkspaceFor reports the recorded clean-room workspace that contains
+// real, if any. Comparison is on resolved absolute paths, so it holds across a
+// $TMPDIR change.
+//
+// It deliberately does NOT go through List/loadBreadcrumb. That path runs
+// validateBreadcrumb, whose workspace check requires the recorded directory to
+// sit under osTempDir() — which reads $TMPDIR at call time. So under exactly
+// the $TMPDIR change this guard exists to defeat, List() skips every
+// breadcrumb and the authoritative half would see nothing. (That same
+// dependency makes `pr list`, `pr teardown`, and `pr cleanup` go blind after a
+// $TMPDIR change; out of scope here, flagged separately.)
+//
+// Reading with the LOCATION guard but not the workspace-schema guard is safe
+// for this use: the recorded string is only ever compared against a candidate
+// path in order to REFUSE. It never becomes an argv, and a broader view here
+// can only refuse more, never act on more.
+func (c *Client) recordedWorkspaceFor(real string) (string, bool) {
+	entries, err := os.ReadDir(c.sessionsDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("Could not read session breadcrumbs while vetting a local review path.", "error", err)
+		}
+		return "", false
+	}
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		path := filepath.Join(c.sessionsDir, e.Name())
+		if !sandbox.WithinWorkspace(c.sessionsDir, path) {
+			continue // same location guard loadBreadcrumb applies first
+		}
+		data, err := os.ReadFile(path) //nolint:gosec // location-validated above
+		if err != nil {
+			continue
+		}
+		var bc Breadcrumb
+		if err := json.Unmarshal(data, &bc); err != nil || bc.Workspace == "" {
+			continue
+		}
+		ws := filepath.Clean(bc.Workspace)
+		if r, err := filepath.EvalSymlinks(ws); err == nil {
+			ws = r
+		}
+		if real == ws || sandbox.WithinWorkspace(ws, real) {
+			return ws, true
+		}
+	}
+	return "", false
+}
+
+func cleanRoomError(absPath, workspace string) error {
+	return fmt.Errorf(
+		"refusing to review %q: it is inside a forgectl clean-room workspace (%q), which holds content fetched from somewhere else. "+
+			"`pr local` reviews your own working tree — point it at your repo, not at a review sandbox",
+		absPath, workspace,
+	)
+}
+
 // teardownLocalArtifacts is PrepareLocal's failure-path cleanup: best-effort
 // removal of both workspace and findingsDir. Best-effort because a caller of
 // this always already has a primary error to return — neither cleanup call's
@@ -138,7 +284,7 @@ func (c *Client) teardownLocalArtifacts(ctx context.Context, workspace, findings
 	_ = os.RemoveAll(findingsDir)
 }
 
-// unparseableHexSentinel is the fallback Number for localRef when hexPart
+// unparseableHexSentinel is the fallback Number for newLocalRef when hexPart
 // fails to parse or parses to zero. hexPart is at most 6 hex digits, so any
 // successful parse is in [0, 0xFFFFFF]; this sentinel sits strictly above
 // that range so it can never collide with a legitimately parsed value (e.g.
@@ -146,15 +292,21 @@ func (c *Client) teardownLocalArtifacts(ctx context.Context, workspace, findings
 // with that).
 const unparseableHexSentinel = 0x1000000
 
-// localRef builds a synthetic Ref identity from a local HEAD oid: Owner is
+// localRef is the ONLY constructor that may produce a Ref carrying the
+// reserved sentinel. It builds the identity in-process from a local git oid —
+// nothing external reaches it — which is what makes locality unforgeable: the
+// exported routes (ParseRef, RefFromParts, ResolveRef) all refuse the
+// sentinel, so no gh response, config value, or user-typed string can spell it.
+//
+// It builds a synthetic Ref identity from a local HEAD oid: Owner is
 // localOwnerSentinel (reserved — see its doc in ref.go), Repo is a 7-char
 // short oid, and Number is derived from the oid's first 6 hex chars (always
 // positive — parseNumber rejects Number<=0, so a fixed 0 sentinel would fail
 // breadcrumb reload). Every component stays inside Ref's existing validated
-// charset, so ref.String() round-trips through ParseRef exactly like a real
-// PR ref. Deriving Number from the oid also keeps concurrent-session tmux
+// charset, so ref.String() round-trips through parseRefAllowingLocal exactly
+// like a real PR ref does through ParseRef. Deriving Number from the oid also keeps concurrent-session tmux
 // window names (pr-<owner>-<N>) distinct per commit under review.
-func localRef(oid string) Ref {
+func newLocalRef(oid string) Ref {
 	hexPart := truncate(oid, 6)
 	n, err := strconv.ParseInt(hexPart, 16, 64)
 	if err != nil || n <= 0 {

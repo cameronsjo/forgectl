@@ -69,7 +69,7 @@ writable escape-hatch directory rather than posted anywhere.
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&agent, "agent", "", "review agent (env "+prAgentEnv+"; default: claude)")
+	cmd.Flags().StringVar(&agent, "agent", "", "review agent (env "+prAgentEnv+"; default: claude; codex is local-review only)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve and print the plan without creating anything")
 	return cmd
 }

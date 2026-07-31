@@ -53,15 +53,15 @@ forgectl pr attach <breadcrumb>          # jump to a review window (also: open <
                                           #   <breadcrumb> is the session path `pr list` prints
 forgectl pr keys                         # tmux cheatsheet for driving a review
 
-# launch — per-project Claude Code launcher (alias: cl)
-forgectl launch                    # interactive launcher: pick Model + New/Resume/Fork, then exec claude
-forgectl launch <claude args…>     # apply the project profile, then pass your args straight through
+# launch — per-project Claude Code / Codex CLI launcher (alias: cl)
+forgectl launch                    # interactive launcher: pick Model + New/Resume/Fork
+forgectl launch <harness args…>    # apply the project profile, then exec the configured harness
 forgectl launch agents --json      # pure passthrough (byte-clean); posture injected only when interactive
 forgectl launch which              # show the profile resolved for the current directory (alias: config)
 forgectl launch init               # scaffold the [launch] section into config.toml
 forgectl launch init --from-claunch # import an existing ~/.config/claunch/claunch.conf into config.toml
 forgectl launch edit               # open config.toml in $EDITOR
-forgectl launch doctor             # check claude availability + launch config validity
+forgectl launch doctor             # check harness availability + launch config validity
 
 # resume — get back into a Claude Code session after a terminal restart
 forgectl resume                    # pick from recent sessions across every repo, then resume in place
@@ -336,16 +336,24 @@ Logging is **off by default**. Set `log_level` to `debug` for the full narrative
 
 With `log_file = ""` (the default target once a level is set), forgectl writes to a daily file — `forgectl-YYYY-MM-DD.log` — in the config dir and prunes any such file older than 7 days on startup. Set `log_file = "-"` to log to stderr instead, or give an explicit path to opt out of rotation.
 
-### launch — per-project Claude Code profiles
+### launch — per-project Claude Code and Codex profiles
 
-`forgectl launch` resolves a posture from the `[launch]` section of the same `config.toml`, runs a short guided launch, then **execs** `claude` in place (via `syscall.Exec`, so Ctrl-C, the TTY, and the exit code pass through untouched). Scaffold the section with `forgectl launch init`.
+`forgectl launch` resolves a posture from the `[launch]` section of the same
+`config.toml`, runs a short guided launch, then **execs** Claude Code or Codex
+CLI in place (via `syscall.Exec`, so Ctrl-C, the TTY, and the exit code pass
+through untouched). Claude remains the compatibility default.
 
 ```toml
 [launch.defaults]
-model           = "opus"     # claude --model value (alias or full id)
+harness         = "claude"   # or "codex"
+model           = "opus"     # remove or replace with a Codex model when harness = "codex"
 permission_mode = "plan"     # launch always starts in plan
 allow_danger    = true       # adds --allow-dangerously-skip-permissions (reachable, not on)
 # binary_path   = ""         # explicit claude path; $FORGECTL_CLAUDE_BIN overrides this
+# Codex settings when harness = "codex":
+# approval_policy   = "on-request"
+# sandbox           = "read-only"   # launch always starts non-writing; opt up to "workspace-write"
+# codex_binary_path = ""      # $FORGECTL_CODEX_BIN overrides this
 
 [[launch.project]]
 match           = "~/Projects/minute"
@@ -359,9 +367,38 @@ Resolution expands `~`, picks the `[[launch.project]]` whose `match` is the **lo
 **Design invariants** (verified against `claude` v2.1.183):
 
 - **Injected posture first, user args last** — a user-supplied flag (e.g. `--model`) overrides the profile because Claude Code is last-flag-wins.
-- **`agents` is special** — only the agents-valid subset is injected; on `--json`/`--help`/`-h` it is pure passthrough (no banner on stdout) so `forgectl launch agents --json | jq` stays byte-clean.
+- **`agents` is Claude-only** — Codex profiles reject the passthrough and point
+  out that no Codex adapter ships. Claude retains its agents-valid injection
+  and byte-clean `--json`/`--help` passthrough.
+- **Launch always starts in a posture that cannot write** — `permission_mode =
+  "plan"` for Claude, `sandbox = "read-only"` for Codex. Both are opt-ups:
+  `allow_danger` makes bypass reachable, `sandbox = "workspace-write"` makes
+  the checkout writable. Neither is on by default.
 
-**Choosing the `claude` binary** (precedence): `$FORGECTL_CLAUDE_BIN` → `[launch.defaults] binary_path` → `claude` on `$PATH`. An explicit path that is missing or non-executable is a clear error, not a silent PATH fallback.
+**Choosing the binary** uses env → config → PATH:
+`FORGECTL_CLAUDE_BIN` / `binary_path` / `claude`, or
+`FORGECTL_CODEX_BIN` / `codex_binary_path` / `codex`.
+
+Codex modes translate to `codex`, `codex resume --last`, `codex fork --last`,
+and `codex exec`. Clean-room reviews accept `--agent codex` for **local review
+only** — `forgectl pr local`, where the reviewed tree is your own.
+
+> **`--agent codex` is refused for a remote PR head, by design.** The Claude
+> clean room confines the reviewer to a deny-by-default allowlist with no
+> command-execution primitive. Codex's `--sandbox read-only` scopes writes and
+> network egress but not *which commands run*, so a prompt injection in a
+> third-party diff could reach a shell with read access to your whole home
+> directory — and anything read reaches the model provider as tool output.
+> `codex exec` exposes no way to confine that: it accepts no
+> `--permission-profile`, and `shell_environment_policy.inherit=none` is
+> honored by `codex sandbox` but ignored by `codex exec` (measured on
+> codex-cli 0.146.0).
+>
+> So the boundary is drawn by **use**, not by sandbox. A remote head is someone
+> else's content and the Codex agent is refused there — enforced in the
+> dispatch path, before anything is fetched. Your own working tree cannot be
+> hostile to you, so `forgectl pr local --agent codex` stays fully available.
+> Use `--agent claude` (the default) for PR review.
 
 **Zero-migration grace** — if `config.toml` has no `[launch]` section, forgectl still reads a legacy `~/.config/claunch/claunch.conf` (the `[launch]` section is the same `[defaults]` + `[[project]]` shape, just namespaced). `forgectl launch init` writes an empty native section for the one-time cutover; `forgectl launch init --from-claunch` migrates your existing legacy profiles into it, so `launch` stops falling back to the legacy file. Both refuse to overwrite an existing `[launch]` section.
 

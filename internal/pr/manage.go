@@ -47,7 +47,9 @@ func (c *Client) loadSession(path string) (Session, error) {
 	if err != nil {
 		return Session{}, err
 	}
-	ref, err := ParseRef(bc.Ref)
+	// Permissive variant: a local session's breadcrumb legitimately carries the
+	// reserved owner (see localOwnerSentinel).
+	ref, err := parseRefAllowingLocal(bc.Ref)
 	if err != nil {
 		return Session{}, fmt.Errorf("breadcrumb ref: %w", err)
 	}

@@ -25,6 +25,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -247,6 +248,166 @@ func TestLaunch_AgentBNotWired(t *testing.T) {
 	}
 }
 
+// TestLaunch_CodexRefusedForRemotePRHead is the SECURITY INVARIANT the
+// use-based boundary rests on. A remote PR head is a third party's content,
+// and the Codex agent cannot be confined on `codex exec`, so dispatch must not
+// happen at all — the assertion is on the behavior (zero Runner calls), not
+// the message, because a well-worded error that still launched would be the
+// whole bug.
+//
+// This test replaces one that asserted the opposite (that a remote Codex
+// review dispatched with a compensating sandbox). That posture was the finding.
+func TestLaunch_CodexRefusedForRemotePRHead(t *testing.T) {
+	codexBin := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(codexBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("FORGECTL_CODEX_BIN", codexBin)
+
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	sess := Session{
+		Ref:       Ref{Owner: "o", Repo: "r", Number: 42},
+		Workspace: fakeWorkspace(t),
+		Agent:     "codex",
+	}
+
+	err := c.Launch(context.Background(), sess, config.Config{})
+	if err == nil {
+		t.Fatal("Codex must be refused for a remote PR head")
+	}
+	// The behavioral assertion: nothing was dispatched.
+	if len(fake.Calls) != 0 {
+		t.Errorf("a refused agent must issue ZERO Runner calls; got %+v", fake.Calls)
+	}
+	// The message must be actionable, naming the reason and the way forward.
+	for _, want := range []string{"remote PR head", "not", "which commands run", "--agent claude"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal message missing %q: %v", want, err)
+		}
+	}
+	// It must NOT offer `pr local` as the way to review THIS PR. Doing so
+	// routes the operator around the control: `pr local` pointed at the
+	// clean-room workspace reviews the same hostile head with the same
+	// unconfined agent. (rejectCleanRoomPath enforces that separately; the
+	// message must not advertise the attempt either.)
+	if strings.Contains(err.Error(), "pr local") {
+		t.Errorf("refusal message routes the operator around the control: %v", err)
+	}
+}
+
+// TestCheckAgentForRef_BoundaryIsOwnershipNotSeverity walks the full matrix.
+// The Codex agent is refused only where the reviewed content belongs to
+// someone else; every other pairing is untouched, including the local Codex
+// review the ruling deliberately keeps available.
+func TestCheckAgentForRef_BoundaryIsOwnershipNotSeverity(t *testing.T) {
+	remote := Ref{Owner: "o", Repo: "r", Number: 42}
+	local := Ref{Owner: localOwnerSentinel, Repo: "abc1234", Number: 1}
+
+	for _, tc := range []struct {
+		agent      string
+		ref        Ref
+		wantRefuse bool
+	}{
+		{"codex", remote, true},
+		{"codex", local, false}, // the operator's own tree cannot be hostile to them
+		{"claude", remote, false},
+		{"claude", local, false},
+		{"", remote, false}, // default → agent A
+		{"", local, false},
+		{"escalation", remote, false}, // unwired, but not THIS refusal's business
+	} {
+		err := CheckAgentForRef(tc.agent, tc.ref)
+		if got := err != nil; got != tc.wantRefuse {
+			t.Errorf("CheckAgentForRef(%q, local=%v) refused = %v, want %v (err: %v)",
+				tc.agent, tc.ref.IsLocal(), got, tc.wantRefuse, err)
+		}
+	}
+}
+
+// TestLaunch_CodexStillDispatchesForLocalReview is the other direction of the
+// ruling: confining by use must not disable the use that is safe.
+func TestLaunch_CodexStillDispatchesForLocalReview(t *testing.T) {
+	codexBin := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(codexBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("FORGECTL_CODEX_BIN", codexBin)
+
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	sess := Session{
+		Ref:         Ref{Owner: localOwnerSentinel, Repo: "abc1234", Number: 1},
+		Workspace:   fakeWorkspace(t),
+		Agent:       "codex",
+		FindingsDir: t.TempDir(),
+	}
+
+	if err := c.Launch(context.Background(), sess, config.Config{}); err != nil {
+		t.Fatalf("local Codex review must still dispatch: %v", err)
+	}
+	args := fake.Last().Args
+	if !contains(args, codexBin) || !contains(args, "exec") {
+		t.Errorf("local Codex review did not reach `codex exec`: %v", args)
+	}
+}
+
+func TestLaunch_CodexLocalWritesOnlyWorkspaceAndFindings(t *testing.T) {
+	codexBin := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(codexBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("FORGECTL_CODEX_BIN", codexBin)
+	findings := t.TempDir()
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	sess := Session{
+		Ref:         Ref{Owner: "local", Repo: "abc1234", Number: 1},
+		Workspace:   fakeWorkspace(t),
+		Agent:       "codex",
+		FindingsDir: findings,
+	}
+	if err := c.Launch(context.Background(), sess, config.Config{}); err != nil {
+		t.Fatalf("Launch local Codex: %v", err)
+	}
+	args := fake.Last().Args
+	if !argPair(args, "--sandbox", "workspace-write") ||
+		!argPair(args, "--add-dir", findings) {
+		t.Errorf("local Codex sandbox did not scope findings: %v", args)
+	}
+	if !contains(args, localReviewPrompt(findings, false)) {
+		t.Errorf("local Codex prompt missing findings path: %v", args)
+	}
+	// The Codex path must NOT claim the findings dir is the only writable one —
+	// nothing enforces that under `codex exec`, and prose that reads as a
+	// control is worse than none.
+	if contains(args, localReviewPrompt(findings, true)) {
+		t.Errorf("local Codex prompt asserts an unenforced write restriction: %v", args)
+	}
+}
+
+// TestLocalReviewPrompt_OnlyClaimsEnforcementWhenEnforced is the unit-level
+// guard on the same property: the "only directory you may write to" phrasing
+// is reserved for the harness that actually enforces it.
+func TestLocalReviewPrompt_OnlyClaimsEnforcementWhenEnforced(t *testing.T) {
+	const dir = "/tmp/findings-xyz"
+	const claim = "the only directory you may write to"
+
+	enforced := localReviewPrompt(dir, true)
+	if !strings.Contains(enforced, claim) {
+		t.Errorf("enforced prompt should state the restriction as fact: %q", enforced)
+	}
+	unenforced := localReviewPrompt(dir, false)
+	if strings.Contains(unenforced, claim) {
+		t.Errorf("unenforced prompt must not assert an enforcement: %q", unenforced)
+	}
+	for _, p := range []string{enforced, unenforced} {
+		if !strings.Contains(p, dir) {
+			t.Errorf("prompt must name the findings dir: %q", p)
+		}
+	}
+}
+
 func TestLaunchInline_LocalSessionAddsFindingsDirAndPrompt(t *testing.T) {
 	claudeBin := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
@@ -270,7 +431,7 @@ func TestLaunchInline_LocalSessionAddsFindingsDirAndPrompt(t *testing.T) {
 	if !argPair(call.Args, "--add-dir", findingsDir) {
 		t.Errorf("local session argv missing --add-dir %s: %v", findingsDir, call.Args)
 	}
-	if !contains(call.Args, localReviewPrompt(findingsDir)) {
+	if !contains(call.Args, localReviewPrompt(findingsDir, true)) {
 		t.Errorf("local session argv missing localReviewPrompt: %v", call.Args)
 	}
 	if contains(call.Args, reviewPrompt) {
@@ -301,4 +462,144 @@ func TestLaunch_DryRunSessionRefused(t *testing.T) {
 	if err := c.Launch(context.Background(), sess, config.Config{}); err == nil {
 		t.Error("a session with no workspace (dry-run) should be refused")
 	}
+}
+
+// TestLaunchInline_DoesNotInheritCodexModel guards the mirror of launchCodex's
+// existing harness check. The clean-room review dispatches `claude` regardless
+// of the operator's ambient launch profile, and `harness = "codex"` in
+// [launch.defaults] is a plausible config for exactly the users this work
+// targets — so without forcing the harness, a Codex model id reaches
+// `claude --model <that>`.
+func TestLaunchInline_DoesNotInheritCodexModel(t *testing.T) {
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
+
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
+
+	cfg := config.Config{Launch: config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Harness: "codex", Model: "gpt-5-codex"},
+	}}
+	if err := c.Launch(context.Background(), sess, cfg); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	args := fake.Last().Args
+	if contains(args, "gpt-5-codex") {
+		t.Errorf("a Codex model id reached `claude --model`: %v", args)
+	}
+	if !argPair(args, "--model", "opus") {
+		t.Errorf("expected the Claude default model, got: %v", args)
+	}
+}
+
+// TestLaunch_LocalSessionWithoutFindingsDirRefused covers the reload shape:
+// FindingsDir is not persisted, so a breadcrumb-reconstituted local session has
+// it empty. Dispatching would pass --add-dir "" and seed a prompt naming no
+// directory — a silently misconfigured review. It must fail loudly.
+func TestLaunch_LocalSessionWithoutFindingsDirRefused(t *testing.T) {
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
+
+	for _, agent := range []string{"claude", "codex"} {
+		t.Run("agent="+agent, func(t *testing.T) {
+			fake := &exec.FakeRunner{}
+			c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+			// As loadSession produces it: Ref restored, FindingsDir zero.
+			sess := Session{
+				Ref:       Ref{Owner: localOwnerSentinel, Repo: "abc1234", Number: 1},
+				Workspace: fakeWorkspace(t),
+				Agent:     agent,
+			}
+
+			err := c.Launch(context.Background(), sess, config.Config{})
+			if err == nil {
+				t.Fatal("a local session with no findings dir must be refused")
+			}
+			if !strings.Contains(err.Error(), "findings directory") {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if len(fake.Calls) != 0 {
+				t.Errorf("refusal must precede dispatch; got %+v", fake.Calls)
+			}
+		})
+	}
+}
+
+// TestLaunchInline_DropsAmbientAddDir guards the clean room's scoping. The
+// hardening block clears AllowDanger, PermissionMode, Harness and Model — and
+// must also clear AddDir, because launch.Resolve returns the operator's
+// [launch.defaults].add_dir and BuilderArgs emits --add-dir for each. Otherwise
+// `add_dir = ["~/notes"]` hands the reviewer of a REMOTE hostile head a root
+// outside the workspace.
+func TestLaunchInline_DropsAmbientAddDir(t *testing.T) {
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
+
+	cfg := config.Config{Launch: config.LaunchConfig{
+		Defaults: config.LaunchDefaults{AddDir: []string{"/private/notes", "/private/keys"}},
+	}}
+
+	// Remote PR review: no --add-dir at all.
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	prSess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
+	if err := c.Launch(context.Background(), prSess, cfg); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	args := fake.Last().Args
+	for _, leaked := range []string{"/private/notes", "/private/keys"} {
+		if contains(args, leaked) {
+			t.Errorf("ambient add_dir %q reached the clean-room reviewer: %v", leaked, args)
+		}
+	}
+	if contains(args, "--add-dir") {
+		t.Errorf("a remote review must grant no additional root: %v", args)
+	}
+
+	// Local review: exactly one --add-dir, the findings dir.
+	findings := t.TempDir()
+	fake2 := &exec.FakeRunner{}
+	c2 := New(fake2, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	localSess := Session{
+		Ref:         Ref{Owner: localOwnerSentinel, Repo: "abc1234", Number: 1},
+		Workspace:   fakeWorkspace(t),
+		Agent:       "claude",
+		FindingsDir: findings,
+	}
+	if err := c2.Launch(context.Background(), localSess, cfg); err != nil {
+		t.Fatalf("Launch local: %v", err)
+	}
+	args2 := fake2.Last().Args
+	if !argPair(args2, "--add-dir", findings) {
+		t.Errorf("local review lost its findings dir: %v", args2)
+	}
+	for _, leaked := range []string{"/private/notes", "/private/keys"} {
+		if contains(args2, leaked) {
+			t.Errorf("ambient add_dir %q survived into the local review: %v", leaked, args2)
+		}
+	}
+	if got := countArg(args2, "--add-dir"); got != 1 {
+		t.Errorf("expected exactly one --add-dir, got %d: %v", got, args2)
+	}
+}
+
+func countArg(args []string, want string) int {
+	n := 0
+	for _, a := range args {
+		if a == want {
+			n++
+		}
+	}
+	return n
 }

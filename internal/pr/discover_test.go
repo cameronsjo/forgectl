@@ -384,3 +384,45 @@ func TestPrepareMany_PerItemErrorCaptured(t *testing.T) {
 		t.Errorf("results[1] should carry the gh pr view failure, got nil")
 	}
 }
+
+// TestParseSearchPRs_RejectsForgedLocalSentinel is the regression guard for a
+// refusal bypass. `gh search prs` output is hostile input, and a PR owned by a
+// GitHub org literally named "local" would otherwise yield Ref{Owner:"local"}
+// for a REMOTE head — making IsLocal() true, so CheckAgentForRef passes,
+// Prepare fetches the third party's head, and launchCodex takes the local
+// branch (flipping the sandbox from read-only to workspace-write).
+//
+// The sentinel must not be spellable by external data at all, so the row is
+// skipped by the parser and never becomes a Ref.
+func TestParseSearchPRs_RejectsForgedLocalSentinel(t *testing.T) {
+	const forged = `[{"repository":{"nameWithOwner":"local/evil"},"number":7,"title":"t","state":"OPEN"},
+	                 {"repository":{"nameWithOwner":"real/repo"},"number":8,"title":"t","state":"OPEN"}]`
+
+	prs, rawCount, err := parseSearchPRs(forged)
+	if err != nil {
+		t.Fatalf("parseSearchPRs: %v", err)
+	}
+	if rawCount != 2 {
+		t.Errorf("rawCount = %d, want 2 (the pre-filter count must not hide a skipped row)", rawCount)
+	}
+	for _, p := range prs {
+		if p.Ref.IsLocal() {
+			t.Errorf("a discovered remote PR forged the local sentinel: %+v", p.Ref)
+		}
+		if p.Ref.Owner == "local" {
+			t.Errorf("owner %q reached a Ref from gh output", p.Ref.Owner)
+		}
+	}
+	if len(prs) != 1 || prs[0].Ref.Owner != "real" {
+		t.Errorf("expected only the legitimate row to survive; got %+v", prs)
+	}
+}
+
+// TestCheckAgentForRef_ForgedLocalRefStillRefused is the end-to-end statement
+// of the same invariant at the boundary itself.
+func TestCheckAgentForRef_ForgedLocalRefStillRefused(t *testing.T) {
+	forged, err := RefFromParts("local", "evil", "7")
+	if err == nil {
+		t.Fatalf("RefFromParts accepted the reserved sentinel, yielding %+v", forged)
+	}
+}

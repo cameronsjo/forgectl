@@ -62,6 +62,15 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 	if !ref.Complete() {
 		return Session{}, fmt.Errorf("PR reference %+v is missing owner/repo; resolve it first", ref)
 	}
+	// Refuse an unconfinable agent BEFORE the gh round-trip: a remote head is a
+	// third party's content, and there is no reason to fetch and check it out
+	// only to refuse at dispatch. Launch re-checks — this one is the fast fail,
+	// not the authoritative gate. It precedes the DryRun branch deliberately,
+	// so `--dry-run` reports the refusal rather than printing a plan that
+	// cannot run.
+	if err := CheckAgentForRef(opts.Agent, ref); err != nil {
+		return Session{}, err
+	}
 	slog.Debug("Preparing to set up clean-room review.", "ref", ref.String(), "dryRun", opts.DryRun)
 
 	view, err := c.viewPR(ctx, ref)
@@ -138,7 +147,16 @@ func (c *Client) sandboxAndQuarantine(ctx context.Context, repo, ref string, alw
 	if err != nil {
 		return "", fmt.Errorf("sandbox: %w", err)
 	}
-	if _, err := quarantine.New(c.run).Hide(ctx, workspace, quarantine.SuffixQuarantined, quarantine.DefaultTargets, false); err != nil {
+	// Expand the nestable basenames so a PR head carrying `src/AGENTS.md` is
+	// quarantined too, not just the root pair. Teardown recomputes through the
+	// same ExpandTargets call, which is what keeps this reversible.
+	targets, err := quarantine.ExpandTargets(workspace, quarantine.SuffixQuarantined, quarantine.DefaultTargets)
+	if err != nil {
+		// best-effort: don't let cleanup's own error shadow the error already being returned
+		_ = sandbox.Teardown(ctx, c.run, workspace)
+		return "", fmt.Errorf("expand quarantine targets: %w", err)
+	}
+	if _, err := quarantine.New(c.run).Hide(ctx, workspace, quarantine.SuffixQuarantined, targets, false); err != nil {
 		// best-effort: don't let cleanup's own error shadow the error already being returned
 		_ = sandbox.Teardown(ctx, c.run, workspace)
 		return "", fmt.Errorf("quarantine workspace: %w", err)

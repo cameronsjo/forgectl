@@ -33,18 +33,42 @@ func ClaudePath(defaults config.LaunchDefaults) (string, error) {
 	return p, nil
 }
 
+// CodexPath resolves the Codex CLI binary in env-over-config-over-PATH order.
+func CodexPath(defaults config.LaunchDefaults) (string, error) {
+	home, _ := os.UserHomeDir()
+	if env := os.Getenv("FORGECTL_CODEX_BIN"); env != "" {
+		return validateBinary(expandTilde(env, home), "FORGECTL_CODEX_BIN", "codex")
+	}
+	if defaults.CodexBinaryPath != "" {
+		return validateBinary(
+			expandTilde(defaults.CodexBinaryPath, home),
+			"[launch.defaults] codex_binary_path",
+			"codex",
+		)
+	}
+	p, err := exec.LookPath("codex")
+	if err != nil {
+		return "", fmt.Errorf("codex not found on PATH: %w", err)
+	}
+	return p, nil
+}
+
 // validateClaudeBin confirms an explicit claude path exists and is an executable
 // regular file, attributing failures to their source (env var or config key).
 func validateClaudeBin(path, source string) (string, error) {
+	return validateBinary(path, source, "claude")
+}
+
+func validateBinary(path, source, name string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", fmt.Errorf("claude binary from %s is unusable: %w", source, err)
+		return "", fmt.Errorf("%s binary from %s is unusable: %w", name, source, err)
 	}
 	if info.IsDir() {
-		return "", fmt.Errorf("claude binary from %s is a directory: %s", source, path)
+		return "", fmt.Errorf("%s binary from %s is a directory: %s", name, source, path)
 	}
 	if info.Mode().Perm()&0o111 == 0 {
-		return "", fmt.Errorf("claude binary from %s is not executable: %s", source, path)
+		return "", fmt.Errorf("%s binary from %s is not executable: %s", name, source, path)
 	}
 	return path, nil
 }

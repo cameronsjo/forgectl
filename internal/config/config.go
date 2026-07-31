@@ -98,20 +98,27 @@ type LaunchConfig struct {
 // matches (and the floor a matching project overrides). AllowDanger is a pointer
 // so an explicit `false` is distinguishable from "unset".
 type LaunchDefaults struct {
-	Model          string            `toml:"model"`
-	PermissionMode string            `toml:"permission_mode"`
-	AllowDanger    *bool             `toml:"allow_danger"`
-	Env            map[string]string `toml:"env"`
-	AddDir         []string          `toml:"add_dir"`
-	BinaryPath     string            `toml:"binary_path"` // explicit claude path; env FORGECTL_CLAUDE_BIN wins
+	Harness         string            `toml:"harness"` // claude (default) | codex
+	Model           string            `toml:"model"`
+	PermissionMode  string            `toml:"permission_mode"`
+	AllowDanger     *bool             `toml:"allow_danger"`
+	ApprovalPolicy  string            `toml:"approval_policy"` // Codex: untrusted|on-request|never
+	Sandbox         string            `toml:"sandbox"`         // Codex: read-only|workspace-write|danger-full-access
+	Env             map[string]string `toml:"env"`
+	AddDir          []string          `toml:"add_dir"`
+	BinaryPath      string            `toml:"binary_path"`       // explicit claude path; env FORGECTL_CLAUDE_BIN wins
+	CodexBinaryPath string            `toml:"codex_binary_path"` // env FORGECTL_CODEX_BIN wins
 }
 
 // LaunchProject is one [[launch.project]] directory-keyed override block.
 type LaunchProject struct {
 	Match          string            `toml:"match"`
+	Harness        string            `toml:"harness"`
 	Model          string            `toml:"model"`
 	PermissionMode string            `toml:"permission_mode"`
 	AllowDanger    *bool             `toml:"allow_danger"`
+	ApprovalPolicy string            `toml:"approval_policy"`
+	Sandbox        string            `toml:"sandbox"`
 	Env            map[string]string `toml:"env"`
 	AddDir         []string          `toml:"add_dir"`
 }
@@ -184,15 +191,15 @@ func (cc CleanConfig) IsZero() bool {
 // the cross-machine operational concordance (an always-on Postgres holding the
 // session index + runbook full-text index). A zero value means "section
 // absent" — internal/sessions applies its own defaults (metrics/runbooks
-// under ~/.claude, machine from the short hostname) and requires a DSN from
+// under the Cadence state home, machine from the short hostname) and requires a DSN from
 // FORGECTL_SESSIONS_DSN or --dsn. The DSN SHOULD omit the password: pgx
 // resolves it from ~/.pgpass (libpq-compatible), keeping the secret outside
 // the repo and the config file.
 type SessionsConfig struct {
 	DSN         string `toml:"dsn"`          // e.g. postgres://user@host:5433/concordance
 	Machine     string `toml:"machine"`      // provenance label; default: short hostname
-	MetricsDir  string `toml:"metrics_dir"`  // default ~/.claude/metrics
-	RunbooksDir string `toml:"runbooks_dir"` // default ~/.claude/cadence/runbooks
+	MetricsDir  string `toml:"metrics_dir"`  // default Cadence XDG state metrics
+	RunbooksDir string `toml:"runbooks_dir"` // default Cadence XDG state runbooks
 }
 
 // IsZero reports whether the [sessions] section was absent or empty.
@@ -372,8 +379,10 @@ func expandTilde(path, home string) string {
 // isZero reports whether no [launch.defaults] value was set. LaunchDefaults
 // holds maps/slices, so it is not comparable with == — check each field.
 func (d LaunchDefaults) isZero() bool {
-	return d.Model == "" && d.PermissionMode == "" && d.AllowDanger == nil &&
-		len(d.Env) == 0 && len(d.AddDir) == 0 && d.BinaryPath == ""
+	return d.Harness == "" && d.Model == "" && d.PermissionMode == "" &&
+		d.AllowDanger == nil && d.ApprovalPolicy == "" && d.Sandbox == "" &&
+		len(d.Env) == 0 && len(d.AddDir) == 0 && d.BinaryPath == "" &&
+		d.CodexBinaryPath == ""
 }
 
 // Load reads the config file. A missing file is not an error — it yields

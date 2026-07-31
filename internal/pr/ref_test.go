@@ -256,18 +256,32 @@ func TestResolveRef_LocalOwnerReserved(t *testing.T) {
 	})
 }
 
-// TestParseRef_LocalOwnerStillPermitted verifies ParseRef itself stays
-// permissive for owner "local" — the reservation is enforced only in
-// ResolveRef. This is required for breadcrumb reload: validateBreadcrumb
-// calls ParseRef directly on a synthetic local Ref's String(), which contains
-// owner "local".
-func TestParseRef_LocalOwnerStillPermitted(t *testing.T) {
-	got, err := ParseRef("local/abc1234#1")
-	if err != nil {
-		t.Fatalf("ParseRef(\"local/abc1234#1\") unexpected error: %v", err)
+// TestLocalSentinel_ReservedOnEveryExportedRoute is the invariant that makes
+// Ref.IsLocal() unforgeable, and therefore makes the Codex refusal
+// (CheckAgentForRef) and the launchCodex sandbox widening safe to key off it.
+//
+// Only the two unexported routes may spell the sentinel: parseRefAllowingLocal
+// for breadcrumb reload, and newLocalRef for construction.
+func TestLocalSentinel_ReservedOnEveryExportedRoute(t *testing.T) {
+	if got, err := ParseRef("local/abc1234#1"); err == nil {
+		t.Errorf("ParseRef accepted the reserved sentinel: %+v", got)
 	}
-	want := Ref{Owner: "local", Repo: "abc1234", Number: 1}
-	if got != want {
-		t.Errorf("ParseRef(\"local/abc1234#1\") = %+v, want %+v", got, want)
+	if got, err := ParseRef("https://github.com/local/abc1234/pull/1"); err == nil {
+		t.Errorf("ParseRef (URL form) accepted the reserved sentinel: %+v", got)
+	}
+	if got, err := RefFromParts("local", "abc1234", "1"); err == nil {
+		t.Errorf("RefFromParts accepted the reserved sentinel: %+v", got)
+	}
+
+	// The internal round-trip route still works — breadcrumb reload depends on it.
+	got, err := parseRefAllowingLocal("local/abc1234#1")
+	if err != nil {
+		t.Fatalf("parseRefAllowingLocal unexpected error: %v", err)
+	}
+	if expect := (Ref{Owner: "local", Repo: "abc1234", Number: 1}); got != expect {
+		t.Errorf("parseRefAllowingLocal = %+v, want %+v", got, expect)
+	}
+	if !got.IsLocal() {
+		t.Error("a breadcrumb-reloaded local Ref must still report IsLocal()")
 	}
 }

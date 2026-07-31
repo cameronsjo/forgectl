@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
@@ -19,7 +20,7 @@ var (
 func newLaunchDoctorCmd(cfg config.Config) *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
-		Short: "Check claude availability and launch config validity",
+		Short: "Check harness availability and launch config validity",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			out := cmd.OutOrStdout()
@@ -27,11 +28,26 @@ func newLaunchDoctorCmd(cfg config.Config) *cobra.Command {
 
 			lc, src := resolveLaunchConfig(cfg)
 
-			if p, err := launch.ClaudePath(lc.Defaults); err == nil {
-				fmt.Fprintf(out, "%s claude found: %s\n", launchOKMark, p)
+			profile := launch.DefaultsProfile(lc)
+			if cwd, err := os.Getwd(); err == nil {
+				profile = launch.Resolve(lc, cwd)
+			}
+			if err := profile.Validate(); err != nil {
+				healthy = false
+				fmt.Fprintf(out, "%s launch profile invalid: %v\n", launchFailMark, err)
+			}
+			var binaryPath string
+			var binaryErr error
+			if profile.Harness == "codex" {
+				binaryPath, binaryErr = launch.CodexPath(lc.Defaults)
+			} else {
+				binaryPath, binaryErr = launch.ClaudePath(lc.Defaults)
+			}
+			if binaryErr == nil {
+				fmt.Fprintf(out, "%s %s found: %s\n", launchOKMark, profile.Harness, binaryPath)
 			} else {
 				healthy = false
-				fmt.Fprintf(out, "%s %v\n", launchFailMark, err)
+				fmt.Fprintf(out, "%s %v\n", launchFailMark, binaryErr)
 			}
 
 			switch parseErr := config.Validate(); {

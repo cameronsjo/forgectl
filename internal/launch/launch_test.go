@@ -5,6 +5,62 @@ import (
 	"testing"
 )
 
+func TestCodexSessionArgs_TranslatesModes(t *testing.T) {
+	p := Profile{
+		ApprovalPolicy: "on-request",
+		Sandbox:        "workspace-write",
+		AddDir:         []string{"/shared"},
+	}
+	tests := []struct {
+		mode SessionMode
+		want []string
+	}{
+		{
+			New,
+			[]string{"--ask-for-approval", "on-request", "--sandbox", "workspace-write", "--model", "gpt-5", "--add-dir", "/shared"},
+		},
+		{
+			Resume,
+			[]string{"resume", "--last", "--ask-for-approval", "on-request", "--sandbox", "workspace-write", "--model", "gpt-5", "--add-dir", "/shared"},
+		},
+		{
+			Fork,
+			[]string{"fork", "--last", "--ask-for-approval", "on-request", "--sandbox", "workspace-write", "--model", "gpt-5", "--add-dir", "/shared"},
+		},
+	}
+	for _, tc := range tests {
+		if got := CodexSessionArgs(p, "gpt-5", tc.mode); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("CodexSessionArgs(%v) = %v, want %v", tc.mode, got, tc.want)
+		}
+	}
+}
+
+func TestCodexSessionArgs_OmitsEmptyModel(t *testing.T) {
+	p := Profile{ApprovalPolicy: "on-request", Sandbox: "workspace-write"}
+	got := CodexSessionArgs(p, "", New)
+	for _, arg := range got {
+		if arg == "--model" {
+			t.Fatalf("empty model should use the Codex default: %v", got)
+		}
+	}
+}
+
+func TestCodexExecArgs_UsesNativeSandboxAndApprovalConfig(t *testing.T) {
+	p := Profile{
+		Model:          "gpt-5",
+		ApprovalPolicy: "never",
+		Sandbox:        "read-only",
+	}
+	got := CodexExecArgs(p, []string{"review this"})
+	want := []string{
+		"exec", "--config", `approval_policy="never"`,
+		"--sandbox", "read-only", "--model", "gpt-5", "review this",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("CodexExecArgs = %v, want %v", got, want)
+	}
+}
+
 func TestSessionArgs_New_FullPosture(t *testing.T) {
 	p := Profile{PermissionMode: "plan", AllowDanger: true, AddDir: []string{"/x", "/y"}}
 	got := SessionArgs(p, "opus", New)

@@ -31,6 +31,20 @@ func TestModelChoices_Empty_FallsBackToAliases(t *testing.T) {
 	}
 }
 
+func TestModelOptions_CodexUsesNativeDefaultInsteadOfClaudeAliases(t *testing.T) {
+	got := modelOptions(Profile{Harness: "codex"})
+	if len(got) != 1 || got[0].Value != "" {
+		t.Fatalf("Codex default options = %#v", got)
+	}
+}
+
+func TestModelOptions_CodexConfiguredModelCanFallBackToNativeDefault(t *testing.T) {
+	got := modelOptions(Profile{Harness: "codex", Model: "gpt-5.6-sol"})
+	if len(got) != 2 || got[0].Value != "gpt-5.6-sol" || got[1].Value != "" {
+		t.Fatalf("Codex configured options = %#v", got)
+	}
+}
+
 func TestSessionMode(t *testing.T) {
 	cases := []struct {
 		in   string

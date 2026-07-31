@@ -14,9 +14,13 @@ func TestLoad_LaunchSection(t *testing.T) {
 	}
 
 	body := `[launch.defaults]
+harness = "codex"
 model = "opus"
 permission_mode = "plan"
 allow_danger = true
+approval_policy = "never"
+sandbox = "read-only"
+codex_binary_path = "/opt/codex"
 
 [[launch.project]]
 match = "~/Projects/minute"
@@ -39,6 +43,12 @@ add_dir = ["~/Projects/infrastructure/homelab"]
 	}
 	if got.Launch.Defaults.AllowDanger == nil || *got.Launch.Defaults.AllowDanger != true {
 		t.Errorf("Defaults.AllowDanger = %v, want pointer to true", got.Launch.Defaults.AllowDanger)
+	}
+	if got.Launch.Defaults.Harness != "codex" ||
+		got.Launch.Defaults.ApprovalPolicy != "never" ||
+		got.Launch.Defaults.Sandbox != "read-only" ||
+		got.Launch.Defaults.CodexBinaryPath != "/opt/codex" {
+		t.Errorf("Codex launch defaults did not round-trip: %+v", got.Launch.Defaults)
 	}
 	if len(got.Launch.Projects) != 2 {
 		t.Fatalf("len(Projects) = %d, want 2", len(got.Launch.Projects))

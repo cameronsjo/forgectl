@@ -150,3 +150,52 @@ func TestBuildSessionsCommittedWithoutCost(t *testing.T) {
 		t.Errorf("pricing should fall back to sessions.jsonl: %+v", rows[0])
 	}
 }
+
+func TestBuildSessionsPreservesCodexProvenanceAndNullableEstimate(t *testing.T) {
+	verified := ts("2026-07-25T00:00:00Z")
+	ledger := []LedgerRow{{
+		SchemaVersion:     2,
+		Harness:           "codex",
+		SourceFormat:      "codex-rollout-v1",
+		SessionID:         "codex-1",
+		Model:             "gpt-5",
+		EstimatedCostUSD:  f64(0.42),
+		PricingSource:     "openai-api-public",
+		PricingVerifiedAt: verified,
+		LastMessageID:     "codex-v1:4:1:2:3:4:5:10",
+		Tokens: Tokens{
+			Input:           10,
+			CacheRead:       20,
+			Output:          5,
+			ReasoningOutput: 3,
+			Total:           35,
+		},
+	}}
+	rows, invalid := BuildSessions(ledger, RootCostMap(nil), "m")
+	if invalid != 0 || len(rows) != 1 {
+		t.Fatalf("rows=%d invalid=%d", len(rows), invalid)
+	}
+	got := rows[0]
+	if got.Harness != "codex" || got.SchemaVersion != 2 ||
+		got.SourceFormat != "codex-rollout-v1" {
+		t.Errorf("provenance lost: %+v", got)
+	}
+	if got.CostUSD != nil || got.EstimatedCostUSD == nil ||
+		*got.EstimatedCostUSD != 0.42 {
+		t.Errorf("nullable estimate semantics lost: %+v", got)
+	}
+	if got.Tokens.ReasoningOutput != 3 || got.Tokens.Total != 35 {
+		t.Errorf("canonical token fields lost: %+v", got.Tokens)
+	}
+}
+
+func TestBuildSessionsLegacyRowDefaultsToClaude(t *testing.T) {
+	rows, _ := BuildSessions(
+		[]LedgerRow{{SessionID: "legacy", CostUSD: f64(1)}},
+		RootCostMap(nil),
+		"m",
+	)
+	if rows[0].Harness != "claude" || rows[0].SchemaVersion != 0 {
+		t.Errorf("legacy provenance = %+v", rows[0])
+	}
+}
