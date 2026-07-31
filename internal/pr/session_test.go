@@ -55,6 +55,39 @@ func findCall(calls []exec.Call, name string) (exec.Call, bool) {
 	return exec.Call{}, false
 }
 
+// TestPrepare_CodexRefusedBeforeAnyFetch is the fast-fail half of the
+// use-based boundary. Launch is the authoritative gate, but refusing only
+// there would mean a third party's head had already been fetched and checked
+// out before anything objected. The behavioral assertion is that ZERO Runner
+// calls fire — not even the read-only `gh pr view`.
+func TestPrepare_CodexRefusedBeforeAnyFetch(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		fake := ghViewRunner()
+		c := testClient(t, fake)
+		ref := Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}
+
+		_, err := c.Prepare(context.Background(), ref, PrepareOpts{Agent: "codex", DryRun: dryRun})
+		if err == nil {
+			t.Fatalf("Prepare(dryRun=%v) must refuse the Codex agent for a remote head", dryRun)
+		}
+		if len(fake.Calls) != 0 {
+			t.Errorf("dryRun=%v: refusal must precede every Runner call; got %+v", dryRun, fake.Calls)
+		}
+	}
+}
+
+// TestPrepare_ClaudeAgentUnaffected is the control: the refusal must be
+// specific to the unconfinable agent, not a new obstacle on the default path.
+func TestPrepare_ClaudeAgentUnaffected(t *testing.T) {
+	fake := ghViewRunner()
+	c := testClient(t, fake)
+	ref := Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}
+
+	if _, err := c.Prepare(context.Background(), ref, PrepareOpts{Agent: "claude", DryRun: true}); err != nil {
+		t.Fatalf("the default agent must still prepare a remote review: %v", err)
+	}
+}
+
 func TestPrepare_DryRunCreatesNothing(t *testing.T) {
 	fake := ghViewRunner()
 	c := testClient(t, fake)

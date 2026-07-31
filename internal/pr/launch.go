@@ -89,6 +89,12 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) er
 	if sess.Workspace == "" {
 		return fmt.Errorf("cannot launch: session has no workspace (dry-run?)")
 	}
+	// Authoritative use-based guard. Prepare refuses the same pairing earlier so
+	// nothing is fetched, but this is the one every route reaches — including a
+	// Session reconstituted from a breadcrumb, which never re-enters Prepare.
+	if err := CheckAgentForRef(sess.Agent, sess.Ref); err != nil {
+		return err
+	}
 	switch path := LaunchPathFor(sess.Agent); path {
 	case InlineSeeded:
 		return c.launchInline(ctx, sess, cfg)

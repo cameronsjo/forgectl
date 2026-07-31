@@ -330,16 +330,25 @@ Resolution expands `~`, picks the `[[launch.project]]` whose `match` is the **lo
 `FORGECTL_CODEX_BIN` / `codex_binary_path` / `codex`.
 
 Codex modes translate to `codex`, `codex resume --last`, `codex fork --last`,
-and `codex exec`. Clean-room reviews accept `--agent codex` and use a native
-read-only or findings-scoped workspace sandbox.
+and `codex exec`. Clean-room reviews accept `--agent codex` for **local review
+only** — `forgectl pr local`, where the reviewed tree is your own.
 
-> **`--agent codex` is not equivalent to the default `--agent claude` review.**
-> The Claude clean room confines the reviewer to a deny-by-default allowlist
-> with no command-execution primitive. Codex's `--sandbox read-only` scopes
-> writes and network egress but not *which commands run*, so the Codex reviewer
-> can run arbitrary shell and read the whole host filesystem — and anything it
-> reads reaches the model provider as tool output. Prefer `--agent claude` for
-> untrusted third-party PR heads.
+> **`--agent codex` is refused for a remote PR head, by design.** The Claude
+> clean room confines the reviewer to a deny-by-default allowlist with no
+> command-execution primitive. Codex's `--sandbox read-only` scopes writes and
+> network egress but not *which commands run*, so a prompt injection in a
+> third-party diff could reach a shell with read access to your whole home
+> directory — and anything read reaches the model provider as tool output.
+> `codex exec` exposes no way to confine that: it accepts no
+> `--permission-profile`, and `shell_environment_policy.inherit=none` is
+> honored by `codex sandbox` but ignored by `codex exec` (measured on
+> codex-cli 0.146.0).
+>
+> So the boundary is drawn by **use**, not by sandbox. A remote head is someone
+> else's content and the Codex agent is refused there — enforced in the
+> dispatch path, before anything is fetched. Your own working tree cannot be
+> hostile to you, so `forgectl pr local --agent codex` stays fully available.
+> Use `--agent claude` (the default) for PR review.
 
 **Zero-migration grace** — if `config.toml` has no `[launch]` section, forgectl still reads a legacy `~/.config/claunch/claunch.conf` (the `[launch]` section is the same `[defaults]` + `[[project]]` shape, just namespaced). `forgectl launch init` writes an empty native section for the one-time cutover; `forgectl launch init --from-claunch` migrates your existing legacy profiles into it, so `launch` stops falling back to the legacy file. Both refuse to overwrite an existing `[launch]` section.
 

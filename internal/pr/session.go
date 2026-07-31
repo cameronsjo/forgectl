@@ -62,6 +62,15 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 	if !ref.Complete() {
 		return Session{}, fmt.Errorf("PR reference %+v is missing owner/repo; resolve it first", ref)
 	}
+	// Refuse an unconfinable agent BEFORE the gh round-trip: a remote head is a
+	// third party's content, and there is no reason to fetch and check it out
+	// only to refuse at dispatch. Launch re-checks — this one is the fast fail,
+	// not the authoritative gate. It precedes the DryRun branch deliberately,
+	// so `--dry-run` reports the refusal rather than printing a plan that
+	// cannot run.
+	if err := CheckAgentForRef(opts.Agent, ref); err != nil {
+		return Session{}, err
+	}
 	slog.Debug("Preparing to set up clean-room review.", "ref", ref.String(), "dryRun", opts.DryRun)
 
 	view, err := c.viewPR(ctx, ref)

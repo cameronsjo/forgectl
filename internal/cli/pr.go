@@ -113,7 +113,7 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&agent, "agent", "", "review agent (env "+prAgentEnv+"; default: claude)")
+	cmd.Flags().StringVar(&agent, "agent", "", "review agent (env "+prAgentEnv+"; default: claude; codex is local-review only)")
 	cmd.Flags().BoolVar(&headless, "headless", false, "stage only; never show the interactive approval gate or auto-post")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve and print the plan without creating anything")
 

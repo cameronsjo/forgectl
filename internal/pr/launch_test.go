@@ -248,7 +248,16 @@ func TestLaunch_AgentBNotWired(t *testing.T) {
 	}
 }
 
-func TestLaunch_CodexExecUsesCompensatingSandbox(t *testing.T) {
+// TestLaunch_CodexRefusedForRemotePRHead is the SECURITY INVARIANT the
+// use-based boundary rests on. A remote PR head is a third party's content,
+// and the Codex agent cannot be confined on `codex exec`, so dispatch must not
+// happen at all — the assertion is on the behavior (zero Runner calls), not
+// the message, because a well-worded error that still launched would be the
+// whole bug.
+//
+// This test replaces one that asserted the opposite (that a remote Codex
+// review dispatched with a compensating sandbox). That posture was the finding.
+func TestLaunch_CodexRefusedForRemotePRHead(t *testing.T) {
 	codexBin := filepath.Join(t.TempDir(), "codex")
 	if err := os.WriteFile(codexBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("write fake codex: %v", err)
@@ -257,22 +266,81 @@ func TestLaunch_CodexExecUsesCompensatingSandbox(t *testing.T) {
 
 	fake := &exec.FakeRunner{}
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
-	ws := fakeWorkspace(t)
 	sess := Session{
 		Ref:       Ref{Owner: "o", Repo: "r", Number: 42},
-		Workspace: ws,
+		Workspace: fakeWorkspace(t),
 		Agent:     "codex",
 	}
+
+	err := c.Launch(context.Background(), sess, config.Config{})
+	if err == nil {
+		t.Fatal("Codex must be refused for a remote PR head")
+	}
+	// The behavioral assertion: nothing was dispatched.
+	if len(fake.Calls) != 0 {
+		t.Errorf("a refused agent must issue ZERO Runner calls; got %+v", fake.Calls)
+	}
+	// The message must be actionable, naming the reason and the way forward.
+	for _, want := range []string{"remote PR head", "not", "which commands run", "--agent claude", "pr local"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal message missing %q: %v", want, err)
+		}
+	}
+}
+
+// TestCheckAgentForRef_BoundaryIsOwnershipNotSeverity walks the full matrix.
+// The Codex agent is refused only where the reviewed content belongs to
+// someone else; every other pairing is untouched, including the local Codex
+// review the ruling deliberately keeps available.
+func TestCheckAgentForRef_BoundaryIsOwnershipNotSeverity(t *testing.T) {
+	remote := Ref{Owner: "o", Repo: "r", Number: 42}
+	local := Ref{Owner: localOwnerSentinel, Repo: "abc1234", Number: 1}
+
+	for _, tc := range []struct {
+		agent      string
+		ref        Ref
+		wantRefuse bool
+	}{
+		{"codex", remote, true},
+		{"codex", local, false}, // the operator's own tree cannot be hostile to them
+		{"claude", remote, false},
+		{"claude", local, false},
+		{"", remote, false}, // default → agent A
+		{"", local, false},
+		{"escalation", remote, false}, // unwired, but not THIS refusal's business
+	} {
+		err := CheckAgentForRef(tc.agent, tc.ref)
+		if got := err != nil; got != tc.wantRefuse {
+			t.Errorf("CheckAgentForRef(%q, local=%v) refused = %v, want %v (err: %v)",
+				tc.agent, tc.ref.IsLocal(), got, tc.wantRefuse, err)
+		}
+	}
+}
+
+// TestLaunch_CodexStillDispatchesForLocalReview is the other direction of the
+// ruling: confining by use must not disable the use that is safe.
+func TestLaunch_CodexStillDispatchesForLocalReview(t *testing.T) {
+	codexBin := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(codexBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("FORGECTL_CODEX_BIN", codexBin)
+
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	sess := Session{
+		Ref:         Ref{Owner: localOwnerSentinel, Repo: "abc1234", Number: 1},
+		Workspace:   fakeWorkspace(t),
+		Agent:       "codex",
+		FindingsDir: t.TempDir(),
+	}
+
 	if err := c.Launch(context.Background(), sess, config.Config{}); err != nil {
-		t.Fatalf("Launch Codex: %v", err)
+		t.Fatalf("local Codex review must still dispatch: %v", err)
 	}
 	args := fake.Last().Args
 	if !contains(args, codexBin) || !contains(args, "exec") {
-		t.Errorf("Codex review missing codex exec: %v", args)
-	}
-	if !argPair(args, "--sandbox", "read-only") ||
-		!argPair(args, "--config", `approval_policy="never"`) {
-		t.Errorf("Codex review is not read-only/never-approve: %v", args)
+		t.Errorf("local Codex review did not reach `codex exec`: %v", args)
 	}
 }
 
