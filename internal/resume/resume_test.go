@@ -889,3 +889,52 @@ func TestSlugify(t *testing.T) {
 		}
 	}
 }
+
+// TestScan_ResumableSortsAboveLive is the ordering fix for the picker's worst
+// habit: recency alone put running sessions on top, and a running session
+// cannot be continued — so the list led with rows that answer a selection by
+// refusing it. Live rows stay in the list (--fork makes them actionable), just
+// below everything actually resumable.
+func TestScan_ResumableSortsAboveLive(t *testing.T) {
+	f := newFixture(t)
+	pinPids(t, map[int]bool{501: true, 502: true})
+	now := time.Now()
+
+	// The two live sessions are the MOST recent — the realistic case.
+	const liveNewest = "aaaa0000-0000-0000-0000-000000000001"
+	const liveOlder = "aaaa0000-0000-0000-0000-000000000002"
+	const deadNewer = "bbbb0000-0000-0000-0000-000000000003"
+	const deadOldest = "bbbb0000-0000-0000-0000-000000000004"
+
+	f.history(liveNewest, "/repo/live-a", "p", now)
+	f.history(liveOlder, "/repo/live-b", "p", now.Add(-time.Minute))
+	f.history(deadNewer, "/repo/dead-a", "p", now.Add(-time.Hour))
+	f.history(deadOldest, "/repo/dead-b", "p", now.Add(-2*time.Hour))
+	f.registryFile(501, liveNewest, "/repo/live-a", "live-a")
+	f.registryFile(502, liveOlder, "/repo/live-b", "live-b")
+
+	got, err := Scan(f.Paths, Opts{IncludeLive: true})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("Scan returned %d sessions, want 4", len(got))
+	}
+	// The two resumable rows come first, in recency order.
+	if got[0].ID != deadNewer || got[1].ID != deadOldest {
+		t.Errorf("resumable rows = %s, %s; want %s, %s (newest first)", got[0].ID, got[1].ID, deadNewer, deadOldest)
+	}
+	// The two live rows come last. Their order between themselves is NOT
+	// asserted: a live session's LastActive is widened by the registry's
+	// updatedAt, so it reflects current process activity rather than the last
+	// recorded prompt — which is the point of that widening.
+	live := map[string]bool{got[2].ID: true, got[3].ID: true}
+	if !live[liveNewest] || !live[liveOlder] {
+		t.Errorf("live rows = %s, %s; want the two running sessions last", got[2].ID, got[3].ID)
+	}
+	for i, s := range got {
+		if s.Live != (i >= 2) {
+			t.Errorf("row %d live=%v — every resumable row must sort above every live one", i, s.Live)
+		}
+	}
+}

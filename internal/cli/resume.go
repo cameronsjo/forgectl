@@ -8,6 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 
@@ -164,19 +167,34 @@ func runResume(cmd *cobra.Command, cfg config.Config, filter string, limit int, 
 // pickSession runs the single-select. Options are keyed by session id so a
 // selection round-trips unambiguously (the same reason pickPRs keys on a ref).
 func pickSession(sessions []resume.Session) (resume.Session, error) {
+	w := layoutFor(sessions, terminalWidth())
 	opts := make([]huh.Option[string], len(sessions))
 	for i, s := range sessions {
-		opts[i] = huh.NewOption(sessionRow(s), s.ID)
+		label := sessionRowWidth(s, w)
+		// A running session cannot be continued, only forked — dimming says
+		// so before the selection does, the same way `pr pick` dims a PR it
+		// will skip.
+		if s.Live {
+			label = prDimStyle.Render(label)
+		}
+		opts[i] = huh.NewOption(label, s.ID)
 	}
+
+	// huh v1.0.0 binds Quit to ctrl+c ALONE (keymap.go:109), so Esc is
+	// unbound and does nothing — the picker reads as stuck to anyone who
+	// reaches for the conventional cancel key. Bind it.
+	km := huh.NewDefaultKeyMap()
+	km.Quit = key.NewBinding(key.WithKeys("ctrl+c", "esc"), key.WithHelp("esc", "cancel"))
+
 	var chosen string
 	err := huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
-				Title("Recent sessions — enter to resume").
+				Title("Recent sessions — enter to resume, esc to cancel").
 				Options(opts...).
 				Value(&chosen),
 		),
-	).Run()
+	).WithKeyMap(km).Run()
 	if err != nil {
 		return resume.Session{}, err
 	}
@@ -188,17 +206,83 @@ func pickSession(sessions []resume.Session) (resume.Session, error) {
 	return resume.Session{}, fmt.Errorf("no session selected")
 }
 
-// sessionRow renders one picker row. Every field is disk-sourced, so every
-// field goes through sanitizeTerm.
+// rowLayout is one render's column widths, in runes.
+type rowLayout struct{ name, repo, branch int }
+
+// Column bounds. The floors keep a column identifiable when space is tight;
+// the caps stop one long value from starving the others on a wide terminal.
+const (
+	minNameCol, maxNameCol     = 16, 52
+	minRepoCol, maxRepoCol     = 8, 28
+	minBranchCol, maxBranchCol = 6, 24
+	// fallbackWidth is the assumed terminal width when the real one is
+	// unknowable — piped output, a closed tty, a CI log.
+	fallbackWidth = 100
+	// tailWidth reserves room for the relative time plus the widest
+	// trailing annotation ("  (running, pid 123456)").
+	tailWidth = 32
+)
+
+// defaultLayout is what a non-terminal render uses: stable widths, so piped
+// output does not reflow depending on who is watching.
+var defaultLayout = rowLayout{name: 28, repo: 22, branch: 18}
+
+// terminalWidth reports the usable output width, or 0 when stdout is not a
+// terminal (piped, redirected, captured by a test).
+func terminalWidth() int {
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		return 0
+	}
+	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || w <= 0 {
+		return 0
+	}
+	return w
+}
+
+// layoutFor sizes the columns to the CONTENT and then to the TERMINAL.
+//
+// Fixed widths were wrong in both directions at once: they clipped names that
+// would have fit on a wide terminal while padding the branch column to 18, so
+// a list where almost every branch is "main" spent a quarter of the row on
+// whitespace. Repo and branch are therefore measured against what is actually
+// in them, and the name — the column that identifies the row — takes whatever
+// is left over.
+func layoutFor(sessions []resume.Session, width int) rowLayout {
+	if width <= 0 {
+		return defaultLayout
+	}
+	l := rowLayout{name: minNameCol, repo: minRepoCol, branch: minBranchCol}
+	for _, s := range sessions {
+		l.repo = max(l.repo, runeLen(s.Repo))
+		l.branch = max(l.branch, runeLen(s.Branch))
+	}
+	l.repo = min(l.repo, maxRepoCol)
+	l.branch = min(l.branch, maxBranchCol)
+
+	// Three single-space separators between four columns.
+	spare := width - (l.repo + l.branch + tailWidth + 3)
+	l.name = min(max(spare, minNameCol), maxNameCol)
+	return l
+}
+
+// sessionRow renders one picker row at the default layout — the shape tests
+// and non-terminal callers get.
 func sessionRow(s resume.Session) string {
+	return sessionRowWidth(s, defaultLayout)
+}
+
+// sessionRowWidth renders one row at an explicit layout. Every field is
+// disk-sourced, so every field goes through sanitizeTerm.
+func sessionRowWidth(s resume.Session, l rowLayout) string {
 	name := s.Name
 	if name == "" {
 		name = s.ID
 	}
 	row := fmt.Sprintf("%s %s %s %s",
-		cell(sanitizeTerm(name), 28),
-		cell(sanitizeTerm(s.Repo), 22),
-		cell(sanitizeTerm(s.Branch), 18),
+		cell(sanitizeTerm(name), l.name),
+		cell(sanitizeTerm(s.Repo), l.repo),
+		cell(sanitizeTerm(s.Branch), l.branch),
 		relativeTime(s.LastActive))
 	switch {
 	case s.Live:
@@ -208,6 +292,9 @@ func sessionRow(s resume.Session) string {
 	}
 	return row
 }
+
+// runeLen counts display cells conservatively — runes, matching cell().
+func runeLen(s string) int { return len([]rune(s)) }
 
 // resumeSession restores the session's tasks, moves into its directory, and
 // replaces this process with claude.
@@ -436,8 +523,11 @@ func printSessions(out, errOut io.Writer, sessions []resume.Session, asJSON bool
 		fmt.Fprintln(out, "no recent sessions")
 		return nil
 	}
+	// Same layout rule as the picker: sized to the terminal when there is
+	// one, fixed when the output is piped so a consumer sees stable columns.
+	l := layoutFor(sessions, terminalWidth())
 	for _, s := range sessions {
-		fmt.Fprintln(out, sessionRow(s))
+		fmt.Fprintln(out, sessionRowWidth(s, l))
 		fmt.Fprintf(out, "\t%s\n", sanitizeTerm(s.Cwd))
 		if s.LastPrompt != "" {
 			fmt.Fprintf(out, "\t%s\n", sanitizeTerm(s.LastPrompt))

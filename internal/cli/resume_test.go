@@ -285,3 +285,70 @@ func TestCell_WidthIsRunesNotBytes(t *testing.T) {
 		}
 	}
 }
+
+// TestLayoutFor_SizesToContentAndTerminal covers the two directions the old
+// fixed widths got wrong at once: clipping names that would fit on a wide
+// terminal, while padding the branch column to 18 so a list of "main" spent a
+// quarter of the row on whitespace.
+func TestLayoutFor_SizesToContentAndTerminal(t *testing.T) {
+	sessions := []resume.Session{
+		{Repo: "forgectl", Branch: "main"},
+		{Repo: "claude-configurations", Branch: "main"},
+	}
+
+	t.Run("non-terminal keeps stable widths", func(t *testing.T) {
+		if got := layoutFor(sessions, 0); got != defaultLayout {
+			t.Errorf("layoutFor(width 0) = %+v, want the fixed default %+v — piped output must not reflow", got, defaultLayout)
+		}
+	})
+
+	t.Run("branch column shrinks to its content", func(t *testing.T) {
+		got := layoutFor(sessions, 160)
+		if got.branch > minBranchCol+1 {
+			t.Errorf("branch column = %d for content %q; it should not pad to the old fixed 18", got.branch, "main")
+		}
+	})
+
+	t.Run("name column takes the slack on a wide terminal", func(t *testing.T) {
+		narrow := layoutFor(sessions, 80)
+		wide := layoutFor(sessions, 200)
+		if wide.name <= narrow.name {
+			t.Errorf("name column did not grow with the terminal: 80→%d, 200→%d", narrow.name, wide.name)
+		}
+		if wide.name > maxNameCol {
+			t.Errorf("name column = %d, want it capped at %d", wide.name, maxNameCol)
+		}
+	})
+
+	t.Run("floors hold on a very narrow terminal", func(t *testing.T) {
+		got := layoutFor(sessions, 20)
+		if got.name < minNameCol || got.repo < minRepoCol || got.branch < minBranchCol {
+			t.Errorf("layout %+v fell below its floors on a 20-column terminal", got)
+		}
+	})
+
+	t.Run("a long repo does not starve the name", func(t *testing.T) {
+		long := []resume.Session{{Repo: strings.Repeat("r", 120), Branch: strings.Repeat("b", 120)}}
+		got := layoutFor(long, 120)
+		if got.repo > maxRepoCol || got.branch > maxBranchCol {
+			t.Errorf("layout %+v exceeded its caps", got)
+		}
+		if got.name < minNameCol {
+			t.Errorf("name column starved to %d by long repo/branch values", got.name)
+		}
+	})
+}
+
+// TestSessionRowWidth_RespectsLayout checks the renderer actually honors the
+// computed widths rather than the constants it used to hardcode.
+func TestSessionRowWidth_RespectsLayout(t *testing.T) {
+	s := resume.Session{Name: "n", Repo: "r", Branch: "b", LastActive: time.Now()}
+	narrow := sessionRowWidth(s, rowLayout{name: 10, repo: 6, branch: 4})
+	wide := sessionRowWidth(s, rowLayout{name: 40, repo: 20, branch: 12})
+	if len(narrow) >= len(wide) {
+		t.Errorf("row did not widen with the layout: narrow=%q wide=%q", narrow, wide)
+	}
+	if !strings.HasPrefix(narrow, "n         ") {
+		t.Errorf("narrow row = %q, want the name padded to 10", narrow)
+	}
+}

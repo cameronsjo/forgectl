@@ -225,7 +225,20 @@ func Scan(p Paths, opts Opts) ([]Session, error) {
 		sessions = append(sessions, s)
 	}
 
+	// Resumable first, then newest first within each group.
+	//
+	// Recency alone put the wrong rows on top. The sessions you were most
+	// recently in are usually the ones still running, and a running session
+	// cannot be continued — so a purely chronological list led with entries
+	// that answer a selection by refusing it (measured: four of the top six).
+	// Live rows still belong in the list, because --fork makes them actionable
+	// and dropping one would turn "that session is running" into a silent "no
+	// session matched" — they just do not belong above everything you can
+	// actually resume.
 	sort.Slice(sessions, func(i, j int) bool {
+		if sessions[i].Live != sessions[j].Live {
+			return !sessions[i].Live
+		}
 		if sessions[i].LastActive.Equal(sessions[j].LastActive) {
 			return sessions[i].ID < sessions[j].ID
 		}
