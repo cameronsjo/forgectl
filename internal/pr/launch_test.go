@@ -281,10 +281,18 @@ func TestLaunch_CodexRefusedForRemotePRHead(t *testing.T) {
 		t.Errorf("a refused agent must issue ZERO Runner calls; got %+v", fake.Calls)
 	}
 	// The message must be actionable, naming the reason and the way forward.
-	for _, want := range []string{"remote PR head", "not", "which commands run", "--agent claude", "pr local"} {
+	for _, want := range []string{"remote PR head", "not", "which commands run", "--agent claude"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal message missing %q: %v", want, err)
 		}
+	}
+	// It must NOT offer `pr local` as the way to review THIS PR. Doing so
+	// routes the operator around the control: `pr local` pointed at the
+	// clean-room workspace reviews the same hostile head with the same
+	// unconfined agent. (rejectCleanRoomPath enforces that separately; the
+	// message must not advertise the attempt either.)
+	if strings.Contains(err.Error(), "pr local") {
+		t.Errorf("refusal message routes the operator around the control: %v", err)
 	}
 }
 

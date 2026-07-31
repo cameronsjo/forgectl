@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/sandbox"
@@ -40,6 +41,9 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 		return Session{}, fmt.Errorf("resolve path %q: %w", path, err)
 	}
 	if err := sandbox.RejectOptionLike("path", absPath); err != nil {
+		return Session{}, err
+	}
+	if err := rejectCleanRoomPath(absPath); err != nil {
 		return Session{}, err
 	}
 	slog.Debug("Preparing local clean-room review.", "path", absPath, "dryRun", opts.DryRun)
@@ -137,6 +141,44 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 
 	slog.Info("Successfully prepared local clean-room review.", "ref", ref.String(), "workspace", workspace, "findings", findingsDir)
 	return sess, nil
+}
+
+// rejectCleanRoomPath refuses a `pr local` path that points into a forgectl
+// clean-room workspace.
+//
+// `pr local` exists to review the operator's OWN tree, and that premise is what
+// justifies keeping the unconfinable Codex reviewer available there. But the
+// verb takes an arbitrary path with no provenance test, so without this guard
+// the refusal of `--agent codex` on a remote head is a speed bump rather than a
+// boundary: run `forgectl pr <ref>` (which is allowed — it dispatches Claude),
+// then point `pr local --agent codex` at the workspace that now holds the
+// third party's head. Same hostile diff, same unconfined reviewer, one extra
+// command.
+//
+// The check mirrors validateWorkspace's: under the OS temp dir AND carrying the
+// sandbox prefix. Both halves are required — a user's own repo living somewhere
+// under the temp dir is legitimate, and the prefix alone would reject a
+// same-named directory anywhere on disk.
+func rejectCleanRoomPath(absPath string) error {
+	real := absPath
+	if r, err := filepath.EvalSymlinks(absPath); err == nil {
+		real = r
+	}
+	if !sandbox.WithinWorkspace(osTempDir(), real) {
+		return nil
+	}
+	for dir := filepath.Clean(real); ; dir = filepath.Dir(dir) {
+		if strings.HasPrefix(filepath.Base(dir), tempPrefix) {
+			return fmt.Errorf(
+				"refusing to review %q: it is inside a forgectl clean-room workspace (%q), which holds content fetched from somewhere else. "+
+					"`pr local` reviews your own working tree — point it at your repo, not at a review sandbox",
+				absPath, dir,
+			)
+		}
+		if parent := filepath.Dir(dir); parent == dir {
+			return nil
+		}
+	}
 }
 
 // teardownLocalArtifacts is PrepareLocal's failure-path cleanup: best-effort

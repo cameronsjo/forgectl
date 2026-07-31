@@ -289,3 +289,55 @@ func TestLocalProfile_FindingsDirIsOnlyWritablePath(t *testing.T) {
 		t.Error(`deny list must not contain bare "Write" — it would clobber the scoped Write(findingsDir/**) allow grant`)
 	}
 }
+
+// TestPrepareLocal_RefusesCleanRoomWorkspace closes the laundering path around
+// the Codex refusal: `forgectl pr <ref>` (allowed, dispatches Claude) leaves a
+// workspace holding the third party's head, and `pr local --agent codex`
+// pointed at that workspace would review the same hostile diff with the
+// unconfined reviewer. `pr local` means the operator's own tree.
+func TestPrepareLocal_RefusesCleanRoomWorkspace(t *testing.T) {
+	cleanRoom, err := os.MkdirTemp("", "forgectl-workflow-*")
+	if err != nil {
+		t.Fatalf("make fake clean room: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(cleanRoom) })
+
+	for _, tc := range []struct{ name, path string }{
+		{"the workspace itself", cleanRoom},
+		{"a subdirectory of it", filepath.Join(cleanRoom, "src")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.MkdirAll(tc.path, 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			fake := localGitRunner()
+			c := testClient(t, fake)
+
+			_, err := c.PrepareLocal(context.Background(), tc.path, PrepareLocalOpts{Agent: "codex"})
+			if err == nil {
+				t.Fatal("PrepareLocal must refuse a path inside a clean-room workspace")
+			}
+			if !strings.Contains(err.Error(), "clean-room workspace") {
+				t.Errorf("unexpected error: %v", err)
+			}
+			// Behavioral: the refusal precedes every Runner call.
+			if len(fake.Calls) != 0 {
+				t.Errorf("refusal must precede any git call; got %+v", fake.Calls)
+			}
+		})
+	}
+}
+
+// TestPrepareLocal_AllowsOrdinaryPaths is the control — the guard must be
+// specific to forgectl's own sandboxes, not a blanket ban on temp dirs (t.TempDir
+// itself lives under the OS temp root).
+func TestPrepareLocal_AllowsOrdinaryPaths(t *testing.T) {
+	c := testClient(t, localGitRunner())
+	sess, err := c.PrepareLocal(context.Background(), t.TempDir(), PrepareLocalOpts{Agent: "codex", DryRun: true})
+	if err != nil {
+		t.Fatalf("an ordinary path must still be reviewable: %v", err)
+	}
+	if !sess.Ref.IsLocal() {
+		t.Errorf("expected a local ref, got %+v", sess.Ref)
+	}
+}

@@ -102,6 +102,18 @@ func LaunchPathFor(agent string) LaunchPath {
 //     hostile to its own author, so there is nothing for the confinement to
 //     protect against and the Codex agent stays fully available.
 //
+// That justification is about content OWNERSHIP, while this function tests how
+// the Ref was CONSTRUCTED — two different predicates, and they only coincide
+// because two other guards hold them together. Both are load-bearing:
+//
+//   - localOwnerSentinel is unforgeable (ref.go), so external data cannot make
+//     a remote head present as local.
+//   - rejectCleanRoomPath (local.go) refuses a `pr local` path inside a
+//     forgectl workspace, so the operator cannot launder a fetched hostile
+//     head into "their own tree" by pointing local review at the sandbox.
+//
+// Weaken either and this refusal degrades from a boundary to a speed bump.
+//
 // Returns nil when the pairing is allowed. Called at both ends of the pipeline
 // — Prepare, so an operator is stopped before a third party's head is ever
 // fetched, and Launch, which is authoritative because it also covers a session
@@ -114,9 +126,8 @@ func CheckAgentForRef(agent string, ref Ref) error {
 		"agent %q cannot review a remote PR head: Codex's sandbox scopes filesystem "+
 			"and network access but NOT which commands run, so a prompt injection in a "+
 			"third-party diff could reach a shell with read access to your whole home "+
-			"directory — and `codex exec` exposes no way to confine that. Use `--agent "+
-			"claude` (the default) for PR review; `--agent codex` stays available for "+
-			"`forgectl pr local`, where the reviewed tree is your own",
+			"directory — and `codex exec` exposes no way to confine that. Review this PR "+
+			"with `--agent claude` (the default), whose allowlist grants no shell at all",
 		agent,
 	)
 }
