@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -269,6 +270,82 @@ func firstID(s []Session) string {
 		return ""
 	}
 	return s[0].ID
+}
+
+// TestScan_FilterFindsBeyondThePrefilterPool covers a false negative that read
+// as certainty: the pool is cut before enrichment and filtering, so a session
+// matching the filter but ranking outside the top Limit*prefilterFactor by
+// global recency was not "shown lower" — it was absent, and the caller reported
+// "no session matched".
+func TestScan_FilterFindsBeyondThePrefilterPool(t *testing.T) {
+	f := newFixture(t)
+	base := time.Now()
+	// The wanted session is the OLDEST of many, well past any pool bound.
+	const wantedID = "beef0000-0000-0000-0000-000000000001"
+	f.history(wantedID, "/work/needle", "the one", base.Add(-500*time.Hour))
+	for i := range 40 {
+		id := "cafe0000-0000-0000-0000-0000000000" + string(rune('a'+i/16)) + string(rune('a'+i%16))
+		f.history(id, "/work/haystack", "noise", base.Add(-time.Duration(i)*time.Minute))
+	}
+
+	got, err := Scan(f.Paths, Opts{Filter: "needle", Limit: 2})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != wantedID {
+		t.Fatalf("filter found %d session(s) (%q), want the one outside the pool — a bounded miss must not read as absent",
+			len(got), firstID(got))
+	}
+}
+
+// TestLiveEntries_IsDeterministic guards a coin flip with durable consequences:
+// Snapshot awards a contested team task directory to whichever live session it
+// processes first, and that claim is sticky forever. Ranging over a map made
+// the winner depend on Go's iteration order rather than on the sessions.
+func TestLiveEntries_IsDeterministic(t *testing.T) {
+	f := newFixture(t)
+	pinPids(t, map[int]bool{101: true, 102: true, 103: true})
+	f.registryFile(101, "cccc0000-0000-0000-0000-000000000003", "/repo/c", "c")
+	f.registryFile(102, "aaaa0000-0000-0000-0000-000000000001", "/repo/a", "a")
+	f.registryFile(103, "bbbb0000-0000-0000-0000-000000000002", "/repo/b", "b")
+
+	var first []string
+	for range 8 {
+		var ids []string
+		for _, e := range LiveEntries(f.Paths) {
+			ids = append(ids, e.SessionID)
+		}
+		if first == nil {
+			first = ids
+			continue
+		}
+		if !slices.Equal(ids, first) {
+			t.Fatalf("LiveEntries order varies between calls: %v vs %v", ids, first)
+		}
+	}
+	if !slices.IsSorted(first) {
+		t.Errorf("LiveEntries = %v, want it sorted by session id", first)
+	}
+}
+
+// TestCaptureState reports the two numbers doctor uses to detect an unwired
+// Stop hook — the only machine-visible signature of a capture that never ran.
+func TestCaptureState(t *testing.T) {
+	f := newFixture(t)
+	pinPids(t, map[int]bool{201: true})
+	f.registryFile(201, "aaaa1111-0000-0000-0000-000000000001", "/repo/a", "a")
+
+	live, stored := CaptureState(f.Paths)
+	if live != 1 || stored != 0 {
+		t.Fatalf("CaptureState = (%d live, %d stored), want (1, 0)", live, stored)
+	}
+
+	if res := Snapshot(f.Paths, time.Now()); len(res.Errs) != 0 {
+		t.Fatalf("Snapshot: %v", res.Errs)
+	}
+	if live, stored = CaptureState(f.Paths); live != 1 || stored != 1 {
+		t.Errorf("CaptureState after a snapshot = (%d, %d), want (1, 1)", live, stored)
+	}
 }
 
 // TestScan_Filter checks the substring match the one-hit shortcut depends on.

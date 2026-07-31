@@ -279,6 +279,22 @@ func checkResumeTasks(d Deps) Check {
 	if err != nil {
 		return Check{Name: name, State: StateSkip, Detail: err.Error()}
 	}
+	// Capture wiring comes first, because it is the failure that actually
+	// costs data. `resume snapshot` is deliberately not auto-installed and
+	// always exits 0 (it runs on a Stop hook and must never fail a turn), so
+	// a hook that is missing, misspelled, or wired into the wrong settings
+	// file is INDISTINGUISHABLE from one that works — until a session exits
+	// and its tasks are gone. Live sessions with an empty store is the one
+	// machine-detectable signature of that, so it is reported here rather
+	// than discovered by losing something.
+	if live, store := resume.CaptureState(paths); live > 0 && store == 0 {
+		return Check{
+			Name: name, State: StateWarn,
+			Detail: fmt.Sprintf("%d live session(s) but no snapshots stored", live),
+			Hint:   "`forgectl resume` cannot restore tasks for a session it never captured — merge the Stop hook from `forgectl resume --help` into the \"hooks\" object of ~/.claude/settings.json",
+		}
+	}
+
 	drift := resume.DriftCheck(paths)
 	switch {
 	case !drift.Checked:

@@ -81,6 +81,11 @@ type Session struct {
 	Pid        int       `json:"pid,omitempty"`
 	TaskDir    string    `json:"task_dir,omitempty"`
 	Tasks      []Task    `json:"tasks,omitempty"`
+
+	// enriched records that the transcript and lane-file reads already ran,
+	// so the widened second pass in Scan does not re-open every transcript it
+	// already opened.
+	enriched bool
 }
 
 // Name sources, in the precedence Scan applies (highest first). The source is
@@ -95,9 +100,11 @@ const (
 
 // Opts tunes a Scan.
 type Opts struct {
-	// Limit caps how many sessions are returned, newest first. Zero means
-	// DefaultLimit. The cut happens BEFORE transcripts are opened, so a
-	// thousand-session corpus is not parsed to show ten rows.
+	// Limit caps how many sessions are returned, newest first. Zero or
+	// negative means DefaultLimit — a computed limit that reaches 0 yields a
+	// full page, not an empty one, so callers deriving it should check.
+	// The cut happens BEFORE transcripts are opened, so a thousand-session
+	// corpus is not parsed to show ten rows.
 	Limit int
 	// Filter, when non-empty, keeps only sessions whose repo, name, or cwd
 	// contains it (case-insensitive). Applied before the limit cut.
@@ -229,16 +236,33 @@ func Scan(p Paths, opts Opts) ([]Session, error) {
 	// and lane name, which Matches then filters on, so cutting to exactly
 	// Limit here would hide matches whose only searchable text has not been
 	// read yet.
-	pool := opts.Limit * prefilterFactor
-	if opts.Filter == "" {
-		pool = opts.Limit
+	pool := opts.Limit
+	if opts.Filter != "" {
+		pool = opts.Limit * prefilterFactor
 	}
-	if len(sessions) > pool {
-		sessions = sessions[:pool]
+	if pool > len(sessions) {
+		pool = len(sessions)
 	}
 
+	out := collect(p, sessions[:pool], opts)
+
+	// A bounded search that finds nothing is not the same as nothing being
+	// there, and the caller's error text ("no session matched") cannot tell
+	// the difference. So when the pool comes back empty, widen to everything
+	// before reporting a miss. This costs a full enrichment pass only on the
+	// rare path where the cheap answer was "not found" — exactly when being
+	// wrong is most expensive.
+	if len(out) == 0 && opts.Filter != "" && pool < len(sessions) {
+		out = collect(p, sessions, opts)
+	}
+	return out, nil
+}
+
+// collect enriches candidates in order and keeps the ones matching the filter,
+// stopping at Limit.
+func collect(p Paths, candidates []*Session, opts Opts) []Session {
 	out := make([]Session, 0, opts.Limit)
-	for _, s := range sessions {
+	for _, s := range candidates {
 		enrich(p, s)
 		if !Matches(*s, opts.Filter) {
 			continue
@@ -248,7 +272,7 @@ func Scan(p Paths, opts Opts) ([]Session, error) {
 			break
 		}
 	}
-	return out, nil
+	return out
 }
 
 // Matches reports whether a session answers to filter — a case-insensitive
@@ -356,6 +380,10 @@ func firstLine(s string) string {
 // the git branch, the ai-title fallback name, and the lane name below it.
 // Both reads are best-effort — a session with neither is still resumable.
 func enrich(p Paths, s *Session) {
+	if s.enriched {
+		return
+	}
+	s.enriched = true
 	branch, title := readTranscript(p, s.ID, s.Cwd)
 	if s.Branch == "" {
 		s.Branch = branch

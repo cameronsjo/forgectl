@@ -111,27 +111,36 @@ func TestSessionRow_LabelsLivenessAndTasks(t *testing.T) {
 // it, not a suggestion — a fork only reads the transcript, so it does not
 // contend with the running session.
 func TestResumeSession_RefusesLiveButNotWithFork(t *testing.T) {
+	// Cwd is empty so nothing can reach the exec: the live refusal is
+	// deliberately raised BEFORE the cwd check, so an already-running session
+	// is reported as such whether or not its directory still exists.
 	live := resume.Session{
-		ID: "aaaaaaaa-0000-0000-0000-000000000001", Cwd: "", // empty cwd stops it before exec
+		ID: "aaaaaaaa-0000-0000-0000-000000000001", Name: "still-running",
 		Live: true, Pid: 4242,
 	}
 	cmd := newResumeSnapshotCmd() // any command — only its out/err streams are used
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 
-	err := resumeSession(cmd, config.Config{}, live, false)
+	err := resumeSession(cmd, config.Config{}, live, false, false)
 	if err == nil || !strings.Contains(err.Error(), "4242") {
 		t.Fatalf("continuing a live session returned %v, want a refusal naming pid 4242", err)
 	}
+	if !strings.Contains(err.Error(), "still-running") {
+		t.Errorf("refusal = %v, want the session's name as well as its id", err)
+	}
+	if code := ExitCode(err); code != 2 {
+		t.Errorf("live refusal exit code = %d, want 2 — it is recoverable, unlike a no-match", code)
+	}
 
-	// With --fork the liveness refusal must NOT be what stops it; the empty
-	// cwd is, which proves execution got past the live check.
-	err = resumeSession(cmd, config.Config{}, live, true)
+	// With --fork the liveness refusal must not fire at all; the empty cwd is
+	// what stops it, which proves execution got past the live check.
+	err = resumeSession(cmd, config.Config{}, live, true, false)
 	if err == nil {
 		t.Fatal("expected the empty-cwd error, got nil")
 	}
 	if strings.Contains(err.Error(), "4242") {
-		t.Errorf("--fork still hit the liveness refusal (%v) — the error message promises it does not", err)
+		t.Errorf("--fork still hit the liveness refusal (%v) — the help text promises it does not", err)
 	}
 	if !strings.Contains(err.Error(), "working directory") {
 		t.Errorf("expected the empty-cwd error past the live check, got %v", err)

@@ -80,6 +80,18 @@ func Snapshot(p Paths, now time.Time) SnapshotResult {
 	return res
 }
 
+// CaptureState reports how many sessions are live right now and how many
+// records the snapshot store holds — the two numbers that decide whether
+// capture is actually wired.
+//
+// It exists because a missing Stop hook is otherwise undetectable: Snapshot
+// always exits 0 by design, so nothing distinguishes "never ran" from "ran and
+// found nothing" until a session exits and takes its tasks with it. Live
+// sessions beside an empty store is the signature.
+func CaptureState(p Paths) (live, stored int) {
+	return len(LiveEntries(p)), len(LoadAll(p.StoreDir))
+}
+
 // RestoreFor puts a session's snapshotted tasks back where the resumed session
 // will read them, and reports what it did.
 //

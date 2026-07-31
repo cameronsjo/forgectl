@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
@@ -13,6 +14,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/meta"
+	"github.com/cameronsjo/forgectl/internal/resume"
 )
 
 // redirectConfigDir points os.UserConfigDir() at a fresh temp dir for the
@@ -316,5 +318,130 @@ func TestRun_AggregatesAllChecksAndFailsOnAnyFailure(t *testing.T) {
 	}
 	if !sawGh {
 		t.Error("Run() report has no gh check")
+	}
+}
+
+// resumeFixture builds a throwaway ~/.claude plus a forgectl store and returns
+// Deps wired to it, so the resume check never reads the developer's real tree.
+func resumeFixture(t *testing.T) (resume.Paths, Deps) {
+	t.Helper()
+	root := t.TempDir()
+	p := resume.Paths{
+		ClaudeHome: filepath.Join(root, ".claude"),
+		StoreDir:   filepath.Join(root, "store"),
+	}
+	for _, d := range []string{
+		filepath.Join(p.ClaudeHome, "tasks"),
+		filepath.Join(p.ClaudeHome, "sessions"),
+		p.StoreDir,
+	} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	return p, Deps{ResumePaths: func() (resume.Paths, error) { return p, nil }}
+}
+
+// mkTaskDir creates one ~/.claude/tasks/<name>/ holding a single task body.
+func mkTaskDir(t *testing.T, p resume.Paths, name string) {
+	t.Helper()
+	dir := filepath.Join(p.ClaudeHome, "tasks", name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "1.json"), []byte(`{"id":"1","subject":"x"}`), 0o600); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+}
+
+// TestCheckResumeTasks covers the check `forgectl resume`'s own plan calls the
+// tripwire for its one version coupling with Claude Code. DriftCheck is tested
+// in isolation over in internal/resume; this pins the doctor WIRING — that each
+// condition maps to the state an operator acts on.
+func TestCheckResumeTasks(t *testing.T) {
+	t.Run("no paths configured skips", func(t *testing.T) {
+		if got := checkResumeTasks(Deps{}); got.State != StateSkip {
+			t.Errorf("state = %q, want skip when ResumePaths is nil", got.State)
+		}
+	})
+
+	t.Run("a paths error skips rather than failing", func(t *testing.T) {
+		d := Deps{ResumePaths: func() (resume.Paths, error) {
+			return resume.Paths{}, errors.New("no home directory")
+		}}
+		if got := checkResumeTasks(d); got.State != StateSkip {
+			t.Errorf("state = %q, want skip — an unresolvable home is not a broken install", got.State)
+		}
+	})
+
+	t.Run("empty tree skips", func(t *testing.T) {
+		_, d := resumeFixture(t)
+		got := checkResumeTasks(d)
+		if got.State != StateSkip {
+			t.Errorf("state = %q (%s), want skip on a tree with no task dirs", got.State, got.Detail)
+		}
+	})
+
+	t.Run("per-session dialect present is ok", func(t *testing.T) {
+		p, d := resumeFixture(t)
+		mkTaskDir(t, p, "11111111-2222-3333-4444-555555555555")
+		got := checkResumeTasks(d)
+		if got.State != StateOK {
+			t.Errorf("state = %q (%s), want ok", got.State, got.Detail)
+		}
+	})
+
+	t.Run("only team dialect warns", func(t *testing.T) {
+		p, d := resumeFixture(t)
+		mkTaskDir(t, p, "session-abcd1234")
+		got := checkResumeTasks(d)
+		if got.State != StateWarn {
+			t.Fatalf("state = %q (%s), want warn — restore would write where nothing reads", got.State, got.Detail)
+		}
+		if got.Hint == "" {
+			t.Error("drift warning carries no hint; the operator needs the next action")
+		}
+	})
+
+	// The capture-wiring branch is the one that actually costs data: an
+	// unwired Stop hook is otherwise undetectable, because snapshot always
+	// exits 0 and a missing capture looks exactly like a successful one until
+	// a session exits and its tasks are gone.
+	t.Run("live sessions with an empty store warns about capture", func(t *testing.T) {
+		p, d := resumeFixture(t)
+		mkTaskDir(t, p, "11111111-2222-3333-4444-555555555555")
+		writeLiveRegistry(t, p, os.Getpid())
+
+		got := checkResumeTasks(d)
+		if got.State != StateWarn {
+			t.Fatalf("state = %q (%s), want warn — a live session with no snapshot means capture is not wired", got.State, got.Detail)
+		}
+		if !strings.Contains(got.Detail, "no snapshots stored") {
+			t.Errorf("detail = %q, want it to name the empty store", got.Detail)
+		}
+	})
+
+	t.Run("live sessions with a populated store is ok", func(t *testing.T) {
+		p, d := resumeFixture(t)
+		mkTaskDir(t, p, "11111111-2222-3333-4444-555555555555")
+		writeLiveRegistry(t, p, os.Getpid())
+		if err := resume.Save(p.StoreDir, &resume.Record{ID: "11111111-2222-3333-4444-555555555555"}); err != nil {
+			t.Fatalf("seed store: %v", err)
+		}
+		if got := checkResumeTasks(d); got.State != StateOK {
+			t.Errorf("state = %q (%s), want ok once capture has produced a record", got.State, got.Detail)
+		}
+	})
+}
+
+// writeLiveRegistry plants a registry file for a pid that is genuinely running
+// (the test process itself), so the liveness probe reports it live without any
+// stubbing.
+func writeLiveRegistry(t *testing.T, p resume.Paths, pid int) {
+	t.Helper()
+	body := fmt.Sprintf(`{"pid":%d,"sessionId":"11111111-2222-3333-4444-555555555555","cwd":"/tmp","version":"2.1.220"}`, pid)
+	path := filepath.Join(p.ClaudeHome, "sessions", fmt.Sprintf("%d.json", pid))
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write registry: %v", err)
 	}
 }

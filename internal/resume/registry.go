@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -90,6 +91,15 @@ func supersedes(e, prev RegistryEntry) bool {
 // LiveEntries returns the registry entries whose process is still running —
 // the input to Snapshot, since only a live session has a /rename name and
 // undeleted tasks to capture.
+//
+// Sorted by session id, and that is load-bearing rather than tidiness. Two live
+// sessions in one checkout can both resolve to the same team task directory
+// when neither has claimed it yet, and Snapshot awards it to whichever it
+// processes FIRST — a claim that is then sticky forever. Ranging over
+// readRegistry's map directly made that a coin flip per run, so identical
+// on-disk state could pair a session with another session's tasks depending on
+// Go's map iteration order. A stable order makes the outcome a function of the
+// state rather than of the run.
 func LiveEntries(p Paths) []RegistryEntry {
 	var out []RegistryEntry
 	for _, e := range readRegistry(p.registryDir()) {
@@ -97,5 +107,6 @@ func LiveEntries(p Paths) []RegistryEntry {
 			out = append(out, e)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].SessionID < out[j].SessionID })
 	return out
 }

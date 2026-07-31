@@ -30,7 +30,7 @@ var resumeModule = module.Manifest{
 
 // newResumeCmd builds `forgectl resume` over the registry Deps.
 func newResumeCmd(deps module.Deps) *cobra.Command {
-	var fork bool
+	var fork, dryRun bool
 	var limit int
 
 	cmd := &cobra.Command{
@@ -46,27 +46,49 @@ neither repo nor branch.
 
   forgectl resume              pick from the recent sessions
   forgectl resume forgectl     filter by repo, name, cwd, or id; one hit resumes
+  forgectl resume --dry-run f  resolve and print, exec nothing
   forgectl resume ls --json    list without acting
   forgectl resume snapshot     capture what a session's exit would destroy
 
-Session identity is read, never persisted — the prompt history and per-project
-transcripts already hold the id, cwd, branch, and title indefinitely. Only two
-things need capturing, and ` + "`resume snapshot`" + ` is what captures them: the
-/rename name, which lives only in the live-process registry, and the task
-bodies, which Claude Code deletes when a session ends. Wire it to a Stop hook
-so every turn refreshes the snapshot:
+THIS COMMAND REPLACES THE PROCESS. On success it execs claude in place (via
+syscall.Exec, the same path forgectl launch uses) and never returns — the
+resumed session is interactive, so there is no -p/--print form. From a script
+or a tool call, use ` + "`resume --dry-run`" + ` (prints the resolved cwd and argv) or
+` + "`resume ls --json`" + `; a bare ` + "`resume`" + ` will exec an interactive claude onto
+whatever stdout it was given.
 
-  {"hooks":{"Stop":[{"hooks":[
-    {"type":"command","command":"forgectl resume snapshot --quiet"}]}]}}
+Related: ` + "`forgectl launch`" + ` starts or resumes a session in the CURRENT
+directory and prompts for the posture. ` + "`resume`" + ` is the cross-repo one — it
+finds a session anywhere on the machine and moves you to it.
+
+Session identity is read from Claude Code's own durable files — the prompt
+history and per-project transcripts hold the id, cwd, branch, and title
+indefinitely. Only two things need capturing, and ` + "`resume snapshot`" + ` is what
+captures them: the /rename name, which lives only in the live-process registry,
+and the task bodies, which Claude Code deletes when a session ends. Wire it to a
+Stop hook — MERGE this entry into the "hooks" object of
+~/.claude/settings.json (user scope, so it covers every repo). Do not replace
+that file; it holds unrelated settings:
+
+  "Stop": [{"hooks":[
+    {"type":"command","command":"forgectl resume snapshot --quiet"}]}]
+
+Without a prior snapshot there is nothing to restore, so an unwired hook fails
+silently at exactly the wrong moment. ` + "`forgectl doctor`" + ` warns when live
+sessions exist and the store is empty.
 
 A session whose process is still running cannot be CONTINUED — two processes on
 one transcript corrupts it — so resume refuses and names the live pid. --fork
 gets you in anyway: it branches a new session off the transcript, which only
-reads it. A forked session starts its own task list, so snapshotted tasks are
-reported rather than restored.
+reads it. Note that --fork applies to DEAD sessions too and always forks: it
+starts a new session rather than continuing the old one, and a new session
+reads its own (empty) task list, so snapshotted tasks are reported rather than
+restored. Pass it in response to the live-session error, not defensively.
 
-Exit codes: 0 resumed (or listed), 1 no session matched, the pick was
-cancelled, or the target is still live.`,
+Exit codes: 0 resumed; 1 no session matched, or the pick was cancelled; 2 the
+target is still running (recoverable — use --fork). Note that ` + "`resume ls`" + `
+exits 0 with an empty list when nothing matches, so ` + "`resume ls X && resume X`" + `
+is NOT a valid guard; test the ls output instead.`,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -75,11 +97,12 @@ cancelled, or the target is still live.`,
 			if len(args) == 1 {
 				filter = args[0]
 			}
-			return runResume(cmd, deps.Cfg, filter, limit, fork)
+			return runResume(cmd, deps.Cfg, filter, limit, fork, dryRun)
 		},
 	}
 	cmd.Flags().BoolVar(&fork, "fork", false, "branch a new session off the transcript instead of continuing it")
-	cmd.Flags().IntVar(&limit, "limit", resume.DefaultLimit, "how many recent sessions to consider")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the resolved session, cwd, and claude argv without resuming")
+	cmd.Flags().IntVar(&limit, "limit", resume.DefaultLimit, "how many recent sessions to consider (0 or negative means the default)")
 
 	cmd.AddCommand(newResumeLsCmd(), newResumeSnapshotCmd())
 	return cmd
@@ -108,7 +131,7 @@ func scanFor(filter string, limit int) ([]resume.Session, error) {
 }
 
 // runResume is the pick-then-resume path.
-func runResume(cmd *cobra.Command, cfg config.Config, filter string, limit int, fork bool) error {
+func runResume(cmd *cobra.Command, cfg config.Config, filter string, limit int, fork, dryRun bool) error {
 	sessions, err := scanFor(filter, limit)
 	if err != nil {
 		return err
@@ -135,7 +158,7 @@ func runResume(cmd *cobra.Command, cfg config.Config, filter string, limit int, 
 		// included. The operator should see the target first.
 		fmt.Fprintf(cmd.ErrOrStderr(), "forgectl: one match — %s\n", sessionRow(picked))
 	}
-	return resumeSession(cmd, cfg, picked, fork)
+	return resumeSession(cmd, cfg, picked, fork, dryRun)
 }
 
 // pickSession runs the single-select. Options are keyed by session id so a
@@ -188,7 +211,7 @@ func sessionRow(s resume.Session) string {
 
 // resumeSession restores the session's tasks, moves into its directory, and
 // replaces this process with claude.
-func resumeSession(cmd *cobra.Command, cfg config.Config, s resume.Session, fork bool) error {
+func resumeSession(cmd *cobra.Command, cfg config.Config, s resume.Session, fork, dryRun bool) error {
 	errOut := cmd.ErrOrStderr()
 
 	// The one failure mode this feature introduces. Two claude processes
@@ -197,13 +220,75 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, s resume.Session, fork
 	// is findable. --fork is the documented way past it, and it is a real
 	// escape rather than a suggestion: a fork only READS the transcript and
 	// writes to a new session of its own, so it does not contend.
+	//
+	// Exit 2, not 1, because this is the one refusal a caller can act on: it
+	// is recoverable with --fork, where "no session matched" is not. The
+	// binary already draws that 1-vs-2 line elsewhere (`env check`).
+	//
+	// Held as a value rather than returned here so --dry-run can still
+	// DESCRIBE a run it would block. A dry-run that refuses to tell you what
+	// it would have done is not an inspection surface, and inspecting a
+	// running session is the common case for one.
+	var blocked error
 	if s.Live && !fork {
-		return WithExitCode(fmt.Errorf(
-			"session %s is still running as pid %d — continuing it a second time would corrupt the transcript; switch to that terminal, or pass --fork to branch a new session off it",
-			sanitizeTerm(s.ID), s.Pid), 1)
+		blocked = WithExitCode(fmt.Errorf(
+			"session %s (%s) is still running as pid %d — continuing it a second time would corrupt the transcript; switch to that terminal, or pass --fork to branch a new session off it",
+			sanitizeTerm(displayName(s)), sanitizeTerm(s.ID), s.Pid), 2)
+	}
+	// Refuse immediately unless this is a dry-run. Deferring it would make the
+	// refusal depend on claude being installed and the cwd still existing,
+	// neither of which is relevant to "that session is already running".
+	if blocked != nil && !dryRun {
+		return blocked
 	}
 	if s.Cwd == "" {
 		return WithExitCode(fmt.Errorf("session %s has no recorded working directory to resume into", sanitizeTerm(s.ID)), 1)
+	}
+
+	// Confirm the target is a real directory BEFORE anything writes. Task
+	// restore used to run first, so a resume that then failed on a deleted
+	// repo had already written files and announced doing so — a side effect
+	// on an otherwise-failed command.
+	//
+	// Sanitize BOTH the path and the error text on the way out. This is the
+	// most reachable escape sink in the file — os.Chdir fails precisely when
+	// the path is malformed — and %w would have re-printed the raw path a
+	// second time inside the wrapped *os.PathError, so sanitizing only s.Cwd
+	// would have left the hole open.
+	if fi, err := os.Stat(s.Cwd); err != nil || !fi.IsDir() {
+		return WithExitCode(fmt.Errorf("session %s records a working directory that is not there: %s",
+			sanitizeTerm(s.ID), sanitizeTerm(s.Cwd)), 1)
+	}
+
+	lc, _ := resolveLaunchConfig(cfg)
+	// Resolve is a pure function of the config and an arbitrary cwd, so
+	// resuming into another repo gets that repo's profile for free — no
+	// per-project config loading.
+	profile := launch.Resolve(lc, s.Cwd)
+	claudePath, err := launch.ClaudePath(lc.Defaults)
+	if err != nil {
+		return err
+	}
+	args := launch.ResumeArgs(profile, profile.Model, s.ID, fork)
+
+	// --dry-run is the headless escape. Resuming exec-replaces this process
+	// with an INTERACTIVE claude (ResumeArgs injects --ide, which rules out a
+	// -p/--print form), so without this there is no way to ask "what would
+	// this do" from a script. Matches `pr <ref> --dry-run` and
+	// `workflow run --dry-run`.
+	if dryRun {
+		out := cmd.OutOrStdout()
+		fmt.Fprintf(out, "session %s\n", sanitizeTerm(s.ID))
+		fmt.Fprintf(out, "name    %s\n", sanitizeTerm(displayName(s)))
+		fmt.Fprintf(out, "cwd     %s\n", sanitizeTerm(s.Cwd))
+		fmt.Fprintf(out, "exec    %s %s\n", sanitizeTerm(claudePath), sanitizeTerm(strings.Join(args, " ")))
+		fmt.Fprintf(out, "tasks   %d held%s\n", len(s.Tasks), forkTaskNote(fork))
+		if blocked != nil {
+			fmt.Fprintf(out, "blocked live — pid %d; add --fork to branch instead\n", s.Pid)
+		}
+		// Exits with the code the real run would, so a script can trust the
+		// dry-run's verdict and not just its text.
+		return blocked
 	}
 
 	// Tasks go back BEFORE the exec: once syscall.Exec replaces this
@@ -215,11 +300,14 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, s resume.Session, fork
 	// Restoring into the original session's directory would write where the
 	// forked session never looks — and when the original is still live, that
 	// write lands in a directory it is actively using.
+	//
+	// The fork notice prints UNCONDITIONALLY, including at zero tasks. It
+	// used to be suppressed when there was nothing to restore — which is the
+	// state of every machine without the Stop hook wired, so the warning went
+	// quiet exactly where the operator was least protected.
 	switch {
 	case fork:
-		if len(s.Tasks) > 0 {
-			fmt.Fprintf(errOut, "forgectl: %d snapshotted task(s) not restored — a fork starts a new session, which reads its own task list\n", len(s.Tasks))
-		}
+		fmt.Fprintf(errOut, "forgectl: forking — %d snapshotted task(s) not restored; a fork starts a new session, which reads its own task list\n", len(s.Tasks))
 	default:
 		if paths, err := resumePaths(); err == nil {
 			switch res, err := resume.RestoreFor(paths, s.ID); {
@@ -233,35 +321,23 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, s resume.Session, fork
 		}
 	}
 
-	// Confirm the target is a real directory before exec'ing into it, and
-	// sanitize BOTH the path and the error text on the way out. This is the
-	// most reachable escape sink in the file — os.Chdir fails precisely when
-	// the path is malformed — and %w would have re-printed the raw path a
-	// second time inside the wrapped *os.PathError, so sanitizing only s.Cwd
-	// would have left the hole open.
-	if fi, err := os.Stat(s.Cwd); err != nil || !fi.IsDir() {
-		return WithExitCode(fmt.Errorf("session %s records a working directory that is not there: %s",
-			sanitizeTerm(s.ID), sanitizeTerm(s.Cwd)), 1)
-	}
 	if err := os.Chdir(s.Cwd); err != nil {
 		return WithExitCode(fmt.Errorf("enter %s: %s", sanitizeTerm(s.Cwd), sanitizeTerm(err.Error())), 1)
 	}
 
-	lc, _ := resolveLaunchConfig(cfg)
-	// Resolve is a pure function of the config and an arbitrary cwd, so
-	// resuming into another repo gets that repo's profile for free — no
-	// per-project config loading.
-	profile := launch.Resolve(lc, s.Cwd)
-	claudePath, err := launch.ClaudePath(lc.Defaults)
-	if err != nil {
-		return err
-	}
-
-	args := launch.ResumeArgs(profile, profile.Model, s.ID, fork)
 	env := launch.MergeEnv(os.Environ(), launch.MergeMaps(bench.TelemetryEnv(cfg), profile.Env))
 	fmt.Fprintf(errOut, "forgectl: resuming %s in %s\n", sanitizeTerm(displayName(s)), sanitizeTerm(s.Cwd))
 	slog.Debug("Preparing to exec claude for a resume.", "session", s.ID, "cwd", s.Cwd, "fork", fork)
 	return launch.Exec(claudePath, args, env)
+}
+
+// forkTaskNote annotates the dry-run task line so a fork's task behavior is
+// visible without running it.
+func forkTaskNote(fork bool) string {
+	if fork {
+		return " (not restored — forking starts a new session)"
+	}
+	return ""
 }
 
 // newResumeLsCmd builds `forgectl resume ls` — the inspection surface.
@@ -274,8 +350,32 @@ func newResumeLsCmd() *cobra.Command {
 		Short: "List recent Claude Code sessions without resuming one",
 		Long: `ls prints the same rows the picker shows, without acting on them: name,
 repo, branch, last activity, liveness, and how many tasks are held for rescue.
+Unlike the parent command it never execs anything.
 
---json emits the full records for scripting.`,
+--json emits one record per session on stdout; the "N session(s)" count goes to
+stderr, so stdout stays pipeable. Fields:
+
+  id           session uuid; always present
+  name         display name; ABSENT when unknown
+  name_source  where name came from: rename | store | ai-title | lane
+  repo         basename of cwd; absent when no cwd is recorded
+  branch       git branch from the transcript; absent when unknown
+  cwd          always present
+  last_active  RFC3339 UTC
+  last_prompt  FIRST LINE of the last prompt, truncated for display — absent
+               when unknown, and never the full prompt text
+  version      Claude Code version that wrote the session; absent when unknown
+  live         bool; true when the session's process is still running
+  pid          absent unless live
+  tasks        COUNT of snapshotted task bodies held, not the bodies
+
+Fields marked absent are omitted from the object entirely rather than emitted
+as null. Use live/pid to pre-check before calling the parent command, which
+refuses a running session with exit 2.
+
+EXIT CODES DIFFER FROM THE PARENT: ls exits 0 even when nothing matches (an
+empty list is not an error), emitting [] under --json. Do not use it as a
+guard for a following resume.`,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
