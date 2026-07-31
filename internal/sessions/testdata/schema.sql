@@ -28,6 +28,10 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- NEVER part of the upsert key — session_id is a globally-unique UUID).
 CREATE TABLE IF NOT EXISTS session (
     session_id          text PRIMARY KEY,
+    -- Provenance shape of the row, stamped by the ETL. 0 = legacy
+    -- Claude-native (no harness/source_format recorded at write time);
+    -- 2 = harness-aware, carrying `harness` and `source_format`. There is
+    -- no 1: v1 is the pre-provenance shape 0 already denotes.
     schema_version      integer NOT NULL DEFAULT 0,
     harness             text NOT NULL DEFAULT 'claude'
         CHECK (harness IN ('claude', 'codex')),
@@ -42,6 +46,9 @@ CREATE TABLE IF NOT EXISTS session (
     tokens_cache_create bigint,
     tokens_cache_read   bigint,
     tokens_output       bigint,
+    -- A SUBSET of tokens_output, not an addend — mirrors OpenAI's
+    -- completion_tokens including reasoning_tokens. Summing it into a
+    -- total double-counts; tokens_total is input + cache_read + output.
     tokens_reasoning_output bigint,
     tokens_total        bigint,
     cost_usd            numeric,
@@ -68,6 +75,18 @@ ALTER TABLE session ADD COLUMN IF NOT EXISTS tokens_total bigint;
 ALTER TABLE session ADD COLUMN IF NOT EXISTS estimated_cost_usd numeric;
 ALTER TABLE session ADD COLUMN IF NOT EXISTS pricing_source text;
 ALTER TABLE session ADD COLUMN IF NOT EXISTS pricing_verified_at timestamptz;
+-- ADD COLUMN cannot carry the harness CHECK, so an already-provisioned
+-- database would otherwise end up with an unconstrained `harness` while a
+-- fresh CREATE TABLE gets the enum — two schemas from one "idempotent" file.
+-- Postgres has no ADD CONSTRAINT IF NOT EXISTS; the guard below is the
+-- standard substitute. The name matches what Postgres auto-assigns to the
+-- inline CHECK above, so on a fresh database this no-ops as duplicate_object
+-- and both paths converge on one constraint.
+DO $$ BEGIN
+    ALTER TABLE session ADD CONSTRAINT session_harness_check
+        CHECK (harness IN ('claude', 'codex'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 CREATE INDEX IF NOT EXISTS session_machine_ts ON session (machine, first_ts);
 CREATE INDEX IF NOT EXISTS session_project_ts ON session (project, first_ts);
 
