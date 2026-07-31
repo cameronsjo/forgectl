@@ -25,6 +25,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/launch"
+	"github.com/cameronsjo/forgectl/internal/resume"
 	"github.com/cameronsjo/forgectl/internal/selfupdate"
 )
 
@@ -83,6 +84,10 @@ type Deps struct {
 	LookPath     func(string) (string, error)
 	TrustedStore func() (bless.Store, error)
 	Prober       bench.Prober
+	// ResumePaths resolves the session-record locations `forgectl resume`
+	// reads. Seamed so the task-dialect check can run against a fixture
+	// tree rather than the machine's real ~/.claude.
+	ResumePaths func() (resume.Paths, error)
 }
 
 // NewDeps wires Deps with production seams: os/exec.LookPath, the real
@@ -94,6 +99,7 @@ func NewDeps(cfg config.Config, runner exec.Runner) Deps {
 		LookPath:     osexec.LookPath,
 		TrustedStore: bless.NewVerifier().TrustedStore,
 		Prober:       bench.NewHTTPProber(),
+		ResumePaths:  resume.DefaultPaths,
 	}
 }
 
@@ -113,6 +119,7 @@ func Run(ctx context.Context, d Deps) Report {
 	checks = append(checks, checkGh(ctx, d))
 	checks = append(checks, benchChecks(ctx, d)...)
 	checks = append(checks, checkTrustStore(d))
+	checks = append(checks, checkResumeTasks(d))
 	checks = append(checks, checkForgectlVersion(ctx, d))
 
 	return Report{Checks: checks}
@@ -249,6 +256,63 @@ func checkTrustStore(d Deps) Check {
 		return Check{Name: "trust store", State: StateSkip, Detail: err.Error(), Hint: "run `forgectl workflow bless` to enroll a signing key, if you use blessed workflows"}
 	default:
 		return Check{Name: "trust store", State: StateFail, Detail: err.Error(), Hint: "the trust store or its root of trust failed to verify — see `forgectl workflow trust list` and bless/verify.go's error taxonomy"}
+	}
+}
+
+// checkResumeTasks is the tripwire for `forgectl resume`'s one version
+// coupling with Claude Code.
+//
+// Task rescue works by writing snapshotted task bodies into
+// ~/.claude/tasks/<session-id>/ before resuming, because that is the directory
+// a resumed session reads. That is verified behavior, not a guarantee: if a
+// future Claude Code stops keying per-session task directories on the session
+// id, restore would write where nothing reads and rescue nothing — silently,
+// since writing succeeds either way. This check compares what restore creates
+// against the dialects actually present on disk, so the drift surfaces here
+// rather than as tasks that quietly stop coming back.
+func checkResumeTasks(d Deps) Check {
+	const name = "resume tasks"
+	if d.ResumePaths == nil {
+		return Check{Name: name, State: StateSkip, Detail: "no session-record paths configured"}
+	}
+	paths, err := d.ResumePaths()
+	if err != nil {
+		return Check{Name: name, State: StateSkip, Detail: err.Error()}
+	}
+	// Capture wiring comes first, because it is the failure that actually
+	// costs data. `resume snapshot` is deliberately not auto-installed and
+	// always exits 0 (it runs on a Stop hook and must never fail a turn), so
+	// a hook that is missing, misspelled, or wired into the wrong settings
+	// file is INDISTINGUISHABLE from one that works — until a session exits
+	// and its tasks are gone. Live sessions with an empty store is the one
+	// machine-detectable signature of that, so it is reported here rather
+	// than discovered by losing something.
+	if live, store := resume.CaptureState(paths); live > 0 && store == 0 {
+		return Check{
+			Name: name, State: StateWarn,
+			Detail: fmt.Sprintf("%d live session(s) but no snapshots stored", live),
+			Hint:   "`forgectl resume` cannot restore tasks for a session it never captured — merge the Stop hook from `forgectl resume --help` into the \"hooks\" object of ~/.claude/settings.json",
+		}
+	}
+
+	drift := resume.DriftCheck(paths)
+	switch {
+	case !drift.Checked:
+		return Check{Name: name, State: StateSkip, Detail: "no task directories on disk yet"}
+	case drift.Drifted():
+		return Check{
+			Name: name, State: StateWarn,
+			// %q, not %s: drift.Dir is a raw directory name off disk, where
+			// every byte but '/' and NUL is legal. The text renderer's
+			// sanitizeCell strips only <0x20 and 0x7f — 0x9B, the
+			// single-byte CSI, survives it — and the --json path relies on
+			// encoding/json, which escapes only 0x00–0x1F. Quoting escapes
+			// the lot at the point of construction, before either path.
+			Detail: fmt.Sprintf("restore writes the %q dialect, but every task directory on disk is %q (newest: %q)", drift.Restores, drift.Newest, drift.Dir),
+			Hint:   "Claude Code appears to have changed how it names task directories — `forgectl resume` would restore tasks where nothing reads them; please file this at github.com/cameronsjo/forgectl",
+		}
+	default:
+		return Check{Name: name, State: StateOK, Detail: fmt.Sprintf("restore target dialect %q is present on disk", drift.Restores)}
 	}
 }
 

@@ -43,6 +43,32 @@ func SessionArgs(p Profile, model string, mode SessionMode) []string {
 	return args
 }
 
+// ResumeArgs builds the interactive posture for resuming one KNOWN session id.
+//
+// Additive rather than a new SessionArgs mode on purpose: SessionArgs appends a
+// bare --resume, which opens Claude Code's own picker, and that is the right
+// behavior for `forgectl launch`, which is cwd-bound and has no session in
+// hand. `forgectl resume` has already picked one, so it passes the id.
+//
+// fork maps to --fork-session, branching a new session off the transcript
+// instead of continuing it — the safe way into a session you do not want to
+// disturb.
+func ResumeArgs(p Profile, model, sessionID string, fork bool) []string {
+	args := []string{"--permission-mode", p.PermissionMode}
+	if p.AllowDanger {
+		args = append(args, "--allow-dangerously-skip-permissions")
+	}
+	args = append(args, "--ide", "--exclude-dynamic-system-prompt-sections", "--model", model)
+	args = append(args, "--resume", sessionID)
+	if fork {
+		args = append(args, "--fork-session")
+	}
+	for _, d := range p.AddDir {
+		args = append(args, "--add-dir", d)
+	}
+	return args
+}
+
 // BuilderArgs applies the profile's core posture, then appends the user's claude
 // args verbatim. Injected flags go first so a user override (e.g. --model) wins
 // under Claude Code's last-flag-wins parsing. Interactive-only flags (--ide,
