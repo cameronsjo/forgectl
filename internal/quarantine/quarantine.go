@@ -143,13 +143,24 @@ func wantsExpansion(targets []string) bool {
 // the nestable basenames present in targets. Root-level hits are excluded:
 // they are already in targets verbatim.
 func walkNestable(root string, scheme Scheme, targets []string) ([]string, error) {
-	want := make(map[string]string, len(targets)*2) // on-disk name -> original basename
+	// Keyed on the LOWERCASED basename. APFS and NTFS are case-insensitive by
+	// default, so an exact-string match is not the same predicate the agent
+	// uses: a head carrying `src/agents.md` is missed by an exact walk, while
+	// the reviewer's open("src/AGENTS.md") resolves to it and reads the
+	// instructions. Matching case-insensitively everywhere costs nothing on a
+	// case-sensitive filesystem (a genuinely distinct `agents.md` is also
+	// quarantined, which is the safe direction) and closes the vector on the
+	// filesystems forgectl actually runs on.
+	//
+	// The root level was already covered by accident — Hide's os.Lstat matches
+	// case-insensitively — so only this walk was exposed.
+	want := make(map[string]bool, len(targets)*2) // lowercased on-disk names to match
 	for _, t := range targets {
 		if !nestableBasenames[t] {
 			continue
 		}
-		want[t] = t
-		want[filepath.Base(renamedPath(scheme, t))] = t
+		want[strings.ToLower(t)] = true
+		want[strings.ToLower(filepath.Base(renamedPath(scheme, t)))] = true
 	}
 
 	var found []string
@@ -166,8 +177,7 @@ func walkNestable(root string, scheme Scheme, targets []string) ([]string, error
 			}
 			return nil
 		}
-		original, ok := want[d.Name()]
-		if !ok {
+		if !want[strings.ToLower(d.Name())] {
 			return nil
 		}
 		rel, relErr := filepath.Rel(root, path)
@@ -178,7 +188,12 @@ func walkNestable(root string, scheme Scheme, targets []string) ([]string, error
 		if dir == "." {
 			return nil // root-level hit: already carried literally in targets
 		}
-		found = append(found, filepath.Join(dir, original))
+		// Return the ACTUAL on-disk spelling, not the canonical target
+		// basename. Emitting "AGENTS.md" for a file named "agents.md" would
+		// rename it to AGENTS.md.quarantined on a case-insensitive filesystem
+		// (silently changing its case across the round-trip) and miss it
+		// entirely on a case-sensitive one.
+		found = append(found, filepath.Join(dir, undecorate(scheme, d.Name())))
 		return nil
 	})
 	if err != nil {
@@ -307,6 +322,20 @@ func computeMove(root string, scheme Scheme, target string) (Move, error) {
 		From: filepath.Join(root, cleanRel),
 		To:   filepath.Join(root, renamedPath(scheme, cleanRel)),
 	}, nil
+}
+
+// undecorate is the inverse of renamedPath's basename transform: given a name
+// the walk matched, it returns the pre-quarantine spelling. A name that is not
+// decorated (the pre-Hide case) is returned unchanged, so the walk yields the
+// same original-relative path in both directions — the property ExpandTargets
+// depends on for reversibility.
+func undecorate(scheme Scheme, base string) string {
+	switch scheme {
+	case SuffixQuarantined:
+		return strings.TrimSuffix(base, ".quarantined")
+	default:
+		return strings.TrimPrefix(base, "_")
+	}
 }
 
 // renamedPath applies scheme to the base name of a cleaned relative path,

@@ -521,3 +521,67 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// TestExpandTargets_MatchesNestedCaseInsensitively closes an injection vector
+// through the very hole the recursive walk was added to close. APFS is
+// case-insensitive by default and forgectl is macOS-first, so a PR head
+// carrying `src/agents.md` is NOT matched by an exact-string walk — yet the
+// reviewing agent's open("src/AGENTS.md") resolves to it and the instructions
+// are read.
+//
+// The root level is covered by accident (Hide's os.Lstat matches
+// case-insensitively); only the nested walk missed, so this test is nested.
+func TestExpandTargets_MatchesNestedCaseInsensitively(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "src", "agents.md"), "lowercase nested")
+	writeFile(t, filepath.Join(root, "pkg", "Claude.md"), "mixed-case nested")
+
+	got, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets: %v", err)
+	}
+	for _, want := range []string{
+		filepath.Join("src", "agents.md"),
+		filepath.Join("pkg", "Claude.md"),
+	} {
+		if !containsStr(got, want) {
+			t.Errorf("case-variant nested instruction file %q not quarantined; got %v", want, got)
+		}
+	}
+}
+
+// TestExpandTargets_CaseVariantRoundTrip proves the case-variant path is
+// reversible too — the rename must restore the ORIGINAL on-disk spelling, not
+// a normalized one.
+func TestExpandTargets_CaseVariantRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "src", "agents.md")
+	writeFile(t, nested, "lowercase nested")
+
+	c := New(&exec.FakeRunner{})
+	hideTargets, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets (hide): %v", err)
+	}
+	if _, err := c.Hide(context.Background(), root, SuffixQuarantined, hideTargets, false); err != nil {
+		t.Fatalf("Hide: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "src", "agents.md.quarantined")); err != nil {
+		t.Errorf("case-variant file was not quarantined to its own spelling: %v", err)
+	}
+
+	restoreTargets, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets (restore): %v", err)
+	}
+	moves, err := ComputeMoves(root, SuffixQuarantined, restoreTargets)
+	if err != nil {
+		t.Fatalf("ComputeMoves: %v", err)
+	}
+	if err := c.Restore(context.Background(), moves); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if got := readFile(t, nested); got != "lowercase nested" {
+		t.Errorf("round-trip corrupted the case-variant file: %q", got)
+	}
+}
