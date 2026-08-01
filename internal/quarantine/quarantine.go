@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -321,7 +322,8 @@ func expandPatterns(root string, scheme Scheme, patterns []string, covered map[s
 
 // globFold is filepath.Glob's contract — resolve a relative pattern against
 // root, return the concrete paths it matches — with one difference: every path
-// segment is matched on its LOWERCASED form.
+// segment's LITERAL characters are matched case-insensitively (see foldPattern
+// for why it is the literals and not the whole segment).
 //
 // This is walkNestable's `want` mechanism generalized from a basename set to a
 // pattern, and it exists for the identical reason. filepath.Glob matches with
@@ -341,17 +343,23 @@ func expandPatterns(root string, scheme Scheme, patterns []string, covered map[s
 // mirroring walkNestable's treatment of an unreadable subtree. ".." can never
 // appear in a result, because segments are matched against directory entries
 // and never traversed upward.
+//
+// A pattern that resolves to root ITSELF yields no matches rather than root.
+// globFold is the single resolver for the destructive `strip` half of the
+// control, and handing a caller the workspace root is handing os.RemoveAll the
+// whole workspace. validateStripGlob rejects that shape up front with an
+// operator-facing error; this is the resolver refusing to produce it at all.
 func globFold(root, pattern string) ([]string, error) {
 	clean := filepath.Clean(pattern)
 	if clean == "." || clean == string(filepath.Separator) {
-		return []string{root}, nil
+		return nil, nil
 	}
 	current := []string{root}
 	for _, seg := range strings.Split(filepath.ToSlash(clean), "/") {
 		if seg == "" {
 			continue
 		}
-		lower := strings.ToLower(seg)
+		folded := foldPattern(seg)
 		var next []string
 		for _, dir := range current {
 			entries, err := os.ReadDir(dir)
@@ -359,7 +367,7 @@ func globFold(root, pattern string) ([]string, error) {
 				continue // not a directory, or unreadable: no matches from here
 			}
 			for _, e := range entries {
-				ok, matchErr := filepath.Match(lower, strings.ToLower(e.Name()))
+				ok, matchErr := filepath.Match(folded, e.Name())
 				if matchErr != nil {
 					return nil, fmt.Errorf("match pattern %q: %w", pattern, matchErr)
 				}
@@ -375,6 +383,75 @@ func globFold(root, pattern string) ([]string, error) {
 	}
 	sort.Strings(current)
 	return current, nil
+}
+
+// foldPattern rewrites one filepath.Match segment pattern so its LITERAL
+// characters match either case, while leaving character-class bodies exactly
+// as the author wrote them. The result is matched against the entry's real
+// on-disk name — nothing on the name side is folded.
+//
+// The obvious implementation is to lowercase the pattern and lowercase the
+// name, and it is wrong, because a class body is not a literal. `[^a-z]foo`
+// matches `Afoo` before folding and matches NOTHING after it: the name's `A`
+// folds to `a`, which the class excludes. Lowercasing the segment therefore
+// silently changes what a valid pattern means, and in the direction that
+// drops matches — the unsafe direction for a quarantine control.
+//
+// Rewriting each cased literal `x` as the two-member class `[xX]` instead
+// keeps every class predicate byte-for-byte against the unmodified name, so a
+// class pattern matches exactly what filepath.Match matched before folding,
+// while `mcp.json` still finds `MCP.json`. An `\` escape is copied with the
+// character it escapes, since wrapping that character in a class would change
+// what the backslash means. A malformed class is copied verbatim so
+// filepath.Match still reports ErrBadPattern rather than being papered over.
+func foldPattern(seg string) string {
+	runes := []rune(seg)
+	var b strings.Builder
+	b.Grow(len(seg) * 2)
+	for i := 0; i < len(runes); i++ {
+		switch c := runes[i]; c {
+		case '\\':
+			b.WriteRune(c)
+			if i+1 < len(runes) {
+				i++
+				b.WriteRune(runes[i])
+			}
+		case '[':
+			// Mirror filepath.Match's own scan to find the class's end: an
+			// optional leading '^', then a ']' in first position is a MEMBER
+			// rather than the terminator, then items (with '\' escaping) until
+			// the closing ']'.
+			j := i + 1
+			if j < len(runes) && runes[j] == '^' {
+				j++
+			}
+			if j < len(runes) && runes[j] == ']' {
+				j++
+			}
+			for j < len(runes) && runes[j] != ']' {
+				if runes[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			if j < len(runes) {
+				j++ // consume the closing ']'
+			}
+			b.WriteString(string(runes[i:j]))
+			i = j - 1
+		default:
+			lower, upper := unicode.ToLower(c), unicode.ToUpper(c)
+			if lower == upper {
+				b.WriteRune(c) // uncased, or a metacharacter: '*', '?', '.', '/'
+				continue
+			}
+			b.WriteRune('[')
+			b.WriteRune(lower)
+			b.WriteRune(upper)
+			b.WriteRune(']')
+		}
+	}
+	return b.String()
 }
 
 // wantsExpansion reports whether targets contains at least one bare nestable

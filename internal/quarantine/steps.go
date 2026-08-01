@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -120,14 +121,31 @@ func newStripStep(defaultGlobs []string) step.Runner {
 	}
 }
 
-// validateStripGlob rejects a glob that could escape ${workspace}: an
-// absolute path, or any ".." path-traversal segment.
+// validateStripGlob rejects a glob that could escape ${workspace} — an
+// absolute path, or any ".." path-traversal segment — and a glob that
+// resolves to ${workspace} ITSELF.
+//
+// The whole-root case is the one with no undo. `filepath.Clean(".")` is ".",
+// which the resolver would hand back as the workspace root, and this step
+// os.RemoveAll's what it is handed: a `strip_globs = ["."]` in config, or
+// `globs = ["."]` on a [[step]], deletes the entire workspace mid-run. The
+// escape guards below never fire on it — "." is neither empty, nor absolute,
+// nor a ".." segment — so it needs its own rejection. Everything that cleans
+// to the root is covered by checking the CLEANED form: ".", "./", ".//",
+// "./.", and (for the Windows separator, which filepath.IsAbs does not call
+// absolute on Unix) "\\" and "/".
 func validateStripGlob(g string) error {
 	if g == "" {
 		return errors.New("strip glob must not be empty")
 	}
 	if filepath.IsAbs(g) {
 		return fmt.Errorf("strip glob %q must not be absolute", g)
+	}
+	// The root check cleans AFTER separator normalization, with the slash-only
+	// path.Clean: filepath.Clean does not touch a backslash on Unix, so a
+	// cleaned-then-replaced ".\" arrives as "./" and slips the check.
+	if rooted := path.Clean(strings.ReplaceAll(g, "\\", "/")); rooted == "." || rooted == "/" {
+		return fmt.Errorf("strip glob %q must not resolve to the workspace root", g)
 	}
 	// Normalize Windows separators so a "..\" segment is caught on any OS, then
 	// reject any ".." path segment wherever it appears.

@@ -9,6 +9,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -270,8 +271,10 @@ func TestSteps_DefaultGlobsFallBackToDefaultTargets(t *testing.T) {
 // TestSteps_DefaultTargetsPatternsReachStrip is the destructive half of the
 // carrier work, and the riskier half: `strip` os.RemoveAll's what it matches,
 // where Hide only renames. The MCP pattern rule therefore has to be verified
-// on THIS path too — it resolves through filepath.Glob here rather than
-// through ExpandTargets, a genuinely different resolver.
+// on THIS path too: strip shares globFold with ExpandTargets, so the resolver
+// is no longer what differs, but strip receives the RAW target list — patterns
+// included, no ExpandTargets pre-processing pass — and it deletes rather than
+// renames what that list resolves to.
 //
 // It pins both directions at once: an MCP carrier in an unenumerated
 // dot-directory is destroyed, and the reviewable tree — CI workflows above
@@ -326,4 +329,100 @@ func TestSteps_DefaultTargetsPatternsReachStrip(t *testing.T) {
 			t.Errorf("strip destroyed reviewable content %q: %v", rel, err)
 		}
 	}
+}
+
+// TestValidateStripGlob_RejectsWorkspaceRoot covers the shape with no undo.
+// The escape guards are all about leaving ${workspace}; this one is about
+// naming ${workspace} itself. `filepath.Clean(".")` is ".", which the resolver
+// would hand back as the workspace root, and strip os.RemoveAll's what it is
+// handed — so `strip_globs = ["."]` deletes the whole clean room mid-run while
+// passing every other check (not empty, not absolute, no ".." segment).
+//
+// Every spelling that CLEANS to the root is listed, not just the literal ".".
+func TestValidateStripGlob_RejectsWorkspaceRoot(t *testing.T) {
+	// Spellings that must be named as the workspace root specifically.
+	for _, g := range []string{".", "./", ".//", "./.", "\\", ".\\"} {
+		err := validateStripGlob(g)
+		if err == nil {
+			t.Errorf("validateStripGlob(%q) = nil, must reject the workspace root", g)
+			continue
+		}
+		if !strings.Contains(err.Error(), "workspace root") {
+			t.Errorf("validateStripGlob(%q) = %v, want a workspace-root rejection", g, err)
+		}
+	}
+	// "/" is rejected as absolute on Unix and as the root on Windows; either
+	// verdict is correct, only "accepted" is not.
+	if err := validateStripGlob("/"); err == nil {
+		t.Error(`validateStripGlob("/") = nil, must be rejected`)
+	}
+	// Control: an ordinary glob still passes, so the guard above is not
+	// rejecting everything.
+	for _, g := range []string{".mcp.json", ".*/mcp.json", "*.md", "docs/."} {
+		if err := validateStripGlob(g); err != nil {
+			t.Errorf("validateStripGlob(%q) = %v, want nil", g, err)
+		}
+	}
+}
+
+// TestSteps_StripRefusesWorkspaceRootGlob is the same guard proven where it
+// matters — on the runner that calls os.RemoveAll — through BOTH entry points
+// an operator has: [workflow] strip_globs in config, and `globs` on a [[step]].
+//
+// The fixture is a t.TempDir() this test creates itself and nothing else, for
+// the obvious reason: the failure mode under test is a recursive delete of the
+// directory named by the glob. A regression here destroys only the sandbox.
+func TestSteps_StripRefusesWorkspaceRootGlob(t *testing.T) {
+	// seed builds a throwaway workspace with a sentinel file and a sentinel
+	// subtree, and returns a check that both survived.
+	seed := func(t *testing.T) (string, func(t *testing.T)) {
+		t.Helper()
+		workspace := t.TempDir()
+		nested := filepath.Join(workspace, "src", "main.go")
+		if err := os.MkdirAll(filepath.Dir(nested), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		for _, p := range []string{filepath.Join(workspace, "keep.txt"), nested} {
+			if err := os.WriteFile(p, []byte("reviewable"), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+		}
+		return workspace, func(t *testing.T) {
+			t.Helper()
+			for _, p := range []string{filepath.Join(workspace, "keep.txt"), nested} {
+				if _, err := os.Stat(p); err != nil {
+					t.Errorf("strip destroyed %q through a whole-root glob: %v", p, err)
+				}
+			}
+		}
+	}
+
+	t.Run("step globs", func(t *testing.T) {
+		workspace, survived := seed(t)
+		err := runStrip(t, &exec.FakeRunner{}, workspace, []string{"."})
+		if err == nil {
+			t.Error(`strip accepted globs = ["."], which resolves to the workspace root`)
+		} else if !strings.Contains(err.Error(), "workspace root") {
+			t.Errorf("strip rejected the root glob with the wrong reason: %v", err)
+		}
+		survived(t)
+	})
+
+	t.Run("configured strip_globs", func(t *testing.T) {
+		workspace, survived := seed(t)
+		def, ok := Steps([]string{"."})["strip"]
+		if !ok {
+			t.Fatal(`Steps must contribute the strip verb`)
+		}
+		wctx := step.NewContext(nil)
+		wctx.Set("workspace", workspace)
+		// No step globs: the configured default set applies, root glob included.
+		err := def.Runner(context.Background(), &exec.FakeRunner{}, wctx, step.PlanStep{Uses: "strip"})
+		if err == nil {
+			t.Error(`strip accepted strip_globs = ["."], which resolves to the workspace root`)
+		} else if !strings.Contains(err.Error(), "workspace root") {
+			t.Errorf("strip rejected the root glob with the wrong reason: %v", err)
+		}
+		survived(t)
+	})
 }

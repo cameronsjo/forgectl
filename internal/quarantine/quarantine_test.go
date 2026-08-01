@@ -1228,3 +1228,70 @@ func TestUndecorate_CaseInsensitive(t *testing.T) {
 		}
 	}
 }
+
+// TestGlobFold_CharacterClassSemanticsSurviveFolding pins the constraint the
+// case-fold has to respect: folding is for LITERALS, and a character class is
+// not a literal.
+//
+// The first implementation lowercased the whole segment and the whole entry
+// name. That is correct for `mcp.json` vs `MCP.json` and silently wrong for
+// any class: `[^a-z]foo` matched `Afoo` before the fold and matched NOTHING
+// after it, because the name's `A` folded to `a` and the class excludes `a`.
+// `[a-z]foo` broke the other way, picking up `Afoo` that filepath.Match would
+// never have given it. Both directions are pinned here — the second matters
+// most, because globFold feeds the destructive `strip` step and a class that
+// suddenly matches more is a class that deletes more.
+//
+// The literal cases are the control: they prove the class fix did not simply
+// turn the fold off.
+func TestGlobFold_CharacterClassSemanticsSurviveFolding(t *testing.T) {
+	root := t.TempDir()
+	// NOTE: no two fixture names may differ only by case — t.TempDir() lands on
+	// APFS, where they would collide rather than coexist.
+	for _, rel := range []string{"Afoo", "zfoo", "MCP.json"} {
+		writeFile(t, filepath.Join(root, rel), "x")
+	}
+
+	tests := []struct {
+		name    string
+		pattern string
+		want    []string
+	}{
+		{"negated class keeps excluding lowercase", "[^a-z]foo", []string{"Afoo"}},
+		{"lowercase class keeps excluding uppercase", "[a-z]foo", []string{"zfoo"}},
+		{"class combines with a folded literal", "[^a-z]FOO", []string{"Afoo"}},
+		{"lowercase literal still finds the uppercase file", "mcp.json", []string{"MCP.json"}},
+		{"uppercase literal still finds the mixed-case file", "MCP.JSON", []string{"MCP.json"}},
+		{"wildcards are untouched by folding", "*.JSON", []string{"MCP.json"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			matches, err := globFold(root, tc.pattern)
+			if err != nil {
+				t.Fatalf("globFold(%q): %v", tc.pattern, err)
+			}
+			var got []string
+			for _, m := range matches {
+				rel, relErr := filepath.Rel(root, m)
+				if relErr != nil {
+					t.Fatalf("Rel(%q): %v", m, relErr)
+				}
+				got = append(got, rel)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("globFold(%q) = %v, want %v", tc.pattern, got, tc.want)
+			}
+			for _, want := range tc.want {
+				if !containsStr(got, want) {
+					t.Errorf("globFold(%q) = %v, missing %q", tc.pattern, got, want)
+				}
+			}
+		})
+	}
+
+	// A malformed class must still surface as ErrBadPattern rather than being
+	// swallowed by the rewrite that copies it.
+	if _, err := globFold(root, "[a-foo"); err == nil {
+		t.Error("globFold must propagate filepath.Match's ErrBadPattern for an unterminated class")
+	}
+}

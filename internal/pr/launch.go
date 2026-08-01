@@ -131,11 +131,19 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) er
 //
 // No MCP counterpart to launchInline's profile.StrictMCP is set here, and that
 // is not an oversight: `codex exec --help` exposes no MCP flag at all, so there
-// is no harness-boundary control to force. The exposure is Tier 2 regardless —
-// CheckAgentForRef refuses Codex for remote PR heads, so this path only ever
-// reviews the operator's own local tree, where a repo-supplied MCP config is
-// the operator's own file. Revisit if Codex gains a strict-config flag or if
-// the remote-head refusal is ever relaxed.
+// is no harness-boundary control to force.
+//
+// What bounds the exposure, stated exactly: CheckAgentForRef refuses Codex for
+// remote PR heads, so this path only ever runs against a workspace on a path
+// the operator owns. That is all sess.Ref.IsLocal() proves — PATH ownership,
+// not COMMIT provenance. PrepareLocal accepts a detached HEAD and only warns,
+// so an ordinary `gh pr checkout` of a third-party branch reaches this path
+// with the contributor's tree in it, repo-supplied MCP config included. The
+// content under review is therefore not necessarily the operator's own; what
+// holds this at Tier 2 is that the operator selected that checkout deliberately
+// and can inspect it before dispatch, not that the bytes are theirs. Revisit if
+// Codex gains a strict-config flag, if the remote-head refusal is relaxed, or
+// if detached heads are ever rejected before dispatch.
 func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Config) error {
 	codexPath, err := launch.CodexPath(cfg.Launch.Defaults)
 	if err != nil {
