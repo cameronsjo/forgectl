@@ -333,7 +333,7 @@ log_file  = ""      # "" = auto (daily-rotated file); "-" = stderr; or an explic
 
 That marker is the point. Every section's zero value means "absent, built-in defaults apply", so a value alone cannot tell a key you never set from a key you misspelled. The command also lists **unrecognized keys** — anything in the file that bound to no field, which catches `probe_hostt` and a key filed under the wrong section — and surfaces the decode error from a malformed file instead of silently defaulting past it. Resolved values that differ from the stored ones (the `off` log level, the dated log path, the launch binary chosen by `FORGECTL_CLAUDE_BIN` > `binary_path` > `PATH`) print in their own labeled blocks.
 
-`sessions.dsn` renders as `(redacted)`; its `(set)`/`(default)` marker is the useful signal and a connection string can carry a password.
+`sessions.dsn` renders as `(redacted)`; its `(set)`/`(default)` marker is the useful signal and a connection string can carry a password. `launch.defaults.env` renders its **key names only** for the same reason — it is arbitrary environment injected into the launched harness, so it is where an `ANTHROPIC_API_KEY` or `GH_TOKEN` would sit. (`forgectl launch which` still prints those values in full; use it when you need to see them.)
 
 `--json` emits the same information machine-readably and is the stable surface — the human rendering may reflow.
 

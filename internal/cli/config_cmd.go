@@ -35,6 +35,10 @@ var configModule = module.Manifest{
 // DSN SHOULD omit the password (pgx resolves it from ~/.pgpass), but "should"
 // is not "does", and this command's output is exactly the kind of thing pasted
 // into an issue.
+//
+// This is an exact dotted-key match, so it can hide a scalar but cannot say
+// "hide the values of this map" — map leaves are handled by policy in
+// leafValue instead.
 var redactedKeys = map[string]bool{
 	"sessions.dsn": true,
 }
@@ -49,10 +53,13 @@ type configEntry struct {
 	// Group is the leaf's parent path — "net" for net.probe_host,
 	// "review.gitea" for review.gitea.host, "" for the three host scalars. It
 	// is what the human renderer emits section headers from.
-	Group    string `json:"group"`
-	Value    any    `json:"value"`
-	Set      bool   `json:"set"`
-	Redacted bool   `json:"redacted,omitempty"`
+	Group string `json:"group"`
+	Value any    `json:"value"`
+	Set   bool   `json:"set"`
+	// Redacted means Value is NOT the stored value — it was withheld. Two
+	// things set it: a redactedKeys hit (Value is the placeholder) and a
+	// non-empty map leaf (Value is the key set, values dropped).
+	Redacted bool `json:"redacted,omitempty"`
 
 	// display is the human-readable rendering; not part of the JSON contract.
 	display string
@@ -161,8 +168,8 @@ func walkStruct(v reflect.Value, prefix string, rep config.Report, out *[]config
 		if !f.IsExported() {
 			continue
 		}
-		tag, _, _ := strings.Cut(f.Tag.Get("toml"), ",")
-		if tag == "" || tag == "-" {
+		tag, bound := tomlFieldName(f)
+		if !bound {
 			continue
 		}
 		key := tag
@@ -182,21 +189,52 @@ func walkStruct(v reflect.Value, prefix string, rep config.Report, out *[]config
 			Set:     rep.IsSet(key),
 			display: display,
 		}
-		if redactedKeys[key] && !fv.IsZero() {
+		switch {
+		case redactedKeys[key] && !fv.IsZero():
 			entry.Value = redactedPlaceholder
 			entry.display = redactedPlaceholder
+			entry.Redacted = true
+		case fv.Kind() == reflect.Map && fv.Len() > 0:
+			// leafValue already dropped the values; say so, so a reader is
+			// never left thinking the key set is the whole content.
 			entry.Redacted = true
 		}
 		*out = append(*out, entry)
 	}
 	for _, i := range nested {
-		f := t.Field(i)
-		tag, _, _ := strings.Cut(f.Tag.Get("toml"), ",")
-		key := tag
+		key, bound := tomlFieldName(t.Field(i))
+		if !bound {
+			continue
+		}
 		if prefix != "" {
-			key = prefix + "." + tag
+			key = prefix + "." + key
 		}
 		walkStruct(v.Field(i), key, rep, out)
+	}
+}
+
+// tomlFieldName returns the config-file name the decoder binds f to, and
+// whether f participates in the file at all.
+//
+// An empty `toml` tag is NOT "unbound": BurntSushi falls back to the Go field
+// name (type_fields.go), matched exactly and then case-insensitively, so an
+// untagged `Foo string` is settable as `Foo = "x"` and decodes — which also
+// means it never shows up under "unrecognized keys". Skipping it here would
+// recreate the invisible-key defect this command exists to remove, one level
+// down. Only `toml:"-"` is genuinely out of the file.
+//
+// The fallback is the belt; TestConfig_EveryBindableFieldIsTagged is the
+// suspenders. It has to be both: the fallback restores visibility but not
+// provenance, because config.Report.IsSet keys on the file's own spelling.
+func tomlFieldName(f reflect.StructField) (string, bool) {
+	tag, _, _ := strings.Cut(f.Tag.Get("toml"), ",")
+	switch tag {
+	case "-":
+		return "", false
+	case "":
+		return f.Name, true
+	default:
+		return tag, true
 	}
 }
 
@@ -206,8 +244,8 @@ func walkStruct(v reflect.Value, prefix string, rep config.Report, out *[]config
 //   - *bool (LaunchDefaults.AllowDanger) — a pointer precisely so an explicit
 //     false is distinguishable from unset; nil renders "unset" / JSON null,
 //     and must not collapse to false.
-//   - map[string]string (LaunchDefaults.Env) — sorted "k=v" pairs, because Go
-//     randomises map iteration and unsorted output would differ run to run.
+//   - map[string]string (LaunchDefaults.Env) — sorted KEYS ONLY, never
+//     values. See the reflect.Map arm.
 //   - []string ([docs] roots, [review] owners, [update] roster, …) — a
 //     bracketed list; a nil slice still renders "[]" and JSON [], never null.
 //
@@ -222,6 +260,24 @@ func leafValue(v reflect.Value) (display string, value any) {
 		}
 		return leafValue(v.Elem())
 
+	// A map leaf renders its sorted KEYS and never its values. The only one
+	// config.Config carries is LaunchDefaults.Env — arbitrary environment
+	// injected into the launched harness, and therefore the likeliest home in
+	// this file for ANTHROPIC_API_KEY, GH_TOKEN, or the password-bearing
+	// FORGECTL_SESSIONS_DSN that redactedKeys already hides one section over.
+	// redactedKeys is an exact dotted-key match and cannot express "mask this
+	// map's values", so the policy lives here and covers every map leaf,
+	// including ones added later.
+	//
+	// Keys-only preserves exactly what the DSN redaction preserves: is it set,
+	// and with what shape. Sorting is load-bearing beyond determinism — Go
+	// randomises map iteration, so unsorted output would differ run to run.
+	//
+	// `forgectl launch which` still prints these values in full
+	// (internal/cli/launch_which.go). That is a pre-existing exposure on a
+	// different surface, filed separately; it is deliberately not inherited
+	// here, where the output is the kind of thing pasted into an issue and
+	// --json makes it machine-copyable.
 	case reflect.Map:
 		keys := make([]string, 0, v.Len())
 		iter := v.MapRange()
@@ -229,14 +285,7 @@ func leafValue(v reflect.Value) (display string, value any) {
 			keys = append(keys, iter.Key().String())
 		}
 		sort.Strings(keys)
-		pairs := make([]string, 0, len(keys))
-		m := make(map[string]string, len(keys))
-		for _, k := range keys {
-			val := v.MapIndex(reflect.ValueOf(k)).String()
-			pairs = append(pairs, k+"="+val)
-			m[k] = val
-		}
-		return "{" + strings.Join(pairs, " ") + "}", m
+		return "{" + strings.Join(keys, " ") + "}", keys
 
 	case reflect.Slice:
 		if v.Type().Elem().Kind() == reflect.Struct {

@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/module"
 )
 
@@ -250,6 +252,118 @@ func TestConfig_UnsetDSNIsNotMarkedRedacted(t *testing.T) {
 	}
 }
 
+// TestConfig_EnvMapValuesAreWithheld is the DSN threat model applied to the
+// key most likely to hold a credential: [launch.defaults.env] is arbitrary
+// environment injected into the launched harness, so ANTHROPIC_API_KEY and
+// GH_TOKEN live there by construction. redactedKeys cannot reach into a map,
+// so leafValue renders map leaves as sorted keys only.
+//
+// Both halves are load-bearing. Without the leak assertion the redaction can
+// silently regress; without the survival assertion "withhold everything" —
+// dropping the line, emptying the map — passes.
+func TestConfig_EnvMapValuesAreWithheld(t *testing.T) {
+	// Distinct, unlikely-to-collide values so "the raw output does not contain
+	// this" is about THIS value, not an accidental absence. FOO is here to
+	// prove the policy is every value, not just the secret-looking one.
+	const body = "[launch.defaults.env]\nANTHROPIC_API_KEY = \"sk-ant-hunter2\"\nFOO = \"plainbarvalue\"\n"
+
+	out := runConfig(t, body)
+	for _, secret := range []string{"sk-ant-hunter2", "plainbarvalue"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("human output leaks env value %q; got:\n%s", secret, out)
+		}
+	}
+	// Signal survival: the key set is what makes the line worth printing.
+	for _, key := range []string{"ANTHROPIC_API_KEY", "FOO"} {
+		if !strings.Contains(out, key) {
+			t.Errorf("human output dropped env key %q — withholding values must not cost the key set; got:\n%s", key, out)
+		}
+	}
+
+	doc, raw := runConfigJSONRaw(t, body)
+	for _, secret := range []string{"sk-ant-hunter2", "plainbarvalue"} {
+		if strings.Contains(raw, secret) {
+			t.Errorf("--json output leaks env value %q; got:\n%s", secret, raw)
+		}
+	}
+	e := findEntry(t, doc, "launch.defaults.env")
+	if !e.Set {
+		t.Error("launch.defaults.env set = false, want true — withholding must not cost the provenance signal")
+	}
+	if !e.Redacted {
+		t.Error("launch.defaults.env redacted = false, want true — the values were withheld and the JSON must say so")
+	}
+	keys, ok := e.Value.([]any)
+	if !ok || len(keys) != 2 || keys[0] != "ANTHROPIC_API_KEY" || keys[1] != "FOO" {
+		t.Errorf("launch.defaults.env value = %#v, want the sorted key list [ANTHROPIC_API_KEY FOO]", e.Value)
+	}
+}
+
+// TestConfig_UnsetEnvMapIsNotMarkedRedacted is the negative control for the
+// map policy, mirroring TestConfig_UnsetDSNIsNotMarkedRedacted: an empty map
+// withheld nothing, and claiming otherwise misreports "unset" as "set but
+// withheld".
+func TestConfig_UnsetEnvMapIsNotMarkedRedacted(t *testing.T) {
+	e := findEntry(t, runConfigJSON(t, ""), "launch.defaults.env")
+	if e.Redacted || e.Set {
+		t.Errorf("launch.defaults.env redacted=%v set=%v with no config file, want both false", e.Redacted, e.Set)
+	}
+}
+
+// TestConfig_EveryBindableFieldIsTagged extends configStructSections' fatal
+// from top-level sections to every field at every depth.
+//
+// BurntSushi binds an exported field with no `toml` tag by its Go name
+// (type_fields.go), matched exactly and then case-insensitively. So an
+// untagged `Foo string` is settable as `Foo = "x"`, decodes correctly, and —
+// because it DID decode — is not reported under "unrecognized keys" either.
+// That is the defect this command exists to remove, relocated one level down.
+//
+// walkStruct's tomlFieldName fallback keeps such a field visible, but cannot
+// recover its (set)/(default) marker: config.Report.IsSet keys on the file's
+// own spelling. So the fallback is the safety net and this test is the rule.
+func TestConfig_EveryBindableFieldIsTagged(t *testing.T) {
+	seen := map[reflect.Type]bool{}
+	audited := 0
+
+	var walk func(typ reflect.Type, path string)
+	walk = func(typ reflect.Type, path string) {
+		// Reach the struct behind a pointer, slice, array, or map —
+		// [[launch.project]] elements are bindable the same way.
+		for {
+			switch typ.Kind() {
+			case reflect.Pointer, reflect.Slice, reflect.Array, reflect.Map:
+				typ = typ.Elem()
+				continue
+			}
+			break
+		}
+		if typ.Kind() != reflect.Struct || seen[typ] {
+			return
+		}
+		seen[typ] = true
+		for i := 0; i < typ.NumField(); i++ {
+			f := typ.Field(i)
+			if !f.IsExported() {
+				continue
+			}
+			audited++
+			if tag, _, _ := strings.Cut(f.Tag.Get("toml"), ","); tag == "" {
+				t.Errorf("%s.%s has no toml tag: the decoder still binds it by Go name, so it is settable in config.toml "+
+					"with no reliable provenance and no unrecognized-key warning. Give it `toml:\"<key>\"`, or `toml:\"-\"` "+
+					"to keep it out of the file entirely.", path, f.Name)
+			}
+			walk(f.Type, path+"."+f.Name)
+		}
+	}
+	walk(reflect.TypeOf(config.Config{}), "config.Config")
+
+	// Self-check: a derivation that visits nothing passes every assertion.
+	if audited == 0 {
+		t.Fatal("audited no fields — the walk derived nothing and would pass vacuously")
+	}
+}
+
 // TestConfig_DecodeErrorSurfaces covers the fourth face of the overloaded zero
 // value: a wrong-typed value aborts the decode partway, Load tolerates it with
 // a warning, and every affected key then renders exactly like "never set".
@@ -344,9 +458,11 @@ func TestConfig_HostScalarsResolved(t *testing.T) {
 	}
 }
 
-// TestConfig_NestedSectionRendered pins [review.gitea], the 12th section:
-// nested under Review, and omitted by the pre-fix renderer alongside the other
-// ten.
+// TestConfig_NestedSectionRendered pins [review.gitea], the one SUBSECTION —
+// nested under Review, so configStructSections' eleven top-level sections do
+// not include it, and TestConfig_PrintsEverySection's anchored header count
+// deliberately excludes it. It was omitted by the pre-fix renderer alongside
+// the ten missing top-level sections, and only this test covers it.
 func TestConfig_NestedSectionRendered(t *testing.T) {
 	out := runConfig(t, "[review.gitea]\nhost = \"git.example\"\n")
 	if !strings.Contains(out, "[review.gitea]") {
