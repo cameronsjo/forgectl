@@ -101,10 +101,17 @@ func (c *Client) SessionsDir() string { return c.sessionsDir }
 // FindingsDir returns the resolved local-review findings directory.
 func (c *Client) FindingsDir() string { return c.findingsDir }
 
-// tempPrefix is the os.MkdirTemp prefix sandbox uses for every workspace
-// ("forgectl-workflow-*"); the breadcrumb content check requires a workspace
-// directory whose symlink-resolved name carries the "forgectl-" prefix.
-const tempPrefix = "forgectl-"
+// tempPrefix is the exact os.MkdirTemp prefix sandbox.Sandbox uses for every
+// workspace it creates (sandbox.go: os.MkdirTemp("", "forgectl-workflow-*")),
+// and it is the full prefix on purpose rather than a looser "forgectl-".
+//
+// Matching the sole producer exactly accepts 100% of legitimate workspaces while
+// excluding two families that a broader "forgectl-" would sweep in: the
+// findingsDirPrefix ("forgectl-findings-") review deliverables, which are
+// deliberately NOT disposable clean rooms, and any incidental forgectl-* dir a
+// user happens to own. That matters because validateWorkspace is the only gate
+// in front of sandbox.Teardown's os.RemoveAll.
+const tempPrefix = "forgectl-workflow-"
 
 // osTempDir is a seam over os.TempDir. Its one remaining consumer is the belt
 // prefix scan in rejectCleanRoomPath, which bounds its walk at the temp root;

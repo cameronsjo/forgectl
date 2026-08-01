@@ -140,22 +140,31 @@ func validateBreadcrumb(bc Breadcrumb) error {
 // the creating shell's macOS $TMPDIR was /var/folders/… — which is why this was
 // not merely an operator-typed-TMPDIR edge case (#184).
 //
-// The guard-strength delta is worth naming rather than glossing. The prefix
-// branch runs EvalSymlinks first, so a "forgectl-"-named symlink cannot launder
-// a target elsewhere, and it already refuses / and $HOME on its own. All the
-// temp-root check ever added was "not a forgectl-* directory sitting outside
-// the temp root" — and planting such a directory takes a process running as
-// this uid, which can just as easily plant one inside the temp root. The check
-// cost every $TMPDIR-crossing session and bought a step an adversary walks
-// around.
+// The guard-strength delta is worth naming rather than glossing, and the honest
+// version is not "the check bought nothing". What the temp root actually bought
+// was a BOUND ON REACH: it confined os.RemoveAll to the disposable region of the
+// filesystem. An attacker never had to PLANT a matching directory — it was
+// enough to NAME one that already existed, and a findings dir full of review
+// deliverables was exactly such a name under the old, looser "forgectl-" prefix.
 //
-// Stated at the sink rather than the gate, so nobody has to re-derive it: `pr
-// teardown` and `pr cleanup` can now delete a forgectl-*-named directory that
-// lives outside the temp root, where before they could not. That is a real
-// widening of the accident surface and it is accepted knowingly — the breadcrumb
-// carrying such a path must first be written into the 0700 session-state dir,
-// which already takes this uid, and the LOCATION guard in loadBreadcrumb is what
-// bounds who can put one there.
+// Two things replace that bound. First, tempPrefix is now the full
+// "forgectl-workflow-" — the exact prefix of the only producer — so the set of
+// nameable directories shrinks to ones sandbox.Sandbox itself creates, and
+// findings dirs and incidental user forgectl-* dirs stop qualifying. Second, the
+// prefix branch resolves symlinks BEFORE testing, so a matching symlink cannot
+// launder a target elsewhere, and it refuses / and $HOME on its own.
+//
+// The residual widening, stated plainly: `pr teardown` and `pr cleanup` can now
+// delete a forgectl-workflow-* directory that lives outside the current temp
+// root, where before they could not. That is accepted knowingly. The breadcrumb
+// naming such a path must first be written into the 0700 session-state dir, and
+// the LOCATION guard in loadBreadcrumb is what bounds who can put one there.
+//
+// The non-adversarial half matters at least as much: the temp-root bound was
+// also a correctness backstop against a CORRUPTED or hand-edited breadcrumb
+// pointing somewhere absurd. Nothing malicious required — just a bad path
+// reaching a recursive delete. The narrowed prefix is what carries that weight
+// now, which is why it should track the producer exactly and not drift looser.
 func validateWorkspace(workspace string) error {
 	if !filepath.IsAbs(workspace) {
 		return fmt.Errorf("workspace %q must be an absolute path", workspace)
@@ -167,9 +176,14 @@ func validateWorkspace(workspace string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("workspace %q is not a directory", workspace)
 	}
-	real := workspace
-	if r, err := filepath.EvalSymlinks(workspace); err == nil {
-		real = r
+	// Fail CLOSED on a resolution failure. With the temp-root layer gone this
+	// branch is the sole gate, so falling back to the unresolved string would
+	// let an unresolvable path be judged on its literal name. os.Stat above
+	// already traversed the whole path, so failing here is anomalous by
+	// construction — treat it as hostile rather than as "good enough".
+	real, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return fmt.Errorf("workspace %q could not be resolved: %w", workspace, err)
 	}
 	if !strings.HasPrefix(filepath.Base(real), tempPrefix) {
 		return fmt.Errorf("workspace %q lacks the %q sandbox prefix", workspace, tempPrefix)

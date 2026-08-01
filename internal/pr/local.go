@@ -196,8 +196,10 @@ func (c *Client) rejectCleanRoomPath(absPath string) error {
 	}
 
 	// Belt: prefix scan, bounded at the temp root so a $TMPDIR whose own path
-	// happens to contain a "forgectl-*" component does not reject everything
-	// under it.
+	// happens to contain a tempPrefix component does not reject everything
+	// under it. The prefix is the producer-exact "forgectl-workflow-", so a
+	// findings dir is not a clean room here either — which costs nothing, since
+	// findings live outside the temp root and this walk never reached them.
 	tempRoot := filepath.Clean(osTempDir())
 	if r, err := filepath.EvalSymlinks(tempRoot); err == nil {
 		tempRoot = r

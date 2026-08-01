@@ -10,9 +10,10 @@ package pr
 //   [x] CONTENT reject: unknown fields (schema drift / smuggled keys)
 //   [x] CONTENT reject: missing required fields (workspace, ref, createdAt)
 //   [x] CONTENT reject: workspace is not an existing dir
-//   [x] CONTENT reject: workspace lacks the forgectl- sandbox prefix
-//   [x] CONTENT accept: a prefixed workspace outside the current temp root
-//       (the documented widening from #184)
+//   [x] CONTENT reject: workspace lacks the forgectl-workflow- sandbox prefix
+//   [x] CONTENT accept: a forgectl-workflow-* workspace outside the current
+//       temp root (the documented widening from #184)
+//   [x] CONTENT reject: a forgectl-findings-* dir (deliverable, not a sandbox)
 //   [x] CONTENT reject: malformed ref string
 //   [x] $TMPDIR moving between create and load does not blind the loader
 //   [x] $TMPDIR moving between create and load does not blind List
@@ -28,11 +29,14 @@ import (
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
-// fakeWorkspace makes a dir under the OS temp root with the forgectl- prefix —
-// what validateWorkspace accepts as a real sandbox.
+// fakeWorkspace makes a dir carrying tempPrefix — what validateWorkspace
+// accepts as a real sandbox. The name must keep the full "forgectl-workflow-"
+// prefix: tempPrefix tracks sandbox.Sandbox's producer exactly, so a looser
+// fixture name (the old "forgectl-test-*") is rejected and every test that
+// seeds a session through this helper fails.
 func fakeWorkspace(t *testing.T) string {
 	t.Helper()
-	ws, err := os.MkdirTemp("", "forgectl-test-*")
+	ws, err := os.MkdirTemp("", "forgectl-workflow-test-*")
 	if err != nil {
 		t.Fatalf("mkdir workspace: %v", err)
 	}
@@ -135,7 +139,10 @@ func TestLoadBreadcrumb_ContentRejections(t *testing.T) {
 // sandbox dir.
 func FuzzLoadBreadcrumb(f *testing.F) {
 	sessionsDir := f.TempDir()
-	ws, err := os.MkdirTemp("", "forgectl-fuzz-*")
+	// Must carry the full tempPrefix. A name the loader rejects would make every
+	// seed error out, the property `return` early, and the whole fuzz go
+	// silently VACUOUS rather than red.
+	ws, err := os.MkdirTemp("", "forgectl-workflow-fuzz-*")
 	if err != nil {
 		f.Fatalf("mkdir workspace: %v", err)
 	}
@@ -221,33 +228,47 @@ func TestLoadBreadcrumb_SurvivesTempDirChange(t *testing.T) {
 }
 
 // TestLoadBreadcrumb_PrefixedDirOutsideTempRootAccepted pins the widening #184
-// took on deliberately: a forgectl-prefixed existing directory loads even when
-// it sits outside the CURRENT temp root. From inside the loader that case is
+// took on deliberately: a forgectl-workflow-* directory loads even when it sits
+// outside the CURRENT temp root. From inside the loader that case is
 // indistinguishable from a legitimate workspace created under a different
-// $TMPDIR, and refusing it cost every $TMPDIR-crossing session while a same-uid
-// adversary could plant a forgectl-* dir inside the temp root just as easily.
+// $TMPDIR, so refusing it is what broke every $TMPDIR-crossing session.
+//
+// The companion assertion is the important half. Accepting a producer-named dir
+// anywhere is only safe because tempPrefix is narrow, so the test also pins that
+// a forgectl-findings-* sibling — a review deliverable, NOT a disposable clean
+// room — is still REJECTED. If someone loosens tempPrefix back to "forgectl-",
+// that second half goes red and names exactly what was lost: findings dirs
+// become reachable by sandbox.Teardown's os.RemoveAll.
 func TestLoadBreadcrumb_PrefixedDirOutsideTempRootAccepted(t *testing.T) {
 	dir := t.TempDir()
 	outside := t.TempDir()
 	otherRoot := t.TempDir()
-	ws := filepath.Join(outside, "forgectl-not-a-real-sandbox")
+
+	ws := filepath.Join(outside, "forgectl-workflow-outside-the-root")
 	if err := os.Mkdir(ws, 0o700); err != nil {
 		t.Fatalf("mkdir workspace: %v", err)
+	}
+	findings := filepath.Join(outside, findingsDirPrefix+"deliverables")
+	if err := os.Mkdir(findings, 0o700); err != nil {
+		t.Fatalf("mkdir findings dir: %v", err)
 	}
 	if sandbox.WithinWorkspace(otherRoot, ws) {
 		t.Fatalf("precondition: otherRoot %q must not contain ws %q", otherRoot, ws)
 	}
 
-	body := `{"workspace":"` + ws + `","ref":"o/r#1","agent":"a","createdAt":"2026-07-08T00:00:00Z"}`
-	path := writeRaw(t, dir, "bc.json", body)
-
 	t.Setenv("TMPDIR", otherRoot)
 
-	got, err := loadBreadcrumb(path, dir)
+	body := `{"workspace":"` + ws + `","ref":"o/r#1","agent":"a","createdAt":"2026-07-08T00:00:00Z"}`
+	got, err := loadBreadcrumb(writeRaw(t, dir, "ws.json", body), dir)
 	if err != nil {
-		t.Fatalf("a forgectl-prefixed dir outside the temp root should now load: %v", err)
+		t.Fatalf("a forgectl-workflow-* dir outside the temp root should load: %v", err)
 	}
 	if got.Workspace != ws {
 		t.Errorf("workspace = %q, want %q", got.Workspace, ws)
+	}
+
+	bad := `{"workspace":"` + findings + `","ref":"o/r#1","agent":"a","createdAt":"2026-07-08T00:00:00Z"}`
+	if _, err := loadBreadcrumb(writeRaw(t, dir, "findings.json", bad), dir); err == nil {
+		t.Errorf("a %s dir must be rejected — it is a review deliverable, not a disposable clean room", findingsDirPrefix)
 	}
 }
