@@ -10,6 +10,12 @@ package cli
 //   [x] Unhappy: an invalid bind address returns a wrapped error naming "bind"
 //   [x] Happy (security): a loopback bind serves requests with no
 //       Authorization header at all — no token is required
+//   [x] Unhappy (security): a request carrying Sec-Fetch-Site: cross-site is
+//       rejected 403 by the running server, while the same request without the
+//       header 200s. Exercised against a REAL server rather than the
+//       middleware alone, because what can regress here is the CHAIN — a
+//       reordering or a dropped entry in runDocsServe leaves the middleware's
+//       own unit tests green
 //
 // allowedHosts (Classification: security gate — Host allowlist construction)
 //   [x] Happy: a non-loopback bind address adds the bound host to the
@@ -183,6 +189,76 @@ func TestRunDocsServe_Loopback_NoBearerTokenRequired(t *testing.T) {
 	resp.Body.Close() //nolint:errcheck // response already read to completion by the caller's decision below
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("GET %s carrying no Authorization header: status = %d, want %d — a loopback bind must not require a bearer token", url, resp.StatusCode, http.StatusOK)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("runDocsServe after cancel: %v, want nil (graceful shutdown)", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runDocsServe did not return within 5s of context cancellation")
+	}
+}
+
+// TestRunDocsServe_CrossSiteRequest_Rejected403 proves the cross-site gate is
+// WIRED, not merely written. httpsrv's own tests cover RejectCrossSite's
+// behavior; this covers the thing they cannot see — that runDocsServe actually
+// puts it in the chain around the docs handler. A dropped or misordered entry
+// there is invisible to a middleware unit test and to the compiler.
+//
+// Both halves matter. The cross-site request must 403, and the otherwise
+// identical request without the header must 200: a gate that rejected
+// everything would satisfy the first assertion alone while breaking the reader.
+func TestRunDocsServe_CrossSiteRequest_Rejected403(t *testing.T) {
+	idx := testDocsIndex(t)
+	fake := &exec.FakeRunner{}
+	deps := module.Deps{Runner: fake}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := testCmdWithContext(ctx)
+
+	done := make(chan error, 1)
+	go func() { done <- runDocsServe(cmd, deps, idx, "127.0.0.1:0", true, "") }()
+
+	url := waitForOpenedURL(t, fake)
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	get := func(t *testing.T, header string) (int, http.Header) {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		if header != "" {
+			req.Header.Set("Sec-Fetch-Site", header)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", url, err)
+		}
+		resp.Body.Close() //nolint:errcheck // only the status and headers are under test
+		return resp.StatusCode, resp.Header
+	}
+
+	code, headers := get(t, "cross-site")
+	if code != http.StatusForbidden {
+		t.Errorf("GET %s with Sec-Fetch-Site: cross-site: status = %d, want %d — the running server must reject a request another origin's page initiated, which means RejectCrossSite has to be in runDocsServe's middleware chain", url, code, http.StatusForbidden)
+	}
+	// A rejected request never reaches the docs handler, so this header can only
+	// be here if SecurityHeaders is wrapped around the CHAIN as well. Without
+	// that, the 401s and 403s the chain generates would be the only responses in
+	// the server carrying no CSP.
+	if got := headers.Get("Content-Security-Policy"); got == "" {
+		t.Error("the 403 from the cross-site gate carries no Content-Security-Policy — SecurityHeaders must wrap the middleware chain, not just the docs handler the rejected request never reaches")
+	}
+	if got := headers.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("the 403 from the cross-site gate has X-Content-Type-Options = %q, want %q", got, "nosniff")
+	}
+
+	if code, _ := get(t, ""); code != http.StatusOK {
+		t.Errorf("GET %s with no Sec-Fetch-Site header: status = %d, want %d — a client that sends no fetch metadata (curl, the Go http.Client behind `docs open`) must still be served", url, code, http.StatusOK)
 	}
 
 	cancel()

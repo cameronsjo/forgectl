@@ -11,6 +11,13 @@ package docs
 //   [x] Unhappy (security): a disallowed extension under a known root 404s
 //   [x] Happy: the sidenav lists the indexed doc with a matching href
 //   [x] Happy: every response carries X-Content-Type-Options: nosniff
+//   [x] Happy (security): every response carries the Content-Security-Policy
+//   [x] Unhappy (security): the shell contains NO inline <script> — every
+//       <script> tag carries a src=. The CSP sets script-src 'self', so an
+//       inline script would be blocked in the browser and silent to Go; this
+//       is the test that keeps the policy and the markup honest together
+//   [x] Unhappy (security): every asset the shell references is same-origin —
+//       no absolute or protocol-relative URL survives default-src 'self'
 //
 // handleLocate (Classification: security-sensitive — membership disclosure)
 //   [x] Unhappy: a missing "path" query param 400s
@@ -28,6 +35,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -90,7 +98,7 @@ func TestServer_StaticAssets_Served(t *testing.T) {
 	idx, _ := testIndex(t)
 	h := testHandler(idx)
 
-	for _, path := range []string{"/assets/artificer.css", "/assets/artificer-theme.js", "/assets/reload.js", "/assets/chroma.css"} {
+	for _, path := range []string{"/assets/artificer.css", "/assets/artificer-theme.js", "/assets/reload.js", "/assets/chroma.css", "/assets/sidenav-filter.js"} {
 		t.Run(path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
@@ -292,6 +300,143 @@ func TestServer_ResponsesCarryNoSniffHeader(t *testing.T) {
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 			if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 				t.Errorf("X-Content-Type-Options = %q, want %q", got, "nosniff")
+			}
+		})
+	}
+}
+
+// TestServer_ResponsesCarryCSPHeader covers every response SHAPE the handler
+// produces, not just the rendered page: the shell, a doc, a static asset, a
+// JSON payload, and a 404. securityHeaders wraps the whole mux precisely so
+// none of these is an exception, and this route table is what holds that claim
+// to account — a header applied in renderShell alone would pass a shell-only
+// test and leave the other four uncovered.
+func TestServer_ResponsesCarryCSPHeader(t *testing.T) {
+	idx, label := testIndex(t)
+	h := testHandler(idx)
+
+	doc, ok := idx.Find(label, "welcome.md")
+	if !ok {
+		t.Fatal("fixture doc \"welcome.md\" not found in the index")
+	}
+	locateQuery := url.Values{"path": []string{doc.AbsPath}}.Encode()
+
+	paths := []string{
+		"/",
+		"/doc/" + label + "/welcome.md",
+		"/assets/artificer.css",
+		locatePath + "?" + locateQuery,      // a 200 JSON payload
+		"/doc/" + label + "/no-such-doc.md", // a 404
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			got := rec.Header().Get("Content-Security-Policy")
+			if got != contentSecurityPolicy {
+				t.Errorf("Content-Security-Policy = %q, want %q — the policy is set on the whole mux, so assets and JSON carry it as well as the rendered shell", got, contentSecurityPolicy)
+			}
+		})
+	}
+}
+
+// scriptTag matches an opening <script ...> tag and captures its attributes, so
+// a test can ask whether the tag loads a file or carries a body.
+var scriptTag = regexp.MustCompile(`(?i)<script([^>]*)>`)
+
+// scriptSrcAttr matches a real src attribute on a tag, anchored to an attribute
+// boundary. A substring search for "src=" would also match data-src= or
+// integrity-src=, which would let an inline <script> slip past the check that
+// exists specifically to catch one.
+var scriptSrcAttr = regexp.MustCompile(`(?i)(^|\s)src\s*=`)
+
+// TestServer_ShellHasNoInlineScript is what keeps the CSP honest. script-src
+// 'self' forbids inline script execution, so an inline <script> added to the
+// shell later would compile, serve, and test green in Go while failing only as
+// a violation in a browser console nobody is watching. Asserting the property
+// in the served HTML puts the failure back in the test run.
+//
+// The check is structural rather than a search for known snippets: every
+// <script> opening tag must carry a src attribute. A tag without one has a body,
+// and a body is inline script regardless of what it contains.
+func TestServer_ShellHasNoInlineScript(t *testing.T) {
+	idx, label := testIndex(t)
+	h := testHandler(idx)
+
+	for _, path := range []string{"/", "/doc/" + label + "/welcome.md"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			body := rec.Body.String()
+
+			tags := scriptTag.FindAllStringSubmatch(body, -1)
+			if len(tags) == 0 {
+				t.Fatalf("no <script> tags found in %s at all — the shell links several, so this assertion is no longer testing what it thinks it is", path)
+			}
+			for _, tag := range tags {
+				if !scriptSrcAttr.MatchString(tag[1]) {
+					t.Errorf("inline <script%s> in %s: the handler sends script-src 'self', which blocks inline script in the browser and reports nothing to Go. Move the code into internal/docs/assets/ and serve it, the way assets/sidenav-filter.js is", tag[1], path)
+				}
+			}
+		})
+	}
+}
+
+// assetRef captures the value of every src= and href= attribute in the shell,
+// in all three HTML quoting forms.
+//
+// Matching only double-quoted values would make this test quietly selective:
+// a single-quoted or unquoted reference added later would not match, so it
+// would never be examined and the test would still pass. The alternation makes
+// "not matched" mean "not a reference" rather than "not a form we happen to
+// parse". Group 1 is the raw value with any quotes, and groups 2/3/4 are the
+// double-quoted, single-quoted, and bare contents respectively.
+var assetRef = regexp.MustCompile(`(?i)\s(?:src|href)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))`)
+
+// assetRefValue pulls the unquoted value out of an assetRef match, choosing the
+// branch by how the raw match starts rather than by "first non-empty group" —
+// the latter would mis-handle a legitimately empty value like href="".
+func assetRefValue(ref []string) string {
+	switch {
+	case strings.HasPrefix(ref[1], `"`):
+		return ref[2]
+	case strings.HasPrefix(ref[1], "'"):
+		return ref[3]
+	default:
+		return ref[4]
+	}
+}
+
+// TestServer_ShellReferencesOnlySameOriginAssets pins the other half of the
+// policy: default-src 'self' means an absolute or protocol-relative URL in the
+// shell would simply not load. The reader is deliberately network-free — every
+// asset is vendored and embedded — so a reference that leaves this origin is
+// both a broken page and a third-party request from opening a local document.
+func TestServer_ShellReferencesOnlySameOriginAssets(t *testing.T) {
+	idx, label := testIndex(t)
+	h := testHandler(idx)
+
+	for _, path := range []string{"/", "/doc/" + label + "/welcome.md"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+			refs := assetRef.FindAllStringSubmatch(rec.Body.String(), -1)
+			if len(refs) == 0 {
+				t.Fatalf("no src=/href= references found in %s — the shell links stylesheets and scripts, so this assertion is no longer testing what it thinks it is", path)
+			}
+			for _, ref := range refs {
+				got := assetRefValue(ref)
+				switch {
+				case got == "":
+					// href="" is a same-document reference; it cannot be off-origin.
+				case strings.HasPrefix(got, "//"):
+					t.Errorf("protocol-relative reference %q in %s: it inherits the page's scheme but not its origin, so it is off-origin and default-src 'self' blocks it", got, path)
+				case strings.Contains(got, "://"):
+					t.Errorf("absolute reference %q in %s: the reader vendors every asset and makes no network calls, and default-src 'self' blocks this", got, path)
+				case !strings.HasPrefix(got, "/") && !strings.HasPrefix(got, "#"):
+					t.Errorf("reference %q in %s is neither root-relative nor a fragment; keep shell references unambiguous so this test can tell same-origin from not", got, path)
+				}
 			}
 		})
 	}
