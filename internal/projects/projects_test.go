@@ -3,10 +3,15 @@ package projects
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -529,4 +534,241 @@ func TestValidPathSegment_RejectsTraversalAndSeparators(t *testing.T) {
 			t.Errorf("validPathSegment(%q) = false, want true", s)
 		}
 	}
+}
+
+// mkMixedFanOutFixture populates tmp with a mix of canonical (host/owner/repo)
+// and flat (top-level) clones — 30 total — so the fan-out phase actually has
+// enough candidates in play to expose a nondeterministic ordering, were one
+// present. Ten owners get a same-named "tool" repo under BOTH the github and
+// gitea host buckets, so Name collisions actually occur and the sort
+// comparator's Dir tie-break branch is exercised by a real Discover() call
+// rather than sitting dead in this test. (It does not, by itself, prove the
+// tie-break is load-bearing — see TestSortProjects_TieBreaksOnDir for that.)
+func mkMixedFanOutFixture(t *testing.T, tmp string) {
+	t.Helper()
+	for i := 0; i < 10; i++ {
+		mkGitDir(t, tmp, "flat-"+strconv.Itoa(i))
+	}
+	for i := 0; i < 10; i++ {
+		owner := "owner-" + strconv.Itoa(i)
+		mkCanonicalGitDir(t, tmp, "github", owner, "tool")
+		mkCanonicalGitDir(t, tmp, "gitea", owner, "tool")
+	}
+}
+
+// nameDir is the (Name, Dir) projection asserted by the determinism test —
+// Status is excluded since it isn't what ordering depends on.
+type nameDir struct{ Name, Dir string }
+
+func projectNameDirs(projs []Project) []nameDir {
+	out := make([]nameDir, len(projs))
+	for i, p := range projs {
+		out[i] = nameDir{p.Name, p.Dir}
+	}
+	return out
+}
+
+// TestDiscover_FanOutIsRepeatable is an end-to-end regression check: two
+// Discover() calls over the same ~30-entry mixed fixture must produce
+// byte-identical, complete, ordered sequences. Renamed from
+// TestDiscover_FanOutIsDeterministic (which claimed to pin the sort's Dir
+// tie-break) after an Opus review of PR #235 proved that claim false by
+// mutation: even with the tie-break hard-removed, this run-twice-and-compare
+// style of check stays green, because it can only ever observe whatever the
+// production pipeline happens to do — it asserts repeatability, not a
+// specific ordering rule.
+//
+// This test earns its keep on repeatability alone (a real regression class:
+// a future change introducing a genuinely nondeterministic step — a map
+// iteration, an unseeded random tiebreak — would be caught here) but proves
+// nothing about the tie-break specifically. See two other tests for that
+// claim, run independently:
+//   - TestDiscover_CollidingNamesOrderByDir below asserts the ordering
+//     PROPERTY directly (dir-ascending among same-Name entries) through this
+//     same Discover() path. It is included for completeness but is, by
+//     measurement, EQUALLY unable to falsify the tie-break — see its own
+//     comment for why, and don't mistake its presence for coverage this
+//     test lacks.
+//   - TestSortProjects_TieBreaksOnDir is the one that actually goes red
+//     without the tie-break: it calls sortProjects directly with a
+//     deliberately non-Dir-sorted input, bypassing the filesystem walk that
+//     makes both Discover-routed tests structurally blind to this mutation.
+func TestDiscover_FanOutIsRepeatable(t *testing.T) {
+	tmp := t.TempDir()
+	mkMixedFanOutFixture(t, tmp)
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}}
+
+	first, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	second, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(first) != 30 {
+		t.Fatalf("got %d projects, want 30", len(first))
+	}
+	if !reflect.DeepEqual(projectNameDirs(first), projectNameDirs(second)) {
+		t.Errorf("Discover order is nondeterministic:\nfirst:  %+v\nsecond: %+v", projectNameDirs(first), projectNameDirs(second))
+	}
+}
+
+// TestDiscover_CollidingNamesOrderByDir asserts the ordering PROPERTY the
+// tie-break is meant to guarantee — directly, not via a two-run comparison —
+// over the same mkMixedFanOutFixture used above: for every pair of entries
+// that share a Name, the earlier one in Discover's result must have the
+// lexicographically smaller Dir.
+//
+// Measured by mutation (comparator collapsed to Name-only, same as
+// TestSortProjects_TieBreaksOnDir's mutation): this assertion STILL PASSES.
+// The reason is structural, not a test-design gap: os.ReadDir returns
+// filename-sorted entries at every level of the walk, so phase 1 always
+// hands phase 2 its candidates in an order that already agrees with
+// Dir-lexicographic order for any fixture built from real directories —
+// tie-break or not, the colliding entries arrive at the final sort already
+// in the order this test checks for. This test is kept anyway because the
+// property itself (colliding entries ARE dir-ordered in the shipped output)
+// is real and worth pinning as a regression check; it is not a substitute
+// for TestSortProjects_TieBreaksOnDir, which is the one that can actually
+// fail this mutation.
+func TestDiscover_CollidingNamesOrderByDir(t *testing.T) {
+	tmp := t.TempDir()
+	mkMixedFanOutFixture(t, tmp)
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}}
+
+	projs, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	lastDirByName := map[string]string{}
+	sawCollision := false
+	for _, p := range projs {
+		if prev, ok := lastDirByName[p.Name]; ok {
+			sawCollision = true
+			if prev >= p.Dir {
+				t.Errorf("Name %q: Dir %q did not sort after previous Dir %q", p.Name, p.Dir, prev)
+			}
+		}
+		lastDirByName[p.Name] = p.Dir
+	}
+	if !sawCollision {
+		t.Fatal("fixture produced no Name collisions — test asserts nothing")
+	}
+}
+
+// TestDiscover_BoundsConcurrency proves discoverDir's phase 2 actually runs
+// concurrently AND stays within discoverConcurrency()'s bound. Both halves
+// are load-bearing: without the peak>1 assertion this test would also pass
+// against fully-serial code.
+func TestDiscover_BoundsConcurrency(t *testing.T) {
+	tmp := t.TempDir()
+	mkMixedFanOutFixture(t, tmp)
+
+	var inFlight, peak int64
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		cur := atomic.AddInt64(&inFlight, 1)
+		defer atomic.AddInt64(&inFlight, -1)
+		for {
+			p := atomic.LoadInt64(&peak)
+			if cur <= p || atomic.CompareAndSwapInt64(&peak, p, cur) {
+				break
+			}
+		}
+		// A near-instant fake call finishes before the scheduler fans the rest
+		// of the batch out, so real concurrency would go unobserved without
+		// this: hold the call open briefly so overlapping goroutines actually
+		// overlap in wall-clock time rather than running effectively serially.
+		time.Sleep(5 * time.Millisecond)
+		// git status --porcelain / rev-list output; empty is fine either way.
+		return "", nil
+	}}
+	c := &Client{Dir: tmp, run: fake}
+
+	if _, err := c.Discover(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := atomic.LoadInt64(&peak)
+	if got <= 1 {
+		t.Errorf("peak in-flight calls = %d, want > 1 (fan-out never ran concurrently)", got)
+	}
+	// Comparing against discoverConcurrency() itself is a shape check, not a
+	// value check: it catches an unbounded fan-out (peak growing past
+	// whatever the bound is), but it cannot catch the bound being wrong —
+	// e.g. a typo'd discoverConcurrency() returning 1000 would still pass
+	// this assertion.
+	if want := int64(discoverConcurrency()); got > want {
+		t.Errorf("peak in-flight calls = %d, want <= discoverConcurrency() = %d", got, want)
+	}
+}
+
+// TestSortProjects_TieBreaksOnDir unit-tests sortProjects directly, bypassing
+// discoverDir's filesystem walk entirely. That matters: routing a fixture
+// through Discover can never falsify the tie-break (see the comments on
+// TestDiscover_FanOutIsRepeatable and TestDiscover_CollidingNamesOrderByDir,
+// both proven unable to catch it by the same mutation) because os.ReadDir's
+// per-level sorted traversal always hands phase 1 its candidates in an order
+// that already agrees with Dir order. Building the input slice directly here
+// sidesteps that constraint — the two colliding "tool" entries are given
+// deliberately Dir-DESCENDING input order, so only an explicit tie-break,
+// not incidental pre-sort ordering, can produce the wanted ascending
+// result. This is the ONLY test in this file proven (by mutation) to fail
+// without the tie-break.
+func TestSortProjects_TieBreaksOnDir(t *testing.T) {
+	projects := []Project{
+		{Name: "tool", Dir: "/z/tool"},
+		{Name: "alpha", Dir: "/x/alpha"},
+		{Name: "tool", Dir: "/a/tool"},
+	}
+	sortProjects(projects)
+
+	want := []nameDir{
+		{"alpha", "/x/alpha"},
+		{"tool", "/a/tool"},
+		{"tool", "/z/tool"},
+	}
+	if got := projectNameDirs(projects); !reflect.DeepEqual(got, want) {
+		t.Errorf("sortProjects order = %+v, want %+v", got, want)
+	}
+}
+
+// TestFanOut_PreservesOrder unit-tests the helper directly: results must land
+// at their input index regardless of completion order, including the empty
+// and single-item edge cases.
+func TestFanOut_PreservesOrder(t *testing.T) {
+	t.Run("many items", func(t *testing.T) {
+		in := make([]int, 50)
+		for i := range in {
+			in[i] = i
+		}
+		out := fanOut(in, func(i int) string {
+			return fmt.Sprintf("v%d", i)
+		})
+		if len(out) != len(in) {
+			t.Fatalf("got %d results, want %d", len(out), len(in))
+		}
+		for i, v := range out {
+			want := fmt.Sprintf("v%d", i)
+			if v != want {
+				t.Errorf("out[%d] = %q, want %q", i, v, want)
+			}
+		}
+	})
+
+	t.Run("empty input", func(t *testing.T) {
+		out := fanOut([]int{}, func(i int) int { return i * 2 })
+		if len(out) != 0 {
+			t.Errorf("got %d results, want 0", len(out))
+		}
+	})
+
+	t.Run("single item", func(t *testing.T) {
+		out := fanOut([]int{7}, func(i int) int { return i * 2 })
+		if len(out) != 1 || out[0] != 14 {
+			t.Errorf("got %v, want [14]", out)
+		}
+	})
 }
