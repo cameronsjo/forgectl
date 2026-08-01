@@ -10,7 +10,15 @@ package docker
 //   [x] Happy: a configured extra label (WithDockerConfig) is appended
 //   [x] Happy: a successful build caches the derived tag (LastTag reflects it)
 //   [x] Unhappy: an option-like context dir is rejected before any Runner call
-//   [x] Unhappy: a git resolution failure surfaces as an error, no docker call
+//   [x] Degraded (forgectl#187): a git resolution failure is non-fatal —
+//       docker still runs, tagging only a directory-derived :dev tag with
+//       the revision/ref.name labels absent
+//   [x] Degraded: --platform and a configured extra label survive the
+//       no-repo path
+//   [x] Degraded: a build that degraded to a dev tag still caches it
+//   [x] Degraded: a PARTIAL git resolution (fresh `git init`: branch
+//       resolves, sha does not) is still all-or-nothing — no half-labelled
+//       image carrying ref.name without revision
 //
 // Client.Run / Client.Shell (Classification: ops layer)
 //   [x] Happy: an explicit --tag is used as given
@@ -24,6 +32,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,12 +77,16 @@ func TestBuild_DerivesTagAndIssuesFullArgv(t *testing.T) {
 	fake := fakeGitRunner("/home/user/myrepo", "feature/foo", "abc1234")
 	c := newTestClient(t, fake, WithDockerConfig(config.DockerConfig{DefaultPlatform: "linux/amd64"}))
 
-	tag, err := c.Build(context.Background(), BuildOptions{ContextDir: "."})
+	result, err := c.Build(context.Background(), BuildOptions{ContextDir: "."})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
+	tag := result.Tag
 	if tag != "myrepo:feature-foo-abc1234" {
 		t.Errorf("Build tag = %q, want %q", tag, "myrepo:feature-foo-abc1234")
+	}
+	if !result.GitMetadata {
+		t.Errorf("GitMetadata = false, want true (git resolution succeeded)")
 	}
 
 	call := fake.Last()
@@ -143,7 +156,7 @@ func TestBuild_Success_CachesLastTag(t *testing.T) {
 	fake := fakeGitRunner("/home/user/myrepo", "main", "abc1234")
 	c := newTestClient(t, fake)
 
-	tag, err := c.Build(context.Background(), BuildOptions{})
+	result, err := c.Build(context.Background(), BuildOptions{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -152,8 +165,8 @@ func TestBuild_Success_CachesLastTag(t *testing.T) {
 	if !ok {
 		t.Fatal("expected LastTag to be populated after a successful build")
 	}
-	if got != tag {
-		t.Errorf("LastTag = %q, want %q", got, tag)
+	if got != result.Tag {
+		t.Errorf("LastTag = %q, want %q", got, result.Tag)
 	}
 }
 
@@ -169,7 +182,13 @@ func TestBuild_RejectsOptionLikeContextDir(t *testing.T) {
 	}
 }
 
-func TestBuild_GitFailure_SurfacesErrorWithoutDockerCall(t *testing.T) {
+// TestBuild_GitFailure_DegradesToDirDerivedDevTag inverts the pre-fix
+// contract this test used to assert (git failure == hard error, docker
+// never runs). forgectl#187: git metadata is an optional enrichment, not a
+// precondition — a git failure now degrades the build to a
+// directory-derived :dev tag with no revision/ref.name labels, and docker
+// still runs.
+func TestBuild_GitFailure_DegradesToDirDerivedDevTag(t *testing.T) {
 	fake := &exec.FakeRunner{
 		RunFunc: func(_ string, _ []string) (string, error) {
 			return "", errors.New("not a git repository")
@@ -177,13 +196,147 @@ func TestBuild_GitFailure_SurfacesErrorWithoutDockerCall(t *testing.T) {
 	}
 	c := newTestClient(t, fake)
 
-	if _, err := c.Build(context.Background(), BuildOptions{}); err == nil {
-		t.Fatal("expected an error when git resolution fails")
+	dir := t.TempDir()
+	want := devTag(slugifyRepo(filepath.Base(dir)))
+
+	result, err := c.Build(context.Background(), BuildOptions{ContextDir: dir})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
 	}
-	for _, call := range fake.Calls {
-		if call.Name == "docker" {
-			t.Errorf("docker must not run when git resolution fails, got: %+v", fake.Calls)
+	if result.GitMetadata {
+		t.Error("GitMetadata = true, want false (git resolution failed)")
+	}
+	if result.GitReason == "" {
+		t.Error("GitReason = empty, want the git resolution error")
+	}
+	if result.Tag != want || result.DevTag != want {
+		t.Errorf("Tag/DevTag = %q/%q, want %q (directory-derived)", result.Tag, result.DevTag, want)
+	}
+
+	call := fake.Last()
+	if call.Name != "docker" {
+		t.Fatalf("expected docker build to still run despite git failure, last call: %+v", call)
+	}
+	var tagFlags int
+	for i, a := range call.Args {
+		if a != "-t" {
+			continue
 		}
+		tagFlags++
+		if i+1 >= len(call.Args) || call.Args[i+1] != want {
+			t.Errorf("-t value = %v, want %q", call.Args[i+1:], want)
+		}
+	}
+	if tagFlags != 1 {
+		t.Errorf("expected exactly one -t flag (dev tag only, no derived tag), got %d in args: %v", tagFlags, call.Args)
+	}
+	argv := strings.Join(call.Args, " ")
+	if strings.Contains(argv, "org.opencontainers.image.revision") {
+		t.Errorf("revision label must be absent when git metadata is unavailable, args: %v", call.Args)
+	}
+	if strings.Contains(argv, "org.opencontainers.image.ref.name") {
+		t.Errorf("ref.name label must be absent when git metadata is unavailable, args: %v", call.Args)
+	}
+}
+
+// TestBuild_PartialGitResolution_DoesNotHalfLabelImage covers the shape
+// TestBuild_GitFailure_DegradesToDirDerivedDevTag structurally cannot: a
+// fresh `git init` before the first commit, where toplevel and branch both
+// resolve and only the sha fails. The tag is directory-derived either way,
+// so an image carrying ref.name=main with no matching revision would claim
+// a git association Build itself reported as absent.
+func TestBuild_PartialGitResolution_DoesNotHalfLabelImage(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			if name != "git" || len(args) < 4 {
+				return "", nil
+			}
+			switch args[3] {
+			case "--show-toplevel":
+				return "/tmp/unborn\n", nil
+			case "--abbrev-ref":
+				return "main\n", nil
+			case "--short":
+				return "", errors.New("fatal: needed a single revision")
+			}
+			return "", nil
+		},
+	}
+	c := newTestClient(t, fake)
+
+	dir := t.TempDir()
+	want := devTag(slugifyRepo(filepath.Base(dir)))
+
+	result, err := c.Build(context.Background(), BuildOptions{ContextDir: dir})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if result.GitMetadata {
+		t.Error("GitMetadata = true, want false (sha resolution failed)")
+	}
+	if result.Tag != want || result.DevTag != want {
+		t.Errorf("Tag/DevTag = %q/%q, want %q (directory-derived)", result.Tag, result.DevTag, want)
+	}
+
+	argv := strings.Join(fake.Last().Args, " ")
+	if strings.Contains(argv, "org.opencontainers.image.ref.name") {
+		t.Errorf("ref.name label must be absent when the tag is directory-derived, args: %v", fake.Last().Args)
+	}
+	if strings.Contains(argv, "org.opencontainers.image.revision") {
+		t.Errorf("revision label must be absent when git metadata is unavailable, args: %v", fake.Last().Args)
+	}
+}
+
+// TestBuild_GitFailure_PlatformAndExtraLabelSurvive proves the no-repo path
+// still carries everything that needs no git data: --platform and any
+// configured extra label.
+func TestBuild_GitFailure_PlatformAndExtraLabelSurvive(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(_ string, _ []string) (string, error) {
+			return "", errors.New("not a git repository")
+		},
+	}
+	c := newTestClient(t, fake, WithDockerConfig(config.DockerConfig{
+		DefaultPlatform: "linux/amd64",
+		LabelTemplate:   "org.example.team=platform",
+	}))
+
+	if _, err := c.Build(context.Background(), BuildOptions{ContextDir: t.TempDir()}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	argv := strings.Join(fake.Last().Args, " ")
+	if !strings.Contains(argv, "--platform linux/amd64") {
+		t.Errorf("--platform must survive the no-repo path, got args: %v", fake.Last().Args)
+	}
+	if !strings.Contains(argv, "org.example.team=platform") {
+		t.Errorf("configured extra label must survive the no-repo path, got args: %v", fake.Last().Args)
+	}
+}
+
+// TestBuild_GitFailure_CachesDevTag proves the overruling decision from
+// forgectl#187: rather than skipping the cache write (the issue's proposed
+// fix), Build caches the dev tag it actually applied, so run/shell can
+// still find it.
+func TestBuild_GitFailure_CachesDevTag(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(_ string, _ []string) (string, error) {
+			return "", errors.New("not a git repository")
+		},
+	}
+	c := newTestClient(t, fake)
+
+	result, err := c.Build(context.Background(), BuildOptions{ContextDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	got, ok := c.LastTag()
+	if !ok {
+		t.Fatal("expected LastTag to be populated after a build that degraded to a dev tag")
+	}
+	if got != result.DevTag {
+		t.Errorf("LastTag = %q, want cached dev tag %q", got, result.DevTag)
 	}
 }
 
@@ -212,7 +365,7 @@ func TestRun_OmittedTag_ReusesCachedTag(t *testing.T) {
 	cachePath := filepath.Join(t.TempDir(), "docker-lasttag")
 	c := New(fake, WithLastTagPath(cachePath), WithNow(func() time.Time { return time.Now() }))
 
-	tag, err := c.Build(context.Background(), BuildOptions{})
+	result, err := c.Build(context.Background(), BuildOptions{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -221,8 +374,8 @@ func TestRun_OmittedTag_ReusesCachedTag(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	call := fake.Last()
-	if call.Args[3] != tag {
-		t.Errorf("Run reused tag = %q, want cached %q (args: %v)", call.Args[3], tag, call.Args)
+	if call.Args[3] != result.Tag {
+		t.Errorf("Run reused tag = %q, want cached %q (args: %v)", call.Args[3], result.Tag, call.Args)
 	}
 }
 

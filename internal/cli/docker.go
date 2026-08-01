@@ -74,14 +74,17 @@ func newDockerBuildCmd(client *dockerpkg.Client) *cobra.Command {
 			if len(args) > 0 {
 				contextDir = args[0]
 			}
-			tag, err := client.Build(cmd.Context(), dockerpkg.BuildOptions{
+			result, err := client.Build(cmd.Context(), dockerpkg.BuildOptions{
 				ContextDir: contextDir,
 				Platform:   platform,
 			})
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "built %s\n", tag)
+			if !result.GitMetadata {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: no git metadata (%s); tagged %s only\n", result.GitReason, result.DevTag)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "built %s\n", result.Tag)
 			return nil
 		},
 	}

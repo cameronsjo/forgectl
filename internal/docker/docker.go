@@ -99,30 +99,66 @@ type BuildOptions struct {
 	Platform string
 }
 
+// BuildResult is the outcome of a successful Build: the tag(s) actually
+// applied, and whether git metadata was available to derive the full
+// {repo}:{branch-slug}-{shortsha} tag.
+type BuildResult struct {
+	// Tag is the tag that was cached for run/shell to reuse. When
+	// GitMetadata is true, this is the derived {repo}:{branch-slug}-{shortsha}
+	// tag; when it's false, this equals DevTag (git resolution failed, so
+	// only the directory-derived :dev tag was applied).
+	Tag string
+	// DevTag is the :dev alias applied on every build, git or no.
+	DevTag string
+	// GitMetadata reports whether repo/branch/sha resolved. False means
+	// Build fell back to a directory-derived dev tag and omitted the
+	// revision/ref.name labels.
+	GitMetadata bool
+	// GitReason explains why GitMetadata is false — gitInfo's error,
+	// surfaced by the CLI as a warning. Empty when GitMetadata is true.
+	GitReason string
+}
+
 // Build resolves repo/branch/sha from git, derives the
 // {repo}:{branch-slug}-{shortsha} tag plus a :dev alias, and runs `docker
 // build` with both tags and a set of OCI labels attached at the CLI (the
-// Dockerfile itself is never edited). On success, the derived tag is cached
-// so a later run/shell can omit --tag. Returns the derived (non-:dev) tag.
-func (c *Client) Build(ctx context.Context, opts BuildOptions) (string, error) {
+// Dockerfile itself is never edited).
+//
+// git metadata is best-effort, not a precondition: outside a git repo (or
+// inside a bare `git init` with no commits yet), Build still runs, tagging
+// only a directory-derived :dev alias and omitting the revision/ref.name
+// labels — see BuildResult.GitMetadata. On success, the applied tag is
+// cached so a later run/shell can omit --tag.
+func (c *Client) Build(ctx context.Context, opts BuildOptions) (BuildResult, error) {
 	contextDir := opts.ContextDir
 	if contextDir == "" {
 		contextDir = "."
 	}
 	if err := sandbox.RejectOptionLike("context", contextDir); err != nil {
-		return "", err
+		return BuildResult{}, err
 	}
 
 	slog.Debug("Preparing to build docker image.", "context", contextDir)
 
-	repo, branch, sha, err := c.gitInfo(ctx, contextDir)
-	if err != nil {
-		slog.Error("Failed to resolve git metadata for docker build.", "context", contextDir, "error", err)
-		return "", err
-	}
+	repo, branch, sha, gitErr := c.gitInfo(ctx, contextDir)
 
-	tag := deriveTag(repo, branch, sha)
-	dev := devTag(repo)
+	var tag, dev, gitReason string
+	gitMetadata := gitErr == nil
+	if gitMetadata {
+		tag = deriveTag(repo, branch, sha)
+		dev = devTag(repo)
+	} else {
+		gitReason = gitErr.Error()
+		slog.Warn("No git metadata available for docker build; falling back to a directory-derived dev tag.", "context", contextDir, "error", gitErr)
+		dev = devTag(slugifyRepo(filepath.Base(absOrSelf(contextDir))))
+		tag = dev
+		// git resolution is all-or-nothing for tagging, so it must be
+		// all-or-nothing for labelling too. A partial resolve is real — a
+		// fresh `git init` resolves the branch but not the sha — and leaving
+		// branch set here would attach ref.name to an image whose tag is
+		// directory-derived, i.e. explicitly not git-associated.
+		branch, sha = "", ""
+	}
 
 	platform := opts.Platform
 	if platform == "" {
@@ -136,29 +172,52 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) (string, error) {
 	for _, label := range c.buildLabels(branch, sha) {
 		args = append(args, "--label", label)
 	}
-	args = append(args, "-t", tag, "-t", dev, "--", contextDir)
+	if gitMetadata {
+		args = append(args, "-t", tag, "-t", dev)
+	} else {
+		args = append(args, "-t", dev)
+	}
+	args = append(args, "--", contextDir)
 
 	if err := c.run.RunInteractive(ctx, "docker", args...); err != nil {
 		slog.Error("Failed to build docker image.", "tag", tag, "error", err)
-		return "", fmt.Errorf("docker build: %w", err)
+		return BuildResult{}, fmt.Errorf("docker build: %w", err)
 	}
 
 	if err := writeLastTag(c.lastTagPath, cacheEntry{Tag: tag, BuiltAt: c.now()}); err != nil {
 		slog.Warn("Failed to cache last-built docker tag.", "path", c.lastTagPath, "error", err)
 	}
 
-	slog.Info("Successfully built docker image.", "tag", tag, "dev_tag", dev)
-	return tag, nil
+	slog.Info("Successfully built docker image.", "tag", tag, "dev_tag", dev, "git_metadata", gitMetadata)
+	return BuildResult{Tag: tag, DevTag: dev, GitMetadata: gitMetadata, GitReason: gitReason}, nil
+}
+
+// absOrSelf returns the absolute form of dir, or dir itself if it can't be
+// resolved (e.g. the cwd was removed out from under the process) — Build's
+// no-git-metadata fallback needs an absolute path so a "." contextDir
+// slugifies to the actual directory name rather than the literal ".".
+func absOrSelf(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return dir
+	}
+	return abs
 }
 
 // buildLabels returns the --label values Build attaches: the built-in OCI
-// labels plus, if configured, one extra "key=value" label.
+// labels plus, if configured, one extra "key=value" label. revision and
+// ref.name are emitted only when sha/branch resolved — Build's no-git
+// path leaves both empty, so those two labels are simply absent rather
+// than attached with an empty value.
 func (c *Client) buildLabels(branch, sha string) []string {
-	labels := []string{
-		"org.opencontainers.image.revision=" + sha,
-		"org.opencontainers.image.ref.name=" + slugifyBranch(branch),
-		"org.opencontainers.image.created=" + c.now().UTC().Format(time.RFC3339),
+	var labels []string
+	if sha != "" {
+		labels = append(labels, "org.opencontainers.image.revision="+sha)
 	}
+	if branch != "" {
+		labels = append(labels, "org.opencontainers.image.ref.name="+slugifyBranch(branch))
+	}
+	labels = append(labels, "org.opencontainers.image.created="+c.now().UTC().Format(time.RFC3339))
 	if c.extraLabel != "" {
 		labels = append(labels, c.extraLabel)
 	}
@@ -249,24 +308,40 @@ func (c *Client) resolveTag(explicit string) (string, error) {
 // gitInfo resolves the repo name (git worktree toplevel's base name),
 // current branch, and short commit sha for dir via `git`. All three are
 // shelled through c.run, never os/exec directly.
+//
+// Each of the three lookups is attempted independently, so err names the
+// first lookup that actually failed rather than the first one attempted —
+// a fresh `git init` with no commits yet (toplevel and branch resolve, HEAD
+// does not) reports the sha failure, not a repo failure. The partially
+// resolved fields are returned for the caller's diagnostics only: Build
+// treats any error as non-fatal but all-or-nothing, discarding every
+// git-derived value and deriving both tag and labels from the directory
+// instead.
 func (c *Client) gitInfo(ctx context.Context, dir string) (repo, branch, sha string, err error) {
-	top, err := c.run.Run(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
-	if err != nil {
-		return "", "", "", fmt.Errorf("resolve git repo root: %w", err)
+	top, topErr := c.run.Run(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
+	if topErr != nil {
+		err = fmt.Errorf("resolve git repo root: %w", topErr)
+	} else {
+		repo = filepath.Base(strings.TrimSpace(top))
 	}
-	repo = filepath.Base(strings.TrimSpace(top))
 
-	branchOut, err := c.run.Run(ctx, "git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD")
-	if err != nil {
-		return "", "", "", fmt.Errorf("resolve git branch: %w", err)
+	branchOut, branchErr := c.run.Run(ctx, "git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD")
+	if branchErr != nil {
+		if err == nil {
+			err = fmt.Errorf("resolve git branch: %w", branchErr)
+		}
+	} else {
+		branch = strings.TrimSpace(branchOut)
 	}
-	branch = strings.TrimSpace(branchOut)
 
-	shaOut, err := c.run.Run(ctx, "git", "-C", dir, "rev-parse", "--short", "HEAD")
-	if err != nil {
-		return "", "", "", fmt.Errorf("resolve git sha: %w", err)
+	shaOut, shaErr := c.run.Run(ctx, "git", "-C", dir, "rev-parse", "--short", "HEAD")
+	if shaErr != nil {
+		if err == nil {
+			err = fmt.Errorf("resolve git sha: %w", shaErr)
+		}
+	} else {
+		sha = strings.TrimSpace(shaOut)
 	}
-	sha = strings.TrimSpace(shaOut)
 
-	return repo, branch, sha, nil
+	return repo, branch, sha, err
 }
