@@ -597,7 +597,15 @@ on disk keeps.
 
 It is built to run from a Stop hook at every turn end, so it is cheap,
 idempotent, and ALWAYS EXITS 0. A capture failure is reported on stderr and
-never becomes a failed turn.`,
+never becomes a failed turn.
+
+The store self-prunes, at most once a day. What retires a record is TRANSCRIPT
+EXISTENCE, not a fixed age: a snapshot is worth keeping exactly as long as
+'claude --resume' can still open that session, and how long that is depends on
+Claude Code's own transcript retention, which is operator-configurable. A record
+whose transcript is gone is dropped; one whose transcript survives is kept
+however old it is, up to a 180-day backstop for the case where retention is
+disabled entirely.`,
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -624,11 +632,16 @@ func runResumeSnapshot(cmd *cobra.Command, quiet bool) {
 		fmt.Fprintf(errOut, "forgectl: snapshot: %v\n", e)
 	}
 	slog.Debug("Successfully completed resume snapshot.",
-		"sessions", res.Sessions, "tasks", res.Tasks, "learned", res.Learned, "errors", len(res.Errs))
+		"sessions", res.Sessions, "tasks", res.Tasks, "learned", res.Learned,
+		"pruned", res.Pruned, "errors", len(res.Errs))
 	if quiet {
 		return
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "snapshotted %d live session(s), %d task(s) held\n", res.Sessions, res.Tasks)
+	line := fmt.Sprintf("snapshotted %d live session(s), %d task(s) held", res.Sessions, res.Tasks)
+	if res.Pruned > 0 {
+		line += fmt.Sprintf(", %d stale record(s) pruned", res.Pruned)
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), line)
 }
 
 // displayName is the session's best label, falling back to the id.

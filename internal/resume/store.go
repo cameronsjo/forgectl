@@ -2,7 +2,9 @@ package resume
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,6 +95,25 @@ func LoadAll(dir string) map[string]*Record {
 		}
 	}
 	return out
+}
+
+// Delete removes one session's record.
+//
+// An already-absent record is success, not an error. Delete is called from
+// Prune, which runs inside a Stop hook at every turn end: two sessions ending
+// on the same turn can both decide the same dead record should go, and the
+// loser of that race must not report a failure for work that is done.
+func Delete(dir, id string) error {
+	if dir == "" {
+		return fmt.Errorf("refusing to delete record %q: no store directory", id)
+	}
+	if !validSessionID(id) {
+		return fmt.Errorf("refusing to delete record with invalid session id %q", id)
+	}
+	if err := os.Remove(filepath.Join(dir, id+".json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("delete record %s: %w", id, err)
+	}
+	return nil
 }
 
 // Save writes one record, replacing any previous one.

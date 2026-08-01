@@ -401,7 +401,7 @@ func enrich(p Paths, s *Session) {
 		return
 	}
 	s.enriched = true
-	branch, title := readTranscript(p, s.ID, s.Cwd)
+	branch, title := readTranscript(p, s.ID, s.Cwd, nil)
 	if s.Branch == "" {
 		s.Branch = branch
 	}
@@ -475,8 +475,8 @@ func forEachLine(r io.Reader, fn func(line []byte) (stop bool)) {
 // The substring pre-filter is the second half: a transcript is almost entirely
 // message bodies, and only a small minority of lines carry either field, so
 // most lines are rejected without a JSON decode.
-func readTranscript(p Paths, id, cwd string) (branch, title string) {
-	path := transcriptPath(p, id, cwd)
+func readTranscript(p Paths, id, cwd string, idx *projectIndex) (branch, title string) {
+	path := transcriptPath(p, id, cwd, idx)
 	if path == "" {
 		return "", ""
 	}
@@ -511,7 +511,11 @@ func readTranscript(p Paths, id, cwd string) (branch, title string) {
 // with every non-alphanumeric byte replaced by '-', but that encoding is
 // Claude Code's, not ours — so a miss falls back to searching the project
 // dirs by filename rather than trusting the derivation.
-func transcriptPath(p Paths, id, cwd string) string {
+//
+// idx may be nil, which reads the project directory fresh on every miss. A
+// caller resolving many ids in one pass should hand one in: the fallback is
+// where the cost is, and a batch is mostly fallbacks by the time it matters.
+func transcriptPath(p Paths, id, cwd string, idx *projectIndex) string {
 	if id == "" {
 		return ""
 	}
@@ -522,15 +526,12 @@ func transcriptPath(p Paths, id, cwd string) string {
 			return guess
 		}
 	}
-	entries, err := os.ReadDir(p.projectsDir())
+	dirs, err := idx.list(p)
 	if err != nil {
 		return ""
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		candidate := filepath.Join(p.projectsDir(), e.Name(), name)
+	for _, d := range dirs {
+		candidate := filepath.Join(p.projectsDir(), d, name)
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate
 		}
