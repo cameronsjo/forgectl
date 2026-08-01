@@ -111,12 +111,56 @@ func TestLoadBreadcrumb_ContentRejections(t *testing.T) {
 		{"missing createdAt", `{"workspace":"` + ws + `","ref":"o/r#1","agent":"a"}`},
 		{"malformed ref", `{"workspace":"` + ws + `","ref":"not a ref","agent":"a","createdAt":"2026-07-08T00:00:00Z"}`},
 		{"workspace missing", `{"workspace":"/tmp/forgectl-does-not-exist-xyz","ref":"o/r#1","agent":"a","createdAt":"2026-07-08T00:00:00Z"}`},
+		// Forged locality: the flag claims a local session while the ref names a
+		// real-looking owner. Only PrepareLocal writes local:true, and it always
+		// stamps owner "local", so the two can never legitimately disagree.
+		{"local flag with non-local owner", `{"workspace":"` + ws + `","ref":"cameronsjo/forgectl#1","agent":"a","createdAt":"2026-07-08T00:00:00Z","local":true}`},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeRaw(t, dir, "bc"+string(rune('a'+i))+".json", tc.body)
 			if _, err := loadBreadcrumb(path, dir); err == nil {
 				t.Errorf("%s: expected content rejection", tc.name)
+			}
+		})
+	}
+}
+
+// TestLoadBreadcrumb_LocalityCheckIsOneDirectional pins the other half of the
+// cross-representation check. Rejecting a forged local flag must not also
+// reject the two shapes that are legitimate: a genuine local session (flag +
+// owner "local"), and an owner literally named "local" with no flag — which is
+// both a real forge repo (git.sjo.lol/local/tools, issue #185) and the shape
+// every pre-upgrade local breadcrumb takes.
+func TestLoadBreadcrumb_LocalityCheckIsOneDirectional(t *testing.T) {
+	dir := t.TempDir()
+	ws := fakeWorkspace(t)
+
+	cases := []struct {
+		name      string
+		body      string
+		wantLocal bool
+	}{
+		{
+			"genuine local session",
+			`{"workspace":"` + ws + `","ref":"local/abc1234#1","agent":"a","createdAt":"2026-07-08T00:00:00Z","local":true}`,
+			true,
+		},
+		{
+			"real forge owner named local, no flag",
+			`{"workspace":"` + ws + `","ref":"local/tools#5","agent":"a","createdAt":"2026-07-08T00:00:00Z"}`,
+			false,
+		},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeRaw(t, dir, "ok"+string(rune('a'+i))+".json", tc.body)
+			bc, err := loadBreadcrumb(path, dir)
+			if err != nil {
+				t.Fatalf("%s must load: %v", tc.name, err)
+			}
+			if bc.Local != tc.wantLocal {
+				t.Errorf("Local = %v, want %v", bc.Local, tc.wantLocal)
 			}
 		})
 	}

@@ -245,12 +245,25 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 // post to, and sess.Ref.Slug() for a local session resolves to the synthetic
 // "local/<oid>" identity — posting against it would fire an unintended
 // `gh pr review` network call, breaking the offline guarantee `pr local`
-// exists to provide. Ref.IsLocal() is the reload-safe predicate (persisted
-// via the breadcrumb's local flag) — it still catches a reload-reconstituted
-// Session, e.g. from a future verb built on the loadSession pattern.
+// exists to provide. Ref.IsLocal() catches a reload-reconstituted Session
+// (e.g. from a future verb built on the loadSession pattern) because
+// loadSession restores locality from the breadcrumb's local flag — but only
+// for breadcrumbs written by this version FORWARD. A pre-#185 local
+// breadcrumb has no local key and reloads NON-local; see the tripwire on the
+// refusal below.
 //
 // It returns whether a post actually fired.
 func (c *Client) PostReview(ctx context.Context, sess Session, review string, headless bool) (posted bool, err error) {
+	// TRIPWIRE for a future caller. This refusal is reload-safe only for
+	// breadcrumbs carrying the local flag (this version forward). A synthetic
+	// session recorded before #185 reloads NON-local and would fall straight
+	// through to the post path below — so IsLocal alone is not sufficient to
+	// exclude synthetic sessions from a loadSession result.
+	//
+	// PostReview has no caller on a reloaded Session today, which is the only
+	// reason that window is harmless. Any future verb that does call it must
+	// also treat an absent FindingsDir as a synthetic session, exactly as
+	// Launch's guard above does.
 	if sess.Ref.IsLocal() {
 		return false, fmt.Errorf("cannot post a review for a local session %q: there is no PR to post to", sess.Ref.String())
 	}

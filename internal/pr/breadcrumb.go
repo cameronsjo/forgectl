@@ -102,8 +102,9 @@ func loadBreadcrumb(path, sessionsDir string) (Breadcrumb, error) {
 }
 
 // validateBreadcrumb enforces the content schema: required fields present, a
-// re-parseable ref, and a Workspace that is a real forgectl sandbox (an
-// existing dir under the OS temp dir with the "forgectl-" prefix).
+// re-parseable ref, a Workspace that is a real forgectl sandbox (an existing
+// dir under the OS temp dir with the "forgectl-" prefix), and agreement
+// between the two representations of locality.
 func validateBreadcrumb(bc Breadcrumb) error {
 	if bc.Workspace == "" {
 		return fmt.Errorf("missing workspace")
@@ -111,8 +112,26 @@ func validateBreadcrumb(bc Breadcrumb) error {
 	if bc.Ref == "" {
 		return fmt.Errorf("missing ref")
 	}
-	if _, err := ParseRef(bc.Ref); err != nil {
+	ref, err := ParseRef(bc.Ref)
+	if err != nil {
 		return fmt.Errorf("malformed ref %q: %w", bc.Ref, err)
+	}
+	// CROSS-REPRESENTATION CHECK. Locality is recorded twice — as the Local
+	// flag (authoritative) and as the ref's display owner — and the only
+	// writer of Local:true is PrepareLocal, which always stamps
+	// localOwnerSentinel. A breadcrumb that claims locality while naming a
+	// real-looking owner therefore cannot have been written by this package:
+	// refuse it, so forged locality cannot hide behind a plausible remote ref.
+	//
+	// Deliberately one-directional. The converse — owner "local" with the flag
+	// unset — is the legitimate case this whole change exists to permit: a real
+	// forge repo named local/… (git.sjo.lol/local/tools), and equally a
+	// pre-upgrade local breadcrumb written before the flag existed.
+	if bc.Local && ref.Owner != localOwnerSentinel {
+		return fmt.Errorf(
+			"breadcrumb claims a local session but its ref names owner %q, not %q",
+			ref.Owner, localOwnerSentinel,
+		)
 	}
 	if bc.CreatedAt.IsZero() {
 		return fmt.Errorf("missing createdAt")
