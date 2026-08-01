@@ -58,7 +58,7 @@ human approval gate.
   forgectl pr list                 list active review sessions
   forgectl pr attach <breadcrumb>  jump to a review window
   forgectl pr open <breadcrumb>    open a shell in the clean room
-  forgectl pr teardown <breadcrumb>  discard a session (alias: close)
+  forgectl pr teardown <breadcrumb>  discard a session
   forgectl pr cleanup <YYYY-MM-DD>   discard all sessions from a day
   forgectl pr findings list|cleanup  reclaim durable local-review findings
   forgectl pr keys                 tmux-review cheatsheet
@@ -199,10 +199,9 @@ func newPrOpenCmd(client *pr.Client) *cobra.Command {
 
 func newPrTeardownCmd(client *pr.Client) *cobra.Command {
 	return &cobra.Command{
-		Use:     "teardown <breadcrumb>",
-		Aliases: []string{"close"},
-		Short:   "Discard a review session (restore + remove workspace)",
-		Args:    cobra.ExactArgs(1),
+		Use:   "teardown <breadcrumb>",
+		Short: "Discard a review session (restore + remove workspace)",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := client.Teardown(cmd.Context(), args[0]); err != nil {
 				return err
