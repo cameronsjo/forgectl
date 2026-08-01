@@ -103,9 +103,12 @@ func (c *Client) FindingsDir() string { return c.findingsDir }
 
 // tempPrefix is the os.MkdirTemp prefix sandbox uses for every workspace
 // ("forgectl-workflow-*"); the breadcrumb content check requires a workspace
-// to live under the OS temp dir with the "forgectl-" prefix.
+// directory whose symlink-resolved name carries the "forgectl-" prefix.
 const tempPrefix = "forgectl-"
 
-// osTempDir is a seam over os.TempDir so the breadcrumb content check is
-// testable against a redirected temp root.
+// osTempDir is a seam over os.TempDir. Its one remaining consumer is the belt
+// prefix scan in rejectCleanRoomPath, which bounds its walk at the temp root;
+// breadcrumb validation deliberately no longer reads it (see validateWorkspace).
+// Tests redirect that root through $TMPDIR with t.Setenv rather than swapping
+// this var, so the indirection is a spare hook, not a live one.
 var osTempDir = os.TempDir

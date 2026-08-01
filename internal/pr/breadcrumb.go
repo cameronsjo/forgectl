@@ -70,9 +70,9 @@ func LoadBreadcrumb(path string) (Breadcrumb, error) {
 //     A path outside the dir, or a symlink inside it that points outside, is
 //     rejected before the file is even read.
 //  2. CONTENT/SCHEMA — the file must be valid JSON with all required fields,
-//     and Workspace must be an EXISTING directory under the OS temp dir with
-//     the "forgectl-" prefix (a real sandbox), so no arbitrary path can be
-//     smuggled in for a later `git -C`.
+//     and Workspace must be an EXISTING directory whose symlink-resolved name
+//     carries the "forgectl-" prefix (a real sandbox), so no arbitrary path can
+//     be smuggled in for a later `git -C`.
 func loadBreadcrumb(path, sessionsDir string) (Breadcrumb, error) {
 	// (1) LOCATION — reject anything not inside the forgectl-owned dir first.
 	if !sandbox.WithinWorkspace(sessionsDir, path) {
@@ -99,7 +99,7 @@ func loadBreadcrumb(path, sessionsDir string) (Breadcrumb, error) {
 
 // validateBreadcrumb enforces the content schema: required fields present, a
 // re-parseable ref, and a Workspace that is a real forgectl sandbox (an
-// existing dir under the OS temp dir with the "forgectl-" prefix).
+// existing dir whose symlink-resolved name carries the "forgectl-" prefix).
 func validateBreadcrumb(bc Breadcrumb) error {
 	if bc.Workspace == "" {
 		return fmt.Errorf("missing workspace")
@@ -122,10 +122,40 @@ func validateBreadcrumb(bc Breadcrumb) error {
 	return nil
 }
 
-// validateWorkspace confirms workspace is an existing directory under the OS
-// temp dir whose base name carries the forgectl sandbox prefix. This is the
-// gate that stops a breadcrumb from pointing a later `git -C` at, say, / or
-// $HOME.
+// validateWorkspace confirms workspace is an existing directory whose
+// symlink-resolved base name carries the forgectl sandbox prefix. Those two
+// conditions are the whole invariant, and together they are what stops a
+// breadcrumb from steering a later consumer at, say, / or $HOME.
+//
+// Know which consumer matters most: sandbox.Teardown does a bare
+// os.RemoveAll(workspace) with no path check of its own, so this function is
+// the ONLY gate in front of a recursive delete — a stronger sink than the
+// `git -C` the rest of this file's comments name.
+//
+// There is deliberately NO temp-root test. os.TempDir() reads $TMPDIR at CALL
+// time, while the workspace was created under the $TMPDIR of the process that
+// created it. So any later verb run under a different $TMPDIR rejected every
+// breadcrumb forgectl itself had written. An UNSET $TMPDIR reaches the same
+// place — under launchd, cron, or a container, os.TempDir() answers /tmp while
+// the creating shell's macOS $TMPDIR was /var/folders/… — which is why this was
+// not merely an operator-typed-TMPDIR edge case (#184).
+//
+// The guard-strength delta is worth naming rather than glossing. The prefix
+// branch runs EvalSymlinks first, so a "forgectl-"-named symlink cannot launder
+// a target elsewhere, and it already refuses / and $HOME on its own. All the
+// temp-root check ever added was "not a forgectl-* directory sitting outside
+// the temp root" — and planting such a directory takes a process running as
+// this uid, which can just as easily plant one inside the temp root. The check
+// cost every $TMPDIR-crossing session and bought a step an adversary walks
+// around.
+//
+// Stated at the sink rather than the gate, so nobody has to re-derive it: `pr
+// teardown` and `pr cleanup` can now delete a forgectl-*-named directory that
+// lives outside the temp root, where before they could not. That is a real
+// widening of the accident surface and it is accepted knowingly — the breadcrumb
+// carrying such a path must first be written into the 0700 session-state dir,
+// which already takes this uid, and the LOCATION guard in loadBreadcrumb is what
+// bounds who can put one there.
 func validateWorkspace(workspace string) error {
 	if !filepath.IsAbs(workspace) {
 		return fmt.Errorf("workspace %q must be an absolute path", workspace)
@@ -136,9 +166,6 @@ func validateWorkspace(workspace string) error {
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("workspace %q is not a directory", workspace)
-	}
-	if !sandbox.WithinWorkspace(osTempDir(), workspace) {
-		return fmt.Errorf("workspace %q is not under the OS temp dir", workspace)
 	}
 	real := workspace
 	if r, err := filepath.EvalSymlinks(workspace); err == nil {

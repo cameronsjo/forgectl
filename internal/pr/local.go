@@ -176,10 +176,10 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 //     (`TMPDIR=/tmp forgectl pr local /var/folders/…/forgectl-workflow-abc`)
 //     slips past any temp-root comparison. The recorded absolute path does not
 //     move.
-//  2. The PREFIX SCAN — under the current temp root AND carrying the sandbox
-//     prefix, the pair validateWorkspace uses. This is the belt: it still
-//     catches a workspace whose breadcrumb was deleted, or one left by a
-//     different forgectl invocation with its own sessions dir.
+//  2. The PREFIX SCAN — a component carrying the sandbox prefix under the
+//     current temp root, a belt this guard applies on its own. It still catches
+//     a workspace whose breadcrumb was deleted, or one left by a different
+//     forgectl invocation with its own sessions dir.
 //
 // A breadcrumb that fails to load is skipped rather than fatal, matching List:
 // one corrupt file must not make every local review unreviewable. The prefix
@@ -221,12 +221,13 @@ func (c *Client) rejectCleanRoomPath(absPath string) error {
 // $TMPDIR change.
 //
 // It deliberately does NOT go through List/loadBreadcrumb. That path runs
-// validateBreadcrumb, whose workspace check requires the recorded directory to
-// sit under osTempDir() — which reads $TMPDIR at call time. So under exactly
-// the $TMPDIR change this guard exists to defeat, List() skips every
-// breadcrumb and the authoritative half would see nothing. (That same
-// dependency makes `pr list`, `pr teardown`, and `pr cleanup` go blind after a
-// $TMPDIR change; out of scope here, flagged separately.)
+// validateBreadcrumb, whose workspace check once required the recorded
+// directory to sit under osTempDir() — which reads $TMPDIR at call time. So
+// under exactly the $TMPDIR change this guard exists to defeat, List() skipped
+// every breadcrumb and the authoritative half would have seen nothing. (#184
+// removed that dependency, so List no longer goes blind; this path stays
+// direct because it needs the recorded string even from a breadcrumb whose
+// content guard would reject it.)
 //
 // Reading with the LOCATION guard but not the workspace-schema guard is safe
 // for this use: the recorded string is only ever compared against a candidate

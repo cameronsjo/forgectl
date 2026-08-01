@@ -9,6 +9,9 @@ package pr
 // Open (Classification: tmux dispatch argv)
 //   [x] new-window argv targets the tmux session, workspace-shell window name,
 //       and the breadcrumb's workspace as cwd
+// List (Classification: breadcrumb enumeration)
+//   [x] a $TMPDIR change between session creation and List does not hide
+//       sessions (#184)
 
 import (
 	"context"
@@ -18,6 +21,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
 func TestAttach_Success(t *testing.T) {
@@ -85,5 +89,35 @@ func TestOpen_TargetPins(t *testing.T) {
 	}
 	if tmux.Interactive {
 		t.Error("Open should dispatch through the non-interactive Run path")
+	}
+}
+
+// TestList_SurvivesTempDirChange is the user-visible half of the #184
+// regression: validateWorkspace used to read $TMPDIR at call time, so a
+// `forgectl pr list` running under a different (or unset) $TMPDIR than the
+// session that created the breadcrumbs skipped every one of them and printed an
+// empty list rather than an error.
+func TestList_SurvivesTempDirChange(t *testing.T) {
+	// Both t.TempDir() calls here and the ones inside testClient/seedSession
+	// have to precede t.Setenv — they resolve against $TMPDIR themselves.
+	c := testClient(t, &exec.FakeRunner{})
+	_, ws1 := seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 1}, time.Now().UTC())
+	_, ws2 := seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 2}, time.Now().UTC().Add(-time.Minute))
+	otherRoot := t.TempDir()
+
+	for _, ws := range []string{ws1, ws2} {
+		if sandbox.WithinWorkspace(otherRoot, ws) {
+			t.Fatalf("precondition: otherRoot %q must not contain workspace %q", otherRoot, ws)
+		}
+	}
+
+	t.Setenv("TMPDIR", otherRoot)
+
+	sessions, err := c.List()
+	if err != nil {
+		t.Fatalf("List after a $TMPDIR change: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Errorf("List() returned %d sessions after a $TMPDIR change, want 2", len(sessions))
 	}
 }
