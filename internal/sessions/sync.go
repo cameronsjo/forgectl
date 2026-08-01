@@ -123,10 +123,14 @@ func (o SyncOptions) Resolve(cfg config.SessionsConfig) (SyncOptions, error) {
 	return o, nil
 }
 
-// expandTilde expands a leading ~ or ~/ to home. Mirrors internal/config's,
-// internal/launch's, and internal/clean's identical small helper — kept
-// local per house convention (see internal/config/config.go's own comment on
-// why) rather than introducing a shared util package for four lines of code.
+// expandTilde expands a leading ~ or ~/ to home. Mirrors the small helper in
+// internal/config, internal/launch and internal/clean — identical for every
+// input a caller here can produce, though config's and launch's copies lack
+// the empty-home guard this one shares with clean's. That divergence is
+// unreachable in practice: callers check `os.UserHomeDir()` before calling.
+// Kept local per house convention (see internal/config/config.go's own
+// comment on why) rather than introducing a shared util package for four
+// lines of code.
 func expandTilde(path, home string) string {
 	if home == "" {
 		return path

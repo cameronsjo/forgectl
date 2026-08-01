@@ -103,8 +103,8 @@ default_type = ""           # empty = every kind; node|python|go|build
 // is the current machine's short hostname — neither is a value this template
 // can bake in without lying on a different machine, so both stay commented.
 // metrics_dir/runbooks_dir have state-home-derived baked defaults; sync.go
-// (internal/sessions/sync.go) expands a leading ~ the same way clean/bench
-// do, and an explicitly-configured metrics_dir that doesn't exist on disk
+// (internal/sessions/sync.go) expands a leading ~ the same way config,
+// launch and clean do, and an explicitly-configured metrics_dir that doesn't exist on disk
 // (a typo, or a path moved since) now fails loudly instead of silently
 // syncing zero sessions. They stay commented so the absent-key fallback
 // (the home-expanded default) applies.
