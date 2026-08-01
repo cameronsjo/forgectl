@@ -35,16 +35,33 @@ type Repo struct {
 	Status    GitStatus `json:"status"`              // working-tree state when Cloned; zero otherwise
 }
 
+// StatusState distinguishes the three outcomes a working-tree check can have.
+// The zero value is StatusUnknown on purpose: a GitStatus that never went
+// through gitStatus must never read as a clean tree.
+type StatusState string
+
+const (
+	StatusUnknown StatusState = ""           // never inspected, or the check failed
+	StatusNotRepo StatusState = "not-a-repo" // directory has no .git
+	StatusOK      StatusState = "ok"         // git status ran and was parsed
+)
+
 // GitStatus summarises the working-tree state of a project directory.
 type GitStatus struct {
-	Modified  int `json:"modified"`
-	Untracked int `json:"untracked"`
-	Ahead     int `json:"ahead"`
+	State     StatusState `json:"state"`
+	Modified  int         `json:"modified"`
+	Untracked int         `json:"untracked"`
+	Ahead     int         `json:"ahead"`
 }
 
 // Label returns a short human-readable badge: "[clean]", "[2 ahead]",
-// "[3 modified]", etc. Returns "" for non-git directories.
+// "[3 modified]", etc. Returns "" when the tree state isn't a successfully
+// parsed git status — a non-git directory or a failed check — so the caller
+// decides how to say so rather than defaulting to a false "clean".
 func (gs GitStatus) Label() string {
+	if gs.State != StatusOK {
+		return ""
+	}
 	if gs.Modified == 0 && gs.Untracked == 0 && gs.Ahead == 0 {
 		return "[clean]"
 	}
@@ -94,7 +111,14 @@ func (r Repo) DisplayLine() string {
 	if r.Cloned {
 		badge = r.Status.Label()
 		if badge == "" {
-			badge = "[cloned]"
+			switch r.Status.State {
+			case StatusNotRepo:
+				badge = "[not-a-repo]"
+			case StatusUnknown:
+				badge = "[unknown]"
+			default:
+				badge = "[cloned]"
+			}
 		}
 	} else {
 		badge = "[uncloned]"

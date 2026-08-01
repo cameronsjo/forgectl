@@ -122,7 +122,10 @@ func renderRepoTable(out, errOut io.Writer, repos []projects.Repo) error {
 			cloned++
 			status = strings.Trim(r.Status.Label(), "[]")
 			if status == "" {
-				status = "cloned"
+				status = "unknown"
+				if r.Status.State == projects.StatusNotRepo {
+					status = "not-a-repo"
+				}
 			}
 		}
 		name := r.Name

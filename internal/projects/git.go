@@ -7,21 +7,23 @@ import (
 	"strings"
 )
 
-// gitStatus runs git in dir and returns a populated GitStatus. Returns a
-// zero-value GitStatus for non-git directories — callers treat it as empty.
+// gitStatus runs git in dir and returns a populated GitStatus. Returns
+// StatusNotRepo when dir has no .git, and StatusUnknown when the git command
+// itself fails — neither is ever read as StatusOK, so a caller can't mistake
+// "never checked" or "check failed" for a clean tree.
 func gitStatus(ctx context.Context, run interface {
 	Run(context.Context, string, ...string) (string, error)
 }, dir string) GitStatus {
 	if _, err := os.Stat(dir + "/.git"); err != nil {
-		return GitStatus{}
+		return GitStatus{State: StatusNotRepo}
 	}
 
 	porcelain, err := run.Run(ctx, "git", "-C", dir, "status", "--porcelain")
 	if err != nil {
-		return GitStatus{}
+		return GitStatus{State: StatusUnknown}
 	}
 
-	var gs GitStatus
+	gs := GitStatus{State: StatusOK}
 	if porcelain == "" {
 		// Clean working tree — check for unpushed commits.
 		ahead, _ := run.Run(ctx, "git", "-C", dir, "rev-list", "--count", "@{upstream}..HEAD")
