@@ -140,6 +140,31 @@ const docsScaffold = `
 addr = "" # empty = 127.0.0.1 with a random port; set host:port to pin one
 `
 
+// preflightScaffold is the [preflight] section. Neither field has a baked
+// literal default — PreflightConfig's zero value means LocateCatalog
+// auto-locates the catalog (installed_plugins.json, then a cache-dir glob) and
+// DefaultSet contributes nothing beyond the catalog's own core tier — so both
+// stay commented rather than baking in a path that would be wrong on the next
+// machine.
+const preflightScaffold = `
+# ── preflight: plugin/catalog alignment (forgectl preflight) ────────────────
+[preflight]
+# catalog_path = "" # override auto-locate; direct path to the generated catalog.md
+# default_set  = [] # extra "plugin@marketplace" entries always folded into the core-tier target
+`
+
+// updateScaffold is the [update] section. Empty is the real default for both
+// fields AND it means something in each case — an empty roster runs every
+// roster step (UpdateConfig's own doc comment), and an empty log_dir falls back
+// to config.UpdateLogDir() — so both are written active, mirroring
+// workflowScaffold's `strip_globs = []` and docsScaffold's `addr = ""`.
+const updateScaffold = `
+# ── update: weekly package-manager + OS maintenance (forgectl update) ───────
+[update]
+roster  = [] # step names to run when --only is omitted; empty = every roster step
+log_dir = "" # transcript log directory; empty = <config dir>/update-logs
+`
+
 // initSection is one scaffoldable block: a config.toml section (or, for the
 // empty name, the host-scalar preamble) plus its annotated template.
 type initSection struct {
@@ -153,6 +178,13 @@ type initSection struct {
 // inserts ahead of existing content; every other block is appended in order
 // via appendLaunchSection. [launch] reuses launchScaffold (launch_init.go)
 // directly rather than a second copy.
+//
+// This list is hand-maintained and therefore drifts: it silently omitted
+// [preflight] and [update] for as long as those sections existed, so `forgectl
+// init` — whose whole job is "scaffold EVERY section" — scaffolded 9 of 11.
+// TestInitSections_CoversEveryStructSection derives the expected set from
+// config.Config by reflection and fails the moment a new section lands here
+// unscaffolded.
 var initSections = []initSection{
 	{"", "host scalars", hostScalarsScaffold},
 	{"launch", "launch", launchScaffold},
@@ -164,6 +196,8 @@ var initSections = []initSection{
 	{"sessions", "sessions", sessionsScaffold},
 	{"review", "review", reviewScaffold},
 	{"docs", "docs", docsScaffold},
+	{"preflight", "preflight", preflightScaffold},
+	{"update", "update", updateScaffold},
 }
 
 // initModule declares the full-scaffold convenience extension (ADR-0005). It

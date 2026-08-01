@@ -28,7 +28,8 @@ forgectl tmux windows      # list windows across all sessions
 forgectl tmux tree         # session → window → pane tree
 forgectl tmux last         # jump to the last-used session
 forgectl tmux cheat        # tmux terms + the keys that matter
-forgectl config            # show active config + resolved paths (alias: cfg)
+forgectl config            # show every config section, per-key set/default (alias: cfg)
+forgectl config --json     # the same, machine-readable (stable surface)
 
 # projects — cross-host project inventory (alias: proj)
 forgectl projects list [query]           # list all projects: local clones + github.com/cameronsjo + git.sjo.lol/cameron
@@ -328,7 +329,13 @@ log_level = "off"   # off | debug | info | warn | error
 log_file  = ""      # "" = auto (daily-rotated file); "-" = stderr; or an explicit path
 ```
 
-`forgectl config` (alias `cfg`) prints the active settings and the resolved config and log paths — including whether the config file was found.
+`forgectl config` (alias `cfg`) prints **every** section of the config — the host scalars, `[launch]` and its `[launch.defaults]`, and all ten domain sections down to the nested `[review.gitea]` — one dotted key per line, each marked `(set)` when the config file supplied it or `(default)` when it came from a built-in fallback.
+
+That marker is the point. Every section's zero value means "absent, built-in defaults apply", so a value alone cannot tell a key you never set from a key you misspelled. The command also lists **unrecognized keys** — anything in the file that bound to no field, which catches `probe_hostt` and a key filed under the wrong section — and surfaces the decode error from a malformed file instead of silently defaulting past it. Resolved values that differ from the stored ones (the `off` log level, the dated log path, the launch binary chosen by `FORGECTL_CLAUDE_BIN` > `binary_path` > `PATH`) print in their own labeled blocks.
+
+`sessions.dsn` renders as `(redacted)`; its `(set)`/`(default)` marker is the useful signal and a connection string can carry a password. `launch.defaults.env` renders its **key names only** for the same reason — it is arbitrary environment injected into the launched harness, so it is where an `ANTHROPIC_API_KEY` or `GH_TOKEN` would sit. (`forgectl launch which` still prints those values in full; use it when you need to see them.)
+
+`--json` emits the same information machine-readably and is the stable surface — the human rendering may reflow.
 
 ### Logging
 
