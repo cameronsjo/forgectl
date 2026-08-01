@@ -572,19 +572,36 @@ func TestLaunchInline_ForcesStrictMCP(t *testing.T) {
 	}
 
 	// Local review takes the same hardened path and must not lose it.
+	//
+	// mustLocalRef, not a Ref literal: locality is an unexported flag, so a
+	// field-by-field Ref{Owner: localOwnerSentinel, …} is a REMOTE ref and this
+	// case would silently re-test the remote path above.
 	fake2 := &exec.FakeRunner{}
 	c2 := New(fake2, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	findingsDir := t.TempDir()
 	localSess := Session{
-		Ref:         Ref{Owner: localOwnerSentinel, Repo: "abc1234", Number: 1},
+		Ref:         mustLocalRef("abc1234", 1),
 		Workspace:   fakeWorkspace(t),
 		Agent:       "claude",
-		FindingsDir: t.TempDir(),
+		FindingsDir: findingsDir,
 	}
 	if err := c2.Launch(context.Background(), localSess, cfg); err != nil {
 		t.Fatalf("Launch (local): %v", err)
 	}
-	if !contains(fake2.Last().Args, "--strict-mcp-config") {
-		t.Errorf("local review lost --strict-mcp-config; argv: %v", fake2.Last().Args)
+	localArgs := fake2.Last().Args
+	// Assert the local branch was actually TAKEN before asserting what it
+	// preserved. profile.StrictMCP is set unconditionally, ahead of any
+	// locality branch, so the --strict-mcp-config check below cannot fail
+	// independently of the remote case — these two argv facts are what prove
+	// this case exercised a different code path at all.
+	if !contains(localArgs, "--add-dir") || !contains(localArgs, findingsDir) {
+		t.Fatalf("local session did not take the local branch (no --add-dir %s); argv: %v", findingsDir, localArgs)
+	}
+	if !contains(localArgs, localReviewPrompt(findingsDir, true)) {
+		t.Fatalf("local session did not take the local branch (not the local prompt); argv: %v", localArgs)
+	}
+	if !contains(localArgs, "--strict-mcp-config") {
+		t.Errorf("local review lost --strict-mcp-config; argv: %v", localArgs)
 	}
 }
 

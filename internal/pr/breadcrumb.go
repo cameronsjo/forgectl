@@ -119,6 +119,13 @@ func validateBreadcrumb(bc Breadcrumb) error {
 	if err != nil {
 		return fmt.Errorf("malformed ref %q: %w", bc.Ref, err)
 	}
+	// A bare number parses (ParseRef's third form) but leaves Owner/Repo empty,
+	// which would yield a Session whose Slug() is "/" and make the locality
+	// cross-check below read an empty Owner. A breadcrumb always records a
+	// resolved ref, so require one.
+	if !ref.Complete() {
+		return fmt.Errorf("ref %q is not a complete owner/repo#N reference", bc.Ref)
+	}
 	// CROSS-REPRESENTATION CHECK. Locality is recorded twice — as the Local
 	// flag (authoritative) and as the ref's display owner — and the only
 	// writer of Local:true is PrepareLocal, which always stamps

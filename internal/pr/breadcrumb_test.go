@@ -123,6 +123,8 @@ func TestLoadBreadcrumb_ContentRejections(t *testing.T) {
 		// real-looking owner. Only PrepareLocal writes local:true, and it always
 		// stamps owner "local", so the two can never legitimately disagree.
 		{"local flag with non-local owner", `{"workspace":"` + ws + `","ref":"cameronsjo/forgectl#1","agent":"a","createdAt":"2026-07-08T00:00:00Z","local":true}`},
+		// A bare number parses but leaves Owner/Repo empty — Slug() would be "/".
+		{"incomplete bare-number ref", `{"workspace":"` + ws + `","ref":"5","agent":"a","createdAt":"2026-07-08T00:00:00Z"}`},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

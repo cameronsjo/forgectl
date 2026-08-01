@@ -286,10 +286,19 @@ func (c *Client) PostReview(ctx context.Context, sess Session, review string, he
 	// through to the post path below — so IsLocal alone is not sufficient to
 	// exclude synthetic sessions from a loadSession result.
 	//
-	// PostReview has no caller on a reloaded Session today, which is the only
-	// reason that window is harmless. Any future verb that does call it must
-	// also treat an absent FindingsDir as a synthetic session, exactly as
-	// Launch's guard above does.
+	// There is NO other persisted field that closes the gap. FindingsDir is
+	// unpersisted for remote sessions too (see Prepare), so on any reload it is
+	// empty for every session — Launch's guard above only works because it is
+	// CONJUNCTIVE with IsLocal(), which is the exact bit a pre-#185 breadcrumb
+	// lacks. Nor is the ref's shape a discriminator: owner "local" with a
+	// short-oid repo is precisely what a real forge repo can spell, which is
+	// the bug this change fixed.
+	//
+	// So a future verb that calls PostReview on a loadSession result cannot
+	// distinguish a legacy synthetic session at all. The operational answer is
+	// migration, not detection: tear down pre-#185 local sessions on upgrade.
+	// PostReview has no such caller today, which is the only reason the window
+	// is harmless.
 	if sess.Ref.IsLocal() {
 		return false, fmt.Errorf("cannot post a review for a local session %q: there is no PR to post to", sess.Ref.String())
 	}
