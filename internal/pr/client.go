@@ -101,13 +101,18 @@ func (c *Client) SessionsDir() string { return c.sessionsDir }
 // FindingsDir returns the resolved local-review findings directory.
 func (c *Client) FindingsDir() string { return c.findingsDir }
 
-// tempPrefix is the os.MkdirTemp prefix sandbox uses for every workspace
+// sandboxPrefix is the os.MkdirTemp prefix sandbox uses for every workspace
 // ("forgectl-workflow-*"); the breadcrumb content check requires a workspace
 // to carry this exact prefix. Narrower than a bare "forgectl-" so it can't
 // match unrelated forgectl-owned temp dirs, e.g. "forgectl-findings-*"
 // (findings.go) — though that one lives under config.PrFindingsDir(), not
 // the OS temp root, so it was never reachable here anyway.
-const tempPrefix = "forgectl-workflow-"
+//
+// Named for what it is: a sandbox IDENTITY marker, not a location bound.
+// validateWorkspace no longer requires a workspace to sit under the OS temp
+// root, so nothing here implies one; rejectCleanRoomPath's prefix scan adds
+// its own temp-root bound separately (local.go).
+const sandboxPrefix = "forgectl-workflow-"
 
 // osTempDir is a seam over os.TempDir so the breadcrumb content check is
 // testable against a redirected temp root.

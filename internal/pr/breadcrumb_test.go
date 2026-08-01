@@ -12,6 +12,13 @@ package pr
 //   [x] CONTENT reject: workspace is not an existing dir
 //   [x] CONTENT reject: workspace lacks the forgectl-workflow- sandbox prefix
 //   [x] CONTENT reject: malformed ref string
+//   [x] CONTENT reject: workspace is a symlink NAMED forgectl-workflow-*
+//       pointing at an unprefixed victim dir (the resolve-then-Base pairing
+//       is the sole identity gate after issue #184 — this is the case that
+//       must never regress)
+//   [x] CONTENT accept (pinned): workspace is a symlink whose own name lacks
+//       the prefix but whose TARGET carries it — widened by issue #184,
+//       benign only because callers act on the unresolved path
 //   [x] CONTENT accept: workspace validates independent of the current
 //       $TMPDIR (issue #184 — a workspace created under one $TMPDIR must
 //       still validate after $TMPDIR changes; identity is the sandbox prefix
@@ -166,8 +173,8 @@ func FuzzLoadBreadcrumb(f *testing.F) {
 		if r, err := filepath.EvalSymlinks(bc.Workspace); err == nil {
 			real = r
 		}
-		if !strings.HasPrefix(filepath.Base(real), tempPrefix) {
-			t.Errorf("loaded breadcrumb workspace %q lacks the %q sandbox prefix", bc.Workspace, tempPrefix)
+		if !strings.HasPrefix(filepath.Base(real), sandboxPrefix) {
+			t.Errorf("loaded breadcrumb workspace %q lacks the %q sandbox prefix", bc.Workspace, sandboxPrefix)
 		}
 	})
 }
@@ -198,6 +205,78 @@ func TestLoadBreadcrumb_TMPDIRIndependent(t *testing.T) {
 	}
 	if got.Workspace != ws {
 		t.Errorf("got.Workspace = %q, want %q", got.Workspace, ws)
+	}
+}
+
+// TestLoadBreadcrumb_WorkspaceSymlinkNamePrefixedTargetNot is the case that
+// must never regress. A symlink NAMED forgectl-workflow-* pointing at an
+// unprefixed victim directory must be REJECTED.
+//
+// After issue #184 retired the temp-root bound, the EvalSymlinks +
+// filepath.Base + HasPrefix triple in validateWorkspace is the ONLY control
+// between a breadcrumb and os.RemoveAll. Nothing else reaches it:
+// TestLoadBreadcrumb_SymlinkEscape covers the LOCATION guard (a symlinked
+// breadcrumb PATH), TestLoadBreadcrumb_WorkspaceBadPrefix uses a plain
+// directory with no link, and FuzzLoadBreadcrumb only mutates JSON — a fuzzer
+// never synthesises a symlink whose name and target disagree. Reorder or drop
+// the resolve-then-Base pairing (prefix-check the unresolved path instead) and
+// this breadcrumb becomes a deletion of an arbitrary directory.
+func TestLoadBreadcrumb_WorkspaceSymlinkNamePrefixedTargetNot(t *testing.T) {
+	dir := t.TempDir()
+	root := t.TempDir()
+
+	victim := filepath.Join(root, "victim")
+	if err := os.Mkdir(victim, 0o700); err != nil {
+		t.Fatalf("mkdir victim: %v", err)
+	}
+	link := filepath.Join(root, "forgectl-workflow-decoy")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	body := `{"workspace":"` + link + `","ref":"o/r#1","agent":"a","createdAt":"2026-07-08T00:00:00Z"}`
+	path := writeRaw(t, dir, "bc.json", body)
+	if _, err := loadBreadcrumb(path, dir); err == nil {
+		t.Error("expected rejection: a symlink named forgectl-workflow-* must not launder an unprefixed target past validateWorkspace")
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("victim dir must be untouched by validation: %v", err)
+	}
+}
+
+// TestLoadBreadcrumb_WorkspaceSymlinkTargetPrefixed pins the OTHER direction,
+// which issue #184 widened: a symlink whose own name lacks the prefix but
+// whose target carries it is ACCEPTED, because validateWorkspace checks the
+// RESOLVED path.
+//
+// This documents accepted behaviour, not a desired guarantee. It is benign
+// only because sandbox.Teardown acts on the UNRESOLVED string, so os.RemoveAll
+// unlinks the link and leaves the target alone (both ends carry a comment
+// saying so). Pinning it means a later change cannot move this case silently
+// in either direction — tightening it to a rejection is a behaviour change,
+// and loosening Teardown to act on the resolved path makes it destructive.
+func TestLoadBreadcrumb_WorkspaceSymlinkTargetPrefixed(t *testing.T) {
+	dir := t.TempDir()
+	root := t.TempDir()
+
+	target := filepath.Join(root, "forgectl-workflow-real")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	link := filepath.Join(root, "plain-name")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	body := `{"workspace":"` + link + `","ref":"o/r#1","agent":"a","createdAt":"2026-07-08T00:00:00Z"}`
+	path := writeRaw(t, dir, "bc.json", body)
+	got, err := loadBreadcrumb(path, dir)
+	if err != nil {
+		t.Fatalf("loadBreadcrumb: %v (a link resolving to a prefixed sandbox is accepted today)", err)
+	}
+	// The UNRESOLVED string is what comes back and what callers act on.
+	if got.Workspace != link {
+		t.Errorf("got.Workspace = %q, want the unresolved link path %q", got.Workspace, link)
 	}
 }
 

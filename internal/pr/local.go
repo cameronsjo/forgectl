@@ -210,7 +210,7 @@ func (c *Client) rejectCleanRoomPath(absPath string) error {
 		return nil
 	}
 	for dir := real; dir != tempRoot; dir = filepath.Dir(dir) {
-		if strings.HasPrefix(filepath.Base(dir), tempPrefix) {
+		if strings.HasPrefix(filepath.Base(dir), sandboxPrefix) {
 			return cleanRoomError(absPath, dir)
 		}
 		if parent := filepath.Dir(dir); parent == dir {

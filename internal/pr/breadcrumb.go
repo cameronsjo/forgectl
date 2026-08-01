@@ -138,6 +138,26 @@ func validateBreadcrumb(bc Breadcrumb) error {
 // never an adversarial boundary to begin with: a same-uid attacker can just
 // call os.MkdirTemp("", "forgectl-workflow-evil-*") and pass it. Identity
 // comes from the sandbox prefix alone.
+//
+// LOAD-BEARING — VALIDATE RESOLVED, ACT UNRESOLVED. This function checks the
+// prefix on filepath.EvalSymlinks(workspace), but every caller acts on the
+// UNRESOLVED string — sandbox.Teardown passes it straight to os.RemoveAll.
+// That split is deliberate and is what keeps a symlink NAMED without the
+// prefix but POINTING at a prefixed directory harmless: it validates here,
+// and RemoveAll then unlinks the link itself rather than following it to the
+// target. Do NOT "tidy" a caller to act on the resolved path on the theory
+// that it should match what was validated — that turns those cases into real
+// deletions of directories outside any sandbox. See the matching note on
+// sandbox.Teardown.
+//
+// KNOWN, ACCEPTED: a symlinked PARENT component IS followed. RemoveAll only
+// refuses to follow the FINAL component, so a workspace recorded as
+// /tmp/plink/forgectl-workflow-x with plink -> $HOME/real deletes
+// $HOME/real/forgectl-workflow-x. The retired temp-root check rejected that
+// shape specifically, because sandbox.WithinWorkspace resolves symlinks on
+// both sides. Reaching it still requires writing a breadcrumb into the 0700
+// session-state dir under $HOME — same-uid arbitrary write — an actor who
+// can delete the target outright without forgectl.
 func validateWorkspace(workspace string) error {
 	if !filepath.IsAbs(workspace) {
 		return fmt.Errorf("workspace %q must be an absolute path", workspace)
@@ -153,8 +173,8 @@ func validateWorkspace(workspace string) error {
 	if r, err := filepath.EvalSymlinks(workspace); err == nil {
 		real = r
 	}
-	if !strings.HasPrefix(filepath.Base(real), tempPrefix) {
-		return fmt.Errorf("workspace %q lacks the %q sandbox prefix", workspace, tempPrefix)
+	if !strings.HasPrefix(filepath.Base(real), sandboxPrefix) {
+		return fmt.Errorf("workspace %q lacks the %q sandbox prefix", workspace, sandboxPrefix)
 	}
 	return nil
 }
