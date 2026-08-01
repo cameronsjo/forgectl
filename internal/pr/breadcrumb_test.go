@@ -10,9 +10,19 @@ package pr
 //   [x] CONTENT reject: unknown fields (schema drift / smuggled keys)
 //   [x] CONTENT reject: missing required fields (workspace, ref, createdAt)
 //   [x] CONTENT reject: workspace is not an existing dir
-//   [x] CONTENT reject: workspace exists but is outside the OS temp dir
-//   [x] CONTENT reject: workspace lacks the forgectl- sandbox prefix
+//   [x] CONTENT reject: workspace lacks the forgectl-workflow- sandbox prefix
 //   [x] CONTENT reject: malformed ref string
+//   [x] CONTENT reject: workspace is a symlink NAMED forgectl-workflow-*
+//       pointing at an unprefixed victim dir (the resolve-then-Base pairing
+//       is the sole identity gate after issue #184 — this is the case that
+//       must never regress)
+//   [x] CONTENT accept (pinned): workspace is a symlink whose own name lacks
+//       the prefix but whose TARGET carries it — widened by issue #184,
+//       benign only because callers act on the unresolved path
+//   [x] CONTENT accept: workspace validates independent of the current
+//       $TMPDIR (issue #184 — a workspace created under one $TMPDIR must
+//       still validate after $TMPDIR changes; identity is the sandbox prefix
+//       alone, not membership under the current OS temp root)
 // writeBreadcrumb round-trips through loadBreadcrumb
 
 import (
@@ -21,15 +31,13 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
-// fakeWorkspace makes a dir under the OS temp root with the forgectl- prefix —
-// what validateWorkspace accepts as a real sandbox.
+// fakeWorkspace makes a dir under the OS temp root with the forgectl-workflow-
+// prefix — what validateWorkspace accepts as a real sandbox.
 func fakeWorkspace(t *testing.T) string {
 	t.Helper()
-	ws, err := os.MkdirTemp("", "forgectl-test-*")
+	ws, err := os.MkdirTemp("", "forgectl-workflow-test-*")
 	if err != nil {
 		t.Fatalf("mkdir workspace: %v", err)
 	}
@@ -124,12 +132,18 @@ func TestLoadBreadcrumb_ContentRejections(t *testing.T) {
 
 // FuzzLoadBreadcrumb mutates breadcrumb JSON against a fixed session-state dir.
 // The security invariant: any breadcrumb the loader RETURNS (no error) must
-// point at a Workspace under the OS temp root carrying the forgectl- sandbox
-// prefix — the loader never yields a breadcrumb steering a later `git -C` at an
-// arbitrary path. Seeded with valid breadcrumbs pointing at a real sandbox dir.
+// point at a Workspace that exists, is a directory, and carries the
+// forgectl-workflow- sandbox prefix — the loader never yields a breadcrumb
+// steering a later `git -C` at an arbitrary path. It deliberately does NOT
+// assert Workspace sits under the current OS temp root: validateWorkspace no
+// longer checks that (issue #184 — that check was $TMPDIR-dependent and made
+// `pr list`/`attach`/`teardown` go blind to a pre-existing session the moment
+// $TMPDIR changed), so a workspace outside the CURRENT temp root is a valid
+// pass here, not a bug. Seeded with valid breadcrumbs pointing at a real
+// sandbox dir.
 func FuzzLoadBreadcrumb(f *testing.F) {
 	sessionsDir := f.TempDir()
-	ws, err := os.MkdirTemp("", "forgectl-fuzz-*")
+	ws, err := os.MkdirTemp("", "forgectl-workflow-fuzz-*")
 	if err != nil {
 		f.Fatalf("mkdir workspace: %v", err)
 	}
@@ -142,7 +156,6 @@ func FuzzLoadBreadcrumb(f *testing.F) {
 		f.Add([]byte(s))
 	}
 
-	tmpRoot := osTempDir()
 	f.Fuzz(func(t *testing.T, body []byte) {
 		path := filepath.Join(sessionsDir, "bc.json")
 		if err := os.WriteFile(path, body, 0o600); err != nil {
@@ -152,28 +165,130 @@ func FuzzLoadBreadcrumb(f *testing.F) {
 		if err != nil {
 			return
 		}
-		if !sandbox.WithinWorkspace(tmpRoot, bc.Workspace) {
-			t.Errorf("loaded breadcrumb workspace %q is not under the OS temp root %q", bc.Workspace, tmpRoot)
+		info, err := os.Stat(bc.Workspace)
+		if err != nil || !info.IsDir() {
+			t.Errorf("loaded breadcrumb workspace %q is not an existing directory: %v", bc.Workspace, err)
 		}
 		real := bc.Workspace
 		if r, err := filepath.EvalSymlinks(bc.Workspace); err == nil {
 			real = r
 		}
-		if !strings.HasPrefix(filepath.Base(real), tempPrefix) {
-			t.Errorf("loaded breadcrumb workspace %q lacks the %q sandbox prefix", bc.Workspace, tempPrefix)
+		if !strings.HasPrefix(filepath.Base(real), sandboxPrefix) {
+			t.Errorf("loaded breadcrumb workspace %q lacks the %q sandbox prefix", bc.Workspace, sandboxPrefix)
 		}
 	})
+}
+
+// TestLoadBreadcrumb_TMPDIRIndependent regresses issue #184: a workspace
+// created under one $TMPDIR must still validate after $TMPDIR changes.
+// os.TempDir() reads $TMPDIR at CALL time, so gating validateWorkspace on the
+// current temp root made every pre-existing session invisible to
+// `pr list`/`attach`/`teardown`/`cleanup` the instant $TMPDIR changed — RED
+// before this fix, since validateWorkspace used to compare workspace against
+// osTempDir() at validation time.
+func TestLoadBreadcrumb_TMPDIRIndependent(t *testing.T) {
+	dir := t.TempDir()
+	ws := fakeWorkspace(t) // created under the current $TMPDIR
+	ref := Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}
+	bc := Breadcrumb{Workspace: ws, Ref: ref.String(), Agent: "claude", CreatedAt: time.Now().UTC()}
+	path, err := writeBreadcrumb(dir, ref, bc)
+	if err != nil {
+		t.Fatalf("writeBreadcrumb: %v", err)
+	}
+
+	// Point $TMPDIR somewhere the workspace is NOT under.
+	t.Setenv("TMPDIR", t.TempDir())
+
+	got, err := loadBreadcrumb(path, dir)
+	if err != nil {
+		t.Fatalf("loadBreadcrumb: %v (workspace validation must not depend on the current $TMPDIR)", err)
+	}
+	if got.Workspace != ws {
+		t.Errorf("got.Workspace = %q, want %q", got.Workspace, ws)
+	}
+}
+
+// TestLoadBreadcrumb_WorkspaceSymlinkNamePrefixedTargetNot is the case that
+// must never regress. A symlink NAMED forgectl-workflow-* pointing at an
+// unprefixed victim directory must be REJECTED.
+//
+// After issue #184 retired the temp-root bound, the EvalSymlinks +
+// filepath.Base + HasPrefix triple in validateWorkspace is the ONLY control
+// between a breadcrumb and os.RemoveAll. Nothing else reaches it:
+// TestLoadBreadcrumb_SymlinkEscape covers the LOCATION guard (a symlinked
+// breadcrumb PATH), TestLoadBreadcrumb_WorkspaceBadPrefix uses a plain
+// directory with no link, and FuzzLoadBreadcrumb only mutates JSON — a fuzzer
+// never synthesises a symlink whose name and target disagree. Reorder or drop
+// the resolve-then-Base pairing (prefix-check the unresolved path instead) and
+// this breadcrumb becomes a deletion of an arbitrary directory.
+func TestLoadBreadcrumb_WorkspaceSymlinkNamePrefixedTargetNot(t *testing.T) {
+	dir := t.TempDir()
+	root := t.TempDir()
+
+	victim := filepath.Join(root, "victim")
+	if err := os.Mkdir(victim, 0o700); err != nil {
+		t.Fatalf("mkdir victim: %v", err)
+	}
+	link := filepath.Join(root, "forgectl-workflow-decoy")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	body := `{"workspace":"` + link + `","ref":"o/r#1","agent":"a","createdAt":"2026-07-08T00:00:00Z"}`
+	path := writeRaw(t, dir, "bc.json", body)
+	if _, err := loadBreadcrumb(path, dir); err == nil {
+		t.Error("expected rejection: a symlink named forgectl-workflow-* must not launder an unprefixed target past validateWorkspace")
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("victim dir must be untouched by validation: %v", err)
+	}
+}
+
+// TestLoadBreadcrumb_WorkspaceSymlinkTargetPrefixed pins the OTHER direction,
+// which issue #184 widened: a symlink whose own name lacks the prefix but
+// whose target carries it is ACCEPTED, because validateWorkspace checks the
+// RESOLVED path.
+//
+// This documents accepted behaviour, not a desired guarantee. It is benign
+// only because sandbox.Teardown acts on the UNRESOLVED string, so os.RemoveAll
+// unlinks the link and leaves the target alone (both ends carry a comment
+// saying so). Pinning it means a later change cannot move this case silently
+// in either direction — tightening it to a rejection is a behaviour change,
+// and loosening Teardown to act on the resolved path makes it destructive.
+func TestLoadBreadcrumb_WorkspaceSymlinkTargetPrefixed(t *testing.T) {
+	dir := t.TempDir()
+	root := t.TempDir()
+
+	target := filepath.Join(root, "forgectl-workflow-real")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	link := filepath.Join(root, "plain-name")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	body := `{"workspace":"` + link + `","ref":"o/r#1","agent":"a","createdAt":"2026-07-08T00:00:00Z"}`
+	path := writeRaw(t, dir, "bc.json", body)
+	got, err := loadBreadcrumb(path, dir)
+	if err != nil {
+		t.Fatalf("loadBreadcrumb: %v (a link resolving to a prefixed sandbox is accepted today)", err)
+	}
+	// The UNRESOLVED string is what comes back and what callers act on.
+	if got.Workspace != link {
+		t.Errorf("got.Workspace = %q, want the unresolved link path %q", got.Workspace, link)
+	}
 }
 
 func TestLoadBreadcrumb_WorkspaceBadPrefix(t *testing.T) {
 	dir := t.TempDir()
 	// A real, existing dir (t.TempDir is under the OS temp root) that lacks the
-	// forgectl- sandbox prefix — so the prefix branch of validateWorkspace must
-	// reject it even though it exists and is a directory.
+	// forgectl-workflow- sandbox prefix — so the prefix branch of
+	// validateWorkspace must reject it even though it exists and is a directory.
 	notASandbox := t.TempDir()
 	body := `{"workspace":"` + notASandbox + `","ref":"o/r#1","agent":"a","createdAt":"2026-07-08T00:00:00Z"}`
 	path := writeRaw(t, dir, "bc.json", body)
 	if _, err := loadBreadcrumb(path, dir); err == nil {
-		t.Error("expected rejection for a workspace lacking the forgectl- sandbox prefix")
+		t.Error("expected rejection for a workspace lacking the forgectl-workflow- sandbox prefix")
 	}
 }
