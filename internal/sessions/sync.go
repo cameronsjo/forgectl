@@ -76,6 +76,10 @@ func (o SyncOptions) Resolve(cfg config.SessionsConfig) (SyncOptions, error) {
 	if o.MetricsDir == "" {
 		o.MetricsDir = cfg.MetricsDir
 	}
+	// Expand regardless of source — a flag-supplied MetricsDir gets the same
+	// ~ handling as a config-supplied one.
+	o.MetricsDir = expandTilde(o.MetricsDir, home)
+	metricsExplicit := o.MetricsDir != ""
 	stateHome := os.Getenv("CADENCE_STATE_HOME")
 	if stateHome == "" {
 		if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
@@ -93,13 +97,51 @@ func (o SyncOptions) Resolve(cfg config.SessionsConfig) (SyncOptions, error) {
 	if o.RunbooksDir == "" {
 		o.RunbooksDir = cfg.RunbooksDir
 	}
+	// Expand regardless of source — a flag-supplied RunbooksDir gets the same
+	// ~ handling as a config-supplied one.
+	o.RunbooksDir = expandTilde(o.RunbooksDir, home)
 	if o.RunbooksDir == "" {
 		o.RunbooksDir = filepath.Join(stateHome, "runbooks")
 	}
 	if o.LegacyRunbooksDir == "" {
 		o.LegacyRunbooksDir = filepath.Join(home, ".claude", "cadence", "runbooks")
 	}
+
+	// An explicitly configured metrics_dir (flag or [sessions] config key)
+	// that doesn't exist is a typo or a moved directory, not the
+	// fresh-machine case — surface it loudly rather than silently syncing
+	// zero sessions. The baked default staying absent is tolerated: a fresh
+	// machine with no state directory yet must keep working. RunbooksDir
+	// gets no equivalent check here — runbooksDirWithLegacy already treats an
+	// absent explicit RunbooksDir as a legitimate not-yet-migrated case and
+	// falls back to LegacyRunbooksDir; a hard error here would break that.
+	if metricsExplicit {
+		if _, statErr := os.Stat(o.MetricsDir); os.IsNotExist(statErr) {
+			return o, fmt.Errorf("metrics_dir %q does not exist (set via config or --metrics-dir)", o.MetricsDir)
+		}
+	}
 	return o, nil
+}
+
+// expandTilde expands a leading ~ or ~/ to home. Mirrors the small helper in
+// internal/config, internal/launch and internal/clean — identical for every
+// input a caller here can produce, though config's and launch's copies lack
+// the empty-home guard this one shares with clean's. That divergence is
+// unreachable in practice: callers check `os.UserHomeDir()` before calling.
+// Kept local per house convention (see internal/config/config.go's own
+// comment on why) rather than introducing a shared util package for four
+// lines of code.
+func expandTilde(path, home string) string {
+	if home == "" {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	if strings.HasPrefix(path, "~/") {
+		return filepath.Join(home, path[2:])
+	}
+	return path
 }
 
 // Sync is one idempotent ETL run: drain the local JSONL WAL into the concordance's
