@@ -143,6 +143,7 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 		Ref:       ref.String(),
 		Agent:     opts.Agent,
 		CreatedAt: sess.CreatedAt,
+		Local:     true,
 	}
 	bcPath, err := writeBreadcrumb(c.sessionsDir, ref, bc)
 	if err != nil {
@@ -301,27 +302,28 @@ func (c *Client) teardownLocalArtifacts(ctx context.Context, workspace, findings
 // with that).
 const unparseableHexSentinel = 0x1000000
 
-// localRef is the ONLY constructor that may produce a Ref carrying the
-// reserved sentinel. It builds the identity in-process from a local git oid —
-// nothing external reaches it — which is what makes locality unforgeable: the
-// exported routes (ParseRef, RefFromParts, ResolveRef) all refuse the
-// sentinel, so no gh response, config value, or user-typed string can spell it.
+// newLocalRef is the ONLY constructor that may produce a local Ref — the one
+// place Ref.local is set. It builds the identity in-process from a local git
+// oid, so nothing external reaches it, and that is what makes locality
+// unforgeable: no parsed string sets the flag, whatever owner it spells.
 //
 // It builds a synthetic Ref identity from a local HEAD oid: Owner is
-// localOwnerSentinel (reserved — see its doc in ref.go), Repo is a 7-char
-// short oid, and Number is derived from the oid's first 6 hex chars (always
-// positive — parseNumber rejects Number<=0, so a fixed 0 sentinel would fail
-// breadcrumb reload). Every component stays inside Ref's existing validated
-// charset, so ref.String() round-trips through parseRefAllowingLocal exactly
-// like a real PR ref does through ParseRef. Deriving Number from the oid also keeps concurrent-session tmux
-// window names (pr-<owner>-<N>) distinct per commit under review.
+// localOwnerSentinel (a display value — see its doc in ref.go), Repo is a
+// 7-char short oid, and Number is derived from the oid's first 6 hex chars
+// (always positive — parseNumber rejects Number<=0, so a fixed 0 sentinel
+// would fail breadcrumb reload). Every component stays inside Ref's existing
+// validated charset, so ref.String() round-trips through ParseRef exactly like
+// a real PR ref does; the flag itself round-trips separately, as the
+// breadcrumb's Local field. Deriving Number from the oid also keeps
+// concurrent-session tmux window names (pr-<owner>-<N>) distinct per commit
+// under review.
 func newLocalRef(oid string) Ref {
 	hexPart := truncate(oid, 6)
 	n, err := strconv.ParseInt(hexPart, 16, 64)
 	if err != nil || n <= 0 {
 		n = unparseableHexSentinel
 	}
-	return Ref{Owner: localOwnerSentinel, Repo: truncate(oid, 7), Number: int(n)}
+	return Ref{Owner: localOwnerSentinel, Repo: truncate(oid, 7), Number: int(n), local: true}
 }
 
 // truncate returns s cut to at most n bytes.

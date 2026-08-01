@@ -106,8 +106,9 @@ func LaunchPathFor(agent string) LaunchPath {
 // the Ref was CONSTRUCTED. They are different predicates. Two other guards keep
 // them from diverging, and both are load-bearing:
 //
-//   - localOwnerSentinel is unforgeable (ref.go), so external data cannot make
-//     a remote head present as local.
+//   - Ref.local is unforgeable (ref.go) — only newLocalRef sets it, and no
+//     parsed string can, whatever owner it spells — so external data cannot
+//     make a remote head present as local.
 //   - rejectCleanRoomPath (local.go) refuses a `pr local` path inside a
 //     forgectl workspace, so the operator cannot launder a fetched hostile
 //     head into "their own tree" by pointing local review at the sandbox.

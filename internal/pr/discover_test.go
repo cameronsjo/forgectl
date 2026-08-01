@@ -385,20 +385,18 @@ func TestPrepareMany_PerItemErrorCaptured(t *testing.T) {
 	}
 }
 
-// TestParseSearchPRs_RejectsForgedLocalSentinel is the regression guard for a
-// refusal bypass. `gh search prs` output is hostile input, and a PR owned by a
-// GitHub org literally named "local" would otherwise yield Ref{Owner:"local"}
-// for a REMOTE head — making IsLocal() true, so CheckAgentForRef passes,
-// Prepare fetches the third party's head, and launchCodex takes the local
-// branch (flipping the sandbox from read-only to workspace-write).
-//
-// The sentinel must not be spellable by external data at all, so the row is
-// skipped by the parser and never becomes a Ref.
-func TestParseSearchPRs_RejectsForgedLocalSentinel(t *testing.T) {
-	const forged = `[{"repository":{"nameWithOwner":"local/evil"},"number":7,"title":"t","state":"OPEN"},
-	                 {"repository":{"nameWithOwner":"real/repo"},"number":8,"title":"t","state":"OPEN"}]`
+// TestParseSearchPRs_KeepsRealLocalOwner is the regression guard for the
+// refusal bypass AND for issue #185. `gh search prs` output is hostile input,
+// and a forge org literally named "local" is a real thing — dropping its rows
+// silently lost PRs from discovery. Keeping the row is only safe because
+// locality no longer rides the owner string: IsLocal() reads Ref.local, which
+// no parsed row can set, so CheckAgentForRef still refuses Codex here and
+// launchCodex never takes the workspace-write branch.
+func TestParseSearchPRs_KeepsRealLocalOwner(t *testing.T) {
+	const rows = `[{"repository":{"nameWithOwner":"local/evil"},"number":7,"title":"t","state":"OPEN"},
+	               {"repository":{"nameWithOwner":"real/repo"},"number":8,"title":"t","state":"OPEN"}]`
 
-	prs, rawCount, err := parseSearchPRs(forged)
+	prs, rawCount, err := parseSearchPRs(rows)
 	if err != nil {
 		t.Fatalf("parseSearchPRs: %v", err)
 	}
@@ -407,22 +405,30 @@ func TestParseSearchPRs_RejectsForgedLocalSentinel(t *testing.T) {
 	}
 	for _, p := range prs {
 		if p.Ref.IsLocal() {
-			t.Errorf("a discovered remote PR forged the local sentinel: %+v", p.Ref)
-		}
-		if p.Ref.Owner == "local" {
-			t.Errorf("owner %q reached a Ref from gh output", p.Ref.Owner)
+			t.Errorf("a discovered remote PR came back LOCAL: %+v", p.Ref)
 		}
 	}
-	if len(prs) != 1 || prs[0].Ref.Owner != "real" {
-		t.Errorf("expected only the legitimate row to survive; got %+v", prs)
+	if len(prs) != 2 {
+		t.Fatalf("expected both rows to survive; got %+v", prs)
+	}
+	if prs[0].Ref.Owner != "local" || prs[1].Ref.Owner != "real" {
+		t.Errorf("expected owners [local real], got %+v", prs)
 	}
 }
 
 // TestCheckAgentForRef_ForgedLocalRefStillRefused is the end-to-end statement
-// of the same invariant at the boundary itself.
+// of the same invariant at the boundary itself: the ref parses, and the Codex
+// refusal still fires because the ref is not local.
 func TestCheckAgentForRef_ForgedLocalRefStillRefused(t *testing.T) {
 	forged, err := RefFromParts("local", "evil", "7")
-	if err == nil {
-		t.Fatalf("RefFromParts accepted the reserved sentinel, yielding %+v", forged)
+	if err != nil {
+		t.Fatalf("RefFromParts rejected a real owner named %q: %v", "local", err)
+	}
+	if forged.IsLocal() {
+		t.Fatalf("RefFromParts produced a LOCAL ref from external input: %+v", forged)
+	}
+	if err := CheckAgentForRef("codex", forged); err == nil {
+		t.Error("CheckAgentForRef(codex) accepted a remote ref owned by \"local\"; " +
+			"the Codex reviewer must still be refused against a remote head")
 	}
 }
