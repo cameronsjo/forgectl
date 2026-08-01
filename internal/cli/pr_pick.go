@@ -29,7 +29,9 @@ func newPrPickCmdForClient(client *pr.Client, cfg config.Config, reviewedPath st
 		Long: `pick lists your open PRs in a multiselect. Chosen PRs are prepared
 concurrently (same-repo checkouts serialized) and each launches a clean-room
 review. A PR you've already marked reviewed is dimmed in the list and skipped
-at launch, so a bulk pick never re-opens a review you've finished.`,
+at launch, so a bulk pick never re-opens a review you've finished. Launches
+are capped at 4 concurrent reviews by default (override via [pr]
+max_concurrent in config.toml); PRs past the cap are deferred, not prepared.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -124,6 +126,22 @@ func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd
 		return nil
 	}
 
+	maxN := pr.MaxConcurrentReviews(cfg.Pr.MaxConcurrent)
+	free, ok := client.Admit(ctx, maxN)
+	if !ok {
+		return fmt.Errorf("cannot read the tmux review window count — refusing to launch %d review(s); "+
+			"never mass-launch on an unreadable count. Check `tmux list-windows -a`, then retry", len(refs))
+	}
+	if free == 0 {
+		fmt.Fprintf(errOut, "review cap reached (max %d already running) — nothing launched; re-run 'forgectl pr pick' as reviews finish\n", maxN)
+		return nil
+	}
+	deferred := 0
+	if len(refs) > free {
+		deferred = len(refs) - free
+		refs = refs[:free]
+	}
+
 	results := client.PrepareMany(ctx, refs, pr.PrepareOpts{Agent: resolveAgent("")})
 	launched := 0
 	prepareFailed := 0
@@ -142,12 +160,15 @@ func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd
 		fmt.Fprintf(out, "launched clean-room review of %s\n", r.Ref.String())
 		launched++
 	}
+	if deferred > 0 {
+		fmt.Fprintf(errOut, "%d PR(s) deferred by the concurrency cap (max %d) — not prepared, not marked reviewed; re-run 'forgectl pr pick' as reviews finish\n", deferred, maxN)
+	}
 	// A launch failure leaves a prepared clean room (workspace + breadcrumb) on
 	// disk — Phase 1 keeps it so the review is retryable/tearable. In bulk these
 	// accumulate silently, so point the user at the cleanup path.
 	if launchFailed > 0 {
 		fmt.Fprintf(errOut, "%d review(s) prepared but failed to launch — their clean rooms remain; discard via 'forgectl pr list' then 'pr teardown <breadcrumb>'\n", launchFailed)
 	}
-	slog.Info("Successfully completed bulk launch.", "launched", launched, "prepareFailed", prepareFailed, "launchFailed", launchFailed, "skipped", skipped)
+	slog.Info("Successfully completed bulk launch.", "launched", launched, "prepareFailed", prepareFailed, "launchFailed", launchFailed, "skipped", skipped, "deferred", deferred)
 	return nil
 }

@@ -8,6 +8,10 @@ package cli
 //   [x] Invariant: a reviewed (dimmed) selected PR is SKIPPED at launch — no
 //       prepare, no launch — with a one-line skip note on stderr (decision 1)
 //   [x] Boundary: all selections dimmed → nothing launched, explanatory note
+//   [x] Boundary: selections exceed the concurrency cap → only the cap's worth
+//       prepared/launched, the rest deferred with a one-line note (decision 2)
+//   [x] Unhappy: the live tmux window count is unreadable → refuse the whole
+//       batch, fail-closed — no prepare (no clone) for anything
 //
 // pickPRs is not unit-tested here: it drives an interactive huh multiselect
 // that requires a TTY. Its selection→launch contract is covered via
@@ -16,6 +20,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,14 +35,43 @@ import (
 )
 
 // prepareRunner fakes gh pr view (valid head), git, and tmux for a Prepare +
-// Launch round-trip.
+// Launch round-trip. has-session and list-windows report a healthy, empty
+// review session (no live "pr-*" windows) — admission always finds free
+// capacity — since generic tmux calls (new-window, has-session,
+// list-windows) all fall through the same "", nil no-op branch below.
 func prepareRunner() *exec.FakeRunner {
 	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		if name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view" {
 			return `{"headRefName":"feature","headRefOid":"abc123",` +
 				`"headRepositoryOwner":{"login":"cameronsjo"},"headRepository":{"name":"forgectl"}}`, nil
 		}
-		return "", nil // git clone / tmux succeed as no-ops
+		if name == "tmux" && len(args) > 0 && args[0] == "has-session" {
+			return "", nil // session exists
+		}
+		if name == "tmux" && len(args) > 0 && args[0] == "list-windows" {
+			return "", nil // no live windows
+		}
+		return "", nil // git clone / tmux new-window succeed as no-ops
+	}}
+}
+
+// unreadableWindowCountRunner fakes gh pr view + git the same as
+// prepareRunner, but tmux list-windows fails with an error that is NOT "no
+// server running" — a genuinely unreadable window count, which the
+// admission gate must treat as fail-closed (never a free-capacity guess).
+func unreadableWindowCountRunner() *exec.FakeRunner {
+	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view" {
+			return `{"headRefName":"feature","headRefOid":"abc123",` +
+				`"headRepositoryOwner":{"login":"cameronsjo"},"headRepository":{"name":"forgectl"}}`, nil
+		}
+		if name == "tmux" && len(args) > 0 && args[0] == "has-session" {
+			return "", nil // session exists
+		}
+		if name == "tmux" && len(args) > 0 && args[0] == "list-windows" {
+			return "", errors.New("boom: tmux exploded")
+		}
+		return "", nil
 	}}
 }
 
@@ -141,6 +175,62 @@ func TestLaunchPicked_AllReviewed_NothingLaunched(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "all selected PRs already reviewed") {
 		t.Errorf("want all-reviewed note on stderr, got %q", errOut.String())
+	}
+}
+
+func TestLaunchPicked_CapDefersExcess(t *testing.T) {
+	fakeClaudeBin(t)
+
+	fake := prepareRunner()
+	client := pr.New(fake, pr.WithSessionsDir(t.TempDir()), pr.WithTmuxSession("forgectl"))
+	store := pr.LoadReviewed(filepath.Join(t.TempDir(), "pr-reviewed.json"))
+
+	updated := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	selected := []pr.PR{
+		{Ref: pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 1}, Title: "one", UpdatedAt: updated},
+		{Ref: pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 2}, Title: "two", UpdatedAt: updated},
+		{Ref: pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 3}, Title: "three", UpdatedAt: updated},
+	}
+
+	cmd, _, errOut := newTestCmd()
+	cfg := config.Config{Pr: config.PrConfig{MaxConcurrent: 2}}
+	if err := launchPicked(context.Background(), client, cfg, cmd, selected, store); err != nil {
+		t.Fatalf("launchPicked: %v", err)
+	}
+
+	windows := tmuxWindows(fake.Calls)
+	if len(windows) != 2 {
+		t.Errorf("want exactly 2 launched windows under cap 2, got %d: %v", len(windows), windows)
+	}
+	if !strings.Contains(errOut.String(), "1 PR(s) deferred") {
+		t.Errorf("want deferred note on stderr, got %q", errOut.String())
+	}
+}
+
+func TestLaunchPicked_UnreadableWindowCount_RefusesBatch(t *testing.T) {
+	fakeClaudeBin(t)
+
+	fake := unreadableWindowCountRunner()
+	client := pr.New(fake, pr.WithSessionsDir(t.TempDir()), pr.WithTmuxSession("forgectl"))
+	store := pr.LoadReviewed(filepath.Join(t.TempDir(), "pr-reviewed.json"))
+
+	updated := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	selected := []pr.PR{
+		{Ref: pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 1}, Title: "one", UpdatedAt: updated},
+	}
+
+	cmd, _, _ := newTestCmd()
+	if err := launchPicked(context.Background(), client, config.Config{}, cmd, selected, store); err == nil {
+		t.Fatal("launchPicked: want error on unreadable window count, got nil")
+	}
+
+	if windows := tmuxWindows(fake.Calls); len(windows) != 0 {
+		t.Errorf("unreadable count must launch nothing; windows=%v", windows)
+	}
+	for _, c := range fake.Calls {
+		if c.Name == "git" && len(c.Args) > 0 && c.Args[0] == "clone" {
+			t.Errorf("unreadable count must refuse BEFORE any prepare/clone; saw git clone call: %+v", c)
+		}
 	}
 }
 

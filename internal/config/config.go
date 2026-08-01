@@ -83,6 +83,7 @@ type Config struct {
 	Docs      DocsConfig      `toml:"docs"`
 	Preflight PreflightConfig `toml:"preflight"`
 	Update    UpdateConfig    `toml:"update"`
+	Pr        PrConfig        `toml:"pr"`
 }
 
 // LaunchConfig is the [launch] section: base defaults plus directory-keyed
@@ -220,6 +221,20 @@ type ReviewConfig struct {
 // IsZero reports whether the [review] section was absent or empty.
 func (rc ReviewConfig) IsZero() bool {
 	return len(rc.Owners) == 0 && rc.Gitea.IsZero()
+}
+
+// PrConfig is the [pr] section: `forgectl pr pick`'s bulk-launch concurrency
+// cap. A zero MaxConcurrent means "section absent" — internal/pr owns the
+// built-in default (DefaultMaxConcurrentReviews) applied when this is unset
+// or non-positive, per the house zero-means-absent convention every other
+// *Config section in this file follows.
+type PrConfig struct {
+	MaxConcurrent int `toml:"max_concurrent"`
+}
+
+// IsZero reports whether the [pr] section was absent or empty.
+func (pc PrConfig) IsZero() bool {
+	return pc.MaxConcurrent == 0
 }
 
 // GiteaConfig is the [review.gitea] section: forgectl review's opt-in second
