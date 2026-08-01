@@ -113,10 +113,19 @@ func resolveToken(tokenFlag, bindAddr string) (string, error) {
 	return httpsrv.GenerateToken()
 }
 
-// runDocsServe binds the listener, wires the Host-allowlist middleware
-// (forgectl#93 security-chain item 1) around the docs handler, and serves
-// until the command's context is canceled (Ctrl-C/SIGTERM) or the server
-// itself fails to start.
+// runDocsServe binds the listener, wires the security middleware chain
+// (forgectl#93 security-chain item 1, plus the cross-site rejecter
+// forgectl#178 adds)
+// around the docs handler, and serves until the command's context is canceled
+// (Ctrl-C/SIGTERM) or the server itself fails to start.
+//
+// Chain order is deliberate: Host allowlist, then cross-site rejection, then
+// the bearer token when one is required. The two header checks are pure string
+// comparisons and deny the requests that should never have arrived at all, so
+// they run before the token check hashes anything. Putting authentication last
+// also means a cross-site probe gets 403 (this origin may not talk to me)
+// rather than 401 (send me credentials), which is both the truer answer and
+// the one that tells a hostile page less.
 func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addrFlag string, openFlag bool, tokenFlag string) error {
 	bindAddr := addrFlag
 	if bindAddr == "" {
@@ -154,6 +163,7 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 
 	middleware := []func(http.Handler) http.Handler{
 		httpsrv.HostAllowlist(allowedHosts(bindAddr)),
+		httpsrv.RejectCrossSite(),
 	}
 	if token != "" {
 		middleware = append(middleware, httpsrv.BearerToken(token))

@@ -37,6 +37,14 @@ var artificerTreeJS []byte
 //go:embed assets/reload.js
 var reloadJS []byte
 
+// sidenavFilterJS is the sidenav filter box's behavior. It lives in a file, and
+// is embedded and served like every other asset, because the handler's
+// Content-Security-Policy sets script-src 'self' — the inline <script> this
+// replaced could not run under it.
+//
+//go:embed assets/sidenav-filter.js
+var sidenavFilterJS []byte
+
 // mermaidJS is vendored mermaid (version, license, and sha256 recorded in
 // assets/provenance-mermaid.json). Embedded rather than loaded from a CDN: the
 // reader must render a diagram with no network call, because opening a local

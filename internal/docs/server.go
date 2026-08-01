@@ -31,6 +31,65 @@ const reloadMessage = "reload"
 // `forgectl docs open`.
 const locatePath = "/api/locate"
 
+// contentSecurityPolicy is sent on EVERY response this handler produces, not
+// just the rendered shell. The reader executes markdown the operator wrote —
+// and, increasingly, markdown Claude wrote for them — so the sanitizer in
+// render.go is the first line and this is the second: whatever the sanitizer
+// were ever to let through still cannot reach off-origin.
+//
+// Directive by directive, because each is a decision and not a copied
+// boilerplate line:
+//
+//   - default-src 'self' — the floor. Every fetch type without its own
+//     directive below inherits same-origin-only.
+//   - script-src 'self' — no 'unsafe-inline' (the shell has no inline
+//     <script>; the sidenav filter was moved to assets/sidenav-filter.js
+//     precisely so this could stay clean) and, deliberately, NO 'unsafe-eval'.
+//     The vendored mermaid bundle contains exactly two Function-constructor
+//     sites, both the `Function("return this")` globalThis polyfill, which
+//     short-circuits on a real `globalThis` before ever constructing anything
+//     in any browser this reader targets. Nothing here needs eval, so nobody
+//     should add 'unsafe-eval' back "just in case" — the correct response to a
+//     CSP eval violation is to find what started evaluating code.
+//   - style-src 'self' 'unsafe-inline' — FORCED, from two independent
+//     directions, which is why neither can be fixed away alone. The shell
+//     template carries layout style= attributes, and mermaid injects a <style>
+//     element per rendered diagram with theme-computed CSS: it exposes no nonce
+//     hook, and the content varies with the Artificer tokens, so no hash is
+//     knowable ahead of the render. Note what this does NOT reopen: the classic
+//     CSS-based exfiltration (a selector whose background-image URL leaks what
+//     it matched) is closed by img-src 'self', not by style-src.
+//   - img-src 'self' data: — the one behavior CHANGE in this policy. A doc
+//     referencing a remote image stops loading it (data: URIs still work, which
+//     is what inline SVG and mermaid need). No doc in this repo does that, and
+//     it closes the tracking-beacon path render.go documents as open by design
+//     under bluemonday's UGCPolicy: opening a document should not tell a third
+//     party you opened it.
+//   - font-src 'self' — named explicitly rather than left to default-src so a
+//     later embedded font works without a policy edit, and so a remote font
+//     (another beacon, and a fingerprinting surface) cannot slip in with it.
+//   - connect-src 'self' — the live-reload EventSource is same-origin; nothing
+//     else should be opening sockets.
+//   - object-src 'none' — no <object>/<embed>; legacy plugin content is a
+//     script-execution path this reader has no use for.
+//   - base-uri 'none' — a <base> tag rewrites every relative URL on the page,
+//     which would redirect the asset loads above. This does NOT fall back to
+//     default-src, so omitting it would leave it unrestricted.
+//   - form-action 'none' — the reader has no forms; an injected one cannot
+//     POST anywhere. Also does NOT fall back to default-src.
+//   - frame-ancestors 'none' — nothing may frame the reader, so a page cannot
+//     clickjack a loopback origin it is otherwise unable to read.
+const contentSecurityPolicy = "default-src 'self'; " +
+	"script-src 'self'; " +
+	"style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' data:; " +
+	"font-src 'self'; " +
+	"connect-src 'self'; " +
+	"object-src 'none'; " +
+	"base-uri 'none'; " +
+	"form-action 'none'; " +
+	"frame-ancestors 'none'"
+
 // locateResponse is the locate endpoint's payload. It deliberately does NOT
 // echo an absolute path: Doc.AbsPath is documented as never being sent to a
 // client, and the caller already knows the path it asked about.
@@ -98,9 +157,12 @@ func handleLocate(store *Store) http.HandlerFunc {
 // the docs package's sole exported handler constructor — security POLICY (Host
 // allowlist, bearer token, anything a caller might configure differently) is the
 // caller's job via internal/httpsrv middleware wrapped around this handler.
-// X-Content-Type-Options is different: it's a fixed, no-config hardening default
-// for every response this handler ever produces, so it's applied here rather
-// than pushed out as an opt-in caller concern.
+// The securityHeaders pair is different: X-Content-Type-Options and
+// Content-Security-Policy are fixed, no-config hardening defaults for every
+// response this handler ever produces — there is no deployment of this handler
+// that wants them off, and the CSP is coupled to the markup and assets this
+// package itself emits — so they are applied here rather than pushed out as an
+// opt-in caller concern.
 //
 // A nil events Broker disables live reload — the stream endpoint 404s and
 // nothing else changes.
@@ -114,6 +176,7 @@ func NewHandler(store *Store, events *Broker) http.Handler {
 	mux.HandleFunc("GET /assets/mermaid-init.js", serveStaticJS(mermaidInitJS))
 	mux.HandleFunc("GET /assets/svg-panzoom.js", serveStaticJS(panZoomJS))
 	mux.HandleFunc("GET /assets/artificer-tree.js", serveStaticJS(artificerTreeJS))
+	mux.HandleFunc("GET /assets/sidenav-filter.js", serveStaticJS(sidenavFilterJS))
 	mux.HandleFunc("GET /assets/chroma.css", serveStaticCSS(ChromaCSS()))
 	mux.HandleFunc("GET /assets/diagram.css", serveStaticCSS(diagramCSS))
 
@@ -122,7 +185,7 @@ func NewHandler(store *Store, events *Broker) http.Handler {
 	mux.HandleFunc("GET /doc/{root}/{rest...}", handleDoc(store))
 	mux.HandleFunc("GET /{$}", handleIndexRoot(store))
 
-	return noSniff(mux)
+	return securityHeaders(mux)
 }
 
 // handleEvents streams reload notifications to one browser as Server-Sent
@@ -188,16 +251,25 @@ func handleEvents(events *Broker) http.HandlerFunc {
 	}
 }
 
-// noSniff sets X-Content-Type-Options: nosniff on every response. Cheap
-// defense-in-depth: it stops a browser from MIME-sniffing a response body
-// into a different content type than the Content-Type header declares (the
+// securityHeaders sets the fixed, no-configuration response headers every
+// response this handler produces carries. It wraps the whole mux rather than
+// the shell renderer alone, so an asset, a JSON payload, and a 404 are covered
+// on the same terms as a rendered doc — a header that protects only the page a
+// developer remembered is the shape that fails later.
+//
+// X-Content-Type-Options: nosniff stops a browser from MIME-sniffing a response
+// body into a different content type than the Content-Type header declares (the
 // classic vector is a browser deciding a text/plain or text/css response is
 // actually HTML/JS and executing it) — irrelevant for the sanitized doc HTML
 // this handler serves deliberately, but free insurance against a future
 // response type this handler doesn't anticipate today.
-func noSniff(next http.Handler) http.Handler {
+//
+// Content-Security-Policy is the second layer behind render.go's sanitizer; see
+// contentSecurityPolicy above for why each directive is what it is.
+func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
 		next.ServeHTTP(w, r)
 	})
 }

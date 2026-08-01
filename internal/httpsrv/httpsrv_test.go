@@ -8,6 +8,18 @@ package httpsrv
 //   [x] Happy: an allowed bracketed IPv6 host with a port passes through
 //   [x] Unhappy: a disallowed Host header is rejected 403 and never reaches next
 //
+// RejectCrossSite (Classification: security gate — cross-site request defense)
+//   [x] Unhappy (security): Sec-Fetch-Site: cross-site is rejected 403 and
+//       never reaches next
+//   [x] Unhappy (security): a mixed-case "Cross-Site" value is rejected too —
+//       the comparison is case-insensitive, not a literal match
+//   [x] Happy: same-origin, same-site, and none all pass through — the three
+//       legitimate values a browser sends for the reader's own pages
+//   [x] Happy (LOAD-BEARING): an absent header passes through. This is what
+//       keeps every non-browser client working — `forgectl docs open`'s Go
+//       http.Client, the curl hint, an operator's own curl — and a
+//       deny-on-absent regression would break the command outright
+//
 // BearerToken (Classification: security gate — timing-safe comparison)
 //   [x] Happy: the exact "Bearer <token>" header passes through
 //   [x] Unhappy: a missing/wrong Authorization header is rejected 401
@@ -96,6 +108,85 @@ func TestHostAllowlist_SpoofedHost_Rejected403(t *testing.T) {
 	}
 	if called {
 		t.Error("next handler was called for a spoofed Host header")
+	}
+}
+
+func TestRejectCrossSite_CrossSite_Rejected403(t *testing.T) {
+	called := false
+	h := RejectCrossSite()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	// The status alone would still be satisfied by a handler that did the work
+	// and then overwrote the code. What this gate promises is that a cross-site
+	// request performs no work at all.
+	if called {
+		t.Error("next handler was called for a request the browser labeled cross-site")
+	}
+}
+
+// TestRejectCrossSite_MixedCaseValue_Rejected403 pins the case-insensitive
+// comparison. Sec-Fetch-Site values are lowercase per the Fetch Metadata spec,
+// so this is not a shape any browser sends — it is a guard against a future
+// refactor swapping strings.EqualFold for a plain ==, which would turn the
+// rejection into something a non-conforming client could sidestep by changing
+// one letter.
+func TestRejectCrossSite_MixedCaseValue_Rejected403(t *testing.T) {
+	h := RejectCrossSite()(okHandler())
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Sec-Fetch-Site", "Cross-Site")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d for a mixed-case cross-site value", rec.Code, http.StatusForbidden)
+	}
+}
+
+// TestRejectCrossSite_SameOriginSameSiteAndNone_PassThrough covers the three
+// values a browser attaches to the reader's own traffic: same-origin for the
+// page's own asset loads and SSE stream, none for a request the user initiated
+// directly (typing the URL, a bookmark), and same-site for another loopback
+// port — which a browser labels same-site because a "site" excludes the port.
+// That last one is the documented non-goal; this test is where the decision is
+// recorded as intentional rather than missed.
+func TestRejectCrossSite_SameOriginSameSiteAndNone_PassThrough(t *testing.T) {
+	cases := []string{"same-origin", "same-site", "none"}
+	for _, value := range cases {
+		t.Run(value, func(t *testing.T) {
+			h := RejectCrossSite()(okHandler())
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("Sec-Fetch-Site", value)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Errorf("status = %d, want %d for Sec-Fetch-Site: %s", rec.Code, http.StatusOK, value)
+			}
+		})
+	}
+}
+
+// TestRejectCrossSite_AbsentHeader_PassesThrough is the load-bearing case.
+// Every non-browser client omits Sec-Fetch-Site, so deny-on-absent is the one
+// regression here that breaks working commands rather than merely tightening
+// something — and it would break them the moment the fix shipped, not under
+// some rare condition.
+func TestRejectCrossSite_AbsentHeader_PassesThrough(t *testing.T) {
+	h := RejectCrossSite()(okHandler())
+	req := httptest.NewRequest(http.MethodGet, "/", nil) // no Sec-Fetch-Site at all
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d for a request with NO Sec-Fetch-Site header. Absent must ALLOW: no non-browser client sends this header, so rejecting on absence breaks `forgectl docs open` (its Go http.Client), the curl command docs open prints for a token-protected reader, and every operator curl. Browsers always send it, so absence is not the traffic this gate is aimed at", rec.Code, http.StatusOK)
 	}
 }
 
