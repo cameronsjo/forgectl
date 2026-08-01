@@ -75,7 +75,7 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 
 			// Warn (don't fail) when off-network before a gh round-trip.
 			if reachable, err := netClient.Reachable(ctx); err == nil && !reachable {
-				fmt.Fprintln(cmd.ErrOrStderr(), "warning: internal network unreachable; the gh round-trip may fail")
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning: network unreachable; the gh round-trip may fail")
 			}
 
 			sess, err := client.Prepare(ctx, ref, pr.PrepareOpts{

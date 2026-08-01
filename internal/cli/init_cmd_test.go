@@ -91,6 +91,32 @@ func TestIntegration_Init_FreshWritesEverySection(t *testing.T) {
 	}
 }
 
+// TestIntegration_Init_NetScaffoldNamesDefaultPublic covers issue #186: the
+// [net] scaffold's baked probe_host is a public host, and the template must
+// say so — an untouched scaffold is a no-op posture, but that posture should
+// not read as an internal-network default when it isn't one.
+func TestIntegration_Init_NetScaffoldNamesDefaultPublic(t *testing.T) {
+	h := newInitHarness(t)
+	h.run(t)
+
+	data, err := os.ReadFile(h.configPath())
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	body := string(data)
+	netIdx := strings.Index(body, "[net]")
+	if netIdx == -1 {
+		t.Fatalf("config.toml missing [net] section; got:\n%s", body)
+	}
+	probeHostLine := body[netIdx:]
+	if end := strings.Index(probeHostLine, "\n\n"); end != -1 {
+		probeHostLine = probeHostLine[:end]
+	}
+	if !strings.Contains(probeHostLine, "public") {
+		t.Errorf("[net] scaffold does not name the baked probe_host default as public; got:\n%s", probeHostLine)
+	}
+}
+
 // TestIntegration_Init_PreservesExistingSection covers the append-if-absent
 // contract's core case: a hand-written [net] section (with its own comment)
 // must survive byte-for-byte, while every missing section — including the

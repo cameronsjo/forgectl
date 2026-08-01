@@ -106,6 +106,20 @@ func TestNetCmd_RefreshFlag_ForcesProbe(t *testing.T) {
 	}
 }
 
+// TestNetCmd_Long_MentionsProbeHost covers issue #186: the baked default
+// (1.1.1.1:443) is a public host, so the Long help must name probe_host as
+// the way to get an actual internal-network answer — not just describe the
+// mechanism against an unqualified "internal endpoint".
+func TestNetCmd_Long_MentionsProbeHost(t *testing.T) {
+	var calls int
+	client := netFixture(t, &calls, nil)
+	cmd := newNetCmdForClient(client)
+
+	if !strings.Contains(cmd.Long, "probe_host") {
+		t.Errorf("Long help does not mention probe_host: %q", cmd.Long)
+	}
+}
+
 func TestNetCmd_HumanOutput_NamesReachability(t *testing.T) {
 	var calls int
 	client := netFixture(t, &calls, nil)
