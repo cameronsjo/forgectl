@@ -597,7 +597,21 @@ on disk keeps.
 
 It is built to run from a Stop hook at every turn end, so it is cheap,
 idempotent, and ALWAYS EXITS 0. A capture failure is reported on stderr and
-never becomes a failed turn.`,
+never becomes a failed turn.
+
+The store self-prunes, at most once a day. What retires a record is TRANSCRIPT
+EXISTENCE, not a fixed age: a snapshot is worth keeping exactly as long as
+'claude --resume' can still open that session, and how long that is depends on
+Claude Code's own transcript retention, which is operator-configurable. A record
+whose transcript survives is KEPT, however old it is — age never overrides a
+session you can still open. A 180-day ceiling applies only to records whose
+transcript is already gone, and exists to retire those even on a machine where
+the transcript lookup itself is failing.
+
+Pruning refuses to run away: a pass that would retire most of the store deletes
+nothing and says so on stderr, because that is what a broken transcript lookup
+looks like. Set FORGECTL_RESUME_NO_PRUNE to any non-empty value to disable
+pruning entirely.`,
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -624,11 +638,19 @@ func runResumeSnapshot(cmd *cobra.Command, quiet bool) {
 		fmt.Fprintf(errOut, "forgectl: snapshot: %v\n", e)
 	}
 	slog.Debug("Successfully completed resume snapshot.",
-		"sessions", res.Sessions, "tasks", res.Tasks, "learned", res.Learned, "errors", len(res.Errs))
+		"sessions", res.Sessions, "tasks", res.Tasks, "learned", res.Learned,
+		"pruned", res.Pruned, "swept", res.Swept, "errors", len(res.Errs))
 	if quiet {
 		return
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "snapshotted %d live session(s), %d task(s) held\n", res.Sessions, res.Tasks)
+	line := fmt.Sprintf("snapshotted %d live session(s), %d task(s) held", res.Sessions, res.Tasks)
+	if res.Pruned > 0 {
+		line += fmt.Sprintf(", %d stale record(s) pruned", res.Pruned)
+	}
+	if res.Swept > 0 {
+		line += fmt.Sprintf(", %d orphan file(s) deleted", res.Swept)
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), line)
 }
 
 // displayName is the session's best label, falling back to the id.

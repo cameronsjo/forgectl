@@ -111,8 +111,14 @@ func ResolveTaskDir(p Paths, id, cwd, prior string, claimed map[string]string) s
 // tasks, and resuming A would inject them into A's own task list. An already
 // claimed directory is therefore off the table for everyone but its owner.
 func ClaimedTaskDirs(p Paths) map[string]string {
-	claimed := map[string]string{}
-	for id, rec := range LoadAll(p.StoreDir) {
+	return claimsFrom(LoadAll(p.StoreDir))
+}
+
+// claimsFrom is the same mapping over a store a caller already loaded. Snapshot
+// reads the store for its own reasons and must not read it twice.
+func claimsFrom(store map[string]*Record) map[string]string {
+	claimed := make(map[string]string, len(store))
+	for id, rec := range store {
 		if rec.TaskDir != "" {
 			claimed[rec.TaskDir] = id
 		}

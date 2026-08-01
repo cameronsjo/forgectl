@@ -10,6 +10,8 @@ type SnapshotResult struct {
 	Sessions int // live sessions written to the store
 	Tasks    int // task bodies held after the merge, across all of them
 	Learned  int // session → task-directory pairings recorded for the first time
+	Pruned   int // stale records retired this pass
+	Swept    int // orphaned files deleted this pass — debris, not records
 	Errs     []error
 }
 
@@ -31,12 +33,16 @@ type SnapshotResult struct {
 // durable data is how a cache starts lying.
 func Snapshot(p Paths, now time.Time) SnapshotResult {
 	var res SnapshotResult
-	// Read the store's directory claims ONCE. This used to happen inside
-	// ResolveTaskDir, i.e. once per live session per turn, with every record
-	// carrying full task bodies.
-	claimed := ClaimedTaskDirs(p)
+	// Read the store ONCE, and serve everything from it. The directory claims
+	// used to be built inside ResolveTaskDir, i.e. once per live session per
+	// turn, with every record carrying full task bodies; the per-session prior
+	// used to be a second read of a file this map already holds. Prune consumes
+	// the same map, so bounding the store costs no additional reads.
+	store := LoadAll(p.StoreDir)
+	claimed := claimsFrom(store)
+	keep := map[string]bool{}
 	for _, e := range LiveEntries(p) {
-		prior, hadPrior := Load(p.StoreDir, e.SessionID)
+		prior, hadPrior := store[e.SessionID]
 
 		rec := &Record{ID: e.SessionID, Cwd: e.Cwd, Version: e.Version, LastSeen: now}
 		if hadPrior {
@@ -70,6 +76,10 @@ func Snapshot(p Paths, now time.Time) SnapshotResult {
 		}
 		rec.Tasks = mergeTasks(priorTasks, ReadTaskDir(dir))
 
+		// Claimed before the write, not after. A Save that fails must still
+		// take this id off the prune table — a record this pass could not
+		// rewrite is the last one it may delete.
+		keep[e.SessionID] = true
 		if err := Save(p.StoreDir, rec); err != nil {
 			res.Errs = append(res.Errs, err)
 			continue
@@ -77,6 +87,13 @@ func Snapshot(p Paths, now time.Time) SnapshotResult {
 		res.Sessions++
 		res.Tasks += len(rec.Tasks)
 	}
+	// Kept as two numbers, never one. "Retired 3 stale records" and "deleted 3
+	// files as debris" are different events with different blast radii, and a
+	// sum makes them indistinguishable after the fact — which is exactly the
+	// question anyone asks first when a record they wanted is gone.
+	pr := Prune(p, store, keep, now)
+	res.Pruned, res.Swept = pr.Removed, pr.Orphans
+	res.Errs = append(res.Errs, pr.Errs...)
 	return res
 }
 
