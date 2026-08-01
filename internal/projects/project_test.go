@@ -100,7 +100,12 @@ func TestRepoDisplayLine(t *testing.T) {
 		want []string // substrings that must appear
 	}{
 		{"uncloned gitea", Repo{Host: "gitea", Owner: "cameron", Name: "homeclaw"}, []string{"git.sjo.lol", "homeclaw", "[uncloned]"}},
-		{"cloned clean github", Repo{Host: "github", Owner: "cameronsjo", Name: "forgectl", Cloned: true}, []string{"gh", "forgectl", "[clean]"}},
+		{"cloned clean github", Repo{Host: "github", Owner: "cameronsjo", Name: "forgectl", Cloned: true,
+			Status: GitStatus{State: StatusOK}}, []string{"gh", "forgectl", "[clean]"}},
+		{"cloned not-a-repo", Repo{Host: "", Name: "notes", Cloned: true,
+			Status: GitStatus{State: StatusNotRepo}}, []string{"notes", "[not-a-repo]"}},
+		{"cloned unknown status", Repo{Host: "github", Owner: "cameronsjo", Name: "flaky", Cloned: true,
+			Status: GitStatus{State: StatusUnknown}}, []string{"flaky", "[unknown]"}},
 		{"mirror flagged", Repo{Host: "gitea", Owner: "cameron", Name: "upstream", Mirror: true}, []string{"upstream (mirror)"}},
 	}
 	for _, tc := range tests {
@@ -112,5 +117,34 @@ func TestRepoDisplayLine(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestGitStatus_Label_EmptyIffStateOK asserts the property Label() != "" iff
+// State == StatusOK, derived from the state rather than hard-coding badge
+// strings — so it survives future label-wording changes and pins the
+// StatusNotRepo/StatusUnknown branches added to fix the false-"clean" defect.
+func TestGitStatus_Label_EmptyIffStateOK(t *testing.T) {
+	states := []StatusState{StatusOK, StatusNotRepo, StatusUnknown}
+	for _, s := range states {
+		t.Run(string(s), func(t *testing.T) {
+			gs := GitStatus{State: s}
+			label := gs.Label()
+			wantEmpty := s != StatusOK
+			gotEmpty := label == ""
+			if gotEmpty != wantEmpty {
+				t.Errorf("State=%q: Label()=%q (empty=%v), want empty=%v", s, label, gotEmpty, wantEmpty)
+			}
+		})
+	}
+}
+
+// TestGitStatus_ZeroValue_DoesNotReadAsClean is the one-line regression pin
+// for the exact defect: a GitStatus that never went through gitStatus (the
+// Go zero value, State == StatusUnknown) must not be mistaken for a clean
+// working tree.
+func TestGitStatus_ZeroValue_DoesNotReadAsClean(t *testing.T) {
+	if got := (GitStatus{}).Label(); got != "" {
+		t.Errorf("zero-value GitStatus.Label() = %q, want \"\" (must not read as clean)", got)
 	}
 }
