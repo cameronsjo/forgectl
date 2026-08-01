@@ -29,9 +29,11 @@ func newPrPickCmdForClient(client *pr.Client, cfg config.Config, reviewedPath st
 		Long: `pick lists your open PRs in a multiselect. Chosen PRs are prepared
 concurrently (same-repo checkouts serialized) and each launches a clean-room
 review. A PR you've already marked reviewed is dimmed in the list and skipped
-at launch, so a bulk pick never re-opens a review you've finished. Launches
-are capped at 4 concurrent reviews by default (override via [pr]
-max_concurrent in config.toml); PRs past the cap are deferred, not prepared.`,
+at launch, so a bulk pick never re-opens a review you've finished. Bulk
+launches are capped at 4 concurrent reviews by default (override via [pr]
+max_concurrent in config.toml); PRs past the cap are deferred, not prepared.
+The cap governs this bulk 'pick' command only — a single 'forgectl pr <ref>'
+review bypasses admission by design.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -126,14 +128,13 @@ func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd
 		return nil
 	}
 
-	maxN := pr.MaxConcurrentReviews(cfg.Pr.MaxConcurrent)
-	free, ok := client.Admit(ctx, maxN)
+	maxN, live, free, ok := client.Admit(ctx, cfg.Pr.MaxConcurrent)
 	if !ok {
 		return fmt.Errorf("cannot read the tmux review window count — refusing to launch %d review(s); "+
 			"never mass-launch on an unreadable count. Check `tmux list-windows -a`, then retry", len(refs))
 	}
 	if free == 0 {
-		fmt.Fprintf(errOut, "review cap reached (max %d already running) — nothing launched; re-run 'forgectl pr pick' as reviews finish\n", maxN)
+		fmt.Fprintf(errOut, "review cap reached (max %d, %d already running) — nothing launched; re-run 'forgectl pr pick' as reviews finish\n", maxN, live)
 		return nil
 	}
 	deferred := 0

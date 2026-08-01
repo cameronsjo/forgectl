@@ -68,6 +68,8 @@ const logKeepDays = 7
 //	[update]             # forgectl update — weekly package-manager + OS maintenance
 //	roster  = []          # step names to run when --only is omitted; empty = every roster step
 //	log_dir = ""          # transcript log directory; empty = <config dir>/update-logs
+//	[pr]                 # forgectl pr pick — bulk-launch concurrency cap
+//	max_concurrent = 4   # live "pr-*" tmux windows allowed at once; <= 0 = default (4)
 type Config struct {
 	NoIcons   bool            `toml:"no_icons"`
 	LogLevel  string          `toml:"log_level"`

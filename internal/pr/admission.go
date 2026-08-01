@@ -11,8 +11,9 @@ import (
 // [pr].max_concurrent is unset or non-positive in config.toml.
 const DefaultMaxConcurrentReviews = 4
 
-// reviewWindowPrefix is the tmux window-name prefix a review launch uses —
-// must match windowName() in launch.go.
+// reviewWindowPrefix is the tmux window-name prefix a review launch uses.
+// windowName() (launch.go) builds off this constant directly rather than a
+// re-hardcoded literal, so the two can never drift apart.
 const reviewWindowPrefix = "pr-"
 
 // MaxConcurrentReviews resolves the configured cap: any non-positive value
@@ -24,24 +25,49 @@ func MaxConcurrentReviews(cfgMax int) int {
 	return cfgMax
 }
 
-// LiveReviews counts tmux windows under the client's session whose name
-// starts with reviewWindowPrefix — the live count of in-flight review
-// launches. ok is false only when the window count genuinely could not be
-// read (list-windows erroring); an absent tmux session is a legitimate zero,
-// not a failure.
+// LiveReviews counts tmux windows across ALL sessions whose session matches
+// the client's exactly and whose name starts with reviewWindowPrefix — the
+// live count of in-flight review launches. ok is false only when the window
+// count genuinely could not be read (list-windows erroring for a reason
+// other than "no server running"); a server with no matching windows is a
+// legitimate zero, not a failure.
 //
-// Two residuals are deliberately left open, both fail-safe:
-//   - a broken tmux binary reads as genuine-zero via HasSession's exit-code
-//     check and fails closed one step later, at Launch's own tmux new-window
-//     call — no session is ever killed by an admission miscount.
-//   - a user-named "pr-*" window unrelated to a review gets counted too;
-//     that only makes admission MORE conservative (fewer slots granted),
-//     never less.
+// ListWindows is the SOLE discriminator, deliberately — it lists every
+// window's session verbatim (no `-t` targeting involved), so the count above
+// is an exact string comparison against ground truth. An earlier version of
+// this function gated the count behind tmux.Client.HasSession(c.tmuxSession)
+// first ("skip ListWindows if the session doesn't exist"). That call goes
+// through tmux's OWN `-t` resolution, which matches exact name, then
+// fnmatch, then PREFIX — so has-session -t forgectl reports true against an
+// unrelated session merely named forgectl-review. That fuzziness gated
+// nothing useful (the exact-match count below runs the same either way,
+// since a window that landed in the wrongly-resolved session was never
+// countable under c.tmuxSession regardless of whether HasSession's check
+// ran), but it DID mean any transport-level tmux failure — a broken or
+// missing binary — surfaced through HasSession's swallowed error as "session
+// absent, zero windows" (ok=true) instead of "unreadable" (ok=false),
+// letting the cap fail OPEN and grant a full batch on every invocation. Now
+// that path runs through ListWindows directly, so the same failure surfaces
+// as ok=false and the caller refuses the batch before any clone.
+//
+// Known residual, NOT fixed here: a review window that lands in the wrong
+// session because Launch's own `tmux new-window -t c.tmuxSession` target is
+// a bare, unqualified session name — subject to that same tmux fuzzy `-t`
+// resolution — is invisible to this exact-match count regardless of how
+// LiveReviews itself is implemented. If a sibling session already exists
+// with a name that happens to prefix-match c.tmuxSession (e.g. a worktree
+// session named after its directory, per internal/projects/projects.go's
+// filepath.Base(dir) naming), new-window can keep depositing review windows
+// there indefinitely, and this count will never see them. Closing that
+// requires qualifying Launch's own tmux target (or verifying exact session
+// existence before it dispatches) — out of scope for this admission-gate
+// change and tracked separately.
+//
+// One residual IS accepted here, deliberately conservative: a user-named
+// "pr-*" window unrelated to a review gets counted too, which only makes
+// admission MORE conservative (fewer slots granted), never less.
 func (c *Client) LiveReviews(ctx context.Context) (n int, ok bool) {
 	t := tmux.New(c.run)
-	if !t.HasSession(ctx, c.tmuxSession) {
-		return 0, true
-	}
 	wins, err := t.ListWindows(ctx)
 	if err != nil {
 		return 0, false
@@ -55,19 +81,25 @@ func (c *Client) LiveReviews(ctx context.Context) (n int, ok bool) {
 	return count, true
 }
 
-// Admit resolves the concurrency cap (via MaxConcurrentReviews) and reports
-// how many more reviews may launch right now. ok is false when the live
-// count could not be read — callers MUST treat that as fail-closed and
-// refuse to launch anything rather than assume free capacity.
-func (c *Client) Admit(ctx context.Context, max int) (free int, ok bool) {
-	max = MaxConcurrentReviews(max)
-	live, ok := c.LiveReviews(ctx)
+// Admit resolves the concurrency cap from cfgMax (via MaxConcurrentReviews)
+// and reports the live count and how many more reviews may launch right now.
+// It is the sole place that resolves cfgMax — callers pass the raw
+// [pr].max_concurrent value through unresolved rather than pre-resolving it
+// themselves, so there is exactly one interpretation of "unset or
+// non-positive" in the whole call path.
+//
+// ok is false when the live count could not be read — callers MUST treat
+// that as fail-closed and refuse to launch anything rather than assume free
+// capacity.
+func (c *Client) Admit(ctx context.Context, cfgMax int) (max, live, free int, ok bool) {
+	max = MaxConcurrentReviews(cfgMax)
+	live, ok = c.LiveReviews(ctx)
 	if !ok {
-		return 0, false
+		return max, 0, 0, false
 	}
 	free = max - live
 	if free < 0 {
 		free = 0
 	}
-	return free, true
+	return max, live, free, true
 }

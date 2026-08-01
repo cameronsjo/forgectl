@@ -20,6 +20,11 @@ package pr
 //       that derive the same Number must not collide on window name
 //   [x] Includes Repo, not just Owner — two repos under one owner that derive
 //       the same Number must not collide on window name
+//   [x] Structural coupling: windowName's output always starts with
+//       admission.go's reviewWindowPrefix — guards against the two drifting
+//       apart silently (mutation-verified: renaming windowName's literal
+//       alone left every admission test green, since reviewWindowPrefix
+//       stayed unchanged and nothing asserted the two matched)
 
 import (
 	"context"
@@ -121,6 +126,26 @@ func TestWindowName_SanitizesDotsInRepo(t *testing.T) {
 	ref := Ref{Owner: "o", Repo: "foo.bar", Number: 42}
 	if got, want := windowName(ref), "pr-o-foo-bar-42"; got != want {
 		t.Errorf("windowName(dotted repo) = %q, want %q", got, want)
+	}
+}
+
+// TestWindowName_StructurallyCoupledToReviewWindowPrefix guards the
+// admission gate's discrimination: LiveReviews (admission.go) counts live
+// reviews by matching reviewWindowPrefix against tmux window names, so every
+// windowName output MUST start with that exact constant, built structurally
+// rather than re-hardcoded — a re-hardcoded literal can drift from the
+// constant with no compiler or test signal (verified: it did, silently,
+// before this fix).
+func TestWindowName_StructurallyCoupledToReviewWindowPrefix(t *testing.T) {
+	refs := []Ref{
+		{Owner: "local", Repo: "abc1234", Number: 42},
+		{Owner: "o", Repo: "a", Number: 1},
+		{Owner: "o", Repo: "foo.bar", Number: 7},
+	}
+	for _, ref := range refs {
+		if got := windowName(ref); !strings.HasPrefix(got, reviewWindowPrefix) {
+			t.Errorf("windowName(%+v) = %q, want prefix %q", ref, got, reviewWindowPrefix)
+		}
 	}
 }
 

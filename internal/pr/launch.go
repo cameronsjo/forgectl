@@ -53,7 +53,11 @@ func localReviewPrompt(findingsDir string, writesEnforced bool) string {
 }
 
 // windowName is the tmux window name for a review session:
-// "pr-<owner>-<sanitized repo>-<N>". Owner is included, not just Number: a
+// "<reviewWindowPrefix><owner>-<sanitized repo>-<N>" — built off
+// reviewWindowPrefix (admission.go), not a re-hardcoded literal, so the
+// concurrency gate's window count can never silently drift out of sync with
+// what a review launch actually names its window. Owner is included, not
+// just Number: a
 // local-mode Ref (Owner "local", Number derived from a hex oid prefix) and a
 // real PR-mode Ref can otherwise land on the identical "pr-<N>" name whenever
 // the derived number happens to match a live PR number — Number alone is not
@@ -71,7 +75,7 @@ func localReviewPrompt(findingsDir string, writesEnforced bool) string {
 // a window) in exchange for correct targeting, which is the greater good.
 func windowName(ref Ref) string {
 	repo := strings.ReplaceAll(ref.Repo, ".", "-")
-	return fmt.Sprintf("pr-%s-%s-%d", ref.Owner, repo, ref.Number)
+	return reviewWindowPrefix + fmt.Sprintf("%s-%s-%d", ref.Owner, repo, ref.Number)
 }
 
 // windowTarget is the tmux target "<session>:pr-<owner>-<sanitized repo>-<N>"
