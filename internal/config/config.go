@@ -32,8 +32,8 @@ const logKeepDays = 7
 //	match = "~/Projects/minute"
 //	model = "sonnet"
 //
-//	[net]                # forgectl net — cached internal-network reachability probe
-//	probe_host = "1.1.1.1"
+//	[net]                # forgectl net — cached reachability probe
+//	probe_host = "1.1.1.1"           # baked default; public host
 //	probe_port = 443
 //	ttl_seconds = 60
 //	timeout_ms = 1000
@@ -144,10 +144,12 @@ func (wc WorkflowConfig) IsZero() bool {
 }
 
 // NetConfig is the [net] section: the endpoint `forgectl net` probes for
-// internal-network reachability, and how long a cached answer stays fresh.
-// A zero value means "section absent" — internal/net's Client applies its own
-// built-in defaults (probe_host 1.1.1.1, probe_port 443, ttl_seconds 60,
-// timeout_ms 1000) for whichever fields are left unset.
+// reachability, and how long a cached answer stays fresh. A zero value means
+// "section absent" — internal/net's Client applies its own built-in defaults
+// (probe_host 1.1.1.1, probe_port 443, ttl_seconds 60, timeout_ms 1000) for
+// whichever fields are left unset. Those defaults point at a public host, so
+// an unconfigured [net] answers "is the internet up" — set probe_host to an
+// internal-only endpoint for an internal-network answer.
 type NetConfig struct {
 	ProbeHost  string `toml:"probe_host"`
 	ProbePort  int    `toml:"probe_port"`

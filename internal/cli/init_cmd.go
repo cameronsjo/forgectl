@@ -51,9 +51,9 @@ strip_globs = [] # empty = falls back to quarantine.DefaultTargets
 // constants (defaultProbeHost/-Port/-TTLSeconds/-TimeoutMs), so an untouched
 // scaffold is a no-op posture.
 const netScaffold = `
-# ── net: cached internal-network reachability probe (forgectl net) ─────────
+# ── net: cached reachability probe (forgectl net) ───────────────────────────
 [net]
-probe_host  = "1.1.1.1" # baked default
+probe_host  = "1.1.1.1" # baked default; public — set an internal-only host for an internal-network answer
 probe_port  = 443       # baked default
 ttl_seconds = 60        # cached result freshness window, seconds
 timeout_ms  = 1000      # probe dial timeout, milliseconds

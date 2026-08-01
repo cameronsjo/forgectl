@@ -1,6 +1,8 @@
-// Package net is the ops layer for `forgectl net`: a cached internal-network
-// reachability probe. It knows nothing of Cobra — that decoupling is the
-// house pattern (see internal/tmux, internal/projects).
+// Package net is the ops layer for `forgectl net`: a cached reachability
+// probe against a configured endpoint. The baked-in default endpoint
+// (1.1.1.1:443) is a public host, not an internal one — an internal-network
+// answer requires a configured probe_host. It knows nothing of Cobra — that
+// decoupling is the house pattern (see internal/tmux, internal/projects).
 //
 // Unlike tmux/projects, the probe itself doesn't shell out: it dials TCP
 // directly via the standard library rather than through the exec.Runner
@@ -41,9 +43,9 @@ type Status struct {
 // inject to fake a reachable/unreachable network without a live socket.
 type dialFunc func(network, address string, timeout time.Duration) (stdnet.Conn, error)
 
-// Client probes internal-network reachability and caches the answer on disk
-// (config.NetCachePath()) for ttl, so repeated calls within that window don't
-// re-dial.
+// Client probes the configured endpoint's reachability and caches the answer
+// on disk (config.NetCachePath()) for ttl, so repeated calls within that
+// window don't re-dial.
 type Client struct {
 	run exec.Runner
 

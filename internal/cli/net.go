@@ -38,10 +38,14 @@ func newNetCmdForClient(client *netpkg.Client) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "net",
-		Short: "Check cached internal-network reachability",
-		Long: `net reports whether the configured internal endpoint (the [net] section
-of config.toml) answers a TCP probe, caching the answer for net.ttl_seconds
+		Short: "Check cached reachability of the configured probe endpoint",
+		Long: `net reports whether the configured probe endpoint (the [net] section of
+config.toml) answers a TCP probe, caching the answer for net.ttl_seconds
 (default 60s) so repeated calls don't re-dial on every invocation.
+
+The baked-in default (1.1.1.1:443) is a public host, so an unconfigured
+net answers "is the internet up" rather than anything about your internal
+network. Set an internal-only net.probe_host for an internal-network answer.
 
   forgectl net             show the cached (or freshly probed) answer
   forgectl net --refresh   force a new probe, bypassing the cache

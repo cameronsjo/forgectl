@@ -138,7 +138,7 @@ forgectl docs serve [dir|file ...]       # render + serve, loopback-only (DNS-re
 forgectl docs serve --open               # also open the system browser
 forgectl docs list [dir|file ...]        # list the indexed docs, no server (--json for scripting)
 
-# net — check cached internal-network reachability
+# net — check cached reachability of the configured probe endpoint
 forgectl net                             # show the cached (or freshly probed) answer
 forgectl net --refresh                   # force a new probe, bypassing the cache
 forgectl net --json                      # machine-readable output for scripting
