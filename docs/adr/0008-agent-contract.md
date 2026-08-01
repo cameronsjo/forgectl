@@ -1,6 +1,6 @@
 # 0008 — Agent contract: every verb must be drivable without a TTY
 
-- **Status:** Proposed (2026-07-31)
+- **Status:** Accepted (2026-08-01)
 - **Context:** forgectl serves two audiences — humans at an interactive terminal and
   agents driving it via tool calls. A 2026-07-31 usage measurement showed agents probing
   the CLI rather than driving it, and a dogfood batch (#182–#202) filed four agent traps:
