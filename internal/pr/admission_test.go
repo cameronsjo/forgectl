@@ -17,17 +17,14 @@ package pr
 //       by temporarily reverting to the old HasSession-based body: against
 //       that code this exact fixture returns (0, true) — see the admission.go
 //       doc comment for the full before/after trace.
-//   [x] DOCUMENTED RESIDUAL, not closed by this file: a sibling session whose
-//       name prefixes the client's tmux session (e.g. "forgectl-review" when
-//       the client watches "forgectl") still reads as a genuine (0, true) —
-//       empirically IDENTICAL to the prior HasSession-gated implementation,
-//       because ListWindows's exact-match filtering was always what produced
-//       the undercount, not HasSession's fuzzy existence check. The window
-//       itself lands in the wrong session because Launch's own
-//       `new-window -t c.tmuxSession` argument is an unqualified session
-//       name subject to the same tmux fuzzy `-t` resolution — a separate bug
-//       this admission-gate change does not touch. This test exists so a
-//       future fix to Launch's targeting has a regression to flip green.
+//   [x] CLOSED (was a documented residual): a sibling session whose name
+//       prefixes the client's tmux session (e.g. "forgectl-review" when the
+//       client watches "forgectl") no longer swallows a launch — Launch's
+//       own new-window now targets the exact-qualified "=name:" form
+//       (launch.go), so the window lands in and is counted under the real
+//       session. Proven end-to-end against a stateful tmux simulation, not
+//       just LiveReviews in isolation — see fakeTmuxServer and
+//       TestLiveReviews_SiblingPrefixSession_Closed.
 //
 // Admit (Classification: concurrency gate, fail-closed, single resolution)
 //   [x] Happy: no windows yet → genuine zero, full cap free, resolved max and
@@ -40,6 +37,8 @@ package pr
 import (
 	"context"
 	"errors"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -136,32 +135,155 @@ func TestLiveReviews_BrokenTmux_FailsClosed(t *testing.T) {
 	}
 }
 
-// TestLiveReviews_SiblingPrefixSession_KnownResidual documents, rather than
-// closes, the CRITICAL trigger: a sibling session whose name PREFIXES the
-// client's tmux session (e.g. a worktree session named after its directory,
-// per internal/projects/projects.go's filepath.Base(dir) naming) is where
-// Launch's own `new-window -t c.tmuxSession` — an unqualified session name,
-// subject to tmux's exact→fnmatch→prefix `-t` resolution — deposits review
-// windows whenever no session literally named c.tmuxSession exists yet.
+// fakeTmuxServer is a minimal, STATEFUL simulation of real tmux -t target
+// resolution — live-verified on an isolated tmux socket (tmux 3.7b):
+//   - has-session -t "=name"  → exact match ONLY
+//   - has-session -t "name"   → exact match, else prefix match against any
+//     existing session (tmux's own exact → fnmatch → prefix fallback,
+//     collapsed to exact-or-prefix, which is sufficient for these fixtures)
+//   - new-window  -t "=name:" → exact match ONLY (the trailing colon is
+//     load-bearing — "=name" alone, without it, still prefix-matches)
+//   - new-window  -t "name"   → same fuzzy exact-or-prefix fallback as bare
+//     has-session
 //
-// This test asserts the CURRENT (unresolved) behavior: LiveReviews reads a
-// genuine (0, true), identical to the pre-fix HasSession-gated
-// implementation, because the exact-match filter below was always what
-// produced the undercount — HasSession's fuzzy existence check never gated
-// the count itself. Closing this requires a fix to Launch's own tmux target
-// (qualifying it, or verifying exact session existence before dispatch),
-// which is out of scope for this admission-only change. Flip this test's
-// assertion (want live windows counted, or ok=false on ambiguity — whichever
-// that fix decides) once Launch's targeting is fixed.
-func TestLiveReviews_SiblingPrefixSession_KnownResidual(t *testing.T) {
-	// Only "forgectl-review" is alive; the client watches "forgectl", which
-	// has no literal session — mirrors the live-verified repro exactly.
-	fake := listWindowsFake(winRow("forgectl-review", "pr-o-r-1"))
-	c := New(fake, WithTmuxSession("forgectl"))
-	n, ok := c.LiveReviews(context.Background())
-	if !ok || n != 0 {
-		t.Fatalf("LiveReviews() = (%d, %v), want (0, true) — this is the KNOWN, undischarged residual; "+
-			"if this now fails, Launch's tmux targeting was fixed and this test's assertion should flip", n, ok)
+// It tracks sessions and their windows so a test can dispatch through the
+// real ensureSession/exactSessionTarget/new-window sequence and then read
+// back which session actually gained the window — the only way to prove a
+// launch does or doesn't land in a sibling session without a live tmux.
+type fakeTmuxServer struct {
+	sessions map[string][]string // session name -> ordered window names
+}
+
+func newFakeTmuxServer(seed map[string][]string) *fakeTmuxServer {
+	s := &fakeTmuxServer{sessions: map[string][]string{}}
+	for name, wins := range seed {
+		cp := make([]string, len(wins))
+		copy(cp, wins)
+		s.sessions[name] = cp
+	}
+	return s
+}
+
+func (s *fakeTmuxServer) resolveSession(target string) (string, bool) {
+	exact := strings.HasPrefix(target, "=")
+	name := strings.TrimPrefix(target, "=")
+	if _, ok := s.sessions[name]; ok {
+		return name, true
+	}
+	if exact {
+		return "", false
+	}
+	names := make([]string, 0, len(s.sessions))
+	for sess := range s.sessions {
+		names = append(names, sess)
+	}
+	sort.Strings(names) // deterministic fallback among multiple prefix matches
+	for _, sess := range names {
+		if strings.HasPrefix(sess, name) {
+			return sess, true
+		}
+	}
+	return "", false
+}
+
+func argAfter(args []string, flag string) (string, bool) {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1], true
+		}
+	}
+	return "", false
+}
+
+func (s *fakeTmuxServer) runner() *exec.FakeRunner {
+	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name != "tmux" || len(args) == 0 {
+			return "", nil
+		}
+		switch args[0] {
+		case "has-session":
+			target, _ := argAfter(args, "-t")
+			if _, ok := s.resolveSession(target); ok {
+				return "", nil
+			}
+			return "", errors.New("can't find session: " + strings.TrimPrefix(target, "="))
+		case "new-session":
+			newName, _ := argAfter(args, "-s")
+			if newName == "" {
+				return "", errors.New("new-session: no -s name")
+			}
+			if _, exists := s.sessions[newName]; exists {
+				return "", errors.New("duplicate session: " + newName)
+			}
+			s.sessions[newName] = []string{"shell"}
+			return "", nil
+		case "new-window":
+			target, _ := argAfter(args, "-t")
+			winName, _ := argAfter(args, "-n")
+			resolveTarget := target
+			if strings.HasPrefix(target, "=") && strings.HasSuffix(target, ":") {
+				resolveTarget = strings.TrimSuffix(target, ":")
+			}
+			sess, ok := s.resolveSession(resolveTarget)
+			if !ok {
+				return "", errors.New("can't find session: " + strings.TrimSuffix(strings.TrimPrefix(target, "="), ":"))
+			}
+			s.sessions[sess] = append(s.sessions[sess], winName)
+			return "", nil
+		case "list-windows":
+			names := make([]string, 0, len(s.sessions))
+			for sess := range s.sessions {
+				names = append(names, sess)
+			}
+			sort.Strings(names)
+			var rows []string
+			for _, sess := range names {
+				for i, w := range s.sessions[sess] {
+					rows = append(rows, strings.Join([]string{sess, strconv.Itoa(i), w, "0", "1"}, "\x1f"))
+				}
+			}
+			return strings.Join(rows, "\n"), nil
+		}
+		return "", nil
+	}}
+}
+
+// TestLiveReviews_SiblingPrefixSession_Closed is the flipped version of what
+// was TestLiveReviews_SiblingPrefixSession_KnownResidual: with the exact
+// CRITICAL trigger fixture (only "forgectl-review" alive, no literal
+// "forgectl"), a launch dispatch must land in the exact "forgectl" session,
+// never the sibling — proven by running the SAME ensureSession +
+// exactSessionTarget + new-window sequence Launch itself issues against a
+// tmux simulation that reproduces real tmux's exact-vs-fuzzy -t resolution
+// (verified live, see fakeTmuxServer's doc comment), then reading the count
+// back through LiveReviews.
+//
+// Red-then-green, verified by hand: reverting exactSessionTarget to return
+// the old bare c.tmuxSession (no "="/":") and reverting ensureSession to a
+// no-op makes this test fail — the window lands in forgectl-review, and
+// LiveReviews reads a false (0, true) exactly like the old bug. Restoring
+// the real implementation makes it pass.
+func TestLiveReviews_SiblingPrefixSession_Closed(t *testing.T) {
+	srv := newFakeTmuxServer(map[string][]string{"forgectl-review": {"shell"}})
+	c := New(srv.runner(), WithTmuxSession("forgectl"))
+	ctx := context.Background()
+
+	// The exact sequence launchInline/launchCodex/Open issue before dispatch.
+	if err := c.ensureSession(ctx); err != nil {
+		t.Fatalf("ensureSession: %v", err)
+	}
+	if _, err := c.run.Run(ctx, "tmux", "new-window",
+		"-t", c.exactSessionTarget(), "-n", "pr-o-r-1", "-c", "/tmp"); err != nil {
+		t.Fatalf("new-window: %v", err)
+	}
+
+	if got := srv.sessions["forgectl-review"]; len(got) != 1 {
+		t.Errorf("sibling session forgectl-review must NOT gain a window; has %v", got)
+	}
+	n, ok := c.LiveReviews(ctx)
+	if !ok || n != 1 {
+		t.Fatalf("LiveReviews() = (%d, %v), want (1, true) — the review must land in and be counted "+
+			"under the exact \"forgectl\" session, not the sibling \"forgectl-review\"", n, ok)
 	}
 }
 

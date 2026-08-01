@@ -111,8 +111,8 @@ func TestWindowName_RepoDistinguishesCrossRepo(t *testing.T) {
 	if windowName(a) != "pr-o-a-42" {
 		t.Errorf("windowName(a) = %q, want %q", windowName(a), "pr-o-a-42")
 	}
-	if windowTarget := (&Client{tmuxSession: "forgectl"}).windowTarget(a); windowTarget != "forgectl:"+windowName(a) {
-		t.Errorf("windowTarget(a) = %q, want %q", windowTarget, "forgectl:"+windowName(a))
+	if windowTarget := (&Client{tmuxSession: "forgectl"}).windowTarget(a); windowTarget != "=forgectl:"+windowName(a) {
+		t.Errorf("windowTarget(a) = %q, want %q", windowTarget, "=forgectl:"+windowName(a))
 	}
 }
 
