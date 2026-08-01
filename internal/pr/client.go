@@ -103,8 +103,11 @@ func (c *Client) FindingsDir() string { return c.findingsDir }
 
 // tempPrefix is the os.MkdirTemp prefix sandbox uses for every workspace
 // ("forgectl-workflow-*"); the breadcrumb content check requires a workspace
-// to live under the OS temp dir with the "forgectl-" prefix.
-const tempPrefix = "forgectl-"
+// to carry this exact prefix. Narrower than a bare "forgectl-" so it can't
+// match unrelated forgectl-owned temp dirs, e.g. "forgectl-findings-*"
+// (findings.go) — though that one lives under config.PrFindingsDir(), not
+// the OS temp root, so it was never reachable here anyway.
+const tempPrefix = "forgectl-workflow-"
 
 // osTempDir is a seam over os.TempDir so the breadcrumb content check is
 // testable against a redirected temp root.
