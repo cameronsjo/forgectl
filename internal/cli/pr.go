@@ -205,7 +205,7 @@ func newPrTeardownCmd(client *pr.Client) *cobra.Command {
 	return &cobra.Command{
 		Use:   "teardown <breadcrumb>",
 		Short: "Discard a review session (restore + remove workspace)",
-		Args:    cobra.ExactArgs(1),
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := client.Teardown(cmd.Context(), args[0]); err != nil {
 				return err
