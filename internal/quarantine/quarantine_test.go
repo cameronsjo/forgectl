@@ -25,11 +25,17 @@ package quarantine
 //
 // DefaultTargets (Classification: pure data)
 //   [x] Happy: exported and non-empty
+//   [x] Happy: covers the tool-registration carriers (.mcp.json, .codex/) for
+//       the two harnesses forgectl dispatches, and both survive a Hide→Restore
+//       round trip (see TestDefaultTargets_CoversToolRegistrationCarriers)
+//   [x] Invariant: no entry is a path-prefix of another, which would strand
+//       files silently (see TestDefaultTargets_NoOverlappingEntries)
 
 import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -406,6 +412,19 @@ func TestExpandTargets_OnlyExpandsNestableBasenames(t *testing.T) {
 	if len(got) != 1 {
 		t.Errorf("explicitly-pathed target was expanded: %v", got)
 	}
+
+	// The tool-registration carriers are root-only too: `.codex/` stays one
+	// literal entry even with a nested directory of the same name present, and
+	// `.mcp.json` is not swept recursively.
+	writeFile(t, filepath.Join(root, "vendor", ".codex", "config.toml"), "nested codex config")
+	writeFile(t, filepath.Join(root, "vendor", ".mcp.json"), "nested mcp registration")
+	got, err = ExpandTargets(root, SuffixQuarantined, []string{".codex/", ".mcp.json"})
+	if err != nil {
+		t.Fatalf("ExpandTargets: %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("a tool-registration carrier was expanded: %v", got)
+	}
 }
 
 // TestExpandTargets_SameListBeforeAndAfterHide is the property teardown
@@ -638,6 +657,89 @@ func TestDefaultTargets_CoversClaudeLocal(t *testing.T) {
 	}
 	if !containsStr(got, filepath.Join("sub", "CLAUDE.local.md")) {
 		t.Errorf("nested CLAUDE.local.md not quarantined; got %v", got)
+	}
+}
+
+// TestDefaultTargets_CoversToolRegistrationCarriers pins the two Tier-1
+// carriers that register TOOLS rather than instructions — `.mcp.json` (MCP
+// servers) and `.codex/` (Codex's per-project config) — for the two harnesses
+// forgectl actually dispatches. Membership alone is not enough: both must also
+// survive a Hide→Restore round trip, and they exercise different shapes (a
+// root file and a root directory).
+func TestDefaultTargets_CoversToolRegistrationCarriers(t *testing.T) {
+	for _, want := range []string{".mcp.json", ".codex/"} {
+		if !containsStr(DefaultTargets, want) {
+			t.Errorf("DefaultTargets omits %s: %v", want, DefaultTargets)
+		}
+	}
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".mcp.json"), `{"mcpServers":{}}`)
+	writeFile(t, filepath.Join(root, ".codex", "config.toml"), "model = \"gpt-5\"\n")
+
+	c := New(&exec.FakeRunner{})
+	moves, err := c.Hide(context.Background(), root, SuffixQuarantined, []string{".mcp.json", ".codex/"}, false)
+	if err != nil {
+		t.Fatalf("Hide: %v", err)
+	}
+	if len(moves) != 2 {
+		t.Fatalf("Hide made %d moves, want 2: %v", len(moves), moves)
+	}
+	if _, err := os.Lstat(filepath.Join(root, ".mcp.json")); !os.IsNotExist(err) {
+		t.Errorf(".mcp.json still readable at its original path after Hide (err=%v)", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, ".codex", "config.toml")); !os.IsNotExist(err) {
+		t.Errorf(".codex/ still readable at its original path after Hide (err=%v)", err)
+	}
+
+	if err := c.Restore(context.Background(), moves); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if got := readFile(t, filepath.Join(root, ".mcp.json")); got != `{"mcpServers":{}}` {
+		t.Errorf(".mcp.json did not round-trip: %q", got)
+	}
+	if got := readFile(t, filepath.Join(root, ".codex", "config.toml")); got != "model = \"gpt-5\"\n" {
+		t.Errorf(".codex/config.toml did not round-trip: %q", got)
+	}
+}
+
+// TestDefaultTargets_NoOverlappingEntries enforces the no-overlapping-entries
+// invariant documented on DefaultTargets. It is the guard that would have
+// caught widening `.cursor/rules` to `.cursor/`, and it guards every future
+// addition.
+func TestDefaultTargets_NoOverlappingEntries(t *testing.T) {
+	// Compare on cleaned, slash-separated paths so ".codex/" and ".codex" are
+	// the same entry, and so a prefix test can be done segment-wise rather
+	// than on raw strings (".claude" must not look like a prefix of
+	// ".claude-extra").
+	norm := func(s string) string {
+		return filepath.ToSlash(filepath.Clean(s))
+	}
+	const stranding = "Hide renames the outer entry first, so the inner rename lands inside the " +
+		"already-renamed parent as <outer>.quarantined/<inner>.quarantined; Restore then skips the " +
+		"inner move because its To no longer exists at the old path, and BOTH return nil — the " +
+		"stranding is invisible. A directory entry that would swallow an existing one must REPLACE " +
+		"it, never join it."
+
+	for i, outer := range DefaultTargets {
+		for j, inner := range DefaultTargets {
+			if i <= j {
+				continue // each unordered pair once; i == j is an entry against itself
+			}
+			a, b := norm(outer), norm(inner)
+			switch {
+			case a == b:
+				t.Errorf("DefaultTargets lists %q and %q, which resolve to the same path %q. "+
+					"Hide would compute the same Move twice and refuse the second as a clobber. Full list: %v",
+					outer, inner, a, DefaultTargets)
+			case strings.HasPrefix(b, a+"/"):
+				t.Errorf("DefaultTargets entries %q and %q overlap (%q contains %q), which silently strands files: %s Full list: %v",
+					outer, inner, outer, inner, stranding, DefaultTargets)
+			case strings.HasPrefix(a, b+"/"):
+				t.Errorf("DefaultTargets entries %q and %q overlap (%q contains %q), which silently strands files: %s Full list: %v",
+					inner, outer, inner, outer, stranding, DefaultTargets)
+			}
+		}
 	}
 }
 

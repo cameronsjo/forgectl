@@ -66,8 +66,43 @@ type Move struct {
 // they descend a tree — see nestableBasenames — are expanded to every nested
 // match by ExpandTargets; the rest are root-level only, which is where they
 // are actually read from.
+//
+// NO-OVERLAPPING-ENTRIES INVARIANT: no entry may be a path-prefix of another.
+// An overlapping pair silently strands files, and both halves of the round
+// trip report success:
+//
+//   - Hide renames the outer entry first, so the inner entry's rename lands
+//     INSIDE the already-renamed parent, producing a nested
+//     `<a>.quarantined/<b>.quarantined/…`.
+//   - Restore then skips the inner move, because its To no longer exists at
+//     the old path — an absent To is the idempotency no-op — and the inner
+//     file rides back inside the outer directory still decorated, or does not
+//     ride back at all.
+//   - Neither returns an error. The stranding is invisible.
+//
+// Proved empirically during triage of the `.cursor/rules` + `.cursor/` pair.
+// So a future directory entry that would swallow an existing one must REPLACE
+// that entry, never join it. TestDefaultTargets_NoOverlappingEntries enforces
+// this.
 var DefaultTargets = []string{
-	"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude/", ".cursor/rules", ".github/copilot-instructions.md",
+	// Tier 1 — the carriers the harnesses forgectl itself dispatches read.
+	// forgectl does not rely on the harness's own trust gate for these:
+	// launch.ClaudePath and launch.CodexPath resolve whatever binary is on the
+	// host, at a version forgectl does not pin, so treating a third party's
+	// folder-trust dialog as the control would outsource a security property
+	// to software forgectl neither ships nor version-gates. Both dispatch
+	// paths are live: `claude -p` via pr.launchInline, and `codex exec` via
+	// pr.launchCodex — the latter reachable for a third party's head only
+	// through `pr local --agent codex` after a `gh pr checkout`, since
+	// pr.CheckAgentForRef already refuses Codex for a remote PR head (that
+	// path is CheckAgentForRef's documented accepted residual).
+	"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude/", ".mcp.json", ".codex/",
+
+	// Tier 2 — carriers for editors and harnesses forgectl never launches.
+	// Present because the workspace may be opened by hand after a review.
+	// Deliberately narrow: every added entry also widens workflow `strip`,
+	// whose sibling implementation is os.RemoveAll.
+	".cursor/rules", ".github/copilot-instructions.md",
 }
 
 // nestableBasenames are the instruction-file basenames a coding agent picks up

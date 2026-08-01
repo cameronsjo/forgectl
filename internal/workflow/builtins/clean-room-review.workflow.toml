@@ -16,8 +16,7 @@ repo = "${repo}"
 ref  = "${branch}"
 
 [[step]]
-uses  = "strip"            # the clean-room control; omit globs → configured default set
-globs = ["CLAUDE.md", "AGENTS.md", ".claude/", ".cursor/rules", ".github/copilot-instructions.md"]
+uses = "strip"             # the clean-room control; globs omitted → quarantine.DefaultTargets
 
 [[step]]
 uses    = "launch"         # exports ${review}; mode sync = wait+collect, surface = fire into tmux/cmux

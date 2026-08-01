@@ -35,9 +35,14 @@ func TestBuildPlan_EmbeddedCleanRoomReview(t *testing.T) {
 		t.Errorf("worktree.Ref = %q, want main (the branch param default)", worktree.Ref)
 	}
 
+	// The builtin deliberately omits `globs`, and an empty plan-time Globs is
+	// exactly what proves the run-time fallback to quarantine.DefaultTargets is
+	// live. A hardcoded list here would be a second copy of the clean-room
+	// control that drifts from the canonical one — it already had, missing
+	// CLAUDE.local.md.
 	strip := plan.Steps[1]
-	if len(strip.Globs) != 5 {
-		t.Errorf("strip.Globs = %d entries, want 5", len(strip.Globs))
+	if len(strip.Globs) != 0 {
+		t.Errorf("strip.Globs = %v, want empty so the DefaultTargets fallback applies", strip.Globs)
 	}
 
 	launch := plan.Steps[2]
