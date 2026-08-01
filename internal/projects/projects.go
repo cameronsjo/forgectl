@@ -19,6 +19,20 @@ import (
 // concurrent workers, and returns the results in input order. Each worker
 // writes to its own out[i] — distinct-index writes are race-free without a
 // mutex, so no post-sort is needed to recover input order.
+//
+// The semaphore acquire (`sem <- struct{}{}`) sits in the loop BEFORE the
+// `go` statement, deliberately: that bounds the number of live goroutines,
+// not just the number doing work at once. Moving the acquire inside the
+// goroutine would still cap concurrent f calls correctly, but every one of
+// len(in) goroutines would be created up front — at 10k candidates that's
+// 8 live stacks vs. 10,000, not a cosmetic difference.
+//
+// fanOut does not check ctx for cancellation itself — a cancelled context
+// still runs every f to completion and returns a full-length result with a
+// nil error. This matches the serial loop it replaced, which had the same
+// property, and nothing in the current call sites cancels these commands
+// mid-flight; a future caller that needs early-exit-on-cancel would need to
+// add that here.
 func fanOut[I, O any](in []I, f func(I) O) []O {
 	out := make([]O, len(in))
 	sem := make(chan struct{}, discoverConcurrency())
@@ -37,16 +51,47 @@ func fanOut[I, O any](in []I, f func(I) O) []O {
 }
 
 // discoverConcurrency bounds the fan-out width for discoverDir and
-// localRepos. Measured on a 500-repo synthetic fixture (M3 Air, warm cache):
-// serial process spawn was the whole cost — three git spawns per repo, one
-// after another, 9.1s wall at 93% of a single core. Isolating just the
-// fan-out: serial 13.6s → 8 workers 3.5s → 16 workers 3.2s. The knee sits at
-// NumCPU; 16 buys only 8% over 8. Floored at 4 so a low-core machine still
-// gets some overlap; capped at 16 because spawning one git process per repo
-// unbounded (500+ concurrent git processes) is not something to do to a
-// laptop.
+// localRepos — each has its own independent fanOut call, so a caller that
+// runs both concurrently (Inventory does, alongside its github/gitea
+// fetches) can see up to roughly discoverConcurrency()+2 processes in
+// flight at once, not a single shared bound across the whole program.
+// Measured on a 500-repo synthetic fixture (M3 Air, warm cache): serial
+// process spawn was the whole cost — gitStatus alone spawns up to two git
+// processes per repo (status, then rev-list on a clean tree), one after
+// another, 9.1s wall at 93% of a single core end to end (a third spawn,
+// `remote get-url`, belongs to localRepos' separate fan-out, not this
+// count). Isolating just the fan-out: serial 13.6s → 8 workers 3.5s → 16
+// workers 3.2s. The knee sits at NumCPU; 16 buys only 8% over 8. Floored at
+// 4 so a low-core machine still gets some overlap; capped at 16 because
+// spawning one git process per repo unbounded (500+ concurrent git
+// processes) is not something to do to a laptop.
 func discoverConcurrency() int {
 	return max(4, min(runtime.NumCPU(), 16))
+}
+
+// sortProjects orders projects by Name, tie-breaking on Dir when two
+// entries share a Name (e.g. github/ownerA/tool and gitea/ownerB/tool).
+//
+// The tie-break is belt-and-suspenders, not a repair for lost ordering:
+// fanOut's distinct-index writes already preserve candidate order (see its
+// doc comment), and phase 1's os.ReadDir-driven walk already produces that
+// candidate order in Dir-lexicographic order, so in the current pipeline
+// the two same-Name entries would already arrive here Dir-sorted even
+// without this tie-break. What the tie-break actually buys is independence
+// from sort.Slice's own tie-resolution — the standard library explicitly
+// does not guarantee it preserves input order for elements the comparator
+// treats as equal, so relying on that coincidence would be fragile against
+// a future stdlib change or a future caller that feeds this a differently
+// ordered input. See TestSortProjects_TieBreaksOnDir, which constructs an
+// input directly (bypassing the filesystem walk) to exercise this
+// independently of that coincidence.
+func sortProjects(projects []Project) {
+	sort.Slice(projects, func(i, j int) bool {
+		if projects[i].Name != projects[j].Name {
+			return projects[i].Name < projects[j].Name
+		}
+		return projects[i].Dir < projects[j].Dir
+	})
 }
 
 // Client discovers and opens local project directories.
@@ -130,16 +175,7 @@ func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error)
 		return c.discoverProject(ctx, cand.name, cand.dir)
 	})
 
-	sort.Slice(projects, func(i, j int) bool {
-		if projects[i].Name != projects[j].Name {
-			return projects[i].Name < projects[j].Name
-		}
-		// Tie-break on Dir: two same-named repos under different owners
-		// (e.g. github/a/tool and gitea/b/tool) would otherwise order
-		// nondeterministically, since fan-out doesn't preserve any
-		// filesystem-walk ordering among equal-Name entries.
-		return projects[i].Dir < projects[j].Dir
-	})
+	sortProjects(projects)
 	return projects, nil
 }
 

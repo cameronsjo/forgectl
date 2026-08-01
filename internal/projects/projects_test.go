@@ -539,15 +539,20 @@ func TestValidPathSegment_RejectsTraversalAndSeparators(t *testing.T) {
 // mkMixedFanOutFixture populates tmp with a mix of canonical (host/owner/repo)
 // and flat (top-level) clones — 30 total — so the fan-out phase actually has
 // enough candidates in play to expose a nondeterministic ordering, were one
-// present.
+// present. Ten owners get a same-named "tool" repo under BOTH the github and
+// gitea host buckets, so Name collisions actually occur and the sort
+// comparator's Dir tie-break branch is exercised by a real Discover() call
+// rather than sitting dead in this test. (It does not, by itself, prove the
+// tie-break is load-bearing — see TestSortProjects_TieBreaksOnDir for that.)
 func mkMixedFanOutFixture(t *testing.T, tmp string) {
 	t.Helper()
-	for i := 0; i < 15; i++ {
+	for i := 0; i < 10; i++ {
 		mkGitDir(t, tmp, "flat-"+strconv.Itoa(i))
 	}
-	for i := 0; i < 15; i++ {
-		owner := "owner-" + strconv.Itoa(i%3)
-		mkCanonicalGitDir(t, tmp, "github", owner, "repo-"+strconv.Itoa(i))
+	for i := 0; i < 10; i++ {
+		owner := "owner-" + strconv.Itoa(i)
+		mkCanonicalGitDir(t, tmp, "github", owner, "tool")
+		mkCanonicalGitDir(t, tmp, "gitea", owner, "tool")
 	}
 }
 
@@ -563,11 +568,23 @@ func projectNameDirs(projs []Project) []nameDir {
 	return out
 }
 
-// TestDiscover_FanOutIsDeterministic pins the sort comparator's Dir tie-break:
-// with the phase-2 fan-out running discoverProject across goroutines,
-// completion order is not filesystem-walk order, so the final sort is the
-// only thing standing between this and a flaky result. Two runs over the
-// same ~30-entry mixed fixture must produce byte-identical ordered sequences.
+// TestDiscover_FanOutIsDeterministic is an end-to-end regression check: two
+// Discover() calls over the same ~30-entry mixed fixture (including Name
+// collisions across hosts, so the sort's Dir tie-break branch actually runs)
+// must produce byte-identical, complete, ordered sequences.
+//
+// This does NOT prove the tie-break is load-bearing — it can't. Phase 1's
+// os.ReadDir-driven walk always produces its candidates in an order that
+// already agrees with Dir-lexicographic order (ReadDir sorts by filename at
+// every level, and Go string comparison makes basename order and full-path
+// order coincide for ordinary names), and fanOut's distinct-index writes
+// preserve that order through phase 2. So even with the tie-break
+// hard-removed, sort.Slice for this fixture's shape empirically reproduces
+// the same output run after run (measured: 200 iterations x 3 -race runs,
+// byte-identical, on a 40-entry duplicate-name fixture). For a test that
+// actually goes red without the tie-break, see
+// TestSortProjects_TieBreaksOnDir, which constructs its input directly and
+// so isn't constrained by that walk-order coincidence.
 func TestDiscover_FanOutIsDeterministic(t *testing.T) {
 	tmp := t.TempDir()
 	mkMixedFanOutFixture(t, tmp)
@@ -626,8 +643,40 @@ func TestDiscover_BoundsConcurrency(t *testing.T) {
 	if got <= 1 {
 		t.Errorf("peak in-flight calls = %d, want > 1 (fan-out never ran concurrently)", got)
 	}
+	// Comparing against discoverConcurrency() itself is a shape check, not a
+	// value check: it catches an unbounded fan-out (peak growing past
+	// whatever the bound is), but it cannot catch the bound being wrong —
+	// e.g. a typo'd discoverConcurrency() returning 1000 would still pass
+	// this assertion.
 	if want := int64(discoverConcurrency()); got > want {
 		t.Errorf("peak in-flight calls = %d, want <= discoverConcurrency() = %d", got, want)
+	}
+}
+
+// TestSortProjects_TieBreaksOnDir unit-tests sortProjects directly, bypassing
+// discoverDir's filesystem walk entirely. That matters: routing a fixture
+// through Discover can never falsify the tie-break (see the comment on
+// TestDiscover_FanOutIsDeterministic) because os.ReadDir's per-level sorted
+// traversal always hands phase 1 its candidates in an order that already
+// agrees with Dir order. Building the input slice directly here sidesteps
+// that constraint — the two colliding "tool" entries are given deliberately
+// Dir-DESCENDING input order, so only an explicit tie-break, not incidental
+// pre-sort ordering, can produce the wanted ascending result.
+func TestSortProjects_TieBreaksOnDir(t *testing.T) {
+	projects := []Project{
+		{Name: "tool", Dir: "/z/tool"},
+		{Name: "alpha", Dir: "/x/alpha"},
+		{Name: "tool", Dir: "/a/tool"},
+	}
+	sortProjects(projects)
+
+	want := []nameDir{
+		{"alpha", "/x/alpha"},
+		{"tool", "/a/tool"},
+		{"tool", "/z/tool"},
+	}
+	if got := projectNameDirs(projects); !reflect.DeepEqual(got, want) {
+		t.Errorf("sortProjects order = %+v, want %+v", got, want)
 	}
 }
 
