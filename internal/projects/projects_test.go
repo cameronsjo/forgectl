@@ -3,10 +3,15 @@ package projects
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -529,4 +534,137 @@ func TestValidPathSegment_RejectsTraversalAndSeparators(t *testing.T) {
 			t.Errorf("validPathSegment(%q) = false, want true", s)
 		}
 	}
+}
+
+// mkMixedFanOutFixture populates tmp with a mix of canonical (host/owner/repo)
+// and flat (top-level) clones — 30 total — so the fan-out phase actually has
+// enough candidates in play to expose a nondeterministic ordering, were one
+// present.
+func mkMixedFanOutFixture(t *testing.T, tmp string) {
+	t.Helper()
+	for i := 0; i < 15; i++ {
+		mkGitDir(t, tmp, "flat-"+strconv.Itoa(i))
+	}
+	for i := 0; i < 15; i++ {
+		owner := "owner-" + strconv.Itoa(i%3)
+		mkCanonicalGitDir(t, tmp, "github", owner, "repo-"+strconv.Itoa(i))
+	}
+}
+
+// nameDir is the (Name, Dir) projection asserted by the determinism test —
+// Status is excluded since it isn't what ordering depends on.
+type nameDir struct{ Name, Dir string }
+
+func projectNameDirs(projs []Project) []nameDir {
+	out := make([]nameDir, len(projs))
+	for i, p := range projs {
+		out[i] = nameDir{p.Name, p.Dir}
+	}
+	return out
+}
+
+// TestDiscover_FanOutIsDeterministic pins the sort comparator's Dir tie-break:
+// with the phase-2 fan-out running discoverProject across goroutines,
+// completion order is not filesystem-walk order, so the final sort is the
+// only thing standing between this and a flaky result. Two runs over the
+// same ~30-entry mixed fixture must produce byte-identical ordered sequences.
+func TestDiscover_FanOutIsDeterministic(t *testing.T) {
+	tmp := t.TempDir()
+	mkMixedFanOutFixture(t, tmp)
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}}
+
+	first, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	second, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(first) != 30 {
+		t.Fatalf("got %d projects, want 30", len(first))
+	}
+	if !reflect.DeepEqual(projectNameDirs(first), projectNameDirs(second)) {
+		t.Errorf("Discover order is nondeterministic:\nfirst:  %+v\nsecond: %+v", projectNameDirs(first), projectNameDirs(second))
+	}
+}
+
+// TestDiscover_BoundsConcurrency proves discoverDir's phase 2 actually runs
+// concurrently AND stays within discoverConcurrency()'s bound. Both halves
+// are load-bearing: without the peak>1 assertion this test would also pass
+// against fully-serial code.
+func TestDiscover_BoundsConcurrency(t *testing.T) {
+	tmp := t.TempDir()
+	mkMixedFanOutFixture(t, tmp)
+
+	var inFlight, peak int64
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		cur := atomic.AddInt64(&inFlight, 1)
+		defer atomic.AddInt64(&inFlight, -1)
+		for {
+			p := atomic.LoadInt64(&peak)
+			if cur <= p || atomic.CompareAndSwapInt64(&peak, p, cur) {
+				break
+			}
+		}
+		// A near-instant fake call finishes before the scheduler fans the rest
+		// of the batch out, so real concurrency would go unobserved without
+		// this: hold the call open briefly so overlapping goroutines actually
+		// overlap in wall-clock time rather than running effectively serially.
+		time.Sleep(5 * time.Millisecond)
+		// git status --porcelain / rev-list output; empty is fine either way.
+		return "", nil
+	}}
+	c := &Client{Dir: tmp, run: fake}
+
+	if _, err := c.Discover(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := atomic.LoadInt64(&peak)
+	if got <= 1 {
+		t.Errorf("peak in-flight calls = %d, want > 1 (fan-out never ran concurrently)", got)
+	}
+	if want := int64(discoverConcurrency()); got > want {
+		t.Errorf("peak in-flight calls = %d, want <= discoverConcurrency() = %d", got, want)
+	}
+}
+
+// TestFanOut_PreservesOrder unit-tests the helper directly: results must land
+// at their input index regardless of completion order, including the empty
+// and single-item edge cases.
+func TestFanOut_PreservesOrder(t *testing.T) {
+	t.Run("many items", func(t *testing.T) {
+		in := make([]int, 50)
+		for i := range in {
+			in[i] = i
+		}
+		out := fanOut(in, func(i int) string {
+			return fmt.Sprintf("v%d", i)
+		})
+		if len(out) != len(in) {
+			t.Fatalf("got %d results, want %d", len(out), len(in))
+		}
+		for i, v := range out {
+			want := fmt.Sprintf("v%d", i)
+			if v != want {
+				t.Errorf("out[%d] = %q, want %q", i, v, want)
+			}
+		}
+	})
+
+	t.Run("empty input", func(t *testing.T) {
+		out := fanOut([]int{}, func(i int) int { return i * 2 })
+		if len(out) != 0 {
+			t.Errorf("got %d results, want 0", len(out))
+		}
+	})
+
+	t.Run("single item", func(t *testing.T) {
+		out := fanOut([]int{7}, func(i int) int { return i * 2 })
+		if len(out) != 1 || out[0] != 14 {
+			t.Errorf("got %v, want [14]", out)
+		}
+	})
 }
