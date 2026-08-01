@@ -305,6 +305,40 @@ func TestParseTeaIssues_HostileRows(t *testing.T) {
 	}
 }
 
+// TestParseTeaIssues_KeepsOwnerNamedLocal is the review-side regression guard
+// for issue #185. A self-hosted forge really does host an org named "local"
+// (git.sjo.lol/local/tools), and the old host-blind owner reservation made
+// itemFromParts reject every such row — so `review list` silently dropped
+// them, with the only trace a warn line in the dated log file.
+func TestParseTeaIssues_KeepsOwnerNamedLocal(t *testing.T) {
+	jsonOut := "[" + teaRow("Issue", "local", "tools", 5) + "]"
+	items, rawCount, err := parseTeaIssues(jsonOut, "git.sjo.lol")
+	if err != nil {
+		t.Fatalf("parseTeaIssues: %v", err)
+	}
+	if rawCount != 1 {
+		t.Errorf("rawCount = %d, want 1", rawCount)
+	}
+	if len(items) != 1 {
+		t.Fatalf("a row owned by %q must survive; got %+v", "local", items)
+	}
+	if items[0].Owner != "local" || items[0].Repo != "tools" || items[0].Number != 5 {
+		t.Errorf("item = %+v, want local/tools#5", items[0])
+	}
+}
+
+// TestParseWorkRefForHosts_OwnerNamedLocal is the other half of #185: marking
+// git.sjo.lol/local/tools#5 reviewed must produce a key, not an error.
+func TestParseWorkRefForHosts_OwnerNamedLocal(t *testing.T) {
+	got, err := ParseWorkRefForHosts("git.sjo.lol/local/tools#5", []string{"git.sjo.lol"})
+	if err != nil {
+		t.Fatalf("ParseWorkRefForHosts rejected a real owner named %q: %v", "local", err)
+	}
+	if want := "git.sjo.lol/local/tools#5"; got != want {
+		t.Errorf("ParseWorkRefForHosts = %q, want %q", got, want)
+	}
+}
+
 func TestParseTeaIssues_MalformedAndEmpty(t *testing.T) {
 	if _, _, err := parseTeaIssues("{not an array", "git.sjo.lol"); err == nil {
 		t.Error("malformed JSON: want error, got nil")

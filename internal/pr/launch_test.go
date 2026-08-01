@@ -45,7 +45,7 @@ var testSess = Session{Ref: Ref{Owner: "o", Repo: "r", Number: 9}, Workspace: "/
 func TestPostReview_LocalSessionRefused(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := postClient(fake, true, true) // approve=true, tty=true — must still refuse
-	localSess := Session{Ref: Ref{Owner: "local", Repo: "abc1234", Number: 1}, Workspace: "/tmp/forgectl-x"}
+	localSess := Session{Ref: mustLocalRef("abc1234", 1), Workspace: "/tmp/forgectl-x"}
 
 	posted, err := c.PostReview(context.Background(), localSess, "the review", false)
 	if err == nil {
@@ -61,14 +61,14 @@ func TestPostReview_LocalSessionRefused(t *testing.T) {
 
 // TestPostReview_ReloadedLocalSessionStillRefused guards the reload path: a
 // Session reconstituted from a breadcrumb (loadSession) never carries any
-// in-process-only fields, same as HeadRef/HeadOid. The guard must still
-// catch this case via the persisted Ref.IsLocal(), or a future verb built on
-// the loadSession pattern would silently defeat PostReview's safety
-// invariant.
+// in-process-only fields, same as HeadRef/HeadOid. The guard must still catch
+// this case via Ref.IsLocal(), which loadSession restores from the
+// breadcrumb's Local field, or a future verb built on the loadSession pattern
+// would silently defeat PostReview's safety invariant.
 func TestPostReview_ReloadedLocalSessionStillRefused(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := postClient(fake, true, true)
-	reloaded := Session{Ref: Ref{Owner: "local", Repo: "abc1234", Number: 1}, Workspace: "/tmp/forgectl-x"} // as loadSession produces
+	reloaded := Session{Ref: mustLocalRef("abc1234", 1), Workspace: "/tmp/forgectl-x"} // as loadSession produces
 
 	posted, err := c.PostReview(context.Background(), reloaded, "the review", false)
 	if err == nil {
@@ -83,7 +83,7 @@ func TestWindowName_OwnerDistinguishesLocalFromPRMode(t *testing.T) {
 	// A local-mode Ref and a PR-mode Ref that derive the identical Number must
 	// not collide on tmux window name — Owner ("local" vs a real GitHub owner)
 	// is what disambiguates them.
-	local := Ref{Owner: "local", Repo: "abc1234", Number: 42}
+	local := mustLocalRef("abc1234", 42)
 	prMode := Ref{Owner: "someowner", Repo: "somerepo", Number: 42}
 	if windowName(local) == windowName(prMode) {
 		t.Errorf("windowName collided: local=%q prMode=%q", windowName(local), windowName(prMode))
@@ -302,7 +302,7 @@ func TestLaunch_CodexRefusedForRemotePRHead(t *testing.T) {
 // review the ruling deliberately keeps available.
 func TestCheckAgentForRef_BoundaryIsOwnershipNotSeverity(t *testing.T) {
 	remote := Ref{Owner: "o", Repo: "r", Number: 42}
-	local := Ref{Owner: localOwnerSentinel, Repo: "abc1234", Number: 1}
+	local := mustLocalRef("abc1234", 1)
 
 	for _, tc := range []struct {
 		agent      string
@@ -337,7 +337,7 @@ func TestLaunch_CodexStillDispatchesForLocalReview(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	sess := Session{
-		Ref:         Ref{Owner: localOwnerSentinel, Repo: "abc1234", Number: 1},
+		Ref:         mustLocalRef("abc1234", 1),
 		Workspace:   fakeWorkspace(t),
 		Agent:       "codex",
 		FindingsDir: t.TempDir(),
@@ -362,7 +362,7 @@ func TestLaunch_CodexLocalWritesOnlyWorkspaceAndFindings(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	sess := Session{
-		Ref:         Ref{Owner: "local", Repo: "abc1234", Number: 1},
+		Ref:         mustLocalRef("abc1234", 1),
 		Workspace:   fakeWorkspace(t),
 		Agent:       "codex",
 		FindingsDir: findings,
@@ -422,7 +422,7 @@ func TestLaunchInline_LocalSessionAddsFindingsDirAndPrompt(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	ws := fakeWorkspace(t)
-	localSess := Session{Ref: Ref{Owner: "local", Repo: "abc1234", Number: 1}, Workspace: ws, Agent: "claude", FindingsDir: findingsDir}
+	localSess := Session{Ref: mustLocalRef("abc1234", 1), Workspace: ws, Agent: "claude", FindingsDir: findingsDir}
 
 	if err := c.Launch(context.Background(), localSess, config.Config{}); err != nil {
 		t.Fatalf("Launch: %v", err)
@@ -514,7 +514,7 @@ func TestLaunch_LocalSessionWithoutFindingsDirRefused(t *testing.T) {
 			c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 			// As loadSession produces it: Ref restored, FindingsDir zero.
 			sess := Session{
-				Ref:       Ref{Owner: localOwnerSentinel, Repo: "abc1234", Number: 1},
+				Ref:       mustLocalRef("abc1234", 1),
 				Workspace: fakeWorkspace(t),
 				Agent:     agent,
 			}
@@ -572,7 +572,7 @@ func TestLaunchInline_DropsAmbientAddDir(t *testing.T) {
 	fake2 := &exec.FakeRunner{}
 	c2 := New(fake2, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	localSess := Session{
-		Ref:         Ref{Owner: localOwnerSentinel, Repo: "abc1234", Number: 1},
+		Ref:         mustLocalRef("abc1234", 1),
 		Workspace:   fakeWorkspace(t),
 		Agent:       "claude",
 		FindingsDir: findings,

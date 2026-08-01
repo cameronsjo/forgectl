@@ -7,7 +7,8 @@ package pr
 //       no worktree, no quarantine/allowlist write, no breadcrumb
 //   [x] Real: uses `git worktree add`, never `git clone`
 //   [x] Real: the worktree ref is the resolved HEAD oid, not the literal "HEAD"
-//   [x] newLocalRef output round-trips through parseRefAllowingLocal (the Number<=0 failure mode)
+//   [x] newLocalRef output round-trips through ParseRef (the Number<=0 failure mode)
+//   [x] The breadcrumb carries "local": true, and loadSession restores IsLocal()
 //   [x] The findings dir is a sibling of workspace, never nested inside it
 //   [x] The findings dir is created under the client's durable findingsDir
 //       (config.PrFindingsDir by default), not a sibling of the OS-temp
@@ -150,7 +151,7 @@ func TestPrepareLocal_PinsToResolvedOid(t *testing.T) {
 	}
 }
 
-func TestPrepareLocal_BreadcrumbRoundTripsThroughInternalParser(t *testing.T) {
+func TestPrepareLocal_BreadcrumbRoundTripsThroughParseRef(t *testing.T) {
 	oids := []string{
 		localHeadOid,
 		"0000001234567890abcdef", // low-value hex prefix, still nonzero
@@ -163,18 +164,88 @@ func TestPrepareLocal_BreadcrumbRoundTripsThroughInternalParser(t *testing.T) {
 			t.Errorf("newLocalRef(%q).Number = %d, want > 0", oid, ref.Number)
 		}
 		// The breadcrumb reload path, which is the reason the round-trip must work.
-		got, err := parseRefAllowingLocal(ref.String())
+		got, err := ParseRef(ref.String())
 		if err != nil {
-			t.Errorf("parseRefAllowingLocal(%q) failed to round-trip: %v", ref.String(), err)
+			t.Errorf("ParseRef(%q) failed to round-trip: %v", ref.String(), err)
 			continue
 		}
-		if got != ref {
-			t.Errorf("round-trip mismatch: got %+v, want %+v", got, ref)
+		// The ref STRING cannot carry locality — the breadcrumb's own Local
+		// field does (see loadSession). So the parse comes back non-local and
+		// matches only once locality is re-applied.
+		if got.IsLocal() {
+			t.Errorf("ParseRef(%q) produced a local Ref; only newLocalRef may", ref.String())
 		}
-		// The public parser must NOT accept it — that asymmetry is the control.
-		if _, err := ParseRef(ref.String()); err == nil {
-			t.Errorf("ParseRef(%q) accepted the reserved sentinel", ref.String())
+		if got.asLocal() != ref {
+			t.Errorf("round-trip mismatch: got %+v, want %+v", got.asLocal(), ref)
 		}
+	}
+}
+
+// TestPrepareLocal_PersistsLocalityFlag is the end-to-end statement of the
+// locality-persistence contract, from PrepareLocal's write through
+// loadSession's read. The ref string cannot carry locality (owner "local" is
+// only a display value), so if the breadcrumb's own flag is not written or not
+// re-applied, a reloaded session goes silently NON-local — and PostReview's
+// refusal plus launchCodex's sandbox posture both key off exactly that bit.
+func TestPrepareLocal_PersistsLocalityFlag(t *testing.T) {
+	fake := localGitRunner()
+	c := testClient(t, fake)
+
+	sess, err := c.PrepareLocal(context.Background(), t.TempDir(), PrepareLocalOpts{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("PrepareLocal: %v", err)
+	}
+	t.Cleanup(func() {
+		os.RemoveAll(sess.Workspace)
+		os.RemoveAll(sess.FindingsDir)
+	})
+
+	raw, err := os.ReadFile(sess.Path)
+	if err != nil {
+		t.Fatalf("read breadcrumb: %v", err)
+	}
+	if !strings.Contains(string(raw), `"local": true`) {
+		t.Errorf("breadcrumb does not persist locality:\n%s", raw)
+	}
+
+	reloaded, err := c.loadSession(sess.Path)
+	if err != nil {
+		t.Fatalf("loadSession: %v", err)
+	}
+	if !reloaded.Ref.IsLocal() {
+		t.Errorf("reloaded session lost its locality: %+v", reloaded.Ref)
+	}
+	if reloaded.Ref.String() != sess.Ref.String() {
+		t.Errorf("reloaded ref = %q, want %q", reloaded.Ref.String(), sess.Ref.String())
+	}
+}
+
+// TestLoadSession_RealLocalOwnerReloadsNonLocal is the other half: a breadcrumb
+// whose REF spells owner "local" but whose Local flag is false must reload
+// non-local. That is both a real forge repo (git.sjo.lol/local/tools, issue
+// #185) and the shape a pre-upgrade local breadcrumb takes — either way, the
+// flag is the only thing that grants locality.
+func TestLoadSession_RealLocalOwnerReloadsNonLocal(t *testing.T) {
+	// No git runner needed: loadSession reads the breadcrumb and shells out to
+	// nothing.
+	c := testClient(t, &exec.FakeRunner{})
+	ws := fakeWorkspace(t)
+	ref := Ref{Owner: "local", Repo: "repo", Number: 5}
+	bc := Breadcrumb{Workspace: ws, Ref: ref.String(), Agent: "claude", CreatedAt: time.Now().UTC()}
+
+	path, err := writeBreadcrumb(c.SessionsDir(), ref, bc)
+	if err != nil {
+		t.Fatalf("writeBreadcrumb: %v", err)
+	}
+	sess, err := c.loadSession(path)
+	if err != nil {
+		t.Fatalf("loadSession: %v", err)
+	}
+	if sess.Ref.IsLocal() {
+		t.Error("a breadcrumb without the local flag must reload NON-local, whatever its owner spells")
+	}
+	if err := CheckAgentForRef("codex", sess.Ref); err == nil {
+		t.Error("the Codex refusal must still apply to a reloaded remote ref owned by \"local\"")
 	}
 }
 

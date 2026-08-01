@@ -20,8 +20,8 @@ package pr
 //   [x] Bare N resolves owner/repo from `gh repo view`
 //   [x] Bare N falls back to `git remote get-url origin` when gh fails
 //   [x] Origin owner/repo outside the charset is rejected
-//   [x] A typed ref with owner "local" is refused (reserved sentinel)
-//   [x] A resolved origin owner "local" is refused (reserved sentinel)
+//   [x] A typed ref with owner "local" resolves like any other, non-local
+//   [x] A resolved origin owner "local" resolves like any other, non-local
 
 import (
 	"context"
@@ -226,18 +226,26 @@ func TestResolveRef_BadOriginRejected(t *testing.T) {
 	}
 }
 
-// TestResolveRef_LocalOwnerReserved verifies the windowName/PostReview
-// disambiguation guarantee holds: a real PR reference can never resolve to
-// owner "local", since localRef's synthetic Refs key off exactly that value.
-func TestResolveRef_LocalOwnerReserved(t *testing.T) {
+// TestResolveRef_LocalOwnerResolves verifies owner "local" is an ordinary
+// forge owner on both resolution routes. Locality is Ref.local, set only by
+// newLocalRef, so a resolved ref naming "local" is remote like any other —
+// self-hosted forges do host an org by that name (issue #185).
+func TestResolveRef_LocalOwnerResolves(t *testing.T) {
 	t.Run("typed directly", func(t *testing.T) {
 		fake := &exec.FakeRunner{}
 		c := New(fake)
-		if got, err := c.ResolveRef(context.Background(), "local/repo#5"); err == nil {
-			t.Errorf("ResolveRef(\"local/repo#5\") = %+v, want error (reserved owner)", got)
+		ref, err := c.ResolveRef(context.Background(), "local/repo#5")
+		if err != nil {
+			t.Fatalf("ResolveRef(\"local/repo#5\") errored: %v", err)
+		}
+		if ref.Owner != "local" || ref.Repo != "repo" || ref.Number != 5 {
+			t.Errorf("ResolveRef = %+v, want local/repo#5", ref)
+		}
+		if ref.IsLocal() {
+			t.Error("a parsed ref must never be local, whatever its owner spells")
 		}
 		if len(fake.Calls) != 0 {
-			t.Errorf("a rejected owner should not shell out; got %+v", fake.Calls)
+			t.Errorf("a complete ref should not shell out; got %+v", fake.Calls)
 		}
 	})
 	t.Run("resolved from origin", func(t *testing.T) {
@@ -250,38 +258,62 @@ func TestResolveRef_LocalOwnerReserved(t *testing.T) {
 			},
 		}
 		c := New(fake)
-		if got, err := c.ResolveRef(context.Background(), "42"); err == nil {
-			t.Errorf("ResolveRef with origin owner \"local\" = %+v, want error", got)
+		ref, err := c.ResolveRef(context.Background(), "42")
+		if err != nil {
+			t.Fatalf("ResolveRef with origin owner \"local\" errored: %v", err)
+		}
+		if ref.Owner != "local" || ref.Repo != "somerepo" || ref.Number != 42 {
+			t.Errorf("ResolveRef = %+v, want local/somerepo#42", ref)
+		}
+		if ref.IsLocal() {
+			t.Error("an origin-resolved ref must never be local")
 		}
 	})
 }
 
-// TestLocalSentinel_ReservedOnEveryExportedRoute is the invariant that makes
+// TestLocalSentinel_OnlyNewLocalRefMarksLocal is the invariant that makes
 // Ref.IsLocal() unforgeable, and therefore makes the Codex refusal
 // (CheckAgentForRef) and the launchCodex sandbox widening safe to key off it.
 //
-// Only the two unexported routes may spell the sentinel: parseRefAllowingLocal
-// for breadcrumb reload, and newLocalRef for construction.
-func TestLocalSentinel_ReservedOnEveryExportedRoute(t *testing.T) {
-	if got, err := ParseRef("local/abc1234#1"); err == nil {
-		t.Errorf("ParseRef accepted the reserved sentinel: %+v", got)
+// The owner string is a display value: every parsing route may spell "local"
+// and none of them produces a local Ref. Only newLocalRef sets the flag.
+func TestLocalSentinel_OnlyNewLocalRefMarksLocal(t *testing.T) {
+	parsed := []struct {
+		name string
+		fn   func() (Ref, error)
+	}{
+		{"ParseRef slug", func() (Ref, error) { return ParseRef("local/abc1234#1") }},
+		{"ParseRef URL", func() (Ref, error) { return ParseRef("https://github.com/local/abc1234/pull/1") }},
+		{"RefFromParts", func() (Ref, error) { return RefFromParts("local", "abc1234", "1") }},
 	}
-	if got, err := ParseRef("https://github.com/local/abc1234/pull/1"); err == nil {
-		t.Errorf("ParseRef (URL form) accepted the reserved sentinel: %+v", got)
-	}
-	if got, err := RefFromParts("local", "abc1234", "1"); err == nil {
-		t.Errorf("RefFromParts accepted the reserved sentinel: %+v", got)
+	for _, tc := range parsed {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.fn()
+			if err != nil {
+				t.Fatalf("%s rejected a real owner named %q: %v", tc.name, localOwnerSentinel, err)
+			}
+			if expect := (Ref{Owner: "local", Repo: "abc1234", Number: 1}); got != expect {
+				t.Errorf("%s = %+v, want %+v", tc.name, got, expect)
+			}
+			if got.IsLocal() {
+				t.Errorf("%s produced a LOCAL ref from external input — the Codex "+
+					"sandbox widening and PostReview refusal both key off this", tc.name)
+			}
+		})
 	}
 
-	// The internal round-trip route still works — breadcrumb reload depends on it.
-	got, err := parseRefAllowingLocal("local/abc1234#1")
-	if err != nil {
-		t.Fatalf("parseRefAllowingLocal unexpected error: %v", err)
+	if !newLocalRef("abc1234def").IsLocal() {
+		t.Error("newLocalRef must produce a local Ref")
 	}
-	if expect := (Ref{Owner: "local", Repo: "abc1234", Number: 1}); got != expect {
-		t.Errorf("parseRefAllowingLocal = %+v, want %+v", got, expect)
-	}
-	if !got.IsLocal() {
-		t.Error("a breadcrumb-reloaded local Ref must still report IsLocal()")
-	}
+}
+
+// mustLocalRef builds a local Ref with an explicit display identity, for tests
+// that need Repo/Number values newLocalRef's oid derivation cannot produce.
+//
+// It exists because a bare Ref{Owner: "local", …} literal is NOT local: the
+// locality flag is unexported and a field-by-field build silently drops it.
+// Every in-package test that needs a local Ref goes through here or
+// newLocalRef — nothing else can make one.
+func mustLocalRef(repo string, number int) Ref {
+	return Ref{Owner: localOwnerSentinel, Repo: repo, Number: number}.asLocal()
 }

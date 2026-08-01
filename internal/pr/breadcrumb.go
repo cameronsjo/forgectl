@@ -25,6 +25,10 @@ type Breadcrumb struct {
 	Ref       string    `json:"ref"` // canonical "owner/repo#N"
 	Agent     string    `json:"agent"`
 	CreatedAt time.Time `json:"createdAt"`
+	// Local persists Ref.local, which Ref's own string form cannot carry.
+	// Omitted when false so a remote session's breadcrumb is byte-identical
+	// to what earlier versions wrote.
+	Local bool `json:"local,omitempty"`
 }
 
 // breadcrumbFilename derives a stable, filesystem-safe name from the ref and
@@ -107,10 +111,7 @@ func validateBreadcrumb(bc Breadcrumb) error {
 	if bc.Ref == "" {
 		return fmt.Errorf("missing ref")
 	}
-	// parseRefAllowingLocal, not ParseRef: this re-parses a Ref this package
-	// wrote to its own sessions dir, and a local session's breadcrumb carries
-	// the reserved owner legitimately.
-	if _, err := parseRefAllowingLocal(bc.Ref); err != nil {
+	if _, err := ParseRef(bc.Ref); err != nil {
 		return fmt.Errorf("malformed ref %q: %w", bc.Ref, err)
 	}
 	if bc.CreatedAt.IsZero() {

@@ -246,8 +246,8 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 // "local/<oid>" identity — posting against it would fire an unintended
 // `gh pr review` network call, breaking the offline guarantee `pr local`
 // exists to provide. Ref.IsLocal() is the reload-safe predicate (persisted
-// via Ref.Owner) — it still catches a reload-reconstituted Session, e.g.
-// from a future verb built on the loadSession pattern.
+// via the breadcrumb's local flag) — it still catches a reload-reconstituted
+// Session, e.g. from a future verb built on the loadSession pattern.
 //
 // It returns whether a post actually fired.
 func (c *Client) PostReview(ctx context.Context, sess Session, review string, headless bool) (posted bool, err error) {

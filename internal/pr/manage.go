@@ -47,11 +47,14 @@ func (c *Client) loadSession(path string) (Session, error) {
 	if err != nil {
 		return Session{}, err
 	}
-	// Permissive variant: a local session's breadcrumb legitimately carries the
-	// reserved owner (see localOwnerSentinel).
-	ref, err := parseRefAllowingLocal(bc.Ref)
+	ref, err := ParseRef(bc.Ref)
 	if err != nil {
 		return Session{}, fmt.Errorf("breadcrumb ref: %w", err)
+	}
+	// Locality cannot ride the ref string (owner "local" is only a display
+	// value); the breadcrumb's own flag is what restores it.
+	if bc.Local {
+		ref = ref.asLocal()
 	}
 	return Session{
 		Ref:       ref,

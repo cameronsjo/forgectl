@@ -125,6 +125,8 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 		Ref:       ref.String(),
 		Agent:     opts.Agent,
 		CreatedAt: sess.CreatedAt,
+		// Local stays false: this is a remote PR. The zero value is the
+		// deliberate answer here, not an omission.
 	}
 	path, err := writeBreadcrumb(c.sessionsDir, ref, bc)
 	if err != nil {
