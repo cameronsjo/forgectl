@@ -382,8 +382,30 @@ func TestServer_ShellHasNoInlineScript(t *testing.T) {
 	}
 }
 
-// assetRef captures the value of every src= and href= attribute in the shell.
-var assetRef = regexp.MustCompile(`(?i)\s(?:src|href)="([^"]*)"`)
+// assetRef captures the value of every src= and href= attribute in the shell,
+// in all three HTML quoting forms.
+//
+// Matching only double-quoted values would make this test quietly selective:
+// a single-quoted or unquoted reference added later would not match, so it
+// would never be examined and the test would still pass. The alternation makes
+// "not matched" mean "not a reference" rather than "not a form we happen to
+// parse". Group 1 is the raw value with any quotes, and groups 2/3/4 are the
+// double-quoted, single-quoted, and bare contents respectively.
+var assetRef = regexp.MustCompile(`(?i)\s(?:src|href)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))`)
+
+// assetRefValue pulls the unquoted value out of an assetRef match, choosing the
+// branch by how the raw match starts rather than by "first non-empty group" —
+// the latter would mis-handle a legitimately empty value like href="".
+func assetRefValue(ref []string) string {
+	switch {
+	case strings.HasPrefix(ref[1], `"`):
+		return ref[2]
+	case strings.HasPrefix(ref[1], "'"):
+		return ref[3]
+	default:
+		return ref[4]
+	}
+}
 
 // TestServer_ShellReferencesOnlySameOriginAssets pins the other half of the
 // policy: default-src 'self' means an absolute or protocol-relative URL in the
@@ -404,8 +426,10 @@ func TestServer_ShellReferencesOnlySameOriginAssets(t *testing.T) {
 				t.Fatalf("no src=/href= references found in %s — the shell links stylesheets and scripts, so this assertion is no longer testing what it thinks it is", path)
 			}
 			for _, ref := range refs {
-				got := ref[1]
+				got := assetRefValue(ref)
 				switch {
+				case got == "":
+					// href="" is a same-document reference; it cannot be off-origin.
 				case strings.HasPrefix(got, "//"):
 					t.Errorf("protocol-relative reference %q in %s: it inherits the page's scheme but not its origin, so it is off-origin and default-src 'self' blocks it", got, path)
 				case strings.Contains(got, "://"):

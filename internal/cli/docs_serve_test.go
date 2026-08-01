@@ -225,7 +225,7 @@ func TestRunDocsServe_CrossSiteRequest_Rejected403(t *testing.T) {
 	url := waitForOpenedURL(t, fake)
 	client := &http.Client{Timeout: 2 * time.Second}
 
-	get := func(t *testing.T, header string) int {
+	get := func(t *testing.T, header string) (int, http.Header) {
 		t.Helper()
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
@@ -238,15 +238,27 @@ func TestRunDocsServe_CrossSiteRequest_Rejected403(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET %s: %v", url, err)
 		}
-		resp.Body.Close() //nolint:errcheck // only the status code is under test
-		return resp.StatusCode
+		resp.Body.Close() //nolint:errcheck // only the status and headers are under test
+		return resp.StatusCode, resp.Header
 	}
 
-	if got := get(t, "cross-site"); got != http.StatusForbidden {
-		t.Errorf("GET %s with Sec-Fetch-Site: cross-site: status = %d, want %d — the running server must reject a request another origin's page initiated, which means RejectCrossSite has to be in runDocsServe's middleware chain", url, got, http.StatusForbidden)
+	code, headers := get(t, "cross-site")
+	if code != http.StatusForbidden {
+		t.Errorf("GET %s with Sec-Fetch-Site: cross-site: status = %d, want %d — the running server must reject a request another origin's page initiated, which means RejectCrossSite has to be in runDocsServe's middleware chain", url, code, http.StatusForbidden)
 	}
-	if got := get(t, ""); got != http.StatusOK {
-		t.Errorf("GET %s with no Sec-Fetch-Site header: status = %d, want %d — a client that sends no fetch metadata (curl, the Go http.Client behind `docs open`) must still be served", url, got, http.StatusOK)
+	// A rejected request never reaches the docs handler, so this header can only
+	// be here if SecurityHeaders is wrapped around the CHAIN as well. Without
+	// that, the 401s and 403s the chain generates would be the only responses in
+	// the server carrying no CSP.
+	if got := headers.Get("Content-Security-Policy"); got == "" {
+		t.Error("the 403 from the cross-site gate carries no Content-Security-Policy — SecurityHeaders must wrap the middleware chain, not just the docs handler the rejected request never reaches")
+	}
+	if got := headers.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("the 403 from the cross-site gate has X-Content-Type-Options = %q, want %q", got, "nosniff")
+	}
+
+	if code, _ := get(t, ""); code != http.StatusOK {
+		t.Errorf("GET %s with no Sec-Fetch-Site header: status = %d, want %d — a client that sends no fetch metadata (curl, the Go http.Client behind `docs open`) must still be served", url, code, http.StatusOK)
 	}
 
 	cancel()

@@ -61,10 +61,15 @@ const locatePath = "/api/locate"
 //     it matched) is closed by img-src 'self', not by style-src.
 //   - img-src 'self' data: — the one behavior CHANGE in this policy. A doc
 //     referencing a remote image stops loading it (data: URIs still work, which
-//     is what inline SVG and mermaid need). No doc in this repo does that, and
-//     it closes the tracking-beacon path render.go documents as open by design
-//     under bluemonday's UGCPolicy: opening a document should not tell a third
-//     party you opened it.
+//     is what inline SVG and mermaid need). Judge that against the SERVED
+//     corpus, not this repo: `docs serve` indexes whatever roots the operator
+//     points it at (resolveDocsRoots), so a README with shields.io badges or a
+//     doc embedding a remote diagram will render with those images broken.
+//     That is the accepted cost of closing the tracking-beacon path render.go
+//     documents as open by design under bluemonday's UGCPolicy — opening a
+//     local document should not tell a third party you opened it. An operator
+//     who needs remote images wants a policy knob, not a silently wider
+//     default.
 //   - font-src 'self' — named explicitly rather than left to default-src so a
 //     later embedded font works without a policy edit, and so a remote font
 //     (another beacon, and a fingerprinting surface) cannot slip in with it.
@@ -157,12 +162,15 @@ func handleLocate(store *Store) http.HandlerFunc {
 // the docs package's sole exported handler constructor — security POLICY (Host
 // allowlist, bearer token, anything a caller might configure differently) is the
 // caller's job via internal/httpsrv middleware wrapped around this handler.
-// The securityHeaders pair is different: X-Content-Type-Options and
+// The SecurityHeaders pair is different: X-Content-Type-Options and
 // Content-Security-Policy are fixed, no-config hardening defaults for every
 // response this handler ever produces — there is no deployment of this handler
 // that wants them off, and the CSP is coupled to the markup and assets this
 // package itself emits — so they are applied here rather than pushed out as an
-// opt-in caller concern.
+// opt-in caller concern. "Every response THIS HANDLER produces" is the exact
+// claim: a request the caller's middleware rejects before it arrives here is
+// not covered, which is why SecurityHeaders is exported and the caller applies
+// it outermost as well.
 //
 // A nil events Broker disables live reload — the stream endpoint 404s and
 // nothing else changes.
@@ -185,7 +193,7 @@ func NewHandler(store *Store, events *Broker) http.Handler {
 	mux.HandleFunc("GET /doc/{root}/{rest...}", handleDoc(store))
 	mux.HandleFunc("GET /{$}", handleIndexRoot(store))
 
-	return securityHeaders(mux)
+	return SecurityHeaders(mux)
 }
 
 // handleEvents streams reload notifications to one browser as Server-Sent
@@ -251,11 +259,20 @@ func handleEvents(events *Broker) http.HandlerFunc {
 	}
 }
 
-// securityHeaders sets the fixed, no-configuration response headers every
+// SecurityHeaders sets the fixed, no-configuration response headers every
 // response this handler produces carries. It wraps the whole mux rather than
 // the shell renderer alone, so an asset, a JSON payload, and a 404 are covered
 // on the same terms as a rendered doc — a header that protects only the page a
 // developer remembered is the shape that fails later.
+//
+// It is exported because NewHandler is not the outermost layer in a real
+// server: the caller wraps this handler in its own security middleware chain,
+// and a request REJECTED there (a 403 from the Host allowlist or the cross-site
+// gate, a 401 from the token check) never reaches this handler at all, so it
+// would carry no headers. The caller applies this as the outermost middleware
+// too, which makes "every response" literally true. Setting the same headers
+// twice is idempotent, and keeping it inside NewHandler as well means the
+// handler is still self-sufficient for any caller that wraps nothing.
 //
 // X-Content-Type-Options: nosniff stops a browser from MIME-sniffing a response
 // body into a different content type than the Content-Type header declares (the
@@ -266,7 +283,7 @@ func handleEvents(events *Broker) http.HandlerFunc {
 //
 // Content-Security-Policy is the second layer behind render.go's sanitizer; see
 // contentSecurityPolicy above for why each directive is what it is.
-func securityHeaders(next http.Handler) http.Handler {
+func SecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Security-Policy", contentSecurityPolicy)

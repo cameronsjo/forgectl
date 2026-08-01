@@ -84,12 +84,37 @@ func HostAllowlist(allowed []string) func(http.Handler) http.Handler {
 // in this codebase omits Sec-Fetch-Site: the Go http.Client behind
 // docspkg.LocateDoc, the curl command `forgectl docs open` prints for a
 // token-protected reader (internal/cli/docs_open.go), and an operator's own
-// curl. Denying on absence would break `forgectl docs open` outright and buy
-// nothing, because the header is a browser-supplied signal and browsers always
-// supply it (Chrome 76+, Firefox 90+, Safari 16.4+). A request arriving
-// without it is one no browser sent, which is exactly the traffic this gate is
-// not aimed at. That is why the check is an equality test against
-// "cross-site" and not a "is this value trusted?" test.
+// curl. Denying on absence would break `forgectl docs open` outright.
+//
+// This gate is BEST-EFFORT, and the reason is the absent-allows rule above
+// meeting a limit in how browsers emit the header. Fetch Metadata headers
+// (Sec-Fetch-*) are attached ONLY to requests whose URL is potentially
+// trustworthy. http://127.0.0.1:PORT qualifies under the localhost exception,
+// so on the default loopback bind a browser always sends it. A non-loopback
+// plain-HTTP bind — what --addr or [docs].addr produce for a LAN or Tailscale
+// address — does NOT qualify, so the browser sends NOTHING and a genuinely
+// cross-site request reaches this check indistinguishable from curl. Old
+// Safari (before 16.4) omits the header everywhere. So in the highest-exposure
+// mode this check is inert, and it must not be read as the control that makes
+// an exposed bind safe: what covers that case is the bearer token
+// resolveToken forces off loopback (internal/cli/docs_serve.go), which is
+// caller-side policy this package deliberately does not own. Treat this as
+// defense in depth for the loopback case, never as the boundary.
+//
+// The Origin check is the complement, and it is why both live here. Origin is
+// a forbidden header name, so a page cannot forge or suppress it, and it rides
+// every CORS-mode request and every non-GET request REGARDLESS of whether the
+// URL is potentially trustworthy — which is exactly the gap above. It does not
+// replace the Sec-Fetch-Site check, because a no-cors GET subresource load (an
+// <img> or a no-cors fetch, the cheapest cross-site reach) carries no Origin at
+// all. Each covers what the other misses; keep both.
+//
+// Comparing Origin against this request's OWN scheme+host is only sound
+// because HostAllowlist runs upstream. Without it, a rebinding attacker
+// controls the Host header, so the attacker's Origin and the reconstructed
+// origin would agree and the comparison would pass. The allowlist is what
+// pins r.Host to a value the operator sanctioned; do not wire this middleware
+// without it.
 //
 // same-site is NOT rejected, and that is a chosen non-goal. A browser's notion
 // of "site" excludes the port, so another loopback listener — a page served
@@ -99,12 +124,29 @@ func HostAllowlist(allowed []string) func(http.Handler) http.Handler {
 // the Host allowlist defend. The scope here is the remote web page, not the
 // local one.
 //
+// There is deliberately NO carve-out for top-level navigation. The canonical
+// Fetch Metadata resource-isolation policy allows a cross-site request when it
+// is a GET navigation to a document, on the theory that following a link
+// should work. This reader rejects it: nothing off-site has a reason to link
+// into a local docs server, and a 403 on a navigation is a visible, harmless
+// failure while the alternative keeps the class half-open. `forgectl docs
+// open` and --open are unaffected — an OS-level browser open is not a
+// navigation FROM a page, so it arrives as Sec-Fetch-Site: none.
+//
 // It closes the CLASS rather than one route. Applied around the whole handler,
 // a future mutating endpoint or a later CORS response header inherits the
 // rejection without its author having to remember this exists.
 func RejectCrossSite() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// A present-but-foreign Origin is the strongest signal available and
+			// the one that survives a non-trustworthy URL. "null" (a sandboxed
+			// iframe, some redirect chains) is not this server's origin either,
+			// so it lands here too — the safe direction.
+			if origin := r.Header.Get("Origin"); origin != "" && !strings.EqualFold(origin, requestOrigin(r)) {
+				http.Error(w, "forbidden origin", http.StatusForbidden)
+				return
+			}
 			// An absent header is the empty string, which is never equal-fold to
 			// "cross-site" — so "present AND cross-site" is the whole condition.
 			if strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
@@ -114,6 +156,22 @@ func RejectCrossSite() func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// requestOrigin reconstructs the origin a browser would serialize for a page
+// served by THIS request's own URL — scheme://host[:port] — so an Origin header
+// can be compared against it.
+//
+// The scheme comes from r.TLS rather than any X-Forwarded-Proto: forgectl
+// serves plain HTTP and terminates its own connections, so the connection's own
+// state is the truth, and trusting a forwarded header would let a client pick
+// the scheme it is compared against.
+func requestOrigin(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
 }
 
 // BearerToken returns middleware that responds 401 to any request whose

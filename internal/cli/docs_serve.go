@@ -119,13 +119,21 @@ func resolveToken(tokenFlag, bindAddr string) (string, error) {
 // around the docs handler, and serves until the command's context is canceled
 // (Ctrl-C/SIGTERM) or the server itself fails to start.
 //
-// Chain order is deliberate: Host allowlist, then cross-site rejection, then
-// the bearer token when one is required. The two header checks are pure string
-// comparisons and deny the requests that should never have arrived at all, so
-// they run before the token check hashes anything. Putting authentication last
-// also means a cross-site probe gets 403 (this origin may not talk to me)
-// rather than 401 (send me credentials), which is both the truer answer and
-// the one that tells a hostile page less.
+// Chain order is deliberate: security headers, Host allowlist, cross-site
+// rejection, then the bearer token when one is required. The two header checks
+// are pure string comparisons and deny the requests that should never have
+// arrived at all, so they run before the token check hashes anything. Putting
+// authentication last also means a cross-site probe gets 403 (this origin may
+// not talk to me) rather than 401 (send me credentials), which is both the
+// truer answer and the one that tells a hostile page less.
+//
+// SecurityHeaders sits OUTERMOST, ahead of every gate, because a rejected
+// request never reaches the docs handler that would otherwise set them — so
+// without this the 401s and 403s produced right here would be the only
+// responses in the whole server carrying no CSP and no nosniff. The docs
+// handler applies it again on the way past; setting the same fixed headers
+// twice is idempotent, and having it in both places means neither the handler
+// nor the chain depends on the other remembering.
 func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addrFlag string, openFlag bool, tokenFlag string) error {
 	bindAddr := addrFlag
 	if bindAddr == "" {
@@ -162,6 +170,7 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 	}
 
 	middleware := []func(http.Handler) http.Handler{
+		docspkg.SecurityHeaders,
 		httpsrv.HostAllowlist(allowedHosts(bindAddr)),
 		httpsrv.RejectCrossSite(),
 	}
