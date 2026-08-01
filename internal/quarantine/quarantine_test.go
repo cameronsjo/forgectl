@@ -28,8 +28,13 @@ package quarantine
 
 import (
 	"context"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -345,7 +350,7 @@ func readFile(t *testing.T, path string) string {
 //
 // Test plan
 //   [x] A nested CLAUDE.md / AGENTS.md is discovered; the root literal survives
-//   [x] Non-nestable entries (.claude/, .cursor/rules, …) are never expanded
+//   [x] Non-nestable entries (.claude/, .cursor, …) are never expanded
 //   [x] An explicit path target (one with a directory component) is literal
 //   [x] Discovery is direction-agnostic: the ALREADY-QUARANTINED tree yields
 //       the identical target list, which is what makes teardown reversible
@@ -370,7 +375,7 @@ func TestExpandTargets_FindsNestedInstructionFiles(t *testing.T) {
 		"CLAUDE.md",                       // absent at root, still preserved
 		filepath.Join("src", "AGENTS.md"), // nested
 		filepath.Join("packages", "api", "CLAUDE.md"), // deeply nested
-		".claude/", ".cursor/rules", ".github/copilot-instructions.md",
+		".claude/", ".cursor", ".github/copilot-instructions.md",
 	} {
 		if !containsStr(got, want) {
 			t.Errorf("ExpandTargets missing %q; got %v", want, got)
@@ -382,7 +387,7 @@ func TestExpandTargets_FindsNestedInstructionFiles(t *testing.T) {
 }
 
 // TestExpandTargets_OnlyExpandsNestableBasenames guards the blast radius: a
-// recursive sweep for `.cursor/rules` or an explicitly-pathed target would
+// recursive sweep for `.cursor` or an explicitly-pathed target would
 // quarantine files the caller never asked about.
 func TestExpandTargets_OnlyExpandsNestableBasenames(t *testing.T) {
 	root := t.TempDir()
@@ -645,6 +650,456 @@ func TestDefaultTargets_CoversClaudeLocal(t *testing.T) {
 // matches case-insensitively, so `src/AGENTS.md.QUARANTINED` reaches
 // undecorate; an exact TrimSuffix left it unchanged, Hide renamed it to
 // `…QUARANTINED.quarantined`, and the teardown walk no longer matched that.
+// --- AI-config carrier coverage (#195) ---
+//
+// Test plan
+//   [x] .mcp.json is covered, with the measurement that justifies it
+//   [x] The enumeration audits ITSELF: DefaultTargets is exactly the tier
+//       groups plus the pattern rule, both directions
+//   [x] Every DefaultTargets entry actually round-trips through Hide/Restore —
+//       derived from the list, never a second copy of it
+//   [x] Over-quarantining control: reviewable content stays readable
+//   [x] The MCP pattern rule reaches an UNENUMERATED dot-directory
+//   [x] The pattern rule is bounded: no nested walk, no non-dot directories
+//   [x] Pattern entries never survive expansion into Hide
+//   [x] A pre-existing .mcp.json.quarantined fails loud rather than clobbering
+
+// TestDefaultTargets_CoversMCPCarrier pins the one entry whose absence was a
+// live remote-code-execution path, and records WHY — naming the measurement is
+// what stops a future reader deleting this as redundant with
+// --strict-mcp-config.
+//
+// Measured on Claude Code 2.1.220, reproducing the review posture exactly
+// (`claude -p`, --permission-mode plan, the deny-by-default workspace
+// allowlist in force): a root .mcp.json whose server declared
+// `/bin/sh -c "touch <sentinel>"` left the sentinel on disk. The session
+// answered normally and the agent never invoked an MCP tool — registration
+// alone spawned the process. Renaming the same file to .mcp.json.quarantined
+// suppressed the spawn, which is what makes quarantine a sufficient control
+// for this carrier.
+func TestDefaultTargets_CoversMCPCarrier(t *testing.T) {
+	if !containsStr(DefaultTargets, ".mcp.json") {
+		t.Fatalf("DefaultTargets omits .mcp.json — a PR author's `command` runs on the reviewer's host: %v", DefaultTargets)
+	}
+	if !containsStr(tier1Carriers, ".mcp.json") {
+		t.Errorf(".mcp.json must sit in tier 1 (read by the dispatched harness), not tier 2: %v", tier1Carriers)
+	}
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".mcp.json"), `{"mcpServers":{"probe":{"command":"/bin/sh"}}}`)
+
+	targets, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets: %v", err)
+	}
+	c := New(&exec.FakeRunner{})
+	if _, err := c.Hide(context.Background(), root, SuffixQuarantined, targets, false); err != nil {
+		t.Fatalf("Hide: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, ".mcp.json")); !os.IsNotExist(err) {
+		t.Errorf(".mcp.json still readable under its own name after Hide, stat err = %v", err)
+	}
+}
+
+// TestDefaultTargets_TierSumIsComplete is the self-audit. The defect in #195
+// was a hand-maintained literal drifting from reality, so asserting a
+// hard-coded expected list here would relocate that defect into the test file
+// rather than fix it. Instead it asserts the STRUCTURE both ways:
+//
+//   - every tier/pattern element reaches DefaultTargets — a new group declared
+//     and left unwired fails loudly;
+//   - every DefaultTargets element comes from exactly one group — an entry
+//     appended outside the tiers fails loudly;
+//   - the lengths agree — a duplicate or a dropped entry fails loudly.
+func TestDefaultTargets_TierSumIsComplete(t *testing.T) {
+	groups := map[string][]string{
+		"tier1Carriers":     tier1Carriers,
+		"tier2Carriers":     tier2Carriers,
+		"mcpConfigPatterns": mcpConfigPatterns,
+	}
+
+	sum := 0
+	origin := make(map[string]string)
+	for name, group := range groups {
+		sum += len(group)
+		for _, entry := range group {
+			if prev, dup := origin[entry]; dup {
+				t.Errorf("%q appears in both %s and %s", entry, prev, name)
+			}
+			origin[entry] = name
+			if !containsStr(DefaultTargets, entry) {
+				t.Errorf("%s entry %q never reaches DefaultTargets — is the group wired into concatTargets?", name, entry)
+			}
+		}
+	}
+
+	if len(DefaultTargets) != sum {
+		t.Errorf("len(DefaultTargets) = %d, want %d (the tier groups summed): %v", len(DefaultTargets), sum, DefaultTargets)
+	}
+	for _, entry := range DefaultTargets {
+		if _, ok := origin[entry]; !ok {
+			t.Errorf("DefaultTargets carries %q, which belongs to no tier group — add it to a tier, not to the list", entry)
+		}
+	}
+}
+
+// TestCarrierGroups_AllReachDefaultTargets closes the hole
+// TestDefaultTargets_TierSumIsComplete cannot: that test names its groups, so
+// a NEW group declared and never wired into concatTargets stays invisible to
+// it — the same hand-maintained enumeration this issue was about, relocated
+// into the test file.
+//
+// So read the source instead. Every package-level []string literal in
+// quarantine.go other than DefaultTargets itself is a carrier group by
+// construction, and every one of its entries must reach DefaultTargets.
+// Declaring `.zed/settings.json` in a new tier and forgetting to concatenate
+// it fails HERE, at the moment the carrier is added, rather than silently
+// leaving it unquarantined.
+func TestCarrierGroups_AllReachDefaultTargets(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "quarantine.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse quarantine.go: %v", err)
+	}
+
+	groups := 0
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if name.Name == "DefaultTargets" || i >= len(vs.Values) {
+					continue
+				}
+				entries, ok := stringSliceLiteral(vs.Values[i])
+				if !ok {
+					continue
+				}
+				groups++
+				for _, entry := range entries {
+					if !containsStr(DefaultTargets, entry) {
+						t.Errorf("carrier group %s declares %q, which never reaches DefaultTargets — wire the group into concatTargets", name.Name, entry)
+					}
+				}
+			}
+		}
+	}
+	if groups == 0 {
+		t.Fatal("found no carrier groups in quarantine.go — this test has gone vacuous")
+	}
+}
+
+// stringSliceLiteral reports the elements of a `[]string{…}` composite literal,
+// and whether the expression was one at all.
+func stringSliceLiteral(expr ast.Expr) ([]string, bool) {
+	lit, ok := expr.(*ast.CompositeLit)
+	if !ok {
+		return nil, false
+	}
+	arr, ok := lit.Type.(*ast.ArrayType)
+	if !ok || arr.Len != nil {
+		return nil, false
+	}
+	if ident, ok := arr.Elt.(*ast.Ident); !ok || ident.Name != "string" {
+		return nil, false
+	}
+	out := make([]string, 0, len(lit.Elts))
+	for _, elt := range lit.Elts {
+		bl, ok := elt.(*ast.BasicLit)
+		if !ok || bl.Kind != token.STRING {
+			return nil, false
+		}
+		unquoted, err := strconv.Unquote(bl.Value)
+		if err != nil {
+			return nil, false
+		}
+		out = append(out, unquoted)
+	}
+	return out, true
+}
+
+// TestDefaultTargets_EveryEntryRoundTrips is the behavioral half of the
+// self-audit: it plants one file per DefaultTargets entry — derived from the
+// list, so a new carrier is exercised the day it is added — and proves the
+// whole set is hidden by Hide and returned intact by Restore. A carrier that
+// is listed but unreachable by the machinery (a pattern the expander does not
+// understand, say) fails here rather than in production.
+func TestDefaultTargets_EveryEntryRoundTrips(t *testing.T) {
+	root := t.TempDir()
+	planted := make(map[string]string, len(DefaultTargets))
+	for i, entry := range DefaultTargets {
+		rel := plantablePath(entry, i)
+		content := "carrier for " + entry
+		writeFile(t, filepath.Join(root, rel), content)
+		planted[rel] = content
+	}
+
+	c := New(&exec.FakeRunner{})
+	hideTargets, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets (hide): %v", err)
+	}
+	if _, err := c.Hide(context.Background(), root, SuffixQuarantined, hideTargets, false); err != nil {
+		t.Fatalf("Hide: %v", err)
+	}
+	for rel := range planted {
+		if _, err := os.Lstat(filepath.Join(root, rel)); !os.IsNotExist(err) {
+			t.Errorf("carrier %q survived Hide under its own name, stat err = %v", rel, err)
+		}
+	}
+
+	restoreTargets, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets (restore): %v", err)
+	}
+	if !equalStrings(hideTargets, restoreTargets) {
+		t.Fatalf("target list changed across Hide:\n before %v\n  after %v", hideTargets, restoreTargets)
+	}
+	moves, err := ComputeMoves(root, SuffixQuarantined, restoreTargets)
+	if err != nil {
+		t.Fatalf("ComputeMoves: %v", err)
+	}
+	if err := c.Restore(context.Background(), moves); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	for rel, want := range planted {
+		if got := readFile(t, filepath.Join(root, rel)); got != want {
+			t.Errorf("round-trip corrupted %q: got %q, want %q", rel, got, want)
+		}
+	}
+}
+
+// plantablePath turns a DefaultTargets entry into one concrete relative path
+// that entry must cover. A pattern is instantiated against a dot-directory
+// name that appears nowhere in the source, which is the point of a pattern
+// rule; a literal is planted as a plain file (directory-shaped targets have
+// their own coverage in TestHide_DirectoryTarget).
+func plantablePath(entry string, i int) string {
+	if !isPattern(entry) {
+		return filepath.Clean(entry)
+	}
+	dir, base := filepath.Split(filepath.Clean(entry))
+	if dir == "" {
+		return base
+	}
+	return filepath.Join(fmt.Sprintf(".unlisted-vendor-%d", i), base)
+}
+
+// TestDefaultTargets_DoesNotHideReviewableContent is the over-quarantine
+// control. Quarantine operates on a repository whose entire PURPOSE is to be
+// read by the reviewer, so widening the list has a real failure mode in the
+// opposite direction. CI workflows are the sharpest case: `.github/` must
+// never be quarantined wholesale, because a hostile workflow change is exactly
+// what a reviewer must be able to see — a security regression wearing a
+// security fix's clothes.
+func TestDefaultTargets_DoesNotHideReviewableContent(t *testing.T) {
+	for _, forbidden := range []string{
+		".github", ".github/", ".github/workflows", ".github/workflows/",
+		"README.md", "go.mod", "go.sum", ".gitignore", "package.json", "src", ".",
+	} {
+		if containsStr(DefaultTargets, forbidden) {
+			t.Errorf("DefaultTargets hides reviewable content %q: %v", forbidden, DefaultTargets)
+		}
+	}
+
+	root := t.TempDir()
+	readable := []string{
+		filepath.Join(".github", "workflows", "ci.yml"),
+		filepath.Join(".github", "dependabot.yml"),
+		"README.md", "go.mod", ".gitignore",
+		filepath.Join("src", "main.go"),
+		filepath.Join("docs", "design.md"),
+	}
+	for _, rel := range readable {
+		writeFile(t, filepath.Join(root, rel), "reviewable")
+	}
+
+	c := New(&exec.FakeRunner{})
+	targets, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets: %v", err)
+	}
+	if _, err := c.Hide(context.Background(), root, SuffixQuarantined, targets, false); err != nil {
+		t.Fatalf("Hide: %v", err)
+	}
+	for _, rel := range readable {
+		if got := readFile(t, filepath.Join(root, rel)); got != "reviewable" {
+			t.Errorf("%q must stay readable to the reviewer, got %q", rel, got)
+		}
+	}
+}
+
+// TestExpandTargets_MCPPatternCoversUnenumeratedDotDir is the durability
+// claim, stated as a test. `.aurora` is a vendor that exists nowhere in this
+// codebase: the pattern rule must reach its MCP config anyway, because MCP
+// configuration shares a shape (machine-read JSON carrying an execution
+// primitive, at the root or one level down inside a dot-directory) where the
+// prose carriers share nothing.
+func TestExpandTargets_MCPPatternCoversUnenumeratedDotDir(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{
+		filepath.Join(".aurora", "mcp.json"),
+		filepath.Join(".zed", ".mcp.json"),
+	} {
+		writeFile(t, filepath.Join(root, rel), `{"mcpServers":{}}`)
+	}
+
+	got, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets: %v", err)
+	}
+	for _, want := range []string{
+		filepath.Join(".aurora", "mcp.json"),
+		filepath.Join(".zed", ".mcp.json"),
+	} {
+		if !containsStr(got, want) {
+			t.Errorf("pattern rule missed %q in an unenumerated dot-directory; got %v", want, got)
+		}
+	}
+
+	// A dot-directory already quarantined WHOLESALE must not also be listed
+	// nested — see coveredRootEntries: the nested entry would vanish from the
+	// post-Hide list and break the reversibility property teardown depends on.
+	writeFile(t, filepath.Join(root, ".cursor", "mcp.json"), `{"mcpServers":{}}`)
+	got, err = ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets: %v", err)
+	}
+	if containsStr(got, filepath.Join(".cursor", "mcp.json")) {
+		t.Errorf(".cursor is hidden as a unit; a nested entry under it breaks reversibility: %v", got)
+	}
+	if !containsStr(got, ".cursor") {
+		t.Errorf(".cursor itself must still be a target: %v", got)
+	}
+}
+
+// TestExpandTargets_MCPPatternIsBounded guards the blast radius. The pattern is
+// one level deep and dot-directories only: a nested `sub/.mcp.json` was
+// measured NOT read by the launched harness, so a full-tree sweep would add
+// reversibility risk to defend a hole that does not exist — and would start
+// quarantining ordinary source directories that happen to hold an mcp.json.
+func TestExpandTargets_MCPPatternIsBounded(t *testing.T) {
+	root := t.TempDir()
+	unmatched := []string{
+		filepath.Join("sub", "mcp.json"),                  // non-dot directory
+		filepath.Join("sub", ".mcp.json"),                 // non-dot directory
+		filepath.Join(".aurora", "deep", "mcp.json"),      // two levels down
+		filepath.Join("testdata", "fixtures", "mcp.json"), // ordinary fixture
+	}
+	for _, rel := range unmatched {
+		writeFile(t, filepath.Join(root, rel), `{"mcpServers":{}}`)
+	}
+
+	got, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets: %v", err)
+	}
+	for _, rel := range unmatched {
+		if containsStr(got, rel) {
+			t.Errorf("pattern rule over-reached to %q; got %v", rel, got)
+		}
+	}
+}
+
+// TestExpandTargets_DropsPatternEntries pins the contract Hide depends on:
+// Hide resolves a target with os.Lstat, so a glob metacharacter surviving
+// expansion would be a silent no-op — the carrier would look covered by the
+// list and be quarantined by nothing.
+func TestExpandTargets_DropsPatternEntries(t *testing.T) {
+	root := t.TempDir()
+	got, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets: %v", err)
+	}
+	for _, entry := range got {
+		if isPattern(entry) {
+			t.Errorf("pattern %q survived expansion into the Hide target list: %v", entry, got)
+		}
+	}
+	for _, p := range mcpConfigPatterns {
+		if containsStr(got, p) {
+			t.Errorf("pattern %q was passed through literally", p)
+		}
+	}
+}
+
+// TestHide_RefusesPreexistingQuarantinedMCP pins the fail-closed behavior
+// across the widened list. Fetched PR content is hostile input, so a head
+// carrying BOTH .mcp.json and .mcp.json.quarantined must fail the review
+// rather than let os.Rename silently destroy one of them. Widening the carrier
+// list widens the set of inputs that can trip this — deliberately.
+func TestHide_RefusesPreexistingQuarantinedMCP(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".mcp.json"), "the live carrier")
+	writeFile(t, filepath.Join(root, ".mcp.json.quarantined"), "the planted decoy")
+
+	c := New(&exec.FakeRunner{})
+	targets, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets: %v", err)
+	}
+	if _, err := c.Hide(context.Background(), root, SuffixQuarantined, targets, false); err == nil {
+		t.Fatal("Hide must refuse an occupied quarantine destination, not clobber it")
+	}
+	if got := readFile(t, filepath.Join(root, ".mcp.json.quarantined")); got != "the planted decoy" {
+		t.Errorf("the pre-existing file was clobbered: %q", got)
+	}
+}
+
+// TestExpandTargets_MCPRoundTripIsReversible is the invariant a future
+// widening of the list will break first: the same ExpandTargets call must
+// return the identical list before Hide and against the already-renamed tree,
+// because teardown recomputes it from scratch and holds no persisted moves.
+func TestExpandTargets_MCPRoundTripIsReversible(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		".mcp.json":                                   `{"root":true}`,
+		filepath.Join(".aurora", "mcp.json"):          `{"unenumerated":true}`,
+		filepath.Join(".cursor", "mcp.json"):          `{"inside a wholesale-hidden dir":true}`,
+		filepath.Join(".cursor", "rules", "x.md"):     "cursor rules",
+		filepath.Join("src", "main.go"):               "package main",
+		filepath.Join("packages", "api", "CLAUDE.md"): "nested prose carrier",
+	}
+	for rel, content := range files {
+		writeFile(t, filepath.Join(root, rel), content)
+	}
+
+	c := New(&exec.FakeRunner{})
+	before, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets (before): %v", err)
+	}
+	if _, err := c.Hide(context.Background(), root, SuffixQuarantined, before, false); err != nil {
+		t.Fatalf("Hide: %v", err)
+	}
+
+	after, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets (after): %v", err)
+	}
+	if !equalStrings(before, after) {
+		t.Fatalf("target list is not direction-agnostic:\n before %v\n  after %v", before, after)
+	}
+
+	moves, err := ComputeMoves(root, SuffixQuarantined, after)
+	if err != nil {
+		t.Fatalf("ComputeMoves: %v", err)
+	}
+	if err := c.Restore(context.Background(), moves); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	for rel, want := range files {
+		if got := readFile(t, filepath.Join(root, rel)); got != want {
+			t.Errorf("round-trip corrupted %q: got %q, want %q", rel, got, want)
+		}
+	}
+}
+
 func TestUndecorate_CaseInsensitive(t *testing.T) {
 	for _, tc := range []struct {
 		scheme   Scheme

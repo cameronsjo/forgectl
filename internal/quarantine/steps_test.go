@@ -226,3 +226,59 @@ func TestSteps_DefaultGlobsFallBackToDefaultTargets(t *testing.T) {
 		t.Errorf("CLAUDE.md (a DefaultTargets entry) should have been stripped, stat err = %v", err)
 	}
 }
+
+// TestSteps_DefaultTargetsPatternsReachStrip is the destructive half of the
+// carrier work, and the riskier half: `strip` os.RemoveAll's what it matches,
+// where Hide only renames. The MCP pattern rule therefore has to be verified
+// on THIS path too — it resolves through filepath.Glob here rather than
+// through ExpandTargets, a genuinely different resolver.
+//
+// It pins both directions at once: an MCP carrier in an unenumerated
+// dot-directory is destroyed, and the reviewable tree — CI workflows above
+// all — survives. Over-stripping is the failure mode with no undo.
+func TestSteps_DefaultTargetsPatternsReachStrip(t *testing.T) {
+	workspace := t.TempDir()
+	write := func(rel string) string {
+		path := filepath.Join(workspace, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		return path
+	}
+
+	stripped := []string{
+		".mcp.json",
+		filepath.Join(".aurora", "mcp.json"),
+		filepath.Join(".zed", ".mcp.json"),
+	}
+	survives := []string{
+		filepath.Join(".github", "workflows", "ci.yml"),
+		"README.md", "go.mod", ".gitignore",
+		filepath.Join("src", "main.go"),
+		filepath.Join("sub", ".mcp.json"), // non-dot dir: outside the bounded rule
+	}
+	for _, rel := range append(append([]string{}, stripped...), survives...) {
+		write(rel)
+	}
+
+	def := Steps(nil)["strip"]
+	wctx := step.NewContext(nil)
+	wctx.Set("workspace", workspace)
+	if err := def.Runner(context.Background(), &exec.FakeRunner{}, wctx, step.PlanStep{Uses: "strip"}); err != nil {
+		t.Fatalf("strip: %v", err)
+	}
+
+	for _, rel := range stripped {
+		if _, err := os.Stat(filepath.Join(workspace, rel)); !os.IsNotExist(err) {
+			t.Errorf("MCP carrier %q survived strip, stat err = %v", rel, err)
+		}
+	}
+	for _, rel := range survives {
+		if _, err := os.Stat(filepath.Join(workspace, rel)); err != nil {
+			t.Errorf("strip destroyed reviewable content %q: %v", rel, err)
+		}
+	}
+}

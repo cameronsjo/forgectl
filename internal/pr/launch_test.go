@@ -533,6 +533,61 @@ func TestLaunch_LocalSessionWithoutFindingsDirRefused(t *testing.T) {
 	}
 }
 
+// TestLaunchInline_ForcesStrictMCP asserts on the ARGV, not the profile field:
+// the control only exists if the flag reaches the child process.
+//
+// Claude Code discovers project-scoped MCP config against its cwd, and the
+// review's cwd IS the workspace holding the PR author's checkout. A discovered
+// server's `command` + `args` are spawned at session START, before the agent
+// invokes any tool — so --permission-mode plan and the deny-by-default
+// workspace allowlist, which govern which TOOLS the agent may call, both sit
+// downstream of a boundary already crossed. Measured on 2.1.220: with the flag
+// a planted carrier did not spawn; without it, the same carrier did.
+//
+// The flag is forced regardless of the ambient launch config — there is no
+// config surface that can set or clear it (see launch.TestResolve_NeverSetsStrictMCP).
+func TestLaunchInline_ForcesStrictMCP(t *testing.T) {
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
+
+	allowDanger := true
+	cfg := config.Config{Launch: config.LaunchConfig{
+		Defaults: config.LaunchDefaults{
+			Harness: "claude", Model: "sonnet", PermissionMode: "acceptEdits", AllowDanger: &allowDanger,
+		},
+	}}
+
+	// Remote PR head — the exploitable case.
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	prSess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
+	if err := c.Launch(context.Background(), prSess, cfg); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if !contains(fake.Last().Args, "--strict-mcp-config") {
+		t.Errorf("clean-room review must refuse discovered MCP config; argv: %v", fake.Last().Args)
+	}
+
+	// Local review takes the same hardened path and must not lose it.
+	fake2 := &exec.FakeRunner{}
+	c2 := New(fake2, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	localSess := Session{
+		Ref:         Ref{Owner: localOwnerSentinel, Repo: "abc1234", Number: 1},
+		Workspace:   fakeWorkspace(t),
+		Agent:       "claude",
+		FindingsDir: t.TempDir(),
+	}
+	if err := c2.Launch(context.Background(), localSess, cfg); err != nil {
+		t.Fatalf("Launch (local): %v", err)
+	}
+	if !contains(fake2.Last().Args, "--strict-mcp-config") {
+		t.Errorf("local review lost --strict-mcp-config; argv: %v", fake2.Last().Args)
+	}
+}
+
 // TestLaunchInline_DropsAmbientAddDir guards the clean room's scoping. The
 // hardening block clears AllowDanger, PermissionMode, Harness and Model — and
 // must also clear AddDir, because launch.Resolve returns the operator's

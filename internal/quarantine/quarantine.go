@@ -58,16 +58,102 @@ type Move struct {
 	To   string
 }
 
-// DefaultTargets is the canonical list of AI-instruction paths (relative to a
+// tier1Carriers are the AI-config carriers the harness forgectl actually
+// dispatches into a review workspace READS. `claude -p` (internal/pr/launch.go
+// launchInline) is the only harness that ever sees a remote, third-party PR
+// head: Codex is refused for remote heads by CheckAgentForRef, and the
+// escalation path is unwired. A gap in this tier is exploitable by
+// `forgectl pr <url>` today.
+//
+// These are prose/state carriers with no shared directory or naming
+// convention, so the tier is necessarily a denylist. The MCP class, which does
+// share a shape, is handled by mcpConfigPatterns instead.
+var tier1Carriers = []string{
+	"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude/",
+	// MEASURED (Claude Code 2.1.220): a root .mcp.json planted in a review
+	// workspace made the harness spawn the PR author's `command` + `args` at
+	// session START — before the agent invoked any tool, with `--permission-mode
+	// plan` and the deny-by-default workspace allowlist both in force. Those
+	// controls govern which TOOLS the agent may call; neither sits upstream of a
+	// process spawned at MCP registration. That is remote-content-to-local-code-
+	// execution on the reviewer's host, strictly worse than the prompt injection
+	// the clean room was built for.
+	//
+	// Do NOT drop this as redundant with --strict-mcp-config (Profile.StrictMCP
+	// in internal/launch): the two are deliberate belt and suspenders at
+	// different layers — quarantine fails on a path nobody enumerated, the flag
+	// fails if a refactor drops it.
+	".mcp.json",
+}
+
+// tier2Carriers are defense in depth, NOT an active hole. forgectl launches
+// none of these assistants, and each of these paths was measured NOT read by
+// `claude -p` (2.1.220). They matter only when a human separately opens the
+// review workspace in one of these editors — a real threat model, but one the
+// human opted into. Cheap to cover; do not describe as closing a live gap.
+//
+// `.cursor` is the whole directory rather than `.cursor/rules` because it is
+// tool state rather than source: a Cursor user opening the workspace picks up
+// everything under it, not only `rules`.
+//
+// `.github/copilot-instructions.md` stays a single FILE. Widening it to
+// `.github/` would hide the CI workflows, and a hostile workflow change is
+// precisely what a reviewer must be able to see — a security regression
+// wearing a security fix's clothes.
+var tier2Carriers = []string{
+	".cursor", ".cursorrules", ".windsurfrules", ".continuerules",
+	".aider.conf.yml", ".codex.toml", "mcp.json",
+	".github/copilot-instructions.md",
+}
+
+// mcpConfigPatterns is the pattern rule for the MCP class. Unlike the prose
+// carriers above, MCP configuration has a consistent shape across tools:
+// machine-read JSON carrying an execution primitive, clustered at the
+// workspace root or directly inside a root-level dot-directory. Matching the
+// POSITION rather than enumerating vendors covers `.cursor/mcp.json`,
+// `.gemini/mcp.json`, `.windsurf/mcp.json` and the next tool's equivalent with
+// no code change — durability exactly where staleness is most expensive, since
+// a missed MCP carrier is an execution primitive rather than a paragraph of
+// text.
+//
+// Bounded on purpose: one level deep, dot-directories only. A nested
+// `sub/.mcp.json` was measured NOT read (the harness discovers project MCP
+// config at the workspace root), so a full-tree walk would add reversibility
+// risk to defend a hole that does not exist.
+//
+// Root-level `mcp.json` / `.mcp.json` are literal entries above, not patterns,
+// because they carry no directory component.
+var mcpConfigPatterns = []string{".*/mcp.json", ".*/.mcp.json"}
+
+// DefaultTargets is the canonical list of AI-config paths (relative to a
 // workspace root) that quarantine hides by default, and that workflow's
 // `strip` step falls back to when a step omits `globs`.
 //
-// Entries are literal relative paths. The two that agents read RECURSIVELY as
-// they descend a tree — see nestableBasenames — are expanded to every nested
-// match by ExpandTargets; the rest are root-level only, which is where they
-// are actually read from.
-var DefaultTargets = []string{
-	"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude/", ".cursor/rules", ".github/copilot-instructions.md",
+// It is the concatenation of the tier slices and the pattern rule, never an
+// independently maintained literal — TestDefaultTargets_TierSumIsComplete
+// fails loudly if a tier is added without being wired in here.
+//
+// Entries are literal relative paths, EXCEPT the mcpConfigPatterns entries,
+// which carry glob metacharacters. ExpandTargets replaces those with their
+// concrete matches; `strip` resolves them natively through filepath.Glob. The
+// nestable basenames — see nestableBasenames — are expanded to every nested
+// match by ExpandTargets; the remaining literals are root-level only, which is
+// where they are actually read from.
+var DefaultTargets = concatTargets(tier1Carriers, tier2Carriers, mcpConfigPatterns)
+
+// concatTargets flattens the tier groups into one list. A plain helper rather
+// than a hand-written literal so a new tier cannot be declared and silently
+// left unwired.
+func concatTargets(groups ...[]string) []string {
+	n := 0
+	for _, g := range groups {
+		n += len(g)
+	}
+	out := make([]string, 0, n)
+	for _, g := range groups {
+		out = append(out, g...)
+	}
+	return out
 }
 
 // nestableBasenames are the instruction-file basenames a coding agent picks up
@@ -89,9 +175,16 @@ var skipDirNames = map[string]bool{
 }
 
 // ExpandTargets resolves targets against root, replacing each bare nestable
-// basename ("CLAUDE.md", "AGENTS.md") with every match found by walking root.
-// Other entries — and any entry carrying a directory component, which is an
-// explicit path the caller meant literally — pass through untouched.
+// basename ("CLAUDE.md", "AGENTS.md") with every match found by walking root,
+// and each glob-shaped entry (see mcpConfigPatterns) with its concrete
+// matches. Other entries — and any literal entry carrying a directory
+// component, which is an explicit path the caller meant literally — pass
+// through untouched.
+//
+// A pattern entry is REPLACED, not preserved: Hide resolves targets with
+// os.Lstat, so a literal "…/*.json" would only ever be a silent no-op. Every
+// Hide call site reaches Hide through this function, so a pattern never
+// arrives unexpanded.
 //
 // It is direction-agnostic BY DESIGN, and that is what keeps quarantine
 // reversible. A match is recorded when the walk finds either the original
@@ -109,17 +202,36 @@ var skipDirNames = map[string]bool{
 // than failing the whole operation, which would strand a workspace mid-review.
 // Errors reaching root itself are returned.
 func ExpandTargets(root string, scheme Scheme, targets []string) ([]string, error) {
+	literals := make([]string, 0, len(targets))
+	var patterns []string
+	for _, t := range targets {
+		if isPattern(t) {
+			patterns = append(patterns, t)
+			continue
+		}
+		literals = append(literals, t)
+	}
+
 	var nested []string
-	if wantsExpansion(targets) {
+	if wantsExpansion(literals) {
 		var err error
-		if nested, err = walkNestable(root, scheme, targets); err != nil {
+		if nested, err = walkNestable(root, scheme, literals); err != nil {
 			return nil, err
 		}
 	}
 
-	out := make([]string, 0, len(targets)+len(nested))
-	seen := make(map[string]bool, len(targets)+len(nested))
-	for _, t := range append(append([]string{}, targets...), nested...) {
+	var matched []string
+	if len(patterns) > 0 {
+		var err error
+		if matched, err = expandPatterns(root, scheme, patterns, coveredRootEntries(literals)); err != nil {
+			return nil, err
+		}
+	}
+
+	all := append(append(append([]string{}, literals...), nested...), matched...)
+	out := make([]string, 0, len(all))
+	seen := make(map[string]bool, len(all))
+	for _, t := range all {
 		if seen[t] {
 			continue
 		}
@@ -127,6 +239,80 @@ func ExpandTargets(root string, scheme Scheme, targets []string) ([]string, erro
 		out = append(out, t)
 	}
 	return out, nil
+}
+
+// isPattern reports whether an entry carries glob metacharacters, i.e. is a
+// pattern rule rather than a literal path.
+func isPattern(target string) bool {
+	return strings.ContainsAny(target, "*?[")
+}
+
+// coveredRootEntries is the set of root-level (single-segment) literal
+// targets. A pattern match UNDER one of them must be dropped, and that is not
+// cosmetic de-duplication — it is what keeps quarantine reversible.
+//
+// `.cursor` is hidden as a directory unit, so once Hide has run, a match at
+// `.cursor/mcp.json` no longer exists under any spelling and the post-Hide
+// ExpandTargets would return a SHORTER list than the pre-Hide one, breaking
+// the property teardown depends on. Worse, if the nested entry were hidden
+// first, Restore would step over it (its quarantined path now lives inside the
+// renamed directory) and leave a `.quarantined` file behind permanently.
+func coveredRootEntries(targets []string) map[string]bool {
+	covered := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		clean := filepath.Clean(t)
+		if clean == "." || strings.ContainsRune(clean, filepath.Separator) {
+			continue
+		}
+		covered[clean] = true
+	}
+	return covered
+}
+
+// expandPatterns resolves each glob pattern to the ORIGINAL relative paths it
+// matches, dropping matches under a directory that is already quarantined
+// wholesale (covered) or never descended into (skipDirNames).
+//
+// Like walkNestable it is direction-agnostic: each pattern is globbed in both
+// its plain and its scheme-renamed form, and the result is undecorated back to
+// the pre-quarantine spelling. That is what makes the same call reproduce the
+// same target list before Hide and at teardown.
+func expandPatterns(root string, scheme Scheme, patterns []string, covered map[string]bool) ([]string, error) {
+	var found []string
+	seen := make(map[string]bool)
+	for _, p := range patterns {
+		for _, form := range []string{filepath.Clean(p), renamedPath(scheme, filepath.Clean(p))} {
+			matches, err := filepath.Glob(filepath.Join(root, form))
+			if err != nil {
+				return nil, fmt.Errorf("expand quarantine pattern %q: %w", p, err)
+			}
+			for _, m := range matches {
+				rel, relErr := filepath.Rel(root, m)
+				if relErr != nil {
+					continue
+				}
+				dir, base := filepath.Split(rel)
+				// The coverage check is itself direction-agnostic. Against an
+				// already-hidden tree the leading segment is the RENAMED directory
+				// (`.cursor.quarantined`), which no longer matches the literal target
+				// it came from — so the post-Hide call would report a nested entry the
+				// pre-Hide call did not, and the two lists would disagree.
+				top := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
+				undecorated := undecorate(scheme, top)
+				if covered[top] || covered[undecorated] || skipDirNames[top] || skipDirNames[undecorated] {
+					continue
+				}
+				orig := filepath.Join(dir, undecorate(scheme, base))
+				if seen[orig] {
+					continue
+				}
+				seen[orig] = true
+				found = append(found, orig)
+			}
+		}
+	}
+	sort.Strings(found)
+	return found, nil
 }
 
 // wantsExpansion reports whether targets contains at least one bare nestable
