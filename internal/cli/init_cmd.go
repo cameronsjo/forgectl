@@ -37,14 +37,13 @@ log_file  = ""    # empty = auto (daily rotation, 7 days kept); "-" = stderr
 
 `
 
-// workflowScaffold is the [workflow] section: the default strip-list glob
-// fallback (WorkflowConfig.IsZero — config.go). An empty list is already the
-// no-op default; quarantine.DefaultTargets is the built-in fallback the
-// `strip` step applies when this stays empty.
+// workflowScaffold is the [workflow] section: extra strip-list globs added to
+// the built-in set (WorkflowConfig.IsZero — config.go). An empty list is
+// already the no-op default; quarantine.DefaultTargets applies either way.
 const workflowScaffold = `
-# ── workflow: default strip-list glob fallback (forgectl workflow) ─────────
+# ── workflow: extra strip-list globs (forgectl workflow) ───────────────────
 [workflow]
-strip_globs = [] # empty = falls back to quarantine.DefaultTargets
+strip_globs = [] # ADDED to quarantine.DefaultTargets; to narrow, set globs on the [[step]]
 `
 
 // netScaffold is the [net] section. Values mirror internal/net's own baked

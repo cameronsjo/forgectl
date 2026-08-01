@@ -3,6 +3,8 @@ package launch
 import (
 	"reflect"
 	"testing"
+
+	"github.com/cameronsjo/forgectl/internal/config"
 )
 
 func TestCodexSessionArgs_TranslatesModes(t *testing.T) {
@@ -146,6 +148,53 @@ func TestBuilderArgs_NoIdeOrExcludeFlags(t *testing.T) {
 	for _, bad := range []string{"--ide", "--exclude-dynamic-system-prompt-sections", "--resume"} {
 		if containsStr(got, bad) {
 			t.Errorf("BuilderArgs should not include %q, got %v", bad, got)
+		}
+	}
+}
+
+// TestBuilderArgs_StrictMCPOnlyWhenSet pins BOTH directions, and the negative
+// case is the one that matters. --strict-mcp-config makes Claude Code ignore
+// every discovered MCP configuration — correct for the clean-room review,
+// where the workspace is a third party's checkout, and a silent functional
+// regression for the operator's ordinary `forgectl launch`, which shares this
+// function and must keep its MCP servers. Emitted unconditionally, every user
+// would lose their tools with no error message.
+func TestBuilderArgs_StrictMCPOnlyWhenSet(t *testing.T) {
+	on := BuilderArgs(Profile{PermissionMode: "plan", Model: "opus", StrictMCP: true}, []string{"-p", "hi"})
+	if !containsStr(on, "--strict-mcp-config") {
+		t.Errorf("StrictMCP profile must emit --strict-mcp-config, got %v", on)
+	}
+	// The flag must precede the user's args so a caller-supplied override still
+	// wins under last-flag-wins parsing.
+	if !containsSeq(on, []string{"--strict-mcp-config", "--model", "opus"}) {
+		t.Errorf("--strict-mcp-config must sit in the injected posture block, got %v", on)
+	}
+
+	off := BuilderArgs(Profile{PermissionMode: "plan", Model: "opus"}, []string{"-p", "hi"})
+	if containsStr(off, "--strict-mcp-config") {
+		t.Errorf("an ordinary launch must keep its discovered MCP servers, got %v", off)
+	}
+}
+
+// TestResolve_NeverSetsStrictMCP is the other half of the same control: the
+// flag has no config surface at all, so no [launch.defaults] or project block
+// can turn it on for an ordinary launch. The review dispatch sets it directly
+// on the Profile, and that is the only writer.
+func TestResolve_NeverSetsStrictMCP(t *testing.T) {
+	allowDanger := true
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{
+			Harness: "claude", Model: "sonnet", PermissionMode: "acceptEdits",
+			AllowDanger: &allowDanger, AddDir: []string{"/s"},
+		},
+		Projects: []config.LaunchProject{{Match: "/proj", Model: "haiku"}},
+	}
+	for name, p := range map[string]Profile{
+		"resolved": resolve(lc, "/proj", "/home/u"),
+		"defaults": DefaultsProfile(lc),
+	} {
+		if p.StrictMCP {
+			t.Errorf("%s profile set StrictMCP; config must not be able to strip an operator's MCP servers", name)
 		}
 	}
 }

@@ -128,6 +128,22 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) er
 // reviewer can run arbitrary shell and read the whole host filesystem. See
 // CodexExec in agent.go for the measured delta against agent A's allowlist and
 // why it is not closable from `codex exec` today.
+//
+// No MCP counterpart to launchInline's profile.StrictMCP is set here, and that
+// is not an oversight: `codex exec --help` exposes no MCP flag at all, so there
+// is no harness-boundary control to force.
+//
+// What bounds the exposure, stated exactly: CheckAgentForRef refuses Codex for
+// remote PR heads, so this path only ever runs against a workspace on a path
+// the operator owns. That is all sess.Ref.IsLocal() proves — PATH ownership,
+// not COMMIT provenance. PrepareLocal accepts a detached HEAD and only warns,
+// so an ordinary `gh pr checkout` of a third-party branch reaches this path
+// with the contributor's tree in it, repo-supplied MCP config included. The
+// content under review is therefore not necessarily the operator's own; what
+// holds this at Tier 2 is that the operator selected that checkout deliberately
+// and can inspect it before dispatch, not that the bytes are theirs. Revisit if
+// Codex gains a strict-config flag, if the remote-head refusal is relaxed, or
+// if detached heads are ever rejected before dispatch.
 func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Config) error {
 	codexPath, err := launch.CodexPath(cfg.Launch.Defaults)
 	if err != nil {
@@ -187,6 +203,16 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	profile := launch.Resolve(cfg.Launch, sess.Workspace)
 	profile.AllowDanger = false
 	profile.PermissionMode = "plan"
+	// Refuse every DISCOVERED MCP configuration. The workspace is a third
+	// party's checkout, and Claude Code spawns a discovered server's `command` +
+	// `args` at session START, before the agent invokes any tool — so both
+	// controls above sit downstream of the boundary an `.mcp.json` in the head
+	// already crossed. quarantine.DefaultTargets renames that file aside as the
+	// backstop; this is the control at the harness boundary, and unlike a
+	// filename list it does not go stale when Claude Code learns a new config
+	// path. Measured on 2.1.220: with the flag, a planted carrier did not spawn;
+	// without it, the same carrier did.
+	profile.StrictMCP = true
 	// The resolved profile is the user's ambient launch config, which may well
 	// be a Codex one — `harness = "codex"` in [launch.defaults] is exactly the
 	// config the Codex work targets. This dispatch is `claude` regardless, and

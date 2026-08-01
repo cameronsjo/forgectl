@@ -129,11 +129,12 @@ func (lc LaunchConfig) IsZero() bool {
 	return len(lc.Projects) == 0 && lc.Defaults.isZero()
 }
 
-// WorkflowConfig is the [workflow] section: the default strip-list the
-// `strip` step falls back to when a workflow file's [[step]] omits `globs`.
-// Its own built-in fallback is now sourced from quarantine.DefaultTargets
-// (#20); this section remains the one config-driven override the DSL
-// exposes.
+// WorkflowConfig is the [workflow] section: extra strip-list entries the
+// `strip` step adds when a workflow file's [[step]] omits `globs`. It WIDENS
+// quarantine.DefaultTargets (#20) rather than replacing it — the built-in
+// clean room is forgectl's own control, not something an operator narrows from
+// this key by accident; see quarantine.stripFallback. To use a narrower list,
+// set `globs` on the [[step]] itself.
 type WorkflowConfig struct {
 	StripGlobs []string `toml:"strip_globs"`
 }
