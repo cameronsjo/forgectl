@@ -16,6 +16,13 @@ package docker
 //   [x] Boundary: a branch beginning with '-' (git-argv-injection shaped)
 //       never survives as a leading '-' in the slug
 //   [x] Boundary: a branch longer than 128 chars is truncated to maxTagLen
+//
+// slugifyRepo (Classification: pure logic / sanitizer)
+//   [x] Happy: a directory name with a space and mixed case slugifies to a
+//       valid docker repository component
+//   [x] Boundary: an empty or fully-invalid name falls back to "image"
+//       (not slugifyBranch's "branch" — the two sanitizers share rules but
+//       not a fallback, since they label different kinds of absence)
 
 import (
 	"strings"
@@ -73,5 +80,28 @@ func TestSlugifyBranch_TruncatesToMaxTagLen(t *testing.T) {
 	}
 	if got != strings.Repeat("a", maxTagLen) {
 		t.Errorf("slugifyBranch truncation produced %q, want %d 'a's", got, maxTagLen)
+	}
+}
+
+func TestSlugifyRepo(t *testing.T) {
+	cases := []struct {
+		name string
+		dir  string
+		want string
+	}{
+		{"already valid, lowercased", "MyProject", "myproject"},
+		{"space collapses to dash", "My Project", "my-project"},
+		{"runs of invalid chars collapse to one dash", "my!!!project", "my-project"},
+		{"leading/trailing separators trimmed", ".hidden-dir.", "hidden-dir"},
+		{"empty falls back to image", "", "image"},
+		{"fully invalid falls back to image", "///!!!", "image"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := slugifyRepo(tc.dir)
+			if got != tc.want {
+				t.Errorf("slugifyRepo(%q) = %q, want %q", tc.dir, got, tc.want)
+			}
+		})
 	}
 }

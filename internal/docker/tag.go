@@ -26,16 +26,34 @@ func devTag(repo string) string {
 }
 
 // slugifyBranch converts a git branch name into a valid docker tag
-// component: lowercased, any run of characters outside [a-z0-9._-]
-// collapsed to a single '-', and leading/trailing '.'/'-' trimmed (a tag
-// must start with an alphanumeric or '_', which every character surviving
-// the loop below already satisfies). The result is capped at maxTagLen. An
-// empty or fully-invalid input falls back to "branch" so deriveTag never
-// produces a malformed tag — this is also the sanitizer that keeps a
-// hostile git branch name (e.g. "-x") from reaching docker/git argv as
-// something option-like.
+// component. An empty or fully-invalid input falls back to "branch" so
+// deriveTag never produces a malformed tag — this is also the sanitizer
+// that keeps a hostile git branch name (e.g. "-x") from reaching
+// docker/git argv as something option-like. See slugify for the shared
+// sanitization rules.
 func slugifyBranch(branch string) string {
-	lower := strings.ToLower(branch)
+	return slugify(branch, "branch")
+}
+
+// slugifyRepo converts a directory basename into a valid docker repository
+// component. Used only on Build's no-git-metadata path, where the
+// directory name (never a sanitized git repo name) becomes the tag's
+// repository segment directly — directory names are not guaranteed
+// docker-clean (spaces, mixed case, and symbols all appear in the wild).
+// The git-metadata path is unaffected: a repo name resolved via git stays
+// unsanitized, as before. See slugify for the shared sanitization rules.
+func slugifyRepo(name string) string {
+	return slugify(name, "image")
+}
+
+// slugify converts s into a valid docker tag/repository component:
+// lowercased, any run of characters outside [a-z0-9._-] collapsed to a
+// single '-', and leading/trailing '.'/'-' trimmed (a tag must start with
+// an alphanumeric or '_', which every character surviving the loop below
+// already satisfies). The result is capped at maxTagLen. An empty or
+// fully-invalid input falls back to fallback.
+func slugify(s, fallback string) string {
+	lower := strings.ToLower(s)
 
 	var b strings.Builder
 	lastDash := false
@@ -56,7 +74,7 @@ func slugifyBranch(branch string) string {
 
 	slug := strings.Trim(b.String(), "-.")
 	if slug == "" {
-		return "branch"
+		return fallback
 	}
 	if len(slug) > maxTagLen {
 		slug = strings.TrimRight(slug[:maxTagLen], "-.")
