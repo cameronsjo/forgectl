@@ -5,8 +5,8 @@
   agents driving it via tool calls. A 2026-07-31 usage measurement showed agents probing
   the CLI rather than driving it, and a dogfood batch (#182–#202) filed four agent traps:
   an interactive picker reachable in `--dry-run` (#202), a swallowed escape (#200), a
-  silent exit-0 on failure (#188), and invisible effective config (#189). Related:
-  0005 (module architecture); the 2026-07-31 active-use pass plan.
+  silent exit-0 on failure (#188, since fixed by #206), and invisible effective config
+  (#189). Related: 0005 (module architecture); the 2026-07-31 active-use pass plan.
 
 ## Context
 
@@ -62,8 +62,9 @@ Every forgectl verb MUST meet all of the following. These rules bind existing ve
 
 ## Consequences
 
-- The agent-traps cluster (#202, #200, #188, #189) implements to this contract; their
-  filed fix shapes already agree (e.g. #202's print-candidates-not-picker).
+- The remaining agent-traps cluster (#202, #200, #189) implements to this contract; their
+  filed fix shapes already agree (e.g. #202's print-candidates-not-picker). #188 landed
+  ahead of this ADR and conforms to rule 3 retroactively.
 - New-verb review gains a checklist: TTY-gated interaction, `--json`, exit-code
   honesty, config visibility, stream discipline.
 - The surface-architecture design (whether the agent surface stays
