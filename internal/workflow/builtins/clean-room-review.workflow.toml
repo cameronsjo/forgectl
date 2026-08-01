@@ -17,8 +17,8 @@ ref  = "${branch}"
 
 [[step]]
 # The clean-room control. `globs` is deliberately OMITTED so the step inherits
-# the configured default set — [workflow] strip_globs, falling back to
-# quarantine.DefaultTargets. It used to carry its own literal copy of that
+# the canonical set — quarantine.DefaultTargets, widened by any [workflow]
+# strip_globs, never narrowed by it. It used to carry its own literal copy of that
 # list, which is how it went stale: it never picked up CLAUDE.local.md, and it
 # would never have picked up .mcp.json, whose `command`+`args` the harness
 # executes at session start. A second copy of a security enumeration is the

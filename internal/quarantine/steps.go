@@ -17,14 +17,10 @@ import (
 // Steps is quarantine's workflow step contribution (ADR-0005): the `strip`
 // verb — the destructive sibling of this package's reversible Hide, built
 // from the same canonical DefaultTargets so the two controls never drift.
-// defaultGlobs is the fallback strip-list for a step that omits `globs`
-// (wired from config's [workflow] strip_globs by the CLI layer); empty falls
-// back to DefaultTargets.
+// defaultGlobs is config's [workflow] strip_globs, wired by the CLI layer; see
+// stripFallback for what a step that omits `globs` actually inherits.
 func Steps(defaultGlobs []string) step.Registry {
-	globs := defaultGlobs
-	if len(globs) == 0 {
-		globs = DefaultTargets
-	}
+	globs := stripFallback(defaultGlobs)
 	return step.Registry{
 		// Globs is guarded (step.Def.GuardedFields): the strip-list IS the
 		// clean-room control, so a ${param} in it would let an agent narrow the
@@ -32,6 +28,35 @@ func Steps(defaultGlobs []string) step.Registry {
 		// repo's CLAUDE.md past the strip and into the reviewer.
 		"strip": {Runner: newStripStep(globs), GuardedFields: []string{"Globs"}},
 	}
+}
+
+// stripFallback builds the list a step inherits when it omits `globs`: the
+// canonical DefaultTargets, UNION whatever [workflow] strip_globs adds.
+//
+// Union rather than replace, deliberately, and this is the one place the
+// distinction bites. DefaultTargets is forgectl's own clean-room control — the
+// floor bounding what a third-party head can do to a reviewer — and the
+// built-in clean-room workflow inherits it precisely BY omitting `globs`. Under
+// replace semantics an operator who set strip_globs to add one glob for their
+// own workflow silently swapped out the built-in clean room's entire carrier
+// set, .mcp.json included, having been shown nothing that reads like that
+// trade. The clean room is not the operator's to shrink from an unrelated
+// config key. strip_globs widens the floor; it does not lower it.
+//
+// The narrowing escape hatch survives and stays explicit: a [[step]] that SETS
+// `globs` replaces the list outright — a workflow author choosing in the open,
+// on a guarded field that cannot be ${param}-smuggled at run time.
+func stripFallback(configured []string) []string {
+	out := make([]string, 0, len(DefaultTargets)+len(configured))
+	seen := make(map[string]bool, cap(out))
+	for _, g := range append(append([]string{}, DefaultTargets...), configured...) {
+		if seen[g] {
+			continue
+		}
+		seen[g] = true
+		out = append(out, g)
+	}
+	return out
 }
 
 // newStripStep builds the `strip` step.Runner, closing over the default
@@ -64,7 +89,13 @@ func newStripStep(defaultGlobs []string) step.Runner {
 			// security control, so under-stripping would weaken the clean-room
 			// defense. A literal entry that doesn't exist yields no matches — a
 			// no-op, matching the pre-glob behavior.
-			matches, err := filepath.Glob(filepath.Join(workspace, filepath.Clean(g)))
+			//
+			// globFold rather than filepath.Glob, so the destructive half of the
+			// control matches case-insensitively exactly as ExpandTargets does.
+			// Otherwise `.gemini/MCP.json` survives strip on the very filesystem
+			// that resolves the reviewer's open(".gemini/mcp.json") to it — see
+			// globFold's comment.
+			matches, err := globFold(workspace, g)
 			if err != nil {
 				slog.Warn("Bad strip pattern.", "glob", g, "error", err)
 				return fmt.Errorf("strip pattern %q: %w", g, err)

@@ -277,12 +277,16 @@ func coveredRootEntries(targets []string) map[string]bool {
 // its plain and its scheme-renamed form, and the result is undecorated back to
 // the pre-quarantine spelling. That is what makes the same call reproduce the
 // same target list before Hide and at teardown.
+// It is also case-insensitive, via globFold, for the same reason walkNestable
+// lowercases: the attacker writes the filename, and on APFS a tool opening
+// `.gemini/mcp.json` resolves to a planted `.gemini/MCP.json` that a
+// case-sensitive filepath.Match never sees.
 func expandPatterns(root string, scheme Scheme, patterns []string, covered map[string]bool) ([]string, error) {
 	var found []string
 	seen := make(map[string]bool)
 	for _, p := range patterns {
 		for _, form := range []string{filepath.Clean(p), renamedPath(scheme, filepath.Clean(p))} {
-			matches, err := filepath.Glob(filepath.Join(root, form))
+			matches, err := globFold(root, form)
 			if err != nil {
 				return nil, fmt.Errorf("expand quarantine pattern %q: %w", p, err)
 			}
@@ -313,6 +317,64 @@ func expandPatterns(root string, scheme Scheme, patterns []string, covered map[s
 	}
 	sort.Strings(found)
 	return found, nil
+}
+
+// globFold is filepath.Glob's contract — resolve a relative pattern against
+// root, return the concrete paths it matches — with one difference: every path
+// segment is matched on its LOWERCASED form.
+//
+// This is walkNestable's `want` mechanism generalized from a basename set to a
+// pattern, and it exists for the identical reason. filepath.Glob matches with
+// filepath.Match, which is case-sensitive; APFS and NTFS are not. So a
+// case-sensitive match is not the predicate the agent uses, and in the pattern
+// rule's case the attacker picks the filename: a head carrying
+// `.gemini/MCP.json` survives a `.*/mcp.json` glob untouched, while the
+// reviewer's open(".gemini/mcp.json") resolves straight to it. Matching
+// case-insensitively costs nothing on a case-sensitive filesystem — a
+// genuinely distinct `MCP.json` is also quarantined, which is the safe
+// direction — and closes the vector on the filesystems forgectl runs on.
+//
+// Resolution is by os.ReadDir per segment rather than by Lstat, so the
+// returned paths carry the ACTUAL on-disk spelling; callers undecorate them
+// back to the original relative path. A segment that is not a readable
+// directory contributes no matches rather than failing the whole operation,
+// mirroring walkNestable's treatment of an unreadable subtree. ".." can never
+// appear in a result, because segments are matched against directory entries
+// and never traversed upward.
+func globFold(root, pattern string) ([]string, error) {
+	clean := filepath.Clean(pattern)
+	if clean == "." || clean == string(filepath.Separator) {
+		return []string{root}, nil
+	}
+	current := []string{root}
+	for _, seg := range strings.Split(filepath.ToSlash(clean), "/") {
+		if seg == "" {
+			continue
+		}
+		lower := strings.ToLower(seg)
+		var next []string
+		for _, dir := range current {
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				continue // not a directory, or unreadable: no matches from here
+			}
+			for _, e := range entries {
+				ok, matchErr := filepath.Match(lower, strings.ToLower(e.Name()))
+				if matchErr != nil {
+					return nil, fmt.Errorf("match pattern %q: %w", pattern, matchErr)
+				}
+				if ok {
+					next = append(next, filepath.Join(dir, e.Name()))
+				}
+			}
+		}
+		current = next
+		if len(current) == 0 {
+			return nil, nil
+		}
+	}
+	sort.Strings(current)
+	return current, nil
 }
 
 // wantsExpansion reports whether targets contains at least one bare nestable

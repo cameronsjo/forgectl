@@ -35,6 +35,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -749,49 +750,97 @@ func TestDefaultTargets_TierSumIsComplete(t *testing.T) {
 // it — the same hand-maintained enumeration this issue was about, relocated
 // into the test file.
 //
-// So read the source instead. Every package-level []string literal in
-// quarantine.go other than DefaultTargets itself is a carrier group by
-// construction, and every one of its entries must reach DefaultTargets.
-// Declaring `.zed/settings.json` in a new tier and forgetting to concatenate
-// it fails HERE, at the moment the carrier is added, rather than silently
-// leaving it unquarantined.
+// So read the source instead. Every package-level var whose name ends in
+// `Carriers` or `Patterns` is a carrier group, and every one of its entries
+// must reach DefaultTargets. Declaring `.zed/settings.json` in a new tier and
+// forgetting to concatenate it fails HERE, at the moment the carrier is added,
+// rather than silently leaving it unquarantined.
+//
+// Three properties this test's own shape has to hold, each of them a measured
+// evasion of an earlier version:
+//
+//   - It parses the whole PACKAGE, not quarantine.go. Splitting a growing
+//     carrier list into carriers.go is the natural next refactor, and a
+//     one-file parse would greet it with a green suite.
+//   - A group that is not a literal slice is an ERROR, not a skip.
+//     `var tier3Carriers = buildTier3()` is unreadable to an AST audit, so the
+//     audit must say so rather than fall silent — silence here reads exactly
+//     like coverage.
+//   - It keys on the NAMING CONVENTION rather than on "any []string". Under
+//     the old rule any package-level []string that was not a carrier group
+//     failed: an allowlist like `alwaysReviewable = []string{".github/workflows"}`
+//     — precisely the over-quarantine guard this change's own discussion
+//     invites — failed the test, and the naive fix (add it to DefaultTargets)
+//     hides the CI workflows. A guard that pushes you toward the security
+//     regression it exists to prevent is worse than no guard.
+//
+// The convention is the contract: a group named outside it evades this test.
+// TestDefaultTargets_TierSumIsComplete is the second net (it catches the
+// init()-append this one cannot), and neither substitutes for naming a new
+// group `…Carriers`.
 func TestCarrierGroups_AllReachDefaultTargets(t *testing.T) {
-	file, err := parser.ParseFile(token.NewFileSet(), "quarantine.go", nil, 0)
+	sources, err := filepath.Glob("*.go")
 	if err != nil {
-		t.Fatalf("parse quarantine.go: %v", err)
+		t.Fatalf("glob package sources: %v", err)
 	}
-
-	groups := 0
-	for _, decl := range file.Decls {
-		gen, ok := decl.(*ast.GenDecl)
-		if !ok || gen.Tok != token.VAR {
+	fset := token.NewFileSet()
+	groups, parsed := 0, 0
+	for _, src := range sources {
+		if strings.HasSuffix(src, "_test.go") {
 			continue
 		}
-		for _, spec := range gen.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok {
+		parsed++
+		file, err := parser.ParseFile(fset, src, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", src, err)
+		}
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.VAR {
 				continue
 			}
-			for i, name := range vs.Names {
-				if name.Name == "DefaultTargets" || i >= len(vs.Values) {
-					continue
-				}
-				entries, ok := stringSliceLiteral(vs.Values[i])
+			for _, spec := range gen.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
 				if !ok {
 					continue
 				}
-				groups++
-				for _, entry := range entries {
-					if !containsStr(DefaultTargets, entry) {
-						t.Errorf("carrier group %s declares %q, which never reaches DefaultTargets — wire the group into concatTargets", name.Name, entry)
+				for i, name := range vs.Names {
+					if !isCarrierGroupName(name.Name) {
+						continue
+					}
+					groups++
+					if i >= len(vs.Values) {
+						t.Errorf("carrier group %s (%s) declares no value — this audit reads literal slices, so an appended-to group is invisible to it; build it as a []string literal", name.Name, src)
+						continue
+					}
+					entries, ok := stringSliceLiteral(vs.Values[i])
+					if !ok {
+						t.Errorf("carrier group %s (%s) is not a []string literal — this audit cannot read a function-built group, and a silent skip would look like coverage; keep carrier groups literal", name.Name, src)
+						continue
+					}
+					for _, entry := range entries {
+						if !containsStr(DefaultTargets, entry) {
+							t.Errorf("carrier group %s declares %q, which never reaches DefaultTargets — wire the group into concatTargets", name.Name, entry)
+						}
 					}
 				}
 			}
 		}
 	}
-	if groups == 0 {
-		t.Fatal("found no carrier groups in quarantine.go — this test has gone vacuous")
+	if parsed == 0 {
+		t.Fatal("found no non-test sources in the package — this test has gone vacuous")
 	}
+	if groups == 0 {
+		t.Fatal("found no carrier groups in the package — this test has gone vacuous")
+	}
+}
+
+// isCarrierGroupName reports whether a package-level var name declares a
+// carrier group, by the `…Carriers` / `…Patterns` convention the audit above
+// keys on. Naming, rather than type, so that an ordinary package-level
+// []string is not conscripted into the carrier set by accident.
+func isCarrierGroupName(name string) bool {
+	return strings.HasSuffix(name, "Carriers") || strings.HasSuffix(name, "Patterns")
 }
 
 // stringSliceLiteral reports the elements of a `[]string{…}` composite literal,
@@ -940,11 +989,16 @@ func TestDefaultTargets_DoesNotHideReviewableContent(t *testing.T) {
 // configuration shares a shape (machine-read JSON carrying an execution
 // primitive, at the root or one level down inside a dot-directory) where the
 // prose carriers share nothing.
+// `.gemini/MCP.json` is in the fixture because the ATTACKER writes the
+// filename. filepath.Match is case-sensitive and APFS is not, so a pattern
+// rule that matched exactly would leave that file readable under a name the
+// reviewer's open(".gemini/mcp.json") resolves to — see globFold.
 func TestExpandTargets_MCPPatternCoversUnenumeratedDotDir(t *testing.T) {
 	root := t.TempDir()
 	for _, rel := range []string{
 		filepath.Join(".aurora", "mcp.json"),
 		filepath.Join(".zed", ".mcp.json"),
+		filepath.Join(".gemini", "MCP.json"),
 	} {
 		writeFile(t, filepath.Join(root, rel), `{"mcpServers":{}}`)
 	}
@@ -956,6 +1010,7 @@ func TestExpandTargets_MCPPatternCoversUnenumeratedDotDir(t *testing.T) {
 	for _, want := range []string{
 		filepath.Join(".aurora", "mcp.json"),
 		filepath.Join(".zed", ".mcp.json"),
+		filepath.Join(".gemini", "MCP.json"),
 	} {
 		if !containsStr(got, want) {
 			t.Errorf("pattern rule missed %q in an unenumerated dot-directory; got %v", want, got)
@@ -975,6 +1030,63 @@ func TestExpandTargets_MCPPatternCoversUnenumeratedDotDir(t *testing.T) {
 	}
 	if !containsStr(got, ".cursor") {
 		t.Errorf(".cursor itself must still be a target: %v", got)
+	}
+}
+
+// TestExpandTargets_MCPPatternIsCaseFolded is the reversible half of the
+// case-fold, end to end. The pattern rule is the one place in the target list
+// where an ATTACKER picks the filename, and filepath.Glob matches basenames
+// case-sensitively while APFS does not — so `.gemini/MCP.json` used to survive
+// Hide untouched while the reviewer's open(".gemini/mcp.json") resolved
+// straight to it.
+//
+// It also pins the half that makes the fold safe: the target carries the
+// ACTUAL on-disk spelling, so Restore returns `MCP.json` under its own name
+// rather than silently case-normalizing it across the round trip (and rather
+// than missing it entirely on a case-sensitive filesystem).
+func TestExpandTargets_MCPPatternIsCaseFolded(t *testing.T) {
+	root := t.TempDir()
+	planted := map[string]string{
+		filepath.Join(".gemini", "MCP.json"): `{"mcpServers":{"a":{}}}`,
+		filepath.Join(".zed", ".MCP.JSON"):   `{"mcpServers":{"b":{}}}`,
+		filepath.Join(".ok", "mcp.json"):     `{"mcpServers":{"c":{}}}`, // control: the rule is live
+	}
+	for rel, content := range planted {
+		writeFile(t, filepath.Join(root, rel), content)
+	}
+
+	c := New(&exec.FakeRunner{})
+	hideTargets, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets (hide): %v", err)
+	}
+	if _, err := c.Hide(context.Background(), root, SuffixQuarantined, hideTargets, false); err != nil {
+		t.Fatalf("Hide: %v", err)
+	}
+	for rel := range planted {
+		if _, err := os.Lstat(filepath.Join(root, rel)); !os.IsNotExist(err) {
+			t.Errorf("MCP carrier %q survived Hide under its own name, stat err = %v", rel, err)
+		}
+	}
+
+	restoreTargets, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets (restore): %v", err)
+	}
+	if !equalStrings(hideTargets, restoreTargets) {
+		t.Fatalf("target list changed across Hide:\n before %v\n  after %v", hideTargets, restoreTargets)
+	}
+	moves, err := ComputeMoves(root, SuffixQuarantined, restoreTargets)
+	if err != nil {
+		t.Fatalf("ComputeMoves: %v", err)
+	}
+	if err := c.Restore(context.Background(), moves); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	for rel, want := range planted {
+		if got := readFile(t, filepath.Join(root, rel)); got != want {
+			t.Errorf("round-trip corrupted %q: got %q, want %q", rel, got, want)
+		}
 	}
 }
 

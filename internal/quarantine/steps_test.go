@@ -177,15 +177,26 @@ func TestStrip_MissingWorkspaceErrors(t *testing.T) {
 	}
 }
 
-// TestSteps_NonEmptyDefaultGlobsOverrideDefaultTargets pins the other side
-// of the config seam: a configured [workflow] strip_globs list REPLACES
-// DefaultTargets as the fallback. If the len==0 guard or the assignment
-// direction in Steps ever inverted, a user's override would silently stop
-// taking effect (always DefaultTargets) with the suite green — this is the
-// test that goes red instead.
-func TestSteps_NonEmptyDefaultGlobsOverrideDefaultTargets(t *testing.T) {
+// TestSteps_ConfiguredGlobsWidenDefaultTargets pins the other side of the
+// config seam, and it INVERTS its predecessor deliberately. That test
+// (…NonEmptyDefaultGlobsOverrideDefaultTargets) asserted CLAUDE.md must
+// SURVIVE a configured strip_globs, pinning replace semantics.
+//
+// Replace is the wrong rule for this key. The built-in clean-room workflow
+// inherits DefaultTargets precisely by omitting `globs`, so under replace an
+// operator adding one glob for their own workflow silently swapped out the
+// clean room's entire carrier set — .mcp.json included — from a config key
+// that reads like an addition. The clean room is forgectl's own control, not
+// the operator's to shrink by accident; see stripFallback.
+//
+// So: both halves must go. The configured entry still takes effect (the
+// direction the old test protected, and the len==0 / assignment-direction
+// inversion it guarded against still fails here), and DefaultTargets still
+// applies alongside it. Narrowing remains available, explicitly, by setting
+// `globs` on the [[step]].
+func TestSteps_ConfiguredGlobsWidenDefaultTargets(t *testing.T) {
 	workspace := t.TempDir()
-	for _, f := range []string{"CLAUDE.md", "custom.md"} {
+	for _, f := range []string{"CLAUDE.md", ".mcp.json", "custom.md", "README.md"} {
 		if err := os.WriteFile(filepath.Join(workspace, f), []byte("x"), 0o644); err != nil {
 			t.Fatalf("WriteFile %s: %v", f, err)
 		}
@@ -194,15 +205,44 @@ func TestSteps_NonEmptyDefaultGlobsOverrideDefaultTargets(t *testing.T) {
 	def := Steps([]string{"custom.md"})["strip"]
 	wctx := step.NewContext(nil)
 	wctx.Set("workspace", workspace)
-	// No step-level globs → the configured override applies, NOT DefaultTargets.
+	// No step-level globs → the configured list is ADDED to DefaultTargets.
 	if err := def.Runner(context.Background(), &exec.FakeRunner{}, wctx, step.PlanStep{Uses: "strip"}); err != nil {
 		t.Fatalf("strip: %v", err)
 	}
+	for _, gone := range []string{"custom.md", "CLAUDE.md", ".mcp.json"} {
+		if _, err := os.Stat(filepath.Join(workspace, gone)); !os.IsNotExist(err) {
+			t.Errorf("%q should have been stripped (configured globs widen DefaultTargets, they do not replace it), stat err = %v", gone, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "README.md")); err != nil {
+		t.Errorf("README.md must stay readable to the reviewer, stat err = %v", err)
+	}
+}
+
+// TestSteps_StepGlobsNarrowExplicitly is the escape hatch stripFallback keeps
+// open: a [[step]] that SETS `globs` replaces the list outright. That is a
+// workflow author choosing a narrower set in the open, on a guarded field —
+// as opposed to an operator shrinking the built-in clean room from an
+// unrelated config key without being shown the trade.
+func TestSteps_StepGlobsNarrowExplicitly(t *testing.T) {
+	workspace := t.TempDir()
+	for _, f := range []string{"CLAUDE.md", "custom.md"} {
+		if err := os.WriteFile(filepath.Join(workspace, f), []byte("x"), 0o644); err != nil {
+			t.Fatalf("WriteFile %s: %v", f, err)
+		}
+	}
+
+	def := Steps(nil)["strip"]
+	wctx := step.NewContext(nil)
+	wctx.Set("workspace", workspace)
+	if err := def.Runner(context.Background(), &exec.FakeRunner{}, wctx, step.PlanStep{Uses: "strip", Globs: []string{"custom.md"}}); err != nil {
+		t.Fatalf("strip: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(workspace, "custom.md")); !os.IsNotExist(err) {
-		t.Errorf("custom.md (the configured override) should have been stripped, stat err = %v", err)
+		t.Errorf("custom.md (the step's own glob) should have been stripped, stat err = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(workspace, "CLAUDE.md")); err != nil {
-		t.Errorf("CLAUDE.md must SURVIVE when a configured override replaces DefaultTargets, stat err = %v", err)
+		t.Errorf("CLAUDE.md must survive when a [[step]] sets its own globs, stat err = %v", err)
 	}
 }
 
@@ -253,6 +293,11 @@ func TestSteps_DefaultTargetsPatternsReachStrip(t *testing.T) {
 		".mcp.json",
 		filepath.Join(".aurora", "mcp.json"),
 		filepath.Join(".zed", ".mcp.json"),
+		// The attacker writes the filename, and filepath.Match is case-sensitive
+		// where APFS is not — an exact-matching strip leaves these readable under
+		// a name the reviewer's open() resolves to. See globFold.
+		filepath.Join(".gemini", "MCP.json"),
+		filepath.Join(".windsurf", ".MCP.JSON"),
 	}
 	survives := []string{
 		filepath.Join(".github", "workflows", "ci.yml"),
