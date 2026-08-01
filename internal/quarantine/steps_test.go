@@ -9,6 +9,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -177,15 +178,26 @@ func TestStrip_MissingWorkspaceErrors(t *testing.T) {
 	}
 }
 
-// TestSteps_NonEmptyDefaultGlobsOverrideDefaultTargets pins the other side
-// of the config seam: a configured [workflow] strip_globs list REPLACES
-// DefaultTargets as the fallback. If the len==0 guard or the assignment
-// direction in Steps ever inverted, a user's override would silently stop
-// taking effect (always DefaultTargets) with the suite green — this is the
-// test that goes red instead.
-func TestSteps_NonEmptyDefaultGlobsOverrideDefaultTargets(t *testing.T) {
+// TestSteps_ConfiguredGlobsWidenDefaultTargets pins the other side of the
+// config seam, and it INVERTS its predecessor deliberately. That test
+// (…NonEmptyDefaultGlobsOverrideDefaultTargets) asserted CLAUDE.md must
+// SURVIVE a configured strip_globs, pinning replace semantics.
+//
+// Replace is the wrong rule for this key. The built-in clean-room workflow
+// inherits DefaultTargets precisely by omitting `globs`, so under replace an
+// operator adding one glob for their own workflow silently swapped out the
+// clean room's entire carrier set — .mcp.json included — from a config key
+// that reads like an addition. The clean room is forgectl's own control, not
+// the operator's to shrink by accident; see stripFallback.
+//
+// So: both halves must go. The configured entry still takes effect (the
+// direction the old test protected, and the len==0 / assignment-direction
+// inversion it guarded against still fails here), and DefaultTargets still
+// applies alongside it. Narrowing remains available, explicitly, by setting
+// `globs` on the [[step]].
+func TestSteps_ConfiguredGlobsWidenDefaultTargets(t *testing.T) {
 	workspace := t.TempDir()
-	for _, f := range []string{"CLAUDE.md", "custom.md"} {
+	for _, f := range []string{"CLAUDE.md", ".mcp.json", "custom.md", "README.md"} {
 		if err := os.WriteFile(filepath.Join(workspace, f), []byte("x"), 0o644); err != nil {
 			t.Fatalf("WriteFile %s: %v", f, err)
 		}
@@ -194,15 +206,44 @@ func TestSteps_NonEmptyDefaultGlobsOverrideDefaultTargets(t *testing.T) {
 	def := Steps([]string{"custom.md"})["strip"]
 	wctx := step.NewContext(nil)
 	wctx.Set("workspace", workspace)
-	// No step-level globs → the configured override applies, NOT DefaultTargets.
+	// No step-level globs → the configured list is ADDED to DefaultTargets.
 	if err := def.Runner(context.Background(), &exec.FakeRunner{}, wctx, step.PlanStep{Uses: "strip"}); err != nil {
 		t.Fatalf("strip: %v", err)
 	}
+	for _, gone := range []string{"custom.md", "CLAUDE.md", ".mcp.json"} {
+		if _, err := os.Stat(filepath.Join(workspace, gone)); !os.IsNotExist(err) {
+			t.Errorf("%q should have been stripped (configured globs widen DefaultTargets, they do not replace it), stat err = %v", gone, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "README.md")); err != nil {
+		t.Errorf("README.md must stay readable to the reviewer, stat err = %v", err)
+	}
+}
+
+// TestSteps_StepGlobsNarrowExplicitly is the escape hatch stripFallback keeps
+// open: a [[step]] that SETS `globs` replaces the list outright. That is a
+// workflow author choosing a narrower set in the open, on a guarded field —
+// as opposed to an operator shrinking the built-in clean room from an
+// unrelated config key without being shown the trade.
+func TestSteps_StepGlobsNarrowExplicitly(t *testing.T) {
+	workspace := t.TempDir()
+	for _, f := range []string{"CLAUDE.md", "custom.md"} {
+		if err := os.WriteFile(filepath.Join(workspace, f), []byte("x"), 0o644); err != nil {
+			t.Fatalf("WriteFile %s: %v", f, err)
+		}
+	}
+
+	def := Steps(nil)["strip"]
+	wctx := step.NewContext(nil)
+	wctx.Set("workspace", workspace)
+	if err := def.Runner(context.Background(), &exec.FakeRunner{}, wctx, step.PlanStep{Uses: "strip", Globs: []string{"custom.md"}}); err != nil {
+		t.Fatalf("strip: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(workspace, "custom.md")); !os.IsNotExist(err) {
-		t.Errorf("custom.md (the configured override) should have been stripped, stat err = %v", err)
+		t.Errorf("custom.md (the step's own glob) should have been stripped, stat err = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(workspace, "CLAUDE.md")); err != nil {
-		t.Errorf("CLAUDE.md must SURVIVE when a configured override replaces DefaultTargets, stat err = %v", err)
+		t.Errorf("CLAUDE.md must survive when a [[step]] sets its own globs, stat err = %v", err)
 	}
 }
 
@@ -225,4 +266,163 @@ func TestSteps_DefaultGlobsFallBackToDefaultTargets(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(workspace, "CLAUDE.md")); !os.IsNotExist(err) {
 		t.Errorf("CLAUDE.md (a DefaultTargets entry) should have been stripped, stat err = %v", err)
 	}
+}
+
+// TestSteps_DefaultTargetsPatternsReachStrip is the destructive half of the
+// carrier work, and the riskier half: `strip` os.RemoveAll's what it matches,
+// where Hide only renames. The MCP pattern rule therefore has to be verified
+// on THIS path too: strip shares globFold with ExpandTargets, so the resolver
+// is no longer what differs, but strip receives the RAW target list — patterns
+// included, no ExpandTargets pre-processing pass — and it deletes rather than
+// renames what that list resolves to.
+//
+// It pins both directions at once: an MCP carrier in an unenumerated
+// dot-directory is destroyed, and the reviewable tree — CI workflows above
+// all — survives. Over-stripping is the failure mode with no undo.
+func TestSteps_DefaultTargetsPatternsReachStrip(t *testing.T) {
+	workspace := t.TempDir()
+	write := func(rel string) string {
+		path := filepath.Join(workspace, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		return path
+	}
+
+	stripped := []string{
+		".mcp.json",
+		filepath.Join(".aurora", "mcp.json"),
+		filepath.Join(".zed", ".mcp.json"),
+		// The attacker writes the filename, and filepath.Match is case-sensitive
+		// where APFS is not — an exact-matching strip leaves these readable under
+		// a name the reviewer's open() resolves to. See globFold.
+		filepath.Join(".gemini", "MCP.json"),
+		filepath.Join(".windsurf", ".MCP.JSON"),
+	}
+	survives := []string{
+		filepath.Join(".github", "workflows", "ci.yml"),
+		"README.md", "go.mod", ".gitignore",
+		filepath.Join("src", "main.go"),
+		filepath.Join("sub", ".mcp.json"), // non-dot dir: outside the bounded rule
+	}
+	for _, rel := range append(append([]string{}, stripped...), survives...) {
+		write(rel)
+	}
+
+	def := Steps(nil)["strip"]
+	wctx := step.NewContext(nil)
+	wctx.Set("workspace", workspace)
+	if err := def.Runner(context.Background(), &exec.FakeRunner{}, wctx, step.PlanStep{Uses: "strip"}); err != nil {
+		t.Fatalf("strip: %v", err)
+	}
+
+	for _, rel := range stripped {
+		if _, err := os.Stat(filepath.Join(workspace, rel)); !os.IsNotExist(err) {
+			t.Errorf("MCP carrier %q survived strip, stat err = %v", rel, err)
+		}
+	}
+	for _, rel := range survives {
+		if _, err := os.Stat(filepath.Join(workspace, rel)); err != nil {
+			t.Errorf("strip destroyed reviewable content %q: %v", rel, err)
+		}
+	}
+}
+
+// TestValidateStripGlob_RejectsWorkspaceRoot covers the shape with no undo.
+// The escape guards are all about leaving ${workspace}; this one is about
+// naming ${workspace} itself. `filepath.Clean(".")` is ".", which the resolver
+// would hand back as the workspace root, and strip os.RemoveAll's what it is
+// handed — so `strip_globs = ["."]` deletes the whole clean room mid-run while
+// passing every other check (not empty, not absolute, no ".." segment).
+//
+// Every spelling that CLEANS to the root is listed, not just the literal ".".
+func TestValidateStripGlob_RejectsWorkspaceRoot(t *testing.T) {
+	// Spellings that must be named as the workspace root specifically.
+	for _, g := range []string{".", "./", ".//", "./.", "\\", ".\\"} {
+		err := validateStripGlob(g)
+		if err == nil {
+			t.Errorf("validateStripGlob(%q) = nil, must reject the workspace root", g)
+			continue
+		}
+		if !strings.Contains(err.Error(), "workspace root") {
+			t.Errorf("validateStripGlob(%q) = %v, want a workspace-root rejection", g, err)
+		}
+	}
+	// "/" is rejected as absolute on Unix and as the root on Windows; either
+	// verdict is correct, only "accepted" is not.
+	if err := validateStripGlob("/"); err == nil {
+		t.Error(`validateStripGlob("/") = nil, must be rejected`)
+	}
+	// Control: an ordinary glob still passes, so the guard above is not
+	// rejecting everything.
+	for _, g := range []string{".mcp.json", ".*/mcp.json", "*.md", "docs/."} {
+		if err := validateStripGlob(g); err != nil {
+			t.Errorf("validateStripGlob(%q) = %v, want nil", g, err)
+		}
+	}
+}
+
+// TestSteps_StripRefusesWorkspaceRootGlob is the same guard proven where it
+// matters — on the runner that calls os.RemoveAll — through BOTH entry points
+// an operator has: [workflow] strip_globs in config, and `globs` on a [[step]].
+//
+// The fixture is a t.TempDir() this test creates itself and nothing else, for
+// the obvious reason: the failure mode under test is a recursive delete of the
+// directory named by the glob. A regression here destroys only the sandbox.
+func TestSteps_StripRefusesWorkspaceRootGlob(t *testing.T) {
+	// seed builds a throwaway workspace with a sentinel file and a sentinel
+	// subtree, and returns a check that both survived.
+	seed := func(t *testing.T) (string, func(t *testing.T)) {
+		t.Helper()
+		workspace := t.TempDir()
+		nested := filepath.Join(workspace, "src", "main.go")
+		if err := os.MkdirAll(filepath.Dir(nested), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		for _, p := range []string{filepath.Join(workspace, "keep.txt"), nested} {
+			if err := os.WriteFile(p, []byte("reviewable"), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+		}
+		return workspace, func(t *testing.T) {
+			t.Helper()
+			for _, p := range []string{filepath.Join(workspace, "keep.txt"), nested} {
+				if _, err := os.Stat(p); err != nil {
+					t.Errorf("strip destroyed %q through a whole-root glob: %v", p, err)
+				}
+			}
+		}
+	}
+
+	t.Run("step globs", func(t *testing.T) {
+		workspace, survived := seed(t)
+		err := runStrip(t, &exec.FakeRunner{}, workspace, []string{"."})
+		if err == nil {
+			t.Error(`strip accepted globs = ["."], which resolves to the workspace root`)
+		} else if !strings.Contains(err.Error(), "workspace root") {
+			t.Errorf("strip rejected the root glob with the wrong reason: %v", err)
+		}
+		survived(t)
+	})
+
+	t.Run("configured strip_globs", func(t *testing.T) {
+		workspace, survived := seed(t)
+		def, ok := Steps([]string{"."})["strip"]
+		if !ok {
+			t.Fatal(`Steps must contribute the strip verb`)
+		}
+		wctx := step.NewContext(nil)
+		wctx.Set("workspace", workspace)
+		// No step globs: the configured default set applies, root glob included.
+		err := def.Runner(context.Background(), &exec.FakeRunner{}, wctx, step.PlanStep{Uses: "strip"})
+		if err == nil {
+			t.Error(`strip accepted strip_globs = ["."], which resolves to the workspace root`)
+		} else if !strings.Contains(err.Error(), "workspace root") {
+			t.Errorf("strip rejected the root glob with the wrong reason: %v", err)
+		}
+		survived(t)
+	})
 }

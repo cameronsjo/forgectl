@@ -90,6 +90,17 @@ func isLocalRepo(repo string) bool {
 
 // Teardown removes a sandbox dir. Idempotent: an empty workspace or an
 // already-removed dir is not an error.
+//
+// LOAD-BEARING — ACTS ON THE UNRESOLVED PATH. workspace is passed to
+// os.RemoveAll exactly as recorded, with no EvalSymlinks. Its caller for a
+// breadcrumb-loaded session, pr.validateWorkspace, validates the prefix on
+// the RESOLVED path instead, and the mismatch is deliberate: a symlink whose
+// name lacks the sandbox prefix but whose target carries it validates there,
+// and RemoveAll here unlinks the link rather than following it to the target.
+// Resolving workspace before RemoveAll — to "match" what was validated —
+// would convert those cases into real deletions outside any sandbox. Note
+// RemoveAll declines to follow only the FINAL component: a symlinked PARENT
+// component is followed, which pr.validateWorkspace documents as accepted.
 func Teardown(_ context.Context, _ exec.Runner, workspace string) error {
 	if workspace == "" {
 		slog.Debug("Teardown: no workspace, nothing to remove.")

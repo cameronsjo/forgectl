@@ -32,8 +32,8 @@ const logKeepDays = 7
 //	match = "~/Projects/minute"
 //	model = "sonnet"
 //
-//	[net]                # forgectl net — cached internal-network reachability probe
-//	probe_host = "1.1.1.1"
+//	[net]                # forgectl net — cached reachability probe
+//	probe_host = "1.1.1.1"           # baked default; public host
 //	probe_port = 443
 //	ttl_seconds = 60
 //	timeout_ms = 1000
@@ -129,11 +129,12 @@ func (lc LaunchConfig) IsZero() bool {
 	return len(lc.Projects) == 0 && lc.Defaults.isZero()
 }
 
-// WorkflowConfig is the [workflow] section: the default strip-list the
-// `strip` step falls back to when a workflow file's [[step]] omits `globs`.
-// Its own built-in fallback is now sourced from quarantine.DefaultTargets
-// (#20); this section remains the one config-driven override the DSL
-// exposes.
+// WorkflowConfig is the [workflow] section: extra strip-list entries the
+// `strip` step adds when a workflow file's [[step]] omits `globs`. It WIDENS
+// quarantine.DefaultTargets (#20) rather than replacing it — the built-in
+// clean room is forgectl's own control, not something an operator narrows from
+// this key by accident; see quarantine.stripFallback. To use a narrower list,
+// set `globs` on the [[step]] itself.
 type WorkflowConfig struct {
 	StripGlobs []string `toml:"strip_globs"`
 }
@@ -144,10 +145,12 @@ func (wc WorkflowConfig) IsZero() bool {
 }
 
 // NetConfig is the [net] section: the endpoint `forgectl net` probes for
-// internal-network reachability, and how long a cached answer stays fresh.
-// A zero value means "section absent" — internal/net's Client applies its own
-// built-in defaults (probe_host 1.1.1.1, probe_port 443, ttl_seconds 60,
-// timeout_ms 1000) for whichever fields are left unset.
+// reachability, and how long a cached answer stays fresh. A zero value means
+// "section absent" — internal/net's Client applies its own built-in defaults
+// (probe_host 1.1.1.1, probe_port 443, ttl_seconds 60, timeout_ms 1000) for
+// whichever fields are left unset. Those defaults point at a public host, so
+// an unconfigured [net] answers "is the internet up" — set probe_host to an
+// internal-only endpoint for an internal-network answer.
 type NetConfig struct {
 	ProbeHost  string `toml:"probe_host"`
 	ProbePort  int    `toml:"probe_port"`

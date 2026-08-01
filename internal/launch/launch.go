@@ -73,10 +73,17 @@ func ResumeArgs(p Profile, model, sessionID string, fork bool) []string {
 // args verbatim. Injected flags go first so a user override (e.g. --model) wins
 // under Claude Code's last-flag-wins parsing. Interactive-only flags (--ide,
 // --exclude-…, --resume) are intentionally omitted — they break -p/--print.
+//
+// --strict-mcp-config is GATED on Profile.StrictMCP, never unconditional: this
+// function also serves the operator's ordinary `forgectl launch`, which must
+// keep its discovered MCP servers.
 func BuilderArgs(p Profile, userArgs []string) []string {
 	args := []string{"--permission-mode", p.PermissionMode}
 	if p.AllowDanger {
 		args = append(args, "--allow-dangerously-skip-permissions")
+	}
+	if p.StrictMCP {
+		args = append(args, "--strict-mcp-config")
 	}
 	args = append(args, "--model", p.Model)
 	for _, d := range p.AddDir {

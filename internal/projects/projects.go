@@ -114,14 +114,11 @@ func (c *Client) discoverCanonicalHost(ctx context.Context, hostDir string) []Pr
 	return out
 }
 
-// discoverProject builds a Project for dir, populating GitStatus when dir is
-// a git repo (gitStatus itself no-ops to a zero value for non-git dirs).
+// discoverProject builds a Project for dir. gitStatus stats .git itself and
+// returns StatusNotRepo for a miss, so it's always safe to call — no extra
+// subprocess is spawned for a non-git dir.
 func (c *Client) discoverProject(ctx context.Context, name, dir string) Project {
-	p := Project{Name: name, Dir: dir}
-	if isGitRepo(dir) {
-		p.Status = gitStatus(ctx, c.run, dir)
-	}
-	return p
+	return Project{Name: name, Dir: dir, Status: gitStatus(ctx, c.run, dir)}
 }
 
 // isGitRepo reports whether dir has a .git marker.
@@ -175,15 +172,20 @@ func (c *Client) localRepos(ctx context.Context) ([]Repo, error) {
 			LocalPath: p.Dir,
 			Status:    p.Status,
 		}
-		url, err := c.run.Run(ctx, "git", "-C", p.Dir, "remote", "get-url", "origin")
-		if err == nil {
-			url = strings.TrimSpace(url)
-			if host, owner, name := parseRemoteURL(url); name != "" {
-				r.Host, r.Owner, r.Name = host, owner, name
-				// SSHURL is contractually an SSH clone URL; an HTTPS origin would
-				// mislabel it in the JSON inventory, so only store SSH-form origins.
-				if isSSHURL(url) {
-					r.SSHURL = url
+		// A non-repo has no origin of its own — `git -C` walks up to find one,
+		// which would misattribute it to an ancestor repo's origin (and then
+		// dedup it away). Skip the spawn entirely for that case.
+		if p.Status.State != StatusNotRepo {
+			url, err := c.run.Run(ctx, "git", "-C", p.Dir, "remote", "get-url", "origin")
+			if err == nil {
+				url = strings.TrimSpace(url)
+				if host, owner, name := parseRemoteURL(url); name != "" {
+					r.Host, r.Owner, r.Name = host, owner, name
+					// SSHURL is contractually an SSH clone URL; an HTTPS origin would
+					// mislabel it in the JSON inventory, so only store SSH-form origins.
+					if isSSHURL(url) {
+						r.SSHURL = url
+					}
 				}
 			}
 		}

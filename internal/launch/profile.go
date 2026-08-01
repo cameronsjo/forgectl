@@ -53,6 +53,22 @@ type Profile struct {
 	Env            map[string]string
 	AddDir         []string
 	Match          string // original `match` of the winning project; "" when defaults-only
+
+	// StrictMCP emits `--strict-mcp-config`, which makes Claude Code use ONLY
+	// MCP servers passed via --mcp-config and ignore every discovered MCP
+	// configuration. It is a security control for the clean-room review, where
+	// the workspace holds a third party's checkout: a `.mcp.json` there is
+	// executed at session start, before the agent calls any tool, so plan mode
+	// and the workspace allowlist are both downstream of it.
+	//
+	// Deliberately NOT surfaced in config and NOT defaulted on: it is set by the
+	// review dispatch alone (internal/pr launchInline). An operator's ordinary
+	// `forgectl launch` must keep its MCP servers — flipping this globally would
+	// strip every user's tools with no error message.
+	//
+	// Claude-only. Codex has no equivalent flag and launchCodex builds a fresh
+	// Profile that never sets this, so it cannot silently no-op there.
+	StrictMCP bool
 }
 
 // Built-in fallbacks applied when a value is set neither by a project nor by

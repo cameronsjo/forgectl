@@ -52,6 +52,41 @@ func (h *initHarness) configPath() string {
 	return childConfigPath(h.base)
 }
 
+// TestInitSections_CoversEveryStructSection derives the expected set from
+// config.Config by reflection (configStructSections, shared with modules_test.go
+// and config_cmd_test.go) and asserts initSections scaffolds all of it.
+//
+// It lives here, beside the list it guards, but it is the same anti-drift gate
+// TestConfig_PrintsEverySection applies to the renderer — and it is the reason
+// fixing initSections belonged in this change: the list had silently omitted
+// [preflight] and [update], the identical hand-maintained-list-diverges-from-
+// struct defect the config renderer carried.
+func TestInitSections_CoversEveryStructSection(t *testing.T) {
+	sections := configStructSections(t)
+	if len(sections) == 0 {
+		t.Fatal("configStructSections derived no sections — the pin would pass vacuously")
+	}
+
+	scaffolded := map[string]bool{}
+	for _, s := range initSections {
+		if s.name == "" {
+			continue // the host-scalar pseudo-section owns no table header
+		}
+		if !sections[s.name] {
+			t.Errorf("initSections scaffolds %q, which is not a struct-kind section of config.Config", s.name)
+		}
+		if scaffolded[s.name] {
+			t.Errorf("initSections scaffolds %q twice", s.name)
+		}
+		scaffolded[s.name] = true
+	}
+	for name := range sections {
+		if !scaffolded[name] {
+			t.Errorf("config section %q has no initSections entry — `forgectl init` would not scaffold it", name)
+		}
+	}
+}
+
 // TestIntegration_Init_FreshWritesEverySection covers the empty-file case: a
 // fresh `forgectl init` must write the host-scalar preamble plus every
 // config.Config struct-kind section, each with its annotated template.
@@ -59,12 +94,11 @@ func TestIntegration_Init_FreshWritesEverySection(t *testing.T) {
 	h := newInitHarness(t)
 	stdout, _ := h.run(t)
 
-	for _, label := range []string{
-		"host scalars", "launch", "workflow", "net", "bench",
-		"docker", "clean", "sessions", "review", "docs",
-	} {
-		if !strings.Contains(stdout, "added:            "+label) {
-			t.Errorf("stdout missing \"added: %s\"; got:\n%s", label, stdout)
+	// Labels come from initSections rather than a fourth hand-written copy;
+	// TestInitSections_CoversEveryStructSection is what keeps that list honest.
+	for _, s := range initSections {
+		if !strings.Contains(stdout, "added:            "+s.label) {
+			t.Errorf("stdout missing \"added: %s\"; got:\n%s", s.label, stdout)
 		}
 	}
 
@@ -73,10 +107,16 @@ func TestIntegration_Init_FreshWritesEverySection(t *testing.T) {
 		t.Fatalf("read config.toml: %v", err)
 	}
 	body := string(data)
+	// hasSection is the production presence predicate — asserting through it
+	// covers [launch], whose scaffold writes [launch.defaults] rather than a
+	// bare [launch] header.
+	for _, s := range initSections {
+		if !hasSection(data, s.name) {
+			t.Errorf("config.toml has no %q section after fresh init; got:\n%s", s.label, body)
+		}
+	}
 	for _, want := range []string{
 		"no_icons  = false", "log_level = \"off\"", "log_file  = \"\"",
-		"[launch.defaults]", "[workflow]", "[net]", "[bench]",
-		"[docker]", "[clean]", "[sessions]", "[review]", "[docs]",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("config.toml missing %q after fresh init; got:\n%s", want, body)
@@ -88,6 +128,32 @@ func TestIntegration_Init_FreshWritesEverySection(t *testing.T) {
 	// precedes every [section].
 	if !strings.HasPrefix(body, "# ── forgectl: global settings") {
 		t.Errorf("config.toml does not start with the host-scalar preamble; first line: %q", strings.SplitN(body, "\n", 2)[0])
+	}
+}
+
+// TestIntegration_Init_NetScaffoldNamesDefaultPublic covers issue #186: the
+// [net] scaffold's baked probe_host is a public host, and the template must
+// say so — an untouched scaffold is a no-op posture, but that posture should
+// not read as an internal-network default when it isn't one.
+func TestIntegration_Init_NetScaffoldNamesDefaultPublic(t *testing.T) {
+	h := newInitHarness(t)
+	h.run(t)
+
+	data, err := os.ReadFile(h.configPath())
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	body := string(data)
+	netIdx := strings.Index(body, "[net]")
+	if netIdx == -1 {
+		t.Fatalf("config.toml missing [net] section; got:\n%s", body)
+	}
+	probeHostLine := body[netIdx:]
+	if end := strings.Index(probeHostLine, "\n\n"); end != -1 {
+		probeHostLine = probeHostLine[:end]
+	}
+	if !strings.Contains(probeHostLine, "public") {
+		t.Errorf("[net] scaffold does not name the baked probe_host default as public; got:\n%s", probeHostLine)
 	}
 }
 
@@ -150,12 +216,9 @@ func TestIntegration_Init_Idempotent(t *testing.T) {
 	}
 
 	stdout, _ := h.run(t)
-	for _, label := range []string{
-		"host scalars", "launch", "workflow", "net", "bench",
-		"docker", "clean", "sessions", "review", "docs",
-	} {
-		if !strings.Contains(stdout, "already present: "+label) {
-			t.Errorf("second run stdout missing \"already present: %s\"; got:\n%s", label, stdout)
+	for _, s := range initSections {
+		if !strings.Contains(stdout, "already present: "+s.label) {
+			t.Errorf("second run stdout missing \"already present: %s\"; got:\n%s", s.label, stdout)
 		}
 	}
 	if !strings.Contains(stdout, "0 section(s) added") {

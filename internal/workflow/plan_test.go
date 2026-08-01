@@ -35,9 +35,13 @@ func TestBuildPlan_EmbeddedCleanRoomReview(t *testing.T) {
 		t.Errorf("worktree.Ref = %q, want main (the branch param default)", worktree.Ref)
 	}
 
+	// The built-in strip step carries NO globs on purpose: it inherits the
+	// canonical default set (quarantine.DefaultTargets, via [workflow]
+	// strip_globs). A literal list here is a second copy of a security
+	// enumeration, and the one that used to live here had already drifted.
 	strip := plan.Steps[1]
-	if len(strip.Globs) != 5 {
-		t.Errorf("strip.Globs = %d entries, want 5", len(strip.Globs))
+	if len(strip.Globs) != 0 {
+		t.Errorf("strip.Globs = %v, want none (inherit the canonical default set)", strip.Globs)
 	}
 
 	launch := plan.Steps[2]

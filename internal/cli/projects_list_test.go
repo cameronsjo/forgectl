@@ -129,14 +129,48 @@ func TestRenderRepoTable_EmptyList_WritesHeaderAndZeroCount(t *testing.T) {
 func TestRenderRepoTable_ClonedCleanRepo_StatusIsClean(t *testing.T) {
 	var out, errOut bytes.Buffer
 	repos := []projects.Repo{
-		{Host: "github", Owner: "cameronsjo", Name: "forgectl", Cloned: true},
-		// Status is zero-value: Label()="[clean]"; Trim("[]")="clean".
+		{Host: "github", Owner: "cameronsjo", Name: "forgectl", Cloned: true,
+			Status: projects.GitStatus{State: projects.StatusOK}},
 	}
 	if err := renderRepoTable(&out, &errOut, repos); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !strings.Contains(out.String(), "clean") {
 		t.Errorf("cloned-clean repo: want 'clean' in STATUS column, got: %q", out.String())
+	}
+}
+
+func TestRenderRepoTable_NotARepo_IsNotReportedClean(t *testing.T) {
+	var out, errOut bytes.Buffer
+	repos := []projects.Repo{
+		{Host: "", Name: "notes", Cloned: true,
+			Status: projects.GitStatus{State: projects.StatusNotRepo}},
+	}
+	if err := renderRepoTable(&out, &errOut, repos); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(out.String(), "clean") {
+		t.Errorf("non-repo: STATUS column must not say 'clean', got: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "not-a-repo") {
+		t.Errorf("non-repo: want 'not-a-repo' in STATUS column, got: %q", out.String())
+	}
+}
+
+func TestRenderRepoTable_UnknownStatus_IsNotReportedClean(t *testing.T) {
+	var out, errOut bytes.Buffer
+	repos := []projects.Repo{
+		{Host: "github", Owner: "cameronsjo", Name: "flaky", Cloned: true,
+			Status: projects.GitStatus{State: projects.StatusUnknown}},
+	}
+	if err := renderRepoTable(&out, &errOut, repos); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(out.String(), "clean") {
+		t.Errorf("failed-check repo: STATUS column must not say 'clean', got: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "unknown") {
+		t.Errorf("failed-check repo: want 'unknown' in STATUS column, got: %q", out.String())
 	}
 }
 

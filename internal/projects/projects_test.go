@@ -419,6 +419,71 @@ func TestDiscover_FindsBothCanonicalAndFlatLayouts(t *testing.T) {
 	}
 }
 
+// TestDiscover_NonGitDir_StatusIsNotRepo reuses the three-way fixture from
+// TestDiscover_FindsBothCanonicalAndFlatLayouts (a canonical clone, a flat
+// clone, and a non-git dir) to assert the state each one lands on: the
+// non-git dir must be StatusNotRepo, and — the control proving the fix
+// didn't just blank the status for everyone — the real repo must be
+// StatusOK.
+func TestDiscover_NonGitDir_StatusIsNotRepo(t *testing.T) {
+	tmp := t.TempDir()
+	mkCanonicalGitDir(t, tmp, "github", "cameronsjo", "forgectl")
+	mkGitDir(t, tmp, "homeclaw")
+	if err := os.Mkdir(filepath.Join(tmp, "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}}
+	projs, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	byName := make(map[string]Project, len(projs))
+	for _, p := range projs {
+		byName[p.Name] = p
+	}
+
+	if got := byName["notes"].Status.State; got != StatusNotRepo {
+		t.Errorf("non-git dir: Status.State = %q, want %q", got, StatusNotRepo)
+	}
+	if got := byName["homeclaw"].Status.State; got != StatusOK {
+		t.Errorf("control real repo: Status.State = %q, want %q", got, StatusOK)
+	}
+}
+
+// TestLocalRepos_NonRepo_SpawnsNoRemoteLookup pins claim 3 (no ancestor-origin
+// escape) and the paired spawn reduction: a non-git dir must not trigger
+// `git remote get-url origin` at all — that call would walk up past the
+// non-repo dir and pick up an ancestor's origin. Filters fake.Calls by
+// content (dir + "remote"), never by index, since ordering is not something
+// this test should depend on.
+func TestLocalRepos_NonRepo_SpawnsNoRemoteLookup(t *testing.T) {
+	tmp := t.TempDir()
+	mkGitDir(t, tmp, "realrepo")
+	nonRepo := filepath.Join(tmp, "notes")
+	if err := os.Mkdir(nonRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "", nil
+	}}
+	c := &Client{Dir: tmp, run: fake}
+
+	if _, err := c.localRepos(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, call := range fake.Calls {
+		if call.Name != "git" || len(call.Args) < 2 {
+			continue
+		}
+		if call.Args[1] == nonRepo && strings.Contains(strings.Join(call.Args, " "), "remote") {
+			t.Errorf("remote get-url was spawned for the non-repo dir: %v", call.Args)
+		}
+	}
+}
+
 // TestDiscover_CanonicalHostBucketMultipleOwnersAndRepos exercises the walk
 // beyond a single owner/repo pair — Inventory/pick/list all depend on every
 // canonical clone surfacing, not just the first found.

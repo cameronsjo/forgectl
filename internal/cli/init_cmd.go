@@ -37,23 +37,22 @@ log_file  = ""    # empty = auto (daily rotation, 7 days kept); "-" = stderr
 
 `
 
-// workflowScaffold is the [workflow] section: the default strip-list glob
-// fallback (WorkflowConfig.IsZero — config.go). An empty list is already the
-// no-op default; quarantine.DefaultTargets is the built-in fallback the
-// `strip` step applies when this stays empty.
+// workflowScaffold is the [workflow] section: extra strip-list globs added to
+// the built-in set (WorkflowConfig.IsZero — config.go). An empty list is
+// already the no-op default; quarantine.DefaultTargets applies either way.
 const workflowScaffold = `
-# ── workflow: default strip-list glob fallback (forgectl workflow) ─────────
+# ── workflow: extra strip-list globs (forgectl workflow) ───────────────────
 [workflow]
-strip_globs = [] # empty = falls back to quarantine.DefaultTargets
+strip_globs = [] # ADDED to quarantine.DefaultTargets; to narrow, set globs on the [[step]]
 `
 
 // netScaffold is the [net] section. Values mirror internal/net's own baked
 // constants (defaultProbeHost/-Port/-TTLSeconds/-TimeoutMs), so an untouched
 // scaffold is a no-op posture.
 const netScaffold = `
-# ── net: cached internal-network reachability probe (forgectl net) ─────────
+# ── net: cached reachability probe (forgectl net) ───────────────────────────
 [net]
-probe_host  = "1.1.1.1" # baked default
+probe_host  = "1.1.1.1" # baked default; public — set an internal-only host for an internal-network answer
 probe_port  = 443       # baked default
 ttl_seconds = 60        # cached result freshness window, seconds
 timeout_ms  = 1000      # probe dial timeout, milliseconds
@@ -102,20 +101,19 @@ default_type = ""           # empty = every kind; node|python|go|build
 // required, via config or $FORGECTL_SESSIONS_DSN) and machine's baked default
 // is the current machine's short hostname — neither is a value this template
 // can bake in without lying on a different machine, so both stay commented.
-// metrics_dir/runbooks_dir have state-home-derived baked defaults, but sync.go
-// (internal/sessions/sync.go) reads a config-supplied value LITERALLY — it does
-// NOT expand ~ the way clean/bench do — so an active `metrics_dir =
-// "~/.local/state/cadence/metrics"` would resolve to a directory named "~" and silently
-// break `forgectl sessions sync` (every session skipped, exit 0). They stay
-// commented so the absent-key fallback (the correctly home-expanded default)
-// applies; the annotation warns anyone who uncomments to use an absolute path.
+// metrics_dir/runbooks_dir have state-home-derived baked defaults; sync.go
+// (internal/sessions/sync.go) expands a leading ~ the same way config,
+// launch and clean do, and an explicitly-configured metrics_dir that doesn't exist on disk
+// (a typo, or a path moved since) now fails loudly instead of silently
+// syncing zero sessions. They stay commented so the absent-key fallback
+// (the home-expanded default) applies.
 const sessionsScaffold = `
 # ── sessions: cross-machine operational concordance ETL (forgectl sessions) ───────
 [sessions]
 # dsn = "postgres://user@host:5433/concordance" # or $FORGECTL_SESSIONS_DSN; required
 # machine = "" # default: short hostname
-# metrics_dir  = ""  # default: ${XDG_STATE_HOME:-~/.local/state}/cadence/metrics
-# runbooks_dir = ""  # default: ${XDG_STATE_HOME:-~/.local/state}/cadence/runbooks
+# metrics_dir  = ""  # default: ${XDG_STATE_HOME:-~/.local/state}/cadence/metrics; ~ expanded
+# runbooks_dir = ""  # default: ${XDG_STATE_HOME:-~/.local/state}/cadence/runbooks; ~ expanded
 `
 
 // reviewScaffold is the [review] section. owners mirrors
@@ -141,6 +139,31 @@ const docsScaffold = `
 addr = "" # empty = 127.0.0.1 with a random port; set host:port to pin one
 `
 
+// preflightScaffold is the [preflight] section. Neither field has a baked
+// literal default — PreflightConfig's zero value means LocateCatalog
+// auto-locates the catalog (installed_plugins.json, then a cache-dir glob) and
+// DefaultSet contributes nothing beyond the catalog's own core tier — so both
+// stay commented rather than baking in a path that would be wrong on the next
+// machine.
+const preflightScaffold = `
+# ── preflight: plugin/catalog alignment (forgectl preflight) ────────────────
+[preflight]
+# catalog_path = "" # override auto-locate; direct path to the generated catalog.md
+# default_set  = [] # extra "plugin@marketplace" entries always folded into the core-tier target
+`
+
+// updateScaffold is the [update] section. Empty is the real default for both
+// fields AND it means something in each case — an empty roster runs every
+// roster step (UpdateConfig's own doc comment), and an empty log_dir falls back
+// to config.UpdateLogDir() — so both are written active, mirroring
+// workflowScaffold's `strip_globs = []` and docsScaffold's `addr = ""`.
+const updateScaffold = `
+# ── update: weekly package-manager + OS maintenance (forgectl update) ───────
+[update]
+roster  = [] # step names to run when --only is omitted; empty = every roster step
+log_dir = "" # transcript log directory; empty = <config dir>/update-logs
+`
+
 // initSection is one scaffoldable block: a config.toml section (or, for the
 // empty name, the host-scalar preamble) plus its annotated template.
 type initSection struct {
@@ -154,6 +177,13 @@ type initSection struct {
 // inserts ahead of existing content; every other block is appended in order
 // via appendLaunchSection. [launch] reuses launchScaffold (launch_init.go)
 // directly rather than a second copy.
+//
+// This list is hand-maintained and therefore drifts: it silently omitted
+// [preflight] and [update] for as long as those sections existed, so `forgectl
+// init` — whose whole job is "scaffold EVERY section" — scaffolded 9 of 11.
+// TestInitSections_CoversEveryStructSection derives the expected set from
+// config.Config by reflection and fails the moment a new section lands here
+// unscaffolded.
 var initSections = []initSection{
 	{"", "host scalars", hostScalarsScaffold},
 	{"launch", "launch", launchScaffold},
@@ -165,6 +195,8 @@ var initSections = []initSection{
 	{"sessions", "sessions", sessionsScaffold},
 	{"review", "review", reviewScaffold},
 	{"docs", "docs", docsScaffold},
+	{"preflight", "preflight", preflightScaffold},
+	{"update", "update", updateScaffold},
 }
 
 // initModule declares the full-scaffold convenience extension (ADR-0005). It

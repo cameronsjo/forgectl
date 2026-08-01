@@ -7,6 +7,8 @@
 //   - RejectOptionLike rejects a leading-'-' repo and ref before any Runner call.
 //   - Teardown is idempotent: an empty workspace is a no-op and issues no
 //     Runner call.
+//   - Teardown follows a symlinked PARENT component (accepted behaviour, not
+//     a desired guarantee — pinned so a change to it is visible).
 //   - WithinWorkspace rejects a symlink escaping the workspace.
 package sandbox
 
@@ -182,6 +184,50 @@ func TestTeardown_Idempotent(t *testing.T) {
 	// Second call on the already-removed dir must not error.
 	if err := Teardown(context.Background(), fake, workspace); err != nil {
 		t.Fatalf("second (idempotent) Teardown must not error, got: %v", err)
+	}
+}
+
+// TestTeardown_FollowsSymlinkedParent documents ACCEPTED BEHAVIOUR, not
+// desired behaviour: os.RemoveAll declines to follow only the FINAL path
+// component, so a workspace reached through a symlinked PARENT is deleted at
+// its real location.
+//
+// It matters because issue #184 retired the temp-root bound in
+// pr.validateWorkspace, which rejected exactly this shape (WithinWorkspace
+// resolves symlinks on both sides). Nothing rejects it now, so the reach is
+// real and worth pinning — if a future change makes Teardown resolve or
+// refuse a symlinked parent, this test fails and the decision is deliberate
+// rather than accidental. Everything below stays inside one t.TempDir().
+func TestTeardown_FollowsSymlinkedParent(t *testing.T) {
+	root := t.TempDir()
+	fake := &exec.FakeRunner{}
+
+	realParent := filepath.Join(root, "realparent")
+	victim := filepath.Join(realParent, "forgectl-workflow-x")
+	if err := os.MkdirAll(victim, 0o700); err != nil {
+		t.Fatalf("mkdir victim: %v", err)
+	}
+	canary := filepath.Join(realParent, "canary")
+	if err := os.Mkdir(canary, 0o700); err != nil {
+		t.Fatalf("mkdir canary: %v", err)
+	}
+	link := filepath.Join(root, "plink")
+	if err := os.Symlink(realParent, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	if err := Teardown(context.Background(), fake, filepath.Join(link, "forgectl-workflow-x")); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if _, err := os.Stat(victim); !os.IsNotExist(err) {
+		t.Errorf("accepted behaviour changed: Teardown no longer follows a symlinked parent, stat err = %v", err)
+	}
+	// Only the named component goes: the link and its siblings survive.
+	if _, err := os.Lstat(link); err != nil {
+		t.Errorf("the parent symlink itself must survive: %v", err)
+	}
+	if _, err := os.Stat(canary); err != nil {
+		t.Errorf("sibling of the target must survive: %v", err)
 	}
 }
 

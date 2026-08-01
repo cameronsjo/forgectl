@@ -3,15 +3,20 @@ package cli
 // Test plan for docker.go
 //
 // newDockerCmd / newDockerCmdForClient (Classification: API handler / cobra command)
-//   [x] Happy: `docker build [context]` reports the derived tag on stdout
+//   [x] Happy: `docker build [context]` reports the derived tag on stdout,
+//       stderr silent when git metadata resolved
 //   [x] Happy: `docker run` with no --tag reuses the tag from a prior build
 //   [x] Happy: `docker shell` with no --tag reuses the tag from a prior build
 //   [x] Happy: subcommand aliases (b/r/sh) resolve to their canonical verb
+//   [x] Degraded (forgectl#187): `docker build` outside a git repo warns on
+//       stderr (naming the reason) and still reports a built tag on stdout
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,9 +56,9 @@ func dockerFixture(t *testing.T) (*dockerpkg.Client, *exec.FakeRunner) {
 func TestDockerBuildCmd_ReportsDerivedTag(t *testing.T) {
 	client, _ := dockerFixture(t)
 	cmd := newDockerCmdForClient(client)
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
-	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetErr(&stderr)
 	cmd.SetArgs([]string{"build"})
 
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
@@ -62,6 +67,47 @@ func TestDockerBuildCmd_ReportsDerivedTag(t *testing.T) {
 	want := "built myrepo:main-abc1234\n"
 	if stdout.String() != want {
 		t.Errorf("stdout = %q, want %q", stdout.String(), want)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty (git metadata was available)", stderr.String())
+	}
+}
+
+// TestDockerBuildCmd_NoGitMetadata_WarnsOnStderr covers forgectl#187's CLI
+// half: outside a git repo, Build degrades rather than erroring, and the
+// warning must reach the user via stderr — not slog, which defaults to a
+// log file the user isn't watching (internal/config/config.go).
+func TestDockerBuildCmd_NoGitMetadata_WarnsOnStderr(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, _ []string) (string, error) {
+			if name == "git" {
+				return "", errors.New("not a git repository")
+			}
+			return "", nil
+		},
+	}
+	cachePath := filepath.Join(t.TempDir(), "docker-lasttag")
+	client := dockerpkg.New(fake,
+		dockerpkg.WithLastTagPath(cachePath),
+		dockerpkg.WithNow(func() time.Time { return time.Now() }),
+	)
+	cmd := newDockerCmdForClient(client)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"build"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stderr.Len() == 0 {
+		t.Error("expected a stderr warning when git metadata is unavailable")
+	}
+	if !strings.Contains(stderr.String(), "not a git repository") {
+		t.Errorf("stderr = %q, want it to name the git failure reason", stderr.String())
+	}
+	if !strings.HasPrefix(stdout.String(), "built ") || !strings.Contains(stdout.String(), ":dev") {
+		t.Errorf("stdout = %q, want a built dev tag reported", stdout.String())
 	}
 }
 

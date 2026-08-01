@@ -178,9 +178,13 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 //     slips past any temp-root comparison. The recorded absolute path does not
 //     move.
 //  2. The PREFIX SCAN — under the current temp root AND carrying the sandbox
-//     prefix, the pair validateWorkspace uses. This is the belt: it still
-//     catches a workspace whose breadcrumb was deleted, or one left by a
-//     different forgectl invocation with its own sessions dir.
+//     prefix. This is the belt: it still catches a workspace whose breadcrumb
+//     was deleted, or one left by a different forgectl invocation with its
+//     own sessions dir. Unlike validateWorkspace (identity only, via the
+//     sandbox prefix — see breadcrumb.go), this scan also bounds at the
+//     current temp root; that's fine here, since this check only ever
+//     REFUSES a path, and refusing less under a stale $TMPDIR is covered by
+//     check 1 above.
 //
 // A breadcrumb that fails to load is skipped rather than fatal, matching List:
 // one corrupt file must not make every local review unreviewable. The prefix
@@ -207,7 +211,7 @@ func (c *Client) rejectCleanRoomPath(absPath string) error {
 		return nil
 	}
 	for dir := real; dir != tempRoot; dir = filepath.Dir(dir) {
-		if strings.HasPrefix(filepath.Base(dir), tempPrefix) {
+		if strings.HasPrefix(filepath.Base(dir), sandboxPrefix) {
 			return cleanRoomError(absPath, dir)
 		}
 		if parent := filepath.Dir(dir); parent == dir {
@@ -222,12 +226,17 @@ func (c *Client) rejectCleanRoomPath(absPath string) error {
 // $TMPDIR change.
 //
 // It deliberately does NOT go through List/loadBreadcrumb. That path runs
-// validateBreadcrumb, whose workspace check requires the recorded directory to
-// sit under osTempDir() — which reads $TMPDIR at call time. So under exactly
-// the $TMPDIR change this guard exists to defeat, List() skips every
-// breadcrumb and the authoritative half would see nothing. (That same
-// dependency makes `pr list`, `pr teardown`, and `pr cleanup` go blind after a
-// $TMPDIR change; out of scope here, flagged separately.)
+// validateBreadcrumb, whose workspace check used to require the recorded
+// directory to sit under osTempDir() — which reads $TMPDIR at call time — so
+// under a $TMPDIR change List() would skip every breadcrumb and the
+// authoritative half would see nothing. That dependency (which also blinded
+// `pr list`, `pr teardown`, and `pr cleanup` after a $TMPDIR change) is gone:
+// validateWorkspace no longer compares against the current temp root, only
+// the recorded sandbox prefix. This function still bypasses List/loadBreadcrumb
+// on its own merits — it needs the recorded string even when the workspace no
+// longer exists on disk (loadBreadcrumb's Stat would reject it), and going
+// straight to the breadcrumb set avoids paying content-schema validation for a
+// comparison that only ever refuses, never acts.
 //
 // Reading with the LOCATION guard but not the workspace-schema guard is safe
 // for this use: the recorded string is only ever compared against a candidate

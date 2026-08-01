@@ -16,8 +16,14 @@ repo = "${repo}"
 ref  = "${branch}"
 
 [[step]]
-uses  = "strip"            # the clean-room control; omit globs → configured default set
-globs = ["CLAUDE.md", "AGENTS.md", ".claude/", ".cursor/rules", ".github/copilot-instructions.md"]
+# The clean-room control. `globs` is deliberately OMITTED so the step inherits
+# the canonical set — quarantine.DefaultTargets, widened by any [workflow]
+# strip_globs, never narrowed by it. It used to carry its own literal copy of that
+# list, which is how it went stale: it never picked up CLAUDE.local.md, and it
+# would never have picked up .mcp.json, whose `command`+`args` the harness
+# executes at session start. A second copy of a security enumeration is the
+# enumeration going stale in slow motion.
+uses = "strip"
 
 [[step]]
 uses    = "launch"         # exports ${review}; mode sync = wait+collect, surface = fire into tmux/cmux
