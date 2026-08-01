@@ -93,6 +93,84 @@ func TestRepoKey(t *testing.T) {
 	}
 }
 
+// TestGitStatusText covers GitStatus.Text()'s state→string mapping directly,
+// including the combination Text()/Label() build on: an inspected-but-dirty
+// tree with commits ahead. That combination falls through to the
+// modified/untracked "parts" branch (its condition requires Modified==0 &&
+// Untracked==0 to take the "N ahead" branch), so the ahead count is silently
+// dropped from the rendered text — pinned here as documented existing
+// behavior, not something this diff changed.
+func TestGitStatusText(t *testing.T) {
+	tests := []struct {
+		name string
+		gs   GitStatus
+		want string
+	}{
+		{"uninspected zero value", GitStatus{}, ""},
+		{"not a repo", GitStatus{State: TreeNotRepo}, ""},
+		{"status call errored", GitStatus{State: TreeUnknown, Modified: 3}, ""},
+		{"clean", GitStatus{State: TreeOK}, "clean"},
+		{"ahead only", GitStatus{State: TreeOK, Ahead: 2}, "2 ahead"},
+		{"modified only", GitStatus{State: TreeOK, Modified: 3}, "3 modified"},
+		{"untracked only", GitStatus{State: TreeOK, Untracked: 1}, "1 untracked"},
+		{"modified and untracked", GitStatus{State: TreeOK, Modified: 2, Untracked: 1}, "2 modified, 1 untracked"},
+		{"ahead dropped when also dirty", GitStatus{State: TreeOK, Ahead: 5, Modified: 1}, "1 modified"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.gs.Text(); got != tc.want {
+				t.Errorf("Text() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGitStatusLabel_WrapsTextInBrackets confirms Label is purely Text()
+// wrapped in "[]", with the same empty-string passthrough for uninspected
+// states.
+func TestGitStatusLabel_WrapsTextInBrackets(t *testing.T) {
+	tests := []struct {
+		name string
+		gs   GitStatus
+		want string
+	}{
+		{"not a repo stays empty, not '[]'", GitStatus{State: TreeNotRepo}, ""},
+		{"clean", GitStatus{State: TreeOK}, "[clean]"},
+		{"modified", GitStatus{State: TreeOK, Modified: 1}, "[1 modified]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.gs.Label(); got != tc.want {
+				t.Errorf("Label() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRepoDisplayLine_NotRepoAndUnknownStates covers DisplayLine's badge
+// switch for the two non-TreeOK cloned states — the branch this diff
+// introduced to stop a not-a-repo or uninspected tree from falling through to
+// Status.Label()'s empty string (which used to render as the bare "[cloned]"
+// default before this switch existed).
+func TestRepoDisplayLine_NotRepoAndUnknownStates(t *testing.T) {
+	tests := []struct {
+		name string
+		repo Repo
+		want string
+	}{
+		{"cloned, not a repo", Repo{Name: "cache-dir", Cloned: true, Status: GitStatus{State: TreeNotRepo}}, "[not a repo]"},
+		{"cloned, status uninspected", Repo{Name: "broken", Cloned: true, Status: GitStatus{State: TreeUnknown}}, "[unknown]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.repo.DisplayLine()
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("DisplayLine() = %q; want badge %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRepoDisplayLine(t *testing.T) {
 	tests := []struct {
 		name string
@@ -100,7 +178,7 @@ func TestRepoDisplayLine(t *testing.T) {
 		want []string // substrings that must appear
 	}{
 		{"uncloned gitea", Repo{Host: "gitea", Owner: "cameron", Name: "homeclaw"}, []string{"git.sjo.lol", "homeclaw", "[uncloned]"}},
-		{"cloned clean github", Repo{Host: "github", Owner: "cameronsjo", Name: "forgectl", Cloned: true}, []string{"gh", "forgectl", "[clean]"}},
+		{"cloned clean github", Repo{Host: "github", Owner: "cameronsjo", Name: "forgectl", Cloned: true, Status: GitStatus{State: TreeOK}}, []string{"gh", "forgectl", "[clean]"}},
 		{"mirror flagged", Repo{Host: "gitea", Owner: "cameron", Name: "upstream", Mirror: true}, []string{"upstream (mirror)"}},
 	}
 	for _, tc := range tests {

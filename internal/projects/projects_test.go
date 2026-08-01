@@ -3,10 +3,13 @@ package projects
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -123,11 +126,13 @@ func TestInventory_MergeDedupCrossHost(t *testing.T) {
 		t.Errorf("gitea/newgt should be uncloned: %+v (found=%v)", r, ok)
 	}
 
-	// Local-only dirs: host "", cloned true.
-	for _, n := range []string{"scratch", "notes"} {
-		if r, ok := findRepo(repos, "", n); !ok || !r.Cloned {
-			t.Errorf("local-only %q should be present and cloned: %+v (found=%v)", n, r, ok)
-		}
+	// Local-only, git-inspected dir with no origin: cloned, TreeOK.
+	if r, ok := findRepo(repos, "", "scratch"); !ok || !r.Cloned || r.Status.State != TreeOK {
+		t.Errorf("local-only scratch should be present, cloned, and TreeOK: %+v (found=%v)", r, ok)
+	}
+	// Local-only, non-git dir: cloned, TreeNotRepo — must never read as clean.
+	if r, ok := findRepo(repos, "", "notes"); !ok || !r.Cloned || r.Status.State != TreeNotRepo || r.Status.Label() != "" {
+		t.Errorf("local-only notes (non-repo) should be present, cloned, TreeNotRepo, empty Label: %+v (found=%v)", r, ok)
 	}
 }
 
@@ -160,6 +165,45 @@ func TestInventory_DegradesWhenHostErrors(t *testing.T) {
 	}
 	if !strings.Contains(notes[0], "github") {
 		t.Errorf("note should name the failed host: %q", notes[0])
+	}
+}
+
+// TestInventory_NonRepoDirIsNotReportedClean pins the headline regression at
+// the Inventory boundary: a non-git directory sitting under Dir (e.g. a
+// .mypy_cache left behind by tooling) must surface with an empty Label(),
+// never "[clean]".
+func TestInventory_NonRepoDirIsNotReportedClean(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.Mkdir(filepath.Join(tmp, ".mypy_cache"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			switch name {
+			case "gh":
+				return "[]", nil
+			case "tea":
+				return "owner\tname\ttype\tssh\n", nil
+			}
+			return "", nil
+		},
+	}
+	c := &Client{Dir: tmp, run: fake}
+
+	repos, _, err := c.Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	r, ok := findRepo(repos, "", ".mypy_cache")
+	if !ok {
+		t.Fatalf(".mypy_cache not found in inventory: %+v", repos)
+	}
+	if r.Status.State != TreeNotRepo {
+		t.Errorf(".mypy_cache Status.State = %q, want %q", r.Status.State, TreeNotRepo)
+	}
+	if r.Status.Label() != "" {
+		t.Errorf(".mypy_cache Label() = %q, want empty — a non-repo dir must never read as clean", r.Status.Label())
 	}
 }
 
@@ -440,6 +484,128 @@ func TestDiscover_CanonicalHostBucketMultipleOwnersAndRepos(t *testing.T) {
 
 // TestCanonicalDest_LowercasesAndMirrorsKey confirms the filesystem tree
 // matches Repo.Key()'s case-insensitive identity.
+// TestDiscover_FanOutIsDeterministic guards against the fan-out phase turning
+// Discover's result order into a race: SliceStable sorts on (Name, Dir), so
+// two runs over the same fixture must return the identical ordered list even
+// though the status-inspection goroutines complete in arbitrary order.
+func TestDiscover_FanOutIsDeterministic(t *testing.T) {
+	tmp := t.TempDir()
+	for i := 0; i < 30; i++ {
+		name := fmt.Sprintf("repo%02d", i)
+		if i%3 == 0 {
+			// Every third entry is a plain non-git dir.
+			if err := os.Mkdir(filepath.Join(tmp, name), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		mkGitDir(t, tmp, name)
+	}
+
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}}
+
+	first, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("first Discover: %v", err)
+	}
+	second, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("second Discover: %v", err)
+	}
+
+	if len(first) != len(second) {
+		t.Fatalf("result length differs: %d vs %d", len(first), len(second))
+	}
+	for i := range first {
+		if first[i].Name != second[i].Name || first[i].Dir != second[i].Dir {
+			t.Errorf("order differs at index %d: (%q,%q) vs (%q,%q)",
+				i, first[i].Name, first[i].Dir, second[i].Name, second[i].Dir)
+		}
+	}
+}
+
+// TestDiscover_BoundsConcurrency proves the fan-out is actually concurrent
+// (peak > 1) and bounded (peak <= discoverConcurrency()) — the whole point of
+// the semaphore.
+func TestDiscover_BoundsConcurrency(t *testing.T) {
+	tmp := t.TempDir()
+	for i := 0; i < 30; i++ {
+		mkGitDir(t, tmp, fmt.Sprintf("repo%02d", i))
+	}
+
+	var inFlight, peak int64
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			cur := atomic.AddInt64(&inFlight, 1)
+			for {
+				p := atomic.LoadInt64(&peak)
+				if cur <= p || atomic.CompareAndSwapInt64(&peak, p, cur) {
+					break
+				}
+			}
+			time.Sleep(2 * time.Millisecond)
+			atomic.AddInt64(&inFlight, -1)
+			return "", nil
+		},
+	}
+	c := &Client{Dir: tmp, run: fake}
+
+	if _, err := c.Discover(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := atomic.LoadInt64(&peak)
+	if got <= 1 {
+		t.Errorf("peak concurrent git calls = %d, want > 1 (no fan-out observed)", got)
+	}
+	if want := int64(discoverConcurrency()); got > want {
+		t.Errorf("peak concurrent git calls = %d, want <= discoverConcurrency() (%d)", got, want)
+	}
+}
+
+// TestFanOut_AppliesFnAndPreservesOrder exercises the fanOut generic helper
+// in isolation, with no subprocess or filesystem dependency — Discover and
+// localRepos only prove it indirectly through their own behavior. Each
+// result must land at its item's index regardless of goroutine completion
+// order, so fn deliberately sleeps longer for earlier items (most likely to
+// finish last if index-tracking were broken).
+func TestFanOut_AppliesFnAndPreservesOrder(t *testing.T) {
+	items := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+	got := fanOut(items, func(i int) int {
+		time.Sleep(time.Duration(10-i) * time.Millisecond)
+		return i * i
+	})
+	if len(got) != len(items) {
+		t.Fatalf("len(got) = %d, want %d", len(got), len(items))
+	}
+	for i, v := range got {
+		want := i * i
+		if v != want {
+			t.Errorf("got[%d] = %d, want %d", i, v, want)
+		}
+	}
+}
+
+// TestFanOut_EmptyInput_ReturnsEmptySlice guards the zero-candidate path
+// (e.g. an empty projects directory) against a panic or a nil-vs-empty
+// mismatch propagating up to callers that range over the result.
+func TestFanOut_EmptyInput_ReturnsEmptySlice(t *testing.T) {
+	got := fanOut([]string{}, func(s string) int { return len(s) })
+	if len(got) != 0 {
+		t.Errorf("len(got) = %d, want 0", len(got))
+	}
+}
+
+// TestFanOut_SingleItem_NoWorkerPoolOverhead is the boundary companion to the
+// concurrency-bound tests: one item must not deadlock or panic on the
+// buffered semaphore of size discoverConcurrency().
+func TestFanOut_SingleItem_NoWorkerPoolOverhead(t *testing.T) {
+	got := fanOut([]int{7}, func(i int) int { return i + 1 })
+	if len(got) != 1 || got[0] != 8 {
+		t.Errorf("got = %v, want [8]", got)
+	}
+}
+
 func TestCanonicalDest_LowercasesAndMirrorsKey(t *testing.T) {
 	got := canonicalDest("/base", "GitHub", "CameronSjo", "Forgectl")
 	want := filepath.Join("/base", "github", "cameronsjo", "forgectl")

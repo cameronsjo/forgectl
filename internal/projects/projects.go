@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -47,50 +49,111 @@ func (c *Client) Discover(ctx context.Context) ([]Project, error) {
 	return c.discoverDir(ctx, c.Dir)
 }
 
+// candidate is a project directory found during discoverDir's serial
+// enumeration phase (phase 1) — a name/dir pair awaiting the git-status fan-
+// out (phase 2). No subprocess work happens while building candidates.
+type candidate struct {
+	name string
+	dir  string
+}
+
 // discoverDir is Discover's dir-parameterized body — PullAll walks a
 // caller-supplied subtree (`pull-all [dir]`) the same way Discover walks
 // c.Dir, so the two share this implementation rather than diverging.
+//
+// Enumeration (phase 1: filesystem walk only) runs serially — it's cheap.
+// Status inspection (phase 2: one `git status --porcelain` subprocess per
+// repo) is the expensive part, so it fans out with bounded concurrency.
 func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error) {
+	slog.Debug("Preparing to discover projects.", "dir", dir)
+	start := time.Now()
 	if _, err := os.Stat(dir); err != nil {
+		slog.Error("Failed to discover projects: directory not accessible.", "dir", dir, "error", err)
 		return nil, fmt.Errorf("projects directory not found: %s", dir)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		slog.Error("Failed to discover projects: cannot read directory.", "dir", dir, "error", err)
 		return nil, fmt.Errorf("reading projects directory: %w", err)
 	}
-	var projects []Project
+
+	var candidates []candidate
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		top := filepath.Join(dir, e.Name())
 		if isGitRepo(top) {
-			projects = append(projects, c.discoverProject(ctx, e.Name(), top))
+			candidates = append(candidates, candidate{e.Name(), top})
 			continue
 		}
-		if canon := c.discoverCanonicalHost(ctx, top); len(canon) > 0 {
-			projects = append(projects, canon...)
+		if canon := c.canonicalHostRepos(top); len(canon) > 0 {
+			candidates = append(candidates, canon...)
 			continue
 		}
-		projects = append(projects, c.discoverProject(ctx, e.Name(), top))
+		candidates = append(candidates, candidate{e.Name(), top})
 	}
-	sort.Slice(projects, func(i, j int) bool {
-		return projects[i].Name < projects[j].Name
+	slog.Debug("Enumeration complete, starting git-status fan-out.", "dir", dir, "candidates", len(candidates))
+
+	projects := fanOut(candidates, func(cd candidate) Project {
+		return c.discoverProject(ctx, cd.name, cd.dir)
 	})
+
+	sort.Slice(projects, func(i, j int) bool {
+		if projects[i].Name != projects[j].Name {
+			return projects[i].Name < projects[j].Name
+		}
+		return projects[i].Dir < projects[j].Dir
+	})
+	slog.Info("Successfully discovered projects.", "dir", dir, "count", len(projects), "duration", time.Since(start).Round(time.Millisecond))
 	return projects, nil
 }
 
-// discoverCanonicalHost walks a potential host bucket (Dir/<host>) two levels
-// deep — owner, then repo — collecting every repo dir with a .git marker.
-// Returns nil when the bucket contains no such repos, signalling the caller
-// to fall back to treating the bucket itself as a flat legacy project (e.g. a
-// plain non-git directory like a scratch notes folder).
-func (c *Client) discoverCanonicalHost(ctx context.Context, hostDir string) []Project {
+// discoverConcurrency bounds the git-status fan-out width. Measured on a
+// 500-repo fixture: serial 13.6s, 8 workers 3.5s, 16 workers 3.2s — the knee
+// is near NumCPU, more workers buy little, and spawning 500 concurrent git
+// processes is not something we want to do to a laptop.
+func discoverConcurrency() int {
+	return max(4, min(runtime.NumCPU(), 16))
+}
+
+// fanOut runs fn over items with bounded concurrency (discoverConcurrency()
+// workers), writing each result into the returned slice at its item's index —
+// the shape shared by discoverDir's git-status pass and localRepos' git-remote
+// pass, the two subprocess-heavy passes in this package.
+func fanOut[T, R any](items []T, fn func(T) R) []R {
+	out := make([]R, len(items))
+	workers := discoverConcurrency()
+	slog.Debug("Starting concurrent fan-out.", "itemCount", len(items), "workers", workers)
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	for i, item := range items {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			out[i] = fn(item)
+		}()
+	}
+	wg.Wait()
+	slog.Debug("Completed concurrent fan-out.", "itemCount", len(items))
+	return out
+}
+
+// canonicalHostRepos walks a potential host bucket (Dir/<host>) two levels
+// deep — owner, then repo — collecting every repo dir with a .git marker as
+// enumeration candidates. Pure filesystem walk; no git-status inspection
+// happens here — that's discoverDir's fan-out phase. Returns nil when the
+// bucket contains no such repos, signalling the caller to fall back to
+// treating the bucket itself as a flat legacy project (e.g. a plain non-git
+// directory like a scratch notes folder).
+func (c *Client) canonicalHostRepos(hostDir string) []candidate {
 	ownerEntries, err := os.ReadDir(hostDir)
 	if err != nil {
 		return nil
 	}
-	var out []Project
+	var out []candidate
 	for _, oe := range ownerEntries {
 		if !oe.IsDir() {
 			continue
@@ -108,20 +171,19 @@ func (c *Client) discoverCanonicalHost(ctx context.Context, hostDir string) []Pr
 			if !isGitRepo(repoDir) {
 				continue
 			}
-			out = append(out, c.discoverProject(ctx, re.Name(), repoDir))
+			out = append(out, candidate{re.Name(), repoDir})
 		}
 	}
 	return out
 }
 
-// discoverProject builds a Project for dir, populating GitStatus when dir is
-// a git repo (gitStatus itself no-ops to a zero value for non-git dirs).
+// discoverProject builds a Project for dir. gitStatus stats dir itself and
+// returns a TreeNotRepo status for a non-git dir, so no isGitRepo guard is
+// needed here.
 func (c *Client) discoverProject(ctx context.Context, name, dir string) Project {
-	p := Project{Name: name, Dir: dir}
-	if isGitRepo(dir) {
-		p.Status = gitStatus(ctx, c.run, dir)
-	}
-	return p
+	status := gitStatus(ctx, c.run, dir)
+	slog.Debug("Inspected project directory.", "name", name, "dir", dir, "state", status.State)
+	return Project{Name: name, Dir: dir, Status: status}
 }
 
 // isGitRepo reports whether dir has a .git marker.
@@ -161,34 +223,41 @@ func (c *Client) InsideTmux() bool {
 // localRepos walks the local clones under Dir and attributes each by its origin
 // remote — host/owner/name parsed from `git remote get-url origin`, never the
 // bare directory name. A dir with no git repo or no origin remote becomes a
-// local-only Repo (empty Host/Owner) that dedups by path.
+// local-only Repo (empty Host/Owner) that dedups by path. The origin lookup
+// (one `git remote get-url` subprocess per repo) fans out with the same
+// bounded concurrency as the status scan in discoverDir, and is skipped
+// entirely for a directory that already inspected as not-a-repo.
 func (c *Client) localRepos(ctx context.Context) ([]Repo, error) {
+	slog.Debug("Preparing to scan local repos for git remotes.")
 	projs, err := c.Discover(ctx)
 	if err != nil {
+		slog.Error("Failed to scan local repos: discovery failed.", "error", err)
 		return nil, err
 	}
-	out := make([]Repo, 0, len(projs))
-	for _, p := range projs {
+	out := fanOut(projs, func(p Project) Repo {
 		r := Repo{
 			Name:      p.Name,
 			Cloned:    true,
 			LocalPath: p.Dir,
 			Status:    p.Status,
 		}
-		url, err := c.run.Run(ctx, "git", "-C", p.Dir, "remote", "get-url", "origin")
-		if err == nil {
-			url = strings.TrimSpace(url)
-			if host, owner, name := parseRemoteURL(url); name != "" {
-				r.Host, r.Owner, r.Name = host, owner, name
-				// SSHURL is contractually an SSH clone URL; an HTTPS origin would
-				// mislabel it in the JSON inventory, so only store SSH-form origins.
-				if isSSHURL(url) {
-					r.SSHURL = url
+		if p.Status.IsRepo() {
+			url, err := c.run.Run(ctx, "git", "-C", p.Dir, "remote", "get-url", "origin")
+			if err == nil {
+				url = strings.TrimSpace(url)
+				if host, owner, name := parseRemoteURL(url); name != "" {
+					r.Host, r.Owner, r.Name = host, owner, name
+					// SSHURL is contractually an SSH clone URL; an HTTPS origin would
+					// mislabel it in the JSON inventory, so only store SSH-form origins.
+					if isSSHURL(url) {
+						r.SSHURL = url
+					}
 				}
 			}
 		}
-		out = append(out, r)
-	}
+		return r
+	})
+	slog.Info("Successfully scanned local repos.", "total", len(out))
 	return out, nil
 }
 

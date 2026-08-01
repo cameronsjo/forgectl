@@ -35,21 +35,49 @@ type Repo struct {
 	Status    GitStatus `json:"status"`              // working-tree state when Cloned; zero otherwise
 }
 
-// GitStatus summarises the working-tree state of a project directory.
+// TreeState records whether a directory's working-tree state was actually
+// inspected. The zero value is the empty string (""), NOT TreeUnknown — so
+// every consumer MUST test `!= TreeOK`, never `== TreeUnknown`, to treat a
+// record as "not confirmed clean"; comparing only against TreeUnknown would
+// let a zero-valued, never-populated GitStatus slip through as inspected.
+// Every GitStatus producer in this package (gitStatus in git.go) sets State
+// explicitly to one of the three named values below; an empty State should
+// only ever appear on a GitStatus a caller built by hand and forgot to
+// populate — a bug, not a valid fourth state.
+type TreeState string
+
+const (
+	TreeUnknown TreeState = "unknown"
+	TreeNotRepo TreeState = "not-a-repo"
+	TreeOK      TreeState = "ok"
+)
+
+// GitStatus summarises the working-tree state of a project directory. State
+// has no `omitempty`: it's the one field whose contract is "never absent" —
+// with omitempty, a record built without inspecting a tree would serialize
+// with no "state" key at all, and a JSON consumer would see nothing instead
+// of "not inspected".
 type GitStatus struct {
-	Modified  int `json:"modified"`
-	Untracked int `json:"untracked"`
-	Ahead     int `json:"ahead"`
+	State     TreeState `json:"state"`
+	Modified  int       `json:"modified"`
+	Untracked int       `json:"untracked"`
+	Ahead     int       `json:"ahead"`
 }
 
-// Label returns a short human-readable badge: "[clean]", "[2 ahead]",
-// "[3 modified]", etc. Returns "" for non-git directories.
-func (gs GitStatus) Label() string {
+// Text returns the human-readable working-tree state without brackets:
+// "clean", "2 ahead", "3 modified, 1 untracked". Returns "" for anything
+// other than an inspected, clean-or-dirty repo (non-repo, or a status call
+// that errored) — the single state→text mapping Label and callers that want
+// the bracket-less form (e.g. a table STATUS column) both build on.
+func (gs GitStatus) Text() string {
+	if gs.State != TreeOK {
+		return ""
+	}
 	if gs.Modified == 0 && gs.Untracked == 0 && gs.Ahead == 0 {
-		return "[clean]"
+		return "clean"
 	}
 	if gs.Ahead > 0 && gs.Modified == 0 && gs.Untracked == 0 {
-		return fmt.Sprintf("[%d ahead]", gs.Ahead)
+		return fmt.Sprintf("%d ahead", gs.Ahead)
 	}
 	var parts string
 	if gs.Modified > 0 {
@@ -61,16 +89,48 @@ func (gs GitStatus) Label() string {
 		}
 		parts += fmt.Sprintf("%d untracked", gs.Untracked)
 	}
-	return "[" + parts + "]"
+	return parts
+}
+
+// Label returns a short human-readable badge: "[clean]", "[2 ahead]",
+// "[3 modified]", etc. Returns "" for anything other than an inspected,
+// clean-or-dirty repo (non-repo, or a status call that errored).
+func (gs GitStatus) Label() string {
+	text := gs.Text()
+	if text == "" {
+		return ""
+	}
+	return "[" + text + "]"
+}
+
+// Badge returns a bracketed status badge for every inspection state, unlike
+// Label (which returns "" for anything but TreeOK): "[clean]"/"[2 ahead]"/etc.
+// for an inspected tree, "[not a repo]" for TreeNotRepo, "[unknown]" for
+// TreeUnknown (or any other state). The one table every renderer that needs a
+// non-empty badge — Project.DisplayLine, Repo.DisplayLine — shares, so
+// neither switches on State directly.
+func (gs GitStatus) Badge() string {
+	if label := gs.Label(); label != "" {
+		return label
+	}
+	if gs.State == TreeNotRepo {
+		return "[not a repo]"
+	}
+	return "[unknown]"
+}
+
+// IsRepo reports whether the directory was actually inspected as a git
+// repo — true for TreeOK and TreeUnknown (a repo whose status call failed),
+// false only for TreeNotRepo. Names the intent at call sites that gate
+// git-repo-only work, rather than comparing against the enum's non-repo value
+// directly.
+func (gs GitStatus) IsRepo() bool {
+	return gs.State != TreeNotRepo
 }
 
 // DisplayLine builds the label shown in the interactive picker.
 func (p Project) DisplayLine() string {
-	label := p.Status.Label()
-	if label == "" {
-		return p.Name
-	}
-	return p.Name + " " + label
+	return p.Name + " " + p.Status.Badge()
 }
 
 // hostBadge returns a short host marker for inventory display.
@@ -90,14 +150,9 @@ func (r Repo) hostBadge() string {
 // DisplayLine builds the label shown in the cross-host picker: host marker,
 // repo name, and a cloned/uncloned badge (with working-tree status when known).
 func (r Repo) DisplayLine() string {
-	var badge string
+	badge := "[uncloned]"
 	if r.Cloned {
-		badge = r.Status.Label()
-		if badge == "" {
-			badge = "[cloned]"
-		}
-	} else {
-		badge = "[uncloned]"
+		badge = r.Status.Badge()
 	}
 	name := r.Name
 	if r.Mirror {

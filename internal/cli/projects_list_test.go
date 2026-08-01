@@ -129,14 +129,37 @@ func TestRenderRepoTable_EmptyList_WritesHeaderAndZeroCount(t *testing.T) {
 func TestRenderRepoTable_ClonedCleanRepo_StatusIsClean(t *testing.T) {
 	var out, errOut bytes.Buffer
 	repos := []projects.Repo{
-		{Host: "github", Owner: "cameronsjo", Name: "forgectl", Cloned: true},
-		// Status is zero-value: Label()="[clean]"; Trim("[]")="clean".
+		{Host: "github", Owner: "cameronsjo", Name: "forgectl", Cloned: true,
+			Status: projects.GitStatus{State: projects.TreeOK}},
 	}
 	if err := renderRepoTable(&out, &errOut, repos); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !strings.Contains(out.String(), "clean") {
 		t.Errorf("cloned-clean repo: want 'clean' in STATUS column, got: %q", out.String())
+	}
+}
+
+func TestRenderRepoTable_NonRepoAndUnknownRenderDistinctly(t *testing.T) {
+	var out, errOut bytes.Buffer
+	repos := []projects.Repo{
+		{Host: "", Name: "mypy-cache-holder", Cloned: true,
+			Status: projects.GitStatus{State: projects.TreeNotRepo}},
+		{Host: "", Name: "broken-status", Cloned: true,
+			Status: projects.GitStatus{State: projects.TreeUnknown}},
+	}
+	if err := renderRepoTable(&out, &errOut, repos); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "not a repo") {
+		t.Errorf("TreeNotRepo row: want 'not a repo' in STATUS column, got: %q", got)
+	}
+	if !strings.Contains(got, "unknown") {
+		t.Errorf("TreeUnknown row: want 'unknown' in STATUS column, got: %q", got)
+	}
+	if strings.Contains(got, "clean") {
+		t.Errorf("neither row inspected clean; 'clean' must not appear: %q", got)
 	}
 }
 
