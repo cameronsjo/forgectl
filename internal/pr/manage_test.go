@@ -34,7 +34,7 @@ func TestAttach_Success(t *testing.T) {
 	if !ok {
 		t.Fatal("no tmux call")
 	}
-	want := []string{"select-window", "-t", "forgectl:pr-o-r-7"}
+	want := []string{"select-window", "-t", "=forgectl:pr-o-r-7"}
 	if !equalArgs(tmux.Args, want) {
 		t.Errorf("tmux args = %v, want %v", tmux.Args, want)
 	}
@@ -75,11 +75,11 @@ func TestOpen_TargetPins(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	tmux, ok := findCall(fake.Calls, "tmux")
+	tmux, ok := findCallVerb(fake.Calls, "tmux", "new-window")
 	if !ok {
-		t.Fatal("no tmux call")
+		t.Fatal("no new-window call")
 	}
-	want := []string{"new-window", "-t", "forgectl", "-n", "pr-o-r-7-shell", "-c", ws}
+	want := []string{"new-window", "-t", "=forgectl:", "-n", "pr-o-r-7-shell", "-c", ws}
 	if !equalArgs(tmux.Args, want) {
 		t.Errorf("tmux args = %v, want %v", tmux.Args, want)
 	}

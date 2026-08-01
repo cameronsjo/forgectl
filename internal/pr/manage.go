@@ -91,7 +91,14 @@ func (c *Client) Open(ctx context.Context, path string) error {
 		return err
 	}
 	slog.Debug("Opening workspace window.", "workspace", sess.Workspace)
-	_, err = c.run.Run(ctx, "tmux", "new-window", "-t", c.tmuxSession,
+	// A review session was already dispatched to reach this breadcrumb, so the
+	// exact "forgectl" session should already exist — ensureSession is a
+	// cheap has-session check in the common case, and a safety net if it was
+	// killed out from under a still-valid breadcrumb.
+	if err := c.ensureSession(ctx); err != nil {
+		return err
+	}
+	_, err = c.run.Run(ctx, "tmux", "new-window", "-t", c.exactSessionTarget(),
 		"-n", windowName(sess.Ref)+"-shell", "-c", sess.Workspace)
 	return err
 }

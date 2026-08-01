@@ -45,7 +45,7 @@ forgectl pr <ref> --dry-run              # resolve + print the plan, create noth
 forgectl pr prs                          # cross-repo open PRs (authored, assigned, review-requested); reviewed rows dimmed
 forgectl pr prs --json                   # machine-readable JSON (safe to pipe; notes go to stderr)
 forgectl pr dash                         # dashboard: active reviews, PRs awaiting you, your open PRs
-forgectl pr pick                         # multiselect open PRs → spin up reviews in bulk (reviewed PRs skipped)
+forgectl pr pick                         # multiselect open PRs → spin up reviews in bulk (reviewed PRs skipped, capped at 4 concurrent via [pr] max_concurrent)
 forgectl pr reviewed mark <ref>          # mark a PR reviewed (dims it until the PR sees new activity)
 forgectl pr reviewed unmark <ref>        # clear a PR's reviewed mark
 forgectl pr reviewed sync                # prune reviewed marks for PRs that are no longer open

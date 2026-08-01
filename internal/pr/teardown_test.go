@@ -59,7 +59,7 @@ func TestTeardown_AcceptsMember(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected a tmux kill-window call; got %+v", fake.Calls)
 	}
-	if want := []string{"kill-window", "-t", "forgectl:pr-o-r-7"}; !equalArgs(tmux.Args, want) {
+	if want := []string{"kill-window", "-t", "=forgectl:pr-o-r-7"}; !equalArgs(tmux.Args, want) {
 		t.Errorf("tmux args = %v, want %v", tmux.Args, want)
 	}
 }

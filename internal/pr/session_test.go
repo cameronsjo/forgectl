@@ -55,6 +55,19 @@ func findCall(calls []exec.Call, name string) (exec.Call, bool) {
 	return exec.Call{}, false
 }
 
+// findCallVerb finds the first call to name whose first arg (the tmux
+// subcommand) equals verb — for asserting on one specific call among
+// several to the same binary, e.g. new-window after ensureSession's own
+// has-session check.
+func findCallVerb(calls []exec.Call, name, verb string) (exec.Call, bool) {
+	for _, c := range calls {
+		if c.Name == name && len(c.Args) > 0 && c.Args[0] == verb {
+			return c, true
+		}
+	}
+	return exec.Call{}, false
+}
+
 // TestPrepare_CodexRefusedBeforeAnyFetch is the fast-fail half of the
 // use-based boundary. Launch is the authoritative gate, but refusing only
 // there would mean a third party's head had already been fetched and checked

@@ -68,6 +68,8 @@ const logKeepDays = 7
 //	[update]             # forgectl update — weekly package-manager + OS maintenance
 //	roster  = []          # step names to run when --only is omitted; empty = every roster step
 //	log_dir = ""          # transcript log directory; empty = <config dir>/update-logs
+//	[pr]                 # forgectl pr pick — bulk-launch concurrency cap
+//	max_concurrent = 4   # live "pr-*" tmux windows allowed at once; <= 0 = default (4)
 type Config struct {
 	NoIcons   bool            `toml:"no_icons"`
 	LogLevel  string          `toml:"log_level"`
@@ -83,6 +85,7 @@ type Config struct {
 	Docs      DocsConfig      `toml:"docs"`
 	Preflight PreflightConfig `toml:"preflight"`
 	Update    UpdateConfig    `toml:"update"`
+	Pr        PrConfig        `toml:"pr"`
 }
 
 // LaunchConfig is the [launch] section: base defaults plus directory-keyed
@@ -223,6 +226,20 @@ type ReviewConfig struct {
 // IsZero reports whether the [review] section was absent or empty.
 func (rc ReviewConfig) IsZero() bool {
 	return len(rc.Owners) == 0 && rc.Gitea.IsZero()
+}
+
+// PrConfig is the [pr] section: `forgectl pr pick`'s bulk-launch concurrency
+// cap. A zero MaxConcurrent means "section absent" — internal/pr owns the
+// built-in default (DefaultMaxConcurrentReviews) applied when this is unset
+// or non-positive, per the house zero-means-absent convention every other
+// *Config section in this file follows.
+type PrConfig struct {
+	MaxConcurrent int `toml:"max_concurrent"`
+}
+
+// IsZero reports whether the [pr] section was absent or empty.
+func (pc PrConfig) IsZero() bool {
+	return pc.MaxConcurrent == 0
 }
 
 // GiteaConfig is the [review.gitea] section: forgectl review's opt-in second

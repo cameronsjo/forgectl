@@ -17,13 +17,15 @@ import (
 // --agent is not passed. Mirrors FORGECTL_CLAUDE_BIN's env-over-config posture.
 const prAgentEnv = "FORGECTL_PR_AGENT"
 
-// prModule declares the clean-room PR review core module (ADR-0005): no
-// config section of its own (it reads [net] for the reachability probe; net
-// owns that section), no alias surface.
+// prModule declares the clean-room PR review core module (ADR-0005): owns
+// the [pr] section (the bulk-launch concurrency cap), and separately reads
+// [net] for the reachability probe (net owns that section). No alias
+// surface.
 var prModule = module.Manifest{
-	Name: "pr",
-	Tier: module.TierCore,
-	New:  newPrCmd,
+	Name:      "pr",
+	Tier:      module.TierCore,
+	ConfigKey: "pr",
+	New:       newPrCmd,
 }
 
 // newPrCmd builds `forgectl pr` over the registry Deps — the clean-room PR
