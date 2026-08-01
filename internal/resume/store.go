@@ -47,20 +47,44 @@ type Task struct {
 	Raw         json.RawMessage `json:"raw,omitempty"`
 }
 
-// Load reads one session's record. The bool reports whether one existed; a
-// record that will not parse reads as absent, since a corrupt cache should
-// degrade to "not snapshotted yet" rather than fail the command.
-func Load(dir, id string) (*Record, bool) {
-	if dir == "" || !validSessionID(id) {
-		return nil, false
+// loadOutcome says WHY a record did not load.
+//
+// The distinction exists for the orphan sweep, which DELETES what it judges to
+// be debris. A file that cannot be READ is a transient environment failure — an
+// I/O error, an ownership change, exhausted file descriptors — and the record
+// may be perfectly good. A file that reads fine and does not PARSE is debris
+// nothing will ever reclaim. Collapsing the two lets one bad moment on the
+// volume make an entire directory of live records look like garbage, which is a
+// whole-store blast radius from a condition that clears on its own.
+type loadOutcome int
+
+const (
+	loadOK         loadOutcome = iota
+	loadAbsent                 // no such file
+	loadUnreadable             // the file is there and its bytes could not be read
+	loadCorrupt                // the bytes were read and are not a usable record
+)
+
+// loadRecord reads one record and reports what happened.
+func loadRecord(dir, id string) (*Record, loadOutcome) {
+	if dir == "" {
+		return nil, loadAbsent
+	}
+	if !validSessionID(id) {
+		// A filename that is not a session id can never name a record, and no
+		// future forgectl will read it either.
+		return nil, loadCorrupt
 	}
 	data, err := os.ReadFile(filepath.Join(dir, id+".json")) // #nosec G304 -- id is validated to be a session-id shape
-	if err != nil {
-		return nil, false
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, loadAbsent
+	case err != nil:
+		return nil, loadUnreadable
 	}
 	var r Record
 	if json.Unmarshal(data, &r) != nil {
-		return nil, false
+		return nil, loadCorrupt
 	}
 	// The id inside the file is a THIRD entry point, distinct from the
 	// filename this function was handed. LoadAll keys its result on r.ID, so
@@ -70,9 +94,17 @@ func Load(dir, id string) (*Record, bool) {
 	// admission checks in scanHistory and readRegistry close. Requiring the
 	// two to agree validates the body and rejects a mismatch in one step.
 	if r.ID != id {
-		return nil, false
+		return nil, loadCorrupt
 	}
-	return &r, true
+	return &r, loadOK
+}
+
+// Load reads one session's record. The bool reports whether one existed; a
+// record that will not parse reads as absent, since a corrupt cache should
+// degrade to "not snapshotted yet" rather than fail the command.
+func Load(dir, id string) (*Record, bool) {
+	r, outcome := loadRecord(dir, id)
+	return r, outcome == loadOK
 }
 
 // LoadAll reads every record in the store, keyed by session id.

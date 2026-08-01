@@ -93,6 +93,10 @@ func (f *fixture) transcript(id, cwd, branch, title string) {
 		strings.Join(lines, "\n")+"\n")
 }
 
+// hexDigits builds distinct session-id suffixes; validSessionID admits only
+// hex and dashes, so a test generating ids has to stay inside that alphabet.
+const hexDigits = "0123456789abcdef"
+
 // storeRecord puts one record in the snapshot store. taskDir may be empty.
 func (f *fixture) storeRecord(id, cwd string, lastSeen time.Time, taskDir string) {
 	f.t.Helper()
@@ -1070,25 +1074,51 @@ func TestPrune_SkipsEverythingWhenNoTranscriptResolves(t *testing.T) {
 	}
 }
 
-// TestPrune_AgeCeilingDropsEvenWithATranscript covers the backstop. With
-// transcript cleanup disabled, transcripts never disappear and the primary
-// signal never retires anything — so an absolute ceiling still bounds the store.
-func TestPrune_AgeCeilingDropsEvenWithATranscript(t *testing.T) {
-	const id = "a5a5a5a5-0000-0000-0000-000000000001"
-	f := newFixture(t)
-	now := time.Now()
-	cwd := t.TempDir()
+// TestPrune_AgeCeiling covers the backstop's two halves, and the first half is
+// the one that matters: LastSeen ages from last USE, not from last
+// resumability. A record can be ancient and still openable by
+// `claude --resume`, so age NEVER overrides a transcript that resolved —
+// deleting there would destroy the task bodies of a live rescue.
+//
+// What the ceiling actually does is release records whose transcript is GONE
+// when the hits guard is refusing to act on that absence, so a machine whose
+// lookup stays broken still retires its dead records eventually.
+func TestPrune_AgeCeiling(t *testing.T) {
+	t.Run("a resolving transcript outranks any age", func(t *testing.T) {
+		const id = "a5a5a5a5-0000-0000-0000-000000000001"
+		f := newFixture(t)
+		now := time.Now()
+		cwd := t.TempDir()
 
-	f.transcript(id, cwd, "main", "ancient")
-	f.storeRecord(id, cwd, now.Add(-200*24*time.Hour), "")
+		f.transcript(id, cwd, "main", "ancient but resumable")
+		f.storeRecord(id, cwd, now.Add(-200*24*time.Hour), "")
 
-	res := Prune(f.Paths, LoadAll(f.Paths.StoreDir), nil, now)
-	if res.Removed != 1 {
-		t.Fatalf("Removed = %d, want 1 — past the ceiling the transcript does not save it", res.Removed)
-	}
-	if _, ok := Load(f.Paths.StoreDir, id); ok {
-		t.Fatal("a 200-day-old record survived the backstop")
-	}
+		res := Prune(f.Paths, LoadAll(f.Paths.StoreDir), nil, now)
+		if res.Removed != 0 {
+			t.Fatalf("Removed = %d, want 0 — the session is still resumable", res.Removed)
+		}
+		if _, ok := Load(f.Paths.StoreDir, id); !ok {
+			t.Fatal("a 200-day-old record was deleted despite a transcript claude can still open")
+		}
+	})
+
+	t.Run("releases a transcript-less record even when hits is zero", func(t *testing.T) {
+		const id = "a5a5a5a5-0000-0000-0000-000000000002"
+		f := newFixture(t)
+		now := time.Now()
+
+		// No transcript anywhere, so nothing vouches for the lookup and the
+		// hits guard is blocking. The ceiling is the only release path left.
+		f.storeRecord(id, t.TempDir(), now.Add(-200*24*time.Hour), "")
+
+		res := Prune(f.Paths, LoadAll(f.Paths.StoreDir), nil, now)
+		if res.Removed != 1 {
+			t.Fatalf("Removed = %d, want 1 — past the ceiling with no transcript it goes", res.Removed)
+		}
+		if _, ok := Load(f.Paths.StoreDir, id); ok {
+			t.Fatal("a 200-day-old transcript-less record survived the backstop")
+		}
+	})
 }
 
 // TestPrune_IsThrottled covers the cost guard. Prune runs from a Stop hook at
@@ -1164,7 +1194,9 @@ func TestPrune_SweepsOrphanTempFiles(t *testing.T) {
 }
 
 // TestSnapshot_ReportsPruned is the end-to-end wiring: the Stop hook's own pass
-// bounds the store, and says so.
+// bounds the store, and says so — with retired records and deleted debris kept
+// as SEPARATE counts, because "a record I wanted is gone" and "a temp file was
+// cleaned up" are not the same event and a sum cannot be taken apart later.
 func TestSnapshot_ReportsPruned(t *testing.T) {
 	const live = "a8a8a8a8-0000-0000-0000-000000000001"
 	const hit = "a8a8a8a8-0000-0000-0000-000000000002"
@@ -1180,6 +1212,14 @@ func TestSnapshot_ReportsPruned(t *testing.T) {
 	f.storeRecord(hit, hitCwd, now.Add(-40*24*time.Hour), "")
 	f.storeRecord(dead, t.TempDir(), now.Add(-40*24*time.Hour), "")
 
+	// One piece of debris alongside, so the two counts can be told apart.
+	tmp := filepath.Join(f.Paths.StoreDir, "a8a8a8a8-0000-0000-0000-000000000009.77.tmp")
+	f.write(tmp, "{ truncated")
+	old := now.Add(-2 * time.Hour)
+	if err := os.Chtimes(tmp, old, old); err != nil {
+		t.Fatalf("age the temp file: %v", err)
+	}
+
 	res := Snapshot(f.Paths, now)
 	if len(res.Errs) != 0 {
 		t.Fatalf("Snapshot errors: %v", res.Errs)
@@ -1188,7 +1228,10 @@ func TestSnapshot_ReportsPruned(t *testing.T) {
 		t.Fatalf("Sessions = %d, want 1", res.Sessions)
 	}
 	if res.Pruned != 1 {
-		t.Fatalf("Pruned = %d, want 1", res.Pruned)
+		t.Fatalf("Pruned = %d, want 1 — records retired", res.Pruned)
+	}
+	if res.Swept != 1 {
+		t.Fatalf("Swept = %d, want 1 — debris deleted, counted apart from records", res.Swept)
 	}
 	if _, ok := Load(f.Paths.StoreDir, dead); ok {
 		t.Error("the dead record survived a snapshot pass")
@@ -1204,24 +1247,30 @@ func TestSnapshot_ReportsPruned(t *testing.T) {
 // zero time, which reads as ~2000 years old. Without this the backstop deletes
 // it on the first pass however live its transcript is.
 func TestPrune_TreatsAZeroLastSeenAsUnknownAge(t *testing.T) {
-	const id = "a9a9a9a9-0000-0000-0000-000000000001"
+	const zeroed = "a9a9a9a9-0000-0000-0000-000000000001"
+	const dated = "a9a9a9a9-0000-0000-0000-000000000002"
 	f := newFixture(t)
 	now := time.Now()
-	cwd := t.TempDir()
 
-	f.transcript(id, cwd, "main", "resumable")
-	f.write(filepath.Join(f.Paths.StoreDir, id+".json"), `{"id":"`+id+`","cwd":"`+cwd+`"}`)
+	// Neither has a transcript, so hits is zero and the age ceiling is the only
+	// thing that can retire either one. The control is the point: `dated` MUST
+	// go, so the survival of `zeroed` is the guard and not an inert pass.
+	f.write(filepath.Join(f.Paths.StoreDir, zeroed+".json"), `{"id":"`+zeroed+`","cwd":"/gone"}`)
+	f.storeRecord(dated, "/gone", now.Add(-200*24*time.Hour), "")
 	store := LoadAll(f.Paths.StoreDir)
-	if _, ok := store[id]; !ok {
+	if _, ok := store[zeroed]; !ok {
 		t.Fatalf("fixture record did not load")
 	}
 
 	res := Prune(f.Paths, store, nil, now)
-	if res.Removed != 0 {
-		t.Fatalf("Removed = %d, want 0 — a missing last_seen is unknown age, not ancient", res.Removed)
+	if res.Removed != 1 {
+		t.Fatalf("Removed = %d, want 1 — only the dated record is past the ceiling", res.Removed)
 	}
-	if _, ok := Load(f.Paths.StoreDir, id); !ok {
-		t.Fatal("a record with no last_seen and a live transcript was deleted by the age backstop")
+	if _, ok := Load(f.Paths.StoreDir, zeroed); !ok {
+		t.Fatal("a record with no last_seen was aged out — a missing field is unknown age, not ancient")
+	}
+	if _, ok := Load(f.Paths.StoreDir, dated); ok {
+		t.Fatal("the 200-day-old control survived, so this test proves nothing")
 	}
 }
 
@@ -1250,5 +1299,232 @@ func TestPrune_SweepKeepsAValidRecordMissingFromTheStoreMap(t *testing.T) {
 	}
 	if _, ok := Load(f.Paths.StoreDir, id); !ok {
 		t.Fatal("a valid record was swept because the caller's store map did not list it")
+	}
+}
+
+// TestPrune_FollowsASymlinkedProjectDir covers a false-absent channel the hits
+// guard cannot see. os.ReadDir fills DirEntry.Type() from the directory entry,
+// not the link target, so a symlinked project directory reports IsDir() ==
+// false and would drop out of the index entirely — making every session inside
+// it read as transcript-less, which is a deletion verdict.
+func TestPrune_FollowsASymlinkedProjectDir(t *testing.T) {
+	const linked = "c1c1c1c1-0000-0000-0000-000000000001"
+	const plain = "c1c1c1c1-0000-0000-0000-000000000002"
+	f := newFixture(t)
+	now := time.Now()
+	plainCwd := t.TempDir()
+
+	// `plain` resolves normally and supplies the hit, so the guard is open and
+	// `linked` is genuinely at risk.
+	f.transcript(plain, plainCwd, "main", "resolves normally")
+	f.storeRecord(plain, plainCwd, now, "")
+
+	// `linked` lives behind a symlinked project dir, under a name the cwd slug
+	// cannot guess — so only the directory list can find it.
+	realDir := filepath.Join(t.TempDir(), "elsewhere")
+	f.write(filepath.Join(realDir, linked+".jsonl"), `{"type":"user","gitBranch":"main"}`+"\n")
+	link := filepath.Join(f.Paths.projectsDir(), "-Volumes-external-project")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Skipf("symlinks unavailable here: %v", err)
+	}
+	f.storeRecord(linked, t.TempDir(), now, "")
+
+	// Pin the premise this guard exists for, rather than assuming it.
+	entries, err := os.ReadDir(f.Paths.projectsDir())
+	if err != nil {
+		t.Fatalf("read projects: %v", err)
+	}
+	sawSymlinkNotDir := false
+	for _, e := range entries {
+		if e.Name() == "-Volumes-external-project" && !e.IsDir() {
+			sawSymlinkNotDir = true
+		}
+	}
+	if !sawSymlinkNotDir {
+		t.Fatal("premise broken: os.ReadDir reported the symlinked dir as a directory, so this test proves nothing")
+	}
+
+	res := Prune(f.Paths, LoadAll(f.Paths.StoreDir), nil, now)
+	if res.Removed != 0 {
+		t.Fatalf("Removed = %d, want 0 — the transcript is there, behind a symlink", res.Removed)
+	}
+	if _, ok := Load(f.Paths.StoreDir, linked); !ok {
+		t.Fatal("a record whose transcript lives in a symlinked project dir was deleted")
+	}
+}
+
+// TestPrune_RefusesAPassOverTheCap is the control for every PARTIAL lookup
+// failure. The hits guard only catches a TOTAL one: a single transcript
+// resolving anywhere authorizes deleting every record that did not. The cap
+// needs no theory about which channel broke — retiring most of a store at once
+// is not something a working prune does.
+//
+// It must REFUSE, not merely count: nothing deleted, and an error saying why.
+func TestPrune_RefusesAPassOverTheCap(t *testing.T) {
+	f := newFixture(t)
+	now := time.Now()
+
+	const hit = "c2c2c2c2-0000-0000-0000-000000000000"
+	hitCwd := t.TempDir()
+	f.transcript(hit, hitCwd, "main", "the lone survivor of a broken lookup")
+	f.storeRecord(hit, hitCwd, now, "")
+
+	var doomed []string
+	for i := 1; i <= 23; i++ {
+		id := "c2c2c2c2-0000-0000-0000-0000000000" + string(hexDigits[i/16]) + string(hexDigits[i%16])
+		f.storeRecord(id, t.TempDir(), now, "")
+		doomed = append(doomed, id)
+	}
+
+	store := LoadAll(f.Paths.StoreDir)
+	if len(store) != 24 {
+		t.Fatalf("fixture built %d records, want 24", len(store))
+	}
+
+	res := Prune(f.Paths, store, nil, now)
+	if res.Removed != 0 {
+		t.Fatalf("Removed = %d, want 0 — the pass must REFUSE, not delete a capped subset", res.Removed)
+	}
+	if len(res.Errs) == 0 {
+		t.Fatal("the refusal was silent — an operator must be told why nothing was pruned")
+	}
+	if !strings.Contains(res.Errs[0].Error(), "REFUSED") {
+		t.Errorf("refusal error = %q, want it to say so plainly", res.Errs[0])
+	}
+	for _, id := range doomed {
+		if _, ok := Load(f.Paths.StoreDir, id); !ok {
+			t.Fatalf("record %s was deleted by a pass that was over the cap", id)
+		}
+	}
+}
+
+// TestPrune_SweepRefusesWhenMostOfTheStoreIsUnparseable applies the same cap to
+// the orphan sweep. A directory that suddenly reads as mostly garbage is a
+// storage problem, not that much debris.
+func TestPrune_SweepRefusesWhenMostOfTheStoreIsUnparseable(t *testing.T) {
+	f := newFixture(t)
+	now := time.Now()
+	old := now.Add(-2 * time.Hour)
+
+	const live = "c3c3c3c3-0000-0000-0000-000000000000"
+	liveCwd := t.TempDir()
+	f.transcript(live, liveCwd, "main", "healthy")
+	f.storeRecord(live, liveCwd, now, "")
+
+	var junk []string
+	for i := 1; i <= 23; i++ {
+		name := "c3c3c3c3-0000-0000-0000-0000000000" + string(hexDigits[i/16]) + string(hexDigits[i%16]) + ".json"
+		path := filepath.Join(f.Paths.StoreDir, name)
+		f.write(path, "{ not a record")
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatalf("age %s: %v", name, err)
+		}
+		junk = append(junk, path)
+	}
+
+	res := Prune(f.Paths, LoadAll(f.Paths.StoreDir), nil, now)
+	if res.Orphans != 0 {
+		t.Fatalf("Orphans = %d, want 0 — the sweep must REFUSE past the cap", res.Orphans)
+	}
+	if len(res.Errs) == 0 {
+		t.Fatal("the sweep refused silently")
+	}
+	for _, path := range junk {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("%s was deleted by a sweep that was over the cap", filepath.Base(path))
+		}
+	}
+}
+
+// TestPrune_SweepKeepsAnUnreadableRecord separates the two ways a record fails
+// to load. Unreadable is an environment problem that clears on its own — an I/O
+// error, an ownership change, exhausted descriptors — and the record underneath
+// may be perfectly good. Only unparseable bytes are debris.
+func TestPrune_SweepKeepsAnUnreadableRecord(t *testing.T) {
+	const id = "c4c4c4c4-0000-0000-0000-000000000001"
+	f := newFixture(t)
+	now := time.Now()
+	cwd := t.TempDir()
+
+	f.storeRecord(id, cwd, now, "")
+	path := filepath.Join(f.Paths.StoreDir, id+".json")
+	old := now.Add(-2 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("age the record: %v", err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("make unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+	if _, err := os.ReadFile(path); err == nil {
+		t.Skip("running with privileges that ignore file modes; cannot stage an unreadable file")
+	}
+
+	// An empty store map, so the file reaches the load check that decides it.
+	res := Prune(f.Paths, map[string]*Record{}, nil, now)
+	if res.Orphans != 0 {
+		t.Fatalf("Orphans = %d, want 0 — unreadable is not corrupt", res.Orphans)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("a record that merely could not be READ was deleted as debris")
+	}
+}
+
+// TestPrune_HonorsTheKillSwitch covers the operator's opt-out of the one part
+// of this package that deletes their data.
+func TestPrune_HonorsTheKillSwitch(t *testing.T) {
+	const hit = "c5c5c5c5-0000-0000-0000-000000000001"
+	const dead = "c5c5c5c5-0000-0000-0000-000000000002"
+	f := newFixture(t)
+	now := time.Now()
+	hitCwd := t.TempDir()
+
+	f.transcript(hit, hitCwd, "main", "resumable")
+	f.storeRecord(hit, hitCwd, now, "")
+	f.storeRecord(dead, t.TempDir(), now.Add(-40*24*time.Hour), "")
+
+	paths := f.Paths
+	paths.NoPrune = true
+	res := Prune(paths, LoadAll(f.Paths.StoreDir), nil, now)
+	if res.Removed != 0 || res.Orphans != 0 || len(res.Errs) != 0 {
+		t.Fatalf("Prune = %+v, want a total no-op under the kill switch", res)
+	}
+	if _, ok := Load(f.Paths.StoreDir, dead); !ok {
+		t.Fatal("a record was pruned with the kill switch set")
+	}
+	if _, err := os.Stat(filepath.Join(f.Paths.StoreDir, pruneMarker)); err == nil {
+		t.Error("the disabled pass still stamped the marker, which would mask a later re-enable")
+	}
+
+	// The control: the same store prunes with the switch off.
+	if res := Prune(f.Paths, LoadAll(f.Paths.StoreDir), nil, now); res.Removed != 1 {
+		t.Fatalf("control pass Removed = %d, want 1 — otherwise the switch proves nothing", res.Removed)
+	}
+}
+
+// TestPrune_IsNotParkedByAFutureDatedMarker covers clock skew and restores from
+// backup. A negative age is not "recent" — read that way, pruning stops until
+// real time catches up with the stamp.
+func TestPrune_IsNotParkedByAFutureDatedMarker(t *testing.T) {
+	const hit = "c6c6c6c6-0000-0000-0000-000000000001"
+	const dead = "c6c6c6c6-0000-0000-0000-000000000002"
+	f := newFixture(t)
+	now := time.Now()
+	hitCwd := t.TempDir()
+
+	f.transcript(hit, hitCwd, "main", "resumable")
+	f.storeRecord(hit, hitCwd, now, "")
+	f.storeRecord(dead, t.TempDir(), now.Add(-40*24*time.Hour), "")
+
+	marker := filepath.Join(f.Paths.StoreDir, pruneMarker)
+	f.write(marker, "from the future\n")
+	ahead := now.Add(72 * time.Hour)
+	if err := os.Chtimes(marker, ahead, ahead); err != nil {
+		t.Fatalf("date the marker forward: %v", err)
+	}
+
+	res := Prune(f.Paths, LoadAll(f.Paths.StoreDir), nil, now)
+	if res.Removed != 1 {
+		t.Fatalf("Removed = %d, want 1 — a future-dated marker must read as never, not as recent", res.Removed)
 	}
 }

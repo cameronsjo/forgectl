@@ -43,6 +43,12 @@ import (
 type Paths struct {
 	ClaudeHome string
 	StoreDir   string
+	// NoPrune disables store pruning entirely. It is the operator's kill
+	// switch for the one part of this package that DELETES their data, and it
+	// lives on Paths rather than being read inside Prune so that this stays
+	// the only function in the package that touches the environment — a test
+	// building Paths by hand is unaffected by whatever the developer has set.
+	NoPrune bool
 }
 
 // DefaultPaths resolves the real locations. It is the one place in the package
@@ -56,7 +62,11 @@ func DefaultPaths() (Paths, error) {
 	if err != nil {
 		return Paths{}, err
 	}
-	return Paths{ClaudeHome: filepath.Join(home, ".claude"), StoreDir: store}, nil
+	return Paths{
+		ClaudeHome: filepath.Join(home, ".claude"),
+		StoreDir:   store,
+		NoPrune:    os.Getenv(noPruneEnv) != "",
+	}, nil
 }
 
 func (p Paths) historyPath() string { return filepath.Join(p.ClaudeHome, "history.jsonl") }

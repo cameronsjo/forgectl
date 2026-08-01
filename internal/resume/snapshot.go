@@ -10,7 +10,8 @@ type SnapshotResult struct {
 	Sessions int // live sessions written to the store
 	Tasks    int // task bodies held after the merge, across all of them
 	Learned  int // session → task-directory pairings recorded for the first time
-	Pruned   int // stale records dropped this pass
+	Pruned   int // stale records retired this pass
+	Swept    int // orphaned files deleted this pass — debris, not records
 	Errs     []error
 }
 
@@ -86,8 +87,12 @@ func Snapshot(p Paths, now time.Time) SnapshotResult {
 		res.Sessions++
 		res.Tasks += len(rec.Tasks)
 	}
+	// Kept as two numbers, never one. "Retired 3 stale records" and "deleted 3
+	// files as debris" are different events with different blast radii, and a
+	// sum makes them indistinguishable after the fact — which is exactly the
+	// question anyone asks first when a record they wanted is gone.
 	pr := Prune(p, store, keep, now)
-	res.Pruned = pr.Removed + pr.Orphans
+	res.Pruned, res.Swept = pr.Removed, pr.Orphans
 	res.Errs = append(res.Errs, pr.Errs...)
 	return res
 }
