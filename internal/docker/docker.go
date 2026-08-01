@@ -152,6 +152,12 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		slog.Warn("No git metadata available for docker build; falling back to a directory-derived dev tag.", "context", contextDir, "error", gitErr)
 		dev = devTag(slugifyRepo(filepath.Base(absOrSelf(contextDir))))
 		tag = dev
+		// git resolution is all-or-nothing for tagging, so it must be
+		// all-or-nothing for labelling too. A partial resolve is real — a
+		// fresh `git init` resolves the branch but not the sha — and leaving
+		// branch set here would attach ref.name to an image whose tag is
+		// directory-derived, i.e. explicitly not git-associated.
+		branch, sha = "", ""
 	}
 
 	platform := opts.Platform
@@ -303,11 +309,14 @@ func (c *Client) resolveTag(explicit string) (string, error) {
 // current branch, and short commit sha for dir via `git`. All three are
 // shelled through c.run, never os/exec directly.
 //
-// Each of the three lookups is attempted independently and filled in
-// best-effort: a failure on one doesn't skip the others. This is what lets
-// a fresh `git init` with no commits yet (toplevel resolves, HEAD does not)
-// still report repo. err is the first failure encountered, if any — Build
-// treats it as non-fatal and falls back per-field to whatever resolved.
+// Each of the three lookups is attempted independently, so err names the
+// first lookup that actually failed rather than the first one attempted —
+// a fresh `git init` with no commits yet (toplevel and branch resolve, HEAD
+// does not) reports the sha failure, not a repo failure. The partially
+// resolved fields are returned for the caller's diagnostics only: Build
+// treats any error as non-fatal but all-or-nothing, discarding every
+// git-derived value and deriving both tag and labels from the directory
+// instead.
 func (c *Client) gitInfo(ctx context.Context, dir string) (repo, branch, sha string, err error) {
 	top, topErr := c.run.Run(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
 	if topErr != nil {

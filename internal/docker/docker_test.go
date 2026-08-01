@@ -16,6 +16,9 @@ package docker
 //   [x] Degraded: --platform and a configured extra label survive the
 //       no-repo path
 //   [x] Degraded: a build that degraded to a dev tag still caches it
+//   [x] Degraded: a PARTIAL git resolution (fresh `git init`: branch
+//       resolves, sha does not) is still all-or-nothing — no half-labelled
+//       image carrying ref.name without revision
 //
 // Client.Run / Client.Shell (Classification: ops layer)
 //   [x] Happy: an explicit --tag is used as given
@@ -233,6 +236,54 @@ func TestBuild_GitFailure_DegradesToDirDerivedDevTag(t *testing.T) {
 	}
 	if strings.Contains(argv, "org.opencontainers.image.ref.name") {
 		t.Errorf("ref.name label must be absent when git metadata is unavailable, args: %v", call.Args)
+	}
+}
+
+// TestBuild_PartialGitResolution_DoesNotHalfLabelImage covers the shape
+// TestBuild_GitFailure_DegradesToDirDerivedDevTag structurally cannot: a
+// fresh `git init` before the first commit, where toplevel and branch both
+// resolve and only the sha fails. The tag is directory-derived either way,
+// so an image carrying ref.name=main with no matching revision would claim
+// a git association Build itself reported as absent.
+func TestBuild_PartialGitResolution_DoesNotHalfLabelImage(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			if name != "git" || len(args) < 4 {
+				return "", nil
+			}
+			switch args[3] {
+			case "--show-toplevel":
+				return "/tmp/unborn\n", nil
+			case "--abbrev-ref":
+				return "main\n", nil
+			case "--short":
+				return "", errors.New("fatal: needed a single revision")
+			}
+			return "", nil
+		},
+	}
+	c := newTestClient(t, fake)
+
+	dir := t.TempDir()
+	want := devTag(slugifyRepo(filepath.Base(dir)))
+
+	result, err := c.Build(context.Background(), BuildOptions{ContextDir: dir})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if result.GitMetadata {
+		t.Error("GitMetadata = true, want false (sha resolution failed)")
+	}
+	if result.Tag != want || result.DevTag != want {
+		t.Errorf("Tag/DevTag = %q/%q, want %q (directory-derived)", result.Tag, result.DevTag, want)
+	}
+
+	argv := strings.Join(fake.Last().Args, " ")
+	if strings.Contains(argv, "org.opencontainers.image.ref.name") {
+		t.Errorf("ref.name label must be absent when the tag is directory-derived, args: %v", fake.Last().Args)
+	}
+	if strings.Contains(argv, "org.opencontainers.image.revision") {
+		t.Errorf("revision label must be absent when git metadata is unavailable, args: %v", fake.Last().Args)
 	}
 }
 
