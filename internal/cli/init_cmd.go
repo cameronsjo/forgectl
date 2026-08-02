@@ -164,6 +164,18 @@ roster  = [] # step names to run when --only is omitted; empty = every roster st
 log_dir = "" # transcript log directory; empty = <config dir>/update-logs
 `
 
+// prScaffold is the [pr] section. Commented rather than active: the field's
+// zero value is not a cap of zero, it is "unset", and internal/pr.Admit
+// resolves any non-positive value to DefaultMaxConcurrentReviews. Writing
+// `max_concurrent = 4` would bake today's built-in default into every host's
+// config.toml and silently pin it there when that default next changes —
+// the same reasoning preflightScaffold gives for staying commented.
+const prScaffold = `
+# ── pr: bulk review-window admission (forgectl pr) ──────────────────────────
+[pr]
+# max_concurrent = 4 # cap on concurrent review windows; unset or <1 uses the built-in default
+`
+
 // initSection is one scaffoldable block: a config.toml section (or, for the
 // empty name, the host-scalar preamble) plus its annotated template.
 type initSection struct {
@@ -197,6 +209,7 @@ var initSections = []initSection{
 	{"docs", "docs", docsScaffold},
 	{"preflight", "preflight", preflightScaffold},
 	{"update", "update", updateScaffold},
+	{"pr", "pr", prScaffold},
 }
 
 // initModule declares the full-scaffold convenience extension (ADR-0005). It
