@@ -66,9 +66,9 @@ forgectl launch doctor             # check harness availability + launch config 
 
 # resume — get back into a Claude Code session after a terminal restart
 forgectl resume                    # pick from recent sessions across every repo, then resume in place
-forgectl resume forgectl           # filter by repo, name, cwd, or id; exactly one hit resumes it
+forgectl resume forgectl           # filter by repo, name, cwd, or id; one hit resumes it, several list the candidates
 forgectl resume --fork             # branch a new session off the transcript — the only way into a still-running one
-forgectl resume --dry-run forge    # resolve and print the cwd + claude argv, exec nothing
+forgectl resume --dry-run forge    # resolve and print the cwd + claude argv, exec nothing (never prompts)
 forgectl resume ls                 # list without acting (the only subcommand that returns)
 forgectl resume ls --json          # machine-readable JSON (safe to pipe; counts go to stderr; see `resume ls --help` for the field table)
 forgectl resume snapshot           # capture what a live session's exit would destroy
@@ -275,7 +275,8 @@ Snapshots live one JSON file per session in forgectl's config directory — `~/L
 
 **Notes:**
 
-- **A running session is refused, not continued** — with **exit 2**, distinct from the exit 1 used for "no session matched", because this is the one refusal a caller can act on. Two Claude Code processes on one transcript corrupts it, so `resume` errors out and names the live pid. `--fork` is the way in anyway: it branches a new session off the transcript, which only reads it. Pre-check with `resume ls --json`, which exposes `live` and `pid`.
+- **An ambiguous filter lists the candidates instead of prompting** — with **exit 1**, the same code as "no session matched", because both recover the same way: change the filter. When more than one session matches and nobody can answer the picker — `--dry-run`, or any run without a terminal — `resume` prints one candidate row per line on stdout and exits 1 rather than opening a selector no one can see. That list is also the answer to "is this filter unique?", which a caller otherwise has no way to know before running the command: candidates on stdout means ambiguous, empty stdout means no match, exit 0 means it resumed.
+- **A running session is refused, not continued** — with **exit 2**, distinct from the exit 1 used for "no session matched" or an ambiguous filter, because this is the one refusal a caller can act on. Two Claude Code processes on one transcript corrupts it, so `resume` errors out and names the live pid. `--fork` is the way in anyway: it branches a new session off the transcript, which only reads it. Pre-check with `resume ls --json`, which exposes `live` and `pid`.
 - **`--fork` always forks, including on a session that is *not* running.** It is not a no-op safety flag: a fork starts a *new* session rather than continuing the old one, and a new session reads its own empty task list, so snapshotted tasks are reported rather than restored (its task directory is named after a session id that does not exist until after the exec). Pass it in response to the live-session error, not defensively.
 - **The task store never shrinks to follow Claude Code.** Snapshots merge by task id and retain what they have already captured, so a later pass seeing fewer tasks never discards the earlier ones — dropping to the live set would throw away exactly what the feature exists to rescue. This is a property of *repeated* snapshots taken while the session is alive: `snapshot` walks the live-process registry, so it cannot discover a session that has already exited. Without a prior snapshot, running it after a crash recovers nothing — which is why the `Stop` hook, not manual invocation, is the intended wiring.
 - **Restore never overwrites.** A task file the live session owns always wins, and `.highwatermark` is raised but never lowered, so a resumed session is never handed an id already on disk. Running it repeatedly is a no-op.
