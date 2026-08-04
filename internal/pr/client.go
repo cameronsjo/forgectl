@@ -6,6 +6,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/launch"
+	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
 // defaultTmuxSession is the tmux session the review windows live under. A
@@ -112,7 +113,10 @@ func (c *Client) FindingsDir() string { return c.findingsDir }
 // validateWorkspace no longer requires a workspace to sit under the OS temp
 // root, so nothing here implies one; rejectCleanRoomPath's prefix scan adds
 // its own temp-root bound separately (local.go).
-const sandboxPrefix = "forgectl-workflow-"
+// Aliased to sandbox.WorkspacePrefix — the producer (sandbox.Sandbox) and
+// both guards (sandbox.Teardown, validateWorkspace) read one constant so they
+// cannot disagree about what a workspace looks like.
+const sandboxPrefix = sandbox.WorkspacePrefix
 
 // osTempDir is a seam over os.TempDir so the breadcrumb content check is
 // testable against a redirected temp root.

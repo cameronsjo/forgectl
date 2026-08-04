@@ -173,9 +173,13 @@ func (e *Executor) Run(ctx context.Context, plan Plan, wctx *Context) error {
 
 // cleanupSandbox best-effort removes the ${workspace} temp dir a worktree/clone
 // step created, called when a step fails before the workflow's own teardown
-// step runs. ${workspace} is always a forgectl os.MkdirTemp dir, so removing it
-// is safe. A stale git-worktree registration in the source repo is left for a
-// future `git worktree prune` (the full teardown lands with the clean-room path).
+// step runs. ${workspace} is NOT necessarily a forgectl os.MkdirTemp dir — a
+// workflow can seed it as a param, which is why this path reaches the delete
+// sink with no gate of its own (#222). sandbox.Teardown enforces the sandbox
+// identity itself and returns ErrUnsafeTeardown for anything else; the warn
+// below is what surfaces a refusal here. A stale git-worktree registration in
+// the source repo is left for a future `git worktree prune` (the full teardown
+// lands with the clean-room path).
 func cleanupSandbox(wctx *Context) {
 	ws, ok := wctx.Get("workspace")
 	if !ok || ws == "" {
@@ -227,7 +231,9 @@ func newSandboxStep(alwaysClone bool) StepRunner {
 
 // teardownStep removes the sandbox dir. It is idempotent: a missing
 // ${workspace} value or an already-removed dir is not an error, so teardown
-// is safe to run after a partial failure (ADR-0003).
+// is safe to run after a partial failure (ADR-0003). A ${workspace} that is
+// not a sandbox — a param-supplied path, say — fails the step closed with
+// sandbox.ErrUnsafeTeardown rather than deleting it (#222).
 func teardownStep(ctx context.Context, run exec.Runner, wctx *Context, _ PlanStep) error {
 	workspace, ok := wctx.Get("workspace")
 	if !ok || workspace == "" {
