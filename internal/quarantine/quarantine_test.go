@@ -1295,3 +1295,56 @@ func TestGlobFold_CharacterClassSemanticsSurviveFolding(t *testing.T) {
 		t.Error("globFold must propagate filepath.Match's ErrBadPattern for an unterminated class")
 	}
 }
+
+// TestPathPrefixPairs_DetectsSwallowingPair pins the detector itself against
+// synthetic input, so the invariant test below can run over the REAL list
+// without a bad pair ever being planted there.
+//
+// The `.cursor` / `.cursorrules` negative is the case that matters most: those
+// two genuinely coexist in tier2Carriers, so a detector that compared raw
+// string prefixes would fail the real list and invite the wrong fix — deleting
+// a carrier that covers a distinct file.
+func TestPathPrefixPairs_DetectsSwallowingPair(t *testing.T) {
+	tests := []struct {
+		name    string
+		targets []string
+		want    bool
+	}{
+		{"outer before inner", []string{".cursor", ".cursor/rules"}, true},
+		{"inner before outer", []string{".cursor/rules", ".cursor"}, true},
+		{"trailing slash still swallows", []string{".claude/", ".claude/settings.json"}, true},
+		{"sibling sharing a prefix is not nesting", []string{".cursor", ".cursorrules"}, false},
+		{"pattern entries are not paths", []string{".*/mcp.json", ".*/.mcp.json", ".cursor"}, false},
+		{"identical entries do not nest", []string{".cursor", ".cursor"}, false},
+		// The two rows that actually EXERCISE the isPattern skips. Without
+		// them the guards are decorative: deleting both from pathPrefixPairs
+		// leaves every other row above green, because none of those strings
+		// is a raw prefix of another anyway. A pattern is not a path — the
+		// pattern/literal overlap it would otherwise flag is already handled
+		// at expansion time by coveredRootEntries.
+		{"outer literal, inner pattern", []string{".cursor", ".cursor/*.json"}, false},
+		{"outer pattern, inner pattern", []string{".*", ".*/mcp.json"}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pairs := pathPrefixPairs(tc.targets)
+			if got := len(pairs) > 0; got != tc.want {
+				t.Fatalf("pathPrefixPairs(%v) = %v, want detected=%v", tc.targets, pairs, tc.want)
+			}
+		})
+	}
+}
+
+// TestDefaultTargets_NoEntryIsPathPrefixOfAnother is a regression guard, not a
+// live bug fix: DefaultTargets carries no such pair today. It exists because
+// the next carrier addition is the one that would introduce it, and neither
+// ordering of the resulting list produces a visible failure at runtime.
+func TestDefaultTargets_NoEntryIsPathPrefixOfAnother(t *testing.T) {
+	for _, pair := range pathPrefixPairs(DefaultTargets) {
+		t.Errorf("DefaultTargets carries %q inside %q — replace the inner entry, do not join it.\n"+
+			"Hiding %q first strands the tree: Hide leaves it inside the renamed outer directory and "+
+			"Restore never reaches it, both returning nil. Hiding %q first round-trips, but then %q "+
+			"can never match anything and is dead config that looks like coverage.",
+			pair[1], pair[0], pair[1], pair[0], pair[1])
+	}
+}
