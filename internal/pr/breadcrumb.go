@@ -168,7 +168,8 @@ func validateBreadcrumb(bc Breadcrumb) error {
 //
 // LOAD-BEARING — VALIDATE RESOLVED, ACT UNRESOLVED. This function checks the
 // prefix on filepath.EvalSymlinks(workspace), but every caller acts on the
-// UNRESOLVED string — sandbox.Teardown passes it straight to os.RemoveAll.
+// UNRESOLVED string — sandbox.Teardown hands it to os.RemoveAll after its own
+// resolved-prefix gate.
 // That split is deliberate and is what keeps a symlink NAMED without the
 // prefix but POINTING at a prefixed directory harmless: it validates here,
 // and RemoveAll then unlinks the link itself rather than following it to the

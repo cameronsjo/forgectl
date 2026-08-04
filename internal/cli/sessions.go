@@ -5,15 +5,14 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"time"
-	"unicode"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/sessions"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // sessionsModule declares the operational-concordance ETL extension (ADR-0005):
@@ -433,13 +432,11 @@ func humanTs(t *time.Time) string {
 	return "unknown"
 }
 
-// sanitizeTerm replaces control bytes (everything unicode.IsControl except
-// tab) with spaces so concordance-indexed content renders inert in the terminal.
+// sanitizeTerm is this package's local alias for termsafe.Sanitize, the hoisted
+// primitive: control bytes (everything unicode.IsControl except tab) become
+// spaces so concordance-indexed content renders inert in the terminal. The
+// alias keeps the ~40 call sites in this package reading at their own
+// altitude; internal/term is where the behavior and its fuzz coverage live.
 func sanitizeTerm(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '\t' || !unicode.IsControl(r) {
-			return r
-		}
-		return ' '
-	}, s)
+	return termsafe.Sanitize(s)
 }
