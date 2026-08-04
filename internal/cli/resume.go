@@ -400,7 +400,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, s resume.Session, fork
 	if err != nil {
 		return err
 	}
-	args := launch.ResumeArgs(profile, profile.Model, s.ID, fork)
+	args := launch.ResumeArgs(profile, s.ID, fork)
 
 	// --dry-run is the headless escape. Resuming exec-replaces this process
 	// with an INTERACTIVE claude (ResumeArgs injects --ide, which rules out a

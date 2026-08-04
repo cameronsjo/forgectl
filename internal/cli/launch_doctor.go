@@ -36,6 +36,19 @@ func newLaunchDoctorCmd(cfg config.Config) *cobra.Command {
 				healthy = false
 				fmt.Fprintf(out, "%s launch profile invalid: %v\n", launchFailMark, err)
 			}
+			// [pr] effort is validated separately because it never enters the
+			// resolved [launch] profile above — it is applied inside the review
+			// dispatch. Without this, the one setting whose failure is INVISIBLE
+			// at runtime (a review runs in a detached tmux window, so a value
+			// claude rejects is an empty pane and no error) is also the one
+			// doctor cannot pre-flight. Harness is pinned to claude because the
+			// review dispatch forces it there regardless of the ambient profile.
+			if cfg.Pr.Effort != "" {
+				if err := (launch.Profile{Harness: "claude", Effort: cfg.Pr.Effort}).Validate(); err != nil {
+					healthy = false
+					fmt.Fprintf(out, "%s [pr] config invalid: %v\n", launchFailMark, err)
+				}
+			}
 			var binaryPath string
 			var binaryErr error
 			if profile.Harness == "codex" {

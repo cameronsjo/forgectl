@@ -135,12 +135,18 @@ func WithinWorkspace(workspace, target string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// RejectOptionLike guards a value that becomes a positional git argument: a
-// leading '-' would be parsed as a git option, so an unsigned shared workflow
-// could smuggle a flag (e.g. --upload-pack) into a clone/worktree invocation.
+// RejectOptionLike guards a value that becomes a positional argument in an
+// assembled argv: a leading '-' would be parsed as an option, so an unsigned
+// shared workflow could smuggle a flag (e.g. --upload-pack) into a
+// clone/worktree invocation, and a config value could smuggle one into a
+// launched harness.
+//
+// field is the caller's own label for the value and carries the whole error
+// message — the callers span git argv (workflow, docker, branch, pr refs) and
+// the clean-room reviewer's claude argv, so it names no subsystem itself.
 func RejectOptionLike(field, value string) error {
 	if strings.HasPrefix(value, "-") {
-		return fmt.Errorf("workflow %s %q must not begin with '-'", field, value)
+		return fmt.Errorf("%s %q must not begin with '-'", field, value)
 	}
 	return nil
 }

@@ -55,7 +55,7 @@ forgectl pr attach <breadcrumb>          # jump to a review window (also: open <
 forgectl pr keys                         # tmux cheatsheet for driving a review
 
 # launch — per-project Claude Code / Codex CLI launcher (alias: cl)
-forgectl launch                    # interactive launcher: pick Model + New/Resume/Fork
+forgectl launch                    # drop straight into the resolved profile (no prompt)
 forgectl launch <harness args…>    # apply the project profile, then exec the configured harness
 forgectl launch agents --json      # pure passthrough (byte-clean); posture injected only when interactive
 forgectl launch which              # show the profile resolved for the current directory (alias: config)
@@ -279,7 +279,7 @@ Snapshots live one JSON file per session in forgectl's config directory — `~/L
 - **`--fork` always forks, including on a session that is *not* running.** It is not a no-op safety flag: a fork starts a *new* session rather than continuing the old one, and a new session reads its own empty task list, so snapshotted tasks are reported rather than restored (its task directory is named after a session id that does not exist until after the exec). Pass it in response to the live-session error, not defensively.
 - **The task store never shrinks to follow Claude Code.** Snapshots merge by task id and retain what they have already captured, so a later pass seeing fewer tasks never discards the earlier ones — dropping to the live set would throw away exactly what the feature exists to rescue. This is a property of *repeated* snapshots taken while the session is alive: `snapshot` walks the live-process registry, so it cannot discover a session that has already exited. Without a prior snapshot, running it after a crash recovers nothing — which is why the `Stop` hook, not manual invocation, is the intended wiring.
 - **Restore never overwrites.** A task file the live session owns always wins, and `.highwatermark` is raised but never lowered, so a resumed session is never handed an id already on disk. Running it repeatedly is a no-op.
-- **The resumed session gets its own project's posture.** `[launch]` profile resolution is a pure function of the config and a directory, so resuming into another repo picks up that repo's model, permission mode, and `--add-dir` set for free.
+- **The resumed session gets its own project's posture.** `[launch]` profile resolution is a pure function of the config and a directory, so resuming into another repo picks up that repo's model, effort, permission mode, and `--add-dir` set for free.
 - `forgectl doctor` carries a `resume tasks` check. Task rescue depends on Claude Code naming per-session task directories after the session id — verified behavior, not a guarantee — and the check warns if that ever stops being true, so rescue cannot silently degrade to writing where nothing reads.
 
 ## How it fits together
@@ -346,14 +346,18 @@ With `log_file = ""` (the default target once a level is set), forgectl writes t
 ### launch — per-project Claude Code and Codex profiles
 
 `forgectl launch` resolves a posture from the `[launch]` section of the same
-`config.toml`, runs a short guided launch, then **execs** Claude Code or Codex
-CLI in place (via `syscall.Exec`, so Ctrl-C, the TTY, and the exit code pass
-through untouched). Claude remains the compatibility default.
+`config.toml`, then **execs** Claude Code or Codex CLI in place (via
+`syscall.Exec`, so Ctrl-C, the TTY, and the exit code pass through untouched).
+There is no prompt — a bare `forgectl launch` drops straight into the resolved
+profile. To resume or fork an earlier session, use `forgectl resume`, which
+discovers sessions across every repo, flags the live ones, and restores their
+tasks. Claude remains the compatibility default.
 
 ```toml
 [launch.defaults]
 harness         = "claude"   # or "codex"
 model           = "opus"     # remove or replace with a Codex model when harness = "codex"
+# effort        = "medium"   # low|medium|high|xhigh|max; unset = derived from model
 permission_mode = "plan"     # launch always starts in plan
 allow_danger    = true       # adds --allow-dangerously-skip-permissions (reachable, not on)
 # binary_path   = ""         # explicit claude path; $FORGECTL_CLAUDE_BIN overrides this
@@ -365,11 +369,29 @@ allow_danger    = true       # adds --allow-dangerously-skip-permissions (reacha
 [[launch.project]]
 match           = "~/Projects/minute"
 model           = "sonnet"
+effort          = "xhigh"    # omit to take sonnet's derived "high"
 env             = { OTEL_EXPORTER = "otlp" }
 add_dir         = ["~/Projects/minute/shared"]
 ```
 
 Resolution expands `~`, picks the `[[launch.project]]` whose `match` is the **longest path-prefix** of the real working directory, and merges it over `[launch.defaults]` — scalars: project wins when set; `env`: merged, project wins on collisions; `add_dir`: concatenated and de-duplicated. No match falls back to defaults alone. Inspect the result with `forgectl launch which`.
+
+**Effort is the exception to "scalars merge like the others."** It resolves *last*, against the **final** model:
+
+| Layer | Wins when |
+|---|---|
+| `effort` on the matching `[[launch.project]]` | set — beats everything below |
+| `effort` in `[launch.defaults]` | set, and the project didn't set one |
+| derived from the resolved model | neither layer set one |
+| nothing — no `--effort` flag at all | the model is unmapped |
+
+The derivation is `sonnet` → `high`, `opus`/`fable` → `medium`, with a `[1m]` context-window suffix (`opus[1m]`) treated as its base model. Anything else — `haiku`, `opusplan`, a full model id like `claude-opus-5` — emits **no flag**, leaving your `settings.json` `effortLevel` in charge. `opusplan` is excluded deliberately: it runs opus for planning and sonnet for execution, and those map to different levels.
+
+Because derivation runs last, a project block overriding only `model` **re-derives** its level rather than inheriting one picked for a different model — unless `[launch.defaults] effort` is set, which is a deliberate global floor and survives the override.
+
+A command-line `--model` does *not* re-derive: `forgectl launch --model sonnet` keeps the profile's effort, and last-flag-wins gives you sonnet at that level. Switch models mid-session with `/model` if you want the matching effort.
+
+An `effort` outside the five accepted levels is rejected before anything is launched — by `forgectl launch`, `forgectl launch doctor`, and the `forgectl pr` review dispatch. That last one is why the check exists: a review runs in a *detached* tmux window, so a value `claude` refuses would otherwise be an empty pane and no error anywhere.
 
 **Design invariants** (verified against `claude` v2.1.183):
 
@@ -410,6 +432,21 @@ only** — `forgectl pr local`, where the reviewed tree is your own.
 **Zero-migration grace** — if `config.toml` has no `[launch]` section, forgectl still reads a legacy `~/.config/claunch/claunch.conf` (the `[launch]` section is the same `[defaults]` + `[[project]]` shape, just namespaced). `forgectl launch init` writes an empty native section for the one-time cutover; `forgectl launch init --from-claunch` migrates your existing legacy profiles into it, so `launch` stops falling back to the legacy file. Both refuse to overwrite an existing `[launch]` section.
 
 > Absorbed from the standalone `claunch` tool. A `claunch='forgectl launch'` shell alias preserves the old muscle memory.
+
+### pr — the clean-room reviewer's own posture
+
+The `[pr]` section configures `forgectl pr` independently of whatever repo a review happens to land in:
+
+```toml
+[pr]
+max_concurrent = 4         # live "pr-*" tmux windows allowed at once; <= 0 = default (4)
+model  = "opus"            # reviewer model; unset = the ambient launch profile's
+effort = "xhigh"           # reviewer effort; unset = derived from the reviewer model
+```
+
+`model` and `effort` exist because a review's posture should follow *the review*, not the checkout it is pointed at. Setting `model` **discards** the ambient repo's effort and re-derives from the new model — otherwise reviewing a sonnet-pinned repo with `[pr] model = "opus"` would ship `--model opus --effort high`, the exact mispairing the knob exists to prevent. Setting `effort` overrides everything.
+
+**These two keys are the whole surface, by design.** The clean-room review always runs with `--permission-mode plan`, never `--allow-dangerously-skip-permissions`, always `--strict-mcp-config`, and with your ambient `add_dir` dropped — because the workspace under review may hold a third party's checkout. That posture is forgectl's control, not an operator preference, and no `[pr]` key can reach it. A value starting with `-` is refused before dispatch, since both land next to those flags in the argv.
 
 ### bench — interop with the local dev services
 

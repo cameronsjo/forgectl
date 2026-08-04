@@ -10,6 +10,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
+	"github.com/cameronsjo/forgectl/internal/sandbox"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -205,6 +206,23 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 	if resolved.Harness == "codex" {
 		profile.Model = resolved.Model
 	}
+	// Same guard, same reason as launchInline's: this is the other clean-room
+	// dispatch, and profile.Model lands in the identical argv neighbourhood
+	// (`codex exec --sandbox read-only --model <value>`). Validate below only
+	// rejects CLAUDE model ids on a Codex profile, so an option-like value
+	// passes it untouched and the check would otherwise rest on clap refusing
+	// `--model --flag` rather than swallowing it — which is exactly the
+	// parser-behavior assumption the guard exists not to depend on.
+	if err := sandbox.RejectOptionLike("reviewer model", profile.Model); err != nil {
+		return err
+	}
+	// [pr] model/effort is deliberately NOT applied here, and its absence is
+	// the correct behavior rather than an oversight. Both keys are Claude-side:
+	// effort maps to --effort, which `codex exec` has no equivalent for, and a
+	// model set for the Claude reviewer is a Claude id that would reach `codex
+	// --model`. That is the exact cross-harness mispairing the resolved.Harness
+	// guard above already refuses; honoring [pr] model here would reintroduce it
+	// from a different direction.
 	prompt := reviewPrompt
 	if sess.Ref.IsLocal() {
 		profile.Sandbox = "workspace-write"
@@ -270,9 +288,17 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// `claude --model <that>`. Force the harness and re-derive the model.
 	// launchCodex guards the mirror case (it adopts resolved.Model only when
 	// the resolved harness is codex); this is the other half.
+	//
+	// Effort is re-derived alongside the model for the same reason it is in
+	// launch.resolve: it is a property OF the model, so carrying a level
+	// chosen under the old one across a model swap is the mispairing, not the
+	// fix. A Codex profile's own [launch.defaults] effort is doubly wrong here
+	// — Codex has no --effort, so any level set there was inert until this
+	// forced harness switch made it reachable.
 	if profile.Harness != "claude" {
 		profile.Harness = "claude"
 		profile.Model = launch.DefaultModelFor("claude")
+		profile.Effort = launch.EffortForModel(profile.Model)
 	}
 	// Drop the operator's ambient add_dir. launch.Resolve returns
 	// [launch.defaults].add_dir plus any project block matching the workspace,
@@ -283,6 +309,59 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// launchCodex builds a fresh Profile and inherits none; this is the
 	// inline half.
 	profile.AddDir = nil
+
+	// [pr] model/effort is its own posture, not a patch on the ambient one.
+	// Setting model DISCARDS the ambient repo's effort and re-derives, because
+	// filling only when empty would be a silent no-op: Effort is already
+	// non-empty by the time this runs (launch.Resolve derives it), so an
+	// ambient sonnet repo plus `[pr] model = "opus"` would ship
+	// `--model opus --effort high` — the exact pairing this knob exists to
+	// prevent.
+	//
+	// Note the sharper edge of the same rule: the discard covers an EXPLICIT
+	// ambient effort too, not just a derived one. `[launch.defaults] effort =
+	// "low"` plus `[pr] model = "opus"` and no `[pr] effort` reviews at
+	// medium, dropping the operator's floor. That is the "own posture, not a
+	// patch" design being consistent — a project-level model override in
+	// launch.resolve re-derives the same way — and `[pr] effort` is the way to
+	// pin a level that survives it.
+	if cfg.Pr.Model != "" {
+		profile.Model = cfg.Pr.Model
+		profile.Effort = launch.EffortForModel(cfg.Pr.Model)
+	}
+	if cfg.Pr.Effort != "" {
+		profile.Effort = cfg.Pr.Effort
+	}
+
+	// Guard the FINAL values, not just the [pr]-sourced ones. Both land as the
+	// operands of --model and --effort in an argv whose neighbours are the
+	// clean room's security flags, and a leading '-' there relies on the
+	// parser swallowing the token as a value rather than reading it as a flag
+	// in its own right. Which config layer supplied the value does not change
+	// that, so guarding only the newest source would leave the ambient
+	// [launch] half — reachable on every review where [pr] is unset, i.e. the
+	// default — travelling the identical path unchecked.
+	//
+	// There is no shell anywhere below (exec.CommandContext with separate
+	// args), so word-splitting and metacharacters are already off the table;
+	// this closes the one residual.
+	if err := sandbox.RejectOptionLike("reviewer model", profile.Model); err != nil {
+		return err
+	}
+	if err := sandbox.RejectOptionLike("reviewer effort", profile.Effort); err != nil {
+		return err
+	}
+
+	// Validate the assembled posture before dispatch. This path needs it more
+	// than `forgectl launch` does, not less: a launch execs into the operator's
+	// own terminal, so a value claude rejects prints its error where they are
+	// looking. A review is dispatched into a DETACHED tmux window, where the
+	// same rejection is an empty pane and no error anywhere — a silent failure
+	// that reads as "the review is still thinking". launchCodex has validated
+	// since it shipped; this is the inline half.
+	if err := profile.Validate(); err != nil {
+		return fmt.Errorf("clean-room review profile invalid: %w", err)
+	}
 
 	prompt := reviewPrompt
 	if sess.Ref.IsLocal() {

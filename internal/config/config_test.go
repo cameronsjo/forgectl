@@ -562,3 +562,56 @@ func TestSetupLogger(t *testing.T) {
 		}
 	})
 }
+
+// TestPrConfig_FieldSetIsPinned is a SECURITY test, not a schema test.
+//
+// The clean-room PR review hardens its posture unconditionally
+// (AllowDanger=false, PermissionMode="plan", StrictMCP=true, AddDir=nil) —
+// that is forgectl's own control over a third party's checkout, not an
+// operator preference. [pr] is the first place user config reaches that
+// dispatch, and nothing else in the suite guards the boundary:
+// TestModules_ConfigClaimsAreValidSubset validates the section NAME only and
+// never inspects a section struct's fields, BurntSushi/toml silently ignores
+// keys that bind to nothing, and Load() discards MetaData — so today a
+// `[pr] permission_mode = "bypassPermissions"` is an invisible no-op.
+//
+// The failure this pins is a LATER change: adding a PermissionMode field here
+// plus one line in launchInline would switch the control off with a green
+// suite. Widening this list is therefore a deliberate act, and the reviewer
+// who sees this test change should ask what it now lets a config file reach.
+func TestPrConfig_FieldSetIsPinned(t *testing.T) {
+	want := map[string]bool{"MaxConcurrent": true, "Model": true, "Effort": true}
+
+	tp := reflect.TypeOf(PrConfig{})
+	got := make(map[string]bool, tp.NumField())
+	for i := 0; i < tp.NumField(); i++ {
+		got[tp.Field(i).Name] = true
+	}
+
+	for name := range got {
+		if !want[name] {
+			t.Errorf("PrConfig gained field %q: [pr] carries model/effort only — "+
+				"the review's hardened posture is forgectl's control, not a config knob", name)
+		}
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("PrConfig lost field %q", name)
+		}
+	}
+}
+
+func TestPrConfig_IsZeroCoversEveryField(t *testing.T) {
+	if !(PrConfig{}).IsZero() {
+		t.Error("an empty PrConfig must report as zero")
+	}
+	for name, pc := range map[string]PrConfig{
+		"max_concurrent": {MaxConcurrent: 4},
+		"model":          {Model: "opus"},
+		"effort":         {Effort: "high"},
+	} {
+		if pc.IsZero() {
+			t.Errorf("a [pr] section setting only %s must not report as absent", name)
+		}
+	}
+}

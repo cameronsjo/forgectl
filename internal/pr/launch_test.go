@@ -495,6 +495,40 @@ func TestLaunch_DryRunSessionRefused(t *testing.T) {
 // [launch.defaults] is a plausible config for exactly the users this work
 // targets — so without forcing the harness, a Codex model id reaches
 // `claude --model <that>`.
+// TestLaunchInline_DoesNotInheritCodexEffort is the effort half of
+// TestLaunchInline_DoesNotInheritCodexModel below. Codex emits no --effort, so
+// a level set in a Codex [launch.defaults] is inert there — and it becomes
+// reachable only when this dispatch forces the harness to claude. Carrying it
+// across would pair a level chosen under a Codex profile with a re-derived
+// Claude model, the same mispairing the model half exists to prevent.
+func TestLaunchInline_DoesNotInheritCodexEffort(t *testing.T) {
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
+
+	cfg := config.Config{Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{
+		Harness: "codex",
+		Model:   "gpt-5",
+		Effort:  "max",
+	}}}
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
+	if err := c.Launch(context.Background(), sess, cfg); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	args := fake.Last().Args
+	if contains(args, "max") {
+		t.Errorf("a Codex profile's effort must not ride the forced harness switch: %v", args)
+	}
+	// opus is DefaultModelFor("claude"), so the re-derived level is medium.
+	if !argPair(args, "--effort", "medium") {
+		t.Errorf("effort must be re-derived from the forced model (opus → medium): %v", args)
+	}
+}
+
 func TestLaunchInline_DoesNotInheritCodexModel(t *testing.T) {
 	claudeBin := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
@@ -699,4 +733,209 @@ func countArg(args []string, want string) int {
 		}
 	}
 	return n
+}
+
+// TestLaunchInline_PrConfigSetsModelAndEffort covers the [pr] knob against a
+// HOSTILE ambient config — the case every other launchInline test misses,
+// because they all pass config.Config{} and so cannot see a [pr]/[launch]
+// interaction at all.
+//
+// Two things are asserted at once. The knob works: [pr] model/effort reach the
+// argv. And the knob's blast radius is bounded: an ambient config doing
+// everything wrong (bypassPermissions, allow_danger, a private add_dir) still
+// gets the hardened clean-room posture, because [pr] carries no key that can
+// reach those controls.
+func TestLaunchInline_PrConfigSetsModelAndEffort(t *testing.T) {
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
+
+	yes := true
+	cfg := config.Config{
+		Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{
+			Model:          "sonnet", // would derive effort "high"
+			PermissionMode: "bypassPermissions",
+			AllowDanger:    &yes,
+			AddDir:         []string{"/private/notes"},
+		}},
+		Pr: config.PrConfig{Model: "opus", Effort: "xhigh"},
+	}
+
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
+	if err := c.Launch(context.Background(), sess, cfg); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	args := fake.Last().Args
+
+	if !argPair(args, "--model", "opus") {
+		t.Errorf("[pr] model did not reach the reviewer argv: %v", args)
+	}
+	if !argPair(args, "--effort", "xhigh") {
+		t.Errorf("[pr] effort did not reach the reviewer argv: %v", args)
+	}
+	// The hardening, unchanged by anything [pr] can say.
+	if !argPair(args, "--permission-mode", "plan") {
+		t.Errorf("ambient bypassPermissions reached the clean room: %v", args)
+	}
+	if contains(args, "--allow-dangerously-skip-permissions") {
+		t.Errorf("ambient allow_danger reached the clean room: %v", args)
+	}
+	if contains(args, "/private/notes") || contains(args, "--add-dir") {
+		t.Errorf("ambient add_dir reached the clean room: %v", args)
+	}
+}
+
+// TestLaunchInline_PrModelRederivesEffort is the reason [pr] is its own posture
+// rather than a patch on the ambient one. Filling only when empty would be a
+// silent no-op — Profile.Effort is already non-empty here (launch.Resolve
+// derived "high" from the ambient sonnet) — so `[pr] model = "opus"` alone
+// would have shipped `--model opus --effort high`, the exact mispairing this
+// feature exists to prevent.
+func TestLaunchInline_PrModelRederivesEffort(t *testing.T) {
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
+
+	cfg := config.Config{
+		Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{Model: "sonnet"}},
+		Pr:     config.PrConfig{Model: "opus"}, // effort deliberately unset
+	}
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
+	if err := c.Launch(context.Background(), sess, cfg); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	args := fake.Last().Args
+	if !argPair(args, "--effort", "medium") {
+		t.Errorf("[pr] model must re-derive effort (opus → medium), not carry the ambient sonnet's \"high\": %v", args)
+	}
+}
+
+// TestLaunchInline_PrConfigRejectsOptionLikeValues: both values land adjacent
+// to security flags in the hardened argv. There is no shell (exec.Command with
+// separate args), so a space cannot split a token — the residual risk is a
+// value like "--allow-dangerously-skip-permissions" riding in as the operand
+// of --model or --effort and being parsed as a flag in its own right. Refuse
+// before dispatch, and prove ZERO Runner calls happened.
+func TestLaunchInline_PrConfigRejectsOptionLikeValues(t *testing.T) {
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
+
+	for name, pc := range map[string]config.PrConfig{
+		"model":  {Model: "--allow-dangerously-skip-permissions"},
+		"effort": {Effort: "--dangerously-skip-permissions"},
+	} {
+		fake := &exec.FakeRunner{}
+		c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+		sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
+		if err := c.Launch(context.Background(), sess, config.Config{Pr: pc}); err == nil {
+			t.Errorf("[pr] %s: an option-like value must be refused", name)
+		}
+		if len(fake.Calls) != 0 {
+			t.Errorf("[pr] %s: a refused value must issue ZERO Runner calls; got %+v", name, fake.Calls)
+		}
+	}
+}
+
+// TestLaunchInline_RejectsOptionLikeAmbientValues is the other half of the
+// option-like guard, and the half that covers the DEFAULT configuration. When
+// [pr] is unset — the common case — the reviewer's --model and --effort
+// operands come from the ambient [launch] profile instead, travel the exact
+// same argv positions next to the clean room's security flags, and would be
+// unchecked if the guard only covered the newest source of them.
+func TestLaunchInline_RejectsOptionLikeAmbientValues(t *testing.T) {
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
+
+	for name, defaults := range map[string]config.LaunchDefaults{
+		"model":  {Model: "--allow-dangerously-skip-permissions"},
+		"effort": {Model: "opus", Effort: "--dangerously-skip-permissions"},
+	} {
+		cfg := config.Config{Launch: config.LaunchConfig{Defaults: defaults}}
+		fake := &exec.FakeRunner{}
+		c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+		sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
+		if err := c.Launch(context.Background(), sess, cfg); err == nil {
+			t.Errorf("ambient [launch] %s: an option-like value must be refused", name)
+		}
+		if len(fake.Calls) != 0 {
+			t.Errorf("ambient [launch] %s: a refused value must issue ZERO Runner calls; got %+v", name, fake.Calls)
+		}
+	}
+}
+
+// TestLaunchInline_RejectsInvalidEffort is the finding this closes: a review is
+// dispatched into a DETACHED tmux window, so a value claude rejects produces an
+// empty pane and no error anywhere — indistinguishable from a review still
+// running. Refuse before dispatch, and prove zero Runner calls.
+func TestLaunchInline_RejectsInvalidEffort(t *testing.T) {
+	claudeBin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
+
+	for name, cfg := range map[string]config.Config{
+		"[pr] effort":      {Pr: config.PrConfig{Effort: "hihg"}},
+		"ambient [launch]": {Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{Effort: "maximum"}}},
+	} {
+		fake := &exec.FakeRunner{}
+		c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+		sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
+		err := c.Launch(context.Background(), sess, cfg)
+		if err == nil {
+			t.Errorf("%s: an invalid effort must be refused before dispatch", name)
+		} else if !strings.Contains(err.Error(), "effort") {
+			t.Errorf("%s: the error must name the offending setting, got %q", name, err)
+		}
+		if len(fake.Calls) != 0 {
+			t.Errorf("%s: a refused value must issue ZERO Runner calls; got %+v", name, fake.Calls)
+		}
+	}
+}
+
+// TestLaunchCodex_RejectsOptionLikeModel is the Codex half of the option-like
+// guard. launchCodex adopts the ambient model whenever the resolved harness is
+// codex, and it lands in the same argv neighbourhood as the sandbox flag
+// (`codex exec --sandbox read-only --model <value>`). Validate does not close
+// it — on a Codex profile Validate only rejects CLAUDE model ids, so an
+// option-like value passes untouched.
+func TestLaunchCodex_RejectsOptionLikeModel(t *testing.T) {
+	codexBin := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(codexBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("FORGECTL_CODEX_BIN", codexBin)
+
+	cfg := config.Config{Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{
+		Harness: "codex",
+		Model:   "--dangerously-bypass-approvals-and-sandbox",
+	}}}
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	sess := Session{
+		Ref:         mustLocalRef("abc1234", 1),
+		Workspace:   fakeWorkspace(t),
+		Agent:       "codex",
+		FindingsDir: t.TempDir(),
+	}
+	if err := c.Launch(context.Background(), sess, cfg); err == nil {
+		t.Error("an option-like Codex model must be refused before dispatch")
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("a refused value must issue ZERO Runner calls; got %+v", fake.Calls)
+	}
 }

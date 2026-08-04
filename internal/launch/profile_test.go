@@ -293,3 +293,221 @@ func TestExpandTilde(t *testing.T) {
 		}
 	}
 }
+
+// ── effort ──────────────────────────────────────────────────────────────────
+
+func TestEffortForModel_MappedAliases(t *testing.T) {
+	cases := map[string]string{
+		"sonnet": "high",
+		"opus":   "medium",
+		"fable":  "medium",
+		// The "[1m]" suffix picks the 1M-token context window, not a different
+		// model, so effort carries over. Claude Code 2.1.221 accepts these.
+		"sonnet[1m]": "high",
+		"opus[1m]":   "medium",
+		"fable[1m]":  "medium",
+	}
+	for model, want := range cases {
+		if got := EffortForModel(model); got != want {
+			t.Errorf("EffortForModel(%q) = %q, want %q", model, got, want)
+		}
+	}
+}
+
+// TestEffortForModel_UnmappedYieldsNoLevel is the deliberate half of the
+// mapping. Emitting no flag leaves settings.json's effortLevel in charge —
+// the pre-existing behavior — whereas guessing a level for a model whose
+// effort semantics were never measured silently changes how it runs.
+//
+// opusplan is the pointed case: it runs opus for planning and sonnet for
+// execution, and this mapping puts those at DIFFERENT levels, so there is no
+// single honest answer to give it.
+func TestEffortForModel_UnmappedYieldsNoLevel(t *testing.T) {
+	for _, model := range []string{
+		"", "haiku", "opusplan", "opusplan[1m]", "claude-opus-5", "gpt-5", "opus[2m]",
+	} {
+		if got := EffortForModel(model); got != "" {
+			t.Errorf("EffortForModel(%q) = %q, want \"\" (unmapped models must emit no --effort)", model, got)
+		}
+	}
+}
+
+func TestResolve_EffortDerivedFromBuiltinModel(t *testing.T) {
+	got := resolveAt(config.LaunchConfig{}, "/home/u/somewhere")
+	if got.Effort != "medium" {
+		t.Errorf("Effort = %q, want %q (derived from the built-in opus)", got.Effort, "medium")
+	}
+}
+
+func TestResolve_EffortScalarMerge_ProjectWinsWhenSet_DefaultsOtherwise(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Model: "opus", Effort: "low"},
+		Projects: []config.LaunchProject{
+			{Match: "~/p", Effort: "max"},
+			{Match: "~/q"},
+		},
+	}
+	if got := resolveAt(lc, "/home/u/p"); got.Effort != "max" {
+		t.Errorf("Effort = %q, want %q (project override)", got.Effort, "max")
+	}
+	if got := resolveAt(lc, "/home/u/q"); got.Effort != "low" {
+		t.Errorf("Effort = %q, want %q (from defaults)", got.Effort, "low")
+	}
+}
+
+// TestResolve_ExplicitEffortBeatsDerivation pins the precedence at both
+// layers: a configured level outranks whatever the model would derive.
+func TestResolve_ExplicitEffortBeatsDerivation(t *testing.T) {
+	defaultsOnly := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Model: "sonnet", Effort: "low"}, // sonnet derives "high"
+	}
+	if got := resolveAt(defaultsOnly, "/home/u/x"); got.Effort != "low" {
+		t.Errorf("Effort = %q, want %q — [launch.defaults] effort must beat derivation", got.Effort, "low")
+	}
+
+	projectOnly := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Model: "opus"},
+		Projects: []config.LaunchProject{{Match: "~/p", Model: "sonnet", Effort: "low"}},
+	}
+	if got := resolveAt(projectOnly, "/home/u/p"); got.Effort != "low" {
+		t.Errorf("Effort = %q, want %q — a project effort must beat its own model's derivation", got.Effort, "low")
+	}
+}
+
+// TestResolve_ProjectModelOverride_RederivesWhenNoExplicitEffort is the case
+// the "derive LAST, against the FINAL model" ordering exists for. The fixture
+// deliberately sets NO defaults-effort — with one set, the explicit value wins
+// and no re-derivation happens (that is the converse test below).
+func TestResolve_ProjectModelOverride_RederivesWhenNoExplicitEffort(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Model: "opus"}, // would derive "medium"
+		Projects: []config.LaunchProject{{Match: "~/p", Model: "sonnet"}},
+	}
+	if got := resolveAt(lc, "/home/u/p"); got.Effort != "high" {
+		t.Errorf("Effort = %q, want %q — a project overriding only `model` must re-derive", got.Effort, "high")
+	}
+}
+
+// TestResolve_DefaultsEffortSurvivesProjectModelOverride is the converse: an
+// explicit [launch.defaults] effort is a deliberate global floor, so a project
+// changing only its model inherits that level rather than re-deriving.
+func TestResolve_DefaultsEffortSurvivesProjectModelOverride(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Model: "opus", Effort: "xhigh"},
+		Projects: []config.LaunchProject{{Match: "~/p", Model: "sonnet"}},
+	}
+	if got := resolveAt(lc, "/home/u/p"); got.Effort != "xhigh" {
+		t.Errorf("Effort = %q, want %q — an explicit defaults effort must survive a project model override", got.Effort, "xhigh")
+	}
+}
+
+// TestResolve_ProjectModelOverrideToUnmappedClearsDerivedEffort: switching to
+// an unmapped model must CLEAR the level the defaults' model derived, not
+// carry it across. Reading p.Effort back would silently keep "medium" here.
+func TestResolve_ProjectModelOverrideToUnmappedClearsDerivedEffort(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Model: "opus"},
+		Projects: []config.LaunchProject{{Match: "~/p", Model: "haiku"}},
+	}
+	if got := resolveAt(lc, "/home/u/p"); got.Effort != "" {
+		t.Errorf("Effort = %q, want \"\" — an unmapped project model must not inherit the defaults' derived level", got.Effort)
+	}
+}
+
+func TestDefaultsProfile_DerivesEffortFromDefaultsModel(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Model: "sonnet"},
+		// A project block must not influence DefaultsProfile at all.
+		Projects: []config.LaunchProject{{Match: "~/", Model: "haiku"}},
+	}
+	if got := DefaultsProfile(lc); got.Effort != "high" {
+		t.Errorf("Effort = %q, want %q", got.Effort, "high")
+	}
+}
+
+// TestProfileValidate_EffortEnum pins the five levels `claude --help` documents
+// (2.1.221: "low, medium, high, xhigh, max"). Empty is valid and means "emit no
+// flag" — an unmapped model resolves to exactly that, so rejecting it would
+// make every haiku profile unlaunchable.
+func TestProfileValidate_EffortEnum(t *testing.T) {
+	for _, level := range EffortLevels {
+		p := Profile{Harness: "claude", Effort: level}
+		if err := p.Validate(); err != nil {
+			t.Errorf("effort %q must be accepted: %v", level, err)
+		}
+	}
+	if err := (Profile{Harness: "claude"}).Validate(); err != nil {
+		t.Errorf("an empty effort means \"emit no flag\" and must be accepted: %v", err)
+	}
+	for _, bad := range []string{"hihg", "HIGH", "maximum", "1", "veryhigh"} {
+		err := (Profile{Harness: "claude", Effort: bad}).Validate()
+		if err == nil {
+			t.Errorf("effort %q must be rejected", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "xhigh") {
+			t.Errorf("the error for %q must name the accepted set, got %q", bad, err)
+		}
+	}
+}
+
+// TestProfileValidate_EffortCheckedOnCodexToo: effort is inert under Codex
+// (no --effort flag, and the Codex builders never emit one), so a typo there
+// is silent until the profile flips harness — or until the clean-room review
+// forces harness to claude. Validate it in both postures.
+func TestProfileValidate_EffortCheckedOnCodexToo(t *testing.T) {
+	p := Profile{Harness: "codex", ApprovalPolicy: "never", Sandbox: "read-only", Effort: "hihg"}
+	if err := p.Validate(); err == nil {
+		t.Error("a bad effort must be rejected on a Codex profile too, where it is otherwise inert")
+	}
+}
+
+// TestEffortForModel_OnlyYieldsValidLevels closes the loop between the two
+// halves of this feature: every level the derivation can produce must survive
+// the validator. A mapping entry added without a matching enum entry would
+// make an untouched config fail at launch.
+func TestEffortForModel_OnlyYieldsValidLevels(t *testing.T) {
+	for _, model := range []string{"sonnet", "opus", "fable", "sonnet[1m]", "opus[1m]", "fable[1m]", "haiku", ""} {
+		derived := EffortForModel(model)
+		if err := (Profile{Harness: "claude", Effort: derived}).Validate(); err != nil {
+			t.Errorf("EffortForModel(%q) = %q, which Validate rejects: %v", model, derived, err)
+		}
+	}
+}
+
+// TestResolve_ExplicitDefaultsEffortSurvivesHarnessOnlyOverride closes the
+// fixture gap the review flagged: a project block overriding only `harness`
+// clears the Model (the harness switch re-derives it), so the effort path has
+// to be checked separately from the model-override cases. An explicit
+// defaults-effort is a global floor and survives; it is inert under Codex,
+// which is why Validate checks it there too.
+func TestResolve_ExplicitDefaultsEffortSurvivesHarnessOnlyOverride(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Model: "opus", Effort: "xhigh"},
+		Projects: []config.LaunchProject{{Match: "~/p", Harness: "codex"}},
+	}
+	got := resolveAt(lc, "/home/u/p")
+	if got.Harness != "codex" {
+		t.Fatalf("Harness = %q, want codex", got.Harness)
+	}
+	if got.Model != "" {
+		t.Errorf("Model = %q, want \"\" (the harness switch re-derives it)", got.Model)
+	}
+	if got.Effort != "xhigh" {
+		t.Errorf("Effort = %q, want %q — an explicit defaults effort is a floor, not a per-model value", got.Effort, "xhigh")
+	}
+}
+
+// TestResolve_HarnessOnlyOverride_NoExplicitEffort_ClearsDerived is the
+// converse: with no explicit effort, a harness-only switch clears the Model,
+// so the derived level must clear with it rather than stay pinned to the
+// Claude model it came from.
+func TestResolve_HarnessOnlyOverride_NoExplicitEffort_ClearsDerived(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Model: "sonnet"}, // derives "high"
+		Projects: []config.LaunchProject{{Match: "~/p", Harness: "codex"}},
+	}
+	if got := resolveAt(lc, "/home/u/p"); got.Effort != "" {
+		t.Errorf("Effort = %q, want \"\" — a cleared model must clear its derived level", got.Effort)
+	}
+}

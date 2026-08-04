@@ -24,11 +24,16 @@ const launchScaffold = `
 #   scalars: project wins when set; Claude remains the compatibility default
 #   env: merged, project wins on key collisions
 #   add_dir: concatenated and de-duplicated
+#   effort: derived from the FINAL model last, so a project overriding only
+#           model re-derives — sonnet high, opus/fable medium, anything else
+#           no --effort at all (your settings.json effortLevel stays in charge).
+#           Set effort at either layer to override the derived level.
 # Inspect the resolved profile with:  forgectl launch which
 
 [launch.defaults]
 harness         = "claude"   # "claude" (default) or "codex"
 model           = "opus"     # remove or replace with a Codex model when harness = "codex"
+# effort        = "medium"   # low|medium|high|xhigh|max; unset = derived from model
 permission_mode = "plan"     # launch always starts in plan
 allow_danger    = true       # adds --allow-dangerously-skip-permissions (reachable, not on)
 # binary_path   = ""         # explicit claude path; $FORGECTL_CLAUDE_BIN overrides this
@@ -41,6 +46,7 @@ allow_danger    = true       # adds --allow-dangerously-skip-permissions (reacha
 # [[launch.project]]
 # match   = "~/Projects/minute"
 # model   = "sonnet"
+# effort  = "xhigh"          # omit to take sonnet's derived "high"
 # env     = { OTEL_EXPORTER = "otlp" }
 # add_dir = ["~/Projects/minute/shared"]
 `

@@ -57,7 +57,7 @@ func Execute(ctx context.Context) error {
 
 	// The launcher intercept runs before TUI/fang routing: `forgectl launch …`
 	// (and its `cl` alias) must reach claude byte-clean for builder/agents
-	// passthrough and open the interview when bare, bypassing Cobra flag
+	// passthrough and exec the resolved profile when bare, bypassing Cobra flag
 	// parsing. Own-verbs (which/edit/init/doctor/help) fall through to fang for
 	// styled help. Only an inert global flag (--no-icons) may precede the token —
 	// a root --help/--version must reach fang, not be skipped into the launcher.
