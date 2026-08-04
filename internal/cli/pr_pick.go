@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/pr"
 )
 
@@ -68,23 +69,23 @@ review bypasses admission by design.`,
 func pickPRs(prs []pr.PR, store *pr.ReviewedStore) ([]pr.PR, error) {
 	opts := make([]huh.Option[string], len(prs))
 	for i, p := range prs {
-		key := p.Ref.String()
-		label := fmt.Sprintf("%s  %s", key, sanitizeCell(p.Title))
+		refKey := p.Ref.String()
+		label := fmt.Sprintf("%s  %s", refKey, sanitizeCell(p.Title))
 		if pr.Dimmed(p, store) {
 			label = prDimStyle.Render(label + "  (reviewed)")
 		}
-		opts[i] = huh.NewOption(label, key)
+		opts[i] = huh.NewOption(label, refKey)
 	}
 
 	var chosen []string
 	err := huh.NewForm(
 		huh.NewGroup(
 			huh.NewMultiSelect[string]().
-				Title("Open PRs — space to select, enter to launch").
+				Title("Open PRs — space to select, enter to launch, esc to cancel").
 				Options(opts...).
 				Value(&chosen),
 		),
-	).Run()
+	).WithKeyMap(keymap.Cancel()).Run()
 	if err != nil {
 		return nil, err
 	}

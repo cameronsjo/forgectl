@@ -15,7 +15,10 @@ package cli
 //
 // pickPRs is not unit-tested here: it drives an interactive huh multiselect
 // that requires a TTY. Its selection→launch contract is covered via
-// launchPicked, which is the load-bearing skip authority.
+// launchPicked, which is the load-bearing skip authority. The esc-to-cancel
+// keymap is likewise unassertable — it is built inline and handed to a form
+// that only observes it under a TTY, and huh opens /dev/tty directly, so any
+// test that let the form run would hang locally and fail only in CI.
 
 import (
 	"bytes"
