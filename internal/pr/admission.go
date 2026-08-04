@@ -108,9 +108,12 @@ func (c *Client) WindowLive(ctx context.Context, ref Ref) (live bool, ok bool) {
 // process per session. ok is false when the window list could not be read;
 // the returned map is nil in that case, never a map of falses.
 //
-// The liveness test is the same exact string comparison LiveReviews uses
-// (w.Session == c.tmuxSession && w.Name == windowName(ref)) and goes through
-// the same ListWindows path, deliberately. has-session and `display-message
+// What is shared with LiveReviews is the exact SESSION comparison
+// (w.Session == c.tmuxSession) and ListWindows as the sole discriminator —
+// the load-bearing part. The window test differs by design: LiveReviews
+// counts the whole review family with a HasPrefix on reviewWindowPrefix,
+// where this needs one specific window, so it compares w.Name against
+// windowName(ref) exactly. has-session and `display-message
 // -t` both route through tmux's own `-t` resolution — exact, then fnmatch,
 // then PREFIX — which reports a sibling session as a match; see the
 // LiveReviews doc comment above for the full trace of why that fuzziness is

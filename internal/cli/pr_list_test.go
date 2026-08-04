@@ -117,6 +117,26 @@ func TestPrList_LiveWindow(t *testing.T) {
 	if !strings.Contains(got, ref.String()) {
 		t.Errorf("pr list output missing the ref:\n%s", got)
 	}
+
+	// The COLUMN CONTRACT, pinned by position and not merely by suffix.
+	// README documents field 3 as the breadcrumb `pr teardown` is fed, so a
+	// suffix check on the status alone is not enough: a future change could
+	// insert a column at position 2, keep status last, pass every other
+	// assertion here, and still hand `cut -f3` a timestamp.
+	line := strings.TrimSuffix(got, "\n")
+	fields := strings.Split(line, "\t")
+	if len(fields) != 4 {
+		t.Fatalf("pr list row has %d tab-separated fields, want exactly 4 (ref, created, breadcrumb, status):\n%s", len(fields), got)
+	}
+	if fields[0] != ref.String() {
+		t.Errorf("field 1 = %q, want the ref %q", fields[0], ref.String())
+	}
+	if !strings.HasSuffix(fields[2], ".json") {
+		t.Errorf("field 3 = %q, want the breadcrumb path — this is the field `pr teardown` is fed", fields[2])
+	}
+	if fields[3] != "live" {
+		t.Errorf("field 4 = %q, want the status %q", fields[3], "live")
+	}
 }
 
 // TestPrList_WindowGone is forgectl#242 end to end: the breadcrumb is on disk
