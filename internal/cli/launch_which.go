@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
@@ -70,13 +69,15 @@ func printLaunchProfile(w io.Writer, p launch.Profile, cwd, confPath string) {
 		row("allow danger", fmt.Sprintf("%t", p.AllowDanger))
 	}
 
+	// Env renders its sorted KEY NAMES only, never its values: this is arbitrary
+	// environment injected into the launched harness, so it is where an
+	// ANTHROPIC_API_KEY or GH_TOKEN sits, and `which` output is the kind of
+	// thing pasted into an issue or a terminal share. The key names carry the
+	// signal an operator needs here — which variables the profile injects.
+	// Same policy, same rendering as the sibling surface: leafValue's
+	// reflect.Map arm in internal/cli/config_cmd.go.
 	if len(p.Env) > 0 {
-		keys := launch.SortedEnvKeys(p.Env)
-		pairs := make([]string, len(keys))
-		for i, k := range keys {
-			pairs[i] = k + "=" + p.Env[k]
-		}
-		row("env", strings.Join(pairs, "  "))
+		row("env", redactedMapDisplay(launch.SortedEnvKeys(p.Env)))
 	}
 	for i, d := range p.AddDir {
 		label := ""

@@ -914,6 +914,27 @@ func TestIntegration_LaunchWhich_ShowsCodexPosture(t *testing.T) {
 	}
 }
 
+// TestIntegration_LaunchWhich_WithholdsEnvValues: the unit test proves the
+// renderer withholds env values; this proves the wiring from a real config
+// file through to real stdout does too — stdout being the surface that
+// actually gets pasted somewhere.
+func TestIntegration_LaunchWhich_WithholdsEnvValues(t *testing.T) {
+	h := newBareHarness(t, "[launch.defaults.env]\nANTHROPIC_API_KEY = \"sk-ant-hunter2\"\nFOO = \"plainbarvalue\"\n")
+	stdout, stderr := h.run(t, "which")
+	combined := stdout + stderr
+
+	for _, secret := range []string{"sk-ant-hunter2", "plainbarvalue"} {
+		if strings.Contains(combined, secret) {
+			t.Errorf("`launch which` leaked the env value %q:\n%s", secret, combined)
+		}
+	}
+	for _, want := range []string{"env", "ANTHROPIC_API_KEY", "FOO"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("`launch which` output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
 // TestIntegration_LaunchDoctor_ResolvesCodexBinary: doctor must resolve and
 // report the Codex binary, not silently check for claude.
 func TestIntegration_LaunchDoctor_ResolvesCodexBinary(t *testing.T) {
