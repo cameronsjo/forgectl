@@ -49,9 +49,10 @@ func TestPrintLaunchProfile_EnvValuesAreWithheld(t *testing.T) {
 	}
 }
 
-// TestPrintLaunchProfile_NoEnvRowWhenUnset is the negative control for the
-// assertions above: with no env configured the row is absent entirely, so a
-// passing leak assertion means the row was rendered and withheld, not skipped.
+// TestPrintLaunchProfile_NoEnvRowWhenUnset pins that withholding the values
+// did not quietly become an always-empty row: with no env configured the row
+// is absent entirely. (That the row RENDERS when env is set is already proved
+// by the key-presence assertions above, not by this test.)
 func TestPrintLaunchProfile_NoEnvRowWhenUnset(t *testing.T) {
 	var buf bytes.Buffer
 	printLaunchProfile(&buf, launch.Profile{
@@ -59,7 +60,10 @@ func TestPrintLaunchProfile_NoEnvRowWhenUnset(t *testing.T) {
 		Model:   "opus",
 	}, "/tmp/cwd", "/tmp/config.toml")
 
-	if strings.Contains(buf.String(), "env") {
+	// Anchored on the rendered LABEL, not a bare "env" substring: three
+	// letters matched against the whole render would also trip on a config
+	// path like ~/.envs, or any future row label containing "env".
+	if strings.Contains(buf.String(), launchLabelStyle.Render("env")) {
 		t.Errorf("`launch which` printed an env row for a profile with no env:\n%s", buf.String())
 	}
 }
