@@ -10,13 +10,13 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/resume"
@@ -61,6 +61,11 @@ or a tool call, use ` + "`resume --dry-run`" + ` (prints the resolved cwd and ar
 ` + "`resume ls --json`" + `; a bare ` + "`resume`" + ` will exec an interactive claude onto
 whatever stdout it was given.
 
+--dry-run never prompts, and neither does a run with no terminal on it. When
+the filter matches more than one session and there is no one to answer the
+picker, resume prints the candidate rows on stdout and exits 1 rather than
+opening a selector nobody can see — narrow the filter or pass a session id.
+
 Related: ` + "`forgectl launch`" + ` starts or resumes a session in the CURRENT
 directory and prompts for the posture. ` + "`resume`" + ` is the cross-repo one — it
 finds a session anywhere on the machine and moves you to it.
@@ -89,10 +94,11 @@ starts a new session rather than continuing the old one, and a new session
 reads its own (empty) task list, so snapshotted tasks are reported rather than
 restored. Pass it in response to the live-session error, not defensively.
 
-Exit codes: 0 resumed; 1 no session matched, or the pick was cancelled; 2 the
-target is still running (recoverable — use --fork). Note that ` + "`resume ls`" + `
-exits 0 with an empty list when nothing matches, so ` + "`resume ls X && resume X`" + `
-is NOT a valid guard; test the ls output instead.`,
+Exit codes: 0 resumed; 1 no session matched, the filter was ambiguous and there
+was no way to pick, or the pick was cancelled; 2 the target is still running
+(recoverable — use --fork). Note that ` + "`resume ls`" + ` exits 0 with an empty
+list when nothing matches, so ` + "`resume ls X && resume X`" + ` is NOT a valid
+guard; test the ls output instead.`,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -122,6 +128,12 @@ is NOT a valid guard; test the ls output instead.`,
 // that runs `go test`.
 var resumePaths = resume.DefaultPaths
 
+// scanSessions is the scan seam for runResume, in the same spirit as
+// resumePaths: internal/resume's fixture builder is unexported, so without a
+// seam here no cli-layer test can produce the two-or-more sessions the
+// ambiguous path exists to handle.
+var scanSessions = scanFor
+
 // scanFor loads the resumable sessions matching filter. Live sessions are
 // included deliberately: hiding one would turn "you cannot resume this, it is
 // still running as pid N" into a silent "no session matched", which sends you
@@ -136,7 +148,7 @@ func scanFor(filter string, limit int) ([]resume.Session, error) {
 
 // runResume is the pick-then-resume path.
 func runResume(cmd *cobra.Command, cfg config.Config, filter string, limit int, fork, dryRun bool) error {
-	sessions, err := scanFor(filter, limit)
+	sessions, err := scanSessions(filter, limit)
 	if err != nil {
 		return err
 	}
@@ -148,11 +160,8 @@ func runResume(cmd *cobra.Command, cfg config.Config, filter string, limit int, 
 	}
 
 	picked := sessions[0]
-	if len(sessions) > 1 {
-		if picked, err = pickSession(sessions); err != nil {
-			return WithExitCode(err, 1)
-		}
-	} else {
+	switch {
+	case len(sessions) == 1:
 		// A single filter hit execs without the picker, so nothing would
 		// otherwise show WHAT is about to be resumed. That matters more
 		// than convenience: resuming means chdir'ing into a directory read
@@ -161,9 +170,69 @@ func runResume(cmd *cobra.Command, cfg config.Config, filter string, limit int, 
 		// loads that directory's own .claude/settings.json — hooks
 		// included. The operator should see the target first.
 		fmt.Fprintf(cmd.ErrOrStderr(), "forgectl: one match — %s\n", sessionRow(picked))
+	case dryRun || !isInteractiveTTY():
+		// Nobody can answer the picker, or nobody should be asked: --dry-run
+		// declares non-interactive intent, and isInteractiveTTY requires BOTH
+		// stdin and stdout to be terminals. The stdout half is not about
+		// /dev/tty being absent — a piped run from a real terminal still has
+		// one. It is that a piped stdout means the output is being consumed,
+		// and a TUI drawn over it corrupts what the caller is reading.
+		// Opening the picker anyway is what ADR-0008 rule 1 forbids.
+		return ambiguousMatch(cmd, sessions, filter, dryRun)
+	default:
+		if picked, err = pickSessionFn(sessions); err != nil {
+			return WithExitCode(err, 1)
+		}
 	}
 	return resumeSession(cmd, cfg, picked, fork, dryRun)
 }
+
+// ambiguousMatch is the headless answer to "which of these did you mean".
+//
+// The picker is the interactive answer, and it is the wrong one twice over:
+// --dry-run declares non-interactive intent, and a run whose stdin or stdout
+// is not a terminal has nobody to prompt or nothing safe to draw over. With
+// stdin redirected huh fails outright with a /dev/tty error that describes
+// forgectl's internals rather than the caller's problem. ADR-0008 rule 1 names
+// the substitute — print the candidate set, one per line, and exit non-zero.
+//
+// Exit 1 rather than a code of its own: the repo draws the 1-vs-2 line by what
+// RECOVERS the call, and an ambiguous filter recovers the same way a no-match
+// does, by changing the filter. A caller that must tell the two apart gets it
+// free — candidates on stdout versus nothing.
+func ambiguousMatch(cmd *cobra.Command, sessions []resume.Session, filter string, dryRun bool) error {
+	out := cmd.OutOrStdout()
+	// Payload to stdout (ADR-0008 rule 5): the candidate list is the answer
+	// to the question the caller asked, so it must survive a pipe.
+	l := layoutFor(sessions, writerWidth(out))
+	for _, s := range sessions {
+		fmt.Fprintln(out, sessionRowWidth(s, l))
+	}
+
+	matched := "recent sessions to choose from"
+	if filter != "" {
+		matched = fmt.Sprintf("sessions matched %q", sanitizeTerm(filter))
+	}
+	reason := "there is no terminal to pick on"
+	if dryRun {
+		reason = "--dry-run never prompts"
+	}
+	// Every clause of the recovery must be followable from what the caller was
+	// just handed. The rows carry name/repo/branch, NOT ids (sessionRowWidth
+	// falls back to the id only when a name is absent), so telling a scripted
+	// caller to "pass a session id" points at something this output does not
+	// contain — `resume ls --json` is where ids actually live.
+	return WithExitCode(fmt.Errorf(
+		"%d %s, and %s — narrow the filter, or get a session id from `forgectl resume ls --json`; the candidates are on stdout",
+		len(sessions), matched, reason), 1)
+}
+
+// pickSessionFn is the picker seam. A test cannot let the real picker run:
+// huh opens /dev/tty directly, which EXISTS whenever `go test` is started from
+// a terminal even with stdout piped, so an unstubbed picker HANGS locally and
+// only fails in CI. Stubbing it is what makes "the picker was not reached" a
+// deterministic assertion.
+var pickSessionFn = pickSession
 
 // pickSession runs the single-select. Options are keyed by session id so a
 // selection round-trips unambiguously (the same reason pickPRs keys on a ref).
@@ -181,12 +250,6 @@ func pickSession(sessions []resume.Session) (resume.Session, error) {
 		opts[i] = huh.NewOption(label, s.ID)
 	}
 
-	// huh v1.0.0 binds Quit to ctrl+c ALONE (keymap.go:109), so Esc is
-	// unbound and does nothing — the picker reads as stuck to anyone who
-	// reaches for the conventional cancel key. Bind it.
-	km := huh.NewDefaultKeyMap()
-	km.Quit = key.NewBinding(key.WithKeys("ctrl+c", "esc"), key.WithHelp("esc", "cancel"))
-
 	var chosen string
 	err := huh.NewForm(
 		huh.NewGroup(
@@ -195,7 +258,7 @@ func pickSession(sessions []resume.Session) (resume.Session, error) {
 				Options(opts...).
 				Value(&chosen),
 		),
-	).WithKeyMap(km).Run()
+	).WithKeyMap(keymap.Cancel()).Run()
 	if err != nil {
 		return resume.Session{}, err
 	}
