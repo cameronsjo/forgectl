@@ -242,6 +242,20 @@ func tomlFieldName(f reflect.StructField) (string, bool) {
 	}
 }
 
+// redactedMapDisplay renders a map leaf as its key names alone — the shared
+// rendering behind the keys-visible/values-withheld policy, used by leafValue's
+// reflect.Map arm and by `forgectl launch which`. Callers pass keys already
+// sorted; the ordering is the caller's to own because Go randomises map
+// iteration and both surfaces must be reproducible.
+//
+// Note this is deliberately NOT redactedPlaceholder: that "(redacted)" stands
+// in for a whole scalar (sessions.dsn), where even the shape is sensitive. A
+// map's key names are the useful signal — which variables are injected — and
+// only the values need withholding.
+func redactedMapDisplay(keys []string) string {
+	return "{" + strings.Join(keys, " ") + "}"
+}
+
 // leafValue renders one non-struct field for display and for --json. The three
 // awkward shapes config.Config carries are handled explicitly:
 //
@@ -277,11 +291,10 @@ func leafValue(v reflect.Value) (display string, value any) {
 	// and with what shape. Sorting is load-bearing beyond determinism — Go
 	// randomises map iteration, so unsorted output would differ run to run.
 	//
-	// `forgectl launch which` still prints these values in full
-	// (internal/cli/launch_which.go). That is a pre-existing exposure on a
-	// different surface, filed separately; it is deliberately not inherited
-	// here, where the output is the kind of thing pasted into an issue and
-	// --json makes it machine-copyable.
+	// `forgectl launch which` renders the same map under the same policy,
+	// through the same redactedMapDisplay helper — see its env row in
+	// internal/cli/launch_which.go. Both surfaces get pasted into issues, and
+	// --json makes this one machine-copyable.
 	case reflect.Map:
 		keys := make([]string, 0, v.Len())
 		iter := v.MapRange()
@@ -289,7 +302,7 @@ func leafValue(v reflect.Value) (display string, value any) {
 			keys = append(keys, iter.Key().String())
 		}
 		sort.Strings(keys)
-		return "{" + strings.Join(keys, " ") + "}", keys
+		return redactedMapDisplay(keys), keys
 
 	case reflect.Slice:
 		if v.Type().Elem().Kind() == reflect.Struct {

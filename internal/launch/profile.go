@@ -337,8 +337,10 @@ func boolOr(p *bool, def bool) bool {
 	return def
 }
 
-// SortedEnvKeys returns the profile env keys in deterministic order, for display
-// and for stable argv/env assembly.
+// SortedEnvKeys returns the profile env keys in deterministic order, for
+// display. Go randomises map iteration, so `forgectl launch which` would
+// otherwise reorder its env row run to run. Env assembly for the exec does not
+// come through here — MergeEnv sorts its own output.
 func SortedEnvKeys(env map[string]string) []string {
 	keys := make([]string, 0, len(env))
 	for k := range env {
