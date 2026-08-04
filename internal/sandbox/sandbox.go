@@ -124,7 +124,12 @@ func isLocalRepo(repo string) bool {
 // EvalSymlinks failure is fail-closed: a dangling symlink is refused rather
 // than falling back to the literal name (pr.validateWorkspace falls back
 // fail-open at that point; this is deliberately stricter, and the trade is
-// that a sandbox whose target vanished must be removed by hand).
+// that a sandbox whose target vanished must be removed by hand — and, because
+// pr.validateWorkspace falls back fail-OPEN on the same error, such a
+// breadcrumb loads fine and then dies here, so `pr teardown` and `pr cleanup`
+// can never reclaim that session without manual help. Reaching it needs the
+// workspace's own final component to be a symlink, which sandbox.Sandbox never
+// produces; the fail-open/fail-closed divergence itself is tracked in #247).
 //
 // TOCTOU, KNOWN AND BOUNDED: between EvalSymlinks and RemoveAll a PARENT
 // component repointed after validation redirects the delete to a different
@@ -144,32 +149,11 @@ func isLocalRepo(repo string) bool {
 // the guard passes it by design. Reaching it requires writing a breadcrumb
 // into the 0700 session-state dir under $HOME, i.e. same-uid arbitrary write.
 func Teardown(_ context.Context, _ exec.Runner, workspace string) error {
-	if workspace == "" {
-		slog.Debug("Teardown: no workspace, nothing to remove.")
+	switch err := checkTeardownTarget(workspace); {
+	case errors.Is(err, errNothingToRemove):
 		return nil
-	}
-	// A relative path's base name can carry the prefix while resolving
-	// anywhere off the process cwd, so require an absolute path first.
-	if !filepath.IsAbs(workspace) {
-		slog.Error("Refused to tear down a relative workspace path.", "workspace", workspace)
-		return fmt.Errorf("teardown %s: %w", workspace, ErrUnsafeTeardown)
-	}
-	if _, err := os.Lstat(workspace); err != nil {
-		if os.IsNotExist(err) {
-			slog.Debug("Teardown: workspace already removed.", "workspace", workspace)
-			return nil
-		}
-		slog.Error("Refused to tear down an unstattable workspace.", "workspace", workspace, "error", err)
-		return fmt.Errorf("teardown %s: %w", workspace, ErrUnsafeTeardown)
-	}
-	resolved, err := filepath.EvalSymlinks(workspace)
-	if err != nil {
-		slog.Error("Refused to tear down a workspace that could not be resolved.", "workspace", workspace, "error", err)
-		return fmt.Errorf("teardown %s: %w", workspace, ErrUnsafeTeardown)
-	}
-	if !strings.HasPrefix(filepath.Base(resolved), WorkspacePrefix) {
-		slog.Error("Refused to tear down a path lacking the sandbox prefix.", "workspace", workspace, "resolved", resolved, "prefix", WorkspacePrefix)
-		return fmt.Errorf("teardown %s: %w", workspace, ErrUnsafeTeardown)
+	case err != nil:
+		return err
 	}
 	slog.Debug("Preparing to tear down workspace.", "workspace", workspace)
 	// The UNRESOLVED string, per ACT UNRESOLVED above.
@@ -178,6 +162,58 @@ func Teardown(_ context.Context, _ exec.Runner, workspace string) error {
 		return fmt.Errorf("teardown %s: %w", workspace, err)
 	}
 	slog.Debug("Successfully tore down workspace.", "workspace", workspace)
+	return nil
+}
+
+// errNothingToRemove is the "no work, no error" verdict — an empty workspace
+// or one already gone. Internal to the check/act split; Teardown maps it to
+// nil so idempotency reads the same to callers as it always has.
+var errNothingToRemove = errors.New("nothing to remove")
+
+// checkTeardownTarget is the whole guard, as a PURE PREDICATE: it stats and
+// resolves, and it never deletes. Splitting it out of Teardown is what lets
+// the worst-case targets — "/" and "/tmp" — be asserted in tests without a
+// recursive-delete sink one regression away. A test that hands the real
+// Teardown "/" is guarded only by the code under test, so the run where the
+// guard breaks is exactly the run that walks the root; measured at ~15s
+// against a real filesystem, and unrecoverable as root in a container.
+//
+// The ORDER is the design, and it is why this is one small function rather
+// than inline steps: resolve BEFORE the prefix test, so a symlink NAMED with
+// the prefix is judged by what it points at. Teardown then reads as
+// check → RemoveAll(unresolved), which is the invariant the header defends.
+func checkTeardownTarget(workspace string) error {
+	if workspace == "" {
+		slog.Debug("Teardown: no workspace, nothing to remove.")
+		return errNothingToRemove
+	}
+	// A relative path's base name can carry the prefix while resolving
+	// anywhere off the process cwd, so require an absolute path first.
+	if !filepath.IsAbs(workspace) {
+		slog.Error("Refused to tear down a relative workspace path.", "workspace", workspace)
+		return fmt.Errorf("teardown %q: %w", workspace, ErrUnsafeTeardown)
+	}
+	if _, err := os.Lstat(workspace); err != nil {
+		if os.IsNotExist(err) {
+			slog.Debug("Teardown: workspace already removed.", "workspace", workspace)
+			return errNothingToRemove
+		}
+		// The CAUSE rides along: a real sandbox that hits EACCES or ELOOP is
+		// still a sandbox, and reporting only "not a forgectl sandbox
+		// workspace" sends the operator to check the prefix — the wrong move.
+		// errors.Is(err, ErrUnsafeTeardown) still matches.
+		slog.Error("Refused to tear down an unstattable workspace.", "workspace", workspace, "error", err)
+		return fmt.Errorf("teardown %q: %w: %v", workspace, ErrUnsafeTeardown, err)
+	}
+	resolved, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		slog.Error("Refused to tear down a workspace that could not be resolved.", "workspace", workspace, "error", err)
+		return fmt.Errorf("teardown %q: %w: %v", workspace, ErrUnsafeTeardown, err)
+	}
+	if !strings.HasPrefix(filepath.Base(resolved), WorkspacePrefix) {
+		slog.Error("Refused to tear down a path lacking the sandbox prefix.", "workspace", workspace, "resolved", resolved, "prefix", WorkspacePrefix)
+		return fmt.Errorf("teardown %q: %w", workspace, ErrUnsafeTeardown)
+	}
 	return nil
 }
 

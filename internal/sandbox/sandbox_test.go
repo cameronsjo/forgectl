@@ -10,7 +10,14 @@
 //   - Teardown refuses anything whose RESOLVED base name lacks
 //     WorkspacePrefix — an unprefixed dir, a prefix-named symlink pointing
 //     elsewhere, a dangling symlink, a "..", the prefix in a parent component
-//     or merely contained in the base name, a relative path, / and /tmp.
+//     or merely contained in the base name, a relative path. "/" and "/tmp"
+//     are asserted against checkTeardownTarget, the pure predicate, so no
+//     test ever hands the real delete sink a path it must be saved from.
+//   - Teardown unlinks a symlink without following it to the target — the
+//     ACT-UNRESOLVED half, which nothing pinned before.
+//   - FuzzTeardown_NeverDeletesUnprefixed drives arbitrary path bytes through
+//     the same property, with containment established BEFORE the call and a
+//     deletable canary outside the tree to catch a containment regression.
 //   - Teardown still removes a genuine forgectl-workflow-* dir (the vacuity
 //     guard for the refusal cases above).
 //   - Teardown follows a symlinked PARENT component (accepted behaviour, not
@@ -371,10 +378,19 @@ func TestTeardown_UnlinksSymlinkWithoutFollowingToTarget(t *testing.T) {
 	}
 }
 
-// TestTeardown_RefusesRoot covers the worst-case sinks directly.
-func TestTeardown_RefusesRoot(t *testing.T) {
+// TestCheckTeardownTarget_RefusesRoot covers the worst-case sinks — against
+// the PREDICATE, never against Teardown.
+//
+// Handing "/" to the real Teardown would make the guard under test the only
+// thing standing between `go test` and os.RemoveAll("/"), which is precisely
+// the protection that is absent on the run where the guard has regressed.
+// Measured: with the prefix check disabled, that call spends ~15s walking the
+// real root and is stopped only by filesystem permissions — as root in a CI
+// container, nothing stops it. "/tmp" is worse than it looks on macOS, where
+// Teardown acts on the unresolved string and would unlink the symlink itself.
+func TestCheckTeardownTarget_RefusesRoot(t *testing.T) {
 	for _, target := range []string{"/", "/tmp"} {
-		if err := Teardown(context.Background(), &exec.FakeRunner{}, target); !errors.Is(err, ErrUnsafeTeardown) {
+		if err := checkTeardownTarget(target); !errors.Is(err, ErrUnsafeTeardown) {
 			t.Fatalf("%s: expected ErrUnsafeTeardown, got %v", target, err)
 		}
 	}
