@@ -1316,6 +1316,14 @@ func TestPathPrefixPairs_DetectsSwallowingPair(t *testing.T) {
 		{"sibling sharing a prefix is not nesting", []string{".cursor", ".cursorrules"}, false},
 		{"pattern entries are not paths", []string{".*/mcp.json", ".*/.mcp.json", ".cursor"}, false},
 		{"identical entries do not nest", []string{".cursor", ".cursor"}, false},
+		// The two rows that actually EXERCISE the isPattern skips. Without
+		// them the guards are decorative: deleting both from pathPrefixPairs
+		// leaves every other row above green, because none of those strings
+		// is a raw prefix of another anyway. A pattern is not a path — the
+		// pattern/literal overlap it would otherwise flag is already handled
+		// at expansion time by coveredRootEntries.
+		{"outer literal, inner pattern", []string{".cursor", ".cursor/*.json"}, false},
+		{"outer pattern, inner pattern", []string{".*", ".*/mcp.json"}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
