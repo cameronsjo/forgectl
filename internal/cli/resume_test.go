@@ -334,12 +334,22 @@ func TestRunResume_AmbiguousSanitizesCandidates(t *testing.T) {
 	second := hostile
 	second.ID = "aaaaaaaa-0000-0000-0000-000000000002"
 	pinScan(t, hostile, second)
-	pinPick(t, explodingPick)
+	calls := pinPick(t, explodingPick)
 	pinTTY(t, false)
 
 	cmd, out, _ := newTestCmd()
 	if err := runResume(cmd, config.Config{}, "cc", 0, false, true); err == nil {
 		t.Fatal("an ambiguous filter returned nil")
+	}
+	// Both assertions are load-bearing. assertInert on an empty string passes
+	// vacuously, so a regression that reached explodingPick instead of
+	// rendering would look clean here: the picker count is what proves the
+	// candidate list is the thing being asserted inert.
+	if *calls != 0 {
+		t.Errorf("the picker was reached %d time(s) with no terminal to draw on", *calls)
+	}
+	if out.Len() == 0 {
+		t.Fatal("no candidate list was rendered, so there is nothing to assert inert")
 	}
 	assertInert(t, out.String())
 }
