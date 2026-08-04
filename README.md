@@ -453,9 +453,11 @@ effort = "xhigh"           # reviewer effort; unset = derived from the reviewer 
 A mistyped `model` therefore reaches the agent, which rejects it a few seconds after dispatch and exits — and tmux destroys the review window along with the error. `forgectl pr list` is where that surfaces: it cross-checks each breadcrumb against the live tmux window list and renders a status column. The output is tab-separated — aligned below for readability.
 
 ```
-cameronsjo/forgectl#42   live          2026-08-04T09:12:31Z  …/forgectl/pr-sessions/cameronsjo-forgectl-42-….json
-cameronsjo/forgectl#41   window gone   2026-08-04T09:10:02Z  …/forgectl/pr-sessions/cameronsjo-forgectl-41-….json
+cameronsjo/forgectl#42   2026-08-04T09:12:31Z  …/forgectl/pr-sessions/cameronsjo-forgectl-42-….json   live
+cameronsjo/forgectl#41   2026-08-04T09:10:02Z  …/forgectl/pr-sessions/cameronsjo-forgectl-41-….json   window gone
 ```
+
+The status is the last field, appended rather than inserted, so the breadcrumb stays field 3 for anything already parsing this output.
 
 `live` means the review window still exists. `window gone` means the agent is no longer running — a rejected `model` is one cause, but so is a finished review or a window you closed yourself; either way the session is stale and `pr teardown <breadcrumb>` reclaims it. `?` means tmux itself could not be read, which says nothing about any individual window; the command still succeeds.
 

@@ -111,8 +111,8 @@ func TestPrList_LiveWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pr list: %v", err)
 	}
-	if !strings.Contains(got, "\tlive\t") {
-		t.Errorf("pr list output missing a \"live\" status column:\n%s", got)
+	if !strings.Contains(got, "\tlive\n") {
+		t.Errorf("pr list output missing a trailing \"live\" status column:\n%s", got)
 	}
 	if !strings.Contains(got, ref.String()) {
 		t.Errorf("pr list output missing the ref:\n%s", got)
@@ -145,8 +145,8 @@ func TestPrList_UnreadableTmux_DegradesAndSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pr list must succeed when tmux is unreadable, got: %v", err)
 	}
-	if !strings.Contains(got, "\t?\t") {
-		t.Errorf("pr list output missing a \"?\" status for an unreadable tmux:\n%s", got)
+	if !strings.Contains(got, "\t?\n") {
+		t.Errorf("pr list output missing a trailing \"?\" status for an unreadable tmux:\n%s", got)
 	}
 	if strings.Contains(got, "window gone") {
 		t.Errorf("an unreadable tmux must NOT render \"window gone\" — that would flag every "+

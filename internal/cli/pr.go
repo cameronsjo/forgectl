@@ -196,9 +196,13 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 			}
 			live, tmuxOK := client.WindowsLive(cmd.Context(), refs)
 			for _, s := range sessions {
+				// Status is APPENDED, never inserted. The breadcrumb path is
+				// field 3 and README documents it as what `pr teardown` is fed,
+				// so a script cutting field 3 keeps working; shifting it would
+				// hand those callers a timestamp.
 				fmt.Fprintf(out, "%s\t%s\t%s\t%s\n",
-					s.Ref.String(), windowStatus(live, s.Ref, tmuxOK),
-					s.CreatedAt.Format(time.RFC3339), s.Path)
+					s.Ref.String(), s.CreatedAt.Format(time.RFC3339), s.Path,
+					windowStatus(live, s.Ref, tmuxOK))
 			}
 			return nil
 		},
