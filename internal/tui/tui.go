@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
@@ -378,7 +379,7 @@ func (m model) startConfirm(op opKind, target string) (tea.Model, tea.Cmd) {
 	m.pendingTarget = target
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewConfirm().Key("ok").Title(prompt).Affirmative("Yes").Negative("No"),
-	)).WithWidth(m.formWidth()).WithShowHelp(false)
+	)).WithWidth(m.formWidth()).WithShowHelp(false).WithKeyMap(keymap.Cancel())
 	m.mode = formMode
 	return m, m.form.Init()
 }
@@ -389,7 +390,7 @@ func (m model) startRename(target string) (tea.Model, tea.Cmd) {
 	m.pendingTarget = target
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewInput().Key("name").Title(fmt.Sprintf("Rename %q to:", target)),
-	)).WithWidth(m.formWidth()).WithShowHelp(false)
+	)).WithWidth(m.formWidth()).WithShowHelp(false).WithKeyMap(keymap.Cancel())
 	m.mode = formMode
 	return m, m.form.Init()
 }

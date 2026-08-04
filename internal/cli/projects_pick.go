@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/projects"
 )
 
@@ -95,7 +96,7 @@ func pickRepo(repos []projects.Repo) (projects.Repo, error) {
 				Options(opts...).
 				Value(&chosen),
 		),
-	).WithKeyMap(cancelKeyMap()).Run()
+	).WithKeyMap(keymap.Cancel()).Run()
 	if err != nil {
 		return projects.Repo{}, err
 	}

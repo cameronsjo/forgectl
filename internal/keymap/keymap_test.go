@@ -1,19 +1,19 @@
-package cli
+package keymap
 
 import (
 	"slices"
 	"testing"
 )
 
-// TestCancelKeyMap_BindsEsc is the assertion the per-picker literals could not
+// TestCancel_BindsEsc is the assertion the per-picker literals could not
 // carry. The keymap is a plain value, so it needs no form and no TTY — only
 // letting the FORM run requires one, because huh opens /dev/tty directly.
 //
 // Without this, the esc binding was verifiable only by hand: a regression on
 // the next huh bump would surface as a picker that reads as stuck, with a
 // green suite.
-func TestCancelKeyMap_BindsEsc(t *testing.T) {
-	km := cancelKeyMap()
+func TestCancel_BindsEsc(t *testing.T) {
+	km := Cancel()
 
 	keys := km.Quit.Keys()
 	for _, want := range []string{"ctrl+c", "esc"} {

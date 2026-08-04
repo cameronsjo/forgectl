@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/pr"
 )
 
@@ -84,7 +85,7 @@ func pickPRs(prs []pr.PR, store *pr.ReviewedStore) ([]pr.PR, error) {
 				Options(opts...).
 				Value(&chosen),
 		),
-	).WithKeyMap(cancelKeyMap()).Run()
+	).WithKeyMap(keymap.Cancel()).Run()
 	if err != nil {
 		return nil, err
 	}
