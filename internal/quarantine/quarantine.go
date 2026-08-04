@@ -140,6 +140,20 @@ var mcpConfigPatterns = []string{".*/mcp.json", ".*/.mcp.json"}
 // nestable basenames — see nestableBasenames — are expanded to every nested
 // match by ExpandTargets; the remaining literals are root-level only, which is
 // where they are actually read from.
+//
+// No literal entry may be a path prefix of another — a directory entry that
+// would swallow an existing entry must REPLACE it, never join it. Widening
+// `.cursor/rules` to `.cursor` means deleting `.cursor/rules` in the same
+// edit. TestDefaultTargets_NoEntryIsPathPrefixOfAnother enforces this, because
+// both orders are wrong and one of them is silent:
+//
+//   - inner first (`.cursor/rules` then `.cursor`) strands the tree
+//     permanently. Hide leaves `.cursor.quarantined/rules.quarantined/`, and
+//     Restore only undoes the outer rename, so `.cursor/rules.quarantined/`
+//     survives — both calls returning nil.
+//   - outer first round-trips cleanly, but the inner entry is then dead config
+//     that merely looks like coverage: it can never match anything, because
+//     the outer rename has already moved it out from under its own path.
 var DefaultTargets = concatTargets(tier1Carriers, tier2Carriers, mcpConfigPatterns)
 
 // concatTargets flattens the tier groups into one list. A plain helper rather
@@ -155,6 +169,35 @@ func concatTargets(groups ...[]string) []string {
 		out = append(out, g...)
 	}
 	return out
+}
+
+// pathPrefixPairs reports every {outer, inner} pair in targets where the outer
+// entry is a directory that contains the inner one. Such a pair is banned in
+// DefaultTargets: see that list's doc comment for the failure it causes.
+//
+// Pattern entries are skipped — a glob is not a path, and the overlap between
+// a pattern match and a literal directory is already handled by
+// coveredRootEntries. Both sides are cleaned first because `.claude/` and
+// `.claude` are the same entry spelled two ways. The separator appended to the
+// outer entry is load-bearing: without it `.cursor` would flag `.cursorrules`,
+// which is a sibling file, not a child.
+func pathPrefixPairs(targets []string) [][2]string {
+	var pairs [][2]string
+	for i, a := range targets {
+		if isPattern(a) {
+			continue
+		}
+		outer := filepath.Clean(a)
+		for j, b := range targets {
+			if i == j || isPattern(b) {
+				continue
+			}
+			if inner := filepath.Clean(b); strings.HasPrefix(inner, outer+string(filepath.Separator)) {
+				pairs = append(pairs, [2]string{outer, inner})
+			}
+		}
+	}
+	return pairs
 }
 
 // nestableBasenames are the instruction-file basenames a coding agent picks up
