@@ -5,8 +5,21 @@
 //   - Sandbox alwaysClone/remote issues `git clone --branch <ref> -- <repo> <dir>`;
 //     clone-without-ref omits --branch.
 //   - RejectOptionLike rejects a leading-'-' repo and ref before any Runner call.
-//   - Teardown is idempotent: an empty workspace is a no-op and issues no
-//     Runner call.
+//   - Teardown is idempotent: an empty workspace and an already-removed dir
+//     are both no-ops, and neither issues a Runner call.
+//   - Teardown refuses anything whose RESOLVED base name lacks
+//     WorkspacePrefix — an unprefixed dir, a prefix-named symlink pointing
+//     elsewhere, a dangling symlink, a "..", the prefix in a parent component
+//     or merely contained in the base name, a relative path. "/" and "/tmp"
+//     are asserted against checkTeardownTarget, the pure predicate, so no
+//     test ever hands the real delete sink a path it must be saved from.
+//   - Teardown unlinks a symlink without following it to the target — the
+//     ACT-UNRESOLVED half, which nothing pinned before.
+//   - FuzzTeardown_NeverDeletesUnprefixed drives arbitrary path bytes through
+//     the same property, with containment established BEFORE the call and a
+//     deletable canary outside the tree to catch a containment regression.
+//   - Teardown still removes a genuine forgectl-workflow-* dir (the vacuity
+//     guard for the refusal cases above).
 //   - Teardown follows a symlinked PARENT component (accepted behaviour, not
 //     a desired guarantee — pinned so a change to it is visible).
 //   - WithinWorkspace rejects a symlink escaping the workspace.
@@ -14,8 +27,10 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -163,9 +178,19 @@ func TestRejectOptionLike(t *testing.T) {
 	}
 }
 
-// TestTeardown_Idempotent verifies Teardown is safe to call on an empty
-// workspace (no-op) and issues no Runner call.
-func TestTeardown_Idempotent(t *testing.T) {
+// mkWorkspace makes a real, prefix-carrying sandbox dir under root.
+func mkWorkspace(t *testing.T, root, name string) string {
+	t.Helper()
+	dir := filepath.Join(root, WorkspacePrefix+name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	return dir
+}
+
+// TestTeardown_EmptyWorkspaceIsNoOp covers the documented idempotency floor:
+// an empty workspace is a no-op and issues no Runner call.
+func TestTeardown_EmptyWorkspaceIsNoOp(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	if err := Teardown(context.Background(), fake, ""); err != nil {
 		t.Fatalf("Teardown on empty workspace: %v", err)
@@ -173,18 +198,291 @@ func TestTeardown_Idempotent(t *testing.T) {
 	if len(fake.Calls) != 0 {
 		t.Errorf("Teardown must not shell out, got calls: %+v", fake.Calls)
 	}
+}
 
-	workspace := t.TempDir()
+// TestTeardown_AlreadyRemovedIsNoOp proves the Lstat-ENOENT leg keeps
+// idempotency intact: tearing down a real workspace twice must not error, and
+// the second call must NOT be reported as a refusal.
+func TestTeardown_AlreadyRemovedIsNoOp(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	workspace := mkWorkspace(t, t.TempDir(), "gone")
+
 	if err := Teardown(context.Background(), fake, workspace); err != nil {
 		t.Fatalf("first Teardown: %v", err)
 	}
 	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
 		t.Fatalf("workspace should be gone after Teardown, stat err = %v", err)
 	}
-	// Second call on the already-removed dir must not error.
 	if err := Teardown(context.Background(), fake, workspace); err != nil {
+		if errors.Is(err, ErrUnsafeTeardown) {
+			t.Fatalf("an already-removed workspace must be a no-op, not a refusal: %v", err)
+		}
 		t.Fatalf("second (idempotent) Teardown must not error, got: %v", err)
 	}
+}
+
+// TestTeardown_AcceptsRealSandbox is the VACUITY GUARD for every refusal test
+// below: a genuine forgectl-workflow-* dir with content is still removed. If
+// this fails, the refusals prove nothing because everything is refused.
+func TestTeardown_AcceptsRealSandbox(t *testing.T) {
+	workspace := mkWorkspace(t, t.TempDir(), "real")
+	if err := os.WriteFile(filepath.Join(workspace, "file.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if err := Teardown(context.Background(), &exec.FakeRunner{}, workspace); err != nil {
+		t.Fatalf("Teardown of a genuine sandbox must succeed, got: %v", err)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Fatalf("genuine sandbox should be gone, stat err = %v", err)
+	}
+}
+
+// TestTeardown_RefusesSymlinkNamedWithPrefix is the order-of-resolution case:
+// a link NAMED forgectl-workflow-* pointing at an unprefixed victim must be
+// refused. Testing the literal base name before resolving would let the link's
+// name alone authorize removing the target.
+func TestTeardown_RefusesSymlinkNamedWithPrefix(t *testing.T) {
+	root := t.TempDir()
+	victim := filepath.Join(root, "victim")
+	if err := os.MkdirAll(filepath.Join(victim, "sub"), 0o700); err != nil {
+		t.Fatalf("mkdir victim: %v", err)
+	}
+	link := filepath.Join(root, WorkspacePrefix+"x")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	err := Teardown(context.Background(), &exec.FakeRunner{}, link)
+	if !errors.Is(err, ErrUnsafeTeardown) {
+		t.Fatalf("expected ErrUnsafeTeardown, got %v", err)
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("victim must survive: %v", err)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Errorf("the link itself must survive: %v", err)
+	}
+}
+
+// TestTeardown_RefusesDanglingSymlink pins the fail-closed EvalSymlinks trade:
+// a prefixed link whose target is gone cannot be resolved, so it is refused
+// rather than falling back to the literal name.
+func TestTeardown_RefusesDanglingSymlink(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(root, WorkspacePrefix+"dangling")
+	if err := os.Symlink(filepath.Join(root, "nonexistent"), link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	if err := Teardown(context.Background(), &exec.FakeRunner{}, link); !errors.Is(err, ErrUnsafeTeardown) {
+		t.Fatalf("expected ErrUnsafeTeardown for a dangling symlink, got %v", err)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Errorf("the dangling link must survive: %v", err)
+	}
+}
+
+// TestTeardown_RefusesUnprefixedBaseName covers the plain case that motivated
+// the guard: an arbitrary existing directory is not a sandbox.
+func TestTeardown_RefusesUnprefixedBaseName(t *testing.T) {
+	dir := t.TempDir()
+	if err := Teardown(context.Background(), &exec.FakeRunner{}, dir); !errors.Is(err, ErrUnsafeTeardown) {
+		t.Fatalf("expected ErrUnsafeTeardown, got %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("dir must survive: %v", err)
+	}
+}
+
+// TestTeardown_RefusesDotDotTraversal covers a path whose literal text carries
+// the prefix in a component but which climbs back out to an unprefixed target.
+func TestTeardown_RefusesDotDotTraversal(t *testing.T) {
+	root := t.TempDir()
+	mkWorkspace(t, root, "x")
+	victim := filepath.Join(root, "victim")
+	if err := os.Mkdir(victim, 0o700); err != nil {
+		t.Fatalf("mkdir victim: %v", err)
+	}
+
+	target := filepath.Join(root, WorkspacePrefix+"x", "..", "victim")
+	if err := Teardown(context.Background(), &exec.FakeRunner{}, target); !errors.Is(err, ErrUnsafeTeardown) {
+		t.Fatalf("expected ErrUnsafeTeardown, got %v", err)
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("victim must survive: %v", err)
+	}
+}
+
+// TestTeardown_RefusesPrefixNotAtBaseName covers the two near-misses: the
+// prefix sitting in a PARENT component, and a base name that merely CONTAINS
+// the prefix rather than starting with it.
+func TestTeardown_RefusesPrefixNotAtBaseName(t *testing.T) {
+	root := t.TempDir()
+
+	parent := mkWorkspace(t, root, "parent")
+	inner := filepath.Join(parent, "victim")
+	if err := os.Mkdir(inner, 0o700); err != nil {
+		t.Fatalf("mkdir inner: %v", err)
+	}
+	notPrefixed := filepath.Join(root, "not"+WorkspacePrefix+"x")
+	if err := os.Mkdir(notPrefixed, 0o700); err != nil {
+		t.Fatalf("mkdir notPrefixed: %v", err)
+	}
+
+	for _, target := range []string{inner, notPrefixed} {
+		if err := Teardown(context.Background(), &exec.FakeRunner{}, target); !errors.Is(err, ErrUnsafeTeardown) {
+			t.Errorf("%s: expected ErrUnsafeTeardown, got %v", target, err)
+		}
+		if _, err := os.Stat(target); err != nil {
+			t.Errorf("%s must survive: %v", target, err)
+		}
+	}
+}
+
+// TestTeardown_UnlinksSymlinkWithoutFollowingToTarget is the ONLY test that
+// pins the ACT-UNRESOLVED half of the invariant. The header comment on
+// Teardown, the one on pr.validateWorkspace, and breadcrumb_test.go:293 all
+// describe it, but until this test existed, mutating os.RemoveAll(workspace)
+// to os.RemoveAll(resolved) passed internal/sandbox, internal/pr, and
+// internal/workflow clean — the exact regression all three comments forbid.
+//
+// The shape: a NON-prefixed symlink pointing at a PREFIXED directory. The
+// guard resolves it, sees a prefixed base, and accepts. Because the delete
+// then uses the UNRESOLVED string, os.RemoveAll unlinks the link and never
+// follows it. Resolving first would delete the real directory instead.
+func TestTeardown_UnlinksSymlinkWithoutFollowingToTarget(t *testing.T) {
+	root := t.TempDir()
+	target := mkWorkspace(t, root, "target")
+	keep := filepath.Join(target, "keep.txt")
+	if err := os.WriteFile(keep, []byte("must survive"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	link := filepath.Join(root, "plainlink")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	// Accepted: the RESOLVED base name carries the prefix.
+	if err := Teardown(context.Background(), &exec.FakeRunner{}, link); err != nil {
+		t.Fatalf("Teardown of a link resolving to a sandbox must succeed, got: %v", err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Errorf("the link itself should be unlinked, stat err = %v", err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Errorf("ACT-UNRESOLVED violated: the link's target was deleted: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("ACT-UNRESOLVED violated: the target's contents were deleted: %v", err)
+	}
+}
+
+// TestCheckTeardownTarget_RefusesRoot covers the worst-case sinks — against
+// the PREDICATE, never against Teardown.
+//
+// Handing "/" to the real Teardown would make the guard under test the only
+// thing standing between `go test` and os.RemoveAll("/"), which is precisely
+// the protection that is absent on the run where the guard has regressed.
+// Measured: with the prefix check disabled, that call spends ~15s walking the
+// real root and is stopped only by filesystem permissions — as root in a CI
+// container, nothing stops it. "/tmp" is worse than it looks on macOS, where
+// Teardown acts on the unresolved string and would unlink the symlink itself.
+func TestCheckTeardownTarget_RefusesRoot(t *testing.T) {
+	for _, target := range []string{"/", "/tmp"} {
+		if err := checkTeardownTarget(target); !errors.Is(err, ErrUnsafeTeardown) {
+			t.Fatalf("%s: expected ErrUnsafeTeardown, got %v", target, err)
+		}
+	}
+}
+
+// TestTeardown_RefusesRelativePath covers the absolute-path requirement: a
+// relative name can carry the prefix while resolving anywhere off the cwd.
+func TestTeardown_RefusesRelativePath(t *testing.T) {
+	if err := Teardown(context.Background(), &exec.FakeRunner{}, WorkspacePrefix+"x"); !errors.Is(err, ErrUnsafeTeardown) {
+		t.Fatalf("expected ErrUnsafeTeardown for a relative path, got %v", err)
+	}
+}
+
+// FuzzTeardown_NeverDeletesUnprefixed asserts the property over arbitrary path
+// bytes rooted in a canary tree: Teardown either errors, or the path it acted
+// on resolved to a base name carrying WorkspacePrefix.
+//
+// CONTAINMENT IS ESTABLISHED BEFORE THE CALL, NOT ASSERTED AFTER. filepath.Join
+// cleans "../", so a rel of "../../forgectl-workflow-anything" resolves out of
+// the fuzz tree and into the process temp root — exactly where
+// os.MkdirTemp("", WorkspacePrefix+"*") puts REAL sandboxes. Teardown would
+// then be CORRECT to delete it (the base name carries the prefix), and an
+// after-the-fact canary check inside the tree could not see it. Under
+// `go test -fuzz` that destroys a concurrently running forgectl's workspace, or
+// a CI agent's. So: any input whose joined path leaves root is dropped before
+// Teardown is ever called.
+//
+// The tree is rooted two levels deep so escape-SHAPED inputs stay explorable —
+// "../" and "../../" still climb, they just land inside root — and only deeper
+// climbs are dropped. outsideCanary is a PREFIXED directory outside root: it is
+// one Teardown would happily delete, so a regression of this exact kind fails
+// the test instead of passing silently.
+func FuzzTeardown_NeverDeletesUnprefixed(f *testing.F) {
+	f.Add("victim")
+	f.Add(WorkspacePrefix + "x")
+	f.Add(WorkspacePrefix + "x/../victim")
+	f.Add("../victim")
+	f.Add("../../victim")
+	f.Add("../../../" + WorkspacePrefix + "escape")
+	f.Add("plink/" + WorkspacePrefix + "x")
+	f.Add("")
+	f.Add("/")
+
+	f.Fuzz(func(t *testing.T, rel string) {
+		root := t.TempDir()
+		base := filepath.Join(root, "tree", "sub")
+		if err := os.MkdirAll(base, 0o700); err != nil {
+			t.Fatalf("mkdir base: %v", err)
+		}
+		canaries := []string{filepath.Join(base, "victim"), filepath.Join(root, "canary")}
+		for _, c := range canaries {
+			if err := os.MkdirAll(c, 0o700); err != nil {
+				t.Fatalf("mkdir canary: %v", err)
+			}
+		}
+		mkWorkspace(t, base, "x")
+
+		// A prefixed — therefore deletable — canary OUTSIDE the containment
+		// boundary. If containment ever regresses, this is what dies.
+		outsideCanary := mkWorkspace(t, t.TempDir(), "outside-canary")
+
+		target := filepath.Join(root, "tree", "sub", rel)
+		// Containment, before the call. filepath.Join has already cleaned the
+		// path, so this comparison is the real reach of the delete. The tree
+		// contains no symlinks, so lexical containment is the whole story.
+		if target != root && !strings.HasPrefix(target, root+string(filepath.Separator)) {
+			return
+		}
+
+		_, lstatErr := os.Lstat(target)
+		resolvedBefore, resolveErr := filepath.EvalSymlinks(target)
+
+		err := Teardown(context.Background(), &exec.FakeRunner{}, target)
+		// A nil return for a path that never existed is the documented
+		// already-removed no-op, not an acceptance.
+		if err == nil && lstatErr == nil {
+			if resolveErr != nil {
+				t.Fatalf("Teardown accepted %q whose target did not resolve: %v", target, resolveErr)
+			}
+			if !strings.HasPrefix(filepath.Base(resolvedBefore), WorkspacePrefix) {
+				t.Fatalf("Teardown accepted %q resolving to %q, which lacks %q", target, resolvedBefore, WorkspacePrefix)
+			}
+		}
+		for _, c := range canaries {
+			if _, statErr := os.Stat(c); statErr != nil {
+				t.Fatalf("canary %s destroyed by Teardown(%q): %v", c, target, statErr)
+			}
+		}
+		if _, statErr := os.Stat(outsideCanary); statErr != nil {
+			t.Fatalf("CONTAINMENT BREACH: Teardown(%q) reached %s outside the fuzz tree: %v", target, outsideCanary, statErr)
+		}
+	})
 }
 
 // TestTeardown_FollowsSymlinkedParent documents ACCEPTED BEHAVIOUR, not

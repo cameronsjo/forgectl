@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/projects"
 )
 
@@ -91,11 +92,11 @@ func pickRepo(repos []projects.Repo) (projects.Repo, error) {
 	err := huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
-				Title("Projects").
+				Title("Projects — enter to pick, esc to cancel").
 				Options(opts...).
 				Value(&chosen),
 		),
-	).Run()
+	).WithKeyMap(keymap.Cancel()).Run()
 	if err != nil {
 		return projects.Repo{}, err
 	}

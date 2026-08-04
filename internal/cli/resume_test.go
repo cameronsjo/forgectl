@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -198,6 +199,233 @@ func pinResumePaths(t *testing.T) resume.Paths {
 	resumePaths = func() (resume.Paths, error) { return p, nil }
 	t.Cleanup(func() { resumePaths = prev })
 	return p
+}
+
+// pinScan points runResume's scan at a fixed session list for one test.
+// internal/resume's fixture builder is unexported, so this seam is the only
+// way a cli-layer test can produce the two-or-more sessions the ambiguous
+// path exists to handle.
+func pinScan(t *testing.T, sessions ...resume.Session) {
+	t.Helper()
+	prev := scanSessions
+	scanSessions = func(string, int) ([]resume.Session, error) { return sessions, nil }
+	t.Cleanup(func() { scanSessions = prev })
+}
+
+// pinPick stubs the interactive picker and reports how many times it was
+// reached.
+//
+// No test may let the REAL picker run. huh opens /dev/tty directly, and that
+// device exists whenever `go test` is started from a terminal — even with
+// stdout piped — so an unstubbed picker hangs on a developer's machine and
+// fails only in CI. The stub is what makes "the picker was not reached" a
+// deterministic assertion rather than a timing one.
+func pinPick(t *testing.T, choose func([]resume.Session) (resume.Session, error)) *int {
+	t.Helper()
+	calls := 0
+	prev := pickSessionFn
+	pickSessionFn = func(sessions []resume.Session) (resume.Session, error) {
+		calls++
+		return choose(sessions)
+	}
+	t.Cleanup(func() { pickSessionFn = prev })
+	return &calls
+}
+
+// explodingPick stands in for the picker on a run that must never reach it,
+// returning the very error the defect produced: huh's /dev/tty failure.
+func explodingPick([]resume.Session) (resume.Session, error) {
+	return resume.Session{}, errors.New("could not open a new TTY: open /dev/tty: device not configured")
+}
+
+// pinTTY forces the interactive-TTY gate for one test.
+func pinTTY(t *testing.T, interactive bool) {
+	t.Helper()
+	prev := isInteractiveTTY
+	isInteractiveTTY = func() bool { return interactive }
+	t.Cleanup(func() { isInteractiveTTY = prev })
+}
+
+// ambiguousFixture is three matching sessions — the shape that used to open a
+// picker. Cwd is deliberately empty so nothing can reach an exec.
+func ambiguousFixture() []resume.Session {
+	now := time.Now()
+	return []resume.Session{
+		{ID: "aaaaaaaa-0000-0000-0000-000000000001", Name: "first-anvil", Repo: "cc", Branch: "main", LastActive: now},
+		{ID: "aaaaaaaa-0000-0000-0000-000000000002", Name: "second-anvil", Repo: "cc", Branch: "main", LastActive: now.Add(-time.Hour)},
+		{ID: "aaaaaaaa-0000-0000-0000-000000000003", Name: "third-anvil", Repo: "cc", Branch: "main", LastActive: now.Add(-2 * time.Hour)},
+	}
+}
+
+// assertCandidateList checks the headless answer to an ambiguous filter: every
+// candidate on stdout, one per line, and an actionable exit-1 error that does
+// not leak the picker's internals.
+func assertCandidateList(t *testing.T, out string, err error, sessions []resume.Session) {
+	t.Helper()
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != len(sessions) {
+		t.Fatalf("stdout had %d line(s), want %d — one per candidate:\n%s", len(lines), len(sessions), out)
+	}
+	for i, s := range sessions {
+		if !strings.Contains(lines[i], s.Name) {
+			t.Errorf("stdout line %d = %q, want it to name %q", i, lines[i], s.Name)
+		}
+	}
+	if err == nil {
+		t.Fatal("an ambiguous filter returned nil — the caller cannot tell it resolved nothing")
+	}
+	if code := ExitCode(err); code != 1 {
+		t.Errorf("ambiguous exit code = %d, want 1 — it recovers the same way a no-match does", code)
+	}
+	if !strings.Contains(err.Error(), "narrow") {
+		t.Errorf("error = %v, want it to say how to recover (narrow the filter)", err)
+	}
+	if strings.Contains(err.Error(), "/dev/tty") {
+		t.Errorf("error = %v, still leaks huh's terminal failure instead of naming the caller's problem", err)
+	}
+}
+
+// TestRunResume_AmbiguousDryRunPrintsCandidatesNotPicker is the issue itself:
+// --dry-run declares non-interactive intent, so an ambiguous filter must list
+// what it could not choose between rather than opening a selector. The TTY is
+// pinned LIVE here on purpose — the flag has to suppress the prompt even when
+// a terminal is sitting right there.
+func TestRunResume_AmbiguousDryRunPrintsCandidatesNotPicker(t *testing.T) {
+	sessions := ambiguousFixture()
+	pinScan(t, sessions...)
+	calls := pinPick(t, explodingPick)
+	pinTTY(t, true)
+
+	cmd, out, _ := newTestCmd()
+	err := runResume(cmd, config.Config{}, "cc", 0, false, true)
+
+	if *calls != 0 {
+		t.Errorf("the picker was reached %d time(s) under --dry-run", *calls)
+	}
+	assertCandidateList(t, out.String(), err, sessions)
+}
+
+// TestRunResume_AmbiguousWithoutTTYPrintsCandidates covers the second, quieter
+// half of the same defect: a BARE ambiguous resume in a pipe crashed
+// identically, because the picker had no TTY gate at all.
+func TestRunResume_AmbiguousWithoutTTYPrintsCandidates(t *testing.T) {
+	sessions := ambiguousFixture()
+	pinScan(t, sessions...)
+	calls := pinPick(t, explodingPick)
+	pinTTY(t, false)
+
+	cmd, out, _ := newTestCmd()
+	err := runResume(cmd, config.Config{}, "cc", 0, false, false)
+
+	if *calls != 0 {
+		t.Errorf("the picker was reached %d time(s) with no terminal to draw on", *calls)
+	}
+	assertCandidateList(t, out.String(), err, sessions)
+}
+
+// TestRunResume_AmbiguousSanitizesCandidates covers what the candidate list
+// newly is: a terminal-output sink for disk-sourced text. Every name, repo,
+// and branch in it came off disk — a /rename string or a model-generated
+// ai-title — so the same control bytes `resume ls` has always had to render
+// inert reach the terminal through this path too, and it is the path a
+// non-interactive caller sees.
+func TestRunResume_AmbiguousSanitizesCandidates(t *testing.T) {
+	hostile := hostileSession()
+	second := hostile
+	second.ID = "aaaaaaaa-0000-0000-0000-000000000002"
+	pinScan(t, hostile, second)
+	calls := pinPick(t, explodingPick)
+	pinTTY(t, false)
+
+	cmd, out, _ := newTestCmd()
+	if err := runResume(cmd, config.Config{}, "cc", 0, false, true); err == nil {
+		t.Fatal("an ambiguous filter returned nil")
+	}
+	// Both assertions are load-bearing. assertInert on an empty string passes
+	// vacuously, so a regression that reached explodingPick instead of
+	// rendering would look clean here: the picker count is what proves the
+	// candidate list is the thing being asserted inert.
+	if *calls != 0 {
+		t.Errorf("the picker was reached %d time(s) with no terminal to draw on", *calls)
+	}
+	if out.Len() == 0 {
+		t.Fatal("no candidate list was rendered, so there is nothing to assert inert")
+	}
+	assertInert(t, out.String())
+}
+
+// TestRunResume_AmbiguousOnTTYStillPicks pins what must NOT change: with a
+// human and a terminal, the picker is still the right answer, and its choice
+// is what gets resumed. The fixture's empty Cwd stops execution at the
+// recorded-directory error, which is how we know the pick reached
+// resumeSession.
+func TestRunResume_AmbiguousOnTTYStillPicks(t *testing.T) {
+	sessions := ambiguousFixture()
+	pinScan(t, sessions...)
+	calls := pinPick(t, func(s []resume.Session) (resume.Session, error) { return s[2], nil })
+	pinTTY(t, true)
+
+	cmd, out, _ := newTestCmd()
+	err := runResume(cmd, config.Config{}, "cc", 0, false, false)
+
+	if *calls != 1 {
+		t.Fatalf("the picker ran %d time(s), want exactly 1 — an interactive ambiguous resume still prompts", *calls)
+	}
+	if out.Len() != 0 {
+		t.Errorf("the interactive path wrote %q to stdout, want nothing", out.String())
+	}
+	if err == nil || !strings.Contains(err.Error(), "working directory") {
+		t.Fatalf("err = %v, want the empty-cwd error proving the pick reached resumeSession", err)
+	}
+	if !strings.Contains(err.Error(), sessions[2].ID) {
+		t.Errorf("err = %v, want it to name the PICKED session %s", err, sessions[2].ID)
+	}
+}
+
+// TestRunResume_ForkDryRunAmbiguousSkipsPicker checks --fork inherits the
+// guard rather than routing around it: the gate sits in runResume, upstream of
+// everything --fork changes.
+func TestRunResume_ForkDryRunAmbiguousSkipsPicker(t *testing.T) {
+	sessions := ambiguousFixture()
+	pinScan(t, sessions...)
+	calls := pinPick(t, explodingPick)
+	pinTTY(t, true)
+
+	cmd, out, _ := newTestCmd()
+	err := runResume(cmd, config.Config{}, "cc", 0, true, true)
+
+	if *calls != 0 {
+		t.Errorf("--fork --dry-run reached the picker %d time(s)", *calls)
+	}
+	assertCandidateList(t, out.String(), err, sessions)
+}
+
+// TestRunResume_SingleMatchDryRunUnchanged is the regression pin on the path
+// that already worked: one hit still resolves, announces itself on stderr, and
+// exits 0 without any picker involved.
+func TestRunResume_SingleMatchDryRunUnchanged(t *testing.T) {
+	fakeClaudeBin(t)
+	only := resume.Session{
+		ID: "aaaaaaaa-0000-0000-0000-00000000000f", Name: "lone-anvil",
+		Repo: "cc", Branch: "main", Cwd: t.TempDir(), LastActive: time.Now(),
+	}
+	pinScan(t, only)
+	calls := pinPick(t, explodingPick)
+	pinTTY(t, false)
+
+	cmd, out, errOut := newTestCmd()
+	if err := runResume(cmd, config.Config{}, "cc", 0, false, true); err != nil {
+		t.Fatalf("single-match --dry-run returned %v, want nil", err)
+	}
+	if *calls != 0 {
+		t.Errorf("a single match reached the picker %d time(s)", *calls)
+	}
+	if !strings.Contains(errOut.String(), "one match —") {
+		t.Errorf("stderr = %q, want the one-match announcement", errOut.String())
+	}
+	if !strings.Contains(out.String(), only.Cwd) {
+		t.Errorf("stdout = %q, want the resolved cwd", out.String())
+	}
 }
 
 // TestResumeSnapshot_AlwaysSucceeds pins the property that makes the Stop hook

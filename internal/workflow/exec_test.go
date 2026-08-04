@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
 // Strip-step behavior tests live with their owning module now —
@@ -141,7 +142,9 @@ func TestExecutor_DryRun_ZeroRunnerCalls(t *testing.T) {
 // (ADR-0003's reentrancy requirement): the second call on an already-removed
 // workspace must not error.
 func TestExecutor_Teardown_Idempotent(t *testing.T) {
-	workspace, err := os.MkdirTemp("", "forgectl-teardown-test-*")
+	// The prefix is load-bearing: sandbox.Teardown refuses any path whose
+	// resolved base name lacks sandbox.WorkspacePrefix.
+	workspace, err := os.MkdirTemp("", sandbox.WorkspacePrefix+"teardown-test-*")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
@@ -159,6 +162,26 @@ func TestExecutor_Teardown_Idempotent(t *testing.T) {
 	}
 	if err := exe.Run(context.Background(), plan, wctx); err != nil {
 		t.Fatalf("second (idempotent) teardown must not error, got: %v", err)
+	}
+}
+
+// TestTeardownStep_RefusesParamSuppliedWorkspace is the regression for the
+// workflow half of issue #222: teardownStep reaches os.RemoveAll with no gate
+// of its own, so a workflow whose `workspace` came from a PARAM rather than a
+// worktree/clone step could name any directory. It must now fail closed.
+func TestTeardownStep_RefusesParamSuppliedWorkspace(t *testing.T) {
+	victim := t.TempDir()
+
+	exe := NewExecutor(&exec.FakeRunner{}, testRegistry(t))
+	wctx := NewContext(map[string]string{"workspace": victim})
+
+	plan := Plan{Name: "param-teardown", Steps: []PlanStep{{Uses: "teardown"}}}
+	err := exe.Run(context.Background(), plan, wctx)
+	if !errors.Is(err, sandbox.ErrUnsafeTeardown) {
+		t.Fatalf("expected ErrUnsafeTeardown for a param-supplied workspace, got %v", err)
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("victim must survive: %v", err)
 	}
 }
 

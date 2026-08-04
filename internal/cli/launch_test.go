@@ -111,9 +111,12 @@ type harness struct {
 	binDir  string
 	outFile string
 	env     []string
-	// base is the fake HOME/XDG_CONFIG_HOME root, set only by harnesses that
-	// need to reconstruct a config path later (e.g. newShadowHarness asserting
-	// the legacy path never leaks into `which` output).
+	// base is the fake HOME/XDG_CONFIG_HOME root. EVERY constructor sets it:
+	// childConfigPath("") returns a RELATIVE path, so a test reconstructing a
+	// config path from a zero-value base writes into the checkout while the
+	// child process reads a different XDG root — a mismatch that reads as a
+	// config-loading bug. Leaving the zero value unreachable is cheaper than
+	// documenting which harnesses may be asked for it.
 	base string
 }
 
@@ -146,6 +149,7 @@ func newHarness(t *testing.T) *harness {
 		cwd:     cwd,
 		binDir:  binDir,
 		outFile: outFile,
+		base:    base,
 		env: []string{
 			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"HOME=" + base,
@@ -185,6 +189,7 @@ func newTelemetryHarness(t *testing.T) *harness {
 		cwd:     cwd,
 		binDir:  binDir,
 		outFile: outFile,
+		base:    base,
 		env: []string{
 			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"HOME=" + base,
@@ -733,6 +738,7 @@ func newBareHarness(t *testing.T, configBody string) *harness {
 		cwd:     cwd,
 		binDir:  binDir,
 		outFile: outFile,
+		base:    base,
 		env: []string{
 			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"HOME=" + base,
@@ -908,6 +914,27 @@ func TestIntegration_LaunchWhich_ShowsCodexPosture(t *testing.T) {
 	}
 }
 
+// TestIntegration_LaunchWhich_WithholdsEnvValues: the unit test proves the
+// renderer withholds env values; this proves the wiring from a real config
+// file through to real stdout does too — stdout being the surface that
+// actually gets pasted somewhere.
+func TestIntegration_LaunchWhich_WithholdsEnvValues(t *testing.T) {
+	h := newBareHarness(t, "[launch.defaults.env]\nANTHROPIC_API_KEY = \"sk-ant-hunter2\"\nFOO = \"plainbarvalue\"\n")
+	stdout, stderr := h.run(t, "which")
+	combined := stdout + stderr
+
+	for _, secret := range []string{"sk-ant-hunter2", "plainbarvalue"} {
+		if strings.Contains(combined, secret) {
+			t.Errorf("`launch which` leaked the env value %q:\n%s", secret, combined)
+		}
+	}
+	for _, want := range []string{"env", "ANTHROPIC_API_KEY", "FOO"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("`launch which` output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
 // TestIntegration_LaunchDoctor_ResolvesCodexBinary: doctor must resolve and
 // report the Codex binary, not silently check for claude.
 func TestIntegration_LaunchDoctor_ResolvesCodexBinary(t *testing.T) {
@@ -1002,4 +1029,37 @@ func TestIntegration_BareLaunch_NoPromptAndBanners(t *testing.T) {
 	if strings.Contains(stdout, "claude ") {
 		t.Errorf("banner leaked into stdout: %q", stdout)
 	}
+}
+
+// hostileConfigTemplate is nativeConfigTemplate with a model carrying a live
+// SGR escape, a DEL, and a single-byte C1 CSI. Profile.Validate allowlists
+// effort and the Codex fields; model is not among them, so this reaches the
+// banner verbatim.
+const hostileConfigTemplate = `[launch.defaults]
+model = "opus"
+permission_mode = "plan"
+allow_danger = true
+
+[[launch.project]]
+match = "%s"
+model = "son\u001B[31mnet\u007F\u009BA"
+`
+
+// TestIntegration_BareLaunch_SanitizesBannerFromConfig is the end-to-end half
+// of #243: config.toml is the untrusted input, `forgectl launch` is the whole
+// pipe, and stderr is the terminal. The unit tests in internal/launch prove
+// Banner sanitizes; this proves nothing downstream of it un-sanitizes.
+func TestIntegration_BareLaunch_SanitizesBannerFromConfig(t *testing.T) {
+	h := newHarness(t)
+	cfgPath := childConfigPath(h.base)
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf(hostileConfigTemplate, h.cwd)), 0o644); err != nil {
+		t.Fatalf("write hostile config.toml: %v", err)
+	}
+
+	_, stderr := h.run(t)
+
+	if !strings.Contains(stderr, "son") || !strings.Contains(stderr, "net") {
+		t.Fatalf("banner did not render the configured model at all: %q", stderr)
+	}
+	assertInert(t, stderr)
 }
