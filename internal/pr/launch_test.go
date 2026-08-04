@@ -906,3 +906,36 @@ func TestLaunchInline_RejectsInvalidEffort(t *testing.T) {
 		}
 	}
 }
+
+// TestLaunchCodex_RejectsOptionLikeModel is the Codex half of the option-like
+// guard. launchCodex adopts the ambient model whenever the resolved harness is
+// codex, and it lands in the same argv neighbourhood as the sandbox flag
+// (`codex exec --sandbox read-only --model <value>`). Validate does not close
+// it — on a Codex profile Validate only rejects CLAUDE model ids, so an
+// option-like value passes untouched.
+func TestLaunchCodex_RejectsOptionLikeModel(t *testing.T) {
+	codexBin := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(codexBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("FORGECTL_CODEX_BIN", codexBin)
+
+	cfg := config.Config{Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{
+		Harness: "codex",
+		Model:   "--dangerously-bypass-approvals-and-sandbox",
+	}}}
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
+	sess := Session{
+		Ref:         mustLocalRef("abc1234", 1),
+		Workspace:   fakeWorkspace(t),
+		Agent:       "codex",
+		FindingsDir: t.TempDir(),
+	}
+	if err := c.Launch(context.Background(), sess, cfg); err == nil {
+		t.Error("an option-like Codex model must be refused before dispatch")
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("a refused value must issue ZERO Runner calls; got %+v", fake.Calls)
+	}
+}

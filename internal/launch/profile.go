@@ -213,8 +213,9 @@ func defaultsProfile(d config.LaunchDefaults, home string) Profile {
 	// directly, so deriving one level up would leave every merge test seeing
 	// an empty Effort.
 	//
-	// resolve DISCARDS this line's result whenever a project block matches,
-	// recomputing the same formula against the final model. That is deliberate,
+	// resolve DISCARDS this line's result unconditionally, recomputing the same
+	// formula against the final model — it merely lands on the same value when
+	// no project block matched. That is deliberate,
 	// not redundancy to collapse: Effort is a plain string, so a value read back
 	// off the struct cannot say whether it was configured or derived — and once
 	// a project overrides Model, only the raw config can answer that. The

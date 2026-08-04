@@ -474,3 +474,40 @@ func TestEffortForModel_OnlyYieldsValidLevels(t *testing.T) {
 		}
 	}
 }
+
+// TestResolve_ExplicitDefaultsEffortSurvivesHarnessOnlyOverride closes the
+// fixture gap the review flagged: a project block overriding only `harness`
+// clears the Model (the harness switch re-derives it), so the effort path has
+// to be checked separately from the model-override cases. An explicit
+// defaults-effort is a global floor and survives; it is inert under Codex,
+// which is why Validate checks it there too.
+func TestResolve_ExplicitDefaultsEffortSurvivesHarnessOnlyOverride(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Model: "opus", Effort: "xhigh"},
+		Projects: []config.LaunchProject{{Match: "~/p", Harness: "codex"}},
+	}
+	got := resolveAt(lc, "/home/u/p")
+	if got.Harness != "codex" {
+		t.Fatalf("Harness = %q, want codex", got.Harness)
+	}
+	if got.Model != "" {
+		t.Errorf("Model = %q, want \"\" (the harness switch re-derives it)", got.Model)
+	}
+	if got.Effort != "xhigh" {
+		t.Errorf("Effort = %q, want %q — an explicit defaults effort is a floor, not a per-model value", got.Effort, "xhigh")
+	}
+}
+
+// TestResolve_HarnessOnlyOverride_NoExplicitEffort_ClearsDerived is the
+// converse: with no explicit effort, a harness-only switch clears the Model,
+// so the derived level must clear with it rather than stay pinned to the
+// Claude model it came from.
+func TestResolve_HarnessOnlyOverride_NoExplicitEffort_ClearsDerived(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Model: "sonnet"}, // derives "high"
+		Projects: []config.LaunchProject{{Match: "~/p", Harness: "codex"}},
+	}
+	if got := resolveAt(lc, "/home/u/p"); got.Effort != "" {
+		t.Errorf("Effort = %q, want \"\" — a cleared model must clear its derived level", got.Effort)
+	}
+}

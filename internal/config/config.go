@@ -72,7 +72,7 @@ const logKeepDays = 7
 //	[pr]                 # forgectl pr — bulk-launch cap and clean-room reviewer posture
 //	max_concurrent = 4   # live "pr-*" tmux windows allowed at once; <= 0 = default (4)
 //	model  = ""          # reviewer model; unset = the ambient launch profile's
-//	effort = ""          # reviewer effort; unset = derived from the reviewer model
+//	effort = ""          # reviewer effort; unset = the ambient profile's, re-derived when model is set
 type Config struct {
 	NoIcons   bool            `toml:"no_icons"`
 	LogLevel  string          `toml:"log_level"`

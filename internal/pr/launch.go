@@ -206,6 +206,16 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 	if resolved.Harness == "codex" {
 		profile.Model = resolved.Model
 	}
+	// Same guard, same reason as launchInline's: this is the other clean-room
+	// dispatch, and profile.Model lands in the identical argv neighbourhood
+	// (`codex exec --sandbox read-only --model <value>`). Validate below only
+	// rejects CLAUDE model ids on a Codex profile, so an option-like value
+	// passes it untouched and the check would otherwise rest on clap refusing
+	// `--model --flag` rather than swallowing it — which is exactly the
+	// parser-behavior assumption the guard exists not to depend on.
+	if err := sandbox.RejectOptionLike("reviewer model", profile.Model); err != nil {
+		return err
+	}
 	// [pr] model/effort is deliberately NOT applied here, and its absence is
 	// the correct behavior rather than an oversight. Both keys are Claude-side:
 	// effort maps to --effort, which `codex exec` has no equivalent for, and a
@@ -307,6 +317,14 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// ambient sonnet repo plus `[pr] model = "opus"` would ship
 	// `--model opus --effort high` — the exact pairing this knob exists to
 	// prevent.
+	//
+	// Note the sharper edge of the same rule: the discard covers an EXPLICIT
+	// ambient effort too, not just a derived one. `[launch.defaults] effort =
+	// "low"` plus `[pr] model = "opus"` and no `[pr] effort` reviews at
+	// medium, dropping the operator's floor. That is the "own posture, not a
+	// patch" design being consistent — a project-level model override in
+	// launch.resolve re-derives the same way — and `[pr] effort` is the way to
+	// pin a level that survives it.
 	if cfg.Pr.Model != "" {
 		profile.Model = cfg.Pr.Model
 		profile.Effort = launch.EffortForModel(cfg.Pr.Model)
