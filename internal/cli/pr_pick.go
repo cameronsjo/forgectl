@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 
@@ -68,23 +69,31 @@ review bypasses admission by design.`,
 func pickPRs(prs []pr.PR, store *pr.ReviewedStore) ([]pr.PR, error) {
 	opts := make([]huh.Option[string], len(prs))
 	for i, p := range prs {
-		key := p.Ref.String()
-		label := fmt.Sprintf("%s  %s", key, sanitizeCell(p.Title))
+		// Named refKey, not key: the bubbles/key package is imported below for
+		// the keymap, and a local `key` would shadow it inside this loop.
+		refKey := p.Ref.String()
+		label := fmt.Sprintf("%s  %s", refKey, sanitizeCell(p.Title))
 		if pr.Dimmed(p, store) {
 			label = prDimStyle.Render(label + "  (reviewed)")
 		}
-		opts[i] = huh.NewOption(label, key)
+		opts[i] = huh.NewOption(label, refKey)
 	}
+
+	// huh v1.0.0 binds Quit to ctrl+c ALONE (keymap.go:109), so Esc is
+	// unbound and does nothing — the picker reads as stuck to anyone who
+	// reaches for the conventional cancel key. Bind it, matching pickSession.
+	km := huh.NewDefaultKeyMap()
+	km.Quit = key.NewBinding(key.WithKeys("ctrl+c", "esc"), key.WithHelp("esc", "cancel"))
 
 	var chosen []string
 	err := huh.NewForm(
 		huh.NewGroup(
 			huh.NewMultiSelect[string]().
-				Title("Open PRs — space to select, enter to launch").
+				Title("Open PRs — space to select, enter to launch, esc to cancel").
 				Options(opts...).
 				Value(&chosen),
 		),
-	).Run()
+	).WithKeyMap(km).Run()
 	if err != nil {
 		return nil, err
 	}
