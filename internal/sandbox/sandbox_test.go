@@ -333,6 +333,44 @@ func TestTeardown_RefusesPrefixNotAtBaseName(t *testing.T) {
 	}
 }
 
+// TestTeardown_UnlinksSymlinkWithoutFollowingToTarget is the ONLY test that
+// pins the ACT-UNRESOLVED half of the invariant. The header comment on
+// Teardown, the one on pr.validateWorkspace, and breadcrumb_test.go:293 all
+// describe it, but until this test existed, mutating os.RemoveAll(workspace)
+// to os.RemoveAll(resolved) passed internal/sandbox, internal/pr, and
+// internal/workflow clean — the exact regression all three comments forbid.
+//
+// The shape: a NON-prefixed symlink pointing at a PREFIXED directory. The
+// guard resolves it, sees a prefixed base, and accepts. Because the delete
+// then uses the UNRESOLVED string, os.RemoveAll unlinks the link and never
+// follows it. Resolving first would delete the real directory instead.
+func TestTeardown_UnlinksSymlinkWithoutFollowingToTarget(t *testing.T) {
+	root := t.TempDir()
+	target := mkWorkspace(t, root, "target")
+	keep := filepath.Join(target, "keep.txt")
+	if err := os.WriteFile(keep, []byte("must survive"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	link := filepath.Join(root, "plainlink")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	// Accepted: the RESOLVED base name carries the prefix.
+	if err := Teardown(context.Background(), &exec.FakeRunner{}, link); err != nil {
+		t.Fatalf("Teardown of a link resolving to a sandbox must succeed, got: %v", err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Errorf("the link itself should be unlinked, stat err = %v", err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Errorf("ACT-UNRESOLVED violated: the link's target was deleted: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("ACT-UNRESOLVED violated: the target's contents were deleted: %v", err)
+	}
+}
+
 // TestTeardown_RefusesRoot covers the worst-case sinks directly.
 func TestTeardown_RefusesRoot(t *testing.T) {
 	for _, target := range []string{"/", "/tmp"} {
@@ -352,28 +390,60 @@ func TestTeardown_RefusesRelativePath(t *testing.T) {
 
 // FuzzTeardown_NeverDeletesUnprefixed asserts the property over arbitrary path
 // bytes rooted in a canary tree: Teardown either errors, or the path it acted
-// on resolved to a base name carrying WorkspacePrefix. The canaries prove no
-// accepted call reached outside a sandbox.
+// on resolved to a base name carrying WorkspacePrefix.
+//
+// CONTAINMENT IS ESTABLISHED BEFORE THE CALL, NOT ASSERTED AFTER. filepath.Join
+// cleans "../", so a rel of "../../forgectl-workflow-anything" resolves out of
+// the fuzz tree and into the process temp root — exactly where
+// os.MkdirTemp("", WorkspacePrefix+"*") puts REAL sandboxes. Teardown would
+// then be CORRECT to delete it (the base name carries the prefix), and an
+// after-the-fact canary check inside the tree could not see it. Under
+// `go test -fuzz` that destroys a concurrently running forgectl's workspace, or
+// a CI agent's. So: any input whose joined path leaves root is dropped before
+// Teardown is ever called.
+//
+// The tree is rooted two levels deep so escape-SHAPED inputs stay explorable —
+// "../" and "../../" still climb, they just land inside root — and only deeper
+// climbs are dropped. outsideCanary is a PREFIXED directory outside root: it is
+// one Teardown would happily delete, so a regression of this exact kind fails
+// the test instead of passing silently.
 func FuzzTeardown_NeverDeletesUnprefixed(f *testing.F) {
 	f.Add("victim")
 	f.Add(WorkspacePrefix + "x")
 	f.Add(WorkspacePrefix + "x/../victim")
 	f.Add("../victim")
+	f.Add("../../victim")
+	f.Add("../../../" + WorkspacePrefix + "escape")
 	f.Add("plink/" + WorkspacePrefix + "x")
 	f.Add("")
 	f.Add("/")
 
 	f.Fuzz(func(t *testing.T, rel string) {
 		root := t.TempDir()
-		canaries := []string{filepath.Join(root, "victim"), filepath.Join(root, "canary")}
+		base := filepath.Join(root, "tree", "sub")
+		if err := os.MkdirAll(base, 0o700); err != nil {
+			t.Fatalf("mkdir base: %v", err)
+		}
+		canaries := []string{filepath.Join(base, "victim"), filepath.Join(root, "canary")}
 		for _, c := range canaries {
 			if err := os.MkdirAll(c, 0o700); err != nil {
 				t.Fatalf("mkdir canary: %v", err)
 			}
 		}
-		mkWorkspace(t, root, "x")
+		mkWorkspace(t, base, "x")
 
-		target := filepath.Join(root, rel)
+		// A prefixed — therefore deletable — canary OUTSIDE the containment
+		// boundary. If containment ever regresses, this is what dies.
+		outsideCanary := mkWorkspace(t, t.TempDir(), "outside-canary")
+
+		target := filepath.Join(root, "tree", "sub", rel)
+		// Containment, before the call. filepath.Join has already cleaned the
+		// path, so this comparison is the real reach of the delete. The tree
+		// contains no symlinks, so lexical containment is the whole story.
+		if target != root && !strings.HasPrefix(target, root+string(filepath.Separator)) {
+			return
+		}
+
 		_, lstatErr := os.Lstat(target)
 		resolvedBefore, resolveErr := filepath.EvalSymlinks(target)
 
@@ -392,6 +462,9 @@ func FuzzTeardown_NeverDeletesUnprefixed(f *testing.F) {
 			if _, statErr := os.Stat(c); statErr != nil {
 				t.Fatalf("canary %s destroyed by Teardown(%q): %v", c, target, statErr)
 			}
+		}
+		if _, statErr := os.Stat(outsideCanary); statErr != nil {
+			t.Fatalf("CONTAINMENT BREACH: Teardown(%q) reached %s outside the fuzz tree: %v", target, outsideCanary, statErr)
 		}
 	})
 }

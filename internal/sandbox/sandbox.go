@@ -126,6 +126,17 @@ func isLocalRepo(repo string) bool {
 // fail-open at that point; this is deliberately stricter, and the trade is
 // that a sandbox whose target vanished must be removed by hand).
 //
+// TOCTOU, KNOWN AND BOUNDED: between EvalSymlinks and RemoveAll a PARENT
+// component repointed after validation redirects the delete to a different
+// prefixed directory. The FINAL component is safe — RemoveAll does not follow
+// it. Closing this needs a same-uid write to the path, which is the same
+// bounded exposure as the accepted symlinked-parent case below, not a new one.
+//
+// The prefix compare is BYTE-EXACT while APFS is case-insensitive, so
+// FORGECTL-WORKFLOW-x is refused. That fails in the LEAK direction — a sandbox
+// that needs removing by hand — never the delete direction. Normalizing the
+// case here would be a LOOSENING of the guard, not a bug fix.
+//
 // KNOWN, ACCEPTED, UNCHANGED: a symlinked PARENT component is still followed.
 // os.RemoveAll declines to follow only the FINAL component, so a workspace
 // recorded as /tmp/plink/forgectl-workflow-x with plink -> $HOME/real still
