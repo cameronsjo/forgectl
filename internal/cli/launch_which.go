@@ -59,6 +59,13 @@ func printLaunchProfile(w io.Writer, p launch.Profile, cwd, confPath string) {
 		row("approval", p.ApprovalPolicy)
 		row("sandbox", p.Sandbox)
 	} else {
+		// Omitted rather than shown empty when no level resolved: an absent
+		// --effort means Claude Code's own default applies, which is a
+		// different statement from "effort is blank". Matches the conditional
+		// env/add-dir rows below.
+		if p.Effort != "" {
+			row("effort", p.Effort)
+		}
 		row("permission", p.PermissionMode)
 		row("allow danger", fmt.Sprintf("%t", p.AllowDanger))
 	}

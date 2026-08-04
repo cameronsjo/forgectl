@@ -79,17 +79,20 @@ func newLaunchCmd(deps module.Deps) *cobra.Command {
 		Aliases: []string{"cl"},
 		Short:   "Per-project launcher for Claude Code or Codex CLI",
 		Long: `launch resolves a per-project profile from your working directory,
-runs a short guided launch, then execs the configured harness.
+then execs the configured harness with that posture — no prompts.
 
-  forgectl launch                 interactive launcher (Model, New/Resume/Fork)
+  forgectl launch                 drop straight into the resolved profile
   forgectl launch <args…>          apply the profile and pass args through
   forgectl launch agents …         Claude-only agent-management passthrough
+
+To resume or fork an earlier session, use "forgectl resume" — it discovers
+sessions across repos, flags the live ones, and restores their tasks.
 
 Run "forgectl launch which" to see the profile resolved for the current
 directory. Profiles live in the [launch] section of config.toml — scaffold one
 with "forgectl launch init".`,
-		// Bare `forgectl launch` is handled by the Execute intercept (interview),
-		// so this RunE only fires if Cobra reaches it directly; keep it correct.
+		// Bare `forgectl launch` is handled by the Execute intercept, so this
+		// RunE only fires if Cobra reaches it directly; keep it correct.
 		RunE: func(_ *cobra.Command, args []string) error {
 			return launchExec(cfg, args)
 		},
@@ -114,10 +117,10 @@ func runLaunch(cfg config.Config, rest []string) (handled bool, err error) {
 	return true, launchExec(cfg, rest)
 }
 
-// launchExec is the resolve → (interview) → exec path: it reduces the launch
-// config against the cwd, resolves the claude binary, assembles the posture for
-// the requested mode, merges env, and execs claude in place. On success it does
-// not return (syscall.Exec replaces the process).
+// launchExec is the resolve → exec path: it reduces the launch config against
+// the cwd, resolves the claude binary, assembles the posture, merges env, and
+// execs claude in place. On success it does not return (syscall.Exec replaces
+// the process).
 func launchExec(cfg config.Config, args []string) error {
 	if w := legacyShadowWarning(cfg); w != "" {
 		fmt.Fprintln(os.Stderr, "forgectl: "+w)
@@ -152,21 +155,22 @@ func launchExec(cfg config.Config, args []string) error {
 	var harnessArgs []string
 	switch {
 	case len(args) == 0:
-		choice := launch.Choice{Model: profile.Model, Mode: launch.New}
-		if launch.IsInteractiveTTY() {
-			if choice, err = launch.Interview(profile); err != nil {
-				return err
-			}
-		}
 		if profile.Harness == "codex" {
-			harnessArgs = launch.CodexSessionArgs(profile, choice.Model, choice.Mode)
+			harnessArgs = launch.CodexSessionArgs(profile)
 			// Codex has no equivalent of the Claude agents banner, so without
 			// this a Codex launch leaves no record of the argv it ran with —
 			// including the approval/sandbox posture, which is the part worth
 			// auditing. stderr, so piped stdout stays clean.
 			launch.HarnessBanner(os.Stderr, profile.Harness, harnessArgs)
 		} else {
-			harnessArgs = launch.SessionArgs(profile, choice.Model, choice.Mode)
+			harnessArgs = launch.SessionArgs(profile)
+			// This is the ONLY path that emits
+			// --allow-dangerously-skip-permissions into an INTERACTIVE session
+			// (the scaffold ships allow_danger = true), and it is the one branch
+			// that printed nothing at all once the interview form stopped
+			// rendering ahead of syscall.Exec. Banner it like the agents branch
+			// does, so the posture — and the resolved effort — stay visible.
+			launch.Banner(os.Stderr, harnessArgs)
 		}
 	case args[0] == "agents":
 		if launch.IsAgentsPassthrough(args) {

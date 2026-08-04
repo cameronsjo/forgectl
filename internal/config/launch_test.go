@@ -20,11 +20,13 @@ permission_mode = "plan"
 allow_danger = true
 approval_policy = "never"
 sandbox = "read-only"
+effort = "low"
 codex_binary_path = "/opt/codex"
 
 [[launch.project]]
 match = "~/Projects/minute"
 model = "sonnet"
+effort = "xhigh"
 env = { OTEL_EXPORTER = "otlp" }
 add_dir = ["~/Projects/minute/shared"]
 
@@ -53,6 +55,12 @@ add_dir = ["~/Projects/infrastructure/homelab"]
 	if len(got.Launch.Projects) != 2 {
 		t.Fatalf("len(Projects) = %d, want 2", len(got.Launch.Projects))
 	}
+	if got.Launch.Defaults.Effort != "low" {
+		t.Errorf("Defaults.Effort = %q, want %q", got.Launch.Defaults.Effort, "low")
+	}
+	if got.Launch.Projects[0].Effort != "xhigh" {
+		t.Errorf("Projects[0].Effort = %q, want %q", got.Launch.Projects[0].Effort, "xhigh")
+	}
 	if got.Launch.Projects[0].Model != "sonnet" {
 		t.Errorf("Projects[0].Model = %q, want %q", got.Launch.Projects[0].Model, "sonnet")
 	}
@@ -62,5 +70,22 @@ add_dir = ["~/Projects/infrastructure/homelab"]
 	wantAddDir := []string{"~/Projects/infrastructure/homelab"}
 	if len(got.Launch.Projects[1].AddDir) != 1 || got.Launch.Projects[1].AddDir[0] != wantAddDir[0] {
 		t.Errorf("Projects[1].AddDir = %v, want %v", got.Launch.Projects[1].AddDir, wantAddDir)
+	}
+}
+
+// TestLaunchConfig_EffortOnlyDefaultsIsNotZero guards a trap that is silent at
+// three live call sites. LaunchConfig.IsZero drives whether config.toml's
+// [launch] section is honored at all: report a populated section as zero and
+// `forgectl launch` falls through to the legacy claunch.conf, the shadow
+// warning never fires, and `launch doctor` reports "no launch profiles
+// configured" — none of which surface as an error. A config setting ONLY
+// `effort` is a legitimate section, so isZero has to know about the field.
+func TestLaunchConfig_EffortOnlyDefaultsIsNotZero(t *testing.T) {
+	lc := LaunchConfig{Defaults: LaunchDefaults{Effort: "high"}}
+	if lc.IsZero() {
+		t.Error("a [launch.defaults] setting only `effort` must not report as an absent section")
+	}
+	if !(LaunchConfig{}).IsZero() {
+		t.Error("a genuinely empty LaunchConfig must still report as zero")
 	}
 }

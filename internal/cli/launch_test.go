@@ -474,6 +474,7 @@ func TestIntegration_Builder_AppliesProfileAndPassesThrough(t *testing.T) {
 		"--permission-mode", "plan",
 		"--allow-dangerously-skip-permissions",
 		"--model", "sonnet",
+		"--effort", "high", // derived from sonnet; the fixture sets no effort
 		"--add-dir", h.cwd + "/shared",
 		"-p", "hi",
 	}
@@ -544,6 +545,7 @@ func TestIntegration_AgentsInteractive_InjectsSubsetAndBannerToStderr(t *testing
 		"--permission-mode", "plan",
 		"--allow-dangerously-skip-permissions",
 		"--model", "sonnet",
+		"--effort", "high",
 		"--cwd", "/x",
 	}
 	if !equalArgs(got, want) {
@@ -561,7 +563,9 @@ func TestIntegration_Which_PrintsResolvedProfile(t *testing.T) {
 	h := newHarness(t)
 	stdout, _ := h.run(t, "which")
 
-	for _, want := range []string{"sonnet", "plan", h.cwd} {
+	// "high" is sonnet's derived effort — the fixture sets no `effort` key, so
+	// its presence here is the derivation reaching the display surface.
+	for _, want := range []string{"sonnet", "effort", "high", "plan", h.cwd} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("which output missing %q; got:\n%s", want, stdout)
 		}
@@ -665,6 +669,7 @@ func TestIntegration_LaunchShadow_ExecWarns(t *testing.T) {
 		"--permission-mode", "plan",
 		"--allow-dangerously-skip-permissions",
 		"--model", "opus",
+		"--effort", "medium", // derived from opus — the shadowed sonnet would derive "high"
 		"-p", "hi",
 	}
 	if !equalArgs(got, want) {
@@ -951,5 +956,50 @@ func TestIntegration_CodexExec_PrintsBannerToStderr(t *testing.T) {
 	}
 	if strings.Contains(stdout, "→ codex") {
 		t.Errorf("banner leaked into stdout, breaking byte-clean piping:\n%s", stdout)
+	}
+}
+
+// TestIntegration_BareLaunch_NoPromptAndBanners covers the branch the removed
+// interview used to own. Two things are asserted.
+//
+// It never prompts: the argv reaches claude directly, in the full interactive
+// posture, with no resume/fork mode. Under the test harness stdin is not a TTY
+// so the old code path would have skipped the form anyway — the real assertion
+// is the argv shape, which no longer has a mode to carry.
+//
+// And it banners. This is the ONLY path that puts
+// --allow-dangerously-skip-permissions into an INTERACTIVE session (the
+// scaffold ships allow_danger = true), and once the huh form stopped rendering
+// ahead of syscall.Exec it printed nothing at all. stderr, so a piped stdout
+// stays clean.
+func TestIntegration_BareLaunch_NoPromptAndBanners(t *testing.T) {
+	h := newHarness(t)
+	stdout, stderr := h.run(t)
+
+	got := h.recordedArgs(t)
+	want := []string{
+		"--permission-mode", "plan",
+		"--allow-dangerously-skip-permissions",
+		"--ide", "--exclude-dynamic-system-prompt-sections",
+		"--model", "sonnet",
+		"--effort", "high",
+		"--add-dir", h.cwd + "/shared",
+	}
+	if !equalArgs(got, want) {
+		t.Errorf("recorded args = %v, want %v", got, want)
+	}
+	for _, forbidden := range []string{"--resume", "--fork-session"} {
+		if containsArg(got, forbidden) {
+			t.Errorf("bare launch must start a NEW session; %q is `forgectl resume`'s job: %v", forbidden, got)
+		}
+	}
+	if !strings.Contains(stderr, "--allow-dangerously-skip-permissions") {
+		t.Errorf("bare launch must banner its posture to stderr, got %q", stderr)
+	}
+	if !strings.Contains(stderr, "--effort high") {
+		t.Errorf("the banner is the cheapest way to eyeball the resolved effort, got %q", stderr)
+	}
+	if strings.Contains(stdout, "claude ") {
+		t.Errorf("banner leaked into stdout: %q", stdout)
 	}
 }

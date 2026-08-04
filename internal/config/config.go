@@ -28,6 +28,7 @@ const logKeepDays = 7
 //
 //	[launch.defaults]    # per-project Claude Code launcher (forgectl launch)
 //	model = "opus"
+//	effort = ""          # low|medium|high|xhigh|max; unset = derived from the model
 //	[[launch.project]]
 //	match = "~/Projects/minute"
 //	model = "sonnet"
@@ -68,8 +69,10 @@ const logKeepDays = 7
 //	[update]             # forgectl update — weekly package-manager + OS maintenance
 //	roster  = []          # step names to run when --only is omitted; empty = every roster step
 //	log_dir = ""          # transcript log directory; empty = <config dir>/update-logs
-//	[pr]                 # forgectl pr pick — bulk-launch concurrency cap
+//	[pr]                 # forgectl pr — bulk-launch cap and clean-room reviewer posture
 //	max_concurrent = 4   # live "pr-*" tmux windows allowed at once; <= 0 = default (4)
+//	model  = ""          # reviewer model; unset = the ambient launch profile's
+//	effort = ""          # reviewer effort; unset = derived from the reviewer model
 type Config struct {
 	NoIcons   bool            `toml:"no_icons"`
 	LogLevel  string          `toml:"log_level"`
@@ -100,9 +103,16 @@ type LaunchConfig struct {
 // LaunchDefaults is [launch.defaults]: the base posture applied when no project
 // matches (and the floor a matching project overrides). AllowDanger is a pointer
 // so an explicit `false` is distinguishable from "unset".
+//
+// Effort is a plain string, not a pointer, because there is no user for
+// "explicitly emit no --effort flag": an unset value already derives a level
+// from the model (launch.EffortForModel), and an unmapped model already emits
+// nothing. The whole point of the key is raising or lowering a derived level,
+// not suppressing one.
 type LaunchDefaults struct {
 	Harness         string            `toml:"harness"` // claude (default) | codex
 	Model           string            `toml:"model"`
+	Effort          string            `toml:"effort"` // low|medium|high|xhigh|max; unset = derived from Model
 	PermissionMode  string            `toml:"permission_mode"`
 	AllowDanger     *bool             `toml:"allow_danger"`
 	ApprovalPolicy  string            `toml:"approval_policy"` // Codex: untrusted|on-request|never
@@ -118,6 +128,7 @@ type LaunchProject struct {
 	Match          string            `toml:"match"`
 	Harness        string            `toml:"harness"`
 	Model          string            `toml:"model"`
+	Effort         string            `toml:"effort"`
 	PermissionMode string            `toml:"permission_mode"`
 	AllowDanger    *bool             `toml:"allow_danger"`
 	ApprovalPolicy string            `toml:"approval_policy"`
@@ -229,17 +240,35 @@ func (rc ReviewConfig) IsZero() bool {
 }
 
 // PrConfig is the [pr] section: `forgectl pr pick`'s bulk-launch concurrency
-// cap. A zero MaxConcurrent means "section absent" — internal/pr owns the
-// built-in default (DefaultMaxConcurrentReviews) applied when this is unset
-// or non-positive, per the house zero-means-absent convention every other
-// *Config section in this file follows.
+// cap, plus the clean-room reviewer's model and effort. A zero value means
+// "section absent" — internal/pr owns the built-in concurrency default
+// (DefaultMaxConcurrentReviews) applied when MaxConcurrent is unset or
+// non-positive, and an unset Model/Effort leaves the reviewer on the ambient
+// launch profile's posture, per the house zero-means-absent convention every
+// other *Config section in this file follows.
+//
+// SECURITY BOUNDARY — this section carries model and effort ONLY, and
+// TestPrConfig_FieldSetIsPinned enforces that. The clean-room review's
+// hardening (AllowDanger=false, PermissionMode="plan", StrictMCP=true,
+// AddDir=nil) is forgectl's own control over a third party's checkout, not an
+// operator preference. A `permission_mode` key here would let a config file
+// turn that control off; adding one is a deliberate act that must break the
+// pinning test first.
 type PrConfig struct {
 	MaxConcurrent int `toml:"max_concurrent"`
+	// Model overrides the reviewer's model independently of whatever repo it
+	// happens to be reviewing. Setting it re-derives Effort from the new model
+	// (internal/pr launchInline) rather than carrying the ambient repo's level
+	// across — see that call site for why filling only when empty is wrong.
+	Model string `toml:"model"`
+	// Effort overrides the reviewer's --effort outright, beating both the
+	// ambient profile and the Model-derived level.
+	Effort string `toml:"effort"`
 }
 
 // IsZero reports whether the [pr] section was absent or empty.
 func (pc PrConfig) IsZero() bool {
-	return pc.MaxConcurrent == 0
+	return pc.MaxConcurrent == 0 && pc.Model == "" && pc.Effort == ""
 }
 
 // GiteaConfig is the [review.gitea] section: forgectl review's opt-in second
@@ -399,7 +428,7 @@ func expandTilde(path, home string) string {
 // isZero reports whether no [launch.defaults] value was set. LaunchDefaults
 // holds maps/slices, so it is not comparable with == — check each field.
 func (d LaunchDefaults) isZero() bool {
-	return d.Harness == "" && d.Model == "" && d.PermissionMode == "" &&
+	return d.Harness == "" && d.Model == "" && d.Effort == "" && d.PermissionMode == "" &&
 		d.AllowDanger == nil && d.ApprovalPolicy == "" && d.Sandbox == "" &&
 		len(d.Env) == 0 && len(d.AddDir) == 0 && d.BinaryPath == "" &&
 		d.CodexBinaryPath == ""

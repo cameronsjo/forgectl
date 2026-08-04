@@ -7,43 +7,41 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 )
 
-func TestCodexSessionArgs_TranslatesModes(t *testing.T) {
+func TestCodexSessionArgs_NativePosture(t *testing.T) {
 	p := Profile{
+		Model:          "gpt-5",
 		ApprovalPolicy: "on-request",
 		Sandbox:        "workspace-write",
 		AddDir:         []string{"/shared"},
 	}
-	tests := []struct {
-		mode SessionMode
-		want []string
-	}{
-		{
-			New,
-			[]string{"--ask-for-approval", "on-request", "--sandbox", "workspace-write", "--model", "gpt-5", "--add-dir", "/shared"},
-		},
-		{
-			Resume,
-			[]string{"resume", "--last", "--ask-for-approval", "on-request", "--sandbox", "workspace-write", "--model", "gpt-5", "--add-dir", "/shared"},
-		},
-		{
-			Fork,
-			[]string{"fork", "--last", "--ask-for-approval", "on-request", "--sandbox", "workspace-write", "--model", "gpt-5", "--add-dir", "/shared"},
-		},
-	}
-	for _, tc := range tests {
-		if got := CodexSessionArgs(p, "gpt-5", tc.mode); !reflect.DeepEqual(got, tc.want) {
-			t.Errorf("CodexSessionArgs(%v) = %v, want %v", tc.mode, got, tc.want)
-		}
+	got := CodexSessionArgs(p)
+	want := []string{"--ask-for-approval", "on-request", "--sandbox", "workspace-write", "--model", "gpt-5", "--add-dir", "/shared"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("CodexSessionArgs =\n  %v\nwant\n  %v", got, want)
 	}
 }
 
 func TestCodexSessionArgs_OmitsEmptyModel(t *testing.T) {
 	p := Profile{ApprovalPolicy: "on-request", Sandbox: "workspace-write"}
-	got := CodexSessionArgs(p, "", New)
+	got := CodexSessionArgs(p)
 	for _, arg := range got {
 		if arg == "--model" {
 			t.Fatalf("empty model should use the Codex default: %v", got)
 		}
+	}
+}
+
+// TestCodexSessionArgs_NeverEmitsEffort pins the harness boundary: --effort is
+// Claude Code's flag and Codex would reject it, so a resolved Effort (which a
+// Codex profile still carries whenever its model happens to be a mapped alias,
+// or whenever [launch.defaults] effort is set outright) must not leak across.
+func TestCodexSessionArgs_NeverEmitsEffort(t *testing.T) {
+	p := Profile{Model: "gpt-5", Effort: "high", ApprovalPolicy: "on-request", Sandbox: "read-only"}
+	if got := CodexSessionArgs(p); containsStr(got, "--effort") {
+		t.Errorf("CodexSessionArgs must not emit --effort, got %v", got)
+	}
+	if got := CodexExecArgs(p, []string{"hi"}); containsStr(got, "--effort") {
+		t.Errorf("CodexExecArgs must not emit --effort, got %v", got)
 	}
 }
 
@@ -63,71 +61,105 @@ func TestCodexExecArgs_UsesNativeSandboxAndApprovalConfig(t *testing.T) {
 	}
 }
 
-func TestSessionArgs_New_FullPosture(t *testing.T) {
-	p := Profile{PermissionMode: "plan", AllowDanger: true, AddDir: []string{"/x", "/y"}}
-	got := SessionArgs(p, "opus", New)
-	want := []string{"--permission-mode", "plan", "--allow-dangerously-skip-permissions", "--ide", "--exclude-dynamic-system-prompt-sections", "--model", "opus", "--add-dir", "/x", "--add-dir", "/y"}
+func TestSessionArgs_FullPosture(t *testing.T) {
+	p := Profile{Model: "opus", Effort: "medium", PermissionMode: "plan", AllowDanger: true, AddDir: []string{"/x", "/y"}}
+	got := SessionArgs(p)
+	want := []string{"--permission-mode", "plan", "--allow-dangerously-skip-permissions", "--ide", "--exclude-dynamic-system-prompt-sections", "--model", "opus", "--effort", "medium", "--add-dir", "/x", "--add-dir", "/y"}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("SessionArgs(New) =\n  %v\nwant\n  %v", got, want)
+		t.Errorf("SessionArgs =\n  %v\nwant\n  %v", got, want)
 	}
 }
 
 func TestSessionArgs_AllowDangerOff_OmitsFlag(t *testing.T) {
-	p := Profile{PermissionMode: "plan", AllowDanger: false}
-	got := SessionArgs(p, "opus", New)
+	p := Profile{Model: "opus", PermissionMode: "plan", AllowDanger: false}
+	got := SessionArgs(p)
 	if containsStr(got, "--allow-dangerously-skip-permissions") {
 		t.Errorf("SessionArgs with AllowDanger=false should omit the danger flag, got %v", got)
 	}
 }
 
-func TestSessionArgs_Resume(t *testing.T) {
-	p := Profile{PermissionMode: "plan"}
-	got := SessionArgs(p, "opus", Resume)
-	if !containsSeq(got, []string{"--model", "opus", "--resume"}) {
-		t.Errorf("SessionArgs(Resume) missing expected seq, got %v", got)
-	}
-	if containsStr(got, "--fork-session") {
-		t.Errorf("SessionArgs(Resume) should not include --fork-session, got %v", got)
+// TestSessionArgs_NeverResumes pins what removing the interview means for the
+// bare launcher: `forgectl launch` starts a NEW session, always. The old
+// SessionArgs took a mode and could append a bare --resume (opening Claude
+// Code's own picker); resume/fork now belong to `forgectl resume` alone, and
+// this is the assertion that would fail if a mode were quietly reintroduced.
+func TestSessionArgs_NeverResumes(t *testing.T) {
+	got := SessionArgs(Profile{Model: "opus", PermissionMode: "plan"})
+	for _, bad := range []string{"--resume", "--fork-session"} {
+		if containsStr(got, bad) {
+			t.Errorf("SessionArgs must not include %q — resume/fork is `forgectl resume`'s job, got %v", bad, got)
+		}
 	}
 }
 
-func TestSessionArgs_Fork_ImpliesResume(t *testing.T) {
-	p := Profile{PermissionMode: "plan"}
-	got := SessionArgs(p, "opus", Fork)
-	if !containsSeq(got, []string{"--resume", "--fork-session"}) {
-		t.Errorf("SessionArgs(Fork) missing expected seq, got %v", got)
+// TestEffortIsOmittedWhenUnresolved covers every Claude argv builder at once:
+// an empty Effort emits NO flag, rather than "--effort" with an empty value.
+// That is the whole contract of an unmapped model — the user's settings.json
+// effortLevel stays in charge, exactly as it did before the flag existed.
+func TestEffortIsOmittedWhenUnresolved(t *testing.T) {
+	p := Profile{Model: "haiku", PermissionMode: "plan"}
+	builders := map[string][]string{
+		"SessionArgs": SessionArgs(p),
+		"ResumeArgs":  ResumeArgs(p, "abc-123", false),
+		"BuilderArgs": BuilderArgs(p, []string{"-p", "hi"}),
+		"AgentsArgs":  AgentsArgs(p, []string{"agents"}),
+	}
+	for name, got := range builders {
+		if containsStr(got, "--effort") {
+			t.Errorf("%s emitted --effort for an unresolved level: %v", name, got)
+		}
+	}
+}
+
+// TestEffortFollowsModelInEveryBuilder pins the POSITION, not just the
+// presence. --effort has to sit in the injected block immediately after
+// --model so a user's trailing override still wins under Claude Code's
+// last-flag-wins parsing; emitted after the user's args it would silently
+// outrank them.
+func TestEffortFollowsModelInEveryBuilder(t *testing.T) {
+	p := Profile{Model: "sonnet", Effort: "high", PermissionMode: "plan"}
+	builders := map[string][]string{
+		"SessionArgs": SessionArgs(p),
+		"ResumeArgs":  ResumeArgs(p, "abc-123", false),
+		"BuilderArgs": BuilderArgs(p, []string{"-p", "hi"}),
+		"AgentsArgs":  AgentsArgs(p, []string{"agents"}),
+	}
+	for name, got := range builders {
+		if !containsSeq(got, []string{"--model", "sonnet", "--effort", "high"}) {
+			t.Errorf("%s must emit --effort right after --model, got %v", name, got)
+		}
 	}
 }
 
 func TestResumeArgs_TargetsTheGivenSession(t *testing.T) {
-	p := Profile{PermissionMode: "plan", AllowDanger: true, AddDir: []string{"/x"}}
-	got := ResumeArgs(p, "opus", "abc-123", false)
+	p := Profile{Model: "opus", Effort: "medium", PermissionMode: "plan", AllowDanger: true, AddDir: []string{"/x"}}
+	got := ResumeArgs(p, "abc-123", false)
 	want := []string{
 		"--permission-mode", "plan", "--allow-dangerously-skip-permissions",
 		"--ide", "--exclude-dynamic-system-prompt-sections", "--model", "opus",
-		"--resume", "abc-123", "--add-dir", "/x",
+		"--effort", "medium", "--resume", "abc-123", "--add-dir", "/x",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ResumeArgs =\n  %v\nwant\n  %v", got, want)
 	}
 }
 
-// The distinction that earned ResumeArgs its own function: SessionArgs appends
-// a BARE --resume, which opens Claude Code's own picker. `forgectl resume` has
-// already picked, so the id must follow the flag.
+// The distinction that earned ResumeArgs its own function: SessionArgs starts a
+// new session and never carries an id, so `forgectl resume` — which has already
+// picked one — needs a builder that puts the id straight after --resume.
 func TestResumeArgs_PassesTheIDUnlikeSessionArgs(t *testing.T) {
-	p := Profile{PermissionMode: "plan"}
-	if got := SessionArgs(p, "opus", Resume); containsStr(got, "abc-123") {
+	p := Profile{Model: "opus", PermissionMode: "plan"}
+	if got := SessionArgs(p); containsStr(got, "abc-123") {
 		t.Fatalf("SessionArgs unexpectedly carries a session id: %v", got)
 	}
-	if got := ResumeArgs(p, "opus", "abc-123", false); !containsSeq(got, []string{"--resume", "abc-123"}) {
+	if got := ResumeArgs(p, "abc-123", false); !containsSeq(got, []string{"--resume", "abc-123"}) {
 		t.Errorf("ResumeArgs must pass the id straight after --resume, got %v", got)
 	}
 }
 
 func TestResumeArgs_ForkAppendsForkSession(t *testing.T) {
-	p := Profile{PermissionMode: "plan"}
-	got := ResumeArgs(p, "opus", "abc-123", true)
+	p := Profile{Model: "opus", PermissionMode: "plan"}
+	got := ResumeArgs(p, "abc-123", true)
 	if !containsSeq(got, []string{"--resume", "abc-123", "--fork-session"}) {
 		t.Errorf("ResumeArgs(fork) missing expected seq, got %v", got)
 	}

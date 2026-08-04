@@ -150,6 +150,7 @@ func TestIntegration_LaunchInit_FromClaunch_ImportedProfileDrivesLaunch(t *testi
 		"--permission-mode", "plan",
 		"--allow-dangerously-skip-permissions",
 		"--model", "sonnet",
+		"--effort", "high", // derived; the legacy file predates the effort key entirely
 		"-p", "hi",
 	}
 	if !equalArgs(got, want) {

@@ -82,8 +82,12 @@ type hostResolvedView struct {
 // `forgectl launch` will actually do, which is why the bespoke block survives
 // the rewrite.
 type launchResolvedView struct {
-	Harness        string `json:"harness"`
-	Model          string `json:"model"`
+	Harness string `json:"harness"`
+	Model   string `json:"model"`
+	// Effort is "" when no level resolved — the model is unmapped and no
+	// config layer set one, so launch emits no --effort and Claude Code's own
+	// default applies. omitempty keeps that distinct in JSON from a level.
+	Effort         string `json:"effort,omitempty"`
 	ApprovalPolicy string `json:"approval_policy,omitempty"`
 	Sandbox        string `json:"sandbox,omitempty"`
 	PermissionMode string `json:"permission_mode,omitempty"`
@@ -342,6 +346,9 @@ func resolveLaunchView(cfg config.Config) launchResolvedView {
 		view.Sandbox = ld.Sandbox
 		bin, err = launch.CodexPath(cfg.Launch.Defaults)
 	} else {
+		// Claude-only: --effort is Claude Code's flag and Codex has no
+		// equivalent, so a Codex profile resolves a level it would never emit.
+		view.Effort = ld.Effort
 		view.PermissionMode = ld.PermissionMode
 		allow := ld.AllowDanger
 		view.AllowDanger = &allow
@@ -405,6 +412,14 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 		fmt.Fprintf(out, "  launch.approval      %s\n", resolved.ApprovalPolicy)
 		fmt.Fprintf(out, "  launch.sandbox       %s\n", resolved.Sandbox)
 	} else {
+		// Spelled out rather than left blank: this block is a fixed field list,
+		// so an empty column would read as "unset" when the operative fact is
+		// that no flag is emitted and Claude Code's own default governs.
+		effort := resolved.Effort
+		if effort == "" {
+			effort = "(none — claude default)"
+		}
+		fmt.Fprintf(out, "  launch.effort        %s\n", effort)
 		fmt.Fprintf(out, "  launch.permission    %s\n", resolved.PermissionMode)
 		fmt.Fprintf(out, "  launch.allow_danger  %v\n", resolved.AllowDanger != nil && *resolved.AllowDanger)
 	}

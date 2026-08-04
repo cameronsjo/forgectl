@@ -10,10 +10,27 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 )
 
-// Validate rejects harness-native settings Codex itself would refuse.
+// EffortLevels are the values Claude Code's `--effort` accepts, in ascending
+// order. Read off `claude --help` on 2.1.221: "(low, medium, high, xhigh,
+// max)". Exported so the error message and any future display share one list.
+var EffortLevels = []string{"low", "medium", "high", "xhigh", "max"}
+
+// Validate rejects harness-native settings Codex itself would refuse, and an
+// effort level Claude Code would refuse.
+//
+// Effort is validated even for a Codex profile, where it is inert (Codex has
+// no --effort and the Codex builders never emit one). A typo that silently
+// does nothing today becomes a live wrong value the moment a profile flips
+// harness, and `effort` is new enough that no existing config can regress.
 func (p Profile) Validate() error {
 	if p.Harness != "claude" && p.Harness != "codex" {
 		return fmt.Errorf("unsupported launch harness %q: want claude or codex", p.Harness)
+	}
+	if p.Effort != "" && !oneOf(p.Effort, EffortLevels...) {
+		return fmt.Errorf(
+			"unsupported effort %q: want one of %s",
+			p.Effort, strings.Join(EffortLevels, ", "),
+		)
 	}
 	if p.Harness == "codex" {
 		if oneOf(p.Model, "opus", "sonnet", "haiku") || strings.HasPrefix(p.Model, "claude-") {
@@ -44,8 +61,13 @@ func oneOf(value string, choices ...string) bool {
 // Profile is the fully resolved posture for one working directory — the on-disk
 // schema (config.LaunchConfig) reduced against the cwd.
 type Profile struct {
-	Harness        string
-	Model          string
+	Harness string
+	Model   string
+	// Effort is the resolved `--effort` level, or "" to emit no flag at all and
+	// let Claude Code's own default (settings.json effortLevel) apply. It is
+	// derived from Model when neither layer of config sets it — see
+	// EffortForModel.
+	Effort         string
 	PermissionMode string
 	AllowDanger    bool
 	ApprovalPolicy string
@@ -156,6 +178,18 @@ func resolve(lc config.LaunchConfig, cwd, home string) Profile {
 		p.Match = win.Match
 	}
 
+	// Effort derivation is the LAST statement, and it runs against the FINAL
+	// model — so a project block overriding only `model` re-derives its level
+	// instead of inheriting one chosen for the defaults' model. The explicit
+	// value is recomputed from the raw config rather than read back off
+	// p.Effort, because defaultsProfile has already derived into that field and
+	// a derived "medium" is indistinguishable from a configured one.
+	explicitEffort := lc.Defaults.Effort
+	if win != nil && win.Effort != "" {
+		explicitEffort = win.Effort
+	}
+	p.Effort = firstNonEmpty(explicitEffort, EffortForModel(p.Model))
+
 	return p
 }
 
@@ -163,7 +197,7 @@ func resolve(lc config.LaunchConfig, cwd, home string) Profile {
 // project matching. Shared by resolve and DefaultsProfile.
 func defaultsProfile(d config.LaunchDefaults, home string) Profile {
 	harness := firstNonEmpty(d.Harness, builtinHarness)
-	return Profile{
+	p := Profile{
 		Harness:        harness,
 		Model:          firstNonEmpty(d.Model, builtinModelForHarness(harness)),
 		PermissionMode: firstNonEmpty(d.PermissionMode, builtinPermissionMode),
@@ -172,6 +206,53 @@ func defaultsProfile(d config.LaunchDefaults, home string) Profile {
 		Sandbox:        firstNonEmpty(d.Sandbox, builtinSandbox),
 		Env:            mergeEnv(nil, d.Env),
 		AddDir:         expandAll(d.AddDir, home),
+	}
+	// Last statement, against the final model — the same ordering resolve
+	// relies on, and the reason both derive here rather than in the exported
+	// Resolve/DefaultsProfile wrappers: this is the core the tests exercise
+	// directly, so deriving one level up would leave every merge test seeing
+	// an empty Effort.
+	//
+	// resolve DISCARDS this line's result whenever a project block matches,
+	// recomputing the same formula against the final model. That is deliberate,
+	// not redundancy to collapse: Effort is a plain string, so a value read back
+	// off the struct cannot say whether it was configured or derived — and once
+	// a project overrides Model, only the raw config can answer that. The
+	// alternative is a provenance flag on Profile, which buys two saved string
+	// comparisons per launch for a permanently wider data model.
+	p.Effort = firstNonEmpty(d.Effort, EffortForModel(p.Model))
+	return p
+}
+
+// EffortForModel maps a model alias to the reasoning effort that suits it, or
+// "" when the model is unmapped. It is pure, and it is the last word in both
+// resolve and defaultsProfile — so a project block overriding only `model`
+// re-derives its level, rather than inheriting one chosen for a different
+// model.
+//
+// The mapping is deliberately alias-only and deliberately incomplete. Claude
+// Code accepts a full model id (claude-opus-5) and other aliases (haiku,
+// opusplan) here too, but the effort semantics of those are unverified, and
+// guessing a level is worse than emitting no flag: "" leaves the user's
+// settings.json effortLevel in charge, which is exactly the pre-existing
+// behavior. Adding an entry is a claim that the level was measured on that
+// model. opusplan is excluded on purpose — it runs opus for planning and
+// sonnet for execution, and this mapping puts those two at DIFFERENT levels,
+// so there is no single honest answer for the pair.
+//
+// The "[1m]" suffix is stripped first. Claude Code 2.1.221 accepts opus[1m],
+// sonnet[1m], fable[1m], and opusplan[1m]; the suffix selects the 1M-token
+// context window, not a different model, so effort carries over unchanged.
+// Matching the bare alias only would silently drop a 1M-context launch to no
+// flag at all — the one failure mode that looks identical to working.
+func EffortForModel(model string) string {
+	switch strings.TrimSuffix(model, "[1m]") {
+	case "sonnet":
+		return "high"
+	case "opus", "fable":
+		return "medium"
+	default:
+		return ""
 	}
 }
 
