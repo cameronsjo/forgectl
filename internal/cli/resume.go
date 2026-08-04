@@ -10,13 +10,13 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/resume"
@@ -250,12 +250,6 @@ func pickSession(sessions []resume.Session) (resume.Session, error) {
 		opts[i] = huh.NewOption(label, s.ID)
 	}
 
-	// huh v1.0.0 binds Quit to ctrl+c ALONE (keymap.go:109), so Esc is
-	// unbound and does nothing — the picker reads as stuck to anyone who
-	// reaches for the conventional cancel key. Bind it.
-	km := huh.NewDefaultKeyMap()
-	km.Quit = key.NewBinding(key.WithKeys("ctrl+c", "esc"), key.WithHelp("esc", "cancel"))
-
 	var chosen string
 	err := huh.NewForm(
 		huh.NewGroup(
@@ -264,7 +258,7 @@ func pickSession(sessions []resume.Session) (resume.Session, error) {
 				Options(opts...).
 				Value(&chosen),
 		),
-	).WithKeyMap(km).Run()
+	).WithKeyMap(keymap.Cancel()).Run()
 	if err != nil {
 		return resume.Session{}, err
 	}
