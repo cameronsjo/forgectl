@@ -81,6 +81,59 @@ func (c *Client) LiveReviews(ctx context.Context) (n int, ok bool) {
 	return count, true
 }
 
+// WindowLive reports whether ref's review window still exists in the client's
+// tmux session. ok is false when the window list could not be read at all —
+// callers MUST render that as "unknown" rather than "gone", because a
+// transport-level tmux failure is indistinguishable from a vanished window if
+// the two are collapsed, and reporting "gone" on an unreadable tmux would cry
+// wolf on every healthy launch.
+//
+// Why this exists: `tmux new-window` returns exit 0 the instant the window is
+// created — it never observes the child. A review agent that dies seconds
+// later (a rejected model, a bad flag, a missing binary) takes the window with
+// it, since remain-on-exit is off by default, and the error message dies with
+// the pane. Launch has already returned nil and the breadcrumb is on disk, so
+// `pr list` — which reads breadcrumbs only — reports the session as active
+// forever. This is the read that tells the truth.
+func (c *Client) WindowLive(ctx context.Context, ref Ref) (live bool, ok bool) {
+	m, ok := c.WindowsLive(ctx, []Ref{ref})
+	if !ok {
+		return false, false
+	}
+	return m[ref], true
+}
+
+// WindowsLive answers WindowLive for a whole set of refs from ONE ListWindows
+// call — the shape `pr list` needs, where a per-ref probe would fork a tmux
+// process per session. ok is false when the window list could not be read;
+// the returned map is nil in that case, never a map of falses.
+//
+// The liveness test is the same exact string comparison LiveReviews uses
+// (w.Session == c.tmuxSession && w.Name == windowName(ref)) and goes through
+// the same ListWindows path, deliberately. has-session and `display-message
+// -t` both route through tmux's own `-t` resolution — exact, then fnmatch,
+// then PREFIX — which reports a sibling session as a match; see the
+// LiveReviews doc comment above for the full trace of why that fuzziness is
+// unsafe here.
+func (c *Client) WindowsLive(ctx context.Context, refs []Ref) (map[Ref]bool, bool) {
+	t := tmux.New(c.run)
+	wins, err := t.ListWindows(ctx)
+	if err != nil {
+		return nil, false
+	}
+	inSession := make(map[string]bool, len(wins))
+	for _, w := range wins {
+		if w.Session == c.tmuxSession {
+			inSession[w.Name] = true
+		}
+	}
+	out := make(map[Ref]bool, len(refs))
+	for _, ref := range refs {
+		out[ref] = inSession[windowName(ref)]
+	}
+	return out, true
+}
+
 // Admit resolves the concurrency cap from cfgMax (via MaxConcurrentReviews)
 // and reports the live count and how many more reviews may launch right now.
 // It is the sole place that resolves cfgMax — callers pass the raw

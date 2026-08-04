@@ -26,6 +26,20 @@ package pr
 //       just LiveReviews in isolation — see fakeTmuxServer and
 //       TestLiveReviews_SiblingPrefixSession_Closed.
 //
+// WindowLive / WindowsLive (Classification: fail-SOFT liveness read)
+//   [x] Happy: a window dispatched through the real new-window sequence reads
+//       live; killing it (what tmux does when the agent exits and
+//       remain-on-exit is off) flips it to (false, true) — forgectl#242
+//   [x] Unhappy: list-windows errors → (_, false), NOT (false, true). The
+//       caller renders "?" from this; collapsing it to "gone" would flag every
+//       healthy review as dead whenever tmux hiccups
+//   [x] Boundary: a same-named window in a DIFFERENT session is not this
+//       client's review
+//   [x] Happy: WindowsLive over a mixed set answers each ref correctly from
+//       exactly ONE list-windows invocation
+//   [x] Unhappy: WindowsLive on an error returns a nil map, never a map of
+//       falses (which would read as "all gone")
+//
 // Admit (Classification: concurrency gate, fail-closed, single resolution)
 //   [x] Happy: no windows yet → genuine zero, full cap free, resolved max and
 //       live both reported
@@ -284,6 +298,139 @@ func TestLiveReviews_SiblingPrefixSession_Closed(t *testing.T) {
 	if !ok || n != 1 {
 		t.Fatalf("LiveReviews() = (%d, %v), want (1, true) — the review must land in and be counted "+
 			"under the exact \"forgectl\" session, not the sibling \"forgectl-review\"", n, ok)
+	}
+}
+
+// killWindow removes name from session, simulating what real tmux does when a
+// window's child process exits and remain-on-exit is off (the default): the
+// window is DESTROYED, taking any error the child printed with it. This is the
+// exact transition forgectl#242 is about — `tmux new-window` returned 0, the
+// breadcrumb landed on disk, and seconds later the window vanished.
+func (s *fakeTmuxServer) killWindow(session, name string) bool {
+	wins, ok := s.sessions[session]
+	if !ok {
+		return false
+	}
+	for i, w := range wins {
+		if w == name {
+			s.sessions[session] = append(append([]string{}, wins[:i]...), wins[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// TestWindowLive_CreatedThenRemoved drives the real dispatch sequence against
+// the stateful tmux simulation, then kills the window the way a rejected model
+// would, and asserts WindowLive flips from live to gone WITHOUT ever reporting
+// unreadable — the whole point being that a dead review is distinguishable
+// from a healthy one, and both are distinguishable from a broken tmux.
+func TestWindowLive_CreatedThenRemoved(t *testing.T) {
+	srv := newFakeTmuxServer(map[string][]string{"forgectl": {"shell"}})
+	c := New(srv.runner(), WithTmuxSession("forgectl"))
+	ctx := context.Background()
+	ref := Ref{Owner: "o", Repo: "r", Number: 1}
+
+	if _, err := c.run.Run(ctx, "tmux", "new-window",
+		"-t", c.exactSessionTarget(), "-n", windowName(ref), "-c", "/tmp"); err != nil {
+		t.Fatalf("new-window: %v", err)
+	}
+	if live, ok := c.WindowLive(ctx, ref); !ok || !live {
+		t.Fatalf("WindowLive() right after dispatch = (%v, %v), want (true, true)", live, ok)
+	}
+
+	if !srv.killWindow("forgectl", windowName(ref)) {
+		t.Fatalf("killWindow did not find %q", windowName(ref))
+	}
+	if live, ok := c.WindowLive(ctx, ref); !ok || live {
+		t.Fatalf("WindowLive() after the window died = (%v, %v), want (false, true) — a vanished "+
+			"window is a readable fact, not an unreadable tmux", live, ok)
+	}
+}
+
+func TestWindowLive_ListWindowsErrors_ReportsUnreadable(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "tmux" && len(args) > 0 && args[0] == "list-windows" {
+			// TRAP: must NOT contain "no server running" — isNoServer
+			// (internal/tmux/sessions.go) converts that to (nil, nil), which is a
+			// legitimate empty window list, not an unreadable one.
+			return "", errors.New("boom: tmux exploded")
+		}
+		return "", nil
+	}}
+	c := New(fake, WithTmuxSession("forgectl"))
+	live, ok := c.WindowLive(context.Background(), Ref{Owner: "o", Repo: "r", Number: 1})
+	if ok || live {
+		t.Fatalf("WindowLive() = (%v, %v), want (false, false) — an unreadable tmux must not "+
+			"masquerade as a vanished window", live, ok)
+	}
+}
+
+func TestWindowLive_IgnoresOtherSessions(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 1}
+	fake := listWindowsFake(winRow("other-session", windowName(ref)))
+	c := New(fake, WithTmuxSession("forgectl"))
+	if live, ok := c.WindowLive(context.Background(), ref); !ok || live {
+		t.Fatalf("WindowLive() = (%v, %v), want (false, true) — a same-named window in another "+
+			"session is not this client's review", live, ok)
+	}
+}
+
+// TestWindowsLive_MixedSet_OneListWindowsCall pins both halves of the batch
+// contract: the right answer per ref, from a SINGLE tmux invocation. `pr list`
+// calls this once for every breadcrumb on disk, so a per-ref probe would fork
+// a tmux process per session.
+func TestWindowsLive_MixedSet_OneListWindowsCall(t *testing.T) {
+	liveRef := Ref{Owner: "o", Repo: "r", Number: 1}
+	goneRef := Ref{Owner: "o", Repo: "r", Number: 2}
+	otherSessionRef := Ref{Owner: "o", Repo: "r", Number: 3}
+
+	fake := listWindowsFake(
+		winRow("forgectl", windowName(liveRef)),
+		winRow("forgectl", "shell"),
+		winRow("other-session", windowName(otherSessionRef)),
+	)
+	c := New(fake, WithTmuxSession("forgectl"))
+
+	got, ok := c.WindowsLive(context.Background(), []Ref{liveRef, goneRef, otherSessionRef})
+	if !ok {
+		t.Fatal("WindowsLive() ok = false, want true")
+	}
+	want := map[Ref]bool{liveRef: true, goneRef: false, otherSessionRef: false}
+	for ref, wantLive := range want {
+		if got[ref] != wantLive {
+			t.Errorf("WindowsLive()[%s] = %v, want %v", ref, got[ref], wantLive)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("WindowsLive() returned %d entries, want %d", len(got), len(want))
+	}
+
+	calls := 0
+	for _, call := range fake.Calls {
+		if call.Name == "tmux" && len(call.Args) > 0 && call.Args[0] == "list-windows" {
+			calls++
+		}
+	}
+	if calls != 1 {
+		t.Errorf("list-windows invoked %d times for 3 refs, want exactly 1", calls)
+	}
+}
+
+func TestWindowsLive_ListWindowsErrors_NilMap(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "tmux" && len(args) > 0 && args[0] == "list-windows" {
+			return "", errors.New("boom: tmux exploded")
+		}
+		return "", nil
+	}}
+	c := New(fake, WithTmuxSession("forgectl"))
+	got, ok := c.WindowsLive(context.Background(), []Ref{{Owner: "o", Repo: "r", Number: 1}})
+	if ok {
+		t.Fatal("WindowsLive() ok = true on a list-windows error, want false")
+	}
+	if got != nil {
+		t.Errorf("WindowsLive() map = %v, want nil — a map of falses would read as \"all gone\"", got)
 	}
 }
 

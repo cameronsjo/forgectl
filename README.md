@@ -391,7 +391,7 @@ Because derivation runs last, a project block overriding only `model` **re-deriv
 
 A command-line `--model` does *not* re-derive: `forgectl launch --model sonnet` keeps the profile's effort, and last-flag-wins gives you sonnet at that level. Switch models mid-session with `/model` if you want the matching effort.
 
-An `effort` outside the five accepted levels is rejected before anything is launched — by `forgectl launch`, `forgectl launch doctor`, and the `forgectl pr` review dispatch. That last one is why the check exists: a review runs in a *detached* tmux window, so a value `claude` refuses would otherwise be an empty pane and no error anywhere.
+An `effort` outside the five accepted levels is rejected before anything is launched — by `forgectl launch`, `forgectl launch doctor`, and the `forgectl pr` review dispatch. That last one is why the check exists: a review runs in a *detached* tmux window, and `tmux new-window` returns 0 the instant the window exists — it never observes the child. When the agent then rejects a value and exits, tmux **destroys the window** (`remain-on-exit` is off by default), taking the error message with it. Nothing is left to read. `forgectl pr list` reports each session's window liveness for exactly this reason — see the `[pr]` section below.
 
 **Design invariants** (verified against `claude` v2.1.183):
 
@@ -447,6 +447,17 @@ effort = "xhigh"           # reviewer effort; unset = derived from the reviewer 
 `model` and `effort` exist because a review's posture should follow *the review*, not the checkout it is pointed at. Setting `model` **discards** the ambient repo's effort and re-derives from the new model — otherwise reviewing a sonnet-pinned repo with `[pr] model = "opus"` would ship `--model opus --effort high`, the exact mispairing the knob exists to prevent. Setting `effort` overrides everything.
 
 **These two keys are the whole surface, by design.** The clean-room review always runs with `--permission-mode plan`, never `--allow-dangerously-skip-permissions`, always `--strict-mcp-config`, and with your ambient `add_dir` dropped — because the workspace under review may hold a third party's checkout. That posture is forgectl's control, not an operator preference, and no `[pr]` key can reach it. A value starting with `-` is refused before dispatch, since both land next to those flags in the argv.
+
+**`model` is deliberately not checked against a list of known models.** `effort` is an enum of five levels, so a typo there is caught before dispatch; `model` is not, because the value space is effectively open — the aliases (`opus`, `sonnet`, `fable`), their undocumented context-window variants (`opus[1m]`), and arbitrary full ids (`claude-opus-5`) all have to keep working. An allowlist would buy little and would break legitimate pins the day a new model ships.
+
+A mistyped `model` therefore reaches the agent, which rejects it a few seconds after dispatch and exits — and tmux destroys the review window along with the error. `forgectl pr list` is where that surfaces: it cross-checks each breadcrumb against the live tmux window list and renders a status column. The output is tab-separated — aligned below for readability.
+
+```
+cameronsjo/forgectl#42   live          2026-08-04T09:12:31Z  …/forgectl/pr-sessions/cameronsjo-forgectl-42-….json
+cameronsjo/forgectl#41   window gone   2026-08-04T09:10:02Z  …/forgectl/pr-sessions/cameronsjo-forgectl-41-….json
+```
+
+`live` means the review window still exists. `window gone` means the agent is no longer running — a rejected `model` is one cause, but so is a finished review or a window you closed yourself; either way the session is stale and `pr teardown <breadcrumb>` reclaims it. `?` means tmux itself could not be read, which says nothing about any individual window; the command still succeeds.
 
 ### bench — interop with the local dev services
 
