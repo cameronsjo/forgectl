@@ -171,9 +171,13 @@ func runResume(cmd *cobra.Command, cfg config.Config, filter string, limit int, 
 		// included. The operator should see the target first.
 		fmt.Fprintf(cmd.ErrOrStderr(), "forgectl: one match — %s\n", sessionRow(picked))
 	case dryRun || !isInteractiveTTY():
-		// Nobody can answer the picker: --dry-run declares non-interactive
-		// intent, and without a terminal huh has no /dev/tty to draw on.
-		// Opening it anyway is what ADR-0008 rule 1 forbids.
+		// Nobody can answer the picker, or nobody should be asked: --dry-run
+		// declares non-interactive intent, and isInteractiveTTY requires BOTH
+		// stdin and stdout to be terminals. The stdout half is not about
+		// /dev/tty being absent — a piped run from a real terminal still has
+		// one. It is that a piped stdout means the output is being consumed,
+		// and a TUI drawn over it corrupts what the caller is reading.
+		// Opening the picker anyway is what ADR-0008 rule 1 forbids.
 		return ambiguousMatch(cmd, sessions, filter, dryRun)
 	default:
 		if picked, err = pickSessionFn(sessions); err != nil {
@@ -186,10 +190,11 @@ func runResume(cmd *cobra.Command, cfg config.Config, filter string, limit int, 
 // ambiguousMatch is the headless answer to "which of these did you mean".
 //
 // The picker is the interactive answer, and it is the wrong one twice over:
-// --dry-run declares non-interactive intent, and a piped run has no terminal
-// to draw on, where huh fails with a /dev/tty error that describes forgectl's
-// internals rather than the caller's problem. ADR-0008 rule 1 names the
-// substitute — print the candidate set, one per line, and exit non-zero.
+// --dry-run declares non-interactive intent, and a run whose stdin or stdout
+// is not a terminal has nobody to prompt or nothing safe to draw over. With
+// stdin redirected huh fails outright with a /dev/tty error that describes
+// forgectl's internals rather than the caller's problem. ADR-0008 rule 1 names
+// the substitute — print the candidate set, one per line, and exit non-zero.
 //
 // Exit 1 rather than a code of its own: the repo draws the 1-vs-2 line by what
 // RECOVERS the call, and an ambiguous filter recovers the same way a no-match
@@ -212,8 +217,13 @@ func ambiguousMatch(cmd *cobra.Command, sessions []resume.Session, filter string
 	if dryRun {
 		reason = "--dry-run never prompts"
 	}
+	// Every clause of the recovery must be followable from what the caller was
+	// just handed. The rows carry name/repo/branch, NOT ids (sessionRowWidth
+	// falls back to the id only when a name is absent), so telling a scripted
+	// caller to "pass a session id" points at something this output does not
+	// contain — `resume ls --json` is where ids actually live.
 	return WithExitCode(fmt.Errorf(
-		"%d %s, and %s — narrow the filter or pass a session id; the candidates are on stdout",
+		"%d %s, and %s — narrow the filter, or get a session id from `forgectl resume ls --json`; the candidates are on stdout",
 		len(sessions), matched, reason), 1)
 }
 
