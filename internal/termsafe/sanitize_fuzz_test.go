@@ -1,4 +1,4 @@
-package term
+package termsafe
 
 // Fuzz/property coverage for Sanitize, additive to the table-driven
 // control-byte-specific cases in internal/cli/sessions_test.go (which plant a

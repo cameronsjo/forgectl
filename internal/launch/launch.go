@@ -17,7 +17,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/cameronsjo/forgectl/internal/term"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // SessionArgs builds the full interactive posture: plan-mode default, bypass
@@ -211,7 +211,7 @@ func MergeMaps(base, over map[string]string) map[string]string {
 // The argv is config-derived and only partly allowlisted — Profile.Validate
 // constrains effort and the Codex fields, but model, permission_mode, and
 // add_dir reach the banner verbatim — so the whole line goes through
-// term.Sanitize before it reaches a terminal. Otherwise an escape sequence in
+// termsafe.Sanitize before it reaches a terminal. Otherwise an escape sequence in
 // config.toml could clear the line and forge a different posture than the one
 // about to exec.
 //
@@ -219,13 +219,13 @@ func MergeMaps(base, over map[string]string) map[string]string {
 // strings.Join does no shell quoting, so an add_dir containing spaces renders
 // as two ambiguous tokens.
 func Banner(w io.Writer, args []string) {
-	_, _ = fmt.Fprintln(w, term.Sanitize("→ claude "+strings.Join(args, " ")))
+	_, _ = fmt.Fprintln(w, termsafe.Sanitize("→ claude "+strings.Join(args, " ")))
 }
 
 // HarnessBanner writes an informational launch line for either CLI. Sanitized
 // on the same grounds as Banner, and with the same no-shell-quoting caveat.
 func HarnessBanner(w io.Writer, harness string, args []string) {
-	_, _ = fmt.Fprintln(w, term.Sanitize("→ "+harness+" "+strings.Join(args, " ")))
+	_, _ = fmt.Fprintln(w, termsafe.Sanitize("→ "+harness+" "+strings.Join(args, " ")))
 }
 
 // Exec replaces the current process with claude. On success it never returns, so

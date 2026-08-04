@@ -111,9 +111,12 @@ type harness struct {
 	binDir  string
 	outFile string
 	env     []string
-	// base is the fake HOME/XDG_CONFIG_HOME root, set only by harnesses that
-	// need to reconstruct a config path later (e.g. newShadowHarness asserting
-	// the legacy path never leaks into `which` output).
+	// base is the fake HOME/XDG_CONFIG_HOME root. EVERY constructor sets it:
+	// childConfigPath("") returns a RELATIVE path, so a test reconstructing a
+	// config path from a zero-value base writes into the checkout while the
+	// child process reads a different XDG root — a mismatch that reads as a
+	// config-loading bug. Leaving the zero value unreachable is cheaper than
+	// documenting which harnesses may be asked for it.
 	base string
 }
 
@@ -186,6 +189,7 @@ func newTelemetryHarness(t *testing.T) *harness {
 		cwd:     cwd,
 		binDir:  binDir,
 		outFile: outFile,
+		base:    base,
 		env: []string{
 			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"HOME=" + base,
@@ -734,6 +738,7 @@ func newBareHarness(t *testing.T, configBody string) *harness {
 		cwd:     cwd,
 		binDir:  binDir,
 		outFile: outFile,
+		base:    base,
 		env: []string{
 			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"HOME=" + base,
