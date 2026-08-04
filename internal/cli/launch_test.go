@@ -146,6 +146,7 @@ func newHarness(t *testing.T) *harness {
 		cwd:     cwd,
 		binDir:  binDir,
 		outFile: outFile,
+		base:    base,
 		env: []string{
 			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"HOME=" + base,
@@ -1002,4 +1003,37 @@ func TestIntegration_BareLaunch_NoPromptAndBanners(t *testing.T) {
 	if strings.Contains(stdout, "claude ") {
 		t.Errorf("banner leaked into stdout: %q", stdout)
 	}
+}
+
+// hostileConfigTemplate is nativeConfigTemplate with a model carrying a live
+// SGR escape, a DEL, and a single-byte C1 CSI. Profile.Validate allowlists
+// effort and the Codex fields; model is not among them, so this reaches the
+// banner verbatim.
+const hostileConfigTemplate = `[launch.defaults]
+model = "opus"
+permission_mode = "plan"
+allow_danger = true
+
+[[launch.project]]
+match = "%s"
+model = "son\u001B[31mnet\u007F\u009BA"
+`
+
+// TestIntegration_BareLaunch_SanitizesBannerFromConfig is the end-to-end half
+// of #243: config.toml is the untrusted input, `forgectl launch` is the whole
+// pipe, and stderr is the terminal. The unit tests in internal/launch prove
+// Banner sanitizes; this proves nothing downstream of it un-sanitizes.
+func TestIntegration_BareLaunch_SanitizesBannerFromConfig(t *testing.T) {
+	h := newHarness(t)
+	cfgPath := childConfigPath(h.base)
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf(hostileConfigTemplate, h.cwd)), 0o644); err != nil {
+		t.Fatalf("write hostile config.toml: %v", err)
+	}
+
+	_, stderr := h.run(t)
+
+	if !strings.Contains(stderr, "son") || !strings.Contains(stderr, "net") {
+		t.Fatalf("banner did not render the configured model at all: %q", stderr)
+	}
+	assertInert(t, stderr)
 }

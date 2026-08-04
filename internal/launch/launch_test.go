@@ -1,8 +1,11 @@
 package launch
 
 import (
+	"bytes"
 	"reflect"
+	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 )
@@ -326,4 +329,57 @@ func containsSeq(haystack, seq []string) bool {
 		}
 	}
 	return false
+}
+
+// hostileArgs is an argv whose config-derived values carry the three classes of
+// control byte a terminal acts on: a C0 escape sequence (SGR color), DEL, and
+// the single-byte C1 CSI that encoding-aware layers routinely miss.
+func hostileArgs() []string {
+	return []string{"--model", "sonnet\x1b[31m", "--permission-mode", "plan\x7f", "--add-dir", "/work\x9bA"}
+}
+
+// assertBannerInert asserts no control rune except tab survived into a rendered
+// banner — the newline Fprintln adds is excepted for the same reason.
+func assertBannerInert(t *testing.T, s string) {
+	t.Helper()
+	for _, r := range s {
+		if r == '\n' || r == '\t' {
+			continue
+		}
+		if unicode.IsControl(r) {
+			t.Errorf("banner carries control rune %U: %q", r, s)
+			return
+		}
+	}
+}
+
+// TestBanner_SanitizesControlBytes pins the fix for #243: the banner renders
+// config-derived argv, and an escape sequence in config.toml must not reach the
+// terminal live. The visible text still has to survive — a sanitizer that ate
+// the posture would defeat the banner's only purpose.
+func TestBanner_SanitizesControlBytes(t *testing.T) {
+	var buf bytes.Buffer
+	Banner(&buf, hostileArgs())
+	got := buf.String()
+	assertBannerInert(t, got)
+	for _, want := range []string{"→ claude", "--model", "sonnet", "plan", "/work"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("banner dropped visible text %q: %q", want, got)
+		}
+	}
+}
+
+// TestHarnessBanner_SanitizesControlBytes is the Codex-side half: the harness
+// name is joined into the same line, so the whole assembled string is what gets
+// sanitized, not just the argv.
+func TestHarnessBanner_SanitizesControlBytes(t *testing.T) {
+	var buf bytes.Buffer
+	HarnessBanner(&buf, "codex\x1b[2K", hostileArgs())
+	got := buf.String()
+	assertBannerInert(t, got)
+	for _, want := range []string{"→ codex", "--model", "sonnet", "/work"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("harness banner dropped visible text %q: %q", want, got)
+		}
+	}
 }
