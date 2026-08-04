@@ -154,6 +154,22 @@ func agentDisplayLabel(agent string) string {
 	return agent
 }
 
+// windowStatus renders one session's review-window liveness for `pr list`.
+// It FAILS SOFT by construction: when tmux could not be read at all (tmuxOK
+// false) every row reports "?" and the command still succeeds, because an
+// unreadable tmux says nothing about any individual window — rendering those
+// rows as "window gone" would flag every healthy review as dead the moment
+// tmux hiccups.
+func windowStatus(live map[pr.Ref]bool, ref pr.Ref, tmuxOK bool) string {
+	if !tmuxOK {
+		return "?"
+	}
+	if live[ref] {
+		return "live"
+	}
+	return "window gone"
+}
+
 func newPrListCmd(client *pr.Client) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
@@ -169,8 +185,24 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 				fmt.Fprintln(out, "no active review sessions")
 				return nil
 			}
+			// A breadcrumb only proves a review was DISPATCHED, never that it
+			// survived: tmux new-window exits 0 before the agent runs, and a
+			// window whose agent dies is destroyed outright. Cross-check each
+			// session against the live window list so a dead review stops
+			// reading as "still thinking".
+			refs := make([]pr.Ref, 0, len(sessions))
 			for _, s := range sessions {
-				fmt.Fprintf(out, "%s\t%s\t%s\n", s.Ref.String(), s.CreatedAt.Format(time.RFC3339), s.Path)
+				refs = append(refs, s.Ref)
+			}
+			live, tmuxOK := client.WindowsLive(cmd.Context(), refs)
+			for _, s := range sessions {
+				// Status is APPENDED, never inserted. The breadcrumb path is
+				// field 3 and README documents it as what `pr teardown` is fed,
+				// so a script cutting field 3 keeps working; shifting it would
+				// hand those callers a timestamp.
+				fmt.Fprintf(out, "%s\t%s\t%s\t%s\n",
+					s.Ref.String(), s.CreatedAt.Format(time.RFC3339), s.Path,
+					windowStatus(live, s.Ref, tmuxOK))
 			}
 			return nil
 		},
