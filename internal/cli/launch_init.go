@@ -169,22 +169,24 @@ func refuseIfLaunchSection(path string) error {
 
 // appendLaunchSection appends content to the config.toml at path, creating
 // the parent directory and the file if absent. Both `launch init` and its
-// `--from-claunch` importer append a TOML block this way, preserving any
-// sections already in the file.
+// `--from-claunch` importer (including the automatic fallback-scenario
+// migration, via writeImportedLaunchSection) append a TOML block this way,
+// preserving any sections already in the file.
+//
+// The write is atomic (writeConfigAtomic: read the existing bytes, then
+// write the concatenation to a temp file and rename it over path) rather
+// than an in-place O_APPEND — a process killed mid-write can never leave
+// config.toml truncated or empty with no recovery copy.
 func appendLaunchSection(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("open config: %w", err)
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read config %s: %w", path, err)
 	}
-	if _, err := f.WriteString(content); err != nil {
-		_ = f.Close() // the write error is the real failure; Close's is secondary
+	if err := writeConfigAtomic(path, append(existing, []byte(content)...)); err != nil {
 		return fmt.Errorf("write config: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close config: %w", err)
 	}
 	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -897,6 +898,75 @@ func TestIntegration_LaunchFallback_AutoMigrates(t *testing.T) {
 	if strings.Contains(stderr2, "migrated") {
 		t.Errorf("second run re-ran the migration: stderr = %q", stderr2)
 	}
+}
+
+// TestIntegration_LaunchFallback_ConcurrentAutoMigrate_NoDuplicateSection is
+// the regression test for the concurrency race code review caught: two
+// concurrent `forgectl launch` invocations can both observe
+// cfg.Launch.IsZero() == true at process start (that check runs once,
+// before either process's autoMigrateFallback re-checks anything) and both
+// attempt the fallback-scenario migration — each appending a full [launch]
+// section, since writeImportedLaunchSection's underlying appendLaunchSection
+// is a pure append with no re-check. The resulting duplicate TOML header
+// makes config.toml fail to decode for every subsequent invocation of any
+// subcommand (BurntSushi's decoder rejects a redefined table outright), with
+// only a stderr WARN as evidence and no self-repair — the legacy file is
+// already renamed to .bak by the winner, so migration never runs again.
+// Reproduced live: 8 concurrent `forgectl launch which` runs against a
+// fresh HOME/XDG_CONFIG_HOME produced exactly this corruption before the
+// fix. The fix serializes the whole read-decide-write-backup critical
+// section behind config.WithFileLock and re-checks immediately before
+// writing, so every racer either performs the migration or cleanly observes
+// it already done — this asserts both halves of that: no racer errors, and
+// the result has exactly one [launch] section that still parses.
+func TestIntegration_LaunchFallback_ConcurrentAutoMigrate_NoDuplicateSection(t *testing.T) {
+	h := newLegacyHarness(t)
+
+	const n = 8
+	var wg sync.WaitGroup
+	wg.Add(n)
+	errs := make([]error, n)
+	stderrs := make([]string, n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			_, stderr, err := h.exec("which")
+			errs[i] = err
+			stderrs[i] = stderr
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d: forgectl launch which failed: %v\nstderr:\n%s", i, err, stderrs[i])
+		}
+	}
+
+	cfgPath := childConfigPath(h.base)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config.toml after concurrent auto-migration: %v", err)
+	}
+	body := string(data)
+	if got := strings.Count(body, "[launch.defaults]"); got != 1 {
+		t.Errorf("config.toml has %d [launch.defaults] headers after %d concurrent auto-migrations, want exactly 1 (duplicate-header corruption):\n%s", got, n, body)
+	}
+	if got := strings.Count(body, "[[launch.project]]"); got != 1 {
+		t.Errorf("config.toml has %d [[launch.project]] headers after %d concurrent auto-migrations, want exactly 1:\n%s", got, n, body)
+	}
+
+	// The corruption's signature symptom is that a duplicate header fails the
+	// WHOLE decode, not just [launch] — every section silently falls back to
+	// built-in defaults. Prove config.toml still parses (rather than just
+	// eyeballing the header counts above) by running `which` once more and
+	// checking the migrated profile still resolves correctly.
+	stdout, _ := h.run(t, "which")
+	if !strings.Contains(stdout, "sonnet") {
+		t.Errorf("which output missing %q after concurrent auto-migration (config.toml failed to parse); got:\n%s", "sonnet", stdout)
+	}
+
+	assertLegacyBackedUp(t, h.base)
 }
 
 // TestIntegration_Launch_SkipLegacyMigrateEnv covers the escape hatch:
