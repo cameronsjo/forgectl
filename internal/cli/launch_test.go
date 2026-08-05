@@ -323,6 +323,80 @@ model = "sonnet"
 	}
 }
 
+// shadowConfigWithProjectTemplate is shadowConfigTemplate plus a
+// [[launch.project]] entry matching the same path the legacy claunch.conf's
+// own [[project]] uses — the "both define the same project match" case: the
+// additive merge must skip the legacy entry rather than duplicate or
+// overwrite the one already in [launch].
+const shadowConfigWithProjectTemplate = `[launch.defaults]
+model = "opus"
+permission_mode = "plan"
+allow_danger = true
+
+[[launch.project]]
+match = "%s"
+model = "opus"
+`
+
+// newShadowHarnessWithProject is newShadowHarness, but config.toml already
+// carries a [[launch.project]] entry for the same match path the legacy
+// claunch.conf's own [[project]] declares (with a different model, so a bad
+// merge would be observable). Every [defaults] field the legacy file sets is
+// also already set in config.toml, so a correct merge contributes nothing
+// at all — the "fully superseded" case.
+func newShadowHarnessWithProject(t *testing.T) *harness {
+	t.Helper()
+
+	cwd, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve symlinks on temp cwd: %v", err)
+	}
+	binDir := t.TempDir()
+	outFile := filepath.Join(t.TempDir(), "claude.out")
+	base := t.TempDir()
+
+	writeStubClaude(t, binDir)
+
+	cfgPath := childConfigPath(base)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf(shadowConfigWithProjectTemplate, cwd)), 0o644); err != nil {
+		t.Fatalf("write config.toml: %v", err)
+	}
+
+	legacyPath := legacyConfigPath(base)
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatalf("mkdir legacy config dir: %v", err)
+	}
+	legacyBody := fmt.Sprintf(`[defaults]
+model = "opus"
+permission_mode = "plan"
+allow_danger = true
+
+[[project]]
+match = "%s"
+model = "sonnet"
+`, cwd)
+	if err := os.WriteFile(legacyPath, []byte(legacyBody), 0o644); err != nil {
+		t.Fatalf("write legacy claunch.conf: %v", err)
+	}
+
+	return &harness{
+		bin:     builtBinPath,
+		cwd:     cwd,
+		binDir:  binDir,
+		outFile: outFile,
+		base:    base,
+		env: []string{
+			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"HOME=" + base,
+			"XDG_CONFIG_HOME=" + base,
+			"FORGECTL_TEST_OUT=" + outFile,
+		},
+	}
+}
+
 func writeStubClaude(t *testing.T, binDir string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(stubClaude), 0o755); err != nil {
@@ -353,6 +427,23 @@ func (h *harness) runExpectErr(t *testing.T, extraEnv []string, args ...string) 
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stderr.String(), err
+}
+
+// runWithEnv is run but with extraEnv appended to the child's environment —
+// for exercising an env-var toggle (e.g. FORGECTL_SKIP_LEGACY_MIGRATE) on the
+// success path, where runExpectErr's error-path contract doesn't fit.
+func (h *harness) runWithEnv(t *testing.T, extraEnv []string, args ...string) (string, string) {
+	t.Helper()
+	cmd := exec.Command(h.bin, append([]string{"launch"}, args...)...)
+	cmd.Dir = h.cwd
+	cmd.Env = append(append([]string{}, h.env...), extraEnv...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("forgectl launch %v (env=%v): %v\nstderr:\n%s", args, extraEnv, err, stderr.String())
+	}
+	return stdout.String(), stderr.String()
 }
 
 func (h *harness) exec(args ...string) (string, string, error) {
@@ -627,58 +718,259 @@ func TestIntegration_LegacyFallback(t *testing.T) {
 	}
 }
 
-// TestIntegration_LaunchShadow_WhichWarns covers #114: a legacy claunch.conf
-// present alongside a config.toml [launch] section is silently shadowed
-// (config.toml wins wholesale, its [[project]] profiles ignored, no
-// diagnostic). `which` should warn on stderr while keeping stdout parseable
-// and free of the now-irrelevant legacy path.
-func TestIntegration_LaunchShadow_WhichWarns(t *testing.T) {
+// legacyBakPath returns the backup path an automatic migration renames a
+// legacy claunch.conf to.
+func legacyBakPath(base string) string {
+	return legacyConfigPath(base) + ".bak"
+}
+
+// assertLegacyBackedUp asserts the legacy claunch.conf at legacyConfigPath(base)
+// was renamed to its .bak sibling (never hard-deleted) by an automatic
+// migration.
+func assertLegacyBackedUp(t *testing.T, base string) {
+	t.Helper()
+	legacyPath := legacyConfigPath(base)
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Errorf("legacy claunch.conf still present at %s after auto-migration (want it renamed away); stat err = %v", legacyPath, err)
+	}
+	if _, err := os.Stat(legacyBakPath(base)); err != nil {
+		t.Errorf("expected backup file %s, stat error: %v", legacyBakPath(base), err)
+	}
+}
+
+// TestIntegration_LaunchShadow_WhichAutoMigrates covers #114's fix: a legacy
+// claunch.conf present alongside a config.toml [launch] section used to be
+// silently shadowed (config.toml wins wholesale, its [[project]] profiles
+// ignored, no diagnostic). Now `which` additively merges the legacy file's
+// previously-orphaned [[project]] entry into [launch] automatically — no
+// conflict here, since config.toml's [launch] carries defaults only — backs
+// the legacy file up, and reports a one-line merge notice instead of the old
+// recurring "present but ignored" warning.
+func TestIntegration_LaunchShadow_WhichAutoMigrates(t *testing.T) {
 	h := newShadowHarness(t)
 	stdout, stderr := h.run(t, "which")
 
-	if !strings.Contains(stderr, "present but ignored") {
-		t.Errorf("stderr = %q, want it to contain %q", stderr, "present but ignored")
+	if strings.Contains(stderr, "present but ignored") {
+		t.Errorf("stderr = %q, still shows the old recurring warning instead of auto-migrating", stderr)
 	}
-	if !strings.Contains(stdout, "matched") || !strings.Contains(stdout, "(defaults only)") {
-		t.Errorf("which stdout missing %q / %q; got:\n%s", "matched", "(defaults only)", stdout)
+	if !strings.Contains(stderr, "merged 1 addition(s)") || !strings.Contains(stderr, "claunch.conf.bak") {
+		t.Errorf("stderr = %q, want the shadow-merge notice", stderr)
 	}
-	legacyPath := legacyConfigPath(h.base)
-	if strings.Contains(stdout, legacyPath) {
-		t.Errorf("which stdout unexpectedly contains the shadowed legacy path %q; got:\n%s", legacyPath, stdout)
+	// The legacy [[project]] entry is no longer shadowed — it now matches cwd.
+	for _, want := range []string{"sonnet", h.cwd} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("which stdout missing %q after auto-merge; got:\n%s", want, stdout)
+		}
 	}
+	if strings.Contains(stdout, "(defaults only)") {
+		t.Errorf("which stdout still says %q; the merged project should now match cwd; got:\n%s", "(defaults only)", stdout)
+	}
+
+	assertLegacyBackedUp(t, h.base)
 }
 
-// TestIntegration_LaunchShadow_DoctorWarns covers #114 for `doctor`: the
-// shadow is a warning, not a failure — doctor must still exit 0.
-func TestIntegration_LaunchShadow_DoctorWarns(t *testing.T) {
+// TestIntegration_LaunchShadow_DoctorAutoMigrates covers #114 for `doctor`:
+// the auto-merge is a routine action, not a failure — doctor must still exit
+// 0 and report the merge notice in place of the old warning.
+func TestIntegration_LaunchShadow_DoctorAutoMigrates(t *testing.T) {
 	h := newShadowHarness(t)
 	stdout, _ := h.run(t, "doctor")
 
-	if !strings.Contains(stdout, "present but ignored") {
-		t.Errorf("doctor stdout missing %q; got:\n%s", "present but ignored", stdout)
+	if strings.Contains(stdout, "present but ignored") {
+		t.Errorf("doctor stdout still shows the old recurring warning: %q", stdout)
+	}
+	if !strings.Contains(stdout, "merged 1 addition(s)") {
+		t.Errorf("doctor stdout missing the shadow-merge notice; got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "1 project profile(s)") {
+		t.Errorf("doctor stdout should report the merged-in project profile; got:\n%s", stdout)
 	}
 }
 
-// TestIntegration_LaunchShadow_ExecWarns covers #114 for the bare exec path:
-// the warning fires on stderr and the config.toml profile (not the shadowed
-// legacy sonnet profile) is what actually reaches claude.
-func TestIntegration_LaunchShadow_ExecWarns(t *testing.T) {
+// TestIntegration_LaunchShadow_ExecAutoMigrates covers #114 for the bare exec
+// path: the merge notice fires on stderr, the legacy file is backed up, and
+// the previously-shadowed sonnet project — no longer orphaned once merged —
+// is what now actually reaches claude.
+func TestIntegration_LaunchShadow_ExecAutoMigrates(t *testing.T) {
 	h := newShadowHarness(t)
 	_, stderr := h.run(t, "-p", "hi")
 
-	if !strings.Contains(stderr, "present but ignored") {
-		t.Errorf("stderr = %q, want it to contain %q", stderr, "present but ignored")
+	if strings.Contains(stderr, "present but ignored") {
+		t.Errorf("stderr = %q, still shows the old recurring warning instead of auto-migrating", stderr)
+	}
+	if !strings.Contains(stderr, "merged 1 addition(s)") {
+		t.Errorf("stderr = %q, want the shadow-merge notice", stderr)
 	}
 	got := h.recordedArgs(t)
 	want := []string{
 		"--permission-mode", "plan",
 		"--allow-dangerously-skip-permissions",
-		"--model", "opus",
-		"--effort", "medium", // derived from opus — the shadowed sonnet would derive "high"
+		"--model", "sonnet",
+		"--effort", "high", // derived from sonnet — the merged-in project now applies
 		"-p", "hi",
 	}
 	if !equalArgs(got, want) {
-		t.Errorf("recorded args = %v, want %v (config.toml defaults, not the shadowed legacy sonnet profile)", got, want)
+		t.Errorf("recorded args = %v, want %v (the merged-in project profile, no longer shadowed)", got, want)
+	}
+	assertLegacyBackedUp(t, h.base)
+}
+
+// TestIntegration_LaunchShadow_DuplicateProjectMatch_NoOverwrite covers the
+// additive merge's core safety property: when the legacy file and [launch]
+// both define a [[project]] for the same match path, the merge must skip the
+// legacy entry rather than duplicate or overwrite the one already configured
+// — config.toml's own project (and its model) must survive untouched.
+func TestIntegration_LaunchShadow_DuplicateProjectMatch_NoOverwrite(t *testing.T) {
+	h := newShadowHarnessWithProject(t)
+	cfgPath := childConfigPath(h.base)
+	before, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config.toml before run: %v", err)
+	}
+
+	_, stderr := h.run(t, "-p", "hi")
+
+	if !strings.Contains(stderr, "legacy config fully superseded, removed.") {
+		t.Errorf("stderr = %q, want the fully-superseded notice (nothing new to merge)", stderr)
+	}
+
+	// Nothing was added, so config.toml is left byte-identical — no rewrite
+	// was needed to satisfy "never overwrite or duplicate".
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config.toml after run: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("config.toml changed even though the merge had nothing new to add;\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	if n := strings.Count(string(after), `match = "`+h.cwd+`"`); n != 1 {
+		t.Errorf("config.toml has %d project entries matching %q, want exactly 1 (no duplication)", n, h.cwd)
+	}
+
+	// config.toml's own project (model = "opus") must have won, not the
+	// legacy file's conflicting model = "sonnet" for the same match.
+	got := h.recordedArgs(t)
+	want := []string{
+		"--permission-mode", "plan",
+		"--allow-dangerously-skip-permissions",
+		"--model", "opus",
+		"--effort", "medium", // derived from opus, not the legacy sonnet entry
+		"-p", "hi",
+	}
+	if !equalArgs(got, want) {
+		t.Errorf("recorded args = %v, want %v (config.toml's own project must win)", got, want)
+	}
+
+	assertLegacyBackedUp(t, h.base)
+}
+
+// TestIntegration_LaunchFallback_AutoMigrates covers the fallback scenario
+// (#109 automated): a legacy claunch.conf and no [launch] section at all. The
+// first invocation imports it wholesale (the same logic `launch migrate`
+// runs on demand), backs the legacy file up, and reports a one-line notice;
+// a second invocation has nothing left to migrate and is a silent no-op.
+func TestIntegration_LaunchFallback_AutoMigrates(t *testing.T) {
+	h := newLegacyHarness(t)
+	stdout, stderr := h.run(t, "which")
+
+	if !strings.Contains(stderr, "migrated 1 profile(s)") || !strings.Contains(stderr, "claunch.conf.bak") {
+		t.Errorf("stderr = %q, want the fallback auto-migrate notice", stderr)
+	}
+	if !strings.Contains(stdout, "sonnet") {
+		t.Errorf("which stdout missing %q after auto-migration; got:\n%s", "sonnet", stdout)
+	}
+
+	cfgPath := childConfigPath(h.base)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config.toml after auto-migration: %v", err)
+	}
+	for _, want := range []string{"[launch.defaults]", "[[launch.project]]"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("config.toml missing %q after auto-migration; got:\n%s", want, data)
+		}
+	}
+	assertLegacyBackedUp(t, h.base)
+
+	// Second run: nothing left to migrate.
+	_, stderr2 := h.run(t, "which")
+	if strings.Contains(stderr2, "migrated") {
+		t.Errorf("second run re-ran the migration: stderr = %q", stderr2)
+	}
+}
+
+// TestIntegration_Launch_SkipLegacyMigrateEnv covers the escape hatch:
+// FORGECTL_SKIP_LEGACY_MIGRATE=1 disables auto-migration and restores the
+// original warn-only behavior byte-for-byte — no config.toml rewrite, no
+// backup, the same "present but ignored" notice as before this feature.
+func TestIntegration_Launch_SkipLegacyMigrateEnv(t *testing.T) {
+	h := newShadowHarness(t)
+	cfgPath := childConfigPath(h.base)
+	before, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config.toml before run: %v", err)
+	}
+
+	stdout, stderr := h.runWithEnv(t, []string{"FORGECTL_SKIP_LEGACY_MIGRATE=1"}, "which")
+
+	if !strings.Contains(stderr, "present but ignored") {
+		t.Errorf("stderr = %q, want the original warn-only notice preserved when %s=1", stderr, "FORGECTL_SKIP_LEGACY_MIGRATE")
+	}
+	if !strings.Contains(stdout, "(defaults only)") {
+		t.Errorf("which stdout missing %q (the legacy project must stay shadowed); got:\n%s", "(defaults only)", stdout)
+	}
+
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config.toml after run: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("config.toml changed even though FORGECTL_SKIP_LEGACY_MIGRATE=1 was set;\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+
+	legacyPath := legacyConfigPath(h.base)
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Errorf("legacy claunch.conf was touched even though FORGECTL_SKIP_LEGACY_MIGRATE=1 was set: %v", err)
+	}
+	if _, err := os.Stat(legacyBakPath(h.base)); !os.IsNotExist(err) {
+		t.Errorf("unexpected backup file created despite FORGECTL_SKIP_LEGACY_MIGRATE=1")
+	}
+}
+
+// TestIntegration_LaunchMigrate_SameLogicAsFromClaunchAlias covers the
+// promoted `forgectl launch migrate` subcommand: it must run the exact same
+// import logic as the deprecated `launch init --from-claunch` spelling
+// (writing an identical [launch] section, leaving the legacy file in place,
+// and refusing a second run the same way).
+func TestIntegration_LaunchMigrate_SameLogicAsFromClaunchAlias(t *testing.T) {
+	h := newLegacyHarness(t)
+	h.run(t, "migrate")
+
+	cfgPath := childConfigPath(h.base)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config.toml after migrate: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{`[launch.defaults]`, `model = "opus"`, `[[launch.project]]`, h.cwd} {
+		if !strings.Contains(body, want) {
+			t.Errorf("config.toml missing %q after `launch migrate`; got:\n%s", want, body)
+		}
+	}
+
+	// The explicit importer leaves the legacy file in place, same contract as
+	// `--from-claunch` — only the automatic migration paths back it up.
+	legacyPath := legacyConfigPath(h.base)
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Errorf("`launch migrate` unexpectedly touched the legacy file: %v", err)
+	}
+
+	stderr, err := h.runExpectErr(t, nil, "migrate")
+	if err == nil {
+		t.Fatal("second `launch migrate` succeeded, want a refusal error (already has a [launch] section)")
+	}
+	if !strings.Contains(stderr, "already has a [launch] section") {
+		t.Errorf("stderr = %q, want it to contain %q", stderr, "already has a [launch] section")
 	}
 }
 

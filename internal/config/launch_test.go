@@ -89,3 +89,87 @@ func TestLaunchConfig_EffortOnlyDefaultsIsNotZero(t *testing.T) {
 		t.Error("a genuinely empty LaunchConfig must still report as zero")
 	}
 }
+
+// TestMergeLegacyIntoLaunch covers the additive-only merge behind the
+// shadow-scenario auto-migration (#114): a config.toml field that's already
+// set must never be touched, a zero field is backfilled from legacy, and a
+// legacy [[project]] is appended only when its match path isn't already
+// present.
+func TestMergeLegacyIntoLaunch(t *testing.T) {
+	t.Run("backfills only zero-valued defaults fields", func(t *testing.T) {
+		trueVal := true
+		cfg := Config{Launch: LaunchConfig{Defaults: LaunchDefaults{
+			Model:       "opus", // already set — must not be overwritten
+			AllowDanger: &trueVal,
+		}}}
+		legacy := LaunchConfig{Defaults: LaunchDefaults{
+			Model:          "sonnet", // conflicts with cfg's — must be ignored
+			PermissionMode: "plan",   // absent in cfg — must be pulled in
+			Effort:         "high",   // absent in cfg — must be pulled in
+		}}
+
+		merged, added := MergeLegacyIntoLaunch(cfg, legacy)
+
+		if merged.Defaults.Model != "opus" {
+			t.Errorf("Model = %q, want the config.toml value preserved (%q)", merged.Defaults.Model, "opus")
+		}
+		if merged.Defaults.AllowDanger == nil || *merged.Defaults.AllowDanger != true {
+			t.Errorf("AllowDanger = %v, want the config.toml pointer preserved", merged.Defaults.AllowDanger)
+		}
+		if merged.Defaults.PermissionMode != "plan" {
+			t.Errorf("PermissionMode = %q, want backfilled %q", merged.Defaults.PermissionMode, "plan")
+		}
+		if merged.Defaults.Effort != "high" {
+			t.Errorf("Effort = %q, want backfilled %q", merged.Defaults.Effort, "high")
+		}
+		if added != 2 {
+			t.Errorf("added = %d, want 2 (PermissionMode + Effort)", added)
+		}
+	})
+
+	t.Run("appends only unseen project match paths", func(t *testing.T) {
+		cfg := Config{Launch: LaunchConfig{Projects: []LaunchProject{
+			{Match: "~/Projects/minute", Model: "opus"}, // must survive untouched
+		}}}
+		legacy := LaunchConfig{Projects: []LaunchProject{
+			{Match: "~/Projects/minute", Model: "sonnet"}, // same match — must be skipped
+			{Match: "~/Projects/hearth", Model: "haiku"},  // new match — must be appended
+		}}
+
+		merged, added := MergeLegacyIntoLaunch(cfg, legacy)
+
+		if len(merged.Projects) != 2 {
+			t.Fatalf("len(Projects) = %d, want 2 (no duplicate for the shared match)", len(merged.Projects))
+		}
+		if merged.Projects[0].Model != "opus" {
+			t.Errorf("Projects[0].Model = %q, want the config.toml value preserved (%q)", merged.Projects[0].Model, "opus")
+		}
+		if merged.Projects[1].Match != "~/Projects/hearth" || merged.Projects[1].Model != "haiku" {
+			t.Errorf("Projects[1] = %+v, want the new legacy entry appended", merged.Projects[1])
+		}
+		if added != 1 {
+			t.Errorf("added = %d, want 1 (only the unseen match)", added)
+		}
+	})
+
+	t.Run("fully superseded legacy contributes nothing", func(t *testing.T) {
+		trueVal := true
+		cfg := Config{Launch: LaunchConfig{
+			Defaults: LaunchDefaults{Model: "opus", PermissionMode: "plan", AllowDanger: &trueVal},
+			Projects: []LaunchProject{{Match: "~/Projects/minute", Model: "opus"}},
+		}}
+		legacy := LaunchConfig{
+			Defaults: LaunchDefaults{Model: "sonnet", PermissionMode: "plan"},
+			Projects: []LaunchProject{{Match: "~/Projects/minute", Model: "sonnet"}},
+		}
+
+		merged, added := MergeLegacyIntoLaunch(cfg, legacy)
+
+		if added != 0 {
+			t.Errorf("added = %d, want 0 (every legacy field/project already present)", added)
+		}
+		if merged.Defaults.Model != "opus" || len(merged.Projects) != 1 || merged.Projects[0].Model != "opus" {
+			t.Errorf("merged = %+v, want config.toml's values entirely unchanged", merged)
+		}
+	})
+}

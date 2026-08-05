@@ -902,6 +902,65 @@ func ValidateLegacyLaunch() error {
 	return nil
 }
 
+// MergeLegacyIntoLaunch performs the additive-only merge behind the
+// shadow-scenario auto-migration (#114): legacy claunch.conf fields are
+// folded into cfg.Launch only where the corresponding config.toml field is
+// still zero-valued, and legacy [[project]] entries are appended only for
+// match paths not already present in [[launch.project]]. It never overwrites
+// or duplicates anything already set in [launch] — added counts how many
+// defaults fields and project entries actually came from legacy, so a caller
+// can tell "nothing new" (0, the legacy file is fully superseded) from a real
+// merge.
+func MergeLegacyIntoLaunch(cfg Config, legacy LaunchConfig) (merged LaunchConfig, added int) {
+	merged = cfg.Launch
+	d := &merged.Defaults
+	l := legacy.Defaults
+
+	fillString := func(dst *string, src string) {
+		if *dst == "" && src != "" {
+			*dst = src
+			added++
+		}
+	}
+	fillString(&d.Harness, l.Harness)
+	fillString(&d.Model, l.Model)
+	fillString(&d.Effort, l.Effort)
+	fillString(&d.PermissionMode, l.PermissionMode)
+	fillString(&d.ApprovalPolicy, l.ApprovalPolicy)
+	fillString(&d.Sandbox, l.Sandbox)
+	fillString(&d.BinaryPath, l.BinaryPath)
+	fillString(&d.CodexBinaryPath, l.CodexBinaryPath)
+
+	if d.AllowDanger == nil && l.AllowDanger != nil {
+		v := *l.AllowDanger
+		d.AllowDanger = &v
+		added++
+	}
+	if len(d.Env) == 0 && len(l.Env) > 0 {
+		d.Env = l.Env
+		added++
+	}
+	if len(d.AddDir) == 0 && len(l.AddDir) > 0 {
+		d.AddDir = l.AddDir
+		added++
+	}
+
+	existing := make(map[string]bool, len(merged.Projects))
+	for _, p := range merged.Projects {
+		existing[p.Match] = true
+	}
+	for _, p := range legacy.Projects {
+		if existing[p.Match] {
+			continue
+		}
+		merged.Projects = append(merged.Projects, p)
+		existing[p.Match] = true
+		added++
+	}
+
+	return merged, added
+}
+
 // nopCloser is an io.Closer that does nothing — stdlib io.NopCloser wraps
 // io.Reader, not a generic Closer, so we keep this small private type.
 type nopCloser struct{}
