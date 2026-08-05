@@ -146,7 +146,12 @@ jobs:
         id: tap-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ vars.RELEASE_APP_ID }}
+          # client-id, not the deprecated app-id. The action resolves
+          # `getInput("client-id") || getInput("app-id")` into a single value it
+          # passes as createAppAuth's appId, so the numeric App ID in
+          # RELEASE_APP_ID stays valid under the new key — this is a rename, not
+          # a credential change.
+          client-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           repositories: homebrew-tap
 
