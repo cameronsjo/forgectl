@@ -24,13 +24,28 @@ jobs:
     name: Maintain release PR
     runs-on: ubuntu-latest
     steps:
-      # GITHUB_TOKEN is sufficient here, unlike in auto-tag.yml. This job only
-      # opens/updates a pull request, and merging that PR is a human action
-      # whose push to main triggers downstream workflows normally. The
-      # GITHUB_TOKEN "does not trigger workflows" limitation bites on the TAG
-      # push, which is why auto-tag.yml mints an App token instead.
+      # An App token, not GITHUB_TOKEN. This is NOT about token scope — the
+      # job already declares `pull-requests: write`. It is the repository
+      # policy "Allow GitHub Actions to create and approve pull requests"
+      # (`can_approve_pull_request_reviews`), which is off here and blocks the
+      # GITHUB_TOKEN actor from opening a PR at all:
+      #
+      #   release-please failed: GitHub Actions is not permitted to create or
+      #   approve pull requests.
+      #
+      # An App token is a different actor and is not subject to that policy.
+      # Enabling the policy instead would let *every* workflow in this repo
+      # create and approve pull requests, including self-approval — a much
+      # wider grant than this one job needs.
+      - name: Generate Forge Bellows token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
       - uses: googleapis/release-please-action@v5
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
