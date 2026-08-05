@@ -1,0 +1,36 @@
+name: Release Please
+
+# Keeps a release PR open against main, tracking every Conventional Commit
+# since the last tag. Merging that PR bumps .release-please-manifest.json and
+# stamps CHANGELOG.md — it does NOT tag. Tagging is auto-tag.yml's job (see
+# `skip-github-release` in release-please-config.json), and the tag is what
+# fires release.yml. Splitting it this way leaves the GoReleaser pipeline
+# completely untouched: it still owns the GitHub Release and the cask.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Serialize. Two runs racing would fight over the same release PR branch.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Maintain release PR
+    runs-on: ubuntu-latest
+    steps:
+      # GITHUB_TOKEN is sufficient here, unlike in auto-tag.yml. This job only
+      # opens/updates a pull request, and merging that PR is a human action
+      # whose push to main triggers downstream workflows normally. The
+      # GITHUB_TOKEN "does not trigger workflows" limitation bites on the TAG
+      # push, which is why auto-tag.yml mints an App token instead.
+      - uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
