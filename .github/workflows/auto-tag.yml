@@ -1,0 +1,77 @@
+name: Auto Tag
+
+# Tags whatever version release-please last wrote into the manifest. This is
+# the "existing infrastructure to tag these releases" that
+# `skip-github-release: true` in release-please-config.json hands off to.
+#
+# Watching the manifest (rather than tagging from release-please directly)
+# keeps release.yml and .goreleaser.yaml untouched: GoReleaser still creates
+# the GitHub Release and pushes the Homebrew cask exactly as it does for a
+# hand-pushed tag. Mirrors the same workflow in cameronsjo/cadence-hooks.
+on:
+  push:
+    branches: [main]
+    paths: [.release-please-manifest.json]
+
+permissions:
+  contents: write
+
+# Serialize. Each run produces a distinct tag, so a second run must land
+# rather than be cancelled by the first.
+concurrency:
+  group: auto-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag version bump
+    runs-on: ubuntu-latest
+    steps:
+      # An App token, not GITHUB_TOKEN: a tag pushed with GITHUB_TOKEN does
+      # NOT trigger `on: push: tags`, so release.yml would never fire and the
+      # release would silently never happen.
+      #
+      # SHA-pinned, unlike the older `@v3` references elsewhere in this repo.
+      # This action mints a live write-scoped installation token from a private
+      # key, so a silent upstream retag of `v3` is worth not trusting. Note
+      # actionlint's bundled metadata for this action is stale and will claim
+      # `client-id` is undefined — it is defined at this ref; check action.yml
+      # before "fixing" it back to the deprecated `app-id`.
+      - name: Generate Forge Bellows token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Extract version and check for existing tag
+        id: check
+        run: |
+          set -euo pipefail
+          VERSION="$(jq -r '.["."]' .release-please-manifest.json)"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "::error::could not read version from .release-please-manifest.json"
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$TAG already exists — nothing to tag."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        if: steps.check.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.check.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git tag "$TAG"
+          git push origin "$TAG"
