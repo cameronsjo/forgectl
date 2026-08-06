@@ -53,6 +53,8 @@ func pullGlyph(s projects.PullStatus) string {
 		return "↓"
 	case projects.PullSkippedDirty:
 		return "⚠"
+	case projects.PullSkippedUnknown:
+		return "?"
 	case projects.PullFailed:
 		return "✗"
 	default:
