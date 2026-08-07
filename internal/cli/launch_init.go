@@ -60,7 +60,7 @@ func newLaunchInitCmd() *cobra.Command {
 			// GetBool only errors on an undefined or non-bool flag; from-claunch
 			// is registered as Bool below, so the error is unreachable here.
 			if fromClaunch, _ := cmd.Flags().GetBool("from-claunch"); fromClaunch {
-				return runClaunchImport(cmd)
+				return runLaunchMigrate(cmd)
 			}
 			path, err := config.ConfigPath()
 			if err != nil {
@@ -76,15 +76,32 @@ func newLaunchInitCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().Bool("from-claunch", false, "import an existing ~/.config/claunch/claunch.conf into config.toml")
+	cmd.Flags().Bool("from-claunch", false, "deprecated: use `forgectl launch migrate`; import an existing ~/.config/claunch/claunch.conf into config.toml")
 	return cmd
 }
 
-// runClaunchImport migrates an existing legacy ~/.config/claunch/claunch.conf
+// newLaunchMigrateCmd builds `forgectl launch migrate` — the discoverable
+// spelling of the one-shot claunch.conf importer. `launch init --from-claunch`
+// remains a deprecated alias for the same runLaunchMigrate logic so existing
+// docs/muscle memory don't break.
+func newLaunchMigrateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "migrate",
+		Short: "Import an existing ~/.config/claunch/claunch.conf into config.toml's [launch] section",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runLaunchMigrate(cmd)
+		},
+	}
+}
+
+// runLaunchMigrate migrates an existing legacy ~/.config/claunch/claunch.conf
 // into config.toml's [launch] section, so `forgectl launch` stops falling
 // back to the legacy file. It refuses to run when config.toml already has a
-// [launch] section — import once, then edit config.toml directly.
-func runClaunchImport(cmd *cobra.Command) error {
+// [launch] section — import once, then edit config.toml directly. Shared by
+// `forgectl launch migrate` and the deprecated `launch init --from-claunch`
+// spelling.
+func runLaunchMigrate(cmd *cobra.Command) error {
 	slog.Debug("Preparing to import legacy claunch.conf into config.toml.")
 
 	path, err := config.ConfigPath()
@@ -107,21 +124,29 @@ func runClaunchImport(cmd *cobra.Command) error {
 	}
 	slog.Debug("Loaded legacy claunch.conf.", "path", legacyPath, "project_count", len(lc.Projects))
 
-	var buf bytes.Buffer
-	if err := toml.NewEncoder(&buf).Encode(struct {
-		Launch config.LaunchConfig `toml:"launch"`
-	}{Launch: lc}); err != nil {
-		return fmt.Errorf("encode imported launch config: %w", err)
-	}
-	header := fmt.Sprintf("\n# ── launch: imported from %s (forgectl launch init --from-claunch) ──\n", legacyPath)
-
-	if err := appendLaunchSection(path, header+buf.String()); err != nil {
+	if err := writeImportedLaunchSection(path, lc, legacyPath); err != nil {
 		return err
 	}
 
 	slog.Info("Successfully imported legacy claunch.conf.", "legacy_path", legacyPath, "config_path", path, "project_count", len(lc.Projects))
 	fmt.Fprintf(cmd.OutOrStdout(), "Imported %d launch profile(s) from %s into %s\n", len(lc.Projects), legacyPath, path)
 	return nil
+}
+
+// writeImportedLaunchSection encodes lc as a [launch] TOML block, headed by a
+// comment naming its legacy source, and appends it to config.toml at path.
+// Shared by runLaunchMigrate (the explicit importer) and the automatic
+// fallback-scenario migration (launch.go's autoMigrateFallback), which both
+// import a legacy claunch.conf wholesale into an absent [launch] section.
+func writeImportedLaunchSection(path string, lc config.LaunchConfig, legacyPath string) error {
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(struct {
+		Launch config.LaunchConfig `toml:"launch"`
+	}{Launch: lc}); err != nil {
+		return fmt.Errorf("encode imported launch config: %w", err)
+	}
+	header := fmt.Sprintf("\n# ── launch: imported from %s (forgectl launch migrate) ──\n", legacyPath)
+	return appendLaunchSection(path, header+buf.String())
 }
 
 // refuseIfLaunchSection errors when config.toml at path already has a
@@ -144,22 +169,24 @@ func refuseIfLaunchSection(path string) error {
 
 // appendLaunchSection appends content to the config.toml at path, creating
 // the parent directory and the file if absent. Both `launch init` and its
-// `--from-claunch` importer append a TOML block this way, preserving any
-// sections already in the file.
+// `--from-claunch` importer (including the automatic fallback-scenario
+// migration, via writeImportedLaunchSection) append a TOML block this way,
+// preserving any sections already in the file.
+//
+// The write is atomic (writeConfigAtomic: read the existing bytes, then
+// write the concatenation to a temp file and rename it over path) rather
+// than an in-place O_APPEND — a process killed mid-write can never leave
+// config.toml truncated or empty with no recovery copy.
 func appendLaunchSection(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("open config: %w", err)
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read config %s: %w", path, err)
 	}
-	if _, err := f.WriteString(content); err != nil {
-		_ = f.Close() // the write error is the real failure; Close's is secondary
+	if err := writeConfigAtomic(path, append(existing, []byte(content)...)); err != nil {
 		return fmt.Errorf("write config: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close config: %w", err)
 	}
 	return nil
 }

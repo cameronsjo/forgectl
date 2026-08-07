@@ -26,6 +26,9 @@ func newLaunchDoctorCmd(cfg config.Config) *cobra.Command {
 			out := cmd.OutOrStdout()
 			healthy := true
 
+			effLaunch, notice := autoMigrateOrWarnLegacyLaunch(cfg)
+			cfg.Launch = effLaunch
+
 			lc, src := resolveLaunchConfig(cfg)
 
 			profile := launch.DefaultsProfile(lc)
@@ -76,8 +79,8 @@ func newLaunchDoctorCmd(cfg config.Config) *cobra.Command {
 				}
 			default:
 				fmt.Fprintf(out, "%s launch config: %s (%d project profile(s))\n", launchOKMark, src, len(lc.Projects))
-				if w := legacyShadowWarning(cfg); w != "" {
-					fmt.Fprintf(out, "%s %s\n", launchWarnMark, w)
+				if notice != "" {
+					fmt.Fprintf(out, "%s %s\n", launchWarnMark, notice)
 				}
 			}
 

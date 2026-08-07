@@ -11,7 +11,7 @@ import (
 // legacy claunch.conf body directly, so tests can exercise a malformed or
 // empty legacy file (newLegacyHarness itself always writes a valid, non-zero
 // config). config.toml has no [launch] section, matching newLegacyHarness's
-// posture, so `launch init --from-claunch` reaches runClaunchImport's legacy
+// posture, so `launch init --from-claunch` reaches runLaunchMigrate's legacy
 // decode branch rather than short-circuiting on the "already has [launch]"
 // refusal.
 func newLegacyHarnessWithBody(t *testing.T, legacyBody string) *harness {
