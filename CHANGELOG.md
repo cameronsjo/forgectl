@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/cameronsjo/forgectl/compare/v0.11.0...v0.12.0) (2026-08-07)
+
+
+### Features
+
+* **launch:** auto-migrate claunch.conf instead of warning about it ([#258](https://github.com/cameronsjo/forgectl/issues/258)) ([ce957f7](https://github.com/cameronsjo/forgectl/commit/ce957f7d33fd7f37d74deb7cd3d029d10bb21a16))
+
 ## [0.11.0](https://github.com/cameronsjo/forgectl/compare/v0.10.0...v0.11.0) (2026-08-05)
 
 
