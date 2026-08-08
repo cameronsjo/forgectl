@@ -175,6 +175,46 @@ func TestPullAll_MissingDir_PropagatesDiscoverError(t *testing.T) {
 	}
 }
 
+// TestPullAll_SkipsUnknownStatus guards forgectl#217: a repo whose `git
+// status --porcelain` invocation itself errors gets StatusUnknown from
+// gitStatus (project.go), not a zero-value clean GitStatus — PullAll must
+// skip it rather than pulling into a tree whose state was never read. Uses a
+// standalone FakeRunner (not pullFixture) since pullFixture has no error hook
+// for "status" and is shared by four other tests.
+func TestPullAll_SkipsUnknownStatus(t *testing.T) {
+	tmp := t.TempDir()
+	mkGitDir(t, tmp, "brokenstatus")
+	brokenDir := filepath.Join(tmp, "brokenstatus")
+
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name != "git" || len(args) < 3 || args[0] != "-C" {
+			return "", nil
+		}
+		if args[2] == "status" {
+			return "", errors.New("fatal: index file corrupt")
+		}
+		return "", nil
+	}}
+	c := &Client{Dir: tmp, run: fake}
+
+	results, err := c.PullAll(context.Background(), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 || results[0].Name != "brokenstatus" {
+		t.Fatalf("PullAll = %+v, want only 'brokenstatus'", results)
+	}
+	if got := results[0].Status; got != PullSkippedUnknown {
+		t.Errorf("brokenstatus status = %v, want PullSkippedUnknown", got)
+	}
+
+	for _, call := range fake.Calls {
+		if call.Name == "git" && len(call.Args) >= 3 && call.Args[2] == "pull" && call.Args[1] == brokenDir {
+			t.Errorf("pull ran for a repo with unknown status: %v", call.Args)
+		}
+	}
+}
+
 func TestClassifyPull_Table(t *testing.T) {
 	cases := []struct {
 		name string

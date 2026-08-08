@@ -16,6 +16,9 @@ const (
 	// PullSkippedDirty means the pull did not run because the working tree
 	// had modified or untracked files.
 	PullSkippedDirty
+	// PullSkippedUnknown means the pull did not run because the repo's git
+	// status check itself failed, so its working-tree state was never read.
+	PullSkippedUnknown
 	// PullFailed means the pull ran and git returned an error.
 	PullFailed
 )
@@ -29,6 +32,8 @@ func (s PullStatus) String() string {
 		return "updated"
 	case PullSkippedDirty:
 		return "skipped-dirty"
+	case PullSkippedUnknown:
+		return "skipped-unknown"
 	case PullFailed:
 		return "failed"
 	default:
@@ -48,7 +53,9 @@ type PullResult struct {
 // runs `git pull --rebase` in every discovered repo, sequentially. A repo with
 // a dirty working tree (modified or untracked files) is skipped rather than
 // pulled — Ahead alone doesn't count as dirty since a rebase pull handles
-// unpushed local commits fine.
+// unpushed local commits fine. A repo whose git status check itself failed
+// (StatusUnknown) is also skipped — its working-tree state was never read, so
+// pulling into it would run blind.
 func (c *Client) PullAll(ctx context.Context, dir string) ([]PullResult, error) {
 	if dir == "" {
 		dir = c.Dir
@@ -64,6 +71,10 @@ func (c *Client) PullAll(ctx context.Context, dir string) ([]PullResult, error) 
 		// repo). They are not repos to pull, so skip them — shelling `git pull`
 		// into a non-repo errors and would misreport as PullFailed.
 		if !isGitRepo(p.Dir) {
+			continue
+		}
+		if p.Status.State == StatusUnknown {
+			results = append(results, PullResult{Name: p.Name, Dir: p.Dir, Status: PullSkippedUnknown})
 			continue
 		}
 		if p.Status.Modified > 0 || p.Status.Untracked > 0 {
