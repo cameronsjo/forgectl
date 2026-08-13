@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // discoveryIdentityPath answers exactly one question, before authentication:
@@ -219,23 +221,23 @@ func (discoveryHTTPClient) Locate(ctx context.Context, info ServerInfo, absPath 
 		if errors.Is(err, errProbeRedirect) {
 			return "", "", errLocateRedirect
 		}
-		return "", "", fmt.Errorf("ask the running reader about %s: %w", absPath, errProbeUnreachable)
+		return "", "", fmt.Errorf("ask the running reader about %s: %w", termsafe.QuotePath(absPath), errProbeUnreachable)
 	}
 	defer resp.Body.Close() //nolint:errcheck // bounded read below
 
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotFound:
-		return "", "", fmt.Errorf("%w: %s", ErrNotServed, absPath)
+		return "", "", fmt.Errorf("%w: %s", ErrNotServed, termsafe.QuotePath(absPath))
 	case http.StatusUnauthorized:
 		return "", "", errStaleGeneration
 	default:
-		return "", "", fmt.Errorf("locate %s: reader returned %s", absPath, resp.Status)
+		return "", "", fmt.Errorf("locate %s: reader returned %s", termsafe.QuotePath(absPath), resp.Status)
 	}
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxRecordBytes+1))
 	if err != nil {
-		return "", "", fmt.Errorf("read the locate response for %s: %w", absPath, errProbeUnreachable)
+		return "", "", fmt.Errorf("read the locate response for %s: %w", termsafe.QuotePath(absPath), errProbeUnreachable)
 	}
 	if len(raw) > maxRecordBytes {
 		return "", "", errLocateOversize
@@ -246,7 +248,7 @@ func (discoveryHTTPClient) Locate(ctx context.Context, info ServerInfo, absPath 
 		return "", "", fmt.Errorf("decode locate response: %w", err)
 	}
 	if payload.Root == "" || payload.Rel == "" {
-		return "", "", fmt.Errorf("%w: %s", ErrNotServed, absPath)
+		return "", "", fmt.Errorf("%w: %s", ErrNotServed, termsafe.QuotePath(absPath))
 	}
 	return payload.Root, payload.Rel, nil
 }

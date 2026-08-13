@@ -11,6 +11,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	docspkg "github.com/cameronsjo/forgectl/internal/docs"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // newDocsOpenCmd builds `forgectl docs open [path]`.
@@ -129,7 +130,7 @@ func runDocsOpen(cmd *cobra.Command, deps module.Deps, target string, printOnly 
 func resolveOpenTarget(ctx context.Context, server docspkg.DiscoveredServer, target string) (string, error) {
 	abs, err := filepath.Abs(target)
 	if err != nil {
-		return "", fmt.Errorf("resolve %s: %w", target, err)
+		return "", fmt.Errorf("resolve %s: %w", termsafe.QuotePath(target), err)
 	}
 
 	root, rel, err := docspkg.LocateDoc(ctx, server, abs)
