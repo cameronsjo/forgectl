@@ -38,8 +38,9 @@ var isInteractiveTTY = func() bool {
 }
 
 // Execute is the binary's entrypoint. It normalizes argv (forgiveness layer),
-// then either opens the TUI (bare invoke or an unrecognized verb — the thumb-
-// mode affordance) or hands off to fang for styled help/errors/version.
+// then gives an eligible unknown top-level verb to the extension rungs before
+// either opening the TUI (bare invoke or an external-command miss — the thumb-
+// mode affordance) or handing off to fang for styled help/errors/version.
 func Execute(ctx context.Context) error {
 	cfg := config.Load()
 	closer := config.SetupLogger(cfg)
@@ -72,6 +73,10 @@ func Execute(ctx context.Context) error {
 			}
 			return err
 		}
+	}
+
+	if handled, err := tryExtensionRungs(root, args, defaultExternalCommandRuntime()); handled {
+		return err
 	}
 
 	noIcons := cfg.NoIcons || hasNoIcons(args)
@@ -156,9 +161,10 @@ func dispatchAction(ctx context.Context, client *tmux.Client, act tui.Action) er
 }
 
 // builtinVerbs are commands Cobra/fang register lazily at Execute time, so they
-// aren't in root.Commands() when we route. They must never fall into the menu.
+// aren't in root.Commands() when we route. They must never fall into the menu
+// or be shadowed by an external command.
 var builtinVerbs = map[string]bool{
-	"help": true, "completion": true,
+	"help": true, "completion": true, "man": true,
 	"__complete": true, "__completeNoDesc": true,
 }
 
@@ -167,7 +173,7 @@ var builtinVerbs = map[string]bool{
 // command group (e.g. `tmux frobnicate`). Flag-only invocations (--version,
 // --help) stay with fang — only non-flag garbage falls into the menu. The
 // check is against the live command/alias set (not root.Find), so it's immune
-// to Cobra's lazy registration of help/completion during Execute.
+// to Cobra/fang's lazy registration of help/completion/man during Execute.
 func shouldLaunchTUI(root *cobra.Command, args []string) bool {
 	first, idx := firstNonFlag(args)
 	if first == "" {

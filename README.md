@@ -209,6 +209,33 @@ fx                    # same as bare forgectl — opens the TUI
 fx tmux ls
 ```
 
+### External commands
+
+An eligible unknown top-level verb can dispatch an external command by one
+convention only: `forgectl <verb> ...` looks for `forgectl-<verb>` on `PATH`.
+This is external-command dispatch, not an extension API: registered commands,
+aliases, and built-in Cobra verbs always win. Exact workflow-name dispatch is a
+future earlier rung, so it will also win before an external command.
+
+Before the verb, only `--no-icons` or `--no-icons=<value>` is eligible; forgectl
+consumes those host flags. Every token after the verb is forwarded exactly as
+received, including empty, spaced, Unicode, flag-looking, and `--` arguments.
+The external command inherits forgectl's stdin, stdout, stderr, and environment,
+and replaces the forgectl process, so signals and exit status belong directly to
+that command.
+
+Resolution uses Go's `exec.LookPath`, then independently requires the result to
+be an absolute path. A lookup error, a relative result, a verb containing `/` or
+`\`, or any other miss preserves the existing behavior: an interactive unknown
+verb opens the TUI, while a headless invocation reaches Cobra's unknown-command
+error. Current-directory execution is refused even when `PATH` contains `.` or
+Go's `execerrdot` compatibility switch is disabled.
+
+forgectl performs **no authenticity, ownership, permission, blessing, sandbox,
+capability, discovery, or registration check** on an external command. A match
+is arbitrary code run with the invoking user's authority; `PATH` contents are
+the user's trust boundary.
+
 ### env — safe .env management
 
 `forgectl env` touches `.env` files without ever putting a secret value in argv, terminal output, or a session transcript: key names are always visible, values never print. It's built for agent-driven workflows — an agent can be trusted with the tool even though it can't be trusted to keep a value out of its own transcript, because the tool structurally never hands one back.
