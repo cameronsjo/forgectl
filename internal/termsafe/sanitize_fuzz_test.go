@@ -1,37 +1,95 @@
 package termsafe
 
-// Fuzz/property coverage for Sanitize, additive to the table-driven
-// control-byte-specific cases in internal/cli/sessions_test.go (which plant a
-// fixed C1 byte and DEL and assert they're gone). This file instead asserts
-// the GENERAL invariant Sanitize claims to hold — "no Cc-category control
-// rune survives, tab excepted" — over arbitrary fuzzer-generated input, and
-// documents a real gap the fuzz corpus surfaced: Unicode Cf (format)
-// characters, including bidirectional-override controls, are NOT covered by
-// unicode.IsControl and pass through unsanitized.
-
 import (
-	"strings"
 	"testing"
 	"unicode"
 	"unicode/utf8"
 )
 
-// FuzzSanitize checks the invariant Sanitize's own doc comment claims: every
-// Cc-category control rune (tab excepted) is replaced. It also checks that
-// valid-UTF8 input keeps its rune count — Sanitize is a 1:1 rune map, never a
-// deletion — so a length mismatch would mean the mapping silently dropped or
-// merged characters.
+func TestIsUnsafeTerminalRuneMatchesUnicodeProperties(t *testing.T) {
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		want := unicode.IsControl(r) || unicode.In(r, unicode.Bidi_Control)
+		if got := IsUnsafeTerminalRune(r); got != want {
+			t.Fatalf("IsUnsafeTerminalRune(%U) = %t, want %t", r, got, want)
+		}
+	}
+}
+
+func TestSanitizeReplacesBidiControls(t *testing.T) {
+	tests := []struct {
+		name string
+		r    rune
+	}{
+		{name: "ARABIC LETTER MARK", r: 0x061c},
+		{name: "LEFT-TO-RIGHT MARK", r: 0x200e},
+		{name: "RIGHT-TO-LEFT MARK", r: 0x200f},
+		{name: "LEFT-TO-RIGHT EMBEDDING", r: 0x202a},
+		{name: "RIGHT-TO-LEFT EMBEDDING", r: 0x202b},
+		{name: "POP DIRECTIONAL FORMATTING", r: 0x202c},
+		{name: "LEFT-TO-RIGHT OVERRIDE", r: 0x202d},
+		{name: "RIGHT-TO-LEFT OVERRIDE", r: 0x202e},
+		{name: "LEFT-TO-RIGHT ISOLATE", r: 0x2066},
+		{name: "RIGHT-TO-LEFT ISOLATE", r: 0x2067},
+		{name: "FIRST STRONG ISOLATE", r: 0x2068},
+		{name: "POP DIRECTIONAL ISOLATE", r: 0x2069},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, want := Sanitize("left"+string(tt.r)+"right"), "left right"; got != want {
+				t.Errorf("Sanitize with %U = %q, want %q", tt.r, got, want)
+			}
+		})
+	}
+}
+
+func TestSanitizePreservesTabAlthoughItIsUnsafe(t *testing.T) {
+	if !IsUnsafeTerminalRune('\t') {
+		t.Fatal("tab is a Cc control and must be classified as unsafe")
+	}
+	if got, want := Sanitize("a\tb"), "a\tb"; got != want {
+		t.Errorf("Sanitize(%q) = %q, want %q", want, got, want)
+	}
+}
+
+func TestSanitizePreservesNonBidiFormattingAndRTLText(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "ZERO WIDTH NON-JOINER", input: "a\u200cb"},
+		{name: "ZERO WIDTH JOINER", input: "a\u200db"},
+		{name: "Persian shaping with ZWNJ", input: "می\u200cروم"},
+		{name: "emoji ZWJ sequence", input: "👩\u200d💻"},
+		{name: "text presentation selector", input: "✈\ufe0e"},
+		{name: "emoji presentation selector", input: "✈\ufe0f"},
+		{name: "supplementary variation selector", input: "a\U000e0100b"},
+		{name: "ZERO WIDTH SPACE", input: "a\u200bb"},
+		{name: "Arabic text", input: "مرحبا"},
+		{name: "Hebrew text", input: "שלום"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Sanitize(tt.input); got != tt.input {
+				t.Errorf("Sanitize(%q) = %q, want unchanged", tt.input, got)
+			}
+		})
+	}
+}
+
 func FuzzSanitize(f *testing.F) {
 	seeds := []string{
 		"",
 		"plain text",
 		"tab\ttab",
-		"\x1b[31mred\x1b[0m", // C0 escape sequence
-		string(rune(0x9b)),   // C1 single-byte CSI
-		string(rune(0x7f)),   // DEL
+		"\x1b[31mred\x1b[0m",
+		string(rune(0x9b)),
+		string(rune(0x7f)),
 		"emoji 🔥 test",
-		"‮hidden‬",    // RLO ... PDF (bidi override)
-		"​zero​width", // zero-width space
+		"hidden" + string(rune(0x202e)) + "spoof" + string(rune(0x202c)),
+		"zero\u200bwidth",
+		"join\u200der",
 		"multi\nline\r\nstring",
 		"咖啡 workflow",
 	}
@@ -41,33 +99,29 @@ func FuzzSanitize(f *testing.F) {
 	f.Fuzz(func(t *testing.T, s string) {
 		got := Sanitize(s)
 		for _, r := range got {
-			if r != '\t' && unicode.IsControl(r) {
-				t.Fatalf("Cc-category control rune %U survived Sanitize: input=%q output=%q", r, s, got)
+			if r != '\t' && IsUnsafeTerminalRune(r) {
+				t.Fatalf("unsafe terminal rune %U survived Sanitize: input=%q output=%q", r, s, got)
 			}
 		}
+
 		if utf8.ValidString(s) {
-			if wantN, gotN := utf8.RuneCountInString(s), utf8.RuneCountInString(got); wantN != gotN {
-				t.Fatalf("Sanitize should be a 1:1 rune map, rune count changed %d -> %d: input=%q output=%q", wantN, gotN, s, got)
+			inputRunes, outputRunes := []rune(s), []rune(got)
+			if len(inputRunes) != len(outputRunes) {
+				t.Fatalf("Sanitize changed rune count %d -> %d: input=%q output=%q", len(inputRunes), len(outputRunes), s, got)
 			}
+			for i, inputRune := range inputRunes {
+				want := inputRune
+				if inputRune != '\t' && IsUnsafeTerminalRune(inputRune) {
+					want = ' '
+				}
+				if outputRunes[i] != want {
+					t.Fatalf("Sanitize rune %d = %U, want %U: input=%q output=%q", i, outputRunes[i], want, s, got)
+				}
+			}
+		}
+
+		if twice := Sanitize(got); twice != got {
+			t.Fatalf("Sanitize is not idempotent: once=%q twice=%q", got, twice)
 		}
 	})
-}
-
-// Pins the gap the fuzz seeds above surfaced: unicode.IsControl only covers
-// the Cc category (C0/C1 controls), not Cf (format) characters. A
-// right-to-left override (U+202E) is a well-known terminal/filename spoofing
-// vector — it can visually reorder trailing text to disguise, e.g., a
-// malicious runbook title — and "render inert in the terminal" reads as
-// covering exactly this class of attack, but the implementation does not
-// strip it. This test documents CURRENT (not necessarily desired) behavior
-// rather than asserting the safe outcome as already achieved — do not read it
-// as endorsing the gap; it exists so a fix has a red test to flip green. See
-// the sibling FuzzSanitize above for the invariant that DOES hold, and the
-// package doc, which scopes the guarantee to Cc for the same reason.
-func TestSanitize_DoesNotStripBidiOverrideGAP(t *testing.T) {
-	rlo := string(rune(0x202E))
-	got := Sanitize("safe" + rlo + "text")
-	if !strings.Contains(got, rlo) {
-		t.Skip("Sanitize now strips U+202E — this GAP test is stale, safe to delete")
-	}
 }
