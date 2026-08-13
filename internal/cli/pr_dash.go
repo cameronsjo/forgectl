@@ -62,13 +62,20 @@ Rows you've marked reviewed are dimmed (new activity auto-un-dims them).`,
 }
 
 // renderSessions prints the local active-review breadcrumbs, or "(none)".
-func renderSessions(out io.Writer, sessions []pr.Session) {
-	if len(sessions) == 0 {
+// A record whose workspace has been deleted is shown with a trailing marker
+// rather than hidden — the dashboard is where a user notices the leftover, and
+// the row carries the breadcrumb path teardown takes.
+func renderSessions(out io.Writer, summaries []pr.SessionSummary) {
+	if len(summaries) == 0 {
 		fmt.Fprintln(out, "  (none)")
 		return
 	}
-	for _, s := range sessions {
-		age := time.Since(s.CreatedAt).Round(time.Second)
-		fmt.Fprintf(out, "  %s  (%s ago)  %s\n", s.Ref.String(), age, s.Path)
+	for _, s := range summaries {
+		age := time.Since(s.CreatedAt()).Round(time.Second)
+		suffix := ""
+		if s.IsWorkspaceMissing() {
+			suffix = "  (" + workspaceMissingStatus + ")"
+		}
+		fmt.Fprintf(out, "  %s  (%s ago)  %s%s\n", s.Ref().String(), age, s.Path(), suffix)
 	}
 }

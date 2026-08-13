@@ -2,6 +2,7 @@ package pr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -9,11 +10,18 @@ import (
 	"sort"
 )
 
-// List returns every valid review session recorded in the session-state dir.
-// Each breadcrumb is loaded through the same location+content validation as
-// every other consumer; a breadcrumb that fails validation is skipped (logged),
-// not fatal — one corrupt file must not blind the whole list.
-func (c *Client) List() ([]Session, error) {
+// List returns a presentation row for every review session recorded in the
+// session-state dir whose workspace is either LIVE or cleanly MISSING, sorted
+// newest first.
+//
+// Rows are SessionSummary, not Session, because a stale record has no workspace
+// to act on and must still be listable — a row the user cannot see is a row
+// they cannot tear down, which is the visibility half of #212.
+//
+// Each breadcrumb goes through the same location+record validation as every
+// other consumer; anything that fails, or whose workspace classifies invalid,
+// is skipped (logged), not fatal — one corrupt file must not blind the list.
+func (c *Client) List() ([]SessionSummary, error) {
 	entries, err := os.ReadDir(c.sessionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -21,40 +29,84 @@ func (c *Client) List() ([]Session, error) {
 		}
 		return nil, fmt.Errorf("read pr sessions dir: %w", err)
 	}
-	var sessions []Session
+	var summaries []SessionSummary
+	var live, missing, invalid int
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 			continue
 		}
 		path := filepath.Join(c.sessionsDir, e.Name())
-		sess, err := c.loadSession(path)
+		sum, err := c.loadSummary(path)
 		if err != nil {
 			slog.Warn("Skipping invalid pr breadcrumb.", "path", path, "error", err)
+			invalid++
 			continue
 		}
-		sessions = append(sessions, sess)
+		if sum.IsWorkspaceMissing() {
+			missing++
+		} else {
+			live++
+		}
+		summaries = append(summaries, sum)
 	}
-	sort.Slice(sessions, func(i, j int) bool {
-		return sessions[i].CreatedAt.After(sessions[j].CreatedAt)
+	sort.Slice(summaries, func(i, j int) bool {
+		return summaries[i].createdAt.After(summaries[j].createdAt)
 	})
-	return sessions, nil
+	// One aggregate at debug altitude. Per-record warnings above keep their
+	// existing altitude; no path or ref is added here, so listing stays quiet
+	// and leaks nothing new.
+	slog.Debug("Listed pr session breadcrumbs.", "live", live, "missing", missing, "invalid_skipped", invalid)
+	return summaries, nil
+}
+
+// loadSummary builds one presentation row: record validation, then workspace
+// classification. Live and missing both yield a row; invalid is an error, so
+// an unclassifiable record can never be presented as if it were understood.
+func (c *Client) loadSummary(path string) (SessionSummary, error) {
+	bc, _, err := loadBreadcrumbRecord(path, c.sessionsDir)
+	if err != nil {
+		return SessionSummary{}, err
+	}
+	ref, err := refFromRecord(bc)
+	if err != nil {
+		return SessionSummary{}, err
+	}
+	avail, err := classifyWorkspace(bc.Workspace)
+	switch avail {
+	case workspaceAvailabilityLive, workspaceAvailabilityMissing:
+	default:
+		return SessionSummary{}, fmt.Errorf("breadcrumb %s: %w", path, err)
+	}
+	return SessionSummary{ref: ref, path: path, createdAt: bc.CreatedAt, availability: avail}, nil
+}
+
+// refFromRecord restores the Ref a breadcrumb records. Locality cannot ride
+// the ref string (owner "local" is only a display value); the breadcrumb's own
+// flag is what restores it. Shared by the summary and session loaders so the
+// two cannot drift on locality.
+func refFromRecord(bc Breadcrumb) (Ref, error) {
+	ref, err := ParseRef(bc.Ref)
+	if err != nil {
+		return Ref{}, fmt.Errorf("breadcrumb ref: %w", err)
+	}
+	if bc.Local {
+		ref = ref.asLocal()
+	}
+	return ref, nil
 }
 
 // loadSession validates+loads the breadcrumb at path (using the client's
-// session-state dir) and reconstitutes a Session from it.
+// session-state dir) and reconstitutes an ACTIONABLE Session from it. It goes
+// through the strict live loader, so a stale or invalid workspace is an error
+// here by design — every caller of this function is about to act on Workspace.
 func (c *Client) loadSession(path string) (Session, error) {
 	bc, err := loadBreadcrumb(path, c.sessionsDir)
 	if err != nil {
 		return Session{}, err
 	}
-	ref, err := ParseRef(bc.Ref)
+	ref, err := refFromRecord(bc)
 	if err != nil {
-		return Session{}, fmt.Errorf("breadcrumb ref: %w", err)
-	}
-	// Locality cannot ride the ref string (owner "local" is only a display
-	// value); the breadcrumb's own flag is what restores it.
-	if bc.Local {
-		ref = ref.asLocal()
+		return Session{}, err
 	}
 	return Session{
 		Ref:       ref,
@@ -65,13 +117,31 @@ func (c *Client) loadSession(path string) (Session, error) {
 	}, nil
 }
 
+// remediateMissingWorkspace appends teardown guidance to err, but ONLY when
+// the failure is a cleanly missing workspace — the one state `pr teardown` can
+// actually resolve.
+//
+// The gate is errors.As on the typed missing error, never
+// errors.Is(err, fs.ErrNotExist). A dangling final symlink, an unresolvable
+// parent, and a resolution race all wrap the same OS cause while being
+// invalid; telling a user to run teardown for those would be advising a
+// deletion the teardown path is going to refuse anyway.
+func remediateMissingWorkspace(path string, err error) error {
+	var missing *workspaceMissingError
+	if !errors.As(err, &missing) {
+		return err
+	}
+	return fmt.Errorf("%w — its workspace is gone, so there is nothing to attach to; "+
+		"discard the leftover breadcrumb with `forgectl pr teardown %q`", err, path)
+}
+
 // Attach jumps to the review window for the breadcrumb at path. It validates
 // the breadcrumb (location + content) BEFORE any tmux argv is built, so a
 // hostile path cannot steer tmux at an arbitrary target.
 func (c *Client) Attach(ctx context.Context, path string) error {
 	sess, err := c.loadSession(path)
 	if err != nil {
-		return err
+		return remediateMissingWorkspace(path, err)
 	}
 	target := c.windowTarget(sess.Ref)
 	slog.Debug("Attaching to review window.", "target", target)
@@ -88,7 +158,7 @@ func (c *Client) Attach(ctx context.Context, path string) error {
 func (c *Client) Open(ctx context.Context, path string) error {
 	sess, err := c.loadSession(path)
 	if err != nil {
-		return err
+		return remediateMissingWorkspace(path, err)
 	}
 	slog.Debug("Opening workspace window.", "workspace", sess.Workspace)
 	// A review session was already dispatched to reach this breadcrumb, so the

@@ -108,22 +108,31 @@ func (c *Client) discard(ctx context.Context, sess Session) error {
 	return nil
 }
 
-// Cleanup discards every session created on the given date (YYYY-MM-DD, UTC).
-// It reuses the validated List, so only genuine breadcrumbs are touched, and
-// each teardown goes through the same exact-match membership guard.
+// Cleanup discards every session created on the given date (YYYY-MM-DD, UTC),
+// stale records included — a day's sweep that silently skipped the leftovers
+// would be the very accumulation #212 exists to end.
+//
+// List supplies only the CANDIDATE set and its recorded dates; it is not
+// trusted for anything else. Every candidate re-enters Teardown, which
+// re-resolves membership, re-validates the record, and re-classifies the
+// workspace from scratch — so a record that changed between the listing and
+// the teardown is judged on what it is NOW, not on what List saw.
+//
+// One failure is retained as the first error while later candidates continue,
+// matching the existing cleanup contract.
 func (c *Client) Cleanup(ctx context.Context, date string) error {
-	sessions, err := c.List()
+	summaries, err := c.List()
 	if err != nil {
 		return err
 	}
 	var discarded int
 	var firstErr error
-	for _, sess := range sessions {
-		if sess.CreatedAt.UTC().Format("2006-01-02") != date {
+	for _, sum := range summaries {
+		if sum.CreatedAt().UTC().Format("2006-01-02") != date {
 			continue
 		}
-		if err := c.Teardown(ctx, sess.Path); err != nil {
-			slog.Error("Failed to tear down session during cleanup.", "path", sess.Path, "error", err)
+		if err := c.Teardown(ctx, sum.Path()); err != nil {
+			slog.Error("Failed to tear down session during cleanup.", "path", sum.Path(), "error", err)
 			if firstErr == nil {
 				firstErr = err
 			}
