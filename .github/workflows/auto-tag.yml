@@ -31,9 +31,9 @@ jobs:
       # NOT trigger `on: push: tags`, so release.yml would never fire and the
       # release would silently never happen.
       #
-      # SHA-pinned, unlike the older `@v3` references elsewhere in this repo.
-      # This action mints a live write-scoped installation token from a private
-      # key, so a silent upstream retag of `v3` is worth not trusting. Note
+      # SHA-pinned: this action mints a live write-scoped installation token
+      # from a private key, so a silent upstream retag of `v3` is worth not
+      # trusting. Note
       # actionlint's bundled metadata for this action is stale and will claim
       # `client-id` is undefined — it is defined at this ref; check action.yml
       # before "fixing" it back to the deprecated `app-id`.
@@ -43,8 +43,9 @@ jobs:
         with:
           client-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}

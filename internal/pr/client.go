@@ -1,7 +1,9 @@
 package pr
 
 import (
+	"context"
 	"os"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -43,6 +45,11 @@ type Client struct {
 	// isTTY reports whether an interactive gate can be shown. When false (or
 	// --headless), the post path stages only and never auto-posts.
 	isTTY func() bool
+
+	// dispatchWait is the one post-dispatch observation delay. Tests inject a
+	// zero-cost waiter; production waits long enough to observe delayed harness
+	// startup failures without sleeping once per review.
+	dispatchWait func(context.Context) error
 }
 
 // Option configures a Client at construction.
@@ -76,6 +83,11 @@ func WithTTYCheck(fn func() bool) Option {
 	return func(c *Client) { c.isTTY = fn }
 }
 
+// WithDispatchWait overrides the post-dispatch observation delay.
+func WithDispatchWait(fn func(context.Context) error) Option {
+	return func(c *Client) { c.dispatchWait = fn }
+}
+
 // New builds a Client over the given Runner.
 func New(run exec.Runner, opts ...Option) *Client {
 	c := &Client{
@@ -83,6 +95,16 @@ func New(run exec.Runner, opts ...Option) *Client {
 		tmuxSession: defaultTmuxSession,
 		approve:     confirmReview,
 		isTTY:       launch.IsInteractiveTTY,
+		dispatchWait: func(ctx context.Context) error {
+			timer := time.NewTimer(8 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				return nil
+			}
+		},
 	}
 	if dir, err := config.PrSessionsDir(); err == nil {
 		c.sessionsDir = dir

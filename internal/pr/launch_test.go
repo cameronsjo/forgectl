@@ -35,6 +35,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 func postClient(fake *exec.FakeRunner, approve bool, tty bool) *Client {
@@ -47,8 +48,24 @@ func postClient(fake *exec.FakeRunner, approve bool, tty bool) *Client {
 
 var testSess = Session{Ref: Ref{Owner: "o", Repo: "r", Number: 9}, Workspace: "/tmp/forgectl-x"}
 
+func successfulLaunchRunner() *exec.FakeRunner {
+	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "tmux" && len(args) > 0 {
+			switch args[0] {
+			case "-V":
+				return "tmux 3.7b", nil
+			case "display-message":
+				return "123\x1f456\x1f@0", nil
+			case "new-window":
+				return "123\x1f456\x1f@1", nil
+			}
+		}
+		return "", nil
+	}}
+}
+
 func TestPostReview_LocalSessionRefused(t *testing.T) {
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := postClient(fake, true, true) // approve=true, tty=true — must still refuse
 	localSess := Session{Ref: mustLocalRef("abc1234", 1), Workspace: "/tmp/forgectl-x"}
 
@@ -71,7 +88,7 @@ func TestPostReview_LocalSessionRefused(t *testing.T) {
 // breadcrumb's Local field, or a future verb built on the loadSession pattern
 // would silently defeat PostReview's safety invariant.
 func TestPostReview_ReloadedLocalSessionStillRefused(t *testing.T) {
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := postClient(fake, true, true)
 	reloaded := Session{Ref: mustLocalRef("abc1234", 1), Workspace: "/tmp/forgectl-x"} // as loadSession produces
 
@@ -150,7 +167,7 @@ func TestWindowName_StructurallyCoupledToReviewWindowPrefix(t *testing.T) {
 }
 
 func TestPostReview_DeclinedDoesNotPost(t *testing.T) {
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := postClient(fake, false, true)
 	posted, err := c.PostReview(context.Background(), testSess, "the review", false)
 	if err != nil {
@@ -165,7 +182,7 @@ func TestPostReview_DeclinedDoesNotPost(t *testing.T) {
 }
 
 func TestPostReview_HeadlessStagesOnly(t *testing.T) {
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	// approve=true, tty=true — but headless flag must still suppress the post.
 	c := postClient(fake, true, true)
 	posted, err := c.PostReview(context.Background(), testSess, "the review", true)
@@ -178,7 +195,7 @@ func TestPostReview_HeadlessStagesOnly(t *testing.T) {
 }
 
 func TestPostReview_NoTTYStagesOnly(t *testing.T) {
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := postClient(fake, true, false) // approve would say yes, but no TTY
 	posted, err := c.PostReview(context.Background(), testSess, "the review", false)
 	if err != nil {
@@ -190,7 +207,7 @@ func TestPostReview_NoTTYStagesOnly(t *testing.T) {
 }
 
 func TestPostReview_ApprovedPosts(t *testing.T) {
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := postClient(fake, true, true)
 	posted, err := c.PostReview(context.Background(), testSess, "the review body", false)
 	if err != nil {
@@ -216,13 +233,17 @@ func TestLaunch_InlineDispatch(t *testing.T) {
 	}
 	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
 
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	ws := fakeWorkspace(t)
 	sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: ws, Agent: "claude"}
 
-	if err := c.Launch(context.Background(), sess, config.Config{}); err != nil {
+	dispatch, err := c.Launch(context.Background(), sess, config.Config{})
+	if err != nil {
 		t.Fatalf("Launch: %v", err)
+	}
+	if dispatch.Ref != sess.Ref || dispatch.WindowID != "123\x1f456\x1f@1" {
+		t.Errorf("dispatch = %+v, want exact generation-qualified identity", dispatch)
 	}
 	call := fake.Last()
 	if call.Name != "tmux" || call.Args[0] != "new-window" {
@@ -236,6 +257,9 @@ func TestLaunch_InlineDispatch(t *testing.T) {
 	}
 	if !contains(call.Args, "--") {
 		t.Errorf("tmux argv missing -- terminator before claude: %v", call.Args)
+	}
+	if len(call.Args) < 4 || !equalArgs(call.Args[:4], []string{"new-window", "-P", "-F", tmux.IdentityFormat}) {
+		t.Errorf("tmux argv missing exact -P/-F identity capture: %v", call.Args)
 	}
 	// SECURITY: the review agent must launch HARDENED even though the launch
 	// default posture is AllowDanger=true (builtinAllowDanger). A leaked
@@ -260,12 +284,12 @@ func argPair(args []string, flag, value string) bool {
 }
 
 func TestLaunch_AgentBNotWired(t *testing.T) {
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := New(fake, WithSessionsDir(os.TempDir()))
 	ws := fakeWorkspace(t)
 	sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: ws, Agent: "escalation"}
 
-	if err := c.Launch(context.Background(), sess, config.Config{}); err == nil {
+	if _, err := c.Launch(context.Background(), sess, config.Config{}); err == nil {
 		t.Error("agent B (escalation) should be refused as not-yet-wired")
 	}
 	if len(fake.Calls) != 0 {
@@ -289,7 +313,7 @@ func TestLaunch_CodexRefusedForRemotePRHead(t *testing.T) {
 	}
 	t.Setenv("FORGECTL_CODEX_BIN", codexBin)
 
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	sess := Session{
 		Ref:       Ref{Owner: "o", Repo: "r", Number: 42},
@@ -297,7 +321,7 @@ func TestLaunch_CodexRefusedForRemotePRHead(t *testing.T) {
 		Agent:     "codex",
 	}
 
-	err := c.Launch(context.Background(), sess, config.Config{})
+	_, err := c.Launch(context.Background(), sess, config.Config{})
 	if err == nil {
 		t.Fatal("Codex must be refused for a remote PR head")
 	}
@@ -359,7 +383,7 @@ func TestLaunch_CodexStillDispatchesForLocalReview(t *testing.T) {
 	}
 	t.Setenv("FORGECTL_CODEX_BIN", codexBin)
 
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	sess := Session{
 		Ref:         mustLocalRef("abc1234", 1),
@@ -368,7 +392,7 @@ func TestLaunch_CodexStillDispatchesForLocalReview(t *testing.T) {
 		FindingsDir: t.TempDir(),
 	}
 
-	if err := c.Launch(context.Background(), sess, config.Config{}); err != nil {
+	if _, err := c.Launch(context.Background(), sess, config.Config{}); err != nil {
 		t.Fatalf("local Codex review must still dispatch: %v", err)
 	}
 	args := fake.Last().Args
@@ -384,7 +408,7 @@ func TestLaunch_CodexLocalWritesOnlyWorkspaceAndFindings(t *testing.T) {
 	}
 	t.Setenv("FORGECTL_CODEX_BIN", codexBin)
 	findings := t.TempDir()
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	sess := Session{
 		Ref:         mustLocalRef("abc1234", 1),
@@ -392,7 +416,7 @@ func TestLaunch_CodexLocalWritesOnlyWorkspaceAndFindings(t *testing.T) {
 		Agent:       "codex",
 		FindingsDir: findings,
 	}
-	if err := c.Launch(context.Background(), sess, config.Config{}); err != nil {
+	if _, err := c.Launch(context.Background(), sess, config.Config{}); err != nil {
 		t.Fatalf("Launch local Codex: %v", err)
 	}
 	args := fake.Last().Args
@@ -444,12 +468,12 @@ func TestLaunchInline_LocalSessionAddsFindingsDirAndPrompt(t *testing.T) {
 
 	// Local session: --add-dir must carry findingsDir, and the prompt must be
 	// the local (offline) variant, not the PR reviewPrompt.
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	ws := fakeWorkspace(t)
 	localSess := Session{Ref: mustLocalRef("abc1234", 1), Workspace: ws, Agent: "claude", FindingsDir: findingsDir}
 
-	if err := c.Launch(context.Background(), localSess, config.Config{}); err != nil {
+	if _, err := c.Launch(context.Background(), localSess, config.Config{}); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
 	call := fake.Last()
@@ -464,11 +488,11 @@ func TestLaunchInline_LocalSessionAddsFindingsDirAndPrompt(t *testing.T) {
 	}
 
 	// Non-local session: no --add-dir for any findings-shaped path, PR prompt used.
-	fake2 := &exec.FakeRunner{}
+	fake2 := successfulLaunchRunner()
 	c2 := New(fake2, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	ws2 := fakeWorkspace(t)
 	prSess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: ws2, Agent: "claude"}
-	if err := c2.Launch(context.Background(), prSess, config.Config{}); err != nil {
+	if _, err := c2.Launch(context.Background(), prSess, config.Config{}); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
 	call2 := fake2.Last()
@@ -481,10 +505,10 @@ func TestLaunchInline_LocalSessionAddsFindingsDirAndPrompt(t *testing.T) {
 }
 
 func TestLaunch_DryRunSessionRefused(t *testing.T) {
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := New(fake, WithSessionsDir(os.TempDir()))
 	sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Agent: "claude"} // no workspace
-	if err := c.Launch(context.Background(), sess, config.Config{}); err == nil {
+	if _, err := c.Launch(context.Background(), sess, config.Config{}); err == nil {
 		t.Error("a session with no workspace (dry-run) should be refused")
 	}
 }
@@ -513,10 +537,10 @@ func TestLaunchInline_DoesNotInheritCodexEffort(t *testing.T) {
 		Model:   "gpt-5",
 		Effort:  "max",
 	}}}
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
-	if err := c.Launch(context.Background(), sess, cfg); err != nil {
+	if _, err := c.Launch(context.Background(), sess, cfg); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
 	args := fake.Last().Args
@@ -536,14 +560,14 @@ func TestLaunchInline_DoesNotInheritCodexModel(t *testing.T) {
 	}
 	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
 
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
 
 	cfg := config.Config{Launch: config.LaunchConfig{
 		Defaults: config.LaunchDefaults{Harness: "codex", Model: "gpt-5-codex"},
 	}}
-	if err := c.Launch(context.Background(), sess, cfg); err != nil {
+	if _, err := c.Launch(context.Background(), sess, cfg); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
 
@@ -569,7 +593,7 @@ func TestLaunch_LocalSessionWithoutFindingsDirRefused(t *testing.T) {
 
 	for _, agent := range []string{"claude", "codex"} {
 		t.Run("agent="+agent, func(t *testing.T) {
-			fake := &exec.FakeRunner{}
+			fake := successfulLaunchRunner()
 			c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 			// As loadSession produces it: Ref restored, FindingsDir zero.
 			sess := Session{
@@ -578,7 +602,7 @@ func TestLaunch_LocalSessionWithoutFindingsDirRefused(t *testing.T) {
 				Agent:     agent,
 			}
 
-			err := c.Launch(context.Background(), sess, config.Config{})
+			_, err := c.Launch(context.Background(), sess, config.Config{})
 			if err == nil {
 				t.Fatal("a local session with no findings dir must be refused")
 			}
@@ -620,10 +644,10 @@ func TestLaunchInline_ForcesStrictMCP(t *testing.T) {
 	}}
 
 	// Remote PR head — the exploitable case.
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	prSess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
-	if err := c.Launch(context.Background(), prSess, cfg); err != nil {
+	if _, err := c.Launch(context.Background(), prSess, cfg); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
 	if !contains(fake.Last().Args, "--strict-mcp-config") {
@@ -635,7 +659,7 @@ func TestLaunchInline_ForcesStrictMCP(t *testing.T) {
 	// mustLocalRef, not a Ref literal: locality is an unexported flag, so a
 	// field-by-field Ref{Owner: localOwnerSentinel, …} is a REMOTE ref and this
 	// case would silently re-test the remote path above.
-	fake2 := &exec.FakeRunner{}
+	fake2 := successfulLaunchRunner()
 	c2 := New(fake2, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	findingsDir := t.TempDir()
 	localSess := Session{
@@ -644,7 +668,7 @@ func TestLaunchInline_ForcesStrictMCP(t *testing.T) {
 		Agent:       "claude",
 		FindingsDir: findingsDir,
 	}
-	if err := c2.Launch(context.Background(), localSess, cfg); err != nil {
+	if _, err := c2.Launch(context.Background(), localSess, cfg); err != nil {
 		t.Fatalf("Launch (local): %v", err)
 	}
 	localArgs := fake2.Last().Args
@@ -682,10 +706,10 @@ func TestLaunchInline_DropsAmbientAddDir(t *testing.T) {
 	}}
 
 	// Remote PR review: no --add-dir at all.
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	prSess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
-	if err := c.Launch(context.Background(), prSess, cfg); err != nil {
+	if _, err := c.Launch(context.Background(), prSess, cfg); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
 	args := fake.Last().Args
@@ -700,7 +724,7 @@ func TestLaunchInline_DropsAmbientAddDir(t *testing.T) {
 
 	// Local review: exactly one --add-dir, the findings dir.
 	findings := t.TempDir()
-	fake2 := &exec.FakeRunner{}
+	fake2 := successfulLaunchRunner()
 	c2 := New(fake2, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	localSess := Session{
 		Ref:         mustLocalRef("abc1234", 1),
@@ -708,7 +732,7 @@ func TestLaunchInline_DropsAmbientAddDir(t *testing.T) {
 		Agent:       "claude",
 		FindingsDir: findings,
 	}
-	if err := c2.Launch(context.Background(), localSess, cfg); err != nil {
+	if _, err := c2.Launch(context.Background(), localSess, cfg); err != nil {
 		t.Fatalf("Launch local: %v", err)
 	}
 	args2 := fake2.Last().Args
@@ -763,10 +787,10 @@ func TestLaunchInline_PrConfigSetsModelAndEffort(t *testing.T) {
 		Pr: config.PrConfig{Model: "opus", Effort: "xhigh"},
 	}
 
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
-	if err := c.Launch(context.Background(), sess, cfg); err != nil {
+	if _, err := c.Launch(context.Background(), sess, cfg); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
 	args := fake.Last().Args
@@ -806,10 +830,10 @@ func TestLaunchInline_PrModelRederivesEffort(t *testing.T) {
 		Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{Model: "sonnet"}},
 		Pr:     config.PrConfig{Model: "opus"}, // effort deliberately unset
 	}
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
-	if err := c.Launch(context.Background(), sess, cfg); err != nil {
+	if _, err := c.Launch(context.Background(), sess, cfg); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
 	args := fake.Last().Args
@@ -835,10 +859,10 @@ func TestLaunchInline_PrConfigRejectsOptionLikeValues(t *testing.T) {
 		"model":  {Model: "--allow-dangerously-skip-permissions"},
 		"effort": {Effort: "--dangerously-skip-permissions"},
 	} {
-		fake := &exec.FakeRunner{}
+		fake := successfulLaunchRunner()
 		c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 		sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
-		if err := c.Launch(context.Background(), sess, config.Config{Pr: pc}); err == nil {
+		if _, err := c.Launch(context.Background(), sess, config.Config{Pr: pc}); err == nil {
 			t.Errorf("[pr] %s: an option-like value must be refused", name)
 		}
 		if len(fake.Calls) != 0 {
@@ -865,10 +889,10 @@ func TestLaunchInline_RejectsOptionLikeAmbientValues(t *testing.T) {
 		"effort": {Model: "opus", Effort: "--dangerously-skip-permissions"},
 	} {
 		cfg := config.Config{Launch: config.LaunchConfig{Defaults: defaults}}
-		fake := &exec.FakeRunner{}
+		fake := successfulLaunchRunner()
 		c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 		sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
-		if err := c.Launch(context.Background(), sess, cfg); err == nil {
+		if _, err := c.Launch(context.Background(), sess, cfg); err == nil {
 			t.Errorf("ambient [launch] %s: an option-like value must be refused", name)
 		}
 		if len(fake.Calls) != 0 {
@@ -892,10 +916,10 @@ func TestLaunchInline_RejectsInvalidEffort(t *testing.T) {
 		"[pr] effort":      {Pr: config.PrConfig{Effort: "hihg"}},
 		"ambient [launch]": {Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{Effort: "maximum"}}},
 	} {
-		fake := &exec.FakeRunner{}
+		fake := successfulLaunchRunner()
 		c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 		sess := Session{Ref: Ref{Owner: "o", Repo: "r", Number: 42}, Workspace: fakeWorkspace(t), Agent: "claude"}
-		err := c.Launch(context.Background(), sess, cfg)
+		_, err := c.Launch(context.Background(), sess, cfg)
 		if err == nil {
 			t.Errorf("%s: an invalid effort must be refused before dispatch", name)
 		} else if !strings.Contains(err.Error(), "effort") {
@@ -924,7 +948,7 @@ func TestLaunchCodex_RejectsOptionLikeModel(t *testing.T) {
 		Harness: "codex",
 		Model:   "--dangerously-bypass-approvals-and-sandbox",
 	}}}
-	fake := &exec.FakeRunner{}
+	fake := successfulLaunchRunner()
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
 	sess := Session{
 		Ref:         mustLocalRef("abc1234", 1),
@@ -932,7 +956,7 @@ func TestLaunchCodex_RejectsOptionLikeModel(t *testing.T) {
 		Agent:       "codex",
 		FindingsDir: t.TempDir(),
 	}
-	if err := c.Launch(context.Background(), sess, cfg); err == nil {
+	if _, err := c.Launch(context.Background(), sess, cfg); err == nil {
 		t.Error("an option-like Codex model must be refused before dispatch")
 	}
 	if len(fake.Calls) != 0 {

@@ -27,7 +27,8 @@ func newPrPickCmd(client *pr.Client, cfg config.Config) *cobra.Command {
 // newPrPickCmdForClient is the test seam — an already-wired client, cfg, and an
 // explicit reviewed-store path.
 func newPrPickCmdForClient(client *pr.Client, cfg config.Config, reviewedPath string) *cobra.Command {
-	return &cobra.Command{
+	var noVerify bool
+	cmd := &cobra.Command{
 		Use:   "pick",
 		Short: "Multiselect open PRs and spin up clean-room reviews in bulk",
 		Long: `pick lists your open PRs in a multiselect. Chosen PRs are prepared
@@ -63,9 +64,11 @@ to stdout and exits 1; each printed ref works with forgectl pr <ref>.`,
 				fmt.Fprintln(cmd.ErrOrStderr(), "no PRs selected")
 				return nil
 			}
-			return launchPicked(ctx, client, cfg, cmd, selected, store)
+			return launchPicked(ctx, client, cfg, cmd, selected, store, noVerify)
 		},
 	}
+	cmd.Flags().BoolVar(&noVerify, "no-verify", false, "skip the delayed post-dispatch window check")
+	return cmd
 }
 
 func choosePRs(cmd *cobra.Command, prs []pr.PR, store *pr.ReviewedStore) ([]pr.PR, error) {
@@ -140,7 +143,7 @@ func pickPRs(prs []pr.PR, store *pr.ReviewedStore) ([]pr.PR, error) {
 // each in input order. A dimmed selection is skipped BEFORE prepare (no wasted
 // clone, no orphan workspace) with a one-line note — the picker's skip is the
 // single shared Dimmed authority, matching the dashboard's dim.
-func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd *cobra.Command, selected []pr.PR, store *pr.ReviewedStore) error {
+func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd *cobra.Command, selected []pr.PR, store *pr.ReviewedStore, noVerify bool) error {
 	slog.Debug("Preparing to launch picked PRs.", "selected", len(selected))
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
@@ -175,22 +178,28 @@ func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd
 		deferred = len(refs) - free
 		refs = refs[:free]
 	}
+	if err := client.CheckDispatchCapability(ctx); err != nil {
+		return err
+	}
 
 	results := client.PrepareMany(ctx, refs, pr.PrepareOpts{Agent: resolveAgent("")})
 	launched := 0
 	prepareFailed := 0
 	launchFailed := 0
+	dispatches := make([]pr.Dispatch, 0, len(results))
 	for _, r := range results {
 		if r.Err != nil {
 			fmt.Fprintf(errOut, "prepare %s failed: %v\n", r.Ref.String(), r.Err)
 			prepareFailed++
 			continue
 		}
-		if err := client.Launch(ctx, r.Session, cfg); err != nil {
+		dispatch, err := client.Launch(ctx, r.Session, cfg)
+		if err != nil {
 			fmt.Fprintf(errOut, "launch %s failed: %v\n", r.Ref.String(), err)
 			launchFailed++
 			continue
 		}
+		dispatches = append(dispatches, dispatch)
 		fmt.Fprintf(out, "launched clean-room review of %s\n", r.Ref.String())
 		launched++
 	}
@@ -203,6 +212,7 @@ func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd
 	if launchFailed > 0 {
 		fmt.Fprintf(errOut, "%d review(s) prepared but failed to launch — their clean rooms remain; discard via 'forgectl pr list' then 'pr teardown <breadcrumb>'\n", launchFailed)
 	}
-	slog.Info("Successfully completed bulk launch.", "launched", launched, "prepareFailed", prepareFailed, "launchFailed", launchFailed, "skipped", skipped, "deferred", deferred)
-	return nil
+	verification := verifyReviewDispatches(ctx, client, dispatches, noVerify)
+	slog.Info("Successfully completed bulk launch.", "launched", launched, "prepareFailed", prepareFailed, "launchFailed", launchFailed, "skipped", skipped, "deferred", deferred, "verify", dispatchVerificationLogValue(verification.State), "gone", len(verification.Gone))
+	return dispatchVerificationError(verification)
 }

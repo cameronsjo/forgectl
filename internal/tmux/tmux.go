@@ -27,6 +27,25 @@ type Client struct {
 	// insideTmux) so tests don't require a real sesh on PATH. Defaults to
 	// os/exec.LookPath.
 	lookPath func(string) (string, error)
+
+	// Server-state seams keep the default-socket classifier deterministic in
+	// same-package tests without exposing filesystem configuration publicly.
+	getenv func(string) string
+	// getuid is os.Getuid, NOT os.Geteuid, and the distinction is
+	// load-bearing: tmux's own make_label() builds the default socket
+	// directory from getuid(), so matching it exactly is what makes the
+	// derived path the same path tmux would use. Verified against tmux
+	// master, tmux.c make_label(): `uid = getuid();` then
+	// `xasprintf(&base, "%s/tmux-%ld", path, (long)uid);` — real uid, and the
+	// same value it later compares st_uid against. Under a setuid/setgid
+	// forgectl the two diverge, and the failure is fail-OPEN — we would lstat
+	// a tmux-<euid> directory that does not exist and classify a LIVE server
+	// as serverAbsentDefault, the one classification meaning "proceed".
+	// ListWindows would then return (nil, nil), LiveReviews would report 0,
+	// and the concurrency cap would grant a full batch on a machine already
+	// running reviews.
+	getuid func() int
+	lstat  func(string) (os.FileInfo, error)
 }
 
 // Option configures a Client at construction.
@@ -61,6 +80,9 @@ func New(run exec.Runner, opts ...Option) *Client {
 			return os.Getenv("TMUX") != ""
 		},
 		lookPath: osexec.LookPath,
+		getenv:   os.Getenv,
+		getuid:   os.Getuid,
+		lstat:    os.Lstat,
 	}
 	for _, opt := range opts {
 		opt(c)

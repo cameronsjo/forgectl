@@ -14,12 +14,15 @@ type Session struct {
 // Window is a tmux window. Target is pre-built as "session:index" so callers
 // can jump without re-assembling it.
 type Window struct {
-	Session string
-	Index   int
-	Name    string
-	Active  bool
-	Panes   int
-	Target  string // "session:index"
+	ServerPID   string
+	ServerStart string
+	ID          string
+	Session     string
+	Index       int
+	Name        string
+	Active      bool
+	Panes       int
+	Target      string // "session:index"
 }
 
 // Pane is a tmux pane. Target is pre-built as "session:windowIndex.paneIndex".

@@ -108,6 +108,13 @@ func (c Config) HasLaunchSection() bool {
 type LaunchConfig struct {
 	Defaults LaunchDefaults  `toml:"defaults"`
 	Projects []LaunchProject `toml:"project"`
+
+	// UsageStats is the informed opt-in for local launch statistics (#240).
+	// Absent and explicit false are both disabled, and nothing but an operator
+	// editing this key may set it: no migration, fallback, environment
+	// variable, init, doctor, or stats path ever writes true here. See
+	// internal/launch/usage.go for exactly what a recorded row contains.
+	UsageStats bool `toml:"usage_stats"`
 }
 
 // LaunchDefaults is [launch.defaults]: the base posture applied when no project
@@ -149,8 +156,15 @@ type LaunchProject struct {
 
 // IsZero reports whether the [launch] section was absent or empty — the signal
 // the launcher uses to fall back to a legacy claunch.conf.
+//
+// usage_stats counts toward non-empty, which changes how one specific operator
+// is routed: someone holding both a claunch.conf and a config.toml containing
+// nothing but the opt-in used to get wholesale legacy import and now gets the
+// additive shadow-merge in MergeLegacyIntoLaunch. Every legacy setting survives
+// either route — the difference is which code path carries it, and that is
+// worth stating here because the opt-in reads like it should be inert.
 func (lc LaunchConfig) IsZero() bool {
-	return len(lc.Projects) == 0 && lc.Defaults.isZero()
+	return len(lc.Projects) == 0 && lc.Defaults.isZero() && !lc.UsageStats
 }
 
 // WorkflowConfig is the [workflow] section: extra strip-list entries the
@@ -826,18 +840,25 @@ func PrSessionsDir() (string, error) {
 	return filepath.Join(dir, "pr-sessions"), nil
 }
 
-// DocsServerPath returns the discovery file a running `forgectl docs serve`
-// writes so other commands can find and steer it:
+// DocsServerPath returns the LEGACY single-file discovery record:
 // <os.UserConfigDir()>/forgectl/docs-server.json (macOS: ~/Library/Application
 // Support/forgectl/docs-server.json; Linux: ~/.config/forgectl/
 // docs-server.json). It derives from the same configDir() base as every other
 // forgectl path, so none of them drift.
 //
-// The file exists because `docs open` STEERS an already-running reader rather
-// than launching one, and the bound address is not knowable in advance — the
-// default bind uses port 0, so the OS assigns it. It holds the resolved address
-// and, when one is in use, the bearer token; it is written after the listener
-// resolves and removed on shutdown.
+// This path is now READ-ONLY. Current servers neither write nor remove it; they
+// publish one immutable record per generation under DocsServersDir instead,
+// because a single shared pathname cannot be owned — two overlapping servers
+// both wrote this file, and whichever stopped first deleted the other's
+// discoverability (forgectl#277).
+//
+// It remains here so a new client can still find a server started by an older
+// binary, and so rolling back to an older binary leaves that binary's record
+// intact. Nothing in forgectl deletes or rewrites it.
+//
+// The record exists at all because `docs open` STEERS an already-running reader
+// rather than launching one, and the bound address is not knowable in advance —
+// the default bind uses port 0, so the OS assigns it.
 func DocsServerPath() (string, error) {
 	dir, err := configDir()
 	if err != nil {
@@ -926,7 +947,7 @@ func LoadLegacyLaunch() (LaunchConfig, string, error) {
 		}
 		return LaunchConfig{}, path, fmt.Errorf("read legacy claunch.conf at %s: %w", path, err)
 	}
-	return lc, path, nil
+	return stripLegacyUsageOptIn(lc), path, nil
 }
 
 // ValidateLegacyLaunch decodes the legacy claunch.conf and returns any parse
