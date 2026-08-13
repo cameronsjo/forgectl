@@ -107,7 +107,7 @@ guard; test the ls output instead.`,
 			if len(args) == 1 {
 				filter = args[0]
 			}
-			return runResume(cmd, deps.Cfg, filter, limit, fork, dryRun)
+			return runResume(cmd, deps.Cfg, deps.LegacyBoundary, filter, limit, fork, dryRun)
 		},
 	}
 	cmd.Flags().BoolVar(&fork, "fork", false, "branch a new session off the transcript instead of continuing it")
@@ -147,7 +147,7 @@ func scanFor(filter string, limit int) ([]resume.Session, error) {
 }
 
 // runResume is the pick-then-resume path.
-func runResume(cmd *cobra.Command, cfg config.Config, filter string, limit int, fork, dryRun bool) error {
+func runResume(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMigrationBoundary, filter string, limit int, fork, dryRun bool) error {
 	sessions, err := scanSessions(filter, limit)
 	if err != nil {
 		return err
@@ -184,7 +184,7 @@ func runResume(cmd *cobra.Command, cfg config.Config, filter string, limit int, 
 			return WithExitCode(err, 1)
 		}
 	}
-	return resumeSession(cmd, cfg, picked, fork, dryRun)
+	return resumeSession(cmd, cfg, boundary, picked, fork, dryRun)
 }
 
 // ambiguousMatch is the headless answer to "which of these did you mean".
@@ -405,7 +405,7 @@ func displayWidth(s string) int { return ansi.StringWidth(s) }
 
 // resumeSession restores the session's tasks, moves into its directory, and
 // replaces this process with claude.
-func resumeSession(cmd *cobra.Command, cfg config.Config, s resume.Session, fork, dryRun bool) error {
+func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMigrationBoundary, s resume.Session, fork, dryRun bool) error {
 	errOut := cmd.ErrOrStderr()
 
 	// The one failure mode this feature introduces. Two claude processes
@@ -454,7 +454,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, s resume.Session, fork
 			sanitizeTerm(s.ID), sanitizeTerm(s.Cwd)), 1)
 	}
 
-	lc, _ := resolveLaunchConfig(nil, cfg)
+	lc, _ := resolveLaunchConfig(boundary, cfg)
 	// Resolve is a pure function of the config and an arbitrary cwd, so
 	// resuming into another repo gets that repo's profile for free — no
 	// per-project config loading.

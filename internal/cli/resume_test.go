@@ -217,7 +217,7 @@ func TestResumeSession_RefusesLiveButNotWithFork(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 
-	err := resumeSession(cmd, config.Config{}, live, false, false)
+	err := resumeSession(cmd, config.Config{}, nil, live, false, false)
 	if err == nil || !strings.Contains(err.Error(), "4242") {
 		t.Fatalf("continuing a live session returned %v, want a refusal naming pid 4242", err)
 	}
@@ -230,7 +230,7 @@ func TestResumeSession_RefusesLiveButNotWithFork(t *testing.T) {
 
 	// With --fork the liveness refusal must not fire at all; the empty cwd is
 	// what stops it, which proves execution got past the live check.
-	err = resumeSession(cmd, config.Config{}, live, true, false)
+	err = resumeSession(cmd, config.Config{}, nil, live, true, false)
 	if err == nil {
 		t.Fatal("expected the empty-cwd error, got nil")
 	}
@@ -389,7 +389,7 @@ func TestRunResume_AmbiguousDryRunPrintsCandidatesNotPicker(t *testing.T) {
 	pinTTY(t, true)
 
 	cmd, out, _ := newTestCmd()
-	err := runResume(cmd, config.Config{}, "cc", 0, false, true)
+	err := runResume(cmd, config.Config{}, nil, "cc", 0, false, true)
 
 	if *calls != 0 {
 		t.Errorf("the picker was reached %d time(s) under --dry-run", *calls)
@@ -407,7 +407,7 @@ func TestRunResume_AmbiguousWithoutTTYPrintsCandidates(t *testing.T) {
 	pinTTY(t, false)
 
 	cmd, out, _ := newTestCmd()
-	err := runResume(cmd, config.Config{}, "cc", 0, false, false)
+	err := runResume(cmd, config.Config{}, nil, "cc", 0, false, false)
 
 	if *calls != 0 {
 		t.Errorf("the picker was reached %d time(s) with no terminal to draw on", *calls)
@@ -430,7 +430,7 @@ func TestRunResume_AmbiguousSanitizesCandidates(t *testing.T) {
 	pinTTY(t, false)
 
 	cmd, out, _ := newTestCmd()
-	if err := runResume(cmd, config.Config{}, "cc", 0, false, true); err == nil {
+	if err := runResume(cmd, config.Config{}, nil, "cc", 0, false, true); err == nil {
 		t.Fatal("an ambiguous filter returned nil")
 	}
 	// Both assertions are load-bearing. assertInert on an empty string passes
@@ -458,7 +458,7 @@ func TestRunResume_AmbiguousOnTTYStillPicks(t *testing.T) {
 	pinTTY(t, true)
 
 	cmd, out, _ := newTestCmd()
-	err := runResume(cmd, config.Config{}, "cc", 0, false, false)
+	err := runResume(cmd, config.Config{}, nil, "cc", 0, false, false)
 
 	if *calls != 1 {
 		t.Fatalf("the picker ran %d time(s), want exactly 1 — an interactive ambiguous resume still prompts", *calls)
@@ -484,7 +484,7 @@ func TestRunResume_ForkDryRunAmbiguousSkipsPicker(t *testing.T) {
 	pinTTY(t, true)
 
 	cmd, out, _ := newTestCmd()
-	err := runResume(cmd, config.Config{}, "cc", 0, true, true)
+	err := runResume(cmd, config.Config{}, nil, "cc", 0, true, true)
 
 	if *calls != 0 {
 		t.Errorf("--fork --dry-run reached the picker %d time(s)", *calls)
@@ -506,7 +506,7 @@ func TestRunResume_SingleMatchDryRunUnchanged(t *testing.T) {
 	pinTTY(t, false)
 
 	cmd, out, errOut := newTestCmd()
-	if err := runResume(cmd, config.Config{}, "cc", 0, false, true); err != nil {
+	if err := runResume(cmd, config.Config{}, nil, "cc", 0, false, true); err != nil {
 		t.Fatalf("single-match --dry-run returned %v, want nil", err)
 	}
 	if *calls != 0 {
