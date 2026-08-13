@@ -82,7 +82,7 @@ func newDockerBuildCmd(client *dockerpkg.Client) *cobra.Command {
 				return err
 			}
 			if !result.GitMetadata {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: no git metadata (%s); tagged %s only\n", result.GitReason, result.DevTag)
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: incomplete git metadata (%s); tagged %s only\n", result.GitReason, result.DevTag)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "built %s\n", result.Tag)
 			return nil
