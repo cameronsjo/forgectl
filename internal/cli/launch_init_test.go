@@ -52,7 +52,7 @@ func newLegacyHarnessWithBody(t *testing.T, legacyBody string) *harness {
 		env: []string{
 			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"HOME=" + base,
-			"XDG_CONFIG_HOME=" + base,
+			"XDG_CONFIG_HOME=" + testXDGConfigHome(base),
 			"FORGECTL_TEST_OUT=" + outFile,
 		},
 	}

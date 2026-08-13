@@ -16,6 +16,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 	"github.com/cameronsjo/forgectl/internal/tui"
 )
@@ -42,12 +43,25 @@ var isInteractiveTTY = func() bool {
 // either opening the TUI (bare invoke or an external-command miss — the thumb-
 // mode affordance) or handing off to fang for styled help/errors/version.
 func Execute(ctx context.Context) error {
-	cfg := config.Load()
+	env, err := config.CaptureEnvSnapshot()
+	if err != nil {
+		return err
+	}
+	legacyBoundary, err := config.PrepareLegacyMigrationBoundary(env, config.NativeMigrationFS())
+	if err != nil {
+		return err
+	}
+	defer legacyBoundary.Close() //nolint:errcheck
+
+	var cfg config.Config
+	if !errors.Is(legacyBoundary.Refusal, config.ErrLegacyPathControl) {
+		cfg = config.LoadPath(legacyBoundary.ConfigPath)
+	}
 	closer := config.SetupLogger(cfg)
 	defer closer.Close()
 
 	slog.Debug("Starting forgectl.", "version", meta.Version)
-	deps := module.Deps{Cfg: cfg, Runner: exec.OSRunner{}}
+	deps := module.Deps{Cfg: cfg, Runner: exec.OSRunner{}, LegacyBoundary: legacyBoundary}
 	// The bare-invoke TUI/runAction path keeps its own tmux client — clients
 	// are stateless wrappers over the Runner, so a second instance is free and
 	// the TUI stays decoupled from the module registry (ADR-0005: the menu is
@@ -63,13 +77,13 @@ func Execute(ctx context.Context) error {
 	// styled help. Only an inert global flag (--no-icons) may precede the token —
 	// a root --help/--version must reach fang, not be skipped into the launcher.
 	if rest, ok := launchIntercept(args); ok {
-		if handled, err := runLaunch(cfg, rest); handled {
+		if handled, err := runLaunch(deps, rest); handled {
 			// This path bypasses fang, which is what prints styled errors for
 			// the normal command tree. Print here so an intercept error (e.g. a
 			// bad FORGECTL_CLAUDE_BIN from ClaudePath) doesn't exit non-zero with
 			// empty stderr — mirrors claunch's original main().
 			if err != nil {
-				fmt.Fprintln(os.Stderr, meta.AppName+": "+err.Error())
+				fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(err.Error()))
 			}
 			return err
 		}

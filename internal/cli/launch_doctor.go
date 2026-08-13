@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -9,6 +10,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 var (
@@ -17,7 +19,7 @@ var (
 	launchFailMark = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render("✗")
 )
 
-func newLaunchDoctorCmd(cfg config.Config) *cobra.Command {
+func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Config) *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
 		Short: "Check harness availability and launch config validity",
@@ -26,10 +28,10 @@ func newLaunchDoctorCmd(cfg config.Config) *cobra.Command {
 			out := cmd.OutOrStdout()
 			healthy := true
 
-			effLaunch, notice := autoMigrateOrWarnLegacyLaunch(cfg)
+			effLaunch, notice := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
 			cfg.Launch = effLaunch
 
-			lc, src := resolveLaunchConfig(cfg)
+			lc, src := resolveLaunchConfig(boundary, cfg)
 
 			profile := launch.DefaultsProfile(lc)
 			if cwd, err := os.Getwd(); err == nil {
@@ -37,7 +39,7 @@ func newLaunchDoctorCmd(cfg config.Config) *cobra.Command {
 			}
 			if err := profile.Validate(); err != nil {
 				healthy = false
-				fmt.Fprintf(out, "%s launch profile invalid: %v\n", launchFailMark, err)
+				fmt.Fprintf(out, "%s launch profile invalid: %s\n", launchFailMark, termsafe.SafeLine(err.Error()))
 			}
 			// [pr] effort is validated separately because it never enters the
 			// resolved [launch] profile above — it is applied inside the review
@@ -49,7 +51,7 @@ func newLaunchDoctorCmd(cfg config.Config) *cobra.Command {
 			if cfg.Pr.Effort != "" {
 				if err := (launch.Profile{Harness: "claude", Effort: cfg.Pr.Effort}).Validate(); err != nil {
 					healthy = false
-					fmt.Fprintf(out, "%s [pr] config invalid: %v\n", launchFailMark, err)
+					fmt.Fprintf(out, "%s [pr] config invalid: %s\n", launchFailMark, termsafe.SafeLine(err.Error()))
 				}
 			}
 			var binaryPath string
@@ -60,27 +62,41 @@ func newLaunchDoctorCmd(cfg config.Config) *cobra.Command {
 				binaryPath, binaryErr = launch.ClaudePath(lc.Defaults)
 			}
 			if binaryErr == nil {
-				fmt.Fprintf(out, "%s %s found: %s\n", launchOKMark, profile.Harness, binaryPath)
+				fmt.Fprintf(out, "%s %s found: %s\n", launchOKMark, termsafe.SafeLine(profile.Harness), termsafe.QuotePath(binaryPath))
 			} else {
 				healthy = false
-				fmt.Fprintf(out, "%s %v\n", launchFailMark, binaryErr)
+				fmt.Fprintf(out, "%s %s\n", launchFailMark, termsafe.SafeLine(binaryErr.Error()))
 			}
 
-			switch parseErr := config.Validate(); {
+			configPath := ""
+			if boundary != nil {
+				configPath = boundary.ConfigPath
+			} else {
+				configPath, _ = config.ConfigPath()
+			}
+			var parseErr error
+			if boundary == nil || !errors.Is(boundary.Refusal, config.ErrLegacyPathControl) {
+				parseErr = config.ValidatePath(configPath)
+			}
+			switch {
 			case parseErr != nil:
 				healthy = false
-				fmt.Fprintf(out, "%s config failed to parse: %v\n", launchFailMark, parseErr)
-			case lc.IsZero():
-				if legacyErr := config.ValidateLegacyLaunch(); legacyErr != nil {
+				fmt.Fprintf(out, "%s config failed to parse: %s\n", launchFailMark, termsafe.SafeLine(parseErr.Error()))
+			case !cfg.HasLaunchSection() && lc.IsZero():
+				var legacyErr error
+				if boundary != nil && boundary.Status != config.BoundaryNoSource {
+					_, legacyErr = boundary.LoadReadOnlyLegacy()
+				}
+				if legacyErr != nil {
 					healthy = false
-					fmt.Fprintf(out, "%s legacy claunch config failed to parse: %v\n", launchFailMark, legacyErr)
+					fmt.Fprintf(out, "%s legacy claunch config failed to parse: %s\n", launchFailMark, termsafe.SafeLine(legacyErr.Error()))
 				} else {
 					fmt.Fprintf(out, "%s no launch profiles configured — using built-in defaults (run `forgectl launch init`)\n", launchWarnMark)
 				}
 			default:
-				fmt.Fprintf(out, "%s launch config: %s (%d project profile(s))\n", launchOKMark, src, len(lc.Projects))
+				fmt.Fprintf(out, "%s launch config: %s (%d project profile(s))\n", launchOKMark, termsafe.QuotePath(src), len(lc.Projects))
 				if notice != "" {
-					fmt.Fprintf(out, "%s %s\n", launchWarnMark, notice)
+					fmt.Fprintf(out, "%s %s\n", launchWarnMark, termsafe.SafeLine(notice))
 				}
 			}
 
@@ -88,7 +104,7 @@ func newLaunchDoctorCmd(cfg config.Config) *cobra.Command {
 			// off is a valid choice (a machine with no local collector).
 			if cfg.Bench.Telemetry {
 				fmt.Fprintf(out, "%s telemetry: on → %s (%s)\n", launchOKMark,
-					cfg.Bench.ResolvedOTLPEndpoint(), cfg.Bench.ResolvedOTLPProtocol())
+					termsafe.SafeLine(cfg.Bench.ResolvedOTLPEndpoint()), termsafe.SafeLine(cfg.Bench.ResolvedOTLPProtocol()))
 			} else {
 				fmt.Fprintf(out, "%s telemetry: off (enable with [bench].telemetry = true)\n", launchWarnMark)
 			}
