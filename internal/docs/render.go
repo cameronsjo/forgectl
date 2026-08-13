@@ -99,6 +99,194 @@ var svgNumericish = regexp.MustCompile(`^[-+.,\s]*[0-9][-+0-9.,eE\s]*(px|em|rem|
 // svgTransform matches the SVG transform functions and nothing else.
 var svgTransform = regexp.MustCompile(`^(?i)(\s*(matrix|translate|scale|rotate|skewX|skewY)\s*\([-+0-9.,eE\s]*\)\s*)+$`)
 
+// svgNamespace accepts only the canonical, case-sensitive SVG namespace.
+// Omission remains valid; any authored alternative loses this attribute while
+// the rest of the allowlisted SVG remains intact.
+var svgNamespace = regexp.MustCompile(`^http://www\.w3\.org/2000/svg$`)
+
+func dropDuplicateSVGNamespaces(rendered []byte) []byte {
+	var sanitized []byte
+	for searchFrom := 0; searchFrom < len(rendered); {
+		start := findSVGOpeningTag(rendered, searchFrom)
+		if start < 0 {
+			return append(sanitized, rendered[searchFrom:]...)
+		}
+		sanitized = append(sanitized, rendered[searchFrom:start]...)
+		end, attributes, malformed := scanSVGOpeningTag(rendered, start)
+		if end < 0 {
+			// A quote-aware scan could not find the end of this opening tag.
+			// Its boundary is ambiguous, so dropping the remainder is the only
+			// repair that cannot accidentally promote attacker text into HTML.
+			return sanitized
+		}
+		if malformed {
+			sanitized = append(sanitized, "<svg>"...)
+		} else if len(attributes) < 2 {
+			sanitized = append(sanitized, rendered[start:end]...)
+		} else {
+			cursor := start
+			for _, attribute := range attributes {
+				sanitized = append(sanitized, rendered[cursor:attribute[0]]...)
+				cursor = attribute[1]
+			}
+			sanitized = append(sanitized, rendered[cursor:end]...)
+		}
+		searchFrom = end
+	}
+	return sanitized
+}
+
+func findSVGOpeningTag(rendered []byte, from int) int {
+	for i := from; i < len(rendered); i++ {
+		if rendered[i] != '<' {
+			continue
+		}
+		if bytes.HasPrefix(rendered[i:], []byte("<!--")) {
+			commentEnd := bytes.Index(rendered[i+4:], []byte("-->"))
+			if commentEnd < 0 {
+				return -1
+			}
+			i += 4 + commentEnd + 2
+			continue
+		}
+		if bytes.HasPrefix(rendered[i:], []byte("<![CDATA[")) {
+			cdataEnd := bytes.Index(rendered[i+9:], []byte("]]>"))
+			if cdataEnd < 0 {
+				return -1
+			}
+			i += 9 + cdataEnd + 2
+			continue
+		}
+		if i+4 <= len(rendered) && equalASCIIFold(rendered[i+1:i+4], "svg") &&
+			(i+4 == len(rendered) || isHTMLSpace(rendered[i+4]) || rendered[i+4] == '>' || rendered[i+4] == '/') {
+			return i
+		}
+		end := markupTagEnd(rendered, i)
+		if end < 0 {
+			return -1
+		}
+		i = end - 1
+	}
+	return -1
+}
+
+func markupTagEnd(rendered []byte, start int) int {
+	quote := byte(0)
+	for i := start + 1; i < len(rendered); i++ {
+		if quote != 0 {
+			if rendered[i] == quote {
+				quote = 0
+			}
+			continue
+		}
+		if rendered[i] == '\'' || rendered[i] == '"' {
+			quote = rendered[i]
+			continue
+		}
+		if rendered[i] == '>' {
+			return i + 1
+		}
+	}
+	return -1
+}
+
+func scanSVGOpeningTag(rendered []byte, start int) (int, [][2]int, bool) {
+	quote := byte(0)
+	end := -1
+	for i := start + 4; i < len(rendered); i++ {
+		if quote != 0 {
+			if rendered[i] == quote {
+				quote = 0
+			}
+			continue
+		}
+		if rendered[i] == '\'' || rendered[i] == '"' {
+			quote = rendered[i]
+		} else if rendered[i] == '>' {
+			end = i + 1
+			break
+		}
+	}
+	if end < 0 {
+		return -1, nil, false
+	}
+
+	var attributes [][2]int
+	malformed := false
+	for cursor := start + 4; cursor < end-1; {
+		for cursor < end-1 && isHTMLSpace(rendered[cursor]) {
+			cursor++
+		}
+		if cursor >= end-1 || rendered[cursor] == '/' {
+			break
+		}
+		attributeStart := cursor
+		for cursor < end-1 && !isHTMLSpace(rendered[cursor]) && rendered[cursor] != '=' && rendered[cursor] != '>' && rendered[cursor] != '/' {
+			cursor++
+		}
+		nameEnd := cursor
+		if nameEnd == attributeStart {
+			return end, attributes, true
+		}
+		isNamespace := equalASCIIFold(rendered[attributeStart:nameEnd], "xmlns")
+		for cursor < end-1 && isHTMLSpace(rendered[cursor]) {
+			cursor++
+		}
+		hasValue := cursor < end-1 && rendered[cursor] == '='
+		if hasValue {
+			cursor++
+			for cursor < end-1 && isHTMLSpace(rendered[cursor]) {
+				cursor++
+			}
+			if cursor >= end-1 {
+				return end, attributes, malformed || isNamespace
+			}
+			if rendered[cursor] == '\'' || rendered[cursor] == '"' {
+				valueQuote := rendered[cursor]
+				cursor++
+				for cursor < end-1 && rendered[cursor] != valueQuote {
+					cursor++
+				}
+				if cursor >= end-1 {
+					return end, attributes, malformed || isNamespace
+				}
+				cursor++
+			} else {
+				for cursor < end-1 && !isHTMLSpace(rendered[cursor]) && rendered[cursor] != '>' {
+					cursor++
+				}
+			}
+		}
+		if !isNamespace {
+			continue
+		}
+		if !hasValue {
+			malformed = true
+		}
+		attributes = append(attributes, [2]int{attributeStart, cursor})
+	}
+	return end, attributes, malformed
+}
+
+func isHTMLSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\f'
+}
+
+func equalASCIIFold(value []byte, literal string) bool {
+	if len(value) != len(literal) {
+		return false
+	}
+	for i, b := range value {
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if b != literal[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // allowInlineSVG opens the sanitizer to hand-authored inline SVG — the reader's
 // diagrams-as-source-in-the-doc case (forgectl#93's pan/zoom requirement).
 //
@@ -193,7 +381,8 @@ func allowInlineSVG(p *bluemonday.Policy) {
 
 	// The root element's framing attributes. viewBox is what makes pan/zoom
 	// possible at all, so it is the load-bearing one here.
-	p.AllowAttrs("viewBox", "preserveAspectRatio", "xmlns", "role", "aria-label").OnElements("svg")
+	p.AllowAttrs("viewBox", "preserveAspectRatio", "role", "aria-label").OnElements("svg")
+	p.AllowAttrs("xmlns").Matching(svgNamespace).OnElements("svg")
 	p.AllowAttrs("width", "height").Matching(svgNumericish).OnElements("svg", "rect", "marker", "mask", "symbol")
 
 	// Geometry.
@@ -284,5 +473,5 @@ func Render(source []byte) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("render markdown: %w", err)
 	}
-	return string(sanitizer.SanitizeBytes(buf.Bytes())), nil
+	return string(sanitizer.SanitizeBytes(dropDuplicateSVGNamespaces(buf.Bytes()))), nil
 }

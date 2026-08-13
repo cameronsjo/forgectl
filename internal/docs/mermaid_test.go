@@ -133,6 +133,117 @@ func TestRender_InlineSVG_Survives(t *testing.T) {
 	}
 }
 
+func TestRender_InlineSVG_OnlyCanonicalNamespaceSurvives(t *testing.T) {
+	tests := []struct {
+		name      string
+		xmlns     string
+		wantXMLNS bool
+	}{
+		{name: "missing"},
+		{name: "canonical", xmlns: ` xmlns="http://www.w3.org/2000/svg"`, wantXMLNS: true},
+		{name: "canonical with xlink declaration", xmlns: ` xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"`, wantXMLNS: true},
+		{name: "empty", xmlns: ` xmlns=""`},
+		{name: "attacker", xmlns: ` xmlns="https://attacker.example/svg"`},
+		{name: "xhtml", xmlns: ` xmlns="http://www.w3.org/1999/xhtml"`},
+		{name: "mixed case", xmlns: ` xmlns="http://www.w3.org/2000/SVG"`},
+		{name: "padded", xmlns: ` xmlns=" http://www.w3.org/2000/svg "`},
+		{name: "duplicate alternative", xmlns: ` xmlns="https://attacker.example/svg" xmlns="http://www.w3.org/2000/svg"`},
+		{name: "canonical before duplicate alternative", xmlns: ` xmlns="http://www.w3.org/2000/svg" xmlns="https://attacker.example/svg"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := `<svg` + tt.xmlns + ` viewBox="0 0 10 10"><rect x="1" y="2" width="3" height="4"/></svg>` + "\n"
+			out := renderOrFail(t, src)
+			hasXMLNS := strings.Contains(out, `xmlns="`)
+			if hasXMLNS != tt.wantXMLNS {
+				t.Errorf("xmlns presence = %v, want %v: %s", hasXMLNS, tt.wantXMLNS, out)
+			}
+			for _, want := range []string{"<svg", "<rect", `viewbox="0 0 10 10"`, `width="3"`, `height="4"`} {
+				if !strings.Contains(strings.ToLower(out), strings.ToLower(want)) {
+					t.Errorf("rejected namespace removed safe SVG feature %q: %s", want, out)
+				}
+			}
+		})
+	}
+}
+
+func TestDropDuplicateSVGNamespaces_ExactAttributeOnly(t *testing.T) {
+	const canonical = `xmlns="http://www.w3.org/2000/svg"`
+	const xlink = `xmlns:xlink="http://www.w3.org/1999/xlink"`
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "canonical and xlink",
+			in:   `<svg ` + canonical + ` ` + xlink + ` viewBox="0 0 1 1"></svg>`,
+			want: `<svg ` + canonical + ` ` + xlink + ` viewBox="0 0 1 1"></svg>`,
+		},
+		{
+			name: "attacker then canonical",
+			in:   `<svg xmlns="https://attacker.example/svg" ` + canonical + ` ` + xlink + ` viewBox="0 0 1 1"></svg>`,
+			want: `<svg   ` + xlink + ` viewBox="0 0 1 1"></svg>`,
+		},
+		{
+			name: "canonical then attacker",
+			in:   `<svg ` + canonical + ` xmlns="https://attacker.example/svg" ` + xlink + ` viewBox="0 0 1 1"></svg>`,
+			want: `<svg   ` + xlink + ` viewBox="0 0 1 1"></svg>`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := string(dropDuplicateSVGNamespaces([]byte(tt.in))); got != tt.want {
+				t.Fatalf("dropDuplicateSVGNamespaces() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDropDuplicateSVGNamespaces_MalformedNamespaceFailsClosed(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "bare duplicate after canonical",
+			in:   `<svg xmlns="http://www.w3.org/2000/svg" xmlns viewBox="0 0 1 1"><rect/></svg>`,
+			want: `<svg><rect/></svg>`,
+		},
+		{
+			name: "bare duplicate before canonical",
+			in:   `<svg xmlns xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect/></svg>`,
+			want: `<svg><rect/></svg>`,
+		},
+		{
+			name: "unterminated namespace quote",
+			in:   `<p>before</p><svg xmlns="http://www.w3.org/2000/svg><rect/></svg><p>after</p>`,
+			want: `<p>before</p>`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := string(dropDuplicateSVGNamespaces([]byte(tt.in))); got != tt.want {
+				t.Fatalf("dropDuplicateSVGNamespaces() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDropDuplicateSVGNamespaces_ScansOnlyRealOpeningTags(t *testing.T) {
+	const prefix = "<!-- <svg xmlns=a xmlns=b> --><![CDATA[<svg xmlns=a xmlns=b>]]><?xml value='<svg xmlns=a xmlns=b>'?><div data-value='<svg xmlns=a xmlns=b>'></div>"
+	const root = `<SVG xmlns="http://www.w3.org/2000/svg" xmlns="https://attacker.example/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><rect/></SVG>`
+	const wantRoot = `<SVG   xmlns:xlink="http://www.w3.org/1999/xlink"><rect/></SVG>`
+
+	if got := string(dropDuplicateSVGNamespaces([]byte(prefix + root))); got != prefix+wantRoot {
+		t.Fatalf("dropDuplicateSVGNamespaces() = %q, want %q", got, prefix+wantRoot)
+	}
+}
+
 // viewBox must survive the sanitizer, but NOT necessarily with its authored
 // capitalization. bluemonday tokenizes through golang.org/x/net/html, which
 // lowercases attribute names, so the serialized output reads viewbox=. That is

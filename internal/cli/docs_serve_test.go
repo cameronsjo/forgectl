@@ -24,11 +24,11 @@ package cli
 //
 // Token policy in runDocsServe (Classification: security-critical — decides
 // whether a docs server starts unauthenticated)
-//   [x] Happy: a non-loopback bind with no --token requires a generated token
+//   [x] Happy: a non-loopback bind with no --token-file requires a generated token
 //   [x] Happy: a loopback bind needs no generated token
-//   [x] Happy: an explicit --token is never silently replaced, even off loopback
+//   [x] Happy: an explicit --token-file is used on either bind class
 //   [x] Happy: two generated tokens differ
-//   These call resolveToken — the same function runDocsServe calls — so they
+//   These call resolveDocsToken — the same function runDocsServe calls — so they
 //   fail if the server's rule regresses. An end-to-end EXPOSED bind is
 //   deliberately not exercised: it would open a real network port during the
 //   test run. The loopback half is covered end-to-end as well, above.
@@ -36,10 +36,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,6 +52,66 @@ import (
 	"github.com/cameronsjo/forgectl/internal/httpsrv"
 	"github.com/cameronsjo/forgectl/internal/module"
 )
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+func TestDocsServe_RetiredTokenFlagNeverEchoesValue(t *testing.T) {
+	const sentinel = "SENTINEL-SECRET-VALUE"
+	for _, args := range [][]string{{"--token", sentinel}, {"--token=" + sentinel}} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			cmd := newDocsServeCmd(module.Deps{})
+			var stdout, stderr, logs bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			cmd.SetArgs(args)
+			priorLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(priorLogger) })
+
+			err := cmd.Execute()
+			if err == nil || err.Error() != "--token was removed because command-line values are visible to other processes; use --token-file instead" {
+				t.Fatalf("Execute error = %v, want fixed retired-flag guidance", err)
+			}
+			for name, text := range map[string]string{
+				"error": err.Error(), "stdout": stdout.String(), "stderr": stderr.String(), "logs": logs.String(),
+			} {
+				if strings.Contains(text, sentinel) {
+					t.Fatalf("%s leaked retired flag value: %q", name, text)
+				}
+			}
+		})
+	}
+}
+
+func TestDocsServe_FlagErrorRewriteIsNarrow(t *testing.T) {
+	cmd := newDocsServeCmd(module.Deps{})
+	if cmd.Flags().Lookup("token") != nil {
+		t.Fatal("retired --token flag is still registered")
+	}
+	if cmd.Flags().Lookup("token-file") == nil {
+		t.Fatal("--token-file is not registered")
+	}
+	cmd.SetArgs([]string{"--unrelated-unknown"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "unknown flag: --unrelated-unknown") {
+		t.Fatalf("unrelated flag error = %v, want Cobra's ordinary parsing error", err)
+	}
+}
 
 func testCmdWithContext(ctx context.Context) *cobra.Command {
 	cmd := &cobra.Command{}
@@ -139,6 +201,131 @@ func TestRunDocsServe_InvalidAddr_ErrorsWrapped(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "bind") {
 		t.Errorf("error = %v, want it to name the bind failure", err)
+	}
+}
+
+func TestRunDocsServe_InvalidTokenFileFailsBeforeBind(t *testing.T) {
+	idx := testDocsIndex(t)
+	tests := []struct {
+		name    string
+		path    string
+		content string
+		mode    os.FileMode
+		want    string
+		leak    string
+	}{
+		{name: "relative path", path: "relative-token", want: "absolute and clean"},
+		{name: "invalid grammar", content: "sentinel:invalid", mode: 0o600, want: "invalid bearer token", leak: "sentinel:invalid"},
+		{name: "oversize", content: strings.Repeat("A", 4097), mode: 0o600, want: "too large"},
+		{name: "unsafe permissions", content: "valid", mode: 0o644, want: "permissions"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := tt.path
+			if path == "" {
+				path = filepath.Join(t.TempDir(), "token")
+				if err := os.WriteFile(path, []byte(tt.content), tt.mode); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, tt.mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := testCmdWithContext(context.Background())
+			err := runDocsServe(cmd, module.Deps{Runner: &exec.FakeRunner{}}, idx, "not-a-valid-address", false, path)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("runDocsServe error = %v, want %q token-file error before bind", err, tt.want)
+			}
+			if strings.Contains(err.Error(), "bind") || tt.leak != "" && strings.Contains(err.Error(), tt.leak) {
+				t.Fatalf("runDocsServe reached bind or leaked content: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunDocsServe_TokenFilePunctuationAuthenticatesWithoutOutputLeak(t *testing.T) {
+	const token = "Az09-._~+/==="
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	idx := testDocsIndex(t)
+	fake := &exec.FakeRunner{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := testCmdWithContext(ctx)
+	var stdout, stderr lockedBuffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	done := make(chan error, 1)
+	go func() { done <- runDocsServe(cmd, module.Deps{Runner: fake}, idx, "127.0.0.1:0", true, tokenPath) }()
+
+	var addr string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range strings.Split(stdout.String(), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "http://127.0.0.1:") {
+				addr = strings.TrimSuffix(strings.TrimPrefix(line, "http://"), "/")
+				break
+			}
+		}
+		if addr != "" && strings.Contains(stdout.String(), "auth: bearer token required (from --token-file)") {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if addr == "" {
+		cancel()
+		t.Fatalf("server did not publish a loopback URL: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+
+	root, rel, err := docspkg.LocateDoc(docspkg.ServerInfo{Addr: addr, Token: token}, filepath.Join(idx.Roots()[0].Path, "readme.md"))
+	if err != nil || root == "" || rel != "readme.md" {
+		cancel()
+		t.Fatalf("LocateDoc with punctuation/padding token = (%q, %q, %v)", root, rel, err)
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	for _, presented := range []string{"", "wrong"} {
+		req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if presented != "" {
+			req.Header.Set("Authorization", "Bearer "+presented)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close() //nolint:errcheck // only status and headers are under test
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("presented token %q: status=%d, want 401", presented, resp.StatusCode)
+		}
+		if resp.Header.Get("Content-Security-Policy") == "" || resp.Header.Get("X-Content-Type-Options") != "nosniff" {
+			t.Errorf("401 missing security headers: %v", resp.Header)
+		}
+	}
+
+	if call := fake.Last(); call.Name != "" {
+		t.Errorf("protected --open invoked browser runner: %+v", call)
+	}
+	for name, text := range map[string]string{"stdout": stdout.String(), "stderr": stderr.String()} {
+		if strings.Contains(text, token) || strings.Contains(text, tokenPath) {
+			t.Errorf("%s leaked token or path: %q", name, text)
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("runDocsServe shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runDocsServe did not shut down")
 	}
 }
 
@@ -302,7 +489,7 @@ func TestAllowedHosts_Loopback_NoAddition(t *testing.T) {
 	}
 }
 
-// The token-policy tests below call resolveToken — the SAME function
+// The token-policy tests below call resolveDocsToken — the SAME function
 // runDocsServe calls — rather than re-implementing its conditional here.
 //
 // That distinction is the point. The off-loopback path cannot be driven
@@ -310,19 +497,19 @@ func TestAllowedHosts_Loopback_NoAddition(t *testing.T) {
 // run, which a suite must not do; and a test that copied the conditional to work
 // around that would stay green after the server's own rule changed, which is
 // worse than no test because it reads as coverage. Extracting the policy into
-// resolveToken means these tests fail when the server's behavior regresses. The
+// resolveDocsToken means these tests fail when the server's behavior regresses. The
 // loopback half is ALSO covered end-to-end through a real running server by
 // TestRunDocsServe_Loopback_NoBearerTokenRequired above.
 
 func TestResolveToken_NonLoopbackWithoutFlag_GeneratesAToken(t *testing.T) {
 	for _, addr := range []string{"0.0.0.0:3590", "192.168.1.10:3590", "100.64.1.2:3590", ":3590"} {
 		t.Run(addr, func(t *testing.T) {
-			got, err := resolveToken("", addr)
+			got, err := resolveDocsToken("", addr)
 			if err != nil {
-				t.Fatalf("resolveToken(\"\", %q): %v", addr, err)
+				t.Fatalf("resolveDocsToken(\"\", %q): %v", addr, err)
 			}
-			if got == "" {
-				t.Errorf("resolveToken(\"\", %q) = \"\", want a generated token — binding off loopback must never start unauthenticated", addr)
+			if got.value == "" || got.source != docsTokenGenerated {
+				t.Errorf("resolveDocsToken(\"\", %q) = %+v, want a generated token — binding off loopback must never start unauthenticated", addr, got)
 			}
 		})
 	}
@@ -331,42 +518,40 @@ func TestResolveToken_NonLoopbackWithoutFlag_GeneratesAToken(t *testing.T) {
 func TestResolveToken_Loopback_ReturnsNoToken(t *testing.T) {
 	for _, addr := range []string{"127.0.0.1:3590", "127.0.0.1:0", "localhost:3590", "[::1]:3590"} {
 		t.Run(addr, func(t *testing.T) {
-			got, err := resolveToken("", addr)
+			got, err := resolveDocsToken("", addr)
 			if err != nil {
-				t.Fatalf("resolveToken(\"\", %q): %v", addr, err)
+				t.Fatalf("resolveDocsToken(\"\", %q): %v", addr, err)
 			}
-			if got != "" {
-				t.Errorf("resolveToken(\"\", %q) = %q, want \"\" — a loopback bind needs no auth by default", addr, got)
-			}
-		})
-	}
-}
-
-func TestResolveToken_ExplicitFlag_IsNeverReplaced(t *testing.T) {
-	const supplied = "operator-supplied-token"
-	for _, addr := range []string{"192.168.1.10:3590", "127.0.0.1:3590"} {
-		t.Run(addr, func(t *testing.T) {
-			got, err := resolveToken(supplied, addr)
-			if err != nil {
-				t.Fatalf("resolveToken(%q, %q): %v", supplied, addr, err)
-			}
-			if got != supplied {
-				t.Errorf("resolveToken(%q, %q) = %q, want the supplied token unchanged — an operator's token must not be silently replaced", supplied, addr, got)
+			if got.value != "" || got.source != docsTokenNone {
+				t.Errorf("resolveDocsToken(\"\", %q) = %+v, want no token — a loopback bind needs no auth by default", addr, got)
 			}
 		})
 	}
 }
 
 func TestResolveToken_GeneratedTokensDiffer(t *testing.T) {
-	first, err := resolveToken("", "192.168.1.10:3590")
+	first, err := resolveDocsToken("", "192.168.1.10:3590")
 	if err != nil {
-		t.Fatalf("resolveToken: %v", err)
+		t.Fatalf("resolveDocsToken: %v", err)
 	}
-	second, err := resolveToken("", "192.168.1.10:3590")
+	second, err := resolveDocsToken("", "192.168.1.10:3590")
 	if err != nil {
-		t.Fatalf("resolveToken: %v", err)
+		t.Fatalf("resolveDocsToken: %v", err)
 	}
-	if first == second {
-		t.Errorf("two generated tokens are identical (%q) — a predictable token is not a token", first)
+	if first.value == second.value {
+		t.Errorf("two generated tokens are identical (%q) — a predictable token is not a token", first.value)
+	}
+}
+
+func TestDocsAuthStartupLine_DisclosureBoundary(t *testing.T) {
+	const token = "generated-token"
+	if got := docsAuthStartupLine(resolvedDocsToken{value: token, source: docsTokenGenerated}); got != "  auth: bearer token required (generated-token)" {
+		t.Fatalf("generated startup line = %q, want explicit generated-token disclosure", got)
+	}
+	if got := docsAuthStartupLine(resolvedDocsToken{value: token, source: docsTokenFromFile}); got != "  auth: bearer token required (from --token-file)" {
+		t.Fatalf("file startup line = %q, want source label without token", got)
+	}
+	if got := docsAuthStartupLine(resolvedDocsToken{}); got != "" {
+		t.Fatalf("unauthenticated startup line = %q, want empty", got)
 	}
 }
