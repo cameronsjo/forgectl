@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
-	"os"
 	"os/signal"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -59,27 +61,45 @@ func newDocsServeCmd(deps module.Deps) *cobra.Command {
 }
 
 // allowedHosts returns the Host-header allowlist for a bind address: the
-// loopback defaults, plus the bound host itself when it is not loopback.
+// loopback defaults, plus the bound host itself when it is not loopback, plus
+// the advertised host when discovery derived a different one.
 //
-// Without the addition, binding to a LAN or Tailscale address would serve a 403
-// to every request — the request's Host header would carry that address, which
-// DefaultAllowedHosts does not list. The allowlist's job is blocking
-// DNS-rebinding (a hostile page resolving its own domain to 127.0.0.1 to reach
-// this server through the victim's browser), and adding the address the operator
-// explicitly chose to bind does not weaken that: an attacker's page still cannot
-// present a Host header outside this list.
-func allowedHosts(bindAddr string) []string {
+// Without the bound-host addition, binding to a LAN or Tailscale address would
+// serve a 403 to every request — the request's Host header would carry that
+// address, which DefaultAllowedHosts does not list. The allowlist's job is
+// blocking DNS-rebinding (a hostile page resolving its own domain to 127.0.0.1
+// to reach this server through the victim's browser), and adding an address the
+// operator explicitly chose to bind does not weaken that: an attacker's page
+// still cannot present a Host header outside this list.
+//
+// The advertised host is added for the same reason one step later: discovery
+// publishes the address a reader will connect to, so that address must be one
+// the server accepts a Host header for, or every discovered request would 403.
+func allowedHosts(bindAddr, advertisedAddr string) []string {
 	allowed := append([]string(nil), httpsrv.DefaultAllowedHosts...)
-	if httpsrv.IsLoopbackAddr(bindAddr) {
-		return allowed
-	}
-	host, _, err := net.SplitHostPort(bindAddr)
-	if err != nil {
-		host = bindAddr
-	}
-	if host = strings.Trim(host, "[]"); host != "" {
+	add := func(addr string) {
+		if addr == "" {
+			return
+		}
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			host = addr
+		}
+		host = strings.Trim(host, "[]")
+		if host == "" {
+			return
+		}
+		for _, existing := range allowed {
+			if existing == host {
+				return
+			}
+		}
 		allowed = append(allowed, host)
 	}
+	if !httpsrv.IsLoopbackAddr(bindAddr) {
+		add(bindAddr)
+	}
+	add(advertisedAddr)
 	return allowed
 }
 
@@ -145,19 +165,61 @@ func resolveDocsToken(tokenFile, bindAddr string) (resolvedDocsToken, error) {
 	return resolvedDocsToken{value: token, source: docsTokenGenerated}, nil
 }
 
-// runDocsServe binds the listener, wires the security middleware chain
-// (forgectl#93 security-chain item 1, plus the cross-site rejecter
-// forgectl#178 adds)
-// around the docs handler, and serves until the command's context is canceled
-// (Ctrl-C/SIGTERM) or the server itself fails to start.
+// docsServeRuntime is every effect runDocsServe performs, passed BY VALUE.
+//
+// Not package-level test hooks: this command's tests run concurrently with each
+// other and with real servers, and a mutable global would let one test observe
+// another's fakes. Not nil-means-default fields either — a test that forgot one
+// would silently exercise production behavior and report a pass.
+type docsServeRuntime struct {
+	listen      func(string) (net.Listener, error)
+	serversDir  func() (string, error)
+	newInfo     func(addr, token string) (docspkg.ServerInfo, error)
+	probe       func(ctx context.Context, addr, generation string) error
+	publish     func(dir string, info docspkg.ServerInfo) (docspkg.Publication, error)
+	serve       func(*http.Server, net.Listener) error
+	closeServer func(*http.Server) error
+	shutdown    func(*http.Server, context.Context) error
+	closeLease  func(*docspkg.ServerLease) error
+}
+
+func productionDocsServeRuntime() docsServeRuntime {
+	return docsServeRuntime{
+		listen:      httpsrv.Listen,
+		serversDir:  config.DocsServersDir,
+		newInfo:     docspkg.NewServerInfo,
+		probe:       docspkg.ProbeServerGeneration,
+		publish:     docspkg.PublishServerInfo,
+		serve:       func(srv *http.Server, ln net.Listener) error { return srv.Serve(ln) },
+		closeServer: func(srv *http.Server) error { return srv.Close() },
+		shutdown:    func(srv *http.Server, ctx context.Context) error { return srv.Shutdown(ctx) },
+		closeLease:  func(lease *docspkg.ServerLease) error { return lease.Close() },
+	}
+}
+
+// runDocsServe is the production entry point. It does nothing but hand its
+// arguments plus a fully populated runtime to the implementation.
+func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addrFlag string, openFlag bool, tokenFile string) error {
+	return runDocsServeWithRuntime(cmd, deps, idx, addrFlag, openFlag, tokenFile, productionDocsServeRuntime())
+}
+
+// runDocsServeWithRuntime binds the listener, wires the security middleware
+// chain (forgectl#93 security-chain item 1, plus the cross-site rejecter
+// forgectl#178 adds) around the docs handler, publishes a generation-owned
+// discovery record, and serves until the command's context is canceled
+// (Ctrl-C/SIGTERM) or the server itself fails.
 //
 // Chain order is deliberate: security headers, Host allowlist, cross-site
-// rejection, then the bearer token when one is required. The two header checks
-// are pure string comparisons and deny the requests that should never have
-// arrived at all, so they run before the token check hashes anything. Putting
-// authentication last also means a cross-site probe gets 403 (this origin may
-// not talk to me) rather than 401 (send me credentials), which is both the
-// truer answer and the one that tells a hostile page less.
+// rejection, discovery identity, then the bearer token when one is required.
+// The two header checks are pure string comparisons and deny the requests that
+// should never have arrived at all, so they run before the token check hashes
+// anything. Putting authentication last also means a cross-site probe gets 403
+// (this origin may not talk to me) rather than 401 (send me credentials), which
+// is both the truer answer and the one that tells a hostile page less.
+//
+// The discovery identity endpoint sits behind the Host and cross-site gates but
+// AHEAD of authentication, because a reader asking "are you the server I found?"
+// has not yet decided whether to present a credential.
 //
 // SecurityHeaders sits OUTERMOST, ahead of every gate, because a rejected
 // request never reaches the docs handler that would otherwise set them — so
@@ -166,7 +228,18 @@ func resolveDocsToken(tokenFile, bindAddr string) (resolvedDocsToken, error) {
 // handler applies it again on the way past; setting the same fixed headers
 // twice is idempotent, and having it in both places means neither the handler
 // nor the chain depends on the other remembering.
-func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addrFlag string, openFlag bool, tokenFile string) error {
+func runDocsServeWithRuntime(
+	cmd *cobra.Command,
+	deps module.Deps,
+	idx *docspkg.Index,
+	addrFlag string,
+	openFlag bool,
+	tokenFile string,
+	rt docsServeRuntime,
+) error {
+	out := cmd.OutOrStdout()
+	errOut := cmd.ErrOrStderr()
+
 	bindAddr := addrFlag
 	if bindAddr == "" {
 		bindAddr = deps.Cfg.Docs.Addr
@@ -180,7 +253,7 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 	}
 	token := resolvedToken.value
 
-	ln, err := httpsrv.Listen(bindAddr)
+	ln, err := rt.listen(bindAddr)
 	if err != nil {
 		return fmt.Errorf("bind %s: %w", bindAddr, err)
 	}
@@ -189,11 +262,11 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 	store := docspkg.NewStore(idx)
 	events := docspkg.NewBroker()
 	// Backstop for every exit path that is NOT the signal path below —
-	// principally srv.Serve returning an unexpected error, which would otherwise
+	// principally Serve returning an unexpected error, which would otherwise
 	// leave SSE handlers parked on their subscriber channels until process
 	// teardown.
 	//
-	// This does NOT replace the explicit events.Close() before srv.Shutdown, and
+	// This does NOT replace the explicit events.Close() before Shutdown, and
 	// must not be "simplified" into it. A deferred call runs after the return
 	// expression is evaluated, so on the shutdown path the defer alone would fire
 	// only once Shutdown had already returned — reinstating the full-grace hang
@@ -201,17 +274,55 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 	// idempotent: whichever runs first does the work.
 	defer events.Close()
 
+	// Discovery eligibility is decided BEFORE the middleware chain exists,
+	// because an ineligible server must not carry an identity endpoint at all.
+	// A route that answered for a generation no record will ever name would
+	// imply a discoverability this server does not have.
+	var (
+		serversDir  string
+		initialInfo docspkg.ServerInfo
+		generation  atomic.Value
+		eligible    bool
+	)
+	advertisedAddr, advertiseErr := docspkg.AdvertisedDocsAddr(ln.Addr())
+	switch {
+	case advertiseErr != nil:
+		advertisedAddr = ""
+		warnDocsServe(errOut, "warning: `forgectl docs open` will not find this server — its address cannot be published for discovery: %v", advertiseErr)
+	default:
+		dir, dirErr := rt.serversDir()
+		if dirErr != nil {
+			warnDocsServe(errOut, "warning: `forgectl docs open` will not find this server — its discovery directory cannot be located: %v", dirErr)
+			break
+		}
+		info, infoErr := rt.newInfo(advertisedAddr, token)
+		if infoErr != nil {
+			// Before Serve, so this is a clean startup failure rather than a
+			// half-started server: nothing is listening and nothing was published.
+			events.Close()
+			ln.Close() //nolint:errcheck // returning a failure; best-effort release
+			return errDocsServeGeneration
+		}
+		serversDir, initialInfo, eligible = dir, info, true
+		generation.Store(info.Generation)
+	}
+
 	middleware := []func(http.Handler) http.Handler{
 		docspkg.SecurityHeaders,
-		httpsrv.HostAllowlist(allowedHosts(bindAddr)),
+		httpsrv.HostAllowlist(allowedHosts(bindAddr, advertisedAddr)),
 		httpsrv.RejectCrossSite(),
+	}
+	if eligible {
+		middleware = append(middleware, docspkg.DiscoveryIdentity(func() string {
+			current, _ := generation.Load().(string)
+			return current
+		}))
 	}
 	if token != "" {
 		middleware = append(middleware, httpsrv.BearerToken(token))
 	}
-	handler := httpsrv.Chain(docspkg.NewHandler(store, events), middleware...)
 	srv := &http.Server{
-		Handler: handler,
+		Handler: httpsrv.Chain(docspkg.NewHandler(store, events), middleware...),
 
 		// ReadHeaderTimeout bounds the slowloris shape (a client that opens a
 		// connection and dribbles headers forever). Safe for SSE: it covers
@@ -237,8 +348,49 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 		// stream handlers alone.
 	}
 
+	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// background tracks every goroutine this function starts. Waiting on it
+	// before returning is what makes "drain the started operations" structural
+	// rather than a sequence of receives a later edit could get out of step with.
+	var background sync.WaitGroup
+	serveCh := make(chan error, 1)
+	background.Add(1)
+	go func() {
+		defer background.Done()
+		serveCh <- rt.serve(srv, ln)
+	}()
+
+	var lease *docspkg.ServerLease
+	if eligible {
+		session := &docsDiscoverySession{
+			rt:         rt,
+			dir:        serversDir,
+			token:      token,
+			generation: &generation,
+			serve:      serveCh,
+			background: &background,
+			errOut:     errOut,
+		}
+		outcome, publishErr := session.publish(ctx, initialInfo)
+		lease = outcome.lease
+		if publishErr != nil {
+			return abortDocsServeStartup(rt, srv, events, &background, lease, errOut, publishErr)
+		}
+		if outcome.primary != nil {
+			return finishDocsServeStartup(rt, srv, events, &background, lease, errOut, *outcome.primary)
+		}
+	}
+
+	// The banner prints AFTER publication, not before.
+	//
+	// Startup can now fail (a self-probe that never answers) or be superseded
+	// (a Serve error, a signal) after the listener exists but before the server
+	// is usable. Printing the URL first would announce a reader that is about
+	// to exit, and the address line is what every caller — an operator, and the
+	// test harness — treats as "it is up".
 	url := "http://" + ln.Addr().String() + "/"
-	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "forgectl docs: serving %d doc(s) across %d root(s)\n", len(idx.List()), len(idx.Roots()))
 	fmt.Fprintf(out, "  %s\n", url)
 	if authLine := docsAuthStartupLine(resolvedToken); authLine != "" {
@@ -246,34 +398,12 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 	}
 	fmt.Fprintln(out, "  Ctrl-C to stop")
 
-	// Publish the resolved address so `docs open` can steer this server. Written
-	// only now, because the default bind uses port 0 and the port is not knowable
-	// before the listener resolves it. A failure here costs discovery, not
-	// serving, so it warns rather than aborting.
-	if infoPath, err := config.DocsServerPath(); err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "warning: cannot locate the docs-server discovery file: %v\n", err)
-	} else {
-		info := docspkg.ServerInfo{Addr: ln.Addr().String(), Token: token, PID: os.Getpid()}
-		if err := docspkg.WriteServerInfo(infoPath, info); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "warning: `forgectl docs open` will not find this server: %v\n", err)
-		} else {
-			defer func() {
-				if err := docspkg.RemoveServerInfo(infoPath); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not remove %s: %v\n", infoPath, err)
-				}
-			}()
-		}
-	}
-
-	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
 	// Live reload is best-effort: if the OS refuses a watcher (descriptor
 	// limits, an exotic filesystem), the reader still serves — it just stops
 	// refreshing on its own. Failing the whole command over it would be a worse
 	// trade than a warning.
-	if watcher, err := docspkg.NewWatcher(store, events); err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "warning: live reload unavailable: %v\n", err)
+	if watcher, watchErr := docspkg.NewWatcher(store, events); watchErr != nil {
+		warnDocsServe(errOut, "warning: live reload unavailable: %v", watchErr)
 	} else {
 		defer watcher.Close() //nolint:errcheck // best-effort resource release on exit
 		go watcher.Run(ctx)
@@ -288,17 +418,21 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 		// for exactly this reason; applying the same rule here keeps the two
 		// verbs consistent rather than correct in one place only.
 		if token != "" {
-			fmt.Fprintln(cmd.ErrOrStderr(), "note: not opening a browser — this server requires a bearer token, which a browser navigation cannot supply")
-		} else if err := docspkg.OpenBrowser(ctx, deps.Runner, url); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to open browser: %v\n", err)
+			fmt.Fprintln(errOut, "note: not opening a browser — this server requires a bearer token, which a browser navigation cannot supply")
+		} else if openErr := docspkg.OpenBrowser(ctx, deps.Runner, url); openErr != nil {
+			warnDocsServe(errOut, "warning: failed to open browser: %v", openErr)
 		}
 	}
 
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(ln) }()
-
-	select {
-	case <-ctx.Done():
+	// Steady state. A buffered Serve result outranks cancellation here for the
+	// same reason it does during startup: a server that has already stopped
+	// serving has nothing left for Shutdown to drain gracefully.
+	event := awaitDocsServeEvent(ctx, serveCh, nil)
+	var result error
+	switch event.Kind {
+	case docsServeEventServe:
+		result = normalizeDocsServeResult(event.Err)
+	default:
 		// Close the broker BEFORE Shutdown, never after. Shutdown waits for
 		// in-flight requests to finish, and an SSE stream never finishes on its
 		// own — so with an open reader tab, Shutdown would block the full
@@ -310,11 +444,84 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
-		return srv.Shutdown(shutdownCtx)
-	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return err
+		result = rt.shutdown(srv, shutdownCtx)
 	}
+
+	closeDocsServeLease(rt, lease, errOut)
+	return result
+}
+
+// abortDocsServeStartup unwinds a startup that failed after Serve began.
+//
+// closeServer rather than shutdown: there is no graceful drain to perform for a
+// server that never finished starting, and Shutdown would wait out its grace
+// period on a listener no client has reached.
+func abortDocsServeStartup(
+	rt docsServeRuntime,
+	srv *http.Server,
+	events *docspkg.Broker,
+	background *sync.WaitGroup,
+	lease *docspkg.ServerLease,
+	errOut io.Writer,
+	cause error,
+) error {
+	events.Close()
+	rt.closeServer(srv) //nolint:errcheck // already returning a failure
+	background.Wait()
+	closeDocsServeLease(rt, lease, errOut)
+	return cause
+}
+
+// finishDocsServeStartup returns under a Serve result or a cancellation that
+// won an arbitration before the server reached steady state.
+//
+// Cancellation here is a normal startup stop, so it returns nil after cleanup
+// rather than calling Shutdown: nothing has been announced and no client has
+// been served, so there is nothing to drain.
+func finishDocsServeStartup(
+	rt docsServeRuntime,
+	srv *http.Server,
+	events *docspkg.Broker,
+	background *sync.WaitGroup,
+	lease *docspkg.ServerLease,
+	errOut io.Writer,
+	event docsServeEvent,
+) error {
+	var result error
+	if event.Kind == docsServeEventServe {
+		result = normalizeDocsServeResult(event.Err)
+	} else {
+		events.Close()
+		rt.closeServer(srv) //nolint:errcheck // stopping a server that never finished starting
+	}
+	background.Wait()
+	closeDocsServeLease(rt, lease, errOut)
+	return result
+}
+
+// closeDocsServeLease removes this server's discovery record exactly once,
+// after the primary outcome is known.
+//
+// A cleanup failure is a warning and never becomes the returned error: the
+// operator's question is "did my server run?", and answering it with a
+// bookkeeping failure would misreport a session that worked.
+func closeDocsServeLease(rt docsServeRuntime, lease *docspkg.ServerLease, errOut io.Writer) {
+	if lease == nil {
+		return
+	}
+	if err := rt.closeLease(lease); err != nil {
+		warnDocsServe(errOut, "warning: could not remove this server's docs discovery record: %v", err)
+	}
+}
+
+// normalizeDocsServeResult maps the expected close error to a clean exit.
+func normalizeDocsServeResult(err error) error {
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+func warnDocsServe(errOut io.Writer, format string, args ...any) {
+	fmt.Fprintf(errOut, format+"\n", args...)
 }

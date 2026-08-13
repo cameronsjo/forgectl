@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	docspkg "github.com/cameronsjo/forgectl/internal/docs"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // newDocsOpenCmd builds `forgectl docs open [path]`.
@@ -57,12 +59,16 @@ server and the operator always knows where it came from.
 }
 
 func runDocsOpen(cmd *cobra.Command, deps module.Deps, target string, printOnly bool) error {
-	infoPath, err := config.DocsServerPath()
+	serversDir, err := config.DocsServersDir()
+	if err != nil {
+		return err
+	}
+	legacyPath, err := config.DocsServerPath()
 	if err != nil {
 		return err
 	}
 
-	info, err := docspkg.ReadServerInfo(infoPath)
+	server, err := docspkg.DiscoverServerInfo(cmd.Context(), serversDir, legacyPath)
 	if errors.Is(err, docspkg.ErrNoServer) {
 		// Name the fix rather than just the failure — this is the error an
 		// operator will hit most, and it has exactly one remedy.
@@ -71,10 +77,11 @@ func runDocsOpen(cmd *cobra.Command, deps module.Deps, target string, printOnly 
 	if err != nil {
 		return err
 	}
+	info := server.Info
 
 	url := info.BaseURL()
 	if target != "" {
-		url, err = resolveOpenTarget(info, target)
+		url, err = resolveOpenTarget(cmd.Context(), server, target)
 		if err != nil {
 			return err
 		}
@@ -82,6 +89,18 @@ func runDocsOpen(cmd *cobra.Command, deps module.Deps, target string, printOnly 
 
 	if printOnly {
 		fmt.Fprintln(cmd.OutOrStdout(), url)
+		return nil
+	}
+
+	if info.Token != "" && server.Legacy {
+		// A legacy server has no freshness endpoint, so there is no way to
+		// establish that the listener at this address is the server the record
+		// described before handing it a credential. Print the URL and the fix;
+		// never the token.
+		out := cmd.OutOrStdout()
+		fmt.Fprintf(out, "%s\n", url)
+		fmt.Fprintf(out, "\nThis reader predates generation-owned discovery and requires a bearer token.\n")
+		fmt.Fprintf(out, "Restart it with `forgectl docs serve` so `docs open` can verify it before authenticating.\n")
 		return nil
 	}
 
@@ -108,15 +127,15 @@ func runDocsOpen(cmd *cobra.Command, deps module.Deps, target string, printOnly 
 // files it actually indexed. Asking it means `open` cannot hand back a URL for a
 // file the server would refuse to serve, and it inherits the index's exclusions
 // for free rather than reimplementing them.
-func resolveOpenTarget(info docspkg.ServerInfo, target string) (string, error) {
+func resolveOpenTarget(ctx context.Context, server docspkg.DiscoveredServer, target string) (string, error) {
 	abs, err := filepath.Abs(target)
 	if err != nil {
-		return "", fmt.Errorf("resolve %s: %w", target, err)
+		return "", fmt.Errorf("resolve %s: %w", termsafe.QuotePath(target), err)
 	}
 
-	root, rel, err := docspkg.LocateDoc(info, abs)
+	root, rel, err := docspkg.LocateDoc(ctx, server, abs)
 	if err != nil {
 		return "", err
 	}
-	return info.DocURL(root, rel), nil
+	return server.Info.DocURL(root, rel), nil
 }

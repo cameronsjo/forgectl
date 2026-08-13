@@ -833,18 +833,25 @@ func PrSessionsDir() (string, error) {
 	return filepath.Join(dir, "pr-sessions"), nil
 }
 
-// DocsServerPath returns the discovery file a running `forgectl docs serve`
-// writes so other commands can find and steer it:
+// DocsServerPath returns the LEGACY single-file discovery record:
 // <os.UserConfigDir()>/forgectl/docs-server.json (macOS: ~/Library/Application
 // Support/forgectl/docs-server.json; Linux: ~/.config/forgectl/
 // docs-server.json). It derives from the same configDir() base as every other
 // forgectl path, so none of them drift.
 //
-// The file exists because `docs open` STEERS an already-running reader rather
-// than launching one, and the bound address is not knowable in advance — the
-// default bind uses port 0, so the OS assigns it. It holds the resolved address
-// and, when one is in use, the bearer token; it is written after the listener
-// resolves and removed on shutdown.
+// This path is now READ-ONLY. Current servers neither write nor remove it; they
+// publish one immutable record per generation under DocsServersDir instead,
+// because a single shared pathname cannot be owned — two overlapping servers
+// both wrote this file, and whichever stopped first deleted the other's
+// discoverability (forgectl#277).
+//
+// It remains here so a new client can still find a server started by an older
+// binary, and so rolling back to an older binary leaves that binary's record
+// intact. Nothing in forgectl deletes or rewrites it.
+//
+// The record exists at all because `docs open` STEERS an already-running reader
+// rather than launching one, and the bound address is not knowable in advance —
+// the default bind uses port 0, so the OS assigns it.
 func DocsServerPath() (string, error) {
 	dir, err := configDir()
 	if err != nil {
