@@ -90,6 +90,15 @@ func TestExternalCommand_LazyBuiltinsNeverProbe(t *testing.T) {
 	}
 }
 
+// Fang installs its hidden man command only inside fang.Execute, after the
+// external-command gate runs. Keep this direct pin independent of the
+// builtinVerbs enumeration so omitting Fang's authority cannot make the table
+// and its test drift together.
+func TestExternalCommand_FangManNeverProbes(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &runnerexec.FakeRunner{}})
+	assertExternalCommandDoesNotProbe(t, root, []string{"man"})
+}
+
 func TestExternalCommand_IneligiblePrefixesNeverProbe(t *testing.T) {
 	root := newRoot(module.Deps{Runner: &runnerexec.FakeRunner{}})
 	tests := []struct {
