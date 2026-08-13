@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 )
@@ -44,16 +45,27 @@ func Aggregate(ctx context.Context, sources ...Source) ([]Item, []string, error)
 		}()
 	}
 
-	var notes []string
-	failed := 0
+	var (
+		notes       []string
+		failed      int
+		sawDeadline bool
+		sawCanceled bool
+	)
 	byKey := make(map[string]Item)
 	for range sources {
 		res := <-ch
 		notes = append(notes, res.notes...)
 		if res.err != nil {
+			// The source error is LOGGED but never rendered or returned: a
+			// source's error can wrap subprocess stderr verbatim, and both the
+			// note and the aggregate error reach a terminal. Only the two
+			// standard context sentinels survive, as identity — the specific
+			// reason lives in the log and in the source's own notes.
 			slog.Warn("Review source degraded.", "source", res.name, "error", res.err)
-			notes = append(notes, fmt.Sprintf("%s: %v", res.name, res.err))
+			notes = append(notes, fmt.Sprintf("%s: source failed", res.name))
 			failed++
+			sawDeadline = sawDeadline || errors.Is(res.err, context.DeadlineExceeded)
+			sawCanceled = sawCanceled || errors.Is(res.err, context.Canceled)
 			continue
 		}
 		for _, it := range res.items {
@@ -61,7 +73,7 @@ func Aggregate(ctx context.Context, sources ...Source) ([]Item, []string, error)
 		}
 	}
 	if failed == len(sources) {
-		return nil, notes, fmt.Errorf("review: every source failed")
+		return nil, notes, safeAggregateError(errors.New("review: every source failed"), sawDeadline, sawCanceled)
 	}
 
 	out := make([]Item, 0, len(byKey))

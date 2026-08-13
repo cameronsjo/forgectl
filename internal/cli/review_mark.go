@@ -56,11 +56,12 @@ func newReviewSyncCmd(srcs []review.Source, reviewedPath string) *cobra.Command 
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			items, notes, err := review.Aggregate(cmd.Context(), srcs...)
+			// Same ordering as runReviewList: the notes explain the failure, so
+			// they must survive it. They also went out unsanitized here, unlike
+			// the list path — renderReviewNotes closes that gap.
+			renderReviewNotes(cmd, notes)
 			if err != nil {
 				return err
-			}
-			for _, n := range notes {
-				fmt.Fprintln(cmd.ErrOrStderr(), "note: "+n)
 			}
 			// A degraded query yields a PARTIAL open set — pruning against it
 			// would drop reviewed marks for items that are actually still open.

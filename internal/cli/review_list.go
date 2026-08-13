@@ -13,7 +13,22 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/review"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
+
+// renderReviewNotes writes each degradation note to stderr — diagnostics never
+// go to stdout, where they would corrupt --json output.
+//
+// A note is built from low-trust material (a query label carrying a config
+// owner, a source's own diagnostic text), so each one is reduced to a single
+// inert terminal line. termsafe.SafeLine, not the weaker sanitizeCell: the
+// latter maps only C0 and DEL, leaving C1 controls and Unicode bidi overrides
+// intact — enough to reorder or overwrite what the operator reads.
+func renderReviewNotes(cmd *cobra.Command, notes []string) {
+	for _, n := range notes {
+		fmt.Fprintln(cmd.ErrOrStderr(), "note: "+termsafe.SafeLine(n))
+	}
+}
 
 // runReviewList is the bare `forgectl review` body: aggregate, filter, render.
 func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string, asJSON bool, kind, repo string) error {
@@ -24,15 +39,13 @@ func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string
 	}
 
 	items, notes, err := review.Aggregate(cmd.Context(), srcs...)
+	// Notes render BEFORE the error return: an all-sources failure is exactly
+	// when the per-query notes matter most, and returning first meant the
+	// operator saw the aggregate error with no indication of which owner or
+	// which leg actually broke.
+	renderReviewNotes(cmd, notes)
 	if err != nil {
 		return err
-	}
-	// Per-query degradation notes are diagnostics → stderr, never stdout. A
-	// note can embed hostile content (a query label built from a config
-	// owner, or an error message that wraps CLI stderr verbatim), so it gets
-	// the same control-byte sanitization every rendered cell does.
-	for _, n := range notes {
-		fmt.Fprintln(cmd.ErrOrStderr(), "note: "+sanitizeCell(n))
 	}
 
 	items = filterItems(items, kind, repo)

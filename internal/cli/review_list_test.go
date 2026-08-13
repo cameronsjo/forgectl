@@ -207,14 +207,19 @@ func TestReviewCmd_KindAndRepoFilters(t *testing.T) {
 	}
 }
 
-func TestResolveReviewOwners(t *testing.T) {
-	var cfg config.Config
-	if got := resolveReviewOwners(cfg); len(got) != 1 || got[0] != defaultReviewOwner {
-		t.Errorf("absent [review] section: got %v, want [%s]", got, defaultReviewOwner)
+// TestReviewHelp_NamesNoBakedAccount covers issue #191 at the compiled-help
+// surface: the fallback is the authenticated GitHub.com account, and the help
+// must say so rather than naming one developer's login.
+func TestReviewHelp_NamesNoBakedAccount(t *testing.T) {
+	help := newReviewCmdForSources(nil, "").Long
+
+	if strings.Contains(help, "cameronsjo") {
+		t.Errorf("review help still names a baked account:\n%s", help)
 	}
-	cfg.Review.Owners = []string{"someoneelse", "cameronsjo"}
-	if got := resolveReviewOwners(cfg); len(got) != 2 || got[0] != "someoneelse" {
-		t.Errorf("configured owners must win: got %v", got)
+	for _, want := range []string{"authenticated", "github.com"} {
+		if !strings.Contains(strings.ToLower(help), want) {
+			t.Errorf("review help does not mention %q:\n%s", want, help)
+		}
 	}
 }
 
