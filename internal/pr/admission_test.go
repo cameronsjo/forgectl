@@ -59,10 +59,9 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
-// winRow builds one list-windows -a fixture line: session, index "1", name,
-// active "0", panes "1" — joined on tmux's field separator.
+// winRow builds one generation-qualified list-windows -a fixture line.
 func winRow(session, name string) string {
-	return strings.Join([]string{session, "1", name, "0", "1"}, "\x1f")
+	return strings.Join([]string{"123", "456", "@1", session, "1", name, "0", "1"}, "\x1f")
 }
 
 // listWindowsFake fakes only `tmux list-windows -a` with rows; every other
@@ -94,9 +93,7 @@ func TestLiveReviews_CountsPrefixedWindowsInSession(t *testing.T) {
 func TestLiveReviews_ListWindowsErrors(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		if name == "tmux" && len(args) > 0 && args[0] == "list-windows" {
-			// TRAP: this string must NOT contain "no server running" — isNoServer
-			// (internal/tmux/sessions.go) would convert that to (nil, nil) and this
-			// test would assert the wrong thing.
+			// A plain error is never enough to prove an absent default socket.
 			return "", errors.New("boom: tmux exploded")
 		}
 		return "", nil
@@ -253,7 +250,7 @@ func (s *fakeTmuxServer) runner() *exec.FakeRunner {
 			var rows []string
 			for _, sess := range names {
 				for i, w := range s.sessions[sess] {
-					rows = append(rows, strings.Join([]string{sess, strconv.Itoa(i), w, "0", "1"}, "\x1f"))
+					rows = append(rows, strings.Join([]string{"123", "456", "@" + strconv.Itoa(i), sess, strconv.Itoa(i), w, "0", "1"}, "\x1f"))
 				}
 			}
 			return strings.Join(rows, "\n"), nil
@@ -351,9 +348,7 @@ func TestWindowLive_CreatedThenRemoved(t *testing.T) {
 func TestWindowLive_ListWindowsErrors_ReportsUnreadable(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		if name == "tmux" && len(args) > 0 && args[0] == "list-windows" {
-			// TRAP: must NOT contain "no server running" — isNoServer
-			// (internal/tmux/sessions.go) converts that to (nil, nil), which is a
-			// legitimate empty window list, not an unreadable one.
+			// A plain error is never enough to prove an absent default socket.
 			return "", errors.New("boom: tmux exploded")
 		}
 		return "", nil

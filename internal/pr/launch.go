@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/huh"
@@ -21,6 +23,35 @@ const reviewPrompt = "Review this pull request as a clean-room reviewer. " +
 	"Inspect the diff and the checked-out tree, then report findings by severity " +
 	"(Critical / Important / Nit) with file:line and a concrete fix. " +
 	"Do NOT post, comment, merge, or push anything — output the review only."
+
+const dispatchIdentityFormat = "#{pid}\x1f#{start_time}\x1f#{window_id}"
+
+var dispatchWindowIDPattern = regexp.MustCompile(`^@[0-9]+$`)
+
+// Dispatch is the generation-qualified identity returned by one successful
+// detached review launch. WindowID is opaque outside this package.
+type Dispatch struct {
+	Ref      Ref
+	WindowID string
+}
+
+func newDispatch(ref Ref, output string) (Dispatch, error) {
+	fields := strings.Split(output, "\x1f")
+	if len(fields) != 3 {
+		return Dispatch{}, fmt.Errorf("tmux dispatch identity has %d fields, want 3", len(fields))
+	}
+	pid, err := strconv.ParseUint(fields[0], 10, 64)
+	if err != nil || pid == 0 {
+		return Dispatch{}, fmt.Errorf("invalid tmux server pid %q", fields[0])
+	}
+	if _, err := strconv.ParseUint(fields[1], 10, 64); err != nil {
+		return Dispatch{}, fmt.Errorf("invalid tmux server start time %q", fields[1])
+	}
+	if !dispatchWindowIDPattern.MatchString(fields[2]) {
+		return Dispatch{}, fmt.Errorf("invalid tmux window id %q", fields[2])
+	}
+	return Dispatch{Ref: ref, WindowID: strings.Join(fields, "\x1f")}, nil
+}
 
 // localReviewPrompt seeds a local (offline) review — there is no PR to post
 // to, so it directs findings to the writable escape-hatch dir (named
@@ -133,15 +164,15 @@ func (c *Client) ensureSession(ctx context.Context) error {
 // with the profile-resolved posture; agent B (BareTUIEscalation) is NOT YET
 // WIRED and returns a clear error here rather than dispatching. Launch never
 // posts a review — that is PostReview's job, behind the approval gate.
-func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) error {
+func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) (Dispatch, error) {
 	if sess.Workspace == "" {
-		return fmt.Errorf("cannot launch: session has no workspace (dry-run?)")
+		return Dispatch{}, fmt.Errorf("cannot launch: session has no workspace (dry-run?)")
 	}
 	// Authoritative use-based guard. Prepare refuses the same pairing earlier so
 	// nothing is fetched, but this is the one every route reaches — including a
 	// Session reconstituted from a breadcrumb, which never re-enters Prepare.
 	if err := CheckAgentForRef(sess.Agent, sess.Ref); err != nil {
-		return err
+		return Dispatch{}, err
 	}
 	// FindingsDir is deliberately NOT persisted (see Session), so loadSession
 	// leaves it zero. A local dispatch on a reload would then pass --add-dir ""
@@ -150,7 +181,7 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) er
 	// calls Launch on a reload today; this makes the future verb that does fail
 	// loudly instead.
 	if sess.Ref.IsLocal() && sess.FindingsDir == "" {
-		return fmt.Errorf(
+		return Dispatch{}, fmt.Errorf(
 			"local review session %s has no findings directory: it is not persisted in the breadcrumb, "+
 				"so a reloaded session cannot be dispatched — re-run `forgectl pr local`",
 			sess.Ref.String(),
@@ -160,12 +191,19 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) er
 	case InlineSeeded:
 		return c.launchInline(ctx, sess, cfg)
 	case BareTUIEscalation:
-		return fmt.Errorf("agent %q (bare-TUI escalation) is not yet wired", sess.Agent)
+		return Dispatch{}, fmt.Errorf("agent %q (bare-TUI escalation) is not yet wired", sess.Agent)
 	case CodexExec:
 		return c.launchCodex(ctx, sess, cfg)
 	default:
-		return fmt.Errorf("unknown launch path %v for agent %q", path, sess.Agent)
+		return Dispatch{}, fmt.Errorf("unknown launch path %v for agent %q", path, sess.Agent)
 	}
+}
+
+// CheckDispatchCapability refuses unsupported or unidentifiable tmux before a
+// caller creates any review workspace or breadcrumb.
+func (c *Client) CheckDispatchCapability(ctx context.Context) error {
+	_, err := tmux.New(c.run).CheckGenerationCapability(ctx)
+	return err
 }
 
 // launchCodex dispatches `codex exec` under Codex's native sandbox. Remote PR
@@ -192,10 +230,10 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) er
 // and can inspect it before dispatch, not that the bytes are theirs. Revisit if
 // Codex gains a strict-config flag, if the remote-head refusal is relaxed, or
 // if detached heads are ever rejected before dispatch.
-func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Config) error {
+func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Config) (Dispatch, error) {
 	codexPath, err := launch.CodexPath(cfg.Launch.Defaults)
 	if err != nil {
-		return fmt.Errorf("resolve codex binary: %w", err)
+		return Dispatch{}, fmt.Errorf("resolve codex binary: %w", err)
 	}
 	resolved := launch.Resolve(cfg.Launch, sess.Workspace)
 	profile := launch.Profile{
@@ -214,7 +252,7 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 	// `--model --flag` rather than swallowing it — which is exactly the
 	// parser-behavior assumption the guard exists not to depend on.
 	if err := sandbox.RejectOptionLike("reviewer model", profile.Model); err != nil {
-		return err
+		return Dispatch{}, err
 	}
 	// [pr] model/effort is deliberately NOT applied here, and its absence is
 	// the correct behavior rather than an oversight. Both keys are Claude-side:
@@ -233,35 +271,44 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 		prompt = localReviewPrompt(sess.FindingsDir, false)
 	}
 	if err := profile.Validate(); err != nil {
-		return fmt.Errorf("codex review profile invalid: %w", err)
+		return Dispatch{}, fmt.Errorf("codex review profile invalid: %w", err)
 	}
 	codexArgs := launch.CodexExecArgs(profile, []string{prompt})
+	if err := c.CheckDispatchCapability(ctx); err != nil {
+		return Dispatch{}, err
+	}
 	if err := c.ensureSession(ctx); err != nil {
-		return err
+		return Dispatch{}, err
 	}
 	args := []string{
 		"new-window",
+		"-P", "-F", dispatchIdentityFormat,
 		"-t", c.exactSessionTarget(),
 		"-n", windowName(sess.Ref),
 		"-c", sess.Workspace,
 		"--", codexPath,
 	}
 	args = append(args, codexArgs...)
-	if _, err := c.run.Run(ctx, "tmux", args...); err != nil {
-		return fmt.Errorf("open Codex review window: %w", err)
+	out, err := c.run.Run(ctx, "tmux", args...)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("open Codex review window: %w", err)
+	}
+	dispatch, err := newDispatch(sess.Ref, out)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("read Codex review window identity: %w", err)
 	}
 	slog.Info("Successfully dispatched Codex clean-room review.", "ref", sess.Ref.String(), "window", c.windowTarget(sess.Ref))
-	return nil
+	return dispatch, nil
 }
 
 // launchInline composes the claude argv and opens it in a tmux window rooted
 // at the workspace. It uses launch.ClaudePath/Resolve/BuilderArgs — never
 // launch.Exec (which would replace this process); the review runs in its own
 // tmux window via the Runner.
-func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Config) error {
+func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Config) (Dispatch, error) {
 	claudePath, err := launch.ClaudePath(cfg.Launch.Defaults)
 	if err != nil {
-		return fmt.Errorf("resolve claude binary: %w", err)
+		return Dispatch{}, fmt.Errorf("resolve claude binary: %w", err)
 	}
 	// Clean-room review runs under a HARDENED posture regardless of the user's
 	// ambient launch profile: never --allow-dangerously-skip-permissions, always
@@ -346,10 +393,10 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// args), so word-splitting and metacharacters are already off the table;
 	// this closes the one residual.
 	if err := sandbox.RejectOptionLike("reviewer model", profile.Model); err != nil {
-		return err
+		return Dispatch{}, err
 	}
 	if err := sandbox.RejectOptionLike("reviewer effort", profile.Effort); err != nil {
-		return err
+		return Dispatch{}, err
 	}
 
 	// Validate the assembled posture before dispatch. This path needs it more
@@ -360,7 +407,7 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// that reads as "the review is still thinking". launchCodex has validated
 	// since it shipped; this is the inline half.
 	if err := profile.Validate(); err != nil {
-		return fmt.Errorf("clean-room review profile invalid: %w", err)
+		return Dispatch{}, fmt.Errorf("clean-room review profile invalid: %w", err)
 	}
 
 	prompt := reviewPrompt
@@ -373,11 +420,15 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	}
 	claudeArgs := launch.BuilderArgs(profile, []string{"-p", prompt})
 
+	if err := c.CheckDispatchCapability(ctx); err != nil {
+		return Dispatch{}, err
+	}
 	if err := c.ensureSession(ctx); err != nil {
-		return err
+		return Dispatch{}, err
 	}
 	args := []string{
 		"new-window",
+		"-P", "-F", dispatchIdentityFormat,
 		"-t", c.exactSessionTarget(),
 		"-n", windowName(sess.Ref),
 		"-c", sess.Workspace,
@@ -386,11 +437,16 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	args = append(args, claudeArgs...)
 
 	slog.Debug("Preparing to dispatch review into tmux window.", "target", c.windowTarget(sess.Ref), "workspace", sess.Workspace)
-	if _, err := c.run.Run(ctx, "tmux", args...); err != nil {
-		return fmt.Errorf("open review window: %w", err)
+	out, err := c.run.Run(ctx, "tmux", args...)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("open review window: %w", err)
+	}
+	dispatch, err := newDispatch(sess.Ref, out)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("read review window identity: %w", err)
 	}
 	slog.Info("Successfully dispatched clean-room review.", "ref", sess.Ref.String(), "window", c.windowTarget(sess.Ref))
-	return nil
+	return dispatch, nil
 }
 
 // PostReview posts review to the PR — but ONLY after the human approval gate

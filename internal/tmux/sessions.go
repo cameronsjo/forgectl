@@ -2,10 +2,6 @@ package tmux
 
 import (
 	"context"
-	"errors"
-	"strings"
-
-	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
 // sessionFormat is the -F spec for list-sessions. Fields, in order:
@@ -20,9 +16,10 @@ const sessionFormat = "#{session_name}" + fieldSep +
 // returns an empty slice (not an error) — "no sessions" is a normal state, not
 // a failure.
 func (c *Client) ListSessions(ctx context.Context) ([]Session, error) {
-	out, err := c.run.Run(ctx, c.tmuxBin, "list-sessions", "-F", sessionFormat)
+	args := []string{"list-sessions", "-F", sessionFormat}
+	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {
-		if isNoServer(err) {
+		if c.absentDefaultServer(ctx, args, err) {
 			return nil, nil
 		}
 		return nil, err
@@ -70,13 +67,4 @@ func (c *Client) RenameSession(ctx context.Context, oldName, newName string) err
 func (c *Client) KillSession(ctx context.Context, name string) error {
 	_, err := c.run.Run(ctx, c.tmuxBin, "kill-session", "-t", name)
 	return err
-}
-
-// isNoServer reports whether err is tmux complaining that no server is running.
-func isNoServer(err error) bool {
-	var cmdErr *exec.CommandError
-	if errors.As(err, &cmdErr) {
-		return strings.Contains(cmdErr.Stderr, "no server running")
-	}
-	return strings.Contains(err.Error(), "no server running")
 }

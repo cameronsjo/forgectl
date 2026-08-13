@@ -15,8 +15,9 @@ import (
 // PostReview path to gate, so it would be a no-op.
 func newPrLocalCmd(client *pr.Client, cfg config.Config) *cobra.Command {
 	var (
-		agent  string
-		dryRun bool
+		agent    string
+		dryRun   bool
+		noVerify bool
 	)
 
 	cmd := &cobra.Command{
@@ -40,6 +41,11 @@ writable escape-hatch directory rather than posted anywhere.
 				path = args[0]
 			}
 			ctx := cmd.Context()
+			if !dryRun {
+				if err := client.CheckDispatchCapability(ctx); err != nil {
+					return err
+				}
+			}
 
 			sess, err := client.PrepareLocal(ctx, path, pr.PrepareLocalOpts{
 				Agent:  resolveAgent(agent),
@@ -59,7 +65,11 @@ writable escape-hatch directory rather than posted anywhere.
 				return nil
 			}
 
-			if err := client.Launch(ctx, sess, cfg); err != nil {
+			dispatch, err := client.Launch(ctx, sess, cfg)
+			if err != nil {
+				return err
+			}
+			if err := dispatchVerificationError(verifyReviewDispatches(ctx, client, []pr.Dispatch{dispatch}, noVerify)); err != nil {
 				return err
 			}
 			fmt.Fprintf(out, "prepared local clean-room review of %s @ %s\n", sess.HeadRef, sess.HeadOid)
@@ -71,5 +81,6 @@ writable escape-hatch directory rather than posted anywhere.
 	}
 	cmd.Flags().StringVar(&agent, "agent", "", "review agent (env "+prAgentEnv+"; default: claude; codex is local-review only)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve and print the plan without creating anything")
+	cmd.Flags().BoolVar(&noVerify, "no-verify", false, "skip the delayed post-dispatch window check")
 	return cmd
 }

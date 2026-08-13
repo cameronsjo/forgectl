@@ -192,6 +192,15 @@ func prepareRunner() *exec.FakeRunner {
 		if name == "tmux" && len(args) > 0 && args[0] == "list-windows" {
 			return "", nil // no live windows
 		}
+		if name == "tmux" && len(args) > 0 && args[0] == "-V" {
+			return "tmux 3.7b", nil
+		}
+		if name == "tmux" && len(args) > 0 && args[0] == "display-message" {
+			return "123\x1f456\x1f@0", nil
+		}
+		if name == "tmux" && len(args) > 0 && args[0] == "new-window" {
+			return "123\x1f456\x1f@1", nil
+		}
 		return "", nil // git clone / tmux new-window succeed as no-ops
 	}}
 }
@@ -269,7 +278,7 @@ func TestLaunchPicked_SkipsReviewedLaunchesRest(t *testing.T) {
 	}
 
 	cmd, out, errOut := newTestCmd()
-	if err := launchPicked(context.Background(), client, config.Config{}, cmd, selected, store); err != nil {
+	if err := launchPicked(context.Background(), client, config.Config{}, cmd, selected, store, true); err != nil {
 		t.Fatalf("launchPicked: %v", err)
 	}
 
@@ -308,7 +317,7 @@ func TestLaunchPicked_AllReviewed_NothingLaunched(t *testing.T) {
 	selected := []pr.PR{{Ref: ref, UpdatedAt: time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)}}
 
 	cmd, _, errOut := newTestCmd()
-	if err := launchPicked(context.Background(), client, config.Config{}, cmd, selected, store); err != nil {
+	if err := launchPicked(context.Background(), client, config.Config{}, cmd, selected, store, true); err != nil {
 		t.Fatalf("launchPicked: %v", err)
 	}
 	if len(tmuxWindows(fake.Calls)) != 0 {
@@ -335,7 +344,7 @@ func TestLaunchPicked_CapDefersExcess(t *testing.T) {
 
 	cmd, _, errOut := newTestCmd()
 	cfg := config.Config{Pr: config.PrConfig{MaxConcurrent: 2}}
-	if err := launchPicked(context.Background(), client, cfg, cmd, selected, store); err != nil {
+	if err := launchPicked(context.Background(), client, cfg, cmd, selected, store, true); err != nil {
 		t.Fatalf("launchPicked: %v", err)
 	}
 
@@ -361,7 +370,7 @@ func TestLaunchPicked_UnreadableWindowCount_RefusesBatch(t *testing.T) {
 	}
 
 	cmd, _, _ := newTestCmd()
-	if err := launchPicked(context.Background(), client, config.Config{}, cmd, selected, store); err == nil {
+	if err := launchPicked(context.Background(), client, config.Config{}, cmd, selected, store, false); err == nil {
 		t.Fatal("launchPicked: want error on unreadable window count, got nil")
 	}
 

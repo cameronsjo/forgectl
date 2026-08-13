@@ -9,9 +9,9 @@ import (
 )
 
 func TestParseWindows(t *testing.T) {
-	out := "main" + sep + "0" + sep + "editor" + sep + "1" + sep + "2" + "\n" +
-		"main" + sep + "1" + sep + "my window" + sep + "0" + sep + "1" + "\n" +
-		"work" + sep + "0" + sep + "shell" + sep + "1" + sep + "1"
+	out := "123" + sep + "456" + sep + "@0" + sep + "main" + sep + "0" + sep + "editor" + sep + "1" + sep + "2" + "\n" +
+		"123" + sep + "456" + sep + "@1" + sep + "main" + sep + "1" + sep + "my window" + sep + "0" + sep + "1" + "\n" +
+		"789" + sep + "999" + sep + "@0" + sep + "work" + sep + "0" + sep + "shell" + sep + "1" + sep + "1"
 	got := parseWindows(out)
 	if len(got) != 3 {
 		t.Fatalf("expected 3 windows, got %d", len(got))
@@ -19,6 +19,9 @@ func TestParseWindows(t *testing.T) {
 	// Target must be pre-built as session:index.
 	if got[0].Target != "main:0" {
 		t.Errorf("window 0 target: got %q want main:0", got[0].Target)
+	}
+	if got[0].ServerPID != "123" || got[0].ServerStart != "456" || got[0].ID != "@0" {
+		t.Errorf("window 0 identity wrong: %+v", got[0])
 	}
 	if !got[0].Active || got[0].Panes != 2 {
 		t.Errorf("window 0 wrong: %+v", got[0])

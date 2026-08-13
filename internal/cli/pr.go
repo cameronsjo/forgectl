@@ -37,11 +37,16 @@ func newPrCmd(deps module.Deps) *cobra.Command {
 	// err discarded: a failed config-dir lookup yields "", which LoadReviewed
 	// reads as an empty store and persist() rejects loudly — never a silent bad write.
 	reviewedPath, _ := config.PrReviewedPath()
+	return newPrCmdForClient(cfg, client, netClient, reviewedPath)
+}
+
+func newPrCmdForClient(cfg config.Config, client *pr.Client, netClient *netpkg.Client, reviewedPath string) *cobra.Command {
 
 	var (
 		agent    string
 		headless bool
 		dryRun   bool
+		noVerify bool
 	)
 
 	cmd := &cobra.Command{
@@ -80,6 +85,11 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 				fmt.Fprintln(cmd.ErrOrStderr(), "warning: network unreachable; the gh round-trip may fail")
 			}
 
+			if !dryRun {
+				if err := client.CheckDispatchCapability(ctx); err != nil {
+					return err
+				}
+			}
 			sess, err := client.Prepare(ctx, ref, pr.PrepareOpts{
 				Agent:    resolveAgent(agent),
 				DryRun:   dryRun,
@@ -99,7 +109,11 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 				return nil
 			}
 
-			if err := client.Launch(ctx, sess, cfg); err != nil {
+			dispatch, err := client.Launch(ctx, sess, cfg)
+			if err != nil {
+				return err
+			}
+			if err := dispatchVerificationError(verifyReviewDispatches(ctx, client, []pr.Dispatch{dispatch}, noVerify)); err != nil {
 				return err
 			}
 			// CLI-layer courtesy note: an explicitly named ref is always a
@@ -118,6 +132,7 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 	cmd.Flags().StringVar(&agent, "agent", "", "review agent (env "+prAgentEnv+"; default: claude; codex is local-review only)")
 	cmd.Flags().BoolVar(&headless, "headless", false, "stage only; never show the interactive approval gate or auto-post")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve and print the plan without creating anything")
+	cmd.Flags().BoolVar(&noVerify, "no-verify", false, "skip the delayed post-dispatch window check")
 
 	cmd.AddCommand(
 		newPrLocalCmd(client, cfg),

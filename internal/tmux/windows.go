@@ -8,8 +8,10 @@ import (
 )
 
 // windowFormat is the -F spec for list-windows -a. Fields:
-// session, window index, window name, active(1/0), pane count.
-const windowFormat = "#{session_name}" + fieldSep +
+// server pid, server start, native window id, session, window index, window
+// name, active(1/0), pane count.
+const windowFormat = identityFormat + fieldSep +
+	"#{session_name}" + fieldSep +
 	"#{window_index}" + fieldSep +
 	"#{window_name}" + fieldSep +
 	"#{?window_active,1,0}" + fieldSep +
@@ -26,9 +28,10 @@ const paneFormat = "#{session_name}" + fieldSep +
 
 // ListWindows returns every window across all sessions (list-windows -a).
 func (c *Client) ListWindows(ctx context.Context) ([]Window, error) {
-	out, err := c.run.Run(ctx, c.tmuxBin, "list-windows", "-a", "-F", windowFormat)
+	args := []string{"list-windows", "-a", "-F", windowFormat}
+	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {
-		if isNoServer(err) {
+		if c.absentDefaultServer(ctx, args, err) {
 			return nil, nil
 		}
 		return nil, err
@@ -41,17 +44,20 @@ func parseWindows(out string) []Window {
 	windows := make([]Window, 0, len(lines))
 	for _, line := range lines {
 		f := splitFields(line)
-		if len(f) < 5 {
+		if len(f) < 8 {
 			continue
 		}
-		idx := atoi(f[1])
+		idx := atoi(f[4])
 		windows = append(windows, Window{
-			Session: f[0],
-			Index:   idx,
-			Name:    f[2],
-			Active:  f[3] == "1",
-			Panes:   atoi(f[4]),
-			Target:  fmt.Sprintf("%s:%d", f[0], idx),
+			ServerPID:   f[0],
+			ServerStart: f[1],
+			ID:          f[2],
+			Session:     f[3],
+			Index:       idx,
+			Name:        f[5],
+			Active:      f[6] == "1",
+			Panes:       atoi(f[7]),
+			Target:      fmt.Sprintf("%s:%d", f[3], idx),
 		})
 	}
 	return windows
@@ -59,9 +65,10 @@ func parseWindows(out string) []Window {
 
 // ListPanes returns every pane across all sessions (list-panes -a).
 func (c *Client) ListPanes(ctx context.Context) ([]Pane, error) {
-	out, err := c.run.Run(ctx, c.tmuxBin, "list-panes", "-a", "-F", paneFormat)
+	args := []string{"list-panes", "-a", "-F", paneFormat}
+	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {
-		if isNoServer(err) {
+		if c.absentDefaultServer(ctx, args, err) {
 			return nil, nil
 		}
 		return nil, err

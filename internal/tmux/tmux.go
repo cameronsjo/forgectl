@@ -27,6 +27,12 @@ type Client struct {
 	// insideTmux) so tests don't require a real sesh on PATH. Defaults to
 	// os/exec.LookPath.
 	lookPath func(string) (string, error)
+
+	// Server-state seams keep the default-socket classifier deterministic in
+	// same-package tests without exposing filesystem configuration publicly.
+	getenv  func(string) string
+	geteuid func() int
+	lstat   func(string) (os.FileInfo, error)
 }
 
 // Option configures a Client at construction.
@@ -61,6 +67,9 @@ func New(run exec.Runner, opts ...Option) *Client {
 			return os.Getenv("TMUX") != ""
 		},
 		lookPath: osexec.LookPath,
+		getenv:   os.Getenv,
+		geteuid:  os.Geteuid,
+		lstat:    os.Lstat,
 	}
 	for _, opt := range opts {
 		opt(c)

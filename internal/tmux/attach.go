@@ -51,9 +51,10 @@ func (c *Client) LastSession(ctx context.Context) error {
 // timestamp (empty string if no server / no sessions).
 func (c *Client) mostRecentSession(ctx context.Context) (string, error) {
 	const format = "#{session_last_attached}" + fieldSep + "#{session_name}"
-	out, err := c.run.Run(ctx, c.tmuxBin, "list-sessions", "-F", format)
+	args := []string{"list-sessions", "-F", format}
+	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {
-		if isNoServer(err) {
+		if c.absentDefaultServer(ctx, args, err) {
 			return "", nil
 		}
 		return "", err

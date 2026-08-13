@@ -28,18 +28,18 @@ import (
 )
 
 // listWinRow builds one `tmux list-windows -a` fixture line in the format
-// internal/tmux parses: session, index, name, active, panes on \x1f.
+// internal/tmux parses: generation identity, session, index, name, active,
+// panes on \x1f.
 func listWinRow(session, name string) string {
-	return strings.Join([]string{session, "1", name, "0", "1"}, "\x1f")
+	return strings.Join([]string{"123", "456", "@1", session, "1", name, "0", "1"}, "\x1f")
 }
 
 // prListRunner layers list-windows control over dashRunner, which already
 // fakes the gh pr view + git calls a real Prepare makes. listErr, when
 // non-nil, makes list-windows fail — the unreadable-tmux case.
 //
-// TRAP: listErr must NOT read "no server running"; internal/tmux/sessions.go
-// converts that to an empty-but-successful window list, which is a readable
-// zero rather than the unreadable failure this fake is meant to produce.
+// A plain listErr is never enough to prove an absent default socket, so it
+// remains the unreadable-tmux case regardless of its text.
 func prListRunner(listErr error, rows ...string) *exec.FakeRunner {
 	out := strings.Join(rows, "\n")
 	prepare := dashRunner("[]").RunFunc

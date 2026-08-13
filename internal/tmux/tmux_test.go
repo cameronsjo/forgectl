@@ -2,6 +2,8 @@ package tmux
 
 import (
 	"context"
+	"errors"
+	"os"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -100,13 +102,18 @@ func TestListSessions_NoServer(t *testing.T) {
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
 			return "", &exec.CommandError{
-				Name:   "tmux",
-				Args:   args,
-				Stderr: "no server running on /tmp/tmux-501/default",
+				Name:     "tmux",
+				Args:     args,
+				Stderr:   "no server running on /tmp/tmux-501/default",
+				ExitCode: 1,
+				Err:      errors.New("exit status 1"),
 			}
 		},
 	}
 	c := New(fake)
+	c.getenv = func(string) string { return "" }
+	c.geteuid = func() int { return 501 }
+	c.lstat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
 
 	sessions, err := c.ListSessions(context.Background())
 	if err != nil {
