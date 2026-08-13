@@ -42,6 +42,12 @@ type UsageStoreStatus struct {
 	// Refusal is set when the namespace exists but forgectl declined to use
 	// it. Disabled collection with no namespace is healthy, not a refusal.
 	Refusal error
+	// Narrowed lists the paths whose permissions were broader than the store's
+	// own modes and were tightened during this inspection. The narrowing is the
+	// shared opener's, not doctor's: inspection cannot reach the store without
+	// it. Reporting the paths is what keeps the correction from erasing the
+	// evidence an operator called doctor to see.
+	Narrowed []string
 }
 
 // usageBase is a seam: tests point the whole store at a scratch directory
