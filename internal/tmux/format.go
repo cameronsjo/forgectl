@@ -115,7 +115,9 @@ func parsedRows[T any](rows []T, lines []string, command string, want int) ([]T,
 		ErrUnreadableFields, command, len(lines), want, lines[0])
 }
 
-// splitLines splits command output into non-empty trimmed lines.
+// splitLines splits command output into lines, trimming trailing newlines and
+// returning nil for empty output. Interior blank lines are kept — callers drop
+// them by rejecting rows that do not split into the expected field count.
 func splitLines(out string) []string {
 	out = strings.TrimRight(out, "\n")
 	if out == "" {

@@ -90,7 +90,7 @@ func parseGenerationIdentity(value string) (string, error) {
 	if len(fields) == 1 {
 		return "", fmt.Errorf(
 			"%w: display-message returned %q as a single field; "+
-				"tmux renders the separator lossily outside a UTF-8 locale — set LANG/LC_ALL to a UTF-8 locale and retry",
+				"the most likely cause is a non-UTF-8 locale, in which tmux renders the separator lossily — check LANG/LC_ALL, set a UTF-8 locale, and retry",
 			ErrUnreadableFields, value)
 	}
 	if len(fields) != 3 {

@@ -70,22 +70,24 @@ func (c *Client) mostRecentSession(ctx context.Context) (string, error) {
 	// -1 (not 0) so a session that has never been attached (last_attached=0)
 	// still beats the sentinel and gets picked when it's the only candidate.
 	lines := splitLines(out)
-	candidates := make([]string, 0, len(lines))
+	// parsed counts rows that split cleanly; it is not the attach target, which
+	// is best. Only its emptiness is read, below.
+	parsed := make([]struct{}, 0, len(lines))
 	best, bestTS := "", -1
 	for _, line := range lines {
 		f := splitFields(line)
 		if len(f) != lastAttachedFieldCount {
 			continue
 		}
-		candidates = append(candidates, f[1])
+		parsed = append(parsed, struct{}{})
 		if ts := atoi(f[0]); ts > bestTS {
 			bestTS, best = ts, f[1]
 		}
 	}
-	// Non-empty output that yielded no candidate at all means the separator did
+	// Non-empty output that yielded no parsed row at all means the separator did
 	// not survive — refuse rather than report "no session to attach to", which
 	// reads as an empty server.
-	if _, err := parsedRows(candidates, lines, "list-sessions", lastAttachedFieldCount); err != nil {
+	if _, err := parsedRows(parsed, lines, "list-sessions", lastAttachedFieldCount); err != nil {
 		return "", err
 	}
 	return best, nil
