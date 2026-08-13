@@ -33,6 +33,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -59,26 +60,32 @@ type tmuxRoutingRunner struct {
 
 	sessionsDir string
 	socketPath  string
+	tempRoot    string          // this bench's private $TMPDIR
 	baseline    map[string]bool // workspaces that existed before the test
 
+	// PrepareMany fans out, so record runs on several goroutines at once.
+	mu          sync.Mutex
 	checkpoints []checkpoint
 }
 
-func newRoutingRunner(t *testing.T, fake *internalexec.FakeRunner, sessionsDir, socketPath string) *tmuxRoutingRunner {
+func newRoutingRunner(t *testing.T, fake *internalexec.FakeRunner, sessionsDir, socketPath, tempRoot string) *tmuxRoutingRunner {
 	t.Helper()
 	return &tmuxRoutingRunner{
 		fake:        fake,
 		sessionsDir: sessionsDir,
 		socketPath:  socketPath,
-		baseline:    workspaceSet(),
+		tempRoot:    tempRoot,
+		baseline:    workspaceSet(tempRoot),
 	}
 }
 
-// workspaceSet is every sandbox workspace currently under the OS temp root.
-// Snapshotting it lets the checkpoints report workspaces THIS test created,
-// without being confused by an unrelated one left by another package.
-func workspaceSet() map[string]bool {
-	matches, _ := filepath.Glob(filepath.Join(os.TempDir(), sandbox.WorkspacePrefix+"*"))
+// workspaceSet is every sandbox workspace currently under tempRoot, which the
+// bench installs as $TMPDIR so sandbox.Sandbox's os.MkdirTemp("", …) lands
+// there. Scoping the glob to this test's own root is what keeps a sibling
+// package's workspace, created in the shared OS temp root while this test runs,
+// from being charged to it.
+func workspaceSet(tempRoot string) map[string]bool {
+	matches, _ := filepath.Glob(filepath.Join(tempRoot, sandbox.WorkspacePrefix+"*"))
 	set := make(map[string]bool, len(matches))
 	for _, m := range matches {
 		set[m] = true
@@ -93,12 +100,14 @@ func (r *tmuxRoutingRunner) record(name string, args []string) {
 	}
 	entries, _ := os.ReadDir(r.sessionsDir)
 	newWorkspaces := 0
-	for path := range workspaceSet() {
+	for path := range workspaceSet(r.tempRoot) {
 		if !r.baseline[path] {
 			newWorkspaces++
 		}
 	}
 	_, statErr := os.Lstat(r.socketPath)
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.checkpoints = append(r.checkpoints, checkpoint{
 		name: name, verb: verb,
 		breadcrumbs:   len(entries),
@@ -171,6 +180,12 @@ func isolatedPickBench(t *testing.T) (*tmuxRoutingRunner, *pr.Client, string) {
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	t.Setenv("TMUX", "")
 	t.Setenv("TMUX_TMPDIR", root)
+	// os.TempDir() reads $TMPDIR on every call, and sandbox.Sandbox creates
+	// workspaces with os.MkdirTemp("", …). Pointing $TMPDIR at this bench's own
+	// root is what makes the workspace checkpoints below observe only THIS
+	// test's workspaces: sibling packages run in separate processes and keep
+	// writing forgectl-workflow-* dirs into the shared OS temp root throughout.
+	t.Setenv("TMPDIR", root)
 
 	// The review agent must outlive the dispatch long enough to be listed.
 	claudeBin := filepath.Join(root, "claude-helper")
@@ -185,7 +200,7 @@ func isolatedPickBench(t *testing.T) (*tmuxRoutingRunner, *pr.Client, string) {
 	}
 	socketPath := filepath.Join(root, "tmux-"+strconv.Itoa(os.Geteuid()), "default")
 
-	router := newRoutingRunner(t, prepareRunner(), sessionsDir, socketPath)
+	router := newRoutingRunner(t, prepareRunner(), sessionsDir, socketPath, root)
 	client := pr.New(router,
 		pr.WithSessionsDir(sessionsDir),
 		pr.WithTmuxSession("reviews"),

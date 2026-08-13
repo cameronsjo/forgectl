@@ -293,7 +293,7 @@ func TestLaunchPicked_BulkOrderingAndAccounting(t *testing.T) {
 	if launchLine < 0 || deferLine < 0 || cleanupLine < 0 {
 		t.Fatalf("stderr = %q, want per-ref failure, deferral, and cleanup summaries", stderr)
 	}
-	if !(launchLine < deferLine && deferLine < cleanupLine) {
+	if launchLine >= deferLine || deferLine >= cleanupLine {
 		t.Errorf("stderr = %q, want per-ref line, then deferral, then cleanup", stderr)
 	}
 

@@ -24,7 +24,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,9 +40,11 @@ import (
 func remoteReviewCmd(t *testing.T, l *tmuxLedger) (*cobra.Command, *bytes.Buffer) {
 	t.Helper()
 	fakeClaudeBin(t)
+	reviewTempRoot(t)
 	fake := l.runner()
 	client := pr.New(fake,
 		pr.WithSessionsDir(t.TempDir()),
+		pr.WithFindingsDir(t.TempDir()),
 		pr.WithTmuxSession(l.session),
 		pr.WithDispatchWait(func(context.Context) error { return nil }),
 	)
@@ -60,6 +61,7 @@ func remoteReviewCmd(t *testing.T, l *tmuxLedger) (*cobra.Command, *bytes.Buffer
 func localReviewCmd(t *testing.T, l *tmuxLedger) (*cobra.Command, *bytes.Buffer) {
 	t.Helper()
 	fakeClaudeBin(t)
+	reviewTempRoot(t)
 	git := prLocalFakeRunner().RunFunc
 	fake := l.runnerWith(git)
 	client := pr.New(fake,
@@ -76,17 +78,14 @@ func localReviewCmd(t *testing.T, l *tmuxLedger) (*cobra.Command, *bytes.Buffer)
 	return cmd, out
 }
 
-// cleanupPrinted removes the workspace and findings dirs a real run created, so
-// an outcome test leaves nothing behind outside t.TempDir.
-func cleanupPrinted(t *testing.T, body string) {
+// reviewTempRoot points $TMPDIR at a t.TempDir, so the sandbox workspace a real
+// prepare creates (os.MkdirTemp("", …), which reads $TMPDIR per call) is torn
+// down with the test. Reading the printed workspace path instead would clean up
+// only the rows that got as far as printing one — a failing row prepares a
+// workspace and prints nothing.
+func reviewTempRoot(t *testing.T) {
 	t.Helper()
-	for _, line := range strings.Split(body, "\n") {
-		for _, prefix := range []string{"  workspace: ", "  findings: "} {
-			if p, ok := strings.CutPrefix(line, prefix); ok {
-				t.Cleanup(func() { _ = os.RemoveAll(p) })
-			}
-		}
-	}
+	t.Setenv("TMPDIR", t.TempDir())
 }
 
 func TestPrRemoteDispatchVerificationOutcomes(t *testing.T) {
@@ -96,7 +95,6 @@ func TestPrRemoteDispatchVerificationOutcomes(t *testing.T) {
 		listErr   error
 		args      []string
 		wantErr   string
-		wantWrap  error
 		wantOut   string
 		forbidOut string
 	}{
@@ -137,7 +135,6 @@ func TestPrRemoteDispatchVerificationOutcomes(t *testing.T) {
 			cmd.SetArgs(tt.args)
 
 			err := cmd.ExecuteContext(context.Background())
-			cleanupPrinted(t, out.String())
 			assertOutcome(t, err, out.String(), tt.wantErr, tt.wantOut, tt.forbidOut)
 			if tt.wantErr != "" && strings.Contains(out.String(), "prepared clean-room review") {
 				t.Errorf("stdout = %q, a failed verification must not print the success block", out.String())
@@ -184,7 +181,6 @@ func TestPrLocalDispatchVerificationOutcomes(t *testing.T) {
 			cmd.SetArgs(args)
 
 			err := cmd.ExecuteContext(context.Background())
-			cleanupPrinted(t, out.String())
 			assertOutcome(t, err, out.String(), tt.wantErr, tt.wantOut, tt.forbidOut)
 		})
 	}
