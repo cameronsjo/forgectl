@@ -222,6 +222,95 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 	}
 }
 
+// symlinkedSessionsDir returns (link, real): a session directory reached
+// through a final-component symlink, which is a supported configuration.
+func symlinkedSessionsDir(t *testing.T) (link, real string) {
+	t.Helper()
+	base := t.TempDir()
+	real = filepath.Join(base, "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatalf("create real sessions dir: %v", err)
+	}
+	link = filepath.Join(base, "sessions")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	return link, real
+}
+
+// TestDiscardStale_ThroughSymlinkedSessionsDir pins that pinning the directory
+// with os.OpenRoot did not break a sessions dir reached through a symlink.
+// os.Root refuses an ESCAPING symlink but resolves the root path itself
+// normally, so this configuration keeps working.
+func TestDiscardStale_ThroughSymlinkedSessionsDir(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	link, real := symlinkedSessionsDir(t)
+	c := testClientAt(t, fake, link)
+	path, _ := seedStaleSession(t, c, Ref{Owner: "o", Repo: "r", Number: 1}, time.Now().UTC())
+
+	member, err := c.resolveBreadcrumbMember(path)
+	if err != nil {
+		t.Fatalf("resolveBreadcrumbMember: %v", err)
+	}
+	if err := c.discardStale(member); err != nil {
+		t.Fatalf("discardStale through a symlinked sessions dir: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(real, filepath.Base(path))); !os.IsNotExist(err) {
+		t.Errorf("the breadcrumb should be gone from the real dir; Lstat err = %v", err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("a stale unlink must issue ZERO Runner calls; got %+v", fake.Calls)
+	}
+}
+
+// TestDiscardStale_RefusesWhenSessionsSymlinkIsSwapped stages the attack the
+// pinned handle exists to answer: the sessions symlink is repointed at a decoy
+// holding an identically-named file after the snapshot is taken. The unlink
+// must refuse, and neither directory may lose a file.
+func TestDiscardStale_RefusesWhenSessionsSymlinkIsSwapped(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	link, real := symlinkedSessionsDir(t)
+	c := testClientAt(t, fake, link)
+	path, _ := seedStaleSession(t, c, Ref{Owner: "o", Repo: "r", Number: 1}, time.Now().UTC())
+	name := filepath.Base(path)
+
+	member, err := c.resolveBreadcrumbMember(path)
+	if err != nil {
+		t.Fatalf("resolveBreadcrumbMember: %v", err)
+	}
+
+	body, err := os.ReadFile(filepath.Join(real, name))
+	if err != nil {
+		t.Fatalf("read seeded breadcrumb: %v", err)
+	}
+	decoy := filepath.Join(filepath.Dir(real), "decoy")
+	if err := os.Mkdir(decoy, 0o700); err != nil {
+		t.Fatalf("create decoy dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(decoy, name), body, 0o600); err != nil {
+		t.Fatalf("seed decoy breadcrumb: %v", err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatalf("drop sessions symlink: %v", err)
+	}
+	if err := os.Symlink(decoy, link); err != nil {
+		t.Fatalf("repoint sessions symlink: %v", err)
+	}
+
+	if err := c.discardStale(member); err == nil {
+		t.Fatal("discardStale must refuse once the sessions symlink was repointed")
+	}
+	if _, err := os.Lstat(filepath.Join(real, name)); err != nil {
+		t.Errorf("the real breadcrumb must survive: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(decoy, name)); err != nil {
+		t.Errorf("the decoy breadcrumb must be untouched: %v", err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("a refusal must issue ZERO Runner calls; got %+v", fake.Calls)
+	}
+}
+
 // TestDiscardStale_WorkspaceReappearanceLeavesItUntouched pins that a
 // reappeared workspace is not merely a refusal reason but is itself never
 // touched — the refusal must not "clean up" the directory it just found.

@@ -81,14 +81,32 @@ func resolvePath(path string) string {
 // This is the one path in forgectl that deletes a file on the strength of a
 // record rather than a live sandbox, so it re-proves every fact it is acting
 // on immediately before acting. Everything membership captured is compared
-// against the filesystem again:
+// against the filesystem again, and every step runs through ONE pinned
+// directory handle opened at the top:
 //
-//	re-Lstat the canonical session directory  -> SameFile as at check time
-//	re-Lstat the authoritative member         -> SameFile as at check time
-//	re-read the authoritative path            -> byte-identical
-//	re-decode and re-validate                 -> every security field identical
-//	re-classify the recorded workspace        -> still cleanly missing
-//	os.Remove(authoritative member)
+//	os.OpenRoot(sessionsDir)             -> pin the directory for every step below
+//	Lstat "." through the handle         -> SameFile as at check time
+//	Lstat the member's base name         -> SameFile as at check time
+//	re-read that name through the handle -> byte-identical
+//	re-decode and re-validate            -> every security field identical
+//	re-classify the recorded workspace   -> still cleanly missing
+//	Remove that same base name
+//
+// PINNED HANDLE, UNRESOLVED NAME — and the pin is what makes the directory
+// identity check load-bearing. The earlier form Lstat'd
+// EvalSymlinks(c.sessionsDir) but unlinked through the UNRESOLVED
+// c.sessionsDir: the object checked and the object acted through were
+// different by construction, not merely racing, so a directory swap could
+// pass the check and still be deleted from. os.Root closes that: every check
+// and the unlink traverse the same file descriptor, and the unlink names only
+// the member's base name.
+//
+// This does NOT conflict with the VALIDATE RESOLVED, ACT UNRESOLVED convention
+// spelled out on validateWorkspace. That warning is about following a symlink
+// to its target; os.Root REFUSES an escaping symlink rather than following it,
+// so acting through the handle can never widen into a deletion elsewhere.
+// OpenRoot resolves c.sessionsDir itself in the ordinary way, so a symlinked
+// session directory remains supported.
 //
 // Any drift refuses: an identity mismatch, a symlink swapped in, a byte or
 // field change, the record disappearing or being recreated, the parent
@@ -102,37 +120,47 @@ func resolvePath(path string) string {
 // to restore — the workspace is already gone — and a stale record must never
 // be able to reach a facility that deletes directories.
 //
-// HONEST RESIDUAL: Go's portable standard library has no compare-and-unlink.
-// A same-uid actor can still race between the final checks and os.Remove, and
-// a parent can be renamed after its SameFile check. That is accepted, not
-// overlooked: the session directory is 0700, so such an actor can already
-// unlink or rewrite the breadcrumb directly without going through forgectl.
-// This protocol prevents benign in-process races and refuses observed drift;
-// it does not claim to defeat a hostile same-uid concurrent writer. Making
-// that claim would need platform-specific directory-handle and unlink support,
-// which is a different piece of work than #212.
+// HONEST RESIDUAL: the pinned handle removes the parent-rename race, but Go
+// still has no compare-and-unlink for the FILE itself. A same-uid actor can
+// replace the breadcrumb between the final Lstat and Remove, and the unlink
+// would take the replacement. That is accepted, not overlooked: the session
+// directory is 0700, so such an actor can already unlink or rewrite the
+// breadcrumb directly without going through forgectl. This protocol prevents
+// benign in-process races and refuses observed drift; it does not claim to
+// defeat a hostile same-uid concurrent writer.
 func (c *Client) discardStale(member breadcrumbMember) error {
 	slog.Debug("Preparing to discard a stale review breadcrumb.",
 		"ref", member.breadcrumb.Ref, "path", member.path)
 
-	canonicalDir, err := filepath.EvalSymlinks(c.sessionsDir)
+	root, err := os.OpenRoot(c.sessionsDir)
 	if err != nil {
-		return fmt.Errorf("re-resolve pr sessions dir: %w", err)
+		return fmt.Errorf("pin pr sessions dir %s: %w", c.sessionsDir, err)
 	}
-	dirInfo, err := os.Lstat(canonicalDir)
+	defer func() {
+		if cerr := root.Close(); cerr != nil {
+			slog.Debug("Failed to close the pinned pr sessions dir handle.", "error", cerr)
+		}
+	}()
+
+	dirInfo, err := root.Lstat(".")
 	if err != nil {
 		return fmt.Errorf("re-stat pr sessions dir: %w", err)
 	}
 	if !os.SameFile(dirInfo, member.dirInfo) {
 		return fmt.Errorf("pr sessions dir %s changed identity during teardown; refusing to remove %s",
-			canonicalDir, member.path)
+			c.sessionsDir, member.path)
 	}
+
+	// Membership already proved this entry sits directly in the canonical
+	// session directory, so its base name is the exact name to operate on
+	// through the pinned handle — and a base name cannot escape it.
+	name := filepath.Base(member.path)
 
 	// A member that vanished before this check is refused rather than treated
 	// as an already-successful removal: a concurrently completed teardown can
 	// report its own success, and silently succeeding here would hide a
 	// replacement race.
-	info, err := os.Lstat(member.path)
+	info, err := root.Lstat(name)
 	if err != nil {
 		return fmt.Errorf("re-stat breadcrumb %s: %w", member.path, err)
 	}
@@ -143,12 +171,16 @@ func (c *Client) discardStale(member breadcrumbMember) error {
 		return fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to remove it", member.path)
 	}
 
-	bc, data, err := loadBreadcrumbRecord(member.path, c.sessionsDir)
+	data, err := root.ReadFile(name)
 	if err != nil {
-		return fmt.Errorf("re-validate breadcrumb before removal: %w", err)
+		return fmt.Errorf("re-read breadcrumb %s: %w", member.path, err)
 	}
 	if !bytes.Equal(data, member.bytes) {
 		return fmt.Errorf("breadcrumb %s changed on disk during teardown; refusing to remove it", member.path)
+	}
+	bc, err := decodeBreadcrumbRecord(data, member.path)
+	if err != nil {
+		return fmt.Errorf("re-validate breadcrumb before removal: %w", err)
 	}
 	if !sameBreadcrumbRecord(bc, member.breadcrumb) {
 		return fmt.Errorf("breadcrumb %s decoded differently during teardown; refusing to remove it", member.path)
@@ -163,7 +195,7 @@ func (c *Client) discardStale(member breadcrumbMember) error {
 			member.path, availErr)
 	}
 
-	if err := os.Remove(member.path); err != nil {
+	if err := root.Remove(name); err != nil {
 		return fmt.Errorf("remove breadcrumb %s: %w", member.path, err)
 	}
 	slog.Info("Successfully discarded a stale review breadcrumb.", "ref", bc.Ref)

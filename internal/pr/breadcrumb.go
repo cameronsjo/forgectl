@@ -127,14 +127,28 @@ func loadBreadcrumbRecord(path, sessionsDir string) (Breadcrumb, []byte, error) 
 	if err != nil {
 		return Breadcrumb{}, nil, fmt.Errorf("read breadcrumb %s: %w", path, err)
 	}
-	bc, err := decodeBreadcrumb(data)
+	bc, err := decodeBreadcrumbRecord(data, path)
 	if err != nil {
-		return Breadcrumb{}, nil, fmt.Errorf("decode breadcrumb %s: %w", path, err)
-	}
-	if err := validateBreadcrumbRecord(bc); err != nil {
-		return Breadcrumb{}, nil, fmt.Errorf("invalid breadcrumb %s: %w", path, err)
+		return Breadcrumb{}, nil, err
 	}
 	return bc, data, nil
+}
+
+// decodeBreadcrumbRecord is step (2) of loadBreadcrumbRecord split out for a
+// caller that already holds the bytes and has settled location by construction
+// rather than by pathname — the stale-unlink protocol reads through a pinned
+// directory handle, so there is no path left to location-check.
+//
+// path names the file only for error messages; it is never opened here.
+func decodeBreadcrumbRecord(data []byte, path string) (Breadcrumb, error) {
+	bc, err := decodeBreadcrumb(data)
+	if err != nil {
+		return Breadcrumb{}, fmt.Errorf("decode breadcrumb %s: %w", path, err)
+	}
+	if err := validateBreadcrumbRecord(bc); err != nil {
+		return Breadcrumb{}, fmt.Errorf("invalid breadcrumb %s: %w", path, err)
+	}
+	return bc, nil
 }
 
 // loadBreadcrumb is the STRICT LIVE loader: the record load above, plus the
