@@ -8,6 +8,36 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
+// TestWindowFormatCarriesIdentityPrefix binds the two halves of dispatch
+// verification together WITHOUT tmux: internal/pr captures a dispatch identity
+// with `new-window -P -F tmux.IdentityFormat`, then matches it against the
+// first three fields of a list-windows row. If windowFormat ever stopped
+// leading with IdentityFormat — a reordered or inserted field — VerifyDispatched
+// would match nothing and report every healthy review gone. The existing
+// real-tmux matrix would catch it, but it skips wherever tmux is absent, so this
+// is the assertion that always runs.
+func TestWindowFormatCarriesIdentityPrefix(t *testing.T) {
+	if !strings.HasPrefix(windowFormat, IdentityFormat+FieldSep) {
+		t.Fatalf("windowFormat = %q, want prefix %q", windowFormat, IdentityFormat+FieldSep)
+	}
+	identityFields := strings.Split(IdentityFormat, FieldSep)
+	if len(identityFields) != 3 {
+		t.Fatalf("IdentityFormat = %q, want 3 fields", IdentityFormat)
+	}
+	// parseWindows reads f[0..2] as ServerPID/ServerStart/ID, and admission
+	// rejoins them with FieldSep to rebuild the captured identity. Prove that
+	// round trip on a real row rather than trusting the constants alone.
+	row := strings.Join([]string{"123", "456", "@7", "reviews", "1", "pr-o-r-1", "0", "1"}, FieldSep)
+	windows := parseWindows(row)
+	if len(windows) != 1 {
+		t.Fatalf("parseWindows(%q) = %d rows, want 1", row, len(windows))
+	}
+	got := strings.Join([]string{windows[0].ServerPID, windows[0].ServerStart, windows[0].ID}, FieldSep)
+	if want := "123" + FieldSep + "456" + FieldSep + "@7"; got != want {
+		t.Errorf("rebuilt identity = %q, want %q", got, want)
+	}
+}
+
 func TestParseWindows(t *testing.T) {
 	out := "123" + sep + "456" + sep + "@0" + sep + "main" + sep + "0" + sep + "editor" + sep + "1" + sep + "2" + "\n" +
 		"123" + sep + "456" + sep + "@1" + sep + "main" + sep + "1" + sep + "my window" + sep + "0" + sep + "1" + "\n" +

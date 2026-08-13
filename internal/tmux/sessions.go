@@ -5,11 +5,11 @@ import (
 )
 
 // sessionFormat is the -F spec for list-sessions. Fields, in order:
-// name, window count, attached(1/0), created(unix), path — joined by fieldSep.
-const sessionFormat = "#{session_name}" + fieldSep +
-	"#{session_windows}" + fieldSep +
-	"#{?session_attached,1,0}" + fieldSep +
-	"#{session_created}" + fieldSep +
+// name, window count, attached(1/0), created(unix), path — joined by FieldSep.
+const sessionFormat = "#{session_name}" + FieldSep +
+	"#{session_windows}" + FieldSep +
+	"#{?session_attached,1,0}" + FieldSep +
+	"#{session_created}" + FieldSep +
 	"#{session_path}"
 
 // ListSessions returns all tmux sessions. When no tmux server is running it

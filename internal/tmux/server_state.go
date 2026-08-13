@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 
 	internalexec "github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -39,6 +40,17 @@ func (c *Client) classifyServerFailure(ctx context.Context, expectedArgs []strin
 	if c.getenv("TMUX") != "" {
 		return serverFailure{Kind: serverCustomSocket, Cause: err}
 	}
+	// Everything below derives the socket THIS argv would use, and
+	// serverAbsentDefault is the one classification that means "proceed" — a
+	// caller may go on to create the first server. That derivation is only valid
+	// for a command with no explicit socket: `-L <label>` and `-S <path>` both
+	// move the socket somewhere this function does not look, so an absent
+	// default would be read as "no server" for a command aimed elsewhere. No
+	// caller passes them today; refuse rather than let a future one inherit the
+	// proceed verdict silently.
+	if hasExplicitSocketArg(expectedArgs) {
+		return serverFailure{Kind: serverUnknown, Cause: err}
+	}
 	root := c.getenv("TMUX_TMPDIR")
 	if root == "" {
 		root = "/tmp"
@@ -58,6 +70,18 @@ func (c *Client) classifyServerFailure(ctx context.Context, expectedArgs []strin
 	default:
 		return serverFailure{Kind: serverUnknown, SocketPath: socketPath, Cause: statErr}
 	}
+}
+
+// hasExplicitSocketArg reports whether argv names a socket other than the
+// default one — tmux's server options `-L <label>` and `-S <path>`, in both
+// their separated and attached (`-Lfoo`, `-S/path`) spellings.
+func hasExplicitSocketArg(args []string) bool {
+	for _, arg := range args {
+		if arg == "-L" || arg == "-S" || strings.HasPrefix(arg, "-L") || strings.HasPrefix(arg, "-S") {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) absentDefaultServer(ctx context.Context, args []string, err error) bool {

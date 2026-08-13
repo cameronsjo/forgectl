@@ -35,6 +35,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 func postClient(fake *exec.FakeRunner, approve bool, tty bool) *Client {
@@ -257,7 +258,7 @@ func TestLaunch_InlineDispatch(t *testing.T) {
 	if !contains(call.Args, "--") {
 		t.Errorf("tmux argv missing -- terminator before claude: %v", call.Args)
 	}
-	if len(call.Args) < 4 || !equalArgs(call.Args[:4], []string{"new-window", "-P", "-F", dispatchIdentityFormat}) {
+	if len(call.Args) < 4 || !equalArgs(call.Args[:4], []string{"new-window", "-P", "-F", tmux.IdentityFormat}) {
 		t.Errorf("tmux argv missing exact -P/-F identity capture: %v", call.Args)
 	}
 	// SECURITY: the review agent must launch HARDENED even though the launch

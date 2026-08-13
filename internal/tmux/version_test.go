@@ -84,7 +84,7 @@ func TestCheckGenerationCapability_CallOrderAndFloor(t *testing.T) {
 				t.Errorf("first args = %v, want [-V]", fake.Calls[0].Args)
 			}
 			if !tc.wantErr {
-				want := []string{"display-message", "-p", identityFormat}
+				want := []string{"display-message", "-p", IdentityFormat}
 				if !reflect.DeepEqual(fake.Calls[1].Args, want) {
 					t.Errorf("display args = %v, want %v", fake.Calls[1].Args, want)
 				}

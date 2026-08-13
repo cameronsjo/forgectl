@@ -6,10 +6,15 @@ import (
 	"time"
 )
 
-// fieldSep is the ASCII unit separator (0x1f). tmux -F formats join fields
+// FieldSep is the ASCII unit separator (0x1f). tmux -F formats join fields
 // with it so session/window/pane names containing spaces (or even tabs) never
 // break strings.Split — a single printable separator that no name will hold.
-const fieldSep = "\x1f"
+//
+// Exported because internal/pr splits dispatch identities produced by this
+// package's formats; a re-hardcoded "\x1f" there could drift from the format
+// that produced the value, and the failure mode is silent (VerifyDispatched
+// matches nothing and reports every healthy review gone).
+const FieldSep = "\x1f"
 
 // splitLines splits command output into non-empty trimmed lines.
 func splitLines(out string) []string {
@@ -22,7 +27,7 @@ func splitLines(out string) []string {
 
 // splitFields splits one -F output line into its fields on the unit separator.
 func splitFields(line string) []string {
-	return strings.Split(line, fieldSep)
+	return strings.Split(line, FieldSep)
 }
 
 // atoi parses an int, defaulting to 0 on garbage (tmux always emits valid

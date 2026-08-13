@@ -24,8 +24,6 @@ const reviewPrompt = "Review this pull request as a clean-room reviewer. " +
 	"(Critical / Important / Nit) with file:line and a concrete fix. " +
 	"Do NOT post, comment, merge, or push anything — output the review only."
 
-const dispatchIdentityFormat = "#{pid}\x1f#{start_time}\x1f#{window_id}"
-
 var dispatchWindowIDPattern = regexp.MustCompile(`^@[0-9]+$`)
 
 // Dispatch is the generation-qualified identity returned by one successful
@@ -36,7 +34,7 @@ type Dispatch struct {
 }
 
 func newDispatch(ref Ref, output string) (Dispatch, error) {
-	fields := strings.Split(output, "\x1f")
+	fields := strings.Split(output, tmux.FieldSep)
 	if len(fields) != 3 {
 		return Dispatch{}, fmt.Errorf("tmux dispatch identity has %d fields, want 3", len(fields))
 	}
@@ -50,7 +48,7 @@ func newDispatch(ref Ref, output string) (Dispatch, error) {
 	if !dispatchWindowIDPattern.MatchString(fields[2]) {
 		return Dispatch{}, fmt.Errorf("invalid tmux window id %q", fields[2])
 	}
-	return Dispatch{Ref: ref, WindowID: strings.Join(fields, "\x1f")}, nil
+	return Dispatch{Ref: ref, WindowID: strings.Join(fields, tmux.FieldSep)}, nil
 }
 
 // localReviewPrompt seeds a local (offline) review — there is no PR to post
@@ -282,7 +280,7 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 	}
 	args := []string{
 		"new-window",
-		"-P", "-F", dispatchIdentityFormat,
+		"-P", "-F", tmux.IdentityFormat,
 		"-t", c.exactSessionTarget(),
 		"-n", windowName(sess.Ref),
 		"-c", sess.Workspace,
@@ -428,7 +426,7 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	}
 	args := []string{
 		"new-window",
-		"-P", "-F", dispatchIdentityFormat,
+		"-P", "-F", tmux.IdentityFormat,
 		"-t", c.exactSessionTarget(),
 		"-n", windowName(sess.Ref),
 		"-c", sess.Workspace,

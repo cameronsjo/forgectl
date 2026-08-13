@@ -155,13 +155,17 @@ func (c *Client) VerifyDispatched(ctx context.Context, dispatches []Dispatch) ([
 	type liveKey struct{ id, session, name string }
 	live := make(map[liveKey]bool, len(windows))
 	for _, window := range windows {
+		// tmux.FieldSep, not a re-hardcoded "\x1f": this key is rebuilt from a
+		// list-windows row and compared against an identity Launch captured with
+		// tmux.IdentityFormat. A drift between the two joins is silent — every
+		// live dispatch would miss and be reported gone.
 		live[liveKey{
-			id:      strings.Join([]string{window.ServerPID, window.ServerStart, window.ID}, "\x1f"),
+			id:      strings.Join([]string{window.ServerPID, window.ServerStart, window.ID}, tmux.FieldSep),
 			session: window.Session,
 			name:    window.Name,
 		}] = true
 	}
-	gone := make([]Dispatch, 0)
+	var gone []Dispatch
 	for _, dispatch := range dispatches {
 		key := liveKey{id: dispatch.WindowID, session: c.tmuxSession, name: windowName(dispatch.Ref)}
 		if !live[key] {

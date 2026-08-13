@@ -85,6 +85,50 @@ func TestClassifyServerFailure(t *testing.T) {
 	}
 }
 
+// TestClassifyServerFailure_ExplicitSocketArgvIsUnknown pins the one
+// classification that authorizes a caller to proceed. The default-socket
+// derivation is only meaningful for an argv with no -L/-S, so an explicit
+// socket must never reach serverAbsentDefault — otherwise a future caller
+// aimed at another socket would be told "no server, go ahead" on the strength
+// of the default one being absent.
+func TestClassifyServerFailure_ExplicitSocketArgvIsUnknown(t *testing.T) {
+	for _, argv := range [][]string{
+		{"-L", "other", "list-windows", "-a", "-F", windowFormat},
+		{"-Lother", "list-windows", "-a", "-F", windowFormat},
+		{"-S", "/tmp/other.sock", "display-message", "-p", IdentityFormat},
+		{"-S/tmp/other.sock", "display-message", "-p", IdentityFormat},
+	} {
+		t.Run(argv[0], func(t *testing.T) {
+			c := New(&internalexec.FakeRunner{})
+			c.getenv = func(string) string { return "" }
+			c.geteuid = func() int { return 501 }
+			c.lstat = func(string) (os.FileInfo, error) {
+				t.Error("derived the default socket for an explicit-socket argv")
+				return nil, os.ErrNotExist
+			}
+			got := c.classifyServerFailure(context.Background(), argv, commandFailure("tmux", argv, "no server running"))
+			if got.Kind != serverUnknown {
+				t.Errorf("kind = %v, want serverUnknown", got.Kind)
+			}
+		})
+	}
+}
+
+// TestProductionArgvHasNoExplicitSocket is the other half: the guard above is
+// only free of cost if no argv this package actually issues trips it.
+func TestProductionArgvHasNoExplicitSocket(t *testing.T) {
+	for _, argv := range [][]string{
+		{"list-windows", "-a", "-F", windowFormat},
+		{"list-panes", "-a", "-F", paneFormat},
+		{"list-sessions", "-F", sessionFormat},
+		{"display-message", "-p", IdentityFormat},
+	} {
+		if hasExplicitSocketArg(argv) {
+			t.Errorf("production argv %v reads as an explicit socket", argv)
+		}
+	}
+}
+
 func TestListWindows_ServerFailureSemantics(t *testing.T) {
 	args := []string{"list-windows", "-a", "-F", windowFormat}
 	for _, tc := range []struct {

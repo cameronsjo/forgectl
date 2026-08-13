@@ -50,7 +50,7 @@ func (c *Client) LastSession(ctx context.Context) error {
 // mostRecentSession returns the session with the greatest session_last_attached
 // timestamp (empty string if no server / no sessions).
 func (c *Client) mostRecentSession(ctx context.Context) (string, error) {
-	const format = "#{session_last_attached}" + fieldSep + "#{session_name}"
+	const format = "#{session_last_attached}" + FieldSep + "#{session_name}"
 	args := []string{"list-sessions", "-F", format}
 	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {

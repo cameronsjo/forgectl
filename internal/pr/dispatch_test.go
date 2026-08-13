@@ -57,6 +57,35 @@ func TestVerifyDispatched_ExactGenerationSessionAndName(t *testing.T) {
 	}
 }
 
+// TestVerifyDispatched_PreservesDuplicateGoneMultiplicity is the gone-side
+// mirror of the live duplicate above. Input order and duplicate multiplicity
+// are contract for BOTH outcomes: the CLI renders one line per gone dispatch,
+// so collapsing duplicates would silently under-report how many reviews died.
+func TestVerifyDispatched_PreservesDuplicateGoneMultiplicity(t *testing.T) {
+	refLive := Ref{Owner: "o", Repo: "r", Number: 1}
+	refGone := Ref{Owner: "o", Repo: "r", Number: 2}
+	rows := dispatchWindowRow("10", "20", "@1", "reviews", windowName(refLive))
+	fake := &internalexec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		if args[0] == "list-windows" {
+			return rows, nil
+		}
+		return "", nil
+	}}
+	c := New(fake, WithTmuxSession("reviews"), WithDispatchWait(func(context.Context) error { return nil }))
+	goneDispatch := Dispatch{Ref: refGone, WindowID: "10\x1f20\x1f@2"}
+	gone, err := c.VerifyDispatched(context.Background(), []Dispatch{
+		goneDispatch,
+		{Ref: refLive, WindowID: "10\x1f20\x1f@1"},
+		goneDispatch,
+	})
+	if err != nil {
+		t.Fatalf("VerifyDispatched: %v", err)
+	}
+	if len(gone) != 2 || gone[0] != goneDispatch || gone[1] != goneDispatch {
+		t.Fatalf("gone = %+v, want the gone dispatch twice in input order", gone)
+	}
+}
+
 func TestVerifyDispatched_EmptyDoesNotWaitOrList(t *testing.T) {
 	fake := &internalexec.FakeRunner{}
 	waits := 0

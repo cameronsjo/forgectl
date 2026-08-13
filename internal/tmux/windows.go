@@ -10,20 +10,20 @@ import (
 // windowFormat is the -F spec for list-windows -a. Fields:
 // server pid, server start, native window id, session, window index, window
 // name, active(1/0), pane count.
-const windowFormat = identityFormat + fieldSep +
-	"#{session_name}" + fieldSep +
-	"#{window_index}" + fieldSep +
-	"#{window_name}" + fieldSep +
-	"#{?window_active,1,0}" + fieldSep +
+const windowFormat = IdentityFormat + FieldSep +
+	"#{session_name}" + FieldSep +
+	"#{window_index}" + FieldSep +
+	"#{window_name}" + FieldSep +
+	"#{?window_active,1,0}" + FieldSep +
 	"#{window_panes}"
 
 // paneFormat is the -F spec for list-panes -a. Fields:
 // session, window index, pane index, title, current command, active(1/0).
-const paneFormat = "#{session_name}" + fieldSep +
-	"#{window_index}" + fieldSep +
-	"#{pane_index}" + fieldSep +
-	"#{pane_title}" + fieldSep +
-	"#{pane_current_command}" + fieldSep +
+const paneFormat = "#{session_name}" + FieldSep +
+	"#{window_index}" + FieldSep +
+	"#{pane_index}" + FieldSep +
+	"#{pane_title}" + FieldSep +
+	"#{pane_current_command}" + FieldSep +
 	"#{?pane_active,1,0}"
 
 // ListWindows returns every window across all sessions (list-windows -a).
