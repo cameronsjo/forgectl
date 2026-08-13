@@ -25,7 +25,7 @@ forgectl is a personal dev-experience CLI that absorbed a working bash script
 (`s`), a working launcher (claunch), and four working dotfiles helpers into one
 pre-1.0 binary (v0.6.0, `Version = "dev"`) from a personal Homebrew tap, under
 a source-available (not OSI) license, with bus factor 1 and high-value paths coupled to the
-author's personal estate (sesh, claude CLI, hearth/chronicle/flux, Touch ID,
+author's personal estate (sesh, claude CLI, hearth/chronicle, Touch ID,
 git.sjo.lol).
 
 ## Your dictionary

@@ -27,7 +27,7 @@ forgectl is a personal dev-experience CLI for a headless macOS workbench —
 eight shipped command groups under a TOML workflow DSL, installed from a
 personal Homebrew tap, Apache-2.0 with Commons Clause. Six releases in six weeks, all
 95 commits and 62 issues from one operator. High-value paths couple to the
-personal estate (sesh, claude CLI, hearth/chronicle/flux, Touch ID).
+personal estate (sesh, claude CLI, hearth/chronicle, Touch ID).
 
 ## Your dictionary
 

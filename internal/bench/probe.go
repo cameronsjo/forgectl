@@ -1,6 +1,6 @@
 // Package bench is forgectl's interop spine across the local developer bench —
-// the hearth telemetry stack, the chronicle transcript-retention layer, and the
-// flux board. It discovers and health-checks each system through its frozen
+// the hearth telemetry stack and the chronicle transcript-retention layer. It
+// discovers and health-checks each system through its frozen
 // interop contract; it never reimplements a service's own logic. All probing is
 // injectable (exec.Runner for shell-outs, Prober for network reachability) so
 // the orchestration stays pure and table-testable, and every component degrades

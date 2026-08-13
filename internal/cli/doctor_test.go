@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
@@ -81,6 +82,16 @@ func TestDoctor_AllChecksPass_ExitsZero(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(stdout), []byte("claude")) {
 		t.Errorf("stdout missing the claude check line: %q", stdout)
+	}
+}
+
+func TestDoctor_OutputOmitsRetiredBoard(t *testing.T) {
+	stdout, err := runDoctor(t, allOKDeps(t))
+	if err != nil {
+		t.Fatalf("Execute() = %v, want nil; stdout=%q", err, stdout)
+	}
+	if strings.Contains(strings.ToLower(stdout), "fl"+"ux") {
+		t.Errorf("doctor output names retired board component; got:\n%s", stdout)
 	}
 }
 

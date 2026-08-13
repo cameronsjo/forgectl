@@ -25,7 +25,7 @@ forgectl is a personal dev-experience CLI for a headless macOS workbench —
 installed via `brew install cameronsjo/tap/forgectl`, claims to run "with
 sensible defaults and no config file," and offers a bare-`forgectl` Thumb mode
 TUI meant to work from a phone over mosh. Much of its value assumes companion
-tools (sesh, claude CLI, hearth/chronicle/flux) and macOS-only hardware
+tools (sesh, claude CLI, hearth/chronicle) and macOS-only hardware
 (Secure Enclave, pbcopy).
 
 ## Your dictionary
