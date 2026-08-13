@@ -156,6 +156,13 @@ type LaunchProject struct {
 
 // IsZero reports whether the [launch] section was absent or empty — the signal
 // the launcher uses to fall back to a legacy claunch.conf.
+//
+// usage_stats counts toward non-empty, which changes how one specific operator
+// is routed: someone holding both a claunch.conf and a config.toml containing
+// nothing but the opt-in used to get wholesale legacy import and now gets the
+// additive shadow-merge in MergeLegacyIntoLaunch. Every legacy setting survives
+// either route — the difference is which code path carries it, and that is
+// worth stating here because the opt-in reads like it should be inert.
 func (lc LaunchConfig) IsZero() bool {
 	return len(lc.Projects) == 0 && lc.Defaults.isZero() && !lc.UsageStats
 }
