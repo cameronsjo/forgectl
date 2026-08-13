@@ -11,6 +11,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 	netpkg "github.com/cameronsjo/forgectl/internal/net"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // prAgentEnv is the environment override for the review agent, honored when
@@ -252,8 +253,18 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 				// field 3 and README documents it as what `pr teardown` is fed,
 				// so a script cutting field 3 keeps working; shifting it would
 				// hand those callers a timestamp.
+				//
+				// The path is a FILENAME chosen on disk, so it is the one field
+				// here that can carry ANSI or bidi controls; Ref is
+				// charset-constrained by ParseRef and the timestamp is
+				// formatted. This row is BOTH rendered to a terminal and
+				// parsed by scripts, so the escaping is conditional: an
+				// ordinary path prints verbatim and field 3 stays exactly
+				// what teardown is fed, while a control-bearing one prints
+				// as a quoted literal instead of driving the terminal.
 				fmt.Fprintf(out, "%s\t%s\t%s\t%s\n",
-					s.Ref().String(), s.CreatedAt().Format(time.RFC3339), s.Path(),
+					s.Ref().String(), s.CreatedAt().Format(time.RFC3339),
+					termsafe.QuotePathIfUnsafe(s.Path()),
 					sessionStatus(live, s, tmuxOK))
 			}
 			return nil

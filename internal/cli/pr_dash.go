@@ -10,6 +10,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // prSectionStyle titles a dashboard block. Bold accent (color 110) matches the
@@ -76,6 +77,10 @@ func renderSessions(out io.Writer, summaries []pr.SessionSummary) {
 		if s.IsWorkspaceMissing() {
 			suffix = "  (" + workspaceMissingStatus + ")"
 		}
-		fmt.Fprintf(out, "  %s  (%s ago)  %s%s\n", s.Ref().String(), age, s.Path(), suffix)
+		// The path is a FILENAME chosen on disk, so it is the one field here
+		// that can carry ANSI or bidi controls; Ref is charset-constrained by
+		// ParseRef. Quote it, as every other human sink in the CLI does.
+		fmt.Fprintf(out, "  %s  (%s ago)  %s%s\n",
+			s.Ref().String(), age, termsafe.QuotePath(s.Path()), suffix)
 	}
 }
