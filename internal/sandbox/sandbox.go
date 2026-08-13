@@ -121,15 +121,14 @@ func isLocalRepo(repo string) bool {
 //     matching note on pr.validateWorkspace also forbids. Do NOT "tidy" this
 //     into acting on what was validated.
 //
-// EvalSymlinks failure is fail-closed: a dangling symlink is refused rather
-// than falling back to the literal name (pr.validateWorkspace falls back
-// fail-open at that point; this is deliberately stricter, and the trade is
-// that a sandbox whose target vanished must be removed by hand — and, because
-// pr.validateWorkspace falls back fail-OPEN on the same error, such a
-// breadcrumb loads fine and then dies here, so `pr teardown` and `pr cleanup`
-// can never reclaim that session without manual help. Reaching it needs the
-// workspace's own final component to be a symlink, which sandbox.Sandbox never
-// produces; the fail-open/fail-closed divergence itself is tracked in #247).
+// Both EvalSymlinks error branches now fail closed: pr.validateWorkspace
+// refuses any resolution error that survives its preceding Stat, and this
+// sink refuses one after Lstat. Their preceding probes intentionally differ:
+// breadcrumb validation rejects an ordinary missing path or static dangling
+// symlink at Stat, while this guard maps an ordinary already-removed path to
+// its idempotent no-op and refuses a static dangling symlink after Lstat.
+// An unresolvable breadcrumb may therefore need manual removal;
+// sandbox.Sandbox does not produce final-component symlinks.
 //
 // TOCTOU, KNOWN AND BOUNDED: between EvalSymlinks and RemoveAll a PARENT
 // component repointed after validation redirects the delete to a different
