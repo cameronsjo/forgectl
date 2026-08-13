@@ -64,6 +64,34 @@ func TestTeardown_AcceptsMember(t *testing.T) {
 	}
 }
 
+func TestTeardown_CoveredRootQuarantineHasNoPhantomNestedMove(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	c := testClient(t, fake)
+	ref := Ref{Owner: "o", Repo: "r", Number: 8}
+	path, ws := seedSession(t, c, ref, time.Now().UTC())
+	externalCanary := filepath.Join(t.TempDir(), "canary")
+	if err := os.WriteFile(externalCanary, []byte("survives"), 0o600); err != nil {
+		t.Fatalf("seed external canary: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(ws, ".claude.quarantined"), 0o700); err != nil {
+		t.Fatalf("seed covered root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".claude.quarantined", "CLAUDE.md"), []byte("covered"), 0o600); err != nil {
+		t.Fatalf("seed nested carrier: %v", err)
+	}
+
+	if err := c.Teardown(context.Background(), path); err != nil {
+		t.Fatalf("Teardown covered root: %v", err)
+	}
+	if _, err := os.Stat(ws); !os.IsNotExist(err) {
+		t.Fatalf("workspace should be removed after covered-root restore: %v", err)
+	}
+	content, err := os.ReadFile(externalCanary)
+	if err != nil || string(content) != "survives" {
+		t.Fatalf("external sibling canary changed: content=%q err=%v", content, err)
+	}
+}
+
 func TestTeardown_RejectsNonMember(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := testClient(t, fake)

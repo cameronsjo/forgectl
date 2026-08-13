@@ -188,3 +188,106 @@ func TestQuarantineStatusCmd_ReportsPerTargetState(t *testing.T) {
 		}
 	}
 }
+
+func TestQuarantineCommands_RejectOverlappingTargetsWithoutOutputOrMutation(t *testing.T) {
+	want := `quarantine targets ".cursor" (outer) and ".cursor/rules" (inner) overlap: replace the inner entry, do not join it`
+	commands := []struct {
+		name string
+		args []string
+	}{
+		{"bare hide", nil},
+		{"explicit hide", []string{"hide"}},
+		{"hide dry-run", []string{"hide", "--dry-run"}},
+		{"restore", []string{"restore"}},
+		{"restore dry-run", []string{"restore", "--dry-run"}},
+		{"status", []string{"status"}},
+	}
+	for _, command := range commands {
+		for _, targets := range [][]string{{".cursor/rules", ".cursor"}, {".cursor", ".cursor/rules"}} {
+			t.Run(command.name+"/"+strings.Join(targets, "-then-"), func(t *testing.T) {
+				root := t.TempDir()
+				writeQuarantineFixture(t, filepath.Join(root, ".cursor", "rules", "r.mdc"), "rules")
+				args := append([]string{}, command.args...)
+				args = append(args, "--root", root)
+				for _, target := range targets {
+					args = append(args, "--targets", target)
+				}
+				cmd := newQuarantineCmd(newQuarantineTestClient())
+				var out bytes.Buffer
+				cmd.SetOut(&out)
+				cmd.SetErr(new(bytes.Buffer))
+				cmd.SetArgs(args)
+
+				err := cmd.ExecuteContext(context.Background())
+				if err == nil || err.Error() != want {
+					t.Fatalf("error = %v, want %q", err, want)
+				}
+				if out.Len() != 0 {
+					t.Fatalf("command emitted partial output on refusal: %q", out.String())
+				}
+				content, readErr := os.ReadFile(filepath.Join(root, ".cursor", "rules", "r.mdc"))
+				if readErr != nil || string(content) != "rules" {
+					t.Fatalf("command mutated source on refusal: content=%q err=%v", content, readErr)
+				}
+			})
+		}
+	}
+}
+
+func TestQuarantineCommands_RejectDestinationSourceChainsExactly(t *testing.T) {
+	tests := []struct {
+		name    string
+		scheme  string
+		targets []string
+		want    string
+	}{
+		{"suffix", "suffix", []string{"foo", "foo.quarantined"}, `quarantine moves for "foo" and "foo.quarantined" conflict: destination "foo.quarantined" is another source`},
+		{"prefix", "prefix", []string{"foo", "_foo"}, `quarantine moves for "_foo" and "foo" conflict: destination "_foo" is another source`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, target := range tc.targets {
+				writeQuarantineFixture(t, filepath.Join(root, target), target)
+			}
+			cmd := newQuarantineCmd(newQuarantineTestClient())
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(new(bytes.Buffer))
+			args := []string{"hide", "--dry-run", "--root", root, "--scheme", tc.scheme}
+			for _, target := range tc.targets {
+				args = append(args, "--targets", target)
+			}
+			cmd.SetArgs(args)
+			if err := cmd.ExecuteContext(context.Background()); err == nil || err.Error() != tc.want {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("dry-run emitted output on graph refusal: %q", out.String())
+			}
+		})
+	}
+}
+
+func TestQuarantineStatus_NoPhantomNestedRowUnderCoveredRoot(t *testing.T) {
+	root := t.TempDir()
+	writeQuarantineFixture(t, filepath.Join(root, ".claude", "CLAUDE.md"), "covered")
+	writeQuarantineFixture(t, filepath.Join(root, "packages", "api", "CLAUDE.md"), "uncovered")
+
+	cmd := newQuarantineCmd(newQuarantineTestClient())
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"status", "--root", root, "--scheme", "suffix"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	body := out.String()
+	if strings.Contains(body, filepath.ToSlash(filepath.Join(".claude", "CLAUDE.md"))+":") {
+		t.Fatalf("status reported a phantom nested row under covered .claude: %s", body)
+	}
+	for _, want := range []string{".claude: present", filepath.ToSlash(filepath.Join("packages", "api", "CLAUDE.md")) + ": present"} {
+		if !strings.Contains(filepath.ToSlash(body), want) {
+			t.Fatalf("status missing %q: %s", want, body)
+		}
+	}
+}
