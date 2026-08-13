@@ -58,7 +58,7 @@ func (c *Client) classifyServerFailure(ctx context.Context, expectedArgs []strin
 	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return serverFailure{Kind: serverUnknown, Cause: err}
 	}
-	socketPath := filepath.Join(root, "tmux-"+strconv.Itoa(c.geteuid()), "default")
+	socketPath := filepath.Join(root, "tmux-"+strconv.Itoa(c.getuid()), "default")
 	_, statErr := c.lstat(socketPath)
 	switch {
 	case errors.Is(statErr, os.ErrNotExist):

@@ -112,7 +112,7 @@ func TestListSessions_NoServer(t *testing.T) {
 	}
 	c := New(fake)
 	c.getenv = func(string) string { return "" }
-	c.geteuid = func() int { return 501 }
+	c.getuid = func() int { return 501 }
 	c.lstat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
 
 	sessions, err := c.ListSessions(context.Background())

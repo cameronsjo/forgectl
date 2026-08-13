@@ -33,10 +33,21 @@ type Dispatch struct {
 	WindowID string
 }
 
+// newDispatch parses the `new-window -P -F tmux.IdentityFormat` result into a
+// generation-qualified identity.
+//
+// It splits with tmux.SplitFields, not a bare strings.Split on tmux.FieldSep,
+// because tmux 3.5a and older hand the separator back octal-escaped (see
+// escapedFieldSep in internal/tmux/format.go). Every field is still validated
+// exactly as before — pid and start time numeric, window id ^@[0-9]+$ — and
+// WindowID is rejoined on the RAW separator, so the in-memory identity is one
+// canonical form regardless of which tmux produced it. That is what keeps it
+// comparable to the ListWindows rows VerifyDispatched matches against, which
+// normalize the same way.
 func newDispatch(ref Ref, output string) (Dispatch, error) {
-	fields := strings.Split(output, tmux.FieldSep)
+	fields := tmux.SplitFields(output)
 	if len(fields) != 3 {
-		return Dispatch{}, fmt.Errorf("tmux dispatch identity has %d fields, want 3", len(fields))
+		return Dispatch{}, fmt.Errorf("tmux dispatch identity has %d fields, want 3 (raw %q)", len(fields), output)
 	}
 	pid, err := strconv.ParseUint(fields[0], 10, 64)
 	if err != nil || pid == 0 {

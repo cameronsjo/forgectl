@@ -102,7 +102,7 @@ func TestCheckGenerationCapability_AbsentDefaultSucceedsWithoutParsingStderr(t *
 	}}
 	c := New(fake)
 	c.getenv = func(string) string { return "" }
-	c.geteuid = func() int { return 501 }
+	c.getuid = func() int { return 501 }
 	c.lstat = func(string) (FileInfo, error) { return nil, ErrNotExist }
 	if _, err := c.CheckGenerationCapability(context.Background()); err != nil {
 		t.Fatalf("CheckGenerationCapability() = %v, want success for absent default", err)
@@ -150,7 +150,7 @@ func TestCheckGenerationCapability_RefusalMatrix(t *testing.T) {
 				}
 				return ""
 			}
-			c.geteuid = func() int { return 501 }
+			c.getuid = func() int { return 501 }
 			c.lstat = func(string) (FileInfo, error) { return nil, tt.lstatErr }
 			if _, err := c.CheckGenerationCapability(tt.ctx); err == nil {
 				t.Fatal("capability succeeded, want refusal")

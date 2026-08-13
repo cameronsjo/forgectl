@@ -30,9 +30,19 @@ type Client struct {
 
 	// Server-state seams keep the default-socket classifier deterministic in
 	// same-package tests without exposing filesystem configuration publicly.
-	getenv  func(string) string
-	geteuid func() int
-	lstat   func(string) (os.FileInfo, error)
+	getenv func(string) string
+	// getuid is os.Getuid, NOT os.Geteuid, and the distinction is
+	// load-bearing: tmux's own make_label() builds the default socket
+	// directory from getuid(), so matching it exactly is what makes the
+	// derived path the same path tmux would use. Under a setuid/setgid
+	// forgectl the two diverge, and the failure is fail-OPEN — we would lstat
+	// a tmux-<euid> directory that does not exist and classify a LIVE server
+	// as serverAbsentDefault, the one classification meaning "proceed".
+	// ListWindows would then return (nil, nil), LiveReviews would report 0,
+	// and the concurrency cap would grant a full batch on a machine already
+	// running reviews.
+	getuid func() int
+	lstat  func(string) (os.FileInfo, error)
 }
 
 // Option configures a Client at construction.
@@ -68,7 +78,7 @@ func New(run exec.Runner, opts ...Option) *Client {
 		},
 		lookPath: osexec.LookPath,
 		getenv:   os.Getenv,
-		geteuid:  os.Geteuid,
+		getuid:   os.Getuid,
 		lstat:    os.Lstat,
 	}
 	for _, opt := range opts {

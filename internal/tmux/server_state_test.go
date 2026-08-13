@@ -65,7 +65,7 @@ func TestClassifyServerFailure(t *testing.T) {
 				}
 				return ""
 			}
-			c.geteuid = func() int { return 501 }
+			c.getuid = func() int { return 501 }
 			lstatCalls := 0
 			c.lstat = func(path string) (os.FileInfo, error) {
 				lstatCalls++
@@ -101,7 +101,7 @@ func TestClassifyServerFailure_ExplicitSocketArgvIsUnknown(t *testing.T) {
 		t.Run(argv[0], func(t *testing.T) {
 			c := New(&internalexec.FakeRunner{})
 			c.getenv = func(string) string { return "" }
-			c.geteuid = func() int { return 501 }
+			c.getuid = func() int { return 501 }
 			c.lstat = func(string) (os.FileInfo, error) {
 				t.Error("derived the default socket for an explicit-socket argv")
 				return nil, os.ErrNotExist
@@ -149,7 +149,7 @@ func TestListWindows_ServerFailureSemantics(t *testing.T) {
 			}}
 			c := New(fake)
 			c.getenv = func(string) string { return "" }
-			c.geteuid = func() int { return 501 }
+			c.getuid = func() int { return 501 }
 			c.lstat = func(string) (os.FileInfo, error) { return nil, tc.lstatErr }
 			wins, err := c.ListWindows(context.Background())
 			if (err != nil) != tc.wantErr {
@@ -179,7 +179,7 @@ func TestListAPIs_AbsentDefaultSoftEmpty(t *testing.T) {
 			}}
 			c := New(fake)
 			c.getenv = func(string) string { return "" }
-			c.geteuid = func() int { return 501 }
+			c.getuid = func() int { return 501 }
 			c.lstat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
 			if err := tt.call(context.Background(), c); err != nil {
 				t.Fatalf("call = %v, want soft empty", err)

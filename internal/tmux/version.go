@@ -82,9 +82,9 @@ func generationCapabilityError(found string, cause error) error {
 }
 
 func parseGenerationIdentity(value string) (string, error) {
-	fields := strings.Split(value, FieldSep)
+	fields := SplitFields(value)
 	if len(fields) != 3 {
-		return "", fmt.Errorf("tmux dispatch identity has %d fields, want 3", len(fields))
+		return "", fmt.Errorf("tmux dispatch identity has %d fields, want 3 (raw %q)", len(fields), value)
 	}
 	pid, err := strconv.ParseUint(fields[0], 10, 64)
 	if err != nil || pid == 0 {

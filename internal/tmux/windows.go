@@ -44,7 +44,14 @@ func parseWindows(out string) []Window {
 	windows := make([]Window, 0, len(lines))
 	for _, line := range lines {
 		f := splitFields(line)
-		if len(f) < 8 {
+		// EXACT, not >=: windowFormat emits exactly 8 fields, and a window name
+		// may legally contain FieldSep (`tmux rename-window $'pr-o-r-1\x1fpad'`).
+		// Under a >= check that name splits into a row whose Name reads
+		// "pr-o-r-1", so WindowsLive (internal/pr/admission.go) would report a
+		// torn-down review as still live in `pr list`. A separator in a name can
+		// only ever push the count ABOVE 8, so requiring exactly 8 drops the
+		// forged row instead of misreading it.
+		if len(f) != 8 {
 			continue
 		}
 		idx := atoi(f[4])
@@ -81,7 +88,9 @@ func parsePanes(out string) []Pane {
 	panes := make([]Pane, 0, len(lines))
 	for _, line := range lines {
 		f := splitFields(line)
-		if len(f) < 6 {
+		// Exact for the same reason parseWindows is: pane_title and
+		// pane_current_command are no more separator-free than a window name.
+		if len(f) != 6 {
 			continue
 		}
 		win := atoi(f[1])
