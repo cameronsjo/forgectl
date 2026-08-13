@@ -19,7 +19,7 @@ func newBenchStatusCmd(deps module.Deps) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Health card across hearth, chronicle, and flux",
+		Short: "Health card across hearth and chronicle",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			report := bench.Status(cmd.Context(), deps.Cfg, deps.Runner, bench.NewHTTPProber())
@@ -39,7 +39,7 @@ func newBenchStatusCmd(deps module.Deps) *cobra.Command {
 // renderBenchReport writes the human health card: one glyph-led line per
 // component plus its indented probe details.
 func renderBenchReport(out io.Writer, r bench.Report) {
-	for _, c := range []bench.Component{r.Hearth, r.Chronicle, r.Flux} {
+	for _, c := range []bench.Component{r.Hearth, r.Chronicle} {
 		fmt.Fprintf(out, "%s %s — %s\n", benchGlyph(c.State), c.Name, c.Reason)
 		for _, d := range c.Details {
 			fmt.Fprintf(out, "    %s\n", d)

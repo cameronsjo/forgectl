@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"os"
 	osexec "os/exec"
 	"runtime"
 	"strconv"
@@ -42,7 +41,6 @@ const (
 type Report struct {
 	Hearth    Component `json:"hearth"`
 	Chronicle Component `json:"chronicle"`
-	Flux      Component `json:"flux"`
 }
 
 // Component is one system's health: an overall State, a one-line human reason,
@@ -61,7 +59,6 @@ func Status(ctx context.Context, cfg config.Config, runner exec.Runner, probe Pr
 	return Report{
 		Hearth:    checkHearth(ctx, cfg, runner, probe),
 		Chronicle: checkChronicle(ctx, cfg, runner),
-		Flux:      checkFlux(ctx, runner),
 	}
 }
 
@@ -205,31 +202,6 @@ func checkChronicle(ctx context.Context, cfg config.Config, runner exec.Runner) 
 			c.Details = append(c.Details, "daemon: loaded")
 		}
 	}
-	return c
-}
-
-// checkFlux is a best-effort board reachability probe: `flux ready` exits 0 when
-// the board is reachable. It reports not-configured when the CLI or board env is
-// absent (flux ships in dotfiles, not in [bench]).
-func checkFlux(ctx context.Context, runner exec.Runner) Component {
-	c := Component{Name: "flux"}
-	if _, err := osexec.LookPath("flux"); err != nil {
-		c.State = StateNotConfigured
-		c.Reason = "flux CLI not on PATH"
-		return c
-	}
-	if os.Getenv("FLUX_DIR") == "" && os.Getenv("CADENCE_KANBAN") == "" {
-		c.State = StateNotConfigured
-		c.Reason = "no board configured ($FLUX_DIR / $CADENCE_KANBAN unset)"
-		return c
-	}
-	if _, err := runner.Run(ctx, "flux", "ready"); err != nil {
-		c.State = StateDegraded
-		c.Reason = "flux board unreachable: " + firstLine(err.Error())
-		return c
-	}
-	c.State = StateOK
-	c.Reason = "board reachable"
 	return c
 }
 

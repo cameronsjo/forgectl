@@ -87,7 +87,7 @@ forgectl workflow trust init              # install the trust anchor (one-time)
 forgectl workflow trust list              # show the enrolled keys
 
 # bench — discover, health-check, and wire the local dev bench:
-#   hearth (telemetry stack), chronicle (transcript-retention layer), flux (task board)
+#   hearth (telemetry stack), chronicle (transcript-retention layer)
 forgectl bench status                     # aggregate health card across all components
 forgectl bench status --json              # machine-readable JSON (safe to pipe)
 forgectl bench up                         # bring up the configured services via their own entrypoints
@@ -185,7 +185,7 @@ forgectl update run --json               # machine-readable summary (with each s
                                           #   (update-logs/, auto-pruned after 7 days)
 
 # doctor — ecosystem health check: claude, tmux/ghostty/cmux, gh auth, config,
-#   the local bench (hearth/chronicle/flux), the trust store, forgectl's own currency
+#   the local bench (hearth/chronicle), the trust store, forgectl's own currency
 forgectl doctor                          # one line per check, with a remediation hint on any warn/fail
 forgectl doctor --json                   # machine-readable report for scripting
 
@@ -464,7 +464,7 @@ The status is the last field, appended rather than inserted, so the breadcrumb s
 
 ### bench — interop with the local dev services
 
-`forgectl bench` is the interop spine across the local bench: the **hearth** telemetry stack, the **chronicle** transcript-retention layer, and the **flux** board. It orchestrates each system through its own frozen contract — it never reimplements one. Configure it in the `[bench]` section of the same `config.toml`:
+`forgectl bench` is the interop spine across the local bench: the **hearth** telemetry stack and the **chronicle** transcript-retention layer. It orchestrates each system through its own frozen contract — it never reimplements one. Configure it in the `[bench]` section of the same `config.toml`:
 
 ```toml
 [bench]
@@ -475,7 +475,7 @@ otlp_protocol = "grpc"                    # baked default
 telemetry     = false                     # opt-in: inject OTLP env into `forgectl launch` sessions
 ```
 
-- **`bench status`** probes each component — `docker compose -p hearth ps` plus HTTP/OTLP reachability, `chronicle status --json` corroborated against `docker compose -p sessions ps` (chronicle's DB containers) plus the `local.chronicle-sync` LaunchAgent, and `flux ready`. Each resolves to `ok | degraded | unavailable | not-configured` with a human reason; a missing `docker`, an unloaded daemon, or an unconfigured dir is a graceful state, never an error, so `bench status` always exits 0. `--json` emits the report to stdout for scripting.
+- **`bench status`** probes each component — `docker compose -p hearth ps` plus HTTP/OTLP reachability, and `chronicle status --json` corroborated against `docker compose -p sessions ps` (chronicle's DB containers) plus the `local.chronicle-sync` LaunchAgent. Each resolves to `ok | degraded | unavailable | not-configured` with a human reason; a missing `docker`, an unloaded daemon, or an unconfigured dir is a graceful state, never an error, so `bench status` always exits 0. `--json` emits the report to stdout for scripting.
 - **`telemetry = true`** injects the Claude-Code-tailored OpenTelemetry env block into launched sessions so their metrics and logs flow to the local collector. Opt-in: with it off, no session points at a collector. A profile `env` value wins over the injected default. `forgectl launch doctor` shows the current telemetry state.
 - **`bench up`** brings the configured services up via their own entrypoints (hearth's `scripts/start.sh`, chronicle's `make sync`); an unconfigured service is skipped with a note. **`bench open`** opens a service UI in the browser (`open` on macOS, `xdg-open` elsewhere).
 

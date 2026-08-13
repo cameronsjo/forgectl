@@ -465,49 +465,6 @@ func TestCheckChronicle_NotConfigured(t *testing.T) {
 	}
 }
 
-func TestCheckFlux_NotConfiguredWhenBoardEnvUnset(t *testing.T) {
-	t.Setenv("FLUX_DIR", "")
-	t.Setenv("CADENCE_KANBAN", "")
-	c := checkFlux(context.Background(), &exec.FakeRunner{})
-
-	if c.State != StateNotConfigured {
-		t.Fatalf("state = %q; want not-configured", c.State)
-	}
-}
-
-func TestCheckFlux_OK(t *testing.T) {
-	if _, err := osexec.LookPath("flux"); err != nil {
-		t.Skip("flux not on PATH")
-	}
-	t.Setenv("FLUX_DIR", "/board")
-	runner := &exec.FakeRunner{}
-
-	c := checkFlux(context.Background(), runner)
-
-	if c.State != StateOK {
-		t.Fatalf("state = %q, reason = %q; want ok", c.State, c.Reason)
-	}
-	if runner.Calls[0].Name != "flux" || !equalStr(runner.Calls[0].Args, []string{"ready"}) {
-		t.Errorf("flux call = %s %v, want flux [ready]", runner.Calls[0].Name, runner.Calls[0].Args)
-	}
-}
-
-func TestCheckFlux_DegradedWhenBoardUnreachable(t *testing.T) {
-	if _, err := osexec.LookPath("flux"); err != nil {
-		t.Skip("flux not on PATH")
-	}
-	t.Setenv("FLUX_DIR", "/board")
-	runner := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
-		return "", errors.New("no board at /board")
-	}}
-
-	c := checkFlux(context.Background(), runner)
-
-	if c.State != StateDegraded {
-		t.Fatalf("state = %q; want degraded", c.State)
-	}
-}
-
 func TestParseComposePS(t *testing.T) {
 	cases := []struct {
 		name                                             string

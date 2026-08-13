@@ -198,9 +198,9 @@ func checkGh(ctx context.Context, d Deps) Check {
 	return Check{Name: "gh", State: StateOK, Detail: "authenticated"}
 }
 
-// benchChecks folds bench.Status's three components (hearth, chronicle,
-// flux — flux being the kanban board) into doctor Checks, translating
-// bench's own State vocabulary rather than re-probing anything itself.
+// benchChecks folds bench.Status's hearth and chronicle components into doctor
+// Checks, translating bench's own State vocabulary rather than re-probing
+// anything itself.
 // bench.StateNotConfigured maps to StateSkip: an unconfigured bench
 // component is a valid choice (a machine with no local bench), not a
 // failure.
@@ -209,7 +209,6 @@ func benchChecks(ctx context.Context, d Deps) []Check {
 	return []Check{
 		fromBenchComponent(report.Hearth),
 		fromBenchComponent(report.Chronicle),
-		fromBenchComponent(report.Flux),
 	}
 }
 

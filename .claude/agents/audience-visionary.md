@@ -32,7 +32,7 @@ agent-driven env workflows.
 ## Your dictionary
 
 - **budget** — you invest heavily when the shift is real: the estate-coupling
-  cost (sesh, claude CLI, hearth/chronicle/flux) is acceptable *if* the forge
+cost (sesh, claude CLI, hearth/chronicle) is acceptable *if* the forge
   thesis pays
 - **switching cost** — gladly paid for an order-of-magnitude shift in how the
   workbench runs; resented for a prettier wrapper around scripts that worked

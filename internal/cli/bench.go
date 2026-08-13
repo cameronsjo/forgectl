@@ -29,11 +29,10 @@ var benchModule = module.Manifest{
 func newBenchCmd(deps module.Deps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bench",
-		Short: "Discover and health-check the local dev bench (hearth, chronicle, flux)",
+		Short: "Discover and health-check the local dev bench (hearth, chronicle)",
 		Long: `bench is forgectl's interop spine across the local developer bench —
-the hearth telemetry stack, the chronicle transcript-retention layer, and the
-flux board. It orchestrates each system through its frozen contract; it never
-reimplements one.
+the hearth telemetry stack and the chronicle transcript-retention layer. It
+orchestrates each system through its frozen contract; it never reimplements one.
 
   forgectl bench status          aggregate health card across all components
   forgectl bench status --json   machine-readable, for scripts

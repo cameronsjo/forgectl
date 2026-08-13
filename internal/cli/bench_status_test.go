@@ -11,8 +11,8 @@ import (
 )
 
 // benchStatusEnv builds a child env with a controlled PATH holding no bench
-// tools (docker/chronicle/flux) and none of the bench dir/board env vars set —
-// so every component deterministically resolves to not-configured.
+// tools (docker/chronicle) and none of the bench dir env vars set — so every
+// component deterministically resolves to not-configured.
 func benchStatusEnv(base, binDir string) []string {
 	return []string{
 		"PATH=" + binDir,
@@ -36,7 +36,7 @@ func writeNoBenchConfig(t *testing.T, base string) {
 
 func TestIntegration_BenchStatus_UnconfiguredJSON(t *testing.T) {
 	base := t.TempDir()
-	binDir := t.TempDir() // empty: no docker/chronicle/flux on PATH
+	binDir := t.TempDir() // empty: no docker/chronicle on PATH
 	writeNoBenchConfig(t, base)
 
 	cmd := exec.Command(builtBinPath, "bench", "status", "--json")
@@ -48,17 +48,20 @@ func TestIntegration_BenchStatus_UnconfiguredJSON(t *testing.T) {
 		t.Fatalf("bench status --json exited non-zero: %v\nstderr:\n%s", err, stderr.String())
 	}
 
-	var report struct {
-		Hearth    struct{ State string } `json:"hearth"`
-		Chronicle struct{ State string } `json:"chronicle"`
-		Flux      struct{ State string } `json:"flux"`
-	}
+	var report map[string]struct{ State string }
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatalf("decode JSON: %v\nstdout:\n%s", err, stdout.String())
 	}
-	for name, state := range map[string]string{
-		"hearth": report.Hearth.State, "chronicle": report.Chronicle.State, "flux": report.Flux.State,
-	} {
+	if len(report) != 2 {
+		t.Fatalf("JSON component count = %d, want exactly 2 (hearth and chronicle); report = %s", len(report), stdout.String())
+	}
+	for _, name := range []string{"hearth", "chronicle"} {
+		component, ok := report[name]
+		if !ok {
+			t.Errorf("JSON report missing %q; report = %s", name, stdout.String())
+			continue
+		}
+		state := component.State
 		if state != "not-configured" {
 			t.Errorf("%s state = %q, want not-configured", name, state)
 		}
@@ -83,9 +86,27 @@ func TestIntegration_BenchStatus_HumanCard(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"hearth", "chronicle", "flux"} {
+	for _, want := range []string{"hearth", "chronicle"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("human card missing %q; got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(strings.ToLower(out), "fl"+"ux") {
+		t.Errorf("human card names retired board component; got:\n%s", out)
+	}
+}
+
+func TestIntegration_BenchHelp_OmitsRetiredBoard(t *testing.T) {
+	for _, args := range [][]string{{"bench", "--help"}, {"bench", "status", "--help"}} {
+		cmd := exec.Command(builtBinPath, args...)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%s exited non-zero: %v\nstderr:\n%s", strings.Join(args, " "), err, stderr.String())
+		}
+		if strings.Contains(strings.ToLower(stdout.String()), "fl"+"ux") {
+			t.Errorf("%s help names retired board component; got:\n%s", strings.Join(args, " "), stdout.String())
 		}
 	}
 }
