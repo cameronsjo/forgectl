@@ -176,33 +176,13 @@ func TestPRCandidateLine_MarksReviewedWithoutTerminalStyling(t *testing.T) {
 }
 
 // prepareRunner fakes gh pr view (valid head), git, and tmux for a Prepare +
-// Launch round-trip. has-session and list-windows report a healthy, empty
-// review session (no live "pr-*" windows) — admission always finds free
-// capacity — since generic tmux calls (new-window, has-session,
-// list-windows) all fall through the same "", nil no-op branch below.
+// Launch + verify round-trip. It is ledger-backed (pr_pick_verify_test.go):
+// admission's list-windows sees an empty review session, so capacity is always
+// free, and a window dispatched through new-window is then present in the
+// verification sweep. A stateless double cannot do both at once, which is what
+// forced the bulk tests onto --no-verify.
 func prepareRunner() *exec.FakeRunner {
-	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
-		if name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view" {
-			return `{"headRefName":"feature","headRefOid":"abc123",` +
-				`"headRepositoryOwner":{"login":"cameronsjo"},"headRepository":{"name":"forgectl"}}`, nil
-		}
-		if name == "tmux" && len(args) > 0 && args[0] == "has-session" {
-			return "", nil // session exists
-		}
-		if name == "tmux" && len(args) > 0 && args[0] == "list-windows" {
-			return "", nil // no live windows
-		}
-		if name == "tmux" && len(args) > 0 && args[0] == "-V" {
-			return "tmux 3.7b", nil
-		}
-		if name == "tmux" && len(args) > 0 && args[0] == "display-message" {
-			return "123\x1f456\x1f@0", nil
-		}
-		if name == "tmux" && len(args) > 0 && args[0] == "new-window" {
-			return "123\x1f456\x1f@1", nil
-		}
-		return "", nil // git clone / tmux new-window succeed as no-ops
-	}}
+	return newTmuxLedger("forgectl").runner()
 }
 
 // unreadableWindowCountRunner fakes gh pr view + git the same as
@@ -269,7 +249,8 @@ func TestLaunchPicked_SkipsReviewedLaunchesRest(t *testing.T) {
 	store := pr.LoadReviewed(reviewedPath)
 
 	fake := prepareRunner()
-	client := pr.New(fake, pr.WithSessionsDir(t.TempDir()), pr.WithTmuxSession("forgectl"))
+	client := pr.New(fake, pr.WithSessionsDir(t.TempDir()), pr.WithTmuxSession("forgectl"),
+		pr.WithDispatchWait(func(context.Context) error { return nil }))
 
 	updated := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 	selected := []pr.PR{
@@ -278,7 +259,7 @@ func TestLaunchPicked_SkipsReviewedLaunchesRest(t *testing.T) {
 	}
 
 	cmd, out, errOut := newTestCmd()
-	if err := launchPicked(context.Background(), client, config.Config{}, cmd, selected, store, true); err != nil {
+	if err := launchPicked(context.Background(), client, config.Config{}, cmd, selected, store, false); err != nil {
 		t.Fatalf("launchPicked: %v", err)
 	}
 
@@ -312,12 +293,13 @@ func TestLaunchPicked_AllReviewed_NothingLaunched(t *testing.T) {
 	store := pr.LoadReviewed(reviewedPath)
 
 	fake := prepareRunner()
-	client := pr.New(fake, pr.WithSessionsDir(t.TempDir()), pr.WithTmuxSession("forgectl"))
+	client := pr.New(fake, pr.WithSessionsDir(t.TempDir()), pr.WithTmuxSession("forgectl"),
+		pr.WithDispatchWait(func(context.Context) error { return nil }))
 
 	selected := []pr.PR{{Ref: ref, UpdatedAt: time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)}}
 
 	cmd, _, errOut := newTestCmd()
-	if err := launchPicked(context.Background(), client, config.Config{}, cmd, selected, store, true); err != nil {
+	if err := launchPicked(context.Background(), client, config.Config{}, cmd, selected, store, false); err != nil {
 		t.Fatalf("launchPicked: %v", err)
 	}
 	if len(tmuxWindows(fake.Calls)) != 0 {
@@ -332,7 +314,8 @@ func TestLaunchPicked_CapDefersExcess(t *testing.T) {
 	fakeClaudeBin(t)
 
 	fake := prepareRunner()
-	client := pr.New(fake, pr.WithSessionsDir(t.TempDir()), pr.WithTmuxSession("forgectl"))
+	client := pr.New(fake, pr.WithSessionsDir(t.TempDir()), pr.WithTmuxSession("forgectl"),
+		pr.WithDispatchWait(func(context.Context) error { return nil }))
 	store := pr.LoadReviewed(filepath.Join(t.TempDir(), "pr-reviewed.json"))
 
 	updated := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
@@ -344,7 +327,7 @@ func TestLaunchPicked_CapDefersExcess(t *testing.T) {
 
 	cmd, _, errOut := newTestCmd()
 	cfg := config.Config{Pr: config.PrConfig{MaxConcurrent: 2}}
-	if err := launchPicked(context.Background(), client, cfg, cmd, selected, store, true); err != nil {
+	if err := launchPicked(context.Background(), client, cfg, cmd, selected, store, false); err != nil {
 		t.Fatalf("launchPicked: %v", err)
 	}
 
