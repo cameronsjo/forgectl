@@ -16,10 +16,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/quarantine"
 )
 
 // seedSession writes a real workspace + breadcrumb and returns the breadcrumb
@@ -61,6 +63,49 @@ func TestTeardown_AcceptsMember(t *testing.T) {
 	}
 	if want := []string{"kill-window", "-t", "=forgectl:pr-o-r-7"}; !equalArgs(tmux.Args, want) {
 		t.Errorf("tmux args = %v, want %v", tmux.Args, want)
+	}
+}
+
+func TestTeardown_CoveredRootQuarantineHasNoPhantomNestedMove(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	c := testClient(t, fake)
+	ref := Ref{Owner: "o", Repo: "r", Number: 8}
+	path, ws := seedSession(t, c, ref, time.Now().UTC())
+	externalCanary := filepath.Join(t.TempDir(), "canary")
+	if err := os.WriteFile(externalCanary, []byte("survives"), 0o600); err != nil {
+		t.Fatalf("seed external canary: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(ws, ".claude.quarantined"), 0o700); err != nil {
+		t.Fatalf("seed covered root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".claude.quarantined", "CLAUDE.md"), []byte("covered"), 0o600); err != nil {
+		t.Fatalf("seed nested carrier: %v", err)
+	}
+	targets, err := quarantine.ExpandTargets(ws, quarantine.SuffixQuarantined, quarantine.DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets covered root: %v", err)
+	}
+	moves, err := quarantine.ComputeMoves(ws, quarantine.SuffixQuarantined, targets)
+	if err != nil {
+		t.Fatalf("ComputeMoves covered root: %v", err)
+	}
+	coveredOriginal := filepath.Join(ws, ".claude")
+	for _, move := range moves {
+		rel, relErr := filepath.Rel(coveredOriginal, move.From)
+		if relErr == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			t.Fatalf("covered root produced phantom nested move: %+v", moves)
+		}
+	}
+
+	if err := c.Teardown(context.Background(), path); err != nil {
+		t.Fatalf("Teardown covered root: %v", err)
+	}
+	if _, err := os.Stat(ws); !os.IsNotExist(err) {
+		t.Fatalf("workspace should be removed after covered-root restore: %v", err)
+	}
+	content, err := os.ReadFile(externalCanary)
+	if err != nil || string(content) != "survives" {
+		t.Fatalf("external sibling canary changed: content=%q err=%v", content, err)
 	}
 }
 

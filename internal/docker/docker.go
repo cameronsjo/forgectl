@@ -100,19 +100,19 @@ type BuildOptions struct {
 }
 
 // BuildResult is the outcome of a successful Build: the tag(s) actually
-// applied, and whether git metadata was available to derive the full
-// {repo}:{branch-slug}-{shortsha} tag.
+// applied, and whether complete git metadata was available to derive the
+// full {repo}:{branch-slug}-{shortsha} tag.
 type BuildResult struct {
 	// Tag is the tag that was cached for run/shell to reuse. When
 	// GitMetadata is true, this is the derived {repo}:{branch-slug}-{shortsha}
-	// tag; when it's false, this equals DevTag (git resolution failed, so
-	// only the directory-derived :dev tag was applied).
+	// tag; when it's false, this equals DevTag. A successfully resolved git
+	// root still supplies the dev-tag name when branch or SHA is incomplete.
 	Tag string
 	// DevTag is the :dev alias applied on every build, git or no.
 	DevTag string
-	// GitMetadata reports whether repo/branch/sha resolved. False means
-	// Build fell back to a directory-derived dev tag and omitted the
-	// revision/ref.name labels.
+	// GitMetadata reports whether repo/branch/sha all resolved. False means
+	// Build applied only the stable dev tag and omitted the revision/ref.name
+	// labels.
 	GitMetadata bool
 	// GitReason explains why GitMetadata is false — gitInfo's error,
 	// surfaced by the CLI as a warning. Empty when GitMetadata is true.
@@ -126,8 +126,9 @@ type BuildResult struct {
 //
 // git metadata is best-effort, not a precondition: outside a git repo (or
 // inside a bare `git init` with no commits yet), Build still runs, tagging
-// only a directory-derived :dev alias and omitting the revision/ref.name
-// labels — see BuildResult.GitMetadata. On success, the applied tag is
+// only a :dev alias and omitting the revision/ref.name labels. The alias
+// uses the git-root basename when available and otherwise the context-dir
+// basename — see BuildResult.GitMetadata. On success, the applied tag is
 // cached so a later run/shell can omit --tag.
 func (c *Client) Build(ctx context.Context, opts BuildOptions) (BuildResult, error) {
 	contextDir := opts.ContextDir
@@ -142,21 +143,28 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 
 	repo, branch, sha, gitErr := c.gitInfo(ctx, contextDir)
 
-	var tag, dev, gitReason string
-	gitMetadata := gitErr == nil
+	repoSource := repo
+	if repoSource == "" {
+		repoSource = filepath.Base(absOrSelf(contextDir))
+	}
+	repoName := slugifyRepo(repoSource)
+	dev := devTag(repoName)
+
+	var tag, gitReason string
+	gitMetadata := gitErr == nil && repo != "" && branch != "" && sha != ""
 	if gitMetadata {
-		tag = deriveTag(repo, branch, sha)
-		dev = devTag(repo)
+		tag = deriveTag(repoName, branch, sha)
 	} else {
-		gitReason = gitErr.Error()
-		slog.Warn("No git metadata available for docker build; falling back to a directory-derived dev tag.", "context", contextDir, "error", gitErr)
-		dev = devTag(slugifyRepo(filepath.Base(absOrSelf(contextDir))))
+		if gitErr != nil {
+			gitReason = gitErr.Error()
+		} else {
+			gitReason = "incomplete git metadata"
+		}
 		tag = dev
-		// git resolution is all-or-nothing for tagging, so it must be
-		// all-or-nothing for labelling too. A partial resolve is real — a
-		// fresh `git init` resolves the branch but not the sha — and leaving
-		// branch set here would attach ref.name to an image whose tag is
-		// directory-derived, i.e. explicitly not git-associated.
+		slog.Warn("Incomplete git metadata for docker build; using dev tag only.", "tag", dev, "error", gitReason, "context", contextDir)
+		// Immutable tagging and git labels are atomic. A partial resolve is
+		// real — a fresh `git init` can resolve the root but not HEAD — and
+		// must not attach one half of the provenance pair.
 		branch, sha = "", ""
 	}
 
@@ -184,6 +192,9 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		return BuildResult{}, fmt.Errorf("docker build: %w", err)
 	}
 
+	// The dev alias intentionally permits lossy local-name collisions, while
+	// the single cache records only the primary tag from the last successful
+	// build. A failed docker child never reaches this write.
 	if err := writeLastTag(c.lastTagPath, cacheEntry{Tag: tag, BuiltAt: c.now()}); err != nil {
 		slog.Warn("Failed to cache last-built docker tag.", "path", c.lastTagPath, "error", err)
 	}
@@ -206,9 +217,9 @@ func absOrSelf(dir string) string {
 
 // buildLabels returns the --label values Build attaches: the built-in OCI
 // labels plus, if configured, one extra "key=value" label. revision and
-// ref.name are emitted only when sha/branch resolved — Build's no-git
-// path leaves both empty, so those two labels are simply absent rather
-// than attached with an empty value.
+// ref.name are emitted only when sha/branch resolved — Build's incomplete
+// metadata path leaves both empty, so those two labels are simply absent
+// rather than attached with an empty value.
 func (c *Client) buildLabels(branch, sha string) []string {
 	var labels []string
 	if sha != "" {
@@ -309,20 +320,22 @@ func (c *Client) resolveTag(explicit string) (string, error) {
 // current branch, and short commit sha for dir via `git`. All three are
 // shelled through c.run, never os/exec directly.
 //
-// Each of the three lookups is attempted independently, so err names the
-// first lookup that actually failed rather than the first one attempted —
-// a fresh `git init` with no commits yet (toplevel and branch resolve, HEAD
-// does not) reports the sha failure, not a repo failure. The partially
-// resolved fields are returned for the caller's diagnostics only: Build
-// treats any error as non-fatal but all-or-nothing, discarding every
-// git-derived value and deriving both tag and labels from the directory
-// instead.
+// Each lookup is attempted independently and successful output is trimmed
+// and required to be non-empty. err names the first failed or blank lookup
+// in repo/branch/SHA order while every independently valid partial field is
+// returned for callers to use. Build uses a partial repo for stable naming,
+// but requires all three fields before emitting immutable tags or git labels.
 func (c *Client) gitInfo(ctx context.Context, dir string) (repo, branch, sha string, err error) {
 	top, topErr := c.run.Run(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
 	if topErr != nil {
 		err = fmt.Errorf("resolve git repo root: %w", topErr)
 	} else {
-		repo = filepath.Base(strings.TrimSpace(top))
+		trimmed := strings.TrimSpace(top)
+		if trimmed == "" {
+			err = errors.New("resolve git repo root: empty git repo root")
+		} else {
+			repo = filepath.Base(trimmed)
+		}
 	}
 
 	branchOut, branchErr := c.run.Run(ctx, "git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD")
@@ -331,7 +344,14 @@ func (c *Client) gitInfo(ctx context.Context, dir string) (repo, branch, sha str
 			err = fmt.Errorf("resolve git branch: %w", branchErr)
 		}
 	} else {
-		branch = strings.TrimSpace(branchOut)
+		trimmed := strings.TrimSpace(branchOut)
+		if trimmed == "" {
+			if err == nil {
+				err = errors.New("resolve git branch: empty git branch")
+			}
+		} else {
+			branch = trimmed
+		}
 	}
 
 	shaOut, shaErr := c.run.Run(ctx, "git", "-C", dir, "rev-parse", "--short", "HEAD")
@@ -340,7 +360,14 @@ func (c *Client) gitInfo(ctx context.Context, dir string) (repo, branch, sha str
 			err = fmt.Errorf("resolve git sha: %w", shaErr)
 		}
 	} else {
-		sha = strings.TrimSpace(shaOut)
+		trimmed := strings.TrimSpace(shaOut)
+		if trimmed == "" {
+			if err == nil {
+				err = errors.New("resolve git sha: empty git sha")
+			}
+		} else {
+			sha = trimmed
+		}
 	}
 
 	return repo, branch, sha, err
