@@ -166,6 +166,11 @@ func validateBreadcrumb(bc Breadcrumb) error {
 // call os.MkdirTemp("", "forgectl-workflow-evil-*") and pass it. Identity
 // comes from the sandbox prefix alone.
 //
+// Static missing paths and dangling symlinks normally fail at the preceding
+// Stat. If resolution fails later because the path changed or the filesystem
+// has special resolution semantics, refuse it rather than judging the literal
+// base name.
+//
 // LOAD-BEARING — VALIDATE RESOLVED, ACT UNRESOLVED. This function checks the
 // prefix on filepath.EvalSymlinks(workspace), but every caller acts on the
 // UNRESOLVED string — sandbox.Teardown hands it to os.RemoveAll after its own
@@ -197,9 +202,9 @@ func validateWorkspace(workspace string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("workspace %q is not a directory", workspace)
 	}
-	real := workspace
-	if r, err := filepath.EvalSymlinks(workspace); err == nil {
-		real = r
+	real, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return fmt.Errorf("workspace %q could not be resolved: %w", workspace, err)
 	}
 	if !strings.HasPrefix(filepath.Base(real), sandboxPrefix) {
 		return fmt.Errorf("workspace %q lacks the %q sandbox prefix", workspace, sandboxPrefix)
