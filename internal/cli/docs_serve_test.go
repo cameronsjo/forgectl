@@ -284,7 +284,20 @@ func TestRunDocsServe_TokenFilePunctuationAuthenticatesWithoutOutputLeak(t *test
 		t.Fatalf("server did not publish a loopback URL: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 
-	root, rel, err := docspkg.LocateDoc(docspkg.ServerInfo{Addr: addr, Token: token}, filepath.Join(idx.Roots()[0].Path, "readme.md"))
+	// Steer through real discovery rather than a hand-built ServerInfo: a
+	// protected v1 server is re-probed before its token is sent, and that
+	// probe needs the generation only the published record carries.
+	waitForDiscoveredAddr(t, addr, "the token-protected server must publish a discovery record")
+	server, ok := discoverDocsServer(t)
+	if !ok {
+		cancel()
+		t.Fatal("discovery lost the token-protected server")
+	}
+	if server.Info.Token != token {
+		cancel()
+		t.Fatalf("the published record carries token %q, want the --token-file value", server.Info.Token)
+	}
+	root, rel, err := docspkg.LocateDoc(context.Background(), server, filepath.Join(idx.Roots()[0].Path, "readme.md"))
 	if err != nil || root == "" || rel != "readme.md" {
 		cancel()
 		t.Fatalf("LocateDoc with punctuation/padding token = (%q, %q, %v)", root, rel, err)
@@ -471,7 +484,7 @@ func containsHost(hosts []string, want string) bool {
 }
 
 func TestAllowedHosts_NonLoopback_AddsBoundHost(t *testing.T) {
-	got := allowedHosts("192.168.1.10:3590")
+	got := allowedHosts("192.168.1.10:3590", "")
 
 	if !containsHost(got, "192.168.1.10") {
 		t.Errorf("allowedHosts(%q) = %v, want it to include the bound host — otherwise every request to it would 403 on the Host allowlist", "192.168.1.10:3590", got)
@@ -484,10 +497,27 @@ func TestAllowedHosts_NonLoopback_AddsBoundHost(t *testing.T) {
 }
 
 func TestAllowedHosts_Loopback_NoAddition(t *testing.T) {
-	got := allowedHosts("127.0.0.1:3590")
+	got := allowedHosts("127.0.0.1:3590", "")
 
 	if len(got) != len(httpsrv.DefaultAllowedHosts) {
 		t.Errorf("allowedHosts(%q) = %v, want exactly the defaults with nothing added for a loopback bind", "127.0.0.1:3590", got)
+	}
+}
+
+// TestAllowedHosts_AdvertisedHost_Added covers the addition discovery creates:
+// the record names the address a reader will connect to, so the server has to
+// accept a Host header for it or every discovered request would 403.
+func TestAllowedHosts_AdvertisedHost_Added(t *testing.T) {
+	got := allowedHosts("0.0.0.0:3590", "192.168.1.10:3590")
+	if !containsHost(got, "192.168.1.10") {
+		t.Errorf("allowedHosts = %v, want it to include the advertised host", got)
+	}
+
+	// The loopback advertised address is already a default; adding it must not
+	// duplicate an entry.
+	got = allowedHosts("127.0.0.1:3590", "127.0.0.1:3590")
+	if len(got) != len(httpsrv.DefaultAllowedHosts) {
+		t.Errorf("allowedHosts = %v, want no duplicate of a default host", got)
 	}
 }
 
@@ -655,18 +685,33 @@ func parseServedAddr(output string) string {
 // written against it.
 func discoveredDocsAddr(t *testing.T) string {
 	t.Helper()
-	infoPath, err := config.DocsServerPath()
+	server, ok := discoverDocsServer(t)
+	if !ok {
+		return ""
+	}
+	return server.Info.Addr
+}
+
+// discoverDocsServer runs the real discovery `forgectl docs open` runs, against
+// whatever isolateDocsDiscoveryState pointed the config directory at.
+func discoverDocsServer(t *testing.T) (docspkg.DiscoveredServer, bool) {
+	t.Helper()
+	serversDir, err := config.DocsServersDir()
+	if err != nil {
+		t.Fatalf("config.DocsServersDir: %v", err)
+	}
+	legacyPath, err := config.DocsServerPath()
 	if err != nil {
 		t.Fatalf("config.DocsServerPath: %v", err)
 	}
-	info, err := docspkg.ReadServerInfo(infoPath)
+	server, err := docspkg.DiscoverServerInfo(context.Background(), serversDir, legacyPath)
 	if errors.Is(err, docspkg.ErrNoServer) {
-		return ""
+		return docspkg.DiscoveredServer{}, false
 	}
 	if err != nil {
 		t.Fatalf("discovery failed with an error other than ErrNoServer: %v", err)
 	}
-	return info.Addr
+	return server, true
 }
 
 // waitForDiscoveredAddr polls discovery until it resolves to want, so the test
