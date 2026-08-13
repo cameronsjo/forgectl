@@ -151,7 +151,8 @@ func (c *Client) sandboxAndQuarantine(ctx context.Context, repo, ref string, alw
 	}
 	// Expand the nestable basenames so a PR head carrying `src/AGENTS.md` is
 	// quarantined too, not just the root pair. Teardown recomputes through the
-	// same ExpandTargets call, which is what keeps this reversible.
+	// same ExpandTargets call, which keeps the stable logical target and move
+	// graph reversible across the sandbox's lifetime.
 	targets, err := quarantine.ExpandTargets(workspace, quarantine.SuffixQuarantined, quarantine.DefaultTargets)
 	if err != nil {
 		// best-effort: don't let cleanup's own error shadow the error already being returned

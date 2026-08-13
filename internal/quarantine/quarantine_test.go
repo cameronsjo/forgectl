@@ -302,7 +302,7 @@ func TestRestore_MissingMove_Idempotent(t *testing.T) {
 	}
 }
 
-func TestComputeMoves_ResolvesEachTargetWithoutTouchingFS(t *testing.T) {
+func TestComputeMoves_ResolvesEachTargetWithoutMutatingFS(t *testing.T) {
 	root := t.TempDir()
 	moves, err := ComputeMoves(root, PrefixUnderscore, []string{"CLAUDE.md", "AGENTS.md"})
 	if err != nil {
@@ -314,7 +314,8 @@ func TestComputeMoves_ResolvesEachTargetWithoutTouchingFS(t *testing.T) {
 	if moves[0].To != filepath.Join(root, "_CLAUDE.md") {
 		t.Errorf("moves[0].To = %q, want %q", moves[0].To, filepath.Join(root, "_CLAUDE.md"))
 	}
-	// Neither file exists on disk; ComputeMoves must not create or error on them.
+	// Neither file exists on disk; ComputeMoves may read path identities but
+	// must not create or error on them.
 	if _, err := os.Stat(filepath.Join(root, "CLAUDE.md")); !os.IsNotExist(err) {
 		t.Errorf("ComputeMoves must not touch the filesystem, stat err = %v", err)
 	}
@@ -376,7 +377,7 @@ func TestExpandTargets_FindsNestedInstructionFiles(t *testing.T) {
 		"CLAUDE.md",                       // absent at root, still preserved
 		filepath.Join("src", "AGENTS.md"), // nested
 		filepath.Join("packages", "api", "CLAUDE.md"), // deeply nested
-		".claude/", ".cursor", ".github/copilot-instructions.md",
+		".claude", ".cursor", ".github/copilot-instructions.md",
 	} {
 		if !containsStr(got, want) {
 			t.Errorf("ExpandTargets missing %q; got %v", want, got)
@@ -1346,5 +1347,10 @@ func TestDefaultTargets_NoEntryIsPathPrefixOfAnother(t *testing.T) {
 			"Restore never reaches it, both returning nil. Hiding %q first round-trips, but then %q "+
 			"can never match anything and is dead config that looks like coverage.",
 			pair[1], pair[0], pair[1], pair[0], pair[1])
+	}
+	for _, scheme := range []Scheme{PrefixUnderscore, SuffixQuarantined} {
+		if _, err := ExpandTargets(t.TempDir(), scheme, DefaultTargets); err != nil {
+			t.Errorf("DefaultTargets violate the runtime move-graph classifier for scheme %v: %v", scheme, err)
+		}
 	}
 }

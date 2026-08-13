@@ -75,7 +75,9 @@ func (c *Client) discard(ctx context.Context, sess Session) error {
 	// Restore quarantined files first, while the workspace still exists.
 	// ExpandTargets is the same call sandboxAndQuarantine made, and it finds a
 	// nested target by its RENAMED form as readily as its original — so the
-	// target list recomputed here is byte-for-byte the one Hide worked from.
+	// stable logical target list and move graph recomputed here match the ones
+	// Hide worked from. Quarantine does not promise a multi-path atomic rename
+	// against concurrent writers; discard operates after that review boundary.
 	targets, err := quarantine.ExpandTargets(sess.Workspace, quarantine.SuffixQuarantined, quarantine.DefaultTargets)
 	if err != nil {
 		return fmt.Errorf("expand quarantine targets: %w", err)
