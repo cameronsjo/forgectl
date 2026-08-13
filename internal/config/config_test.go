@@ -640,6 +640,53 @@ func TestPrConfig_FieldSetIsPinned(t *testing.T) {
 	}
 }
 
+// TestProjectsConfig_DecodesIndependentlyOfReview pins the two owner lists as
+// separate policies: configuring one must leave the other absent, since an
+// absent list is what routes a section to the authenticated GitHub.com login.
+func TestProjectsConfig_DecodesIndependentlyOfReview(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		body         string
+		wantProjects ProjectsConfig
+		wantReview   []string
+		zero         bool
+	}{
+		{
+			name:       "absent section",
+			body:       "[review]\nowners = [\"reviewer\"]\n",
+			wantReview: []string{"reviewer"},
+			zero:       true,
+		},
+		{
+			name: "explicitly empty list",
+			body: "[projects]\nowners = []\n",
+			zero: true,
+		},
+		{
+			name:         "multiple owners",
+			body:         "[projects]\nowners = [\"first\", \"second\"]\n[review]\nowners = [\"reviewer\"]\n",
+			wantProjects: ProjectsConfig{Owners: []string{"first", "second"}},
+			wantReview:   []string{"reviewer"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := DecodeStrict([]byte(tc.body))
+			if err != nil {
+				t.Fatalf("DecodeStrict: %v", err)
+			}
+			if !tc.zero && !reflect.DeepEqual(got.Projects, tc.wantProjects) {
+				t.Errorf("Projects = %+v, want %+v", got.Projects, tc.wantProjects)
+			}
+			if got.Projects.IsZero() != tc.zero {
+				t.Errorf("Projects.IsZero() = %v, want %v", got.Projects.IsZero(), tc.zero)
+			}
+			if !reflect.DeepEqual(got.Review.Owners, tc.wantReview) {
+				t.Errorf("Review.Owners = %v, want %v — the lists never inherit from each other", got.Review.Owners, tc.wantReview)
+			}
+		})
+	}
+}
+
 func TestPrConfig_IsZeroCoversEveryField(t *testing.T) {
 	if !(PrConfig{}).IsZero() {
 		t.Error("an empty PrConfig must report as zero")

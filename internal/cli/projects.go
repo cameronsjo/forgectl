@@ -23,6 +23,7 @@ var projectAliases = map[string][]string{
 var projectsModule = module.Manifest{
 	Name:         "projects",
 	Tier:         module.TierCore,
+	ConfigKey:    "projects",
 	GroupAliases: []string{"proj"},
 	SubAliases:   projectAliases,
 	New: func(deps module.Deps) *cobra.Command {

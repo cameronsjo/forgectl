@@ -115,13 +115,27 @@ const sessionsScaffold = `
 # runbooks_dir = ""  # default: ${XDG_STATE_HOME:-~/.local/state}/cadence/runbooks; ~ expanded
 `
 
-// reviewScaffold is the [review] section. owners mirrors
-// internal/cli/review.go's defaultReviewOwner constant, so an untouched
-// scaffold is a no-op posture.
+// projectsScaffold is the [projects] section. Commented rather than active:
+// there is no baked owner to mirror any more — an unset list resolves the
+// authenticated GitHub.com login at run time (internal/githubauth) — so
+// writing an active value here would pin one machine's account into every
+// host's config.toml, the same reasoning preflightScaffold and prScaffold
+// give for staying commented.
+const projectsScaffold = `
+# ── projects: cross-forge project inventory (forgectl projects) ─────────────
+[projects]
+# owners = ["your-login"] # gh repo list scope; unset or [] = authenticated GitHub.com login
+`
+
+// reviewScaffold is the [review] section. Commented for the same reason as
+// projectsScaffold: an unset list resolves the authenticated GitHub.com login,
+// and the two lists are independent — neither inherits from the other. An
+// existing active `owners` stays as written; init never rewrites a present
+// section.
 const reviewScaffold = `
 # ── review: cross-project work inventory (forgectl review) ─────────────────
 [review]
-owners = ["cameronsjo"] # gh search --owner scope; baked default when unset
+# owners = ["your-login"] # gh search --owner scope; unset or [] = authenticated GitHub.com login
 `
 
 // docsScaffold is the [docs] section. roots' baked default is cwd + ./docs
@@ -204,6 +218,7 @@ var initSections = []initSection{
 	{"docker", "docker", dockerScaffold},
 	{"clean", "clean", cleanScaffold},
 	{"sessions", "sessions", sessionsScaffold},
+	{"projects", "projects", projectsScaffold},
 	{"review", "review", reviewScaffold},
 	{"docs", "docs", docsScaffold},
 	{"preflight", "preflight", preflightScaffold},
