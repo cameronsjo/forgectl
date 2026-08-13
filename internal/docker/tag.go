@@ -35,13 +35,10 @@ func slugifyBranch(branch string) string {
 	return slugify(branch, "branch")
 }
 
-// slugifyRepo converts a directory basename into a valid docker repository
-// name component. Used only on Build's no-git-metadata path, where the
-// directory name (never a sanitized git repo name) becomes the tag's
-// repository segment directly — directory names are not guaranteed
-// docker-clean (spaces, mixed case, and symbols all appear in the wild).
-// The git-metadata path is unaffected: a repo name resolved via git stays
-// unsanitized, as before.
+// slugifyRepo converts either a git-root or context-directory basename into
+// a valid docker repository name component. Neither filesystem-derived name
+// is guaranteed docker-clean (spaces, mixed case, and symbols all appear in
+// the wild).
 //
 // This deliberately does NOT share slugify with slugifyBranch: the two
 // positions have different grammars, and the tag grammar is the more

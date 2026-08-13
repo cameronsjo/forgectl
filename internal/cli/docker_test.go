@@ -8,8 +8,8 @@ package cli
 //   [x] Happy: `docker run` with no --tag reuses the tag from a prior build
 //   [x] Happy: `docker shell` with no --tag reuses the tag from a prior build
 //   [x] Happy: subcommand aliases (b/r/sh) resolve to their canonical verb
-//   [x] Degraded (forgectl#187): `docker build` outside a git repo warns on
-//       stderr (naming the reason) and still reports a built tag on stdout
+//   [x] Degraded: total and partial git failures have exact stdout/stderr
+//       contracts, retain the best stable dev identity, and disclose no root
 
 import (
 	"bytes"
@@ -73,41 +73,84 @@ func TestDockerBuildCmd_ReportsDerivedTag(t *testing.T) {
 	}
 }
 
-// TestDockerBuildCmd_NoGitMetadata_WarnsOnStderr covers forgectl#187's CLI
-// half: outside a git repo, Build degrades rather than erroring, and the
-// warning must reach the user via stderr — not slog, which defaults to a
-// log file the user isn't watching (internal/config/config.go).
-func TestDockerBuildCmd_NoGitMetadata_WarnsOnStderr(t *testing.T) {
-	fake := &exec.FakeRunner{
-		RunFunc: func(name string, _ []string) (string, error) {
-			if name == "git" {
-				return "", errors.New("not a git repository")
-			}
-			return "", nil
+// TestDockerBuildCmd_IncompleteGitMetadataHasExactOutput covers forgectl#187's
+// CLI warning channel plus #226's partial-root naming and non-disclosure.
+func TestDockerBuildCmd_IncompleteGitMetadataHasExactOutput(t *testing.T) {
+	tests := []struct {
+		name       string
+		contextDir string
+		run        func(string, []string) (string, error)
+		wantOut    string
+		wantErr    string
+		secretPath string
+	}{
+		{
+			name:       "total failure",
+			contextDir: "/workspace/sub context",
+			run: func(name string, _ []string) (string, error) {
+				if name == "git" {
+					return "", errors.New("not a git repository")
+				}
+				return "", nil
+			},
+			wantOut: "built sub-context:dev\n",
+			wantErr: "warning: incomplete git metadata (resolve git repo root: not a git repository); tagged sub-context:dev only\n",
+		},
+		{
+			name:       "partial failure",
+			contextDir: "/workspace/sub context",
+			secretPath: "/private/build/Repo Root",
+			run: func(name string, args []string) (string, error) {
+				if name != "git" || len(args) < 4 {
+					return "", nil
+				}
+				switch args[3] {
+				case "--show-toplevel":
+					return "/private/build/Repo Root\n", nil
+				case "--abbrev-ref":
+					return "", errors.New("ambiguous HEAD")
+				case "--short":
+					return "abc1234\n", nil
+				}
+				return "", nil
+			},
+			wantOut: "built repo-root:dev\n",
+			wantErr: "warning: incomplete git metadata (resolve git branch: ambiguous HEAD); tagged repo-root:dev only\n",
 		},
 	}
-	cachePath := filepath.Join(t.TempDir(), "docker-lasttag")
-	client := dockerpkg.New(fake,
-		dockerpkg.WithLastTagPath(cachePath),
-		dockerpkg.WithNow(func() time.Time { return time.Now() }),
-	)
-	cmd := newDockerCmdForClient(client)
-	var stdout, stderr bytes.Buffer
-	cmd.SetOut(&stdout)
-	cmd.SetErr(&stderr)
-	cmd.SetArgs([]string{"build"})
 
-	if err := cmd.ExecuteContext(context.Background()); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if stderr.Len() == 0 {
-		t.Error("expected a stderr warning when git metadata is unavailable")
-	}
-	if !strings.Contains(stderr.String(), "not a git repository") {
-		t.Errorf("stderr = %q, want it to name the git failure reason", stderr.String())
-	}
-	if !strings.HasPrefix(stdout.String(), "built ") || !strings.Contains(stdout.String(), ":dev") {
-		t.Errorf("stdout = %q, want a built dev tag reported", stdout.String())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &exec.FakeRunner{
+				RunFunc: tt.run,
+			}
+			cachePath := filepath.Join(t.TempDir(), "docker-lasttag")
+			client := dockerpkg.New(fake,
+				dockerpkg.WithLastTagPath(cachePath),
+				dockerpkg.WithNow(func() time.Time { return time.Now() }),
+			)
+			cmd := newDockerCmdForClient(client)
+			var stdout, stderr bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			cmd.SetArgs([]string{"build", tt.contextDir})
+
+			if err := cmd.ExecuteContext(context.Background()); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if stdout.String() != tt.wantOut {
+				t.Errorf("stdout = %q, want %q", stdout.String(), tt.wantOut)
+			}
+			if stderr.String() != tt.wantErr {
+				t.Errorf("stderr = %q, want %q", stderr.String(), tt.wantErr)
+			}
+			if strings.Count(stderr.String(), "warning:") != 1 {
+				t.Errorf("stderr warning count = %d, want 1 (%q)", strings.Count(stderr.String(), "warning:"), stderr.String())
+			}
+			if tt.secretPath != "" && (strings.Contains(stdout.String(), tt.secretPath) || strings.Contains(stderr.String(), tt.secretPath)) {
+				t.Errorf("output disclosed resolved git root %q: stdout=%q stderr=%q", tt.secretPath, stdout.String(), stderr.String())
+			}
+		})
 	}
 }
 
