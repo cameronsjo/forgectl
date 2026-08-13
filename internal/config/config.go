@@ -108,6 +108,13 @@ func (c Config) HasLaunchSection() bool {
 type LaunchConfig struct {
 	Defaults LaunchDefaults  `toml:"defaults"`
 	Projects []LaunchProject `toml:"project"`
+
+	// UsageStats is the informed opt-in for local launch statistics (#240).
+	// Absent and explicit false are both disabled, and nothing but an operator
+	// editing this key may set it: no migration, fallback, environment
+	// variable, init, doctor, or stats path ever writes true here. See
+	// internal/launch/usage.go for exactly what a recorded row contains.
+	UsageStats bool `toml:"usage_stats"`
 }
 
 // LaunchDefaults is [launch.defaults]: the base posture applied when no project
@@ -150,7 +157,7 @@ type LaunchProject struct {
 // IsZero reports whether the [launch] section was absent or empty — the signal
 // the launcher uses to fall back to a legacy claunch.conf.
 func (lc LaunchConfig) IsZero() bool {
-	return len(lc.Projects) == 0 && lc.Defaults.isZero()
+	return len(lc.Projects) == 0 && lc.Defaults.isZero() && !lc.UsageStats
 }
 
 // WorkflowConfig is the [workflow] section: extra strip-list entries the
