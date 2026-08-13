@@ -3,34 +3,88 @@ package projects
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+
+	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 )
 
-// githubOwner is the GitHub account whose repos the inventory enumerates.
-const githubOwner = "cameronsjo"
+// ownerListResult is one owner's repo-list outcome, held only long enough to
+// fold it in input order. The error stays internal: it is reduced to a
+// categorical note before anything reaches a human sink.
+type ownerListResult struct {
+	repos []Repo
+	err   error
+}
 
-// githubList returns structured records for every repo owned by githubOwner —
-// a thin wrapper over githubListOrg for the single account the inventory
-// tracks.
-func githubList(ctx context.Context, run interface {
-	Run(context.Context, string, ...string) (string, error)
-}) ([]Repo, error) {
-	return githubListOrg(ctx, run, githubOwner)
+// githubList returns structured records for every repo owned by the resolved
+// owner set, plus one categorical note per owner whose query failed.
+//
+// configured is the low-trust [projects].owners list. Empty means "whoever is
+// authenticated on GitHub.com", resolved once. Resolution happens in full
+// before any repo query, so a malformed owner anywhere in the list means zero
+// queries rather than a silently narrowed inventory.
+//
+// A partial failure is not an error: healthy owners' repos come back with a
+// note naming each failed owner. Only an every-owner failure returns an error,
+// and neither the notes nor that error ever carry raw gh output — gh stderr
+// can hold tokens and terminal control sequences, and these strings end up on
+// a terminal.
+func githubList(ctx context.Context, run exec.Runner, configured []string) ([]Repo, []string, error) {
+	owners, err := githubauth.ResolveOwners(ctx, run, configured)
+	if err != nil {
+		slog.Warn("Failed to resolve GitHub owners.", "configured", len(configured), "error", err)
+		return nil, nil, err
+	}
+
+	results := fanOut(owners, func(owner string) ownerListResult {
+		repos, err := githubListOrg(ctx, run, owner)
+		return ownerListResult{repos: repos, err: err}
+	})
+
+	var (
+		repos  []Repo
+		notes  []string
+		failed int
+	)
+	for i, res := range results {
+		if res.err != nil {
+			failed++
+			notes = append(notes, fmt.Sprintf("github(%s): query failed", owners[i]))
+			continue
+		}
+		repos = append(repos, res.repos...)
+	}
+	if failed > 0 && failed == len(owners) {
+		slog.Warn("Every GitHub owner query failed.", "owners", len(owners))
+		return nil, notes, errors.New("github: every owner query failed")
+	}
+	slog.Info("Successfully fetched GitHub repos across owners.", "owners", len(owners), "failed", failed, "count", len(repos))
+	return repos, notes, nil
 }
 
 // githubListOrg returns structured records for every repo owned by org (any
-// GitHub user or org login, not just githubOwner) via `gh repo list --json` —
-// the bulk-clone path (`projects clone --org`) needs an arbitrary login, not
-// just the inventory's own account. Archived repos are included — the
-// inventory is a finder, and you may still want to open an archived project.
-// Returns the command error on failure so callers can note the degraded host;
-// a JSON parse failure is treated the same way.
-func githubListOrg(ctx context.Context, run interface {
-	Run(context.Context, string, ...string) (string, error)
-}, org string) ([]Repo, error) {
+// GitHub user or org login) via `gh repo list --json`. Archived repos are
+// included — the inventory is a finder, and you may still want to open an
+// archived project. Returns the command error on failure so callers can note
+// the degraded owner; a JSON parse failure is treated the same way.
+//
+// org is revalidated here, immediately before argv construction, rather than
+// trusted from the caller: this is the last point before a config value, a
+// discovered login, or a `clone --org` argument becomes a subprocess argument.
+// The call is host-pinned, so an ambient GH_HOST cannot silently redirect the
+// listing at a GitHub Enterprise instance and have its repos stamped
+// Host: "github".
+func githubListOrg(ctx context.Context, run exec.Runner, org string) ([]Repo, error) {
+	if !githubauth.ValidOwner(org) {
+		// Deliberately value-free: this string can reach a terminal, and org
+		// is exactly the untrusted value that failed validation.
+		return nil, errors.New("GitHub owner is outside the allowed owner charset")
+	}
 	slog.Debug("Preparing to fetch GitHub repos.", "owner", org)
-	out, err := run.Run(ctx, "gh", "repo", "list", org,
+	out, err := githubauth.Runner(run).Run(ctx, "gh", "repo", "list", org,
 		"--limit", "1000", "--json", "name,sshUrl,isPrivate")
 	if err != nil {
 		slog.Error("Failed to fetch GitHub repos.", "owner", org, "error", err)

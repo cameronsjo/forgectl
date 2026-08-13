@@ -266,6 +266,11 @@ func twoHostRunFunc(ghJSON, teaTSV string) func(string, []string) (string, error
 	return func(name string, args []string) (string, error) {
 		switch name {
 		case "gh":
+			// Unconfigured owners: the inventory resolves the authenticated
+			// GitHub.com login before it lists anything.
+			if len(args) >= 2 && args[0] == "api" && args[1] == "user" {
+				return "cameronsjo", nil
+			}
 			return ghJSON, nil
 		case "tea":
 			return teaTSV, nil

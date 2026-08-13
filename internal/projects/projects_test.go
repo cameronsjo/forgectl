@@ -45,6 +45,11 @@ func inventoryRunFunc(tmp string) func(string, []string) (string, error) {
 	return func(name string, args []string) (string, error) {
 		switch name {
 		case "gh":
+			// With no [projects].owners configured, the inventory asks
+			// GitHub.com who the operator is before listing anything.
+			if len(args) >= 2 && args[0] == "api" && args[1] == "user" {
+				return "cameronsjo", nil
+			}
 			return ghJSON, nil
 		case "tea":
 			return teaTSV, nil

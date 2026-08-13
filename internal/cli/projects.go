@@ -27,7 +27,7 @@ var projectsModule = module.Manifest{
 	GroupAliases: []string{"proj"},
 	SubAliases:   projectAliases,
 	New: func(deps module.Deps) *cobra.Command {
-		return newProjectsCmd(projects.New(deps.Runner))
+		return newProjectsCmd(projects.New(deps.Runner, projects.WithGitHubOwners(deps.Cfg.Projects.Owners)))
 	},
 }
 
