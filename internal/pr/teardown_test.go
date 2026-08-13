@@ -16,10 +16,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/quarantine"
 )
 
 // seedSession writes a real workspace + breadcrumb and returns the breadcrumb
@@ -78,6 +80,21 @@ func TestTeardown_CoveredRootQuarantineHasNoPhantomNestedMove(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(ws, ".claude.quarantined", "CLAUDE.md"), []byte("covered"), 0o600); err != nil {
 		t.Fatalf("seed nested carrier: %v", err)
+	}
+	targets, err := quarantine.ExpandTargets(ws, quarantine.SuffixQuarantined, quarantine.DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets covered root: %v", err)
+	}
+	moves, err := quarantine.ComputeMoves(ws, quarantine.SuffixQuarantined, targets)
+	if err != nil {
+		t.Fatalf("ComputeMoves covered root: %v", err)
+	}
+	coveredOriginal := filepath.Join(ws, ".claude")
+	for _, move := range moves {
+		rel, relErr := filepath.Rel(coveredOriginal, move.From)
+		if relErr == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			t.Fatalf("covered root produced phantom nested move: %+v", moves)
+		}
 	}
 
 	if err := c.Teardown(context.Background(), path); err != nil {

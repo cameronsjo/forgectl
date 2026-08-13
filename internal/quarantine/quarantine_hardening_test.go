@@ -181,7 +181,7 @@ func TestPrepareMoves_RejectsSameSourceThroughSymlinkAlias(t *testing.T) {
 
 func TestPrepareMoves_RejectsSameSourceThroughDeepestExistingAlias(t *testing.T) {
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "real"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "real"), 0o750); err != nil {
 		t.Fatalf("MkdirAll real: %v", err)
 	}
 	if err := os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "alias")); err != nil {
@@ -593,10 +593,10 @@ func TestExpandTargets_CaseOnlyEscapingAliasNeverCountsAsCovered(t *testing.T) {
 	base := t.TempDir()
 	upperRoot := filepath.Join(base, "Root")
 	lowerRoot := filepath.Join(base, "root")
-	if err := os.MkdirAll(filepath.Join(upperRoot, ".claude"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(upperRoot, ".claude"), 0o750); err != nil {
 		t.Fatalf("MkdirAll upper root: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(lowerRoot, ".claude"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(lowerRoot, ".claude"), 0o750); err != nil {
 		t.Skipf("filesystem cannot represent case-only sibling roots: %v", err)
 	}
 	upperInfo, err := os.Stat(upperRoot)

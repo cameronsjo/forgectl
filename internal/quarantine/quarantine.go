@@ -304,7 +304,6 @@ func ExpandTargets(root string, scheme Scheme, targets []string) ([]string, erro
 	if err != nil {
 		return nil, err
 	}
-
 	var nested []string
 	if wantsExpansion(literals) {
 		if nested, err = walkNestable(root, scheme, literals, covered); err != nil {
@@ -314,7 +313,8 @@ func ExpandTargets(root string, scheme Scheme, targets []string) ([]string, erro
 
 	var matched []string
 	if len(patterns) > 0 {
-		if matched, err = expandPatterns(root, scheme, patterns, covered); err != nil {
+		coveredRoots := canonicalCoveredRoots(root, covered)
+		if matched, err = expandPatterns(root, canonicalRoot.real, scheme, patterns, covered, coveredRoots); err != nil {
 			return nil, err
 		}
 	}
@@ -417,7 +417,7 @@ func uniqueFoldedEntry(entries []fs.DirEntry, wanted string) (fs.DirEntry, error
 // lowercases: the attacker writes the filename, and on APFS a tool opening
 // `.gemini/mcp.json` resolves to a planted `.gemini/MCP.json` that a
 // case-sensitive filepath.Match never sees.
-func expandPatterns(root string, scheme Scheme, patterns []string, covered map[string]string) ([]string, error) {
+func expandPatterns(root, realRoot string, scheme Scheme, patterns []string, covered map[string]string, coveredRoots []string) ([]string, error) {
 	var found []string
 	seen := make(map[string]bool)
 	for _, p := range patterns {
@@ -447,7 +447,7 @@ func expandPatterns(root string, scheme Scheme, patterns []string, covered map[s
 				// suppress an alias when its canonical referent is already owned by a
 				// covered root-level target. Escaping aliases deliberately continue to
 				// prepareMoves, whose confinement check fails closed.
-				if aliasesCoveredRoot(root, top, covered) {
+				if aliasesCoveredRoot(root, realRoot, top, coveredRoots) {
 					continue
 				}
 				if skipDirNames[top] || skipDirNames[undecorated] {
@@ -466,11 +466,7 @@ func expandPatterns(root string, scheme Scheme, patterns []string, covered map[s
 	return found, nil
 }
 
-func aliasesCoveredRoot(root, top string, covered map[string]string) bool {
-	canonicalRoot, err := resolveRootIdentity(root)
-	if err != nil {
-		return false
-	}
+func aliasesCoveredRoot(root, realRoot, top string, coveredRoots []string) bool {
 	info, err := os.Lstat(filepath.Join(root, top))
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
 		return false
@@ -480,9 +476,24 @@ func aliasesCoveredRoot(root, top string, covered map[string]string) bool {
 		return false
 	}
 	alias, err = filepath.Abs(alias)
-	if err != nil || !canonicalOwns(canonicalRoot.real, alias) {
+	if err != nil || !canonicalOwns(realRoot, alias) {
 		return false
 	}
+	for _, coveredPath := range coveredRoots {
+		if canonicalOwns(coveredPath, alias) {
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalCoveredRoots snapshots covered-root ownership once per
+// ExpandTargets call. The cache is deliberately invocation-local: expansion
+// performs no mutation, while Hide separately revalidates the resulting move
+// set immediately before its mutation phase.
+func canonicalCoveredRoots(root string, covered map[string]string) []string {
+	seen := make(map[string]bool)
+	var roots []string
 	for spelling := range covered {
 		actual, complete, resolveErr := resolveExistingSpelling(root, spelling)
 		if resolveErr != nil || !complete {
@@ -493,11 +504,14 @@ func aliasesCoveredRoot(root, top string, covered map[string]string) bool {
 			continue
 		}
 		coveredPath, resolveErr = filepath.Abs(coveredPath)
-		if resolveErr == nil && canonicalOwns(coveredPath, alias) {
-			return true
+		if resolveErr != nil || seen[coveredPath] {
+			continue
 		}
+		seen[coveredPath] = true
+		roots = append(roots, coveredPath)
 	}
-	return false
+	sort.Strings(roots)
+	return roots
 }
 
 // canonicalOwns compares canonical filesystem locations, whose case policy is
