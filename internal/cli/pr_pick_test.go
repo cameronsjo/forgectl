@@ -13,12 +13,10 @@ package cli
 //   [x] Unhappy: the live tmux window count is unreadable → refuse the whole
 //       batch, fail-closed — no prepare (no clone) for anything
 //
-// pickPRs is not unit-tested here: it drives an interactive huh multiselect
-// that requires a TTY. Its selection→launch contract is covered via
-// launchPicked, which is the load-bearing skip authority. The esc-to-cancel
-// keymap is likewise unassertable — it is built inline and handed to a form
-// that only observes it under a TTY, and huh opens /dev/tty directly, so any
-// test that let the form run would hang locally and fail only in CI.
+// pickPRs itself remains unexecuted because it drives huh directly. The
+// choosePRs boundary below covers its headless candidate path, first writer
+// error, and live-TTY seam; launchPicked covers the selected-set contract.
+// The esc-to-cancel keymap is likewise unassertable without running huh.
 
 import (
 	"bytes"
@@ -36,6 +34,146 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/pr"
 )
+
+func TestChoosePRs_HeadlessWritesExecutableSanitizedCandidates(t *testing.T) {
+	prevTTY, prevPicker := isInteractiveTTY, pickPRsFn
+	isInteractiveTTY = func() bool { return interactiveTTY(false, true) }
+	pickerCalls := 0
+	pickPRsFn = func([]pr.PR, *pr.ReviewedStore) ([]pr.PR, error) {
+		pickerCalls++
+		return nil, errors.New("picker reached")
+	}
+	t.Cleanup(func() { isInteractiveTTY, pickPRsFn = prevTTY, prevPicker })
+
+	store := pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json"))
+	prs := []pr.PR{{Ref: pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}, Title: "safe"}, {Ref: pr.Ref{Owner: "c", Repo: "r", Number: 7}, Title: "bad\x1b[31m\t\n"}}
+	cmd := &cobra.Command{}
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	_, err := choosePRs(cmd, prs, store)
+	if got, want := stdout.String(), "cameronsjo/forgectl#42  safe\nc/r#7  bad [31m  \n"; got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+	if err == nil || !strings.Contains(err.Error(), "2 open PRs require a selection") || ExitCode(err) != 1 {
+		t.Errorf("error = %v, want coded selection error", err)
+	}
+	if pickerCalls != 0 {
+		t.Errorf("picker calls = %d, want 0", pickerCalls)
+	}
+}
+
+func TestPrPickCommand_HeadlessWritesCandidatesAndDoesNotLaunch(t *testing.T) {
+	prevTTY, prevPicker := isInteractiveTTY, pickPRsFn
+	isInteractiveTTY = func() bool { return interactiveTTY(true, false) }
+	pickerCalls := 0
+	pickPRsFn = func([]pr.PR, *pr.ReviewedStore) ([]pr.PR, error) {
+		pickerCalls++
+		return nil, errors.New("picker reached")
+	}
+	t.Cleanup(func() { isInteractiveTTY, pickPRsFn = prevTTY, prevPicker })
+
+	searchJSON := "[" + prSearchRow("cameronsjo/forgectl", 42) + "," + prSearchRow("cameronsjo/forgectl", 7) + "]"
+	fake := &exec.FakeRunner{RunFunc: prsRunFunc(searchJSON)}
+	cmd := newPrPickCmdForClient(pr.New(fake), config.Config{}, filepath.Join(t.TempDir(), "reviewed.json"))
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SilenceUsage = true
+	if err := cmd.ExecuteContext(context.Background()); err == nil || ExitCode(err) != 1 || !strings.Contains(err.Error(), "2 open PRs require a selection") {
+		t.Errorf("error = %v, want coded PR ambiguity error", err)
+	}
+	if pickerCalls != 0 {
+		t.Errorf("picker calls = %d, want 0", pickerCalls)
+	}
+	if got := strings.Count(strings.TrimSpace(stdout.String()), "\n") + 1; got != 2 {
+		t.Errorf("stdout candidates = %q, want two rows", stdout.String())
+	}
+	for _, call := range fake.Calls {
+		if call.Name == "tmux" || (call.Name == "gh" && len(call.Args) > 1 && call.Args[0] == "pr" && call.Args[1] == "view") {
+			t.Errorf("downstream action call = %s %v", call.Name, call.Args)
+		}
+	}
+}
+
+func TestPrPickCommand_HeadlessWriterErrorStopsBeforePickerOrLaunch(t *testing.T) {
+	prevTTY, prevPicker := isInteractiveTTY, pickPRsFn
+	isInteractiveTTY = func() bool { return interactiveTTY(false, true) }
+	pickerCalls := 0
+	pickPRsFn = func([]pr.PR, *pr.ReviewedStore) ([]pr.PR, error) { pickerCalls++; return nil, nil }
+	t.Cleanup(func() { isInteractiveTTY, pickPRsFn = prevTTY, prevPicker })
+	sentinel := errors.New("candidate writer failed")
+	fake := &exec.FakeRunner{RunFunc: prsRunFunc("[" + prSearchRow("c/r", 1) + "," + prSearchRow("c/r", 2) + "]")}
+	cmd := newPrPickCmdForClient(pr.New(fake), config.Config{}, filepath.Join(t.TempDir(), "reviewed.json"))
+	cmd.SetOut(failingWriter{err: sentinel})
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SilenceUsage = true
+	if err := cmd.ExecuteContext(context.Background()); err != sentinel || !errors.Is(err, sentinel) {
+		t.Errorf("error = %v, want original writer sentinel", err)
+	}
+	if pickerCalls != 0 {
+		t.Errorf("picker calls = %d, want 0", pickerCalls)
+	}
+	for _, call := range fake.Calls {
+		if call.Name == "tmux" || (call.Name == "gh" && len(call.Args) > 1 && call.Args[0] == "pr" && call.Args[1] == "view") {
+			t.Errorf("downstream action call = %s %v", call.Name, call.Args)
+		}
+	}
+}
+
+func TestChoosePRs_HeadlessPreservesFirstWriterError(t *testing.T) {
+	prevTTY, prevPicker := isInteractiveTTY, pickPRsFn
+	isInteractiveTTY = func() bool { return interactiveTTY(true, false) }
+	pickerCalls := 0
+	pickPRsFn = func([]pr.PR, *pr.ReviewedStore) ([]pr.PR, error) { pickerCalls++; return nil, nil }
+	t.Cleanup(func() { isInteractiveTTY, pickPRsFn = prevTTY, prevPicker })
+	sentinel := errors.New("writer failed")
+	cmd := &cobra.Command{}
+	cmd.SetOut(failingWriter{err: sentinel})
+	_, err := choosePRs(cmd, []pr.PR{{Ref: pr.Ref{Owner: "c", Repo: "r", Number: 1}}}, pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json")))
+	if !errors.Is(err, sentinel) || err != sentinel {
+		t.Errorf("error = %v, want original sentinel", err)
+	}
+	if pickerCalls != 0 {
+		t.Errorf("picker calls = %d, want 0", pickerCalls)
+	}
+}
+
+func TestChoosePRs_InteractiveCallsPickerOnceWithoutCandidateOutput(t *testing.T) {
+	prevTTY, prevPicker := isInteractiveTTY, pickPRsFn
+	isInteractiveTTY = func() bool { return interactiveTTY(true, true) }
+	want := []pr.PR{{Ref: pr.Ref{Owner: "c", Repo: "r", Number: 1}}}
+	pickerCalls := 0
+	pickPRsFn = func([]pr.PR, *pr.ReviewedStore) ([]pr.PR, error) { pickerCalls++; return want, nil }
+	t.Cleanup(func() { isInteractiveTTY, pickPRsFn = prevTTY, prevPicker })
+
+	cmd := &cobra.Command{}
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	got, err := choosePRs(cmd, want, pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json")))
+	if err != nil || len(got) != 1 || got[0].Ref != want[0].Ref {
+		t.Errorf("choosePRs = (%+v, %v), want (%+v, nil)", got, err, want)
+	}
+	if pickerCalls != 1 {
+		t.Errorf("picker calls = %d, want 1", pickerCalls)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("candidate stdout = %q, want empty", stdout.String())
+	}
+}
+
+func TestPRCandidateLine_MarksReviewedWithoutTerminalStyling(t *testing.T) {
+	ref := pr.Ref{Owner: "c", Repo: "r", Number: 1}
+	store := pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json"), pr.WithNow(func() time.Time {
+		return time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC)
+	}))
+	if err := store.Mark(ref); err != nil {
+		t.Fatal(err)
+	}
+	got := prCandidateLine(pr.PR{Ref: ref, Title: "done", UpdatedAt: time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)}, store)
+	if got != "c/r#1  done  (reviewed)" {
+		t.Errorf("candidate = %q, want reviewed marker without ANSI styling", got)
+	}
+}
 
 // prepareRunner fakes gh pr view (valid head), git, and tmux for a Prepare +
 // Launch round-trip. has-session and list-windows report a healthy, empty

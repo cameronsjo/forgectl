@@ -34,8 +34,13 @@ var errHeadlessMenuRoute = errors.New("forgectl: no command to run outside a ter
 // screen); env.go's isTerminal only gates a single stdin prompt, so this is
 // a separate check rather than a reuse of that seam.
 var isInteractiveTTY = func() bool {
-	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+	return interactiveTTY(
+		term.IsTerminal(int(os.Stdin.Fd())),
+		term.IsTerminal(int(os.Stdout.Fd())),
+	)
 }
+
+func interactiveTTY(stdinTTY, stdoutTTY bool) bool { return stdinTTY && stdoutTTY }
 
 // Execute is the binary's entrypoint. It normalizes argv (forgiveness layer),
 // then gives an eligible unknown top-level verb to the extension rungs before

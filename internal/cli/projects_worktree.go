@@ -27,7 +27,11 @@ func newProjectsWorktreeCmd(client *projects.Client) *cobra.Command {
 		Use:     "worktree <query | url | owner/repo> [branch]",
 		Aliases: []string{"wt"},
 		Short:   "Initialize a bare-repo worktree layout for a project",
-		Args:    cobra.RangeArgs(1, 2),
+		Long: `Initialize a bare-repo worktree layout. With both stdin and stdout attached
+to terminals, ambiguous matches use the existing picker. Otherwise forgectl writes one
+sanitized candidate identity per line to stdout and exits 1; use the candidate sshUrl
+from projects list --json, or rerun interactively when no sshUrl is available.`,
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			var branch string
@@ -59,7 +63,7 @@ func newProjectsWorktreeCmd(client *projects.Client) *cobra.Command {
 				return worktreeOnly(ctx, client, cmd, candidates[0], branch)
 			}
 
-			chosen, err := pickRepo(candidates)
+			chosen, err := chooseRepo(cmd, candidates, projectSelectionWorktree)
 			if err != nil {
 				return err
 			}
