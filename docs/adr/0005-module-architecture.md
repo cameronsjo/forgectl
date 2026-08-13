@@ -20,8 +20,9 @@ extensions — without leaving the single-binary model.
 
 **Internal compile-time modules only (Model 1).** One binary. Each command group is a
 `module.Manifest` — plain data plus constructors — aggregated in one explicit slice
-(`internal/cli/modules.go: allModules()`). No `init()` self-registration, no subprocess
-plugins.
+(`internal/cli/modules.go: allModules()`). No `init()` self-registration and no subprocess
+plugin platform. The host's separately implemented external-command fallback, described
+below, does not register modules or join either extension plane.
 
 ### Two extension planes
 
@@ -31,6 +32,26 @@ plugins.
 - **Data plane** — user-authored `*.workflow.toml` files (embedded builtins +
   `<config>/workflows/` overrides) composing step verbs. Modules contribute step verbs via
   their manifests; the data plane's vocabulary is registry-derived, not hand-listed.
+
+### Host external-command dispatch
+
+Rung B is implemented as narrow host routing: after registered commands, aliases, and lazy
+Cobra builtins lose, an eligible unknown `forgectl <verb> ...` may execute an absolute
+`forgectl-<verb>` resolved from `PATH`. Only leading `--no-icons` forms are consumed by the
+host; the argv suffix, stdio, environment, signals, and process exit status belong to the
+external command. Lookup errors and relative results are misses, so the current directory is
+never executable through this rung. A miss retains the existing TUI/Cobra route.
+
+This adds no registration, discovery, manifest, structured-output, capability, authenticity,
+ownership, permission, blessing, or sandbox contract. It runs arbitrary code with the
+invoking user's authority. Future exact workflow-name dispatch remains Rung A and must run
+before Rung B, but after registered-name precedence.
+
+The blessing helper boundary is unchanged and does not reuse this rung:
+`forgectl-bless-helper` is still resolved only as a sibling of the running executable and,
+when the release trust gate is armed, its Developer-ID trust is re-verified immediately
+before every privileged helper execution. A same-named PATH command reached manually through
+Rung B does not become the blessing helper or participate in trust bootstrap.
 
 ### Contract packages
 
@@ -93,8 +114,8 @@ names which embedded workflows a step-contributing module's eviction would break
 
 ## Alternatives considered
 
-- **Model 2 — kubectl-style `forgectl-foo` PATH subprocess fallback now.** Nothing exists to
-  use it; documented below as future rung B instead.
+- **Model 2 — make `forgectl-foo` subprocesses the module model.** Declined. The later, narrow
+  host Rung B does not make external commands modules and adds no plugin platform.
 - **Model 3 — full kubectl-parity plugin platform.** Serves extenders who aren't the owner.
 - **`init()` self-registration.** Serves third-party packages; the explicit slice gives
   determinism, greppability, and a meaningful completeness test.
@@ -106,7 +127,7 @@ names which embedded workflows a step-contributing module's eviction would break
 - **Workflows as top-level verbs now.** The one behavior addition in an otherwise
   user-invisible refactor; dropped to future rung A.
 
-## Future work (documented, not built)
+## Host dispatch rungs
 
 The dispatch pipeline's rungs, in order: normalize argv → `launch` intercept → known verb? →
 *(rung A)* → *(rung B)* → TUI.
@@ -115,9 +136,9 @@ The dispatch pipeline's rungs, in order: normalize argv → `launch` intercept �
   (exact, un-normalized match only) before falling into the TUI; ~30 LOC at the
   `shouldLaunchTUI` seam. Makes data-plane workflows feel like verbs without registering them
   in cobra.
-- **Rung B — `forgectl-<verb>` PATH subprocess fallback.** Contract: argv passthrough
-  untouched, exit-code propagation, no env mutation. Only worth building when an out-of-tree
-  consumer exists.
+- **Rung B — `forgectl-<verb>` external-command fallback (implemented).** Registered names
+  win; eligible unknown verbs use absolute-only `PATH` resolution, exact argv-suffix
+  passthrough, inherited stdio/environment, and process replacement for status propagation.
 - **TUI `Menu` hook.** An optional manifest field for modules to contribute menu entries —
   deferred until a second module actually wants one.
 - **Argv forgiveness for all modules.** `normalizeArgs` is registry-driven but only tmux

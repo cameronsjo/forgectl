@@ -38,8 +38,9 @@ var isInteractiveTTY = func() bool {
 }
 
 // Execute is the binary's entrypoint. It normalizes argv (forgiveness layer),
-// then either opens the TUI (bare invoke or an unrecognized verb — the thumb-
-// mode affordance) or hands off to fang for styled help/errors/version.
+// then gives an eligible unknown top-level verb to the extension rungs before
+// either opening the TUI (bare invoke or an external-command miss — the thumb-
+// mode affordance) or handing off to fang for styled help/errors/version.
 func Execute(ctx context.Context) error {
 	cfg := config.Load()
 	closer := config.SetupLogger(cfg)
@@ -72,6 +73,10 @@ func Execute(ctx context.Context) error {
 			}
 			return err
 		}
+	}
+
+	if handled, err := tryExtensionRungs(root, args, defaultExternalCommandRuntime()); handled {
+		return err
 	}
 
 	noIcons := cfg.NoIcons || hasNoIcons(args)
