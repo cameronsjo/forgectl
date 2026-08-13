@@ -43,22 +43,24 @@ func TestMain(m *testing.M) {
 
 // --- harness -----------------------------------------------------------
 
-// childConfigPath returns the OS-correct forgectl config.toml path under a
-// fake HOME/XDG_CONFIG_HOME base, mirroring os.UserConfigDir()'s resolution:
-// darwin ignores XDG and uses Library/Application Support; linux honors XDG.
-func childConfigPath(base string) string {
+// testXDGConfigHome returns the lexical XDG base accepted by the migration
+// boundary on each OS. Darwin's os.UserConfigDir ignores XDG, so the explicit
+// value must equal its native Application Support base; other Unix targets
+// use the supplied base directly.
+func testXDGConfigHome(base string) string {
 	if runtime.GOOS == "darwin" {
-		return filepath.Join(base, "Library", "Application Support", "forgectl", "config.toml")
+		return filepath.Join(base, "Library", "Application Support")
 	}
-	return filepath.Join(base, "forgectl", "config.toml")
+	return base
+}
+
+func childConfigPath(base string) string {
+	return filepath.Join(testXDGConfigHome(base), "forgectl", "config.toml")
 }
 
 // legacyConfigPath returns the legacy claunch.conf path under a fake base.
-// config.LegacyLaunchPath honors $XDG_CONFIG_HOME directly on every OS (unlike
-// os.UserConfigDir, which darwin ignores), so this is base/claunch/claunch.conf
-// regardless of GOOS as long as XDG_CONFIG_HOME=base is set in the child env.
 func legacyConfigPath(base string) string {
-	return filepath.Join(base, "claunch", "claunch.conf")
+	return filepath.Join(testXDGConfigHome(base), "claunch", "claunch.conf")
 }
 
 const stubClaude = `#!/usr/bin/env bash
@@ -154,7 +156,7 @@ func newHarness(t *testing.T) *harness {
 		env: []string{
 			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"HOME=" + base,
-			"XDG_CONFIG_HOME=" + base,
+			"XDG_CONFIG_HOME=" + testXDGConfigHome(base),
 			"FORGECTL_TEST_OUT=" + outFile,
 		},
 	}
@@ -194,7 +196,7 @@ func newTelemetryHarness(t *testing.T) *harness {
 		env: []string{
 			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"HOME=" + base,
-			"XDG_CONFIG_HOME=" + base,
+			"XDG_CONFIG_HOME=" + testXDGConfigHome(base),
 			"FORGECTL_TEST_OUT=" + outFile,
 		},
 	}
@@ -250,7 +252,7 @@ model = "sonnet"
 		env: []string{
 			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"HOME=" + base,
-			"XDG_CONFIG_HOME=" + base,
+			"XDG_CONFIG_HOME=" + testXDGConfigHome(base),
 			"FORGECTL_TEST_OUT=" + outFile,
 		},
 	}
@@ -318,7 +320,7 @@ model = "sonnet"
 		env: []string{
 			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"HOME=" + base,
-			"XDG_CONFIG_HOME=" + base,
+			"XDG_CONFIG_HOME=" + testXDGConfigHome(base),
 			"FORGECTL_TEST_OUT=" + outFile,
 		},
 	}
@@ -392,7 +394,7 @@ model = "sonnet"
 		env: []string{
 			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"HOME=" + base,
-			"XDG_CONFIG_HOME=" + base,
+			"XDG_CONFIG_HOME=" + testXDGConfigHome(base),
 			"FORGECTL_TEST_OUT=" + outFile,
 		},
 	}
@@ -1104,7 +1106,7 @@ func newBareHarness(t *testing.T, configBody string) *harness {
 		env: []string{
 			"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 			"HOME=" + base,
-			"XDG_CONFIG_HOME=" + base,
+			"XDG_CONFIG_HOME=" + testXDGConfigHome(base),
 			"FORGECTL_TEST_OUT=" + outFile,
 		},
 	}
@@ -1123,19 +1125,17 @@ func TestIntegration_Which_ConfigSourceLabel(t *testing.T) {
 		}
 	})
 
-	// An explicit-but-empty [launch] header (no keys under it) still yields
-	// cfg.Launch.IsZero() == true, so this lands in the same terminal branch
-	// as a config that omits [launch] entirely — the current label reads
-	// slightly loosely here ("no [launch] section" when a section header IS
-	// present but empty), but it still points the reader at the right file.
-	// Pinning this boundary makes any future resolveLaunchConfig change to
-	// this case a deliberate one, not an accidental drift.
+	// An explicit-but-empty [launch] header is still authoritative: migration
+	// presence is not inferred from the decoded struct's zero value.
 	t.Run("file present, explicit empty [launch] section", func(t *testing.T) {
 		h := newBareHarness(t, "[launch]\n\n[bench]\ntelemetry = true\n")
 		stdout, _ := h.run(t, "which")
 
-		if !strings.Contains(stdout, "no [launch] section") {
-			t.Errorf("which output missing %q; got:\n%s", "no [launch] section", stdout)
+		if strings.Contains(stdout, "no [launch] section") {
+			t.Errorf("which output misclassified an explicitly present empty table; got:\n%s", stdout)
+		}
+		if !strings.Contains(stdout, "config.toml") {
+			t.Errorf("which output does not identify authoritative config.toml; got:\n%s", stdout)
 		}
 		if strings.Contains(stdout, "(missing") {
 			t.Errorf("which output unexpectedly contains %q for a present config; got:\n%s", "(missing", stdout)

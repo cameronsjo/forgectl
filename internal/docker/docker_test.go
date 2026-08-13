@@ -16,21 +16,30 @@ package docker
 //   [x] Degraded: --platform and a configured extra label survive the
 //       no-repo path
 //   [x] Degraded: a build that degraded to a dev tag still caches it
-//   [x] Degraded: a PARTIAL git resolution (fresh `git init`: branch
-//       resolves, sha does not) is still all-or-nothing — no half-labelled
-//       image carrying ref.name without revision
+//   [x] Degraded: partial git resolution retains a sanitized root-derived
+//       :dev identity while immutable tags and git labels stay all-or-nothing
+//   [x] Degraded: blank successful probe output is a field-specific failure
+//       and the first failure remains stable while all probes still run
+//   [x] Degraded: platform/created/configured labels survive the partial path
+//   [x] Collision: lossy root sanitization and the global cache are explicitly
+//       last-successful-build-wins; a failed later build preserves the cache
+//   [x] Logging: total/partial degradation emits one structured warning with
+//       stable fields and no resolved root; complete metadata emits none
 //
 // Client.Run / Client.Shell (Classification: ops layer)
 //   [x] Happy: an explicit --tag is used as given
-//   [x] Happy: an omitted tag reuses the cached last-built tag
+//   [x] Happy: independent Run and Shell clients reuse a partial build's
+//       cached stable dev tag
 //   [x] Happy: Shell defaults to "sh" when --shell is omitted
 //   [x] Unhappy: no explicit tag and no cache yields an error, no Runner call
 //   [x] Unhappy: an option-like explicit tag is rejected before any Runner call
 //   [x] Unhappy: an option-like --shell value is rejected before any Runner call
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -40,11 +49,12 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
-// fakeGitRunner returns a FakeRunner whose Run (git plumbing) answers the
-// three `git rev-parse` calls gitInfo makes, keyed on the flag at args[3]
-// (["-C", dir, "rev-parse", <flag>, ...]) so the fixture doesn't care what
-// dir Build was called with.
-func fakeGitRunner(toplevel, branch, sha string) *exec.FakeRunner {
+type gitProbe struct {
+	output string
+	err    error
+}
+
+func fakeGitProbeRunner(top, branch, sha gitProbe) *exec.FakeRunner {
 	return &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
 			if name != "git" || len(args) < 4 {
@@ -52,15 +62,27 @@ func fakeGitRunner(toplevel, branch, sha string) *exec.FakeRunner {
 			}
 			switch args[3] {
 			case "--show-toplevel":
-				return toplevel, nil
+				return top.output, top.err
 			case "--abbrev-ref":
-				return branch, nil
+				return branch.output, branch.err
 			case "--short":
-				return sha, nil
+				return sha.output, sha.err
 			}
 			return "", nil
 		},
 	}
+}
+
+// fakeGitRunner returns a FakeRunner whose Run (git plumbing) answers the
+// three `git rev-parse` calls gitInfo makes, keyed on the flag at args[3]
+// (["-C", dir, "rev-parse", <flag>, ...]) so the fixture doesn't care what
+// dir Build was called with.
+func fakeGitRunner(toplevel, branch, sha string) *exec.FakeRunner {
+	return fakeGitProbeRunner(
+		gitProbe{output: toplevel},
+		gitProbe{output: branch},
+		gitProbe{output: sha},
+	)
 }
 
 func newTestClient(t *testing.T, run exec.Runner, opts ...Option) *Client {
@@ -239,52 +261,147 @@ func TestBuild_GitFailure_DegradesToDirDerivedDevTag(t *testing.T) {
 	}
 }
 
-// TestBuild_PartialGitResolution_DoesNotHalfLabelImage covers the shape
-// TestBuild_GitFailure_DegradesToDirDerivedDevTag structurally cannot: a
-// fresh `git init` before the first commit, where toplevel and branch both
-// resolve and only the sha fails. The tag is directory-derived either way,
-// so an image carrying ref.name=main with no matching revision would claim
-// a git association Build itself reported as absent.
-func TestBuild_PartialGitResolution_DoesNotHalfLabelImage(t *testing.T) {
-	fake := &exec.FakeRunner{
-		RunFunc: func(name string, args []string) (string, error) {
-			if name != "git" || len(args) < 4 {
-				return "", nil
+// TestBuild_GitFieldCompletenessAndStableNaming covers the partial and blank
+// probe shapes that total Git failure cannot: a valid root remains useful
+// naming identity even when branch/SHA cannot support immutable provenance.
+func TestBuild_GitFieldCompletenessAndStableNaming(t *testing.T) {
+	probeErr := errors.New("probe failed")
+	tests := []struct {
+		name       string
+		top        gitProbe
+		branch     gitProbe
+		sha        gitProbe
+		wantTag    string
+		wantReason string
+		complete   bool
+	}{
+		{name: "complete", top: gitProbe{output: "/workspace/Repo Root\n"}, branch: gitProbe{output: "main\n"}, sha: gitProbe{output: "abc1234\n"}, wantTag: "repo-root:main-abc1234", complete: true},
+		{name: "branch error", top: gitProbe{output: "/workspace/Repo Root\n"}, branch: gitProbe{err: errors.New("ambiguous HEAD")}, sha: gitProbe{output: "abc1234\n"}, wantTag: "repo-root:dev", wantReason: "resolve git branch: ambiguous HEAD"},
+		{name: "sha error", top: gitProbe{output: "/workspace/Repo Root\n"}, branch: gitProbe{output: "main\n"}, sha: gitProbe{err: errors.New("missing HEAD")}, wantTag: "repo-root:dev", wantReason: "resolve git sha: missing HEAD"},
+		{name: "both revision errors preserve first", top: gitProbe{output: "/workspace/Repo Root\n"}, branch: gitProbe{err: errors.New("ambiguous HEAD")}, sha: gitProbe{err: errors.New("missing HEAD")}, wantTag: "repo-root:dev", wantReason: "resolve git branch: ambiguous HEAD"},
+		{name: "blank root", top: gitProbe{output: " \n\t"}, branch: gitProbe{output: "main\n"}, sha: gitProbe{output: "abc1234\n"}, wantTag: "sub-context:dev", wantReason: "resolve git repo root: empty git repo root"},
+		{name: "blank branch", top: gitProbe{output: "/workspace/Repo Root\n"}, branch: gitProbe{output: " \n"}, sha: gitProbe{output: "abc1234\n"}, wantTag: "repo-root:dev", wantReason: "resolve git branch: empty git branch"},
+		{name: "blank sha", top: gitProbe{output: "/workspace/Repo Root\n"}, branch: gitProbe{output: "main\n"}, sha: gitProbe{output: "\t\n"}, wantTag: "repo-root:dev", wantReason: "resolve git sha: empty git sha"},
+		{name: "root error", top: gitProbe{err: probeErr}, branch: gitProbe{output: "main\n"}, sha: gitProbe{output: "abc1234\n"}, wantTag: "sub-context:dev", wantReason: "resolve git repo root: probe failed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := fakeGitProbeRunner(tt.top, tt.branch, tt.sha)
+			c := newTestClient(t, fake)
+			contextDir := filepath.Join(t.TempDir(), "sub context")
+
+			result, err := c.Build(context.Background(), BuildOptions{ContextDir: contextDir})
+			if err != nil {
+				t.Fatalf("Build: %v", err)
 			}
-			switch args[3] {
-			case "--show-toplevel":
-				return "/tmp/unborn\n", nil
-			case "--abbrev-ref":
-				return "main\n", nil
-			case "--short":
-				return "", errors.New("fatal: needed a single revision")
+			if result.Tag != tt.wantTag {
+				t.Errorf("Tag = %q, want %q", result.Tag, tt.wantTag)
 			}
-			return "", nil
-		},
-	}
-	c := newTestClient(t, fake)
+			wantDev := tt.wantTag
+			if tt.complete {
+				wantDev = "repo-root:dev"
+			}
+			if result.DevTag != wantDev {
+				t.Errorf("DevTag = %q, want %q", result.DevTag, wantDev)
+			}
+			if result.GitMetadata != tt.complete {
+				t.Errorf("GitMetadata = %v, want %v", result.GitMetadata, tt.complete)
+			}
+			if result.GitReason != tt.wantReason {
+				t.Errorf("GitReason = %q, want %q", result.GitReason, tt.wantReason)
+			}
+			if got := len(fake.Calls); got != 4 {
+				t.Errorf("Runner calls = %d, want three git probes plus docker build", got)
+			}
 
-	dir := t.TempDir()
-	want := devTag(slugifyRepo(filepath.Base(dir)))
+			argv := strings.Join(fake.Last().Args, " ")
+			if strings.Contains(argv, "/workspace/Repo Root") || strings.Contains(argv, "Repo Root") {
+				t.Errorf("docker argv disclosed unsanitized root: %v", fake.Last().Args)
+			}
+			wantTagFlags := 1
+			if tt.complete {
+				wantTagFlags = 2
+			}
+			if got := countArg(fake.Last().Args, "-t"); got != wantTagFlags {
+				t.Errorf("-t count = %d, want %d (args: %v)", got, wantTagFlags, fake.Last().Args)
+			}
+			if got := strings.Contains(argv, "org.opencontainers.image.revision="); got != tt.complete {
+				t.Errorf("revision label present = %v, want %v (args: %v)", got, tt.complete, fake.Last().Args)
+			}
+			if got := strings.Contains(argv, "org.opencontainers.image.ref.name="); got != tt.complete {
+				t.Errorf("ref.name label present = %v, want %v (args: %v)", got, tt.complete, fake.Last().Args)
+			}
+		})
+	}
+}
 
-	result, err := c.Build(context.Background(), BuildOptions{ContextDir: dir})
-	if err != nil {
-		t.Fatalf("Build: %v", err)
+func countArg(args []string, want string) int {
+	count := 0
+	for _, arg := range args {
+		if arg == want {
+			count++
+		}
 	}
-	if result.GitMetadata {
-		t.Error("GitMetadata = true, want false (sha resolution failed)")
-	}
-	if result.Tag != want || result.DevTag != want {
-		t.Errorf("Tag/DevTag = %q/%q, want %q (directory-derived)", result.Tag, result.DevTag, want)
-	}
+	return count
+}
 
-	argv := strings.Join(fake.Last().Args, " ")
-	if strings.Contains(argv, "org.opencontainers.image.ref.name") {
-		t.Errorf("ref.name label must be absent when the tag is directory-derived, args: %v", fake.Last().Args)
+func TestBuild_PartialGitResolutionPreservesCommonArgv(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		override     string
+		wantPlatform string
+	}{
+		{name: "configured default", wantPlatform: "linux/amd64"},
+		{name: "explicit override", override: "linux/arm64", wantPlatform: "linux/arm64"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := fakeGitProbeRunner(
+				gitProbe{output: "/workspace/Repo Root\n"},
+				gitProbe{err: errors.New("ambiguous HEAD")},
+				gitProbe{output: "abc1234\n"},
+			)
+			c := newTestClient(t, fake, WithDockerConfig(config.DockerConfig{
+				DefaultPlatform: "linux/amd64",
+				LabelTemplate:   "org.example.team=platform",
+			}))
+			contextDir := filepath.Join(t.TempDir(), "sub context")
+
+			if _, err := c.Build(context.Background(), BuildOptions{ContextDir: contextDir, Platform: tt.override}); err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+			args := fake.Last().Args
+			if got := countArg(args, "--platform"); got != 1 {
+				t.Errorf("--platform count = %d, want 1 (args: %v)", got, args)
+			}
+			for _, pair := range [][2]string{
+				{"--platform", tt.wantPlatform},
+				{"--label", "org.opencontainers.image.created=2026-07-09T12:00:00Z"},
+				{"--label", "org.example.team=platform"},
+				{"-t", "repo-root:dev"},
+			} {
+				if got := countArgPair(args, pair[0], pair[1]); got != 1 {
+					t.Errorf("argv pair %q %q count = %d, want 1 (args: %v)", pair[0], pair[1], got, args)
+				}
+			}
+			if countArg(args, "-t") != 1 {
+				t.Errorf("partial build must apply one tag, args: %v", args)
+			}
+			if got := args[len(args)-2:]; got[0] != "--" || got[1] != contextDir {
+				t.Errorf("argv suffix = %v, want [-- %s]", got, contextDir)
+			}
+		})
 	}
-	if strings.Contains(argv, "org.opencontainers.image.revision") {
-		t.Errorf("revision label must be absent when git metadata is unavailable, args: %v", fake.Last().Args)
+}
+
+func countArgPair(args []string, flag, value string) int {
+	count := 0
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
+			count++
+		}
 	}
+	return count
 }
 
 // TestBuild_GitFailure_PlatformAndExtraLabelSurvive proves the no-repo path
@@ -337,6 +454,180 @@ func TestBuild_GitFailure_CachesDevTag(t *testing.T) {
 	}
 	if got != result.DevTag {
 		t.Errorf("LastTag = %q, want cached dev tag %q", got, result.DevTag)
+	}
+}
+
+func TestBuild_PartialGitCacheFeedsRunAndShellIndependently(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "docker-lasttag")
+	buildFake := fakeGitProbeRunner(
+		gitProbe{output: "/workspace/Repo Root\n"},
+		gitProbe{err: errors.New("ambiguous HEAD")},
+		gitProbe{output: "abc1234\n"},
+	)
+	buildClient := New(buildFake,
+		WithLastTagPath(cachePath),
+		WithNow(func() time.Time { return time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC) }),
+	)
+	result, err := buildClient.Build(context.Background(), BuildOptions{ContextDir: "/workspace/sub context"})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if result.Tag != "repo-root:dev" {
+		t.Fatalf("partial build tag = %q, want repo-root:dev", result.Tag)
+	}
+
+	runFake := &exec.FakeRunner{}
+	runClient := New(runFake, WithLastTagPath(cachePath))
+	if err := runClient.Run(context.Background(), RunOptions{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got, want := runFake.Last().Args, []string{"run", "--rm", "-it", "repo-root:dev"}; !equalStrings(got, want) {
+		t.Errorf("Run argv = %v, want %v", got, want)
+	}
+
+	shellFake := &exec.FakeRunner{}
+	shellClient := New(shellFake, WithLastTagPath(cachePath))
+	if err := shellClient.Shell(context.Background(), ShellOptions{}); err != nil {
+		t.Fatalf("Shell: %v", err)
+	}
+	if got, want := shellFake.Last().Args, []string{"run", "--rm", "-it", "repo-root:dev", "sh"}; !equalStrings(got, want) {
+		t.Errorf("Shell argv = %v, want %v", got, want)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestBuild_RepositorySanitizerCollisionIsLastSuccessfulBuildWins(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "docker-lasttag")
+	build := func(t *testing.T, root, sha string, interactiveErr error) BuildResult {
+		t.Helper()
+		fake := fakeGitProbeRunner(
+			gitProbe{output: root + "\n"},
+			gitProbe{output: "main\n"},
+			gitProbe{output: sha + "\n"},
+		)
+		fake.InteractiveErr = interactiveErr
+		client := New(fake,
+			WithLastTagPath(cachePath),
+			WithNow(func() time.Time { return time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC) }),
+		)
+		result, err := client.Build(context.Background(), BuildOptions{ContextDir: "/workspace/context"})
+		if interactiveErr == nil && err != nil {
+			t.Fatalf("Build(%q): %v", root, err)
+		}
+		if interactiveErr != nil {
+			if err == nil {
+				t.Fatalf("Build(%q) succeeded, want docker failure", root)
+			}
+			if got, want := err.Error(), "docker build: "+interactiveErr.Error(); got != want {
+				t.Fatalf("Build(%q) error = %q, want %q", root, got, want)
+			}
+		}
+		argv := strings.Join(fake.Last().Args, " ")
+		if strings.Contains(argv, root) {
+			t.Errorf("docker argv disclosed unsanitized source root %q: %v", root, fake.Last().Args)
+		}
+		base := filepath.Base(root)
+		if base != slugifyRepo(base) && strings.Contains(argv, base) {
+			t.Errorf("docker argv disclosed unsanitized root basename %q: %v", base, fake.Last().Args)
+		}
+		return result
+	}
+
+	first := build(t, "/private/repos/A B", "1111111", nil)
+	second := build(t, "/other/repos/a-b", "2222222", nil)
+	if first.DevTag != "a-b:dev" || second.DevTag != "a-b:dev" {
+		t.Fatalf("colliding dev tags = %q and %q, want a-b:dev", first.DevTag, second.DevTag)
+	}
+	if first.Tag == second.Tag {
+		t.Fatalf("immutable tags collided: %q", first.Tag)
+	}
+	reader := New(&exec.FakeRunner{}, WithLastTagPath(cachePath))
+	if got, ok := reader.LastTag(); !ok || got != second.Tag {
+		t.Fatalf("LastTag after second success = %q, %v; want %q, true", got, ok, second.Tag)
+	}
+
+	build(t, "/third/repos/A B", "3333333", errors.New("build failed"))
+	if got, ok := reader.LastTag(); !ok || got != second.Tag {
+		t.Fatalf("LastTag after failed third build = %q, %v; want prior %q, true", got, ok, second.Tag)
+	}
+}
+
+func TestBuild_StructuredWarningMatchesMetadataCompleteness(t *testing.T) {
+	resolvedRoot := "/private/build/Repo Root"
+	tests := []struct {
+		name        string
+		top         gitProbe
+		branch      gitProbe
+		sha         gitProbe
+		wantWarning bool
+		wantFields  []string
+	}{
+		{
+			name:        "partial",
+			top:         gitProbe{output: resolvedRoot + "\n"},
+			branch:      gitProbe{err: errors.New("ambiguous HEAD")},
+			sha:         gitProbe{output: "abc1234\n"},
+			wantWarning: true,
+			wantFields:  []string{"tag=repo-root:dev", `error="resolve git branch: ambiguous HEAD"`, `context="sub context"`},
+		},
+		{
+			name:        "total",
+			top:         gitProbe{err: errors.New("not a git repository")},
+			branch:      gitProbe{err: errors.New("not a git repository")},
+			sha:         gitProbe{err: errors.New("not a git repository")},
+			wantWarning: true,
+			wantFields:  []string{"tag=sub-context:dev", `error="resolve git repo root: not a git repository"`, `context="sub context"`},
+		},
+		{
+			name:   "complete",
+			top:    gitProbe{output: resolvedRoot + "\n"},
+			branch: gitProbe{output: "main\n"},
+			sha:    gitProbe{output: "abc1234\n"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+
+			fake := fakeGitProbeRunner(tt.top, tt.branch, tt.sha)
+			c := newTestClient(t, fake)
+			if _, err := c.Build(context.Background(), BuildOptions{ContextDir: "sub context"}); err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+
+			got := logs.String()
+			message := "Incomplete git metadata for docker build; using dev tag only."
+			wantCount := 0
+			if tt.wantWarning {
+				wantCount = 1
+			}
+			if count := strings.Count(got, message); count != wantCount {
+				t.Fatalf("structured warning count = %d, want %d; logs=%q", count, wantCount, got)
+			}
+			for _, want := range tt.wantFields {
+				if !strings.Contains(got, want) {
+					t.Errorf("structured warning missing %q: %q", want, got)
+				}
+			}
+			if strings.Contains(got, resolvedRoot) {
+				t.Errorf("structured warning disclosed resolved root %q: %q", resolvedRoot, got)
+			}
+		})
 	}
 }
 

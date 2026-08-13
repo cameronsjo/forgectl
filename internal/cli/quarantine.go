@@ -80,8 +80,9 @@ func resolveQuarantineRoot(root string) (string, error) {
 func newQuarantineCmd(client *quarantine.Client) *cobra.Command {
 	f := &quarantineFlags{}
 	cmd := &cobra.Command{
-		Use:   "quarantine",
-		Short: "Reversibly hide AI-instruction files from a workspace",
+		Use:          "quarantine",
+		Short:        "Reversibly hide AI-instruction files from a workspace",
+		SilenceUsage: true,
 		Long: `quarantine renames AI-instruction files (CLAUDE.md, AGENTS.md, …) aside via
 os.Rename — reversible, unlike workflow's destructive strip step.
 

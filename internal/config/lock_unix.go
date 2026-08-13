@@ -5,7 +5,8 @@ package config
 import (
 	"fmt"
 	"os"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // WithFileLock runs fn while holding a blocking exclusive advisory lock on
@@ -29,16 +30,24 @@ import (
 // different package from the lock.
 func WithFileLock(path string, fn func() error) error {
 	lockPath := path + ".lock"
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	fd, err := unix.Open(lockPath, unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0o600)
 	if err != nil {
 		return fmt.Errorf("open lock file %s: %w", lockPath, err)
 	}
+	f := os.NewFile(uintptr(fd), lockPath)
 	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat lock file %s: %w", lockPath, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("lock file %s is not a regular file", lockPath)
+	}
 
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
 		return fmt.Errorf("lock %s: %w", lockPath, err)
 	}
-	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+	defer func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN) }()
 
 	return fn()
 }

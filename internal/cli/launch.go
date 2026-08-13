@@ -1,14 +1,11 @@
 package cli
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 
-	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
@@ -16,6 +13,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/step"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // skipLegacyMigrateEnv disables the automatic claunch.conf migration
@@ -83,6 +81,7 @@ func isOwnLaunchVerb(tok string) bool {
 // `forgectl launch --model sonnet -p hi` stays byte-clean.
 func newLaunchCmd(deps module.Deps) *cobra.Command {
 	cfg := deps.Cfg
+	boundary := deps.LegacyBoundary
 	cmd := &cobra.Command{
 		Use:     "launch [harness args…]",
 		Aliases: []string{"cl"},
@@ -103,15 +102,15 @@ with "forgectl launch init".`,
 		// Bare `forgectl launch` is handled by the Execute intercept, so this
 		// RunE only fires if Cobra reaches it directly; keep it correct.
 		RunE: func(_ *cobra.Command, args []string) error {
-			return launchExec(cfg, args)
+			return launchExec(boundary, cfg, args)
 		},
 	}
 	cmd.AddCommand(
-		newLaunchWhichCmd(cfg),
+		newLaunchWhichCmd(boundary, cfg),
 		newLaunchEditCmd(),
-		newLaunchInitCmd(),
-		newLaunchDoctorCmd(cfg),
-		newLaunchMigrateCmd(),
+		newLaunchInitCmd(boundary),
+		newLaunchDoctorCmd(boundary, cfg),
+		newLaunchMigrateCmd(boundary),
 	)
 	applyAliases(cmd, launchAliases)
 	return cmd
@@ -120,28 +119,28 @@ with "forgectl launch init".`,
 // runLaunch dispatches a `forgectl launch …` invocation. Own-verbs return
 // handled=false and are left for the normal fang path (styled help); everything
 // else (bare, builder, agents) execs claude directly.
-func runLaunch(cfg config.Config, rest []string) (handled bool, err error) {
+func runLaunch(deps module.Deps, rest []string) (handled bool, err error) {
 	if len(rest) > 0 && isOwnLaunchVerb(rest[0]) {
 		return false, nil // own-verb → fang dispatches the launch subtree
 	}
-	return true, launchExec(cfg, rest)
+	return true, launchExec(deps.LegacyBoundary, deps.Cfg, rest)
 }
 
 // launchExec is the resolve → exec path: it reduces the launch config against
 // the cwd, resolves the claude binary, assembles the posture, merges env, and
 // execs claude in place. On success it does not return (syscall.Exec replaces
 // the process).
-func launchExec(cfg config.Config, args []string) error {
-	effLaunch, notice := autoMigrateOrWarnLegacyLaunch(cfg)
+func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, args []string) error {
+	effLaunch, notice := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
 	if notice != "" {
-		fmt.Fprintln(os.Stderr, "forgectl: "+notice)
+		fmt.Fprintln(os.Stderr, "forgectl: "+termsafe.SafeLine(notice))
 	}
 	cfg.Launch = effLaunch
-	lc, _ := resolveLaunchConfig(cfg)
+	lc, _ := resolveLaunchConfig(boundary, cfg)
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		return fmt.Errorf("determine working directory: %w", err)
+		return termsafe.Error(fmt.Errorf("determine working directory: %w", err))
 	}
 	profile := launch.Resolve(lc, cwd)
 
@@ -205,7 +204,7 @@ func launchExec(cfg config.Config, args []string) error {
 	// nil and this reduces to the profile env alone.
 	extra := launch.MergeMaps(bench.TelemetryEnv(cfg), profile.Env)
 	env := launch.MergeEnv(os.Environ(), extra)
-	slog.Debug("Preparing to exec harness.", "harness", profile.Harness, "path", binaryPath, "argc", len(harnessArgs), "match", profile.Match)
+	slog.Debug("Preparing to exec harness.", "harness", termsafe.SafeLine(profile.Harness), "path", termsafe.QuotePath(binaryPath), "argc", len(harnessArgs), "match", termsafe.SafeLine(profile.Match))
 	return launch.Exec(binaryPath, harnessArgs, env)
 }
 
@@ -225,18 +224,14 @@ func launchExec(cfg config.Config, args []string) error {
 // launch_init.go) whenever cfg.Launch is non-zero — which is exactly the only
 // state this warning ever fires in. Pointing at init here would be a
 // guaranteed dead end.
-func legacyShadowWarning(cfg config.Config) string {
-	if cfg.Launch.IsZero() {
+func legacyShadowWarning(boundary *config.LegacyMigrationBoundary, cfg config.Config) string {
+	if !cfg.HasLaunchSection() {
 		return "" // legacy honored, nothing shadowed
 	}
-	path, err := config.LegacyLaunchPath()
-	if err != nil {
+	if boundary == nil || boundary.Status == config.BoundaryNoSource {
 		return ""
 	}
-	if _, err := os.Stat(path); err != nil {
-		return "" // no legacy file present — nothing to shadow
-	}
-	return "legacy claunch config at " + path + " is present but ignored — config.toml's " +
+	return "legacy claunch config at " + termsafe.QuotePath(boundary.LegacyPath) + " is present but ignored — config.toml's " +
 		"[launch] section takes precedence; migrate its profiles into [launch] and remove it " +
 		"(edit it with `forgectl launch edit`)"
 }
@@ -245,21 +240,34 @@ func legacyShadowWarning(cfg config.Config) string {
 // human source label. When that section is absent it falls back to a legacy
 // ~/.config/claunch/claunch.conf (zero-migration grace); when neither exists it
 // returns the empty config and points at where `forgectl launch init` writes.
-func resolveLaunchConfig(cfg config.Config) (config.LaunchConfig, string) {
-	if !cfg.Launch.IsZero() {
-		path, _ := config.ConfigPath()
+func resolveLaunchConfig(boundary *config.LegacyMigrationBoundary, cfg config.Config) (config.LaunchConfig, string) {
+	path := ""
+	if boundary != nil {
+		path = boundary.ConfigPath
+	} else {
+		path, _ = config.ConfigPath()
+	}
+	if cfg.HasLaunchSection() {
 		return cfg.Launch, path
 	}
-	switch legacy, legacyPath, err := config.LoadLegacyLaunch(); {
+	var legacy config.LaunchConfig
+	var err error
+	legacyPath := ""
+	if boundary != nil {
+		legacyPath = boundary.LegacyPath
+		legacy, err = boundary.LoadReadOnlyLegacy()
+	} else {
+		legacy, legacyPath, err = config.LoadLegacyLaunch()
+	}
+	switch {
 	case err == nil:
-		slog.Debug("Using legacy claunch config (no [launch] section in config.toml).", "path", legacyPath)
+		slog.Debug("Using legacy claunch config (no [launch] section in config.toml).", "path", termsafe.QuotePath(legacyPath))
 		return legacy, legacyPath + " (legacy)"
 	case !errors.Is(err, config.ErrNoLegacyLaunch):
 		// A malformed or unreadable legacy file shouldn't block normal launch —
 		// warn and fall through to config.toml (an absent file is silent).
-		slog.Warn("Ignoring unreadable legacy claunch config.", "path", legacyPath, "error", err)
+		slog.Warn("Ignoring unreadable legacy claunch config.", "path", termsafe.QuotePath(legacyPath), "error", termsafe.SafeLine(err.Error()))
 	}
-	path, _ := config.ConfigPath()
 	switch _, err := os.Stat(path); {
 	case err == nil:
 		// config.toml exists but declares no [launch] section (and there is no
@@ -298,313 +306,24 @@ func resolveLaunchConfig(cfg config.Config) (config.LaunchConfig, string) {
 // rewritten in place when a migration just ran, so callers don't need to
 // re-read config.toml — plus a message to print, or "" when there's nothing
 // to report.
-func autoMigrateOrWarnLegacyLaunch(cfg config.Config) (config.LaunchConfig, string) {
+func autoMigrateOrWarnLegacyLaunch(boundary *config.LegacyMigrationBoundary, cfg config.Config) (config.LaunchConfig, string) {
 	if os.Getenv(skipLegacyMigrateEnv) != "" {
-		return cfg.Launch, legacyShadowWarning(cfg)
-	}
-
-	legacyPath, err := config.LegacyLaunchPath()
-	if err != nil {
-		return cfg.Launch, ""
-	}
-	if _, err := os.Stat(legacyPath); err != nil {
-		return cfg.Launch, "" // no legacy file present — nothing to migrate
-	}
-
-	// A config.toml that fails to decode/validate isn't safe to migrate
-	// against: Load() tolerates a decode error by silently returning whatever
-	// the decoder populated before erroring, so cfg here may already be
-	// missing sections the decoder never reached. Writing a migration on top
-	// of that partial state would risk discarding them permanently. Mirrors
-	// `launch doctor`'s own config.Validate() health check (launch_doctor.go)
-	// — the automatic path previously skipped it entirely.
-	if err := config.Validate(); err != nil {
-		slog.Warn("Skipping automatic claunch.conf migration: config.toml failed to validate.",
-			"path", legacyPath, "error", err)
-		return cfg.Launch, ""
-	}
-
-	configPath, err := config.ConfigPath()
-	if err != nil {
-		return cfg.Launch, ""
-	}
-
-	// fallback is decided once, up front, from the caller's cfg.Launch — the
-	// same snapshot taken at process start (execute.go) — and used to pick
-	// BOTH which migration runs inside the lock AND how a failure/no-op
-	// result is reported below, so the two decisions can never disagree with
-	// each other even though the branch itself can still be stale by the
-	// time the lock is acquired (autoMigrateFallback/autoMigrateShadow each
-	// re-verify their own precondition immediately before writing).
-	fallback := cfg.Launch.IsZero()
-
-	var lc config.LaunchConfig
-	var msg string
-	var migrateErr error
-	lockErr := config.WithFileLock(configPath, func() error {
-		if fallback {
-			lc, msg, migrateErr = autoMigrateFallback()
-		} else {
-			lc, msg, migrateErr = autoMigrateShadow(cfg, legacyPath)
-		}
-		return nil // migrateErr is reported below, not via the lock's own error
-	})
-	if lockErr != nil {
-		slog.Warn("Automatic claunch.conf migration could not acquire its lock; falling back to legacy read-through.",
-			"path", legacyPath, "error", lockErr)
-		return cfg.Launch, ""
-	}
-	if migrateErr != nil {
-		if fallback {
-			slog.Warn("Automatic claunch.conf migration failed; falling back to legacy read-through.",
-				"path", legacyPath, "error", migrateErr)
-			return cfg.Launch, ""
-		}
-		slog.Warn("Automatic claunch.conf merge failed; showing the original shadow warning instead.",
-			"path", legacyPath, "error", migrateErr)
-		return cfg.Launch, legacyShadowWarning(cfg)
-	}
-	if msg == "" {
-		// Either nothing to import/merge, or a concurrent forgectl process
-		// already migrated (and renamed the legacy file away) while this one
-		// waited for the lock — either way, nothing new to report.
-		return cfg.Launch, ""
-	}
-	return lc, msg
-}
-
-// autoMigrateFallback runs the fallback-scenario migration: legacy
-// claunch.conf present, no [launch] section yet. It imports the legacy
-// config wholesale (writeImportedLaunchSection, the same path `launch
-// migrate` uses) and backs the legacy file up. Returns a zero LaunchConfig
-// and "" (not an error) when the legacy file decodes cleanly but has nothing
-// to import — the caller treats that as a no-op, matching runLaunchMigrate's
-// own IsZero refusal. The same zero/""/nil result also covers "a concurrent
-// forgectl process already migrated while this one waited for the lock" —
-// see the two re-checks below.
-//
-// MUST be called only while holding config.WithFileLock on config.toml
-// (autoMigrateOrWarnLegacyLaunch is the only caller, and does): the caller's
-// cfg.Launch.IsZero() check that routed here ran at process start, before
-// the lock was acquired, and can be stale by the time this function runs —
-// this is the read-decide-write critical section the lock exists to
-// serialize.
-func autoMigrateFallback() (config.LaunchConfig, string, error) {
-	lc, legacyPath, err := config.LoadLegacyLaunch()
-	if err != nil {
-		if errors.Is(err, config.ErrNoLegacyLaunch) {
-			// A concurrent process already migrated and renamed the legacy
-			// file away while we waited for the lock — nothing left to do.
-			return config.LaunchConfig{}, "", nil
-		}
-		return config.LaunchConfig{}, "", err
-	}
-	if lc.IsZero() {
-		return config.LaunchConfig{}, "", nil
-	}
-
-	path, err := config.ConfigPath()
-	if err != nil {
-		return config.LaunchConfig{}, "", err
-	}
-	// Re-check immediately before writing, now that the lock is held: mirrors
-	// refuseIfLaunchSection's own guard on the manual importer
-	// (runLaunchMigrate) — the automatic path must carry the same safety
-	// property, not trust a snapshot taken before this lock was acquired. A
-	// hit here means another process added [launch] (by any means) between
-	// our caller's stale check and now; bail cleanly rather than duplicate
-	// the section.
-	if err := refuseIfLaunchSection(path); err != nil {
-		return config.LaunchConfig{}, "", nil
-	}
-	if err := writeImportedLaunchSection(path, lc, legacyPath); err != nil {
-		return config.LaunchConfig{}, "", err
-	}
-	if err := backupAndRemoveLegacy(legacyPath); err != nil {
-		return config.LaunchConfig{}, "", err
-	}
-
-	slog.Info("Automatically migrated legacy claunch.conf into config.toml.",
-		"legacy_path", legacyPath, "config_path", path, "project_count", len(lc.Projects))
-	msg := fmt.Sprintf(
-		"migrated %d profile(s) from claunch.conf into config.toml's [launch] section (old file kept as claunch.conf.bak)",
-		len(lc.Projects))
-	return lc, msg, nil
-}
-
-// autoMigrateShadow runs the shadow-scenario migration (#114 automated):
-// config.toml already has a live [launch] section AND a legacy claunch.conf
-// is still present. config.MergeLegacyIntoLaunch does the additive-only
-// merge; when it contributes nothing new the legacy file is simply retired
-// (renamed, no rewrite needed since the merged value equals cfg.Launch).
-//
-// MUST be called only while holding config.WithFileLock on config.toml —
-// see autoMigrateFallback's doc comment for why (the same stale-snapshot
-// hazard applies here). The re-load of the legacy file below doubles as the
-// re-check: a concurrent process racing the same merge already renamed it
-// away, so a second racer's LoadLegacyLaunch fails with ErrNoLegacyLaunch
-// and bails cleanly instead of re-deriving and re-writing a merge against a
-// legacy file that's already gone.
-func autoMigrateShadow(cfg config.Config, legacyPath string) (config.LaunchConfig, string, error) {
-	legacy, _, err := config.LoadLegacyLaunch()
-	if err != nil {
-		if errors.Is(err, config.ErrNoLegacyLaunch) {
-			return config.LaunchConfig{}, "", nil
-		}
-		return config.LaunchConfig{}, "", err
-	}
-
-	merged, added := config.MergeLegacyIntoLaunch(cfg, legacy)
-	if added > 0 {
-		path, err := config.ConfigPath()
-		if err != nil {
-			return config.LaunchConfig{}, "", err
-		}
-		if err := replaceLaunchSection(path, merged, legacyPath); err != nil {
-			return config.LaunchConfig{}, "", err
-		}
-	}
-	if err := backupAndRemoveLegacy(legacyPath); err != nil {
-		return config.LaunchConfig{}, "", err
-	}
-
-	var msg string
-	if added == 0 {
-		msg = "legacy config fully superseded, removed."
-		slog.Info("Legacy claunch.conf was fully shadowed by config.toml's [launch] section; removed.",
-			"legacy_path", legacyPath)
-	} else {
-		msg = fmt.Sprintf(
-			"merged %d addition(s) from claunch.conf into config.toml's [launch] section (old file kept as claunch.conf.bak)",
-			added)
-		slog.Info("Automatically merged legacy claunch.conf into config.toml's [launch] section.",
-			"legacy_path", legacyPath, "added", added)
-	}
-	return merged, msg, nil
-}
-
-// backupAndRemoveLegacy renames the legacy config file at path to
-// "<path>.bak" — the legacy claunch.conf is never hard-deleted by an
-// automatic migration, only moved aside, so an operator who wants the
-// original back can always find it.
-func backupAndRemoveLegacy(path string) error {
-	if err := os.Rename(path, path+".bak"); err != nil {
-		return fmt.Errorf("back up legacy config %s: %w", path, err)
-	}
-	return nil
-}
-
-// replaceLaunchSection rewrites config.toml at path, dropping every line
-// belonging to any [launch]-family table (wherever it appears in the file —
-// TOML tables need not be contiguous) and splicing in a freshly encoded
-// [launch] block for merged at the position of the first one found. Used
-// only by the shadow-scenario auto-migration, where cfg.Launch is already
-// non-zero, so a rewrite (not append) is required — appending a second
-// [launch.defaults] table would be invalid TOML (a redefined table).
-// Everything outside the launch tables — comments, other sections — is
-// preserved verbatim, including a comment block that sits directly above the
-// next section's header (see the backward-correction pass below).
-//
-// Table boundaries are resolved with tomlLineScanner (launch_scan.go), not a
-// naive "line starts with [ and ends with ]" check: that misses a header
-// carrying a trailing comment (`[bench] # …` never ends in "]", so the
-// scanner never notices the boundary and silently drops everything after it
-// — including unrelated sections — until some other header happens to
-// parse) and can misfire inside a multi-line string or array. When the scan
-// can't unambiguously resolve a line (or the file ends mid multi-line
-// string/array), this returns an error and writes nothing — fail safe,
-// never fail silent; the caller (autoMigrateShadow) treats that exactly like
-// any other migration failure and leaves config.toml untouched.
-//
-// The write itself is atomic (writeConfigAtomic): a temp file in the same
-// directory, renamed over path, so a process killed mid-write can never
-// leave config.toml truncated or empty with no recovery copy.
-func replaceLaunchSection(path string, merged config.LaunchConfig, legacyPath string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read config %s: %w", path, err)
-	}
-	lines := strings.Split(string(data), "\n")
-
-	// dropped[i] tracks whether line i belongs to a [launch]-family table and
-	// should be removed; commentOrBlank[i] flags a stand-alone comment or
-	// blank line (never true while a multi-line string/array is still open —
-	// that's string/array content, not a real comment, however it looks
-	// trimmed).
-	dropped := make([]bool, len(lines))
-	commentOrBlank := make([]bool, len(lines))
-
-	var scanner tomlLineScanner
-	inLaunch := false
-	for i, line := range lines {
-		mid := scanner.inTripleBasic || scanner.inTripleLiteral || scanner.bracketDepth > 0
-		trimmed := strings.TrimSpace(line)
-		commentOrBlank[i] = !mid && (trimmed == "" || strings.HasPrefix(trimmed, "#"))
-
-		table, ok := scanner.scanLine(line)
-		if !ok {
-			return fmt.Errorf(
-				"rewrite config %s: line %d has TOML this scanner cannot unambiguously resolve (%q); refusing to guess",
-				path, i+1, line)
-		}
-		if table != "" {
-			inLaunch = isLaunchTable(table)
-		}
-		dropped[i] = inLaunch
-	}
-	if scanner.pending() {
-		return fmt.Errorf("rewrite config %s: file ends inside an unterminated multi-line string or array; refusing to guess", path)
-	}
-
-	// A blank/comment-only line takes on the classification of whatever
-	// substantive line follows it, not whatever came before it. In raw file
-	// order a comment documenting the NEXT section still reads as "inside"
-	// whatever table preceded it until that table's header is reached — so
-	// without this correction, a comment block written directly above (say)
-	// [bench] would be misattributed to [launch] and dropped right along
-	// with it, purely because of where it happens to sit in the byte stream.
-	for i := len(dropped) - 2; i >= 0; i-- {
-		if commentOrBlank[i] {
-			dropped[i] = dropped[i+1]
-		}
-	}
-
-	var kept []string
-	firstLaunchIdx := -1
-	for i, line := range lines {
-		if dropped[i] {
-			if firstLaunchIdx == -1 {
-				firstLaunchIdx = len(kept)
+		if !cfg.HasLaunchSection() && boundary != nil {
+			if fallback, err := boundary.LoadReadOnlyLegacy(); err == nil {
+				return fallback, ""
 			}
-			continue // dropped — the merged block below replaces it
 		}
-		kept = append(kept, line)
+		return cfg.Launch, legacyShadowWarning(boundary, cfg)
 	}
-
-	var buf bytes.Buffer
-	if err := toml.NewEncoder(&buf).Encode(struct {
-		Launch config.LaunchConfig `toml:"launch"`
-	}{Launch: merged}); err != nil {
-		return fmt.Errorf("encode merged launch config: %w", err)
+	result := migrateLegacyAutomatically(boundary, cfg, nativeMigrationTxnOps())
+	if result.Err != nil {
+		slog.Warn("Automatic claunch.conf migration did not fully retire the source.",
+			"path", func() string {
+				if boundary == nil {
+					return ""
+				}
+				return termsafe.QuotePath(boundary.LegacyPath)
+			}(), "error", termsafe.SafeLine(result.Err.Error()), "commit", result.Commit, "backup", result.Backup, "retirement", result.Retirement)
 	}
-	header := fmt.Sprintf("# ── launch: merged with %s (forgectl launch migrate) ──", legacyPath)
-	block := append([]string{header}, strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")...)
-
-	var out []string
-	if firstLaunchIdx == -1 {
-		// Shouldn't happen — this is only called when cfg.Launch is non-zero,
-		// i.e. an existing launch table was already found by resolveLaunchConfig
-		// — but append rather than drop the merge if it ever does.
-		out = append(kept, "")
-		out = append(out, block...)
-	} else {
-		out = append(out, kept[:firstLaunchIdx]...)
-		out = append(out, block...)
-		out = append(out, kept[firstLaunchIdx:]...)
-	}
-
-	if err := writeConfigAtomic(path, []byte(strings.Join(out, "\n"))); err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
-	return nil
+	return result.Effective, result.Notice
 }

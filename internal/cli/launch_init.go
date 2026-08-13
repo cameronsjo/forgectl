@@ -1,17 +1,14 @@
 package cli
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 
-	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // launchScaffold is the [launch] section appended to config.toml by
@@ -51,7 +48,7 @@ allow_danger    = true       # adds --allow-dangerously-skip-permissions (reacha
 # add_dir = ["~/Projects/minute/shared"]
 `
 
-func newLaunchInitCmd() *cobra.Command {
+func newLaunchInitCmd(boundary *config.LegacyMigrationBoundary) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Scaffold the [launch] section into config.toml",
@@ -60,19 +57,34 @@ func newLaunchInitCmd() *cobra.Command {
 			// GetBool only errors on an undefined or non-bool flag; from-claunch
 			// is registered as Bool below, so the error is unreachable here.
 			if fromClaunch, _ := cmd.Flags().GetBool("from-claunch"); fromClaunch {
-				return runLaunchMigrate(cmd)
+				return termsafe.Error(runLaunchMigrate(cmd, boundary))
 			}
-			path, err := config.ConfigPath()
+			if err := refuseConfigMutationForLegacyBoundary(boundary); err != nil {
+				return termsafe.Error(err)
+			}
+			path := ""
+			if boundary != nil {
+				path = boundary.ConfigPath
+			} else {
+				var err error
+				path, err = config.ConfigPath()
+				if err != nil {
+					return termsafe.Error(err)
+				}
+			}
+			action, err := updateConfigLocked(path, nativeConfigWriterOps(), func(raw []byte) ([]byte, error) {
+				if hasLaunchSection(raw) {
+					return nil, fmt.Errorf("config already has a [launch] section at %s (edit it with `forgectl launch edit`); refusing to overwrite an existing launch profile", termsafe.QuotePath(path))
+				}
+				return append(raw, []byte(launchScaffold)...), nil
+			})
+			if err != nil && !visibleWithoutDirectoryDurability(action, err) {
+				return termsafe.Error(err)
+			}
 			if err != nil {
-				return err
+				fmt.Fprintln(cmd.ErrOrStderr(), "forgectl: config is visible, but directory durability and cross-process locking are unavailable on this platform")
 			}
-			if err := refuseIfLaunchSection(path); err != nil {
-				return err
-			}
-			if err := appendLaunchSection(path, launchScaffold); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Added a [launch] section to %s\n", path)
+			fmt.Fprintf(cmd.OutOrStdout(), "Added a [launch] section to %s\n", termsafe.QuotePath(path))
 			return nil
 		},
 	}
@@ -84,13 +96,13 @@ func newLaunchInitCmd() *cobra.Command {
 // spelling of the one-shot claunch.conf importer. `launch init --from-claunch`
 // remains a deprecated alias for the same runLaunchMigrate logic so existing
 // docs/muscle memory don't break.
-func newLaunchMigrateCmd() *cobra.Command {
+func newLaunchMigrateCmd(boundary *config.LegacyMigrationBoundary) *cobra.Command {
 	return &cobra.Command{
 		Use:   "migrate",
 		Short: "Import an existing ~/.config/claunch/claunch.conf into config.toml's [launch] section",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runLaunchMigrate(cmd)
+			return termsafe.Error(runLaunchMigrate(cmd, boundary))
 		},
 	}
 }
@@ -101,93 +113,32 @@ func newLaunchMigrateCmd() *cobra.Command {
 // [launch] section — import once, then edit config.toml directly. Shared by
 // `forgectl launch migrate` and the deprecated `launch init --from-claunch`
 // spelling.
-func runLaunchMigrate(cmd *cobra.Command) error {
+func runLaunchMigrate(cmd *cobra.Command, boundary *config.LegacyMigrationBoundary) error {
 	slog.Debug("Preparing to import legacy claunch.conf into config.toml.")
-
-	path, err := config.ConfigPath()
-	if err != nil {
-		return err
-	}
-	if err := refuseIfLaunchSection(path); err != nil {
-		return err
-	}
-
-	lc, legacyPath, err := config.LoadLegacyLaunch()
-	if err != nil {
-		if errors.Is(err, config.ErrNoLegacyLaunch) {
+	owned := false
+	if boundary == nil {
+		env, err := config.CaptureEnvSnapshot()
+		if err != nil {
 			return err
 		}
-		return fmt.Errorf("legacy claunch.conf is malformed, not importing: %w", err)
-	}
-	if lc.IsZero() {
-		return fmt.Errorf("legacy claunch.conf at %s has no [defaults] or [[project]] to import", legacyPath)
-	}
-	slog.Debug("Loaded legacy claunch.conf.", "path", legacyPath, "project_count", len(lc.Projects))
-
-	if err := writeImportedLaunchSection(path, lc, legacyPath); err != nil {
-		return err
-	}
-
-	slog.Info("Successfully imported legacy claunch.conf.", "legacy_path", legacyPath, "config_path", path, "project_count", len(lc.Projects))
-	fmt.Fprintf(cmd.OutOrStdout(), "Imported %d launch profile(s) from %s into %s\n", len(lc.Projects), legacyPath, path)
-	return nil
-}
-
-// writeImportedLaunchSection encodes lc as a [launch] TOML block, headed by a
-// comment naming its legacy source, and appends it to config.toml at path.
-// Shared by runLaunchMigrate (the explicit importer) and the automatic
-// fallback-scenario migration (launch.go's autoMigrateFallback), which both
-// import a legacy claunch.conf wholesale into an absent [launch] section.
-func writeImportedLaunchSection(path string, lc config.LaunchConfig, legacyPath string) error {
-	var buf bytes.Buffer
-	if err := toml.NewEncoder(&buf).Encode(struct {
-		Launch config.LaunchConfig `toml:"launch"`
-	}{Launch: lc}); err != nil {
-		return fmt.Errorf("encode imported launch config: %w", err)
-	}
-	header := fmt.Sprintf("\n# ── launch: imported from %s (forgectl launch migrate) ──\n", legacyPath)
-	return appendLaunchSection(path, header+buf.String())
-}
-
-// refuseIfLaunchSection errors when config.toml at path already has a
-// [launch] section — both `launch init` and its `--from-claunch` importer
-// refuse to run over an existing profile rather than risk overwriting it. A
-// missing file is not an error; the caller appends to it fresh.
-func refuseIfLaunchSection(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+		boundary, err = config.PrepareLegacyMigrationBoundary(env, config.NativeMigrationFS())
+		if err != nil {
+			return err
 		}
-		return fmt.Errorf("read config %s: %w", path, err)
+		owned = true
 	}
-	if hasLaunchSection(data) {
-		return fmt.Errorf("config already has a [launch] section at %s (edit it with `forgectl launch edit`); refusing to overwrite an existing launch profile", path)
+	if owned {
+		defer boundary.Close() //nolint:errcheck
 	}
-	return nil
-}
-
-// appendLaunchSection appends content to the config.toml at path, creating
-// the parent directory and the file if absent. Both `launch init` and its
-// `--from-claunch` importer (including the automatic fallback-scenario
-// migration, via writeImportedLaunchSection) append a TOML block this way,
-// preserving any sections already in the file.
-//
-// The write is atomic (writeConfigAtomic: read the existing bytes, then
-// write the concatenation to a temp file and rename it over path) rather
-// than an in-place O_APPEND — a process killed mid-write can never leave
-// config.toml truncated or empty with no recovery copy.
-func appendLaunchSection(path, content string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
+	result := migrateLegacyExplicit(boundary, nativeMigrationTxnOps())
+	if result.Err != nil {
+		if errors.Is(result.Err, config.ErrLegacyMalformed) {
+			return fmt.Errorf("legacy claunch.conf is malformed, not importing: %w", result.Err)
+		}
+		return result.Err
 	}
-	existing, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read config %s: %w", path, err)
-	}
-	if err := writeConfigAtomic(path, append(existing, []byte(content)...)); err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
+	slog.Info("Successfully imported legacy claunch.conf.", "legacy_path", termsafe.QuotePath(boundary.LegacyPath), "config_path", termsafe.QuotePath(boundary.ConfigPath), "project_count", len(result.Effective.Projects))
+	fmt.Fprintf(cmd.OutOrStdout(), "Imported %d launch profile(s) from %s into %s\n", len(result.Effective.Projects), termsafe.QuotePath(boundary.LegacyPath), termsafe.QuotePath(boundary.ConfigPath))
 	return nil
 }
 

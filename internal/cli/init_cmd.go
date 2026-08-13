@@ -3,8 +3,6 @@ package cli
 import (
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -12,6 +10,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // This file scaffolds config.toml end to end (`forgectl init`), one template
@@ -226,43 +225,58 @@ var initModule = module.Manifest{
 // (or, for the host-scalar preamble, prepend) its template iff that block is
 // not already present in config.toml. It never overwrites or reflows a
 // section that's already there.
-func newInitCmd(module.Deps) *cobra.Command {
+func newInitCmd(deps module.Deps) *cobra.Command {
 	return &cobra.Command{
 		Use:   "init",
 		Short: "Scaffold every config.toml section with commented, sensibly-defaulted templates",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			slog.Debug("Preparing to scaffold config.toml.")
-			path, err := config.ConfigPath()
-			if err != nil {
-				return err
+			if err := refuseConfigMutationForLegacyBoundary(deps.LegacyBoundary); err != nil {
+				return termsafe.Error(err)
 			}
-			data, err := os.ReadFile(path)
-			if err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("read config %s: %w", path, err)
+			path := ""
+			if deps.LegacyBoundary != nil {
+				path = deps.LegacyBoundary.ConfigPath
+			} else {
+				var err error
+				path, err = config.ConfigPath()
+				if err != nil {
+					return termsafe.Error(err)
+				}
 			}
-
 			out := cmd.OutOrStdout()
 			added := 0
-			for _, s := range initSections {
-				if hasSection(data, s.name) {
-					fmt.Fprintf(out, "already present: %s\n", s.label)
-					continue
+			var lines []string
+			action, err := updateConfigLocked(path, nativeConfigWriterOps(), func(raw []byte) ([]byte, error) {
+				data := raw
+				for _, s := range initSections {
+					if hasSection(data, s.name) {
+						lines = append(lines, "already present: "+s.label)
+						continue
+					}
+					if s.name == "" {
+						data = append([]byte(s.template), data...)
+					} else {
+						data = append(data, []byte(s.template)...)
+					}
+					lines = append(lines, "added:            "+s.label)
+					added++
 				}
-				if s.name == "" {
-					err = prependHostScalars(path, s.template)
-				} else {
-					err = appendLaunchSection(path, s.template)
-				}
-				if err != nil {
-					return err
-				}
-				fmt.Fprintf(out, "added:            %s\n", s.label)
-				added++
+				return data, nil
+			})
+			if err != nil && !visibleWithoutDirectoryDurability(action, err) {
+				return termsafe.Error(err)
+			}
+			if err != nil {
+				fmt.Fprintln(cmd.ErrOrStderr(), "forgectl: config is visible, but directory durability and cross-process locking are unavailable on this platform")
+			}
+			for _, line := range lines {
+				fmt.Fprintln(out, line)
 			}
 
-			slog.Info("Successfully scaffolded config.toml.", "path", path, "sections_added", added)
-			fmt.Fprintf(out, "\n%d section(s) added to %s\n", added, path)
+			slog.Info("Successfully scaffolded config.toml.", "path", termsafe.QuotePath(path), "sections_added", added)
+			fmt.Fprintf(out, "\n%d section(s) added to %s\n", added, termsafe.QuotePath(path))
 			return nil
 		},
 	}
@@ -301,24 +315,4 @@ func hasHostScalars(data []byte) bool {
 		}
 	}
 	return false
-}
-
-// prependHostScalars inserts content at the very top of the config.toml at
-// path, ahead of any existing bytes, creating the parent directory and the
-// file if absent. Host scalars are bare TOML keys with no table header, so
-// they parse as document-root only when they precede every [section] in the
-// file — appendLaunchSection's append-only write would silently fold them
-// into whatever section already precedes the end of the file.
-func prependHostScalars(path, content string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
-	}
-	existing, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read config %s: %w", path, err)
-	}
-	if err := os.WriteFile(path, append([]byte(content), existing...), 0o644); err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
-	return nil
 }
