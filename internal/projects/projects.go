@@ -50,11 +50,14 @@ func fanOut[I, O any](in []I, f func(I) O) []O {
 	return out
 }
 
-// discoverConcurrency bounds the fan-out width for discoverDir and
-// localRepos — each has its own independent fanOut call, so a caller that
-// runs both concurrently (Inventory does, alongside its github/gitea
-// fetches) can see up to roughly discoverConcurrency()+2 processes in
-// flight at once, not a single shared bound across the whole program.
+// discoverConcurrency bounds the fan-out width of each individual fanOut
+// call, not the program as a whole — there is no shared bound. Inventory is
+// the worst case: localRepos' fan-out and githubList's own fan-out (one gh
+// process per resolved owner) can be in flight at the same time, each up to
+// discoverConcurrency() wide, alongside the single tea process. Its peak is
+// therefore roughly 2*discoverConcurrency()+1 processes, not
+// discoverConcurrency()+2. (localRepos runs Discover to completion first, so
+// discoverDir's fan-out and localRepos' do not overlap each other.)
 // Measured on a 500-repo synthetic fixture (M3 Air, warm cache): serial
 // process spawn was the whole cost — gitStatus alone spawns up to two git
 // processes per repo (status, then rev-list on a clean tree), one after
@@ -374,8 +377,13 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 		res := fetched[host]
 		notes = append(notes, res.notes...)
 		if res.err != nil {
+			// Categorical note, raw cause to the log only. res.err reaches here
+			// straight off a subprocess — gh stderr, or tea's, which is server-
+			// supplied text a hostile or MITM'd host controls. These notes are
+			// printed to a terminal, so interpolating %v here would hand that
+			// server a write channel to the operator's screen.
 			slog.Warn("Host degraded.", "host", host, "error", res.err)
-			notes = append(notes, fmt.Sprintf("%s: %v", host, res.err))
+			notes = append(notes, fmt.Sprintf("%s: host query failed", host))
 			continue
 		}
 		slog.Debug("Host succeeded.", "host", host, "count", len(res.repos))

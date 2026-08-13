@@ -58,8 +58,8 @@ func newReviewSyncCmd(srcs []review.Source, reviewedPath string) *cobra.Command 
 			items, notes, err := review.Aggregate(cmd.Context(), srcs...)
 			// Same ordering as runReviewList: the notes explain the failure, so
 			// they must survive it. They also went out unsanitized here, unlike
-			// the list path — renderReviewNotes closes that gap.
-			renderReviewNotes(cmd, notes)
+			// the list path — renderDegradationNotes closes that gap.
+			renderDegradationNotes(cmd, notes)
 			if err != nil {
 				return err
 			}

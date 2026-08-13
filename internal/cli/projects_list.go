@@ -46,10 +46,10 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// Per-host degradation notes are diagnostics → stderr, never stdout.
-			for _, n := range notes {
-				fmt.Fprintln(cmd.ErrOrStderr(), "note: "+n)
-			}
+			// Per-host degradation notes are diagnostics → stderr, never stdout,
+			// and escaped on the way: a note can carry a filesystem path or a
+			// host label built from low-trust config.
+			renderDegradationNotes(cmd, notes)
 
 			query := ""
 			if len(args) == 1 {
