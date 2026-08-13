@@ -36,6 +36,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -47,6 +48,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	docspkg "github.com/cameronsjo/forgectl/internal/docs"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/httpsrv"
@@ -553,5 +555,189 @@ func TestDocsAuthStartupLine_DisclosureBoundary(t *testing.T) {
 	}
 	if got := docsAuthStartupLine(resolvedDocsToken{}); got != "" {
 		t.Fatalf("unauthenticated startup line = %q, want empty", got)
+	}
+}
+
+// isolateDocsDiscoveryState points os.UserConfigDir() — and therefore every
+// discovery path forgectl derives from it — at a fresh temp dir, so a test that
+// starts real servers cannot read, write, or delete the developer's own
+// docs-server state.
+func isolateDocsDiscoveryState(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "") // force the HOME-based path on linux
+}
+
+// servedDocs is one real `docs serve` instance running in the background,
+// identified by the loopback address it actually bound.
+type servedDocs struct {
+	addr   string
+	cancel context.CancelFunc
+	done   chan error
+}
+
+// stop cancels the server and waits for runDocsServe to return, failing the
+// test if it does not shut down or returns an error.
+func (s *servedDocs) stop(t *testing.T, label string) {
+	t.Helper()
+	s.cancel()
+	select {
+	case err := <-s.done:
+		if err != nil {
+			t.Fatalf("server %s: runDocsServe returned %v, want nil after cancellation", label, err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("server %s did not shut down within 10s of cancellation", label)
+	}
+}
+
+// startDocsServer starts a real runDocsServe on an OS-assigned loopback port
+// and returns once the server has printed the address it bound.
+//
+// The address comes from the server's own startup output rather than from the
+// discovery record, so the test can tell the two servers apart INDEPENDENTLY of
+// the discovery mechanism it is exercising. Reading it from discovery would make
+// the test agree with whatever discovery currently reports, including nothing.
+func startDocsServer(t *testing.T, label string) *servedDocs {
+	t.Helper()
+	idx := testDocsIndex(t)
+	deps := module.Deps{Runner: &exec.FakeRunner{}}
+
+	out := &lockedBuffer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := &cobra.Command{}
+	cmd.SetOut(out)
+	cmd.SetErr(&lockedBuffer{})
+	cmd.SetContext(ctx)
+
+	srv := &servedDocs{cancel: cancel, done: make(chan error, 1)}
+	go func() { srv.done <- runDocsServe(cmd, deps, idx, "127.0.0.1:0", false, "") }()
+	t.Cleanup(cancel)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if addr := parseServedAddr(out.String()); addr != "" {
+			srv.addr = addr
+			return srv
+		}
+		select {
+		case err := <-srv.done:
+			t.Fatalf("server %s exited before it printed an address: %v", label, err)
+		default:
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("server %s never printed its bound address within 10s; output was %q", label, out.String())
+	return nil
+}
+
+// parseServedAddr pulls the host:port out of the "  http://127.0.0.1:PORT/"
+// line runDocsServe prints on startup.
+func parseServedAddr(output string) string {
+	const prefix = "http://"
+	i := strings.Index(output, prefix)
+	if i < 0 {
+		return ""
+	}
+	rest := output[i+len(prefix):]
+	j := strings.Index(rest, "/")
+	if j < 0 {
+		return ""
+	}
+	return rest[:j]
+}
+
+// discoveredDocsAddr returns the address `forgectl docs open` would steer to
+// right now, or "" when discovery finds no usable server.
+//
+// This is the single point the overlap test consults, so migrating it from the
+// shared-record API to generation-owned discovery does not weaken any assertion
+// written against it.
+func discoveredDocsAddr(t *testing.T) string {
+	t.Helper()
+	infoPath, err := config.DocsServerPath()
+	if err != nil {
+		t.Fatalf("config.DocsServerPath: %v", err)
+	}
+	info, err := docspkg.ReadServerInfo(infoPath)
+	if errors.Is(err, docspkg.ErrNoServer) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("discovery failed with an error other than ErrNoServer: %v", err)
+	}
+	return info.Addr
+}
+
+// waitForDiscoveredAddr polls discovery until it resolves to want, so the test
+// never races publication against a guessed sleep.
+func waitForDiscoveredAddr(t *testing.T, want, label string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	var got string
+	for time.Now().Before(deadline) {
+		if got = discoveredDocsAddr(t); got == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("discovery never resolved to %s (%s) within 10s; last result was %q", want, label, got)
+}
+
+// TestRunDocsServe_OlderShutdownPreservesNewerDiscovery is the regression for
+// forgectl#277: two overlapping `docs serve` processes must not be able to
+// delete each other's discoverability.
+//
+// Both shutdown orders are exercised because they fail differently. When the
+// OLDER server stops last it removes a record the newer one published, and when
+// the NEWER server stops last it removes a record the older one published — a
+// single-order test would leave half the race uncovered.
+func TestRunDocsServe_OlderShutdownPreservesNewerDiscovery(t *testing.T) {
+	tests := []struct {
+		name string
+		// stopFirst is the label of the server canceled first; the other one
+		// must remain discoverable afterwards.
+		stopFirst string
+	}{
+		{name: "older stops first", stopFirst: "A"},
+		{name: "newer stops first", stopFirst: "B"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateDocsDiscoveryState(t)
+
+			a := startDocsServer(t, "A")
+			waitForDiscoveredAddr(t, a.addr, "the first server must be discoverable before the second starts")
+
+			b := startDocsServer(t, "B")
+			waitForDiscoveredAddr(t, b.addr, "the newer server must take over discovery while both run")
+
+			stopped, survivor, survivorLabel := a, b, "B"
+			if tc.stopFirst == "B" {
+				stopped, survivor, survivorLabel = b, a, "A"
+			}
+			stopped.stop(t, tc.stopFirst)
+
+			// The survivor is still serving — prove that independently of
+			// discovery, so a discovery failure cannot be mistaken for a server
+			// that simply died.
+			client := &http.Client{Timeout: 2 * time.Second}
+			resp, err := client.Get("http://" + survivor.addr + "/")
+			if err != nil {
+				t.Fatalf("server %s stopped serving after server %s shut down: %v", survivorLabel, tc.stopFirst, err)
+			}
+			resp.Body.Close() //nolint:errcheck // status is the only thing under test
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("server %s returned %d after server %s shut down, want %d", survivorLabel, resp.StatusCode, tc.stopFirst, http.StatusOK)
+			}
+
+			if got := discoveredDocsAddr(t); got != survivor.addr {
+				t.Errorf("after server %s shut down, discovery resolved to %q, want server %s at %q — one server's shutdown must never remove another server's discovery record",
+					tc.stopFirst, got, survivorLabel, survivor.addr)
+			}
+
+			survivor.stop(t, survivorLabel)
+		})
 	}
 }
