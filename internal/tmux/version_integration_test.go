@@ -28,7 +28,11 @@ func TestGenerationCapabilityIsolated(t *testing.T) {
 		t.Skipf("tmux 2.2+ required: %q", versionOut)
 	}
 
-	root, err := os.MkdirTemp("/private/tmp", "f242-tmux-")
+	// Not t.TempDir(): macOS caps a Unix socket path at ~104 bytes and
+	// t.TempDir() embeds the full test name, so tmux's <root>/tmux-<uid>/default
+	// overflows it. "/tmp" is absolute and filepath.Clean-stable on both macOS
+	// and Linux, which is what classifyServerFailure requires of TMUX_TMPDIR.
+	root, err := os.MkdirTemp("/tmp", "f242-tmux-")
 	if err != nil {
 		t.Fatal(err)
 	}

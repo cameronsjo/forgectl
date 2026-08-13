@@ -53,7 +53,7 @@ func TestLaunchPickedIsolatedTmux_FirstServer(t *testing.T) {
 	}
 	for _, noVerify := range []bool{false, true} {
 		t.Run(map[bool]string{false: "verified", true: "no-verify"}[noVerify], func(t *testing.T) {
-			root, err := os.MkdirTemp("/private/tmp", "f242-pick-")
+			root, err := os.MkdirTemp("/tmp", "f242-pick-")
 			if err != nil {
 				t.Fatal(err)
 			}
