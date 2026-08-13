@@ -2,6 +2,7 @@ package pr
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/tmux"
@@ -29,7 +30,7 @@ func MaxConcurrentReviews(cfgMax int) int {
 // the client's exactly and whose name starts with reviewWindowPrefix — the
 // live count of in-flight review launches. ok is false only when the window
 // count genuinely could not be read (list-windows erroring for a reason
-// other than "no server running"); a server with no matching windows is a
+// other than a proven absent default socket); a server with no matching windows is a
 // legitimate zero, not a failure.
 //
 // ListWindows is the SOLE discriminator, deliberately — it lists every
@@ -135,6 +136,43 @@ func (c *Client) WindowsLive(ctx context.Context, refs []Ref) (map[Ref]bool, boo
 		out[ref] = inSession[windowName(ref)]
 	}
 	return out, true
+}
+
+// VerifyDispatched performs one delayed window snapshot for a whole launch
+// batch and returns dispatches whose generation, session, and name no longer
+// match. Errors leave liveness unknown and never fabricate gone reviews.
+func (c *Client) VerifyDispatched(ctx context.Context, dispatches []Dispatch) ([]Dispatch, error) {
+	if len(dispatches) == 0 {
+		return nil, nil
+	}
+	if err := c.dispatchWait(ctx); err != nil {
+		return nil, fmt.Errorf("wait to verify review dispatches: %w", err)
+	}
+	windows, err := tmux.New(c.run).ListWindows(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("verify review dispatches: %w", err)
+	}
+	type liveKey struct{ id, session, name string }
+	live := make(map[liveKey]bool, len(windows))
+	for _, window := range windows {
+		// tmux.FieldSep, not a re-hardcoded "\x1f": this key is rebuilt from a
+		// list-windows row and compared against an identity Launch captured with
+		// tmux.IdentityFormat. A drift between the two joins is silent — every
+		// live dispatch would miss and be reported gone.
+		live[liveKey{
+			id:      strings.Join([]string{window.ServerPID, window.ServerStart, window.ID}, tmux.FieldSep),
+			session: window.Session,
+			name:    window.Name,
+		}] = true
+	}
+	var gone []Dispatch
+	for _, dispatch := range dispatches {
+		key := liveKey{id: dispatch.WindowID, session: c.tmuxSession, name: windowName(dispatch.Ref)}
+		if !live[key] {
+			gone = append(gone, dispatch)
+		}
+	}
+	return gone, nil
 }
 
 // Admit resolves the concurrency cap from cfgMax (via MaxConcurrentReviews)

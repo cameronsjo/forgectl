@@ -38,6 +38,16 @@ import (
 func prLocalFakeRunner() *exec.FakeRunner {
 	return &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			if name == "tmux" && len(args) > 0 {
+				switch args[0] {
+				case "-V":
+					return "tmux 3.7b", nil
+				case "display-message":
+					return "123\x1f456\x1f@0", nil
+				case "new-window":
+					return "123\x1f456\x1f@1", nil
+				}
+			}
 			if name == "git" && len(args) >= 3 && args[2] == "rev-parse" {
 				for _, a := range args {
 					if a == "--abbrev-ref" {
@@ -59,7 +69,7 @@ func prLocalFakeRunner() *exec.FakeRunner {
 // time this test runs.
 func newPrLocalTestClient(t *testing.T, fake *exec.FakeRunner) *pr.Client {
 	t.Helper()
-	return pr.New(fake, pr.WithSessionsDir(t.TempDir()), pr.WithFindingsDir(t.TempDir()))
+	return pr.New(fake, pr.WithSessionsDir(t.TempDir()), pr.WithFindingsDir(t.TempDir()), pr.WithDispatchWait(func(context.Context) error { return nil }))
 }
 
 func TestPrLocalCmd_DryRun_DefaultsPathAndPrintsPlan(t *testing.T) {
@@ -154,7 +164,7 @@ func TestPrLocalCmd_RealRun_PrintsWorkspaceFindingsBreadcrumb(t *testing.T) {
 	cmd := newPrLocalCmd(client, config.Config{})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	cmd.SetArgs([]string{t.TempDir()})
+	cmd.SetArgs([]string{t.TempDir(), "--no-verify"})
 
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
