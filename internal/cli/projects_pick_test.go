@@ -97,6 +97,12 @@ func TestProjectCandidateLine_SanitizesAndMarksMirror(t *testing.T) {
 	}
 }
 
+func TestSanitizeCandidate_ComposesSharedControlsWithTabLayoutRule(t *testing.T) {
+	if got, want := sanitizeCandidate("left\x1b\t\nright"), "left   right"; got != want {
+		t.Errorf("sanitizeCandidate = %q, want %q", got, want)
+	}
+}
+
 func TestProjectCandidateLine_UnclonedMirrorKeepsMirrorMarker(t *testing.T) {
 	if got, want := projectCandidateLine(projects.Repo{Host: "gitea", Owner: "c", Name: "mirror", Mirror: true}), "gitea  c/mirror  uncloned, mirror"; got != want {
 		t.Errorf("candidate = %q, want %q", got, want)

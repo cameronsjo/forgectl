@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"unicode"
 
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
@@ -139,16 +138,16 @@ func projectCandidateStatus(repo projects.Repo) string {
 	return status
 }
 
-// sanitizeCandidate is intentionally sink-local: candidate rows require fixed
-// two-space columns, so unlike the broader terminal sanitizer they neutralize
-// tabs as well as the remaining control runes.
+// sanitizeCandidate composes the shared terminal sanitizer with this sink's
+// fixed-column layout rule: shared sanitization handles every unsafe rune, and
+// the candidate sink alone neutralizes the tab it deliberately preserves.
 func sanitizeCandidate(s string) string {
 	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if r == '\t' {
 			return ' '
 		}
 		return r
-	}, s)
+	}, sanitizeTerm(s))
 }
 
 func projectAmbiguityError(mode projectSelectionMode, count int) error {
