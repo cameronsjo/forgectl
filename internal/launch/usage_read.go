@@ -11,9 +11,15 @@ import (
 // AggregateUsage streams a JSONL usage store and reduces it to the pinned v1
 // aggregate. days nil means all time.
 //
-// It never loads the store into memory and never raises its per-row bound: a
-// row longer than MaxUsageRowBytes is discarded, not buffered, so a corrupted
-// or hostile file cannot turn a stats run into an allocation.
+// It never buffers the store and never raises its per-row bound: a row longer
+// than MaxUsageRowBytes is discarded, not buffered, so a corrupted or hostile
+// file cannot turn a stats run into an allocation.
+//
+// The one thing it does retain scales with the number of DISTINCT values seen,
+// not with the store's size — one count map entry per harness, model, session
+// mode, and posture. Those values come from the operator's own config and
+// harness, so nobody else can inflate the key space, and a store hand-edited
+// to hold a huge number of distinct values is bounded by what its owner wrote.
 //
 // Damage is counted, never fatal. A malformed, oversized, crash-partial, or
 // future-version row increments SkippedRows and the scan continues, because
