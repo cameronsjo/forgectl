@@ -216,6 +216,32 @@ func TestClone_DispatchesByHost(t *testing.T) {
 // TestListOrg_RejectsUnsafeLogin guards the caller-supplied `--org` value: an
 // empty, traversal, or leading-'-' login must be refused before it becomes a
 // `gh` argv (a '-'-leading value would be read as a flag, not a positional).
+// TestClone_PinsGhToGitHubComDespiteAmbientHost covers the clone leg's own
+// host pin. A mislabeled listing row is a bad table cell; a clone REDIRECTED to
+// an enterprise host by an ambient GH_HOST persists to disk at
+// Dir/github/<owner>/<name>, where originMatches then disagrees with it on
+// every later run. The literal is deliberate — asserting against
+// githubauth.Host would agree with whatever that constant became.
+func TestClone_PinsGhToGitHubComDespiteAmbientHost(t *testing.T) {
+	t.Setenv("GH_HOST", "ghe.example.test")
+	fake := &exec.FakeRunner{}
+	c := &Client{Dir: t.TempDir(), run: fake}
+
+	if _, err := c.Clone(context.Background(), Repo{
+		Host: "github", Owner: "cameronsjo", Name: "newgh",
+	}); err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+
+	last := fake.Last()
+	if last.Name != "gh" {
+		t.Fatalf("last command = %q, want gh", last.Name)
+	}
+	if got := last.Env["GH_HOST"]; got != "github.com" {
+		t.Fatalf("GH_HOST = %q, want github.com — the clone must not follow an ambient host", got)
+	}
+}
+
 func TestListOrg_RejectsUnsafeLogin(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := &Client{Dir: t.TempDir(), run: fake}

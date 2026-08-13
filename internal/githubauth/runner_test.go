@@ -138,6 +138,63 @@ func TestRunner_RunWithEnvCannotEscapeThePin(t *testing.T) {
 	}
 }
 
+// TestRunner_RunWithInputRefusesGh covers the hole an embedded exec.Runner left
+// open: RunWithInput was inherited unpinned, so a stdin-fed gh leg (the shape
+// real `gh api graphql --input -` pagination would take) would have reached the
+// subprocess on whatever host an ambient GH_HOST named. It cannot be pinned —
+// stdin mode carries no environment — so the wrapper must refuse it, and must
+// refuse it BEFORE any process is spawned.
+func TestRunner_RunWithInputRefusesGh(t *testing.T) {
+	t.Setenv("GH_HOST", "ghe.example.test")
+	fake := &exec.FakeRunner{}
+
+	_, err := Runner(fake).RunWithInput(t.Context(), "query{}", "gh", "api", "graphql", "--input", "-")
+
+	if !errors.Is(err, ErrUnpinnableGhPath) {
+		t.Fatalf("err = %v, want ErrUnpinnableGhPath", err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("underlying calls = %d (%+v), want 0 — the refusal must precede the spawn", len(fake.Calls), fake.Calls)
+	}
+}
+
+// TestRunner_RunInteractiveRefusesGh is RunWithInput's twin: the interactive
+// mode takes no environment either, so an interactive gh cannot carry the pin.
+func TestRunner_RunInteractiveRefusesGh(t *testing.T) {
+	t.Setenv("GH_HOST", "ghe.example.test")
+	fake := &exec.FakeRunner{}
+
+	err := Runner(fake).RunInteractive(t.Context(), "gh", "auth", "login")
+
+	if !errors.Is(err, ErrUnpinnableGhPath) {
+		t.Fatalf("err = %v, want ErrUnpinnableGhPath", err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("underlying calls = %d (%+v), want 0 — the refusal must precede the spawn", len(fake.Calls), fake.Calls)
+	}
+}
+
+// TestRunner_NonGhStdinAndInteractiveStillDelegate keeps the refusal narrow:
+// the pin is a GitHub-identity control, so pbcopy and tmux must be untouched.
+func TestRunner_NonGhStdinAndInteractiveStillDelegate(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	wrapped := Runner(fake)
+
+	if _, err := wrapped.RunWithInput(t.Context(), "clip me", "pbcopy"); err != nil {
+		t.Fatalf("RunWithInput(pbcopy): %v", err)
+	}
+	if got := fake.Last(); got.Name != "pbcopy" || got.Input != "clip me" {
+		t.Fatalf("pbcopy call = %+v, want name pbcopy with stdin preserved", got)
+	}
+
+	if err := wrapped.RunInteractive(t.Context(), "tmux", "attach-session"); err != nil {
+		t.Fatalf("RunInteractive(tmux): %v", err)
+	}
+	if got := fake.Last(); got.Name != "tmux" || !got.Interactive {
+		t.Fatalf("tmux call = %+v, want an interactive tmux delegation", got)
+	}
+}
+
 func TestRunner_DoubleWrapIsHarmless(t *testing.T) {
 	fake := &exec.FakeRunner{}
 
@@ -167,8 +224,15 @@ func TestRunner_CancelledContextBeatsDisagreeingRawError(t *testing.T) {
 	if strings.Contains(err.Error(), "exit status") {
 		t.Fatalf("err %q leaked the raw exit text", err)
 	}
+	// The wrapper passes the underlying runner's stdout return value through
+	// untouched — it rewrites only the error. That is NOT a claim that a failed
+	// command's stdout survives: OSRunner returns "" alongside a
+	// *exec.CommandError, and classifyContextFailure drops that error whole
+	// (Stderr and Output included) when a sentinel wins. hookFake returns a
+	// non-empty string here precisely because OSRunner never would, which is
+	// what makes the passthrough observable at all.
 	if out != "partial" {
-		t.Fatalf("stdout = %q, want it retained across classification", out)
+		t.Fatalf("stdout = %q, want the underlying return value passed through unmodified", out)
 	}
 }
 

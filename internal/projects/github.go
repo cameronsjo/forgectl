@@ -117,11 +117,16 @@ func githubListOrg(ctx context.Context, run exec.Runner, org string) ([]Repo, er
 
 // cloneRepo runs `gh repo clone name dest` and returns an error on failure. It
 // keeps gh's credential handling for github.com clones (vs. a bare git clone).
-func cloneRepo(ctx context.Context, run interface {
-	Run(context.Context, string, ...string) (string, error)
-}, name, dest string) error {
+//
+// The call is host-pinned, and the pin is applied HERE rather than left to the
+// call site: a clone's result persists to disk at Dir/github/<owner>/<name>, so
+// an ambient GH_HOST redirecting it at an enterprise instance does not merely
+// mislabel a table row — it leaves a checkout that originMatches then disagrees
+// with on every later run. Taking exec.Runner (not a bare Run-only interface)
+// is what lets the wrap live in here, where no future caller can forget it.
+func cloneRepo(ctx context.Context, run exec.Runner, name, dest string) error {
 	slog.Debug("Preparing to clone from GitHub.", "repo", name, "dest", dest)
-	_, err := run.Run(ctx, "gh", "repo", "clone", name, dest)
+	_, err := githubauth.Runner(run).Run(ctx, "gh", "repo", "clone", name, dest)
 	if err != nil {
 		slog.Error("Failed to clone from GitHub.", "repo", name, "dest", dest, "error", err)
 		return fmt.Errorf("gh repo clone %s: %w", name, err)
@@ -133,12 +138,11 @@ func cloneRepo(ctx context.Context, run interface {
 // cloneBareRepo runs `gh repo clone name dest -- --bare`, forwarding --bare to
 // the underlying git clone (gh passes post-`--` args straight through). It keeps
 // gh's credential handling for github.com, same as cloneRepo — the worktree
-// layout's bare-clone step.
-func cloneBareRepo(ctx context.Context, run interface {
-	Run(context.Context, string, ...string) (string, error)
-}, name, dest string) error {
+// layout's bare-clone step — and the same in-function host pin, for the same
+// reason: a bare clone persists to disk too.
+func cloneBareRepo(ctx context.Context, run exec.Runner, name, dest string) error {
 	slog.Debug("Preparing to bare-clone from GitHub.", "repo", name, "dest", dest)
-	_, err := run.Run(ctx, "gh", "repo", "clone", name, dest, "--", "--bare")
+	_, err := githubauth.Runner(run).Run(ctx, "gh", "repo", "clone", name, dest, "--", "--bare")
 	if err != nil {
 		slog.Error("Failed to bare-clone from GitHub.", "repo", name, "dest", dest, "error", err)
 		return fmt.Errorf("gh repo clone --bare %s: %w", name, err)

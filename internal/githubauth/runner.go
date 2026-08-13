@@ -20,24 +20,37 @@ import (
 // overridden rather than queried and mislabeled.
 const Host = "github.com"
 
-// pinnedRunner wraps an exec.Runner so every `gh` invocation routed through
-// Run carries GH_HOST=github.com, and so any cancellation or deadline failure
-// is converted to a safe standard sentinel at the subprocess boundary rather
-// than deeper in the call stack.
+// ErrUnpinnableGhPath is returned when a `gh` command is routed through a
+// Runner method that cannot carry the host pin. exec.Runner's stdin and
+// interactive modes take no environment, so there is no way to force
+// GH_HOST=Host on them — and a gh subprocess that quietly ran without the pin
+// is the exact failure this package exists to prevent. Refusing is therefore
+// the fail-closed answer. If a stdin-fed or tty-driven gh leg is ever needed
+// (real `gh api graphql --input -` pagination is the obvious candidate), the
+// fix is an env-carrying variant on exec.Runner, not a bypass here.
+var ErrUnpinnableGhPath = errors.New("githubauth: gh cannot be host-pinned on this runner path")
+
+// pinnedRunner wraps an exec.Runner so every `gh` invocation carries
+// GH_HOST=Host, and so any cancellation or deadline failure is converted to a
+// safe standard sentinel at the subprocess boundary rather than deeper in the
+// call stack.
 //
-// The embedded Runner supplies RunInteractive/RunWithInput/RunWithEnv
-// unchanged. Only Run is overridden, because Run is the method every GitHub
-// inventory path (including the shared pr.SearchPRs leg, which accepts a full
-// exec.Runner but calls only Run) actually uses.
+// The underlying runner is a NAMED field, deliberately not an embed. An embed
+// supplies the interface's remaining methods automatically, so a `gh` call
+// written against RunWithInput or RunInteractive — or against any method added
+// to exec.Runner later — would reach the subprocess unpinned, with no compile
+// error and no test failure. With a named field the compiler refuses the type
+// until all four methods are written out, and each one has to state what it
+// does with `gh`.
 type pinnedRunner struct {
-	exec.Runner
+	base exec.Runner
 }
 
 // Runner returns run wrapped so that `gh` subprocesses are pinned to
 // github.com. Non-gh commands delegate to the underlying runner untouched —
 // the pin is a GitHub-identity control, not a general environment override.
 func Runner(run exec.Runner) exec.Runner {
-	return pinnedRunner{Runner: run}
+	return pinnedRunner{base: run}
 }
 
 // Run pins `gh` to Host via RunWithEnv (which merges over the process
@@ -45,9 +58,9 @@ func Runner(run exec.Runner) exec.Runner {
 // context failures. Anything that is not `gh` delegates unchanged.
 func (p pinnedRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
 	if name != "gh" {
-		return p.Runner.Run(ctx, name, args...)
+		return p.base.Run(ctx, name, args...)
 	}
-	out, err := p.Runner.RunWithEnv(ctx, map[string]string{"GH_HOST": Host}, name, args...)
+	out, err := p.base.RunWithEnv(ctx, map[string]string{"GH_HOST": Host}, name, args...)
 	if err != nil {
 		return out, classifyContextFailure(ctx, err)
 	}
@@ -61,24 +74,51 @@ func (p pinnedRunner) Run(ctx context.Context, name string, args ...string) (str
 // pin is applied last so it beats any GH_HOST in env.
 func (p pinnedRunner) RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (string, error) {
 	if name != "gh" {
-		return p.Runner.RunWithEnv(ctx, env, name, args...)
+		return p.base.RunWithEnv(ctx, env, name, args...)
 	}
 	pinned := make(map[string]string, len(env)+1)
 	for k, v := range env {
 		pinned[k] = v
 	}
 	pinned["GH_HOST"] = Host
-	out, err := p.Runner.RunWithEnv(ctx, pinned, name, args...)
+	out, err := p.base.RunWithEnv(ctx, pinned, name, args...)
 	if err != nil {
 		return out, classifyContextFailure(ctx, err)
 	}
 	return out, nil
 }
 
+// RunWithInput refuses `gh` rather than running it unpinned: stdin mode carries
+// no environment, so the host pin cannot ride along. Everything else delegates
+// untouched — the pin is a GitHub-identity control, and pbcopy has no host.
+func (p pinnedRunner) RunWithInput(ctx context.Context, stdin string, name string, args ...string) (string, error) {
+	if name == "gh" {
+		return "", ErrUnpinnableGhPath
+	}
+	return p.base.RunWithInput(ctx, stdin, name, args...)
+}
+
+// RunInteractive refuses `gh` for the same reason RunWithInput does: the
+// interactive mode takes no environment, so an interactive gh would reach the
+// tty on whatever host an ambient GH_HOST named. Non-gh commands (tmux attach,
+// `sesh connect`) delegate untouched.
+func (p pinnedRunner) RunInteractive(ctx context.Context, name string, args ...string) error {
+	if name == "gh" {
+		return ErrUnpinnableGhPath
+	}
+	return p.base.RunInteractive(ctx, name, args...)
+}
+
 // classifyContextFailure converts a raw subprocess failure into a safe
 // standard context sentinel when the failure is really a cancellation or an
 // expired deadline, and otherwise returns the raw error for the in-process
 // caller to classify categorically.
+//
+// The replacement is total: when a sentinel wins, the original error is
+// dropped whole, including an *exec.CommandError's Stderr and Output fields.
+// Nothing of the subprocess's own text survives into the returned error — which
+// is the point, since that text is rendered — so no caller may treat the
+// returned sentinel as still carrying the child's output.
 //
 // ctx.Err() is consulted FIRST and wins. os/exec commonly reports a killed
 // child as an *os/exec.ExitError ("signal: killed") rather than as
