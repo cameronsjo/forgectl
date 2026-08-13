@@ -29,7 +29,11 @@ func newProjectsCloneCmd(client *projects.Client) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "clone [query | url | owner/repo]",
 		Short: "Clone a project into the canonical {host}/{org}/{repo} layout",
-		Args:  cobra.MaximumNArgs(1),
+		Long: `Clone a project into the canonical layout. With both stdin and stdout attached
+to terminals, ambiguous matches use the existing picker. Otherwise forgectl writes one
+sanitized candidate identity per line to stdout and exits 1; use the candidate sshUrl
+from projects list --json, or rerun interactively when no sshUrl is available.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
@@ -70,7 +74,7 @@ func newProjectsCloneCmd(client *projects.Client) *cobra.Command {
 				// Multiple matches → interactive selector below.
 			}
 
-			chosen, err := pickRepo(candidates)
+			chosen, err := chooseRepo(cmd, candidates, projectSelectionClone)
 			if err != nil {
 				return err
 			}
