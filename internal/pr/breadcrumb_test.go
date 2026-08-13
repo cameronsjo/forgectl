@@ -218,11 +218,11 @@ func FuzzLoadBreadcrumb(f *testing.F) {
 		if err != nil || !info.IsDir() {
 			t.Errorf("loaded breadcrumb workspace %q is not an existing directory: %v", bc.Workspace, err)
 		}
-		real, err := filepath.EvalSymlinks(bc.Workspace)
+		resolved, err := filepath.EvalSymlinks(bc.Workspace)
 		if err != nil {
 			t.Fatalf("loaded breadcrumb workspace %q is not resolvable: %v", bc.Workspace, err)
 		}
-		if !strings.HasPrefix(filepath.Base(real), sandboxPrefix) {
+		if !strings.HasPrefix(filepath.Base(resolved), sandboxPrefix) {
 			t.Errorf("loaded breadcrumb workspace %q resolves without the %q sandbox prefix", bc.Workspace, sandboxPrefix)
 		}
 	})

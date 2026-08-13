@@ -202,11 +202,11 @@ func validateWorkspace(workspace string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("workspace %q is not a directory", workspace)
 	}
-	real, err := filepath.EvalSymlinks(workspace)
+	resolved, err := filepath.EvalSymlinks(workspace)
 	if err != nil {
 		return fmt.Errorf("workspace %q could not be resolved: %w", workspace, err)
 	}
-	if !strings.HasPrefix(filepath.Base(real), sandboxPrefix) {
+	if !strings.HasPrefix(filepath.Base(resolved), sandboxPrefix) {
 		return fmt.Errorf("workspace %q lacks the %q sandbox prefix", workspace, sandboxPrefix)
 	}
 	return nil
