@@ -54,11 +54,14 @@ func openUsageReaderUnix(base string) (io.ReadCloser, func(), error) {
 		return nil, nil, unsafeStore("lock the usage store: %s", err)
 	}
 
+	// Nothing here was opened for writing, so every close is discardable: a
+	// close error on a read-only descriptor cannot have lost data, and the
+	// caller has already consumed whatever it read.
 	release := func() {
 		unix.Flock(int(lock.Fd()), unix.LOCK_UN) //nolint:errcheck // closing releases it anyway
-		lock.Close()                             //nolint:errcheck
-		data.Close()                             //nolint:errcheck
-		unix.Close(stateFD)                      //nolint:errcheck
+		lock.Close()                             //nolint:errcheck // read-only, see above
+		data.Close()                             //nolint:errcheck // read-only, see above
+		unix.Close(stateFD)                      //nolint:errcheck // read-only, see above
 	}
 	return data, release, nil
 }
@@ -103,7 +106,14 @@ func inspectUsageStoreUnix(paths UsageStorePaths) (UsageStoreStatus, error) {
 	return status, nil
 }
 
+// usageEntryPresent reports whether the fixed name resolves to anything at
+// all. Only ENOENT counts as absent: any other failure means the entry exists
+// in some state this process cannot describe, and reporting that as "nothing
+// recorded yet" would turn a broken store into a clean bill of health. Routing
+// it through the present branch instead sends it to the safe opener, which
+// says exactly what it refused.
 func usageEntryPresent(stateFD int, name string) bool {
 	var stat unix.Stat_t
-	return unix.Fstatat(stateFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW) == nil
+	err := unix.Fstatat(stateFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW)
+	return err == nil || !errors.Is(err, unix.ENOENT)
 }

@@ -1,10 +1,47 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 )
+
+// The migration writers re-encode a whole LaunchConfig. TOML puts every scalar
+// in a table BEFORE that table's sub-tables, so a scalar declared after
+// Projects in the struct must still be emitted ahead of [launch.defaults] and
+// [[launch.project]] — otherwise it silently reattaches to the last project
+// block on the next read, and an operator's opt-in changes meaning without
+// anything failing.
+func TestLaunchConfig_UsageStatsSurvivesTOMLRoundTrip(t *testing.T) {
+	original := LaunchConfig{
+		Defaults:   LaunchDefaults{Harness: "claude", Model: "opus"},
+		Projects:   []LaunchProject{{Match: "~/Projects/one", Model: "sonnet"}},
+		UsageStats: true,
+	}
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(struct {
+		Launch LaunchConfig `toml:"launch"`
+	}{Launch: original}); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	cfg, err := DecodeStrict(buf.Bytes())
+	if err != nil {
+		t.Fatalf("decode re-encoded config: %v\n%s", err, buf.String())
+	}
+	if !cfg.Launch.UsageStats {
+		t.Fatalf("usage_stats did not survive the round trip:\n%s", buf.String())
+	}
+	if len(cfg.Launch.Projects) != 1 || cfg.Launch.Projects[0].Match != "~/Projects/one" {
+		t.Fatalf("project profiles did not survive the round trip:\n%s", buf.String())
+	}
+	if cfg.Launch.Defaults.Model != "opus" {
+		t.Fatalf("defaults did not survive the round trip:\n%s", buf.String())
+	}
+}
 
 // The legacy claunch.conf is a compatibility source, not a consent surface. A
 // `usage_stats = true` planted there must not switch collection on, and must
