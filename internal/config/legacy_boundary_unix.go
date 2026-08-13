@@ -195,6 +195,7 @@ func (p *unixLegacyProbe) Capture() (*LegacySnapshot, error) {
 	if _, err := toml.Decode(string(data), &launch); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrLegacyMalformed, err)
 	}
+	launch = stripLegacyUsageOptIn(launch)
 
 	plat := &unixLegacySnapshot{
 		parentFD: p.parentFD,
@@ -533,5 +534,5 @@ func (nativeMigrationFS) loadReadOnly(path string) (LaunchConfig, error) {
 	if _, err := toml.Decode(string(data), &launch); err != nil {
 		return LaunchConfig{}, fmt.Errorf("%w: %v", ErrLegacyMalformed, err)
 	}
-	return launch, nil
+	return stripLegacyUsageOptIn(launch), nil
 }

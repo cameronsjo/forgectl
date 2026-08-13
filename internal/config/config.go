@@ -933,7 +933,7 @@ func LoadLegacyLaunch() (LaunchConfig, string, error) {
 		}
 		return LaunchConfig{}, path, fmt.Errorf("read legacy claunch.conf at %s: %w", path, err)
 	}
-	return lc, path, nil
+	return stripLegacyUsageOptIn(lc), path, nil
 }
 
 // ValidateLegacyLaunch decodes the legacy claunch.conf and returns any parse

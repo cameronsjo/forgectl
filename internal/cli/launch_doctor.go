@@ -28,6 +28,10 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 			out := cmd.OutOrStdout()
 			healthy := true
 
+			// Same rule as launchExec: the opt-in is whatever config.toml
+			// declared at process start, never what a migration produced.
+			usageEnabled := cfg.Launch.UsageStats
+
 			effLaunch, notice := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
 			cfg.Launch = effLaunch
 
@@ -98,6 +102,10 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 				if notice != "" {
 					fmt.Fprintf(out, "%s %s\n", launchWarnMark, termsafe.SafeLine(notice))
 				}
+			}
+
+			if !reportUsageStats(out, usageEnabled) {
+				healthy = false
 			}
 
 			// Bench telemetry injection is informational, not a health signal —

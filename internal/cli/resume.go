@@ -522,7 +522,19 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	env := launch.MergeEnv(os.Environ(), launch.MergeMaps(bench.TelemetryEnv(cfg), profile.Env))
 	fmt.Fprintf(errOut, "forgectl: resuming %s in %s\n", sanitizeTerm(displayName(s)), sanitizeTerm(s.Cwd))
 	slog.Debug("Preparing to exec claude for a resume.", "session", s.ID, "cwd", s.Cwd, "fork", fork)
-	return launch.Exec(claudePath, args, env)
+
+	// After the chdir, so a failed chdir records nothing, and after the task
+	// restore, whose failure is deliberately non-blocking — a resume that
+	// warned about tasks and then execed is still an accepted attempt. The
+	// row carries the fork boolean forgectl already resolved and nothing else
+	// about the session: no id, no cwd, no task count.
+	sessionMode := launch.UsageSessionResume
+	if fork {
+		sessionMode = launch.UsageSessionFork
+	}
+	recordUsageSilently(cfg.Launch.UsageStats,
+		newLaunchUsageEvent(profile.Harness, profile.Model, sessionMode, launch.UsagePostureDefault))
+	return execHarness(claudePath, args, env)
 }
 
 // forkTaskNote annotates the dry-run task line so a fork's task behavior is

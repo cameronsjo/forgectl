@@ -68,5 +68,5 @@ func (nativeMigrationFS) loadReadOnly(path string) (LaunchConfig, error) {
 	if _, err := toml.Decode(string(data), &launch); err != nil {
 		return LaunchConfig{}, fmt.Errorf("%w: %v", ErrLegacyMalformed, err)
 	}
-	return launch, nil
+	return stripLegacyUsageOptIn(launch), nil
 }

@@ -27,6 +27,38 @@ const launchScaffold = `
 #           Set effort at either layer to override the derived level.
 # Inspect the resolved profile with:  forgectl launch which
 
+[launch]
+# Local launch statistics — OFF unless you set this to true, and never turned
+# on by an upgrade, a migration, or an environment variable.
+#
+# When on, forgectl appends one line to
+# ${XDG_STATE_HOME:-~/.local/state}/forgectl/launch-usage.jsonl immediately
+# before each harness exec it attempts. That line holds exactly seven fields:
+#   schema_version  the row format
+#   ts              a UTC timestamp, to the second
+#   event           always "exec_attempt"
+#   harness         "claude" or "codex"
+#   model           the resolved model, "" for the harness default
+#   session_mode    new | resume | fork | unknown
+#   posture         default | builder | agents
+# Nothing else: no directory, project, repository, branch, session id, harness
+# arguments, prompt, environment, tasks, host, user, or pid — and no hash of
+# any of them.
+#
+# Those seven are still sensitive. Exact timestamps describe when you work, a
+# model label can name an internal deployment, and the session and posture
+# counts describe how you work. Aggregating locally does not change that.
+#
+# Nothing is uploaded: no network call, no device identifier, no import of the
+# retired claunch wrapper's log. Rows are kept until you delete them. Setting
+# this back to false stops new rows but neither hides nor removes old ones —
+# delete them yourself, while no forgectl launch, resume, or stats is running:
+#   rm -- "${XDG_STATE_HOME:-$HOME/.local/state}/forgectl/launch-usage.jsonl"
+#   rm -- "${XDG_STATE_HOME:-$HOME/.local/state}/forgectl/launch-usage.jsonl.lock"
+# Deletion is permanent. Read the aggregate with "forgectl launch stats"; the
+# file itself is plain JSON Lines, so it is also your export.
+usage_stats = false
+
 [launch.defaults]
 harness         = "claude"   # "claude" (default) or "codex"
 model           = "opus"     # remove or replace with a Codex model when harness = "codex"
