@@ -22,7 +22,7 @@ jobs:
       HAS_CERT: ${{ secrets.APPLE_CERTIFICATE_P12 != '' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
