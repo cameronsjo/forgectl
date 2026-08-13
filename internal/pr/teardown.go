@@ -12,6 +12,14 @@ import (
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
+// sandboxTeardown is the workspace-removal seam. Production wires the real
+// call; tests inject a mid-teardown failure, which is the only portable way to
+// stage a LIVE branch that fails after mutation has begun — FakeRunner cannot
+// force it, since sandbox.Teardown's failures come from the filesystem rather
+// than from a Runner call. Tests must restore it and must not run in parallel
+// while overriding it. Mirrors the classifier seams in workspace_state.go.
+var sandboxTeardown = sandbox.Teardown
+
 // Teardown discards the review session recorded at path.
 //
 // path MUST resolve to a member of the current breadcrumb set — a
@@ -239,7 +247,7 @@ func (c *Client) discard(ctx context.Context, sess Session) error {
 		return fmt.Errorf("restore quarantined files: %w", err)
 	}
 
-	if err := sandbox.Teardown(ctx, c.run, sess.Workspace); err != nil {
+	if err := sandboxTeardown(ctx, c.run, sess.Workspace); err != nil {
 		return fmt.Errorf("teardown workspace: %w", err)
 	}
 

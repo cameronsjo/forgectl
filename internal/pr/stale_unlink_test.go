@@ -20,10 +20,13 @@ package pr
 //   [x] Every refusal leaves breadcrumb, sibling, parent, and external canaries
 //       intact and issues ZERO Runner calls
 //   [x] Concurrent same-client teardowns serialize: exactly one unlink succeeds
+//   [x] A LIVE teardown that fails mid-flight never falls back to the stale
+//       unlink: the error surfaces and both breadcrumb and workspace survive
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -333,6 +336,38 @@ func TestDiscardStale_WorkspaceReappearanceLeavesItUntouched(t *testing.T) {
 	}
 	if _, err := os.Stat(f.path); err != nil {
 		t.Errorf("the breadcrumb must survive a refusal: %v", err)
+	}
+}
+
+// TestTeardown_LiveFailureNeverEntersTheStaleUnlink pins the branch boundary
+// documented on Teardown: once the live path has begun mutating, a failure
+// must surface as an error rather than degrade into the stale unlink.
+//
+// What it injects is exactly one thing — sandbox.Teardown returning an error
+// while leaving the workspace in place, the shape of a removal blocked by
+// permissions. Everything before it (membership, classification, quarantine
+// restore) runs for real. It does NOT prove the workspace is what blocked the
+// removal; it proves that when workspace removal fails, forgectl deletes
+// nothing and reports.
+func TestTeardown_LiveFailureNeverEntersTheStaleUnlink(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	c := testClient(t, fake)
+	path, ws := seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 1}, time.Now().UTC())
+
+	injected := errors.New("teardown workspace: permission denied")
+	restore := sandboxTeardown
+	sandboxTeardown = func(context.Context, exec.Runner, string) error { return injected }
+	t.Cleanup(func() { sandboxTeardown = restore })
+
+	err := c.Teardown(context.Background(), path)
+	if !errors.Is(err, injected) {
+		t.Fatalf("a failed live teardown must return its error, got %v", err)
+	}
+	if _, statErr := os.Lstat(path); statErr != nil {
+		t.Errorf("the breadcrumb must survive a failed live teardown: %v", statErr)
+	}
+	if _, statErr := os.Stat(ws); statErr != nil {
+		t.Errorf("the workspace must survive a failed live teardown: %v", statErr)
 	}
 }
 
