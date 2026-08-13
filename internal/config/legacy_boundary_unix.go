@@ -242,6 +242,7 @@ type unixBackupAllocation struct {
 	path      string
 	identity  FileIdentity
 	writer    *os.File
+	owner     *os.File
 	validated *os.File
 	validMeta stableFileMetadata
 }
@@ -269,6 +270,31 @@ func createExclusiveBackup(parentFD int, parent, name string) (*os.File, FileIde
 	return f, id, nil
 }
 
+func pinBackupOwner(writer *os.File) (*os.File, error) {
+	fd, err := unix.FcntlInt(writer.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), writer.Name()), nil
+}
+
+func discardUnpinnedBackup(parentFD int, name string, identity FileIdentity, writer *os.File) error {
+	var errs []error
+	var named unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
+		identityFromUnixStat(&named) != identity || named.Mode&unix.S_IFMT != unix.S_IFREG {
+		errs = append(errs, ErrBackupIdentityLost)
+	} else if err := unix.Unlinkat(parentFD, name, 0); err != nil {
+		errs = append(errs, fmt.Errorf("unlink unpinned backup allocation: %w", err))
+	} else if err := unix.Fsync(parentFD); err != nil {
+		errs = append(errs, fmt.Errorf("sync legacy parent after unpinned allocation cleanup: %w", err))
+	}
+	if err := writer.Close(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
 func (s *unixLegacySnapshot) AllocateBackup() (*BackupAllocation, error) {
 	stable := s.base + ".bak"
 	writer, identity, err := createExclusiveBackup(s.parentFD, filepath.Dir(s.path), stable)
@@ -291,6 +317,11 @@ func (s *unixLegacySnapshot) AllocateBackup() (*BackupAllocation, error) {
 	if err != nil {
 		return nil, fmt.Errorf("allocate legacy backup: %w", err)
 	}
+	owner, err := pinBackupOwner(writer)
+	if err != nil {
+		cleanupErr := discardUnpinnedBackup(s.parentFD, name, identity, writer)
+		return nil, errors.Join(fmt.Errorf("pin legacy backup allocation: %w", err), cleanupErr)
+	}
 	platform := &unixBackupAllocation{
 		parentFD: s.parentFD,
 		parent:   filepath.Dir(s.path),
@@ -298,6 +329,7 @@ func (s *unixLegacySnapshot) AllocateBackup() (*BackupAllocation, error) {
 		path:     filepath.Join(filepath.Dir(s.path), name),
 		identity: identity,
 		writer:   writer,
+		owner:    owner,
 	}
 	return &BackupAllocation{Name: name, Path: platform.path, Identity: identity, platform: platform}, nil
 }
@@ -404,6 +436,17 @@ func (b *unixBackupAllocation) CleanupPartial() error {
 	if b.writer != nil {
 		_ = b.CloseWriter()
 	}
+	if b.owner == nil {
+		return ErrBackupIdentityLost
+	}
+	ownerInfo, err := b.owner.Stat()
+	if err != nil || !ownerInfo.Mode().IsRegular() {
+		return ErrBackupIdentityLost
+	}
+	ownerID, err := identityFromFileInfo(ownerInfo)
+	if err != nil || ownerID != b.identity {
+		return ErrBackupIdentityLost
+	}
 	var named unix.Stat_t
 	if err := unix.Fstatat(b.parentFD, b.name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
 		identityFromUnixStat(&named) != b.identity || named.Mode&unix.S_IFMT != unix.S_IFREG {
@@ -426,6 +469,10 @@ func (b *unixBackupAllocation) Close() error {
 	if b.validated != nil {
 		errs = append(errs, b.validated.Close())
 		b.validated = nil
+	}
+	if b.owner != nil {
+		errs = append(errs, b.owner.Close())
+		b.owner = nil
 	}
 	return errors.Join(errs...)
 }

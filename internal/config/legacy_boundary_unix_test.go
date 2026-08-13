@@ -15,7 +15,7 @@ import (
 
 func boundaryFixture(t *testing.T, body []byte) (EnvSnapshot, string, string) {
 	t.Helper()
-	base, err := os.MkdirTemp("/private/tmp", "forgectl-263-")
+	base, err := os.MkdirTemp("/tmp", "forgectl-263-")
 	if err != nil {
 		t.Fatal(err)
 	}

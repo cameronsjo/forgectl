@@ -130,9 +130,12 @@ func (s *LegacySnapshot) SyncParent() error {
 	return s.platform.SyncParent()
 }
 
-// BackupAllocation carries the exact inode allocated by this attempt. Its
-// pathname is display-only until Validate and Revalidate prove the directory
-// entry still names that inode and contains the captured source bytes.
+// BackupAllocation carries the exact inode allocated by this attempt. On Unix
+// it keeps an identity descriptor open until Close, including after
+// CloseWriter, so inode reuse cannot make a replacement look attempt-owned.
+// Its pathname is display-only until Validate and Revalidate prove the
+// directory entry still names that inode and contains the captured source
+// bytes.
 type BackupAllocation struct {
 	Name     string
 	Path     string
