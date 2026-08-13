@@ -1,19 +1,6 @@
-// Package termsafe holds the primitives for writing untrusted text to a
-// terminal. Text forgectl renders that came from config, a database, or
-// another process's output SHOULD pass through here, so a hostile string
-// cannot clear the line, forge a posture, or set a color the operator did not
-// ask for.
-//
-// "Should", not "does": this is what the package is for, not an invariant the
-// codebase currently upholds everywhere. `launch which` and `config` still
-// render config-derived values raw (#250). Reading this as "already handled"
-// is how the next print path ships without calling Sanitize.
-//
-// The coverage is the Cc category only — C0, C1, and DEL. Cf (format)
-// characters, bidirectional overrides among them, are outside
-// unicode.IsControl and pass through; sanitize_fuzz_test.go pins that gap
-// deliberately (#244), so read the guarantee as "no control byte", not
-// "safe text".
+// Package termsafe holds primitives for writing untrusted text to a terminal.
+// Sanitize maps non-tab Cc controls and Unicode Bidi_Control formatting
+// characters to spaces; tab and every other rune pass through.
 //
 // Named termsafe rather than term because golang.org/x/term is already
 // imported unqualified as `term` in internal/cli and internal/launch — the two
@@ -30,11 +17,18 @@ import (
 	"unicode"
 )
 
-// Sanitize replaces control bytes (everything unicode.IsControl except
-// tab) with spaces so untrusted content renders inert in the terminal.
+// IsUnsafeTerminalRune reports whether r is a Cc control or a Unicode
+// Bidi_Control formatting character. Contextual renderers may visibly quote
+// additional runes, but must not broaden this shared classification.
+func IsUnsafeTerminalRune(r rune) bool {
+	return unicode.IsControl(r) || unicode.In(r, unicode.Bidi_Control)
+}
+
+// Sanitize maps non-tab Cc controls and Unicode Bidi_Control formatting
+// characters to spaces; tab and every other rune pass through.
 func Sanitize(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r == '\t' || !unicode.IsControl(r) {
+		if r == '\t' || !IsUnsafeTerminalRune(r) {
 			return r
 		}
 		return ' '
