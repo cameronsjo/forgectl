@@ -20,7 +20,10 @@ func TestParseSessions(t *testing.T) {
 		"my session" + sep + "1" + sep + "0" + sep + "1700000100" + sep + "/Users/cam/Notes With Spaces" + "\n" +
 		"empty" + sep + "0" + sep + "0" + sep + "1700000200" + sep + "/tmp"
 
-	got := parseSessions(out)
+	got, err := parseSessions(out)
+	if err != nil {
+		t.Fatalf("parseSessions: %v", err)
+	}
 	if len(got) != 3 {
 		t.Fatalf("expected 3 sessions, got %d: %+v", len(got), got)
 	}
@@ -53,16 +56,25 @@ func TestParseSessions(t *testing.T) {
 }
 
 func TestParseSessions_Empty(t *testing.T) {
-	if got := parseSessions(""); len(got) != 0 {
+	got, err := parseSessions("")
+	if err != nil {
+		t.Fatalf("parseSessions of empty output: %v", err)
+	}
+	if len(got) != 0 {
 		t.Errorf("empty output should yield no sessions, got %+v", got)
 	}
 }
 
 func TestParseSessions_SkipsShortRows(t *testing.T) {
-	// A malformed row (too few fields) must be skipped, not panic.
+	// A malformed row (too few fields) must be skipped, not panic. The
+	// well-formed row alongside it keeps parsedRows' zero-row contract from
+	// firing, so this pins the DROP rather than the refusal.
 	out := "good" + sep + "2" + sep + "1" + sep + "1700000000" + sep + "/tmp" + "\n" +
 		"truncated" + sep + "2"
-	got := parseSessions(out)
+	got, err := parseSessions(out)
+	if err != nil {
+		t.Fatalf("parseSessions: %v", err)
+	}
 	if len(got) != 1 || got[0].Name != "good" {
 		t.Errorf("expected only the well-formed row, got %+v", got)
 	}

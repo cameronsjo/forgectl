@@ -47,8 +47,16 @@ func (c *Client) LastSession(ctx context.Context) error {
 	return c.run.RunInteractive(ctx, c.tmuxBin, "attach-session", "-t", name)
 }
 
+// lastAttachedFieldCount is how many fields mostRecentSession's format emits.
+const lastAttachedFieldCount = 2
+
 // mostRecentSession returns the session with the greatest session_last_attached
 // timestamp (empty string if no server / no sessions).
+//
+// The field check is EXACT for the same reason parseSessions' is: a session
+// name may carry FieldSep, and under the old `len(f) < 2` check a name of
+// `real<sep>decoy` yielded f[1] == "real" — a truncated attach target, and the
+// one this function hands straight to `attach-session -t`.
 func (c *Client) mostRecentSession(ctx context.Context) (string, error) {
 	const format = "#{session_last_attached}" + FieldSep + "#{session_name}"
 	args := []string{"list-sessions", "-F", format}
@@ -61,15 +69,24 @@ func (c *Client) mostRecentSession(ctx context.Context) (string, error) {
 	}
 	// -1 (not 0) so a session that has never been attached (last_attached=0)
 	// still beats the sentinel and gets picked when it's the only candidate.
+	lines := splitLines(out)
+	candidates := make([]string, 0, len(lines))
 	best, bestTS := "", -1
-	for _, line := range splitLines(out) {
+	for _, line := range lines {
 		f := splitFields(line)
-		if len(f) < 2 {
+		if len(f) != lastAttachedFieldCount {
 			continue
 		}
+		candidates = append(candidates, f[1])
 		if ts := atoi(f[0]); ts > bestTS {
 			bestTS, best = ts, f[1]
 		}
+	}
+	// Non-empty output that yielded no candidate at all means the separator did
+	// not survive — refuse rather than report "no session to attach to", which
+	// reads as an empty server.
+	if _, err := parsedRows(candidates, lines, "list-sessions", lastAttachedFieldCount); err != nil {
+		return "", err
 	}
 	return best, nil
 }

@@ -26,6 +26,14 @@ const paneFormat = "#{session_name}" + FieldSep +
 	"#{pane_current_command}" + FieldSep +
 	"#{?pane_active,1,0}"
 
+// windowFieldCount and paneFieldCount are how many fields the two formats
+// above emit. Named so the exact-count check and the fail-closed error can
+// never report different numbers.
+const (
+	windowFieldCount = 8
+	paneFieldCount   = 6
+)
+
 // ListWindows returns every window across all sessions (list-windows -a).
 func (c *Client) ListWindows(ctx context.Context) ([]Window, error) {
 	args := []string{"list-windows", "-a", "-F", windowFormat}
@@ -36,10 +44,10 @@ func (c *Client) ListWindows(ctx context.Context) ([]Window, error) {
 		}
 		return nil, err
 	}
-	return parseWindows(out), nil
+	return parseWindows(out)
 }
 
-func parseWindows(out string) []Window {
+func parseWindows(out string) ([]Window, error) {
 	lines := splitLines(out)
 	windows := make([]Window, 0, len(lines))
 	for _, line := range lines {
@@ -51,7 +59,7 @@ func parseWindows(out string) []Window {
 		// torn-down review as still live in `pr list`. A separator in a name can
 		// only ever push the count ABOVE 8, so requiring exactly 8 drops the
 		// forged row instead of misreading it.
-		if len(f) != 8 {
+		if len(f) != windowFieldCount {
 			continue
 		}
 		idx := atoi(f[4])
@@ -67,7 +75,9 @@ func parseWindows(out string) []Window {
 			Target:      fmt.Sprintf("%s:%d", f[3], idx),
 		})
 	}
-	return windows
+	// Every row failing at once is the separator being gone, not eight forged
+	// names — see parsedRows for why that must be loud.
+	return parsedRows(windows, lines, "list-windows", windowFieldCount)
 }
 
 // ListPanes returns every pane across all sessions (list-panes -a).
@@ -80,17 +90,17 @@ func (c *Client) ListPanes(ctx context.Context) ([]Pane, error) {
 		}
 		return nil, err
 	}
-	return parsePanes(out), nil
+	return parsePanes(out)
 }
 
-func parsePanes(out string) []Pane {
+func parsePanes(out string) ([]Pane, error) {
 	lines := splitLines(out)
 	panes := make([]Pane, 0, len(lines))
 	for _, line := range lines {
 		f := splitFields(line)
 		// Exact for the same reason parseWindows is: pane_title and
 		// pane_current_command are no more separator-free than a window name.
-		if len(f) != 6 {
+		if len(f) != paneFieldCount {
 			continue
 		}
 		win := atoi(f[1])
@@ -105,7 +115,7 @@ func parsePanes(out string) []Pane {
 			Target:  fmt.Sprintf("%s:%d.%d", f[0], win, idx),
 		})
 	}
-	return panes
+	return parsedRows(panes, lines, "list-panes", paneFieldCount)
 }
 
 // JumpToWindow jumps to a "session:index" target. It routes through

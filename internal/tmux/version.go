@@ -83,6 +83,16 @@ func generationCapabilityError(found string, cause error) error {
 
 func parseGenerationIdentity(value string) (string, error) {
 	fields := SplitFields(value)
+	// One field means no separator survived at all, not a malformed identity —
+	// and the caller wraps this in a "tmux 2.2 or newer is required" message
+	// that would otherwise blame a perfectly modern tmux for the operator's
+	// locale. Name the real cause (see ErrUnreadableFields).
+	if len(fields) == 1 {
+		return "", fmt.Errorf(
+			"%w: display-message returned %q as a single field; "+
+				"tmux renders the separator lossily outside a UTF-8 locale — set LANG/LC_ALL to a UTF-8 locale and retry",
+			ErrUnreadableFields, value)
+	}
 	if len(fields) != 3 {
 		return "", fmt.Errorf("tmux dispatch identity has %d fields, want 3 (raw %q)", len(fields), value)
 	}

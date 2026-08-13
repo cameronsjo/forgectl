@@ -12,6 +12,9 @@ const sessionFormat = "#{session_name}" + FieldSep +
 	"#{session_created}" + FieldSep +
 	"#{session_path}"
 
+// sessionFieldCount is how many fields sessionFormat emits.
+const sessionFieldCount = 5
+
 // ListSessions returns all tmux sessions. When no tmux server is running it
 // returns an empty slice (not an error) — "no sessions" is a normal state, not
 // a failure.
@@ -24,17 +27,26 @@ func (c *Client) ListSessions(ctx context.Context) ([]Session, error) {
 		}
 		return nil, err
 	}
-	return parseSessions(out), nil
+	return parseSessions(out)
 }
 
-// parseSessions turns list-sessions output into Sessions. Rows with too few
-// fields are skipped defensively rather than panicking.
-func parseSessions(out string) []Session {
+// parseSessions turns list-sessions output into Sessions.
+//
+// EXACT, not >=, for the reason parseWindows is (see the comment there): a
+// session NAME may legally carry FieldSep, and under the old `len(f) < 5`
+// check `work<sep>pad` split into a row whose Name read "work" with every
+// later field shifted one right — so Path read a window count and Tree
+// rendered a session that does not exist. A separator anywhere in a row can
+// only push the count above 5, so requiring exactly 5 drops the forged row
+// instead of misreading it. The blast radius is display (Tree) and
+// LastSession's attach target rather than review liveness, which is why the
+// window parsers were tightened first — but the defect is the same one.
+func parseSessions(out string) ([]Session, error) {
 	lines := splitLines(out)
 	sessions := make([]Session, 0, len(lines))
 	for _, line := range lines {
 		f := splitFields(line)
-		if len(f) < 5 {
+		if len(f) != sessionFieldCount {
 			continue
 		}
 		sessions = append(sessions, Session{
@@ -45,7 +57,7 @@ func parseSessions(out string) []Session {
 			Path:     f[4],
 		})
 	}
-	return sessions
+	return parsedRows(sessions, lines, "list-sessions", sessionFieldCount)
 }
 
 // HasSession reports whether a session named name exists. It keys off

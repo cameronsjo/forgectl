@@ -28,7 +28,10 @@ func TestWindowFormatCarriesIdentityPrefix(t *testing.T) {
 	// rejoins them with FieldSep to rebuild the captured identity. Prove that
 	// round trip on a real row rather than trusting the constants alone.
 	row := strings.Join([]string{"123", "456", "@7", "reviews", "1", "pr-o-r-1", "0", "1"}, FieldSep)
-	windows := parseWindows(row)
+	windows, err := parseWindows(row)
+	if err != nil {
+		t.Fatalf("parseWindows(%q): %v", row, err)
+	}
 	if len(windows) != 1 {
 		t.Fatalf("parseWindows(%q) = %d rows, want 1", row, len(windows))
 	}
@@ -42,7 +45,10 @@ func TestParseWindows(t *testing.T) {
 	out := "123" + sep + "456" + sep + "@0" + sep + "main" + sep + "0" + sep + "editor" + sep + "1" + sep + "2" + "\n" +
 		"123" + sep + "456" + sep + "@1" + sep + "main" + sep + "1" + sep + "my window" + sep + "0" + sep + "1" + "\n" +
 		"789" + sep + "999" + sep + "@0" + sep + "work" + sep + "0" + sep + "shell" + sep + "1" + sep + "1"
-	got := parseWindows(out)
+	got, err := parseWindows(out)
+	if err != nil {
+		t.Fatalf("parseWindows: %v", err)
+	}
 	if len(got) != 3 {
 		t.Fatalf("expected 3 windows, got %d", len(got))
 	}
@@ -68,7 +74,10 @@ func TestParseWindows(t *testing.T) {
 func TestParsePanes(t *testing.T) {
 	out := "main" + sep + "0" + sep + "0" + sep + "title one" + sep + "nvim" + sep + "1" + "\n" +
 		"main" + sep + "0" + sep + "1" + sep + "title two" + sep + "zsh" + sep + "0"
-	got := parsePanes(out)
+	got, err := parsePanes(out)
+	if err != nil {
+		t.Fatalf("parsePanes: %v", err)
+	}
 	if len(got) != 2 {
 		t.Fatalf("expected 2 panes, got %d", len(got))
 	}

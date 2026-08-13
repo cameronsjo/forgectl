@@ -34,7 +34,10 @@ type Client struct {
 	// getuid is os.Getuid, NOT os.Geteuid, and the distinction is
 	// load-bearing: tmux's own make_label() builds the default socket
 	// directory from getuid(), so matching it exactly is what makes the
-	// derived path the same path tmux would use. Under a setuid/setgid
+	// derived path the same path tmux would use. Verified against tmux
+	// master, tmux.c make_label(): `uid = getuid();` then
+	// `xasprintf(&base, "%s/tmux-%ld", path, (long)uid);` — real uid, and the
+	// same value it later compares st_uid against. Under a setuid/setgid
 	// forgectl the two diverge, and the failure is fail-OPEN — we would lstat
 	// a tmux-<euid> directory that does not exist and classify a LIVE server
 	// as serverAbsentDefault, the one classification meaning "proceed".
