@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -65,13 +66,18 @@ type tmuxLedger struct {
 	// window is gone by the time verification lists. This is forgectl#242's
 	// exact failure, and the only way to reach the gone branch honestly.
 	diesOnDispatch map[string]bool
+	// dieAll is diesOnDispatch for every window, for callers that would
+	// otherwise have to spell a derived window name (a local review's, say).
+	dieAll bool
 	// launchFails names windows whose new-window call itself errors, leaving a
 	// prepared clean room behind.
 	launchFails map[string]bool
-	// failListAfter makes list-windows error once it has been called this many
-	// times (0 disables). Admission lists first, verification second, so 1 fails
-	// exactly the verification list.
-	failListAfter int
+	// listErr, when set, is returned once list-windows has been called more than
+	// listErrAfter times. Bulk lists at admission and again at verification, so
+	// listErrAfter=1 fails exactly the verification sweep; a single review never
+	// reaches admission, so 0 fails its only list.
+	listErr      error
+	listErrAfter int
 
 	listCalls   int
 	windowCalls int
@@ -87,17 +93,28 @@ func newTmuxLedger(session string) *tmuxLedger {
 	}
 }
 
-// runner wires the ledger into a FakeRunner that also answers the gh/git calls
-// Prepare makes. RunFunc can be called concurrently (PrepareMany fans out), so
-// every ledger read and write is under the mutex.
+// runner wires the ledger into a FakeRunner that also answers the `gh pr view`
+// call a remote Prepare makes.
 func (l *tmuxLedger) runner() *exec.FakeRunner {
-	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+	return l.runnerWith(func(name string, args []string) (string, error) {
 		if name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view" {
 			return `{"headRefName":"feature","headRefOid":"abc123",` +
 				`"headRepositoryOwner":{"login":"cameronsjo"},"headRepository":{"name":"forgectl"}}`, nil
 		}
+		return "", nil
+	})
+}
+
+// runnerWith answers every tmux call from the ledger and hands everything else
+// to fallback — the seam a local review needs, since PrepareLocal wants real
+// `git rev-parse` answers rather than a PR head.
+//
+// RunFunc can be called concurrently (PrepareMany fans out), so every ledger
+// read and write below is under the mutex.
+func (l *tmuxLedger) runnerWith(fallback func(string, []string) (string, error)) *exec.FakeRunner {
+	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		if name != "tmux" || len(args) == 0 {
-			return "", nil
+			return fallback(name, args)
 		}
 		switch args[0] {
 		case "-V":
@@ -123,8 +140,8 @@ func (l *tmuxLedger) listWindows() (string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.listCalls++
-	if l.failListAfter > 0 && l.listCalls > l.failListAfter {
-		return "", fmt.Errorf("boom: tmux exploded")
+	if l.listErr != nil && l.listCalls > l.listErrAfter {
+		return "", l.listErr
 	}
 	rows := make([]string, 0, len(l.live))
 	for i, w := range l.live {
@@ -147,7 +164,7 @@ func (l *tmuxLedger) newWindow(args []string) (string, error) {
 	}
 	l.nextID++
 	id := fmt.Sprintf("@%d", l.nextID)
-	if !l.diesOnDispatch[name] {
+	if !l.dieAll && !l.diesOnDispatch[name] {
 		l.live = append(l.live, ledgerWindow{id: id, name: name})
 	}
 	return l.identity(id), nil
@@ -310,7 +327,8 @@ func TestLaunchPicked_VerificationListErrorIsUnknown(t *testing.T) {
 	readLog := captureCompletionLog(t)
 
 	ledger := newTmuxLedger("forgectl")
-	ledger.failListAfter = 1 // admission's list succeeds; verification's does not
+	// Admission's list succeeds; the verification sweep's does not.
+	ledger.listErr, ledger.listErrAfter = errors.New("boom: tmux exploded"), 1
 	fake := ledger.runner()
 	client := verifyingClient(t, ledger, fake)
 
