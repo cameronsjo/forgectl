@@ -97,8 +97,9 @@ func TestProjectCandidateLine_SanitizesAndMarksMirror(t *testing.T) {
 	}
 }
 
-func TestSanitizeCandidate_ComposesSharedControlsWithTabLayoutRule(t *testing.T) {
-	if got, want := sanitizeCandidate("left\x1b\t\nright"), "left   right"; got != want {
+func TestSanitizeCandidate_ComposesSharedBidiAndControlsWithTabLayoutRule(t *testing.T) {
+	rlo := string(rune(0x202e))
+	if got, want := sanitizeCandidate("left"+rlo+"\x1b\t\nright"), "left    right"; got != want {
 		t.Errorf("sanitizeCandidate = %q, want %q", got, want)
 	}
 }
