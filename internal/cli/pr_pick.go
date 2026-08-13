@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 
 	"github.com/charmbracelet/huh"
@@ -12,6 +13,8 @@ import (
 	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/pr"
 )
+
+var pickPRsFn = pickPRs
 
 // newPrPickCmd builds `forgectl pr pick`. It needs cfg to launch the review
 // agent (Launch resolves the claude posture from the launch profile).
@@ -34,7 +37,9 @@ at launch, so a bulk pick never re-opens a review you've finished. Bulk
 launches are capped at 4 concurrent reviews by default (override via [pr]
 max_concurrent in config.toml); PRs past the cap are deferred, not prepared.
 The cap governs this bulk 'pick' command only — a single 'forgectl pr <ref>'
-review bypasses admission by design.`,
+review bypasses admission by design. With both stdin and stdout attached to terminals,
+pick uses the existing multiselect. Otherwise it writes sanitized owner/repo#N candidates
+to stdout and exits 1; each printed ref works with forgectl pr <ref>.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -50,7 +55,7 @@ review bypasses admission by design.`,
 			}
 
 			store := pr.LoadReviewed(reviewedPath)
-			selected, err := pickPRs(prs, store)
+			selected, err := choosePRs(cmd, prs, store)
 			if err != nil {
 				return err
 			}
@@ -61,6 +66,33 @@ review bypasses admission by design.`,
 			return launchPicked(ctx, client, cfg, cmd, selected, store)
 		},
 	}
+}
+
+func choosePRs(cmd *cobra.Command, prs []pr.PR, store *pr.ReviewedStore) ([]pr.PR, error) {
+	if isInteractiveTTY() {
+		return pickPRsFn(prs, store)
+	}
+	if err := writePRCandidates(cmd.OutOrStdout(), prs, store); err != nil {
+		return nil, err
+	}
+	return nil, WithExitCode(fmt.Errorf("%d open PRs require a selection, and there is no interactive terminal — pass one printed owner/repo#N to `forgectl pr <ref>`, inspect the inventory with `forgectl pr prs --json`, or rerun `forgectl pr pick` interactively; candidates are on stdout", len(prs)), 1)
+}
+
+func writePRCandidates(out io.Writer, prs []pr.PR, store *pr.ReviewedStore) error {
+	for _, item := range prs {
+		if _, err := fmt.Fprintln(out, prCandidateLine(item, store)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func prCandidateLine(item pr.PR, store *pr.ReviewedStore) string {
+	line := item.Ref.String() + "  " + item.Title
+	if pr.Dimmed(item, store) {
+		line += "  (reviewed)"
+	}
+	return sanitizeTerm(line)
 }
 
 // pickPRs runs the multiselect and returns the chosen PRs (input PR order

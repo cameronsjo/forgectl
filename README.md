@@ -36,8 +36,10 @@ forgectl projects list [query]           # list all projects: local clones + git
 forgectl projects list --json            # machine-readable JSON (safe to pipe; degradation notes go to stderr)
 forgectl projects list --host github     # filter to one host: github | gitea
 forgectl projects list --host gitea forge  # host filter + name substring
-forgectl projects pick [query]           # interactive picker across the full inventory; clones uncloned repos before opening (aliases: p, open)
-forgectl projects                        # shorthand for pick (no args → TUI selector)
+forgectl projects pick [query]           # picker with both descriptors TTY; otherwise sanitized candidates on stdout + exit 1 (aliases: p, open)
+forgectl projects                        # shorthand for pick; same headless candidate/exit-1 contract
+forgectl projects clone [query]          # picker with both descriptors TTY; otherwise candidates + exit 1 (use sshUrl from list --json)
+forgectl projects worktree <query> [branch] # same ambiguity contract as clone; use sshUrl from list --json
 
 # pr — clean-room pull-request review (the flagship review family)
 forgectl pr <ref>                        # prepare + launch an isolated, deny-by-default review (owner/repo#N, a PR URL, or a bare N)
@@ -45,7 +47,7 @@ forgectl pr <ref> --dry-run              # resolve + print the plan, create noth
 forgectl pr prs                          # cross-repo open PRs (authored, assigned, review-requested); reviewed rows dimmed
 forgectl pr prs --json                   # machine-readable JSON (safe to pipe; notes go to stderr)
 forgectl pr dash                         # dashboard: active reviews, PRs awaiting you, your open PRs
-forgectl pr pick                         # multiselect open PRs → spin up reviews in bulk (reviewed PRs skipped, capped at 4 concurrent via [pr] max_concurrent)
+forgectl pr pick                         # multiselect with both descriptors TTY; otherwise sanitized owner/repo#N rows on stdout + exit 1
 forgectl pr reviewed mark <ref>          # mark a PR reviewed (dims it until the PR sees new activity)
 forgectl pr reviewed unmark <ref>        # clear a PR's reviewed mark
 forgectl pr reviewed sync                # prune reviewed marks for PRs that are no longer open
@@ -53,6 +55,17 @@ forgectl pr list                         # list active clean-room review session
 forgectl pr attach <breadcrumb>          # jump to a review window (also: open <b>, teardown <b>)
                                           #   <breadcrumb> is the session path `pr list` prints
 forgectl pr keys                         # tmux cheatsheet for driving a review
+
+When both stdin and stdout are terminals, these selectors keep their existing
+pickers. With either descriptor non-TTY, `projects`/`projects pick` emit one
+sanitized display identity per candidate on stdout and exit 1; narrow pick to a
+unique project name when possible or inspect `projects list --json`. Ambiguous
+`projects clone` and `projects worktree` use the same rows and exit 1; obtain a
+candidate's `sshUrl` from `projects list --json` for an exact target, or rerun
+interactively when it has none. Project display rows are not universal command
+arguments. Headless `pr pick` similarly emits sanitized `owner/repo#N` rows and
+exits 1; each row is directly usable with `forgectl pr <ref>`, while `pr prs
+--json` remains the stable inventory.
 
 # launch — per-project Claude Code / Codex CLI launcher (alias: cl)
 forgectl launch                    # drop straight into the resolved profile (no prompt)
