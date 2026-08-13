@@ -20,6 +20,11 @@ const (
 
 	usageLeafMode = 0o700
 	usageFileMode = 0o600
+	// Directories forgectl has to create on the way to the state base but does
+	// not own — a missing ~/.local, say. They get the conventional mode, since
+	// a statistics opt-in has no business deciding the permissions of a
+	// general-purpose parent other tools will share.
+	usageAncestorMode = 0o755
 )
 
 // UsageStorePaths names every file collection can touch, so documentation,

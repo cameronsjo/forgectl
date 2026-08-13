@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"golang.org/x/sys/unix"
 
@@ -44,8 +45,8 @@ func unsafeStore(format string, args ...any) error {
 func pinUsageLeaf(base string, create bool) (int, error) {
 	baseFD, err := unix.Open(base, dirOpenFlags, 0)
 	if errors.Is(err, unix.ENOENT) && create {
-		if mkErr := os.MkdirAll(base, usageLeafMode); mkErr != nil {
-			return -1, unsafeStore("create state base: %s", mkErr)
+		if mkErr := createUsageBase(base); mkErr != nil {
+			return -1, mkErr
 		}
 		baseFD, err = unix.Open(base, dirOpenFlags, 0)
 	}
@@ -80,6 +81,25 @@ func pinUsageLeaf(base string, create bool) (int, error) {
 		return -1, err
 	}
 	return stateFD, nil
+}
+
+// createUsageBase materialises the state base, private to this user, without
+// imposing that privacy on directories it merely passes through.
+//
+// The split matters because the base is often several levels below a shared
+// root an operator has not created yet — enabling statistics on a machine with
+// no ~/.local should not be what decides ~/.local is 0700 forever. Ancestors
+// therefore get the conventional directory mode and only the base itself is
+// narrowed; the leaf beneath it, which is what actually holds the data, is
+// created and pinned at usageLeafMode by the caller either way.
+func createUsageBase(base string) error {
+	if err := os.MkdirAll(filepath.Dir(base), usageAncestorMode); err != nil {
+		return unsafeStore("create state base ancestors: %s", err)
+	}
+	if err := os.Mkdir(base, usageLeafMode); err != nil && !errors.Is(err, os.ErrExist) {
+		return unsafeStore("create state base: %s", err)
+	}
+	return nil
 }
 
 // verifyUsageLeaf proves the pinned descriptor is the same object the leaf

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // usageScratch points the whole store at a throwaway state base. No test in
@@ -55,6 +57,40 @@ func TestUsageNamespace_CreatesExactModesAndNames(t *testing.T) {
 	}
 	if len(entries) != 2 {
 		t.Fatalf("leaf holds %d entries, want exactly the data and lock files", len(entries))
+	}
+}
+
+// Enabling statistics on a machine that has no ~/.local must not be what
+// decides ~/.local is private. Only the state base forgectl owns is narrowed;
+// directories it merely had to pass through keep the conventional mode.
+func TestUsageNamespace_LeavesAncestorsConventional(t *testing.T) {
+	// Pinned so the assertion measures the requested mode rather than whatever
+	// umask the developer or runner happens to carry.
+	prevMask := unix.Umask(0o022)
+	t.Cleanup(func() { unix.Umask(prevMask) })
+
+	root := t.TempDir()
+	base := filepath.Join(root, "local", "state")
+	prev := usageBase
+	usageBase = func() (string, error) { return base, nil }
+	t.Cleanup(func() { usageBase = prev })
+
+	if err := recordOne(t, "2026-08-13T10:00:00Z"); err != nil {
+		t.Fatalf("RecordUsage: %v", err)
+	}
+
+	for path, wantMode := range map[string]os.FileMode{
+		filepath.Join(root, "local"):    0o755,
+		base:                            0o700,
+		filepath.Join(base, "forgectl"): 0o700,
+	} {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != wantMode {
+			t.Errorf("%s mode = %o, want %o", path, got, wantMode)
+		}
 	}
 }
 
