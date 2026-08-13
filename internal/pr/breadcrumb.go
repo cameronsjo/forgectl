@@ -38,6 +38,18 @@ func breadcrumbFilename(ref Ref, createdAt time.Time) string {
 	return fmt.Sprintf("%s-%s-%d-%d.json", ref.Owner, ref.Repo, ref.Number, createdAt.UnixNano())
 }
 
+// writeBreadcrumb is the client-owned write path: it takes the same mutex
+// teardown holds, so one Client cannot replace a breadcrumb while another of
+// its own operations is reading and verifying it. Breadcrumb names are already
+// unique by ref and creation nanosecond, so this rarely contends — having a
+// single ownership point is what makes the invariant explicit rather than
+// incidental.
+func (c *Client) writeBreadcrumb(ref Ref, bc Breadcrumb) (string, error) {
+	c.sessionsMu.Lock()
+	defer c.sessionsMu.Unlock()
+	return writeBreadcrumb(c.sessionsDir, ref, bc)
+}
+
 // writeBreadcrumb writes bc into sessionsDir and returns the file path. The
 // directory is created if absent (0700 — session state is private).
 func writeBreadcrumb(sessionsDir string, ref Ref, bc Breadcrumb) (string, error) {

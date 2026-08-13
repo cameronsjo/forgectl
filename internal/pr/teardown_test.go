@@ -109,6 +109,77 @@ func TestTeardown_CoveredRootQuarantineHasNoPhantomNestedMove(t *testing.T) {
 	}
 }
 
+// TestTeardown_LiveOrderRemovesBreadcrumbLast pins the live branch's ordering
+// against the stale branch's: the breadcrumb is the LAST thing to go, still on
+// disk when the tmux kill runs. If it were unlinked earlier, a failure partway
+// through would leave a torn-down workspace with no record of it — the inverse
+// of the leak #212 fixes, and worse, because nothing would point at it.
+func TestTeardown_LiveOrderRemovesBreadcrumbLast(t *testing.T) {
+	var breadcrumbAtTmux bool
+	var bcPath string
+	fake := &exec.FakeRunner{}
+	fake.RunFunc = func(name string, args []string) (string, error) {
+		if name == "tmux" && len(args) > 0 && args[0] == "kill-window" {
+			_, err := os.Stat(bcPath)
+			breadcrumbAtTmux = err == nil
+		}
+		return "", nil
+	}
+	c := testClient(t, fake)
+	ref := Ref{Owner: "o", Repo: "r", Number: 11}
+	path, ws := seedSession(t, c, ref, time.Now().UTC())
+	bcPath = path
+
+	if err := c.Teardown(context.Background(), path); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if !breadcrumbAtTmux {
+		t.Error("the breadcrumb must still exist when the tmux kill runs — it is removed last")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("breadcrumb should be gone once the live teardown completes")
+	}
+	if _, err := os.Stat(ws); !os.IsNotExist(err) {
+		t.Error("workspace should be removed by the live branch")
+	}
+}
+
+// TestTeardown_BranchesAreDisjoint pins the branch boundary by its observable
+// signature. The live branch necessarily reaches the Runner (the tmux kill);
+// the stale branch necessarily does not, and must not, because everything the
+// Runner does there would act on a workspace that is gone. So a nonempty
+// Runner ledger for a stale record — or an empty one for a live record — means
+// the branches have merged.
+//
+// The stale branch is also structurally unreachable after a live failure:
+// Teardown's classification switch returns discard's error directly and has no
+// fallback arm. There is no portable way to force a mid-teardown failure
+// without a chmod assumption (quarantine.Restore treats an occupied
+// destination as non-fatal by design, and sandbox.Teardown's only failure is
+// an os.RemoveAll error), so that half is pinned by construction rather than
+// by a contrived fault injection.
+func TestTeardown_BranchesAreDisjoint(t *testing.T) {
+	liveFake := &exec.FakeRunner{}
+	liveClient := testClient(t, liveFake)
+	livePath, _ := seedSession(t, liveClient, Ref{Owner: "o", Repo: "r", Number: 12}, time.Now().UTC())
+	if err := liveClient.Teardown(context.Background(), livePath); err != nil {
+		t.Fatalf("live Teardown: %v", err)
+	}
+	if _, ok := findCall(liveFake.Calls, "tmux"); !ok {
+		t.Errorf("the live branch must reach tmux; got %+v", liveFake.Calls)
+	}
+
+	staleFake := &exec.FakeRunner{}
+	staleClient := testClient(t, staleFake)
+	stalePath, _ := seedStaleSession(t, staleClient, Ref{Owner: "o", Repo: "r", Number: 13}, time.Now().UTC())
+	if err := staleClient.Teardown(context.Background(), stalePath); err != nil {
+		t.Fatalf("stale Teardown: %v", err)
+	}
+	if len(staleFake.Calls) != 0 {
+		t.Errorf("the stale branch must never reach the Runner; got %+v", staleFake.Calls)
+	}
+}
+
 func TestTeardown_RejectsNonMember(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := testClient(t, fake)

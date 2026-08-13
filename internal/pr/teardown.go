@@ -1,6 +1,7 @@
 package pr
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -11,46 +12,55 @@ import (
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
-// Teardown discards the review session recorded at path: it removes the
-// sandbox workspace, restores the quarantined instruction files, kills the
-// tmux window, and deletes the breadcrumb.
+// Teardown discards the review session recorded at path.
 //
-// path MUST be an EXACT-MATCH member of the current breadcrumb set — a
+// path MUST resolve to a member of the current breadcrumb set — a
 // set-membership check, never a glob or a prefix match — so code under review
-// cannot invoke teardown against an arbitrary path. Membership is resolved
-// against the live session-state dir listing (symlink-resolved), and the
-// breadcrumb is then loaded through the same location+content validation as
-// every other consumer.
+// cannot invoke teardown against an arbitrary path. Membership yields the
+// AUTHORITATIVE file (see resolveBreadcrumbMember); nothing downstream acts on
+// the caller's operand.
+//
+// Two branches, decided by the recorded workspace's state, and the order is
+// load-bearing:
+//
+//	membership -> record validation -> workspace classification
+//	  missing -> identity/byte/field recheck -> breadcrumb-ONLY unlink
+//	  live    -> strict live reload -> quarantine restore -> sandbox teardown
+//	          -> best-effort tmux kill -> breadcrumb unlink
+//	  invalid -> refusal
+//
+// The stale decision happens BEFORE any live teardown facility, and the live
+// branch never falls back to the stale unlink once quarantine restore, sandbox
+// teardown, or tmux action has begun. A live-to-missing race can fail and leak
+// through the existing error handling, but it cannot cross branches after
+// mutation has started.
 func (c *Client) Teardown(ctx context.Context, path string) error {
-	if err := c.assertMember(path); err != nil {
-		return err
-	}
-	sess, err := c.loadSession(path)
-	if err != nil {
-		return err
-	}
-	return c.discard(ctx, sess)
-}
+	// Held across membership, classification, and the final unlink so this
+	// Client cannot race itself. Cleanup deliberately does NOT hold it around
+	// its Teardown calls; each candidate reacquires it here.
+	c.sessionsMu.Lock()
+	defer c.sessionsMu.Unlock()
 
-// assertMember rejects any path that is not an exact member of the known
-// breadcrumb set. The comparison is on symlink-resolved absolute paths, so
-// neither a symlink nor a "./" alias nor a glob can slip a non-member through.
-func (c *Client) assertMember(path string) error {
-	want := resolvePath(path)
-	entries, err := os.ReadDir(c.sessionsDir)
+	member, err := c.resolveBreadcrumbMember(path)
 	if err != nil {
-		return fmt.Errorf("read pr sessions dir: %w", err)
+		return err
 	}
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
-			continue
+
+	avail, availErr := classifyWorkspace(member.breadcrumb.Workspace)
+	switch avail {
+	case workspaceAvailabilityMissing:
+		return c.discardStale(member)
+	case workspaceAvailabilityLive:
+		// Strict live reload through the authoritative path — never the
+		// operand — so the session acted on is the record just verified.
+		sess, err := c.loadSession(member.path)
+		if err != nil {
+			return err
 		}
-		if resolvePath(filepath.Join(c.sessionsDir, e.Name())) == want {
-			return nil
-		}
+		return c.discard(ctx, sess)
+	default:
+		return fmt.Errorf("cannot tear down breadcrumb %s: %w", member.path, availErr)
 	}
-	slog.Error("Teardown target is not a known session breadcrumb; refusing.", "path", path)
-	return fmt.Errorf("%q is not a known pr session breadcrumb", path)
 }
 
 // resolvePath returns the symlink-resolved absolute form of path, falling back
@@ -63,6 +73,113 @@ func resolvePath(path string) string {
 		return filepath.Clean(abs)
 	}
 	return filepath.Clean(path)
+}
+
+// discardStale removes a breadcrumb whose workspace is gone — and removes
+// NOTHING else.
+//
+// This is the one path in forgectl that deletes a file on the strength of a
+// record rather than a live sandbox, so it re-proves every fact it is acting
+// on immediately before acting. Everything membership captured is compared
+// against the filesystem again:
+//
+//	re-Lstat the canonical session directory  -> SameFile as at check time
+//	re-Lstat the authoritative member         -> SameFile as at check time
+//	re-read the authoritative path            -> byte-identical
+//	re-decode and re-validate                 -> every security field identical
+//	re-classify the recorded workspace        -> still cleanly missing
+//	os.Remove(authoritative member)
+//
+// Any drift refuses: an identity mismatch, a symlink swapped in, a byte or
+// field change, the record disappearing or being recreated, the parent
+// directory swapped, an invalid decode, the workspace REAPPEARING, or any
+// permission or I/O error. A refusal leaks a breadcrumb; deleting on
+// uncertainty loses a record that may still describe a real review. Leaking is
+// recoverable, so leaking is the failure mode chosen.
+//
+// It issues ZERO Runner calls and performs no quarantine restore, sandbox
+// teardown, git, tmux, workspace write, or workspace removal. There is nothing
+// to restore — the workspace is already gone — and a stale record must never
+// be able to reach a facility that deletes directories.
+//
+// HONEST RESIDUAL: Go's portable standard library has no compare-and-unlink.
+// A same-uid actor can still race between the final checks and os.Remove, and
+// a parent can be renamed after its SameFile check. That is accepted, not
+// overlooked: the session directory is 0700, so such an actor can already
+// unlink or rewrite the breadcrumb directly without going through forgectl.
+// This protocol prevents benign in-process races and refuses observed drift;
+// it does not claim to defeat a hostile same-uid concurrent writer. Making
+// that claim would need platform-specific directory-handle and unlink support,
+// which is a different piece of work than #212.
+func (c *Client) discardStale(member breadcrumbMember) error {
+	slog.Debug("Preparing to discard a stale review breadcrumb.",
+		"ref", member.breadcrumb.Ref, "path", member.path)
+
+	canonicalDir, err := filepath.EvalSymlinks(c.sessionsDir)
+	if err != nil {
+		return fmt.Errorf("re-resolve pr sessions dir: %w", err)
+	}
+	dirInfo, err := os.Lstat(canonicalDir)
+	if err != nil {
+		return fmt.Errorf("re-stat pr sessions dir: %w", err)
+	}
+	if !os.SameFile(dirInfo, member.dirInfo) {
+		return fmt.Errorf("pr sessions dir %s changed identity during teardown; refusing to remove %s",
+			canonicalDir, member.path)
+	}
+
+	// A member that vanished before this check is refused rather than treated
+	// as an already-successful removal: a concurrently completed teardown can
+	// report its own success, and silently succeeding here would hide a
+	// replacement race.
+	info, err := os.Lstat(member.path)
+	if err != nil {
+		return fmt.Errorf("re-stat breadcrumb %s: %w", member.path, err)
+	}
+	if !os.SameFile(info, member.info) {
+		return fmt.Errorf("breadcrumb %s changed identity during teardown; refusing to remove it", member.path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to remove it", member.path)
+	}
+
+	bc, data, err := loadBreadcrumbRecord(member.path, c.sessionsDir)
+	if err != nil {
+		return fmt.Errorf("re-validate breadcrumb before removal: %w", err)
+	}
+	if !bytes.Equal(data, member.bytes) {
+		return fmt.Errorf("breadcrumb %s changed on disk during teardown; refusing to remove it", member.path)
+	}
+	if !sameBreadcrumbRecord(bc, member.breadcrumb) {
+		return fmt.Errorf("breadcrumb %s decoded differently during teardown; refusing to remove it", member.path)
+	}
+
+	// The authority for this deletion is the workspace's absence, so re-prove
+	// it last, closest to the unlink. A workspace that came back means the
+	// record is live again and must not be discarded as stale.
+	avail, availErr := classifyWorkspace(bc.Workspace)
+	if avail != workspaceAvailabilityMissing {
+		return fmt.Errorf("workspace for breadcrumb %s is no longer cleanly absent; refusing to remove it: %w",
+			member.path, availErr)
+	}
+
+	if err := os.Remove(member.path); err != nil {
+		return fmt.Errorf("remove breadcrumb %s: %w", member.path, err)
+	}
+	slog.Info("Successfully discarded a stale review breadcrumb.", "ref", bc.Ref)
+	return nil
+}
+
+// sameBreadcrumbRecord reports whether two decoded records agree on every
+// field that carries security meaning. Byte equality already implies this;
+// checking both means a future decoder change cannot quietly widen what
+// "unchanged" means.
+func sameBreadcrumbRecord(a, b Breadcrumb) bool {
+	return a.Workspace == b.Workspace &&
+		a.Ref == b.Ref &&
+		a.Agent == b.Agent &&
+		a.Local == b.Local &&
+		a.CreatedAt.Equal(b.CreatedAt)
 }
 
 // discard performs the actual teardown for an already-validated session: undo
