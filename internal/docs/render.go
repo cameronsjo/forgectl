@@ -99,6 +99,23 @@ var svgNumericish = regexp.MustCompile(`^[-+.,\s]*[0-9][-+0-9.,eE\s]*(px|em|rem|
 // svgTransform matches the SVG transform functions and nothing else.
 var svgTransform = regexp.MustCompile(`^(?i)(\s*(matrix|translate|scale|rotate|skewX|skewY)\s*\([-+0-9.,eE\s]*\)\s*)+$`)
 
+// svgNamespace accepts only the canonical, case-sensitive SVG namespace.
+// Omission remains valid; any authored alternative loses this attribute while
+// the rest of the allowlisted SVG remains intact.
+var svgNamespace = regexp.MustCompile(`^http://www\.w3\.org/2000/svg$`)
+
+var svgOpeningTag = regexp.MustCompile(`(?is)<svg(?:\s[^<>]*)?>`)
+var svgNamespaceAttribute = regexp.MustCompile(`(?i)\s+xmlns(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?`)
+
+func dropDuplicateSVGNamespaces(rendered []byte) []byte {
+	return svgOpeningTag.ReplaceAllFunc(rendered, func(tag []byte) []byte {
+		if len(svgNamespaceAttribute.FindAllIndex(tag, -1)) < 2 {
+			return tag
+		}
+		return svgNamespaceAttribute.ReplaceAll(tag, nil)
+	})
+}
+
 // allowInlineSVG opens the sanitizer to hand-authored inline SVG — the reader's
 // diagrams-as-source-in-the-doc case (forgectl#93's pan/zoom requirement).
 //
@@ -193,7 +210,8 @@ func allowInlineSVG(p *bluemonday.Policy) {
 
 	// The root element's framing attributes. viewBox is what makes pan/zoom
 	// possible at all, so it is the load-bearing one here.
-	p.AllowAttrs("viewBox", "preserveAspectRatio", "xmlns", "role", "aria-label").OnElements("svg")
+	p.AllowAttrs("viewBox", "preserveAspectRatio", "role", "aria-label").OnElements("svg")
+	p.AllowAttrs("xmlns").Matching(svgNamespace).OnElements("svg")
 	p.AllowAttrs("width", "height").Matching(svgNumericish).OnElements("svg", "rect", "marker", "mask", "symbol")
 
 	// Geometry.
@@ -284,5 +302,5 @@ func Render(source []byte) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("render markdown: %w", err)
 	}
-	return string(sanitizer.SanitizeBytes(buf.Bytes())), nil
+	return string(sanitizer.SanitizeBytes(dropDuplicateSVGNamespaces(buf.Bytes()))), nil
 }

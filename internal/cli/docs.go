@@ -50,9 +50,12 @@ line replaces that default set entirely.
 The server binds loopback-only by default and rejects any request whose
 Host header isn't 127.0.0.1/localhost/::1 — DNS rebinding defense, not just
 a bind-address restriction. Binding --addr to a non-loopback address adds that
-address to the allowlist and REQUIRES a bearer token, generating one if you did
-not pass --token: exposing the reader to the network and authenticating it are
-one decision, never two.`,
+address to the allowlist and REQUIRES a bearer token, generating one if you do
+not pass --token-file: exposing the reader to the network and authenticating it
+are one decision, never two. A token file must be an absolute owner-only regular
+file containing one RFC 6750 bearer token plus an optional final LF or CRLF.
+Protected servers cannot be opened directly with --open because browser
+navigation cannot attach an Authorization header.`,
 	}
 	cmd.AddCommand(
 		newDocsServeCmd(deps),

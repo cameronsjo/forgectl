@@ -28,7 +28,7 @@ const shutdownGrace = 5 * time.Second
 func newDocsServeCmd(deps module.Deps) *cobra.Command {
 	var addr string
 	var openFlag bool
-	var token string
+	var tokenFile string
 
 	cmd := &cobra.Command{
 		Use:   "serve [dir|file ...]",
@@ -43,17 +43,18 @@ func newDocsServeCmd(deps module.Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runDocsServe(cmd, deps, idx, addr, openFlag, token)
+			return runDocsServe(cmd, deps, idx, addr, openFlag, tokenFile)
 		},
 	}
+	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		if err != nil && err.Error() == "unknown flag: --token" {
+			return errors.New("--token was removed because command-line values are visible to other processes; use --token-file instead")
+		}
+		return err
+	})
 	cmd.Flags().StringVar(&addr, "addr", "", "bind address (default: [docs].addr, else 127.0.0.1 with a random port)")
 	cmd.Flags().BoolVar(&openFlag, "open", false, "open the system browser once the server is listening")
-	// The help text names the argv exposure because a caller cannot see it: a
-	// token passed here is visible to every local process via the process table
-	// (/proc/<pid>/cmdline on Linux, ps elsewhere). The GENERATED path never
-	// touches argv, so the safest usage is to pass no token and read the one the
-	// server prints.
-	cmd.Flags().StringVar(&token, "token", "", "require this bearer token on every request; visible to other local processes via the process table, so prefer omitting it and letting a non-loopback --addr generate one")
+	cmd.Flags().StringVar(&tokenFile, "token-file", "", "read the bearer token from an absolute owner-only regular file")
 	return cmd
 }
 
@@ -82,8 +83,31 @@ func allowedHosts(bindAddr string) []string {
 	return allowed
 }
 
-// resolveToken decides the bearer token a docs server should require, given the
-// operator's --token flag and the address being bound.
+type docsTokenSource uint8
+
+const (
+	docsTokenNone docsTokenSource = iota
+	docsTokenGenerated
+	docsTokenFromFile
+)
+
+type resolvedDocsToken struct {
+	value  string
+	source docsTokenSource
+}
+
+func docsAuthStartupLine(token resolvedDocsToken) string {
+	if token.value == "" {
+		return ""
+	}
+	if token.source == docsTokenFromFile {
+		return "  auth: bearer token required (from --token-file)"
+	}
+	return fmt.Sprintf("  auth: bearer token required (%s)", token.value)
+}
+
+// resolveDocsToken decides the bearer token a docs server should require,
+// given the operator's --token-file path and the address being bound.
 //
 // The rule: loopback needs no token; anything else requires one, and if the
 // operator did not supply one it is GENERATED rather than starting
@@ -103,14 +127,22 @@ func allowedHosts(bindAddr string) []string {
 // whether or not the server actually followed it — the failure mode where a
 // green test proves nothing about production. Extracting it means the test and
 // the server read the same rule.
-func resolveToken(tokenFlag, bindAddr string) (string, error) {
-	if tokenFlag != "" {
-		return tokenFlag, nil // an operator-supplied token is never replaced
+func resolveDocsToken(tokenFile, bindAddr string) (resolvedDocsToken, error) {
+	if tokenFile != "" {
+		token, err := acquireDocsTokenFile(tokenFile)
+		if err != nil {
+			return resolvedDocsToken{}, err
+		}
+		return resolvedDocsToken{value: token, source: docsTokenFromFile}, nil
 	}
 	if httpsrv.IsLoopbackAddr(bindAddr) {
-		return "", nil
+		return resolvedDocsToken{}, nil
 	}
-	return httpsrv.GenerateToken()
+	token, err := httpsrv.GenerateToken()
+	if err != nil {
+		return resolvedDocsToken{}, err
+	}
+	return resolvedDocsToken{value: token, source: docsTokenGenerated}, nil
 }
 
 // runDocsServe binds the listener, wires the security middleware chain
@@ -134,7 +166,7 @@ func resolveToken(tokenFlag, bindAddr string) (string, error) {
 // handler applies it again on the way past; setting the same fixed headers
 // twice is idempotent, and having it in both places means neither the handler
 // nor the chain depends on the other remembering.
-func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addrFlag string, openFlag bool, tokenFlag string) error {
+func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addrFlag string, openFlag bool, tokenFile string) error {
 	bindAddr := addrFlag
 	if bindAddr == "" {
 		bindAddr = deps.Cfg.Docs.Addr
@@ -142,6 +174,11 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 	if bindAddr == "" {
 		bindAddr = httpsrv.LoopbackAddr
 	}
+	resolvedToken, err := resolveDocsToken(tokenFile, bindAddr)
+	if err != nil {
+		return err
+	}
+	token := resolvedToken.value
 
 	ln, err := httpsrv.Listen(bindAddr)
 	if err != nil {
@@ -163,11 +200,6 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 	// it exists to prevent. Both are correct together because Close is
 	// idempotent: whichever runs first does the work.
 	defer events.Close()
-
-	token, err := resolveToken(tokenFlag, bindAddr)
-	if err != nil {
-		return err
-	}
 
 	middleware := []func(http.Handler) http.Handler{
 		docspkg.SecurityHeaders,
@@ -209,8 +241,8 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "forgectl docs: serving %d doc(s) across %d root(s)\n", len(idx.List()), len(idx.Roots()))
 	fmt.Fprintf(out, "  %s\n", url)
-	if token != "" {
-		fmt.Fprintf(out, "  auth: bearer token required (%s)\n", token)
+	if authLine := docsAuthStartupLine(resolvedToken); authLine != "" {
+		fmt.Fprintln(out, authLine)
 	}
 	fmt.Fprintln(out, "  Ctrl-C to stop")
 

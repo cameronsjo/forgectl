@@ -133,6 +133,41 @@ func TestRender_InlineSVG_Survives(t *testing.T) {
 	}
 }
 
+func TestRender_InlineSVG_OnlyCanonicalNamespaceSurvives(t *testing.T) {
+	tests := []struct {
+		name      string
+		xmlns     string
+		wantXMLNS bool
+	}{
+		{name: "missing"},
+		{name: "canonical", xmlns: ` xmlns="http://www.w3.org/2000/svg"`, wantXMLNS: true},
+		{name: "empty", xmlns: ` xmlns=""`},
+		{name: "attacker", xmlns: ` xmlns="https://attacker.example/svg"`},
+		{name: "xhtml", xmlns: ` xmlns="http://www.w3.org/1999/xhtml"`},
+		{name: "mixed case", xmlns: ` xmlns="http://www.w3.org/2000/SVG"`},
+		{name: "padded", xmlns: ` xmlns=" http://www.w3.org/2000/svg "`},
+		{name: "duplicate alternative", xmlns: ` xmlns="https://attacker.example/svg" xmlns="http://www.w3.org/2000/svg"`},
+		{name: "canonical before duplicate alternative", xmlns: ` xmlns="http://www.w3.org/2000/svg" xmlns="https://attacker.example/svg"`},
+		{name: "canonical before malformed duplicate", xmlns: ` xmlns="http://www.w3.org/2000/svg" xmlns`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := `<svg` + tt.xmlns + ` viewBox="0 0 10 10"><rect x="1" y="2" width="3" height="4"/></svg>` + "\n"
+			out := renderOrFail(t, src)
+			hasXMLNS := strings.Contains(out, `xmlns="`)
+			if hasXMLNS != tt.wantXMLNS {
+				t.Errorf("xmlns presence = %v, want %v: %s", hasXMLNS, tt.wantXMLNS, out)
+			}
+			for _, want := range []string{"<svg", "<rect", `viewbox="0 0 10 10"`, `width="3"`, `height="4"`} {
+				if !strings.Contains(strings.ToLower(out), strings.ToLower(want)) {
+					t.Errorf("rejected namespace removed safe SVG feature %q: %s", want, out)
+				}
+			}
+		})
+	}
+}
+
 // viewBox must survive the sanitizer, but NOT necessarily with its authored
 // capitalization. bluemonday tokenizes through golang.org/x/net/html, which
 // lowercases attribute names, so the serialized output reads viewbox=. That is
