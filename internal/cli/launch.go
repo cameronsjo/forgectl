@@ -54,7 +54,8 @@ var launchModule = module.Manifest{
 // version/completion are intentionally absent — forgectl owns those at the root.
 var ownLaunchVerbs = map[string]bool{
 	"which": true, "edit": true, "init": true, "doctor": true, "migrate": true,
-	"help": true, "--help": true, "-h": true,
+	"stats": true,
+	"help":  true, "--help": true, "-h": true,
 }
 
 // isOwnLaunchVerb reports whether tok routes to the Cobra launch subtree — a
@@ -111,6 +112,7 @@ with "forgectl launch init".`,
 		newLaunchInitCmd(boundary),
 		newLaunchDoctorCmd(boundary, cfg),
 		newLaunchMigrateCmd(boundary),
+		newLaunchStatsCmd(),
 	)
 	applyAliases(cmd, launchAliases)
 	return cmd
@@ -131,6 +133,13 @@ func runLaunch(deps module.Deps, rest []string) (handled bool, err error) {
 // execs claude in place. On success it does not return (syscall.Exec replaces
 // the process).
 func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, args []string) error {
+	// Read the opt-in from the config.toml snapshot taken at process start,
+	// BEFORE the automatic legacy migration rewrites cfg.Launch below. The
+	// legacy decode already strips usage_stats (config.stripLegacyUsageOptIn);
+	// reading it here too means collection stays off even if a future
+	// migration path forgets.
+	usageEnabled := cfg.Launch.UsageStats
+
 	effLaunch, notice := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
 	if notice != "" {
 		fmt.Fprintln(os.Stderr, "forgectl: "+termsafe.SafeLine(notice))
@@ -205,7 +214,15 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	extra := launch.MergeMaps(bench.TelemetryEnv(cfg), profile.Env)
 	env := launch.MergeEnv(os.Environ(), extra)
 	slog.Debug("Preparing to exec harness.", "harness", termsafe.SafeLine(profile.Harness), "path", termsafe.QuotePath(binaryPath), "argc", len(harnessArgs), "match", termsafe.SafeLine(profile.Match))
-	return launch.Exec(binaryPath, harnessArgs, env)
+
+	// One event, immediately before the exec that would replace this process.
+	// Everything that can refuse the launch — profile validation, the Codex
+	// agents refusal, binary resolution — has already returned above, so a
+	// recorded row means forgectl really did attempt to hand off. It does not
+	// mean the harness started: nothing after syscall.Exec is observable.
+	sessionMode, posture := launchUsageClassification(args)
+	recordUsageSilently(usageEnabled, newLaunchUsageEvent(profile.Harness, profile.Model, sessionMode, posture))
+	return execHarness(binaryPath, harnessArgs, env)
 }
 
 // legacyShadowWarning reports the one-line #114 fallback-cliff warning when

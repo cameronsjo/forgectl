@@ -108,6 +108,13 @@ func (c Config) HasLaunchSection() bool {
 type LaunchConfig struct {
 	Defaults LaunchDefaults  `toml:"defaults"`
 	Projects []LaunchProject `toml:"project"`
+
+	// UsageStats is the informed opt-in for local launch statistics (#240).
+	// Absent and explicit false are both disabled, and nothing but an operator
+	// editing this key may set it: no migration, fallback, environment
+	// variable, init, doctor, or stats path ever writes true here. See
+	// internal/launch/usage.go for exactly what a recorded row contains.
+	UsageStats bool `toml:"usage_stats"`
 }
 
 // LaunchDefaults is [launch.defaults]: the base posture applied when no project
@@ -149,8 +156,15 @@ type LaunchProject struct {
 
 // IsZero reports whether the [launch] section was absent or empty — the signal
 // the launcher uses to fall back to a legacy claunch.conf.
+//
+// usage_stats counts toward non-empty, which changes how one specific operator
+// is routed: someone holding both a claunch.conf and a config.toml containing
+// nothing but the opt-in used to get wholesale legacy import and now gets the
+// additive shadow-merge in MergeLegacyIntoLaunch. Every legacy setting survives
+// either route — the difference is which code path carries it, and that is
+// worth stating here because the opt-in reads like it should be inert.
 func (lc LaunchConfig) IsZero() bool {
-	return len(lc.Projects) == 0 && lc.Defaults.isZero()
+	return len(lc.Projects) == 0 && lc.Defaults.isZero() && !lc.UsageStats
 }
 
 // WorkflowConfig is the [workflow] section: extra strip-list entries the
@@ -933,7 +947,7 @@ func LoadLegacyLaunch() (LaunchConfig, string, error) {
 		}
 		return LaunchConfig{}, path, fmt.Errorf("read legacy claunch.conf at %s: %w", path, err)
 	}
-	return lc, path, nil
+	return stripLegacyUsageOptIn(lc), path, nil
 }
 
 // ValidateLegacyLaunch decodes the legacy claunch.conf and returns any parse

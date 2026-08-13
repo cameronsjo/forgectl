@@ -485,6 +485,57 @@ New config and backup files are owner-only and no broader than `0600`; a restric
 
 > Absorbed from the standalone `claunch` tool. A `claunch='forgectl launch'` shell alias preserves the old muscle memory.
 
+### Local launch statistics
+
+`forgectl` can count the harness launches it attempts, locally and only when you
+ask it to. Collection is off unless `config.toml` says otherwise:
+
+```toml
+[launch]
+usage_stats = true
+```
+
+Nothing but that key turns it on — no upgrade, migration, or environment
+variable does, and a `usage_stats` in a legacy `claunch.conf` is ignored.
+
+When on, one line is appended to
+`${XDG_STATE_HOME:-~/.local/state}/forgectl/launch-usage.jsonl` immediately
+before each harness exec forgectl attempts:
+
+```json
+{"schema_version":1,"ts":"2026-08-13T19:42:17Z","event":"exec_attempt","harness":"claude","model":"opus","session_mode":"new","posture":"default"}
+```
+
+Those seven fields are the whole record. There is no directory, project,
+repository, branch, session id, harness argument, prompt, environment variable,
+task, host, user, or process id in it — and no hash of any of them. They are
+still sensitive: exact timestamps describe when you work, a model label can name
+an internal deployment, and the session and posture counts describe how you
+work. Aggregating locally does not change that.
+
+Nothing is uploaded. There is no network call, no device identifier, and no
+import of the retired claunch wrapper's own log.
+
+Read it back with `forgectl launch stats [days] [--json]`; `--json` emits an
+aggregate only, while the JSONL file itself is your raw export. `forgectl launch
+doctor` reports whether collection is on, where the file lives, and any
+permission it had to tighten.
+
+Rows are kept until you delete them. Setting `usage_stats = false` stops new
+rows but neither hides nor removes old ones. Delete them yourself, while no
+`forgectl launch`, `resume`, or `stats` is running:
+
+```sh
+rm -- "${XDG_STATE_HOME:-$HOME/.local/state}/forgectl/launch-usage.jsonl"
+rm -- "${XDG_STATE_HOME:-$HOME/.local/state}/forgectl/launch-usage.jsonl.lock"
+```
+
+Deletion is permanent.
+
+An `exec_attempt` means forgectl finished validating a profile and called
+`exec`. It does not mean the harness started or that the session was useful:
+nothing after `syscall.Exec` is observable from a process that replaced itself.
+
 ### pr — the clean-room reviewer's own posture
 
 The `[pr]` section configures `forgectl pr` independently of whatever repo a review happens to land in:
