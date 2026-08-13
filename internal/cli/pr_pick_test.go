@@ -46,12 +46,12 @@ func TestChoosePRs_HeadlessWritesExecutableSanitizedCandidates(t *testing.T) {
 	t.Cleanup(func() { isInteractiveTTY, pickPRsFn = prevTTY, prevPicker })
 
 	store := pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json"))
-	prs := []pr.PR{{Ref: pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}, Title: "safe"}, {Ref: pr.Ref{Owner: "c", Repo: "r", Number: 7}, Title: "bad\x1b[31m\n"}}
+	prs := []pr.PR{{Ref: pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}, Title: "safe"}, {Ref: pr.Ref{Owner: "c", Repo: "r", Number: 7}, Title: "bad\x1b[31m\t\n"}}
 	cmd := &cobra.Command{}
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	_, err := choosePRs(cmd, prs, store)
-	if got, want := stdout.String(), "cameronsjo/forgectl#42  safe\nc/r#7  bad [31m \n"; got != want {
+	if got, want := stdout.String(), "cameronsjo/forgectl#42  safe\nc/r#7  bad [31m  \n"; got != want {
 		t.Errorf("stdout = %q, want %q", got, want)
 	}
 	if err == nil || !strings.Contains(err.Error(), "2 open PRs require a selection") || ExitCode(err) != 1 {
@@ -59,6 +59,64 @@ func TestChoosePRs_HeadlessWritesExecutableSanitizedCandidates(t *testing.T) {
 	}
 	if pickerCalls != 0 {
 		t.Errorf("picker calls = %d, want 0", pickerCalls)
+	}
+}
+
+func TestPrPickCommand_HeadlessWritesCandidatesAndDoesNotLaunch(t *testing.T) {
+	prevTTY, prevPicker := isInteractiveTTY, pickPRsFn
+	isInteractiveTTY = func() bool { return interactiveTTY(true, false) }
+	pickerCalls := 0
+	pickPRsFn = func([]pr.PR, *pr.ReviewedStore) ([]pr.PR, error) {
+		pickerCalls++
+		return nil, errors.New("picker reached")
+	}
+	t.Cleanup(func() { isInteractiveTTY, pickPRsFn = prevTTY, prevPicker })
+
+	searchJSON := "[" + prSearchRow("cameronsjo/forgectl", 42) + "," + prSearchRow("cameronsjo/forgectl", 7) + "]"
+	fake := &exec.FakeRunner{RunFunc: prsRunFunc(searchJSON)}
+	cmd := newPrPickCmdForClient(pr.New(fake), config.Config{}, filepath.Join(t.TempDir(), "reviewed.json"))
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SilenceUsage = true
+	if err := cmd.ExecuteContext(context.Background()); err == nil || ExitCode(err) != 1 || !strings.Contains(err.Error(), "2 open PRs require a selection") {
+		t.Errorf("error = %v, want coded PR ambiguity error", err)
+	}
+	if pickerCalls != 0 {
+		t.Errorf("picker calls = %d, want 0", pickerCalls)
+	}
+	if got := strings.Count(strings.TrimSpace(stdout.String()), "\n") + 1; got != 2 {
+		t.Errorf("stdout candidates = %q, want two rows", stdout.String())
+	}
+	for _, call := range fake.Calls {
+		if call.Name == "tmux" || (call.Name == "gh" && len(call.Args) > 1 && call.Args[0] == "pr" && call.Args[1] == "view") {
+			t.Errorf("downstream action call = %s %v", call.Name, call.Args)
+		}
+	}
+}
+
+func TestPrPickCommand_HeadlessWriterErrorStopsBeforePickerOrLaunch(t *testing.T) {
+	prevTTY, prevPicker := isInteractiveTTY, pickPRsFn
+	isInteractiveTTY = func() bool { return interactiveTTY(false, true) }
+	pickerCalls := 0
+	pickPRsFn = func([]pr.PR, *pr.ReviewedStore) ([]pr.PR, error) { pickerCalls++; return nil, nil }
+	t.Cleanup(func() { isInteractiveTTY, pickPRsFn = prevTTY, prevPicker })
+	sentinel := errors.New("candidate writer failed")
+	fake := &exec.FakeRunner{RunFunc: prsRunFunc("[" + prSearchRow("c/r", 1) + "," + prSearchRow("c/r", 2) + "]")}
+	cmd := newPrPickCmdForClient(pr.New(fake), config.Config{}, filepath.Join(t.TempDir(), "reviewed.json"))
+	cmd.SetOut(failingWriter{err: sentinel})
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SilenceUsage = true
+	if err := cmd.ExecuteContext(context.Background()); err != sentinel || !errors.Is(err, sentinel) {
+		t.Errorf("error = %v, want original writer sentinel", err)
+	}
+	if pickerCalls != 0 {
+		t.Errorf("picker calls = %d, want 0", pickerCalls)
+	}
+	for _, call := range fake.Calls {
+		if call.Name == "tmux" || (call.Name == "gh" && len(call.Args) > 1 && call.Args[0] == "pr" && call.Args[1] == "view") {
+			t.Errorf("downstream action call = %s %v", call.Name, call.Args)
+		}
 	}
 }
 

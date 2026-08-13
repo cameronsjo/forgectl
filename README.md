@@ -64,7 +64,7 @@ unique project name when possible or inspect `projects list --json`. Ambiguous
 candidate's `sshUrl` from `projects list --json` for an exact target, or rerun
 interactively when it has none. Project display rows are not universal command
 arguments. Headless `pr pick` similarly emits sanitized `owner/repo#N` rows and
-exits 1; each row is directly usable with `forgectl pr <ref>`, while `pr prs
+exits 1; each printed ref is directly usable with `forgectl pr <ref>`, while `pr prs
 --json` remains the stable inventory.
 
 # launch — per-project Claude Code / Codex CLI launcher (alias: cl)

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"strings"
@@ -87,12 +88,83 @@ func TestChooseRepo_InteractiveCallsPickerOnceWithoutCandidateOutput(t *testing.
 }
 
 func TestProjectCandidateLine_SanitizesAndMarksMirror(t *testing.T) {
-	got := projectCandidateLine(projects.Repo{Host: "git\x1b[31m", Owner: "cam\n", Name: "forge\x7f", Cloned: true, Mirror: true, Status: projects.GitStatus{State: projects.StatusOK, Modified: 2, Untracked: 1}})
-	if strings.ContainsAny(got, "\x1b\n\x7f") {
+	got := projectCandidateLine(projects.Repo{Host: "git\x1b[31m\t", Owner: "cam\n", Name: "forge\x7f", Cloned: true, Mirror: true, Status: projects.GitStatus{State: projects.StatusOK, Modified: 2, Untracked: 1}})
+	if strings.ContainsAny(got, "\x1b\t\n\x7f") {
 		t.Errorf("candidate contains terminal control bytes: %q", got)
 	}
 	if want := "2 modified, 1 untracked, mirror"; !strings.Contains(got, want) {
 		t.Errorf("candidate = %q, want %q", got, want)
+	}
+}
+
+func TestProjectCandidateLine_UnclonedMirrorKeepsMirrorMarker(t *testing.T) {
+	if got, want := projectCandidateLine(projects.Repo{Host: "gitea", Owner: "c", Name: "mirror", Mirror: true}), "gitea  c/mirror  uncloned, mirror"; got != want {
+		t.Errorf("candidate = %q, want %q", got, want)
+	}
+}
+
+func TestProjectsCommands_HeadlessAmbiguityUsesEachModeAndNoPicker(t *testing.T) {
+	prevTTY, prevPicker := isInteractiveTTY, pickRepoFn
+	isInteractiveTTY = func() bool { return interactiveTTY(false, true) }
+	pickerCalls := 0
+	pickRepoFn = func([]projects.Repo) (projects.Repo, error) {
+		pickerCalls++
+		return projects.Repo{}, errors.New("picker reached")
+	}
+	t.Cleanup(func() { isInteractiveTTY, pickRepoFn = prevTTY, prevPicker })
+
+	ghJSON := `[{"name":"same","sshUrl":"git@github.com:cameronsjo/same.git","isPrivate":false},{"name":"same-other","sshUrl":"git@github.com:cameronsjo/same-other.git","isPrivate":false}]`
+	for _, tt := range []struct {
+		name string
+		new  func(*projects.Client) *cobra.Command
+		args []string
+		want string
+	}{
+		{"bare", newProjectsCmd, nil, "2 projects require a selection"},
+		{"pick", newProjectsPickCmd, nil, "2 projects require a selection"},
+		{"clone", newProjectsCloneCmd, nil, "2 projects require a clone selection"},
+		{"worktree", newProjectsWorktreeCmd, []string{"same"}, "2 projects require a worktree selection"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := tt.new(cloneFixture(t, twoHostRunFunc(ghJSON, "owner\tname\ttype\tssh\n")))
+			var stdout, stderr bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			cmd.SilenceUsage = true
+			cmd.SetArgs(tt.args)
+			err := cmd.ExecuteContext(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tt.want) || ExitCode(err) != 1 {
+				t.Errorf("error = %v, want coded %q", err, tt.want)
+			}
+			if lines := strings.Count(strings.TrimSpace(stdout.String()), "\n") + 1; lines != 2 {
+				t.Errorf("stdout candidates = %q, want two rows", stdout.String())
+			}
+			if strings.Contains(stderr.String(), "Cloning") || strings.Contains(stderr.String(), "Initializing") {
+				t.Errorf("downstream action reached stderr: %q", stderr.String())
+			}
+		})
+	}
+	if pickerCalls != 0 {
+		t.Errorf("picker calls = %d, want 0", pickerCalls)
+	}
+}
+
+func TestProjectsCloneCommand_HeadlessWriterErrorStopsBeforePickerOrClone(t *testing.T) {
+	prevTTY, prevPicker := isInteractiveTTY, pickRepoFn
+	isInteractiveTTY = func() bool { return interactiveTTY(false, true) }
+	pickerCalls := 0
+	pickRepoFn = func([]projects.Repo) (projects.Repo, error) { pickerCalls++; return projects.Repo{}, nil }
+	t.Cleanup(func() { isInteractiveTTY, pickRepoFn = prevTTY, prevPicker })
+	sentinel := errors.New("candidate writer failed")
+	cmd := newProjectsCloneCmd(cloneFixture(t, twoHostRunFunc(`[{"name":"a","sshUrl":"git@github.com:c/a.git"},{"name":"b","sshUrl":"git@github.com:c/b.git"}]`, "owner\tname\ttype\tssh\n")))
+	cmd.SetOut(failingWriter{err: sentinel})
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SilenceUsage = true
+	if err := cmd.ExecuteContext(context.Background()); err != sentinel || !errors.Is(err, sentinel) {
+		t.Errorf("error = %v, want original writer sentinel", err)
+	}
+	if pickerCalls != 0 {
+		t.Errorf("picker calls = %d, want 0", pickerCalls)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode"
 
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
@@ -105,36 +106,49 @@ func projectCandidateLine(repo projects.Repo) string {
 		if path == "" {
 			path = "<unknown>"
 		}
-		identity = "path:" + sanitizeTerm(path)
+		identity = "path:" + sanitizeCandidate(path)
 	} else {
-		host = sanitizeTerm(repo.Host)
-		identity = sanitizeTerm(repo.Owner) + "/" + sanitizeTerm(repo.Name)
+		host = sanitizeCandidate(repo.Host)
+		identity = sanitizeCandidate(repo.Owner) + "/" + sanitizeCandidate(repo.Name)
 	}
 	status := projectCandidateStatus(repo)
-	return host + "  " + identity + "  " + sanitizeTerm(status)
+	return host + "  " + identity + "  " + sanitizeCandidate(status)
 }
 
 func projectCandidateStatus(repo projects.Repo) string {
-	if !repo.Cloned {
-		return "uncloned"
-	}
 	var status string
-	if label := strings.Trim(repo.Status.Label(), "[]"); label != "" {
-		status = label
+	if !repo.Cloned {
+		status = "uncloned"
 	} else {
-		switch repo.Status.State {
-		case projects.StatusNotRepo:
-			status = "not-a-repo"
-		case projects.StatusUnknown:
-			status = "unknown"
-		default:
-			status = "cloned"
+		if label := strings.Trim(repo.Status.Label(), "[]"); label != "" {
+			status = label
+		} else {
+			switch repo.Status.State {
+			case projects.StatusNotRepo:
+				status = "not-a-repo"
+			case projects.StatusUnknown:
+				status = "unknown"
+			default:
+				status = "cloned"
+			}
 		}
 	}
 	if repo.Mirror {
 		status += ", mirror"
 	}
 	return status
+}
+
+// sanitizeCandidate is intentionally sink-local: candidate rows require fixed
+// two-space columns, so unlike the broader terminal sanitizer they neutralize
+// tabs as well as the remaining control runes.
+func sanitizeCandidate(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 func projectAmbiguityError(mode projectSelectionMode, count int) error {
