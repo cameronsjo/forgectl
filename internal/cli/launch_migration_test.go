@@ -577,6 +577,102 @@ func TestMigrationConcurrent_WaiterMissingSourceUsesWinnerConfigWithoutBackup(t 
 	}
 }
 
+func TestMigrationMissingSourceWithoutAuthoritativeWinnerRefusesAndKeepsCapturedFallback(t *testing.T) {
+	base := t.TempDir()
+	b := transactionBoundary(t, base, []byte("[defaults]\nmodel = \"sonnet\"\n"))
+	ops := nativeMigrationTxnOps()
+	nativeRevalidate := ops.sourceRevalidate
+	calls := 0
+	ops.sourceRevalidate = func(source *config.LegacySnapshot) error {
+		calls++
+		if calls == 3 {
+			if err := os.Remove(b.LegacyPath); err != nil {
+				return err
+			}
+		}
+		return nativeRevalidate(source)
+	}
+
+	result := migrateLegacyAutomatically(b, config.Config{}, ops)
+	if !errors.Is(result.Err, config.ErrLegacySourceMissing) {
+		t.Fatalf("error=%v, want missing-source refusal", result.Err)
+	}
+	if result.Effective.Defaults.Model != "sonnet" {
+		t.Fatalf("effective=%+v, want captured fallback", result.Effective)
+	}
+	if result.Action != configUnchanged || result.Backup != backupNotAllocated || result.Retirement != retirementSourceMissingUnproved {
+		t.Fatalf("unproved winner state=%+v", result)
+	}
+	if result.Notice == "" {
+		t.Fatal("unproved winner refusal has no notice")
+	}
+}
+
+func TestMigrationMissingSourceWithIncompleteLaunchDoesNotProveWinner(t *testing.T) {
+	base := t.TempDir()
+	legacy := []byte("[[project]]\nmatch = \"/tmp/project\"\nmodel = \"sonnet\"\n")
+	b := transactionBoundary(t, base, legacy)
+	if err := os.MkdirAll(filepath.Dir(b.ConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b.ConfigPath, []byte("[launch.defaults]\nmodel = \"opus\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ops := nativeMigrationTxnOps()
+	nativeRevalidate := ops.sourceRevalidate
+	calls := 0
+	ops.sourceRevalidate = func(source *config.LegacySnapshot) error {
+		calls++
+		if calls == 3 {
+			return config.ErrLegacySourceMissing
+		}
+		return nativeRevalidate(source)
+	}
+
+	result := migrateLegacyAutomatically(b, config.Config{}, ops)
+	if !errors.Is(result.Err, config.ErrLegacySourceMissing) || result.Retirement != retirementSourceMissingUnproved {
+		t.Fatalf("incomplete launch was accepted as winner: %+v", result)
+	}
+	if result.Effective.Defaults.Model != "opus" {
+		t.Fatalf("effective=%+v, want authoritative shadow config", result.Effective)
+	}
+}
+
+func TestMigrationTempSubstitutionNeverReachesBackupOrSourceRetirement(t *testing.T) {
+	base := t.TempDir()
+	b := transactionBoundary(t, base, []byte("[defaults]\nmodel = \"sonnet\"\n"))
+	ops := nativeMigrationTxnOps()
+	nativeRename := ops.atomic.rename
+	ops.atomic.rename = func(oldPath, newPath string) error {
+		if err := os.Remove(oldPath); err != nil {
+			return err
+		}
+		if err := os.WriteFile(oldPath, []byte("attacker-controlled\n"), 0o644); err != nil {
+			return err
+		}
+		if err := os.Chmod(oldPath, 0o644); err != nil {
+			return err
+		}
+		return nativeRename(oldPath, newPath)
+	}
+	backupCalls := 0
+	ops.allocateBackup = func(*config.LegacySnapshot) (*config.BackupAllocation, error) {
+		backupCalls++
+		return nil, errors.New("backup must not be reached")
+	}
+
+	result := migrateLegacyAutomatically(b, config.Config{}, ops)
+	if result.Commit != commitRenamed || !errors.Is(result.Err, errConfigCommittedValidation) {
+		t.Fatalf("result=%+v, want visible/non-durable validation failure", result)
+	}
+	if result.Backup != backupNotAllocated || result.Retirement != retirementSourceRetained || backupCalls != 0 {
+		t.Fatalf("substitution advanced transaction: result=%+v backup_calls=%d", result, backupCalls)
+	}
+	if _, err := os.Stat(b.LegacyPath); err != nil {
+		t.Fatalf("legacy source was not retained: %v", err)
+	}
+}
+
 func TestBackupIdentity_ReplacementAfterDurableValidationRetainsSourceAndOccupant(t *testing.T) {
 	base := t.TempDir()
 	b := transactionBoundary(t, base, []byte("[defaults]\nmodel = \"sonnet\"\n"))
@@ -680,7 +776,17 @@ func TestMigrationTransaction_ExactOperationTrace(t *testing.T) {
 	ops.readFile = func(path string) ([]byte, error) { appendTrace("config-reread"); return nativeRead(path) }
 
 	nativeAtomic := ops.atomic
-	ops.atomic.lstat = func(path string) (os.FileInfo, error) { appendTrace("config-lstat"); return nativeAtomic.lstat(path) }
+	lstatEvents := []string{"config-lstat", "config-temp-owner-check", "config-destination-check"}
+	lstatCalls := 0
+	ops.atomic.lstat = func(path string) (os.FileInfo, error) {
+		event := "config-unexpected-lstat"
+		if lstatCalls < len(lstatEvents) {
+			event = lstatEvents[lstatCalls]
+		}
+		lstatCalls++
+		appendTrace(event)
+		return nativeAtomic.lstat(path)
+	}
 	ops.atomic.createTemp = func(dir, pattern string) (*os.File, error) {
 		appendTrace("config-temp")
 		return nativeAtomic.createTemp(dir, pattern)
@@ -694,10 +800,22 @@ func TestMigrationTransaction_ExactOperationTrace(t *testing.T) {
 		return nativeAtomic.chmodFile(file, mode)
 	}
 	ops.atomic.syncFile = func(file *os.File) error { appendTrace("config-file-sync"); return nativeAtomic.syncFile(file) }
+	ops.atomic.pinTemp = func(file *os.File) (*os.File, error) {
+		appendTrace("config-pin")
+		return nativeAtomic.pinTemp(file)
+	}
 	ops.atomic.closeFile = func(file *os.File) error { appendTrace("config-close"); return nativeAtomic.closeFile(file) }
 	ops.atomic.rename = func(oldPath, newPath string) error {
 		appendTrace("config-rename")
 		return nativeAtomic.rename(oldPath, newPath)
+	}
+	ops.atomic.readAll = func(reader io.Reader) ([]byte, error) {
+		appendTrace("config-validate-read")
+		return nativeAtomic.readAll(reader)
+	}
+	ops.atomic.closePinned = func(file *os.File) error {
+		appendTrace("config-pinned-close")
+		return nativeAtomic.closePinned(file)
 	}
 	ops.atomic.syncDir = func(path string) error { appendTrace("config-parent-sync"); return nativeAtomic.syncDir(path) }
 
@@ -755,7 +873,8 @@ func TestMigrationTransaction_ExactOperationTrace(t *testing.T) {
 	}
 	want := []string{
 		"source-check", "parent-stat-missing", "ancestor-stat", "parent-mkdir", "parent-sync-new", "ancestor-sync", "source-check",
-		"lock", "config-reread", "source-check", "config-lstat", "config-temp", "config-write", "config-mode", "config-file-sync", "config-close", "config-rename", "config-parent-sync",
+		"lock", "config-reread", "source-check", "config-lstat", "config-temp", "config-write", "config-mode", "config-file-sync", "config-pin", "config-close",
+		"config-temp-owner-check", "config-rename", "config-destination-check", "config-validate-read", "config-pinned-close", "config-parent-sync",
 		"backup-allocate", "backup-write", "backup-mode", "backup-file-sync", "backup-close", "backup-parent-sync", "backup-validate",
 		"source-check", "backup-recheck", "source-check", "backup-recheck", "source-unlink", "source-parent-sync",
 	}

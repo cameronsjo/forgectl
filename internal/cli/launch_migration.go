@@ -40,6 +40,7 @@ type retirementState uint8
 const (
 	retirementNotStarted retirementState = iota
 	retirementSourceRetained
+	retirementSourceMissingUnproved
 	retirementRemoved
 	retirementDurabilityUnknown
 )
@@ -207,11 +208,28 @@ func refusalResult(boundary *config.LegacyMigrationBoundary, cfg config.Config, 
 		Err:        cause,
 	}
 	if !cfg.HasLaunchSection() {
-		if fallback, err := boundary.LoadReadOnlyLegacy(); err == nil {
+		if boundary != nil && boundary.Source != nil {
+			result.Effective = boundary.Source.Launch
+		} else if fallback, err := boundary.LoadReadOnlyLegacy(); err == nil {
 			result.Effective = fallback
 		}
 	}
 	result.Notice = "automatic legacy migration skipped; source retained"
+	return result
+}
+
+func authoritativePeerWinner(raw []byte, locked config.Config, source config.LaunchConfig) bool {
+	if !locked.HasLaunchSection() && !hasLaunchSection(raw) {
+		return false
+	}
+	_, added := config.MergeLegacyIntoLaunch(locked, source)
+	return added == 0
+}
+
+func unprovedMissingSourceResult(boundary *config.LegacyMigrationBoundary, locked config.Config, cause error) MigrationResult {
+	result := refusalResult(boundary, locked, cause)
+	result.Retirement = retirementSourceMissingUnproved
+	result.Notice = "legacy source disappeared without authoritative peer-migration proof; captured fallback remains effective"
 	return result
 }
 
@@ -253,7 +271,10 @@ func migrateLocked(boundary *config.LegacyMigrationBoundary, ops migrationTxnOps
 	}
 	if err := ops.sourceRevalidate(boundary.Source); err != nil {
 		if errors.Is(err, config.ErrLegacySourceMissing) {
-			return MigrationResult{Effective: locked.Launch, Action: configUnchanged, Backup: backupNotAllocated, Retirement: retirementRemoved}
+			if authoritativePeerWinner(raw, locked, boundary.Source.Launch) {
+				return MigrationResult{Effective: locked.Launch, Action: configUnchanged, Backup: backupNotAllocated, Retirement: retirementRemoved}
+			}
+			return unprovedMissingSourceResult(boundary, locked, err)
 		}
 		return refusalResult(boundary, locked, err)
 	}

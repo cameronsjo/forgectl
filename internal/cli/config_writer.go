@@ -70,6 +70,12 @@ func visibleWithoutDirectoryDurability(action configAction, err error) bool {
 
 func refuseConfigMutationForLegacyBoundary(boundary *config.LegacyMigrationBoundary) error {
 	if boundary != nil && boundary.Status == config.BoundaryRefused {
+		// Secure legacy mutation remains unsupported on !unix, but that
+		// capability refusal must not disable the documented developer-only
+		// ordinary config writers on those platforms.
+		if errors.Is(boundary.Refusal, config.ErrLegacyMigrationUnsupported) && normalWriterAllowsUnsupportedLegacyMutation() {
+			return nil
+		}
 		return boundary.Refusal
 	}
 	return nil

@@ -39,6 +39,14 @@ func openRegularNoFollow(path string) (*os.File, error) {
 	return f, nil
 }
 
+func pinConfigTemp(f *os.File) (*os.File, error) {
+	fd, err := unix.FcntlInt(f.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), f.Name()), nil
+}
+
 func ensureNormalConfigParent(path string, ops configParentOps) ([]string, error) {
 	return ensureConfigParentDurable(path, ops)
 }

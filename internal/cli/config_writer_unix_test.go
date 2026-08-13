@@ -3,13 +3,23 @@
 package cli
 
 import (
+	"errors"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/cameronsjo/forgectl/internal/config"
 )
+
+func TestNormalWriterBoundaryRefusal_UnixDoesNotIgnoreUnsupportedCapability(t *testing.T) {
+	boundary := &config.LegacyMigrationBoundary{Status: config.BoundaryRefused, Refusal: config.ErrLegacyMigrationUnsupported}
+	if err := refuseConfigMutationForLegacyBoundary(boundary); !errors.Is(err, config.ErrLegacyMigrationUnsupported) {
+		t.Fatalf("unix unsupported refusal=%v, want blocked", err)
+	}
+}
 
 func TestConfigWriterLock_FIFOConfigRefusesWithoutBlockingOrRendering(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")

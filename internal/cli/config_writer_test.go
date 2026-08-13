@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -245,5 +246,12 @@ func TestConfigWriterLock_RereadsInsideLock(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestNormalWriterBoundaryRefusal_BlocksUnsafeLegacyPath(t *testing.T) {
+	unsafe := &config.LegacyMigrationBoundary{Status: config.BoundaryRefused, Refusal: config.ErrLegacyPathControl}
+	if err := refuseConfigMutationForLegacyBoundary(unsafe); !errors.Is(err, config.ErrLegacyPathControl) {
+		t.Fatalf("path-control refusal=%v, want blocked", err)
 	}
 }

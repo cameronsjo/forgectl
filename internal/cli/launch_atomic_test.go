@@ -146,11 +146,17 @@ func TestWriteConfigAtomic_FailureMatrixReportsExactVisibility(t *testing.T) {
 			ops.chmodFile = func(*os.File, os.FileMode) error { return errors.New("injected mode") }
 		}},
 		{name: "file sync", inject: func(ops *atomicWriteOps) { ops.syncFile = func(*os.File) error { return errors.New("injected sync") } }},
+		{name: "pin temp", inject: func(ops *atomicWriteOps) {
+			ops.pinTemp = func(*os.File) (*os.File, error) { return nil, errors.New("injected pin") }
+		}},
 		{name: "close", inject: func(ops *atomicWriteOps) {
 			ops.closeFile = func(*os.File) error { return errors.New("injected close") }
 		}},
 		{name: "rename", inject: func(ops *atomicWriteOps) {
 			ops.rename = func(string, string) error { return errors.New("injected rename") }
+		}},
+		{name: "pinned close", wantState: commitRenamed, wantBytes: "new", inject: func(ops *atomicWriteOps) {
+			ops.closePinned = func(*os.File) error { return errors.New("injected pinned close") }
 		}},
 		{name: "parent sync", wantState: commitRenamed, wantBytes: "new", inject: func(ops *atomicWriteOps) {
 			ops.syncDir = func(string) error { return errors.New("injected parent sync") }
@@ -212,5 +218,103 @@ func TestWriteConfigAtomic_TempCleanupFailureMatrixReportsResidue(t *testing.T) 
 				t.Fatalf("temp residue=%v, want residue=%t", entries, tt.wantResidue)
 			}
 		})
+	}
+}
+
+func TestWriteConfigAtomic_SubstitutedTempCannotBecomeDurableConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	ops := nativeAtomicWriteOps()
+	nativeRename := ops.rename
+	ops.rename = func(oldPath, newPath string) error {
+		if err := os.Remove(oldPath); err != nil {
+			return err
+		}
+		if err := os.WriteFile(oldPath, []byte("attacker-controlled\n"), 0o644); err != nil {
+			return err
+		}
+		if err := os.Chmod(oldPath, 0o644); err != nil {
+			return err
+		}
+		return nativeRename(oldPath, newPath)
+	}
+
+	state, err := writeConfigAtomicWithOps(path, []byte("intended\n"), ops)
+	if err == nil || state != commitRenamed || !errors.Is(err, errConfigCommittedValidation) {
+		t.Fatalf("state=%v error=%v, want commitRenamed/validation refusal", state, err)
+	}
+	if got, readErr := os.ReadFile(path); readErr == nil {
+		if string(got) == "attacker-controlled\n" && state == commitDurable {
+			t.Fatalf("attacker bytes were reported durable")
+		}
+		if info, statErr := os.Stat(path); statErr == nil && info.Mode().Perm()&0o077 != 0 && state == commitDurable {
+			t.Fatalf("broader mode %04o was reported durable", info.Mode().Perm())
+		}
+	}
+}
+
+func TestWriteConfigAtomic_TempSubstitutionBeforeRenamePreservesOccupant(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	ops := nativeAtomicWriteOps()
+	nativeClose := ops.closeFile
+	var replaced string
+	ops.closeFile = func(f *os.File) error {
+		replaced = f.Name()
+		if err := nativeClose(f); err != nil {
+			return err
+		}
+		if err := os.Remove(replaced); err != nil {
+			return err
+		}
+		return os.WriteFile(replaced, []byte("replacement\n"), 0o600)
+	}
+
+	state, err := writeConfigAtomicWithOps(path, []byte("intended\n"), ops)
+	if state != commitNone || !errors.Is(err, errConfigTempIdentityLost) {
+		t.Fatalf("state=%v error=%v, want commitNone/identity loss", state, err)
+	}
+	if got, readErr := os.ReadFile(replaced); readErr != nil || string(got) != "replacement\n" {
+		t.Fatalf("replacement bytes=%q error=%v, want preserved", got, readErr)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("config destination was exposed: %v", statErr)
+	}
+}
+
+func TestWriteConfigAtomic_TempCleanupPreservesReplacement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	ops := nativeAtomicWriteOps()
+	var replaced string
+	dirSyncCalls := 0
+	ops.syncDir = func(string) error {
+		dirSyncCalls++
+		return nil
+	}
+	ops.writeAll = func(f *os.File, _ []byte) error {
+		replaced = f.Name()
+		if err := os.Remove(replaced); err != nil {
+			return err
+		}
+		if err := os.WriteFile(replaced, []byte("replacement\n"), 0o600); err != nil {
+			return err
+		}
+		return errors.New("injected original write failure")
+	}
+
+	state, err := writeConfigAtomicWithOps(path, []byte("intended\n"), ops)
+	if state != commitNone || !errors.Is(err, errConfigTempIdentityLost) {
+		t.Fatalf("state=%v error=%v, want commitNone/identity loss", state, err)
+	}
+	got, readErr := os.ReadFile(replaced)
+	if readErr != nil {
+		t.Fatalf("replacement was removed by cleanup: %v", readErr)
+	}
+	if string(got) != "replacement\n" {
+		t.Fatalf("replacement bytes=%q", got)
+	}
+	if dirSyncCalls != 0 {
+		t.Fatalf("directory sync calls=%d, want zero when cleanup preserves a replacement", dirSyncCalls)
 	}
 }
