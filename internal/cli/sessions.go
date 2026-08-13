@@ -315,11 +315,10 @@ type whyDTO struct {
 	KeyDecisions string `json:"key_decisions,omitempty"`
 }
 
-// printWhyHits renders `sessions why` results. Both paths strip control bytes
-// from concordance-sourced fields: encoding/json only escapes 0x00–0x1F, so DEL and
-// the C1 range (0x80–0x9F, including 0x9B = single-byte CSI) would otherwise
-// reach a terminal raw through --json. sanitizeTerm's unicode.IsControl check
-// catches them; the JSON path must call it explicitly.
+// printWhyHits renders `sessions why` results. Both paths sanitize
+// concordance-sourced fields: encoding/json only escapes 0x00–0x1F, so DEL,
+// the C1 range, and Unicode Bidi_Control characters would otherwise reach a
+// terminal raw through --json. The JSON path must call sanitizeTerm explicitly.
 func printWhyHits(cmd *cobra.Command, hits []sessions.WhyHit, asJSON bool) error {
 	out := cmd.OutOrStdout()
 	if asJSON {
@@ -432,11 +431,11 @@ func humanTs(t *time.Time) string {
 	return "unknown"
 }
 
-// sanitizeTerm is this package's local alias for termsafe.Sanitize, the hoisted
-// primitive: control bytes (everything unicode.IsControl except tab) become
-// spaces so concordance-indexed content renders inert in the terminal. The
-// alias keeps the ~40 call sites in this package reading at their own
-// altitude; internal/term is where the behavior and its fuzz coverage live.
+// sanitizeTerm is this package's local alias for termsafe.Sanitize: non-tab Cc
+// controls and Unicode Bidi_Control formatting characters become spaces; tab
+// and every other rune pass through. The alias keeps this package's call sites
+// reading at their own altitude; internal/termsafe owns the behavior and fuzz
+// coverage.
 func sanitizeTerm(s string) string {
 	return termsafe.Sanitize(s)
 }

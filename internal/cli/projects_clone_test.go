@@ -15,9 +15,9 @@ package cli
 //   [x] Unhappy: --org listing failure propagates
 //   [x] Unhappy: --org with no repos returns an error
 //
-// pickRepo-driven paths (no args, or a query with multiple matches) are not
-// unit-tested here: they drive an interactive huh select, same convention as
-// pr_pick_test.go's pickPRs.
+// The interactive huh form remains unexecuted in unit tests. Its chooser
+// boundary is covered in projects_pick_test.go, including headless candidate
+// output, first writer-error preservation, and the live-TTY picker seam.
 
 import (
 	"bytes"

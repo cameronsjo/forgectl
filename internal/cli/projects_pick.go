@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
@@ -10,6 +12,16 @@ import (
 	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/projects"
 )
+
+type projectSelectionMode uint8
+
+const (
+	projectSelectionPick projectSelectionMode = iota
+	projectSelectionClone
+	projectSelectionWorktree
+)
+
+var pickRepoFn = pickRepo
 
 // newProjectsPickCmd is the interactive workhorse over the unified cross-host
 // inventory (local clones + GitHub + Gitea):
@@ -25,7 +37,11 @@ func newProjectsPickCmd(client *projects.Client) *cobra.Command {
 	return &cobra.Command{
 		Use:   "pick [query]",
 		Short: "Open a project in tmux (interactive or by name; clones if needed)",
-		Args:  cobra.MaximumNArgs(1),
+		Long: `Open a project in tmux. With both stdin and stdout attached to terminals,
+ambiguous matches use the existing picker. Otherwise forgectl writes one sanitized
+candidate identity per line to stdout and exits 1; narrow to a unique project name
+when possible, inspect identities with projects list --json, or rerun interactively.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
@@ -53,12 +69,95 @@ func newProjectsPickCmd(client *projects.Client) *cobra.Command {
 				// Multiple matches → interactive selector below.
 			}
 
-			chosen, err := pickRepo(candidates)
+			chosen, err := chooseRepo(cmd, candidates, projectSelectionPick)
 			if err != nil {
 				return err
 			}
 			return openOrClone(ctx, client, cmd, chosen)
 		},
+	}
+}
+
+func chooseRepo(cmd *cobra.Command, repos []projects.Repo, mode projectSelectionMode) (projects.Repo, error) {
+	if isInteractiveTTY() {
+		return pickRepoFn(repos)
+	}
+	if err := writeProjectCandidates(cmd.OutOrStdout(), repos); err != nil {
+		return projects.Repo{}, err
+	}
+	return projects.Repo{}, WithExitCode(projectAmbiguityError(mode, len(repos)), 1)
+}
+
+func writeProjectCandidates(out io.Writer, repos []projects.Repo) error {
+	for _, repo := range repos {
+		if _, err := fmt.Fprintln(out, projectCandidateLine(repo)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func projectCandidateLine(repo projects.Repo) string {
+	var host, identity string
+	if repo.Host == "" || repo.Owner == "" || repo.Name == "" {
+		host = "local"
+		path := repo.LocalPath
+		if path == "" {
+			path = "<unknown>"
+		}
+		identity = "path:" + sanitizeCandidate(path)
+	} else {
+		host = sanitizeCandidate(repo.Host)
+		identity = sanitizeCandidate(repo.Owner) + "/" + sanitizeCandidate(repo.Name)
+	}
+	status := projectCandidateStatus(repo)
+	return host + "  " + identity + "  " + sanitizeCandidate(status)
+}
+
+func projectCandidateStatus(repo projects.Repo) string {
+	var status string
+	if !repo.Cloned {
+		status = "uncloned"
+	} else {
+		if label := strings.Trim(repo.Status.Label(), "[]"); label != "" {
+			status = label
+		} else {
+			switch repo.Status.State {
+			case projects.StatusNotRepo:
+				status = "not-a-repo"
+			case projects.StatusUnknown:
+				status = "unknown"
+			default:
+				status = "cloned"
+			}
+		}
+	}
+	if repo.Mirror {
+		status += ", mirror"
+	}
+	return status
+}
+
+// sanitizeCandidate composes the shared terminal sanitizer with this sink's
+// fixed-column layout rule: shared sanitization handles every unsafe rune, and
+// the candidate sink alone neutralizes the tab it deliberately preserves.
+func sanitizeCandidate(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\t' {
+			return ' '
+		}
+		return r
+	}, sanitizeTerm(s))
+}
+
+func projectAmbiguityError(mode projectSelectionMode, count int) error {
+	switch mode {
+	case projectSelectionClone:
+		return fmt.Errorf("%d projects require a clone selection, and there is no interactive terminal — get the candidate's sshUrl from `forgectl projects list --json` and pass that URL; owner/repo is exact only for GitHub candidates, and any candidate without an sshUrl (including local-only) requires an interactive rerun; candidates are on stdout", count)
+	case projectSelectionWorktree:
+		return fmt.Errorf("%d projects require a worktree selection, and there is no interactive terminal — get the candidate's sshUrl from `forgectl projects list --json` and pass that URL; owner/repo is exact only for GitHub candidates, and any candidate without an sshUrl (including local-only) requires an interactive rerun; candidates are on stdout", count)
+	default:
+		return fmt.Errorf("%d projects require a selection, and there is no interactive terminal — narrow to a unique project name when possible, or rerun interactively; inspect identities with `forgectl projects list --json`; candidates are on stdout", count)
 	}
 }
 

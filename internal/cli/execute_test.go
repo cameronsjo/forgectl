@@ -9,6 +9,26 @@ import (
 	"github.com/cameronsjo/forgectl/internal/tui"
 )
 
+func TestInteractiveTTY_RequiresBothDescriptors(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		stdinTTY        bool
+		stdoutTTY       bool
+		wantInteractive bool
+	}{
+		{name: "neither", stdinTTY: false, stdoutTTY: false, wantInteractive: false},
+		{name: "stdout only", stdinTTY: false, stdoutTTY: true, wantInteractive: false},
+		{name: "stdin only", stdinTTY: true, stdoutTTY: false, wantInteractive: false},
+		{name: "both", stdinTTY: true, stdoutTTY: true, wantInteractive: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := interactiveTTY(tt.stdinTTY, tt.stdoutTTY); got != tt.wantInteractive {
+				t.Errorf("interactiveTTY(%t, %t) = %t, want %t", tt.stdinTTY, tt.stdoutTTY, got, tt.wantInteractive)
+			}
+		})
+	}
+}
+
 func TestDispatchAction(t *testing.T) {
 	ctx := context.Background()
 

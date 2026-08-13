@@ -1,12 +1,8 @@
-// Package termsafe holds the primitives for writing untrusted text to a
-// terminal. Text forgectl renders that came from config, a database, or
-// another process's output SHOULD pass through here, so a hostile string
-// cannot clear the line, forge a posture, or set a color the operator did not
-// ask for.
-//
-// Sanitize is the older compatibility primitive and covers the Cc category
-// only. SafeLine and QuotePath are the stronger final-output boundary: they
-// also escape tabs and Unicode format characters such as bidi overrides.
+// Package termsafe holds primitives for writing untrusted text to a terminal.
+// Sanitize maps non-tab Cc controls and Unicode Bidi_Control formatting
+// characters to spaces; tab and every other rune pass through.
+// SafeLine and QuotePath are stronger final-output boundaries: they visibly
+// quote unsafe and non-graphic runes instead of deleting or replacing them.
 //
 // Named termsafe rather than term because golang.org/x/term is already
 // imported unqualified as `term` in internal/cli and internal/launch — the two
@@ -26,11 +22,18 @@ import (
 	"unicode"
 )
 
-// Sanitize replaces control bytes (everything unicode.IsControl except
-// tab) with spaces so untrusted content renders inert in the terminal.
+// IsUnsafeTerminalRune reports whether r is a Cc control or a Unicode
+// Bidi_Control formatting character. Contextual renderers may visibly quote
+// additional runes, but must not broaden this shared classification.
+func IsUnsafeTerminalRune(r rune) bool {
+	return unicode.IsControl(r) || unicode.In(r, unicode.Bidi_Control)
+}
+
+// Sanitize maps non-tab Cc controls and Unicode Bidi_Control formatting
+// characters to spaces; tab and every other rune pass through.
 func Sanitize(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r == '\t' || !unicode.IsControl(r) {
+		if r == '\t' || !IsUnsafeTerminalRune(r) {
 			return r
 		}
 		return ' '
@@ -44,7 +47,7 @@ func Sanitize(s string) string {
 func SafeLine(s string) string {
 	var safe strings.Builder
 	for _, r := range s {
-		if unicode.IsGraphic(r) {
+		if !IsUnsafeTerminalRune(r) && unicode.IsGraphic(r) {
 			safe.WriteRune(r)
 			continue
 		}
