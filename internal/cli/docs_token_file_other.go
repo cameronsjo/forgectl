@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 )
@@ -26,7 +27,7 @@ func openDocsTokenFile(path string) (openedDocsTokenFile, error) {
 	}
 	after, err := file.Stat()
 	if err != nil {
-		return nil, closeInvalidDocsTokenFileOther(file, fmt.Errorf("inspect opened token file %s: %w", displayPath, err))
+		return nil, closeInvalidDocsTokenFileOther(file, wrapDocsTokenDescriptorError("inspect opened", displayPath, err))
 	}
 	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
 		return nil, closeInvalidDocsTokenFileOther(file, fmt.Errorf("token file changed while opening: %s", displayPath))
@@ -36,7 +37,7 @@ func openDocsTokenFile(path string) (openedDocsTokenFile, error) {
 
 func closeInvalidDocsTokenFileOther(file *os.File, validationErr error) error {
 	if closeErr := file.Close(); closeErr != nil {
-		return fmt.Errorf("%w; close token file: %v", validationErr, closeErr)
+		return errors.Join(validationErr, wrapDocsTokenDescriptorError("close", file.Name(), closeErr))
 	}
 	return validationErr
 }

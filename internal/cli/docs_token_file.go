@@ -38,10 +38,10 @@ func readDocsTokenFile(path string, file openedDocsTokenFile) (string, error) {
 	if readErr != nil || closeErr != nil {
 		var failures []error
 		if readErr != nil {
-			failures = append(failures, fmt.Errorf("read token file %s: %w", displayPath, readErr))
+			failures = append(failures, wrapDocsTokenDescriptorError("read", displayPath, readErr))
 		}
 		if closeErr != nil {
-			failures = append(failures, fmt.Errorf("close token file %s: %w", displayPath, closeErr))
+			failures = append(failures, wrapDocsTokenDescriptorError("close", displayPath, closeErr))
 		}
 		return "", errors.Join(failures...)
 	}
@@ -63,11 +63,44 @@ func readDocsTokenFile(path string, file openedDocsTokenFile) (string, error) {
 func safeDocsTokenPath(path string) string { return termsafe.Sanitize(path) }
 
 func wrapDocsTokenPathError(operation, path string, err error) error {
-	var pathErr *os.PathError
-	if errors.As(err, &pathErr) {
-		err = pathErr.Err
+	return wrapDocsTokenDescriptorError(operation, path, err)
+}
+
+// wrapDocsTokenDescriptorError removes path-bearing wrappers before an error
+// reaches the terminal. *os.File operations reuse the raw os.NewFile name in
+// PathError, so a sanitized outer prefix alone is not sufficient.
+func wrapDocsTokenDescriptorError(operation, path string, err error) error {
+	return fmt.Errorf("%s token file %s: %w", operation, safeDocsTokenPath(path), docsTokenErrorCause(err))
+}
+
+func docsTokenErrorCause(err error) error {
+	switch typed := err.(type) {
+	case *os.PathError:
+		return docsTokenErrorCause(typed.Err)
+	case *os.LinkError:
+		return docsTokenErrorCause(typed.Err)
+	case interface{ Unwrap() []error }:
+		children := typed.Unwrap()
+		sanitized := make([]error, 0, len(children))
+		for _, child := range children {
+			sanitized = append(sanitized, docsTokenErrorCause(child))
+		}
+		return errors.Join(sanitized...)
+	case interface{ Unwrap() error }:
+		child := typed.Unwrap()
+		if docsTokenErrorHasPathFields(child) {
+			return docsTokenErrorCause(child)
+		}
+		return err
+	default:
+		return err
 	}
-	return fmt.Errorf("%s token file %s: %w", operation, safeDocsTokenPath(path), err)
+}
+
+func docsTokenErrorHasPathFields(err error) bool {
+	var pathErr *os.PathError
+	var linkErr *os.LinkError
+	return errors.As(err, &pathErr) || errors.As(err, &linkErr)
 }
 
 // validDocsBearerToken implements RFC 6750's b64token grammar byte-for-byte:

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -188,6 +189,83 @@ func TestReadDocsTokenFile_ReadAndCloseFailuresJoinWithoutLeak(t *testing.T) {
 			}
 			if file.closeCount != 1 {
 				t.Fatalf("close count = %d, want 1", file.closeCount)
+			}
+		})
+	}
+}
+
+func TestReadDocsTokenFile_PathErrorsDoNotReintroduceUnsafePaths(t *testing.T) {
+	readCause := errors.New("read cause")
+	closeCause := errors.New("close cause")
+	const rawPath = "/tmp/secret\n\r\u202epath"
+	readErr := &os.PathError{Op: "read", Path: rawPath, Err: readCause}
+	closeErr := &os.PathError{Op: "close", Path: rawPath, Err: closeCause}
+
+	tests := []struct {
+		name      string
+		reader    io.Reader
+		closeErr  error
+		wantRead  bool
+		wantClose bool
+	}{
+		{name: "read", reader: &partialErrorReader{data: []byte("partial-secret"), err: readErr}, wantRead: true},
+		{name: "close", reader: strings.NewReader("valid"), closeErr: closeErr, wantClose: true},
+		{name: "read and close", reader: &partialErrorReader{data: []byte("partial-secret"), err: readErr}, closeErr: closeErr, wantRead: true, wantClose: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := &injectedDocsTokenFile{reader: tt.reader, closeErr: tt.closeErr}
+			got, err := readDocsTokenFile("/safe/token", file)
+			if got != "" || err == nil {
+				t.Fatalf("readDocsTokenFile = (%q, %v), want empty token and error", got, err)
+			}
+			if strings.Contains(err.Error(), rawPath) || strings.Contains(err.Error(), "/tmp/secret") || strings.ContainsRune(err.Error(), '\r') || strings.ContainsRune(err.Error(), '\u202e') {
+				t.Fatalf("error reintroduced unsafe descriptor path: %q", err)
+			}
+			if errors.Is(err, readCause) != tt.wantRead || errors.Is(err, closeCause) != tt.wantClose {
+				t.Fatalf("error identity = %v, want read=%v close=%v", err, tt.wantRead, tt.wantClose)
+			}
+			var pathErr *os.PathError
+			if errors.As(err, &pathErr) {
+				t.Fatalf("error retained a path-bearing wrapper: %+v", pathErr)
+			}
+			if file.closeCount != 1 {
+				t.Fatalf("close count = %d, want 1", file.closeCount)
+			}
+		})
+	}
+}
+
+func TestWrapDocsTokenDescriptorError_StripsAllPathFields(t *testing.T) {
+	cause := errors.New("descriptor cause")
+	secondCause := errors.New("second descriptor cause")
+	const raw = "/tmp/bad\n\u202epath"
+	tests := []struct {
+		name       string
+		input      error
+		wantSecond bool
+	}{
+		{name: "path", input: &os.PathError{Op: "stat", Path: raw, Err: cause}},
+		{name: "link", input: &os.LinkError{Op: "rename", Old: raw + "-old", New: raw + "-new", Err: cause}},
+		{name: "wrapped path", input: fmt.Errorf("descriptor failed: %w", &os.PathError{Op: "read", Path: raw, Err: cause})},
+		{name: "joined path children", input: errors.Join(
+			&os.PathError{Op: "read", Path: raw, Err: cause},
+			&os.LinkError{Op: "rename", Old: raw + "-old", New: raw + "-new", Err: secondCause},
+		), wantSecond: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := wrapDocsTokenDescriptorError("inspect", "/safe/token", tt.input)
+			if strings.Contains(err.Error(), raw) || strings.Contains(err.Error(), "/tmp/bad") || strings.ContainsRune(err.Error(), '\r') || strings.ContainsRune(err.Error(), '\u202e') {
+				t.Fatalf("error retained raw path/link fields: %q", err)
+			}
+			if !errors.Is(err, cause) || errors.Is(err, secondCause) != tt.wantSecond {
+				t.Fatalf("error lost underlying identity: %v", err)
+			}
+			var pathErr *os.PathError
+			var linkErr *os.LinkError
+			if errors.As(err, &pathErr) || errors.As(err, &linkErr) {
+				t.Fatalf("error retained a path-bearing wrapper: %v", err)
 			}
 		})
 	}

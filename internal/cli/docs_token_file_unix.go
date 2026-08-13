@@ -27,7 +27,7 @@ func openDocsTokenFile(path string) (openedDocsTokenFile, error) {
 
 	info, statErr := file.Stat()
 	if statErr != nil {
-		return nil, closeInvalidDocsTokenFile(file, fmt.Errorf("inspect token file %s: %w", displayPath, statErr))
+		return nil, closeInvalidDocsTokenFile(file, wrapDocsTokenDescriptorError("inspect", displayPath, statErr))
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
@@ -50,7 +50,7 @@ func openDocsTokenFile(path string) (openedDocsTokenFile, error) {
 
 func closeInvalidDocsTokenFile(file *os.File, validationErr error) error {
 	if closeErr := file.Close(); closeErr != nil {
-		return errors.Join(validationErr, fmt.Errorf("close token file %s: %w", safeDocsTokenPath(file.Name()), closeErr))
+		return errors.Join(validationErr, wrapDocsTokenDescriptorError("close", file.Name(), closeErr))
 	}
 	return validationErr
 }
