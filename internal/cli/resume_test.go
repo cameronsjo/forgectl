@@ -46,7 +46,8 @@ func TestPrintSessions_SanitizesText(t *testing.T) {
 // TestPrintSessions_SanitizesJSON checks the real selected-session DTO path.
 // Non-tab Cc and Bidi_Control runes become spaces in decoded values and never
 // survive literally in the raw stream; join controls and variation selectors
-// remain unchanged, and the stable schema still decodes into sessionDTO.
+// remain unchanged, and independent wire checks pin every populated key and
+// primitive JSON type without sharing production DTO tags or field types.
 func TestPrintSessions_SanitizesJSON(t *testing.T) {
 	rlo := string(rune(0x202e))
 	zwnj := string(rune(0x200c))
@@ -84,39 +85,88 @@ func TestPrintSessions_SanitizesJSON(t *testing.T) {
 	// ...and so must the DECODED values, since that is what a consumer
 	// pipes onward. A C1 escape in the wire form is still a CSI byte
 	// once anything decodes it.
-	var got []sessionDTO
+	var got []map[string]json.RawMessage
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("decode --json output: %v", err)
 	}
 	if len(got) != 1 {
 		t.Fatalf("decoded %d records, want 1", len(got))
 	}
-	want := sessionDTO{
-		ID:         "id ",
-		Name:       "left right",
-		NameSource: "user" + zwnj + "named",
-		Repo:       "emoji" + zwj + "join",
-		Branch:     "main",
-		Cwd:        "/work/" + variation,
-		LastActive: lastActive.Format(time.RFC3339),
-		LastPrompt: "prompt ",
-		Version:    "1.2.3",
-		Live:       true,
-		Pid:        4242,
-		Tasks:      2,
+	record := got[0]
+	wantStrings := map[string]string{
+		"id":          "id ",
+		"name":        "left right",
+		"name_source": "user" + zwnj + "named",
+		"repo":        "emoji" + zwj + "join",
+		"branch":      "main",
+		"cwd":         "/work/" + variation,
+		"last_active": lastActive.Format(time.RFC3339),
+		"last_prompt": "prompt ",
+		"version":     "1.2.3",
 	}
-	if got[0] != want {
-		t.Errorf("decoded selected-session schema/value mismatch:\n got: %+v\nwant: %+v", got[0], want)
+	wantTypes := map[string]string{
+		"id": "string", "name": "string", "name_source": "string",
+		"repo": "string", "branch": "string", "cwd": "string",
+		"last_active": "string", "last_prompt": "string", "version": "string",
+		"live": "boolean", "pid": "number", "tasks": "number",
 	}
-	for field, value := range map[string]string{
-		"id": got[0].ID, "name": got[0].Name, "name_source": got[0].NameSource,
-		"repo": got[0].Repo, "branch": got[0].Branch, "cwd": got[0].Cwd,
-		"last_prompt": got[0].LastPrompt, "version": got[0].Version,
-	} {
+	if len(record) != len(wantTypes) {
+		t.Errorf("selected-session key count = %d, want %d: %s", len(record), len(wantTypes), out.String())
+	}
+	for key := range record {
+		if _, ok := wantTypes[key]; !ok {
+			t.Errorf("unexpected selected-session key %q", key)
+		}
+	}
+	for key, wantType := range wantTypes {
+		raw, ok := record[key]
+		if !ok {
+			t.Errorf("missing selected-session key %q", key)
+			continue
+		}
+		var value any
+		if err := json.Unmarshal(raw, &value); err != nil {
+			t.Errorf("decode selected-session key %q: %v", key, err)
+			continue
+		}
+		var gotType string
+		switch value.(type) {
+		case string:
+			gotType = "string"
+		case bool:
+			gotType = "boolean"
+		case float64:
+			gotType = "number"
+		default:
+			gotType = "non-primitive"
+		}
+		if gotType != wantType {
+			t.Errorf("selected-session key %q type = %s, want %s; value=%s", key, gotType, wantType, raw)
+		}
+	}
+	for field, want := range wantStrings {
+		var value string
+		if err := json.Unmarshal(record[field], &value); err != nil {
+			t.Errorf("decode selected-session string %q: %v", field, err)
+			continue
+		}
+		if value != want {
+			t.Errorf("decoded %s = %q, want %q", field, value, want)
+		}
 		for _, r := range value {
 			if r != '\t' && (unicode.IsControl(r) || unicode.In(r, unicode.Bidi_Control)) {
 				t.Errorf("decoded %s = %q still carries unsafe terminal rune %U", field, value, r)
 			}
+		}
+	}
+	var live bool
+	if err := json.Unmarshal(record["live"], &live); err != nil || !live {
+		t.Errorf("decoded live = %t, err=%v; want true boolean", live, err)
+	}
+	for field, want := range map[string]float64{"pid": 4242, "tasks": 2} {
+		var value float64
+		if err := json.Unmarshal(record[field], &value); err != nil || value != want {
+			t.Errorf("decoded %s = %v, err=%v; want %v number", field, value, err, want)
 		}
 	}
 }
