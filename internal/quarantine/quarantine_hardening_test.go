@@ -544,6 +544,87 @@ func TestExpandTargets_DecoratedCoveredRootSymlinkAliasIsNotTraversed(t *testing
 	}
 }
 
+func TestCanonicalOwns_UsesExactSegmentedFilesystemPaths(t *testing.T) {
+	tests := []struct {
+		owner     string
+		candidate string
+		want      bool
+	}{
+		{"/tmp/Root/.claude", "/tmp/Root/.claude", true},
+		{"/tmp/Root/.claude", "/tmp/Root/.claude/sub", true},
+		{"/tmp/Root/.claude", "/tmp/Root/.claude-other", false},
+		{"/tmp/Root/.claude", "/tmp/root/.claude", false},
+		{"/tmp/Root/.claude", "/tmp/root/.claude/sub", false},
+	}
+	for _, tc := range tests {
+		if got := canonicalOwns(tc.owner, tc.candidate); got != tc.want {
+			t.Errorf("canonicalOwns(%q, %q) = %v, want %v", tc.owner, tc.candidate, got, tc.want)
+		}
+	}
+}
+
+func TestExpandTargets_CoveredRootDescendantAliasIsNotTraversed(t *testing.T) {
+	for _, tc := range []struct {
+		scheme    Scheme
+		covered   string
+		aliasDest string
+	}{
+		{PrefixUnderscore, ".claude", filepath.Join(".claude", "sub")},
+		{PrefixUnderscore, "_.claude", filepath.Join("_.claude", "sub")},
+		{SuffixQuarantined, ".claude", filepath.Join(".claude", "sub")},
+		{SuffixQuarantined, ".claude.quarantined", filepath.Join(".claude.quarantined", "sub")},
+	} {
+		root := t.TempDir()
+		writeFile(t, filepath.Join(root, tc.covered, "sub", "mcp.json"), "covered descendant")
+		if err := os.Symlink(tc.aliasDest, filepath.Join(root, ".gemini")); err != nil {
+			t.Skipf("symlink unsupported: %v", err)
+		}
+		targets, err := ExpandTargets(root, tc.scheme, DefaultTargets)
+		if err != nil {
+			t.Fatalf("scheme=%v covered=%q ExpandTargets: %v", tc.scheme, tc.covered, err)
+		}
+		if containsStr(targets, filepath.Join(".gemini", "mcp.json")) {
+			t.Fatalf("scheme=%v covered=%q descendant alias was traversed: %v", tc.scheme, tc.covered, targets)
+		}
+	}
+}
+
+func TestExpandTargets_CaseOnlyEscapingAliasNeverCountsAsCovered(t *testing.T) {
+	base := t.TempDir()
+	upperRoot := filepath.Join(base, "Root")
+	lowerRoot := filepath.Join(base, "root")
+	if err := os.MkdirAll(filepath.Join(upperRoot, ".claude"), 0o755); err != nil {
+		t.Fatalf("MkdirAll upper root: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(lowerRoot, ".claude"), 0o755); err != nil {
+		t.Skipf("filesystem cannot represent case-only sibling roots: %v", err)
+	}
+	upperInfo, err := os.Stat(upperRoot)
+	if err != nil {
+		t.Fatalf("Stat upper root: %v", err)
+	}
+	lowerInfo, err := os.Stat(lowerRoot)
+	if err != nil {
+		t.Fatalf("Stat lower root: %v", err)
+	}
+	if os.SameFile(upperInfo, lowerInfo) {
+		t.Skip("filesystem is case-insensitive; Linux behavior is exercised on a case-sensitive runner")
+	}
+	writeFile(t, filepath.Join(lowerRoot, ".claude", "mcp.json"), "external")
+	if err := os.Symlink(filepath.Join(lowerRoot, ".claude"), filepath.Join(upperRoot, ".gemini")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	for _, scheme := range []Scheme{PrefixUnderscore, SuffixQuarantined} {
+		_, expandErr := ExpandTargets(upperRoot, scheme, DefaultTargets)
+		if expandErr == nil || !strings.Contains(expandErr.Error(), `quarantine target ".gemini/mcp.json" escapes root through its parent`) {
+			t.Fatalf("scheme=%v case-only escape error = %v", scheme, expandErr)
+		}
+		if got := readFile(t, filepath.Join(lowerRoot, ".claude", "mcp.json")); got != "external" {
+			t.Fatalf("scheme=%v external carrier mutated: %q", scheme, got)
+		}
+	}
+}
+
 func TestExpandTargets_UniqueInRootSymlinkedMCPCarrierRoundTrips(t *testing.T) {
 	for _, scheme := range []Scheme{PrefixUnderscore, SuffixQuarantined} {
 		root := t.TempDir()

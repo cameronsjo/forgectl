@@ -467,6 +467,10 @@ func expandPatterns(root string, scheme Scheme, patterns []string, covered map[s
 }
 
 func aliasesCoveredRoot(root, top string, covered map[string]string) bool {
+	canonicalRoot, err := resolveRootIdentity(root)
+	if err != nil {
+		return false
+	}
 	info, err := os.Lstat(filepath.Join(root, top))
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
 		return false
@@ -476,7 +480,7 @@ func aliasesCoveredRoot(root, top string, covered map[string]string) bool {
 		return false
 	}
 	alias, err = filepath.Abs(alias)
-	if err != nil {
+	if err != nil || !canonicalOwns(canonicalRoot.real, alias) {
 		return false
 	}
 	for spelling := range covered {
@@ -489,11 +493,20 @@ func aliasesCoveredRoot(root, top string, covered map[string]string) bool {
 			continue
 		}
 		coveredPath, resolveErr = filepath.Abs(coveredPath)
-		if resolveErr == nil && sameIdentity(identityForPath(alias), identityForPath(coveredPath)) {
+		if resolveErr == nil && canonicalOwns(coveredPath, alias) {
 			return true
 		}
 	}
 	return false
+}
+
+// canonicalOwns compares canonical filesystem locations, whose case policy is
+// already embodied by the filesystem resolution that produced them. Unlike
+// logical diagnostic identities, absolute ownership must never ASCII-fold:
+// Linux can have distinct case-only sibling trees. filepath.Rel also enforces
+// a path-segment boundary, so ".claude-other" is not owned by ".claude".
+func canonicalOwns(owner, candidate string) bool {
+	return pathWithin(filepath.Clean(owner), filepath.Clean(candidate))
 }
 
 // globFold is filepath.Glob's contract — resolve a relative pattern against

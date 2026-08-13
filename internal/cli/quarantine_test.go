@@ -323,6 +323,43 @@ func TestQuarantineHide_DefaultTargetsRejectEscapingSymlinkedMCPCarrier(t *testi
 	}
 }
 
+func TestQuarantine_DefaultTargetsCoveredDescendantAliasHideRestore(t *testing.T) {
+	for _, scheme := range []string{"prefix", "suffix"} {
+		root := t.TempDir()
+		writeQuarantineFixture(t, filepath.Join(root, ".claude", "sub", "mcp.json"), "covered descendant")
+		if err := os.Symlink(filepath.Join(".claude", "sub"), filepath.Join(root, ".gemini")); err != nil {
+			t.Skipf("symlink unsupported: %v", err)
+		}
+		hide := newQuarantineCmd(newQuarantineTestClient())
+		var hideOut bytes.Buffer
+		hide.SetOut(&hideOut)
+		hide.SetErr(new(bytes.Buffer))
+		hide.SetArgs([]string{"hide", "--root", root, "--scheme", scheme})
+		if err := hide.ExecuteContext(context.Background()); err != nil {
+			t.Fatalf("scheme=%s hide: %v", scheme, err)
+		}
+		decorated := "_.claude"
+		if scheme == "suffix" {
+			decorated = ".claude.quarantined"
+		}
+		if _, err := os.Lstat(filepath.Join(root, decorated, "sub", "mcp.json")); err != nil {
+			t.Fatalf("scheme=%s covered root not hidden: %v", scheme, err)
+		}
+
+		restore := newQuarantineCmd(newQuarantineTestClient())
+		var restoreOut bytes.Buffer
+		restore.SetOut(&restoreOut)
+		restore.SetErr(new(bytes.Buffer))
+		restore.SetArgs([]string{"restore", "--root", root, "--scheme", scheme})
+		if err := restore.ExecuteContext(context.Background()); err != nil {
+			t.Fatalf("scheme=%s restore: %v", scheme, err)
+		}
+		if got, err := os.ReadFile(filepath.Join(root, ".claude", "sub", "mcp.json")); err != nil || string(got) != "covered descendant" {
+			t.Fatalf("scheme=%s restored content=%q err=%v", scheme, got, err)
+		}
+	}
+}
+
 func TestQuarantineCommands_RejectFinalSymlinkOuterAndDescendantWithoutOutputOrMutation(t *testing.T) {
 	commands := []struct {
 		name string
