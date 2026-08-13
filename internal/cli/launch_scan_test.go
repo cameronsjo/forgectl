@@ -1,8 +1,7 @@
 package cli
 
 import (
-	"os"
-	"path/filepath"
+	"errors"
 	"strings"
 	"testing"
 
@@ -22,8 +21,6 @@ import (
 // correctly: the comment-block-then-commented-header [bench] section
 // survives verbatim, and only the [launch] family is actually replaced.
 func TestReplaceLaunchSection_PreservesTrailingCommentSectionAndLeadingComments(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
 	body := `[launch.defaults]
 model = "opus"
 
@@ -36,21 +33,13 @@ model = "sonnet"
 hearth_dir = "~/Projects/hearth"
 telemetry = true
 `
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatalf("write config.toml: %v", err)
-	}
-
 	merged := config.LaunchConfig{
 		Defaults: config.LaunchDefaults{Model: "opus"},
 		Projects: []config.LaunchProject{{Match: "~/Projects/minute", Model: "haiku"}},
 	}
-	if err := replaceLaunchSection(path, merged, "/legacy/claunch.conf"); err != nil {
-		t.Fatalf("replaceLaunchSection: %v", err)
-	}
-
-	data, err := os.ReadFile(path)
+	data, err := renderReplacedLaunch([]byte(body), merged, "/legacy/claunch.conf")
 	if err != nil {
-		t.Fatalf("read rewritten config.toml: %v", err)
+		t.Fatalf("renderReplacedLaunch: %v", err)
 	}
 	got := string(data)
 
@@ -78,6 +67,22 @@ telemetry = true
 	}
 }
 
+func TestRenderers_RejectInvalidUTF8PathBeforeTOMLCommentInsertion(t *testing.T) {
+	invalid := string([]byte{'/', 't', 'm', 'p', '/', 0xff})
+	for name, render := range map[string]func() ([]byte, error){
+		"import": func() ([]byte, error) { return renderImportedLaunch(nil, config.LaunchConfig{}, invalid) },
+		"replace": func() ([]byte, error) {
+			return renderReplacedLaunch([]byte("[launch]\n"), config.LaunchConfig{}, invalid)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := render(); !errors.Is(err, config.ErrLegacyPathControl) {
+				t.Fatalf("error=%v, want invalid path refusal", err)
+			}
+		})
+	}
+}
+
 // TestReplaceLaunchSection_AmbiguousScanRefusesAndLeavesFileUntouched covers
 // the fail-safe contract security review required alongside the scanner
 // hardening: when the scan can't unambiguously resolve the file's structure
@@ -86,8 +91,6 @@ telemetry = true
 // remaining gap — replaceLaunchSection MUST return an error and MUST NOT
 // write anything, rather than guess at which lines belong to [launch].
 func TestReplaceLaunchSection_AmbiguousScanRefusesAndLeavesFileUntouched(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
 	body := `[launch.defaults]
 model = "opus"
 
@@ -96,21 +99,9 @@ roots = [
   "a",
   "b",
 `
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatalf("write config.toml: %v", err)
-	}
-
 	merged := config.LaunchConfig{Defaults: config.LaunchDefaults{Model: "haiku"}}
-	if err := replaceLaunchSection(path, merged, "/legacy/claunch.conf"); err == nil {
+	if _, err := renderReplacedLaunch([]byte(body), merged, "/legacy/claunch.conf"); err == nil {
 		t.Fatal("replaceLaunchSection succeeded against a file ending mid multi-line array, want a refusal error")
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read config.toml after the refused rewrite: %v", err)
-	}
-	if string(data) != body {
-		t.Errorf("config.toml was modified despite replaceLaunchSection refusing to write;\nbefore:\n%s\nafter:\n%s", body, data)
 	}
 }
 

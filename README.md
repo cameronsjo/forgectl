@@ -73,7 +73,8 @@ forgectl launch <harness args…>    # apply the project profile, then exec the 
 forgectl launch agents --json      # pure passthrough (byte-clean); posture injected only when interactive
 forgectl launch which              # show the profile resolved for the current directory (alias: config)
 forgectl launch init               # scaffold the [launch] section into config.toml
-forgectl launch init --from-claunch # import an existing ~/.config/claunch/claunch.conf into config.toml
+forgectl launch migrate            # explicitly import an existing claunch.conf without retiring it
+forgectl launch init --from-claunch # deprecated alias for `launch migrate`
 forgectl launch edit               # open config.toml in $EDITOR
 forgectl launch doctor             # check harness availability + launch config validity
 
@@ -470,7 +471,17 @@ only** — `forgectl pr local`, where the reviewed tree is your own.
 > hostile to you, so `forgectl pr local --agent codex` stays fully available.
 > Use `--agent claude` (the default) for PR review.
 
-**Zero-migration grace** — if `config.toml` has no `[launch]` section, forgectl still reads a legacy `~/.config/claunch/claunch.conf` (the `[launch]` section is the same `[defaults]` + `[[project]]` shape, just namespaced). `forgectl launch init` writes an empty native section for the one-time cutover; `forgectl launch init --from-claunch` migrates your existing legacy profiles into it, so `launch` stops falling back to the legacy file. Both refuse to overwrite an existing `[launch]` section.
+**Legacy `claunch.conf` migration** — on Darwin and Linux, a launch command captures the legacy file once, decodes that exact byte slice, and uses those same bytes for a no-clobber backup before retiring the named source. An existing `claunch.conf.bak` is never overwritten; forgectl allocates an exclusive `claunch.conf.bak.<random>` name instead. A hardlinked source is allowed, but retirement removes only the `claunch.conf` directory entry and leaves sibling links unchanged. `launch migrate` is the explicit import-only form: it refuses an existing `[launch]` table and does not back up or retire the source.
+
+The path policy is lexical and fail-closed. An explicit `XDG_CONFIG_HOME` must be absolute, and both `<xdg>/forgectl/config.toml` and `<xdg>/claunch/claunch.conf` must be the exact cleaned children of that same root—prefix lookalikes and cross-root Darwin pairs are refused. With no explicit XDG value, Darwin keeps the historical native-config/`~/.config/claunch` pair. Symlinks, directories, FIFOs, sockets, devices, malformed TOML, unstable reads, and identity drift are never migration sources. A legacy leaf symlink may still be followed only by the nonblocking read-only compatibility fallback when it resolves to a regular file.
+
+On an automatic refusal, a missing native `[launch]` uses a safely decoded read-only legacy profile for that invocation; a present `[launch]`—even an empty table—remains authoritative. `FORGECTL_SKIP_LEGACY_MIGRATE=1` always selects that non-mutating behavior. No pre-capture refusal creates the config directory, writer lock, config temp, config file, or backup.
+
+Config replacement, backup creation, and source retirement are separate reported phases. The config temp remains pinned by an attempt-owned descriptor: its name is identity-checked immediately before rename, and the renamed identity, exact bytes, and private mode are checked again before directory durability can be claimed. Cleanup immediately identity-validates the name and live descriptor before removal, preserving any replacement already visible at that check. The backup allocation likewise retains an attempt-owned identity descriptor through cleanup, so immediate inode reuse cannot make a replacement appear owned. The config file and its directory entry must be durable in the current attempt before backup begins; an added-zero retry reopens the current bytes, syncs the file, and syncs its parent before retirement can resume. If a config rename is visible but its identity/content/mode proof or directory sync fails, the source is retained. Any later backup or identity failure likewise retains the source; a failure syncing the legacy directory after unlink is reported as durability-unknown and keeps the verified backup.
+
+A captured legacy name disappearing while a process waits for the writer lock is a successful peer no-op only when the locked `[launch]` config already supersedes every captured legacy addition. Otherwise the disappearance is reported as drift/refusal, the source is not claimed as cooperatively retired, and fallback uses the captured profile when no native `[launch]` is authoritative.
+
+New config and backup files are owner-only and no broader than `0600`; a restrictive umask may narrow them further, and an existing config mode such as `0400`, `0200`, or `0000` is not broadened. Every cooperating launch/top-level init writer shares the same Unix sibling lock and atomic replacement path. Secure legacy mutation and directory-durability claims apply to Unix builds (the shipped Darwin/Linux targets); non-Unix builds refuse automatic and explicit legacy mutation before writer activity. Their developer-only normal init may make a replacement visible, but reports that directory durability and cross-process serialization are unavailable.
 
 > Absorbed from the standalone `claunch` tool. A `claunch='forgectl launch'` shell alias preserves the old muscle memory.
 

@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // logKeepDays is how many daily log files are retained before pruning.
@@ -89,6 +91,14 @@ type Config struct {
 	Preflight PreflightConfig `toml:"preflight"`
 	Update    UpdateConfig    `toml:"update"`
 	Pr        PrConfig        `toml:"pr"`
+	launchSet bool
+}
+
+// HasLaunchSection distinguishes an explicitly present but empty [launch]
+// table from a missing table. The distinction is authoritative during legacy
+// migration: even an empty table shadows the compatibility source.
+func (c Config) HasLaunchSection() bool {
+	return c.launchSet || !c.Launch.IsZero()
 }
 
 // LaunchConfig is the [launch] section: base defaults plus directory-keyed
@@ -445,12 +455,38 @@ func Load() Config {
 	if err != nil {
 		return Config{}
 	}
-	var cfg Config
-	if _, err := toml.DecodeFile(path, &cfg); err != nil && !os.IsNotExist(err) {
+	return LoadPath(path)
+}
+
+// LoadPath reads the already-resolved config path for a process attempt. It
+// keeps Load's tolerant startup behavior while preventing migration callers
+// from recomputing HOME/XDG after their authoritative boundary was captured.
+func LoadPath(path string) Config {
+	data, err := ReadPath(path)
+	if os.IsNotExist(err) {
+		return Config{}
+	}
+	cfg, decodeErr := DecodeStrict(data)
+	if err == nil {
+		err = decodeErr
+	}
+	if err != nil && !os.IsNotExist(err) {
 		slog.Warn("Failed to decode config file; using built-in defaults for unreadable sections.",
-			"path", path, "error", err)
+			"path", termsafe.QuotePath(path), "error", termsafe.SafeLine(err.Error()))
 	}
 	return cfg
+}
+
+// DecodeStrict decodes an immutable config snapshot and retains table
+// presence metadata. Migration uses it only after acquiring the writer lock.
+func DecodeStrict(data []byte) (Config, error) {
+	var cfg Config
+	if len(data) == 0 {
+		return cfg, nil
+	}
+	meta, err := toml.Decode(string(data), &cfg)
+	cfg.launchSet = meta.IsDefined("launch")
+	return cfg, err
 }
 
 // Validate decodes the config file and returns any parse error. A missing file
@@ -461,14 +497,21 @@ func Validate() error {
 	if err != nil {
 		return err
 	}
-	var cfg Config
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
+	return ValidatePath(path)
+}
+
+// ValidatePath strictly decodes the already-resolved config path. A missing
+// file remains valid and selects built-in defaults.
+func ValidatePath(path string) error {
+	data, err := ReadPath(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
 		return err
 	}
-	return nil
+	_, err = DecodeStrict(data)
+	return err
 }
 
 // SetupLogger configures the global slog default from cfg and returns a Closer
@@ -857,7 +900,10 @@ func LegacyLaunchPath() (string, error) {
 // path — the expected "nothing to import / nothing to shadow" outcome, distinct
 // from a path-resolution or decode failure (which callers surface as real
 // errors). Test for it with errors.Is.
-var ErrNoLegacyLaunch = errors.New("no legacy claunch.conf found")
+var (
+	ErrNoLegacyLaunch   = errors.New("no legacy claunch.conf found")
+	ErrConfigNonRegular = errors.New("config path does not resolve to a regular file")
+)
 
 // LoadLegacyLaunch reads a legacy claunch.conf into a LaunchConfig — the same
 // TOML shape as [launch] ([defaults] + [[project]]) — and returns the resolved

@@ -373,6 +373,25 @@ func TestConfigPath(t *testing.T) {
 	}
 }
 
+func TestLoadPathAndValidatePathUseTheSuppliedSnapshotPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "captured.toml")
+	if err := os.WriteFile(path, []byte("[launch.defaults]\nmodel = \"sonnet\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadPath(path).Launch.Defaults.Model; got != "sonnet" {
+		t.Fatalf("LoadPath model = %q, want sonnet", got)
+	}
+	if err := ValidatePath(path); err != nil {
+		t.Fatalf("ValidatePath(valid) = %v", err)
+	}
+	if err := os.WriteFile(path, []byte("broken [toml"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePath(path); err == nil {
+		t.Fatal("ValidatePath(malformed) = nil, want error")
+	}
+}
+
 func TestWorkflowsDir(t *testing.T) {
 	dir := redirectConfigDir(t)
 	got, err := WorkflowsDir()
@@ -487,6 +506,26 @@ func TestLoad(t *testing.T) {
 			t.Errorf("Load() with malformed file = %+v, want zero-value Config", got)
 		}
 	})
+}
+
+func TestDecodeStrictAndLoadPath_PreserveEmptyLaunchTablePresence(t *testing.T) {
+	const body = "[launch]\n"
+	decoded, err := DecodeStrict([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.HasLaunchSection() || !decoded.Launch.IsZero() {
+		t.Fatalf("DecodeStrict presence=%t launch=%+v, want present empty table", decoded.HasLaunchSection(), decoded.Launch)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded := LoadPath(path)
+	if !loaded.HasLaunchSection() || !loaded.Launch.IsZero() {
+		t.Fatalf("LoadPath presence=%t launch=%+v, want present empty table", loaded.HasLaunchSection(), loaded.Launch)
+	}
 }
 
 func TestReviewGiteaConfig_RoundTripAndIsZero(t *testing.T) {

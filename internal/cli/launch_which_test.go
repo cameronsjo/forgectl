@@ -67,3 +67,48 @@ func TestPrintLaunchProfile_NoEnvRowWhenUnset(t *testing.T) {
 		t.Errorf("`launch which` printed an env row for a profile with no env:\n%s", buf.String())
 	}
 }
+
+func TestRenderSafe_EscapesAttackerTextBeforeTrustedANSI(t *testing.T) {
+	render := func(parts ...string) string { return "\x1b[32m" + strings.Join(parts, "") + "\x1b[0m" }
+	got := renderSafe(render, "value\nforged\x1b[2K\u202eexe")
+	for _, trusted := range []string{"\x1b[32m", "\x1b[0m"} {
+		if !strings.Contains(got, trusted) {
+			t.Fatalf("trusted ANSI %q was escaped: %q", trusted, got)
+		}
+	}
+	for _, attacker := range []string{"\n", "\x1b[2K", "\u202e"} {
+		if strings.Contains(got, attacker) {
+			t.Fatalf("attacker sequence %q survived: %q", attacker, got)
+		}
+	}
+	for _, escaped := range []string{`\n`, `\x1b`, `\u202e`} {
+		if !strings.Contains(got, escaped) {
+			t.Errorf("escaped marker %q absent: %q", escaped, got)
+		}
+	}
+}
+
+func TestPrintLaunchProfile_EscapesEveryUntrustedSurfaceToOneLinePerRow(t *testing.T) {
+	attack := "x\tline\nforged\r\x1b[2K\x7f\u009b\u202e"
+	var buf bytes.Buffer
+	printLaunchProfile(&buf, launch.Profile{
+		Match:          attack,
+		Harness:        attack,
+		Model:          attack,
+		PermissionMode: attack,
+		AddDir:         []string{attack},
+		Env:            map[string]string{attack: "withheld"},
+	}, attack, attack)
+	out := buf.String()
+	if strings.ContainsAny(out, "\t\r\x7f") || strings.Contains(out, "\x1b[2K") || strings.ContainsRune(out, '\u009b') || strings.ContainsRune(out, '\u202e') {
+		t.Fatalf("profile output contains attacker controls: %q", out)
+	}
+	for _, escaped := range []string{`\t`, `\n`, `\r`, `\x1b`, `\x7f`, `\u009b`, `\u202e`} {
+		if !strings.Contains(out, escaped) {
+			t.Errorf("profile output missing escaped marker %q: %q", escaped, out)
+		}
+	}
+	if lines := strings.Count(out, "\n"); lines != 9 {
+		t.Fatalf("physical lines = %d, want one title plus eight rows; output=%q", lines, out)
+	}
+}

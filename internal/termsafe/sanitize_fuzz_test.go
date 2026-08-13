@@ -1,7 +1,14 @@
 package termsafe
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"strings"
 	"testing"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -124,4 +131,105 @@ func FuzzSanitize(f *testing.F) {
 			t.Fatalf("Sanitize is not idempotent: once=%q twice=%q", got, twice)
 		}
 	})
+}
+
+func TestTextHandler_SafeFieldsRemainOnePhysicalLine(t *testing.T) {
+	var out bytes.Buffer
+	handler := slog.NewTextHandler(&out, nil)
+	record := slog.NewRecord(time.Unix(0, 0), slog.LevelWarn, "migration refused", 0)
+	record.Add("path", QuotePath("/tmp/a\n\x1b[2K\u202e"), "error", SafeLine("bad\r\x9bforged"))
+	if err := handler.Handle(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if strings.Count(got, "\n") != 1 || strings.ContainsAny(strings.TrimSuffix(got, "\n"), "\r\x1b") || strings.ContainsRune(got, '\u009b') || strings.ContainsRune(got, '\u202e') {
+		t.Fatalf("TextHandler output is not one inert physical line: %q", got)
+	}
+}
+
+func TestError_PreservesIdentityAndEscapesFilesystemPaths(t *testing.T) {
+	sentinel := errors.New("permission\x1b[2Kdenied")
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "path", err: &os.PathError{Op: "open\nforged", Path: "/tmp/a\nb\x1b[31m", Err: sentinel}},
+		{name: "link", err: &os.LinkError{Op: "rename\rforged", Old: "/tmp/old\nline", New: "/tmp/new\u202eexe", Err: sentinel}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Error(tt.err)
+			if !errors.Is(got, sentinel) {
+				t.Fatalf("errors.Is(%v, sentinel) = false", got)
+			}
+			var pathErr *os.PathError
+			var linkErr *os.LinkError
+			if !errors.As(got, &pathErr) && !errors.As(got, &linkErr) {
+				t.Fatalf("errors.As(%T) did not preserve filesystem error", tt.err)
+			}
+			if strings.Count(got.Error(), "\n") != 0 || strings.ContainsAny(got.Error(), "\r\x1b") || strings.ContainsRune(got.Error(), '\u202e') {
+				t.Fatalf("safe error contains terminal control/format text: %q", got.Error())
+			}
+			for _, escaped := range []string{`\n`, `\x1b`} {
+				if !strings.Contains(got.Error(), escaped) {
+					t.Errorf("safe error %q does not visibly escape %q", got.Error(), escaped)
+				}
+			}
+		})
+	}
+}
+
+func TestSafeLineAndQuotePath_EscapeLayoutControlsAndBidiOverride(t *testing.T) {
+	input := "a\tb\nc\rd\x1be\x7ff\u0085g\u202eh"
+	for name, got := range map[string]string{
+		"SafeLine":  SafeLine(input),
+		"QuotePath": QuotePath(input),
+	} {
+		if strings.ContainsAny(got, "\t\n\r\x1b\x7f\u0085\u202e") {
+			t.Fatalf("%s output %q retained a sink layout control or bidi override", name, got)
+		}
+		if strings.ContainsAny(got, "\n\r") {
+			t.Fatalf("%s output spans physical lines: %q", name, got)
+		}
+	}
+}
+
+func TestSafeLineAndQuotePath_EscapeEverySharedUnsafeRune(t *testing.T) {
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if !IsUnsafeTerminalRune(r) {
+			continue
+		}
+		for name, got := range map[string]string{
+			"SafeLine":  SafeLine(string(r)),
+			"QuotePath": QuotePath(string(r)),
+		} {
+			if strings.ContainsRune(got, r) {
+				t.Fatalf("%s retained unsafe rune %U in %q", name, r, got)
+			}
+		}
+	}
+}
+
+func TestVisibleQuotingDoesNotBroadenSharedSanitizeClassifier(t *testing.T) {
+	for _, r := range []rune{'\u200c', '\u200d', '\ufe0e', '\ufe0f', '\U000e0100'} {
+		input := "left" + string(r) + "right"
+		if IsUnsafeTerminalRune(r) {
+			t.Fatalf("permitted formatting rune %U was added to the shared classifier", r)
+		}
+		if got := Sanitize(input); got != input {
+			t.Fatalf("Sanitize changed permitted formatting rune %U: %q", r, got)
+		}
+	}
+
+	for _, r := range []rune{'\u200c', '\u200d'} {
+		input := "left" + string(r) + "right"
+		for name, got := range map[string]string{
+			"SafeLine":  SafeLine(input),
+			"QuotePath": QuotePath(input),
+		} {
+			if strings.ContainsRune(got, r) {
+				t.Fatalf("%s did not visibly quote non-graphic rune %U: %q", name, r, got)
+			}
+		}
+	}
 }

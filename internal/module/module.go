@@ -29,8 +29,9 @@ const (
 // Deps carries what a module constructor needs: the loaded config and the
 // process runner (exec.OSRunner in Execute; exec.FakeRunner in tests).
 type Deps struct {
-	Cfg    config.Config
-	Runner exec.Runner
+	Cfg            config.Config
+	Runner         exec.Runner
+	LegacyBoundary *config.LegacyMigrationBoundary
 }
 
 // Manifest declares one module: its canonical verb, tier, config-section

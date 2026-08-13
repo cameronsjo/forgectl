@@ -10,6 +10,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 var (
@@ -19,7 +20,7 @@ var (
 	launchDimStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
 )
 
-func newLaunchWhichCmd(cfg config.Config) *cobra.Command {
+func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Config) *cobra.Command {
 	return &cobra.Command{
 		Use:   "which",
 		Short: "Print the resolved launch profile for the current directory",
@@ -27,14 +28,14 @@ func newLaunchWhichCmd(cfg config.Config) *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
-				return fmt.Errorf("determine working directory: %w", err)
+				return termsafe.Error(fmt.Errorf("determine working directory: %w", err))
 			}
-			effLaunch, notice := autoMigrateOrWarnLegacyLaunch(cfg)
+			effLaunch, notice := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
 			if notice != "" {
-				fmt.Fprintln(cmd.ErrOrStderr(), "forgectl: "+notice)
+				fmt.Fprintln(cmd.ErrOrStderr(), "forgectl: "+termsafe.SafeLine(notice))
 			}
 			cfg.Launch = effLaunch
-			lc, src := resolveLaunchConfig(cfg)
+			lc, src := resolveLaunchConfig(boundary, cfg)
 			printLaunchProfile(cmd.OutOrStdout(), launch.Resolve(lc, cwd), cwd, src)
 			return nil
 		},
@@ -43,17 +44,21 @@ func newLaunchWhichCmd(cfg config.Config) *cobra.Command {
 
 func printLaunchProfile(w io.Writer, p launch.Profile, cwd, confPath string) {
 	row := func(label, value string) {
-		_, _ = fmt.Fprintln(w, launchLabelStyle.Render(label)+launchValueStyle.Render(value))
+		_, _ = fmt.Fprintln(w, renderSafe(launchLabelStyle.Render, label)+renderSafe(launchValueStyle.Render, value))
+	}
+	rowDim := func(label, value string) {
+		_, _ = fmt.Fprintln(w, renderSafe(launchLabelStyle.Render, label)+renderSafe(launchDimStyle.Render, value))
 	}
 
-	_, _ = fmt.Fprintln(w, launchTitleStyle.Render("launch profile")+launchDimStyle.Render("  "+cwd))
+	_, _ = fmt.Fprintln(w, launchTitleStyle.Render("launch profile")+renderSafe(launchDimStyle.Render, "  "+cwd))
 	row("config", confPath)
 
 	matched := p.Match
 	if matched == "" {
-		matched = launchDimStyle.Render("(defaults only)")
+		rowDim("matched", "(defaults only)")
+	} else {
+		row("matched", matched)
 	}
-	row("matched", matched)
 	row("harness", p.Harness)
 	row("model", p.Model)
 	if p.Harness == "codex" {
@@ -88,4 +93,10 @@ func printLaunchProfile(w io.Writer, p launch.Profile, cwd, confPath string) {
 		}
 		row(label, d)
 	}
+}
+
+// renderSafe establishes the ordering invariant for styled terminal output:
+// untrusted text is escaped first, then the trusted renderer may add ANSI.
+func renderSafe(render func(...string) string, untrusted string) string {
+	return render(termsafe.SafeLine(untrusted))
 }
