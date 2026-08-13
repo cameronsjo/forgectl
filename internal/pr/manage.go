@@ -42,9 +42,10 @@ func (c *Client) List() ([]SessionSummary, error) {
 			invalid++
 			continue
 		}
-		if sum.IsWorkspaceMissing() {
+		switch {
+		case sum.IsWorkspaceMissing():
 			missing++
-		} else {
+		case sum.IsWorkspaceLive():
 			live++
 		}
 		summaries = append(summaries, sum)
@@ -71,6 +72,10 @@ func (c *Client) loadSummary(path string) (SessionSummary, error) {
 	if err != nil {
 		return SessionSummary{}, err
 	}
+	// Live and missing are both presentable, so their errors are discarded on
+	// purpose — classifyWorkspace returns the typed missing error alongside a
+	// perfectly listable row, and only a consumer that ACTS on the workspace
+	// (loadBreadcrumb) needs to surface it.
 	avail, err := classifyWorkspace(bc.Workspace)
 	switch avail {
 	case workspaceAvailabilityLive, workspaceAvailabilityMissing:
