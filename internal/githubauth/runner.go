@@ -54,6 +54,27 @@ func (p pinnedRunner) Run(ctx context.Context, name string, args ...string) (str
 	return out, nil
 }
 
+// RunWithEnv applies the same pin to the explicit-environment path. Without
+// this override the wrapper would be asymmetric: a caller reaching for
+// RunWithEnv — the very method used to control a child's environment — would
+// silently escape the host pin, and could even supply its own GH_HOST. The
+// pin is applied last so it beats any GH_HOST in env.
+func (p pinnedRunner) RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (string, error) {
+	if name != "gh" {
+		return p.Runner.RunWithEnv(ctx, env, name, args...)
+	}
+	pinned := make(map[string]string, len(env)+1)
+	for k, v := range env {
+		pinned[k] = v
+	}
+	pinned["GH_HOST"] = Host
+	out, err := p.Runner.RunWithEnv(ctx, pinned, name, args...)
+	if err != nil {
+		return out, classifyContextFailure(ctx, err)
+	}
+	return out, nil
+}
+
 // classifyContextFailure converts a raw subprocess failure into a safe
 // standard context sentinel when the failure is really a cancellation or an
 // expired deadline, and otherwise returns the raw error for the in-process

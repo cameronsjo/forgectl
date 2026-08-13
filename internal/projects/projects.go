@@ -370,7 +370,7 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 		fetched[res.host] = res
 	}
 	var remote []Repo
-	for _, host := range [remoteHosts]string{"github", "gitea"} {
+	for _, host := range []string{"github", "gitea"} {
 		res := fetched[host]
 		notes = append(notes, res.notes...)
 		if res.err != nil {

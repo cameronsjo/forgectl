@@ -115,6 +115,29 @@ func TestRunner_DelegatesNonGhUntouched(t *testing.T) {
 	}
 }
 
+// TestRunner_RunWithEnvCannotEscapeThePin covers the asymmetry a wrapper that
+// overrode only Run would leave: RunWithEnv is the method for controlling a
+// child's environment, so it is exactly where a caller could otherwise supply
+// its own GH_HOST and route a gh call at an enterprise instance.
+func TestRunner_RunWithEnvCannotEscapeThePin(t *testing.T) {
+	fake := &exec.FakeRunner{}
+
+	_, err := Runner(fake).RunWithEnv(t.Context(),
+		map[string]string{"GH_HOST": "ghe.example.test", "GH_TOKEN": "keep-me"},
+		"gh", "api", "user")
+	if err != nil {
+		t.Fatalf("RunWithEnv: %v", err)
+	}
+
+	last := fake.Last()
+	if got := last.Env["GH_HOST"]; got != Host {
+		t.Errorf("GH_HOST = %q, want %q — the caller's value must not win", got, Host)
+	}
+	if got := last.Env["GH_TOKEN"]; got != "keep-me" {
+		t.Errorf("GH_TOKEN = %q, want the caller's other vars preserved", got)
+	}
+}
+
 func TestRunner_DoubleWrapIsHarmless(t *testing.T) {
 	fake := &exec.FakeRunner{}
 

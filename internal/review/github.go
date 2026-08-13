@@ -146,7 +146,9 @@ func (g *GitHub) Items(ctx context.Context) ([]Item, []string, error) {
 		}
 		items = append(items, res.items...)
 	}
-	if failed == len(queries) {
+	// failed > 0 guards the degenerate case: an empty query list would satisfy
+	// failed == len(queries) and report a total failure with nothing attempted.
+	if failed > 0 && failed == len(queries) {
 		return nil, notes, safeAggregateError(ErrGitHubQueriesUnavailable, sawDeadline, sawCanceled)
 	}
 	slog.Info("Successfully loaded GitHub review inventory.", "items", len(items), "owners", len(owners), "degraded_queries", failed)
