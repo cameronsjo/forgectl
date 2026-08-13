@@ -3,6 +3,7 @@
 package docs
 
 import (
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -28,7 +29,7 @@ import (
 func openLegacyRecord(path string) (io.ReadCloser, error) {
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
-		if err == unix.ENOENT {
+		if errors.Is(err, unix.ENOENT) {
 			return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
 		}
 		return nil, errUnsafeRecord

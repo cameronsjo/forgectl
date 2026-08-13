@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"net/netip"
 )
 
 // ErrLegacyProtectedServer means the discovered server predates the freshness
@@ -87,15 +86,10 @@ func readLegacyRecord(rt discoveryRuntime, path string) (ServerInfo, error) {
 	if legacy.Token != "" && !validDiscoveryToken(legacy.Token) {
 		return ServerInfo{}, errInvalidToken
 	}
-	if err := validateLegacyAddr(legacy.Addr, rt.localIP); err != nil {
+	// The old writer emitted whatever net.Listener.Addr() produced, which is
+	// already the numeric form these rules accept.
+	if err := validateAdvertisedAddr(legacy.Addr, rt.localIP); err != nil {
 		return ServerInfo{}, err
 	}
 	return ServerInfo{Addr: legacy.Addr, Token: legacy.Token}, nil
-}
-
-// validateLegacyAddr applies the v1 address rules to an old record. The old
-// writer emitted whatever net.Listener.Addr() produced, which is already the
-// numeric form these rules accept.
-func validateLegacyAddr(addr string, localIP func(netip.Addr) bool) error {
-	return validateAdvertisedAddr(addr, localIP)
 }

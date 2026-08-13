@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/netip"
 	"sort"
 	"sync"
 )
@@ -67,6 +68,13 @@ func scanRecords(rt discoveryRuntime, dir string) ([]ServerInfo, error) {
 	if len(entries) > maxDirEntries {
 		return nil, ErrDiscoveryOverloaded
 	}
+
+	// Memoize the local-IP check for the life of this scan. It enumerates
+	// every interface on the machine, and without this a directory holding the
+	// maximum 64 records would sweep them 64 times to answer the same handful
+	// of questions. Per-scan rather than package-level, so an interface coming
+	// up or down is picked up by the next discovery.
+	rt.localIP = memoizeLocalIP(rt.localIP)
 
 	records := make([]ServerInfo, 0, len(entries))
 	for _, entry := range entries {
@@ -194,4 +202,23 @@ func selectLiveRecord(ctx context.Context, rt discoveryRuntime, records []Server
 		}
 	}
 	return ServerInfo{}, ErrNoServer
+}
+
+// memoizeLocalIP caches one local-IP verdict per address for the life of a
+// single scan. It is not safe for concurrent use and does not need to be: the
+// scan that installs it is sequential, and selection has already finished
+// parsing by the time it fans out probes.
+func memoizeLocalIP(localIP func(netip.Addr) bool) func(netip.Addr) bool {
+	if localIP == nil {
+		return nil
+	}
+	seen := make(map[netip.Addr]bool)
+	return func(ip netip.Addr) bool {
+		if verdict, ok := seen[ip]; ok {
+			return verdict
+		}
+		verdict := localIP(ip)
+		seen[ip] = verdict
+		return verdict
+	}
 }
