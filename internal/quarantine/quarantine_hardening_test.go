@@ -199,6 +199,64 @@ func TestPrepareMoves_RejectsSameSourceThroughDeepestExistingAlias(t *testing.T)
 	}
 }
 
+func TestHide_RejectsFinalSymlinkOuterAndDescendantBeforeMutation(t *testing.T) {
+	for _, scheme := range []Scheme{PrefixUnderscore, SuffixQuarantined} {
+		for _, targets := range [][]string{{"alias", "alias/child"}, {"alias/child", "alias"}} {
+			root := t.TempDir()
+			writeFile(t, filepath.Join(root, "real", "child", "sentinel"), "unchanged")
+			if err := os.Symlink("real", filepath.Join(root, "alias")); err != nil {
+				t.Skipf("symlink unsupported: %v", err)
+			}
+			want := `quarantine targets "alias" (outer) and "alias/child" (inner) overlap: replace the inner entry, do not join it`
+			moves, err := New(&exec.FakeRunner{}).Hide(context.Background(), root, scheme, targets, false)
+			if err == nil || err.Error() != want {
+				t.Fatalf("scheme=%v targets=%v error = %v, want %q", scheme, targets, err, want)
+			}
+			if len(moves) != 0 {
+				t.Fatalf("scheme=%v targets=%v returned moves: %+v", scheme, targets, moves)
+			}
+			if got := readFile(t, filepath.Join(root, "real", "child", "sentinel")); got != "unchanged" {
+				t.Fatalf("scheme=%v targets=%v child mutated: %q", scheme, targets, got)
+			}
+			if info, statErr := os.Lstat(filepath.Join(root, "alias")); statErr != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("scheme=%v targets=%v outer symlink mutated: info=%v err=%v", scheme, targets, info, statErr)
+			}
+			if _, statErr := os.Lstat(filepath.Join(root, renamedPath(scheme, "alias"))); !os.IsNotExist(statErr) {
+				t.Fatalf("scheme=%v targets=%v decorated outer exists after refusal: %v", scheme, targets, statErr)
+			}
+		}
+	}
+}
+
+func TestComputeMoves_RelativeRootUsesOneAbsoluteIdentityNamespace(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	root := t.TempDir()
+	relRoot, err := filepath.Rel(cwd, root)
+	if err != nil {
+		t.Fatalf("Rel root: %v", err)
+	}
+	writeFile(t, filepath.Join(root, "real", "existing"), "x")
+	if err := os.Symlink("real", filepath.Join(root, "alias")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	for _, target := range []string{"real/existing", "real/missing/child", "alias/existing", "alias/missing/child"} {
+		moves, moveErr := ComputeMoves(relRoot, SuffixQuarantined, []string{target})
+		if moveErr != nil {
+			t.Fatalf("target=%q ComputeMoves relative root: %v", target, moveErr)
+		}
+		if len(moves) != 1 {
+			t.Fatalf("target=%q moves = %+v, want one", target, moves)
+		}
+		if !filepath.IsAbs(moves[0].From) || !filepath.IsAbs(moves[0].To) {
+			t.Fatalf("target=%q moves are not rooted in one absolute namespace: %+v", target, moves)
+		}
+	}
+}
+
 func TestPrepareMoves_RejectsNestedDestinationSourceChain(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "dir", "item"), "item")
@@ -471,6 +529,104 @@ func TestExpandTargets_CoveredRootSymlinkAliasIsNotTraversed(t *testing.T) {
 	}
 }
 
+func TestExpandTargets_DecoratedCoveredRootSymlinkAliasIsNotTraversed(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".claude.quarantined", "mcp.json"), "covered mcp")
+	if err := os.Symlink(".claude.quarantined", filepath.Join(root, ".alias")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	targets, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets: %v", err)
+	}
+	if containsStr(targets, filepath.Join(".alias", "mcp.json")) {
+		t.Fatalf("decorated covered-root alias was traversed: %v", targets)
+	}
+}
+
+func TestExpandTargets_UniqueInRootSymlinkedMCPCarrierRoundTrips(t *testing.T) {
+	for _, scheme := range []Scheme{PrefixUnderscore, SuffixQuarantined} {
+		root := t.TempDir()
+		writeFile(t, filepath.Join(root, "real", "mcp.json"), "carrier")
+		if err := os.Symlink("real", filepath.Join(root, ".gemini")); err != nil {
+			t.Skipf("symlink unsupported: %v", err)
+		}
+
+		before, err := ExpandTargets(root, scheme, DefaultTargets)
+		if err != nil {
+			t.Fatalf("scheme=%v ExpandTargets before: %v", scheme, err)
+		}
+		logical := filepath.Join(".gemini", "mcp.json")
+		if !containsStr(before, logical) {
+			t.Fatalf("scheme=%v unique symlinked MCP carrier missing: %v", scheme, before)
+		}
+		client := New(&exec.FakeRunner{})
+		moves, err := client.Hide(context.Background(), root, scheme, before, false)
+		if err != nil {
+			t.Fatalf("scheme=%v Hide: %v", scheme, err)
+		}
+		if !containsMoveFrom(moves, filepath.Join(root, logical)) {
+			t.Fatalf("scheme=%v carrier move does not preserve logical alias ownership: %+v", scheme, moves)
+		}
+		if _, err := os.Lstat(filepath.Join(root, "real", renamedPath(scheme, "mcp.json"))); err != nil {
+			t.Fatalf("scheme=%v carrier not quarantined through alias: %v", scheme, err)
+		}
+		after, err := ExpandTargets(root, scheme, DefaultTargets)
+		if err != nil {
+			t.Fatalf("scheme=%v ExpandTargets after: %v", scheme, err)
+		}
+		if !equalStrings(before, after) {
+			t.Fatalf("scheme=%v target set changed: before=%v after=%v", scheme, before, after)
+		}
+		restoreMoves, err := ComputeMoves(root, scheme, after)
+		if err != nil {
+			t.Fatalf("scheme=%v ComputeMoves restore: %v", scheme, err)
+		}
+		if err := client.Restore(context.Background(), restoreMoves); err != nil {
+			t.Fatalf("scheme=%v Restore: %v", scheme, err)
+		}
+		if got := readFile(t, filepath.Join(root, "real", "mcp.json")); got != "carrier" {
+			t.Fatalf("scheme=%v restored carrier = %q", scheme, got)
+		}
+	}
+}
+
+func TestExpandTargets_SymlinkedMCPCarrierEscapeFailsClosed(t *testing.T) {
+	external := t.TempDir()
+	writeFile(t, filepath.Join(external, "mcp.json"), "external")
+	for _, scheme := range []Scheme{PrefixUnderscore, SuffixQuarantined} {
+		root := t.TempDir()
+		if err := os.Symlink(external, filepath.Join(root, ".gemini")); err != nil {
+			t.Skipf("symlink unsupported: %v", err)
+		}
+		if _, err := ExpandTargets(root, scheme, DefaultTargets); err == nil || !strings.Contains(err.Error(), `quarantine target ".gemini/mcp.json" escapes root through its parent`) {
+			t.Fatalf("scheme=%v escape error = %v", scheme, err)
+		}
+		if got := readFile(t, filepath.Join(external, "mcp.json")); got != "external" {
+			t.Fatalf("scheme=%v external carrier mutated: %q", scheme, got)
+		}
+	}
+}
+
+func TestExpandTargets_TwoAliasesToUniqueMCPCarrierFailDeterministically(t *testing.T) {
+	for _, scheme := range []Scheme{PrefixUnderscore, SuffixQuarantined} {
+		root := t.TempDir()
+		writeFile(t, filepath.Join(root, "real", "mcp.json"), "carrier")
+		for _, alias := range []string{".gemini", ".other"} {
+			if err := os.Symlink("real", filepath.Join(root, alias)); err != nil {
+				t.Skipf("symlink unsupported: %v", err)
+			}
+		}
+		want := `quarantine targets ".gemini/mcp.json" and ".other/mcp.json" identify the same rename location`
+		for i := 0; i < 20; i++ {
+			_, err := ExpandTargets(root, scheme, DefaultTargets)
+			if err == nil || err.Error() != want {
+				t.Fatalf("scheme=%v iteration=%d error = %v, want %q", scheme, i, err, want)
+			}
+		}
+	}
+}
+
 func TestCoveredRootEntries_RecognizesOnlyOriginalAndSchemeDecoration(t *testing.T) {
 	for _, tc := range []struct {
 		scheme Scheme
@@ -514,6 +670,15 @@ func TestUniqueFoldedEntry_RejectsCaseAmbiguity(t *testing.T) {
 type testDirEntry struct {
 	name string
 	dir  bool
+}
+
+func containsMoveFrom(moves []Move, from string) bool {
+	for _, move := range moves {
+		if move.From == from {
+			return true
+		}
+	}
+	return false
 }
 
 func (entry testDirEntry) Name() string               { return entry.name }

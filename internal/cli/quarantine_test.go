@@ -269,6 +269,138 @@ func TestQuarantineCommands_RejectDestinationSourceChainsExactly(t *testing.T) {
 	}
 }
 
+func TestQuarantineHide_DefaultTargetsQuarantineUniqueSymlinkedMCPCarrier(t *testing.T) {
+	for _, scheme := range []string{"prefix", "suffix"} {
+		root := t.TempDir()
+		writeQuarantineFixture(t, filepath.Join(root, "real", "mcp.json"), "carrier")
+		if err := os.Symlink("real", filepath.Join(root, ".gemini")); err != nil {
+			t.Skipf("symlink unsupported: %v", err)
+		}
+		cmd := newQuarantineCmd(newQuarantineTestClient())
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(new(bytes.Buffer))
+		cmd.SetArgs([]string{"hide", "--root", root, "--scheme", scheme})
+		if err := cmd.ExecuteContext(context.Background()); err != nil {
+			t.Fatalf("scheme=%s hide: %v", scheme, err)
+		}
+		if strings.Contains(out.String(), "no instruction files found") {
+			t.Fatalf("scheme=%s reported false success: %q", scheme, out.String())
+		}
+		decorated := "_mcp.json"
+		if scheme == "suffix" {
+			decorated = "mcp.json.quarantined"
+		}
+		if _, err := os.Lstat(filepath.Join(root, "real", decorated)); err != nil {
+			t.Fatalf("scheme=%s carrier not quarantined: %v", scheme, err)
+		}
+	}
+}
+
+func TestQuarantineHide_DefaultTargetsRejectEscapingSymlinkedMCPCarrier(t *testing.T) {
+	external := t.TempDir()
+	writeQuarantineFixture(t, filepath.Join(external, "mcp.json"), "external")
+	for _, scheme := range []string{"prefix", "suffix"} {
+		root := t.TempDir()
+		if err := os.Symlink(external, filepath.Join(root, ".gemini")); err != nil {
+			t.Skipf("symlink unsupported: %v", err)
+		}
+		cmd := newQuarantineCmd(newQuarantineTestClient())
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(new(bytes.Buffer))
+		cmd.SetArgs([]string{"hide", "--root", root, "--scheme", scheme})
+		err := cmd.ExecuteContext(context.Background())
+		if err == nil || !strings.Contains(err.Error(), `quarantine target ".gemini/mcp.json" escapes root through its parent`) {
+			t.Fatalf("scheme=%s error = %v", scheme, err)
+		}
+		if out.Len() != 0 {
+			t.Fatalf("scheme=%s emitted false-success output: %q", scheme, out.String())
+		}
+		if got, readErr := os.ReadFile(filepath.Join(external, "mcp.json")); readErr != nil || string(got) != "external" {
+			t.Fatalf("scheme=%s external carrier mutated: content=%q err=%v", scheme, got, readErr)
+		}
+	}
+}
+
+func TestQuarantineCommands_RejectFinalSymlinkOuterAndDescendantWithoutOutputOrMutation(t *testing.T) {
+	commands := []struct {
+		name string
+		args []string
+	}{
+		{"bare hide", nil},
+		{"explicit hide", []string{"hide"}},
+		{"hide dry-run", []string{"hide", "--dry-run"}},
+		{"restore", []string{"restore"}},
+		{"restore dry-run", []string{"restore", "--dry-run"}},
+		{"status", []string{"status"}},
+	}
+	want := `quarantine targets "alias" (outer) and "alias/child" (inner) overlap: replace the inner entry, do not join it`
+	for _, scheme := range []string{"prefix", "suffix"} {
+		for _, command := range commands {
+			for _, targets := range [][]string{{"alias", "alias/child"}, {"alias/child", "alias"}} {
+				t.Run(scheme+"/"+command.name+"/"+strings.Join(targets, "-then-"), func(t *testing.T) {
+					root := t.TempDir()
+					writeQuarantineFixture(t, filepath.Join(root, "real", "child", "sentinel"), "unchanged")
+					if err := os.Symlink("real", filepath.Join(root, "alias")); err != nil {
+						t.Skipf("symlink unsupported: %v", err)
+					}
+					args := append([]string{}, command.args...)
+					args = append(args, "--root", root, "--scheme", scheme)
+					for _, target := range targets {
+						args = append(args, "--targets", target)
+					}
+					cmd := newQuarantineCmd(newQuarantineTestClient())
+					var out bytes.Buffer
+					cmd.SetOut(&out)
+					cmd.SetErr(new(bytes.Buffer))
+					cmd.SetArgs(args)
+					err := cmd.ExecuteContext(context.Background())
+					if err == nil || err.Error() != want {
+						t.Fatalf("error = %v, want %q", err, want)
+					}
+					if out.Len() != 0 {
+						t.Fatalf("command emitted output on refusal: %q", out.String())
+					}
+					if got, readErr := os.ReadFile(filepath.Join(root, "real", "child", "sentinel")); readErr != nil || string(got) != "unchanged" {
+						t.Fatalf("command mutated child on refusal: content=%q err=%v", got, readErr)
+					}
+					if info, statErr := os.Lstat(filepath.Join(root, "alias")); statErr != nil || info.Mode()&os.ModeSymlink == 0 {
+						t.Fatalf("command mutated outer symlink: info=%v err=%v", info, statErr)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestQuarantineHide_RelativeRootPlansNestedTarget(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	root := t.TempDir()
+	relRoot, err := filepath.Rel(cwd, root)
+	if err != nil {
+		t.Fatalf("Rel root: %v", err)
+	}
+	writeQuarantineFixture(t, filepath.Join(root, "nested", "target"), "x")
+	cmd := newQuarantineCmd(newQuarantineTestClient())
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"hide", "--dry-run", "--root", relRoot, "--targets", "nested/target"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("relative-root dry-run: %v", err)
+	}
+	if !strings.Contains(out.String(), "nested/target") {
+		t.Fatalf("relative-root dry-run omitted target: %q", out.String())
+	}
+	if got, readErr := os.ReadFile(filepath.Join(root, "nested", "target")); readErr != nil || string(got) != "x" {
+		t.Fatalf("relative-root dry-run mutated target: content=%q err=%v", got, readErr)
+	}
+}
+
 func TestQuarantineStatus_NoPhantomNestedRowUnderCoveredRoot(t *testing.T) {
 	root := t.TempDir()
 	writeQuarantineFixture(t, filepath.Join(root, ".claude", "CLAUDE.md"), "covered")

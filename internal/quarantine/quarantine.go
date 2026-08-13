@@ -229,12 +229,19 @@ type pathIdentity struct {
 	fold  string
 }
 
+type rootIdentity struct {
+	absolute string
+	real     string
+}
+
 type concreteTarget struct {
 	display             string
 	logical             string
 	destination         string
 	sourceIdentity      pathIdentity
 	destinationIdentity pathIdentity
+	sourceLexical       pathIdentity
+	destinationLexical  pathIdentity
 	move                Move
 }
 
@@ -277,6 +284,11 @@ func ExpandTargets(root string, scheme Scheme, targets []string) ([]string, erro
 	if err != nil {
 		return nil, err
 	}
+	canonicalRoot, err := resolveRootIdentity(root)
+	if err != nil {
+		return nil, err
+	}
+	root = canonicalRoot.absolute
 
 	literals := make([]string, 0, len(rules))
 	var patterns []string
@@ -427,14 +439,15 @@ func expandPatterns(root string, scheme Scheme, patterns []string, covered map[s
 				// pre-Hide call did not, and the two lists would disagree.
 				top := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
 				undecorated := undecorate(scheme, top)
-				// globFold resolves one segment at a time with ReadDir, which follows
-				// a symlink when it becomes the next directory. Expansion must not
-				// turn a root-level directory alias into a second logical target: the
-				// move graph is about directory entries, not symlink referents.
-				if info, statErr := os.Lstat(filepath.Join(root, top)); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+				if _, ok := covered[asciiPathFold(top)]; ok {
 					continue
 				}
-				if _, ok := covered[asciiPathFold(top)]; ok {
+				// A unique in-root symlinked directory is a real carrier namespace:
+				// quarantine through its logical alias so the move round-trips. Only
+				// suppress an alias when its canonical referent is already owned by a
+				// covered root-level target. Escaping aliases deliberately continue to
+				// prepareMoves, whose confinement check fails closed.
+				if aliasesCoveredRoot(root, top, covered) {
 					continue
 				}
 				if skipDirNames[top] || skipDirNames[undecorated] {
@@ -451,6 +464,36 @@ func expandPatterns(root string, scheme Scheme, patterns []string, covered map[s
 	}
 	sort.Strings(found)
 	return found, nil
+}
+
+func aliasesCoveredRoot(root, top string, covered map[string]string) bool {
+	info, err := os.Lstat(filepath.Join(root, top))
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	alias, err := filepath.EvalSymlinks(filepath.Join(root, top))
+	if err != nil {
+		return false
+	}
+	alias, err = filepath.Abs(alias)
+	if err != nil {
+		return false
+	}
+	for spelling := range covered {
+		actual, complete, resolveErr := resolveExistingSpelling(root, spelling)
+		if resolveErr != nil || !complete {
+			continue
+		}
+		coveredPath, resolveErr := filepath.EvalSymlinks(filepath.Join(root, actual))
+		if resolveErr != nil {
+			continue
+		}
+		coveredPath, resolveErr = filepath.Abs(coveredPath)
+		if resolveErr == nil && sameIdentity(identityForPath(alias), identityForPath(coveredPath)) {
+			return true
+		}
+	}
+	return false
 }
 
 // globFold is filepath.Glob's contract — resolve a relative pattern against
@@ -744,6 +787,11 @@ func normalizeConcreteTargets(root string, scheme Scheme, raw []string) ([]concr
 	if err != nil {
 		return nil, err
 	}
+	canonicalRoot, err := resolveRootIdentity(root)
+	if err != nil {
+		return nil, err
+	}
+	root = canonicalRoot.absolute
 	targets := make([]concreteTarget, 0, len(rules))
 	for _, rule := range rules {
 		if rule.pattern {
@@ -753,12 +801,12 @@ func normalizeConcreteTargets(root string, scheme Scheme, raw []string) ([]concr
 		if err != nil {
 			return nil, err
 		}
-		sourceIdentity, err := canonicalRenameLocation(root, logical)
+		sourceIdentity, err := canonicalRenameLocation(canonicalRoot, logical)
 		if err != nil {
 			return nil, err
 		}
 		destination := renamedPath(scheme, logical)
-		destinationIdentity, err := canonicalRenameLocation(root, destination)
+		destinationIdentity, err := canonicalRenameLocation(canonicalRoot, destination)
 		if err != nil {
 			return nil, err
 		}
@@ -768,6 +816,8 @@ func normalizeConcreteTargets(root string, scheme Scheme, raw []string) ([]concr
 			destination:         destination,
 			sourceIdentity:      sourceIdentity,
 			destinationIdentity: destinationIdentity,
+			sourceLexical:       identityForPath(filepath.Join(root, logical)),
+			destinationLexical:  identityForPath(filepath.Join(root, destination)),
 			move: Move{
 				From: filepath.Join(root, logical),
 				To:   filepath.Join(root, destination),
@@ -825,26 +875,35 @@ func resolveExistingSpelling(root, target string) (string, bool, error) {
 	return filepath.FromSlash(strings.Join(actual, "/")), true, nil
 }
 
-func canonicalRenameLocation(root, target string) (pathIdentity, error) {
-	realRoot, err := filepath.EvalSymlinks(root)
+func resolveRootIdentity(root string) (rootIdentity, error) {
+	absolute, err := filepath.Abs(root)
 	if err != nil {
-		return pathIdentity{}, fmt.Errorf("resolve quarantine root: %w", err)
+		return rootIdentity{}, fmt.Errorf("make quarantine root absolute: %w", err)
+	}
+	realRoot, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return rootIdentity{}, fmt.Errorf("resolve quarantine root: %w", err)
 	}
 	realRoot, err = filepath.Abs(realRoot)
 	if err != nil {
-		return pathIdentity{}, fmt.Errorf("make quarantine root absolute: %w", err)
+		return rootIdentity{}, fmt.Errorf("make resolved quarantine root absolute: %w", err)
 	}
+	return rootIdentity{absolute: absolute, real: realRoot}, nil
+}
+
+func canonicalRenameLocation(root rootIdentity, target string) (pathIdentity, error) {
 	parent := filepath.Dir(filepath.Clean(target))
 	remaining := make([]string, 0)
 	current := parent
-	resolvedParent := realRoot
+	resolvedParent := root.real
 	for current != "." && current != "" {
-		candidate := filepath.Join(root, current)
+		candidate := filepath.Join(root.absolute, current)
 		if _, statErr := os.Lstat(candidate); statErr == nil {
-			resolvedParent, err = filepath.EvalSymlinks(candidate)
-			if err != nil {
-				return pathIdentity{}, fmt.Errorf("resolve quarantine target parent %q: %w", filepath.ToSlash(current), err)
+			resolved, resolveErr := filepath.EvalSymlinks(candidate)
+			if resolveErr != nil {
+				return pathIdentity{}, fmt.Errorf("resolve quarantine target parent %q: %w", filepath.ToSlash(current), resolveErr)
 			}
+			resolvedParent = resolved
 			break
 		} else if !os.IsNotExist(statErr) {
 			return pathIdentity{}, fmt.Errorf("stat quarantine target parent %q: %w", filepath.ToSlash(current), statErr)
@@ -856,12 +915,17 @@ func canonicalRenameLocation(root, target string) (pathIdentity, error) {
 		}
 		current = next
 	}
-	if !pathWithin(realRoot, resolvedParent) {
+	if !pathWithin(root.real, resolvedParent) {
 		return pathIdentity{}, fmt.Errorf("quarantine target %q escapes root through its parent", filepath.ToSlash(target))
 	}
 	parts := append(append([]string{}, remaining...), filepath.Base(filepath.Clean(target)))
 	exact := filepath.Clean(filepath.Join(append([]string{resolvedParent}, parts...)...))
-	return pathIdentity{exact: exact, fold: asciiPathFold(exact)}, nil
+	return identityForPath(exact), nil
+}
+
+func identityForPath(value string) pathIdentity {
+	exact := filepath.Clean(value)
+	return pathIdentity{exact: exact, fold: asciiPathFold(exact)}
 }
 
 func pathWithin(root, candidate string) bool {
@@ -893,9 +957,11 @@ func validateMoveGraph(targets []concreteTarget) error {
 	for i := range targets {
 		for j := i + 1; j < len(targets); j++ {
 			a, b := targets[i], targets[j]
-			if containsIdentity(a.sourceIdentity, b.sourceIdentity) || containsIdentity(b.sourceIdentity, a.sourceIdentity) {
+			aContainsB := containsIdentity(a.sourceIdentity, b.sourceIdentity) || containsIdentity(a.sourceLexical, b.sourceLexical)
+			bContainsA := containsIdentity(b.sourceIdentity, a.sourceIdentity) || containsIdentity(b.sourceLexical, a.sourceLexical)
+			if aContainsB || bContainsA {
 				outer, inner := a, b
-				if containsIdentity(b.sourceIdentity, a.sourceIdentity) {
+				if bContainsA {
 					outer, inner = b, a
 				}
 				conflicts = append(conflicts, graphConflict{1, outer.display, inner.display,
@@ -910,21 +976,21 @@ func validateMoveGraph(targets []concreteTarget) error {
 				from concreteTarget
 				to   concreteTarget
 			}{{a, b}, {b, a}} {
-				if sameIdentity(edge.from.destinationIdentity, edge.to.sourceIdentity) {
+				if sameIdentity(edge.from.destinationIdentity, edge.to.sourceIdentity) || sameIdentity(edge.from.destinationLexical, edge.to.sourceLexical) {
 					first, second := orderedPair(a.display, b.display)
 					destination := filepath.ToSlash(edge.from.destination)
 					conflicts = append(conflicts, graphConflict{3, first, second,
 						fmt.Sprintf("quarantine moves for %q and %q conflict: destination %q is another source", first, second, destination)})
 				}
 			}
-			if sameIdentity(a.destinationIdentity, b.destinationIdentity) {
+			if sameIdentity(a.destinationIdentity, b.destinationIdentity) || sameIdentity(a.destinationLexical, b.destinationLexical) {
 				first, second := orderedPair(a.display, b.display)
 				destination := filepath.ToSlash(a.destination)
 				conflicts = append(conflicts, graphConflict{4, first, second,
 					fmt.Sprintf("quarantine moves for %q and %q conflict: destination %q is shared", first, second, destination)})
 			}
 		}
-		if sameIdentity(targets[i].sourceIdentity, targets[i].destinationIdentity) {
+		if sameIdentity(targets[i].sourceIdentity, targets[i].destinationIdentity) || sameIdentity(targets[i].sourceLexical, targets[i].destinationLexical) {
 			display := targets[i].display
 			conflicts = append(conflicts, graphConflict{5, display, display,
 				fmt.Sprintf("quarantine move for %q maps its source onto itself", display)})
@@ -991,6 +1057,10 @@ func (c *Client) Hide(_ context.Context, root string, scheme Scheme, targets []s
 	if err != nil {
 		return nil, err
 	}
+	canonicalRoot, err := resolveRootIdentity(root)
+	if err != nil {
+		return nil, err
+	}
 	ready := make([]concreteTarget, 0, len(prepared))
 	for _, target := range prepared {
 		move := target.move
@@ -1005,7 +1075,7 @@ func (c *Client) Hide(_ context.Context, root string, scheme Scheme, targets []s
 		// A target with no ".." can still reach outside root via a symlink;
 		// re-check the resolved path before any mutation (mirrors workflow's
 		// withinWorkspace guard on strip matches).
-		if !withinRoot(root, move.From) {
+		if !withinRoot(canonicalRoot.real, move.From) {
 			slog.Error("Quarantine target escapes root; refusing.", "target", target.logical, "resolved", move.From)
 			return nil, fmt.Errorf("quarantine target %q escapes root", filepath.ToSlash(target.logical))
 		}
