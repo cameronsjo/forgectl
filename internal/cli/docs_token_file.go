@@ -62,10 +62,6 @@ func readDocsTokenFile(path string, file openedDocsTokenFile) (string, error) {
 
 func safeDocsTokenPath(path string) string { return termsafe.Sanitize(path) }
 
-func wrapDocsTokenPathError(operation, path string, err error) error {
-	return wrapDocsTokenDescriptorError(operation, path, err)
-}
-
 // wrapDocsTokenDescriptorError removes path-bearing wrappers before an error
 // reaches the terminal. *os.File operations reuse the raw os.NewFile name in
 // PathError, so a sanitized outer prefix alone is not sufficient.
@@ -74,6 +70,7 @@ func wrapDocsTokenDescriptorError(operation, path string, err error) error {
 }
 
 func docsTokenErrorCause(err error) error {
+	//nolint:errorlint // Direct unwrapping deliberately removes path-bearing wrappers; errors.As would retain them.
 	switch typed := err.(type) {
 	case *os.PathError:
 		return docsTokenErrorCause(typed.Err)
@@ -95,6 +92,13 @@ func docsTokenErrorCause(err error) error {
 	default:
 		return err
 	}
+}
+
+func closeInvalidDocsTokenFile(file *os.File, validationErr error) error {
+	if closeErr := file.Close(); closeErr != nil {
+		return errors.Join(validationErr, wrapDocsTokenDescriptorError("close", file.Name(), closeErr))
+	}
+	return validationErr
 }
 
 func docsTokenErrorHasPathFields(err error) bool {

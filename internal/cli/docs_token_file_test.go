@@ -37,18 +37,31 @@ func TestResolveDocsToken_SourcePolicy(t *testing.T) {
 }
 
 func TestAcquireDocsTokenFile_ErrorPathIsTerminalSafe(t *testing.T) {
-	_, err := acquireDocsTokenFile(filepath.Join(t.TempDir(), "bad\n\u202epath"))
-	if err == nil {
-		t.Fatal("acquireDocsTokenFile on missing path returned nil error")
+	tempDir := t.TempDir()
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "missing absolute", path: filepath.Join(tempDir, "bad\n\u202epath")},
+		{name: "relative", path: "bad\n\u202epath"},
+		{name: "unclean absolute", path: tempDir + "/subdir/../bad\n\u202epath"},
 	}
-	if strings.ContainsAny(err.Error(), "\n\r") || strings.ContainsRune(err.Error(), '\u202e') {
-		t.Fatalf("error retained terminal control characters: %q", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := acquireDocsTokenFile(tt.path)
+			if err == nil {
+				t.Fatal("acquireDocsTokenFile returned nil error")
+			}
+			if strings.ContainsAny(err.Error(), "\n\r") || strings.ContainsRune(err.Error(), '\u202e') {
+				t.Fatalf("error retained terminal control characters: %q", err)
+			}
+		})
 	}
 }
 
-func TestWrapDocsTokenPathError_RedactsWrappedPathAndPreservesIdentity(t *testing.T) {
+func TestWrapDocsTokenDescriptorError_RedactsWrappedPathAndPreservesIdentity(t *testing.T) {
 	rawPath := "/tmp/bad\n\u202epath"
-	err := wrapDocsTokenPathError("open", rawPath, &os.PathError{Op: "open", Path: rawPath, Err: os.ErrNotExist})
+	err := wrapDocsTokenDescriptorError("open", rawPath, &os.PathError{Op: "open", Path: rawPath, Err: os.ErrNotExist})
 	if strings.ContainsAny(err.Error(), "\n\r") || strings.ContainsRune(err.Error(), '\u202e') {
 		t.Fatalf("wrapped error retained terminal controls: %q", err)
 	}

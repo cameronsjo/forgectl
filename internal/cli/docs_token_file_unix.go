@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"syscall"
@@ -46,11 +45,4 @@ func openDocsTokenFile(path string) (openedDocsTokenFile, error) {
 		return nil, closeInvalidDocsTokenFile(file, fmt.Errorf("token file permissions allow group or other access: %s", displayPath))
 	}
 	return file, nil
-}
-
-func closeInvalidDocsTokenFile(file *os.File, validationErr error) error {
-	if closeErr := file.Close(); closeErr != nil {
-		return errors.Join(validationErr, wrapDocsTokenDescriptorError("close", file.Name(), closeErr))
-	}
-	return validationErr
 }
