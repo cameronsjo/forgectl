@@ -45,6 +45,15 @@ package docs
 //   [x] a protected legacy server returns restart guidance and sends no token
 //   [x] an unsafe or overloaded v1 directory does NOT fall back to legacy
 //
+// Filesystem safety controls, Unix (Classification: same-user tampering)
+//   [x] a symlinked record is refused at open (see discovery_dir_unix_test.go)
+//   [x] a FIFO wearing a record name is refused by the type check
+//   [x] a hardlinked record is refused by the nlink check
+//   [x] a group-readable record is refused by the mode check
+//   [x] a group-readable or symlinked discovery directory is refused at open
+//   [x] publishing into a 0755 directory writes no token to disk at all
+//   [ ] foreign-owned records and directories — needs a second uid, not covered
+//
 // Sanitization (Classification: terminal safety)
 //   [x] errors carry no path, generation, address, token, or record body
 

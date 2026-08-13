@@ -79,6 +79,14 @@ func readLegacyRecord(rt discoveryRuntime, path string) (ServerInfo, error) {
 		return ServerInfo{}, errRecordTooLarge
 	}
 
+	// Deliberately looser than the v1 parser: plain json.Unmarshal means no
+	// duplicate-key pass, no DisallowUnknownFields, and no trailing-value check,
+	// so a legacy record carrying two "token" keys silently applies the last one.
+	// The asymmetry is accepted rather than fixed. This file is opened through
+	// the same owner-checked, 0600 path as a v1 record, so its bytes are already
+	// governed by this user's permissions; and tightening the grammar would make
+	// records written by older binaries unreadable, which is the one outcome the
+	// legacy path exists to prevent.
 	var legacy legacyServerInfo
 	if err := json.Unmarshal(raw, &legacy); err != nil {
 		return ServerInfo{}, errMalformedRecord

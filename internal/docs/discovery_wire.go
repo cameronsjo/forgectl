@@ -189,6 +189,10 @@ func rejectDuplicateKeys(raw []byte) error {
 	return nil
 }
 
+// Recursion depth is bounded only by maxRecordBytes: an 8 KiB record cannot
+// nest deeper than a few thousand levels, which the Go stack absorbs. Raising
+// maxRecordBytes therefore requires revisiting this walk — the cap is the only
+// thing standing between a hostile record and unbounded recursion here.
 func walkForDuplicates(dec *json.Decoder) error {
 	tok, err := dec.Token()
 	if err != nil {

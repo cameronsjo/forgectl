@@ -42,7 +42,8 @@ for a value only one process will ever hold can be.
    considering an arbitrary subset.
 3. Parse the entries whose names are exactly 32 lowercase hex characters plus
    `.json`. Everything else is ignored. Malformed, oversized, foreign-owned,
-   and future-schema records are skipped and counted.
+   and future-schema records are skipped silently — nothing counts or reports
+   them, so a bad record cannot influence what `docs open` says about a live one.
 4. Stop with an overload error at the 65th valid record.
 5. Rank by start time, newest first, breaking ties by generation.
 6. Ask each candidate, in rank order, whether it is still serving the
@@ -162,6 +163,17 @@ They do **not** cover a hostile process running as the same user. Such a process
 can already read bearer tokens out of that state and change the directory. The
 lease is pathname ownership under cooperation, not a claim that a filename is an
 inode identity against same-user tampering.
+
+Those filesystem guarantees are also not the whole boundary. The freshness
+endpoint answers *before* authentication, so any local process — including one
+running as another OS user — can read a running server's current generation; see
+[What the freshness check proves, and what it does not](#what-the-freshness-check-proves-and-what-it-does-not).
+Chained with a record a `SIGKILL`ed server left behind, that supports a
+token-theft attempt: read the generation, bind the freed `addr:port`, replay the
+generation the stale record names, and receive the token `docs open` was about to
+send. It requires winning a port race against a server that has already crashed,
+and it is strictly narrower than the pre-change behavior, which sent the token
+with no probe at all.
 
 On macOS and Linux, records are opened through the pinned directory descriptor
 and refused unless they are regular, single-linked, owned by this user, and not

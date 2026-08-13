@@ -130,8 +130,11 @@ var ErrGenerationCollision = errors.New("docs discovery generation already exist
 var ErrDiscoveryOverloaded = errors.New("docs discovery state exceeds safe limits; stop every `forgectl docs serve` and remove the docs-servers directory")
 
 // Fixed parse and validation failures. None of them carries a path, a record
-// body, a generation, an address, or a token: they are counted and surfaced as
-// categories, and a hostile filename must never reach a terminal through them.
+// body, a generation, an address, or a token: each is a fixed category, and a
+// hostile filename must never reach a terminal through them. They are not
+// counted or aggregated anywhere — the scan skips a failing record silently, by
+// design, so that one bad record can never influence what the reader reports
+// about a live sibling.
 var (
 	errUnknownSchema      = errors.New("docs discovery record uses an unknown schema version")
 	errMalformedRecord    = errors.New("docs discovery record is malformed")
