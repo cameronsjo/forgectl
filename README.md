@@ -34,7 +34,7 @@ forgectl config            # show every config section, per-key set/default (ali
 forgectl config --json     # the same, machine-readable (stable surface)
 
 # projects — cross-host project inventory (alias: proj)
-forgectl projects list [query]           # list all projects: local clones + github.com/cameronsjo + git.sjo.lol/cameron
+forgectl projects list [query]           # list all projects: local clones + your GitHub.com repos + git.sjo.lol/cameron
 forgectl projects list --json            # machine-readable JSON (safe to pipe; degradation notes go to stderr)
 forgectl projects list --host github     # filter to one host: github | gitea
 forgectl projects list --host gitea forge  # host filter + name substring
@@ -335,7 +335,7 @@ forgectl tmux pick
 
 forgectl projects list / pick
     ├── local clone walk (git remote get-url)
-    ├── gh repo list (github.com/cameronsjo) ─┐ concurrent
+    ├── gh repo list (github.com, per owner) ─┐ concurrent
     └── tea repo ls  (git.sjo.lol/cameron)   ─┘
 
 forgectl workflow run <name>
@@ -373,13 +373,49 @@ log_level = "off"   # off | debug | info | warn | error
 log_file  = ""      # "" = auto (daily-rotated file); "-" = stderr; or an explicit path
 ```
 
-`forgectl config` (alias `cfg`) prints **every** section of the config — the host scalars, `[launch]` and its `[launch.defaults]`, and all ten domain sections down to the nested `[review.gitea]` — one dotted key per line, each marked `(set)` when the config file supplied it or `(default)` when it came from a built-in fallback.
+`forgectl config` (alias `cfg`) prints **every** section of the config — the host scalars, `[launch]` and its `[launch.defaults]`, and every domain section down to the nested `[review.gitea]` — one dotted key per line, each marked `(set)` when the config file supplied it or `(default)` when it came from a built-in fallback.
 
 That marker is the point. Every section's zero value means "absent, built-in defaults apply", so a value alone cannot tell a key you never set from a key you misspelled. The command also lists **unrecognized keys** — anything in the file that bound to no field, which catches `probe_hostt` and a key filed under the wrong section — and surfaces the decode error from a malformed file instead of silently defaulting past it. Resolved values that differ from the stored ones (the `off` log level, the dated log path, the launch binary chosen by `FORGECTL_CLAUDE_BIN` > `binary_path` > `PATH`) print in their own labeled blocks.
 
 `sessions.dsn` renders as `(redacted)`; its `(set)`/`(default)` marker is the useful signal and a connection string can carry a password. `launch.defaults.env` renders its **key names only** for the same reason — it is arbitrary environment injected into the launched harness, so it is where an `ANTHROPIC_API_KEY` or `GH_TOKEN` would sit. `forgectl launch which` applies the same policy to the same map, so no forgectl command prints those values — to read one, open the config file itself with `forgectl launch edit`.
 
 `--json` emits the same information machine-readably and is the stable surface — the human rendering may reflow.
+
+### projects and review — whose repos get enumerated
+
+Both inventories are scoped to GitHub accounts you name, and both default to the
+account `gh` is already authenticated as:
+
+```toml
+[projects]
+# owners = ["your-login"] # gh repo list scope; unset or [] = authenticated GitHub.com login
+[review]
+# owners = ["your-login"] # gh search --owner scope; unset or [] = authenticated GitHub.com login
+```
+
+The two lists are **independent**. Neither inherits from the other — which repos
+you jump between and which repos you triage work in are different questions, and
+a shared list would force one answer on both. Set one, the other, both, or
+neither.
+
+Leaving a list unset (or writing `owners = []`) resolves the authenticated login
+once per run, so the same binary follows whichever account you are logged in as
+on that machine. A configured list is authoritative and makes no discovery call
+at all. Owner values are validated against GitHub's owner charset, capped in
+count and length, and deduplicated case-insensitively before any of them becomes
+a `gh` argument; a malformed entry anywhere in the list means zero queries rather
+than a quietly narrowed inventory.
+
+**Every GitHub call is pinned to `github.com`**, whatever `GH_HOST` says in the
+surrounding shell. GitHub Enterprise is not supported: an ambient enterprise host
+is overridden rather than queried, because listing an enterprise instance's repos
+and labeling them `github` would put wrong data in the inventory. The Gitea
+source is unchanged and keeps its existing `git.sjo.lol` assumptions — forgectl
+does not claim arbitrary-Gitea portability either.
+
+If `forgectl init` already wrote an active `owners = ["…"]` into your
+config.toml, it stays exactly as written: init never rewrites a section that is
+already present. Delete or comment the line to move to the authenticated default.
 
 ### Logging
 

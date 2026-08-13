@@ -207,6 +207,20 @@ func TestReviewCmd_KindAndRepoFilters(t *testing.T) {
 	}
 }
 
+// TestProjectsListHelp_NamesNoBakedAccount is the projects half of #191's
+// help contract: the GitHub scope is configured or authenticated, never one
+// developer's account compiled into the binary.
+func TestProjectsListHelp_NamesNoBakedAccount(t *testing.T) {
+	help := newProjectsListCmd(nil).Long
+
+	if strings.Contains(help, "github.com/cameronsjo") {
+		t.Errorf("projects list help still names a baked account:\n%s", help)
+	}
+	if !strings.Contains(help, "authenticated") {
+		t.Errorf("projects list help does not describe the authenticated fallback:\n%s", help)
+	}
+}
+
 // TestReviewHelp_NamesNoBakedAccount covers issue #191 at the compiled-help
 // surface: the fallback is the authenticated GitHub.com account, and the help
 // must say so rather than naming one developer's login.

@@ -24,8 +24,11 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list [query]",
 		Short: "List projects across local, GitHub, and Gitea (cloned + uncloned)",
-		Long: "List every project across local clones, github.com/cameronsjo, and the\n" +
+		Long: "List every project across local clones, GitHub.com, and the\n" +
 			"self-hosted Gitea (git.sjo.lol/cameron), marking which are checked out.\n\n" +
+			"GitHub scope comes from [projects] owners in config.toml; leave it unset\n" +
+			"and forgectl lists the repos of whoever gh is authenticated as. Calls are\n" +
+			"pinned to github.com — GitHub Enterprise is not supported.\n\n" +
 			"Examples:\n" +
 			"  forgectl projects list                 # human table, all hosts\n" +
 			"  forgectl projects list --json          # machine-readable, for scripts\n" +
