@@ -12,6 +12,9 @@ package pr
 //   [x] Happy: removes ONLY the authorized breadcrumb
 //   [x] Member replaced with identical bytes (new inode) -> refuse
 //   [x] Member replaced by a symlink -> refuse
+//   [x] Member RENAMED with a symlink left at its old name -> refuse. The link
+//       target is the original file, so identity, bytes and record all still
+//       match; only lstat'ing the name itself sees the link
 //   [x] Member bytes changed -> refuse
 //   [x] Member security field changed -> refuse
 //   [x] Member disappeared -> refuse (never reported as success)
@@ -177,6 +180,36 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 			if err := os.Symlink(target, f.path); err != nil {
 				t.Skipf("symlink unsupported: %v", err)
 			}
+			return intact
+		},
+		// The case above swaps in a symlink to a COPY, so the identity check
+		// refuses it on the copy's inode and the Lstat never has to matter.
+		// Renaming the member and linking its old name to it is the shape that
+		// isolates the Lstat: the target is the original file, so it carries
+		// the original inode, the original bytes and the original record.
+		// Every check downstream passes, and a Stat here would report the
+		// symlink as that regular file and unlink the LINK — reporting the
+		// breadcrumb discarded while the record survives under its new name.
+		// Only lstat'ing the name itself sees a symlink and refuses.
+		"member renamed with a link left at its old name": func(t *testing.T, f staleFixture) expect {
+			moved := filepath.Join(f.dirPath, "renamed-member.json")
+			if err := os.Rename(f.path, moved); err != nil {
+				t.Fatalf("rename member: %v", err)
+			}
+			if err := os.Symlink(moved, f.path); err != nil {
+				t.Skipf("symlink unsupported: %v", err)
+			}
+			if !sameFileAt(t, moved, f.member.info) {
+				t.Fatalf("the rename did not carry the original inode; this case cannot test what it claims")
+			}
+			// The link at the original name survives the refusal, and so does
+			// the renamed original — assert the latter here, since the shared
+			// breadcrumbSurvives check only covers the name itself.
+			t.Cleanup(func() {
+				if _, err := os.Lstat(moved); err != nil {
+					t.Errorf("a refusal must leave the renamed original in place: %v", err)
+				}
+			})
 			return intact
 		},
 		"member bytes changed": func(t *testing.T, f staleFixture) expect {
