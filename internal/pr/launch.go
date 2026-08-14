@@ -254,17 +254,23 @@ func (c *Client) CheckDispatchCapability(ctx context.Context) error {
 // is not an oversight: `codex exec --help` exposes no MCP flag at all, so there
 // is no harness-boundary control to force.
 //
-// What bounds the exposure, stated exactly: CheckAgentForRef refuses Codex for
-// remote PR heads, so this path only ever runs against a workspace on a path
-// the operator owns. That is all sess.Ref.IsLocal() proves — PATH ownership,
-// not COMMIT provenance. PrepareLocal accepts a detached HEAD and only warns,
-// so an ordinary `gh pr checkout` of a third-party branch reaches this path
-// with the contributor's tree in it, repo-supplied MCP config included. The
-// content under review is therefore not necessarily the operator's own; what
-// holds this at Tier 2 is that the operator selected that checkout deliberately
-// and can inspect it before dispatch, not that the bytes are theirs. Revisit if
-// Codex gains a strict-config flag, if the remote-head refusal is relaxed, or
-// if detached heads are ever rejected before dispatch.
+// What bounds the exposure, stated exactly: CheckAgentForReview permits this
+// path ONLY for ReviewProvenanceOperatorAuthored — a claim that exists solely
+// because the operator passed `pr local --operator-authored`, and that survives
+// reconstruction only in a canonical local breadcrumb. Nothing infers it.
+//
+// That is the whole of forgectl#232, and it replaced a weaker bound worth
+// naming so it is not reintroduced. The predecessor rested on
+// `sess.Ref.IsLocal()`, which proves PATH ownership, not COMMIT provenance —
+// and PrepareLocal accepted a detached HEAD with only a warning. So an ordinary
+// `gh pr checkout` of a third-party branch reached this path with the
+// contributor's tree in it, repo-supplied MCP config included, and the thing
+// holding it at Tier 2 was that the operator had selected the checkout
+// deliberately rather than that the bytes were theirs.
+//
+// Revisit if Codex gains a strict-config flag, if the provenance requirement is
+// relaxed anywhere, or if any signal other than the explicit assertion is ever
+// allowed to produce operator-authored.
 func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Config) (Dispatch, error) {
 	codexPath, err := launch.CodexPath(cfg.Launch.Defaults)
 	if err != nil {

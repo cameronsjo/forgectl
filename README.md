@@ -493,25 +493,44 @@ An `effort` outside the five accepted levels is rejected before anything is laun
 `FORGECTL_CODEX_BIN` / `codex_binary_path` / `codex`.
 
 Codex modes translate to `codex`, `codex resume --last`, `codex fork --last`,
-and `codex exec`. Clean-room reviews accept `--agent codex` for **local review
-only** — `forgectl pr local`, where the reviewed tree is your own.
+and `codex exec`. Clean-room reviews accept `--agent codex` only for
+`forgectl pr local --operator-authored` — code you state that you wrote.
 
-> **`--agent codex` is refused for a remote PR head, by design.** The Claude
+> **`--agent codex` requires you to assert authorship, by design.** The Claude
 > clean room confines the reviewer to a deny-by-default allowlist with no
 > command-execution primitive. Codex's `--sandbox read-only` scopes writes and
-> network egress but not *which commands run*, so a prompt injection in a
-> third-party diff could reach a shell with read access to your whole home
+> network egress but not *which commands run*, so a prompt injection in a diff
+> you did not write could reach a shell with read access to your whole home
 > directory — and anything read reaches the model provider as tool output.
 > `codex exec` exposes no way to confine that: it accepts no
 > `--permission-profile`, and `shell_environment_policy.inherit=none` is
 > honored by `codex sandbox` but ignored by `codex exec` (measured on
 > codex-cli 0.146.0).
 >
-> So the boundary is drawn by **use**, not by sandbox. A remote head is someone
-> else's content and the Codex agent is refused there — enforced in the
-> dispatch path, before anything is fetched. Your own working tree cannot be
-> hostile to you, so `forgectl pr local --agent codex` stays fully available.
-> Use `--agent claude` (the default) for PR review.
+> So the boundary is drawn by **authorship**, not by sandbox and not by
+> locality. A local path proves only that the *directory* is yours — `gh pr
+> checkout` puts someone else's commit in your own repository, which is the
+> ordinary way to review a PR. So `forgectl pr local --agent codex` refuses
+> unless you pass `--operator-authored`, and `forgectl pr <ref>` refuses
+> outright with no flag to override, since a fetched PR head is someone else's
+> content by construction. Use `--agent claude` (the default) for anything you
+> did not write.
+>
+> Refusal is enforced in the dispatch path before anything is fetched or
+> created, and again at launch — the second check is what covers a session
+> restored from a breadcrumb. Provenance is never inferred from a signal:
+> not from HEAD being attached or detached, not from path or repository
+> ownership, not from the Git author or a commit signature, and not from your
+> profile, UID, or terminal.
+
+Provenance is recorded in the session breadcrumb, which has one **downgrade
+limitation** worth knowing: the breadcrumb decoder rejects unknown fields, so an
+*older* forgectl refuses a breadcrumb written by a newer one. Upgrading is
+seamless in the forward direction — legacy breadcrumbs read as unknown
+provenance, so Claude, `pr list`, `pr attach`, and `pr teardown` keep working
+and only Codex needs a fresh `--operator-authored` run. If you must roll back,
+use the newer binary or recreate the session state; the field is never stripped
+automatically, because doing so would silently change what the record asserts.
 
 **Legacy `claunch.conf` migration** — on Darwin and Linux, a launch command captures the legacy file once, decodes that exact byte slice, and uses those same bytes for a no-clobber backup before retiring the named source. An existing `claunch.conf.bak` is never overwritten; forgectl allocates an exclusive `claunch.conf.bak.<random>` name instead. A hardlinked source is allowed, but retirement removes only the `claunch.conf` directory entry and leaves sibling links unchanged. `launch migrate` is the explicit import-only form: it refuses an existing `[launch]` table and does not back up or retire the source.
 

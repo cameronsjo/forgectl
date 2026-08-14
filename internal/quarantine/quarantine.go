@@ -62,10 +62,17 @@ type Move struct {
 
 // tier1Carriers are the AI-config carriers the harness forgectl actually
 // dispatches into a review workspace READS. `claude -p` (internal/pr/launch.go
-// launchInline) is the only harness that ever sees a remote, third-party PR
-// head: Codex is refused for remote heads by CheckAgentForRef, and the
-// escalation path is unwired. A gap in this tier is exploitable by
-// `forgectl pr <url>` today.
+// launchInline) is the only harness that ever sees content someone else wrote:
+// Codex requires positive operator-authored provenance (CheckAgentForReview in
+// internal/pr/provenance.go), and the escalation path is unwired. A gap in this
+// tier is exploitable by `forgectl pr <url>` today.
+//
+// forgectl#232 STRENGTHENED the premise this rests on. The predecessor said
+// "Codex is refused for remote heads", which was true and insufficient: a
+// third-party commit reached Codex through an ordinary `gh pr checkout` local
+// review, because locality was standing in for authorship. That path now
+// requires an explicit assertion, so the tiering argument no longer has a
+// silent hole under it.
 //
 // These are prose/state carriers with no shared directory or naming
 // convention, so the tier is necessarily a denylist. The MCP class, which does
