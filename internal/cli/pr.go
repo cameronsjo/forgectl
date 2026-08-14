@@ -176,6 +176,17 @@ func agentDisplayLabel(agent string) string {
 // wording can change without touching that contract.
 const workspaceMissingStatus = "workspace missing"
 
+// workspaceUnclassifiedStatus is what BOTH human sinks say about a summary for
+// which neither predicate holds. It is unreachable through List, which emits
+// only live or missing summaries, so seeing it means a summary was constructed
+// outside the loader.
+//
+// It is an internal-error string rather than a label because inventing a human
+// wording for an unclassified state is how a fail-closed enum quietly becomes
+// fail-open — and staying silent is worse still: an unmarked row reads as an
+// ordinary LIVE review, which is the one thing this state cannot promise.
+const workspaceUnclassifiedStatus = "internal error: unclassified workspace state"
+
 // sessionStatus renders one summary's status field for `pr list`.
 //
 // A record whose workspace is gone reports that and nothing else: its tmux
@@ -186,10 +197,8 @@ const workspaceMissingStatus = "workspace missing"
 // those rows as "window gone" would flag every healthy review as dead the
 // moment tmux hiccups.
 //
-// The final branch is unreachable through List, which only ever emits live or
-// missing summaries. It is an internal error rather than a label because
-// inventing a human string for an unclassified state is how a fail-closed enum
-// quietly becomes fail-open.
+// The final branch is unreachable through List; see workspaceUnclassifiedStatus
+// for why it is an internal error rather than a label.
 func sessionStatus(live map[pr.Ref]bool, s pr.SessionSummary, tmuxOK bool) string {
 	switch {
 	case s.IsWorkspaceMissing():
@@ -197,7 +206,7 @@ func sessionStatus(live map[pr.Ref]bool, s pr.SessionSummary, tmuxOK bool) strin
 	case s.IsWorkspaceLive():
 		return windowStatus(live, s.Ref(), tmuxOK)
 	default:
-		return "internal error: unclassified workspace state"
+		return workspaceUnclassifiedStatus
 	}
 }
 

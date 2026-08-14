@@ -163,6 +163,44 @@ func TestRenderSessions_MarksMissingWorkspace(t *testing.T) {
 	}
 }
 
+// TestRenderSessions_MarksUnclassifiedWorkspace pins the third arm of the
+// fail-closed enum, which the dashboard used to render as nothing at all.
+//
+// A summary for which NEITHER predicate holds — the zero value, the only such
+// shape constructible outside internal/pr, and the shape that type's contract
+// warns consumers about — must not print as an ordinary unmarked row. An
+// unmarked row is the LIVE rendering, so silence there asserts liveness that
+// nothing verified. `pr list` already says so in its status column; the dash
+// now says the same thing in its suffix.
+func TestRenderSessions_MarksUnclassifiedWorkspace(t *testing.T) {
+	var zero pr.SessionSummary
+	if zero.IsWorkspaceLive() || zero.IsWorkspaceMissing() {
+		t.Fatal("the zero summary must hold neither predicate; this test targets that state")
+	}
+
+	var out bytes.Buffer
+	renderSessions(&out, []pr.SessionSummary{zero})
+
+	got := out.String()
+	if !strings.Contains(got, workspaceUnclassifiedStatus) {
+		t.Errorf("an unclassified row must be marked %q, not rendered as a live row: %q",
+			workspaceUnclassifiedStatus, got)
+	}
+	if strings.Contains(got, workspaceMissingStatus) {
+		t.Errorf("an unclassified row must not borrow the missing label: %q", got)
+	}
+}
+
+// TestSessionStatus_UnclassifiedMatchesTheDash pins that the two human sinks
+// agree on the unclassified state, so a future edit cannot leave one of them
+// silently rendering it as live.
+func TestSessionStatus_UnclassifiedMatchesTheDash(t *testing.T) {
+	var zero pr.SessionSummary
+	if got := sessionStatus(nil, zero, true); got != workspaceUnclassifiedStatus {
+		t.Errorf("sessionStatus(unclassified) = %q, want %q", got, workspaceUnclassifiedStatus)
+	}
+}
+
 func TestDashCmd_ThreeSectionsRenderInOrder(t *testing.T) {
 	client := pr.New(dashRunner("[]"), pr.WithSessionsDir(t.TempDir()))
 	cmd := newPrDashCmdForClient(client, filepath.Join(t.TempDir(), "r.json"))
