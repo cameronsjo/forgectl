@@ -51,18 +51,14 @@ func MaxConcurrentReviews(cfgMax int) int {
 // that path runs through ListWindows directly, so the same failure surfaces
 // as ok=false and the caller refuses the batch before any clone.
 //
-// Known residual, NOT fixed here: a review window that lands in the wrong
-// session because Launch's own `tmux new-window -t c.tmuxSession` target is
-// a bare, unqualified session name — subject to that same tmux fuzzy `-t`
-// resolution — is invisible to this exact-match count regardless of how
-// LiveReviews itself is implemented. If a sibling session already exists
-// with a name that happens to prefix-match c.tmuxSession (e.g. a worktree
-// session named after its directory, per internal/projects/projects.go's
-// filepath.Base(dir) naming), new-window can keep depositing review windows
-// there indefinitely, and this count will never see them. Closing that
-// requires qualifying Launch's own tmux target (or verifying exact session
-// existence before it dispatches) — out of scope for this admission-gate
-// change and tracked separately.
+// CLOSED by forgectl#237, and recorded because this comment previously named
+// it as an open residual: Launch used to pass a bare, unqualified session name
+// to `tmux new-window -t`, so a sibling session that merely prefix-matched
+// c.tmuxSession could absorb review windows indefinitely — invisibly to this
+// exact-match count, regardless of how LiveReviews itself is implemented.
+// Launch now targets the session's native id via newWindowTarget (launch.go),
+// so no name reaches tmux's resolver and every window it creates is countable
+// here. Do not reintroduce a name target on that path.
 //
 // One residual IS accepted here, deliberately conservative: a user-named
 // "pr-*" window unrelated to a review gets counted too, which only makes

@@ -13,8 +13,17 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/meta"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
+
+// errStatus renders a footer error. Every error surfaced here can carry text
+// forgectl never composed — a tmux session or window name, a sesh candidate, an
+// exec diagnostic quoting one — so it goes through termsafe.SafeLine before any
+// styling. Escape sequences in a name would otherwise repaint the TUI's chrome.
+func errStatus(prefix string, err error) string {
+	return styleDanger.Render(termsafe.SafeLine("✗ " + prefix + err.Error()))
+}
 
 // ActionKind is the deferred jump the TUI selected. Jumps that need the tty
 // (attach/sesh connect) can't run while Bubble Tea owns the terminal, so the
@@ -321,7 +330,7 @@ func (m *model) enterPick() {
 	names, err := m.client.SeshList(m.ctx)
 	if err != nil {
 		slog.Error("Failed to load sesh sessions.", "error", err)
-		m.status = styleDanger.Render("✗ sesh: " + err.Error())
+		m.status = errStatus("sesh: ", err)
 	}
 	items := make([]list.Item, 0, len(names))
 	for _, n := range names {
@@ -336,7 +345,7 @@ func (m *model) enterSessions() {
 	sessions, err := m.client.ListSessions(m.ctx)
 	if err != nil {
 		slog.Error("Failed to load sessions.", "error", err)
-		m.status = styleDanger.Render("✗ tmux: " + err.Error())
+		m.status = errStatus("tmux: ", err)
 	}
 	items := make([]list.Item, 0, len(sessions))
 	for _, s := range sessions {
@@ -351,7 +360,7 @@ func (m *model) enterWindows() {
 	windows, err := m.client.ListWindows(m.ctx)
 	if err != nil {
 		slog.Error("Failed to load windows.", "error", err)
-		m.status = styleDanger.Render("✗ tmux: " + err.Error())
+		m.status = errStatus("tmux: ", err)
 	}
 	items := make([]list.Item, 0, len(windows))
 	for _, w := range windows {
@@ -366,7 +375,7 @@ func (m *model) enterTree() {
 	out, err := m.client.Tree(m.ctx, !m.noIcons)
 	if err != nil {
 		slog.Error("Failed to load tree.", "error", err)
-		m.status = styleDanger.Render("✗ tmux: " + err.Error())
+		m.status = errStatus("tmux: ", err)
 	}
 	m.tree.SetContent(out)
 	m.tree.GotoTop()
@@ -441,7 +450,7 @@ func (m *model) applyPending() {
 // otherwise the success text (green).
 func (m *model) setStatus(err error, ok string) {
 	if err != nil {
-		m.status = styleDanger.Render("✗ " + err.Error())
+		m.status = errStatus("", err)
 		return
 	}
 	m.status = styleOK.Render("✓ " + ok)

@@ -60,13 +60,15 @@ func parseWindows(out string) ([]Window, error) {
 	windows := make([]Window, 0, len(lines))
 	for _, line := range lines {
 		f := splitFields(line)
-		// EXACT, not >=: windowFormat emits exactly 8 fields, and a window name
-		// may legally contain FieldSep (`tmux rename-window $'pr-o-r-1\x1fpad'`).
-		// Under a >= check that name splits into a row whose Name reads
-		// "pr-o-r-1", so WindowsLive (internal/pr/admission.go) would report a
-		// torn-down review as still live in `pr list`. A separator in a name can
-		// only ever push the count ABOVE 8, so requiring exactly 8 drops the
-		// forged row instead of misreading it.
+		// EXACT, not >=: windowFormat emits exactly windowFieldCount fields, and
+		// a window name may legally contain FieldSep
+		// (`tmux rename-window $'pr-o-r-1\x1fpad'`). Under a >= check that name
+		// splits into a row whose Name reads "pr-o-r-1", so LiveReviews
+		// (internal/pr/admission.go) would report a torn-down review as still
+		// live in `pr list`. A separator in a name can only ever push the count
+		// ABOVE the expected number, so requiring it exactly drops the forged row
+		// instead of misreading it. The count is spelled once, in the constant —
+		// forgectl#237 raised it from 8 to 9 by adding the parent session id.
 		if len(f) != windowFieldCount {
 			continue
 		}

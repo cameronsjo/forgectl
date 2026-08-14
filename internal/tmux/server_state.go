@@ -75,6 +75,15 @@ func (c *Client) classifyServerFailure(ctx context.Context, expectedArgs []strin
 // hasExplicitSocketArg reports whether argv names a socket other than the
 // default one — tmux's server options `-L <label>` and `-S <path>`, in both
 // their separated and attached (`-Lfoo`, `-S/path`) spellings.
+//
+// It over-matches on purpose: any element merely beginning with -L or -S counts,
+// including an operand tmux would never read as a flag (a session name, a `-c`
+// directory). That direction is the safe one — a false positive only downgrades
+// the verdict to serverUnknown, which refuses to read an absent default socket
+// as "no server, proceed". Tightening it would mean modelling tmux's own option
+// grammar, and being wrong there hands a proceed verdict to a command aimed at a
+// socket this function never inspected. See
+// TestHasExplicitSocketArgOverMatchesDeliberately.
 func hasExplicitSocketArg(args []string) bool {
 	for _, arg := range args {
 		if arg == "-L" || arg == "-S" || strings.HasPrefix(arg, "-L") || strings.HasPrefix(arg, "-S") {

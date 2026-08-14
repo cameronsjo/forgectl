@@ -116,15 +116,48 @@ func TestClassifyServerFailure_ExplicitSocketArgvIsUnknown(t *testing.T) {
 
 // TestProductionArgvHasNoExplicitSocket is the other half: the guard above is
 // only free of cost if no argv this package actually issues trips it.
+//
+// The list must cover every argv that reaches — or could reach —
+// classifyServerFailure, not just the ones that do today. mostRecentSession's
+// listing does (attach.go), and CreateSession's does not yet, but the whole
+// point of the guard is that a future caller must not inherit the "proceed"
+// verdict silently. Both are enumerated so the contract is enforced over the
+// current set rather than a stale subset (forgectl#237 review).
 func TestProductionArgvHasNoExplicitSocket(t *testing.T) {
 	for _, argv := range [][]string{
 		{"list-windows", "-a", "-F", windowFormat},
 		{"list-panes", "-a", "-F", paneFormat},
 		{"list-sessions", "-F", sessionFormat},
+		{"list-sessions", "-F", lastAttachedFormat},
 		{"display-message", "-p", IdentityFormat},
+		{"new-session", "-d", "-P", "-F", sessionIdentityFormat, "-s", "forgectl"},
+		{"new-session", "-d", "-P", "-F", sessionIdentityFormat, "-s", "forgectl", "-c", "/tmp/wt"},
 	} {
 		if hasExplicitSocketArg(argv) {
 			t.Errorf("production argv %v reads as an explicit socket", argv)
+		}
+	}
+}
+
+// TestHasExplicitSocketArgOverMatchesDeliberately documents the one way the
+// guard is wrong on purpose. It matches by PREFIX, so an operand that merely
+// begins with -L or -S — a session name, a working directory — reads as an
+// explicit socket even though tmux would treat it as an operand.
+//
+// That direction is safe and the tightening is not: a false positive downgrades
+// the verdict to serverUnknown, which only ever REFUSES to treat an absent
+// default socket as "no server, proceed". A precise flag parser would have to
+// model tmux's own option grammar to stay correct, and being wrong the other way
+// hands a proceed verdict to a command aimed at a socket this code never looked
+// at. Kept over-broad; asserted here so a future "cleanup" has to argue with a
+// test rather than a comment.
+func TestHasExplicitSocketArgOverMatchesDeliberately(t *testing.T) {
+	for _, argv := range [][]string{
+		{"new-session", "-d", "-s", "-Sneaky"},
+		{"new-session", "-d", "-s", "forgectl", "-c", "-Lworktree"},
+	} {
+		if !hasExplicitSocketArg(argv) {
+			t.Errorf("argv %v: the prefix over-match is load-bearing and must fail closed", argv)
 		}
 	}
 }
