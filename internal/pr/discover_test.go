@@ -22,6 +22,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -299,15 +301,57 @@ func TestDash_DegradedSectionNoteIsCategorical(t *testing.T) {
 	assertCategoricalPRNotes(t, notes)
 }
 
-// assertCategoricalPRNotes holds both halves of the contract: every note is the
-// categorical "<label>: query failed" shape, and none of the subprocess stderr
-// survived into it.
+// TestDash_ActiveReviewsNoteIsCategorical covers the one Dash leg its twin above
+// cannot reach. That test hands Dash a WithSessionsDir(t.TempDir()) that always
+// reads cleanly, so c.List never errors and the active-reviews note never fires.
+// Pointing the session-state dir at a regular file makes os.ReadDir fail with
+// ENOTDIR — the error text then carries the operator's filesystem path, which is
+// exactly what the categorical note exists to keep off a terminal.
+func TestDash_ActiveReviewsNoteIsCategorical(t *testing.T) {
+	notADir := filepath.Join(t.TempDir(), "sessions")
+	if err := os.WriteFile(notADir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("seeding a non-directory session-state path: %v", err)
+	}
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "[]", nil
+	}}
+	client := New(fake, WithSessionsDir(notADir))
+
+	_, notes, err := client.Dash(context.Background())
+	if err != nil {
+		t.Fatalf("an unreadable session-state dir must note, not fail: %v", err)
+	}
+	if len(notes) != 1 {
+		t.Fatalf("notes = %v, want exactly the active-reviews note", notes)
+	}
+	if notes[0] != "active-reviews: listing failed" {
+		t.Errorf("note %q is not the categorical active-reviews shape", notes[0])
+	}
+	if strings.Contains(notes[0], notADir) {
+		t.Errorf("note %q leaked the session-state path", notes[0])
+	}
+	assertNoPRNoteLeaks(t, notes)
+}
+
+// assertCategoricalPRNotes holds both halves of the query-leg contract: every
+// note is the categorical "<label>: query failed" shape, and none of the
+// subprocess stderr survived into it. The active-reviews leg carries a different
+// categorical suffix and is asserted at its own call site.
 func assertCategoricalPRNotes(t *testing.T, notes []string) {
 	t.Helper()
 	for _, n := range notes {
 		if !strings.HasSuffix(n, ": query failed") {
 			t.Errorf("note %q is not categorical; want a %q suffix", n, ": query failed")
 		}
+	}
+	assertNoPRNoteLeaks(t, notes)
+}
+
+// assertNoPRNoteLeaks is the half of the contract every note shares regardless
+// of which categorical shape it carries.
+func assertNoPRNoteLeaks(t *testing.T, notes []string) {
+	t.Helper()
+	for _, n := range notes {
 		for _, leak := range prNoteLeaks {
 			if strings.Contains(n, leak) {
 				t.Errorf("note %q leaked %q from subprocess stderr", n, leak)

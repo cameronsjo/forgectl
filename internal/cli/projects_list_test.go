@@ -428,8 +428,10 @@ func TestListCmd_DegradationNotes_AppearOnStderrNotStdout(t *testing.T) {
 // hostileRunes are the three shapes a note must never carry to a terminal: a
 // CSI sequence (here "erase display" + "cursor home", which blanks the screen
 // and repaints from the top), a bare carriage return (overwrites the line just
-// printed), and a right-to-left override (reorders what follows).
-var hostileRunes = []string{"\x1b", "\r", "‮"}
+// printed), and a right-to-left override (reorders what follows). The override
+// is built from its code point rather than typed, so reading this file — or a
+// diff of it — in a terminal does not apply the reordering live.
+var hostileRunes = []string{"\x1b", "\r", string(rune(0x202e))}
 
 // TestListCmd_HostileNoteIsEscapedOnStderr covers the gap that made `projects
 // list` weaker than `forgectl review`: notes were printed with no escaping at
@@ -437,7 +439,8 @@ var hostileRunes = []string{"\x1b", "\r", "‮"}
 // PROJECTS_DIR degrades to a "local: …" note carrying the path verbatim — but
 // the control being tested is the render, not this particular source.
 func TestListCmd_HostileNoteIsEscapedOnStderr(t *testing.T) {
-	hostile := filepath.Join(t.TempDir(), "missing\x1b[2J\x1b[H\rforged‮gnp")
+	rlo := string(rune(0x202e))
+	hostile := filepath.Join(t.TempDir(), "missing\x1b[2J\x1b[H\rforged"+rlo+"gnp")
 	t.Setenv("PROJECTS_DIR", hostile)
 	fake := &exec.FakeRunner{RunFunc: twoHostRunFunc("[]", "owner\tname\ttype\tssh\n")}
 	client := projects.New(fake)

