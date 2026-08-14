@@ -60,7 +60,8 @@ func inventoryRunFunc(tmp string) func(string, []string) (string, error) {
 				}
 				return "", errors.New("no origin set")
 			}
-			// status --porcelain / rev-list → clean, 0 ahead.
+			// status --porcelain=v2 --branch → empty output is a clean tree
+			// with no branch header, so 0 ahead.
 			return "", nil
 		}
 		return "", nil
@@ -487,6 +488,96 @@ func TestDiscover_NonGitDir_StatusIsNotRepo(t *testing.T) {
 	}
 }
 
+// TestInventory_StatusProcessBudget pins forgectl#216 end to end: a full
+// Inventory row costs exactly two git processes per repository — one status
+// probe and one origin lookup — whether the tree is clean or dirty. Before
+// the porcelain-v2 collapse a clean row cost three, because learning the
+// ahead count needed a second `rev-list` walk.
+//
+// Calls are filtered by binary, repo dir, and subcommand rather than by slice
+// index: Inventory fans the status phase and the origin phase out across
+// discoverConcurrency() workers each, so completion order is undefined and an
+// index-based assertion would be asserting on the scheduler.
+func TestInventory_StatusProcessBudget(t *testing.T) {
+	cases := []struct {
+		name      string
+		statusOut string
+		want      GitStatus
+	}{
+		{
+			name:      "clean row keeps its ahead count without a second process",
+			statusOut: v2Branch(2, 0),
+			want:      GitStatus{State: StatusOK, Ahead: 2},
+		},
+		{
+			name:      "dirty row reports counts and discards ahead",
+			statusOut: v2Out(v2Branch(2, 0), v2Ordinary, v2Untracked),
+			want:      GitStatus{State: StatusOK, Modified: 1, Untracked: 1},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			mkGitDir(t, tmp, "forgectl")
+			repo := filepath.Join(tmp, "forgectl")
+
+			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				switch name {
+				case "gh":
+					if len(args) >= 2 && args[0] == "api" && args[1] == "user" {
+						return "cameronsjo", nil
+					}
+					return `[{"name":"forgectl","sshUrl":"git@github.com:cameronsjo/forgectl.git","isPrivate":false}]`, nil
+				case "tea":
+					return "owner\tname\ttype\tssh\n", nil
+				case "git":
+					if len(args) >= 5 && args[0] == "-C" && args[2] == "remote" {
+						return "git@github.com:cameronsjo/forgectl.git", nil
+					}
+					return tc.statusOut, nil
+				}
+				return "", nil
+			}}
+			c := &Client{Dir: tmp, run: fake}
+
+			repos, notes, err := c.Inventory(context.Background())
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(notes) != 0 {
+				t.Errorf("expected no degradation notes, got %v", notes)
+			}
+
+			r, ok := findRepo(repos, "github", "forgectl")
+			if !ok {
+				t.Fatalf("github/forgectl missing from inventory: %+v", repos)
+			}
+			if r.Status != tc.want {
+				t.Errorf("Status = %+v, want %+v", r.Status, tc.want)
+			}
+
+			counts := countGitSubcommands(fake.Calls, repo)
+			if counts["status"] != 1 {
+				t.Errorf("status calls = %d, want exactly 1", counts["status"])
+			}
+			if counts["remote"] != 1 {
+				t.Errorf("remote get-url calls = %d, want exactly 1", counts["remote"])
+			}
+			if counts["rev-list"] != 0 {
+				t.Errorf("rev-list calls = %d, want 0", counts["rev-list"])
+			}
+			total := 0
+			for _, n := range counts {
+				total += n
+			}
+			if total != 2 {
+				t.Errorf("git calls for %s = %d (%v), want exactly 2", repo, total, counts)
+			}
+		})
+	}
+}
+
 // TestLocalRepos_NonRepo_SpawnsNoRemoteLookup pins claim 3 (no ancestor-origin
 // escape) and the paired spawn reduction: a non-git dir must not trigger
 // `git remote get-url origin` at all — that call would walk up past the
@@ -713,7 +804,8 @@ func TestDiscover_BoundsConcurrency(t *testing.T) {
 		// this: hold the call open briefly so overlapping goroutines actually
 		// overlap in wall-clock time rather than running effectively serially.
 		time.Sleep(5 * time.Millisecond)
-		// git status --porcelain / rev-list output; empty is fine either way.
+		// git status --porcelain=v2 --branch output; empty parses as clean,
+		// which is all this test needs — it counts spawns, not states.
 		return "", nil
 	}}
 	c := &Client{Dir: tmp, run: fake}

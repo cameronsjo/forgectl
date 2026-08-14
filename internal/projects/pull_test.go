@@ -11,11 +11,12 @@ import (
 )
 
 // pullFixture wires a *Client whose git calls are keyed by the full repo dir:
-// porcelain controls `git status --porcelain` (empty = clean), pullOut/pullErr
-// control `git pull --rebase`'s outcome. Any dir absent from a map gets the
-// zero value (clean / "" / nil), and `rev-list --count` always answers "0"
-// unless overridden via ahead.
-func pullFixture(porcelain, pullOut map[string]string, pullErr map[string]error, ahead map[string]string) *exec.FakeRunner {
+// records supplies the porcelain-v2 records a repo's `git status
+// --porcelain=v2 --branch` reports (none = clean), pullOut/pullErr control
+// `git pull --rebase`'s outcome. Any dir absent from a map gets the zero value
+// (clean / "" / nil), and every repo's branch header reports zero ahead unless
+// overridden via ahead.
+func pullFixture(records map[string][]string, pullOut map[string]string, pullErr map[string]error, ahead map[string]int) *exec.FakeRunner {
 	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		if name != "git" || len(args) < 3 || args[0] != "-C" {
 			return "", nil
@@ -23,12 +24,7 @@ func pullFixture(porcelain, pullOut map[string]string, pullErr map[string]error,
 		dir := args[1]
 		switch args[2] {
 		case "status":
-			return porcelain[dir], nil
-		case "rev-list":
-			if a, ok := ahead[dir]; ok {
-				return a, nil
-			}
-			return "0", nil
+			return v2Out(append([]string{v2Branch(ahead[dir], 0)}, records[dir]...)...), nil
 		case "pull":
 			return pullOut[dir], pullErr[dir]
 		}
@@ -52,9 +48,9 @@ func TestPullAll_ClassifiesEachRepo(t *testing.T) {
 	failDir := filepath.Join(tmp, "failpull")
 	aheadDir := filepath.Join(tmp, "aheadonly")
 
-	porcelain := map[string]string{
-		dirtyModDir:       " M file.go",
-		dirtyUntrackedDir: "?? newfile.go",
+	records := map[string][]string{
+		dirtyModDir:       {v2Ordinary},
+		dirtyUntrackedDir: {v2Untracked},
 	}
 	pullOut := map[string]string{
 		uptodateDir: "Already up to date.",
@@ -64,11 +60,11 @@ func TestPullAll_ClassifiesEachRepo(t *testing.T) {
 	pullErr := map[string]error{
 		failDir: errors.New("conflict"),
 	}
-	ahead := map[string]string{
-		aheadDir: "2",
+	ahead := map[string]int{
+		aheadDir: 2,
 	}
 
-	fake := pullFixture(porcelain, pullOut, pullErr, ahead)
+	fake := pullFixture(records, pullOut, pullErr, ahead)
 	c := &Client{Dir: tmp, run: fake}
 
 	results, err := c.PullAll(context.Background(), "")
@@ -211,6 +207,77 @@ func TestPullAll_SkipsUnknownStatus(t *testing.T) {
 	for _, call := range fake.Calls {
 		if call.Name == "git" && len(call.Args) >= 3 && call.Args[2] == "pull" && call.Args[1] == brokenDir {
 			t.Errorf("pull ran for a repo with unknown status: %v", call.Args)
+		}
+	}
+}
+
+// TestPullAll_StatusProcessAndSafetyBudget pairs forgectl#216's process budget
+// with the safety decisions that budget must not disturb. One status probe per
+// repo, no rev-list anywhere, and the three classification outcomes unchanged:
+// a clean ahead-only repo still pulls, a dirty one still skips, and one whose
+// status could not be read still skips. Call filtering is by dir and
+// subcommand, never by index — PullAll's discovery phase fans out.
+func TestPullAll_StatusProcessAndSafetyBudget(t *testing.T) {
+	tmp := t.TempDir()
+	for _, n := range []string{"aheadonly", "dirty", "unknown"} {
+		mkGitDir(t, tmp, n)
+	}
+	aheadDir := filepath.Join(tmp, "aheadonly")
+	dirtyDir := filepath.Join(tmp, "dirty")
+	unknownDir := filepath.Join(tmp, "unknown")
+
+	statusOut := map[string]string{
+		aheadDir: v2Branch(2, 0),
+		dirtyDir: v2Out(v2Branch(2, 0), v2Ordinary),
+	}
+
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name != "git" || len(args) < 3 || args[0] != "-C" {
+			return "", nil
+		}
+		dir := args[1]
+		switch args[2] {
+		case "status":
+			if dir == unknownDir {
+				return "", errors.New("fatal: index file corrupt")
+			}
+			return statusOut[dir], nil
+		case "pull":
+			return "Already up to date.", nil
+		}
+		return "", nil
+	}}
+	c := &Client{Dir: tmp, run: fake}
+
+	results, err := c.PullAll(context.Background(), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	byName := make(map[string]PullResult, len(results))
+	for _, r := range results {
+		byName[r.Name] = r
+	}
+
+	if got := byName["aheadonly"].Status; got != PullUpToDate {
+		t.Errorf("aheadonly status = %v, want PullUpToDate", got)
+	}
+	if got := byName["dirty"].Status; got != PullSkippedDirty {
+		t.Errorf("dirty status = %v, want PullSkippedDirty", got)
+	}
+	if got := byName["unknown"].Status; got != PullSkippedUnknown {
+		t.Errorf("unknown status = %v, want PullSkippedUnknown", got)
+	}
+
+	for dir, wantPull := range map[string]int{aheadDir: 1, dirtyDir: 0, unknownDir: 0} {
+		counts := countGitSubcommands(fake.Calls, dir)
+		if counts["status"] != 1 {
+			t.Errorf("%s: status calls = %d, want exactly 1", filepath.Base(dir), counts["status"])
+		}
+		if counts["rev-list"] != 0 {
+			t.Errorf("%s: rev-list calls = %d, want 0", filepath.Base(dir), counts["rev-list"])
+		}
+		if counts["pull"] != wantPull {
+			t.Errorf("%s: pull calls = %d, want %d", filepath.Base(dir), counts["pull"], wantPull)
 		}
 	}
 }
