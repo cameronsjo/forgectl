@@ -213,10 +213,30 @@ func (k prSessionKey) canonical() []byte {
 }
 
 // appendLenString appends s as a big-endian uint16 length plus its bytes.
-// Every string that reaches it has already been charset-validated well below
-// 64KiB by a constructor, so no length check is possible to fail here.
+//
+// The bound is enforced HERE, at the narrowing, rather than trusted from the
+// constructors. Every current caller passes a field checkFieldLength already
+// bounded, so this is unreachable today — but the invariant is exactly the one
+// whose violation forges an identity: a 65536-byte owner wraps the uint16
+// length prefix to a short one, and two different owners then encode to
+// identical canonical bytes that the window-name digest is taken over. Keeping
+// the check at the conversion means a future constructor that forgets
+// checkFieldLength cannot silently reintroduce the wrap.
+//
+// It panics rather than returning an error because canonical, and the equal
+// and digest that build on it, are total functions on a value type — an
+// identity has no failure mode to report. Reaching this is a programming error
+// (a constructor that skipped its bound), and the only alternative to stopping
+// is emitting bytes that name the wrong session.
+// The length is bound to a local so the check and the conversion read the same
+// value — which is also the form gosec's range analysis can follow, clearing
+// the G115 it reports on the unguarded narrowing.
 func appendLenString(buf []byte, s string) []byte {
-	buf = binary.BigEndian.AppendUint16(buf, uint16(len(s)))
+	n := len(s)
+	if n > maxSessionKeyFieldBytes {
+		panic(fmt.Sprintf("pr: session key field is %d bytes, over the %d-byte bound; a constructor skipped checkFieldLength", n, maxSessionKeyFieldBytes))
+	}
+	buf = binary.BigEndian.AppendUint16(buf, uint16(n))
 	return append(buf, s...)
 }
 

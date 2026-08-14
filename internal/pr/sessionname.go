@@ -66,7 +66,20 @@ var sessionDigestEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567
 // reSessionName is the grammar, enforced on the way out. Every generated name
 // is checked against it before it is returned, so a bug in the builder fails
 // loudly here rather than reaching tmux as a malformed target.
-var reSessionName = regexp.MustCompile(`^pr-v2-[lr]-[a-z0-9-]{1,55}-[a-z2-7]{32}$`)
+//
+// The pattern is BUILT from the same constants encodedName builds names from,
+// never restated as literals. A restated pattern drifts silently: raise
+// maxSessionLabelBytes or edit reviewWindowPrefix and the code still compiles,
+// but this gate — documented below as an independent second check that turns a
+// sanitizer bypass into a refusal — starts refusing every name the builder
+// produces, which is a self-inflicted outage on the launch path rather than a
+// missed check. Deriving it means the two cannot disagree.
+var reSessionName = regexp.MustCompile(fmt.Sprintf(
+	`^%s-[lr]-[a-z0-9-]{1,%d}-[a-z2-7]{%d}$`,
+	regexp.QuoteMeta(reviewWindowPrefix+sessionNameVersion),
+	maxSessionLabelBytes,
+	sessionDigestChars,
+))
 
 // encodedName renders the tmux window name for this key in the given role.
 // label is free-form display text — a ref's own spelling, typically — and is

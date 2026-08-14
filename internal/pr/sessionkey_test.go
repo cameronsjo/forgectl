@@ -2,6 +2,7 @@ package pr
 
 import (
 	"bytes"
+	"encoding/binary"
 	"strings"
 	"testing"
 )
@@ -153,11 +154,13 @@ func TestDecodeSessionKeyRejectsOverlongFields(t *testing.T) {
 	// Hand-build an encoding whose owner exceeds the bound. It is representable
 	// on the wire (the uint16 prefix holds it), so only an explicit check in
 	// decode refuses it — and it must, or decode would mint keys the
-	// constructors cannot.
+	// constructors cannot. The prefix is written by hand rather than through
+	// appendLenString, which refuses to encode an out-of-bound field at all.
 	long := strings.Repeat("a", maxSessionKeyFieldBytes+1)
 	b := []byte(sessionKeyMagic)
 	b = append(b, sessionKeyVersion, byte(kindRemote))
-	b = appendLenString(b, long)
+	b = binary.BigEndian.AppendUint16(b, uint16(len(long)))
+	b = append(b, long...)
 	b = appendLenString(b, "repo")
 	b = append(b, 0, 0, 0, 0, 0, 0, 0, 1)
 	if _, err := decodeSessionKey(b); err == nil {
@@ -235,4 +238,17 @@ func TestSessionKeyForRefMatchesKind(t *testing.T) {
 	if key.equal(remoteKey) {
 		t.Fatal("a local ref and a remote ref spelling the same parts share a key")
 	}
+}
+
+// The uint16 length prefix is where a forged identity would be minted: two
+// different owners encoding to identical canonical bytes, which the window-name
+// digest is then taken over. The bound is enforced at the narrowing itself, so
+// a future constructor that forgets checkFieldLength stops rather than wraps.
+func TestAppendLenStringRefusesToWrapItsLengthPrefix(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("appendLenString encoded a field over the bound instead of panicking")
+		}
+	}()
+	appendLenString(nil, strings.Repeat("a", maxSessionKeyFieldBytes+1))
 }

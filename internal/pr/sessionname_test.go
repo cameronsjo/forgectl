@@ -249,3 +249,40 @@ func TestEncodedNameCarriesNoTmuxTargetGrammar(t *testing.T) {
 		}
 	}
 }
+
+// reSessionName is the second gate: it turns a sanitizer bypass into a refusal.
+// It is therefore load-bearing in BOTH directions — a pattern that drifts from
+// the constants encodedName builds names from would refuse every name the
+// builder produces, which is an outage on the launch path rather than a missed
+// check. This asserts the coupling at every edge of the grammar, from the
+// constants, so a constant change that the pattern did not follow fails here.
+func TestSessionNameGrammarFollowsItsConstants(t *testing.T) {
+	head := reviewWindowPrefix + sessionNameVersion + "-l-"
+	digest := strings.Repeat("a", sessionDigestChars)
+
+	accept := map[string]string{
+		"shortest legal label":     head + "x-" + digest,
+		"label at the exact bound": head + strings.Repeat("a", maxSessionLabelBytes) + "-" + digest,
+	}
+	for what, name := range accept {
+		if !reSessionName.MatchString(name) {
+			t.Errorf("%s: grammar refused %q, which encodedName can produce", what, name)
+		}
+	}
+
+	reject := map[string]string{
+		"label one byte over the bound": head + strings.Repeat("a", maxSessionLabelBytes+1) + "-" + digest,
+		"empty label":                   head + "-" + digest,
+		"digest one char short":         head + "x-" + strings.Repeat("a", sessionDigestChars-1),
+		"digest one char long":          head + "x-" + strings.Repeat("a", sessionDigestChars+1),
+		"digest outside base32":         head + "x-" + strings.Repeat("a", sessionDigestChars-1) + "1",
+		"wrong version":                 reviewWindowPrefix + "v0-l-x-" + digest,
+		"outside the review namespace":  "x" + head + "x-" + digest,
+		"unknown kind letter":           reviewWindowPrefix + sessionNameVersion + "-z-x-" + digest,
+	}
+	for what, name := range reject {
+		if reSessionName.MatchString(name) {
+			t.Errorf("%s: grammar accepted %q", what, name)
+		}
+	}
+}
