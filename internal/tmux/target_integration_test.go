@@ -12,6 +12,24 @@ import (
 	internalexec "github.com/cameronsjo/forgectl/internal/exec"
 )
 
+// requireTmuxEnv, when set to any non-empty value, turns this file's skips into
+// failures. CI sets it; a developer box without tmux does not, so the tests stay
+// skippable locally.
+const requireTmuxEnv = "FORGECTL_REQUIRE_TMUX"
+
+// skipOrFail is the loud-skip gate. These tests are the ONLY place the tmux
+// target grammar is measured rather than described, so where they are meant to
+// run, a skip and a pass must not look alike — an environment that lost tmux
+// would otherwise retire the guarantee silently.
+func skipOrFail(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv(requireTmuxEnv) != "" {
+		t.Fatalf("%s=1 but the real-tmux grammar tests cannot run: "+format,
+			append([]any{requireTmuxEnv}, args...)...)
+	}
+	t.Skipf(format, args...)
+}
+
 // isolatedTmux stands up a private tmux server on its own socket and returns a
 // Client over it. Nothing here can reach the operator's real server: TMUX is
 // cleared so we are not treated as being inside a client, and TMUX_TMPDIR moves
@@ -23,16 +41,16 @@ func isolatedTmux(t *testing.T) (*Client, internalexec.Runner, string) {
 	t.Helper()
 	tmuxBin, err := exec.LookPath("tmux")
 	if err != nil {
-		t.Skip("tmux not installed")
+		skipOrFail(t, "tmux not installed")
 	}
 	runner := internalexec.OSRunner{}
 	versionOut, err := runner.Run(context.Background(), tmuxBin, "-V")
 	if err != nil {
-		t.Skipf("tmux -V: %v", err)
+		skipOrFail(t, "tmux -V: %v", err)
 	}
 	major, minor, _, err := parseTmuxVersion(versionOut)
 	if err != nil || major < 2 || (major == 2 && minor < 2) {
-		t.Skipf("tmux 2.2+ required: %q", versionOut)
+		skipOrFail(t, "tmux 2.2+ required: %q", versionOut)
 	}
 	root, err := os.MkdirTemp("/tmp", "f237-tmux-")
 	if err != nil {
@@ -52,7 +70,9 @@ func isolatedTmux(t *testing.T) (*Client, internalexec.Runner, string) {
 // `forgectl`, it measures what each spelling of `new-window -t` actually does.
 // The table this pins was first measured by hand on tmux 3.7b; running it here
 // means a future tmux that changes the rules breaks the build instead of
-// quietly restoring the bug.
+// quietly restoring the bug. CI installs tmux and sets FORGECTL_REQUIRE_TMUX=1
+// so that claim holds there — without both, this test skips and a skip is
+// indistinguishable from a pass.
 func TestNewWindowTargetResolutionIsolated(t *testing.T) {
 	c, runner, tmuxBin := isolatedTmux(t)
 	ctx := context.Background()

@@ -15,17 +15,20 @@ import (
 )
 
 func TestGenerationCapabilityIsolated(t *testing.T) {
+	// skipOrFail, not t.Skip: this test measures a real server's generation
+	// fields, so where it is meant to run (CI, FORGECTL_REQUIRE_TMUX=1) a skip
+	// must not read as a pass. See target_integration_test.go.
 	tmuxBin, err := exec.LookPath("tmux")
 	if err != nil {
-		t.Skip("tmux not installed")
+		skipOrFail(t, "tmux not installed")
 	}
 	versionOut, err := internalexec.OSRunner{}.Run(context.Background(), tmuxBin, "-V")
 	if err != nil {
-		t.Skipf("tmux -V: %v", err)
+		skipOrFail(t, "tmux -V: %v", err)
 	}
 	major, minor, _, err := parseTmuxVersion(versionOut)
 	if err != nil || major < 2 || (major == 2 && minor < 2) {
-		t.Skipf("tmux 2.2+ required: %q", versionOut)
+		skipOrFail(t, "tmux 2.2+ required: %q", versionOut)
 	}
 
 	// Not t.TempDir(): macOS caps a Unix socket path at ~104 bytes and

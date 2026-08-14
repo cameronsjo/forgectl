@@ -26,6 +26,13 @@ jobs:
         with:
           go-version: '1.26'
 
+      - name: Install tmux
+        # internal/tmux's *Isolated tests measure tmux's real -t target grammar
+        # against a private socket — the only check that would catch a future
+        # tmux restoring forgectl#237. They self-skip when tmux is absent, so
+        # without this step they never ran here (#237 review).
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
       - name: Build
         run: go build ./...
 
@@ -33,7 +40,19 @@ jobs:
         run: go vet ./...
 
       - name: Test
+        # FORGECTL_REQUIRE_TMUX turns those tests' skips into failures: on a
+        # runner where they are meant to run, a skip and a pass must not look
+        # alike.
+        env:
+          FORGECTL_REQUIRE_TMUX: '1'
         run: go test ./...
+
+      - name: Real-tmux grammar tests (named)
+        # Same tests, -v: the run log naming each *Isolated test as PASS is the
+        # readable proof they executed rather than skipped.
+        env:
+          FORGECTL_REQUIRE_TMUX: '1'
+        run: go test -v -count=1 -run Isolated ./internal/tmux
 
       - name: Check formatting
         run: |
@@ -61,9 +80,18 @@ jobs:
         with:
           go-version: '1.26'
 
+      - name: Install tmux
+        # Same reason as the ubuntu job: the *Isolated tmux-grammar tests skip
+        # themselves without a tmux on PATH. Darwin is also where the socket-path
+        # length constraint isolatedTmux works around actually bites.
+        run: brew install tmux
+
       - name: Test (Darwin-gated coverage)
         # -v is deliberate: the run log naming each formerly-skipped test as
-        # PASS is the proof this coverage exists.
+        # PASS is the proof this coverage exists. FORGECTL_REQUIRE_TMUX makes a
+        # missing tmux a failure rather than a silent skip.
+        env:
+          FORGECTL_REQUIRE_TMUX: '1'
         run: go test -v ./...
 
   helper:
