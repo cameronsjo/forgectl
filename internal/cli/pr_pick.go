@@ -180,7 +180,14 @@ func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd
 		return err
 	}
 
-	results := client.PrepareMany(ctx, refs, pr.PrepareOpts{Agent: resolveAgent("")})
+	// Every PR the picker surfaces came from a forge query, so the whole batch
+	// is third-party by construction — bulk is the route where an unnoticed
+	// escalation would be widest, and it is declared here rather than left to
+	// the zero value so the intent is legible.
+	results := client.PrepareMany(ctx, refs, pr.PrepareOpts{
+		Agent:      resolveAgent(""),
+		Provenance: pr.ReviewProvenanceThirdParty,
+	})
 	launched := 0
 	prepareFailed := 0
 	launchFailed := 0

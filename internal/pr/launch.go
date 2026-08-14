@@ -190,10 +190,23 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) (D
 	if sess.Workspace == "" {
 		return Dispatch{}, fmt.Errorf("cannot launch: session has no workspace (dry-run?)")
 	}
-	// Authoritative use-based guard. Prepare refuses the same pairing earlier so
-	// nothing is fetched, but this is the one every route reaches — including a
-	// Session reconstituted from a breadcrumb, which never re-enters Prepare.
-	if err := CheckAgentForRef(sess.Agent, sess.Ref); err != nil {
+	// AUTHORITATIVE provenance guard. Prepare refuses the same pairing earlier
+	// so nothing is fetched, but this is the one point EVERY route reaches —
+	// including a Session reconstituted from a breadcrumb, which never re-enters
+	// Prepare and whose provenance therefore arrives from disk.
+	//
+	// It re-applies EffectiveProvenance rather than trusting sess.Provenance as
+	// handed over. Prepare and the breadcrumb loader both normalize already, so
+	// this is redundant on every path that exists today — deliberately. This is
+	// the last gate before an unconfined shell, and the cost of the redundancy
+	// is one comparison against the cost of a future caller that builds a
+	// Session literal and gets the declaration wrong.
+	//
+	// The refusal is placed before every launch-time effect below: no tmux
+	// capability probe, session, or window, and no process. It does NOT clean up
+	// the workspace or breadcrumb — those predate this call, and Claude,
+	// `pr attach`, and `pr teardown` all still need them.
+	if err := CheckAgentForReview(sess.Agent, EffectiveProvenance(sess.Ref, sess.Provenance)); err != nil {
 		return Dispatch{}, err
 	}
 	// FindingsDir is deliberately NOT persisted (see Session), so loadSession
@@ -202,6 +215,13 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) (D
 	// else" — a silently misconfigured review rather than a failed one. Nothing
 	// calls Launch on a reload today; this makes the future verb that does fail
 	// loudly instead.
+	//
+	// It is also, incidentally, a SECOND independent barrier on the persistence
+	// path: because FindingsDir is never persisted, this refuses every reloaded
+	// local session regardless of provenance — including a canonical breadcrumb
+	// that legitimately reloads as operator-authored, which the provenance gate
+	// above would let through. A change that starts persisting FindingsDir
+	// removes that barrier and leaves the gate above standing alone.
 	if sess.Ref.IsLocal() && sess.FindingsDir == "" {
 		return Dispatch{}, fmt.Errorf(
 			"local review session %s has no findings directory: it is not persisted in the breadcrumb, "+
@@ -241,17 +261,23 @@ func (c *Client) CheckDispatchCapability(ctx context.Context) error {
 // is not an oversight: `codex exec --help` exposes no MCP flag at all, so there
 // is no harness-boundary control to force.
 //
-// What bounds the exposure, stated exactly: CheckAgentForRef refuses Codex for
-// remote PR heads, so this path only ever runs against a workspace on a path
-// the operator owns. That is all sess.Ref.IsLocal() proves — PATH ownership,
-// not COMMIT provenance. PrepareLocal accepts a detached HEAD and only warns,
-// so an ordinary `gh pr checkout` of a third-party branch reaches this path
-// with the contributor's tree in it, repo-supplied MCP config included. The
-// content under review is therefore not necessarily the operator's own; what
-// holds this at Tier 2 is that the operator selected that checkout deliberately
-// and can inspect it before dispatch, not that the bytes are theirs. Revisit if
-// Codex gains a strict-config flag, if the remote-head refusal is relaxed, or
-// if detached heads are ever rejected before dispatch.
+// What bounds the exposure, stated exactly: CheckAgentForReview permits this
+// path ONLY for ReviewProvenanceOperatorAuthored — a claim that exists solely
+// because the operator passed `pr local --operator-authored`, and that survives
+// reconstruction only in a canonical local breadcrumb. Nothing infers it.
+//
+// That is the whole of forgectl#232, and it replaced a weaker bound worth
+// naming so it is not reintroduced. The predecessor rested on
+// `sess.Ref.IsLocal()`, which proves PATH ownership, not COMMIT provenance —
+// and PrepareLocal accepted a detached HEAD with only a warning. So an ordinary
+// `gh pr checkout` of a third-party branch reached this path with the
+// contributor's tree in it, repo-supplied MCP config included, and the thing
+// holding it at Tier 2 was that the operator had selected the checkout
+// deliberately rather than that the bytes were theirs.
+//
+// Revisit if Codex gains a strict-config flag, if the provenance requirement is
+// relaxed anywhere, or if any signal other than the explicit assertion is ever
+// allowed to produce operator-authored.
 func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Config) (Dispatch, error) {
 	codexPath, err := launch.CodexPath(cfg.Launch.Defaults)
 	if err != nil {

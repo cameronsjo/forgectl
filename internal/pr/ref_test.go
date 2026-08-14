@@ -272,8 +272,10 @@ func TestResolveRef_LocalOwnerResolves(t *testing.T) {
 }
 
 // TestLocalSentinel_OnlyNewLocalRefMarksLocal is the invariant that makes
-// Ref.IsLocal() unforgeable, and therefore makes the Codex refusal
-// (CheckAgentForRef) and the launchCodex sandbox widening safe to key off it.
+// Ref.IsLocal() unforgeable, and therefore makes the launchCodex sandbox
+// widening, the PostReview gate, and EffectiveProvenance's non-local downgrade
+// safe to key off it. The Codex refusal itself keys off the operator's
+// authorship declaration (CheckAgentForReview), not off locality.
 //
 // The owner string is a display value: every parsing route may spell "local"
 // and none of them produces a local Ref. Only newLocalRef sets the flag.

@@ -1,7 +1,5 @@
 package pr
 
-import "fmt"
-
 // LaunchPath selects how a review agent is dispatched into its clean-room
 // workspace.
 type LaunchPath int
@@ -46,10 +44,10 @@ const (
 	//
 	// Consequence: a prompt injection in a reviewed third-party PR diff buys a
 	// shell here where it buys nothing under agent A. Since the confinement is
-	// unreachable, the boundary is drawn by USE instead — CheckAgentForRef
-	// refuses this path for a remote PR head and keeps it for a local review of
-	// the operator's own tree. That refusal is enforced in the dispatch path,
-	// not documented and hoped for.
+	// unreachable, the boundary is drawn by USE instead — CheckAgentForReview
+	// (provenance.go) opens this path only for code the operator has explicitly
+	// stated they wrote. That refusal is enforced in the dispatch path, not
+	// documented and hoped for.
 	CodexExec
 )
 
@@ -86,64 +84,24 @@ func LaunchPathFor(agent string) LaunchPath {
 	return InlineSeeded
 }
 
-// CheckAgentForRef refuses an agent whose confinement does not match what the
-// reviewed content can do to you. It is the enforcement of a use-based
-// boundary, chosen because the sandbox-based one is unreachable (see
-// CodexExec): Codex permits arbitrary shell with host-wide read, and `codex
-// exec` on 0.146.0 offers no flag or config key that confines it.
+// CheckAgentForRef is GONE — deliberately, and it should not come back.
 //
-// The threat is prompt injection carried in a diff someone else wrote. That
-// makes the boundary ownership, not severity:
+// It took a Ref and asked whether the head was local or remote, then used that
+// answer to decide an AUTHORSHIP question. The two coincide often enough to look
+// like one predicate and diverge on the single most ordinary review workflow
+// there is: `gh pr checkout 123` puts a third party's commit in the operator's
+// own repository, where locality reports "yours" and authorship is "theirs"
+// (forgectl#232).
 //
-//   - A REMOTE PR head is a third party's content, fetched and checked out.
-//     A hostile diff reaching a shell is exactly the scenario the clean room
-//     exists to prevent, so the Codex agent is refused there.
-//   - A LOCAL review reads the operator's own working tree. It cannot be
-//     hostile to its own author, so there is nothing for the confinement to
-//     protect against and the Codex agent stays fully available.
+// Its replacement is CheckAgentForReview in provenance.go, which takes the
+// authorship value directly. Ref.IsLocal() keeps its own meaning — path and
+// workspace ownership, and whether PostReview may fire — and is read on the
+// provenance path as a NEGATIVE signal only (EffectiveProvenance), never as
+// evidence that the operator wrote anything.
 //
-// That justification is about content OWNERSHIP, while this function tests how
-// the Ref was CONSTRUCTED. They are different predicates. Two other guards keep
-// them from diverging, and both are load-bearing:
-//
-//   - Ref.local is unforgeable (ref.go) — only newLocalRef sets it, and no
-//     parsed string can, whatever owner it spells — so external data cannot
-//     make a remote head present as local.
-//   - rejectCleanRoomPath (local.go) refuses a `pr local` path inside a
-//     forgectl workspace, so the operator cannot launder a fetched hostile
-//     head into "their own tree" by pointing local review at the sandbox.
-//
-// Weaken either and this refusal degrades from a boundary to a speed bump.
-//
-// ACCEPTED RESIDUAL — the predicates still do not fully coincide, and one gap
-// is deliberately left open:
-//
-//	forgectl pr local --agent codex <the operator's own repo, checked out to
-//	                                 a third party's head>
-//
-// e.g. after `gh pr checkout 123`. That path is the operator's TREE, which is
-// not the operator's CONTENT, and `gh pr checkout` is the ordinary way the two
-// diverge. It is not gateable by path provenance — the directory is genuinely
-// theirs — so this design does not gate it. PrepareLocal warns when HEAD is
-// detached, which covers the common shape of it without pretending to be a
-// control. Anyone extending this boundary should know the gap is known and
-// accepted, not overlooked.
-//
-// Returns nil when the pairing is allowed. Called at both ends of the pipeline
-// — Prepare, so an operator is stopped before a third party's head is ever
-// fetched, and Launch, which is authoritative because it also covers a session
-// reconstituted from a breadcrumb.
-func CheckAgentForRef(agent string, ref Ref) error {
-	if LaunchPathFor(agent) != CodexExec || ref.IsLocal() {
-		return nil
-	}
-	return fmt.Errorf(
-		"agent %q cannot review a remote PR head: Codex's sandbox scopes filesystem "+
-			"and network access but NOT which commands run, so a prompt injection in a "+
-			"third-party diff could reach a shell with read access to your whole home "+
-			"directory — and `codex exec` exposes no way to confine that. Review this PR "+
-			"with `--agent claude` (the default), whose allowlist confines Bash to an "+
-			"enumerated read-only prefix set",
-		agent,
-	)
-}
+// Two guards named in the retired doc are still load-bearing and still enforced
+// elsewhere: Ref.local is unforgeable (only newLocalRef sets it, see ref.go), and
+// rejectCleanRoomPath refuses a `pr local` path inside a forgectl workspace
+// (local.go), so a fetched hostile head cannot be laundered into "their own
+// tree". Provenance is a third control beside those, not a replacement for
+// either.

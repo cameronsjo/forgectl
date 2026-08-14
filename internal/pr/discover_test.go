@@ -506,7 +506,7 @@ func TestPrepareMany_PerItemErrorCaptured(t *testing.T) {
 // and a forge org literally named "local" is a real thing — dropping its rows
 // silently lost PRs from discovery. Keeping the row is only safe because
 // locality no longer rides the owner string: IsLocal() reads Ref.local, which
-// no parsed row can set, so CheckAgentForRef still refuses Codex here and
+// no parsed row can set, so CheckAgentForReview still refuses Codex here and
 // launchCodex never takes the workspace-write branch.
 func TestParseSearchPRs_KeepsRealLocalOwner(t *testing.T) {
 	const rows = `[{"repository":{"nameWithOwner":"local/evil"},"number":7,"title":"t","state":"OPEN"},
@@ -532,10 +532,17 @@ func TestParseSearchPRs_KeepsRealLocalOwner(t *testing.T) {
 	}
 }
 
-// TestCheckAgentForRef_ForgedLocalRefStillRefused is the end-to-end statement
-// of the same invariant at the boundary itself: the ref parses, and the Codex
-// refusal still fires because the ref is not local.
-func TestCheckAgentForRef_ForgedLocalRefStillRefused(t *testing.T) {
+// TestCheckAgentForReview_ForgedLocalRefStillRefused is the end-to-end statement
+// of the same invariant at the boundary itself: the ref parses, it is not local,
+// and the Codex refusal still fires.
+//
+// Under forgectl#232 the assertion is strictly stronger than it was. The old
+// check refused this ref because it was remote; the new one is handed the most
+// permissive declaration that exists — operator-authored — and STILL refuses,
+// because EffectiveProvenance downgrades a claim that a remote ref cannot
+// support. Discovery output is hostile input, so an owner spelled "local" in a
+// `gh search prs` row must buy nothing.
+func TestCheckAgentForReview_ForgedLocalRefStillRefused(t *testing.T) {
 	forged, err := RefFromParts("local", "evil", "7")
 	if err != nil {
 		t.Fatalf("RefFromParts rejected a real owner named %q: %v", "local", err)
@@ -543,8 +550,12 @@ func TestCheckAgentForRef_ForgedLocalRefStillRefused(t *testing.T) {
 	if forged.IsLocal() {
 		t.Fatalf("RefFromParts produced a LOCAL ref from external input: %+v", forged)
 	}
-	if err := CheckAgentForRef("codex", forged); err == nil {
-		t.Error("CheckAgentForRef(codex) accepted a remote ref owned by \"local\"; " +
+	effective := EffectiveProvenance(forged, ReviewProvenanceOperatorAuthored)
+	if effective != ReviewProvenanceThirdParty {
+		t.Errorf("a discovered remote ref upgraded to %v; want third-party", effective)
+	}
+	if err := CheckAgentForReview("codex", effective); err == nil {
+		t.Error("CheckAgentForReview(codex) accepted a remote ref owned by \"local\"; " +
 			"the Codex reviewer must still be refused against a remote head")
 	}
 }

@@ -33,7 +33,15 @@ func TestRef_ExternalConstructionIsNeverLocal(t *testing.T) {
 	if parsed.IsLocal() {
 		t.Error("pr.ParseRef produced a local Ref from an external string")
 	}
-	if err := pr.CheckAgentForRef("codex", parsed); err == nil {
-		t.Error("CheckAgentForRef(codex) must still refuse a remote ref owned by \"local\"")
+	// forgectl#232: the boundary an external caller must not be able to cross is
+	// now authorship, not locality — so assert it with the most permissive
+	// declaration available. EffectiveProvenance downgrades it against a ref no
+	// outside package can make local, and Codex stays refused.
+	effective := pr.EffectiveProvenance(parsed, pr.ReviewProvenanceOperatorAuthored)
+	if effective != pr.ReviewProvenanceThirdParty {
+		t.Errorf("an externally built ref upgraded to %v; want third-party", effective)
+	}
+	if err := pr.CheckAgentForReview("codex", effective); err == nil {
+		t.Error("CheckAgentForReview(codex) must still refuse a remote ref owned by \"local\"")
 	}
 }

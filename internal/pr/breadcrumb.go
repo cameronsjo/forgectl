@@ -29,6 +29,67 @@ type Breadcrumb struct {
 	// Omitted when false so a remote session's breadcrumb is byte-identical
 	// to what earlier versions wrote.
 	Local bool `json:"local,omitempty"`
+	// Provenance persists who WROTE the reviewed code (forgectl#232), so a
+	// reconstructed session can answer the question that gates CodexExec
+	// without re-entering preparation.
+	//
+	// IT IS NEVER READ ON ITS OWN. This is the single most attractive field in
+	// the file to an attacker who can write here: flipping it to
+	// "operator-authored" is a one-word edit that would otherwise buy an
+	// unconfined shell over content of their choosing. provenanceFromRecord
+	// validates it JOINTLY with the record's canonical local shape, so the
+	// string can only mean what the rest of the breadcrumb corroborates.
+	//
+	// Omitted when unknown, which keeps a legacy breadcrumb and a freshly
+	// written unasserted one byte-identical rather than inventing a second
+	// spelling for the same state.
+	Provenance string `json:"provenance,omitempty"`
+}
+
+// provenanceFromRecord resolves a breadcrumb's EFFECTIVE provenance, and it is
+// the one place a persisted authorship claim is ever believed.
+//
+// The rule it enforces: a positive claim is only valid when the record has the
+// CANONICAL LOCAL SHAPE that could have produced it. Only PrepareLocal writes
+// operator-authored, and it always writes Local:true alongside — which
+// validateBreadcrumbRecord in turn ties to the localOwnerSentinel owner, so the
+// three facts corroborate each other. A record missing any of them did not come
+// from that writer.
+//
+// This is validation of application state, not a cryptographic seal, and the
+// distinction is honest: an actor with arbitrary write access to the 0700
+// session-state dir can author a fully canonical local breadcrumb, and this
+// check will accept it. What it stops is the CHEAP attack — self-labelling an
+// existing remote-shaped record into eligibility by editing one field — which is
+// the difference between a boundary and a speed bump.
+//
+// It NORMALIZES rather than rejects. A contradictory record stays loadable, so
+// Claude, `pr list`, `pr attach`, and `pr teardown` keep working on it exactly
+// as before; only Codex eligibility is denied. Rejecting outright would turn a
+// security downgrade into a availability failure for verbs that were never at
+// risk.
+//
+// Where the record's remote origin is KNOWN it degrades to third-party; where
+// nothing is established it degrades to unknown. Both refuse Codex identically.
+func provenanceFromRecord(bc Breadcrumb) ReviewProvenance {
+	declared := ParseReviewProvenance(bc.Provenance)
+	if declared == ReviewProvenanceOperatorAuthored && !bc.Local {
+		// A remote-shaped record claiming authorship. Its origin is known, so
+		// say so rather than hiding behind unknown.
+		//
+		// Workspace is logged unwrapped, which was CHECKED rather than assumed:
+		// this branch fires when a record looks tampered with, so the pathname is
+		// attacker-influenced and could carry ANSI or bidi controls. The stdlib
+		// slog.TextHandler this binary installs (internal/config) quotes any value
+		// containing control characters, so they reach the terminal escaped and a
+		// termsafe.QuotePath here would be redundant. That redundancy becomes
+		// necessary if the handler is ever swapped for one that does not quote.
+		slog.Warn("Breadcrumb claims operator-authored provenance but does not have the canonical local shape; "+
+			"treating it as third-party. The unconfined Codex reviewer is refused for this session.",
+			"ref", bc.Ref, "workspace", bc.Workspace)
+		return ReviewProvenanceThirdParty
+	}
+	return declared
 }
 
 // breadcrumbFilename derives a stable, filesystem-safe name from the ref and

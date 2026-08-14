@@ -95,6 +95,13 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 				Agent:    resolveAgent(agent),
 				DryRun:   dryRun,
 				Headless: headless,
+				// A named PR ref is a third party's content by construction,
+				// whatever the owner spells and whoever opened it. There is no
+				// flag to override this and there must not be one: an operator
+				// reviewing their OWN branch locally uses `pr local
+				// --operator-authored`, which reviews the tree in front of them
+				// rather than a fetched head.
+				Provenance: pr.ReviewProvenanceThirdParty,
 			})
 			if err != nil {
 				return err
@@ -130,7 +137,7 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&agent, "agent", "", "review agent (env "+prAgentEnv+"; default: claude; codex is local-review only)")
+	cmd.Flags().StringVar(&agent, "agent", "", "review agent (env "+prAgentEnv+"; default: claude; codex is refused for PR heads)")
 	cmd.Flags().BoolVar(&headless, "headless", false, "stage only; never show the interactive approval gate or auto-post")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve and print the plan without creating anything")
 	cmd.Flags().BoolVar(&noVerify, "no-verify", false, "skip the delayed post-dispatch window check")

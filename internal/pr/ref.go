@@ -27,9 +27,15 @@ type Ref struct {
 	Number int
 
 	// local marks a synthetic, offline-review Ref. It is the SECURITY
-	// BOUNDARY behind IsLocal(), which decides whether the Codex reviewer is
-	// refused (CheckAgentForRef), whether PostReview may fire, and whether
-	// launchCodex widens the sandbox from read-only to workspace-write.
+	// BOUNDARY behind IsLocal(), which decides whether PostReview may fire
+	// and whether launchCodex widens the sandbox from read-only to
+	// workspace-write.
+	//
+	// It does NOT decide whether the Codex reviewer is refused. That gate is
+	// CheckAgentForReview (provenance.go), which reads the operator's
+	// authorship declaration — locality is not authorship (forgectl#232).
+	// Locality reaches provenance only as a DOWNGRADE: EffectiveProvenance
+	// forces third-party on a non-local ref and can never upgrade one.
 	//
 	// It is unexported and set by exactly one constructor, newLocalRef
 	// (local.go), so no external string — a gh response, a config value, a

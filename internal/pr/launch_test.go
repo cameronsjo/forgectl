@@ -326,7 +326,10 @@ func TestLaunch_CodexRefusedForRemotePRHead(t *testing.T) {
 		t.Errorf("a refused agent must issue ZERO Runner calls; got %+v", fake.Calls)
 	}
 	// The message must be actionable, naming the reason and the way forward.
-	for _, want := range []string{"remote PR head", "not", "which commands run", "--agent claude"} {
+	// Under forgectl#232 the reason is stated as authorship rather than as
+	// "remote PR head" — a remote ref resolves third-party unconditionally, so
+	// the operator is told whose code it is, not how it was fetched.
+	for _, want := range []string{"someone else", "which commands run", "--agent claude"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal message missing %q: %v", want, err)
 		}
@@ -339,39 +342,59 @@ func TestLaunch_CodexRefusedForRemotePRHead(t *testing.T) {
 	if strings.Contains(err.Error(), "pr local") {
 		t.Errorf("refusal message routes the operator around the control: %v", err)
 	}
+	// Nor may it name the assertion flag here. On a known third-party head the
+	// flag would have to be a false statement to work, so advertising it is the
+	// same routing-around in a smaller costume.
+	if strings.Contains(err.Error(), "--operator-authored") {
+		t.Errorf("refusal message advertises the flag that would silence it: %v", err)
+	}
 }
 
-// TestCheckAgentForRef_BoundaryIsOwnershipNotSeverity walks the full matrix.
-// The Codex agent is refused only where the reviewed content belongs to
-// someone else; every other pairing is untouched, including the local Codex
-// review the ruling deliberately keeps available.
-func TestCheckAgentForRef_BoundaryIsOwnershipNotSeverity(t *testing.T) {
+// TestCheckAgentForReview_BoundaryIsAuthorshipNotLocality walks the full matrix
+// through the ref+declaration seam, which is how every production caller reaches
+// it. The Codex agent is refused everywhere except over code the operator has
+// asserted they wrote; every other pairing is untouched.
+//
+// The row that changed with forgectl#232 is marked. Under the old check, `codex`
+// on a LOCAL ref was permitted outright — that permission is what a `gh pr
+// checkout` tree inherited. It now requires the declaration, and locality alone
+// buys nothing.
+func TestCheckAgentForReview_BoundaryIsAuthorshipNotLocality(t *testing.T) {
 	remote := Ref{Owner: "o", Repo: "r", Number: 42}
 	local := mustLocalRef("abc1234", 1)
 
 	for _, tc := range []struct {
 		agent      string
 		ref        Ref
+		declared   ReviewProvenance
 		wantRefuse bool
 	}{
-		{"codex", remote, true},
-		{"codex", local, false}, // the operator's own tree cannot be hostile to them
-		{"claude", remote, false},
-		{"claude", local, false},
-		{"", remote, false}, // default → agent A
-		{"", local, false},
-		{"escalation", remote, false}, // unwired, but not THIS refusal's business
+		{"codex", remote, ReviewProvenanceThirdParty, true},
+		{"codex", remote, ReviewProvenanceOperatorAuthored, true}, // downgraded: remote cannot be authored
+		{"codex", local, ReviewProvenanceUnknown, true},           // CHANGED by #232: locality is not authorship
+		{"codex", local, ReviewProvenanceThirdParty, true},
+		{"codex", local, ReviewProvenanceOperatorAuthored, false}, // the one permitted cell
+
+		{"claude", remote, ReviewProvenanceThirdParty, false},
+		{"claude", local, ReviewProvenanceUnknown, false},
+		{"", remote, ReviewProvenanceThirdParty, false}, // default → agent A
+		{"", local, ReviewProvenanceUnknown, false},
+		{"escalation", remote, ReviewProvenanceThirdParty, false}, // unwired, but not THIS refusal's business
 	} {
-		err := CheckAgentForRef(tc.agent, tc.ref)
+		err := CheckAgentForReview(tc.agent, EffectiveProvenance(tc.ref, tc.declared))
 		if got := err != nil; got != tc.wantRefuse {
-			t.Errorf("CheckAgentForRef(%q, local=%v) refused = %v, want %v (err: %v)",
-				tc.agent, tc.ref.IsLocal(), got, tc.wantRefuse, err)
+			t.Errorf("CheckAgentForReview(%q, local=%v, declared=%v) refused = %v, want %v (err: %v)",
+				tc.agent, tc.ref.IsLocal(), tc.declared, got, tc.wantRefuse, err)
 		}
 	}
 }
 
 // TestLaunch_CodexStillDispatchesForLocalReview is the other direction of the
 // ruling: confining by use must not disable the use that is safe.
+//
+// forgectl#232 narrowed what "safe" means here. The session must now carry the
+// operator's authorship assertion — locality alone no longer dispatches, because
+// a local tree can hold a contributor's commit.
 func TestLaunch_CodexStillDispatchesForLocalReview(t *testing.T) {
 	codexBin := filepath.Join(t.TempDir(), "codex")
 	if err := os.WriteFile(codexBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
@@ -386,6 +409,7 @@ func TestLaunch_CodexStillDispatchesForLocalReview(t *testing.T) {
 		Workspace:   fakeWorkspace(t),
 		Agent:       "codex",
 		FindingsDir: t.TempDir(),
+		Provenance:  ReviewProvenanceOperatorAuthored,
 	}
 
 	if _, err := c.Launch(context.Background(), sess, config.Config{}); err != nil {
@@ -411,6 +435,7 @@ func TestLaunch_CodexLocalWritesOnlyWorkspaceAndFindings(t *testing.T) {
 		Workspace:   fakeWorkspace(t),
 		Agent:       "codex",
 		FindingsDir: findings,
+		Provenance:  ReviewProvenanceOperatorAuthored,
 	}
 	if _, err := c.Launch(context.Background(), sess, config.Config{}); err != nil {
 		t.Fatalf("Launch local Codex: %v", err)
@@ -591,11 +616,18 @@ func TestLaunch_LocalSessionWithoutFindingsDirRefused(t *testing.T) {
 		t.Run("agent="+agent, func(t *testing.T) {
 			fake := successfulLaunchRunner()
 			c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
-			// As loadSession produces it: Ref restored, FindingsDir zero.
+			// As loadSession produces it for a canonical local breadcrumb: Ref
+			// restored, provenance restored, FindingsDir zero because it is
+			// deliberately not persisted.
+			//
+			// Provenance is operator-authored so the Codex case actually REACHES
+			// this check — the #232 gate runs first, being the security boundary
+			// rather than a configuration error, and would otherwise mask it.
 			sess := Session{
-				Ref:       mustLocalRef("abc1234", 1),
-				Workspace: fakeWorkspace(t),
-				Agent:     agent,
+				Ref:        mustLocalRef("abc1234", 1),
+				Workspace:  fakeWorkspace(t),
+				Agent:      agent,
+				Provenance: ReviewProvenanceOperatorAuthored,
 			}
 
 			_, err := c.Launch(context.Background(), sess, config.Config{})
