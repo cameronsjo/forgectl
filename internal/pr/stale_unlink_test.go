@@ -12,9 +12,9 @@ package pr
 //   [x] Happy: removes ONLY the authorized breadcrumb
 //   [x] Member replaced with identical bytes (new inode) -> refuse
 //   [x] Member replaced by a symlink -> refuse
-//   [x] Member RENAMED with a symlink left at its old name -> refuse. The link
-//       target is the original file, so identity, bytes and record all still
-//       match; only lstat'ing the name itself sees the link
+//   [x] Member RENAMED with a RELATIVE symlink left at its old name -> refuse.
+//       The link target is the original file, so identity, bytes and record all
+//       still match; only lstat'ing the name itself sees the link
 //   [x] Member bytes changed -> refuse
 //   [x] Member security field changed -> refuse
 //   [x] Member disappeared -> refuse (never reported as success)
