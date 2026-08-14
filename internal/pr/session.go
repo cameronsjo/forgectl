@@ -30,6 +30,13 @@ type Session struct {
 	// Session and zero-valued after a reload via List/Attach/Teardown (same
 	// pattern HeadRef/HeadOid/HeadRepo already follow).
 	FindingsDir string // the one path outside Workspace the local review agent may write
+
+	// Provenance is who WROTE the code under review, and unlike FindingsDir it
+	// IS persisted — a reconstructed session must be able to answer the
+	// question that gates CodexExec without re-entering preparation. It is
+	// always the EFFECTIVE value (EffectiveProvenance applied), never the raw
+	// declaration, so nothing downstream has to remember to normalize it.
+	Provenance ReviewProvenance
 }
 
 // PrepareOpts are the knobs for one Prepare call.
@@ -37,6 +44,12 @@ type PrepareOpts struct {
 	Agent    string
 	DryRun   bool
 	Headless bool
+	// Provenance is the caller's authorship DECLARATION. Every route into
+	// Prepare is a remote PR by construction, so the honest value here is
+	// ReviewProvenanceThirdParty — and the zero value (unknown) refuses the
+	// unconfined path just the same, which is why a caller that forgets is
+	// safe rather than sorry.
+	Provenance ReviewProvenance
 }
 
 // ghPRView is the subset of `gh pr view --json …` output the core consumes.
@@ -68,7 +81,14 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 	// not the authoritative gate. It precedes the DryRun branch deliberately,
 	// so `--dry-run` reports the refusal rather than printing a plan that
 	// cannot run.
-	if err := CheckAgentForRef(opts.Agent, ref); err != nil {
+	//
+	// EffectiveProvenance is what makes a declaration unforgeable here: this is
+	// the remote route, so a ref reaching it is never local, and any
+	// operator-authored claim — a caller bug, a copied literal, a future route
+	// that declares wrongly — is downgraded to third-party before the check
+	// rather than trusted.
+	provenance := EffectiveProvenance(ref, opts.Provenance)
+	if err := CheckAgentForReview(opts.Agent, provenance); err != nil {
 		return Session{}, err
 	}
 	slog.Debug("Preparing to set up clean-room review.", "ref", ref.String(), "dryRun", opts.DryRun)
@@ -81,13 +101,14 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 	headOwner := firstNonEmpty(view.HeadRepositoryOwner.Login, ref.Owner)
 	headName := firstNonEmpty(view.HeadRepository.Name, ref.Repo)
 	sess := Session{
-		Ref:       ref,
-		HeadRef:   view.HeadRefName,
-		HeadOid:   view.HeadRefOid,
-		HeadRepo:  headOwner + "/" + headName,
-		Agent:     opts.Agent,
-		CreatedAt: time.Now().UTC(),
-		DryRun:    opts.DryRun,
+		Ref:        ref,
+		HeadRef:    view.HeadRefName,
+		HeadOid:    view.HeadRefOid,
+		HeadRepo:   headOwner + "/" + headName,
+		Agent:      opts.Agent,
+		CreatedAt:  time.Now().UTC(),
+		DryRun:     opts.DryRun,
+		Provenance: provenance,
 	}
 
 	if opts.DryRun {
@@ -121,10 +142,11 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 	}
 
 	bc := Breadcrumb{
-		Workspace: workspace,
-		Ref:       ref.String(),
-		Agent:     opts.Agent,
-		CreatedAt: sess.CreatedAt,
+		Workspace:  workspace,
+		Ref:        ref.String(),
+		Agent:      opts.Agent,
+		CreatedAt:  sess.CreatedAt,
+		Provenance: provenance.persisted(),
 		// Local stays false: this is a remote PR. The zero value is the
 		// deliberate answer here, not an omission.
 	}

@@ -25,6 +25,15 @@ const findingsDirPrefix = "forgectl-findings-"
 type PrepareLocalOpts struct {
 	Agent  string
 	DryRun bool
+	// Provenance carries the operator's authorship DECLARATION — the only
+	// source of positive provenance in the whole package. `pr local` is the one
+	// route where the operator is in a position to know, and
+	// `--operator-authored` is how they say so.
+	//
+	// The zero value is unknown, which is correct for every unasserted local
+	// review: `pr local` reviews whatever the working tree currently holds, and
+	// after `gh pr checkout` that is someone else's commit.
+	Provenance ReviewProvenance
 }
 
 // PrepareLocal resolves the local HEAD of the repo at path, sandboxes it into
@@ -58,25 +67,37 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 		return Session{}, fmt.Errorf("resolve local HEAD commit: %w", err)
 	}
 
-	// A detached HEAD is the ordinary shape of `gh pr checkout` — the operator's
-	// own tree sitting on a third party's commit. That is the one Codex path
-	// this design deliberately does not gate (see CheckAgentForRef's ACCEPTED
-	// RESIDUAL), because the directory is genuinely theirs. Warn rather than
-	// refuse: silence here would read as coverage.
-	if LaunchPathFor(opts.Agent) == CodexExec && headRef == "HEAD" {
-		slog.Warn("Local review is on a detached HEAD, which is what `gh pr checkout` leaves behind. "+
-			"If this commit came from someone else, the Codex reviewer is not confined against it — "+
-			"use --agent claude instead.", "path", absPath, "head", headOid)
+	ref := newLocalRef(headOid)
+
+	// PROVENANCE GATE — forgectl#232. This replaced a slog.Warn that fired only
+	// on a detached HEAD, which was the wrong predicate in both directions: a
+	// detached HEAD can hold the operator's own commit, and an ATTACHED branch
+	// can hold a contributor's (`gh pr checkout` on a same-repo PR leaves a
+	// named branch, and a plain `git fetch && git switch` of someone's branch
+	// leaves one too). Detachedness was a proxy for authorship, and a leaky one.
+	//
+	// So the gate reads the operator's declaration and nothing else. An
+	// unasserted local review is unknown — refused for Codex, untouched for
+	// Claude — whether HEAD is attached or not.
+	//
+	// ORDERING IS PINNED, and both halves matter. It sits AFTER the two
+	// read-only `git rev-parse` probes so an unborn or invalid HEAD still
+	// reports git's own error rather than having its diagnosis changed by an
+	// unrelated flag. It sits BEFORE the sandbox, findings dir, allowlist, and
+	// breadcrumb, so a refusal creates no state at all.
+	provenance := EffectiveProvenance(ref, opts.Provenance)
+	if err := CheckAgentForReview(opts.Agent, provenance); err != nil {
+		return Session{}, err
 	}
 
-	ref := newLocalRef(headOid)
 	sess := Session{
-		Ref:       ref,
-		HeadRef:   headRef,
-		HeadOid:   headOid,
-		Agent:     opts.Agent,
-		CreatedAt: time.Now().UTC(),
-		DryRun:    opts.DryRun,
+		Ref:        ref,
+		HeadRef:    headRef,
+		HeadOid:    headOid,
+		Agent:      opts.Agent,
+		CreatedAt:  time.Now().UTC(),
+		DryRun:     opts.DryRun,
+		Provenance: provenance,
 	}
 
 	if opts.DryRun {
@@ -139,11 +160,12 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	}
 
 	bc := Breadcrumb{
-		Workspace: workspace,
-		Ref:       ref.String(),
-		Agent:     opts.Agent,
-		CreatedAt: sess.CreatedAt,
-		Local:     true,
+		Workspace:  workspace,
+		Ref:        ref.String(),
+		Agent:      opts.Agent,
+		CreatedAt:  sess.CreatedAt,
+		Local:      true,
+		Provenance: provenance.persisted(),
 	}
 	bcPath, err := c.writeBreadcrumb(ref, bc)
 	if err != nil {

@@ -57,24 +57,40 @@ func TestCheckAgentForReview_ZeroValueIsIneligible(t *testing.T) {
 	}
 }
 
-// TestCheckAgentForReview_RefusalIsActionable keeps the refusal from routing the
-// operator around the control. It must name the working alternative (Claude) and
-// the assertion's actual precondition — authorship — never a bare "denied".
+// TestCheckAgentForReview_RefusalIsActionable keeps the refusal useful without
+// letting it route the operator around the control.
+//
+// The asymmetry it pins is deliberate. An UNKNOWN session is a local tree nobody
+// has vouched for, so naming `--operator-authored` is genuine help. A THIRD-PARTY
+// session is known to be someone else's code, where the same sentence would be
+// an instruction to make a false statement — the refusal must not name the
+// incantation that silences it.
 func TestCheckAgentForReview_RefusalIsActionable(t *testing.T) {
-	err := CheckAgentForReview("codex", ReviewProvenanceThirdParty)
-	if err == nil {
-		t.Fatal("third-party Codex was permitted")
+	unknown := CheckAgentForReview("codex", ReviewProvenanceUnknown)
+	thirdParty := CheckAgentForReview("codex", ReviewProvenanceThirdParty)
+	if unknown == nil || thirdParty == nil {
+		t.Fatal("an ineligible Codex pairing was permitted")
 	}
-	msg := err.Error()
-	for _, want := range []string{"claude", "--operator-authored"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("refusal does not mention %q: %v", want, err)
+
+	// Both must name the working alternative and the reason.
+	for _, err := range []error{unknown, thirdParty} {
+		for _, want := range []string{"claude", "which commands run", "did not write"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("refusal does not mention %q: %v", want, err)
+			}
 		}
 	}
-	// The escape hatch must never be spelled as a way to silence the refusal
-	// for code the operator did not write.
-	if !strings.Contains(msg, "wrote") && !strings.Contains(msg, "authored") {
-		t.Errorf("refusal does not state the authorship precondition: %v", err)
+
+	if !strings.Contains(unknown.Error(), "--operator-authored") {
+		t.Errorf("an unknown-provenance refusal should name the assertion: %v", unknown)
+	}
+	if strings.Contains(thirdParty.Error(), "--operator-authored") {
+		t.Errorf("a third-party refusal must NOT name the flag that would silence it, "+
+			"since using it there would be a false statement: %v", thirdParty)
+	}
+	// It must never suggest laundering the review through `pr local`.
+	if strings.Contains(thirdParty.Error(), "pr local") {
+		t.Errorf("refusal routes the operator around the control: %v", thirdParty)
 	}
 }
 
@@ -131,9 +147,11 @@ func TestEffectiveProvenance_RemoteRefCannotUpgrade(t *testing.T) {
 		declared ReviewProvenance
 		want     ReviewProvenance
 	}{
+		// A remote ref resolves third-party unconditionally: its content came
+		// from a forge, so it is someone else's whatever the caller declared.
 		{"remote claiming authored", remote, ReviewProvenanceOperatorAuthored, ReviewProvenanceThirdParty},
 		{"forged local owner claiming authored", forgedOwner, ReviewProvenanceOperatorAuthored, ReviewProvenanceThirdParty},
-		{"remote unknown stays unknown", remote, ReviewProvenanceUnknown, ReviewProvenanceUnknown},
+		{"remote undeclared is third-party, not unknown", remote, ReviewProvenanceUnknown, ReviewProvenanceThirdParty},
 		{"remote third-party stays third-party", remote, ReviewProvenanceThirdParty, ReviewProvenanceThirdParty},
 
 		// A local ref does not MANUFACTURE authorship — it only declines to

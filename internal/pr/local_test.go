@@ -244,7 +244,13 @@ func TestLoadSession_RealLocalOwnerReloadsNonLocal(t *testing.T) {
 	if sess.Ref.IsLocal() {
 		t.Error("a breadcrumb without the local flag must reload NON-local, whatever its owner spells")
 	}
-	if err := CheckAgentForRef("codex", sess.Ref); err == nil {
+	// The reloaded session's provenance is resolved by loadSession, so this
+	// asserts the whole restore path, not just the predicate: a record whose ref
+	// reloads non-local cannot carry a positive claim out of the loader.
+	if sess.Provenance == ReviewProvenanceOperatorAuthored {
+		t.Error("a breadcrumb without the local flag reloaded as operator-authored")
+	}
+	if err := CheckAgentForReview("codex", sess.Provenance); err == nil {
 		t.Error("the Codex refusal must still apply to a reloaded remote ref owned by \"local\"")
 	}
 }
@@ -305,7 +311,13 @@ func TestPrepareLocal_AllowlistOnlyForHarnessesThatReadIt(t *testing.T) {
 	} {
 		t.Run("agent="+tc.agent, func(t *testing.T) {
 			c := testClient(t, localGitRunner())
-			sess, err := c.PrepareLocal(context.Background(), t.TempDir(), PrepareLocalOpts{Agent: tc.agent})
+			// Asserted authorship: this test is about which harness gets an
+			// allowlist, so the Codex case must get PAST the #232 provenance
+			// gate to say anything about it.
+			sess, err := c.PrepareLocal(context.Background(), t.TempDir(), PrepareLocalOpts{
+				Agent:      tc.agent,
+				Provenance: ReviewProvenanceOperatorAuthored,
+			})
 			if err != nil {
 				t.Fatalf("PrepareLocal: %v", err)
 			}
@@ -405,7 +417,11 @@ func TestPrepareLocal_RefusesCleanRoomWorkspace(t *testing.T) {
 // itself lives under the OS temp root).
 func TestPrepareLocal_AllowsOrdinaryPaths(t *testing.T) {
 	c := testClient(t, localGitRunner())
-	sess, err := c.PrepareLocal(context.Background(), t.TempDir(), PrepareLocalOpts{Agent: "codex", DryRun: true})
+	sess, err := c.PrepareLocal(context.Background(), t.TempDir(), PrepareLocalOpts{
+		Agent:      "codex",
+		DryRun:     true,
+		Provenance: ReviewProvenanceOperatorAuthored,
+	})
 	if err != nil {
 		t.Fatalf("an ordinary path must still be reviewable: %v", err)
 	}

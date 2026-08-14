@@ -190,10 +190,23 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) (D
 	if sess.Workspace == "" {
 		return Dispatch{}, fmt.Errorf("cannot launch: session has no workspace (dry-run?)")
 	}
-	// Authoritative use-based guard. Prepare refuses the same pairing earlier so
-	// nothing is fetched, but this is the one every route reaches — including a
-	// Session reconstituted from a breadcrumb, which never re-enters Prepare.
-	if err := CheckAgentForRef(sess.Agent, sess.Ref); err != nil {
+	// AUTHORITATIVE provenance guard. Prepare refuses the same pairing earlier
+	// so nothing is fetched, but this is the one point EVERY route reaches —
+	// including a Session reconstituted from a breadcrumb, which never re-enters
+	// Prepare and whose provenance therefore arrives from disk.
+	//
+	// It re-applies EffectiveProvenance rather than trusting sess.Provenance as
+	// handed over. Prepare and the breadcrumb loader both normalize already, so
+	// this is redundant on every path that exists today — deliberately. This is
+	// the last gate before an unconfined shell, and the cost of the redundancy
+	// is one comparison against the cost of a future caller that builds a
+	// Session literal and gets the declaration wrong.
+	//
+	// The refusal is placed before every launch-time effect below: no tmux
+	// capability probe, session, or window, and no process. It does NOT clean up
+	// the workspace or breadcrumb — those predate this call, and Claude,
+	// `pr attach`, and `pr teardown` all still need them.
+	if err := CheckAgentForReview(sess.Agent, EffectiveProvenance(sess.Ref, sess.Provenance)); err != nil {
 		return Dispatch{}, err
 	}
 	// FindingsDir is deliberately NOT persisted (see Session), so loadSession

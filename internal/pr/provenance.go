@@ -118,13 +118,23 @@ func (p ReviewProvenance) persisted() string {
 // path/workspace/PostReview meaning and is not being repurposed as an authorship
 // predicate — that would reintroduce the conflation.
 func EffectiveProvenance(ref Ref, declared ReviewProvenance) ReviewProvenance {
-	if declared == ReviewProvenanceOperatorAuthored && !ref.IsLocal() {
+	// A non-local ref is third-party BY CONSTRUCTION, whatever was declared: its
+	// content was fetched from a forge, so it is someone else's by definition.
+	// Resolving it here rather than only downgrading an authored claim makes the
+	// classification total — a remote session is never merely "undeclared" — and
+	// that totality is load-bearing for the refusal wording below, which may
+	// only suggest the `--operator-authored` escape hatch where the content
+	// could plausibly be the operator's own.
+	if !ref.IsLocal() {
 		return ReviewProvenanceThirdParty
 	}
-	if declared != ReviewProvenanceOperatorAuthored && declared != ReviewProvenanceThirdParty {
+	switch declared {
+	case ReviewProvenanceOperatorAuthored, ReviewProvenanceThirdParty:
+		return declared
+	default:
+		// Local and undeclared — including every out-of-range value.
 		return ReviewProvenanceUnknown
 	}
-	return declared
 }
 
 // CheckAgentForReview refuses an agent whose confinement does not match who
@@ -160,13 +170,25 @@ func CheckAgentForReview(agent string, provenance ReviewProvenance) error {
 	if LaunchPathFor(agent) != CodexExec || provenance == ReviewProvenanceOperatorAuthored {
 		return nil
 	}
+	// The remedy is provenance-specific, and the difference is a control, not a
+	// nicety. Offering `--operator-authored` to someone reviewing a KNOWN
+	// third-party head would route them around the boundary — the flag would
+	// have to be a false statement to work, and a refusal that names the
+	// incantation which silences it is a speed bump. So the escape hatch is
+	// mentioned only where the content could honestly be the operator's own:
+	// UNKNOWN, which is a local tree nobody has vouched for.
+	remedy := "Review this with `--agent claude` (the default), whose allowlist confines " +
+		"Bash to an enumerated read-only prefix set."
+	subject := "the code under review was written by someone else"
+	if provenance == ReviewProvenanceUnknown {
+		subject = "nothing has established who wrote the code under review"
+		remedy += " If you wrote this code yourself, say so with `--operator-authored`."
+	}
 	return fmt.Errorf(
-		"agent %q needs you to state that you wrote the code under review, and this session is %s: "+
-			"Codex's sandbox scopes filesystem and network access but NOT which commands run, so a prompt "+
-			"injection in a diff you did not write could reach a shell with read access to your whole home "+
-			"directory — and `codex exec` exposes no way to confine that. Review this with `--agent claude` "+
-			"(the default), whose allowlist confines Bash to an enumerated read-only prefix set. If this is "+
-			"your own code in your own repository, `forgectl pr local --operator-authored` asserts that",
-		agent, provenance,
+		"agent %q cannot review this: %s. Codex's sandbox scopes filesystem and network access "+
+			"but NOT which commands run, so a prompt injection in a diff you did not write could "+
+			"reach a shell with read access to your whole home directory — and `codex exec` exposes "+
+			"no way to confine that. %s",
+		agent, subject, remedy,
 	)
 }

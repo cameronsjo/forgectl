@@ -115,12 +115,20 @@ func (c *Client) loadSession(path string) (Session, error) {
 	if err != nil {
 		return Session{}, err
 	}
+	// Provenance is resolved through provenanceFromRecord (joint shape
+	// validation), then through EffectiveProvenance against the RECONSTRUCTED
+	// ref — two independent normalizations, because they catch different
+	// forgeries. The first refuses a remote-shaped record that self-labels as
+	// authored; the second refuses a record whose ref does not reload local at
+	// all, which is where a real forge repo named `local/…` and a pre-#185
+	// breadcrumb both land.
 	return Session{
-		Ref:       ref,
-		Workspace: bc.Workspace,
-		Agent:     bc.Agent,
-		Path:      path,
-		CreatedAt: bc.CreatedAt,
+		Ref:        ref,
+		Workspace:  bc.Workspace,
+		Agent:      bc.Agent,
+		Path:       path,
+		CreatedAt:  bc.CreatedAt,
+		Provenance: EffectiveProvenance(ref, provenanceFromRecord(bc)),
 	}, nil
 }
 
