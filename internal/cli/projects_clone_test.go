@@ -270,7 +270,11 @@ func TestCloneCmd_DegradationNotes_AppearOnStderrNotStdout(t *testing.T) {
 // clear plus attacker-chosen text. Asserting here, not only at `list`, is what
 // makes renderDegradationNotes load-bearing at every call site.
 func TestCloneCmd_HostileNoteIsEscapedOnStderr(t *testing.T) {
-	hostile := filepath.Join(t.TempDir(), "missing\x1b[2J\x1b[H\rforged‮gnp")
+	// Same payload as the `list` twin — CSI erase-display + cursor home, a bare
+	// CR, then a right-to-left override — with the override built from its code
+	// point rather than typed, so this file needs no staticcheck ST1018 waiver.
+	rlo := string(rune(0x202e))
+	hostile := filepath.Join(t.TempDir(), "missing\x1b[2J\x1b[H\rforged"+rlo+"gnp")
 	t.Setenv("PROJECTS_DIR", hostile)
 	fake := &exec.FakeRunner{RunFunc: twoHostRunFunc("[]", "owner\tname\ttype\tssh\n")}
 	client := projects.New(fake)
