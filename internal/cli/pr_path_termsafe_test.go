@@ -32,7 +32,11 @@ import (
 // hostileBreadcrumbName carries a cursor-clearing CSI sequence, a bare escape,
 // a carriage return, and a right-to-left override — the shapes that let a
 // filename repaint or reorder a line it was only supposed to appear on.
-const hostileBreadcrumbName = "o-r-1-\x1b[2K\rspoofed‮desrever.json"
+//
+// The RTL override is written as \u202E rather than the literal rune: a raw
+// bidi control in source reorders THIS file for anyone reading it, which is
+// exactly the hazard the test exists to pin. The string value is identical.
+const hostileBreadcrumbName = "o-r-1-\x1b[2K\rspoofed\u202Edesrever.json"
 
 // seedHostileBreadcrumb writes one stale breadcrumb whose FILENAME is hostile
 // while its record contents are perfectly ordinary, and returns the sessions
@@ -44,6 +48,11 @@ func seedHostileBreadcrumb(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("seed workspace: %v", err)
 	}
+	// Registered immediately, not after the staling RemoveAll below: the
+	// filesystem-rejects-control-characters Skipf is a REACHABLE outcome, and a
+	// skip returns before that removal — leaking the directory into the system
+	// temp dir, which t.TempDir does not own.
+	t.Cleanup(func() { _ = os.RemoveAll(ws) })
 	body, err := json.Marshal(map[string]any{
 		"workspace": ws,
 		"ref":       "o/r#1",

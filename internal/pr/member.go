@@ -127,19 +127,19 @@ func (c *Client) resolveBreadcrumbMember(operand string) (breadcrumbMember, erro
 	// the enumerated set would reach past the guard entirely.
 	if selected.isSymlink {
 		target := selected.resolved
-		var real *candidate
+		var realEntry *candidate
 		for i := range candidates {
 			if !candidates[i].isSymlink && candidates[i].resolved == target {
-				real = &candidates[i]
+				realEntry = &candidates[i]
 				break
 			}
 		}
-		if real == nil {
+		if realEntry == nil {
 			slog.Error("Teardown target is a link outside the known breadcrumb set; refusing.", "path", operand)
 			return breadcrumbMember{}, fmt.Errorf(
 				"%q is a link whose target is not itself a known pr session breadcrumb", operand)
 		}
-		selected = real
+		selected = realEntry
 	}
 
 	// Defense in depth: the authoritative entry must sit directly in the
