@@ -76,6 +76,14 @@ func provenanceFromRecord(bc Breadcrumb) ReviewProvenance {
 	if declared == ReviewProvenanceOperatorAuthored && !bc.Local {
 		// A remote-shaped record claiming authorship. Its origin is known, so
 		// say so rather than hiding behind unknown.
+		//
+		// Workspace is logged unwrapped, which was CHECKED rather than assumed:
+		// this branch fires when a record looks tampered with, so the pathname is
+		// attacker-influenced and could carry ANSI or bidi controls. The stdlib
+		// slog.TextHandler this binary installs (internal/config) quotes any value
+		// containing control characters, so they reach the terminal escaped and a
+		// termsafe.QuotePath here would be redundant. That redundancy becomes
+		// necessary if the handler is ever swapped for one that does not quote.
 		slog.Warn("Breadcrumb claims operator-authored provenance but does not have the canonical local shape; "+
 			"treating it as third-party. The unconfined Codex reviewer is refused for this session.",
 			"ref", bc.Ref, "workspace", bc.Workspace)
