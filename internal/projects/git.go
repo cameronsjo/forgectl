@@ -94,7 +94,7 @@ func parseGitStatusV2(out string) (GitStatus, bool) {
 		switch {
 		case strings.HasPrefix(line, "1 "):
 			// 1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
-			if !validFixedFields(line, 9) {
+			if _, ok := validChangeRecord(line, 9); !ok {
 				return GitStatus{State: StatusUnknown}, false
 			}
 			gs.Modified++
@@ -106,19 +106,19 @@ func parseGitStatusV2(out string) (GitStatus, bool) {
 			gs.Modified++
 		case strings.HasPrefix(line, "u "):
 			// u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>
-			if !validFixedFields(line, 11) {
+			if _, ok := validChangeRecord(line, 11); !ok {
 				return GitStatus{State: StatusUnknown}, false
 			}
 			gs.Modified++
 		case strings.HasPrefix(line, "? "):
-			if !validFixedFields(line, 2) {
+			if !validPathRecord(line) {
 				return GitStatus{State: StatusUnknown}, false
 			}
 			gs.Untracked++
 		case strings.HasPrefix(line, "! "):
 			// An ignored item is recognized so it can't be mistaken for an
 			// unknown discriminator, and counted nowhere.
-			if !validFixedFields(line, 2) {
+			if !validPathRecord(line) {
 				return GitStatus{State: StatusUnknown}, false
 			}
 		default:
@@ -134,32 +134,47 @@ func parseGitStatusV2(out string) (GitStatus, bool) {
 	return gs, true
 }
 
-// validFixedFields checks that a record splits into exactly n space-separated
-// fields with none of them empty. Splitting is bounded at n so the trailing
-// path field keeps any spaces it contains rather than being chopped into more
-// fields — which is also what makes a truncated record detectable: it yields
-// fewer than n fields, or an empty final one.
-//
-// XY and the submodule field carry fixed widths git guarantees; checking them
-// rejects a record that has the right field COUNT but was assembled by hand.
-// Object names, modes, and rename scores are checked for presence only —
-// validating their contents would be decoding data this parser has no use for.
-func validFixedFields(line string, n int) bool {
+// splitRecord splits a record into exactly n space-separated fields, none of
+// them empty, and reports whether it had that shape. Splitting is bounded at n
+// so the trailing path field keeps any spaces it contains rather than being
+// chopped into more fields — which is also what makes a truncated record
+// detectable: it yields fewer than n fields, or an empty final one.
+func splitRecord(line string, n int) ([]string, bool) {
 	fields := strings.SplitN(line, " ", n)
 	if len(fields) != n {
-		return false
+		return nil, false
 	}
 	for _, f := range fields {
 		if f == "" {
-			return false
+			return nil, false
 		}
 	}
-	// The two-field forms (? and !) carry a discriminator and a path, nothing
-	// with a fixed width to check.
-	if n == 2 {
-		return true
+	return fields, true
+}
+
+// validPathRecord checks the two-field forms — `? <path>` and `! <path>` —
+// which carry a discriminator and a path and nothing of fixed width.
+func validPathRecord(line string) bool {
+	_, ok := splitRecord(line, 2)
+	return ok
+}
+
+// validChangeRecord checks a record whose leading fields git gives fixed
+// widths: the two-character XY status and the four-character submodule field.
+// Checking those rejects a record with the right field COUNT that was
+// assembled by hand. Object names, modes, and rename scores are checked for
+// presence only — validating their contents would mean decoding data this
+// parser has no use for. Returns the fields so a caller that needs the trailing
+// path (the rename form) doesn't split the line a second time.
+func validChangeRecord(line string, n int) ([]string, bool) {
+	fields, ok := splitRecord(line, n)
+	if !ok {
+		return nil, false
 	}
-	return len(fields[1]) == 2 && len(fields[2]) == 4
+	if len(fields[1]) != 2 || len(fields[2]) != 4 {
+		return nil, false
+	}
+	return fields, true
 }
 
 // validRenameRecord checks a type-2 record: the type-1 fixed fields plus a
@@ -169,11 +184,11 @@ func validFixedFields(line string, n int) bool {
 // which is exactly why the split is on "\t" and not on the escape sequence.
 func validRenameRecord(line string) bool {
 	const renameFields = 10
-	if !validFixedFields(line, renameFields) {
+	fields, ok := validChangeRecord(line, renameFields)
+	if !ok {
 		return false
 	}
-	paths := strings.SplitN(line, " ", renameFields)[renameFields-1]
-	target, source, found := strings.Cut(paths, "\t")
+	target, source, found := strings.Cut(fields[renameFields-1], "\t")
 	return found && target != "" && source != ""
 }
 
