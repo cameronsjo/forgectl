@@ -16,9 +16,9 @@ func TestParseSessions(t *testing.T) {
 	// One line per session, fields joined by the unit separator. Covers the
 	// gnarly cases the bash precedent stumbled on: names AND paths with spaces,
 	// a zero-window session, and the attached/detached split.
-	out := "main" + sep + "3" + sep + "1" + sep + "1700000000" + sep + "/Users/cam/Projects/forgectl" + "\n" +
-		"my session" + sep + "1" + sep + "0" + sep + "1700000100" + sep + "/Users/cam/Notes With Spaces" + "\n" +
-		"empty" + sep + "0" + sep + "0" + sep + "1700000200" + sep + "/tmp"
+	out := "123" + sep + "456" + sep + "$0" + sep + "main" + sep + "3" + sep + "1" + sep + "1700000000" + sep + "/Users/cam/Projects/forgectl" + "\n" +
+		"123" + sep + "456" + sep + "$1" + sep + "my session" + sep + "1" + sep + "0" + sep + "1700000100" + sep + "/Users/cam/Notes With Spaces" + "\n" +
+		"123" + sep + "456" + sep + "$2" + sep + "empty" + sep + "0" + sep + "0" + sep + "1700000200" + sep + "/tmp"
 
 	got, err := parseSessions(out)
 	if err != nil {
@@ -30,6 +30,9 @@ func TestParseSessions(t *testing.T) {
 
 	if got[0].Name != "main" || got[0].Windows != 3 || !got[0].Attached {
 		t.Errorf("session 0 wrong: %+v", got[0])
+	}
+	if got[0].ServerPID != "123" || got[0].ServerStart != "456" || got[0].ID != "$0" {
+		t.Errorf("session 0 identity wrong: %+v", got[0])
 	}
 	if got[0].Path != "/Users/cam/Projects/forgectl" {
 		t.Errorf("session 0 path wrong: %q", got[0].Path)
@@ -69,7 +72,7 @@ func TestParseSessions_SkipsShortRows(t *testing.T) {
 	// A malformed row (too few fields) must be skipped, not panic. The
 	// well-formed row alongside it keeps parsedRows' zero-row contract from
 	// firing, so this pins the DROP rather than the refusal.
-	out := "good" + sep + "2" + sep + "1" + sep + "1700000000" + sep + "/tmp" + "\n" +
+	out := "123" + sep + "456" + sep + "$0" + sep + "good" + sep + "2" + sep + "1" + sep + "1700000000" + sep + "/tmp" + "\n" +
 		"truncated" + sep + "2"
 	got, err := parseSessions(out)
 	if err != nil {
@@ -84,7 +87,7 @@ func TestListSessions_Wiring(t *testing.T) {
 	// Verify the exact argv tmux receives: list-sessions -F <sessionFormat>.
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
-			return "main" + sep + "1" + sep + "1" + sep + "1700000000" + sep + "/tmp", nil
+			return "123" + sep + "456" + sep + "$0" + sep + "main" + sep + "1" + sep + "1" + sep + "1700000000" + sep + "/tmp", nil
 		},
 	}
 	c := New(fake, WithBins("tmux", "sesh"))
