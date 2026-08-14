@@ -15,16 +15,14 @@ package pr
 //       (even though the launch default posture is AllowDanger=true)
 //   [x] Agent B (BareTUIEscalation) → "not yet wired" error, NO tmux call
 //   [x] Dry-run session (no workspace) → refused
-// windowName (Classification: tmux window identity)
-//   [x] Includes Owner, not just Number — a local-mode Ref and a PR-mode Ref
-//       that derive the same Number must not collide on window name
-//   [x] Includes Repo, not just Owner — two repos under one owner that derive
-//       the same Number must not collide on window name
-//   [x] Structural coupling: windowName's output always starts with
-//       admission.go's reviewWindowPrefix — guards against the two drifting
-//       apart silently (mutation-verified: renaming windowName's literal
-//       alone left every admission test green, since reviewWindowPrefix
-//       stayed unchanged and nothing asserted the two matched)
+// ReviewWindowName (Classification: tmux window identity)
+//   [x] Structural coupling: its output always starts with admission.go's
+//       reviewWindowPrefix — guards against the two drifting apart silently
+//       (mutation-verified: renaming the literal alone left every admission
+//       test green, since reviewWindowPrefix stayed unchanged and nothing
+//       asserted the two matched)
+//   [x] Separation, keying, grammar, and fail-closed behavior live in
+//       window_name_test.go, sessionkey_test.go, and sessionname_test.go
 
 import (
 	"context"
@@ -108,34 +106,11 @@ func TestPostReview_ReloadedLocalSessionStillRefused(t *testing.T) {
 	}
 }
 
-func TestWindowName_OwnerDistinguishesLocalFromPRMode(t *testing.T) {
-	// A local-mode Ref and a PR-mode Ref that derive the identical Number must
-	// not collide on tmux window name — Owner ("local" vs a real GitHub owner)
-	// is what disambiguates them.
-	local := mustLocalRef("abc1234", 42)
-	prMode := Ref{Owner: "someowner", Repo: "somerepo", Number: 42}
-	if windowName(local) == windowName(prMode) {
-		t.Errorf("windowName collided: local=%q prMode=%q", windowName(local), windowName(prMode))
-	}
-	if windowName(local) != "pr-local-abc1234-42" {
-		t.Errorf("windowName(local) = %q, want %q", windowName(local), "pr-local-abc1234-42")
-	}
-}
-
-// TestWindowName_RepoDistinguishesCrossRepo guards the cross-repo collision
-// this fix targets: two repos under the same owner (o/a#42 and o/b#42) must
-// not collide on tmux window name — Repo is what disambiguates them, since
-// Owner and Number alone are identical between the two Refs.
-func TestWindowName_RepoDistinguishesCrossRepo(t *testing.T) {
-	a := Ref{Owner: "o", Repo: "a", Number: 42}
-	b := Ref{Owner: "o", Repo: "b", Number: 42}
-	if windowName(a) == windowName(b) {
-		t.Errorf("windowName collided across repos: a=%q b=%q", windowName(a), windowName(b))
-	}
-	if windowName(a) != "pr-o-a-42" {
-		t.Errorf("windowName(a) = %q, want %q", windowName(a), "pr-o-a-42")
-	}
-}
+// The local-vs-PR-mode and cross-repo collisions these tests used to pin by
+// literal name (pr-local-abc1234-42, pr-o-a-42) are pinned harder in
+// window_name_test.go, which asserts separation for the exact adversarial
+// pair — same owner spelling, same repo, same number — rather than for two
+// refs that already differed on their face.
 
 // TestNewWindowTarget_IsSessionIDWithTrailingColon pins the dispatch
 // destination. The colon is what makes the operand session-qualified for
@@ -155,18 +130,12 @@ func TestNewWindowTarget_IsSessionIDWithTrailingColon(t *testing.T) {
 	}
 }
 
-// TestWindowName_SanitizesDotsInRepo guards against a tmux target-parsing
-// hazard: a literal "." in a window name is mis-resolved by tmux as the
-// window.pane separator (empirically verified: `select-window -t
-// sess:pr-o-foo.bar-42` resolves to window="pr-o-foo", pane="bar-42", not
-// the intended window). A dotted repo name (legal on GitHub) must have its
-// dots replaced so the resulting window name targets cleanly.
-func TestWindowName_SanitizesDotsInRepo(t *testing.T) {
-	ref := Ref{Owner: "o", Repo: "foo.bar", Number: 42}
-	if got, want := windowName(ref), "pr-o-foo-bar-42"; got != want {
-		t.Errorf("windowName(dotted repo) = %q, want %q", got, want)
-	}
-}
+// The dotted-repo hazard — tmux reads "." as the window.pane separator, so
+// `select-window -t sess:pr-o-foo.bar-42` resolved to window="pr-o-foo",
+// pane="bar-42" — is now excluded by the generated grammar rather than by a
+// dot-to-hyphen rewrite, and asserted in sessionname_test.go against the whole
+// tmux target charset. window_name_test.go covers the recollision that rewrite
+// used to cause, between repos "a.b" and "a-b".
 
 // TestWindowName_StructurallyCoupledToReviewWindowPrefix guards the
 // admission gate's discrimination: LiveReviews (admission.go) counts live
@@ -182,8 +151,13 @@ func TestWindowName_StructurallyCoupledToReviewWindowPrefix(t *testing.T) {
 		{Owner: "o", Repo: "foo.bar", Number: 7},
 	}
 	for _, ref := range refs {
-		if got := windowName(ref); !strings.HasPrefix(got, reviewWindowPrefix) {
-			t.Errorf("windowName(%+v) = %q, want prefix %q", ref, got, reviewWindowPrefix)
+		got, err := ReviewWindowName(ref)
+		if err != nil {
+			t.Errorf("ReviewWindowName(%+v): %v", ref, err)
+			continue
+		}
+		if !strings.HasPrefix(got, reviewWindowPrefix) {
+			t.Errorf("ReviewWindowName(%+v) = %q, want prefix %q", ref, got, reviewWindowPrefix)
 		}
 	}
 }
@@ -271,7 +245,7 @@ func TestLaunch_InlineDispatch(t *testing.T) {
 	if call.Name != "tmux" || call.Args[0] != "new-window" {
 		t.Fatalf("expected tmux new-window; got %+v", call)
 	}
-	if !contains(call.Args, "pr-o-r-42") || !contains(call.Args, ws) || !contains(call.Args, claudeBin) {
+	if !contains(call.Args, mustWindowName(t, sess.Ref)) || !contains(call.Args, ws) || !contains(call.Args, claudeBin) {
 		t.Errorf("tmux argv missing window/workspace/claude: %v", call.Args)
 	}
 	if !contains(call.Args, "-p") || !contains(call.Args, reviewPrompt) {

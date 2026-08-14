@@ -18,9 +18,9 @@ func TestVerifyDispatched_ExactGenerationSessionAndName(t *testing.T) {
 	refRestarted := Ref{Owner: "o", Repo: "r", Number: 2}
 	refDuplicate := Ref{Owner: "o", Repo: "r", Number: 3}
 	rows := strings.Join([]string{
-		dispatchWindowRow("10", "20", "@1", "reviews", windowName(refLive)),
-		dispatchWindowRow("99", "20", "@0", "reviews", windowName(refRestarted)),
-		dispatchWindowRow("10", "20", "@7", "reviews", windowName(refDuplicate)),
+		dispatchWindowRow("10", "20", "@1", "reviews", mustWindowName(t, refLive)),
+		dispatchWindowRow("99", "20", "@0", "reviews", mustWindowName(t, refRestarted)),
+		dispatchWindowRow("10", "20", "@7", "reviews", mustWindowName(t, refDuplicate)),
 	}, "\n")
 	fake := &internalexec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
 		if args[0] == "list-windows" {
@@ -64,7 +64,7 @@ func TestVerifyDispatched_ExactGenerationSessionAndName(t *testing.T) {
 func TestVerifyDispatched_PreservesDuplicateGoneMultiplicity(t *testing.T) {
 	refLive := Ref{Owner: "o", Repo: "r", Number: 1}
 	refGone := Ref{Owner: "o", Repo: "r", Number: 2}
-	rows := dispatchWindowRow("10", "20", "@1", "reviews", windowName(refLive))
+	rows := dispatchWindowRow("10", "20", "@1", "reviews", mustWindowName(t, refLive))
 	fake := &internalexec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
 		if args[0] == "list-windows" {
 			return rows, nil

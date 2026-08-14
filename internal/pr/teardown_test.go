@@ -38,9 +38,9 @@ func seedSession(t *testing.T, c *Client, ref Ref, createdAt time.Time) (bcPath,
 }
 
 func TestTeardown_AcceptsMember(t *testing.T) {
-	fake := reviewServer("pr-o-r-7")
-	c := testClient(t, fake)
 	ref := Ref{Owner: "o", Repo: "r", Number: 7}
+	fake := reviewServer(mustWindowName(t, ref))
+	c := testClient(t, fake)
 	path, ws := seedSession(t, c, ref, time.Now().UTC())
 
 	// A real quarantined file so Restore has something to rename back.
@@ -72,8 +72,9 @@ func TestTeardown_AcceptsMember(t *testing.T) {
 // path: a window carrying this review's NAME but sitting in another session is
 // not this review's window, and teardown must leave it running.
 func TestTeardown_LeavesForeignWindowAlone(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 7}
 	sessionRow := strings.Join([]string{"123", "456", "$1", "forgectl", "1", "0", "1700000000", "/w"}, "\x1f")
-	strayRow := strings.Join([]string{"123", "456", "@9", "$2", "other", "0", "pr-o-r-7", "0", "1"}, "\x1f")
+	strayRow := strings.Join([]string{"123", "456", "@9", "$2", "other", "0", mustWindowName(t, ref), "0", "1"}, "\x1f")
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		if name != "tmux" || len(args) == 0 {
 			return "", nil
@@ -87,7 +88,6 @@ func TestTeardown_LeavesForeignWindowAlone(t *testing.T) {
 		return "", nil
 	}}
 	c := testClient(t, fake)
-	ref := Ref{Owner: "o", Repo: "r", Number: 7}
 	path, _ := seedSession(t, c, ref, time.Now().UTC())
 
 	if err := c.Teardown(context.Background(), path); err != nil {
@@ -149,7 +149,8 @@ func TestTeardown_CoveredRootQuarantineHasNoPhantomNestedMove(t *testing.T) {
 func TestTeardown_LiveOrderRemovesBreadcrumbLast(t *testing.T) {
 	var breadcrumbAtTmux bool
 	var bcPath string
-	server := reviewServer("pr-o-r-11")
+	ref := Ref{Owner: "o", Repo: "r", Number: 11}
+	server := reviewServer(mustWindowName(t, ref))
 	inner := server.RunFunc
 	fake := &exec.FakeRunner{}
 	fake.RunFunc = func(name string, args []string) (string, error) {
@@ -160,7 +161,6 @@ func TestTeardown_LiveOrderRemovesBreadcrumbLast(t *testing.T) {
 		return inner(name, args)
 	}
 	c := testClient(t, fake)
-	ref := Ref{Owner: "o", Repo: "r", Number: 11}
 	path, ws := seedSession(t, c, ref, time.Now().UTC())
 	bcPath = path
 

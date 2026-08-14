@@ -207,7 +207,7 @@ func TestWindowStatus_UnreadableTmux(t *testing.T) {
 func TestPrList_LiveWindow(t *testing.T) {
 	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 9}
 	fake := prListRunner(nil,
-		listWinRow("forgectl", "pr-cameronsjo-forgectl-9"),
+		listWinRow("forgectl", pickWindowName(t, 9)),
 		listWinRow("forgectl", "shell"),
 	)
 	got, err := runPrList(t, fake, ref)
