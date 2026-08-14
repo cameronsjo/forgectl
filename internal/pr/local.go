@@ -145,7 +145,7 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 		CreatedAt: sess.CreatedAt,
 		Local:     true,
 	}
-	bcPath, err := writeBreadcrumb(c.sessionsDir, ref, bc)
+	bcPath, err := c.writeBreadcrumb(ref, bc)
 	if err != nil {
 		c.teardownLocalArtifacts(ctx, workspace, findingsDir)
 		return Session{}, err

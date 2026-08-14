@@ -128,7 +128,7 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 		// Local stays false: this is a remote PR. The zero value is the
 		// deliberate answer here, not an omission.
 	}
-	path, err := writeBreadcrumb(c.sessionsDir, ref, bc)
+	path, err := c.writeBreadcrumb(ref, bc)
 	if err != nil {
 		_ = sandbox.Teardown(ctx, c.run, workspace)
 		return Session{}, err
