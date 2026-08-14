@@ -21,6 +21,9 @@ package pr
 //       cause, so this message must not wrap one)
 //   [x] Every refusal leaves breadcrumb, sibling, parent, and external canaries
 //       intact and issues ZERO Runner calls
+//   [x] An absent, UNPREFIXED recorded workspace classifies MISSING and the
+//       unlink still touches nothing but the breadcrumb (the prefix rule is
+//       undefined without a resolvable path; containment is the guarantee)
 //   [x] Concurrent same-client teardowns serialize: exactly one unlink succeeds
 //   [x] A LIVE teardown that fails mid-flight never falls back to the stale
 //       unlink: the error surfaces and both breadcrumb and workspace survive
@@ -262,6 +265,70 @@ func TestDiscardStale_ReappearedWorkspaceRendersACleanRefusal(t *testing.T) {
 	}
 	if len(f.fake.Calls) != 0 {
 		t.Errorf("a refusal must issue ZERO Runner calls; got %+v", f.fake.Calls)
+	}
+}
+
+// TestDiscardStale_UnprefixedRecordedWorkspaceTouchesNothing answers the
+// standing question about this branch: classifyWorkspace grants MISSING
+// without repeating validateWorkspace's sandbox-prefix rule, so a record
+// naming an absent, unprefixed path — /etc/no-such-dir in the general case —
+// does authorize a stale unlink.
+//
+// The prefix rule cannot be repeated here, and should not be approximated.
+// It is defined on filepath.EvalSymlinks(workspace), and a path whose final
+// component is absent has nothing to resolve; checking the LITERAL base name
+// instead would be a different, weaker rule that refuses the supported shape
+// TestClassifyWorkspace_LiveThroughSymlink pins — a workspace reached through
+// an unprefixed link name. Such a record would become permanently unremovable,
+// which is #212 itself.
+//
+// What actually bounds the damage is that Missing authorizes ONE syscall, and
+// it does not name the workspace: discardStale unlinks the member's base name
+// through a pinned handle on the 0700 session directory. The recorded
+// workspace is never an operand. That is what this test pins — the containment,
+// on the hostile shape.
+func TestDiscardStale_UnprefixedRecordedWorkspaceTouchesNothing(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	c := testClient(t, fake)
+
+	// A real directory holding a canary, with the recorded workspace named as
+	// an absent, UNPREFIXED child of it. Nothing here may be disturbed.
+	parent := t.TempDir()
+	canary := filepath.Join(parent, "must-survive")
+	if err := os.WriteFile(canary, []byte("intact"), 0o600); err != nil {
+		t.Fatalf("seed workspace-side canary: %v", err)
+	}
+	workspace := filepath.Join(parent, "no-such-dir")
+
+	ref := Ref{Owner: "o", Repo: "r", Number: 1}
+	path, err := writeBreadcrumb(c.SessionsDir(), ref, Breadcrumb{
+		Workspace: workspace, Ref: ref.String(), Agent: "claude", CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("seed breadcrumb: %v", err)
+	}
+
+	// The accepted classification, asserted rather than assumed.
+	avail, _ := classifyWorkspace(workspace)
+	if avail != workspaceAvailabilityMissing {
+		t.Fatalf("availability = %d, want missing — this test exists for that grant", avail)
+	}
+
+	if err := c.Teardown(context.Background(), path); err != nil {
+		t.Fatalf("Teardown of an unprefixed stale record: %v", err)
+	}
+	if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+		t.Errorf("the breadcrumb is the only thing removed; Lstat err = %v", statErr)
+	}
+	body, readErr := os.ReadFile(canary)
+	if readErr != nil || string(body) != "intact" {
+		t.Errorf("nothing at the recorded workspace's parent may be touched: body=%q err=%v", body, readErr)
+	}
+	if _, statErr := os.Stat(parent); statErr != nil {
+		t.Errorf("the recorded workspace's parent must survive: %v", statErr)
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("a stale teardown must issue ZERO Runner calls; got %+v", fake.Calls)
 	}
 }
 

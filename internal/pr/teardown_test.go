@@ -153,11 +153,11 @@ func TestTeardown_LiveOrderRemovesBreadcrumbLast(t *testing.T) {
 //
 // The stale branch is also structurally unreachable after a live failure:
 // Teardown's classification switch returns discard's error directly and has no
-// fallback arm. There is no portable way to force a mid-teardown failure
-// without a chmod assumption (quarantine.Restore treats an occupied
-// destination as non-fatal by design, and sandbox.Teardown's only failure is
-// an os.RemoveAll error), so that half is pinned by construction rather than
-// by a contrived fault injection.
+// fallback arm. That half is no longer pinned by construction alone — the
+// sandboxTeardown seam this change added stages a real mid-teardown failure,
+// and TestTeardown_LiveFailureNeverEntersTheStaleUnlink asserts the error
+// surfaces with both breadcrumb and workspace intact. This test keeps the
+// cheaper, injection-free half: the two branches' Runner signatures.
 func TestTeardown_BranchesAreDisjoint(t *testing.T) {
 	liveFake := &exec.FakeRunner{}
 	liveClient := testClient(t, liveFake)

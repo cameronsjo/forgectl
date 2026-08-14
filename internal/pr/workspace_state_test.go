@@ -13,6 +13,8 @@ package pr
 //   [x] Missing parent, non-directory parent, and dangling parent link are INVALID
 //   [x] Non-directory, bad resolved prefix are INVALID
 //   [x] EACCES, generic I/O, and post-Lstat disappearance (seams) are INVALID
+//   [x] A non-directory PARENT reaches its own guard (seamed: no real layout
+//       can stage a clean absence under a regular file)
 //   [x] Relative and unclean pathnames are INVALID
 //   [x] Only LIVE and MISSING ever return their state; every refusal is INVALID
 //       with a non-nil error
@@ -22,6 +24,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -144,7 +147,12 @@ func TestClassifyWorkspace_InvalidStates(t *testing.T) {
 		{"non-directory", file},
 		{"bad resolved prefix", unprefixed},
 		{"missing parent", filepath.Join(dir, "no-such-parent", "forgectl-workflow-x")},
-		{"parent is a file", parentIsFile},
+		// NOT the !info.IsDir() parent guard: Lstat of a child under a regular
+		// file fails ENOTDIR, so this refuses at the "could not be examined"
+		// arm long before the parent is stat'd. Kept because that arm is worth
+		// pinning too; the guard itself is reached in
+		// TestClassifyWorkspace_NonDirectoryParentReachesItsGuard.
+		{"child of a regular file (ENOTDIR at the entry Lstat)", parentIsFile},
 		{"dangling parent link", filepath.Join(danglingParent, "forgectl-workflow-x")},
 	}
 	for _, tc := range cases {
@@ -161,6 +169,47 @@ func TestClassifyWorkspace_InvalidStates(t *testing.T) {
 				t.Error("an invalid workspace must never produce a workspaceMissingError")
 			}
 		})
+	}
+}
+
+// TestClassifyWorkspace_NonDirectoryParentReachesItsGuard covers the parent
+// !info.IsDir() branch, which no real filesystem layout can reach.
+//
+// The obvious staging — a path whose parent component is a regular file —
+// never gets there: Lstat of a child under a regular file fails ENOTDIR, not
+// ENOENT, so classification refuses at the "could not be examined" arm, and
+// the errno is platform-dependent besides. Reaching the guard needs the entry
+// to be cleanly absent WHILE the parent is a non-directory, so the entry Lstat
+// is seamed to ENOENT and the parent Stat runs for real against a file.
+//
+// The assertion is on the guard's own message: any weaker check would pass
+// from the arm above it, which is exactly how this branch went untested.
+func TestClassifyWorkspace_NonDirectoryParentReachesItsGuard(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "parent-is-a-file")
+	if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed parent file: %v", err)
+	}
+	target := filepath.Join(parent, "forgectl-workflow-x")
+
+	swapFSSeams(t,
+		func(string) (fs.FileInfo, error) {
+			return nil, &fs.PathError{Op: "lstat", Path: target, Err: syscall.ENOENT}
+		},
+		os.Stat, nil)
+
+	avail, err := classifyWorkspace(target)
+	if avail != workspaceAvailabilityInvalid {
+		t.Fatalf("availability = %d, want invalid", avail)
+	}
+	if err == nil {
+		t.Fatal("invalid classification must carry an error")
+	}
+	if !strings.Contains(err.Error(), "is not a directory") {
+		t.Errorf("error %q must come from the parent directory guard, not an earlier arm", err)
+	}
+	var missing *workspaceMissingError
+	if errors.As(err, &missing) {
+		t.Error("a non-directory parent must never produce a workspaceMissingError")
 	}
 }
 

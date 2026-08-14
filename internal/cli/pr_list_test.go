@@ -114,14 +114,24 @@ func TestPrList_StaleOnlyIssuesNoTmuxCalls(t *testing.T) {
 	}
 }
 
-// TestPrList_MixedBatchesOnlyLiveRefs pins that a mixed list sends exactly the
-// live refs to one liveness read, and that an unreadable tmux degrades only
-// those rows — a stale row's status never depends on tmux.
+// TestPrList_MixedBatchesOnlyLiveRefs pins that a mixed list costs exactly ONE
+// liveness read, and that an unreadable tmux degrades only the live rows — a
+// stale row's status never depends on tmux.
+//
+// WHICH refs enter that read is not observable here: WindowsLive takes them
+// in-process and issues one blanket `tmux list-windows -a` whose arguments
+// never name a ref. The exclusion is pinned at its observable boundary instead,
+// by TestPrList_StaleOnlyIssuesNoTmuxCalls — a stale-only list issues zero
+// calls, which only holds if stale refs are filtered out before the read.
 func TestPrList_MixedBatchesOnlyLiveRefs(t *testing.T) {
 	liveRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 1}
 	staleRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 2}
 	fake := prListRunner(errors.New("boom: tmux exploded"))
 	got := runPrListOver(t, fake, []pr.Ref{liveRef}, []pr.Ref{staleRef})
+
+	if n := countCliCalls(fake.Calls, "tmux", "list-windows"); n != 1 {
+		t.Errorf("a mixed list must cost exactly one liveness read, got %d: %+v", n, fake.Calls)
+	}
 
 	var liveLine, staleLine string
 	for _, line := range strings.Split(got, "\n") {
@@ -141,6 +151,17 @@ func TestPrList_MixedBatchesOnlyLiveRefs(t *testing.T) {
 	if !strings.HasSuffix(staleLine, "\t"+workspaceMissingStatus) {
 		t.Errorf("the stale row must report %q regardless of tmux: %q", workspaceMissingStatus, staleLine)
 	}
+}
+
+// countCliCalls counts Runner calls to name whose first argument is verb.
+func countCliCalls(calls []exec.Call, name, verb string) int {
+	var n int
+	for _, c := range calls {
+		if c.Name == name && len(c.Args) > 0 && c.Args[0] == verb {
+			n++
+		}
+	}
+	return n
 }
 
 // findCliCall reports whether any Runner call invoked name.
