@@ -150,7 +150,10 @@ func (c *Client) Attach(ctx context.Context, path string) error {
 	if err != nil {
 		return remediateMissingWorkspace(path, err)
 	}
-	name := windowName(sess.Ref)
+	name, err := ReviewWindowName(sess.Ref)
+	if err != nil {
+		return err
+	}
 	window, err := c.resolveReviewWindow(ctx, sess.Ref)
 	if err != nil {
 		return fmt.Errorf("select review window %q: %w — the window may predate a "+
@@ -184,7 +187,15 @@ func (c *Client) Open(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.run.Run(ctx, "tmux", "new-window", "-t", target,
-		"-n", windowName(sess.Ref)+"-shell", "-c", sess.Workspace)
+	// A shell window is NOT the review — it is a second, non-authoritative
+	// window under the same key, distinguished by its role in the digest rather
+	// than by a "-shell" suffix on the review's name. A suffix was both losable
+	// to the name bound and indistinguishable from a review window whose own
+	// label happened to end that way.
+	name, err := shellWindowName(sess.Ref)
+	if err != nil {
+		return err
+	}
+	_, err = c.run.Run(ctx, "tmux", "new-window", "-t", target, "-n", name, "-c", sess.Workspace)
 	return err
 }

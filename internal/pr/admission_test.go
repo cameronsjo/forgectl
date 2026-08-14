@@ -388,15 +388,15 @@ func TestWindowLive_CreatedThenRemoved(t *testing.T) {
 		t.Fatalf("newWindowTarget: %v", err)
 	}
 	if _, err := c.run.Run(ctx, "tmux", "new-window",
-		"-t", target, "-n", windowName(ref), "-c", "/tmp"); err != nil {
+		"-t", target, "-n", mustWindowName(t, ref), "-c", "/tmp"); err != nil {
 		t.Fatalf("new-window: %v", err)
 	}
 	if live, ok := c.WindowLive(ctx, ref); !ok || !live {
 		t.Fatalf("WindowLive() right after dispatch = (%v, %v), want (true, true)", live, ok)
 	}
 
-	if !srv.killWindow("forgectl", windowName(ref)) {
-		t.Fatalf("killWindow did not find %q", windowName(ref))
+	if !srv.killWindow("forgectl", mustWindowName(t, ref)) {
+		t.Fatalf("killWindow did not find %q", mustWindowName(t, ref))
 	}
 	if live, ok := c.WindowLive(ctx, ref); !ok || live {
 		t.Fatalf("WindowLive() after the window died = (%v, %v), want (false, true) — a vanished "+
@@ -422,7 +422,7 @@ func TestWindowLive_ListWindowsErrors_ReportsUnreadable(t *testing.T) {
 
 func TestWindowLive_IgnoresOtherSessions(t *testing.T) {
 	ref := Ref{Owner: "o", Repo: "r", Number: 1}
-	fake := listWindowsFake(winRow("other-session", windowName(ref)))
+	fake := listWindowsFake(winRow("other-session", mustWindowName(t, ref)))
 	c := New(fake, WithTmuxSession("forgectl"))
 	if live, ok := c.WindowLive(context.Background(), ref); !ok || live {
 		t.Fatalf("WindowLive() = (%v, %v), want (false, true) — a same-named window in another "+
@@ -440,9 +440,9 @@ func TestWindowsLive_MixedSet_OneListWindowsCall(t *testing.T) {
 	otherSessionRef := Ref{Owner: "o", Repo: "r", Number: 3}
 
 	fake := listWindowsFake(
-		winRow("forgectl", windowName(liveRef)),
+		winRow("forgectl", mustWindowName(t, liveRef)),
 		winRow("forgectl", "shell"),
-		winRow("other-session", windowName(otherSessionRef)),
+		winRow("other-session", mustWindowName(t, otherSessionRef)),
 	)
 	c := New(fake, WithTmuxSession("forgectl"))
 

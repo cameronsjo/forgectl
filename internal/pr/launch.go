@@ -94,30 +94,49 @@ func localReviewPrompt(findingsDir string, writesEnforced bool) string {
 		"to that file."
 }
 
-// windowName is the tmux window name for a review session:
-// "<reviewWindowPrefix><owner>-<sanitized repo>-<N>" — built off
-// reviewWindowPrefix (admission.go), not a re-hardcoded literal, so the
-// concurrency gate's window count can never silently drift out of sync with
-// what a review launch actually names its window. Owner is included, not
-// just Number: a
-// local-mode Ref (Owner "local", Number derived from a hex oid prefix) and a
-// real PR-mode Ref can otherwise land on the identical "pr-<N>" name whenever
-// the derived number happens to match a live PR number — Number alone is not
-// unique across the two Ref kinds. Repo is included too: two repos under the
-// same owner (o/a#42 and o/b#42) still collide on "pr-<owner>-<N>" — Owner
-// alone is not unique across repos.
+// ReviewWindowName is the tmux window name for ref's review window, derived from
+// ref's logical key (sessionkey.go) through the name codec (sessionname.go).
 //
-// The repo component has its dots replaced with hyphens. Empirically, tmux
-// target strings split on "." as the window.pane separator: a window
-// literally named "pr-o-foo.bar-42" mis-resolves `select-window -t
-// sess:pr-o-foo.bar-42` to window="pr-o-foo", pane="bar-42" instead of
-// matching (or cleanly failing to match) the window — functional breakage
-// for a legal GitHub repo name. Sanitizing accepts a narrower, purely
-// cosmetic recollision (repos "a.b" and "a-b" under the same owner sharing
-// a window) in exchange for correct targeting, which is the greater good.
-func windowName(ref Ref) string {
-	repo := strings.ReplaceAll(ref.Repo, ".", "-")
-	return reviewWindowPrefix + fmt.Sprintf("%s-%s-%d", ref.Owner, repo, ref.Number)
+// It reads Ref.IsLocal() rather than the owner spelling, which is the whole of
+// forgectl#218: the predecessor assembled "pr-<owner>-<repo>-<N>" from display
+// parts, so a synthetic local session (owner "local", repo a short oid, number
+// derived from that oid) and a genuine PR under a forge owner literally named
+// "local" could spell one name — and tmux's first-match targeting then sent
+// `pr attach` and `pr teardown` at whichever window it found first. Two
+// different things now have two different keys, so they cannot share a name.
+//
+// It also retires the dot-to-hyphen rewrite the predecessor needed. tmux splits
+// a target on "." as the window.pane separator, so a window named
+// "pr-o-foo.bar-42" mis-resolved to window="pr-o-foo", pane="bar-42"; the
+// rewrite fixed that at the cost of a real recollision between repos "a.b" and
+// "a-b". The generated grammar excludes "." outright, and the digest is taken
+// over the key rather than the display spelling, so both problems are gone
+// rather than traded.
+//
+// It returns an error rather than a fallback name: a name with no key behind it
+// is exactly the unbacked authority #218 removes, so every caller fails closed.
+func ReviewWindowName(ref Ref) (string, error) {
+	return refWindowName(ref, roleReview)
+}
+
+// shellWindowName is the name for the non-authoritative shell window `pr open`
+// puts in the clean room. It is a distinct identity, not the review name with a
+// suffix — the role lives in the digest, so it cannot be lost to truncation and
+// a shell window can never be mistaken for the review it sits beside.
+func shellWindowName(ref Ref) (string, error) {
+	return refWindowName(ref, roleShell)
+}
+
+func refWindowName(ref Ref, role nameRole) (string, error) {
+	key, err := sessionKeyForRef(ref)
+	if err != nil {
+		return "", fmt.Errorf("derive review session identity for %s: %w", ref.String(), err)
+	}
+	name, err := key.encodedName(key.label(), role)
+	if err != nil {
+		return "", fmt.Errorf("derive review window name for %s: %w", ref.String(), err)
+	}
+	return name, nil
 }
 
 // ensureSession resolves the review session by exact name, creating it if it
@@ -150,12 +169,16 @@ func newWindowTarget(session tmux.SessionIdentity) (string, error) {
 // restart would name a different window anyway. What the breadcrumb supplies is
 // the NAME to look for; the identity is rebuilt from the live server every time.
 func (c *Client) resolveReviewWindow(ctx context.Context, ref Ref) (tmux.WindowIdentity, error) {
+	name, err := ReviewWindowName(ref)
+	if err != nil {
+		return tmux.WindowIdentity{}, err
+	}
 	t := tmux.New(c.run)
 	session, err := t.ResolveSessionExact(ctx, c.tmuxSession)
 	if err != nil {
 		return tmux.WindowIdentity{}, fmt.Errorf("resolve review session %q: %w", c.tmuxSession, err)
 	}
-	return t.ResolveWindowExact(ctx, session, windowName(ref))
+	return t.ResolveWindowExact(ctx, session, name)
 }
 
 // Launch dispatches the review agent for sess into a fresh tmux window under
@@ -284,11 +307,15 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 	if err != nil {
 		return Dispatch{}, err
 	}
+	name, err := ReviewWindowName(sess.Ref)
+	if err != nil {
+		return Dispatch{}, err
+	}
 	args := []string{
 		"new-window",
 		"-P", "-F", tmux.IdentityFormat,
 		"-t", target,
-		"-n", windowName(sess.Ref),
+		"-n", name,
 		"-c", sess.Workspace,
 		"--", codexPath,
 	}
@@ -302,9 +329,41 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 		return Dispatch{}, fmt.Errorf("read Codex review window identity: %w", err)
 	}
 	slog.Info("Successfully dispatched Codex clean-room review.",
-		"ref", sess.Ref.String(), "session_id", session.ID, "window", windowName(sess.Ref))
+		"ref", sess.Ref.String(), "session_id", session.ID, "window", name)
 	return dispatch, nil
 }
+
+// A same-name/different-key collision is NOT probed for before creating a
+// window, and the reason is forgectl#237 plus the digest — not this file's own
+// judgment, and not a claim that names stopped mattering.
+//
+// THE DIGEST IS LOAD-BEARING, and it is what makes this removal safe. The review
+// window is found BY NAME on every use: a breadcrumb carries no native id (and
+// one persisted across a tmux server restart would name a different window), so
+// each act on an existing window goes through ResolveWindowExact, which scans
+// `list-windows` and takes the FIRST window whose name matches under the
+// session's id. Two logical sessions spelling one name would therefore still
+// hand one of them the other's window. Nothing downstream would catch it. What
+// stops it is upstream: the name's 160-bit digest is taken over the canonical
+// key (sessionkey.go) with the role byte mixed in, so a collision requires a
+// digest collision. Both the role byte and the digest width are load-bearing —
+// do not shorten the digest, and do not let two roles share one name.
+//
+// WHAT #237 REMOVED IS NARROWER: tmux's own fuzzy `-t` resolution. Before #237 a
+// name reached tmux as a `-t` operand, where tmux would match it by prefix or
+// pattern against windows this code never listed — so a *near*-name, not just an
+// identical one, could absorb a select or a kill. That is the hazard the
+// pre-create refusal defended against, and it is the one that is now closed
+// structurally: `new-window` mints its own `@N` and returns it, VerifyDispatched
+// matches that generation-qualified identity, and ResolveWindowExact matches
+// names by Go string equality rather than handing one to tmux. With fuzzy
+// targeting gone and the digest separating keys, the pre-create probe bought a
+// `list-windows` fork per launch — in a package whose targeting is deliberately
+// built around not forking per ref (see WindowsLive in admission.go) — for a
+// case the codec already makes unreachable.
+//
+// If a future change reverts #237 and lets a NAME reach a `-t` operand again,
+// this refusal has to come back with it.
 
 // launchInline composes the claude argv and opens it in a tmux window rooted
 // at the workspace. It uses launch.ClaudePath/Resolve/BuilderArgs — never
@@ -436,18 +495,22 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	if err != nil {
 		return Dispatch{}, err
 	}
+	name, err := ReviewWindowName(sess.Ref)
+	if err != nil {
+		return Dispatch{}, err
+	}
 	args := []string{
 		"new-window",
 		"-P", "-F", tmux.IdentityFormat,
 		"-t", target,
-		"-n", windowName(sess.Ref),
+		"-n", name,
 		"-c", sess.Workspace,
 		"--", claudePath,
 	}
 	args = append(args, claudeArgs...)
 
 	slog.Debug("Preparing to dispatch review into tmux window.",
-		"session_id", session.ID, "window", windowName(sess.Ref), "workspace", sess.Workspace)
+		"session_id", session.ID, "window", name, "workspace", sess.Workspace)
 	out, err := c.run.Run(ctx, "tmux", args...)
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("open review window: %w", err)
@@ -457,7 +520,7 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 		return Dispatch{}, fmt.Errorf("read review window identity: %w", err)
 	}
 	slog.Info("Successfully dispatched clean-room review.",
-		"ref", sess.Ref.String(), "session_id", session.ID, "window", windowName(sess.Ref))
+		"ref", sess.Ref.String(), "session_id", session.ID, "window", name)
 	return dispatch, nil
 }
 

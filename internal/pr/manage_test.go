@@ -49,9 +49,9 @@ func reviewServer(windowNames ...string) *exec.FakeRunner {
 }
 
 func TestAttach_Success(t *testing.T) {
-	fake := reviewServer("pr-o-r-7")
-	c := testClient(t, fake)
 	ref := Ref{Owner: "o", Repo: "r", Number: 7}
+	fake := reviewServer(mustWindowName(t, ref))
+	c := testClient(t, fake)
 	path, _ := seedSession(t, c, ref, time.Now().UTC())
 
 	if err := c.Attach(context.Background(), path); err != nil {
@@ -75,9 +75,10 @@ func TestAttach_Success(t *testing.T) {
 // on the PR path. Window names are not unique across a tmux server, so a
 // same-named window in ANOTHER session must not answer for this review's.
 func TestAttach_SiblingSessionWindowIsNotSelected(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 7}
 	sessionRow := strings.Join([]string{"123", "456", "$1", "forgectl", "1", "0", "1700000000", "/w"}, "\x1f")
-	// The only pr-o-r-7 on the server lives in a DIFFERENT session ($2).
-	strayRow := strings.Join([]string{"123", "456", "@9", "$2", "other", "0", "pr-o-r-7", "0", "1"}, "\x1f")
+	// The only window with this review's name lives in a DIFFERENT session ($2).
+	strayRow := strings.Join([]string{"123", "456", "@9", "$2", "other", "0", mustWindowName(t, ref), "0", "1"}, "\x1f")
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		if name != "tmux" || len(args) == 0 {
 			return "", nil
@@ -91,7 +92,6 @@ func TestAttach_SiblingSessionWindowIsNotSelected(t *testing.T) {
 		return "", nil
 	}}
 	c := testClient(t, fake)
-	ref := Ref{Owner: "o", Repo: "r", Number: 7}
 	path, _ := seedSession(t, c, ref, time.Now().UTC())
 
 	if err := c.Attach(context.Background(), path); err == nil {
@@ -126,9 +126,9 @@ func TestAttach_MissingWindow_Hints(t *testing.T) {
 }
 
 func TestOpen_TargetPins(t *testing.T) {
-	fake := reviewServer("pr-o-r-7")
-	c := testClient(t, fake)
 	ref := Ref{Owner: "o", Repo: "r", Number: 7}
+	fake := reviewServer(mustWindowName(t, ref))
+	c := testClient(t, fake)
 	path, ws := seedSession(t, c, ref, time.Now().UTC())
 
 	if err := c.Open(context.Background(), path); err != nil {
@@ -140,8 +140,13 @@ func TestOpen_TargetPins(t *testing.T) {
 		t.Fatal("no new-window call")
 	}
 	// The destination is the review session's native id with its trailing
-	// colon — never the session NAME, and never a "=name:" spelling.
-	want := []string{"new-window", "-t", "$1:", "-n", "pr-o-r-7-shell", "-c", ws}
+	// colon — never the session NAME, and never a "=name:" spelling. The window
+	// name is the shell ROLE's own name, not the review name plus a suffix.
+	shell, err := shellWindowName(ref)
+	if err != nil {
+		t.Fatalf("shellWindowName: %v", err)
+	}
+	want := []string{"new-window", "-t", "$1:", "-n", shell, "-c", ws}
 	if !equalArgs(call.Args, want) {
 		t.Errorf("tmux args = %v, want %v", call.Args, want)
 	}

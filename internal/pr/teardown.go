@@ -280,7 +280,13 @@ func (c *Client) discard(ctx context.Context, sess Session) error {
 	// whatever tmux would have matched.
 	window, err := c.resolveReviewWindow(ctx, sess.Ref)
 	if err != nil {
-		slog.Debug("No review window to kill (already gone).", "window", windowName(sess.Ref), "error", err)
+		// The name is diagnostic only here; a ref that cannot even be keyed logs
+		// as such rather than shadowing the resolve failure being reported.
+		name, nameErr := ReviewWindowName(sess.Ref)
+		if nameErr != nil {
+			name = "<no derivable identity>"
+		}
+		slog.Debug("No review window to kill (already gone).", "window", name, "error", err)
 	} else if err := tmux.New(c.run).KillWindow(ctx, window); err != nil {
 		slog.Debug("Review window could not be killed.", "window_id", window.ID, "error", err)
 	}

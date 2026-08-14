@@ -249,6 +249,18 @@ func pickRefs(numbers ...int) []pr.PR {
 	return out
 }
 
+// pickWindowName is the review-window name for the Nth ref pickRefs produces.
+// Window names are derived from a session's logical key (forgectl#218), so a
+// test cannot spell one — it asks for it, exactly as production does.
+func pickWindowName(t *testing.T, number int) string {
+	t.Helper()
+	name, err := pr.ReviewWindowName(pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: number})
+	if err != nil {
+		t.Fatalf("ReviewWindowName(#%d): %v", number, err)
+	}
+	return name
+}
+
 func emptyStore(t *testing.T) *pr.ReviewedStore {
 	t.Helper()
 	return pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json"))
@@ -261,8 +273,8 @@ func TestLaunchPicked_BulkOrderingAndAccounting(t *testing.T) {
 	ledger := newTmuxLedger("forgectl")
 	// #2's window never survives its own dispatch; #3's new-window refuses
 	// outright, leaving a prepared clean room behind.
-	ledger.diesOnDispatch["pr-cameronsjo-forgectl-2"] = true
-	ledger.launchFails["pr-cameronsjo-forgectl-3"] = true
+	ledger.diesOnDispatch[pickWindowName(t, 2)] = true
+	ledger.launchFails[pickWindowName(t, 3)] = true
 	fake := ledger.runner()
 	client := verifyingClient(t, ledger, fake)
 
@@ -400,7 +412,7 @@ func TestLaunchPicked_NoVerifySkipsWaitAndSweep(t *testing.T) {
 	ledger := newTmuxLedger("forgectl")
 	// The same window that the verified run reports gone. Under --no-verify the
 	// command must succeed: the flag drops the observation, not the dispatch.
-	ledger.diesOnDispatch["pr-cameronsjo-forgectl-1"] = true
+	ledger.diesOnDispatch[pickWindowName(t, 1)] = true
 	fake := ledger.runner()
 	waits := 0
 	client := pr.New(fake,

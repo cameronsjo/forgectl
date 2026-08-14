@@ -3,6 +3,7 @@ package pr
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/tmux"
@@ -13,7 +14,7 @@ import (
 const DefaultMaxConcurrentReviews = 4
 
 // reviewWindowPrefix is the tmux window-name prefix a review launch uses.
-// windowName() (launch.go) builds off this constant directly rather than a
+// ReviewWindowName() (launch.go) builds off this constant directly rather than a
 // re-hardcoded literal, so the two can never drift apart.
 const reviewWindowPrefix = "pr-"
 
@@ -110,7 +111,7 @@ func (c *Client) WindowLive(ctx context.Context, ref Ref) (live bool, ok bool) {
 // the load-bearing part. The window test differs by design: LiveReviews
 // counts the whole review family with a HasPrefix on reviewWindowPrefix,
 // where this needs one specific window, so it compares w.Name against
-// windowName(ref) exactly. has-session and `display-message
+// ReviewWindowName(ref) exactly. has-session and `display-message
 // -t` both route through tmux's own `-t` resolution — exact, then fnmatch,
 // then PREFIX — which reports a sibling session as a match; see the
 // LiveReviews doc comment above for the full trace of why that fuzziness is
@@ -129,7 +130,18 @@ func (c *Client) WindowsLive(ctx context.Context, refs []Ref) (map[Ref]bool, boo
 	}
 	out := make(map[Ref]bool, len(refs))
 	for _, ref := range refs {
-		out[ref] = inSession[windowName(ref)]
+		name, err := ReviewWindowName(ref)
+		if err != nil {
+			// A ref with no derivable identity has no window to be live in.
+			// Reporting it as not-live is correct AND safe: liveness only ever
+			// widens what the UI shows and what teardown offers, never what it
+			// destroys, and the ref will fail closed at the seam that acts on it.
+			slog.Debug("Skipping liveness for a ref with no derivable session identity.",
+				"ref", ref.String(), "error", err)
+			out[ref] = false
+			continue
+		}
+		out[ref] = inSession[name]
 	}
 	return out, true
 }
@@ -163,7 +175,14 @@ func (c *Client) VerifyDispatched(ctx context.Context, dispatches []Dispatch) ([
 	}
 	var gone []Dispatch
 	for _, dispatch := range dispatches {
-		key := liveKey{id: dispatch.WindowID, session: c.tmuxSession, name: windowName(dispatch.Ref)}
+		// Every ref here was keyable at launch, so a failure now is a real fault,
+		// not a gone review. Erroring the batch leaves liveness unknown, which the
+		// contract above requires; reporting it gone would fabricate one.
+		name, err := ReviewWindowName(dispatch.Ref)
+		if err != nil {
+			return nil, fmt.Errorf("verify review dispatches: %w", err)
+		}
+		key := liveKey{id: dispatch.WindowID, session: c.tmuxSession, name: name}
 		if !live[key] {
 			gone = append(gone, dispatch)
 		}
