@@ -175,9 +175,23 @@ func sanitizeSessionLabel(s string) string {
 	return label
 }
 
-// sessionLabelForRef is the display text a ref contributes to its window name:
-// its canonical "owner/repo#N" spelling, sanitized. Two refs can perfectly well
-// sanitize to the same label; only the digest has to separate them.
-func sessionLabelForRef(ref Ref) string {
-	return sanitizeSessionLabel(ref.String())
+// label is the display text a key contributes to its window name, rendered from
+// the KEY's own fields rather than from the Ref that produced it. That is what
+// makes a name a pure function of its key, as this file's head comment claims:
+// a local Ref carries an Owner and a Number that the key does not (both are
+// derived from the oid), so labelling from Ref.String() would let one key wear
+// two names. Two distinct keys can perfectly well render the same label; only
+// the digest has to separate them.
+//
+// An unknown kind renders empty, which sanitizeSessionLabel turns into the "x"
+// placeholder — encodedName rejects the key on its own kind switch before any
+// such name is returned.
+func (k prSessionKey) label() string {
+	switch k.kind {
+	case kindLocal:
+		return localOwnerSentinel + "-" + k.oid
+	case kindRemote:
+		return fmt.Sprintf("%s/%s#%d", k.owner, k.repo, k.number)
+	}
+	return ""
 }

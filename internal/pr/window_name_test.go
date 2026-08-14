@@ -91,6 +91,70 @@ func TestWindowNameSeparatesNearMissRefs(t *testing.T) {
 	}
 }
 
+// A name is a PURE FUNCTION OF THE KEY, which is the invariant sessionname.go's
+// head comment asserts and the only reason two windows of one session can be
+// resolved by name at all. It has teeth exactly where a Ref carries display
+// parts the key does not: a local Ref's Owner and Number are both derived from
+// the oid and absent from the key, so a breadcrumb marked local with a different
+// owner or number must still name the SAME window — not a same-digest name under
+// a different label, which resolves to nothing and strands the session.
+func TestWindowNameIsAFunctionOfTheKeyNotTheRefSpelling(t *testing.T) {
+	const oid = "0123456789abcdef0123456789abcdef01234567"
+	canonical := newLocalRef(oid)
+	// Same key (local kind, same oid in Repo), different display parts.
+	impostor := Ref{Owner: "someone-else", Repo: canonical.Repo, Number: 99}.asLocal()
+	if impostor.String() == canonical.String() {
+		t.Fatal("test setup is wrong: the two refs must differ in display spelling")
+	}
+
+	for _, role := range []struct {
+		name string
+		fn   func(Ref) (string, error)
+	}{
+		{"review", ReviewWindowName},
+		{"shell", shellWindowName},
+	} {
+		t.Run(role.name, func(t *testing.T) {
+			want, err := role.fn(canonical)
+			if err != nil {
+				t.Fatalf("%s name (canonical): %v", role.name, err)
+			}
+			got, err := role.fn(impostor)
+			if err != nil {
+				t.Fatalf("%s name (impostor): %v", role.name, err)
+			}
+			if got != want {
+				t.Fatalf("one key produced two %s names: %q vs %q", role.name, want, got)
+			}
+		})
+	}
+}
+
+// The same invariant on the remote kind, where the divergence a Ref can carry is
+// case: remoteSessionKey lowercases owner and repo, so two spellings of one
+// repository are one identity and must be one name.
+func TestWindowNameIgnoresRemoteRefCase(t *testing.T) {
+	lower, err := RefFromParts("cameronsjo", "forgectl", "218")
+	if err != nil {
+		t.Fatalf("RefFromParts(lower): %v", err)
+	}
+	upper, err := RefFromParts("CameronSjo", "ForgeCtl", "218")
+	if err != nil {
+		t.Fatalf("RefFromParts(upper): %v", err)
+	}
+	lowerName, err := ReviewWindowName(lower)
+	if err != nil {
+		t.Fatalf("ReviewWindowName(lower): %v", err)
+	}
+	upperName, err := ReviewWindowName(upper)
+	if err != nil {
+		t.Fatalf("ReviewWindowName(upper): %v", err)
+	}
+	if lowerName != upperName {
+		t.Fatalf("one repository produced two window names: %q vs %q", lowerName, upperName)
+	}
+}
+
 // `pr open` puts a shell in the clean room. It must never be mistaken for the
 // review window, and must stay countable by the admission gate.
 func TestShellWindowNameIsDistinctAndInNamespace(t *testing.T) {

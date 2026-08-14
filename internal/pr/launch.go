@@ -132,7 +132,7 @@ func refWindowName(ref Ref, role nameRole) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("derive review session identity for %s: %w", ref.String(), err)
 	}
-	name, err := key.encodedName(sessionLabelForRef(ref), role)
+	name, err := key.encodedName(key.label(), role)
 	if err != nil {
 		return "", fmt.Errorf("derive review window name for %s: %w", ref.String(), err)
 	}
@@ -334,29 +334,36 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 }
 
 // A same-name/different-key collision is NOT probed for before creating a
-// window, and the reason is forgectl#237, not this file's own judgment.
+// window, and the reason is forgectl#237 plus the digest — not this file's own
+// judgment, and not a claim that names stopped mattering.
 //
-// THIS REMOVAL IS CONTINGENT ON #237's ID-BASED TARGETING. Before #237, a name
-// reached tmux as a `-t` operand, so a window carrying somebody else's identical
-// name could answer for this review's and absorb a select or a kill. A
-// pre-create refusal was the only thing standing between that and a
-// wrong-window action. #237 eliminated the hazard structurally instead: every
-// action now targets a native id. `new-window` mints its own `@N` and returns
-// it, VerifyDispatched matches on that generation-qualified identity, and every
-// act on an existing window resolves through ResolveWindowExact under the
-// session's native id. A same-name window can no longer receive an action meant
-// for this one, so the check bought a `list-windows` fork per launch — in a
-// package whose targeting is deliberately built around not forking per ref (see
-// WindowsLive in admission.go) — for a guarantee the targeting layer already
-// provides.
+// THE DIGEST IS LOAD-BEARING, and it is what makes this removal safe. The review
+// window is found BY NAME on every use: a breadcrumb carries no native id (and
+// one persisted across a tmux server restart would name a different window), so
+// each act on an existing window goes through ResolveWindowExact, which scans
+// `list-windows` and takes the FIRST window whose name matches under the
+// session's id. Two logical sessions spelling one name would therefore still
+// hand one of them the other's window. Nothing downstream would catch it. What
+// stops it is upstream: the name's 160-bit digest is taken over the canonical
+// key (sessionkey.go) with the role byte mixed in, so a collision requires a
+// digest collision. Both the role byte and the digest width are load-bearing —
+// do not shorten the digest, and do not let two roles share one name.
+//
+// WHAT #237 REMOVED IS NARROWER: tmux's own fuzzy `-t` resolution. Before #237 a
+// name reached tmux as a `-t` operand, where tmux would match it by prefix or
+// pattern against windows this code never listed — so a *near*-name, not just an
+// identical one, could absorb a select or a kill. That is the hazard the
+// pre-create refusal defended against, and it is the one that is now closed
+// structurally: `new-window` mints its own `@N` and returns it, VerifyDispatched
+// matches that generation-qualified identity, and ResolveWindowExact matches
+// names by Go string equality rather than handing one to tmux. With fuzzy
+// targeting gone and the digest separating keys, the pre-create probe bought a
+// `list-windows` fork per launch — in a package whose targeting is deliberately
+// built around not forking per ref (see WindowsLive in admission.go) — for a
+// case the codec already makes unreachable.
 //
 // If a future change reverts #237 and lets a NAME reach a `-t` operand again,
 // this refusal has to come back with it.
-//
-// Supporting, not load-bearing: the digest carries 160 bits over the canonical
-// key, so two distinct sessions cannot land on one name by accident, and a
-// deliberate same-name plant requires write access to the operator's tmux
-// session — already a larger compromise than anything this check protects.
 
 // launchInline composes the claude argv and opens it in a tmux window rooted
 // at the workspace. It uses launch.ClaudePath/Resolve/BuilderArgs — never
