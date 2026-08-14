@@ -182,21 +182,24 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 			}
 			return intact
 		},
-		// The case above swaps in a symlink to a COPY, so the identity check
-		// refuses it on the copy's inode and the Lstat never has to matter.
-		// Renaming the member and linking its old name to it is the shape that
-		// isolates the Lstat: the target is the original file, so it carries
-		// the original inode, the original bytes and the original record.
-		// Every check downstream passes, and a Stat here would report the
-		// symlink as that regular file and unlink the LINK — reporting the
+		// The case above cannot isolate the LSTAT, for two reasons: its link
+		// points at a COPY, so the identity check refuses on the copy's inode,
+		// and its target is ABSOLUTE, which os.Root rejects outright even when
+		// the path lands back inside the root. This is the shape that reaches
+		// the lstat — a RELATIVE link to the renamed original. os.Root follows
+		// it, since it stays in the root; the target is the original file, so
+		// it carries the original inode, the original bytes and the original
+		// record, and every check downstream passes. A Stat here would report
+		// the link as that regular file and unlink the LINK, reporting the
 		// breadcrumb discarded while the record survives under its new name.
 		// Only lstat'ing the name itself sees a symlink and refuses.
-		"member renamed with a link left at its old name": func(t *testing.T, f staleFixture) expect {
-			moved := filepath.Join(f.dirPath, "renamed-member.json")
+		"member renamed with a relative link left at its old name": func(t *testing.T, f staleFixture) expect {
+			const movedName = "renamed-member.json"
+			moved := filepath.Join(f.dirPath, movedName)
 			if err := os.Rename(f.path, moved); err != nil {
 				t.Fatalf("rename member: %v", err)
 			}
-			if err := os.Symlink(moved, f.path); err != nil {
+			if err := os.Symlink(movedName, f.path); err != nil {
 				t.Skipf("symlink unsupported: %v", err)
 			}
 			if !sameFileAt(t, moved, f.member.info) {
