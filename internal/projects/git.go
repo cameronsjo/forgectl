@@ -23,11 +23,18 @@ import (
 //   - Git 2.11.0 is the support floor. That release defined --porcelain=<version>,
 //     porcelain v2, and the branch.ab header. Older git fails the command, which
 //     lands on StatusUnknown, and PullAll skips rather than mutating.
-//   - A branch-graph failure is no longer swallowed. The v1 shape ran rev-list
-//     separately and ignored its error, reporting a clean StatusOK with ahead
-//     zero; now the same failure makes the single command exit nonzero and the
-//     repository reports StatusUnknown. Refusing to act on a tree whose status
-//     could not be fully established is the safer answer.
+//
+//   - There is no longer a second command whose error can be discarded. The v1
+//     shape ran rev-list separately and ignored its error; gitStatus now has a
+//     single Run, and its error is checked.
+//
+//     This is not an escalation to StatusUnknown, and measurement says so: on a
+//     repository whose branch.<name>.merge names a ref with no remote-tracking
+//     branch, rev-list --count @{upstream}..HEAD exits 128, while
+//     status --porcelain=v2 --branch omits the branch.upstream and branch.ab
+//     headers and exits 0. That repository reports StatusOK with ahead zero
+//     either way. What changed is that the absent branch graph is now a missing
+//     header the parser handles, rather than an error nobody read.
 //
 // There is no version probe and no v1 fallback: an arbitrary command error is
 // not a reliable version signal — it may equally be cancellation, permissions,
