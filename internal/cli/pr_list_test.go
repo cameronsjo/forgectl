@@ -73,6 +73,107 @@ func runPrList(t *testing.T, fake *exec.FakeRunner, ref pr.Ref) (string, error) 
 	return stdout.String(), err
 }
 
+// runPrListOver runs `pr list` against a client whose session-state dir was
+// seeded directly, so stale records (whose workspace no longer exists) can be
+// staged — a real Prepare can only produce live ones.
+func runPrListOver(t *testing.T, fake *exec.FakeRunner, live, stale []pr.Ref) string {
+	t.Helper()
+	sessionsDir := t.TempDir()
+	seedSummaries(t, sessionsDir, live, stale)
+	client := pr.New(fake, pr.WithSessionsDir(sessionsDir), pr.WithTmuxSession("forgectl"))
+
+	cmd := newPrListCmd(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs(nil)
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("pr list: %v", err)
+	}
+	return stdout.String()
+}
+
+// TestPrList_StaleOnlyIssuesNoTmuxCalls pins the cost contract: a list of
+// nothing but stale records asks tmux nothing. Their windows are irrelevant,
+// and paying a tmux round-trip to learn that would be pure waste.
+func TestPrList_StaleOnlyIssuesNoTmuxCalls(t *testing.T) {
+	fake := prListRunner(nil, listWinRow("forgectl", "shell"))
+	got := runPrListOver(t, fake, nil, []pr.Ref{
+		{Owner: "cameronsjo", Repo: "forgectl", Number: 1},
+		{Owner: "cameronsjo", Repo: "forgectl", Number: 2},
+	})
+
+	if _, ok := findCliCall(fake.Calls, "tmux"); ok {
+		t.Errorf("a stale-only list must issue ZERO tmux calls; got %+v", fake.Calls)
+	}
+	if strings.Count(got, workspaceMissingStatus) != 2 {
+		t.Errorf("both stale rows must report %q:\n%s", workspaceMissingStatus, got)
+	}
+	if strings.Contains(got, "window gone") || strings.Contains(got, "\t?\n") {
+		t.Errorf("a stale row must not borrow a window status:\n%s", got)
+	}
+}
+
+// TestPrList_MixedBatchesOnlyLiveRefs pins that a mixed list costs exactly ONE
+// liveness read, and that an unreadable tmux degrades only the live rows — a
+// stale row's status never depends on tmux.
+//
+// WHICH refs enter that read is not observable here: WindowsLive takes them
+// in-process and issues one blanket `tmux list-windows -a` whose arguments
+// never name a ref. The exclusion is pinned at its observable boundary instead,
+// by TestPrList_StaleOnlyIssuesNoTmuxCalls — a stale-only list issues zero
+// calls, which only holds if stale refs are filtered out before the read.
+func TestPrList_MixedBatchesOnlyLiveRefs(t *testing.T) {
+	liveRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 1}
+	staleRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 2}
+	fake := prListRunner(errors.New("boom: tmux exploded"))
+	got := runPrListOver(t, fake, []pr.Ref{liveRef}, []pr.Ref{staleRef})
+
+	if n := countCliCalls(fake.Calls, "tmux", "list-windows"); n != 1 {
+		t.Errorf("a mixed list must cost exactly one liveness read, got %d: %+v", n, fake.Calls)
+	}
+
+	var liveLine, staleLine string
+	for _, line := range strings.Split(got, "\n") {
+		switch {
+		case strings.Contains(line, liveRef.String()):
+			liveLine = line
+		case strings.Contains(line, staleRef.String()):
+			staleLine = line
+		}
+	}
+	if liveLine == "" || staleLine == "" {
+		t.Fatalf("both rows must render:\n%s", got)
+	}
+	if !strings.HasSuffix(liveLine, "\t?") {
+		t.Errorf("the live row must degrade to %q under an unreadable tmux: %q", "?", liveLine)
+	}
+	if !strings.HasSuffix(staleLine, "\t"+workspaceMissingStatus) {
+		t.Errorf("the stale row must report %q regardless of tmux: %q", workspaceMissingStatus, staleLine)
+	}
+}
+
+// countCliCalls counts Runner calls to name whose first argument is verb.
+func countCliCalls(calls []exec.Call, name, verb string) int {
+	var n int
+	for _, c := range calls {
+		if c.Name == name && len(c.Args) > 0 && c.Args[0] == verb {
+			n++
+		}
+	}
+	return n
+}
+
+// findCliCall reports whether any Runner call invoked name.
+func findCliCall(calls []exec.Call, name string) (exec.Call, bool) {
+	for _, c := range calls {
+		if c.Name == name {
+			return c, true
+		}
+	}
+	return exec.Call{}, false
+}
+
 func TestWindowStatus_Live(t *testing.T) {
 	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 9}
 	if got := windowStatus(map[pr.Ref]bool{ref: true}, ref, true); got != "live" {

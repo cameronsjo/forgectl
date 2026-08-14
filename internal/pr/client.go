@@ -3,6 +3,7 @@ package pr
 import (
 	"context"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -26,6 +27,16 @@ type Client struct {
 	// (config.PrSessionsDir); the breadcrumb location check enforces that a
 	// loaded path resolves to inside it. Injectable for tests.
 	sessionsDir string
+
+	// sessionsMu serializes this Client's own mutations of sessionsDir: a
+	// teardown holds it from membership resolution through the final unlink,
+	// and breadcrumb writes take it too, so one Client cannot read a record
+	// while replacing it.
+	//
+	// SCOPE, STATED HONESTLY: this prevents benign in-process races within one
+	// Client. It is NOT cross-process locking and NOT protection against a
+	// hostile same-uid writer — see the residual note on discardStale.
+	sessionsMu sync.Mutex
 
 	// findingsDir is the forgectl-owned directory (config.PrFindingsDir) that
 	// holds `forgectl pr local` findings — the deliverable of a local

@@ -32,7 +32,10 @@ type PR struct {
 // reviews (breadcrumbs, no gh), the PRs whose review is requested of you, and
 // your own open PRs.
 type Dashboard struct {
-	ActiveReviews []Session
+	// ActiveReviews carries presentation rows, not actionable sessions: the
+	// dashboard must show a review whose workspace has been deleted so the
+	// leftover breadcrumb is discoverable and tearable down.
+	ActiveReviews []SessionSummary
 	AwaitingYou   []PR
 	YourOpen      []PR
 }

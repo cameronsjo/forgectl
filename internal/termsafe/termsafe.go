@@ -67,6 +67,26 @@ func QuotePath(path string) string {
 	return strconv.QuoteToGraphic(path)
 }
 
+// QuotePathIfUnsafe returns path verbatim when quoting would have changed
+// nothing but the surrounding quotes, and the full QuotePath escaping
+// otherwise.
+//
+// It exists for a sink whose output is BOTH rendered to a terminal and a
+// documented machine-parseable field — `forgectl pr list` field 3, which
+// `pr teardown` is fed. Unconditional quoting there would rewrite every
+// ordinary row and break callers parsing it; printing raw would let a planted
+// breadcrumb filename drive the reader's terminal. Quoting only the paths that
+// need it keeps both properties, and the test for "needs it" is the escaping
+// itself rather than a second, drift-prone predicate.
+//
+// Prefer plain QuotePath on any sink that is human-only.
+func QuotePathIfUnsafe(path string) string {
+	if quoted := QuotePath(path); quoted != `"`+path+`"` {
+		return quoted
+	}
+	return path
+}
+
 type safeError struct {
 	message string
 	cause   error

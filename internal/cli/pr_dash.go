@@ -10,6 +10,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // prSectionStyle titles a dashboard block. Bold accent (color 110) matches the
@@ -62,13 +63,33 @@ Rows you've marked reviewed are dimmed (new activity auto-un-dims them).`,
 }
 
 // renderSessions prints the local active-review breadcrumbs, or "(none)".
-func renderSessions(out io.Writer, sessions []pr.Session) {
-	if len(sessions) == 0 {
+// A record whose workspace has been deleted is shown with a trailing marker
+// rather than hidden — the dashboard is where a user notices the leftover, and
+// the row carries the breadcrumb path teardown takes.
+//
+// Only a LIVE row goes unmarked. Marking is a three-way decision on the same
+// fail-closed enum `pr list` reads, not a missing/not-missing flag: an
+// unclassified summary marked as nothing renders identically to a healthy
+// review, which is exactly the claim it cannot make.
+func renderSessions(out io.Writer, summaries []pr.SessionSummary) {
+	if len(summaries) == 0 {
 		fmt.Fprintln(out, "  (none)")
 		return
 	}
-	for _, s := range sessions {
-		age := time.Since(s.CreatedAt).Round(time.Second)
-		fmt.Fprintf(out, "  %s  (%s ago)  %s\n", s.Ref.String(), age, s.Path)
+	for _, s := range summaries {
+		age := time.Since(s.CreatedAt()).Round(time.Second)
+		suffix := ""
+		switch {
+		case s.IsWorkspaceMissing():
+			suffix = "  (" + workspaceMissingStatus + ")"
+		case !s.IsWorkspaceLive():
+			// Neither predicate holds: not a state to render silently.
+			suffix = "  (" + workspaceUnclassifiedStatus + ")"
+		}
+		// The path is a FILENAME chosen on disk, so it is the one field here
+		// that can carry ANSI or bidi controls; Ref is charset-constrained by
+		// ParseRef. Quote it, as every other human sink in the CLI does.
+		fmt.Fprintf(out, "  %s  (%s ago)  %s%s\n",
+			s.Ref().String(), age, termsafe.QuotePath(s.Path()), suffix)
 	}
 }

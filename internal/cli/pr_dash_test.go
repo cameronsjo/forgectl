@@ -18,7 +18,10 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -51,14 +54,65 @@ func TestRenderSessions_NoSessions_ShowsNone(t *testing.T) {
 	}
 }
 
-func TestRenderSessions_ListsRefAgeAndPath(t *testing.T) {
-	sess := pr.Session{
-		Ref:       pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42},
-		Path:      "/tmp/forgectl/pr-sessions/cameronsjo-forgectl-42.json",
-		CreatedAt: time.Now().Add(-2 * time.Hour),
+// seedSummaries writes real breadcrumbs into a fresh session-state dir and
+// returns them through Client.List — the ONLY supported way to obtain a
+// SessionSummary. Its fields are private precisely so a test cannot hand-build
+// one and assert a liveness nobody verified, so presentation fixtures seed
+// real records instead of faking the type.
+//
+// A ref in stale has its workspace deleted after the breadcrumb is written,
+// reproducing the #212 state.
+func seedSummaries(t *testing.T, sessionsDir string, live, stale []pr.Ref) []pr.SessionSummary {
+	t.Helper()
+	write := func(ref pr.Ref, keepWorkspace bool) {
+		ws, err := os.MkdirTemp("", "forgectl-workflow-test-*")
+		if err != nil {
+			t.Fatalf("seed workspace: %v", err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(ws) })
+		body, err := json.Marshal(map[string]any{
+			"workspace": ws,
+			"ref":       ref.String(),
+			"agent":     "claude",
+			"createdAt": time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano),
+		})
+		if err != nil {
+			t.Fatalf("marshal breadcrumb: %v", err)
+		}
+		name := fmt.Sprintf("%s-%s-%d-%d.json", ref.Owner, ref.Repo, ref.Number, time.Now().UnixNano())
+		if err := os.WriteFile(filepath.Join(sessionsDir, name), append(body, '\n'), 0o600); err != nil {
+			t.Fatalf("seed breadcrumb: %v", err)
+		}
+		if !keepWorkspace {
+			if err := os.RemoveAll(ws); err != nil {
+				t.Fatalf("stale the workspace: %v", err)
+			}
+		}
 	}
+	for _, ref := range live {
+		write(ref, true)
+	}
+	for _, ref := range stale {
+		write(ref, false)
+	}
+
+	client := pr.New(&exec.FakeRunner{}, pr.WithSessionsDir(sessionsDir))
+	summaries, err := client.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if want := len(live) + len(stale); len(summaries) != want {
+		t.Fatalf("List returned %d summaries, want %d", len(summaries), want)
+	}
+	return summaries
+}
+
+func TestRenderSessions_ListsRefAgeAndPath(t *testing.T) {
+	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}
+	summaries := seedSummaries(t, t.TempDir(), []pr.Ref{ref}, nil)
+
 	var out bytes.Buffer
-	renderSessions(&out, []pr.Session{sess})
+	renderSessions(&out, summaries)
 
 	got := out.String()
 	if !strings.Contains(got, "cameronsjo/forgectl#42") {
@@ -67,8 +121,83 @@ func TestRenderSessions_ListsRefAgeAndPath(t *testing.T) {
 	if !strings.Contains(got, "ago)") {
 		t.Errorf("missing age suffix in output: %q", got)
 	}
-	if !strings.Contains(got, sess.Path) {
+	if !strings.Contains(got, summaries[0].Path()) {
 		t.Errorf("missing breadcrumb path in output: %q", got)
+	}
+	if strings.Contains(got, workspaceMissingStatus) {
+		t.Errorf("a live session must not be marked %q: %q", workspaceMissingStatus, got)
+	}
+}
+
+// TestRenderSessions_MarksMissingWorkspace pins the dashboard half of #212: a
+// record whose workspace is gone is SHOWN, with its breadcrumb path, and
+// marked — hiding it is what let the leftovers accumulate unnoticed.
+func TestRenderSessions_MarksMissingWorkspace(t *testing.T) {
+	liveRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 1}
+	staleRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 2}
+	summaries := seedSummaries(t, t.TempDir(), []pr.Ref{liveRef}, []pr.Ref{staleRef})
+
+	var out bytes.Buffer
+	renderSessions(&out, summaries)
+
+	var liveLine, staleLine string
+	for _, line := range strings.Split(out.String(), "\n") {
+		switch {
+		case strings.Contains(line, liveRef.String()):
+			liveLine = line
+		case strings.Contains(line, staleRef.String()):
+			staleLine = line
+		}
+	}
+	if liveLine == "" || staleLine == "" {
+		t.Fatalf("both rows must render; got:\n%s", out.String())
+	}
+	if !strings.Contains(staleLine, workspaceMissingStatus) {
+		t.Errorf("stale row missing the %q marker: %q", workspaceMissingStatus, staleLine)
+	}
+	if !strings.Contains(staleLine, ".json") {
+		t.Errorf("stale row must still carry the breadcrumb path teardown takes: %q", staleLine)
+	}
+	if strings.Contains(liveLine, workspaceMissingStatus) {
+		t.Errorf("live row must not be marked: %q", liveLine)
+	}
+}
+
+// TestRenderSessions_MarksUnclassifiedWorkspace pins the third arm of the
+// fail-closed enum, which the dashboard used to render as nothing at all.
+//
+// A summary for which NEITHER predicate holds — the zero value, the only such
+// shape constructible outside internal/pr, and the shape that type's contract
+// warns consumers about — must not print as an ordinary unmarked row. An
+// unmarked row is the LIVE rendering, so silence there asserts liveness that
+// nothing verified. `pr list` already says so in its status column; the dash
+// now says the same thing in its suffix.
+func TestRenderSessions_MarksUnclassifiedWorkspace(t *testing.T) {
+	var zero pr.SessionSummary
+	if zero.IsWorkspaceLive() || zero.IsWorkspaceMissing() {
+		t.Fatal("the zero summary must hold neither predicate; this test targets that state")
+	}
+
+	var out bytes.Buffer
+	renderSessions(&out, []pr.SessionSummary{zero})
+
+	got := out.String()
+	if !strings.Contains(got, workspaceUnclassifiedStatus) {
+		t.Errorf("an unclassified row must be marked %q, not rendered as a live row: %q",
+			workspaceUnclassifiedStatus, got)
+	}
+	if strings.Contains(got, workspaceMissingStatus) {
+		t.Errorf("an unclassified row must not borrow the missing label: %q", got)
+	}
+}
+
+// TestSessionStatus_UnclassifiedMatchesTheDash pins that the two human sinks
+// agree on the unclassified state, so a future edit cannot leave one of them
+// silently rendering it as live.
+func TestSessionStatus_UnclassifiedMatchesTheDash(t *testing.T) {
+	var zero pr.SessionSummary
+	if got := sessionStatus(nil, zero, true); got != workspaceUnclassifiedStatus {
+		t.Errorf("sessionStatus(unclassified) = %q, want %q", got, workspaceUnclassifiedStatus)
 	}
 }
 

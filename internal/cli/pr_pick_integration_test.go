@@ -208,7 +208,7 @@ func isolatedPickBench(t *testing.T) (*tmuxRoutingRunner, *pr.Client, string) {
 	)
 	t.Cleanup(func() {
 		for _, session := range mustListSessions(t, client) {
-			_ = client.Teardown(context.Background(), session.Path)
+			_ = client.Teardown(context.Background(), session.Path())
 		}
 		_, _ = router.real.Run(context.Background(), "tmux", "kill-server")
 	})
@@ -356,7 +356,7 @@ func TestLaunchPickedIsolatedTmux_RefusesAtAdmission(t *testing.T) {
 	}
 }
 
-func mustListSessions(t *testing.T, client *pr.Client) []pr.Session {
+func mustListSessions(t *testing.T, client *pr.Client) []pr.SessionSummary {
 	t.Helper()
 	sessions, err := client.List()
 	if err != nil {
