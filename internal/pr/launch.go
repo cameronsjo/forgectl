@@ -334,17 +334,29 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 }
 
 // A same-name/different-key collision is NOT probed for before creating a
-// window, deliberately. The digest carries 160 bits over the canonical key, so
-// two distinct sessions cannot land on one name by accident; a same-name window
-// therefore means either a leftover from this same session — the same key, so
-// not a collision — or a window planted by someone who can already write to the
-// operator's tmux session, which is a far larger compromise than a mis-targeted
-// review. Buying the check would cost a `list-windows` fork per launch, in a
-// package whose targeting is built around not forking per ref (see WindowsLive
-// in admission.go), and what it protects against is already covered downstream:
-// VerifyDispatched revalidates each dispatch's exact native id, session, and
-// name after the fact, and every act on an existing window resolves through
-// ResolveWindowExact under the session's native id rather than by name lookup.
+// window, and the reason is forgectl#237, not this file's own judgment.
+//
+// THIS REMOVAL IS CONTINGENT ON #237's ID-BASED TARGETING. Before #237, a name
+// reached tmux as a `-t` operand, so a window carrying somebody else's identical
+// name could answer for this review's and absorb a select or a kill. A
+// pre-create refusal was the only thing standing between that and a
+// wrong-window action. #237 eliminated the hazard structurally instead: every
+// action now targets a native id. `new-window` mints its own `@N` and returns
+// it, VerifyDispatched matches on that generation-qualified identity, and every
+// act on an existing window resolves through ResolveWindowExact under the
+// session's native id. A same-name window can no longer receive an action meant
+// for this one, so the check bought a `list-windows` fork per launch — in a
+// package whose targeting is deliberately built around not forking per ref (see
+// WindowsLive in admission.go) — for a guarantee the targeting layer already
+// provides.
+//
+// If a future change reverts #237 and lets a NAME reach a `-t` operand again,
+// this refusal has to come back with it.
+//
+// Supporting, not load-bearing: the digest carries 160 bits over the canonical
+// key, so two distinct sessions cannot land on one name by accident, and a
+// deliberate same-name plant requires write access to the operator's tmux
+// session — already a larger compromise than anything this check protects.
 
 // launchInline composes the claude argv and opens it in a tmux window rooted
 // at the workspace. It uses launch.ClaudePath/Resolve/BuilderArgs — never

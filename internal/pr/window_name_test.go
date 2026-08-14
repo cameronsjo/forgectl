@@ -1,8 +1,12 @@
 package pr
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
 // mustWindowName is the review-window name for ref, for tests that need a
@@ -121,5 +125,85 @@ func TestWindowNameFailsClosedOnAnUnkeyableRef(t *testing.T) {
 	}
 	if _, err := shellWindowName(Ref{}); err == nil {
 		t.Fatal("an empty ref produced a shell window name")
+	}
+}
+
+// tmuxMutations counts the tmux verbs that CHANGE server state. A refusal is
+// only real if it is zero of these — an error return proves the caller was told,
+// not that nothing happened on the way to telling them.
+func tmuxMutations(calls []exec.Call) []string {
+	mutating := map[string]bool{
+		"new-window": true, "select-window": true, "kill-window": true,
+		"rename-window": true, "new-session": true, "kill-session": true,
+	}
+	var out []string
+	for _, call := range calls {
+		if call.Name == "tmux" && len(call.Args) > 0 && mutating[call.Args[0]] {
+			out = append(out, call.Args[0])
+		}
+	}
+	return out
+}
+
+// The fail-closed guarantee, counted rather than asserted in prose: a breadcrumb
+// whose ref yields no logical key must reach ZERO tmux mutations — no create, no
+// select, no rename, no kill — on every verb that acts on a window.
+//
+// The breadcrumb here is the realistic corrupt case: marked local, so the oid
+// lives in Repo, but carrying something no declared oid width accepts. Every
+// other seam validates the ref's charset, so this is what a key failure looks
+// like in production rather than a synthetic zero value.
+func TestUnkeyableRefReachesZeroTmuxMutations(t *testing.T) {
+	ref, err := ParseRef("local/zzz#1")
+	if err != nil {
+		t.Fatalf("ParseRef: %v", err)
+	}
+	ref = ref.asLocal()
+	if _, err := ReviewWindowName(ref); err == nil {
+		t.Fatal("test setup is wrong: this ref is keyable, so it proves nothing")
+	}
+
+	for _, tc := range []struct {
+		verb string
+		call func(*Client, string) error
+	}{
+		{"attach", func(c *Client, path string) error { return c.Attach(context.Background(), path) }},
+		{"open", func(c *Client, path string) error { return c.Open(context.Background(), path) }},
+	} {
+		t.Run(tc.verb, func(t *testing.T) {
+			fake := reviewServer()
+			c := testClient(t, fake)
+			workspace := fakeWorkspace(t)
+			bc := Breadcrumb{
+				Workspace: workspace, Ref: ref.String(), Agent: "claude",
+				CreatedAt: time.Now().UTC(), Local: true,
+			}
+			path, err := writeBreadcrumb(c.SessionsDir(), ref, bc)
+			if err != nil {
+				t.Fatalf("seed breadcrumb: %v", err)
+			}
+
+			if err := tc.call(c, path); err == nil {
+				t.Fatalf("%s accepted a ref with no derivable session identity", tc.verb)
+			}
+			if got := tmuxMutations(fake.Calls); len(got) != 0 {
+				t.Errorf("%s issued %d tmux mutation(s) %v before refusing; want zero", tc.verb, len(got), got)
+			}
+
+			// Positive control: the same verb on a KEYABLE ref must register a
+			// mutation. Without this, a tmuxMutations that silently matched
+			// nothing — a renamed verb, a changed Call shape — would report the
+			// refusal above as airtight while counting exactly as many mutations
+			// as a broken counter counts.
+			good := Ref{Owner: "o", Repo: "r", Number: 7}
+			goodFake := reviewServer(mustWindowName(t, good))
+			goodClient := testClient(t, goodFake)
+			goodPath, _ := seedSession(t, goodClient, good, time.Now().UTC())
+			_ = tc.call(goodClient, goodPath)
+			if got := tmuxMutations(goodFake.Calls); len(got) == 0 {
+				t.Errorf("%s on a keyable ref registered zero mutations — the counter is broken, "+
+					"so the zero above proves nothing; calls=%+v", tc.verb, goodFake.Calls)
+			}
+		})
 	}
 }

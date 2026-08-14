@@ -118,6 +118,20 @@ func (k prSessionKey) digest(role nameRole) string {
 // is total: every input, including empty, invalid-UTF-8 bytes, and pure
 // punctuation, yields a legal 1..55-byte label.
 //
+// TERMINAL SAFETY: a generated name DOES reach human sinks — `pr attach`'s error
+// text quotes it, and slog carries it — so the question of control and bidi
+// characters is live, not hypothetical. It is answered by construction rather
+// than by termsafe.SafeLine at each sink: the label is built from an ALLOWLIST
+// of [a-z0-9-] and the digest from base32's [a-z2-7], so a control byte, an
+// ANSI escape, a NUL, or a bidi override (U+202E and friends) cannot survive
+// into the output — every one of them is non-alphanumeric and collapses to a
+// hyphen here. That is strictly stronger than sanitizing at the sink, which
+// strips what it knows to look for; this cannot emit what it cannot spell.
+// Callers therefore need no termsafe wrapper on a name from this codec, and
+// that is the ONLY reason they are exempt — a future change that widens the
+// label alphabet takes the exemption with it (see forgectl#281, #291, #295 for
+// how often this class drifts).
+//
 // ASCII letters lowercase, digits survive, and every other rune — punctuation,
 // whitespace, control characters, anything non-ASCII, and the U+FFFD that
 // invalid bytes decode to — collapses into a single hyphen. That deliberately

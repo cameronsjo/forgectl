@@ -180,6 +180,55 @@ func TestEncodedNameRejectsInvalidUTF8Label(t *testing.T) {
 	}
 }
 
+// A generated name reaches human sinks — error text and slog — so it must be
+// terminal-safe. The codec's claim is stronger than sanitizing at the sink: an
+// allowlist alphabet cannot EMIT a control, escape, or bidi character, whatever
+// went in. Asserted here by a byte-level scan over hostile input, not by eye.
+//
+// Every hostile rune is CONSTRUCTED, never authored literally: a literal bidi
+// override in this file would reorder the source of the very test asserting it
+// is neutralized.
+func TestEncodedNameCannotEmitTerminalControlOrBidi(t *testing.T) {
+	key, err := remoteSessionKey("owner", "repo", 1)
+	if err != nil {
+		t.Fatalf("remoteSessionKey: %v", err)
+	}
+	hostile := string([]rune{
+		rune(0x202e), // RIGHT-TO-LEFT OVERRIDE
+		rune(0x202d), // LEFT-TO-RIGHT OVERRIDE
+		rune(0x2066), // LEFT-TO-RIGHT ISOLATE
+		rune(0x200f), // RIGHT-TO-LEFT MARK
+		rune(0x001b), // ESC — the head of every ANSI sequence
+		rune(0x0007), // BEL
+		rune(0x0000), // NUL
+		rune(0x000a), // LF
+		rune(0x000d), // CR
+		rune(0x007f), // DEL
+		rune(0x009b), // CSI (C1)
+		rune(0x0008), // BS
+	})
+	name, err := key.encodedName("start"+hostile+"end", roleReview)
+	if err != nil {
+		t.Fatalf("encodedName: %v", err)
+	}
+	// Byte-level: every byte must be in the generated alphabet. This catches a
+	// multi-byte rune that survived as bytes even if it reads fine as a string.
+	for i := range len(name) {
+		c := name[i]
+		ok := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'
+		if !ok {
+			t.Fatalf("name %q carries byte %#02x at offset %d, outside the generated alphabet", name, c, i)
+		}
+	}
+	if !reEncodedName.MatchString(name) {
+		t.Fatalf("name %q is outside the grammar", name)
+	}
+	// The control run collapsed to one separator rather than vanishing silently.
+	if !strings.Contains(name, "start-end") {
+		t.Fatalf("name %q lost the label boundary the hostile run should have become", name)
+	}
+}
+
 // tmux splits a target string on ":" and ".", and treats "$", "@", "%", "="
 // as identity or match sigils. None may appear in a generated name.
 func TestEncodedNameCarriesNoTmuxTargetGrammar(t *testing.T) {
