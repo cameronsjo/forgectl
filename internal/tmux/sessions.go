@@ -170,9 +170,16 @@ func (c *Client) CreateSession(ctx context.Context, name, dir string) (SessionId
 // through the error path instead of the target path.
 //
 // Every one of these must hold before the failure counts as a duplicate: the
-// argv is exactly the one CreateSession built, tmux exited 1, and stderr is
-// tmux's duplicate diagnostic for exactly this name. Equality, not Contains — a
-// session name can carry the diagnostic's text.
+// argv is exactly the one CreateSession built, tmux exited 1, and stderr equals
+// "duplicate session: " + name.
+//
+// The strength of that last check is worth stating precisely, because the
+// tempting justification — "no other tmux message begins with that prefix" — is
+// a claim over tmux's entire message catalog and is not provable. The provable
+// property is narrower and does more work: the comparison is exact equality
+// against a string THIS function constructs from the name it was given, so a
+// forgery requires tmux to emit that line byte for byte. Equality, not Contains
+// — under Contains, a session named after the diagnostic forges the verdict.
 func (c *Client) classifyCreateFailure(args []string, name string, err error) error {
 	var commandErr *internalexec.CommandError
 	if !errors.As(err, &commandErr) {
@@ -276,6 +283,17 @@ func (c *Client) KillSession(ctx context.Context, want SessionIdentity) error {
 // it is not pointed at, so a wrong or stale target does not kill the wrong
 // session, it kills all the RIGHT ones. Revalidation immediately before
 // dispatch is not belt-and-braces here, it is the control.
+//
+// ValidateSessionID is load-bearing on this line specifically, and not as
+// hygiene. Measured on tmux 3.7b: `kill-session -a -t ”` exits 0 and kills
+// every session except the current one. An empty operand is not a no-op and not
+// an error — it silently succeeds at maximum blast radius, which is the one
+// failure mode this function must not have.
+//
+// Two independent layers keep current.ID non-empty: preflight validates before
+// any command runs, and parseSessions drops rows failing ValidateSessionID, so
+// a listing cannot produce an empty id to revalidate against. Relaxing either
+// one "because ids are always well-formed" re-arms the sentence above.
 func (c *Client) KillOthers(ctx context.Context, keep SessionIdentity) error {
 	current, err := c.RevalidateSession(ctx, keep)
 	if err != nil {
