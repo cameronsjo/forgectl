@@ -52,10 +52,9 @@ reviewed are dimmed; new activity on the PR auto-un-dims them.
 			if err != nil {
 				return err
 			}
-			// Per-query degradation notes are diagnostics → stderr, never stdout.
-			for _, n := range notes {
-				fmt.Fprintln(cmd.ErrOrStderr(), "note: "+n)
-			}
+			// Per-query degradation notes are diagnostics → stderr, never stdout,
+			// and escaped on the way.
+			renderDegradationNotes(cmd, notes)
 
 			store := pr.LoadReviewed(reviewedPath)
 			if asJSON {

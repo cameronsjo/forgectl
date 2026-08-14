@@ -48,9 +48,7 @@ to stdout and exits 1; each printed ref works with forgectl pr <ref>.`,
 			if err != nil {
 				return err
 			}
-			for _, n := range notes {
-				fmt.Fprintln(cmd.ErrOrStderr(), "note: "+n)
-			}
+			renderDegradationNotes(cmd, notes)
 			if len(prs) == 0 {
 				return fmt.Errorf("no open PRs to pick from")
 			}

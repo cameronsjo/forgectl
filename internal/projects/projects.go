@@ -360,6 +360,14 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 	if err != nil {
 		// A missing/unreadable projects dir shouldn't suppress the remote view —
 		// degrade to "no local clones" and note it.
+		// Deliberately NOT categorical, unlike the host legs below. Those carry
+		// a remote's stderr — text a hostile or MITM'd server authors, with no
+		// diagnostic worth the risk. This one carries c.Dir and the OS's own
+		// errno text, which is the whole answer to "why is my inventory empty",
+		// and it is config- and filesystem-material rather than server-chosen.
+		// It is the low-trust interpolation the render sink exists to escape:
+		// keeping one live producer is what keeps renderDegradationNotes
+		// load-bearing instead of conventional.
 		slog.Warn("Failed to enumerate local repos.", "projectsDir", c.Dir, "error", err)
 		notes = append(notes, fmt.Sprintf("local: %v", err))
 		local = nil

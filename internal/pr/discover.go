@@ -106,8 +106,14 @@ func (c *Client) PRs(ctx context.Context) ([]PR, []string, error) {
 	for range queries {
 		res := <-ch
 		if res.err != nil {
+			// Categorical note, raw cause to the log only. res.err comes off
+			// `gh` as an *exec.CommandError whose Error() is that subprocess's
+			// stderr verbatim — text the responding host (this leg is not
+			// pinned to github.com) or any proxy or gh extension in between
+			// chooses. These notes are printed to a terminal, so interpolating
+			// %v would hand that writer the operator's screen.
 			slog.Warn("PR query degraded.", "query", res.label, "error", res.err)
-			notes = append(notes, fmt.Sprintf("%s: %v", res.label, res.err))
+			notes = append(notes, fmt.Sprintf("%s: query failed", res.label))
 			continue
 		}
 		if res.truncated {
@@ -136,8 +142,11 @@ func (c *Client) Dash(ctx context.Context) (Dashboard, []string, error) {
 
 	active, err := c.List()
 	if err != nil {
+		// Categorical, for the same reason as the query legs below: c.List
+		// reads a breadcrumb dir whose path and contents are filesystem
+		// material, and the error text carries it verbatim.
 		slog.Warn("Active-reviews section degraded.", "error", err)
-		notes = append(notes, fmt.Sprintf("active-reviews: %v", err))
+		notes = append(notes, "active-reviews: listing failed")
 	}
 
 	const sections = 2
@@ -155,8 +164,10 @@ func (c *Client) Dash(ctx context.Context) (Dashboard, []string, error) {
 	for i := 0; i < sections; i++ {
 		res := <-ch
 		if res.err != nil {
+			// Categorical note, raw cause to the log only — same
+			// subprocess-stderr reasoning as PRs above.
 			slog.Warn("Dashboard section degraded.", "section", res.label, "error", res.err)
-			notes = append(notes, fmt.Sprintf("%s: %v", res.label, res.err))
+			notes = append(notes, fmt.Sprintf("%s: query failed", res.label))
 			continue
 		}
 		if res.truncated {

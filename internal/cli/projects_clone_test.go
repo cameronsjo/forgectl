@@ -14,6 +14,8 @@ package cli
 //   [x] Unhappy: --org combined with a query argument is rejected
 //   [x] Unhappy: --org listing failure propagates
 //   [x] Unhappy: --org with no repos returns an error
+//   [x] Invariant: a hostile degradation note is escaped on stderr — the
+//       non-`list` anchor proving renderDegradationNotes is applied here too
 //
 // The interactive huh form remains unexecuted in unit tests. Its chooser
 // boundary is covered in projects_pick_test.go, including headless candidate
@@ -255,5 +257,47 @@ func TestCloneCmd_DegradationNotes_AppearOnStderrNotStdout(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "note:") {
 		t.Errorf("degradation notes missing from stderr: %q", stderr.String())
+	}
+}
+
+// TestCloneCmd_HostileNoteIsEscapedOnStderr is the non-`list` anchor for the
+// shared render sink. The escaping helper was introduced for `review` and
+// `projects list`, and for a while only those sites called it — a convention,
+// not a control. `clone` is one of the seven commands that printed the SAME
+// client.Inventory notes raw, and its vector is the cheapest one an attacker
+// has: anything that reaches PROJECTS_DIR (a config value, a synced dotfile, a
+// repo-local .envrc) turns `forgectl projects clone <no-match>` into a screen
+// clear plus attacker-chosen text. Asserting here, not only at `list`, is what
+// makes renderDegradationNotes load-bearing at every call site.
+func TestCloneCmd_HostileNoteIsEscapedOnStderr(t *testing.T) {
+	hostile := filepath.Join(t.TempDir(), "missing\x1b[2J\x1b[H\rforged‮gnp")
+	t.Setenv("PROJECTS_DIR", hostile)
+	fake := &exec.FakeRunner{RunFunc: twoHostRunFunc("[]", "owner\tname\ttype\tssh\n")}
+	client := projects.New(fake)
+
+	cmd := newProjectsCloneCmd(client)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	// A query matching nothing keeps the run deterministic: the notes render,
+	// then the command errors out before any picker or clone.
+	cmd.SetArgs([]string{"no-such-project"})
+
+	// The error is the point of the arg, not of the test — assert on stderr.
+	_ = cmd.ExecuteContext(context.Background())
+
+	body := stderr.String()
+	if !strings.Contains(body, "note:") || !strings.Contains(body, "local") {
+		t.Fatalf("expected a local-degradation note on stderr, got %q", body)
+	}
+	for _, r := range hostileRunes {
+		if strings.Contains(body, r) {
+			t.Errorf("stderr carried %q unescaped: %q", r, body)
+		}
+	}
+	// Quote, don't delete: the operator still needs to see something odd was in
+	// the path.
+	if !strings.Contains(body, `\x1b`) {
+		t.Errorf("want the escape sequence rendered as inert text, got %q", body)
 	}
 }

@@ -43,13 +43,15 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 			}
 
 			repos, notes, err := client.Inventory(ctx)
+			// Per-host degradation notes are diagnostics → stderr, never stdout,
+			// and escaped on the way: a note can carry a filesystem path or a
+			// host label built from low-trust config. They render BEFORE the
+			// error return for the same reason `review` does it — an
+			// all-hosts failure is exactly when the per-host notes matter most.
+			renderDegradationNotes(cmd, notes)
 			if err != nil {
 				return err
 			}
-			// Per-host degradation notes are diagnostics → stderr, never stdout,
-			// and escaped on the way: a note can carry a filesystem path or a
-			// host label built from low-trust config.
-			renderDegradationNotes(cmd, notes)
 
 			query := ""
 			if len(args) == 1 {

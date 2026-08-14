@@ -49,9 +49,7 @@ when possible, inspect identities with projects list --json, or rerun interactiv
 			if err != nil {
 				return err
 			}
-			for _, n := range notes {
-				fmt.Fprintln(cmd.ErrOrStderr(), "note: "+n)
-			}
+			renderDegradationNotes(cmd, notes)
 			if len(all) == 0 {
 				return fmt.Errorf("no projects found across local, GitHub, or Gitea")
 			}

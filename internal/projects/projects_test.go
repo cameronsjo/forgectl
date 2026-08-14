@@ -213,9 +213,6 @@ func TestClone_DispatchesByHost(t *testing.T) {
 	})
 }
 
-// TestListOrg_RejectsUnsafeLogin guards the caller-supplied `--org` value: an
-// empty, traversal, or leading-'-' login must be refused before it becomes a
-// `gh` argv (a '-'-leading value would be read as a flag, not a positional).
 // TestClone_PinsGhToGitHubComDespiteAmbientHost covers the clone leg's own
 // host pin. A mislabeled listing row is a bad table cell; a clone REDIRECTED to
 // an enterprise host by an ambient GH_HOST persists to disk at
@@ -242,6 +239,9 @@ func TestClone_PinsGhToGitHubComDespiteAmbientHost(t *testing.T) {
 	}
 }
 
+// TestListOrg_RejectsUnsafeLogin guards the caller-supplied `--org` value: an
+// empty, traversal, or leading-'-' login must be refused before it becomes a
+// `gh` argv (a '-'-leading value would be read as a flag, not a positional).
 func TestListOrg_RejectsUnsafeLogin(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := &Client{Dir: t.TempDir(), run: fake}
