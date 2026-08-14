@@ -16,7 +16,9 @@ package pr
 //   [x] Member security field changed -> refuse
 //   [x] Member disappeared -> refuse (never reported as success)
 //   [x] Session directory swapped -> refuse
-//   [x] Workspace reappeared -> refuse, member intact
+//   [x] Workspace reappeared -> refuse, member intact, and the RENDERED
+//       refusal carries no formatting artifact (Live classifies with a nil
+//       cause, so this message must not wrap one)
 //   [x] Every refusal leaves breadcrumb, sibling, parent, and external canaries
 //       intact and issues ZERO Runner calls
 //   [x] Concurrent same-client teardowns serialize: exactly one unlink succeeds
@@ -27,8 +29,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -222,6 +226,42 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 				f.canary.assertIntact(t)
 			}
 		})
+	}
+}
+
+// TestDiscardStale_ReappearedWorkspaceRendersACleanRefusal pins the TEXT of the
+// likeliest refusal on this path, not merely that one occurred.
+//
+// A workspace that came back between classification and the unlink classifies
+// LIVE, and classifyWorkspace returns a NIL error for Live. The refusal used to
+// wrap that cause unconditionally, so the operator saw "%!w(<nil>)" — a message
+// that reads as a forgectl bug at exactly the moment it should read as "your
+// workspace is back, nothing was deleted".
+func TestDiscardStale_ReappearedWorkspaceRendersACleanRefusal(t *testing.T) {
+	f := newStaleFixture(t)
+	if err := os.MkdirAll(f.ws, 0o700); err != nil {
+		t.Fatalf("recreate workspace: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(f.ws) })
+
+	err := f.client.discardStale(f.member)
+	if err == nil {
+		t.Fatal("discardStale must refuse once the recorded workspace is live again")
+	}
+	got := err.Error()
+	if strings.Contains(got, "%!") || strings.Contains(got, "<nil>") {
+		t.Errorf("the refusal must not render a formatting artifact: %q", got)
+	}
+	want := fmt.Sprintf(
+		"workspace for breadcrumb %s is no longer cleanly absent; refusing to remove it", f.path)
+	if got != want {
+		t.Errorf("refusal = %q, want %q", got, want)
+	}
+	if _, statErr := os.Lstat(f.path); statErr != nil {
+		t.Errorf("a refusal must leave the breadcrumb in place: %v", statErr)
+	}
+	if len(f.fake.Calls) != 0 {
+		t.Errorf("a refusal must issue ZERO Runner calls; got %+v", f.fake.Calls)
 	}
 }
 

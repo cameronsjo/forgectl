@@ -199,6 +199,15 @@ func (c *Client) discardStale(member breadcrumbMember) error {
 	// record is live again and must not be discarded as stale.
 	avail, availErr := classifyWorkspace(bc.Workspace)
 	if avail != workspaceAvailabilityMissing {
+		// classifyWorkspace returns a NIL error for Live, and Live is the most
+		// likely way to reach this refusal — the workspace reappeared between
+		// the classification that chose this branch and the unlink. Wrapping
+		// unconditionally rendered that operator-facing message as
+		// "%!w(<nil>)", so the cause is wrapped only when there is one.
+		if availErr == nil {
+			return fmt.Errorf("workspace for breadcrumb %s is no longer cleanly absent; refusing to remove it",
+				member.path)
+		}
 		return fmt.Errorf("workspace for breadcrumb %s is no longer cleanly absent; refusing to remove it: %w",
 			member.path, availErr)
 	}
