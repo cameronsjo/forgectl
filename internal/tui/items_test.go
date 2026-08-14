@@ -67,11 +67,12 @@ func TestPickItemRender(t *testing.T) {
 
 func TestWindowItemRender(t *testing.T) {
 	item := windowItem{w: tmux.Window{
-		Session: "main",
-		Name:    "editor",
-		Active:  true,
-		Panes:   2,
-		Target:  "main:editor",
+		ID:        "@4",
+		SessionID: "$1",
+		Session:   "main",
+		Name:      "editor",
+		Active:    true,
+		Panes:     2,
 	}}
 
 	t.Run("contains session and window name", func(t *testing.T) {

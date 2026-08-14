@@ -56,6 +56,13 @@ func successfulLaunchRunner() *exec.FakeRunner {
 				return "tmux 3.7b", nil
 			case "display-message":
 				return "123\x1f456\x1f@0", nil
+			case "list-sessions":
+				// Empty server: EnsureSession creates the review session.
+				return "", nil
+			case "new-session":
+				// `new-session -P -F` returns the generation plus the new
+				// session's native id, which is what the dispatch targets.
+				return "123\x1f456\x1f$1", nil
 			case "new-window":
 				return "123\x1f456\x1f@1", nil
 			}
@@ -128,8 +135,23 @@ func TestWindowName_RepoDistinguishesCrossRepo(t *testing.T) {
 	if windowName(a) != "pr-o-a-42" {
 		t.Errorf("windowName(a) = %q, want %q", windowName(a), "pr-o-a-42")
 	}
-	if windowTarget := (&Client{tmuxSession: "forgectl"}).windowTarget(a); windowTarget != "=forgectl:"+windowName(a) {
-		t.Errorf("windowTarget(a) = %q, want %q", windowTarget, "=forgectl:"+windowName(a))
+}
+
+// TestNewWindowTarget_IsSessionIDWithTrailingColon pins the dispatch
+// destination. The colon is what makes the operand session-qualified for
+// new-window; without it tmux reads the value as a window target and resolves
+// it by prefix (forgectl#237).
+func TestNewWindowTarget_IsSessionIDWithTrailingColon(t *testing.T) {
+	session := tmux.SessionIdentity{ID: "$4", Name: "forgectl"}
+	got, err := newWindowTarget(session)
+	if err != nil {
+		t.Fatalf("newWindowTarget: %v", err)
+	}
+	if got != "$4:" {
+		t.Fatalf("newWindowTarget = %q, want %q", got, "$4:")
+	}
+	if strings.Contains(got, "forgectl") {
+		t.Fatalf("newWindowTarget = %q; the session NAME must never reach a -t operand", got)
 	}
 }
 

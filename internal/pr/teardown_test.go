@@ -38,7 +38,7 @@ func seedSession(t *testing.T, c *Client, ref Ref, createdAt time.Time) (bcPath,
 }
 
 func TestTeardown_AcceptsMember(t *testing.T) {
-	fake := &exec.FakeRunner{}
+	fake := reviewServer("pr-o-r-7")
 	c := testClient(t, fake)
 	ref := Ref{Owner: "o", Repo: "r", Number: 7}
 	path, ws := seedSession(t, c, ref, time.Now().UTC())
@@ -57,12 +57,44 @@ func TestTeardown_AcceptsMember(t *testing.T) {
 	if _, err := os.Stat(ws); !os.IsNotExist(err) {
 		t.Error("workspace should be removed after teardown")
 	}
-	tmux, ok := findCall(fake.Calls, "tmux")
+	call, ok := findCallVerb(fake.Calls, "tmux", "kill-window")
 	if !ok {
 		t.Fatalf("expected a tmux kill-window call; got %+v", fake.Calls)
 	}
-	if want := []string{"kill-window", "-t", "=forgectl:pr-o-r-7"}; !equalArgs(tmux.Args, want) {
-		t.Errorf("tmux args = %v, want %v", tmux.Args, want)
+	// The native window id, resolved under the review session and revalidated
+	// immediately before the kill.
+	if want := []string{"kill-window", "-t", "@5"}; !equalArgs(call.Args, want) {
+		t.Errorf("tmux args = %v, want %v", call.Args, want)
+	}
+}
+
+// TestTeardown_LeavesForeignWindowAlone is the destructive gate on the teardown
+// path: a window carrying this review's NAME but sitting in another session is
+// not this review's window, and teardown must leave it running.
+func TestTeardown_LeavesForeignWindowAlone(t *testing.T) {
+	sessionRow := strings.Join([]string{"123", "456", "$1", "forgectl", "1", "0", "1700000000", "/w"}, "\x1f")
+	strayRow := strings.Join([]string{"123", "456", "@9", "$2", "other", "0", "pr-o-r-7", "0", "1"}, "\x1f")
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name != "tmux" || len(args) == 0 {
+			return "", nil
+		}
+		switch args[0] {
+		case "list-sessions":
+			return sessionRow, nil
+		case "list-windows":
+			return strayRow, nil
+		}
+		return "", nil
+	}}
+	c := testClient(t, fake)
+	ref := Ref{Owner: "o", Repo: "r", Number: 7}
+	path, _ := seedSession(t, c, ref, time.Now().UTC())
+
+	if err := c.Teardown(context.Background(), path); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if call, ok := findCallVerb(fake.Calls, "tmux", "kill-window"); ok {
+		t.Errorf("kill-window ran with %v against a window in another session", call.Args)
 	}
 }
 
@@ -117,13 +149,15 @@ func TestTeardown_CoveredRootQuarantineHasNoPhantomNestedMove(t *testing.T) {
 func TestTeardown_LiveOrderRemovesBreadcrumbLast(t *testing.T) {
 	var breadcrumbAtTmux bool
 	var bcPath string
+	server := reviewServer("pr-o-r-11")
+	inner := server.RunFunc
 	fake := &exec.FakeRunner{}
 	fake.RunFunc = func(name string, args []string) (string, error) {
 		if name == "tmux" && len(args) > 0 && args[0] == "kill-window" {
 			_, err := os.Stat(bcPath)
 			breadcrumbAtTmux = err == nil
 		}
-		return "", nil
+		return inner(name, args)
 	}
 	c := testClient(t, fake)
 	ref := Ref{Owner: "o", Repo: "r", Number: 11}

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -29,12 +30,33 @@ func TestInteractiveTTY_RequiresBothDescriptors(t *testing.T) {
 	}
 }
 
+// liveServer answers listings describing one session ($1 "main") holding one
+// window (@3), so an Action's identity survives the revalidation every dispatch
+// now performs. Building fixtures this way rather than stubbing the client is
+// the point: the argv a test asserts is the argv that came out the far side of
+// a real identity check.
+func liveServer() *exec.FakeRunner {
+	const sep = "\x1f"
+	return &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		switch args[0] {
+		case "list-sessions":
+			return strings.Join([]string{"123", "456", "$1", "main", "1", "1", "1700000000", "/w"}, sep), nil
+		case "list-windows":
+			return strings.Join([]string{"123", "456", "@3", "$1", "main", "0", "editor", "1", "1"}, sep), nil
+		}
+		return "", nil
+	}}
+}
+
 func TestDispatchAction(t *testing.T) {
 	ctx := context.Background()
 
 	cases := []struct {
 		name            string
-		action          tui.Action
+		action          func(*tmux.Client) tui.Action
 		wantCallCount   int
 		wantCmd         string
 		wantArgs        []string
@@ -42,25 +64,42 @@ func TestDispatchAction(t *testing.T) {
 	}{
 		{
 			name:   "ActionNone makes no calls",
-			action: tui.Action{},
+			action: func(*tmux.Client) tui.Action { return tui.Action{} },
 		},
 		{
-			name:          "ActionAttach inside tmux issues switch-client",
-			action:        tui.Action{Kind: tui.ActionAttach, Target: "main"},
+			name: "ActionAttachSession inside tmux switches by native id",
+			action: func(c *tmux.Client) tui.Action {
+				return tui.Action{
+					Kind:    tui.ActionAttachSession,
+					Session: c.SessionIdentity(tmux.Session{ServerPID: "123", ServerStart: "456", ID: "$1", Name: "main"}),
+				}
+			},
 			wantCallCount: 1,
 			wantCmd:       "tmux",
-			wantArgs:      []string{"switch-client", "-t", "main"},
+			wantArgs:      []string{"switch-client", "-t", "$1"},
+		},
+		{
+			name: "ActionAttachWindow selects the window then switches to its parent",
+			action: func(c *tmux.Client) tui.Action {
+				return tui.Action{
+					Kind:   tui.ActionAttachWindow,
+					Window: c.WindowIdentity(tmux.Window{ServerPID: "123", ServerStart: "456", ID: "@3", SessionID: "$1", Name: "editor"}),
+				}
+			},
+			wantCallCount: 1,
+			wantCmd:       "tmux",
+			wantArgs:      []string{"switch-client", "-t", "$1"},
 		},
 		{
 			name:          "ActionLast inside tmux issues switch-client -l",
-			action:        tui.Action{Kind: tui.ActionLast},
+			action:        func(*tmux.Client) tui.Action { return tui.Action{Kind: tui.ActionLast} },
 			wantCallCount: 1,
 			wantCmd:       "tmux",
 			wantArgs:      []string{"switch-client", "-l"},
 		},
 		{
 			name:            "ActionPick issues interactive sesh connect",
-			action:          tui.Action{Kind: tui.ActionPick, Target: "dev"},
+			action:          func(*tmux.Client) tui.Action { return tui.Action{Kind: tui.ActionPick, Pick: "dev"} },
 			wantCallCount:   1,
 			wantCmd:         "sesh",
 			wantInteractive: true,
@@ -69,7 +108,7 @@ func TestDispatchAction(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &exec.FakeRunner{}
+			fake := liveServer()
 			// Stub the sesh PATH check so the ActionPick case exercises the
 			// dispatch, not a real sesh binary (CI runners have none).
 			client := tmux.New(fake,
@@ -77,7 +116,7 @@ func TestDispatchAction(t *testing.T) {
 				tmux.WithLookPath(func(string) (string, error) { return "sesh", nil }),
 			)
 
-			if err := dispatchAction(ctx, client, tc.action); err != nil {
+			if err := dispatchAction(ctx, client, tc.action(client)); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
@@ -113,15 +152,38 @@ func TestDispatchAction(t *testing.T) {
 
 func TestDispatchAction_ErrorPropagates(t *testing.T) {
 	ctx := context.Background()
-	fake := &exec.FakeRunner{
-		InteractiveErr: &exec.CommandError{Name: "sesh", Err: &mockExitErr{}},
-	}
+	fake := liveServer()
+	fake.InteractiveErr = &exec.CommandError{Name: "tmux", Err: &mockExitErr{}}
 	client := tmux.New(fake, tmux.WithInsideTmux(func() bool { return false }))
 
-	act := tui.Action{Kind: tui.ActionAttach, Target: "main"}
-	err := dispatchAction(ctx, client, act)
-	if err == nil {
+	act := tui.Action{
+		Kind:    tui.ActionAttachSession,
+		Session: client.SessionIdentity(tmux.Session{ServerPID: "123", ServerStart: "456", ID: "$1", Name: "main"}),
+	}
+	if err := dispatchAction(ctx, client, act); err == nil {
 		t.Fatal("expected error from failed attach, got nil")
+	}
+}
+
+// TestDispatchAction_StaleIdentityIsRefused closes the gap the TUI's deferred
+// action opens: Bubble Tea's teardown sits between choosing a session and
+// attaching to it, and the server can restart in that window. The captured id
+// would still resolve — to a different session.
+func TestDispatchAction_StaleIdentityIsRefused(t *testing.T) {
+	fake := liveServer()
+	client := tmux.New(fake, tmux.WithInsideTmux(func() bool { return true }))
+	act := tui.Action{
+		Kind: tui.ActionAttachSession,
+		// Same $1, a server generation that no longer exists.
+		Session: client.SessionIdentity(tmux.Session{ServerPID: "999", ServerStart: "999", ID: "$1", Name: "main"}),
+	}
+	if err := dispatchAction(context.Background(), client, act); err == nil {
+		t.Fatal("attached to a session id minted by a dead server generation")
+	}
+	for _, call := range fake.Calls {
+		if len(call.Args) > 0 && call.Args[0] != "list-sessions" {
+			t.Fatalf("ran %v on a stale identity, want only the listing", call.Args)
+		}
 	}
 }
 

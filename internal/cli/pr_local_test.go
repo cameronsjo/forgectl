@@ -38,6 +38,9 @@ import (
 func prLocalFakeRunner() *exec.FakeRunner {
 	return &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			if out, handled, err := tmuxDouble(name, args); handled {
+				return out, err
+			}
 			if name == "tmux" && len(args) > 0 {
 				switch args[0] {
 				case "-V":
