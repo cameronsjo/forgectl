@@ -90,9 +90,7 @@ func newPrReviewedSyncCmd(client *pr.Client, reviewedPath string) *cobra.Command
 			if err != nil {
 				return err
 			}
-			for _, n := range notes {
-				fmt.Fprintln(cmd.ErrOrStderr(), "note: "+n)
-			}
+			renderDegradationNotes(cmd, notes)
 			// A degraded query yields a PARTIAL open set — pruning against it
 			// would drop reviewed marks for PRs that are actually still open.
 			// Refuse to prune on partial data (a mark is only ever recreated by

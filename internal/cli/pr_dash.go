@@ -38,9 +38,7 @@ Rows you've marked reviewed are dimmed (new activity auto-un-dims them).`,
 			if err != nil {
 				return err
 			}
-			for _, n := range notes {
-				fmt.Fprintln(cmd.ErrOrStderr(), "note: "+n)
-			}
+			renderDegradationNotes(cmd, notes)
 
 			store := pr.LoadReviewed(reviewedPath)
 			out := cmd.OutOrStdout()

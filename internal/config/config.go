@@ -55,8 +55,10 @@ const logKeepDays = 7
 //	[sessions]           # forgectl sessions — cross-machine operational concordance ETL
 //	dsn     = "postgres://user@host:5433/concordance" # password via ~/.pgpass; env FORGECTL_SESSIONS_DSN wins
 //	machine = ""                     # provenance label; default: short hostname
+//	[projects]           # forgectl projects — GitHub.com inventory scope
+//	owners = ["your-login"]          # gh repo list scope; unset/[] = authenticated login
 //	[review]             # forgectl review — cross-project work inventory
-//	owners = ["cameronsjo"]          # gh search --owner scope; default cameronsjo
+//	owners = ["your-login"]          # gh search --owner scope; unset/[] = authenticated login
 //	[review.gitea]       # forgectl review — additional Gitea source (opt-in)
 //	enabled = false                  # false by default; the tea CLI must be on PATH
 //	host    = "git.sjo.lol"          # required when enabled
@@ -86,6 +88,7 @@ type Config struct {
 	Docker    DockerConfig    `toml:"docker"`
 	Clean     CleanConfig     `toml:"clean"`
 	Sessions  SessionsConfig  `toml:"sessions"`
+	Projects  ProjectsConfig  `toml:"projects"`
 	Review    ReviewConfig    `toml:"review"`
 	Docs      DocsConfig      `toml:"docs"`
 	Preflight PreflightConfig `toml:"preflight"`
@@ -248,11 +251,31 @@ func (sc SessionsConfig) IsZero() bool {
 	return sc.DSN == "" && sc.Machine == "" && sc.MetricsDir == "" && sc.RunbooksDir == ""
 }
 
+// ProjectsConfig is the [projects] section: which GitHub.com accounts
+// `forgectl projects` enumerates. A zero value — the section absent, or
+// `owners = []` written explicitly — means "the authenticated GitHub.com
+// login", resolved once per operation by internal/githubauth.
+//
+// It is deliberately independent of ReviewConfig.Owners: which repos you jump
+// between and which repos you triage work in are different policies, and
+// neither list ever inherits from the other. Owner values are low-trust argv
+// input; internal/githubauth validates them against the anchored owner
+// charset and bounds the set before any subprocess is spawned.
+type ProjectsConfig struct {
+	Owners []string `toml:"owners"`
+}
+
+// IsZero reports whether the [projects] section was absent or empty.
+func (pc ProjectsConfig) IsZero() bool {
+	return len(pc.Owners) == 0
+}
+
 // ReviewConfig is the [review] section: which owners `forgectl review` fans
 // its gh searches across, plus the opt-in Gitea source. A zero value means
-// "section absent" — the CLI layer applies its built-in default owner. Owner
-// values are low-trust argv input; the search layer validates them against
-// the anchored owner charset.
+// "section absent" — the GitHub source then resolves the authenticated
+// GitHub.com login, exactly as an absent [projects] section does, and
+// independently of it. Owner values are low-trust argv input; the search
+// layer validates them against the anchored owner charset.
 type ReviewConfig struct {
 	Owners []string    `toml:"owners"`
 	Gitea  GiteaConfig `toml:"gitea"`

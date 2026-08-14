@@ -45,6 +45,11 @@ func inventoryRunFunc(tmp string) func(string, []string) (string, error) {
 	return func(name string, args []string) (string, error) {
 		switch name {
 		case "gh":
+			// With no [projects].owners configured, the inventory asks
+			// GitHub.com who the operator is before listing anything.
+			if len(args) >= 2 && args[0] == "api" && args[1] == "user" {
+				return "cameronsjo", nil
+			}
 			return ghJSON, nil
 		case "tea":
 			return teaTSV, nil
@@ -206,6 +211,32 @@ func TestClone_DispatchesByHost(t *testing.T) {
 			t.Errorf("expected a git clone of %s, got %q %v", url, last.Name, last.Args)
 		}
 	})
+}
+
+// TestClone_PinsGhToGitHubComDespiteAmbientHost covers the clone leg's own
+// host pin. A mislabeled listing row is a bad table cell; a clone REDIRECTED to
+// an enterprise host by an ambient GH_HOST persists to disk at
+// Dir/github/<owner>/<name>, where originMatches then disagrees with it on
+// every later run. The literal is deliberate — asserting against
+// githubauth.Host would agree with whatever that constant became.
+func TestClone_PinsGhToGitHubComDespiteAmbientHost(t *testing.T) {
+	t.Setenv("GH_HOST", "ghe.example.test")
+	fake := &exec.FakeRunner{}
+	c := &Client{Dir: t.TempDir(), run: fake}
+
+	if _, err := c.Clone(context.Background(), Repo{
+		Host: "github", Owner: "cameronsjo", Name: "newgh",
+	}); err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+
+	last := fake.Last()
+	if last.Name != "gh" {
+		t.Fatalf("last command = %q, want gh", last.Name)
+	}
+	if got := last.Env["GH_HOST"]; got != "github.com" {
+		t.Fatalf("GH_HOST = %q, want github.com — the clone must not follow an ambient host", got)
+	}
 }
 
 // TestListOrg_RejectsUnsafeLogin guards the caller-supplied `--org` value: an

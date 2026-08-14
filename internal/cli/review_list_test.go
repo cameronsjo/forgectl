@@ -207,14 +207,33 @@ func TestReviewCmd_KindAndRepoFilters(t *testing.T) {
 	}
 }
 
-func TestResolveReviewOwners(t *testing.T) {
-	var cfg config.Config
-	if got := resolveReviewOwners(cfg); len(got) != 1 || got[0] != defaultReviewOwner {
-		t.Errorf("absent [review] section: got %v, want [%s]", got, defaultReviewOwner)
+// TestProjectsListHelp_NamesNoBakedAccount is the projects half of #191's
+// help contract: the GitHub scope is configured or authenticated, never one
+// developer's account compiled into the binary.
+func TestProjectsListHelp_NamesNoBakedAccount(t *testing.T) {
+	help := newProjectsListCmd(nil).Long
+
+	if strings.Contains(help, "github.com/cameronsjo") {
+		t.Errorf("projects list help still names a baked account:\n%s", help)
 	}
-	cfg.Review.Owners = []string{"someoneelse", "cameronsjo"}
-	if got := resolveReviewOwners(cfg); len(got) != 2 || got[0] != "someoneelse" {
-		t.Errorf("configured owners must win: got %v", got)
+	if !strings.Contains(help, "authenticated") {
+		t.Errorf("projects list help does not describe the authenticated fallback:\n%s", help)
+	}
+}
+
+// TestReviewHelp_NamesNoBakedAccount covers issue #191 at the compiled-help
+// surface: the fallback is the authenticated GitHub.com account, and the help
+// must say so rather than naming one developer's login.
+func TestReviewHelp_NamesNoBakedAccount(t *testing.T) {
+	help := newReviewCmdForSources(nil, "").Long
+
+	if strings.Contains(help, "cameronsjo") {
+		t.Errorf("review help still names a baked account:\n%s", help)
+	}
+	for _, want := range []string{"authenticated", "github.com"} {
+		if !strings.Contains(strings.ToLower(help), want) {
+			t.Errorf("review help does not mention %q:\n%s", want, help)
+		}
 	}
 }
 

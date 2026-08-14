@@ -131,6 +131,40 @@ func TestIntegration_Init_FreshWritesEverySection(t *testing.T) {
 	}
 }
 
+// TestIntegration_Init_OwnerScaffoldsAreCommentedExamples covers issue #191:
+// a fresh config.toml must carry no active owner assignment at all. The old
+// [review] scaffold wrote `owners = ["cameronsjo"]` — one machine's account
+// baked into every host's config — and the replacement contract is that an
+// unset list resolves the authenticated GitHub.com login at run time.
+func TestIntegration_Init_OwnerScaffoldsAreCommentedExamples(t *testing.T) {
+	h := newInitHarness(t)
+	h.run(t)
+
+	data, err := os.ReadFile(h.configPath())
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	body := string(data)
+
+	if strings.Contains(body, "cameronsjo") {
+		t.Errorf("fresh config.toml bakes an account into a scaffold; got:\n%s", body)
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "owners") {
+			t.Errorf("fresh config.toml carries an ACTIVE owners assignment %q; owner scaffolds must be commented examples", line)
+		}
+	}
+	// Both sections still land, commented — the operator sees the key exists.
+	for _, want := range []string{
+		"[projects]\n# owners = [\"your-login\"]",
+		"[review]\n# owners = [\"your-login\"]",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("fresh config.toml missing commented scaffold %q; got:\n%s", want, body)
+		}
+	}
+}
+
 // TestIntegration_Init_NetScaffoldNamesDefaultPublic covers issue #186: the
 // [net] scaffold's baked probe_host is a public host, and the template must
 // say so — an untouched scaffold is a no-op posture, but that posture should

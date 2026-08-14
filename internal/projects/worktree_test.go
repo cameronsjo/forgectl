@@ -121,6 +121,32 @@ func TestWorktree_CreatesBareAndWorktree(t *testing.T) {
 	}
 }
 
+// TestWorktree_BareClonePinsGhToGitHubCom is the bare-clone twin of
+// TestClone_PinsGhToGitHubComDespiteAmbientHost: this leg writes a checkout to
+// disk too, so an ambient GH_HOST redirecting it leaves the same durable
+// mismatch. The literal is deliberate, for the same reason.
+func TestWorktree_BareClonePinsGhToGitHubCom(t *testing.T) {
+	t.Setenv("GH_HOST", "ghe.example.test")
+	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("", false)}
+	c := &Client{Dir: t.TempDir(), run: fake}
+
+	if _, err := c.Worktree(context.Background(), Repo{
+		Host: "github", Owner: "cameronsjo", Name: "forgectl",
+	}, "mybranch"); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+
+	clone, ok := findCall(fake.Calls, func(c exec.Call) bool {
+		return c.Name == "gh" && strings.Contains(strings.Join(c.Args, " "), "--bare")
+	})
+	if !ok {
+		t.Fatalf("no bare gh clone recorded, calls: %+v", fake.Calls)
+	}
+	if got := clone.Env["GH_HOST"]; got != "github.com" {
+		t.Fatalf("GH_HOST = %q, want github.com — the bare clone must not follow an ambient host", got)
+	}
+}
+
 func TestWorktree_DetectsDefaultBranch(t *testing.T) {
 	tmp := t.TempDir()
 	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("main", false)}

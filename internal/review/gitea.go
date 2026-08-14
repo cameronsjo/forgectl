@@ -54,6 +54,13 @@ func (g *Gitea) Name() string { return "gitea" }
 // (mark/unmark) without reaching back into config.
 func (g *Gitea) Host() string { return g.host }
 
+// maxGiteaQueryConcurrency caps how many tea processes this source has in
+// flight at once. Gitea owners come from the same low-trust config the GitHub
+// owners do, so an unbounded fan-out lets a long list spawn one tea process
+// per entry simultaneously. Defined as the GitHub source's ceiling rather than
+// a second literal, so the two bounds cannot drift apart.
+const maxGiteaQueryConcurrency = maxGitHubQueryConcurrency
+
 // giteaQueryResult carries one owner's tea query outcome across the
 // fan-out channel — the same Inventory model github.go's ghQueryResult uses.
 type giteaQueryResult struct {
@@ -73,9 +80,17 @@ func (g *Gitea) Items(ctx context.Context) ([]Item, []string, error) {
 		return nil, nil, fmt.Errorf("gitea source: no owners configured")
 	}
 
+	// The semaphore is acquired BEFORE the `go` statement so the bound caps
+	// live goroutines, not merely concurrent tea processes (the same reasoning
+	// github.go and projects.fanOut document). ch is buffered to len(owners),
+	// so a worker never blocks on its send while holding a slot — the loop
+	// cannot deadlock against the drain below.
 	ch := make(chan giteaQueryResult, len(g.owners))
+	sem := make(chan struct{}, maxGiteaQueryConcurrency)
 	for _, owner := range g.owners {
+		sem <- struct{}{}
 		go func() {
+			defer func() { <-sem }()
 			items, truncated, err := g.issuesForOwner(ctx, owner)
 			ch <- giteaQueryResult{fmt.Sprintf("gitea(%s)", owner), items, truncated, err}
 		}()
@@ -87,8 +102,14 @@ func (g *Gitea) Items(ctx context.Context) ([]Item, []string, error) {
 	for range g.owners {
 		res := <-ch
 		if res.err != nil {
+			// The raw cause is logged, never rendered — the same rule the GitHub
+			// source follows, and for a sharper reason here: res.err is usually a
+			// *exec.CommandError whose Error() is tea's stderr verbatim, and that
+			// stderr is text a Gitea server (or anything sitting on tea's
+			// transport) chooses. Rendered raw it is an attacker-controlled write
+			// to the operator's terminal.
 			slog.Warn("Gitea review query degraded.", "query", res.label, "error", res.err)
-			notes = append(notes, fmt.Sprintf("%s: %v", res.label, res.err))
+			notes = append(notes, fmt.Sprintf("%s: query failed", res.label))
 			failed++
 			continue
 		}

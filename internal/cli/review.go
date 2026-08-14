@@ -10,10 +10,6 @@ import (
 	"github.com/cameronsjo/forgectl/internal/review"
 )
 
-// defaultReviewOwner is the --owner scope applied when the [review] section is
-// absent or empty.
-const defaultReviewOwner = "cameronsjo"
-
 // reviewModule declares the cross-project work-inventory extension
 // (ADR-0005): owns the [review] config section, no alias surface.
 var reviewModule = module.Manifest{
@@ -31,7 +27,7 @@ var reviewModule = module.Manifest{
 // than silently narrowing to GitHub-only — module.Manifest.New has no error
 // return, so this is the seam that surfaces the config error to the user.
 func newReviewCmd(deps module.Deps) *cobra.Command {
-	srcs := []review.Source{review.NewGitHub(deps.Runner, resolveReviewOwners(deps.Cfg))}
+	srcs := []review.Source{review.NewGitHub(deps.Runner, deps.Cfg.Review.Owners)}
 	giteaSrc, ok, err := resolveGiteaSource(deps)
 	if err != nil {
 		return newReviewConfigErrorCmd(err)
@@ -68,17 +64,6 @@ func newReviewConfigErrorCmd(err error) *cobra.Command {
 		&cobra.Command{Use: "sync", Args: cobra.NoArgs, RunE: fail},
 	)
 	return cmd
-}
-
-// resolveReviewOwners applies the [review] owners config, falling back to the
-// built-in default owner when the section is absent or empty. Split out of
-// newReviewCmd so the one piece of wiring logic the test seam bypasses is
-// itself unit-testable.
-func resolveReviewOwners(cfg config.Config) []string {
-	if len(cfg.Review.Owners) > 0 {
-		return cfg.Review.Owners
-	}
-	return []string{defaultReviewOwner}
 }
 
 // resolveGiteaSource builds the Gitea review source from [review.gitea].
@@ -151,9 +136,15 @@ func newReviewCmdForSources(srcs []review.Source, reviewedPath string) *cobra.Co
 		Use:   "review [--kind issue|pr] [--repo <owner/name>]",
 		Short: "Cross-project work inventory: open issues and PRs across your repos",
 		Long: `review lists every open issue and pull request across the configured
-owners ([review] owners in config.toml; default cameronsjo) — the whole work
-inventory, rendered live from gh. Nothing is copied or synced; the only local
-state is the reviewed-marks file, and new activity on an item auto-un-dims it.
+owners — the whole work inventory, rendered live from gh. Nothing is copied or
+synced; the only local state is the reviewed-marks file, and new activity on an
+item auto-un-dims it.
+
+The owners come from [review] owners in config.toml. Leave that list unset (or
+empty) and review enumerates whoever gh is authenticated as on GitHub.com; the
+list is independent of [projects] owners and neither inherits from the other.
+Every GitHub query is pinned to github.com — GitHub Enterprise is not
+supported, and an ambient GH_HOST is overridden rather than queried.
 
 An optional second source, a self-hosted Gitea instance, joins the inventory
 when [review.gitea] sets enabled = true and a host (enumerated over the tea

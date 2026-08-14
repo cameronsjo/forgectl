@@ -24,15 +24,13 @@ func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string
 	}
 
 	items, notes, err := review.Aggregate(cmd.Context(), srcs...)
+	// Notes render BEFORE the error return: an all-sources failure is exactly
+	// when the per-query notes matter most, and returning first meant the
+	// operator saw the aggregate error with no indication of which owner or
+	// which leg actually broke.
+	renderDegradationNotes(cmd, notes)
 	if err != nil {
 		return err
-	}
-	// Per-query degradation notes are diagnostics → stderr, never stdout. A
-	// note can embed hostile content (a query label built from a config
-	// owner, or an error message that wraps CLI stderr verbatim), so it gets
-	// the same control-byte sanitization every rendered cell does.
-	for _, n := range notes {
-		fmt.Fprintln(cmd.ErrOrStderr(), "note: "+sanitizeCell(n))
 	}
 
 	items = filterItems(items, kind, repo)

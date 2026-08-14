@@ -3,12 +3,15 @@ package review
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/pr"
 )
 
@@ -24,27 +27,47 @@ const searchLimit = 1000
 // aren't drafts).
 const issueSearchFields = "number,title,url,author,updatedAt,state,labels,repository"
 
+// maxGitHubQueryConcurrency caps how many gh search processes this source has
+// in flight at once. Owners come from config and each contributes two queries,
+// so an unbounded fan-out would let a 64-owner list spawn 128 concurrent
+// subprocesses; GitHub's own rate limiter would punish that even if the
+// machine tolerated it.
+const maxGitHubQueryConcurrency = 8
+
+// ErrGitHubQueriesUnavailable is the safe sentinel returned when no GitHub
+// query produced anything usable. It carries no subprocess output: gh stderr
+// can hold tokens and terminal control sequences, and this error is rendered.
+var ErrGitHubQueriesUnavailable = errors.New("github review queries unavailable")
+
 // GitHub enumerates open issues and PRs owner-wide via `gh search`. It is
 // deliberately --owner-scoped, NOT the @me-involvement scoping pr prs/dash
 // use: this is the whole-inventory view.
 type GitHub struct {
-	run    exec.Runner
-	owners []string
+	run exec.Runner
+	// configured is the raw [review].owners list. Empty means "the
+	// authenticated GitHub.com login", resolved per Items call.
+	configured []string
 }
 
-// NewGitHub builds the source over run for the given owners. Owner validation
-// happens per-query in Items (config is low-trust input headed for an argv;
-// an invalid owner fails loudly there rather than being silently dropped).
+// NewGitHub builds the source over run for the given owners. The runner is
+// wrapped so every gh call it makes — owner discovery, the issue leg, and the
+// shared pr.SearchPRs leg — is pinned to github.com regardless of an ambient
+// GH_HOST. Without that pin an enterprise instance's rows would come back
+// stamped as github.com data.
+//
+// Owner validation and resolution happen in Items rather than here: config is
+// low-trust input headed for an argv, and a constructor with no error return
+// is the wrong place to refuse it.
 func NewGitHub(run exec.Runner, owners []string) *GitHub {
-	return &GitHub{run: run, owners: owners}
+	return &GitHub{run: githubauth.Runner(run), configured: owners}
 }
 
 // Name implements Source.
 func (g *GitHub) Name() string { return "github" }
 
-// ghQueryResult carries one gh-search query's outcome across the fan-out
-// channel: its label (for notes), the parsed items, whether it hit --limit,
-// and any error.
+// ghQueryResult carries one gh-search query's outcome: its label (for notes),
+// the parsed items, whether it hit --limit, and any error. The error is held
+// only long enough to classify the query categorically — it is never rendered.
 type ghQueryResult struct {
 	label     string
 	items     []Item
@@ -52,12 +75,20 @@ type ghQueryResult struct {
 	err       error
 }
 
-// Items runs two `gh search` queries per owner (issues + PRs) concurrently on
-// the Inventory model. A degraded query contributes a note; Items errors only
-// when every query failed (nothing usable) or when no owners are configured.
+// Items runs two `gh search` queries per owner (issues + PRs), bounded to
+// maxGitHubQueryConcurrency in flight, and folds the results in a fixed order:
+// owner order, issues before PRs, regardless of which query finishes first.
+//
+// A degraded query contributes a categorical note and leaves the healthy
+// queries' rows intact. Items errors only when every query failed, or when the
+// owner set could not be resolved at all — and those errors carry
+// ErrGitHubQueriesUnavailable plus, when applicable, the context sentinel,
+// never a raw runner cause.
 func (g *GitHub) Items(ctx context.Context) ([]Item, []string, error) {
-	if len(g.owners) == 0 {
-		return nil, nil, fmt.Errorf("github source: no owners configured")
+	owners, err := githubauth.ResolveOwners(ctx, g.run, g.configured)
+	if err != nil {
+		slog.Warn("Failed to resolve GitHub review owners.", "configured", len(g.configured), "error", err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrGitHubQueriesUnavailable, err)
 	}
 
 	type query struct {
@@ -66,30 +97,48 @@ func (g *GitHub) Items(ctx context.Context) ([]Item, []string, error) {
 		owner string
 	}
 	var queries []query
-	for _, owner := range g.owners {
+	for _, owner := range owners {
 		queries = append(queries,
 			query{fmt.Sprintf("issues(%s)", owner), g.searchIssues, owner},
 			query{fmt.Sprintf("prs(%s)", owner), g.searchPRs, owner},
 		)
 	}
 
-	ch := make(chan ghQueryResult, len(queries))
-	for _, q := range queries {
+	// Indexed results, not a channel: the fold order must be the query order,
+	// and each goroutine owning one index makes that true without a sort. The
+	// semaphore is acquired BEFORE the `go` statement so the bound caps live
+	// goroutines, not merely concurrent gh processes (the same reasoning
+	// projects.fanOut documents).
+	results := make([]ghQueryResult, len(queries))
+	sem := make(chan struct{}, maxGitHubQueryConcurrency)
+	var wg sync.WaitGroup
+	for i, q := range queries {
+		wg.Add(1)
+		sem <- struct{}{}
 		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
 			items, truncated, err := q.run(ctx, q.owner)
-			ch <- ghQueryResult{q.label, items, truncated, err}
+			results[i] = ghQueryResult{q.label, items, truncated, err}
 		}()
 	}
+	wg.Wait()
 
-	var notes []string
-	var items []Item
-	failed := 0
-	for range queries {
-		res := <-ch
+	var (
+		notes       []string
+		items       []Item
+		failed      int
+		sawDeadline bool
+		sawCanceled bool
+	)
+	for _, res := range results {
 		if res.err != nil {
+			// The raw cause is logged, never rendered: it can carry gh stderr.
 			slog.Warn("Review query degraded.", "query", res.label, "error", res.err)
-			notes = append(notes, fmt.Sprintf("%s: %v", res.label, res.err))
+			notes = append(notes, fmt.Sprintf("%s: query failed", res.label))
 			failed++
+			sawDeadline = sawDeadline || errors.Is(res.err, context.DeadlineExceeded)
+			sawCanceled = sawCanceled || errors.Is(res.err, context.Canceled)
 			continue
 		}
 		if res.truncated {
@@ -97,11 +146,31 @@ func (g *GitHub) Items(ctx context.Context) ([]Item, []string, error) {
 		}
 		items = append(items, res.items...)
 	}
-	if failed == len(queries) {
-		return nil, notes, fmt.Errorf("github source: every query failed")
+	// failed > 0 guards the degenerate case: an empty query list would satisfy
+	// failed == len(queries) and report a total failure with nothing attempted.
+	if failed > 0 && failed == len(queries) {
+		return nil, notes, safeAggregateError(ErrGitHubQueriesUnavailable, sawDeadline, sawCanceled)
 	}
-	slog.Info("Successfully loaded GitHub review inventory.", "items", len(items), "owners", len(g.owners), "degraded_queries", failed)
+	slog.Info("Successfully loaded GitHub review inventory.", "items", len(items), "owners", len(owners), "degraded_queries", failed)
 	return items, notes, nil
+}
+
+// safeAggregateError joins base with whichever standard context sentinels were
+// observed, in a fixed deadline-then-canceled order so the rendered error is
+// identical run to run. Only the two standard sentinels are ever joined — a
+// raw runner error would carry subprocess output into a public error.
+func safeAggregateError(base error, deadline, canceled bool) error {
+	errs := []error{base}
+	if deadline {
+		errs = append(errs, context.DeadlineExceeded)
+	}
+	if canceled {
+		errs = append(errs, context.Canceled)
+	}
+	if len(errs) == 1 {
+		return base
+	}
+	return errors.Join(errs...)
 }
 
 // searchPRs runs the PR leg for one owner through the shared pr.SearchPRs

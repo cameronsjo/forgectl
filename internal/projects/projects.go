@@ -50,11 +50,14 @@ func fanOut[I, O any](in []I, f func(I) O) []O {
 	return out
 }
 
-// discoverConcurrency bounds the fan-out width for discoverDir and
-// localRepos — each has its own independent fanOut call, so a caller that
-// runs both concurrently (Inventory does, alongside its github/gitea
-// fetches) can see up to roughly discoverConcurrency()+2 processes in
-// flight at once, not a single shared bound across the whole program.
+// discoverConcurrency bounds the fan-out width of each individual fanOut
+// call, not the program as a whole — there is no shared bound. Inventory is
+// the worst case: localRepos' fan-out and githubList's own fan-out (one gh
+// process per resolved owner) can be in flight at the same time, each up to
+// discoverConcurrency() wide, alongside the single tea process. Its peak is
+// therefore roughly 2*discoverConcurrency()+1 processes, not
+// discoverConcurrency()+2. (localRepos runs Discover to completion first, so
+// discoverDir's fan-out and localRepos' do not overlap each other.)
 // Measured on a 500-repo synthetic fixture (M3 Air, warm cache): serial
 // process spawn was the whole cost — gitStatus alone spawns up to two git
 // processes per repo (status, then rev-list on a clean tree), one after
@@ -98,11 +101,32 @@ func sortProjects(projects []Project) {
 type Client struct {
 	Dir string
 	run exec.Runner
+
+	// githubOwners is the configured [projects].owners list. Empty means the
+	// authenticated GitHub.com login, resolved per Inventory call rather than
+	// cached — the answer belongs to whoever gh is authenticated as right now.
+	githubOwners []string
+}
+
+// Option configures a Client at construction. Options exist so the GitHub
+// owner scope can be injected from config without every existing caller —
+// including the tests that build a Client over a fake runner — having to
+// thread a value they do not care about.
+type Option func(*Client)
+
+// WithGitHubOwners sets the GitHub accounts the inventory enumerates. The
+// slice is copied: the caller's config value must not be mutable through the
+// Client afterwards. An empty or nil list keeps the default posture, the
+// authenticated GitHub.com login.
+func WithGitHubOwners(owners []string) Option {
+	return func(c *Client) {
+		c.githubOwners = append([]string(nil), owners...)
+	}
 }
 
 // New builds a Client. It reads $PROJECTS_DIR, falling back to ~/Projects.
 // A leading ~ is expanded so env vars stored as "~/Projects" work correctly.
-func New(run exec.Runner) *Client {
+func New(run exec.Runner, opts ...Option) *Client {
 	dir := os.Getenv("PROJECTS_DIR")
 	if dir == "" {
 		home, _ := os.UserHomeDir()
@@ -111,7 +135,11 @@ func New(run exec.Runner) *Client {
 		home, _ := os.UserHomeDir()
 		dir = filepath.Join(home, dir[2:])
 	}
-	return &Client{Dir: dir, run: run}
+	c := &Client{Dir: dir, run: run}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Discover returns every project found under Dir, covering both layouts in
@@ -311,34 +339,59 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 	// Kick off both remote fetches first so they overlap the local walk below —
 	// the per-clone git fan-out is the slow part, so the network calls hide
 	// under it rather than adding to it.
+	// notes carries a host's own per-owner diagnostics, which survive even when
+	// the host also errors overall — an all-owners-failed GitHub run should say
+	// WHICH owners failed, not just that the host degraded.
 	type hostResult struct {
 		host  string
 		repos []Repo
+		notes []string
 		err   error
 	}
 	const remoteHosts = 2
 	ch := make(chan hostResult, remoteHosts)
-	go func() { r, e := githubList(ctx, c.run); ch <- hostResult{"github", r, e} }()
-	go func() { r, e := giteaList(ctx, c.run); ch <- hostResult{"gitea", r, e} }()
+	go func() {
+		r, n, e := githubList(ctx, c.run, c.githubOwners)
+		ch <- hostResult{"github", r, n, e}
+	}()
+	go func() { r, e := giteaList(ctx, c.run); ch <- hostResult{"gitea", r, nil, e} }()
 
 	local, err := c.localRepos(ctx)
 	if err != nil {
 		// A missing/unreadable projects dir shouldn't suppress the remote view —
 		// degrade to "no local clones" and note it.
+		// Deliberately NOT categorical, unlike the host legs below. Those carry
+		// a remote's stderr — text a hostile or MITM'd server authors, with no
+		// diagnostic worth the risk. This one carries c.Dir and the OS's own
+		// errno text, which is the whole answer to "why is my inventory empty",
+		// and it is config- and filesystem-material rather than server-chosen.
 		slog.Warn("Failed to enumerate local repos.", "projectsDir", c.Dir, "error", err)
 		notes = append(notes, fmt.Sprintf("local: %v", err))
 		local = nil
 	}
 
-	var remote []Repo
+	// Collect first, fold second: the two fetches finish in whatever order the
+	// network decides, but the notes a human reads must not reorder run to run.
+	fetched := make(map[string]hostResult, remoteHosts)
 	for i := 0; i < remoteHosts; i++ {
 		res := <-ch
+		fetched[res.host] = res
+	}
+	var remote []Repo
+	for _, host := range []string{"github", "gitea"} {
+		res := fetched[host]
+		notes = append(notes, res.notes...)
 		if res.err != nil {
-			slog.Warn("Host degraded.", "host", res.host, "error", res.err)
-			notes = append(notes, fmt.Sprintf("%s: %v", res.host, res.err))
+			// Categorical note, raw cause to the log only. res.err reaches here
+			// straight off a subprocess — gh stderr, or tea's, which is server-
+			// supplied text a hostile or MITM'd host controls. These notes are
+			// printed to a terminal, so interpolating %v here would hand that
+			// server a write channel to the operator's screen.
+			slog.Warn("Host degraded.", "host", host, "error", res.err)
+			notes = append(notes, fmt.Sprintf("%s: host query failed", host))
 			continue
 		}
-		slog.Debug("Host succeeded.", "host", res.host, "count", len(res.repos))
+		slog.Debug("Host succeeded.", "host", host, "count", len(res.repos))
 		remote = append(remote, res.repos...)
 	}
 
@@ -370,12 +423,15 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 }
 
 // ListOrg returns every GitHub repo owned by org (a user or org login), for
-// the bulk-clone path (`projects clone --org`). Unlike Inventory's githubList
-// (pinned to the const githubOwner), org is caller-supplied — so it's vetted
-// as a safe path segment before it becomes a `gh` argv: the guard rejects a
-// traversal value and a leading '-' that gh's cobra parser would read as a
-// flag rather than a positional. The result isn't merged with local/gitea
-// state — it's a plain listing to feed straight into Clone.
+// the bulk-clone path (`projects clone --org`). org comes straight off the
+// command line, so it is vetted as a safe path segment before it becomes a
+// `gh` argv: the guard rejects a traversal value and a leading '-' that gh's
+// cobra parser would read as a flag rather than a positional. githubListOrg
+// re-checks it against the owner charset immediately before argv construction
+// — the two guards answer different questions (is it a safe path segment; is
+// it a plausible owner), and the value is untrusted for both. The result isn't
+// merged with local/gitea state — it's a plain listing to feed straight into
+// Clone.
 func (c *Client) ListOrg(ctx context.Context, org string) ([]Repo, error) {
 	if !validPathSegment(org) {
 		return nil, fmt.Errorf("invalid GitHub org/user name %q", org)
