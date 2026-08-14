@@ -12,6 +12,9 @@ package pr
 //   [x] Happy: removes ONLY the authorized breadcrumb
 //   [x] Member replaced with identical bytes (new inode) -> refuse
 //   [x] Member replaced by a symlink -> refuse
+//   [x] Member RENAMED with a RELATIVE symlink left at its old name -> refuse.
+//       The link target is the original file, so identity, bytes and record all
+//       still match; only lstat'ing the name itself sees the link
 //   [x] Member bytes changed -> refuse
 //   [x] Member security field changed -> refuse
 //   [x] Member disappeared -> refuse (never reported as success)
@@ -33,6 +36,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +55,19 @@ func marshalBreadcrumb(bc Breadcrumb) ([]byte, error) {
 		return nil, err
 	}
 	return append(data, '\n'), nil
+}
+
+// sameFileAt reports whether the file now at path is the same object discardStale
+// captured, by the SAME comparison discardStale makes. A drift case that means to
+// exercise an identity refusal asserts through this so it cannot silently degrade
+// into asserting nothing when a filesystem recycles the inode number.
+func sameFileAt(t *testing.T, path string, want fs.FileInfo) bool {
+	t.Helper()
+	got, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("stat the replacement at %s: %v", path, err)
+	}
+	return os.SameFile(got, want)
 }
 
 // staleFixture is one seeded stale breadcrumb plus the snapshot taken over it.
@@ -118,16 +135,33 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 	intact := expect{breadcrumbSurvives: true, canariesInPlace: true}
 
 	cases := map[string]func(t *testing.T, f staleFixture) expect{
+		// A DIFFERENT file carrying the same bytes at the same name. Identity
+		// is dev+ino, and an inode number is only unique among LIVE files: a
+		// filesystem is free to hand the just-unlinked number straight back to
+		// the next create, which ext4 does and APFS does not. Left to the
+		// allocator this case asserts an accident of the host filesystem, so
+		// it holds the original open across the unlink — an open descriptor
+		// keeps the inode allocated, so the replacement is guaranteed a
+		// different one and the member SameFile arm is what has to refuse.
 		"member replaced with identical bytes": func(t *testing.T, f staleFixture) expect {
 			body, err := os.ReadFile(f.path)
 			if err != nil {
 				t.Fatalf("read member: %v", err)
 			}
+			pin, err := os.Open(f.path)
+			if err != nil {
+				t.Fatalf("pin the original inode: %v", err)
+			}
+			// Closed only after the subtest calls discardStale.
+			t.Cleanup(func() { _ = pin.Close() })
 			if err := os.Remove(f.path); err != nil {
 				t.Fatalf("remove member: %v", err)
 			}
 			if err := os.WriteFile(f.path, body, 0o600); err != nil {
 				t.Fatalf("recreate member: %v", err)
+			}
+			if sameFileAt(t, f.path, f.member.info) {
+				t.Fatalf("the replacement reused the original inode; this case cannot test what it claims")
 			}
 			return intact
 		},
@@ -146,6 +180,39 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 			if err := os.Symlink(target, f.path); err != nil {
 				t.Skipf("symlink unsupported: %v", err)
 			}
+			return intact
+		},
+		// The case above cannot isolate the LSTAT, for two reasons: its link
+		// points at a COPY, so the identity check refuses on the copy's inode,
+		// and its target is ABSOLUTE, which os.Root rejects outright even when
+		// the path lands back inside the root. This is the shape that reaches
+		// the lstat — a RELATIVE link to the renamed original. os.Root follows
+		// it, since it stays in the root; the target is the original file, so
+		// it carries the original inode, the original bytes and the original
+		// record, and every check downstream passes. A Stat here would report
+		// the link as that regular file and unlink the LINK, reporting the
+		// breadcrumb discarded while the record survives under its new name.
+		// Only lstat'ing the name itself sees a symlink and refuses.
+		"member renamed with a relative link left at its old name": func(t *testing.T, f staleFixture) expect {
+			const movedName = "renamed-member.json"
+			moved := filepath.Join(f.dirPath, movedName)
+			if err := os.Rename(f.path, moved); err != nil {
+				t.Fatalf("rename member: %v", err)
+			}
+			if err := os.Symlink(movedName, f.path); err != nil {
+				t.Skipf("symlink unsupported: %v", err)
+			}
+			if !sameFileAt(t, moved, f.member.info) {
+				t.Fatalf("the rename did not carry the original inode; this case cannot test what it claims")
+			}
+			// The link at the original name survives the refusal, and so does
+			// the renamed original — assert the latter here, since the shared
+			// breadcrumbSurvives check only covers the name itself.
+			t.Cleanup(func() {
+				if _, err := os.Lstat(moved); err != nil {
+					t.Errorf("a refusal must leave the renamed original in place: %v", err)
+				}
+			})
 			return intact
 		},
 		"member bytes changed": func(t *testing.T, f staleFixture) expect {

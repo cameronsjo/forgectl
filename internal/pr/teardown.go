@@ -137,6 +137,17 @@ func resolvePath(path string) string {
 // breadcrumb directly without going through forgectl. This protocol prevents
 // benign in-process races and refuses observed drift; it does not claim to
 // defeat a hostile same-uid concurrent writer.
+//
+// A second, narrower residual sits inside the identity check itself: SameFile
+// compares dev+ino, and an inode number is unique only among LIVE files. A
+// filesystem may hand a just-unlinked number back to the next create — ext4
+// routinely does, APFS does not — so a replacement can land on the original
+// identity. That is contained rather than dangerous: such a replacement still
+// has to pass the byte and record comparisons below, so the only file the
+// unlink can take is one holding EXACTLY the authorized record at exactly the
+// authorized name. There is no portable strengthening available; the identity
+// check earns its place against the replacements that differ, which is every
+// case an operator or a bug produces.
 func (c *Client) discardStale(member breadcrumbMember) error {
 	slog.Debug("Preparing to discard a stale review breadcrumb.",
 		"ref", member.breadcrumb.Ref, "path", member.path)
