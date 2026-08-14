@@ -119,15 +119,17 @@ func (c *Client) loadSession(path string) (Session, error) {
 	// validation) and then through EffectiveProvenance against the
 	// RECONSTRUCTED ref.
 	//
-	// The second pass is UNREACHABLE TODAY, and deliberately kept. For it to
-	// change anything, a record would have to yield operator-authored while its
-	// ref reloads non-local — but provenanceFromRecord only returns that value
-	// when bc.Local is set, refFromRecord makes exactly those refs local, and
-	// validateBreadcrumbRecord already rejects a Local record whose owner is not
-	// the sentinel. Three invariants have to hold for the redundancy to stay
-	// redundant, and all three live in other functions. This costs one
-	// comparison and means a change to any of them degrades to a refusal rather
-	// than to an unconfined shell.
+	// The second pass CANNOT UPGRADE a loaded record today, and is deliberately
+	// kept. It does change value on some records — a non-local ref carrying an
+	// unknown or absent provenance is normalized down to third-party — but no
+	// record reaches operator-authored that did not already declare it, and none
+	// yields operator-authored with a non-local reloaded ref. That holds because
+	// provenanceFromRecord only returns that value when bc.Local is set,
+	// refFromRecord makes exactly those refs local, and validateBreadcrumbRecord
+	// already rejects a Local record whose owner is not the sentinel. Three
+	// invariants have to hold for the pass to stay upgrade-proof, and all three
+	// live in other functions. This costs one comparison and means a change to
+	// any of them degrades to a refusal rather than to an unconfined shell.
 	//
 	// Neither pass is what stops the hostile breadcrumb end-to-end — Launch's
 	// own re-check does, and a mutation probe confirms it fires alone. These are

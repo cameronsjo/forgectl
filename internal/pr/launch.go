@@ -215,6 +215,13 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) (D
 	// else" — a silently misconfigured review rather than a failed one. Nothing
 	// calls Launch on a reload today; this makes the future verb that does fail
 	// loudly instead.
+	//
+	// It is also, incidentally, a SECOND independent barrier on the persistence
+	// path: because FindingsDir is never persisted, this refuses every reloaded
+	// local session regardless of provenance — including a canonical breadcrumb
+	// that legitimately reloads as operator-authored, which the provenance gate
+	// above would let through. A change that starts persisting FindingsDir
+	// removes that barrier and leaves the gate above standing alone.
 	if sess.Ref.IsLocal() && sess.FindingsDir == "" {
 		return Dispatch{}, fmt.Errorf(
 			"local review session %s has no findings directory: it is not persisted in the breadcrumb, "+
