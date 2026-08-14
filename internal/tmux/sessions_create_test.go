@@ -34,8 +34,7 @@ func TestCreateSessionArgvAndIdentity(t *testing.T) {
 	// an operand: if anything ran it through a target builder, this argv would
 	// not survive.
 	const hostile = "=forge:"
-	var fake *internalexec.FakeRunner
-	fake = &internalexec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+	fake := &internalexec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
 		argsEqual(t, args, createArgs(hostile, "/repo"))
 		return identityOut("123", "456", "$4"), nil
 	}}
@@ -265,7 +264,7 @@ func TestEnsureSessionStateMachine(t *testing.T) {
 				t.Errorf("new-session calls = %d, want %d", s.creates, tt.wantCreates)
 			}
 			// No refusal path may attach, switch, or select anything.
-			for _, call := range s.FakeRunner.Calls {
+			for _, call := range s.Calls {
 				switch call.Args[0] {
 				case "list-sessions", "new-session":
 				default:
