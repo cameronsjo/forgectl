@@ -116,12 +116,23 @@ func (c *Client) loadSession(path string) (Session, error) {
 		return Session{}, err
 	}
 	// Provenance is resolved through provenanceFromRecord (joint shape
-	// validation), then through EffectiveProvenance against the RECONSTRUCTED
-	// ref — two independent normalizations, because they catch different
-	// forgeries. The first refuses a remote-shaped record that self-labels as
-	// authored; the second refuses a record whose ref does not reload local at
-	// all, which is where a real forge repo named `local/…` and a pre-#185
-	// breadcrumb both land.
+	// validation) and then through EffectiveProvenance against the
+	// RECONSTRUCTED ref.
+	//
+	// The second pass is UNREACHABLE TODAY, and deliberately kept. For it to
+	// change anything, a record would have to yield operator-authored while its
+	// ref reloads non-local — but provenanceFromRecord only returns that value
+	// when bc.Local is set, refFromRecord makes exactly those refs local, and
+	// validateBreadcrumbRecord already rejects a Local record whose owner is not
+	// the sentinel. Three invariants have to hold for the redundancy to stay
+	// redundant, and all three live in other functions. This costs one
+	// comparison and means a change to any of them degrades to a refusal rather
+	// than to an unconfined shell.
+	//
+	// Neither pass is what stops the hostile breadcrumb end-to-end — Launch's
+	// own re-check does, and a mutation probe confirms it fires alone. These are
+	// depth, and each is pinned by its own unit test so it cannot be mistaken
+	// for dead code.
 	return Session{
 		Ref:        ref,
 		Workspace:  bc.Workspace,

@@ -117,8 +117,8 @@ func TestPrepareLocal_ClaudeUnaffectedByProvenance(t *testing.T) {
 				t.Fatalf("Claude must remain available in every provenance state: %v", err)
 			}
 			t.Cleanup(func() {
-				os.RemoveAll(sess.Workspace)
-				os.RemoveAll(sess.FindingsDir)
+				_ = os.RemoveAll(sess.Workspace)
+				_ = os.RemoveAll(sess.FindingsDir)
 			})
 			if sess.Provenance != ReviewProvenanceUnknown {
 				t.Errorf("undeclared local session provenance = %v, want unknown", sess.Provenance)
@@ -149,8 +149,8 @@ func TestPrepareLocal_AssertionPermitsCodex(t *testing.T) {
 				t.Fatalf("an asserted local review must permit Codex: %v", err)
 			}
 			t.Cleanup(func() {
-				os.RemoveAll(sess.Workspace)
-				os.RemoveAll(sess.FindingsDir)
+				_ = os.RemoveAll(sess.Workspace)
+				_ = os.RemoveAll(sess.FindingsDir)
 			})
 			if sess.Provenance != ReviewProvenanceOperatorAuthored {
 				t.Errorf("Session.Provenance = %v, want operator-authored", sess.Provenance)
@@ -233,7 +233,7 @@ func TestPrepare_RemoteRecordsThirdParty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	t.Cleanup(func() { os.RemoveAll(sess.Workspace) })
+	t.Cleanup(func() { _ = os.RemoveAll(sess.Workspace) })
 	if sess.Provenance != ReviewProvenanceThirdParty {
 		t.Errorf("remote Session.Provenance = %v, want third-party", sess.Provenance)
 	}
