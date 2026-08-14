@@ -98,7 +98,10 @@ func TestPrLocalCmd_CodexRefusedWithoutFlag(t *testing.T) {
 // TestPrLocalCmd_OperatorAuthoredFlagPermitsCodex is the other direction, on a
 // detached HEAD specifically: the assertion is what opens the path, and
 // detachedness neither grants nor withholds it.
+// It asserts the success output, so it cannot pass under a refusal: a refused
+// run returns an error and never reaches PrepareLocal's log line.
 func TestPrLocalCmd_OperatorAuthoredFlagPermitsCodex(t *testing.T) {
+	fakeCodexBin(t)
 	fake := detachedPrLocalFakeRunner()
 	cmd := newPrLocalCmd(newPrLocalTestClient(t, fake), config.Config{})
 	var out bytes.Buffer

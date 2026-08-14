@@ -216,6 +216,20 @@ func fakeClaudeBin(t *testing.T) {
 	t.Setenv("FORGECTL_CLAUDE_BIN", bin)
 }
 
+// fakeCodexBin is fakeClaudeBin's counterpart for the Codex reviewer. Codex is
+// not installable on a CI runner, so a test that lets the launch PROCEED past
+// the provenance gate must supply the binary itself or it fails on the host
+// rather than on the behavior under test. The stub is never executed — the
+// resolved path only reaches the faked tmux argv.
+func fakeCodexBin(t *testing.T) {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("FORGECTL_CODEX_BIN", bin)
+}
+
 func newTestCmd() (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
 	var out, errOut bytes.Buffer
 	cmd := &cobra.Command{}
