@@ -132,6 +132,17 @@ func (k prSessionKey) digest(role nameRole) string {
 // label alphabet takes the exemption with it (see forgectl#281, #291, #295 for
 // how often this class drifts).
 //
+// The guarantee is construction by allowlist AND VERIFICATION BY ALLOWLIST, and
+// both halves are load-bearing. reSessionName in encodedName above is an
+// independent second gate: it matches the WHOLE assembled string against
+// ^pr-v2-[lr]-[a-z0-9-]{1,55}-[a-z2-7]{32}$ before any name is returned. Replace
+// this function with a passthrough and no hostile name escapes — encodedName
+// returns an error instead, and even that error escapes the bytes with %q rather
+// than emitting them. Neither gate alone is as strong: without sanitizing, an
+// ordinary repo name like "foo.bar" would fail a launch outright; without the
+// grammar check, a sanitizer bug would leak straight to a tmux operand and a
+// human sink. Do not retire the grammar check as redundant.
+//
 // ASCII letters lowercase, digits survive, and every other rune — punctuation,
 // whitespace, control characters, anything non-ASCII, and the U+FFFD that
 // invalid bytes decode to — collapses into a single hyphen. That deliberately
