@@ -13,7 +13,7 @@ import (
 func TestParseWindowsReadsBothTmuxRenderings(t *testing.T) {
 	var got [2][]Window
 	for i, escaped := range []bool{false, true} {
-		row := render(escaped, "123", "456", "@7", "reviews", "1", "pr-o-r-1", "0", "2")
+		row := render(escaped, "123", "456", "@7", "$3", "reviews", "1", "pr-o-r-1", "0", "2")
 		parsed, err := parseWindows(row)
 		if err != nil {
 			t.Fatalf("escaped=%v: parseWindows(%q): %v", escaped, row, err)
@@ -29,15 +29,15 @@ func TestParseWindowsReadsBothTmuxRenderings(t *testing.T) {
 	// The identity fields are what VerifyDispatched matches on, so pin them
 	// explicitly rather than resting on the two renderings merely agreeing.
 	w := got[0][0]
-	if w.ServerPID != "123" || w.ServerStart != "456" || w.ID != "@7" || w.Name != "pr-o-r-1" || w.Panes != 2 {
-		t.Errorf("window = %+v, want identity 123/456/@7 name pr-o-r-1 panes 2", w)
+	if w.ServerPID != "123" || w.ServerStart != "456" || w.ID != "@7" || w.SessionID != "$3" || w.Name != "pr-o-r-1" || w.Panes != 2 {
+		t.Errorf("window = %+v, want identity 123/456/@7 under $3, name pr-o-r-1, panes 2", w)
 	}
 }
 
 func TestParsePanesReadsBothTmuxRenderings(t *testing.T) {
 	var got [2][]Pane
 	for i, escaped := range []bool{false, true} {
-		row := render(escaped, "reviews", "1", "0", "title", "claude", "1")
+		row := render(escaped, "123", "456", "%2", "@7", "0", "title", "claude", "1")
 		parsed, err := parsePanes(row)
 		if err != nil {
 			t.Fatalf("escaped=%v: parsePanes(%q): %v", escaped, row, err)
@@ -50,15 +50,15 @@ func TestParsePanesReadsBothTmuxRenderings(t *testing.T) {
 	if !reflect.DeepEqual(got[0], got[1]) {
 		t.Fatalf("rendering changed the parse:\n raw     = %+v\n escaped = %+v", got[0], got[1])
 	}
-	if got[0][0].Target != "reviews:1.0" || got[0][0].Command != "claude" {
-		t.Errorf("pane = %+v, want target reviews:1.0 command claude", got[0][0])
+	if got[0][0].ID != "%2" || got[0][0].WindowID != "@7" || got[0][0].Command != "claude" {
+		t.Errorf("pane = %+v, want %%2 under @7, command claude", got[0][0])
 	}
 }
 
 func TestParseSessionsReadsBothTmuxRenderings(t *testing.T) {
 	var got [2][]Session
 	for i, escaped := range []bool{false, true} {
-		row := render(escaped, "reviews", "2", "1", "1700000000", "/tmp/wt")
+		row := render(escaped, "123", "456", "$1", "reviews", "2", "1", "1700000000", "/tmp/wt")
 		parsed, err := parseSessions(row)
 		if err != nil {
 			t.Fatalf("escaped=%v: parseSessions(%q): %v", escaped, row, err)
@@ -71,8 +71,8 @@ func TestParseSessionsReadsBothTmuxRenderings(t *testing.T) {
 	if !reflect.DeepEqual(got[0], got[1]) {
 		t.Fatalf("rendering changed the parse:\n raw     = %+v\n escaped = %+v", got[0], got[1])
 	}
-	if got[0][0].Name != "reviews" || !got[0][0].Attached || got[0][0].Path != "/tmp/wt" {
-		t.Errorf("session = %+v, want reviews attached /tmp/wt", got[0][0])
+	if got[0][0].ID != "$1" || got[0][0].Name != "reviews" || !got[0][0].Attached || got[0][0].Path != "/tmp/wt" {
+		t.Errorf("session = %+v, want $1 reviews attached /tmp/wt", got[0][0])
 	}
 }
 
@@ -98,8 +98,8 @@ func TestParseGenerationIdentityReadsBothTmuxRenderings(t *testing.T) {
 func TestParseWindowsRejectsSeparatorInWindowName(t *testing.T) {
 	renderings(t, func(t *testing.T, escaped bool) {
 		forged := render(escaped, "pr-o-r-1", "padding")
-		good := render(escaped, "123", "456", "@7", "reviews", "0", "shell", "1", "1")
-		row := render(escaped, "123", "456", "@7", "reviews", "1", forged, "0", "1")
+		good := render(escaped, "123", "456", "@7", "$3", "reviews", "0", "shell", "1", "1")
+		row := render(escaped, "123", "456", "@8", "$3", "reviews", "1", forged, "0", "1")
 		// The good row alongside it is load-bearing: it keeps parsedRows' zero-row
 		// contract from firing, so this pins the silent DROP rather than the
 		// refusal — which is what stops a hostile window name from taking down
@@ -117,8 +117,8 @@ func TestParseWindowsRejectsSeparatorInWindowName(t *testing.T) {
 
 func TestParsePanesRejectsSeparatorInPaneTitle(t *testing.T) {
 	renderings(t, func(t *testing.T, escaped bool) {
-		good := render(escaped, "reviews", "1", "1", "plain", "zsh", "0")
-		row := render(escaped, "reviews", "1", "0", render(escaped, "title", "pad"), "claude", "1")
+		good := render(escaped, "123", "456", "%1", "@7", "1", "plain", "zsh", "0")
+		row := render(escaped, "123", "456", "%2", "@7", "0", render(escaped, "title", "pad"), "claude", "1")
 		out := good + "\n" + row
 		got, err := parsePanes(out)
 		if err != nil {
@@ -136,8 +136,8 @@ func TestParsePanesRejectsSeparatorInPaneTitle(t *testing.T) {
 func TestParseSessionsRejectsSeparatorInSessionName(t *testing.T) {
 	renderings(t, func(t *testing.T, escaped bool) {
 		forged := render(escaped, "work", "pad")
-		good := render(escaped, "plain", "2", "1", "1700000000", "/tmp/good")
-		row := render(escaped, forged, "2", "0", "1700000000", "/tmp/wt")
+		good := render(escaped, "123", "456", "$1", "plain", "2", "1", "1700000000", "/tmp/good")
+		row := render(escaped, "123", "456", "$2", forged, "2", "0", "1700000000", "/tmp/wt")
 		out := good + "\n" + row
 		got, err := parseSessions(out)
 		if err != nil {

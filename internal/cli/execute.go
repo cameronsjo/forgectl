@@ -166,12 +166,15 @@ func runAction(ctx context.Context, client *tmux.Client, noIcons bool) error {
 // from runAction so it can be unit-tested without a real terminal.
 func dispatchAction(ctx context.Context, client *tmux.Client, act tui.Action) error {
 	switch act.Kind {
-	case tui.ActionAttach:
-		slog.Debug("Dispatching attach action.", "target", act.Target)
-		return client.AttachOrSwitch(ctx, act.Target)
+	case tui.ActionAttachSession:
+		slog.Debug("Dispatching attach action.", "session_id", act.Session.ID, "name", act.Session.Name)
+		return client.AttachSession(ctx, act.Session)
+	case tui.ActionAttachWindow:
+		slog.Debug("Dispatching window jump.", "window_id", act.Window.ID, "session_id", act.Window.SessionID)
+		return client.AttachWindow(ctx, act.Window)
 	case tui.ActionPick:
-		slog.Debug("Dispatching pick action.", "target", act.Target)
-		return client.Pick(ctx, act.Target)
+		slog.Debug("Dispatching pick action.", "candidate", act.Pick)
+		return client.Pick(ctx, act.Pick)
 	case tui.ActionLast:
 		slog.Debug("Dispatching last session action.")
 		return client.LastSession(ctx)

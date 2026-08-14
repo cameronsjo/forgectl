@@ -81,30 +81,51 @@ func generationCapabilityError(found string, cause error) error {
 	return fmt.Errorf("tmux 2.2 or newer is required to launch PR reviews with exact dispatch identity (found %q); upgrade tmux and retry: %w", found, cause)
 }
 
-func parseGenerationIdentity(value string) (string, error) {
+// identityTriple is a parsed "#{pid}<sep>#{start_time}<sep>#{<native id>}"
+// result — the shape both IdentityFormat (window id) and sessionIdentityFormat
+// (session id) emit.
+type identityTriple struct {
+	PID       string
+	StartTime string
+	ID        string
+}
+
+// parseIdentityTriple validates one generation-plus-native-id triple. kind
+// names the object for diagnostics; validateID is the native-id validator for
+// that object, so the same parser cannot accept a window id where a session id
+// was asked for.
+func parseIdentityTriple(value, kind string, validateID func(string) error) (identityTriple, error) {
 	fields := SplitFields(value)
 	// One field means no separator survived at all, not a malformed identity —
-	// and the caller wraps this in a "tmux 2.2 or newer is required" message
+	// and a caller may wrap this in a "tmux 2.2 or newer is required" message
 	// that would otherwise blame a perfectly modern tmux for the operator's
 	// locale. Name the real cause (see ErrUnreadableFields).
 	if len(fields) == 1 {
-		return "", fmt.Errorf(
-			"%w: display-message returned %q as a single field; "+
+		return identityTriple{}, fmt.Errorf(
+			"%w: tmux returned %q as a single field; "+
 				"the most likely cause is a non-UTF-8 locale, in which tmux renders the separator lossily — check LANG/LC_ALL, set a UTF-8 locale, and retry",
 			ErrUnreadableFields, value)
 	}
 	if len(fields) != 3 {
-		return "", fmt.Errorf("tmux dispatch identity has %d fields, want 3 (raw %q)", len(fields), value)
+		return identityTriple{}, fmt.Errorf("tmux %s identity has %d fields, want 3 (raw %q)", kind, len(fields), value)
 	}
 	pid, err := strconv.ParseUint(fields[0], 10, 64)
 	if err != nil || pid == 0 {
-		return "", fmt.Errorf("invalid tmux server pid %q", fields[0])
+		return identityTriple{}, fmt.Errorf("invalid tmux server pid %q", fields[0])
 	}
 	if _, err := strconv.ParseUint(fields[1], 10, 64); err != nil {
-		return "", fmt.Errorf("invalid tmux server start time %q", fields[1])
+		return identityTriple{}, fmt.Errorf("invalid tmux server start time %q", fields[1])
 	}
-	if !windowIDPattern.MatchString(fields[2]) {
-		return "", fmt.Errorf("invalid tmux window id %q", fields[2])
+	if err := validateID(fields[2]); err != nil {
+		return identityTriple{}, err
 	}
-	return strings.Join(fields, FieldSep), nil
+	return identityTriple{PID: fields[0], StartTime: fields[1], ID: fields[2]}, nil
+}
+
+func parseGenerationIdentity(value string) (string, error) {
+	triple, err := parseIdentityTriple(value, "dispatch", ValidateWindowID)
+	if err != nil {
+		return "", err
+	}
+	return strings.Join([]string{triple.PID, triple.StartTime, triple.ID}, FieldSep), nil
 }

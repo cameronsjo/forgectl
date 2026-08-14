@@ -22,9 +22,17 @@ func (c *Client) SeshList(ctx context.Context) ([]string, error) {
 // Pick connects to (or smart-creates) the named target via sesh. sesh handles
 // the inside/outside-tmux switch itself, so this is a straight interactive
 // hand-off — sesh connect takes over the tty.
+//
+// The `--` terminates sesh's flags. name is not forgectl-controlled: any
+// same-uid process can create a tmux session called `--help` or `-t`, SeshList
+// surfaces it, and the TUI picker hands it straight back here — so without the
+// terminator it reaches sesh's own flag parser as argv[2].
+//
+// Note this is the one session path forgectl does NOT match exactly: past this
+// point resolution is sesh's smart naming, not forgectl's string equality.
 func (c *Client) Pick(ctx context.Context, name string) error {
 	if err := c.checkSeshAvailable(); err != nil {
 		return err
 	}
-	return c.run.RunInteractive(ctx, c.seshBin, "connect", name)
+	return c.run.RunInteractive(ctx, c.seshBin, "connect", "--", name)
 }

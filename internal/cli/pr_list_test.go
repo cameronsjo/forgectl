@@ -30,8 +30,10 @@ import (
 // listWinRow builds one `tmux list-windows -a` fixture line in the format
 // internal/tmux parses: generation identity, session, index, name, active,
 // panes on \x1f.
+// The parent session id ($1) matches what tmuxDouble's new-session hands back,
+// so a resolved review window really does sit under the review session.
 func listWinRow(session, name string) string {
-	return strings.Join([]string{"123", "456", "@1", session, "1", name, "0", "1"}, "\x1f")
+	return strings.Join([]string{"123", "456", "@1", "$1", session, "1", name, "0", "1"}, "\x1f")
 }
 
 // prListRunner layers list-windows control over dashRunner, which already

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -17,11 +18,18 @@ func newTmuxRenameCmd(client *tmux.Client) *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			oldName, newName := args[0], args[1]
-			if !client.HasSession(cmd.Context(), oldName) {
-				return fmt.Errorf("no such session: %s", oldName)
+			// oldName is resolved by exact equality; newName is a rename operand
+			// and is never resolved at all. Conflating the two is how a rename
+			// lands on a prefix sibling.
+			session, err := client.ResolveSessionExact(cmd.Context(), oldName)
+			if err != nil {
+				if errors.Is(err, tmux.ErrSessionNotFound) {
+					return fmt.Errorf("no such session: %s", oldName)
+				}
+				return err
 			}
-			slog.Debug("Preparing to rename session.", "from", oldName, "to", newName)
-			if err := client.RenameSession(cmd.Context(), oldName, newName); err != nil {
+			slog.Debug("Preparing to rename session.", "from", oldName, "to", newName, "session_id", session.ID)
+			if err := client.RenameSession(cmd.Context(), session, newName); err != nil {
 				slog.Error("Failed to rename session.", "from", oldName, "to", newName, "error", err)
 				return err
 			}

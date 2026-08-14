@@ -235,8 +235,15 @@ func TestLaunchPickedIsolatedTmux_FirstServer(t *testing.T) {
 			// Step 1-2 then 3: the ordered tmux conversation. The floor and the
 			// capability probe both precede any review mutation, and the
 			// defensive recheck inside Launch precedes ensureSession.
+			//
+			// list-sessions replaced has-session with #237: presence is decided
+			// by exact Go equality over a listing, because has-session's own -t
+			// operand went through tmux's prefix-matching target grammar. This
+			// runs against a REAL tmux on an isolated socket, so it is also the
+			// live proof that `new-session -P -F` returns an identity the
+			// package can parse.
 			verbs := router.tmuxVerbs()
-			wantPrefix := []string{"list-windows", "-V", "display-message", "-V", "display-message", "has-session", "new-session", "new-window"}
+			wantPrefix := []string{"list-windows", "-V", "display-message", "-V", "display-message", "list-sessions", "new-session", "new-window"}
 			if len(verbs) < len(wantPrefix) {
 				t.Fatalf("tmux verbs = %v, want at least %v", verbs, wantPrefix)
 			}

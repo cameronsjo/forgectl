@@ -59,14 +59,14 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
-// winRow builds one generation-qualified list-windows -a fixture line.
+// winRow builds one generation-qualified list-windows -a fixture line, with the
+// parent session id windowFormat now carries.
 func winRow(session, name string) string {
-	return strings.Join([]string{"123", "456", "@1", session, "1", name, "0", "1"}, "\x1f")
+	return strings.Join([]string{"123", "456", "@1", "$1", session, "1", name, "0", "1"}, "\x1f")
 }
 
 // listWindowsFake fakes only `tmux list-windows -a` with rows; every other
-// tmux call (including has-session, kept only for callers that still probe
-// it) succeeds as a no-op.
+// tmux call succeeds as a no-op.
 func listWindowsFake(rows ...string) *exec.FakeRunner {
 	out := strings.Join(rows, "\n")
 	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
@@ -148,34 +148,65 @@ func TestLiveReviews_BrokenTmux_FailsClosed(t *testing.T) {
 
 // fakeTmuxServer is a minimal, STATEFUL simulation of real tmux -t target
 // resolution — live-verified on an isolated tmux socket (tmux 3.7b):
-//   - has-session -t "=name"  → exact match ONLY
-//   - has-session -t "name"   → exact match, else prefix match against any
-//     existing session (tmux's own exact → fnmatch → prefix fallback,
-//     collapsed to exact-or-prefix, which is sufficient for these fixtures)
-//   - new-window  -t "=name:" → exact match ONLY (the trailing colon is
-//     load-bearing — "=name" alone, without it, still prefix-matches)
-//   - new-window  -t "name"   → same fuzzy exact-or-prefix fallback as bare
-//     has-session
+//   - -t "$N" / "$N:"  → native id, resolved by identity, no fallback ever
+//   - -t "=name:"      → exact match ONLY (the trailing colon is load-bearing —
+//     "=name" alone, without it, still prefix-matches for new-window)
+//   - -t "name"        → exact match, else PREFIX match against any existing
+//     session (tmux's own exact → fnmatch → prefix fallback, collapsed to
+//     exact-or-prefix, which is sufficient for these fixtures)
 //
-// It tracks sessions and their windows so a test can dispatch through the
-// real ensureSession/exactSessionTarget/new-window sequence and then read
-// back which session actually gained the window — the only way to prove a
-// launch does or doesn't land in a sibling session without a live tmux.
+// The fuzzy branches are retained deliberately even though forgectl no longer
+// emits a name target: they are what makes a regression VISIBLE. If a future
+// change hands tmux a bare name again, the simulation resolves it the way real
+// tmux does — into the sibling — and the assertions below fail.
+//
+// It tracks sessions, their native ids, and their windows, so a test can drive
+// the real ensureSession/new-window sequence and read back which session
+// actually gained the window — the only way to prove a launch does or does not
+// land in a sibling without a live tmux.
 type fakeTmuxServer struct {
 	sessions map[string][]string // session name -> ordered window names
+	ids      map[string]string   // session name -> native "$N"
+	nextID   int
 }
 
 func newFakeTmuxServer(seed map[string][]string) *fakeTmuxServer {
-	s := &fakeTmuxServer{sessions: map[string][]string{}}
-	for name, wins := range seed {
-		cp := make([]string, len(wins))
-		copy(cp, wins)
+	s := &fakeTmuxServer{sessions: map[string][]string{}, ids: map[string]string{}}
+	names := make([]string, 0, len(seed))
+	for name := range seed {
+		names = append(names, name)
+	}
+	sort.Strings(names) // deterministic id assignment
+	for _, name := range names {
+		cp := make([]string, len(seed[name]))
+		copy(cp, seed[name])
 		s.sessions[name] = cp
+		s.ids[name] = s.mintID()
 	}
 	return s
 }
 
+func (s *fakeTmuxServer) mintID() string {
+	id := "$" + strconv.Itoa(s.nextID)
+	s.nextID++
+	return id
+}
+
+func (s *fakeTmuxServer) nameForID(id string) (string, bool) {
+	for name, got := range s.ids {
+		if got == id {
+			return name, true
+		}
+	}
+	return "", false
+}
+
 func (s *fakeTmuxServer) resolveSession(target string) (string, bool) {
+	// A native id resolves by identity and never falls back — that is the whole
+	// property #237 buys.
+	if strings.HasPrefix(target, "$") {
+		return s.nameForID(strings.TrimSuffix(target, ":"))
+	}
 	exact := strings.HasPrefix(target, "=")
 	name := strings.TrimPrefix(target, "=")
 	if _, ok := s.sessions[name]; ok {
@@ -212,12 +243,20 @@ func (s *fakeTmuxServer) runner() *exec.FakeRunner {
 			return "", nil
 		}
 		switch args[0] {
-		case "has-session":
-			target, _ := argAfter(args, "-t")
-			if _, ok := s.resolveSession(target); ok {
-				return "", nil
+		case "list-sessions":
+			names := make([]string, 0, len(s.sessions))
+			for sess := range s.sessions {
+				names = append(names, sess)
 			}
-			return "", errors.New("can't find session: " + strings.TrimPrefix(target, "="))
+			sort.Strings(names)
+			var rows []string
+			for _, sess := range names {
+				rows = append(rows, strings.Join([]string{
+					"123", "456", s.ids[sess], sess,
+					strconv.Itoa(len(s.sessions[sess])), "0", "1700000000", "/w",
+				}, "\x1f"))
+			}
+			return strings.Join(rows, "\n"), nil
 		case "new-session":
 			newName, _ := argAfter(args, "-s")
 			if newName == "" {
@@ -227,7 +266,8 @@ func (s *fakeTmuxServer) runner() *exec.FakeRunner {
 				return "", errors.New("duplicate session: " + newName)
 			}
 			s.sessions[newName] = []string{"shell"}
-			return "", nil
+			s.ids[newName] = s.mintID()
+			return strings.Join([]string{"123", "456", s.ids[newName]}, "\x1f"), nil
 		case "new-window":
 			target, _ := argAfter(args, "-t")
 			winName, _ := argAfter(args, "-n")
@@ -248,9 +288,16 @@ func (s *fakeTmuxServer) runner() *exec.FakeRunner {
 			}
 			sort.Strings(names)
 			var rows []string
+			// Window ids are unique across the SERVER, not per session — real
+			// tmux mints them from one counter, and resolution by @id would be
+			// meaningless if two sessions could both hold @0.
+			nextWindowID := 0
 			for _, sess := range names {
 				for i, w := range s.sessions[sess] {
-					rows = append(rows, strings.Join([]string{"123", "456", "@" + strconv.Itoa(i), sess, strconv.Itoa(i), w, "0", "1"}, "\x1f"))
+					rows = append(rows, strings.Join([]string{
+						"123", "456", "@" + strconv.Itoa(nextWindowID), s.ids[sess], sess, strconv.Itoa(i), w, "0", "1",
+					}, "\x1f"))
+					nextWindowID++
 				}
 			}
 			return strings.Join(rows, "\n"), nil
@@ -263,28 +310,32 @@ func (s *fakeTmuxServer) runner() *exec.FakeRunner {
 // was TestLiveReviews_SiblingPrefixSession_KnownResidual: with the exact
 // CRITICAL trigger fixture (only "forgectl-review" alive, no literal
 // "forgectl"), a launch dispatch must land in the exact "forgectl" session,
-// never the sibling — proven by running the SAME ensureSession +
-// exactSessionTarget + new-window sequence Launch itself issues against a
-// tmux simulation that reproduces real tmux's exact-vs-fuzzy -t resolution
-// (verified live, see fakeTmuxServer's doc comment), then reading the count
-// back through LiveReviews.
+// never the sibling — proven by running the SAME ensureSession + new-window
+// sequence Launch itself issues against a tmux simulation that reproduces real
+// tmux's exact-vs-fuzzy -t resolution (verified live, see fakeTmuxServer's doc
+// comment), then reading the count back through LiveReviews.
 //
-// Red-then-green, verified by hand: reverting exactSessionTarget to return
-// the old bare c.tmuxSession (no "="/":") and reverting ensureSession to a
-// no-op makes this test fail — the window lands in forgectl-review, and
-// LiveReviews reads a false (0, true) exactly like the old bug. Restoring
-// the real implementation makes it pass.
+// Since #237 the dispatch target is the review session's native id, so the
+// simulation's prefix branch is never reached. That branch is still there, and
+// still resolves `forgectl` to `forgectl-review` the way tmux does — so if a
+// future change hands tmux a name again, this test fails exactly as it did for
+// the original bug.
 func TestLiveReviews_SiblingPrefixSession_Closed(t *testing.T) {
 	srv := newFakeTmuxServer(map[string][]string{"forgectl-review": {"shell"}})
 	c := New(srv.runner(), WithTmuxSession("forgectl"))
 	ctx := context.Background()
 
 	// The exact sequence launchInline/launchCodex/Open issue before dispatch.
-	if err := c.ensureSession(ctx); err != nil {
+	session, err := c.ensureSession(ctx)
+	if err != nil {
 		t.Fatalf("ensureSession: %v", err)
 	}
+	target, err := newWindowTarget(session)
+	if err != nil {
+		t.Fatalf("newWindowTarget: %v", err)
+	}
 	if _, err := c.run.Run(ctx, "tmux", "new-window",
-		"-t", c.exactSessionTarget(), "-n", "pr-o-r-1", "-c", "/tmp"); err != nil {
+		"-t", target, "-n", "pr-o-r-1", "-c", "/tmp"); err != nil {
 		t.Fatalf("new-window: %v", err)
 	}
 
@@ -328,8 +379,16 @@ func TestWindowLive_CreatedThenRemoved(t *testing.T) {
 	ctx := context.Background()
 	ref := Ref{Owner: "o", Repo: "r", Number: 1}
 
+	session, err := c.ensureSession(ctx)
+	if err != nil {
+		t.Fatalf("ensureSession: %v", err)
+	}
+	target, err := newWindowTarget(session)
+	if err != nil {
+		t.Fatalf("newWindowTarget: %v", err)
+	}
 	if _, err := c.run.Run(ctx, "tmux", "new-window",
-		"-t", c.exactSessionTarget(), "-n", windowName(ref), "-c", "/tmp"); err != nil {
+		"-t", target, "-n", windowName(ref), "-c", "/tmp"); err != nil {
 		t.Fatalf("new-window: %v", err)
 	}
 	if live, ok := c.WindowLive(ctx, ref); !ok || !live {

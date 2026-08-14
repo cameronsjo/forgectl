@@ -33,8 +33,32 @@ import (
 
 // dashRunner fakes gh search prs (dash's two queries), gh pr view (for a real
 // Prepare to build an active-review breadcrumb), and git/tmux as no-ops.
+// tmuxDouble answers the tmux commands a review dispatch makes now that the
+// review session is resolved and targeted by native id rather than by name.
+// list-sessions comes back EMPTY, so EnsureSession finds nothing and creates —
+// the same flow the old failing `has-session` produced — and new-session
+// returns an identity, because it is now invoked with `-P -F`.
+//
+// handled=false hands the call back to the caller's own fake, so a test that
+// wants to control list-windows (or anything else) still can.
+func tmuxDouble(name string, args []string) (out string, handled bool, err error) {
+	if name != "tmux" || len(args) == 0 {
+		return "", false, nil
+	}
+	switch args[0] {
+	case "list-sessions":
+		return "", true, nil
+	case "new-session":
+		return strings.Join([]string{"123", "456", "$1"}, "\x1f"), true, nil
+	}
+	return "", false, nil
+}
+
 func dashRunner(searchJSON string) *exec.FakeRunner {
 	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if out, handled, err := tmuxDouble(name, args); handled {
+			return out, err
+		}
 		if name == "gh" && len(args) >= 2 && args[0] == "search" && args[1] == "prs" {
 			return searchJSON, nil
 		}

@@ -121,8 +121,11 @@ func (l *tmuxLedger) runnerWith(fallback func(string, []string) (string, error))
 			return "tmux 3.7b", nil
 		case "display-message":
 			return l.identity("@0"), nil
-		case "has-session":
-			return "", nil
+		case "list-sessions":
+			// The review session already exists, so EnsureSession resolves it
+			// and creates nothing — the state the old has-session probe
+			// reported by exiting 0.
+			return l.listSessions(), nil
 		case "list-windows":
 			return l.listWindows()
 		case "new-window":
@@ -136,6 +139,21 @@ func (l *tmuxLedger) identity(windowID string) string {
 	return strings.Join([]string{l.pid, l.start, windowID}, tmux.FieldSep)
 }
 
+// reviewSessionID is the native id every window in this ledger hangs off. It is
+// fixed because the ledger models one server holding one review session.
+const reviewSessionID = "$1"
+
+// listSessions renders the review session in sessionFormat's field order:
+// identity (pid, start, session id), name, windows, attached, created, path.
+func (l *tmuxLedger) listSessions() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Join([]string{
+		l.pid, l.start, reviewSessionID, l.session,
+		fmt.Sprint(len(l.live)), "0", "1700000000", "/w",
+	}, tmux.FieldSep)
+}
+
 func (l *tmuxLedger) listWindows() (string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -145,10 +163,10 @@ func (l *tmuxLedger) listWindows() (string, error) {
 	}
 	rows := make([]string, 0, len(l.live))
 	for i, w := range l.live {
-		// Field order is windowFormat's: identity (pid, start, id), then
-		// session, index, name, active, panes.
+		// Field order is windowFormat's: identity (pid, start, window id),
+		// parent session id, session name, index, name, active, panes.
 		rows = append(rows, strings.Join([]string{
-			l.pid, l.start, w.id, l.session, fmt.Sprint(i), w.name, "0", "1",
+			l.pid, l.start, w.id, reviewSessionID, l.session, fmt.Sprint(i), w.name, "0", "1",
 		}, tmux.FieldSep))
 	}
 	return strings.Join(rows, "\n"), nil

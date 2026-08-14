@@ -10,7 +10,7 @@ import (
 )
 
 func dispatchWindowRow(pid, start, id, session, name string) string {
-	return strings.Join([]string{pid, start, id, session, "1", name, "0", "1"}, "\x1f")
+	return strings.Join([]string{pid, start, id, "$1", session, "1", name, "0", "1"}, "\x1f")
 }
 
 func TestVerifyDispatched_ExactGenerationSessionAndName(t *testing.T) {

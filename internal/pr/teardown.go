@@ -10,6 +10,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/quarantine"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // sandboxTeardown is the workspace-removal seam. Production wires the real
@@ -260,9 +261,17 @@ func (c *Client) discard(ctx context.Context, sess Session) error {
 		return fmt.Errorf("teardown workspace: %w", err)
 	}
 
-	// Best-effort: kill the review window if it is still open.
-	if _, err := c.run.Run(ctx, "tmux", "kill-window", "-t", c.windowTarget(sess.Ref)); err != nil {
-		slog.Debug("No review window to kill (already gone).", "target", c.windowTarget(sess.Ref), "error", err)
+	// Best-effort: kill the review window if it is still open. Resolution is
+	// exact — the window must carry this review's name AND sit under the review
+	// session's native id — and the kill revalidates that before issuing. A
+	// failure to resolve means there is nothing of ours to kill, which is the
+	// ordinary case after the reviewer exits; it must never widen into killing
+	// whatever tmux would have matched.
+	window, err := c.resolveReviewWindow(ctx, sess.Ref)
+	if err != nil {
+		slog.Debug("No review window to kill (already gone).", "window", windowName(sess.Ref), "error", err)
+	} else if err := tmux.New(c.run).KillWindow(ctx, window); err != nil {
+		slog.Debug("Review window could not be killed.", "window_id", window.ID, "error", err)
 	}
 
 	if sess.Path != "" {

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -19,8 +20,15 @@ func newTmuxKillCmd(client *tmux.Client) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
-			if !client.HasSession(cmd.Context(), name) {
-				return fmt.Errorf("no such session: %s", name)
+			// Resolved once, by exact name, up front — so the confirmation the
+			// operator reads and the session the command kills are the same
+			// object. The identity, not the name, is what the kill targets.
+			session, err := client.ResolveSessionExact(cmd.Context(), name)
+			if err != nil {
+				if errors.Is(err, tmux.ErrSessionNotFound) {
+					return fmt.Errorf("no such session: %s", name)
+				}
+				return err
 			}
 			out := cmd.OutOrStdout()
 			prompt := fmt.Sprintf("Kill session %q?", name)
@@ -38,8 +46,8 @@ func newTmuxKillCmd(client *tmux.Client) *cobra.Command {
 				}
 			}
 			if others {
-				slog.Debug("Preparing to kill others.", "keep", name)
-				if err := client.KillOthers(cmd.Context(), name); err != nil {
+				slog.Debug("Preparing to kill others.", "keep", name, "session_id", session.ID)
+				if err := client.KillOthers(cmd.Context(), session); err != nil {
 					slog.Error("Failed to kill others.", "keep", name, "error", err)
 					return err
 				}
@@ -47,8 +55,8 @@ func newTmuxKillCmd(client *tmux.Client) *cobra.Command {
 				fmt.Fprintf(out, "killed all sessions except %s\n", name)
 				return nil
 			}
-			slog.Debug("Preparing to kill session.", "session", name)
-			if err := client.KillSession(cmd.Context(), name); err != nil {
+			slog.Debug("Preparing to kill session.", "session", name, "session_id", session.ID)
+			if err := client.KillSession(cmd.Context(), session); err != nil {
 				slog.Error("Failed to kill session.", "session", name, "error", err)
 				return err
 			}

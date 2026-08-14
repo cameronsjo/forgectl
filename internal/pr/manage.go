@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // List returns a presentation row for every review session recorded in the
@@ -148,11 +150,15 @@ func (c *Client) Attach(ctx context.Context, path string) error {
 	if err != nil {
 		return remediateMissingWorkspace(path, err)
 	}
-	target := c.windowTarget(sess.Ref)
-	slog.Debug("Attaching to review window.", "target", target)
-	if err := c.run.RunInteractive(ctx, "tmux", "select-window", "-t", target); err != nil {
+	name := windowName(sess.Ref)
+	window, err := c.resolveReviewWindow(ctx, sess.Ref)
+	if err != nil {
 		return fmt.Errorf("select review window %q: %w — the window may predate a "+
-			"forgectl upgrade that renamed review windows; relaunch the review with `pr <ref>`", target, err)
+			"forgectl upgrade that renamed review windows; relaunch the review with `pr <ref>`", name, err)
+	}
+	slog.Debug("Attaching to review window.", "window_id", window.ID, "session_id", window.SessionID, "name", name)
+	if err := tmux.New(c.run).SelectWindow(ctx, window); err != nil {
+		return fmt.Errorf("select review window %q: %w", name, err)
 	}
 	return nil
 }
@@ -167,13 +173,18 @@ func (c *Client) Open(ctx context.Context, path string) error {
 	}
 	slog.Debug("Opening workspace window.", "workspace", sess.Workspace)
 	// A review session was already dispatched to reach this breadcrumb, so the
-	// exact "forgectl" session should already exist — ensureSession is a
-	// cheap has-session check in the common case, and a safety net if it was
-	// killed out from under a still-valid breadcrumb.
-	if err := c.ensureSession(ctx); err != nil {
+	// review session should already exist — ensureSession is a cheap exact
+	// lookup in the common case, and a safety net if it was killed out from
+	// under a still-valid breadcrumb.
+	session, err := c.ensureSession(ctx)
+	if err != nil {
 		return err
 	}
-	_, err = c.run.Run(ctx, "tmux", "new-window", "-t", c.exactSessionTarget(),
+	target, err := newWindowTarget(session)
+	if err != nil {
+		return err
+	}
+	_, err = c.run.Run(ctx, "tmux", "new-window", "-t", target,
 		"-n", windowName(sess.Ref)+"-shell", "-c", sess.Workspace)
 	return err
 }

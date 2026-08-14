@@ -13,6 +13,12 @@ import (
 
 const sep = "\x1f"
 
+// oneSessionRow is a single list-sessions row in sessionFormat's field order:
+// server pid, server start, native session id, name, windows, attached,
+// created, path.
+const oneSessionRow = "123" + sep + "456" + sep + "$1" + sep + "alpha" + sep +
+	"1" + sep + "0" + sep + "1700000000" + sep + "/tmp"
+
 func key(s string) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 }
@@ -36,7 +42,7 @@ func TestNumberKeyNavigatesAndAttaches(t *testing.T) {
 	// "2" on the menu → Sessions screen (loads via the fake client); "1" there
 	// → attach the first session and quit with the right Action.
 	fake := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
-		return "alpha" + sep + "1" + sep + "0" + sep + "1700000000" + sep + "/tmp", nil
+		return oneSessionRow, nil
 	}}
 	m := sized(newModel(context.Background(), tmux.New(fake), true), 80, 24)
 
@@ -48,8 +54,16 @@ func TestNumberKeyNavigatesAndAttaches(t *testing.T) {
 
 	out, _ = m.Update(key("1"))
 	m = out.(model)
-	if m.action.Kind != ActionAttach || m.action.Target != "alpha" {
-		t.Errorf("expected attach alpha, got %+v", m.action)
+	if m.action.Kind != ActionAttachSession {
+		t.Fatalf("expected ActionAttachSession, got %+v", m.action)
+	}
+	// The Action carries a full identity, not a name: it has to survive Bubble
+	// Tea's teardown before anything acts on it.
+	if m.action.Session.ID != "$1" || m.action.Session.Name != "alpha" {
+		t.Errorf("expected identity $1/alpha, got %+v", m.action.Session)
+	}
+	if m.action.Session.Generation.PID != "123" || m.action.Session.Generation.StartTime != "456" {
+		t.Errorf("action identity is not generation-qualified: %+v", m.action.Session.Generation)
 	}
 }
 
@@ -79,7 +93,7 @@ func TestKillOthersEntersConfirm(t *testing.T) {
 	// with the right pending op + target. (Driving the huh form to completion is
 	// out of scope; this locks the wiring.)
 	fake := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
-		return "alpha" + sep + "1" + sep + "0" + sep + "1700000000" + sep + "/tmp", nil
+		return oneSessionRow, nil
 	}}
 	m := sized(newModel(context.Background(), tmux.New(fake), true), 80, 24)
 
@@ -94,8 +108,16 @@ func TestKillOthersEntersConfirm(t *testing.T) {
 	if m.pendingOp != opKillOthers {
 		t.Errorf("expected opKillOthers, got %v", m.pendingOp)
 	}
-	if m.pendingTarget != "alpha" {
-		t.Errorf("expected target alpha, got %q", m.pendingTarget)
+	// The confirmation holds the identity, not the name — the prompt the
+	// operator reads and the object the kill lands on must be the same thing.
+	if m.pendingSession.ID != "$1" || m.pendingSession.Name != "alpha" {
+		t.Errorf("expected pending identity $1/alpha, got %+v", m.pendingSession)
+	}
+	if m.pendingSession.Generation.PID == "" {
+		t.Error("pending identity is not generation-qualified; a restart between confirm and act would go unnoticed")
+	}
+	if !strings.Contains(m.View(), "alpha") {
+		t.Error("the confirmation prompt should still render the session NAME")
 	}
 }
 

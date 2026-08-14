@@ -13,15 +13,43 @@ package pr
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
+// reviewServer answers the listings a manage-path call needs: the review
+// session "forgectl" as $1, holding the named review windows. windowNames are
+// window names, in order, each getting a distinct @id starting at @5.
+func reviewServer(windowNames ...string) *exec.FakeRunner {
+	sessionRow := strings.Join([]string{"123", "456", "$1", "forgectl", "1", "0", "1700000000", "/w"}, "\x1f")
+	rows := make([]string, 0, len(windowNames))
+	for i, name := range windowNames {
+		rows = append(rows, strings.Join([]string{
+			"123", "456", "@" + strconv.Itoa(5+i), "$1", "forgectl", strconv.Itoa(i), name, "0", "1",
+		}, "\x1f"))
+	}
+	windowsOut := strings.Join(rows, "\n")
+	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name != "tmux" || len(args) == 0 {
+			return "", nil
+		}
+		switch args[0] {
+		case "list-sessions":
+			return sessionRow, nil
+		case "list-windows":
+			return windowsOut, nil
+		}
+		return "", nil
+	}}
+}
+
 func TestAttach_Success(t *testing.T) {
-	fake := &exec.FakeRunner{}
+	fake := reviewServer("pr-o-r-7")
 	c := testClient(t, fake)
 	ref := Ref{Owner: "o", Repo: "r", Number: 7}
 	path, _ := seedSession(t, c, ref, time.Now().UTC())
@@ -30,22 +58,54 @@ func TestAttach_Success(t *testing.T) {
 		t.Fatalf("Attach: %v", err)
 	}
 
-	tmux, ok := findCall(fake.Calls, "tmux")
+	call, ok := findCallVerb(fake.Calls, "tmux", "select-window")
 	if !ok {
-		t.Fatal("no tmux call")
+		t.Fatal("no select-window call")
 	}
-	want := []string{"select-window", "-t", "=forgectl:pr-o-r-7"}
-	if !equalArgs(tmux.Args, want) {
-		t.Errorf("tmux args = %v, want %v", tmux.Args, want)
+	want := []string{"select-window", "-t", "@5"}
+	if !equalArgs(call.Args, want) {
+		t.Errorf("tmux args = %v, want %v", call.Args, want)
 	}
-	if !tmux.Interactive {
+	if !call.Interactive {
 		t.Error("Attach should dispatch through the interactive path")
 	}
 }
 
+// TestAttach_SiblingSessionWindowIsNotSelected is the parentage half of #237
+// on the PR path. Window names are not unique across a tmux server, so a
+// same-named window in ANOTHER session must not answer for this review's.
+func TestAttach_SiblingSessionWindowIsNotSelected(t *testing.T) {
+	sessionRow := strings.Join([]string{"123", "456", "$1", "forgectl", "1", "0", "1700000000", "/w"}, "\x1f")
+	// The only pr-o-r-7 on the server lives in a DIFFERENT session ($2).
+	strayRow := strings.Join([]string{"123", "456", "@9", "$2", "other", "0", "pr-o-r-7", "0", "1"}, "\x1f")
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name != "tmux" || len(args) == 0 {
+			return "", nil
+		}
+		switch args[0] {
+		case "list-sessions":
+			return sessionRow, nil
+		case "list-windows":
+			return strayRow, nil
+		}
+		return "", nil
+	}}
+	c := testClient(t, fake)
+	ref := Ref{Owner: "o", Repo: "r", Number: 7}
+	path, _ := seedSession(t, c, ref, time.Now().UTC())
+
+	if err := c.Attach(context.Background(), path); err == nil {
+		t.Fatal("Attach selected a same-named window belonging to another session")
+	}
+	if _, ok := findCallVerb(fake.Calls, "tmux", "select-window"); ok {
+		t.Error("select-window ran against a window outside the review session")
+	}
+}
+
 func TestAttach_MissingWindow_Hints(t *testing.T) {
-	underlying := errors.New("can't find window: pr-o-r-7")
-	fake := &exec.FakeRunner{InteractiveErr: underlying}
+	// A running review session with no windows at all: the review's window is
+	// genuinely gone, which is the case the hint is written for.
+	fake := reviewServer()
 	c := testClient(t, fake)
 	ref := Ref{Owner: "o", Repo: "r", Number: 7}
 	path, _ := seedSession(t, c, ref, time.Now().UTC())
@@ -60,13 +120,13 @@ func TestAttach_MissingWindow_Hints(t *testing.T) {
 	if !strings.Contains(err.Error(), "relaunch the review with `pr <ref>`") {
 		t.Errorf("error = %q, want it to include the relaunch instruction", err.Error())
 	}
-	if !errors.Is(err, underlying) {
-		t.Errorf("error = %q, want it to wrap the underlying tmux error", err.Error())
+	if !errors.Is(err, tmux.ErrObjectGone) {
+		t.Errorf("error = %q, want it to wrap tmux.ErrObjectGone", err.Error())
 	}
 }
 
 func TestOpen_TargetPins(t *testing.T) {
-	fake := &exec.FakeRunner{}
+	fake := reviewServer("pr-o-r-7")
 	c := testClient(t, fake)
 	ref := Ref{Owner: "o", Repo: "r", Number: 7}
 	path, ws := seedSession(t, c, ref, time.Now().UTC())
@@ -75,15 +135,17 @@ func TestOpen_TargetPins(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	tmux, ok := findCallVerb(fake.Calls, "tmux", "new-window")
+	call, ok := findCallVerb(fake.Calls, "tmux", "new-window")
 	if !ok {
 		t.Fatal("no new-window call")
 	}
-	want := []string{"new-window", "-t", "=forgectl:", "-n", "pr-o-r-7-shell", "-c", ws}
-	if !equalArgs(tmux.Args, want) {
-		t.Errorf("tmux args = %v, want %v", tmux.Args, want)
+	// The destination is the review session's native id with its trailing
+	// colon — never the session NAME, and never a "=name:" spelling.
+	want := []string{"new-window", "-t", "$1:", "-n", "pr-o-r-7-shell", "-c", ws}
+	if !equalArgs(call.Args, want) {
+		t.Errorf("tmux args = %v, want %v", call.Args, want)
 	}
-	if tmux.Interactive {
+	if call.Interactive {
 		t.Error("Open should dispatch through the non-interactive Run path")
 	}
 }

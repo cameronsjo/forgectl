@@ -13,8 +13,17 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/meta"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
+
+// errStatus renders a footer error. Every error surfaced here can carry text
+// forgectl never composed — a tmux session or window name, a sesh candidate, an
+// exec diagnostic quoting one — so it goes through termsafe.SafeLine before any
+// styling. Escape sequences in a name would otherwise repaint the TUI's chrome.
+func errStatus(prefix string, err error) string {
+	return styleDanger.Render(termsafe.SafeLine("✗ " + prefix + err.Error()))
+}
 
 // ActionKind is the deferred jump the TUI selected. Jumps that need the tty
 // (attach/sesh connect) can't run while Bubble Tea owns the terminal, so the
@@ -24,15 +33,29 @@ type ActionKind int
 
 const (
 	ActionNone ActionKind = iota
-	ActionAttach
+	ActionAttachSession
+	ActionAttachWindow
 	ActionPick
 	ActionLast
 )
 
 // Action is what Run returns for the caller to execute post-teardown.
+//
+// Attach carries a typed, generation-qualified identity rather than a target
+// string. That matters here more than anywhere else in the program: an Action
+// crosses the whole Bubble Tea teardown before it is dispatched, which is
+// unbounded time for the server to restart or the object to move. The
+// identity's generation is what lets the dispatch prove the object it is about
+// to act on is still the one the operator selected.
+//
+// Pick is the exception, and deliberately so: it is a sesh candidate name
+// handed to `sesh connect`, not a tmux target, so there is no tmux object to
+// qualify.
 type Action struct {
-	Kind   ActionKind
-	Target string
+	Kind    ActionKind
+	Pick    string
+	Session tmux.SessionIdentity
+	Window  tmux.WindowIdentity
 }
 
 type mode int
@@ -69,9 +92,13 @@ type model struct {
 	l    list.Model
 	tree viewport.Model
 
-	form          *huh.Form
-	pendingOp     opKind
-	pendingTarget string
+	form      *huh.Form
+	pendingOp opKind
+	// pendingSession is the identity the confirmed operation acts on. The
+	// confirmation prompt renders pendingSession.Name; the command targets its
+	// native id, revalidated at dispatch. Holding a name here instead is how a
+	// "yes" to "Kill session X?" could land on a different X.
+	pendingSession tmux.SessionIdentity
 
 	// status is a transient one-line result of the last mutation (kill/rename),
 	// shown in the footer — green on success, red on failure. Cleared when the
@@ -205,11 +232,11 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if it, ok := m.l.SelectedItem().(sessionItem); ok {
 			switch key {
 			case "k":
-				return m.startConfirm(opKill, it.s.Name)
+				return m.startConfirm(opKill, m.client.SessionIdentity(it.s))
 			case "K":
-				return m.startConfirm(opKillOthers, it.s.Name)
+				return m.startConfirm(opKillOthers, m.client.SessionIdentity(it.s))
 			case "r":
-				return m.startRename(it.s.Name)
+				return m.startRename(m.client.SessionIdentity(it.s))
 			}
 		}
 	}
@@ -241,17 +268,17 @@ func (m model) activate(index int) (tea.Model, tea.Cmd) {
 		return m, nil
 	case pickMode:
 		if it, ok := m.l.SelectedItem().(pickItem); ok {
-			m.action = Action{Kind: ActionPick, Target: string(it)}
+			m.action = Action{Kind: ActionPick, Pick: string(it)}
 			return m, tea.Quit
 		}
 	case sessionsMode:
 		if it, ok := m.l.SelectedItem().(sessionItem); ok {
-			m.action = Action{Kind: ActionAttach, Target: it.s.Name}
+			m.action = Action{Kind: ActionAttachSession, Session: m.client.SessionIdentity(it.s)}
 			return m, tea.Quit
 		}
 	case windowsMode:
 		if it, ok := m.l.SelectedItem().(windowItem); ok {
-			m.action = Action{Kind: ActionAttach, Target: it.w.Target}
+			m.action = Action{Kind: ActionAttachWindow, Window: m.client.WindowIdentity(it.w)}
 			return m, tea.Quit
 		}
 	}
@@ -303,7 +330,7 @@ func (m *model) enterPick() {
 	names, err := m.client.SeshList(m.ctx)
 	if err != nil {
 		slog.Error("Failed to load sesh sessions.", "error", err)
-		m.status = styleDanger.Render("✗ sesh: " + err.Error())
+		m.status = errStatus("sesh: ", err)
 	}
 	items := make([]list.Item, 0, len(names))
 	for _, n := range names {
@@ -318,7 +345,7 @@ func (m *model) enterSessions() {
 	sessions, err := m.client.ListSessions(m.ctx)
 	if err != nil {
 		slog.Error("Failed to load sessions.", "error", err)
-		m.status = styleDanger.Render("✗ tmux: " + err.Error())
+		m.status = errStatus("tmux: ", err)
 	}
 	items := make([]list.Item, 0, len(sessions))
 	for _, s := range sessions {
@@ -333,7 +360,7 @@ func (m *model) enterWindows() {
 	windows, err := m.client.ListWindows(m.ctx)
 	if err != nil {
 		slog.Error("Failed to load windows.", "error", err)
-		m.status = styleDanger.Render("✗ tmux: " + err.Error())
+		m.status = errStatus("tmux: ", err)
 	}
 	items := make([]list.Item, 0, len(windows))
 	for _, w := range windows {
@@ -348,7 +375,7 @@ func (m *model) enterTree() {
 	out, err := m.client.Tree(m.ctx, !m.noIcons)
 	if err != nil {
 		slog.Error("Failed to load tree.", "error", err)
-		m.status = styleDanger.Render("✗ tmux: " + err.Error())
+		m.status = errStatus("tmux: ", err)
 	}
 	m.tree.SetContent(out)
 	m.tree.GotoTop()
@@ -369,14 +396,14 @@ func (m *model) setList(items []list.Item) {
 	m.l.Select(0)
 }
 
-func (m model) startConfirm(op opKind, target string) (tea.Model, tea.Cmd) {
+func (m model) startConfirm(op opKind, session tmux.SessionIdentity) (tea.Model, tea.Cmd) {
 	m.status = ""
-	prompt := fmt.Sprintf("Kill session %q?", target)
+	prompt := fmt.Sprintf("Kill session %q?", session.Name)
 	if op == opKillOthers {
-		prompt = fmt.Sprintf("Kill ALL sessions except %q?", target)
+		prompt = fmt.Sprintf("Kill ALL sessions except %q?", session.Name)
 	}
 	m.pendingOp = op
-	m.pendingTarget = target
+	m.pendingSession = session
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewConfirm().Key("ok").Title(prompt).Affirmative("Yes").Negative("No"),
 	)).WithWidth(m.formWidth()).WithShowHelp(false).WithKeyMap(keymap.Cancel())
@@ -384,40 +411,46 @@ func (m model) startConfirm(op opKind, target string) (tea.Model, tea.Cmd) {
 	return m, m.form.Init()
 }
 
-func (m model) startRename(target string) (tea.Model, tea.Cmd) {
+func (m model) startRename(session tmux.SessionIdentity) (tea.Model, tea.Cmd) {
 	m.status = ""
 	m.pendingOp = opRename
-	m.pendingTarget = target
+	m.pendingSession = session
 	m.form = huh.NewForm(huh.NewGroup(
-		huh.NewInput().Key("name").Title(fmt.Sprintf("Rename %q to:", target)),
+		huh.NewInput().Key("name").Title(fmt.Sprintf("Rename %q to:", session.Name)),
 	)).WithWidth(m.formWidth()).WithShowHelp(false).WithKeyMap(keymap.Cancel())
 	m.mode = formMode
 	return m, m.form.Init()
 }
 
+// applyPending runs the confirmed mutation. Each client call revalidates
+// m.pendingSession before issuing anything, so a session that was killed,
+// renamed, or replaced by a server restart while the confirmation was on screen
+// produces a refusal in the footer rather than a mutation somewhere else.
 func (m *model) applyPending() {
+	name := m.pendingSession.Name
 	switch m.pendingOp {
 	case opKill:
 		if m.form.GetBool("ok") {
-			m.setStatus(m.client.KillSession(m.ctx, m.pendingTarget), "killed "+m.pendingTarget)
+			m.setStatus(m.client.KillSession(m.ctx, m.pendingSession), "killed "+name)
 		}
 	case opKillOthers:
 		if m.form.GetBool("ok") {
-			m.setStatus(m.client.KillOthers(m.ctx, m.pendingTarget), "kept only "+m.pendingTarget)
+			m.setStatus(m.client.KillOthers(m.ctx, m.pendingSession), "kept only "+name)
 		}
 	case opRename:
-		if name := m.form.GetString("name"); name != "" {
-			m.setStatus(m.client.RenameSession(m.ctx, m.pendingTarget, name), "renamed "+m.pendingTarget+" → "+name)
+		if newName := m.form.GetString("name"); newName != "" {
+			m.setStatus(m.client.RenameSession(m.ctx, m.pendingSession, newName), "renamed "+name+" → "+newName)
 		}
 	}
 	m.pendingOp = opNone
+	m.pendingSession = tmux.SessionIdentity{}
 }
 
 // setStatus records a transient footer message: the error (red) if non-nil,
 // otherwise the success text (green).
 func (m *model) setStatus(err error, ok string) {
 	if err != nil {
-		m.status = styleDanger.Render("✗ " + err.Error())
+		m.status = errStatus("", err)
 		return
 	}
 	m.status = styleOK.Render("✓ " + ok)
