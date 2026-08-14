@@ -60,11 +60,12 @@ func fanOut[I, O any](in []I, f func(I) O) []O {
 // discoverConcurrency()+2. (localRepos runs Discover to completion first, so
 // discoverDir's fan-out and localRepos' do not overlap each other.)
 // Measured on a 500-repo synthetic fixture (M3 Air, warm cache): serial
-// process spawn was the whole cost — gitStatus alone spawns up to two git
-// processes per repo (status, then rev-list on a clean tree), one after
-// another, 9.1s wall at 93% of a single core end to end (a third spawn,
-// `remote get-url`, belongs to localRepos' separate fan-out, not this
-// count). Isolating just the fan-out: serial 13.6s → 8 workers 3.5s → 16
+// process spawn was the whole cost — 9.1s wall at 93% of a single core end to
+// end. gitStatus spawned up to two git processes per repo at the time of that
+// measurement (status, then rev-list on a clean tree); it now spawns exactly
+// one, whatever the tree's state (forgectl#216). The `remote get-url` spawn
+// belongs to localRepos' separate fan-out, not this count.
+// Isolating just the fan-out: serial 13.6s → 8 workers 3.5s → 16
 // workers 3.2s. The knee sits at NumCPU; 16 buys only 8% over 8. Floored at
 // 4 so a low-core machine still gets some overlap; capped at 16 because
 // spawning one git process per repo unbounded (500+ concurrent git

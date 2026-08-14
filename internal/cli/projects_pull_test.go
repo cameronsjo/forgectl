@@ -13,11 +13,26 @@ import (
 	"github.com/cameronsjo/forgectl/internal/projects"
 )
 
+// v2Clean is the porcelain-v2 branch header block git reports for a clean
+// tree on an up-to-date tracking branch — the baseline every fixture repo here
+// starts from, with dirty records appended per repo.
+const v2Clean = "# branch.oid e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\n" +
+	"# branch.head main\n" +
+	"# branch.upstream origin/main\n" +
+	"# branch.ab +0 -0"
+
+// v2ModifiedRecord is a complete porcelain-v2 ordinary record — one modified
+// tracked file. Written out in full because the parser validates the fixed
+// fields and rejects a truncated record as unreadable rather than dirty.
+const v2ModifiedRecord = "1 .M N... 100644 100644 100644 " +
+	"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 file.go"
+
 // pullCmdFixture stands up tmp/name .git dirs and a *projects.Client whose git
-// calls branch on the `-C <dir>` arg — porcelain empty means clean, pullOut/
-// pullErr drive `git pull --rebase`'s outcome, keyed by repo name (not the
-// full path, since callers here don't need it).
-func pullCmdFixture(t *testing.T, names []string, porcelain, pullOut map[string]string, pullErr map[string]error) *projects.Client {
+// calls branch on the `-C <dir>` arg — statusRecords supplies each repo's
+// porcelain-v2 records (absent means clean), pullOut/pullErr drive `git pull
+// --rebase`'s outcome, keyed by repo name (not the full path, since callers
+// here don't need it).
+func pullCmdFixture(t *testing.T, names []string, statusRecords, pullOut map[string]string, pullErr map[string]error) *projects.Client {
 	t.Helper()
 	tmp := t.TempDir()
 	for _, n := range names {
@@ -33,9 +48,10 @@ func pullCmdFixture(t *testing.T, names []string, porcelain, pullOut map[string]
 		repoName := filepath.Base(args[1])
 		switch args[2] {
 		case "status":
-			return porcelain[repoName], nil
-		case "rev-list":
-			return "0", nil
+			if rec := statusRecords[repoName]; rec != "" {
+				return v2Clean + "\n" + rec, nil
+			}
+			return v2Clean, nil
 		case "pull":
 			return pullOut[repoName], pullErr[repoName]
 		}
@@ -68,7 +84,7 @@ func TestPullAllCmd_AllClean_ReturnsNilAndRendersGlyphs(t *testing.T) {
 }
 
 func TestPullAllCmd_DirtyRepo_ShowsWarningGlyphAndDoesNotFail(t *testing.T) {
-	client := pullCmdFixture(t, []string{"dirty"}, map[string]string{"dirty": " M file.go"}, nil, nil)
+	client := pullCmdFixture(t, []string{"dirty"}, map[string]string{"dirty": v2ModifiedRecord}, nil, nil)
 	cmd := newProjectsPullAllCmd(client)
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
