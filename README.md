@@ -17,6 +17,8 @@ Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path di
 
 Commands that actually launch a PR review — `forgectl pr <ref>`, `forgectl pr local`, and `forgectl pr pick` once admission establishes there is at least one ref to prepare — require **tmux 2.2 or newer**, for the dispatch-identity reasons in the `[pr]` section below. Read-only PR commands, any `--dry-run`, and empty, all-reviewed, or cap-full selections do not acquire that floor.
 
+Reading a local clone's git state — `projects list`, `projects pick`, the project inventory, and `projects pull-all` — requires **Git 2.11.0 or newer**. That release introduced `git status --porcelain=v2 --branch`, which reports the working-tree state and the ahead/behind counts in a single command; forgectl reads both from that one call rather than spawning a second `rev-list` per clean repository. On older Git the command fails, the repository's status reads as unknown, and `pull-all` skips it rather than rebasing a tree whose state it could not establish.
+
 ## Usage
 
 ```sh

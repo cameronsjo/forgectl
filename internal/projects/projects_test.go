@@ -60,7 +60,8 @@ func inventoryRunFunc(tmp string) func(string, []string) (string, error) {
 				}
 				return "", errors.New("no origin set")
 			}
-			// status --porcelain / rev-list → clean, 0 ahead.
+			// status --porcelain=v2 --branch → empty output is a clean tree
+			// with no branch header, so 0 ahead.
 			return "", nil
 		}
 		return "", nil
@@ -803,7 +804,8 @@ func TestDiscover_BoundsConcurrency(t *testing.T) {
 		// this: hold the call open briefly so overlapping goroutines actually
 		// overlap in wall-clock time rather than running effectively serially.
 		time.Sleep(5 * time.Millisecond)
-		// git status --porcelain / rev-list output; empty is fine either way.
+		// git status --porcelain=v2 --branch output; empty parses as clean,
+		// which is all this test needs — it counts spawns, not states.
 		return "", nil
 	}}
 	c := &Client{Dir: tmp, run: fake}

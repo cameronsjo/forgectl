@@ -11,11 +11,12 @@ import (
 )
 
 // pullFixture wires a *Client whose git calls are keyed by the full repo dir:
-// porcelain controls `git status --porcelain` (empty = clean), pullOut/pullErr
-// control `git pull --rebase`'s outcome. Any dir absent from a map gets the
-// zero value (clean / "" / nil), and `rev-list --count` always answers "0"
-// unless overridden via ahead.
-func pullFixture(porcelain, pullOut map[string]string, pullErr map[string]error, ahead map[string]string) *exec.FakeRunner {
+// records supplies the porcelain-v2 records a repo's `git status
+// --porcelain=v2 --branch` reports (none = clean), pullOut/pullErr control
+// `git pull --rebase`'s outcome. Any dir absent from a map gets the zero value
+// (clean / "" / nil), and every repo's branch header reports zero ahead unless
+// overridden via ahead.
+func pullFixture(records map[string][]string, pullOut map[string]string, pullErr map[string]error, ahead map[string]int) *exec.FakeRunner {
 	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		if name != "git" || len(args) < 3 || args[0] != "-C" {
 			return "", nil
@@ -23,12 +24,7 @@ func pullFixture(porcelain, pullOut map[string]string, pullErr map[string]error,
 		dir := args[1]
 		switch args[2] {
 		case "status":
-			return porcelain[dir], nil
-		case "rev-list":
-			if a, ok := ahead[dir]; ok {
-				return a, nil
-			}
-			return "0", nil
+			return v2Out(append([]string{v2Branch(ahead[dir], 0)}, records[dir]...)...), nil
 		case "pull":
 			return pullOut[dir], pullErr[dir]
 		}
@@ -52,9 +48,9 @@ func TestPullAll_ClassifiesEachRepo(t *testing.T) {
 	failDir := filepath.Join(tmp, "failpull")
 	aheadDir := filepath.Join(tmp, "aheadonly")
 
-	porcelain := map[string]string{
-		dirtyModDir:       " M file.go",
-		dirtyUntrackedDir: "?? newfile.go",
+	records := map[string][]string{
+		dirtyModDir:       {v2Ordinary},
+		dirtyUntrackedDir: {v2Untracked},
 	}
 	pullOut := map[string]string{
 		uptodateDir: "Already up to date.",
@@ -64,11 +60,11 @@ func TestPullAll_ClassifiesEachRepo(t *testing.T) {
 	pullErr := map[string]error{
 		failDir: errors.New("conflict"),
 	}
-	ahead := map[string]string{
-		aheadDir: "2",
+	ahead := map[string]int{
+		aheadDir: 2,
 	}
 
-	fake := pullFixture(porcelain, pullOut, pullErr, ahead)
+	fake := pullFixture(records, pullOut, pullErr, ahead)
 	c := &Client{Dir: tmp, run: fake}
 
 	results, err := c.PullAll(context.Background(), "")
