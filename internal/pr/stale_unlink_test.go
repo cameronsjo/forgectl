@@ -197,7 +197,36 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 			// sibling canary are legitimately absent from their old paths.
 			// What matters is that discardStale refuses rather than deleting
 			// a same-named file inside a directory it never verified.
+			//
+			// Note WHICH guard refuses this one: the swapped-in directory is
+			// empty, so the re-stat of the member's base name fails first and
+			// the directory identity check never gets the chance. The case
+			// below is the one that isolates it.
 			return expect{breadcrumbSurvives: false, canariesInPlace: false}
+		},
+		// A hard link to the member, in a directory swapped in under the same
+		// pathname, passes every check downstream of the directory identity
+		// one: same inode, same bytes, same decoded record, workspace still
+		// absent. Only the pinned directory differs — a rename carries the
+		// original inode to its new name, so the recreated directory is a new
+		// object. Without the identity check the whole suite stays green while
+		// discardStale unlinks through a directory nobody verified, which is
+		// exactly the swap its comment warns about.
+		"session directory swapped for one holding a hard link to the member": func(t *testing.T, f staleFixture) expect {
+			moved := f.dirPath + ".moved"
+			if err := os.Rename(f.dirPath, moved); err != nil {
+				t.Fatalf("move session dir: %v", err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(moved) })
+			if err := os.MkdirAll(f.dirPath, 0o700); err != nil {
+				t.Fatalf("recreate session dir: %v", err)
+			}
+			if err := os.Link(filepath.Join(moved, filepath.Base(f.path)), f.path); err != nil {
+				t.Skipf("hard links unsupported: %v", err)
+			}
+			// The member is reachable at its original pathname and must
+			// survive; the sibling canary went with the moved directory.
+			return expect{breadcrumbSurvives: true, canariesInPlace: false}
 		},
 		"workspace reappeared": func(t *testing.T, f staleFixture) expect {
 			if err := os.MkdirAll(f.ws, 0o700); err != nil {
