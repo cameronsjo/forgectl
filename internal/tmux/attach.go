@@ -44,6 +44,18 @@ func (c *Client) AttachWindow(ctx context.Context, want WindowIdentity) error {
 	return c.attachOrSwitch(ctx, current.SessionID, current.Name)
 }
 
+// SelectWindow makes a window current within its own session without attaching
+// or switching clients — the "I am already looking at this session, just change
+// the view" path. It goes through the interactive runner because tmux redraws
+// the attached client as a side effect.
+func (c *Client) SelectWindow(ctx context.Context, want WindowIdentity) error {
+	current, err := c.RevalidateWindow(ctx, want)
+	if err != nil {
+		return fmt.Errorf("select window %q: %w", want.Name, err)
+	}
+	return c.run.RunInteractive(ctx, c.tmuxBin, "select-window", "-t", current.ID)
+}
+
 // attachOrSwitch is the single inside/outside branch, taking an already
 // revalidated native session id.
 func (c *Client) attachOrSwitch(ctx context.Context, sessionID, label string) error {

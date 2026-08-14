@@ -124,6 +124,46 @@ func parsePanes(out string) ([]Pane, error) {
 	return parsedRows(panes, lines, "list-panes", paneFieldCount)
 }
 
+// ResolveWindowExact finds the window whose name matches exactly AND whose
+// parent is the given session, by Go string equality over a listing.
+//
+// Both halves are required. Window names are not unique across a server — two
+// sessions can each hold a `pr-o-r-1` — so matching on name alone would find a
+// window in somebody else's session, and killing it during teardown would take
+// down an unrelated review.
+func (c *Client) ResolveWindowExact(ctx context.Context, session SessionIdentity, name string) (WindowIdentity, error) {
+	if err := ValidateSessionID(session.ID); err != nil {
+		return WindowIdentity{}, err
+	}
+	windows, err := c.ListWindows(ctx)
+	if err != nil {
+		return WindowIdentity{}, err
+	}
+	selector := c.currentSelector()
+	for _, w := range windows {
+		if w.SessionID != session.ID || w.Name != name {
+			continue
+		}
+		if err := ValidateWindowID(w.ID); err != nil {
+			return WindowIdentity{}, err
+		}
+		return w.Identity(selector), nil
+	}
+	return WindowIdentity{}, fmt.Errorf("%w: no window named %q in session %s", ErrObjectGone, name, session.ID)
+}
+
+// KillWindow kills the window the identity names, revalidating generation and
+// parentage first. A window that moved to another session since capture is
+// refused rather than killed — its @id would still resolve.
+func (c *Client) KillWindow(ctx context.Context, want WindowIdentity) error {
+	current, err := c.RevalidateWindow(ctx, want)
+	if err != nil {
+		return fmt.Errorf("kill window %q: %w", want.Name, err)
+	}
+	_, err = c.run.Run(ctx, c.tmuxBin, "kill-window", "-t", current.ID)
+	return err
+}
+
 // treeMarkers are the structural glyphs buildTree uses. Kept here (not in the
 // tui glyph set) because the tree is assembled in the ops layer, which must
 // not import tui. The icons flag on Tree selects between the two sets.

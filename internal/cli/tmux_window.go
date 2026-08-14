@@ -36,7 +36,12 @@ func newTmuxWindowsCmd(client *tmux.Client) *cobra.Command {
 				if win.Panes == 1 {
 					unit = "pane"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%d %s\n", marker, win.Target, win.Name, win.Panes, unit)
+				// "session:index" is a human LOCATION here, not a target the
+				// program will act on — every jump goes by native window id.
+				// It stays in the output because it is the shape operators
+				// already read this column as.
+				location := fmt.Sprintf("%s:%d", win.Session, win.Index)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%d %s\n", marker, location, win.Name, win.Panes, unit)
 			}
 			return w.Flush()
 		},

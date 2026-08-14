@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // fanOut applies f to every element of in, bounded to discoverConcurrency()
@@ -255,27 +256,24 @@ func isGitRepo(dir string) bool {
 	return err == nil
 }
 
-// Open creates a new detached tmux session named after dir's basename (or
-// reattaches if one exists), then switches/attaches the current client.
+// Open attaches to the tmux session named after dir's basename, creating it
+// detached first if it does not exist.
+//
+// The whole flow lives in internal/tmux, which is the single owner of tmux
+// targeting. The version here used to be its own: `has-session -t <name>`
+// followed by `new-session`/`attach-session` on that same bare name. Every one
+// of those operands went through tmux's target grammar, so opening a project
+// called `forge` while a `forge-review` session existed found the sibling and
+// attached to it — the project never opened, and nothing reported a problem
+// (forgectl#237).
 func (c *Client) Open(ctx context.Context, dir string) error {
 	name := filepath.Base(dir)
-
-	// Check if session exists.
-	_, err := c.run.Run(ctx, "tmux", "has-session", "-t", name)
+	client := tmux.New(c.run)
+	session, err := client.EnsureSession(ctx, name, dir)
 	if err != nil {
-		// Session doesn't exist — create it.
-		_, err = c.run.Run(ctx, "tmux", "new-session", "-d", "-s", name, "-c", dir)
-		if err != nil {
-			return fmt.Errorf("creating tmux session %s: %w", name, err)
-		}
+		return fmt.Errorf("opening tmux session %s: %w", name, err)
 	}
-
-	// Attach or switch depending on whether we're already inside tmux.
-	if c.InsideTmux() {
-		_, err = c.run.Run(ctx, "tmux", "switch-client", "-t", name)
-		return err
-	}
-	return c.run.RunInteractive(ctx, "tmux", "attach-session", "-t", name)
+	return client.AttachSession(ctx, session)
 }
 
 // InsideTmux reports whether the process is running inside a tmux client.

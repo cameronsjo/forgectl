@@ -163,6 +163,20 @@ func (c *Client) currentSelector() ServerSelector {
 	return ServerSelector{TmuxEnv: c.getenv("TMUX"), TmpDir: c.getenv("TMUX_TMPDIR")}
 }
 
+// SessionIdentity binds a listed session row to the server selection this
+// client is pointed at. It exists so callers outside the package can carry a
+// full identity out of a listing without the selector being exported, which
+// would invite one being assembled from somewhere other than the client that
+// took the listing.
+func (c *Client) SessionIdentity(s Session) SessionIdentity {
+	return s.Identity(c.currentSelector())
+}
+
+// WindowIdentity binds a listed window row to the current server selection.
+func (c *Client) WindowIdentity(w Window) WindowIdentity {
+	return w.Identity(c.currentSelector())
+}
+
 // serverStateError maps a failed tmux command onto a typed server-state error,
 // routing #242's classifier rather than adding a second one. Only
 // serverAbsentDefault becomes ErrNoServer; every other verdict — including a

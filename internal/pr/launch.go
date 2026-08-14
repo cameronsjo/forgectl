@@ -120,52 +120,42 @@ func windowName(ref Ref) string {
 	return reviewWindowPrefix + fmt.Sprintf("%s-%s-%d", ref.Owner, repo, ref.Number)
 }
 
-// exactSessionTarget is the tmux -t form that resolves ONLY a session
-// literally named c.tmuxSession — never tmux's own -t fallback resolution
-// (exact name, then fnmatch, then PREFIX). Both the leading "=" (tmux's
-// exact-match modifier) and the trailing ":" are load-bearing: live-verified
-// on an isolated tmux socket (tmux 3.7b) that "=forgectl" WITHOUT the
-// trailing colon still falls through to prefix-matching an unrelated
-// session like "forgectl-review" for a `new-window -t` session target — only
-// "=forgectl:" refuses correctly when the exact session is absent, and lands
-// correctly when it exists. has-session doesn't need the trailing colon (its
-// target is always session-only), but including it there too costs nothing
-// and keeps every caller using one form.
-func (c *Client) exactSessionTarget() string {
-	return "=" + c.tmuxSession + ":"
+// ensureSession resolves the review session by exact name, creating it if it
+// does not exist, and returns its generation-qualified identity.
+//
+// The name never reaches a `-t` operand — every window command below targets
+// the returned native id. The predecessor here built `=forgectl:` by hand and
+// relied on that spelling being exactly right; the "=" alone was not enough
+// (see internal/tmux/target.go for the measured resolution table), and getting
+// it wrong deposited review windows into whatever session prefix-matched.
+func (c *Client) ensureSession(ctx context.Context) (tmux.SessionIdentity, error) {
+	session, err := tmux.New(c.run).EnsureSession(ctx, c.tmuxSession, "")
+	if err != nil {
+		return tmux.SessionIdentity{}, fmt.Errorf("resolve review session %q: %w", c.tmuxSession, err)
+	}
+	return session, nil
 }
 
-// windowTarget is the tmux target "<exact session>:pr-<owner>-<sanitized
-// repo>-<N>" for select/attach/kill. Built off exactSessionTarget for the
-// same reason new-window is: a bare or "="-without-colon session prefix on
-// a session:window target ALSO fuzzy-prefix-matches the session part
-// (verified live), so a stale leaked window under a wrongly-resolved
-// sibling session could otherwise be selected or killed as if it were the
-// real one.
-func (c *Client) windowTarget(ref Ref) string {
-	return c.exactSessionTarget() + windowName(ref)
+// newWindowTarget renders the `new-window -t` destination for the review
+// session. Split out so both launch paths and `pr open` share one spelling.
+func newWindowTarget(session tmux.SessionIdentity) (string, error) {
+	return tmux.NewWindowSessionTarget(session.ID)
 }
 
-// ensureSession creates the client's tmux session explicitly if a session
-// literally named c.tmuxSession doesn't already exist. Before
-// exactSessionTarget, a review's FIRST-EVER new-window call implicitly
-// depended on tmux's own fuzzy -t resolution to land the window somewhere —
-// in a sibling session if one happened to prefix-match, or fail outright
-// with "can't find window" if nothing did (verified live: with no session at
-// all, or only unrelated sessions, the bare `-t c.tmuxSession` form used to
-// fail the exact same way exact targeting does now). That was never a real
-// bootstrap mechanism, just an accident of tmux's resolution order — now
-// that new-window targets the session exactly, dispatch must create the
-// session itself rather than rely on it.
-func (c *Client) ensureSession(ctx context.Context) error {
+// resolveReviewWindow finds the review window for ref inside the review
+// session, by exact name under that session's native id.
+//
+// Resolution happens on use rather than from the breadcrumb: breadcrumbs
+// predate native ids and carry none, and an id persisted across a tmux server
+// restart would name a different window anyway. What the breadcrumb supplies is
+// the NAME to look for; the identity is rebuilt from the live server every time.
+func (c *Client) resolveReviewWindow(ctx context.Context, ref Ref) (tmux.WindowIdentity, error) {
 	t := tmux.New(c.run)
-	if t.HasSession(ctx, "="+c.tmuxSession) {
-		return nil
+	session, err := t.ResolveSessionExact(ctx, c.tmuxSession)
+	if err != nil {
+		return tmux.WindowIdentity{}, fmt.Errorf("resolve review session %q: %w", c.tmuxSession, err)
 	}
-	if _, err := c.run.Run(ctx, "tmux", "new-session", "-d", "-s", c.tmuxSession); err != nil {
-		return fmt.Errorf("create review session %q: %w", c.tmuxSession, err)
-	}
-	return nil
+	return t.ResolveWindowExact(ctx, session, windowName(ref))
 }
 
 // Launch dispatches the review agent for sess into a fresh tmux window under
@@ -286,13 +276,18 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 	if err := c.CheckDispatchCapability(ctx); err != nil {
 		return Dispatch{}, err
 	}
-	if err := c.ensureSession(ctx); err != nil {
+	session, err := c.ensureSession(ctx)
+	if err != nil {
+		return Dispatch{}, err
+	}
+	target, err := newWindowTarget(session)
+	if err != nil {
 		return Dispatch{}, err
 	}
 	args := []string{
 		"new-window",
 		"-P", "-F", tmux.IdentityFormat,
-		"-t", c.exactSessionTarget(),
+		"-t", target,
 		"-n", windowName(sess.Ref),
 		"-c", sess.Workspace,
 		"--", codexPath,
@@ -306,7 +301,8 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("read Codex review window identity: %w", err)
 	}
-	slog.Info("Successfully dispatched Codex clean-room review.", "ref", sess.Ref.String(), "window", c.windowTarget(sess.Ref))
+	slog.Info("Successfully dispatched Codex clean-room review.",
+		"ref", sess.Ref.String(), "session_id", session.ID, "window", windowName(sess.Ref))
 	return dispatch, nil
 }
 
@@ -432,20 +428,26 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	if err := c.CheckDispatchCapability(ctx); err != nil {
 		return Dispatch{}, err
 	}
-	if err := c.ensureSession(ctx); err != nil {
+	session, err := c.ensureSession(ctx)
+	if err != nil {
+		return Dispatch{}, err
+	}
+	target, err := newWindowTarget(session)
+	if err != nil {
 		return Dispatch{}, err
 	}
 	args := []string{
 		"new-window",
 		"-P", "-F", tmux.IdentityFormat,
-		"-t", c.exactSessionTarget(),
+		"-t", target,
 		"-n", windowName(sess.Ref),
 		"-c", sess.Workspace,
 		"--", claudePath,
 	}
 	args = append(args, claudeArgs...)
 
-	slog.Debug("Preparing to dispatch review into tmux window.", "target", c.windowTarget(sess.Ref), "workspace", sess.Workspace)
+	slog.Debug("Preparing to dispatch review into tmux window.",
+		"session_id", session.ID, "window", windowName(sess.Ref), "workspace", sess.Workspace)
 	out, err := c.run.Run(ctx, "tmux", args...)
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("open review window: %w", err)
@@ -454,7 +456,8 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("read review window identity: %w", err)
 	}
-	slog.Info("Successfully dispatched clean-room review.", "ref", sess.Ref.String(), "window", c.windowTarget(sess.Ref))
+	slog.Info("Successfully dispatched clean-room review.",
+		"ref", sess.Ref.String(), "session_id", session.ID, "window", windowName(sess.Ref))
 	return dispatch, nil
 }
 
