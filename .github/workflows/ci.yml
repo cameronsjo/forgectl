@@ -84,7 +84,10 @@ jobs:
         # Same reason as the ubuntu job: the *Isolated tmux-grammar tests skip
         # themselves without a tmux on PATH. Darwin is also where the socket-path
         # length constraint isolatedTmux works around actually bites.
-        run: brew install tmux
+        # `brew list ||` keeps the step reentrant: the runner image may already
+        # ship tmux, and `brew install` over a present formula is not reliably
+        # exit 0.
+        run: brew list tmux || brew install tmux
 
       - name: Test (Darwin-gated coverage)
         # -v is deliberate: the run log naming each formerly-skipped test as
