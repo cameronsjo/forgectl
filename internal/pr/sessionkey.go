@@ -93,17 +93,43 @@ var oidWidths = map[string]int{
 // becomes a uint64 so the widening is obviously lossless.
 const maxPRNumber = math.MaxInt
 
+// maxSessionKeyFieldBytes bounds every string in a key. It is load-bearing, not
+// hygiene: the canonical encoding prefixes each string with a uint16 length, so
+// a 65536-byte owner would wrap that prefix to a short one and two DIFFERENT
+// owners could encode to identical bytes — a forged identity rather than a
+// malformed one. ValidOwnerRepoPart constrains the charset and says nothing
+// about length, so the bound has to live here.
+//
+// 255 is far above anything real (GitHub caps owners at 39 and repos at 100)
+// and far below the wrap point, so it can never be the thing that refuses a
+// legitimate repository.
+const maxSessionKeyFieldBytes = 255
+
+// checkFieldLength rejects a string too long for the canonical encoding to
+// represent unambiguously. field names the component for the error message.
+func checkFieldLength(field, value string) error {
+	if len(value) > maxSessionKeyFieldBytes {
+		return fmt.Errorf("session key %s is %d bytes, over the %d-byte bound", field, len(value), maxSessionKeyFieldBytes)
+	}
+	return nil
+}
+
 // localSessionKey builds the key for a synthetic offline review of a local
 // commit. oid is the git object id as the Ref carries it, in any case; it is
 // lowercased and must be exactly one declared width of hex.
 func localSessionKey(oid string) (prSessionKey, error) {
 	lowered := asciiLower(oid)
+	// Widths are unique across the declared algorithms, so this is a lookup, not
+	// a search — written as a switch rather than a range over oidWidths so the
+	// mapping is fixed in the source instead of depending on map order.
 	algorithm := ""
-	for tag, width := range oidWidths {
-		if len(lowered) == width {
-			algorithm = tag
-			break
-		}
+	switch len(lowered) {
+	case oidWidths[oidAlgorithmShort]:
+		algorithm = oidAlgorithmShort
+	case oidWidths[oidAlgorithmSHA1]:
+		algorithm = oidAlgorithmSHA1
+	case oidWidths[oidAlgorithmSHA256]:
+		algorithm = oidAlgorithmSHA256
 	}
 	if algorithm == "" {
 		return prSessionKey{}, fmt.Errorf("local session oid %q is %d hex digits, which matches no declared width (7, 40, or 64)", oid, len(lowered))
@@ -121,6 +147,12 @@ func localSessionKey(oid string) (prSessionKey, error) {
 func remoteSessionKey(owner, repo string, number int) (prSessionKey, error) {
 	if !ValidOwnerRepoPart(owner) || !ValidOwnerRepoPart(repo) {
 		return prSessionKey{}, fmt.Errorf("session key owner/repo %q/%q outside allowed charset", owner, repo)
+	}
+	if err := checkFieldLength("owner", owner); err != nil {
+		return prSessionKey{}, err
+	}
+	if err := checkFieldLength("repo", repo); err != nil {
+		return prSessionKey{}, err
 	}
 	if number <= 0 {
 		return prSessionKey{}, fmt.Errorf("session key PR number must be positive, got %d", number)
@@ -290,6 +322,12 @@ func takeLenString(b []byte, field string) (string, []byte, error) {
 	s := string(b[:n])
 	if !utf8.ValidString(s) {
 		return "", nil, fmt.Errorf("session key %s is not valid UTF-8", field)
+	}
+	// The same bound the constructors apply. Without it, decode could mint a key
+	// no constructor can build — which would mean two ways to hold one identity,
+	// only one of them validated.
+	if err := checkFieldLength(field, s); err != nil {
+		return "", nil, err
 	}
 	return s, b[n:], nil
 }

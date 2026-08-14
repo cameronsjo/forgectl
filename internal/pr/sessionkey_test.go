@@ -124,6 +124,47 @@ func TestSessionKeyConstructorsRejectInvalidInput(t *testing.T) {
 	}
 }
 
+// The canonical encoding prefixes each string with a uint16 length, and
+// ValidOwnerRepoPart bounds the charset but not the length. Without an explicit
+// bound, an owner of 65536+ bytes wraps that prefix to a short one — and two
+// different owners can then encode to identical bytes, which is a forged
+// identity, not merely a malformed one.
+func TestSessionKeyRejectsOverlongFields(t *testing.T) {
+	long := strings.Repeat("a", maxSessionKeyFieldBytes+1)
+	if _, err := remoteSessionKey(long, "repo", 1); err == nil {
+		t.Error("an overlong owner was accepted")
+	}
+	if _, err := remoteSessionKey("owner", long, 1); err == nil {
+		t.Error("an overlong repo was accepted")
+	}
+	// The pair that would collide if the length prefix wrapped: identical for
+	// the first 65536 bytes, different after. Neither may encode at all.
+	wrapA := strings.Repeat("a", 1<<16)
+	wrapB := wrapA + "b"
+	keyA, errA := remoteSessionKey(wrapA, "r", 1)
+	keyB, errB := remoteSessionKey(wrapB, "r", 1)
+	if errA == nil || errB == nil {
+		t.Fatalf("owners at the uint16 boundary were accepted: %v / %v — encoded %q vs %q",
+			errA, errB, keyA.canonical(), keyB.canonical())
+	}
+}
+
+func TestDecodeSessionKeyRejectsOverlongFields(t *testing.T) {
+	// Hand-build an encoding whose owner exceeds the bound. It is representable
+	// on the wire (the uint16 prefix holds it), so only an explicit check in
+	// decode refuses it — and it must, or decode would mint keys the
+	// constructors cannot.
+	long := strings.Repeat("a", maxSessionKeyFieldBytes+1)
+	b := []byte(sessionKeyMagic)
+	b = append(b, sessionKeyVersion, byte(kindRemote))
+	b = appendLenString(b, long)
+	b = appendLenString(b, "repo")
+	b = append(b, 0, 0, 0, 0, 0, 0, 0, 1)
+	if _, err := decodeSessionKey(b); err == nil {
+		t.Fatal("decode accepted an overlong owner")
+	}
+}
+
 func TestDecodeSessionKeyRejectsNoncanonicalBytes(t *testing.T) {
 	valid, err := remoteSessionKey("owner", "repo", 7)
 	if err != nil {
