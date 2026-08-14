@@ -50,7 +50,7 @@ func (c *Client) ListWindows(ctx context.Context) ([]Window, error) {
 		if c.absentDefaultServer(ctx, args, err) {
 			return nil, nil
 		}
-		return nil, err
+		return nil, c.serverStateError(ctx, args, err)
 	}
 	return parseWindows(out)
 }
@@ -68,6 +68,11 @@ func parseWindows(out string) ([]Window, error) {
 		// only ever push the count ABOVE 8, so requiring exactly 8 drops the
 		// forged row instead of misreading it.
 		if len(f) != windowFieldCount {
+			continue
+		}
+		// The window id AND its parent session id, both — a row is only usable
+		// as an identity if both halves are well formed (see parseSessions).
+		if ValidateWindowID(f[2]) != nil || ValidateSessionID(f[3]) != nil {
 			continue
 		}
 		windows = append(windows, Window{
@@ -95,7 +100,7 @@ func (c *Client) ListPanes(ctx context.Context) ([]Pane, error) {
 		if c.absentDefaultServer(ctx, args, err) {
 			return nil, nil
 		}
-		return nil, err
+		return nil, c.serverStateError(ctx, args, err)
 	}
 	return parsePanes(out)
 }
@@ -108,6 +113,9 @@ func parsePanes(out string) ([]Pane, error) {
 		// Exact for the same reason parseWindows is: pane_title and
 		// pane_current_command are no more separator-free than a window name.
 		if len(f) != paneFieldCount {
+			continue
+		}
+		if ValidatePaneID(f[2]) != nil || ValidateWindowID(f[3]) != nil {
 			continue
 		}
 		panes = append(panes, Pane{

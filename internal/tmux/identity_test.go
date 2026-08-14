@@ -237,6 +237,53 @@ func TestRevalidateSurfacesUnreadableFields(t *testing.T) {
 	}
 }
 
+// TestParsersRejectMalformedNativeIDs pins the second half of the row-level
+// defence. The exact field count stops a shifted row from impersonating a
+// shorter one; this stops a row that survives the count from handing a caller
+// an id-shaped value that is not an id. Every id leaving a parser goes straight
+// into a `-t` operand, so an unvalidated one is the whole bug again.
+//
+// Each case pairs the bad row with a good one, so parsedRows' zero-row contract
+// does not fire and the assertion is about the DROP.
+func TestParsersRejectMalformedNativeIDs(t *testing.T) {
+	goodSession := sessionRow("9", "100", "$1", "keep", "/w")
+	goodWindow := windowRow("9", "100", "@1", "$1", "keep", 0, "keep")
+	goodPane := strings.Join([]string{"9", "100", "%1", "@1", "0", "t", "zsh", "1"}, FieldSep)
+
+	t.Run("session id", func(t *testing.T) {
+		out := goodSession + "\n" + sessionRow("9", "100", "1", "forged", "/w")
+		got, err := parseSessions(out)
+		if err != nil {
+			t.Fatalf("parseSessions: %v", err)
+		}
+		if len(got) != 1 || got[0].Name != "keep" {
+			t.Fatalf("parseSessions = %+v, want only the well-formed row", got)
+		}
+	})
+	t.Run("window parent session id", func(t *testing.T) {
+		// The window id is fine; its PARENT is not. Both halves must hold, or
+		// the row cannot prove parentage later.
+		out := goodWindow + "\n" + windowRow("9", "100", "@2", "notanid", "forged", 0, "forged")
+		got, err := parseWindows(out)
+		if err != nil {
+			t.Fatalf("parseWindows: %v", err)
+		}
+		if len(got) != 1 || got[0].Name != "keep" {
+			t.Fatalf("parseWindows = %+v, want only the well-formed row", got)
+		}
+	})
+	t.Run("pane id", func(t *testing.T) {
+		out := goodPane + "\n" + strings.Join([]string{"9", "100", "@2", "@1", "1", "t", "zsh", "0"}, FieldSep)
+		got, err := parsePanes(out)
+		if err != nil {
+			t.Fatalf("parsePanes: %v", err)
+		}
+		if len(got) != 1 || got[0].ID != "%1" {
+			t.Fatalf("parsePanes = %+v, want only the well-formed row", got)
+		}
+	})
+}
+
 // TestServerStateErrorsAreTyped proves the identity layer routes #242's
 // classifier verdicts into errors a caller can branch on — specifically that an
 // absent DEFAULT server is distinguishable from an unreadable one, because only

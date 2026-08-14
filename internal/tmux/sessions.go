@@ -45,7 +45,7 @@ func (c *Client) ListSessions(ctx context.Context) ([]Session, error) {
 		if c.absentDefaultServer(ctx, args, err) {
 			return nil, nil
 		}
-		return nil, err
+		return nil, c.serverStateError(ctx, args, err)
 	}
 	return parseSessions(out)
 }
@@ -67,6 +67,14 @@ func parseSessions(out string) ([]Session, error) {
 	for _, line := range lines {
 		f := splitFields(line)
 		if len(f) != sessionFieldCount {
+			continue
+		}
+		// Drop a row whose native id is not well formed, alongside the
+		// field-count check and for the same reason: a row that reaches a caller
+		// carries an id that will be handed to `-t`, and a shifted or forged row
+		// can offer a plausible-looking value naming something else. Validating
+		// here means no unvalidated id ever leaves a parser.
+		if ValidateSessionID(f[2]) != nil {
 			continue
 		}
 		sessions = append(sessions, Session{

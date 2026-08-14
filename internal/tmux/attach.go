@@ -120,7 +120,7 @@ func (c *Client) mostRecentSession(ctx context.Context) (SessionIdentity, error)
 		if c.absentDefaultServer(ctx, args, err) {
 			return SessionIdentity{}, nil
 		}
-		return SessionIdentity{}, err
+		return SessionIdentity{}, c.serverStateError(ctx, args, err)
 	}
 	lines := splitLines(out)
 	// parsed holds the rows that split cleanly. Only its emptiness is read
