@@ -215,6 +215,77 @@ func TestPullAll_SkipsUnknownStatus(t *testing.T) {
 	}
 }
 
+// TestPullAll_StatusProcessAndSafetyBudget pairs forgectl#216's process budget
+// with the safety decisions that budget must not disturb. One status probe per
+// repo, no rev-list anywhere, and the three classification outcomes unchanged:
+// a clean ahead-only repo still pulls, a dirty one still skips, and one whose
+// status could not be read still skips. Call filtering is by dir and
+// subcommand, never by index — PullAll's discovery phase fans out.
+func TestPullAll_StatusProcessAndSafetyBudget(t *testing.T) {
+	tmp := t.TempDir()
+	for _, n := range []string{"aheadonly", "dirty", "unknown"} {
+		mkGitDir(t, tmp, n)
+	}
+	aheadDir := filepath.Join(tmp, "aheadonly")
+	dirtyDir := filepath.Join(tmp, "dirty")
+	unknownDir := filepath.Join(tmp, "unknown")
+
+	statusOut := map[string]string{
+		aheadDir: v2Branch(2, 0),
+		dirtyDir: v2Out(v2Branch(2, 0), v2Ordinary),
+	}
+
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name != "git" || len(args) < 3 || args[0] != "-C" {
+			return "", nil
+		}
+		dir := args[1]
+		switch args[2] {
+		case "status":
+			if dir == unknownDir {
+				return "", errors.New("fatal: index file corrupt")
+			}
+			return statusOut[dir], nil
+		case "pull":
+			return "Already up to date.", nil
+		}
+		return "", nil
+	}}
+	c := &Client{Dir: tmp, run: fake}
+
+	results, err := c.PullAll(context.Background(), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	byName := make(map[string]PullResult, len(results))
+	for _, r := range results {
+		byName[r.Name] = r
+	}
+
+	if got := byName["aheadonly"].Status; got != PullUpToDate {
+		t.Errorf("aheadonly status = %v, want PullUpToDate", got)
+	}
+	if got := byName["dirty"].Status; got != PullSkippedDirty {
+		t.Errorf("dirty status = %v, want PullSkippedDirty", got)
+	}
+	if got := byName["unknown"].Status; got != PullSkippedUnknown {
+		t.Errorf("unknown status = %v, want PullSkippedUnknown", got)
+	}
+
+	for dir, wantPull := range map[string]int{aheadDir: 1, dirtyDir: 0, unknownDir: 0} {
+		counts := countGitSubcommands(fake.Calls, dir)
+		if counts["status"] != 1 {
+			t.Errorf("%s: status calls = %d, want exactly 1", filepath.Base(dir), counts["status"])
+		}
+		if counts["rev-list"] != 0 {
+			t.Errorf("%s: rev-list calls = %d, want 0", filepath.Base(dir), counts["rev-list"])
+		}
+		if counts["pull"] != wantPull {
+			t.Errorf("%s: pull calls = %d, want %d", filepath.Base(dir), counts["pull"], wantPull)
+		}
+	}
+}
+
 func TestClassifyPull_Table(t *testing.T) {
 	cases := []struct {
 		name string
