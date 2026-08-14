@@ -124,15 +124,37 @@ func TestKillOthers_TargetsNativeID(t *testing.T) {
 
 // TestRenameSession_NewNameIsAnOperand pins the argv split that makes rename
 // safe: -t carries the native id of the session being renamed, and the trailing
-// bare arg is the new name, passed through untouched. A new name that reads as
-// target syntax must not be "helpfully" rewritten.
+// bare arg is the new name, passed through untouched behind `--`. A new name
+// that reads as target syntax must not be "helpfully" rewritten.
 func TestRenameSession_NewNameIsAnOperand(t *testing.T) {
 	fake, c, identity := opsFixture(t, false)
 	const newName = "=fresh:"
 	if err := c.RenameSession(context.Background(), identity, newName); err != nil {
 		t.Fatalf("RenameSession: %v", err)
 	}
-	argsEqual(t, fake.Last().Args, []string{"rename-session", "-t", "$1", newName})
+	argsEqual(t, fake.Last().Args, []string{"rename-session", "-t", "$1", "--", newName})
+}
+
+// TestRenameSession_DashNameStaysAnOperand is the flag-injection half. The new
+// name is the only operator-controlled positional this package hands tmux, and
+// the TUI's rename field is free text — so a name that opens with a dash must
+// land after `--` rather than in tmux's own flag parser.
+func TestRenameSession_DashNameStaysAnOperand(t *testing.T) {
+	for _, newName := range []string{"-t$9", "--help", "-X", "-"} {
+		t.Run(newName, func(t *testing.T) {
+			fake, c, identity := opsFixture(t, false)
+			if err := c.RenameSession(context.Background(), identity, newName); err != nil {
+				t.Fatalf("RenameSession: %v", err)
+			}
+			args := fake.Last().Args
+			argsEqual(t, args, []string{"rename-session", "-t", "$1", "--", newName})
+			// The terminator must sit BEFORE the name; a `--` appended after it
+			// would satisfy a set comparison while leaving the name parseable.
+			if args[len(args)-2] != "--" {
+				t.Fatalf("args = %v; the terminator must immediately precede the new name", args)
+			}
+		})
+	}
 }
 
 // TestZeroMutationOnStaleIdentity is the destructive gate. Every mutating and
@@ -231,6 +253,85 @@ func TestAttachWindow_ZeroActionOnReparent(t *testing.T) {
 	}
 }
 
+// windowOpsFixture builds a client whose list-windows reports one window @3
+// parented by the given session id, plus the identity that names @3 under $1.
+// parentID lets a test declare the window has been reparented since capture.
+func windowOpsFixture(t *testing.T, parentID string) (*exec.FakeRunner, *Client, WindowIdentity) {
+	t.Helper()
+	session := "alpha"
+	if parentID != "$1" {
+		session = "other"
+	}
+	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		if len(args) > 0 && args[0] == "list-windows" {
+			return strings.Join([]string{"123", "456", "@3", parentID, session, "2", "shell", "1", "1"}, FieldSep), nil
+		}
+		return "", nil
+	}}
+	c := New(fake, WithInsideTmux(func() bool { return true }))
+	identityEnv(c, "", "/tmp")
+	return fake, c, WindowIdentity{
+		Generation: ServerGeneration{Selector: ServerSelector{TmpDir: "/tmp"}, PID: "123", StartTime: "456"},
+		ID:         "@3", SessionID: "$1", Name: "shell",
+	}
+}
+
+// TestWindowVerbs_TargetNativeID covers the two window verbs AttachWindow's own
+// tests do not: the destructive kill and the in-session select. Both go through
+// RevalidateWindow, so both must issue a single @id-targeted command.
+func TestWindowVerbs_TargetNativeID(t *testing.T) {
+	for name, tc := range map[string]struct {
+		run         func(*Client, WindowIdentity) error
+		want        []string
+		interactive bool
+	}{
+		"KillWindow": {
+			run:  func(c *Client, id WindowIdentity) error { return c.KillWindow(context.Background(), id) },
+			want: []string{"kill-window", "-t", "@3"},
+		},
+		"SelectWindow": {
+			run:         func(c *Client, id WindowIdentity) error { return c.SelectWindow(context.Background(), id) },
+			want:        []string{"select-window", "-t", "@3"},
+			interactive: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake, c, identity := windowOpsFixture(t, "$1")
+			if err := tc.run(c, identity); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			call := fake.Last()
+			argsEqual(t, call.Args, tc.want)
+			if call.Interactive != tc.interactive {
+				t.Errorf("interactive = %v, want %v", call.Interactive, tc.interactive)
+			}
+		})
+	}
+}
+
+// TestWindowVerbs_ZeroActionOnReparent is the assertion AttachWindow already
+// carries, extended to the destructive verb: a window that moved to another
+// session since capture keeps its @id, so killing it would destroy a window in
+// a session the operator never selected.
+func TestWindowVerbs_ZeroActionOnReparent(t *testing.T) {
+	for name, run := range map[string]func(*Client, WindowIdentity) error{
+		"KillWindow":   func(c *Client, id WindowIdentity) error { return c.KillWindow(context.Background(), id) },
+		"SelectWindow": func(c *Client, id WindowIdentity) error { return c.SelectWindow(context.Background(), id) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake, c, identity := windowOpsFixture(t, "$2")
+			if err := run(c, identity); !errors.Is(err, ErrWrongParent) {
+				t.Fatalf("%s error = %v, want ErrWrongParent", name, err)
+			}
+			for _, call := range fake.Calls {
+				if len(call.Args) > 0 && call.Args[0] != "list-windows" {
+					t.Fatalf("%s ran %v after a reparent refusal, want only the listing", name, call.Args)
+				}
+			}
+		})
+	}
+}
+
 // fakeLookPathFound always resolves — used by tests that exercise sesh
 // delegation but must not depend on a real sesh binary on PATH.
 func fakeLookPathFound(bin string) (string, error) {
@@ -238,20 +339,26 @@ func fakeLookPathFound(bin string) (string, error) {
 }
 
 func TestPick_DelegatesToSesh(t *testing.T) {
-	// Pick must shell out to `sesh connect <name>` interactively (it takes the tty).
-	fake := &exec.FakeRunner{}
-	c := New(fake, WithBins("tmux", "sesh"), WithLookPath(fakeLookPathFound))
-	if err := c.Pick(context.Background(), "projectx"); err != nil {
-		t.Fatalf("Pick: %v", err)
+	// Pick must shell out to `sesh connect -- <name>` interactively (it takes the
+	// tty). The name comes from `sesh list`, i.e. from whatever sessions exist on
+	// the box — so it is terminated even though forgectl never composes it.
+	for _, name := range []string{"projectx", "--help", "-t"} {
+		t.Run(name, func(t *testing.T) {
+			fake := &exec.FakeRunner{}
+			c := New(fake, WithBins("tmux", "sesh"), WithLookPath(fakeLookPathFound))
+			if err := c.Pick(context.Background(), name); err != nil {
+				t.Fatalf("Pick: %v", err)
+			}
+			call := fake.Last()
+			if call.Name != "sesh" {
+				t.Errorf("expected sesh binary, got %q", call.Name)
+			}
+			if !call.Interactive {
+				t.Errorf("sesh connect must take the tty (interactive)")
+			}
+			argsEqual(t, call.Args, []string{"connect", "--", name})
+		})
 	}
-	call := fake.Last()
-	if call.Name != "sesh" {
-		t.Errorf("expected sesh binary, got %q", call.Name)
-	}
-	if !call.Interactive {
-		t.Errorf("sesh connect must take the tty (interactive)")
-	}
-	argsEqual(t, call.Args, []string{"connect", "projectx"})
 }
 
 func TestSeshList_Parse(t *testing.T) {

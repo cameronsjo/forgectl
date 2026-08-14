@@ -241,6 +241,13 @@ func (c *Client) EnsureSession(ctx context.Context, name, dir string) (SessionId
 // the `-t` operand is the native id, so a prefix sibling cannot be renamed by
 // mistake (forgectl#237 reproduced exactly that with `rename-session -t forge`
 // renaming `forge-review`).
+//
+// The `--` is what keeps newName an operand. It is the only operator-controlled
+// POSITIONAL this package hands tmux, and the TUI's rename field (internal/tui)
+// is free text — so a name like `-t$9` would otherwise reach tmux's own flag
+// parser. Measured on tmux 3.7b it cannot hijack the target (it consumes the
+// sole positional and rename-session then fails "too few arguments"), but a
+// tmux-legal name failing with a parser diagnostic is still wrong.
 func (c *Client) RenameSession(ctx context.Context, want SessionIdentity, newName string) error {
 	if newName == "" {
 		return errors.New("cannot rename a tmux session to an empty name")
@@ -249,7 +256,7 @@ func (c *Client) RenameSession(ctx context.Context, want SessionIdentity, newNam
 	if err != nil {
 		return fmt.Errorf("rename session %q: %w", want.Name, err)
 	}
-	_, err = c.run.Run(ctx, c.tmuxBin, "rename-session", "-t", current.ID, newName)
+	_, err = c.run.Run(ctx, c.tmuxBin, "rename-session", "-t", current.ID, "--", newName)
 	return err
 }
 
