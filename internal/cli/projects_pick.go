@@ -103,13 +103,13 @@ func projectCandidateLine(repo projects.Repo) string {
 		if path == "" {
 			path = "<unknown>"
 		}
-		identity = "path:" + sanitizeCandidate(path)
+		identity = "path:" + safeCandidate(path)
 	} else {
-		host = sanitizeCandidate(repo.Host)
-		identity = sanitizeCandidate(repo.Owner) + "/" + sanitizeCandidate(repo.Name)
+		host = safeCandidate(repo.Host)
+		identity = safeCandidate(repo.Owner) + "/" + safeCandidate(repo.Name)
 	}
 	status := projectCandidateStatus(repo)
-	return host + "  " + identity + "  " + sanitizeCandidate(status)
+	return host + "  " + identity + "  " + safeCandidate(status)
 }
 
 func projectCandidateStatus(repo projects.Repo) string {
@@ -136,12 +136,12 @@ func projectCandidateStatus(repo projects.Repo) string {
 	return status
 }
 
-// sanitizeCandidate renders one fixed-column candidate field. It is safeTerm
+// safeCandidate renders one fixed-column candidate field. It is safeTerm
 // alone: the sink used to need a second pass to neutralize the tab the old
 // sanitizer deliberately preserved, and SafeLine escapes tab like every other
 // non-graphic rune, so the layout rule this sink needs now falls out of the
 // shared boundary rather than being maintained beside it.
-func sanitizeCandidate(s string) string {
+func safeCandidate(s string) string {
 	return safeTerm(s)
 }
 

@@ -189,9 +189,9 @@ machine can find a runbook or field report it did not author.
 					return nil
 				}
 				for _, h := range hits {
-					// Indexed content is untrusted at print time — strip control
-					// bytes so a hostile title/snippet can't smuggle terminal
-					// escape sequences to the operator's shell.
+					// Indexed content is untrusted at print time — quote every
+					// unsafe rune so a hostile title/snippet can't smuggle
+					// terminal escape sequences to the operator's shell.
 					fmt.Fprintf(out, "%s\t%s\t[%s]\t(%s, indexed by %s)\n\t%s\n",
 						safeTerm(h.Path), safeTerm(h.Title), safeTerm(h.Type),
 						safeTerm(h.Project), safeTerm(h.Machine), safeTerm(h.Snippet))

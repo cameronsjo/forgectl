@@ -93,7 +93,7 @@ func prCandidateLine(item pr.PR, store *pr.ReviewedStore) string {
 	if pr.Dimmed(item, store) {
 		line += "  (reviewed)"
 	}
-	return sanitizeCandidate(line)
+	return safeCandidate(line)
 }
 
 // pickPRs runs the multiselect and returns the chosen PRs (input PR order
