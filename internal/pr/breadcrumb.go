@@ -237,13 +237,22 @@ func loadBreadcrumbRecord(path, sessionsDir string) (Breadcrumb, []byte, error) 
 // directory handle, so there is no path left to location-check.
 //
 // path names the file only for error messages; it is never opened here — and it
-// is ESCAPED on the way into them. The filename is chosen by whoever can write
-// the session-state dir, the same actor these refusals presume, and this error
-// reaches the terminal through fang's handler, which renders err.Error()
-// verbatim with no sanitizer anywhere on the route. A name carrying ANSI or
+// is ESCAPED on the way into the two below. The filename is chosen by whoever
+// can write the session-state dir, the same actor these refusals presume, and
+// these errors reach the terminal through fang's handler, which renders
+// err.Error() verbatim with no sanitizer on the route. A name carrying ANSI or
 // bidi controls could otherwise repaint the very line telling an operator which
 // file to remove. QuotePathIfUnsafe rather than QuotePath so an ordinary
 // pathname still prints bare — the same trade `pr list` makes at this hazard.
+//
+// SCOPE, AND IT IS NARROW: this closes these two exits, NOT the route. Sibling
+// sites still interpolate the same attacker-chosen name raw — the read failure
+// in loadBreadcrumbRecord (whose *os.PathError cause re-inserts the path even
+// if its own %s were escaped), the workspace branches in loadBreadcrumb, and
+// the member and teardown paths. An operator sent here by the trailing-content
+// remedy can still be shown a repainted line by one of those on the same verb.
+// Converging the cluster is forgectl#309; do not read this escape as evidence
+// the exposure is handled.
 func decodeBreadcrumbRecord(data []byte, path string) (Breadcrumb, error) {
 	safePath := termsafe.QuotePathIfUnsafe(path)
 	bc, err := decodeBreadcrumb(data)
