@@ -149,9 +149,14 @@ read but is not a faithful copy of what was typed.`,
 				return err
 			}
 
+			// A dropped write would silently shorten the list, and a short
+			// list of commands reads exactly like a short history — so a
+			// write failure is surfaced rather than swallowed.
 			out := cmd.OutOrStdout()
 			for _, entry := range tail {
-				fmt.Fprintln(out, termsafe.SafeLine(entry.Command))
+				if _, err := fmt.Fprintln(out, termsafe.SafeLine(entry.Command)); err != nil {
+					return fmt.Errorf("write shell history: %w", err)
+				}
 			}
 			return nil
 		},

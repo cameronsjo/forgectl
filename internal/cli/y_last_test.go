@@ -10,10 +10,12 @@ package cli
 //   [x] Fail-closed: an absent $HISTFILE errors and prints nothing
 //   [x] Fail-closed: a malformed history errors and prints nothing
 //   [x] Fail-closed: a non-numeric or non-positive count errors
+//   [x] Fail-closed: a failing stdout surfaces rather than truncating quietly
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,6 +145,25 @@ func TestYLastCmd_FailsClosed(t *testing.T) {
 				t.Errorf("y last printed %q alongside a refusal", stdout)
 			}
 		})
+	}
+}
+
+// errWriter fails every write, standing in for a closed pipe.
+type errWriter struct{}
+
+func (errWriter) Write([]byte) (int, error) { return 0, errors.New("pipe closed") }
+
+func TestYLastCmd_SurfacesWriteFailures(t *testing.T) {
+	seedHistory(t, "echo one\necho two\n")
+
+	client := clippkg.New(&exec.FakeRunner{}, clippkg.WithGOOS("darwin"))
+	cmd := newYCmdForClient(client)
+	cmd.SetOut(errWriter{})
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"last", "2"})
+
+	if err := cmd.ExecuteContext(context.Background()); err == nil {
+		t.Fatal("y last reported success while every write to stdout failed")
 	}
 }
 
