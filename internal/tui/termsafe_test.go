@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -103,9 +104,35 @@ func TestScreensDrawNothingUnsafe(t *testing.T) {
 	}
 }
 
+// TestErrorStatusDrawsNothingUnsafe pins errStatus, which was a live sanitizer
+// with no test at all: nothing in this package drove a failing runner, so
+// deleting its termsafe.SafeLine left the whole suite green.
+//
+// That gap is structural, not an oversight in probing. Every other sink here is
+// reachable by rendering a screen, so a mutation probe finds it; this one is
+// reachable only by making a tmux call FAIL, which no fixture did. A comment
+// asserting "the error path already goes through errStatus" was true of the
+// code and unverified by anything — the shape this repo has been burned by
+// before.
+func TestErrorStatusDrawsNothingUnsafe(t *testing.T) {
+	m := hostileModel(t)
+	// An error is the one input whose text forgectl never composes at all:
+	// *exec.CommandError concatenates raw tmux stderr, which echoes the session
+	// name tmux was given.
+	m.setStatus(errors.New("tmux: "+termsafetest.Hostile("boom")), "")
+	if m.status == "" {
+		t.Fatal("status is empty; the check would pass vacuously")
+	}
+	termsafetest.AssertInert(t, "error status", m.status)
+	if !strings.Contains(m.status, "boom") {
+		t.Errorf("error status lost its legible text: %q", m.status)
+	}
+}
+
 // TestSuccessStatusDrawsNothingUnsafe covers the footer's OTHER half. The error
-// path already goes through errStatus; the success path composes its message
-// from the same session name ("killed <name>") and had no such boundary.
+// path goes through errStatus (pinned directly above); the success path
+// composes its message from the same session name ("killed <name>") and had no
+// such boundary.
 func TestSuccessStatusDrawsNothingUnsafe(t *testing.T) {
 	m := hostileModel(t)
 	m.setStatus(nil, "killed "+termsafetest.Hostile("work"))
