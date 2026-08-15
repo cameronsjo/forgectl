@@ -162,12 +162,12 @@ func TestDecodeBreadcrumb_RejectsTrailingContent(t *testing.T) {
 // spellings are covered below, and either one turns this red.
 func TestDecodeBreadcrumb_TrailingContentErrorCarriesNoFileBytes(t *testing.T) {
 	const marker = "MARKERBYTES1234"
-	// A string token (echoed verbatim by Token — the escape is spelled 
-	// so the tail is VALID json and really does decode to a token carrying a
-	// raw ESC and a raw bidi override) and a bare word (whose first byte the
-	// syntax error quotes): the two ways file bytes reach a message.
+	// Two shapes. A quoted STRING whose escapes keep the tail valid json, so
+	// it really does decode to a token carrying a raw ESC and a raw bidi
+	// override — that token is what Token hands back verbatim. And a bare
+	// word, whose first byte the syntax error quotes instead.
 	for _, tail := range []string{
-		"\n\"\\u001b[31m" + marker + "‮\"",
+		"\n\"\\u001b[31m" + marker + "\u202e\"",
 		"\n" + marker,
 		"\n\x1b[31m" + marker,
 	} {
@@ -179,7 +179,7 @@ func TestDecodeBreadcrumb_TrailingContentErrorCarriesNoFileBytes(t *testing.T) {
 		if strings.Contains(got, marker) {
 			t.Errorf("refusal message echoed file bytes: %q", got)
 		}
-		for _, control := range []string{"\x1b", "‮", `\x1b`, `‮`} {
+		for _, control := range []string{"\x1b", "\u202e", `\x1b`, `\u202e`} {
 			if strings.Contains(got, control) {
 				t.Errorf("refusal message carries %q from the file: %q", control, got)
 			}
