@@ -70,11 +70,24 @@ func gitStatus(ctx context.Context, run interface {
 // dirty record git meant to report would make the tree look clean, and PullAll
 // rebases a clean tree.
 //
+// That split is about individual LINES. One assertion is made about the
+// payload as a whole, before any line is read: the header block must be
+// there at all. An extensible set is still a set git always sends.
+//
 // Paths are hostile input and are never decoded — only their presence and, for
 // a rename, their TAB separation are checked. Without -z, git C-quotes any path
 // containing a newline, TAB, quote, or backslash, so those characters arrive as
 // escape sequences inside one physical line and cannot forge a second record.
 func parseGitStatusV2(out string) (GitStatus, bool) {
+	// Asserted before a single record is interpreted, because it is the
+	// question of whether this payload answers the command that was issued at
+	// all — and that is answerable without reading any record. The placement
+	// also keeps the assertion independent of how records are treated: it
+	// holds even if record handling ever stops short-circuiting.
+	if !hasHeaderLine(out) {
+		return GitStatus{State: StatusUnknown}, false
+	}
+
 	gs := GitStatus{State: StatusOK}
 	ahead := 0
 	// Any malformed branch.ab poisons the ahead count for the whole payload:
@@ -139,6 +152,34 @@ func parseGitStatusV2(out string) (GitStatus, bool) {
 		gs.Ahead = ahead
 	}
 	return gs, true
+}
+
+// hasHeaderLine reports whether a porcelain-v2 payload carries a header block
+// at all.
+//
+// gitStatus always passes --branch, and every repository shape answers it with
+// a block: no upstream still emits branch.oid and branch.head, a detached HEAD
+// emits branch.head (detached), an unborn branch emits branch.oid (initial).
+// Only branch.upstream and branch.ab are ever omitted. So a payload with no
+// header line — the empty string included — is not an answer to the command
+// that was issued, and reading a tree state out of it would report on a branch
+// this parser never saw.
+//
+// PRESENCE of the block is what is asserted, never the identity of what is in
+// it: an unrecognized `# ` line satisfies this. That is what keeps individual
+// headers fail-soft and extensible while the block itself is fail-closed, like
+// the non-extensible record discriminators.
+//
+// A pre-2.11 git cannot reach here — it fails the command outright and
+// gitStatus lands on StatusUnknown from that error — so an old-git environment
+// is never misreported as a hostile payload.
+func hasHeaderLine(out string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "# ") {
+			return true
+		}
+	}
+	return false
 }
 
 // splitRecord splits a record into exactly n space-separated fields, none of
