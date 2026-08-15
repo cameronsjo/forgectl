@@ -213,9 +213,13 @@ forgectl upgrade --check                 # report whether an update is available
                                           #   a source build (go build/go run) WARNS instead of attempting anything —
                                           #   there's no cask install to manage
 
-# y — read/write the system clipboard (macOS only)
+# y — clipboard (macOS only) + read-only zsh history recall
 echo hi | forgectl y copy                # copy stdin to the clipboard
 forgectl y paste                         # print the clipboard's current contents
+forgectl y last 5                        # print the 5 most recent zsh commands, oldest first
+                                          #   reads $HISTFILE (default ~/.zsh_history); no shell shim, so it sees
+                                          #   only what zsh has flushed — set INC_APPEND_HISTORY or SHARE_HISTORY
+                                          #   in .zshrc for the current shell's commands to appear. zsh only.
 ```
 
 The cask doesn't stage an `fx` command — it's a shell alias you add yourself:

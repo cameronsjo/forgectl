@@ -3,14 +3,18 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
+	"strconv"
 
 	"github.com/spf13/cobra"
 
 	clippkg "github.com/cameronsjo/forgectl/internal/clip"
+	"github.com/cameronsjo/forgectl/internal/history"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
-// yAliases is the single source of truth for y's c/p shorthands — migrated
+// yAliases is the single source of truth for y's c/p/l shorthands — migrated
 // here from forgive.YAliases at conversion. A separate var (not a literal
 // inside yModule) because newYCmdForClient also applies it: routing that read
 // through yModule would be an initialization cycle (manifest → constructor →
@@ -18,6 +22,7 @@ import (
 var yAliases = map[string][]string{
 	"copy":  {"c"},
 	"paste": {"p"},
+	"last":  {"l"},
 }
 
 // yModule declares the y (clipboard) extension (ADR-0005) — the conversion
@@ -29,8 +34,9 @@ var yModule = module.Manifest{
 	New:        newYCmd,
 }
 
-// newYCmd builds `forgectl y` over the registry Deps. Clipboard half of
-// issue #26 only; the shell-history-reading half is deferred.
+// newYCmd builds `forgectl y` over the registry Deps — both halves of issue
+// #26: the clipboard verbs over pbcopy/pbpaste, and read-only shell-history
+// recall over $HISTFILE.
 func newYCmd(deps module.Deps) *cobra.Command {
 	client := clippkg.New(deps.Runner)
 	return newYCmdForClient(client)
@@ -42,16 +48,19 @@ func newYCmd(deps module.Deps) *cobra.Command {
 func newYCmdForClient(client *clippkg.Client) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "y",
-		Short: "Read/write the system clipboard",
+		Short: "Clipboard and shell-history helpers",
 		Long: `y wraps pbcopy/pbpaste so a shell pipeline can move text through the
-clipboard without shelling out directly. macOS only.
+clipboard without shelling out directly, and reads back recent commands from
+the zsh history file. Clipboard verbs are macOS only.
 
   echo hi | forgectl y copy   copy stdin to the clipboard
-  forgectl y paste            print the clipboard's current contents`,
+  forgectl y paste            print the clipboard's current contents
+  forgectl y last 5           print the 5 most recent shell commands`,
 	}
 	cmd.AddCommand(
 		newYCopyCmd(client),
 		newYPasteCmd(client),
+		newYLastCmd(),
 	)
 	applyAliases(cmd, yAliases)
 	return cmd
@@ -85,6 +94,65 @@ func newYPasteCmd(client *clippkg.Client) *cobra.Command {
 				return err
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), out)
+			return nil
+		},
+	}
+}
+
+// newYLastCmd builds `y last [n]`. Everything it prints comes from the history
+// file, which is untrusted, so every command goes through termsafe.SafeLine —
+// one entry always renders as exactly one inert physical line.
+func newYLastCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "last [n]",
+		Short: "Print the n most recent shell commands",
+		Long: `last reads $HISTFILE (default ~/.zsh_history), parses zsh's history
+format, and prints the n most recent commands, oldest first. n defaults to 1.
+
+It is read-only: forgectl installs no shell function and no hook, so it sees
+only what zsh has already flushed to disk. zsh buffers history until the shell
+exits unless INC_APPEND_HISTORY or SHARE_HISTORY is set in .zshrc — without one
+of those, commands typed in the current shell are not on disk yet and will not
+appear here.
+
+Only zsh history is supported; bash stores history differently.
+
+Commands are printed with control characters escaped, so the output is safe to
+read but is not a faithful copy of what was typed.`,
+		// SilenceUsage/SilenceErrors mirror `env get` (env.go): last's stdout is
+		// a stream of recovered commands, so a refusal must not dump usage text
+		// into it — a caller reading the output would take the help banner for
+		// history.
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Args:          cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			count := 1
+			if len(args) == 1 {
+				parsed, err := strconv.Atoi(args[0])
+				if err != nil {
+					return fmt.Errorf("count %q is not a number", termsafe.SafeLine(args[0]))
+				}
+				count = parsed
+			}
+
+			path, err := history.ResolvePath(os.Getenv, os.UserHomeDir)
+			if err != nil {
+				return err
+			}
+			entries, err := history.Read(path)
+			if err != nil {
+				return err
+			}
+			tail, err := history.LastN(entries, count)
+			if err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+			for _, entry := range tail {
+				fmt.Fprintln(out, termsafe.SafeLine(entry.Command))
+			}
 			return nil
 		},
 	}

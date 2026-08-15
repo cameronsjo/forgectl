@@ -2,9 +2,9 @@
 // thin wrapper around macOS's pbcopy/pbpaste. It knows nothing of Cobra —
 // that decoupling is the house pattern (see internal/net, internal/docker).
 //
-// This is the clipboard half of issue #26 only; the shell-history-reading
-// half is deferred (it depends on a shell-integration convention that
-// doesn't exist in this repo yet).
+// This is the clipboard half of issue #26; the shell-history half lives in
+// internal/history, which reads $HISTFILE directly rather than through a
+// shell shim.
 package clip
 
 import (
