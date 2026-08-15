@@ -71,11 +71,17 @@ func TestPickerLabelsAreBuiltByAnEscapingRenderer(t *testing.T) {
 	var options int
 	for name, file := range files {
 		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
+				options += checkFuncLabels(t, fset, name, fn)
 				continue
 			}
-			options += checkFuncLabels(t, fset, name, fn)
+			// An option built in a package-level var block has no enclosing
+			// function, so the per-function walk above never reaches it — and the
+			// options floor stays green on the strength of the real options
+			// elsewhere, leaving this one silently unexamined. There are no
+			// locals out here, so the strict form with an empty approval map is
+			// exactly right.
+			options += checkDeclLabels(t, fset, name, decl)
 		}
 	}
 
@@ -87,6 +93,35 @@ func TestPickerLabelsAreBuiltByAnEscapingRenderer(t *testing.T) {
 	if options == 0 {
 		t.Fatal("parsed files but found no huh.NewOption; the matcher is broken, not the package clean")
 	}
+}
+
+// checkDeclLabels checks huh.NewOption calls in a declaration with no function
+// body — a package-level var block — against an empty approval map.
+func checkDeclLabels(t *testing.T, fset *token.FileSet, file string, decl ast.Decl) int {
+	t.Helper()
+	options := 0
+	ast.Inspect(decl, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || !isHuhNewOption(call) {
+			return true
+		}
+		options++
+		if len(call.Args) == 0 || !labelIsEscaped(call.Args[0], nil) {
+			t.Errorf("%s:%d: package-level huh.NewOption label is not built by an escaping renderer",
+				file, fset.Position(call.Pos()).Line)
+		}
+		return true
+	})
+	return options
+}
+
+func isHuhNewOption(call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "NewOption" {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "huh"
 }
 
 // checkFuncLabels walks one function body in source order, tracking which locals
@@ -116,12 +151,7 @@ func checkFuncLabels(t *testing.T, fset *token.FileSet, file string, fn *ast.Fun
 				delete(approved, ident.Name)
 			}
 		case *ast.CallExpr:
-			sel, ok := node.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "NewOption" {
-				return true
-			}
-			pkg, ok := sel.X.(*ast.Ident)
-			if !ok || pkg.Name != "huh" {
+			if !isHuhNewOption(node) {
 				return true
 			}
 			options++
@@ -196,7 +226,7 @@ func TestWeakLabelSanitizerDoesNotSpread(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sites := []string{}
+	byFile := map[string]int{}
 	for name, file := range files {
 		ast.Inspect(file, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
@@ -204,18 +234,40 @@ func TestWeakLabelSanitizerDoesNotSpread(t *testing.T) {
 				return true
 			}
 			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "sanitizeCell" {
-				sites = append(sites, name+":"+itoa(fset.Position(call.Pos()).Line))
+				byFile[name]++
 			}
 			return true
 		})
 	}
-	sort.Strings(sites)
 
-	// The eight sites #324 inherited: doctor (2), ghostty (1), the pr picker
-	// label and pr list cell (2), review_list (3).
-	if ceiling := 8; len(sites) > ceiling {
-		t.Errorf("sanitizeCell has %d call site(s), ceiling is %d — a new use of the weak "+
-			"primitive; use safeTerm, or land #324 first: %v", len(sites), ceiling, sites)
+	// PER FILE, not a total. An aggregate ceiling is fungible across a mixed
+	// population: exactly one of these is a picker label (pr_pick.go) and the
+	// other seven are table and detail cells, so migrating a review_list site
+	// under #324 would drop the total and silently buy headroom for a new
+	// sanitizeCell LABEL — the growth this pin exists to stop, reached through
+	// an unrelated improvement. Counts rather than file:line, so an edit above a
+	// call does not churn the pin into being relaxed.
+	//
+	// The number may only fall. Being wrong about it on the first run — 8, not
+	// the 2 asserted from memory — is the argument for pinning it at all.
+	want := map[string]int{
+		"doctor.go":      2,
+		"ghostty.go":     1,
+		"pr_pick.go":     1,
+		"pr_prs.go":      1,
+		"review_list.go": 3,
+	}
+	for name, got := range byFile {
+		if got > want[name] {
+			t.Errorf("%s has %d sanitizeCell call(s), ceiling is %d — a new use of the weak "+
+				"primitive; use safeTerm, or land #324 first", name, got, want[name])
+		}
+	}
+	for name, ceiling := range want {
+		if byFile[name] > 0 || ceiling == 0 {
+			continue
+		}
+		t.Logf("%s no longer uses sanitizeCell (#324 progress) — lower its ceiling to 0", name)
 	}
 }
 
@@ -253,16 +305,4 @@ func sortedRendererNames() []string {
 	}
 	sort.Strings(names)
 	return names
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var digits []byte
-	for n > 0 {
-		digits = append([]byte{byte('0' + n%10)}, digits...)
-		n /= 10
-	}
-	return string(digits)
 }
