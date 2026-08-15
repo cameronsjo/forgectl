@@ -13,6 +13,7 @@ package history
 //   [x] Fail-closed: trailing lone metafy marker refuses as truncated
 //   [x] Fail-closed: non-UTF-8 after unmetafying refuses
 //   [x] Fail-closed: every malformed extended header shape refuses
+//   [x] Fail-closed: an elapsed field that would overflow a Duration refuses
 //
 // LastN
 //   [x] Happy: returns the tail, oldest first, capped at what exists
@@ -21,6 +22,7 @@ package history
 // Read
 //   [x] Happy: reads and parses a file
 //   [x] Fail-closed: absent path, directory, and oversized file all refuse
+//   [x] Fail-closed: a fifo is refused before the open that would block on it
 //
 // ResolvePath
 //   [x] Happy: $HISTFILE wins; otherwise ~/.zsh_history
@@ -31,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -252,6 +255,46 @@ func TestRead_FailsClosed(t *testing.T) {
 			t.Errorf("Read error = %v, want ErrMalformed", err)
 		}
 	})
+}
+
+// TestRead_RefusesNonRegularFiles pins the kind check. A fifo is the case
+// that matters: without the check, os.Open blocks forever waiting for a
+// writer, so the failure mode is a hang rather than a wrong answer — hence the
+// deadline.
+func TestRead_RefusesNonRegularFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Skipf("mkfifo unavailable: %v", err)
+	}
+
+	type result struct{ err error }
+	done := make(chan result, 1)
+	go func() {
+		_, err := Read(path)
+		done <- result{err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.err == nil {
+			t.Fatal("Read accepted a fifo as a history file")
+		}
+		if !strings.Contains(got.err.Error(), "not a regular file") {
+			t.Errorf("Read error = %v, want it to name the file kind", got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Read blocked on a fifo — the kind check must run before the open")
+	}
+}
+
+func TestParse_RefusesElapsedThatWouldOverflowADuration(t *testing.T) {
+	entries, err := Parse([]byte(": 1690000000:9223372036854775807;echo one\n"))
+	if !errors.Is(err, ErrMalformed) {
+		t.Fatalf("Parse error = %v, want ErrMalformed", err)
+	}
+	if entries != nil {
+		t.Errorf("Parse returned %d entries alongside a refusal", len(entries))
+	}
 }
 
 func TestResolvePath(t *testing.T) {

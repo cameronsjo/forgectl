@@ -23,6 +23,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -51,6 +53,10 @@ const defaultHistoryName = ".zsh_history"
 
 // extendedPrefix opens an EXTENDED_HISTORY record.
 const extendedPrefix = ": "
+
+// maxElapsedSeconds is the largest elapsed field that still fits a
+// time.Duration once multiplied by a second.
+const maxElapsedSeconds = int64(math.MaxInt64) / int64(time.Second)
 
 var (
 	// ErrNoHistory reports that the file parsed cleanly but held no commands.
@@ -161,6 +167,11 @@ func parseRecord(record string, line int) (Entry, error) {
 	if err != nil {
 		return Entry{}, fmt.Errorf("%w: unreadable elapsed time at line %d", ErrMalformed, line)
 	}
+	// Guard the seconds→Duration multiply: an absurd elapsed would otherwise
+	// wrap into a negative duration rather than being rejected.
+	if elapsed > maxElapsedSeconds {
+		return Entry{}, fmt.Errorf("%w: elapsed time out of range at line %d", ErrMalformed, line)
+	}
 
 	command := header[colon+1+semicolon+1:]
 	if command == "" {
@@ -229,20 +240,39 @@ func LastN(entries []Entry, n int) ([]Entry, error) {
 // unreadable, a directory, oversized, or unparseable — is an error, and the
 // path is quoted so a hostile filename cannot drive the reader's terminal.
 func Read(path string) ([]Entry, error) {
-	info, err := os.Stat(path)
+	// Stat before opening: a $HISTFILE pointing at a fifo would block forever
+	// in os.Open, so the kind check has to happen while nothing is open.
+	if err := checkRegular(path, nil); err != nil {
+		return nil, err
+	}
+
+	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("read shell history: %w", termsafe.Error(err))
 	}
-	if info.IsDir() {
-		return nil, fmt.Errorf("read shell history: %s is a directory", termsafe.QuotePath(path))
+	defer func() { _ = file.Close() }()
+
+	// Re-check against the open handle: the path could have been swapped
+	// between the stat above and this open.
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("read shell history: %w", termsafe.Error(err))
+	}
+	if err := checkRegular(path, info); err != nil {
+		return nil, err
 	}
 	if info.Size() > MaxFileBytes {
 		return nil, fmt.Errorf("%w: %s is %d bytes, over the %d-byte limit", ErrTooLarge, termsafe.QuotePath(path), info.Size(), MaxFileBytes)
 	}
 
-	data, err := os.ReadFile(path)
+	// Bounded by the same limit rather than trusting the size just read: the
+	// file can grow between the stat and the read.
+	data, err := io.ReadAll(io.LimitReader(file, MaxFileBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read shell history: %w", termsafe.Error(err))
+	}
+	if int64(len(data)) > MaxFileBytes {
+		return nil, fmt.Errorf("%w: %s grew past the %d-byte limit while being read", ErrTooLarge, termsafe.QuotePath(path), MaxFileBytes)
 	}
 	entries, err := Parse(data)
 	if err != nil {
@@ -270,6 +300,25 @@ func ResolvePath(getenv func(string) string, home func() (string, error)) (strin
 		return "", fmt.Errorf("resolve shell history path: $%s is unset and the home directory is empty", histFileEnv)
 	}
 	return checkedPath(filepath.Join(dir, defaultHistoryName), "the home directory")
+}
+
+// checkRegular refuses anything that is not a regular file — a directory, a
+// fifo, a device node. info is stat'd from path when nil, so the same rule
+// serves both the pre-open check and the re-check against the open handle.
+func checkRegular(path string, info os.FileInfo) error {
+	if info == nil {
+		var err error
+		if info, err = os.Stat(path); err != nil {
+			return fmt.Errorf("read shell history: %w", termsafe.Error(err))
+		}
+	}
+	if info.IsDir() {
+		return fmt.Errorf("read shell history: %s is a directory", termsafe.QuotePath(path))
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("read shell history: %s is not a regular file", termsafe.QuotePath(path))
+	}
+	return nil
 }
 
 // checkedPath refuses a path carrying terminal controls, naming only the
