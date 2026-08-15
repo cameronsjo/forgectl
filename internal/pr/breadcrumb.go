@@ -182,7 +182,15 @@ func decodeBreadcrumb(data []byte) (Breadcrumb, error) {
 	// record. The error names no file content, so hostile bytes never reach a
 	// log or a terminal through it.
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return Breadcrumb{}, fmt.Errorf("trailing content after the breadcrumb record; a breadcrumb file must contain exactly one JSON record")
+		// The remedy is named because no forgectl verb can reach this record:
+		// `pr list` skips it and `pr teardown` refuses it at this same decode,
+		// so an operator who is not told to remove it by hand has no next move.
+		// The path is deliberately NOT interpolated — decodeBreadcrumbRecord's
+		// wrapper already carries it, and keeping this message a CONSTANT is
+		// what stops the file's own bytes riding the refusal to a terminal.
+		return Breadcrumb{}, fmt.Errorf("trailing content after the breadcrumb record; " +
+			"a breadcrumb file must contain exactly one JSON record, and no forgectl verb can " +
+			"read or discard this one — remove the file by hand")
 	}
 	return bc, nil
 }

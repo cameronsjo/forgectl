@@ -187,6 +187,30 @@ func TestDecodeBreadcrumb_TrailingContentErrorCarriesNoFileBytes(t *testing.T) {
 	}
 }
 
+// TestDecodeBreadcrumbRecord_TrailingContentNamesPathAndRemedy pins the
+// operator-facing half of the refusal. A record rejected for trailing content
+// is unreachable by every verb — `pr list` skips it, `pr teardown` refuses it
+// at this same decode — so the only remedy is removing the file, and the
+// message has to say both WHICH file and WHAT to do.
+//
+// The two halves come from different places on purpose: the path from
+// decodeBreadcrumbRecord's wrapper, the remedy from the constant. Asserting
+// them together is what proves the pairing survives.
+func TestDecodeBreadcrumbRecord_TrailingContentNamesPathAndRemedy(t *testing.T) {
+	path := filepath.Join(string(filepath.Separator), "tmp", "sessions", "o-r-1-2.json")
+	_, err := decodeBreadcrumbRecord([]byte(firstDoc+"\n{}"), path)
+	if err == nil {
+		t.Fatal("trailing content must be rejected")
+	}
+	got := err.Error()
+	if !strings.Contains(got, path) {
+		t.Errorf("refusal does not name the file to remove: %q", got)
+	}
+	if !strings.Contains(got, "by hand") {
+		t.Errorf("refusal names no remedy, and no forgectl verb can reach this record: %q", got)
+	}
+}
+
 // TestDecodeBreadcrumb_AcceptsTrailingWhitespace is the half of the tightening
 // that keeps it a hardening rather than a migration: writeBreadcrumb appends a
 // newline to every file it writes, so rejecting trailing whitespace would
