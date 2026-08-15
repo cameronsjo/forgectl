@@ -60,7 +60,11 @@ func readDocsTokenFile(path string, file openedDocsTokenFile) (string, error) {
 	return string(raw), nil
 }
 
-func safeDocsTokenPath(path string) string { return termsafe.Sanitize(path) }
+// safeDocsTokenPath renders a token-file path for the terminal. QuotePath, not
+// SafeLine: every use is a human-only error message where the value is
+// unambiguously a path, and the explicit quotes keep a trailing space or an
+// escaped segment legible as part of the path rather than as sentence text.
+func safeDocsTokenPath(path string) string { return termsafe.QuotePath(path) }
 
 // wrapDocsTokenDescriptorError removes path-bearing wrappers before an error
 // reaches the terminal. *os.File operations reuse the raw os.NewFile name in

@@ -136,16 +136,13 @@ func projectCandidateStatus(repo projects.Repo) string {
 	return status
 }
 
-// sanitizeCandidate composes the shared terminal sanitizer with this sink's
-// fixed-column layout rule: shared sanitization handles every unsafe rune, and
-// the candidate sink alone neutralizes the tab it deliberately preserves.
+// sanitizeCandidate renders one fixed-column candidate field. It is safeTerm
+// alone: the sink used to need a second pass to neutralize the tab the old
+// sanitizer deliberately preserved, and SafeLine escapes tab like every other
+// non-graphic rune, so the layout rule this sink needs now falls out of the
+// shared boundary rather than being maintained beside it.
 func sanitizeCandidate(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '\t' {
-			return ' '
-		}
-		return r
-	}, sanitizeTerm(s))
+	return safeTerm(s)
 }
 
 func projectAmbiguityError(mode projectSelectionMode, count int) error {

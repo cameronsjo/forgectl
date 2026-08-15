@@ -97,9 +97,13 @@ func TestProjectCandidateLine_SanitizesAndMarksMirror(t *testing.T) {
 	}
 }
 
-func TestSanitizeCandidate_ComposesSharedBidiAndControlsWithTabLayoutRule(t *testing.T) {
+// TestSanitizeCandidate_QuotesBidiControlsAndLayoutBytes: the candidate sink
+// used to need a tab rule of its own on top of the shared sanitizer. SafeLine
+// quotes tab with everything else, so the whole hostile input renders as one
+// legible escaped run and the fixed-column layout holds.
+func TestSanitizeCandidate_QuotesBidiControlsAndLayoutBytes(t *testing.T) {
 	rlo := string(rune(0x202e))
-	if got, want := sanitizeCandidate("left"+rlo+"\x1b\t\nright"), "left    right"; got != want {
+	if got, want := sanitizeCandidate("left"+rlo+"\x1b\t\nright"), `left\u202e\x1b\t\nright`; got != want {
 		t.Errorf("sanitizeCandidate = %q, want %q", got, want)
 	}
 }
