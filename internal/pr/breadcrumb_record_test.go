@@ -211,6 +211,45 @@ func TestDecodeBreadcrumbRecord_TrailingContentNamesPathAndRemedy(t *testing.T) 
 	}
 }
 
+// TestDecodeBreadcrumbRecord_EscapesAControlBearingPath closes the other half
+// of the same hazard. The refusal's own message is a constant, but the WRAPPER
+// interpolates the breadcrumb's filename — and that name is chosen by the same
+// actor who planted the trailing bytes.
+//
+// It matters more here than at a typical error site because the message now
+// tells the operator to delete the file: a name that can repaint the line or
+// reverse its direction is the classic setup for deleting the wrong one. This
+// error reaches the terminal through fang's handler, which renders
+// err.Error() verbatim, so nothing downstream would catch it.
+func TestDecodeBreadcrumbRecord_EscapesAControlBearingPath(t *testing.T) {
+	hostile := filepath.Join(string(filepath.Separator), "tmp", "sessions",
+		"o-r-1-\x1b[2K\rinnocent\u202egnj.json")
+
+	// Both refusal routes through this wrapper, since either can name the file.
+	cases := map[string][]byte{
+		"trailing content": []byte(firstDoc + "\n{}"),
+		"invalid record":   []byte(`{"workspace":"relative","ref":"o/r#1","createdAt":"2026-01-01T00:00:00Z"}`),
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := decodeBreadcrumbRecord(body, hostile)
+			if err == nil {
+				t.Fatal("must be rejected")
+			}
+			got := err.Error()
+			for _, control := range []string{"\x1b", "\r", "\u202e"} {
+				if strings.Contains(got, control) {
+					t.Errorf("error carries raw %q from the breadcrumb filename: %q", control, got)
+				}
+			}
+			// The name must still be identifiable — escaped, not dropped.
+			if !strings.Contains(got, "innocent") {
+				t.Errorf("escaping lost the filename entirely, leaving nothing to act on: %q", got)
+			}
+		})
+	}
+}
+
 // TestDecodeBreadcrumb_AcceptsTrailingWhitespace is the half of the tightening
 // that keeps it a hardening rather than a migration: writeBreadcrumb appends a
 // newline to every file it writes, so rejecting trailing whitespace would

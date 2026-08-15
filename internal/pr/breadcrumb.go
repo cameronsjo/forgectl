@@ -14,6 +14,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Breadcrumb is the on-disk record of one clean-room review session, written
@@ -188,9 +189,14 @@ func decodeBreadcrumb(data []byte) (Breadcrumb, error) {
 		// The path is deliberately NOT interpolated — decodeBreadcrumbRecord's
 		// wrapper already carries it, and keeping this message a CONSTANT is
 		// what stops the file's own bytes riding the refusal to a terminal.
+		// The clean room is named too: the first document may be a perfectly
+		// good record for a LIVE sandbox — a stray writer appending bytes does
+		// not make the recorded workspace fake — so removing only the
+		// breadcrumb discards the last pointer to that directory.
 		return Breadcrumb{}, fmt.Errorf("trailing content after the breadcrumb record; " +
 			"a breadcrumb file must contain exactly one JSON record, and no forgectl verb can " +
-			"read or discard this one — remove the file by hand")
+			"read or discard this one — remove the file by hand, and check whether its clean " +
+			"room under the temp dir needs removing with it")
 	}
 	return bc, nil
 }
@@ -230,14 +236,22 @@ func loadBreadcrumbRecord(path, sessionsDir string) (Breadcrumb, []byte, error) 
 // rather than by pathname — the stale-unlink protocol reads through a pinned
 // directory handle, so there is no path left to location-check.
 //
-// path names the file only for error messages; it is never opened here.
+// path names the file only for error messages; it is never opened here — and it
+// is ESCAPED on the way into them. The filename is chosen by whoever can write
+// the session-state dir, the same actor these refusals presume, and this error
+// reaches the terminal through fang's handler, which renders err.Error()
+// verbatim with no sanitizer anywhere on the route. A name carrying ANSI or
+// bidi controls could otherwise repaint the very line telling an operator which
+// file to remove. QuotePathIfUnsafe rather than QuotePath so an ordinary
+// pathname still prints bare — the same trade `pr list` makes at this hazard.
 func decodeBreadcrumbRecord(data []byte, path string) (Breadcrumb, error) {
+	safePath := termsafe.QuotePathIfUnsafe(path)
 	bc, err := decodeBreadcrumb(data)
 	if err != nil {
-		return Breadcrumb{}, fmt.Errorf("decode breadcrumb %s: %w", path, err)
+		return Breadcrumb{}, fmt.Errorf("decode breadcrumb %s: %w", safePath, err)
 	}
 	if err := validateBreadcrumbRecord(bc); err != nil {
-		return Breadcrumb{}, fmt.Errorf("invalid breadcrumb %s: %w", path, err)
+		return Breadcrumb{}, fmt.Errorf("invalid breadcrumb %s: %w", safePath, err)
 	}
 	return bc, nil
 }
