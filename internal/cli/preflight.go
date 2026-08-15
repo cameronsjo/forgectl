@@ -12,6 +12,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/module"
 	preflightpkg "github.com/cameronsjo/forgectl/internal/preflight"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // preflightModule declares the configuration-alignment extension (ADR-0005):
@@ -262,7 +263,7 @@ func writePreflightJSON(out io.Writer, r preflightReport) error {
 	if unregistered == nil {
 		unregistered = []string{}
 	}
-	enc := json.NewEncoder(out)
+	enc := termsafe.JSONEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(preflightJSON{
 		CatalogPath:             r.CatalogPath,

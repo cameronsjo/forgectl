@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	updatepkg "github.com/cameronsjo/forgectl/internal/update"
 )
 
@@ -382,7 +382,7 @@ func writeUpdateJSON(out io.Writer, report updatepkg.Report) error {
 		j.Steps = append(j.Steps, step)
 	}
 	j.Ok, j.Skipped, j.Failed = tallyResults(report.Results)
-	enc := json.NewEncoder(out)
+	enc := termsafe.JSONEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(j)
 }

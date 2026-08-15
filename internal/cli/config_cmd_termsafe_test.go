@@ -200,10 +200,11 @@ func TestConfig_HostileValuesAreInertInText(t *testing.T) {
 // walkConfig, leafValue, or resolveLaunchView instead, the decoded JSON stops
 // reconstructing the operator's actual value and this fails.
 //
-// Cc controls are already byte-faithful AND terminal-inert in JSON: the encoder
-// emits them as \uXXXX escapes. Bidi Cf is faithful but NOT inert — RLO is
-// emitted literally — a separately filed value-preserving encoding gap,
-// deliberately not closed here by corrupting the machine contract.
+// Cc controls are byte-faithful AND terminal-inert in JSON: the encoder emits
+// them as \uXXXX escapes. Bidi Cf was faithful but NOT inert until #279 gave it
+// the same treatment via termsafe.JSONEncoder — value-preserving encoding, so
+// this control's round-trip assertion still holds unchanged. That is the point:
+// closing the display gap must not cost the machine contract.
 func TestConfig_JSONPreservesRawControlValues(t *testing.T) {
 	const rawModel = "opus\u001b[2K\u202e-tail"
 	const body = `[launch.defaults]
@@ -246,5 +247,47 @@ model = "opus\u001b[2K\u202e-tail"
 	}
 	if !seen {
 		t.Error("no launch.defaults.model entry in the --json document")
+	}
+}
+
+// TestConfig_JSONEscapesBidiFormatCharacters is the #279 counterpart to the
+// negative control above. Cc controls were already byte-faithful AND
+// terminal-inert in JSON because encoding/json escapes them; Bidi_Control
+// formatting characters were faithful but NOT inert, so a stored
+// RIGHT-TO-LEFT OVERRIDE reordered the visible text of a document piped
+// straight to a terminal.
+//
+// The fix is value-preserving encoding, not sanitization: the bidi character
+// is emitted as its \uXXXX escape, which a terminal renders as six inert ASCII
+// characters and a decoder turns back into the exact stored rune. Both halves
+// are asserted here, so an implementation that neutralizes by deleting or
+// replacing the rune fails the round trip and the negative control both.
+func TestConfig_JSONEscapesBidiFormatCharacters(t *testing.T) {
+	const rawModel = "opus\u202e-tail\u2066\u2069\u200f\u061c"
+	const body = `[launch.defaults]
+model = "opus\u202E-tail\u2066\u2069\u200F\u061C"
+`
+
+	out := runConfig(t, body, "--json")
+
+	for _, r := range []rune{'\u202e', '\u2066', '\u2069', '\u200f', '\u061c'} {
+		if strings.ContainsRune(out, r) {
+			t.Errorf("--json emitted literal bidi U+%04X; it must be \\u-escaped:\n%q", r, out)
+		}
+	}
+	if !strings.Contains(out, "\\u202e") {
+		t.Errorf("--json lost the RLO escape entirely — the stored value was mutated:\n%s", out)
+	}
+
+	var doc struct {
+		LaunchResolved struct {
+			Model string `json:"model"`
+		} `json:"launch_resolved"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("decode --json output: %v\n%s", err, out)
+	}
+	if doc.LaunchResolved.Model != rawModel {
+		t.Errorf("launch_resolved.model = %q, want the exact stored value %q", doc.LaunchResolved.Model, rawModel)
 	}
 }

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -81,7 +80,7 @@ func withConcordance(cmd *cobra.Command, dsn string, cfg config.SessionsConfig, 
 // writeJSON encodes v as indented JSON to out — the shared --json emitter for
 // the query verbs' stable, pipeable output.
 func writeJSON(out io.Writer, v any) error {
-	enc := json.NewEncoder(out)
+	enc := termsafe.JSONEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
 }
