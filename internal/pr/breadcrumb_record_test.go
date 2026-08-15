@@ -14,6 +14,8 @@ package pr
 //   [x] Unknown fields are rejected
 //   [x] Trailing content after the record is REJECTED (forgectl#289)
 //   [x] Trailing WHITESPACE is still accepted — writeBreadcrumb emits it
+//   [x] The refusal message echoes no file bytes, so hostile trailing content
+//       cannot ride it to a terminal
 // FuzzDecodeBreadcrumbRecord
 //   [x] Every accepted record has an absolute nonempty workspace, a complete
 //       canonical ref, a valid locality relation, and a nonzero timestamp —
@@ -146,6 +148,42 @@ func TestDecodeBreadcrumb_RejectsTrailingContent(t *testing.T) {
 				t.Errorf("decodeBreadcrumb accepted %s; a breadcrumb file is exactly one record", tc.name)
 			}
 		})
+	}
+}
+
+// TestDecodeBreadcrumb_TrailingContentErrorCarriesNoFileBytes guards the
+// property that makes the refusal safe to log: the message is a CONSTANT, so
+// nothing the file says rides it to an operator's terminal.
+//
+// The tail that matters is a quoted STRING. json.Decoder.Token returns a
+// string token as its verbatim Go value, so a message that reported the token
+// — or wrapped the syntax error, which quotes the first offending byte — would
+// echo whatever the file chose, raw ANSI and bidi overrides included. Both
+// spellings are covered below, and either one turns this red.
+func TestDecodeBreadcrumb_TrailingContentErrorCarriesNoFileBytes(t *testing.T) {
+	const marker = "MARKERBYTES1234"
+	// A string token (echoed verbatim by Token — the escape is spelled 
+	// so the tail is VALID json and really does decode to a token carrying a
+	// raw ESC and a raw bidi override) and a bare word (whose first byte the
+	// syntax error quotes): the two ways file bytes reach a message.
+	for _, tail := range []string{
+		"\n\"\\u001b[31m" + marker + "‮\"",
+		"\n" + marker,
+		"\n\x1b[31m" + marker,
+	} {
+		_, err := decodeBreadcrumb([]byte(firstDoc + tail))
+		if err == nil {
+			t.Fatalf("trailing %q must be rejected", tail)
+		}
+		got := err.Error()
+		if strings.Contains(got, marker) {
+			t.Errorf("refusal message echoed file bytes: %q", got)
+		}
+		for _, control := range []string{"\x1b", "‮", `\x1b`, `‮`} {
+			if strings.Contains(got, control) {
+				t.Errorf("refusal message carries %q from the file: %q", control, got)
+			}
+		}
 	}
 }
 
