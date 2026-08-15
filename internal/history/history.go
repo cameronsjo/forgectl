@@ -122,6 +122,9 @@ func Parse(data []byte) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Unreachable while the blank-text refusal above stands — non-blank text
+	// always folds into at least one record. Kept as the invariant this
+	// function's contract rests on, not as a live check.
 	if len(records) == 0 {
 		return nil, ErrNoHistory
 	}
@@ -283,8 +286,10 @@ func parseRecord(record string, line int, extended bool) (Entry, error) {
 }
 
 // parseUnsigned reads a non-negative decimal field. Negatives are rejected
-// rather than clamped: zsh never writes one, so its presence means the record
-// was not written by zsh.
+// rather than clamped: zsh never writes one, so its presence would mean the
+// record was not written by zsh. isExtendedHeader already refuses a header
+// carrying a sign, so this is the second line of that defense rather than the
+// first — keep both, since this helper's contract is the digits-only one.
 func parseUnsigned(field string) (int64, error) {
 	n, err := strconv.ParseInt(field, 10, 64)
 	if err != nil {
@@ -361,6 +366,9 @@ func Read(path string) ([]Entry, error) {
 	if err := checkRegular(path, info); err != nil {
 		return nil, err
 	}
+	// An early-out, not the limit itself: the bounded read below is what
+	// actually holds, since a file can grow after this stat. This one exists to
+	// refuse an already-huge file without reading 32 MiB of it first.
 	if info.Size() > MaxFileBytes {
 		return nil, fmt.Errorf("%w: %s is %d bytes, over the %d-byte limit", ErrTooLarge, termsafe.QuotePath(path), info.Size(), MaxFileBytes)
 	}

@@ -285,6 +285,19 @@ func TestParse_FormatIsDecidedOncePerFile(t *testing.T) {
 		}
 	})
 
+	t.Run("a damaged first header does not demote the file to plain", func(t *testing.T) {
+		// If the format were read from the first record alone, this file would
+		// be called plain and both lines would come back as commands — a
+		// corrupted extended history reading as a confident list.
+		entries, err := Parse([]byte(": nope:0;echo one\n: 1690000060:0;echo two\n"))
+		if !errors.Is(err, ErrMalformed) {
+			t.Fatalf("Parse error = %v, want ErrMalformed", err)
+		}
+		if entries != nil {
+			t.Errorf("Parse returned %d entries alongside a refusal", len(entries))
+		}
+	})
+
 	t.Run("extended file refuses a record that is not a header", func(t *testing.T) {
 		entries, err := Parse([]byte(": 1690000000:0;echo one\necho two\n"))
 		if !errors.Is(err, ErrMalformed) {
