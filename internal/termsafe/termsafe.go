@@ -5,13 +5,18 @@
 // boundary, and is value-preserving instead — a --json document must hand back
 // the stored bytes exactly.
 //
-// There is deliberately no weaker text primitive. An earlier Sanitize mapped
-// non-tab Cc controls and Unicode Bidi_Control characters to spaces, which was
-// both lossy (the operator could not tell a space from a suppressed control)
-// and short: U+2028, U+2029, U+200B, U+00AD and U+2060 are none of those classes
-// and passed through it untouched (#281). Every human sink now takes SafeLine
-// or QuotePath, so there is no second, weaker choice for the next author to pick
-// by coincidence of name.
+// This package deliberately exports no weaker text primitive. An earlier
+// Sanitize mapped non-tab Cc controls and Unicode Bidi_Control characters to
+// spaces, which was both lossy (the operator could not tell a space from a
+// suppressed control) and short: U+2028, U+2029, U+200B, U+00AD and U+2060 are
+// none of those classes and passed through it untouched (#281). Every sink that
+// used it now takes SafeLine or QuotePath.
+//
+// One weaker sanitizer still lives OUTSIDE this package — internal/cli's
+// sanitizeCell, which maps only C0 and DEL and so passes C1 and bidi through.
+// It renders PR titles, and moving it is an output-contract decision rather
+// than a substitution, tracked in #324. Naming it here is the point: a package
+// doc claiming a clean sweep it has not made is what the next author trusts.
 //
 // Named termsafe rather than term because golang.org/x/term is already
 // imported unqualified as `term` in internal/cli and internal/launch — the two

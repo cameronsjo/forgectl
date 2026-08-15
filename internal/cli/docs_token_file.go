@@ -37,11 +37,15 @@ func readDocsTokenFile(path string, file openedDocsTokenFile) (string, error) {
 	closeErr := file.Close()
 	if readErr != nil || closeErr != nil {
 		var failures []error
+		// The RAW path, not displayPath: wrapDocsTokenDescriptorError renders it
+		// itself, and QuotePath is not idempotent — passing the already-quoted
+		// form produced a doubly-quoted path. Sanitize was idempotent, which is
+		// why this was invisible before the boundary moved.
 		if readErr != nil {
-			failures = append(failures, wrapDocsTokenDescriptorError("read", displayPath, readErr))
+			failures = append(failures, wrapDocsTokenDescriptorError("read", path, readErr))
 		}
 		if closeErr != nil {
-			failures = append(failures, wrapDocsTokenDescriptorError("close", displayPath, closeErr))
+			failures = append(failures, wrapDocsTokenDescriptorError("close", path, closeErr))
 		}
 		return "", errors.Join(failures...)
 	}

@@ -384,14 +384,22 @@ func parseParams(raw []string) (map[string]string, error) {
 
 // printPlan renders a resolved Plan for --dry-run: the step sequence a user
 // reviews before trusting a workflow, with zero side effects.
+//
+// Every field here comes from the workflow file, which ADR-0006/0007 treat as
+// attacker-writable — and this is the surface where that matters most, because
+// --dry-run is the review a user performs to decide whether to bless the file,
+// and it deliberately skips the blessing gate to do so. TOML forbids raw control
+// bytes in the file, but a \u escape decodes to a real one, so an unblessed
+// definition could otherwise rewrite the very lines describing it.
 func printPlan(out io.Writer, plan workflow.Plan) {
-	fmt.Fprintf(out, "workflow %s@%s — %d step(s):\n", plan.Name, plan.Version, len(plan.Steps))
+	fmt.Fprintf(out, "workflow %s@%s — %d step(s):\n",
+		termsafe.SafeLine(plan.Name), termsafe.SafeLine(plan.Version), len(plan.Steps))
 	for i, s := range plan.Steps {
-		fmt.Fprintf(out, "  %d. %s\n", i+1, s.Uses)
+		fmt.Fprintf(out, "  %d. %s\n", i+1, termsafe.SafeLine(s.Uses))
 		printField(out, "repo", s.Repo)
 		printField(out, "ref", s.Ref)
 		if len(s.Globs) > 0 {
-			fmt.Fprintf(out, "     globs: %s\n", strings.Join(s.Globs, ", "))
+			fmt.Fprintf(out, "     globs: %s\n", termsafe.SafeLine(strings.Join(s.Globs, ", ")))
 		}
 		printField(out, "skill", s.Skill)
 		printField(out, "posture", s.Posture)
@@ -400,15 +408,17 @@ func printPlan(out io.Writer, plan workflow.Plan) {
 		printField(out, "to", s.To)
 		printField(out, "cmd", s.Cmd)
 		if len(s.Args) > 0 {
-			fmt.Fprintf(out, "     args: %s\n", strings.Join(s.Args, " "))
+			fmt.Fprintf(out, "     args: %s\n", termsafe.SafeLine(strings.Join(s.Args, " ")))
 		}
 	}
 }
 
-// printField writes one non-empty plan-step field as an indented line.
+// printField writes one non-empty plan-step field as an indented line. The
+// escaping lives here rather than at each call site so a field added to
+// printPlan's list cannot be the one that ships raw.
 func printField(out io.Writer, name, value string) {
 	if value == "" {
 		return
 	}
-	fmt.Fprintf(out, "     %s: %s\n", name, value)
+	fmt.Fprintf(out, "     %s: %s\n", name, termsafe.SafeLine(value))
 }
