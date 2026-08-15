@@ -11,6 +11,17 @@
 // commands it recovers; rendering them is the caller's job and goes through
 // internal/termsafe, so exactly one notion of terminal-safe exists.
 //
+// One ambiguity in zsh's format is irreducible and worth stating. A command's
+// embedded newline is written as a trailing backslash, and nothing escapes the
+// continuation line — so a command whose second line is itself a well-formed
+// header cannot be told from two separate records. This package breaks the tie
+// toward a record boundary, which is the commoner case: a trailing backslash
+// does not fold when the next line opens a header. The trade is real. Before,
+// a command genuinely ending in a backslash swallowed the record after it, and
+// the reader saw a command that never ran; now, a multi-line command whose
+// second line looks like a header is split in two instead. In a file with no
+// headers at all there is no tiebreaker, and a trailing backslash always folds.
+//
 // Two zsh encodings are handled explicitly. The extended history format
 // (`: <begintime>:<elapsed>;<command>`, written when EXTENDED_HISTORY is set)
 // is parsed for its times; a file without those headers is read as plain
@@ -80,7 +91,8 @@ var (
 	ErrTruncated = errors.New("history: truncated file")
 	// ErrEncoding reports bytes that are not UTF-8 once unmetafied.
 	ErrEncoding = errors.New("history: unsupported encoding")
-	// ErrTooLarge reports a file past MaxFileBytes.
+	// ErrTooLarge reports a file past a size limit — MaxFileBytes on disk, or
+	// MaxEntries records once parsed.
 	ErrTooLarge = errors.New("history: file too large")
 	// ErrRange reports a non-positive entry count.
 	ErrRange = errors.New("history: count out of range")
@@ -129,24 +141,28 @@ func Parse(data []byte) ([]Entry, error) {
 		return nil, ErrNoHistory
 	}
 
-	// zsh writes one format per file, so the format is decided once and every
-	// record is held to it. One well-formed header anywhere marks the file
-	// extended — deciding from the first record alone would let a corrupted
-	// first header demote the whole file to plain, and deciding per record
-	// would let a corrupted header demote to a plain command. A file with no
-	// header at all is plain, which is what keeps a legitimate `:` builtin
-	// command (`: > file`) from reading as damage.
-	extended := false
+	// Only one class of record is ambiguous: one that opens with ": " but is
+	// not a well-formed header. It is either a damaged extended record or a
+	// command using zsh's `:` builtin, and nothing in the record itself says
+	// which. The rest of the file decides: if any well-formed header exists,
+	// the file has written headers, and an almost-header is damage rather than
+	// a command. If none does, `: > file` is exactly what it looks like.
+	//
+	// A record that does not open with ": " is never ambiguous — it is a
+	// command, in any file. That is what lets a history hold both shapes, which
+	// an append-only log does whenever EXTENDED_HISTORY is toggled or two
+	// differently-configured shells share one $HISTFILE.
+	hasHeaders := false
 	for _, candidate := range records {
 		if isExtendedHeader(candidate.text) {
-			extended = true
+			hasHeaders = true
 			break
 		}
 	}
 
 	entries := make([]Entry, 0, len(records))
 	for _, record := range records {
-		entry, err := parseRecord(record.text, record.line, extended)
+		entry, err := parseRecord(record.text, record.line, hasHeaders)
 		if err != nil {
 			return nil, err
 		}
@@ -167,24 +183,32 @@ type record struct {
 // header does not fold: a command whose text genuinely ends in a backslash
 // would otherwise swallow the following record, and the reader would be shown
 // a command that never ran.
+// It walks the text a line at a time rather than splitting it up front:
+// strings.Split allocates one string header per line before any record exists,
+// so a file of very short lines would blow past the entry cap in a single
+// allocation the cap could never see.
 func foldRecords(text string) ([]record, error) {
 	var (
 		records []record
 		folded  []string
 		startAt int
 	)
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
+	for lineNo, rest := 1, text; ; lineNo++ {
+		line, remainder, more := cutLine(rest)
+		rest = remainder
 		if len(folded) == 0 {
-			startAt = i + 1
+			startAt = lineNo
 		}
 		// A trailing backslash on the last line means the file was cut
 		// mid-record; folding it leaves the continuation unterminated, which
 		// is exactly the refusal that should fire.
-		continues := strings.HasSuffix(line, `\`) &&
-			(i+1 >= len(lines) || !isExtendedHeader(lines[i+1]))
+		nextLine, _, _ := cutLine(rest)
+		continues := strings.HasSuffix(line, `\`) && (!more || !isExtendedHeader(nextLine))
 		if continues {
 			folded = append(folded, strings.TrimSuffix(line, `\`))
+			if !more {
+				break
+			}
 			continue
 		}
 		folded = append(folded, line)
@@ -193,11 +217,24 @@ func foldRecords(text string) ([]record, error) {
 		}
 		records = append(records, record{text: strings.Join(folded, "\n"), line: startAt})
 		folded = nil
+		if !more {
+			break
+		}
 	}
 	if len(folded) > 0 {
 		return nil, fmt.Errorf("%w: unterminated continuation at line %d", ErrTruncated, startAt)
 	}
 	return records, nil
+}
+
+// cutLine returns the next line, the remaining text, and whether a further
+// line follows. It is strings.Cut over a newline, named for what the fold loop
+// needs so the loop reads as line-at-a-time rather than index arithmetic.
+func cutLine(text string) (string, string, bool) {
+	if i := strings.IndexByte(text, '\n'); i >= 0 {
+		return text[:i], text[i+1:], true
+	}
+	return text, "", false
 }
 
 // isExtendedHeader reports whether a line opens an EXTENDED_HISTORY record:
@@ -232,16 +269,20 @@ func cutDigits(s string, sep byte) (string, string, bool) {
 
 // parseRecord turns one logical record into an Entry. line is the record's
 // first physical line number, reported so a refusal points at the damage;
-// extended says which format the file was found to be in.
-func parseRecord(record string, line int, extended bool) (Entry, error) {
+// hasHeaders says whether the file carries any well-formed extended header,
+// which is what makes an almost-header damage rather than a command.
+func parseRecord(record string, line int, hasHeaders bool) (Entry, error) {
 	if record == "" {
 		return Entry{}, fmt.Errorf("%w: blank record at line %d", ErrMalformed, line)
 	}
-	if !extended {
+	if !strings.HasPrefix(record, extendedPrefix) {
 		return Entry{Command: record}, nil
 	}
 	if !isExtendedHeader(record) {
-		return Entry{}, fmt.Errorf("%w: extended header malformed at line %d", ErrMalformed, line)
+		if hasHeaders {
+			return Entry{}, fmt.Errorf("%w: extended header malformed at line %d", ErrMalformed, line)
+		}
+		return Entry{Command: record}, nil
 	}
 
 	header := record[len(extendedPrefix):]
@@ -358,7 +399,11 @@ func Read(path string) ([]Entry, error) {
 	defer func() { _ = file.Close() }()
 
 	// Re-check against the open handle: the path could have been swapped
-	// between the stat above and this open.
+	// between the stat above and this open. This catches the swap, but the
+	// open has already happened by then — a path swapped to a character device
+	// is opened before being rejected, and opening one can have side effects.
+	// Narrow (it needs write access to the directory plus the timing) and
+	// forgectl is not setuid, so it is recorded rather than defended against.
 	info, err := file.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("read shell history: %w", termsafe.Error(err))

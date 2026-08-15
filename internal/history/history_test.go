@@ -298,8 +298,50 @@ func TestParse_FormatIsDecidedOncePerFile(t *testing.T) {
 		}
 	})
 
-	t.Run("extended file refuses a record that is not a header", func(t *testing.T) {
+	t.Run("a header among plain commands does not refuse the file", func(t *testing.T) {
+		// One header-shaped line — typed, pasted, or appended by anything
+		// running as the operator — must not disable the whole feature.
+		entries, err := Parse([]byte("echo one\n: 1690000000:0;echo hi\necho two\n"))
+		if err != nil {
+			t.Fatalf("Parse: unexpected error: %v", err)
+		}
+		if len(entries) != 3 {
+			t.Fatalf("len(entries) = %d, want 3", len(entries))
+		}
+		if got, want := entries[1].Command, "echo hi"; got != want {
+			t.Errorf("entries[1].Command = %q, want %q", got, want)
+		}
+		if got, want := entries[2].Command, "echo two"; got != want {
+			t.Errorf("entries[2].Command = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("mixed formats parse rather than refusing", func(t *testing.T) {
+		// An append-only history spans config changes: toggling
+		// EXTENDED_HISTORY, or two differently-configured shells sharing one
+		// $HISTFILE, leaves headers followed by plain commands.
 		entries, err := Parse([]byte(": 1690000000:0;echo one\necho two\n"))
+		if err != nil {
+			t.Fatalf("Parse: unexpected error: %v", err)
+		}
+		if len(entries) != 2 {
+			t.Fatalf("len(entries) = %d, want 2", len(entries))
+		}
+		if entries[0].Timestamp.IsZero() {
+			t.Error("entries[0] lost its timestamp; the extended record must keep it")
+		}
+		if got, want := entries[1].Command, "echo two"; got != want {
+			t.Errorf("entries[1].Command = %q, want %q", got, want)
+		}
+		if !entries[1].Timestamp.IsZero() {
+			t.Error("entries[1] gained a timestamp the plain record never carried")
+		}
+	})
+
+	t.Run("an almost-header still refuses where headers exist", func(t *testing.T) {
+		// The one ambiguous class: opens with ": " but is not a header. With
+		// real headers in the file it is damage, not a `:` builtin command.
+		entries, err := Parse([]byte(": 1690000000:0;echo one\n: nope:0;echo two\n"))
 		if !errors.Is(err, ErrMalformed) {
 			t.Fatalf("Parse error = %v, want ErrMalformed", err)
 		}
