@@ -111,10 +111,9 @@ func TestWrapDocsTokenDescriptorError_QuotesExactlyOnce(t *testing.T) {
 	if got := strings.Count(text, `"/safe/token"`); got != 2 {
 		t.Fatalf("path quoted %d time(s), want exactly once per joined failure (read + close): %q", got, text)
 	}
-	got := text
 	for _, doubled := range []string{`\"`, `""`, `"\"`} {
-		if strings.Contains(got, doubled) {
-			t.Fatalf("path was quoted more than once (%q): %q", doubled, got)
+		if strings.Contains(text, doubled) {
+			t.Fatalf("path was quoted more than once (%q): %q", doubled, text)
 		}
 	}
 }

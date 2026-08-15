@@ -33,8 +33,7 @@ func TestDocsTokenErrorsQuoteThePathExactlyOnce(t *testing.T) {
 	fset := token.NewFileSet()
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || !strings.HasPrefix(name, "docs_token_file") ||
-			!strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
 		file, err := parser.ParseFile(fset, filepath.Join(".", name), nil, 0)
@@ -57,11 +56,27 @@ func TestDocsTokenErrorsQuoteThePathExactlyOnce(t *testing.T) {
 				t.Errorf("%s: wrapDocsTokenDescriptorError with too few arguments", fset.Position(call.Pos()))
 				return true
 			}
-			if ident, ok := call.Args[1].(*ast.Ident); ok && ident.Name != "path" {
-				t.Errorf("%s: wrapDocsTokenDescriptorError takes the RAW path, got %q — "+
-					"it renders the path itself, and QuotePath is not idempotent",
-					fset.Position(call.Pos()), ident.Name)
+			// An ALLOWLIST, not a denylist. The historical defect was the
+			// identifier displayPath, which a denylist catches — but the equally
+			// natural way to write the same bug is to inline it,
+			// wrapDocsTokenDescriptorError("inspect", safeDocsTokenPath(path), err),
+			// which is a CallExpr and would sail past a name check. Anything not
+			// known-raw fails.
+			switch arg := call.Args[1].(type) {
+			case *ast.Ident:
+				if arg.Name == "path" {
+					return true
+				}
+			case *ast.CallExpr:
+				// file.Name() is the descriptor's own raw pathname, the one
+				// correct non-identifier form.
+				if sel, ok := arg.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Name" && len(arg.Args) == 0 {
+					return true
+				}
 			}
+			t.Errorf("%s: wrapDocsTokenDescriptorError takes the RAW path — it renders the "+
+				"path itself, and QuotePath is not idempotent, so a pre-rendered value is "+
+				"quoted twice", fset.Position(call.Pos()))
 			return true
 		})
 	}
@@ -69,7 +84,7 @@ func TestDocsTokenErrorsQuoteThePathExactlyOnce(t *testing.T) {
 	// Without these the guard passes just as loudly on a walk that matched
 	// nothing — a green proving the walk ran, not the call sites clean.
 	if parsed < 2 {
-		t.Fatalf("parsed %d docs_token_file source(s); expected the shared file plus every platform opener", parsed)
+		t.Fatalf("parsed %d source file(s) in internal/cli; the walk is broken, not the call sites clean", parsed)
 	}
 	if checked == 0 {
 		t.Fatal("found no wrapDocsTokenDescriptorError call; the matcher is broken, not the call sites clean")
