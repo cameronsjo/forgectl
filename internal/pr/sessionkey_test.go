@@ -347,11 +347,11 @@ func FuzzDecodeSessionKey(f *testing.F) {
 	// teeth under a plain `go test` run rather than only under -fuzz. Each is a
 	// second spelling of a key that already has one: normalize instead of
 	// refusing any of them and two byte strings name one session.
-	canonical, err := remoteSessionKey("owner", "repo", 7)
+	nearMissBase, err := remoteSessionKey("owner", "repo", 7)
 	if err != nil {
 		f.Fatalf("seed construction: %v", err)
 	}
-	good := canonical.canonical()
+	good := nearMissBase.canonical()
 	f.Add(bytes.Replace(good, []byte("owner"), []byte("OWNER"), 1))
 	f.Add(append(append([]byte{}, good...), 0x00))
 
