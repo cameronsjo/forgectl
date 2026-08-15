@@ -84,12 +84,28 @@ func TestPickRepoLabel_IsQuoted(t *testing.T) {
 // TestWrapDocsTokenDescriptorError_QuotesExactlyOnce pins the review nit that
 // QuotePath, unlike the sanitizer it replaced, is not idempotent: handing it an
 // already-rendered path produced a doubly-quoted one.
+//
+// It drives readDocsTokenFile rather than calling the wrapper directly. The
+// defect was at the CALL SITE — the wrapper was always correct on a raw path —
+// so a test that called the wrapper itself passed while the bug stood. That is
+// exactly what a mutation probe caught here, and why this test enters where the
+// production code does.
 func TestWrapDocsTokenDescriptorError_QuotesExactlyOnce(t *testing.T) {
-	got := wrapDocsTokenDescriptorError("read", "/safe/token", errString("boom")).Error()
-	if want := `read token file "/safe/token": boom`; got != want {
-		t.Fatalf("error = %q, want %q", got, want)
+	file := &injectedDocsTokenFile{
+		reader:   &partialErrorReader{data: nil, err: errString("injected read failure")},
+		closeErr: errString("injected close failure"),
 	}
-	if strings.Contains(got, `\"`) || strings.Contains(got, `""`) {
-		t.Fatalf("path was quoted more than once: %q", got)
+	_, err := readDocsTokenFile("/safe/token", file)
+	if err == nil {
+		t.Fatal("a failing read and close must produce an error")
+	}
+	got := err.Error()
+	if want := 1; strings.Count(got, `"/safe/token"`) != 2 {
+		t.Fatalf("want the path quoted exactly once per failure (read + close), got %d in %q", want, got)
+	}
+	for _, doubled := range []string{`\"`, `""`, `"\"`} {
+		if strings.Contains(got, doubled) {
+			t.Fatalf("path was quoted more than once (%q): %q", doubled, got)
+		}
 	}
 }
