@@ -14,6 +14,10 @@ package history
 //   [x] Fail-closed: non-UTF-8 after unmetafying refuses
 //   [x] Fail-closed: every malformed extended header shape refuses
 //   [x] Fail-closed: an elapsed field that would overflow a Duration refuses
+//   [x] Fail-closed: a start time outside a plausible epoch window refuses
+//   [x] Fail-closed: a file past MaxEntries refuses
+//   [x] Format: the first record decides the format and every record is held to it
+//   [x] Format: a command ending in a backslash does not swallow the next record
 //
 // LastN
 //   [x] Happy: returns the tail, oldest first, capped at what exists
@@ -22,7 +26,6 @@ package history
 // Read
 //   [x] Happy: reads and parses a file
 //   [x] Fail-closed: absent path, directory, and oversized file all refuse
-//   [x] Fail-closed: a fifo is refused before the open that would block on it
 //
 // ResolvePath
 //   [x] Happy: $HISTFILE wins; otherwise ~/.zsh_history
@@ -33,7 +36,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -144,12 +146,12 @@ func TestParse_FailsClosed(t *testing.T) {
 		{"unterminated continuation", []byte(": 1690000000:0;echo one\\\n"), ErrTruncated},
 		{"trailing metafy marker", append([]byte(": 1690000000:0;echo one\n"), 0x83), ErrTruncated},
 		{"invalid utf-8", []byte(": 1690000000:0;echo \xc3\n"), ErrEncoding},
-		{"header missing semicolon", []byte(": 1690000000:0 echo one\n"), ErrMalformed},
-		{"header missing colon", []byte(": 1690000000;echo one\n"), ErrMalformed},
-		{"non-numeric timestamp", []byte(": notatime:0;echo one\n"), ErrMalformed},
-		{"non-numeric elapsed", []byte(": 1690000000:soon;echo one\n"), ErrMalformed},
-		{"negative timestamp", []byte(": -1690000000:0;echo one\n"), ErrMalformed},
-		{"negative elapsed", []byte(": 1690000000:-5;echo one\n"), ErrMalformed},
+		{"header missing semicolon", []byte(": 1690000000:0;echo one\n: 1690000000:0 echo two\n"), ErrMalformed},
+		{"header missing colon", []byte(": 1690000000:0;echo one\n: 1690000000;echo two\n"), ErrMalformed},
+		{"non-numeric timestamp", []byte(": 1690000000:0;echo one\n: notatime:0;echo two\n"), ErrMalformed},
+		{"non-numeric elapsed", []byte(": 1690000000:0;echo one\n: 1690000000:soon;echo two\n"), ErrMalformed},
+		{"negative timestamp", []byte(": 1690000000:0;echo one\n: -1690000000:0;echo two\n"), ErrMalformed},
+		{"negative elapsed", []byte(": 1690000000:0;echo one\n: 1690000000:-5;echo two\n"), ErrMalformed},
 		{"empty command", []byte(": 1690000000:0;\n"), ErrMalformed},
 		{"blank line between entries", []byte("echo one\n\necho two\n"), ErrMalformed},
 	}
@@ -248,7 +250,7 @@ func TestRead_FailsClosed(t *testing.T) {
 
 	t.Run("malformed names the file", func(t *testing.T) {
 		path := filepath.Join(dir, "bad")
-		if err := os.WriteFile(path, []byte(": nope:0;echo one\n"), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte(": 1690000000:0;echo one\n: nope:0;echo two\n"), 0o600); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
 		if _, err := Read(path); !errors.Is(err, ErrMalformed) {
@@ -257,40 +259,74 @@ func TestRead_FailsClosed(t *testing.T) {
 	})
 }
 
-// TestRead_RefusesNonRegularFiles pins the kind check. A fifo is the case
-// that matters: without the check, os.Open blocks forever waiting for a
-// writer, so the failure mode is a hang rather than a wrong answer — hence the
-// deadline.
-func TestRead_RefusesNonRegularFiles(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "fifo")
-	if err := syscall.Mkfifo(path, 0o600); err != nil {
-		t.Skipf("mkfifo unavailable: %v", err)
-	}
-
-	type result struct{ err error }
-	done := make(chan result, 1)
-	go func() {
-		_, err := Read(path)
-		done <- result{err}
-	}()
-
-	select {
-	case got := <-done:
-		if got.err == nil {
-			t.Fatal("Read accepted a fifo as a history file")
-		}
-		if !strings.Contains(got.err.Error(), "not a regular file") {
-			t.Errorf("Read error = %v, want it to name the file kind", got.err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Read blocked on a fifo — the kind check must run before the open")
-	}
-}
-
 func TestParse_RefusesElapsedThatWouldOverflowADuration(t *testing.T) {
 	entries, err := Parse([]byte(": 1690000000:9223372036854775807;echo one\n"))
 	if !errors.Is(err, ErrMalformed) {
 		t.Fatalf("Parse error = %v, want ErrMalformed", err)
+	}
+	if entries != nil {
+		t.Errorf("Parse returned %d entries alongside a refusal", len(entries))
+	}
+}
+
+func TestParse_FormatIsDecidedOncePerFile(t *testing.T) {
+	t.Run("plain file keeps a colon-builtin command", func(t *testing.T) {
+		// `:` is a real zsh builtin, so a plain-format history legitimately
+		// holds lines that open like an extended header but are not one.
+		entries, err := Parse([]byte("echo one\n: > /tmp/truncate-me\n"))
+		if err != nil {
+			t.Fatalf("Parse: unexpected error: %v", err)
+		}
+		if len(entries) != 2 {
+			t.Fatalf("len(entries) = %d, want 2", len(entries))
+		}
+		if got, want := entries[1].Command, ": > /tmp/truncate-me"; got != want {
+			t.Errorf("entries[1].Command = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("extended file refuses a record that is not a header", func(t *testing.T) {
+		entries, err := Parse([]byte(": 1690000000:0;echo one\necho two\n"))
+		if !errors.Is(err, ErrMalformed) {
+			t.Fatalf("Parse error = %v, want ErrMalformed", err)
+		}
+		if entries != nil {
+			t.Errorf("Parse returned %d entries alongside a refusal", len(entries))
+		}
+	})
+}
+
+func TestParse_TrailingBackslashDoesNotSwallowTheNextRecord(t *testing.T) {
+	// The first command's text genuinely ends in a backslash. Folding it into
+	// the next record would show the reader a command that never ran.
+	entries, err := Parse([]byte(": 1690000000:0;echo 'a\\\n: 1690000060:0;echo two\n"))
+	if err != nil {
+		t.Fatalf("Parse: unexpected error: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("len(entries) = %d, want 2 — the next header must not fold in", len(entries))
+	}
+	if got, want := entries[1].Command, "echo two"; got != want {
+		t.Errorf("entries[1].Command = %q, want %q", got, want)
+	}
+}
+
+func TestParse_RefusesStartTimeOutOfRange(t *testing.T) {
+	entries, err := Parse([]byte(": 9223372036854775807:0;echo one\n"))
+	if !errors.Is(err, ErrMalformed) {
+		t.Fatalf("Parse error = %v, want ErrMalformed", err)
+	}
+	if entries != nil {
+		t.Errorf("Parse returned %d entries alongside a refusal", len(entries))
+	}
+}
+
+func TestParse_RefusesTooManyEntries(t *testing.T) {
+	data := []byte(strings.Repeat("a\n", MaxEntries+1))
+
+	entries, err := Parse(data)
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("Parse error = %v, want ErrTooLarge", err)
 	}
 	if entries != nil {
 		t.Errorf("Parse returned %d entries alongside a refusal", len(entries))

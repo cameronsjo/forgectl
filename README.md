@@ -220,6 +220,8 @@ forgectl y last 5                        # print the 5 most recent zsh commands,
                                           #   reads $HISTFILE (default ~/.zsh_history); no shell shim, so it sees
                                           #   only what zsh has flushed — set INC_APPEND_HISTORY or SHARE_HISTORY
                                           #   in .zshrc for the current shell's commands to appear. zsh only.
+                                          #   prints inline secrets verbatim if your history holds any — treat
+                                          #   the output as sensitive
 ```
 
 The cask doesn't stage an `fx` command — it's a shell alias you add yourself:

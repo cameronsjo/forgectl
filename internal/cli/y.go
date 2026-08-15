@@ -118,7 +118,12 @@ appear here.
 Only zsh history is supported; bash stores history differently.
 
 Commands are printed with control characters escaped, so the output is safe to
-read but is not a faithful copy of what was typed.`,
+read but is not a faithful copy of what was typed.
+
+Shell history routinely contains inline secrets — an exported token, a bearer
+header, a password passed as a flag. last prints them verbatim, so treat its
+output as sensitive: it moves those values from a mode-0600 file on one machine
+into whatever captures your terminal.`,
 		// SilenceUsage/SilenceErrors mirror `env get` (env.go): last's stdout is
 		// a stream of recovered commands, so a refusal must not dump usage text
 		// into it — a caller reading the output would take the help banner for

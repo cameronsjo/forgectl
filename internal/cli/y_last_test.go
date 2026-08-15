@@ -121,7 +121,9 @@ func TestYLastCmd_FailsClosed(t *testing.T) {
 	}{
 		{name: "absent history", absent: true},
 		{name: "empty history", contents: ""},
-		{name: "malformed history", contents: ": nope:0;echo one\n"},
+		// A valid header marks the file extended, so the damaged second
+		// record cannot demote to a plain command.
+		{name: "malformed history", contents: ": 1690000000:0;echo one\n: nope:0;echo two\n"},
 		{name: "truncated history", contents: ": 1690000000:0;echo one\\\n"},
 		{name: "non-numeric count", contents: "echo one\n", args: []string{"three"}},
 		{name: "zero count", contents: "echo one\n", args: []string{"0"}},

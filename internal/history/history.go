@@ -58,6 +58,17 @@ const extendedPrefix = ": "
 // time.Duration once multiplied by a second.
 const maxElapsedSeconds = int64(math.MaxInt64) / int64(time.Second)
 
+// maxBeginSeconds bounds a record's start time. 1<<40 seconds lands in the
+// year 36812 — far past any real history and far short of a value that would
+// render as a confident absurdity.
+const maxBeginSeconds = int64(1) << 40
+
+// MaxEntries caps how many records a history file may hold. The byte limit
+// alone is not enough: a file of short lines expands to roughly thirty times
+// its size in entry structs and string headers, so a file well under
+// MaxFileBytes could still exhaust memory.
+const MaxEntries = 1 << 20
+
 var (
 	// ErrNoHistory reports that the file parsed cleanly but held no commands.
 	// It is a refusal rather than an empty slice so an absent or emptied
@@ -107,46 +118,127 @@ func Parse(data []byte) ([]Entry, error) {
 		return nil, ErrNoHistory
 	}
 
-	var (
-		entries []Entry
-		folded  []string
-		startAt int
-	)
-	for i, line := range strings.Split(text, "\n") {
-		if len(folded) == 0 {
-			startAt = i + 1
+	records, err := foldRecords(text)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) == 0 {
+		return nil, ErrNoHistory
+	}
+
+	// zsh writes one format per file, so the format is decided once and every
+	// record is held to it. One well-formed header anywhere marks the file
+	// extended — deciding from the first record alone would let a corrupted
+	// first header demote the whole file to plain, and deciding per record
+	// would let a corrupted header demote to a plain command. A file with no
+	// header at all is plain, which is what keeps a legitimate `:` builtin
+	// command (`: > file`) from reading as damage.
+	extended := false
+	for _, candidate := range records {
+		if isExtendedHeader(candidate.text) {
+			extended = true
+			break
 		}
-		// zsh escapes a command's embedded newlines by ending the physical
-		// line with a backslash, so a trailing backslash continues the record.
-		if strings.HasSuffix(line, `\`) {
-			folded = append(folded, strings.TrimSuffix(line, `\`))
-			continue
-		}
-		folded = append(folded, line)
-		entry, err := parseRecord(strings.Join(folded, "\n"), startAt)
+	}
+
+	entries := make([]Entry, 0, len(records))
+	for _, record := range records {
+		entry, err := parseRecord(record.text, record.line, extended)
 		if err != nil {
 			return nil, err
 		}
-		folded = nil
 		entries = append(entries, entry)
-	}
-	if len(folded) > 0 {
-		return nil, fmt.Errorf("%w: unterminated continuation at line %d", ErrTruncated, startAt)
-	}
-	if len(entries) == 0 {
-		return nil, ErrNoHistory
 	}
 	return entries, nil
 }
 
+// record is one logical history entry plus the physical line it started on,
+// carried so a refusal can point at the damage.
+type record struct {
+	text string
+	line int
+}
+
+// foldRecords splits the file into logical records, rejoining zsh's
+// backslash-escaped newlines. A continuation that is really a new extended
+// header does not fold: a command whose text genuinely ends in a backslash
+// would otherwise swallow the following record, and the reader would be shown
+// a command that never ran.
+func foldRecords(text string) ([]record, error) {
+	var (
+		records []record
+		folded  []string
+		startAt int
+	)
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if len(folded) == 0 {
+			startAt = i + 1
+		}
+		// A trailing backslash on the last line means the file was cut
+		// mid-record; folding it leaves the continuation unterminated, which
+		// is exactly the refusal that should fire.
+		continues := strings.HasSuffix(line, `\`) &&
+			(i+1 >= len(lines) || !isExtendedHeader(lines[i+1]))
+		if continues {
+			folded = append(folded, strings.TrimSuffix(line, `\`))
+			continue
+		}
+		folded = append(folded, line)
+		if len(records) >= MaxEntries {
+			return nil, fmt.Errorf("%w: more than %d entries", ErrTooLarge, MaxEntries)
+		}
+		records = append(records, record{text: strings.Join(folded, "\n"), line: startAt})
+		folded = nil
+	}
+	if len(folded) > 0 {
+		return nil, fmt.Errorf("%w: unterminated continuation at line %d", ErrTruncated, startAt)
+	}
+	return records, nil
+}
+
+// isExtendedHeader reports whether a line opens an EXTENDED_HISTORY record:
+// ": ", digits, ":", digits, ";". Anything looser would match a plain command
+// that merely starts with the `:` builtin.
+func isExtendedHeader(line string) bool {
+	if !strings.HasPrefix(line, extendedPrefix) {
+		return false
+	}
+	rest := line[len(extendedPrefix):]
+	begin, rest, ok := cutDigits(rest, ':')
+	if !ok || begin == "" {
+		return false
+	}
+	elapsed, _, ok := cutDigits(rest, ';')
+	return ok && elapsed != ""
+}
+
+// cutDigits reads a run of ASCII digits up to sep, returning the digits, the
+// remainder after sep, and whether the field was well-formed.
+func cutDigits(s string, sep byte) (string, string, bool) {
+	for i := 0; i < len(s); i++ {
+		if s[i] == sep {
+			return s[:i], s[i+1:], true
+		}
+		if s[i] < '0' || s[i] > '9' {
+			return "", "", false
+		}
+	}
+	return "", "", false
+}
+
 // parseRecord turns one logical record into an Entry. line is the record's
-// first physical line number, reported so a refusal points at the damage.
-func parseRecord(record string, line int) (Entry, error) {
+// first physical line number, reported so a refusal points at the damage;
+// extended says which format the file was found to be in.
+func parseRecord(record string, line int, extended bool) (Entry, error) {
 	if record == "" {
 		return Entry{}, fmt.Errorf("%w: blank record at line %d", ErrMalformed, line)
 	}
-	if !strings.HasPrefix(record, extendedPrefix) {
+	if !extended {
 		return Entry{Command: record}, nil
+	}
+	if !isExtendedHeader(record) {
+		return Entry{}, fmt.Errorf("%w: extended header malformed at line %d", ErrMalformed, line)
 	}
 
 	header := record[len(extendedPrefix):]
@@ -162,6 +254,12 @@ func parseRecord(record string, line int) (Entry, error) {
 	begin, err := parseUnsigned(header[:colon])
 	if err != nil {
 		return Entry{}, fmt.Errorf("%w: unreadable start time at line %d", ErrMalformed, line)
+	}
+	// Bound the start time for the same reason as elapsed below: an absurd
+	// value would otherwise become a confident nonsense date rather than a
+	// refusal, and the next consumer to format a Timestamp inherits it.
+	if begin > maxBeginSeconds {
+		return Entry{}, fmt.Errorf("%w: start time out of range at line %d", ErrMalformed, line)
 	}
 	elapsed, err := parseUnsigned(header[colon+1 : colon+1+semicolon])
 	if err != nil {
@@ -246,10 +344,12 @@ func Read(path string) ([]Entry, error) {
 		return nil, err
 	}
 
-	file, err := os.Open(path)
+	file, err := openHistory(path)
 	if err != nil {
 		return nil, fmt.Errorf("read shell history: %w", termsafe.Error(err))
 	}
+	// The close error is discarded deliberately: the handle is read-only, so
+	// there is no buffered write whose loss it could report.
 	defer func() { _ = file.Close() }()
 
 	// Re-check against the open handle: the path could have been swapped
