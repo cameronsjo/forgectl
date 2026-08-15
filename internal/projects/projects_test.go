@@ -470,7 +470,7 @@ func TestDiscover_NonGitDir_StatusIsNotRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := &Client{Dir: tmp, run: &exec.FakeRunner{}}
+	c := &Client{Dir: tmp, run: v2CleanRunner()}
 	projs, err := c.Discover(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

@@ -70,6 +70,10 @@ func gitStatus(ctx context.Context, run interface {
 // dirty record git meant to report would make the tree look clean, and PullAll
 // rebases a clean tree.
 //
+// That split is about individual LINES. One assertion is made about the
+// payload as a whole: the header block must be there at all (see sawHeader
+// below). An extensible set is still a set git always sends.
+//
 // Paths are hostile input and are never decoded — only their presence and, for
 // a rename, their TAB separation are checked. Without -z, git C-quotes any path
 // containing a newline, TAB, quote, or backslash, so those characters arrive as
@@ -81,12 +85,14 @@ func parseGitStatusV2(out string) (GitStatus, bool) {
 	// a partially forged header must not have a valid sibling accepted in its
 	// place.
 	aheadUsable := true
+	sawHeader := false
 
 	for _, line := range strings.Split(out, "\n") {
 		if line == "" {
 			continue
 		}
 		if strings.HasPrefix(line, "# ") {
+			sawHeader = true
 			fields := strings.Fields(line)
 			if len(fields) >= 2 && fields[1] == "branch.ab" {
 				if n, ok := parseBranchAB(fields); ok {
@@ -131,6 +137,26 @@ func parseGitStatusV2(out string) (GitStatus, bool) {
 		default:
 			return GitStatus{State: StatusUnknown}, false
 		}
+	}
+
+	// The one assertion made about the header block as a whole rather than
+	// about an individual header. gitStatus always passes --branch, and every
+	// repository shape answers it with a block: no upstream still emits
+	// branch.oid and branch.head, a detached HEAD emits branch.head (detached),
+	// and an unborn branch emits branch.oid (initial). Only branch.upstream and
+	// branch.ab are ever omitted. So a payload with no header line at all — the
+	// empty string included — is not an answer to the command that was issued,
+	// and reading a tree state out of it would report on a branch this parser
+	// never saw.
+	//
+	// Presence of the block is asserted, never the identity of what is in it:
+	// an unrecognized `# ` line satisfies this, which is what keeps headers
+	// fail-soft and extensible while the block itself is fail-closed. A
+	// pre-2.11 git cannot reach here — it fails the command outright and
+	// gitStatus lands on StatusUnknown from the error, so an old-git
+	// environment is never reported through this path.
+	if !sawHeader {
+		return GitStatus{State: StatusUnknown}, false
 	}
 
 	// A dirty tree keeps Ahead at zero, matching the labels and JSON the v1
