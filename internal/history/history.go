@@ -74,6 +74,13 @@ const maxElapsedSeconds = int64(math.MaxInt64) / int64(time.Second)
 // render as a confident absurdity.
 const maxBeginSeconds = int64(1) << 40
 
+// MaxContinuationLines caps how many physical lines one record may fold
+// together. A real multi-line command is a loop or a heredoc, not a million
+// lines; without this bound a file that is one unbroken continuation run
+// grows the fold buffer to the whole file's line count before the truncation
+// refusal fires, which is the entry cap's blind spot.
+const MaxContinuationLines = 1 << 12
+
 // MaxEntries caps how many records a history file may hold. The byte limit
 // alone is not enough: a file of short lines expands to roughly thirty times
 // its size in entry structs and string headers, so a file well under
@@ -186,7 +193,10 @@ type record struct {
 // It walks the text a line at a time rather than splitting it up front:
 // strings.Split allocates one string header per line before any record exists,
 // so a file of very short lines would blow past the entry cap in a single
-// allocation the cap could never see.
+// allocation the cap could never see. Both accumulators are bounded —
+// the record list by MaxEntries and the fold buffer by MaxContinuationLines —
+// because a file that is one long continuation run never reaches the record
+// cap at all.
 func foldRecords(text string) ([]record, error) {
 	var (
 		records []record
@@ -205,6 +215,9 @@ func foldRecords(text string) ([]record, error) {
 		nextLine, _, _ := cutLine(rest)
 		continues := strings.HasSuffix(line, `\`) && (!more || !isExtendedHeader(nextLine))
 		if continues {
+			if len(folded) >= MaxContinuationLines {
+				return nil, fmt.Errorf("%w: a single record spans more than %d lines from line %d", ErrTooLarge, MaxContinuationLines, startAt)
+			}
 			folded = append(folded, strings.TrimSuffix(line, `\`))
 			if !more {
 				break
@@ -402,8 +415,13 @@ func Read(path string) ([]Entry, error) {
 	// between the stat above and this open. This catches the swap, but the
 	// open has already happened by then — a path swapped to a character device
 	// is opened before being rejected, and opening one can have side effects.
-	// Narrow (it needs write access to the directory plus the timing) and
-	// forgectl is not setuid, so it is recorded rather than defended against.
+	// The commoner swap is to another regular file, which passes both checks
+	// and is parsed — bounded and rendered through termsafe, and no worse than
+	// the $HISTFILE control such an attacker already has. Both need write
+	// access to the containing directory, which is another local user's reach
+	// whenever $HISTFILE points somewhere world-writable. forgectl is not
+	// setuid, so no privilege boundary is crossed either way, and this is
+	// recorded rather than defended against.
 	info, err := file.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("read shell history: %w", termsafe.Error(err))

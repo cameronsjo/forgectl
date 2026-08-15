@@ -16,6 +16,7 @@ package history
 //   [x] Fail-closed: an elapsed field that would overflow a Duration refuses
 //   [x] Fail-closed: a start time outside a plausible epoch window refuses
 //   [x] Fail-closed: a file past MaxEntries refuses
+//   [x] Fail-closed: one record folding past MaxContinuationLines refuses
 //   [x] Format: the first record decides the format and every record is held to it
 //   [x] Format: a command ending in a backslash does not swallow the next record
 //
@@ -370,6 +371,20 @@ func TestParse_RefusesStartTimeOutOfRange(t *testing.T) {
 	entries, err := Parse([]byte(": 9223372036854775807:0;echo one\n"))
 	if !errors.Is(err, ErrMalformed) {
 		t.Fatalf("Parse error = %v, want ErrMalformed", err)
+	}
+	if entries != nil {
+		t.Errorf("Parse returned %d entries alongside a refusal", len(entries))
+	}
+}
+
+func TestParse_RefusesAnEndlessContinuationRun(t *testing.T) {
+	// A file that is one unbroken continuation never reaches the record cap,
+	// so without a fold bound it accumulates the whole file before refusing.
+	data := []byte(strings.Repeat("a\\\n", MaxContinuationLines+1))
+
+	entries, err := Parse(data)
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("Parse error = %v, want ErrTooLarge", err)
 	}
 	if entries != nil {
 		t.Errorf("Parse returned %d entries alongside a refusal", len(entries))
