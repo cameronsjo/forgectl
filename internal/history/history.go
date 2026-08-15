@@ -74,11 +74,12 @@ const maxElapsedSeconds = int64(math.MaxInt64) / int64(time.Second)
 // render as a confident absurdity.
 const maxBeginSeconds = int64(1) << 40
 
-// MaxContinuationLines caps how many physical lines one record may fold
-// together. A real multi-line command is a loop or a heredoc, not a million
-// lines; without this bound a file that is one unbroken continuation run
-// grows the fold buffer to the whole file's line count before the truncation
-// refusal fires, which is the entry cap's blind spot.
+// MaxContinuationLines caps how many continuation lines one record may fold
+// together — the record itself spans one more, the line that ends it. A real
+// multi-line command is a loop or a heredoc, not a million lines; without this
+// bound a file that is one unbroken continuation run grows the fold buffer to
+// the whole file's line count before the truncation refusal fires, which is
+// the entry cap's blind spot.
 const MaxContinuationLines = 1 << 12
 
 // MaxEntries caps how many records a history file may hold. The byte limit
