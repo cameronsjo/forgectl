@@ -310,7 +310,21 @@ func TestOidWidthsAreDistinct(t *testing.T) {
 // persisted key first has to read back. Asserting "accepted if and only if
 // declared" over the whole width range catches either direction.
 func TestLocalSessionKeyAcceptsExactlyTheDeclaredWidths(t *testing.T) {
-	// Comfortably past the widest hash anyone would add: SHA-512 hex is 128.
+	// The bound is a fixed literal, and it carries a residual worth stating
+	// plainly rather than papering over: a constructor-only algorithm declared
+	// ABOVE it escapes this sweep, and nothing else in the suite catches it
+	// either. Deriving the bound from oidWidths does not help — a constructor-only
+	// width is absent from the map by definition, so a map-derived bound cannot
+	// reach it, and today would sweep only to 96 rather than 160. No sweep can
+	// bound a width it was never told about; the hole is irreducible while the
+	// switch and the map are two declarations of one fact, which they are
+	// deliberately (the switch must case on constants for the compiler to enforce
+	// width distinctness — that is the whole of forgectl#300 item 3).
+	//
+	// What bounds the damage is that the residual is fail-CLOSED: such a key does
+	// not decode, so it is an availability edge at forgectl#299 item 1, never a
+	// mis-identification. 160 clears SHA-512 hex (128) with room, so every width
+	// anyone would plausibly declare is inside it.
 	const sweepTo = 160
 	for width := range sweepTo + 1 {
 		key, err := localSessionKey(strings.Repeat("a", width))
@@ -326,6 +340,20 @@ func TestLocalSessionKeyAcceptsExactlyTheDeclaredWidths(t *testing.T) {
 			}
 			if key.oid != strings.Repeat("a", width) {
 				t.Errorf("width %d: oid round-tripped as %q", width, key.oid)
+			}
+			// The invariant the width bookkeeping exists to serve, asserted
+			// directly rather than inferred from the tag: a key the constructor
+			// accepts must decode. A constructor-only algorithm mints keys the
+			// decoder refuses — fail-closed, but still an outage at forgectl#299
+			// item 1, when a persisted key first has to read back. This runs
+			// inside the sweep, so it inherits sweepTo's residual above; what it
+			// adds is coverage of the decode direction at every width the sweep
+			// does reach, which the tag comparison alone does not give.
+			decoded, err := decodeSessionKey(key.canonical())
+			if err != nil {
+				t.Errorf("width %d: the constructor minted a key the decoder refuses: %v", width, err)
+			} else if !decoded.equal(key) {
+				t.Errorf("width %d: a constructed key did not survive its own round trip", width)
 			}
 		}
 	}
@@ -381,6 +409,15 @@ func FuzzDecodeSessionKey(f *testing.F) {
 	f.Add(bytes.Replace(good, []byte("owner"), []byte("OWNER"), 1))
 	f.Add(append(append([]byte{}, good...), 0x00))
 
+	// One known-canonical encoding per kind, for the liveness check inside the
+	// target below. Built here so each -fuzz worker process carries its own copy
+	// rather than sharing state across the process boundary.
+	liveLocal, err := localSessionKey(strings.Repeat("a", oidWidthShort))
+	if err != nil {
+		f.Fatalf("liveness fixture: %v", err)
+	}
+	liveness := [][]byte{good, liveLocal.canonical()}
+
 	f.Fuzz(func(t *testing.T, encoded []byte) {
 		// Liveness, carried by the oracle itself rather than borrowed from a
 		// neighbouring test: the assertion below is vacuously true for a decoder
@@ -388,8 +425,15 @@ func FuzzDecodeSessionKey(f *testing.F) {
 		// can still say yes. Checked in-callback rather than by counting
 		// successes afterwards, because under -fuzz the callback runs in worker
 		// processes and no shared counter would survive the boundary.
-		if _, err := decodeSessionKey(good); err != nil {
-			t.Fatalf("the decoder rejected a known-canonical encoding, so this oracle proves nothing: %v", err)
+		//
+		// One probe per KIND. The two kinds decode through separate bodies, so a
+		// single remote probe leaves a decoder broken only in decodeLocalBody
+		// looking alive — liveness repatriated for one kind and still borrowed
+		// for the other.
+		for _, live := range liveness {
+			if _, err := decodeSessionKey(live); err != nil {
+				t.Fatalf("the decoder rejected a known-canonical encoding, so this oracle proves nothing: %v", err)
+			}
 		}
 
 		key, err := decodeSessionKey(encoded)
