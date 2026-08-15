@@ -48,6 +48,25 @@ func v2Branch(ahead, behind int) string {
 // porcelain-v2 payload.
 func v2Out(parts ...string) string { return strings.Join(parts, "\n") }
 
+// v2CleanRunner answers a porcelain-v2 status probe with the header block real
+// git emits for a clean tracking branch, and answers every other command
+// empty.
+//
+// A zero-value FakeRunner is not a stand-in for a clean repository: its empty
+// stdout is a payload with no branch header block, which since forgectl#294
+// reads as StatusUnknown. Any test that needs a repository to reach StatusOK
+// supplies the block — which is what real git would have returned anyway.
+func v2CleanRunner() *exec.FakeRunner {
+	return &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		for _, a := range args {
+			if a == "--porcelain=v2" {
+				return v2Branch(0, 0), nil
+			}
+		}
+		return "", nil
+	}}
+}
+
 // ctxRunner is a minimal context-aware stand-in for the Runner seam.
 // exec.FakeRunner deliberately drops the context (its Run signature ignores
 // it), so cancellation behavior cannot be expressed through it; rather than
@@ -105,9 +124,7 @@ func TestGitStatus_NonRepoDir_StateIsNotRepo(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
-		return "", nil // clean status, 0 ahead
-	}}
+	fake := v2CleanRunner() // clean status, 0 ahead
 
 	if got := gitStatus(context.Background(), fake, nonRepo); got.State != StatusNotRepo {
 		t.Errorf("non-repo dir: State = %q, want %q", got.State, StatusNotRepo)
@@ -136,9 +153,7 @@ func TestGitStatus_CommandError_StateIsUnknown(t *testing.T) {
 	}
 
 	// Control: identical fixture, RunFunc succeeds → StatusOK.
-	succeeding := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
-		return "", nil
-	}}
+	succeeding := v2CleanRunner()
 	if got := gitStatus(context.Background(), succeeding, repo); got.State != StatusOK {
 		t.Errorf("control succeeding git status: State = %q, want %q", got.State, StatusOK)
 	}
@@ -285,7 +300,6 @@ func TestGitStatus_ParsesPorcelainV2(t *testing.T) {
 			"# branch.oid (initial)\n# branch.head main",
 			GitStatus{State: StatusOK},
 		},
-		{"empty output", "", GitStatus{State: StatusOK}},
 		{"ordinary record", v2Out(v2Branch(1, 0), v2Ordinary), GitStatus{State: StatusOK, Modified: 1}},
 		{"rename record", v2Out(v2Branch(1, 0), v2Rename), GitStatus{State: StatusOK, Modified: 1}},
 		{"unmerged record", v2Out(v2Branch(1, 0), v2Unmerged), GitStatus{State: StatusOK, Modified: 1}},
@@ -356,6 +370,21 @@ func TestGitStatus_ParsesPorcelainV2(t *testing.T) {
 			GitStatus{State: StatusUnknown},
 		},
 
+		// --- fail closed when the branch header block is absent entirely ---
+		// The command always passes --branch, and every documented repository
+		// shape answers it with at least `# branch.oid` — so a payload carrying
+		// no header at all did not come from the command that was issued.
+		// Accepting it would report a confident tree state read out of output
+		// the parser never saw a protocol marker in.
+		{"empty output", "", GitStatus{State: StatusUnknown}},
+		{"records only, no header block", v2Out(v2Ordinary), GitStatus{State: StatusUnknown}},
+		{
+			"records only reading as a clean tree",
+			v2Out(v2Ignored),
+			GitStatus{State: StatusUnknown},
+		},
+		{"blank lines only", "\n\n", GitStatus{State: StatusUnknown}},
+
 		// --- fail soft on branch.ab: valid records, ahead drops to zero ---
 		{"branch.ab missing plus sign", v2Out("# branch.ab 2 -3"), GitStatus{State: StatusOK}},
 		{"branch.ab missing minus sign", v2Out("# branch.ab +2 3"), GitStatus{State: StatusOK}},
@@ -400,6 +429,51 @@ func TestGitStatus_ParsesPorcelainV2(t *testing.T) {
 			}
 			if len(fake.Calls) != 1 {
 				t.Errorf("git calls = %d, want exactly 1", len(fake.Calls))
+			}
+		})
+	}
+}
+
+// TestGitStatus_HeaderlessPayloadIsUnknown pins the header-presence assertion
+// as its own contract (forgectl#294), paired against the minimal payload that
+// satisfies it.
+//
+// The pairing is the point. Asserting only that a headerless payload refuses
+// would also pass if the parser refused everything; asserting only that a
+// headered payload parses would pass with the assertion deleted. The two
+// together isolate the header block as the deciding variable, since the only
+// difference between the fixtures is the one `# ` line.
+//
+// The satisfying fixture is deliberately an UNRECOGNIZED header: the check is
+// that the extensible header BLOCK was present, not that any particular header
+// was understood, which is what keeps an unknown header fail-soft.
+func TestGitStatus_HeaderlessPayloadIsUnknown(t *testing.T) {
+	tmp := t.TempDir()
+	mkGitDir(t, tmp, "repo")
+	repo := filepath.Join(tmp, "repo")
+
+	const header = "# future.header whatever it says"
+
+	cases := []struct {
+		name string
+		out  string
+		want GitStatus
+	}{
+		{"headerless records refuse", v2Out(v2Ordinary, v2Untracked), GitStatus{State: StatusUnknown}},
+		{
+			"the same records with a header parse",
+			v2Out(header, v2Ordinary, v2Untracked),
+			GitStatus{State: StatusOK, Modified: 1, Untracked: 1},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) {
+				return tc.out, nil
+			}}
+			if got := gitStatus(context.Background(), fake, repo); got != tc.want {
+				t.Errorf("gitStatus = %+v, want %+v\n--- output ---\n%s", got, tc.want, tc.out)
 			}
 		})
 	}
