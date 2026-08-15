@@ -142,12 +142,19 @@ func resolvePath(path string) string {
 // compares dev+ino, and an inode number is unique only among LIVE files. A
 // filesystem may hand a just-unlinked number back to the next create — ext4
 // routinely does, APFS does not — so a replacement can land on the original
-// identity. That is contained rather than dangerous: such a replacement still
-// has to pass the byte and record comparisons below, so the only file the
-// unlink can take is one holding EXACTLY the authorized record at exactly the
-// authorized name. There is no portable strengthening available; the identity
-// check earns its place against the replacements that differ, which is every
-// case an operator or a bug produces.
+// identity. That is contained rather than dangerous, but by two separate
+// facts, and they are worth keeping apart. The checks decide WHETHER to
+// unlink, never WHAT is unlinked: Remove is a fresh name resolution after the
+// last Lstat, so under the residual above it takes whatever sits at the name
+// at that instant. What the byte and record comparisons below prove is that
+// the only file these checks can APPROVE is one holding exactly the authorized
+// record. What bounds the unlink itself is separate and unconditional:
+// root.Remove is handed filepath.Base(member.path) and nothing else, through a
+// directory handle whose identity was verified above — so the deletion can
+// never leave that one name in that one directory, whatever landed there.
+// There is no portable strengthening available; the identity check earns its
+// place against the replacements that differ, which is every case an operator
+// or a bug produces.
 func (c *Client) discardStale(member breadcrumbMember) error {
 	slog.Debug("Preparing to discard a stale review breadcrumb.",
 		"ref", member.breadcrumb.Ref, "path", member.path)

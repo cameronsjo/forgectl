@@ -14,7 +14,8 @@ package pr
 //   [x] Member replaced by a symlink -> refuse
 //   [x] Member RENAMED with a RELATIVE symlink left at its old name -> refuse.
 //       The link target is the original file, so identity, bytes and record all
-//       still match; only lstat'ing the name itself sees the link
+//       still match; only lstat'ing the name itself sees the link rather
+//       than the original's identity, so the member identity arm refuses
 //   [x] Member bytes changed -> refuse
 //   [x] Member security field changed -> refuse
 //   [x] Member disappeared -> refuse (never reported as success)
@@ -131,6 +132,10 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 	type expect struct {
 		breadcrumbSurvives bool
 		canariesInPlace    bool
+		// wantErrContains, when set, pins WHICH refusal arm fired — a case
+		// that merely asserts "an error occurred" cannot tell one guard
+		// from another, and a comment naming the wrong one reads as verified.
+		wantErrContains string
 	}
 	intact := expect{breadcrumbSurvives: true, canariesInPlace: true}
 
@@ -143,6 +148,13 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 		// it holds the original open across the unlink — an open descriptor
 		// keeps the inode allocated, so the replacement is guaranteed a
 		// different one and the member SameFile arm is what has to refuse.
+		//
+		// The pin is also why this case is UNIX-shaped: os.Remove on a file
+		// held open fails on Windows unless the handle carries
+		// FILE_SHARE_DELETE, so on a Windows leg the os.Remove below would fail
+		// as a HARNESS error, not a control failure. There is no Windows CI
+		// today; the moment one is added this case needs a build-tag skip
+		// rather than a reading that the guard broke.
 		"member replaced with identical bytes": func(t *testing.T, f staleFixture) expect {
 			body, err := os.ReadFile(f.path)
 			if err != nil {
@@ -180,11 +192,17 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 			if err := os.Symlink(target, f.path); err != nil {
 				t.Skipf("symlink unsupported: %v", err)
 			}
-			return intact
+			want := intact
+			// Same arm as the renamed-link case below, and for the same reason:
+			// Lstat sees the link, not the copy it points at.
+			want.wantErrContains = "changed identity during teardown; refusing to remove it"
+			return want
 		},
-		// The case above cannot isolate the LSTAT, for two reasons: its link
-		// points at a COPY, so the identity check refuses on the copy's inode,
-		// and its target is ABSOLUTE, which os.Root rejects outright even when
+		// The case above cannot isolate the LSTAT, for two reasons. Its link is a
+		// distinct object from the member, so the identity check refuses on the
+		// LINK's own inode — Lstat does not follow the final component, so the
+		// COPY's inode never reaches os.SameFile at all. And its target is
+		// ABSOLUTE, which os.Root rejects outright even when
 		// the path lands back inside the root. This is the shape that reaches
 		// the lstat — a RELATIVE link to the renamed original. os.Root follows
 		// it, since it stays in the root; the target is the original file, so
@@ -192,7 +210,13 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 		// record, and every check downstream passes. A Stat here would report
 		// the link as that regular file and unlink the LINK, reporting the
 		// breadcrumb discarded while the record survives under its new name.
-		// Only lstat'ing the name itself sees a symlink and refuses.
+		//
+		// Name WHICH arm refuses, as the directory-swap cases below do: it is
+		// the member IDENTITY check, not the mode check. Lstat returns the
+		// LINK's own inode, which is not member.info, so SameFile fails and
+		// IsRegular is never reached — deleting the IsRegular arm leaves this
+		// case, and the rest of the package, green. wantErrContains pins that
+		// so the two arms stay distinguishable.
 		"member renamed with a relative link left at its old name": func(t *testing.T, f staleFixture) expect {
 			const movedName = "renamed-member.json"
 			moved := filepath.Join(f.dirPath, movedName)
@@ -213,7 +237,9 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 					t.Errorf("a refusal must leave the renamed original in place: %v", err)
 				}
 			})
-			return intact
+			want := intact
+			want.wantErrContains = "changed identity during teardown; refusing to remove it"
+			return want
 		},
 		"member bytes changed": func(t *testing.T, f staleFixture) expect {
 			body, err := os.ReadFile(f.path)
@@ -312,6 +338,9 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 			err := f.client.discardStale(f.member)
 			if err == nil {
 				t.Fatalf("discardStale must refuse after %s", name)
+			}
+			if want.wantErrContains != "" && !strings.Contains(err.Error(), want.wantErrContains) {
+				t.Errorf("refusal = %q, want it to name the %q arm", err, want.wantErrContains)
 			}
 			if want.breadcrumbSurvives {
 				if _, statErr := os.Lstat(f.path); statErr != nil {
