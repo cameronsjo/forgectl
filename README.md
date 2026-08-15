@@ -532,6 +532,12 @@ and only Codex needs a fresh `--operator-authored` run. If you must roll back,
 use the newer binary or recreate the session state; the field is never stripped
 automatically, because doing so would silently change what the record asserts.
 
+The decoder also requires a breadcrumb file to hold exactly one JSON record:
+anything but whitespace after it is rejected, since forgectl writes one record
+per file and trailing content means something else has written there. This
+changes nothing for a file forgectl wrote — its own terminating newline is
+whitespace — so there is no migration.
+
 **Legacy `claunch.conf` migration** — on Darwin and Linux, a launch command captures the legacy file once, decodes that exact byte slice, and uses those same bytes for a no-clobber backup before retiring the named source. An existing `claunch.conf.bak` is never overwritten; forgectl allocates an exclusive `claunch.conf.bak.<random>` name instead. A hardlinked source is allowed, but retirement removes only the `claunch.conf` directory entry and leaves sibling links unchanged. `launch migrate` is the explicit import-only form: it refuses an existing `[launch]` table and does not back up or retire the source.
 
 The path policy is lexical and fail-closed. An explicit `XDG_CONFIG_HOME` must be absolute, and both `<xdg>/forgectl/config.toml` and `<xdg>/claunch/claunch.conf` must be the exact cleaned children of that same root—prefix lookalikes and cross-root Darwin pairs are refused. With no explicit XDG value, Darwin keeps the historical native-config/`~/.config/claunch` pair. Symlinks, directories, FIFOs, sockets, devices, malformed TOML, unstable reads, and identity drift are never migration sources. A legacy leaf symlink may still be followed only by the nonblocking read-only compatibility fallback when it resolves to a regular file.

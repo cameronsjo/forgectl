@@ -12,7 +12,10 @@ package pr
 //   [x] Validation performs NO workspace filesystem access (seams would fire)
 // decodeBreadcrumb (Classification: one decoder, frozen grammar)
 //   [x] Unknown fields are rejected
-//   [x] Two concatenated JSON documents remain ACCEPTED (forgectl#289)
+//   [x] Trailing content after the record is REJECTED (forgectl#289)
+//   [x] Trailing WHITESPACE is still accepted — writeBreadcrumb emits it
+//   [x] The refusal message echoes no file bytes, so hostile trailing content
+//       cannot ride it to a terminal
 // FuzzDecodeBreadcrumbRecord
 //   [x] Every accepted record has an absolute nonempty workspace, a complete
 //       canonical ref, a valid locality relation, and a nonzero timestamp —
@@ -111,18 +114,114 @@ func TestDecodeBreadcrumb_RejectsUnknownFields(t *testing.T) {
 	}
 }
 
-// TestDecodeBreadcrumb_AcceptsTrailingDocument pins the grammar #212
-// deliberately did NOT change. Tightening it is forgectl#289; until then this
-// test exists so the acceptance is a recorded decision rather than an
-// accident, and so tightening it cannot happen silently.
-func TestDecodeBreadcrumb_AcceptsTrailingDocument(t *testing.T) {
-	bc, err := decodeBreadcrumb([]byte(`{"workspace":"/tmp/forgectl-workflow-a","ref":"o/r#1","createdAt":"2026-01-01T00:00:00Z"}
-{"workspace":"/tmp/forgectl-workflow-b","ref":"o/r#2","createdAt":"2026-01-01T00:00:00Z"}`))
-	if err != nil {
-		t.Fatalf("decodeBreadcrumb with a trailing document = %v; the accepted grammar must not change in #212", err)
+// firstDoc is the one well-formed record every trailing-content case appends
+// to, so the cases differ only in what follows it.
+const firstDoc = `{"workspace":"/tmp/forgectl-workflow-a","ref":"o/r#1","createdAt":"2026-01-01T00:00:00Z"}`
+
+// TestDecodeBreadcrumb_RejectsTrailingContent is forgectl#289, and it replaces
+// the test #212 wrote to pin the OPPOSITE behaviour.
+//
+// A breadcrumb file is exactly one record. While bytes after the first document
+// were ignored, the file could say two different things and which one a reader
+// got depended on where it happened to stop — the same leniency
+// DisallowUnknownFields already refuses INSIDE the record.
+func TestDecodeBreadcrumb_RejectsTrailingContent(t *testing.T) {
+	secondDoc := `{"workspace":"/tmp/forgectl-workflow-b","ref":"o/r#2","createdAt":"2026-01-01T00:00:00Z"}`
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"second document", firstDoc + secondDoc},
+		{"second document after newline", firstDoc + "\n" + secondDoc},
+		{"second document after whitespace run", firstDoc + " \t\r\n  " + secondDoc},
+		{"truncated second document", firstDoc + "\n" + `{"workspace":"/tmp/forg`},
+		{"trailing NUL", firstDoc + "\x00"},
+		{"second document after NUL", firstDoc + "\x00" + secondDoc},
+		{"trailing array", firstDoc + "\n[]"},
+		{"trailing bare token", firstDoc + "\nnull"},
+		{"trailing garbage", firstDoc + "\nnot json at all"},
+		{"trailing closing brace", firstDoc + "}"},
 	}
-	if bc.Ref != "o/r#1" {
-		t.Errorf("ref = %q, want the FIRST document's ref %q", bc.Ref, "o/r#1")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := decodeBreadcrumb([]byte(tc.body)); err == nil {
+				t.Errorf("decodeBreadcrumb accepted %s; a breadcrumb file is exactly one record", tc.name)
+			}
+		})
+	}
+}
+
+// TestDecodeBreadcrumb_TrailingContentErrorCarriesNoFileBytes guards the
+// property that makes the refusal safe to log: the message is a CONSTANT, so
+// nothing the file says rides it to an operator's terminal.
+//
+// The tail that matters is a quoted STRING. json.Decoder.Token returns a
+// string token as its verbatim Go value, so a message that reported the token
+// — or wrapped the syntax error, which quotes the first offending byte — would
+// echo whatever the file chose, raw ANSI and bidi overrides included. Both
+// spellings are covered below, and either one turns this red.
+func TestDecodeBreadcrumb_TrailingContentErrorCarriesNoFileBytes(t *testing.T) {
+	const marker = "MARKERBYTES1234"
+	// Two shapes. A quoted STRING whose escapes keep the tail valid json, so
+	// it really does decode to a token carrying a raw ESC and a raw bidi
+	// override — that token is what Token hands back verbatim. And a bare
+	// word, whose first byte the syntax error quotes instead.
+	for _, tail := range []string{
+		"\n\"\\u001b[31m" + marker + "\u202e\"",
+		"\n" + marker,
+		"\n\x1b[31m" + marker,
+	} {
+		_, err := decodeBreadcrumb([]byte(firstDoc + tail))
+		if err == nil {
+			t.Fatalf("trailing %q must be rejected", tail)
+		}
+		got := err.Error()
+		if strings.Contains(got, marker) {
+			t.Errorf("refusal message echoed file bytes: %q", got)
+		}
+		for _, control := range []string{"\x1b", "\u202e", `\x1b`, `\u202e`} {
+			if strings.Contains(got, control) {
+				t.Errorf("refusal message carries %q from the file: %q", control, got)
+			}
+		}
+	}
+}
+
+// TestDecodeBreadcrumbRecord_TrailingContentNamesRemedy pins the
+// operator-facing half of the refusal. A record rejected for trailing content
+// is unreachable by every verb — `pr list` skips it, `pr teardown` refuses it
+// at this same decode — so removing the file is the only remedy and the message
+// has to say so.
+//
+// It deliberately asserts the REMEDY only. Which file is named is the wrapper's
+// pre-existing behaviour and not this change's to pin: the filename is
+// attacker-chosen and reaches a terminal unescaped from every error site in
+// this package, so a test here that pinned the path would read as a guarantee
+// about a surface #289 does not cover. That cluster is forgectl#309.
+func TestDecodeBreadcrumbRecord_TrailingContentNamesRemedy(t *testing.T) {
+	path := filepath.Join(string(filepath.Separator), "tmp", "sessions", "o-r-1-2.json")
+	_, err := decodeBreadcrumbRecord([]byte(firstDoc+"\n{}"), path)
+	if err == nil {
+		t.Fatal("trailing content must be rejected")
+	}
+	if got := err.Error(); !strings.Contains(got, "by hand") {
+		t.Errorf("refusal names no remedy, and no forgectl verb can reach this record: %q", got)
+	}
+}
+
+// TestDecodeBreadcrumb_AcceptsTrailingWhitespace is the half of the tightening
+// that keeps it a hardening rather than a migration: writeBreadcrumb appends a
+// newline to every file it writes, so rejecting trailing whitespace would
+// reject forgectl's own output.
+func TestDecodeBreadcrumb_AcceptsTrailingWhitespace(t *testing.T) {
+	for _, tail := range []string{"", "\n", "  \t\r\n\n", "\r\n"} {
+		bc, err := decodeBreadcrumb([]byte(firstDoc + tail))
+		if err != nil {
+			t.Fatalf("decodeBreadcrumb with trailing %q = %v, want acceptance", tail, err)
+		}
+		if bc.Ref != "o/r#1" {
+			t.Errorf("ref = %q, want %q", bc.Ref, "o/r#1")
+		}
 	}
 }
 

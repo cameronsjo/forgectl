@@ -12,6 +12,10 @@ package pr
 //   [x] CONTENT reject: workspace is not an existing dir
 //   [x] CONTENT reject: workspace lacks the forgectl-workflow- sandbox prefix
 //   [x] CONTENT reject: malformed ref string
+//   [x] CONTENT reject: real on-disk bytes carrying a second document, a
+//       truncated one, an embedded NUL, or any other trailing non-whitespace
+//       (forgectl#289)
+//   [x] CONTENT accept: the trailing whitespace writeBreadcrumb itself emits
 //   [x] CONTENT reject: workspace is a symlink NAMED forgectl-workflow-*
 //       pointing at an unprefixed victim dir (the resolve-then-Base pairing
 //       is the sole identity gate after issue #184 — this is the case that
@@ -136,6 +140,60 @@ func TestLoadBreadcrumb_ContentRejections(t *testing.T) {
 				t.Errorf("%s: expected content rejection", tc.name)
 			}
 		})
+	}
+}
+
+// TestLoadBreadcrumb_RejectsTrailingContentOnDisk drives forgectl#289 through
+// the real path — bytes written to a real file in a real session-state dir and
+// read back by the loader — rather than handing strings straight to the
+// decoder. The tails are the shapes a file actually takes when something else
+// has written to it: a second record, a partially written one, and NUL padding.
+func TestLoadBreadcrumb_RejectsTrailingContentOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	ws := fakeWorkspace(t)
+	record := `{"workspace":"` + ws + `","ref":"o/r#1","agent":"a","createdAt":"2026-07-08T00:00:00Z"}`
+	second := `{"workspace":"` + ws + `","ref":"o/r#2","agent":"a","createdAt":"2026-07-08T00:00:00Z"}`
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"second document", record + second},
+		{"second document after newline", record + "\n" + second},
+		{"second document after whitespace", record + "  \t\r\n" + second},
+		{"truncated second document", record + "\n" + `{"workspace":"/tmp/forgectl-workflow-`},
+		{"embedded NUL then document", record + "\x00" + second},
+		{"NUL padding", record + "\n\x00\x00\x00"},
+		{"trailing garbage", record + "\nlolwat"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeRaw(t, dir, "trail"+string(rune('a'+i))+".json", tc.body)
+			if _, err := loadBreadcrumb(path, dir); err == nil {
+				t.Errorf("%s: loaded a breadcrumb file carrying trailing content", tc.name)
+			}
+		})
+	}
+}
+
+// TestLoadBreadcrumb_AcceptsWriterTrailingWhitespace is the companion accept
+// case, and it is what proves #289 is a hardening and not a migration:
+// writeBreadcrumb terminates every file with "\n", so the tightening has to
+// leave whitespace tails alone.
+func TestLoadBreadcrumb_AcceptsWriterTrailingWhitespace(t *testing.T) {
+	dir := t.TempDir()
+	ws := fakeWorkspace(t)
+	record := `{"workspace":"` + ws + `","ref":"o/r#1","agent":"a","createdAt":"2026-07-08T00:00:00Z"}`
+
+	for i, tail := range []string{"", "\n", "\r\n", "\n\n  \t\n"} {
+		path := writeRaw(t, dir, "ws"+string(rune('a'+i))+".json", record+tail)
+		got, err := loadBreadcrumb(path, dir)
+		if err != nil {
+			t.Fatalf("trailing whitespace %q must still load: %v", tail, err)
+		}
+		if got.Ref != "o/r#1" {
+			t.Errorf("ref = %q, want %q", got.Ref, "o/r#1")
+		}
 	}
 }
 
