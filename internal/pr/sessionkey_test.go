@@ -296,25 +296,51 @@ func TestOidWidthsAreDistinct(t *testing.T) {
 	}
 }
 
-// Distinctness stated as the behaviour it protects: every declared width must
-// reach its OWN algorithm tag. A first-match switch over colliding widths passes
-// every existing test — the key still builds and still names a window — and
-// fails only here, where the tag itself is read back.
-func TestLocalSessionKeyRoutesEachWidthToItsOwnAlgorithm(t *testing.T) {
-	for algorithm, width := range oidWidths {
-		t.Run(algorithm, func(t *testing.T) {
-			key, err := localSessionKey(strings.Repeat("a", width))
-			if err != nil {
-				t.Fatalf("localSessionKey at width %d: %v", width, err)
-			}
-			if key.algorithm != algorithm {
-				t.Fatalf("a %d-digit oid was filed under algorithm %q, want %q", width, key.algorithm, algorithm)
+// Distinctness stated as the behaviour it protects, swept exhaustively over
+// every width the codec could ever be handed rather than only the three it
+// declares. A first-match switch over colliding widths passes every other test —
+// the key still builds and still names a window — and fails here, where the tag
+// itself is read back.
+//
+// The sweep runs in BOTH directions, which a per-declared-width loop cannot. The
+// constructor's switch and oidWidths are separate declarations of one fact, and
+// each can gain a member the other lacks: a map-only algorithm is decodable but
+// unconstructible, and a switch-only algorithm constructs keys the decoder
+// refuses — which becomes an availability bug at forgectl#299 item 1, when a
+// persisted key first has to read back. Asserting "accepted if and only if
+// declared" over the whole width range catches either direction.
+func TestLocalSessionKeyAcceptsExactlyTheDeclaredWidths(t *testing.T) {
+	// Comfortably past the widest hash anyone would add: SHA-512 hex is 128.
+	const sweepTo = 160
+	for width := range sweepTo + 1 {
+		key, err := localSessionKey(strings.Repeat("a", width))
+		wantAlgorithm, isDeclaredWidth := algorithmForWidth(width)
+		switch {
+		case isDeclaredWidth && err != nil:
+			t.Errorf("width %d is declared as %q but localSessionKey refused it: %v", width, wantAlgorithm, err)
+		case !isDeclaredWidth && err == nil:
+			t.Errorf("width %d is declared by no algorithm but localSessionKey accepted it as %q", width, key.algorithm)
+		case isDeclaredWidth:
+			if key.algorithm != wantAlgorithm {
+				t.Errorf("a %d-digit oid was filed under algorithm %q, want %q", width, key.algorithm, wantAlgorithm)
 			}
 			if key.oid != strings.Repeat("a", width) {
-				t.Fatalf("oid round-tripped as %q", key.oid)
+				t.Errorf("width %d: oid round-tripped as %q", width, key.oid)
 			}
-		})
+		}
 	}
+}
+
+// algorithmForWidth is the test's own independent inverse of oidWidths, so the
+// sweep above compares the constructor against the MAP rather than against the
+// constructor's own switch.
+func algorithmForWidth(width int) (string, bool) {
+	for algorithm, declared := range oidWidths {
+		if declared == width {
+			return algorithm, true
+		}
+	}
+	return "", false
 }
 
 // decodeSessionKey has no production caller yet (forgectl#299 item 1 brings
@@ -356,6 +382,16 @@ func FuzzDecodeSessionKey(f *testing.F) {
 	f.Add(append(append([]byte{}, good...), 0x00))
 
 	f.Fuzz(func(t *testing.T, encoded []byte) {
+		// Liveness, carried by the oracle itself rather than borrowed from a
+		// neighbouring test: the assertion below is vacuously true for a decoder
+		// that refuses EVERYTHING, so every invocation first proves the decoder
+		// can still say yes. Checked in-callback rather than by counting
+		// successes afterwards, because under -fuzz the callback runs in worker
+		// processes and no shared counter would survive the boundary.
+		if _, err := decodeSessionKey(good); err != nil {
+			t.Fatalf("the decoder rejected a known-canonical encoding, so this oracle proves nothing: %v", err)
+		}
+
 		key, err := decodeSessionKey(encoded)
 		if err != nil {
 			return
