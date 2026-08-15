@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -43,14 +44,26 @@ func TestSafeLineQuotesEveryBidiControl(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := SafeLine("left" + string(tt.r) + "right")
-			if strings.ContainsRune(got, tt.r) {
-				t.Errorf("SafeLine with %U = %q, want the rune quoted", tt.r, got)
-			}
-			if !strings.HasPrefix(got, "left") || !strings.HasSuffix(got, "right") {
-				t.Errorf("SafeLine with %U = %q, want the surrounding text intact", tt.r, got)
-			}
+			assertQuotedInPlace(t, tt.r)
 		})
+	}
+}
+
+// assertQuotedInPlace checks SafeLine's actual contract: the rune is replaced by
+// its VISIBLE escape, in place, with the surrounding text intact.
+//
+// Asserting only that the rune is gone would pass on a SafeLine that DELETED it,
+// and deletion is the behaviour the whole boundary exists to avoid — an operator
+// who cannot see that something was removed is being lied to just as surely as
+// one whose cursor gets moved. The expected form comes from
+// strconv.QuoteRuneToGraphic, the same source SafeLine builds from, so this
+// pins the spelling rather than restating the implementation's arithmetic.
+func assertQuotedInPlace(t *testing.T, r rune) {
+	t.Helper()
+	quoted := strconv.QuoteRuneToGraphic(r)
+	want := "left" + quoted[1:len(quoted)-1] + "right"
+	if got := SafeLine("left" + string(r) + "right"); got != want {
+		t.Errorf("SafeLine with %U = %q, want %q", r, got, want)
 	}
 }
 
@@ -61,10 +74,7 @@ func TestSafeLineQuotesEveryBidiControl(t *testing.T) {
 // non-graphic", which is the reason every human sink was moved onto it.
 func TestSafeLineQuotesTabAndTheInvisibleFormattingResidual(t *testing.T) {
 	for _, r := range []rune{'\t', 0x2028, 0x2029, 0x200b, 0x00ad, 0x2060} {
-		got := SafeLine("left" + string(r) + "right")
-		if strings.ContainsRune(got, r) {
-			t.Errorf("SafeLine did not quote %U: %q", r, got)
-		}
+		assertQuotedInPlace(t, r)
 	}
 }
 

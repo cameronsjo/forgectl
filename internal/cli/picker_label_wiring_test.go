@@ -128,11 +128,33 @@ func isHuhNewOption(call *ast.CallExpr) bool {
 // hold escaped text, and reports how many huh.NewOption calls it checked.
 func checkFuncLabels(t *testing.T, fset *token.FileSet, file string, fn *ast.FuncDecl) int {
 	t.Helper()
-	approved := map[string]bool{}
+	return checkBodyLabels(t, fset, file, fn.Body, map[string]bool{})
+}
+
+// checkBodyLabels walks one body in source order against its own approval map.
+//
+// A function literal gets a COPY of the enclosing map rather than sharing it.
+// Inheriting is right — a closure legitimately uses a label the enclosing scope
+// escaped — but sharing is not: a nested `label := safeTerm(x)` shadows the
+// outer name, and with one shared map that inner approval leaks out and blesses
+// an outer `label` still holding raw text. Copy-in gives the closure what it can
+// see without letting its shadows escape.
+func checkBodyLabels(t *testing.T, fset *token.FileSet, file string, body ast.Node, approved map[string]bool) int {
+	t.Helper()
 	options := 0
 
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
+	ast.Inspect(body, func(n ast.Node) bool {
 		switch node := n.(type) {
+		case *ast.FuncLit:
+			if node == body {
+				return true
+			}
+			inner := make(map[string]bool, len(approved))
+			for name, ok := range approved {
+				inner[name] = ok
+			}
+			options += checkBodyLabels(t, fset, file, node.Body, inner)
+			return false // walked separately; do not descend with the outer map
 		case *ast.AssignStmt:
 			for i, rhs := range node.Rhs {
 				if i >= len(node.Lhs) {
