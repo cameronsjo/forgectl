@@ -11,10 +11,13 @@ package pr
 // discardStale (Classification: destructive, fail-closed)
 //   [x] Happy: removes ONLY the authorized breadcrumb
 //   [x] Member replaced with identical bytes (new inode) -> refuse
-//   [x] Member replaced by a symlink -> refuse
+//   [x] Member replaced by a symlink -> refuse. WHICH arm refuses is
+//       filesystem-dependent (identity on APFS, IsRegular where the link
+//       inherits the unlinked original's inode), so it pins neither
 //   [x] Member RENAMED with a RELATIVE symlink left at its old name -> refuse.
 //       The link target is the original file, so identity, bytes and record all
-//       still match; only lstat'ing the name itself sees the link
+//       still match; only lstat'ing the name itself sees the link rather
+//       than the original's identity, so the member identity arm refuses
 //   [x] Member bytes changed -> refuse
 //   [x] Member security field changed -> refuse
 //   [x] Member disappeared -> refuse (never reported as success)
@@ -131,6 +134,10 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 	type expect struct {
 		breadcrumbSurvives bool
 		canariesInPlace    bool
+		// wantErrContains, when set, pins WHICH refusal arm fired — a case
+		// that merely asserts "an error occurred" cannot tell one guard
+		// from another, and a comment naming the wrong one reads as verified.
+		wantErrContains string
 	}
 	intact := expect{breadcrumbSurvives: true, canariesInPlace: true}
 
@@ -143,6 +150,13 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 		// it holds the original open across the unlink — an open descriptor
 		// keeps the inode allocated, so the replacement is guaranteed a
 		// different one and the member SameFile arm is what has to refuse.
+		//
+		// The pin is also why this case is UNIX-shaped: os.Remove on a file
+		// held open fails on Windows unless the handle carries
+		// FILE_SHARE_DELETE, so on a Windows leg the os.Remove below would fail
+		// as a HARNESS error, not a control failure. There is no Windows CI
+		// today; the moment one is added this case needs a build-tag skip
+		// rather than a reading that the guard broke.
 		"member replaced with identical bytes": func(t *testing.T, f staleFixture) expect {
 			body, err := os.ReadFile(f.path)
 			if err != nil {
@@ -180,19 +194,40 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 			if err := os.Symlink(target, f.path); err != nil {
 				t.Skipf("symlink unsupported: %v", err)
 			}
+			// Deliberately NOT pinned to an arm: which guard refuses here depends
+			// on the filesystem, per the comment below. Refusal is the contract.
 			return intact
 		},
-		// The case above cannot isolate the LSTAT, for two reasons: its link
-		// points at a COPY, so the identity check refuses on the copy's inode,
-		// and its target is ABSOLUTE, which os.Root rejects outright even when
-		// the path lands back inside the root. This is the shape that reaches
+		// The case above cannot isolate the LSTAT, for two reasons. The first is
+		// that WHICH arm refuses it is filesystem-dependent, so it can pin
+		// neither. Lstat does not follow the final component, so the identity
+		// check sees the LINK's own inode and the COPY's never reaches
+		// os.SameFile at all — but the case unlinks the original first, and on a
+		// filesystem that recycles inodes (ext4 does, APFS does not) the new
+		// symlink can inherit the just-freed number. Then SameFile PASSES and the
+		// IsRegular arm is what refuses; on APFS the identity arm refuses instead.
+		// Both were measured, by pinning the refusal text: this case refuses via
+		// IsRegular on the Linux CI leg and via the identity arm on macOS. The
+		// second reason is that its target is ABSOLUTE, which os.Root rejects
+		// outright even when the path lands back inside the root.
+		//
+		// This is the shape that reaches
 		// the lstat — a RELATIVE link to the renamed original. os.Root follows
 		// it, since it stays in the root; the target is the original file, so
 		// it carries the original inode, the original bytes and the original
 		// record, and every check downstream passes. A Stat here would report
 		// the link as that regular file and unlink the LINK, reporting the
 		// breadcrumb discarded while the record survives under its new name.
-		// Only lstat'ing the name itself sees a symlink and refuses.
+		//
+		// Name WHICH arm refuses, as the directory-swap cases below do: it is
+		// the member IDENTITY check, not the mode check. The original survives
+		// under its new name, so its inode is never freed and the link at the old
+		// name is a distinct object on every filesystem — SameFile fails and
+		// IsRegular is never reached. Unlike the case above, that holds
+		// everywhere, which is what makes it pinnable — the case above is not.
+		// Deleting the IsRegular arm leaves this case green, and on APFS left the
+		// whole package green, which is how the wrong attribution survived.
+		// wantErrContains keeps the identity and mode arms distinguishable here.
 		"member renamed with a relative link left at its old name": func(t *testing.T, f staleFixture) expect {
 			const movedName = "renamed-member.json"
 			moved := filepath.Join(f.dirPath, movedName)
@@ -213,7 +248,9 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 					t.Errorf("a refusal must leave the renamed original in place: %v", err)
 				}
 			})
-			return intact
+			want := intact
+			want.wantErrContains = "changed identity during teardown; refusing to remove it"
+			return want
 		},
 		"member bytes changed": func(t *testing.T, f staleFixture) expect {
 			body, err := os.ReadFile(f.path)
@@ -312,6 +349,9 @@ func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 			err := f.client.discardStale(f.member)
 			if err == nil {
 				t.Fatalf("discardStale must refuse after %s", name)
+			}
+			if want.wantErrContains != "" && !strings.Contains(err.Error(), want.wantErrContains) {
+				t.Errorf("refusal = %q, want it to name the %q arm", err, want.wantErrContains)
 			}
 			if want.breadcrumbSurvives {
 				if _, statErr := os.Lstat(f.path); statErr != nil {
