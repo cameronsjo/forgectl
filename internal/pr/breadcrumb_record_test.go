@@ -12,7 +12,8 @@ package pr
 //   [x] Validation performs NO workspace filesystem access (seams would fire)
 // decodeBreadcrumb (Classification: one decoder, frozen grammar)
 //   [x] Unknown fields are rejected
-//   [x] Two concatenated JSON documents remain ACCEPTED (forgectl#289)
+//   [x] Trailing content after the record is REJECTED (forgectl#289)
+//   [x] Trailing WHITESPACE is still accepted — writeBreadcrumb emits it
 // FuzzDecodeBreadcrumbRecord
 //   [x] Every accepted record has an absolute nonempty workspace, a complete
 //       canonical ref, a valid locality relation, and a nonzero timestamp —
@@ -111,18 +112,56 @@ func TestDecodeBreadcrumb_RejectsUnknownFields(t *testing.T) {
 	}
 }
 
-// TestDecodeBreadcrumb_AcceptsTrailingDocument pins the grammar #212
-// deliberately did NOT change. Tightening it is forgectl#289; until then this
-// test exists so the acceptance is a recorded decision rather than an
-// accident, and so tightening it cannot happen silently.
-func TestDecodeBreadcrumb_AcceptsTrailingDocument(t *testing.T) {
-	bc, err := decodeBreadcrumb([]byte(`{"workspace":"/tmp/forgectl-workflow-a","ref":"o/r#1","createdAt":"2026-01-01T00:00:00Z"}
-{"workspace":"/tmp/forgectl-workflow-b","ref":"o/r#2","createdAt":"2026-01-01T00:00:00Z"}`))
-	if err != nil {
-		t.Fatalf("decodeBreadcrumb with a trailing document = %v; the accepted grammar must not change in #212", err)
+// firstDoc is the one well-formed record every trailing-content case appends
+// to, so the cases differ only in what follows it.
+const firstDoc = `{"workspace":"/tmp/forgectl-workflow-a","ref":"o/r#1","createdAt":"2026-01-01T00:00:00Z"}`
+
+// TestDecodeBreadcrumb_RejectsTrailingContent is forgectl#289, and it replaces
+// the test #212 wrote to pin the OPPOSITE behaviour.
+//
+// A breadcrumb file is exactly one record. While bytes after the first document
+// were ignored, the file could say two different things and which one a reader
+// got depended on where it happened to stop — the same leniency
+// DisallowUnknownFields already refuses INSIDE the record.
+func TestDecodeBreadcrumb_RejectsTrailingContent(t *testing.T) {
+	secondDoc := `{"workspace":"/tmp/forgectl-workflow-b","ref":"o/r#2","createdAt":"2026-01-01T00:00:00Z"}`
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"second document", firstDoc + secondDoc},
+		{"second document after newline", firstDoc + "\n" + secondDoc},
+		{"second document after whitespace run", firstDoc + " \t\r\n  " + secondDoc},
+		{"truncated second document", firstDoc + "\n" + `{"workspace":"/tmp/forg`},
+		{"trailing NUL", firstDoc + "\x00"},
+		{"second document after NUL", firstDoc + "\x00" + secondDoc},
+		{"trailing array", firstDoc + "\n[]"},
+		{"trailing bare token", firstDoc + "\nnull"},
+		{"trailing garbage", firstDoc + "\nnot json at all"},
+		{"trailing closing brace", firstDoc + "}"},
 	}
-	if bc.Ref != "o/r#1" {
-		t.Errorf("ref = %q, want the FIRST document's ref %q", bc.Ref, "o/r#1")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := decodeBreadcrumb([]byte(tc.body)); err == nil {
+				t.Errorf("decodeBreadcrumb accepted %s; a breadcrumb file is exactly one record", tc.name)
+			}
+		})
+	}
+}
+
+// TestDecodeBreadcrumb_AcceptsTrailingWhitespace is the half of the tightening
+// that keeps it a hardening rather than a migration: writeBreadcrumb appends a
+// newline to every file it writes, so rejecting trailing whitespace would
+// reject forgectl's own output.
+func TestDecodeBreadcrumb_AcceptsTrailingWhitespace(t *testing.T) {
+	for _, tail := range []string{"", "\n", "  \t\r\n\n", "\r\n"} {
+		bc, err := decodeBreadcrumb([]byte(firstDoc + tail))
+		if err != nil {
+			t.Fatalf("decodeBreadcrumb with trailing %q = %v, want acceptance", tail, err)
+		}
+		if bc.Ref != "o/r#1" {
+			t.Errorf("ref = %q, want %q", bc.Ref, "o/r#1")
+		}
 	}
 }
 

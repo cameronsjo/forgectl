@@ -1,8 +1,11 @@
 package pr
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -149,18 +152,37 @@ func LoadBreadcrumb(path string) (Breadcrumb, error) {
 // list rows, stale teardown — decodes through here, so no second schema can
 // drift away from this one.
 //
-// GRAMMAR NOTE, DELIBERATE: one Decode call with DisallowUnknownFields, which
-// is exactly what the pre-#212 code did. A second trailing JSON document after
-// the first therefore remains ACCEPTED, unchanged. Rejecting trailing
-// documents is sensible hardening, but doing it here would make bytes that
-// older forgectl versions accepted start failing — a migration wearing a
-// bugfix's clothes. Tightening it is tracked separately (forgectl#289).
+// GRAMMAR: a breadcrumb file is EXACTLY ONE JSON record. DisallowUnknownFields
+// refuses smuggled keys inside the record, and the trailing-token check refuses
+// anything after it (forgectl#289).
+//
+// Both halves answer the same question — can this file mean something other
+// than what a reader took from it? While trailing bytes were ignored, a file
+// could carry a second record that no consumer here ever saw, and which
+// document a reader ended up acting on was a property of where its parser
+// happened to stop rather than of the file. Trailing content is also positive
+// evidence something other than writeBreadcrumb has written to this path, which
+// is worth refusing on its own.
+//
+// Trailing WHITESPACE stays accepted, and that is what keeps this a hardening
+// rather than a migration: writeBreadcrumb terminates every file with "\n", so
+// every breadcrumb forgectl has ever written still decodes. Only bytes forgectl
+// never wrote are newly rejected.
 func decodeBreadcrumb(data []byte) (Breadcrumb, error) {
 	var bc Breadcrumb
-	dec := json.NewDecoder(strings.NewReader(string(data)))
+	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&bc); err != nil {
 		return Breadcrumb{}, err
+	}
+	// Token reports the next token in the stream, skipping whitespace, and
+	// returns io.EOF only when nothing but whitespace remains. Anything else —
+	// a second document, a truncated one, a stray delimiter, NUL padding —
+	// yields a value or a syntax error, and both mean this file is not one
+	// record. The error names no file content, so hostile bytes never reach a
+	// log or a terminal through it.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return Breadcrumb{}, fmt.Errorf("trailing content after the breadcrumb record; a breadcrumb file must contain exactly one JSON record")
 	}
 	return bc, nil
 }
