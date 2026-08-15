@@ -79,13 +79,44 @@ const (
 	oidAlgorithmSHA256 = "sha256"
 )
 
-// oidWidths maps each declared algorithm tag to its exact hex width. A partial
-// oid — one whose length matches no declared width — is rejected outright
-// rather than padded, truncated, or guessed at.
+// The exact hex width of each declared algorithm, as CONSTANTS. They are
+// constants rather than only map entries because localSessionKey's width switch
+// cases on them: with constant cases, two algorithms declared at the same width
+// are a compile error ("duplicate case"), whereas the map lookups this replaced
+// were non-constant expressions — a duplicate compiled cleanly and the switch
+// silently took whichever case was written first, quietly filing one algorithm's
+// oids under another's tag. The tag travels inside the canonical bytes the
+// window-name digest is taken over, so that mislabelling is an identity bug, not
+// a cosmetic one. The distinctness the switch's comment asserts is now enforced
+// by the compiler rather than stated in prose.
+const (
+	oidWidthShort  = 7
+	oidWidthSHA1   = 40
+	oidWidthSHA256 = 64
+)
+
+// A second, independent compile-time distinctness check, stated where the widths
+// are declared rather than inferred from how they happen to be consumed: an
+// array literal cannot carry a duplicate index, so making the widths the indexes
+// makes a collision a compile error even if the switch below is ever rewritten
+// into a form that no longer cases on constants. The value is discarded, so it
+// costs nothing at runtime.
+var _ = [...]bool{oidWidthShort: true, oidWidthSHA1: true, oidWidthSHA256: true}
+
+// oidWidths maps each declared algorithm tag to its exact hex width, for the
+// decoder — which arrives with the tag in hand and needs the width it implies. A
+// partial oid — one whose length matches no declared width — is rejected
+// outright rather than padded, truncated, or guessed at.
+//
+// It is built from the constants above so the two cannot disagree, and
+// TestOidWidthsAgreeWithDeclaredConstants holds the map to exactly that set: a
+// fourth algorithm added here but not to the constants would be reachable by the
+// decoder and unreachable by the constructor, which is a decode-only identity no
+// launch could ever produce.
 var oidWidths = map[string]int{
-	oidAlgorithmShort:  7,
-	oidAlgorithmSHA1:   40,
-	oidAlgorithmSHA256: 64,
+	oidAlgorithmShort:  oidWidthShort,
+	oidAlgorithmSHA1:   oidWidthSHA1,
+	oidAlgorithmSHA256: oidWidthSHA256,
 }
 
 // maxPRNumber is the largest PR number a key may carry. parseNumber already
@@ -122,17 +153,25 @@ func localSessionKey(oid string) (prSessionKey, error) {
 	// Widths are unique across the declared algorithms, so this is a lookup, not
 	// a search — written as a switch rather than a range over oidWidths so the
 	// mapping is fixed in the source instead of depending on map order.
+	//
+	// The cases are the width CONSTANTS, not oidWidths lookups. That is what
+	// makes the uniqueness above a compiler-enforced fact: constant cases that
+	// collide fail to build, where the map lookups this replaced were
+	// non-constant and a collision silently resolved to the first case.
 	algorithm := ""
 	switch len(lowered) {
-	case oidWidths[oidAlgorithmShort]:
+	case oidWidthShort:
 		algorithm = oidAlgorithmShort
-	case oidWidths[oidAlgorithmSHA1]:
+	case oidWidthSHA1:
 		algorithm = oidAlgorithmSHA1
-	case oidWidths[oidAlgorithmSHA256]:
+	case oidWidthSHA256:
 		algorithm = oidAlgorithmSHA256
 	}
 	if algorithm == "" {
-		return prSessionKey{}, fmt.Errorf("local session oid %q is %d hex digits, which matches no declared width (7, 40, or 64)", oid, len(lowered))
+		// The widths are interpolated from the constants rather than spelled out,
+		// so widening the set cannot leave the error message lying about it.
+		return prSessionKey{}, fmt.Errorf("local session oid %q is %d hex digits, which matches no declared width (%d, %d, or %d)",
+			oid, len(lowered), oidWidthShort, oidWidthSHA1, oidWidthSHA256)
 	}
 	if !isLowerHex(lowered) {
 		return prSessionKey{}, fmt.Errorf("local session oid %q is not hexadecimal", oid)
@@ -180,6 +219,15 @@ func sessionKeyForRef(ref Ref) (prSessionKey, error) {
 // equal reports whether two keys are the same identity. It compares canonical
 // bytes rather than fields so there is exactly one definition of equality, and
 // it is the same one the digest in a window name is computed over.
+//
+// NO PRODUCTION CALLER TODAY, deliberately. Production never compares two keys:
+// a key is derived from a Ref and immediately rendered to a name, and every
+// downstream comparison — ResolveWindowExact, the admission gate — is a
+// comparison of NAMES. equal exists so the tests below assert identity the way
+// the digest defines it rather than field by field, which is the only definition
+// a collision test may use; asserting on fields would pass on a pair that
+// encodes, and therefore names, identically. Do not read its presence as a
+// production equality path that something forgot to call.
 func (k prSessionKey) equal(other prSessionKey) bool {
 	return string(k.canonical()) == string(other.canonical())
 }
@@ -247,6 +295,22 @@ func appendLenString(buf []byte, s string) []byte {
 // refusals. Nothing is normalized on the way in — a value that would re-encode
 // differently than it arrived is rejected rather than repaired, so the round
 // trip is byte-identical by construction.
+//
+// NO PRODUCTION CALLER TODAY, deliberately, and worth stating because a strict
+// parser sitting beside an identity codec reads as load-bearing. Nothing in
+// forgectl parses a session key: keys are built from a Ref and rendered
+// forward, never reconstructed. The production caller arrives with forgectl#299
+// item 1 — a breadcrumb that persists the key itself rather than re-deriving it
+// from a Ref — at which point these bytes become untrusted input from disk and
+// every refusal below starts earning its keep.
+//
+// Until then it is not dead weight but the ROUND-TRIP ORACLE for canonical: the
+// property that a decode which succeeds must re-encode byte-identically is what
+// pins canonical to exactly one encoding per key, and one encoding per key is
+// the premise the window-name digest rests on. TestSessionKeyRoundTripIsByte-
+// Identical checks that over constructed keys and FuzzDecodeSessionKey checks it
+// over arbitrary bytes, so the surface is exercised as a proof harness even
+// though production does not call it.
 func decodeSessionKey(b []byte) (prSessionKey, error) {
 	rest := b
 	if len(rest) < len(sessionKeyMagic)+2 {

@@ -252,3 +252,126 @@ func TestAppendLenStringRefusesToWrapItsLengthPrefix(t *testing.T) {
 	}()
 	appendLenString(nil, strings.Repeat("a", maxSessionKeyFieldBytes+1))
 }
+
+// oidWidths is what the DECODER trusts and the width constants are what the
+// CONSTRUCTOR switches on, so the two disagreeing is a real hazard: an
+// algorithm present only in the map is decodable but unconstructible, and one
+// present only in the constants names a tag the decoder refuses. Neither is a
+// compile error, so it is asserted here.
+func TestOidWidthsAgreeWithDeclaredConstants(t *testing.T) {
+	want := map[string]int{
+		oidAlgorithmShort:  oidWidthShort,
+		oidAlgorithmSHA1:   oidWidthSHA1,
+		oidAlgorithmSHA256: oidWidthSHA256,
+	}
+	if len(oidWidths) != len(want) {
+		t.Fatalf("oidWidths has %d algorithms, want exactly %d", len(oidWidths), len(want))
+	}
+	for algorithm, width := range want {
+		got, declared := oidWidths[algorithm]
+		if !declared {
+			t.Errorf("algorithm %q is missing from oidWidths", algorithm)
+			continue
+		}
+		if got != width {
+			t.Errorf("oidWidths[%q] is %d, want the declared constant %d", algorithm, got, width)
+		}
+	}
+}
+
+// The runtime half of the distinctness guarantee. The compile-time half — the
+// constant switch in localSessionKey and the array-literal index assertion
+// beside the constants — cannot see a duplicate introduced through oidWidths
+// alone, and a duplicate width there means one algorithm's oids are silently
+// filed under another's tag. The tag is inside the canonical bytes the window
+// digest covers, so that is a wrong identity, not a wrong label.
+func TestOidWidthsAreDistinct(t *testing.T) {
+	seen := make(map[int]string, len(oidWidths))
+	for algorithm, width := range oidWidths {
+		if other, clash := seen[width]; clash {
+			t.Errorf("algorithms %q and %q both declare width %d; a key of that width cannot name its own algorithm", other, algorithm, width)
+			continue
+		}
+		seen[width] = algorithm
+	}
+}
+
+// Distinctness stated as the behaviour it protects: every declared width must
+// reach its OWN algorithm tag. A first-match switch over colliding widths passes
+// every existing test — the key still builds and still names a window — and
+// fails only here, where the tag itself is read back.
+func TestLocalSessionKeyRoutesEachWidthToItsOwnAlgorithm(t *testing.T) {
+	for algorithm, width := range oidWidths {
+		t.Run(algorithm, func(t *testing.T) {
+			key, err := localSessionKey(strings.Repeat("a", width))
+			if err != nil {
+				t.Fatalf("localSessionKey at width %d: %v", width, err)
+			}
+			if key.algorithm != algorithm {
+				t.Fatalf("a %d-digit oid was filed under algorithm %q, want %q", width, key.algorithm, algorithm)
+			}
+			if key.oid != strings.Repeat("a", width) {
+				t.Fatalf("oid round-tripped as %q", key.oid)
+			}
+		})
+	}
+}
+
+// decodeSessionKey has no production caller yet (forgectl#299 item 1 brings
+// one), so this is what exercises it: the property that makes it worth keeping.
+// A decode that SUCCEEDS must re-encode byte-identically, because exactly one
+// encoding per key is the premise the window-name digest rests on — accept a
+// second spelling of one key and two canonical byte strings name one session,
+// or one byte string names two.
+//
+// Failures are fine and expected; only a success that does not round-trip is a
+// finding. Seeds are built programmatically rather than written as literals so
+// no control or bidi byte is ever authored into this file.
+func FuzzDecodeSessionKey(f *testing.F) {
+	seed := func(k prSessionKey, err error) {
+		if err != nil {
+			f.Fatalf("seed construction: %v", err)
+		}
+		f.Add(k.canonical())
+	}
+	seed(localSessionKey(strings.Repeat("a", oidWidthShort)))
+	seed(localSessionKey(strings.Repeat("b", oidWidthSHA1)))
+	seed(localSessionKey(strings.Repeat("c", oidWidthSHA256)))
+	seed(remoteSessionKey("owner", "repo.name", 42))
+	seed(remoteSessionKey("o", "r", maxPRNumber))
+	f.Add([]byte{})
+	f.Add([]byte(sessionKeyMagic))
+	f.Add([]byte(sessionKeyMagic + "\x02\x01"))
+
+	// Near-misses that decode MUST refuse, seeded explicitly so the oracle has
+	// teeth under a plain `go test` run rather than only under -fuzz. Each is a
+	// second spelling of a key that already has one: normalize instead of
+	// refusing any of them and two byte strings name one session.
+	canonical, err := remoteSessionKey("owner", "repo", 7)
+	if err != nil {
+		f.Fatalf("seed construction: %v", err)
+	}
+	good := canonical.canonical()
+	f.Add(bytes.Replace(good, []byte("owner"), []byte("OWNER"), 1))
+	f.Add(append(append([]byte{}, good...), 0x00))
+
+	f.Fuzz(func(t *testing.T, encoded []byte) {
+		key, err := decodeSessionKey(encoded)
+		if err != nil {
+			return
+		}
+		reencoded := key.canonical()
+		if !bytes.Equal(reencoded, encoded) {
+			t.Fatalf("decode accepted a non-canonical encoding: %q re-encoded to %q", encoded, reencoded)
+		}
+		// A key that decodes must also survive its own re-encoding, or the
+		// oracle above is only checking the first hop of a round trip.
+		again, err := decodeSessionKey(reencoded)
+		if err != nil {
+			t.Fatalf("a key's own canonical bytes failed to decode: %v", err)
+		}
+		if !again.equal(key) {
+			t.Fatalf("re-decoding a canonical encoding changed the identity")
+		}
+	})
+}
