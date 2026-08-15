@@ -310,22 +310,31 @@ func TestOidWidthsAreDistinct(t *testing.T) {
 // persisted key first has to read back. Asserting "accepted if and only if
 // declared" over the whole width range catches either direction.
 func TestLocalSessionKeyAcceptsExactlyTheDeclaredWidths(t *testing.T) {
-	// The bound is a fixed literal, and it carries a residual worth stating
-	// plainly rather than papering over: a constructor-only algorithm declared
-	// ABOVE it escapes this sweep, and nothing else in the suite catches it
-	// either. Deriving the bound from oidWidths does not help — a constructor-only
-	// width is absent from the map by definition, so a map-derived bound cannot
-	// reach it, and today would sweep only to 96 rather than 160. No sweep can
-	// bound a width it was never told about; the hole is irreducible while the
-	// switch and the map are two declarations of one fact, which they are
-	// deliberately (the switch must case on constants for the compiler to enforce
-	// width distinctness — that is the whole of forgectl#300 item 3).
+	// The bound comes from the ENCODING's own hard limit — not from a width that
+	// looks roomy, and not from oidWidths. appendLenString refuses to emit a field
+	// over maxSessionKeyFieldBytes, so every width whose keys can be encoded at all
+	// is at or below it: sweeping to exactly that covers the whole constructible
+	// range by construction, and cannot expire the way "SHA-512 hex is 128, so 160
+	// is roomy" expires the moment someone declares wider.
 	//
-	// What bounds the damage is that the residual is fail-CLOSED: such a key does
-	// not decode, so it is an availability edge at forgectl#299 item 1, never a
-	// mis-identification. 160 clears SHA-512 hex (128) with room, so every width
-	// anyone would plausibly declare is inside it.
-	const sweepTo = 160
+	// Deriving it from oidWidths instead would be strictly worse. A
+	// constructor-only width is absent from the map by definition, so a
+	// map-derived bound is a function of the very declaration such a mutation does
+	// not touch — and today it would land at 96.
+	//
+	// The residual above the bound, stated rather than papered over: a
+	// constructor-only algorithm declared past maxSessionKeyFieldBytes still
+	// escapes this sweep, and nothing else in the suite catches it. The hole is
+	// irreducible while the switch and the map are two declarations of one fact —
+	// which they are deliberately, since the switch must case on constants for the
+	// compiler to enforce width distinctness at all (forgectl#300 item 3). It stays
+	// acceptable because it can never be a MIS-identification: a constructor-only
+	// algorithm cannot occupy a declared width, that being the compile error, so no
+	// existing oid is re-tagged. It is availability only, and loud either way —
+	// above the bound the key never reaches the decoder, because canonical() panics
+	// in appendLenString on the live launch path; at or below it the key encodes and
+	// the decoder refuses it.
+	const sweepTo = maxSessionKeyFieldBytes
 	for width := range sweepTo + 1 {
 		key, err := localSessionKey(strings.Repeat("a", width))
 		wantAlgorithm, isDeclaredWidth := algorithmForWidth(width)
