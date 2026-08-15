@@ -32,7 +32,7 @@ func TestVersionCmd_PrintsRootVersion(t *testing.T) {
 // `version` verb (version.go) and fang's injected `--version` flag must stay
 // byte-identical, since version.go reads cmd.Root().Version rather than
 // duplicating fang's format. Runs both through the real fang.Execute path
-// (not root.Execute directly) using the same fangVersionOptions execCommand
+// (not root.Execute directly) using the same fangOptions execCommand
 // calls — not a hand-rolled copy — so an option added to that wiring later
 // is exercised by this guard too. Each invocation gets a fresh root: fang
 // registers a `man` subcommand every call, so reusing one root across calls
@@ -48,7 +48,7 @@ func TestVersion_VerbMatchesFlagThroughFang(t *testing.T) {
 		root.SetErr(&buf)
 		root.SetArgs([]string{arg})
 
-		err := fang.Execute(context.Background(), root, fangVersionOptions("9.9.9", "abcdef0123456")...)
+		err := fang.Execute(context.Background(), root, fangOptions("9.9.9", "abcdef0123456")...)
 		if err != nil {
 			t.Fatalf("fang.Execute(%q) error = %v", arg, err)
 		}

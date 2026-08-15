@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -29,8 +30,11 @@ func newTmuxPickCmd(client *tmux.Client) *cobra.Command {
 				fmt.Fprintln(out, "no sesh candidates")
 				return nil
 			}
+			// A sesh candidate is a tmux session name or a directory sesh
+			// discovered — neither composed by forgectl, both printable to a
+			// terminal only after neutralizing.
 			for _, n := range names {
-				fmt.Fprintln(out, n)
+				fmt.Fprintln(out, termsafe.SafeLine(n))
 			}
 			return nil
 		},
