@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 
@@ -10,6 +9,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/doctor"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // doctorSkipMark renders a StateSkip check — mirrors launch_doctor.go's
@@ -143,7 +143,7 @@ func writeDoctorJSON(out io.Writer, report doctor.Report) error {
 	for _, c := range report.Checks {
 		j.Checks = append(j.Checks, doctorCheckJSON{Name: c.Name, State: string(c.State), Detail: c.Detail, Hint: c.Hint})
 	}
-	enc := json.NewEncoder(out)
+	enc := termsafe.JSONEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(j)
 }

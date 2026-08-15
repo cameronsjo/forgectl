@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -9,6 +8,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/module"
 	netpkg "github.com/cameronsjo/forgectl/internal/net"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // netModule declares the net extension (ADR-0005): the [net] config section's
@@ -71,7 +71,7 @@ network. Set an internal-only net.probe_host for an internal-network answer.
 			age := time.Since(status.CheckedAt).Round(time.Second)
 
 			if asJSON {
-				enc := json.NewEncoder(out)
+				enc := termsafe.JSONEncoder(out)
 				return enc.Encode(netStatusJSON{
 					Reachable:  status.Reachable,
 					CheckedAt:  status.CheckedAt,

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // prDimStyle dims a whole reviewed row. Convention is a muted foreground, not
@@ -100,7 +100,7 @@ func emitPRsJSON(out io.Writer, prs []pr.PR, store *pr.ReviewedStore) error {
 			Reviewed:  pr.Dimmed(p, store),
 		})
 	}
-	enc := json.NewEncoder(out)
+	enc := termsafe.JSONEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(rows)
 }

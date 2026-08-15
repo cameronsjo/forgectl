@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 
@@ -9,6 +8,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // newBenchStatusCmd builds `forgectl bench status [--json]`. The Claude-callable
@@ -24,7 +24,7 @@ func newBenchStatusCmd(deps module.Deps) *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			report := bench.Status(cmd.Context(), deps.Cfg, deps.Runner, bench.NewHTTPProber())
 			if asJSON {
-				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc := termsafe.JSONEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
 				return enc.Encode(report)
 			}

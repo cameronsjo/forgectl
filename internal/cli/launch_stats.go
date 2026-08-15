@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 
@@ -75,7 +74,7 @@ func newLaunchStatsCmd() *cobra.Command {
 
 func writeUsageReport(out io.Writer, aggregate launch.UsageAggregateV1, asJSON bool) error {
 	if asJSON {
-		encoder := json.NewEncoder(out)
+		encoder := termsafe.JSONEncoder(out)
 		// The stored model string is the operator's own value and stays raw in
 		// the machine contract; only the human report below quotes it.
 		encoder.SetEscapeHTML(false)

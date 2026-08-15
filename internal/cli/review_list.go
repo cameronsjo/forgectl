@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/review"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // runReviewList is the bare `forgectl review` body: aggregate, filter, render.
@@ -105,7 +105,7 @@ func emitReviewJSON(out io.Writer, items []review.Item, store *pr.ReviewedStore)
 			Reviewed:  store.IsReviewedKey(it.Key(), it.UpdatedAt),
 		})
 	}
-	enc := json.NewEncoder(out)
+	enc := termsafe.JSONEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(rows)
 }
