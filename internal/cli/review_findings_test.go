@@ -56,9 +56,14 @@ func TestPrintPlan_RendersUnblessedDefinitionInertly(t *testing.T) {
 // TestPickRepoLabel_IsQuoted covers the interactive twin of
 // projectCandidateLine. A local project's name is a directory basename, so
 // anyone who can create a directory under the projects dir picks those bytes,
-// and the picker is the path an operator actually uses. The label is asserted
-// through the exported DisplayLine the picker feeds to huh, since huh's option
-// list is not constructible headlessly.
+// and the picker is the path an operator actually uses.
+//
+// This asserts the RENDERER only. huh's option list is not inspectable
+// headlessly, so the wiring — that pickRepo still passes its label through this
+// renderer — is asserted separately and structurally by
+// TestPickerLabelsAreBuiltByAnEscapingRenderer. Neither test is sufficient
+// alone: this one passes if the picker stops calling the renderer, and that one
+// passes if the renderer stops escaping.
 func TestPickRepoLabel_IsQuoted(t *testing.T) {
 	for _, tt := range append([]unsafeRune{
 		{name: "ESC", r: 0x1b},
@@ -99,10 +104,14 @@ func TestWrapDocsTokenDescriptorError_QuotesExactlyOnce(t *testing.T) {
 	if err == nil {
 		t.Fatal("a failing read and close must produce an error")
 	}
-	got := err.Error()
-	if want := 1; strings.Count(got, `"/safe/token"`) != 2 {
-		t.Fatalf("want the path quoted exactly once per failure (read + close), got %d in %q", want, got)
+	// Bind the real count into the message. Formatting the WANT into the "got"
+	// slot reports the same number on every failure, so the two cases a reader
+	// most needs told apart — 0 and 3 — read identically.
+	text := err.Error()
+	if got := strings.Count(text, `"/safe/token"`); got != 2 {
+		t.Fatalf("path quoted %d time(s), want exactly once per joined failure (read + close): %q", got, text)
 	}
+	got := text
 	for _, doubled := range []string{`\"`, `""`, `"\"`} {
 		if strings.Contains(got, doubled) {
 			t.Fatalf("path was quoted more than once (%q): %q", doubled, got)
