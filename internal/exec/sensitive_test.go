@@ -9,19 +9,62 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 )
 
-// captureSlog installs a debug-level JSON handler over a buffer as the default
-// logger for the duration of the test and returns the buffer. Debug level
-// matters: the leak this seam exists to close was a slog.Debug call, so a
-// capture at Info would prove nothing.
+// dualHandler fans one record out to two handlers. It exists because the two
+// slog handlers differ exactly where a redaction gap would live: the JSON
+// handler marshals (and so skips unexported fields), while the text handler
+// renders a non-TextMarshaler value with fmt.Sprintf("%+v", v). Production
+// installs the text handler, so a JSON-only capture cannot see the leak this
+// package is built to prevent.
+type dualHandler struct{ a, b slog.Handler }
+
+func (d dualHandler) Enabled(ctx context.Context, l slog.Level) bool {
+	return d.a.Enabled(ctx, l) || d.b.Enabled(ctx, l)
+}
+
+func (d dualHandler) Handle(ctx context.Context, r slog.Record) error {
+	_ = d.a.Handle(ctx, r.Clone())
+	return d.b.Handle(ctx, r)
+}
+
+func (d dualHandler) WithAttrs(as []slog.Attr) slog.Handler {
+	return dualHandler{a: d.a.WithAttrs(as), b: d.b.WithAttrs(as)}
+}
+
+func (d dualHandler) WithGroup(name string) slog.Handler {
+	return dualHandler{a: d.a.WithGroup(name), b: d.b.WithGroup(name)}
+}
+
+// captureSlog installs a debug-level capture — under both handler shapes — as
+// the default logger for the test's duration. Debug level matters: the leak
+// this seam exists to close was a slog.Debug call, so a capture at Info would
+// prove nothing.
 func captureSlog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
+	opts := &slog.HandlerOptions{Level: slog.LevelDebug}
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	slog.SetDefault(slog.New(dualHandler{
+		a: slog.NewJSONHandler(&buf, opts),
+		b: slog.NewTextHandler(&buf, opts),
+	}))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	return &buf
+}
+
+const (
+	pathSentinel  = "SENTINEL-PATH-a1b2c3"
+	arg0Sentinel  = "SENTINEL-ARG0-d4e5f6"
+	arg1Sentinel  = "SENTINEL-ARG1-g7h8i9"
+	arg2Sentinel  = "SENTINEL-ARG2-j1k2l3"
+	envSentinel   = "SENTINEL-ENV-m4n5o6"
+	herdrSentinel = "SENTINEL-HERDR-p7q8r9"
+)
+
+func allSentinels() []string {
+	return []string{pathSentinel, arg0Sentinel, arg1Sentinel, arg2Sentinel, envSentinel, herdrSentinel}
 }
 
 // TestSensitiveCommand_SentinelNeverRendersThroughAnyPath is the load-bearing
@@ -32,16 +75,6 @@ func captureSlog(t *testing.T) *bytes.Buffer {
 // them.
 func TestSensitiveCommand_SentinelNeverRendersThroughAnyPath(t *testing.T) {
 	logs := captureSlog(t)
-
-	const (
-		pathSentinel  = "SENTINEL-PATH-a1b2c3"
-		arg0Sentinel  = "SENTINEL-ARG0-d4e5f6"
-		arg1Sentinel  = "SENTINEL-ARG1-g7h8i9"
-		arg2Sentinel  = "SENTINEL-ARG2-j1k2l3"
-		envSentinel   = "SENTINEL-ENV-m4n5o6"
-		herdrSentinel = "SENTINEL-HERDR-p7q8r9"
-	)
-	sentinels := []string{pathSentinel, arg0Sentinel, arg1Sentinel, arg2Sentinel, envSentinel, herdrSentinel}
 
 	cmd := SensitiveCommand{
 		Kind: KindTmuxCreate,
@@ -69,45 +102,7 @@ func TestSensitiveCommand_SentinelNeverRendersThroughAnyPath(t *testing.T) {
 		t.Fatalf("expected ErrStartFailed, got %v", err)
 	}
 
-	renderings := map[string]string{
-		"err.Error()":             err.Error(),
-		"%v of err":               fmt.Sprintf("%v", err),
-		"%+v of err":              fmt.Sprintf("%+v", err),
-		"%#v of err":              fmt.Sprintf("%#v", err),
-		"%q of err":               fmt.Sprintf("%q", err),
-		"%s of err":               fmt.Sprintf("%s", err),
-		"errors.Unwrap(err)":      fmt.Sprintf("%v", errors.Unwrap(err)),
-		"%v of result":            fmt.Sprintf("%v", res),
-		"%+v of result":           fmt.Sprintf("%+v", res),
-		"%#v of result":           fmt.Sprintf("%#v", res),
-		"%v of command":           fmt.Sprintf("%v", cmd),
-		"%+v of command":          fmt.Sprintf("%+v", cmd),
-		"%#v of command":          fmt.Sprintf("%#v", cmd),
-		"%q of command":           fmt.Sprintf("%q", cmd),
-		"%v of command args":      fmt.Sprintf("%v", cmd.Args),
-		"%+v of command env":      fmt.Sprintf("%+v", cmd.Env),
-		"%#v of command path":     fmt.Sprintf("%#v", cmd.Path),
-		"json.Marshal(err)":       mustMarshal(t, err),
-		"json.Marshal(result)":    mustMarshal(t, res),
-		"json.Marshal(command)":   mustMarshal(t, cmd),
-		"json.Marshal(args)":      mustMarshal(t, cmd.Args),
-		"json.Marshal(env)":       mustMarshal(t, cmd.Env),
-		"slog of err":             logLine(t, "err", err),
-		"slog of result":          logLine(t, "res", res),
-		"slog of command":         logLine(t, "cmd", cmd),
-		"slog of path":            logLine(t, "path", cmd.Path),
-		"slog of args":            logLine(t, "args", cmd.Args),
-		"slog of env":             logLine(t, "env", cmd.Env),
-		"captured runner logging": logs.String(),
-	}
-
-	for name, rendered := range renderings {
-		for _, s := range sentinels {
-			if strings.Contains(rendered, s) {
-				t.Errorf("%s leaked sentinel %s: %s", name, s, rendered)
-			}
-		}
-	}
+	assertNoSentinel(t, "start-failure", renderEveryWay(t, cmd, res, err), logs.String())
 
 	// The captured logging must be non-empty, or "no sentinel appeared" would
 	// be satisfied by the runner having logged nothing at all.
@@ -119,17 +114,115 @@ func TestSensitiveCommand_SentinelNeverRendersThroughAnyPath(t *testing.T) {
 	}
 }
 
+// TestSensitiveCommand_SentinelNeverRendersFromARunThatProduced covers what the
+// start-failure case above cannot: the paths where the process actually ran and
+// the runner logs a populated result. A start failure never reaches those
+// slog.Error calls, so without this the coverage would be narrower than the
+// test name above suggests.
+func TestSensitiveCommand_SentinelNeverRendersFromARunThatProduced(t *testing.T) {
+	logs := captureSlog(t)
+	runner, self := helperRunner(t, "flood:400000", defaultRetireBound)
+
+	cmd := SensitiveCommand{
+		Kind:      KindCmuxSnapshot,
+		Path:      Secret(self),
+		Args:      []Arg{Opaque(arg0Sentinel), Opaque(arg1Sentinel)},
+		Env:       []EnvMutation{ReplaceCmuxSocketPath(envSentinel)},
+		StdoutCap: 4096,
+		StderrCap: 4096,
+	}
+
+	res, err := runner.RunSensitive(context.Background(), cmd)
+	if !errors.Is(err, ErrOutputLimit) {
+		t.Fatalf("err = %v, want ErrOutputLimit", err)
+	}
+	if res.Stdout.Len() == 0 {
+		t.Fatal("no output captured; the rendering assertions would be vacuous")
+	}
+
+	// The captured stdout is the helper's filler bytes, never a sentinel — the
+	// sentinels are in the path, argv, and environment only.
+	assertNoSentinel(t, "overflow", renderEveryWay(t, cmd, res, err), logs.String())
+	if !strings.Contains(logs.String(), "output_limit") {
+		t.Errorf("expected the closed outcome in the logs, got: %s", logs.String())
+	}
+}
+
+func renderEveryWay(t *testing.T, cmd SensitiveCommand, res SensitiveResult, err error) map[string]string {
+	t.Helper()
+	return map[string]string{
+		"err.Error()":           err.Error(),
+		"%v of err":             fmt.Sprintf("%v", err),
+		"%+v of err":            fmt.Sprintf("%+v", err),
+		"%#v of err":            fmt.Sprintf("%#v", err),
+		"%q of err":             fmt.Sprintf("%q", err),
+		"%s of err":             fmt.Sprintf("%s", err),
+		"errors.Unwrap(err)":    fmt.Sprintf("%v", errors.Unwrap(err)),
+		"%v of result":          fmt.Sprintf("%v", res),
+		"%+v of result":         fmt.Sprintf("%+v", res),
+		"%#v of result":         fmt.Sprintf("%#v", res),
+		"%v of command":         fmt.Sprintf("%v", cmd),
+		"%+v of command":        fmt.Sprintf("%+v", cmd),
+		"%#v of command":        fmt.Sprintf("%#v", cmd),
+		"%q of command":         fmt.Sprintf("%q", cmd),
+		"%v of command args":    fmt.Sprintf("%v", cmd.Args),
+		"%+v of command env":    fmt.Sprintf("%+v", cmd.Env),
+		"%#v of command path":   fmt.Sprintf("%#v", cmd.Path),
+		"embedded in a struct":  fmt.Sprintf("%+v", newContainmentProbe(cmd, res)),
+		"embedded, %#v":         fmt.Sprintf("%#v", newContainmentProbe(cmd, res)),
+		"embedded, %v":          fmt.Sprintf("%v", newContainmentProbe(cmd, res)),
+		"json.Marshal(err)":     mustMarshal(t, err),
+		"json.Marshal(result)":  mustMarshal(t, res),
+		"json.Marshal(command)": mustMarshal(t, cmd),
+		"json.Marshal(args)":    mustMarshal(t, cmd.Args),
+		"json.Marshal(env)":     mustMarshal(t, cmd.Env),
+		"slog of err":           logLine(t, "err", err),
+		"slog of result":        logLine(t, "res", res),
+		"slog of command":       logLine(t, "cmd", cmd),
+		"slog of path":          logLine(t, "path", cmd.Path),
+		"slog of args":          logLine(t, "args", cmd.Args),
+		"slog of env":           logLine(t, "env", cmd.Env),
+		"slog of the struct":    logLine(t, "probe", newContainmentProbe(cmd, res)),
+	}
+}
+
+// containmentProbe is the shape an adapter will actually have: opaque values
+// held in *unexported* fields. fmt consults a value's Formatter/Stringer only
+// when reflect.Value.CanInterface() is true, which is false through an
+// unexported field — so a string payload would be printed verbatim here even
+// though every direct rendering of the same type is redacted. This probe is
+// what pins the closure containment; without it the guarantee is assumed.
+type containmentProbe struct {
+	path   SecretArg
+	args   []Arg
+	env    []EnvMutation
+	stdout BoundedOutput
+	label  string
+}
+
+func newContainmentProbe(cmd SensitiveCommand, res SensitiveResult) containmentProbe {
+	return containmentProbe{
+		path: cmd.Path, args: cmd.Args, env: cmd.Env, stdout: res.Stdout, label: "adapter",
+	}
+}
+
+func assertNoSentinel(t *testing.T, phase string, renderings map[string]string, logs string) {
+	t.Helper()
+	renderings["captured runner logging"] = logs
+	for name, rendered := range renderings {
+		for _, s := range allSentinels() {
+			if strings.Contains(rendered, s) {
+				t.Errorf("[%s] %s leaked sentinel %s: %s", phase, name, s, rendered)
+			}
+		}
+	}
+}
+
 // TestSensitiveCommand_RevealReachesExecCmd is the mirror of the leak test.
 // Without it, a seam that dropped every value on the floor would pass the
-// assertion above. This is the only test anywhere that sees a revealed value,
+// assertions above. This is the only test anywhere that sees a revealed value,
 // and it lives in internal/exec because no other package can reach the seam.
 func TestSensitiveCommand_RevealReachesExecCmd(t *testing.T) {
-	const (
-		pathSentinel = "SENTINEL-PATH-a1b2c3"
-		arg0Sentinel = "SENTINEL-ARG0-d4e5f6"
-		arg1Sentinel = "SENTINEL-ARG1-g7h8i9"
-		envSentinel  = "SENTINEL-ENV-m4n5o6"
-	)
 	path := "/nonexistent/" + pathSentinel
 
 	runner := &OSSensitiveRunner{env: []string{"PATH=/usr/bin", "CMUX_SOCKET_PATH=stale", "TMUX=/tmp/old,1,2"}}
@@ -191,6 +284,7 @@ func TestOpaqueValues_RedactUnderEveryRenderingVerb(t *testing.T) {
 			Stdout: BoundedOutputForTest([]byte(secret), true),
 			Stderr: BoundedOutputForTest([]byte(secret), false),
 		},
+		"error": newSensitiveError(KindCmuxCreate, OutcomeExit, SensitiveResult{}, "process reported a nonzero status"),
 	}
 
 	verbs := []string{"%v", "%+v", "%#v", "%s", "%q", "%d", "%x"}
@@ -233,7 +327,7 @@ func TestFixedArg_RejectsUnsafeConstants(t *testing.T) {
 	// The same values are legitimate as opaque dynamic values: a real path or
 	// prompt may contain anything, which is why they are never rendered.
 	for name, value := range cases {
-		if a := Opaque(value); !a.set || !a.Secret() {
+		if a := Opaque(value); !a.set() || !a.Secret() {
 			t.Errorf("Opaque(%s) should accept any payload", name)
 		}
 	}
@@ -262,8 +356,12 @@ func TestSensitiveCommand_ValidateRefusesBeforeStart(t *testing.T) {
 		"out-of-range kind":    func(c *SensitiveCommand) { c.Kind = CommandKind(200) },
 		"unset path":           func(c *SensitiveCommand) { c.Path = SecretArg{} },
 		"empty path":           func(c *SensitiveCommand) { c.Path = Secret("") },
+		"relative path":        func(c *SensitiveCommand) { c.Path = Secret("true") },
+		"dot-relative path":    func(c *SensitiveCommand) { c.Path = Secret("./true") },
 		"unconstructed arg":    func(c *SensitiveCommand) { c.Args = []Arg{MustFixed("-V"), {}} },
+		"dash-leading opaque":  func(c *SensitiveCommand) { c.Args = []Arg{Opaque("-rf")} },
 		"zero env mutation":    func(c *SensitiveCommand) { c.Env = []EnvMutation{{}} },
+		"empty replace value":  func(c *SensitiveCommand) { c.Env = []EnvMutation{ReplaceCmuxSocketPath("")} },
 		"duplicate env key":    func(c *SensitiveCommand) { c.Env = []EnvMutation{SetCmuxQuiet(), SetCmuxQuiet()} },
 		"zero stdout cap":      func(c *SensitiveCommand) { c.StdoutCap = 0 },
 		"negative stdout cap":  func(c *SensitiveCommand) { c.StdoutCap = -1 },
@@ -288,9 +386,21 @@ func TestSensitiveCommand_ValidateRefusesBeforeStart(t *testing.T) {
 		if !errors.As(err, &se) || se.Outcome != OutcomeInvalid {
 			t.Errorf("%s did not classify as OutcomeInvalid: %v", name, err)
 		}
+		if res.ExitCode != -1 {
+			t.Errorf("%s reported ExitCode %d; a command that never ran has no exit status", name, res.ExitCode)
+		}
 		if res.Stdout.Len() != 0 || res.Stderr.Len() != 0 {
 			t.Errorf("%s produced output despite refusing before start", name)
 		}
+	}
+
+	// A dash-leading dynamic value is legitimate once an end-of-options
+	// separator precedes it — the refusal above is a fail-closed default with
+	// a returnable escape, not a wall.
+	escaped := base()
+	escaped.Args = []Arg{MustFixed("send-keys"), EndOfOptions(), Opaque("-rf")}
+	if err := escaped.validate(); err != nil {
+		t.Errorf("an end-of-options separator did not release the dash refusal: %v", err)
 	}
 
 	// A cap at the ceiling, and one narrower than it, are both legitimate.
@@ -303,9 +413,37 @@ func TestSensitiveCommand_ValidateRefusesBeforeStart(t *testing.T) {
 	}
 }
 
+// TestRunSensitive_RefusesAnAlreadyDoneContextWithoutForking pins that an
+// expired deadline does not buy a fork/exec. The path is a real binary, so the
+// only thing stopping it is the context check.
+func TestRunSensitive_RefusesAnAlreadyDoneContextWithoutForking(t *testing.T) {
+	runner, self := helperRunner(t, "ok:should-never-run", defaultRetireBound)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-ctx.Done()
+
+	res, err := runner.RunSensitive(ctx, helperCommand(KindTmuxProbe, self, 1024))
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("err = %v, want ErrTimeout", err)
+	}
+	if res.Stdout.Len() != 0 {
+		t.Errorf("the process ran: captured %d bytes", res.Stdout.Len())
+	}
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1 for a command that never ran", res.ExitCode)
+	}
+
+	canceledCtx, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	if _, err := runner.RunSensitive(canceledCtx, helperCommand(KindTmuxProbe, self, 1024)); !errors.Is(err, ErrCanceled) {
+		t.Errorf("err = %v, want ErrCanceled", err)
+	}
+}
+
 // TestOutcomes_RemainDistinguishable pins that each failure class unwraps to
-// its own sentinel — a caller deciding whether to retry needs a timeout and an
-// output-limit kill to be different answers.
+// its own sentinel — a caller deciding whether to retry needs a timeout, an
+// output-limit kill, and a cut-off stream to be different answers.
 func TestOutcomes_RemainDistinguishable(t *testing.T) {
 	pairs := []struct {
 		outcome  Outcome
@@ -317,6 +455,7 @@ func TestOutcomes_RemainDistinguishable(t *testing.T) {
 		{OutcomeTimeout, ErrTimeout},
 		{OutcomeCanceled, ErrCanceled},
 		{OutcomeOutputLimit, ErrOutputLimit},
+		{OutcomeTruncated, ErrTruncated},
 	}
 	for _, p := range pairs {
 		err := newSensitiveError(KindTmuxProbe, p.outcome, SensitiveResult{}, "")
@@ -335,8 +474,8 @@ func TestOutcomes_RemainDistinguishable(t *testing.T) {
 }
 
 // TestBoundedOutput_CopyIsFreshAndCarriesCompleteness proves a parser cannot
-// mutate the runner's buffer and cannot receive truncated bytes without also
-// receiving the flag that says they are truncated.
+// mutate the runner's buffer and cannot receive partial bytes without also
+// receiving the flag that says they are partial — for either cause.
 func TestBoundedOutput_CopyIsFreshAndCarriesCompleteness(t *testing.T) {
 	bo := BoundedOutputForTest([]byte("abc"), true)
 	first, complete := bo.CopyBytesForParse()
@@ -349,31 +488,55 @@ func TestBoundedOutput_CopyIsFreshAndCarriesCompleteness(t *testing.T) {
 		t.Errorf("mutating the copy changed the source: %q", second)
 	}
 
-	truncated := BoundedOutputForTest([]byte("abc"), false)
-	if _, complete := truncated.CopyBytesForParse(); complete {
+	overflowed := BoundedOutputForTest([]byte("abc"), false)
+	if _, complete := overflowed.CopyBytesForParse(); complete {
 		t.Error("overflow output reported itself complete; it must never pass as a whole schema")
 	}
-	if truncated.Complete() {
+	if overflowed.Complete() {
 		t.Error("Complete() disagreed with CopyBytesForParse")
+	}
+
+	// A force-retired stream never hit its cap, so overflow is false — and it
+	// must still report incomplete. Collapsing the two causes into one bool is
+	// exactly how a cut-off prefix would reach a parser marked whole.
+	cutOff := BoundedOutputForTest([]byte("abc"), true)
+	cutOff.forced = true
+	if cutOff.Complete() {
+		t.Error("a force-retired stream reported itself complete")
+	}
+	if _, complete := cutOff.CopyBytesForParse(); complete {
+		t.Error("force-retired bytes were offered to a parser as a complete schema")
+	}
+
+	var zero BoundedOutput
+	if zero.Len() != 0 {
+		t.Errorf("zero-value Len = %d, want 0", zero.Len())
+	}
+	if data, complete := zero.CopyBytesForParse(); len(data) != 0 || !complete {
+		t.Errorf("zero-value CopyBytesForParse = %q, %v", data, complete)
 	}
 }
 
 // TestFakeSensitiveRunner_ComparesOpaqueValues shows the intended adapter test
-// shape: build the expected command with the same constructors and compare,
-// with no path that turns a recorded argument back into a string.
+// shape: build the expected command with the same constructors and compare
+// with Equal, with no path that turns a recorded argument back into a string.
 func TestFakeSensitiveRunner_ComparesOpaqueValues(t *testing.T) {
 	fake := &FakeSensitiveRunner{}
-	want := SensitiveCommand{
+	args := []Arg{MustFixed("pane"), MustFixed("run"), Opaque("bootstrap-value")}
+	sent := SensitiveCommand{
 		Kind:      KindHerdrCreate,
 		Path:      Secret("/opt/homebrew/bin/herdr"),
-		Args:      []Arg{MustFixed("pane"), MustFixed("run"), Opaque("bootstrap-value")},
+		Args:      args,
 		Env:       []EnvMutation{ReplaceHerdrConfigPath("/tmp/herdr.toml")},
 		StdoutCap: 4096,
 		StderrCap: 4096,
 	}
-	if _, err := fake.RunSensitive(context.Background(), want); err != nil {
+	if _, err := fake.RunSensitive(context.Background(), sent); err != nil {
 		t.Fatalf("fake returned an error: %v", err)
 	}
+
+	// Reusing the backing array must not rewrite the recorded history.
+	args[2] = Opaque("a-later-call-value")
 
 	got, ok := fake.Last()
 	if !ok {
@@ -387,24 +550,21 @@ func TestFakeSensitiveRunner_ComparesOpaqueValues(t *testing.T) {
 		StdoutCap: 4096,
 		StderrCap: 4096,
 	}
-	if got.Kind != expected.Kind || got.Path != expected.Path {
-		t.Errorf("recorded kind/path did not match the independently built expectation")
-	}
-	for i := range expected.Args {
-		if got.Args[i] != expected.Args[i] {
-			t.Errorf("recorded arg %d did not match the independently built expectation", i)
-		}
-	}
-	for i := range expected.Env {
-		if got.Env[i] != expected.Env[i] {
-			t.Errorf("recorded env %d did not match the independently built expectation", i)
-		}
+	if !got.Equal(expected) {
+		t.Error("the recorded call did not match the independently built expectation")
 	}
 
 	// A wrong value must actually fail the comparison, or the equality above
 	// would be proving nothing.
-	if got.Args[2] == Opaque("some-other-value") {
+	wrong := expected
+	wrong.Args = []Arg{MustFixed("pane"), MustFixed("run"), Opaque("some-other-value")}
+	if got.Equal(wrong) {
 		t.Error("comparison treated different opaque values as equal")
+	}
+	// A fixed and an opaque argument with the same text are not the same
+	// argument: the classification is part of the identity.
+	if Opaque("run").Equal(MustFixed("run")) {
+		t.Error("an opaque value compared equal to a fixed constant")
 	}
 }
 
@@ -420,10 +580,8 @@ func mustMarshal(t *testing.T, v any) string {
 func logLine(t *testing.T, key string, v any) string {
 	t.Helper()
 	var buf bytes.Buffer
-	slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})).
+	opts := &slog.HandlerOptions{Level: slog.LevelDebug}
+	slog.New(dualHandler{a: slog.NewJSONHandler(&buf, opts), b: slog.NewTextHandler(&buf, opts)}).
 		Info("probe", key, v)
-	var text bytes.Buffer
-	slog.New(slog.NewTextHandler(&text, &slog.HandlerOptions{Level: slog.LevelDebug})).
-		Info("probe", key, v)
-	return buf.String() + text.String()
+	return buf.String()
 }

@@ -31,10 +31,10 @@ func helperMain(mode string) int {
 	verb, arg, _ := strings.Cut(mode, ":")
 	switch verb {
 	case "ok":
-		_, _ = fmt.Fprint(os.Stdout, arg)
+		fmt.Fprint(os.Stdout, arg)
 		return 0
 	case "fail":
-		_, _ = fmt.Fprint(os.Stderr, arg)
+		fmt.Fprint(os.Stderr, arg)
 		return 3
 	case "flood":
 		return floodTo(os.Stdout, arg)
@@ -42,7 +42,7 @@ func helperMain(mode string) int {
 		if code := floodTo(os.Stderr, arg); code != 0 {
 			return code
 		}
-		_, _ = fmt.Fprint(os.Stdout, "stdout-still-flowing")
+		fmt.Fprint(os.Stdout, "stdout-still-flowing")
 		return 0
 	case "sleep":
 		d, err := time.ParseDuration(arg)
@@ -56,9 +56,9 @@ func helperMain(mode string) int {
 	case "env":
 		for _, key := range strings.Split(arg, ",") {
 			if v, ok := os.LookupEnv(key); ok {
-				_, _ = fmt.Fprintf(os.Stdout, "%s=%s\n", key, v)
+				fmt.Fprintf(os.Stdout, "%s=%s\n", key, v)
 			} else {
-				_, _ = fmt.Fprintf(os.Stdout, "%s=<unset>\n", key)
+				fmt.Fprintf(os.Stdout, "%s=<unset>\n", key)
 			}
 		}
 		return 0
@@ -96,7 +96,7 @@ func spawnHolder(arg string) int {
 	if err := child.Start(); err != nil {
 		return 96
 	}
-	_, _ = fmt.Fprint(os.Stdout, "parent-done")
+	fmt.Fprint(os.Stdout, "parent-done")
 	return 0
 }
 
@@ -184,7 +184,7 @@ func TestRunSensitive_StdoutOverflowKillsAndMarksIncomplete(t *testing.T) {
 	if _, complete := res.Stdout.CopyBytesForParse(); complete {
 		t.Error("overflow bytes were offered to a parser as a complete schema")
 	}
-	if elapsed > 10*time.Second {
+	if elapsed > 3*time.Second {
 		t.Errorf("overflow took %v; the runner should kill rather than drain", elapsed)
 	}
 }
@@ -234,7 +234,7 @@ func TestRunSensitive_TimeoutKillsAndClassifies(t *testing.T) {
 	if errors.Is(err, ErrCanceled) {
 		t.Error("a deadline was reported as a cancellation; the classes must stay distinct")
 	}
-	if elapsed > 10*time.Second {
+	if elapsed > 3*time.Second {
 		t.Errorf("timeout returned after %v; the process was not killed and reaped promptly", elapsed)
 	}
 }
@@ -257,7 +257,7 @@ func TestRunSensitive_CancellationKillsAndClassifies(t *testing.T) {
 	if errors.Is(err, ErrTimeout) {
 		t.Error("a cancellation was reported as a timeout; the classes must stay distinct")
 	}
-	if elapsed > 10*time.Second {
+	if elapsed > 3*time.Second {
 		t.Errorf("cancellation returned after %v", elapsed)
 	}
 }
@@ -274,16 +274,33 @@ func TestRunSensitive_ReturnsWithinBoundWhenDescendantHoldsThePipe(t *testing.T)
 	res, err := runner.RunSensitive(context.Background(), helperCommand(KindTmuxCreate, self, 4096))
 	elapsed := time.Since(start)
 
-	if err != nil {
-		t.Fatalf("RunSensitive: %v", err)
+	// The immediate CLI exited 0, but a descendant held the pipe past the
+	// bound, so the stream is a prefix. A force-closed Read returns
+	// os.ErrClosed rather than io.EOF, so without an explicit signal this
+	// would be indistinguishable from a complete stream — and a parser would
+	// receive truncated bytes marked whole.
+	if !errors.Is(err, ErrTruncated) {
+		t.Fatalf("err = %v, want ErrTruncated", err)
 	}
-	if elapsed > 10*time.Second {
+	if errors.Is(err, ErrOutputLimit) {
+		t.Error("a retirement-bound truncation was reported as a cap hit; no cap was reached")
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("ExitCode = %d; the immediate CLI exited cleanly", res.ExitCode)
+	}
+	if res.Stdout.Complete() {
+		t.Error("a force-retired stream reported itself complete")
+	}
+	if elapsed > 3*time.Second {
 		t.Fatalf("returned after %v; the descendant's inherited pipe was never retired", elapsed)
 	}
 	if elapsed < retire {
 		t.Errorf("returned after %v, before the %v retirement bound; the bound is not being applied", elapsed, retire)
 	}
-	data, _ := res.Stdout.CopyBytesForParse()
+	data, complete := res.Stdout.CopyBytesForParse()
+	if complete {
+		t.Error("CopyBytesForParse offered a force-retired prefix as a complete schema")
+	}
 	if !strings.Contains(string(data), "parent-done") {
 		t.Errorf("stdout = %q; what the immediate child wrote before exiting must still be captured", data)
 	}

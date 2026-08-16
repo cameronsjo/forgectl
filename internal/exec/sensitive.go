@@ -1,9 +1,22 @@
 // Sensitive execution seam. The ordinary Runner logs its argv at debug level
-// and retains it on *CommandError, which is correct for tmux/sesh/brew
+// and retains it on *CommandError, which is correct for tmux, sesh, and brew
 // plumbing and wrong for anything carrying a path, a prompt, a socket, or a
 // nonce. This file is the other seam: values go in opaque, are revealed once
 // immediately before they fill exec.Cmd, and nothing the runner returns or
 // logs can render them back out.
+//
+// # What this seam does not cover
+//
+// An argv is world-readable to the same user for the lifetime of the process
+// (`ps`, /proc). This seam closes the log-file and error-string sinks, which
+// is where a prompt or a nonce becomes a durable artifact — it cannot close
+// the process table. Do not read Opaque as "safe for a true secret such as an
+// API token"; read it as "will not be written down".
+//
+// Killing is process-scoped, not process-group-scoped, and deliberately so:
+// for tmux and cmux the surviving server is the point of the call. A killed
+// command's descendants keep running, and keep their own argv in the process
+// table; the runner bounds the *call*, not the descendant's lifetime.
 package exec
 
 import (
@@ -12,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -116,17 +130,27 @@ func writeRedacted(f fmt.State, verb rune) {
 
 func redactedJSON() ([]byte, error) { return []byte(strconv.Quote(Redacted)), nil }
 
-// SecretArg is an opaque command path or environment value. Its payload lives
-// in an unexported field with no exported accessor: only this package's
-// production runner unwraps it, immediately before populating exec.Cmd.
+// SecretArg is an opaque command path or environment value.
+//
+// The payload is held in a closure, not a string field, and that is the whole
+// containment mechanism rather than a stylistic choice. fmt consults a value's
+// Formatter, Stringer, or GoStringer only when reflect.Value.CanInterface()
+// reports true, which is false for anything reached through an *unexported*
+// field. So a plain string payload here would be printed verbatim by %v, %+v,
+// and %#v of any struct that holds this type in an unexported field — the
+// natural shape for an adapter client — and slog's TextHandler, which
+// production installs, renders a non-TextMarshaler value with exactly
+// fmt.Sprintf("%+v", v). A func value prints as an address under every verb at
+// every depth, so reflection has nothing to reach.
+//
+// The cost is that this type is no longer comparable with ==; use Equal.
 type SecretArg struct {
-	payload string
-	set     bool
+	reveal func() string
 }
 
 // Secret wraps a dynamic value — a path, a socket, a nonce, a prompt — so it
 // can travel through adapters without any of them being able to render it.
-func Secret(v string) SecretArg { return SecretArg{payload: v, set: true} }
+func Secret(v string) SecretArg { return SecretArg{reveal: func() string { return v }} }
 
 func (SecretArg) String() string                { return Redacted }
 func (SecretArg) GoString() string              { return Redacted }
@@ -135,19 +159,42 @@ func (SecretArg) LogValue() slog.Value          { return slog.StringValue(Redact
 func (SecretArg) MarshalJSON() ([]byte, error)  { return redactedJSON() }
 func (SecretArg) MarshalText() ([]byte, error)  { return []byte(Redacted), nil }
 
-func (s SecretArg) reveal() string { return s.payload }
-func (s SecretArg) present() bool  { return s.set && s.payload != "" }
+// Equal compares two opaque values without revealing either. It replaces ==,
+// which the closure payload makes unavailable. Note this is a confirmation
+// oracle by construction — a caller who guesses a value can confirm it — which
+// is the same trade == offered and is what makes adapter fakes assertable.
+func (s SecretArg) Equal(other SecretArg) bool {
+	if s.reveal == nil || other.reveal == nil {
+		return s.reveal == nil && other.reveal == nil
+	}
+	return s.reveal() == other.reveal()
+}
 
-// Arg is one argv element. Two constructors distinguish a fixed backend
-// constant from an opaque dynamic value: the constant is validated at
-// construction (it can never legitimately contain a control character or run
-// to kilobytes), the dynamic value is accepted as-is because a real path or
-// prompt may contain anything. Both render redacted — the runner logs argument
-// counts, never argument text, so there is no rendering difference to exploit.
+func (s SecretArg) set() bool { return s.reveal != nil }
+
+func (s SecretArg) present() bool { return s.reveal != nil && s.reveal() != "" }
+
+// argKind separates the three argv element classes the seam recognizes.
+type argKind uint8
+
+const (
+	argUnset argKind = iota
+	// argFixed is a backend constant, validated at construction.
+	argFixed
+	// argOpaque is a dynamic value, accepted as-is because a real path or
+	// prompt may contain anything.
+	argOpaque
+	// argEndOfOptions is the literal "--" separator.
+	argEndOfOptions
+)
+
+// Arg is one argv element. Its payload is a closure for the same reason
+// SecretArg's is; see that type's comment. Both fixed and opaque arguments
+// render redacted — the runner logs argument counts, never argument text, so
+// there is no rendering difference for a reader to exploit.
 type Arg struct {
-	payload string
-	secret  bool
-	set     bool
+	reveal func() string
+	kind   argKind
 }
 
 // Fixed builds an argv element from a backend constant such as "new-session"
@@ -167,7 +214,7 @@ func Fixed(v string) (Arg, error) {
 			return Arg{}, fmt.Errorf("%w: fixed argument contains a control character", ErrInvalidCommand)
 		}
 	}
-	return Arg{payload: v, set: true}, nil
+	return Arg{reveal: func() string { return v }, kind: argFixed}, nil
 }
 
 // MustFixed is Fixed for package-level constants whose validity is a property
@@ -184,7 +231,18 @@ func MustFixed(v string) Arg {
 // Opaque builds an argv element from a dynamic value: a cwd, a session name, a
 // socket path, a ref, a recovery tag, a bootstrap command. Every dynamic value
 // reaching a sensitive argv goes through here.
-func Opaque(v string) Arg { return Arg{payload: v, secret: true, set: true} }
+//
+// A dynamic value beginning with "-" is an operand the backend would parse as
+// a flag, so validate refuses it unless an EndOfOptions separator precedes it.
+// That check lives in the seam rather than in each adapter because the seam's
+// own redaction is what would make the resulting argv hard to diagnose.
+func Opaque(v string) Arg { return Arg{reveal: func() string { return v }, kind: argOpaque} }
+
+// EndOfOptions is the literal "--" separator. Every opaque argument after it
+// is passed as an operand no matter what it begins with.
+func EndOfOptions() Arg {
+	return Arg{reveal: func() string { return "--" }, kind: argEndOfOptions}
+}
 
 func (Arg) String() string                { return Redacted }
 func (Arg) GoString() string              { return Redacted }
@@ -193,12 +251,23 @@ func (Arg) LogValue() slog.Value          { return slog.StringValue(Redacted) }
 func (Arg) MarshalJSON() ([]byte, error)  { return redactedJSON() }
 func (Arg) MarshalText() ([]byte, error)  { return []byte(Redacted), nil }
 
-func (a Arg) reveal() string { return a.payload }
+// Equal compares two arguments without revealing either; see SecretArg.Equal.
+func (a Arg) Equal(other Arg) bool {
+	if a.kind != other.kind {
+		return false
+	}
+	if a.reveal == nil || other.reveal == nil {
+		return a.reveal == nil && other.reveal == nil
+	}
+	return a.reveal() == other.reveal()
+}
 
 // Secret reports whether this argument was built from a dynamic value rather
 // than a validated backend constant. It exposes the classification, never the
-// payload — an adapter fake uses it to assert what a caller passed.
-func (a Arg) Secret() bool { return a.secret }
+// payload.
+func (a Arg) Secret() bool { return a.kind == argOpaque }
+
+func (a Arg) set() bool { return a.reveal != nil && a.kind != argUnset }
 
 // Environment keys the seam is allowed to touch. There is no constructor that
 // takes a key, so an unknown key is unrepresentable rather than rejected.
@@ -258,12 +327,21 @@ func (EnvMutation) LogValue() slog.Value          { return slog.StringValue(Reda
 func (EnvMutation) MarshalJSON() ([]byte, error)  { return redactedJSON() }
 func (EnvMutation) MarshalText() ([]byte, error)  { return []byte(Redacted), nil }
 
+// Equal compares two mutations without revealing either value.
+func (m EnvMutation) Equal(other EnvMutation) bool {
+	return m.key == other.key && m.op == other.op && m.value.Equal(other.value)
+}
+
+// valid requires a replacement value to be non-empty, not merely present. Most
+// CLIs treat an empty environment value as unset, so an empty pin would
+// silently reopen the auto-discovery window the mutation exists to close —
+// while looking like a successful pin in logs that record only the count.
 func (m EnvMutation) valid() bool {
 	switch m.op {
 	case envOpReplace:
-		return m.key != "" && m.value.set
+		return m.key != "" && m.value.present()
 	case envOpUnset:
-		return m.key != "" && !m.value.set
+		return m.key != "" && !m.value.set()
 	case envOpUnspecified:
 		return false
 	default:
@@ -296,8 +374,7 @@ func (c SensitiveCommand) String() string {
 func (c SensitiveCommand) GoString() string { return c.String() }
 
 // Format redacts the aggregate under every verb. Without it, %#v would reach
-// through the struct and print each field's unexported payload by reflection,
-// which is exactly the leak the element types close individually.
+// through the struct and print each field by reflection.
 func (c SensitiveCommand) Format(f fmt.State, verb rune) {
 	if verb == 'q' {
 		_, _ = io.WriteString(f, strconv.Quote(c.String()))
@@ -322,29 +399,68 @@ func (c SensitiveCommand) MarshalJSON() ([]byte, error) {
 
 func (c SensitiveCommand) MarshalText() ([]byte, error) { return []byte(c.String()), nil }
 
-// validate refuses before process start. Every message here is static text: a
-// validation failure must not become the rendering path that reveals what was
-// wrong with the value.
-func (c SensitiveCommand) validate() error {
-	if !c.Kind.Valid() {
-		return fmt.Errorf("%w: command kind is not a known operation", ErrInvalidCommand)
+// Equal compares two commands without revealing any value — the assertion an
+// adapter test makes against a fake's recorded call.
+func (c SensitiveCommand) Equal(other SensitiveCommand) bool {
+	if c.Kind != other.Kind || c.StdoutCap != other.StdoutCap || c.StderrCap != other.StderrCap {
+		return false
 	}
-	if !c.Path.present() {
-		return fmt.Errorf("%w: command path is empty", ErrInvalidCommand)
+	if !c.Path.Equal(other.Path) || len(c.Args) != len(other.Args) || len(c.Env) != len(other.Env) {
+		return false
 	}
 	for i := range c.Args {
-		if !c.Args[i].set {
-			return fmt.Errorf("%w: argument %d was never constructed", ErrInvalidCommand, i)
+		if !c.Args[i].Equal(other.Args[i]) {
+			return false
+		}
+	}
+	for i := range c.Env {
+		if !c.Env[i].Equal(other.Env[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// validate refuses before process start. Every message here is static text: a
+// validation failure must not become the rendering path that reveals what was
+// wrong with the value. It reveals the path only to test filepath.IsAbs, and
+// the argv only to test a leading dash; neither result reaches a message.
+func (c SensitiveCommand) validate() error {
+	if !c.Kind.Valid() {
+		return errors.New("command kind is not a known operation")
+	}
+	if !c.Path.present() {
+		return errors.New("command path is empty")
+	}
+	// An absolute path is required so the binary is chosen by the caller and
+	// not by exec.LookPath, which reads the live process PATH rather than the
+	// runner's captured environment — the one decision where the snapshot
+	// would otherwise not apply.
+	if !filepath.IsAbs(c.Path.reveal()) {
+		return errors.New("command path is not absolute")
+	}
+	seenEndOfOptions := false
+	for i := range c.Args {
+		a := c.Args[i]
+		if !a.set() {
+			return fmt.Errorf("argument %d was never constructed", i)
+		}
+		if a.kind == argEndOfOptions {
+			seenEndOfOptions = true
+			continue
+		}
+		if a.kind == argOpaque && !seenEndOfOptions && strings.HasPrefix(a.reveal(), "-") {
+			return fmt.Errorf("dynamic argument %d begins with a dash and no end-of-options separator precedes it", i)
 		}
 	}
 	seen := make(map[string]struct{}, len(c.Env))
 	for i := range c.Env {
 		m := c.Env[i]
 		if !m.valid() {
-			return fmt.Errorf("%w: environment mutation %d is not a permitted operation", ErrInvalidCommand, i)
+			return fmt.Errorf("environment mutation %d is not a permitted operation", i)
 		}
 		if _, dup := seen[m.key]; dup {
-			return fmt.Errorf("%w: environment mutation %d duplicates an earlier key", ErrInvalidCommand, i)
+			return fmt.Errorf("environment mutation %d duplicates an earlier key", i)
 		}
 		seen[m.key] = struct{}{}
 	}
@@ -357,43 +473,64 @@ func (c SensitiveCommand) validate() error {
 func validCap(stream string, limit int64) error {
 	switch {
 	case limit <= 0:
-		return fmt.Errorf("%w: %s cap must be positive", ErrInvalidCommand, stream)
+		return fmt.Errorf("%s cap must be positive", stream)
 	case limit > MaxOutputBytes:
-		return fmt.Errorf("%w: %s cap exceeds the %d-byte runner ceiling", ErrInvalidCommand, stream, MaxOutputBytes)
+		return fmt.Errorf("%s cap exceeds the %d-byte runner ceiling", stream, MaxOutputBytes)
 	}
 	return nil
 }
 
+// outputBuf holds captured bytes behind a pointer so that a BoundedOutput
+// reached through an unexported field renders as an address rather than as the
+// decimal byte dump reflection would otherwise produce. Same containment
+// reasoning as SecretArg's closure.
+type outputBuf struct{ data []byte }
+
 // BoundedOutput owns at most one stream's cap worth of bytes. It renders as
 // byte-count metadata everywhere, and hands out its bytes only through
 // CopyBytesForParse, which returns a fresh copy alongside a completeness flag
-// the caller cannot ignore — truncated output must never be parsed as a whole
+// the caller cannot ignore — a partial stream must never be parsed as a whole
 // backend response.
 type BoundedOutput struct {
-	data     []byte
+	buf *outputBuf
+
+	// overflow means the stream produced more than its cap.
 	overflow bool
+	// forced means the read end was retired before the stream reached EOF —
+	// after a kill, or after the retirement bound expired with a descendant
+	// still holding the write end. The bytes are a prefix either way, but the
+	// two causes are different answers to "should I retry".
+	forced bool
 }
 
 // Len is the number of bytes retained, which is at most the stream's cap.
-func (b BoundedOutput) Len() int { return len(b.data) }
+func (b BoundedOutput) Len() int {
+	if b.buf == nil {
+		return 0
+	}
+	return len(b.buf.data)
+}
 
-// Complete reports whether the stream ended within its cap. False means the
-// process produced more than the cap and the retained bytes are a prefix.
-func (b BoundedOutput) Complete() bool { return !b.overflow }
+// Complete reports whether the stream was read to EOF within its cap. False
+// means the retained bytes are a prefix — because the stream exceeded the cap,
+// or because the read end was retired before EOF.
+func (b BoundedOutput) Complete() bool { return !b.overflow && !b.forced }
 
 // CopyBytesForParse returns a fresh copy of the retained bytes and whether
 // they are the complete stream. The copy keeps a parser from aliasing (and
 // mutating) the runner's buffer; the flag is a second return value rather than
 // a method so a caller cannot reach the bytes without receiving it.
 func (b BoundedOutput) CopyBytesForParse() (data []byte, complete bool) {
-	out := make([]byte, len(b.data))
-	copy(out, b.data)
-	return out, !b.overflow
+	out := make([]byte, b.Len())
+	if b.buf != nil {
+		copy(out, b.buf.data)
+	}
+	return out, b.Complete()
 }
 
 func (b BoundedOutput) String() string {
-	return "BoundedOutput{bytes:" + strconv.Itoa(len(b.data)) +
-		" complete:" + strconv.FormatBool(!b.overflow) + "}"
+	return "BoundedOutput{bytes:" + strconv.Itoa(b.Len()) +
+		" complete:" + strconv.FormatBool(b.Complete()) + "}"
 }
 
 func (b BoundedOutput) GoString() string { return b.String() }
@@ -407,7 +544,7 @@ func (b BoundedOutput) Format(f fmt.State, verb rune) {
 }
 
 func (b BoundedOutput) LogValue() slog.Value {
-	return slog.GroupValue(slog.Int("bytes", len(b.data)), slog.Bool("complete", !b.overflow))
+	return slog.GroupValue(slog.Int("bytes", b.Len()), slog.Bool("complete", b.Complete()))
 }
 
 func (b BoundedOutput) MarshalJSON() ([]byte, error) {
@@ -475,6 +612,13 @@ const (
 	OutcomeCanceled
 	// OutcomeOutputLimit means a stream exceeded its cap and the process was killed.
 	OutcomeOutputLimit
+	// OutcomeTruncated means the command itself succeeded but a stream was cut
+	// off before EOF, because a descendant still held the pipe when the
+	// retirement bound expired. It is deliberately not OutcomeOutputLimit: no
+	// cap was reached, and a caller deciding whether to retry needs to know
+	// the difference between "the backend said too much" and "we stopped
+	// listening".
+	OutcomeTruncated
 
 	outcomeCount
 )
@@ -487,6 +631,7 @@ var outcomeNames = [outcomeCount]string{
 	OutcomeTimeout:     "timeout",
 	OutcomeCanceled:    "canceled",
 	OutcomeOutputLimit: "output_limit",
+	OutcomeTruncated:   "truncated",
 }
 
 func (o Outcome) String() string {
@@ -506,6 +651,7 @@ var (
 	ErrTimeout        = errors.New("exec: sensitive command timed out")
 	ErrCanceled       = errors.New("exec: sensitive command canceled")
 	ErrOutputLimit    = errors.New("exec: sensitive command exceeded its output ceiling")
+	ErrTruncated      = errors.New("exec: sensitive command output was cut off before end of stream")
 )
 
 var outcomeSentinels = [outcomeCount]error{
@@ -515,6 +661,7 @@ var outcomeSentinels = [outcomeCount]error{
 	OutcomeTimeout:     ErrTimeout,
 	OutcomeCanceled:    ErrCanceled,
 	OutcomeOutputLimit: ErrOutputLimit,
+	OutcomeTruncated:   ErrTruncated,
 }
 
 // SensitiveError is the only error type this seam returns. Every field is
@@ -553,6 +700,20 @@ func (e *SensitiveError) Error() string {
 	b.WriteString("]")
 	return b.String()
 }
+
+// Format and GoString are armor, not decoration. Every field here is metadata
+// today, so %#v is safe by inspection — but by-inspection safety expires the
+// day someone adds a payload-bearing field, and it expires silently. These two
+// methods make the invariant structural instead.
+func (e *SensitiveError) Format(f fmt.State, verb rune) {
+	if verb == 'q' {
+		_, _ = io.WriteString(f, strconv.Quote(e.Error()))
+		return
+	}
+	_, _ = io.WriteString(f, e.Error())
+}
+
+func (e *SensitiveError) GoString() string { return e.Error() }
 
 // Unwrap returns the outcome's sentinel, not the underlying process error, so
 // errors.Is works while errors.Unwrap cannot reach a payload-bearing error.

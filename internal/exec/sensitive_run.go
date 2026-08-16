@@ -19,6 +19,11 @@ import (
 // call returns" are different events separated by a descendant's lifetime.
 const defaultRetireBound = 2 * time.Second
 
+// maxZeroProgressReads bounds a reader that keeps returning (0, nil), which
+// io.Reader permits and os.File does not do in practice. Purely defensive: it
+// converts a theoretical spin into a bounded stop.
+const maxZeroProgressReads = 64
+
 // OSSensitiveRunner is the production SensitiveRunner. It captures the
 // inherited environment once at construction so a later os.Setenv elsewhere in
 // the process cannot change what a sensitive command inherits mid-flight.
@@ -48,7 +53,8 @@ func (r *OSSensitiveRunner) bound() time.Duration {
 // occurrences matters: a duplicated key in the inherited environment would
 // otherwise leave the stale entry in place on some platforms' lookup order.
 // Entries the mutation set does not name are copied byte-exact and never
-// inspected.
+// inspected. Key matching is case-sensitive, which is correct for the POSIX
+// platforms forgectl targets.
 func (r *OSSensitiveRunner) buildEnv(muts []EnvMutation) []string {
 	if len(muts) == 0 {
 		out := make([]string, len(r.env))
@@ -90,6 +96,19 @@ func envKeyOf(entry string) string {
 // straight into the *exec.Cmd. It is a separate function so internal/exec's own
 // tests can assert that the real values do reach exec.Cmd.Args — the mirror of
 // the redaction tests, without a production accessor that reveals.
+//
+// It builds with exec.Command rather than exec.CommandContext deliberately.
+// CommandContext kills on context completion but does not own what happens
+// next, and this runner does: it must kill, reap, and retire two pipe ends in
+// a defined order and within a tested bound, and it must distinguish a
+// deadline from a cancellation from an output-limit kill in the returned
+// outcome. Handing half of that to CommandContext would leave two killers
+// racing for the same process. The context check that CommandContext performs
+// before Start is done explicitly in RunSensitive instead.
+//
+// validate has already required an absolute path, so exec.Command performs no
+// PATH lookup here — which matters, because LookPath reads the live process
+// PATH rather than this runner's captured environment.
 func (r *OSSensitiveRunner) buildCmd(sc SensitiveCommand) *exec.Cmd {
 	argv := make([]string, len(sc.Args))
 	for i := range sc.Args {
@@ -100,25 +119,43 @@ func (r *OSSensitiveRunner) buildCmd(sc SensitiveCommand) *exec.Cmd {
 	return cmd
 }
 
+// failedResult is what every never-ran path returns. ExitCode is -1, never 0:
+// a command that did not run has no exit status, and 0 is the one value a
+// caller reads as success.
+func failedResult() SensitiveResult { return SensitiveResult{ExitCode: -1} }
+
 // RunSensitive runs one bounded command. Nothing it logs or returns can render
 // the path, the argv, or the environment; stdout and stderr are captured
 // concurrently into fixed buffers that cannot exceed the caps; and every
-// abnormal ending — overflow, timeout, cancellation — kills and reaps the
-// immediate CLI and retires both pipe ends within a bounded wait.
+// abnormal ending — overflow, timeout, cancellation, or a descendant holding a
+// pipe past the bound — kills and reaps the immediate CLI, retires both pipe
+// ends, and reports a stream that stopped short as incomplete.
 func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveCommand) (SensitiveResult, error) {
 	if err := sc.validate(); err != nil {
 		slog.Debug("Refusing sensitive command before start.", "cmd", sc, "reason", err.Error())
-		return SensitiveResult{}, newSensitiveError(sc.Kind, OutcomeInvalid, SensitiveResult{}, err.Error())
+		return failedResult(), newSensitiveError(sc.Kind, OutcomeInvalid, failedResult(), err.Error())
+	}
+
+	// An already-done context must not buy a fork/exec. exec.CommandContext
+	// performs this check internally; since this runner deliberately does not
+	// use it (see buildCmd), the check is explicit here.
+	if err := ctx.Err(); err != nil {
+		outcome := OutcomeCanceled
+		if errors.Is(err, context.DeadlineExceeded) {
+			outcome = OutcomeTimeout
+		}
+		slog.Debug("Refusing sensitive command; context already done.", "cmd", sc, "outcome", outcome.String())
+		return failedResult(), newSensitiveError(sc.Kind, outcome, failedResult(), "context was already done before start")
 	}
 
 	outR, outW, err := os.Pipe()
 	if err != nil {
-		return SensitiveResult{}, newSensitiveError(sc.Kind, OutcomeStartFailed, SensitiveResult{}, "stdout pipe unavailable")
+		return failedResult(), newSensitiveError(sc.Kind, OutcomeStartFailed, failedResult(), "stdout pipe unavailable")
 	}
 	errR, errW, err := os.Pipe()
 	if err != nil {
 		closeAll(outR, outW)
-		return SensitiveResult{}, newSensitiveError(sc.Kind, OutcomeStartFailed, SensitiveResult{}, "stderr pipe unavailable")
+		return failedResult(), newSensitiveError(sc.Kind, OutcomeStartFailed, failedResult(), "stderr pipe unavailable")
 	}
 
 	cmd := r.buildCmd(sc)
@@ -130,9 +167,8 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 
 	if err := cmd.Start(); err != nil {
 		closeAll(outR, outW, errR, errW)
-		res := SensitiveResult{ExitCode: -1}
 		slog.Error("Sensitive command failed to start.", "kind", sc.Kind.String())
-		return res, newSensitiveError(sc.Kind, OutcomeStartFailed, res, "fork/exec did not succeed")
+		return failedResult(), newSensitiveError(sc.Kind, OutcomeStartFailed, failedResult(), "fork/exec did not succeed")
 	}
 
 	// The parent's write ends must go now, or the readers never see EOF even
@@ -158,38 +194,61 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 	// caller of kill follows it with a Wait, which carries the real outcome.
 	kill := func() { killOnce.Do(func() { _ = cmd.Process.Kill() }) }
 
+	// A completed process wins over a simultaneously-ready cancellation. Go's
+	// select picks uniformly among ready cases, so without this the outcome of
+	// a command that finished just as its deadline expired would be a coin
+	// flip between success and timeout.
 	select {
 	case waitErr = <-waitCh:
-		// The immediate CLI is done. A descendant may still hold a pipe; the
-		// retirement below is what bounds that.
-	case <-ctx.Done():
-		trigger = OutcomeCanceled
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			trigger = OutcomeTimeout
+	default:
+		select {
+		case waitErr = <-waitCh:
+			// The immediate CLI is done. A descendant may still hold a pipe;
+			// the retirement below is what bounds that.
+		case <-ctx.Done():
+			trigger = OutcomeCanceled
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				trigger = OutcomeTimeout
+			}
+			kill()
+			waitErr = <-waitCh
+		case <-overflow:
+			trigger = OutcomeOutputLimit
+			kill()
+			waitErr = <-waitCh
 		}
-		kill()
-		waitErr = <-waitCh
-	case <-overflow:
-		trigger = OutcomeOutputLimit
-		kill()
-		waitErr = <-waitCh
 	}
 
 	// Retire both pipes. On an abnormal ending there is nothing left worth
 	// waiting for, so the read ends close immediately; on a clean exit the
 	// readers get the bound to drain what the CLI already wrote before the
 	// same force-close applies to whatever descendant inherited the pipe.
-	stdout, stderr := r.retire(trigger != OutcomeUnspecified, outR, errR, outCh, errCh)
-	if !stdout.Complete() || !stderr.Complete() {
-		if trigger == OutcomeUnspecified {
-			trigger = OutcomeOutputLimit
-		}
-		kill()
+	stdout, stderr, forced := r.retire(trigger != OutcomeUnspecified, sc.Kind, outR, errR, outCh, errCh)
+	if forced {
+		// A force-closed read returns os.ErrClosed, not io.EOF, so the reader
+		// cannot tell a retired stream from a finished one. Marking here is
+		// what keeps a cut-off prefix from reporting itself complete.
+		stdout.forced, stderr.forced = true, true
 	}
 
-	res := SensitiveResult{Stdout: stdout, Stderr: stderr, ExitCode: exitCodeOf(waitErr)}
-	if waitErr == nil {
-		res.ExitCode = 0
+	// Overflow can also surface after the fact: a reader that filled its
+	// buffer while the process was already exiting signals on a channel nobody
+	// selected. Read the real signal rather than inferring one from
+	// incompleteness, which by now also covers forced retirement.
+	if trigger == OutcomeUnspecified && (stdout.overflow || stderr.overflow) {
+		trigger = OutcomeOutputLimit
+		kill()
+	}
+	// A clean exit whose output was cut off is its own outcome: no cap was
+	// reached and the command itself succeeded, but the bytes are a prefix and
+	// a caller must not parse them as a whole response.
+	if trigger == OutcomeUnspecified && waitErr == nil && (!stdout.Complete() || !stderr.Complete()) {
+		trigger = OutcomeTruncated
+	}
+
+	res := SensitiveResult{Stdout: stdout, Stderr: stderr, ExitCode: 0}
+	if waitErr != nil {
+		res.ExitCode = exitCodeOf(waitErr)
 	}
 
 	switch {
@@ -218,6 +277,8 @@ func retireReason(o Outcome) string {
 		return "context canceled; process killed"
 	case OutcomeOutputLimit:
 		return "stream exceeded its cap; process killed"
+	case OutcomeTruncated:
+		return "pipe retired before end of stream; output is a prefix"
 	default:
 		return ""
 	}
@@ -226,11 +287,13 @@ func retireReason(o Outcome) string {
 // retire collects both readers and guarantees the call returns even when a
 // descendant still holds a write end. Closing an *os.File interrupts a Read
 // blocked on it, so the force-close is what unblocks a reader no EOF is ever
-// coming for.
-func (r *OSSensitiveRunner) retire(immediate bool, outR, errR *os.File, outCh, errCh <-chan BoundedOutput) (BoundedOutput, BoundedOutput) {
+// coming for. The returned bool reports whether that force-close happened
+// before the readers finished — the caller needs it, because a force-closed
+// Read returns os.ErrClosed and is otherwise indistinguishable from EOF.
+func (r *OSSensitiveRunner) retire(immediate bool, kind CommandKind, outR, errR *os.File, outCh, errCh <-chan BoundedOutput) (BoundedOutput, BoundedOutput, bool) {
 	if immediate {
 		closeAll(outR, errR)
-		return <-outCh, <-errCh
+		return <-outCh, <-errCh, true
 	}
 
 	timer := time.NewTimer(r.bound())
@@ -247,6 +310,12 @@ func (r *OSSensitiveRunner) retire(immediate bool, outR, errR *os.File, outCh, e
 		case stderr = <-errCh:
 			gotErr = true
 		case <-timer.C:
+			// Log it: the bound expiring is the one source of latency in this
+			// call that is not the backend's own, and an unattributed
+			// multi-second pause is exactly what a future debugging session
+			// would otherwise have to rediscover.
+			slog.Warn("Retirement bound expired with a pipe still held; closing it.",
+				"kind", kind.String(), "bound", r.bound())
 			closeAll(outR, errR)
 			if !gotOut {
 				stdout = <-outCh
@@ -254,11 +323,11 @@ func (r *OSSensitiveRunner) retire(immediate bool, outR, errR *os.File, outCh, e
 			if !gotErr {
 				stderr = <-errCh
 			}
-			return stdout, stderr
+			return stdout, stderr, true
 		}
 	}
 	closeAll(outR, errR)
-	return stdout, stderr
+	return stdout, stderr, false
 }
 
 // readCapped fills a single fixed buffer of cap+1 bytes and stops. It never
@@ -268,28 +337,38 @@ func (r *OSSensitiveRunner) retire(immediate bool, outR, errR *os.File, outCh, e
 func readCapped(r io.Reader, limit int64, out chan<- BoundedOutput, overflow chan<- struct{}) {
 	buf := make([]byte, limit+1)
 	n := 0
+	idle := 0
 	for int64(n) < limit+1 {
 		m, err := r.Read(buf[n:])
 		n += m
 		if err != nil {
 			break
 		}
+		if m == 0 {
+			// io.Reader permits (0, nil); os.File does not produce it, but a
+			// reader that only ever did would spin here forever.
+			if idle++; idle >= maxZeroProgressReads {
+				break
+			}
+			continue
+		}
+		idle = 0
 	}
 	if int64(n) > limit {
 		select {
 		case overflow <- struct{}{}:
 		default:
 		}
-		out <- BoundedOutput{data: buf[:limit], overflow: true}
+		out <- BoundedOutput{buf: &outputBuf{data: buf[:limit]}, overflow: true}
 		return
 	}
-	out <- BoundedOutput{data: buf[:n]}
+	out <- BoundedOutput{buf: &outputBuf{data: buf[:n]}}
 }
 
-// closeAll retires pipe ends. Close errors are dropped deliberately: these
-// are read/write ends of the runner's own pipes, a second Close is expected
-// on the paths where both the timeout and Wait retire the same descriptor,
-// and no caller decision depends on the result.
+// closeAll retires pipe ends. Close errors are dropped deliberately: these are
+// read/write ends of the runner's own pipes, a second Close is expected on the
+// paths where both the timeout and the caller retire the same descriptor, and
+// no caller decision depends on the result.
 func closeAll(files ...*os.File) {
 	for _, f := range files {
 		if f != nil {
