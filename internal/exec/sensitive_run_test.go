@@ -405,6 +405,53 @@ func TestRunSensitive_KilledProducerLeavesAnIncompletePrefix(t *testing.T) {
 	}
 }
 
+// diedUnderSignal must answer from the process state, not from the exit code.
+// exitCodeOf returns -1 for a signal death AND for any error that does not wrap
+// an *exec.ExitError — a Wait that failed for its own reasons, a process that
+// never started. Reading -1 as "signalled" collapses "the child was killed"
+// into "we could not find out what happened to it", and marks streams as
+// prefixes on evidence that says nothing about the child at all.
+func TestDiedUnderSignal_AnswersFromProcessStateNotExitCode(t *testing.T) {
+	signalled := func() error {
+		self, err := os.Executable()
+		if err != nil {
+			t.Fatalf("os.Executable: %v", err)
+		}
+		cmd := exec.Command(self)
+		cmd.Env = append(os.Environ(), helperModeEnv+"=sleep:30s")
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		_ = cmd.Process.Kill()
+		return cmd.Wait()
+	}()
+
+	cases := map[string]struct {
+		err  error
+		want bool
+	}{
+		"signal death":           {err: signalled, want: true},
+		"nil":                    {err: nil, want: false},
+		"plain error":            {err: errors.New("wait failed for its own reasons"), want: false},
+		"wrapped plain error":    {err: fmt.Errorf("context: %w", errors.New("boom")), want: false},
+		"exec.ErrNotFound":       {err: exec.ErrNotFound, want: false},
+		"nil-state ExitError":    {err: &exec.ExitError{}, want: false},
+		"wrapped signal ExitErr": {err: fmt.Errorf("wrapped: %w", signalled), want: true},
+	}
+
+	for name, tc := range cases {
+		if got := diedUnderSignal(tc.err); got != tc.want {
+			t.Errorf("%s: diedUnderSignal = %v, want %v (err=%v)", name, got, tc.want, tc.err)
+		}
+	}
+
+	// Anti-vacuity: the fixture must really be a signal death, or "signal
+	// death" above proves nothing about signals.
+	if exitCodeOf(signalled) != -1 {
+		t.Fatalf("fixture did not produce a signal death: exit=%d", exitCodeOf(signalled))
+	}
+}
+
 // A command that never ran has no stream to be complete. The zero-value
 // BoundedOutput reports Complete() == true over zero bytes, and this contract
 // sends a parser to the flag rather than to the error — so that reads as "the

@@ -347,15 +347,25 @@ func (r *OSSensitiveRunner) awaitOutcome(ctx context.Context, waitCh chan error,
 }
 
 // diedUnderSignal reports whether the process was terminated rather than
-// exiting. os.ProcessState.ExitCode returns -1 exactly when a process was
-// ended by a signal, which is the portable way to ask — syscall.WaitStatus
-// is not the same type on every platform this builds for.
-//
-// A process that was signalled did not choose its moment, so whatever it had
-// written is a prefix. That is true whether the signal came from this runner
+// exiting. A process that was signalled did not choose its moment, so whatever
+// it had written is a prefix — true whether the signal came from this runner
 // or from the OOM killer, a supervisor, an operator, or a fault in the CLI.
+//
+// It asks the ProcessState rather than the exit code. os.ProcessState.ExitCode
+// returns -1 exactly when a process was ended by a signal, which is the
+// portable way to ask — syscall.WaitStatus is not the same type on every
+// platform this builds for. But exitCodeOf also returns -1 when the error is
+// not an *exec.ExitError at all: a Wait that failed for its own reasons, a
+// process that never started. Routing through it would call those signal
+// deaths, so the ExitError has to be unwrapped first and its state asked
+// directly. The distinction is not academic — it is the difference between
+// "the child was killed" and "we could not find out what happened to it".
 func diedUnderSignal(waitErr error) bool {
-	return waitErr != nil && exitCodeOf(waitErr) == -1
+	var exitErr *exec.ExitError
+	if !errors.As(waitErr, &exitErr) || exitErr.ProcessState == nil {
+		return false
+	}
+	return exitErr.ExitCode() == -1
 }
 
 func retireReason(o Outcome) string {

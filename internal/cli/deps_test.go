@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -15,12 +16,29 @@ func TestProductionDeps_FillsEverySeam(t *testing.T) {
 	boundary := &config.LegacyMigrationBoundary{}
 	deps := productionDeps(config.Config{}, boundary)
 
-	if deps.Runner == nil {
-		t.Error("Runner is nil")
+	// Enumerated by reflection rather than by name. A named list only pins the
+	// seams someone remembered to add to it, and the failure this guards against
+	// is precisely the one nobody remembered — a field added to Deps and never
+	// wired into productionDeps. Reflection makes a new seam opt out explicitly
+	// instead of being missed silently.
+	v := reflect.ValueOf(deps)
+	if v.NumField() == 0 {
+		t.Fatal("Deps has no fields; the reflection below would pass vacuously")
 	}
-	if deps.SensitiveRunner == nil {
-		t.Error("SensitiveRunner is nil; a bootstrap-bearing command would have no bounded seam to run through")
+	for i := range v.NumField() {
+		field, name := v.Field(i), v.Type().Field(i).Name
+		switch field.Kind() {
+		case reflect.Chan, reflect.Func, reflect.Interface,
+			reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+			if field.IsNil() {
+				t.Errorf("%s is nil; whichever module first needs it discovers that at its own call site, far from this wiring", name)
+			}
+		default:
+			// A non-nil-able field (a string, an int, a value struct) has no
+			// unfilled state to detect — its zero value may be legitimate.
+		}
 	}
+
 	if deps.LegacyBoundary != boundary {
 		t.Error("LegacyBoundary was not passed through")
 	}
