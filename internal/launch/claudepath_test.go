@@ -72,3 +72,45 @@ func TestCodexPath_InvalidOverrideNamesSource(t *testing.T) {
 		t.Fatalf("CodexPath error = %v, want source attribution", err)
 	}
 }
+
+// TestValidateBinary_RejectsADirectory exercises the branch neither the env nor
+// config precedence tests reach: a configured path that stats successfully but
+// names a directory, not a file. Falling through to os.Stat's bare success
+// would hand syscall.Exec a directory and fail far from this error message,
+// with none of the "from <source>" attribution that names the misconfigured
+// knob.
+func TestValidateBinary_RejectsADirectory(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FORGECTL_CLAUDE_BIN", "")
+
+	_, err := ClaudePath(config.LaunchDefaults{BinaryPath: dir})
+	if err == nil || !strings.Contains(err.Error(), "is a directory") {
+		t.Fatalf("ClaudePath error = %v, want a directory-specific message", err)
+	}
+	if !strings.Contains(err.Error(), "[launch.defaults] binary_path") {
+		t.Fatalf("ClaudePath error = %v, want source attribution", err)
+	}
+}
+
+// TestValidateBinary_RejectsANonExecutableFile pins the third validateBinary
+// branch: a regular file that exists but carries no execute bit. Every other
+// resolution test in this package uses a 0o755 stub, so this is the only place
+// the permission check itself is exercised — a validateBinary that dropped the
+// `Mode().Perm()&0o111` check would otherwise hand syscall.Exec a file the
+// kernel refuses to run, and no test here would notice.
+func TestValidateBinary_RejectsANonExecutableFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FORGECTL_CODEX_BIN", "")
+
+	_, err := CodexPath(config.LaunchDefaults{CodexBinaryPath: path})
+	if err == nil || !strings.Contains(err.Error(), "is not executable") {
+		t.Fatalf("CodexPath error = %v, want a not-executable message", err)
+	}
+	if !strings.Contains(err.Error(), "[launch.defaults] codex_binary_path") {
+		t.Fatalf("CodexPath error = %v, want source attribution", err)
+	}
+}

@@ -128,10 +128,11 @@ func runLaunch(deps module.Deps, rest []string) (handled bool, err error) {
 	return true, launchExec(deps.LegacyBoundary, deps.Cfg, rest)
 }
 
-// launchExec is the resolve → exec path: it reduces the launch config against
-// the cwd, resolves the claude binary, assembles the posture, merges env, and
-// execs claude in place. On success it does not return (syscall.Exec replaces
-// the process).
+// launchExec is the resolve → exec path. It prepares the effective launch
+// config (migrating a legacy claunch.conf once, up front), hands the rest to
+// launch.BuildInvocation, then does the three things a builder returning pure
+// data cannot: banner the posture, record the usage event, and exec. On success
+// it does not return (syscall.Exec replaces the process).
 func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, args []string) error {
 	// Read the opt-in from the config.toml snapshot taken at process start,
 	// BEFORE the automatic legacy migration rewrites cfg.Launch below. The
@@ -151,69 +152,31 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	if err != nil {
 		return termsafe.Error(fmt.Errorf("determine working directory: %w", err))
 	}
-	profile := launch.Resolve(lc, cwd)
-
-	if err := profile.Validate(); err != nil {
-		return err
-	}
-	if profile.Harness == "codex" && len(args) > 0 && args[0] == "agents" {
-		return fmt.Errorf(
-			"`launch agents` is Claude-only and has no Codex adapter; invoke Codex directly or switch this launch profile to Claude",
-		)
-	}
-
-	var binaryPath string
-	if profile.Harness == "codex" {
-		binaryPath, err = launch.CodexPath(lc.Defaults)
-	} else {
-		binaryPath, err = launch.ClaudePath(lc.Defaults)
-	}
+	// The bench telemetry block is injected UNDER the profile's env (the builder
+	// layers it that way), so a profile value wins over an injected default.
+	// When telemetry is off, TelemetryEnv is nil and the merge reduces to the
+	// profile env alone.
+	built, err := launch.BuildInvocation(launch.InvocationRequest{
+		Config:      lc,
+		CWD:         cwd,
+		Args:        args,
+		BaseEnv:     os.Environ(),
+		InjectedEnv: bench.TelemetryEnv(cfg),
+		Resolve:     launch.ResolveBinary,
+	})
 	if err != nil {
 		return err
 	}
+	profile := built.Profile
 
-	var harnessArgs []string
-	switch {
-	case len(args) == 0:
-		if profile.Harness == "codex" {
-			harnessArgs = launch.CodexSessionArgs(profile)
-			// Codex has no equivalent of the Claude agents banner, so without
-			// this a Codex launch leaves no record of the argv it ran with —
-			// including the approval/sandbox posture, which is the part worth
-			// auditing. stderr, so piped stdout stays clean.
-			launch.HarnessBanner(os.Stderr, profile.Harness, harnessArgs)
-		} else {
-			harnessArgs = launch.SessionArgs(profile)
-			// This is the ONLY path that emits
-			// --allow-dangerously-skip-permissions into an INTERACTIVE session
-			// (the scaffold ships allow_danger = true), and it is the one branch
-			// that printed nothing at all once the interview form stopped
-			// rendering ahead of syscall.Exec. Banner it like the agents branch
-			// does, so the posture — and the resolved effort — stay visible.
-			launch.Banner(os.Stderr, harnessArgs)
-		}
-	case args[0] == "agents":
-		if launch.IsAgentsPassthrough(args) {
-			harnessArgs = args // byte-clean: no injection, no banner
-		} else {
-			harnessArgs = launch.AgentsArgs(profile, args)
-			launch.Banner(os.Stderr, harnessArgs)
-		}
-	default:
-		if profile.Harness == "codex" {
-			harnessArgs = launch.CodexExecArgs(profile, args)
-			launch.HarnessBanner(os.Stderr, profile.Harness, harnessArgs)
-		} else {
-			harnessArgs = launch.BuilderArgs(profile, args)
-		}
-	}
+	// Banner the resolved posture to stderr — the builder path and the agents
+	// scripting passthrough stay silent, which EmitBanner owns. This is the only
+	// place --allow-dangerously-skip-permissions becomes visible before an
+	// INTERACTIVE session starts (the scaffold ships allow_danger = true), and
+	// the cheapest way to eyeball the resolved effort.
+	launch.EmitBanner(os.Stderr, built)
 
-	// Layer the profile env over the opt-in bench telemetry block (profile wins),
-	// then merge that over the process env. When telemetry is off, TelemetryEnv is
-	// nil and this reduces to the profile env alone.
-	extra := launch.MergeMaps(bench.TelemetryEnv(cfg), profile.Env)
-	env := launch.MergeEnv(os.Environ(), extra)
-	slog.Debug("Preparing to exec harness.", "harness", termsafe.SafeLine(profile.Harness), "path", termsafe.QuotePath(binaryPath), "argc", len(harnessArgs), "match", termsafe.SafeLine(profile.Match))
+	slog.Debug("Preparing to exec harness.", "harness", termsafe.SafeLine(profile.Harness), "path", termsafe.QuotePath(built.Invocation.Binary.Path), "argc", len(built.Invocation.Args), "match", termsafe.SafeLine(profile.Match))
 
 	// One event, immediately before the exec that would replace this process.
 	// Everything that can refuse the launch — profile validation, the Codex
@@ -222,7 +185,7 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	// mean the harness started: nothing after syscall.Exec is observable.
 	sessionMode, posture := launchUsageClassification(args)
 	recordUsageSilently(usageEnabled, newLaunchUsageEvent(profile.Harness, profile.Model, sessionMode, posture))
-	return execHarness(binaryPath, harnessArgs, env)
+	return execHarness(built.Invocation.Binary.Path, built.Invocation.Args, built.Invocation.Env)
 }
 
 // legacyShadowWarning reports the one-line #114 fallback-cliff warning when
