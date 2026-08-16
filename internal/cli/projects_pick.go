@@ -103,13 +103,13 @@ func projectCandidateLine(repo projects.Repo) string {
 		if path == "" {
 			path = "<unknown>"
 		}
-		identity = "path:" + sanitizeCandidate(path)
+		identity = "path:" + safeCandidate(path)
 	} else {
-		host = sanitizeCandidate(repo.Host)
-		identity = sanitizeCandidate(repo.Owner) + "/" + sanitizeCandidate(repo.Name)
+		host = safeCandidate(repo.Host)
+		identity = safeCandidate(repo.Owner) + "/" + safeCandidate(repo.Name)
 	}
 	status := projectCandidateStatus(repo)
-	return host + "  " + identity + "  " + sanitizeCandidate(status)
+	return host + "  " + identity + "  " + safeCandidate(status)
 }
 
 func projectCandidateStatus(repo projects.Repo) string {
@@ -136,16 +136,26 @@ func projectCandidateStatus(repo projects.Repo) string {
 	return status
 }
 
-// sanitizeCandidate composes the shared terminal sanitizer with this sink's
-// fixed-column layout rule: shared sanitization handles every unsafe rune, and
-// the candidate sink alone neutralizes the tab it deliberately preserves.
-func sanitizeCandidate(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '\t' {
-			return ' '
-		}
-		return r
-	}, sanitizeTerm(s))
+// safeCandidate renders one fixed-column candidate field. It is safeTerm
+// alone: the sink used to need a second pass to neutralize the tab the old
+// sanitizer deliberately preserved, and SafeLine escapes tab like every other
+// non-graphic rune, so the layout rule this sink needs now falls out of the
+// shared boundary rather than being maintained beside it.
+func safeCandidate(s string) string {
+	return safeTerm(s)
+}
+
+// repoPickerLabel renders one interactive picker row. It exists as its own
+// function so a test can assert the label the picker actually builds — huh's
+// option list is not inspectable headlessly, and a test that re-derived the
+// label itself would pass no matter what the picker did.
+//
+// DisplayLine concatenates a repo name that, for a local project, is a
+// directory basename: anyone who can create a directory under the projects dir
+// chooses those bytes. The headless rendering of this same data goes through
+// the boundary, and the interactive path is the more common one.
+func repoPickerLabel(r projects.Repo) string {
+	return safeTerm(r.DisplayLine())
 }
 
 func projectAmbiguityError(mode projectSelectionMode, count int) error {
@@ -182,7 +192,10 @@ func pickRepo(repos []projects.Repo) (projects.Repo, error) {
 	byKey := make(map[string]projects.Repo, len(repos))
 	for i, r := range repos {
 		key := r.Key()
-		opts[i] = huh.NewOption(r.DisplayLine(), key)
+		// The label is escaped; the key is not. The key is the selection
+		// round-trip and is never printed, so escaping it would only risk
+		// breaking the lookup.
+		opts[i] = huh.NewOption(repoPickerLabel(r), key)
 		byKey[key] = r
 	}
 	var chosen string

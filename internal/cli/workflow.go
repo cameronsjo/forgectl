@@ -13,6 +13,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/bless"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/step"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/workflow"
 )
 
@@ -306,10 +307,18 @@ func newWorkflowStatusCmd() *cobra.Command {
 		Short: "Show the last run's per-step checkpoint state",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name := args[0]
+			// Every value this report interpolates is untrusted, and the sidecar
+			// is the sharper half: ADR-0006/0007's threat model treats it as
+			// attacker-writable (resumeOptions refuses to reconstruct an export
+			// from it for exactly that reason), so its workflow name, run id,
+			// timestamps and step verbs are third-party strings printed to a
+			// terminal. The argv name goes through the same boundary rather than
+			// being trusted for being typed — one rule for the whole renderer is
+			// what keeps the next field added here from being the exception.
+			name := termsafe.SafeLine(args[0])
 			out := cmd.OutOrStdout()
 
-			state, ok, err := workflow.LoadState(name)
+			state, ok, err := workflow.LoadState(args[0])
 			if err != nil {
 				return err
 			}
@@ -318,31 +327,41 @@ func newWorkflowStatusCmd() *cobra.Command {
 				return nil
 			}
 
-			fmt.Fprintf(out, "%s — run %s\n", state.Workflow, state.RunID)
-			fmt.Fprintf(out, "  started: %s\n", state.StartedAt)
-			fmt.Fprintf(out, "  updated: %s\n", state.UpdatedAt)
+			fmt.Fprintf(out, "%s — run %s\n", termsafe.SafeLine(state.Workflow), termsafe.SafeLine(state.RunID))
+			fmt.Fprintf(out, "  started: %s\n", termsafe.SafeLine(state.StartedAt))
+			fmt.Fprintf(out, "  updated: %s\n", termsafe.SafeLine(state.UpdatedAt))
 			if len(state.Steps) == 0 {
 				fmt.Fprintln(out, "  no steps checkpointed complete")
 			} else {
 				fmt.Fprintf(out, "  %d step(s) complete:\n", len(state.Steps))
 				for _, s := range state.Steps {
-					fmt.Fprintf(out, "    %d. %-10s done %s\n", s.Index+1, s.Uses, s.CompletedAt)
+					fmt.Fprintf(out, "    %d. %-10s done %s\n", s.Index+1, termsafe.SafeLine(s.Uses), termsafe.SafeLine(s.CompletedAt))
 				}
 			}
 
+			// The two note lines below are note-shaped output that deliberately
+			// does NOT route through renderDegradationNotes (#291). That sink
+			// writes to stderr, because its callers all have a --json stdout to
+			// keep clean; these two are body text of a human-only report and
+			// belong on stdout with the rest of it. What they must share with the
+			// shared sink is the termsafe boundary, and they do.
+			//
 			// If the definition changed since this run, --resume will refuse it
 			// (a resume never replays across an edited file) — say so up front.
 			// The hash covers the WHOLE file, so any byte change invalidates every
 			// checkpoint, not just the edited step.
-			if src, err := workflow.Load(name); err == nil {
+			if src, err := workflow.Load(args[0]); err == nil {
 				if workflow.DefinitionHash(src.Data) != state.DefinitionHash {
 					fmt.Fprintf(out, "  note: %s has changed since this run (any edit to the file invalidates every checkpoint) — resume will be refused; run it fresh\n", name)
 				}
 			} else {
 				// The current definition is missing or unreadable — --resume can't
 				// proceed without it, so say so rather than silently dropping the
-				// error and implying a clean resume is available.
-				fmt.Fprintf(out, "  note: could not load the current definition of %s (%v) — resume is unavailable until it loads\n", name, err)
+				// error and implying a clean resume is available. The error text is
+				// escaped through termsafe.Error rather than SafeLine so that a
+				// wrapped *os.PathError cannot reinsert the raw path its own Error
+				// method would print.
+				fmt.Fprintf(out, "  note: could not load the current definition of %s (%v) — resume is unavailable until it loads\n", name, termsafe.Error(err))
 			}
 			return nil
 		},
@@ -365,14 +384,22 @@ func parseParams(raw []string) (map[string]string, error) {
 
 // printPlan renders a resolved Plan for --dry-run: the step sequence a user
 // reviews before trusting a workflow, with zero side effects.
+//
+// Every field here comes from the workflow file, which ADR-0006/0007 treat as
+// attacker-writable — and this is the surface where that matters most, because
+// --dry-run is the review a user performs to decide whether to bless the file,
+// and it deliberately skips the blessing gate to do so. TOML forbids raw control
+// bytes in the file, but a \u escape decodes to a real one, so an unblessed
+// definition could otherwise rewrite the very lines describing it.
 func printPlan(out io.Writer, plan workflow.Plan) {
-	fmt.Fprintf(out, "workflow %s@%s — %d step(s):\n", plan.Name, plan.Version, len(plan.Steps))
+	fmt.Fprintf(out, "workflow %s@%s — %d step(s):\n",
+		termsafe.SafeLine(plan.Name), termsafe.SafeLine(plan.Version), len(plan.Steps))
 	for i, s := range plan.Steps {
-		fmt.Fprintf(out, "  %d. %s\n", i+1, s.Uses)
+		fmt.Fprintf(out, "  %d. %s\n", i+1, termsafe.SafeLine(s.Uses))
 		printField(out, "repo", s.Repo)
 		printField(out, "ref", s.Ref)
 		if len(s.Globs) > 0 {
-			fmt.Fprintf(out, "     globs: %s\n", strings.Join(s.Globs, ", "))
+			fmt.Fprintf(out, "     globs: %s\n", termsafe.SafeLine(strings.Join(s.Globs, ", ")))
 		}
 		printField(out, "skill", s.Skill)
 		printField(out, "posture", s.Posture)
@@ -381,15 +408,17 @@ func printPlan(out io.Writer, plan workflow.Plan) {
 		printField(out, "to", s.To)
 		printField(out, "cmd", s.Cmd)
 		if len(s.Args) > 0 {
-			fmt.Fprintf(out, "     args: %s\n", strings.Join(s.Args, " "))
+			fmt.Fprintf(out, "     args: %s\n", termsafe.SafeLine(strings.Join(s.Args, " ")))
 		}
 	}
 }
 
-// printField writes one non-empty plan-step field as an indented line.
+// printField writes one non-empty plan-step field as an indented line. The
+// escaping lives here rather than at each call site so a field added to
+// printPlan's list cannot be the one that ships raw.
 func printField(out io.Writer, name, value string) {
 	if value == "" {
 		return
 	}
-	fmt.Fprintf(out, "     %s: %s\n", name, value)
+	fmt.Fprintf(out, "     %s: %s\n", name, termsafe.SafeLine(value))
 }

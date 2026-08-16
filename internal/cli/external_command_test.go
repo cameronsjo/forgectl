@@ -219,7 +219,7 @@ func TestExternalCommand_ExecFailureIsHandledSanitizedAndPreservesIdentity(t *te
 	if execCalls != 1 {
 		t.Errorf("exec calls = %d, want 1", execCalls)
 	}
-	wantLine := termsafe.Sanitize(meta.AppName+": "+wantErr.Error()) + "\n"
+	wantLine := termsafe.SafeLine(meta.AppName+": "+wantErr.Error()) + "\n"
 	if got := stderr.String(); got != wantLine {
 		t.Errorf("stderr = %q, want exactly %q", got, wantLine)
 	}

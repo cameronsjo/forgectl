@@ -189,12 +189,12 @@ machine can find a runbook or field report it did not author.
 					return nil
 				}
 				for _, h := range hits {
-					// Indexed content is untrusted at print time — strip control
-					// bytes so a hostile title/snippet can't smuggle terminal
-					// escape sequences to the operator's shell.
+					// Indexed content is untrusted at print time — quote every
+					// unsafe rune so a hostile title/snippet can't smuggle
+					// terminal escape sequences to the operator's shell.
 					fmt.Fprintf(out, "%s\t%s\t[%s]\t(%s, indexed by %s)\n\t%s\n",
-						sanitizeTerm(h.Path), sanitizeTerm(h.Title), sanitizeTerm(h.Type),
-						sanitizeTerm(h.Project), sanitizeTerm(h.Machine), sanitizeTerm(h.Snippet))
+						safeTerm(h.Path), safeTerm(h.Title), safeTerm(h.Type),
+						safeTerm(h.Project), safeTerm(h.Machine), safeTerm(h.Snippet))
 				}
 				return nil
 			})
@@ -314,19 +314,21 @@ type whyDTO struct {
 	KeyDecisions string `json:"key_decisions,omitempty"`
 }
 
-// printWhyHits renders `sessions why` results. Both paths sanitize
-// concordance-sourced fields: encoding/json only escapes 0x00–0x1F, so DEL,
-// the C1 range, and Unicode Bidi_Control characters would otherwise reach a
-// terminal raw through --json. The JSON path must call sanitizeTerm explicitly.
+// printWhyHits renders `sessions why` results. Concordance-sourced fields are
+// untrusted on both paths, and each path uses the control built for its own
+// sink: the text path quotes through safeTerm, the JSON path carries the stored
+// value unaltered and lets writeJSON's termsafe.JSONEncoder escape it on the way
+// out. Escaping there rather than rewriting is what keeps `--json | jq` handing
+// back the operator's exact bytes.
 func printWhyHits(cmd *cobra.Command, hits []sessions.WhyHit, asJSON bool) error {
 	out := cmd.OutOrStdout()
 	if asJSON {
 		dto := make([]whyDTO, 0, len(hits))
 		for _, h := range hits {
 			dto = append(dto, whyDTO{
-				SessionID: sanitizeTerm(h.SessionID), Date: fmtTs(h.LastTs), Repo: sanitizeTerm(h.Project),
-				Model: sanitizeTerm(h.Model), Committed: h.Committed, RunbookType: sanitizeTerm(h.Type),
-				Intent: sanitizeTerm(h.Title), Link: sanitizeTerm(h.Path), KeyDecisions: sanitizeTerm(h.Snippet),
+				SessionID: h.SessionID, Date: fmtTs(h.LastTs), Repo: h.Project,
+				Model: h.Model, Committed: h.Committed, RunbookType: h.Type,
+				Intent: h.Title, Link: h.Path, KeyDecisions: h.Snippet,
 			})
 		}
 		if len(hits) > 0 {
@@ -340,10 +342,10 @@ func printWhyHits(cmd *cobra.Command, hits []sessions.WhyHit, asJSON bool) error
 	}
 	for _, h := range hits {
 		fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\n",
-			sanitizeTerm(h.SessionID), humanTs(h.LastTs), sanitizeTerm(h.Project), sanitizeTerm(h.Model))
-		fmt.Fprintf(out, "\t%s · %s\n", sanitizeTerm(h.Type), sanitizeTerm(h.Title))
-		fmt.Fprintf(out, "\t%s\n", sanitizeTerm(h.Path))
-		fmt.Fprintf(out, "\t%s\n", sanitizeTerm(h.Snippet))
+			safeTerm(h.SessionID), humanTs(h.LastTs), safeTerm(h.Project), safeTerm(h.Model))
+		fmt.Fprintf(out, "\t%s · %s\n", safeTerm(h.Type), safeTerm(h.Title))
+		fmt.Fprintf(out, "\t%s\n", safeTerm(h.Path))
+		fmt.Fprintf(out, "\t%s\n", safeTerm(h.Snippet))
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "Found %d sessions\n", len(hits))
 	return nil
@@ -370,8 +372,7 @@ type lastDTO struct {
 
 // printLastSession renders `sessions last`. A repo with no session is a clean
 // miss: null in --json (any jq can test it), a friendly line otherwise.
-// Concordance-sourced fields are control-byte-stripped on both paths (see printWhyHits
-// for why the JSON encoder alone is insufficient).
+// Concordance-sourced fields take the same per-sink split as printWhyHits.
 func printLastSession(cmd *cobra.Command, repo string, s *sessions.SessionSummary, asJSON bool) error {
 	out := cmd.OutOrStdout()
 	if asJSON {
@@ -380,16 +381,16 @@ func printLastSession(cmd *cobra.Command, repo string, s *sessions.SessionSummar
 		}
 		arts := make([]artifactDTO, 0, len(s.Artifacts))
 		for _, a := range s.Artifacts {
-			arts = append(arts, artifactDTO{Type: sanitizeTerm(a.Type), Title: sanitizeTerm(a.Title), Path: sanitizeTerm(a.Path)})
+			arts = append(arts, artifactDTO{Type: a.Type, Title: a.Title, Path: a.Path})
 		}
 		return writeJSON(out, lastDTO{
-			SessionID: sanitizeTerm(s.SessionID), Repo: sanitizeTerm(s.Project), Branch: sanitizeTerm(s.GitBranch), Model: sanitizeTerm(s.Model),
-			Machine: sanitizeTerm(s.Machine), FirstTs: fmtTs(s.FirstTs), LastTs: fmtTs(s.LastTs),
+			SessionID: s.SessionID, Repo: s.Project, Branch: s.GitBranch, Model: s.Model,
+			Machine: s.Machine, FirstTs: fmtTs(s.FirstTs), LastTs: fmtTs(s.LastTs),
 			Committed: s.Committed, Artifacts: arts,
 		})
 	}
 	if s == nil {
-		fmt.Fprintf(out, "no sessions recorded for %q\n", sanitizeTerm(repo))
+		fmt.Fprintf(out, "no sessions recorded for %q\n", safeTerm(repo))
 		return nil
 	}
 	committed := "no commits"
@@ -397,9 +398,9 @@ func printLastSession(cmd *cobra.Command, repo string, s *sessions.SessionSummar
 		committed = "committed"
 	}
 	fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\t%s\n",
-		sanitizeTerm(s.SessionID), humanTs(s.LastTs), sanitizeTerm(s.Project), sanitizeTerm(s.GitBranch), committed)
+		safeTerm(s.SessionID), humanTs(s.LastTs), safeTerm(s.Project), safeTerm(s.GitBranch), committed)
 	if s.Model != "" || s.Machine != "" {
-		fmt.Fprintf(out, "\t%s on %s\n", sanitizeTerm(s.Model), sanitizeTerm(s.Machine))
+		fmt.Fprintf(out, "\t%s on %s\n", safeTerm(s.Model), safeTerm(s.Machine))
 	}
 	if len(s.Artifacts) == 0 {
 		fmt.Fprintln(out, "\tno field report or handoff recorded")
@@ -407,7 +408,7 @@ func printLastSession(cmd *cobra.Command, repo string, s *sessions.SessionSummar
 	}
 	for _, a := range s.Artifacts {
 		fmt.Fprintf(out, "\t%s · %s\n\t  %s\n",
-			sanitizeTerm(a.Type), sanitizeTerm(a.Title), sanitizeTerm(a.Path))
+			safeTerm(a.Type), safeTerm(a.Title), safeTerm(a.Path))
 	}
 	return nil
 }
@@ -430,11 +431,14 @@ func humanTs(t *time.Time) string {
 	return "unknown"
 }
 
-// sanitizeTerm is this package's local alias for termsafe.Sanitize: non-tab Cc
-// controls and Unicode Bidi_Control formatting characters become spaces; tab
-// and every other rune pass through. The alias keeps this package's call sites
-// reading at their own altitude; internal/termsafe owns the behavior and fuzz
-// coverage.
-func sanitizeTerm(s string) string {
-	return termsafe.Sanitize(s)
+// safeTerm is this package's local alias for termsafe.SafeLine: every unsafe or
+// non-graphic rune is visibly quoted, so an untrusted value renders as one inert
+// physical line. The alias keeps this package's call sites reading at their own
+// altitude; internal/termsafe owns the behavior and its fuzz coverage.
+//
+// It is for HUMAN sinks only. A --json surface encodes through
+// termsafe.JSONEncoder, which escapes without rewriting — quoting a value there
+// would corrupt the machine contract.
+func safeTerm(s string) string {
+	return termsafe.SafeLine(s)
 }

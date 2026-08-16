@@ -105,7 +105,7 @@ func TestIntegrationWhyZeroLimitReturnsEmpty(t *testing.T) {
 // the trigram fallback (or worse, error). The 'english' config still forms
 // lexemes for non-English scripts via the default parser, so this pins that
 // unicode.IsLetter-shaped input is a first-class query, not just something
-// sanitizeTerm has to render safely on the way back out.
+// safeTerm has to render safely on the way back out.
 func TestIntegrationWhyUnicodeTopic(t *testing.T) {
 	dsn := concordanceDSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

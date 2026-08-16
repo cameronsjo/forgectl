@@ -26,7 +26,9 @@ func openDocsTokenFile(path string) (openedDocsTokenFile, error) {
 	}
 	after, err := file.Stat()
 	if err != nil {
-		return nil, closeInvalidDocsTokenFile(file, wrapDocsTokenDescriptorError("inspect opened", displayPath, err))
+		// The raw path, matching :18 and :25 above: wrapDocsTokenDescriptorError
+		// renders it itself, and QuotePath is not idempotent.
+		return nil, closeInvalidDocsTokenFile(file, wrapDocsTokenDescriptorError("inspect opened", path, err))
 	}
 	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
 		return nil, closeInvalidDocsTokenFile(file, fmt.Errorf("token file changed while opening: %s", displayPath))

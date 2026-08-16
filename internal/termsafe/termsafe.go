@@ -1,8 +1,22 @@
 // Package termsafe holds primitives for writing untrusted text to a terminal.
-// Sanitize maps non-tab Cc controls and Unicode Bidi_Control formatting
-// characters to spaces; tab and every other rune pass through.
-// SafeLine and QuotePath are stronger final-output boundaries: they visibly
-// quote unsafe and non-graphic runes instead of deleting or replacing them.
+// SafeLine and QuotePath are the human-output boundary: they visibly quote
+// unsafe and non-graphic runes rather than deleting or replacing them, so the
+// operator sees that something was there. JSONEncoder is the machine-output
+// boundary, and is value-preserving instead — a --json document must hand back
+// the stored bytes exactly.
+//
+// This package deliberately exports no weaker text primitive. An earlier
+// Sanitize mapped non-tab Cc controls and Unicode Bidi_Control characters to
+// spaces, which was both lossy (the operator could not tell a space from a
+// suppressed control) and short: U+2028, U+2029, U+200B, U+00AD and U+2060 are
+// none of those classes and passed through it untouched (#281). Every sink that
+// used it now takes SafeLine or QuotePath.
+//
+// One weaker sanitizer still lives OUTSIDE this package — internal/cli's
+// sanitizeCell, which maps only C0 and DEL and so passes C1 and bidi through.
+// It renders PR titles, and moving it is an output-contract decision rather
+// than a substitution, tracked in #324. Naming it here is the point: a package
+// doc claiming a clean sweep it has not made is what the next author trusts.
 //
 // Named termsafe rather than term because golang.org/x/term is already
 // imported unqualified as `term` in internal/cli and internal/launch — the two
@@ -27,17 +41,6 @@ import (
 // additional runes, but must not broaden this shared classification.
 func IsUnsafeTerminalRune(r rune) bool {
 	return unicode.IsControl(r) || unicode.In(r, unicode.Bidi_Control)
-}
-
-// Sanitize maps non-tab Cc controls and Unicode Bidi_Control formatting
-// characters to spaces; tab and every other rune pass through.
-func Sanitize(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '\t' || !IsUnsafeTerminalRune(r) {
-			return r
-		}
-		return ' '
-	}, s)
 }
 
 // SafeLine turns arbitrary text into one inert physical terminal line. Go's

@@ -407,3 +407,44 @@ func TestMayContainUnsafe_AlsoCatchesInvalidUTF8(t *testing.T) {
 		t.Error("prefilter claimed a document with nothing to escape may contain an unsafe rune")
 	}
 }
+
+// TestJSONEncoder_InvalidUTF8IsReplacedNotPreserved pins the boundary of the
+// preservation claim on JSONEncoder's doc comment. A Go string can hold bytes
+// that are not valid UTF-8 — a Unix path is the realistic case, since the kernel
+// constrains only NUL and '/' — and encoding/json substitutes U+FFFD for them.
+// So the round trip is byte-exact for valid UTF-8 and lossy outside it.
+//
+// This is stdlib behaviour rather than something this filter introduces, and the
+// retired Sanitize (strings.Map) mangled the same input the same way, so nothing
+// regressed. The test exists because the CLAIM is new: a doc comment promising
+// the operator's exact stored bytes is one an author will rely on, and it needs
+// its edge stated rather than discovered.
+func TestJSONEncoder_InvalidUTF8IsReplacedNotPreserved(t *testing.T) {
+	const replacement = "\uFFFD"
+	for name, value := range map[string]string{
+		"lone continuation": "path/" + string([]byte{0xAE}),
+		"unpaired FF":       "path/" + string([]byte{0xFF}),
+		"truncated 3-byte":  "path/" + string([]byte{0xE2, 0x80}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := JSONEncoder(&buf).Encode(value); err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			var decoded string
+			if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if decoded == value {
+				t.Fatalf("invalid UTF-8 round-tripped intact (%q) — the doc comment scopes "+
+					"preservation to valid UTF-8; if this now holds, widen the claim", decoded)
+			}
+			if !strings.Contains(decoded, replacement) {
+				t.Fatalf("decoded %q carries no U+FFFD; invalid bytes must be REPLACED, not dropped", decoded)
+			}
+			if !strings.HasPrefix(decoded, "path/") {
+				t.Fatalf("decoded %q lost the valid prefix", decoded)
+			}
+		})
+	}
+}

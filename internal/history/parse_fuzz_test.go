@@ -36,6 +36,14 @@ func FuzzParse(f *testing.F) {
 	for _, seed := range seeds {
 		f.Add([]byte(seed))
 	}
+	// The fold bound needs its own seeds: reaching it takes thousands of
+	// consecutive continuation lines, and a single mutated line without a
+	// trailing backslash resets the run — so mutation will not find it from
+	// the short seeds above. One seed sits just under the bound and one just
+	// over, so the fuzzer can mutate across the boundary rather than only
+	// past it.
+	f.Add([]byte(strings.Repeat("a\\\n", MaxContinuationLines-1) + "done\n"))
+	f.Add([]byte(strings.Repeat("a\\\n", MaxContinuationLines+1)))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		entries, err := Parse(data)

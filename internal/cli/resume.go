@@ -154,7 +154,7 @@ func runResume(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMig
 	}
 	if len(sessions) == 0 {
 		if filter != "" {
-			return WithExitCode(fmt.Errorf("no session matched %q — try `forgectl resume ls` to see what's there", sanitizeTerm(filter)), 1)
+			return WithExitCode(fmt.Errorf("no session matched %q — try `forgectl resume ls` to see what's there", safeTerm(filter)), 1)
 		}
 		return WithExitCode(fmt.Errorf("no recent sessions found"), 1)
 	}
@@ -211,7 +211,7 @@ func ambiguousMatch(cmd *cobra.Command, sessions []resume.Session, filter string
 
 	matched := "recent sessions to choose from"
 	if filter != "" {
-		matched = fmt.Sprintf("sessions matched %q", sanitizeTerm(filter))
+		matched = fmt.Sprintf("sessions matched %q", safeTerm(filter))
 	}
 	reason := "there is no terminal to pick on"
 	if dryRun {
@@ -373,16 +373,16 @@ func sessionRow(s resume.Session) string {
 }
 
 // sessionRowWidth renders one row at an explicit layout. Every field is
-// disk-sourced, so every field goes through sanitizeTerm.
+// disk-sourced, so every field goes through safeTerm.
 func sessionRowWidth(s resume.Session, l rowLayout) string {
 	name := s.Name
 	if name == "" {
 		name = s.ID
 	}
 	row := fmt.Sprintf("%s %s %s %s",
-		cell(sanitizeTerm(name), l.name),
-		cell(sanitizeTerm(s.Repo), l.repo),
-		cell(sanitizeTerm(s.Branch), l.branch),
+		cell(safeTerm(name), l.name),
+		cell(safeTerm(s.Repo), l.repo),
+		cell(safeTerm(s.Branch), l.branch),
 		relativeTime(s.LastActive))
 	switch {
 	case s.Live:
@@ -427,7 +427,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	if s.Live && !fork {
 		blocked = WithExitCode(fmt.Errorf(
 			"session %s (%s) is still running as pid %d — continuing it a second time would corrupt the transcript; switch to that terminal, or pass --fork to branch a new session off it",
-			sanitizeTerm(displayName(s)), sanitizeTerm(s.ID), s.Pid), 2)
+			safeTerm(displayName(s)), safeTerm(s.ID), s.Pid), 2)
 	}
 	// Refuse immediately unless this is a dry-run. Deferring it would make the
 	// refusal depend on claude being installed and the cwd still existing,
@@ -436,7 +436,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 		return blocked
 	}
 	if s.Cwd == "" {
-		return WithExitCode(fmt.Errorf("session %s has no recorded working directory to resume into", sanitizeTerm(s.ID)), 1)
+		return WithExitCode(fmt.Errorf("session %s has no recorded working directory to resume into", safeTerm(s.ID)), 1)
 	}
 
 	// Confirm the target is a real directory BEFORE anything writes. Task
@@ -451,7 +451,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	// would have left the hole open.
 	if fi, err := os.Stat(s.Cwd); err != nil || !fi.IsDir() {
 		return WithExitCode(fmt.Errorf("session %s records a working directory that is not there: %s",
-			sanitizeTerm(s.ID), sanitizeTerm(s.Cwd)), 1)
+			safeTerm(s.ID), safeTerm(s.Cwd)), 1)
 	}
 
 	lc, _ := resolveLaunchConfig(boundary, cfg)
@@ -472,10 +472,10 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	// `workflow run --dry-run`.
 	if dryRun {
 		out := cmd.OutOrStdout()
-		fmt.Fprintf(out, "session %s\n", sanitizeTerm(s.ID))
-		fmt.Fprintf(out, "name    %s\n", sanitizeTerm(displayName(s)))
-		fmt.Fprintf(out, "cwd     %s\n", sanitizeTerm(s.Cwd))
-		fmt.Fprintf(out, "exec    %s %s\n", sanitizeTerm(claudePath), sanitizeTerm(strings.Join(args, " ")))
+		fmt.Fprintf(out, "session %s\n", safeTerm(s.ID))
+		fmt.Fprintf(out, "name    %s\n", safeTerm(displayName(s)))
+		fmt.Fprintf(out, "cwd     %s\n", safeTerm(s.Cwd))
+		fmt.Fprintf(out, "exec    %s %s\n", safeTerm(claudePath), safeTerm(strings.Join(args, " ")))
 		fmt.Fprintf(out, "tasks   %d held%s\n", len(s.Tasks), forkTaskNote(fork))
 		if blocked != nil {
 			fmt.Fprintf(out, "blocked live — pid %d; add --fork to branch instead\n", s.Pid)
@@ -516,11 +516,11 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	}
 
 	if err := os.Chdir(s.Cwd); err != nil {
-		return WithExitCode(fmt.Errorf("enter %s: %s", sanitizeTerm(s.Cwd), sanitizeTerm(err.Error())), 1)
+		return WithExitCode(fmt.Errorf("enter %s: %s", safeTerm(s.Cwd), safeTerm(err.Error())), 1)
 	}
 
 	env := launch.MergeEnv(os.Environ(), launch.MergeMaps(bench.TelemetryEnv(cfg), profile.Env))
-	fmt.Fprintf(errOut, "forgectl: resuming %s in %s\n", sanitizeTerm(displayName(s)), sanitizeTerm(s.Cwd))
+	fmt.Fprintf(errOut, "forgectl: resuming %s in %s\n", safeTerm(displayName(s)), safeTerm(s.Cwd))
 	slog.Debug("Preparing to exec claude for a resume.", "session", s.ID, "cwd", s.Cwd, "fork", fork)
 
 	// After the chdir, so a failed chdir records nothing, and after the task
@@ -620,20 +620,21 @@ type sessionDTO struct {
 
 // printSessions renders `resume ls`.
 //
-// Both paths strip control bytes from every disk-sourced field, and the JSON
-// path must do it explicitly: encoding/json escapes only 0x00–0x1F, so DEL and
-// the C1 range (0x80–0x9F, including 0x9B = single-byte CSI) would otherwise
-// reach a terminal raw through --json. A session name is whatever was typed at
-// /rename, and an ai-title is model-generated — neither is trusted markup.
+// Every field is disk-sourced and untrusted — a session name is whatever was
+// typed at /rename, and an ai-title is model-generated — so each path applies
+// the control built for its own sink. The text path quotes through safeTerm.
+// The JSON path passes the stored value through and lets writeJSON's
+// termsafe.JSONEncoder escape it, because a `resume ls --json | jq -r .cwd`
+// must return a path that still resolves.
 func printSessions(out, errOut io.Writer, sessions []resume.Session, asJSON bool) error {
 	if asJSON {
 		dto := make([]sessionDTO, 0, len(sessions))
 		for _, s := range sessions {
 			dto = append(dto, sessionDTO{
-				ID: sanitizeTerm(s.ID), Name: sanitizeTerm(s.Name), NameSource: sanitizeTerm(s.NameSource),
-				Repo: sanitizeTerm(s.Repo), Branch: sanitizeTerm(s.Branch), Cwd: sanitizeTerm(s.Cwd),
-				LastActive: s.LastActive.UTC().Format(time.RFC3339), LastPrompt: sanitizeTerm(s.LastPrompt),
-				Version: sanitizeTerm(s.Version), Live: s.Live, Pid: s.Pid, Tasks: len(s.Tasks),
+				ID: s.ID, Name: s.Name, NameSource: s.NameSource,
+				Repo: s.Repo, Branch: s.Branch, Cwd: s.Cwd,
+				LastActive: s.LastActive.UTC().Format(time.RFC3339), LastPrompt: s.LastPrompt,
+				Version: s.Version, Live: s.Live, Pid: s.Pid, Tasks: len(s.Tasks),
 			})
 		}
 		return writeJSON(out, dto)
@@ -648,9 +649,9 @@ func printSessions(out, errOut io.Writer, sessions []resume.Session, asJSON bool
 	l := layoutFor(sessions, writerWidth(out))
 	for _, s := range sessions {
 		fmt.Fprintln(out, sessionRowWidth(s, l))
-		fmt.Fprintf(out, "\t%s\n", sanitizeTerm(s.Cwd))
+		fmt.Fprintf(out, "\t%s\n", safeTerm(s.Cwd))
 		if s.LastPrompt != "" {
-			fmt.Fprintf(out, "\t%s\n", sanitizeTerm(s.LastPrompt))
+			fmt.Fprintf(out, "\t%s\n", safeTerm(s.LastPrompt))
 		}
 	}
 	fmt.Fprintf(errOut, "%d session(s)\n", len(sessions))
