@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -158,6 +159,20 @@ func (e *CommandError) Unwrap() error { return e.Err }
 // or -1 when err doesn't wrap one (the command never started, the context
 // was canceled, …) — -1 is never a real exit code, so it's a safe "unknown"
 // sentinel for callers comparing against a specific status.
+// signaledDeath reports whether a child died to a signal rather than returning
+// from main. A process stopped that way did not finish writing by definition,
+// so whatever it had already produced is a prefix — regardless of who sent the
+// signal. This is the one death mode a reader cannot infer: killing a process
+// closes its write ends, so its reader sees an ordinary io.EOF.
+func signaledDeath(err error) bool {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		return false
+	}
+	status, ok := ee.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled()
+}
+
 func exitCodeOf(err error) int {
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {

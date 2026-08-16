@@ -140,9 +140,23 @@ func failedResult() SensitiveResult { return SensitiveResult{ExitCode: -1} }
 // RunSensitive runs one bounded command. Nothing it logs or returns can render
 // the path, the argv, or the environment; stdout and stderr are captured
 // concurrently into fixed buffers that cannot exceed the caps; and every
-// abnormal ending — overflow, timeout, cancellation, or a descendant holding a
-// pipe past the bound — kills and reaps the immediate CLI, retires both pipe
-// ends, and reports a stream that stopped short as incomplete.
+// abnormal ending retires both pipe ends and reports a stream that stopped
+// short as incomplete.
+//
+// Only some of those endings involve a kill. Overflow, timeout, and
+// cancellation kill and reap the immediate CLI. A descendant holding a pipe
+// past the retirement bound does not: the immediate CLI has already exited and
+// been reaped by then, and the bound only stops us waiting on whatever
+// inherited the write end. A signal from outside — the OOM killer, a
+// supervisor, an operator — kills the child without this runner's involvement
+// at all.
+//
+// Truncation is carried by BoundedOutput.Complete, not by the returned error.
+// On a zero-exit run there is no error to check: a backend that daemonises
+// leaves a descendant holding the pipe, which is a successful run by every
+// measure except that we stopped listening. A caller that parses output must
+// read the completeness flag; CopyBytesForParse returns it alongside the bytes
+// so it cannot be skipped by accident.
 func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveCommand) (SensitiveResult, error) {
 	if err := sc.validate(); err != nil {
 		slog.Debug("Refusing sensitive command before start.", "cmd", sc, "reason", err.Error())
@@ -240,7 +254,7 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 	// parsable even when stderr's reader was the one still held.
 	killed := trigger != OutcomeUnspecified
 	stdout, stderr := r.retire(killed, sc.Kind, outR, errR, outCh, errCh)
-	if killed {
+	if killed || signaledDeath(waitErr) {
 		// The one cause readCapped cannot see. Killing the child closes every
 		// write end, so its reader gets a genuine io.EOF and correctly reports
 		// that the stream ended — while the reason it ended is that the
@@ -250,6 +264,13 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 		// prefix. This is the likeliest truncation of all — it is what a
 		// timeout, a cancellation, and an overflow on the other stream all
 		// produce.
+		//
+		// A signal this runner never sent lands here too. Keying only on our own
+		// trigger would miss the OOM killer, a supervisor, an operator's kill,
+		// and a SIGSEGV in the CLI — all of which stop a producer mid-write and
+		// none of which readCapped or the trigger can see. The question is not
+		// whether we pulled the trigger; it is whether the stream ended on its
+		// own terms.
 		stdout.forced, stderr.forced = true, true
 	}
 
