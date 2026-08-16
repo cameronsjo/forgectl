@@ -281,10 +281,10 @@ func TestOpaqueValues_RedactUnderEveryRenderingVerb(t *testing.T) {
 			Args: []Arg{Opaque(secret)}, Env: []EnvMutation{ReplaceCmuxSocketPath(secret)},
 			StdoutCap: 1, StderrCap: 1,
 		},
-		"BoundedOutput": BoundedOutputForTest([]byte(secret), true),
+		"BoundedOutput": BoundedOutputForTest([]byte(secret), OutputComplete),
 		"result": SensitiveResult{
-			Stdout: BoundedOutputForTest([]byte(secret), true),
-			Stderr: BoundedOutputForTest([]byte(secret), false),
+			Stdout: BoundedOutputForTest([]byte(secret), OutputComplete),
+			Stderr: BoundedOutputForTest([]byte(secret), OutputOverflowed),
 		},
 		"error": newSensitiveError(KindCmuxCreate, OutcomeExit, SensitiveResult{}, "process reported a nonzero status"),
 	}
@@ -319,10 +319,10 @@ func TestFixedArg_RejectsUnsafeConstants(t *testing.T) {
 		"oversize":      strings.Repeat("a", maxFixedArgBytes+1),
 	}
 	for name, value := range cases {
-		if _, err := Fixed(value); err == nil {
-			t.Errorf("Fixed(%s) was accepted; expected a refusal", name)
+		if _, err := fixed(value); err == nil {
+			t.Errorf("fixed(%s) was accepted; expected a refusal", name)
 		} else if !errors.Is(err, ErrInvalidCommand) {
-			t.Errorf("Fixed(%s) returned %v, want ErrInvalidCommand", name, err)
+			t.Errorf("fixed(%s) returned %v, want ErrInvalidCommand", name, err)
 		}
 	}
 
@@ -334,9 +334,24 @@ func TestFixedArg_RejectsUnsafeConstants(t *testing.T) {
 		}
 	}
 
-	if _, err := Fixed("new-session"); err != nil {
-		t.Errorf("Fixed rejected a legitimate constant: %v", err)
+	if _, err := fixed("new-session"); err != nil {
+		t.Errorf("fixed rejected a legitimate constant: %v", err)
 	}
+
+	// fixed stays unexported so a dynamic value cannot be laundered through it
+	// to escape the leading-dash refusal — a fixed argument is exempt from that
+	// check by design. MustFixed panics, so it is usable only on a literal.
+	// This assertion is the compile-time one: if fixed were exported, the
+	// package's own test could not tell. What it can pin is that the exempt
+	// class is reachable only through a panicking constructor.
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("MustFixed accepted a value fixed refuses; the exempt class is not gated")
+			}
+		}()
+		MustFixed(string(rune(0x1B)) + "[31m")
+	}()
 }
 
 // TestSensitiveCommand_ValidateRefusesBeforeStart covers every pre-start
@@ -479,7 +494,6 @@ func TestOutcomes_RemainDistinguishable(t *testing.T) {
 		{OutcomeTimeout, ErrTimeout},
 		{OutcomeCanceled, ErrCanceled},
 		{OutcomeOutputLimit, ErrOutputLimit},
-		{OutcomeTruncated, ErrTruncated},
 	}
 	for _, p := range pairs {
 		err := newSensitiveError(KindTmuxProbe, p.outcome, SensitiveResult{}, "")
@@ -501,7 +515,7 @@ func TestOutcomes_RemainDistinguishable(t *testing.T) {
 // mutate the runner's buffer and cannot receive partial bytes without also
 // receiving the flag that says they are partial — for either cause.
 func TestBoundedOutput_CopyIsFreshAndCarriesCompleteness(t *testing.T) {
-	bo := BoundedOutputForTest([]byte("abc"), true)
+	bo := BoundedOutputForTest([]byte("abc"), OutputComplete)
 	first, complete := bo.CopyBytesForParse()
 	if !complete {
 		t.Error("a complete output reported incomplete")
@@ -512,7 +526,7 @@ func TestBoundedOutput_CopyIsFreshAndCarriesCompleteness(t *testing.T) {
 		t.Errorf("mutating the copy changed the source: %q", second)
 	}
 
-	overflowed := BoundedOutputForTest([]byte("abc"), false)
+	overflowed := BoundedOutputForTest([]byte("abc"), OutputOverflowed)
 	if _, complete := overflowed.CopyBytesForParse(); complete {
 		t.Error("overflow output reported itself complete; it must never pass as a whole schema")
 	}
@@ -523,8 +537,10 @@ func TestBoundedOutput_CopyIsFreshAndCarriesCompleteness(t *testing.T) {
 	// A force-retired stream never hit its cap, so overflow is false — and it
 	// must still report incomplete. Collapsing the two causes into one bool is
 	// exactly how a cut-off prefix would reach a parser marked whole.
-	cutOff := BoundedOutputForTest([]byte("abc"), true)
-	cutOff.forced = true
+	cutOff := BoundedOutputForTest([]byte("abc"), OutputRetired)
+	if cutOff.overflow {
+		t.Error("a retired stream claimed its cap was hit")
+	}
 	if cutOff.Complete() {
 		t.Error("a force-retired stream reported itself complete")
 	}
@@ -589,6 +605,55 @@ func TestFakeSensitiveRunner_ComparesOpaqueValues(t *testing.T) {
 	// argument: the classification is part of the identity.
 	if Opaque("run").Equal(MustFixed("run")) {
 		t.Error("an opaque value compared equal to a fixed constant")
+	}
+}
+
+// TestFakeSensitiveRunner_RefusesWhatProductionRefuses closes the gap that made
+// every guard in this seam invisible to the tests written against it. The fake
+// is the only surface an adapter is developed on, so a command production
+// rejects before fork/exec must not read as a clean success here.
+func TestFakeSensitiveRunner_RefusesWhatProductionRefuses(t *testing.T) {
+	valid := SensitiveCommand{
+		Kind:      KindTmuxCreate,
+		Path:      Secret("/usr/bin/true"),
+		Args:      []Arg{MustFixed("-V")},
+		StdoutCap: 1024,
+		StderrCap: 1024,
+	}
+
+	cases := map[string]func(*SensitiveCommand){
+		"relative path":       func(c *SensitiveCommand) { c.Path = Secret("true") },
+		"dash-leading opaque": func(c *SensitiveCommand) { c.Args = []Arg{Opaque("-rf")} },
+		"empty replace value": func(c *SensitiveCommand) { c.Env = []EnvMutation{ReplaceCmuxSocketPath("")} },
+		"duplicate env key":   func(c *SensitiveCommand) { c.Env = []EnvMutation{SetCmuxQuiet(), SetCmuxQuiet()} },
+		"cap over ceiling":    func(c *SensitiveCommand) { c.StdoutCap = MaxOutputBytes + 1 },
+		"zero kind":           func(c *SensitiveCommand) { c.Kind = KindUnspecified },
+	}
+
+	for name, mutate := range cases {
+		fake := &FakeSensitiveRunner{}
+		cmd := valid
+		mutate(&cmd)
+
+		res, err := fake.RunSensitive(context.Background(), cmd)
+		if !errors.Is(err, ErrInvalidCommand) {
+			t.Errorf("%s: fake returned %v, want ErrInvalidCommand", name, err)
+		}
+		if res.ExitCode != -1 {
+			t.Errorf("%s: fake reported ExitCode %d, want -1", name, res.ExitCode)
+		}
+		if calls := fake.Calls(); len(calls) != 0 {
+			t.Errorf("%s: fake recorded a refused command", name)
+		}
+	}
+
+	// The refusals must be refusals, not a fake that rejects everything.
+	fake := &FakeSensitiveRunner{}
+	if _, err := fake.RunSensitive(context.Background(), valid); err != nil {
+		t.Fatalf("fake refused a valid command: %v", err)
+	}
+	if calls := fake.Calls(); len(calls) != 1 {
+		t.Fatalf("fake recorded %d calls for one valid command", len(calls))
 	}
 }
 

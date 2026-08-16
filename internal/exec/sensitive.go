@@ -144,6 +144,12 @@ func redactedJSON() ([]byte, error) { return []byte(strconv.Quote(Redacted)), ni
 // every depth, so reflection has nothing to reach.
 //
 // The cost is that this type is no longer comparable with ==; use Equal.
+//
+// Every constructor here closes over an immutable string, so reveal is pure
+// and repeatable. That is load-bearing, not incidental: validate reveals to
+// check the path and the argv, and buildCmd reveals again to fill exec.Cmd.
+// A constructor accepting a caller-supplied func would make that pair a
+// time-of-check/time-of-use gap while looking like a natural extension.
 type SecretArg struct {
 	reveal func() string
 }
@@ -197,10 +203,16 @@ type Arg struct {
 	kind   argKind
 }
 
-// Fixed builds an argv element from a backend constant such as "new-session"
+// fixed builds an argv element from a backend constant such as "new-session"
 // or "-t". It refuses invalid UTF-8, control characters, and oversize input so
 // a mistyped constant cannot smuggle a terminal escape into an argv.
-func Fixed(v string) (Arg, error) {
+//
+// It is deliberately unexported. A fixed argument is exempt from the
+// leading-dash refusal below — MustFixed("-t") is the whole point — so an
+// exported, error-returning constructor taking a runtime string would be the
+// obvious way to launder a dynamic value past that check. MustFixed panics,
+// which makes it usable only on a literal a human wrote.
+func fixed(v string) (Arg, error) {
 	switch {
 	case v == "":
 		return Arg{}, fmt.Errorf("%w: fixed argument is empty", ErrInvalidCommand)
@@ -217,11 +229,12 @@ func Fixed(v string) (Arg, error) {
 	return Arg{reveal: func() string { return v }, kind: argFixed}, nil
 }
 
-// MustFixed is Fixed for package-level constants whose validity is a property
-// of the source text. It panics on a bad constant, which is a startup failure,
-// not a runtime error path.
+// MustFixed builds an argv element from a backend constant whose validity is a
+// property of the source text. It panics on a bad constant, which is a startup
+// failure, not a runtime error path — and which is what keeps a dynamic value
+// from being routed through here to escape the leading-dash refusal.
 func MustFixed(v string) Arg {
-	a, err := Fixed(v)
+	a, err := fixed(v)
 	if err != nil {
 		panic(err)
 	}
@@ -238,8 +251,11 @@ func MustFixed(v string) Arg {
 // own redaction is what would make the resulting argv hard to diagnose.
 func Opaque(v string) Arg { return Arg{reveal: func() string { return v }, kind: argOpaque} }
 
-// EndOfOptions is the literal "--" separator. Every opaque argument after it
-// is passed as an operand no matter what it begins with.
+// EndOfOptions is the literal "--" separator. Its scope is everything after
+// it: once present, no later opaque argument is checked for a leading dash, so
+// emit it immediately before the operands rather than early. That the backend
+// honours "--" at the specific subcommand is the caller's assertion — the seam
+// cannot check it, and a second separator reaches the argv as a literal operand.
 func EndOfOptions() Arg {
 	return Arg{reveal: func() string { return "--" }, kind: argEndOfOptions}
 }
@@ -484,6 +500,10 @@ func validCap(stream string, limit int64) error {
 // reached through an unexported field renders as an address rather than as the
 // decimal byte dump reflection would otherwise produce. Same containment
 // reasoning as SecretArg's closure.
+//
+// Both the type and the field are unexported, so no importer can reach them.
+// Inside this package they can: %#v on a bare *outputBuf dumps the bytes, so
+// never hand one to slog or fmt directly — log the BoundedOutput.
 type outputBuf struct{ data []byte }
 
 // BoundedOutput owns at most one stream's cap worth of bytes. It renders as
@@ -514,6 +534,13 @@ func (b BoundedOutput) Len() int {
 // Complete reports whether the stream was read to EOF within its cap. False
 // means the retained bytes are a prefix — because the stream exceeded the cap,
 // or because the read end was retired before EOF.
+//
+// A successful run can report false, and for the backends this seam exists to
+// drive that is the expected case rather than an anomaly: a daemon the command
+// spawned inherits the write end and outlives the command, so the runner
+// retires the pipe on its own schedule. That is why a cut-off stream is not an
+// error — the command did what it was asked — and why a caller that parses
+// output must read this flag rather than the returned error.
 func (b BoundedOutput) Complete() bool { return !b.overflow && !b.forced }
 
 // CopyBytesForParse returns a fresh copy of the retained bytes and whether
@@ -612,13 +639,6 @@ const (
 	OutcomeCanceled
 	// OutcomeOutputLimit means a stream exceeded its cap and the process was killed.
 	OutcomeOutputLimit
-	// OutcomeTruncated means the command itself succeeded but a stream was cut
-	// off before EOF, because a descendant still held the pipe when the
-	// retirement bound expired. It is deliberately not OutcomeOutputLimit: no
-	// cap was reached, and a caller deciding whether to retry needs to know
-	// the difference between "the backend said too much" and "we stopped
-	// listening".
-	OutcomeTruncated
 
 	outcomeCount
 )
@@ -631,7 +651,6 @@ var outcomeNames = [outcomeCount]string{
 	OutcomeTimeout:     "timeout",
 	OutcomeCanceled:    "canceled",
 	OutcomeOutputLimit: "output_limit",
-	OutcomeTruncated:   "truncated",
 }
 
 func (o Outcome) String() string {
@@ -651,7 +670,6 @@ var (
 	ErrTimeout        = errors.New("exec: sensitive command timed out")
 	ErrCanceled       = errors.New("exec: sensitive command canceled")
 	ErrOutputLimit    = errors.New("exec: sensitive command exceeded its output ceiling")
-	ErrTruncated      = errors.New("exec: sensitive command output was cut off before end of stream")
 )
 
 var outcomeSentinels = [outcomeCount]error{
@@ -661,7 +679,6 @@ var outcomeSentinels = [outcomeCount]error{
 	OutcomeTimeout:     ErrTimeout,
 	OutcomeCanceled:    ErrCanceled,
 	OutcomeOutputLimit: ErrOutputLimit,
-	OutcomeTruncated:   ErrTruncated,
 }
 
 // SensitiveError is the only error type this seam returns. Every field is

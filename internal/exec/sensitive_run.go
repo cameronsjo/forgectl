@@ -216,21 +216,17 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 	select {
 	case waitErr = <-waitCh:
 	default:
+		// An overflow already signalled outranks a simultaneously-ready
+		// cancellation for the same reason completion does: the classification
+		// is what a caller retries on, and a coin flip between "the backend said
+		// too much" and "we ran out of time" is a misleading answer to that.
 		select {
-		case waitErr = <-waitCh:
-			// The immediate CLI is done. A descendant may still hold a pipe;
-			// the retirement below is what bounds that.
-		case <-ctx.Done():
-			trigger = OutcomeCanceled
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				trigger = OutcomeTimeout
-			}
-			kill()
-			waitErr = <-waitCh
 		case <-overflow:
 			trigger = OutcomeOutputLimit
 			kill()
 			waitErr = <-waitCh
+		default:
+			trigger, waitErr = r.awaitOutcome(ctx, waitCh, overflow, kill)
 		}
 	}
 
@@ -238,13 +234,11 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 	// waiting for, so the read ends close immediately; on a clean exit the
 	// readers get the bound to drain what the CLI already wrote before the
 	// same force-close applies to whatever descendant inherited the pipe.
-	stdout, stderr, forced := r.retire(trigger != OutcomeUnspecified, sc.Kind, outR, errR, outCh, errCh)
-	if forced {
-		// A force-closed read returns os.ErrClosed, not io.EOF, so the reader
-		// cannot tell a retired stream from a finished one. Marking here is
-		// what keeps a cut-off prefix from reporting itself complete.
-		stdout.forced, stderr.forced = true, true
-	}
+	// A force-closed read returns os.ErrClosed, not io.EOF, so a reader cannot
+	// tell a retired stream from a finished one. retire marks the streams it
+	// actually cut off, per stream — a stdout that reached EOF stays parsable
+	// even when stderr's reader was the one still held.
+	stdout, stderr := r.retire(trigger != OutcomeUnspecified, sc.Kind, outR, errR, outCh, errCh)
 
 	// Overflow can also surface after the fact: a reader that filled its
 	// buffer while the process was already exiting signals on a channel nobody
@@ -254,12 +248,13 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 		trigger = OutcomeOutputLimit
 		kill()
 	}
-	// A clean exit whose output was cut off is its own outcome: no cap was
-	// reached and the command itself succeeded, but the bytes are a prefix and
-	// a caller must not parse them as a whole response.
-	if trigger == OutcomeUnspecified && waitErr == nil && (!stdout.Complete() || !stderr.Complete()) {
-		trigger = OutcomeTruncated
-	}
+	// A clean exit whose output was cut off is deliberately NOT an error. Every
+	// backend this seam drives spawns a daemon that inherits the write end and
+	// outlives the command, so the retirement bound expiring is the normal shape
+	// of a successful create — returning an error there would make the obvious
+	// handling (retry) produce a duplicate session. BoundedOutput.Complete
+	// carries it instead, and CopyBytesForParse hands the caller that flag
+	// alongside the bytes.
 
 	res := SensitiveResult{Stdout: stdout, Stderr: stderr, ExitCode: 0}
 	if waitErr != nil {
@@ -284,6 +279,29 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 	return res, nil
 }
 
+// awaitOutcome blocks until the process finishes, the context ends, or a
+// stream overflows, killing and reaping on the latter two. It is the arm the
+// caller reaches only after the non-blocking checks found nothing already
+// ready, so its own uniform select is between genuinely concurrent events.
+func (r *OSSensitiveRunner) awaitOutcome(ctx context.Context, waitCh chan error, overflow chan struct{}, kill func()) (Outcome, error) {
+	select {
+	case waitErr := <-waitCh:
+		// The immediate CLI is done. A descendant may still hold a pipe; the
+		// retirement below is what bounds that.
+		return OutcomeUnspecified, waitErr
+	case <-ctx.Done():
+		trigger := OutcomeCanceled
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			trigger = OutcomeTimeout
+		}
+		kill()
+		return trigger, <-waitCh
+	case <-overflow:
+		kill()
+		return OutcomeOutputLimit, <-waitCh
+	}
+}
+
 func retireReason(o Outcome) string {
 	switch o {
 	case OutcomeTimeout:
@@ -292,8 +310,6 @@ func retireReason(o Outcome) string {
 		return "context canceled; process killed"
 	case OutcomeOutputLimit:
 		return "stream exceeded its cap; process killed"
-	case OutcomeTruncated:
-		return "pipe retired before end of stream; output is a prefix"
 	default:
 		return ""
 	}
@@ -302,13 +318,14 @@ func retireReason(o Outcome) string {
 // retire collects both readers and guarantees the call returns even when a
 // descendant still holds a write end. Closing an *os.File interrupts a Read
 // blocked on it, so the force-close is what unblocks a reader no EOF is ever
-// coming for. The returned bool reports whether that force-close happened
-// before the readers finished — the caller needs it, because a force-closed
+// coming for. Each stream it cuts off is marked forced, because a force-closed
 // Read returns os.ErrClosed and is otherwise indistinguishable from EOF.
-func (r *OSSensitiveRunner) retire(immediate bool, kind CommandKind, outR, errR *os.File, outCh, errCh <-chan BoundedOutput) (BoundedOutput, BoundedOutput, bool) {
+func (r *OSSensitiveRunner) retire(immediate bool, kind CommandKind, outR, errR *os.File, outCh, errCh <-chan BoundedOutput) (BoundedOutput, BoundedOutput) {
 	if immediate {
 		closeAll(outR, errR)
-		return <-outCh, <-errCh, true
+		stdout, stderr := <-outCh, <-errCh
+		stdout.forced, stderr.forced = true, true
+		return stdout, stderr
 	}
 
 	timer := time.NewTimer(r.bound())
@@ -332,17 +349,21 @@ func (r *OSSensitiveRunner) retire(immediate bool, kind CommandKind, outR, errR 
 			slog.Warn("Retirement bound expired with a pipe still held; closing it.",
 				"kind", kind.String(), "bound", r.bound())
 			closeAll(outR, errR)
+			// Only the streams still outstanding were cut off; one that
+			// already reached EOF is complete and stays parsable.
 			if !gotOut {
 				stdout = <-outCh
+				stdout.forced = true
 			}
 			if !gotErr {
 				stderr = <-errCh
+				stderr.forced = true
 			}
-			return stdout, stderr, true
+			return stdout, stderr
 		}
 	}
 	closeAll(outR, errR)
-	return stdout, stderr, false
+	return stdout, stderr
 }
 
 // readCapped fills a single fixed buffer of cap+1 bytes and stops. It never

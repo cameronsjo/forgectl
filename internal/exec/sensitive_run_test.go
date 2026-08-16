@@ -286,15 +286,15 @@ func TestRunSensitive_ReturnsWithinBoundWhenDescendantHoldsThePipe(t *testing.T)
 	elapsed := time.Since(start)
 
 	// The immediate CLI exited 0, but a descendant held the pipe past the
-	// bound, so the stream is a prefix. A force-closed Read returns
-	// os.ErrClosed rather than io.EOF, so without an explicit signal this
-	// would be indistinguishable from a complete stream — and a parser would
-	// receive truncated bytes marked whole.
-	if !errors.Is(err, ErrTruncated) {
-		t.Fatalf("err = %v, want ErrTruncated", err)
-	}
-	if errors.Is(err, ErrOutputLimit) {
-		t.Error("a retirement-bound truncation was reported as a cap hit; no cap was reached")
+	// bound, so the stream is a prefix. That is a successful command, not a
+	// failed one — every backend this seam drives spawns a daemon that
+	// inherits the write end, so an error here would make the ordinary create
+	// path look like a failure and invite a duplicate-creating retry. The
+	// prefix has to be visible all the same: a force-closed Read returns
+	// os.ErrClosed rather than io.EOF, so without the explicit flag a parser
+	// would receive truncated bytes marked whole.
+	if err != nil {
+		t.Fatalf("err = %v; a cut-off stream on a zero-exit run is not an error", err)
 	}
 	if res.ExitCode != 0 {
 		t.Errorf("ExitCode = %d; the immediate CLI exited cleanly", res.ExitCode)

@@ -23,10 +23,22 @@ type FakeSensitiveRunner struct {
 	calls []SensitiveCommand
 }
 
-// RunSensitive records the command and delegates to RunFunc. The Args and Env
-// slices are cloned at record time: a caller that reuses a backing array
-// across calls would otherwise rewrite its own recorded history.
+// RunSensitive validates, records, and delegates to RunFunc.
+//
+// It validates for the same reason the production runner does, and refusing to
+// is the more dangerous choice: this fake is the only surface an adapter is
+// developed against, so a fake that accepts a relative path, a dash-leading
+// dynamic value, or an empty environment pin would let an adapter pass its
+// whole suite and fail first in production — against exactly the guards this
+// seam exists to add. A refused command is not recorded: production never ran
+// it either.
+//
+// The Args and Env slices are cloned at record time: a caller that reuses a
+// backing array across calls would otherwise rewrite its own recorded history.
 func (f *FakeSensitiveRunner) RunSensitive(_ context.Context, cmd SensitiveCommand) (SensitiveResult, error) {
+	if err := cmd.validate(); err != nil {
+		return failedResult(), newSensitiveError(cmd.Kind, OutcomeInvalid, failedResult(), err.Error())
+	}
 	recorded := cmd
 	recorded.Args = slices.Clone(cmd.Args)
 	recorded.Env = slices.Clone(cmd.Env)
@@ -58,11 +70,31 @@ func (f *FakeSensitiveRunner) Last() (SensitiveCommand, bool) {
 	return f.calls[len(f.calls)-1], true
 }
 
+// OutputCause names why a test's BoundedOutput is what it is. It exists so a
+// fake cannot say "incomplete" without saying which kind: claiming a cap was
+// hit when the stream was merely retired would have an adapter test assert
+// against a state production never produces.
+type OutputCause uint8
+
+const (
+	// OutputComplete means the stream reached EOF within its cap.
+	OutputComplete OutputCause = iota
+	// OutputOverflowed means the stream exceeded its cap and was killed.
+	OutputOverflowed
+	// OutputRetired means the read end was closed before EOF — the ordinary
+	// outcome when a daemon the command spawned still holds the write end.
+	OutputRetired
+)
+
 // BoundedOutputForTest builds a BoundedOutput a fake can return, so an adapter
 // test can exercise its parsing path without a live backend. It is the only
 // constructor for the type outside the runner, and it copies its input.
-func BoundedOutputForTest(data []byte, complete bool) BoundedOutput {
-	return BoundedOutput{buf: &outputBuf{data: slices.Clone(data)}, overflow: !complete}
+func BoundedOutputForTest(data []byte, cause OutputCause) BoundedOutput {
+	return BoundedOutput{
+		buf:      &outputBuf{data: slices.Clone(data)},
+		overflow: cause == OutputOverflowed,
+		forced:   cause == OutputRetired,
+	}
 }
 
 var _ SensitiveRunner = (*FakeSensitiveRunner)(nil)
