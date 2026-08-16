@@ -13,6 +13,8 @@
 package termsafetest
 
 import (
+	"encoding/hex"
+	"fmt"
 	"testing"
 	"unicode"
 
@@ -47,7 +49,27 @@ func AssertInert(t *testing.T, label, out string) {
 			continue
 		}
 		if termsafe.IsUnsafeTerminalRune(r) || !unicode.IsGraphic(r) {
-			t.Fatalf("%s emitted unsafe rune %q at byte %d\nfull output: %q", label, r, i, out)
+			t.Fatal(inertFailure(label, r, i, out))
 		}
 	}
+}
+
+// inertFailure builds the failure message, and carries the output twice: once
+// as %q for a reader, and once as hex.
+//
+// The hex is the load-bearing half. %q alone produced a failure nobody could
+// diagnose: its escapes are themselves text, so a %q line that is pasted,
+// forwarded, or rendered by a terminal can arrive transformed — and an
+// artifact that cannot be shown to be unedited is not evidence, however
+// precise it looks. A real investigation stalled on exactly that, on a %q
+// artifact carrying a literal RLO that %q can never emit. Hex has no escapes
+// to reinterpret and no characters a terminal will act on, so the bytes that
+// failed are recoverable from the failure message alone.
+//
+// It is a separate function so the message is testable without a failing
+// test: the hex is the whole point of this helper, and a change that dropped
+// or truncated it would otherwise ship green.
+func inertFailure(label string, r rune, i int, out string) string {
+	return fmt.Sprintf("%s emitted unsafe rune %q (U+%04X) at byte %d\nfull output: %q\noutput hex: %s",
+		label, r, r, i, out, hex.EncodeToString([]byte(out)))
 }
