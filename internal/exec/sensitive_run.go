@@ -322,9 +322,31 @@ func retireReason(o Outcome) string {
 // Read returns os.ErrClosed and is otherwise indistinguishable from EOF.
 func (r *OSSensitiveRunner) retire(immediate bool, kind CommandKind, outR, errR *os.File, outCh, errCh <-chan BoundedOutput) (BoundedOutput, BoundedOutput) {
 	if immediate {
+		// Take whatever already finished before closing, so a stream that
+		// reached EOF on its own is not marked as one this call cut off.
+		var (
+			stdout, stderr BoundedOutput
+			gotOut, gotErr bool
+		)
+		select {
+		case stdout = <-outCh:
+			gotOut = true
+		default:
+		}
+		select {
+		case stderr = <-errCh:
+			gotErr = true
+		default:
+		}
 		closeAll(outR, errR)
-		stdout, stderr := <-outCh, <-errCh
-		stdout.forced, stderr.forced = true, true
+		if !gotOut {
+			stdout = <-outCh
+			stdout.forced = true
+		}
+		if !gotErr {
+			stderr = <-errCh
+			stderr.forced = true
+		}
 		return stdout, stderr
 	}
 
@@ -374,16 +396,26 @@ func readCapped(r io.Reader, limit int64, out chan<- BoundedOutput, overflow cha
 	buf := make([]byte, limit+1)
 	n := 0
 	idle := 0
+	// cut records that the stream stopped for a reason other than reaching its
+	// end. Only io.EOF means the stream is whole; a force-close reports
+	// os.ErrClosed, and a pipe whose peer died abnormally can report EIO. Both
+	// leave a prefix that must not be parsed as a complete response, and this is
+	// the only place that distinction is visible — downstream sees a delivered
+	// BoundedOutput either way.
+	cut := false
 	for int64(n) < limit+1 {
 		m, err := r.Read(buf[n:])
 		n += m
 		if err != nil {
+			cut = !errors.Is(err, io.EOF)
 			break
 		}
 		if m == 0 {
 			// io.Reader permits (0, nil); os.File does not produce it, but a
-			// reader that only ever did would spin here forever.
+			// reader that only ever did would spin here forever. Giving up is
+			// not reaching the end, so it counts as a cut.
 			if idle++; idle >= maxZeroProgressReads {
+				cut = true
 				break
 			}
 			continue
@@ -398,7 +430,7 @@ func readCapped(r io.Reader, limit int64, out chan<- BoundedOutput, overflow cha
 		out <- BoundedOutput{buf: &outputBuf{data: buf[:limit]}, overflow: true}
 		return
 	}
-	out <- BoundedOutput{buf: &outputBuf{data: buf[:n]}}
+	out <- BoundedOutput{buf: &outputBuf{data: buf[:n]}, forced: cut}
 }
 
 // closeAll retires pipe ends. Close errors are dropped deliberately: these are

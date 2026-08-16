@@ -207,11 +207,9 @@ type Arg struct {
 // or "-t". It refuses invalid UTF-8, control characters, and oversize input so
 // a mistyped constant cannot smuggle a terminal escape into an argv.
 //
-// It is deliberately unexported. A fixed argument is exempt from the
-// leading-dash refusal below — MustFixed("-t") is the whole point — so an
-// exported, error-returning constructor taking a runtime string would be the
-// obvious way to launder a dynamic value past that check. MustFixed panics,
-// which makes it usable only on a literal a human wrote.
+// It is deliberately unexported: the exempt class is reachable from outside
+// this package only through MustFixed, whose parameter type admits constants
+// alone. See constantArg for why that is the gate rather than the panic.
 func fixed(v string) (Arg, error) {
 	switch {
 	case v == "":
@@ -229,12 +227,24 @@ func fixed(v string) (Arg, error) {
 	return Arg{reveal: func() string { return v }, kind: argFixed}, nil
 }
 
-// MustFixed builds an argv element from a backend constant whose validity is a
-// property of the source text. It panics on a bad constant, which is a startup
-// failure, not a runtime error path — and which is what keeps a dynamic value
-// from being routed through here to escape the leading-dash refusal.
-func MustFixed(v string) Arg {
-	a, err := fixed(v)
+// constantArg is the parameter type of MustFixed, and it is what makes "only a
+// constant" a compiler rule rather than a comment. An untyped string constant
+// is assignable to it, so MustFixed("new-session") compiles anywhere; a value
+// of type string is not, and no other package can name this type to perform
+// the explicit conversion that would bridge the gap.
+//
+// That matters because a fixed argument is exempt from the leading-dash refusal
+// below — MustFixed("-t") is the whole point — so an exempt class reachable
+// from a runtime string is a way to launder a session name or a ref past that
+// check. Panicking on a malformed constant does not prevent it: "-rf" is
+// well-formed. The type does.
+type constantArg string
+
+// MustFixed builds an argv element from a backend constant. Its parameter
+// accepts only a constant (see constantArg), and it panics on one that is
+// malformed, which is a startup failure rather than a runtime error path.
+func MustFixed(v constantArg) Arg {
+	a, err := fixed(string(v))
 	if err != nil {
 		panic(err)
 	}

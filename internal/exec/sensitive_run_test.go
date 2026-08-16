@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -360,6 +361,56 @@ func TestRunSensitive_EnvironmentPolicyIsAppliedToTheRealChild(t *testing.T) {
 	}
 	if strings.Contains(got, "/stale/") {
 		t.Errorf("a stale inherited occurrence survived the replacement:\n%s", got)
+	}
+}
+
+// errAfterReader delivers some bytes and then fails, standing in for a pipe
+// whose peer died abnormally (EIO) — the one way a stream can stop short
+// without either hitting its cap or being force-closed by this package.
+type errAfterReader struct {
+	data []byte
+	err  error
+}
+
+func (r *errAfterReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, r.err
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+// TestReadCapped_MarksANonEOFStopAsIncomplete covers the one path where a
+// cut-off stream would otherwise be emitted complete without retire ever
+// seeing it: readCapped is the only place that can tell io.EOF from a real
+// read error, and downstream receives a delivered BoundedOutput either way.
+func TestReadCapped_MarksANonEOFStopAsIncomplete(t *testing.T) {
+	cases := map[string]struct {
+		reader   io.Reader
+		complete bool
+	}{
+		"clean EOF":       {&errAfterReader{data: []byte("whole"), err: io.EOF}, true},
+		"read error":      {&errAfterReader{data: []byte("part"), err: errors.New("input/output error")}, false},
+		"closed mid-read": {&errAfterReader{data: []byte("part"), err: os.ErrClosed}, false},
+		"no progress":     {&errAfterReader{data: nil, err: nil}, false},
+	}
+
+	for name, tc := range cases {
+		out := make(chan BoundedOutput, 1)
+		overflow := make(chan struct{}, 2)
+		readCapped(tc.reader, 1024, out, overflow)
+		got := <-out
+
+		if got.Complete() != tc.complete {
+			t.Errorf("%s: Complete() = %v, want %v", name, got.Complete(), tc.complete)
+		}
+		if _, complete := got.CopyBytesForParse(); complete != tc.complete {
+			t.Errorf("%s: CopyBytesForParse complete = %v, want %v", name, complete, tc.complete)
+		}
+		if got.overflow {
+			t.Errorf("%s: claimed its cap was hit; none of these reach it", name)
+		}
 	}
 }
 

@@ -338,20 +338,37 @@ func TestFixedArg_RejectsUnsafeConstants(t *testing.T) {
 		t.Errorf("fixed rejected a legitimate constant: %v", err)
 	}
 
-	// fixed stays unexported so a dynamic value cannot be laundered through it
-	// to escape the leading-dash refusal — a fixed argument is exempt from that
-	// check by design. MustFixed panics, so it is usable only on a literal.
-	// This assertion is the compile-time one: if fixed were exported, the
-	// package's own test could not tell. What it can pin is that the exempt
-	// class is reachable only through a panicking constructor.
+	// A malformed constant is a startup failure, not an error return.
 	func() {
 		defer func() {
 			if recover() == nil {
-				t.Error("MustFixed accepted a value fixed refuses; the exempt class is not gated")
+				t.Error("MustFixed accepted a constant fixed refuses")
 			}
 		}()
-		MustFixed(string(rune(0x1B)) + "[31m")
+		MustFixed("\x1b[31m")
 	}()
+
+	// The gate on the dash-exempt class is the parameter type, not the panic:
+	// "-rf" is a well-formed constant, so MustFixed accepts it, and that is
+	// correct — MustFixed("-t") is the reason the exempt class exists. What
+	// keeps a session name out is that constantArg admits only constants, and
+	// no other package can name the type to convert a string into one. The
+	// compiler enforces it, so the assertion here is that the exempt class is
+	// still exempt and the refusal still lives on the dynamic constructor.
+	if a := MustFixed("-rf"); a.Secret() {
+		t.Error("MustFixed produced a secret argument; the exempt class changed shape")
+	}
+	dashed := SensitiveCommand{
+		Kind: KindTmuxProbe, Path: Secret("/usr/bin/true"),
+		Args: []Arg{MustFixed("-rf")}, StdoutCap: 1, StderrCap: 1,
+	}
+	if err := dashed.validate(); err != nil {
+		t.Errorf("a fixed flag was refused; MustFixed(\"-t\") is the exempt class's purpose: %v", err)
+	}
+	dashed.Args = []Arg{Opaque("-rf")}
+	if err := dashed.validate(); err == nil {
+		t.Error("the same text as a dynamic value was accepted; the refusal moved off Opaque")
+	}
 }
 
 // TestSensitiveCommand_ValidateRefusesBeforeStart covers every pre-start
@@ -645,6 +662,20 @@ func TestFakeSensitiveRunner_RefusesWhatProductionRefuses(t *testing.T) {
 		if calls := fake.Calls(); len(calls) != 0 {
 			t.Errorf("%s: fake recorded a refused command", name)
 		}
+	}
+
+	// An already-done context is the other refusal production makes before it
+	// forks. A fake that accepted it would let an adapter's cancellation
+	// handling pass a suite it would fail in production.
+	expired, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-expired.Done()
+	ctxFake := &FakeSensitiveRunner{}
+	if _, err := ctxFake.RunSensitive(expired, valid); !errors.Is(err, ErrTimeout) {
+		t.Errorf("fake returned %v under an expired deadline, want ErrTimeout", err)
+	}
+	if calls := ctxFake.Calls(); len(calls) != 0 {
+		t.Errorf("fake recorded a call it refused for context")
 	}
 
 	// The refusals must be refusals, not a fake that rejects everything.

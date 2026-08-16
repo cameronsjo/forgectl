@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 )
@@ -30,14 +31,23 @@ type FakeSensitiveRunner struct {
 // developed against, so a fake that accepts a relative path, a dash-leading
 // dynamic value, or an empty environment pin would let an adapter pass its
 // whole suite and fail first in production — against exactly the guards this
-// seam exists to add. A refused command is not recorded: production never ran
-// it either.
+// seam exists to add. It refuses an already-done context for the same reason,
+// so an adapter's cancellation handling is exercised rather than skipped. A
+// refused command is not recorded: production never ran it either, so Calls()
+// is a log of attempts that reached a process, not of attempts made.
 //
 // The Args and Env slices are cloned at record time: a caller that reuses a
 // backing array across calls would otherwise rewrite its own recorded history.
-func (f *FakeSensitiveRunner) RunSensitive(_ context.Context, cmd SensitiveCommand) (SensitiveResult, error) {
+func (f *FakeSensitiveRunner) RunSensitive(ctx context.Context, cmd SensitiveCommand) (SensitiveResult, error) {
 	if err := cmd.validate(); err != nil {
 		return failedResult(), newSensitiveError(cmd.Kind, OutcomeInvalid, failedResult(), err.Error())
+	}
+	if err := ctx.Err(); err != nil {
+		outcome := OutcomeCanceled
+		if errors.Is(err, context.DeadlineExceeded) {
+			outcome = OutcomeTimeout
+		}
+		return failedResult(), newSensitiveError(cmd.Kind, outcome, failedResult(), "context was already done before start")
 	}
 	recorded := cmd
 	recorded.Args = slices.Clone(cmd.Args)
