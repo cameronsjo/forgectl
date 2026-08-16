@@ -31,10 +31,10 @@ func helperMain(mode string) int {
 	verb, arg, _ := strings.Cut(mode, ":")
 	switch verb {
 	case "ok":
-		fmt.Fprint(os.Stdout, arg)
+		_, _ = fmt.Fprint(os.Stdout, arg)
 		return 0
 	case "fail":
-		fmt.Fprint(os.Stderr, arg)
+		_, _ = fmt.Fprint(os.Stderr, arg)
 		return 3
 	case "flood":
 		return floodTo(os.Stdout, arg)
@@ -42,7 +42,7 @@ func helperMain(mode string) int {
 		if code := floodTo(os.Stderr, arg); code != 0 {
 			return code
 		}
-		fmt.Fprint(os.Stdout, "stdout-still-flowing")
+		_, _ = fmt.Fprint(os.Stdout, "stdout-still-flowing")
 		return 0
 	case "sleep":
 		d, err := time.ParseDuration(arg)
@@ -67,9 +67,9 @@ func helperMain(mode string) int {
 	case "env":
 		for _, key := range strings.Split(arg, ",") {
 			if v, ok := os.LookupEnv(key); ok {
-				fmt.Fprintf(os.Stdout, "%s=%s\n", key, v)
+				_, _ = fmt.Fprintf(os.Stdout, "%s=%s\n", key, v)
 			} else {
-				fmt.Fprintf(os.Stdout, "%s=<unset>\n", key)
+				_, _ = fmt.Fprintf(os.Stdout, "%s=<unset>\n", key)
 			}
 		}
 		return 0
@@ -107,7 +107,7 @@ func spawnHolder(arg string) int {
 	if err := child.Start(); err != nil {
 		return 96
 	}
-	fmt.Fprint(os.Stdout, "parent-done")
+	_, _ = fmt.Fprint(os.Stdout, "parent-done")
 	return 0
 }
 
