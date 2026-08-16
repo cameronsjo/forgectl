@@ -67,7 +67,7 @@ func Execute(ctx context.Context) error {
 	defer closer.Close()
 
 	slog.Debug("Starting forgectl.", "version", meta.Version)
-	deps := module.Deps{Cfg: cfg, Runner: exec.OSRunner{}, LegacyBoundary: legacyBoundary}
+	deps := productionDeps(cfg, legacyBoundary)
 	// The bare-invoke TUI/runAction path keeps its own tmux client — clients
 	// are stateless wrappers over the Runner, so a second instance is free and
 	// the TUI stays decoupled from the module registry (ADR-0005: the menu is
@@ -123,6 +123,19 @@ func Execute(ctx context.Context) error {
 	default:
 		slog.Debug("Dispatching to command verb.", "verb", args)
 		return execCommand(ctx, root, args)
+	}
+}
+
+// productionDeps assembles the dependency set every module constructor
+// receives. It is a named function rather than an inline literal so the
+// wiring is assertable: a seam that production forgets to fill is a nil
+// interface a module would have to discover at its own call site.
+func productionDeps(cfg config.Config, boundary *config.LegacyMigrationBoundary) module.Deps {
+	return module.Deps{
+		Cfg:             cfg,
+		Runner:          exec.OSRunner{},
+		LegacyBoundary:  boundary,
+		SensitiveRunner: exec.NewOSSensitiveRunner(),
 	}
 }
 

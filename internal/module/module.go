@@ -32,6 +32,12 @@ type Deps struct {
 	Cfg            config.Config
 	Runner         exec.Runner
 	LegacyBoundary *config.LegacyMigrationBoundary
+
+	// SensitiveRunner is the bounded, redacting execution seam, for commands
+	// whose path, argv, or environment must never reach a log line or an
+	// error string. Production fills it; a module that needs it refuses on
+	// nil rather than falling back to Runner, which logs its argv by design.
+	SensitiveRunner exec.SensitiveRunner
 }
 
 // Manifest declares one module: its canonical verb, tier, config-section
