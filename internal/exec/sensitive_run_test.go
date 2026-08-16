@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -68,13 +67,17 @@ func helperMain(mode string) int {
 		_, _ = fmt.Fprint(os.Stdout, "-REST")
 		return 0
 	case "selfkill":
-		// Write, then die to a signal this runner never sent. The OOM killer, a
-		// supervisor, an operator's kill, and a SIGSEGV in the CLI all land here.
-		// The runner's own trigger stays unset, so nothing but the child's death
-		// mode distinguishes this prefix from a stream that ended on its own.
-		_, _ = fmt.Fprint(os.Stdout, "PARTIAL")
-		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
-		select {} // unreachable: SIGKILL is not catchable
+		// Write, then die to a signal this runner did not send — the OOM
+		// killer, a supervisor, or a fault in the CLI itself all look like
+		// this from the parent's side.
+		_, _ = fmt.Fprint(os.Stdout, arg)
+		self, err := os.FindProcess(os.Getpid())
+		if err != nil {
+			return 94
+		}
+		_ = self.Signal(os.Kill)
+		time.Sleep(10 * time.Second) // unreachable; the signal lands first
+		return 93
 	case "touch":
 		// Durable evidence that fork/exec happened. A test asserting "this
 		// never ran" cannot rely on captured output: a kill races the child's
@@ -346,34 +349,6 @@ func TestRunSensitive_ReturnsWithinBoundWhenDescendantHoldsThePipe(t *testing.T)
 // stopped mid-write. Only the layer that killed it knows, and a caller parsing
 // the bytes has to be told, because the seam's contract sends them to the
 // completeness flag rather than to the error.
-// A producer this runner never killed is still a producer that stopped short.
-// The runner's trigger says only whether it pulled the trigger, so keying
-// completeness on it misses every foreign signal: the OOM killer, a supervisor,
-// an operator's kill, a SIGSEGV in the CLI. The child's death mode is the signal
-// that survives all four.
-func TestRunSensitive_ForeignSignalLeavesAnIncompletePrefix(t *testing.T) {
-	runner, self := helperRunner(t, "selfkill:", defaultRetireBound)
-
-	res, err := runner.RunSensitive(context.Background(), helperCommand(KindTmuxCreate, self, 4096))
-	if err == nil {
-		t.Fatal("expected the signaled death to be reported as an error")
-	}
-
-	data, complete := res.Stdout.CopyBytesForParse()
-	if string(data) != "PARTIAL" {
-		t.Errorf("stdout = %q, want the prefix the child managed to write", data)
-	}
-	if complete {
-		t.Error("a signal-killed producer's prefix reported itself complete")
-	}
-	if res.Stdout.Complete() {
-		t.Error("Complete() disagreed with CopyBytesForParse")
-	}
-	if res.Stderr.Complete() {
-		t.Error("the other stream of a signal-killed process reported itself complete")
-	}
-}
-
 func TestRunSensitive_KilledProducerLeavesAnIncompletePrefix(t *testing.T) {
 	cases := map[string]func() (context.Context, context.CancelFunc){
 		"deadline": func() (context.Context, context.CancelFunc) {
@@ -427,6 +402,45 @@ func TestRunSensitive_KilledProducerLeavesAnIncompletePrefix(t *testing.T) {
 	}
 	if string(data) != "PARTIAL-REST" {
 		t.Errorf("control stdout = %q, want the whole stream", data)
+	}
+}
+
+// TestRunSensitive_ForeignSignalAlsoLeavesAnIncompletePrefix covers the same
+// truncation as the kill test above, arriving from outside. The runner never
+// pulls the trigger here, so a predicate keyed on "did I kill it" misses this
+// entirely — and the OOM killer, a supervisor, an operator, and a fault in the
+// CLI all produce it. The child's wait status is what says the producer did
+// not choose its moment.
+func TestRunSensitive_ForeignSignalAlsoLeavesAnIncompletePrefix(t *testing.T) {
+	runner, self := helperRunner(t, "selfkill:PARTIAL", defaultRetireBound)
+
+	res, err := runner.RunSensitive(context.Background(), helperCommand(KindTmuxCreate, self, 4096))
+	if err == nil {
+		t.Fatal("a child that died to a signal reported success")
+	}
+	if errors.Is(err, ErrTimeout) || errors.Is(err, ErrCanceled) {
+		t.Errorf("err = %v; this runner did not end the process", err)
+	}
+
+	data, complete := res.Stdout.CopyBytesForParse()
+	if string(data) != "PARTIAL" {
+		t.Errorf("stdout = %q, want the prefix the child managed to write", data)
+	}
+	if complete {
+		t.Error("a signalled producer's prefix reported itself complete")
+	}
+
+	// A child that exits nonzero under its own control is a different thing:
+	// it chose its moment, so its output is whole and must stay parsable.
+	// Without this, marking every failed run incomplete would pass the check
+	// above while telling every caller its diagnostics are untrustworthy.
+	failRunner, failSelf := helperRunner(t, "fail:backend-said-no", defaultRetireBound)
+	failRes, failErr := failRunner.RunSensitive(context.Background(), helperCommand(KindTmuxProbe, failSelf, 4096))
+	if !errors.Is(failErr, ErrNonzeroExit) {
+		t.Fatalf("control run: err = %v, want ErrNonzeroExit", failErr)
+	}
+	if !failRes.Stderr.Complete() {
+		t.Error("a process that chose to exit nonzero had its output marked incomplete")
 	}
 }
 

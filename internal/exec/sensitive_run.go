@@ -138,25 +138,14 @@ func (r *OSSensitiveRunner) buildCmd(sc SensitiveCommand) *exec.Cmd {
 func failedResult() SensitiveResult { return SensitiveResult{ExitCode: -1} }
 
 // RunSensitive runs one bounded command. Nothing it logs or returns can render
-// the path, the argv, or the environment; stdout and stderr are captured
-// concurrently into fixed buffers that cannot exceed the caps; and every
-// abnormal ending retires both pipe ends and reports a stream that stopped
-// short as incomplete.
+// the path, the argv, or the environment, and stdout and stderr are captured
+// concurrently into fixed buffers that cannot exceed the caps.
 //
-// Only some of those endings involve a kill. Overflow, timeout, and
-// cancellation kill and reap the immediate CLI. A descendant holding a pipe
-// past the retirement bound does not: the immediate CLI has already exited and
-// been reaped by then, and the bound only stops us waiting on whatever
-// inherited the write end. A signal from outside — the OOM killer, a
-// supervisor, an operator — kills the child without this runner's involvement
-// at all.
-//
-// Truncation is carried by BoundedOutput.Complete, not by the returned error.
-// On a zero-exit run there is no error to check: a backend that daemonises
-// leaves a descendant holding the pipe, which is a successful run by every
-// measure except that we stopped listening. A caller that parses output must
-// read the completeness flag; CopyBytesForParse returns it alongside the bytes
-// so it cannot be skipped by accident.
+// An overflow, a timeout, and a cancellation kill and reap the immediate CLI
+// and retire both pipe ends. A descendant still holding a pipe after the CLI
+// exited on its own is different: nothing is killed there — the read ends are
+// closed and the call returns, leaving the descendant to its own lifetime.
+// Either way a stream that stopped short is reported incomplete.
 func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveCommand) (SensitiveResult, error) {
 	if err := sc.validate(); err != nil {
 		slog.Debug("Refusing sensitive command before start.", "cmd", sc, "reason", err.Error())
@@ -252,25 +241,26 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 	// tell a retired stream from a finished one on its own. readCapped makes
 	// that call for each stream as it ends, so a stdout that reached EOF stays
 	// parsable even when stderr's reader was the one still held.
-	killed := trigger != OutcomeUnspecified
-	stdout, stderr := r.retire(killed, sc.Kind, outR, errR, outCh, errCh)
-	if killed || signaledDeath(waitErr) {
-		// The one cause readCapped cannot see. Killing the child closes every
+	stopped := trigger != OutcomeUnspecified
+	stdout, stderr := r.retire(stopped, sc.Kind, outR, errR, outCh, errCh)
+	if stopped || diedUnderSignal(waitErr) {
+		// The one cause readCapped cannot see. Ending the child closes every
 		// write end, so its reader gets a genuine io.EOF and correctly reports
 		// that the stream ended — while the reason it ended is that the
-		// producer was stopped mid-write. From the reader's side a killed
-		// producer and a finished one are identical; only this layer knows it
-		// pulled the trigger, so only this layer can say the bytes are a
-		// prefix. This is the likeliest truncation of all — it is what a
-		// timeout, a cancellation, and an overflow on the other stream all
-		// produce.
+		// producer was stopped mid-write. From the reader's side a stopped
+		// producer and a finished one are identical.
 		//
-		// A signal this runner never sent lands here too. Keying only on our own
-		// trigger would miss the OOM killer, a supervisor, an operator's kill,
-		// and a SIGSEGV in the CLI — all of which stop a producer mid-write and
-		// none of which readCapped or the trigger can see. The question is not
-		// whether we pulled the trigger; it is whether the stream ended on its
-		// own terms.
+		// The predicate is "the child did not finish under its own control",
+		// not "this runner killed it". A timeout, a cancellation, and an
+		// overflow are the likeliest causes and this layer knows them
+		// first-hand, but the OOM killer, a supervisor, an operator's kill,
+		// and a fault inside the CLI leave exactly the same prefix behind
+		// exactly the same clean EOF — and the wait status says so.
+		//
+		// This over-marks a stream that had genuinely finished before the
+		// child stopped: a strict adapter loses a diagnostic it could have
+		// rendered. That is the safe direction, and the cost is paid only on
+		// a run that already failed.
 		stdout.forced, stderr.forced = true, true
 	}
 
@@ -336,6 +326,18 @@ func (r *OSSensitiveRunner) awaitOutcome(ctx context.Context, waitCh chan error,
 	}
 }
 
+// diedUnderSignal reports whether the process was terminated rather than
+// exiting. os.ProcessState.ExitCode returns -1 exactly when a process was
+// ended by a signal, which is the portable way to ask — syscall.WaitStatus
+// is not the same type on every platform this builds for.
+//
+// A process that was signalled did not choose its moment, so whatever it had
+// written is a prefix. That is true whether the signal came from this runner
+// or from the OOM killer, a supervisor, an operator, or a fault in the CLI.
+func diedUnderSignal(waitErr error) bool {
+	return waitErr != nil && exitCodeOf(waitErr) == -1
+}
+
 func retireReason(o Outcome) string {
 	switch o {
 	case OutcomeTimeout:
@@ -359,10 +361,12 @@ func retireReason(o Outcome) string {
 // the end, and a reader that finished before the close carries its own correct
 // answer — so marking here would duplicate a decision already made.
 //
-// That covers every cause a reader can observe. It does not cover the kill:
-// once the child is reaped its write ends are closed too, so the reader sees a
-// genuine io.EOF and cannot tell a producer that finished from one that was
-// stopped. RunSensitive marks that case, because it is the layer that knows.
+// That covers every cause a reader can observe. It does not cover a producer
+// that was stopped: once the child is reaped its write ends are closed too, so
+// the reader sees a genuine io.EOF and cannot tell a producer that finished
+// from one that was killed. RunSensitive marks that case — both when it did
+// the killing and when something outside it did, which the wait status
+// reports.
 func (r *OSSensitiveRunner) retire(immediate bool, kind CommandKind, outR, errR *os.File, outCh, errCh <-chan BoundedOutput) (BoundedOutput, BoundedOutput) {
 	if immediate {
 		closeAll(outR, errR)
