@@ -44,16 +44,63 @@ var isInteractiveTTY = func() bool {
 
 func interactiveTTY(stdinTTY, stdoutTTY bool) bool { return stdinTTY && stdoutTTY }
 
-// Execute is the binary's entrypoint. It normalizes argv (forgiveness layer),
-// then gives an eligible unknown top-level verb to the extension rungs before
-// either opening the TUI (bare invoke or an external-command miss — the thumb-
-// mode affordance) or handing off to fang for styled help/errors/version.
+// The startup steps Execute runs, behind package-level seams so the entry
+// tests can replace each with a fail-if-called sentinel. That is how the
+// ordering guarantee is asserted rather than merely read: `surface _exec` must
+// be claimed before any of these run, and reading the source proves that only
+// until the next edit.
+//
+// osArgs is here for the same reason — Execute reads process argv directly,
+// which is the behavior under test, so the test has to be able to set it.
+var (
+	captureEnvSnapshot    = config.CaptureEnvSnapshot
+	prepareLegacyBoundary = config.PrepareLegacyMigrationBoundary
+	setupLogger           = config.SetupLogger
+	buildRoot             = newRoot
+	osArgs                = os.Args
+)
+
+// processArgs returns the arguments after the program name, tolerating an argv
+// with no program name at all. Go's runtime normally guarantees os.Args[0], but
+// an execve with argc == 0 does not, and this is read on the binary's first
+// executable statement — the one place a panic has nothing to report it.
+func processArgs() []string {
+	if len(osArgs) == 0 {
+		return nil
+	}
+	return osArgs[1:]
+}
+
+// Execute is the binary's entrypoint. It claims a surface bootstrap re-entry
+// before doing anything else, then normalizes argv (forgiveness layer) and
+// gives an eligible unknown top-level verb to the extension rungs before either
+// opening the TUI (bare invoke or an external-command miss — the thumb-mode
+// affordance) or handing off to fang for styled help/errors/version.
 func Execute(ctx context.Context) error {
-	env, err := config.CaptureEnvSnapshot()
+	// FIRST, ahead of every line below. A `surface _exec` re-entry carries a
+	// private socket path and a one-use rendezvous nonce in argv, and every
+	// statement after this one either does work that invocation does not need
+	// or writes something derived from argv into the log. See surface_exec.go.
+	//
+	// argv[0] is not assumed to exist: an execve with argc == 0 would otherwise
+	// panic on the binary's first executable statement, before any logger or
+	// recovery exists to say why.
+	if handled, err := trySurfaceExec(ctx, processArgs(), productionTrampolineRuntime()); handled {
+		// This path returns before fang exists, so nothing downstream renders
+		// the error — without this the operator gets a bare non-zero exit. The
+		// bootstrap errors are fixed category text carrying no value from argv,
+		// which is exactly what makes them safe to print verbatim.
+		if err != nil {
+			fmt.Fprintln(os.Stderr, termsafe.SafeLine(err.Error()))
+		}
+		return err
+	}
+
+	env, err := captureEnvSnapshot()
 	if err != nil {
 		return err
 	}
-	legacyBoundary, err := config.PrepareLegacyMigrationBoundary(env, config.NativeMigrationFS())
+	legacyBoundary, err := prepareLegacyBoundary(env, config.NativeMigrationFS())
 	if err != nil {
 		return err
 	}
@@ -63,7 +110,7 @@ func Execute(ctx context.Context) error {
 	if !errors.Is(legacyBoundary.Refusal, config.ErrLegacyPathControl) {
 		cfg = config.LoadPath(legacyBoundary.ConfigPath)
 	}
-	closer := config.SetupLogger(cfg)
+	closer := setupLogger(cfg)
 	defer closer.Close()
 
 	slog.Debug("Starting forgectl.", "version", meta.Version)
@@ -73,8 +120,8 @@ func Execute(ctx context.Context) error {
 	// the TUI stays decoupled from the module registry (ADR-0005: the menu is
 	// a tmux session jumper, not a command palette).
 	tmuxClient := tmux.New(exec.OSRunner{})
-	root := newRoot(deps)
-	args := normalizeArgs(os.Args[1:])
+	root := buildRoot(deps)
+	args := normalizeArgs(processArgs())
 
 	// The launcher intercept runs before TUI/fang routing: `forgectl launch …`
 	// (and its `cl` alias) must reach claude byte-clean for builder/agents
@@ -114,16 +161,59 @@ func Execute(ctx context.Context) error {
 		// prints help and returns nil instead; errHeadlessMenuRoute turns
 		// that into a failure so headless callers never read silence as
 		// success.
-		slog.Debug("Headless; routing to Cobra/fang instead of the TUI.", "verb", args)
+		logDispatch("Headless; routing to Cobra/fang instead of the TUI.", root, args)
 		root.SetOut(os.Stderr)
 		if err := execCommand(ctx, root, args); err != nil {
 			return err
 		}
 		return errHeadlessMenuRoute
 	default:
-		slog.Debug("Dispatching to command verb.", "verb", args)
+		logDispatch("Dispatching to command verb.", root, args)
 		return execCommand(ctx, root, args)
 	}
+}
+
+// logDispatch is the ONLY way either dispatch path records what it is about to
+// run. Both routes call it rather than composing their own slog.Debug, so the
+// argv-safety rule has exactly one implementation and exactly one place a test
+// can hold it to: no raw argv, ever — a canonical verb and a count.
+//
+// It exists as a function purely for that reason. Inline, the two call sites
+// were one careless edit away from `"verb", args` again, and nothing would have
+// gone red.
+func logDispatch(msg string, root *cobra.Command, args []string) {
+	slog.Debug(msg, "verb", canonicalVerb(root, args), "argc", len(args))
+}
+
+// unknownVerb is what the dispatch log records for a token that resolves to no
+// registered command. The literal category, never the supplied token — an
+// unrecognized first argument is exactly the case where argv is most likely to
+// be something forgectl never composed.
+const unknownVerb = "unknown"
+
+// canonicalVerb maps argv to the NAME OF A REGISTERED COMMAND, or the literal
+// "unknown". It is what the dispatch debug records instead of raw argv.
+//
+// The value is drawn from the live command tree rather than filtered against a
+// list of things not to log. A denylist has to be updated every time a command
+// learns a secret-bearing argument, and the failure mode of forgetting is a
+// silent leak; resolving against the registered set means a token can only be
+// logged if it is already a command name that shipped in the binary.
+//
+// An alias resolves to the command's canonical name, so the log says what ran
+// rather than how it was spelled.
+func canonicalVerb(root *cobra.Command, args []string) string {
+	first, _ := firstNonFlag(args)
+	if first == "" {
+		return unknownVerb
+	}
+	if builtinVerbs[first] {
+		return first
+	}
+	if child := findChild(root, first); child != nil {
+		return child.Name()
+	}
+	return unknownVerb
 }
 
 // productionDeps assembles the dependency set every module constructor
