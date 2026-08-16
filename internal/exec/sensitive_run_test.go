@@ -405,6 +405,61 @@ func TestRunSensitive_KilledProducerLeavesAnIncompletePrefix(t *testing.T) {
 	}
 }
 
+// A command that never ran has no stream to be complete. The zero-value
+// BoundedOutput reports Complete() == true over zero bytes, and this contract
+// sends a parser to the flag rather than to the error — so that reads as "the
+// backend returned an empty response". Empty-and-complete is a legitimate
+// answer from a command that ran and printed nothing; it must not also be the
+// answer from one that never started. Every refusal shares failedResult, so a
+// future refusal path inherits the guarantee rather than reintroducing the bug.
+func TestRunSensitive_NeverRanReportsNoCompleteStream(t *testing.T) {
+	_, self := helperRunner(t, "ok:unreachable", defaultRetireBound)
+
+	doneCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cases := map[string]func() (SensitiveResult, error){
+		"already-done context": func() (SensitiveResult, error) {
+			r, s := helperRunner(t, "ok:unreachable", defaultRetireBound)
+			return r.RunSensitive(doneCtx, helperCommand(KindTmuxCreate, s, 4096))
+		},
+		"refused before start": func() (SensitiveResult, error) {
+			r, _ := helperRunner(t, "ok:unreachable", defaultRetireBound)
+			return r.RunSensitive(context.Background(), helperCommand(KindTmuxCreate, "relative/path", 4096))
+		},
+	}
+
+	for name, run := range cases {
+		res, err := run()
+		if err == nil {
+			t.Fatalf("%s: expected a refusal", name)
+		}
+		if res.ExitCode != -1 {
+			t.Errorf("%s: ExitCode = %d, want -1", name, res.ExitCode)
+		}
+		if res.Stdout.Complete() {
+			t.Errorf("%s: stdout of a command that never ran reported itself complete", name)
+		}
+		if res.Stderr.Complete() {
+			t.Errorf("%s: stderr of a command that never ran reported itself complete", name)
+		}
+		if _, complete := res.Stdout.CopyBytesForParse(); complete {
+			t.Errorf("%s: a parser was offered zero bytes as a complete stream", name)
+		}
+	}
+
+	// A command that ran and printed nothing is still complete: "empty" and
+	// "never ran" have to stay distinguishable in the direction that matters.
+	empty, _ := helperRunner(t, "ok:", defaultRetireBound)
+	res, err := empty.RunSensitive(context.Background(), helperCommand(KindTmuxCreate, self, 4096))
+	if err != nil {
+		t.Fatalf("control run: %v", err)
+	}
+	if !res.Stdout.Complete() {
+		t.Error("a command that ran and printed nothing reported itself truncated")
+	}
+}
+
 // TestRunSensitive_ForeignSignalAlsoLeavesAnIncompletePrefix covers the same
 // truncation as the kill test above, arriving from outside. The runner never
 // pulls the trigger here, so a predicate keyed on "did I kill it" misses this

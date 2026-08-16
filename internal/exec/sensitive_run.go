@@ -135,7 +135,20 @@ func (r *OSSensitiveRunner) buildCmd(sc SensitiveCommand) *exec.Cmd {
 // failedResult is what every never-ran path returns. ExitCode is -1, never 0:
 // a command that did not run has no exit status, and 0 is the one value a
 // caller reads as success.
-func failedResult() SensitiveResult { return SensitiveResult{ExitCode: -1} }
+//
+// Both streams are marked cut off for the same reason. A zero-value
+// BoundedOutput reports Complete() == true over zero bytes, which says "the
+// stream ended and you have all of it" about a process that never existed —
+// and this contract sends a parser to the completeness flag rather than to the
+// error. Empty-and-complete is a valid answer from a command that ran and
+// printed nothing; it must not also be the answer from one that never started.
+func failedResult() SensitiveResult {
+	return SensitiveResult{
+		ExitCode: -1,
+		Stdout:   BoundedOutput{forced: true},
+		Stderr:   BoundedOutput{forced: true},
+	}
+}
 
 // RunSensitive runs one bounded command. Nothing it logs or returns can render
 // the path, the argv, or the environment, and stdout and stderr are captured
