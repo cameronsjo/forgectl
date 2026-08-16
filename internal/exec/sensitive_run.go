@@ -235,9 +235,9 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 	// readers get the bound to drain what the CLI already wrote before the
 	// same force-close applies to whatever descendant inherited the pipe.
 	// A force-closed read returns os.ErrClosed, not io.EOF, so a reader cannot
-	// tell a retired stream from a finished one. retire marks the streams it
-	// actually cut off, per stream — a stdout that reached EOF stays parsable
-	// even when stderr's reader was the one still held.
+	// tell a retired stream from a finished one on its own. readCapped makes
+	// that call for each stream as it ends, so a stdout that reached EOF stays
+	// parsable even when stderr's reader was the one still held.
 	stdout, stderr := r.retire(trigger != OutcomeUnspecified, sc.Kind, outR, errR, outCh, errCh)
 
 	// Overflow can also surface after the fact: a reader that filled its
@@ -318,36 +318,18 @@ func retireReason(o Outcome) string {
 // retire collects both readers and guarantees the call returns even when a
 // descendant still holds a write end. Closing an *os.File interrupts a Read
 // blocked on it, so the force-close is what unblocks a reader no EOF is ever
-// coming for. Each stream it cuts off is marked forced, because a force-closed
-// Read returns os.ErrClosed and is otherwise indistinguishable from EOF.
+// coming for.
+//
+// It does not mark the streams it cuts off, deliberately. The interrupted Read
+// returns os.ErrClosed, which readCapped already classifies as a stop that is
+// not the end of the stream — so readCapped is the single writer of that flag,
+// and a reader that finished before the close carries its own correct answer.
+// A second writer here would be a duplicate of a decision already made, and
+// the two could drift.
 func (r *OSSensitiveRunner) retire(immediate bool, kind CommandKind, outR, errR *os.File, outCh, errCh <-chan BoundedOutput) (BoundedOutput, BoundedOutput) {
 	if immediate {
-		// Take whatever already finished before closing, so a stream that
-		// reached EOF on its own is not marked as one this call cut off.
-		var (
-			stdout, stderr BoundedOutput
-			gotOut, gotErr bool
-		)
-		select {
-		case stdout = <-outCh:
-			gotOut = true
-		default:
-		}
-		select {
-		case stderr = <-errCh:
-			gotErr = true
-		default:
-		}
 		closeAll(outR, errR)
-		if !gotOut {
-			stdout = <-outCh
-			stdout.forced = true
-		}
-		if !gotErr {
-			stderr = <-errCh
-			stderr.forced = true
-		}
-		return stdout, stderr
+		return <-outCh, <-errCh
 	}
 
 	timer := time.NewTimer(r.bound())
@@ -371,15 +353,11 @@ func (r *OSSensitiveRunner) retire(immediate bool, kind CommandKind, outR, errR 
 			slog.Warn("Retirement bound expired with a pipe still held; closing it.",
 				"kind", kind.String(), "bound", r.bound())
 			closeAll(outR, errR)
-			// Only the streams still outstanding were cut off; one that
-			// already reached EOF is complete and stays parsable.
 			if !gotOut {
 				stdout = <-outCh
-				stdout.forced = true
 			}
 			if !gotErr {
 				stderr = <-errCh
-				stderr.forced = true
 			}
 			return stdout, stderr
 		}
