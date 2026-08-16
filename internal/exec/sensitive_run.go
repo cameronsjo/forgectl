@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,7 +34,19 @@ type OSSensitiveRunner struct {
 	// retireBound overrides defaultRetireBound; tests set it directly so the
 	// descendant-holds-a-pipe case can be proven without a two-second wait.
 	retireBound time.Duration
+
+	// started counts successful fork/execs. It exists because "this command
+	// never ran" is not observable from the child: a refusal that kills, or a
+	// pre-start check that never forks, both leave no trace in the child's own
+	// side effects — the kill wins that race every time. Counting at the one
+	// place a process comes into existence is what makes the refusal provable
+	// rather than assumed.
+	started atomic.Int64
 }
+
+// StartedCount reports how many processes this runner has successfully
+// started. It is metadata about the runner, never about any command.
+func (r *OSSensitiveRunner) StartedCount() int64 { return r.started.Load() }
 
 // NewOSSensitiveRunner snapshots the current environment and returns a runner
 // ready for production use.
@@ -170,6 +183,8 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 		slog.Error("Sensitive command failed to start.", "kind", sc.Kind.String())
 		return failedResult(), newSensitiveError(sc.Kind, OutcomeStartFailed, failedResult(), "fork/exec did not succeed")
 	}
+
+	r.started.Add(1)
 
 	// The parent's write ends must go now, or the readers never see EOF even
 	// after every child process has exited.
