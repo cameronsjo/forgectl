@@ -448,12 +448,18 @@ func (m *model) applyPending() {
 
 // setStatus records a transient footer message: the error (red) if non-nil,
 // otherwise the success text (green).
+//
+// The success text needs the same boundary as the error text, and for the same
+// reason: every caller composes it around a session name ("killed <name>",
+// "renamed <old> → <new>"), which is text forgectl never wrote. Neutralizing
+// here rather than at the three call sites means a fourth mutation cannot
+// reintroduce the gap.
 func (m *model) setStatus(err error, ok string) {
 	if err != nil {
 		m.status = errStatus("", err)
 		return
 	}
-	m.status = styleOK.Render("✓ " + ok)
+	m.status = styleOK.Render(termsafe.SafeLine("✓ " + ok))
 }
 
 func (m model) formWidth() int {

@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -40,8 +41,11 @@ func newTmuxWindowsCmd(client *tmux.Client) *cobra.Command {
 				// program will act on — every jump goes by native window id.
 				// It stays in the output because it is the shape operators
 				// already read this column as.
-				location := fmt.Sprintf("%s:%d", win.Session, win.Index)
-				fmt.Fprintf(w, "%s\t%s\t%s\t%d %s\n", marker, location, win.Name, win.Panes, unit)
+				// Both names are tmux's — chosen by whoever created the session
+				// and the window — so each is neutralized on its way to the
+				// terminal. SafeLine is a no-op on an ordinary name.
+				location := fmt.Sprintf("%s:%d", termsafe.SafeLine(win.Session), win.Index)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%d %s\n", marker, location, termsafe.SafeLine(win.Name), win.Panes, unit)
 			}
 			return w.Flush()
 		},

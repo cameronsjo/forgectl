@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -65,13 +66,23 @@ func (i menuItem) render(index int, selected, narrow bool, g glyphSet) string {
 	return leader(index, false) + styleFg.Render(label) + "  " + styleMuted.Render(i.desc)
 }
 
+// Every row from here down renders text forgectl did not compose: session
+// names, window names, and working directories are chosen by whoever created
+// the object, which is any same-uid process. The TUI redraws the whole screen
+// on every keystroke, so an escape sequence in one name repaints the chrome
+// around it and a bidi override reorders the row — which is why each reaches
+// the styler through termsafe.SafeLine, the same boundary errStatus and
+// setStatus use. TestScreensDrawNothingUnsafe asserts over the whole drawn
+// screen, so a row type that skips it fails without the test needing to know
+// it exists. (menuItem above is exempt: its labels are literals in this file.)
+
 // --- pick (sesh candidate) ---
 
 type pickItem string
 
 func (i pickItem) FilterValue() string { return string(i) }
 func (i pickItem) render(index int, selected, narrow bool, g glyphSet) string {
-	label := g.Session + "  " + string(i)
+	label := g.Session + "  " + termsafe.SafeLine(string(i))
 	if selected {
 		return leader(index, true) + styleSelected.Render(label)
 	}
@@ -88,7 +99,7 @@ func (i sessionItem) render(index int, selected, narrow bool, g glyphSet) string
 	if i.s.Attached {
 		marker = styleOK.Render(g.Attached)
 	}
-	name := i.s.Name
+	name := termsafe.SafeLine(i.s.Name)
 	if selected {
 		name = styleSelected.Render(name)
 	} else {
@@ -102,7 +113,7 @@ func (i sessionItem) render(index int, selected, narrow bool, g glyphSet) string
 	if i.s.Windows == 1 {
 		unit = "window"
 	}
-	meta := fmt.Sprintf("  %d %s · %s", i.s.Windows, unit, i.s.Path)
+	meta := fmt.Sprintf("  %d %s · %s", i.s.Windows, unit, termsafe.SafeLine(i.s.Path))
 	return row + styleMuted.Render(meta)
 }
 
@@ -112,8 +123,8 @@ type windowItem struct{ w tmux.Window }
 
 func (i windowItem) FilterValue() string { return i.w.Session + " " + i.w.Name }
 func (i windowItem) render(index int, selected, narrow bool, g glyphSet) string {
-	sess := styleCyan.Render(i.w.Session)
-	name := i.w.Name
+	sess := styleCyan.Render(termsafe.SafeLine(i.w.Session))
+	name := termsafe.SafeLine(i.w.Name)
 	if i.w.Active {
 		name = styleActive.Render(name)
 	} else if selected {

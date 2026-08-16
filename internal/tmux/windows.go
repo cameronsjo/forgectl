@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // windowFormat is the -F spec for list-windows -a. Fields:
@@ -212,6 +214,15 @@ func (c *Client) Tree(ctx context.Context, icons bool) (string, error) {
 
 // buildTree is the pure assembly step — no exec, no I/O — so it's directly
 // testable from a fixture.
+//
+// Every tmux-derived string it writes goes through termsafe.SafeLine, because
+// this is a terminal-output boundary over text forgectl did not compose: a
+// session, window, or pane name is chosen by whoever created the object, which
+// is any same-uid process, and an ANSI escape or bidi override in one would
+// repaint or reorder the rendered tree. SafeLine is a no-op on ordinary names,
+// so the everyday tree is byte-identical. TestBuildTreeEmitsNoUnsafeRunes
+// asserts over the ASSEMBLED string rather than on any single call, so a field
+// added here later is covered without extending the test.
 // Grouping is by native id, not by name-and-index. The old composite key
 // ("session name" + "window index") re-derived parentage from two mutable
 // values, so a session renamed or a window moved between the three listings
@@ -245,7 +256,7 @@ func buildTree(sessions []Session, windows []Window, panes []Pane, m treeMarkers
 		if s.Attached {
 			marker = m.attached
 		}
-		fmt.Fprintf(&b, "%s %s\n", marker, s.Name)
+		fmt.Fprintf(&b, "%s %s\n", marker, termsafe.SafeLine(s.Name))
 
 		ws := winBySession[s.ID]
 		sort.Slice(ws, func(i, j int) bool { return ws[i].Index < ws[j].Index })
@@ -258,7 +269,7 @@ func buildTree(sessions []Session, windows []Window, panes []Pane, m treeMarkers
 			if w.Panes == 1 {
 				unit = "pane"
 			}
-			fmt.Fprintf(&b, "  %d: %s%s (%d %s)\n", w.Index, w.Name, active, w.Panes, unit)
+			fmt.Fprintf(&b, "  %d: %s%s (%d %s)\n", w.Index, termsafe.SafeLine(w.Name), active, w.Panes, unit)
 
 			ps := panesByWindow[w.ID]
 			sort.Slice(ps, func(i, j int) bool { return ps[i].Index < ps[j].Index })
@@ -271,7 +282,7 @@ func buildTree(sessions []Session, windows []Window, panes []Pane, m treeMarkers
 				if cmd == "" {
 					cmd = p.Title
 				}
-				fmt.Fprintf(&b, "    %d: %s%s\n", p.Index, cmd, active)
+				fmt.Fprintf(&b, "    %d: %s%s\n", p.Index, termsafe.SafeLine(cmd), active)
 			}
 		}
 	}

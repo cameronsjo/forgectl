@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -131,19 +132,38 @@ func Execute(ctx context.Context) error {
 // where fang writes output, which the caller sets via root.SetOut first.
 func execCommand(ctx context.Context, root *cobra.Command, args []string) error {
 	root.SetArgs(args)
-	return fang.Execute(ctx, root, fangVersionOptions(meta.Version, meta.Commit)...)
+	return fang.Execute(ctx, root, fangOptions(meta.Version, meta.Commit)...)
 }
 
-// fangVersionOptions builds the fang.Option set that seeds root.Version
-// before Execute runs. Extracted so TestVersion_VerbMatchesFlagThroughFang
-// can call the exact same wiring instead of a parallel hand-rolled copy —
-// an option added here is automatically exercised by that regression guard
-// too.
-func fangVersionOptions(version, commit string) []fang.Option {
+// fangOptions builds the fang.Option set every dispatch runs under: the version
+// seed for root.Version, and the terminal-safety boundary on the error sink.
+// Extracted so TestVersion_VerbMatchesFlagThroughFang can call the exact same
+// wiring instead of a parallel hand-rolled copy — an option added here is
+// automatically exercised by that regression guard too.
+func fangOptions(version, commit string) []fang.Option {
 	return []fang.Option{
 		fang.WithVersion(version),
 		fang.WithCommit(commit),
+		fang.WithErrorHandler(termsafeErrorHandler),
 	}
+}
+
+// termsafeErrorHandler is the terminal-safety boundary for every error the
+// cobra command tree returns — the one sink the rest of internal/cli cannot
+// reach, because fang renders it after Execute hands the error back.
+//
+// fang.DefaultErrorHandler prints err.Error() with no filtering of its own, and
+// plenty of forgectl errors carry text forgectl never composed: an
+// *exec.CommandError concatenates raw tmux stderr, which echoes whatever
+// session name it was given, and any same-uid process can name a session with
+// an ANSI escape or a bidi override. Sanitizing here rather than at each
+// fmt.Errorf means a new command cannot reintroduce the hole by forgetting.
+//
+// termsafe.Error preserves the unwrap chain, so errors.Is/errors.As disposition
+// upstream is untouched; and SafeLine leaves ordinary ASCII byte-identical, so
+// fang's own prefix match for usage errors ("unknown flag: …") still fires.
+func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
+	fang.DefaultErrorHandler(w, styles, termsafe.Error(err))
 }
 
 // runAction opens the TUI and performs whatever jump it selected. Jumps that
