@@ -153,6 +153,9 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 		trigger  = OutcomeUnspecified
 		waitErr  error
 	)
+	// The Kill error is dropped deliberately: the only failure it reports is
+	// os.ErrProcessDone, which is the state kill was trying to reach. Every
+	// caller of kill follows it with a Wait, which carries the real outcome.
 	kill := func() { killOnce.Do(func() { _ = cmd.Process.Kill() }) }
 
 	select {
@@ -283,6 +286,10 @@ func readCapped(r io.Reader, limit int64, out chan<- BoundedOutput, overflow cha
 	out <- BoundedOutput{data: buf[:n]}
 }
 
+// closeAll retires pipe ends. Close errors are dropped deliberately: these
+// are read/write ends of the runner's own pipes, a second Close is expected
+// on the paths where both the timeout and Wait retire the same descriptor,
+// and no caller decision depends on the result.
 func closeAll(files ...*os.File) {
 	for _, f := range files {
 		if f != nil {
