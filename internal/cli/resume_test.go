@@ -44,10 +44,13 @@ func TestPrintSessions_SanitizesText(t *testing.T) {
 }
 
 // TestPrintSessions_SanitizesJSON checks the real selected-session DTO path.
-// Non-tab Cc and Bidi_Control runes become spaces in decoded values and never
-// survive literally in the raw stream; join controls and variation selectors
-// remain unchanged, and independent wire checks pin every populated key and
-// primitive JSON type without sharing production DTO tags or field types.
+// The raw stream is inert — no unsafe rune survives literally, so `resume ls
+// --json` is safe to look at in a terminal — while every DECODED value is the
+// operator's stored bytes unchanged, because a --json document is a machine
+// contract. Rewriting a control byte to a space there (what the retired
+// Sanitize did, #281) silently hands a corrupted id or path to whatever parses
+// it. Independent wire checks pin every populated key and primitive JSON type
+// without sharing production DTO tags or field types.
 func TestPrintSessions_SanitizesJSON(t *testing.T) {
 	rlo := string(rune(0x202e))
 	zwnj := string(rune(0x200c))
@@ -82,9 +85,9 @@ func TestPrintSessions_SanitizesJSON(t *testing.T) {
 		}
 	}
 
-	// ...and so must the DECODED values, since that is what a consumer
-	// pipes onward. A C1 escape in the wire form is still a CSI byte
-	// once anything decodes it.
+	// ...while the DECODED values round-trip to the stored bytes exactly. The
+	// two properties are not in tension: escaping is what delivers both, where
+	// rewriting could only ever deliver the first.
 	var got []map[string]json.RawMessage
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("decode --json output: %v", err)
@@ -94,15 +97,15 @@ func TestPrintSessions_SanitizesJSON(t *testing.T) {
 	}
 	record := got[0]
 	wantStrings := map[string]string{
-		"id":          "id ",
-		"name":        "left right",
-		"name_source": "user" + zwnj + "named",
-		"repo":        "emoji" + zwj + "join",
-		"branch":      "main",
-		"cwd":         "/work/" + variation,
+		"id":          fixture.ID,
+		"name":        fixture.Name,
+		"name_source": fixture.NameSource,
+		"repo":        fixture.Repo,
+		"branch":      fixture.Branch,
+		"cwd":         fixture.Cwd,
 		"last_active": lastActive.Format(time.RFC3339),
-		"last_prompt": "prompt ",
-		"version":     "1.2.3",
+		"last_prompt": fixture.LastPrompt,
+		"version":     fixture.Version,
 	}
 	wantTypes := map[string]string{
 		"id": "string", "name": "string", "name_source": "string",
@@ -151,12 +154,7 @@ func TestPrintSessions_SanitizesJSON(t *testing.T) {
 			continue
 		}
 		if value != want {
-			t.Errorf("decoded %s = %q, want %q", field, value, want)
-		}
-		for _, r := range value {
-			if r != '\t' && (unicode.IsControl(r) || unicode.In(r, unicode.Bidi_Control)) {
-				t.Errorf("decoded %s = %q still carries unsafe terminal rune %U", field, value, r)
-			}
+			t.Errorf("decoded %s = %q, want the stored value %q unchanged", field, value, want)
 		}
 	}
 	var live bool

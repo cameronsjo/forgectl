@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -9,6 +8,7 @@ import (
 
 	docspkg "github.com/cameronsjo/forgectl/internal/docs"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // newDocsListCmd builds `forgectl docs list [dir|file ...]` — lists the
@@ -52,7 +52,7 @@ func printDocsList(cmd *cobra.Command, docs []docspkg.Doc, asJSON bool) error {
 		for i, d := range docs {
 			wire[i] = docJSON{Root: d.RootLabel, Path: d.RelPath, Title: d.Title, ModTime: d.ModTime}
 		}
-		enc := json.NewEncoder(out)
+		enc := termsafe.JSONEncoder(out)
 		return enc.Encode(wire)
 	}
 

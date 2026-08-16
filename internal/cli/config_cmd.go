@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -497,7 +496,7 @@ func emitConfigJSON(out io.Writer, entries []configEntry, rep config.Report, hos
 	if rep.DecodeErr != nil {
 		doc.DecodeError = rep.DecodeErr.Error()
 	}
-	enc := json.NewEncoder(out)
+	enc := termsafe.JSONEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(doc)
 }

@@ -1,7 +1,6 @@
 package docs
 
 import (
-	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
@@ -11,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // recentCount is how many docs the "Recent" sidenav group shows.
@@ -145,8 +146,13 @@ func handleLocate(store *Store) http.HandlerFunc {
 			return
 		}
 
+		// Title comes from an indexed file's own heading, so it is untrusted
+		// text, and an operator curling this endpoint reads the response in a
+		// terminal rather than through the shell's fetch. The escaping filter
+		// is value-preserving, so the programmatic consumer in
+		// discovery_http.go decodes exactly the same string either way.
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		if err := json.NewEncoder(w).Encode(locateResponse{
+		if err := termsafe.JSONEncoder(w).Encode(locateResponse{
 			Root:  doc.RootLabel,
 			Rel:   doc.RelPath,
 			Title: doc.Title,

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -11,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/projects"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // newProjectsListCmd builds `forgectl projects list [query]` — the scriptable,
@@ -63,7 +63,7 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 				if repos == nil {
 					repos = []projects.Repo{}
 				}
-				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc := termsafe.JSONEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
 				return enc.Encode(repos)
 			}

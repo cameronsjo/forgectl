@@ -93,7 +93,7 @@ func prCandidateLine(item pr.PR, store *pr.ReviewedStore) string {
 	if pr.Dimmed(item, store) {
 		line += "  (reviewed)"
 	}
-	return sanitizeCandidate(line)
+	return safeCandidate(line)
 }
 
 // pickPRs runs the multiselect and returns the chosen PRs (input PR order
@@ -103,7 +103,12 @@ func pickPRs(prs []pr.PR, store *pr.ReviewedStore) ([]pr.PR, error) {
 	opts := make([]huh.Option[string], len(prs))
 	for i, p := range prs {
 		refKey := p.Ref.String()
-		label := fmt.Sprintf("%s  %s", refKey, sanitizeCell(p.Title))
+		// refKey is escaped in the LABEL and raw in the key. It is structured
+		// (owner/repo#N) rather than free text, so this is belt-and-braces — but
+		// the label's other half was already escaped, and a label with one
+		// escaped part and one raw part is the shape that reads as safe while
+		// not being it.
+		label := fmt.Sprintf("%s  %s", safeTerm(refKey), sanitizeCell(p.Title))
 		if pr.Dimmed(p, store) {
 			label = prDimStyle.Render(label + "  (reviewed)")
 		}

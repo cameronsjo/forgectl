@@ -213,9 +213,15 @@ forgectl upgrade --check                 # report whether an update is available
                                           #   a source build (go build/go run) WARNS instead of attempting anything —
                                           #   there's no cask install to manage
 
-# y — read/write the system clipboard (macOS only)
+# y — clipboard (macOS only) + read-only zsh history recall
 echo hi | forgectl y copy                # copy stdin to the clipboard
 forgectl y paste                         # print the clipboard's current contents
+forgectl y last 5                        # print the 5 most recent zsh commands, oldest first
+                                          #   reads $HISTFILE (default ~/.zsh_history); no shell shim, so it sees
+                                          #   only what zsh has flushed — set INC_APPEND_HISTORY or SHARE_HISTORY
+                                          #   in .zshrc for the current shell's commands to appear. zsh only.
+                                          #   prints inline secrets verbatim if your history holds any — treat
+                                          #   the output as sensitive
 ```
 
 The cask doesn't stage an `fx` command — it's a shell alias you add yourself:
@@ -650,7 +656,7 @@ tmux 2.2 or newer is required to launch PR reviews with exact dispatch identity 
 
 The stable sentence and the quoted version are the contract; the text after the final colon is the wrapped cause and varies with what failed. The quoted value is `"unknown"` only when `tmux -V` itself could not be run or parsed — a missing binary, or output in a shape forgectl refuses to guess at. A supported binary whose server state is unreadable still reports its real version there.
 
-A refusal leaves no clean room, no breadcrumb, and no tmux server, session, or window behind. The one exception is tmux's own doing: a read-only probe against a machine with no server running can create the standard `tmux-<uid>` socket parent directory. That is a tmux artifact, not a review artifact.
+This capability check runs before any clean room or breadcrumb exists, so a refusal there leaves neither behind, and it creates no tmux server, session, or window — both probes (`tmux -V` and one `display-message -p`) only read. Nothing an earlier invocation left running is touched: a review dispatched from another terminal or another repository keeps its window, and `forgectl pr list` is how to see what is still live. What this does **not** cover is a failure after preparation — an invalid reviewer profile, a refused provenance, or tmux going away between this check and the launch: those deliberately leave the workspace and breadcrumb in place, because `pr attach` and `pr teardown` still need them. The one exception is tmux's own doing: a read-only probe against a machine with no server running can create the standard `tmux-<uid>` socket parent directory. That is a tmux artifact, not a review artifact.
 
 When verification reports a review gone, recovery is the ordinary stale-session path — `forgectl pr list` to see which breadcrumbs lost their window, then `forgectl pr teardown <breadcrumb>` on each. When tmux could not be read at all, the command says exactly that instead of naming any review gone; an unreadable server is not evidence of a dead window.
 

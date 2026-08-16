@@ -26,7 +26,9 @@ func openDocsTokenFile(path string) (openedDocsTokenFile, error) {
 
 	info, statErr := file.Stat()
 	if statErr != nil {
-		return nil, closeInvalidDocsTokenFile(file, wrapDocsTokenDescriptorError("inspect", displayPath, statErr))
+		// The raw path: wrapDocsTokenDescriptorError renders it itself, and
+		// QuotePath is not idempotent.
+		return nil, closeInvalidDocsTokenFile(file, wrapDocsTokenDescriptorError("inspect", path, statErr))
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {

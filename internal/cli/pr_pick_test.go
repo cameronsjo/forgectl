@@ -51,7 +51,7 @@ func TestChoosePRs_HeadlessWritesExecutableSanitizedCandidates(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	_, err := choosePRs(cmd, prs, store)
-	if got, want := stdout.String(), "cameronsjo/forgectl#42  safe\nc/r#7  bad [31m  \n"; got != want {
+	if got, want := stdout.String(), "cameronsjo/forgectl#42  safe\nc/r#7  bad"+`\x1b[31m\t\n`+"\n"; got != want {
 		t.Errorf("stdout = %q, want %q", got, want)
 	}
 	if err == nil || !strings.Contains(err.Error(), "2 open PRs require a selection") || ExitCode(err) != 1 {

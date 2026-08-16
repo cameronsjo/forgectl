@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 	clippkg "github.com/cameronsjo/forgectl/internal/clip"
 	envpkg "github.com/cameronsjo/forgectl/internal/env"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // confirmAnyFile is the --any-file confirmation seam — a package-level var
@@ -449,7 +449,7 @@ func writeCheckJSON(out io.Writer, missing, extra []string) error {
 	if extra == nil {
 		extra = []string{}
 	}
-	enc := json.NewEncoder(out)
+	enc := termsafe.JSONEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(checkJSON{Missing: missing, Extra: extra})
 }
