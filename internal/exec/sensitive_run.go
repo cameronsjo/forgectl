@@ -146,6 +146,13 @@ func failedResult() SensitiveResult { return SensitiveResult{ExitCode: -1} }
 // exited on its own is different: nothing is killed there — the read ends are
 // closed and the call returns, leaving the descendant to its own lifetime.
 // Either way a stream that stopped short is reported incomplete.
+//
+// That incompleteness rides BoundedOutput.Complete, never the returned error.
+// On a zero-exit run there is no error to check: a backend that daemonises
+// leaves a descendant holding the pipe, which is a successful run by every
+// measure except that we stopped listening. A caller that parses output must
+// read the completeness flag — CopyBytesForParse returns it alongside the bytes
+// so it cannot be skipped by accident.
 func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveCommand) (SensitiveResult, error) {
 	if err := sc.validate(); err != nil {
 		slog.Debug("Refusing sensitive command before start.", "cmd", sc, "reason", err.Error())
