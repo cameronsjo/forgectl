@@ -53,6 +53,17 @@ func helperMain(mode string) int {
 		return 0
 	case "spawn":
 		return spawnHolder(arg)
+	case "touch":
+		// Durable evidence that fork/exec happened. A test asserting "this
+		// never ran" cannot rely on captured output: a kill races the child's
+		// first write, so an empty stdout is also what a process that started
+		// and died promptly looks like.
+		f, err := os.Create(arg)
+		if err != nil {
+			return 95
+		}
+		_ = f.Close()
+		return 0
 	case "env":
 		for _, key := range strings.Split(arg, ",") {
 			if v, ok := os.LookupEnv(key); ok {

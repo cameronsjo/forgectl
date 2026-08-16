@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -417,7 +420,12 @@ func TestSensitiveCommand_ValidateRefusesBeforeStart(t *testing.T) {
 // expired deadline does not buy a fork/exec. The path is a real binary, so the
 // only thing stopping it is the context check.
 func TestRunSensitive_RefusesAnAlreadyDoneContextWithoutForking(t *testing.T) {
-	runner, self := helperRunner(t, "ok:should-never-run", defaultRetireBound)
+	// The child creates this file the instant it runs. Captured output cannot
+	// carry this assertion: a kill races the child's first write, so an empty
+	// stdout is also what a process that started and died promptly looks like.
+	// A file that exists is proof the fork happened, whenever it happened.
+	marker := filepath.Join(t.TempDir(), "the-child-ran")
+	runner, self := helperRunner(t, "touch:"+marker, defaultRetireBound)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
 	defer cancel()
@@ -427,9 +435,6 @@ func TestRunSensitive_RefusesAnAlreadyDoneContextWithoutForking(t *testing.T) {
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("err = %v, want ErrTimeout", err)
 	}
-	if res.Stdout.Len() != 0 {
-		t.Errorf("the process ran: captured %d bytes", res.Stdout.Len())
-	}
 	if res.ExitCode != -1 {
 		t.Errorf("ExitCode = %d, want -1 for a command that never ran", res.ExitCode)
 	}
@@ -438,6 +443,21 @@ func TestRunSensitive_RefusesAnAlreadyDoneContextWithoutForking(t *testing.T) {
 	cancel2()
 	if _, err := runner.RunSensitive(canceledCtx, helperCommand(KindTmuxProbe, self, 1024)); !errors.Is(err, ErrCanceled) {
 		t.Errorf("err = %v, want ErrCanceled", err)
+	}
+
+	// Give a process that did start time to reach os.Create before looking.
+	time.Sleep(200 * time.Millisecond)
+	if _, err := os.Stat(marker); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the child ran under an already-done context: stat says %v", err)
+	}
+
+	// The marker must be capable of appearing, or its absence above proves
+	// nothing about the context check.
+	if _, err := runner.RunSensitive(context.Background(), helperCommand(KindTmuxProbe, self, 1024)); err != nil {
+		t.Fatalf("control run failed: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("the marker never appears even on a normal run; its absence above proved nothing: %v", err)
 	}
 }
 
