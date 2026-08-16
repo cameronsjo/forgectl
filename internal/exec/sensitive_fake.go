@@ -36,6 +36,12 @@ type FakeSensitiveRunner struct {
 // refused command is not recorded: production never ran it either, so Calls()
 // is a log of attempts that reached a process, not of attempts made.
 //
+// Two production refusals it cannot mirror, both start failures: an
+// unavailable pipe and a fork/exec that fails on a path that is absolute but
+// missing or not executable. A fake that never forks cannot reach either, so
+// an adapter's start-failure handling stays uncovered here — the gap runs
+// toward untested rather than toward accepting something production refuses.
+//
 // The Args and Env slices are cloned at record time: a caller that reuses a
 // backing array across calls would otherwise rewrite its own recorded history.
 func (f *FakeSensitiveRunner) RunSensitive(ctx context.Context, cmd SensitiveCommand) (SensitiveResult, error) {

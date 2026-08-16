@@ -238,7 +238,20 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 	// tell a retired stream from a finished one on its own. readCapped makes
 	// that call for each stream as it ends, so a stdout that reached EOF stays
 	// parsable even when stderr's reader was the one still held.
-	stdout, stderr := r.retire(trigger != OutcomeUnspecified, sc.Kind, outR, errR, outCh, errCh)
+	killed := trigger != OutcomeUnspecified
+	stdout, stderr := r.retire(killed, sc.Kind, outR, errR, outCh, errCh)
+	if killed {
+		// The one cause readCapped cannot see. Killing the child closes every
+		// write end, so its reader gets a genuine io.EOF and correctly reports
+		// that the stream ended — while the reason it ended is that the
+		// producer was stopped mid-write. From the reader's side a killed
+		// producer and a finished one are identical; only this layer knows it
+		// pulled the trigger, so only this layer can say the bytes are a
+		// prefix. This is the likeliest truncation of all — it is what a
+		// timeout, a cancellation, and an overflow on the other stream all
+		// produce.
+		stdout.forced, stderr.forced = true, true
+	}
 
 	// Overflow can also surface after the fact: a reader that filled its
 	// buffer while the process was already exiting signals on a channel nobody
@@ -321,11 +334,14 @@ func retireReason(o Outcome) string {
 // coming for.
 //
 // It does not mark the streams it cuts off, deliberately. The interrupted Read
-// returns os.ErrClosed, which readCapped already classifies as a stop that is
-// not the end of the stream — so readCapped is the single writer of that flag,
-// and a reader that finished before the close carries its own correct answer.
-// A second writer here would be a duplicate of a decision already made, and
-// the two could drift.
+// returns os.ErrClosed, which readCapped already classifies as a stop short of
+// the end, and a reader that finished before the close carries its own correct
+// answer — so marking here would duplicate a decision already made.
+//
+// That covers every cause a reader can observe. It does not cover the kill:
+// once the child is reaped its write ends are closed too, so the reader sees a
+// genuine io.EOF and cannot tell a producer that finished from one that was
+// stopped. RunSensitive marks that case, because it is the layer that knows.
 func (r *OSSensitiveRunner) retire(immediate bool, kind CommandKind, outR, errR *os.File, outCh, errCh <-chan BoundedOutput) (BoundedOutput, BoundedOutput) {
 	if immediate {
 		closeAll(outR, errR)

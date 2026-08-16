@@ -54,6 +54,18 @@ func helperMain(mode string) int {
 		return 0
 	case "spawn":
 		return spawnHolder(arg)
+	case "partial":
+		// Write, then stall, then write again. A caller that kills during the
+		// stall gets a prefix — and gets it after a clean io.EOF, because the
+		// kill closes this process's write ends too.
+		_, _ = fmt.Fprint(os.Stdout, "PARTIAL")
+		d, err := time.ParseDuration(arg)
+		if err != nil {
+			return 98
+		}
+		time.Sleep(d)
+		_, _ = fmt.Fprint(os.Stdout, "-REST")
+		return 0
 	case "touch":
 		// Durable evidence that fork/exec happened. A test asserting "this
 		// never ran" cannot rely on captured output: a kill races the child's
@@ -315,6 +327,69 @@ func TestRunSensitive_ReturnsWithinBoundWhenDescendantHoldsThePipe(t *testing.T)
 	}
 	if !strings.Contains(string(data), "parent-done") {
 		t.Errorf("stdout = %q; what the immediate child wrote before exiting must still be captured", data)
+	}
+}
+
+// TestRunSensitive_KilledProducerLeavesAnIncompletePrefix covers the one cause
+// of truncation a reader structurally cannot see. Killing the child closes its
+// write ends, so the reader gets a genuine io.EOF and correctly reports that
+// the stream ended — while the reason it ended is that the producer was
+// stopped mid-write. Only the layer that killed it knows, and a caller parsing
+// the bytes has to be told, because the seam's contract sends them to the
+// completeness flag rather than to the error.
+func TestRunSensitive_KilledProducerLeavesAnIncompletePrefix(t *testing.T) {
+	cases := map[string]func() (context.Context, context.CancelFunc){
+		"deadline": func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 200*time.Millisecond)
+		},
+		"cancellation": func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+				cancel()
+			}()
+			return ctx, func() {}
+		},
+	}
+
+	for name, mkCtx := range cases {
+		runner, self := helperRunner(t, "partial:60s", defaultRetireBound)
+		ctx, cancel := mkCtx()
+
+		res, err := runner.RunSensitive(ctx, helperCommand(KindTmuxCreate, self, 4096))
+		cancel()
+
+		if err == nil {
+			t.Errorf("%s: expected the kill to be reported", name)
+		}
+		data, complete := res.Stdout.CopyBytesForParse()
+		if string(data) != "PARTIAL" {
+			t.Errorf("%s: stdout = %q, want the prefix the child managed to write", name, data)
+		}
+		if complete {
+			t.Errorf("%s: a killed producer's prefix reported itself complete", name)
+		}
+		if res.Stdout.Complete() {
+			t.Errorf("%s: Complete() disagreed with CopyBytesForParse", name)
+		}
+		if res.Stderr.Complete() {
+			t.Errorf("%s: the other stream of a killed process reported itself complete", name)
+		}
+	}
+
+	// The same helper run to completion reports complete, so "incomplete" above
+	// is the kill and not something the fixture always produces.
+	runner, self := helperRunner(t, "partial:1ms", defaultRetireBound)
+	res, err := runner.RunSensitive(context.Background(), helperCommand(KindTmuxCreate, self, 4096))
+	if err != nil {
+		t.Fatalf("control run failed: %v", err)
+	}
+	data, complete := res.Stdout.CopyBytesForParse()
+	if !complete {
+		t.Errorf("an uninterrupted run reported itself incomplete; the assertions above prove nothing")
+	}
+	if string(data) != "PARTIAL-REST" {
+		t.Errorf("control stdout = %q, want the whole stream", data)
 	}
 }
 

@@ -238,6 +238,12 @@ func fixed(v string) (Arg, error) {
 // from a runtime string is a way to launder a session name or a ref past that
 // check. Panicking on a malformed constant does not prevent it: "-rf" is
 // well-formed. The type does.
+//
+// The claim is about the type system, and it stops there: reflect can hand an
+// importer this type descriptor without naming it, and Convert will mint one
+// from a runtime string. No Go type can close that, and a caller who reaches
+// for reflect to get past a constructor is not making a mistake this seam can
+// prevent. What the type closes is every accidental route.
 type constantArg string
 
 // MustFixed builds an argv element from a backend constant. Its parameter
