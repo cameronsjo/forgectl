@@ -37,11 +37,15 @@ func readDocsTokenFile(path string, file openedDocsTokenFile) (string, error) {
 	closeErr := file.Close()
 	if readErr != nil || closeErr != nil {
 		var failures []error
+		// The RAW path, not displayPath: wrapDocsTokenDescriptorError renders it
+		// itself, and QuotePath is not idempotent — passing the already-quoted
+		// form produced a doubly-quoted path. Sanitize was idempotent, which is
+		// why this was invisible before the boundary moved.
 		if readErr != nil {
-			failures = append(failures, wrapDocsTokenDescriptorError("read", displayPath, readErr))
+			failures = append(failures, wrapDocsTokenDescriptorError("read", path, readErr))
 		}
 		if closeErr != nil {
-			failures = append(failures, wrapDocsTokenDescriptorError("close", displayPath, closeErr))
+			failures = append(failures, wrapDocsTokenDescriptorError("close", path, closeErr))
 		}
 		return "", errors.Join(failures...)
 	}
@@ -60,7 +64,11 @@ func readDocsTokenFile(path string, file openedDocsTokenFile) (string, error) {
 	return string(raw), nil
 }
 
-func safeDocsTokenPath(path string) string { return termsafe.Sanitize(path) }
+// safeDocsTokenPath renders a token-file path for the terminal. QuotePath, not
+// SafeLine: every use is a human-only error message where the value is
+// unambiguously a path, and the explicit quotes keep a trailing space or an
+// escaped segment legible as part of the path rather than as sentence text.
+func safeDocsTokenPath(path string) string { return termsafe.QuotePath(path) }
 
 // wrapDocsTokenDescriptorError removes path-bearing wrappers before an error
 // reaches the terminal. *os.File operations reuse the raw os.NewFile name in

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ func TestIsUnsafeTerminalRuneMatchesUnicodeProperties(t *testing.T) {
 	}
 }
 
-func TestSanitizeReplacesBidiControls(t *testing.T) {
+func TestSafeLineQuotesEveryBidiControl(t *testing.T) {
 	tests := []struct {
 		name string
 		r    rune
@@ -43,49 +44,72 @@ func TestSanitizeReplacesBidiControls(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got, want := Sanitize("left"+string(tt.r)+"right"), "left right"; got != want {
-				t.Errorf("Sanitize with %U = %q, want %q", tt.r, got, want)
-			}
+			assertQuotedInPlace(t, tt.r)
 		})
 	}
 }
 
-func TestSanitizePreservesTabAlthoughItIsUnsafe(t *testing.T) {
-	if !IsUnsafeTerminalRune('\t') {
-		t.Fatal("tab is a Cc control and must be classified as unsafe")
-	}
-	if got, want := Sanitize("a\tb"), "a\tb"; got != want {
-		t.Errorf("Sanitize(%q) = %q, want %q", want, got, want)
+// assertQuotedInPlace checks SafeLine's actual contract: the rune is replaced by
+// its VISIBLE escape, in place, with the surrounding text intact.
+//
+// Asserting only that the rune is gone would pass on a SafeLine that DELETED it,
+// and deletion is the behaviour the whole boundary exists to avoid — an operator
+// who cannot see that something was removed is being lied to just as surely as
+// one whose cursor gets moved. The expected form comes from
+// strconv.QuoteRuneToGraphic, the same source SafeLine builds from, so this
+// pins the spelling rather than restating the implementation's arithmetic.
+func assertQuotedInPlace(t *testing.T, r rune) {
+	t.Helper()
+	quoted := strconv.QuoteRuneToGraphic(r)
+	want := "left" + quoted[1:len(quoted)-1] + "right"
+	if got := SafeLine("left" + string(r) + "right"); got != want {
+		t.Errorf("SafeLine with %U = %q, want %q", r, got, want)
 	}
 }
 
-func TestSanitizePreservesNonBidiFormattingAndRTLText(t *testing.T) {
+// TestSafeLineQuotesTabAndTheInvisibleFormattingResidual is #281's regression at
+// the primitive: the retired Sanitize passed tab through by design and passed
+// U+2028, U+2029, U+200B, U+00AD and U+2060 through by omission — none of them
+// is Cc or Bidi_Control. SafeLine quotes all six because its rule is "unsafe OR
+// non-graphic", which is the reason every human sink was moved onto it.
+func TestSafeLineQuotesTabAndTheInvisibleFormattingResidual(t *testing.T) {
+	for _, r := range []rune{'\t', 0x2028, 0x2029, 0x200b, 0x00ad, 0x2060} {
+		assertQuotedInPlace(t, r)
+	}
+}
+
+// TestSafeLinePreservesOrdinaryGraphicText is the other half of the boundary:
+// SafeLine must not turn legitimate non-ASCII text into escapes. RTL script and
+// emoji are graphic runes and survive verbatim. Joiners and variation selectors
+// are deliberately NOT in this set — they are Cf, and SafeLine quotes them by
+// its non-graphic rule, which
+// TestVisibleQuotingDoesNotBroadenSharedClassifier pins from the other side.
+func TestSafeLinePreservesOrdinaryGraphicText(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
 	}{
-		{name: "ZERO WIDTH NON-JOINER", input: "a\u200cb"},
-		{name: "ZERO WIDTH JOINER", input: "a\u200db"},
-		{name: "Persian shaping with ZWNJ", input: "می\u200cروم"},
-		{name: "emoji ZWJ sequence", input: "👩\u200d💻"},
-		{name: "text presentation selector", input: "✈\ufe0e"},
-		{name: "emoji presentation selector", input: "✈\ufe0f"},
-		{name: "supplementary variation selector", input: "a\U000e0100b"},
-		{name: "ZERO WIDTH SPACE", input: "a\u200bb"},
 		{name: "Arabic text", input: "مرحبا"},
 		{name: "Hebrew text", input: "שלום"},
+		{name: "emoji", input: "emoji 🔥 test"},
+		{name: "CJK", input: "咖啡 workflow"},
+		{name: "ASCII with spaces", input: "plain text"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := Sanitize(tt.input); got != tt.input {
-				t.Errorf("Sanitize(%q) = %q, want unchanged", tt.input, got)
+			if got := SafeLine(tt.input); got != tt.input {
+				t.Errorf("SafeLine(%q) = %q, want unchanged", tt.input, got)
 			}
 		})
 	}
 }
 
-func FuzzSanitize(f *testing.F) {
+// FuzzSafeLine holds the property the human boundary exists for: no unsafe and
+// no non-graphic rune survives into the output, the result is one physical
+// line, and a second pass changes nothing. The corpus carries the seeds the
+// retired FuzzSanitize accumulated plus the #281 residual it never covered.
+func FuzzSafeLine(f *testing.F) {
 	seeds := []string{
 		"",
 		"plain text",
@@ -95,40 +119,36 @@ func FuzzSanitize(f *testing.F) {
 		string(rune(0x7f)),
 		"emoji 🔥 test",
 		"hidden" + string(rune(0x202e)) + "spoof" + string(rune(0x202c)),
-		"zero\u200bwidth",
-		"join\u200der",
+		"zero" + string(rune(0x200b)) + "width",
+		"join" + string(rune(0x200d)) + "er",
 		"multi\nline\r\nstring",
 		"咖啡 workflow",
+		"line" + string(rune(0x2028)) + "sep",
+		"para" + string(rune(0x2029)) + "sep",
+		"soft" + string(rune(0x00ad)) + "hyphen",
+		"word" + string(rune(0x2060)) + "joiner",
 	}
 	for _, s := range seeds {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
-		got := Sanitize(s)
+		got := SafeLine(s)
 		for _, r := range got {
-			if r != '\t' && IsUnsafeTerminalRune(r) {
-				t.Fatalf("unsafe terminal rune %U survived Sanitize: input=%q output=%q", r, s, got)
+			if IsUnsafeTerminalRune(r) {
+				t.Fatalf("unsafe terminal rune %U survived SafeLine: input=%q output=%q", r, s, got)
+			}
+			if !unicode.IsGraphic(r) {
+				t.Fatalf("non-graphic rune %U survived SafeLine: input=%q output=%q", r, s, got)
 			}
 		}
-
-		if utf8.ValidString(s) {
-			inputRunes, outputRunes := []rune(s), []rune(got)
-			if len(inputRunes) != len(outputRunes) {
-				t.Fatalf("Sanitize changed rune count %d -> %d: input=%q output=%q", len(inputRunes), len(outputRunes), s, got)
-			}
-			for i, inputRune := range inputRunes {
-				want := inputRune
-				if inputRune != '\t' && IsUnsafeTerminalRune(inputRune) {
-					want = ' '
-				}
-				if outputRunes[i] != want {
-					t.Fatalf("Sanitize rune %d = %U, want %U: input=%q output=%q", i, outputRunes[i], want, s, got)
-				}
-			}
+		if strings.ContainsAny(got, "\n\r") {
+			t.Fatalf("SafeLine output spans physical lines: input=%q output=%q", s, got)
 		}
-
-		if twice := Sanitize(got); twice != got {
-			t.Fatalf("Sanitize is not idempotent: once=%q twice=%q", got, twice)
+		if !utf8.ValidString(got) {
+			t.Fatalf("SafeLine produced invalid UTF-8: input=%q output=%q", s, got)
+		}
+		if twice := SafeLine(got); twice != got {
+			t.Fatalf("SafeLine is not idempotent: once=%q twice=%q", got, twice)
 		}
 	})
 }
@@ -210,18 +230,19 @@ func TestSafeLineAndQuotePath_EscapeEverySharedUnsafeRune(t *testing.T) {
 	}
 }
 
-func TestVisibleQuotingDoesNotBroadenSharedSanitizeClassifier(t *testing.T) {
-	for _, r := range []rune{'\u200c', '\u200d', '\ufe0e', '\ufe0f', '\U000e0100'} {
-		input := "left" + string(r) + "right"
+// TestVisibleQuotingDoesNotBroadenSharedClassifier guards the one invariant the
+// #281 convergence must not trade away. IsUnsafeTerminalRune is shared by the
+// text renderer and the JSON filter, and only the text renderer may quote MORE
+// than it names — a rune added to the classifier itself would start escaping
+// values inside --json documents, where escaping is a contract change.
+func TestVisibleQuotingDoesNotBroadenSharedClassifier(t *testing.T) {
+	for _, r := range []rune{0x200c, 0x200d, 0xfe0e, 0xfe0f, 0x0e0100, 0x2028, 0x2029, 0x200b, 0x00ad, 0x2060} {
 		if IsUnsafeTerminalRune(r) {
 			t.Fatalf("permitted formatting rune %U was added to the shared classifier", r)
 		}
-		if got := Sanitize(input); got != input {
-			t.Fatalf("Sanitize changed permitted formatting rune %U: %q", r, got)
-		}
 	}
 
-	for _, r := range []rune{'\u200c', '\u200d'} {
+	for _, r := range []rune{0x200c, 0x200d} {
 		input := "left" + string(r) + "right"
 		for name, got := range map[string]string{
 			"SafeLine":  SafeLine(input),

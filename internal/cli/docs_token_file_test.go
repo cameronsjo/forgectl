@@ -164,7 +164,7 @@ func TestReadDocsTokenFile_B64TokenGrammarAndEOL(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "invalid bearer token") || got != "" {
 				t.Fatalf("readDocsTokenFile(%q) = (%q, %v), want redacted invalid-token error", raw, got, err)
 			}
-			if err.Error() != "token file contains an invalid bearer token: /safe/token" {
+			if err.Error() != `token file contains an invalid bearer token: "/safe/token"` {
 				t.Fatalf("error = %q, want fixed class and safe path only", err)
 			}
 		})

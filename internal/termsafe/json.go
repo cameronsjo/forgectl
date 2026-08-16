@@ -18,6 +18,17 @@ import (
 // to the very same rune, so the round trip is unchanged and only the terminal
 // rendering differs.
 //
+// The preservation guarantee is scoped to VALID UTF-8, and that boundary is
+// encoding/json's, not this filter's: the stdlib encoder substitutes U+FFFD for
+// invalid bytes in a Go string, so a Unix path holding an unpaired 0xFF does not
+// survive a --json round trip and never did. This filter matches that behaviour
+// rather than diverging from it (escapeJSONUnsafe repairs the same way, which is
+// what makes an overlong encoding of an unsafe rune fail closed instead of being
+// reassembled downstream). Reversible encoding of arbitrary bytes would mean a
+// different wire shape for every path field — a contract change, not a fix — so
+// the claim is narrowed here instead of the behaviour being quietly overstated.
+// TestJSONEncoder_InvalidUTF8IsReplacedNotPreserved pins it.
+//
 // encoding/json escapes every byte below 0x20 inside a string, which is why C0
 // controls were never the gap. Above 0x20 it escapes only '"', '\\', U+2028 and
 // U+2029 — so DEL, the C1 controls (U+0080–U+009F, which include CSI and OSC

@@ -107,7 +107,10 @@ func (runtime externalCommandRuntime) runExternalCommand(candidate topLevelCandi
 	if err != nil {
 		// The exec error is the caller's identity-bearing result; an unavailable
 		// diagnostic writer must not replace or wrap it.
-		_, _ = fmt.Fprintln(runtime.stderr, termsafe.Sanitize(meta.AppName+": "+err.Error()))
+		// SafeLine, so the diagnostic is one inert physical line: the text comes
+		// from a third-party extension binary, which is exactly the source with
+		// no reason to be trusted with the operator's cursor.
+		_, _ = fmt.Fprintln(runtime.stderr, termsafe.SafeLine(meta.AppName+": "+err.Error()))
 	}
 	return true, err
 }
