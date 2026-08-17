@@ -135,6 +135,13 @@ func (r StartResult) Validate() error {
 		if r.hasCause && !r.cause.Valid() {
 			return fmt.Errorf("%w: a ref-known result carries an unclassified cause", ErrInvalidResult)
 		}
+		// And the reverse: a cause sitting in the field that no constructor
+		// declared. This is the one shape that flips Failed(), so it reads as
+		// a clean success while carrying a real failure — and PlanCleanup then
+		// plans no close for a workspace that needs one.
+		if !r.hasCause && r.cause.set() {
+			return fmt.Errorf("%w: a ref-known result carries an undeclared cause", ErrInvalidResult)
+		}
 	case OutcomeUnknown:
 		if r.hasRef {
 			return fmt.Errorf("%w: an outcome-unknown result carries a reference", ErrInvalidResult)

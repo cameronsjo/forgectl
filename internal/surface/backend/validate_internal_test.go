@@ -89,6 +89,16 @@ func TestStartResult_ForbiddenFieldCombinations(t *testing.T) {
 		"outcome-unknown with an undeclared cause": {result: StartResult{
 			outcome: OutcomeUnknown, tag: tag, hasTag: true, cause: internalCause(),
 		}},
+		// The one undeclared-cause shape that flips Failed(): without the
+		// guard it reads as a clean success while carrying a real failure.
+		// Validation refuses it, and because the reference is sound the
+		// fallback still cleans up the workspace it names.
+		"ref-known with an undeclared cause": {
+			result: StartResult{
+				outcome: RefKnown, ref: ref, hasRef: true, cause: internalCause(),
+			},
+			wantClose: true,
+		},
 		"ref-known with a separate tag": {
 			result: StartResult{
 				outcome: RefKnown, ref: ref, hasRef: true, tag: tag, hasTag: true,
@@ -242,27 +252,33 @@ func TestProbeResult_SuccessMayNotCarryACause(t *testing.T) {
 // passes. Only an in-package test can reach the sentinel, which is where the
 // real bound lives.
 func TestClosedEnums_EveryConstantIsNamed(t *testing.T) {
-	enums := map[string]struct {
-		count int
-		name  func(int) string
-	}{
-		"Kind":              {int(kindCount), func(i int) string { return Kind(i).String() }},
-		"StartFailureClass": {int(failureClassCount), func(i int) string { return StartFailureClass(i).String() }},
-		"Phase":             {int(phaseCount), func(i int) string { return Phase(i).String() }},
-		"MutationOutcome":   {int(mutationOutcomeCount), func(i int) string { return MutationOutcome(i).String() }},
-		"CloseState":        {int(closeStateCount), func(i int) string { return CloseState(i).String() }},
-		"ProbeState":        {int(probeStateCount), func(i int) string { return ProbeState(i).String() }},
-		"CleanupOutcome":    {int(cleanupOutcomeCount), func(i int) string { return CleanupOutcome(i).String() }},
+	// Each entry walks its own enum in its own type — no int conversions, so
+	// the loop bound is the count sentinel itself rather than a number that
+	// has to be converted back. The final element of each slice is the value
+	// one *past* the sentinel, which is what proves the walk reached the real
+	// end rather than stopping short of it.
+	enums := map[string][]string{
+		"Kind": walkEnum(kindCount, func(v Kind) string { return v.String() }),
+		"StartFailureClass": walkEnum(failureClassCount,
+			func(v StartFailureClass) string { return v.String() }),
+		"Phase": walkEnum(phaseCount, func(v Phase) string { return v.String() }),
+		"MutationOutcome": walkEnum(mutationOutcomeCount,
+			func(v MutationOutcome) string { return v.String() }),
+		"CloseState": walkEnum(closeStateCount, func(v CloseState) string { return v.String() }),
+		"ProbeState": walkEnum(probeStateCount, func(v ProbeState) string { return v.String() }),
+		"CleanupOutcome": walkEnum(cleanupOutcomeCount,
+			func(v CleanupOutcome) string { return v.String() }),
 	}
 
-	for enum, spec := range enums {
+	for enum, names := range enums {
 		t.Run(enum, func(t *testing.T) {
-			if spec.count < 2 {
-				t.Fatalf("count sentinel is %d; the enum is not being walked", spec.count)
+			if len(names) < 3 {
+				t.Fatalf("walked %d values; the enum is not being walked", len(names))
 			}
-			seen := make(map[string]bool, spec.count)
-			for i := range spec.count {
-				got := spec.name(i)
+			inside, past := names[:len(names)-1], names[len(names)-1]
+
+			seen := make(map[string]bool, len(inside))
+			for i, got := range inside {
 				switch {
 				case got == "":
 					t.Errorf("value %d has no entry in the name table", i)
@@ -273,13 +289,51 @@ func TestClosedEnums_EveryConstantIsNamed(t *testing.T) {
 				}
 				seen[got] = true
 			}
-			// One past the sentinel must render as an invalid marker, which is
-			// what proves the walk stopped at the real end rather than short of
-			// it.
-			if got := spec.name(spec.count); !strings.HasPrefix(got, "invalid(") {
-				t.Errorf("the value past the sentinel renders as %q, not an invalid marker", got)
+			if !strings.HasPrefix(past, "invalid(") {
+				t.Errorf("the value past the sentinel renders as %q, not an invalid marker", past)
 			}
 		})
+	}
+}
+
+// walkEnum renders every value from zero up to and including the count
+// sentinel. The sentinel's own rendering is the last element, so a caller can
+// assert that it falls outside the named range.
+func walkEnum[T ~uint8](count T, render func(T) string) []string {
+	out := make([]string, 0, count+1)
+	for v := T(0); v <= count; v++ {
+		out = append(out, render(v))
+	}
+	return out
+}
+
+// TestRetryable_WalksEveryFailureClass is the in-package half of the retry
+// invariant.
+//
+// The external test enumerates the classes it can name, which means a class
+// appended later is simply not visited: the loop never reaches it, and the
+// "exactly one is retryable" assertion still holds. Walking to the count
+// sentinel is the only way to hold a *closed* set closed, and the sentinel is
+// unexported.
+func TestRetryable_WalksEveryFailureClass(t *testing.T) {
+	if failureClassCount < 3 {
+		t.Fatalf("count sentinel is %d; the enum is not being walked", failureClassCount)
+	}
+
+	retryable := 0
+	for c := FailureUnspecified; c < failureClassCount; c++ {
+		if !c.Retryable() {
+			continue
+		}
+		retryable++
+		if c != FailureNameCollision {
+			t.Errorf("%v is retryable; only a definitive pre-mutation name collision may be, "+
+				"because every other class leaves open that the first request already mutated "+
+				"the daemon", c)
+		}
+	}
+	if retryable != 1 {
+		t.Errorf("%d classes are retryable, want exactly 1", retryable)
 	}
 }
 

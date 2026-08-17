@@ -492,8 +492,17 @@ func TestRef_RendersNoSecrets(t *testing.T) {
 	if !strings.Contains(rendered, tag.OwnershipName()) {
 		t.Errorf("rendering %q omits the ownership name an operator needs", rendered)
 	}
+
+	// Scan everything *except* the ownership name. The tag is 32 random hex
+	// characters, and the numeric fixtures below are decimal — which is a
+	// subset of hex — so a tag containing "4242" by chance would fail this as
+	// a leak roughly once in every few thousand runs.
+	scanned := strings.ReplaceAll(rendered, tag.OwnershipName(), "")
+	if scanned == rendered {
+		t.Fatal("the ownership name was not found to exclude; the scan below covers the wrong text")
+	}
 	for _, secret := range []string{"/private/tmp/fc/sock", "4242", "16777232"} {
-		if strings.Contains(rendered, secret) {
+		if strings.Contains(scanned, secret) {
 			t.Errorf("rendering %q leaks fingerprint input %q", rendered, secret)
 		}
 	}

@@ -211,10 +211,16 @@ func TestLaunchError_KeepsTheFourFactsApart(t *testing.T) {
 	}
 }
 
-// TestClosedEnums_NameEveryValue catches an enum that gained a constant
-// without gaining a name — which renders as "invalid(7)" in a log and reads as
-// a corruption rather than as a missing table entry.
-func TestClosedEnums_NameEveryValue(t *testing.T) {
+// TestClosedEnums_NamedValuesAreDistinct checks the exported surface: every
+// constant a caller can name renders as a non-empty, unique string.
+//
+// It deliberately does NOT claim to catch an enum that gained a constant
+// without gaining a name. Each loop below is bounded by the last constant this
+// package can see, so a member appended before the unexported count sentinel
+// is never visited — the array grows with an empty default and this test stays
+// green. Holding the *bound* requires reaching the sentinel, which only an
+// in-package test can do: TestClosedEnums_EveryConstantIsNamed.
+func TestClosedEnums_NamedValuesAreDistinct(t *testing.T) {
 	stringers := map[string][]fmt.Stringer{}
 
 	for k := backend.KindTmux; k <= backend.KindHerdr; k++ {

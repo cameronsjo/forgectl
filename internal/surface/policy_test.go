@@ -17,7 +17,11 @@ import (
 func executable(t *testing.T, name string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	// Owner-only, but the executable bit is the entire point: the policy
+	// refuses a binary without it, so a mode gosec would prefer would make
+	// every acceptance row here fail for the wrong reason.
+	//nolint:gosec // G306: the executable bit is the property under test
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
 	return path
@@ -92,7 +96,7 @@ func TestPolicy_OptingInToPATHWaivesNothingElse(t *testing.T) {
 	dir := t.TempDir()
 
 	notExecutable := filepath.Join(dir, "claude.txt")
-	if err := os.WriteFile(notExecutable, []byte("not a binary"), 0o644); err != nil {
+	if err := os.WriteFile(notExecutable, []byte("not a binary"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 

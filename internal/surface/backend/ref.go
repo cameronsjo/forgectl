@@ -136,12 +136,12 @@ func (s ServerSource) String() string {
 	return sourceNames[s.code]
 }
 
-func (s ServerSource) MarshalText() ([]byte, error) {
-	if !s.Valid() {
-		return nil, fmt.Errorf("%w: server source is unset", ErrInvalidRef)
-	}
-	return []byte(s.String()), nil
-}
+// There is deliberately no MarshalText/UnmarshalText pair here. Ref.MarshalJSON
+// writes String() and DecodeRef reads it back with parseServerSource, so a
+// marshaler would sit off every encoding path — and shipping one without its
+// inverse would give a caller who embedded a ServerSource validating encoding
+// and non-validating decoding. String and parseServerSource are the one
+// spelling pair.
 
 // parseServerSource resolves an exact wire spelling. Unknown values fail
 // closed; there is no default source, because falling back to a default server
@@ -265,9 +265,15 @@ func Fingerprint(in IncarnationInput) (ServerID, error) {
 	writeField(h, []byte(in.ServerReported))
 	writeUint(h, in.Device)
 	writeUint(h, in.Inode)
-	writeUint(h, uint64(in.ChangedAtUnixNano))
-	writeUint(h, uint64(int64(in.PID)))
-	writeUint(h, uint64(in.StartedAtUnixNano))
+	// The three signed conversions below are reinterpretations, not range
+	// checks that were forgotten. A fingerprint needs the raw bit pattern of
+	// each timestamp and pid, and two's-complement reinterpretation is
+	// injective — a negative value maps to exactly one uint64 and no other
+	// input maps there. Range-limiting them would change every digest that
+	// already exists and buy nothing.
+	writeUint(h, uint64(in.ChangedAtUnixNano)) //nolint:gosec // G115: injective bit reinterpretation, see above
+	writeUint(h, uint64(int64(in.PID)))        //nolint:gosec // G115: injective bit reinterpretation, see above
+	writeUint(h, uint64(in.StartedAtUnixNano)) //nolint:gosec // G115: injective bit reinterpretation, see above
 	return ServerID{digest: hex.EncodeToString(h.Sum(nil))}, nil
 }
 

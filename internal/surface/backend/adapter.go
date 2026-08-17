@@ -205,9 +205,9 @@ func (s StartSpec) Validate() error {
 // safeText bounds a string that will reach a manager's command line and UI:
 // length-capped, valid UTF-8, and free of the control sequences that would let
 // it rewrite a terminal it was only supposed to appear in.
-func safeText(s string, max int, what string) error {
-	if len(s) > max {
-		return fmt.Errorf("%w: %s exceeds %d bytes", ErrInvalidStartSpec, what, max)
+func safeText(s string, limit int, what string) error {
+	if len(s) > limit {
+		return fmt.Errorf("%w: %s exceeds %d bytes", ErrInvalidStartSpec, what, limit)
 	}
 	if !utf8.ValidString(s) {
 		return fmt.Errorf("%w: %s is not valid UTF-8", ErrInvalidStartSpec, what)

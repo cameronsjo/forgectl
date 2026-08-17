@@ -376,6 +376,10 @@ func TestProbeResult_Matrix(t *testing.T) {
 // failure that may already have mutated the daemon. Every class but a
 // definitive pre-creation name collision leaves that possibility open, and a
 // retry there creates a second workspace nobody owns.
+//
+// This list is what the exported surface can name, so it cannot see a class
+// appended later. TestRetryable_WalksEveryFailureClass holds the closed set
+// closed, in-package, where the count sentinel is reachable.
 func TestRetryable_OnlyPreMutationCollision(t *testing.T) {
 	all := []backend.StartFailureClass{
 		backend.FailureUnspecified,

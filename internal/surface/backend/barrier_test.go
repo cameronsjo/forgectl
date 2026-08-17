@@ -1,6 +1,7 @@
 package backend_test
 
 import (
+	"bytes"
 	"os/exec"
 	"slices"
 	"strings"
@@ -25,12 +26,8 @@ const (
 // load-bearing assertion into a convention someone has to remember.
 func adapterSidePackages(t *testing.T) []string {
 	t.Helper()
-	out, err := exec.Command("go", "list", modulePath+"/internal/surface/...").Output()
-	if err != nil {
-		t.Fatalf("go list internal/surface/...: %v", err)
-	}
 	var pkgs []string
-	for _, pkg := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	for _, pkg := range goList(t, modulePath+"/internal/surface/...") {
 		if pkg != "" && pkg != surfacePackage {
 			pkgs = append(pkgs, pkg)
 		}
@@ -41,15 +38,35 @@ func adapterSidePackages(t *testing.T) []string {
 // deps returns the full transitive dependency list of a package.
 func deps(t *testing.T, pkg string) []string {
 	t.Helper()
-	out, err := exec.Command("go", "list", "-deps", pkg).Output()
-	if err != nil {
-		t.Fatalf("go list -deps %s: %v", pkg, err)
-	}
-	listed := strings.Split(strings.TrimSpace(string(out)), "\n")
+	listed := goList(t, "-deps", pkg)
 	if len(listed) < 2 {
 		t.Fatalf("go list -deps %s returned %d packages; the query did not run", pkg, len(listed))
 	}
 	return listed
+}
+
+// goList runs `go list` and returns its lines.
+//
+// It carries the test's context so a hung toolchain cannot outlive the test,
+// and it captures stderr because a failure here aborts the package's
+// load-bearing assertion — and a barrier that fails with a bare exit status is
+// one nobody can repair.
+func goList(t *testing.T, args ...string) []string {
+	t.Helper()
+	//nolint:gosec // G204: the arguments are package paths built from
+	// constants in this file, not from anything a test caller supplies.
+	cmd := exec.CommandContext(t.Context(), "go", append([]string{"list"}, args...)...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list %v: %v: %s", args, err, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return nil
+	}
+	return lines
 }
 
 // TestAdapterPackagesCannotSeeTheInvocation is the architecture's load-bearing
