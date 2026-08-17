@@ -124,6 +124,13 @@ func TestPin_RefusesASubstitutedLeaf(t *testing.T) {
 	}
 
 	elsewhere := t.TempDir()
+	// Pinned explicitly rather than inherited from t.TempDir(), whose mode is
+	// 0o777 masked by the ambient umask — under umask 077 the fixture would
+	// already be 0o700 and the assertion below would fail spuriously.
+	//nolint:gosec // G301: the fixture stands in for an attacker's directory
+	if err := os.Chmod(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	victim := filepath.Join(elsewhere, "victim")
 	if err := os.WriteFile(victim, []byte("do not touch\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -136,18 +143,49 @@ func TestPin_RefusesASubstitutedLeaf(t *testing.T) {
 		t.Fatalf("Pin through a symlinked leaf = %v, want ErrUnsafe", err)
 	}
 
-	// A refusal that still touched the attacker's directory is not a refusal.
+	// The mode assertion is the one doing the work: a repair that landed on
+	// the symlink's target would narrow it to the private mode.
+	info, err := os.Lstat(elsewhere)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Errorf("the attacker's directory mode = %o, want 755 — the refusal chmod'd it", got)
+	}
+
+	// The content check cannot fail today, because no path in Pin writes a
+	// file under the leaf. It is kept as a tripwire for the change that would
+	// add one before the identity check rather than after.
 	//nolint:gosec // G304: the path is this test's own fixture
 	got, err := os.ReadFile(victim)
 	if err != nil || string(got) != "do not touch\n" {
 		t.Errorf("the refusal disturbed the attacker's target: %q, %v", got, err)
 	}
-	info, err := os.Lstat(elsewhere)
-	if err != nil {
-		t.Fatal(err)
+}
+
+// TestPin_ReadOnlyOpensAnExistingLeaf covers the success path a reader takes:
+// Create is false, the leaf is already there, and every check still runs.
+func TestPin_ReadOnlyOpensAnExistingLeaf(t *testing.T) {
+	base := scratch(t)
+	if _, err := pin(t, spec(base)); err != nil {
+		t.Fatalf("seeding Pin: %v", err)
 	}
-	if info.Mode().Perm() == 0o700 {
-		t.Error("the refusal chmod'd the symlink's target to the private mode")
+
+	readOnly := spec(base)
+	readOnly.Create = false
+	fd, err := pin(t, readOnly)
+	if err != nil {
+		t.Fatalf("read-only Pin on an existing leaf = %v, want success", err)
+	}
+
+	// The descriptor is the same directory, and usable.
+	child, err := unix.Openat(fd, "probe", unix.O_CREAT|unix.O_WRONLY|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		t.Fatalf("openat against the read-only pin: %v", err)
+	}
+	_ = unix.Close(child)
+	if _, err := os.Lstat(filepath.Join(base, "forgectl", "probe")); err != nil {
+		t.Errorf("the read-only pin points somewhere else: %v", err)
 	}
 }
 
@@ -246,15 +284,24 @@ func TestPin_RefusesASpecItCannotCheck(t *testing.T) {
 	base := scratch(t)
 
 	tests := map[string]privdir.Spec{
-		"no base":             {Leaf: "forgectl", Mode: 0o700, AncestorMode: 0o755, Create: true},
-		"no leaf":             {Base: base, Mode: 0o700, AncestorMode: 0o755, Create: true},
-		"multi-segment leaf":  {Base: base, Leaf: "a/b", Mode: 0o700, AncestorMode: 0o755, Create: true},
-		"traversing leaf":     {Base: base, Leaf: "..", Mode: 0o700, AncestorMode: 0o755, Create: true},
-		"current-dir leaf":    {Base: base, Leaf: ".", Mode: 0o700, AncestorMode: 0o755, Create: true},
-		"absolute leaf":       {Base: base, Leaf: "/etc", Mode: 0o700, AncestorMode: 0o755, Create: true},
-		"no mode":             {Base: base, Leaf: "forgectl", AncestorMode: 0o755, Create: true},
-		"no ancestor mode":    {Base: base, Leaf: "forgectl", Mode: 0o700, Create: true},
-		"the zero value spec": {},
+		"no base":            {Leaf: "forgectl", Mode: 0o700, AncestorMode: 0o755, Create: true},
+		"no leaf":            {Base: base, Mode: 0o700, AncestorMode: 0o755, Create: true},
+		"multi-segment leaf": {Base: base, Leaf: "a/b", Mode: 0o700, AncestorMode: 0o755, Create: true},
+		"traversing leaf":    {Base: base, Leaf: "..", Mode: 0o700, AncestorMode: 0o755, Create: true},
+		"current-dir leaf":   {Base: base, Leaf: ".", Mode: 0o700, AncestorMode: 0o755, Create: true},
+		"absolute leaf":      {Base: base, Leaf: "/etc", Mode: 0o700, AncestorMode: 0o755, Create: true},
+		// The separator alone is the one absolute path filepath.Base returns
+		// unchanged, so a round-trip check through Base admits it. POSIX
+		// ignores the dirfd when the path is absolute, so openat would hand
+		// back a descriptor on the root filesystem — and the mode repair would
+		// then chmod / to 0700 for any caller running as root.
+		"the root directory":      {Base: base, Leaf: "/", Mode: 0o700, AncestorMode: 0o755, Create: true},
+		"double separator":        {Base: base, Leaf: "//", Mode: 0o700, AncestorMode: 0o755, Create: true},
+		"leaf with a NUL":         {Base: base, Leaf: "a\x00b", Mode: 0o700, AncestorMode: 0o755, Create: true},
+		"leaf with a setgid mode": {Base: base, Leaf: "forgectl", Mode: 0o2700, AncestorMode: 0o755, Create: true},
+		"no mode":                 {Base: base, Leaf: "forgectl", AncestorMode: 0o755, Create: true},
+		"no ancestor mode":        {Base: base, Leaf: "forgectl", Mode: 0o700, Create: true},
+		"the zero value spec":     {},
 	}
 
 	for name, s := range tests {

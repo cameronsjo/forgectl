@@ -43,12 +43,17 @@ var (
 // a single component is what makes that checkable — a multi-segment leaf would
 // reintroduce the intermediate names this package exists to stop consulting.
 type Spec struct {
-	// Base is the parent directory. It is opened and pinned, but its own
-	// ancestors are not walked no-follow: on macOS the standard temp and state
-	// roots sit under symlinked ancestors (/var → /private/var), and a strict
-	// walk refuses paths operators legitimately use. Everything below Base —
-	// where names are predictable and therefore worth attacking — is fully
-	// verified.
+	// Base is the parent directory. Its final component is opened no-follow,
+	// but its own ancestors are not walked that way: on macOS the standard
+	// temp and state roots sit under symlinked ancestors (/var →
+	// /private/var), and a strict walk refuses paths operators legitimately
+	// use. Everything below Base — where names are predictable and therefore
+	// worth attacking — is fully verified.
+	//
+	// Base is trusted for *placement* only; its ownership and mode are never
+	// checked. That is deliberate and survives a hostile base: an attacker who
+	// owns Base still cannot produce a leaf owned by this euid, and cannot
+	// redirect anything after the leaf is pinned.
 	Base string
 
 	// Leaf is a single path component under Base. This is the directory whose
@@ -59,6 +64,12 @@ type Spec struct {
 	// 0o700. A leaf found broader than this is narrowed, but only after its
 	// identity and ownership are proven, so a chmod can never land on an
 	// object that was never ours.
+	//
+	// Permission bits only. Setuid, setgid, and sticky are refused rather than
+	// silently dropped, because a caller that asked for setgid and received
+	// 0o700 would believe it has semantics it does not have. The check on the
+	// *found* mode still covers all twelve bits, so a leaf that arrives setgid
+	// is repaired.
 	Mode fs.FileMode
 
 	// AncestorMode is the permission for directories created above Base when

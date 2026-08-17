@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/sys/unix"
 
@@ -89,21 +90,48 @@ func Pin(s Spec) (int, error) {
 	return leafFD, nil
 }
 
-// validate refuses a spec that cannot describe a checkable directory. A
-// multi-segment or traversing leaf is the case that matters: it would put
-// intermediate names back into the resolution this package exists to remove.
+// validate refuses a spec that cannot describe a checkable directory, before
+// anything is created. A multi-segment or traversing leaf is the case that
+// matters: it would put intermediate names back into the resolution this
+// package exists to remove.
+//
+// The separator test is explicit rather than a round-trip through
+// filepath.Base, because Base is not injective on the inputs that matter.
+// filepath.Base("/") returns "/" unchanged — documented behaviour — so a
+// round-trip admits the one absolute path that must never get through. POSIX
+// ignores the directory descriptor when a path is absolute, so an accepted "/"
+// would make openat hand back a descriptor on the root filesystem, whose name
+// then agrees with itself under the identity check; a caller running as root
+// would go on to chmod / to the leaf mode.
 func (s Spec) validate() error {
 	if s.Base == "" {
 		return fmt.Errorf("%w: no base directory", ErrUnsafe)
 	}
-	if s.Leaf == "" || s.Leaf != filepath.Base(s.Leaf) || s.Leaf == "." || s.Leaf == ".." {
+	switch {
+	case s.Leaf == "", s.Leaf == ".", s.Leaf == "..":
 		return fmt.Errorf("%w: leaf must be a single path component", ErrUnsafe)
+	case strings.ContainsRune(s.Leaf, filepath.Separator):
+		return fmt.Errorf("%w: leaf must not contain a path separator", ErrUnsafe)
+	case strings.ContainsRune(s.Leaf, 0):
+		// The syscall layer refuses this too, but only after the base has been
+		// created — a spec this package can see is wrong should cost nothing.
+		return fmt.Errorf("%w: leaf must not contain a NUL", ErrUnsafe)
 	}
 	if s.Mode.Perm() == 0 {
 		return fmt.Errorf("%w: no leaf mode", ErrUnsafe)
 	}
+	// Only permission bits are honoured — setuid, setgid, and sticky are
+	// dropped by Perm() on the way to mkdirat and fchmod. Refusing them is
+	// better than silently narrowing: a caller that asked for setgid and got
+	// 0700 would believe it has semantics it does not have.
+	if s.Mode != s.Mode.Perm() {
+		return fmt.Errorf("%w: leaf mode carries bits beyond permissions", ErrUnsafe)
+	}
 	if s.Create && s.AncestorMode.Perm() == 0 {
 		return fmt.Errorf("%w: no ancestor mode", ErrUnsafe)
+	}
+	if s.AncestorMode != s.AncestorMode.Perm() {
+		return fmt.Errorf("%w: ancestor mode carries bits beyond permissions", ErrUnsafe)
 	}
 	return nil
 }
@@ -121,9 +149,13 @@ func (s Spec) createBase() error {
 }
 
 // verify proves the pinned descriptor is the same object the leaf name
-// resolves to, that it belongs to this user, and that it is not readable by
-// anyone else — in that order, and all of it before any file beneath it is
-// created or opened.
+// resolves to, that it belongs to this user, and that it carries the mode the
+// caller asked for — in that order, and all of it before any file beneath it
+// is created or opened.
+//
+// Note the third clause is "the caller's mode", not "private": validate
+// accepts any permission bits, so how private the result is remains the
+// caller's choice. Both of forgectl's callers ask for 0o700.
 func (s Spec) verify(baseFD, leafFD int) error {
 	want := uint32(s.Mode.Perm())
 
@@ -141,6 +173,12 @@ func (s Spec) verify(baseFD, leafFD int) error {
 	// The name must still resolve to the object we pinned. Without this, a
 	// swap between the open and the first use would go unnoticed — the
 	// descriptor would be fine and the name would point somewhere else.
+	//
+	// Against a symlink that was already in place, this and the O_NOFOLLOW on
+	// the open are redundant: either refuses it alone. They stop being
+	// redundant only against a *live* swap, which no test here exercises — so
+	// removing either one leaves the suite green, and that is a gap in the
+	// tests rather than evidence the check is dead. Keep both.
 	var named unix.Stat_t
 	if err := unix.Fstatat(baseFD, s.Leaf, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return unsafe("stat leaf entry: %s", err)

@@ -51,10 +51,30 @@ func pinUsageLeaf(base string, create bool) (int, error) {
 	case errors.Is(err, privdir.ErrUnsafe), errors.Is(err, privdir.ErrUnsupported):
 		// Re-wrap rather than pass through: doctor and the reader branch on
 		// ErrUsageUnsafeStore, and privdir deliberately does not know that
-		// this store exists.
-		return -1, unsafeStore("%s", strings.TrimPrefix(err.Error(), "privdir: "))
+		// this store exists. The whole sentinel is stripped, not just its
+		// namespace — leaving it would print "unsafe" twice — and "state" goes
+		// back in, because it is what tells the operator which directory
+		// doctor is complaining about.
+		return -1, unsafeStore("state %s", strippedReason(err))
 	case err != nil:
 		return -1, unsafeStore("pin state leaf: %s", err)
 	}
 	return fd, nil
+}
+
+// strippedReason returns privdir's refusal reason without its sentinel prefix,
+// so the wrapped message reads as one sentence rather than two stacked
+// "unsafe" clauses.
+func strippedReason(err error) string {
+	msg := err.Error()
+	for _, sentinel := range []error{privdir.ErrUnsafe, privdir.ErrUnsupported} {
+		if trimmed, ok := strings.CutPrefix(msg, sentinel.Error()+": "); ok {
+			return trimmed
+		}
+		// An error that *is* the bare sentinel carries no further reason.
+		if msg == sentinel.Error() {
+			return strings.TrimPrefix(msg, "privdir: ")
+		}
+	}
+	return msg
 }
