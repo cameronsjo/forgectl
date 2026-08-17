@@ -9,6 +9,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/forgive"
+	"github.com/cameronsjo/forgectl/internal/surface"
 )
 
 // This file is forgectl's pre-start bootstrap classifier: the first thing the
@@ -51,7 +52,12 @@ const (
 	// maxSocketPathLen bounds the socket path well under the platform's
 	// sun_path limit (104 on Darwin, 108 on Linux), so an over-long path is
 	// refused here with a clear category rather than at bind time.
-	maxSocketPathLen = 100
+	//
+	// Taken from the package that *produces* these paths rather than declared
+	// again here. Two independent literals would let the producer emit a
+	// bootstrap this classifier refuses — a defect that would surface only on
+	// whoever has the longest temp path.
+	maxSocketPathLen = surface.MaxSocketPathLen
 )
 
 // Bootstrap refusals are deliberately category-only and carry no offending
