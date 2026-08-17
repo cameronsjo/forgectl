@@ -218,7 +218,7 @@ func TestBootstrapRequest_RendersRedacted(t *testing.T) {
 		// The %s verb is the point of the row, not an accidental Sprintf — the
 		// test exists to prove every verb redacts, including the one a String
 		// method makes "redundant".
-		"%s": fmt.Sprintf("%s", rt.got), //nolint:gosimple,staticcheck // exercising the verb is the assertion
+		"%s": fmt.Sprintf("%s", rt.got), //nolint:staticcheck // exercising the verb is the assertion
 		"%q": fmt.Sprintf("%q", rt.got),
 	}
 	for verb, rendered := range renders {

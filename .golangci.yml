@@ -1,0 +1,57 @@
+# golangci-lint configuration.
+#
+# This file exists because its absence was actively misleading. With no config,
+# `golangci-lint run` uses the tool's *standard* linter set — which excludes
+# gosec, noctx, and predeclared. CodeRabbit enables them. So a local run could
+# report "0 issues" on a branch CodeRabbit then filed nine findings against,
+# and "lint clean" meant two different things depending on who said it.
+#
+# The three linters below close that gap. What they do NOT do is demand a
+# repo-wide cleanup first: enabling them across the existing tree surfaces 555
+# findings, 449 of them in test files. That is not a backlog worth blocking on,
+# and paying it down in one pass would be a 500-file diff nobody could review.
+#
+# `new-from-rev` is what makes that tractable, and it is a faithful match
+# rather than a compromise: CodeRabbit only ever reports on the diff, so
+# scoping local runs to the diff is what makes the two agree. New and changed
+# code is held to the full set; the existing tree is left alone until someone
+# touches it.
+#
+# To see everything, including the inherited findings:
+#   golangci-lint run --new-from-rev=
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    # Flags shadowing of Go's predeclared identifiers. `max` and `min` became
+    # predeclared in 1.21, so a parameter named `max` silently shadows a
+    # builtin — the finding that started this file.
+    - predeclared
+    # Requires the context-carrying form of a call that can block. A
+    # subprocess or request with no context cannot be cancelled, and in a test
+    # it can outlive the test.
+    - noctx
+    # Security scanner. Its value here is less the individual findings than the
+    # forcing function: every suppression has to carry a recorded reason,
+    # which is the escape-hatch discipline this repo already follows for
+    # `//nolint` elsewhere.
+    - gosec
+
+issues:
+  # Report findings introduced relative to the default branch. Set to the empty
+  # string on the command line to audit the whole tree.
+  new-from-rev: origin/main
+  # No caps. A truncated report is one where the finding you needed was the
+  # eleventh, and there is no signal that it was dropped.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  # Report every finding on a line, not just the first.
+  #
+  # This defaults to true, and the default hides things. A line declaring
+  # `func probeShadow(max int)` produces both an `unused` finding (col 6) and a
+  # `predeclared` finding (col 18); with one-per-line, only `unused` is shown —
+  # so the style finding masks the one that actually matters, and fixing it
+  # makes a second finding appear from nowhere. A security linter behind a
+  # cosmetic one is the shape of this that would hurt.
+  uniq-by-line: false

@@ -82,7 +82,7 @@ func TestBootstrapCommand_RendersRedacted(t *testing.T) {
 		"%v":               fmt.Sprintf("%v", b),
 		"%+v":              fmt.Sprintf("%+v", b),
 		"%#v":              fmt.Sprintf("%#v", b),
-		"%s":               fmt.Sprintf("%s", b), //nolint:gosimple,staticcheck // exercising the verb is the assertion
+		"%s":               fmt.Sprintf("%s", b), //nolint:staticcheck // exercising the verb is the assertion
 		"%q":               fmt.Sprintf("%q", b),
 		"in a struct, %v":  fmt.Sprintf("%v", holder{cmd: b}),
 		"in a struct, %+v": fmt.Sprintf("%+v", holder{cmd: b}),

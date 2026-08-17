@@ -51,7 +51,7 @@ func TestStartCause_RendersOnlyItsClass(t *testing.T) {
 		// The %s and %q rows are the point of this test, not accidental
 		// Sprintfs: a String method is what makes them "redundant", and the
 		// assertion is that every verb redacts, including those.
-		"%s":            fmt.Sprintf("%s", cause), //nolint:gosimple,staticcheck // exercising the verb is the assertion
+		"%s":            fmt.Sprintf("%s", cause), //nolint:staticcheck // exercising the verb is the assertion
 		"%q":            fmt.Sprintf("%q", cause),
 		"wrapped %v":    fmt.Sprintf("%v", fmt.Errorf("launch: %w", cause)),
 		"slog":          buf.String(),
