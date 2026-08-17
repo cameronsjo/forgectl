@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/surface"
@@ -119,6 +120,139 @@ func TestNewRunDir_RefusesAnOverlongPathBeforeCreatingAnything(t *testing.T) {
 	}
 	if len(after) != len(before) {
 		t.Errorf("a refused NewRunDir created %d entries", len(after)-len(before))
+	}
+}
+
+// TestNewRunDir_RefusesAWorldWritableNonStickyBase covers the check the whole
+// directory guarantee silently rested on.
+//
+// privdir proves the *leaf* is ours but hands back a path — there is no
+// bindat — so the window between that proof and the bind is closed only by the
+// base being one another user cannot rename entries in. On stock Linux /tmp is
+// 1777 and the sticky bit carries that; strip it, as a `chmod 777 /tmp` in a
+// container image does, and an attacker can rename our proven directory away
+// and drop a symlink at the same name before the socket lands.
+func TestNewRunDir_RefusesAWorldWritableNonStickyBase(t *testing.T) {
+	root := shortBase(t)
+
+	// World-writable WITHOUT the sticky bit: the dangerous combination.
+	unsticky := filepath.Join(root, "u")
+	//nolint:gosec // G301: the permissive mode is the condition under test
+	if err := os.Mkdir(unsticky, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	//nolint:gosec // G302: the permissive mode is the condition under test
+	if err := os.Chmod(unsticky, 0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := surface.NewRunDir(unsticky); !errors.Is(err, surface.ErrRunDir) {
+		t.Fatalf("NewRunDir on a world-writable non-sticky base = %v, want ErrRunDir", err)
+	}
+	if entries, err := os.ReadDir(unsticky); err != nil || len(entries) != 0 {
+		t.Errorf("the refusal created something: %d entries, %v", len(entries), err)
+	}
+
+	// The control: the same mode WITH the sticky bit is accepted, which is
+	// stock /tmp. Otherwise this test would pass for a policy that refuses
+	// every shared base, and Linux would be unusable.
+	sticky := filepath.Join(root, "s")
+	//nolint:gosec // G301: 1777 is stock /tmp, the case that must keep working
+	if err := os.Mkdir(sticky, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	//nolint:gosec // G302: 1777 is stock /tmp, the case that must keep working
+	if err := os.Chmod(sticky, 0o777|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := surface.NewRunDir(sticky)
+	if err != nil {
+		t.Fatalf("NewRunDir on a sticky world-writable base = %v, want success", err)
+	}
+	_ = dir.Close()
+
+	// And a private base is fine, which is macOS's per-user temp dir.
+	private := filepath.Join(root, "p")
+	if err := os.Mkdir(private, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir, err = surface.NewRunDir(private)
+	if err != nil {
+		t.Fatalf("NewRunDir on a 0700 base = %v, want success", err)
+	}
+	_ = dir.Close()
+}
+
+// TestRunDir_ClosesConcurrentlyWithoutDoubleClosing covers the shape the doc
+// comment invites: a defer racing an error-path cleanup. Without the guard both
+// would read a live descriptor before either cleared it, and the second close
+// would land on whatever number the runtime had since reused.
+func TestRunDir_ClosesConcurrentlyWithoutDoubleClosing(t *testing.T) {
+	dir, err := surface.NewRunDir(shortBase(t))
+	if err != nil {
+		t.Fatalf("NewRunDir: %v", err)
+	}
+	path := dir.Path()
+
+	var wg sync.WaitGroup
+	errs := make([]error, 8)
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = dir.Close()
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("concurrent Close %d = %v, want nil", i, err)
+		}
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Errorf("the directory survived: %v", err)
+	}
+}
+
+// TestRunDir_ZeroValueDoesNotCloseStdin pins the sentinel. RunDir is exported,
+// so `var d surface.RunDir; defer d.Close()` is a shape a caller can write, and
+// a `fd >= 0` test would read the zero value's fd 0 as live.
+func TestRunDir_ZeroValueDoesNotCloseStdin(t *testing.T) {
+	var d surface.RunDir
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close on the zero value = %v, want nil", err)
+	}
+
+	// stdin must still be open: reading its fd stats successfully.
+	if _, err := os.Stdin.Stat(); err != nil {
+		t.Errorf("stdin was closed by the zero value's Close: %v", err)
+	}
+
+	if got := d.SocketPath(); got != "" {
+		t.Errorf("zero-value SocketPath() = %q, want empty", got)
+	}
+}
+
+// TestRunDir_SocketPathIsEmptyAfterClose keeps a use-after-close from yielding
+// a *relative* path, which would be refused far away by the bootstrap
+// classifier's absoluteness check with a message about neither.
+func TestRunDir_SocketPathIsEmptyAfterClose(t *testing.T) {
+	dir, err := surface.NewRunDir(shortBase(t))
+	if err != nil {
+		t.Fatalf("NewRunDir: %v", err)
+	}
+	if dir.SocketPath() == "" {
+		t.Fatal("SocketPath is empty before Close")
+	}
+
+	_ = dir.Close()
+
+	if got := dir.SocketPath(); got != "" {
+		t.Errorf("SocketPath() after Close = %q, want empty", got)
+	}
+	if got := dir.Path(); got != "" {
+		t.Errorf("Path() after Close = %q, want empty", got)
 	}
 }
 

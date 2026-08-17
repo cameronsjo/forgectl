@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cameronsjo/forgectl/internal/termsafe"
+
 	"github.com/cameronsjo/forgectl/internal/surface"
 )
 
@@ -33,11 +35,7 @@ var hostileWords = []string{
 	"~",
 	"~root",
 	"=ls", // zsh: leading = is command-path expansion
-	"!!",  // history expansion
 	"#comment",
-	"a\nb", // newline inside a word
-	"a\tb",
-	"a\rb",
 	"café",
 	"emoji-free-but-hi-bit-\xc3\xa9",
 	"--flag=value",
@@ -48,13 +46,13 @@ var hostileWords = []string{
 	"beefcafe0123456789abcdef0123456789abcdef0123456789abcdef0beefcaf",
 }
 
-// shells returns the shells present on this machine. sh is required; the rest
-// are opportunistic, because the point is to prove one encoding satisfies
-// several dialects rather than to require any particular one be installed.
-func shells(t *testing.T) map[string]string {
+// posixShells returns the POSIX-family shells present on this machine. Scripts
+// written for `$@` and `set --` run only here; fish is a different language and
+// gets its own assertion.
+func posixShells(t *testing.T) map[string]string {
 	t.Helper()
 	found := map[string]string{}
-	for _, name := range []string{"sh", "bash", "zsh", "fish"} {
+	for _, name := range []string{"sh", "bash", "zsh"} {
 		if path, err := exec.LookPath(name); err == nil {
 			found[name] = path
 		}
@@ -65,11 +63,25 @@ func shells(t *testing.T) map[string]string {
 	return found
 }
 
+// allShells adds the non-POSIX dialects the refusal set exists for. They are
+// opportunistic — see TestQuote_FishIsTheReasonForTheRefusalSet for what it
+// means that fish is usually absent.
+func allShells(t *testing.T) map[string]string {
+	t.Helper()
+	found := posixShells(t)
+	for _, name := range []string{"fish", "tcsh"} {
+		if path, err := exec.LookPath(name); err == nil {
+			found[name] = path
+		}
+	}
+	return found
+}
+
 // TestQuote_RoundTripsThroughRealShells is the assertion that matters. Testing
 // the encoder against its own rules would only prove it is self-consistent;
 // this proves a real shell hands the word back unchanged.
 func TestQuote_RoundTripsThroughRealShells(t *testing.T) {
-	available := shells(t)
+	available := allShells(t)
 	t.Logf("shells under test: %s", strings.Join(shellNames(available), ", "))
 
 	for _, word := range hostileWords {
@@ -102,7 +114,11 @@ func TestQuote_RoundTripsThroughRealShells(t *testing.T) {
 // then joining them wrongly produces a command that still runs, with the
 // wrong argv.
 func TestQuoteCommand_KeepsWordBoundaries(t *testing.T) {
-	available := shells(t)
+	// POSIX only: the scripts below use `$@` and `set --`, neither of which is
+	// fish syntax — fish has no `$@`, and `set --` is its option terminator.
+	// Running them under fish would go red for a reason unrelated to the
+	// encoder. Fish gets its own assertion below.
+	available := posixShells(t)
 
 	words := []string{
 		"/Users/some one/bin/forgectl",
@@ -144,7 +160,46 @@ func TestQuoteCommand_KeepsWordBoundaries(t *testing.T) {
 	}
 }
 
-// TestQuote_RefusesWhatCannotMeanOneThing pins the two characters whose
+// TestQuote_FishIsTheReasonForTheRefusalSet checks word boundaries in fish's
+// own syntax, and reports plainly when fish is absent.
+//
+// Fish is the shell the refusal set exists for, and it is not installed on most
+// developer machines or in this repo's CI. That means the fish half of the
+// claim is *argued* rather than *tested* most of the time. Skipping silently
+// would let that read as coverage; this says so.
+func TestQuote_FishIsTheReasonForTheRefusalSet(t *testing.T) {
+	fish, err := exec.LookPath("fish")
+	if err != nil {
+		t.Skip("fish is not installed: the refusal set's fish rationale is untested here. " +
+			"Install fish to exercise it, or read Quote's doc comment for the argument.")
+	}
+
+	words := []string{"/Users/some one/bin/forgectl", "surface", "_exec", "", "a b c", "$HOME", "*"}
+	line, err := surface.QuoteCommand(words)
+	if err != nil {
+		t.Fatalf("QuoteCommand: %v", err)
+	}
+
+	// fish syntax: expand the line into a command that prints each argument
+	// NUL-terminated, so a merged or split word is visible.
+	script := "for w in " + line + "\nprintf '%s\\0' $w\nend"
+	//nolint:gosec // G204: running a real shell on the encoder's output IS the test
+	got, err := exec.CommandContext(t.Context(), fish, "-c", script).Output()
+	if err != nil {
+		t.Fatalf("fish -c %q: %v", script, err)
+	}
+
+	var want strings.Builder
+	for _, w := range words {
+		want.WriteString(w)
+		want.WriteByte(0)
+	}
+	if string(got) != want.String() {
+		t.Errorf("fish argv round-trip differs\n got %q\nwant %q\nline: %s", got, want.String(), line)
+	}
+}
+
+// TestQuote_RefusesWhatCannotMeanOneThing pins the characters whose
 // encoding genuinely differs between POSIX shells and fish. Escaping them for
 // one dialect produces shell syntax in the other, so they are refused rather
 // than guessed at.
@@ -155,8 +210,25 @@ func TestQuote_RefusesWhatCannotMeanOneThing(t *testing.T) {
 		"a backslash":         `a\b`,
 		"only a backslash":    `\`,
 		"a windows-ish path":  `C:\Users\x`,
-		"an embedded NUL":     "a\x00b",
 		"a quote in a path":   "/Users/o'brien/bin/forgectl",
+
+		// csh and tcsh expand history inside single quotes, and do it
+		// non-interactively — verified: tcsh -c "printf %s 'a!b'" fails with
+		// "Event not found" while sh and bash return a!b.
+		"a bang":       "a!b",
+		"double bang":  "!!",
+		"bang in path": "/Users/x/bin/forge!ctl",
+
+		// Control characters are refused for a different reason than the
+		// others: the bootstrap is *typed*, so quoting is not the layer that
+		// contains them. A newline submits the line and runs the remainder as
+		// a fresh command no matter how it is quoted.
+		"an embedded NUL":   "a\x00b",
+		"a newline":         "a\nb",
+		"a carriage return": "a\rb",
+		"a tab":             "a\tb",
+		"an escape":         "a\x1bb",
+		"a bell":            "a\ab",
 	}
 
 	for name, word := range refused {
@@ -221,13 +293,13 @@ func FuzzQuote(f *testing.F) {
 			if !errors.Is(err, surface.ErrUnquotable) {
 				t.Fatalf("Quote(%q) failed with an unexpected error: %v", word, err)
 			}
+			// The refusal must be attributable, or a widened refusal set would
+			// let this target pass while exercising almost nothing. Keep this
+			// predicate in step with quotable().
+			if !refusable(word) {
+				t.Fatalf("Quote refused %q, which carries none of the refused characters", word)
+			}
 			return
-		}
-
-		// A NUL cannot survive an argv round-trip regardless of quoting, and
-		// Quote already refuses it — so reaching here with one is the bug.
-		if strings.ContainsRune(word, 0) {
-			t.Fatalf("Quote accepted a word containing NUL: %q", word)
 		}
 
 		//nolint:gosec // G204: the fuzzer's whole job is feeding this to a shell
@@ -239,6 +311,17 @@ func FuzzQuote(f *testing.F) {
 			t.Fatalf("round-trip of %q gave %q (quoted: %s)", word, out, quoted)
 		}
 	})
+}
+
+// refusable mirrors quotable's predicate, so the fuzz target can tell a
+// legitimate refusal from a refusal set that quietly grew.
+func refusable(word string) bool {
+	for _, r := range word {
+		if r == '\'' || r == '\\' || r == '!' || termsafe.IsUnsafeTerminalRune(r) {
+			return true
+		}
+	}
+	return false
 }
 
 func shellNames(m map[string]string) []string {
