@@ -22,6 +22,7 @@ package surface
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -75,6 +76,17 @@ func (p Policy) AcceptBinary(b launch.ResolvedBinary, self string) error {
 		// claim that the binary is an official harness: an intentional wrapper
 		// is a legitimate thing to point forgectl at, and same-UID replacement
 		// after this check is outside the threat model either way.
+		//
+		// Recorded residual, since "other local UIDs" *is* in the threat
+		// model: nothing here rejects a binary sitting under a world- or
+		// group-writable directory, where another UID could swap it — before
+		// this check or between it and the eventual exec. A permission check
+		// on the file and its parent would close most of that, and is not
+		// done because a group-writable shared bin is a legitimate layout on
+		// some machines and refusing it would break real setups over a risk
+		// the operator already accepted by naming that path. Revisit if the
+		// threat model ever promotes other-UID tampering above operator
+		// intent.
 	case launch.BinaryPATH:
 		if !p.AllowPATHBinary {
 			return fmt.Errorf("%w: %s; pass --allow-path-binary to accept it",
@@ -106,11 +118,24 @@ func (p Policy) AcceptBinary(b launch.ResolvedBinary, self string) error {
 	// A symlink, a hard link, or a differently-spelled absolute path all name
 	// the same inode, and any of them would produce a forgectl that re-execs
 	// itself as its own harness — a fork bomb wearing a launch command.
-	if self != "" {
-		selfInfo, err := os.Stat(self)
-		if err == nil && os.SameFile(info, selfInfo) {
-			return fmt.Errorf("%w: %s", ErrBinarySelfLoop, termsafe.QuotePath(b.Path))
-		}
+	//
+	// An empty self is a caller that never resolved one, which would disable
+	// the check silently, so it is refused rather than skipped. A stat that
+	// fails is the guard's own failure rather than a bad input, so it warns
+	// and admits: a guard must not block the operation it protects because it
+	// could not run, but it must say that it did not run.
+	if self == "" {
+		return fmt.Errorf("%w: cannot prove %s is not forgectl itself without the running executable",
+			ErrBinaryUnusable, termsafe.QuotePath(b.Path))
+	}
+	selfInfo, err := os.Stat(self)
+	if err != nil {
+		slog.Warn("Self-loop check did not run; could not stat the running executable.",
+			"binary_source", string(b.Source), "error", termsafe.Error(err))
+		return nil
+	}
+	if os.SameFile(info, selfInfo) {
+		return fmt.Errorf("%w: %s", ErrBinarySelfLoop, termsafe.QuotePath(b.Path))
 	}
 
 	return nil

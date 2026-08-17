@@ -131,47 +131,104 @@ func TestBootstrapCommand_ForwardsWithoutRevealing(t *testing.T) {
 	}
 }
 
-// TestStartSpec_ValidationTable is what an adapter is guaranteed before it
-// runs. The display name checks matter because that string reaches a manager's
-// command line and its UI.
-func TestStartSpec_ValidationTable(t *testing.T) {
-	tag := recoveryTag(t)
-	good := backend.StartSpec{
-		CWD:       "/Users/someone/Projects/thing",
-		Name:      "thing",
-		Tag:       tag,
-		Bootstrap: bootstrap(t),
+// startSpec builds a valid spec for tests that are not testing construction.
+func startSpec(t *testing.T, tag backend.RecoveryTag) backend.StartSpec {
+	t.Helper()
+	spec, err := backend.NewStartSpec(
+		"/Users/someone/Projects/thing", "thing", tag, bootstrap(t))
+	if err != nil {
+		t.Fatalf("NewStartSpec: %v", err)
 	}
+	return spec
+}
 
+// TestNewStartSpec_ValidationTable is what an adapter is guaranteed before it
+// runs. Both string checks matter because both reach a manager's command line
+// and its UI — and the directory is the one an operator does not choose, since
+// a checked-out directory name comes from whoever wrote the repository.
+func TestNewStartSpec_ValidationTable(t *testing.T) {
+	tag := recoveryTag(t)
+
+	good := startSpec(t, tag)
 	if err := good.Validate(); err != nil {
 		t.Fatalf("the valid fixture was refused: %v", err)
 	}
 	if got := good.OwnershipName(); got != tag.OwnershipName() {
 		t.Errorf("OwnershipName() = %q, want %q", got, tag.OwnershipName())
 	}
-
-	tests := map[string]func(*backend.StartSpec){
-		"no directory":            func(s *backend.StartSpec) { s.CWD = "" },
-		"relative directory":      func(s *backend.StartSpec) { s.CWD = "Projects/thing" },
-		"uncanonical directory":   func(s *backend.StartSpec) { s.CWD = "/Users/someone/../someone/thing" },
-		"trailing slash":          func(s *backend.StartSpec) { s.CWD = "/Users/someone/thing/" },
-		"no tag":                  func(s *backend.StartSpec) { s.Tag = backend.RecoveryTag{} },
-		"no bootstrap":            func(s *backend.StartSpec) { s.Bootstrap = backend.BootstrapCommand{} },
-		"no name":                 func(s *backend.StartSpec) { s.Name = "" },
-		"oversized name":          func(s *backend.StartSpec) { s.Name = strings.Repeat("n", 129) },
-		"name with an escape":     func(s *backend.StartSpec) { s.Name = "thing\x1b[31m" },
-		"name with a newline":     func(s *backend.StartSpec) { s.Name = "thing\nmore" },
-		"name with invalid utf-8": func(s *backend.StartSpec) { s.Name = "thing\xff" },
+	if got := good.Tag(); got != tag {
+		t.Errorf("Tag() = %q, want %q", got, tag)
 	}
 
-	for name, mutate := range tests {
+	tests := map[string]struct {
+		cwd, name string
+		tag       backend.RecoveryTag
+		bootstrap backend.BootstrapCommand
+	}{
+		"no directory":            {"", "thing", tag, bootstrap(t)},
+		"relative directory":      {"Projects/thing", "thing", tag, bootstrap(t)},
+		"uncanonical directory":   {"/Users/someone/../someone/thing", "thing", tag, bootstrap(t)},
+		"trailing slash":          {"/Users/someone/thing/", "thing", tag, bootstrap(t)},
+		"directory with escape":   {"/Users/someone/thing\x1b[31m", "thing", tag, bootstrap(t)},
+		"directory with newline":  {"/Users/someone/thing\nmore", "thing", tag, bootstrap(t)},
+		"directory invalid utf-8": {"/Users/someone/thing\xff", "thing", tag, bootstrap(t)},
+		"oversized directory":     {"/Users/" + strings.Repeat("d", 4096), "thing", tag, bootstrap(t)},
+		"no name":                 {"/Users/someone/thing", "", tag, bootstrap(t)},
+		"oversized name":          {"/Users/someone/thing", strings.Repeat("n", 129), tag, bootstrap(t)},
+		"name with an escape":     {"/Users/someone/thing", "thing\x1b[31m", tag, bootstrap(t)},
+		"name with a newline":     {"/Users/someone/thing", "thing\nmore", tag, bootstrap(t)},
+		"name with invalid utf-8": {"/Users/someone/thing", "thing\xff", tag, bootstrap(t)},
+		"no tag":                  {"/Users/someone/thing", "thing", backend.RecoveryTag{}, bootstrap(t)},
+		"no bootstrap":            {"/Users/someone/thing", "thing", tag, backend.BootstrapCommand{}},
+	}
+
+	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			spec := good
-			mutate(&spec)
-			if err := spec.Validate(); !errors.Is(err, backend.ErrInvalidStartSpec) {
-				t.Errorf("Validate() = %v, want ErrInvalidStartSpec", err)
+			spec, err := backend.NewStartSpec(tc.cwd, tc.name, tc.tag, tc.bootstrap)
+			if !errors.Is(err, backend.ErrInvalidStartSpec) {
+				t.Errorf("NewStartSpec err = %v, want ErrInvalidStartSpec", err)
+			}
+			// A refused construction must not yield a spec an adapter would
+			// then act on.
+			if err := spec.Validate(); err == nil {
+				t.Error("a refused construction returned a valid spec")
 			}
 		})
+	}
+}
+
+// TestStartSpec_ZeroValueIsRefused covers the shape the unexported fields
+// prevent outside this package but that a future in-package caller could still
+// write by struct literal.
+func TestStartSpec_ZeroValueIsRefused(t *testing.T) {
+	var zero backend.StartSpec
+	if err := zero.Validate(); !errors.Is(err, backend.ErrInvalidStartSpec) {
+		t.Errorf("the zero spec validated: err = %v", err)
+	}
+}
+
+// TestStartSpec_ForwardsItsValuesOpaquely pins the contract an adapter works
+// against: the directory and the label go into a sensitive command without
+// being read back, exactly as the bootstrap does.
+func TestStartSpec_ForwardsItsValuesOpaquely(t *testing.T) {
+	spec := startSpec(t, recoveryTag(t))
+
+	for name, arg := range map[string]fcexec.Arg{"CWD": spec.CWD(), "Name": spec.Name()} {
+		if !arg.Secret() {
+			t.Errorf("%s() returned a non-opaque argument", name)
+		}
+	}
+	if !spec.CWD().Equal(fcexec.Opaque("/Users/someone/Projects/thing")) {
+		t.Error("CWD() does not carry the directory it was built from")
+	}
+	if spec.CWD().Equal(fcexec.Opaque("/Users/someone/Projects/other")) {
+		t.Error("CWD() compared equal to a directory it never held")
+	}
+	if !spec.Name().Equal(fcexec.Opaque("thing")) {
+		t.Error("Name() does not carry the label it was built from")
+	}
+	if !spec.Bootstrap().Set() {
+		t.Error("Bootstrap() lost the bootstrap command")
 	}
 }
 
@@ -181,11 +238,10 @@ func TestStartSpec_ValidationTable(t *testing.T) {
 // travels further than the manager's own UI.
 func TestStartSpec_LogsOnlyTheTag(t *testing.T) {
 	tag := recoveryTag(t)
-	spec := backend.StartSpec{
-		CWD:       "/Users/someone/Projects/secret-thing",
-		Name:      "secret-thing",
-		Tag:       tag,
-		Bootstrap: bootstrap(t),
+	spec, err := backend.NewStartSpec(
+		"/Users/someone/Projects/secret-thing", "secret-thing", tag, bootstrap(t))
+	if err != nil {
+		t.Fatalf("NewStartSpec: %v", err)
 	}
 
 	buf := &bytes.Buffer{}
@@ -243,12 +299,7 @@ func TestFakeAdapter_RecordsWhatItWasHanded(t *testing.T) {
 		return backend.NewCloseClosed()
 	}
 
-	spec := backend.StartSpec{
-		CWD:       "/Users/someone/Projects/thing",
-		Name:      "thing",
-		Tag:       tag,
-		Bootstrap: bootstrap(t),
-	}
+	spec := startSpec(t, tag)
 
 	res := adapter.Start(context.Background(), spec)
 	if err := res.Validate(); err != nil {
@@ -262,7 +313,7 @@ func TestFakeAdapter_RecordsWhatItWasHanded(t *testing.T) {
 	// Asserted through Equal, not a reveal accessor: production has no way to
 	// read the bootstrap back out, so a test that could would be proving
 	// something production cannot rely on.
-	if !starts[0].Bootstrap.SensitiveArg().Equal(fcexec.Opaque(bootstrapLine)) {
+	if !starts[0].Bootstrap().SensitiveArg().Equal(fcexec.Opaque(bootstrapLine)) {
 		t.Error("the adapter was handed a different bootstrap than the one built")
 	}
 

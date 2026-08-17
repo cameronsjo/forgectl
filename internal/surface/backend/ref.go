@@ -205,6 +205,11 @@ func parseOwnershipName(name string) (RecoveryTag, error) {
 // address. A daemon that restarts on the same socket reuses its local IDs, so
 // an endpoint-and-protocol hash would happily authorize closing workspace 3 of
 // a server that has no idea what workspace 3 used to be.
+//
+// The strength of that guarantee depends on the evidence an adapter can
+// gather: it holds wherever some input actually turns over on a restart. See
+// IncarnationInput.ServerReported for the case where the filesystem evidence
+// does not — a backend addressed by a config path rather than a socket.
 type ServerID struct{ digest string }
 
 // IncarnationInput is the evidence a fingerprint is computed from. The raw
@@ -229,6 +234,18 @@ type IncarnationInput struct {
 	// otherwise.
 	PID               int
 	StartedAtUnixNano int64
+	// ServerReported is an opaque incarnation token the daemon itself supplies
+	// — a boot id, an uptime, a session nonce returned on connect — and is
+	// empty when it supplies none.
+	//
+	// It exists because the filesystem evidence above is only volatile when
+	// Endpoint is a socket. For herdr, Endpoint is a *config path*: its inode,
+	// device, and change time are all stable across a daemon restart, and
+	// herdr reports no pid, so a herdr fingerprint computed from the fields
+	// above alone would match across the exact restart it exists to detect.
+	// A herdr adapter must populate this (forgectl#344); until it does, the
+	// incarnation guarantee stated on ServerID holds for tmux and cmux only.
+	ServerReported string
 }
 
 // Fingerprint hashes an observed incarnation.
@@ -245,6 +262,7 @@ func Fingerprint(in IncarnationInput) (ServerID, error) {
 	h := sha256.New()
 	writeField(h, []byte(in.Endpoint))
 	writeField(h, []byte(in.Version))
+	writeField(h, []byte(in.ServerReported))
 	writeUint(h, in.Device)
 	writeUint(h, in.Inode)
 	writeUint(h, uint64(in.ChangedAtUnixNano))
@@ -293,10 +311,18 @@ type TmuxIdentity struct{ session string }
 // NewTmuxIdentity validates a session name.
 //
 // The grammar is forgectl's own ownership namespace, not tmux's. That is
-// deliberately narrow: it means a reference — including one decoded from a
-// file somebody else wrote — can only ever name a session this tool created,
-// so no decoding path can produce a Ref that authorizes killing the operator's
-// own work.
+// deliberately narrow: a tmux reference can only ever name a session this tool
+// created, so no decoding path produces one that authorizes killing the
+// operator's own work.
+//
+// That guarantee is tmux-only, and the asymmetry is worth stating plainly
+// because it is a guarantee Phase 5 must not assume it inherits. tmux lets us
+// choose the session name, so the identity can carry the ownership tag and
+// Ref.Validate can check it. A cmux workspace is addressed by a
+// server-assigned UUID and a herdr workspace by a server-assigned ID; neither
+// can carry our tag, so for those two backends the identity is checked for
+// grammar alone and the tag is not bound to the object. See the Closer
+// contract for the obligation that fills the gap.
 func NewTmuxIdentity(session string) (TmuxIdentity, error) {
 	if _, err := parseOwnershipName(session); err != nil {
 		return TmuxIdentity{}, fmt.Errorf("%w: tmux session name", ErrInvalidIdentity)
@@ -342,7 +368,9 @@ type HerdrIdentity struct{ workspace, tab, pane string }
 // A colon in the workspace ID is refused specifically: herdr's addressing uses
 // colons to qualify a workspace with a pane, so a workspace-only ID containing
 // one is either a qualified address in the wrong field or an attempt to widen
-// what a later command targets.
+// what a later command targets. The tab and pane IDs are not colon-checked,
+// because they are the qualifiers rather than the thing being qualified, and
+// neither is what a close authorizes against.
 func NewHerdrIdentity(workspace, tab, pane string) (HerdrIdentity, error) {
 	if !validHerdrID(workspace) || strings.Contains(workspace, ":") {
 		return HerdrIdentity{}, fmt.Errorf("%w: herdr workspace id", ErrInvalidIdentity)
@@ -493,6 +521,15 @@ func (r Ref) Server() ServerID { return r.server }
 
 // Tag returns the ownership tag.
 func (r Ref) Tag() RecoveryTag { return r.tag }
+
+// OwnershipName is the native name forgectl gave this object, and the exact
+// string a Closer must find on the object before removing it.
+//
+// It exists as one accessor so there is one spelling to compare against. For
+// tmux the comparison is redundant — Validate already binds the session name
+// to the tag — but for cmux and herdr, whose IDs are server-assigned, this is
+// the only thing standing between a reference and somebody else's workspace.
+func (r Ref) OwnershipName() string { return r.tag.OwnershipName() }
 
 // TMuxIdentity returns the tmux session, or an error if this is not a tmux
 // reference. The accessors are kind-checked rather than returning a zero value
@@ -706,11 +743,18 @@ func validUUID(s string) bool {
 	return true
 }
 
-// validHerdrID reports whether s is a bounded, single-line, printable ASCII
-// identifier. herdr does not publish an ID grammar, so this is a conservative
-// shape check rather than a claim about its format: what it is really for is
-// keeping a control character or an unbounded blob out of a value that later
-// becomes a command-line argument.
+// validHerdrID reports whether s is a bounded ASCII identifier with no
+// whitespace and no control characters. herdr does not publish an ID grammar,
+// so this is a conservative shape check rather than a claim about its format:
+// what it is really for is keeping a control character or an unbounded blob
+// out of a value that later becomes a command-line argument.
+//
+// It deliberately does not refuse a leading "-". That an ID like "--kill-all"
+// cannot be parsed as a flag is enforced one layer down, by exec.Opaque, which
+// refuses a dynamic operand starting with a dash unless an EndOfOptions
+// separator precedes it. Duplicating the rule here would put two spellings of
+// it in the codebase; the dependency is named so a Phase 5 adapter author
+// knows the separator is load-bearing rather than decorative.
 func validHerdrID(s string) bool {
 	if s == "" || len(s) > maxHerdrIDLen {
 		return false

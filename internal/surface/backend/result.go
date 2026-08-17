@@ -116,7 +116,7 @@ func (r StartResult) Validate() error {
 		if r.hasTag {
 			return fmt.Errorf("%w: a not-mutated result carries a recovery tag", ErrInvalidResult)
 		}
-		if !r.cause.Valid() {
+		if !r.hasCause || !r.cause.Valid() {
 			return fmt.Errorf("%w: a not-mutated result needs a classified cause", ErrInvalidResult)
 		}
 	case RefKnown:
@@ -142,7 +142,7 @@ func (r StartResult) Validate() error {
 		if !r.hasTag || !r.tag.Valid() {
 			return fmt.Errorf("%w: an outcome-unknown result needs a recovery tag", ErrInvalidResult)
 		}
-		if !r.cause.Valid() {
+		if !r.hasCause || !r.cause.Valid() {
 			return fmt.Errorf("%w: an outcome-unknown result needs a classified cause", ErrInvalidResult)
 		}
 	default:
@@ -444,9 +444,14 @@ func (o CleanupOutcome) String() string {
 	return cleanupOutcomeNames[o]
 }
 
-// Satisfied reports whether rollback left nothing behind. The three states
-// that describe a close we never made are deliberately not satisfied except
-// for the two where there was nothing to close.
+// Satisfied reports whether rollback left nothing behind.
+//
+// Four states qualify, for two different reasons. CleanupNotApplicable and
+// CleanupSkippedCommitted describe a close that correctly never happened —
+// nothing was created, or the launch succeeded and ownership moved to the
+// surface. CleanupClosed and CleanupAlreadyGone describe confirmed absence.
+// Everything else left an object behind, including CleanupUnavailableUnknown,
+// which is the honest end state rather than a failure to try harder.
 func (o CleanupOutcome) Satisfied() bool {
 	switch o {
 	case CleanupNotApplicable, CleanupSkippedCommitted, CleanupClosed, CleanupAlreadyGone:
@@ -505,8 +510,25 @@ type CleanupPlan struct {
 // The committed case matters most: after the acknowledgement, caller
 // cancellation must not reach into a running surface, so the decision is made
 // here from state rather than left to a defer that races the commit.
+// A validation failure still plans a close in one narrow case: the result
+// claims RefKnown, is uncommitted, and carries a reference that validates on
+// its own. That shape is reachable and it matters — an adapter that created a
+// workspace, hit a later failure, and forgot to classify it produces exactly
+// it, and refusing to plan the close would orphan a real object over a
+// bookkeeping mistake. The error comes back alongside, so the caller records
+// the malformed result *and* cleans up after it.
+//
+// The condition is on the claimed outcome, not merely on a reference being
+// present. A contradictory result whose outcome says NotMutated or
+// OutcomeUnknown is asserting that we do not know we created that object, and
+// widening the fallback to close it anyway would hand back exactly the
+// guessed-target authority the three-outcome closure exists to withhold.
 func PlanCleanup(res StartResult, committed bool) (CleanupPlan, error) {
 	if err := res.Validate(); err != nil {
+		ref, ok := res.Ref()
+		if ok && res.Outcome() == RefKnown && !committed && ref.Validate() == nil {
+			return CleanupPlan{call: true, ref: ref}, err
+		}
 		return CleanupPlan{}, err
 	}
 	switch res.Outcome() {
@@ -527,6 +549,17 @@ func PlanCleanup(res StartResult, committed bool) (CleanupPlan, error) {
 
 // Close returns the reference to close and whether to call the Closer at all.
 func (p CleanupPlan) Close() (Ref, bool) { return p.ref, p.call }
+
+func (p CleanupPlan) String() string {
+	if p.call {
+		return "surface cleanup: close " + p.ref.String()
+	}
+	return "surface cleanup: " + p.outcome.String()
+}
+
+func (p CleanupPlan) GoString() string { return p.String() }
+
+func (p CleanupPlan) LogValue() slog.Value { return slog.StringValue(p.String()) }
 
 // Outcome returns the recorded cleanup outcome for a plan that makes no call.
 // When the plan does call Close, the outcome comes from CleanupOutcomeFor

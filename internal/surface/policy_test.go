@@ -29,6 +29,7 @@ func executable(t *testing.T, name string) string {
 // the path silently becomes the harness.
 func TestPolicy_ProvenanceGate(t *testing.T) {
 	bin := executable(t, "claude")
+	self := executable(t, "forgectl")
 
 	sources := []launch.BinarySource{
 		launch.BinaryClaudeEnv,
@@ -38,7 +39,7 @@ func TestPolicy_ProvenanceGate(t *testing.T) {
 	}
 	for _, source := range sources {
 		t.Run(string(source)+" is accepted by default", func(t *testing.T) {
-			err := surface.Policy{}.AcceptBinary(launch.ResolvedBinary{Path: bin, Source: source}, "")
+			err := surface.Policy{}.AcceptBinary(launch.ResolvedBinary{Path: bin, Source: source}, self)
 			if err != nil {
 				t.Errorf("explicit provenance %q was refused: %v", source, err)
 			}
@@ -47,7 +48,7 @@ func TestPolicy_ProvenanceGate(t *testing.T) {
 
 	pathBinary := launch.ResolvedBinary{Path: bin, Source: launch.BinaryPATH}
 
-	err := surface.Policy{}.AcceptBinary(pathBinary, "")
+	err := surface.Policy{}.AcceptBinary(pathBinary, self)
 	if !errors.Is(err, surface.ErrBinaryProvenance) {
 		t.Errorf("a $PATH binary was accepted by default: err = %v", err)
 	}
@@ -55,8 +56,29 @@ func TestPolicy_ProvenanceGate(t *testing.T) {
 		t.Errorf("the refusal does not name the flag that resolves it: %v", err)
 	}
 
-	if err := (surface.Policy{AllowPATHBinary: true}).AcceptBinary(pathBinary, ""); err != nil {
+	if err := (surface.Policy{AllowPATHBinary: true}).AcceptBinary(pathBinary, self); err != nil {
 		t.Errorf("--allow-path-binary did not accept a $PATH binary: %v", err)
+	}
+}
+
+// TestPolicy_RefusesWithoutASelfPath is the fail-closed half of the self-loop
+// guard. An empty self is a caller that never resolved one — the check would
+// then be skipped silently, which is indistinguishable from a check that ran
+// and passed. It is refused rather than warned about, because unlike a stat
+// error it is a bad input rather than the guard failing at its own job.
+func TestPolicy_RefusesWithoutASelfPath(t *testing.T) {
+	bin := launch.ResolvedBinary{Path: executable(t, "claude"), Source: launch.BinaryClaudeEnv}
+
+	if err := (surface.Policy{}).AcceptBinary(bin, ""); !errors.Is(err, surface.ErrBinaryUnusable) {
+		t.Errorf("an unresolved self path was accepted: err = %v", err)
+	}
+
+	// A stat failure is the guard's own failure rather than a bad input, so it
+	// admits — a guard must not block the operation it protects because it
+	// could not run.
+	absent := filepath.Join(t.TempDir(), "no-such-forgectl")
+	if err := (surface.Policy{}).AcceptBinary(bin, absent); err != nil {
+		t.Errorf("an unstattable self path blocked the launch: %v", err)
 	}
 }
 
@@ -66,6 +88,7 @@ func TestPolicy_ProvenanceGate(t *testing.T) {
 // or an unreadable file.
 func TestPolicy_OptingInToPATHWaivesNothingElse(t *testing.T) {
 	permissive := surface.Policy{AllowPATHBinary: true}
+	self := executable(t, "forgectl")
 	dir := t.TempDir()
 
 	notExecutable := filepath.Join(dir, "claude.txt")
@@ -81,7 +104,7 @@ func TestPolicy_OptingInToPATHWaivesNothingElse(t *testing.T) {
 	for name, path := range tests {
 		t.Run(name, func(t *testing.T) {
 			err := permissive.AcceptBinary(
-				launch.ResolvedBinary{Path: path, Source: launch.BinaryPATH}, "")
+				launch.ResolvedBinary{Path: path, Source: launch.BinaryPATH}, self)
 			if !errors.Is(err, surface.ErrBinaryUnusable) {
 				t.Errorf("AcceptBinary(%s) err = %v, want ErrBinaryUnusable", name, err)
 			}
@@ -93,6 +116,7 @@ func TestPolicy_OptingInToPATHWaivesNothingElse(t *testing.T) {
 // provenance.
 func TestPolicy_ShapeChecks(t *testing.T) {
 	policy := surface.Policy{}
+	self := executable(t, "forgectl")
 
 	tests := map[string]launch.ResolvedBinary{
 		"empty path":         {Path: "", Source: launch.BinaryClaudeEnv},
@@ -102,7 +126,7 @@ func TestPolicy_ShapeChecks(t *testing.T) {
 	}
 	for name, bin := range tests {
 		t.Run(name, func(t *testing.T) {
-			if err := policy.AcceptBinary(bin, ""); err == nil {
+			if err := policy.AcceptBinary(bin, self); err == nil {
 				t.Errorf("AcceptBinary(%s) was accepted", name)
 			}
 		})
@@ -128,10 +152,12 @@ func TestPolicy_RefusesASelfLoop(t *testing.T) {
 	}
 
 	loops := map[string]string{
-		"the same path":      self,
-		"a symlink to it":    symlink,
-		"a hard link to it":  hardlink,
-		"an uncleaned spell": filepath.Join(dir, ".", "forgectl"),
+		"the same path":     self,
+		"a symlink to it":   symlink,
+		"a hard link to it": hardlink,
+		// Built by concatenation, not filepath.Join, which would clean the
+		// "/./" away and make this row a duplicate of the first.
+		"an uncleaned spell": dir + "/./forgectl",
 	}
 	for name, path := range loops {
 		t.Run(name, func(t *testing.T) {
@@ -160,7 +186,7 @@ func TestPolicy_RefusalsAreTerminalSafe(t *testing.T) {
 	hostile := filepath.Join(t.TempDir(), "clau\x1b[31mde")
 
 	err := surface.Policy{}.AcceptBinary(
-		launch.ResolvedBinary{Path: hostile, Source: launch.BinaryClaudeEnv}, "")
+		launch.ResolvedBinary{Path: hostile, Source: launch.BinaryClaudeEnv}, executable(t, "forgectl"))
 	if err == nil {
 		t.Fatal("an absent binary was accepted")
 	}

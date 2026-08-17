@@ -355,9 +355,12 @@ func TestProbeResult_Matrix(t *testing.T) {
 		})
 	}
 
+	// A ProbePresent carrying a cause is unconstructible from out here — the
+	// success constructors take no cause — so that shape is covered in-package
+	// instead, in validate_internal_test.go.
 	invalid := map[string]backend.ProbeResult{
 		"unset":                    {},
-		"present with a cause":     backend.NewProbeIdentityMismatch(backend.StartCause{}),
+		"mismatch with no cause":   backend.NewProbeIdentityMismatch(backend.StartCause{}),
 		"unreadable with no cause": backend.NewProbeUnreadable(backend.StartCause{}),
 	}
 	for name, res := range invalid {

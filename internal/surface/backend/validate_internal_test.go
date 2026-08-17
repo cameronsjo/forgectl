@@ -2,6 +2,7 @@ package backend
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -51,44 +52,77 @@ func TestStartResult_ForbiddenFieldCombinations(t *testing.T) {
 	ref := internalRef(t)
 	tag := ref.Tag()
 
-	tests := map[string]StartResult{
-		"outcome-unknown with a reference": {
+	tests := map[string]struct {
+		result StartResult
+		// wantClose is true only where the result claims RefKnown and carries
+		// a reference that validates on its own. Those name a real object we
+		// created, so refusing to plan their close would orphan it over a
+		// bookkeeping mistake; every other shape is asserting that we do not
+		// know we created anything, and gets no close.
+		wantClose bool
+	}{
+		"outcome-unknown with a reference": {result: StartResult{
 			outcome: OutcomeUnknown, ref: ref, hasRef: true,
 			tag: tag, hasTag: true, cause: internalCause(), hasCause: true,
-		},
-		"not-mutated with a reference": {
+		}},
+		"not-mutated with a reference": {result: StartResult{
 			outcome: NotMutated, ref: ref, hasRef: true,
 			cause: internalCause(), hasCause: true,
-		},
-		"not-mutated with a recovery tag": {
+		}},
+		"not-mutated with a recovery tag": {result: StartResult{
 			outcome: NotMutated, tag: tag, hasTag: true,
 			cause: internalCause(), hasCause: true,
-		},
-		"ref-known with a separate tag": {
-			outcome: RefKnown, ref: ref, hasRef: true, tag: tag, hasTag: true,
-		},
-		"outcome-unknown with an invalid tag": {
+		}},
+		"outcome-unknown with an invalid tag": {result: StartResult{
 			outcome: OutcomeUnknown, hasTag: true,
 			cause: internalCause(), hasCause: true,
-		},
-		"an outcome outside the enum": {
+		}},
+		"an outcome outside the enum": {result: StartResult{
 			outcome: MutationOutcome(200), cause: internalCause(), hasCause: true,
+		}},
+		// A cause present in the field but never declared by a constructor.
+		// Cause() reports absent for these, so validating them would mean a
+		// result whose failure nothing downstream can see.
+		"not-mutated with an undeclared cause": {result: StartResult{
+			outcome: NotMutated, cause: internalCause(),
+		}},
+		"outcome-unknown with an undeclared cause": {result: StartResult{
+			outcome: OutcomeUnknown, tag: tag, hasTag: true, cause: internalCause(),
+		}},
+		"ref-known with a separate tag": {
+			result: StartResult{
+				outcome: RefKnown, ref: ref, hasRef: true, tag: tag, hasTag: true,
+			},
+			wantClose: true,
+		},
+		"ref-known with an unclassified cause": {
+			result:    NewRefKnownWithCause(ref, StartCause{}),
+			wantClose: true,
 		},
 	}
 
-	for name, res := range tests {
+	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			if err := res.Validate(); !errors.Is(err, ErrInvalidResult) {
+			if err := tc.result.Validate(); !errors.Is(err, ErrInvalidResult) {
 				t.Errorf("Validate() = %v, want ErrInvalidResult", err)
 			}
-			// And the decision that consumes it must refuse rather than act on
-			// a value it could not validate.
-			plan, err := PlanCleanup(res, false)
+
+			plan, err := PlanCleanup(tc.result, false)
 			if err == nil {
 				t.Error("PlanCleanup accepted a contradictory result")
 			}
-			if _, call := plan.Close(); call {
-				t.Error("PlanCleanup asked for a close from a contradictory result")
+			gotRef, gotCall := plan.Close()
+			if gotCall != tc.wantClose {
+				t.Fatalf("PlanCleanup close = %v, want %v", gotCall, tc.wantClose)
+			}
+			if tc.wantClose && gotRef != ref {
+				t.Errorf("PlanCleanup planned a close against %v, want the result's own reference", gotRef)
+			}
+
+			// A committed launch never closes, whatever the result claims.
+			committed, _ := PlanCleanup(tc.result, true)
+			if _, call := committed.Close(); call {
+				t.Error("PlanCleanup asked for a close on a committed launch")
 			}
 		})
 	}
@@ -195,6 +229,102 @@ func TestProbeResult_SuccessMayNotCarryACause(t *testing.T) {
 				t.Errorf("Validate() = %v, want ErrInvalidResult", err)
 			}
 		})
+	}
+}
+
+// TestClosedEnums_EveryConstantIsNamed walks each enum to its unexported count
+// sentinel.
+//
+// The external version of this test cannot: it can only loop to the last
+// *named* constant it can see, so appending a constant and forgetting its
+// name-table entry leaves the loop stopping short — the array grows with an
+// empty default, String returns "", and the test written to catch exactly that
+// passes. Only an in-package test can reach the sentinel, which is where the
+// real bound lives.
+func TestClosedEnums_EveryConstantIsNamed(t *testing.T) {
+	enums := map[string]struct {
+		count int
+		name  func(int) string
+	}{
+		"Kind":              {int(kindCount), func(i int) string { return Kind(i).String() }},
+		"StartFailureClass": {int(failureClassCount), func(i int) string { return StartFailureClass(i).String() }},
+		"Phase":             {int(phaseCount), func(i int) string { return Phase(i).String() }},
+		"MutationOutcome":   {int(mutationOutcomeCount), func(i int) string { return MutationOutcome(i).String() }},
+		"CloseState":        {int(closeStateCount), func(i int) string { return CloseState(i).String() }},
+		"ProbeState":        {int(probeStateCount), func(i int) string { return ProbeState(i).String() }},
+		"CleanupOutcome":    {int(cleanupOutcomeCount), func(i int) string { return CleanupOutcome(i).String() }},
+	}
+
+	for enum, spec := range enums {
+		t.Run(enum, func(t *testing.T) {
+			if spec.count < 2 {
+				t.Fatalf("count sentinel is %d; the enum is not being walked", spec.count)
+			}
+			seen := make(map[string]bool, spec.count)
+			for i := range spec.count {
+				got := spec.name(i)
+				switch {
+				case got == "":
+					t.Errorf("value %d has no entry in the name table", i)
+				case strings.HasPrefix(got, "invalid("):
+					t.Errorf("value %d renders as %q; it is inside the enum but unnamed", i, got)
+				case seen[got]:
+					t.Errorf("value %d reuses the name %q", i, got)
+				}
+				seen[got] = true
+			}
+			// One past the sentinel must render as an invalid marker, which is
+			// what proves the walk stopped at the real end rather than short of
+			// it.
+			if got := spec.name(spec.count); !strings.HasPrefix(got, "invalid(") {
+				t.Errorf("the value past the sentinel renders as %q, not an invalid marker", got)
+			}
+		})
+	}
+}
+
+// TestStartSpec_RefusesAStructLiteralBuild covers the shape the unexported
+// fields make unconstructible outside this package: a spec whose two
+// string-valued fields were assigned directly rather than sealed by
+// NewStartSpec.
+//
+// The point is not that an external caller could do this — they cannot — but
+// that a future in-package one could, and such a spec would be *valid enough*
+// to reach an adapter while carrying values that render in the clear and that
+// never passed the text checks. Validate asks whether the seal is present
+// rather than whether the fields look plausible.
+func TestStartSpec_RefusesAStructLiteralBuild(t *testing.T) {
+	tag, err := NewRecoveryTag()
+	if err != nil {
+		t.Fatalf("NewRecoveryTag: %v", err)
+	}
+	boot, err := NewBootstrapCommand(exec.Opaque("forgectl surface _exec --nonce beefcafe"))
+	if err != nil {
+		t.Fatalf("NewBootstrapCommand: %v", err)
+	}
+
+	// Everything a hand-built spec would plausibly set, except the seal.
+	unsealed := StartSpec{tag: tag, bootstrap: boot}
+	if err := unsealed.Validate(); !errors.Is(err, ErrInvalidStartSpec) {
+		t.Errorf("an unsealed spec validated: err = %v", err)
+	}
+
+	// Half-sealed is still unsealed: both values must have gone through the
+	// constructor, or one of them skipped the text checks.
+	halfSealed := StartSpec{cwd: exec.Opaque("/tmp/x"), tag: tag, bootstrap: boot}
+	if err := halfSealed.Validate(); !errors.Is(err, ErrInvalidStartSpec) {
+		t.Errorf("a half-sealed spec validated: err = %v", err)
+	}
+
+	// The control: the real constructor produces a spec that validates, so the
+	// refusals above are the seal check firing rather than Validate refusing
+	// everything.
+	sealed, err := NewStartSpec("/tmp/x", "x", tag, boot)
+	if err != nil {
+		t.Fatalf("NewStartSpec: %v", err)
+	}
+	if err := sealed.Validate(); err != nil {
+		t.Errorf("a sealed spec was refused: %v", err)
 	}
 }
 

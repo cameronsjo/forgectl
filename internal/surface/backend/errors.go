@@ -96,14 +96,36 @@ func (c StartFailureClass) Retryable() bool { return c == FailureNameCollision }
 // question, without ever handing over a value that could be printed.
 type StartCause struct {
 	class StartFailureClass
-	err   error
+	err   *causeBox
 }
+
+// causeBox holds the original behind a pointer, which closes two holes that an
+// `err error` field leaves open.
+//
+// The first is reflection. fmt reaches a value held in an *unexported* field
+// through reflect, where CanInterface is false, so it never consults Format or
+// String — it walks the fields instead. A StartCause nested in another struct
+// would therefore print its original in full whenever that original is a
+// value-typed error with exported fields, which is exactly the manager stderr
+// carrying a socket path and a cwd. fmt does not dereference a pointer nested
+// in a struct, so a boxed original prints as an address at every depth.
+//
+// The second is comparability. errors.Is compares a target with == when the
+// target's type is comparable; StartCause is statically comparable, so two
+// causes wrapping the same uncomparable dynamic error type would panic on
+// comparison. A pointer field is always comparable and compares by identity,
+// so the panic is unreachable and errors.Is against a specific cause still
+// works.
+type causeBox struct{ err error }
 
 // NewStartCause records a classified failure. A cause built with an invalid
 // class does not validate, so a caller that forgets to classify cannot produce
 // a result the service will act on.
 func NewStartCause(class StartFailureClass, err error) StartCause {
-	return StartCause{class: class, err: err}
+	if err == nil {
+		return StartCause{class: class}
+	}
+	return StartCause{class: class, err: &causeBox{err: err}}
 }
 
 // Class returns the closed classification.
@@ -147,7 +169,7 @@ func (c StartCause) Is(target error) bool {
 	if c.err == nil {
 		return false
 	}
-	return errors.Is(c.err, target)
+	return errors.Is(c.err.err, target)
 }
 
 // LaunchError is the single error type a surface launch returns. It keeps the
@@ -186,7 +208,12 @@ func (e *LaunchError) Error() string {
 			msg += " (look for " + e.Recovery.OwnershipName() + ")"
 		}
 	case RefKnown:
-		msg += "; " + e.Cleanup.String()
+		// Only a recorded outcome earns a clause. The zero value is the state
+		// before rollback has run, and appending its name produces a dangling
+		// "; unspecified" that reads to an operator as a cleanup verdict.
+		if e.Cleanup != CleanupUnspecified {
+			msg += "; " + e.Cleanup.String()
+		}
 	case NotMutated:
 	}
 	return msg
