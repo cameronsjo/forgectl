@@ -162,7 +162,7 @@ func TestStartSpec_RendersRedactedUnderEveryVerb(t *testing.T) {
 		"%v":                  fmt.Sprintf("%v", spec),
 		"%+v":                 fmt.Sprintf("%+v", spec),
 		"%#v":                 fmt.Sprintf("%#v", spec),
-		"%s":                  fmt.Sprintf("%s", spec), //nolint:gosimple,staticcheck // exercising the verb is the assertion
+		"%s":                  fmt.Sprintf("%s", spec), //nolint:staticcheck // exercising the verb is the assertion
 		"%q":                  fmt.Sprintf("%q", spec),
 		"wrapped in an error": fmt.Errorf("start %v: boom", spec).Error(),
 		"in a struct, %+v":    fmt.Sprintf("%+v", holder{spec: spec}),
