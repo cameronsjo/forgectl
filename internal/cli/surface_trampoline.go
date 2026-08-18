@@ -8,6 +8,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"syscall"
 
 	"github.com/cameronsjo/forgectl/internal/surface"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -58,12 +59,12 @@ func (productionTrampoline) Run(ctx context.Context, req bootstrapRequest) error
 	// Clean before use. The path came from argv a terminal manager typed, and
 	// while forgectl produced it, the process that typed it is exactly the one
 	// the threat model does not trust.
-	socket := filepath.Clean(req.revealSocket())
+	socket := filepath.Clean(req.socketPath())
 	if err := checkSocketOwner(socket); err != nil {
 		return err
 	}
 
-	nonce, err := surface.ParseNonce(req.revealNonce())
+	nonce, err := surface.ParseNonce(req.nonceValue())
 	if err != nil {
 		// The classifier already validated the encoding, so this is
 		// unreachable in practice — and it refuses rather than proceeding with
@@ -166,7 +167,20 @@ func harnessCommand(inv surface.Invocation) (*osexec.Cmd, error) {
 	//nolint:gosec,noctx // G204: executing a validated, authenticated invocation is this function's job; noctx: the child must outlive this context
 	cmd := osexec.Command(inv.Path, inv.Args...)
 	cmd.Dir = inv.CWD
+
+	// A nil Env is not "no environment" to os/exec — it means *inherit the
+	// parent's*, and the parent here is a process a terminal manager started.
+	// So the one case where the invocation carried no environment is exactly
+	// the case where the harness would silently receive the manager's instead
+	// of the one forgectl built. Verified: with cmd.Env nil the child reads the
+	// trampoline's variables; with a non-nil empty slice it reads none.
+	//
+	// Empty is the honest reading of an empty invocation. Inheriting is never
+	// one of the options.
 	cmd.Env = inv.Env
+	if cmd.Env == nil {
+		cmd.Env = []string{}
+	}
 
 	// The harness is an interactive session and this process is standing in for
 	// it inside the manager's pane, so it inherits the terminal wholesale.
@@ -183,12 +197,21 @@ func harnessCommand(inv surface.Invocation) (*osexec.Cmd, error) {
 //
 // The real error is not forwarded and this is the reason the field is an enum:
 // os/exec's message quotes the harness path, and on some failures the argv too.
+// The directory cases are tested first, and the order is the whole correctness
+// of this function. A missing Cmd.Dir surfaces as a *os.PathError with Op
+// "chdir" that ALSO satisfies errors.Is(err, os.ErrNotExist), so a generic
+// not-exist test placed first swallows it and reports FailExec — the operator
+// then goes looking at the harness binary when the directory is what is gone.
+//
+// The Op check alone is not enough either: a Cmd.Dir that exists but is a
+// regular file fails as Op "fork/exec" wrapping ENOTDIR, with ErrNotExist
+// false. Both were confirmed against os/exec rather than assumed.
 func startFailureCategory(err error) surface.ExecFailure {
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
-		return surface.FailExec
-	}
 	var pathErr *os.PathError
 	if errors.As(err, &pathErr) && pathErr.Op == "chdir" {
+		return surface.FailChdir
+	}
+	if errors.Is(err, syscall.ENOTDIR) {
 		return surface.FailChdir
 	}
 	return surface.FailExec

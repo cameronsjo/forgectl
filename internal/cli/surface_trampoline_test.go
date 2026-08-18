@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -140,6 +141,139 @@ func TestTrampoline_StartsTheHarnessAndCommits(t *testing.T) {
 	// cmd.Env was honoured, and exactly: the variable came from the invocation.
 	if string(proof) != "delivered" {
 		t.Errorf("the harness saw %q, want the invocation's environment", proof)
+	}
+}
+
+// TestTrampoline_NeverLetsTheHarnessInheritThisEnvironment is a privacy
+// property wearing a correctness bug's clothes.
+//
+// cmd.Env == nil does not mean "no environment" to os/exec; it means inherit
+// the parent's. The parent here is a process a terminal manager started, so an
+// invocation that carried no environment would hand the harness the *manager's*
+// — the exact copy this whole design exists to avoid making.
+func TestTrampoline_NeverLetsTheHarnessInheritThisEnvironment(t *testing.T) {
+	requireUnix(t)
+
+	t.Setenv("FORGECTL_TRAMPOLINE_ONLY", "leaked")
+
+	listener, socket := listenerAt(t)
+	nonce, err := surface.NewNonce()
+	if err != nil {
+		t.Fatalf("NewNonce: %v", err)
+	}
+
+	workdir, err := os.MkdirTemp("", "te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(workdir) })
+
+	// Env is nil, which is what slices.Clone of an absent environment yields.
+	inv := launch.Invocation{
+		Harness: "test",
+		Binary:  launch.ResolvedBinary{Path: "/bin/sh", Source: launch.BinaryClaudeConfig},
+		Args:    []string{"-c", `printf '%s' "${FORGECTL_TRAMPOLINE_ONLY:-<absent>}" > seen.txt`},
+		Env:     nil,
+		CWD:     workdir,
+	}
+
+	committed := serviceOn(t, listener, nonce, inv)
+
+	if err := (productionTrampoline{}).Run(context.Background(), bootstrapFor(t, socket, nonce)); err != nil {
+		t.Fatalf("the trampoline failed: %v", err)
+	}
+	if err := <-committed; err != nil {
+		t.Fatalf("the service did not commit: %v", err)
+	}
+
+	//nolint:gosec // G304: reading back a file this test just created in its own temp dir
+	seen, err := os.ReadFile(filepath.Join(workdir, "seen.txt"))
+	if err != nil {
+		t.Fatalf("the harness did not run: %v", err)
+	}
+	if string(seen) != "<absent>" {
+		t.Errorf("the harness saw FORGECTL_TRAMPOLINE_ONLY=%q; a nil invocation "+
+			"environment leaked the trampoline's own", seen)
+	}
+}
+
+// TestStartFailureCategory_SeparatesDirectoryFromExec pins the classifier's
+// ordering, which is the whole of its correctness.
+//
+// A missing Cmd.Dir is a *os.PathError with Op "chdir" that ALSO satisfies
+// errors.Is(err, os.ErrNotExist), so a generic not-exist test placed first
+// reports FailExec and sends the operator to look at the harness binary when
+// the directory is what is gone. A Cmd.Dir that is a regular file fails
+// differently again — Op "fork/exec" wrapping ENOTDIR — so the Op check alone
+// does not cover it either. Both are produced here by os/exec rather than
+// hand-built, so the test cannot drift from what the runtime actually returns.
+func TestStartFailureCategory_SeparatesDirectoryFromExec(t *testing.T) {
+	requireUnix(t)
+
+	dir, err := os.MkdirTemp("", "tc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	regularFile := filepath.Join(dir, "afile")
+	if err := os.WriteFile(regularFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := map[string]struct {
+		dir  string
+		path string
+		want surface.ExecFailure
+	}{
+		"missing working directory": {
+			dir: filepath.Join(dir, "absent"), path: "/bin/echo", want: surface.FailChdir,
+		},
+		"working directory is a regular file": {
+			dir: regularFile, path: "/bin/echo", want: surface.FailChdir,
+		},
+		"harness does not exist": {
+			dir: dir, path: filepath.Join(dir, "no-such-harness"), want: surface.FailExec,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			//nolint:gosec // G204: fixed paths, constructed by this test to provoke a real start failure
+			cmd := osexec.CommandContext(t.Context(), tc.path)
+			cmd.Dir = tc.dir
+			startErr := cmd.Start()
+			if startErr == nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				t.Fatalf("the fixture started successfully; it provokes no failure to classify")
+			}
+			if got := startFailureCategory(startErr); got != tc.want {
+				t.Errorf("startFailureCategory(%v) = %q, want %q", startErr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBootstrapRequest_ZeroValueRefusesRatherThanPanics covers the closures.
+// parseBootstrap always sets them, but a zero-value request is a legal Go value
+// and a nil closure call is a panic where the surrounding code produces
+// refusals.
+func TestBootstrapRequest_ZeroValueRefusesRatherThanPanics(t *testing.T) {
+	var zero bootstrapRequest
+	if got := zero.socketPath(); got != "" {
+		t.Errorf("socketPath on a zero request = %q, want empty", got)
+	}
+	if got := zero.nonceValue(); got != "" {
+		t.Errorf("nonceValue on a zero request = %q, want empty", got)
+	}
+
+	err := (productionTrampoline{}).Run(context.Background(), zero)
+	if err == nil {
+		t.Fatal("a zero-value bootstrap request ran without error")
+	}
+	if !errors.Is(err, errSocketUnsafe) {
+		t.Errorf("a zero-value request = %v, want errSocketUnsafe", err)
 	}
 }
 

@@ -102,6 +102,29 @@ type bootstrapRequest struct {
 	revealNonce  func() string
 }
 
+// socketPath and nonceValue read the closures without assuming they are set.
+//
+// parseBootstrap is the only producer today and always sets both, so the guard
+// looks redundant — it is not, because a zero-value bootstrapRequest is a legal
+// Go value and calling a nil closure panics. A future construction path (a
+// test fixture, a second entry point) would fail with a stack trace instead of
+// the refusal the surrounding code is built to produce. Empty strings land on
+// the existing checks: an empty socket path fails checkSocketOwner and an empty
+// nonce fails ParseNonce.
+func (r bootstrapRequest) socketPath() string {
+	if r.revealSocket == nil {
+		return ""
+	}
+	return r.revealSocket()
+}
+
+func (r bootstrapRequest) nonceValue() string {
+	if r.revealNonce == nil {
+		return ""
+	}
+	return r.revealNonce()
+}
+
 // String and LogValue redact at the STRUCT level, not only the field level.
 // The fields already render redacted on their own, so this is belt and braces
 // — but it is the cheap kind: it means a future field added to this struct is
