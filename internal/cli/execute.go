@@ -87,10 +87,19 @@ func Execute(ctx context.Context) error {
 	// recovery exists to say why.
 	if handled, err := trySurfaceExec(ctx, processArgs(), productionTrampolineRuntime()); handled {
 		// This path returns before fang exists, so nothing downstream renders
-		// the error — without this the operator gets a bare non-zero exit. The
-		// bootstrap errors are fixed category text carrying no value from argv,
-		// which is exactly what makes them safe to print verbatim.
-		if err != nil {
+		// the error — without this the operator gets a bare non-zero exit.
+		//
+		// Everything reachable here is fixed category text: the classifier's
+		// refusals and the trampoline's are bare sentinels precisely because
+		// this stderr is the terminal manager's pane, so none of them carry a
+		// socket path, a nonce, or anything from the invocation.
+		//
+		// errHarnessExit is the exception, and it is suppressed rather than
+		// printed. It means an ordinary session ended non-zero — the harness
+		// has already written its own diagnostics to this same stderr, and a
+		// second line beneath them is noise on every failed claude run. Its
+		// exit code still propagates; only the message is dropped.
+		if err != nil && !errors.Is(err, errHarnessExit) {
 			fmt.Fprintln(os.Stderr, termsafe.SafeLine(err.Error()))
 		}
 		return err

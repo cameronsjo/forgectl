@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -248,7 +249,7 @@ func TestStartFailureCategory_SeparatesDirectoryFromExec(t *testing.T) {
 				_ = cmd.Wait()
 				t.Fatalf("the fixture started successfully; it provokes no failure to classify")
 			}
-			if got := startFailureCategory(startErr); got != tc.want {
+			if got := startFailureCategory(startErr, tc.dir); got != tc.want {
 				t.Errorf("startFailureCategory(%v) = %q, want %q", startErr, got, tc.want)
 			}
 		})
@@ -274,6 +275,343 @@ func TestBootstrapRequest_ZeroValueRefusesRatherThanPanics(t *testing.T) {
 	}
 	if !errors.Is(err, errSocketUnsafe) {
 		t.Errorf("a zero-value request = %v, want errSocketUnsafe", err)
+	}
+}
+
+// TestTrampoline_AFailedStartDoesNotCommit is the headline property, and until
+// this existed nothing asserted it.
+//
+// Every other failure test refuses inside harnessCommand, which returns before
+// cmd.Start is reached — so moving boot.Started() above cmd.Start(), turning the
+// exact acknowledgement into an optimistic one, left the whole suite green.
+//
+// The fixture is a harness that passes every check harnessCommand makes and
+// still cannot be started: regular, executable, present, and not an image the
+// kernel can exec. That is the only shape that reaches a failing Start.
+func TestTrampoline_AFailedStartDoesNotCommit(t *testing.T) {
+	requireUnix(t)
+
+	listener, socket := listenerAt(t)
+	nonce, err := surface.NewNonce()
+	if err != nil {
+		t.Fatalf("NewNonce: %v", err)
+	}
+
+	dir, err := os.MkdirTemp("", "tx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	unstartable := filepath.Join(dir, "harness")
+	if err := os.WriteFile(unstartable, []byte("\x00\x01not an executable image\n"), 0o755); err != nil { //nolint:gosec // G306: the executable bit is the point
+		t.Fatal(err)
+	}
+
+	committed := serviceOn(t, listener, nonce, launch.Invocation{
+		Harness: "test",
+		Binary:  launch.ResolvedBinary{Path: unstartable, Source: launch.BinaryClaudeConfig},
+		Args:    []string{},
+		Env:     []string{"PATH=/usr/bin:/bin"},
+		CWD:     dir,
+	})
+
+	runErr := (productionTrampoline{}).Run(context.Background(), bootstrapFor(t, socket, nonce))
+	if runErr == nil {
+		t.Fatal("a harness that cannot be exec'd produced no error")
+	}
+	if !errors.Is(runErr, errHarnessUnstartable) {
+		t.Errorf("the trampoline error = %v, want errHarnessUnstartable", runErr)
+	}
+
+	select {
+	case err := <-committed:
+		if err == nil {
+			t.Fatal("the service COMMITTED on a harness that never started — " +
+				"the acknowledgement is optimistic, not exact")
+		}
+		if !strings.Contains(err.Error(), string(surface.FailExec)) {
+			t.Errorf("the service saw %q, want the %q category", err, surface.FailExec)
+		}
+		if strings.Contains(err.Error(), unstartable) {
+			t.Error("the failure reason carried the harness path across the wire")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the service never received a result frame")
+	}
+}
+
+// TestTrampoline_AnUnusableWorkingDirectoryIsRefusedBeforeStart records where
+// the boundary actually falls, which is not where the classifier suggests.
+//
+// harnessCommand stats the working directory, so a directory that is missing or
+// is not a directory never reaches cmd.Start — the outer is told the
+// *invocation* was refused, not that chdir failed. FailChdir is therefore
+// reachable only when the directory becomes unusable in the window between that
+// stat and the exec, a race no test can produce deterministically.
+//
+// The classifier's mapping is pinned by TestStartFailureCategory_SeparatesDirectoryFromExec,
+// which drives it with errors os/exec really returned. This test pins the
+// reachable path, so that a future change moving validation around cannot
+// silently alter which category an operator sees without one of the two failing.
+func TestTrampoline_AnUnusableWorkingDirectoryIsRefusedBeforeStart(t *testing.T) {
+	requireUnix(t)
+
+	listener, socket := listenerAt(t)
+	nonce, err := surface.NewNonce()
+	if err != nil {
+		t.Fatalf("NewNonce: %v", err)
+	}
+
+	dir, err := os.MkdirTemp("", "td")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	notADirectory := filepath.Join(dir, "afile")
+	if err := os.WriteFile(notADirectory, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	committed := serviceOn(t, listener, nonce, launch.Invocation{
+		Harness: "test",
+		Binary:  launch.ResolvedBinary{Path: "/bin/sh", Source: launch.BinaryClaudeConfig},
+		Args:    []string{"-c", "exit 0"},
+		Env:     []string{"PATH=/usr/bin:/bin"},
+		CWD:     notADirectory,
+	})
+
+	runErr := (productionTrampoline{}).Run(context.Background(), bootstrapFor(t, socket, nonce))
+	if !errors.Is(runErr, errHarnessUnusable) {
+		t.Fatalf("the trampoline error = %v, want errHarnessUnusable", runErr)
+	}
+
+	select {
+	case err := <-committed:
+		if err == nil {
+			t.Fatal("the service committed on a harness that never started")
+		}
+		if !strings.Contains(err.Error(), string(surface.FailInvocation)) {
+			t.Errorf("the service saw %q, want the %q category", err, surface.FailInvocation)
+		}
+		if strings.Contains(err.Error(), notADirectory) {
+			t.Error("the failure reason carried the working directory across the wire")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the service never received a result frame")
+	}
+}
+
+// TestTrampoline_MirrorsASignalledHarness covers the 128+n convention. The
+// implementation is small and the mistake it guards against — reporting a
+// signalled session as a plain failure — is invisible without an assertion.
+func TestTrampoline_MirrorsASignalledHarness(t *testing.T) {
+	requireUnix(t)
+
+	listener, socket := listenerAt(t)
+	nonce, err := surface.NewNonce()
+	if err != nil {
+		t.Fatalf("NewNonce: %v", err)
+	}
+
+	committed := serviceOn(t, listener, nonce, launch.Invocation{
+		Harness: "test",
+		Binary:  launch.ResolvedBinary{Path: "/bin/sh", Source: launch.BinaryClaudeConfig},
+		Args:    []string{"-c", `kill -TERM $$; sleep 5`},
+		Env:     []string{"PATH=/usr/bin:/bin"},
+		CWD:     "/",
+	})
+
+	runErr := (productionTrampoline{}).Run(context.Background(), bootstrapFor(t, socket, nonce))
+	if runErr == nil {
+		t.Fatal("a signalled harness produced no error")
+	}
+	// SIGTERM is 15, so the shell's convention puts this at 143.
+	if got := ExitCode(runErr); got != 143 {
+		t.Errorf("exit code = %d, want 143 (128 + SIGTERM)", got)
+	}
+	if err := <-committed; err != nil {
+		t.Errorf("the service did not commit before the harness was signalled: %v", err)
+	}
+}
+
+// TestTrampoline_SurvivesATerminalSignalAndStillReaps is the Ctrl-C property.
+//
+// The harness stays in the pane's foreground process group so Ctrl-C reaches
+// it, but the trampoline is in that group too — and with no handling installed,
+// Go's default disposition kills it mid-Wait. The session is then orphaned on
+// the tty and the exit status this file exists to mirror is discarded.
+//
+// The signal is delivered to this process, which is what a terminal does to the
+// whole group. If the handling is removed, this test does not fail politely:
+// the test binary itself dies. That is the correct signal — it is exactly what
+// happens to the trampoline in a real pane.
+func TestTrampoline_SurvivesATerminalSignalAndStillReaps(t *testing.T) {
+	requireUnix(t)
+
+	listener, socket := listenerAt(t)
+	nonce, err := surface.NewNonce()
+	if err != nil {
+		t.Fatalf("NewNonce: %v", err)
+	}
+
+	// The harness ignores SIGINT and exits 7 — a claude session traps it and
+	// carries on, so the reaper must outlive the signal to see the real status.
+	committed := serviceOn(t, listener, nonce, launch.Invocation{
+		Harness: "test",
+		Binary:  launch.ResolvedBinary{Path: "/bin/sh", Source: launch.BinaryClaudeConfig},
+		Args:    []string{"-c", `trap '' INT; sleep 0.4; exit 7`},
+		Env:     []string{"PATH=/usr/bin:/bin"},
+		CWD:     "/",
+	})
+
+	go func() {
+		// Late enough that Run has installed its handling and is in Wait.
+		time.Sleep(200 * time.Millisecond)
+		_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
+	}()
+
+	runErr := (productionTrampoline{}).Run(context.Background(), bootstrapFor(t, socket, nonce))
+	if runErr == nil {
+		t.Fatal("the harness exited 7 but the trampoline reported success")
+	}
+	if got := ExitCode(runErr); got != 7 {
+		t.Errorf("exit code = %d, want 7 — the reaper did not survive the signal "+
+			"to observe the harness's real status", got)
+	}
+	if err := <-committed; err != nil {
+		t.Errorf("the service did not commit: %v", err)
+	}
+}
+
+// TestTrampoline_AnUnacknowledgedLaunchIsNotSuccess covers the branch where the
+// child started but the acknowledgement could not be delivered.
+//
+// The outer never commits and will roll the surface back, so a trampoline that
+// exited 0 here would report success for a launch that did not happen. The
+// harness exits cleanly on purpose: that is the only case where the exit status
+// would otherwise say nothing went wrong.
+func TestTrampoline_AnUnacknowledgedLaunchIsNotSuccess(t *testing.T) {
+	requireUnix(t)
+
+	listener, socket := listenerAt(t)
+	nonce, err := surface.NewNonce()
+	if err != nil {
+		t.Fatalf("NewNonce: %v", err)
+	}
+
+	// A service that sends the invocation and then hangs up, so the
+	// acknowledgement has nowhere to land.
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		handoff, acceptErr := surface.Accept(conn, nonce)
+		if acceptErr != nil {
+			return
+		}
+		_ = handoff.Send(launch.Invocation{
+			Harness: "test",
+			Binary:  launch.ResolvedBinary{Path: "/bin/sh", Source: launch.BinaryClaudeConfig},
+			Args:    []string{"-c", "exit 0"},
+			Env:     []string{"PATH=/usr/bin:/bin"},
+			CWD:     "/",
+		})
+		_ = handoff.Close()
+	}()
+
+	runErr := (productionTrampoline{}).Run(context.Background(), bootstrapFor(t, socket, nonce))
+	if runErr == nil {
+		t.Fatal("an unacknowledged launch reported success; the outer is rolling it back")
+	}
+	if !errors.Is(runErr, errUnacknowledged) {
+		t.Errorf("the trampoline error = %v, want errUnacknowledged", runErr)
+	}
+}
+
+// TestTrampoline_ErrorsNeverNameTheInvocation guards the local channel.
+//
+// The wire reason is a closed enum, which is well covered — but this process's
+// stderr is the manager's pane, and an error naming the harness path hands over
+// by message exactly what the socket withheld from argv. Every refusal is a
+// bare sentinel for that reason, and nothing else asserts it.
+func TestTrampoline_ErrorsNeverNameTheInvocation(t *testing.T) {
+	requireUnix(t)
+
+	dir, err := os.MkdirTemp("", "tp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	// Distinctive enough that a substring check cannot pass by accident.
+	secretHarness := filepath.Join(dir, "harness-SENTINEL-9f3a")
+	secretCWD := filepath.Join(dir, "cwd-SENTINEL-9f3a")
+
+	cases := map[string]struct {
+		path, cwd string
+		setup     func(t *testing.T)
+	}{
+		"harness is not executable": {
+			path: secretHarness, cwd: dir,
+			setup: func(t *testing.T) {
+				t.Helper()
+				if err := os.WriteFile(secretHarness, []byte("#!/bin/sh\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		"harness cannot be exec'd": {
+			path: secretHarness, cwd: dir,
+			setup: func(t *testing.T) {
+				t.Helper()
+				//nolint:gosec // G306: the executable bit is what carries this case past validation
+				if err := os.WriteFile(secretHarness, []byte("\x00\x01"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		"working directory is missing": {
+			path: "/bin/sh", cwd: secretCWD,
+			setup: func(*testing.T) {},
+		},
+		// Reaches the stat-failed branch rather than the shape checks — a
+		// different return, and one an os error would happily annotate with the
+		// path it could not find.
+		"harness is missing": {
+			path: secretHarness, cwd: dir,
+			setup: func(*testing.T) {},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_ = os.Remove(secretHarness)
+			tc.setup(t)
+
+			listener, socket := listenerAt(t)
+			nonce, err := surface.NewNonce()
+			if err != nil {
+				t.Fatalf("NewNonce: %v", err)
+			}
+			committed := serviceOn(t, listener, nonce, launch.Invocation{
+				Harness: "test",
+				Binary:  launch.ResolvedBinary{Path: tc.path, Source: launch.BinaryClaudeConfig},
+				Args:    []string{"--prompt", "SENTINEL-9f3a-argument"},
+				Env:     []string{"SECRET=SENTINEL-9f3a-env"},
+				CWD:     tc.cwd,
+			})
+
+			runErr := (productionTrampoline{}).Run(context.Background(), bootstrapFor(t, socket, nonce))
+			if runErr == nil {
+				t.Fatal("the fixture produced no error, so there is nothing to inspect")
+			}
+			if strings.Contains(runErr.Error(), "SENTINEL-9f3a") {
+				t.Errorf("the trampoline's error reaches the manager's pane and names the "+
+					"invocation: %v", runErr)
+			}
+			<-committed
+		})
 	}
 }
 

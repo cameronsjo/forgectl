@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	osexec "os/exec"
+	"os/signal"
 	"path/filepath"
 	"syscall"
 
@@ -23,10 +24,24 @@ import (
 //
 // Two properties shape everything here.
 //
-// The invocation never appears in this process's argv. That is the entire point
-// of the socket, and it means the trampoline must not print, log, or forward
-// what it receives — its diagnostics are categories, and the logger the
-// classifier hands it discards by default.
+// The invocation never appears in this process's argv, and it never appears in
+// this process's diagnostics either. Both matter, and the second is the easier
+// one to lose: this process's stderr is the manager's pane, so an error that
+// names the harness path hands over by message what the socket withheld from
+// argv. Every refusal below is therefore a category — the wire carries a closed
+// enum, and the local errors are bare sentinels.
+//
+// What the mechanism actually buys is worth stating precisely, because the
+// checks here can read as more than they are. The threat model grants a hostile
+// manager the socket path and the nonce, both of which it typed, and the
+// protocol authenticates in one direction only — the trampoline proves itself
+// to the outer, not the reverse. Such a manager can dial the socket itself and
+// receive the invocation without ever exec'ing anything. So the property is
+// that the invocation is not exposed *through argv*, which defeats every
+// passive same-uid observer: ps, process accounting, shell history, a scrollback
+// buffer. It is not a defence against an active hostile manager, and the
+// re-validation below is shape checking and defence in depth rather than an
+// authorization boundary.
 //
 // And acknowledgement is exact. The outer process commits — stops being able to
 // roll the surface back — only when it reads an exec_started frame, so this
@@ -36,7 +51,8 @@ import (
 //
 // After acknowledgement it is a transparent reaper and nothing more: it waits
 // for the harness, mirrors its exit status, and performs no restart, health
-// polling, or supervision of any kind.
+// polling, or supervision of any kind. Staying alive long enough to do that is
+// itself work — see the signal handling in Run.
 
 var (
 	// errSocketUnsafe reports a bootstrap socket this process will not dial.
@@ -45,9 +61,20 @@ var (
 	// errHarnessUnusable reports a received invocation the trampoline refuses.
 	errHarnessUnusable = errors.New("forgectl: surface invocation is not runnable")
 
+	// errHarnessUnstartable reports a harness that could not be started. It
+	// carries no detail for the same reason the wire category does not: the
+	// operating system's message quotes the harness path, and this error
+	// reaches the pane's stderr, which belongs to the terminal manager.
+	errHarnessUnstartable = errors.New("forgectl: the harness could not be started")
+
+	// errUnacknowledged reports a harness that ran without the launch ever
+	// being acknowledged, so the outer is rolling the surface back.
+	errUnacknowledged = errors.New("forgectl: surface launch was not acknowledged")
+
 	// errHarnessExit carries the child's failure without describing it. The
 	// harness has already written whatever it wanted to the inherited stderr;
-	// re-reporting it here would be a second, worse copy.
+	// re-reporting it here would be a second, worse copy — which is why Execute
+	// suppresses the message for this sentinel and keeps only its exit code.
 	errHarnessExit = errors.New("forgectl: harness exited non-zero")
 )
 
@@ -75,7 +102,9 @@ func (productionTrampoline) Run(ctx context.Context, req bootstrapRequest) error
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(ctx, "unix", socket)
 	if err != nil {
-		return fmt.Errorf("forgectl: dial surface bootstrap socket: %w", termsafe.Error(err))
+		// Bare, like every other refusal here: the dial error names the socket
+		// path, and this goes to the manager's pane.
+		return errSocketUnsafe
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -93,9 +122,39 @@ func (productionTrampoline) Run(ctx context.Context, req bootstrapRequest) error
 		return err
 	}
 
+	// Terminal signals belong to the harness, not to its reaper.
+	//
+	// The child stays in the pane's foreground process group so Ctrl-C reaches
+	// it — but the trampoline is in that group too, and Go's default
+	// disposition for SIGINT kills it while it sits in Wait. Reproduced: the
+	// harness traps SIGINT and keeps running, the reaper dies, and the session
+	// is orphaned on the tty with the shell's prompt back and the exit status
+	// this file exists to mirror thrown away.
+	//
+	// Notify rather than Ignore, and the ordering is not interchangeable.
+	// signal.Ignore installs a real SIG_IGN, and an ignored disposition is the
+	// one thing execve *preserves* into the child — probed, and the child then
+	// never sees Ctrl-C at all. Notify changes only this process's handling, so
+	// the child's dispositions still reset to default at exec.
+	//
+	// SIGTSTP is deliberately not caught: it stops rather than kills, and a
+	// reaper suspending alongside the session it is waiting on is correct.
+	// SIGTERM is not caught either — a kill aimed at this process should work.
+	signals := make(chan os.Signal, 4)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGQUIT)
+	defer signal.Stop(signals)
+	go func() {
+		for range signals { //nolint:revive // draining is the whole behaviour
+		}
+	}()
+
 	if err := cmd.Start(); err != nil {
-		_ = boot.Failed(startFailureCategory(err))
-		return fmt.Errorf("forgectl: start harness: %w", termsafe.Error(err))
+		_ = boot.Failed(startFailureCategory(err, cmd.Dir))
+		// The error is a category, not a description. os/exec's message quotes
+		// the harness path, and this error is printed to the pane's stderr —
+		// which is the terminal manager's, the party the socket exists to keep
+		// the invocation from.
+		return errHarnessUnstartable
 	}
 
 	// The child exists. On Darwin and Linux a successful Start means the fork,
@@ -109,7 +168,13 @@ func (productionTrampoline) Run(ctx context.Context, req bootstrapRequest) error
 		// the outer never agreed to. Reaping continues either way so the child
 		// is not orphaned in the meantime.
 		_ = boot.Close()
-		return reap(cmd)
+		if reapErr := reap(cmd); reapErr != nil {
+			return reapErr
+		}
+		// The harness exited cleanly, but this launch was never acknowledged
+		// and the outer is rolling it back. Returning nil here would report
+		// success for a launch that did not happen.
+		return errUnacknowledged
 	}
 
 	// Done being a protocol peer. The socket closes here rather than at return,
@@ -126,27 +191,24 @@ func (productionTrampoline) Run(ctx context.Context, req bootstrapRequest) error
 // trampoline cannot tell a genuine outer from something that reached the socket
 // first, so it verifies what it holds rather than trusting the sender it
 // authenticated. They are also cheap relative to what follows: an exec.
+// Every refusal here is the bare sentinel. Naming which check failed, or which
+// path failed it, would put the harness path and the target directory on the
+// pane's stderr — the manager's, and the one place this design is keeping the
+// invocation away from. The outer learns the category over the wire; an
+// operator debugging a genuinely broken configuration has the outer's own
+// diagnostics, which run on the trusted side.
 func harnessCommand(inv surface.Invocation) (*osexec.Cmd, error) {
 	info, err := os.Stat(inv.Path)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errHarnessUnusable, termsafe.Error(err))
+		return nil, errHarnessUnusable
 	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%w: %s is not a regular file",
-			errHarnessUnusable, termsafe.QuotePath(inv.Path))
-	}
-	if info.Mode().Perm()&0o111 == 0 {
-		return nil, fmt.Errorf("%w: %s is not executable",
-			errHarnessUnusable, termsafe.QuotePath(inv.Path))
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return nil, errHarnessUnusable
 	}
 
 	dir, err := os.Stat(inv.CWD)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errHarnessUnusable, termsafe.Error(err))
-	}
-	if !dir.IsDir() {
-		return nil, fmt.Errorf("%w: %s is not a directory",
-			errHarnessUnusable, termsafe.QuotePath(inv.CWD))
+	if err != nil || !dir.IsDir() {
+		return nil, errHarnessUnusable
 	}
 
 	// Deliberately not CommandContext. Binding the harness to this context
@@ -197,21 +259,32 @@ func harnessCommand(inv surface.Invocation) (*osexec.Cmd, error) {
 //
 // The real error is not forwarded and this is the reason the field is an enum:
 // os/exec's message quotes the harness path, and on some failures the argv too.
-// The directory cases are tested first, and the order is the whole correctness
-// of this function. A missing Cmd.Dir surfaces as a *os.PathError with Op
-// "chdir" that ALSO satisfies errors.Is(err, os.ErrNotExist), so a generic
-// not-exist test placed first swallows it and reports FailExec — the operator
-// then goes looking at the harness binary when the directory is what is gone.
+// startFailureCategory maps a start failure onto the closed wire category.
 //
-// The Op check alone is not enough either: a Cmd.Dir that exists but is a
-// regular file fails as Op "fork/exec" wrapping ENOTDIR, with ErrNotExist
-// false. Both were confirmed against os/exec rather than assumed.
-func startFailureCategory(err error) surface.ExecFailure {
+// Probed against os/exec rather than reasoned about, because the error alone
+// cannot carry this distinction:
+//
+//	directory absent      Op "chdir"      and satisfies os.ErrNotExist
+//	directory unsearchable Op "fork/exec"  permission denied
+//	directory is a file   Op "fork/exec"  not a directory
+//	harness absent        Op "fork/exec"  and satisfies os.ErrNotExist
+//	harness not executable Op "fork/exec" permission denied
+//
+// Two consequences. An errno test placed first claims the absent-directory case
+// for FailExec and sends an operator to inspect a binary that is fine. And
+// beyond that one case, Go relabels everything the child reports through its
+// error pipe as "fork/exec" — including a chdir that failed there — so three of
+// the five rows above are indistinguishable by error alone.
+//
+// So the directory is consulted directly. That is a second look at something
+// already checked, and it is only a diagnostic: this runs after the launch has
+// failed, and it picks which of two words the outer is told.
+func startFailureCategory(err error, cwd string) surface.ExecFailure {
 	var pathErr *os.PathError
 	if errors.As(err, &pathErr) && pathErr.Op == "chdir" {
 		return surface.FailChdir
 	}
-	if errors.Is(err, syscall.ENOTDIR) {
+	if info, statErr := os.Stat(cwd); statErr != nil || !info.IsDir() {
 		return surface.FailChdir
 	}
 	return surface.FailExec

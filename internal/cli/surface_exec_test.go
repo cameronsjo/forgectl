@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-
-	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
 // validNonce is a well-formed 256-bit rendezvous nonce: 64 lowercase hex
@@ -65,19 +63,34 @@ func TestTrySurfaceExec_AcceptsOnlyTheExactForm(t *testing.T) {
 	if rt.calls != 1 {
 		t.Fatalf("trampoline ran %d times, want exactly 1", rt.calls)
 	}
-	// Compared through SecretArg.Equal rather than a reveal accessor: the
-	// request deliberately exposes no way to read its payload back out, so the
-	// test asserts equality the same way production code would have to.
-	if !rt.got.socket.Equal(exec.Secret(validSocket)) {
-		t.Errorf("socket did not round-trip; want %q", validSocket)
+	// Read through the same package-private accessors the trampoline uses. The
+	// request exposes no way for anything outside this package to read its
+	// payload; within it, the values have to be readable or the trampoline
+	// could not dial.
+	if got := rt.got.socketPath(); got != validSocket {
+		t.Errorf("socket did not round-trip; got %q, want %q", got, validSocket)
 	}
-	if !rt.got.nonce.Equal(exec.Secret(validNonce)) {
-		t.Errorf("nonce did not round-trip; want %q", validNonce)
+	if got := rt.got.nonceValue(); got != validNonce {
+		t.Errorf("nonce did not round-trip; got %q, want %q", got, validNonce)
 	}
-	// And a wrong value must not compare equal, or the two assertions above
-	// would pass over a request that parsed nothing at all.
-	if rt.got.nonce.Equal(exec.Secret(strings.Repeat("a", 64))) {
-		t.Error("nonce compared equal to a value it was never given")
+	// And a wrong value must not match, or the two assertions above would pass
+	// over a request that parsed nothing at all.
+	if rt.got.nonceValue() == strings.Repeat("a", 64) {
+		t.Error("nonce matched a value it was never given")
+	}
+
+	// The request still renders redacted, which is the property the closures
+	// exist for: %v and %+v reach unexported fields by reflection, and this is
+	// the type a future logger would be handed.
+	for _, rendered := range []string{
+		fmt.Sprintf("%v", rt.got),
+		fmt.Sprintf("%+v", rt.got),
+		rt.got.String(),
+		fmt.Sprintf("%v", &rt.got),
+	} {
+		if strings.Contains(rendered, validSocket) || strings.Contains(rendered, validNonce) {
+			t.Errorf("a rendered bootstrap request leaked its payload: %s", rendered)
+		}
 	}
 }
 

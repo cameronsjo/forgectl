@@ -79,25 +79,24 @@ var (
 	errBootstrapProtocol  = errors.New("forgectl: unsupported surface bootstrap protocol version")
 )
 
-// bootstrapRequest is a validated bootstrap invocation. Both fields are opaque
-// by construction: exec.SecretArg renders redacted through every formatting
-// verb, slog, and JSON, and offers no accessor that reveals its payload —
-// comparison goes through Equal. Nothing downstream can print them by accident.
+// bootstrapRequest is a validated bootstrap invocation.
+//
+// Each value is held once, in a closure. That is the containment mechanism, not
+// a stylistic choice, and it is the same one exec.SecretArg uses: fmt's
+// reflection reaches a string in an *unexported* field and prints it under %v
+// and %+v — CanInterface is false there, so a String method is never consulted
+// — while a func value renders as an address at every depth.
+//
+// An earlier shape carried each value twice, once in an exec.SecretArg field
+// and once in a closure. It was dropped: nothing in production read the
+// SecretArg fields, and the redundancy pointed the wrong way. Nested inside an
+// unexported field, reflection walks *through* SecretArg's own methods and
+// prints its payload, while the closure holds. Two copies of a secret, of which
+// the weaker was the documented one.
+//
+// The struct-level String and LogValue below cover the direct-print case, and
+// they are on value receivers so a pointer is covered too.
 type bootstrapRequest struct {
-	socket exec.SecretArg
-	nonce  exec.SecretArg
-
-	// The trampoline has to dial the socket and present the nonce, so these
-	// values must be readable somewhere. exec.SecretArg deliberately offers no
-	// accessor that reveals — that absence *is* its containment — so the
-	// readable copies live here, unexported, in the one package that needs
-	// them, and reach only net.Dial and the handshake.
-	//
-	// They are closures rather than strings for exactly the reason SecretArg's
-	// payload is: fmt's reflection reaches a string in an unexported field and
-	// prints it under %v and %+v, where a func value renders as an address at
-	// every depth. Holding the raw strings as plain fields here would undo the
-	// opacity the fields above provide.
 	revealSocket func() string
 	revealNonce  func() string
 }
@@ -135,10 +134,10 @@ func (bootstrapRequest) String() string { return "surface bootstrap request " + 
 
 func (r bootstrapRequest) LogValue() slog.Value { return slog.StringValue(r.String()) }
 
-// trampolineRuntime is the seam Phase 4 (forgectl#331) fills: connect to the
-// socket, complete the nonce handshake, receive the invocation, and exec the
-// harness. It is an interface so the classifier can be tested without any of
-// that existing.
+// trampolineRuntime connects to the socket, completes the nonce handshake,
+// receives the invocation, and execs the harness. It is an interface so the
+// classifier can be tested without a socket, and so a test can assert that a
+// malformed candidate never reaches the runtime at all.
 type trampolineRuntime interface {
 	Run(ctx context.Context, req bootstrapRequest) error
 }
@@ -233,8 +232,6 @@ func parseBootstrap(argv []string) (bootstrapRequest, error) {
 
 	socket, nonce := argv[5], argv[7]
 	return bootstrapRequest{
-		socket:       exec.Secret(socket),
-		nonce:        exec.Secret(nonce),
 		revealSocket: func() string { return socket },
 		revealNonce:  func() string { return nonce },
 	}, nil

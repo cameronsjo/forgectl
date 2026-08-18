@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"fmt"
 	osexec "os/exec"
 )
 
@@ -14,10 +13,7 @@ import (
 // same reason the peer-credential stub does: a guard that waves everything
 // through on a platform it does not understand is worse than no guard, because
 // it reads as one.
-func checkSocketOwner(path string) error {
-	return fmt.Errorf("%w: socket ownership cannot be established on this platform",
-		errSocketUnsafe)
-}
+func checkSocketOwner(string) error { return errSocketUnsafe }
 
 // signalExitCode has no wait-status detail to read on this platform.
 func signalExitCode(*osexec.ExitError) int { return 1 }

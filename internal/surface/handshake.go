@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"slices"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/launch"
 )
@@ -219,7 +220,18 @@ func Dial(conn net.Conn, n Nonce) (_ *Bootstrap, _ Invocation, err error) {
 // call returns only once the child's directory change and exec have both
 // succeeded, which is what makes this an exact acknowledgement rather than an
 // optimistic one.
+//
+// The handshake deadline is cleared first, and that is not housekeeping. The
+// budget covers the dial, the exchange, the validation, and a fork/exec; if it
+// expires between a successful Start and this write, the outer never commits
+// and rolls back a harness that is already running — a slow machine turning a
+// successful launch into a killed session. By this point the peer is
+// authenticated and the only work left is one small write to it, so the denial
+// reasoning that motivates the deadline no longer applies.
 func (b *Bootstrap) Started() error {
+	if err := b.ex.conn.SetDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("%w: clear handshake deadline: %w", ErrTransport, err)
+	}
 	return b.ex.write(resultFrame{Kind: kindExecStarted, Version: ProtocolVersion})
 }
 

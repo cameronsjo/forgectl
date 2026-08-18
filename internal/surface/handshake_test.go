@@ -237,6 +237,60 @@ func TestAccept_HangsUpOnARefusedPeer(t *testing.T) {
 	}
 }
 
+// TestDial_HangsUpWhenItRefuses is the mirror of the Accept case above.
+//
+// Same change, same PR, and the same failure: a service left waiting on a
+// trampoline that has already decided against it blocks until its own deadline.
+// The two ends got one test between them.
+func TestDial_HangsUpWhenItRefuses(t *testing.T) {
+	listener, addr := socketPair(t)
+
+	nonce, err := surface.NewNonce()
+	if err != nil {
+		t.Fatalf("NewNonce: %v", err)
+	}
+
+	serviceDone := make(chan struct{})
+	go func() {
+		defer close(serviceDone)
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		handoff, acceptErr := surface.Accept(conn, nonce)
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = handoff.Close() }()
+		if handoff.Send(sampleInvocation()) != nil {
+			return
+		}
+		// Blocks reading a result the trampoline will never send. It returns
+		// only because the trampoline hung up.
+		_ = handoff.AwaitStart()
+	}()
+
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "unix", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	// A zero-value nonce is refused before anything is written, which is the
+	// earliest refusal Dial has — so the connection is closed on the path with
+	// the least chance of an incidental close.
+	var unset surface.Nonce
+	if _, _, err := surface.Dial(conn, unset); !errors.Is(err, surface.ErrInvalidNonce) {
+		t.Fatalf("Dial with an unset nonce = %v, want ErrInvalidNonce", err)
+	}
+
+	select {
+	case <-serviceDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the service was left connected after the trampoline refused; it will " +
+			"block until the handshake deadline instead of being hung up on")
+	}
+}
+
 // TestAwaitStart_DoesNotCommitOnAFailedExec keeps the commit signal exact.
 // Receipt of the invocation is not commit, and neither is a connection that
 // stayed open — only a complete exec_started frame is.
