@@ -14,9 +14,11 @@
 // admission policy below is the piece that needs launch, and it is the reason
 // the split had to exist.
 //
-// Phase 4a ships the typed core and this policy. The protocol, trampoline, and
-// Service.Launch state machine are forgectl#331 Phase 4b; the real backends
-// are forgectl#332 Phase 5.
+// The typed core and this policy landed first, then the private run directory
+// and the bootstrap quoting, then the wire protocol, its rendezvous nonce, and
+// the peer-credential check. What remains of forgectl#331 is the trampoline
+// runtime and the Service.Launch state machine; the real backends are
+// forgectl#332.
 package surface
 
 import (

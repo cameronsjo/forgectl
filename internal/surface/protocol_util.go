@@ -1,17 +1,12 @@
 package surface
 
 import (
-	"bytes"
-	"io"
+	"fmt"
 	"path/filepath"
 	"strings"
-)
 
-// newByteReader wraps a payload for the JSON decoder. It exists so decodeFrame
-// reads a fixed slice rather than the connection: the length prefix has already
-// bounded the read, and handing the decoder the socket would put the bound back
-// in the decoder's hands.
-func newByteReader(b []byte) io.Reader { return bytes.NewReader(b) }
+	"github.com/cameronsjo/forgectl/internal/termsafe"
+)
 
 // lowerHexString reports whether s is non-empty and made only of 0-9a-f.
 //
@@ -37,7 +32,40 @@ func lowerHexString(s string) bool {
 // checks rather than a mix of helpers and stdlib calls.
 func isAbsPath(p string) bool { return filepath.IsAbs(p) }
 
-// hasEqualsSign reports whether an environment entry has a name/value
-// separator. An entry without one is not a variable, and exec would carry it
-// into the child regardless.
-func hasEqualsSign(entry string) bool { return strings.Contains(entry, "=") }
+// isEnvAssignment reports whether an environment entry is NAME=VALUE with a
+// non-empty name.
+//
+// The separator alone is not the test: "=VALUE" carries one and names nothing,
+// and exec passes it to the child as a variable with an empty name.
+func isEnvAssignment(entry string) bool { return strings.Index(entry, "=") > 0 }
+
+// containsNUL reports whether s carries a NUL byte.
+//
+// A NUL cannot survive into an argv or an environ — exec refuses it — but its
+// refusal quotes the offending value, and bounded category-only errors are what
+// keep the invocation out of a log.
+func containsNUL(s string) bool { return strings.ContainsRune(s, 0) }
+
+// refuseUnsafeRunes rejects a field carrying a rune that would be interpreted
+// by a terminal rather than displayed.
+//
+// The refusal names the field and the byte offset, never the rune or the value
+// — reporting what it found would print the escape sequence into the very log
+// this is protecting.
+func refuseUnsafeRunes(field, s string) error {
+	for i, r := range s {
+		if termsafe.IsUnsafeTerminalRune(r) {
+			return fmt.Errorf("%w: %s carries a control character at byte %d", ErrProtocol, field, i)
+		}
+	}
+	return nil
+}
+
+// truncate bounds an error string the peer had a hand in composing, marking the
+// cut so a reader is never left believing they have the whole message.
+func truncate(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	return s[:limit] + "… (truncated)"
+}

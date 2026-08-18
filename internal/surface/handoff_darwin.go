@@ -16,8 +16,9 @@ import (
 // GetsockoptXucred. Like Linux's, the value is captured by the kernel rather
 // than sent by the peer, which is the property that makes it worth checking.
 //
-// Cr_uid is the *effective* uid at connect time. That is the right field: it is
-// what the kernel would use for a permission decision, and comparing against
+// The xucred's uid field — cr_uid in the C struct, Uid in the Go binding — is
+// the *effective* uid at connect time. That is the right field: it is what the
+// kernel would use for a permission decision, and comparing against
 // os.Geteuid() keeps both sides of the comparison in the same terms.
 func peerUID(conn *net.UnixConn) (int, error) {
 	raw, err := conn.SyscallConn()

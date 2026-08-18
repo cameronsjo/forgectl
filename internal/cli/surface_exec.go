@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -37,17 +38,13 @@ const (
 	surfaceVerb     = "surface"
 	surfaceExecVerb = "_exec"
 
-	// bootstrapProtocol is the only wire version this build speaks. The outer
-	// process and the trampoline are always the same binary in the intended
-	// flow, so a mismatch means someone hand-built the invocation, or an
-	// upgrade replaced the binary between a manager being asked to type the
-	// command and it running — both cases must refuse rather than negotiate.
-	bootstrapProtocol = "1"
-
-	// nonceHexLen is the encoded length of a 256-bit rendezvous nonce: 64
-	// lowercase hex characters. Exact, not a minimum — a length check that
-	// accepted longer values would accept a padded or concatenated one.
-	nonceHexLen = 64
+	// nonceHexLen is the encoded length of a 256-bit rendezvous nonce.
+	//
+	// Taken from the package that produces these nonces, for the same reason
+	// maxSocketPathLen is taken from the package that produces socket paths:
+	// two independent literals let the producer emit a bootstrap this
+	// classifier refuses.
+	nonceHexLen = surface.NonceHexLen
 
 	// maxSocketPathLen bounds the socket path well under the platform's
 	// sun_path limit (104 on Darwin, 108 on Linux), so an over-long path is
@@ -64,6 +61,18 @@ const (
 // value. The classifier handles a socket path and a rendezvous nonce; an error
 // that quoted the token it rejected would print the nonce to stderr, which is
 // the leak this whole early seam exists to prevent.
+// bootstrapProtocol is the only wire version this build speaks, rendered from
+// the protocol's own constant rather than written again here. The outer process
+// and the trampoline are always the same binary in the intended flow, so a
+// mismatch means someone hand-built the invocation, or an upgrade replaced the
+// binary between a manager being asked to type the command and it running —
+// both cases must refuse rather than negotiate.
+//
+// It is a var only because strconv.Itoa is not a constant expression; deriving
+// it is what keeps the classifier and the protocol from drifting apart on a
+// version bump.
+var bootstrapProtocol = strconv.Itoa(surface.ProtocolVersion)
+
 var (
 	errBootstrapMalformed = errors.New("forgectl: malformed surface bootstrap invocation")
 	errBootstrapProtocol  = errors.New("forgectl: unsupported surface bootstrap protocol version")

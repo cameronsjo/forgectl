@@ -100,8 +100,56 @@ func TestVerifyPeer_RefusesWhatItCannotIdentify(t *testing.T) {
 	}
 
 	// A nil connection must also refuse rather than panic: it is the shape a
-	// failed accept produces on a path that forgot to check the error.
+	// failed accept produces on a path that forgot to check the error. Both
+	// spellings are covered — an untyped nil interface, and a net.Conn holding
+	// a *typed* nil *net.UnixConn, which passes the type assertion and then
+	// panics on the first dereference.
 	if err := surface.VerifyPeer(nil); !errors.Is(err, surface.ErrPeerIdentity) {
 		t.Errorf("VerifyPeer(nil) = %v, want ErrPeerIdentity", err)
+	}
+	var typedNil *net.UnixConn
+	if err := surface.VerifyPeer(typedNil); !errors.Is(err, surface.ErrPeerIdentity) {
+		t.Errorf("VerifyPeer(typed-nil *net.UnixConn) = %v, want ErrPeerIdentity", err)
+	}
+}
+
+// TestVerifyPeer_FailsClosedWhenTheCredentialCannotBeRead reaches the branch
+// the test above cannot.
+//
+// That one refuses at the type assertion, so peerUID is never called and the
+// unreadable-credential path — the one VerifyPeer's doc comment promises fails
+// closed — has no coverage at all. Mutation-tested: changing that path to
+// return nil makes VerifyPeer fail *open* on any connection whose credential
+// cannot be read, and the entire package suite stays green without this test.
+//
+// A unixgram socket is the fixture: it is a real *net.UnixConn, so it passes
+// the assertion, but it is connectionless, so there is no peer credential for
+// the kernel to have captured.
+func TestVerifyPeer_FailsClosedWhenTheCredentialCannotBeRead(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skipf("peer credentials are unavailable on %s", runtime.GOOS)
+	}
+
+	dir, err := os.MkdirTemp("", "hg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	var lc net.ListenConfig
+	packet, err := lc.ListenPacket(t.Context(), "unixgram", filepath.Join(dir, "g"))
+	if err != nil {
+		t.Skipf("cannot create a unixgram socket: %v", err)
+	}
+	t.Cleanup(func() { _ = packet.Close() })
+
+	unixConn, ok := packet.(*net.UnixConn)
+	if !ok {
+		t.Fatalf("a unixgram socket is %T, not *net.UnixConn; the fixture no longer "+
+			"reaches peerUID and this test proves nothing", packet)
+	}
+
+	if err := surface.VerifyPeer(unixConn); !errors.Is(err, surface.ErrPeerIdentity) {
+		t.Errorf("VerifyPeer on a socket with no readable credential = %v, want ErrPeerIdentity", err)
 	}
 }

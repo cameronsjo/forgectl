@@ -8,8 +8,26 @@ import (
 	"fmt"
 )
 
-// nonceBytes is the rendezvous nonce's width: 256 bits.
-const nonceBytes = 32
+const (
+	// nonceBytes is the rendezvous nonce's width: 256 bits.
+	nonceBytes = 32
+
+	// NonceHexLen is that width encoded: 64 lowercase hex characters. Exact,
+	// not a minimum — a length check accepting longer values would accept a
+	// padded or concatenated nonce.
+	//
+	// Derived rather than written, and exported for the same reason
+	// MaxSocketPathLen is: the CLI's bootstrap classifier checks this length on
+	// a value *this* package produces. Two independent literals would let the
+	// producer emit a bootstrap the classifier refuses, and a hand-written 64
+	// beside a changed nonceBytes would leave the parser accepting the old
+	// width while the generator emitted the new one.
+	NonceHexLen = nonceBytes * 2
+
+	// nonceHexLen is the in-package spelling, kept so the wire checks read in
+	// lower case beside the other bounds.
+	nonceHexLen = NonceHexLen
+)
 
 // ErrInvalidNonce reports a malformed nonce. A *mismatched* nonce is
 // deliberately not distinguished from a malformed one at the call site — see
