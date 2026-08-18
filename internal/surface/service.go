@@ -246,6 +246,27 @@ func (s *Service) Launch(ctx context.Context, req LaunchRequest) (Result, error)
 	}
 	defer func() { _ = handoff.Close() }()
 
+	// Cancellation has to reach the two calls below, and neither takes a
+	// context: they are bounded only by the handshake deadline, so a caller
+	// who gave up would otherwise wait out that whole budget before the
+	// surface is rolled back.
+	//
+	// Closing the handoff is what unblocks them, and it is safe on both sides
+	// of the commit — a handoff is a socket, not the surface. Closing it after
+	// commit costs a connection the trampoline has already finished with;
+	// closing the *surface* after commit is the thing that must never happen,
+	// and that is prevented by there being no cleanup path past this block at
+	// all rather than by this watcher's timing.
+	settled := make(chan struct{})
+	defer close(settled)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = handoff.Close()
+		case <-settled:
+		}
+	}()
+
 	if err := handoff.Send(req.Invocation); err != nil {
 		return Result{}, s.rollback(ctx, PhaseHandshake, result, err)
 	}
@@ -335,6 +356,19 @@ func (s *Service) handshake(ctx context.Context, listener net.Listener, nonce No
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
+		return nil, err
+	}
+
+	// Stop listening the moment there is a peer, rather than at return.
+	//
+	// Only one connection is ever served either way — there is no second
+	// Accept — so a later dial would sit unanswered in the backlog and learn
+	// nothing. But "unanswered" is a weaker statement than "refused", and it
+	// only holds as long as nobody adds a second Accept later. Closing here
+	// makes the socket stop existing as an entry point at the first peer,
+	// which is when it has finished its job.
+	if err := listener.Close(); err != nil {
+		_ = conn.Close()
 		return nil, err
 	}
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
@@ -204,6 +205,130 @@ func TestService_RefusesASecondConnection(t *testing.T) {
 
 	if _, err := service.Launch(context.Background(), internalRequest(t)); err != nil {
 		t.Fatalf("Launch: %v", err)
+	}
+}
+
+// TestService_CancellationUnblocksAnAuthenticatedStall is the cancellation
+// property past the point where a context stops being consulted.
+//
+// Handoff.Send and AwaitStart take no context — they are bounded by the
+// handshake deadline alone — so a peer that authenticates and then goes quiet
+// would hold the launch for that whole budget after the caller has given up.
+// Closing the handoff is what unblocks them.
+func TestService_CancellationUnblocksAnAuthenticatedStall(t *testing.T) {
+	adapter, service := internalFixture(t)
+	seen := observe(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	adapter.StartFunc = func(_ context.Context, spec backend.StartSpec) backend.StartResult {
+		bootstrap := <-seen
+		//nolint:gosec // G118: this goroutine is the peer, not the request; it must outlive the cancelled ctx to keep the stall alive
+		go func() {
+			// Authenticate, then stall: never read the invocation, never report.
+			conn, err := (&net.Dialer{}).DialContext(context.Background(), "unix", bootstrap.socket)
+			if err != nil {
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			ex, err := newExchange(conn, HandshakeTimeout)
+			if err != nil {
+				return
+			}
+			_ = ex.write(helloFrame{
+				Kind: kindHello, Version: ProtocolVersion, Nonce: bootstrap.nonce.String(),
+			})
+			// And nothing further. The caller cancels below.
+			<-ctx.Done()
+		}()
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			cancel()
+		}()
+		return backend.NewRefKnown(internalRef(t, spec.Tag()))
+	}
+	adapter.CloseFunc = func(context.Context, backend.Ref) backend.CloseResult {
+		return backend.NewCloseClosed()
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.Launch(ctx, internalRequest(t))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a cancelled launch reported success")
+		}
+	case <-time.After(HandshakeTimeout / 2):
+		t.Fatal("cancellation did not unblock the authenticated exchange; the launch " +
+			"waited on the handshake deadline instead")
+	}
+
+	// The surface was still rolled back — cancellation is not a reason to
+	// leave a container behind.
+	if closes := adapter.Closes(); len(closes) != 1 {
+		t.Errorf("a cancelled launch closed the surface %d time(s), want 1", len(closes))
+	}
+}
+
+// TestService_StopsListeningAtTheFirstPeer pins when the socket stops being an
+// entry point.
+//
+// Only one connection is ever served, so a later dial would learn nothing
+// either way — but "sits unanswered in the backlog" is a weaker guarantee than
+// "refused", and it depends on nobody adding a second Accept later. This
+// asserts the stronger one, during the commit window rather than after it.
+func TestService_StopsListeningAtTheFirstPeer(t *testing.T) {
+	adapter, service := internalFixture(t)
+	seen := observe(t)
+
+	secondDial := make(chan error, 1)
+
+	adapter.StartFunc = func(_ context.Context, spec backend.StartSpec) backend.StartResult {
+		bootstrap := <-seen
+		//nolint:gosec // G118: this goroutine plays the peer, not the request — it deliberately does not share the launch's context
+		go func() {
+			conn, err := (&net.Dialer{}).DialContext(context.Background(), "unix", bootstrap.socket)
+			if err != nil {
+				secondDial <- err
+				return
+			}
+			boot, _, err := Dial(conn, bootstrap.nonce)
+			if err != nil {
+				secondDial <- err
+				return
+			}
+			defer func() { _ = boot.Close() }()
+
+			// A second peer, attempted while the first still holds the
+			// exchange — before Started, so squarely inside the window.
+			second, dialErr := (&net.Dialer{}).DialContext(context.Background(), "unix", bootstrap.socket)
+			if dialErr == nil {
+				_ = second.Close()
+			}
+			secondDial <- dialErr
+
+			_ = boot.Started()
+		}()
+		return backend.NewRefKnown(internalRef(t, spec.Tag()))
+	}
+
+	if _, err := service.Launch(context.Background(), internalRequest(t)); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	select {
+	case err := <-secondDial:
+		if err == nil {
+			t.Error("a second connection was accepted while the first exchange was still " +
+				"in flight; the socket outlives its one peer")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the trampoline goroutine never reported")
 	}
 }
 
