@@ -154,11 +154,10 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 
 	service := surface.NewService(adapter, surface.Policy{AllowPATHBinary: opts.AllowPATH}, "")
 
-	result, err := service.Launch(cmd.Context(), surface.LaunchRequest{
-		Name:       displayNameFor(opts.DisplayName, target),
-		Invocation: built.Invocation,
-		Self:       self,
-	})
+	req := surface.NewLaunchRequest(displayNameFor(opts.DisplayName, target), built.Invocation)
+	req.Self = self
+
+	result, err := service.Launch(cmd.Context(), req)
 	if err != nil {
 		return err
 	}

@@ -41,17 +41,15 @@ func internalRequest(t *testing.T) LaunchRequest {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return LaunchRequest{
-		Name: "thing",
-		Invocation: launch.Invocation{
-			Harness: "claude",
-			Binary:  launch.ResolvedBinary{Path: "/bin/sh", Source: launch.BinaryClaudeConfig},
-			Args:    []string{"--model", "opus"},
-			Env:     []string{"PATH=/usr/bin"},
-			CWD:     t.TempDir(),
-		},
-		Self: self,
-	}
+	req := NewLaunchRequest("thing", launch.Invocation{
+		Harness: "claude",
+		Binary:  launch.ResolvedBinary{Path: "/bin/sh", Source: launch.BinaryClaudeConfig},
+		Args:    []string{"--model", "opus"},
+		Env:     []string{"PATH=/usr/bin"},
+		CWD:     t.TempDir(),
+	})
+	req.Self = self
+	return req
 }
 
 func internalRef(t *testing.T, tag backend.RecoveryTag) backend.Ref {
@@ -101,10 +99,14 @@ func observe(t *testing.T) <-chan struct {
 // TestService_CommitsAndDoesNotCloseTheSurface is the success path, and the
 // assertion that matters is the negative one: nothing was closed.
 //
-// It also proves the socket is live before the adapter is called — the
+// It also proves the socket is live by the time the adapter is called — the
 // trampoline dials from inside StartFunc, which is where a real manager would
-// type the command. If the service bound the socket after building the
-// bootstrap, this dial would fail.
+// type the command.
+//
+// That is weaker than it may read: binding anywhere before Start satisfies it,
+// including immediately before. The stronger ordering — bound before the
+// bootstrap carrying the path exists — is
+// TestService_BindsTheSocketBeforeBuildingTheBootstrap.
 func TestService_CommitsAndDoesNotCloseTheSurface(t *testing.T) {
 	adapter, service := internalFixture(t)
 	seen := observe(t)
@@ -176,35 +178,106 @@ func TestService_DoesNotCommitWhenTheTrampolineReportsAFailedExec(t *testing.T) 
 	}
 }
 
-// TestService_RefusesASecondConnection is the nonce's single-use property.
+// TestService_BindsTheSocketBeforeBuildingTheBootstrap is the squatter-window
+// property, asserted directly.
 //
-// The service accepts exactly one connection, so a second peer presenting the
-// same nonce — a replay, or a stale trampoline from an earlier launch — finds
-// nothing listening. An accept loop would make the nonce re-presentable.
-func TestService_RefusesASecondConnection(t *testing.T) {
+// The package doc says the socket is bound before the bootstrap that carries
+// its path exists, because a path that is chosen but not yet occupied can be
+// taken by anyone who reads it. observeBootstrap fires *after* the bootstrap is
+// built, so a second Listen on the same path at that moment must already fail —
+// and it fails for the right reason only if the service got there first.
+//
+// The obvious version of this test — dialling from inside StartFunc — proves
+// something strictly weaker: Start runs after Listen in either ordering, so
+// moving the bind down to just before Start leaves that test green.
+func TestService_BindsTheSocketBeforeBuildingTheBootstrap(t *testing.T) {
+	adapter, service := internalFixture(t)
+
+	squatted := make(chan error, 1)
+	original := observeBootstrap
+	t.Cleanup(func() { observeBootstrap = original })
+	observeBootstrap = func(socket string, _ Nonce) {
+		var lc net.ListenConfig
+		listener, err := lc.Listen(context.Background(), "unix", socket)
+		if err == nil {
+			_ = listener.Close()
+		}
+		squatted <- err
+	}
+
+	adapter.StartFunc = func(_ context.Context, spec backend.StartSpec) backend.StartResult {
+		return backend.NewNotMutated(
+			backend.NewStartCause(backend.FailureUnavailable, errors.New("stop here")))
+	}
+
+	_, _ = service.Launch(context.Background(), internalRequest(t))
+
+	select {
+	case err := <-squatted:
+		if err == nil {
+			t.Error("the socket path was still free at the moment the bootstrap carrying " +
+				"it was built; a same-uid process reading that command could bind there " +
+				"first and become the invocation server")
+		}
+	default:
+		t.Fatal("the bootstrap was never built, so nothing was observed")
+	}
+}
+
+// TestService_AWrongNonceFailsTheLaunchRatherThanRetrying is the single-accept
+// property, and it is the one the old test did not actually hold.
+//
+// Turning the single Accept into a retry loop survives a test that dials after
+// the launch has returned — by then the listener is closed no matter what the
+// accept discipline is. The property is only observable while the launch is
+// still running: a peer that presents the wrong nonce must end the launch, not
+// be given another turn for the rest of the accept window.
+func TestService_AWrongNonceFailsTheLaunchRatherThanRetrying(t *testing.T) {
 	adapter, service := internalFixture(t)
 	seen := observe(t)
 
+	original := acceptTimeout
+	t.Cleanup(func() { acceptTimeout = original })
+	// Short, so a retry loop would be caught by the elapsed-time assertion
+	// rather than by waiting a minute for it.
+	acceptTimeout = 3 * time.Second
+
+	var created backend.Ref
 	adapter.StartFunc = func(_ context.Context, spec backend.StartSpec) backend.StartResult {
+		created = internalRef(t, spec.Tag())
 		bootstrap := <-seen
+		//nolint:gosec // G118: this goroutine plays the peer, not the request
 		go func() {
-			_ = runTrampoline(t, bootstrap.socket, bootstrap.nonce,
+			wrong, err := NewNonce()
+			if err != nil {
+				return
+			}
+			// A stale trampoline from an earlier launch: speaks the protocol,
+			// has the wrong nonce.
+			_ = runTrampoline(t, bootstrap.socket, wrong,
 				func(b *Bootstrap) error { return b.Started() })
 		}()
-		// Hold the socket path so the assertion below runs after the launch.
-		t.Cleanup(func() {
-			conn, err := (&net.Dialer{}).DialContext(context.Background(), "unix", bootstrap.socket)
-			if err == nil {
-				_ = conn.Close()
-				t.Error("a second connection was accepted after the launch committed; " +
-					"the nonce is re-presentable")
-			}
-		})
-		return backend.NewRefKnown(internalRef(t, spec.Tag()))
+		return backend.NewRefKnown(created)
+	}
+	adapter.CloseFunc = func(context.Context, backend.Ref) backend.CloseResult {
+		return backend.NewCloseClosed()
 	}
 
-	if _, err := service.Launch(context.Background(), internalRequest(t)); err != nil {
-		t.Fatalf("Launch: %v", err)
+	start := time.Now()
+	_, err := service.Launch(context.Background(), internalRequest(t))
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("a peer with the wrong nonce committed the launch")
+	}
+	// A retry loop would keep accepting until the window closed. Failing fast
+	// is what proves the nonce got exactly one presentation.
+	if elapsed >= acceptTimeout {
+		t.Errorf("the launch ran %v against a %v accept window; a refused peer was "+
+			"retried rather than ending the launch", elapsed, acceptTimeout)
+	}
+	if closes := adapter.Closes(); len(closes) != 1 || closes[0] != created {
+		t.Errorf("the surface was not rolled back after a refused peer: %d close(s)", len(closes))
 	}
 }
 
@@ -329,6 +402,55 @@ func TestService_StopsListeningAtTheFirstPeer(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the trampoline goroutine never reported")
+	}
+}
+
+// TestService_TheAcceptDeadlineBoundsAManagerThatNeverTypes covers the timeout
+// on its own terms.
+//
+// The other failure test uses a cancelled context, which reaches the same end
+// state through a different mechanism — so deleting the deadline entirely left
+// the suite green and sixty seconds slower. This runs with an uncancellable
+// context, so only the deadline can end it.
+func TestService_TheAcceptDeadlineBoundsAManagerThatNeverTypes(t *testing.T) {
+	adapter, service := internalFixture(t)
+
+	original := acceptTimeout
+	t.Cleanup(func() { acceptTimeout = original })
+	acceptTimeout = 100 * time.Millisecond
+
+	var created backend.Ref
+	adapter.StartFunc = func(_ context.Context, spec backend.StartSpec) backend.StartResult {
+		created = internalRef(t, spec.Tag())
+		// The manager was asked and never typed the command.
+		return backend.NewRefKnown(created)
+	}
+	adapter.CloseFunc = func(context.Context, backend.Ref) backend.CloseResult {
+		return backend.NewCloseClosed()
+	}
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, err := service.Launch(context.Background(), internalRequest(t))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a launch nothing connected to reported success")
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("the launch took %v against a %v accept budget", elapsed, acceptTimeout)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the accept deadline never fired; a manager that never types would hang " +
+			"the command indefinitely")
+	}
+
+	if closes := adapter.Closes(); len(closes) != 1 || closes[0] != created {
+		t.Errorf("the surface was not rolled back after the accept deadline: %d close(s)", len(closes))
 	}
 }
 
