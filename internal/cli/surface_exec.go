@@ -30,9 +30,10 @@ import (
 // amount of work it does not need and write a socket path and a nonce into the
 // log on the way. Claiming the invocation here means none of that is reachable.
 //
-// Phase 3 ships the classifier alone. The runtime behind it is a stub that
-// refuses with a typed error, so a hand-crafted `surface _exec` is *claimed and
-// refused* rather than either running or falling through.
+// The classifier's contract is that it claims every bootstrap candidate,
+// well-formed or not: a malformed one is claimed and *refused* here rather than
+// falling through to a startup path that would log its socket and nonce. The
+// runtime it hands a valid one to lives in surface_trampoline.go.
 
 const (
 	surfaceVerb     = "surface"
@@ -57,10 +58,6 @@ const (
 	maxSocketPathLen = surface.MaxSocketPathLen
 )
 
-// Bootstrap refusals are deliberately category-only and carry no offending
-// value. The classifier handles a socket path and a rendezvous nonce; an error
-// that quoted the token it rejected would print the nonce to stderr, which is
-// the leak this whole early seam exists to prevent.
 // bootstrapProtocol is the only wire version this build speaks, rendered from
 // the protocol's own constant rather than written again here. The outer process
 // and the trampoline are always the same binary in the intended flow, so a
@@ -73,14 +70,13 @@ const (
 // version bump.
 var bootstrapProtocol = strconv.Itoa(surface.ProtocolVersion)
 
+// Bootstrap refusals are deliberately category-only and carry no offending
+// value. The classifier handles a socket path and a rendezvous nonce; an error
+// that quoted the token it rejected would print the nonce to stderr, which is
+// the leak this whole early seam exists to prevent.
 var (
 	errBootstrapMalformed = errors.New("forgectl: malformed surface bootstrap invocation")
 	errBootstrapProtocol  = errors.New("forgectl: unsupported surface bootstrap protocol version")
-
-	// errTrampolineNotImplemented is Phase 3's terminal state. It is a typed
-	// error rather than a nil return so a valid bootstrap fails inspectably
-	// instead of looking like a trampoline that ran and did nothing.
-	errTrampolineNotImplemented = errors.New("forgectl: surface bootstrap runtime is not implemented in this build")
 )
 
 // bootstrapRequest is a validated bootstrap invocation. Both fields are opaque
@@ -90,6 +86,20 @@ var (
 type bootstrapRequest struct {
 	socket exec.SecretArg
 	nonce  exec.SecretArg
+
+	// The trampoline has to dial the socket and present the nonce, so these
+	// values must be readable somewhere. exec.SecretArg deliberately offers no
+	// accessor that reveals — that absence *is* its containment — so the
+	// readable copies live here, unexported, in the one package that needs
+	// them, and reach only net.Dial and the handshake.
+	//
+	// They are closures rather than strings for exactly the reason SecretArg's
+	// payload is: fmt's reflection reaches a string in an unexported field and
+	// prints it under %v and %+v, where a func value renders as an address at
+	// every depth. Holding the raw strings as plain fields here would undo the
+	// opacity the fields above provide.
+	revealSocket func() string
+	revealNonce  func() string
 }
 
 // String and LogValue redact at the STRUCT level, not only the field level.
@@ -109,16 +119,6 @@ func (r bootstrapRequest) LogValue() slog.Value { return slog.StringValue(r.Stri
 type trampolineRuntime interface {
 	Run(ctx context.Context, req bootstrapRequest) error
 }
-
-// notImplementedTrampoline is Phase 3's stub.
-type notImplementedTrampoline struct{}
-
-func (notImplementedTrampoline) Run(context.Context, bootstrapRequest) error {
-	return errTrampolineNotImplemented
-}
-
-// productionTrampolineRuntime returns the runtime Execute hands the classifier.
-func productionTrampolineRuntime() trampolineRuntime { return notImplementedTrampoline{} }
 
 // trySurfaceExec claims and handles a surface bootstrap invocation. It reports
 // handled=true for every bootstrap candidate — including malformed ones, which
@@ -208,9 +208,12 @@ func parseBootstrap(argv []string) (bootstrapRequest, error) {
 		return bootstrapRequest{}, errBootstrapMalformed
 	}
 
+	socket, nonce := argv[5], argv[7]
 	return bootstrapRequest{
-		socket: exec.Secret(argv[5]),
-		nonce:  exec.Secret(argv[7]),
+		socket:       exec.Secret(socket),
+		nonce:        exec.Secret(nonce),
+		revealSocket: func() string { return socket },
+		revealNonce:  func() string { return nonce },
 	}, nil
 }
 

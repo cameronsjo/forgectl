@@ -240,16 +240,18 @@ func secretName(s string) string {
 	return "socket path"
 }
 
-// TestProductionTrampolineRuntime_RefusesTypedUntilPhase4 pins the stub's
-// contract. Phase 3 ships the classifier alone; a valid bootstrap must fail
-// with an inspectable typed error rather than a nil success that would read as
-// "the trampoline ran".
-func TestProductionTrampolineRuntime_RefusesTypedUntilPhase4(t *testing.T) {
+// TestProductionTrampolineRuntime_ReceivesAValidBootstrap pins the handoff.
+//
+// The fixture names a socket that does not exist, so the runtime refuses at its
+// first check — and that refusal is the evidence, because it can only come from
+// the trampoline. A nil return here would mean a valid bootstrap was claimed and
+// then quietly did nothing.
+func TestProductionTrampolineRuntime_ReceivesAValidBootstrap(t *testing.T) {
 	handled, err := trySurfaceExec(context.Background(), validBootstrapArgs(), productionTrampolineRuntime())
 	if !handled {
 		t.Fatal("a well-formed bootstrap was not claimed")
 	}
-	if !errors.Is(err, errTrampolineNotImplemented) {
-		t.Fatalf("err = %v, want errTrampolineNotImplemented", err)
+	if !errors.Is(err, errSocketUnsafe) {
+		t.Fatalf("err = %v, want errSocketUnsafe", err)
 	}
 }

@@ -74,12 +74,12 @@ func TestExecute_ValidBootstrapTouchesNoStartupDependency(t *testing.T) {
 
 	err := Execute(context.Background())
 
-	// Phase 3 ships the classifier with a stub runtime, so the expected outcome
-	// is the typed not-implemented refusal — reached without any sentinel
-	// firing. The sentinels are the assertion; this only confirms the
-	// invocation went where it was supposed to.
-	if !errors.Is(err, errTrampolineNotImplemented) {
-		t.Fatalf("Execute = %v, want errTrampolineNotImplemented", err)
+	// The fixture's socket path does not exist, so the trampoline refuses at its
+	// first check. That specific error is what proves the invocation reached the
+	// runtime rather than stopping in the parser — the sentinels are the real
+	// assertion, and this confirms the handoff happened at all.
+	if !errors.Is(err, errSocketUnsafe) {
+		t.Fatalf("Execute = %v, want errSocketUnsafe", err)
 	}
 }
 

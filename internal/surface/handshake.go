@@ -78,15 +78,28 @@ type Handoff struct {
 // protect, and every check before it is a precondition of sending it.
 //
 // It reads under the small unauthenticated budget, not the invocation's.
-func Accept(conn net.Conn, expected Nonce) (*Handoff, error) {
-	if err := VerifyPeer(conn); err != nil {
+//
+// On any refusal it closes conn before returning. A rejected peer that is left
+// connected sits there until its own deadline expires — thirty seconds of a
+// launch already decided against — and every caller would otherwise have to
+// remember a close on a path where it holds no handle to close. Refusing and
+// hanging up is one act, so it is one call.
+func Accept(conn net.Conn, expected Nonce) (_ *Handoff, err error) {
+	defer func() {
+		if err != nil && conn != nil {
+			_ = conn.Close()
+		}
+	}()
+
+	if err = VerifyPeer(conn); err != nil {
 		return nil, err
 	}
 	if !expected.Valid() {
 		// A service that generated no nonce must not authenticate anyone. This
 		// is the same fail-open Nonce.Equal guards against, caught one layer up
 		// where the mistake is likelier: a zero-value field on a struct.
-		return nil, fmt.Errorf("%w: no nonce was generated for this launch", ErrNonceMismatch)
+		err = fmt.Errorf("%w: no nonce was generated for this launch", ErrNonceMismatch)
+		return nil, err
 	}
 
 	ex, err := newExchange(conn, HandshakeTimeout)
@@ -99,13 +112,14 @@ func Accept(conn net.Conn, expected Nonce) (*Handoff, error) {
 		return nil, err
 	}
 	var hello helloFrame
-	if err := decodeFrame(payload, &hello); err != nil {
+	if err = decodeFrame(payload, &hello); err != nil {
 		return nil, err
 	}
 
-	presented, err := ParseNonce(hello.Nonce)
-	if err != nil || !expected.Equal(presented) {
-		return nil, ErrNonceMismatch
+	presented, parseErr := ParseNonce(hello.Nonce)
+	if parseErr != nil || !expected.Equal(presented) {
+		err = ErrNonceMismatch
+		return nil, err
 	}
 	return &Handoff{ex: ex}, nil
 }
@@ -151,12 +165,20 @@ type Bootstrap struct {
 // is deliberate: the trampoline cannot tell a genuine outer process from
 // something that reached the socket first, so it checks what it holds rather
 // than trusting the sender it authenticated.
-func Dial(conn net.Conn, n Nonce) (*Bootstrap, Invocation, error) {
-	if err := VerifyPeer(conn); err != nil {
+// Like Accept, it closes conn on any refusal — same reasoning, other end.
+func Dial(conn net.Conn, n Nonce) (_ *Bootstrap, _ Invocation, err error) {
+	defer func() {
+		if err != nil && conn != nil {
+			_ = conn.Close()
+		}
+	}()
+
+	if err = VerifyPeer(conn); err != nil {
 		return nil, Invocation{}, err
 	}
 	if !n.Valid() {
-		return nil, Invocation{}, ErrInvalidNonce
+		err = ErrInvalidNonce
+		return nil, Invocation{}, err
 	}
 
 	ex, err := newExchange(conn, HandshakeTimeout)
@@ -164,7 +186,7 @@ func Dial(conn net.Conn, n Nonce) (*Bootstrap, Invocation, error) {
 		return nil, Invocation{}, err
 	}
 
-	if err := ex.write(helloFrame{
+	if err = ex.write(helloFrame{
 		Kind:    kindHello,
 		Version: ProtocolVersion,
 		Nonce:   n.String(),
@@ -179,7 +201,7 @@ func Dial(conn net.Conn, n Nonce) (*Bootstrap, Invocation, error) {
 		return nil, Invocation{}, err
 	}
 	var frame invocationFrame
-	if err := decodeFrame(payload, &frame); err != nil {
+	if err = decodeFrame(payload, &frame); err != nil {
 		return nil, Invocation{}, err
 	}
 
