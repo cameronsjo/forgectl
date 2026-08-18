@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-
-	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
 // validNonce is a well-formed 256-bit rendezvous nonce: 64 lowercase hex
@@ -65,19 +63,34 @@ func TestTrySurfaceExec_AcceptsOnlyTheExactForm(t *testing.T) {
 	if rt.calls != 1 {
 		t.Fatalf("trampoline ran %d times, want exactly 1", rt.calls)
 	}
-	// Compared through SecretArg.Equal rather than a reveal accessor: the
-	// request deliberately exposes no way to read its payload back out, so the
-	// test asserts equality the same way production code would have to.
-	if !rt.got.socket.Equal(exec.Secret(validSocket)) {
-		t.Errorf("socket did not round-trip; want %q", validSocket)
+	// Read through the same package-private accessors the trampoline uses. The
+	// request exposes no way for anything outside this package to read its
+	// payload; within it, the values have to be readable or the trampoline
+	// could not dial.
+	if got := rt.got.socketPath(); got != validSocket {
+		t.Errorf("socket did not round-trip; got %q, want %q", got, validSocket)
 	}
-	if !rt.got.nonce.Equal(exec.Secret(validNonce)) {
-		t.Errorf("nonce did not round-trip; want %q", validNonce)
+	if got := rt.got.nonceValue(); got != validNonce {
+		t.Errorf("nonce did not round-trip; got %q, want %q", got, validNonce)
 	}
-	// And a wrong value must not compare equal, or the two assertions above
-	// would pass over a request that parsed nothing at all.
-	if rt.got.nonce.Equal(exec.Secret(strings.Repeat("a", 64))) {
-		t.Error("nonce compared equal to a value it was never given")
+	// And a wrong value must not match, or the two assertions above would pass
+	// over a request that parsed nothing at all.
+	if rt.got.nonceValue() == strings.Repeat("a", 64) {
+		t.Error("nonce matched a value it was never given")
+	}
+
+	// The request still renders redacted, which is the property the closures
+	// exist for: %v and %+v reach unexported fields by reflection, and this is
+	// the type a future logger would be handed.
+	for _, rendered := range []string{
+		fmt.Sprintf("%v", rt.got),
+		fmt.Sprintf("%+v", rt.got),
+		rt.got.String(),
+		fmt.Sprintf("%v", &rt.got),
+	} {
+		if strings.Contains(rendered, validSocket) || strings.Contains(rendered, validNonce) {
+			t.Errorf("a rendered bootstrap request leaked its payload: %s", rendered)
+		}
 	}
 }
 
@@ -240,16 +253,18 @@ func secretName(s string) string {
 	return "socket path"
 }
 
-// TestProductionTrampolineRuntime_RefusesTypedUntilPhase4 pins the stub's
-// contract. Phase 3 ships the classifier alone; a valid bootstrap must fail
-// with an inspectable typed error rather than a nil success that would read as
-// "the trampoline ran".
-func TestProductionTrampolineRuntime_RefusesTypedUntilPhase4(t *testing.T) {
+// TestProductionTrampolineRuntime_ReceivesAValidBootstrap pins the handoff.
+//
+// The fixture names a socket that does not exist, so the runtime refuses at its
+// first check — and that refusal is the evidence, because it can only come from
+// the trampoline. A nil return here would mean a valid bootstrap was claimed and
+// then quietly did nothing.
+func TestProductionTrampolineRuntime_ReceivesAValidBootstrap(t *testing.T) {
 	handled, err := trySurfaceExec(context.Background(), validBootstrapArgs(), productionTrampolineRuntime())
 	if !handled {
 		t.Fatal("a well-formed bootstrap was not claimed")
 	}
-	if !errors.Is(err, errTrampolineNotImplemented) {
-		t.Fatalf("err = %v, want errTrampolineNotImplemented", err)
+	if !errors.Is(err, errSocketUnsafe) {
+		t.Fatalf("err = %v, want errSocketUnsafe", err)
 	}
 }

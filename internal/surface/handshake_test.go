@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/surface"
@@ -185,6 +186,108 @@ func TestAccept_RefusesAnUngeneratedNonce(t *testing.T) {
 	var unset surface.Nonce
 	if _, err := surface.Accept(conn, unset); !errors.Is(err, surface.ErrNonceMismatch) {
 		t.Errorf("Accept with an ungenerated nonce = %v, want ErrNonceMismatch", err)
+	}
+}
+
+// TestAccept_HangsUpOnARefusedPeer is a latency property, and it reads as a
+// slow test rather than a bug when it regresses.
+//
+// A refused peer that is left connected blocks on its own read until the
+// handshake deadline expires — thirty seconds of a launch already decided
+// against. It cannot close the connection itself, because from its side nothing
+// has happened yet. Caught when this exact case took 30.00s to pass.
+func TestAccept_HangsUpOnARefusedPeer(t *testing.T) {
+	listener, addr := socketPair(t)
+
+	expected, err := surface.NewNonce()
+	if err != nil {
+		t.Fatalf("NewNonce: %v", err)
+	}
+	other, err := surface.NewNonce()
+	if err != nil {
+		t.Fatalf("NewNonce: %v", err)
+	}
+
+	peerDone := make(chan struct{})
+	go func() {
+		defer close(peerDone)
+		var d net.Dialer
+		conn, dialErr := d.DialContext(t.Context(), "unix", addr)
+		if dialErr != nil {
+			return
+		}
+		// Dial blocks reading the invocation that will never come. It returns
+		// only because the service hung up.
+		_, _, _ = surface.Dial(conn, other)
+	}()
+
+	conn, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if _, err := surface.Accept(conn, expected); !errors.Is(err, surface.ErrNonceMismatch) {
+		t.Fatalf("Accept with the wrong nonce = %v, want ErrNonceMismatch", err)
+	}
+
+	select {
+	case <-peerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a refused peer was left connected; it will block until the handshake " +
+			"deadline instead of being hung up on")
+	}
+}
+
+// TestDial_HangsUpWhenItRefuses is the mirror of the Accept case above.
+//
+// Same change, same PR, and the same failure: a service left waiting on a
+// trampoline that has already decided against it blocks until its own deadline.
+// The two ends got one test between them.
+func TestDial_HangsUpWhenItRefuses(t *testing.T) {
+	listener, addr := socketPair(t)
+
+	nonce, err := surface.NewNonce()
+	if err != nil {
+		t.Fatalf("NewNonce: %v", err)
+	}
+
+	serviceDone := make(chan struct{})
+	go func() {
+		defer close(serviceDone)
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		handoff, acceptErr := surface.Accept(conn, nonce)
+		if acceptErr != nil {
+			return
+		}
+		defer func() { _ = handoff.Close() }()
+		if handoff.Send(sampleInvocation()) != nil {
+			return
+		}
+		// Blocks reading a result the trampoline will never send. It returns
+		// only because the trampoline hung up.
+		_ = handoff.AwaitStart()
+	}()
+
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "unix", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	// A zero-value nonce is refused before anything is written, which is the
+	// earliest refusal Dial has — so the connection is closed on the path with
+	// the least chance of an incidental close.
+	var unset surface.Nonce
+	if _, _, err := surface.Dial(conn, unset); !errors.Is(err, surface.ErrInvalidNonce) {
+		t.Fatalf("Dial with an unset nonce = %v, want ErrInvalidNonce", err)
+	}
+
+	select {
+	case <-serviceDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the service was left connected after the trampoline refused; it will " +
+			"block until the handshake deadline instead of being hung up on")
 	}
 }
 
