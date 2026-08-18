@@ -120,12 +120,23 @@ func TestReadFrame_AllocatesWhatArrivesNotWhatIsClaimed(t *testing.T) {
 	binary.BigEndian.PutUint32(claim, maxFrameBytes)
 	claim = append(claim, 'x') // one byte of a megabyte-sized promise
 
+	// The error is not the assertion — a reader that pre-sized the buffer and
+	// then failed the copy returns the identical one. The allocation is.
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
 	payload, err := readFrame(bytes.NewReader(claim), maxFrameBytes)
+	runtime.ReadMemStats(&after)
+
 	if err == nil {
 		t.Fatalf("readFrame accepted a frame short of its claim, returning %d bytes", len(payload))
 	}
 	if !errors.Is(err, ErrTransport) {
 		t.Errorf("an undelivered body = %v, want ErrTransport", err)
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > maxFrameBytes/2 {
+		t.Errorf("an undelivered 1 MiB claim allocated %d bytes; the body must be copied "+
+			"incrementally rather than pre-sized", grew)
 	}
 }
 
@@ -359,6 +370,13 @@ func TestInvocationFrame_Validation(t *testing.T) {
 			Kind: kindInvocation, Version: ProtocolVersion, Path: good.Path, CWD: good.CWD,
 			Args: []string{"--model\x00opus"},
 		},
+		// "K=v\x00" is a well-formed assignment as far as the separator rule is
+		// concerned, so nothing but this check stops it reaching exec — whose
+		// error quotes the offending value.
+		"NUL in an environment entry": {
+			Kind: kindInvocation, Version: ProtocolVersion, Path: good.Path, CWD: good.CWD,
+			Env: []string{"TOKEN=abc\x00def"},
+		},
 		// A path is rendered — by the service's logs, by launch's consumers —
 		// so an escape sequence in one is interpreted rather than displayed.
 		// Every other file in this package already refuses these; this was the
@@ -510,9 +528,14 @@ func TestExchange_DeadlineCoversTheWholeConversation(t *testing.T) {
 	t.Cleanup(func() { _ = ours.Close() })
 	t.Cleanup(func() { _ = theirs.Close() })
 
+	// The two outcomes sit at `budget` (one deadline for the conversation) and
+	// `budget + firstWait` (a per-frame reset), and the ceiling is halfway
+	// between. The absolute numbers are chosen so that half-gap is a full
+	// second: a narrower margin is scheduler noise on a loaded runner, and a
+	// timing test that flakes gets muted rather than fixed.
 	const (
-		budget    = 600 * time.Millisecond
-		firstWait = 400 * time.Millisecond
+		budget    = 3 * time.Second
+		firstWait = 2 * time.Second
 	)
 
 	start := time.Now()

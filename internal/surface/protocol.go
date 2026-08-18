@@ -441,6 +441,9 @@ func (f invocationFrame) validate() error {
 		if !isEnvAssignment(entry) {
 			return fmt.Errorf("%w: environment entry %d is not a NAME=VALUE assignment", ErrProtocol, i)
 		}
+		if containsNUL(entry) {
+			return fmt.Errorf("%w: environment entry %d contains a NUL byte", ErrProtocol, i)
+		}
 	}
 	return nil
 }
