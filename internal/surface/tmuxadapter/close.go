@@ -7,6 +7,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // Close removes exactly the session a reference names, after proving the server
@@ -27,6 +28,31 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 	case locateAbsent:
 		return backend.NewCloseAlreadyGone()
 	case locateFound:
+		// Fall through to the kill. The switch is written so that ONLY this
+		// state reaches it — see the default below.
+	default:
+		// A state nobody has taught this switch about must not reach the kill.
+		// The reason is measured, not theoretical: `kill-session -t ""` exits
+		// ZERO and kills a session anyway (probed on tmux 3.7b against a
+		// two-session server — the empty target took out the second one). So a
+		// zero-valued identityRow arriving here would silently destroy an
+		// unrelated session and report success.
+		//
+		// Stated plainly because the distinction matters: this arm is a
+		// CONSTRUCTION guard against a future locateState, not a tested
+		// control. All four states today are handled above, so nothing can
+		// drive it and its mutation survives — the honest reading is that it
+		// costs nothing and pays for itself the day a fifth state is added.
+		// The ValidateSessionID check below is the tested half.
+		return backend.NewCloseUnreadable(backend.NewStartCause(backend.FailureInternal,
+			errors.New("the session lookup produced no usable state")))
+	}
+
+	// Re-validate at the point of USE, not only where the row was parsed. This
+	// is the last thing standing between a malformed id and the empty-target
+	// behaviour above, and it costs one comparison.
+	if err := tmux.ValidateSessionID(row.id); err != nil {
+		return backend.NewCloseUnreadable(backend.NewStartCause(backend.FailureMalformedResponse, err))
 	}
 
 	res, err := a.run.RunSensitive(ctx, a.command(exec.KindTmuxCleanup,
@@ -141,9 +167,28 @@ func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (identityRow, loc
 		return row, locateFound, backend.StartCause{}
 	}
 
-	// Absent by name. Deliberately NOT checked against the incarnation: if no
-	// session carries our ownership name, there is nothing to close on any
-	// incarnation, and demanding a fingerprint match first would turn a
+	// Absent by name — but absence is only meaningful against the incarnation
+	// the reference was bound to, and a Ref outlives its process: it round-trips
+	// through JSON, so a rollback can run against a server that restarted, or a
+	// different one the same selection chain now resolves to. The chain check
+	// above compares the CHAIN, deliberately not the path, so it cannot see
+	// that.
+	//
+	// The check is free — every row of one listing carries the same
+	// #{pid}/#{start_time} — so any row will do; we are asking about the
+	// SERVER, not about that session.
+	if len(rows) > 0 {
+		server, ferr := a.fingerprint(rows[0], version)
+		if ferr != nil {
+			return identityRow{}, locateUnreadable, backend.NewStartCause(backend.FailureMalformedResponse, ferr)
+		}
+		if !ref.Server().Matches(server) {
+			return identityRow{}, locateMismatch, backend.NewStartCause(backend.FailureIdentityMismatch,
+				errors.New("the tmux server restarted since this reference was taken"))
+		}
+	}
+	// Zero rows means no server holds anything at all, on any incarnation —
+	// nothing to close, and demanding a fingerprint we cannot take would turn a
 	// satisfied rollback into an unreadable one.
 	return identityRow{}, locateAbsent, backend.StartCause{}
 }

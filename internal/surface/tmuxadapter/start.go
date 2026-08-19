@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
@@ -13,13 +15,22 @@ import (
 )
 
 // Output caps. A tmux -F reply is a handful of short fields per session, so
-// these are generous rather than tight — but they are bounded, because the
-// completeness flag that comes back with a truncated stream is what turns a
-// half-read reply into OutcomeUnknown instead of a confident misparse.
+// these are generous — but they are bounded, because the completeness flag that
+// comes back with a truncated stream is what turns a half-read reply into
+// OutcomeUnknown instead of a confident misparse.
+//
+// stdoutCap is written as the seam's ceiling rather than the literal that
+// happens to equal it: validate() REFUSES a cap above MaxOutputBytes, so a
+// hardcoded 1<<16 would make every command in this package fail validation at
+// once the day that ceiling is lowered.
 const (
-	stdoutCap = 1 << 16
+	stdoutCap = exec.MaxOutputBytes
 	stderrCap = 1 << 14
 )
+
+// maxStartTimeSeconds is the largest #{start_time} that still fits in int64
+// once multiplied into nanoseconds — roughly the year 2262.
+const maxStartTimeSeconds int64 = math.MaxInt64 / int64(time.Second)
 
 // Start creates the surface session and returns what we know about whether the
 // server changed state.
@@ -211,7 +222,7 @@ func (a *Adapter) fingerprint(row identityRow, version string) (backend.ServerID
 		Version:  version,
 		PID:      row.pid,
 		// tmux reports start_time in whole seconds; the field wants nanos.
-		StartedAtUnixNano: row.startTime * 1e9,
+		StartedAtUnixNano: row.startTime * int64(time.Second),
 	}
 	fillStat(&in, info)
 	return backend.Fingerprint(in)
@@ -288,6 +299,13 @@ func parseRows(out exec.BoundedOutput) ([]identityRow, parseStatus) {
 		}
 		start, err := strconv.ParseInt(fields[1], 10, 64)
 		if err != nil {
+			continue
+		}
+		// Bounded before it is multiplied into nanos below: ParseInt accepts
+		// anything up to int64, and start*1e9 overflows silently past ~9.2e9.
+		// No tmux emits a start time beyond this, which is exactly why an
+		// unbounded value would be a forged row rather than an old one.
+		if start < 0 || start > maxStartTimeSeconds {
 			continue
 		}
 		if tmux.ValidateSessionID(fields[2]) != nil {
@@ -375,16 +393,25 @@ func stderrEquals(out exec.BoundedOutput, want string) bool {
 	return strings.TrimRight(string(raw), "\n") == want
 }
 
-// noServer reports tmux's "no server running" family, the one listing failure
-// that proves absence rather than ambiguity.
+// noServer reports tmux's one listing failure that proves absence rather than
+// ambiguity: there is no server, so no server is hiding our session.
+//
+// It matches THAT diagnostic and no other. "error connecting to <path> (…)"
+// looks like a sibling and is not — tmux formats it as
+// `error connecting to %s (%s)` with strerror(errno), so a RUNNING server
+// whose socket the caller cannot open answers with it. Measured on 3.7b:
+// chmod 000 on a live server's socket yields
+// "error connecting to /tmp/…/s (Permission denied)" with the server still up
+// and its sessions intact. Reading that as absence made reconcile report
+// NotMutated for a session that exists and made Close discharge a rollback
+// obligation that was still outstanding — both fail-open, in the direction
+// that leaks a live surface.
 func noServer(out exec.BoundedOutput) bool {
 	raw, complete := out.CopyBytesForParse()
 	if !complete {
 		return false
 	}
-	text := strings.TrimSpace(string(raw))
-	return strings.HasPrefix(text, "no server running on ") ||
-		strings.HasPrefix(text, "error connecting to ")
+	return strings.HasPrefix(strings.TrimSpace(string(raw)), "no server running on ")
 }
 
 // classifyRunError maps a runner error onto the closed failure vocabulary.

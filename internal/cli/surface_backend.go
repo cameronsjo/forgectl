@@ -81,7 +81,19 @@ func newTmuxAdapter() (backend.Adapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: resolve tmux path: %w", errBackendUnavailable, err)
 	}
-	return tmuxadapter.New(exec.NewOSSensitiveRunner(), abs, os.Getenv, os.Getuid)
+	// Assigned and returned explicitly rather than forwarded. A bare
+	// `return tmuxadapter.New(...)` converts New's nil *Adapter into a NON-nil
+	// backend.Adapter holding a nil pointer — two lines below two `return nil`
+	// statements that behave differently. The caller checks err first today;
+	// this makes the shape not depend on that.
+	a, err := tmuxadapter.New(exec.NewOSSensitiveRunner(), abs, os.Getenv, os.Getuid)
+	if err != nil {
+		// Classified as unavailable, not not-implemented: tmux is driven, and
+		// an operator whose socket cannot be resolved needs to fix their
+		// environment rather than wait for a release.
+		return nil, fmt.Errorf("%w: %w", errBackendUnavailable, err)
+	}
+	return a, nil
 }
 
 // parseBackendKind resolves the closed set of names.

@@ -403,9 +403,12 @@ func TestStartClassifiesTheThreeOutcomes(t *testing.T) {
 		{
 			// The listing could not be read, so absence is unproven. This is
 			// the honest end state, not a failure to try harder.
-			name:      "create failed and reconcile cannot read the server",
-			create:    func() (exec.SensitiveResult, error) { return stderr("boom"), errors.New("exit 1") },
-			reconcile: func() (exec.SensitiveResult, error) { return stderr("permission denied"), errors.New("exit 1") },
+			name:   "create failed and reconcile cannot read the server",
+			create: func() (exec.SensitiveResult, error) { return stderr("boom"), errors.New("exit 1") },
+			reconcile: func() (exec.SensitiveResult, error) {
+				return stderr("error connecting to /tmp/tmux-501/default (Permission denied)"),
+					exec.SensitiveErrorForTest(exec.KindTmuxReconcile, exec.OutcomeExit)
+			},
 			want:      backend.OutcomeUnknown,
 			wantClass: backend.FailureUnavailable,
 		},
@@ -480,7 +483,8 @@ func TestReconcileRunsExactlyOnce(t *testing.T) {
 		exec.KindTmuxCreate: func() (exec.SensitiveResult, error) { return stderr("boom"), errors.New("exit 1") },
 		exec.KindTmuxReconcile: func() (exec.SensitiveResult, error) {
 			reconciles++
-			return stderr("permission denied"), errors.New("exit 1")
+			return stderr("error connecting to /tmp/tmux-501/default (Permission denied)"),
+				exec.SensitiveErrorForTest(exec.KindTmuxReconcile, exec.OutcomeExit)
 		},
 	}}.runFunc}
 
@@ -848,6 +852,16 @@ func TestParseRowsRefusesAnUnreadableListing(t *testing.T) {
 		t.Errorf("an unreadable listing produced rows: %+v", rows)
 	}
 
+	// A start time large enough to overflow int64 once multiplied into nanos
+	// is dropped, not accepted. ParseInt takes anything up to int64, and no
+	// tmux emits a value this large — which is why an unbounded one is a
+	// forged row rather than an old one, and why the overflowed product would
+	// be a fingerprint that silently matched the wrong incarnation.
+	overflowing := row("91", "9300000000", "$1", "fc-surface-x")
+	if _, status = parseRows(exec.BoundedOutputForTest([]byte(overflowing), exec.OutputComplete)); status != parseUnreadable {
+		t.Errorf("an unbounded start time was accepted: status = %v", status)
+	}
+
 	// A genuinely empty listing is still parseOK: a server with no sessions
 	// must stay distinguishable from one we could not read.
 	if _, status = parseRows(exec.BoundedOutputForTest(nil, exec.OutputComplete)); status != parseOK {
@@ -978,6 +992,108 @@ func TestNewRefusesASocketDirectoryItDoesNotPrivatelyOwn(t *testing.T) {
 			return nil, fs.ErrNotExist
 		})); err != nil {
 		t.Errorf("New refused an absent socket directory: %v", err)
+	}
+}
+
+// TestAnUnreadableSocketIsNotAnAbsentServer is the counterexample that killed
+// the `error connecting to ` arm of noServer.
+//
+// tmux formats that diagnostic as `error connecting to %s (%s)` with
+// strerror(errno), so a RUNNING server whose socket the caller cannot open
+// answers with it. Measured on 3.7b: chmod 000 on a live server's socket
+// yields "error connecting to /tmp/…/s (Permission denied)" while the server
+// is up and its sessions are intact.
+//
+// Reading it as absence was fail-open in the direction that leaks: reconcile
+// reported NotMutated for a session that exists, and Close discharged a
+// rollback obligation still outstanding.
+func TestAnUnreadableSocketIsNotAnAbsentServer(t *testing.T) {
+	unreadable := "error connecting to /tmp/tmux-501/default (Permission denied)"
+
+	if noServer(exec.BoundedOutputForTest([]byte(unreadable), exec.OutputComplete)) {
+		t.Error("a live server's permission error was read as proof of absence")
+	}
+	// The genuine absence diagnostic still proves absence, so the check is not
+	// simply refusing everything.
+	if !noServer(exec.BoundedOutputForTest([]byte("no server running on /tmp/tmux-501/default\n"), exec.OutputComplete)) {
+		t.Error("tmux's actual no-server diagnostic was not recognized")
+	}
+
+	// End to end: a rollback against an unreadable server must stay outstanding.
+	spec, tag := newSpec(t)
+	name := spec.OwnershipName()
+	run := &exec.FakeSensitiveRunner{RunFunc: scripted{byKind: map[exec.CommandKind]func() (exec.SensitiveResult, error){
+		exec.KindTmuxProbe: func() (exec.SensitiveResult, error) {
+			return stderr(unreadable), exec.SensitiveErrorForTest(exec.KindTmuxProbe, exec.OutcomeExit)
+		},
+	}}.runFunc}
+	a := newTestAdapter(t, run, nil, WithLstat(liveSocket(liveInode)))
+	if got := a.Close(context.Background(), refFor(t, tag, name)); got.State().SatisfiesRollback() {
+		t.Errorf("Close = %v — the rollback was discharged against a server we could not read", got.State())
+	}
+}
+
+// TestCloseNeverKillsWithoutAValidatedNativeID guards the one tmux behaviour
+// that turns a lookup bug into a destroyed session belonging to someone else.
+//
+// Measured on 3.7b against a two-session server: `kill-session -t ""` exits
+// ZERO and kills a session anyway — the empty target took out the second one.
+// So an empty or malformed operand is neither a no-op nor an error; it
+// silently succeeds against the wrong thing.
+func TestCloseNeverKillsWithoutAValidatedNativeID(t *testing.T) {
+	spec, tag := newSpec(t)
+	name := spec.OwnershipName()
+	// A listing row whose native id is not $N. parseRows drops it, so locate
+	// reports absent — and the point is that NOTHING reaches kill-session.
+	malformed := row("91", "1700000000", "not-a-session-id", name)
+
+	run := &exec.FakeSensitiveRunner{RunFunc: scripted{byKind: map[exec.CommandKind]func() (exec.SensitiveResult, error){
+		exec.KindTmuxProbe: func() (exec.SensitiveResult, error) { return stdout(malformed), nil },
+	}}.runFunc}
+
+	a := newTestAdapter(t, run, nil, WithLstat(liveSocket(liveInode)))
+	_ = a.Close(context.Background(), refFor(t, tag, name))
+
+	for _, cmd := range run.Calls() {
+		if cmd.Kind != exec.KindTmuxCleanup {
+			continue
+		}
+		target := cmd.Args[len(cmd.Args)-1]
+		if target.Equal(exec.Opaque("")) {
+			t.Fatal("kill-session ran with an EMPTY target — that exits zero and kills a session")
+		}
+		t.Fatal("kill-session ran at all against a listing with no valid native id")
+	}
+}
+
+// TestCloseRefusesAbsenceFromARestartedServer closes the gap the absent-by-name
+// path used to leave open.
+//
+// A Ref round-trips through JSON, so a rollback can run in a later process
+// against a server that restarted — or a different one the same selection chain
+// now resolves to. The chain check compares the CHAIN and deliberately not the
+// path, so it cannot see that. Absence is only meaningful against the
+// incarnation the reference was bound to, and every row of one listing carries
+// the same #{pid}/#{start_time}, so the check costs no extra command.
+func TestCloseRefusesAbsenceFromARestartedServer(t *testing.T) {
+	spec, tag := newSpec(t)
+	name := spec.OwnershipName()
+	// A live server holding somebody else's session, on a DIFFERENT incarnation
+	// than the reference was bound to. Our name is absent from it.
+	stranger := row("777", "1700009999", "$3", "someone-elses-session")
+
+	run := &exec.FakeSensitiveRunner{RunFunc: scripted{byKind: map[exec.CommandKind]func() (exec.SensitiveResult, error){
+		exec.KindTmuxProbe: func() (exec.SensitiveResult, error) { return stdout(stranger), nil },
+	}}.runFunc}
+
+	a := newTestAdapter(t, run, nil, WithLstat(liveSocket(liveInode)))
+	ref := refFor(t, tag, name)
+
+	if got := a.Close(context.Background(), ref); got.State() != backend.CloseIdentityMismatch {
+		t.Errorf("Close = %v, want identity-mismatch — absence on a restarted server proves nothing", got.State())
+	}
+	if got := a.Probe(context.Background(), ref); got.State() != backend.ProbeIdentityMismatch {
+		t.Errorf("Probe = %v, want identity-mismatch", got.State())
 	}
 }
 
