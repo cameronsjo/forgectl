@@ -12,6 +12,7 @@ import (
 	"slices"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Client wraps tmux + sesh behind the exec.Runner seam.
@@ -57,6 +58,18 @@ type Client struct {
 	// disagreeing about which server an in-flight identity belongs to.
 	socket string
 }
+
+// MaxSocketPathLen bounds a pinned socket's absolute path. Unix sun_path is 104
+// bytes on macOS; the margin leaves room for tmux's own suffixing.
+//
+// It is EXPORTED rather than private because the dependency direction forbids
+// only the import, not the sharing: internal/tmux must not import the surface
+// package that will become its caller, but surface may import tmux. So surface
+// aliases this constant (the pattern internal/cli already uses) and a test
+// there asserts the two are equal. Two independent literals are how a producer
+// mints a socket its own consumer then refuses — forgectl#343, and the reason
+// internal/cli stopped restating this bound.
+const MaxSocketPathLen = 100
 
 // Option configures a Client at construction.
 type Option func(*Client)
@@ -104,7 +117,10 @@ func WithLookPath(fn func(string) (string, error)) Option {
 //
 // A pinned client never unsets $TMUX for the child, and does not need to: `-S`
 // overrides socket selection outright, and tmux's nesting refusal fires only on
-// a command that would ATTACH — every pinned command here is `-d` or read-only.
+// a command that would ATTACH. Every command a pinned client can still issue is
+// `-d` or read-only, because attaching and switching are refused outright — see
+// ErrAttachUnavailableWhenPinned. That refusal is what makes this paragraph
+// true; without it the attach branch would be both reachable and broken.
 //
 // CALLER OBLIGATION, and the pin is not a security boundary without it: the
 // socket's parent directory — and every component above it — must be writable
@@ -127,6 +143,23 @@ func NewPinned(run exec.Runner, socket string, opts ...Option) (*Client, error) 
 	}
 	if filepath.Clean(socket) != socket {
 		return nil, fmt.Errorf("%w: must be clean, got %q (want %q)", ErrInvalidSocketPath, socket, filepath.Clean(socket))
+	}
+	// Screen control characters before this path can reach an error message an
+	// operator reads. It is caller-supplied and, in the environmental case, can
+	// derive from $TMUX_TMPDIR — an absolute, lexically clean path is free to
+	// carry an escape sequence that clears the terminal. Byte offset only: the
+	// refusal must not print the very bytes it is refusing.
+	for i, r := range socket {
+		if termsafe.IsUnsafeTerminalRune(r) {
+			return nil, fmt.Errorf("%w: carries a control character at byte %d", ErrInvalidSocketPath, i)
+		}
+	}
+	// The same ceiling internal/surface applies, and for the same reason: a
+	// too-long path fails at tmux's own bind as an unattributable error against
+	// a server nobody meant to reach. Refusing here names the cause.
+	if len(socket) > MaxSocketPathLen {
+		return nil, fmt.Errorf("%w: %d bytes exceeds the %d-byte limit: %s",
+			ErrInvalidSocketPath, len(socket), MaxSocketPathLen, termsafe.QuotePath(socket))
 	}
 	c := New(run, opts...)
 	c.socket = socket

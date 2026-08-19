@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // tmux's target grammar is the whole reason this file exists.
@@ -100,6 +103,17 @@ type ServerSelector struct {
 	Socket  string
 }
 
+// String renders a selector with every field quoted, and exists because a
+// selector is printed straight at an operator by ErrSelectorChanged — while two
+// of its three fields come from the ENVIRONMENT ($TMUX, $TMUX_TMPDIR). Those
+// can name a path carrying an escape sequence, so a bare %+v hands the terminal
+// whatever the environment says. Implementing Stringer fixes every %v and %+v
+// site at once rather than leaving each one to remember.
+func (s ServerSelector) String() string {
+	return fmt.Sprintf("{tmux=%s tmpdir=%s socket=%s}",
+		termsafe.QuotePath(s.TmuxEnv), termsafe.QuotePath(s.TmpDir), termsafe.QuotePath(s.Socket))
+}
+
 // ServerGeneration identifies one running tmux server: which socket it is on,
 // and which incarnation of the server that is. PID alone is not enough — pids
 // are recycled — so the start time rides along.
@@ -172,6 +186,15 @@ var (
 	// that permits a caller to create the first server. A command aimed at any
 	// other socket never reaches this verdict.
 	ErrNoServer = errors.New("no tmux server is running")
+	// ErrUnpinnedCommand reports that a pinned client saw an argv it did not
+	// build — a call site that skipped tmuxArgs, so the command reached the
+	// ENVIRONMENTAL server. It is a forgectl bug, not a tmux state, and says so
+	// rather than hiding inside ErrServerUnreadable.
+	ErrUnpinnedCommand = errors.New("a pinned tmux command was issued without its socket")
+	// ErrSocketDirMissing reports that a pinned socket's parent directory does
+	// not exist. tmux creates the default socket's directory but never an
+	// explicit `-S` one, so this can never resolve itself by creating a server.
+	ErrSocketDirMissing = errors.New("the directory for the pinned tmux socket does not exist")
 	// ErrInvalidSocketPath reports a socket path NewPinned refused. It is typed
 	// like every other refusal in this package so a caller classifies on the
 	// error rather than on its wording — a construction failure against a
@@ -232,9 +255,20 @@ func (c *Client) serverStateError(ctx context.Context, args []string, err error)
 		if c.socket != "" {
 			kind = "pinned socket"
 		}
-		return fmt.Errorf("%w (%s %s)", ErrNoServer, kind, failure.SocketPath)
+		// Quoted, not bare: in environmental mode this path is derived from
+		// $TMUX_TMPDIR, which an operator's environment can point at a name
+		// carrying an escape sequence. It reaches a terminal from here.
+		return fmt.Errorf("%w (%s %s)", ErrNoServer, kind, termsafe.QuotePath(failure.SocketPath))
 	case serverCanceled:
 		return failure.Cause
+	case serverPinMismatch:
+		// Named separately from "unreadable" because it sends the operator
+		// somewhere else entirely: this is forgectl having aimed the command at
+		// the wrong server, not tmux being in a state we cannot read. Folded
+		// into the default arm, the only trace was a Debug line.
+		return fmt.Errorf("%w (socket %s)", ErrUnpinnedCommand, termsafe.QuotePath(c.socket))
+	case serverSocketDirMissing:
+		return fmt.Errorf("%w: %s", ErrSocketDirMissing, termsafe.QuotePath(filepath.Dir(failure.SocketPath)))
 	default:
 		cause := failure.Cause
 		if cause == nil {

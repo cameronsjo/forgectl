@@ -139,25 +139,55 @@ func TestProductionArgvHasNoExplicitSocket(t *testing.T) {
 	}
 }
 
-// TestHasExplicitSocketArgOverMatchesDeliberately documents the one way the
-// guard is wrong on purpose. It matches by PREFIX, so an operand that merely
-// begins with -L or -S — a session name, a working directory — reads as an
-// explicit socket even though tmux would treat it as an operand.
+// TestHasExplicitSocketArgOverMatchesDeliberately documents the ways the guard
+// is wrong on purpose. It matches any single-dash element carrying an uppercase
+// S or L ANYWHERE in it, so an operand that merely contains one — a session
+// name, a working directory — reads as an explicit socket even though tmux
+// would treat it as an operand.
 //
-// That direction is safe and the tightening is not: a false positive downgrades
-// the verdict to serverUnknown, which only ever REFUSES to treat an absent
-// default socket as "no server, proceed". A precise flag parser would have to
+// It is not a prefix test, and cannot be: tmux's getopt honours BUNDLED short
+// options, so `tmux -2S/path` sets the socket while beginning with neither -S
+// nor -L (verified live on tmux 3.7b). A prefix test misses it.
+//
+// The over-match direction is safe and the tightening is not: a false positive
+// downgrades the verdict to a refusal, which only ever REFUSES to treat an
+// absent socket as "no server, proceed". A precise flag parser would have to
 // model tmux's own option grammar to stay correct, and being wrong the other way
 // hands a proceed verdict to a command aimed at a socket this code never looked
 // at. Kept over-broad; asserted here so a future "cleanup" has to argue with a
 // test rather than a comment.
 func TestHasExplicitSocketArgOverMatchesDeliberately(t *testing.T) {
 	for _, argv := range [][]string{
+		// Prefix forms — the original rule.
 		{"new-session", "-d", "-s", "-Sneaky"},
 		{"new-session", "-d", "-s", "forgectl", "-c", "-Lworktree"},
+		// Bundled form: the case that makes a prefix test wrong. This is the
+		// ENVIRONMENTAL call site, where the socket at stake is the operator's
+		// real default server.
+		{"list-sessions", "-2S/tmp/elsewhere"},
+		{"list-windows", "-a", "-2L", "other"},
+		// A double-dash element is scanned too — in an argv tail it is an
+		// operand, not an option, so "tmux has no long options" is not a reason
+		// to skip it.
+		{"list-windows", "--Startup"},
 	} {
 		if !hasExplicitSocketArg(argv) {
-			t.Errorf("argv %v: the prefix over-match is load-bearing and must fail closed", argv)
+			t.Errorf("argv %v: the over-match is load-bearing and must fail closed", argv)
+		}
+	}
+
+	// The converse: forgectl's own argv must never trip it, or every
+	// environmental classification would refuse and no caller could ever create
+	// a first server. These are the real production shapes.
+	for _, argv := range [][]string{
+		{"list-sessions", "-F", sessionFormat},
+		{"list-windows", "-a", "-F", windowFormat},
+		{"list-panes", "-a", "-F", paneFormat},
+		{"display-message", "-p", IdentityFormat},
+		{"new-session", "-d", "-P", "-F", sessionIdentityFormat, "-s", "forge", "-c", "/tmp"},
+	} {
+		if hasExplicitSocketArg(argv) {
+			t.Errorf("argv %v: forgectl's own command tripped the socket guard, which would refuse every create", argv)
 		}
 	}
 }

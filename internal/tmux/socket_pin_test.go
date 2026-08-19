@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	internalexec "github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 const testSocket = "/tmp/fc-surface/sock"
@@ -23,7 +25,17 @@ func pinnedClient(t *testing.T, run *internalexec.FakeRunner) *Client {
 	}
 	c.getenv = func(string) string { return "" }
 	c.getuid = func() int { return 501 }
-	c.lstat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	// The socket is absent; its DIRECTORY exists. That distinction is the normal
+	// state a surface adapter creates — a private run dir with no server in it
+	// yet — and the two must be driven separately, because "no socket" and "no
+	// directory to put one in" reach different verdicts: only the first permits
+	// creating a server.
+	c.lstat = func(path string) (os.FileInfo, error) {
+		if path == filepath.Dir(testSocket) {
+			return nil, nil
+		}
+		return nil, os.ErrNotExist
+	}
 	return c
 }
 
@@ -101,6 +113,13 @@ func TestPinnedClientPinsEveryCommand(t *testing.T) {
 				return paneRow, nil
 			case slices.Contains(args, "new-session"):
 				return strings.Join([]string{pid, start, "$1"}, FieldSep), nil
+			case slices.Contains(args, "-V"):
+				// A version tmux's own parser accepts, so
+				// CheckGenerationCapability proceeds to display-message rather
+				// than bailing after -V and leaving that argv undriven.
+				return "tmux 3.7b", nil
+			case slices.Contains(args, "display-message"):
+				return strings.Join([]string{pid, start}, FieldSep), nil
 			}
 			return "", nil
 		},
@@ -126,6 +145,11 @@ func TestPinnedClientPinsEveryCommand(t *testing.T) {
 	_ = c.AttachWindow(ctx, window)
 	_ = c.AttachSession(ctx, session)
 	_ = c.LastSession(ctx)
+	// version.go owns two more pinned argv sites (`-V` and `display-message`)
+	// that no other method reaches. A pinned caller does reach them —
+	// internal/pr calls CheckGenerationCapability — so leaving them undriven
+	// left both unasserted.
+	_, _ = c.CheckGenerationCapability(ctx)
 
 	if len(run.Calls) == 0 {
 		t.Fatal("no commands recorded — the test drove nothing")
@@ -147,13 +171,14 @@ func TestPinnedClientPinsEveryCommand(t *testing.T) {
 	// blast radius: `kill-session -a` unpinned kills every session on the
 	// DEFAULT server while the operator asked about the pinned one.
 	//
-	// `switch-client` is deliberately absent: it is reachable only when
-	// InsideTmux() reports true, which a pinned client never does. Listing it
-	// would be asserting a command that cannot run.
+	// `switch-client` and `attach-session` are deliberately absent: both are
+	// refused outright under a pin (ErrAttachUnavailableWhenPinned), so listing
+	// either would be asserting a command that cannot run. Their refusal is
+	// tested by TestPinnedClientRefusesAttachAndSwitch.
 	wantVerbs := []string{
 		"list-sessions", "list-windows", "list-panes", "new-session",
 		"rename-session", "kill-window", "kill-session", "select-window",
-		"attach-session",
+		"-V", "display-message",
 	}
 	for _, verb := range wantVerbs {
 		if !seen[verb] {
@@ -276,6 +301,11 @@ func TestPinnedClientMayCreateItsFirstServer(t *testing.T) {
 
 	lstatted := ""
 	c.lstat = func(path string) (os.FileInfo, error) {
+		// The run dir exists, the socket in it does not — the state a surface
+		// adapter is in just before it brings up its first server.
+		if path == filepath.Dir(testSocket) {
+			return nil, nil
+		}
 		lstatted = path
 		return nil, os.ErrNotExist
 	}
@@ -288,12 +318,44 @@ func TestPinnedClientMayCreateItsFirstServer(t *testing.T) {
 		t.Errorf("inspected socket %q, want the pinned %q — a pinned client must judge absence by ITS socket, never the derived default", lstatted, testSocket)
 	}
 	// The message names the mode, because "default socket" on a pinned client
-	// sends the operator to look at the wrong file.
-	if !strings.Contains(err.Error(), "pinned socket "+testSocket) {
+	// sends the operator to look at the wrong file. The path is quoted, since
+	// it reaches a terminal.
+	if !strings.Contains(err.Error(), "pinned socket "+termsafe.QuotePath(testSocket)) {
 		t.Errorf("error = %q, want it to name the pinned socket", err)
 	}
 	if strings.Contains(err.Error(), "default socket") {
 		t.Errorf("error = %q calls a pinned socket the default one", err)
+	}
+}
+
+// TestPinnedMissingSocketDirIsNotAnAbsentServer separates two states an lstat
+// reports identically. tmux CREATES the default socket's directory but never an
+// explicit `-S` one, so "no directory" cannot be answered by creating a server —
+// granting the create verdict there sends the caller into a bind failure against
+// a path nothing can bind, which is exactly the unattributable error the
+// construction-time checks exist to prevent.
+func TestPinnedMissingSocketDirIsNotAnAbsentServer(t *testing.T) {
+	c := pinnedClient(t, &internalexec.FakeRunner{})
+	c.lstat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist } // nothing exists, dir included
+	args := c.tmuxArgs("list-sessions", "-F", sessionFormat)
+
+	err := c.serverStateError(context.Background(), args, commandFailure("tmux", args, "no server running"))
+	if errors.Is(err, ErrNoServer) {
+		t.Fatalf("a missing socket DIRECTORY got the create-permitting ErrNoServer: %v", err)
+	}
+	if !errors.Is(err, ErrSocketDirMissing) {
+		t.Fatalf("serverStateError = %v, want ErrSocketDirMissing", err)
+	}
+
+	// An environmental client must be unaffected: tmux makes its own default
+	// socket directory, so absence there is still "no server yet".
+	env := New(&internalexec.FakeRunner{})
+	env.getenv = func(string) string { return "" }
+	env.getuid = func() int { return 501 }
+	env.lstat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	envArgs := []string{"list-sessions", "-F", sessionFormat}
+	if err := env.serverStateError(context.Background(), envArgs, commandFailure("tmux", envArgs, "no server")); !errors.Is(err, ErrNoServer) {
+		t.Errorf("environmental client = %v, want ErrNoServer — the directory check must not touch this mode", err)
 	}
 }
 
@@ -322,6 +384,11 @@ func TestPinnedClientRefusesAnArgvAimedElsewhere(t *testing.T) {
 		// -2S/path sets the socket on 3.7b while beginning with neither -S nor
 		// -L, which is why the check cannot be a prefix test.
 		{"bundled socket option", []string{"-S", testSocket, "list-windows", "-2S/tmp/someone-else"}},
+		// A double-dash element is scanned too. "tmux has no long options" would
+		// have justified skipping it on the OPTION grammar — but this function
+		// also scans argv tails, where a `--` element is an operand, and the
+		// safe direction is to refuse it rather than reason about which it is.
+		{"double-dash element carrying S", []string{"-S", testSocket, "list-windows", "--Startup"}},
 		{"truncated pin", []string{"-S"}},
 	}
 	for _, tt := range tests {
@@ -336,8 +403,11 @@ func TestPinnedClientRefusesAnArgvAimedElsewhere(t *testing.T) {
 			if errors.Is(err, ErrNoServer) {
 				t.Errorf("argv %v got the create-permitting ErrNoServer", tt.args)
 			}
-			if !errors.Is(err, ErrServerUnreadable) {
-				t.Errorf("argv %v = %v, want ErrServerUnreadable", tt.args, err)
+			// ErrUnpinnedCommand, not the generic ErrServerUnreadable: this is
+			// forgectl having aimed a command at the wrong server, and an
+			// operator told "tmux is unreadable" goes and debugs their tmux.
+			if !errors.Is(err, ErrUnpinnedCommand) {
+				t.Errorf("argv %v = %v, want ErrUnpinnedCommand", tt.args, err)
 			}
 			if lstatCalls != 0 {
 				t.Errorf("argv %v caused %d lstat calls — a refused argv must never reach the filesystem", tt.args, lstatCalls)
@@ -364,6 +434,61 @@ func TestPinnedSelectorIgnoresTheEnvironment(t *testing.T) {
 	want := ServerSelector{Socket: testSocket}
 	if got != want {
 		t.Errorf("currentSelector() = %+v, want %+v", got, want)
+	}
+}
+
+// TestPinnedRefusalsQuoteTheSocket covers the scenario refuseWhenPinned's own
+// comment names: a socket that did NOT come through NewPinned's control-
+// character screen. Written as two sibling guards, one quoted the path and one
+// did not, and nothing said which was the rule — so this asserts the rule
+// rather than leaving it to whichever guard a future reader copies.
+func TestPinnedRefusalsQuoteTheSocket(t *testing.T) {
+	c := New(&internalexec.FakeRunner{})
+	c.socket = "/tmp/\x1b[2J/sock" // bypasses NewPinned, as a second constructor might
+
+	for name, err := range map[string]error{
+		"attach": c.refuseAttachWhenPinned(),
+		"sesh":   c.refuseSeshWhenPinned(),
+	} {
+		if err == nil {
+			t.Fatalf("%s refusal returned nil for a pinned client", name)
+		}
+		if strings.ContainsRune(err.Error(), '\x1b') {
+			t.Errorf("%s refusal carried a raw escape sequence to the terminal: %q", name, err.Error())
+		}
+	}
+}
+
+// TestSelectorRenderingIsTerminalSafe: ErrSelectorChanged prints a whole
+// ServerSelector at the operator, and two of its three fields come from the
+// ENVIRONMENT — so a bare %+v hands the terminal whatever $TMUX_TMPDIR says.
+// The Stringer is what closes that, and closing it once covers every %v site
+// rather than leaving each one to remember.
+func TestSelectorRenderingIsTerminalSafe(t *testing.T) {
+	hostile := ServerSelector{TmpDir: "/tmp/\x1b[2J\x1b[H"}
+	rendered := hostile.String()
+	if strings.ContainsRune(rendered, '\x1b') {
+		t.Errorf("ServerSelector.String() = %q — it passed an escape sequence through", rendered)
+	}
+
+	// And it must reach a real error the same way, not just via String().
+	run := &internalexec.FakeRunner{}
+	c := New(run)
+	c.getenv = func(key string) string {
+		if key == "TMUX_TMPDIR" {
+			return "/tmp/\x1b[2J"
+		}
+		return ""
+	}
+	_, err := c.RevalidateSession(context.Background(), SessionIdentity{
+		Generation: ServerGeneration{Selector: ServerSelector{Socket: testSocket}, PID: "9", StartTime: "1"},
+		ID:         "$1",
+	})
+	if !errors.Is(err, ErrSelectorChanged) {
+		t.Fatalf("RevalidateSession = %v, want ErrSelectorChanged", err)
+	}
+	if strings.ContainsRune(err.Error(), '\x1b') {
+		t.Errorf("ErrSelectorChanged carried a raw escape sequence to the terminal: %q", err.Error())
 	}
 }
 
@@ -467,6 +592,136 @@ func TestPinnedClientRefusesSesh(t *testing.T) {
 				t.Errorf("ran %d commands: %v — a refused sesh delegation must run nothing", len(run.Calls), run.Calls)
 			}
 		})
+	}
+}
+
+// TestPinnedClientRefusesAttachAndSwitch covers the seam whose two branches are
+// both wrong under a pin — and the reachable one is broken exactly when a pin is
+// in play. InsideTmux() is false when pinned, so attachOrSwitch takes the
+// attach-session branch; tmux refuses that outright while $TMUX is set, which is
+// precisely the operator-inside-tmux case a surface pin exists for.
+//
+// The refusal must run BEFORE any command, so all three entry points are driven
+// and the runner is required to have seen nothing.
+func TestPinnedClientRefusesAttachAndSwitch(t *testing.T) {
+	const pid, start = "9", "1"
+	gen := ServerGeneration{Selector: ServerSelector{Socket: testSocket}, PID: pid, StartTime: start}
+	sessionRow := strings.Join([]string{pid, start, "$1", "forge", "1", "0", "0", "/tmp"}, FieldSep)
+	windowRow := strings.Join([]string{pid, start, "@1", "$1", "forge", "0", "editor", "1", "1"}, FieldSep)
+
+	for _, tc := range []struct {
+		name string
+		call func(*Client) error
+	}{
+		{"AttachSession", func(c *Client) error {
+			return c.AttachSession(context.Background(), SessionIdentity{Generation: gen, ID: "$1", Name: "forge"})
+		}},
+		{"AttachWindow", func(c *Client) error {
+			return c.AttachWindow(context.Background(), WindowIdentity{Generation: gen, ID: "@1", SessionID: "$1", Name: "editor"})
+		}},
+		{"LastSession", func(c *Client) error { return c.LastSession(context.Background()) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := &internalexec.FakeRunner{
+				RunFunc: func(_ string, args []string) (string, error) {
+					switch {
+					case slices.Contains(args, "list-sessions"):
+						return sessionRow, nil
+					case slices.Contains(args, "list-windows"):
+						return windowRow, nil
+					}
+					return "", nil
+				},
+			}
+			// insideTmux true is the case that makes attach-session fail at
+			// tmux; a pinned client must refuse rather than reach it.
+			c := pinnedClient(t, run)
+			c.insideTmux = func() bool { return true }
+
+			if err := tc.call(c); !errors.Is(err, ErrAttachUnavailableWhenPinned) {
+				t.Fatalf("%s = %v, want ErrAttachUnavailableWhenPinned", tc.name, err)
+			}
+			for _, call := range run.Calls {
+				for _, arg := range call.Args {
+					if arg == "attach-session" || arg == "switch-client" {
+						t.Errorf("%s reached the runner with %q despite the refusal", tc.name, arg)
+					}
+				}
+			}
+		})
+	}
+
+	// A STALE identity is the case the attachOrSwitch backstop cannot answer
+	// correctly. With no rows, revalidation fails first, and if the refusal sat
+	// only at the seam the caller would get a transient-looking ErrObjectGone
+	// for a client that can never attach — and would retry forever. The check
+	// has to be ahead of revalidation, and this is what proves it is.
+	for _, tc := range []struct {
+		name string
+		call func(*Client) error
+	}{
+		{"AttachSession", func(c *Client) error {
+			return c.AttachSession(context.Background(), SessionIdentity{Generation: gen, ID: "$9", Name: "gone"})
+		}},
+		{"AttachWindow", func(c *Client) error {
+			return c.AttachWindow(context.Background(), WindowIdentity{Generation: gen, ID: "@9", SessionID: "$9", Name: "gone"})
+		}},
+	} {
+		t.Run(tc.name+" with a stale identity", func(t *testing.T) {
+			run := &internalexec.FakeRunner{} // no rows: revalidation cannot succeed
+			c := pinnedClient(t, run)
+
+			err := tc.call(c)
+			if errors.Is(err, ErrObjectGone) {
+				t.Fatalf("%s reported a transient ErrObjectGone for a client that can NEVER attach: %v", tc.name, err)
+			}
+			if !errors.Is(err, ErrAttachUnavailableWhenPinned) {
+				t.Fatalf("%s = %v, want ErrAttachUnavailableWhenPinned", tc.name, err)
+			}
+			if len(run.Calls) != 0 {
+				t.Errorf("%s ran %d commands before refusing: %v", tc.name, len(run.Calls), run.Calls)
+			}
+		})
+	}
+
+	// The refusal is pin-scoped: an unpinned client must still attach.
+	run := &internalexec.FakeRunner{}
+	unpinned := New(run, WithInsideTmux(func() bool { return true }))
+	unpinned.getenv = func(string) string { return "" }
+	if err := unpinned.attachOrSwitch(context.Background(), "$1", "forge"); err != nil {
+		t.Fatalf("unpinned attachOrSwitch = %v, want nil — the refusal must not touch the environmental mode", err)
+	}
+	if len(run.Calls) != 1 {
+		t.Errorf("unpinned attachOrSwitch ran %d commands, want 1", len(run.Calls))
+	}
+}
+
+// TestNewPinnedScreensTerminalHostilePaths: this path is caller-supplied and
+// lands in an error an operator reads, so an absolute, lexically clean path
+// carrying an escape sequence must not get through. The refusal reports a byte
+// offset and never echoes the bytes it is refusing.
+func TestNewPinnedScreensTerminalHostilePaths(t *testing.T) {
+	hostile := "/tmp/fc\x1b[2J/sock"
+	c, err := NewPinned(&internalexec.FakeRunner{}, hostile)
+	if !errors.Is(err, ErrInvalidSocketPath) {
+		t.Fatalf("NewPinned(control char) = (%v, %v), want ErrInvalidSocketPath", c, err)
+	}
+	if strings.ContainsRune(err.Error(), '\x1b') {
+		t.Errorf("the refusal echoed the control character it refused: %q", err.Error())
+	}
+
+	long := "/tmp/" + strings.Repeat("a", MaxSocketPathLen)
+	if _, err := NewPinned(&internalexec.FakeRunner{}, long); !errors.Is(err, ErrInvalidSocketPath) {
+		t.Errorf("NewPinned(%d bytes) = %v, want ErrInvalidSocketPath", len(long), err)
+	}
+	// At the cap, not over it — a refusal case without an acceptance case
+	// beside it cannot tell a correct bound from an off-by-one.
+	atCap := "/tmp/" + strings.Repeat("a", MaxSocketPathLen-len("/tmp/"))
+	if len(atCap) != MaxSocketPathLen {
+		t.Fatalf("fixture is %d bytes, want exactly %d", len(atCap), MaxSocketPathLen)
+	}
+	if _, err := NewPinned(&internalexec.FakeRunner{}, atCap); err != nil {
+		t.Errorf("NewPinned at exactly the %d-byte cap = %v, want nil", MaxSocketPathLen, err)
 	}
 }
 

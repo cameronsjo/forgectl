@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -21,7 +22,43 @@ const (
 	serverStaleSocket
 	serverSocketPermission
 	serverCanceled
+	// serverPinMismatch means a pinned client saw an argv it did not build —
+	// a call site that skipped tmuxArgs, so the command went to the
+	// environmental server. It is separated from serverUnknown because the two
+	// send an operator to opposite places: unknown says "your tmux is
+	// unreadable", this says "forgectl aimed the command wrong". Folded
+	// together, the only trace of a missing pin was a Debug line.
+	serverPinMismatch
+	// serverSocketDirMissing means the pinned socket's PARENT directory does not
+	// exist. It is not serverAbsent, because tmux creates the default socket's
+	// directory but never an explicit `-S` one — so "absent, go create it" would
+	// send the caller into a bind failure against a path nothing can bind.
+	serverSocketDirMissing
 )
+
+// String renders a serverFailureKind for logging — the log line at the bottom
+// of classifyServerFailure is the only consumer, and a bare uint8 there would
+// read as noise.
+func (k serverFailureKind) String() string {
+	switch k {
+	case serverAbsent:
+		return "absent"
+	case serverCustomSocket:
+		return "custom_socket"
+	case serverStaleSocket:
+		return "stale_socket"
+	case serverSocketPermission:
+		return "socket_permission"
+	case serverCanceled:
+		return "canceled"
+	case serverPinMismatch:
+		return "pin_mismatch"
+	case serverSocketDirMissing:
+		return "socket_dir_missing"
+	default:
+		return "unknown"
+	}
+}
 
 type serverFailure struct {
 	Kind       serverFailureKind
@@ -42,16 +79,48 @@ func (c *Client) classifyServerFailure(ctx context.Context, expectedArgs []strin
 		return serverFailure{Kind: refusal, Cause: err}
 	}
 	_, statErr := c.lstat(socketPath)
+	var failure serverFailure
 	switch {
+	case errors.Is(statErr, os.ErrNotExist) && !c.socketDirUsable(socketPath):
+		// Absent socket AND no directory to put one in. Only reachable under a
+		// pin: the environmental socket's directory is one tmux makes itself.
+		failure = serverFailure{Kind: serverSocketDirMissing, SocketPath: socketPath, Cause: err}
 	case errors.Is(statErr, os.ErrNotExist):
-		return serverFailure{Kind: serverAbsent, SocketPath: socketPath, Cause: err}
+		failure = serverFailure{Kind: serverAbsent, SocketPath: socketPath, Cause: err}
 	case errors.Is(statErr, os.ErrPermission):
-		return serverFailure{Kind: serverSocketPermission, SocketPath: socketPath, Cause: statErr}
+		failure = serverFailure{Kind: serverSocketPermission, SocketPath: socketPath, Cause: statErr}
 	case statErr == nil:
-		return serverFailure{Kind: serverStaleSocket, SocketPath: socketPath, Cause: err}
+		failure = serverFailure{Kind: serverStaleSocket, SocketPath: socketPath, Cause: err}
 	default:
-		return serverFailure{Kind: serverUnknown, SocketPath: socketPath, Cause: statErr}
+		failure = serverFailure{Kind: serverUnknown, SocketPath: socketPath, Cause: statErr}
 	}
+	// This is the classifier's decisive verdict — serverAbsent is the ONE kind
+	// that permits a caller to create a server, so a confusing "why did it
+	// create/refuse" report is diagnosed from this line, not from the caller's
+	// own (already-typed) error.
+	slog.Debug("Classified tmux server failure.",
+		"kind", failure.Kind, "socket", socketPath, "pinned", c.socket != "")
+	return failure
+}
+
+// socketDirUsable reports whether the socket's parent directory exists, so an
+// absent socket can be told apart from an unbindable path.
+//
+// It answers true for an environmental client without looking: `tmux` creates
+// its own default-socket directory, so absence there is genuinely "no server
+// yet". An explicit `-S` path gets no such treatment from tmux, which is why
+// only the pinned mode needs the check.
+//
+// A stat error other than "not exist" answers true — the check must not turn
+// its own inability to run into a refusal of an otherwise-valid create.
+func (c *Client) socketDirUsable(socketPath string) bool {
+	if c.socket == "" {
+		return true
+	}
+	if _, err := c.lstat(filepath.Dir(socketPath)); errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	return true
 }
 
 // classifiableSocket decides whether this argv's server absence may be read
@@ -78,7 +147,7 @@ func (c *Client) classifyServerFailure(ctx context.Context, expectedArgs []strin
 func (c *Client) classifiableSocket(args []string) (path string, ok bool, refusal serverFailureKind) {
 	if c.socket != "" {
 		if !c.pinnedArgs(args) {
-			return "", false, serverUnknown
+			return "", false, serverPinMismatch
 		}
 		return c.socket, true, serverUnknown
 	}
@@ -118,9 +187,16 @@ func (c *Client) classifiableSocket(args []string) (path string, ok bool, refusa
 // it is safe there: a false positive only withholds the proceed verdict.
 func (c *Client) pinnedArgs(args []string) bool {
 	if len(args) < 2 || args[0] != "-S" || args[1] != c.socket {
+		slog.Debug("Refusing argv this pinned client did not build.",
+			"pin", c.socket, "argv", args)
 		return false
 	}
-	return !hasExplicitSocketArg(args[2:])
+	if hasExplicitSocketArg(args[2:]) {
+		slog.Debug("Refusing argv naming a second socket after the pin.",
+			"pin", c.socket, "argv", args)
+		return false
+	}
+	return true
 }
 
 // hasExplicitSocketArg reports whether argv names a socket other than the
@@ -140,12 +216,15 @@ func (c *Client) pinnedArgs(args []string) bool {
 // derivation, where the socket at stake is the default one, and pinnedArgs's
 // tail check, where it is the pin.
 //
-// `--` and long options are excluded because tmux has no long options, so a
-// double-dash element is the argument terminator or an operand — never a
-// bundled short flag. See TestHasExplicitSocketArgOverMatchesDeliberately.
+// `--` is NOT excluded. tmux has no long options today, so excluding it would
+// be defensible on the option grammar alone — but this function also scans argv
+// TAILS (pinnedArgs's args[2:]), where a `--` element is an operand rather than
+// an option, and a future tmux long option would land in the same blind spot.
+// Including it costs only more false-positive refusals, which the paragraph
+// above already argues are free. See TestHasExplicitSocketArgOverMatchesDeliberately.
 func hasExplicitSocketArg(args []string) bool {
 	for _, arg := range args {
-		if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") {
+		if !strings.HasPrefix(arg, "-") {
 			continue
 		}
 		if strings.ContainsAny(arg, "SL") {

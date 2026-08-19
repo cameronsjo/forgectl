@@ -11,6 +11,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/privdir"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // MaxSocketPathLen bounds the bootstrap socket's absolute path.
@@ -27,7 +28,21 @@ import (
 // disagreeing would mean forgectl emitting a bootstrap its own re-entry
 // refuses — the kind of defect that only shows up on the longest temp path
 // somebody happens to have.
+//
+// tmux.NewPinned validates against the same bound for the same reason, and the
+// two are asserted equal at COMPILE time below rather than by a test, so drift
+// cannot ship. The assertion lives here because the dependency runs this way:
+// surface may import tmux, never the reverse.
 const MaxSocketPathLen = 100
+
+// Two independent literals of this bound are how a producer mints a socket its
+// own consumer refuses. This makes that a build failure: if the constants ever
+// diverge, one of these subtractions is negative and an untyped unsigned
+// constant expression overflows.
+const (
+	_ uint = MaxSocketPathLen - tmux.MaxSocketPathLen
+	_ uint = tmux.MaxSocketPathLen - MaxSocketPathLen
+)
 
 // runDirPrefix namespaces the private directory in a shared temp root, so an
 // operator listing /tmp can tell what made it.

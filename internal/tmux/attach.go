@@ -19,6 +19,13 @@ import (
 // through tmux's target grammar, where a missing session falls through to a
 // prefix sibling (forgectl#237).
 func (c *Client) AttachSession(ctx context.Context, want SessionIdentity) error {
+	// Ahead of revalidation, not behind it. A pinned client can NEVER attach, so
+	// a stale identity must not turn that permanent answer into a transient-
+	// looking ErrObjectGone — a caller distinguishing "route this elsewhere"
+	// from "retry" would read the wrong one and retry forever.
+	if err := c.refuseAttachWhenPinned(); err != nil {
+		return err
+	}
 	current, err := c.RevalidateSession(ctx, want)
 	if err != nil {
 		return fmt.Errorf("attach session %q: %w", want.Name, err)
@@ -34,6 +41,11 @@ func (c *Client) AttachSession(ctx context.Context, want SessionIdentity) error 
 // arrives already looking at the right window rather than flashing whatever was
 // current.
 func (c *Client) AttachWindow(ctx context.Context, want WindowIdentity) error {
+	// Up front, for AttachSession's reason — and here it also spares a
+	// select-window against a session the client could never then attach to.
+	if err := c.refuseAttachWhenPinned(); err != nil {
+		return err
+	}
 	current, err := c.RevalidateWindow(ctx, want)
 	if err != nil {
 		return fmt.Errorf("attach window %q: %w", want.Name, err)
@@ -59,6 +71,9 @@ func (c *Client) SelectWindow(ctx context.Context, want WindowIdentity) error {
 // attachOrSwitch is the single inside/outside branch, taking an already
 // revalidated native session id.
 func (c *Client) attachOrSwitch(ctx context.Context, sessionID, label string) error {
+	if err := c.refuseAttachWhenPinned(); err != nil {
+		return err
+	}
 	inside := c.InsideTmux()
 	slog.Debug("Preparing to attach.", "session_id", sessionID, "name", label, "inside_tmux", inside)
 	var err error
@@ -79,6 +94,12 @@ func (c *Client) attachOrSwitch(ctx context.Context, sessionID, label string) er
 // this — switch-client -l. Outside, there's no "last" client state, so we
 // resolve the most-recently-attached session ourselves and attach to it by id.
 func (c *Client) LastSession(ctx context.Context) error {
+	// Checked up front rather than left to attachOrSwitch: both outcomes end in
+	// an attach a pinned client refuses, so the listing below would be work
+	// done only to be discarded.
+	if err := c.refuseAttachWhenPinned(); err != nil {
+		return err
+	}
 	if c.InsideTmux() {
 		_, err := c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("switch-client", "-l")...)
 		return err
