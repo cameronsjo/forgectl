@@ -113,3 +113,43 @@ func TestSurfaceAdapterFor_DrivesTmuxAndRefusesTheRest(t *testing.T) {
 		t.Errorf("an unknown backend = %v, want errUnknownBackend", err)
 	}
 }
+
+// TestNewTmuxAdapter_ReturnsATrulyNilAdapterOnEveryFailure pins the reason
+// newTmuxAdapter assigns and returns explicitly instead of forwarding
+// tmuxadapter.New's result: a bare `return tmuxadapter.New(...)` converts
+// New's nil *Adapter into a NON-nil backend.Adapter holding a nil pointer, the
+// moment New's error path is taken. `adapter != nil` would then be true and
+// `err != nil` would also be true — a caller checking err first (as this
+// package's tests do) would never notice, but a caller checking adapter first,
+// or storing it, would hold a typed nil. This asserts the plain `== nil`
+// comparison directly, on both of newTmuxAdapter's two failure exits.
+func TestNewTmuxAdapter_ReturnsATrulyNilAdapterOnEveryFailure(t *testing.T) {
+	t.Run("tmux not found on PATH", func(t *testing.T) {
+		empty := t.TempDir()
+		t.Setenv("PATH", empty)
+
+		adapter, err := newTmuxAdapter()
+		if !errors.Is(err, errBackendUnavailable) {
+			t.Fatalf("newTmuxAdapter() err = %v, want errBackendUnavailable", err)
+		}
+		if adapter != nil {
+			t.Error("newTmuxAdapter() returned a non-nil adapter alongside an error")
+		}
+	})
+
+	t.Run("tmuxadapter.New refuses the resolved socket", func(t *testing.T) {
+		// tmux resolves fine on PATH; the failure is pushed into New itself by
+		// naming a socket path so long tmux.NewPinned's own shape check
+		// refuses it — the one New-side refusal this package can force without
+		// touching the filesystem.
+		t.Setenv("TMUX", "/tmp/"+strings.Repeat("a", 5000)+",1,0")
+
+		adapter, err := newTmuxAdapter()
+		if !errors.Is(err, errBackendUnavailable) {
+			t.Fatalf("newTmuxAdapter() err = %v, want errBackendUnavailable", err)
+		}
+		if adapter != nil {
+			t.Error("newTmuxAdapter() returned a non-nil adapter alongside an error")
+		}
+	})
+}

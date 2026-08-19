@@ -92,8 +92,10 @@ type Adapter struct {
 	source backend.ServerSource
 
 	// lstat is seamed so incarnation fingerprinting is testable without a live
-	// server.
-	lstat func(string) (os.FileInfo, error)
+	// server; mkdirAll is seamed alongside it so the socket-directory check can
+	// be driven without touching the real /tmp.
+	lstat    func(string) (os.FileInfo, error)
+	mkdirAll func(string, os.FileMode) error
 }
 
 // Option configures an Adapter at construction.
@@ -102,6 +104,11 @@ type Option func(*Adapter)
 // WithLstat overrides the socket stat used for incarnation fingerprinting.
 func WithLstat(fn func(string) (os.FileInfo, error)) Option {
 	return func(a *Adapter) { a.lstat = fn }
+}
+
+// WithMkdirAll overrides the socket-directory creation.
+func WithMkdirAll(fn func(string, os.FileMode) error) Option {
+	return func(a *Adapter) { a.mkdirAll = fn }
 }
 
 // ErrResolveSocket reports that the tmux server socket could not be chosen.
@@ -135,6 +142,7 @@ func New(run exec.SensitiveRunner, tmuxPath string, getenv func(string) string, 
 		socket:   socket,
 		source:   source,
 		lstat:    os.Lstat,
+		mkdirAll: os.MkdirAll,
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -161,17 +169,28 @@ var ErrUnsafeSocketDir = errors.New("tmuxadapter: the tmux socket directory is n
 // attacker who wins the race to create /tmp/tmux-<uid>/ then owns the server
 // that receives the bootstrap's socket path and one-shot nonce.
 //
-// An ABSENT directory is fine and is the common first-run case: tmux creates it
-// with the right mode, and refusing here would mean forgectl could never start
-// the first server. The rule is only that a directory which already exists must
-// be one we own and nobody else can write.
+// An absent directory is CREATED here, not waved through, and that ordering is
+// the whole control. The obvious carve-out — "absent is fine, tmux makes it" —
+// is false under `-S`, and measured to be: on 3.7b,
+// `tmux -S /tmp/absent/default new-session …` prints
+// "error creating /tmp/absent/default (No such file or directory)", creates
+// nothing, and EXITS ZERO. So the carve-out would have bought nothing
+// functional while opening the window it exists to close: between an ENOENT
+// pre-check and the create, anyone can win the race to make /tmp/tmux-<uid>
+// (with /tmp world-writable) holding a socket bound to THEIR tmux server —
+// and the create's final operand is the bootstrap, carrying the handshake
+// socket path and the one-shot nonce.
+//
+// Hence create-then-verify: MkdirAll with 0700, tolerate EEXIST, then run the
+// checks against what is actually on disk. Verifying after rather than trusting
+// the pre-check is what makes the answer describe the directory we will use.
 func (a *Adapter) checkSocketDir(getuid func() int) error {
 	dir := filepath.Dir(a.socket)
+	if err := a.mkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("%w: %s", ErrUnsafeSocketDir, "cannot create it")
+	}
 	info, err := a.lstat(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return fmt.Errorf("%w: %s", ErrUnsafeSocketDir, "cannot stat it")
 	}
 	// This also closes the symlink case, and it is worth saying why rather than

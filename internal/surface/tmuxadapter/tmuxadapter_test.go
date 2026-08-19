@@ -62,6 +62,12 @@ func liveSocket(inode uint64) func(string) (os.FileInfo, error) {
 	return fakeFS(safeDir(), fakeInfo{sys: statFor(inode), mode: fs.ModeSocket | 0o600})
 }
 
+// noMkdir stands in for os.MkdirAll so no test touches the real filesystem.
+// It reports success without creating anything, which is the same answer
+// MkdirAll gives for a directory that already exists — and every test's fake
+// lstat then describes what checkSocketDir finds there.
+func noMkdir(string, os.FileMode) error { return nil }
+
 // safeDir is the socket's parent as New's check wants to find it: a real
 // directory, owned by this uid, with no group or world write.
 func safeDir() fakeInfo {
@@ -86,7 +92,7 @@ func newTestAdapter(t *testing.T, run exec.SensitiveRunner, env map[string]strin
 	// The safe filesystem goes first so every test is independent of the real
 	// /tmp on the machine running it — CI's uid is not this fixture's — and a
 	// caller's own WithLstat still wins, options being applied in order.
-	opts = append([]Option{WithLstat(liveSocket(liveInode))}, opts...)
+	opts = append([]Option{WithLstat(liveSocket(liveInode)), WithMkdirAll(noMkdir)}, opts...)
 	a, err := New(run, testTmux, getenv, func() int { return testUID }, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -976,7 +982,8 @@ func TestNewRefusesASocketDirectoryItDoesNotPrivatelyOwn(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := New(&exec.FakeSensitiveRunner{}, testTmux,
 				func(string) string { return "" }, func() int { return testUID },
-				WithLstat(fakeFS(tt.dir, fakeInfo{sys: statFor(liveInode), mode: fs.ModeSocket | 0o600})))
+				WithLstat(fakeFS(tt.dir, fakeInfo{sys: statFor(liveInode), mode: fs.ModeSocket | 0o600})),
+				WithMkdirAll(noMkdir))
 			if !errors.Is(err, ErrUnsafeSocketDir) {
 				t.Errorf("New = %v, want ErrUnsafeSocketDir", err)
 			}
@@ -988,10 +995,19 @@ func TestNewRefusesASocketDirectoryItDoesNotPrivatelyOwn(t *testing.T) {
 	// first server on a clean machine.
 	if _, err := New(&exec.FakeSensitiveRunner{}, testTmux,
 		func(string) string { return "" }, func() int { return testUID },
-		WithLstat(func(path string) (os.FileInfo, error) {
-			return nil, fs.ErrNotExist
-		})); err != nil {
-		t.Errorf("New refused an absent socket directory: %v", err)
+		WithLstat(fakeFS(safeDir(), fakeInfo{sys: statFor(liveInode), mode: fs.ModeSocket | 0o600})),
+		WithMkdirAll(noMkdir)); err != nil {
+		t.Errorf("New refused a directory it had just created: %v", err)
+	}
+
+	// And a directory it cannot create is a refusal, not a pass-through. This
+	// is the arm that replaced the old absent-is-fine carve-out: under `-S`
+	// tmux creates nothing, so an uncreatable directory means no server can
+	// ever bind there.
+	if _, err := New(&exec.FakeSensitiveRunner{}, testTmux,
+		func(string) string { return "" }, func() int { return testUID },
+		WithMkdirAll(func(string, os.FileMode) error { return fs.ErrPermission })); !errors.Is(err, ErrUnsafeSocketDir) {
+		t.Errorf("New = %v, want ErrUnsafeSocketDir when the directory cannot be created", err)
 	}
 }
 
@@ -1094,6 +1110,86 @@ func TestCloseRefusesAbsenceFromARestartedServer(t *testing.T) {
 	}
 	if got := a.Probe(context.Background(), ref); got.State() != backend.ProbeIdentityMismatch {
 		t.Errorf("Probe = %v, want identity-mismatch", got.State())
+	}
+}
+
+// TestTheZeroLocateStateNeverKillsAndNeverReportsPresent pins the property
+// that made the previous guard inert.
+//
+// locateFound used to be `iota`, so it WAS the zero value — which put Close's
+// default arm on the wrong side of the exact state it named: a zero-valued
+// locateState selected `case locateFound:` and fell through to the kill, and
+// Probe answered ProbePresent, the fail-open direction. Naming an explicit
+// locateInvalid zero is what moves both guards to where they always read as
+// if they were.
+//
+// Asserted on the enum itself rather than through a driven call, because
+// nothing can produce the zero state today — which is the whole reason it must
+// be asserted rather than assumed.
+func TestTheZeroLocateStateNeverKillsAndNeverReportsPresent(t *testing.T) {
+	var zero locateState
+	if zero == locateFound {
+		t.Fatal("the zero locateState is locateFound — Close's guard is on the wrong side of it, and Probe reports present")
+	}
+	if zero != locateInvalid {
+		t.Errorf("the zero locateState is %d, want locateInvalid", zero)
+	}
+}
+
+// TestAnAbsentSocketFileProvesAbsenceWithoutParsingStrerror is the second half
+// of the absence question, and it is why the answer comes from the filesystem.
+//
+// The two tmux diagnostics do not partition the way they look like they do.
+// Measured on 3.7b: "no server running on <path>" appears only when the socket
+// FILE exists and the server behind it is dead; when the socket is simply
+// absent — a clean machine, or after a /tmp sweep — tmux says
+// "error connecting to <path> (No such file or directory)", sharing its prefix
+// with the permission case that proves nothing. Matching text alone therefore
+// left NotMutated and AlreadyGone unreachable in the commonest case.
+//
+// The stat is also locale-proof, which the text is not: the parenthesised half
+// is strerror(3) and translates.
+func TestAnAbsentSocketFileProvesAbsenceWithoutParsingStrerror(t *testing.T) {
+	// tmux's ambiguous wording, and a socket the stat says is not there.
+	ambiguous := stderr("error connecting to /tmp/tmux-501/default (No such file or directory)")
+	// The DIRECTORY stats fine — only the socket FILE is missing. A seam that
+	// reported ENOENT for both would fail New's directory check first, and the
+	// test would pass for a reason that has nothing to do with absence.
+	socketGone := func(path string) (os.FileInfo, error) {
+		if filepath.Base(path) == "default" {
+			return nil, fs.ErrNotExist
+		}
+		return safeDir(), nil
+	}
+
+	spec, tag := newSpec(t)
+	name := spec.OwnershipName()
+	ref := refFor(t, tag, name)
+
+	run := &exec.FakeSensitiveRunner{RunFunc: scripted{byKind: map[exec.CommandKind]func() (exec.SensitiveResult, error){
+		exec.KindTmuxProbe: func() (exec.SensitiveResult, error) {
+			return ambiguous, exec.SensitiveErrorForTest(exec.KindTmuxProbe, exec.OutcomeExit)
+		},
+	}}.runFunc}
+	a := newTestAdapter(t, run, nil, WithLstat(socketGone))
+
+	if got := a.Close(context.Background(), ref); got.State() != backend.CloseAlreadyGone {
+		t.Errorf("Close = %v, want already-gone — an absent socket file proves absence", got.State())
+	}
+	if got := a.Probe(context.Background(), ref); got.State() != backend.ProbeGone {
+		t.Errorf("Probe = %v, want gone", got.State())
+	}
+
+	// Same wording, socket file PRESENT: now it proves nothing, because the
+	// errno behind it could just as well be EACCES.
+	run2 := &exec.FakeSensitiveRunner{RunFunc: scripted{byKind: map[exec.CommandKind]func() (exec.SensitiveResult, error){
+		exec.KindTmuxProbe: func() (exec.SensitiveResult, error) {
+			return ambiguous, exec.SensitiveErrorForTest(exec.KindTmuxProbe, exec.OutcomeExit)
+		},
+	}}.runFunc}
+	b := newTestAdapter(t, run2, nil, WithLstat(liveSocket(liveInode)))
+	if got := b.Close(context.Background(), ref); got.State().SatisfiesRollback() {
+		t.Errorf("Close = %v — the rollback was discharged on a socket that still exists", got.State())
 	}
 }
 
@@ -1230,6 +1326,126 @@ func TestCloseClassifiesAFailedKill(t *testing.T) {
 // every failure would report FailureUnavailable while three named classes sat
 // dead in the switch. Driving the real error shape is what makes this a
 // statement about production rather than about a fake.
+// TestReadinessRefusesBeforeCreatingOnEveryFailureShape covers the ways `-V`
+// can fail that no other table drives: the runner erroring outright (not just
+// returning odd text) and a reply too short to carry a version at all. Both
+// must land as an honestly NotMutated refusal, and — like the version-floor
+// case — neither may let a create run, since readiness is the one check
+// permitted to conclude NotMutated on its own.
+func TestReadinessRefusesBeforeCreatingOnEveryFailureShape(t *testing.T) {
+	spec, _ := newSpec(t)
+
+	tests := []struct {
+		name      string
+		readiness func() (exec.SensitiveResult, error)
+		wantClass backend.StartFailureClass
+	}{
+		{
+			name: "the runner itself errors, not just the text it returns",
+			readiness: func() (exec.SensitiveResult, error) {
+				return stderr("exec: \"tmux\": executable file not found in $PATH"),
+					exec.SensitiveErrorForTest(exec.KindTmuxReadiness, exec.OutcomeStartFailed)
+			},
+			wantClass: backend.FailureUnavailable,
+		},
+		{
+			name: "the reply is truncated before a version is readable",
+			readiness: func() (exec.SensitiveResult, error) {
+				return exec.SensitiveResult{
+					Stdout: exec.BoundedOutputForTest([]byte("tmux 3"), exec.OutputOverflowed),
+					Stderr: exec.BoundedOutputForTest(nil, exec.OutputComplete),
+				}, nil
+			},
+			wantClass: backend.FailureMalformedResponse,
+		},
+		{
+			name:      "the reply is complete and empty",
+			readiness: func() (exec.SensitiveResult, error) { return stdout(""), nil },
+			wantClass: backend.FailureMalformedResponse,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := &exec.FakeSensitiveRunner{RunFunc: scripted{byKind: map[exec.CommandKind]func() (exec.SensitiveResult, error){
+				exec.KindTmuxReadiness: tt.readiness,
+			}}.runFunc}
+			a := newTestAdapter(t, run, nil, WithLstat(liveSocket(liveInode)))
+
+			res := a.Start(context.Background(), spec)
+			if res.Outcome() != backend.NotMutated {
+				t.Fatalf("outcome = %v, want not-mutated", res.Outcome())
+			}
+			cause, ok := res.Cause()
+			if !ok {
+				t.Fatal("no cause recorded")
+			}
+			if cause.Class() != tt.wantClass {
+				t.Errorf("cause class = %v, want %v", cause.Class(), tt.wantClass)
+			}
+			for _, cmd := range run.Calls() {
+				if cmd.Kind == exec.KindTmuxCreate {
+					t.Fatal("a create ran despite readiness failing — the result claims nothing was mutated")
+				}
+			}
+		})
+	}
+}
+
+// TestProbeReportsPresentAndGoneOnTheHappyPaths drives Probe far enough to
+// observe the two states it reaches on an ordinary launch and an ordinary
+// close-elsewhere — present and gone — rather than only the mismatch and
+// unreadable states the other Probe tests target. Close and Probe share
+// locate(), and the happy paths through it were the one part of that sharing
+// nothing here exercised end to end.
+func TestProbeReportsPresentAndGoneOnTheHappyPaths(t *testing.T) {
+	spec, _ := newSpec(t)
+	name := spec.OwnershipName()
+	live := row("91", "1700000000", "$1", name)
+
+	t.Run("present", func(t *testing.T) {
+		run := &exec.FakeSensitiveRunner{RunFunc: scripted{byKind: map[exec.CommandKind]func() (exec.SensitiveResult, error){
+			exec.KindTmuxCreate: func() (exec.SensitiveResult, error) { return stdout(live), nil },
+			exec.KindTmuxProbe:  func() (exec.SensitiveResult, error) { return stdout(live), nil },
+		}}.runFunc}
+		a := newTestAdapter(t, run, nil, WithLstat(liveSocket(liveInode)))
+		ref, ok := a.Start(context.Background(), spec).Ref()
+		if !ok {
+			t.Fatal("no reference from Start")
+		}
+
+		got := a.Probe(context.Background(), ref)
+		if got.State() != backend.ProbePresent {
+			t.Errorf("Probe = %v, want present", got.State())
+		}
+		if !got.State().Conclusive() {
+			t.Error("a present probe reported an inconclusive answer")
+		}
+	})
+
+	t.Run("gone", func(t *testing.T) {
+		run := &exec.FakeSensitiveRunner{RunFunc: scripted{byKind: map[exec.CommandKind]func() (exec.SensitiveResult, error){
+			exec.KindTmuxCreate: func() (exec.SensitiveResult, error) { return stdout(live), nil },
+			exec.KindTmuxProbe: func() (exec.SensitiveResult, error) {
+				return stderr("no server running on /tmp/tmux-501/default"), errors.New("exit 1")
+			},
+		}}.runFunc}
+		a := newTestAdapter(t, run, nil, WithLstat(liveSocket(liveInode)))
+		ref, ok := a.Start(context.Background(), spec).Ref()
+		if !ok {
+			t.Fatal("no reference from Start")
+		}
+
+		got := a.Probe(context.Background(), ref)
+		if got.State() != backend.ProbeGone {
+			t.Errorf("Probe = %v, want gone", got.State())
+		}
+		if !got.State().Conclusive() {
+			t.Error("a gone probe reported an inconclusive answer")
+		}
+	})
+}
+
 func TestClassifyRunErrorReadsTheSeamsSentinels(t *testing.T) {
 	for _, tt := range []struct {
 		name    string

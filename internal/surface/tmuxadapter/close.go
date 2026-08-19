@@ -40,10 +40,12 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 		//
 		// Stated plainly because the distinction matters: this arm is a
 		// CONSTRUCTION guard against a future locateState, not a tested
-		// control. All four states today are handled above, so nothing can
-		// drive it and its mutation survives — the honest reading is that it
-		// costs nothing and pays for itself the day a fifth state is added.
-		// The ValidateSessionID check below is the tested half.
+		// control. Every state locate can return is handled above, so nothing
+		// can drive it and its mutation survives. What IS tested is the enum
+		// underneath it — locateInvalid owning zero, so a zero-valued state
+		// reaches here rather than `case locateFound:`; before that the guard
+		// sat on the wrong side of the very value it names. The
+		// ValidateSessionID check below is the other tested half.
 		return backend.NewCloseUnreadable(backend.NewStartCause(backend.FailureInternal,
 			errors.New("the session lookup produced no usable state")))
 	}
@@ -63,7 +65,7 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 	if err != nil {
 		// A kill that raced someone else's is a satisfied rollback, not a
 		// failure: the obligation was that the object be gone, and it is.
-		if noServer(res.Stderr) || sessionNotFound(res.Stderr) {
+		if a.serverAbsent(res.Stderr) || sessionNotFound(res.Stderr) {
 			return backend.NewCloseAlreadyGone()
 		}
 		return backend.NewCloseFailed(classifyRunError(err))
@@ -84,16 +86,36 @@ func (a *Adapter) Probe(ctx context.Context, ref backend.Ref) backend.ProbeResul
 		return backend.NewProbeGone()
 	case locateFound:
 		return backend.NewProbePresent()
+	case locateInvalid:
 	}
+	// Reached only by locateInvalid or a state added without teaching this
+	// switch. Unreadable, never Present: an unknown state answering "the
+	// session is there" is the fail-OPEN direction, and Conclusive() would let
+	// a caller act on it.
+	//
+	// Like Close's default arm, this is a CONSTRUCTION guard and not a tested
+	// control — locate cannot return locateInvalid, so its mutation survives.
+	// The tested part is the enum itself: locateInvalid owning zero is what
+	// keeps a zero-valued state out of `case locateFound:`, and that is pinned
+	// by TestTheZeroLocateStateNeverKillsAndNeverReportsPresent.
 	return backend.NewProbeUnreadable(backend.NewStartCause(backend.FailureInternal,
-		errors.New("unreachable locate state")))
+		errors.New("the session lookup produced no usable state")))
 }
 
 // locateState is the shared outcome of "find this reference's session".
 type locateState uint8
 
 const (
-	locateFound locateState = iota
+	// locateInvalid is the ZERO value, and it is deliberately not a real
+	// outcome. Without it locateFound would be zero, so a zero-valued
+	// locateState — the exact "state nobody taught the switch about" that
+	// Close's default arm exists to catch — would select `case locateFound:`
+	// and fall through to the kill, on the wrong side of its own guard. It
+	// would also make Probe answer ProbePresent, which is the fail-OPEN
+	// direction. Naming the zero is what puts both guards where they read as
+	// if they already were.
+	locateInvalid locateState = iota
+	locateFound
 	locateAbsent
 	locateMismatch
 	locateUnreadable
@@ -131,7 +153,7 @@ func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (identityRow, loc
 		exec.Opaque(identityFormat),
 	))
 	if err != nil {
-		if noServer(res.Stderr) {
+		if a.serverAbsent(res.Stderr) {
 			// No server at all means the session is certainly gone. The
 			// incarnation question is moot: there is no incarnation.
 			return identityRow{}, locateAbsent, backend.StartCause{}

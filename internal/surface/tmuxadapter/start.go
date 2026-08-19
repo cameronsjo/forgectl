@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -131,7 +132,7 @@ func (a *Adapter) reconcile(ctx context.Context, tag backend.RecoveryTag, name, 
 	if runErr != nil {
 		// "No server running" is the one listing failure that proves absence:
 		// a server that does not exist is not hiding our session.
-		if noServer(res.Stderr) {
+		if a.serverAbsent(res.Stderr) {
 			return backend.NewNotMutated(cause)
 		}
 		return backend.NewOutcomeUnknown(tag, cause)
@@ -412,6 +413,29 @@ func noServer(out exec.BoundedOutput) bool {
 		return false
 	}
 	return strings.HasPrefix(strings.TrimSpace(string(raw)), "no server running on ")
+}
+
+// serverAbsent decides whether a failed listing PROVES there is no server,
+// which is the one listing failure the contract lets us read as absence.
+//
+// It asks the filesystem rather than trusting the diagnostic, because the
+// diagnostics do not partition the way they look like they do. Measured on
+// 3.7b: "no server running on <path>" appears only when the socket FILE exists
+// and the server behind it is dead; when the socket is simply absent — a clean
+// machine, or after a /tmp sweep — tmux says
+// "error connecting to <path> (No such file or directory)", which shares its
+// prefix with the permission case that proves nothing.
+//
+// So the text is a fast path and the stat is the proof. The stat is also
+// locale-proof, which the text is not: the parenthesised half is strerror(3)
+// and translates, and this package has already been bitten once by tmux
+// rendering differently under a non-UTF-8 locale.
+func (a *Adapter) serverAbsent(out exec.BoundedOutput) bool {
+	if noServer(out) {
+		return true
+	}
+	_, err := a.lstat(a.socket)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // classifyRunError maps a runner error onto the closed failure vocabulary.
