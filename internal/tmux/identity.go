@@ -62,8 +62,18 @@ func ValidatePaneID(id string) error {
 
 // ServerSelector captures WHICH tmux server a command reaches.
 //
-// Selection is one of two modes, and they are mutually exclusive by
-// construction — exactly one group of fields is ever populated:
+// Selection is one of two modes. currentSelector is the only thing that builds
+// a selector, and it populates exactly one group of fields per mode — but the
+// struct is exported and nothing prevents another package assembling a mixed
+// one by hand. That is harmless rather than guarded, and deliberately so: every
+// impossible combination FAILS CLOSED. preflight compares the whole struct with
+// !=, so a hand-assembled selector matches no live client and refuses every
+// action. Making the invalid states unrepresentable — a sealed type or an
+// interface — would cost more than it bought, because that comparison depends
+// on ServerSelector staying a plain comparable struct. The exclusivity is a
+// property of the constructor; the safety is a property of the comparison.
+//
+// The two modes:
 //
 //   - ENVIRONMENTAL (Socket empty). No `-L`/`-S` is passed, so selection is
 //     entirely environmental: inside tmux, $TMUX names the socket the client is
@@ -162,6 +172,11 @@ var (
 	// that permits a caller to create the first server. A command aimed at any
 	// other socket never reaches this verdict.
 	ErrNoServer = errors.New("no tmux server is running")
+	// ErrInvalidSocketPath reports a socket path NewPinned refused. It is typed
+	// like every other refusal in this package so a caller classifies on the
+	// error rather than on its wording — a construction failure against a
+	// server nobody meant to reach is worth distinguishing from any other.
+	ErrInvalidSocketPath = errors.New("invalid tmux socket path")
 	// ErrDuplicateSession reports tmux refusing to create a session because the
 	// name is taken. It is the ONLY create failure that permits a second lookup.
 	ErrDuplicateSession = errors.New("a tmux session with that name already exists")
@@ -188,9 +203,10 @@ func (c *Client) currentSelector() ServerSelector {
 
 // SessionIdentity binds a listed session row to the server selection this
 // client is pointed at. It exists so callers outside the package can carry a
-// full identity out of a listing without the selector being exported, which
-// would invite one being assembled from somewhere other than the client that
-// took the listing.
+// full identity out of a listing without reaching for currentSelector, which is
+// unexported precisely so a selector is never assembled from somewhere other
+// than the client that took the listing. (ServerSelector itself IS exported —
+// what is withheld is the ability to produce a real one.)
 func (c *Client) SessionIdentity(s Session) SessionIdentity {
 	return s.Identity(c.currentSelector())
 }
@@ -203,14 +219,20 @@ func (c *Client) WindowIdentity(w Window) WindowIdentity {
 // serverStateError maps a failed tmux command onto a typed server-state error,
 // routing #242's classifier rather than adding a second one. Only
 // serverAbsent becomes ErrNoServer; every other verdict — including a
-// custom socket we cannot inspect — becomes ErrServerUnreadable, because
-// proceeding would mean acting on the default server after asking about
-// another one.
+// socket we cannot inspect — becomes ErrServerUnreadable, because proceeding
+// would mean acting on the server this client selects after having asked about
+// a different one. Under a pin no default server is involved at all.
 func (c *Client) serverStateError(ctx context.Context, args []string, err error) error {
 	failure := c.classifyServerFailure(ctx, args, err)
 	switch failure.Kind {
 	case serverAbsent:
-		return fmt.Errorf("%w (default socket %s)", ErrNoServer, failure.SocketPath)
+		// Naming the mode matters for the operator: "default socket" on a pinned
+		// client points them at the wrong file to go look at.
+		kind := "default socket"
+		if c.socket != "" {
+			kind = "pinned socket"
+		}
+		return fmt.Errorf("%w (%s %s)", ErrNoServer, kind, failure.SocketPath)
 	case serverCanceled:
 		return failure.Cause
 	default:

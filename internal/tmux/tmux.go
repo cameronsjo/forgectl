@@ -5,11 +5,11 @@
 package tmux
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"slices"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -62,6 +62,12 @@ type Client struct {
 type Option func(*Client)
 
 // WithInsideTmux overrides the $TMUX detection — used in tests.
+//
+// It configures the ENVIRONMENTAL answer only. A socket-pinned client reports
+// false unconditionally (see InsideTmux), so passing this to NewPinned is
+// accepted and has no effect. That is by design rather than a dropped option:
+// under a pin, $TMUX describes a client of a different server, so there is no
+// environment for it to answer about.
 func WithInsideTmux(fn func() bool) Option {
 	return func(c *Client) { c.insideTmux = fn }
 }
@@ -99,15 +105,28 @@ func WithLookPath(fn func(string) (string, error)) Option {
 // A pinned client never unsets $TMUX for the child, and does not need to: `-S`
 // overrides socket selection outright, and tmux's nesting refusal fires only on
 // a command that would ATTACH — every pinned command here is `-d` or read-only.
+//
+// CALLER OBLIGATION, and the pin is not a security boundary without it: the
+// socket's parent directory — and every component above it — must be writable
+// only by the invoking uid. This validates the path as a STRING; it cannot
+// validate the filesystem, and the gap is a real one. The create path reads
+// "absent" from an lstat and then asks tmux to create, so anyone who can write
+// the parent directory can plant a live socket at the path in that window;
+// tmux would then CONNECT to a foreign server, and every later selector check
+// would agree, because the pin does match. Use a privately-owned 0700 directory
+// (internal/surface's run dir is one) rather than a shared temp path.
 func NewPinned(run exec.Runner, socket string, opts ...Option) (*Client, error) {
+	// The empty case is subsumed by IsAbs — it exists only to say "empty"
+	// instead of "must be absolute, got \"\"", which is a worse diagnostic for
+	// the most likely mistake. It is not an independent control.
 	if socket == "" {
-		return nil, errors.New("tmux socket path is empty")
+		return nil, fmt.Errorf("%w: it is empty", ErrInvalidSocketPath)
 	}
 	if !filepath.IsAbs(socket) {
-		return nil, fmt.Errorf("tmux socket path must be absolute, got %q", socket)
+		return nil, fmt.Errorf("%w: must be absolute, got %q", ErrInvalidSocketPath, socket)
 	}
 	if filepath.Clean(socket) != socket {
-		return nil, fmt.Errorf("tmux socket path must be clean, got %q (want %q)", socket, filepath.Clean(socket))
+		return nil, fmt.Errorf("%w: must be clean, got %q (want %q)", ErrInvalidSocketPath, socket, filepath.Clean(socket))
 	}
 	c := New(run, opts...)
 	c.socket = socket
@@ -115,16 +134,26 @@ func NewPinned(run exec.Runner, socket string, opts ...Option) (*Client, error) 
 }
 
 // tmuxArgs prefixes a tmux argv with the client's socket pin. It is the single
-// place `-S` is introduced: every command goes through it, so a pinned client
-// cannot issue an unpinned command by a call site forgetting the prefix.
+// DEFINITION of the `-S` spelling — every call site in this package routes
+// through it. It is not an enforcement mechanism: a call site can still forget
+// to call it, and nothing here would notice. What catches that is
+// TestPinnedClientPinsEveryCommand, which drives each method far enough to
+// issue its command and asserts the recorded argv.
 //
 // The `-S <path>` spelling is separated rather than attached (`-S/path`) on
 // purpose — classifyServerFailure recognizes a pinned argv by matching exactly
 // these two leading elements, and one spelling on both sides is what keeps that
 // match a comparison instead of a parse of tmux's option grammar.
+//
+// Both branches return a slice the caller may append to without touching
+// anything else. The clone is not decorative: Go passes a named slice through a
+// variadic parameter WITHOUT copying, so returning `args` directly would hand
+// back the caller's own array — and CreateSession already appends to this
+// result. Without the clone the hazard would also be mode-dependent, present
+// unpinned and absent pinned, which is the worst shape for a latent bug.
 func (c *Client) tmuxArgs(args ...string) []string {
 	if c.socket == "" {
-		return args
+		return slices.Clone(args)
 	}
 	return append([]string{"-S", c.socket}, args...)
 }

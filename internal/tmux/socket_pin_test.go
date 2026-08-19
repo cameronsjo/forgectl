@@ -53,8 +53,11 @@ func TestNewPinnedValidatesTheSocketPath(t *testing.T) {
 				}
 				return
 			}
-			if err == nil {
-				t.Fatalf("NewPinned(%q) = nil error, want one mentioning %q", tt.socket, tt.wantErr)
+			// Classification first — that is the contract. The message check
+			// below is a secondary quality assertion, so a reword breaks only
+			// the message expectation and never the classification one.
+			if !errors.Is(err, ErrInvalidSocketPath) {
+				t.Fatalf("NewPinned(%q) = %v, want ErrInvalidSocketPath", tt.socket, err)
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("NewPinned(%q) error = %q, want it to mention %q", tt.socket, err, tt.wantErr)
@@ -64,57 +67,133 @@ func TestNewPinnedValidatesTheSocketPath(t *testing.T) {
 }
 
 // TestPinnedClientPinsEveryCommand is the structural assertion behind the whole
-// design: it drives every tmux-issuing method on the Client and requires each
-// resulting argv to lead with the pin.
+// design: every tmux command this client issues must lead with the pin.
 //
-// It asserts over the recorded calls rather than per-method so that a NEW tmux
-// command added later without going through tmuxArgs fails here — a per-method
-// test only covers the methods someone remembered to add a case for.
+// The fake serves LIVE rows matching the identities under test, and that is the
+// whole point rather than a convenience. An earlier version of this test used an
+// empty fake, so every revalidating method bailed inside RevalidateSession /
+// RevalidateWindow before issuing its command — the mutating verbs never ran,
+// and deleting tmuxArgs from KillWindow survived a test that calls KillWindow.
+// A test that drives a method without reaching its command asserts nothing about
+// that method.
+//
+// The recorded-verb assertion is what makes this catch a FUTURE unpinned
+// command: wantVerbs is checked for completeness, so a new mutating method whose
+// argv skips tmuxArgs shows up as an unpinned entry rather than passing unseen.
 func TestPinnedClientPinsEveryCommand(t *testing.T) {
+	const pid, start = "9", "1"
+	gen := ServerGeneration{Selector: ServerSelector{Socket: testSocket}, PID: pid, StartTime: start}
+	session := SessionIdentity{Generation: gen, ID: "$1", Name: "forge"}
+	window := WindowIdentity{Generation: gen, ID: "@1", SessionID: "$1", Name: "editor"}
+
+	sessionRow := strings.Join([]string{pid, start, "$1", "forge", "1", "0", "0", "/tmp"}, FieldSep)
+	windowRow := strings.Join([]string{pid, start, "@1", "$1", "forge", "0", "editor", "1", "1"}, FieldSep)
+	paneRow := strings.Join([]string{pid, start, "%1", "@1", "0", "title", "zsh", "1"}, FieldSep)
+
 	run := &internalexec.FakeRunner{
-		RunFunc: func(_ string, _ []string) (string, error) { return "", nil },
+		RunFunc: func(_ string, args []string) (string, error) {
+			switch {
+			case slices.Contains(args, "list-sessions"):
+				return sessionRow, nil
+			case slices.Contains(args, "list-windows"):
+				return windowRow, nil
+			case slices.Contains(args, "list-panes"):
+				return paneRow, nil
+			case slices.Contains(args, "new-session"):
+				return strings.Join([]string{pid, start, "$1"}, FieldSep), nil
+			}
+			return "", nil
+		},
 	}
 	c := pinnedClient(t, run)
 	ctx := context.Background()
 
-	session := SessionIdentity{
-		Generation: ServerGeneration{Selector: ServerSelector{Socket: testSocket}, PID: "9", StartTime: "1"},
-		ID:         "$1",
-		Name:       "forge",
-	}
-	window := WindowIdentity{
-		Generation: ServerGeneration{Selector: ServerSelector{Socket: testSocket}, PID: "9", StartTime: "1"},
-		ID:         "@1",
-		SessionID:  "$1",
-	}
-
-	// Every one of these is expected to fail somewhere downstream (the fake
-	// returns no rows, so revalidation finds nothing) — the argv is what is
-	// under test, not the outcome.
+	// Outcomes are not under test — the argv is. Failures here would be caught
+	// by the verb-coverage assertion below, not swallowed.
 	_, _ = c.ListSessions(ctx)
 	_, _ = c.ListWindows(ctx)
 	_, _ = c.ListPanes(ctx)
 	_, _ = c.CreateSession(ctx, "forge", "/tmp")
 	_ = c.RenameSession(ctx, session, "renamed")
+	_ = c.KillWindow(ctx, window)
 	_ = c.KillSession(ctx, session)
 	_ = c.KillOthers(ctx, session)
-	_ = c.KillWindow(ctx, window)
-	_ = c.AttachSession(ctx, session)
 	_ = c.SelectWindow(ctx, window)
+	// AttachWindow issues its OWN select-window, a second call site the verb set
+	// cannot distinguish from SelectWindow's — so it has to be driven, not
+	// assumed covered. Dropping the pin from just this site survived an earlier
+	// version of this test for exactly that reason.
+	_ = c.AttachWindow(ctx, window)
+	_ = c.AttachSession(ctx, session)
 	_ = c.LastSession(ctx)
-	_, _ = c.CheckGenerationCapability(ctx)
 
 	if len(run.Calls) == 0 {
 		t.Fatal("no commands recorded — the test drove nothing")
 	}
+	seen := map[string]bool{}
 	for _, call := range run.Calls {
 		if call.Name != "tmux" {
 			t.Errorf("unexpected binary %q with args %v", call.Name, call.Args)
 			continue
 		}
-		if len(call.Args) < 2 || call.Args[0] != "-S" || call.Args[1] != testSocket {
+		if len(call.Args) < 3 || call.Args[0] != "-S" || call.Args[1] != testSocket {
 			t.Errorf("argv %v does not lead with the socket pin -S %s", call.Args, testSocket)
+			continue
 		}
+		seen[call.Args[2]] = true
+	}
+
+	// The mutating verbs are listed explicitly because they are the ones with
+	// blast radius: `kill-session -a` unpinned kills every session on the
+	// DEFAULT server while the operator asked about the pinned one.
+	//
+	// `switch-client` is deliberately absent: it is reachable only when
+	// InsideTmux() reports true, which a pinned client never does. Listing it
+	// would be asserting a command that cannot run.
+	wantVerbs := []string{
+		"list-sessions", "list-windows", "list-panes", "new-session",
+		"rename-session", "kill-window", "kill-session", "select-window",
+		"attach-session",
+	}
+	for _, verb := range wantVerbs {
+		if !seen[verb] {
+			t.Errorf("%s never reached the runner — the test drove a method that bailed before issuing its command, so it asserts nothing about that method's argv", verb)
+		}
+	}
+}
+
+// TestPinnedKillOthersIsPinned isolates the highest-blast-radius command in the
+// package. `kill-session -a -t <id>` kills every OTHER session on the server it
+// reaches, so an unpinned one destroys the operator's real sessions while they
+// asked about a private surface server. It gets its own test because a verb-set
+// assertion cannot distinguish it from a plain `kill-session`.
+func TestPinnedKillOthersIsPinned(t *testing.T) {
+	const pid, start = "9", "1"
+	gen := ServerGeneration{Selector: ServerSelector{Socket: testSocket}, PID: pid, StartTime: start}
+	run := &internalexec.FakeRunner{
+		RunFunc: func(_ string, args []string) (string, error) {
+			if slices.Contains(args, "list-sessions") {
+				return strings.Join([]string{pid, start, "$1", "forge", "1", "0", "0", "/tmp"}, FieldSep), nil
+			}
+			return "", nil
+		},
+	}
+	c := pinnedClient(t, run)
+
+	if err := c.KillOthers(context.Background(), SessionIdentity{Generation: gen, ID: "$1", Name: "forge"}); err != nil {
+		t.Fatalf("KillOthers: %v", err)
+	}
+	var killAll []string
+	for _, call := range run.Calls {
+		if slices.Contains(call.Args, "-a") && slices.Contains(call.Args, "kill-session") {
+			killAll = call.Args
+		}
+	}
+	if killAll == nil {
+		t.Fatal("kill-session -a never reached the runner")
+	}
+	if killAll[0] != "-S" || killAll[1] != testSocket {
+		t.Errorf("kill-session -a argv = %v, want it pinned to %s", killAll, testSocket)
 	}
 }
 
@@ -137,15 +216,63 @@ func TestUnpinnedClientArgvIsUnchanged(t *testing.T) {
 	}
 }
 
+// TestTmuxArgsNeverAliasesTheCallersSlice pins the one hazard that would
+// otherwise be MODE-DEPENDENT — present unpinned, absent pinned — which is the
+// worst shape for a latent bug.
+//
+// Go passes a named slice through a variadic parameter without copying, so
+// returning it directly hands back the caller's array; appending to the result
+// then writes into the caller's spare capacity. CreateSession already appends
+// to a tmuxArgs result, so the triggering pattern is in the file.
+func TestTmuxArgsNeverAliasesTheCallersSlice(t *testing.T) {
+	pinned, err := NewPinned(&internalexec.FakeRunner{}, testSocket)
+	if err != nil {
+		t.Fatalf("NewPinned: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		client *Client
+	}{
+		{"unpinned", New(&internalexec.FakeRunner{})},
+		{"pinned", pinned},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// base leaves exactly two slots of spare capacity, and the append
+			// below adds exactly two. Appending MORE than the spare capacity
+			// would make Go reallocate and the aliasing would never show —
+			// the first version of this test did that and passed against a
+			// deliberately aliasing tmuxArgs.
+			backing := []string{"new-session", "-d", "-s", "UNTOUCHED", "UNTOUCHED"}
+			base := backing[:3]
+
+			got := tc.client.tmuxArgs(base...)
+			got = append(got, "-c", "/tmp")
+			_ = got
+
+			for i := 3; i < len(backing); i++ {
+				if backing[i] != "UNTOUCHED" {
+					t.Fatalf("appending to the tmuxArgs result overwrote the caller's backing array at %d (%q) — tmuxArgs must not return the caller's slice", i, backing[i])
+				}
+			}
+		})
+	}
+}
+
 // TestPinnedClientMayCreateItsFirstServer is the finding that blocked #332: a
 // `-S`-pinned argv used to be refused a serverAbsent verdict outright, so the
 // surface adapter could never create the session it exists to create.
 //
 // The assertion is on ErrNoServer specifically, because that is the ONE
 // classification documented as permitting a create.
+//
+// The argv is `list-sessions`, not `new-session`, because that is the one that
+// actually reaches this function on the live path: EnsureSession ->
+// ResolveSessionExact -> ListSessions -> absentServer. CreateSession's own
+// failures route through classifyCreateFailure and never get here, so testing a
+// new-session argv would assert the right property about the wrong command.
 func TestPinnedClientMayCreateItsFirstServer(t *testing.T) {
 	c := pinnedClient(t, &internalexec.FakeRunner{})
-	args := c.tmuxArgs("new-session", "-d", "-s", "forge")
+	args := c.tmuxArgs("list-sessions", "-F", sessionFormat)
 
 	lstatted := ""
 	c.lstat = func(path string) (os.FileInfo, error) {
@@ -159,6 +286,14 @@ func TestPinnedClientMayCreateItsFirstServer(t *testing.T) {
 	}
 	if lstatted != testSocket {
 		t.Errorf("inspected socket %q, want the pinned %q — a pinned client must judge absence by ITS socket, never the derived default", lstatted, testSocket)
+	}
+	// The message names the mode, because "default socket" on a pinned client
+	// sends the operator to look at the wrong file.
+	if !strings.Contains(err.Error(), "pinned socket "+testSocket) {
+		t.Errorf("error = %q, want it to name the pinned socket", err)
+	}
+	if strings.Contains(err.Error(), "default socket") {
+		t.Errorf("error = %q calls a pinned socket the default one", err)
 	}
 }
 
@@ -174,8 +309,19 @@ func TestPinnedClientRefusesAnArgvAimedElsewhere(t *testing.T) {
 		{"no pin at all", []string{"list-windows"}},
 		{"a different socket", []string{"-S", "/tmp/someone-else", "list-windows"}},
 		{"pin not leading", []string{"list-windows", "-S", testSocket}},
-		{"pin overridden later", []string{"-S", testSocket, "list-windows", "-S", "/tmp/someone-else"}},
-		{"pin overridden by label", []string{"-S", testSocket, "list-windows", "-L", "other"}},
+		// A SECOND leading -S genuinely overrides the pin on tmux 3.7b
+		// (`tmux -S /a -S /b` connects to /b), which is what the tail check is
+		// for.
+		{"second leading socket wins", []string{"-S", testSocket, "-S", "/tmp/someone-else", "list-windows"}},
+		// These two are inert on 3.7b — tmux's global options stop at the
+		// command name. They are refused anyway, because proving inertness
+		// means modelling a grammar that can change under us and refusing
+		// costs nothing.
+		{"socket after the command, refused though inert", []string{"-S", testSocket, "list-windows", "-S", "/tmp/someone-else"}},
+		{"label after the command, refused though inert", []string{"-S", testSocket, "list-windows", "-L", "other"}},
+		// -2S/path sets the socket on 3.7b while beginning with neither -S nor
+		// -L, which is why the check cannot be a prefix test.
+		{"bundled socket option", []string{"-S", testSocket, "list-windows", "-2S/tmp/someone-else"}},
 		{"truncated pin", []string{"-S"}},
 	}
 	for _, tt := range tests {
@@ -295,20 +441,32 @@ func TestCreatedSessionCarriesThePinnedSelector(t *testing.T) {
 // TestPinnedClientRefusesSesh guards the one delegation the pin cannot reach:
 // sesh has no -S to thread, so it would act on the environmental server.
 func TestPinnedClientRefusesSesh(t *testing.T) {
-	run := &internalexec.FakeRunner{}
-	c := pinnedClient(t, run)
-	// A resolving lookPath proves the refusal is unconditional rather than an
-	// incidental "sesh is not installed" failure.
-	c.lookPath = func(string) (string, error) { return "/usr/bin/sesh", nil }
+	// Both lookPath outcomes are driven, because they are the only inputs that
+	// distinguish the documented ordering (refuse first) from the inverted one.
+	// Asserting only the resolving case cannot see the swap: the refusal still
+	// fires, just behind a different error on machines without sesh.
+	for _, tc := range []struct {
+		name     string
+		lookPath func(string) (string, error)
+	}{
+		{"sesh installed", func(string) (string, error) { return "/usr/bin/sesh", nil }},
+		{"sesh missing", func(string) (string, error) { return "", errors.New("not found in $PATH") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := &internalexec.FakeRunner{}
+			c := pinnedClient(t, run)
+			c.lookPath = tc.lookPath
 
-	if _, err := c.SeshList(context.Background()); !errors.Is(err, ErrSeshUnavailableWhenPinned) {
-		t.Errorf("SeshList = %v, want ErrSeshUnavailableWhenPinned", err)
-	}
-	if err := c.Pick(context.Background(), "forge"); !errors.Is(err, ErrSeshUnavailableWhenPinned) {
-		t.Errorf("Pick = %v, want ErrSeshUnavailableWhenPinned", err)
-	}
-	if len(run.Calls) != 0 {
-		t.Errorf("ran %d commands: %v — a refused sesh delegation must run nothing", len(run.Calls), run.Calls)
+			if _, err := c.SeshList(context.Background()); !errors.Is(err, ErrSeshUnavailableWhenPinned) {
+				t.Errorf("SeshList = %v, want ErrSeshUnavailableWhenPinned", err)
+			}
+			if err := c.Pick(context.Background(), "forge"); !errors.Is(err, ErrSeshUnavailableWhenPinned) {
+				t.Errorf("Pick = %v, want ErrSeshUnavailableWhenPinned", err)
+			}
+			if len(run.Calls) != 0 {
+				t.Errorf("ran %d commands: %v — a refused sesh delegation must run nothing", len(run.Calls), run.Calls)
+			}
+		})
 	}
 }
 
