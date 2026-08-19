@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	osexec "os/exec"
 	"strings"
 	"testing"
 
@@ -59,6 +60,11 @@ func TestParseBackendKind_RefusalNeverEchoesTheName(t *testing.T) {
 // and "the program is not installed" send an operator to three different next
 // moves — fix a typo, wait for a release, install tmux — and collapsing any two
 // of them loses that.
+// Side effect worth declaring: the "tmux" case below calls the real
+// surfaceAdapterFor, so on a machine with tmux installed it runs the real
+// os.MkdirAll and creates /tmp/tmux-<uid> (0700) if it is not already there.
+// Harmless — it is the directory tmux itself would use — but it is a write, and
+// a test that writes outside its TempDir should say so.
 func TestSurfaceAdapterFor_DrivesTmuxAndRefusesTheRest(t *testing.T) {
 	for _, name := range []string{"cmux", "herdr"} {
 		t.Run(name, func(t *testing.T) {
@@ -138,10 +144,18 @@ func TestNewTmuxAdapter_ReturnsATrulyNilAdapterOnEveryFailure(t *testing.T) {
 	})
 
 	t.Run("tmuxadapter.New refuses the resolved socket", func(t *testing.T) {
-		// tmux resolves fine on PATH; the failure is pushed into New itself by
-		// naming a socket path so long tmux.NewPinned's own shape check
-		// refuses it — the one New-side refusal this package can force without
-		// touching the filesystem.
+		// Without tmux on PATH the LookPath above fails FIRST and this subtest
+		// silently becomes a duplicate of its sibling — asserting the same
+		// thing and never reaching New at all. Skipping says so out loud
+		// rather than reporting a pass for coverage that did not happen.
+		if _, err := osexec.LookPath("tmux"); err != nil {
+			t.Skip("tmux is not installed, so this cannot reach tmuxadapter.New")
+		}
+		// The failure is pushed into New itself by naming a socket path long
+		// enough that tmuxadapter.checkSocketPath refuses it — the one
+		// New-side refusal this package can force without touching the
+		// filesystem. (checkSocketPath mirrors tmux.NewPinned's rules; it is
+		// the one that actually runs here.)
 		t.Setenv("TMUX", "/tmp/"+strings.Repeat("a", 5000)+",1,0")
 
 		adapter, err := newTmuxAdapter()

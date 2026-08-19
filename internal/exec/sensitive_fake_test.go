@@ -15,6 +15,20 @@ import (
 // outcome's fake unwraps to the exact package sentinel a real error of that
 // outcome does.
 func TestSensitiveErrorForTest_UnwrapsToTheProductionSentinel(t *testing.T) {
+	// The zero outcome first, because the loop below starts past it and would
+	// otherwise exempt the one value a caller reaches by FORGETTING the
+	// argument. outcomeSentinels has no entry there, so an error built from it
+	// would unwrap to nil and satisfy no classification at all — passing every
+	// assertion written about it by matching nothing.
+	t.Run("the zero outcome is refused", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Error("SensitiveErrorForTest accepted OutcomeUnspecified — that error matches no sentinel")
+			}
+		}()
+		_ = SensitiveErrorForTest(KindTmuxCreate, OutcomeUnspecified)
+	})
+
 	for outcome := OutcomeInvalid; outcome < outcomeCount; outcome++ {
 		sentinel := outcomeSentinels[outcome]
 		t.Run(outcome.String(), func(t *testing.T) {

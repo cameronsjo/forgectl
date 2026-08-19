@@ -182,16 +182,25 @@ var ErrUnsafeSocketDir = errors.New("tmuxadapter: the tmux socket directory is n
 // socket path and the one-shot nonce.
 //
 // Hence create-then-verify: MkdirAll with 0700, tolerate EEXIST, then run the
-// checks against what is actually on disk. Verifying after rather than trusting
-// the pre-check is what makes the answer describe the directory we will use.
+// checks against what is actually on disk rather than against a pre-check that
+// described a different moment.
+//
+// What that buys, stated exactly, because the window is not closed: the checks
+// describe the directory as of New, and Start, Probe, and Close all run later —
+// Close possibly in another process entirely. Nothing here re-checks. What
+// actually prevents a swap in between is that we own the directory 0700 AND
+// that its parent carries the sticky bit, so nobody else may rename our entry
+// out from under it. /tmp has that bit; an operator-chosen TMUX_TMPDIR on a
+// world-writable path without it does not, and there the residual window is
+// real.
 func (a *Adapter) checkSocketDir(getuid func() int) error {
 	dir := filepath.Dir(a.socket)
 	if err := a.mkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("%w: %s", ErrUnsafeSocketDir, "cannot create it")
+		return fmt.Errorf("%w: cannot create it: %w", ErrUnsafeSocketDir, err)
 	}
 	info, err := a.lstat(dir)
 	if err != nil {
-		return fmt.Errorf("%w: %s", ErrUnsafeSocketDir, "cannot stat it")
+		return fmt.Errorf("%w: cannot stat it: %w", ErrUnsafeSocketDir, err)
 	}
 	// This also closes the symlink case, and it is worth saying why rather than
 	// adding a second check that could never fire: the seam is LSTAT, which

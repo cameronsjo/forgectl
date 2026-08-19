@@ -179,7 +179,7 @@ func (a *Adapter) readiness(ctx context.Context) (string, *backend.StartCause) {
 	major, minor, ok := parseVersion(version)
 	if !ok {
 		cause := backend.NewStartCause(backend.FailureMalformedResponse,
-			fmt.Errorf("tmux reported an unrecognized version"))
+			errors.New("tmux reported an unrecognized version"))
 		return "", &cause
 	}
 	if major < minMajor || (major == minMajor && minor < minMinor) {
@@ -251,8 +251,14 @@ const (
 	// parseTruncated — the stream was cut short by the output cap, so the row
 	// we are looking for may be in the part we never got.
 	parseTruncated
-	// parseUnreadable — output was present and NOT ONE line parsed, which
-	// means the field separator did not survive the round trip.
+	// parseUnreadable — output was present and NOT ONE line of it was usable.
+	//
+	// Deliberately named for the property it establishes and not for the cause
+	// it usually has. A lost field separator is the reason that matters and the
+	// one internal/tmux measured, but a listing can also drop every row because
+	// each carried a non-numeric pid, an out-of-range start time, or an id that
+	// is not $N. Claiming the separator in the status would send an operator
+	// hitting a forged row off to fix their locale.
 	parseUnreadable
 )
 
@@ -331,10 +337,17 @@ func parseRows(out exec.BoundedOutput) ([]identityRow, parseStatus) {
 // sentences with no operand: the diagnostic can reach a manager's pane.
 func listingUnusable(status parseStatus) error {
 	if status == parseUnreadable {
-		return tmux.ErrUnreadableFields
+		return errUnusableListing
 	}
 	return errors.New("session listing was truncated")
 }
+
+// errUnusableListing states only what parseUnreadable establishes. It is
+// deliberately NOT tmux.ErrUnreadableFields, whose text names the field
+// separator specifically: that is the likeliest cause and the one
+// internal/tmux measured, but not the only way every row is dropped, and an
+// operator told to fix a locale that is fine has been sent to the wrong place.
+var errUnusableListing = errors.New("no line of the tmux session listing was usable")
 
 // soleRow reads a create reply, requiring exactly one row and requiring it to
 // name the session we asked for.
@@ -412,7 +425,7 @@ func noServer(out exec.BoundedOutput) bool {
 	if !complete {
 		return false
 	}
-	return strings.HasPrefix(strings.TrimSpace(string(raw)), "no server running on ")
+	return hasPrefixTrimmed(string(raw), "no server running on ")
 }
 
 // serverAbsent decides whether a failed listing PROVES there is no server,

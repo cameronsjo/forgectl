@@ -1008,14 +1008,29 @@ func TestNewRefusesASocketDirectoryItDoesNotPrivatelyOwn(t *testing.T) {
 		})
 	}
 
-	// An ABSENT directory is the ordinary first-run case: tmux creates it with
-	// the right mode. Refusing here would mean forgectl could never start the
-	// first server on a clean machine.
+	// An absent directory must be CREATED and then verified — not waved
+	// through. The seam is stateful so the case proves that ordering rather
+	// than restating the happy path: the directory reports ENOENT until
+	// mkdirAll runs, and a sound 0700 afterwards. A fixture that reported a
+	// good directory from the start would be byte-identical to every other
+	// test's default and could not fail for the reason it names.
+	created := false
 	if _, err := New(&exec.FakeSensitiveRunner{}, testTmux,
 		func(string) string { return "" }, func() int { return testUID },
-		WithLstat(fakeFS(safeDir(), fakeInfo{sys: statFor(liveInode), mode: fs.ModeSocket | 0o600})),
-		WithMkdirAll(noMkdir)); err != nil {
+		WithMkdirAll(func(string, os.FileMode) error { created = true; return nil }),
+		WithLstat(func(path string) (os.FileInfo, error) {
+			if filepath.Base(path) == "default" {
+				return fakeInfo{sys: statFor(liveInode), mode: fs.ModeSocket | 0o600}, nil
+			}
+			if !created {
+				return nil, fs.ErrNotExist
+			}
+			return safeDir(), nil
+		})); err != nil {
 		t.Errorf("New refused a directory it had just created: %v", err)
+	}
+	if !created {
+		t.Error("New never created the absent socket directory — under `-S` tmux will not, so nothing would bind")
 	}
 
 	// And a directory it cannot create is a refusal, not a pass-through. This
@@ -1067,18 +1082,21 @@ func TestAnUnreadableSocketIsNotAnAbsentServer(t *testing.T) {
 	}
 }
 
-// TestCloseNeverKillsWithoutAValidatedNativeID guards the one tmux behaviour
+// TestCloseNeverKillsFromAListingItCouldNotValidate guards the one tmux behaviour
 // that turns a lookup bug into a destroyed session belonging to someone else.
 //
 // Measured on 3.7b against a two-session server: `kill-session -t ""` exits
 // ZERO and kills a session anyway — the empty target took out the second one.
 // So an empty or malformed operand is neither a no-op nor an error; it
 // silently succeeds against the wrong thing.
-func TestCloseNeverKillsWithoutAValidatedNativeID(t *testing.T) {
+func TestCloseNeverKillsFromAListingItCouldNotValidate(t *testing.T) {
 	spec, tag := newSpec(t)
 	name := spec.OwnershipName()
-	// A listing row whose native id is not $N. parseRows drops it, so locate
-	// reports absent — and the point is that NOTHING reaches kill-session.
+	// A listing row whose native id is not $N. parseRows drops it, and because
+	// it is the only row the listing becomes parseUnreadable — so locate
+	// reports UNREADABLE, not absent. Either way the point holds and is the
+	// thing asserted: nothing reaches kill-session, where an empty or
+	// malformed target exits zero and takes out a bystander.
 	malformed := row("91", "1700000000", "not-a-session-id", name)
 
 	run := &exec.FakeSensitiveRunner{RunFunc: scripted{byKind: map[exec.CommandKind]func() (exec.SensitiveResult, error){
@@ -1335,15 +1353,6 @@ func TestCloseClassifiesAFailedKill(t *testing.T) {
 	}
 }
 
-// TestClassifyRunErrorReadsTheSeamsSentinels pins the classification to what
-// the production runner actually returns.
-//
-// *exec.SensitiveError unwraps to its outcome's PACKAGE sentinel and
-// deliberately never to an underlying error, so classifying on context.Canceled
-// or os.ErrPermission produces branches that are structurally unreachable —
-// every failure would report FailureUnavailable while three named classes sat
-// dead in the switch. Driving the real error shape is what makes this a
-// statement about production rather than about a fake.
 // TestReadinessRefusesBeforeCreatingOnEveryFailureShape covers the ways `-V`
 // can fail that no other table drives: the runner erroring outright (not just
 // returning odd text) and a reply too short to carry a version at all. Both
@@ -1464,6 +1473,15 @@ func TestProbeReportsPresentAndGoneOnTheHappyPaths(t *testing.T) {
 	})
 }
 
+// TestClassifyRunErrorReadsTheSeamsSentinels pins the classification to what
+// the production runner actually returns.
+//
+// *exec.SensitiveError unwraps to its outcome's PACKAGE sentinel and
+// deliberately never to an underlying error, so classifying on context.Canceled
+// or os.ErrPermission produces branches that are structurally unreachable —
+// every failure would report FailureUnavailable while three named classes sat
+// dead in the switch. Driving the real error shape is what makes this a
+// statement about production rather than about a fake.
 func TestClassifyRunErrorReadsTheSeamsSentinels(t *testing.T) {
 	for _, tt := range []struct {
 		name    string

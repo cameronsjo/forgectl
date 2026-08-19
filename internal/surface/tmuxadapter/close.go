@@ -50,9 +50,13 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 			errors.New("the session lookup produced no usable state")))
 	}
 
-	// Re-validate at the point of USE, not only where the row was parsed. This
-	// is the last thing standing between a malformed id and the empty-target
-	// behaviour above, and it costs one comparison.
+	// Re-validate at the point of USE. Labelled honestly, in the same terms as
+	// the default arm above: parseRows already drops any row whose id fails
+	// this exact function, so no identityRow reaching locateFound can carry an
+	// id this rejects — it is defence in depth against a future locate that
+	// stops validating, not a live gate. parseRows is the enforcing one. The
+	// asymmetry is worth spelling out, because calling one guard inert and
+	// leaving the other looking live would misdescribe both.
 	if err := tmux.ValidateSessionID(row.id); err != nil {
 		return backend.NewCloseUnreadable(backend.NewStartCause(backend.FailureMalformedResponse, err))
 	}
