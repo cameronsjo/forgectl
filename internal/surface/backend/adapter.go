@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -154,6 +155,24 @@ func NewStartSpec(cwd, name string, tag RecoveryTag, bootstrap BootstrapCommand)
 	}
 	if err := safeText(name, maxDisplayNameLen, "display name"); err != nil {
 		return StartSpec{}, err
+	}
+	// A display name a manager's argument parser would read as a flag is
+	// refused here, where the operator can act on it.
+	//
+	// The name is operator-supplied and gets sealed as an exec.Opaque below.
+	// The sensitive seam refuses an opaque argument beginning with a dash unless
+	// an end-of-options separator precedes it — and an adapter passing the name
+	// as a FLAG'S VALUE has nowhere to put one, since nothing may come between a
+	// flag and its value. Without this check such a name made the whole
+	// sensitive command invalid, which an adapter then classified as
+	// FailureInternal: an internal-defect verdict, on a cosmetic label, for a
+	// launch that was otherwise fine.
+	//
+	// The cwd needs no equivalent because it is already required to be
+	// absolute, and only a leading dash is ambiguous — a dash anywhere else in
+	// the name is ordinary and stays allowed.
+	if strings.HasPrefix(name, "-") {
+		return StartSpec{}, fmt.Errorf("%w: display name may not begin with a dash", ErrInvalidStartSpec)
 	}
 	if !tag.Valid() {
 		return StartSpec{}, fmt.Errorf("%w: %w", ErrInvalidStartSpec, ErrInvalidRecoveryTag)
