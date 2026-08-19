@@ -139,7 +139,55 @@ func New(run exec.SensitiveRunner, tmuxPath string, getenv func(string) string, 
 	for _, opt := range opts {
 		opt(a)
 	}
+	// After the options, so the lstat seam is the one the caller supplied.
+	if err := a.checkSocketDir(getuid); err != nil {
+		return nil, err
+	}
 	return a, nil
+}
+
+// ErrUnsafeSocketDir reports that the directory holding the tmux socket is not
+// one this uid privately owns.
+var ErrUnsafeSocketDir = errors.New("tmuxadapter: the tmux socket directory is not privately owned")
+
+// checkSocketDir applies the ownership rules tmux applies to its own socket
+// directory — which passing an explicit `-S` skips.
+//
+// That skip is the whole reason this exists. tmux validates <tmpdir>/tmux-<uid>
+// inside make_label() when it derives the path itself, and refuses a directory
+// it does not own; `-S <path>` takes the path directly. This adapter always
+// passes `-S`, so without this check forgectl would use a directory a plain
+// `tmux` by the same operator would have refused — and on a shared host a local
+// attacker who wins the race to create /tmp/tmux-<uid>/ then owns the server
+// that receives the bootstrap's socket path and one-shot nonce.
+//
+// An ABSENT directory is fine and is the common first-run case: tmux creates it
+// with the right mode, and refusing here would mean forgectl could never start
+// the first server. The rule is only that a directory which already exists must
+// be one we own and nobody else can write.
+func (a *Adapter) checkSocketDir(getuid func() int) error {
+	dir := filepath.Dir(a.socket)
+	info, err := a.lstat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("%w: %s", ErrUnsafeSocketDir, "cannot stat it")
+	}
+	// This also closes the symlink case, and it is worth saying why rather than
+	// adding a second check that could never fire: the seam is LSTAT, which
+	// reports a symlink as ModeSymlink and never as ModeDir, so a link whose
+	// target could move after this check is already refused here.
+	if !info.IsDir() {
+		return fmt.Errorf("%w: %s", ErrUnsafeSocketDir, "not a directory")
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%w: %s", ErrUnsafeSocketDir, "group or world writable")
+	}
+	if owner, ok := ownerUID(info); ok && owner != getuid() {
+		return fmt.Errorf("%w: %s", ErrUnsafeSocketDir, "owned by another user")
+	}
+	return nil
 }
 
 // resolveSocket picks the server endpoint and records which chain picked it.

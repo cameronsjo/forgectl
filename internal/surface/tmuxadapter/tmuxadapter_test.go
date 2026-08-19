@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -16,40 +17,77 @@ import (
 )
 
 const (
-	testSocket = "/tmp/tmux-501/default"
-	testTmux   = "/opt/homebrew/bin/tmux"
-	testCWD    = "/Users/example/code/forgectl"
-	liveInode  = 4242
+	testSocket    = "/tmp/tmux-501/default"
+	testTmux      = "/opt/homebrew/bin/tmux"
+	testCWD       = "/Users/example/code/forgectl"
+	testBootstrap = "forgectl surface _exec --protocol 1"
+	liveInode     = 4242
 )
 
 // fakeInfo is the minimum os.FileInfo the fingerprint path reads. Sys() returns
 // nil rather than a *syscall.Stat_t so fillStat's type assertion fails — which
 // is the point for the tests that need fingerprinting to fail closed; the ones
 // that need it to succeed use statInfo below.
-type fakeInfo struct{ sys any }
+type fakeInfo struct {
+	sys  any
+	mode fs.FileMode
+}
 
-func (fakeInfo) Name() string       { return "default" }
-func (fakeInfo) Size() int64        { return 0 }
-func (fakeInfo) Mode() fs.FileMode  { return fs.ModeSocket | 0o600 }
-func (fakeInfo) ModTime() time.Time { return time.Unix(0, 0) }
-func (fakeInfo) IsDir() bool        { return false }
-func (f fakeInfo) Sys() any         { return f.sys }
+func (fakeInfo) Name() string        { return "default" }
+func (fakeInfo) Size() int64         { return 0 }
+func (f fakeInfo) Mode() fs.FileMode { return f.mode }
+func (fakeInfo) ModTime() time.Time  { return time.Unix(0, 0) }
+func (f fakeInfo) IsDir() bool       { return f.mode.IsDir() }
+func (f fakeInfo) Sys() any          { return f.sys }
 
 // statFor builds the platform stat a fingerprint reads. Only Ino is set: it is
 // uint64 on both Darwin and Linux, whereas Dev is int32 on one and uint64 on
 // the other — and Dev is not what the fingerprint depends on.
 func statFor(inode uint64) *syscall.Stat_t { return &syscall.Stat_t{Ino: inode} }
 
+// testUID is the uid newTestAdapter reports, and the one the fake filesystem
+// below says owns everything — so the socket-directory check passes by default
+// and a test that wants it to refuse says so explicitly.
+const testUID = 501
+
 // liveSocket is an lstat seam reporting a socket with a usable inode, so
-// Fingerprint's non-zero-inode requirement is met.
+// Fingerprint's non-zero-inode requirement is met — and a privately-owned 0700
+// directory above it, which is what New's socket-directory check reads.
+//
+// It answers by PATH rather than returning one shape for everything: a seam
+// that called the parent directory a socket would fail the ownership check for
+// the wrong reason, and every test would then be asserting against a refusal
+// rather than the behaviour it names.
 func liveSocket(inode uint64) func(string) (os.FileInfo, error) {
-	return func(string) (os.FileInfo, error) { return fakeInfo{sys: statFor(inode)}, nil }
+	return fakeFS(safeDir(), fakeInfo{sys: statFor(inode), mode: fs.ModeSocket | 0o600})
+}
+
+// safeDir is the socket's parent as New's check wants to find it: a real
+// directory, owned by this uid, with no group or world write.
+func safeDir() fakeInfo {
+	return fakeInfo{sys: &syscall.Stat_t{Uid: testUID}, mode: fs.ModeDir | 0o700}
+}
+
+// fakeFS answers the socket path with sockInfo and everything else — which for
+// this package means the parent directory — with dirInfo. Every fixture socket
+// is named "default", tmux's own, so the split needs no path list.
+func fakeFS(dirInfo, sockInfo fakeInfo) func(string) (os.FileInfo, error) {
+	return func(path string) (os.FileInfo, error) {
+		if filepath.Base(path) == "default" {
+			return sockInfo, nil
+		}
+		return dirInfo, nil
+	}
 }
 
 func newTestAdapter(t *testing.T, run exec.SensitiveRunner, env map[string]string, opts ...Option) *Adapter {
 	t.Helper()
 	getenv := func(k string) string { return env[k] }
-	a, err := New(run, testTmux, getenv, func() int { return 501 }, opts...)
+	// The safe filesystem goes first so every test is independent of the real
+	// /tmp on the machine running it — CI's uid is not this fixture's — and a
+	// caller's own WithLstat still wins, options being applied in order.
+	opts = append([]Option{WithLstat(liveSocket(liveInode))}, opts...)
+	a, err := New(run, testTmux, getenv, func() int { return testUID }, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -62,15 +100,43 @@ func newSpec(t *testing.T) (backend.StartSpec, backend.RecoveryTag) {
 	if err != nil {
 		t.Fatalf("NewRecoveryTag: %v", err)
 	}
-	boot, err := backend.NewBootstrapCommand(exec.Opaque("forgectl surface _exec --protocol 1"))
-	if err != nil {
-		t.Fatalf("NewBootstrapCommand: %v", err)
-	}
-	spec, err := backend.NewStartSpec(testCWD, "forgectl", tag, boot)
+	spec, err := backend.NewStartSpec(testCWD, "forgectl", tag, bootstrapForTest(t))
 	if err != nil {
 		t.Fatalf("NewStartSpec: %v", err)
 	}
 	return spec, tag
+}
+
+// refFor mints a reference the way production does — through a clean Start —
+// so a test that needs one to hand Close or Probe is not hand-building a shape
+// Ref.Validate might not accept. The adapter here is a throwaway; it shares the
+// lstat inode and default socket with the caller's, so the fingerprints agree.
+func refFor(t *testing.T, tag backend.RecoveryTag, name string) backend.Ref {
+	t.Helper()
+	spec, err := backend.NewStartSpec(testCWD, "forgectl", tag, bootstrapForTest(t))
+	if err != nil {
+		t.Fatalf("NewStartSpec: %v", err)
+	}
+	run := &exec.FakeSensitiveRunner{RunFunc: scripted{byKind: map[exec.CommandKind]func() (exec.SensitiveResult, error){
+		exec.KindTmuxCreate: func() (exec.SensitiveResult, error) {
+			return stdout(row("91", "1700000000", "$1", name)), nil
+		},
+	}}.runFunc}
+	ref, ok := newTestAdapter(t, run, nil, WithLstat(liveSocket(liveInode))).
+		Start(context.Background(), spec).Ref()
+	if !ok {
+		t.Fatal("refFor: a clean create produced no reference")
+	}
+	return ref
+}
+
+func bootstrapForTest(t *testing.T) backend.BootstrapCommand {
+	t.Helper()
+	boot, err := backend.NewBootstrapCommand(exec.Opaque(testBootstrap))
+	if err != nil {
+		t.Fatalf("NewBootstrapCommand: %v", err)
+	}
+	return boot
 }
 
 // row renders one -F line in the shape identityFormat asks for.
@@ -668,10 +734,10 @@ func TestFingerprintFailsClosedWithoutAnInode(t *testing.T) {
 		exec.KindTmuxReconcile: func() (exec.SensitiveResult, error) { return stdout(live), nil },
 	}}.runFunc}
 
-	// Sys() returns nil, so fillStat leaves Inode zero.
-	a := newTestAdapter(t, run, nil, WithLstat(func(string) (os.FileInfo, error) {
-		return fakeInfo{sys: nil}, nil
-	}))
+	// Sys() returns nil for the SOCKET, so fillStat leaves Inode zero. The
+	// directory stays sound, so New's ownership check is not what refuses.
+	a := newTestAdapter(t, run, nil,
+		WithLstat(fakeFS(safeDir(), fakeInfo{sys: nil, mode: fs.ModeSocket | 0o600})))
 
 	res := a.Start(context.Background(), spec)
 	if res.Outcome() == backend.RefKnown {
@@ -741,20 +807,95 @@ func TestParseVersion(t *testing.T) {
 // that names a different session.
 func TestParseRowsRequiresAnExactFieldCount(t *testing.T) {
 	forged := row("91", "1700000000", "$1", "name"+tmux.FieldSep+"extra")
-	rows, complete := parseRows(exec.BoundedOutputForTest([]byte(forged), exec.OutputComplete))
-	if !complete {
-		t.Fatal("the fixture was reported incomplete")
+	good := row("91", "1700000000", "$1", "fc-surface-x")
+
+	// The forged row must be DROPPED, not misread — but it is the only row in
+	// this listing, so total loss makes the whole listing unreadable. Pair it
+	// with a good row to isolate the count check from the zero-row contract.
+	rows, status := parseRows(exec.BoundedOutputForTest([]byte(good+"\n"+forged), exec.OutputComplete))
+	if status != parseOK {
+		t.Fatalf("status = %v, want parseOK — a partial drop must stay silent", status)
 	}
-	if len(rows) != 0 {
+	if len(rows) != 1 || rows[0].name != "fc-surface-x" {
 		t.Errorf("a row with a separator in its NAME was parsed: %+v", rows)
 	}
 
-	// And a well-formed row still parses, so the check is not simply refusing
-	// everything.
+	// And a well-formed row alone still parses, so the check is not simply
+	// refusing everything.
+	rows, status = parseRows(exec.BoundedOutputForTest([]byte(good), exec.OutputComplete))
+	if status != parseOK || len(rows) != 1 || rows[0].id != "$1" {
+		t.Errorf("a well-formed row did not parse: status=%v rows=%+v", status, rows)
+	}
+}
+
+// TestParseRowsRefusesAnUnreadableListing pins the fail-CLOSED half: output
+// that arrived and yielded NOT ONE row must never be reported as an empty
+// listing.
+//
+// The fixture is the measured one, not an invented one. internal/tmux recorded
+// tmux 3.7b under a non-UTF-8 locale SUBSTITUTING `_` for the separator
+// (format.go), lossily — so every row collapses to a single field and every
+// exact-count check drops it. Without this contract an operator's LANG turns a
+// live session into a confident "no such session".
+func TestParseRowsRefusesAnUnreadableListing(t *testing.T) {
+	mangled := "91_1700000000_$1_fc-surface-x"
+
+	rows, status := parseRows(exec.BoundedOutputForTest([]byte(mangled), exec.OutputComplete))
+	if status != parseUnreadable {
+		t.Errorf("status = %v, want parseUnreadable — a mangled separator was read as an empty listing", status)
+	}
+	if len(rows) != 0 {
+		t.Errorf("an unreadable listing produced rows: %+v", rows)
+	}
+
+	// A genuinely empty listing is still parseOK: a server with no sessions
+	// must stay distinguishable from one we could not read.
+	if _, status = parseRows(exec.BoundedOutputForTest(nil, exec.OutputComplete)); status != parseOK {
+		t.Errorf("an empty listing reported %v, want parseOK", status)
+	}
+	// And truncation keeps its own status, so the two reasons stay separable.
 	good := row("91", "1700000000", "$1", "fc-surface-x")
-	rows, _ = parseRows(exec.BoundedOutputForTest([]byte(good), exec.OutputComplete))
-	if len(rows) != 1 || rows[0].id != "$1" {
-		t.Errorf("a well-formed row did not parse: %+v", rows)
+	if _, status = parseRows(exec.BoundedOutputForTest([]byte(good), exec.OutputOverflowed)); status != parseTruncated {
+		t.Errorf("a truncated listing reported %v, want parseTruncated", status)
+	}
+}
+
+// TestAMangledSeparatorNeverProvesAbsence is the end-to-end half of the
+// contract, and it is the one that matters: the unit above proves parseRows
+// classifies, this proves every consumer ACTS on the classification.
+//
+// Measured consequence if it does not: Start reports NotMutated so the service
+// cleans nothing up, and Close reports AlreadyGone with SatisfiesRollback true
+// — leaving a live tmux session with the harness inside it, orphaned, because
+// of an operator's locale.
+func TestAMangledSeparatorNeverProvesAbsence(t *testing.T) {
+	spec, tag := newSpec(t)
+	name := spec.OwnershipName()
+	mangled := "91_1700000000_$1_" + name
+
+	// A reference to hand Close and Probe, built while the separator still
+	// works, so the mangling is the only variable between the two phases.
+	ref := refFor(t, tag, name)
+
+	run := &exec.FakeSensitiveRunner{RunFunc: scripted{byKind: map[exec.CommandKind]func() (exec.SensitiveResult, error){
+		exec.KindTmuxCreate:    func() (exec.SensitiveResult, error) { return stdout(mangled), nil },
+		exec.KindTmuxReconcile: func() (exec.SensitiveResult, error) { return stdout(mangled), nil },
+		exec.KindTmuxProbe:     func() (exec.SensitiveResult, error) { return stdout(mangled), nil },
+	}}.runFunc}
+
+	a := newTestAdapter(t, run, nil, WithLstat(liveSocket(liveInode)))
+	ctx := context.Background()
+
+	if got := a.Start(ctx, spec).Outcome(); got != backend.OutcomeUnknown {
+		t.Errorf("Start outcome = %v, want outcome-unknown", got)
+	}
+
+	closed := a.Close(ctx, ref)
+	if closed.State().SatisfiesRollback() {
+		t.Error("Close discharged the rollback obligation on a listing it could not read")
+	}
+	if probed := a.Probe(ctx, ref); probed.State().Conclusive() {
+		t.Error("Probe reported a conclusive verdict from a listing it could not read")
 	}
 }
 
@@ -792,5 +933,204 @@ func TestStderrMatchingIsExactEquality(t *testing.T) {
 	}
 	if stderrEquals(exec.BoundedOutputForTest([]byte(want), exec.OutputOverflowed), want) {
 		t.Error("a truncated stderr matched — a prefix is not equality")
+	}
+}
+
+// TestNewRefusesASocketDirectoryItDoesNotPrivatelyOwn applies the checks tmux
+// applies to its own socket directory — which an explicit `-S` skips.
+//
+// That skip is the point. tmux validates <tmpdir>/tmux-<uid> inside
+// make_label() when it derives the path itself and refuses a directory it does
+// not own; `-S <path>` takes the path directly. This adapter always passes
+// `-S`, so without this check forgectl would use a directory a plain `tmux` by
+// the same operator would have refused — and on a shared host, whoever wins the
+// race to create it owns the server that receives the bootstrap's socket path
+// and one-shot nonce.
+func TestNewRefusesASocketDirectoryItDoesNotPrivatelyOwn(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		dir  fakeInfo
+	}{
+		{"owned by another user", fakeInfo{sys: &syscall.Stat_t{Uid: testUID + 1}, mode: fs.ModeDir | 0o700}},
+		{"world writable", fakeInfo{sys: &syscall.Stat_t{Uid: testUID}, mode: fs.ModeDir | 0o777}},
+		{"group writable", fakeInfo{sys: &syscall.Stat_t{Uid: testUID}, mode: fs.ModeDir | 0o770}},
+		{"not a directory", fakeInfo{sys: &syscall.Stat_t{Uid: testUID}, mode: fs.ModeSocket | 0o600}},
+		// lstat reports a symlink as ModeSymlink and never ModeDir, so the
+		// not-a-directory arm is what refuses a link whose target could move.
+		{"a symlink to a directory", fakeInfo{sys: &syscall.Stat_t{Uid: testUID}, mode: fs.ModeSymlink | 0o700}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(&exec.FakeSensitiveRunner{}, testTmux,
+				func(string) string { return "" }, func() int { return testUID },
+				WithLstat(fakeFS(tt.dir, fakeInfo{sys: statFor(liveInode), mode: fs.ModeSocket | 0o600})))
+			if !errors.Is(err, ErrUnsafeSocketDir) {
+				t.Errorf("New = %v, want ErrUnsafeSocketDir", err)
+			}
+		})
+	}
+
+	// An ABSENT directory is the ordinary first-run case: tmux creates it with
+	// the right mode. Refusing here would mean forgectl could never start the
+	// first server on a clean machine.
+	if _, err := New(&exec.FakeSensitiveRunner{}, testTmux,
+		func(string) string { return "" }, func() int { return testUID },
+		WithLstat(func(path string) (os.FileInfo, error) {
+			return nil, fs.ErrNotExist
+		})); err != nil {
+		t.Errorf("New refused an absent socket directory: %v", err)
+	}
+}
+
+// TestStartRunsTheBootstrapAsTheSessionsCommand is the difference between
+// creating THE SURFACE and creating a login shell.
+//
+// The bootstrap re-enters forgectl carrying the socket path and the one-shot
+// nonce the handshake authenticates. Omit it and tmux starts the operator's
+// default shell: nothing ever dials the socket, the service blocks in
+// AwaitStart until it times out, and every launch fails after creating a
+// session it then has to roll back. Start would still report RefKnown — a
+// structurally valid result asserting "the surface was created" about a
+// session that is not the surface.
+func TestStartRunsTheBootstrapAsTheSessionsCommand(t *testing.T) {
+	spec, _ := newSpec(t)
+	name := spec.OwnershipName()
+
+	run := &exec.FakeSensitiveRunner{RunFunc: scripted{byKind: map[exec.CommandKind]func() (exec.SensitiveResult, error){
+		exec.KindTmuxCreate: func() (exec.SensitiveResult, error) {
+			return stdout(row("91", "1700000000", "$1", name)), nil
+		},
+	}}.runFunc}
+
+	a := newTestAdapter(t, run, nil, WithLstat(liveSocket(liveInode)))
+	if got := a.Start(context.Background(), spec).Outcome(); got != backend.RefKnown {
+		t.Fatalf("Start outcome = %v, want ref-known", got)
+	}
+
+	var create exec.SensitiveCommand
+	for _, cmd := range run.Calls() {
+		if cmd.Kind == exec.KindTmuxCreate {
+			create = cmd
+		}
+	}
+	if create.Kind != exec.KindTmuxCreate {
+		t.Fatal("no create command was recorded")
+	}
+
+	// The bootstrap is the LAST operand: tmux reads new-session's shell-command
+	// there, and anything after it would be a second operand tmux ignores.
+	last := create.Args[len(create.Args)-1]
+	if !last.Equal(exec.Opaque(testBootstrap)) {
+		t.Error("the create argv does not end with the bootstrap command — the session would host a shell, not the surface")
+	}
+	// And it is separated by `--`. exec.Opaque refuses a leading dash without
+	// one, so a bootstrap that legitimately begins with a flag reaches the argv
+	// only because this separator precedes it.
+	if len(create.Args) < 2 || !create.Args[len(create.Args)-2].Equal(exec.EndOfOptions()) {
+		t.Error("the bootstrap is not preceded by the end-of-options separator")
+	}
+}
+
+// TestCloseClassifiesAFailedKill covers the branch that turns a FAILED kill
+// into a satisfied rollback — the one place where reporting success about a
+// command that did not succeed is correct, and therefore the one place where
+// getting it wrong is silent.
+//
+// The truncated case is the point of the table: a stderr cut mid-stream whose
+// retained prefix happens to begin "no server running on " must NOT discharge
+// the obligation. Without the completeness guard it would.
+func TestCloseClassifiesAFailedKill(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		stderr exec.SensitiveResult
+		want   backend.CloseState
+	}{
+		{
+			name:   "the session vanished under us",
+			stderr: stderr("can't find session: $7\n"),
+			want:   backend.CloseAlreadyGone,
+		},
+		{
+			name:   "the server went away under us",
+			stderr: stderr("no server running on /tmp/tmux-501/default\n"),
+			want:   backend.CloseAlreadyGone,
+		},
+		{
+			// Truncated: the retained prefix READS like proof of absence and is
+			// not. A rollback obligation stays outstanding.
+			name: "a truncated absence diagnostic proves nothing",
+			stderr: exec.SensitiveResult{
+				Stdout: exec.BoundedOutputForTest(nil, exec.OutputComplete),
+				Stderr: exec.BoundedOutputForTest([]byte("no server running on /tmp/tmu"), exec.OutputOverflowed),
+			},
+			want: backend.CloseFailed,
+		},
+		{
+			// The same trap on the OTHER matcher. Both guards need their own
+			// fixture: a truncated "no server running on …" never reaches
+			// sessionNotFound, so one case cannot cover both.
+			name: "a truncated session-not-found diagnostic proves nothing",
+			stderr: exec.SensitiveResult{
+				Stdout: exec.BoundedOutputForTest(nil, exec.OutputComplete),
+				Stderr: exec.BoundedOutputForTest([]byte("can't find session"), exec.OutputOverflowed),
+			},
+			want: backend.CloseFailed,
+		},
+		{
+			name:   "an unrelated failure is a failure",
+			stderr: stderr("server exited unexpectedly\n"),
+			want:   backend.CloseFailed,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			spec, tag := newSpec(t)
+			name := spec.OwnershipName()
+			live := row("91", "1700000000", "$7", name)
+
+			run := &exec.FakeSensitiveRunner{RunFunc: scripted{byKind: map[exec.CommandKind]func() (exec.SensitiveResult, error){
+				exec.KindTmuxProbe: func() (exec.SensitiveResult, error) { return stdout(live), nil },
+				exec.KindTmuxCleanup: func() (exec.SensitiveResult, error) {
+					return tt.stderr, exec.SensitiveErrorForTest(exec.KindTmuxCleanup, exec.OutcomeExit)
+				},
+			}}.runFunc}
+
+			a := newTestAdapter(t, run, nil, WithLstat(liveSocket(liveInode)))
+			got := a.Close(context.Background(), refFor(t, tag, name))
+			if got.State() != tt.want {
+				t.Errorf("Close = %v, want %v", got.State(), tt.want)
+			}
+			if got.State().SatisfiesRollback() != (tt.want == backend.CloseAlreadyGone) {
+				t.Errorf("SatisfiesRollback = %v for state %v", got.State().SatisfiesRollback(), got.State())
+			}
+		})
+	}
+}
+
+// TestClassifyRunErrorReadsTheSeamsSentinels pins the classification to what
+// the production runner actually returns.
+//
+// *exec.SensitiveError unwraps to its outcome's PACKAGE sentinel and
+// deliberately never to an underlying error, so classifying on context.Canceled
+// or os.ErrPermission produces branches that are structurally unreachable —
+// every failure would report FailureUnavailable while three named classes sat
+// dead in the switch. Driving the real error shape is what makes this a
+// statement about production rather than about a fake.
+func TestClassifyRunErrorReadsTheSeamsSentinels(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		outcome exec.Outcome
+		want    backend.StartFailureClass
+	}{
+		{"canceled", exec.OutcomeCanceled, backend.FailureCanceled},
+		{"timed out", exec.OutcomeTimeout, backend.FailureTimeout},
+		{"refused before start", exec.OutcomeInvalid, backend.FailureInternal},
+		{"nonzero exit is a statement about tmux", exec.OutcomeExit, backend.FailureUnavailable},
+		{"failed to start", exec.OutcomeStartFailed, backend.FailureUnavailable},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := exec.SensitiveErrorForTest(exec.KindTmuxCreate, tt.outcome)
+			if got := classifyRunError(err).Class(); got != tt.want {
+				t.Errorf("class = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

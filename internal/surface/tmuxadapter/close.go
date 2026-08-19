@@ -3,6 +3,7 @@ package tmuxadapter
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
@@ -111,12 +112,13 @@ func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (identityRow, loc
 		}
 		return identityRow{}, locateUnreadable, classifyRunError(err)
 	}
-	rows, complete := parseRows(res.Stdout)
-	if !complete {
-		// A truncated listing cannot prove absence, and reporting gone here
-		// would discharge a rollback obligation that is still outstanding.
+	rows, status := parseRows(res.Stdout)
+	if status != parseOK {
+		// Neither a truncated listing nor an unreadable one can prove absence,
+		// and reporting gone here would discharge a rollback obligation that is
+		// still outstanding.
 		return identityRow{}, locateUnreadable, backend.NewStartCause(backend.FailureMalformedResponse,
-			errors.New("session listing was truncated"))
+			listingUnusable(status))
 	}
 
 	want := ref.OwnershipName()
@@ -154,4 +156,11 @@ func sessionNotFound(out exec.BoundedOutput) bool {
 		return false
 	}
 	return hasPrefixTrimmed(string(raw), "can't find session")
+}
+
+// hasPrefixTrimmed reports whether s, with surrounding whitespace removed,
+// begins with prefix. tmux diagnostics arrive with a trailing newline and
+// occasionally a leading one.
+func hasPrefixTrimmed(s, prefix string) bool {
+	return strings.HasPrefix(strings.TrimSpace(s), prefix)
 }

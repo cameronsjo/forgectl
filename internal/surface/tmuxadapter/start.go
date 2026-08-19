@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
@@ -54,6 +53,19 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 		exec.Opaque(name),
 		exec.MustFixed("-c"),
 		spec.CWD(),
+		// Everything past here is the shell-command operand, and it is what
+		// makes the created session the SURFACE rather than a login shell: the
+		// bootstrap re-enters forgectl carrying the socket path and the one-shot
+		// nonce the handshake authenticates. Without it tmux starts the
+		// operator's default shell, nothing dials the socket, and every launch
+		// dies in the handshake after creating a session it then rolls back.
+		//
+		// The separator is load-bearing and its correctness is OUR assertion,
+		// not the seam's: exec.Opaque refuses a leading dash without one, and
+		// tmux honours `--` at new-session (probed on 3.7b — the operand landed
+		// in #{pane_start_command} intact).
+		exec.EndOfOptions(),
+		spec.Bootstrap().SensitiveArg(),
 	))
 
 	if runErr == nil {
@@ -113,10 +125,11 @@ func (a *Adapter) reconcile(ctx context.Context, tag backend.RecoveryTag, name, 
 		}
 		return backend.NewOutcomeUnknown(tag, cause)
 	}
-	rows, complete := parseRows(res.Stdout)
-	if !complete {
-		// A truncated listing cannot prove absence — the row we are looking for
-		// may be in the part we did not get.
+	rows, status := parseRows(res.Stdout)
+	if status != parseOK {
+		// Neither a truncated listing nor an unreadable one can prove absence:
+		// the row may be in the part we did not get, or in a rendering we could
+		// not read. Only parseOK is entitled to conclude NotMutated below.
 		return backend.NewOutcomeUnknown(tag, cause)
 	}
 	for _, row := range rows {
@@ -142,10 +155,6 @@ func (a *Adapter) readiness(ctx context.Context) (string, *backend.StartCause) {
 	res, err := a.run.RunSensitive(ctx, a.command(exec.KindTmuxReadiness, exec.MustFixed("-V")))
 	if err != nil {
 		cause := classifyRunError(err)
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return "", &cause
-		}
-		cause = backend.NewStartCause(backend.FailureUnavailable, err)
 		return "", &cause
 	}
 	raw, complete := res.Stdout.CopyBytesForParse()
@@ -216,8 +225,27 @@ type identityRow struct {
 	name      string
 }
 
+// parseStatus says whether a listing may be read as authoritative.
+//
+// Three states rather than a bool because "we got nothing" and "there is
+// nothing" are different answers, and only one of them may be reported as
+// absence.
+type parseStatus uint8
+
+const (
+	// parseOK — the stream arrived whole and yielded usable rows (or was
+	// legitimately empty). Only this status may be read as absence.
+	parseOK parseStatus = iota
+	// parseTruncated — the stream was cut short by the output cap, so the row
+	// we are looking for may be in the part we never got.
+	parseTruncated
+	// parseUnreadable — output was present and NOT ONE line parsed, which
+	// means the field separator did not survive the round trip.
+	parseUnreadable
+)
+
 // parseRows splits a listing into rows, dropping any line whose field count is
-// not exact.
+// not exact, and refuses to report an unreadable listing as an empty one.
 //
 // Exact, not a minimum: a session NAME may legally contain the field
 // separator, and under a `len(f) < N` check such a row would parse with every
@@ -225,14 +253,31 @@ type identityRow struct {
 // that names a different session. A separator inside a name can only push the
 // count ABOVE the expected one, so requiring equality drops the forged row
 // instead of misreading it.
-func parseRows(out exec.BoundedOutput) ([]identityRow, bool) {
+//
+// TOTAL parse failure is the fail-closed half, and it is not hypothetical:
+// internal/tmux measured tmux 3.7b under a non-UTF-8 locale SUBSTITUTING `_`
+// for the separator, lossily, so every row collapses to one field and every
+// exact-count check drops it (see internal/tmux/format.go, which takes the same
+// contract at parsedRows and explains why there is no rendering-side fix).
+// Without this, an operator's LANG turns a live session into a confident "no
+// such session" — reported as NotMutated by Start and AlreadyGone by Close,
+// orphaning the surface with the harness inside it.
+//
+// PARTIAL loss stays a silent drop, deliberately and for the same reason
+// internal/tmux gives: one row can legitimately fail its count because a name
+// carries the separator, and erroring on that would let anyone who can name a
+// session break every lookup on the server. Total loss cannot be caused that
+// way — every row failing at once means the separator itself is gone.
+func parseRows(out exec.BoundedOutput) ([]identityRow, parseStatus) {
 	raw, complete := out.CopyBytesForParse()
 	var rows []identityRow
+	lines := 0
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimRight(line, "\r")
 		if line == "" {
 			continue
 		}
+		lines++
 		fields := tmux.SplitFields(line)
 		if len(fields) != identityFieldCount {
 			continue
@@ -250,7 +295,26 @@ func parseRows(out exec.BoundedOutput) ([]identityRow, bool) {
 		}
 		rows = append(rows, identityRow{pid: pid, startTime: start, id: fields[2], name: fields[3]})
 	}
-	return rows, complete
+	// Unreadable is checked first because it is the stronger claim: a stream
+	// whose separator is gone tells us nothing regardless of whether we got all
+	// of it. Both statuses reach the same consumer outcome either way.
+	if lines > 0 && len(rows) == 0 {
+		return nil, parseUnreadable
+	}
+	if !complete {
+		return rows, parseTruncated
+	}
+	return rows, parseOK
+}
+
+// listingUnusable names why a listing could not be read, so an operator sees
+// "fix your locale" rather than "tmux said something odd". Both arms are bare
+// sentences with no operand: the diagnostic can reach a manager's pane.
+func listingUnusable(status parseStatus) error {
+	if status == parseUnreadable {
+		return tmux.ErrUnreadableFields
+	}
+	return errors.New("session listing was truncated")
 }
 
 // soleRow reads a create reply, requiring exactly one row and requiring it to
@@ -261,8 +325,8 @@ func parseRows(out exec.BoundedOutput) ([]identityRow, bool) {
 // and a row naming something else is a reply about a different object, which
 // must never become a reference we would later close.
 func soleRow(out exec.BoundedOutput, want string) (identityRow, bool) {
-	rows, complete := parseRows(out)
-	if !complete || len(rows) != 1 || rows[0].name != want {
+	rows, status := parseRows(out)
+	if status != parseOK || len(rows) != 1 || rows[0].name != want {
 		return identityRow{}, false
 	}
 	return rows[0], true
@@ -325,17 +389,28 @@ func noServer(out exec.BoundedOutput) bool {
 
 // classifyRunError maps a runner error onto the closed failure vocabulary.
 //
+// It matches the SEAM's sentinels, not context's or os's. The sensitive runner
+// returns only *exec.SensitiveError, and that type unwraps to its outcome's
+// package sentinel and deliberately never to the underlying error — whose text
+// can carry the path that failed to start. So `errors.Is(err, context.Canceled)`
+// is structurally false even for a command the runner killed on cancellation,
+// and classifying on it would leave FailureCanceled, FailureTimeout, and
+// FailurePermissionDenied unreachable while every failure reported
+// FailureUnavailable.
+//
 // Everything it cannot recognize becomes FailureUnavailable rather than
 // FailureInternal: an unrecognized tmux failure is a statement about tmux, and
 // calling it an internal defect would send the reader to the wrong code.
 func classifyRunError(err error) backend.StartCause {
 	switch {
-	case errors.Is(err, context.Canceled):
+	case errors.Is(err, exec.ErrCanceled):
 		return backend.NewStartCause(backend.FailureCanceled, err)
-	case errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, exec.ErrTimeout):
 		return backend.NewStartCause(backend.FailureTimeout, err)
-	case errors.Is(err, os.ErrPermission):
-		return backend.NewStartCause(backend.FailurePermissionDenied, err)
+	case errors.Is(err, exec.ErrInvalidCommand):
+		// Refused before start: the argv this package built is wrong, which is
+		// our defect and not the operator's tmux.
+		return backend.NewStartCause(backend.FailureInternal, err)
 	default:
 		return backend.NewStartCause(backend.FailureUnavailable, err)
 	}

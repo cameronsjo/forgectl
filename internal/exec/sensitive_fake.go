@@ -113,4 +113,19 @@ func BoundedOutputForTest(data []byte, cause OutputCause) BoundedOutput {
 	}
 }
 
+// SensitiveErrorForTest builds the error shape RunSensitive actually returns,
+// so a fake cannot hand its caller an error the production runner would never
+// produce.
+//
+// This matters more than it looks. *SensitiveError unwraps to its outcome's
+// package SENTINEL and deliberately never to an underlying error, so a caller
+// classifying on context.Canceled or os.ErrPermission is writing a branch that
+// is structurally unreachable in production — and a fake returning a bare
+// errors.New will happily fail to notice, because it does not match those
+// either. Every classification assertion written against such a fake is an
+// assertion about the fake.
+func SensitiveErrorForTest(kind CommandKind, outcome Outcome) *SensitiveError {
+	return &SensitiveError{Kind: kind, Outcome: outcome, ExitCode: -1, reason: "synthesized for a test"}
+}
+
 var _ SensitiveRunner = (*FakeSensitiveRunner)(nil)
