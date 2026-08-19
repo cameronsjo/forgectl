@@ -412,9 +412,6 @@ func TestDecodeRef_FailsClosed(t *testing.T) {
 	}
 }
 
-// TestRef_IdentityAccessorsAreKindChecked keeps a caller from reaching for the
-// wrong backend's identity and receiving an empty string it might then hand to
-// a command.
 // TestNewCMuxIdentity_AcceptsEitherHexCaseUnchanged is the acceptance case the
 // grammar was missing, and it is written from a measurement rather than from the
 // RFC.
@@ -450,6 +447,9 @@ func TestNewCMuxIdentity_AcceptsEitherHexCaseUnchanged(t *testing.T) {
 	}
 }
 
+// TestRef_IdentityAccessorsAreKindChecked keeps a caller from reaching for the
+// wrong backend's identity and receiving an empty string it might then hand to
+// a command.
 func TestRef_IdentityAccessorsAreKindChecked(t *testing.T) {
 	tmux, tag := tmuxRef(t)
 

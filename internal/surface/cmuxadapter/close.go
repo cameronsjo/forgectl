@@ -45,21 +45,30 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 			errors.New("the workspace lookup produced no usable state")))
 	}
 
-	// Re-validate at the point of USE, and the status of this check was measured
-	// rather than assumed.
+	// Re-validate at the point of USE. This is a CONSTRUCTION guard: the line is
+	// reached on every close and cannot currently fire.
 	//
-	// It is the second of a staged pair: parseWorkspaceList already drops any
-	// row whose id fails this exact constructor, so no id reaching locateFound
-	// can carry one this rejects. Mutating either layer alone therefore survives
-	// — which is what redundant layers always do, and is not evidence of dead
-	// code. Removing BOTH goes red, so the property is covered as a pair and
-	// neither half is separably testable. parseWorkspaceList is the enforcing
-	// one; this is the layer that would still hold if a future locate stopped
-	// validating.
+	// An earlier version of this comment claimed it was half of a staged pair
+	// whose layers each survive alone and go red together. That was wrong on the
+	// facts, and wrong in a way a reader would have trusted: mutating
+	// parseWorkspaceList's row drop ALONE goes red, so the red from removing
+	// both came entirely from that side, and nothing covered the property named
+	// here. The error was inferring a joint verdict from a both-removed probe
+	// without ever probing each layer individually — a pair probe says nothing
+	// about attribution unless both singles are run too.
 	//
-	// It earns its place because the operand here is what reaches a command
-	// line: an empty or non-UUID value arriving at `workspace close` is the
-	// shape that closes the wrong object.
+	// What actually enforces the operand's grammar is the MAP-KEY LOOKUP above.
+	// locate selects `rows[foldID(want)]`, and `want` already passed
+	// NewCMuxIdentity at Ref construction, so a row whose folded key equals a
+	// valid uppercase UUID necessarily carries a valid UUID id. Probed by
+	// removing both validation layers and planting "", "not-a-uuid", and
+	// <uuid>+"x" into a listing: every one produced already-gone with no close
+	// command issued.
+	//
+	// It is kept rather than deleted because the operand here is what reaches a
+	// command line, and the guard would become live the moment locate stopped
+	// selecting by validated key. Labelled honestly so nobody reads it as a
+	// tested control — what is tested is the lookup it backs up.
 	if _, err := backend.NewCMuxIdentity(workspace); err != nil {
 		return backend.NewCloseUnreadable(backend.NewStartCause(backend.FailureMalformedResponse, err))
 	}
@@ -162,7 +171,16 @@ func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (string, locateSt
 		// Anything else — unreadable, not ours, incompatible, unauthenticated —
 		// proves nothing about the workspace and must not discharge a rollback
 		// obligation.
-		if a.serverGone() {
+		//
+		// Gated on the failure CLASS as well as the stat, matching reconcile.
+		// The two were asymmetric — reconcile required FailureUnavailable and
+		// this took a bare stat — and the looser one was the arm that
+		// discharges a rollback, which is backwards. readiness lstats and this
+		// re-lstats, so without the class gate a socket unlinked between the
+		// two turns an auth, incompatible, or identity-mismatch failure into
+		// AlreadyGone: a live surface reported cleaned up because of a race in
+		// a check that was never about that failure.
+		if cause.Class() == backend.FailureUnavailable && a.serverGone() {
 			return "", locateAbsent, backend.StartCause{}
 		}
 		return "", locateUnreadable, *cause

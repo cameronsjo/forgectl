@@ -459,9 +459,14 @@ func (a *Adapter) serverAbsent(out exec.BoundedOutput) bool {
 // package sentinel and deliberately never to the underlying error — whose text
 // can carry the path that failed to start. So `errors.Is(err, context.Canceled)`
 // is structurally false even for a command the runner killed on cancellation,
-// and classifying on it would leave FailureCanceled, FailureTimeout, and
-// FailurePermissionDenied unreachable while every failure reported
-// FailureUnavailable.
+// and classifying on it would leave FailureCanceled and FailureTimeout
+// unreachable while every failure reported FailureUnavailable.
+//
+// FailurePermissionDenied is deliberately NOT in that list, though an earlier
+// version of this comment claimed it: the seam publishes no permission
+// sentinel, so that class is unreachable from here under either scheme. It is
+// produced where a permission question is actually asked — the socket-ownership
+// checks — never by classifying a runner error.
 //
 // Everything it cannot recognize becomes FailureUnavailable rather than
 // FailureInternal: an unrecognized tmux failure is a statement about tmux, and

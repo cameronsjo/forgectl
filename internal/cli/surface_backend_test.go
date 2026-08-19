@@ -178,3 +178,51 @@ func TestNewTmuxAdapter_ReturnsATrulyNilAdapterOnEveryFailure(t *testing.T) {
 		}
 	})
 }
+
+// TestNewCmuxAdapter_ReturnsATrulyNilAdapterOnEveryFailure is the cmux
+// counterpart, and its absence was the exact fault this file's other test
+// argues against three functions above: "a per-backend assertion only ever
+// catches per-backend faults, and the arms it does not compare are exactly
+// where the next adapter's wiring drifts."
+//
+// The principle was applied to surfaceAdapterFor's driven-backend table and not
+// to the typed-nil guard one function below it, so newCmuxAdapter's guard was
+// claimed by a comment and pinned by nothing — rewriting its body to forward
+// cmuxadapter.New's result directly left the suite green.
+func TestNewCmuxAdapter_ReturnsATrulyNilAdapterOnEveryFailure(t *testing.T) {
+	t.Run("cmux not found on PATH", func(t *testing.T) {
+		empty := t.TempDir()
+		t.Setenv("PATH", empty)
+
+		adapter, err := newCmuxAdapter()
+		if !errors.Is(err, errBackendUnavailable) {
+			t.Fatalf("newCmuxAdapter() err = %v, want errBackendUnavailable", err)
+		}
+		if adapter != nil {
+			t.Error("newCmuxAdapter() returned a non-nil adapter alongside an error")
+		}
+	})
+
+	t.Run("cmuxadapter.New refuses the resolved socket", func(t *testing.T) {
+		// Same guard as the tmux sibling, and for the same reason: without cmux
+		// on PATH the LookPath fails FIRST and this subtest silently becomes a
+		// duplicate that never reaches New. Skipping says so out loud rather
+		// than reporting a pass for coverage that did not happen.
+		if _, err := osexec.LookPath("cmux"); err != nil {
+			t.Skip("cmux is not installed, so this cannot reach cmuxadapter.New")
+		}
+		// The direct analogue of the tmux subtest's oversized TMUX: a socket
+		// path past sun_path, which cmuxadapter.checkSocketPath refuses. It is
+		// the one New-side failure this package can force without touching the
+		// filesystem.
+		t.Setenv("CMUX_SOCKET_PATH", "/tmp/"+strings.Repeat("a", 5000)+"/cmux.sock")
+
+		adapter, err := newCmuxAdapter()
+		if !errors.Is(err, errBackendUnavailable) {
+			t.Fatalf("newCmuxAdapter() err = %v, want errBackendUnavailable", err)
+		}
+		if adapter != nil {
+			t.Error("newCmuxAdapter() returned a non-nil adapter alongside an error")
+		}
+	})
+}

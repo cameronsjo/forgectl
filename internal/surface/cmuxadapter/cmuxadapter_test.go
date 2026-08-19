@@ -253,6 +253,87 @@ func TestStartSendsTheBootstrapAsTheWorkspacesCommand(t *testing.T) {
 	}
 }
 
+// TestTheCreateArgvCarriesEveryFlagWithItsOwnValue asserts the WHOLE create
+// argv, and it exists because asserting one argument of five was the gap.
+//
+// The bootstrap test below covers `--command` and nothing else covered the
+// rest, so deleting `--description`, `--cwd`, or `--name` — or swapping any of
+// their values for another sealed argument — left the entire suite green.
+// Measured: six such mutants all survived.
+//
+// The ownership marker is the one that matters most, because it is the only
+// thing tying a created workspace back to this launch, and losing it fires both
+// hazard directions at once. Reconciliation would match zero rows, so every
+// ambiguous create reports NotMutated while a live workspace sits orphaned with
+// the harness inside it. And locate would find `row.marker == ""` against our
+// name, so every Close returns identity-mismatch and rollback refuses to clean
+// up a workspace forgectl really did create.
+//
+// `--cwd` is a live hazard on its own: cmux exits ZERO when the directory does
+// not exist, so a swapped value opens the surface somewhere else and nothing
+// notices (forgectl#362).
+//
+// Values are compared by rebuilding them with the same constructor — the sealed
+// ones have no accessor — and each is required to FOLLOW ITS OWN FLAG, because
+// presence alone cannot tell a correct argv from one whose values were
+// transposed.
+func TestTheCreateArgvCarriesEveryFlagWithItsOwnValue(t *testing.T) {
+	run := newRunner()
+	a := newTestAdapter(t, run)
+	spec, tag := newSpec(t)
+
+	a.Start(context.Background(), spec)
+
+	create, ok := commandOfKind(run.calls(), exec.KindCmuxCreate)
+	if !ok {
+		t.Fatal("Start issued no create command")
+	}
+
+	// The flag args are built with literals because exec.MustFixed takes a
+	// constant-only type — the seam enforcing "fixed arguments are literals" in
+	// the type system, so a runtime string cannot become one even in a test.
+	pairs := []struct {
+		name string
+		flag exec.Arg
+		want exec.Arg
+	}{
+		{"--focus", exec.MustFixed("--focus"), exec.MustFixed("false")},
+		{"--description", exec.MustFixed("--description"), exec.Opaque(tag.OwnershipName())},
+		{"--name", exec.MustFixed("--name"), spec.Name()},
+		{"--cwd", exec.MustFixed("--cwd"), spec.CWD()},
+		{"--command", exec.MustFixed("--command"), spec.Bootstrap().SensitiveArg()},
+	}
+	for _, tc := range pairs {
+		t.Run(tc.name, func(t *testing.T) {
+			flag, want := tc.flag, tc.want
+			found := false
+			for i, arg := range create.Args {
+				if !arg.Equal(flag) {
+					continue
+				}
+				found = true
+				if i+1 >= len(create.Args) {
+					t.Fatalf("%s is the last argument; it carries no value", tc.name)
+				}
+				if !create.Args[i+1].Equal(want) {
+					t.Errorf("%s's value is not the one it should carry", tc.name)
+				}
+			}
+			if !found {
+				t.Errorf("the create argv does not carry %s", tc.name)
+			}
+		})
+	}
+
+	// The verb itself, so a create that stopped being a create would not pass
+	// on the strength of its flags alone.
+	if len(create.Args) < 4 ||
+		!create.Args[2].Equal(exec.MustFixed("workspace")) ||
+		!create.Args[3].Equal(exec.MustFixed("create")) {
+		t.Error("the create command is not `workspace create` after the global flags")
+	}
+}
+
 // TestEveryCommandCarriesThePinAndTheIDFormat pins the two properties no single
 // call site may forget.
 //
@@ -1327,6 +1408,195 @@ func TestAnInvalidPasswordOnStdoutIsAlsoAnAuthFailure(t *testing.T) {
 	if causeClass(res) != backend.FailureAuthentication {
 		t.Errorf("class = %v, want FailureAuthentication", causeClass(res))
 	}
+}
+
+// TestProbeAnswersItsTwoPositiveOutcomes covers the arms Prober exists FOR.
+//
+// Every other Probe assertion in this file is a refusal — unreadable, identity
+// mismatch, not-present — so the two arms that actually answer the question had
+// no accepting sibling and both their mutants survived. Swapping absent for
+// present is the fail-OPEN direction, and it is precisely what Probe's own
+// default arm is written to avoid; a refusal-only table could not see either.
+func TestProbeAnswersItsTwoPositiveOutcomes(t *testing.T) {
+	t.Run("present when the marked workspace is listed", func(t *testing.T) {
+		a, run, ref := startClean(t)
+		run.reply1(exec.KindCmuxProbe, listJSON([2]string{workspaceA, ref.OwnershipName()}))
+
+		if got := a.Probe(context.Background(), ref); got.State() != backend.ProbePresent {
+			t.Errorf("Probe state = %v, want present", got.State())
+		}
+	})
+	t.Run("gone on a complete empty listing", func(t *testing.T) {
+		a, run, ref := startClean(t)
+		run.reply1(exec.KindCmuxProbe, listJSON())
+
+		if got := a.Probe(context.Background(), ref); got.State() != backend.ProbeGone {
+			t.Errorf("Probe state = %v, want gone", got.State())
+		}
+	})
+}
+
+// TestAPositiveReconciliationWeCannotReferenceIsNeverNotMutated is the one place
+// a POSITIVE match must still refuse to conclude absence.
+//
+// Reconciliation finds exactly one workspace carrying our marker and absent
+// from the pre-snapshot — so something was definitely created — and then
+// building the reference fails. The realistic cause is the mid-create
+// re-fingerprint catching a server restart. Reporting NotMutated there would
+// say "nothing was created" about a workspace we just found, and the service
+// would take no recovery action at all: a surface orphaned with not even a
+// recovery tag to find it by.
+func TestAPositiveReconciliationWeCannotReferenceIsNeverNotMutated(t *testing.T) {
+	spec, tag := newSpec(t)
+	marker := tag.OwnershipName()
+
+	// The socket turns over after readiness, so reference's incarnation check
+	// refuses while the listing still shows our workspace.
+	stats := 0
+	before, after := liveSocket(liveInode), liveSocket(liveInode+1)
+	seam := func(p string) (os.FileInfo, error) {
+		stats++
+		if stats == 1 {
+			return before(p)
+		}
+		return after(p)
+	}
+	run := newRunner().
+		reply1(exec.KindCmuxCreate, []byte(`{"workspace_id":""}`)).
+		reply1(exec.KindCmuxReconcile, listJSON([2]string{workspaceA, marker}))
+	a := newTestAdapter(t, run, WithLstat(seam))
+
+	res := a.Start(context.Background(), spec)
+
+	if res.Outcome() == backend.NotMutated {
+		t.Fatal("a workspace we found under our own marker was reported as never created")
+	}
+	if res.Outcome() != backend.OutcomeUnknown {
+		t.Errorf("outcome = %v, want OutcomeUnknown", res.Outcome())
+	}
+	if got := mustTag(t, res); got.String() != tag.String() {
+		t.Errorf("tag = %q, want %q — it is the only handle left on the workspace", got.String(), tag.String())
+	}
+}
+
+// TestAFailedPreSnapshotStopsTheLaunch pins the check that makes reconciliation
+// able to tell this attempt's workspace from the last one's.
+//
+// Without it, a listing failure yields a nil pre-snapshot and every workspace
+// looks novel. On a RETRY — which reuses the same tag, and is exactly what the
+// pre-snapshot is documented to disambiguate — a leftover from the previous
+// attempt then matches as new: two matches if it is still there, or a reference
+// bound to the wrong workspace if the first was already cleaned.
+func TestAFailedPreSnapshotStopsTheLaunch(t *testing.T) {
+	run := newRunner().on(exec.KindCmuxSnapshot, func() (exec.SensitiveResult, error) {
+		return exec.SensitiveResult{}, exec.SensitiveErrorForTest(exec.KindCmuxSnapshot, exec.OutcomeExit)
+	})
+	a := newTestAdapter(t, run)
+	spec, _ := newSpec(t)
+
+	res := a.Start(context.Background(), spec)
+
+	if res.Outcome() != backend.NotMutated {
+		t.Errorf("outcome = %v, want NotMutated", res.Outcome())
+	}
+	if _, created := commandOfKind(run.calls(), exec.KindCmuxCreate); created {
+		t.Error("a create ran without a pre-snapshot to reconcile against")
+	}
+}
+
+// TestACloseAgainstAVanishedServerSatisfiesTheRollback covers the other half of
+// the already-gone condition.
+//
+// The sibling test drives the `not_found:` half; this one drives the stat half,
+// which had no fixture. The close command itself fails while the endpoint is
+// gone — a cmux quitting mid-rollback — and the obligation is still discharged,
+// because the object being gone is the whole obligation.
+func TestACloseAgainstAVanishedServerSatisfiesTheRollback(t *testing.T) {
+	_, _, ref := startClean(t)
+
+	// Present for readiness, absent by the time the failed close asks. Close
+	// takes exactly two stats — readiness's ownership check, then serverGone —
+	// so the boundary is after the first.
+	stats := 0
+	live := liveSocket(liveInode)
+	seam := func(p string) (os.FileInfo, error) {
+		stats++
+		if stats > 1 {
+			return absentSocket(p)
+		}
+		return live(p)
+	}
+	run := newRunner().reply1(exec.KindCmuxProbe, listJSON([2]string{workspaceA, ref.OwnershipName()}))
+	run.on(exec.KindCmuxCleanup, func() (exec.SensitiveResult, error) {
+		return exec.SensitiveResult{}, exec.SensitiveErrorForTest(exec.KindCmuxCleanup, exec.OutcomeExit)
+	})
+	a := newTestAdapter(t, run, WithLstat(seam))
+
+	if got := a.Close(context.Background(), ref); !got.State().SatisfiesRollback() {
+		t.Errorf("Close = %v, want a satisfied rollback against a server that is gone", got)
+	}
+}
+
+// TestAnAbsentSocketOnlyProvesAbsenceForTheRightFailure pins the CLASS half of
+// both absence gates, which the stat half alone cannot reach.
+//
+// Absence is concluded from two facts together: the failure was
+// FailureUnavailable, and the socket is not there. Only the pair means "no
+// server". Either alone is a different claim — a malformed reply or a rejected
+// credential says nothing about whether the workspace exists, and the socket
+// being gone at the moment we happen to look is a race, not a verdict.
+//
+// The two arms need different setups because they fail at different depths, and
+// that is why the class gate is only reachable through a race here: whenever the
+// socket is absent from the start, readiness fails Unavailable at its own stat
+// before any runner call, so the gate passes for the right reason. Driving the
+// refusing direction means a socket that is present when readiness looks and
+// gone when the absence check does.
+func TestAnAbsentSocketOnlyProvesAbsenceForTheRightFailure(t *testing.T) {
+	// The socket is live for the first stat and gone for every one after, which
+	// is the race both gates exist to survive.
+	vanishing := func() func(string) (os.FileInfo, error) {
+		stats := 0
+		live := liveSocket(liveInode)
+		return func(p string) (os.FileInfo, error) {
+			stats++
+			if stats > 1 {
+				return absentSocket(p)
+			}
+			return live(p)
+		}
+	}
+
+	t.Run("reconcile: a malformed listing is not proof nothing was created", func(t *testing.T) {
+		spec, _ := newSpec(t)
+		run := newRunner().
+			reply1(exec.KindCmuxCreate, []byte(`{"workspace_id":""}`)).
+			reply1(exec.KindCmuxReconcile, []byte("cmux: not json at all"))
+		a := newTestAdapter(t, run, WithLstat(vanishing()))
+
+		res := a.Start(context.Background(), spec)
+
+		if res.Outcome() == backend.NotMutated {
+			t.Error("a listing we could not PARSE was read as proof nothing was created, " +
+				"because the socket happened to be gone when we looked")
+		}
+	})
+
+	t.Run("locate: an auth failure is not proof the workspace is gone", func(t *testing.T) {
+		_, _, ref := startClean(t)
+		run := newRunner().on(exec.KindCmuxReadiness, func() (exec.SensitiveResult, error) {
+			return exec.SensitiveResult{
+					Stderr: exec.BoundedOutputForTest([]byte("Error: ERROR: Invalid password\n"), exec.OutputComplete),
+				},
+				exec.SensitiveErrorForTest(exec.KindCmuxReadiness, exec.OutcomeExit)
+		})
+		a := newTestAdapter(t, run, WithLstat(vanishing()))
+
+		if got := a.Close(context.Background(), ref); got.State().SatisfiesRollback() {
+			t.Error("a rejected credential discharged the rollback because the socket " +
+				"vanished between readiness and the absence check")
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------

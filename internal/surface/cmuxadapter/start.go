@@ -551,12 +551,16 @@ func (a *Adapter) serverGone() bool {
 // chooses. The classification is advisory — it steers an operator's diagnosis
 // and gates no mutation — so a false positive is cheap while a false negative
 // sends someone hunting a dead server instead of their password.
+// A truncated stream is searched rather than skipped, which is the opposite of
+// what every ABSENCE check in this package does — and deliberately so. Those
+// checks refuse an incomplete stream because concluding "nothing is there" from
+// a partial read discharges a rollback. This one concludes nothing and gates no
+// mutation; it only decides which sentence an operator reads. Skipping the
+// partial stream would be a false negative, which the comment above calls the
+// costly direction, so the completeness flag is deliberately not consulted.
 func authFailed(streams ...exec.BoundedOutput) bool {
 	for _, out := range streams {
-		raw, complete := out.CopyBytesForParse()
-		if !complete {
-			continue
-		}
+		raw, _ := out.CopyBytesForParse()
 		if strings.Contains(string(raw), "Invalid password") {
 			return true
 		}
@@ -571,9 +575,14 @@ func authFailed(streams ...exec.BoundedOutput) bool {
 // package sentinel and deliberately never to the underlying error — whose text
 // can carry the path that failed to start. So errors.Is(err, context.Canceled)
 // is structurally false even for a command the runner killed on cancellation,
-// and classifying on it would leave FailureCanceled, FailureTimeout, and
-// FailurePermissionDenied unreachable while every failure reported
-// FailureUnavailable.
+// and classifying on it would leave FailureCanceled and FailureTimeout
+// unreachable while every failure reported FailureUnavailable.
+//
+// FailurePermissionDenied is deliberately NOT in that list, though an earlier
+// version of this comment claimed it: the seam publishes no permission
+// sentinel, so that class is unreachable from here under either scheme. It is
+// produced where a permission question is actually asked — the socket-ownership
+// checks — never by classifying a runner error.
 //
 // Everything it cannot recognize becomes FailureUnavailable rather than
 // FailureInternal: an unrecognized cmux failure is a statement about cmux, and
