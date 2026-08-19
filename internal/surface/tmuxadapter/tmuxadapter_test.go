@@ -1153,18 +1153,27 @@ func TestCloseRefusesAbsenceFromARestartedServer(t *testing.T) {
 // checks and the last control in this package that the suite could not tell
 // apart from its own absence.
 //
-// It is a wiring error rather than an operator-reachable one — a cmux Ref
+// It is a wiring error rather than an operator-reachable one: a cmux Ref
 // reaching the tmux adapter means the resolver handed the wrong adapter a
-// reference — but that is exactly why it must refuse rather than proceed. Past
-// the kind check nothing else in locate is kind-aware: `ref.OwnershipName()`
-// answers for any kind, so a cmux workspace UUID would be matched against tmux
-// session names, and a collision would put a kill on a session this reference
-// never named.
+// reference.
 //
-// Refusing UNREADABLE and not gone is the load-bearing half: a wrong-kind
-// reference tells us nothing about whether the object exists, and reporting
-// gone would discharge a rollback obligation belonging to a different backend
-// entirely.
+// What the kind check buys is the OUTCOME STATE, and that is worth stating
+// precisely because the obvious justification is wrong. Ref.Validate enforces
+// that a reference's source kind equals its own kind, so a foreign Ref can
+// never carry a tmux source — which means locate's SOURCE check would refuse
+// this reference anyway, one line later, even with the kind check deleted.
+// Nothing reaches the listing either way, and no kill is possible: measured,
+// deleting the kind check yields identity-mismatch and never a command.
+//
+// So the difference is what we SAY, and it matters. Identity-mismatch asserts
+// that the server restarted since this reference was taken — a claim about a
+// tmux incarnation that a cmux reference gives no evidence for whatsoever.
+// Unreadable is the honest answer: we cannot speak to this object at all.
+// Both refuse; only one of them refuses truthfully.
+//
+// Unreadable and not GONE is the other half: a wrong-kind reference says
+// nothing about whether the object exists, and reporting gone would discharge
+// a rollback obligation belonging to a different backend entirely.
 func TestCloseAndProbeRefuseARefForAnotherBackend(t *testing.T) {
 	tag, err := backend.NewRecoveryTag()
 	if err != nil {
@@ -1174,6 +1183,8 @@ func TestCloseAndProbeRefuseARefForAnotherBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCMuxIdentity: %v", err)
 	}
+	// Any valid fingerprint will do — locate refuses before anything compares
+	// it, so nothing here is load-bearing beyond Valid().
 	server, err := backend.Fingerprint(backend.IncarnationInput{
 		Endpoint: testSocket, Version: "cmux 1.0", Inode: liveInode,
 	})
@@ -1199,9 +1210,15 @@ func TestCloseAndProbeRefuseARefForAnotherBackend(t *testing.T) {
 		t.Errorf("Probe = %v, want unreadable", probed.State())
 	}
 
-	// And it refuses BEFORE talking to tmux at all. A wrong-kind reference must
-	// not cost a command, and reaching the runner would mean the kind check ran
-	// somewhere after the lookup rather than first.
+	// And it refuses BEFORE talking to tmux at all — a wrong-kind reference must
+	// not cost a command against a server it has no business reaching.
+	//
+	// Stated at the strength it actually holds: this pins "kind OR source
+	// refuses before any command", not "the kind check is first". The source
+	// check short-circuits regardless of where the kind check sits, so moving
+	// the kind check later is caught by the state assertions above rather than
+	// by this one. It is still worth pinning — deleting BOTH checks lets two
+	// commands through, and this is the assertion that notices.
 	if calls := run.Calls(); len(calls) != 0 {
 		t.Errorf("a foreign reference reached tmux: %d command(s), first kind %v", len(calls), calls[0].Kind)
 	}
