@@ -31,6 +31,16 @@ jobs:
         # against a private socket — the only check that would catch a future
         # tmux restoring forgectl#237. They self-skip when tmux is absent, so
         # without this step they never ran here (#237 review).
+        #
+        # Bounded because this step does not fail when the apt mirror is
+        # unreachable — it stops making progress. Observed wedging for 6 to 17
+        # minutes on four occasions across two PRs, every following step
+        # pending, while the macOS and helper jobs passed on the same head in
+        # under a minute (forgectl#358). An unbounded hang leaves a PR with no
+        # Linux signal at all and reads as "CI is slow"; a bounded one fails
+        # fast and legibly, which is a state a re-run can actually clear. The
+        # install normally completes in seconds, so this is generous.
+        timeout-minutes: 3
         run: sudo apt-get update && sudo apt-get install -y tmux
 
       - name: Build
@@ -87,6 +97,14 @@ jobs:
         # `brew list ||` keeps the step reentrant: the runner image may already
         # ship tmux, and `brew install` over a present formula is not reliably
         # exit 0.
+        #
+        # Bounded for the same reason as the ubuntu job's. This one has not been
+        # observed hanging, and it gets the bound anyway: a package install over
+        # the network is the same shape of risk on either runner, and a bound
+        # applied only where a hang has already been seen is one that arrives
+        # after the outage rather than before it. Higher than ubuntu's because
+        # brew genuinely can take longer when the formula is not in the image.
+        timeout-minutes: 5
         run: brew list tmux || brew install tmux
 
       - name: Test (Darwin-gated coverage)
