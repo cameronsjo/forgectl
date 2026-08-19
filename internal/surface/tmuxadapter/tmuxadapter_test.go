@@ -1149,6 +1149,64 @@ func TestCloseRefusesAbsenceFromARestartedServer(t *testing.T) {
 	}
 }
 
+// TestCloseAndProbeRefuseARefForAnotherBackend covers the first thing locate
+// checks and the last control in this package that the suite could not tell
+// apart from its own absence.
+//
+// It is a wiring error rather than an operator-reachable one — a cmux Ref
+// reaching the tmux adapter means the resolver handed the wrong adapter a
+// reference — but that is exactly why it must refuse rather than proceed. Past
+// the kind check nothing else in locate is kind-aware: `ref.OwnershipName()`
+// answers for any kind, so a cmux workspace UUID would be matched against tmux
+// session names, and a collision would put a kill on a session this reference
+// never named.
+//
+// Refusing UNREADABLE and not gone is the load-bearing half: a wrong-kind
+// reference tells us nothing about whether the object exists, and reporting
+// gone would discharge a rollback obligation belonging to a different backend
+// entirely.
+func TestCloseAndProbeRefuseARefForAnotherBackend(t *testing.T) {
+	tag, err := backend.NewRecoveryTag()
+	if err != nil {
+		t.Fatalf("NewRecoveryTag: %v", err)
+	}
+	id, err := backend.NewCMuxIdentity("3f2504e0-4f89-41d3-9a0c-0305e82c3301")
+	if err != nil {
+		t.Fatalf("NewCMuxIdentity: %v", err)
+	}
+	server, err := backend.Fingerprint(backend.IncarnationInput{
+		Endpoint: testSocket, Version: "cmux 1.0", Inode: liveInode,
+	})
+	if err != nil {
+		t.Fatalf("Fingerprint: %v", err)
+	}
+	foreign, err := backend.NewCmuxRef(backend.CmuxDefaultServer(), server, tag, id)
+	if err != nil {
+		t.Fatalf("NewCmuxRef: %v", err)
+	}
+
+	run := &exec.FakeSensitiveRunner{}
+	a := newTestAdapter(t, run, nil, WithLstat(liveSocket(liveInode)))
+
+	closed := a.Close(context.Background(), foreign)
+	if closed.State() != backend.CloseUnreadable {
+		t.Errorf("Close = %v, want unreadable", closed.State())
+	}
+	if closed.State().SatisfiesRollback() {
+		t.Error("a reference from another backend discharged this backend's rollback obligation")
+	}
+	if probed := a.Probe(context.Background(), foreign); probed.State() != backend.ProbeUnreadable {
+		t.Errorf("Probe = %v, want unreadable", probed.State())
+	}
+
+	// And it refuses BEFORE talking to tmux at all. A wrong-kind reference must
+	// not cost a command, and reaching the runner would mean the kind check ran
+	// somewhere after the lookup rather than first.
+	if calls := run.Calls(); len(calls) != 0 {
+		t.Errorf("a foreign reference reached tmux: %d command(s), first kind %v", len(calls), calls[0].Kind)
+	}
+}
+
 // TestTheZeroLocateStateNeverKillsAndNeverReportsPresent pins the property
 // that made the previous guard inert.
 //
