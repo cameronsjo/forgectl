@@ -277,11 +277,6 @@ func (c *Client) Open(ctx context.Context, dir string) error {
 	return client.AttachSession(ctx, session)
 }
 
-// InsideTmux reports whether the process is running inside a tmux client.
-func (c *Client) InsideTmux() bool {
-	return os.Getenv("TMUX") != ""
-}
-
 // localRepos walks the local clones under Dir and attributes each by its origin
 // remote — host/owner/name parsed from `git remote get-url origin`, never the
 // bare directory name. A dir with no git repo or no origin remote becomes a

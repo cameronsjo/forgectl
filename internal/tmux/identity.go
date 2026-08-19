@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // tmux's target grammar is the whole reason this file exists.
@@ -62,19 +65,53 @@ func ValidatePaneID(id string) error {
 
 // ServerSelector captures WHICH tmux server a command reaches.
 //
-// forgectl never passes `-L` or `-S`, so selection is entirely environmental:
-// inside tmux, $TMUX names the socket the client is attached to; outside it,
-// $TMUX_TMPDIR moves the default socket directory. Capturing both is what makes
-// default-server identity and custom-server identity impossible to cross — an
-// id minted on a custom socket cannot be silently acted on against the default
-// server, because the selector no longer matches and every action refuses.
+// Selection is one of two modes. currentSelector is the only thing that builds
+// a selector, and it populates exactly one group of fields per mode — but the
+// struct is exported and nothing prevents another package assembling a mixed
+// one by hand. That is harmless rather than guarded, and deliberately so: every
+// impossible combination FAILS CLOSED. preflight compares the whole struct with
+// !=, so a hand-assembled selector matches no live client and refuses every
+// action. Making the invalid states unrepresentable — a sealed type or an
+// interface — would cost more than it bought, because that comparison depends
+// on ServerSelector staying a plain comparable struct. The exclusivity is a
+// property of the constructor; the safety is a property of the comparison.
 //
-// classifyServerFailure already refuses to classify an explicit-socket argv as
-// an absent default (see hasExplicitSocketArg), so a future `-L`/`-S` option
-// cannot inherit the proceed verdict either; it would need a field here first.
+// The two modes:
+//
+//   - ENVIRONMENTAL (Socket empty). No `-L`/`-S` is passed, so selection is
+//     entirely environmental: inside tmux, $TMUX names the socket the client is
+//     attached to; outside it, $TMUX_TMPDIR moves the default socket directory.
+//   - PINNED (Socket set). Every command carries `-S <Socket>`, which overrides
+//     the environment outright, so $TMUX and $TMUX_TMPDIR say nothing about
+//     which server is reached and are deliberately NOT captured. Recording them
+//     anyway would manufacture an ErrSelectorChanged the moment the operator
+//     attached to any tmux session, refusing an action against a server that
+//     had not moved at all.
+//
+// Capturing the mode is what makes the three server identities impossible to
+// cross — an id minted on a pinned socket cannot be silently acted on against
+// the default server, or against a different pinned socket, because the
+// selector no longer matches and every action refuses.
+//
+// classifyServerFailure grants the "no server, you may create the first one"
+// verdict only for the mode this selector is in: an environmental client
+// derives and inspects the default socket, a pinned client inspects its own,
+// and an argv naming any OTHER socket is refused outright (hasExplicitSocketArg).
 type ServerSelector struct {
 	TmuxEnv string
 	TmpDir  string
+	Socket  string
+}
+
+// String renders a selector with every field quoted, and exists because a
+// selector is printed straight at an operator by ErrSelectorChanged — while two
+// of its three fields come from the ENVIRONMENT ($TMUX, $TMUX_TMPDIR). Those
+// can name a path carrying an escape sequence, so a bare %+v hands the terminal
+// whatever the environment says. Implementing Stringer fixes every %v and %+v
+// site at once rather than leaving each one to remember.
+func (s ServerSelector) String() string {
+	return fmt.Sprintf("{tmux=%s tmpdir=%s socket=%s}",
+		termsafe.QuotePath(s.TmuxEnv), termsafe.QuotePath(s.TmpDir), termsafe.QuotePath(s.Socket))
 }
 
 // ServerGeneration identifies one running tmux server: which socket it is on,
@@ -143,9 +180,26 @@ var (
 	// exactly. It is deliberately NOT satisfied by a prefix or glob sibling:
 	// that fallback is forgectl#237.
 	ErrSessionNotFound = errors.New("no tmux session with that exact name")
-	// ErrNoServer reports that no tmux server is running on the DEFAULT socket
-	// — the one classification that permits a caller to create the first one.
+	// ErrNoServer reports that no tmux server is running on the socket THIS
+	// client selects — the default one derived from the environment, or the
+	// pinned one when the client carries a socket. It is the one classification
+	// that permits a caller to create the first server. A command aimed at any
+	// other socket never reaches this verdict.
 	ErrNoServer = errors.New("no tmux server is running")
+	// ErrUnpinnedCommand reports that a pinned client saw an argv it did not
+	// build — a call site that skipped tmuxArgs, so the command reached the
+	// ENVIRONMENTAL server. It is a forgectl bug, not a tmux state, and says so
+	// rather than hiding inside ErrServerUnreadable.
+	ErrUnpinnedCommand = errors.New("a pinned tmux command was issued without its socket")
+	// ErrSocketDirMissing reports that a pinned socket's parent directory does
+	// not exist. tmux creates the default socket's directory but never an
+	// explicit `-S` one, so this can never resolve itself by creating a server.
+	ErrSocketDirMissing = errors.New("the directory for the pinned tmux socket does not exist")
+	// ErrInvalidSocketPath reports a socket path NewPinned refused. It is typed
+	// like every other refusal in this package so a caller classifies on the
+	// error rather than on its wording — a construction failure against a
+	// server nobody meant to reach is worth distinguishing from any other.
+	ErrInvalidSocketPath = errors.New("invalid tmux socket path")
 	// ErrDuplicateSession reports tmux refusing to create a session because the
 	// name is taken. It is the ONLY create failure that permits a second lookup.
 	ErrDuplicateSession = errors.New("a tmux session with that name already exists")
@@ -159,15 +213,23 @@ var (
 // currentSelector reads the live server selection. Compared against a captured
 // selector, an inequality here is the "you are pointed at a different server
 // now" refusal.
+//
+// A pinned client reports its socket and nothing else, per ServerSelector's
+// two-mode contract: the pin is immutable for the client's lifetime, so this is
+// constant rather than "live", which is exactly the property a pin is for.
 func (c *Client) currentSelector() ServerSelector {
+	if c.socket != "" {
+		return ServerSelector{Socket: c.socket}
+	}
 	return ServerSelector{TmuxEnv: c.getenv("TMUX"), TmpDir: c.getenv("TMUX_TMPDIR")}
 }
 
 // SessionIdentity binds a listed session row to the server selection this
 // client is pointed at. It exists so callers outside the package can carry a
-// full identity out of a listing without the selector being exported, which
-// would invite one being assembled from somewhere other than the client that
-// took the listing.
+// full identity out of a listing without reaching for currentSelector, which is
+// unexported precisely so a selector is never assembled from somewhere other
+// than the client that took the listing. (ServerSelector itself IS exported —
+// what is withheld is the ability to produce a real one.)
 func (c *Client) SessionIdentity(s Session) SessionIdentity {
 	return s.Identity(c.currentSelector())
 }
@@ -179,17 +241,34 @@ func (c *Client) WindowIdentity(w Window) WindowIdentity {
 
 // serverStateError maps a failed tmux command onto a typed server-state error,
 // routing #242's classifier rather than adding a second one. Only
-// serverAbsentDefault becomes ErrNoServer; every other verdict — including a
-// custom socket we cannot inspect — becomes ErrServerUnreadable, because
-// proceeding would mean acting on the default server after asking about
-// another one.
+// serverAbsent becomes ErrNoServer; every other verdict — including a
+// socket we cannot inspect — becomes ErrServerUnreadable, because proceeding
+// would mean acting on the server this client selects after having asked about
+// a different one. Under a pin no default server is involved at all.
 func (c *Client) serverStateError(ctx context.Context, args []string, err error) error {
 	failure := c.classifyServerFailure(ctx, args, err)
 	switch failure.Kind {
-	case serverAbsentDefault:
-		return fmt.Errorf("%w (default socket %s)", ErrNoServer, failure.SocketPath)
+	case serverAbsent:
+		// Naming the mode matters for the operator: "default socket" on a pinned
+		// client points them at the wrong file to go look at.
+		kind := "default socket"
+		if c.socket != "" {
+			kind = "pinned socket"
+		}
+		// Quoted, not bare: in environmental mode this path is derived from
+		// $TMUX_TMPDIR, which an operator's environment can point at a name
+		// carrying an escape sequence. It reaches a terminal from here.
+		return fmt.Errorf("%w (%s %s)", ErrNoServer, kind, termsafe.QuotePath(failure.SocketPath))
 	case serverCanceled:
 		return failure.Cause
+	case serverPinMismatch:
+		// Named separately from "unreadable" because it sends the operator
+		// somewhere else entirely: this is forgectl having aimed the command at
+		// the wrong server, not tmux being in a state we cannot read. Folded
+		// into the default arm, the only trace was a Debug line.
+		return fmt.Errorf("%w (socket %s)", ErrUnpinnedCommand, termsafe.QuotePath(c.socket))
+	case serverSocketDirMissing:
+		return fmt.Errorf("%w: %s", ErrSocketDirMissing, termsafe.QuotePath(filepath.Dir(failure.SocketPath)))
 	default:
 		cause := failure.Cause
 		if cause == nil {

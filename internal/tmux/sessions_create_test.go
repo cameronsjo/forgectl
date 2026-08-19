@@ -200,7 +200,7 @@ func TestEnsureSessionStateMachine(t *testing.T) {
 			label:   "duplicate, re-list transport failure",
 			listOut: []string{sibling, ""},
 			listErr: []error{nil, errors.New("tmux died")},
-			// The second failure is a plain error, so absentDefaultServer will
+			// The second failure is a plain error, so absentServer will
 			// not convert it into an empty listing.
 			createFn:    func([]string) (string, error) { return "", dupErr },
 			wantErr:     ErrDuplicateSession,

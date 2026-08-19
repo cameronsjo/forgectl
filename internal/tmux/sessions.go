@@ -39,10 +39,10 @@ const sessionIdentityFormat = "#{pid}" + FieldSep + "#{start_time}" + FieldSep +
 // returns an empty slice (not an error) — "no sessions" is a normal state, not
 // a failure.
 func (c *Client) ListSessions(ctx context.Context) ([]Session, error) {
-	args := []string{"list-sessions", "-F", sessionFormat}
+	args := c.tmuxArgs("list-sessions", "-F", sessionFormat)
 	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {
-		if c.absentDefaultServer(ctx, args, err) {
+		if c.absentServer(ctx, args, err) {
 			return nil, nil
 		}
 		return nil, c.serverStateError(ctx, args, err)
@@ -144,7 +144,7 @@ func (c *Client) CreateSession(ctx context.Context, name, dir string) (SessionId
 	if name == "" {
 		return SessionIdentity{}, errors.New("cannot create a tmux session with an empty name")
 	}
-	args := []string{"new-session", "-d", "-P", "-F", sessionIdentityFormat, "-s", name}
+	args := c.tmuxArgs("new-session", "-d", "-P", "-F", sessionIdentityFormat, "-s", name)
 	if dir != "" {
 		args = append(args, "-c", dir)
 	}
@@ -263,7 +263,7 @@ func (c *Client) RenameSession(ctx context.Context, want SessionIdentity, newNam
 	if err != nil {
 		return fmt.Errorf("rename session %q: %w", want.Name, err)
 	}
-	_, err = c.run.Run(ctx, c.tmuxBin, "rename-session", "-t", current.ID, "--", newName)
+	_, err = c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("rename-session", "-t", current.ID, "--", newName)...)
 	return err
 }
 
@@ -273,7 +273,7 @@ func (c *Client) KillSession(ctx context.Context, want SessionIdentity) error {
 	if err != nil {
 		return fmt.Errorf("kill session %q: %w", want.Name, err)
 	}
-	_, err = c.run.Run(ctx, c.tmuxBin, "kill-session", "-t", current.ID)
+	_, err = c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("kill-session", "-t", current.ID)...)
 	return err
 }
 
@@ -299,6 +299,6 @@ func (c *Client) KillOthers(ctx context.Context, keep SessionIdentity) error {
 	if err != nil {
 		return fmt.Errorf("kill other sessions (keeping %q): %w", keep.Name, err)
 	}
-	_, err = c.run.Run(ctx, c.tmuxBin, "kill-session", "-a", "-t", current.ID)
+	_, err = c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("kill-session", "-a", "-t", current.ID)...)
 	return err
 }

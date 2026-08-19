@@ -217,6 +217,8 @@ func (c *Client) Open(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
+	// Unpinned by construction — see the note at internal/pr/launch.go's
+	// new-window sites and forgectl#353.
 	_, err = c.run.Run(ctx, "tmux", "new-window", "-t", target, "-n", name, "-c", sess.Workspace)
 	return err
 }

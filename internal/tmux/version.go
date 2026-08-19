@@ -46,7 +46,7 @@ func parseTmuxVersion(value string) (major int, minor int, normalized string, er
 
 func (c *Client) CheckGenerationCapability(ctx context.Context) (GenerationCapability, error) {
 	const unknownVersion = "unknown"
-	versionOut, err := c.run.Run(ctx, c.tmuxBin, "-V")
+	versionOut, err := c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("-V")...)
 	if err != nil {
 		return GenerationCapability{}, generationCapabilityError(unknownVersion, err)
 	}
@@ -58,11 +58,11 @@ func (c *Client) CheckGenerationCapability(ctx context.Context) (GenerationCapab
 		return GenerationCapability{}, generationCapabilityError(normalized, fmt.Errorf("unsupported tmux version"))
 	}
 
-	args := []string{"display-message", "-p", IdentityFormat}
+	args := c.tmuxArgs("display-message", "-p", IdentityFormat)
 	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {
 		failure := c.classifyServerFailure(ctx, args, err)
-		if failure.Kind == serverAbsentDefault {
+		if failure.Kind == serverAbsent {
 			return GenerationCapability{Version: normalized}, nil
 		}
 		cause := failure.Cause

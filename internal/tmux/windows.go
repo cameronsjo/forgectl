@@ -46,10 +46,10 @@ const (
 
 // ListWindows returns every window across all sessions (list-windows -a).
 func (c *Client) ListWindows(ctx context.Context) ([]Window, error) {
-	args := []string{"list-windows", "-a", "-F", windowFormat}
+	args := c.tmuxArgs("list-windows", "-a", "-F", windowFormat)
 	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {
-		if c.absentDefaultServer(ctx, args, err) {
+		if c.absentServer(ctx, args, err) {
 			return nil, nil
 		}
 		return nil, c.serverStateError(ctx, args, err)
@@ -98,10 +98,10 @@ func parseWindows(out string) ([]Window, error) {
 
 // ListPanes returns every pane across all sessions (list-panes -a).
 func (c *Client) ListPanes(ctx context.Context) ([]Pane, error) {
-	args := []string{"list-panes", "-a", "-F", paneFormat}
+	args := c.tmuxArgs("list-panes", "-a", "-F", paneFormat)
 	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {
-		if c.absentDefaultServer(ctx, args, err) {
+		if c.absentServer(ctx, args, err) {
 			return nil, nil
 		}
 		return nil, c.serverStateError(ctx, args, err)
@@ -172,7 +172,7 @@ func (c *Client) KillWindow(ctx context.Context, want WindowIdentity) error {
 	if err != nil {
 		return fmt.Errorf("kill window %q: %w", want.Name, err)
 	}
-	_, err = c.run.Run(ctx, c.tmuxBin, "kill-window", "-t", current.ID)
+	_, err = c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("kill-window", "-t", current.ID)...)
 	return err
 }
 
