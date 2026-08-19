@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	osexec "os/exec"
 	"strings"
 	"testing"
 
@@ -52,14 +53,20 @@ func TestParseBackendKind_RefusalNeverEchoesTheName(t *testing.T) {
 	}
 }
 
-// TestSurfaceAdapterFor_RefusesEveryBackendForNow pins the honest state of this
-// build: the plumbing is complete, the adapters are forgectl#332.
+// TestSurfaceAdapterFor_DrivesTmuxAndRefusesTheRest pins the honest state of
+// this build: tmux is driven, cmux and herdr are still forgectl#332.
 //
-// It is a real assertion rather than a placeholder — the distinction between
-// "unknown name" and "no adapter yet" is what tells an operator whether they
-// made a typo or hit a missing feature, and collapsing the two would lose it.
-func TestSurfaceAdapterFor_RefusesEveryBackendForNow(t *testing.T) {
-	for _, name := range []string{"tmux", "cmux", "herdr"} {
+// The three-way distinction is the assertion. "Unknown name", "no adapter yet",
+// and "the program is not installed" send an operator to three different next
+// moves — fix a typo, wait for a release, install tmux — and collapsing any two
+// of them loses that.
+// Side effect worth declaring: the "tmux" case below calls the real
+// surfaceAdapterFor, so on a machine with tmux installed it runs the real
+// os.MkdirAll and creates /tmp/tmux-<uid> (0700) if it is not already there.
+// Harmless — it is the directory tmux itself would use — but it is a write, and
+// a test that writes outside its TempDir should say so.
+func TestSurfaceAdapterFor_DrivesTmuxAndRefusesTheRest(t *testing.T) {
+	for _, name := range []string{"cmux", "herdr"} {
 		t.Run(name, func(t *testing.T) {
 			adapter, err := surfaceAdapterFor(name)
 			if adapter != nil {
@@ -75,8 +82,88 @@ func TestSurfaceAdapterFor_RefusesEveryBackendForNow(t *testing.T) {
 		})
 	}
 
+	// tmux resolves to a real adapter wherever tmux is installed, and to a
+	// distinct "not available" refusal where it is not — never to "not
+	// implemented", which would now be a lie, and never to "unknown".
+	t.Run("tmux", func(t *testing.T) {
+		adapter, err := surfaceAdapterFor("tmux")
+		if errors.Is(err, errBackendNotImplemented) {
+			t.Fatal("tmux reported as unimplemented; this build drives it")
+		}
+		if errors.Is(err, errUnknownBackend) {
+			t.Fatal("tmux reported as an unknown backend")
+		}
+		if err != nil {
+			// The only sanctioned failure here is a machine without tmux.
+			if !errors.Is(err, errBackendUnavailable) {
+				t.Fatalf("surfaceAdapterFor(tmux) = %v, want an adapter or errBackendUnavailable", err)
+			}
+			return
+		}
+		if adapter == nil {
+			t.Fatal("surfaceAdapterFor(tmux) returned no adapter and no error")
+		}
+		if adapter.Kind() != backend.KindTmux {
+			t.Errorf("adapter.Kind() = %v, want tmux", adapter.Kind())
+		}
+		// The launch refuses any adapter that cannot clean up after itself, so
+		// an adapter that reaches the service without Close and Probe would
+		// fail at rollback — while holding something that needs closing.
+		if _, err := backend.RequireCapabilities(adapter); err != nil {
+			t.Errorf("the tmux adapter does not satisfy Capabilities: %v", err)
+		}
+	})
+
 	// And an unrecognised name still reports itself as one.
 	if _, err := surfaceAdapterFor("screen"); !errors.Is(err, errUnknownBackend) {
 		t.Errorf("an unknown backend = %v, want errUnknownBackend", err)
 	}
+}
+
+// TestNewTmuxAdapter_ReturnsATrulyNilAdapterOnEveryFailure pins the reason
+// newTmuxAdapter assigns and returns explicitly instead of forwarding
+// tmuxadapter.New's result: a bare `return tmuxadapter.New(...)` converts
+// New's nil *Adapter into a NON-nil backend.Adapter holding a nil pointer, the
+// moment New's error path is taken. `adapter != nil` would then be true and
+// `err != nil` would also be true — a caller checking err first (as this
+// package's tests do) would never notice, but a caller checking adapter first,
+// or storing it, would hold a typed nil. This asserts the plain `== nil`
+// comparison directly, on both of newTmuxAdapter's two failure exits.
+func TestNewTmuxAdapter_ReturnsATrulyNilAdapterOnEveryFailure(t *testing.T) {
+	t.Run("tmux not found on PATH", func(t *testing.T) {
+		empty := t.TempDir()
+		t.Setenv("PATH", empty)
+
+		adapter, err := newTmuxAdapter()
+		if !errors.Is(err, errBackendUnavailable) {
+			t.Fatalf("newTmuxAdapter() err = %v, want errBackendUnavailable", err)
+		}
+		if adapter != nil {
+			t.Error("newTmuxAdapter() returned a non-nil adapter alongside an error")
+		}
+	})
+
+	t.Run("tmuxadapter.New refuses the resolved socket", func(t *testing.T) {
+		// Without tmux on PATH the LookPath above fails FIRST and this subtest
+		// silently becomes a duplicate of its sibling — asserting the same
+		// thing and never reaching New at all. Skipping says so out loud
+		// rather than reporting a pass for coverage that did not happen.
+		if _, err := osexec.LookPath("tmux"); err != nil {
+			t.Skip("tmux is not installed, so this cannot reach tmuxadapter.New")
+		}
+		// The failure is pushed into New itself by naming a socket path long
+		// enough that tmuxadapter.checkSocketPath refuses it — the one
+		// New-side refusal this package can force without touching the
+		// filesystem. (checkSocketPath mirrors tmux.NewPinned's rules; it is
+		// the one that actually runs here.)
+		t.Setenv("TMUX", "/tmp/"+strings.Repeat("a", 5000)+",1,0")
+
+		adapter, err := newTmuxAdapter()
+		if !errors.Is(err, errBackendUnavailable) {
+			t.Fatalf("newTmuxAdapter() err = %v, want errBackendUnavailable", err)
+		}
+		if adapter != nil {
+			t.Error("newTmuxAdapter() returned a non-nil adapter alongside an error")
+		}
+	})
 }
