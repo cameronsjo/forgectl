@@ -9,6 +9,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
+	"github.com/cameronsjo/forgectl/internal/surface/cmuxadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/tmuxadapter"
 )
 
@@ -44,14 +45,14 @@ var (
 
 // surfaceAdapterFor maps a backend name onto its adapter.
 //
-// tmux is driven; cmux and herdr still refuse. The refusal is deliberate rather
-// than a stub left behind: the surface command, its target resolution, its
-// launch state machine, and its rollback all exist and are exercised, and
-// shipping them behind a truthful refusal is better than shipping a command
-// that silently does nothing or one that lies about which manager it drove.
+// tmux and cmux are driven; herdr still refuses. The refusal is deliberate
+// rather than a stub left behind: the surface command, its target resolution,
+// its launch state machine, and its rollback all exist and are exercised, and
+// shipping them behind a truthful refusal is better than shipping a command that
+// silently does nothing or one that lies about which manager it drove.
 //
-// The tmux arm resolves its server from the environment at construction, so an
-// adapter is built per invocation rather than cached: the socket a launch
+// Every arm resolves its server from the environment at construction, so an
+// adapter is built per invocation rather than cached: the endpoint a launch
 // targets is a property of the environment that launch ran in.
 func surfaceAdapterFor(name string) (backend.Adapter, error) {
 	kind, err := parseBackendKind(name)
@@ -61,7 +62,9 @@ func surfaceAdapterFor(name string) (backend.Adapter, error) {
 	switch kind {
 	case backend.KindTmux:
 		return newTmuxAdapter()
-	case backend.KindCmux, backend.KindHerdr, backend.KindUnspecified:
+	case backend.KindCmux:
+		return newCmuxAdapter()
+	case backend.KindHerdr, backend.KindUnspecified:
 	}
 	return nil, fmt.Errorf("%w: %s (forgectl#332)", errBackendNotImplemented, kind)
 }
@@ -90,6 +93,34 @@ func newTmuxAdapter() (backend.Adapter, error) {
 	if err != nil {
 		// Classified as unavailable, not not-implemented: tmux is driven, and
 		// an operator whose socket cannot be resolved needs to fix their
+		// environment rather than wait for a release.
+		return nil, fmt.Errorf("%w: %w", errBackendUnavailable, err)
+	}
+	return a, nil
+}
+
+// newCmuxAdapter resolves cmux on PATH and builds the adapter.
+//
+// The lookup happens here rather than inside the adapter for the same reason
+// tmux's does: the sensitive runner requires an ABSOLUTE path, refusing to let
+// exec.LookPath choose the binary against the live process PATH, which is the
+// one decision its captured environment would otherwise not cover.
+func newCmuxAdapter() (backend.Adapter, error) {
+	path, err := osexec.LookPath("cmux")
+	if err != nil {
+		return nil, fmt.Errorf("%w: cmux not found on PATH: %w", errBackendUnavailable, err)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: resolve cmux path: %w", errBackendUnavailable, err)
+	}
+	// Assigned and returned explicitly rather than forwarded, for the reason
+	// spelled out in newTmuxAdapter: a bare return would convert a nil *Adapter
+	// into a NON-nil backend.Adapter holding a nil pointer.
+	a, err := cmuxadapter.New(exec.NewOSSensitiveRunner(), abs, os.Getenv)
+	if err != nil {
+		// Classified as unavailable, not not-implemented: cmux is driven, and an
+		// operator whose endpoint cannot be resolved needs to fix their
 		// environment rather than wait for a release.
 		return nil, fmt.Errorf("%w: %w", errBackendUnavailable, err)
 	}

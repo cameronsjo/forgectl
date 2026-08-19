@@ -393,7 +393,7 @@ func TestDecodeRef_FailsClosed(t *testing.T) {
 
 		// Backend-specific grammar.
 		"cmux workspace is not a uuid": `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"ws-1"}`,
-		"cmux uuid uppercase":          `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"` + strings.ToUpper(uuidA) + `"}`,
+		"cmux uuid with a non-hex digit": `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"z9d03be6-9444-4a2b-9c24-aba8c1126a0a"}`,
 		"herdr workspace has a colon":  `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","workspace":"ws-1:pane-2"}`,
 		"herdr workspace is empty":     `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","workspace":""}`,
 		"herdr workspace oversized":    `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","workspace":"` + strings.Repeat("w", 129) + `"}`,
@@ -415,6 +415,41 @@ func TestDecodeRef_FailsClosed(t *testing.T) {
 // TestRef_IdentityAccessorsAreKindChecked keeps a caller from reaching for the
 // wrong backend's identity and receiving an empty string it might then hand to
 // a command.
+// TestNewCMuxIdentity_AcceptsEitherHexCaseUnchanged is the acceptance case the
+// grammar was missing, and it is written from a measurement rather than from the
+// RFC.
+//
+// cmux 0.64.22 answers `workspace create --json` with an UPPERCASE UUID —
+// "39D03BE6-9444-4A2B-9C24-ABA8C1126A0A" — and reports the same spelling in
+// `workspace list --json`. The grammar here accepted lowercase only, and said
+// "canonical lowercase" in its doc comment as though that settled it, so it
+// rejected every workspace id cmux actually mints. The failure would not have
+// been a clean refusal either: Start would have reported a malformed response,
+// reconciled, found the workspace by its ownership marker, and failed to build a
+// reference from the same uppercase id — leaving an orphaned surface on every
+// single cmux launch.
+//
+// The second half of the assertion matters as much as the first. The identifier
+// is an opaque handle minted by cmux and handed straight back to it, so it must
+// round-trip byte-for-byte; a constructor that "helpfully" lowercased it would
+// pass an acceptance test written only as a boolean.
+func TestNewCMuxIdentity_AcceptsEitherHexCaseUnchanged(t *testing.T) {
+	for _, in := range []string{
+		"39D03BE6-9444-4A2B-9C24-ABA8C1126A0A",
+		"39d03be6-9444-4a2b-9c24-aba8c1126a0a",
+		"39D03be6-9444-4A2B-9c24-ABA8c1126a0a",
+	} {
+		id, err := backend.NewCMuxIdentity(in)
+		if err != nil {
+			t.Errorf("NewCMuxIdentity(%q) = %v, want a valid identity", in, err)
+			continue
+		}
+		if id.Workspace() != in {
+			t.Errorf("NewCMuxIdentity(%q) stored %q; the identifier must round-trip unchanged", in, id.Workspace())
+		}
+	}
+}
+
 func TestRef_IdentityAccessorsAreKindChecked(t *testing.T) {
 	tmux, tag := tmuxRef(t)
 

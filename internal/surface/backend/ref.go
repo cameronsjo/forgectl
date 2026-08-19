@@ -729,7 +729,21 @@ func lowerHex(s string) bool {
 	return true
 }
 
-// validUUID reports whether s is a canonical lowercase 8-4-4-4-12 UUID.
+// validUUID reports whether s is an 8-4-4-4-12 UUID in either hex case.
+//
+// Either case, because the backend that produces these emits UPPERCASE. This
+// function previously accepted lowercase only, and said "canonical lowercase" as
+// though that settled it — a grammar asserted from the RFC rather than measured
+// against the producer. cmux 0.64.22 answers `workspace create --json` with
+// "39D03BE6-9444-4A2B-9C24-ABA8C1126A0A", so the narrow rule rejected every
+// workspace id cmux actually mints, which would have made every cmux launch
+// report a malformed response and orphan the surface it had just created.
+//
+// The case is not normalised here and callers must not normalise it either. A
+// UUID is an opaque handle minted by the backend and handed straight back to it;
+// rewriting bytes we did not choose buys nothing and would make the reference
+// disagree with the listing it has to be found in. Callers that COMPARE two of
+// these fold the case at the comparison instead.
 func validUUID(s string) bool {
 	if len(s) != 36 {
 		return false
@@ -741,7 +755,10 @@ func validUUID(s string) bool {
 				return false
 			}
 		default:
-			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			isDigit := c >= '0' && c <= '9'
+			isLower := c >= 'a' && c <= 'f'
+			isUpper := c >= 'A' && c <= 'F'
+			if !isDigit && !isLower && !isUpper {
 				return false
 			}
 		}
