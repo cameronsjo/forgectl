@@ -1165,11 +1165,19 @@ func TestCloseRefusesAbsenceFromARestartedServer(t *testing.T) {
 // Nothing reaches the listing either way, and no kill is possible: measured,
 // deleting the kind check yields identity-mismatch and never a command.
 //
-// So the difference is what we SAY, and it matters. Identity-mismatch asserts
-// that the server restarted since this reference was taken — a claim about a
-// tmux incarnation that a cmux reference gives no evidence for whatsoever.
-// Unreadable is the honest answer: we cannot speak to this object at all.
-// Both refuse; only one of them refuses truthfully.
+// So the difference is what we SAY, and it matters — at the level of the
+// STATE, not the wording. Without the kind check the verdict is
+// identity-mismatch, which the contract defines as a claim about tmux
+// identity: the caller reads it as "this reference named a tmux object that is
+// no longer the one we bound to". A cmux reference supports no such claim; it
+// names no tmux object at all. Unreadable is the honest answer — we cannot
+// speak to this object. Both refuse; only one refuses truthfully.
+//
+// The cause TEXT on that path is the source check's own ("the reference names
+// a different server selection"), not the restart message, which belongs to
+// the fingerprint arms a foreign ref never reaches. Worth pinning down,
+// because attributing the stronger wording here would be the same overclaim
+// this test exists to catch.
 //
 // Unreadable and not GONE is the other half: a wrong-kind reference says
 // nothing about whether the object exists, and reporting gone would discharge
