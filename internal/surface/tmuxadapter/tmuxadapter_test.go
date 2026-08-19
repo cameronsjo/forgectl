@@ -262,7 +262,7 @@ func TestNewRefusesAnUnusableSocketPath(t *testing.T) {
 // then asserts over the RECORDED calls rather than per-method, so a future
 // command added without going through pinned() shows up here.
 func TestEveryCommandIsPinnedToTheSocket(t *testing.T) {
-	spec, tag := newSpec(t)
+	spec, _ := newSpec(t)
 	name := spec.OwnershipName()
 	live := row("91", "1700000000", "$1", name)
 
@@ -301,17 +301,35 @@ func TestEveryCommandIsPinnedToTheSocket(t *testing.T) {
 		}
 		seen[cmd.Kind] = true
 	}
+	// A second adapter drives the ONE kind the happy path cannot reach:
+	// reconcile only runs when a create fails. Without it this test's promise —
+	// that a future command added outside pinned() shows up here — would hold
+	// for four kinds and quietly not for the fifth.
+	reconcileRun := &exec.FakeSensitiveRunner{RunFunc: scripted{byKind: map[exec.CommandKind]func() (exec.SensitiveResult, error){
+		exec.KindTmuxCreate: func() (exec.SensitiveResult, error) {
+			return stderr("server exited unexpectedly"), exec.SensitiveErrorForTest(exec.KindTmuxCreate, exec.OutcomeExit)
+		},
+		exec.KindTmuxReconcile: func() (exec.SensitiveResult, error) { return stdout(live), nil },
+	}}.runFunc}
+	_ = newTestAdapter(t, reconcileRun, nil, WithLstat(liveSocket(liveInode))).Start(ctx, spec)
+	for i, cmd := range reconcileRun.Calls() {
+		if len(cmd.Args) < 2 || !cmd.Args[0].Equal(wantPin[0]) || !cmd.Args[1].Equal(wantPin[1]) {
+			t.Errorf("reconcile-path call %d (kind %v) does not lead with the socket pin", i, cmd.Kind)
+		}
+		seen[cmd.Kind] = true
+	}
+
 	// Each operation must reach the runner under its OWN kind. A kind that
 	// never appears means the method bailed before issuing its command, and a
 	// test that drove it would be asserting nothing about it.
 	for _, kind := range []exec.CommandKind{
-		exec.KindTmuxReadiness, exec.KindTmuxCreate, exec.KindTmuxProbe, exec.KindTmuxCleanup,
+		exec.KindTmuxReadiness, exec.KindTmuxCreate, exec.KindTmuxProbe,
+		exec.KindTmuxCleanup, exec.KindTmuxReconcile,
 	} {
 		if !seen[kind] {
 			t.Errorf("no command recorded for kind %v", kind)
 		}
 	}
-	_ = tag
 }
 
 // TestStartReturnsRefKnownOnACleanCreate also pins that the reference carries
