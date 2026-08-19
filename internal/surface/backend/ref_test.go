@@ -392,11 +392,11 @@ func TestDecodeRef_FailsClosed(t *testing.T) {
 		"herdr with a session":  `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","workspace":"ws-1"}`,
 
 		// Backend-specific grammar.
-		"cmux workspace is not a uuid": `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"ws-1"}`,
+		"cmux workspace is not a uuid":   `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"ws-1"}`,
 		"cmux uuid with a non-hex digit": `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"z9d03be6-9444-4a2b-9c24-aba8c1126a0a"}`,
-		"herdr workspace has a colon":  `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","workspace":"ws-1:pane-2"}`,
-		"herdr workspace is empty":     `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","workspace":""}`,
-		"herdr workspace oversized":    `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","workspace":"` + strings.Repeat("w", 129) + `"}`,
+		"herdr workspace has a colon":    `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","workspace":"ws-1:pane-2"}`,
+		"herdr workspace is empty":       `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","workspace":""}`,
+		"herdr workspace oversized":      `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","workspace":"` + strings.Repeat("w", 129) + `"}`,
 	}
 
 	for name, in := range tests {
