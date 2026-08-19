@@ -16,7 +16,7 @@ type serverFailureKind uint8
 
 const (
 	serverUnknown serverFailureKind = iota
-	serverAbsentDefault
+	serverAbsent
 	serverCustomSocket
 	serverStaleSocket
 	serverSocketPermission
@@ -37,32 +37,14 @@ func (c *Client) classifyServerFailure(ctx context.Context, expectedArgs []strin
 	if !errors.As(err, &commandErr) || commandErr.Name != c.tmuxBin || commandErr.ExitCode != 1 || !reflect.DeepEqual(commandErr.Args, expectedArgs) {
 		return serverFailure{Kind: serverUnknown, Cause: err}
 	}
-	if c.getenv("TMUX") != "" {
-		return serverFailure{Kind: serverCustomSocket, Cause: err}
+	socketPath, refusal, ok := c.classifiableSocket(expectedArgs)
+	if !ok {
+		return serverFailure{Kind: refusal, Cause: err}
 	}
-	// Everything below derives the socket THIS argv would use, and
-	// serverAbsentDefault is the one classification that means "proceed" — a
-	// caller may go on to create the first server. That derivation is only valid
-	// for a command with no explicit socket: `-L <label>` and `-S <path>` both
-	// move the socket somewhere this function does not look, so an absent
-	// default would be read as "no server" for a command aimed elsewhere. No
-	// caller passes them today; refuse rather than let a future one inherit the
-	// proceed verdict silently.
-	if hasExplicitSocketArg(expectedArgs) {
-		return serverFailure{Kind: serverUnknown, Cause: err}
-	}
-	root := c.getenv("TMUX_TMPDIR")
-	if root == "" {
-		root = "/tmp"
-	}
-	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
-		return serverFailure{Kind: serverUnknown, Cause: err}
-	}
-	socketPath := filepath.Join(root, "tmux-"+strconv.Itoa(c.getuid()), "default")
 	_, statErr := c.lstat(socketPath)
 	switch {
 	case errors.Is(statErr, os.ErrNotExist):
-		return serverFailure{Kind: serverAbsentDefault, SocketPath: socketPath, Cause: err}
+		return serverFailure{Kind: serverAbsent, SocketPath: socketPath, Cause: err}
 	case errors.Is(statErr, os.ErrPermission):
 		return serverFailure{Kind: serverSocketPermission, SocketPath: socketPath, Cause: statErr}
 	case statErr == nil:
@@ -70,6 +52,65 @@ func (c *Client) classifyServerFailure(ctx context.Context, expectedArgs []strin
 	default:
 		return serverFailure{Kind: serverUnknown, SocketPath: socketPath, Cause: statErr}
 	}
+}
+
+// classifiableSocket decides whether this argv's server absence may be read
+// from the filesystem at all, and if so, which socket to inspect. A true return
+// is the gateway to the ONE verdict that means "proceed, you may create the
+// first server", so every path that is not provably about this client's own
+// socket refuses instead.
+//
+// The two modes refuse for different reasons, and neither reason covers the
+// other:
+//
+//   - ENVIRONMENTAL. $TMUX set means the operator's client is on some socket
+//     this function cannot derive, so absence of the default one says nothing
+//     (serverCustomSocket). An explicit `-L`/`-S` in the argv moves the target
+//     somewhere the derivation does not look, so the derived default's absence
+//     would be read as "no server" for a command aimed elsewhere.
+//   - PINNED. The pin IS the answer, so no derivation happens and $TMUX is
+//     irrelevant. What must be proven instead is that the argv actually carries
+//     the pin — see pinnedArgs.
+func (c *Client) classifiableSocket(args []string) (string, serverFailureKind, bool) {
+	if c.socket != "" {
+		if !c.pinnedArgs(args) {
+			return "", serverUnknown, false
+		}
+		return c.socket, serverUnknown, true
+	}
+	if c.getenv("TMUX") != "" {
+		return "", serverCustomSocket, false
+	}
+	if hasExplicitSocketArg(args) {
+		return "", serverUnknown, false
+	}
+	root := c.getenv("TMUX_TMPDIR")
+	if root == "" {
+		root = "/tmp"
+	}
+	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
+		return "", serverUnknown, false
+	}
+	return filepath.Join(root, "tmux-"+strconv.Itoa(c.getuid()), "default"), serverUnknown, true
+}
+
+// pinnedArgs reports whether argv is one this pinned client built: it leads
+// with exactly the `-S <socket>` pair tmuxArgs emits, and nothing after that
+// pair names a second socket.
+//
+// Both halves are load-bearing, and the second is the one that is easy to skip.
+// A leading pin proves the command reaches this client's server ONLY if no
+// later `-L`/`-S` overrides it — tmux takes the last such option, so an argv of
+// `-S ours ... -S theirs` runs against theirs while passing a check that looked
+// only at the front. Reusing hasExplicitSocketArg for the tail keeps that
+// judgment in the one over-matching function that already owns it, and the
+// over-match stays safe here for the same reason it is safe there: a false
+// positive only withholds the proceed verdict.
+func (c *Client) pinnedArgs(args []string) bool {
+	if len(args) < 2 || args[0] != "-S" || args[1] != c.socket {
+		return false
+	}
+	return !hasExplicitSocketArg(args[2:])
 }
 
 // hasExplicitSocketArg reports whether argv names a socket other than the
@@ -93,6 +134,6 @@ func hasExplicitSocketArg(args []string) bool {
 	return false
 }
 
-func (c *Client) absentDefaultServer(ctx context.Context, args []string, err error) bool {
-	return c.classifyServerFailure(ctx, args, err).Kind == serverAbsentDefault
+func (c *Client) absentServer(ctx context.Context, args []string, err error) bool {
+	return c.classifyServerFailure(ctx, args, err).Kind == serverAbsent
 }

@@ -38,7 +38,7 @@ func (c *Client) AttachWindow(ctx context.Context, want WindowIdentity) error {
 	if err != nil {
 		return fmt.Errorf("attach window %q: %w", want.Name, err)
 	}
-	if _, err := c.run.Run(ctx, c.tmuxBin, "select-window", "-t", current.ID); err != nil {
+	if _, err := c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("select-window", "-t", current.ID)...); err != nil {
 		return fmt.Errorf("select window %s: %w", current.ID, err)
 	}
 	return c.attachOrSwitch(ctx, current.SessionID, current.Name)
@@ -53,7 +53,7 @@ func (c *Client) SelectWindow(ctx context.Context, want WindowIdentity) error {
 	if err != nil {
 		return fmt.Errorf("select window %q: %w", want.Name, err)
 	}
-	return c.run.RunInteractive(ctx, c.tmuxBin, "select-window", "-t", current.ID)
+	return c.run.RunInteractive(ctx, c.tmuxBin, c.tmuxArgs("select-window", "-t", current.ID)...)
 }
 
 // attachOrSwitch is the single inside/outside branch, taking an already
@@ -63,9 +63,9 @@ func (c *Client) attachOrSwitch(ctx context.Context, sessionID, label string) er
 	slog.Debug("Preparing to attach.", "session_id", sessionID, "name", label, "inside_tmux", inside)
 	var err error
 	if inside {
-		_, err = c.run.Run(ctx, c.tmuxBin, "switch-client", "-t", sessionID)
+		_, err = c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("switch-client", "-t", sessionID)...)
 	} else {
-		err = c.run.RunInteractive(ctx, c.tmuxBin, "attach-session", "-t", sessionID)
+		err = c.run.RunInteractive(ctx, c.tmuxBin, c.tmuxArgs("attach-session", "-t", sessionID)...)
 	}
 	if err != nil {
 		slog.Error("Failed to attach.", "session_id", sessionID, "name", label, "error", err)
@@ -80,7 +80,7 @@ func (c *Client) attachOrSwitch(ctx context.Context, sessionID, label string) er
 // resolve the most-recently-attached session ourselves and attach to it by id.
 func (c *Client) LastSession(ctx context.Context) error {
 	if c.InsideTmux() {
-		_, err := c.run.Run(ctx, c.tmuxBin, "switch-client", "-l")
+		_, err := c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("switch-client", "-l")...)
 		return err
 	}
 	identity, err := c.mostRecentSession(ctx)
@@ -114,10 +114,10 @@ const lastAttachedFieldCount = 5
 // attach target, from the one function that hands its result straight to
 // attach.
 func (c *Client) mostRecentSession(ctx context.Context) (SessionIdentity, error) {
-	args := []string{"list-sessions", "-F", lastAttachedFormat}
+	args := c.tmuxArgs("list-sessions", "-F", lastAttachedFormat)
 	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {
-		if c.absentDefaultServer(ctx, args, err) {
+		if c.absentServer(ctx, args, err) {
 			return SessionIdentity{}, nil
 		}
 		return SessionIdentity{}, c.serverStateError(ctx, args, err)

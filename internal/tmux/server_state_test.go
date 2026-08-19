@@ -31,7 +31,7 @@ func TestClassifyServerFailure(t *testing.T) {
 		want      serverFailureKind
 		wantLstat bool
 	}{
-		{"absent default", context.Background(), commandFailure("tmux", args, "anything"), "", "/tmp", os.ErrNotExist, serverAbsentDefault, true},
+		{"absent default", context.Background(), commandFailure("tmux", args, "anything"), "", "/tmp", os.ErrNotExist, serverAbsent, true},
 		{"custom socket", context.Background(), commandFailure("tmux", args, "anything"), "/tmp/custom,1,0", "/tmp", os.ErrNotExist, serverCustomSocket, false},
 		{"relative root", context.Background(), commandFailure("tmux", args, "anything"), "", "relative", os.ErrNotExist, serverUnknown, false},
 		{"stale socket", context.Background(), commandFailure("tmux", args, "anything"), "", "/tmp", nil, serverStaleSocket, true},
@@ -88,7 +88,7 @@ func TestClassifyServerFailure(t *testing.T) {
 // TestClassifyServerFailure_ExplicitSocketArgvIsUnknown pins the one
 // classification that authorizes a caller to proceed. The default-socket
 // derivation is only meaningful for an argv with no -L/-S, so an explicit
-// socket must never reach serverAbsentDefault — otherwise a future caller
+// socket must never reach serverAbsent — otherwise a future caller
 // aimed at another socket would be told "no server, go ahead" on the strength
 // of the default one being absent.
 func TestClassifyServerFailure_ExplicitSocketArgvIsUnknown(t *testing.T) {
