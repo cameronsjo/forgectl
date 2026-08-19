@@ -138,10 +138,17 @@ func TestPinnedClientPinsEveryCommand(t *testing.T) {
 	_ = c.KillSession(ctx, session)
 	_ = c.KillOthers(ctx, session)
 	_ = c.SelectWindow(ctx, window)
-	// AttachWindow issues its OWN select-window, a second call site the verb set
-	// cannot distinguish from SelectWindow's — so it has to be driven, not
-	// assumed covered. Dropping the pin from just this site survived an earlier
-	// version of this test for exactly that reason.
+	// These three contribute NO argv, and saying so is the point. All of them
+	// refuse with ErrAttachUnavailableWhenPinned before issuing any command, so
+	// AttachWindow's own select-window site — a second call site the verb set
+	// could not distinguish from SelectWindow's anyway — is unreachable while
+	// pinned and is deliberately NOT asserted here. Its `tmuxArgs` call is
+	// defence in depth against the refusal ever being relaxed, not a covered
+	// path; dropping the pin from it survives this test, by design.
+	//
+	// They are driven anyway so that a refusal regressing into a command shows
+	// up as an unexpected recorded argv rather than silence. The refusals
+	// themselves are covered by TestPinnedClientRefusesAttachAndSwitch.
 	_ = c.AttachWindow(ctx, window)
 	_ = c.AttachSession(ctx, session)
 	_ = c.LastSession(ctx)

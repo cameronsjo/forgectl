@@ -542,11 +542,8 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 
 	slog.Debug("Preparing to dispatch review into tmux window.",
 		"session_id", session.ID, "window", name, "workspace", sess.Workspace)
-	// Unpinned by construction: this argv does not route through
-	// tmux.Client.tmuxArgs, so it always reaches the ENVIRONMENTAL server.
-	// Consistent today because every internal/pr path builds tmux.New (never
-	// tmux.NewPinned) — but a pinned caller here would create the window on
-	// one server and mint an identity naming another. See forgectl#353.
+	// Unpinned by construction — see the note at the sibling new-window site
+	// earlier in this file, and forgectl#353.
 	out, err := c.run.Run(ctx, "tmux", args...)
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("open review window: %w", err)
