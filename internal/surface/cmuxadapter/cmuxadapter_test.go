@@ -278,7 +278,16 @@ func TestEveryCommandCarriesThePinAndTheIDFormat(t *testing.T) {
 	if len(calls) < 5 {
 		t.Fatalf("expected readiness, snapshot, create, probe and close commands; got %d", len(calls))
 	}
-	wantEnv := pinnedEnv(testSocket)
+	// Built from the constructors rather than by calling pinnedEnv, and that is
+	// not a style choice. Comparing against pinnedEnv(testSocket) made this
+	// assertion self-referential: deleting the socket replacement from
+	// pinnedEnv changed the expectation in step with the code, and the test
+	// stayed green while every command lost its pin. Caught by mutation, not by
+	// reading.
+	wantEnv := []exec.EnvMutation{
+		exec.ReplaceCmuxSocketPath(testSocket),
+		exec.SetCmuxQuiet(),
+	}
 	for _, cmd := range calls {
 		if len(cmd.Env) != len(wantEnv) {
 			t.Fatalf("%v carried %d env mutations, want %d", cmd.Kind, len(cmd.Env), len(wantEnv))
@@ -925,9 +934,209 @@ func TestKindReportsCmux(t *testing.T) {
 	}
 }
 
+// TestParseCreatedWorkspaceRefusesEveryNonUUID tests the parser DIRECTLY, and
+// the reason is a mutation result rather than a preference.
+//
+// Going through Start could not tell this control from its absence: with the
+// UUID check deleted, parseCreatedWorkspace happily returns "workspace:4" and
+// the reference builder refuses it one call later, so every end-to-end
+// assertion stayed green. That is a staged pair where the second layer is doing
+// the work, and the first is only load-bearing for the truncation case it also
+// owns. Testing the pure function separately is what makes each layer visible.
+func TestParseCreatedWorkspaceRefusesEveryNonUUID(t *testing.T) {
+	refusals := map[string]exec.SensitiveResult{
+		"the ref envelope the missing flag produces": stdout([]byte(`{"workspace_ref":"workspace:4"}`)),
+		"a workspace_id holding a ref":               stdout([]byte(`{"workspace_id":"workspace:4"}`)),
+		"an empty workspace_id":                      stdout([]byte(`{"workspace_id":""}`)),
+		"a truncated but still parseable document": {Stdout: exec.BoundedOutputForTest(
+			createJSON(workspaceA), exec.OutputOverflowed)},
+		"not JSON at all": stdout([]byte("OK workspace:2")),
+	}
+	for name, res := range refusals {
+		t.Run(name, func(t *testing.T) {
+			if got, err := parseCreatedWorkspace(res.Stdout); err == nil {
+				t.Errorf("parseCreatedWorkspace returned %q, want a refusal", got)
+			}
+		})
+	}
+	t.Run("a valid uuid, returned unchanged", func(t *testing.T) {
+		got, err := parseCreatedWorkspace(stdout(createJSON(workspaceA)).Stdout)
+		if err != nil {
+			t.Fatalf("parseCreatedWorkspace: %v", err)
+		}
+		if got != workspaceA {
+			t.Errorf("parseCreatedWorkspace = %q, want %q unchanged", got, workspaceA)
+		}
+	})
+}
+
+// TestATruncatedCapabilitiesReplyIsNotAReadyServer covers readiness's own
+// completeness guard.
+//
+// The fixture is a COMPLETE, valid document flagged as overflowed, which is the
+// only shape that can exercise it: a document truncated mid-object fails to
+// parse and would be caught by the JSON error instead, so a naive fixture tests
+// the wrong guard and the real one survives its mutation.
+func TestATruncatedCapabilitiesReplyIsNotAReadyServer(t *testing.T) {
+	run := newRunner().on(exec.KindCmuxReadiness, func() (exec.SensitiveResult, error) {
+		return exec.SensitiveResult{
+			Stdout: exec.BoundedOutputForTest(goodCapabilities(), exec.OutputOverflowed),
+		}, nil
+	})
+	a := newTestAdapter(t, run)
+	spec, _ := newSpec(t)
+
+	res := a.Start(context.Background(), spec)
+
+	if res.Outcome() != backend.NotMutated {
+		t.Errorf("outcome = %v, want NotMutated", res.Outcome())
+	}
+	if _, created := commandOfKind(run.calls(), exec.KindCmuxCreate); created {
+		t.Error("a create ran on the strength of a readiness reply that was cut short")
+	}
+}
+
+// TestAnUnreadableOwnerRefusesEvenWhenTheUIDsWouldHaveMatched isolates the
+// cannot-establish arm from the comparison beside it.
+//
+// The two look redundant and are not. With the platform unable to report an
+// owner, OwnerUID yields zero — so under any non-root uid the comparison
+// happens to refuse anyway, and deleting the cannot-establish arm changes
+// nothing. Running as uid 0 is what separates them: the zero owner then MATCHES,
+// and only the explicit arm still refuses. Without this the guard would be
+// untested for precisely the account where it matters most.
+func TestAnUnreadableOwnerRefusesEvenWhenTheUIDsWouldHaveMatched(t *testing.T) {
+	unreadable := fakeInfo{sys: nil, mode: fs.ModeSocket | 0o600}
+	run := newRunner()
+	a := newTestAdapter(t, run,
+		WithLstat(func(string) (os.FileInfo, error) { return unreadable, nil }),
+		WithSelfUID(func() int { return 0 }),
+	)
+	spec, _ := newSpec(t)
+
+	res := a.Start(context.Background(), spec)
+
+	if res.Outcome() != backend.NotMutated {
+		t.Errorf("outcome = %v, want NotMutated", res.Outcome())
+	}
+	if causeClass(res) != backend.FailurePermissionDenied {
+		t.Errorf("class = %v, want FailurePermissionDenied", causeClass(res))
+	}
+	if len(run.calls()) != 0 {
+		t.Error("a command was sent to a socket whose owner could not be established")
+	}
+}
+
+// TestAServerRestartingMidCreateNeverBecomesAReference pins the re-fingerprint
+// that brackets the mutation.
+//
+// cmux reports no server pid and no start time, so the socket inode is the only
+// witness to a restart — unlike tmux, which carries three. Taking the
+// fingerprint again after the create is what converts "the server turned over
+// while we were creating, and we cannot say which incarnation holds this
+// workspace" from a silent mixed state into a refusal. Without it, Start hands
+// back a reference bound to an incarnation that no longer exists, and the
+// rollback that follows closes a UUID on the wrong server or nothing at all.
+func TestAServerRestartingMidCreateNeverBecomesAReference(t *testing.T) {
+	// Readiness takes the first stat; every stat after it reports a new inode,
+	// which is what a server rebinding the same path looks like.
+	stats := 0
+	before, after := liveSocket(liveInode), liveSocket(liveInode+1)
+	seam := func(p string) (os.FileInfo, error) {
+		stats++
+		if stats == 1 {
+			return before(p)
+		}
+		return after(p)
+	}
+	run := newRunner()
+	a := newTestAdapter(t, run, WithLstat(seam))
+	spec, _ := newSpec(t)
+
+	res := a.Start(context.Background(), spec)
+
+	if _, ok := res.Ref(); ok {
+		t.Fatal("a reference was minted across a server restart; a later close would " +
+			"target a UUID on an incarnation that never held it")
+	}
+}
+
+// TestAForeignReferenceIsRefusedAsUnreadableNotAsAMismatch pins what the kind
+// check BUYS, which is the outcome state and not a prevented close.
+//
+// Asserting only "nothing was closed" could not see this control at all:
+// Ref.Validate forbids a foreign source on a given kind, the source check
+// refuses a line later, and the identity accessor refuses after that — three
+// layers, and removing all of them still closes nothing. What differs between
+// them is the verdict. Kind mismatch means "we cannot speak to this object";
+// FailureIdentityMismatch would instead be a claim about cmux identity that a
+// tmux reference supports not at all, and would send an operator looking for a
+// restarted server that never existed.
+func TestAForeignReferenceIsRefusedAsUnreadableNotAsAMismatch(t *testing.T) {
+	a := newTestAdapter(t, newRunner())
+	foreign := foreignRef(t)
+
+	closed := a.Close(context.Background(), foreign)
+	if closed.State() != backend.CloseUnreadable {
+		t.Errorf("Close state = %v, want unreadable", closed.State())
+	}
+	cause, ok := closed.Cause()
+	if !ok || !errors.Is(cause, backend.ErrRefKindMismatch) {
+		t.Errorf("Close cause = %v, want ErrRefKindMismatch", cause)
+	}
+	if probe := a.Probe(context.Background(), foreign); probe.State() != backend.ProbeUnreadable {
+		t.Errorf("Probe state = %v, want unreadable", probe.State())
+	}
+}
+
+// TestACmuxReferenceFromAnotherSelectionChainIsAMismatch drives the source
+// check on its own.
+//
+// It needs a reference that is genuinely cmux — so the kind check passes and
+// the identity accessor answers — but was taken through the OTHER endpoint
+// chain. That is what separates this control from the kind check above, and it
+// is a real scenario rather than a contrived one: a reference taken while
+// CMUX_SOCKET_PATH was set must not be answered by an adapter that resolved the
+// default endpoint, even on a machine where the two paths coincide today.
+func TestACmuxReferenceFromAnotherSelectionChainIsAMismatch(t *testing.T) {
+	_, _, ref := startClean(t) // taken through the env chain
+	other := rebindSource(t, ref, backend.CmuxDefaultServer())
+
+	run := newRunner()
+	a := newTestAdapter(t, run) // still pinned through the env chain
+
+	closed := a.Close(context.Background(), other)
+	if closed.State() != backend.CloseIdentityMismatch {
+		t.Errorf("Close state = %v, want identity-mismatch", closed.State())
+	}
+	if probe := a.Probe(context.Background(), other); probe.State() != backend.ProbeIdentityMismatch {
+		t.Errorf("Probe state = %v, want identity-mismatch", probe.State())
+	}
+	if len(run.calls()) != 0 {
+		t.Error("a command reached cmux for a reference from a different selection chain")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Helpers.
 // ---------------------------------------------------------------------------
+
+// rebindSource rebuilds a cmux reference against a different server source,
+// keeping every other field. It goes through the public constructor so the
+// result is a reference Ref.Validate accepts — a hand-built struct would prove
+// nothing about a shape production can produce.
+func rebindSource(t *testing.T, ref backend.Ref, source backend.ServerSource) backend.Ref {
+	t.Helper()
+	id, err := ref.CMuxIdentity()
+	if err != nil {
+		t.Fatalf("CMuxIdentity: %v", err)
+	}
+	out, err := backend.NewCmuxRef(source, ref.Server(), ref.Tag(), id)
+	if err != nil {
+		t.Fatalf("NewCmuxRef: %v", err)
+	}
+	return out
+}
 
 func commandOfKind(calls []exec.SensitiveCommand, kind exec.CommandKind) (exec.SensitiveCommand, bool) {
 	for _, c := range calls {

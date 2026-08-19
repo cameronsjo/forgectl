@@ -45,12 +45,21 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 			errors.New("the workspace lookup produced no usable state")))
 	}
 
-	// Re-validate at the point of USE. Labelled honestly, in the same terms as
-	// the arm above: locate only ever returns an id that already satisfies this,
-	// so it is defence in depth against a future locate that stops validating,
-	// not a live gate. The difference from a purely inert check is that the
-	// operand here is what reaches a command line — an empty or non-UUID value
-	// arriving at `workspace close` is the shape that closes the wrong object.
+	// Re-validate at the point of USE, and the status of this check was measured
+	// rather than assumed.
+	//
+	// It is the second of a staged pair: parseWorkspaceList already drops any
+	// row whose id fails this exact constructor, so no id reaching locateFound
+	// can carry one this rejects. Mutating either layer alone therefore survives
+	// — which is what redundant layers always do, and is not evidence of dead
+	// code. Removing BOTH goes red, so the property is covered as a pair and
+	// neither half is separably testable. parseWorkspaceList is the enforcing
+	// one; this is the layer that would still hold if a future locate stopped
+	// validating.
+	//
+	// It earns its place because the operand here is what reaches a command
+	// line: an empty or non-UUID value arriving at `workspace close` is the
+	// shape that closes the wrong object.
 	if _, err := backend.NewCMuxIdentity(workspace); err != nil {
 		return backend.NewCloseUnreadable(backend.NewStartCause(backend.FailureMalformedResponse, err))
 	}
