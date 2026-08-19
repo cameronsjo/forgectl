@@ -29,7 +29,8 @@
 //
 // Two more measured facts shape the error handling. cmux exits ZERO and creates
 // the workspace anyway when --cwd names a directory that does not exist, so a
-// clean exit is not evidence the surface is where it was asked to be. And the
+// clean exit is not evidence the surface is where it was asked to be — nothing
+// here handles that, and where the missing check belongs is forgectl#362. And the
 // legacy verbs (new-workspace, list-workspaces, …) print a deprecation notice on
 // STDOUT ahead of the payload; this package uses the canonical `workspace`
 // subcommands and sets CMUX_QUIET anyway, because a parser that reads prose as
@@ -105,7 +106,17 @@ var ErrResolveSocket = errors.New("cmuxadapter: cannot resolve the cmux server s
 // Only the path SHAPE is validated here. Whether anything is listening, and
 // whether what is listening is ours, are live questions answered at readiness —
 // where an absent socket is an honest "cmux is not running" rather than a
-// construction error, and where the answer is fresh at the moment it is used.
+// construction error.
+//
+// Fresh at the moment it is CHECKED, which is not the moment it is used: two
+// subprocesses run between the ownership stat and the create that carries the
+// bootstrap, and the re-fingerprint in reference detects an inode change only
+// AFTER the nonce has been sent. Substituting the socket in that window
+// requires write access to its directory — the same uid, which is outside the
+// stated threat model — and closing it properly would need a
+// connect-then-verify handshake this CLI-driven design cannot have. Said
+// plainly rather than left implied by the word "fresh".
+//
 // tmux's adapter checks its socket DIRECTORY at construction because it goes on
 // to CREATE the server; this adapter only ever connects to one cmux already
 // started, so there is nothing here to make safe in advance.
