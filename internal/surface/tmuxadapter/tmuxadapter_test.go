@@ -1149,6 +1149,89 @@ func TestCloseRefusesAbsenceFromARestartedServer(t *testing.T) {
 	}
 }
 
+// TestCloseAndProbeRefuseARefForAnotherBackend covers the first thing locate
+// checks and the last control in this package that the suite could not tell
+// apart from its own absence.
+//
+// It is a wiring error rather than an operator-reachable one: a cmux Ref
+// reaching the tmux adapter means the resolver handed the wrong adapter a
+// reference.
+//
+// What the kind check buys is the OUTCOME STATE, and that is worth stating
+// precisely because the obvious justification is wrong. Ref.Validate enforces
+// that a reference's source kind equals its own kind, so a foreign Ref can
+// never carry a tmux source — which means locate's SOURCE check would refuse
+// this reference anyway, one line later, even with the kind check deleted.
+// Nothing reaches the listing either way, and no kill is possible: measured,
+// deleting the kind check yields identity-mismatch and never a command.
+//
+// So the difference is what we SAY, and it matters — at the level of the
+// STATE, not the wording. Without the kind check the verdict is
+// identity-mismatch, which the contract defines as a claim about tmux
+// identity: the caller reads it as "this reference named a tmux object that is
+// no longer the one we bound to". A cmux reference supports no such claim; it
+// names no tmux object at all. Unreadable is the honest answer — we cannot
+// speak to this object. Both refuse; only one refuses truthfully.
+//
+// The cause TEXT on that path is the source check's own ("the reference names
+// a different server selection"), not the restart message, which belongs to
+// the fingerprint arms a foreign ref never reaches. Worth pinning down,
+// because attributing the stronger wording here would be the same overclaim
+// this test exists to catch.
+//
+// Unreadable and not GONE is the other half: a wrong-kind reference says
+// nothing about whether the object exists, and reporting gone would discharge
+// a rollback obligation belonging to a different backend entirely.
+func TestCloseAndProbeRefuseARefForAnotherBackend(t *testing.T) {
+	tag, err := backend.NewRecoveryTag()
+	if err != nil {
+		t.Fatalf("NewRecoveryTag: %v", err)
+	}
+	id, err := backend.NewCMuxIdentity("3f2504e0-4f89-41d3-9a0c-0305e82c3301")
+	if err != nil {
+		t.Fatalf("NewCMuxIdentity: %v", err)
+	}
+	// Any valid fingerprint will do — locate refuses before anything compares
+	// it, so nothing here is load-bearing beyond Valid().
+	server, err := backend.Fingerprint(backend.IncarnationInput{
+		Endpoint: testSocket, Version: "cmux 1.0", Inode: liveInode,
+	})
+	if err != nil {
+		t.Fatalf("Fingerprint: %v", err)
+	}
+	foreign, err := backend.NewCmuxRef(backend.CmuxDefaultServer(), server, tag, id)
+	if err != nil {
+		t.Fatalf("NewCmuxRef: %v", err)
+	}
+
+	run := &exec.FakeSensitiveRunner{}
+	a := newTestAdapter(t, run, nil, WithLstat(liveSocket(liveInode)))
+
+	closed := a.Close(context.Background(), foreign)
+	if closed.State() != backend.CloseUnreadable {
+		t.Errorf("Close = %v, want unreadable", closed.State())
+	}
+	if closed.State().SatisfiesRollback() {
+		t.Error("a reference from another backend discharged this backend's rollback obligation")
+	}
+	if probed := a.Probe(context.Background(), foreign); probed.State() != backend.ProbeUnreadable {
+		t.Errorf("Probe = %v, want unreadable", probed.State())
+	}
+
+	// And it refuses BEFORE talking to tmux at all — a wrong-kind reference must
+	// not cost a command against a server it has no business reaching.
+	//
+	// Stated at the strength it actually holds: this pins "kind OR source
+	// refuses before any command", not "the kind check is first". The source
+	// check short-circuits regardless of where the kind check sits, so moving
+	// the kind check later is caught by the state assertions above rather than
+	// by this one. It is still worth pinning — deleting BOTH checks lets two
+	// commands through, and this is the assertion that notices.
+	if calls := run.Calls(); len(calls) != 0 {
+		t.Errorf("a foreign reference reached tmux: %d command(s), first kind %v", len(calls), calls[0].Kind)
+	}
+}
+
 // TestTheZeroLocateStateNeverKillsAndNeverReportsPresent pins the property
 // that made the previous guard inert.
 //
