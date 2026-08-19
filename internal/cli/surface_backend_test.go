@@ -66,7 +66,7 @@ func TestParseBackendKind_RefusalNeverEchoesTheName(t *testing.T) {
 // Harmless — it is the directory tmux itself would use — but it is a write, and
 // a test that writes outside its TempDir should say so.
 func TestSurfaceAdapterFor_DrivesTmuxAndRefusesTheRest(t *testing.T) {
-	for _, name := range []string{"cmux", "herdr"} {
+	for _, name := range []string{"herdr"} {
 		t.Run(name, func(t *testing.T) {
 			adapter, err := surfaceAdapterFor(name)
 			if adapter != nil {
@@ -82,37 +82,48 @@ func TestSurfaceAdapterFor_DrivesTmuxAndRefusesTheRest(t *testing.T) {
 		})
 	}
 
-	// tmux resolves to a real adapter wherever tmux is installed, and to a
-	// distinct "not available" refusal where it is not — never to "not
+	// Every DRIVEN backend gets the same criterion rather than one apiece: a
+	// per-backend assertion only ever catches per-backend faults, and the arms
+	// it does not compare are exactly where the next adapter's wiring drifts.
+	// Each resolves to a real adapter wherever its program is installed, and to
+	// a distinct "not available" refusal where it is not — never to "not
 	// implemented", which would now be a lie, and never to "unknown".
-	t.Run("tmux", func(t *testing.T) {
-		adapter, err := surfaceAdapterFor("tmux")
-		if errors.Is(err, errBackendNotImplemented) {
-			t.Fatal("tmux reported as unimplemented; this build drives it")
-		}
-		if errors.Is(err, errUnknownBackend) {
-			t.Fatal("tmux reported as an unknown backend")
-		}
-		if err != nil {
-			// The only sanctioned failure here is a machine without tmux.
-			if !errors.Is(err, errBackendUnavailable) {
-				t.Fatalf("surfaceAdapterFor(tmux) = %v, want an adapter or errBackendUnavailable", err)
+	driven := map[string]backend.Kind{
+		"tmux": backend.KindTmux,
+		"cmux": backend.KindCmux,
+	}
+	for name, want := range driven {
+		t.Run(name, func(t *testing.T) {
+			adapter, err := surfaceAdapterFor(name)
+			if errors.Is(err, errBackendNotImplemented) {
+				t.Fatalf("%s reported as unimplemented; this build drives it", name)
 			}
-			return
-		}
-		if adapter == nil {
-			t.Fatal("surfaceAdapterFor(tmux) returned no adapter and no error")
-		}
-		if adapter.Kind() != backend.KindTmux {
-			t.Errorf("adapter.Kind() = %v, want tmux", adapter.Kind())
-		}
-		// The launch refuses any adapter that cannot clean up after itself, so
-		// an adapter that reaches the service without Close and Probe would
-		// fail at rollback — while holding something that needs closing.
-		if _, err := backend.RequireCapabilities(adapter); err != nil {
-			t.Errorf("the tmux adapter does not satisfy Capabilities: %v", err)
-		}
-	})
+			if errors.Is(err, errUnknownBackend) {
+				t.Fatalf("%s reported as an unknown backend", name)
+			}
+			if err != nil {
+				// The only sanctioned failure here is a machine without the
+				// program, or one whose endpoint cannot be resolved.
+				if !errors.Is(err, errBackendUnavailable) {
+					t.Fatalf("surfaceAdapterFor(%s) = %v, want an adapter or errBackendUnavailable", name, err)
+				}
+				return
+			}
+			if adapter == nil {
+				t.Fatalf("surfaceAdapterFor(%s) returned no adapter and no error", name)
+			}
+			if adapter.Kind() != want {
+				t.Errorf("adapter.Kind() = %v, want %v", adapter.Kind(), want)
+			}
+			// The launch refuses any adapter that cannot clean up after itself,
+			// so an adapter that reaches the service without Close and Probe
+			// would fail at rollback — while holding something that needs
+			// closing.
+			if _, err := backend.RequireCapabilities(adapter); err != nil {
+				t.Errorf("the %s adapter does not satisfy Capabilities: %v", name, err)
+			}
+		})
+	}
 
 	// And an unrecognised name still reports itself as one.
 	if _, err := surfaceAdapterFor("screen"); !errors.Is(err, errUnknownBackend) {
@@ -164,6 +175,54 @@ func TestNewTmuxAdapter_ReturnsATrulyNilAdapterOnEveryFailure(t *testing.T) {
 		}
 		if adapter != nil {
 			t.Error("newTmuxAdapter() returned a non-nil adapter alongside an error")
+		}
+	})
+}
+
+// TestNewCmuxAdapter_ReturnsATrulyNilAdapterOnEveryFailure is the cmux
+// counterpart, and its absence was the exact fault this file's other test
+// argues against three functions above: "a per-backend assertion only ever
+// catches per-backend faults, and the arms it does not compare are exactly
+// where the next adapter's wiring drifts."
+//
+// The principle was applied to surfaceAdapterFor's driven-backend table and not
+// to the typed-nil guard one function below it, so newCmuxAdapter's guard was
+// claimed by a comment and pinned by nothing — rewriting its body to forward
+// cmuxadapter.New's result directly left the suite green.
+func TestNewCmuxAdapter_ReturnsATrulyNilAdapterOnEveryFailure(t *testing.T) {
+	t.Run("cmux not found on PATH", func(t *testing.T) {
+		empty := t.TempDir()
+		t.Setenv("PATH", empty)
+
+		adapter, err := newCmuxAdapter()
+		if !errors.Is(err, errBackendUnavailable) {
+			t.Fatalf("newCmuxAdapter() err = %v, want errBackendUnavailable", err)
+		}
+		if adapter != nil {
+			t.Error("newCmuxAdapter() returned a non-nil adapter alongside an error")
+		}
+	})
+
+	t.Run("cmuxadapter.New refuses the resolved socket", func(t *testing.T) {
+		// Same guard as the tmux sibling, and for the same reason: without cmux
+		// on PATH the LookPath fails FIRST and this subtest silently becomes a
+		// duplicate that never reaches New. Skipping says so out loud rather
+		// than reporting a pass for coverage that did not happen.
+		if _, err := osexec.LookPath("cmux"); err != nil {
+			t.Skip("cmux is not installed, so this cannot reach cmuxadapter.New")
+		}
+		// The direct analogue of the tmux subtest's oversized TMUX: a socket
+		// path past sun_path, which cmuxadapter.checkSocketPath refuses. It is
+		// the one New-side failure this package can force without touching the
+		// filesystem.
+		t.Setenv("CMUX_SOCKET_PATH", "/tmp/"+strings.Repeat("a", 5000)+"/cmux.sock")
+
+		adapter, err := newCmuxAdapter()
+		if !errors.Is(err, errBackendUnavailable) {
+			t.Fatalf("newCmuxAdapter() err = %v, want errBackendUnavailable", err)
+		}
+		if adapter != nil {
+			t.Error("newCmuxAdapter() returned a non-nil adapter alongside an error")
 		}
 	})
 }

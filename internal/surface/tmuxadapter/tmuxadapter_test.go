@@ -996,6 +996,14 @@ func TestNewRefusesASocketDirectoryItDoesNotPrivatelyOwn(t *testing.T) {
 		// lstat reports a symlink as ModeSymlink and never ModeDir, so the
 		// not-a-directory arm is what refuses a link whose target could move.
 		{"a symlink to a directory", fakeInfo{sys: &syscall.Stat_t{Uid: testUID}, mode: fs.ModeSymlink | 0o700}},
+		// An owner that cannot be READ is refused, not skipped. Sys() returning
+		// nil is how sockstat reports "this platform cannot answer", and the
+		// check was previously written `ok && owner != getuid()` — which
+		// short-circuits, so an unreadable owner SKIPPED the comparison
+		// entirely. That is the shape sockstat's own doc calls out: a check
+		// that silently succeeds when it cannot see the answer is worse than no
+		// check, because it reads as one.
+		{"an owner that cannot be read", fakeInfo{sys: nil, mode: fs.ModeDir | 0o700}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := New(&exec.FakeSensitiveRunner{}, testTmux,
