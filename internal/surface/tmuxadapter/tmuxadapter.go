@@ -213,7 +213,19 @@ func (a *Adapter) checkSocketDir(getuid func() int) error {
 	if info.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("%w: %s", ErrUnsafeSocketDir, "group or world writable")
 	}
-	if owner, ok := sockstat.OwnerUID(info); ok && owner != getuid() {
+	// An owner we cannot READ is refused, not waved through.
+	//
+	// This was `ok && owner != getuid()`, which short-circuits: a platform that
+	// cannot report an owner SKIPPED the check rather than failing it. That is
+	// the precise shape sockstat's own doc calls out — a check that silently
+	// succeeds when it cannot see the answer is worse than no check, because it
+	// reads as one — and the extraction would otherwise have shipped a package
+	// doc asserting a property one of its two callers violated.
+	owner, ok := sockstat.OwnerUID(info)
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrUnsafeSocketDir, "owner cannot be established")
+	}
+	if owner != getuid() {
 		return fmt.Errorf("%w: %s", ErrUnsafeSocketDir, "owned by another user")
 	}
 	return nil

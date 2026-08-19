@@ -139,7 +139,7 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 			backend.NewStartCause(backend.FailureMalformedResponse, err))
 	}
 
-	return a.reconcile(ctx, spec.Tag(), marker, before, server, a.classifyRunError(runErr, res.Stderr))
+	return a.reconcile(ctx, spec.Tag(), marker, before, server, a.classifyRunError(runErr, res))
 }
 
 // reconcile runs EXACTLY ONE listing to settle whether the create landed.
@@ -261,7 +261,7 @@ func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCaus
 		exec.MustFixed("capabilities"),
 	))
 	if runErr != nil {
-		cause := a.classifyRunError(runErr, res.Stderr)
+		cause := a.classifyRunError(runErr, res)
 		return serverInfo{}, &cause
 	}
 	raw, complete := res.Stdout.CopyBytesForParse()
@@ -354,10 +354,15 @@ func (a *Adapter) fingerprint(info os.FileInfo, version string) (backend.ServerI
 // workspaceRow is the part of a listing row this package reads. The id is kept
 // alongside the map key because the key is case-folded and the id is not: what
 // goes back to cmux must be the bytes cmux wrote.
+//
+// There is deliberately no title field. One was here, populated from
+// custom_title and read by nothing — and an unused field is worse than absent
+// here specifically, because the Closer contract phrases the ownership
+// read-back as "native name OR TITLE", so a reader checking whether that
+// obligation is met finds a title on the row and concludes it is.
 type workspaceRow struct {
 	id     string
 	marker string
-	title  string
 }
 
 // foldID is the comparison spelling of a workspace UUID. It exists so a lookup
@@ -378,7 +383,7 @@ func (a *Adapter) snapshot(ctx context.Context, kind exec.CommandKind) (map[stri
 		exec.MustFixed("--json"),
 	))
 	if runErr != nil {
-		cause := a.classifyRunError(runErr, res.Stderr)
+		cause := a.classifyRunError(runErr, res)
 		return nil, &cause
 	}
 	rows, err := parseWorkspaceList(res.Stdout)
@@ -417,7 +422,6 @@ type listReply struct {
 	Workspaces []struct {
 		ID          string `json:"id"`
 		Description string `json:"description"`
-		CustomTitle string `json:"custom_title"`
 	} `json:"workspaces"`
 }
 
@@ -481,7 +485,7 @@ func parseWorkspaceList(out exec.BoundedOutput) (map[string]workspaceRow, error)
 		// that cannot find its own workspace reports it already gone and
 		// discharges the rollback. The id itself is never rewritten, because it
 		// is an opaque handle that goes straight back to cmux.
-		rows[foldID(w.ID)] = workspaceRow{id: w.ID, marker: w.Description, title: w.CustomTitle}
+		rows[foldID(w.ID)] = workspaceRow{id: w.ID, marker: w.Description}
 	}
 	if len(reply.Workspaces) > 0 && len(rows) == 0 {
 		return nil, errors.New("no row of the cmux workspace listing was usable")
@@ -504,7 +508,9 @@ func missingMethods(advertised []string) string {
 	return ""
 }
 
-// serverGone reports whether the endpoint is definitively absent.
+// serverGone reports that the endpoint PATH is absent. It does not report that
+// the server is gone, and the difference is worth stating because callers use
+// this to discharge a rollback.
 //
 // It asks the FILESYSTEM, not the diagnostic. cmux does emit a recognisable
 // "Socket not found at <path>" for this case, but the tmux adapter was bitten
@@ -512,19 +518,50 @@ func missingMethods(advertised []string) string {
 // permission error as absence, once by removing the arm and losing the case
 // where absence is the correct answer. A stat answers the question the text only
 // hints at, and it cannot be changed by a locale or a release note.
+//
+// The residual risk, named rather than glossed: a LIVE cmux whose socket file
+// has been unlinked — swept by a stale-socket cleaner, replaced mid-restart, or
+// left behind by an operator moving a CMUX_SOCKET_PATH — satisfies this while
+// still holding the workspace and the harness inside it. Callers then report
+// AlreadyGone for a surface that is still running.
+//
+// Nothing here closes that gap, and cmux gives us nothing to close it with: it
+// reports no server pid and no start time, so the socket inode is the only
+// witness this adapter has (forgectl#344 tracks the same weakness for herdr).
+// What is defensible is that the alternative — treating an absent path as
+// "unknown" — makes the ordinary clean-machine case permanently unresolvable,
+// which is a worse failure in every launch rather than a rare one.
 func (a *Adapter) serverGone() bool {
 	_, err := a.lstat(a.socket)
 	return errors.Is(err, os.ErrNotExist)
 }
 
-// authFailed matches cmux's exact refusal for a rejected credential. Measured on
-// 0.64.22: every verb answers "Error: ERROR: Invalid password" with exit 1.
-func authFailed(out exec.BoundedOutput) bool {
-	raw, complete := out.CopyBytesForParse()
-	if !complete {
-		return false
+// authFailed matches cmux's exact refusal for a rejected credential.
+//
+// Measured on 0.64.22, and the STREAM is part of the measurement rather than an
+// assumption: `ping`, `capabilities`, and `workspace list` under a wrong
+// CMUX_SOCKET_PASSWORD all answer "Error: ERROR: Invalid password" on STDERR
+// with stdout empty, exit 1. Saying "measured" while leaving the stream
+// unstated is how the tmux adapter ended up with a permission arm whose fixture
+// was a string tmux never emits.
+//
+// Both streams are searched anyway. That is not hedging about the measurement:
+// it costs nothing, it is drivable by a test rather than being a control no
+// fixture can reach, and it removes a coupling to which stream a future cmux
+// chooses. The classification is advisory — it steers an operator's diagnosis
+// and gates no mutation — so a false positive is cheap while a false negative
+// sends someone hunting a dead server instead of their password.
+func authFailed(streams ...exec.BoundedOutput) bool {
+	for _, out := range streams {
+		raw, complete := out.CopyBytesForParse()
+		if !complete {
+			continue
+		}
+		if strings.Contains(string(raw), "Invalid password") {
+			return true
+		}
 	}
-	return strings.Contains(string(raw), "Invalid password")
+	return false
 }
 
 // classifyRunError maps a runner error onto the closed failure vocabulary.
@@ -541,7 +578,7 @@ func authFailed(out exec.BoundedOutput) bool {
 // Everything it cannot recognize becomes FailureUnavailable rather than
 // FailureInternal: an unrecognized cmux failure is a statement about cmux, and
 // calling it an internal defect would send the reader to the wrong code.
-func (a *Adapter) classifyRunError(err error, stderr exec.BoundedOutput) backend.StartCause {
+func (a *Adapter) classifyRunError(err error, res exec.SensitiveResult) backend.StartCause {
 	switch {
 	case errors.Is(err, exec.ErrCanceled):
 		return backend.NewStartCause(backend.FailureCanceled, err)
@@ -551,7 +588,7 @@ func (a *Adapter) classifyRunError(err error, stderr exec.BoundedOutput) backend
 		// Refused before start: the argv this package built is wrong, which is
 		// our defect and not the operator's cmux.
 		return backend.NewStartCause(backend.FailureInternal, err)
-	case authFailed(stderr):
+	case authFailed(res.Stdout, res.Stderr):
 		return backend.NewStartCause(backend.FailureAuthentication, err)
 	default:
 		return backend.NewStartCause(backend.FailureUnavailable, err)

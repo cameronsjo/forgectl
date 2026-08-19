@@ -560,13 +560,13 @@ func TestAnInvalidPasswordIsItsOwnFailureClass(t *testing.T) {
 // returning a bare errors.New would never notice, because it matches neither.
 func TestClassifyRunErrorReadsTheSeamsSentinels(t *testing.T) {
 	cases := map[exec.Outcome]backend.StartFailureClass{
-		exec.OutcomeCanceled:    backend.FailureCanceled,
-		exec.OutcomeTimeout:     backend.FailureTimeout,
-		exec.OutcomeInvalid:     backend.FailureInternal,
-		exec.OutcomeExit: backend.FailureUnavailable,
+		exec.OutcomeCanceled: backend.FailureCanceled,
+		exec.OutcomeTimeout:  backend.FailureTimeout,
+		exec.OutcomeInvalid:  backend.FailureInternal,
+		exec.OutcomeExit:     backend.FailureUnavailable,
 	}
 	a := newTestAdapter(t, newRunner())
-	empty := exec.BoundedOutputForTest(nil, exec.OutputComplete)
+	empty := exec.SensitiveResult{}
 	for outcome, want := range cases {
 		got := a.classifyRunError(exec.SensitiveErrorForTest(exec.KindCmuxProbe, outcome), empty)
 		if got.Class() != want {
@@ -1117,6 +1117,218 @@ func TestACmuxReferenceFromAnotherSelectionChainIsAMismatch(t *testing.T) {
 	}
 }
 
+// TestCloseRefusesAWorkspaceThatIsNotOurs is the ownership read-back the Closer
+// contract states as a MUST, and it is the one test in this file guarding
+// against the worst outcome the package can produce.
+//
+// The obligation exists because the type system cannot carry it for this
+// backend. A tmux session name is CHOSEN by forgectl, so Ref.Validate binds it
+// to the ownership tag; a cmux workspace UUID is server-assigned and carries
+// nothing of ours. So a create response naming the wrong object — a raced
+// reply, a stale id echoed after a restart — yields a fully VALID Ref pointing
+// at somebody else's workspace, and every check upstream of the read-back
+// passes it: the kind matches, the source matches, the incarnation matches, and
+// the UUID is present in the listing.
+//
+// Without the read-back, Close issues `workspace close <operator's UUID>` and
+// reports success. Not a failed rollback — a rollback that destroys something
+// it never created.
+//
+// The fixture is the whole point. Every other Close/Probe test in this file
+// feeds ref.OwnershipName() as the description, so the suite LOOKED like it
+// covered ownership while nothing asserted on it; those fixtures could not have
+// gone red no matter what locate did.
+func TestCloseRefusesAWorkspaceThatIsNotOurs(t *testing.T) {
+	a, run, ref := startClean(t)
+	// Same UUID the reference names, wearing somebody else's marker.
+	run.reply1(exec.KindCmuxProbe, listJSON([2]string{workspaceA, "fc-surface-somebodyelse"}))
+
+	closed := a.Close(context.Background(), ref)
+	if closed.State() != backend.CloseIdentityMismatch {
+		t.Errorf("Close state = %v, want identity-mismatch", closed.State())
+	}
+	if closed.State().SatisfiesRollback() {
+		t.Error("closing somebody else's workspace was reported as a satisfied rollback")
+	}
+	if _, cleaned := commandOfKind(run.calls(), exec.KindCmuxCleanup); cleaned {
+		t.Fatal("a close command was issued against a workspace carrying another owner's marker")
+	}
+
+	if probe := a.Probe(context.Background(), ref); probe.State() != backend.ProbeIdentityMismatch {
+		t.Errorf("Probe state = %v, want identity-mismatch", probe.State())
+	}
+}
+
+// TestCloseAcceptsOnlyTheExactMarker is the acceptance side of the read-back,
+// plus the near-misses. A comparison written with a prefix or a fold would pass
+// the refusal above and fail here.
+func TestCloseAcceptsOnlyTheExactMarker(t *testing.T) {
+	// Each case DERIVES its planted marker from the reference under test rather
+	// than from a literal captured earlier, and that is the whole reason these
+	// cases test anything.
+	//
+	// The first version of this table built its strings from an outer
+	// startClean's marker while every subtest minted a fresh reference with a
+	// fresh random tag — so "case-folded" was not a case-folded marker, it was
+	// an unrelated tag, refused for a reason that had nothing to do with the
+	// property named. Every case passed under an EqualFold comparison the table
+	// was written to reject. A refusal fixture caught by an earlier rule tests
+	// nothing, and the name is what conceals it.
+	refusals := map[string]func(marker string) string{
+		"empty":              func(string) string { return "" },
+		"a prefix of ours":   func(m string) string { return m[:len(m)-1] },
+		"ours with a suffix": func(m string) string { return m + "x" },
+		"case-folded":        strings.ToUpper,
+		"another launch's":   func(string) string { return "fc-surface-" + strings.Repeat("a", 32) },
+	}
+	for name, plant := range refusals {
+		t.Run("refuses "+name, func(t *testing.T) {
+			a, run, ref := startClean(t)
+			planted := plant(ref.OwnershipName())
+			if planted == ref.OwnershipName() {
+				t.Fatalf("the fixture equals the real marker; this case could not fail")
+			}
+			run.reply1(exec.KindCmuxProbe, listJSON([2]string{workspaceA, planted}))
+
+			if got := a.Close(context.Background(), ref); got.State() != backend.CloseIdentityMismatch {
+				t.Errorf("Close state = %v, want identity-mismatch", got.State())
+			}
+			if _, cleaned := commandOfKind(run.calls(), exec.KindCmuxCleanup); cleaned {
+				t.Error("a close command was issued for a marker that is not ours")
+			}
+		})
+	}
+
+	t.Run("accepts the exact marker", func(t *testing.T) {
+		a, run, ref := startClean(t)
+		run.reply1(exec.KindCmuxProbe, listJSON([2]string{workspaceA, ref.OwnershipName()}))
+
+		if got := a.Close(context.Background(), ref); !got.State().SatisfiesRollback() {
+			t.Fatalf("Close = %v, want a satisfied rollback", got)
+		}
+		if _, cleaned := commandOfKind(run.calls(), exec.KindCmuxCleanup); !cleaned {
+			t.Error("no close command was issued for a workspace that is ours")
+		}
+	})
+}
+
+// TestOnlyAnAbsentEndpointReadsAsGone pins the narrowest reading of a readiness
+// failure.
+//
+// Every readiness failure that is NOT an absent socket must be unreadable. The
+// mutation that made this arm unconditional survived the first sweep, and what
+// it would have cost is the whole rollback: an auth failure, an incompatible
+// server, or a socket we cannot prove is ours would all have reported
+// AlreadyGone for a surface that is still running with the harness inside it.
+func TestOnlyAnAbsentEndpointReadsAsGone(t *testing.T) {
+	authRefusal := func() (exec.SensitiveResult, error) {
+		return exec.SensitiveResult{
+				Stderr: exec.BoundedOutputForTest([]byte("Error: ERROR: Invalid password\n"), exec.OutputComplete),
+			},
+			exec.SensitiveErrorForTest(exec.KindCmuxReadiness, exec.OutcomeExit)
+	}
+	t.Run("an auth failure is unreadable, not gone", func(t *testing.T) {
+		_, _, ref := startClean(t)
+		run := newRunner().on(exec.KindCmuxReadiness, authRefusal)
+		a := newTestAdapter(t, run)
+
+		closed := a.Close(context.Background(), ref)
+		if closed.State().SatisfiesRollback() {
+			t.Error("an auth failure discharged the rollback; the surface would be orphaned")
+		}
+		if probe := a.Probe(context.Background(), ref); probe.State() != backend.ProbeUnreadable {
+			t.Errorf("Probe state = %v, want unreadable", probe.State())
+		}
+	})
+
+	t.Run("an absent endpoint is gone", func(t *testing.T) {
+		_, _, ref := startClean(t)
+		run := newRunner().on(exec.KindCmuxReadiness, authRefusal)
+		a := newTestAdapter(t, run, WithLstat(absentSocket))
+
+		if got := a.Close(context.Background(), ref); !got.State().SatisfiesRollback() {
+			t.Errorf("Close = %v, want a satisfied rollback for an endpoint that is not there", got)
+		}
+	})
+}
+
+// TestTheCloseOperandComesFromTheListing pins which spelling of the identifier
+// reaches cmux.
+//
+// The listing's, not the reference's — because the map key is case-folded while
+// the value is not, and the whole reason for that split is that a Close which
+// cannot find its own workspace reports it already gone. A mutation swapping
+// row.id for the reference's spelling survived the first sweep, leaving the
+// protection the code documents unexercised.
+func TestTheCloseOperandComesFromTheListing(t *testing.T) {
+	_, _, ref := startClean(t)
+	lower := strings.ToLower(workspaceA)
+	if lower == workspaceA {
+		t.Fatal("the fixture UUID has no case to differ in; this test could not fail")
+	}
+
+	run := newRunner().reply1(exec.KindCmuxProbe, listJSON([2]string{lower, ref.OwnershipName()}))
+	a := newTestAdapter(t, run)
+
+	if got := a.Close(context.Background(), ref); !got.State().SatisfiesRollback() {
+		t.Fatalf("Close = %v; a differently-cased listing lost track of its own workspace", got)
+	}
+	cleanup, ok := commandOfKind(run.calls(), exec.KindCmuxCleanup)
+	if !ok {
+		t.Fatal("Close issued no cleanup command")
+	}
+	if last := cleanup.Args[len(cleanup.Args)-1]; !last.Equal(exec.Opaque(lower)) {
+		t.Error("the close operand is not the spelling the listing used")
+	}
+}
+
+// TestATruncatedRefusalIsNotAlreadyGone pins the completeness check on the
+// already-gone arm.
+//
+// A truncated stderr whose visible prefix happens to contain `not_found:` would
+// otherwise discharge a rollback on the strength of a stream we did not finish
+// reading — the same fail-open shape as reading a truncated listing as empty.
+func TestATruncatedRefusalIsNotAlreadyGone(t *testing.T) {
+	a, run, ref := startClean(t)
+	run.reply1(exec.KindCmuxProbe, listJSON([2]string{workspaceA, ref.OwnershipName()}))
+	run.on(exec.KindCmuxCleanup, func() (exec.SensitiveResult, error) {
+		return exec.SensitiveResult{
+				Stderr: exec.BoundedOutputForTest(
+					[]byte("Error: not_found: Workspace not f"), exec.OutputOverflowed),
+			},
+			exec.SensitiveErrorForTest(exec.KindCmuxCleanup, exec.OutcomeExit)
+	})
+
+	if got := a.Close(context.Background(), ref); got.State().SatisfiesRollback() {
+		t.Errorf("Close = %v; a stream we could not finish reading discharged the rollback", got)
+	}
+}
+
+// TestAnInvalidPasswordOnStdoutIsAlsoAnAuthFailure covers the second stream.
+//
+// Measured on 0.64.22, cmux puts this refusal on STDERR — the sibling test uses
+// that stream. Both are searched because the classification is advisory and a
+// false negative sends an operator hunting a dead server instead of their
+// password, so the arm should not be coupled to which stream a future release
+// picks. This is the test that makes that second stream a real control rather
+// than an untested branch.
+func TestAnInvalidPasswordOnStdoutIsAlsoAnAuthFailure(t *testing.T) {
+	run := newRunner().on(exec.KindCmuxReadiness, func() (exec.SensitiveResult, error) {
+		return exec.SensitiveResult{
+				Stdout: exec.BoundedOutputForTest([]byte("Error: ERROR: Invalid password\n"), exec.OutputComplete),
+			},
+			exec.SensitiveErrorForTest(exec.KindCmuxReadiness, exec.OutcomeExit)
+	})
+	a := newTestAdapter(t, run)
+	spec, _ := newSpec(t)
+
+	res := a.Start(context.Background(), spec)
+
+	if causeClass(res) != backend.FailureAuthentication {
+		t.Errorf("class = %v, want FailureAuthentication", causeClass(res))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Helpers.
 // ---------------------------------------------------------------------------
@@ -1172,7 +1384,6 @@ func foreignRef(t *testing.T) backend.Ref {
 	}
 	return ref
 }
-
 
 // causeClass reads a result's failure class, treating an absent cause as the
 // unspecified class rather than panicking — a test asserting on a class wants a

@@ -75,7 +75,7 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 		if a.serverGone() || workspaceNotFound(res.Stderr) {
 			return backend.NewCloseAlreadyGone()
 		}
-		return backend.NewCloseFailed(a.classifyRunError(err, res.Stderr))
+		return backend.NewCloseFailed(a.classifyRunError(err, res))
 	}
 	return backend.NewCloseClosed()
 }
@@ -152,11 +152,16 @@ func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (string, locateSt
 
 	server, cause := a.readiness(ctx)
 	if cause != nil {
-		// An endpoint that is definitively absent means the workspace is
-		// certainly gone. The incarnation question is moot: there is no
-		// incarnation. Anything else — unreadable, not ours, incompatible,
-		// unauthenticated — proves nothing about the workspace and must not
-		// discharge a rollback obligation.
+		// An absent endpoint PATH is read as the workspace being gone. That is
+		// the weakest link in this path and it is stated plainly rather than
+		// asserted as certainty: serverGone answers "the socket file is not
+		// there", which a live cmux whose socket was unlinked also satisfies —
+		// see serverGone for why nothing here can close that gap and why the
+		// alternative is worse.
+		//
+		// Anything else — unreadable, not ours, incompatible, unauthenticated —
+		// proves nothing about the workspace and must not discharge a rollback
+		// obligation.
 		if a.serverGone() {
 			return "", locateAbsent, backend.StartCause{}
 		}
@@ -180,6 +185,27 @@ func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (string, locateSt
 		return "", locateUnreadable, *scause
 	}
 	if row, ok := rows[foldID(want)]; ok {
+		// Read the ownership marker back before calling this ours. The Closer
+		// contract states this as a MUST, and it is the obligation that fills a
+		// gap the type system cannot: a tmux session name is CHOSEN by forgectl,
+		// so Ref.Validate can bind it to the tag, but a cmux workspace UUID is
+		// server-assigned and carries nothing of ours. For this backend a create
+		// response that named the wrong object — a raced reply, a stale id
+		// echoed after a restart — yields a fully valid Ref pointing at somebody
+		// else's workspace, and nothing upstream of here can tell.
+		//
+		// Without this, Close would issue `workspace close <operator's UUID>`
+		// and report success. That is the worst outcome this package can
+		// produce: not a failed rollback, but a rollback that destroys
+		// something it never created.
+		//
+		// Compared with a plain != and not folded, unlike the id above. The
+		// description is the exact bytes forgectl wrote, not a value cmux
+		// normalises, so folding would only widen what matches.
+		if row.marker != ref.OwnershipName() {
+			return "", locateMismatch, backend.NewStartCause(backend.FailureIdentityMismatch,
+				errors.New("the workspace at this identifier does not carry our ownership marker"))
+		}
 		// The listing's spelling wins, not the reference's: the operand goes
 		// back to cmux, so it should be the bytes cmux most recently used for
 		// this object.
