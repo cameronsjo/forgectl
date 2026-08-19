@@ -12,6 +12,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
+	"github.com/cameronsjo/forgectl/internal/surface/sockstat"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -225,7 +226,7 @@ func (a *Adapter) fingerprint(row identityRow, version string) (backend.ServerID
 		// tmux reports start_time in whole seconds; the field wants nanos.
 		StartedAtUnixNano: row.startTime * int64(time.Second),
 	}
-	fillStat(&in, info)
+	sockstat.Fill(&in, info)
 	return backend.Fingerprint(in)
 }
 

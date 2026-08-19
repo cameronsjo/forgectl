@@ -36,6 +36,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
+	"github.com/cameronsjo/forgectl/internal/surface/sockstat"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -212,7 +213,7 @@ func (a *Adapter) checkSocketDir(getuid func() int) error {
 	if info.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("%w: %s", ErrUnsafeSocketDir, "group or world writable")
 	}
-	if owner, ok := ownerUID(info); ok && owner != getuid() {
+	if owner, ok := sockstat.OwnerUID(info); ok && owner != getuid() {
 		return fmt.Errorf("%w: %s", ErrUnsafeSocketDir, "owned by another user")
 	}
 	return nil
