@@ -49,7 +49,7 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 		exec.MustFixed("-d"),
 		exec.MustFixed("-P"),
 		exec.MustFixed("-F"),
-		exec.MustFixed(identityFormat),
+		exec.Opaque(identityFormat),
 		exec.MustFixed("-s"),
 		exec.Opaque(name),
 		exec.MustFixed("-c"),
@@ -103,7 +103,7 @@ func (a *Adapter) reconcile(ctx context.Context, tag backend.RecoveryTag, name, 
 	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindTmuxReconcile,
 		exec.MustFixed("list-sessions"),
 		exec.MustFixed("-F"),
-		exec.MustFixed(identityFormat),
+		exec.Opaque(identityFormat),
 	))
 	if runErr != nil {
 		// "No server running" is the one listing failure that proves absence:

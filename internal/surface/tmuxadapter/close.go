@@ -101,7 +101,7 @@ func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (identityRow, loc
 	res, err := a.run.RunSensitive(ctx, a.command(exec.KindTmuxProbe,
 		exec.MustFixed("list-sessions"),
 		exec.MustFixed("-F"),
-		exec.MustFixed(identityFormat),
+		exec.Opaque(identityFormat),
 	))
 	if err != nil {
 		if noServer(res.Stderr) {

@@ -56,6 +56,18 @@ const identityFormat = "#{pid}" + tmux.FieldSep + "#{start_time}" + tmux.FieldSe
 // well-formed-looking native id naming a different session.
 const identityFieldCount = 4
 
+// identityFormat travels as exec.Opaque rather than exec.MustFixed even though
+// it is a compile-time constant, because it embeds FieldSep (0x1f) and the
+// fixed-argument constructor refuses control characters outright — deliberately,
+// so a mistyped constant cannot smuggle a terminal escape into an argv.
+//
+// That refusal is right and this is the sanctioned exception: the separator is
+// the whole point of the format (a session name may contain spaces or tabs, so
+// only an unprintable byte can delimit fields reliably). Opaque carries it
+// without weakening the fixed-argument rule for everything else, and the only
+// check it loses — the leading-dash refusal — cannot bite a string beginning
+// with "#{".
+
 // minMajor and minMinor are the floor at which #{pid} and #{start_time} exist.
 // Below it tmux echoes the format string back instead of expanding it, which
 // would arrive here as an unparseable row rather than an honest refusal.
