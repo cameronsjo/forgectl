@@ -30,4 +30,5 @@ func fill(in *backend.IncarnationInput, info os.FileInfo) {
 	}
 	in.Device = uint64(sys.Dev) //nolint:unconvert,gosec // G115: widening; Dev is int32 on Darwin, uint64 on Linux
 	in.Inode = uint64(sys.Ino)  //nolint:unconvert // widening for the same reason
+	in.ChangedAtUnixNano = changeTime(sys)
 }

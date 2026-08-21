@@ -32,16 +32,27 @@ import (
 // restarts on the same path, which is precisely the event a fingerprint built
 // from path and version alone would miss.
 //
-// ChangedAtUnixNano is deliberately left zero. Its field name differs by
-// platform — Ctim on Linux, Ctimespec on Darwin — so reading it would mean
-// another build-tagged pair, and backend documents it as optional for exactly
-// that reason.
+// ChangedAtUnixNano is read too, and it used to be skipped for a reason that did
+// not survive contact with what it costs: the field name differs by platform —
+// Ctim on Linux, Ctimespec on Darwin — so reading it means another build-tagged
+// trio, and backend documents it as optional.
 //
-// How much a caller may lean on the inode alone varies by backend, and callers
-// should say so where they build the input rather than assume it here: a tmux
-// fingerprint also carries the server pid and start time, so it has three
-// independent witnesses to a restart, while a backend that reports neither has
-// only this one.
+// What that reasoning left out is who pays. tmux's fingerprint carries the
+// server pid and start time as well, so it has three independent witnesses to a
+// restart; cmux and herdr expose neither, so the inode was their ONLY one
+// (forgectl#344). A second witness for the two backends that have none is worth
+// three small files.
+//
+// It is a WEAKER witness than a pid, and deliberately so in the safe direction.
+// ctime moves on any metadata change, not only on creation, so it can differ
+// when nothing restarted — which refuses a close that would have succeeded and
+// costs a manual cleanup. The failure it prevents is the opposite one: a
+// fingerprint that survives a restart is what lets a rollback close a stranger's
+// workspace.
+//
+// Platforms that are neither Darwin nor Linux read no timestamp and keep exactly
+// the witnesses they had, rather than gaining a selector this project cannot
+// build or test.
 func Fill(in *backend.IncarnationInput, info os.FileInfo) { fill(in, info) }
 
 // OwnerUID reports the uid owning the stat'ed object, and whether the platform
