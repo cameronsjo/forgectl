@@ -265,12 +265,18 @@ type IncarnationInput struct {
 	// selected a herdr server at all (forgectl#364), which is why the sibling
 	// ServerSource constants were renamed from -config to -session.
 	//
-	// So all three backends get filesystem-volatile evidence, and what
-	// forgectl#344 actually tracks is narrower than this once claimed: cmux and
-	// herdr report no pid and no start time, so the socket's inode is their ONLY
-	// witness where tmux has three. ChangedAtUnixNano is a second witness both
-	// could carry — sockstat reads Device and Inode and simply does not populate
-	// it — and remains the cheapest available strengthening.
+	// So all three backends get filesystem-volatile evidence. cmux and herdr
+	// report no pid and no start time, so they rest on the socket alone where
+	// tmux also has the server's pid and start time — but "alone" now means two
+	// fields, not one: sockstat populates Device, Inode, AND ChangedAtUnixNano.
+	//
+	// Third revision of this paragraph, and the second correction of a positive
+	// claim it made about sockstat. It previously said sockstat "does not
+	// populate" the change time, which stopped being true in the same change that
+	// made it worth saying. A comment that asserts what ANOTHER package does goes
+	// stale without that package's tests noticing — which is the argument for
+	// describing the guarantee here and leaving the mechanism to sockstat's own
+	// doc.
 	//
 	// Nothing populates ServerReported today. It stays because a daemon-supplied
 	// token is strictly better than inferring an incarnation from a directory

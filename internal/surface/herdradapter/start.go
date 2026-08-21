@@ -426,12 +426,18 @@ func (a *Adapter) protocol(ctx context.Context) (string, *backend.StartCause) {
 // reference binds a created workspace to the incarnation that minted it, after
 // proving the server did not turn over while the create was in flight.
 //
-// herdr reports no server pid and no start time, so the socket's inode is the
-// only witness to a restart — the same single-witness weakness cmux has, and the
-// one forgectl#344 tracks. Taking the fingerprint again after the mutation is
-// what turns "the server restarted mid-create and we cannot say which
-// incarnation holds this workspace" into a refusal instead of a silent mixed
-// state.
+// herdr reports no server pid and no start time, so the fingerprint rests on
+// the socket alone — its inode and its change time (forgectl#344), where tmux
+// has the server's pid and start time as well. Taking the fingerprint again
+// after the mutation is what turns "the server restarted mid-create and we
+// cannot say which incarnation holds this workspace" into a refusal instead of a
+// silent mixed state.
+//
+// The change time can move without a restart, so this refuses slightly more
+// often than it strictly must — and on THIS path an extra refusal costs more
+// than on the close path: a create that fully succeeded returns OutcomeUnknown
+// with no reference, leaving a live workspace nothing in-process can close and
+// only the recovery tag to find it by.
 func (a *Adapter) reference(created createdWorkspace, tag backend.RecoveryTag, server serverInfo) (backend.Ref, error) {
 	info, err := a.lstat(server.socket)
 	if err != nil {
