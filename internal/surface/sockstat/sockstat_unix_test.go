@@ -118,8 +118,8 @@ func TestOwnerUIDReportsTheOwnerAndDeclinesWhenItCannot(t *testing.T) {
 //
 // Asserting that ChangedAtUnixNano is non-zero would pass for a Fill that wrote
 // a constant. What matters is that two sockets differing ONLY in change time
-// fingerprint differently — which is the whole reason to read it, since the two
-// single-witness backends previously had nothing but the inode.
+// fingerprint differently — which is the whole reason to read it, since cmux and
+// herdr had nothing but the inode before it.
 //
 // The inode is deliberately held equal here. That is the case the second witness
 // exists for: a server that rebinds and happens to land on the same inode number
@@ -131,7 +131,7 @@ func TestFillCarriesTheChangeTimeAsASecondWitness(t *testing.T) {
 	first := base
 	Fill(&first, fakeInfo{sys: statWithChangeTime(inode, 1_000)})
 	if first.ChangedAtUnixNano == 0 {
-		t.Fatal("Fill read no change time; the two single-witness backends gained nothing")
+		t.Fatal("Fill read no change time; cmux and herdr gained no second witness")
 	}
 
 	second := base

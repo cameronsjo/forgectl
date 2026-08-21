@@ -210,10 +210,12 @@ func (a *Adapter) reference(row identityRow, tag backend.RecoveryTag, version st
 // fingerprint hashes the incarnation this row came from.
 //
 // The socket's inode is required by Fingerprint and is the field that turns
-// over when a server restarts on the same path. tmux also reports its own pid
-// and start time, so a tmux fingerprint carries three independent witnesses to
-// a restart — which is why the incarnation guarantee holds here and needs
-// separate work for herdr (forgectl#344).
+// over when a server restarts on the same path. sockstat also fills the
+// socket's change time, and tmux reports its own pid and start time on top of
+// that — so a tmux fingerprint carries four witnesses where cmux and herdr have
+// the two filesystem ones. That gap is what forgectl#344 tracks; its filesystem
+// half is now closed, and what remains open there is a daemon-supplied
+// incarnation token, which no backend exposes.
 func (a *Adapter) fingerprint(row identityRow, version string) (backend.ServerID, error) {
 	info, err := a.lstat(a.socket)
 	if err != nil {

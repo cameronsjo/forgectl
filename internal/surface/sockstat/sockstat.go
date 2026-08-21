@@ -38,10 +38,9 @@ import (
 // trio, and backend documents it as optional.
 //
 // What that reasoning left out is who pays. tmux's fingerprint carries the
-// server pid and start time as well, so it has three independent witnesses to a
-// restart; cmux and herdr expose neither, so the inode was their ONLY one
-// (forgectl#344). A second witness for the two backends that have none is worth
-// three small files.
+// server pid and start time as well; cmux and herdr expose neither, so before
+// this the inode was the whole of their evidence (forgectl#344). A second
+// witness for the two backends that had one is worth three small files.
 //
 // It is a WEAKER witness than a pid, and deliberately so in the safe direction.
 // ctime moves on any metadata change, not only on creation, so it can differ

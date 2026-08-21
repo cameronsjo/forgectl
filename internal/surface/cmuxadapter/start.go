@@ -312,13 +312,17 @@ func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCaus
 // reference binds a workspace UUID to the incarnation that minted it, after
 // proving the server did not turn over while the create was in flight.
 //
-// The re-fingerprint is the point. cmux reports no server pid and no start time,
-// so unlike tmux — which carries three independent witnesses to a restart — the
-// only witness here is the socket's inode. Taking it again after the mutation
-// is what converts "the server restarted mid-create, and we cannot say which
-// incarnation holds this workspace" from a silent mixed state into a refusal.
-// The single-witness weakness itself is shared with herdr and tracked as
-// forgectl#344.
+// The re-fingerprint is the point. cmux reports no server pid and no start
+// time, so where tmux has those two on top of the socket, this rests on the
+// socket alone — its inode and its change time (forgectl#344). Taking the
+// fingerprint again after the mutation is what converts "the server restarted
+// mid-create, and we cannot say which incarnation holds this workspace" from a
+// silent mixed state into a refusal.
+//
+// The change time is the weaker of the two and can move without a restart, so
+// this refuses slightly more often than it strictly must. What that costs is
+// named at the call site below, because it is larger here than on the close
+// path.
 func (a *Adapter) reference(workspace string, tag backend.RecoveryTag, server serverInfo) (backend.Ref, error) {
 	info, err := a.lstat(a.socket)
 	if err != nil {
@@ -345,8 +349,10 @@ func (a *Adapter) fingerprint(info os.FileInfo, version string) (backend.ServerI
 		Version:  version,
 	}
 	// The inode is required by Fingerprint and is the field that turns over when
-	// a server restarts on the same path. cmux supplies no pid or start time, so
-	// this is the sole witness — see reference for what is done about that.
+	// a server restarts on the same path; sockstat also fills the socket's change
+	// time, which is a second, weaker witness. cmux supplies no pid or start
+	// time, so those two are all there is — see reference for what is done about
+	// that.
 	sockstat.Fill(&in, info)
 	return backend.Fingerprint(in)
 }
