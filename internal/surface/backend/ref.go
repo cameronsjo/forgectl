@@ -386,17 +386,31 @@ type HerdrIdentity struct{ workspace, tab, pane string }
 // A colon in the workspace ID is refused specifically: herdr's addressing uses
 // colons to qualify a workspace with a pane, so a workspace-only ID containing
 // one is either a qualified address in the wrong field or an attempt to widen
-// what a later command targets. The tab and pane IDs are not colon-checked,
-// because they are the qualifiers rather than the thing being qualified, and
-// neither is what a close authorizes against.
+// what a later command targets.
+//
+// The tab and pane IDs are constrained the other way — each must be qualified by
+// THIS workspace. herdr's grammar is `<workspace>:<kind><n>` (measured: w2R,
+// w2R:t1, w2R:p1), so a child of ours always carries our prefix.
+//
+// An earlier version left them unchecked, reasoning that they are the qualifiers
+// rather than the thing qualified and that neither is what a close authorizes
+// against. The first half is still true and the second is still true of CLOSE —
+// but it stopped covering the code that reads the field. The pane ID is the
+// DELIVERY ADDRESS of the bootstrap: `pane run <pane> <bootstrap>` types the
+// handshake socket path and the one-shot nonce into whatever pane it names. A
+// create reply reporting our workspace with a foreign root pane would have sent
+// the credential there and returned a clean RefKnown with no cause attached, so
+// nothing downstream could notice. The identity authorizes nothing through this
+// field; it ADDRESSES a secret through it, which is the stronger reason to
+// constrain it.
 func NewHerdrIdentity(workspace, tab, pane string) (HerdrIdentity, error) {
 	if !validHerdrID(workspace) || strings.Contains(workspace, ":") {
 		return HerdrIdentity{}, fmt.Errorf("%w: herdr workspace id", ErrInvalidIdentity)
 	}
-	if tab != "" && !validHerdrID(tab) {
+	if tab != "" && !qualifiedBy(workspace, tab) {
 		return HerdrIdentity{}, fmt.Errorf("%w: herdr tab id", ErrInvalidIdentity)
 	}
-	if pane != "" && !validHerdrID(pane) {
+	if pane != "" && !qualifiedBy(workspace, pane) {
 		return HerdrIdentity{}, fmt.Errorf("%w: herdr pane id", ErrInvalidIdentity)
 	}
 	return HerdrIdentity{workspace: workspace, tab: tab, pane: pane}, nil
@@ -776,6 +790,18 @@ func validUUID(s string) bool {
 		}
 	}
 	return true
+}
+
+// qualifiedBy reports whether child is a well-formed herdr id belonging to this
+// workspace — the `<workspace>:<kind><n>` grammar, with the prefix required
+// rather than merely permitted.
+//
+// The prefix test is what makes a tab or pane id a CHILD rather than an
+// arbitrary address, and it is checked here because backend is the layer that
+// mints identities; an adapter comparing prefixes itself would be a second
+// spelling of a rule that belongs with the type.
+func qualifiedBy(workspace, child string) bool {
+	return validHerdrID(child) && strings.HasPrefix(child, workspace+":")
 }
 
 // validHerdrID reports whether s is a bounded ASCII identifier with no

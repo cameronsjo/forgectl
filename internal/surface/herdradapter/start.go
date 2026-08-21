@@ -220,13 +220,25 @@ type serverInfo struct {
 // readiness proves the session exists, is running, is ours, and speaks a
 // protocol we understand.
 //
-// The ordering is a safety property, not a convenience. The session roster is
-// read FIRST and WITHOUT the pin, because `herdr --session <name>` STARTS a
-// server when that session is not running — so pinning a name in order to ask
-// whether it exists is the one question that can answer itself by creating the
-// thing. `session list` is global and read-only, and refusing a session that is
-// not already running is what keeps this adapter from silently minting a second,
-// differently-privileged server (forgectl#364).
+// The session roster is read FIRST and WITHOUT the pin. `session list` is global
+// and read-only, so it answers "does this session exist, is it running, and
+// which socket does it own" without naming a session to anything.
+//
+// The justification is narrower than it first appears, and worth writing down
+// accurately because two earlier versions of this comment got it wrong in
+// opposite directions. `herdr --session <name>` with NO SUBCOMMAND — the bare
+// and attach forms — starts a server when that session is not running, and a
+// stray herdr server silently captures later invocations, which is a real hazard
+// in this estate. Read from herdr's source: its CLI SUBCOMMANDS, which are all
+// this adapter ever issues, return a structured `server_not_running` error
+// instead of spawning. So the ordering is not what stands between this package
+// and an accidental server.
+//
+// What it does buy is still worth the call: the roster is the only place the
+// socket comes from, and refusing a session that is not already running gives
+// the operator a better answer than a `server_not_running` surfacing three
+// commands deeper, after a pre-snapshot and a create have been attempted
+// (forgectl#364).
 func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCause) {
 	res, runErr := a.run.RunSensitive(ctx, exec.SensitiveCommand{
 		Kind: exec.KindHerdrReadiness,
@@ -345,20 +357,23 @@ func (a *Adapter) checkSocketOwner(socket string) (os.FileInfo, *backend.StartCa
 
 // protocol asks the pinned session what it speaks.
 //
-// Pinned, unlike the roster read above — and the window is NARROWED rather than
-// closed, which the earlier wording got wrong by claiming it "cannot create it".
+// Pinned, and safe to pin — established by reading herdr's source rather than
+// by reasoning about the argv, after two successive comments here got it wrong
+// in opposite directions.
 //
-// Readiness established that this session was running a moment ago. That is a
-// claim about a moment, applied to a later one: if the session stops between the
-// roster read and this call — or before the pinned pre-snapshot, or the create —
-// then naming it starts a fresh server, which is the estate hazard the whole
-// ordering exists to avoid, and the launch proceeds against a server the
-// operator never opened.
+// herdr's CLI SUBCOMMANDS do not auto-start a server. A subcommand that cannot
+// reach the socket returns a structured `server_not_running` error naming the
+// command an operator would run; no spawn path is reachable from one. The
+// auto-start that makes a stray server a hazard in this estate belongs to the
+// BARE and ATTACH forms — `herdr --session <name>` with no subcommand — which
+// this adapter never issues.
 //
-// The race cannot be closed from here; herdr 0.8.0 offers no no-autostart flag
-// this adapter could pass. What the ordering buys is that the COMMON case — a
-// session that was never running — is refused before any pinned command is
-// issued at all, rather than being created by the question.
+// So the roster-first ordering is not load-bearing against auto-start, and the
+// earlier wording claiming a pinned call could create a server overstated it as
+// badly as the wording before it understated it. What the ordering actually buys
+// is worth keeping on its own: the roster is where the socket comes from, and
+// refusing a session that is not running gives the operator a better answer than
+// `server_not_running` would, before any pinned command is issued.
 func (a *Adapter) protocol(ctx context.Context) (string, *backend.StartCause) {
 	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHerdrReadiness,
 		exec.MustFixed("status"),

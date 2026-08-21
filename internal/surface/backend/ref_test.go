@@ -66,7 +66,7 @@ func cmuxRef(t *testing.T) backend.Ref {
 
 func herdrRef(t *testing.T) backend.Ref {
 	t.Helper()
-	id, err := backend.NewHerdrIdentity("ws-7719", "tab-1", "pane-1")
+	id, err := backend.NewHerdrIdentity("w2R", "w2R:t1", "w2R:p1")
 	if err != nil {
 		t.Fatalf("NewHerdrIdentity: %v", err)
 	}
@@ -472,6 +472,48 @@ func TestRef_IdentityAccessorsAreKindChecked(t *testing.T) {
 // TestNewHerdrIdentity_AllowsAPartialRef covers the shape the plan is explicit
 // about: herdr can create a workspace and then fail the pane step, and that
 // reference has to be representable or the workspace cannot be cleaned up.
+// TestNewHerdrIdentity_RefusesAChildOfAnotherWorkspace is the constraint that
+// protects the bootstrap's DELIVERY ADDRESS.
+//
+// The workspace field has been colon-checked from the start, because a
+// colon-bearing workspace id would widen what a close reaches. The tab and pane
+// were left unchecked on the reasoning that they qualify rather than authorize —
+// true, and it stopped covering the code that reads them. `pane run <pane>
+// <bootstrap>` types the handshake socket path and the one-shot nonce into
+// whatever pane it names, so a create reply pairing our workspace with a foreign
+// root pane would deliver the credential elsewhere and still return a clean
+// RefKnown with no cause attached.
+//
+// The grammar is measured, not assumed: herdr ids are `<workspace>:<kind><n>`,
+// observed as w2R, w2R:t1, w2R:p1 on 0.8.0.
+func TestNewHerdrIdentity_RefusesAChildOfAnotherWorkspace(t *testing.T) {
+	foreign := map[string][2]string{
+		"pane in another workspace":                 {"w2R:t1", "wOTHER:p1"},
+		"tab in another workspace":                  {"wOTHER:t1", "w2R:p1"},
+		"pane unqualified":                          {"w2R:t1", "p1"},
+		"tab unqualified":                           {"t1", "w2R:p1"},
+		"pane qualified by a prefix of ours":        {"w2R:t1", "w2:p1"},
+		"pane whose prefix merely starts with ours": {"w2R:t1", "w2RX:p1"},
+	}
+	for name, ids := range foreign {
+		t.Run(name, func(t *testing.T) {
+			if _, err := backend.NewHerdrIdentity("w2R", ids[0], ids[1]); !errors.Is(err, backend.ErrInvalidIdentity) {
+				t.Errorf("NewHerdrIdentity(w2R, %q, %q) = %v, want ErrInvalidIdentity", ids[0], ids[1], err)
+			}
+		})
+	}
+
+	// The acceptance side, without which a constructor refusing every child
+	// would pass the table above.
+	id, err := backend.NewHerdrIdentity("w2R", "w2R:t1", "w2R:p1")
+	if err != nil {
+		t.Fatalf("NewHerdrIdentity with real herdr ids = %v, want acceptance", err)
+	}
+	if id.Tab() != "w2R:t1" || id.Pane() != "w2R:p1" {
+		t.Errorf("identity stored %q/%q; the ids must round-trip unchanged", id.Tab(), id.Pane())
+	}
+}
+
 func TestNewHerdrIdentity_AllowsAPartialRef(t *testing.T) {
 	id, err := backend.NewHerdrIdentity("ws-7719", "", "")
 	if err != nil {

@@ -266,15 +266,24 @@ func causeClass(res backend.StartResult) backend.StartFailureClass {
 // TestTheSessionRosterIsReadWithoutThePin is a SAFETY property, not a
 // stylistic one, and it is the single most important test in this package.
 //
-// `herdr --session <name> …` STARTS a server when that session is not running.
-// So pinning a session name in order to ask whether it exists is the one
-// question that can answer itself by creating the thing — and in this estate a
-// stray herdr server is a known hazard: a second, differently-privileged server
-// that silently captures later invocations.
+// The roster read is deliberately unpinned and every OTHER command is
+// deliberately pinned. Both halves are asserted, because either alone is half a
+// control.
 //
-// The roster read is therefore deliberately unpinned, and every OTHER command
-// is deliberately pinned. Both halves are asserted here because either alone is
-// half a control.
+// The REASON is worth stating accurately, since this test originally justified
+// itself with a hazard it does not face. `herdr --session <name>` with no
+// subcommand — the bare and attach forms — starts a server when that session is
+// not running, and a stray herdr server silently capturing later invocations is
+// a real hazard in this estate. But herdr's CLI SUBCOMMANDS, which are all this
+// adapter issues, return a structured `server_not_running` error rather than
+// spawning. Verified by reading herdr's source after two comments claimed
+// otherwise in opposite directions.
+//
+// What the ordering actually buys: the roster is where the socket comes from,
+// and refusing a session that is not running gives the operator a better answer
+// than `server_not_running` from three commands deeper. The pin still has to be
+// on everything else, or a command reaches whatever server the environment
+// selects.
 func TestTheSessionRosterIsReadWithoutThePin(t *testing.T) {
 	run := newRunner()
 	a := newTestAdapter(t, run, nil)
@@ -304,7 +313,7 @@ func TestTheSessionRosterIsReadWithoutThePin(t *testing.T) {
 	}
 	if !isSessionList(calls[0]) {
 		t.Error("the first command was not the session roster read; a pinned command " +
-			"issued before the session is known to be running is what STARTS a server")
+			"issued before the roster has been read reaches a server this adapter never resolved")
 	}
 
 	sawRoster := false
@@ -503,6 +512,51 @@ func TestTheBootstrapIsRunInTheCreatedPane(t *testing.T) {
 	}
 	if !targeted {
 		t.Error("`pane run` does not target the pane id the create reported")
+	}
+}
+
+// TestAForeignRootPaneNeverReceivesTheBootstrap is the end-to-end half of the
+// child-qualification rule, and it is the half that matters.
+//
+// The constructor test in backend proves the rule refuses. This proves the rule
+// is REACHED BEFORE DELIVERY — because the hazard is not an invalid identity, it
+// is the handshake socket path and the one-shot nonce being typed into a pane
+// belonging to somebody else's workspace while Start returns a clean RefKnown
+// that mentions none of it.
+//
+// The ordering that makes this work is worth naming: reference() builds the
+// identity, and the `pane run` only happens after it succeeds. Move the run
+// above the reference and this test goes red while every constructor test stays
+// green.
+func TestAForeignRootPaneNeverReceivesTheBootstrap(t *testing.T) {
+	// Our workspace, somebody else's root pane — a raced reply, or a stale id
+	// from a prior incarnation.
+	run := newRunner().reply1(exec.KindHerdrCreate, createJSON(wsA, tabA, "wOTHER:p1"))
+	a := newTestAdapter(t, run, nil)
+	spec, _ := newSpec(t)
+
+	res := a.Start(context.Background(), spec)
+
+	for _, cmd := range run.calls() {
+		for _, arg := range cmd.Args {
+			if arg.Equal(exec.Opaque("wOTHER:p1")) {
+				t.Fatal("a command was addressed to a pane in a workspace this launch " +
+					"does not own; the socket path and nonce would go there")
+			}
+			if arg.Equal(spec.Bootstrap().SensitiveArg()) {
+				t.Fatal("the bootstrap was delivered despite the create reply naming a " +
+					"foreign root pane")
+			}
+		}
+	}
+
+	// And the outcome is honest rather than a clean success: nothing was found
+	// under our marker, so nothing was created that needs closing.
+	if res.Outcome() == backend.RefKnown {
+		t.Error("a create reply naming a foreign pane produced RefKnown")
+	}
+	if !res.Failed() {
+		t.Error("the launch did not succeed but the result does not say so")
 	}
 }
 
