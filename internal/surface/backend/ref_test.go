@@ -66,11 +66,11 @@ func cmuxRef(t *testing.T) backend.Ref {
 
 func herdrRef(t *testing.T) backend.Ref {
 	t.Helper()
-	id, err := backend.NewHerdrIdentity("ws-7719", "tab-1", "pane-1")
+	id, err := backend.NewHerdrIdentity("w2R", "w2R:t1", "w2R:p1")
 	if err != nil {
 		t.Fatalf("NewHerdrIdentity: %v", err)
 	}
-	ref, err := backend.NewHerdrRef(backend.HerdrDefaultConfigServer(), serverID(t), recoveryTag(t), id)
+	ref, err := backend.NewHerdrRef(backend.HerdrDefaultSessionServer(), serverID(t), recoveryTag(t), id)
 	if err != nil {
 		t.Fatalf("NewHerdrRef: %v", err)
 	}
@@ -268,8 +268,8 @@ func TestServerSource_KindIsClosed(t *testing.T) {
 		{backend.TmuxCurrentServer(), backend.KindTmux, "tmux-current"},
 		{backend.CmuxDefaultServer(), backend.KindCmux, "cmux-default"},
 		{backend.CmuxEnvServer(), backend.KindCmux, "cmux-env"},
-		{backend.HerdrDefaultConfigServer(), backend.KindHerdr, "herdr-default-config"},
-		{backend.HerdrEnvConfigServer(), backend.KindHerdr, "herdr-env-config"},
+		{backend.HerdrDefaultSessionServer(), backend.KindHerdr, "herdr-default-session"},
+		{backend.HerdrNamedSessionServer(), backend.KindHerdr, "herdr-named-session"},
 	}
 
 	for _, tc := range tests {
@@ -389,14 +389,14 @@ func TestDecodeRef_FailsClosed(t *testing.T) {
 		"tmux with a workspace": `{"version":1,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","workspace":"` + uuidA + `"}`,
 		"cmux with a session":   `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","workspace":"` + uuidA + `"}`,
 		"cmux with a pane":      `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"` + uuidA + `","pane":"p1"}`,
-		"herdr with a session":  `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","workspace":"ws-1"}`,
+		"herdr with a session":  `{"version":1,"kind":"herdr","source":"herdr-default-session","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","workspace":"ws-1"}`,
 
 		// Backend-specific grammar.
 		"cmux workspace is not a uuid":   `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"ws-1"}`,
 		"cmux uuid with a non-hex digit": `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"z9d03be6-9444-4a2b-9c24-aba8c1126a0a"}`,
-		"herdr workspace has a colon":    `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","workspace":"ws-1:pane-2"}`,
-		"herdr workspace is empty":       `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","workspace":""}`,
-		"herdr workspace oversized":      `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","workspace":"` + strings.Repeat("w", 129) + `"}`,
+		"herdr workspace has a colon":    `{"version":1,"kind":"herdr","source":"herdr-default-session","server":"` + digest + `","tag":"` + tag + `","workspace":"ws-1:pane-2"}`,
+		"herdr workspace is empty":       `{"version":1,"kind":"herdr","source":"herdr-default-session","server":"` + digest + `","tag":"` + tag + `","workspace":""}`,
+		"herdr workspace oversized":      `{"version":1,"kind":"herdr","source":"herdr-default-session","server":"` + digest + `","tag":"` + tag + `","workspace":"` + strings.Repeat("w", 129) + `"}`,
 	}
 
 	for name, in := range tests {
@@ -472,6 +472,73 @@ func TestRef_IdentityAccessorsAreKindChecked(t *testing.T) {
 // TestNewHerdrIdentity_AllowsAPartialRef covers the shape the plan is explicit
 // about: herdr can create a workspace and then fail the pane step, and that
 // reference has to be representable or the workspace cannot be cleaned up.
+// TestNewHerdrIdentity_RefusesADashLeadingID keeps a create from minting a
+// reference that nothing can ever close.
+//
+// The grammar used to allow a leading dash and leave the rule to exec.Opaque,
+// which refuses a dash-leading operand at the command. That reasoning avoided
+// two spellings of one rule and missed WHERE the refusal lands: at CLOSE, after
+// Start has already handed back a reference. Every subsequent Close then failed
+// with an internal class, forever — a handle nothing can act on, for a workspace
+// that really exists. Refusing here routes the create through reconciliation
+// instead, which can answer something a caller can use.
+func TestNewHerdrIdentity_RefusesADashLeadingID(t *testing.T) {
+	for _, ws := range []string{"-oProxyCommand", "--kill-all", "-"} {
+		t.Run(ws, func(t *testing.T) {
+			if _, err := backend.NewHerdrIdentity(ws, "", ""); !errors.Is(err, backend.ErrInvalidIdentity) {
+				t.Errorf("NewHerdrIdentity(%q) = %v, want ErrInvalidIdentity", ws, err)
+			}
+		})
+	}
+	// A dash INSIDE an id is ordinary and stays allowed — only a leading one is
+	// ambiguous to an argument parser.
+	if _, err := backend.NewHerdrIdentity("w2R-alt", "", ""); err != nil {
+		t.Errorf("NewHerdrIdentity(w2R-alt) = %v, want acceptance", err)
+	}
+}
+
+// TestNewHerdrIdentity_RefusesAChildOfAnotherWorkspace is the constraint that
+// protects the bootstrap's DELIVERY ADDRESS.
+//
+// The workspace field has been colon-checked from the start, because a
+// colon-bearing workspace id would widen what a close reaches. The tab and pane
+// were left unchecked on the reasoning that they qualify rather than authorize —
+// true, and it stopped covering the code that reads them. `pane run <pane>
+// <bootstrap>` types the handshake socket path and the one-shot nonce into
+// whatever pane it names, so a create reply pairing our workspace with a foreign
+// root pane would deliver the credential elsewhere and still return a clean
+// RefKnown with no cause attached.
+//
+// The grammar is measured, not assumed: herdr ids are `<workspace>:<kind><n>`,
+// observed as w2R, w2R:t1, w2R:p1 on 0.8.0.
+func TestNewHerdrIdentity_RefusesAChildOfAnotherWorkspace(t *testing.T) {
+	foreign := map[string][2]string{
+		"pane in another workspace":                 {"w2R:t1", "wOTHER:p1"},
+		"tab in another workspace":                  {"wOTHER:t1", "w2R:p1"},
+		"pane unqualified":                          {"w2R:t1", "p1"},
+		"tab unqualified":                           {"t1", "w2R:p1"},
+		"pane qualified by a prefix of ours":        {"w2R:t1", "w2:p1"},
+		"pane whose prefix merely starts with ours": {"w2R:t1", "w2RX:p1"},
+	}
+	for name, ids := range foreign {
+		t.Run(name, func(t *testing.T) {
+			if _, err := backend.NewHerdrIdentity("w2R", ids[0], ids[1]); !errors.Is(err, backend.ErrInvalidIdentity) {
+				t.Errorf("NewHerdrIdentity(w2R, %q, %q) = %v, want ErrInvalidIdentity", ids[0], ids[1], err)
+			}
+		})
+	}
+
+	// The acceptance side, without which a constructor refusing every child
+	// would pass the table above.
+	id, err := backend.NewHerdrIdentity("w2R", "w2R:t1", "w2R:p1")
+	if err != nil {
+		t.Fatalf("NewHerdrIdentity with real herdr ids = %v, want acceptance", err)
+	}
+	if id.Tab() != "w2R:t1" || id.Pane() != "w2R:p1" {
+		t.Errorf("identity stored %q/%q; the ids must round-trip unchanged", id.Tab(), id.Pane())
+	}
+}
+
 func TestNewHerdrIdentity_AllowsAPartialRef(t *testing.T) {
 	id, err := backend.NewHerdrIdentity("ws-7719", "", "")
 	if err != nil {

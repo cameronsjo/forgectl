@@ -62,29 +62,29 @@ const (
 	sourceTmuxCurrent
 	sourceCmuxDefault
 	sourceCmuxEnv
-	sourceHerdrDefaultConfig
-	sourceHerdrEnvConfig
+	sourceHerdrDefaultSession
+	sourceHerdrNamedSession
 	sourceCount
 )
 
 var sourceNames = [sourceCount]string{
-	sourceInvalid:            "invalid",
-	sourceTmuxDefault:        "tmux-default",
-	sourceTmuxCurrent:        "tmux-current",
-	sourceCmuxDefault:        "cmux-default",
-	sourceCmuxEnv:            "cmux-env",
-	sourceHerdrDefaultConfig: "herdr-default-config",
-	sourceHerdrEnvConfig:     "herdr-env-config",
+	sourceInvalid:             "invalid",
+	sourceTmuxDefault:         "tmux-default",
+	sourceTmuxCurrent:         "tmux-current",
+	sourceCmuxDefault:         "cmux-default",
+	sourceCmuxEnv:             "cmux-env",
+	sourceHerdrDefaultSession: "herdr-default-session",
+	sourceHerdrNamedSession:   "herdr-named-session",
 }
 
 var sourceKinds = [sourceCount]Kind{
-	sourceInvalid:            KindUnspecified,
-	sourceTmuxDefault:        KindTmux,
-	sourceTmuxCurrent:        KindTmux,
-	sourceCmuxDefault:        KindCmux,
-	sourceCmuxEnv:            KindCmux,
-	sourceHerdrDefaultConfig: KindHerdr,
-	sourceHerdrEnvConfig:     KindHerdr,
+	sourceInvalid:             KindUnspecified,
+	sourceTmuxDefault:         KindTmux,
+	sourceTmuxCurrent:         KindTmux,
+	sourceCmuxDefault:         KindCmux,
+	sourceCmuxEnv:             KindCmux,
+	sourceHerdrDefaultSession: KindHerdr,
+	sourceHerdrNamedSession:   KindHerdr,
 }
 
 // ServerSource names *how* an endpoint was selected, never the endpoint
@@ -109,13 +109,25 @@ func CmuxDefaultServer() ServerSource { return ServerSource{code: sourceCmuxDefa
 // CmuxEnvServer selects the socket named by CMUX_SOCKET_PATH.
 func CmuxEnvServer() ServerSource { return ServerSource{code: sourceCmuxEnv} }
 
-// HerdrDefaultConfigServer selects herdr's default config source.
-func HerdrDefaultConfigServer() ServerSource {
-	return ServerSource{code: sourceHerdrDefaultConfig}
+// HerdrDefaultSessionServer selects herdr's default session — the one a bare
+// `herdr` command talks to.
+func HerdrDefaultSessionServer() ServerSource {
+	return ServerSource{code: sourceHerdrDefaultSession}
 }
 
-// HerdrEnvConfigServer selects the config named by HERDR_CONFIG_PATH.
-func HerdrEnvConfigServer() ServerSource { return ServerSource{code: sourceHerdrEnvConfig} }
+// HerdrNamedSessionServer selects a session chosen by name rather than the
+// default one.
+//
+// Named for the SESSION and not for a config path, because the config path does
+// not select a herdr server. Measured on 0.8.0: a HERDR_CONFIG_PATH pointing at
+// a nonexistent file, and one naming a different socket, both resolved to the
+// same endpoint as no config at all. What selects a server is `--session`, and
+// `herdr session list` maps each name to its own socket. The earlier spellings
+// (herdr-default-config / herdr-env-config) encoded a model herdr does not
+// have; they are renamed here rather than after the adapter ships, because
+// these strings are serialized into every reference and no herdr reference
+// exists yet. See forgectl#364.
+func HerdrNamedSessionServer() ServerSource { return ServerSource{code: sourceHerdrNamedSession} }
 
 // Valid reports whether s names a real selection chain.
 func (s ServerSource) Valid() bool { return s.code > sourceInvalid && s.code < sourceCount }
@@ -239,12 +251,30 @@ type IncarnationInput struct {
 	// empty when it supplies none.
 	//
 	// It exists because the filesystem evidence above is only volatile when
-	// Endpoint is a socket. For herdr, Endpoint is a *config path*: its inode,
-	// device, and change time are all stable across a daemon restart, and
-	// herdr reports no pid, so a herdr fingerprint computed from the fields
-	// above alone would match across the exact restart it exists to detect.
-	// A herdr adapter must populate this (forgectl#344); until it does, the
-	// incarnation guarantee stated on ServerID holds for tmux and cmux only.
+	// Endpoint is a socket.
+	//
+	// This paragraph used to say that herdr's Endpoint is a CONFIG PATH whose
+	// inode is stable across a restart, and therefore that the incarnation
+	// guarantee held for tmux and cmux only. Both halves are now false, and the
+	// direction of the error is the unusual one: it UNDERSTATED a control that
+	// is present, so an auditor reading this would conclude herdr launches have
+	// no restart detection and stop looking.
+	//
+	// The herdr adapter passes the SOCKET path reported by `herdr session list`,
+	// whose inode turns over exactly as cmux's does. The config path never
+	// selected a herdr server at all (forgectl#364), which is why the sibling
+	// ServerSource constants were renamed from -config to -session.
+	//
+	// So all three backends get filesystem-volatile evidence, and what
+	// forgectl#344 actually tracks is narrower than this once claimed: cmux and
+	// herdr report no pid and no start time, so the socket's inode is their ONLY
+	// witness where tmux has three. ChangedAtUnixNano is a second witness both
+	// could carry — sockstat reads Device and Inode and simply does not populate
+	// it — and remains the cheapest available strengthening.
+	//
+	// Nothing populates ServerReported today. It stays because a daemon-supplied
+	// token is strictly better than inferring an incarnation from a directory
+	// entry, and any of the three would take it if one appeared.
 	ServerReported string
 }
 
@@ -374,17 +404,31 @@ type HerdrIdentity struct{ workspace, tab, pane string }
 // A colon in the workspace ID is refused specifically: herdr's addressing uses
 // colons to qualify a workspace with a pane, so a workspace-only ID containing
 // one is either a qualified address in the wrong field or an attempt to widen
-// what a later command targets. The tab and pane IDs are not colon-checked,
-// because they are the qualifiers rather than the thing being qualified, and
-// neither is what a close authorizes against.
+// what a later command targets.
+//
+// The tab and pane IDs are constrained the other way — each must be qualified by
+// THIS workspace. herdr's grammar is `<workspace>:<kind><n>` (measured: w2R,
+// w2R:t1, w2R:p1), so a child of ours always carries our prefix.
+//
+// An earlier version left them unchecked, reasoning that they are the qualifiers
+// rather than the thing qualified and that neither is what a close authorizes
+// against. The first half is still true and the second is still true of CLOSE —
+// but it stopped covering the code that reads the field. The pane ID is the
+// DELIVERY ADDRESS of the bootstrap: `pane run <pane> <bootstrap>` types the
+// handshake socket path and the one-shot nonce into whatever pane it names. A
+// create reply reporting our workspace with a foreign root pane would have sent
+// the credential there and returned a clean RefKnown with no cause attached, so
+// nothing downstream could notice. The identity authorizes nothing through this
+// field; it ADDRESSES a secret through it, which is the stronger reason to
+// constrain it.
 func NewHerdrIdentity(workspace, tab, pane string) (HerdrIdentity, error) {
 	if !validHerdrID(workspace) || strings.Contains(workspace, ":") {
 		return HerdrIdentity{}, fmt.Errorf("%w: herdr workspace id", ErrInvalidIdentity)
 	}
-	if tab != "" && !validHerdrID(tab) {
+	if tab != "" && !qualifiedBy(workspace, tab) {
 		return HerdrIdentity{}, fmt.Errorf("%w: herdr tab id", ErrInvalidIdentity)
 	}
-	if pane != "" && !validHerdrID(pane) {
+	if pane != "" && !qualifiedBy(workspace, pane) {
 		return HerdrIdentity{}, fmt.Errorf("%w: herdr pane id", ErrInvalidIdentity)
 	}
 	return HerdrIdentity{workspace: workspace, tab: tab, pane: pane}, nil
@@ -766,20 +810,47 @@ func validUUID(s string) bool {
 	return true
 }
 
+// qualifiedBy reports whether child is a well-formed herdr id belonging to this
+// workspace — the `<workspace>:<kind><n>` grammar, with the prefix required
+// rather than merely permitted.
+//
+// The prefix test is what makes a tab or pane id a CHILD rather than an
+// arbitrary address, and it is checked here because backend is the layer that
+// mints identities; an adapter comparing prefixes itself would be a second
+// spelling of a rule that belongs with the type.
+func qualifiedBy(workspace, child string) bool {
+	return validHerdrID(child) && strings.HasPrefix(child, workspace+":")
+}
+
 // validHerdrID reports whether s is a bounded ASCII identifier with no
 // whitespace and no control characters. herdr does not publish an ID grammar,
 // so this is a conservative shape check rather than a claim about its format:
 // what it is really for is keeping a control character or an unbounded blob
 // out of a value that later becomes a command-line argument.
 //
-// It deliberately does not refuse a leading "-". That an ID like "--kill-all"
-// cannot be parsed as a flag is enforced one layer down, by exec.Opaque, which
-// refuses a dynamic operand starting with a dash unless an EndOfOptions
-// separator precedes it. Duplicating the rule here would put two spellings of
-// it in the codebase; the dependency is named so a Phase 5 adapter author
-// knows the separator is load-bearing rather than decorative.
+// It DOES refuse a leading "-", and the reason it did not used to is worth
+// keeping because the reasoning was sound and the conclusion was wrong.
+//
+// The rule that an id like "--kill-all" cannot be parsed as a flag is enforced
+// one layer down by exec.Opaque, which refuses a dash-leading dynamic operand
+// unless an EndOfOptions separator precedes it — so duplicating it here looked
+// like putting two spellings of one rule in the codebase.
+//
+// What that missed is WHERE the refusal lands. exec.Opaque refuses at the
+// command, which for a workspace id means at CLOSE — after Start has already
+// minted a reference. Every subsequent Close then fails with an internal class,
+// forever: a handle nothing can ever act on, for a workspace that really exists.
+// Refusing here instead routes the create through reconciliation, which lists by
+// ownership marker and can answer RefKnownWithCause or OutcomeUnknown — outcomes
+// a caller can act on.
+//
+// The seam's refusal is still the backstop and still load-bearing; this is the
+// earlier, more useful place to say no.
 func validHerdrID(s string) bool {
 	if s == "" || len(s) > maxHerdrIDLen {
+		return false
+	}
+	if strings.HasPrefix(s, "-") {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
