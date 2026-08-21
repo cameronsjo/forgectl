@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 )
 
@@ -177,6 +178,41 @@ func TestNewTmuxAdapter_ReturnsATrulyNilAdapterOnEveryFailure(t *testing.T) {
 			t.Error("newTmuxAdapter() returned a non-nil adapter alongside an error")
 		}
 	})
+}
+
+// TestTheSurfaceFlagHelpNamesExactlyTheDrivenBackends ties the operator-facing
+// roster to the code that decides it.
+//
+// The flag's parenthesised list IS the roster as far as anyone reading `--help`
+// is concerned, and nothing linked it to surfaceAdapterFor's switch: cmux
+// shipped driven while the help still said "(tmux)", so the command refused to
+// admit it could do the thing it had just learned to do. A stale roster is a
+// small defect with a large surface — it is the first place an operator looks
+// and the last place a diff touches.
+//
+// The check derives both sides rather than restating either. A backend is
+// DRIVEN when surfaceAdapterFor does not refuse it as unimplemented — which
+// covers the "installed" and "not installed" cases alike, since only the
+// not-implemented refusal is a statement about this build.
+func TestTheSurfaceFlagHelpNamesExactlyTheDrivenBackends(t *testing.T) {
+	flag := newSurfaceLaunchCmd(module.Deps{}).Flags().Lookup("surface")
+	if flag == nil {
+		t.Fatal("the launch command has no --surface flag")
+	}
+	help := flag.Usage
+
+	for _, name := range []string{"tmux", "cmux", "herdr"} {
+		_, err := surfaceAdapterFor(name)
+		driven := !errors.Is(err, errBackendNotImplemented)
+		named := strings.Contains(help, name)
+
+		switch {
+		case driven && !named:
+			t.Errorf("%s is driven but --surface's help does not name it: %q", name, help)
+		case !driven && named:
+			t.Errorf("%s is not implemented but --surface's help advertises it: %q", name, help)
+		}
+	}
 }
 
 // TestNewCmuxAdapter_ReturnsATrulyNilAdapterOnEveryFailure is the cmux
