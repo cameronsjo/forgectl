@@ -102,7 +102,7 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 	// the service would have nothing to close. RefKnown-with-cause is the
 	// contract's answer — the launch failed AND we know exactly what to clean
 	// up.
-	if _, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHerdrCreate,
+	if runRes, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHerdrCreate,
 		exec.MustFixed("pane"),
 		// `pane run` sends the text and Enter in one call. The protocol has no
 		// run method — it is a client-side composition of send_text and
@@ -129,7 +129,14 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 		// direction.
 		spec.Bootstrap().SensitiveArg(),
 	)); runErr != nil {
-		return backend.NewRefKnownWithCause(ref, a.classifyRunError(runErr, exec.SensitiveResult{}))
+		// The RESULT is passed, not an empty one. It was discarded here, so
+		// classifyRunError's structured-code switch read an empty stderr and
+		// every pane-run failure classified as FailureUnavailable — on the one
+		// call where herdr's code is most worth having. A permission_denied
+		// became "check whether herdr is up" instead of "fix a permission". The
+		// create call two blocks above already did this correctly, so it was an
+		// inconsistency inside one function.
+		return backend.NewRefKnownWithCause(ref, a.classifyRunError(runErr, runRes))
 	}
 
 	// Note what a clean exit here does and does not mean. `pane run` types a
@@ -268,20 +275,37 @@ func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCaus
 		return serverInfo{}, &cause
 	}
 
+	// From here the socket is KNOWN and shape-checked, so every later failure
+	// carries it forward rather than returning a zero serverInfo.
+	//
+	// This is not tidiness. locate concludes absence from the failure class AND
+	// a stat of this socket, and serverGone short-circuits on an empty path — so
+	// while every failing path returned serverInfo{}, the stat never ran and
+	// locateAbsent was unreachable. A stopped session then produced
+	// CloseUnreadable forever: a rollback obligation for a surface that
+	// provably no longer exists, which could never be discharged. The comment in
+	// locate described a control that did not exist.
+	//
+	// The class gate still does the discriminating. checkSocketOwner returns
+	// FailureUnavailable only for an unreachable path and a non-socket, and
+	// FailurePermissionDenied for the ownership arms, so a socket we are refused
+	// can never be read as a socket that is gone.
+	endpoint := serverInfo{socket: row.SocketPath}
+
 	info, cause := a.checkSocketOwner(row.SocketPath)
 	if cause != nil {
-		return serverInfo{}, cause
+		return endpoint, cause
 	}
 
 	version, cause := a.protocol(ctx)
 	if cause != nil {
-		return serverInfo{}, cause
+		return endpoint, cause
 	}
 
 	id, err := a.fingerprint(row.SocketPath, info, version)
 	if err != nil {
 		c := backend.NewStartCause(backend.FailureMalformedResponse, err)
-		return serverInfo{}, &c
+		return endpoint, &c
 	}
 	return serverInfo{socket: row.SocketPath, version: version, incarnation: id}, nil
 }
@@ -321,8 +345,20 @@ func (a *Adapter) checkSocketOwner(socket string) (os.FileInfo, *backend.StartCa
 
 // protocol asks the pinned session what it speaks.
 //
-// Safe to pin here, unlike the roster read above: readiness has already
-// established that this session is running, so naming it cannot create it.
+// Pinned, unlike the roster read above — and the window is NARROWED rather than
+// closed, which the earlier wording got wrong by claiming it "cannot create it".
+//
+// Readiness established that this session was running a moment ago. That is a
+// claim about a moment, applied to a later one: if the session stops between the
+// roster read and this call — or before the pinned pre-snapshot, or the create —
+// then naming it starts a fresh server, which is the estate hazard the whole
+// ordering exists to avoid, and the launch proceeds against a server the
+// operator never opened.
+//
+// The race cannot be closed from here; herdr 0.8.0 offers no no-autostart flag
+// this adapter could pass. What the ordering buys is that the COMMON case — a
+// session that was never running — is refused before any pinned command is
+// issued at all, rather than being created by the question.
 func (a *Adapter) protocol(ctx context.Context) (string, *backend.StartCause) {
 	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHerdrReadiness,
 		exec.MustFixed("status"),

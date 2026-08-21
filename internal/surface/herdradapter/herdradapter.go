@@ -27,9 +27,14 @@
 // Three more properties shape this package, all measured against a live 0.8.0
 // server.
 //
-// The create reply is COMPLETE. `workspace create --json` returns the workspace,
-// its tab, and its root pane in one envelope — workspace_id, tab_id, and pane_id
-// together — so nothing has to be looked up afterwards. That matters because the
+// The create reply is COMPLETE. `workspace create` returns the workspace, its
+// tab, and its root pane in one envelope — workspace_id, tab_id, and pane_id
+// together — so nothing has to be looked up afterwards. No --json flag: herdr
+// answers its control verbs in JSON by default, and the two that DO take the
+// flag (session list, status) take it because their default is a human table.
+// Named precisely because the argv and the comment must agree — if that default
+// ever changes, both parse sites break at once and the comment is where a reader
+// will look first. That matters because the
 // bootstrap goes to a PANE, and a second call to find it would be a second place
 // the answer could be lost.
 //

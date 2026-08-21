@@ -429,9 +429,10 @@ func TestTheCreateArgvCarriesTheMarkerAndTheCWD(t *testing.T) {
 // tmux adapter, adapted to herdr's two-step shape.
 //
 // herdr's create takes no command, so the bootstrap is a SECOND call against the
-// pane the create just reported. Both halves are asserted: that the run targets
-// the pane id from the create reply, and that the bootstrap is its final operand
-// behind an end-of-options separator.
+// pane the create just reported. Three things are asserted: that the run targets
+// the pane id from the create reply, that the bootstrap is its final operand,
+// and that NO end-of-options separator precedes it — see the body for why that
+// last one is the opposite of what this comment originally said.
 func TestTheBootstrapIsRunInTheCreatedPane(t *testing.T) {
 	run := newRunner()
 	a := newTestAdapter(t, run, nil)
@@ -494,17 +495,13 @@ func TestTheBootstrapIsRunInTheCreatedPane(t *testing.T) {
 // here is what to clean up.
 func TestACreateThatSucceedsAndAPaneRunThatFailsStillYieldsARef(t *testing.T) {
 	run := newRunner()
-	// The second create-kind call is the pane run; fail it.
+	// Driven through RunFunc directly rather than through run.on, because the
+	// create KIND covers both the workspace create and the pane run and the
+	// scripted path suppresses the second. An earlier version installed a
+	// run.on closure here as well and then replaced RunFunc wholesale, so the
+	// closure never ran — dead setup that reads as live, and a reader tuning it
+	// would have been tuning nothing.
 	calls := 0
-	run.on(exec.KindHerdrCreate, func() (exec.SensitiveResult, error) {
-		calls++
-		if calls == 1 {
-			return stdout(createJSON(wsA, tabA, paneA)), nil
-		}
-		return exec.SensitiveResult{}, exec.SensitiveErrorForTest(exec.KindHerdrCreate, exec.OutcomeExit)
-	})
-	// The scripted-reply path suppresses the second call, so drive it directly.
-	run.reply = map[exec.CommandKind]func() (exec.SensitiveResult, error){}
 	run.fake.RunFunc = func(cmd exec.SensitiveCommand) (exec.SensitiveResult, error) {
 		if cmd.Kind == exec.KindHerdrReadiness && isSessionList(cmd) {
 			return stdout(defaultSessions()), nil
@@ -1188,6 +1185,270 @@ func TestAHerdrReferenceFromAnotherSelectionChainIsAMismatch(t *testing.T) {
 	}
 }
 
+// TestAVanishedEndpointIsGoneNotUnreadable is the control the code review found
+// DEAD, and whose comment had claimed it worked.
+//
+// locate concludes absence from the failure class AND a stat of the endpoint.
+// Every failing readiness path used to return a zero serverInfo, and serverGone
+// short-circuits on an empty socket — so the stat never ran and locateAbsent was
+// unreachable. A stopped session produced CloseUnreadable forever: a rollback
+// obligation for a surface that provably no longer exists, which could never be
+// discharged, and a Probe that answered unreadable rather than gone.
+//
+// Both directions are covered, because the class gate is what stops the fix from
+// becoming the opposite defect — a refused socket read as an absent one.
+func TestAVanishedEndpointIsGoneNotUnreadable(t *testing.T) {
+	t.Run("the socket is gone: already-gone, and the rollback discharges", func(t *testing.T) {
+		_, _, ref := startClean(t)
+		run := newRunner()
+		a := newTestAdapter(t, run, nil, WithLstat(absentSocket))
+
+		closed := a.Close(context.Background(), ref)
+		if closed.State() != backend.CloseAlreadyGone {
+			t.Errorf("Close state = %v, want already-gone", closed.State())
+		}
+		if !closed.State().SatisfiesRollback() {
+			t.Error("a surface that provably no longer exists left its rollback outstanding")
+		}
+		if probe := a.Probe(context.Background(), ref); probe.State() != backend.ProbeGone {
+			t.Errorf("Probe state = %v, want gone", probe.State())
+		}
+	})
+
+	t.Run("the socket is refused, not absent: unreadable", func(t *testing.T) {
+		_, _, ref := startClean(t)
+		// Readable and stat-able, but owned by somebody else —
+		// FailurePermissionDenied, which the class gate must keep OUT of the
+		// absence branch. Without it, carrying the socket forward would turn
+		// every refusal into "gone".
+		run := newRunner()
+		a := newTestAdapter(t, run, nil, WithLstat(func(string) (os.FileInfo, error) {
+			return fakeInfo{sys: &syscall.Stat_t{Ino: liveInode, Uid: testUID + 1}, mode: fs.ModeSocket | 0o600}, nil
+		}))
+
+		closed := a.Close(context.Background(), ref)
+		if closed.State().SatisfiesRollback() {
+			t.Errorf("Close = %v; a socket we are REFUSED was read as one that is GONE", closed)
+		}
+		if probe := a.Probe(context.Background(), ref); probe.State() != backend.ProbeUnreadable {
+			t.Errorf("Probe state = %v, want unreadable", probe.State())
+		}
+	})
+
+	t.Run("a close that fails while the endpoint vanished still discharges", func(t *testing.T) {
+		_, _, ref := startClean(t)
+		// Present through locate, absent by the time the failed close asks — a
+		// herdr that quit mid-rollback. cmux has this arm; herdr had only the
+		// structured-code half, so this yielded CloseFailed for a workspace that
+		// could not possibly still exist.
+		stats := 0
+		live := liveSocket(liveInode)
+		seam := func(path string) (os.FileInfo, error) {
+			stats++
+			if stats > 1 {
+				return absentSocket(path)
+			}
+			return live(path)
+		}
+		run := newRunner().reply1(exec.KindHerdrProbe, listJSON([2]string{wsA, ref.OwnershipName()}))
+		run.on(exec.KindHerdrCleanup, func() (exec.SensitiveResult, error) {
+			return exec.SensitiveResult{}, exec.SensitiveErrorForTest(exec.KindHerdrCleanup, exec.OutcomeExit)
+		})
+		a := newTestAdapter(t, run, nil, WithLstat(seam))
+
+		if got := a.Close(context.Background(), ref); !got.State().SatisfiesRollback() {
+			t.Errorf("Close = %v, want a satisfied rollback against an endpoint that is gone", got)
+		}
+	})
+}
+
+// TestTheAbsenceGateNeedsBothHalves drives the two conditions SEPARATELY, which
+// the sibling test above cannot.
+//
+// Absence needs a FailureUnavailable class AND an absent socket. The obvious
+// fixtures never discriminate: when the socket is simply missing, readiness
+// fails Unavailable at its own stat, so both halves agree and either alone
+// suffices. Each half only shows its work where the two DISAGREE.
+//
+// That is a race in both cases, and a real one — readiness stats the socket and
+// the absence check re-stats it, so anything can happen in between.
+func TestTheAbsenceGateNeedsBothHalves(t *testing.T) {
+	// Live for readiness's ownership stat, gone by the time the absence check
+	// asks. Everything after the first stat reports ENOENT.
+	vanishing := func() func(string) (os.FileInfo, error) {
+		stats := 0
+		live := liveSocket(liveInode)
+		return func(path string) (os.FileInfo, error) {
+			stats++
+			if stats > 1 {
+				return absentSocket(path)
+			}
+			return live(path)
+		}
+	}
+
+	t.Run("wrong class, absent socket: NOT gone", func(t *testing.T) {
+		// An INCOMPATIBLE server, with the socket vanishing underneath. The
+		// stat alone would say "gone"; the class says we never established
+		// anything about the workspace. Without the class gate, an
+		// incompatible — or unauthenticated — server whose socket happened to
+		// vanish would discharge a rollback on a live surface.
+		_, _, ref := startClean(t)
+		run := newRunner().reply1(exec.KindHerdrReadiness, statusJSON(true, false, minProtocol))
+		a := newTestAdapter(t, run, nil, WithLstat(vanishing()))
+
+		// Close only. The seam is stateful — every stat after the first reports
+		// ENOENT — so by a second call the socket is genuinely absent from the
+		// very first stat, readiness fails Unavailable at its own lstat, and
+		// "gone" becomes the correct answer. Asserting Probe here would be
+		// asserting against a different world than the one Close saw, which is
+		// its own species of test that cannot mean what it says.
+		closed := a.Close(context.Background(), ref)
+		if closed.State().SatisfiesRollback() {
+			t.Errorf("Close = %v; an incompatible server discharged the rollback because "+
+				"its socket vanished between two stats", closed)
+		}
+	})
+
+	t.Run("right class, present socket: NOT gone", func(t *testing.T) {
+		// The session reports itself stopped AFTER the roster said it was
+		// running — FailureUnavailable — while the socket file is still there.
+		// The class alone would say "gone"; the stat says we cannot prove it.
+		_, _, ref := startClean(t)
+		run := newRunner().reply1(exec.KindHerdrReadiness, statusJSON(false, true, minProtocol))
+		a := newTestAdapter(t, run, nil) // socket present throughout
+
+		closed := a.Close(context.Background(), ref)
+		if closed.State().SatisfiesRollback() {
+			t.Errorf("Close = %v; absence was concluded from the failure class alone, "+
+				"with the endpoint still on disk", closed)
+		}
+		if probe := a.Probe(context.Background(), ref); probe.State() == backend.ProbeGone {
+			t.Error("Probe reported gone with the endpoint still present")
+		}
+	})
+}
+
+// TestAFailedReconciliationChoosesByFailureClass covers the branch deciding
+// whether a create attempt left something behind — the only path that can report
+// NotMutated AFTER a create has run, so a wrong answer is the
+// orphan-a-live-surface hazard exactly.
+//
+// Both outcomes were unasserted: opposite mutants, always-fire and never-fire,
+// both survived, which means nothing drove a failing reconciliation at all.
+func TestAFailedReconciliationChoosesByFailureClass(t *testing.T) {
+	failListing := func(r *scriptedRunner) {
+		r.on(exec.KindHerdrReconcile, func() (exec.SensitiveResult, error) {
+			return exec.SensitiveResult{}, exec.SensitiveErrorForTest(exec.KindHerdrReconcile, exec.OutcomeExit)
+		})
+	}
+
+	t.Run("the endpoint is still there: outcome-unknown", func(t *testing.T) {
+		run := newRunner().reply1(exec.KindHerdrCreate, []byte("not a create reply"))
+		failListing(run)
+		a := newTestAdapter(t, run, nil)
+		spec, _ := newSpec(t)
+
+		if res := a.Start(context.Background(), spec); res.Outcome() != backend.OutcomeUnknown {
+			t.Errorf("outcome = %v, want OutcomeUnknown — a listing we could not read "+
+				"is not proof nothing was created", res.Outcome())
+		}
+	})
+
+	t.Run("the endpoint has vanished: not-mutated", func(t *testing.T) {
+		stats := 0
+		live := liveSocket(liveInode)
+		seam := func(path string) (os.FileInfo, error) {
+			stats++
+			if stats > 1 {
+				return absentSocket(path)
+			}
+			return live(path)
+		}
+		run := newRunner().reply1(exec.KindHerdrCreate, []byte("not a create reply"))
+		failListing(run)
+		a := newTestAdapter(t, run, nil, WithLstat(seam))
+		spec, _ := newSpec(t)
+
+		if res := a.Start(context.Background(), spec); res.Outcome() != backend.NotMutated {
+			t.Errorf("outcome = %v, want NotMutated", res.Outcome())
+		}
+	})
+}
+
+// TestThePaneRunFailureCarriesHerdrsErrorCode pins that the failing bootstrap
+// call's RESULT reaches classification.
+//
+// It was discarded, so the structured-code switch read an empty stderr and every
+// pane-run failure classified as FailureUnavailable — on the one call where
+// herdr's code is most worth having. A permission problem became "check whether
+// herdr is up".
+func TestThePaneRunFailureCarriesHerdrsErrorCode(t *testing.T) {
+	calls := 0
+	run := newRunner()
+	run.fake.RunFunc = func(cmd exec.SensitiveCommand) (exec.SensitiveResult, error) {
+		if cmd.Kind == exec.KindHerdrReadiness && isSessionList(cmd) {
+			return stdout(defaultSessions()), nil
+		}
+		switch cmd.Kind {
+		case exec.KindHerdrReadiness:
+			return stdout(goodStatus()), nil
+		case exec.KindHerdrSnapshot:
+			return stdout(listJSON()), nil
+		case exec.KindHerdrCreate:
+			calls++
+			if calls == 1 {
+				return stdout(createJSON(wsA, tabA, paneA)), nil
+			}
+			return exec.SensitiveResult{
+					Stderr: exec.BoundedOutputForTest(errorJSON("permission_denied"), exec.OutputComplete),
+				},
+				exec.SensitiveErrorForTest(exec.KindHerdrCreate, exec.OutcomeExit)
+		}
+		return exec.SensitiveResult{}, nil
+	}
+	a := newTestAdapter(t, run, nil)
+	spec, _ := newSpec(t)
+
+	res := a.Start(context.Background(), spec)
+
+	if _, ok := res.Ref(); !ok {
+		t.Fatal("the workspace was created and the result carries no reference to close it")
+	}
+	if causeClass(res) != backend.FailurePermissionDenied {
+		t.Errorf("class = %v, want FailurePermissionDenied — the failing pane run's "+
+			"stderr never reached classification", causeClass(res))
+	}
+}
+
+// TestParseSessionsFailsClosed covers the roster parser's two guards, whose
+// siblings in parseWorkspaceList are tested. One criterion, both parsers.
+func TestParseSessionsFailsClosed(t *testing.T) {
+	t.Run("truncated", func(t *testing.T) {
+		out := exec.BoundedOutputForTest(defaultSessions(), exec.OutputOverflowed)
+		if _, err := parseSessions(out); err == nil {
+			t.Error("a roster we could not finish reading was accepted")
+		}
+	})
+	t.Run("rows present, none usable", func(t *testing.T) {
+		out := exec.BoundedOutputForTest(sessionsJSON(
+			map[string]any{"name": "", "running": true, "socket_path": testSocket},
+		), exec.OutputComplete)
+		if _, err := parseSessions(out); err == nil {
+			t.Error("a roster whose every row was unusable was reported as empty")
+		}
+	})
+	t.Run("a complete empty roster is a real answer", func(t *testing.T) {
+		rows, err := parseSessions(exec.BoundedOutputForTest(sessionsJSON(), exec.OutputComplete))
+		if err != nil {
+			t.Fatalf("parseSessions: %v", err)
+		}
+		if len(rows) != 0 {
+			t.Errorf("rows = %d, want 0", len(rows))
+		}
+	})
+}
+
 // foreignRef builds a valid reference belonging to a different backend.
 func foreignRef(t *testing.T) backend.Ref {
 	t.Helper()
@@ -1211,5 +1472,3 @@ func foreignRef(t *testing.T) backend.Ref {
 	}
 	return ref
 }
-
-var _ = absentSocket

@@ -12,7 +12,7 @@ import (
 // session is still the incarnation the reference was bound to AND that the
 // workspace is one we created.
 func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResult {
-	workspace, state, cause := a.locate(ctx, ref)
+	workspace, server, state, cause := a.locate(ctx, ref)
 	switch state {
 	case locateMismatch:
 		return backend.NewCloseIdentityMismatch(cause)
@@ -57,7 +57,13 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 		// that the object be gone, and it is. Matched on herdr's structured
 		// CODE rather than its prose, so a reworded message cannot turn a
 		// satisfied rollback into a failed one.
-		if errorCode(res.Stderr) == "workspace_not_found" {
+		// Two ways a failed close is still a satisfied rollback: herdr says the
+		// workspace is gone, or the endpoint itself has vanished — a herdr that
+		// quit mid-rollback. The second half needs the socket locate resolved,
+		// which is why it travels back. cmux has both; this had only the first,
+		// so a server quitting mid-rollback yielded CloseFailed for a workspace
+		// that could not possibly still exist.
+		if errorCode(res.Stderr) == "workspace_not_found" || a.serverGone(server) {
 			return backend.NewCloseAlreadyGone()
 		}
 		return backend.NewCloseFailed(a.classifyRunError(err, res))
@@ -69,7 +75,7 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 // re-resolution, incarnation, and ownership rules Close uses. It runs no
 // mutating command.
 func (a *Adapter) Probe(ctx context.Context, ref backend.Ref) backend.ProbeResult {
-	_, state, cause := a.locate(ctx, ref)
+	_, _, state, cause := a.locate(ctx, ref)
 	switch state {
 	case locateMismatch:
 		return backend.NewProbeIdentityMismatch(cause)
@@ -106,21 +112,25 @@ const (
 )
 
 // locate is the single lookup Close and Probe share, so the two cannot drift.
-func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (string, locateState, backend.StartCause) {
+// The serverInfo comes back so Close can reuse it: a close that FAILS while the
+// endpoint has vanished is a satisfied rollback, and answering that needs the
+// socket locate already resolved. cmux's adapter does the same with a socket it
+// knows at construction; herdr's comes from the roster, so it has to travel.
+func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (string, serverInfo, locateState, backend.StartCause) {
 	if ref.Kind() != backend.KindHerdr {
-		return "", locateUnreadable, backend.NewStartCause(backend.FailureInternal,
+		return "", serverInfo{}, locateUnreadable, backend.NewStartCause(backend.FailureInternal,
 			backend.ErrRefKindMismatch)
 	}
 	// The selection CHAIN must match, not merely the resolved name. A reference
 	// taken against an explicitly named session must not be answered by an
 	// adapter that resolved the default one.
 	if ref.Source() != a.source {
-		return "", locateMismatch, backend.NewStartCause(backend.FailureIdentityMismatch,
+		return "", serverInfo{}, locateMismatch, backend.NewStartCause(backend.FailureIdentityMismatch,
 			errors.New("the reference names a different server selection"))
 	}
 	identity, err := ref.HerdrIdentity()
 	if err != nil {
-		return "", locateUnreadable, backend.NewStartCause(backend.FailureInternal, err)
+		return "", serverInfo{}, locateUnreadable, backend.NewStartCause(backend.FailureInternal, err)
 	}
 	want := identity.Workspace()
 
@@ -131,9 +141,9 @@ func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (string, locateSt
 		// server says nothing about whether the workspace exists, and a socket
 		// missing at the moment we look is a race rather than a verdict.
 		if cause.Class() == backend.FailureUnavailable && a.serverGone(server) {
-			return "", locateAbsent, backend.StartCause{}
+			return "", server, locateAbsent, backend.StartCause{}
 		}
-		return "", locateUnreadable, *cause
+		return "", server, locateUnreadable, *cause
 	}
 
 	// Prove the incarnation BEFORE reading the listing into a verdict. A
@@ -141,7 +151,7 @@ func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (string, locateSt
 	// hold the workspace this reference names, and an id it does not recognise
 	// would otherwise read as an ordinary absence.
 	if !ref.Server().Matches(server.incarnation) {
-		return "", locateMismatch, backend.NewStartCause(backend.FailureIdentityMismatch,
+		return "", server, locateMismatch, backend.NewStartCause(backend.FailureIdentityMismatch,
 			errors.New("the herdr server restarted since this reference was taken"))
 	}
 
@@ -149,14 +159,14 @@ func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (string, locateSt
 	if scause != nil {
 		// Neither a truncated listing nor an unreadable one can prove absence,
 		// and reporting gone would discharge an obligation still outstanding.
-		return "", locateUnreadable, *scause
+		return "", server, locateUnreadable, *scause
 	}
 	row, ok := rows[want]
 	if !ok {
 		// Absent by id on the incarnation the reference was bound to. herdr ids
 		// are server-assigned and not reused within a session, so a workspace
 		// missing from a complete listing is gone rather than renamed.
-		return "", locateAbsent, backend.StartCause{}
+		return "", server, locateAbsent, backend.StartCause{}
 	}
 	// Ownership, and it is the check the Closer contract states as a MUST.
 	//
@@ -167,8 +177,8 @@ func (a *Adapter) locate(ctx context.Context, ref backend.Ref) (string, locateSt
 	// somebody else's workspace, and Close would destroy it and report success.
 	// The cmux adapter shipped without this and it was the review's Critical.
 	if row.marker != ref.OwnershipName() {
-		return "", locateMismatch, backend.NewStartCause(backend.FailureIdentityMismatch,
+		return "", server, locateMismatch, backend.NewStartCause(backend.FailureIdentityMismatch,
 			errors.New("the workspace at this identifier does not carry our ownership marker"))
 	}
-	return row.id, locateFound, backend.StartCause{}
+	return row.id, server, locateFound, backend.StartCause{}
 }
