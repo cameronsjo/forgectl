@@ -341,7 +341,20 @@ func SetCmuxQuiet() EnvMutation {
 	return EnvMutation{key: envKeyCmuxQuiet, value: Secret("1"), op: envOpReplace}
 }
 
-// ReplaceHerdrConfigPath pins Herdr to an exact config source.
+// ReplaceHerdrConfigPath replaces HERDR_CONFIG_PATH.
+//
+// It does NOT pin herdr to a server, despite what its name and the #181 plan
+// both suggest, and an adapter reaching for it as the sanctioned way to pin
+// herdr will pin nothing while appearing to. Measured on herdr 0.8.0: a
+// HERDR_CONFIG_PATH naming a nonexistent file, and one naming a different
+// socket, both resolved to the same endpoint as no config at all. What selects
+// a herdr server is the `--session` flag; `herdr session list` maps each
+// session name to its own socket.
+//
+// Kept rather than deleted because it is a permitted mutation of a real
+// variable and the seam's own tests use it as a fixture. Whether it should
+// survive at all is forgectl#364 — this comment exists so the next reader does
+// not have to rediscover what it cannot do.
 func ReplaceHerdrConfigPath(path string) EnvMutation {
 	return EnvMutation{key: envKeyHerdrConfig, value: Secret(path), op: envOpReplace}
 }

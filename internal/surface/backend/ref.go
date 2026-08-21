@@ -62,29 +62,29 @@ const (
 	sourceTmuxCurrent
 	sourceCmuxDefault
 	sourceCmuxEnv
-	sourceHerdrDefaultConfig
-	sourceHerdrEnvConfig
+	sourceHerdrDefaultSession
+	sourceHerdrNamedSession
 	sourceCount
 )
 
 var sourceNames = [sourceCount]string{
-	sourceInvalid:            "invalid",
-	sourceTmuxDefault:        "tmux-default",
-	sourceTmuxCurrent:        "tmux-current",
-	sourceCmuxDefault:        "cmux-default",
-	sourceCmuxEnv:            "cmux-env",
-	sourceHerdrDefaultConfig: "herdr-default-config",
-	sourceHerdrEnvConfig:     "herdr-env-config",
+	sourceInvalid:             "invalid",
+	sourceTmuxDefault:         "tmux-default",
+	sourceTmuxCurrent:         "tmux-current",
+	sourceCmuxDefault:         "cmux-default",
+	sourceCmuxEnv:             "cmux-env",
+	sourceHerdrDefaultSession: "herdr-default-session",
+	sourceHerdrNamedSession:   "herdr-named-session",
 }
 
 var sourceKinds = [sourceCount]Kind{
-	sourceInvalid:            KindUnspecified,
-	sourceTmuxDefault:        KindTmux,
-	sourceTmuxCurrent:        KindTmux,
-	sourceCmuxDefault:        KindCmux,
-	sourceCmuxEnv:            KindCmux,
-	sourceHerdrDefaultConfig: KindHerdr,
-	sourceHerdrEnvConfig:     KindHerdr,
+	sourceInvalid:             KindUnspecified,
+	sourceTmuxDefault:         KindTmux,
+	sourceTmuxCurrent:         KindTmux,
+	sourceCmuxDefault:         KindCmux,
+	sourceCmuxEnv:             KindCmux,
+	sourceHerdrDefaultSession: KindHerdr,
+	sourceHerdrNamedSession:   KindHerdr,
 }
 
 // ServerSource names *how* an endpoint was selected, never the endpoint
@@ -109,13 +109,25 @@ func CmuxDefaultServer() ServerSource { return ServerSource{code: sourceCmuxDefa
 // CmuxEnvServer selects the socket named by CMUX_SOCKET_PATH.
 func CmuxEnvServer() ServerSource { return ServerSource{code: sourceCmuxEnv} }
 
-// HerdrDefaultConfigServer selects herdr's default config source.
-func HerdrDefaultConfigServer() ServerSource {
-	return ServerSource{code: sourceHerdrDefaultConfig}
+// HerdrDefaultSessionServer selects herdr's default session — the one a bare
+// `herdr` command talks to.
+func HerdrDefaultSessionServer() ServerSource {
+	return ServerSource{code: sourceHerdrDefaultSession}
 }
 
-// HerdrEnvConfigServer selects the config named by HERDR_CONFIG_PATH.
-func HerdrEnvConfigServer() ServerSource { return ServerSource{code: sourceHerdrEnvConfig} }
+// HerdrNamedSessionServer selects a session chosen by name rather than the
+// default one.
+//
+// Named for the SESSION and not for a config path, because the config path does
+// not select a herdr server. Measured on 0.8.0: a HERDR_CONFIG_PATH pointing at
+// a nonexistent file, and one naming a different socket, both resolved to the
+// same endpoint as no config at all. What selects a server is `--session`, and
+// `herdr session list` maps each name to its own socket. The earlier spellings
+// (herdr-default-config / herdr-env-config) encoded a model herdr does not
+// have; they are renamed here rather than after the adapter ships, because
+// these strings are serialized into every reference and no herdr reference
+// exists yet. See forgectl#364.
+func HerdrNamedSessionServer() ServerSource { return ServerSource{code: sourceHerdrNamedSession} }
 
 // Valid reports whether s names a real selection chain.
 func (s ServerSource) Valid() bool { return s.code > sourceInvalid && s.code < sourceCount }

@@ -70,7 +70,7 @@ func herdrRef(t *testing.T) backend.Ref {
 	if err != nil {
 		t.Fatalf("NewHerdrIdentity: %v", err)
 	}
-	ref, err := backend.NewHerdrRef(backend.HerdrDefaultConfigServer(), serverID(t), recoveryTag(t), id)
+	ref, err := backend.NewHerdrRef(backend.HerdrDefaultSessionServer(), serverID(t), recoveryTag(t), id)
 	if err != nil {
 		t.Fatalf("NewHerdrRef: %v", err)
 	}
@@ -268,8 +268,8 @@ func TestServerSource_KindIsClosed(t *testing.T) {
 		{backend.TmuxCurrentServer(), backend.KindTmux, "tmux-current"},
 		{backend.CmuxDefaultServer(), backend.KindCmux, "cmux-default"},
 		{backend.CmuxEnvServer(), backend.KindCmux, "cmux-env"},
-		{backend.HerdrDefaultConfigServer(), backend.KindHerdr, "herdr-default-config"},
-		{backend.HerdrEnvConfigServer(), backend.KindHerdr, "herdr-env-config"},
+		{backend.HerdrDefaultSessionServer(), backend.KindHerdr, "herdr-default-session"},
+		{backend.HerdrNamedSessionServer(), backend.KindHerdr, "herdr-named-session"},
 	}
 
 	for _, tc := range tests {
@@ -389,14 +389,14 @@ func TestDecodeRef_FailsClosed(t *testing.T) {
 		"tmux with a workspace": `{"version":1,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","workspace":"` + uuidA + `"}`,
 		"cmux with a session":   `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","workspace":"` + uuidA + `"}`,
 		"cmux with a pane":      `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"` + uuidA + `","pane":"p1"}`,
-		"herdr with a session":  `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","workspace":"ws-1"}`,
+		"herdr with a session":  `{"version":1,"kind":"herdr","source":"herdr-default-session","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","workspace":"ws-1"}`,
 
 		// Backend-specific grammar.
 		"cmux workspace is not a uuid":   `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"ws-1"}`,
 		"cmux uuid with a non-hex digit": `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"z9d03be6-9444-4a2b-9c24-aba8c1126a0a"}`,
-		"herdr workspace has a colon":    `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","workspace":"ws-1:pane-2"}`,
-		"herdr workspace is empty":       `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","workspace":""}`,
-		"herdr workspace oversized":      `{"version":1,"kind":"herdr","source":"herdr-default-config","server":"` + digest + `","tag":"` + tag + `","workspace":"` + strings.Repeat("w", 129) + `"}`,
+		"herdr workspace has a colon":    `{"version":1,"kind":"herdr","source":"herdr-default-session","server":"` + digest + `","tag":"` + tag + `","workspace":"ws-1:pane-2"}`,
+		"herdr workspace is empty":       `{"version":1,"kind":"herdr","source":"herdr-default-session","server":"` + digest + `","tag":"` + tag + `","workspace":""}`,
+		"herdr workspace oversized":      `{"version":1,"kind":"herdr","source":"herdr-default-session","server":"` + digest + `","tag":"` + tag + `","workspace":"` + strings.Repeat("w", 129) + `"}`,
 	}
 
 	for name, in := range tests {

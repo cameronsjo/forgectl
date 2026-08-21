@@ -10,6 +10,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/cmuxadapter"
+	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/tmuxadapter"
 )
 
@@ -25,14 +26,20 @@ var (
 	errUnknownBackend = errors.New("forgectl: unknown surface backend")
 
 	// errBackendNotImplemented reports a backend this build names but cannot
-	// yet drive.
+	// drive.
 	//
-	// It is a distinct error rather than a variant of "unknown", because the
-	// two need different responses: an unknown name is a typo the operator can
-	// fix, and this one is a build that does not have the adapter yet. The
-	// plumbing — protocol, trampoline, service, rollback — is complete and
-	// tested; what is missing is the code that talks to a specific manager,
-	// which is forgectl#332.
+	// It is a distinct error rather than a variant of "unknown", because the two
+	// need different responses: an unknown name is a typo the operator can fix,
+	// and this one is a build without the adapter.
+	//
+	// As of #332 it is a CONSTRUCTION guard, not a reachable state. All three
+	// named backends are driven, and parseBackendKind returns an error rather
+	// than KindUnspecified, so nothing can reach the arm that produces it —
+	// which is why its mutation survives and no test asserts it fires. It is
+	// kept because the case it guards is real and recurring: adding a fourth
+	// Kind and teaching parseBackendKind about it, while forgetting the switch
+	// in surfaceAdapterFor, lands exactly here. The alternative is a fallthrough
+	// returning a nil adapter and a nil error.
 	errBackendNotImplemented = errors.New("forgectl: this build has no adapter for that surface backend yet")
 
 	// errBackendUnavailable reports a backend this build CAN drive but whose
@@ -45,11 +52,11 @@ var (
 
 // surfaceAdapterFor maps a backend name onto its adapter.
 //
-// tmux and cmux are driven; herdr still refuses. The refusal is deliberate
-// rather than a stub left behind: the surface command, its target resolution,
-// its launch state machine, and its rollback all exist and are exercised, and
-// shipping them behind a truthful refusal is better than shipping a command that
-// silently does nothing or one that lies about which manager it drove.
+// All three backends are driven. errBackendNotImplemented survives for the
+// unspecified arm alone — it is the honest answer for a Kind that named no
+// backend, and keeping it distinct from errUnknownBackend preserves the
+// three-way distinction an operator needs: a typo, a missing feature, and an
+// uninstalled program send them to three different next moves.
 //
 // Every arm resolves its server from the environment at construction, so an
 // adapter is built per invocation rather than cached: the endpoint a launch
@@ -64,7 +71,9 @@ func surfaceAdapterFor(name string) (backend.Adapter, error) {
 		return newTmuxAdapter()
 	case backend.KindCmux:
 		return newCmuxAdapter()
-	case backend.KindHerdr, backend.KindUnspecified:
+	case backend.KindHerdr:
+		return newHerdrAdapter()
+	case backend.KindUnspecified:
 	}
 	return nil, fmt.Errorf("%w: %s (forgectl#332)", errBackendNotImplemented, kind)
 }
@@ -94,6 +103,30 @@ func newTmuxAdapter() (backend.Adapter, error) {
 		// Classified as unavailable, not not-implemented: tmux is driven, and
 		// an operator whose socket cannot be resolved needs to fix their
 		// environment rather than wait for a release.
+		return nil, fmt.Errorf("%w: %w", errBackendUnavailable, err)
+	}
+	return a, nil
+}
+
+// newHerdrAdapter resolves herdr on PATH and builds the adapter.
+//
+// The lookup happens here for the same reason the other two do: the sensitive
+// runner requires an ABSOLUTE path, refusing to let exec.LookPath choose the
+// binary against the live process PATH.
+func newHerdrAdapter() (backend.Adapter, error) {
+	path, err := osexec.LookPath("herdr")
+	if err != nil {
+		return nil, fmt.Errorf("%w: herdr not found on PATH: %w", errBackendUnavailable, err)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: resolve herdr path: %w", errBackendUnavailable, err)
+	}
+	// Assigned and returned explicitly rather than forwarded, for the reason
+	// spelled out in newTmuxAdapter: a bare return converts a nil *Adapter into
+	// a NON-nil backend.Adapter holding a nil pointer.
+	a, err := herdradapter.New(exec.NewOSSensitiveRunner(), abs, os.Getenv)
+	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errBackendUnavailable, err)
 	}
 	return a, nil

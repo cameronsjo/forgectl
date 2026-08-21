@@ -54,8 +54,9 @@ func TestParseBackendKind_RefusalNeverEchoesTheName(t *testing.T) {
 	}
 }
 
-// TestSurfaceAdapterFor_DrivesTmuxAndRefusesTheRest pins the honest state of
-// this build: tmux is driven, cmux and herdr are still forgectl#332.
+// TestSurfaceAdapterFor_DrivesEveryNamedBackend pins the honest state of this
+// build: all three backends are driven, and an unrecognised name is still
+// reported as one.
 //
 // The three-way distinction is the assertion. "Unknown name", "no adapter yet",
 // and "the program is not installed" send an operator to three different next
@@ -66,23 +67,7 @@ func TestParseBackendKind_RefusalNeverEchoesTheName(t *testing.T) {
 // os.MkdirAll and creates /tmp/tmux-<uid> (0700) if it is not already there.
 // Harmless — it is the directory tmux itself would use — but it is a write, and
 // a test that writes outside its TempDir should say so.
-func TestSurfaceAdapterFor_DrivesTmuxAndRefusesTheRest(t *testing.T) {
-	for _, name := range []string{"herdr"} {
-		t.Run(name, func(t *testing.T) {
-			adapter, err := surfaceAdapterFor(name)
-			if adapter != nil {
-				t.Fatal("an adapter was returned; update this test alongside forgectl#332")
-			}
-			if !errors.Is(err, errBackendNotImplemented) {
-				t.Errorf("surfaceAdapterFor(%q) = %v, want errBackendNotImplemented", name, err)
-			}
-			if errors.Is(err, errUnknownBackend) {
-				t.Error("a recognised backend was reported as unknown; an operator would " +
-					"go looking for a typo that is not there")
-			}
-		})
-	}
-
+func TestSurfaceAdapterFor_DrivesEveryNamedBackend(t *testing.T) {
 	// Every DRIVEN backend gets the same criterion rather than one apiece: a
 	// per-backend assertion only ever catches per-backend faults, and the arms
 	// it does not compare are exactly where the next adapter's wiring drifts.
@@ -90,8 +75,9 @@ func TestSurfaceAdapterFor_DrivesTmuxAndRefusesTheRest(t *testing.T) {
 	// a distinct "not available" refusal where it is not — never to "not
 	// implemented", which would now be a lie, and never to "unknown".
 	driven := map[string]backend.Kind{
-		"tmux": backend.KindTmux,
-		"cmux": backend.KindCmux,
+		"tmux":  backend.KindTmux,
+		"cmux":  backend.KindCmux,
+		"herdr": backend.KindHerdr,
 	}
 	for name, want := range driven {
 		t.Run(name, func(t *testing.T) {

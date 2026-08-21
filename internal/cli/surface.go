@@ -92,7 +92,7 @@ A path may be anywhere, because naming it is the choice being made explicitly.`,
 	// shipped while this still said "(tmux)" — so it is written next to the
 	// switch it describes in surfaceAdapterFor, and both change together.
 	cmd.Flags().StringVar(&backendName, "surface", "",
-		"terminal manager to create the surface in (tmux, cmux) — required, no default")
+		"terminal manager to create the surface in (tmux, cmux, herdr) — required, no default")
 	cmd.Flags().StringVar(&displayName, "name", "",
 		"display name for the surface (defaults to the target's directory name)")
 	cmd.Flags().BoolVar(&allowPATH, "allow-path-binary", false,
