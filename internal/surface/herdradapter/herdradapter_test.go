@@ -459,8 +459,20 @@ func TestTheBootstrapIsRunInTheCreatedPane(t *testing.T) {
 	if !last.Equal(spec.Bootstrap().SensitiveArg()) {
 		t.Error("the bootstrap is not the final operand of `pane run`")
 	}
-	if !runCmd.Args[len(runCmd.Args)-2].Equal(exec.EndOfOptions()) {
-		t.Error("no end-of-options separator precedes the bootstrap")
+	// And NO end-of-options separator, which this test originally asserted the
+	// presence of — codifying the bug rather than catching it.
+	//
+	// `pane run` forwards its COMMAND operand to the terminal instead of
+	// parsing it, so a `--` is not consumed as a separator: it gets TYPED. A
+	// live launch answered `zsh: command not found: --` while the real
+	// bootstrap never ran, and the handshake then timed out on a workspace that
+	// had been created — the worst shape, because it is a real surface with no
+	// harness in it.
+	for _, arg := range runCmd.Args {
+		if arg.Equal(exec.EndOfOptions()) {
+			t.Error("`pane run` carries an end-of-options separator; herdr does not " +
+				"consume one here, so it is typed into the pane and the bootstrap never runs")
+		}
 	}
 	targeted := false
 	for _, arg := range runCmd.Args {
@@ -677,8 +689,24 @@ func TestCloseAcceptsOnlyTheExactMarker(t *testing.T) {
 		if got := a.Close(context.Background(), ref); !got.State().SatisfiesRollback() {
 			t.Fatalf("Close = %v, want a satisfied rollback", got)
 		}
-		if _, cleaned := commandOfKind(run.calls(), exec.KindHerdrCleanup); !cleaned {
-			t.Error("no close was issued for a workspace that is ours")
+		cleanup, cleaned := commandOfKind(run.calls(), exec.KindHerdrCleanup)
+		if !cleaned {
+			t.Fatal("no close was issued for a workspace that is ours")
+		}
+		// The operand is the workspace id and nothing else stands between the
+		// verb and it. An end-of-options separator here makes herdr answer
+		// `usage: herdr workspace close <workspace_id>` and close NOTHING — a
+		// live rollback failed for exactly that reason, reporting "cleanup
+		// failed" on a workspace that was still open.
+		last := cleanup.Args[len(cleanup.Args)-1]
+		if !last.Equal(exec.Opaque(wsA)) {
+			t.Error("the close operand is not the reference's workspace id")
+		}
+		for _, arg := range cleanup.Args {
+			if arg.Equal(exec.EndOfOptions()) {
+				t.Error("`workspace close` carries an end-of-options separator; herdr " +
+					"rejects the command as a usage error and closes nothing")
+			}
 		}
 	})
 }

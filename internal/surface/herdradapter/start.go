@@ -111,10 +111,22 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 		exec.MustFixed("run"),
 		exec.Opaque(created.PaneID),
 		// The bootstrap is the last operand and it is what makes this workspace
-		// the SURFACE rather than an idle shell. Separator first: exec.Opaque
-		// refuses a leading dash without one, and whether the backend honours
-		// `--` at this verb is OUR assertion, not the seam's.
-		exec.EndOfOptions(),
+		// the SURFACE rather than an idle shell.
+		//
+		// NO end-of-options separator, and that is measured rather than
+		// preferred. `pane run` forwards its COMMAND operand to the terminal
+		// instead of parsing it, so a `--` does not separate anything — it gets
+		// TYPED, and the pane answers `zsh: command not found: --` while the
+		// real bootstrap never runs. The seam says plainly that whether a
+		// backend honours `--` at a specific verb is the caller's assertion;
+		// the tmux adapter probed it before relying on it and this one did not,
+		// until a live launch showed the separator sitting in the pane.
+		//
+		// Safe without it because exec.Opaque still refuses a leading dash, and
+		// the bootstrap is a shell-quoted absolute path — it begins with a quote
+		// or a slash. A bootstrap that somehow began with a dash would be
+		// refused before start rather than mis-parsed, which is the right
+		// direction.
 		spec.Bootstrap().SensitiveArg(),
 	)); runErr != nil {
 		return backend.NewRefKnownWithCause(ref, a.classifyRunError(runErr, exec.SensitiveResult{}))

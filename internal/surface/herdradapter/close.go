@@ -42,7 +42,14 @@ func (a *Adapter) Close(ctx context.Context, ref backend.Ref) backend.CloseResul
 		// workspace with a colon, so a colon-bearing id here would widen what
 		// this command reaches — which is why NewHerdrIdentity refuses one in
 		// the workspace field.
-		exec.EndOfOptions(),
+		//
+		// NO end-of-options separator: `herdr workspace close -- <id>` answers
+		// `usage: herdr workspace close <workspace_id>` and closes nothing.
+		// Measured, after a live rollback failed for exactly this reason. What
+		// the separator was standing in for is still enforced — exec.Opaque
+		// refuses a dash-leading operand — so an id herdr could misread as a
+		// flag is refused before start instead of being passed with a separator
+		// herdr ignores. validHerdrID deliberately leaves that rule to the seam.
 		exec.Opaque(workspace),
 	))
 	if err != nil {
