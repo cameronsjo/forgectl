@@ -18,6 +18,12 @@
 // asserted the same way tmux's socket pin is, rather than by comparing an
 // environment the fake would have to model.
 //
+// A nonexistent --cwd does not fail a herdr create either: it exits ZERO and
+// silently roots the workspace at $HOME. Like cmux's version of the same
+// behaviour, this cannot arise through the surface command — the target is
+// symlink-resolved, stat'ed, and IsDir-checked upstream before it becomes a
+// StartSpec — so it is recorded as a property of herdr rather than a gap here.
+//
 // Three more properties shape this package, all measured against a live 0.8.0
 // server.
 //

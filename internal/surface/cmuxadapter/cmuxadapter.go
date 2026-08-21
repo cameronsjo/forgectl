@@ -29,8 +29,12 @@
 //
 // Two more measured facts shape the error handling. cmux exits ZERO and creates
 // the workspace anyway when --cwd names a directory that does not exist, so a
-// clean exit is not evidence the surface is where it was asked to be — nothing
-// here handles that, and where the missing check belongs is forgectl#362. And the
+// clean exit from cmux is not by itself evidence the surface is where it was
+// asked to be. Nothing here needs to handle that: internal/projects.canonicalDir
+// resolves symlinks, stats, and IsDir-checks the target before it ever becomes a
+// StartSpec, so the case cannot arise through the surface command. The fact is
+// recorded because it is a property of cmux worth knowing if that upstream
+// guarantee is ever loosened — not because there is a gap here. And the
 // legacy verbs (new-workspace, list-workspaces, …) print a deprecation notice on
 // STDOUT ahead of the payload; this package uses the canonical `workspace`
 // subcommands and sets CMUX_QUIET anyway, because a parser that reads prose as
