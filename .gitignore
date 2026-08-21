@@ -28,3 +28,4 @@ helper/forgectl-bless-helper/.build/
 
 # local probe builds
 /fgc
+.claude/skill-red/
