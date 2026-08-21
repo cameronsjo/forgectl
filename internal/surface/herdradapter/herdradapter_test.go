@@ -287,8 +287,28 @@ func TestTheSessionRosterIsReadWithoutThePin(t *testing.T) {
 	}
 	a.Probe(context.Background(), ref)
 
+	// The roster read must come FIRST, not merely be unpinned.
+	//
+	// Asserting only WHICH commands carry the pin left the ordering unpinned:
+	// moving the pinned status call above the roster read passed both tests that
+	// claim this property. The full suite did go red — but on an unrelated
+	// socket-OWNERSHIP test, via its incidental assertion about the call count.
+	// Coverage borrowed from a test about something else evaporates the moment
+	// that test's shape changes.
+	//
+	// readiness's first RunSensitive is the roster read on every path, so this
+	// holds today and fails for the stated reason if the order ever moves.
+	calls := run.calls()
+	if len(calls) == 0 {
+		t.Fatal("readiness issued no commands at all")
+	}
+	if !isSessionList(calls[0]) {
+		t.Error("the first command was not the session roster read; a pinned command " +
+			"issued before the session is known to be running is what STARTS a server")
+	}
+
 	sawRoster := false
-	for _, cmd := range run.calls() {
+	for _, cmd := range calls {
 		pinned := len(cmd.Args) >= 2 &&
 			cmd.Args[0].Equal(exec.MustFixed("--session")) &&
 			cmd.Args[1].Equal(exec.Opaque(defaultSession))
