@@ -472,6 +472,31 @@ func TestRef_IdentityAccessorsAreKindChecked(t *testing.T) {
 // TestNewHerdrIdentity_AllowsAPartialRef covers the shape the plan is explicit
 // about: herdr can create a workspace and then fail the pane step, and that
 // reference has to be representable or the workspace cannot be cleaned up.
+// TestNewHerdrIdentity_RefusesADashLeadingID keeps a create from minting a
+// reference that nothing can ever close.
+//
+// The grammar used to allow a leading dash and leave the rule to exec.Opaque,
+// which refuses a dash-leading operand at the command. That reasoning avoided
+// two spellings of one rule and missed WHERE the refusal lands: at CLOSE, after
+// Start has already handed back a reference. Every subsequent Close then failed
+// with an internal class, forever — a handle nothing can act on, for a workspace
+// that really exists. Refusing here routes the create through reconciliation
+// instead, which can answer something a caller can use.
+func TestNewHerdrIdentity_RefusesADashLeadingID(t *testing.T) {
+	for _, ws := range []string{"-oProxyCommand", "--kill-all", "-"} {
+		t.Run(ws, func(t *testing.T) {
+			if _, err := backend.NewHerdrIdentity(ws, "", ""); !errors.Is(err, backend.ErrInvalidIdentity) {
+				t.Errorf("NewHerdrIdentity(%q) = %v, want ErrInvalidIdentity", ws, err)
+			}
+		})
+	}
+	// A dash INSIDE an id is ordinary and stays allowed — only a leading one is
+	// ambiguous to an argument parser.
+	if _, err := backend.NewHerdrIdentity("w2R-alt", "", ""); err != nil {
+		t.Errorf("NewHerdrIdentity(w2R-alt) = %v, want acceptance", err)
+	}
+}
+
 // TestNewHerdrIdentity_RefusesAChildOfAnotherWorkspace is the constraint that
 // protects the bootstrap's DELIVERY ADDRESS.
 //

@@ -322,7 +322,14 @@ func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCaus
 	return serverInfo{socket: row.SocketPath, version: version, incarnation: id}, nil
 }
 
-// checkSocketOwner refuses an endpoint this uid does not privately own.
+// checkSocketOwner refuses an endpoint this uid does not own.
+//
+// Deliberately not "privately own", which is what this said and what it does not
+// check: the test is the socket type and the owning uid, never the permission
+// bits or the parent directory, so a world-writable socket owned by us is
+// accepted. That posture matches the cmux adapter and is a defensible reading of
+// the threat model — the declared adversary is a passive same-uid observer, and
+// mode bits do not exclude one — but the word claimed a check that is not here.
 //
 // Lstat rather than Stat: following a symlink would authenticate the target's
 // ownership while talking through a link somebody else controls. An owner that
@@ -604,13 +611,28 @@ func parseCreated(out exec.BoundedOutput) (createdWorkspace, error) {
 	return out2, nil
 }
 
-// parseWorkspaceList reads a listing, failing closed on anything unreadable.
+// parseWorkspaceList reads a listing, failing closed on anything unreadable —
+// including a SINGLE unusable row, which is where this parser diverges from its
+// siblings and the divergence is deliberate.
 //
-// A reply we could not read is not an empty reply — the contract internal/tmux
-// states for its own parser and both earlier adapters had to be taught. The
-// completeness flag is checked as well as the JSON parse because a document that
-// happened to be valid at its truncation point would otherwise present as a
-// SHORTER listing, which is exactly a false absence.
+// A reply we could not read is not an empty reply; the completeness flag is
+// checked as well as the JSON parse, because a document that happened to be
+// valid at its truncation point would otherwise present as a SHORTER listing,
+// which is exactly a false absence.
+//
+// internal/tmux and the cmux adapter DROP an unusable row and refuse only when
+// every row is unusable, and they are right to: a tmux session name is chosen by
+// the operator, so erroring on one malformed row would let anyone who can name a
+// session break every lookup on the server. That reasoning does not transfer.
+// herdr workspace ids are SERVER-assigned and short; nothing an operator types
+// reaches this field, so an unusable row is the server saying something this
+// adapter does not understand rather than a hostile name.
+//
+// The cost of getting it wrong is asymmetric. A dropped row for OUR workspace
+// reads as absence at both consumers: locate answers gone, so Close discharges a
+// rollback for a live surface, and reconcile matches nothing, so a create that
+// landed reports NotMutated and the workspace stays open with no reference to
+// it. Refusing the whole listing instead costs a launch that fails loudly.
 func parseWorkspaceList(out exec.BoundedOutput) (map[string]workspaceRow, error) {
 	raw, complete := out.CopyBytesForParse()
 	if !complete {
@@ -623,12 +645,9 @@ func parseWorkspaceList(out exec.BoundedOutput) (map[string]workspaceRow, error)
 	rows := make(map[string]workspaceRow, len(reply.Result.Workspaces))
 	for _, w := range reply.Result.Workspaces {
 		if _, err := backend.NewHerdrIdentity(w.WorkspaceID, "", ""); err != nil {
-			continue
+			return nil, errors.New("a row of the herdr workspace listing was not usable")
 		}
 		rows[w.WorkspaceID] = workspaceRow{id: w.WorkspaceID, marker: w.Label}
-	}
-	if len(reply.Result.Workspaces) > 0 && len(rows) == 0 {
-		return nil, errors.New("no row of the herdr workspace listing was usable")
 	}
 	return rows, nil
 }

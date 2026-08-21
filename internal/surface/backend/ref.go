@@ -251,12 +251,30 @@ type IncarnationInput struct {
 	// empty when it supplies none.
 	//
 	// It exists because the filesystem evidence above is only volatile when
-	// Endpoint is a socket. For herdr, Endpoint is a *config path*: its inode,
-	// device, and change time are all stable across a daemon restart, and
-	// herdr reports no pid, so a herdr fingerprint computed from the fields
-	// above alone would match across the exact restart it exists to detect.
-	// A herdr adapter must populate this (forgectl#344); until it does, the
-	// incarnation guarantee stated on ServerID holds for tmux and cmux only.
+	// Endpoint is a socket.
+	//
+	// This paragraph used to say that herdr's Endpoint is a CONFIG PATH whose
+	// inode is stable across a restart, and therefore that the incarnation
+	// guarantee held for tmux and cmux only. Both halves are now false, and the
+	// direction of the error is the unusual one: it UNDERSTATED a control that
+	// is present, so an auditor reading this would conclude herdr launches have
+	// no restart detection and stop looking.
+	//
+	// The herdr adapter passes the SOCKET path reported by `herdr session list`,
+	// whose inode turns over exactly as cmux's does. The config path never
+	// selected a herdr server at all (forgectl#364), which is why the sibling
+	// ServerSource constants were renamed from -config to -session.
+	//
+	// So all three backends get filesystem-volatile evidence, and what
+	// forgectl#344 actually tracks is narrower than this once claimed: cmux and
+	// herdr report no pid and no start time, so the socket's inode is their ONLY
+	// witness where tmux has three. ChangedAtUnixNano is a second witness both
+	// could carry — sockstat reads Device and Inode and simply does not populate
+	// it — and remains the cheapest available strengthening.
+	//
+	// Nothing populates ServerReported today. It stays because a daemon-supplied
+	// token is strictly better than inferring an incarnation from a directory
+	// entry, and any of the three would take it if one appeared.
 	ServerReported string
 }
 
@@ -810,14 +828,29 @@ func qualifiedBy(workspace, child string) bool {
 // what it is really for is keeping a control character or an unbounded blob
 // out of a value that later becomes a command-line argument.
 //
-// It deliberately does not refuse a leading "-". That an ID like "--kill-all"
-// cannot be parsed as a flag is enforced one layer down, by exec.Opaque, which
-// refuses a dynamic operand starting with a dash unless an EndOfOptions
-// separator precedes it. Duplicating the rule here would put two spellings of
-// it in the codebase; the dependency is named so a Phase 5 adapter author
-// knows the separator is load-bearing rather than decorative.
+// It DOES refuse a leading "-", and the reason it did not used to is worth
+// keeping because the reasoning was sound and the conclusion was wrong.
+//
+// The rule that an id like "--kill-all" cannot be parsed as a flag is enforced
+// one layer down by exec.Opaque, which refuses a dash-leading dynamic operand
+// unless an EndOfOptions separator precedes it — so duplicating it here looked
+// like putting two spellings of one rule in the codebase.
+//
+// What that missed is WHERE the refusal lands. exec.Opaque refuses at the
+// command, which for a workspace id means at CLOSE — after Start has already
+// minted a reference. Every subsequent Close then fails with an internal class,
+// forever: a handle nothing can ever act on, for a workspace that really exists.
+// Refusing here instead routes the create through reconciliation, which lists by
+// ownership marker and can answer RefKnownWithCause or OutcomeUnknown — outcomes
+// a caller can act on.
+//
+// The seam's refusal is still the backstop and still load-bearing; this is the
+// earlier, more useful place to say no.
 func validHerdrID(s string) bool {
 	if s == "" || len(s) > maxHerdrIDLen {
+		return false
+	}
+	if strings.HasPrefix(s, "-") {
 		return false
 	}
 	for i := 0; i < len(s); i++ {

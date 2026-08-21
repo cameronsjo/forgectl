@@ -674,6 +674,55 @@ func TestAnUnreadableListingIsNeverAnEmptyOne(t *testing.T) {
 	})
 }
 
+// TestOneUnusableRowRefusesTheWholeListing is where this parser deliberately
+// diverges from its siblings.
+//
+// internal/tmux and the cmux adapter drop an unusable row and refuse only when
+// EVERY row is unusable, because a tmux session name is chosen by the operator
+// and erroring on one malformed row would let anyone who can name a session
+// break every lookup. herdr ids are SERVER-assigned, so nothing an operator
+// types reaches this field and an unusable row means the server said something
+// this adapter does not understand.
+//
+// The asymmetry is why it matters: a dropped row for OUR workspace reads as
+// absence at both consumers — Close discharges a rollback for a live surface,
+// and reconcile reports NotMutated for a create that landed. Refusing the
+// listing costs a launch that fails loudly instead.
+func TestOneUnusableRowRefusesTheWholeListing(t *testing.T) {
+	t.Run("a good row beside a bad one is refused", func(t *testing.T) {
+		out := exec.BoundedOutputForTest(
+			listJSON([2]string{wsA, "fc-surface-x"}, [2]string{"w2R:p1", "y"}), exec.OutputComplete)
+		if _, err := parseWorkspaceList(out); err == nil {
+			t.Error("a listing carrying an unusable row was accepted, so a row for our " +
+				"own workspace could be dropped and read as absence")
+		}
+	})
+
+	t.Run("close refuses rather than discharging", func(t *testing.T) {
+		a, run, ref := startClean(t)
+		// Our workspace IS present and correctly marked — but a sibling row is
+		// unreadable, so the listing cannot be trusted to be complete.
+		run.reply1(exec.KindHerdrProbe,
+			listJSON([2]string{wsA, ref.OwnershipName()}, [2]string{"w2R:p1", "y"}))
+
+		if got := a.Close(context.Background(), ref); got.State().SatisfiesRollback() {
+			t.Errorf("Close = %v; a listing with an unusable row was acted on", got)
+		}
+	})
+
+	t.Run("an all-good listing is still accepted", func(t *testing.T) {
+		out := exec.BoundedOutputForTest(
+			listJSON([2]string{wsA, "fc-surface-x"}, [2]string{wsB, "fc-surface-y"}), exec.OutputComplete)
+		rows, err := parseWorkspaceList(out)
+		if err != nil {
+			t.Fatalf("parseWorkspaceList: %v", err)
+		}
+		if len(rows) != 2 {
+			t.Errorf("rows = %d, want 2", len(rows))
+		}
+	})
+}
+
 // TestACreateReplyMissingAnIDNeverBecomesAReference pins that a create must
 // report the FULL identity. A create reports all three ids, so a reply missing
 // one is a reply we do not understand rather than a partial success.
