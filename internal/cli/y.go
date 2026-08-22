@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	clippkg "github.com/cameronsjo/forgectl/internal/clip"
 	"github.com/cameronsjo/forgectl/internal/history"
@@ -23,6 +25,15 @@ var yAliases = map[string][]string{
 	"copy":  {"c"},
 	"paste": {"p"},
 	"last":  {"l"},
+}
+
+// yLastOutputIsTerminal is the policy seam for history output. It inspects the
+// writer Cobra will actually use, rather than assuming process stdout, because
+// a parent command or an embedding caller can replace that sink. Tests replace
+// this function so the interactive and redirected paths need no real terminal.
+var yLastOutputIsTerminal = func(out io.Writer) bool {
+	fdWriter, ok := out.(interface{ Fd() uintptr })
+	return ok && term.IsTerminal(int(fdWriter.Fd()))
 }
 
 // yModule declares the y (clipboard) extension (ADR-0005) — the conversion
@@ -103,7 +114,9 @@ func newYPasteCmd(client *clippkg.Client) *cobra.Command {
 // file, which is untrusted, so every command goes through termsafe.SafeLine —
 // one entry always renders as exactly one inert physical line.
 func newYLastCmd() *cobra.Command {
-	return &cobra.Command{
+	var allowSensitiveOutput bool
+
+	cmd := &cobra.Command{
 		Use:   "last [n]",
 		Short: "Print the n most recent shell commands",
 		Long: `last reads $HISTFILE (default ~/.zsh_history), parses zsh's history
@@ -121,9 +134,10 @@ Commands are printed with control characters escaped, so the output is safe to
 read but is not a faithful copy of what was typed.
 
 Shell history routinely contains inline secrets — an exported token, a bearer
-header, a password passed as a flag. last prints them verbatim, so treat its
-output as sensitive: it moves those values from a mode-0600 file on one machine
-into whatever captures your terminal.`,
+header, a password passed as a flag. last prints those values verbatim, so it
+writes to an interactive terminal only. Piping or redirecting stdout requires
+--allow-sensitive-output, which acknowledges the wider audience; it does not
+scan, classify, or redact the output.`,
 		// SilenceUsage/SilenceErrors mirror `env get` (env.go): last's stdout is
 		// a stream of recovered commands, so a refusal must not dump usage text
 		// into it — a caller reading the output would take the help banner for
@@ -132,6 +146,11 @@ into whatever captures your terminal.`,
 		SilenceErrors: true,
 		Args:          cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			if !allowSensitiveOutput && !yLastOutputIsTerminal(out) {
+				return errors.New("shell history output is sensitive; refusing non-terminal stdout without --allow-sensitive-output")
+			}
+
 			count := 1
 			if len(args) == 1 {
 				parsed, err := strconv.Atoi(args[0])
@@ -157,7 +176,6 @@ into whatever captures your terminal.`,
 			// A dropped write would silently shorten the list, and a short
 			// list of commands reads exactly like a short history — so a
 			// write failure is surfaced rather than swallowed.
-			out := cmd.OutOrStdout()
 			for _, entry := range tail {
 				if _, err := fmt.Fprintln(out, termsafe.SafeLine(entry.Command)); err != nil {
 					return fmt.Errorf("write shell history: %w", err)
@@ -166,4 +184,7 @@ into whatever captures your terminal.`,
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&allowSensitiveOutput, "allow-sensitive-output", false,
+		"allow verbatim history on non-terminal stdout (no secret scanning or redaction)")
+	return cmd
 }
