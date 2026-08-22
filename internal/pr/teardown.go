@@ -194,10 +194,6 @@ func (c *Client) discardStale(member breadcrumbMember) error {
 	if !os.SameFile(info, member.info) {
 		return fmt.Errorf("breadcrumb %s changed identity during teardown; refusing to remove it", member.path)
 	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to remove it", member.path)
-	}
-
 	data, err := root.ReadFile(name)
 	if err != nil {
 		return fmt.Errorf("re-read breadcrumb %s: %w", member.path, err)
