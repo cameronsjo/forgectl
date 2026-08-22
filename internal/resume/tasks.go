@@ -258,6 +258,7 @@ func Restore(dir string, tasks []Task) (RestoreResult, error) {
 		}
 		body := t.Raw
 		if len(body) == 0 {
+			// termsafe:allow-raw-json persisted task record, never command output
 			encoded, err := json.MarshalIndent(t, "", "  ")
 			if err != nil {
 				continue

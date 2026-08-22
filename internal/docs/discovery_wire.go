@@ -48,6 +48,7 @@ type schemaProbe struct {
 
 // encodeRecord renders a validated record as the canonical payload.
 func encodeRecord(info ServerInfo) ([]byte, error) {
+	// termsafe:allow-raw-json persisted docs discovery record, never command output
 	payload, err := json.Marshal(struct {
 		SchemaVersion uint   `json:"schema_version"`
 		Generation    string `json:"generation"`

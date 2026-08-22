@@ -223,6 +223,7 @@ func (s *ReviewedStore) persist() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
 	}
+	// termsafe:allow-raw-json persisted review timestamp, never command output
 	data, err := json.Marshal(s.at)
 	if err != nil {
 		return err

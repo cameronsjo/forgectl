@@ -145,18 +145,21 @@ func WriteLocal(projectDir string, enabled map[string]bool, marketplaces map[str
 		marketplaces = map[string]json.RawMessage{}
 	}
 
+	// termsafe:allow-raw-json nested settings value for a persisted file, never command output
 	enabledJSON, err := json.Marshal(enabled)
 	if err != nil {
 		return "", fmt.Errorf("marshal enabledPlugins: %w", err)
 	}
 	raw["enabledPlugins"] = enabledJSON
 
+	// termsafe:allow-raw-json nested settings value for a persisted file, never command output
 	marketplacesJSON, err := json.Marshal(marketplaces)
 	if err != nil {
 		return "", fmt.Errorf("marshal extraKnownMarketplaces: %w", err)
 	}
 	raw["extraKnownMarketplaces"] = marketplacesJSON
 
+	// termsafe:allow-raw-json persisted Claude settings file, never command output
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal %s: %w", path, err)

@@ -128,6 +128,7 @@ func writeBreadcrumb(sessionsDir string, ref Ref, bc Breadcrumb) (string, error)
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
 		return "", fmt.Errorf("create pr sessions dir: %w", err)
 	}
+	// termsafe:allow-raw-json persisted PR breadcrumb, never command output
 	data, err := json.MarshalIndent(bc, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal breadcrumb: %w", err)
