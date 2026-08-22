@@ -397,6 +397,7 @@ func TestSensitiveCommand_ValidateRefusesBeforeStart(t *testing.T) {
 		"zero env mutation":    func(c *SensitiveCommand) { c.Env = []EnvMutation{{}} },
 		"empty replace value":  func(c *SensitiveCommand) { c.Env = []EnvMutation{ReplaceCmuxSocketPath("")} },
 		"duplicate env key":    func(c *SensitiveCommand) { c.Env = []EnvMutation{SetCmuxQuiet(), SetCmuxQuiet()} },
+		"invalid stdout mode":  func(c *SensitiveCommand) { c.StdoutMode = CaptureMode(200) },
 		"zero stdout cap":      func(c *SensitiveCommand) { c.StdoutCap = 0 },
 		"negative stdout cap":  func(c *SensitiveCommand) { c.StdoutCap = -1 },
 		"stdout cap over ceil": func(c *SensitiveCommand) { c.StdoutCap = MaxOutputBytes + 1 },

@@ -42,6 +42,32 @@ const Redacted = "[redacted]"
 // loud failure instead of a quiet widening of the bound.
 const MaxOutputBytes int64 = 64 << 10
 
+// CaptureMode selects how stdout is retained. The zero mode preserves the raw
+// bounded capture every existing caller uses. CaptureCmuxWorkspaceList is a
+// closed, schema-specific projection for cmux's workspace-list envelope: the
+// runner streams past fields the adapter never reads and retains only workspace
+// id and description values under the same output ceiling.
+type CaptureMode uint8
+
+const (
+	CaptureRaw CaptureMode = iota
+	CaptureCmuxWorkspaceList
+	captureModeCount
+)
+
+func (m CaptureMode) valid() bool { return m < captureModeCount }
+
+func (m CaptureMode) String() string {
+	switch m {
+	case CaptureRaw:
+		return "raw"
+	case CaptureCmuxWorkspaceList:
+		return "cmux_workspace_list"
+	default:
+		return "invalid(" + strconv.Itoa(int(m)) + ")"
+	}
+}
+
 // maxFixedArgBytes bounds a fixed backend constant. Constants are short verb
 // and flag spellings; anything approaching this length is a caller mistake
 // that should not reach an argv.
@@ -400,18 +426,20 @@ func (m EnvMutation) valid() bool {
 // field on purpose — a cwd is a dynamic value like any other and travels as an
 // Opaque argument to whichever backend flag takes it.
 type SensitiveCommand struct {
-	Kind      CommandKind
-	Path      SecretArg
-	Args      []Arg
-	Env       []EnvMutation
-	StdoutCap int64
-	StderrCap int64
+	Kind       CommandKind
+	Path       SecretArg
+	Args       []Arg
+	Env        []EnvMutation
+	StdoutMode CaptureMode
+	StdoutCap  int64
+	StderrCap  int64
 }
 
 func (c SensitiveCommand) String() string {
 	return "SensitiveCommand{kind:" + c.Kind.String() +
 		" args:" + strconv.Itoa(len(c.Args)) +
 		" env:" + strconv.Itoa(len(c.Env)) +
+		" stdout_mode:" + c.StdoutMode.String() +
 		" stdout_cap:" + strconv.FormatInt(c.StdoutCap, 10) +
 		" stderr_cap:" + strconv.FormatInt(c.StderrCap, 10) + "}"
 }
@@ -433,6 +461,7 @@ func (c SensitiveCommand) LogValue() slog.Value {
 		slog.String("kind", c.Kind.String()),
 		slog.Int("args", len(c.Args)),
 		slog.Int("env", len(c.Env)),
+		slog.String("stdout_mode", c.StdoutMode.String()),
 		slog.Int64("stdout_cap", c.StdoutCap),
 		slog.Int64("stderr_cap", c.StderrCap),
 	)
@@ -447,7 +476,7 @@ func (c SensitiveCommand) MarshalText() ([]byte, error) { return []byte(c.String
 // Equal compares two commands without revealing any value — the assertion an
 // adapter test makes against a fake's recorded call.
 func (c SensitiveCommand) Equal(other SensitiveCommand) bool {
-	if c.Kind != other.Kind || c.StdoutCap != other.StdoutCap || c.StderrCap != other.StderrCap {
+	if c.Kind != other.Kind || c.StdoutMode != other.StdoutMode || c.StdoutCap != other.StdoutCap || c.StderrCap != other.StderrCap {
 		return false
 	}
 	if !c.Path.Equal(other.Path) || len(c.Args) != len(other.Args) || len(c.Env) != len(other.Env) {
@@ -476,6 +505,9 @@ func (c SensitiveCommand) validate() error {
 	}
 	if !c.Path.present() {
 		return errors.New("command path is empty")
+	}
+	if !c.StdoutMode.valid() {
+		return errors.New("stdout capture mode is not supported")
 	}
 	// An absolute path is required so the binary is chosen by the caller and
 	// not by exec.LookPath, which reads the live process PATH rather than the
