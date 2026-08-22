@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"io"
 	osexec "os/exec"
 	"strings"
 	"testing"
@@ -216,7 +217,7 @@ func TestNewCmuxAdapter_ReturnsATrulyNilAdapterOnEveryFailure(t *testing.T) {
 		empty := t.TempDir()
 		t.Setenv("PATH", empty)
 
-		adapter, err := newCmuxAdapter()
+		adapter, err := newCmuxAdapter(io.Discard)
 		if !errors.Is(err, errBackendUnavailable) {
 			t.Fatalf("newCmuxAdapter() err = %v, want errBackendUnavailable", err)
 		}
@@ -239,7 +240,7 @@ func TestNewCmuxAdapter_ReturnsATrulyNilAdapterOnEveryFailure(t *testing.T) {
 		// filesystem.
 		t.Setenv("CMUX_SOCKET_PATH", "/tmp/"+strings.Repeat("a", 5000)+"/cmux.sock")
 
-		adapter, err := newCmuxAdapter()
+		adapter, err := newCmuxAdapter(io.Discard)
 		if !errors.Is(err, errBackendUnavailable) {
 			t.Fatalf("newCmuxAdapter() err = %v, want errBackendUnavailable", err)
 		}

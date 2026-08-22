@@ -1,6 +1,7 @@
 package cmuxadapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1112,6 +1113,56 @@ func TestAnUnreadableOwnerRefusesEvenWhenTheUIDsWouldHaveMatched(t *testing.T) {
 	}
 	if len(run.calls()) != 0 {
 		t.Error("a command was sent to a socket whose owner could not be established")
+	}
+}
+
+// TestSocketDirectoryWarningIsAdvisory pins Cameron's ruling on #369: cmux
+// chooses its socket location, and forgectl makes a known local disruption
+// risk visible without turning it into a readiness refusal.
+func TestSocketDirectoryWarningIsAdvisory(t *testing.T) {
+	tests := map[string]struct {
+		stat func(string) (os.FileInfo, error)
+		want string
+	}{
+		"group writable": {
+			stat: func(string) (os.FileInfo, error) {
+				return fakeInfo{sys: &syscall.Stat_t{Uid: testUID}, mode: fs.ModeDir | 0o720}, nil
+			},
+			want: "warning: cmux socket directory \"/tmp/cmuxtest\" is group or world writable; " +
+				"forgectl will honor this location, but another local user may disrupt launches\n",
+		},
+		"foreign owned": {
+			stat: func(string) (os.FileInfo, error) {
+				return fakeInfo{sys: &syscall.Stat_t{Uid: testUID + 1}, mode: fs.ModeDir | 0o700}, nil
+			},
+			want: "warning: cmux socket directory \"/tmp/cmuxtest\" is owned by another user; " +
+				"forgectl will honor this location, but another local user may disrupt launches\n",
+		},
+		"private": {
+			stat: func(string) (os.FileInfo, error) {
+				return fakeInfo{sys: &syscall.Stat_t{Uid: testUID}, mode: fs.ModeDir | 0o700}, nil
+			},
+		},
+		"directory cannot be inspected": {
+			stat: func(string) (os.FileInfo, error) { return nil, os.ErrPermission },
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			var warnings bytes.Buffer
+			run := newRunner()
+			a := newTestAdapter(t, run, WithSocketDirStat(tt.stat), WithWarnings(&warnings))
+			spec, _ := newSpec(t)
+
+			res := a.Start(context.Background(), spec)
+
+			if res.Outcome() != backend.RefKnown {
+				t.Errorf("outcome = %v, want RefKnown; warning must not block readiness", res.Outcome())
+			}
+			if got := warnings.String(); got != tt.want {
+				t.Errorf("warning = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

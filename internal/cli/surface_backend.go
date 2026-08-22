@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -62,6 +63,13 @@ var (
 // adapter is built per invocation rather than cached: the endpoint a launch
 // targets is a property of the environment that launch ran in.
 func surfaceAdapterFor(name string) (backend.Adapter, error) {
+	return surfaceAdapterForWithWarnings(name, io.Discard)
+}
+
+// surfaceAdapterForWithWarnings is the production wiring for advisory backend
+// warnings. The plain helper keeps selection tests quiet; a real surface
+// command supplies its stderr so warnings remain visible when slog is off.
+func surfaceAdapterForWithWarnings(name string, warnings io.Writer) (backend.Adapter, error) {
 	kind, err := parseBackendKind(name)
 	if err != nil {
 		return nil, err
@@ -70,9 +78,9 @@ func surfaceAdapterFor(name string) (backend.Adapter, error) {
 	case backend.KindTmux:
 		return newTmuxAdapter()
 	case backend.KindCmux:
-		return newCmuxAdapter()
+		return newCmuxAdapter(warnings)
 	case backend.KindHerdr:
-		return newHerdrAdapter()
+		return newHerdrAdapter(warnings)
 	case backend.KindUnspecified:
 	}
 	return nil, fmt.Errorf("%w: %s (forgectl#332)", errBackendNotImplemented, kind)
@@ -113,7 +121,7 @@ func newTmuxAdapter() (backend.Adapter, error) {
 // The lookup happens here for the same reason the other two do: the sensitive
 // runner requires an ABSOLUTE path, refusing to let exec.LookPath choose the
 // binary against the live process PATH.
-func newHerdrAdapter() (backend.Adapter, error) {
+func newHerdrAdapter(warnings io.Writer) (backend.Adapter, error) {
 	path, err := osexec.LookPath("herdr")
 	if err != nil {
 		return nil, fmt.Errorf("%w: herdr not found on PATH: %w", errBackendUnavailable, err)
@@ -125,7 +133,11 @@ func newHerdrAdapter() (backend.Adapter, error) {
 	// Assigned and returned explicitly rather than forwarded, for the reason
 	// spelled out in newTmuxAdapter: a bare return converts a nil *Adapter into
 	// a NON-nil backend.Adapter holding a nil pointer.
-	a, err := herdradapter.New(exec.NewOSSensitiveRunner(), abs, os.Getenv)
+	if warnings == nil {
+		warnings = io.Discard
+	}
+	a, err := herdradapter.New(exec.NewOSSensitiveRunner(), abs, os.Getenv,
+		herdradapter.WithWarnings(warnings))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errBackendUnavailable, err)
 	}
@@ -138,7 +150,7 @@ func newHerdrAdapter() (backend.Adapter, error) {
 // tmux's does: the sensitive runner requires an ABSOLUTE path, refusing to let
 // exec.LookPath choose the binary against the live process PATH, which is the
 // one decision its captured environment would otherwise not cover.
-func newCmuxAdapter() (backend.Adapter, error) {
+func newCmuxAdapter(warnings io.Writer) (backend.Adapter, error) {
 	path, err := osexec.LookPath("cmux")
 	if err != nil {
 		return nil, fmt.Errorf("%w: cmux not found on PATH: %w", errBackendUnavailable, err)
@@ -150,7 +162,11 @@ func newCmuxAdapter() (backend.Adapter, error) {
 	// Assigned and returned explicitly rather than forwarded, for the reason
 	// spelled out in newTmuxAdapter: a bare return would convert a nil *Adapter
 	// into a NON-nil backend.Adapter holding a nil pointer.
-	a, err := cmuxadapter.New(exec.NewOSSensitiveRunner(), abs, os.Getenv)
+	if warnings == nil {
+		warnings = io.Discard
+	}
+	a, err := cmuxadapter.New(exec.NewOSSensitiveRunner(), abs, os.Getenv,
+		cmuxadapter.WithWarnings(warnings))
 	if err != nil {
 		// Classified as unavailable, not not-implemented: cmux is driven, and an
 		// operator whose endpoint cannot be resolved needs to fix their
