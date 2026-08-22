@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestGuardedValues_MapsEveryStepField(t *testing.T) {
+func TestGuardedValues_MapsEveryGuardedInput(t *testing.T) {
 	s := Step{
 		Uses:    "kitchen-sink",
 		Repo:    "owner/x",
@@ -20,16 +20,17 @@ func TestGuardedValues_MapsEveryStepField(t *testing.T) {
 		Args:    []string{"-C", "dir"},
 	}
 	want := map[string][]string{
-		"Repo":    {"owner/x"},
-		"Ref":     {"main"},
-		"Globs":   {"CLAUDE.md", ".claude/"},
-		"Skill":   {"code-review"},
-		"Posture": {"opus"},
-		"Mode":    {"sync"},
-		"From":    {"${review}"},
-		"To":      {"out.md"},
-		"Cmd":     {"make"},
-		"Args":    {"-C", "dir"},
+		"Repo":      {"owner/x"},
+		"Ref":       {"main"},
+		"Globs":     {"CLAUDE.md", ".claude/"},
+		"Skill":     {"code-review"},
+		"Posture":   {"opus"},
+		"Mode":      {"sync"},
+		"From":      {"${review}"},
+		"To":        {"out.md"},
+		"Cmd":       {"make"},
+		"Args":      {"-C", "dir"},
+		"Workspace": {"${workspace}"},
 	}
 
 	fields := make([]string, 0, len(want))
@@ -55,6 +56,21 @@ func TestGuardedValues_MapsEveryStepField(t *testing.T) {
 				t.Errorf("field %q[%d] = %q, want %q", field, i, gotVals[i], wantVals[i])
 			}
 		}
+	}
+}
+
+func TestBuiltinRegistry_TeardownGuardsImplicitWorkspace(t *testing.T) {
+	def := builtinRegistry()["teardown"]
+	want := []string{"Workspace"}
+	if len(def.GuardedFields) != len(want) || def.GuardedFields[0] != want[0] {
+		t.Fatalf("teardown GuardedFields = %v, want exactly %v", def.GuardedFields, want)
+	}
+	got, err := GuardedValues(Step{Uses: "teardown"}, def.GuardedFields)
+	if err != nil {
+		t.Fatalf("GuardedValues: %v", err)
+	}
+	if values := got["Workspace"]; len(values) != 1 || values[0] != "${workspace}" {
+		t.Errorf("teardown Workspace guarded values = %v, want [${workspace}]", values)
 	}
 }
 

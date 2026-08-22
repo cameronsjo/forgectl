@@ -171,7 +171,7 @@ CLI layer when the section is absent. `ReviewReviewedPath()` beside `PrReviewedP
   `exec.OSRunner{}`, resolves owners (config else default), registers in `root.go`.
 - `review_list.go` — the bare `forgectl review` RunE + `--json` + `--kind` + `--repo`
   filters. Table: `KIND / REPO / # / TITLE / LABELS / STATE`; labels cell is
-  comma-joined and `sanitizeCell`-scrubbed like every other gh-supplied string; dimming
+  comma-joined and passed through `termsafe.SafeLine` like every other gh-supplied string; dimming
   applied per whole line AFTER tabwriter flush (post-flush dim discipline); count summary
   to stderr. `--json` emits `[]` never null, each row carrying `key`, `kind`, `repo`,
   `number`, `title`, `state`, `isDraft`, `labels`, `updatedAt`, `url`, `reviewed`.

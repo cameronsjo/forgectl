@@ -160,7 +160,7 @@ var _ bench.Prober = fakeDoctorProber{}
 // sequence embedded there could forge an extra well-formed check line, or
 // rewrite a real failure's line via a cursor-control escape (the exact
 // pr_prs.go/forgectl#162 defect class, reused here at doctor's own display
-// boundary). Before sanitizeCell was applied, this test's forged detail
+// boundary). Before the terminal boundary was applied, this forged detail
 // would render as two lines, the second indistinguishable from a real
 // passing "gh" check.
 func TestPrintDoctorReport_SanitizesForgedControlBytes(t *testing.T) {
@@ -170,7 +170,9 @@ func TestPrintDoctorReport_SanitizesForgedControlBytes(t *testing.T) {
 	}}
 
 	var out bytes.Buffer
-	printDoctorReport(&out, report)
+	if err := printDoctorReport(&out, report); err != nil {
+		t.Fatal(err)
+	}
 	rendered := out.String()
 
 	if bytes.Count([]byte(rendered), []byte("\n")) != 2 {

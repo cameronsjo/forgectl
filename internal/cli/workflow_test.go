@@ -18,6 +18,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/workflow"
 )
 
@@ -334,6 +335,37 @@ func TestWorkflowTrustList(t *testing.T) {
 	for _, want := range []string{store.AnchorKeyID, store.Keys[0].KeyID, "sjomba"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("trust list output missing %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestWorkflowTrustList_VisiblyEscapesAuthenticatedMetadata(t *testing.T) {
+	store := bless.Store{
+		Schema:      bless.StoreSchema,
+		AnchorKeyID: "sha256:anchor",
+		Keys: []bless.TrustedKey{{
+			KeyID:   "sha256:key",
+			Machine: "sjomba\u009btitle",
+			AddedAt: "2026-07-12\u202eT00:00:00Z",
+		}},
+	}
+	swapTrustStorer(t, fakeTrustStorer{store: store})
+
+	cmd := newWorkflowTrustListCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("trust list: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{`sjomba\u009btitle`, `2026-07-12\u202eT00:00:00Z`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("trust list missing visible escape %q: %q", want, got)
+		}
+	}
+	for _, r := range got {
+		if r != '\n' && termsafe.IsUnsafeTerminalRune(r) {
+			t.Errorf("unsafe rune %U survived trust list: %q", r, got)
 		}
 	}
 }

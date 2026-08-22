@@ -18,6 +18,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/workflow"
 )
 
@@ -147,7 +148,7 @@ func runWorkflowBless(cmd *cobra.Command, deps module.Deps, name string) error {
 		paramNames = append(paramNames, p)
 	}
 	sort.Strings(paramNames)
-	if err := bless.CheckGuardedParamRefs(stepChecks, paramNames); err != nil {
+	if err := bless.CheckGuardedParamRefs(stepChecks, paramNames, workflow.RegistryExportNames(registry)); err != nil {
 		return fmt.Errorf("workflow %q: %w", name, err)
 	}
 
@@ -550,7 +551,10 @@ func newWorkflowTrustListCmd() *cobra.Command {
 			}
 			fmt.Fprintln(out, "enrolled keys:")
 			for _, k := range store.Keys {
-				fmt.Fprintf(out, "  %s  %s  %s\n", k.KeyID, k.Machine, k.AddedAt)
+				if _, err := fmt.Fprintf(out, "  %s  %s  %s\n", k.KeyID,
+					termsafe.SafeLine(k.Machine), termsafe.SafeLine(k.AddedAt)); err != nil {
+					return err
+				}
 			}
 			return nil
 		},

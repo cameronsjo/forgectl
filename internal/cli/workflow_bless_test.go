@@ -125,6 +125,65 @@ args = ["${target}"]
 	}
 }
 
+// TestWorkflowBless_RefusesReservedWorkspaceWithoutExporter exercises #246
+// through the production merged registry. The workflow contains no worktree or
+// clone step, but workspace remains registry-owned and cannot be a param.
+func TestWorkflowBless_RefusesReservedWorkspaceWithoutExporter(t *testing.T) {
+	dir := cliRedirectConfigDir(t)
+	wf := `dsl_version = 1
+name = "demo"
+version = "1.0.0"
+
+[params]
+workspace = { default = "/tmp/forged", help = "x" }
+
+[[step]]
+uses = "teardown"
+`
+	cliWriteUserWorkflow(t, dir, "demo", []byte(wf))
+	cmd := newWorkflowBlessCmd(module.Deps{Runner: &exec.FakeRunner{}})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"demo"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("workspace param must be refused even without an exporting step")
+	}
+	for _, want := range []string{"workspace", "reserved step export"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q should mention %q", err, want)
+		}
+	}
+}
+
+// TestWorkflowBless_LoneTeardownRequiresEarlierWorkspaceExport proves the
+// teardown registry entry exposes its implicit Context read to blessing. With
+// no earlier producer, the workflow cannot establish trusted provenance.
+func TestWorkflowBless_LoneTeardownRequiresEarlierWorkspaceExport(t *testing.T) {
+	dir := cliRedirectConfigDir(t)
+	wf := `dsl_version = 1
+name = "demo"
+version = "1.0.0"
+
+[[step]]
+uses = "teardown"
+`
+	cliWriteUserWorkflow(t, dir, "demo", []byte(wf))
+	cmd := newWorkflowBlessCmd(module.Deps{Runner: &exec.FakeRunner{}})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"demo"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("lone teardown must not bless without an earlier workspace export")
+	}
+	for _, want := range []string{"teardown", "Workspace", "workspace"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q should mention %q", err, want)
+		}
+	}
+}
+
 // TestWorkflowBless_RefusesParamRefInStripGlobs is the strip-list case: the
 // clean-room redaction list is a SECURITY CONTROL, so a ${param} in it would let
 // an agent weaken the strip-list at run time against already-blessed bytes —
@@ -426,7 +485,7 @@ func TestBlessRefExtractionMatchesInterpolate(t *testing.T) {
 				{Uses: "seed", Exports: tc.refs},
 				blessRunCheck(tc.input),
 			}
-			blessErr := bless.CheckGuardedParamRefs(allowed, nil)
+			blessErr := bless.CheckGuardedParamRefs(allowed, nil, nil)
 
 			if tc.unterminated {
 				if interpErr == nil {
@@ -449,7 +508,7 @@ func TestBlessRefExtractionMatchesInterpolate(t *testing.T) {
 			// name unset, Interpolate reports the same unknown variable.
 			if len(tc.refs) > 0 {
 				first := tc.refs[0]
-				refused := bless.CheckGuardedParamRefs([]bless.StepCheck{blessRunCheck(tc.input)}, nil)
+				refused := bless.CheckGuardedParamRefs([]bless.StepCheck{blessRunCheck(tc.input)}, nil, nil)
 				if refused == nil || !strings.Contains(refused.Error(), first) {
 					t.Errorf("CheckGuardedParamRefs(%q) should refuse naming ${%s}, got %v", tc.input, first, refused)
 				}
