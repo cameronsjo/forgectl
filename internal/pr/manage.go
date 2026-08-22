@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -82,7 +83,7 @@ func (c *Client) loadSummary(path string) (SessionSummary, error) {
 	switch avail {
 	case workspaceAvailabilityLive, workspaceAvailabilityMissing:
 	default:
-		return SessionSummary{}, fmt.Errorf("breadcrumb %s: %w", path, err)
+		return SessionSummary{}, fmt.Errorf("breadcrumb %s: %w", termsafe.QuotePath(path), err)
 	}
 	return SessionSummary{ref: ref, path: path, createdAt: bc.CreatedAt, availability: avail}, nil
 }
