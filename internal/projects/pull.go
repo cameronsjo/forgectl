@@ -81,7 +81,7 @@ func (c *Client) PullAll(ctx context.Context, dir string) ([]PullResult, error) 
 			results = append(results, PullResult{Name: p.Name, Dir: p.Dir, Status: PullSkippedDirty})
 			continue
 		}
-		out, err := c.run.Run(ctx, "git", "-C", p.Dir, "pull", "--rebase")
+		out, err := c.run.Run(ctx, c.gitBinary(), "-C", p.Dir, "pull", "--rebase")
 		results = append(results, PullResult{Name: p.Name, Dir: p.Dir, Status: classifyPull(out, err), Err: err})
 	}
 	return results, nil

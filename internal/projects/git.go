@@ -40,14 +40,23 @@ import (
 // not a reliable version signal — it may equally be cancellation, permissions,
 // corruption, or a missing object — and retrying could reclassify an
 // unreadable tree as clean.
+//
+// gitBin is the absolute path Client resolved once at construction. That pins
+// the protocol assertion and a later PullAll mutation to one executable even
+// if PATH changes between them. It deliberately claims no more: a hostile git
+// already selected by the invoking environment's initial PATH remains the
+// selected binary. Pinning bounds resolution; it does not attest provenance.
 func gitStatus(ctx context.Context, run interface {
 	Run(context.Context, string, ...string) (string, error)
-}, dir string) GitStatus {
+}, gitBin, dir string) GitStatus {
 	if _, err := os.Stat(dir + "/.git"); err != nil {
 		return GitStatus{State: StatusNotRepo}
 	}
+	if gitBin == "" {
+		return GitStatus{State: StatusUnknown}
+	}
 
-	out, err := run.Run(ctx, "git", "-C", dir, "status", "--porcelain=v2", "--branch")
+	out, err := run.Run(ctx, gitBin, "-C", dir, "status", "--porcelain=v2", "--branch")
 	if err != nil {
 		return GitStatus{State: StatusUnknown}
 	}
