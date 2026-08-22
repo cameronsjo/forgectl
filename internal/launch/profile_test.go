@@ -187,6 +187,29 @@ func TestResolve_CodexProjectDoesNotInheritClaudeDefaultModel(t *testing.T) {
 	}
 }
 
+func TestResolve_PiHarnessProviderAndModel(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Harness: "pi", Provider: "google", Model: "gemini-2.5-pro"},
+		Projects: []config.LaunchProject{{
+			Match: "~/p", Provider: "lm-studio", Model: "qwen/qwen3-coder-next",
+		}},
+	}
+	got := resolve(lc, "/home/me/p/repo", "/home/me")
+	if got.Harness != "pi" || got.Provider != "lm-studio" || got.Model != "qwen/qwen3-coder-next" {
+		t.Errorf("resolved Pi profile = %+v", got)
+	}
+}
+
+func TestResolve_PiProjectDoesNotInheritClaudeDefaultModel(t *testing.T) {
+	lc := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{Model: "opus"},
+		Projects: []config.LaunchProject{{Match: "~/p", Harness: "pi"}},
+	}
+	if got := resolveAt(lc, "/home/u/p"); got.Model != "" {
+		t.Fatalf("Pi project inherited Claude model: %q", got.Model)
+	}
+}
+
 // TestProfileValidate_UnsupportedHarness covers Validate's first branch, which
 // had no test: an unknown harness must be rejected by name rather than falling
 // through to the Claude path, which is what a typo would otherwise get.
@@ -198,12 +221,12 @@ func TestProfileValidate_UnsupportedHarness(t *testing.T) {
 			t.Errorf("Validate() accepted unsupported harness %q", harness)
 			continue
 		}
-		if !strings.Contains(err.Error(), "want claude or codex") {
+		if !strings.Contains(err.Error(), "want claude, codex, or pi") {
 			t.Errorf("Validate() for %q = %v, want the message to name the supported harnesses", harness, err)
 		}
 	}
 
-	for _, harness := range []string{"claude", "codex"} {
+	for _, harness := range []string{"claude", "codex", "pi"} {
 		p := Profile{Harness: harness, ApprovalPolicy: "never", Sandbox: "read-only"}
 		if err := p.Validate(); err != nil {
 			t.Errorf("Validate() rejected supported harness %q: %v", harness, err)

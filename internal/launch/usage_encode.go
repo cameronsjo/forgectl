@@ -25,7 +25,7 @@ func (e UsageEventV1) Validate() error {
 	if e.Event != UsageEventExecAttempt {
 		return fmt.Errorf("%w: unknown event", ErrUsageInvalidEvent)
 	}
-	if e.Harness != "claude" && e.Harness != "codex" {
+	if e.Harness != "claude" && e.Harness != "codex" && e.Harness != "pi" {
 		return fmt.Errorf("%w: unknown harness", ErrUsageInvalidEvent)
 	}
 	switch e.SessionMode {

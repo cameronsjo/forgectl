@@ -18,13 +18,13 @@ var EffortLevels = []string{"low", "medium", "high", "xhigh", "max"}
 // Validate rejects harness-native settings Codex itself would refuse, and an
 // effort level Claude Code would refuse.
 //
-// Effort is validated even for a Codex profile, where it is inert (Codex has
-// no --effort and the Codex builders never emit one). A typo that silently
-// does nothing today becomes a live wrong value the moment a profile flips
-// harness, and `effort` is new enough that no existing config can regress.
+// Effort is validated even for Codex and Pi profiles, where it is inert (only
+// Claude's builders emit it). A typo that silently does nothing today becomes
+// a live wrong value the moment a profile flips harness, and `effort` is new
+// enough that no existing config can regress.
 func (p Profile) Validate() error {
-	if p.Harness != "claude" && p.Harness != "codex" {
-		return fmt.Errorf("unsupported launch harness %q: want claude or codex", p.Harness)
+	if p.Harness != "claude" && p.Harness != "codex" && p.Harness != "pi" {
+		return fmt.Errorf("unsupported launch harness %q: want claude, codex, or pi", p.Harness)
 	}
 	if p.Effort != "" && !oneOf(p.Effort, EffortLevels...) {
 		return fmt.Errorf(
@@ -63,6 +63,9 @@ func oneOf(value string, choices ...string) bool {
 type Profile struct {
 	Harness string
 	Model   string
+	// Provider is Pi's provider selector. Empty deliberately emits no flag and
+	// leaves Pi's own configured/default provider in charge.
+	Provider string
 	// Effort is the resolved `--effort` level, or "" to emit no flag at all and
 	// let Claude Code's own default (settings.json effortLevel) apply. It is
 	// derived from Model when neither layer of config sets it — see
@@ -161,6 +164,9 @@ func resolve(lc config.LaunchConfig, cwd, home string) Profile {
 		if win.Model != "" {
 			p.Model = win.Model
 		}
+		if win.Provider != "" {
+			p.Provider = win.Provider
+		}
 		if win.PermissionMode != "" {
 			p.PermissionMode = win.PermissionMode
 		}
@@ -200,6 +206,7 @@ func defaultsProfile(d config.LaunchDefaults, home string) Profile {
 	p := Profile{
 		Harness:        harness,
 		Model:          firstNonEmpty(d.Model, builtinModelForHarness(harness)),
+		Provider:       d.Provider,
 		PermissionMode: firstNonEmpty(d.PermissionMode, builtinPermissionMode),
 		AllowDanger:    boolOr(d.AllowDanger, builtinAllowDanger),
 		ApprovalPolicy: firstNonEmpty(d.ApprovalPolicy, builtinApprovalPolicy),
@@ -258,10 +265,10 @@ func EffortForModel(model string) string {
 }
 
 func builtinModelForHarness(harness string) string {
-	if harness == "codex" {
-		return ""
+	if harness == "claude" {
+		return builtinModel
 	}
-	return builtinModel
+	return ""
 }
 
 // DefaultModelFor exposes the built-in model for a harness, for callers that

@@ -64,6 +64,25 @@ func TestCodexExecArgs_UsesNativeSandboxAndApprovalConfig(t *testing.T) {
 	}
 }
 
+func TestPiArgs_ProfileFirstUserArgsLast(t *testing.T) {
+	p := Profile{Provider: "lm-studio", Model: "qwen/qwen3-coder-next"}
+	got := PiArgs(p, []string{"--provider", "ollama", "-p", "review this"})
+	want := []string{
+		"--provider", "lm-studio", "--model", "qwen/qwen3-coder-next",
+		"--provider", "ollama", "-p", "review this",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("PiArgs = %v, want %v", got, want)
+	}
+}
+
+func TestPiArgs_OmitsUnconfiguredSelectors(t *testing.T) {
+	got := PiArgs(Profile{}, []string{"--resume"})
+	if !reflect.DeepEqual(got, []string{"--resume"}) {
+		t.Errorf("PiArgs = %v, want only the operator's args", got)
+	}
+}
+
 func TestSessionArgs_FullPosture(t *testing.T) {
 	p := Profile{Model: "opus", Effort: "medium", PermissionMode: "plan", AllowDanger: true, AddDir: []string{"/x", "/y"}}
 	got := SessionArgs(p)
@@ -381,5 +400,13 @@ func TestHarnessBanner_SanitizesControlBytes(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("harness banner dropped visible text %q: %q", want, got)
 		}
+	}
+}
+
+func TestHarnessBanner_EmptyArgsHasNoTrailingSpace(t *testing.T) {
+	var buf bytes.Buffer
+	HarnessBanner(&buf, "pi", nil)
+	if got, want := buf.String(), "→ pi\n"; got != want {
+		t.Errorf("HarnessBanner = %q, want %q", got, want)
 	}
 }

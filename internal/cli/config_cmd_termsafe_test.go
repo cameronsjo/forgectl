@@ -71,7 +71,7 @@ func hostileTextFixture() ([]configEntry, hostResolvedView, launchResolvedView) 
 		LogFile:  hostilePayload("logfile"),
 	}
 	resolved := launchResolvedView{
-		Harness:        hostilePayload("harness"),
+		Harness:        "claude",
 		Model:          hostilePayload("model"),
 		Effort:         hostilePayload("effort"),
 		PermissionMode: hostilePayload("perm"),
@@ -97,6 +97,12 @@ func TestRenderConfigText_SanitizesEveryUntrustedFragment(t *testing.T) {
 	codexResolved.Harness = "codex"
 	codexResolved.ApprovalPolicy = hostilePayload("approval")
 	codexResolved.Sandbox = hostilePayload("sandbox")
+	piResolved := claudeResolved
+	piResolved.Harness = "pi"
+	piResolved.Provider = hostilePayload("provider")
+	piResolved.BinaryLabel = "launch.pi_bin"
+	invalidResolved := claudeResolved
+	invalidResolved.Harness = hostilePayload("harness")
 
 	tests := []struct {
 		name     string
@@ -113,13 +119,13 @@ func TestRenderConfigText_SanitizesEveryUntrustedFragment(t *testing.T) {
 				Unrecognized: []string{hostilePayload("unrec")},
 			},
 			resolved: claudeResolved,
-			markers:  []string{"path", "decode", "unrec", "root", "leaf", "level", "logfile", "harness", "model", "effort", "perm", "binpath"},
+			markers:  []string{"path", "decode", "unrec", "root", "leaf", "level", "logfile", "model", "effort", "perm", "binpath"},
 		},
 		{
 			name:     "path unresolvable",
 			rep:      config.Report{PathErr: errors.New(hostilePayload("patherr"))},
 			resolved: claudeResolved,
-			markers:  []string{"patherr", "root", "leaf", "level", "logfile", "harness", "model", "binpath"},
+			markers:  []string{"patherr", "root", "leaf", "level", "logfile", "model", "binpath"},
 		},
 		{
 			name:     "path not found",
@@ -132,6 +138,18 @@ func TestRenderConfigText_SanitizesEveryUntrustedFragment(t *testing.T) {
 			rep:      config.Report{Path: hostilePayload("path"), Found: true},
 			resolved: codexResolved,
 			markers:  []string{"path", "approval", "sandbox", "model", "binpath"},
+		},
+		{
+			name:     "pi arm",
+			rep:      config.Report{Path: hostilePayload("path"), Found: true},
+			resolved: piResolved,
+			markers:  []string{"path", "provider", "model", "binpath"},
+		},
+		{
+			name:     "invalid harness arm",
+			rep:      config.Report{Path: hostilePayload("path"), Found: true},
+			resolved: invalidResolved,
+			markers:  []string{"path", "harness", "model", "binpath"},
 		},
 	}
 
@@ -151,7 +169,7 @@ func TestRenderConfigText_SanitizesEveryUntrustedFragment(t *testing.T) {
 
 			// Trusted layout is not collateral: code-authored labels, section
 			// headers, and structural newlines must survive untouched.
-			for _, want := range []string{"config file:", "\n[docs]\n", "  launch.claude_bin"} {
+			for _, want := range []string{"config file:", "\n[docs]\n", "  " + tc.resolved.BinaryLabel} {
 				if !strings.Contains(out, want) {
 					t.Errorf("trusted layout fragment %q missing — sanitization reached renderer-authored text:\n%s", want, out)
 				}

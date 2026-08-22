@@ -58,13 +58,8 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 					fmt.Fprintf(out, "%s [pr] config invalid: %s\n", launchFailMark, termsafe.SafeLine(err.Error()))
 				}
 			}
-			var binaryPath string
-			var binaryErr error
-			if profile.Harness == "codex" {
-				binaryPath, binaryErr = launch.CodexPath(lc.Defaults)
-			} else {
-				binaryPath, binaryErr = launch.ClaudePath(lc.Defaults)
-			}
+			resolvedBinary, binaryErr := launch.ResolveBinary(profile.Harness, lc.Defaults)
+			binaryPath := resolvedBinary.Path
 			if binaryErr == nil {
 				fmt.Fprintf(out, "%s %s found: %s\n", launchOKMark, termsafe.SafeLine(profile.Harness), termsafe.QuotePath(binaryPath))
 			} else {

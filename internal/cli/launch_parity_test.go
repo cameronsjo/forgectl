@@ -51,8 +51,8 @@ type parityHarness struct {
 	env     []string
 }
 
-// newParityHarness installs parityStub under both `claude` and `codex` (which
-// binary runs is the profile's call, and installing both keeps a
+// newParityHarness installs parityStub under each supported harness name (which
+// binary runs is the profile's call, and installing all keeps a
 // harness-selection bug from presenting as "binary not found") and writes
 // configBody, which must carry a %s for the project match path.
 func newParityHarness(t *testing.T, configBody string) *parityHarness {
@@ -66,7 +66,7 @@ func newParityHarness(t *testing.T, configBody string) *parityHarness {
 	outFile := filepath.Join(t.TempDir(), "harness.out")
 	base := t.TempDir()
 
-	for _, name := range []string{"claude", "codex"} {
+	for _, name := range []string{"claude", "codex", "pi"} {
 		if err := os.WriteFile(filepath.Join(binDir, name), []byte(parityStub), 0o755); err != nil {
 			t.Fatalf("write parity stub %s: %v", name, err)
 		}
@@ -259,6 +259,45 @@ func TestParity_CodexOrdinaryLaunch(t *testing.T) {
 	}
 
 	assertEnvEntry(t, gotEnv, "FORGECTL_PARITY_PROFILE", "profile-value")
+	assertEnvEntry(t, gotEnv, "FORGECTL_PARITY_INHERITED", "carried-through")
+}
+
+const parityPiConfig = `[launch.defaults]
+harness = "pi"
+provider = "lm-studio"
+model = "qwen/qwen3-coder-next"
+
+[[launch.project]]
+match = "%s"
+env = { CADENCE_BRIEFS_DIR = "/tmp/briefs", CADENCE_METRICS_DIR = "/tmp/metrics", GIT_GUARDRAILS_ALLOWED_OWNERS = "cameronsjo" }
+`
+
+// TestParity_PiOrdinaryLaunch pins the complete narrow Pi lane: provider and
+// model precede user args, while Cadence bridge settings reach Pi through the
+// existing profile environment rather than machine-specific built-ins.
+func TestParity_PiOrdinaryLaunch(t *testing.T) {
+	h := newParityHarness(t, parityPiConfig)
+	stdout, stderr := h.run(t, "-p", "review this")
+
+	gotCWD, gotArgv, gotEnv := h.recorded(t)
+	wantArgv := []string{
+		"--provider", "lm-studio",
+		"--model", "qwen/qwen3-coder-next",
+		"-p", "review this",
+	}
+	assertArgv(t, gotArgv, wantArgv)
+	if gotCWD != h.cwd {
+		t.Errorf("harness cwd = %q, want %q", gotCWD, h.cwd)
+	}
+	if want := "→ pi " + strings.Join(wantArgv, " ") + "\n"; stderr != want {
+		t.Errorf("stderr = %q, want exactly %q", stderr, want)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	assertEnvEntry(t, gotEnv, "CADENCE_BRIEFS_DIR", "/tmp/briefs")
+	assertEnvEntry(t, gotEnv, "CADENCE_METRICS_DIR", "/tmp/metrics")
+	assertEnvEntry(t, gotEnv, "GIT_GUARDRAILS_ALLOWED_OWNERS", "cameronsjo")
 	assertEnvEntry(t, gotEnv, "FORGECTL_PARITY_INHERITED", "carried-through")
 }
 

@@ -25,6 +25,7 @@ func TestUsageEventV1_ModelRepresentation(t *testing.T) {
 	}{
 		{"claude default", "claude", "opus", `"model":"opus"`},
 		{"codex native default", "codex", "", `"model":""`},
+		{"pi native default", "pi", "", `"model":""`},
 		{"custom deployment label", "claude", "internal-deploy-7", `"model":"internal-deploy-7"`},
 		{"hostile label survives without a raw control byte", "claude", hostileModel(), ""},
 	} {

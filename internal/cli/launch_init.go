@@ -15,7 +15,7 @@ import (
 // `forgectl launch init`. Values mirror the built-in defaults so an untouched
 // scaffold is a no-op posture.
 const launchScaffold = `
-# ── launch: per-project Claude/Codex launcher (forgectl launch) ─────────────
+# ── launch: per-project Claude/Codex/Pi launcher (forgectl launch) ──────────
 # Resolution: expand ~, pick the [[launch.project]] whose match is the longest
 # path-prefix of the real cwd, then merge over [launch.defaults].
 #   scalars: project wins when set; Claude remains the compatibility default
@@ -37,7 +37,7 @@ const launchScaffold = `
 #   schema_version  the row format
 #   ts              a UTC timestamp, to the second
 #   event           always "exec_attempt"
-#   harness         "claude" or "codex"
+#   harness         "claude", "codex", or "pi"
 #   model           the resolved model, "" for the harness default
 #   session_mode    new | resume | fork | unknown
 #   posture         default | builder | agents
@@ -60,16 +60,19 @@ const launchScaffold = `
 usage_stats = false
 
 [launch.defaults]
-harness         = "claude"   # "claude" (default) or "codex"
-model           = "opus"     # remove or replace with a Codex model when harness = "codex"
+harness         = "claude"   # "claude" (default), "codex", or "pi"
+model           = "opus"     # remove or replace for Codex/Pi
 # effort        = "medium"   # low|medium|high|xhigh|max; unset = derived from model
-permission_mode = "plan"     # launch always starts in plan
+permission_mode = "plan"     # Claude starts in plan
 allow_danger    = true       # adds --allow-dangerously-skip-permissions (reachable, not on)
 # binary_path   = ""         # explicit claude path; $FORGECTL_CLAUDE_BIN overrides this
 # Codex-native settings (used when harness = "codex"):
 # approval_policy  = "on-request"
 # sandbox          = "read-only"     # launch always starts non-writing
 # codex_binary_path = ""      # $FORGECTL_CODEX_BIN overrides this
+# Pi-native settings (used when harness = "pi"):
+# provider       = "lm-studio" # optional; unset = Pi's configured/default provider
+# pi_binary_path = ""          # $FORGECTL_PI_BIN overrides this
 
 # Per-project overrides — add as many [[launch.project]] blocks as you like.
 # [[launch.project]]

@@ -73,7 +73,8 @@ type Policy struct {
 func (p Policy) AcceptBinary(b launch.ResolvedBinary, self string) error {
 	switch b.Source {
 	case launch.BinaryClaudeEnv, launch.BinaryClaudeConfig,
-		launch.BinaryCodexEnv, launch.BinaryCodexConfig:
+		launch.BinaryCodexEnv, launch.BinaryCodexConfig,
+		launch.BinaryPiEnv, launch.BinaryPiConfig:
 		// An explicit selection is operator intent. It is deliberately not a
 		// claim that the binary is an official harness: an intentional wrapper
 		// is a legitimate thing to point forgectl at, and same-UID replacement

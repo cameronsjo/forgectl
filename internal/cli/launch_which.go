@@ -60,11 +60,15 @@ func printLaunchProfile(w io.Writer, p launch.Profile, cwd, confPath string) {
 		row("matched", matched)
 	}
 	row("harness", p.Harness)
+	if p.Harness == "pi" && p.Provider != "" {
+		row("provider", p.Provider)
+	}
 	row("model", p.Model)
-	if p.Harness == "codex" {
+	switch p.Harness {
+	case "codex":
 		row("approval", p.ApprovalPolicy)
 		row("sandbox", p.Sandbox)
-	} else {
+	case "claude":
 		// Omitted rather than shown empty when no level resolved: an absent
 		// --effort means Claude Code's own default applies, which is a
 		// different statement from "effort is blank". Matches the conditional

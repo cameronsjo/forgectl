@@ -40,7 +40,7 @@ func newSurfaceCmd(deps module.Deps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "surface",
 		Short: "Start a harness inside a terminal manager without exposing its invocation",
-		Long: `surface starts a harness (claude, codex) inside a terminal manager —
+		Long: `surface starts a harness (claude, codex, pi) inside a terminal manager —
 tmux, cmux, or herdr — without the manager ever seeing the harness invocation.
 
 A manager necessarily learns the target directory and the command it is asked

@@ -71,7 +71,7 @@ arguments. Headless `pr pick` similarly emits sanitized `owner/repo#N` rows and
 exits 1; each printed ref is directly usable with `forgectl pr <ref>`, while `pr prs
 --json` remains the stable inventory.
 
-# launch — per-project Claude Code / Codex CLI launcher (alias: cl)
+# launch — per-project Claude Code / Codex CLI / Pi launcher (alias: cl)
 forgectl launch                    # drop straight into the resolved profile (no prompt)
 forgectl launch <harness args…>    # apply the project profile, then exec the configured harness
 forgectl launch agents --json      # pure passthrough (byte-clean); posture injected only when interactive
@@ -447,10 +447,10 @@ Logging is **off by default**. Set `log_level` to `debug` for the full narrative
 
 With `log_file = ""` (the default target once a level is set), forgectl writes to a daily file — `forgectl-YYYY-MM-DD.log` — in the config dir and prunes any such file older than 7 days on startup. Set `log_file = "-"` to log to stderr instead, or give an explicit path to opt out of rotation.
 
-### launch — per-project Claude Code and Codex profiles
+### launch — per-project Claude Code, Codex, and Pi profiles
 
 `forgectl launch` resolves a posture from the `[launch]` section of the same
-`config.toml`, then **execs** Claude Code or Codex CLI in place (via
+`config.toml`, then **execs** Claude Code, Codex CLI, or Pi in place (via
 `syscall.Exec`, so Ctrl-C, the TTY, and the exit code pass through untouched).
 There is no prompt — a bare `forgectl launch` drops straight into the resolved
 profile. To resume or fork an earlier session, use `forgectl resume`, which
@@ -459,16 +459,19 @@ tasks. Claude remains the compatibility default.
 
 ```toml
 [launch.defaults]
-harness         = "claude"   # or "codex"
-model           = "opus"     # remove or replace with a Codex model when harness = "codex"
+harness         = "claude"   # or "codex" / "pi"
+model           = "opus"     # remove or replace for Codex/Pi
 # effort        = "medium"   # low|medium|high|xhigh|max; unset = derived from model
-permission_mode = "plan"     # launch always starts in plan
+permission_mode = "plan"     # Claude starts in plan
 allow_danger    = true       # adds --allow-dangerously-skip-permissions (reachable, not on)
 # binary_path   = ""         # explicit claude path; $FORGECTL_CLAUDE_BIN overrides this
 # Codex settings when harness = "codex":
 # approval_policy   = "on-request"
 # sandbox           = "read-only"   # launch always starts non-writing; opt up to "workspace-write"
 # codex_binary_path = ""      # $FORGECTL_CODEX_BIN overrides this
+# Pi settings when harness = "pi":
+# provider       = "lm-studio" # optional; unset = Pi's configured/default provider
+# pi_binary_path = ""          # $FORGECTL_PI_BIN overrides this
 
 [[launch.project]]
 match           = "~/Projects/minute"
@@ -500,21 +503,33 @@ An `effort` outside the five accepted levels is rejected before anything is laun
 **Design invariants** (verified against `claude` v2.1.183):
 
 - **Injected posture first, user args last** — a user-supplied flag (e.g. `--model`) overrides the profile because Claude Code is last-flag-wins.
-- **`agents` is Claude-only** — Codex profiles reject the passthrough and point
-  out that no Codex adapter ships. Claude retains its agents-valid injection
+- **`agents` is Claude-only** — Codex and Pi profiles reject the passthrough and
+  point out that no adapter ships. Claude retains its agents-valid injection
   and byte-clean `--json`/`--help` passthrough.
-- **Launch always starts in a posture that cannot write** — `permission_mode =
+- **Claude and Codex start in postures that cannot write** — `permission_mode =
   "plan"` for Claude, `sandbox = "read-only"` for Codex. Both are opt-ups:
   `allow_danger` makes bypass reachable, `sandbox = "workspace-write"` makes
   the checkout writable. Neither is on by default.
+- **Pi uses Pi's native tool posture** — forgectl injects only configured
+  `provider`/`model` selectors and the resolved profile environment. Configure
+  Cadence bridge variables such as `CADENCE_BRIEFS_DIR`,
+  `CADENCE_METRICS_DIR`, and `GIT_GUARDRAILS_ALLOWED_OWNERS` in `env`; forgectl
+  passes their values to Pi but shows only their names in `launch which`.
 
 **Choosing the binary** uses env → config → PATH:
 `FORGECTL_CLAUDE_BIN` / `binary_path` / `claude`, or
-`FORGECTL_CODEX_BIN` / `codex_binary_path` / `codex`.
+`FORGECTL_CODEX_BIN` / `codex_binary_path` / `codex`, or
+`FORGECTL_PI_BIN` / `pi_binary_path` / `pi`.
 
 Codex modes translate to `codex`, `codex resume --last`, `codex fork --last`,
 and `codex exec`. Clean-room reviews accept `--agent codex` only for
 `forgectl pr local --operator-authored` — code you state that you wrote.
+
+Pi launches as `pi [--provider <name>] [--model <pattern>]`, with operator
+arguments appended last so an explicit command-line selector wins. Surface
+placement stays separate: use `forgectl surface launch <target> --surface
+tmux|cmux|herdr`; forgectl does not add Pi-specific pane management or start,
+probe, or supervise a local model server.
 
 > **`--agent codex` requires you to assert authorship, by design.** The Claude
 > clean room confines the reviewer to a deny-by-default allowlist with no

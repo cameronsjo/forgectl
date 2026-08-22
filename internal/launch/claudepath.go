@@ -133,6 +133,13 @@ func CodexPath(defaults config.LaunchDefaults) (string, error) {
 	return resolved.Path, err
 }
 
+// PiPath resolves Pi in env-over-config-over-PATH order. Kept beside the
+// compatibility wrappers for callers that need only a path.
+func PiPath(defaults config.LaunchDefaults) (string, error) {
+	resolved, err := ResolveBinary("pi", defaults)
+	return resolved.Path, err
+}
+
 func validateBinary(path, source, name string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
