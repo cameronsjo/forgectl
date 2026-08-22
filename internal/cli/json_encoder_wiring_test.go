@@ -99,12 +99,12 @@ func scanRawJSONEmitters(root string) (findings []jsonEmitterFinding, parsed, em
 		findings = append(findings, markerFindings...)
 
 		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok || !isJSONEmitter(call, jsonName) {
+			pos, ok := jsonEmitterPosition(n, jsonName)
+			if !ok {
 				return true
 			}
 			emitters++
-			position := fset.Position(call.Pos())
+			position := fset.Position(pos)
 			marker := markerForCall(markers, position.Line)
 			if marker != nil {
 				marker.used++
@@ -130,16 +130,24 @@ func scanRawJSONEmitters(root string) (findings []jsonEmitterFinding, parsed, em
 	return findings, parsed, emitters, err
 }
 
-func isJSONEmitter(call *ast.CallExpr, jsonName string) bool {
-	switch fun := call.Fun.(type) {
+func jsonEmitterPosition(n ast.Node, jsonName string) (token.Pos, bool) {
+	switch node := n.(type) {
 	case *ast.SelectorExpr:
-		pkgIdent, ok := fun.X.(*ast.Ident)
-		return ok && jsonName != "" && jsonName != "." && pkgIdent.Name == jsonName && jsonEmitters[fun.Sel.Name]
-	case *ast.Ident:
-		return jsonName == "." && jsonEmitters[fun.Name]
+		pkgIdent, ok := node.X.(*ast.Ident)
+		if ok && jsonName != "" && jsonName != "." && pkgIdent.Name == jsonName && jsonEmitters[node.Sel.Name] {
+			return node.Pos(), true
+		}
+	case *ast.CallExpr:
+		// A dot-import makes NewEncoder(w) a bare identifier. Named imports
+		// are matched at the SelectorExpr instead, including function-value
+		// references such as encode := json.Marshal.
+		fun, ok := node.Fun.(*ast.Ident)
+		if ok && jsonName == "." && jsonEmitters[fun.Name] {
+			return node.Pos(), true
+		}
 	default:
-		return false
 	}
+	return token.NoPos, false
 }
 
 func exemptionMarkers(fset *token.FileSet, file *ast.File) (map[int]*exemptionMarker, []jsonEmitterFinding) {
@@ -205,6 +213,7 @@ func TestJSONEmitterGuardAdversarialCases(t *testing.T) {
 	}{
 		{name: "other package NewEncoder", source: `package docs; import "encoding/json"; func f(w anyWriter) { json.NewEncoder(w) }`, wantFindings: 1, wantEmitters: 1},
 		{name: "aliased Marshal", source: `package output; import j "encoding/json"; func f(v any) { _, _ = j.Marshal(v) }`, wantFindings: 1, wantEmitters: 1},
+		{name: "function value indirection", source: `package output; import j "encoding/json"; func f() { encode := j.Marshal; _ = encode }`, wantFindings: 1, wantEmitters: 1},
 		{name: "dot imported MarshalIndent", source: `package output; import . "encoding/json"; func f(v any) { _, _ = MarshalIndent(v, "", "  ") }`, wantFindings: 1, wantEmitters: 1},
 		{name: "all variants", source: `package output
 import j "encoding/json"
