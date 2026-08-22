@@ -108,7 +108,26 @@ func TestPrintLaunchProfile_EscapesEveryUntrustedSurfaceToOneLinePerRow(t *testi
 			t.Errorf("profile output missing escaped marker %q: %q", escaped, out)
 		}
 	}
-	if lines := strings.Count(out, "\n"); lines != 9 {
-		t.Fatalf("physical lines = %d, want one title plus eight rows; output=%q", lines, out)
+	if lines := strings.Count(out, "\n"); lines != 7 {
+		t.Fatalf("physical lines = %d, want one title plus six rows for an invalid harness; output=%q", lines, out)
+	}
+}
+
+func TestPrintLaunchProfile_EscapesPiProvider(t *testing.T) {
+	attack := "lm-studio\nforged\x1b[2K\u202e"
+	var buf bytes.Buffer
+	printLaunchProfile(&buf, launch.Profile{
+		Harness:  "pi",
+		Provider: attack,
+		Model:    "qwen/qwen3-coder-next",
+	}, "/tmp/cwd", "/tmp/config.toml")
+	out := buf.String()
+	if strings.Contains(out, "\x1b[2K") || strings.ContainsRune(out, '\u202e') || strings.Contains(out, "lm-studio\nforged") {
+		t.Fatalf("Pi provider output contains attacker controls: %q", out)
+	}
+	for _, escaped := range []string{`\n`, `\x1b`, `\u202e`} {
+		if !strings.Contains(out, escaped) {
+			t.Errorf("Pi provider output missing escaped marker %q: %q", escaped, out)
+		}
 	}
 }

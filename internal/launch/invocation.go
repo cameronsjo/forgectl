@@ -27,6 +27,8 @@ const (
 	BinaryClaudeConfig BinarySource = "claude-config"
 	BinaryCodexEnv     BinarySource = "codex-env"
 	BinaryCodexConfig  BinarySource = "codex-config"
+	BinaryPiEnv        BinarySource = "pi-env"
+	BinaryPiConfig     BinarySource = "pi-config"
 	BinaryPATH         BinarySource = "path"
 )
 
@@ -68,6 +70,8 @@ const (
 	PostureAgentsPassthrough Posture = "agents-passthrough"
 	PostureCodexSession      Posture = "codex-session"
 	PostureCodexExec         Posture = "codex-exec"
+	PosturePiSession         Posture = "pi-session"
+	PosturePiArgs            Posture = "pi-args"
 )
 
 // BinaryResolver maps a harness name and its config defaults to a binary. The
@@ -159,6 +163,17 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 // ran. args is already a private copy, so the passthrough branch can return it
 // without aliasing the caller.
 func selectPosture(p Profile, args []string) (Posture, []string, error) {
+	if p.Harness == "pi" {
+		if len(args) > 0 && args[0] == "agents" {
+			return "", nil, fmt.Errorf(
+				"`launch agents` is Claude-only and has no Pi adapter; invoke Pi directly or switch this launch profile to Claude",
+			)
+		}
+		if len(args) == 0 {
+			return PosturePiSession, PiArgs(p, nil), nil
+		}
+		return PosturePiArgs, PiArgs(p, args), nil
+	}
 	if p.Harness == "codex" {
 		if len(args) > 0 && args[0] == "agents" {
 			return "", nil, fmt.Errorf(
@@ -208,7 +223,7 @@ func EmitBanner(w io.Writer, b BuiltInvocation) {
 	case PostureClaudeBuilder, PostureAgentsPassthrough:
 	case PostureClaudeSession, PostureClaudeAgents:
 		Banner(w, b.Invocation.Args)
-	case PostureCodexSession, PostureCodexExec:
+	case PostureCodexSession, PostureCodexExec, PosturePiSession, PosturePiArgs:
 		HarnessBanner(w, b.Invocation.Harness, b.Invocation.Args)
 	default:
 		HarnessBanner(w, b.Invocation.Harness, b.Invocation.Args)
@@ -226,11 +241,13 @@ var allPostures = []Posture{
 	PostureAgentsPassthrough,
 	PostureCodexSession,
 	PostureCodexExec,
+	PosturePiSession,
+	PosturePiArgs,
 }
 
 // ResolveBinary resolves a harness binary and reports which layer chose it, in
 // the same env-over-config-over-PATH order — and with the same validation and
-// error text — as the ClaudePath/CodexPath wrappers below, which delegate here.
+// error text — as the path-only wrappers below, which delegate here.
 // One resolution path is the point: ten call sites across the repo resolve a
 // harness binary, and a second implementation that drifted would leave two of
 // them running different binaries with no error anywhere.
@@ -261,8 +278,17 @@ func ResolveBinary(harness string, defaults config.LaunchDefaults) (ResolvedBina
 			configSrc:   BinaryCodexConfig,
 			name:        "codex",
 		})
+	case "pi":
+		return resolveLayered(layered{
+			envKey:      "FORGECTL_PI_BIN",
+			envSource:   BinaryPiEnv,
+			configPath:  defaults.PiBinaryPath,
+			configLabel: "[launch.defaults] pi_binary_path",
+			configSrc:   BinaryPiConfig,
+			name:        "pi",
+		})
 	default:
-		return ResolvedBinary{}, fmt.Errorf("unsupported launch harness %q: want claude or codex", harness)
+		return ResolvedBinary{}, fmt.Errorf("unsupported launch harness %q: want claude, codex, or pi", harness)
 	}
 }
 

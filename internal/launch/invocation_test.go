@@ -31,35 +31,37 @@ func clearBinEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("FORGECTL_CLAUDE_BIN", "")
 	t.Setenv("FORGECTL_CODEX_BIN", "")
+	t.Setenv("FORGECTL_PI_BIN", "")
 }
 
 // resolutionStubs lays out the three locations a harness binary can be
-// resolved from: an off-PATH claude and codex for the env and config layers,
-// and a directory holding both that a test points $PATH at. Every layer of
+// resolved from: one off-PATH binary per harness for the env and config layers,
+// and a directory holding all three that a test points $PATH at. Every layer of
 // every harness is reachable from this one fixture, so a resolution test picks
 // which one it means rather than building its own.
-func resolutionStubs(t *testing.T) (claudeBin, codexBin, pathDir string) {
+func resolutionStubs(t *testing.T) (claudeBin, codexBin, piBin, pathDir string) {
 	t.Helper()
 	claudeBin = stubBinary(t, "claude")
 	codexBin = stubBinary(t, "codex")
+	piBin = stubBinary(t, "pi")
 	pathDir = t.TempDir()
-	for _, name := range []string{"claude", "codex"} {
+	for _, name := range []string{"claude", "codex", "pi"} {
 		// #nosec G306 -- see stubBinary.
 		if err := os.WriteFile(filepath.Join(pathDir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
 			t.Fatalf("write PATH stub %s: %v", name, err)
 		}
 	}
-	return claudeBin, codexBin, pathDir
+	return claudeBin, codexBin, piBin, pathDir
 }
 
 // TestResolveBinary_ReportsProvenance pins the source category beside the path
-// for every layer of both harnesses. The category is what the surface policy
+// for every layer of every harness. The category is what the surface policy
 // (forgectl#331) gates on — it accepts an env/config selection as an operator
 // assertion and refuses a PATH hit by default — so a resolver that returned the
 // right path under the wrong label would hand that policy a decision it cannot
 // make correctly.
 func TestResolveBinary_ReportsProvenance(t *testing.T) {
-	claudeBin, codexBin, pathDir := resolutionStubs(t)
+	claudeBin, codexBin, piBin, pathDir := resolutionStubs(t)
 
 	tests := []struct {
 		name       string
@@ -111,6 +113,27 @@ func TestResolveBinary_ReportsProvenance(t *testing.T) {
 			wantPath:   filepath.Join(pathDir, "codex"),
 			wantSource: BinaryPATH,
 		},
+		{
+			name:       "pi env override",
+			harness:    "pi",
+			env:        map[string]string{"FORGECTL_PI_BIN": piBin},
+			defaults:   config.LaunchDefaults{PiBinaryPath: filepath.Join(pathDir, "pi")},
+			wantPath:   piBin,
+			wantSource: BinaryPiEnv,
+		},
+		{
+			name:       "pi config pi_binary_path",
+			harness:    "pi",
+			defaults:   config.LaunchDefaults{PiBinaryPath: piBin},
+			wantPath:   piBin,
+			wantSource: BinaryPiConfig,
+		},
+		{
+			name:       "pi falls through to PATH",
+			harness:    "pi",
+			wantPath:   filepath.Join(pathDir, "pi"),
+			wantSource: BinaryPATH,
+		},
 	}
 
 	for _, tc := range tests {
@@ -142,7 +165,7 @@ func TestResolveBinary_ReportsProvenance(t *testing.T) {
 // error anywhere. The wrappers delegate, and this proves it for every layer
 // rather than trusting the delegation to stay.
 func TestResolveBinary_AgreesWithCompatibilityWrappers(t *testing.T) {
-	claudeBin, codexBin, pathDir := resolutionStubs(t)
+	claudeBin, codexBin, piBin, pathDir := resolutionStubs(t)
 
 	tests := []struct {
 		name     string
@@ -156,6 +179,9 @@ func TestResolveBinary_AgreesWithCompatibilityWrappers(t *testing.T) {
 		{name: "codex via env", harness: "codex", env: map[string]string{"FORGECTL_CODEX_BIN": codexBin}},
 		{name: "codex via config", harness: "codex", defaults: config.LaunchDefaults{CodexBinaryPath: codexBin}},
 		{name: "codex via PATH", harness: "codex"},
+		{name: "pi via env", harness: "pi", env: map[string]string{"FORGECTL_PI_BIN": piBin}},
+		{name: "pi via config", harness: "pi", defaults: config.LaunchDefaults{PiBinaryPath: piBin}},
+		{name: "pi via PATH", harness: "pi"},
 	}
 
 	for _, tc := range tests {
@@ -167,8 +193,11 @@ func TestResolveBinary_AgreesWithCompatibilityWrappers(t *testing.T) {
 			}
 
 			wrapper, wrapperErr := ClaudePath(tc.defaults)
-			if tc.harness == "codex" {
+			switch tc.harness {
+			case "codex":
 				wrapper, wrapperErr = CodexPath(tc.defaults)
+			case "pi":
+				wrapper, wrapperErr = PiPath(tc.defaults)
 			}
 			if wrapperErr != nil {
 				t.Fatalf("compatibility wrapper: %v", wrapperErr)
@@ -205,7 +234,7 @@ func TestResolveBinary_PropagatesSourceAttributedErrors(t *testing.T) {
 // Source that agrees with how Path was chosen while disagreeing with what was
 // asked for, which is exactly the claim the surface policy gates on.
 func TestResolveBinary_RefusesAnUnknownHarness(t *testing.T) {
-	claudeBin, _, pathDir := resolutionStubs(t)
+	claudeBin, _, _, pathDir := resolutionStubs(t)
 	clearBinEnv(t)
 	t.Setenv("PATH", pathDir)
 	// Both explicit layers are set and valid, so a fallthrough to the Claude
@@ -218,7 +247,7 @@ func TestResolveBinary_RefusesAnUnknownHarness(t *testing.T) {
 			if err == nil {
 				t.Fatalf("ResolveBinary(%q) = %+v, want a refusal", harness, got)
 			}
-			if !strings.Contains(err.Error(), "want claude or codex") {
+			if !strings.Contains(err.Error(), "want claude, codex, or pi") {
 				t.Errorf("error = %v, want one naming the supported harnesses", err)
 			}
 			if got != (ResolvedBinary{}) {
@@ -611,6 +640,13 @@ func TestBuildInvocation_Postures(t *testing.T) {
 			Sandbox:        "read-only",
 		},
 	}
+	piCfg := config.LaunchConfig{
+		Defaults: config.LaunchDefaults{
+			Harness:  "pi",
+			Provider: "lm-studio",
+			Model:    "qwen/qwen3-coder-next",
+		},
+	}
 
 	tests := []struct {
 		name        string
@@ -659,6 +695,19 @@ func TestBuildInvocation_Postures(t *testing.T) {
 			wantPosture: PostureCodexExec,
 			wantArgs:    func(p Profile) []string { return CodexExecArgs(p, []string{"review this"}) },
 		},
+		{
+			name:        "bare pi launch",
+			cfg:         piCfg,
+			wantPosture: PosturePiSession,
+			wantArgs:    func(p Profile) []string { return PiArgs(p, nil) },
+		},
+		{
+			name:        "pi with passthrough args",
+			cfg:         piCfg,
+			args:        []string{"-p", "review this"},
+			wantPosture: PosturePiArgs,
+			wantArgs:    func(p Profile) []string { return PiArgs(p, []string{"-p", "review this"}) },
+		},
 	}
 
 	for _, tc := range tests {
@@ -705,13 +754,19 @@ func TestBuildInvocation_RefusesBeforeResolvingBinary(t *testing.T) {
 		{
 			name:    "unsupported harness",
 			cfg:     config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "gemini"}},
-			wantErr: "want claude or codex",
+			wantErr: "want claude, codex, or pi",
 		},
 		{
 			name:    "agents under a codex profile",
 			cfg:     config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "codex", ApprovalPolicy: "never", Sandbox: "read-only"}},
 			args:    []string{"agents", "list"},
 			wantErr: "Claude-only",
+		},
+		{
+			name:    "agents under a pi profile",
+			cfg:     config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "pi"}},
+			args:    []string{"agents", "list"},
+			wantErr: "no Pi adapter",
 		},
 	}
 
@@ -818,6 +873,8 @@ func TestEmitBanner_ByPosture(t *testing.T) {
 		{PostureClaudeAgents, "→ claude --model sonnet\n"},
 		{PostureCodexSession, "→ codex --model sonnet\n"},
 		{PostureCodexExec, "→ codex --model sonnet\n"},
+		{PosturePiSession, "→ pi --model sonnet\n"},
+		{PosturePiArgs, "→ pi --model sonnet\n"},
 		{PostureClaudeBuilder, ""},
 		{PostureAgentsPassthrough, ""},
 	}
@@ -827,6 +884,8 @@ func TestEmitBanner_ByPosture(t *testing.T) {
 			harness := "claude"
 			if strings.HasPrefix(string(tc.posture), "codex") {
 				harness = "codex"
+			} else if strings.HasPrefix(string(tc.posture), "pi") {
+				harness = "pi"
 			}
 			var buf bytes.Buffer
 			EmitBanner(&buf, BuiltInvocation{

@@ -1,7 +1,7 @@
-// Package launch is the per-project Claude Code launcher behind
+// Package launch is the per-project harness launcher behind
 // `forgectl launch`. It resolves a posture from config (see profile.go),
-// assembles the claude argv for each posture (session, builder, agents), merges
-// environment, and execs claude in place. Absorbed from the standalone claunch
+// assembles harness-native argv for each posture, merges environment, and
+// execs the selected binary in place. Absorbed from the standalone claunch
 // tool.
 //
 // `forgectl launch` drops straight into the resolved profile: there is no
@@ -148,6 +148,25 @@ func CodexExecArgs(p Profile, userArgs []string) []string {
 	return append(args, userArgs...)
 }
 
+// PiArgs applies Pi's provider/model selection before the operator's args.
+// Pi accepts the same flag shape for interactive and non-interactive runs, so
+// one builder owns both. User args remain last, preserving launch's established
+// override rule (a later --provider or --model wins in Pi 0.82.1).
+//
+// Cadence environment belongs to Profile.Env, not argv: BuildInvocation merges
+// that map for every harness, including Pi, without hard-coding machine-local
+// directories or credentials here.
+func PiArgs(p Profile, userArgs []string) []string {
+	var args []string
+	if p.Provider != "" {
+		args = append(args, "--provider", p.Provider)
+	}
+	if p.Model != "" {
+		args = append(args, "--model", p.Model)
+	}
+	return append(args, userArgs...)
+}
+
 // IsAgentsPassthrough reports whether `claude agents …` is a scripting/help
 // invocation that must reach claude byte-clean: no posture injection, no banner.
 func IsAgentsPassthrough(agentArgs []string) bool {
@@ -222,20 +241,24 @@ func Banner(w io.Writer, args []string) {
 	_, _ = fmt.Fprintln(w, termsafe.SafeLine("→ claude "+strings.Join(args, " ")))
 }
 
-// HarnessBanner writes an informational launch line for either CLI. Sanitized
+// HarnessBanner writes an informational launch line for any supported CLI. Sanitized
 // on the same grounds as Banner, and with the same no-shell-quoting caveat.
 func HarnessBanner(w io.Writer, harness string, args []string) {
-	_, _ = fmt.Fprintln(w, termsafe.SafeLine("→ "+harness+" "+strings.Join(args, " ")))
+	line := "→ " + harness
+	if len(args) > 0 {
+		line += " " + strings.Join(args, " ")
+	}
+	_, _ = fmt.Fprintln(w, termsafe.SafeLine(line))
 }
 
-// Exec replaces the current process with claude. On success it never returns, so
+// Exec replaces the current process with the selected harness. On success it never returns, so
 // Ctrl-C, the TTY, and the exit code pass through untouched. This is the one
 // documented exception to routing process execution through internal/exec.Runner
-// — Runner spawns a child, whereas the launcher must *become* claude.
-func Exec(claudePath string, args, env []string) error {
-	argv := append([]string{claudePath}, args...)
-	// #nosec G204 -- claudePath is validated by ClaudePath (exists + executable)
-	// or resolved via exec.LookPath; replacing this process with claude is the
+// — Runner spawns a child, whereas the launcher must *become* the harness.
+func Exec(harnessPath string, args, env []string) error {
+	argv := append([]string{harnessPath}, args...)
+	// #nosec G204 -- harnessPath is validated by ResolveBinary (exists + executable)
+	// or resolved via exec.LookPath; replacing this process with the harness is the
 	// entire purpose of the launcher, not an injection sink.
-	return syscall.Exec(claudePath, argv, env)
+	return syscall.Exec(harnessPath, argv, env)
 }

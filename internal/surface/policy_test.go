@@ -40,6 +40,8 @@ func TestPolicy_ProvenanceGate(t *testing.T) {
 		launch.BinaryClaudeConfig,
 		launch.BinaryCodexEnv,
 		launch.BinaryCodexConfig,
+		launch.BinaryPiEnv,
+		launch.BinaryPiConfig,
 	}
 	for _, source := range sources {
 		t.Run(string(source)+" is accepted by default", func(t *testing.T) {

@@ -77,13 +77,14 @@ type hostResolvedView struct {
 
 // launchResolvedView is the [launch] block's resolved posture: built-in
 // fallbacks applied and the exec target resolved with launch's own precedence
-// (FORGECTL_CLAUDE_BIN > binary_path > PATH). The generic walk cannot
+// (harness-specific env > binary path key > PATH). The generic walk cannot
 // reproduce it — the walk reports what the file says, this reports what
 // `forgectl launch` will actually do, which is why the bespoke block survives
 // the rewrite.
 type launchResolvedView struct {
-	Harness string `json:"harness"`
-	Model   string `json:"model"`
+	Harness  string `json:"harness"`
+	Model    string `json:"model"`
+	Provider string `json:"provider,omitempty"`
 	// Effort is "" when no level resolved — the model is unmapped and no
 	// config layer set one, so launch emits no --effort and Claude Code's own
 	// default applies. omitempty keeps that distinct in JSON from a level.
@@ -353,12 +354,17 @@ func resolveLaunchView(cfg config.Config) launchResolvedView {
 
 	var bin string
 	var err error
-	if ld.Harness == "codex" {
+	switch ld.Harness {
+	case "codex":
 		view.BinaryLabel = "launch.codex_bin"
 		view.ApprovalPolicy = ld.ApprovalPolicy
 		view.Sandbox = ld.Sandbox
 		bin, err = launch.CodexPath(cfg.Launch.Defaults)
-	} else {
+	case "pi":
+		view.BinaryLabel = "launch.pi_bin"
+		view.Provider = ld.Provider
+		bin, err = launch.PiPath(cfg.Launch.Defaults)
+	default:
 		// Claude-only: --effort is Claude Code's flag and Codex has no
 		// equivalent, so a Codex profile resolves a level it would never emit.
 		view.Effort = ld.Effort
@@ -428,11 +434,15 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 
 	fmt.Fprintf(out, "\n[launch] resolved (built-in fallbacks and binary precedence applied)\n")
 	fmt.Fprintf(out, "  launch.harness       %s\n", termsafe.SafeLine(resolved.Harness))
+	if resolved.Harness == "pi" && resolved.Provider != "" {
+		_, _ = fmt.Fprintf(out, "  launch.provider      %s\n", termsafe.SafeLine(resolved.Provider))
+	}
 	fmt.Fprintf(out, "  launch.model         %s\n", termsafe.SafeLine(resolved.Model))
-	if resolved.Harness == "codex" {
+	switch resolved.Harness {
+	case "codex":
 		fmt.Fprintf(out, "  launch.approval      %s\n", termsafe.SafeLine(resolved.ApprovalPolicy))
 		fmt.Fprintf(out, "  launch.sandbox       %s\n", termsafe.SafeLine(resolved.Sandbox))
-	} else {
+	case "claude":
 		// Spelled out rather than left blank: this block is a fixed field list,
 		// so an empty column would read as "unset" when the operative fact is
 		// that no flag is emitted and Claude Code's own default governs.

@@ -130,9 +130,10 @@ type LaunchConfig struct {
 // nothing. The whole point of the key is raising or lowering a derived level,
 // not suppressing one.
 type LaunchDefaults struct {
-	Harness         string            `toml:"harness"` // claude (default) | codex
+	Harness         string            `toml:"harness"` // claude (default) | codex | pi
 	Model           string            `toml:"model"`
-	Effort          string            `toml:"effort"` // low|medium|high|xhigh|max; unset = derived from Model
+	Provider        string            `toml:"provider"` // Pi provider; empty = Pi's own default
+	Effort          string            `toml:"effort"`   // low|medium|high|xhigh|max; unset = derived from Model
 	PermissionMode  string            `toml:"permission_mode"`
 	AllowDanger     *bool             `toml:"allow_danger"`
 	ApprovalPolicy  string            `toml:"approval_policy"` // Codex: untrusted|on-request|never
@@ -141,6 +142,7 @@ type LaunchDefaults struct {
 	AddDir          []string          `toml:"add_dir"`
 	BinaryPath      string            `toml:"binary_path"`       // explicit claude path; env FORGECTL_CLAUDE_BIN wins
 	CodexBinaryPath string            `toml:"codex_binary_path"` // env FORGECTL_CODEX_BIN wins
+	PiBinaryPath    string            `toml:"pi_binary_path"`    // env FORGECTL_PI_BIN wins
 }
 
 // LaunchProject is one [[launch.project]] directory-keyed override block.
@@ -148,6 +150,7 @@ type LaunchProject struct {
 	Match          string            `toml:"match"`
 	Harness        string            `toml:"harness"`
 	Model          string            `toml:"model"`
+	Provider       string            `toml:"provider"`
 	Effort         string            `toml:"effort"`
 	PermissionMode string            `toml:"permission_mode"`
 	AllowDanger    *bool             `toml:"allow_danger"`
@@ -475,10 +478,10 @@ func expandTilde(path, home string) string {
 // isZero reports whether no [launch.defaults] value was set. LaunchDefaults
 // holds maps/slices, so it is not comparable with == — check each field.
 func (d LaunchDefaults) isZero() bool {
-	return d.Harness == "" && d.Model == "" && d.Effort == "" && d.PermissionMode == "" &&
+	return d.Harness == "" && d.Model == "" && d.Provider == "" && d.Effort == "" && d.PermissionMode == "" &&
 		d.AllowDanger == nil && d.ApprovalPolicy == "" && d.Sandbox == "" &&
 		len(d.Env) == 0 && len(d.AddDir) == 0 && d.BinaryPath == "" &&
-		d.CodexBinaryPath == ""
+		d.CodexBinaryPath == "" && d.PiBinaryPath == ""
 }
 
 // Load reads the config file. A missing file is not an error — it yields
@@ -1014,12 +1017,14 @@ func MergeLegacyIntoLaunch(cfg Config, legacy LaunchConfig) (merged LaunchConfig
 	}
 	fillString(&d.Harness, l.Harness)
 	fillString(&d.Model, l.Model)
+	fillString(&d.Provider, l.Provider)
 	fillString(&d.Effort, l.Effort)
 	fillString(&d.PermissionMode, l.PermissionMode)
 	fillString(&d.ApprovalPolicy, l.ApprovalPolicy)
 	fillString(&d.Sandbox, l.Sandbox)
 	fillString(&d.BinaryPath, l.BinaryPath)
 	fillString(&d.CodexBinaryPath, l.CodexBinaryPath)
+	fillString(&d.PiBinaryPath, l.PiBinaryPath)
 
 	if d.AllowDanger == nil && l.AllowDanger != nil {
 		v := *l.AllowDanger

@@ -22,10 +22,13 @@ approval_policy = "never"
 sandbox = "read-only"
 effort = "low"
 codex_binary_path = "/opt/codex"
+provider = "lm-studio"
+pi_binary_path = "/opt/pi"
 
 [[launch.project]]
 match = "~/Projects/minute"
 model = "sonnet"
+provider = "ollama"
 effort = "xhigh"
 env = { OTEL_EXPORTER = "otlp" }
 add_dir = ["~/Projects/minute/shared"]
@@ -49,8 +52,10 @@ add_dir = ["~/Projects/infrastructure/homelab"]
 	if got.Launch.Defaults.Harness != "codex" ||
 		got.Launch.Defaults.ApprovalPolicy != "never" ||
 		got.Launch.Defaults.Sandbox != "read-only" ||
-		got.Launch.Defaults.CodexBinaryPath != "/opt/codex" {
-		t.Errorf("Codex launch defaults did not round-trip: %+v", got.Launch.Defaults)
+		got.Launch.Defaults.CodexBinaryPath != "/opt/codex" ||
+		got.Launch.Defaults.Provider != "lm-studio" ||
+		got.Launch.Defaults.PiBinaryPath != "/opt/pi" {
+		t.Errorf("harness launch defaults did not round-trip: %+v", got.Launch.Defaults)
 	}
 	if len(got.Launch.Projects) != 2 {
 		t.Fatalf("len(Projects) = %d, want 2", len(got.Launch.Projects))
@@ -63,6 +68,9 @@ add_dir = ["~/Projects/infrastructure/homelab"]
 	}
 	if got.Launch.Projects[0].Model != "sonnet" {
 		t.Errorf("Projects[0].Model = %q, want %q", got.Launch.Projects[0].Model, "sonnet")
+	}
+	if got.Launch.Projects[0].Provider != "ollama" {
+		t.Errorf("Projects[0].Provider = %q, want %q", got.Launch.Projects[0].Provider, "ollama")
 	}
 	if got.Launch.Projects[0].Env["OTEL_EXPORTER"] != "otlp" {
 		t.Errorf("Projects[0].Env[OTEL_EXPORTER] = %q, want %q", got.Launch.Projects[0].Env["OTEL_EXPORTER"], "otlp")

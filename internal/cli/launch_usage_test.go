@@ -62,12 +62,16 @@ func usageConfig(t *testing.T, harness string, enabled bool) config.Config {
 	t.Helper()
 	binary := stubHarnessBinary(t)
 	defaults := config.LaunchDefaults{Harness: harness, Model: "opus"}
-	if harness == "codex" {
+	switch harness {
+	case "codex":
 		defaults.Model = ""
 		defaults.ApprovalPolicy = "on-request"
 		defaults.Sandbox = "read-only"
 		defaults.CodexBinaryPath = binary
-	} else {
+	case "pi":
+		defaults.Model = ""
+		defaults.PiBinaryPath = binary
+	default:
 		defaults.BinaryPath = binary
 	}
 	return config.Config{Launch: config.LaunchConfig{Defaults: defaults, UsageStats: enabled}}
@@ -105,8 +109,10 @@ func TestLaunchExec_ClassifiesEveryBranchWithoutReadingArgv(t *testing.T) {
 	}{
 		{"bare claude", "claude", nil, launch.UsageSessionNew, launch.UsagePostureDefault, "opus"},
 		{"bare codex", "codex", nil, launch.UsageSessionNew, launch.UsagePostureDefault, ""},
+		{"bare pi", "pi", nil, launch.UsageSessionNew, launch.UsagePostureDefault, ""},
 		{"opaque builder", "claude", []string{"--resume", "sessionid", "-p", "secretprompt"}, launch.UsageSessionUnknown, launch.UsagePostureBuilder, "opus"},
 		{"native codex resume", "codex", []string{"resume", "--fork", "deadbeef"}, launch.UsageSessionUnknown, launch.UsagePostureBuilder, ""},
+		{"native pi resume", "pi", []string{"--resume"}, launch.UsageSessionUnknown, launch.UsagePostureBuilder, ""},
 		{"agents passthrough", "claude", []string{"agents", "list", "--json"}, launch.UsageSessionUnknown, launch.UsagePostureAgents, "opus"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -270,6 +276,7 @@ func TestLaunchExec_PreExecBlockersRecordZero(t *testing.T) {
 		{"invalid profile", "claude", func(c *config.Config) { c.Launch.Defaults.Harness = "aider" }, nil},
 		{"unresolvable binary", "claude", func(c *config.Config) { c.Launch.Defaults.BinaryPath = "/nonexistent/harness" }, nil},
 		{"codex agents refusal", "codex", func(*config.Config) {}, []string{"agents", "list"}},
+		{"pi agents refusal", "pi", func(*config.Config) {}, []string{"agents", "list"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			probe := installUsageProbe(t)

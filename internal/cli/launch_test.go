@@ -1249,6 +1249,16 @@ func codexHarness(t *testing.T, configBody string) *harness {
 	return h
 }
 
+func piHarness(t *testing.T, configBody string) *harness {
+	t.Helper()
+	h := newBareHarness(t, configBody)
+	//nolint:gosec // G306: the file is an executable harness stub by design.
+	if err := os.WriteFile(filepath.Join(h.binDir, "pi"), []byte(stubClaude), 0o755); err != nil {
+		t.Fatalf("write stub pi: %v", err)
+	}
+	return h
+}
+
 const codexConfig = `[launch.defaults]
 harness = "codex"
 model = "gpt-5"
@@ -1311,6 +1321,37 @@ func TestIntegration_LaunchDoctor_ResolvesCodexBinary(t *testing.T) {
 	}
 }
 
+func TestIntegration_LaunchWhichAndDoctor_ShowPiProfile(t *testing.T) {
+	const piConfig = `[launch.defaults]
+harness = "pi"
+provider = "lm-studio"
+model = "qwen/qwen3-coder-next"
+`
+	h := piHarness(t, piConfig)
+
+	stdout, _ := h.run(t, "which")
+	for _, want := range []string{"harness", "pi", "provider", "lm-studio", "model", "qwen/qwen3-coder-next"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("`launch which` output missing %q:\n%s", want, stdout)
+		}
+	}
+	for _, forbidden := range []string{"permission", "allow danger", "approval", "sandbox"} {
+		if strings.Contains(stdout, forbidden) {
+			t.Errorf("`launch which` showed non-Pi row %q:\n%s", forbidden, stdout)
+		}
+	}
+
+	stdout, _ = h.run(t, "doctor")
+	if !strings.Contains(stdout, "pi found:") {
+		t.Errorf("`launch doctor` did not report the resolved Pi binary:\n%s", stdout)
+	}
+
+	stderr, err := h.runExpectErr(t, nil, "agents", "list")
+	if err == nil || !strings.Contains(stderr, "no Pi adapter") {
+		t.Errorf("Pi `launch agents` refusal = %v, stderr %q", err, stderr)
+	}
+}
+
 // TestIntegration_LaunchDoctor_RejectsUnsupportedHarness: a typo'd harness
 // must be a doctor failure with a usable message, not a silent fall-through
 // to the Claude path.
@@ -1323,7 +1364,7 @@ func TestIntegration_LaunchDoctor_RejectsUnsupportedHarness(t *testing.T) {
 	}
 	stdout, _, _ := h.exec("doctor")
 	combined := stdout + stderr
-	for _, want := range []string{"launch profile invalid", "gemini", "want claude or codex"} {
+	for _, want := range []string{"launch profile invalid", "gemini", "want claude, codex, or pi"} {
 		if !strings.Contains(combined, want) {
 			t.Errorf("doctor output missing %q:\n%s", want, combined)
 		}
