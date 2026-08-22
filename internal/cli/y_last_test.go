@@ -6,6 +6,8 @@ package cli
 //   [x] Happy: `y last` prints the single most recent command
 //   [x] Happy: `y last 3` prints three commands, oldest first
 //   [x] Happy: the `l` alias resolves to last
+//   [x] Policy: non-terminal stdout refuses before printing any history
+//   [x] Policy: --allow-sensitive-output permits deliberate redirected output
 //   [x] Security: control and bidi characters in history are escaped at the sink
 //   [x] Fail-closed: an absent $HISTFILE errors and prints nothing
 //   [x] Fail-closed: a malformed history errors and prints nothing
@@ -16,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +42,7 @@ func seedHistory(t *testing.T, contents string) string {
 // runYLast executes `y last` with the given args and returns stdout.
 func runYLast(t *testing.T, args ...string) (string, error) {
 	t.Helper()
+	stubYLastOutputTTY(t, true)
 	client := clippkg.New(&exec.FakeRunner{}, clippkg.WithGOOS("darwin"))
 	cmd := newYCmdForClient(client)
 	var stdout bytes.Buffer
@@ -47,6 +51,15 @@ func runYLast(t *testing.T, args ...string) (string, error) {
 	cmd.SetArgs(append([]string{"last"}, args...))
 	err := cmd.ExecuteContext(context.Background())
 	return stdout.String(), err
+}
+
+// stubYLastOutputTTY controls the output policy without requiring a real
+// terminal. No test here is parallel because this seam is package-global.
+func stubYLastOutputTTY(t *testing.T, terminal bool) {
+	t.Helper()
+	previous := yLastOutputIsTerminal
+	yLastOutputIsTerminal = func(io.Writer) bool { return terminal }
+	t.Cleanup(func() { yLastOutputIsTerminal = previous })
 }
 
 func TestYLastCmd_PrintsMostRecentCommand(t *testing.T) {
@@ -71,6 +84,76 @@ func TestYLastCmd_PrintsCountOldestFirst(t *testing.T) {
 	want := "echo two\necho three\necho four\n"
 	if stdout != want {
 		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+func TestYLastCmd_RefusesNonTerminalOutputBeforeHistory(t *testing.T) {
+	seedHistory(t, "export API_TOKEN=secret-that-must-not-print\n")
+	stubYLastOutputTTY(t, false)
+
+	client := clippkg.New(&exec.FakeRunner{}, clippkg.WithGOOS("darwin"))
+	cmd := newYCmdForClient(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"last"})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("y last accepted non-terminal stdout without an explicit acknowledgement")
+	}
+	if !strings.Contains(err.Error(), "--allow-sensitive-output") {
+		t.Errorf("error = %q, want the explicit override", err)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want no history output on refusal", stdout.String())
+	}
+}
+
+func TestYLastCmd_AllowsAcknowledgedNonTerminalOutputAndKeepsItTerminalSafe(t *testing.T) {
+	esc := string(rune(0x1B))
+	seedHistory(t, "export API_TOKEN=secret-value && echo "+esc+"[2J\n")
+	stubYLastOutputTTY(t, false)
+
+	client := clippkg.New(&exec.FakeRunner{}, clippkg.WithGOOS("darwin"))
+	cmd := newYCmdForClient(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"last", "--allow-sensitive-output"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "API_TOKEN=secret-value") {
+		t.Errorf("stdout = %q, want verbatim history value after acknowledgement", stdout.String())
+	}
+	if strings.Contains(stdout.String(), esc) {
+		t.Fatalf("stdout = %q, raw terminal control survived the override path", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "\\x1b") {
+		t.Errorf("stdout = %q, want escaped terminal control", stdout.String())
+	}
+}
+
+func TestYLastCmd_HelpNamesSensitiveOutputBoundary(t *testing.T) {
+	cmd := newYLastCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--help"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	help := stdout.String()
+	for _, want := range []string{"--allow-sensitive-output", "does not", "redact"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help missing %q:\n%s", want, help)
+		}
+	}
+	if cmd.Flags().Lookup("json") != nil {
+		t.Fatal("y last unexpectedly exposes a JSON output path outside the sensitive-output gate")
 	}
 }
 
@@ -157,6 +240,7 @@ func (errWriter) Write([]byte) (int, error) { return 0, errors.New("pipe closed"
 
 func TestYLastCmd_SurfacesWriteFailures(t *testing.T) {
 	seedHistory(t, "echo one\necho two\n")
+	stubYLastOutputTTY(t, true)
 
 	client := clippkg.New(&exec.FakeRunner{}, clippkg.WithGOOS("darwin"))
 	cmd := newYCmdForClient(client)
