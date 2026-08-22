@@ -368,6 +368,18 @@ A user workflow must be **blessed** before `workflow run` will execute it. `forg
 
 The ceremony holds its key in the Secure Enclave, so **blessing is macOS-only**. The `forgectl-bless-helper` binary that performs it ships alongside `forgectl` in the Homebrew cask, and forgectl finds it as a sibling of its own executable. Linux builds still *verify* blessings — that path is pure Go — but cannot create them.
 
+`quarantine` and the clean-room workflow share one default carrier list. The
+standalone command reversibly renames matches; clean-room `strip` permanently
+deletes the same matches only inside its throwaway sandbox. Coverage is
+intentional, not universal-editor protection: in addition to the Claude/Codex
+and MCP execution carriers used by forgectl's review harnesses, the defaults
+hide Cursor's `.cursor/` and `.cursorrules` plus Copilot's
+`.github/instructions/`. Other editor-specific configuration remains visible
+until a concrete forgectl workflow justifies the extra deletion and
+fail-on-existing-`.quarantined` surface. The vendor-neutral MCP pattern remains
+separate, so a matching `.vscode/mcp.json` is still covered as executable MCP
+configuration even though VS Code settings are not quarantined wholesale.
+
 ## Configuration
 
 Optional. forgectl runs with sensible defaults and no config file. To persist preferences, drop a TOML file at `config.toml` in your OS config dir:

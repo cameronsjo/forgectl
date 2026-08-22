@@ -5,7 +5,7 @@ package quarantine
 // Hide (Classification: FS mutation with a security guard)
 //   [x] Happy: PrefixUnderscore scheme renames CLAUDE.md -> _CLAUDE.md
 //   [x] Happy: SuffixQuarantined scheme renames CLAUDE.md -> CLAUDE.md.quarantined
-//   [x] Happy: nested target (.github/copilot-instructions.md) renames only the base name
+//   [x] Happy: nested target (.github/instructions/review.instructions.md) renames only the base name
 //   [x] Happy: a DIRECTORY target (.claude/) is renamed as a unit (_.claude),
 //       and a file inside it rides along with its content intact — issue
 //       #20's verification pass found no test exercising this path directly
@@ -34,6 +34,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -85,14 +86,14 @@ func TestHide_SuffixScheme_RenamesEachTarget(t *testing.T) {
 
 func TestHide_NestedTarget_RenamesOnlyBaseName(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, ".github", "copilot-instructions.md"), "x")
+	writeFile(t, filepath.Join(root, ".github", "instructions", "review.instructions.md"), "x")
 
 	c := New(&exec.FakeRunner{})
-	moves, err := c.Hide(context.Background(), root, PrefixUnderscore, []string{".github/copilot-instructions.md"}, false)
+	moves, err := c.Hide(context.Background(), root, PrefixUnderscore, []string{".github/instructions/review.instructions.md"}, false)
 	if err != nil {
 		t.Fatalf("Hide: %v", err)
 	}
-	wantTo := filepath.Join(root, ".github", "_copilot-instructions.md")
+	wantTo := filepath.Join(root, ".github", "instructions", "_review.instructions.md")
 	if len(moves) != 1 || moves[0].To != wantTo {
 		t.Fatalf("moves = %+v, want single move To %q", moves, wantTo)
 	}
@@ -377,7 +378,7 @@ func TestExpandTargets_FindsNestedInstructionFiles(t *testing.T) {
 		"CLAUDE.md",                       // absent at root, still preserved
 		filepath.Join("src", "AGENTS.md"), // nested
 		filepath.Join("packages", "api", "CLAUDE.md"), // deeply nested
-		".claude", ".cursor", ".github/copilot-instructions.md",
+		".claude", ".cursor", ".github/instructions",
 	} {
 		if !containsStr(got, want) {
 			t.Errorf("ExpandTargets missing %q; got %v", want, got)
@@ -393,15 +394,15 @@ func TestExpandTargets_FindsNestedInstructionFiles(t *testing.T) {
 // quarantine files the caller never asked about.
 func TestExpandTargets_OnlyExpandsNestableBasenames(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "sub", ".github", "copilot-instructions.md"), "nested copilot")
+	writeFile(t, filepath.Join(root, "sub", ".github", "instructions", "review.instructions.md"), "nested copilot")
 	writeFile(t, filepath.Join(root, "other", "src", "AGENTS.md"), "nested but explicitly pathed target")
 
 	// Non-nestable entry: never expanded, even though a nested match exists.
-	got, err := ExpandTargets(root, SuffixQuarantined, []string{".github/copilot-instructions.md"})
+	got, err := ExpandTargets(root, SuffixQuarantined, []string{".github/instructions/review.instructions.md"})
 	if err != nil {
 		t.Fatalf("ExpandTargets: %v", err)
 	}
-	if len(got) != 1 || got[0] != ".github/copilot-instructions.md" {
+	if len(got) != 1 || got[0] != ".github/instructions/review.instructions.md" {
 		t.Errorf("non-nestable target was expanded: %v", got)
 	}
 
@@ -700,6 +701,125 @@ func TestDefaultTargets_CoversMCPCarrier(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(root, ".mcp.json")); !os.IsNotExist(err) {
 		t.Errorf(".mcp.json still readable under its own name after Hide, stat err = %v", err)
+	}
+}
+
+// TestTier2Carriers_ApprovedScope pins Cameron's #229 ruling. The list is
+// intentionally small: Cursor's complete project state plus Copilot's
+// directory-scoped instruction files. It is not a promise to quarantine every
+// editor or assistant configuration.
+func TestTier2Carriers_ApprovedScope(t *testing.T) {
+	want := []string{".cursor/", ".cursorrules", ".github/instructions/"}
+	if !slices.Equal(tier2Carriers, want) {
+		t.Fatalf("tier2Carriers = %v, want the explicitly approved #229 scope %v", tier2Carriers, want)
+	}
+	if containsStr(tier2Carriers, ".cursor/rules") {
+		t.Fatalf(".cursor/ must replace, not overlap, the narrower .cursor/rules target: %v", tier2Carriers)
+	}
+	if pairs := pathPrefixPairs(DefaultTargets); len(pairs) != 0 {
+		t.Fatalf("approved targets introduced overlapping entries: %v", pairs)
+	}
+}
+
+func TestTier2Carriers_HideRestoreRoundTripLeavesUnselectedEditorsUntouched(t *testing.T) {
+	root := t.TempDir()
+	type fixture struct {
+		rel     string
+		content string
+	}
+	approved := []fixture{
+		{filepath.Join(".cursor", "rules", "review.mdc"), "cursor rule"},
+		{".cursorrules", "legacy cursor rule"},
+		{filepath.Join(".github", "instructions", "review.instructions.md"), "copilot rule"},
+	}
+	unselected := []fixture{
+		{filepath.Join(".github", "prompts", "review.prompt.md"), "copilot prompt"},
+		{filepath.Join(".windsurf", "rules", "review.md"), "windsurf rule"},
+		{".windsurfrules", "windsurf legacy rule"},
+		{filepath.Join(".devin", "instructions.md"), "devin rule"},
+		{filepath.Join(".continue", "config.yaml"), "continue config"},
+		{".continuerules", "continue legacy rule"},
+		{filepath.Join(".gemini", "settings.json"), "gemini config"},
+		{"GEMINI.md", "gemini instructions"},
+		{".goosehints", "goose hints"},
+		{".aider.conf.yml", "aider config"},
+		{".clinerules", "cline rules"},
+		{filepath.Join(".vscode", "settings.json"), "vscode config"},
+		{".codex.toml", "invalid legacy codex path"},
+		{"mcp.json", "unsupported root mcp path"},
+		{filepath.Join(".github", "copilot-instructions.md"), "unselected copilot singleton"},
+	}
+	for _, f := range append(append([]fixture{}, approved...), unselected...) {
+		writeFile(t, filepath.Join(root, f.rel), f.content)
+	}
+
+	c := New(&exec.FakeRunner{})
+	targets, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets (hide): %v", err)
+	}
+	if _, err := c.Hide(context.Background(), root, SuffixQuarantined, targets, false); err != nil {
+		t.Fatalf("Hide: %v", err)
+	}
+	for _, f := range approved {
+		if _, err := os.Lstat(filepath.Join(root, f.rel)); !os.IsNotExist(err) {
+			t.Errorf("approved Tier 2 carrier %q survived Hide, stat err = %v", f.rel, err)
+		}
+	}
+	for _, f := range unselected {
+		if got := readFile(t, filepath.Join(root, f.rel)); got != f.content {
+			t.Errorf("unselected editor path %q changed during Hide: got %q, want %q", f.rel, got, f.content)
+		}
+	}
+
+	restoreTargets, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets (restore): %v", err)
+	}
+	moves, err := ComputeMoves(root, SuffixQuarantined, restoreTargets)
+	if err != nil {
+		t.Fatalf("ComputeMoves: %v", err)
+	}
+	if err := c.Restore(context.Background(), moves); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	for _, f := range approved {
+		if got := readFile(t, filepath.Join(root, f.rel)); got != f.content {
+			t.Errorf("approved Tier 2 carrier %q did not round-trip: got %q, want %q", f.rel, got, f.content)
+		}
+	}
+}
+
+func TestTier2Carriers_PreexistingQuarantinedDestinationFailsBeforeMutation(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".cursor", "rules", "review.mdc"), "cursor rule")
+	writeFile(t, filepath.Join(root, ".cursorrules"), "legacy cursor rule")
+	writeFile(t, filepath.Join(root, ".github", "instructions", "review.instructions.md"), "copilot rule")
+	writeFile(t, filepath.Join(root, ".github", "instructions.quarantined", "decoy"), "occupied")
+
+	targets, err := ExpandTargets(root, SuffixQuarantined, DefaultTargets)
+	if err != nil {
+		t.Fatalf("ExpandTargets: %v", err)
+	}
+	moves, err := New(&exec.FakeRunner{}).Hide(context.Background(), root, SuffixQuarantined, targets, false)
+	if err == nil || !strings.Contains(err.Error(), `quarantine destination ".github/instructions.quarantined" already exists`) {
+		t.Fatalf("Hide error = %v, want occupied approved-target destination refusal", err)
+	}
+	if len(moves) != 0 {
+		t.Fatalf("Hide returned moves on preflight refusal: %+v", moves)
+	}
+	for _, f := range []struct {
+		rel     string
+		content string
+	}{
+		{filepath.Join(".cursor", "rules", "review.mdc"), "cursor rule"},
+		{".cursorrules", "legacy cursor rule"},
+		{filepath.Join(".github", "instructions", "review.instructions.md"), "copilot rule"},
+		{filepath.Join(".github", "instructions.quarantined", "decoy"), "occupied"},
+	} {
+		if got := readFile(t, filepath.Join(root, f.rel)); got != f.content {
+			t.Errorf("preflight refusal changed %q: got %q, want %q", f.rel, got, f.content)
+		}
 	}
 }
 
