@@ -147,7 +147,7 @@ func runWorkflowBless(cmd *cobra.Command, deps module.Deps, name string) error {
 		paramNames = append(paramNames, p)
 	}
 	sort.Strings(paramNames)
-	if err := bless.CheckGuardedParamRefs(stepChecks, paramNames); err != nil {
+	if err := bless.CheckGuardedParamRefs(stepChecks, paramNames, workflow.RegistryExportNames(registry)); err != nil {
 		return fmt.Errorf("workflow %q: %w", name, err)
 	}
 

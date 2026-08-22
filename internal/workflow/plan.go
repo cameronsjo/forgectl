@@ -31,27 +31,26 @@ type Plan struct {
 func BuildPlan(wf Workflow, cliParams map[string]string, registry StepRegistry) (Plan, error) {
 	slog.Debug("Preparing to build plan.", "workflowName", wf.Name, "workflowVersion", wf.Version, "stepCount", len(wf.Steps))
 
+	// Params and exports share ONE variable namespace at execution time (the
+	// Context). Reserve the merged registry's COMPLETE export vocabulary, not
+	// merely exports from verbs present in this workflow: a context consumer
+	// such as teardown can read ${workspace} without a worktree/clone step being
+	// present. Checking the structural collision before resolving values makes a
+	// malformed declaration fail consistently — ahead of missing-required or
+	// unknown-CLI-param errors — whether or not the caller supplied the param.
+	for _, exp := range RegistryExportNames(registry) {
+		if _, isParam := wf.Params[exp]; isParam {
+			slog.Error("Param name collides with a reserved step export.", "workflowName", wf.Name, "param", exp)
+			return Plan{}, fmt.Errorf("param %q collides with reserved step export %q: params and step exports share one namespace", exp, exp)
+		}
+	}
+
 	resolved, err := resolveParams(wf.Params, cliParams)
 	if err != nil {
 		slog.Error("Failed to resolve workflow params.", "workflowName", wf.Name, "error", err)
 		return Plan{}, err
 	}
 	slog.Debug("Resolved workflow params.", "paramCount", len(resolved))
-
-	// Params and exports share ONE variable namespace at execution time (the
-	// Context), and an export only overwrites its name if its step actually
-	// Sets it — so a param named after an export could survive into later
-	// steps if an exporting step ever succeeded without setting it. That would
-	// let a CLI-supplied value ride a name the bless-time injection guard
-	// (#10) trusts as step-produced. Refuse the collision outright.
-	for i, s := range wf.Steps {
-		for _, exp := range registry[s.Uses].Exports {
-			if _, isParam := wf.Params[exp]; isParam {
-				slog.Error("Param name collides with a step export.", "workflowName", wf.Name, "param", exp, "stepIndex", i, "stepUse", s.Uses)
-				return Plan{}, fmt.Errorf("param %q collides with the %q export of step %d (%s): params and step exports share one namespace", exp, exp, i, s.Uses)
-			}
-		}
-	}
 
 	ctx := NewContext(resolved)
 	// Mark every variable a step exports as deferred, so a field that

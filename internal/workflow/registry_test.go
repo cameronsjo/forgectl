@@ -50,3 +50,22 @@ func TestNewRegistry_MergesContributions(t *testing.T) {
 		t.Errorf("launch exports = %v, want [review] — plan-time deferral depends on it", got)
 	}
 }
+
+func TestRegistryExportNames_IsSortedUniqueAndIncludesContributions(t *testing.T) {
+	reg, err := NewRegistry(StepRegistry{
+		"publish": {Exports: []string{"zeta", "workspace", "alpha"}},
+	})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	want := []string{"alpha", "workspace", "zeta"}
+	got := RegistryExportNames(reg)
+	if len(got) != len(want) {
+		t.Fatalf("RegistryExportNames = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("RegistryExportNames[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

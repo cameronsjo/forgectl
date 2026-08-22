@@ -77,7 +77,9 @@ func NewExecutor(run exec.Runner, registry StepRegistry, opts ...Option) *Execut
 // escape hatch: its cmd and args choose what runs, so both are guarded.
 // worktree/clone take repo/ref, which merely NAME data — parameterizing them
 // (`--param repo=owner/x`) is the feature, and the sandbox contains what they
-// fetch. teardown reads only ${workspace} from the Context. collect's `from`
+// fetch. teardown's Workspace is an implicit Context input rather than a TOML
+// field; guarding it makes blessing prove that ${workspace} came from an
+// earlier worktree/clone step. collect's `from`
 // merely names a data path to read, but `to` is a write DESTINATION: a ${param}
 // there would let an agent redirect where the human-blessed bytes land at run
 // time, so `to` is a guarded write sink. The guard is bless-time, so closing it
@@ -88,7 +90,7 @@ func builtinRegistry() StepRegistry {
 		"run":      {Runner: runStep, GuardedFields: []string{"Cmd", "Args"}},
 		"worktree": {Runner: newSandboxStep(false), Exports: []string{"workspace"}},
 		"clone":    {Runner: newSandboxStep(true), Exports: []string{"workspace"}},
-		"teardown": {Runner: teardownStep},
+		"teardown": {Runner: teardownStep, GuardedFields: []string{"Workspace"}},
 		"collect":  {Runner: notYetWiredStep, GuardedFields: []string{"To"}},
 	}
 }
