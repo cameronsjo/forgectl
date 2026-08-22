@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -20,6 +21,12 @@ import (
 // than from a Runner call. Tests must restore it and must not run in parallel
 // while overriding it. Mirrors the classifier seams in workspace_state.go.
 var sandboxTeardown = sandbox.Teardown
+
+// staleMemberIsRegular is the mode-check seam. Production is exactly
+// FileInfo.Mode().IsRegular; the test override forces only that verdict after
+// the real pinned-root Lstat and SameFile checks have passed, so coverage does
+// not depend on whether the host filesystem recycles an inode into a symlink.
+var staleMemberIsRegular = func(info fs.FileInfo) bool { return info.Mode().IsRegular() }
 
 // Teardown discards the review session recorded at path.
 //
@@ -194,7 +201,7 @@ func (c *Client) discardStale(member breadcrumbMember) error {
 	if !os.SameFile(info, member.info) {
 		return fmt.Errorf("breadcrumb %s changed identity during teardown; refusing to remove it", member.displayPath)
 	}
-	if !info.Mode().IsRegular() {
+	if !staleMemberIsRegular(info) {
 		return fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to remove it", member.displayPath)
 	}
 

@@ -126,6 +126,33 @@ func TestDiscardStale_RemovesOnlyTheAuthorizedBreadcrumb(t *testing.T) {
 	f.canary.assertIntact(t)
 }
 
+// TestDiscardStale_NonRegularArmIsDeterministic is the durable result of #322's
+// Linux mutation experiment: removing the IsRegular arm left Build, Vet, and
+// Test green on Linux, just as it did on macOS. The allocator-dependent
+// symlink case therefore reached this area without depending on the arm's
+// result. This test forces only the IsRegular predicate false after the real
+// pinned-root Lstat and identity check pass, so only the mode guard can refuse.
+// Removing or inverting that guard deletes the breadcrumb and makes this test
+// fail on every filesystem.
+func TestDiscardStale_NonRegularArmIsDeterministic(t *testing.T) {
+	f := newStaleFixture(t)
+	original := staleMemberIsRegular
+	staleMemberIsRegular = func(fs.FileInfo) bool { return false }
+	t.Cleanup(func() { staleMemberIsRegular = original })
+
+	err := f.client.discardStale(f.member)
+	if err == nil || !strings.Contains(err.Error(), "is no longer a regular file") {
+		t.Fatalf("discardStale refusal = %v, want the non-regular-file arm", err)
+	}
+	if _, statErr := os.Lstat(f.path); statErr != nil {
+		t.Errorf("mode refusal must leave the breadcrumb in place: %v", statErr)
+	}
+	if len(f.fake.Calls) != 0 {
+		t.Errorf("mode refusal must issue zero Runner calls; got %+v", f.fake.Calls)
+	}
+	f.canary.assertIntact(t)
+}
+
 func TestDiscardStale_RefusesOnDrift(t *testing.T) {
 	// Each case mutates the filesystem AFTER the snapshot was taken, and
 	// declares what should still be assertable afterwards. A case that itself
