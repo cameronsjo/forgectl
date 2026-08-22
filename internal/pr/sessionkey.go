@@ -133,7 +133,9 @@ const maxPRNumber = math.MaxInt
 //
 // 255 is far above anything real (GitHub caps owners at 39 and repos at 100)
 // and far below the wrap point, so it can never be the thing that refuses a
-// legitimate repository.
+// legitimate repository. TestLocalSessionKeyAcceptsExactlyTheDeclaredWidths
+// allocates and exercises every oid width through this bound, so raising it
+// also raises that test's work quadratically.
 const maxSessionKeyFieldBytes = 255
 
 // checkFieldLength rejects a string too long for the canonical encoding to

@@ -310,12 +310,13 @@ func TestOidWidthsAreDistinct(t *testing.T) {
 // persisted key first has to read back. Asserting "accepted if and only if
 // declared" over the whole width range catches either direction.
 func TestLocalSessionKeyAcceptsExactlyTheDeclaredWidths(t *testing.T) {
-	// The bound comes from the ENCODING's own hard limit — not from a width that
-	// looks roomy, and not from oidWidths. appendLenString refuses to emit a field
-	// over maxSessionKeyFieldBytes, so every width whose keys can be encoded at all
-	// is at or below it: sweeping to exactly that covers the whole constructible
-	// range by construction, and cannot expire the way "SHA-512 hex is 128, so 160
-	// is roomy" expires the moment someone declares wider.
+	// The bound comes from the oid's CURRENT ENCODING PATH — not from a width that
+	// looks roomy, and not from oidWidths. Every oid localSessionKey can encode
+	// currently routes through appendLenString, which refuses a field over
+	// maxSessionKeyFieldBytes, so sweeping to exactly that covers the whole
+	// constructible range as long as appendLenString remains the oid's single
+	// write path. Naming that condition keeps a future writer from inheriting a
+	// guarantee this sweep would no longer establish.
 	//
 	// Deriving it from oidWidths instead would be strictly worse. A
 	// constructor-only width is absent from the map by definition, so a
