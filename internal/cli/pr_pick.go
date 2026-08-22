@@ -103,16 +103,7 @@ func pickPRs(prs []pr.PR, store *pr.ReviewedStore) ([]pr.PR, error) {
 	opts := make([]huh.Option[string], len(prs))
 	for i, p := range prs {
 		refKey := p.Ref.String()
-		// refKey is escaped in the LABEL and raw in the key. It is structured
-		// (owner/repo#N) rather than free text, so this is belt-and-braces — but
-		// the label's other half was already escaped, and a label with one
-		// escaped part and one raw part is the shape that reads as safe while
-		// not being it.
-		label := fmt.Sprintf("%s  %s", safeTerm(refKey), sanitizeCell(p.Title))
-		if pr.Dimmed(p, store) {
-			label = prDimStyle.Render(label + "  (reviewed)")
-		}
-		opts[i] = huh.NewOption(label, refKey)
+		opts[i] = huh.NewOption(prPickerLabel(p, store), refKey)
 	}
 
 	var chosen []string
@@ -140,6 +131,17 @@ func pickPRs(prs []pr.PR, store *pr.ReviewedStore) ([]pr.PR, error) {
 		}
 	}
 	return out, nil
+}
+
+// prPickerLabel renders the human-only picker label. Both dynamic fields cross
+// the shared terminal boundary; SafeLine leaves ordinary text byte-identical
+// and visibly escapes controls rather than silently erasing evidence of them.
+func prPickerLabel(p pr.PR, store *pr.ReviewedStore) string {
+	label := fmt.Sprintf("%s  %s", safeTerm(p.Ref.String()), safeTerm(p.Title))
+	if pr.Dimmed(p, store) {
+		label = prDimStyle.Render(label + "  (reviewed)")
+	}
+	return label
 }
 
 // launchPicked prepares the non-dimmed selected PRs concurrently, then launches

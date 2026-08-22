@@ -8,7 +8,7 @@ package cli
 //   [x] Happy: no themes at all prints a clear "none found" message
 //   [x] Unhappy: a theme name carrying C0/DEL bytes (from a third-party
 //       theme pack under ~/.config/ghostty/themes/) renders sanitized
-//       (forgectl#7 fold, mirrors forgectl#162's sanitizeCell hardening)
+//       (forgectl#7 fold, mirrors forgectl#162's terminal hardening)
 //
 // newGhosttyCheatCmd (Classification: API handler / cobra command)
 //   [x] Happy: renders the keybind sheet from parsed +list-keybinds output

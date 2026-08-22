@@ -9,7 +9,7 @@ package tui
 //   [x] Happy: --no-icons swaps in the ASCII glyph set
 //   [x] Unhappy: a hostile trigger/action/comment carrying C0/DEL bytes
 //       renders with the control bytes stripped (forgectl#7 fold, mirrors
-//       internal/cli's sanitizeCell hardening from forgectl#162)
+//       forgectl#162's original terminal hardening)
 //
 // sanitizeControlBytes (Classification: pure sanitizer)
 //   [x] Happy: every C0 byte and DEL is stripped, visible content survives

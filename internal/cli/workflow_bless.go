@@ -18,6 +18,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/workflow"
 )
 
@@ -550,7 +551,10 @@ func newWorkflowTrustListCmd() *cobra.Command {
 			}
 			fmt.Fprintln(out, "enrolled keys:")
 			for _, k := range store.Keys {
-				fmt.Fprintf(out, "  %s  %s  %s\n", k.KeyID, k.Machine, k.AddedAt)
+				if _, err := fmt.Fprintf(out, "  %s  %s  %s\n", k.KeyID,
+					termsafe.SafeLine(k.Machine), termsafe.SafeLine(k.AddedAt)); err != nil {
+					return err
+				}
 			}
 			return nil
 		},
