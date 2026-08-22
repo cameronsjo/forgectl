@@ -197,6 +197,31 @@ func TestFingerprint_DistinguishesIncarnations(t *testing.T) {
 	}
 }
 
+// TestFingerprint_GoldenSchema makes the fingerprint's field set an explicit
+// compatibility surface. Adding, removing, reordering, or re-encoding a field
+// changes this digest and forces the same change to confront refVersion rather
+// than silently making every persisted reference look like a server restart.
+func TestFingerprint_GoldenSchema(t *testing.T) {
+	id, err := backend.Fingerprint(backend.IncarnationInput{
+		Endpoint:          "/private/tmp/fc/golden.sock",
+		Device:            0x0102030405060708,
+		Inode:             0x1112131415161718,
+		ChangedAtUnixNano: 0x2122232425262728,
+		Version:           "backend/v9 protocol 27",
+		PID:               0x31323334,
+		StartedAtUnixNano: 0x4142434445464748,
+		ServerReported:    "incarnation-token",
+	})
+	if err != nil {
+		t.Fatalf("Fingerprint: %v", err)
+	}
+
+	const want = "b55c9464802849c00a4db07be22b727c7ed40c95e01a1ed39fd0f4a6475673ea"
+	if got := id.String(); got != want {
+		t.Errorf("Fingerprint(golden input) = %q, want %q; if the field schema changed intentionally, bump refVersion with this digest", got, want)
+	}
+}
+
 // TestFingerprint_FieldBoundariesAreHashed proves the length prefixing does
 // something. Concatenating the fields raw would let an endpoint that ends in a
 // version string collide with the other split — a collision an attacker who
@@ -367,36 +392,37 @@ func TestDecodeRef_FailsClosed(t *testing.T) {
 		"empty":                 ``,
 		"not an object":         `"nope"`,
 		"no version":            `{"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `"}`,
-		"future version":        `{"version":2,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `"}`,
-		"unknown backend":       `{"version":1,"kind":"screen","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `"}`,
-		"unknown source":        `{"version":1,"kind":"tmux","source":"tmux-guessed","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `"}`,
-		"source is a path":      `{"version":1,"kind":"tmux","source":"/tmp/tmux-501/default","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `"}`,
-		"cross-backend source":  `{"version":1,"kind":"tmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `"}`,
-		"no server identity":    `{"version":1,"kind":"tmux","source":"tmux-default","server":"","tag":"` + tag + `","session":"` + session + `"}`,
-		"short server identity": `{"version":1,"kind":"tmux","source":"tmux-default","server":"abc","tag":"` + tag + `","session":"` + session + `"}`,
-		"bad tag":               `{"version":1,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"nope","session":"` + session + `"}`,
-		"unknown field":         `{"version":1,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","focus":true}`,
-		"trailing content":      string(good) + `{"version":1}`,
+		"old version":           `{"version":1,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `"}`,
+		"future version":        `{"version":3,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `"}`,
+		"unknown backend":       `{"version":2,"kind":"screen","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `"}`,
+		"unknown source":        `{"version":2,"kind":"tmux","source":"tmux-guessed","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `"}`,
+		"source is a path":      `{"version":2,"kind":"tmux","source":"/tmp/tmux-501/default","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `"}`,
+		"cross-backend source":  `{"version":2,"kind":"tmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `"}`,
+		"no server identity":    `{"version":2,"kind":"tmux","source":"tmux-default","server":"","tag":"` + tag + `","session":"` + session + `"}`,
+		"short server identity": `{"version":2,"kind":"tmux","source":"tmux-default","server":"abc","tag":"` + tag + `","session":"` + session + `"}`,
+		"bad tag":               `{"version":2,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"nope","session":"` + session + `"}`,
+		"unknown field":         `{"version":2,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","focus":true}`,
+		"trailing content":      string(good) + `{"version":2}`,
 
 		// The session name must carry this reference's own tag. A reference
 		// naming somebody else's session is the one that would kill an
 		// operator's live work.
-		"foreign session name": `{"version":1,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `","session":"my-work"}`,
-		"tag/name disagree":    `{"version":1,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `","session":"fc-surface-` + strings.Repeat("a", 32) + `"}`,
-		"no session":           `{"version":1,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `"}`,
+		"foreign session name": `{"version":2,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `","session":"my-work"}`,
+		"tag/name disagree":    `{"version":2,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `","session":"fc-surface-` + strings.Repeat("a", 32) + `"}`,
+		"no session":           `{"version":2,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `"}`,
 
 		// Fields belonging to another backend must be refused, not ignored.
-		"tmux with a workspace": `{"version":1,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","workspace":"` + uuidA + `"}`,
-		"cmux with a session":   `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","workspace":"` + uuidA + `"}`,
-		"cmux with a pane":      `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"` + uuidA + `","pane":"p1"}`,
-		"herdr with a session":  `{"version":1,"kind":"herdr","source":"herdr-default-session","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","workspace":"ws-1"}`,
+		"tmux with a workspace": `{"version":2,"kind":"tmux","source":"tmux-default","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","workspace":"` + uuidA + `"}`,
+		"cmux with a session":   `{"version":2,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","workspace":"` + uuidA + `"}`,
+		"cmux with a pane":      `{"version":2,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"` + uuidA + `","pane":"p1"}`,
+		"herdr with a session":  `{"version":2,"kind":"herdr","source":"herdr-default-session","server":"` + digest + `","tag":"` + tag + `","session":"` + session + `","workspace":"ws-1"}`,
 
 		// Backend-specific grammar.
-		"cmux workspace is not a uuid":   `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"ws-1"}`,
-		"cmux uuid with a non-hex digit": `{"version":1,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"z9d03be6-9444-4a2b-9c24-aba8c1126a0a"}`,
-		"herdr workspace has a colon":    `{"version":1,"kind":"herdr","source":"herdr-default-session","server":"` + digest + `","tag":"` + tag + `","workspace":"ws-1:pane-2"}`,
-		"herdr workspace is empty":       `{"version":1,"kind":"herdr","source":"herdr-default-session","server":"` + digest + `","tag":"` + tag + `","workspace":""}`,
-		"herdr workspace oversized":      `{"version":1,"kind":"herdr","source":"herdr-default-session","server":"` + digest + `","tag":"` + tag + `","workspace":"` + strings.Repeat("w", 129) + `"}`,
+		"cmux workspace is not a uuid":   `{"version":2,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"ws-1"}`,
+		"cmux uuid with a non-hex digit": `{"version":2,"kind":"cmux","source":"cmux-env","server":"` + digest + `","tag":"` + tag + `","workspace":"z9d03be6-9444-4a2b-9c24-aba8c1126a0a"}`,
+		"herdr workspace has a colon":    `{"version":2,"kind":"herdr","source":"herdr-default-session","server":"` + digest + `","tag":"` + tag + `","workspace":"ws-1:pane-2"}`,
+		"herdr workspace is empty":       `{"version":2,"kind":"herdr","source":"herdr-default-session","server":"` + digest + `","tag":"` + tag + `","workspace":""}`,
+		"herdr workspace oversized":      `{"version":2,"kind":"herdr","source":"herdr-default-session","server":"` + digest + `","tag":"` + tag + `","workspace":"` + strings.Repeat("w", 129) + `"}`,
 	}
 
 	for name, in := range tests {

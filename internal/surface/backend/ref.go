@@ -17,7 +17,7 @@ import (
 
 // refVersion is the wire version of an encoded reference. A decoder that meets
 // any other value fails closed rather than guessing which fields it can trust.
-const refVersion = 1
+const refVersion = 2
 
 // ownershipPrefix namespaces every object forgectl creates in a manager.
 //
