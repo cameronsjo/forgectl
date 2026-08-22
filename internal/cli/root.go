@@ -5,11 +5,56 @@
 package cli
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
+
+// structuredTerminalError is composed only from trusted layout and fields
+// sanitized at their trust boundary. termsafeErrorHandler recognizes this
+// exact private type so it can preserve those newlines; every other error still
+// passes through the one-physical-line fallback.
+type structuredTerminalError struct {
+	headline    string
+	suggestions []string
+}
+
+func (e *structuredTerminalError) Error() string {
+	if len(e.suggestions) == 0 {
+		return e.headline
+	}
+	return e.headline + "\n\nDid you mean this?\n  " + strings.Join(e.suggestions, "\n  ")
+}
+
+// safeRootArgs mirrors Cobra's legacy root-argument validation while keeping
+// the unknown verb and suggestions separate from Cobra-authored structure.
+// Cobra otherwise concatenates all of them into one opaque error string, after
+// which the error sink cannot tell a hostile embedded newline from its own
+// "Did you mean" layout.
+func safeRootArgs(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+
+	headline := fmt.Sprintf("unknown command %s for %s", termsafe.QuoteText(args[0]), termsafe.QuoteText(cmd.CommandPath()))
+	suggestions := cmd.SuggestionsFor(args[0])
+	for i := range suggestions {
+		suggestions[i] = termsafe.SafeLine(suggestions[i])
+	}
+
+	return &structuredTerminalError{headline: headline, suggestions: suggestions}
+}
+
+// showRootHelp keeps Cobra's prior non-runnable-root behavior after adding the
+// Args validator: a bare headless invocation still prints help and returns nil
+// to Execute, which turns the no-dispatch outcome into errHeadlessMenuRoute.
+func showRootHelp(*cobra.Command, []string) error { return pflag.ErrHelp }
 
 // newRoot builds the root command tree from the module registry
 // (allModules) — every command group registers through its manifest
@@ -19,6 +64,8 @@ func newRoot(deps module.Deps) *cobra.Command {
 		Use:     meta.AppName,
 		Short:   meta.Tagline,
 		Version: meta.Version,
+		Args:    safeRootArgs,
+		RunE:    showRootHelp,
 		// fang renders styled errors/usage; we own when usage appears so an op
 		// failure doesn't dump a wall of help. Bare-invoke → TUI is handled in
 		// Execute, before Cobra runs.
