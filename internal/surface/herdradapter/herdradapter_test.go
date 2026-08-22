@@ -1092,6 +1092,184 @@ func TestReconciliationMatchesOnTheMarkerAndOnNovelty(t *testing.T) {
 	}
 }
 
+// TestReconciliationBindsABenignCtimeChangeToTheFreshIncarnation covers the
+// #367 ruling for herdr. The marker and pre-snapshot identify one workspace;
+// fresh readiness must resolve the same named session to the same socket before
+// binding that workspace to the current incarnation.
+func TestReconciliationBindsABenignCtimeChangeToTheFreshIncarnation(t *testing.T) {
+	if !changeTimeSupported {
+		t.Skip("socket ctime is not part of fingerprints on this platform")
+	}
+	spec, tag := newSpec(t)
+	marker := tag.OwnershipName()
+
+	stats := 0
+	before := liveSocketWithChangeTime(liveInode, 1_000)
+	after := liveSocketWithChangeTime(liveInode, 2_000)
+	seam := func(path string) (os.FileInfo, error) {
+		stats++
+		if stats == 1 {
+			return before(path)
+		}
+		return after(path)
+	}
+	var warnings bytes.Buffer
+	run := newRunner().reply1(exec.KindHerdrReconcile, listJSON([2]string{wsA, marker}))
+	a := newTestAdapter(t, run, nil,
+		WithLstat(seam),
+		WithSocketDirStat(func(string) (os.FileInfo, error) {
+			return fakeInfo{sys: &syscall.Stat_t{Uid: testUID}, mode: fs.ModeDir | 0o777}, nil
+		}),
+		WithWarnings(&warnings),
+	)
+
+	res := a.Start(context.Background(), spec)
+
+	if res.Outcome() != backend.RefKnown || !res.Failed() {
+		t.Fatalf("outcome = %v, failed = %v; want RefKnown-with-cause", res.Outcome(), res.Failed())
+	}
+	if _, ok := res.Ref(); !ok {
+		t.Fatal("fresh reconciliation returned no closeable reference")
+	}
+	if got := strings.Count(warnings.String(), "warning: herdr socket directory"); got != 1 {
+		t.Errorf("warning count = %d, want 1 across both readiness passes", got)
+	}
+}
+
+func TestReconciliationKeepsOutcomeUnknownWhenFreshReadinessFails(t *testing.T) {
+	spec, tag := newSpec(t)
+	marker := tag.OwnershipName()
+	statusCalls := 0
+	run := newRunner().
+		reply1(exec.KindHerdrCreate, []byte("not a create reply")).
+		reply1(exec.KindHerdrReconcile, listJSON([2]string{wsA, marker})).
+		on(exec.KindHerdrReadiness, func() (exec.SensitiveResult, error) {
+			statusCalls++
+			if statusCalls == 1 {
+				return stdout(goodStatus()), nil
+			}
+			return exec.SensitiveResult{}, exec.SensitiveErrorForTest(exec.KindHerdrReadiness, exec.OutcomeExit)
+		})
+	a := newTestAdapter(t, run, nil)
+
+	res := a.Start(context.Background(), spec)
+
+	if res.Outcome() != backend.OutcomeUnknown {
+		t.Errorf("outcome = %v, want OutcomeUnknown", res.Outcome())
+	}
+	if _, ok := res.Ref(); ok {
+		t.Fatal("failed fresh readiness minted a reference")
+	}
+	got, ok := res.RecoveryTag()
+	if !ok {
+		t.Fatal("OutcomeUnknown carries no recovery tag")
+	}
+	if got.String() != tag.String() {
+		t.Errorf("tag = %q, want %q", got.String(), tag.String())
+	}
+}
+
+func TestReconciliationNeverFollowsAChangedHerdrEndpoint(t *testing.T) {
+	spec, tag := newSpec(t)
+	marker := tag.OwnershipName()
+	const movedSocket = "/tmp/another-herdr/herdr.sock"
+	rosterCalls := 0
+	statusCalls := 0
+	var statPaths []string
+	run := newRunner().
+		reply1(exec.KindHerdrCreate, []byte("not a create reply")).
+		reply1(exec.KindHerdrReconcile, listJSON([2]string{wsA, marker})).
+		on(exec.KindHerdrReadiness, func() (exec.SensitiveResult, error) {
+			statusCalls++
+			return stdout(goodStatus()), nil
+		})
+	run.sessions = func() (exec.SensitiveResult, error) {
+		rosterCalls++
+		socket := testSocket
+		if rosterCalls > 1 {
+			socket = movedSocket
+		}
+		return stdout(sessionsJSON(map[string]any{
+			"default": true, "name": defaultSession, "running": true, "socket_path": socket,
+		})), nil
+	}
+	live := liveSocket(liveInode)
+	a := newTestAdapter(t, run, nil, WithLstat(func(path string) (os.FileInfo, error) {
+		statPaths = append(statPaths, path)
+		return live(path)
+	}))
+
+	res := a.Start(context.Background(), spec)
+
+	if res.Outcome() != backend.OutcomeUnknown {
+		t.Errorf("outcome = %v, want OutcomeUnknown", res.Outcome())
+	}
+	if _, ok := res.Ref(); ok {
+		t.Fatal("a moved herdr endpoint minted a reference")
+	}
+	if statusCalls != 1 {
+		t.Errorf("pinned status calls = %d, want 1; fresh readiness followed the moved endpoint", statusCalls)
+	}
+	for _, path := range statPaths {
+		if path == movedSocket {
+			t.Fatal("fresh readiness statted the moved endpoint instead of failing closed")
+		}
+	}
+}
+
+func TestReconciliationKeepsOutcomeUnknownWhenTheHerdrSessionPinChanges(t *testing.T) {
+	spec, tag := newSpec(t)
+	marker := tag.OwnershipName()
+	rosterCalls := 0
+	var a *Adapter
+	run := newRunner().
+		reply1(exec.KindHerdrCreate, []byte("not a create reply")).
+		on(exec.KindHerdrReconcile, func() (exec.SensitiveResult, error) {
+			a.session = "other"
+			return stdout(listJSON([2]string{wsA, marker})), nil
+		})
+	run.sessions = func() (exec.SensitiveResult, error) {
+		rosterCalls++
+		return stdout(defaultSessions()), nil
+	}
+	a = newTestAdapter(t, run, nil)
+
+	res := a.Start(context.Background(), spec)
+
+	if res.Outcome() != backend.OutcomeUnknown {
+		t.Errorf("outcome = %v, want OutcomeUnknown", res.Outcome())
+	}
+	if _, ok := res.Ref(); ok {
+		t.Fatal("a changed session pin minted a reference")
+	}
+	if rosterCalls != 1 {
+		t.Errorf("session roster calls = %d, want 1; fresh readiness followed a changed session pin", rosterCalls)
+	}
+}
+
+func TestAnAmbiguousReconciliationDoesNotRunFreshReadiness(t *testing.T) {
+	spec, tag := newSpec(t)
+	marker := tag.OwnershipName()
+	rosterCalls := 0
+	run := newRunner().
+		reply1(exec.KindHerdrCreate, []byte("not a create reply")).
+		reply1(exec.KindHerdrReconcile, listJSON([2]string{wsA, marker}, [2]string{wsB, marker}))
+	run.sessions = func() (exec.SensitiveResult, error) {
+		rosterCalls++
+		return stdout(defaultSessions()), nil
+	}
+	a := newTestAdapter(t, run, nil)
+
+	res := a.Start(context.Background(), spec)
+
+	if res.Outcome() != backend.OutcomeUnknown {
+		t.Errorf("outcome = %v, want OutcomeUnknown", res.Outcome())
+	}
+	if rosterCalls != 1 {
+		t.Errorf("session roster calls = %d, want 1; ambiguity must not attempt a fresh bind", rosterCalls)
+	}
+}
+
 // TestAFailedPreSnapshotStopsTheLaunch pins the check that lets reconciliation
 // tell this attempt's workspace from a retry's leftover.
 func TestAFailedPreSnapshotStopsTheLaunch(t *testing.T) {
