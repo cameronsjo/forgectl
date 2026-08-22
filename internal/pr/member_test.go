@@ -133,9 +133,9 @@ func TestResolveBreadcrumbMember_AliasFormsSelectTheRealMember(t *testing.T) {
 
 func TestResolveBreadcrumbMember_CapturesTerminalSafeDisplayPath(t *testing.T) {
 	c := testClient(t, &exec.FakeRunner{})
-	real, workspace := seedStaleSession(t, c, Ref{Owner: "o", Repo: "r", Number: 1}, time.Now().UTC())
+	realPath, workspace := seedStaleSession(t, c, Ref{Owner: "o", Repo: "r", Number: 1}, time.Now().UTC())
 	hostile := filepath.Join(c.SessionsDir(), "planted-\x1b[2K\rinnocent\u202egnj.json")
-	if err := os.Rename(real, hostile); err != nil {
+	if err := os.Rename(realPath, hostile); err != nil {
 		t.Fatalf("rename breadcrumb to hostile filename: %v", err)
 	}
 
