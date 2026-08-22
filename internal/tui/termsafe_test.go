@@ -145,8 +145,8 @@ func TestSuccessStatusDrawsNothingUnsafe(t *testing.T) {
 	}
 }
 
-// TestConfirmPromptDrawsNothingUnsafe covers the kill/rename confirmation,
-// which renders the selected session's name inside a huh form.
+// TestConfirmPromptDrawsNothingUnsafe covers the kill confirmation, which
+// renders the selected session's name inside a huh form.
 func TestConfirmPromptDrawsNothingUnsafe(t *testing.T) {
 	m := hostileModel(t)
 	out, _ := m.Update(key("2"))
@@ -157,4 +157,24 @@ func TestConfirmPromptDrawsNothingUnsafe(t *testing.T) {
 		t.Fatalf("expected the confirmation form, got mode %v", m.mode)
 	}
 	termsafetest.AssertInert(t, "confirmation form", m.View())
+}
+
+// TestRenamePromptDrawsNothingUnsafe pins startRename's %q boundary directly.
+// The kill prompt above reaches its sibling through Update; rename used to have
+// no test at all, so changing its title to %s left the suite green.
+func TestRenamePromptDrawsNothingUnsafe(t *testing.T) {
+	m := hostileModel(t)
+	out, _ := m.startRename(tmux.SessionIdentity{Name: termsafetest.Hostile("work")})
+	m = out.(model)
+	if m.mode != formMode {
+		t.Fatalf("expected the rename form, got mode %v", m.mode)
+	}
+	view := m.View()
+	if view == "" {
+		t.Fatal("rename form drew nothing; the check would pass vacuously")
+	}
+	termsafetest.AssertInert(t, "rename form", view)
+	if !strings.Contains(view, "Rename") || !strings.Contains(view, "work") {
+		t.Fatalf("rename prompt lost its legible title: %q", view)
+	}
 }
