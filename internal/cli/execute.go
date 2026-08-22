@@ -271,11 +271,38 @@ func fangOptions(version, commit string) []fang.Option {
 // an ANSI escape or a bidi override. Sanitizing here rather than at each
 // fmt.Errorf means a new command cannot reintroduce the hole by forgetting.
 //
-// termsafe.Error preserves the unwrap chain, so errors.Is/errors.As disposition
-// upstream is untouched; and SafeLine leaves ordinary ASCII byte-identical, so
-// fang's own prefix match for usage errors ("unknown flag: …") still fires.
+// safeRootArgs is the one structured exception: it sanitizes each untrusted
+// field before composing Cobra's "Did you mean" block, so its private error
+// type can retain forgectl-owned newlines. termsafe.Error preserves the unwrap
+// chain for every other error, so errors.Is/errors.As disposition upstream is
+// untouched; and SafeLine leaves ordinary ASCII byte-identical, so fang's own
+// prefix match for usage errors ("unknown flag: …") still fires.
 func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
+	if structured, ok := err.(*structuredTerminalError); ok {
+		renderStructuredTerminalError(w, styles, structured)
+		return
+	}
 	fang.DefaultErrorHandler(w, styles, termsafe.Error(err))
+}
+
+// renderStructuredTerminalError applies fang's normal error styles one safe
+// field at a time. fang's ErrorText transform intentionally collapses all
+// whitespace in a single Render call, so handing it the complete structured
+// message would flatten the trusted newlines again even after fixing the
+// sanitizer boundary.
+func renderStructuredTerminalError(w io.Writer, styles fang.Styles, err *structuredTerminalError) {
+	_, _ = fmt.Fprintln(w, styles.ErrorHeader.String())
+	_, _ = fmt.Fprintln(w, styles.ErrorText.Render(err.headline+"."))
+	if len(err.suggestions) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, styles.ErrorText.Render("Did you mean this?"))
+		for _, suggestion := range err.suggestions {
+			_, _ = fmt.Fprintln(w, styles.ErrorText.UnsetTransform().Render("  "+suggestion))
+		}
+	}
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, styles.ErrorText.UnsetWidth().Render("Try --help for usage."))
+	_, _ = fmt.Fprintln(w)
 }
 
 // runAction opens the TUI and performs whatever jump it selected. Jumps that

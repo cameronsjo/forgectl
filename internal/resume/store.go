@@ -160,6 +160,7 @@ func Save(dir string, r *Record) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create resume store %s: %w", dir, err)
 	}
+	// termsafe:allow-raw-json persisted resume record, never command output
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return err

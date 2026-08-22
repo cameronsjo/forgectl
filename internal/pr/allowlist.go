@@ -192,6 +192,7 @@ func writeSettings(workspace string, perms permissions) (string, error) {
 		return "", fmt.Errorf("create allowlist dir: %w", err)
 	}
 	settings := allowlistSettings{Permissions: perms}
+	// termsafe:allow-raw-json persisted Claude settings file, never command output
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal allowlist: %w", err)

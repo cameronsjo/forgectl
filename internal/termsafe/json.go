@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -31,11 +32,13 @@ import (
 //
 // encoding/json escapes every byte below 0x20 inside a string, which is why C0
 // controls were never the gap. Above 0x20 it escapes only '"', '\\', U+2028 and
-// U+2029 — so DEL, the C1 controls (U+0080–U+009F, which include CSI and OSC
-// and drive the same cursor and window-title operations as their two-byte C0
-// forms), and the bidi formatting characters all reached a terminal literally.
-// They were byte-faithful and not inert; this filter makes them both.
+// U+2029 — so DEL, the C1 controls (including CSI and OSC), bidi formatting,
+// and other non-graphic format characters such as U+FEFF, U+2060, and Unicode
+// tag characters all reached a terminal literally. They were byte-faithful and
+// not visibly inert; this filter makes them both while leaving ordinary graphic
+// Unicode unchanged.
 func JSONEncoder(out io.Writer) *json.Encoder {
+	// termsafe:allow-raw-json wrapped here by escapingWriter before terminal output
 	return json.NewEncoder(&escapingWriter{out: out})
 }
 
@@ -52,10 +55,11 @@ func JSONEncoder(out io.Writer) *json.Encoder {
 // does escape every sub-floor rune IsUnsafeTerminalRune names.
 const jsonEscapeFloor = 0x7F
 
-// needsJSONEscape is the filter's predicate: the shared terminal-safety
-// classification, narrowed to the range where JSON leaves the work undone.
+// needsJSONEscape matches the text boundary's policy for controls and invisible
+// format characters. JSON narrows that shared policy only by delegating the
+// sub-floor runes encoding/json already escapes; graphic Unicode remains raw.
 func needsJSONEscape(r rune) bool {
-	return r >= jsonEscapeFloor && IsUnsafeTerminalRune(r)
+	return r >= jsonEscapeFloor && (IsUnsafeTerminalRune(r) || unicode.In(r, unicode.Cf))
 }
 
 // escapingWriter rewrites terminal-unsafe characters in a UTF-8 JSON byte

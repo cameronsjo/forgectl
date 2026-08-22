@@ -59,6 +59,7 @@ func EncodeUsageEvent(e UsageEventV1) ([]byte, error) {
 		return nil, err
 	}
 	var buf bytes.Buffer
+	// termsafe:allow-raw-json persisted usage event, never command output
 	enc := json.NewEncoder(&buf)
 	// Keep the raw model string byte-exact: HTML escaping would rewrite <, >,
 	// and & in a value the operator configured, and this file is never served
