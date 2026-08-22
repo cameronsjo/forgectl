@@ -1,6 +1,7 @@
 package projects
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -146,5 +147,66 @@ func TestGitStatus_Label_EmptyIffStateOK(t *testing.T) {
 func TestGitStatus_ZeroValue_DoesNotReadAsClean(t *testing.T) {
 	if got := (GitStatus{}).Label(); got != "" {
 		t.Errorf("zero-value GitStatus.Label() = %q, want \"\" (must not read as clean)", got)
+	}
+}
+
+func TestStatusState_JSONUsesAnExplicitUnknownValue(t *testing.T) {
+	tests := []struct {
+		name string
+		in   StatusState
+		wire string
+	}{
+		{name: "unknown zero value", in: StatusUnknown, wire: `"unknown"`},
+		{name: "not a repository", in: StatusNotRepo, wire: `"not-a-repo"`},
+		{name: "status available", in: StatusOK, wire: `"ok"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(tt.in)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if got := string(data); got != tt.wire {
+				t.Errorf("Marshal(%q) = %s, want %s", tt.in, got, tt.wire)
+			}
+
+			var decoded StatusState
+			if err := json.Unmarshal(data, &decoded); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if decoded != tt.in {
+				t.Errorf("round trip = %q, want %q", decoded, tt.in)
+			}
+		})
+	}
+}
+
+func TestGitStatus_ZeroValueJSONDoesNotLookClean(t *testing.T) {
+	data, err := json.Marshal(GitStatus{})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	const want = `{"state":"unknown","modified":0,"untracked":0,"ahead":0}`
+	if got := string(data); got != want {
+		t.Errorf("Marshal(zero GitStatus) = %s, want %s", got, want)
+	}
+}
+
+func TestStatusState_JSONDecodeCompatibility(t *testing.T) {
+	var legacy StatusState
+	if err := json.Unmarshal([]byte(`""`), &legacy); err != nil {
+		t.Fatalf("Unmarshal legacy unknown: %v", err)
+	}
+	if legacy != StatusUnknown {
+		t.Errorf("legacy empty state decoded as %q, want StatusUnknown", legacy)
+	}
+
+	preserved := StatusOK
+	if err := json.Unmarshal([]byte(`null`), &preserved); err != nil {
+		t.Fatalf("Unmarshal null: %v", err)
+	}
+	if preserved != StatusOK {
+		t.Errorf("null changed state to %q, want %q", preserved, StatusOK)
 	}
 }

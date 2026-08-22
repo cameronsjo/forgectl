@@ -5,6 +5,7 @@
 package projects
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -45,6 +46,35 @@ const (
 	StatusNotRepo StatusState = "not-a-repo" // directory has no .git
 	StatusOK      StatusState = "ok"         // git status ran and was parsed
 )
+
+// MarshalJSON keeps StatusUnknown fail-closed in Go while making it explicit
+// on the wire. The empty string is useful as the language zero value but reads
+// as absent information to a JSON consumer, alongside reassuring zero counts.
+func (s StatusState) MarshalJSON() ([]byte, error) {
+	if s == StatusUnknown {
+		return json.Marshal("unknown")
+	}
+	return json.Marshal(string(s))
+}
+
+// UnmarshalJSON is MarshalJSON's inverse: a status emitted as "unknown" must
+// recover the internal zero value rather than becoming an unrecognized fourth
+// state that the human renderer would label merely "cloned".
+func (s *StatusState) UnmarshalJSON(data []byte) error {
+	var wire *string
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire == nil {
+		return nil
+	}
+	if *wire == "unknown" {
+		*s = StatusUnknown
+		return nil
+	}
+	*s = StatusState(*wire)
+	return nil
+}
 
 // GitStatus summarises the working-tree state of a project directory.
 type GitStatus struct {
