@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -216,7 +217,7 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 	overflow := make(chan struct{}, 2)
 	outCh := make(chan BoundedOutput, 1)
 	errCh := make(chan BoundedOutput, 1)
-	go readCapped(outR, sc.StdoutCap, outCh, overflow)
+	go readCappedMode(outR, sc.StdoutCap, sc.StdoutMode, outCh, overflow)
 	go readCapped(errR, sc.StderrCap, errCh, overflow)
 
 	waitCh := make(chan error, 1)
@@ -480,6 +481,171 @@ func readCapped(r io.Reader, limit int64, out chan<- BoundedOutput, overflow cha
 		return
 	}
 	out <- BoundedOutput{buf: &outputBuf{data: buf[:n]}, forced: cut}
+}
+
+func readCappedMode(r io.Reader, limit int64, mode CaptureMode, out chan<- BoundedOutput, overflow chan<- struct{}) {
+	if mode == CaptureRaw {
+		readCapped(r, limit, out, overflow)
+		return
+	}
+	data, err := projectCmuxWorkspaceList(r)
+	if err != nil {
+		// Keep draining after a malformed document so the child cannot block on
+		// a full pipe while RunSensitive waits for it. Empty complete output is
+		// deliberately invalid JSON, so the adapter reports an unreadable reply.
+		_, drainErr := io.Copy(io.Discard, r)
+		out <- BoundedOutput{buf: &outputBuf{}, forced: drainErr != nil}
+		return
+	}
+	if int64(len(data)) > limit {
+		select {
+		case overflow <- struct{}{}:
+		default:
+		}
+		out <- BoundedOutput{buf: &outputBuf{data: data[:limit]}, overflow: true}
+		return
+	}
+	out <- BoundedOutput{buf: &outputBuf{data: data}}
+}
+
+type projectedCmuxWorkspace struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+}
+
+// projectCmuxWorkspaceList walks the JSON token stream instead of decoding the
+// envelope wholesale. Unknown values are consumed and discarded one token at
+// a time, so large conversation, port, remote, and state fields never enter the
+// retained result; the returned projection grows only with the match set. The
+// decoder can still hold its current token, so peak working memory is bounded
+// by the largest single JSON token plus that projection, not by the projection
+// alone. cmux currently emits the heavy data as many ordinary-sized tokens.
+func projectCmuxWorkspaceList(r io.Reader) ([]byte, error) {
+	dec := json.NewDecoder(r)
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return nil, errors.New("cmux workspace listing is not an object")
+	}
+	var workspaces []projectedCmuxWorkspace
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		name, ok := key.(string)
+		if !ok {
+			return nil, errors.New("cmux workspace listing has a non-string key")
+		}
+		if name != "workspaces" {
+			if err := skipJSONValue(dec); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		workspaces, err = decodeProjectedCmuxWorkspaces(dec)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	if tok, err := dec.Token(); !errors.Is(err, io.EOF) || tok != nil {
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("cmux workspace listing has trailing JSON")
+	}
+	return json.Marshal(struct {
+		Workspaces []projectedCmuxWorkspace `json:"workspaces"`
+	}{Workspaces: workspaces})
+}
+
+func decodeProjectedCmuxWorkspaces(dec *json.Decoder) ([]projectedCmuxWorkspace, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if tok == nil {
+		return nil, nil
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '[' {
+		return nil, errors.New("cmux workspaces field is not an array")
+	}
+	var rows []projectedCmuxWorkspace
+	for dec.More() {
+		row, err := decodeProjectedCmuxWorkspace(dec)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, row)
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func decodeProjectedCmuxWorkspace(dec *json.Decoder) (projectedCmuxWorkspace, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return projectedCmuxWorkspace{}, err
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return projectedCmuxWorkspace{}, errors.New("cmux workspace row is not an object")
+	}
+	var row projectedCmuxWorkspace
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return projectedCmuxWorkspace{}, err
+		}
+		name, ok := key.(string)
+		if !ok {
+			return projectedCmuxWorkspace{}, errors.New("cmux workspace row has a non-string key")
+		}
+		switch name {
+		case "id":
+			err = dec.Decode(&row.ID)
+		case "description":
+			err = dec.Decode(&row.Description)
+		default:
+			err = skipJSONValue(dec)
+		}
+		if err != nil {
+			return projectedCmuxWorkspace{}, err
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return projectedCmuxWorkspace{}, err
+	}
+	return row, nil
+}
+
+func skipJSONValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	for dec.More() {
+		if delim == '{' {
+			if _, err := dec.Token(); err != nil {
+				return err
+			}
+		}
+		if err := skipJSONValue(dec); err != nil {
+			return err
+		}
+	}
+	_, err = dec.Token()
+	return err
 }
 
 // closeAll retires pipe ends. Close errors are dropped deliberately: these are
