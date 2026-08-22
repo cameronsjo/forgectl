@@ -14,19 +14,11 @@ import (
 // escapedLabelRenderers are the functions permitted to produce a huh option
 // label. Each applies a terminal boundary to untrusted text before it reaches
 // the picker.
-//
-// sanitizeCell is in the set under protest: it maps only C0 and DEL, so C1 and
-// bidi reach the terminal through a PR title. It is weaker than everything else
-// here and is tracked in #324. Listing it keeps the guard honest about what it
-// currently permits — a guard that goes red on known-accepted code gets its
-// allowlist widened in a hurry, which is worse than an explicit entry — and
-// TestWeakLabelSanitizerDoesNotSpread pins its call count so the entry cannot
-// quietly become a growth path for new sinks.
 var escapedLabelRenderers = map[string]bool{
 	"repoPickerLabel": true,
+	"prPickerLabel":   true,
 	"safeTerm":        true,
 	"safeCandidate":   true,
-	"sanitizeCell":    true,
 	// Row renderers that apply the boundary to every field they compose. They
 	// are approved as whole renderers because a label built from one is escaped
 	// field by field inside it.
@@ -229,67 +221,6 @@ func labelIsEscaped(expr ast.Expr, approved map[string]bool) bool {
 		// A selector, index, or anything else reaching for a field directly is
 		// raw text until a renderer says otherwise.
 		return false
-	}
-}
-
-// TestWeakLabelSanitizerDoesNotSpread pins the one entry in the allowlist that
-// is there under protest. sanitizeCell maps only C0 and DEL, so a NEW sink built
-// on it extends C1 and bidi exposure to output nobody reviewed — and the wiring
-// guard above would bless it in a label, because its job is wiring rather than
-// primitive strength.
-//
-// This is a one-way ratchet, not a description: the count may only go DOWN, as
-// #324 moves each site onto the shared boundary. Raising it to make a new sink
-// pass is the failure this exists to prevent.
-func TestWeakLabelSanitizerDoesNotSpread(t *testing.T) {
-	fset := token.NewFileSet()
-	files, err := parsePackageSources(t, fset, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	byFile := map[string]int{}
-	for name, file := range files {
-		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "sanitizeCell" {
-				byFile[name]++
-			}
-			return true
-		})
-	}
-
-	// PER FILE, not a total. An aggregate ceiling is fungible across a mixed
-	// population: exactly one of these is a picker label (pr_pick.go) and the
-	// other seven are table and detail cells, so migrating a review_list site
-	// under #324 would drop the total and silently buy headroom for a new
-	// sanitizeCell LABEL — the growth this pin exists to stop, reached through
-	// an unrelated improvement. Counts rather than file:line, so an edit above a
-	// call does not churn the pin into being relaxed.
-	//
-	// The number may only fall. Being wrong about it on the first run — 8, not
-	// the 2 asserted from memory — is the argument for pinning it at all.
-	want := map[string]int{
-		"doctor.go":      2,
-		"ghostty.go":     1,
-		"pr_pick.go":     1,
-		"pr_prs.go":      1,
-		"review_list.go": 3,
-	}
-	for name, got := range byFile {
-		if got > want[name] {
-			t.Errorf("%s has %d sanitizeCell call(s), ceiling is %d — a new use of the weak "+
-				"primitive; use safeTerm, or land #324 first", name, got, want[name])
-		}
-	}
-	for name, ceiling := range want {
-		if byFile[name] > 0 || ceiling == 0 {
-			continue
-		}
-		t.Logf("%s no longer uses sanitizeCell (#324 progress) — lower its ceiling to 0", name)
 	}
 }
 

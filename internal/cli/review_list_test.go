@@ -366,7 +366,7 @@ func TestReviewCmd_Table_HostileTitleSanitized(t *testing.T) {
 }
 
 // hasControlByte reports whether s contains any C0 control byte (0x00-0x1F)
-// or DEL (0x7F) — the set sanitizeCell is expected to have already removed
+// or DEL (0x7F) — the legacy set this helper expects the boundary to remove
 // from anything it processed. Callers split multi-line output on "\n" first,
 // since that legitimate line separator is not itself hostile content.
 func hasControlByte(s string) bool {

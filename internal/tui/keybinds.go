@@ -42,8 +42,8 @@ func KeybindSheet(rows []ghostty.Keybind, noIcons bool) string {
 // (Trigger/Action/Comment all come from the `+list-keybinds` process, itself
 // echoing the user's config file verbatim) before it reaches the TTY, so a
 // crafted config entry can't inject cursor-control sequences or extra
-// physical lines into the rendered sheet. Mirrors internal/cli's sanitizeCell
-// (internal/cli/pr_prs.go:160, forgectl#162) — duplicated rather than
+// physical lines into the rendered sheet. Mirrors forgectl#162's original
+// terminal hardening — duplicated rather than
 // exported because tui and cli don't share a util package and the two
 // render different untrusted-input classes (a remote PR title vs. a local
 // config file) for the same reason (raw terminal output). Every C0 control

@@ -302,11 +302,10 @@ func checkResumeTasks(d Deps) Check {
 		return Check{
 			Name: name, State: StateWarn,
 			// %q, not %s: drift.Dir is a raw directory name off disk, where
-			// every byte but '/' and NUL is legal. The text renderer's
-			// sanitizeCell strips only <0x20 and 0x7f — 0x9B, the
-			// single-byte CSI, survives it — and the --json path relies on
-			// encoding/json, which escapes only 0x00–0x1F. Quoting escapes
-			// the lot at the point of construction, before either path.
+			// every byte but '/' and NUL is legal. Quoting at construction
+			// preserves the directory boundaries in both human output (which
+			// also crosses SafeLine) and JSON output (which preserves values
+			// while escaping its syntax).
 			Detail: fmt.Sprintf("restore writes the %q dialect, but every task directory on disk is %q (newest: %q)", drift.Restores, drift.Newest, drift.Dir),
 			Hint:   "Claude Code appears to have changed how it names task directories — `forgectl resume` would restore tasks where nothing reads them; please file this at github.com/cameronsjo/forgectl",
 		}

@@ -73,7 +73,9 @@ Exit codes: 0 every check ok (or skipped), 1 at least one check failed.`,
 					return WithExitCode(err, 2)
 				}
 			} else {
-				printDoctorReport(out, report)
+				if err := printDoctorReport(out, report); err != nil {
+					return WithExitCode(err, 2)
+				}
 			}
 			if !report.Healthy() {
 				return WithExitCode(fmt.Errorf("doctor found problems"), 1)
@@ -109,18 +111,22 @@ func doctorMark(s doctor.State) string {
 // outdated line, a CommandError's stderr) — an untrusted tap or a
 // compromised gh session could embed a newline/CR or an ANSI CSI sequence
 // there to forge an additional well-formed check line, or overwrite a real
-// failure's line via a cursor-control escape. sanitizeCell (pr_prs.go,
-// forgectl#162's same fix for review render paths) neutralizes both classes
-// at this exact display boundary — the one place every check's output
+// failure's line via a cursor-control escape. SafeLine visibly escapes both
+// classes at this exact display boundary — the one place every check's output
 // converges before reaching a terminal. The --json path needs no such
 // treatment: encoding/json already escapes control bytes.
-func printDoctorReport(out io.Writer, report doctor.Report) {
+func printDoctorReport(out io.Writer, report doctor.Report) error {
 	for _, c := range report.Checks {
-		fmt.Fprintf(out, "%s %-18s %s\n", doctorMark(c.State), c.Name, sanitizeCell(c.Detail))
+		if _, err := fmt.Fprintf(out, "%s %-18s %s\n", doctorMark(c.State), c.Name, termsafe.SafeLine(c.Detail)); err != nil {
+			return err
+		}
 		if c.Hint != "" {
-			fmt.Fprintf(out, "  %s\n", sanitizeCell(c.Hint))
+			if _, err := fmt.Fprintf(out, "  %s\n", termsafe.SafeLine(c.Hint)); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 // doctorCheckJSON is one Check's --json wire shape.

@@ -8,6 +8,7 @@ import (
 
 	ghosttypkg "github.com/cameronsjo/forgectl/internal/ghostty"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tui"
 )
 
@@ -91,11 +92,12 @@ func newGhosttyThemesCmd(client *ghosttypkg.Client) *cobra.Command {
 				if th.Active {
 					marker = "*"
 				}
-				// sanitizeCell (pr_prs.go, forgectl#162): theme names are
-				// genuinely third-party once a theme pack is installed
-				// under ~/.config/ghostty/themes/, so a crafted name can't
-				// carry a raw control byte into the rendered table.
-				fmt.Fprintf(w, "%s\t%s\n", marker, sanitizeCell(th.Name))
+				// Theme names are genuinely third-party once a theme pack is
+				// installed under ~/.config/ghostty/themes/. SafeLine keeps
+				// their ordinary spelling and visibly escapes controls.
+				if _, err := fmt.Fprintf(w, "%s\t%s\n", marker, termsafe.SafeLine(th.Name)); err != nil {
+					return err
+				}
 			}
 			return w.Flush()
 		},
