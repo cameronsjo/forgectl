@@ -95,24 +95,22 @@ var tier1Carriers = []string{
 	".mcp.json",
 }
 
-// tier2Carriers are defense in depth, NOT an active hole. forgectl launches
-// none of these assistants, and each of these paths was measured NOT read by
-// `claude -p` (2.1.220). They matter only when a human separately opens the
-// review workspace in one of these editors — a real threat model, but one the
-// human opted into. Cheap to cover; do not describe as closing a live gap.
+// tier2Carriers are deliberately bounded defense in depth, NOT universal
+// editor protection and NOT an active harness hole. forgectl launches neither
+// Cursor nor Copilot; these paths matter when a human separately opens the
+// review workspace in Cursor or asks Copilot to review the PR head. Other
+// assistants stay out until an actual forgectl workflow justifies the added
+// deletion and fail-loud surface (forgectl#229).
 //
-// `.cursor` is the whole directory rather than `.cursor/rules` because it is
+// `.cursor/` is the whole directory rather than `.cursor/rules` because it is
 // tool state rather than source: a Cursor user opening the workspace picks up
 // everything under it, not only `rules`.
 //
-// `.github/copilot-instructions.md` stays a single FILE. Widening it to
-// `.github/` would hide the CI workflows, and a hostile workflow change is
-// precisely what a reviewer must be able to see — a security regression
-// wearing a security fix's clothes.
+// `.github/instructions/` is the bounded Copilot target. Widening it to
+// `.github/` would hide CI workflows, and a hostile workflow change is
+// precisely what a reviewer must be able to see.
 var tier2Carriers = []string{
-	".cursor", ".cursorrules", ".windsurfrules", ".continuerules",
-	".aider.conf.yml", ".codex.toml", "mcp.json",
-	".github/copilot-instructions.md",
+	".cursor/", ".cursorrules", ".github/instructions/",
 }
 
 // mcpConfigPatterns is the pattern rule for the MCP class. Unlike the prose
@@ -130,8 +128,9 @@ var tier2Carriers = []string{
 // config at the workspace root), so a full-tree walk would add reversibility
 // risk to defend a hole that does not exist.
 //
-// Root-level `mcp.json` / `.mcp.json` are literal entries above, not patterns,
-// because they carry no directory component.
+// Root-level `.mcp.json` is a literal entry above, not a pattern, because it
+// carries no directory component. A bare root-level `mcp.json` is not read by
+// a supported harness and is intentionally outside the default set.
 var mcpConfigPatterns = []string{".*/mcp.json", ".*/.mcp.json"}
 
 // DefaultTargets is the canonical list of AI-config paths (relative to a
@@ -1230,7 +1229,7 @@ func undecorate(scheme Scheme, base string) string {
 
 // renamedPath applies scheme to the base name of a cleaned relative path,
 // leaving any parent directory component untouched — a nested target like
-// ".github/copilot-instructions.md" renames only its base name.
+// ".github/instructions/review.instructions.md" renames only its base name.
 func renamedPath(scheme Scheme, cleanRel string) string {
 	dir, base := filepath.Split(cleanRel)
 	var newBase string

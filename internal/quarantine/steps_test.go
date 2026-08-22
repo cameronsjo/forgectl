@@ -331,6 +331,65 @@ func TestSteps_DefaultTargetsPatternsReachStrip(t *testing.T) {
 	}
 }
 
+// TestSteps_ApprovedTier2ScopeReachesThrowawayStrip pins the destructive half
+// of #229. Only the approved Cursor/Copilot carriers are added to the default
+// strip set; rejected editor configuration remains reviewable in the sandbox.
+// `.vscode/mcp.json` is the deliberate exception because the independent MCP
+// execution-config pattern covers it regardless of editor ownership.
+func TestSteps_ApprovedTier2ScopeReachesThrowawayStrip(t *testing.T) {
+	workspace := t.TempDir()
+	write := func(rel string) {
+		path := filepath.Join(workspace, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatalf("MkdirAll %s: %v", rel, err)
+		}
+		if err := os.WriteFile(path, []byte(rel), 0o600); err != nil {
+			t.Fatalf("WriteFile %s: %v", rel, err)
+		}
+	}
+
+	stripped := []string{
+		filepath.Join(".cursor", "rules", "review.mdc"),
+		".cursorrules",
+		filepath.Join(".github", "instructions", "review.instructions.md"),
+		filepath.Join(".vscode", "mcp.json"), // independent MCP execution class
+	}
+	survives := []string{
+		filepath.Join(".github", "prompts", "review.prompt.md"),
+		filepath.Join(".github", "copilot-instructions.md"),
+		filepath.Join(".windsurf", "rules", "review.md"),
+		".windsurfrules",
+		filepath.Join(".devin", "instructions.md"),
+		filepath.Join(".continue", "config.yaml"),
+		".continuerules",
+		filepath.Join(".gemini", "settings.json"),
+		"GEMINI.md",
+		".goosehints",
+		".aider.conf.yml",
+		".clinerules",
+		filepath.Join(".vscode", "settings.json"),
+		".codex.toml",
+		"mcp.json",
+	}
+	for _, rel := range append(append([]string{}, stripped...), survives...) {
+		write(rel)
+	}
+
+	if err := runStrip(t, &exec.FakeRunner{}, workspace, nil); err != nil {
+		t.Fatalf("strip defaults: %v", err)
+	}
+	for _, rel := range stripped {
+		if _, err := os.Lstat(filepath.Join(workspace, rel)); !os.IsNotExist(err) {
+			t.Errorf("approved/default execution carrier %q survived strip, stat err = %v", rel, err)
+		}
+	}
+	for _, rel := range survives {
+		if got := readFile(t, filepath.Join(workspace, rel)); got != rel {
+			t.Errorf("unselected editor path %q changed: got %q", rel, got)
+		}
+	}
+}
+
 // TestValidateStripGlob_RejectsWorkspaceRoot covers the shape with no undo.
 // The escape guards are all about leaving ${workspace}; this one is about
 // naming ${workspace} itself. `filepath.Clean(".")` is ".", which the resolver
