@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -104,6 +105,13 @@ type Client struct {
 	Dir string
 	run exec.Runner
 
+	// gitBin is resolved once when New constructs the client. Every status
+	// probe and the pull it authorizes use this same value, so a later PATH
+	// change cannot make the check and mutation execute different binaries.
+	gitBin    string
+	gitPinned bool
+	lookPath  func(string) (string, error)
+
 	// githubOwners is the configured [projects].owners list. Empty means the
 	// authenticated GitHub.com login, resolved per Inventory call rather than
 	// cached — the answer belongs to whoever gh is authenticated as right now.
@@ -126,8 +134,33 @@ func WithGitHubOwners(owners []string) Option {
 	}
 }
 
+// WithGitBinary overrides the git executable used by status probes and pulls.
+// The path must already be absolute and clean; anything else selects the same
+// fail-closed unavailable state as a failed construction-time PATH lookup.
+// Production relies on New's own resolution; this explicit seam is primarily
+// for deterministic callers and tests that provide their own runner.
+func WithGitBinary(path string) Option {
+	return func(c *Client) {
+		if filepath.IsAbs(path) && filepath.Clean(path) == path {
+			c.gitBin = path
+		} else {
+			c.gitBin = ""
+		}
+		c.gitPinned = true
+	}
+}
+
+// withGitLookPath replaces PATH resolution for same-package tests. Unlike an
+// explicit binary override, the resolved result still goes through New's
+// absolute-path normalization.
+func withGitLookPath(fn func(string) (string, error)) Option {
+	return func(c *Client) { c.lookPath = fn }
+}
+
 // New builds a Client. It reads $PROJECTS_DIR, falling back to ~/Projects.
 // A leading ~ is expanded so env vars stored as "~/Projects" work correctly.
+// It also resolves git exactly once to an absolute path; a lookup failure is
+// retained as an empty pin so status probes fail closed as StatusUnknown.
 func New(run exec.Runner, opts ...Option) *Client {
 	dir := os.Getenv("PROJECTS_DIR")
 	if dir == "" {
@@ -137,11 +170,25 @@ func New(run exec.Runner, opts ...Option) *Client {
 		home, _ := os.UserHomeDir()
 		dir = filepath.Join(home, dir[2:])
 	}
-	c := &Client{Dir: dir, run: run}
+	c := &Client{Dir: dir, run: run, lookPath: osexec.LookPath}
 	for _, opt := range opts {
 		opt(c)
 	}
+	if !c.gitPinned {
+		c.gitPinned = true
+		if path, err := c.lookPath("git"); err == nil {
+			if abs, err := filepath.Abs(path); err == nil {
+				c.gitBin = abs
+			}
+		}
+	}
 	return c
+}
+
+// gitBinary returns New's pinned answer. An empty result is the fail-closed
+// unavailable state: gitStatus reports Unknown and PullAll never mutates.
+func (c *Client) gitBinary() string {
+	return c.gitBin
 }
 
 // Discover returns every project found under Dir, covering both layouts in
@@ -248,7 +295,7 @@ func discoverCanonicalHostCandidates(hostDir string) []discoverCandidate {
 // returns StatusNotRepo for a miss, so it's always safe to call — no extra
 // subprocess is spawned for a non-git dir.
 func (c *Client) discoverProject(ctx context.Context, name, dir string) Project {
-	return Project{Name: name, Dir: dir, Status: gitStatus(ctx, c.run, dir)}
+	return Project{Name: name, Dir: dir, Status: gitStatus(ctx, c.run, c.gitBinary(), dir)}
 }
 
 // isGitRepo reports whether dir has a .git marker.

@@ -76,7 +76,7 @@ func hasCall(calls []exec.Call, name, substr string) bool {
 func TestWorktree_CreatesBareAndWorktree(t *testing.T) {
 	tmp := t.TempDir()
 	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("", false)}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	got, err := c.Worktree(context.Background(), Repo{
 		Host: "github", Owner: "cameronsjo", Name: "forgectl",
@@ -128,7 +128,7 @@ func TestWorktree_CreatesBareAndWorktree(t *testing.T) {
 func TestWorktree_BareClonePinsGhToGitHubCom(t *testing.T) {
 	t.Setenv("GH_HOST", "ghe.example.test")
 	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("", false)}
-	c := &Client{Dir: t.TempDir(), run: fake}
+	c := &Client{Dir: t.TempDir(), run: fake, gitBin: "git"}
 
 	if _, err := c.Worktree(context.Background(), Repo{
 		Host: "github", Owner: "cameronsjo", Name: "forgectl",
@@ -150,7 +150,7 @@ func TestWorktree_BareClonePinsGhToGitHubCom(t *testing.T) {
 func TestWorktree_DetectsDefaultBranch(t *testing.T) {
 	tmp := t.TempDir()
 	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("main", false)}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	// No branch arg → defaultBranch parses `remote show origin`'s HEAD line.
 	got, err := c.Worktree(context.Background(), Repo{
@@ -179,7 +179,7 @@ func TestWorktree_DefaultBranchFallback(t *testing.T) {
 	tmp := t.TempDir()
 	// remote show origin output carries no HEAD line → fall back to "main".
 	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("", false)}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	if _, err := c.Worktree(context.Background(), Repo{
 		Host: "github", Owner: "cameronsjo", Name: "forgectl",
@@ -199,7 +199,7 @@ func TestWorktree_DefaultBranchUnknownFallsBackToMain(t *testing.T) {
 	// git prints "HEAD branch: (unknown)" for a headless remote — it must be
 	// treated as absent, NOT used verbatim as a branch name.
 	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("(unknown)", false)}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	if _, err := c.Worktree(context.Background(), Repo{
 		Host: "github", Owner: "cameronsjo", Name: "forgectl",
@@ -220,7 +220,7 @@ func TestWorktree_DefaultBranchUnknownFallsBackToMain(t *testing.T) {
 func TestWorktree_WorktreeAddFallback(t *testing.T) {
 	tmp := t.TempDir()
 	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("", true)} // first add fails
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	if _, err := c.Worktree(context.Background(), Repo{
 		Host: "github", Owner: "cameronsjo", Name: "forgectl",
@@ -242,7 +242,7 @@ func TestWorktree_RefusesExistingDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("", false)}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	if _, err := c.Worktree(context.Background(), Repo{
 		Host: "github", Owner: "cameronsjo", Name: "forgectl",
@@ -273,7 +273,7 @@ func TestWorktree_RefusesSymlinkedBase(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("", false)}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	if _, err := c.Worktree(context.Background(), Repo{
 		Host: "github", Owner: "cameronsjo", Name: "forgectl",
@@ -292,7 +292,7 @@ func TestWorktree_RefusesSymlinkedBase(t *testing.T) {
 func TestWorktree_RejectsUnsafeSegment(t *testing.T) {
 	tmp := t.TempDir()
 	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("", false)}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 	cases := []Repo{
 		{Host: "../escape", Owner: "cameronsjo", Name: "forgectl"},
 		{Host: "github", Owner: "..", Name: "forgectl"},
@@ -313,7 +313,7 @@ func TestWorktree_RejectsUnsafeBranch(t *testing.T) {
 	for _, branch := range []string{"-x", "..", "a/../b", "feat/-x", "/abs", "a/"} {
 		tmp := t.TempDir()
 		fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("", false)}
-		c := &Client{Dir: tmp, run: fake}
+		c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 		if _, err := c.Worktree(context.Background(), Repo{
 			Host: "github", Owner: "cameronsjo", Name: "forgectl",
 		}, branch); err == nil {
@@ -329,7 +329,7 @@ func TestWorktree_RejectsUnsafeBranch(t *testing.T) {
 func TestWorktree_LowercasesPath(t *testing.T) {
 	tmp := t.TempDir()
 	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("", false)}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	// Uppercase host/owner/name (non-github so it takes the SSH bare-clone path)
 	// must land at a lowercased canonical dest, mirroring Repo.Key().
@@ -352,7 +352,7 @@ func TestWorktree_LowercasesPath(t *testing.T) {
 func TestWorktree_NonGithubUsesBareGitClone(t *testing.T) {
 	tmp := t.TempDir()
 	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("", false)}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	url := "ssh://git@git.sjo.lol:222/cameron/homeclaw.git"
 	if _, err := c.Worktree(context.Background(), Repo{

@@ -87,7 +87,7 @@ func TestInventory_MergeDedupCrossHost(t *testing.T) {
 	}
 
 	fake := &exec.FakeRunner{RunFunc: inventoryRunFunc(tmp)}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	repos, notes, err := c.Inventory(context.Background())
 	if err != nil {
@@ -157,7 +157,7 @@ func TestInventory_DegradesWhenHostErrors(t *testing.T) {
 			return "", nil
 		},
 	}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	repos, notes, err := c.Inventory(context.Background())
 	if err != nil {
@@ -179,7 +179,7 @@ func TestClone_DispatchesByHost(t *testing.T) {
 
 	t.Run("github goes through gh", func(t *testing.T) {
 		fake := &exec.FakeRunner{}
-		c := &Client{Dir: tmp, run: fake}
+		c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 		dest, err := c.Clone(context.Background(), Repo{
 			Host: "github", Owner: "cameronsjo", Name: "newgh",
 			SSHURL: "git@github.com:cameronsjo/newgh.git",
@@ -199,7 +199,7 @@ func TestClone_DispatchesByHost(t *testing.T) {
 
 	t.Run("gitea goes through git clone", func(t *testing.T) {
 		fake := &exec.FakeRunner{}
-		c := &Client{Dir: tmp, run: fake}
+		c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 		url := "ssh://git@git.sjo.lol:222/cameron/newgt.git"
 		if _, err := c.Clone(context.Background(), Repo{
 			Host: "gitea", Owner: "cameron", Name: "newgt", SSHURL: url,
@@ -223,7 +223,7 @@ func TestClone_DispatchesByHost(t *testing.T) {
 func TestClone_PinsGhToGitHubComDespiteAmbientHost(t *testing.T) {
 	t.Setenv("GH_HOST", "ghe.example.test")
 	fake := &exec.FakeRunner{}
-	c := &Client{Dir: t.TempDir(), run: fake}
+	c := &Client{Dir: t.TempDir(), run: fake, gitBin: "git"}
 
 	if _, err := c.Clone(context.Background(), Repo{
 		Host: "github", Owner: "cameronsjo", Name: "newgh",
@@ -245,7 +245,7 @@ func TestClone_PinsGhToGitHubComDespiteAmbientHost(t *testing.T) {
 // `gh` argv (a '-'-leading value would be read as a flag, not a positional).
 func TestListOrg_RejectsUnsafeLogin(t *testing.T) {
 	fake := &exec.FakeRunner{}
-	c := &Client{Dir: t.TempDir(), run: fake}
+	c := &Client{Dir: t.TempDir(), run: fake, gitBin: "git"}
 	for _, org := range []string{"", ".", "..", "a/b", "-x", "--all"} {
 		if _, err := c.ListOrg(context.Background(), org); err == nil {
 			t.Errorf("ListOrg(%q) should reject an unsafe login, got nil", org)
@@ -259,7 +259,7 @@ func TestListOrg_RejectsUnsafeLogin(t *testing.T) {
 func TestListOrg_ValidLoginLists(t *testing.T) {
 	out := `[{"isPrivate":false,"name":"claude-code","sshUrl":"git@github.com:anthropics/claude-code.git"}]`
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) { return out, nil }}
-	c := &Client{Dir: t.TempDir(), run: fake}
+	c := &Client{Dir: t.TempDir(), run: fake, gitBin: "git"}
 	repos, err := c.ListOrg(context.Background(), "anthropics")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -272,7 +272,7 @@ func TestListOrg_ValidLoginLists(t *testing.T) {
 func TestClone_RejectsUnsafeName(t *testing.T) {
 	tmp := t.TempDir()
 	fake := &exec.FakeRunner{}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 	for _, name := range []string{"", ".", "..", "../escape", "a/b"} {
 		if _, err := c.Clone(context.Background(), Repo{Host: "gitea", Owner: "cameron", Name: name, SSHURL: "ssh://x"}); err == nil {
 			t.Errorf("Clone(name=%q) should error on an unsafe name, got nil", name)
@@ -290,7 +290,7 @@ func TestClone_RejectsUnsafeName(t *testing.T) {
 func TestClone_RejectsUnsafeHostOrOwner(t *testing.T) {
 	tmp := t.TempDir()
 	fake := &exec.FakeRunner{}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 	cases := []struct{ host, owner string }{
 		{"../escape", "cameron"},
 		{"gitea", "../escape"},
@@ -328,7 +328,7 @@ func TestClone_CrossHostDissolvesCollision(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := &exec.FakeRunner{RunFunc: originGitea}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	dest, err := c.Clone(context.Background(), Repo{
 		Host: "github", Owner: "cameronsjo", Name: "homeclaw",
@@ -359,7 +359,7 @@ func TestClone_ExistingCanonicalDestWrongOriginErrors(t *testing.T) {
 		}
 		return "", nil
 	}}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	_, err := c.Clone(context.Background(), Repo{
 		Host: "gitea", Owner: "cameron", Name: "homeclaw",
@@ -385,7 +385,7 @@ func TestClone_SameRepoIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := &exec.FakeRunner{RunFunc: originGitea}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	// Cloning the repo that's already there returns its path with no clone.
 	got, err := c.Clone(context.Background(), Repo{
@@ -429,7 +429,7 @@ func TestDiscover_FindsBothCanonicalAndFlatLayouts(t *testing.T) {
 		t.Fatal(err) // plain non-git dir, no canonical structure beneath it
 	}
 
-	c := &Client{Dir: tmp, run: &exec.FakeRunner{}}
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}, gitBin: "git"}
 	projs, err := c.Discover(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -470,7 +470,7 @@ func TestDiscover_NonGitDir_StatusIsNotRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := &Client{Dir: tmp, run: v2CleanRunner()}
+	c := &Client{Dir: tmp, run: v2CleanRunner(), gitBin: "git"}
 	projs, err := c.Discover(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -539,7 +539,7 @@ func TestInventory_StatusProcessBudget(t *testing.T) {
 				}
 				return "", nil
 			}}
-			c := &Client{Dir: tmp, run: fake}
+			c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 			repos, notes, err := c.Inventory(context.Background())
 			if err != nil {
@@ -595,7 +595,7 @@ func TestLocalRepos_NonRepo_SpawnsNoRemoteLookup(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		return "", nil
 	}}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	if _, err := c.localRepos(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -620,7 +620,7 @@ func TestDiscover_CanonicalHostBucketMultipleOwnersAndRepos(t *testing.T) {
 	mkCanonicalGitDir(t, tmp, "gitea", "cameron", "forgectl")
 	mkCanonicalGitDir(t, tmp, "gitea", "otherowner", "sidecar")
 
-	c := &Client{Dir: tmp, run: &exec.FakeRunner{}}
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}, gitBin: "git"}
 	projs, err := c.Discover(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -718,7 +718,7 @@ func projectNameDirs(projs []Project) []nameDir {
 func TestDiscover_FanOutIsRepeatable(t *testing.T) {
 	tmp := t.TempDir()
 	mkMixedFanOutFixture(t, tmp)
-	c := &Client{Dir: tmp, run: &exec.FakeRunner{}}
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}, gitBin: "git"}
 
 	first, err := c.Discover(context.Background())
 	if err != nil {
@@ -758,7 +758,7 @@ func TestDiscover_FanOutIsRepeatable(t *testing.T) {
 func TestDiscover_CollidingNamesOrderByDir(t *testing.T) {
 	tmp := t.TempDir()
 	mkMixedFanOutFixture(t, tmp)
-	c := &Client{Dir: tmp, run: &exec.FakeRunner{}}
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}, gitBin: "git"}
 
 	projs, err := c.Discover(context.Background())
 	if err != nil {
@@ -808,7 +808,7 @@ func TestDiscover_BoundsConcurrency(t *testing.T) {
 		// which is all this test needs — it counts spawns, not states.
 		return "", nil
 	}}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	if _, err := c.Discover(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
