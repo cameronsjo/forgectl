@@ -57,6 +57,19 @@ ttl_seconds = 60        # cached result freshness window, seconds
 timeout_ms  = 1000      # probe dial timeout, milliseconds
 `
 
+// proxyScaffold names the schema without installing a machine-specific
+// endpoint. Profile values may contain credentials, so the example remains
+// commented and `forgectl config` exposes only configured profile names.
+const proxyScaffold = `
+# ── proxy: named current-shell proxy profiles (forgectl proxy) ──────────────
+[proxy]
+# [proxy.profiles.work]
+# http_proxy  = "http://proxy.example:8080"
+# https_proxy = "http://proxy.example:8080"
+# all_proxy   = "socks5://proxy.example:1080"
+# no_proxy    = "localhost,127.0.0.1"
+`
+
 // benchScaffold is the [bench] section. hearth_dir/chronicle_dir have no
 // baked literal default — ResolvedHearthDir/ResolvedChronicleDir fall back to
 // $HEARTH_DIR/$CHRONICLE_DIR and then empty (config.go), so they stay
@@ -214,6 +227,7 @@ var initSections = []initSection{
 	{"launch", "launch", launchScaffold},
 	{"workflow", "workflow", workflowScaffold},
 	{"net", "net", netScaffold},
+	{"proxy", "proxy", proxyScaffold},
 	{"bench", "bench", benchScaffold},
 	{"docker", "docker", dockerScaffold},
 	{"clean", "clean", cleanScaffold},

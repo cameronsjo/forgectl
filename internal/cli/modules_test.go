@@ -122,14 +122,14 @@ func TestModules_CommandTreeSmoke(t *testing.T) {
 func TestModules_CompletenessPins(t *testing.T) {
 	mods := allModules()
 
-	const wantCount = 26
+	const wantCount = 27
 	if len(mods) != wantCount {
 		t.Errorf("allModules() has %d modules, want %d — adding a module means editing this pin deliberately (ADR-0005)", len(mods), wantCount)
 	}
 
 	wantNames := map[string]bool{
 		"tmux": true, "projects": true, "config": true, "launch": true,
-		"workflow": true, "pr": true, "net": true, "bench": true,
+		"workflow": true, "pr": true, "net": true, "proxy": true, "bench": true,
 		"quarantine": true, "pip": true, "docker": true, "branch": true,
 		"clean": true, "y": true, "sessions": true, "review": true,
 		"env":       true,

@@ -20,6 +20,7 @@ func allModules() []module.Manifest {
 		workflowModule(),
 		prModule,
 		netModule,
+		proxyModule,
 		yModule,
 		pipModule,
 		branchModule,
