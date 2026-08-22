@@ -40,6 +40,11 @@ const logKeepDays = 7
 //	probe_port = 443
 //	ttl_seconds = 60
 //	timeout_ms = 1000
+//	[proxy]              # forgectl proxy — named current-shell proxy profiles
+//	[proxy.profiles.work]
+//	http_proxy  = "http://proxy.example:8080"
+//	https_proxy = "http://proxy.example:8080"
+//	no_proxy    = "localhost,127.0.0.1"
 //	[bench]              # interop with the local bench (forgectl bench)
 //	hearth_dir    = "~/Projects/hearth"      # else $HEARTH_DIR
 //	chronicle_dir = "~/Projects/chronicle"   # else $CHRONICLE_DIR
@@ -84,6 +89,7 @@ type Config struct {
 	Launch    LaunchConfig    `toml:"launch"`
 	Workflow  WorkflowConfig  `toml:"workflow"`
 	Net       NetConfig       `toml:"net"`
+	Proxy     ProxyConfig     `toml:"proxy"`
 	Bench     BenchConfig     `toml:"bench"`
 	Docker    DockerConfig    `toml:"docker"`
 	Clean     CleanConfig     `toml:"clean"`
@@ -205,6 +211,36 @@ type NetConfig struct {
 // IsZero reports whether the [net] section was absent or empty.
 func (nc NetConfig) IsZero() bool {
 	return nc.ProbeHost == "" && nc.ProbePort == 0 && nc.TTLSeconds == 0 && nc.TimeoutMs == 0
+}
+
+// ProxyConfig is the [proxy] section: named profiles whose values are emitted
+// only by `forgectl proxy use NAME` for a shell wrapper to capture and eval.
+// The generic config renderer deliberately exposes profile names but, because
+// Profiles is a map, applies its map-value redaction policy to every value.
+type ProxyConfig struct {
+	Profiles map[string]ProxyProfile `toml:"profiles"`
+}
+
+// IsZero reports whether no named proxy profiles are configured.
+func (pc ProxyConfig) IsZero() bool {
+	return len(pc.Profiles) == 0
+}
+
+// ProxyProfile is one [proxy.profiles.NAME] table. Each configured value is
+// copied to both its lower- and upper-case environment spelling; an omitted
+// value unsets both spellings so a profile switch cannot retain stale halves.
+// Values are sensitive and must never appear in logs, errors, or ordinary
+// config/status output.
+type ProxyProfile struct {
+	HTTPProxy  string `toml:"http_proxy"`
+	HTTPSProxy string `toml:"https_proxy"`
+	AllProxy   string `toml:"all_proxy"`
+	NoProxy    string `toml:"no_proxy"`
+}
+
+// IsZero reports whether the profile sets no proxy value at all.
+func (p ProxyProfile) IsZero() bool {
+	return p.HTTPProxy == "" && p.HTTPSProxy == "" && p.AllProxy == "" && p.NoProxy == ""
 }
 
 // DockerConfig is the [docker] section: build-time defaults for `forgectl

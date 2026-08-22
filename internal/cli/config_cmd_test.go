@@ -310,6 +310,28 @@ func TestConfig_UnsetEnvMapIsNotMarkedRedacted(t *testing.T) {
 	}
 }
 
+func TestConfig_ProxyProfileNamesVisibleValuesWithheld(t *testing.T) {
+	const opaqueValue = "opaque-proxy-value-that-must-not-appear"
+	body := "[proxy.profiles.work]\nhttp_proxy = \"" + opaqueValue + "\"\n"
+
+	text := runConfig(t, body)
+	if strings.Contains(text, opaqueValue) {
+		t.Fatalf("human config output leaked proxy value: %q", text)
+	}
+	if !strings.Contains(text, "work") {
+		t.Fatalf("human config output hid configured profile name: %q", text)
+	}
+
+	doc, raw := runConfigJSONRaw(t, body)
+	e := findEntry(t, doc, "proxy.profiles")
+	if !e.Redacted || !e.Set {
+		t.Fatalf("proxy.profiles redacted=%v set=%v, want both true", e.Redacted, e.Set)
+	}
+	if strings.Contains(raw, opaqueValue) {
+		t.Fatalf("JSON config output leaked proxy value: %q", raw)
+	}
+}
+
 // TestConfig_EveryBindableFieldIsTagged extends configStructSections' fatal
 // from top-level sections to every field at every depth.
 //

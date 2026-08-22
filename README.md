@@ -162,6 +162,10 @@ forgectl net                             # show the cached (or freshly probed) a
 forgectl net --refresh                   # force a new probe, bypassing the cache
 forgectl net --json                      # machine-readable output for scripting
 
+# proxy — apply config-defined profiles to the current shell through an explicit wrapper
+forgectl proxy use NAME                  # emit a fixed export/unset batch (does not mutate the parent shell)
+forgectl proxy off                       # emit unsets for every supported upper/lower-case variable
+
 # ghostty — theme + keybind reporting, parsed live from the ghostty CLI
 forgectl ghostty themes                  # custom themes, active one marked
 forgectl ghostty themes --all            # also list the themes bundled with ghostty
@@ -401,9 +405,45 @@ log_file  = ""      # "" = auto (daily-rotated file); "-" = stderr; or an explic
 
 That marker is the point. Every section's zero value means "absent, built-in defaults apply", so a value alone cannot tell a key you never set from a key you misspelled. The command also lists **unrecognized keys** — anything in the file that bound to no field, which catches `probe_hostt` and a key filed under the wrong section — and surfaces the decode error from a malformed file instead of silently defaulting past it. Resolved values that differ from the stored ones (the `off` log level, the dated log path, the launch binary chosen by `FORGECTL_CLAUDE_BIN` > `binary_path` > `PATH`) print in their own labeled blocks.
 
-`sessions.dsn` renders as `(redacted)`; its `(set)`/`(default)` marker is the useful signal and a connection string can carry a password. `launch.defaults.env` renders its **key names only** for the same reason — it is arbitrary environment injected into the launched harness, so it is where an `ANTHROPIC_API_KEY` or `GH_TOKEN` would sit. `forgectl launch which` applies the same policy to the same map, so no forgectl command prints those values — to read one, open the config file itself with `forgectl launch edit`.
+`sessions.dsn` renders as `(redacted)`; its `(set)`/`(default)` marker is the useful signal and a connection string can carry a password. `launch.defaults.env` and `proxy.profiles` render their **key names only** for the same reason — they hold arbitrary environment values or credential-bearing proxy URLs. `forgectl launch which` applies the same policy to the launch map. The only forgectl output containing proxy values is the purpose-built `proxy use` shell protocol described below; capture it through the wrapper rather than displaying it.
 
 `--json` emits the same information machine-readably and is the stable surface — the human rendering may reflow.
+
+### proxy — current-shell profiles
+
+Proxy profiles live in config and use the environment variable spellings as
+field names. Missing fields are deliberately unset when a profile is applied,
+so switching profiles cannot retain stale values from the previous one:
+
+```toml
+[proxy.profiles.work]
+http_proxy  = "http://proxy.example:8080"
+https_proxy = "http://proxy.example:8080"
+all_proxy   = "socks5://proxy.example:1080"
+no_proxy    = "localhost,127.0.0.1"
+```
+
+A process cannot change its parent shell. Add this explicit zsh wrapper to
+`.zshrc`; it captures the generated protocol before evaluating it, so sensitive
+proxy URLs do not print in the terminal or transcript:
+
+```zsh
+function forgectl-proxy() {
+  local proxy_env
+  proxy_env="$(command forgectl proxy "$@")" || return
+  builtin eval "$proxy_env"
+}
+
+forgectl-proxy use work
+forgectl-proxy off
+```
+
+`use` emits only a fixed sequence of `export`/`unset` builtins with strictly
+single-quoted values. Each configured value is applied to both its upper- and
+lower-case spelling; `off` unsets all eight supported spellings. There is no
+profile status/list command because that would create another sensitive output
+surface. Running bare `forgectl proxy use NAME` prints the protocol instead of
+changing the current shell; use the wrapper for the actual switch.
 
 ### projects and review — whose repos get enumerated
 
