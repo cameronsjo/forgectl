@@ -13,7 +13,7 @@ Built for two hands and one thumb:
 brew install cameronsjo/tap/forgectl
 ```
 
-Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against the self-hosted Gitea, and `review` when `[review.gitea]` is enabled), `docker` (`bench status`/`up`, `docker build/run/shell`, and `clean --docker`), `npm`/`pnpm`/`pip`/`go`/`brew` (`clean --caches` — each is independently opt-in and skipped, not required, when absent). `update`'s roster shares that same `brew`/`go`/`npm` dependency (`softwareupdate` is a macOS built-in) — each step is independently scoped, so a missing tool fails only its own step, never the others.
+Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against the self-hosted Gitea, and `review` when `[review.gitea]` is enabled), `kubectl` (`k8s logs`), `docker` (`bench status`/`up`, `docker build/run/shell`, and `clean --docker`), `npm`/`pnpm`/`pip`/`go`/`brew` (`clean --caches` — each is independently opt-in and skipped, not required, when absent). `update`'s roster shares that same `brew`/`go`/`npm` dependency (`softwareupdate` is a macOS built-in) — each step is independently scoped, so a missing tool fails only its own step, never the others.
 
 Commands that actually launch a PR review — `forgectl pr <ref>`, `forgectl pr local`, and `forgectl pr pick` once admission establishes there is at least one ref to prepare — require **tmux 2.2 or newer**, for the dispatch-identity reasons in the `[pr]` section below. Read-only PR commands, any `--dry-run`, and empty, all-reviewed, or cap-full selections do not acquire that floor.
 
@@ -165,6 +165,11 @@ forgectl net --json                      # machine-readable output for scripting
 # proxy — apply config-defined profiles to the current shell through an explicit wrapper
 forgectl proxy use NAME                  # emit a fixed export/unset batch (does not mutate the parent shell)
 forgectl proxy off                       # emit unsets for every supported upper/lower-case variable
+
+# k8s — safely stream ordinary kubectl logs
+forgectl k8s logs deployment/api -f                     # forward resource/follow args directly to kubectl logs
+forgectl k8s logs -n prod -l app=api -f --log-level warn # keep WARN+ JSON logs plus every unrecognized line
+forgectl k8s logs pod/api --color never                  # force color policy: auto | always | never
 
 # ghostty — theme + keybind reporting, parsed live from the ghostty CLI
 forgectl ghostty themes                  # custom themes, active one marked
@@ -385,6 +390,26 @@ until a concrete forgectl workflow justifies the extra deletion and
 fail-on-existing-`.quarantined` surface. The vendor-neutral MCP pattern remains
 separate, so a matching `.vscode/mcp.json` is still covered as executable MCP
 configuration even though VS Code settings are not quarantined wholesale.
+
+### k8s — bounded, terminal-safe log streaming
+
+`forgectl k8s logs` forwards ordinary `kubectl logs` arguments token-for-token;
+it does not invoke a shell, choose a pod, define a deployment manifest, or add
+an `inspect` abstraction. forgectl consumes only `--log-level` and `--color`
+before the first `--`. A separator lets kubectl receive a same-named flag.
+
+Recognized top-level JSON `level` or `severity` strings use the
+trace/debug/info/warn/error/fatal ordering. A floor suppresses only recognized
+JSON below it: startup banners, malformed JSON, and unknown severity shapes
+still print. Output is transformed line-by-line with a fixed memory bound;
+oversized lines stream through safely instead of being accumulated.
+
+Pod text and kubectl diagnostics are untrusted terminal input. Control and
+invisible formatting runes render as visible escapes before forgectl adds its
+own severity color. Ordinary text stays byte-identical. Color is automatic for
+a terminal, disabled for redirected output or whenever `NO_COLOR` is present,
+and overrideable with `--color always|never`. Cancellation and kubectl's
+nonzero exit status propagate through forgectl.
 
 ## Configuration
 

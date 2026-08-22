@@ -12,10 +12,53 @@ package exec
 //   [x] Happy: RunFunc still produces the canned (name, args)-keyed output
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 )
+
+func TestOSRunner_RunStreaming_ConnectsStreamsWithoutBuffering(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (OSRunner{}).RunStreaming(
+		context.Background(),
+		strings.NewReader("from stdin"),
+		&stdout,
+		&stderr,
+		"sh", "-c", "IFS= read -r line; printf 'out:%s' \"$line\"; printf 'err:%s' \"$line\" >&2",
+	)
+	if err != nil {
+		t.Fatalf("RunStreaming: %v", err)
+	}
+	if stdout.String() != "out:from stdin" || stderr.String() != "err:from stdin" {
+		t.Errorf("streams not connected: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestOSRunner_RunStreaming_PreservesExitCodeWithoutRetainingArgv(t *testing.T) {
+	err := (OSRunner{}).RunStreaming(context.Background(), nil, io.Discard, io.Discard, "sh", "-c", "exit 7", "secret-token")
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error = %T %v, want *CommandError", err, err)
+	}
+	if cmdErr.ExitCode != 7 {
+		t.Errorf("ExitCode = %d, want 7", cmdErr.ExitCode)
+	}
+	if len(cmdErr.Args) != 0 || strings.Contains(err.Error(), "secret-token") {
+		t.Errorf("streaming error retained argv: Args=%q error=%q", cmdErr.Args, err)
+	}
+}
+
+func TestOSRunner_RunStreaming_PreservesCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := (OSRunner{}).RunStreaming(ctx, nil, io.Discard, io.Discard, "sh", "-c", "exit 0")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
 
 func TestOSRunner_RunWithInput_PipesStdinToChild(t *testing.T) {
 	out, err := (OSRunner{}).RunWithInput(context.Background(), "hello from stdin", "cat")
