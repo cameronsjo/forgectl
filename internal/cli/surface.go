@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -151,7 +152,7 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		Config:  deps.Cfg.Launch,
 		CWD:     target,
 		Args:    nil,
-		BaseEnv: os.Environ(),
+		BaseEnv: surfaceLaunchEnvironment(os.Environ()),
 		Resolve: launch.ResolveBinary,
 	})
 	if err != nil {
@@ -173,6 +174,25 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	// print an invocation, an environment, or a server fingerprint.
 	_, err = fmt.Fprintln(cmd.OutOrStdout(), termsafe.SafeLine(result.Ref().String()))
 	return err
+}
+
+const claudeCodeChildSessionEnv = "CLAUDE_CODE_CHILD_SESSION"
+
+// surfaceLaunchEnvironment removes the Claude marker that describes a child
+// process of the current session. A newly created surface is an independently
+// resumable workspace, so forwarding the marker would misclassify the harness
+// and silently disable its transcript. This policy belongs at the surface
+// boundary: ordinary in-place launches continue to inherit the marker.
+func surfaceLaunchEnvironment(base []string) []string {
+	out := make([]string, 0, len(base))
+	for _, entry := range base {
+		key, _, _ := strings.Cut(entry, "=")
+		if key == claudeCodeChildSessionEnv {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // displayNameFor falls back to the target's own directory name, which is what
