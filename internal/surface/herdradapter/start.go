@@ -189,7 +189,15 @@ func (a *Adapter) reconcile(
 	case 0:
 		return backend.NewNotMutated(cause)
 	case 1:
-		ref, err := a.reference(createdWorkspace{WorkspaceID: matches[0]}, tag, server)
+		// The exact marker and pre-snapshot identify this attempt's workspace.
+		// Revalidate the SAME named session and socket, then bind the reference
+		// to that fresh incarnation. A moved endpoint is refused before a pinned
+		// command can follow the roster to it.
+		fresh, rcause := a.freshReadiness(ctx, server)
+		if rcause != nil {
+			return backend.NewOutcomeUnknown(tag, cause)
+		}
+		ref, err := a.reference(createdWorkspace{WorkspaceID: matches[0]}, tag, fresh)
 		if err != nil {
 			return backend.NewOutcomeUnknown(tag, cause)
 		}
@@ -203,6 +211,11 @@ func (a *Adapter) reconcile(
 
 // serverInfo is what readiness establishes about the session behind the pin.
 type serverInfo struct {
+	// session is the immutable CLI pin whose roster row selected socket. It is
+	// carried so reconciliation can refuse before issuing any command if that
+	// pin somehow changes during a launch.
+	session string
+
 	// socket is the endpoint herdr REPORTED for this session, not one we
 	// derived. It is kept so absence can be settled by a stat rather than by a
 	// diagnostic string.
@@ -241,6 +254,23 @@ type serverInfo struct {
 // commands deeper, after a pre-snapshot and a create have been attempted
 // (forgectl#364).
 func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCause) {
+	return a.readinessAtPin(ctx, "", true)
+}
+
+// freshReadiness resolves the original named session again but refuses a new
+// socket before protocol() can follow the session pin to another endpoint. The
+// warning is suppressed because the initial readiness already emitted it for
+// this Start.
+func (a *Adapter) freshReadiness(ctx context.Context, original serverInfo) (serverInfo, *backend.StartCause) {
+	if original.session == "" || original.session != a.session || original.socket == "" {
+		cause := backend.NewStartCause(backend.FailureIdentityMismatch,
+			errors.New("the herdr session pin changed during reconciliation"))
+		return serverInfo{}, &cause
+	}
+	return a.readinessAtPin(ctx, original.socket, false)
+}
+
+func (a *Adapter) readinessAtPin(ctx context.Context, expectedSocket string, warn bool) (serverInfo, *backend.StartCause) {
 	res, runErr := a.run.RunSensitive(ctx, exec.SensitiveCommand{
 		Kind: exec.KindHerdrReadiness,
 		Path: exec.Secret(a.herdrPath),
@@ -287,6 +317,11 @@ func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCaus
 		cause := backend.NewStartCause(backend.FailureMalformedResponse, err)
 		return serverInfo{}, &cause
 	}
+	if expectedSocket != "" && row.SocketPath != expectedSocket {
+		cause := backend.NewStartCause(backend.FailureIdentityMismatch,
+			errors.New("the herdr session resolved to a different endpoint during reconciliation"))
+		return serverInfo{session: a.session, socket: row.SocketPath}, &cause
+	}
 
 	// From here the socket is KNOWN and shape-checked, so every later failure
 	// carries it forward rather than returning a zero serverInfo.
@@ -303,13 +338,15 @@ func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCaus
 	// FailureUnavailable only for an unreachable path and a non-socket, and
 	// FailurePermissionDenied for the ownership arms, so a socket we are refused
 	// can never be read as a socket that is gone.
-	endpoint := serverInfo{socket: row.SocketPath}
+	endpoint := serverInfo{session: a.session, socket: row.SocketPath}
 
 	info, cause := a.checkSocketOwner(row.SocketPath)
 	if cause != nil {
 		return endpoint, cause
 	}
-	a.warnUnsafeSocketDir(row.SocketPath)
+	if warn {
+		a.warnUnsafeSocketDir(row.SocketPath)
+	}
 
 	version, cause := a.protocol(ctx)
 	if cause != nil {
@@ -321,7 +358,7 @@ func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCaus
 		c := backend.NewStartCause(backend.FailureMalformedResponse, err)
 		return endpoint, &c
 	}
-	return serverInfo{socket: row.SocketPath, version: version, incarnation: id}, nil
+	return serverInfo{session: a.session, socket: row.SocketPath, version: version, incarnation: id}, nil
 }
 
 // warnUnsafeSocketDir reports an unsafe herdr-selected location without
@@ -450,15 +487,13 @@ func (a *Adapter) protocol(ctx context.Context) (string, *backend.StartCause) {
 // herdr reports no server pid and no start time, so the fingerprint rests on
 // the socket alone — its inode and its change time (forgectl#344), where tmux
 // has the server's pid and start time as well. Taking the fingerprint again
-// after the mutation is what turns "the server restarted mid-create and we
-// cannot say which incarnation holds this workspace" into a refusal instead of a
-// silent mixed state.
+// after the mutation catches both a restart and the weaker case where socket
+// metadata changed while the create was in flight.
 //
-// The change time can move without a restart, so this refuses slightly more
-// often than it strictly must — and on THIS path an extra refusal costs more
-// than on the close path: a create that fully succeeded returns OutcomeUnknown
-// with no reference, leaving a live workspace nothing in-process can close and
-// only the recovery tag to find it by.
+// The change time can move without a restart, so this local bind refuses
+// slightly more often than it strictly must. Start then reconciles by marker
+// and novelty; one exact match earns fresh readiness against the same named
+// session and socket, while ambiguity still remains OutcomeUnknown.
 func (a *Adapter) reference(created createdWorkspace, tag backend.RecoveryTag, server serverInfo) (backend.Ref, error) {
 	info, err := a.lstat(server.socket)
 	if err != nil {
@@ -469,7 +504,7 @@ func (a *Adapter) reference(created createdWorkspace, tag backend.RecoveryTag, s
 		return backend.Ref{}, err
 	}
 	if !server.incarnation.Matches(now) {
-		return backend.Ref{}, errors.New("the herdr server restarted while the workspace was being created")
+		return backend.Ref{}, errors.New("the herdr server incarnation changed while the workspace was being created")
 	}
 	id, err := backend.NewHerdrIdentity(created.WorkspaceID, created.TabID, created.PaneID)
 	if err != nil {
