@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/huh"
@@ -24,8 +22,6 @@ const reviewPrompt = "Review this pull request as a clean-room reviewer. " +
 	"(Critical / Important / Nit) with file:line and a concrete fix. " +
 	"Do NOT post, comment, merge, or push anything — output the review only."
 
-var dispatchWindowIDPattern = regexp.MustCompile(`^@[0-9]+$`)
-
 // Dispatch is the generation-qualified identity returned by one successful
 // detached review launch. WindowID is opaque outside this package.
 type Dispatch struct {
@@ -33,33 +29,14 @@ type Dispatch struct {
 	WindowID string
 }
 
-// newDispatch parses the `new-window -P -F tmux.IdentityFormat` result into a
-// generation-qualified identity.
-//
-// It splits with tmux.SplitFields, not a bare strings.Split on tmux.FieldSep,
-// because tmux 3.5a and older hand the separator back octal-escaped (see
-// escapedFieldSep in internal/tmux/format.go). Every field is still validated
-// exactly as before — pid and start time numeric, window id ^@[0-9]+$ — and
-// WindowID is rejoined on the RAW separator, so the in-memory identity is one
-// canonical form regardless of which tmux produced it. That is what keeps it
-// comparable to the ListWindows rows VerifyDispatched matches against, which
-// normalize the same way.
-func newDispatch(ref Ref, output string) (Dispatch, error) {
-	fields := tmux.SplitFields(output)
-	if len(fields) != 3 {
-		return Dispatch{}, fmt.Errorf("tmux dispatch identity has %d fields, want 3 (raw %q)", len(fields), output)
-	}
-	pid, err := strconv.ParseUint(fields[0], 10, 64)
-	if err != nil || pid == 0 {
-		return Dispatch{}, fmt.Errorf("invalid tmux server pid %q", fields[0])
-	}
-	if _, err := strconv.ParseUint(fields[1], 10, 64); err != nil {
-		return Dispatch{}, fmt.Errorf("invalid tmux server start time %q", fields[1])
-	}
-	if !dispatchWindowIDPattern.MatchString(fields[2]) {
-		return Dispatch{}, fmt.Errorf("invalid tmux window id %q", fields[2])
-	}
-	return Dispatch{Ref: ref, WindowID: strings.Join(fields, tmux.FieldSep)}, nil
+// newDispatch serializes the already-validated tmux identity into the opaque
+// key VerifyDispatched compares with ListWindows rows.
+func newDispatch(ref Ref, window tmux.WindowIdentity) Dispatch {
+	return Dispatch{Ref: ref, WindowID: strings.Join([]string{
+		window.Generation.PID,
+		window.Generation.StartTime,
+		window.ID,
+	}, tmux.FieldSep)}
 }
 
 // localReviewPrompt seeds a local (offline) review — there is no PR to post
@@ -148,17 +125,11 @@ func refWindowName(ref Ref, role nameRole) (string, error) {
 // (see internal/tmux/target.go for the measured resolution table), and getting
 // it wrong deposited review windows into whatever session prefix-matched.
 func (c *Client) ensureSession(ctx context.Context) (tmux.SessionIdentity, error) {
-	session, err := tmux.New(c.run).EnsureSession(ctx, c.tmuxSession, "")
+	session, err := c.tmuxClient.EnsureSession(ctx, c.tmuxSession, "")
 	if err != nil {
 		return tmux.SessionIdentity{}, fmt.Errorf("resolve review session %q: %w", c.tmuxSession, err)
 	}
 	return session, nil
-}
-
-// newWindowTarget renders the `new-window -t` destination for the review
-// session. Split out so both launch paths and `pr open` share one spelling.
-func newWindowTarget(session tmux.SessionIdentity) (string, error) {
-	return tmux.NewWindowSessionTarget(session.ID)
 }
 
 // resolveReviewWindow finds the review window for ref inside the review
@@ -173,7 +144,7 @@ func (c *Client) resolveReviewWindow(ctx context.Context, ref Ref) (tmux.WindowI
 	if err != nil {
 		return tmux.WindowIdentity{}, err
 	}
-	t := tmux.New(c.run)
+	t := c.tmuxClient
 	session, err := t.ResolveSessionExact(ctx, c.tmuxSession)
 	if err != nil {
 		return tmux.WindowIdentity{}, fmt.Errorf("resolve review session %q: %w", c.tmuxSession, err)
@@ -244,7 +215,7 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) (D
 // CheckDispatchCapability refuses unsupported or unidentifiable tmux before a
 // caller creates any review workspace or breadcrumb.
 func (c *Client) CheckDispatchCapability(ctx context.Context) error {
-	_, err := tmux.New(c.run).CheckGenerationCapability(ctx)
+	_, err := c.tmuxClient.CheckGenerationCapability(ctx)
 	return err
 }
 
@@ -329,39 +300,18 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 	if err != nil {
 		return Dispatch{}, err
 	}
-	target, err := newWindowTarget(session)
-	if err != nil {
-		return Dispatch{}, err
-	}
 	name, err := ReviewWindowName(sess.Ref)
 	if err != nil {
 		return Dispatch{}, err
 	}
-	args := []string{
-		"new-window",
-		"-P", "-F", tmux.IdentityFormat,
-		"-t", target,
-		"-n", name,
-		"-c", sess.Workspace,
-		"--", codexPath,
-	}
-	args = append(args, codexArgs...)
-	// Unpinned by construction: this argv does not route through
-	// tmux.Client.tmuxArgs, so it always reaches the ENVIRONMENTAL server.
-	// Consistent today because every internal/pr path builds tmux.New (never
-	// tmux.NewPinned) — but a pinned caller here would create the window on
-	// one server and mint an identity naming another. See forgectl#353.
-	out, err := c.run.Run(ctx, "tmux", args...)
+	command := append([]string{codexPath}, codexArgs...)
+	window, err := c.tmuxClient.NewWindow(ctx, session, name, sess.Workspace, command...)
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("open Codex review window: %w", err)
 	}
-	dispatch, err := newDispatch(sess.Ref, out)
-	if err != nil {
-		return Dispatch{}, fmt.Errorf("read Codex review window identity: %w", err)
-	}
 	slog.Info("Successfully dispatched Codex clean-room review.",
 		"ref", sess.Ref.String(), "session_id", session.ID, "window", name)
-	return dispatch, nil
+	return newDispatch(sess.Ref, window), nil
 }
 
 // A same-name/different-key collision is NOT probed for before creating a
@@ -522,39 +472,20 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	if err != nil {
 		return Dispatch{}, err
 	}
-	target, err := newWindowTarget(session)
-	if err != nil {
-		return Dispatch{}, err
-	}
 	name, err := ReviewWindowName(sess.Ref)
 	if err != nil {
 		return Dispatch{}, err
 	}
-	args := []string{
-		"new-window",
-		"-P", "-F", tmux.IdentityFormat,
-		"-t", target,
-		"-n", name,
-		"-c", sess.Workspace,
-		"--", claudePath,
-	}
-	args = append(args, claudeArgs...)
-
 	slog.Debug("Preparing to dispatch review into tmux window.",
 		"session_id", session.ID, "window", name, "workspace", sess.Workspace)
-	// Unpinned by construction — see the note at the sibling new-window site
-	// earlier in this file, and forgectl#353.
-	out, err := c.run.Run(ctx, "tmux", args...)
+	command := append([]string{claudePath}, claudeArgs...)
+	window, err := c.tmuxClient.NewWindow(ctx, session, name, sess.Workspace, command...)
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("open review window: %w", err)
 	}
-	dispatch, err := newDispatch(sess.Ref, out)
-	if err != nil {
-		return Dispatch{}, fmt.Errorf("read review window identity: %w", err)
-	}
 	slog.Info("Successfully dispatched clean-room review.",
 		"ref", sess.Ref.String(), "session_id", session.ID, "window", name)
-	return dispatch, nil
+	return newDispatch(sess.Ref, window), nil
 }
 
 // PostReview posts review to the PR — but ONLY after the human approval gate

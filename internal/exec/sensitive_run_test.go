@@ -3,6 +3,7 @@ package exec
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -39,6 +40,15 @@ func helperMain(mode string) int {
 		return 3
 	case "flood":
 		return floodTo(os.Stdout, arg)
+	case "cmuxlist":
+		n, err := strconv.Atoi(arg)
+		if err != nil || n < 0 {
+			return 98
+		}
+		_, _ = fmt.Fprint(os.Stdout, `{"window_ref":"window:1","workspaces":[{"id":"123E4567-E89B-12D3-A456-426614174000","description":"fc-surface-test","latest_conversation_message":"`)
+		_, _ = fmt.Fprint(os.Stdout, strings.Repeat("x", n))
+		_, _ = fmt.Fprint(os.Stdout, `","remote":{"detail":{"nested":[1,2,3]}}}]}`)
+		return 0
 	case "floodstderr":
 		if code := floodTo(os.Stderr, arg); code != 0 {
 			return code
@@ -222,6 +232,79 @@ func TestRunSensitive_StdoutOverflowKillsAndMarksIncomplete(t *testing.T) {
 	}
 	if elapsed > 3*time.Second {
 		t.Errorf("overflow took %v; the runner should kill rather than drain", elapsed)
+	}
+}
+
+func TestRunSensitive_CmuxProjectionIgnoresLargeUnusedFields(t *testing.T) {
+	runner, self := helperRunner(t, "cmuxlist:200000", defaultRetireBound)
+	cmd := helperCommand(KindCmuxSnapshot, self, 4096)
+	cmd.StdoutMode = CaptureCmuxWorkspaceList
+	res, err := runner.RunSensitive(context.Background(), cmd)
+	if err != nil {
+		t.Fatalf("RunSensitive: %v", err)
+	}
+	raw, complete := res.Stdout.CopyBytesForParse()
+	if !complete {
+		t.Fatal("projected workspace listing reported itself incomplete")
+	}
+	if len(raw) >= 4096 {
+		t.Fatalf("projected listing retained %d bytes, want less than cap", len(raw))
+	}
+	if strings.Contains(string(raw), "latest_conversation_message") || strings.Contains(string(raw), "remote") {
+		t.Fatalf("projected listing retained an unused field: %s", raw)
+	}
+	var got struct {
+		Workspaces []projectedCmuxWorkspace `json:"workspaces"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("projected JSON: %v", err)
+	}
+	if len(got.Workspaces) != 1 || got.Workspaces[0].ID != "123E4567-E89B-12D3-A456-426614174000" || got.Workspaces[0].Description != "fc-surface-test" {
+		t.Fatalf("projected workspaces = %+v", got.Workspaces)
+	}
+}
+
+func TestRunSensitive_CmuxProjectionStillEnforcesOutputCap(t *testing.T) {
+	runner, self := helperRunner(t, "cmuxlist:0", defaultRetireBound)
+	cmd := helperCommand(KindCmuxSnapshot, self, 32)
+	cmd.StdoutMode = CaptureCmuxWorkspaceList
+	res, err := runner.RunSensitive(context.Background(), cmd)
+	if !errors.Is(err, ErrOutputLimit) {
+		t.Fatalf("err = %v, want ErrOutputLimit", err)
+	}
+	if res.Stdout.Len() != 32 || res.Stdout.Complete() {
+		t.Fatalf("projected stdout = %d bytes complete=%v, want capped incomplete output", res.Stdout.Len(), res.Stdout.Complete())
+	}
+}
+
+func TestRunSensitive_CmuxProjectionMalformedReplyStaysUnreadable(t *testing.T) {
+	runner, self := helperRunner(t, `ok:{"workspaces":[`, defaultRetireBound)
+	cmd := helperCommand(KindCmuxSnapshot, self, 4096)
+	cmd.StdoutMode = CaptureCmuxWorkspaceList
+	res, err := runner.RunSensitive(context.Background(), cmd)
+	if err != nil {
+		t.Fatalf("RunSensitive: %v", err)
+	}
+	raw, complete := res.Stdout.CopyBytesForParse()
+	if !complete {
+		t.Fatal("the whole malformed reply was read; it should be unreadable, not reported truncated")
+	}
+	var value any
+	if json.Unmarshal(raw, &value) == nil {
+		t.Fatalf("malformed input became readable projected JSON: %s", raw)
+	}
+}
+
+func TestProjectCmuxWorkspaceListRejectsMalformedAndTrailingJSON(t *testing.T) {
+	for _, input := range []string{
+		`{"workspaces":[`,
+		`{"workspaces":[]} true`,
+		`{"workspaces":{}}`,
+		`{"workspaces":[7]}`,
+	} {
+		if got, err := projectCmuxWorkspaceList(strings.NewReader(input)); err == nil {
+			t.Errorf("projectCmuxWorkspaceList(%q) = %q, want error", input, got)
+		}
 	}
 }
 

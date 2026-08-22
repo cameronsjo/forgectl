@@ -243,7 +243,7 @@ func TestLaunchPickedIsolatedTmux_FirstServer(t *testing.T) {
 			// live proof that `new-session -P -F` returns an identity the
 			// package can parse.
 			verbs := router.tmuxVerbs()
-			wantPrefix := []string{"list-windows", "-V", "display-message", "-V", "display-message", "list-sessions", "new-session", "new-window"}
+			wantPrefix := []string{"list-windows", "-V", "display-message", "-V", "display-message", "list-sessions", "new-session", "list-sessions", "new-window"}
 			if len(verbs) < len(wantPrefix) {
 				t.Fatalf("tmux verbs = %v, want at least %v", verbs, wantPrefix)
 			}

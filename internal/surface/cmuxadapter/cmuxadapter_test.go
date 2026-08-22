@@ -383,6 +383,13 @@ func TestEveryCommandCarriesThePinAndTheIDFormat(t *testing.T) {
 			!cmd.Args[1].Equal(exec.MustFixed("uuids")) {
 			t.Errorf("%v does not lead with --id-format uuids; its reply's keys would be renamed", cmd.Kind)
 		}
+		isListing := cmd.Kind == exec.KindCmuxSnapshot || cmd.Kind == exec.KindCmuxReconcile || cmd.Kind == exec.KindCmuxProbe
+		if isListing && cmd.StdoutMode != exec.CaptureCmuxWorkspaceList {
+			t.Errorf("%v uses stdout mode %v, want streamed workspace projection", cmd.Kind, cmd.StdoutMode)
+		}
+		if !isListing && cmd.StdoutMode != exec.CaptureRaw {
+			t.Errorf("%v uses stdout mode %v, want raw capture", cmd.Kind, cmd.StdoutMode)
+		}
 	}
 }
 

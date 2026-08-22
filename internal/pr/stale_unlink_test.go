@@ -419,7 +419,7 @@ func TestDiscardStale_ReappearedWorkspaceRendersACleanRefusal(t *testing.T) {
 		t.Errorf("the refusal must not render a formatting artifact: %q", got)
 	}
 	want := fmt.Sprintf(
-		"workspace for breadcrumb %s is no longer cleanly absent; refusing to remove it", f.path)
+		"workspace for breadcrumb %s is no longer cleanly absent; refusing to remove it", f.member.displayPath)
 	if got != want {
 		t.Errorf("refusal = %q, want %q", got, want)
 	}

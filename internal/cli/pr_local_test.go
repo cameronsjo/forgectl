@@ -36,8 +36,20 @@ import (
 // PrepareLocal issues, plus a no-op success for a later `git worktree add` /
 // `tmux new-window`.
 func prLocalFakeRunner() *exec.FakeRunner {
+	created := false
 	return &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			if name == "tmux" && len(args) > 0 {
+				switch args[0] {
+				case "list-sessions":
+					if created {
+						return "123\x1f456\x1f$1\x1fforgectl\x1f1\x1f0\x1f0\x1f/tmp", nil
+					}
+				case "new-session":
+					created = true
+					return "123\x1f456\x1f$1", nil
+				}
+			}
 			if out, handled, err := tmuxDouble(name, args); handled {
 				return out, err
 			}

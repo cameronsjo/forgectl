@@ -164,6 +164,49 @@ func (c *Client) ResolveWindowExact(ctx context.Context, session SessionIdentity
 	return WindowIdentity{}, fmt.Errorf("%w: no window named %q in session %s", ErrObjectGone, name, session.ID)
 }
 
+// NewWindow creates a window under the generation-qualified session and
+// returns the identity minted by that same command. The session is revalidated
+// immediately before creation, and both calls route through tmuxArgs so a
+// socket-pinned client cannot accidentally read one server and write another.
+func (c *Client) NewWindow(ctx context.Context, session SessionIdentity, name, dir string, command ...string) (WindowIdentity, error) {
+	if name == "" {
+		return WindowIdentity{}, fmt.Errorf("cannot create a tmux window with an empty name")
+	}
+	current, err := c.RevalidateSession(ctx, session)
+	if err != nil {
+		return WindowIdentity{}, fmt.Errorf("create window %q: %w", name, err)
+	}
+	target, err := NewWindowSessionTarget(current.ID)
+	if err != nil {
+		return WindowIdentity{}, err
+	}
+	args := c.tmuxArgs("new-window", "-P", "-F", IdentityFormat, "-t", target, "-n", name)
+	if dir != "" {
+		args = append(args, "-c", dir)
+	}
+	if len(command) != 0 {
+		args = append(args, "--")
+		args = append(args, command...)
+	}
+	out, err := c.run.Run(ctx, c.tmuxBin, args...)
+	if err != nil {
+		return WindowIdentity{}, fmt.Errorf("create window %q: %w", name, err)
+	}
+	triple, err := parseIdentityTriple(out, "window", ValidateWindowID)
+	if err != nil {
+		return WindowIdentity{}, fmt.Errorf("read identity of new window %q: %w", name, err)
+	}
+	if !current.Generation.matches(triple.PID, triple.StartTime) {
+		return WindowIdentity{}, generationDrift(current.Generation, triple.PID, triple.StartTime)
+	}
+	return WindowIdentity{
+		Generation: current.Generation,
+		ID:         triple.ID,
+		SessionID:  current.ID,
+		Name:       name,
+	}, nil
+}
+
 // KillWindow kills the window the identity names, revalidating generation and
 // parentage first. A window that moved to another session since capture is
 // refused rather than killed — its @id would still resolve.

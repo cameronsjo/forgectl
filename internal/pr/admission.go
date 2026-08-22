@@ -65,7 +65,7 @@ func MaxConcurrentReviews(cfgMax int) int {
 // "pr-*" window unrelated to a review gets counted too, which only makes
 // admission MORE conservative (fewer slots granted), never less.
 func (c *Client) LiveReviews(ctx context.Context) (n int, ok bool) {
-	t := tmux.New(c.run)
+	t := c.tmuxClient
 	wins, err := t.ListWindows(ctx)
 	if err != nil {
 		return 0, false
@@ -117,7 +117,7 @@ func (c *Client) WindowLive(ctx context.Context, ref Ref) (live bool, ok bool) {
 // LiveReviews doc comment above for the full trace of why that fuzziness is
 // unsafe here.
 func (c *Client) WindowsLive(ctx context.Context, refs []Ref) (map[Ref]bool, bool) {
-	t := tmux.New(c.run)
+	t := c.tmuxClient
 	wins, err := t.ListWindows(ctx)
 	if err != nil {
 		return nil, false
@@ -156,7 +156,7 @@ func (c *Client) VerifyDispatched(ctx context.Context, dispatches []Dispatch) ([
 	if err := c.dispatchWait(ctx); err != nil {
 		return nil, fmt.Errorf("wait to verify review dispatches: %w", err)
 	}
-	windows, err := tmux.New(c.run).ListWindows(ctx)
+	windows, err := c.tmuxClient.ListWindows(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("verify review dispatches: %w", err)
 	}

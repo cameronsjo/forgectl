@@ -47,6 +47,7 @@ func postClient(fake *exec.FakeRunner, approve bool, tty bool) *Client {
 var testSess = Session{Ref: Ref{Owner: "o", Repo: "r", Number: 9}, Workspace: "/tmp/forgectl-x"}
 
 func successfulLaunchRunner() *exec.FakeRunner {
+	created := false
 	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		if name == "tmux" && len(args) > 0 {
 			switch args[0] {
@@ -55,11 +56,16 @@ func successfulLaunchRunner() *exec.FakeRunner {
 			case "display-message":
 				return "123\x1f456\x1f@0", nil
 			case "list-sessions":
-				// Empty server: EnsureSession creates the review session.
+				// Empty first, then live: EnsureSession creates the review session
+				// and NewWindow revalidates it immediately before mutation.
+				if created {
+					return "123\x1f456\x1f$1\x1fforgectl\x1f1\x1f0\x1f0\x1f/tmp", nil
+				}
 				return "", nil
 			case "new-session":
 				// `new-session -P -F` returns the generation plus the new
 				// session's native id, which is what the dispatch targets.
+				created = true
 				return "123\x1f456\x1f$1", nil
 			case "new-window":
 				return "123\x1f456\x1f@1", nil
@@ -111,24 +117,6 @@ func TestPostReview_ReloadedLocalSessionStillRefused(t *testing.T) {
 // window_name_test.go, which asserts separation for the exact adversarial
 // pair — same owner spelling, same repo, same number — rather than for two
 // refs that already differed on their face.
-
-// TestNewWindowTarget_IsSessionIDWithTrailingColon pins the dispatch
-// destination. The colon is what makes the operand session-qualified for
-// new-window; without it tmux reads the value as a window target and resolves
-// it by prefix (forgectl#237).
-func TestNewWindowTarget_IsSessionIDWithTrailingColon(t *testing.T) {
-	session := tmux.SessionIdentity{ID: "$4", Name: "forgectl"}
-	got, err := newWindowTarget(session)
-	if err != nil {
-		t.Fatalf("newWindowTarget: %v", err)
-	}
-	if got != "$4:" {
-		t.Fatalf("newWindowTarget = %q, want %q", got, "$4:")
-	}
-	if strings.Contains(got, "forgectl") {
-		t.Fatalf("newWindowTarget = %q; the session NAME must never reach a -t operand", got)
-	}
-}
 
 // The dotted-repo hazard — tmux reads "." as the window.pane separator, so
 // `select-window -t sess:pr-o-foo.bar-42` resolved to window="pr-o-foo",

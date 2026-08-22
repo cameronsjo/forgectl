@@ -113,6 +113,8 @@ func TestPinnedClientPinsEveryCommand(t *testing.T) {
 				return paneRow, nil
 			case slices.Contains(args, "new-session"):
 				return strings.Join([]string{pid, start, "$1"}, FieldSep), nil
+			case slices.Contains(args, "new-window"):
+				return strings.Join([]string{pid, start, "@2"}, FieldSep), nil
 			case slices.Contains(args, "-V"):
 				// A version tmux's own parser accepts, so
 				// CheckGenerationCapability proceeds to display-message rather
@@ -133,6 +135,7 @@ func TestPinnedClientPinsEveryCommand(t *testing.T) {
 	_, _ = c.ListWindows(ctx)
 	_, _ = c.ListPanes(ctx)
 	_, _ = c.CreateSession(ctx, "forge", "/tmp")
+	_, _ = c.NewWindow(ctx, session, "review", "/tmp", "codex", "exec")
 	_ = c.RenameSession(ctx, session, "renamed")
 	_ = c.KillWindow(ctx, window)
 	_ = c.KillSession(ctx, session)
@@ -183,7 +186,7 @@ func TestPinnedClientPinsEveryCommand(t *testing.T) {
 	// either would be asserting a command that cannot run. Their refusal is
 	// tested by TestPinnedClientRefusesAttachAndSwitch.
 	wantVerbs := []string{
-		"list-sessions", "list-windows", "list-panes", "new-session",
+		"list-sessions", "list-windows", "list-panes", "new-session", "new-window",
 		"rename-session", "kill-window", "kill-session", "select-window",
 		"-V", "display-message",
 	}

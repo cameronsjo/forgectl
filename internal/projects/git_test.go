@@ -121,16 +121,16 @@ func TestGitStatus_NonRepoDir_StateIsNotRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := filepath.Join(tmp, "realrepo")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	fake := v2CleanRunner() // clean status, 0 ahead
 
-	if got := gitStatus(context.Background(), fake, nonRepo); got.State != StatusNotRepo {
+	if got := gitStatus(context.Background(), fake, "git", nonRepo); got.State != StatusNotRepo {
 		t.Errorf("non-repo dir: State = %q, want %q", got.State, StatusNotRepo)
 	}
 	// Control: same runner, a dir that IS a repo must report StatusOK.
-	if got := gitStatus(context.Background(), fake, repo); got.State != StatusOK {
+	if got := gitStatus(context.Background(), fake, "git", repo); got.State != StatusOK {
 		t.Errorf("control repo dir: State = %q, want %q", got.State, StatusOK)
 	}
 }
@@ -148,14 +148,53 @@ func TestGitStatus_CommandError_StateIsUnknown(t *testing.T) {
 	failing := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		return "", errors.New("fatal: unable to read current working directory")
 	}}
-	if got := gitStatus(context.Background(), failing, repo); got.State != StatusUnknown {
+	if got := gitStatus(context.Background(), failing, "git", repo); got.State != StatusUnknown {
 		t.Errorf("failing git status: State = %q, want %q", got.State, StatusUnknown)
 	}
 
 	// Control: identical fixture, RunFunc succeeds → StatusOK.
 	succeeding := v2CleanRunner()
-	if got := gitStatus(context.Background(), succeeding, repo); got.State != StatusOK {
+	if got := gitStatus(context.Background(), succeeding, "git", repo); got.State != StatusOK {
 		t.Errorf("control succeeding git status: State = %q, want %q", got.State, StatusOK)
+	}
+}
+
+func TestNew_ResolvesGitOnceAndPinsTheAbsoluteResult(t *testing.T) {
+	lookups := 0
+	c := New(&exec.FakeRunner{}, withGitLookPath(func(name string) (string, error) {
+		lookups++
+		if name != "git" {
+			t.Fatalf("LookPath name = %q, want git", name)
+		}
+		return "/known/bin/git", nil
+	}))
+	if got := c.gitBinary(); got != "/known/bin/git" {
+		t.Fatalf("git binary = %q, want /known/bin/git", got)
+	}
+	_ = c.gitBinary()
+	if lookups != 1 {
+		t.Fatalf("LookPath calls = %d, want exactly one construction-time resolution", lookups)
+	}
+}
+
+func TestWithGitBinary_RejectsAnUnpinnedOverride(t *testing.T) {
+	c := New(&exec.FakeRunner{}, WithGitBinary("git"))
+	if got := c.gitBinary(); got != "" {
+		t.Fatalf("relative git override resolved as %q, want unavailable", got)
+	}
+}
+
+func TestGitStatus_MissingPinnedGitIsUnknownWithoutRunnerCall(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fake := &exec.FakeRunner{}
+	if got := gitStatus(context.Background(), fake, "", repo); got.State != StatusUnknown {
+		t.Fatalf("gitStatus without a resolved binary = %+v, want State %q", got, StatusUnknown)
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("runner calls = %v, want none when git was unavailable at construction", fake.Calls)
 	}
 }
 
@@ -176,7 +215,7 @@ func TestGitStatus_UsesOnePorcelainV2BranchProbe(t *testing.T) {
 		return v2Branch(2, 3), nil
 	}}
 
-	got := gitStatus(context.Background(), fake, repo)
+	got := gitStatus(context.Background(), fake, "git", repo)
 	want := GitStatus{State: StatusOK, Ahead: 2}
 	if got != want {
 		t.Errorf("gitStatus = %+v, want %+v", got, want)
@@ -243,7 +282,7 @@ func TestGitStatus_CombinedCommandFailureIsUnknownWithoutFallback(t *testing.T) 
 			defer cancel()
 			run := &ctxRunner{fn: tc.fn}
 
-			if got := gitStatus(ctx, run, repo); got.State != StatusUnknown {
+			if got := gitStatus(ctx, run, "git", repo); got.State != StatusUnknown {
 				t.Errorf("gitStatus = %+v, want State %q", got, StatusUnknown)
 			}
 
@@ -424,7 +463,7 @@ func TestGitStatus_ParsesPorcelainV2(t *testing.T) {
 			fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) {
 				return tc.out, nil
 			}}
-			if got := gitStatus(context.Background(), fake, repo); got != tc.want {
+			if got := gitStatus(context.Background(), fake, "git", repo); got != tc.want {
 				t.Errorf("gitStatus = %+v, want %+v\n--- output ---\n%s", got, tc.want, tc.out)
 			}
 			if len(fake.Calls) != 1 {
@@ -472,7 +511,7 @@ func TestGitStatus_HeaderlessPayloadIsUnknown(t *testing.T) {
 			fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) {
 				return tc.out, nil
 			}}
-			if got := gitStatus(context.Background(), fake, repo); got != tc.want {
+			if got := gitStatus(context.Background(), fake, "git", repo); got != tc.want {
 				t.Errorf("gitStatus = %+v, want %+v\n--- output ---\n%s", got, tc.want, tc.out)
 			}
 		})
@@ -507,7 +546,7 @@ func TestGitStatusV2_RecordOrderDoesNotAffectCounts(t *testing.T) {
 	for _, perm := range perms {
 		out := v2Out(append([]string{v2Branch(2, 0)}, perm...)...)
 		fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, nil }}
-		if got := gitStatus(context.Background(), fake, repo); got != want {
+		if got := gitStatus(context.Background(), fake, "git", repo); got != want {
 			t.Errorf("permutation %v: gitStatus = %+v, want %+v", perm, got, want)
 		}
 	}

@@ -14,6 +14,14 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
+)
+
+const maxBreadcrumbRecordBytes = 8 << 10
+
+var (
+	errBreadcrumbDuplicateKeys  = errors.New("breadcrumb record contains duplicate object keys")
+	errBreadcrumbRecordTooLarge = errors.New("breadcrumb record exceeds the 8 KiB limit")
 )
 
 // Breadcrumb is the on-disk record of one clean-room review session, written
@@ -124,8 +132,12 @@ func writeBreadcrumb(sessionsDir string, ref Ref, bc Breadcrumb) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("marshal breadcrumb: %w", err)
 	}
+	data = append(data, '\n')
+	if len(data) > maxBreadcrumbRecordBytes {
+		return "", errBreadcrumbRecordTooLarge
+	}
 	path := filepath.Join(sessionsDir, breadcrumbFilename(ref, bc.CreatedAt))
-	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return "", fmt.Errorf("write breadcrumb %s: %w", path, err)
 	}
 	slog.Debug("Wrote pr session breadcrumb.", "path", path, "ref", bc.Ref)
@@ -152,9 +164,11 @@ func LoadBreadcrumb(path string) (Breadcrumb, error) {
 // list rows, stale teardown — decodes through here, so no second schema can
 // drift away from this one.
 //
-// GRAMMAR: a breadcrumb file is EXACTLY ONE JSON record. DisallowUnknownFields
-// refuses smuggled keys inside the record, and the trailing-token check refuses
-// anything after it (forgectl#289).
+// GRAMMAR: a breadcrumb file is EXACTLY ONE JSON record of at most 8 KiB.
+// Duplicate-key rejection prevents two readers from assigning different
+// meanings to one object, DisallowUnknownFields refuses smuggled keys inside
+// the record, and the trailing-token check refuses anything after it
+// (forgectl#289, forgectl#306).
 //
 // Both halves answer the same question — can this file mean something other
 // than what a reader took from it? While trailing bytes were ignored, a file
@@ -169,6 +183,12 @@ func LoadBreadcrumb(path string) (Breadcrumb, error) {
 // every breadcrumb forgectl has ever written still decodes. Only bytes forgectl
 // never wrote are newly rejected.
 func decodeBreadcrumb(data []byte) (Breadcrumb, error) {
+	if len(data) > maxBreadcrumbRecordBytes {
+		return Breadcrumb{}, errBreadcrumbRecordTooLarge
+	}
+	if err := rejectDuplicateBreadcrumbKeys(data); err != nil {
+		return Breadcrumb{}, err
+	}
 	var bc Breadcrumb
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
@@ -195,9 +215,59 @@ func decodeBreadcrumb(data []byte) (Breadcrumb, error) {
 		return Breadcrumb{}, fmt.Errorf("trailing content after the breadcrumb record; " +
 			"a breadcrumb file must contain exactly one JSON record, and no forgectl verb can " +
 			"read or discard this one — remove the file by hand, and check whether its clean " +
-			"room under the temp dir needs removing with it")
+			"room matching forgectl-workflow-* under the temp dir needs removing with it")
 	}
 	return bc, nil
+}
+
+// rejectDuplicateBreadcrumbKeys walks the token stream before decoding into a
+// struct, because encoding/json has already discarded the losing value by the
+// time Decode returns. Recursion is bounded by maxBreadcrumbRecordBytes; any
+// increase to that cap must revisit this walk's stack bound too.
+func rejectDuplicateBreadcrumbKeys(data []byte) error {
+	return walkBreadcrumbJSON(json.NewDecoder(bytes.NewReader(data)))
+}
+
+func walkBreadcrumbJSON(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		for dec.More() {
+			keyToken, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return fmt.Errorf("breadcrumb object key is not a string")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return errBreadcrumbDuplicateKeys
+			}
+			seen[key] = struct{}{}
+			if err := walkBreadcrumbJSON(dec); err != nil {
+				return err
+			}
+		}
+	case '[':
+		for dec.More() {
+			if err := walkBreadcrumbJSON(dec); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("unexpected breadcrumb JSON delimiter %q", delim)
+	}
+	_, err = dec.Token()
+	return err
 }
 
 // loadBreadcrumbRecord is the RECORD loader: location guard, read, decode, and
@@ -215,13 +285,20 @@ func loadBreadcrumbRecord(path, sessionsDir string) (Breadcrumb, []byte, error) 
 	// (1) LOCATION — reject anything not inside the forgectl-owned dir first.
 	if !sandbox.WithinWorkspace(sessionsDir, path) {
 		slog.Error("Breadcrumb path escapes session-state dir; refusing.", "path", path, "sessionsDir", sessionsDir)
-		return Breadcrumb{}, nil, fmt.Errorf("breadcrumb %q is not inside the forgectl session-state dir", path)
+		return Breadcrumb{}, nil, fmt.Errorf("breadcrumb %s is not inside the forgectl session-state dir", termsafe.QuotePath(path))
 	}
 
-	// (2) CONTENT — only now read and decode.
-	data, err := os.ReadFile(path) //nolint:gosec // path was location-validated above
+	// (2) CONTENT — only now read and decode. LimitReader bounds the allocation
+	// before parsing rather than discovering an oversized record after ReadFile
+	// has already buffered it all.
+	file, err := os.Open(path) //nolint:gosec // path was location-validated above
 	if err != nil {
-		return Breadcrumb{}, nil, fmt.Errorf("read breadcrumb %s: %w", path, err)
+		return Breadcrumb{}, nil, fmt.Errorf("read breadcrumb %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
+	}
+	defer func() { _ = file.Close() }()
+	data, err := readBreadcrumbBytes(file)
+	if err != nil {
+		return Breadcrumb{}, nil, fmt.Errorf("read breadcrumb %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	bc, err := decodeBreadcrumbRecord(data, path)
 	if err != nil {
@@ -230,24 +307,31 @@ func loadBreadcrumbRecord(path, sessionsDir string) (Breadcrumb, []byte, error) 
 	return bc, data, nil
 }
 
+func readBreadcrumbBytes(reader io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, maxBreadcrumbRecordBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxBreadcrumbRecordBytes {
+		return nil, errBreadcrumbRecordTooLarge
+	}
+	return data, nil
+}
+
 // decodeBreadcrumbRecord is step (2) of loadBreadcrumbRecord split out for a
 // caller that already holds the bytes and has settled location by construction
 // rather than by pathname — the stale-unlink protocol reads through a pinned
 // directory handle, so there is no path left to location-check.
 //
 // path names the file only for error messages; it is never opened here. It is
-// interpolated RAW, as every sibling error site in this package does — the
-// breadcrumb filename is attacker-chosen and reaches a terminal unescaped from
-// roughly a dozen sites here, in manage.go, member.go, and teardown.go, and
-// escaping this one pair while the rest stay raw buys an operator nothing.
-// Converging the cluster is forgectl#309.
+// terminal-quoted because the breadcrumb filename is attacker-chosen.
 func decodeBreadcrumbRecord(data []byte, path string) (Breadcrumb, error) {
 	bc, err := decodeBreadcrumb(data)
 	if err != nil {
-		return Breadcrumb{}, fmt.Errorf("decode breadcrumb %s: %w", path, err)
+		return Breadcrumb{}, fmt.Errorf("decode breadcrumb %s: %w", termsafe.QuotePath(path), err)
 	}
 	if err := validateBreadcrumbRecord(bc); err != nil {
-		return Breadcrumb{}, fmt.Errorf("invalid breadcrumb %s: %w", path, err)
+		return Breadcrumb{}, fmt.Errorf("invalid breadcrumb %s: %w", termsafe.QuotePath(path), err)
 	}
 	return bc, nil
 }
@@ -281,9 +365,9 @@ func loadBreadcrumb(path, sessionsDir string) (Breadcrumb, error) {
 	case workspaceAvailabilityLive:
 		return bc, nil
 	case workspaceAvailabilityMissing:
-		return Breadcrumb{}, fmt.Errorf("breadcrumb %s: %w", path, err)
+		return Breadcrumb{}, fmt.Errorf("breadcrumb %s: %w", termsafe.QuotePath(path), err)
 	default:
-		return Breadcrumb{}, fmt.Errorf("invalid breadcrumb %s: %w", path, err)
+		return Breadcrumb{}, fmt.Errorf("invalid breadcrumb %s: %w", termsafe.QuotePath(path), err)
 	}
 }
 

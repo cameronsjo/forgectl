@@ -21,14 +21,10 @@ import (
 // hardcoded constant would make every command in this package fail validation at
 // once the day that ceiling is lowered.
 //
-// The ceiling is worth naming because it is reachable here in a way it is not
-// for tmux. One row of `workspace list --json` measures ~1.8 KB against a 64 KB
-// cap, so a listing stops being readable somewhere around 35 open workspaces.
-// The failure is the safe one — a truncated stream is reported unreadable and
-// never as an absence, so nothing is orphaned and no rollback is falsely
-// discharged — but it is a real limit and it is tracked as forgectl#359 rather
-// than hidden. The compact text listing is not an escape: it omits
-// `description`, which is the field reconciliation matches on.
+// cmux workspace listings are streamed through CaptureCmuxWorkspaceList before
+// this cap applies. One raw row is ~1.8 KB, mostly fields the adapter never
+// reads; the projection retains only id and description while keeping the
+// runner-owned ceiling and fail-closed completeness contract intact.
 const (
 	stdoutCap = exec.MaxOutputBytes
 	stderrCap = 1 << 14
@@ -383,11 +379,13 @@ func foldID(id string) string { return strings.ToUpper(id) }
 // that would be two chances to let them drift, with the drift showing up as a
 // probe that says present and a close that refuses, or worse, the reverse.
 func (a *Adapter) snapshot(ctx context.Context, kind exec.CommandKind) (map[string]workspaceRow, *backend.StartCause) {
-	res, runErr := a.run.RunSensitive(ctx, a.command(kind,
+	cmd := a.command(kind,
 		exec.MustFixed("workspace"),
 		exec.MustFixed("list"),
 		exec.MustFixed("--json"),
-	))
+	)
+	cmd.StdoutMode = exec.CaptureCmuxWorkspaceList
+	res, runErr := a.run.RunSensitive(ctx, cmd)
 	if runErr != nil {
 		cause := a.classifyRunError(runErr, res)
 		return nil, &cause

@@ -415,6 +415,9 @@ func (m model) startRename(session tmux.SessionIdentity) (tea.Model, tea.Cmd) {
 	m.status = ""
 	m.pendingOp = opRename
 	m.pendingSession = session
+	// %q is the text boundary here, not cosmetic quoting: session.Name comes
+	// from tmux, and strconv-style quoting keeps terminal controls and bidi
+	// overrides inert inside the huh prompt.
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewInput().Key("name").Title(fmt.Sprintf("Rename %q to:", session.Name)),
 	)).WithWidth(m.formWidth()).WithShowHelp(false).WithKeyMap(keymap.Cancel())

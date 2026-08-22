@@ -65,7 +65,7 @@ func TestPullAll_ClassifiesEachRepo(t *testing.T) {
 	}
 
 	fake := pullFixture(records, pullOut, pullErr, ahead)
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	results, err := c.PullAll(context.Background(), "")
 	if err != nil {
@@ -113,6 +113,38 @@ func TestPullAll_ClassifiesEachRepo(t *testing.T) {
 	}
 }
 
+func TestPullAll_StatusAndPullUseTheSamePinnedGitBinary(t *testing.T) {
+	tmp := t.TempDir()
+	mkGitDir(t, tmp, "repo")
+	const pinnedGit = "/known/bin/git"
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name != pinnedGit {
+			t.Fatalf("command binary = %q, want pinned %q", name, pinnedGit)
+		}
+		if len(args) >= 3 && args[2] == "status" {
+			return v2Branch(0, 0), nil
+		}
+		return "Already up to date.", nil
+	}}
+	c := &Client{Dir: tmp, run: fake, gitBin: pinnedGit}
+
+	results, err := c.PullAll(context.Background(), "")
+	if err != nil {
+		t.Fatalf("PullAll: %v", err)
+	}
+	if len(results) != 1 || results[0].Status != PullUpToDate {
+		t.Fatalf("results = %+v, want one up-to-date repo", results)
+	}
+	if len(fake.Calls) != 2 {
+		t.Fatalf("calls = %v, want one status and one pull", fake.Calls)
+	}
+	for _, call := range fake.Calls {
+		if call.Name != pinnedGit {
+			t.Errorf("call used %q, want %q", call.Name, pinnedGit)
+		}
+	}
+}
+
 // TestPullAll_SkipsNonGitDir guards the discoverDir non-git-inclusion trap:
 // discoverDir returns plain non-git directories (list/pick display them) with
 // the same zero GitStatus as a clean repo, so PullAll must isGitRepo-gate them
@@ -128,7 +160,7 @@ func TestPullAll_SkipsNonGitDir(t *testing.T) {
 	}
 
 	fake := pullFixture(nil, nil, map[string]error{scratch: errors.New("fatal: not a git repository")}, nil)
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	results, err := c.PullAll(context.Background(), "")
 	if err != nil {
@@ -153,7 +185,7 @@ func TestPullAll_DirOverride_WalksOnlyThatSubtree(t *testing.T) {
 	mkGitDir(t, sub, "inside")
 
 	fake := pullFixture(nil, nil, nil, nil)
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	results, err := c.PullAll(context.Background(), sub)
 	if err != nil {
@@ -165,7 +197,7 @@ func TestPullAll_DirOverride_WalksOnlyThatSubtree(t *testing.T) {
 }
 
 func TestPullAll_MissingDir_PropagatesDiscoverError(t *testing.T) {
-	c := &Client{Dir: "/nonexistent/does/not/exist", run: &exec.FakeRunner{}}
+	c := &Client{Dir: "/nonexistent/does/not/exist", run: &exec.FakeRunner{}, gitBin: "git"}
 	if _, err := c.PullAll(context.Background(), ""); err == nil {
 		t.Fatal("expected an error for a missing projects dir, got nil")
 	}
@@ -191,7 +223,7 @@ func TestPullAll_SkipsUnknownStatus(t *testing.T) {
 		}
 		return "", nil
 	}}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	results, err := c.PullAll(context.Background(), "")
 	if err != nil {
@@ -247,7 +279,7 @@ func TestPullAll_StatusProcessAndSafetyBudget(t *testing.T) {
 		}
 		return "", nil
 	}}
-	c := &Client{Dir: tmp, run: fake}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	results, err := c.PullAll(context.Background(), "")
 	if err != nil {
