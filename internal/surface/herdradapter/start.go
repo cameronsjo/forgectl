@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
@@ -308,6 +309,7 @@ func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCaus
 	if cause != nil {
 		return endpoint, cause
 	}
+	a.warnUnsafeSocketDir(row.SocketPath)
 
 	version, cause := a.protocol(ctx)
 	if cause != nil {
@@ -322,14 +324,33 @@ func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCaus
 	return serverInfo{socket: row.SocketPath, version: version, incarnation: id}, nil
 }
 
+// warnUnsafeSocketDir reports an unsafe herdr-selected location without
+// rejecting it. The socket-owning application chooses its endpoint; forgectl
+// honors that choice and makes the local disruption risk visible.
+func (a *Adapter) warnUnsafeSocketDir(socket string) {
+	dir := filepath.Dir(socket)
+	info, err := a.statSocketDir(dir)
+	if err != nil {
+		return
+	}
+	reason := sockstat.UnsafeDirectoryReason(info, a.selfUID())
+	if reason == "" {
+		return
+	}
+	// Advisory by ruling: even a broken warning sink must not change readiness.
+	_, _ = fmt.Fprintf(a.warnings,
+		"warning: herdr socket directory %q is %s; forgectl will honor this location, but another local user may disrupt launches\n",
+		dir, reason)
+}
+
 // checkSocketOwner refuses an endpoint this uid does not own.
 //
 // Deliberately not "privately own", which is what this said and what it does not
-// check: the test is the socket type and the owning uid, never the permission
-// bits or the parent directory, so a world-writable socket owned by us is
-// accepted. That posture matches the cmux adapter and is a defensible reading of
-// the threat model — the declared adversary is a passive same-uid observer, and
-// mode bits do not exclude one — but the word claimed a check that is not here.
+// check: the refusal is based on the socket type and owning uid, never the
+// permission bits or parent directory. A socket under an unsafe directory is
+// accepted because herdr owns its endpoint policy, and the advisory check
+// immediately before this function's caller proceeds makes that concern visible
+// without claiming it is a readiness failure.
 //
 // Lstat rather than Stat: following a symlink would authenticate the target's
 // ownership while talking through a link somebody else controls. An owner that

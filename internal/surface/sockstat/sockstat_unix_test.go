@@ -42,6 +42,18 @@ func (f fakeInfo) Sys() any         { return f.sys }
 
 var _ os.FileInfo = fakeInfo{}
 
+type fakeDirInfo struct {
+	sys  any
+	mode fs.FileMode
+}
+
+func (fakeDirInfo) Name() string        { return "socket-dir" }
+func (fakeDirInfo) Size() int64         { return 0 }
+func (f fakeDirInfo) Mode() fs.FileMode { return f.mode }
+func (fakeDirInfo) ModTime() time.Time  { return time.Unix(0, 0) }
+func (f fakeDirInfo) IsDir() bool       { return f.mode.IsDir() }
+func (f fakeDirInfo) Sys() any          { return f.sys }
+
 // TestFillCarriesTheInodeThatDetectsARestart pins the field the whole package
 // exists for. The inode is what turns over when a server rebinds the same path,
 // so a Fill that dropped it would leave every fingerprint matching across a
@@ -110,6 +122,42 @@ func TestOwnerUIDReportsTheOwnerAndDeclinesWhenItCannot(t *testing.T) {
 	}
 	if uid != 0 {
 		t.Errorf("OwnerUID = %d, want 0 alongside ok=false", uid)
+	}
+}
+
+func TestUnsafeDirectoryReasonReportsOnlyKnownConcerns(t *testing.T) {
+	tests := map[string]struct {
+		info os.FileInfo
+		want string
+	}{
+		"private and ours": {
+			info: fakeDirInfo{sys: &syscall.Stat_t{Uid: 501}, mode: fs.ModeDir | 0o700},
+		},
+		"group writable": {
+			info: fakeDirInfo{sys: &syscall.Stat_t{Uid: 501}, mode: fs.ModeDir | 0o720},
+			want: "group or world writable",
+		},
+		"owned by another user": {
+			info: fakeDirInfo{sys: &syscall.Stat_t{Uid: 502}, mode: fs.ModeDir | 0o700},
+			want: "owned by another user",
+		},
+		"both concerns": {
+			info: fakeDirInfo{sys: &syscall.Stat_t{Uid: 502}, mode: fs.ModeDir | 0o707},
+			want: "group or world writable and owned by another user",
+		},
+		"owner unavailable is not invented as foreign": {
+			info: fakeDirInfo{sys: nil, mode: fs.ModeDir | 0o700},
+		},
+		"not a directory": {
+			info: fakeInfo{sys: &syscall.Stat_t{Uid: 502}},
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := UnsafeDirectoryReason(tt.info, 501); got != tt.want {
+				t.Errorf("UnsafeDirectoryReason = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

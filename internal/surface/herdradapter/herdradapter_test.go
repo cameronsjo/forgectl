@@ -1,6 +1,7 @@
 package herdradapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1196,6 +1197,56 @@ func TestNewRefusesARelativeBinaryPath(t *testing.T) {
 func TestKindReportsHerdr(t *testing.T) {
 	if got := newTestAdapter(t, newRunner(), nil).Kind(); got != backend.KindHerdr {
 		t.Errorf("Kind() = %v, want herdr", got)
+	}
+}
+
+// TestSocketDirectoryWarningIsAdvisory pins Cameron's ruling on #369 for the
+// roster-derived endpoint: herdr chooses the location, and forgectl warns about
+// a known concern without refusing an otherwise ready session.
+func TestSocketDirectoryWarningIsAdvisory(t *testing.T) {
+	tests := map[string]struct {
+		stat func(string) (os.FileInfo, error)
+		want string
+	}{
+		"world writable": {
+			stat: func(string) (os.FileInfo, error) {
+				return fakeInfo{sys: &syscall.Stat_t{Uid: testUID}, mode: fs.ModeDir | 0o707}, nil
+			},
+			want: "warning: herdr socket directory \"/tmp/herdrtest\" is group or world writable; " +
+				"forgectl will honor this location, but another local user may disrupt launches\n",
+		},
+		"foreign owned": {
+			stat: func(string) (os.FileInfo, error) {
+				return fakeInfo{sys: &syscall.Stat_t{Uid: testUID + 1}, mode: fs.ModeDir | 0o700}, nil
+			},
+			want: "warning: herdr socket directory \"/tmp/herdrtest\" is owned by another user; " +
+				"forgectl will honor this location, but another local user may disrupt launches\n",
+		},
+		"private": {
+			stat: func(string) (os.FileInfo, error) {
+				return fakeInfo{sys: &syscall.Stat_t{Uid: testUID}, mode: fs.ModeDir | 0o700}, nil
+			},
+		},
+		"directory cannot be inspected": {
+			stat: func(string) (os.FileInfo, error) { return nil, os.ErrPermission },
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			var warnings bytes.Buffer
+			run := newRunner()
+			a := newTestAdapter(t, run, nil, WithSocketDirStat(tt.stat), WithWarnings(&warnings))
+			spec, _ := newSpec(t)
+
+			res := a.Start(context.Background(), spec)
+
+			if res.Outcome() != backend.RefKnown {
+				t.Errorf("outcome = %v, want RefKnown; warning must not block readiness", res.Outcome())
+			}
+			if got := warnings.String(); got != tt.want {
+				t.Errorf("warning = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
