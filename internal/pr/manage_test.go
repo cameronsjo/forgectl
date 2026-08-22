@@ -43,6 +43,8 @@ func reviewServer(windowNames ...string) *exec.FakeRunner {
 			return sessionRow, nil
 		case "list-windows":
 			return windowsOut, nil
+		case "new-window":
+			return "123\x1f456\x1f@9", nil
 		}
 		return "", nil
 	}}
@@ -146,11 +148,59 @@ func TestOpen_TargetPins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("shellWindowName: %v", err)
 	}
-	want := []string{"new-window", "-t", "$1:", "-n", shell, "-c", ws}
+	want := []string{"new-window", "-P", "-F", tmux.IdentityFormat, "-t", "$1:", "-n", shell, "-c", ws}
 	if !equalArgs(call.Args, want) {
 		t.Errorf("tmux args = %v, want %v", call.Args, want)
 	}
 	if call.Interactive {
 		t.Error("Open should dispatch through the non-interactive Run path")
+	}
+}
+
+func TestOpen_PinnedClientPinsLookupRevalidationAndCreation(t *testing.T) {
+	const socket = "/tmp/forgectl-pr-test.sock"
+	ref := Ref{Owner: "o", Repo: "r", Number: 7}
+	sessionRow := strings.Join([]string{"123", "456", "$1", "forgectl", "1", "0", "1700000000", "/w"}, tmux.FieldSep)
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name != "tmux" {
+			return "", nil
+		}
+		switch {
+		case contains(args, "list-sessions"):
+			return sessionRow, nil
+		case contains(args, "new-window"):
+			return "123" + tmux.FieldSep + "456" + tmux.FieldSep + "@9", nil
+		}
+		return "", nil
+	}}
+	pinned, err := tmux.NewPinned(fake, socket)
+	if err != nil {
+		t.Fatalf("NewPinned: %v", err)
+	}
+	c := New(fake,
+		WithSessionsDir(t.TempDir()),
+		WithFindingsDir(t.TempDir()),
+		WithTmuxClient(pinned),
+	)
+	path, _ := seedSession(t, c, ref, time.Now().UTC())
+
+	if err := c.Open(context.Background(), path); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	var sawCreate bool
+	for _, call := range fake.Calls {
+		if call.Name != "tmux" {
+			continue
+		}
+		if len(call.Args) < 3 || call.Args[0] != "-S" || call.Args[1] != socket {
+			t.Errorf("tmux argv is not pinned: %v", call.Args)
+			continue
+		}
+		if call.Args[2] == "new-window" {
+			sawCreate = true
+		}
+	}
+	if !sawCreate {
+		t.Fatal("pinned new-window never reached the runner")
 	}
 }

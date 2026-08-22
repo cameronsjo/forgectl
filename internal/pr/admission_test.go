@@ -280,7 +280,7 @@ func (s *fakeTmuxServer) runner() *exec.FakeRunner {
 				return "", errors.New("can't find session: " + strings.TrimSuffix(strings.TrimPrefix(target, "="), ":"))
 			}
 			s.sessions[sess] = append(s.sessions[sess], winName)
-			return "", nil
+			return "123\x1f456\x1f@999", nil
 		case "list-windows":
 			names := make([]string, 0, len(s.sessions))
 			for sess := range s.sessions {
@@ -330,12 +330,7 @@ func TestLiveReviews_SiblingPrefixSession_Closed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensureSession: %v", err)
 	}
-	target, err := newWindowTarget(session)
-	if err != nil {
-		t.Fatalf("newWindowTarget: %v", err)
-	}
-	if _, err := c.run.Run(ctx, "tmux", "new-window",
-		"-t", target, "-n", "pr-o-r-1", "-c", "/tmp"); err != nil {
+	if _, err := c.tmuxClient.NewWindow(ctx, session, "pr-o-r-1", "/tmp"); err != nil {
 		t.Fatalf("new-window: %v", err)
 	}
 
@@ -383,12 +378,7 @@ func TestWindowLive_CreatedThenRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensureSession: %v", err)
 	}
-	target, err := newWindowTarget(session)
-	if err != nil {
-		t.Fatalf("newWindowTarget: %v", err)
-	}
-	if _, err := c.run.Run(ctx, "tmux", "new-window",
-		"-t", target, "-n", mustWindowName(t, ref), "-c", "/tmp"); err != nil {
+	if _, err := c.tmuxClient.NewWindow(ctx, session, mustWindowName(t, ref), "/tmp"); err != nil {
 		t.Fatalf("new-window: %v", err)
 	}
 	if live, ok := c.WindowLive(ctx, ref); !ok || !live {

@@ -10,6 +10,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // defaultTmuxSession is the tmux session the review windows live under. A
@@ -21,7 +22,8 @@ const defaultTmuxSession = "forgectl"
 // and tmux through the exec.Runner seam and gates every review-post behind an
 // injectable human approval function.
 type Client struct {
-	run exec.Runner
+	run        exec.Runner
+	tmuxClient *tmux.Client
 
 	// sessionsDir is the forgectl-owned breadcrumb directory
 	// (config.PrSessionsDir); the breadcrumb location check enforces that a
@@ -83,6 +85,17 @@ func WithTmuxSession(name string) Option {
 	return func(c *Client) { c.tmuxSession = name }
 }
 
+// WithTmuxClient supplies the tmux boundary used by every pr operation. It is
+// primarily the injection point for a socket-pinned client; nil leaves the
+// runner-backed environmental client in place.
+func WithTmuxClient(client *tmux.Client) Option {
+	return func(c *Client) {
+		if client != nil {
+			c.tmuxClient = client
+		}
+	}
+}
+
 // WithApprover overrides the human approval gate — used in tests to supply a
 // deterministic approve/deny without a TTY.
 func WithApprover(fn func(review string) (bool, error)) Option {
@@ -103,6 +116,7 @@ func WithDispatchWait(fn func(context.Context) error) Option {
 func New(run exec.Runner, opts ...Option) *Client {
 	c := &Client{
 		run:         run,
+		tmuxClient:  tmux.New(run),
 		tmuxSession: defaultTmuxSession,
 		approve:     confirmReview,
 		isTTY:       launch.IsInteractiveTTY,

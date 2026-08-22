@@ -98,6 +98,63 @@ func TestListWindows_Construction(t *testing.T) {
 	argsEqual(t, fake.Last().Args, []string{"list-windows", "-a", "-F", windowFormat})
 }
 
+func TestNewWindow_RevalidatesSessionAndReturnsCommandIdentity(t *testing.T) {
+	sessionRow := strings.Join([]string{"123", "456", "$1", "forge", "1", "0", "0", "/repo"}, FieldSep)
+	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		switch args[0] {
+		case "list-sessions":
+			return sessionRow, nil
+		case "new-window":
+			// tmux 3.5a and older render FieldSep back as this printable
+			// octal escape. NewWindow owns normalization and validation.
+			return `123\037456\037@7`, nil
+		}
+		return "", nil
+	}}
+	c := New(fake)
+	identityEnv(c, "", "/tmp")
+	session := SessionIdentity{
+		Generation: ServerGeneration{Selector: ServerSelector{TmpDir: "/tmp"}, PID: "123", StartTime: "456"},
+		ID:         "$1",
+		Name:       "forge",
+	}
+
+	got, err := c.NewWindow(context.Background(), session, "review", "/repo", "codex", "exec", "prompt")
+	if err != nil {
+		t.Fatalf("NewWindow: %v", err)
+	}
+	if got.Generation != session.Generation || got.ID != "@7" || got.SessionID != "$1" || got.Name != "review" {
+		t.Fatalf("NewWindow identity = %+v", got)
+	}
+	if len(fake.Calls) != 2 {
+		t.Fatalf("calls = %d, want revalidation + creation: %+v", len(fake.Calls), fake.Calls)
+	}
+	argsEqual(t, fake.Calls[1].Args, []string{
+		"new-window", "-P", "-F", IdentityFormat,
+		"-t", "$1:", "-n", "review", "-c", "/repo",
+		"--", "codex", "exec", "prompt",
+	})
+}
+
+func TestNewWindow_RefusesGenerationDrift(t *testing.T) {
+	sessionRow := strings.Join([]string{"123", "456", "$1", "forge", "1", "0", "0", "/repo"}, FieldSep)
+	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		if args[0] == "list-sessions" {
+			return sessionRow, nil
+		}
+		return "999" + FieldSep + "888" + FieldSep + "@7", nil
+	}}
+	c := New(fake)
+	identityEnv(c, "", "/tmp")
+	session := SessionIdentity{
+		Generation: ServerGeneration{Selector: ServerSelector{TmpDir: "/tmp"}, PID: "123", StartTime: "456"},
+		ID:         "$1",
+	}
+	if _, err := c.NewWindow(context.Background(), session, "review", ""); !errors.Is(err, ErrGenerationChanged) {
+		t.Fatalf("NewWindow error = %v, want ErrGenerationChanged", err)
+	}
+}
+
 func TestBuildTree(t *testing.T) {
 	// Deliberately out-of-order input to prove sorting (work before main;
 	// window 1 before 0; pane 1 before 0).
