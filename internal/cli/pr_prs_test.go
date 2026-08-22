@@ -11,9 +11,10 @@ package cli
 //
 // renderPRTable / emitPRsJSON are exercised through the command above.
 //
-// sanitizeCell (Classification: hostile-input parser)
-//   [x] Unhappy: every C0 control byte (incl. ESC) and DEL is replaced with a
-//       space; printable ASCII and Unicode pass through unchanged
+// renderPRTable (Classification: hostile-input renderer)
+//   [x] Unhappy: C0, C1, and bidi controls are visibly escaped
+//   [x] Invariant: ordinary titles remain byte-identical
+//   [x] Invariant: distinct hostile titles remain distinguishable
 
 import (
 	"bytes"
@@ -31,6 +32,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // prSearchRow renders one gh-search-prs JSON object for slug#number.
@@ -193,31 +195,49 @@ func TestPrsCmd_DegradationNotesOnStderr(t *testing.T) {
 	}
 }
 
-// TestSanitizeCell_StripsAllC0AndDEL pins the hardened sanitizer (forgectl#162):
-// a crafted title carrying an ESC-based cursor-control sequence plus a mix of
-// other C0 bytes and DEL must come out with no control bytes at all, while
-// printable ASCII and Unicode survive untouched.
-func TestSanitizeCell_StripsAllC0AndDEL(t *testing.T) {
-	hostile := "safe\x1b[2K\x1b[Gtitle\x00\x01\x07\x7fend\tmore\nlines\rhere"
-	got := sanitizeCell(hostile)
+func TestRenderPRTable_VisiblyEscapesUnsafeTitlesAndKeepsThemDistinct(t *testing.T) {
+	prs := []pr.PR{
+		{Ref: pr.Ref{Owner: "c", Repo: "r", Number: 1}, Title: "left\u009bright", State: "OPEN"},
+		{Ref: pr.Ref{Owner: "c", Repo: "r", Number: 2}, Title: "left\u202eright", State: "OPEN"},
+	}
+	store := pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json"))
+	var stdout, stderr bytes.Buffer
+	if err := renderPRTable(&stdout, &stderr, prs, store); err != nil {
+		t.Fatal(err)
+	}
 
-	for i := 0; i < 0x20; i++ {
-		if strings.ContainsRune(got, rune(i)) {
-			t.Errorf("sanitizeCell output still contains C0 byte 0x%02x: %q", i, got)
-		}
-	}
-	if strings.ContainsRune(got, 0x7f) {
-		t.Errorf("sanitizeCell output still contains DEL: %q", got)
-	}
-	for _, want := range []string{"safe", "title", "end", "more", "lines", "here"} {
+	got := stdout.String()
+	for _, want := range []string{`left\u009bright`, `left\u202eright`} {
 		if !strings.Contains(got, want) {
-			t.Errorf("sanitizeCell dropped visible content %q: got %q", want, got)
+			t.Errorf("table missing visible escape %q:\n%s", want, got)
 		}
 	}
+	for _, r := range got {
+		if r != '\n' && termsafe.IsUnsafeTerminalRune(r) {
+			t.Errorf("unsafe rune %U survived rendered table: %q", r, got)
+		}
+	}
+	if strings.Count(got, "left") != 2 {
+		t.Errorf("distinct hostile titles collapsed or split rows: %q", got)
+	}
+}
 
-	// Printable Unicode (non-ASCII) must pass through unchanged.
-	unicodeTitle := "café émoji \U0001F600 done"
-	if got := sanitizeCell(unicodeTitle); got != unicodeTitle {
-		t.Errorf("sanitizeCell must not touch printable Unicode: got %q, want %q", got, unicodeTitle)
+func TestRenderPRTable_OrdinaryTitleIsByteStable(t *testing.T) {
+	title := "Fix café picker — issue #324"
+	prs := []pr.PR{{
+		Ref:   pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 324},
+		Title: title,
+		State: "OPEN",
+	}}
+	store := pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json"))
+	var stdout, stderr bytes.Buffer
+	if err := renderPRTable(&stdout, &stderr, prs, store); err != nil {
+		t.Fatal(err)
+	}
+	if got := safeTerm(title); got != title {
+		t.Fatalf("ordinary TITLE boundary = %q, want byte-identical %q", got, title)
+	}
+	if got := strings.Count(stdout.String(), title); got != 1 {
+		t.Errorf("ordinary title occurs %d times, want exactly once byte-for-byte:\n%s", got, stdout.String())
 	}
 }

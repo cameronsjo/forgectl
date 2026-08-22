@@ -13,10 +13,12 @@ package cli
 //   [x] Unhappy: the live tmux window count is unreadable → refuse the whole
 //       batch, fail-closed — no prepare (no clone) for anything
 //
-// pickPRs itself remains unexecuted because it drives huh directly. The
-// choosePRs boundary below covers its headless candidate path, first writer
-// error, and live-TTY seam; launchPicked covers the selected-set contract.
-// The esc-to-cancel keymap is likewise unassertable without running huh.
+// pickPRs itself remains unexecuted because it drives huh directly. Its label
+// renderer is asserted independently, while the wiring guard proves every
+// huh.NewOption reaches an approved renderer. The choosePRs boundary below
+// covers its headless candidate path, first writer error, and live-TTY seam;
+// launchPicked covers the selected-set contract. The esc-to-cancel keymap is
+// likewise unassertable without running huh.
 
 import (
 	"bytes"
@@ -172,6 +174,27 @@ func TestPRCandidateLine_MarksReviewedWithoutTerminalStyling(t *testing.T) {
 	got := prCandidateLine(pr.PR{Ref: ref, Title: "done", UpdatedAt: time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)}, store)
 	if got != "c/r#1  done  (reviewed)" {
 		t.Errorf("candidate = %q, want reviewed marker without ANSI styling", got)
+	}
+}
+
+func TestPRPickerLabel_VisibleEscapesAndOrdinaryStability(t *testing.T) {
+	store := pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json"))
+	ref := pr.Ref{Owner: "c", Repo: "r", Number: 1}
+	ordinary := "Fix café picker — issue #324"
+	if got, want := prPickerLabel(pr.PR{Ref: ref, Title: ordinary}, store), "c/r#1  "+ordinary; got != want {
+		t.Errorf("ordinary picker label = %q, want byte-identical %q", got, want)
+	}
+
+	c1 := prPickerLabel(pr.PR{Ref: ref, Title: "left\u009bright"}, store)
+	bidi := prPickerLabel(pr.PR{Ref: ref, Title: "left\u202eright"}, store)
+	if c1 != `c/r#1  left\u009bright` {
+		t.Errorf("C1 picker label = %q", c1)
+	}
+	if bidi != `c/r#1  left\u202eright` {
+		t.Errorf("bidi picker label = %q", bidi)
+	}
+	if c1 == bidi {
+		t.Errorf("distinct hostile titles collapsed to one label: %q", c1)
 	}
 }
 

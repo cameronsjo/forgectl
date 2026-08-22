@@ -14,9 +14,9 @@ import (
 //
 // A note is built from low-trust material (a query label carrying a config
 // owner, a source's own diagnostic text), so each one is reduced to a single
-// inert terminal line. termsafe.SafeLine, not the weaker sanitizeCell: the
-// latter maps only C0 and DEL, leaving C1 controls and Unicode bidi overrides
-// intact — enough to reorder or overwrite what the operator reads.
+// inert terminal line. termsafe.SafeLine is the shared human-output boundary:
+// it visibly escapes C1 controls and Unicode bidi overrides as well as C0 and
+// DEL, so accidental or hostile content cannot reorder what the operator reads.
 //
 // One function for every command that renders notes, deliberately. This started
 // as a review-only helper while `projects list` printed its notes raw, and the
