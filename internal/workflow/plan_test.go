@@ -1,8 +1,11 @@
 package workflow
 
 import (
+	"context"
 	"strings"
 	"testing"
+
+	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
 func TestBuildPlan_EmbeddedCleanRoomReview(t *testing.T) {
@@ -138,5 +141,143 @@ func TestBuildPlan_RejectsParamExportCollision(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "collides") {
 		t.Errorf("error %q does not name the collision", err)
+	}
+}
+
+// TestBuildPlan_RejectsEveryRegistryExportWhenItsVerbIsAbsent pins #246's
+// global reservation: an export name is owned by the merged registry, not only
+// by the subset of exporting verbs a particular workflow happens to contain.
+func TestBuildPlan_RejectsEveryRegistryExportWhenItsVerbIsAbsent(t *testing.T) {
+	reg := testRegistry(t)
+	for verb, def := range reg {
+		for _, exp := range def.Exports {
+			t.Run(verb+"/"+exp, func(t *testing.T) {
+				wf := Workflow{
+					DSLVersion: 1,
+					Name:       "absent-exporter-collision",
+					Params:     map[string]Param{exp: {Default: "attacker-controlled"}},
+					Steps:      []Step{{Uses: "teardown"}},
+				}
+				_, err := BuildPlan(wf, nil, reg)
+				if err == nil {
+					t.Fatalf("param %q must be refused even though exporter %q is absent", exp, verb)
+				}
+				for _, want := range []string{exp, "reserved step export"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q should mention %q", err, want)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestBuildPlan_RegistryContributionReservesExports proves module/custom verbs
+// extend the same namespace policy. The contributed verb is deliberately absent
+// from the workflow: presence is not what confers ownership of an export name.
+func TestBuildPlan_RegistryContributionReservesExports(t *testing.T) {
+	reg, err := NewRegistry(StepRegistry{
+		"publish": {Exports: []string{"artifact"}},
+	})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	wf := Workflow{
+		DSLVersion: 1,
+		Name:       "contributed-export-collision",
+		Params:     map[string]Param{"artifact": {Default: "forged"}},
+		Steps:      []Step{{Uses: "run", Cmd: "true"}},
+	}
+	if _, err := BuildPlan(wf, nil, reg); err == nil || !strings.Contains(err.Error(), "artifact") {
+		t.Fatalf("contributed export must reserve its name, got %v", err)
+	}
+}
+
+// TestBuildPlan_CollisionIsStructuralAndPrecedesValueErrors defines failure
+// precedence. A reserved declaration is invalid even before values are merged,
+// so it wins over both a missing-required value and an unknown CLI parameter.
+func TestBuildPlan_CollisionIsStructuralAndPrecedesValueErrors(t *testing.T) {
+	wf := Workflow{
+		DSLVersion: 1,
+		Name:       "structural-collision",
+		Params:     map[string]Param{"workspace": {Required: true}},
+		Steps:      []Step{{Uses: "teardown"}},
+	}
+	_, err := BuildPlan(wf, map[string]string{"unknown": "value"}, testRegistry(t))
+	if err == nil {
+		t.Fatal("expected reserved export collision")
+	}
+	if !strings.Contains(err.Error(), "reserved step export") {
+		t.Fatalf("collision must precede missing/unknown value errors, got %v", err)
+	}
+	if strings.Contains(err.Error(), "missing required") || strings.Contains(err.Error(), "unknown param") {
+		t.Fatalf("value-resolution error took precedence over structural collision: %v", err)
+	}
+}
+
+func TestBuildPlan_MultipleCollisionsReportAlphabetically(t *testing.T) {
+	wf := Workflow{
+		DSLVersion: 1,
+		Name:       "multiple-collisions",
+		Params: map[string]Param{
+			"workspace": {},
+			"review":    {},
+		},
+	}
+	_, err := BuildPlan(wf, nil, testRegistry(t))
+	if err == nil {
+		t.Fatal("expected reserved export collision")
+	}
+	if !strings.Contains(err.Error(), `param "review"`) {
+		t.Fatalf("first alphabetical collision must be reported, got %v", err)
+	}
+}
+
+func TestBuildPlan_AllowsNonReservedParams(t *testing.T) {
+	wf := Workflow{
+		DSLVersion: 1,
+		Name:       "legitimate-param",
+		Params:     map[string]Param{"repo": {Required: true}},
+		Steps:      []Step{{Uses: "worktree", Repo: "${repo}"}},
+	}
+	plan, err := BuildPlan(wf, map[string]string{"repo": "owner/project"}, testRegistry(t))
+	if err != nil {
+		t.Fatalf("non-reserved param was rejected: %v", err)
+	}
+	if got := plan.Steps[0].Repo; got != "owner/project" {
+		t.Errorf("repo = %q, want owner/project", got)
+	}
+}
+
+// TestBuildPlan_LoneTeardownWorkspaceParamStopsBeforeSink is the exact #246
+// route. A test sink replaces teardown's real RemoveAll-backed runner: if plan
+// validation regresses, execution reaches it and the call count exposes that
+// the refusal happened too late.
+func TestBuildPlan_LoneTeardownWorkspaceParamStopsBeforeSink(t *testing.T) {
+	reg := testRegistry(t)
+	sinkCalls := 0
+	teardown := reg["teardown"]
+	teardown.Runner = func(context.Context, exec.Runner, *Context, PlanStep) error {
+		sinkCalls++
+		return nil
+	}
+	reg["teardown"] = teardown
+
+	wf := Workflow{
+		DSLVersion: 1,
+		Name:       "lone-teardown",
+		Params:     map[string]Param{"workspace": {Default: "/tmp/forgectl-workflow-victim"}},
+		Steps:      []Step{{Uses: "teardown"}},
+	}
+	plan, planErr := BuildPlan(wf, nil, reg)
+	if planErr == nil {
+		exe := NewExecutor(&exec.FakeRunner{}, reg)
+		_ = exe.Run(context.Background(), plan, NewContext(map[string]string{"workspace": "/tmp/forgectl-workflow-victim"}))
+	}
+	if sinkCalls != 0 {
+		t.Fatalf("teardown sink called %d time(s); planning must refuse first", sinkCalls)
+	}
+	if planErr == nil {
+		t.Fatal("lone teardown with workspace param unexpectedly planned")
 	}
 }

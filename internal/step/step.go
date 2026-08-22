@@ -32,8 +32,9 @@ type Def struct {
 	Runner  Runner
 	Exports []string
 
-	// GuardedFields names this verb's param-hostile fields by their PlanStep Go
-	// field name ("Cmd", "Args", "Globs", "Skill", …). A blessing signs a
+	// GuardedFields names this verb's param-hostile inputs. Most names are a
+	// PlanStep Go field ("Cmd", "Args", "Globs", "Skill", …); "Workspace" is
+	// teardown's one implicit Context input. A blessing signs a
 	// workflow FILE's bytes, but ${} references interpolate at run time — so a
 	// field whose value drives execution or enforces a security control must not
 	// be runtime-injectable, or the human blessed one thing and the agent runs

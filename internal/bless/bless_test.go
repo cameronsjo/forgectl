@@ -413,6 +413,10 @@ func worktreeStep() StepCheck {
 	return StepCheck{Uses: "worktree", Exports: []string{"workspace"}}
 }
 
+func teardownStep() StepCheck {
+	return StepCheck{Uses: "teardown", Guarded: map[string][]string{"Workspace": {"${workspace}"}}}
+}
+
 // collectStep guards only its `to` write-destination — mirroring the registry
 // (collect: GuardedFields ["To"]). `from` merely names a data path to read, so
 // it is not scanned; a ${param} in `to`, though, would redirect where the
@@ -507,6 +511,16 @@ func TestCheckGuardedParamRefs(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name:    "lone teardown cannot consume an unproduced workspace",
+			steps:   []StepCheck{teardownStep()},
+			wantErr: true,
+		},
+		{
+			name:    "teardown accepts workspace from an earlier exporter",
+			steps:   []StepCheck{worktreeStep(), teardownStep()},
+			wantErr: false,
+		},
 
 		// strip.globs — the clean-room redaction list IS a security control, so a
 		// param in it would let an agent narrow the strip-list at run time.
@@ -593,7 +607,7 @@ func TestCheckGuardedParamRefs(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := CheckGuardedParamRefs(tc.steps, tc.params)
+			err := CheckGuardedParamRefs(tc.steps, tc.params, nil)
 			if tc.wantErr && err == nil {
 				t.Fatal("expected an error, got nil")
 			}
@@ -604,13 +618,29 @@ func TestCheckGuardedParamRefs(t *testing.T) {
 	}
 }
 
+func TestCheckGuardedParamRefs_ReservesAbsentRegistryExports(t *testing.T) {
+	err := CheckGuardedParamRefs(
+		[]StepCheck{{Uses: "teardown", Guarded: map[string][]string{"Workspace": {"${workspace}"}}}},
+		[]string{"workspace"},
+		[]string{"review", "workspace"},
+	)
+	if err == nil {
+		t.Fatal("reserved workspace param must be refused without a worktree step")
+	}
+	for _, want := range []string{"workspace", "reserved step export"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
+}
+
 // TestCheckGuardedParamRefs_ErrorNamesFieldAndRef pins the error text: an author
 // staring at a refusal needs the step index, the FIELD, and the offending ref.
 func TestCheckGuardedParamRefs_ErrorNamesFieldAndRef(t *testing.T) {
 	err := CheckGuardedParamRefs([]StepCheck{
 		worktreeStep(),
 		stripStep("CLAUDE.md", "${sneaky}"),
-	}, []string{"sneaky"})
+	}, []string{"sneaky"}, nil)
 	if err == nil {
 		t.Fatal("expected a refusal")
 	}

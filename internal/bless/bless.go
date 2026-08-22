@@ -240,27 +240,33 @@ type StepCheck struct {
 // Non-guarded fields — a worktree step's repo/ref — are unrestricted, because
 // naming the data a blessed pattern operates on is the intended parameterization.
 //
-// params is the workflow's declared param names. A param whose name collides
-// with ANY step's export is refused outright: params and exports share one
-// variable namespace at execution time, so a same-named param could ride an
-// export name this guard trusts as step-produced (the executor also refuses
-// the collision at plan time — this is the bless-time belt to that buckle, so
-// the collision can never even be blessed into a file).
+// params is the workflow's declared param names. reservedExports is the merged
+// registry's COMPLETE export vocabulary, including verbs absent from this
+// workflow. A param whose name collides with either that vocabulary or a
+// StepCheck export is refused outright: params and exports share one variable
+// namespace at execution time, so a same-named param could ride an export name
+// this guard trusts as step-produced. The planner enforces the same global
+// reservation — this is the bless-time belt to that buckle.
 //
 // The ${...} extraction mirrors internal/step.Context.Interpolate byte-for-byte:
 // find "${", take the FIRST "}" after it, name is everything between (no charset
 // restriction); an unterminated "${" is a fail-closed error.
 // TestBlessRefExtractionMatchesInterpolate pins the two scanners together.
-func CheckGuardedParamRefs(steps []StepCheck, params []string) error {
+func CheckGuardedParamRefs(steps []StepCheck, params, reservedExports []string) error {
 	exported := make(map[string]bool)
+	for _, exp := range reservedExports {
+		exported[exp] = true
+	}
 	for _, s := range steps {
 		for _, exp := range s.Exports {
 			exported[exp] = true
 		}
 	}
-	for _, p := range params {
+	sortedParams := append([]string(nil), params...)
+	sort.Strings(sortedParams)
+	for _, p := range sortedParams {
 		if exported[p] {
-			return fmt.Errorf("param %q collides with a step export of the same name: params and step exports share one namespace", p)
+			return fmt.Errorf("param %q collides with reserved step export %q: params and step exports share one namespace", p, p)
 		}
 	}
 
