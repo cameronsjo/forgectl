@@ -21,6 +21,8 @@ const v2Clean = "# branch.oid e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\n" +
 	"# branch.upstream origin/main\n" +
 	"# branch.ab +0 -0"
 
+const testProjectsGitBinary = "/test/bin/git"
+
 // v2ModifiedRecord is a complete porcelain-v2 ordinary record — one modified
 // tracked file. Written out in full because the parser validates the fixed
 // fields and rejects a truncated record as unreadable rather than dirty.
@@ -42,7 +44,7 @@ func pullCmdFixture(t *testing.T, names []string, statusRecords, pullOut map[str
 	}
 	t.Setenv("PROJECTS_DIR", tmp)
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
-		if name != "git" || len(args) < 3 || args[0] != "-C" {
+		if name != testProjectsGitBinary || len(args) < 3 || args[0] != "-C" {
 			return "", nil
 		}
 		repoName := filepath.Base(args[1])
@@ -57,7 +59,7 @@ func pullCmdFixture(t *testing.T, names []string, statusRecords, pullOut map[str
 		}
 		return "", nil
 	}}
-	return projects.New(fake)
+	return projects.New(fake, projects.WithGitBinary(testProjectsGitBinary))
 }
 
 func TestPullAllCmd_AllClean_ReturnsNilAndRendersGlyphs(t *testing.T) {

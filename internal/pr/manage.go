@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // List returns a presentation row for every review session recorded in the
@@ -80,7 +82,7 @@ func (c *Client) loadSummary(path string) (SessionSummary, error) {
 	switch avail {
 	case workspaceAvailabilityLive, workspaceAvailabilityMissing:
 	default:
-		return SessionSummary{}, fmt.Errorf("breadcrumb %s: %w", path, err)
+		return SessionSummary{}, fmt.Errorf("breadcrumb %s: %w", termsafe.QuotePath(path), err)
 	}
 	return SessionSummary{ref: ref, path: path, createdAt: bc.CreatedAt, availability: avail}, nil
 }

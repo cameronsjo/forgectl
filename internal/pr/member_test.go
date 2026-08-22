@@ -13,6 +13,7 @@ package pr
 //   [x] Two names resolving to one target reject an ambiguous operand, while an
 //       exact lexical name still selects deterministically
 //   [x] The captured bytes and record match the file on disk
+//   [x] A hostile enumerated filename yields one terminal-safe display path
 // Alias unlink (Classification: deletes the real record, never the alias)
 //   [x] Teardown through every alias form removes the REAL breadcrumb
 //   [x] Every rejection issues ZERO Runner calls and mutates nothing
@@ -127,6 +128,33 @@ func TestResolveBreadcrumbMember_AliasFormsSelectTheRealMember(t *testing.T) {
 				t.Errorf("captured record ref = %q, want %q", member.breadcrumb.Ref, "o/r#1")
 			}
 		})
+	}
+}
+
+func TestResolveBreadcrumbMember_CapturesTerminalSafeDisplayPath(t *testing.T) {
+	c := testClient(t, &exec.FakeRunner{})
+	realPath, workspace := seedStaleSession(t, c, Ref{Owner: "o", Repo: "r", Number: 1}, time.Now().UTC())
+	hostile := filepath.Join(c.SessionsDir(), "planted-\x1b[2K\rinnocent\u202egnj.json")
+	if err := os.Rename(realPath, hostile); err != nil {
+		t.Fatalf("rename breadcrumb to hostile filename: %v", err)
+	}
+
+	member, err := c.resolveBreadcrumbMember(hostile)
+	if err != nil {
+		t.Fatalf("resolve hostile breadcrumb: %v", err)
+	}
+	if member.displayPath == member.path {
+		t.Fatalf("display path was not escaped: %q", member.displayPath)
+	}
+
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatalf("recreate workspace: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(workspace) })
+	if err := c.discardStale(member); err == nil {
+		t.Fatal("discardStale must refuse after the workspace reappears")
+	} else {
+		assertTerminalSafeBreadcrumbError(t, err)
 	}
 }
 
