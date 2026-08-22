@@ -221,7 +221,9 @@ forgectl y last 5                        # print the 5 most recent zsh commands,
                                           #   only what zsh has flushed — set INC_APPEND_HISTORY or SHARE_HISTORY
                                           #   in .zshrc for the current shell's commands to appear. zsh only.
                                           #   prints inline secrets verbatim if your history holds any — treat
-                                          #   the output as sensitive
+                                          #   the output as sensitive. Interactive stdout is allowed by default;
+                                          #   piping or redirecting requires --allow-sensitive-output, an explicit
+                                          #   acknowledgement only: forgectl does not scan or redact the history
 ```
 
 The cask doesn't stage an `fx` command — it's a shell alias you add yourself:
