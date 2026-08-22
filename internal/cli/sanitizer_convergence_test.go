@@ -194,13 +194,9 @@ func TestConvergedHumanSinks_QuoteEveryUnsafeRuneClass(t *testing.T) {
 // the retired Sanitize did not do — it rewrote every control byte to a space and
 // handed a corrupted value to whatever parsed it.
 //
-// The escaping half of the assertion covers the classes termsafe classifies as
-// unsafe. It deliberately does NOT cover the non-bidi Cf residual (U+200B,
-// U+00AD, U+2060): the JSON filter's scope is IsUnsafeTerminalRune, closing that
-// residual there would mean broadening the shared classifier, and the text
-// renderer's wider quoting set is a rendering choice it does not export. That
-// divergence is documented on termsafe.JSONEncoder and pinned by
-// TestJSONEncoder_EscapesEveryEscapableRune.
+// The escaping half covers controls, bidi formatting, and the non-bidi Cf
+// residual (U+200B, U+00AD, U+2060). JSON spelling remains value-preserving,
+// but no invisible format character reaches the terminal literally.
 func TestResumeLsJSON_EscapesRatherThanRewrites(t *testing.T) {
 	escaped := []unsafeRune{
 		{name: "LINE-SEPARATOR", r: 0x2028},
@@ -210,7 +206,8 @@ func TestResumeLsJSON_EscapesRatherThanRewrites(t *testing.T) {
 		{name: "DEL", r: 0x7f},
 		{name: "RIGHT-TO-LEFT-OVERRIDE", r: 0x202e},
 	}
-	for _, tt := range append(append([]unsafeRune(nil), invisibleFormatting...), escaped...) {
+	escaped = append(escaped, invisibleFormatting...)
+	for _, tt := range escaped {
 		t.Run(tt.name, func(t *testing.T) {
 			value := "before" + string(tt.r) + "after"
 			var out, errOut bytes.Buffer

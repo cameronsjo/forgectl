@@ -42,6 +42,7 @@ func writeCache(path string, entry cacheEntry) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
+	// termsafe:allow-raw-json persisted network cache record, never command output
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return err

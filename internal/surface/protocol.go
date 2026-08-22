@@ -262,6 +262,7 @@ func writeFrame[T frame](w io.Writer, v T) error {
 	if err := v.validate(); err != nil {
 		return err
 	}
+	// termsafe:allow-raw-json length-prefixed manager protocol frame, never terminal output
 	payload, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("%w: encode frame: %w", ErrProtocol, err)

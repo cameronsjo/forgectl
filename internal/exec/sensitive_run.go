@@ -559,6 +559,7 @@ func projectCmuxWorkspaceList(r io.Reader) ([]byte, error) {
 		}
 		return nil, errors.New("cmux workspace listing has trailing JSON")
 	}
+	// termsafe:allow-raw-json internal cmux protocol projection, never command output
 	return json.Marshal(struct {
 		Workspaces []projectedCmuxWorkspace `json:"workspaces"`
 	}{Workspaces: workspaces})
