@@ -64,10 +64,18 @@ func SafeLine(s string) string {
 	return safe.String()
 }
 
-// QuotePath is SafeLine with explicit quotes, so spaces and path boundaries
-// remain legible without allowing the path to contribute terminal controls.
+// QuoteText visibly quotes an untrusted text field without allowing it to
+// contribute terminal controls. Unlike applying %q after SafeLine, it escapes
+// each original rune exactly once, so a newline is shown as \n rather than
+// the more confusing \\n.
+func QuoteText(text string) string {
+	return strconv.QuoteToGraphic(text)
+}
+
+// QuotePath is QuoteText named for filesystem sinks, where the surrounding
+// quotes also keep spaces and path boundaries legible.
 func QuotePath(path string) string {
-	return strconv.QuoteToGraphic(path)
+	return QuoteText(path)
 }
 
 // QuotePathIfUnsafe returns path verbatim when quoting would have changed
