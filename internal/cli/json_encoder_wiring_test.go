@@ -97,6 +97,13 @@ func scanRawJSONEmitters(root string) (findings []jsonEmitterFinding, parsed, em
 		jsonName := importLocalName(file, "encoding/json")
 		markers, markerFindings := exemptionMarkers(fset, file)
 		findings = append(findings, markerFindings...)
+		if jsonName == "." {
+			findings = append(findings, jsonEmitterFinding{
+				position: fset.Position(importPosition(file, "encoding/json")),
+				message:  "dot-imported encoding/json is forbidden because emitter references cannot be resolved reliably; use a named import",
+			})
+			jsonName = "" // the import finding covers the whole file without ambiguous identifier matching
+		}
 
 		ast.Inspect(file, func(n ast.Node) bool {
 			pos, ok := jsonEmitterPosition(n, jsonName)
@@ -135,14 +142,6 @@ func jsonEmitterPosition(n ast.Node, jsonName string) (token.Pos, bool) {
 	case *ast.SelectorExpr:
 		pkgIdent, ok := node.X.(*ast.Ident)
 		if ok && jsonName != "" && jsonName != "." && pkgIdent.Name == jsonName && jsonEmitters[node.Sel.Name] {
-			return node.Pos(), true
-		}
-	case *ast.CallExpr:
-		// A dot-import makes NewEncoder(w) a bare identifier. Named imports
-		// are matched at the SelectorExpr instead, including function-value
-		// references such as encode := json.Marshal.
-		fun, ok := node.Fun.(*ast.Ident)
-		if ok && jsonName == "." && jsonEmitters[fun.Name] {
 			return node.Pos(), true
 		}
 	default:
@@ -198,6 +197,16 @@ func importLocalName(file *ast.File, importPath string) string {
 	return ""
 }
 
+func importPosition(file *ast.File, importPath string) token.Pos {
+	for _, spec := range file.Imports {
+		path, err := strconv.Unquote(spec.Path.Value)
+		if err == nil && path == importPath {
+			return spec.Pos()
+		}
+	}
+	return token.NoPos
+}
+
 // localNameFor is shared with the other AST wiring guards in this package.
 func localNameFor(t *testing.T, file *ast.File, importPath string) string {
 	t.Helper()
@@ -214,7 +223,7 @@ func TestJSONEmitterGuardAdversarialCases(t *testing.T) {
 		{name: "other package NewEncoder", source: `package docs; import "encoding/json"; func f(w anyWriter) { json.NewEncoder(w) }`, wantFindings: 1, wantEmitters: 1},
 		{name: "aliased Marshal", source: `package output; import j "encoding/json"; func f(v any) { _, _ = j.Marshal(v) }`, wantFindings: 1, wantEmitters: 1},
 		{name: "function value indirection", source: `package output; import j "encoding/json"; func f() { encode := j.Marshal; _ = encode }`, wantFindings: 1, wantEmitters: 1},
-		{name: "dot imported MarshalIndent", source: `package output; import . "encoding/json"; func f(v any) { _, _ = MarshalIndent(v, "", "  ") }`, wantFindings: 1, wantEmitters: 1},
+		{name: "dot import is forbidden", source: `package output; import . "encoding/json"; func f(v any) { encode := MarshalIndent; _ = encode }`, wantFindings: 1, wantEmitters: 0},
 		{name: "all variants", source: `package output
 import j "encoding/json"
 func f(w anyWriter, v any) { j.NewEncoder(w); j.Marshal(v); j.MarshalIndent(v, "", "") }`, wantFindings: 3, wantEmitters: 3},
