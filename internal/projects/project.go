@@ -52,8 +52,10 @@ const (
 // as absent information to a JSON consumer, alongside reassuring zero counts.
 func (s StatusState) MarshalJSON() ([]byte, error) {
 	if s == StatusUnknown {
+		// termsafe:allow-raw-json custom wire value, with escaping applied by the output encoder
 		return json.Marshal("unknown")
 	}
+	// termsafe:allow-raw-json custom wire value, with escaping applied by the output encoder
 	return json.Marshal(string(s))
 }
 

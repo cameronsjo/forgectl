@@ -675,6 +675,7 @@ func (r Ref) MarshalJSON() ([]byte, error) {
 	case KindUnspecified:
 		return nil, ErrInvalidRef
 	}
+	// termsafe:allow-raw-json custom wire value, with escaping applied by the output encoder
 	return json.Marshal(w)
 }
 

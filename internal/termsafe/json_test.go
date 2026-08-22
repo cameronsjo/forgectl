@@ -26,7 +26,10 @@ const (
 	bel  = 0x0007 // BELL — C0, which encoding/json escapes before we see it
 	emDa = 0x2014 // non-bidi, and shares RLO's E2-80 lead pair exactly, so
 	//               the carry must hold it and then release it unescaped
-	zwsp = 0x200B // ZERO WIDTH SPACE — invisible, but neither Cc nor bidi
+	zwsp = 0x200B  // ZERO WIDTH SPACE — non-bidi Cf
+	wj   = 0x2060  // WORD JOINER — non-bidi Cf
+	bom  = 0xFEFF  // ZERO WIDTH NO-BREAK SPACE / BOM — non-bidi Cf
+	tagA = 0xE0061 // TAG LATIN SMALL LETTER A — supplementary-plane Cf
 )
 
 // Safe multi-byte runes, chosen by encoding length and lead byte rather than by
@@ -200,20 +203,16 @@ func TestJSONEncoder_EscapeSpelling(t *testing.T) {
 	}
 }
 
-// TestJSONEncoder_LeavesOrdinaryDocumentsByteIdentical pins the filter as
-// value-preserving rather than merely round-trip-safe: a document with nothing
-// to escape must come out exactly as encoding/json wrote it, so adopting the
-// encoder cannot churn any existing --json contract. ZERO WIDTH SPACE is in the
-// fixture on purpose — it is invisible but neither Cc nor bidi, and rewriting
-// it would mean the escape set had quietly widened past IsUnsafeTerminalRune.
+// TestJSONEncoder_LeavesOrdinaryDocumentsByteIdentical pins the compatibility
+// boundary: a document containing ordinary graphic Unicode and no terminal-
+// unsafe format characters must come out exactly as encoding/json wrote it.
 func TestJSONEncoder_LeavesOrdinaryDocumentsByteIdentical(t *testing.T) {
 	value := map[string]any{
-		"path":      "/tmp/forgectl/config.toml",
-		"model":     "opus",
-		"unicode":   "café — naïve — " + raw(emDa),
-		"invisible": raw(zwsp),
-		"html":      "<a>&</a>",
-		"count":     7,
+		"path":    "/tmp/forgectl/config.toml",
+		"model":   "opus",
+		"unicode": "café — naïve — " + raw(emDa),
+		"html":    "<a>&</a>",
+		"count":   7,
 	}
 
 	var filtered, reference bytes.Buffer
@@ -230,6 +229,42 @@ func TestJSONEncoder_LeavesOrdinaryDocumentsByteIdentical(t *testing.T) {
 
 	if filtered.String() != reference.String() {
 		t.Errorf("filter rewrote a document with nothing to escape:\n got %q\nwant %q", filtered.String(), reference.String())
+	}
+}
+
+// TestJSONEncoder_EscapesInvisibleFormatCharacters is the #315 ruling: non-
+// bidi Cf must be visible in a terminal just like bidi format controls. The
+// supplementary-plane tag rune also proves appendJSONEscape emits the surrogate
+// pair JSON requires. Every spelling remains value-preserving after decode.
+func TestJSONEncoder_EscapesInvisibleFormatCharacters(t *testing.T) {
+	for name, r := range map[string]rune{
+		"zero width space": zwsp,
+		"word joiner":      wj,
+		"BOM":              bom,
+		"tag character":    tagA,
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := "head" + raw(r) + "tail"
+			var buf bytes.Buffer
+			if err := JSONEncoder(&buf).Encode(value); err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			out := buf.String()
+			if strings.ContainsRune(out, r) {
+				t.Fatalf("U+%04X survived literally in %q", r, out)
+			}
+			wantEscape := string(appendJSONEscape(nil, r))
+			if !strings.Contains(out, wantEscape) {
+				t.Errorf("encoded %q lacks %q", out, wantEscape)
+			}
+			var decoded string
+			if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if decoded != value {
+				t.Errorf("decoded = %q, want %q", decoded, value)
+			}
+		})
 	}
 }
 
@@ -366,7 +401,7 @@ func TestEscapingWriter_EverySplitPoint(t *testing.T) {
 // the predecessor asserted only over escapable prefixes, and "safe rune, split
 // in half" was precisely the case that had no coverage and no correct behavior.
 func TestIncompleteSuffixLen_HoldsEveryPartialCharacter(t *testing.T) {
-	subjects := append(escapableRunes(), eAcute, euro, enDash, grin, emDa, zwsp, 'a')
+	subjects := append(escapableRunes(), eAcute, euro, enDash, grin, emDa, 'a')
 	for _, r := range subjects {
 		var buf [utf8.UTFMax]byte
 		n := utf8.EncodeRune(buf[:], r)
