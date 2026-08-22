@@ -188,7 +188,16 @@ func (a *Adapter) reconcile(
 	case 0:
 		return backend.NewNotMutated(cause)
 	case 1:
-		ref, err := a.reference(matches[0], tag, server)
+		// The marker and pre-snapshot prove this attempt created exactly this
+		// workspace. Bind it to the incarnation that is ready NOW instead of
+		// retrying the stale fingerprint that already refused it. This is narrow:
+		// freshReadiness still validates the original pinned endpoint, and any
+		// failure leaves the outcome unknown rather than minting a reference.
+		fresh, rcause := a.freshReadiness(ctx, server)
+		if rcause != nil {
+			return backend.NewOutcomeUnknown(tag, cause)
+		}
+		ref, err := a.reference(matches[0], tag, fresh)
 		if err != nil {
 			return backend.NewOutcomeUnknown(tag, cause)
 		}
@@ -200,6 +209,11 @@ func (a *Adapter) reconcile(
 
 // serverInfo is what readiness establishes about the server behind the pin.
 type serverInfo struct {
+	// socket is the exact endpoint pinned by this adapter. Keeping it in the
+	// readiness result lets reconciliation refuse if that pin ever changes,
+	// before it sends a fresh readiness command anywhere else.
+	socket string
+
 	// version is the protocol identity that goes into the fingerprint. It is
 	// the protocol name and number rather than the application version because
 	// the fingerprint's job is to detect an incompatible or different server,
@@ -224,6 +238,22 @@ type serverInfo struct {
 // and without the check that failure is silent, because a wrong server answers
 // perfectly well.
 func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCause) {
+	return a.readinessAtPin(ctx, true)
+}
+
+// freshReadiness revalidates the exact endpoint readiness originally proved.
+// It deliberately suppresses the advisory socket-directory warning: one Start
+// should emit it once, even when reconciliation needs a second readiness pass.
+func (a *Adapter) freshReadiness(ctx context.Context, original serverInfo) (serverInfo, *backend.StartCause) {
+	if original.socket == "" || original.socket != a.socket {
+		cause := backend.NewStartCause(backend.FailureIdentityMismatch,
+			errors.New("the cmux endpoint pin changed during reconciliation"))
+		return serverInfo{}, &cause
+	}
+	return a.readinessAtPin(ctx, false)
+}
+
+func (a *Adapter) readinessAtPin(ctx context.Context, warn bool) (serverInfo, *backend.StartCause) {
 	// Ownership before anything is sent. Lstat rather than Stat: following a
 	// symlink would authenticate the target's ownership while talking through a
 	// link somebody else controls.
@@ -252,7 +282,9 @@ func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCaus
 			errors.New("the cmux socket is owned by another user"))
 		return serverInfo{}, &cause
 	}
-	a.warnUnsafeSocketDir()
+	if warn {
+		a.warnUnsafeSocketDir()
+	}
 
 	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindCmuxReadiness,
 		exec.MustFixed("capabilities"),
@@ -303,7 +335,7 @@ func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCaus
 		cause := backend.NewStartCause(backend.FailureMalformedResponse, err)
 		return serverInfo{}, &cause
 	}
-	return serverInfo{version: version, incarnation: id}, nil
+	return serverInfo{socket: a.socket, version: version, incarnation: id}, nil
 }
 
 // warnUnsafeSocketDir reports an unsafe configured location without rejecting
@@ -331,14 +363,13 @@ func (a *Adapter) warnUnsafeSocketDir() {
 // The re-fingerprint is the point. cmux reports no server pid and no start
 // time, so where tmux has those two on top of the socket, this rests on the
 // socket alone — its inode and its change time (forgectl#344). Taking the
-// fingerprint again after the mutation is what converts "the server restarted
-// mid-create, and we cannot say which incarnation holds this workspace" from a
-// silent mixed state into a refusal.
+// fingerprint again after the mutation catches both a restart and the weaker
+// case where socket metadata changed while the create was in flight.
 //
 // The change time is the weaker of the two and can move without a restart, so
-// this refuses slightly more often than it strictly must. What that costs is
-// named at the call site below, because it is larger here than on the close
-// path.
+// this local bind refuses slightly more often than it strictly must. Start then
+// reconciles by marker and novelty; one exact match earns a fresh readiness
+// pass, while ambiguity still remains OutcomeUnknown.
 func (a *Adapter) reference(workspace string, tag backend.RecoveryTag, server serverInfo) (backend.Ref, error) {
 	info, err := a.lstat(a.socket)
 	if err != nil {
@@ -349,7 +380,7 @@ func (a *Adapter) reference(workspace string, tag backend.RecoveryTag, server se
 		return backend.Ref{}, err
 	}
 	if !server.incarnation.Matches(now) {
-		return backend.Ref{}, errors.New("the cmux server restarted while the workspace was being created")
+		return backend.Ref{}, errors.New("the cmux server incarnation changed while the workspace was being created")
 	}
 	id, err := backend.NewCMuxIdentity(workspace)
 	if err != nil {

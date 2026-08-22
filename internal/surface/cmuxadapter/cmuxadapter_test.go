@@ -747,6 +747,116 @@ func TestAnAmbiguousReconciliationCarriesTheTagAndNoReference(t *testing.T) {
 	if got := mustTag(t, res); got.String() != tag.String() {
 		t.Errorf("tag = %q, want %q", got.String(), tag.String())
 	}
+	readiness := 0
+	for _, cmd := range run.calls() {
+		if cmd.Kind == exec.KindCmuxReadiness {
+			readiness++
+		}
+	}
+	if readiness != 1 {
+		t.Errorf("readiness calls = %d, want 1; ambiguity must not attempt a fresh bind", readiness)
+	}
+}
+
+// TestReconciliationBindsABenignCtimeChangeToTheFreshIncarnation covers the
+// decision in #367. The socket keeps its inode and only ctime moves, so the
+// first reference correctly refuses the stale fingerprint. An exact new marker
+// match then earns one fresh readiness pass and a closeable reference bound to
+// the current incarnation.
+func TestReconciliationBindsABenignCtimeChangeToTheFreshIncarnation(t *testing.T) {
+	if !changeTimeSupported {
+		t.Skip("socket ctime is not part of fingerprints on this platform")
+	}
+	spec, tag := newSpec(t)
+	marker := tag.OwnershipName()
+
+	stats := 0
+	before := liveSocketWithChangeTime(liveInode, 1_000)
+	after := liveSocketWithChangeTime(liveInode, 2_000)
+	seam := func(path string) (os.FileInfo, error) {
+		stats++
+		if stats == 1 {
+			return before(path)
+		}
+		return after(path)
+	}
+	var warnings bytes.Buffer
+	run := newRunner().reply1(exec.KindCmuxReconcile, listJSON([2]string{workspaceA, marker}))
+	a := newTestAdapter(t, run,
+		WithLstat(seam),
+		WithSocketDirStat(func(string) (os.FileInfo, error) {
+			return fakeInfo{sys: &syscall.Stat_t{Uid: testUID}, mode: fs.ModeDir | 0o777}, nil
+		}),
+		WithWarnings(&warnings),
+	)
+
+	res := a.Start(context.Background(), spec)
+
+	if res.Outcome() != backend.RefKnown || !res.Failed() {
+		t.Fatalf("outcome = %v, failed = %v; want RefKnown-with-cause", res.Outcome(), res.Failed())
+	}
+	if _, ok := res.Ref(); !ok {
+		t.Fatal("fresh reconciliation returned no closeable reference")
+	}
+	if got := strings.Count(warnings.String(), "warning: cmux socket directory"); got != 1 {
+		t.Errorf("warning count = %d, want 1 across both readiness passes", got)
+	}
+}
+
+func TestReconciliationKeepsOutcomeUnknownWhenFreshReadinessFails(t *testing.T) {
+	spec, tag := newSpec(t)
+	marker := tag.OwnershipName()
+	readiness := 0
+	run := newRunner().
+		reply1(exec.KindCmuxCreate, []byte(`{"workspace_id":""}`)).
+		reply1(exec.KindCmuxReconcile, listJSON([2]string{workspaceA, marker})).
+		on(exec.KindCmuxReadiness, func() (exec.SensitiveResult, error) {
+			readiness++
+			if readiness == 1 {
+				return stdout(goodCapabilities()), nil
+			}
+			return exec.SensitiveResult{}, exec.SensitiveErrorForTest(exec.KindCmuxReadiness, exec.OutcomeExit)
+		})
+	a := newTestAdapter(t, run)
+
+	res := a.Start(context.Background(), spec)
+
+	if res.Outcome() != backend.OutcomeUnknown {
+		t.Errorf("outcome = %v, want OutcomeUnknown", res.Outcome())
+	}
+	if _, ok := res.Ref(); ok {
+		t.Fatal("failed fresh readiness minted a reference")
+	}
+	if got := mustTag(t, res); got.String() != tag.String() {
+		t.Errorf("tag = %q, want %q", got.String(), tag.String())
+	}
+}
+
+func TestReconciliationNeverFollowsAChangedCmuxEndpoint(t *testing.T) {
+	spec, tag := newSpec(t)
+	marker := tag.OwnershipName()
+	readiness := 0
+	run := newRunner().
+		reply1(exec.KindCmuxCreate, []byte(`{"workspace_id":""}`)).
+		reply1(exec.KindCmuxReconcile, listJSON([2]string{workspaceA, marker})).
+		on(exec.KindCmuxReadiness, func() (exec.SensitiveResult, error) {
+			readiness++
+			socket := testSocket
+			if readiness > 1 {
+				socket = "/tmp/another-cmux/cmux.sock"
+			}
+			return stdout(capabilitiesJSON(wantProtocol, minVersion, socket, requiredMethods)), nil
+		})
+	a := newTestAdapter(t, run)
+
+	res := a.Start(context.Background(), spec)
+
+	if res.Outcome() != backend.OutcomeUnknown {
+		t.Errorf("outcome = %v, want OutcomeUnknown", res.Outcome())
+	}
+	if _, ok := res.Ref(); ok {
+		t.Fatal("a readiness reply naming another endpoint minted a reference")
+	}
 }
 
 // TestAnAbsentServerProvesNothingWasCreated is the one listing failure that may
@@ -1494,17 +1604,15 @@ func TestProbeAnswersItsTwoPositiveOutcomes(t *testing.T) {
 	})
 }
 
-// TestAPositiveReconciliationWeCannotReferenceIsNeverNotMutated is the one place
-// a POSITIVE match must still refuse to conclude absence.
+// TestAPositiveReconciliationBindsToTheFreshIncarnation covers the guarded
+// fresh-bind ruling with the stronger inode-change witness.
 //
 // Reconciliation finds exactly one workspace carrying our marker and absent
 // from the pre-snapshot — so something was definitely created — and then
-// building the reference fails. The realistic cause is the mid-create
-// re-fingerprint catching a server restart. Reporting NotMutated there would
-// say "nothing was created" about a workspace we just found, and the service
-// would take no recovery action at all: a surface orphaned with not even a
-// recovery tag to find it by.
-func TestAPositiveReconciliationWeCannotReferenceIsNeverNotMutated(t *testing.T) {
+// building the reference fails because the mid-create re-fingerprint catches
+// an incarnation change. Full readiness on the original endpoint then binds
+// the exact match to the fresh incarnation instead of retrying the stale one.
+func TestAPositiveReconciliationBindsToTheFreshIncarnation(t *testing.T) {
 	spec, tag := newSpec(t)
 	marker := tag.OwnershipName()
 
@@ -1526,14 +1634,15 @@ func TestAPositiveReconciliationWeCannotReferenceIsNeverNotMutated(t *testing.T)
 
 	res := a.Start(context.Background(), spec)
 
-	if res.Outcome() == backend.NotMutated {
-		t.Fatal("a workspace we found under our own marker was reported as never created")
+	if res.Outcome() != backend.RefKnown || !res.Failed() {
+		t.Errorf("outcome = %v, failed = %v; want RefKnown-with-cause", res.Outcome(), res.Failed())
 	}
-	if res.Outcome() != backend.OutcomeUnknown {
-		t.Errorf("outcome = %v, want OutcomeUnknown", res.Outcome())
+	ref, ok := res.Ref()
+	if !ok {
+		t.Fatal("an exact positive reconciliation returned no reference")
 	}
-	if got := mustTag(t, res); got.String() != tag.String() {
-		t.Errorf("tag = %q, want %q — it is the only handle left on the workspace", got.String(), tag.String())
+	if ref.Tag().String() != tag.String() {
+		t.Errorf("ref tag = %q, want %q", ref.Tag().String(), tag.String())
 	}
 }
 
