@@ -10,7 +10,6 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/quarantine"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
-	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // sandboxTeardown is the workspace-removal seam. Production wires the real
@@ -294,7 +293,7 @@ func (c *Client) discard(ctx context.Context, sess Session) error {
 			name = "<no derivable identity>"
 		}
 		slog.Debug("No review window to kill (already gone).", "window", name, "error", err)
-	} else if err := tmux.New(c.run).KillWindow(ctx, window); err != nil {
+	} else if err := c.tmuxClient.KillWindow(ctx, window); err != nil {
 		slog.Debug("Review window could not be killed.", "window_id", window.ID, "error", err)
 	}
 

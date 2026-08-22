@@ -8,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-
-	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // List returns a presentation row for every review session recorded in the
@@ -181,7 +179,7 @@ func (c *Client) Attach(ctx context.Context, path string) error {
 			"forgectl upgrade that renamed review windows; relaunch the review with `pr <ref>`", name, err)
 	}
 	slog.Debug("Attaching to review window.", "window_id", window.ID, "session_id", window.SessionID, "name", name)
-	if err := tmux.New(c.run).SelectWindow(ctx, window); err != nil {
+	if err := c.tmuxClient.SelectWindow(ctx, window); err != nil {
 		return fmt.Errorf("select review window %q: %w", name, err)
 	}
 	return nil
@@ -204,10 +202,6 @@ func (c *Client) Open(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	target, err := newWindowTarget(session)
-	if err != nil {
-		return err
-	}
 	// A shell window is NOT the review — it is a second, non-authoritative
 	// window under the same key, distinguished by its role in the digest rather
 	// than by a "-shell" suffix on the review's name. A suffix was both losable
@@ -217,8 +211,6 @@ func (c *Client) Open(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	// Unpinned by construction — see the note at internal/pr/launch.go's
-	// new-window sites and forgectl#353.
-	_, err = c.run.Run(ctx, "tmux", "new-window", "-t", target, "-n", name, "-c", sess.Workspace)
+	_, err = c.tmuxClient.NewWindow(ctx, session, name, sess.Workspace)
 	return err
 }
