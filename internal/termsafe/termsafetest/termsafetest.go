@@ -15,11 +15,18 @@ package termsafetest
 import (
 	"encoding/hex"
 	"fmt"
-	"testing"
 	"unicode"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
+
+// testReporter is the part of testing.T AssertInert needs. Keeping the seam
+// this narrow lets this shared assertion be tested without starting a nested
+// Go test whose only success condition is failure.
+type testReporter interface {
+	Helper()
+	Fatal(args ...any)
+}
 
 // Hostile decorates a benign label with the three shapes an untrusted name can
 // carry into a terminal: a CSI introducer (repaints the screen), a
@@ -42,7 +49,7 @@ func Hostile(label string) string {
 // called. That is what makes it survive drift: a column added to a listing, a
 // field added to the tree, or a sanitizer call dropped from an existing one all
 // fail here without anybody remembering to extend the test.
-func AssertInert(t *testing.T, label, out string) {
+func AssertInert(t testReporter, label, out string) {
 	t.Helper()
 	for i, r := range out {
 		if r == '\n' {
@@ -50,6 +57,7 @@ func AssertInert(t *testing.T, label, out string) {
 		}
 		if termsafe.IsUnsafeTerminalRune(r) || !unicode.IsGraphic(r) {
 			t.Fatal(inertFailure(label, r, i, out))
+			return
 		}
 	}
 }
@@ -70,6 +78,6 @@ func AssertInert(t *testing.T, label, out string) {
 // test: the hex is the whole point of this helper, and a change that dropped
 // or truncated it would otherwise ship green.
 func inertFailure(label string, r rune, i int, out string) string {
-	return fmt.Sprintf("%s emitted unsafe rune %q (U+%04X) at byte %d\nfull output: %q\noutput hex: %s",
+	return fmt.Sprintf("%q emitted unsafe rune %q (U+%04X) at byte %d\nfull output: %q\noutput hex: %s",
 		label, r, r, i, out, hex.EncodeToString([]byte(out)))
 }

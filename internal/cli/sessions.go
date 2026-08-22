@@ -183,20 +183,7 @@ machine can find a runbook or field report it did not author.
 				if err != nil {
 					return err
 				}
-				out := cmd.OutOrStdout()
-				if len(hits) == 0 {
-					fmt.Fprintln(out, "no runbooks matched")
-					return nil
-				}
-				for _, h := range hits {
-					// Indexed content is untrusted at print time — quote every
-					// unsafe rune so a hostile title/snippet can't smuggle
-					// terminal escape sequences to the operator's shell.
-					fmt.Fprintf(out, "%s\t%s\t[%s]\t(%s, indexed by %s)\n\t%s\n",
-						safeTerm(h.Path), safeTerm(h.Title), safeTerm(h.Type),
-						safeTerm(h.Project), safeTerm(h.Machine), safeTerm(h.Snippet))
-				}
-				return nil
+				return printSearchHits(cmd.OutOrStdout(), hits)
 			})
 		},
 	}
@@ -204,6 +191,24 @@ machine can find a runbook or field report it did not author.
 	cmd.Flags().StringVar(&project, "project", "", "restrict matches to one project")
 	cmd.Flags().IntVar(&limit, "limit", 10, "maximum hits to return")
 	return cmd
+}
+
+// printSearchHits owns the terminal boundary for concordance search results.
+// Indexed content is untrusted at print time, so every field is quoted before
+// it reaches the operator's shell.
+func printSearchHits(out io.Writer, hits []sessions.SearchHit) error {
+	if len(hits) == 0 {
+		_, err := fmt.Fprintln(out, "no runbooks matched")
+		return err
+	}
+	for _, h := range hits {
+		if _, err := fmt.Fprintf(out, "%s\t%s\t[%s]\t(%s, indexed by %s)\n\t%s\n",
+			safeTerm(h.Path), safeTerm(h.Title), safeTerm(h.Type),
+			safeTerm(h.Project), safeTerm(h.Machine), safeTerm(h.Snippet)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func newSessionsWhyCmd(cfg config.Config) *cobra.Command {

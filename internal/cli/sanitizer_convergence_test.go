@@ -10,9 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	runnerexec "github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/resume"
+	"github.com/cameronsjo/forgectl/internal/sessions"
 	"github.com/cameronsjo/forgectl/internal/workflow"
 )
 
@@ -38,8 +41,9 @@ type unsafeRune struct {
 	r    rune
 }
 
-// humanSink renders one of the three sinks #281 converges, given a hostile
-// value, and returns exactly what an operator's terminal would receive.
+// humanSink renders one human-output boundary given a hostile value and
+// returns exactly what an operator's terminal would receive. Keeping the sinks
+// in one table makes every hostile-rune class apply to every boundary.
 type humanSink struct {
 	name   string
 	render func(t *testing.T, value string) string
@@ -90,6 +94,34 @@ func convergedHumanSinks() []humanSink {
 				return stderr.String()
 			},
 		},
+		{
+			name: "sessions-search-text-row",
+			render: func(t *testing.T, value string) string {
+				t.Helper()
+				var out bytes.Buffer
+				hit := sessions.SearchHit{
+					Path: value, Title: value, Type: value,
+					Project: value, Machine: value, Snippet: value,
+				}
+				if err := printSearchHits(&out, []sessions.SearchHit{hit}); err != nil {
+					t.Fatalf("printSearchHits: %v", err)
+				}
+				return out.String()
+			},
+		},
+		{
+			name: "sessions-last-human-header",
+			render: func(t *testing.T, value string) string {
+				t.Helper()
+				summary := &sessions.SessionSummary{
+					SessionID: value, Project: value, GitBranch: value,
+				}
+				out, _ := renderCmd(t, func(cmd *cobra.Command) error {
+					return printLastSession(cmd, "repo", summary, false)
+				})
+				return out
+			},
+		},
 	}
 }
 
@@ -100,8 +132,8 @@ type errString string
 func (e errString) Error() string { return string(e) }
 
 // TestConvergedHumanSinks_QuoteInvisibleFormatting is #281's acceptance
-// criterion, one subtest per sink per rune: each of the three sinks must render
-// the residual inertly rather than passing it to the terminal.
+// criterion, one subtest per sink per rune: every sink must render the residual
+// inertly rather than passing it to the terminal.
 func TestConvergedHumanSinks_QuoteInvisibleFormatting(t *testing.T) {
 	for _, sink := range convergedHumanSinks() {
 		for _, tt := range invisibleFormatting {
