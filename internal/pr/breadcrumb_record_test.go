@@ -12,6 +12,8 @@ package pr
 //   [x] Validation performs NO workspace filesystem access (seams would fire)
 // decodeBreadcrumb (Classification: one decoder, frozen grammar)
 //   [x] Unknown fields are rejected
+//   [x] Duplicate keys are rejected, including security-relevant fields
+//   [x] Exactly 8 KiB is accepted and one byte more is rejected
 //   [x] Trailing content after the record is REJECTED (forgectl#289)
 //   [x] Trailing WHITESPACE is still accepted — writeBreadcrumb emits it
 //   [x] The refusal message echoes no file bytes, so hostile trailing content
@@ -22,7 +24,9 @@ package pr
 //       and never any workspace-existence invariant
 
 import (
+	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -111,6 +115,52 @@ func TestValidateBreadcrumbRecord_Rejections(t *testing.T) {
 func TestDecodeBreadcrumb_RejectsUnknownFields(t *testing.T) {
 	if _, err := decodeBreadcrumb([]byte(`{"workspace":"/tmp/x","surprise":1}`)); err == nil {
 		t.Error("decodeBreadcrumb accepted an unknown field; the strict grammar is load-bearing")
+	}
+}
+
+func TestDecodeBreadcrumb_RejectsDuplicateKeys(t *testing.T) {
+	for _, duplicate := range []string{
+		`"workspace":"/tmp/forgectl-workflow-b"`,
+		`"provenance":"operator-authored"`,
+	} {
+		body := `{"workspace":"/tmp/forgectl-workflow-a",` + duplicate +
+			`,"ref":"o/r#1","provenance":"third-party","createdAt":"2026-01-01T00:00:00Z"}`
+		if _, err := decodeBreadcrumb([]byte(body)); err == nil {
+			t.Errorf("decodeBreadcrumb accepted duplicate field in %s", body)
+		}
+	}
+}
+
+func TestDecodeBreadcrumb_RecordSizeLimit(t *testing.T) {
+	exact := firstDoc + strings.Repeat(" ", maxBreadcrumbRecordBytes-len(firstDoc))
+	if len(exact) != maxBreadcrumbRecordBytes {
+		t.Fatalf("exact-size fixture is %d bytes, want %d", len(exact), maxBreadcrumbRecordBytes)
+	}
+	if _, err := decodeBreadcrumb([]byte(exact)); err != nil {
+		t.Fatalf("decodeBreadcrumb at the size limit = %v, want acceptance", err)
+	}
+	if _, err := decodeBreadcrumb([]byte(exact + " ")); !errors.Is(err, errBreadcrumbRecordTooLarge) {
+		t.Fatalf("decodeBreadcrumb one byte over the limit = %v, want %v", err, errBreadcrumbRecordTooLarge)
+	}
+}
+
+func TestLoadBreadcrumbRecord_RejectsOversizedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "oversized.json")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", maxBreadcrumbRecordBytes+1)), 0o600); err != nil {
+		t.Fatalf("write oversized breadcrumb: %v", err)
+	}
+	if _, _, err := loadBreadcrumbRecord(path, dir); !errors.Is(err, errBreadcrumbRecordTooLarge) {
+		t.Fatalf("loadBreadcrumbRecord = %v, want %v", err, errBreadcrumbRecordTooLarge)
+	}
+}
+
+func TestWriteBreadcrumb_RefusesRecordItsLoaderWouldReject(t *testing.T) {
+	bc := validRecord()
+	bc.Agent = strings.Repeat("a", maxBreadcrumbRecordBytes)
+	ref := Ref{Owner: "o", Repo: "r", Number: 1}
+	if _, err := writeBreadcrumb(t.TempDir(), ref, bc); !errors.Is(err, errBreadcrumbRecordTooLarge) {
+		t.Fatalf("writeBreadcrumb = %v, want %v", err, errBreadcrumbRecordTooLarge)
 	}
 }
 
@@ -206,6 +256,35 @@ func TestDecodeBreadcrumbRecord_TrailingContentNamesRemedy(t *testing.T) {
 	}
 	if got := err.Error(); !strings.Contains(got, "by hand") {
 		t.Errorf("refusal names no remedy, and no forgectl verb can reach this record: %q", got)
+	} else if !strings.Contains(got, "forgectl-workflow-*") {
+		t.Errorf("refusal does not identify the trusted clean-room shape: %q", got)
+	}
+}
+
+func TestBreadcrumbErrors_EscapeHostileFilenameAndFilesystemCause(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "planted-\x1b[2K\rinnocent\u202egnj.json")
+
+	_, err := decodeBreadcrumbRecord([]byte(firstDoc+"\n{}"), path)
+	if err == nil {
+		t.Fatal("decodeBreadcrumbRecord accepted trailing content")
+	}
+	assertTerminalSafeBreadcrumbError(t, err)
+
+	_, _, err = loadBreadcrumbRecord(path, dir)
+	if err == nil {
+		t.Fatal("loadBreadcrumbRecord unexpectedly read a nonexistent hostile path")
+	}
+	assertTerminalSafeBreadcrumbError(t, err)
+}
+
+func assertTerminalSafeBreadcrumbError(t *testing.T, err error) {
+	t.Helper()
+	got := err.Error()
+	for _, unsafe := range []string{"\x1b", "\r", "\n", "\u202e"} {
+		if strings.Contains(got, unsafe) {
+			t.Errorf("breadcrumb error contains raw terminal-unsafe text %q: %q", unsafe, got)
+		}
 	}
 }
 

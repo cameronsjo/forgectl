@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // breadcrumbMember is the CAPABILITY a successful membership check yields: not
@@ -22,6 +24,9 @@ type breadcrumbMember struct {
 	// path is the authoritative entry: a real, non-symlink .json file joined
 	// under the client's own session directory. Never the caller's operand.
 	path string
+	// displayPath is path quoted once at the capability boundary. Downstream
+	// refusal messages can never accidentally render the hostile filename raw.
+	displayPath string
 	// info is that file's identity at check time, for a SameFile recheck
 	// immediately before the unlink.
 	info fs.FileInfo
@@ -146,15 +151,16 @@ func (c *Client) resolveBreadcrumbMember(operand string) (breadcrumbMember, erro
 	// canonical session directory.
 	if parent := filepath.Dir(resolvePath(selected.lexical)); parent != canonicalDir {
 		return breadcrumbMember{}, fmt.Errorf(
-			"breadcrumb %q resolves outside the pr session directory", selected.lexical)
+			"breadcrumb %s resolves outside the pr session directory", termsafe.QuotePath(selected.lexical))
 	}
 
 	info, err := os.Lstat(selected.lexical)
 	if err != nil {
-		return breadcrumbMember{}, fmt.Errorf("stat breadcrumb %s: %w", selected.lexical, err)
+		return breadcrumbMember{}, fmt.Errorf("stat breadcrumb %s: %w",
+			termsafe.QuotePath(selected.lexical), termsafe.Error(err))
 	}
 	if !info.Mode().IsRegular() {
-		return breadcrumbMember{}, fmt.Errorf("breadcrumb %q is not a regular file", selected.lexical)
+		return breadcrumbMember{}, fmt.Errorf("breadcrumb %s is not a regular file", termsafe.QuotePath(selected.lexical))
 	}
 
 	bc, data, err := loadBreadcrumbRecord(selected.lexical, c.sessionsDir)
@@ -162,11 +168,12 @@ func (c *Client) resolveBreadcrumbMember(operand string) (breadcrumbMember, erro
 		return breadcrumbMember{}, err
 	}
 	return breadcrumbMember{
-		path:       selected.lexical,
-		info:       info,
-		dirInfo:    dirInfo,
-		bytes:      data,
-		breadcrumb: bc,
+		path:        selected.lexical,
+		displayPath: termsafe.QuotePath(selected.lexical),
+		info:        info,
+		dirInfo:     dirInfo,
+		bytes:       data,
+		breadcrumb:  bc,
 	}, nil
 }
 
