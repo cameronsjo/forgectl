@@ -550,6 +550,31 @@ func TestBuildInvocation_MergesEnvExactlyOnce(t *testing.T) {
 	}
 }
 
+// TestBuildInvocation_PreservesClaudeChildMarker pins the non-surface side of
+// forgectl#363. BuildInvocation also backs ordinary in-place launches and owns
+// no surface policy; only the caller that creates a new surface may remove this
+// marker.
+func TestBuildInvocation_PreservesClaudeChildMarker(t *testing.T) {
+	target := projectDir(t)
+	built, err := BuildInvocation(InvocationRequest{
+		Config:  config.LaunchConfig{Defaults: config.LaunchDefaults{Model: "opus"}},
+		CWD:     target,
+		BaseEnv: []string{"CLAUDE_CODE_CHILD_SESSION=1", "KEEP=yes"},
+		Resolve: fixedResolver(ResolvedBinary{Path: "/stub/claude", Source: BinaryPATH}),
+	})
+	if err != nil {
+		t.Fatalf("BuildInvocation: %v", err)
+	}
+
+	got := envMap(t, built.Invocation.Env)
+	if got["CLAUDE_CODE_CHILD_SESSION"] != "1" {
+		t.Errorf("CLAUDE_CODE_CHILD_SESSION = %q, want preserved %q", got["CLAUDE_CODE_CHILD_SESSION"], "1")
+	}
+	if got["KEEP"] != "yes" {
+		t.Errorf("KEEP = %q, want %q", got["KEEP"], "yes")
+	}
+}
+
 func envMap(t *testing.T, env []string) map[string]string {
 	t.Helper()
 	out := make(map[string]string, len(env))
