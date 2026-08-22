@@ -499,28 +499,48 @@ func TestTrampoline_AnUnacknowledgedLaunchIsNotSuccess(t *testing.T) {
 		t.Fatalf("NewNonce: %v", err)
 	}
 
-	// A service that sends the invocation and then hangs up, so the
-	// acknowledgement has nowhere to land.
+	// Shut down the service's read half BEFORE sending the invocation. The
+	// trampoline cannot attempt exec_started until Send gives it the invocation,
+	// so this orders the refusal before the acknowledgement instead of racing a
+	// full close against bytes already accepted by the socket buffer.
+	serviceErr := make(chan error, 1)
 	go func() {
 		conn, acceptErr := listener.Accept()
 		if acceptErr != nil {
+			serviceErr <- acceptErr
 			return
 		}
 		handoff, acceptErr := surface.Accept(conn, nonce)
 		if acceptErr != nil {
+			serviceErr <- acceptErr
 			return
 		}
-		_ = handoff.Send(launch.Invocation{
+		unixConn, ok := conn.(*net.UnixConn)
+		if !ok {
+			serviceErr <- errors.New("accepted Unix listener connection is not *net.UnixConn")
+			return
+		}
+		if closeErr := unixConn.CloseRead(); closeErr != nil {
+			serviceErr <- closeErr
+			return
+		}
+		if sendErr := handoff.Send(launch.Invocation{
 			Harness: "test",
 			Binary:  launch.ResolvedBinary{Path: "/bin/sh", Source: launch.BinaryClaudeConfig},
 			Args:    []string{"-c", "exit 0"},
 			Env:     []string{"PATH=/usr/bin:/bin"},
 			CWD:     "/",
-		})
-		_ = handoff.Close()
+		}); sendErr != nil {
+			serviceErr <- sendErr
+			return
+		}
+		serviceErr <- handoff.Close()
 	}()
 
 	runErr := (productionTrampoline{}).Run(context.Background(), bootstrapFor(t, socket, nonce))
+	if err := <-serviceErr; err != nil {
+		t.Fatalf("fake service setup: %v", err)
+	}
 	if runErr == nil {
 		t.Fatal("an unacknowledged launch reported success; the outer is rolling it back")
 	}
