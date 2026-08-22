@@ -56,6 +56,7 @@ package herdradapter
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,6 +103,11 @@ type Adapter struct {
 	// refusal cannot be provoked honestly from a unit test, so without a seam
 	// the suite would be indifferent to whether the comparison exists.
 	selfUID func() int
+
+	// statSocketDir and warnings are separate from lstat so the advisory
+	// directory check cannot perturb socket fingerprinting or launch outcomes.
+	statSocketDir func(string) (os.FileInfo, error)
+	warnings      io.Writer
 }
 
 // Option configures an Adapter at construction.
@@ -115,6 +121,21 @@ func WithLstat(fn func(string) (os.FileInfo, error)) Option {
 // WithSelfUID overrides the uid the socket-ownership check compares against.
 func WithSelfUID(fn func() int) Option {
 	return func(a *Adapter) { a.selfUID = fn }
+}
+
+// WithSocketDirStat overrides the containing-directory stat used by the
+// advisory privacy warning.
+func WithSocketDirStat(fn func(string) (os.FileInfo, error)) Option {
+	return func(a *Adapter) { a.statSocketDir = fn }
+}
+
+// WithWarnings sends non-blocking readiness warnings to w.
+func WithWarnings(w io.Writer) Option {
+	return func(a *Adapter) {
+		if w != nil {
+			a.warnings = w
+		}
+	}
 }
 
 // ErrResolveSession reports that the herdr session could not be chosen.
@@ -152,12 +173,14 @@ func New(run exec.SensitiveRunner, herdrPath string, getenv func(string) string,
 		return nil, err
 	}
 	a := &Adapter{
-		run:       run,
-		herdrPath: herdrPath,
-		session:   session,
-		source:    source,
-		lstat:     os.Lstat,
-		selfUID:   os.Geteuid,
+		run:           run,
+		herdrPath:     herdrPath,
+		session:       session,
+		source:        source,
+		lstat:         os.Lstat,
+		selfUID:       os.Geteuid,
+		statSocketDir: os.Stat,
+		warnings:      io.Discard,
 	}
 	for _, opt := range opts {
 		opt(a)

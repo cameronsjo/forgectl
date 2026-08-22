@@ -44,6 +44,7 @@ package cmuxadapter
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -81,6 +82,12 @@ type Adapter struct {
 	// planting a foreign-owned socket needs a second account — so without a seam
 	// the suite would be indifferent to whether the comparison exists at all.
 	selfUID func() int
+
+	// statSocketDir and warnings are separate from lstat so adding an advisory
+	// directory check cannot perturb the socket-identity seam or turn a warning
+	// write into readiness failure.
+	statSocketDir func(string) (os.FileInfo, error)
+	warnings      io.Writer
 }
 
 // Option configures an Adapter at construction.
@@ -94,6 +101,21 @@ func WithLstat(fn func(string) (os.FileInfo, error)) Option {
 // WithSelfUID overrides the uid the socket-ownership check compares against.
 func WithSelfUID(fn func() int) Option {
 	return func(a *Adapter) { a.selfUID = fn }
+}
+
+// WithSocketDirStat overrides the containing-directory stat used by the
+// advisory privacy warning.
+func WithSocketDirStat(fn func(string) (os.FileInfo, error)) Option {
+	return func(a *Adapter) { a.statSocketDir = fn }
+}
+
+// WithWarnings sends non-blocking readiness warnings to w.
+func WithWarnings(w io.Writer) Option {
+	return func(a *Adapter) {
+		if w != nil {
+			a.warnings = w
+		}
+	}
 }
 
 // ErrResolveSocket reports that the cmux server socket could not be chosen.
@@ -116,14 +138,16 @@ var ErrResolveSocket = errors.New("cmuxadapter: cannot resolve the cmux server s
 // subprocesses run between the ownership stat and the create that carries the
 // bootstrap, and the re-fingerprint in reference detects an inode change only
 // AFTER the nonce has been sent. Substituting the socket in that window
-// requires write access to its directory — the same uid, which is outside the
-// stated threat model — and closing it properly would need a
-// connect-then-verify handshake this CLI-driven design cannot have. Said
-// plainly rather than left implied by the word "fresh".
+// requires write access to its directory. Readiness warns when the directory is
+// known to be writable by or owned by another uid, but honors cmux's configured
+// location; closing the window properly would need a connect-then-verify
+// handshake this CLI-driven design cannot have. Said plainly rather than left
+// implied by the word "fresh".
 //
 // tmux's adapter checks its socket DIRECTORY at construction because it goes on
-// to CREATE the server; this adapter only ever connects to one cmux already
-// started, so there is nothing here to make safe in advance.
+// to CREATE the server. This adapter only connects to a cmux already started,
+// so forgectl reports an unsafe directory at readiness without overriding the
+// socket-owning application's location policy.
 func New(run exec.SensitiveRunner, cmuxPath string, getenv func(string) string, opts ...Option) (*Adapter, error) {
 	if run == nil {
 		return nil, fmt.Errorf("%w: no runner", ErrResolveSocket)
@@ -136,12 +160,14 @@ func New(run exec.SensitiveRunner, cmuxPath string, getenv func(string) string, 
 		return nil, err
 	}
 	a := &Adapter{
-		run:      run,
-		cmuxPath: cmuxPath,
-		socket:   socket,
-		source:   source,
-		lstat:    os.Lstat,
-		selfUID:  os.Geteuid,
+		run:           run,
+		cmuxPath:      cmuxPath,
+		socket:        socket,
+		source:        source,
+		lstat:         os.Lstat,
+		selfUID:       os.Geteuid,
+		statSocketDir: os.Stat,
+		warnings:      io.Discard,
 	}
 	for _, opt := range opts {
 		opt(a)

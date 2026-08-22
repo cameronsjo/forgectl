@@ -252,6 +252,7 @@ func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCaus
 			errors.New("the cmux socket is owned by another user"))
 		return serverInfo{}, &cause
 	}
+	a.warnUnsafeSocketDir()
 
 	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindCmuxReadiness,
 		exec.MustFixed("capabilities"),
@@ -303,6 +304,25 @@ func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCaus
 		return serverInfo{}, &cause
 	}
 	return serverInfo{version: version, incarnation: id}, nil
+}
+
+// warnUnsafeSocketDir reports an unsafe configured location without rejecting
+// it. cmux owns the endpoint policy; forgectl honors the socket it selected and
+// tells the operator when another local user may be able to perturb launches.
+func (a *Adapter) warnUnsafeSocketDir() {
+	dir := filepath.Dir(a.socket)
+	info, err := a.statSocketDir(dir)
+	if err != nil {
+		return
+	}
+	reason := sockstat.UnsafeDirectoryReason(info, a.selfUID())
+	if reason == "" {
+		return
+	}
+	// Advisory by ruling: even a broken warning sink must not change readiness.
+	_, _ = fmt.Fprintf(a.warnings,
+		"warning: cmux socket directory %q is %s; forgectl will honor this location, but another local user may disrupt launches\n",
+		dir, reason)
 }
 
 // reference binds a workspace UUID to the incarnation that minted it, after

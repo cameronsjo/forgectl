@@ -119,17 +119,17 @@ func firstArg(args []string) string {
 
 // runSurfaceLaunch is the CLI half: resolve, build, hand to the service.
 //
-// It deliberately banners nothing on success. `forgectl launch` prints its
-// posture to stderr because the operator is watching that terminal; this
-// command's stderr belongs to whatever manager is about to host the session,
-// so anything written here lands in a pane the operator did not ask to read.
+// It deliberately banners nothing on success. The exception is an advisory
+// backend warning: unlike a success banner, a warning about a socket location
+// another local user can perturb is actionable at launch time and is routed to
+// this command's stderr explicitly rather than depending on optional logging.
 func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOptions) error {
 	if opts.Backend == "" {
 		return WithExitCode(fmt.Errorf(
 			"--surface is required and has no default; pass --surface tmux"), 2)
 	}
 
-	adapter, err := surfaceAdapterFor(opts.Backend)
+	adapter, err := surfaceAdapterForWithWarnings(opts.Backend, cmd.ErrOrStderr())
 	if err != nil {
 		return WithExitCode(err, 2)
 	}

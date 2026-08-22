@@ -22,6 +22,7 @@ package sockstat
 
 import (
 	"os"
+	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 )
@@ -57,3 +58,27 @@ func Fill(in *backend.IncarnationInput, info os.FileInfo) { fill(in, info) }
 // OwnerUID reports the uid owning the stat'ed object, and whether the platform
 // could answer at all. A false ok means "cannot establish", never "ours".
 func OwnerUID(info os.FileInfo) (int, bool) { return ownerUID(info) }
+
+// UnsafeDirectoryReason reports why a socket's containing directory cannot be
+// called private. An empty result means no known concern: the directory is not
+// group/world-writable and, on platforms that expose ownership, belongs to the
+// current uid.
+//
+// Ownership that the platform cannot establish is deliberately not described
+// as foreign. This check is advisory, so inventing a concern from an absent
+// answer would produce a warning the operator cannot act on and would differ
+// from the stated policy: warn about a directory KNOWN to be writable by or
+// owned by another user.
+func UnsafeDirectoryReason(info os.FileInfo, selfUID int) string {
+	if info == nil || !info.IsDir() {
+		return ""
+	}
+	var reasons []string
+	if info.Mode().Perm()&0o022 != 0 {
+		reasons = append(reasons, "group or world writable")
+	}
+	if owner, ok := OwnerUID(info); ok && owner != selfUID {
+		reasons = append(reasons, "owned by another user")
+	}
+	return strings.Join(reasons, " and ")
+}
