@@ -60,6 +60,21 @@ type lockedBuffer struct {
 	b  bytes.Buffer
 }
 
+// interactiveCallRunner makes an interactive invocation observable without
+// polling FakeRunner.Last. The embedded fake still records the call before the
+// notification is sent, so receiving from called is the synchronization point
+// the test can safely cancel after.
+type interactiveCallRunner struct {
+	*exec.FakeRunner
+	called chan<- exec.Call
+}
+
+func (r *interactiveCallRunner) RunInteractive(ctx context.Context, name string, args ...string) error {
+	err := r.FakeRunner.RunInteractive(ctx, name, args...)
+	r.called <- r.Last()
+	return err
+}
+
 func (b *lockedBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -163,27 +178,36 @@ func TestRunDocsServe_ContextCancel_GracefulShutdown(t *testing.T) {
 
 func TestRunDocsServe_OpenFlag_InvokesBrowserOpener(t *testing.T) {
 	idx := testDocsIndex(t)
-	fake := &exec.FakeRunner{}
-	deps := module.Deps{Runner: fake}
+	opened := make(chan exec.Call, 1)
+	runner := &interactiveCallRunner{FakeRunner: &exec.FakeRunner{}, called: opened}
+	deps := module.Deps{Runner: runner}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	cmd := testCmdWithContext(ctx)
-
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
 
 	done := make(chan error, 1)
 	go func() { done <- runDocsServe(cmd, deps, idx, "127.0.0.1:0", true, "") }()
 
+	var call exec.Call
 	select {
-	case <-done:
+	case call = <-opened:
+		cancel()
+	case err := <-done:
+		t.Fatalf("runDocsServe returned before invoking the browser opener: %v", err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("runDocsServe did not return within 5s")
+		t.Fatal("runDocsServe did not invoke the browser opener within 5s")
 	}
 
-	call := fake.Last()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runDocsServe shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runDocsServe did not shut down within 5s")
+	}
+
 	if call.Name != "open" && call.Name != "xdg-open" {
 		t.Fatalf("browser opener call.Name = %q, want open or xdg-open", call.Name)
 	}
