@@ -8,13 +8,20 @@ name: Auto Tag
 # keeps release.yml and .goreleaser.yaml untouched: GoReleaser still creates
 # the GitHub Release and pushes the Homebrew cask exactly as it does for a
 # hand-pushed tag. Mirrors the same workflow in cameronsjo/cadence-hooks.
+#
+# `skip-github-release: true` also skips release-please's own label flip, so
+# the merged release PR is left sitting on `autorelease: pending` forever.
+# Every later release-please run then aborts with "There are untagged, merged
+# release PRs outstanding" inside a green job — no release PR is ever opened
+# again. Taking over the tagging means taking over the flip too, so this
+# workflow closes the loop itself (see "Flip the release PR label" below).
 on:
   push:
     branches: [main]
     paths: [.release-please-manifest.json]
 
-permissions:
-  contents: write
+# Deny by default; the one job that needs anything grants it job-scoped.
+permissions: {}
 
 # Serialize. Each run produces a distinct tag, so a second run must land
 # rather than be cancelled by the first.
@@ -26,10 +33,20 @@ jobs:
   tag:
     name: Tag version bump
     runs-on: ubuntu-latest
+    # Job-scoped, deliberately. `contents: read` is all GITHUB_TOKEN needs
+    # here: the tag push authenticates with the App token instead (see
+    # below), so a `contents: write` grant would be dead weight — and paired
+    # with `pull-requests: write` it would hand GITHUB_TOKEN the ability to
+    # merge pull requests, which nothing in this job does.
+    permissions:
+      contents: read # clone the repo and resolve existing tags
+      pull-requests: write # flip the merged release PR's autorelease label
     steps:
       # An App token, not GITHUB_TOKEN: a tag pushed with GITHUB_TOKEN does
       # NOT trigger `on: push: tags`, so release.yml would never fire and the
-      # release would silently never happen.
+      # release would silently never happen. That constraint is specific to
+      # pushing refs — the label flip further down has no such problem and
+      # deliberately stays on GITHUB_TOKEN.
       #
       # SHA-pinned: this action mints a live write-scoped installation token
       # from a private key, so a silent upstream retag of `v3` is worth not
@@ -45,34 +62,103 @@ jobs:
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
 
+      # `persist-credentials: false`: nothing is written into .git/config, so
+      # no token outlives the step that needs it. The checkout itself reads
+      # with the job's own `contents: read` GITHUB_TOKEN; the App token is
+      # handed to the push step alone, per-invocation.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
 
       - name: Extract version and check for existing tag
         id: check
         run: |
           set -euo pipefail
           VERSION="$(jq -r '.["."]' .release-please-manifest.json)"
-          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-            echo "::error::could not read version from .release-please-manifest.json"
+          # Anchored charset check, not just non-empty. `jq -r` un-escapes,
+          # so a manifest carrying a newline in the version string would
+          # otherwise let it forge arbitrary $GITHUB_OUTPUT step outputs.
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::.release-please-manifest.json version is missing or not a semver: ${VERSION}"
             exit 1
           fi
           TAG="v${VERSION}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+          # Heredoc-delimited writes with a random delimiter: even if the
+          # charset check above is ever loosened, a value cannot close its
+          # own block and start a new key.
+          DELIM="EOF_$(openssl rand -hex 16)"
+          {
+            printf 'tag<<%s\n%s\n%s\n' "$DELIM" "$TAG" "$DELIM"
+            printf 'version<<%s\n%s\n%s\n' "$DELIM" "$VERSION" "$DELIM"
+          } >> "$GITHUB_OUTPUT"
+          if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+            printf 'exists<<%s\ntrue\n%s\n' "$DELIM" "$DELIM" >> "$GITHUB_OUTPUT"
             echo "$TAG already exists — nothing to tag."
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            printf 'exists<<%s\nfalse\n%s\n' "$DELIM" "$DELIM" >> "$GITHUB_OUTPUT"
           fi
 
+      # The App token travels in this step's env and is used inline via
+      # `http.extraheader`, so it never lands in .git/config or in a remote
+      # URL that git would echo back in an error message.
       - name: Create and push tag
         if: steps.check.outputs.exists == 'false'
         env:
           TAG: ${{ steps.check.outputs.tag }}
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           git tag "$TAG"
-          git push origin "$TAG"
+          AUTH_HEADER="$(printf 'x-access-token:%s' "$APP_TOKEN" | base64 | tr -d '\n')"
+          git -c "http.extraheader=AUTHORIZATION: basic ${AUTH_HEADER}" \
+            push "https://github.com/${GITHUB_REPOSITORY}.git" -- "refs/tags/${TAG}:refs/tags/${TAG}"
+
+      # release-please's own flip is skipped along with its GitHub Release
+      # (`skip-github-release: true`), so without this the merged release PR
+      # stays `autorelease: pending` and wedges every subsequent run.
+      #
+      # GITHUB_TOKEN, not the App token, and that is a security boundary
+      # rather than a convenience: the estate-main ruleset binds approvals
+      # from the Actions actor but does not bind GitHub Apps, so an App token
+      # carrying `pull-requests: write` would be an unattended
+      # open-and-merge primitive. GITHUB_TOKEN has no such reach, and the
+      # tag-push constraint that forced the App token upward does not apply
+      # to labels.
+      - name: Flip the release PR label
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.check.outputs.version }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TITLE="chore(main): release ${VERSION}"
+
+          # Primary: the merged release PR still wearing the pending label.
+          PR="$(gh pr list --state merged --label 'autorelease: pending' \
+                  --limit 50 --json number,title \
+                | jq -r --arg title "$TITLE" \
+                    'map(select(.title == $title)) | first | .number // empty')"
+
+          # Fallback: the PR that produced this very commit. Never parse a
+          # number out of the commit message — the API is authoritative.
+          if [ -z "$PR" ]; then
+            PR="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/pulls" \
+                    --jq 'map(select(.merged_at != null)) | first | .number // empty' || true)"
+          fi
+
+          if [ -z "$PR" ]; then
+            echo "::error::no merged release PR found for ${VERSION} (title: ${TITLE}); the autorelease label is still pending and release-please will abort on its next run"
+            exit 1
+          fi
+          if [[ ! "$PR" =~ ^[0-9]+$ ]]; then
+            echo "::error::resolved PR reference is not a number: ${PR}"
+            exit 1
+          fi
+
+          echo "Flipping autorelease label on PR #${PR}"
+          gh pr edit "$PR" \
+            --remove-label 'autorelease: pending' \
+            --add-label 'autorelease: tagged'
