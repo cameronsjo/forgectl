@@ -37,6 +37,7 @@ func Names(profiles map[string]config.ProxyProfile) []string {
 // unset: an empty assignment routes no traffic, so calling it "set" would
 // misreport the shape it exists to describe.
 func Environment(lookup Lookup) []Variable {
+	// The zero profile contributes no values: only the spellings are read here.
 	variables := profileVariables(config.ProxyProfile{})
 	states := make([]Variable, 0, len(variables))
 	for _, v := range variables {

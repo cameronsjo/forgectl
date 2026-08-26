@@ -30,7 +30,10 @@ func newProxyCmd(deps module.Deps) *cobra.Command {
 its parent shell: capture and eval its output through the documented wrapper.
 
 Profile values are sensitive. The use command is a machine protocol for that
-wrapper, not a status or display command; forgectl never logs those values.`,
+wrapper, not a status or display command; forgectl never logs those values.
+The read verbs, list and status, print profile names and per-variable
+set/unset only — never a value, from either the configuration or the live
+environment.`,
 	}
 	cmd.AddCommand(
 		newProxyUseCmd(deps),
