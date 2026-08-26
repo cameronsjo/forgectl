@@ -10,6 +10,11 @@ package docker
 //   [x] Happy: a configured extra label (WithDockerConfig) is appended
 //   [x] Happy: a successful build caches the derived tag (LastTag reflects it)
 //   [x] Unhappy: an option-like context dir is rejected before any Runner call
+//   [x] Happy (forgectl#398): ExtraArgs land in the argv after the derived
+//       -t flags and before `-- <context>`
+//   [x] Happy (forgectl#398): a user-supplied --platform in ExtraArgs
+//       suppresses the derived --platform (docker's flag is a stringArray;
+//       simply appending would stack rather than override)
 //   [x] Degraded (forgectl#187): a git resolution failure is non-fatal —
 //       docker still runs, tagging only a directory-derived :dev tag with
 //       the revision/ref.name labels absent
@@ -126,6 +131,93 @@ func TestBuild_DerivesTagAndIssuesFullArgv(t *testing.T) {
 		"--label", "org.opencontainers.image.created=2026-07-09T12:00:00Z",
 		"-t", "myrepo:feature-foo-abc1234",
 		"-t", "myrepo:dev",
+		"--", ".",
+	}
+	if len(call.Args) != len(want) {
+		t.Fatalf("argv = %v, want %v", call.Args, want)
+	}
+	for i, w := range want {
+		if call.Args[i] != w {
+			t.Errorf("arg %d: got %q want %q (full args: %v)", i, call.Args[i], w, call.Args)
+		}
+	}
+}
+
+// TestBuild_ExtraArgs_AppearAfterDerivedFlagsBeforeDash covers forgectl#398:
+// user-supplied pass-through flags land after the derived -t/-t pair and
+// before the `-- <context>` guard.
+func TestBuild_ExtraArgs_AppearAfterDerivedFlagsBeforeDash(t *testing.T) {
+	fake := fakeGitRunner("/home/user/myrepo", "main", "abc1234")
+	c := newTestClient(t, fake, WithDockerConfig(config.DockerConfig{DefaultPlatform: "linux/amd64"}))
+
+	_, err := c.Build(context.Background(), BuildOptions{
+		ContextDir: ".",
+		Platform:   "",
+		ExtraArgs:  []string{"--target", "builder", "--build-arg", "K=V"},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	call := fake.Last()
+	want := []string{
+		"build",
+		"--platform", "linux/amd64",
+		"--label", "org.opencontainers.image.revision=abc1234",
+		"--label", "org.opencontainers.image.ref.name=main",
+		"--label", "org.opencontainers.image.created=2026-07-09T12:00:00Z",
+		"-t", "myrepo:main-abc1234",
+		"-t", "myrepo:dev",
+		"--target", "builder",
+		"--build-arg", "K=V",
+		"--", ".",
+	}
+	if len(call.Args) != len(want) {
+		t.Fatalf("argv = %v, want %v", call.Args, want)
+	}
+	for i, w := range want {
+		if call.Args[i] != w {
+			t.Errorf("arg %d: got %q want %q (full args: %v)", i, call.Args[i], w, call.Args)
+		}
+	}
+}
+
+// TestBuild_ExtraArgsPlatform_SuppressesDerivedPlatform covers forgectl#398's
+// override guarantee for --platform specifically: docker's --platform is a
+// stringArray flag (repeating it appends, producing a multi-platform build
+// request), so simply appending ExtraArgs after the derived --platform
+// would silently stack the two rather than let the user's value win. Build
+// must suppress its own derived --platform when ExtraArgs supplies one.
+func TestBuild_ExtraArgsPlatform_SuppressesDerivedPlatform(t *testing.T) {
+	fake := fakeGitRunner("/home/user/myrepo", "main", "abc1234")
+	c := newTestClient(t, fake, WithDockerConfig(config.DockerConfig{DefaultPlatform: "linux/amd64"}))
+
+	_, err := c.Build(context.Background(), BuildOptions{
+		ContextDir: ".",
+		ExtraArgs:  []string{"--platform", "linux/arm64"},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	call := fake.Last()
+	count := 0
+	for _, a := range call.Args {
+		if a == "--platform" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("--platform appeared %d times, want exactly 1 (the user's), argv: %v", count, call.Args)
+	}
+	want := []string{
+		"build",
+		"--label", "org.opencontainers.image.revision=abc1234",
+		"--label", "org.opencontainers.image.ref.name=main",
+		"--label", "org.opencontainers.image.created=2026-07-09T12:00:00Z",
+		"-t", "myrepo:main-abc1234",
+		"-t", "myrepo:dev",
+		"--platform", "linux/arm64",
 		"--", ".",
 	}
 	if len(call.Args) != len(want) {

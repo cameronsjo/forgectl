@@ -97,6 +97,26 @@ type BuildOptions struct {
 	// Platform overrides the --platform flag; empty uses the configured
 	// default_platform, and omits the flag entirely if that's also empty.
 	Platform string
+	// ExtraArgs are user-supplied `docker build` flags passed through
+	// verbatim (forgectl's `docker build ctx -- --target builder` escape).
+	// They're placed after the derived --label/-t flags and before the
+	// `--` that guards ContextDir. A user-supplied --platform in ExtraArgs
+	// suppresses the derived --platform flag (see Build) — --platform is a
+	// docker stringArray flag, so simply appending would stack the two
+	// rather than let the user's value win.
+	ExtraArgs []string
+}
+
+// hasFlag reports whether args contains flag as a bare token or as
+// "flag=value" — used to detect a user-supplied override of a flag Build
+// would otherwise derive itself.
+func hasFlag(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag || strings.HasPrefix(a, flag+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 // BuildResult is the outcome of a successful Build: the tag(s) actually
@@ -173,8 +193,14 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		platform = c.defaultPlatform
 	}
 
+	// --platform is docker's own stringArray flag: repeating it APPENDS
+	// (multi-platform build), it does not override. So a user-supplied
+	// --platform in ExtraArgs would silently stack with the derived one
+	// rather than replace it unless we suppress our own here — the "user
+	// flags can override" promise has to be enforced by forgectl, not by
+	// hoping docker's parser treats every flag as last-value-wins.
 	args := []string{"build"}
-	if platform != "" {
+	if platform != "" && !hasFlag(opts.ExtraArgs, "--platform") {
 		args = append(args, "--platform", platform)
 	}
 	for _, label := range c.buildLabels(branch, sha) {
@@ -185,6 +211,7 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 	} else {
 		args = append(args, "-t", dev)
 	}
+	args = append(args, opts.ExtraArgs...)
 	args = append(args, "--", contextDir)
 
 	if err := c.run.RunInteractive(ctx, "docker", args...); err != nil {

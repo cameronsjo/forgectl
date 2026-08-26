@@ -45,9 +45,12 @@ func newDockerCmdForClient(client *dockerpkg.Client) *cobra.Command {
 {repo}:{branch-slug}-{shortsha}, plus a :dev alias — so labels attach at the
 CLI without touching the Dockerfile.
 
-  forgectl docker build [context]   build, tagging {repo}:{branch}-{sha} and :dev
-  forgectl docker run [-- args...]  run the built (or --tag) image
-  forgectl docker shell             open a shell in the built (or --tag) image
+  forgectl docker build [context] [-- args...]  build, tagging {repo}:{branch}-{sha}
+                                                 and :dev; args after -- pass through
+                                                 to docker build (can override
+                                                 derived flags like --platform)
+  forgectl docker run [-- args...]              run the built (or --tag) image
+  forgectl docker shell                         open a shell in the built (or --tag) image
 
 run and shell reuse the tag from the most recent build when --tag is
 omitted. Configure defaults in the [docker] section of config.toml (macOS:
@@ -62,21 +65,44 @@ omitted. Configure defaults in the [docker] section of config.toml (macOS:
 	return cmd
 }
 
+// dockerBuildArgs bounds `docker build`'s positionals to at most one
+// context dir — but only counts args before a `--` dash, so post-dash
+// pass-through args (forgectl#398) don't count against the limit the way
+// cobra.MaximumNArgs(1) would (cobra counts args on both sides of `--`).
+func dockerBuildArgs(cmd *cobra.Command, args []string) error {
+	n := len(args)
+	if dash := cmd.ArgsLenAtDash(); dash != -1 {
+		n = dash
+	}
+	if n > 1 {
+		return fmt.Errorf("accepts at most 1 context arg before --, received %d", n)
+	}
+	return nil
+}
+
 // newDockerBuildCmd builds `docker build`.
 func newDockerBuildCmd(client *dockerpkg.Client) *cobra.Command {
 	var platform string
 	cmd := &cobra.Command{
-		Use:   "build [context]",
+		Use:   "build [context] [-- args...]",
 		Short: "Build an image tagged from git repo/branch/sha",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  dockerBuildArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			contextDir := "."
-			if len(args) > 0 {
+			var extraArgs []string
+			dash := cmd.ArgsLenAtDash()
+			if dash == -1 {
+				dash = len(args)
+			} else {
+				extraArgs = args[dash:]
+			}
+			if dash > 0 {
 				contextDir = args[0]
 			}
 			result, err := client.Build(cmd.Context(), dockerpkg.BuildOptions{
 				ContextDir: contextDir,
 				Platform:   platform,
+				ExtraArgs:  extraArgs,
 			})
 			if err != nil {
 				return err

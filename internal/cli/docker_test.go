@@ -10,6 +10,13 @@ package cli
 //   [x] Happy: subcommand aliases (b/r/sh) resolve to their canonical verb
 //   [x] Degraded: total and partial git failures have exact stdout/stderr
 //       contracts, retain the best stable dev identity, and disclose no root
+//   [x] Happy (forgectl#398): `docker build ctx -- --target builder
+//       --build-arg K=V` passes those args through to the docker argv,
+//       after the derived flags
+//   [x] Happy (forgectl#398): derived tag/labels/platform defaults are
+//       unchanged when no `--` args are given
+//   [x] Unhappy (forgectl#398): two positionals before `--` are still
+//       rejected; two positionals with no `--` are still rejected
 
 import (
 	"bytes"
@@ -48,7 +55,7 @@ func dockerFixture(t *testing.T) (*dockerpkg.Client, *exec.FakeRunner) {
 	cachePath := filepath.Join(t.TempDir(), "docker-lasttag")
 	client := dockerpkg.New(fake,
 		dockerpkg.WithLastTagPath(cachePath),
-		dockerpkg.WithNow(func() time.Time { return time.Now() }),
+		dockerpkg.WithNow(func() time.Time { return time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC) }),
 	)
 	return client, fake
 }
@@ -149,6 +156,91 @@ func TestDockerBuildCmd_IncompleteGitMetadataHasExactOutput(t *testing.T) {
 			}
 			if tt.secretPath != "" && (strings.Contains(stdout.String(), tt.secretPath) || strings.Contains(stderr.String(), tt.secretPath)) {
 				t.Errorf("output disclosed resolved git root %q: stdout=%q stderr=%q", tt.secretPath, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+// TestDockerBuildCmd_DashArgs_PassThroughAfterDerivedFlags covers
+// forgectl#398: args after `--` reach the docker argv, positioned after
+// the derived -t flags (so an explicit user flag can override one).
+func TestDockerBuildCmd_DashArgs_PassThroughAfterDerivedFlags(t *testing.T) {
+	client, fake := dockerFixture(t)
+	cmd := newDockerCmdForClient(client)
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"build", ".", "--", "--target", "builder", "--build-arg", "K=V"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	call := fake.Last()
+	want := []string{
+		"build",
+		"--label", "org.opencontainers.image.revision=abc1234",
+		"--label", "org.opencontainers.image.ref.name=main",
+		"--label", "org.opencontainers.image.created=2026-07-09T12:00:00Z",
+		"-t", "myrepo:main-abc1234",
+		"-t", "myrepo:dev",
+		"--target", "builder",
+		"--build-arg", "K=V",
+		"--", ".",
+	}
+	if len(call.Args) != len(want) {
+		t.Fatalf("argv = %v, want %v", call.Args, want)
+	}
+	for i, w := range want {
+		if call.Args[i] != w {
+			t.Errorf("arg %d: got %q want %q (full args: %v)", i, call.Args[i], w, call.Args)
+		}
+	}
+}
+
+// TestDockerBuildCmd_NoDashArgs_NoPassThroughLeak is a regression guard for
+// forgectl#398: with no `--` given, nothing pass-through-shaped leaks into
+// the argv (the derived tag/label/platform behavior itself is already
+// pinned by TestDockerBuildCmd_ReportsDerivedTag).
+func TestDockerBuildCmd_NoDashArgs_NoPassThroughLeak(t *testing.T) {
+	client, fake := dockerFixture(t)
+	cmd := newDockerCmdForClient(client)
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"build"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	call := fake.Last()
+	for _, a := range call.Args {
+		if a == "--target" || a == "--build-arg" {
+			t.Errorf("unexpected pass-through arg %q with no -- given: %v", a, call.Args)
+		}
+	}
+}
+
+// TestDockerBuildCmd_TooManyPositionals_StillRejected covers forgectl#398's
+// third test requirement: the arg-count guard must still reject two
+// positionals, both with and without a `--` dash present.
+func TestDockerBuildCmd_TooManyPositionals_StillRejected(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "two positionals, no dash", args: []string{"build", "ctx1", "ctx2"}},
+		{name: "two positionals before dash", args: []string{"build", "ctx1", "ctx2", "--", "--target", "builder"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, _ := dockerFixture(t)
+			cmd := newDockerCmdForClient(client)
+			cmd.SetOut(new(bytes.Buffer))
+			cmd.SetErr(new(bytes.Buffer))
+			cmd.SetArgs(tt.args)
+
+			if err := cmd.ExecuteContext(context.Background()); err == nil {
+				t.Fatalf("expected an error for args %v, got nil", tt.args)
 			}
 		})
 	}
