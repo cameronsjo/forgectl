@@ -32,7 +32,7 @@ func (r *cliStreamingRunner) RunStreaming(_ context.Context, _ io.Reader, stdout
 
 func executeK8sLogs(t *testing.T, runner *cliStreamingRunner, args ...string) (*bytes.Buffer, *bytes.Buffer, error) {
 	t.Helper()
-	cmd := newK8sCmdForClient(k8spkg.New(runner))
+	cmd := newK8sCmdForClient(k8spkg.New(runner), &forgexec.FakeRunner{})
 	stdout, stderr := new(bytes.Buffer), new(bytes.Buffer)
 	cmd.SetOut(stdout)
 	cmd.SetErr(stderr)
@@ -169,7 +169,7 @@ func TestK8sLogs_CancellationRemainsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	runner := &cliStreamingRunner{}
-	cmd := newK8sCmdForClient(k8spkg.New(runner))
+	cmd := newK8sCmdForClient(k8spkg.New(runner), &forgexec.FakeRunner{})
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs([]string{"logs", "pod/api"})
@@ -182,4 +182,85 @@ func TestK8sLogs_CancellationRemainsCancellation(t *testing.T) {
 	}
 }
 
+func executeK8sNs(t *testing.T, runner *forgexec.FakeRunner, args ...string) (*bytes.Buffer, error) {
+	t.Helper()
+	cmd := newK8sCmdForClient(k8spkg.New(&cliStreamingRunner{}), runner)
+	stdout := new(bytes.Buffer)
+	cmd.SetOut(stdout)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs(append([]string{"ns"}, args...))
+	return stdout, cmd.ExecuteContext(context.Background())
+}
+
+func TestK8sNs_NoArgsPrintsCurrentNamespace(t *testing.T) {
+	runner := &forgexec.FakeRunner{RunFunc: func(string, []string) (string, error) {
+		return "staging", nil
+	}}
+	stdout, err := executeK8sNs(t, runner)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got, want := stdout.String(), "staging\n"; got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+	want := []string{"config", "view", "--minify", "-o", "jsonpath={..namespace}"}
+	if got := runner.Last(); got.Name != "kubectl" || !reflect.DeepEqual(got.Args, want) {
+		t.Errorf("call = %#v, want kubectl %#v", got, want)
+	}
+}
+
+func TestK8sNs_NoArgsFallsBackToDefaultWhenUnset(t *testing.T) {
+	runner := &forgexec.FakeRunner{RunFunc: func(string, []string) (string, error) {
+		return "", nil
+	}}
+	stdout, err := executeK8sNs(t, runner)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got, want := stdout.String(), "default\n"; got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestK8sNs_OneArgSetsCurrentContextNamespace(t *testing.T) {
+	runner := &forgexec.FakeRunner{}
+	stdout, err := executeK8sNs(t, runner, "prod")
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if stdout.String() != "" {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+	want := []string{"config", "set-context", "--current", "--namespace=prod"}
+	if got := runner.Last(); got.Name != "kubectl" || !reflect.DeepEqual(got.Args, want) {
+		t.Errorf("call = %#v, want kubectl %#v", got, want)
+	}
+}
+
+func TestK8sNs_TwoArgsRejected(t *testing.T) {
+	runner := &forgexec.FakeRunner{}
+	_, err := executeK8sNs(t, runner, "prod", "extra")
+	if err == nil {
+		t.Fatal("expected error for two args")
+	}
+	if len(runner.Calls) != 0 {
+		t.Errorf("kubectl calls = %d, want 0", len(runner.Calls))
+	}
+}
+
+func TestK8sNs_OptsIntoKubectlExitCode(t *testing.T) {
+	sentinel := errors.New("exit status 1")
+	runner := &forgexec.FakeRunner{RunFunc: func(string, []string) (string, error) {
+		return "", &forgexec.CommandError{Name: "kubectl", ExitCode: 1, Err: sentinel}
+	}}
+	_, err := executeK8sNs(t, runner)
+	if err == nil {
+		t.Fatal("expected kubectl failure")
+	}
+	if got := ExitCode(err); got != 1 {
+		t.Errorf("ExitCode = %d, want 1", got)
+	}
+}
+
 var _ forgexec.StreamingRunner = (*cliStreamingRunner)(nil)
+var _ forgexec.Runner = (*forgexec.FakeRunner)(nil)
