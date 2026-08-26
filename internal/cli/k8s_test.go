@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os/exec"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -21,9 +21,10 @@ import (
 // is not.
 func realExitError(t *testing.T, code int) error {
 	t.Helper()
-	err := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
+	script := "exit " + strconv.Itoa(code)
+	err := exec.CommandContext(t.Context(), "sh", "-c", script).Run() // #nosec G204 -- test helper; script is built from an integer literal
 	if err == nil {
-		t.Fatalf("sh -c exit %d unexpectedly succeeded", code)
+		t.Fatalf("sh -c %s unexpectedly succeeded", script)
 	}
 	return err
 }
