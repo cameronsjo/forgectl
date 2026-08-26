@@ -10,8 +10,11 @@ package clip
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -20,6 +23,23 @@ import (
 // or Windows caller gets a clear message instead of a confusing
 // `exec: "pbcopy": not found`.
 var errMacOSOnly = errors.New("forgectl y: macOS only")
+
+// errUnsupportedImageExt is returned by CopyImage for an extension with no
+// known AppleScript image class mapping.
+var errUnsupportedImageExt = errors.New("forgectl y: unsupported image extension")
+
+// imageClassForExt maps a file extension to the AppleScript image class
+// osascript's `read ... as «class ...»` needs to decode it. Extended here as
+// new formats come up; unmapped extensions are a clear, actionable error
+// rather than a confusing osascript failure.
+var imageClassForExt = map[string]string{
+	".png":  "PNGf",
+	".tif":  "TIFF",
+	".tiff": "TIFF",
+	".jpg":  "JPEG",
+	".jpeg": "JPEG",
+	".gif":  "GIFf",
+}
 
 // Client copies to and pastes from the system clipboard via pbcopy/pbpaste,
 // shelled through exec.Runner (never os/exec directly).
@@ -108,4 +128,49 @@ func (c *Client) Paste(ctx context.Context) (string, error) {
 		slog.Info("Successfully pasted from clipboard.", "bytes", len(out))
 	}
 	return out, nil
+}
+
+// CopyFile puts a POSIX file reference for path on the pasteboard (macOS
+// `public.file-url`), via osascript — pbcopy carries only text, so it has no
+// route to this type. Pasting into Finder, Mail, or a chat window attaches
+// the file rather than dumping its path as a string. macOS only.
+func (c *Client) CopyFile(ctx context.Context, path string) error {
+	if c.goos != "darwin" {
+		return errMacOSOnly
+	}
+
+	slog.Debug("Preparing to copy file reference to clipboard.", "path", path)
+	if err := copyFileReference(ctx, c.run, path); err != nil {
+		slog.Error("Failed to copy file reference to clipboard.", "error", err)
+		return err
+	}
+	slog.Info("Successfully copied file reference to clipboard.")
+	return nil
+}
+
+// CopyImage decodes the image at path and puts it on the pasteboard as image
+// data (macOS `public.png`/`public.tiff`/`public.jpeg`/`public.gif`), via
+// osascript — pbcopy carries only text, so it has no route to this type
+// either. Pasting into Finder, Mail, or a chat window pastes a picture
+// rather than a filename. The image class is chosen from path's extension;
+// an unrecognized extension is a clear error rather than a silent no-op.
+// macOS only.
+func (c *Client) CopyImage(ctx context.Context, path string) error {
+	if c.goos != "darwin" {
+		return errMacOSOnly
+	}
+
+	ext := strings.ToLower(filepath.Ext(path))
+	class, ok := imageClassForExt[ext]
+	if !ok {
+		return fmt.Errorf("%w: %q", errUnsupportedImageExt, ext)
+	}
+
+	slog.Debug("Preparing to copy image to clipboard.", "path", path, "class", class)
+	if err := copyImageReference(ctx, c.run, path, class); err != nil {
+		slog.Error("Failed to copy image to clipboard.", "error", err)
+		return err
+	}
+	slog.Info("Successfully copied image to clipboard.")
+	return nil
 }
