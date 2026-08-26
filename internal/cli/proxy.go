@@ -88,7 +88,9 @@ func newProxyStatusCmd(deps module.Deps, lookup proxypkg.Lookup) *cobra.Command 
 		Use:   "status",
 		Short: "Report which configured profile the current environment carries",
 		Long: `status names the configured profile whose values the current environment
-carries, then reports each proxy variable as set or unset.
+carries, and then reports each proxy variable as set or unset. When no
+profile matches, that verdict is the whole output: which variable diverged is
+itself a fact about a configured value.
 
 It prints no proxy value, from either the configuration or the environment:
 every comparison happens in memory. A half-applied environment matches no
@@ -97,6 +99,8 @@ profile, which is the state this verb exists to make visible.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			name, matched := proxypkg.Match(deps.Cfg.Proxy.Profiles, lookup)
 			if !matched {
+				// Stdout, unlike list's empty case: "nothing matches" IS
+				// this verb's answer, not the absence of one.
 				_, err := fmt.Fprintln(cmd.OutOrStdout(), noMatchMessage)
 				return err
 			}

@@ -3,10 +3,13 @@ package config_test
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 )
@@ -84,6 +87,57 @@ func TestProxyProfile_RendersRedactedUnderEveryVerb(t *testing.T) {
 				t.Errorf("%s leaked %q: %s", name, leak, rendered)
 			}
 		}
+	}
+}
+
+// TestProxyProfile_RedactionIsScopedToExportedHolders pins the one documented
+// exception, so the guarantee's boundary is a tested fact rather than a
+// comment. fmt consults Formatter/Stringer/GoStringer only when
+// reflect.Value.CanInterface reports true, which is false for a value reached
+// through an unexported field — and slog's TextHandler renders a
+// non-TextMarshaler value with exactly fmt.Sprintf("%+v", v), so the same hole
+// reaches a log file. Closing it needs closure containment (exec.SecretArg's
+// mechanism), which the TOML decoder's need for settable exported fields rules
+// out. If this test ever fails, the exception was closed: delete it and narrow
+// the comment at the method set.
+func TestProxyProfile_RedactionIsScopedToExportedHolders(t *testing.T) {
+	type unexportedHolder struct{ profile config.ProxyProfile }
+
+	rendered := fmt.Sprintf("%+v", unexportedHolder{profile: sentinelProfile()})
+	if !strings.Contains(rendered, "opaque-http-value") {
+		t.Fatalf("an unexported holder no longer bypasses Format — the exception is closed: %q", rendered)
+	}
+
+	// The control: the exported-field holder in the test above is the case
+	// the guarantee covers, and it must still redact.
+	type exportedHolder struct{ Profile config.ProxyProfile }
+	if rendered := fmt.Sprintf("%+v", exportedHolder{Profile: sentinelProfile()}); strings.Contains(rendered, "opaque-http-value") {
+		t.Fatalf("an exported holder leaked, which the guarantee does cover: %q", rendered)
+	}
+}
+
+// TestProxyProfile_TOMLEncodeFailsClosed guards the write path MarshalText
+// opened. The BurntSushi encoder honors encoding.TextMarshaler, so without
+// MarshalTOML a Config encode rewrites every [proxy.profiles.NAME] table as
+// the scalar NAME = "[redacted]" — silently destroying the user's profiles,
+// and not round-tripping, since there is no UnmarshalText.
+func TestProxyProfile_TOMLEncodeFailsClosed(t *testing.T) {
+	cfg := config.Config{Proxy: config.ProxyConfig{Profiles: map[string]config.ProxyProfile{
+		"work": sentinelProfile(),
+	}}}
+
+	var buf bytes.Buffer
+	err := toml.NewEncoder(&buf).Encode(cfg)
+	if !errors.Is(err, config.ErrProxyProfileNotEncodable) {
+		t.Fatalf("TOML encode err = %v, want ErrProxyProfileNotEncodable", err)
+	}
+	for _, leak := range sentinelValues() {
+		if strings.Contains(buf.String(), leak) {
+			t.Fatalf("the aborted encode still emitted %q: %s", leak, buf.String())
+		}
+	}
+	if strings.Contains(buf.String(), "work = ") {
+		t.Fatalf("the profile table was flattened to a scalar: %s", buf.String())
 	}
 }
 

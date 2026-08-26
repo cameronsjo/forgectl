@@ -251,6 +251,18 @@ func (p ProxyProfile) IsZero() bool {
 // standard library reaches for — fmt, slog, encoding/json, encoding —
 // answers with exec.Redacted. Reading a field explicitly still works, so the
 // one sanctioned sink (internal/proxy's shell protocol) is unaffected.
+//
+// The guarantee has one documented exception, and it is a property of fmt,
+// not of these methods: fmt consults Formatter/Stringer/GoStringer only when
+// reflect.Value.CanInterface reports true, which is false for a value reached
+// through an UNEXPORTED struct field. A holder keeping a Config,
+// ProxyConfig, or ProxyProfile in an unexported field therefore renders the
+// fields verbatim under %v/%+v — and slog's TextHandler renders a
+// non-TextMarshaler value with exactly fmt.Sprintf("%+v", v). Closing that
+// would mean holding the values in a closure the way exec.SecretArg does,
+// which the TOML decoder's need for settable exported fields rules out. So:
+// hold a proxy value in an exported field, or not at all.
+// TestProxyProfile_RedactionIsScopedToExportedHolders pins this.
 
 func (ProxyProfile) String() string   { return exec.Redacted }
 func (ProxyProfile) GoString() string { return exec.Redacted }
@@ -270,6 +282,24 @@ func (ProxyProfile) MarshalJSON() ([]byte, error) {
 }
 
 func (ProxyProfile) MarshalText() ([]byte, error) { return []byte(exec.Redacted), nil }
+
+// ErrProxyProfileNotEncodable reports an attempt to TOML-encode a profile.
+var ErrProxyProfileNotEncodable = errors.New(
+	"config: a proxy profile cannot be TOML-encoded; write the [proxy.profiles] section from its fields")
+
+// MarshalTOML makes a TOML encode of a profile fail loudly instead of
+// destroying it. The BurntSushi encoder honors encoding.TextMarshaler, so
+// MarshalText above — added for the redaction guarantee on the READ side —
+// would otherwise rewrite a whole [proxy.profiles.NAME] table as the scalar
+// `NAME = "[redacted]"`. There is no UnmarshalText, so that output does not
+// even round-trip: the next load fails to decode the section. Silent data
+// loss is the inverse of the failure this method set exists to prevent, and
+// the encoder consults toml.Marshaler before encoding.TextMarshaler, so
+// returning an error here is what makes the write path fail closed.
+//
+// No caller TOML-encodes a Config today; this exists so the one added later
+// gets an error rather than a truncated config file.
+func (ProxyProfile) MarshalTOML() ([]byte, error) { return nil, ErrProxyProfileNotEncodable }
 
 // DockerConfig is the [docker] section: build-time defaults for `forgectl
 // docker build`. A zero value means "section absent" — internal/docker's
