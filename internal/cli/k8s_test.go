@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -12,6 +14,19 @@ import (
 	forgexec "github.com/cameronsjo/forgectl/internal/exec"
 	k8spkg "github.com/cameronsjo/forgectl/internal/k8s"
 )
+
+// realExitError runs a trivial child process that exits with code so tests
+// can exercise a genuine *exec.ExitError — the shape OSRunner.RunInteractive
+// actually returns in production, which a hand-built *forgexec.CommandError
+// is not.
+func realExitError(t *testing.T, code int) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
+	if err == nil {
+		t.Fatalf("sh -c exit %d unexpectedly succeeded", code)
+	}
+	return err
+}
 
 type cliStreamingRunner struct {
 	name  string
@@ -339,8 +354,10 @@ func TestK8sExec_KubectlHelpAfterAResourceIsForwarded(t *testing.T) {
 }
 
 func TestK8sExec_OptsIntoKubectlExitCode(t *testing.T) {
-	sentinel := errors.New("exit status 126")
-	runner := &forgexec.FakeRunner{InteractiveErr: &forgexec.CommandError{Name: "kubectl", ExitCode: 126, Err: sentinel}}
+	// OSRunner.RunInteractive returns cmd.Run()'s error unwrapped — a bare
+	// *exec.ExitError, never a *forgexec.CommandError — so the fake must
+	// produce the same shape production actually returns.
+	runner := &forgexec.FakeRunner{InteractiveErr: realExitError(t, 126)}
 	_, err := executeK8sExec(t, runner, "pod/api", "--", "sh")
 	if err == nil {
 		t.Fatal("expected kubectl failure")
@@ -399,6 +416,30 @@ func TestK8sInspect_RequiresKindSlashName(t *testing.T) {
 	}
 	if len(runner.Calls) != 0 {
 		t.Errorf("kubectl calls = %d, want 0", len(runner.Calls))
+	}
+}
+
+// TestK8sInspect_RejectsFlagShapedWorkload guards the flag-injection finding
+// from the pre-merge security review: a "contains a slash, has a name" check
+// alone accepts a kubectl global flag whose value happens to include a '/',
+// which kubectl then parses as its own flag (e.g. --server redirecting the
+// call, with its bearer token, to an attacker-chosen host).
+func TestK8sInspect_RejectsFlagShapedWorkload(t *testing.T) {
+	for _, workload := range []string{
+		"--kubeconfig=/tmp/evil.yaml",
+		"--server=https://attacker.example/x",
+		"--as=cluster-admin/x",
+		"-n/x",
+		"pod/api,involvedObject.namespace=kube-system",
+	} {
+		runner := &forgexec.FakeRunner{}
+		_, err := executeK8sInspect(t, runner, workload)
+		if err == nil {
+			t.Errorf("workload %q: expected rejection", workload)
+		}
+		if len(runner.Calls) != 0 {
+			t.Errorf("workload %q: kubectl calls = %d, want 0", workload, len(runner.Calls))
+		}
 	}
 }
 

