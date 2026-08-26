@@ -162,6 +162,54 @@ func TestCopy_NonDarwin_FailsFastWithoutTouchingRunner(t *testing.T) {
 	}
 }
 
+func TestCopyFile_NonDarwin_FailsFastWithoutTouchingRunner(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithGOOS("linux"))
+
+	err := c.CopyFile(context.Background(), "/tmp/whatever.pdf")
+	if err == nil {
+		t.Fatal("expected an error on non-Darwin GOOS")
+	}
+	if !errors.Is(err, errMacOSOnly) {
+		t.Errorf("error = %v, want errMacOSOnly", err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("Runner was called %d times, want 0 (guard must short-circuit)", len(fake.Calls))
+	}
+}
+
+func TestCopyImage_NonDarwin_FailsFastWithoutTouchingRunner(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithGOOS("windows"))
+
+	err := c.CopyImage(context.Background(), "/tmp/whatever.png")
+	if err == nil {
+		t.Fatal("expected an error on non-Darwin GOOS")
+	}
+	if !errors.Is(err, errMacOSOnly) {
+		t.Errorf("error = %v, want errMacOSOnly", err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("Runner was called %d times, want 0 (guard must short-circuit)", len(fake.Calls))
+	}
+}
+
+func TestCopyImage_UnsupportedExt_FailsWithoutTouchingRunner(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	c := New(fake, WithGOOS("darwin"))
+
+	err := c.CopyImage(context.Background(), "/tmp/whatever.webp")
+	if err == nil {
+		t.Fatal("expected an error for an unrecognized image extension")
+	}
+	if !errors.Is(err, errUnsupportedImageExt) {
+		t.Errorf("error = %v, want errUnsupportedImageExt", err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("Runner was called %d times, want 0 (unsupported extension must short-circuit)", len(fake.Calls))
+	}
+}
+
 func TestPaste_NonDarwin_FailsFastWithoutTouchingRunner(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := New(fake, WithGOOS("windows"))

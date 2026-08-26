@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/spf13/cobra"
@@ -66,11 +67,15 @@ the zsh history file. Clipboard verbs are macOS only.
 
   echo hi | forgectl y copy   copy stdin to the clipboard
   forgectl y paste            print the clipboard's current contents
+  forgectl y file ./a.pdf     put a file reference on the clipboard (attaches, not text)
+  forgectl y img ./a.png      put decoded image data on the clipboard (pastes as a picture)
   forgectl y last 5           print the 5 most recent shell commands`,
 	}
 	cmd.AddCommand(
 		newYCopyCmd(client),
 		newYPasteCmd(client),
+		newYFileCmd(client),
+		newYImgCmd(client),
 		newYLastCmd(),
 	)
 	applyAliases(cmd, yAliases)
@@ -108,6 +113,68 @@ func newYPasteCmd(client *clippkg.Client) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// newYFileCmd builds `y file <path>`. Unlike copy/paste, it takes a path
+// rather than stdin — that's what lets it reach a pasteboard type
+// (public.file-url) a text pipe cannot express (issue #401).
+func newYFileCmd(client *clippkg.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "file <path>",
+		Short: "Put a file reference on the clipboard",
+		Long: `file puts a POSIX file reference for path on the clipboard, so pasting into
+Finder, Mail, or a chat window attaches the file rather than dumping its path
+as text. macOS only.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, err := resolveYPath(args[0])
+			if err != nil {
+				return err
+			}
+			return client.CopyFile(cmd.Context(), path)
+		},
+	}
+}
+
+// newYImgCmd builds `y img <path>`. Same rationale as newYFileCmd: a path
+// argument reaches decoded image data (public.png/tiff/jpeg/gif), which a
+// text pipe cannot carry.
+func newYImgCmd(client *clippkg.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "img <path>",
+		Short: "Put decoded image data on the clipboard",
+		Long: `img decodes the image at path and puts it on the clipboard as image data, so
+pasting into Finder, Mail, or a chat window pastes a picture rather than a
+filename. Supports .png, .tif/.tiff, .jpg/.jpeg, .gif. macOS only.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, err := resolveYPath(args[0])
+			if err != nil {
+				return err
+			}
+			return client.CopyImage(cmd.Context(), path)
+		},
+	}
+}
+
+// resolveYPath checks path exists and is a regular file before it ever
+// reaches osascript, so a typo surfaces as a clear "no such file" instead of
+// a confusing osascript failure three layers down. Returns the absolute
+// path: osascript's `POSIX file` resolves relative paths against its own
+// process cwd, not the caller's, so a relative path would silently break.
+func resolveYPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve path %q: %w", path, err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", termsafe.SafeLine(path), err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%s: is a directory, not a file", termsafe.SafeLine(path))
+	}
+	return abs, nil
 }
 
 // newYLastCmd builds `y last [n]`. Everything it prints comes from the history
