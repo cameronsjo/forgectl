@@ -84,19 +84,20 @@ jobs:
             exit 1
           fi
           TAG="v${VERSION}"
-          # Heredoc-delimited writes with a random delimiter: even if the
-          # charset check above is ever loosened, a value cannot close its
-          # own block and start a new key.
+          # Manifest-derived values go out heredoc-delimited with a random
+          # delimiter: even if the charset check above is ever loosened, a
+          # value cannot close its own block and start a new key. `exists`
+          # is a literal this script chooses, so it needs none of that.
           DELIM="EOF_$(openssl rand -hex 16)"
           {
             printf 'tag<<%s\n%s\n%s\n' "$DELIM" "$TAG" "$DELIM"
             printf 'version<<%s\n%s\n%s\n' "$DELIM" "$VERSION" "$DELIM"
           } >> "$GITHUB_OUTPUT"
           if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
-            printf 'exists<<%s\ntrue\n%s\n' "$DELIM" "$DELIM" >> "$GITHUB_OUTPUT"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "$TAG already exists — nothing to tag."
           else
-            printf 'exists<<%s\nfalse\n%s\n' "$DELIM" "$DELIM" >> "$GITHUB_OUTPUT"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       # The App token travels in this step's env and is used inline via
@@ -111,6 +112,10 @@ jobs:
           set -euo pipefail
           git tag "$TAG"
           AUTH_HEADER="$(printf 'x-access-token:%s' "$APP_TOKEN" | base64 | tr -d '\n')"
+          # Actions masks the raw token, but not a base64 transform of it.
+          # Register the encoded form too, or a git error that echoes the
+          # config would print a usable credential in the clear.
+          echo "::add-mask::${AUTH_HEADER}"
           git -c "http.extraheader=AUTHORIZATION: basic ${AUTH_HEADER}" \
             push "https://github.com/${GITHUB_REPOSITORY}.git" -- "refs/tags/${TAG}:refs/tags/${TAG}"
 
