@@ -11,8 +11,11 @@ package cli
 //     Those pins are THE growth gate: a new module edits them in its own diff.
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -164,6 +167,53 @@ func TestModules_CompletenessPins(t *testing.T) {
 	for _, m := range mods {
 		if isCore := m.Tier == module.TierCore; isCore != wantCore[m.Name] {
 			t.Errorf("module %q tier = %v, want core=%v — promotion/demotion edits this pin plus an ADR note", m.Name, m.Tier, wantCore[m.Name])
+		}
+	}
+}
+
+// readmePath locates README.md at the repo root, relative to this test file's
+// own location (runtime.Caller), so the test works regardless of the
+// package's invocation cwd (`go test ./...` from the root vs `go test .`
+// from internal/cli).
+func readmePath(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller: could not resolve this test file's path")
+	}
+	return filepath.Join(filepath.Dir(thisFile), "..", "..", "README.md")
+}
+
+// TestModules_DocumentedInREADME is the docs-coverage gate (forgectl#397):
+// every command group in allModules() must have a real home in README.md,
+// not just an incidental mention. It guards against a repeat of the drift
+// forgectl#101 already fixed once — a module shipping with no roster entry
+// or deep-dive section.
+//
+// A module counts as documented when its name starts either:
+//   - a line-leading `forgectl <name>` usage example (how tmux and config —
+//     the two groups folded into the Usage intro with no group header — are
+//     covered), or
+//   - a `#`/`##`/`###` heading or roster comment, e.g. `# proxy — …` (the
+//     Usage-block group intro) or `### k8s — …` (a deep-dive section).
+//
+// A bare word-boundary search over the whole document is deliberately NOT
+// enough here: it passes on a module (e.g. "surface") named only in passing,
+// mid-sentence, inside another group's prose — which is exactly the
+// half-documented state this gate exists to close, not wave through.
+func TestModules_DocumentedInREADME(t *testing.T) {
+	path := readmePath(t)
+	raw, err := os.ReadFile(path) //nolint:gosec // path is derived from runtime.Caller, not external input
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	readme := string(raw)
+
+	for _, m := range allModules() {
+		name := regexp.QuoteMeta(m.Name)
+		pattern := regexp.MustCompile(`(?m)^(#{1,3}\s*` + name + `\b|forgectl\s+` + name + `\b)`)
+		if !pattern.MatchString(readme) {
+			t.Errorf("module %q has no command-group home in README.md (no `forgectl %s ...` usage line and no heading/roster comment) — document it (forgectl#397, forgectl#101)", m.Name, m.Name)
 		}
 	}
 }

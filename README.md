@@ -1,6 +1,6 @@
 # forgectl
 
-Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) is growing into the **workbench forge**: composable modules — tmux, projects, launch, workflow — with a declarative workflow DSL as the composition layer.
+Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) has grown into the **workbench forge**: 28 composable command-group modules (see the table below) with a declarative workflow DSL as the composition layer.
 
 Built for two hands and one thumb:
 
@@ -19,6 +19,44 @@ Commands that actually launch a PR review — `forgectl pr <ref>`, `forgectl pr 
 
 Reading a local clone's git state — `projects list`, `projects pick`, the project inventory, and `projects pull-all` — requires **Git 2.11.0 or newer**. That release introduced `git status --porcelain=v2 --branch`, which reports the working-tree state and the ahead/behind counts in a single command; forgectl reads both from that one call rather than spawning a second `rev-list` per clean repository. On older Git the command fails, the repository's status reads as unknown, and `pull-all` skips it rather than rebasing a tree whose state it could not establish.
 
+## Command groups
+
+28 command groups, at a glance. `forgectl --help` lists them from the binary
+itself; this table is the scannable index — full verbs and flags for every
+group are in the `## Usage` roster below, and the groups with a dedicated
+deep-dive get a link here.
+
+| Group | One-liner | Docs |
+| --- | --- | --- |
+| `tmux` | List/pick/kill/rename tmux sessions, delegating smart naming to `sesh` | Usage below |
+| `config` | Show every config section, per-key set/default (alias: `cfg`) | Usage below |
+| `init` | Scaffold every `config.toml` section with commented, sensibly-defaulted templates | Usage below |
+| `projects` | Cross-host project inventory: local clones + GitHub + Gitea (alias: `proj`) | [projects and review](#projects-and-review--whose-repos-get-enumerated) |
+| `pr` | Clean-room pull-request review, the flagship review family | [pr](#pr--the-clean-room-reviewers-own-posture) |
+| `launch` | Per-project Claude Code / Codex CLI / Pi launcher (alias: `cl`) | [launch](#launch--per-project-claude-code-codex-and-pi-profiles) |
+| `resume` | Get back into a Claude Code session after a terminal restart | [resume](#resume--getting-back-in-after-a-terminal-restart) |
+| `surface` | Start a harness inside a terminal manager (tmux/cmux/herdr) without exposing its invocation | Usage below |
+| `workflow` | Run declarative workflows composing forgectl's other verbs (alias: `flow`) | Usage below |
+| `bench` | Discover, health-check, and wire the local dev bench (hearth, chronicle) | [bench](#bench--interop-with-the-local-dev-services) |
+| `sessions` | Drain local session ledgers into the cross-machine concordance | Usage below |
+| `env` | Safe `.env` management: key names visible, values never | [env](#env--safe-env-management) |
+| `branch` | Prune stale/orphaned git branches (alias: `br`) | Usage below |
+| `clean` | Reclaim dep/build directories under a project root (alias: `cln`) | Usage below |
+| `docker` | Build/run/shell images tagged from git repo/branch/sha | Usage below |
+| `docs` | Local markdown reader: render + serve an indexed doc set over loopback HTTP | Usage below |
+| `net` | Check cached reachability of the configured probe endpoint | Usage below |
+| `proxy` | Apply config-defined profiles to the current shell through an explicit wrapper | [proxy](#proxy--current-shell-profiles) |
+| `k8s` | Safely stream ordinary kubectl logs, plus bounded namespace/exec/inspect helpers | [k8s](#k8s--bounded-terminal-safe-log-streaming) |
+| `ghostty` | Theme + keybind reporting, parsed live from the ghostty CLI | Usage below |
+| `pip` | Comment- and whitespace-preserving `pip.conf` editor | Usage below |
+| `quarantine` | Reversibly hide AI-instruction files (`CLAUDE.md`, `AGENTS.md`, …) from a workspace | Usage below |
+| `review` | Cross-project work inventory: open issues and PRs across your repos | [projects and review](#projects-and-review--whose-repos-get-enumerated) |
+| `preflight` | Align enabled plugins to the skill catalog's core-tier default set | Usage below |
+| `update` | Weekly package-manager + OS maintenance, independently-scoped steps | Usage below |
+| `doctor` | Ecosystem health check: claude, tmux/ghostty/cmux, gh auth, config, the bench, the trust store | Usage below |
+| `upgrade` | Update forgectl itself via the Homebrew tap | Usage below |
+| `y` | Clipboard (macOS only) + read-only zsh history recall | Usage below |
+
 ## Usage
 
 ```sh
@@ -34,6 +72,11 @@ forgectl tmux last         # jump to the last-used session
 forgectl tmux cheat        # tmux terms + the keys that matter
 forgectl config            # show every config section, per-key set/default (alias: cfg)
 forgectl config --json     # the same, machine-readable (stable surface)
+
+# init — scaffold every config.toml section with commented, sensibly-defaulted templates
+forgectl init               # append (or, for the host-scalar preamble, prepend) each
+                             #   section's template iff that section is absent —
+                             #   never overwrites or reflows what's already there
 
 # projects — cross-host project inventory (alias: proj)
 forgectl projects list [query]           # list all projects: local clones + your GitHub.com repos + git.sjo.lol/cameron
@@ -92,6 +135,10 @@ forgectl resume ls --json          # machine-readable JSON (safe to pipe; counts
 forgectl resume snapshot           # capture what a live session's exit would destroy
 forgectl resume snapshot --quiet   # same, silent — the form a Stop hook uses
 
+# surface — start a harness inside a terminal manager without exposing its invocation
+forgectl surface launch <target> --surface tmux           # tmux, cmux, or herdr — always explicit, never a default
+forgectl surface launch . --surface tmux --name review     # override the display name (defaults to the target dir's name)
+
 # workflow — run declarative workflows composing forgectl's other verbs (alias: flow)
 forgectl workflow run <name>              # run a workflow by name
 forgectl workflow run <name> --param k=v  # override a workflow param (repeatable)
@@ -149,6 +196,8 @@ forgectl clean --docker --apply          # DESTRUCTIVE, opt-in: also prune docke
 
 # docker — build/run/shell images tagged from git repo/branch/sha
 forgectl docker build [context]          # build, tagging {repo}:{branch}-{sha} and :dev
+forgectl docker build [context] -- --platform linux/arm64  # args after -- pass straight through to
+                                          #   docker build; --platform there overrides the derived one
 forgectl docker run [-- args...]         # run the built (or --tag) image
 forgectl docker shell                    # open a shell in the built (or --tag) image
 
@@ -165,11 +214,18 @@ forgectl net --json                      # machine-readable output for scripting
 # proxy — apply config-defined profiles to the current shell through an explicit wrapper
 forgectl proxy use NAME                  # emit a fixed export/unset batch (does not mutate the parent shell)
 forgectl proxy off                       # emit unsets for every supported upper/lower-case variable
+forgectl proxy list                      # list configured profile names only — never a value
+forgectl proxy status                    # matched profile + per-variable set/unset — never a value
 
-# k8s — safely stream ordinary kubectl logs
+# k8s — safely stream ordinary kubectl logs, plus small bounded namespace/exec/inspect helpers
 forgectl k8s logs deployment/api -f                     # forward resource/follow args directly to kubectl logs
 forgectl k8s logs -n prod -l app=api -f --log-level warn # keep WARN+ JSON logs plus every unrecognized line
 forgectl k8s logs pod/api --color never                  # force color policy: auto | always | never
+forgectl k8s ns                                          # print the current context's namespace (default when unset)
+forgectl k8s ns staging                                  # switch the current context to the staging namespace
+forgectl k8s exec -it pod/api -- sh                       # kubectl exec argv forwarded verbatim, real TTY wired through
+forgectl k8s inspect deployment/api                       # describe + get -o wide + events, in that fixed order
+forgectl k8s inspect pod/api-7f6c9 -n prod                # extra args forward to all three kubectl calls unchanged
 
 # ghostty — theme + keybind reporting, parsed live from the ghostty CLI
 forgectl ghostty themes                  # custom themes, active one marked
@@ -211,6 +267,13 @@ forgectl update run --json               # machine-readable summary (with each s
                                           #   the full per-step transcript goes to stderr + a timestamped log
                                           #   (update-logs/, auto-pruned after 7 days)
 
+# preflight — align enabled plugins to the skill catalog's core-tier default set
+forgectl preflight                       # report the change-set, make no changes
+forgectl preflight --apply               # write the COMPLETE aligned enabledPlugins set to
+                                          #   .claude/settings.local.json (a delta, not a merge —
+                                          #   see § preflight below before running this)
+forgectl preflight --json                # machine-readable report for scripting
+
 # doctor — ecosystem health check: claude, tmux/ghostty/cmux, gh auth, config,
 #   the local bench (hearth/chronicle), the trust store, forgectl's own currency
 forgectl doctor                          # one line per check, with a remediation hint on any warn/fail
@@ -225,6 +288,8 @@ forgectl upgrade --check                 # report whether an update is available
 # y — clipboard (macOS only) + read-only zsh history recall
 echo hi | forgectl y copy                # copy stdin to the clipboard
 forgectl y paste                         # print the clipboard's current contents
+forgectl y file ./a.pdf                  # put a file reference on the clipboard (attaches, not text; macOS only)
+forgectl y img ./a.png                   # decode + put image data on the clipboard (pastes as a picture; macOS only)
 forgectl y last 5                        # print the 5 most recent zsh commands, oldest first
                                           #   reads $HISTFILE (default ~/.zsh_history); no shell shim, so it sees
                                           #   only what zsh has flushed — set INC_APPEND_HISTORY or SHARE_HISTORY
@@ -465,10 +530,18 @@ forgectl-proxy off
 
 `use` emits only a fixed sequence of `export`/`unset` builtins with strictly
 single-quoted values. Each configured value is applied to both its upper- and
-lower-case spelling; `off` unsets all eight supported spellings. There is no
-profile status/list command because that would create another sensitive output
-surface. Running bare `forgectl proxy use NAME` prints the protocol instead of
-changing the current shell; use the wrapper for the actual switch.
+lower-case spelling; `off` unsets all eight supported spellings. Running bare
+`forgectl proxy use NAME` prints the protocol instead of changing the current
+shell; use the wrapper for the actual switch.
+
+`list` and `status` are the read-only verbs, and neither opens a new sensitive
+output surface: `list` prints configured profile *names* only, sorted, never a
+value; `status` names which configured profile (if any) the current
+environment matches, then reports each proxy variable as `set`/`unset` —
+also never a value, from either the configuration or the live environment. A
+half-applied environment (some but not all of a profile's variables set)
+matches no profile, and that "no match" verdict, plus the per-variable
+set/unset breakdown, is `status`'s whole point.
 
 ### projects and review — whose repos get enumerated
 
