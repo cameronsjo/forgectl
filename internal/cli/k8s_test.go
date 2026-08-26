@@ -275,5 +275,174 @@ func TestK8sNs_OptsIntoKubectlExitCode(t *testing.T) {
 	}
 }
 
+func executeK8sExec(t *testing.T, runner *forgexec.FakeRunner, args ...string) (*bytes.Buffer, error) {
+	t.Helper()
+	cmd := newK8sCmdForClient(k8spkg.New(&cliStreamingRunner{}), runner)
+	stdout := new(bytes.Buffer)
+	cmd.SetOut(stdout)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs(append([]string{"exec"}, args...))
+	return stdout, cmd.ExecuteContext(context.Background())
+}
+
+func TestK8sExec_ForwardsArgvVerbatimAndRunsInteractively(t *testing.T) {
+	runner := &forgexec.FakeRunner{}
+	_, err := executeK8sExec(t, runner, "-it", "pod/api", "-c", "sidecar", "--", "sh")
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	want := []string{"exec", "-it", "pod/api", "-c", "sidecar", "--", "sh"}
+	got := runner.Last()
+	if got.Name != "kubectl" || !reflect.DeepEqual(got.Args, want) {
+		t.Errorf("call = %#v, want kubectl %#v", got, want)
+	}
+	if !got.Interactive {
+		t.Errorf("call.Interactive = false, want true")
+	}
+}
+
+func TestK8sExec_NoArgsRefusesBeforeKubectl(t *testing.T) {
+	runner := &forgexec.FakeRunner{}
+	_, err := executeK8sExec(t, runner)
+	if err == nil {
+		t.Fatal("expected error for missing args")
+	}
+	if len(runner.Calls) != 0 {
+		t.Errorf("kubectl calls = %d, want 0", len(runner.Calls))
+	}
+}
+
+func TestK8sExec_HelpDoesNotInvokeKubectl(t *testing.T) {
+	runner := &forgexec.FakeRunner{}
+	stdout, err := executeK8sExec(t, runner, "--help")
+	if err != nil {
+		t.Fatalf("Execute help: %v", err)
+	}
+	if len(runner.Calls) != 0 {
+		t.Errorf("kubectl calls = %d, want 0", len(runner.Calls))
+	}
+	if !strings.Contains(stdout.String(), "kubectl exec") {
+		t.Errorf("help missing kubectl exec contract: %q", stdout.String())
+	}
+}
+
+func TestK8sExec_KubectlHelpAfterAResourceIsForwarded(t *testing.T) {
+	runner := &forgexec.FakeRunner{}
+	_, err := executeK8sExec(t, runner, "pod/api", "--help")
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	want := []string{"exec", "pod/api", "--help"}
+	if got := runner.Last(); got.Name != "kubectl" || !reflect.DeepEqual(got.Args, want) {
+		t.Errorf("args = %#v, want %#v", got, want)
+	}
+}
+
+func TestK8sExec_OptsIntoKubectlExitCode(t *testing.T) {
+	sentinel := errors.New("exit status 126")
+	runner := &forgexec.FakeRunner{InteractiveErr: &forgexec.CommandError{Name: "kubectl", ExitCode: 126, Err: sentinel}}
+	_, err := executeK8sExec(t, runner, "pod/api", "--", "sh")
+	if err == nil {
+		t.Fatal("expected kubectl failure")
+	}
+	if got := ExitCode(err); got != 126 {
+		t.Errorf("ExitCode = %d, want 126", got)
+	}
+}
+
+func executeK8sInspect(t *testing.T, runner *forgexec.FakeRunner, args ...string) (*bytes.Buffer, error) {
+	t.Helper()
+	cmd := newK8sCmdForClient(k8spkg.New(&cliStreamingRunner{}), runner)
+	stdout := new(bytes.Buffer)
+	cmd.SetOut(stdout)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs(append([]string{"inspect"}, args...))
+	return stdout, cmd.ExecuteContext(context.Background())
+}
+
+func TestK8sInspect_RunsDescribeGetEventsInOrder(t *testing.T) {
+	runner := &forgexec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "output for " + strings.Join(args, " "), nil
+	}}
+	stdout, err := executeK8sInspect(t, runner, "deployment/api", "-n", "prod")
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	wantCalls := [][]string{
+		{"describe", "deployment/api", "-n", "prod"},
+		{"get", "deployment/api", "-o", "wide", "-n", "prod"},
+		{"get", "events", "--field-selector", "involvedObject.name=api", "-n", "prod"},
+	}
+	if len(runner.Calls) != len(wantCalls) {
+		t.Fatalf("calls = %d, want %d (%#v)", len(runner.Calls), len(wantCalls), runner.Calls)
+	}
+	for i, want := range wantCalls {
+		got := runner.Calls[i]
+		if got.Name != "kubectl" || !reflect.DeepEqual(got.Args, want) {
+			t.Errorf("call %d = %#v, want kubectl %#v", i, got, want)
+		}
+	}
+	out := stdout.String()
+	describeIdx := strings.Index(out, "== describe ==")
+	getIdx := strings.Index(out, "== get -o wide ==")
+	eventsIdx := strings.Index(out, "== events ==")
+	if describeIdx < 0 || getIdx < 0 || eventsIdx < 0 || !(describeIdx < getIdx && getIdx < eventsIdx) {
+		t.Errorf("sections out of order or missing: %q", out)
+	}
+}
+
+func TestK8sInspect_RequiresKindSlashName(t *testing.T) {
+	runner := &forgexec.FakeRunner{}
+	_, err := executeK8sInspect(t, runner, "api")
+	if err == nil {
+		t.Fatal("expected error for missing kind/name")
+	}
+	if len(runner.Calls) != 0 {
+		t.Errorf("kubectl calls = %d, want 0", len(runner.Calls))
+	}
+}
+
+func TestK8sInspect_NoArgsRefusesBeforeKubectl(t *testing.T) {
+	runner := &forgexec.FakeRunner{}
+	_, err := executeK8sInspect(t, runner)
+	if err == nil {
+		t.Fatal("expected error for missing args")
+	}
+	if len(runner.Calls) != 0 {
+		t.Errorf("kubectl calls = %d, want 0", len(runner.Calls))
+	}
+}
+
+func TestK8sInspect_StopsAtFirstFailure(t *testing.T) {
+	sentinel := errors.New("exit status 1")
+	runner := &forgexec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "", &forgexec.CommandError{Name: "kubectl", ExitCode: 1, Err: sentinel}
+	}}
+	_, err := executeK8sInspect(t, runner, "pod/api")
+	if err == nil {
+		t.Fatal("expected kubectl failure")
+	}
+	if got := ExitCode(err); got != 1 {
+		t.Errorf("ExitCode = %d, want 1", got)
+	}
+	if len(runner.Calls) != 1 {
+		t.Errorf("kubectl calls = %d, want 1 (should stop after describe fails)", len(runner.Calls))
+	}
+}
+
+func TestK8sInspect_HelpDoesNotInvokeKubectl(t *testing.T) {
+	runner := &forgexec.FakeRunner{}
+	stdout, err := executeK8sInspect(t, runner, "--help")
+	if err != nil {
+		t.Fatalf("Execute help: %v", err)
+	}
+	if len(runner.Calls) != 0 {
+		t.Errorf("kubectl calls = %d, want 0", len(runner.Calls))
+	}
+	if !strings.Contains(stdout.String(), "describe/get/events triple") {
+		t.Errorf("help missing inspect contract: %q", stdout.String())
+	}
+}
+
 var _ forgexec.StreamingRunner = (*cliStreamingRunner)(nil)
 var _ forgexec.Runner = (*forgexec.FakeRunner)(nil)
