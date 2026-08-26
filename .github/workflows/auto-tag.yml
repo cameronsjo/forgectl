@@ -100,9 +100,10 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # The App token travels in this step's env and is used inline via
-      # `http.extraheader`, so it never lands in .git/config or in a remote
-      # URL that git would echo back in an error message.
+      # The App token reaches git through GIT_CONFIG_* environment variables,
+      # so it lands in neither .git/config (checkout persists nothing), a
+      # remote URL that git would echo back in an error, nor the process
+      # argument list that anything else on the runner could read.
       - name: Create and push tag
         if: steps.check.outputs.exists == 'false'
         env:
@@ -116,8 +117,10 @@ jobs:
           # Register the encoded form too, or a git error that echoes the
           # config would print a usable credential in the clear.
           echo "::add-mask::${AUTH_HEADER}"
-          git -c "http.extraheader=AUTHORIZATION: basic ${AUTH_HEADER}" \
-            push "https://github.com/${GITHUB_REPOSITORY}.git" -- "refs/tags/${TAG}:refs/tags/${TAG}"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.extraheader \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${AUTH_HEADER}" \
+            git push "https://github.com/${GITHUB_REPOSITORY}.git" -- "refs/tags/${TAG}:refs/tags/${TAG}"
 
       # release-please's own flip is skipped along with its GitHub Release
       # (`skip-github-release: true`), so without this the merged release PR
@@ -130,8 +133,11 @@ jobs:
       # open-and-merge primitive. GITHUB_TOKEN has no such reach, and the
       # tag-push constraint that forced the App token upward does not apply
       # to labels.
+      # No `if:` on purpose — the flip is idempotent and must stay re-runnable.
+      # If the tag push succeeds and this step then fails, gating on
+      # `exists == 'false'` would make a re-run skip both steps and exit green
+      # with the label still pending: the wedge, now unfixable by re-run.
       - name: Flip the release PR label
-        if: steps.check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -141,26 +147,44 @@ jobs:
           set -euo pipefail
           TITLE="chore(main): release ${VERSION}"
 
-          # Primary: the merged release PR still wearing the pending label.
-          PR="$(gh pr list --state merged --label 'autorelease: pending' \
-                  --limit 50 --json number,title \
+          # Primary: the merged PR that produced THIS manifest commit. Both
+          # gates matter — `merged_at` and the exact title. The endpoint
+          # returns every PR whose head branch *contains* the commit, in
+          # unspecified order, so `first` without the title assertion could
+          # label an unrelated PR. Never parse a number out of a commit
+          # message; the API is authoritative.
+          PR="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/pulls" \
                 | jq -r --arg title "$TITLE" \
-                    'map(select(.title == $title)) | first | .number // empty')"
+                    'map(select(.merged_at != null and .title == $title))
+                     | first | .number // empty' || true)"
 
-          # Fallback: the PR that produced this very commit. Never parse a
-          # number out of the commit message — the API is authoritative.
+          # Fallback: the merged PR with that exact title still wearing the
+          # pending label. Same title assertion, different index.
           if [ -z "$PR" ]; then
-            PR="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/pulls" \
-                    --jq 'map(select(.merged_at != null)) | first | .number // empty' || true)"
+            PR="$(gh pr list --state merged --label 'autorelease: pending' \
+                    --limit 100 --json number,title \
+                  | jq -r --arg title "$TITLE" \
+                      'map(select(.title == $title)) | first | .number // empty')"
           fi
 
           if [ -z "$PR" ]; then
-            echo "::error::no merged release PR found for ${VERSION} (title: ${TITLE}); the autorelease label is still pending and release-please will abort on its next run"
+            echo "::error::no merged release PR titled '${TITLE}' found for ${VERSION}; the autorelease label is still pending and release-please will abort on its next run"
             exit 1
           fi
           if [[ ! "$PR" =~ ^[0-9]+$ ]]; then
             echo "::error::resolved PR reference is not a number: ${PR}"
             exit 1
+          fi
+
+          # Already flipped (a re-run, or a hand-fix) is success, not a no-op
+          # worth failing over.
+          # Assigned, not piped into `grep -q`: an early-closing grep SIGPIPEs
+          # gh, and `pipefail` would then read a successful match as a miss.
+          TAGGED="$(gh pr view "$PR" --json labels \
+                      --jq '[.labels[].name] | index("autorelease: tagged") != null')"
+          if [ "$TAGGED" = "true" ]; then
+            echo "PR #${PR} is already autorelease: tagged — nothing to flip."
+            exit 0
           fi
 
           echo "Flipping autorelease label on PR #${PR}"
