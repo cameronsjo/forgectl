@@ -386,7 +386,7 @@ func TestK8sInspect_RunsDescribeGetEventsInOrder(t *testing.T) {
 	describeIdx := strings.Index(out, "== describe ==")
 	getIdx := strings.Index(out, "== get -o wide ==")
 	eventsIdx := strings.Index(out, "== events ==")
-	if describeIdx < 0 || getIdx < 0 || eventsIdx < 0 || !(describeIdx < getIdx && getIdx < eventsIdx) {
+	if describeIdx < 0 || getIdx < 0 || eventsIdx < 0 || describeIdx >= getIdx || getIdx >= eventsIdx {
 		t.Errorf("sections out of order or missing: %q", out)
 	}
 }
