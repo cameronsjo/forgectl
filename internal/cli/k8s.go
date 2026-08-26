@@ -31,18 +31,71 @@ var k8sOutputIsTerminal = func(out io.Writer) bool {
 
 func newK8sCmd(deps module.Deps) *cobra.Command {
 	streamer, _ := deps.Runner.(forgexec.StreamingRunner)
-	return newK8sCmdForClient(k8spkg.New(streamer))
+	return newK8sCmdForClient(k8spkg.New(streamer), deps.Runner)
 }
 
-func newK8sCmdForClient(client *k8spkg.Client) *cobra.Command {
+func newK8sCmdForClient(client *k8spkg.Client, runner forgexec.Runner) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "k8s",
 		Short: "Focused Kubernetes helpers",
 		Long: `k8s provides small wrappers around ordinary kubectl arguments. It does not
-define deployment manifests, choose pods, or manage cluster configuration.`,
+define deployment manifests, choose pods, or manage cluster configuration beyond
+reading and switching the current context's namespace (ns).`,
 	}
 	cmd.AddCommand(newK8sLogsCmd(client))
+	cmd.AddCommand(newK8sNsCmd(runner))
 	return cmd
+}
+
+// newK8sNsCmd wraps the current-context namespace: no args reads it (falling
+// back to "default" the same way kubectl itself treats an unset namespace),
+// one arg sets it. It is deliberately narrower than the logs command above —
+// plain cobra flag parsing, no forgectl-owned flags — because both kubectl
+// invocations it wraps take a single, unambiguous argument.
+func newK8sNsCmd(runner forgexec.Runner) *cobra.Command {
+	return &cobra.Command{
+		Use:   "ns [namespace]",
+		Short: "Get or set the current kubectl context's namespace",
+		Long: `ns reports the current context's namespace, or switches it when given one.
+
+  forgectl k8s ns          print the current namespace (default when unset)
+  forgectl k8s ns staging  switch the current context to the staging namespace`,
+		Args:         cobra.MaximumNArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				namespace := strings.TrimSpace(args[0])
+				if namespace == "" {
+					return errors.New("namespace must not be empty")
+				}
+				_, err := runner.Run(cmd.Context(), "kubectl", "config", "set-context", "--current", "--namespace="+namespace)
+				return wrapK8sCommandError(err)
+			}
+			out, err := runner.Run(cmd.Context(), "kubectl", "config", "view", "--minify", "-o", "jsonpath={..namespace}")
+			if err != nil {
+				return wrapK8sCommandError(err)
+			}
+			namespace := strings.TrimSpace(out)
+			if namespace == "" {
+				namespace = "default"
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), termsafe.SafeLine(namespace))
+			return err
+		},
+	}
+}
+
+// wrapK8sCommandError opts `ns` into kubectl's real exit code, mirroring the
+// logs command's handling in newK8sLogsCmd's RunE above.
+func wrapK8sCommandError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var commandErr *forgexec.CommandError
+	if errors.As(err, &commandErr) && commandErr.ExitCode > 0 {
+		return WithExitCode(err, commandErr.ExitCode)
+	}
+	return err
 }
 
 type k8sLogsInvocation struct {
@@ -93,14 +146,7 @@ and is disabled when stdout is not a terminal or NO_COLOR is present.`,
 				MinLevel: invocation.level,
 				Color:    color,
 			})
-			if err == nil || errors.Is(err, cmd.Context().Err()) {
-				return err
-			}
-			var commandErr *forgexec.CommandError
-			if errors.As(err, &commandErr) && commandErr.ExitCode > 0 {
-				return WithExitCode(err, commandErr.ExitCode)
-			}
-			return err
+			return wrapK8sCommandError(err)
 		},
 	}
 	return cmd
