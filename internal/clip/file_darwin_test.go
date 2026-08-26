@@ -13,14 +13,18 @@
 //
 //	[x] Happy: shells osascript with the path and the AppleScript image
 //	    class resolved from the extension (.png -> PNGf, .jpg -> JPEG, ...)
-//	[x] Happy: a real pasteboard smoke test for CopyFile, skipped outside an
-//	    interactive macOS session (CI's darwin runner has no login
-//	    pasteboard) — cleans up after itself by restoring the prior
-//	    clipboard contents where possible
+//	[x] Unhappy: every class imageClassForExt (clip.go) can produce has a
+//	    matching branch in copyImageScript — the two files are edited
+//	    separately, and a class with no branch falls through to a silent
+//	    no-op rather than an error (see the script's own comment)
+//	[x] Happy: a real pasteboard smoke test for CopyFile, opt-in via
+//	    FORGECTL_PASTEBOARD_TESTS=1, best-effort restores the prior
+//	    clipboard contents
 package clip
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +32,24 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
+
+// TestCopyImageScript_HasABranchForEveryMappedClass guards the coupling the
+// security review flagged: imageClassForExt (clip.go) and copyImageScript's
+// if/else-if chain (file_darwin.go) are two separately-edited files that
+// must agree, and copyImageScript's `else error` only fires for a class no
+// existing branch names. Adding an entry to imageClassForExt without a
+// matching `else if theClass is "..."` branch would otherwise ship a class
+// value that silently no-ops instead of erroring — this test catches that
+// class of drift by asserting every mapped class appears as a quoted
+// AppleScript literal in the script source.
+func TestCopyImageScript_HasABranchForEveryMappedClass(t *testing.T) {
+	for _, class := range imageClassForExt {
+		want := fmt.Sprintf("%q", class)
+		if !strings.Contains(copyImageScript, want) {
+			t.Errorf("copyImageScript has no branch for class %s (from imageClassForExt) — add `else if theClass is %s`", class, want)
+		}
+	}
+}
 
 func TestCopyFile_ShellsOsascriptWithPathAsArgv(t *testing.T) {
 	fake := &exec.FakeRunner{}
@@ -95,18 +117,24 @@ func TestCopyImage_ResolvesExtensionToAppleScriptClass(t *testing.T) {
 
 // TestCopyFile_RealPasteboard_Smoke exercises the real osascript pasteboard
 // path end to end. It writes a scratch file, copies a file reference to it,
-// reads the pasteboard back via `osascript -e "the clipboard as «class
-// furl»"` to confirm a file URL landed, and restores the pasteboard's prior
-// text contents afterward via t.Cleanup so the test leaves no residue on a
-// developer's actual clipboard.
+// and reads the pasteboard back via `osascript -e "the clipboard as «class
+// furl»"` to confirm a file URL landed. t.Cleanup best-effort restores
+// whatever text `pbpaste` reported beforehand — best-effort because
+// `exec.Runner.Run` trims trailing newlines, so a prior clipboard value
+// ending in one or more newlines is NOT restored byte-for-byte, and a
+// SIGKILL or a `-timeout` panic skips the cleanup entirely, leaving the
+// file reference on the developer's actual clipboard.
 //
-// Skipped outside a session with an accessible pasteboard (no login window
-// session, e.g. a bare CI runner) — osascript's clipboard calls fail loudly
-// there rather than silently no-op, which is the signal this test uses to
-// skip rather than fail.
+// Opt-in via FORGECTL_PASTEBOARD_TESTS=1 (unset by default) rather than an
+// opt-out: this test reads and overwrites the real system pasteboard, which
+// a plain `go test ./...` on a darwin dev machine should not do implicitly.
+// It additionally skips when the session has no accessible pasteboard (no
+// login window session, e.g. a bare CI runner) — osascript's clipboard
+// calls fail loudly there rather than silently no-op, which is the signal
+// this test uses to skip rather than fail.
 func TestCopyFile_RealPasteboard_Smoke(t *testing.T) {
-	if os.Getenv("FORGECTL_SKIP_PASTEBOARD_TESTS") != "" {
-		t.Skip("FORGECTL_SKIP_PASTEBOARD_TESTS set")
+	if os.Getenv("FORGECTL_PASTEBOARD_TESTS") == "" {
+		t.Skip("set FORGECTL_PASTEBOARD_TESTS=1 to exercise the real system pasteboard")
 	}
 
 	prior, priorErr := exec.OSRunner{}.Run(context.Background(), "pbpaste")
