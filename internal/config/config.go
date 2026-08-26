@@ -10,11 +10,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -242,6 +244,32 @@ type ProxyProfile struct {
 func (p ProxyProfile) IsZero() bool {
 	return p.HTTPProxy == "" && p.HTTPSProxy == "" && p.AllProxy == "" && p.NoProxy == ""
 }
+
+// The methods below make the never-print guarantee a property of the type
+// rather than of every call site that happens to hold one. They mirror
+// exec.SecretArg and backend.BootstrapCommand: every rendering interface the
+// standard library reaches for — fmt, slog, encoding/json, encoding —
+// answers with exec.Redacted. Reading a field explicitly still works, so the
+// one sanctioned sink (internal/proxy's shell protocol) is unaffected.
+
+func (ProxyProfile) String() string   { return exec.Redacted }
+func (ProxyProfile) GoString() string { return exec.Redacted }
+
+func (ProxyProfile) Format(f fmt.State, verb rune) {
+	if verb == 'q' {
+		_, _ = io.WriteString(f, strconv.Quote(exec.Redacted))
+		return
+	}
+	_, _ = io.WriteString(f, exec.Redacted)
+}
+
+func (ProxyProfile) LogValue() slog.Value { return slog.StringValue(exec.Redacted) }
+
+func (ProxyProfile) MarshalJSON() ([]byte, error) {
+	return []byte(strconv.Quote(exec.Redacted)), nil
+}
+
+func (ProxyProfile) MarshalText() ([]byte, error) { return []byte(exec.Redacted), nil }
 
 // DockerConfig is the [docker] section: build-time defaults for `forgectl
 // docker build`. A zero value means "section absent" — internal/docker's

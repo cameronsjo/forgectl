@@ -23,6 +23,19 @@ type variable struct {
 	value string
 }
 
+// profileVariables is the single ordered declaration of every supported proxy
+// variable and its two spellings. Both the emitted shell batch and the
+// read-only status comparison walk this list, so neither can support a
+// variable or a spelling the other silently misses.
+func profileVariables(profile config.ProxyProfile) []variable {
+	return []variable{
+		{lower: "http_proxy", upper: "HTTP_PROXY", value: profile.HTTPProxy},
+		{lower: "https_proxy", upper: "HTTPS_PROXY", value: profile.HTTPSProxy},
+		{lower: "all_proxy", upper: "ALL_PROXY", value: profile.AllProxy},
+		{lower: "no_proxy", upper: "NO_PROXY", value: profile.NoProxy},
+	}
+}
+
 // Use renders one fixed batch of export/unset builtins for profile. Every
 // configured value is assigned to its lowercase and uppercase spellings in
 // the same export command; every absent value unsets both spellings. The
@@ -32,12 +45,7 @@ func Use(profile config.ProxyProfile) (string, error) {
 	if profile.IsZero() {
 		return "", ErrEmptyProfile
 	}
-	variables := []variable{
-		{lower: "http_proxy", upper: "HTTP_PROXY", value: profile.HTTPProxy},
-		{lower: "https_proxy", upper: "HTTPS_PROXY", value: profile.HTTPSProxy},
-		{lower: "all_proxy", upper: "ALL_PROXY", value: profile.AllProxy},
-		{lower: "no_proxy", upper: "NO_PROXY", value: profile.NoProxy},
-	}
+	variables := profileVariables(profile)
 
 	commands := make([]string, 0, len(variables))
 	for _, v := range variables {
