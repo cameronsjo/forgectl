@@ -64,7 +64,11 @@ func newK8sNsCmd(runner forgexec.Runner) *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
-				_, err := runner.Run(cmd.Context(), "kubectl", "config", "set-context", "--current", "--namespace="+args[0])
+				namespace := strings.TrimSpace(args[0])
+				if namespace == "" {
+					return errors.New("namespace must not be empty")
+				}
+				_, err := runner.Run(cmd.Context(), "kubectl", "config", "set-context", "--current", "--namespace="+namespace)
 				return wrapK8sCommandError(err)
 			}
 			out, err := runner.Run(cmd.Context(), "kubectl", "config", "view", "--minify", "-o", "jsonpath={..namespace}")

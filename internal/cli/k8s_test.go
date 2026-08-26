@@ -248,6 +248,19 @@ func TestK8sNs_TwoArgsRejected(t *testing.T) {
 	}
 }
 
+func TestK8sNs_EmptyOrWhitespaceArgRejectedBeforeKubectl(t *testing.T) {
+	for _, arg := range []string{"", "   "} {
+		runner := &forgexec.FakeRunner{}
+		_, err := executeK8sNs(t, runner, arg)
+		if err == nil {
+			t.Errorf("arg %q: expected error", arg)
+		}
+		if len(runner.Calls) != 0 {
+			t.Errorf("arg %q: kubectl calls = %d, want 0", arg, len(runner.Calls))
+		}
+	}
+}
+
 func TestK8sNs_OptsIntoKubectlExitCode(t *testing.T) {
 	sentinel := errors.New("exit status 1")
 	runner := &forgexec.FakeRunner{RunFunc: func(string, []string) (string, error) {
