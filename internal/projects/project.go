@@ -293,10 +293,10 @@ func canonicalHost(hostname, gitHubHost string) string {
 			bare = bare[:i]
 		}
 	}
-	switch {
-	case bare == gitHubHost:
+	switch bare {
+	case gitHubHost:
 		return "github"
-	case bare == "git.sjo.lol":
+	case "git.sjo.lol":
 		return "gitea"
 	default:
 		return hostname

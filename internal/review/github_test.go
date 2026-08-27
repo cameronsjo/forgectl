@@ -217,3 +217,45 @@ func TestParseSearchIssues_MalformedAndEmpty(t *testing.T) {
 		t.Errorf("empty output: want (nil, 0, nil), got (%+v, %d, %v)", items, rawCount, err)
 	}
 }
+
+// TestNewGitHub_GHEHostStampsItemsAndPinsQueries: the effective host is one
+// value for both the subprocess pin and the Item stamp — a row can never
+// claim a host its query did not run against — and the non-default host
+// scrubs the token env vars.
+func TestNewGitHub_GHEHostStampsItemsAndPinsQueries(t *testing.T) {
+	t.Setenv("GH_HOST", "ambient.example.test")
+	t.Setenv("GH_ENTERPRISE_TOKEN", "ambient-enterprise-token")
+	const ghe = "github.example.com"
+	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		for _, a := range args {
+			if a == "issues" {
+				return `[{"number":7,"title":"t","url":"https://github.example.com/acme/tool/issues/7","author":{"login":"a"},"updatedAt":"2026-01-01T00:00:00Z","state":"open","labels":[],"repository":{"nameWithOwner":"acme/tool"}}]`, nil
+			}
+		}
+		return `[]`, nil
+	}}
+
+	items, notes, err := NewGitHub(fake, []string{"acme"}, ghe).Items(context.Background())
+	if err != nil {
+		t.Fatalf("Items: %v (notes %v)", err, notes)
+	}
+	if len(items) != 1 || items[0].Host != ghe {
+		t.Fatalf("items = %+v, want one item stamped Host=%q", items, ghe)
+	}
+	if key := items[0].Key(); key != ghe+"/acme/tool#7" {
+		t.Errorf("Key() = %q, want %q", key, ghe+"/acme/tool#7")
+	}
+	for _, c := range fake.Calls {
+		if c.Name != "gh" {
+			continue
+		}
+		if got := c.Env["GH_HOST"]; got != ghe {
+			t.Errorf("call %v ran with GH_HOST=%q, want %q", c.Args, got, ghe)
+		}
+		for _, k := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} {
+			if got, present := c.Env[k]; !present || got != "" {
+				t.Errorf("call %v: %s = %q (present=%v), want forced empty", c.Args, k, got, present)
+			}
+		}
+	}
+}

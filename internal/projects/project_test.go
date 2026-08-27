@@ -212,3 +212,68 @@ func TestStatusState_JSONDecodeCompatibility(t *testing.T) {
 		t.Errorf("null changed state to %q, want %q", preserved, StatusOK)
 	}
 }
+
+// TestCanonicalHost pins the exact-match mapping: the substring test it
+// replaced stamped any hostname merely CONTAINING "github.com" as trusted
+// "github" inventory.
+func TestCanonicalHost(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		hostname   string
+		gitHubHost string
+		want       string
+	}{
+		{"empty hostname", "", "github.com", ""},
+		{"github.com default", "github.com", "github.com", "github"},
+		{"zero-value client means default", "github.com", "", "github"},
+		{"case-insensitive", "GitHub.COM", "github.com", "github"},
+		{"ported remote same host", "github.com:443", "github.com", "github"},
+		{"substring attack stays raw", "evil-github.com.attacker.net", "github.com", "evil-github.com.attacker.net"},
+		{"prefix attack stays raw", "github.com.attacker.net", "github.com", "github.com.attacker.net"},
+		{"ghe host configured", "github.example.com", "github.example.com", "github"},
+		{"github.com under ghe config stays raw", "github.com", "github.example.com", "github.com"},
+		{"gitea exact", "git.sjo.lol", "github.com", "gitea"},
+		{"gitea substring attack stays raw", "git.sjo.lol.evil.net", "github.com", "git.sjo.lol.evil.net"},
+		{"trailing colon not a port", "github.com:", "github.com", "github.com:"},
+		{"non-numeric port not stripped", "github.com:x1", "github.com", "github.com:x1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := canonicalHost(tc.hostname, tc.gitHubHost); got != tc.want {
+				t.Errorf("canonicalHost(%q, %q) = %q, want %q", tc.hostname, tc.gitHubHost, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseCloneTarget_UnderGHEHost: the bare owner/repo shorthand is
+// deployment-scoped — it means the CONFIGURED host (the clone runs through gh
+// pinned there) and still carries the "github" token; a github.com URL under
+// a GHE config maps to its raw hostname (not this deployment's GitHub), and a
+// GHE URL maps to "github".
+func TestParseCloneTarget_UnderGHEHost(t *testing.T) {
+	const ghe = "github.example.com"
+
+	r, ok := ParseCloneTarget("acme/tool", ghe)
+	if !ok || r.Host != "github" || r.Owner != "acme" || r.Name != "tool" {
+		t.Fatalf("shorthand under GHE = %+v ok=%v, want github/acme/tool", r, ok)
+	}
+
+	r, ok = ParseCloneTarget("https://github.example.com/acme/tool", ghe)
+	if !ok || r.Host != "github" {
+		t.Fatalf("GHE URL = %+v ok=%v, want Host github", r, ok)
+	}
+
+	r, ok = ParseCloneTarget("https://github.com/acme/tool", ghe)
+	if !ok || r.Host != "github.com" || r.SSHURL != "https://github.com/acme/tool" {
+		t.Fatalf("github.com URL under GHE = %+v ok=%v, want raw-host repo carrying the literal URL", r, ok)
+	}
+}
+
+// TestParseRemoteURL_GHEHost: a GHE remote parses to the "github" token under
+// its own configured host.
+func TestParseRemoteURL_GHEHost(t *testing.T) {
+	host, owner, name := parseRemoteURL("git@github.example.com:acme/tool.git", "github.example.com")
+	if host != "github" || owner != "acme" || name != "tool" {
+		t.Errorf("parseRemoteURL scp GHE = (%q,%q,%q), want (github,acme,tool)", host, owner, name)
+	}
+}

@@ -731,3 +731,47 @@ func TestPrConfig_IsZeroCoversEveryField(t *testing.T) {
 		}
 	}
 }
+
+// TestGithubConfig_FieldSetIsPinned mirrors TestPrConfig_FieldSetIsPinned:
+// [github] is a SECURITY BOUNDARY carrying the host only. The host value is
+// what the gh subprocess pin and the token scrub key off, so a new field here
+// widens what a config file can steer and must be a deliberate act.
+func TestGithubConfig_FieldSetIsPinned(t *testing.T) {
+	want := map[string]bool{"Host": true}
+
+	tp := reflect.TypeOf(GithubConfig{})
+	got := make(map[string]bool, tp.NumField())
+	for i := 0; i < tp.NumField(); i++ {
+		got[tp.Field(i).Name] = true
+	}
+
+	for name := range got {
+		if !want[name] {
+			t.Errorf("GithubConfig gained field %q: [github] carries the host only — "+
+				"widening what a config file can steer must break this pin first", name)
+		}
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("GithubConfig lost field %q", name)
+		}
+	}
+}
+
+// TestGithubConfig_DecodeAndIsZero covers the [github] section's decode shape
+// and the house zero-means-absent convention.
+func TestGithubConfig_DecodeAndIsZero(t *testing.T) {
+	cfg, err := DecodeStrict([]byte("[github]\nhost = \"github.example.com\"\n"))
+	if err != nil {
+		t.Fatalf("DecodeStrict: %v", err)
+	}
+	if cfg.Github.Host != "github.example.com" {
+		t.Errorf("Github.Host = %q, want github.example.com", cfg.Github.Host)
+	}
+	if cfg.Github.IsZero() {
+		t.Error("IsZero() = true with host set, want false")
+	}
+	if !(GithubConfig{}).IsZero() {
+		t.Error("zero GithubConfig.IsZero() = false, want true")
+	}
+}

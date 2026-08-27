@@ -48,7 +48,8 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 			// value is ResolveHost-validated at construction; termsafe guards
 			// the render anyway. Stderr only — a --json pipe stays clean.
 			if gh := client.GitHubHost(); gh != githubauth.DefaultHost {
-				fmt.Fprintf(cmd.ErrOrStderr(), "github host: %s\n", termsafe.SafeLine(gh))
+				// Best-effort diagnostic write, same as every stderr note here.
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "github host: %s\n", termsafe.SafeLine(gh))
 			}
 
 			repos, notes, err := client.Inventory(ctx)
