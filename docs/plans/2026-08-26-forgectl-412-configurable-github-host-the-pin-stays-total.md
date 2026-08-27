@@ -114,3 +114,20 @@ Branch-mode repo → worktree off `origin/main` in `forgectl/.claude/worktrees/`
 ## Learnings
 
 *(empty at approval)*
+
+<!-- Execution log (amber-fugue, 2026-08-26) -->
+
+**Execution state:** steps 0–9 done — step-0 security review ran (6 findings: 2 Critical folded in-branch, 4 residuals filed to forgectl#413), githubauth/config/projects/review/cli threaded and tested, CHANGELOG + docs landed, forgectl#413 filed. Remaining: review passes fold-in, PR.
+
+## Deviations
+
+- **`pulls`-form URLs stay accepted on the effective host.** The plan's "keep `/pull/`-only strictness for GitHub-family hosts" turned out to conflict with its own byte-for-byte default-host assertion: the generic any-host URL branch (`reHostWorkURL`, which allows `pulls?`) always accepted `https://github.com/o/r/pulls/N` via hostAllowed's github.com arm. Byte-for-byte won: the github-shaped regex itself stays `/pull/`-only, the generic branch keeps admitting the effective host, and the pre-change acceptance is pinned by test as deliberate.
+- **Step-0 findings reshaped the runner beyond the plan text:** `Runner` collapses a same-host double wrap and fails closed on a host-conflicting one (finding 1 — nested pins invert precedence, decoupling the scrub from the host); `pinnedRunner` implements `RunStreaming`, refusing gh (finding 6 — the separate `StreamingRunner` interface was an open side).
+- **`allowedHostSpelling` replaces the planned boolean `hostAllowed`:** case-folded matching had to return the configured spelling, or a mixed-case typed ref would mint a key disagreeing with the source's stamped items.
+- **`canonicalHost` treats an empty gitHubHost as the default** — existing tests construct `Client` as a struct literal (no `New`), and a zero-value client must mean github.com, not "nothing matches github". The gitea arm also moved to the same exact-match (behavior-preserving under the port-strip).
+
+## Learnings
+
+- `TestRunDocsServe_*` shutdown assertions flake under parallel load on clean `main` too (`-count=2` reproduces; each passes in isolation) — noted on forgectl#413 so a red CI run has a name.
+- The repo's CHANGELOG is release-please-generated (no standing `[Unreleased]` section); the entry was added manually per the changelog-before-PR rule and will fold into the next release heading.
+- A raw-string cobra `Long` cannot carry backticks — the gh-auth prerequisite line cost one build break.
