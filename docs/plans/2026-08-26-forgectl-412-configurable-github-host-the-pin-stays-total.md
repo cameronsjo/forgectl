@@ -131,3 +131,5 @@ Branch-mode repo → worktree off `origin/main` in `forgectl/.claude/worktrees/`
 - `TestRunDocsServe_*` shutdown assertions flake under parallel load on clean `main` too (`-count=2` reproduces; each passes in isolation) — noted on forgectl#413 so a red CI run has a name.
 - The repo's CHANGELOG is release-please-generated (no standing `[Unreleased]` section); the entry was added manually per the changelog-before-PR rule and will fold into the next release heading.
 - A raw-string cobra `Long` cannot carry backticks — the gh-auth prerequisite line cost one build break.
+
+**Review passes (step 9):** code-review PASS (0 Critical/Important; 1 of 3 nits folded — stray import group; regex-per-call and stale test names declined). Security diff pass (Opus) clean — no Critical/Important; 3 of 4 nits folded (flag-proof config-error trees, decode-degraded marker on unlocatable ConfigPath, refusal of [github] host == [review.gitea] host), the port-strip-over-match nit accepted as the documented ported-remote tradeoff. Polish marker recorded (scope=code; security=ran on Opus). PR forgectl#414.
