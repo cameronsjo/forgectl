@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 
@@ -116,9 +117,23 @@ type pinnedRunner struct {
 // control, not a general environment override. A host that fails validation
 // yields a fail-closed runner: every gh path returns ErrUnpinnableHost before
 // any process is spawned.
+//
+// An already-pinned runner is returned unchanged when the hosts agree, and
+// converted to the fail-closed runner when they disagree. Nesting two live
+// pins would invert precedence — each layer sets GH_HOST last and then
+// delegates, so the INNERMOST host would win while the outer layer's token
+// scrub decision stood, decoupling the scrub from the host it protects
+// (step-0 security review, finding 1). Same host → same behavior either way,
+// so collapsing is safe; different hosts → nobody chose one identity, refuse.
 func Runner(run exec.Runner, host string) exec.Runner {
 	resolved, err := ResolveHost(host)
 	if err != nil {
+		return pinnedRunner{base: run, host: ""}
+	}
+	if p, ok := run.(pinnedRunner); ok {
+		if p.host == resolved {
+			return p
+		}
 		return pinnedRunner{base: run, host: ""}
 	}
 	return pinnedRunner{base: run, host: resolved}
@@ -203,6 +218,27 @@ func (p pinnedRunner) RunInteractive(ctx context.Context, name string, args ...s
 		return ErrUnpinnableGhPath
 	}
 	return p.base.RunInteractive(ctx, name, args...)
+}
+
+// RunStreaming closes the interface's open side: exec.StreamingRunner is a
+// separate interface, so without this method a `deps.Runner.(StreamingRunner)`
+// type assertion on a pinned runner silently fails and a future streaming gh
+// leg would be written against the UNWRAPPED runner — outside the pin and the
+// token scrub, with no compile error (step-0 security review, finding 6). gh
+// is refused exactly as on the other env-less paths; non-gh streams delegate
+// when the base itself can stream.
+func (p pinnedRunner) RunStreaming(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
+	if name == "gh" {
+		if p.host == "" {
+			return ErrUnpinnableHost
+		}
+		return ErrUnpinnableGhPath
+	}
+	sr, ok := p.base.(exec.StreamingRunner)
+	if !ok {
+		return errors.New("githubauth: underlying runner does not support streaming")
+	}
+	return sr.RunStreaming(ctx, stdin, stdout, stderr, name, args...)
 }
 
 // classifyContextFailure converts a raw subprocess failure into a safe

@@ -488,3 +488,41 @@ func TestRunner_DoubleWrapSameHostIsHarmless(t *testing.T) {
 		t.Fatalf("GH_HOST = %q, want %q", got, ghe)
 	}
 }
+
+// TestRunner_DoubleWrapDifferentHostsFailsClosed: nesting two live pins with
+// disagreeing hosts must not run at all — each layer sets GH_HOST last before
+// delegating, so the innermost host would win while the outer layer's token
+// scrub decision stood. Nobody chose one identity; refuse every gh path.
+func TestRunner_DoubleWrapDifferentHostsFailsClosed(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	wrapped := Runner(Runner(fake, "github.example.com"), "")
+
+	if _, err := wrapped.Run(t.Context(), "gh", "api", "user"); !errors.Is(err, ErrUnpinnableHost) {
+		t.Fatalf("err = %v, want ErrUnpinnableHost on host-conflicting double wrap", err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("underlying calls = %d, want 0", len(fake.Calls))
+	}
+	if _, err := wrapped.Run(t.Context(), "git", "status"); err != nil {
+		t.Fatalf("non-gh delegation: %v", err)
+	}
+}
+
+// TestRunner_RunStreamingRefusesGh: exec.StreamingRunner is a separate
+// interface, so a pinned runner must implement it and refuse gh — otherwise a
+// future streaming gh leg would be written against the unwrapped runner,
+// outside the pin and the scrub.
+func TestRunner_RunStreamingRefusesGh(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	sr, ok := Runner(fake, DefaultHost).(exec.StreamingRunner)
+	if !ok {
+		t.Fatal("pinned runner does not satisfy exec.StreamingRunner")
+	}
+	err := sr.RunStreaming(t.Context(), strings.NewReader(""), &strings.Builder{}, &strings.Builder{}, "gh", "api", "graphql")
+	if !errors.Is(err, ErrUnpinnableGhPath) {
+		t.Fatalf("err = %v, want ErrUnpinnableGhPath", err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("underlying calls = %d, want 0", len(fake.Calls))
+	}
+}
