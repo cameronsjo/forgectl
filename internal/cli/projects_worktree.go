@@ -39,7 +39,7 @@ from projects list --json, or rerun interactively when no sshUrl is available.`,
 				branch = args[1]
 			}
 
-			if r, ok := projects.ParseCloneTarget(args[0]); ok {
+			if r, ok := projects.ParseCloneTarget(args[0], client.GitHubHost()); ok {
 				return worktreeOnly(ctx, client, cmd, r, branch)
 			}
 

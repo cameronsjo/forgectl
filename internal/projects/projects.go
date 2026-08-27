@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -113,9 +114,16 @@ type Client struct {
 	lookPath  func(string) (string, error)
 
 	// githubOwners is the configured [projects].owners list. Empty means the
-	// authenticated GitHub.com login, resolved per Inventory call rather than
-	// cached — the answer belongs to whoever gh is authenticated as right now.
+	// authenticated login on the configured GitHub host, resolved per
+	// Inventory call rather than cached — the answer belongs to whoever gh is
+	// authenticated as right now.
 	githubOwners []string
+
+	// gitHubHost is the deployment's configured GitHub host ([github].host,
+	// already validated by githubauth.ResolveHost at the CLI seam). It pins
+	// every gh subprocess and anchors canonicalHost's "github" token. New
+	// defaults it to githubauth.DefaultHost.
+	gitHubHost string
 }
 
 // Option configures a Client at construction. Options exist so the GitHub
@@ -133,6 +141,24 @@ func WithGitHubOwners(owners []string) Option {
 		c.githubOwners = append([]string(nil), owners...)
 	}
 }
+
+// WithGitHubHost sets the deployment's GitHub host. The value must already be
+// ResolveHost output — the CLI seam validates before construction, and an
+// invalid value that somehow arrived here would fail closed anyway (the
+// pinned runner refuses gh for a host that fails validation). An empty value
+// keeps the default, github.com.
+func WithGitHubHost(host string) Option {
+	return func(c *Client) {
+		if host != "" {
+			c.gitHubHost = host
+		}
+	}
+}
+
+// GitHubHost returns the deployment's effective GitHub host — the value every
+// gh subprocess is pinned to. CLI call sites need it for ParseCloneTarget and
+// the non-default-host stderr note.
+func (c *Client) GitHubHost() string { return c.gitHubHost }
 
 // WithGitBinary overrides the git executable used by status probes and pulls.
 // The path must already be absolute and clean; anything else selects the same
@@ -170,7 +196,7 @@ func New(run exec.Runner, opts ...Option) *Client {
 		home, _ := os.UserHomeDir()
 		dir = filepath.Join(home, dir[2:])
 	}
-	c := &Client{Dir: dir, run: run, lookPath: osexec.LookPath}
+	c := &Client{Dir: dir, run: run, lookPath: osexec.LookPath, gitHubHost: githubauth.DefaultHost}
 	for _, opt := range opts {
 		opt(c)
 	}
@@ -347,7 +373,7 @@ func (c *Client) localRepos(ctx context.Context) ([]Repo, error) {
 			url, err := c.run.Run(ctx, "git", "-C", p.Dir, "remote", "get-url", "origin")
 			if err == nil {
 				url = strings.TrimSpace(url)
-				if host, owner, name := parseRemoteURL(url); name != "" {
+				if host, owner, name := parseRemoteURL(url, c.gitHubHost); name != "" {
 					r.Host, r.Owner, r.Name = host, owner, name
 					// SSHURL is contractually an SSH clone URL; an HTTPS origin would
 					// mislabel it in the JSON inventory, so only store SSH-form origins.
@@ -392,7 +418,7 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 	const remoteHosts = 2
 	ch := make(chan hostResult, remoteHosts)
 	go func() {
-		r, n, e := githubList(ctx, c.run, c.githubOwners)
+		r, n, e := githubList(ctx, c.run, c.githubOwners, c.gitHubHost)
 		ch <- hostResult{"github", r, n, e}
 	}()
 	go func() { r, e := giteaList(ctx, c.run); ch <- hostResult{"gitea", r, nil, e} }()
@@ -477,7 +503,7 @@ func (c *Client) ListOrg(ctx context.Context, org string) ([]Repo, error) {
 	if !validPathSegment(org) {
 		return nil, fmt.Errorf("invalid GitHub org/user name %q", org)
 	}
-	return githubListOrg(ctx, c.run, org)
+	return githubListOrg(ctx, c.run, org, c.gitHubHost)
 }
 
 // Clone checks out a remote Repo into the canonical Dir/host/owner/name layout
@@ -512,7 +538,7 @@ func (c *Client) Clone(ctx context.Context, r Repo) (string, error) {
 	}
 	switch r.Host {
 	case "github":
-		if err := cloneRepo(ctx, c.run, r.Owner+"/"+r.Name, dest); err != nil {
+		if err := cloneRepo(ctx, c.run, r.Owner+"/"+r.Name, dest, c.gitHubHost); err != nil {
 			slog.Error("Failed to clone from GitHub.", "host", r.Host, "repo", r.Owner+"/"+r.Name, "dest", dest, "error", err)
 			return "", err
 		}
@@ -556,7 +582,7 @@ func (c *Client) originMatches(ctx context.Context, dir string, r Repo) bool {
 	if err != nil {
 		return false
 	}
-	host, owner, name := parseRemoteURL(strings.TrimSpace(url))
+	host, owner, name := parseRemoteURL(strings.TrimSpace(url), c.gitHubHost)
 	return host == r.Host && owner == r.Owner && name == r.Name
 }
 

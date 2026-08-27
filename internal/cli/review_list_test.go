@@ -68,7 +68,7 @@ func TestReviewCmd_JSON_ReviewedAndLabels(t *testing.T) {
 	reviewedPath := filepath.Join(t.TempDir(), "review-reviewed.json")
 	seedReviewedKey(t, reviewedPath, "github.com/cameronsjo/forgectl#76", reviewTestTime.Add(time.Hour))
 
-	cmd := newReviewCmdForSources([]review.Source{src}, reviewedPath)
+	cmd := newReviewCmdForSources([]review.Source{src}, reviewedPath, review.GitHubHost)
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -101,7 +101,7 @@ func TestReviewCmd_JSON_ReviewedAndLabels(t *testing.T) {
 }
 
 func TestReviewCmd_JSON_EmptyIsArray(t *testing.T) {
-	cmd := newReviewCmdForSources([]review.Source{fakeReviewSource{}}, filepath.Join(t.TempDir(), "r.json"))
+	cmd := newReviewCmdForSources([]review.Source{fakeReviewSource{}}, filepath.Join(t.TempDir(), "r.json"), review.GitHubHost)
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -130,7 +130,7 @@ func TestReviewCmd_Table_DimsReviewedRow(t *testing.T) {
 	reviewedPath := filepath.Join(t.TempDir(), "review-reviewed.json")
 	seedReviewedKey(t, reviewedPath, "github.com/cameronsjo/alpha#1", reviewTestTime.Add(time.Hour))
 
-	cmd := newReviewCmdForSources([]review.Source{src}, reviewedPath)
+	cmd := newReviewCmdForSources([]review.Source{src}, reviewedPath, review.GitHubHost)
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -173,7 +173,7 @@ func TestReviewCmd_KindAndRepoFilters(t *testing.T) {
 
 	run := func(args ...string) []reviewRowJSON {
 		t.Helper()
-		cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"))
+		cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"), review.GitHubHost)
 		var stdout bytes.Buffer
 		cmd.SetOut(&stdout)
 		cmd.SetErr(new(bytes.Buffer))
@@ -198,7 +198,7 @@ func TestReviewCmd_KindAndRepoFilters(t *testing.T) {
 		t.Errorf("--repo filter: got %+v", rows)
 	}
 
-	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"))
+	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"), review.GitHubHost)
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"--kind", "bogus"})
@@ -225,7 +225,7 @@ func TestProjectsListHelp_NamesNoBakedAccount(t *testing.T) {
 // surface: the fallback is the authenticated GitHub.com account, and the help
 // must say so rather than naming one developer's login.
 func TestReviewHelp_NamesNoBakedAccount(t *testing.T) {
-	help := newReviewCmdForSources(nil, "").Long
+	help := newReviewCmdForSources(nil, "", review.GitHubHost).Long
 
 	if strings.Contains(help, "cameronsjo") {
 		t.Errorf("review help still names a baked account:\n%s", help)
@@ -318,7 +318,7 @@ func TestReviewCmd_NotesOnStderr(t *testing.T) {
 		items: []review.Item{reviewItem(review.KindIssue, "alpha", 1)},
 		notes: []string{"issues(cameronsjo): gh: rate limited"},
 	}
-	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"))
+	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"), review.GitHubHost)
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -346,7 +346,7 @@ func TestReviewCmd_Table_HostileTitleSanitized(t *testing.T) {
 		UpdatedAt: reviewTestTime,
 	}
 	src := fakeReviewSource{items: []review.Item{hostile}}
-	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"))
+	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"), review.GitHubHost)
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -389,7 +389,7 @@ func TestReviewStateLabel_TabSanitized(t *testing.T) {
 		UpdatedAt: reviewTestTime,
 	}
 	src := fakeReviewSource{items: []review.Item{hostile}}
-	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"))
+	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"), review.GitHubHost)
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -409,7 +409,7 @@ func TestReviewCmd_HostileNoteSanitized(t *testing.T) {
 		items: []review.Item{reviewItem(review.KindIssue, "alpha", 1)},
 		notes: []string{"issues(cameronsjo): tea: \x1b[2K\x1b[Guser does not exist"},
 	}
-	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"))
+	cmd := newReviewCmdForSources([]review.Source{src}, filepath.Join(t.TempDir(), "r.json"), review.GitHubHost)
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)

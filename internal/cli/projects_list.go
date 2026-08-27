@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -27,8 +28,10 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 		Long: "List every project across local clones, GitHub.com, and the\n" +
 			"self-hosted Gitea (git.sjo.lol/cameron), marking which are checked out.\n\n" +
 			"GitHub scope comes from [projects] owners in config.toml; leave it unset\n" +
-			"and forgectl lists the repos of whoever gh is authenticated as. Calls are\n" +
-			"pinned to github.com — GitHub Enterprise is not supported.\n\n" +
+			"and forgectl lists the repos of whoever gh is authenticated as. Every gh\n" +
+			"call is pinned to the deployment's [github] host (default github.com) —\n" +
+			"an ambient GH_HOST is overridden, and a non-default host requires a\n" +
+			"stored `gh auth login --hostname <host>` credential.\n\n" +
 			"Examples:\n" +
 			"  forgectl projects list                 # human table, all hosts\n" +
 			"  forgectl projects list --json          # machine-readable, for scripts\n" +
@@ -40,6 +43,15 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 
 			if host != "" && host != "github" && host != "gitea" {
 				return fmt.Errorf("invalid --host %q: want github or gitea", host)
+			}
+
+			// One stderr line names a non-default GitHub host, so a surprising
+			// inventory is never silently attributable to the wrong forge. The
+			// value is ResolveHost-validated at construction; termsafe guards
+			// the render anyway. Stderr only — a --json pipe stays clean.
+			if gh := client.GitHubHost(); gh != githubauth.DefaultHost {
+				// Best-effort diagnostic write, same as every stderr note here.
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "github host: %s\n", termsafe.SafeLine(gh))
 			}
 
 			repos, notes, err := client.Inventory(ctx)

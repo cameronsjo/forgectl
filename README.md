@@ -568,12 +568,40 @@ count and length, and deduplicated case-insensitively before any of them becomes
 a `gh` argument; a malformed entry anywhere in the list means zero queries rather
 than a quietly narrowed inventory.
 
-**Every GitHub call is pinned to `github.com`**, whatever `GH_HOST` says in the
-surrounding shell. GitHub Enterprise is not supported: an ambient enterprise host
-is overridden rather than queried, because listing an enterprise instance's repos
-and labeling them `github` would put wrong data in the inventory. The Gitea
+**Every GitHub call on the projects/review inventory path is pinned**, whatever
+`GH_HOST` says in the surrounding shell — an ambient host is overridden rather
+than queried, because listing another instance's repos and labeling them
+`github` would put wrong data in the inventory. The pinned value is
+per-deployment: it defaults to `github.com`, and one config line points the
+whole deployment (projects **and** review — one host, so clones and review keys
+can never disagree) at a GitHub Enterprise instance instead:
+
+```toml
+[github]
+host = "github.example.com" # lowercase hostname; no port, no scheme
+```
+
+Two prerequisites and one consequence:
+
+- **`gh auth login --hostname <host>` must have been run first.** On any
+  non-default host, forgectl scrubs `GH_TOKEN`, `GITHUB_TOKEN`,
+  `GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN` from every gh
+  subprocess — a config line must not be able to redirect an ambient
+  credential to a host of its choosing — so gh's stored credential for that
+  hostname is the only one that works.
+- The host is validated (lowercase DNS name, no port, no scheme, no path); an
+  invalid value or an unreadable config file fails both command trees loudly
+  instead of silently falling back to github.com. A GHE host served on a
+  nonstandard port is not configurable.
+- Flipping the host later leaves the old host's reviewed marks inert (never
+  pruned, never re-verified) and its clones as unmatched local dirs; there is
+  no migration tooling.
+
+The pin covers the projects/review inventory path only — `branch`, `pr`, and
+`doctor` gh calls remain unpinned and github.com-shaped
+([forgectl#413](https://github.com/cameronsjo/forgectl/issues/413)). The Gitea
 source is unchanged and keeps its existing `git.sjo.lol` assumptions — forgectl
-does not claim arbitrary-Gitea portability either.
+does not claim arbitrary-Gitea portability either (same follow-up).
 
 If `forgectl init` already wrote an active `owners = ["…"]` into your
 config.toml, it stays exactly as written: init never rewrites a section that is

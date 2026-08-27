@@ -45,21 +45,35 @@ var ErrGitHubQueriesUnavailable = errors.New("github review queries unavailable"
 type GitHub struct {
 	run exec.Runner
 	// configured is the raw [review].owners list. Empty means "the
-	// authenticated GitHub.com login", resolved per Items call.
+	// authenticated login on the effective host", resolved per Items call.
 	configured []string
+	// host is the effective GitHub host ([github].host, ResolveHost output;
+	// GitHubHost when unconfigured). Every gh call is pinned to it and every
+	// Item is stamped with it — one value for both, so a row can never claim
+	// a host its query did not run against.
+	host string
 }
 
-// NewGitHub builds the source over run for the given owners. The runner is
-// wrapped so every gh call it makes — owner discovery, the issue leg, and the
-// shared pr.SearchPRs leg — is pinned to github.com regardless of an ambient
-// GH_HOST. Without that pin an enterprise instance's rows would come back
-// stamped as github.com data.
+// NewGitHub builds the source over run for the given owners and effective
+// host. The runner is wrapped so every gh call it makes — owner discovery,
+// the issue leg, and the shared pr.SearchPRs leg — is pinned to that host
+// regardless of an ambient GH_HOST. Without that pin another instance's rows
+// would come back stamped as the configured host's data.
 //
 // Owner validation and resolution happen in Items rather than here: config is
 // low-trust input headed for an argv, and a constructor with no error return
-// is the wrong place to refuse it.
-func NewGitHub(run exec.Runner, owners []string) *GitHub {
-	return &GitHub{run: githubauth.Runner(run), configured: owners}
+// is the wrong place to refuse it. An invalid host takes the same shape: the
+// wrapped runner fails every gh call closed, so Items errors loudly. The
+// stamped host is the RESOLVED value ("" input → GitHubHost), matching what
+// the pin actually set.
+func NewGitHub(run exec.Runner, owners []string, host string) *GitHub {
+	resolved, err := githubauth.ResolveHost(host)
+	if err != nil {
+		// Keep the invalid input out of the stamp; the fail-closed runner
+		// guarantees no Item is ever built under this value anyway.
+		resolved = ""
+	}
+	return &GitHub{run: githubauth.Runner(run, host), configured: owners, host: resolved}
 }
 
 // Name implements Source.
@@ -85,7 +99,7 @@ type ghQueryResult struct {
 // ErrGitHubQueriesUnavailable plus, when applicable, the context sentinel,
 // never a raw runner cause.
 func (g *GitHub) Items(ctx context.Context) ([]Item, []string, error) {
-	owners, err := githubauth.ResolveOwners(ctx, g.run, g.configured)
+	owners, err := githubauth.ResolveOwners(ctx, g.run, g.configured, g.host)
 	if err != nil {
 		slog.Warn("Failed to resolve GitHub review owners.", "configured", len(g.configured), "error", err)
 		return nil, nil, fmt.Errorf("%w: %w", ErrGitHubQueriesUnavailable, err)
@@ -185,7 +199,7 @@ func (g *GitHub) searchPRs(ctx context.Context, owner string) ([]Item, bool, err
 	for _, p := range prs {
 		items = append(items, Item{
 			Kind:      KindPR,
-			Host:      GitHubHost,
+			Host:      g.host,
 			Owner:     p.Ref.Owner,
 			Repo:      p.Ref.Repo,
 			Number:    p.Ref.Number,
@@ -236,7 +250,7 @@ func (g *GitHub) searchIssues(ctx context.Context, owner string) ([]Item, bool, 
 	if err != nil {
 		return nil, false, err
 	}
-	items, rawCount, err := parseSearchIssues(out)
+	items, rawCount, err := parseSearchIssues(out, g.host)
 	if err != nil {
 		return nil, false, err
 	}
@@ -255,7 +269,7 @@ func (g *GitHub) searchIssues(ctx context.Context, owner string) ([]Item, bool, 
 //
 // rawCount is the PRE-filter row count for the truncation sentinel (see
 // searchIssues).
-func parseSearchIssues(jsonOut string) (items []Item, rawCount int, err error) {
+func parseSearchIssues(jsonOut, host string) (items []Item, rawCount int, err error) {
 	if strings.TrimSpace(jsonOut) == "" {
 		return nil, 0, nil
 	}
@@ -274,7 +288,7 @@ func parseSearchIssues(jsonOut string) (items []Item, rawCount int, err error) {
 			slog.Warn("Skipping pull request row in issue search.", "url", r.URL)
 			continue
 		}
-		item, err := itemFromParts(KindIssue, GitHubHost, owner, repo, r.Number)
+		item, err := itemFromParts(KindIssue, host, owner, repo, r.Number)
 		if err != nil {
 			slog.Warn("Skipping issue with invalid ref.", "nameWithOwner", r.Repository.NameWithOwner, "number", r.Number, "error", err)
 			continue

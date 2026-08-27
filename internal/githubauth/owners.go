@@ -37,18 +37,18 @@ func ValidOwner(owner string) bool { return pr.ValidOwnerRepoPart(owner) }
 // ResolveOwners returns the owner set an operation should enumerate.
 //
 // A non-empty configured list is authoritative and makes zero discovery calls.
-// An absent or explicitly empty list resolves the authenticated GitHub.com
-// login exactly once, through the pinned Runner so an ambient GH_HOST cannot
-// redirect the question at a GitHub Enterprise instance.
+// An absent or explicitly empty list resolves the authenticated login on the
+// configured host exactly once, through the pinned Runner so an ambient
+// GH_HOST cannot redirect the question at a host nobody chose.
 //
 // Every value — configured or discovered — passes the same validation and
 // byte budget, and the whole set is deduplicated case-insensitively (GitHub
 // logins are case-insensitive; the first spelling and input order are kept)
 // and count-bounded before it is returned. A refusal returns no owners at all:
 // a bad later element must not leave earlier elements queryable.
-func ResolveOwners(ctx context.Context, run exec.Runner, configured []string) ([]string, error) {
+func ResolveOwners(ctx context.Context, run exec.Runner, configured []string, host string) ([]string, error) {
 	if len(configured) == 0 {
-		login, err := discoverLogin(ctx, run)
+		login, err := discoverLogin(ctx, run, host)
 		if err != nil {
 			return nil, err
 		}
@@ -57,10 +57,12 @@ func ResolveOwners(ctx context.Context, run exec.Runner, configured []string) ([
 	return normalizeOwners(configured)
 }
 
-// discoverLogin asks GitHub.com who the operator is, through the pinned
-// runner, and validates the answer as hostile input.
-func discoverLogin(ctx context.Context, run exec.Runner) (string, error) {
-	out, err := Runner(run).Run(ctx, "gh", "api", "user", "--jq", ".login")
+// discoverLogin asks the configured GitHub host who the operator is, through
+// the pinned runner, and validates the answer as hostile input. Wrapping here
+// is safe even when run is already pinned: the double wrap is idempotent for
+// the same host.
+func discoverLogin(ctx context.Context, run exec.Runner, host string) (string, error) {
+	out, err := Runner(run, host).Run(ctx, "gh", "api", "user", "--jq", ".login")
 	if err != nil {
 		// The pinned runner has already reduced a cancellation or expired
 		// deadline to a bare standard sentinel; join it so callers keep both

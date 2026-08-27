@@ -48,7 +48,7 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 
 	switch r.Host {
 	case "github":
-		if err := cloneBareRepo(ctx, c.run, r.Owner+"/"+r.Name, bareDir); err != nil {
+		if err := cloneBareRepo(ctx, c.run, r.Owner+"/"+r.Name, bareDir, c.gitHubHost); err != nil {
 			slog.Error("Failed to bare-clone from GitHub.", "repo", r.Owner+"/"+r.Name, "dest", bareDir, "error", err)
 			return "", err
 		}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 )
 
 // repoJSON is one gh repo list record for owner/name.
@@ -37,7 +38,7 @@ func TestGithubList_ConfiguredOwnersQueryEachOnceAndPinTheHost(t *testing.T) {
 		},
 	}
 
-	repos, notes, err := githubList(context.Background(), fake, []string{"alpha", "beta"})
+	repos, notes, err := githubList(context.Background(), fake, []string{"alpha", "beta"}, githubauth.DefaultHost)
 	if err != nil {
 		t.Fatalf("githubList: %v", err)
 	}
@@ -81,7 +82,7 @@ func TestGithubList_AbsentConfigDiscoversLoginOnce(t *testing.T) {
 		},
 	}
 
-	repos, _, err := githubList(context.Background(), fake, nil)
+	repos, _, err := githubList(context.Background(), fake, nil, githubauth.DefaultHost)
 	if err != nil {
 		t.Fatalf("githubList: %v", err)
 	}
@@ -113,7 +114,7 @@ func TestGithubList_CaseVariantsQueryOnce(t *testing.T) {
 		},
 	}
 
-	if _, _, err := githubList(context.Background(), fake, []string{"Alpha", "alpha", "ALPHA"}); err != nil {
+	if _, _, err := githubList(context.Background(), fake, []string{"Alpha", "alpha", "ALPHA"}, githubauth.DefaultHost); err != nil {
 		t.Fatalf("githubList: %v", err)
 	}
 
@@ -144,7 +145,7 @@ func TestGithubList_MalformedOwnerYieldsZeroQueries(t *testing.T) {
 				},
 			}
 
-			repos, _, err := githubList(context.Background(), fake, tc.configured)
+			repos, _, err := githubList(context.Background(), fake, tc.configured, githubauth.DefaultHost)
 
 			if err == nil {
 				t.Fatalf("githubList = %+v, want an error", repos)
@@ -175,7 +176,7 @@ func TestGithubList_PartialFailureKeepsHealthyRowsAndNotesCategorically(t *testi
 		},
 	}
 
-	repos, notes, err := githubList(context.Background(), fake, []string{"alpha", "beta"})
+	repos, notes, err := githubList(context.Background(), fake, []string{"alpha", "beta"}, githubauth.DefaultHost)
 
 	if err != nil {
 		t.Fatalf("partial failure returned err = %v, want nil with healthy rows preserved", err)
@@ -197,7 +198,7 @@ func TestGithubList_EveryOwnerFailingReturnsSafeAggregate(t *testing.T) {
 		RunFunc: func(name string, args []string) (string, error) { return "", hostile },
 	}
 
-	repos, notes, err := githubList(context.Background(), fake, []string{"alpha", "beta"})
+	repos, notes, err := githubList(context.Background(), fake, []string{"alpha", "beta"}, githubauth.DefaultHost)
 
 	if err == nil {
 		t.Fatal("all owners failing must return an error")
@@ -219,7 +220,7 @@ func TestGithubList_BadJSONIsACategoricalOwnerFailure(t *testing.T) {
 		RunFunc: func(name string, args []string) (string, error) { return "not json", nil },
 	}
 
-	_, notes, err := githubList(context.Background(), fake, []string{"alpha"})
+	_, notes, err := githubList(context.Background(), fake, []string{"alpha"}, githubauth.DefaultHost)
 
 	if err == nil {
 		t.Fatal("a JSON parse failure for the only owner must return an error")
@@ -237,7 +238,7 @@ func TestGithubListOrg_UsesArbitraryLoginAndPinsTheHost(t *testing.T) {
 		},
 	}
 
-	repos, err := githubListOrg(context.Background(), fake, "anthropics")
+	repos, err := githubListOrg(context.Background(), fake, "anthropics", githubauth.DefaultHost)
 	if err != nil {
 		t.Fatalf("githubListOrg: %v", err)
 	}
@@ -258,7 +259,7 @@ func TestGithubListOrg_RejectsHostileOrgBeforeInvoking(t *testing.T) {
 	for _, org := range []string{"--limit", "..", "a/b", "own er", ""} {
 		fake := &exec.FakeRunner{}
 
-		if _, err := githubListOrg(context.Background(), fake, org); err == nil {
+		if _, err := githubListOrg(context.Background(), fake, org, githubauth.DefaultHost); err == nil {
 			t.Errorf("githubListOrg(%q) = nil error, want a rejection", org)
 		}
 		if len(fake.Calls) != 0 {

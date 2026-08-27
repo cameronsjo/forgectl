@@ -418,7 +418,7 @@ func TestParseTeaIssues_KeepsOwnerNamedLocal(t *testing.T) {
 // TestParseWorkRefForHosts_OwnerNamedLocal is the other half of #185: marking
 // git.sjo.lol/local/tools#5 reviewed must produce a key, not an error.
 func TestParseWorkRefForHosts_OwnerNamedLocal(t *testing.T) {
-	got, err := ParseWorkRefForHosts("git.sjo.lol/local/tools#5", []string{"git.sjo.lol"})
+	got, err := ParseWorkRefForHosts("git.sjo.lol/local/tools#5", GitHubHost, []string{"git.sjo.lol"})
 	if err != nil {
 		t.Fatalf("ParseWorkRefForHosts rejected a real owner named %q: %v", "local", err)
 	}
@@ -447,7 +447,7 @@ func TestParseWorkRefForHosts(t *testing.T) {
 		"https://git.sjo.lol/cameron/forgectl/issues/12",
 		"https://git.sjo.lol/cameron/forgectl/pulls/12",
 	} {
-		got, err := ParseWorkRefForHosts(in, hosts)
+		got, err := ParseWorkRefForHosts(in, GitHubHost, hosts)
 		if err != nil {
 			t.Errorf("ParseWorkRefForHosts(%q): %v", in, err)
 			continue
@@ -458,7 +458,7 @@ func TestParseWorkRefForHosts(t *testing.T) {
 	}
 
 	// The unqualified github.com forms still work through the same function.
-	if got, err := ParseWorkRefForHosts("cameronsjo/forgectl#76", hosts); err != nil || got != "github.com/cameronsjo/forgectl#76" {
+	if got, err := ParseWorkRefForHosts("cameronsjo/forgectl#76", GitHubHost, hosts); err != nil || got != "github.com/cameronsjo/forgectl#76" {
 		t.Errorf("ParseWorkRefForHosts(github form) = %q, %v, want github.com/cameronsjo/forgectl#76, nil", got, err)
 	}
 
@@ -467,14 +467,14 @@ func TestParseWorkRefForHosts(t *testing.T) {
 		"unknown.example/cameron/forgectl#1",
 		"https://unknown.example/cameron/forgectl/issues/1",
 	} {
-		if _, err := ParseWorkRefForHosts(in, hosts); err == nil {
+		if _, err := ParseWorkRefForHosts(in, GitHubHost, hosts); err == nil {
 			t.Errorf("ParseWorkRefForHosts(%q): unconfigured host must be rejected", in)
 		}
 	}
 
 	// With no hosts configured, a host-qualified ref is rejected outright —
 	// this is exactly ParseWorkRef's behavior.
-	if _, err := ParseWorkRefForHosts("git.sjo.lol/cameron/forgectl#12", nil); err == nil {
+	if _, err := ParseWorkRefForHosts("git.sjo.lol/cameron/forgectl#12", GitHubHost, nil); err == nil {
 		t.Error("host-qualified ref must be rejected when no hosts are configured")
 	}
 }
@@ -491,7 +491,7 @@ func TestParseWorkRefForHosts_PortedHost(t *testing.T) {
 		"https://git.sjo.lol:3000/cameron/forgectl/issues/12",
 		"https://git.sjo.lol:3000/cameron/forgectl/pulls/12",
 	} {
-		got, err := ParseWorkRefForHosts(in, hosts)
+		got, err := ParseWorkRefForHosts(in, GitHubHost, hosts)
 		if err != nil {
 			t.Errorf("ParseWorkRefForHosts(%q): %v", in, err)
 			continue
@@ -506,7 +506,7 @@ func TestParseWorkRefForHosts_PortedHost(t *testing.T) {
 		"git.sjo.lol:4000/cameron/forgectl#12",
 		"https://git.sjo.lol:4000/cameron/forgectl/issues/12",
 	} {
-		if _, err := ParseWorkRefForHosts(in, hosts); err == nil {
+		if _, err := ParseWorkRefForHosts(in, GitHubHost, hosts); err == nil {
 			t.Errorf("ParseWorkRefForHosts(%q): unlisted host:port must be rejected", in)
 		}
 	}

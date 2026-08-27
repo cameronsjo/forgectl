@@ -895,3 +895,43 @@ func TestFanOut_PreservesOrder(t *testing.T) {
 		}
 	})
 }
+
+// TestInventory_GHEHostPinsAndScrubs: WithGitHubHost threads all the way to
+// the gh subprocess env — the pin carries the configured host and, because it
+// is non-default, the token variables are forced empty. The observable
+// consequence (finding 4): gh cannot use an ambient credential; only its
+// hosts.yml credential for that host remains.
+func TestInventory_GHEHostPinsAndScrubs(t *testing.T) {
+	t.Setenv("GH_HOST", "ambient.example.test")
+	t.Setenv("GH_TOKEN", "ambient-token")
+	fake := &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		if name == "gh" {
+			return `[]`, nil
+		}
+		return "", nil
+	}}
+	c := New(fake, WithGitHubOwners([]string{"acme"}), WithGitHubHost("github.example.com"))
+
+	if _, err := c.ListOrg(t.Context(), "acme"); err != nil {
+		t.Fatalf("ListOrg: %v", err)
+	}
+
+	var ghCall *exec.Call
+	for i := range fake.Calls {
+		if fake.Calls[i].Name == "gh" {
+			ghCall = &fake.Calls[i]
+			break
+		}
+	}
+	if ghCall == nil {
+		t.Fatalf("no gh call recorded: %+v", fake.Calls)
+	}
+	if got := ghCall.Env["GH_HOST"]; got != "github.example.com" {
+		t.Errorf("GH_HOST = %q, want github.example.com", got)
+	}
+	for _, k := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} {
+		if got, present := ghCall.Env[k]; !present || got != "" {
+			t.Errorf("%s = %q (present=%v), want forced empty on a non-default host", k, got, present)
+		}
+	}
+}

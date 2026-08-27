@@ -128,6 +128,19 @@ const sessionsScaffold = `
 # runbooks_dir = ""  # default: ${XDG_STATE_HOME:-~/.local/state}/cadence/runbooks; ~ expanded
 `
 
+// githubScaffold is the [github] section: the one GitHub host this
+// deployment's projects and review inventories talk to. Commented rather than
+// active: the baked default is github.com, and writing an active host here
+// would pin a GitHub Enterprise hostname into every machine's config.toml.
+// Setting it requires a stored credential for that host (`gh auth login
+// --hostname <host>`) — on a non-default host forgectl scrubs the gh token
+// env vars, so the hosts.yml credential is the only one gh can use.
+const githubScaffold = `
+# ── github: deployment-wide GitHub host (projects + review) ─────────────────
+[github]
+# host = "" # GitHub hostname, e.g. "github.example.com"; empty = github.com. Needs: gh auth login --hostname <host>
+`
+
 // projectsScaffold is the [projects] section. Commented rather than active:
 // there is no baked owner to mirror any more — an unset list resolves the
 // authenticated GitHub.com login at run time (internal/githubauth) — so
@@ -232,6 +245,7 @@ var initSections = []initSection{
 	{"docker", "docker", dockerScaffold},
 	{"clean", "clean", cleanScaffold},
 	{"sessions", "sessions", sessionsScaffold},
+	{"github", "github", githubScaffold},
 	{"projects", "projects", projectsScaffold},
 	{"review", "review", reviewScaffold},
 	{"docs", "docs", docsScaffold},

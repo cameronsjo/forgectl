@@ -32,15 +32,15 @@ type ownerListResult struct {
 // and neither the notes nor that error ever carry raw gh output — gh stderr
 // can hold tokens and terminal control sequences, and these strings end up on
 // a terminal.
-func githubList(ctx context.Context, run exec.Runner, configured []string) ([]Repo, []string, error) {
-	owners, err := githubauth.ResolveOwners(ctx, run, configured)
+func githubList(ctx context.Context, run exec.Runner, configured []string, host string) ([]Repo, []string, error) {
+	owners, err := githubauth.ResolveOwners(ctx, run, configured, host)
 	if err != nil {
 		slog.Warn("Failed to resolve GitHub owners.", "configured", len(configured), "error", err)
 		return nil, nil, err
 	}
 
 	results := fanOut(owners, func(owner string) ownerListResult {
-		repos, err := githubListOrg(ctx, run, owner)
+		repos, err := githubListOrg(ctx, run, owner, host)
 		return ownerListResult{repos: repos, err: err}
 	})
 
@@ -77,14 +77,14 @@ func githubList(ctx context.Context, run exec.Runner, configured []string) ([]Re
 // The call is host-pinned, so an ambient GH_HOST cannot silently redirect the
 // listing at a GitHub Enterprise instance and have its repos stamped
 // Host: "github".
-func githubListOrg(ctx context.Context, run exec.Runner, org string) ([]Repo, error) {
+func githubListOrg(ctx context.Context, run exec.Runner, org, host string) ([]Repo, error) {
 	if !githubauth.ValidOwner(org) {
 		// Deliberately value-free: this string can reach a terminal, and org
 		// is exactly the untrusted value that failed validation.
 		return nil, errors.New("GitHub owner is outside the allowed owner charset")
 	}
 	slog.Debug("Preparing to fetch GitHub repos.", "owner", org)
-	out, err := githubauth.Runner(run).Run(ctx, "gh", "repo", "list", org,
+	out, err := githubauth.Runner(run, host).Run(ctx, "gh", "repo", "list", org,
 		"--limit", "1000", "--json", "name,sshUrl,isPrivate")
 	if err != nil {
 		slog.Error("Failed to fetch GitHub repos.", "owner", org, "error", err)
@@ -124,9 +124,9 @@ func githubListOrg(ctx context.Context, run exec.Runner, org string) ([]Repo, er
 // mislabel a table row — it leaves a checkout that originMatches then disagrees
 // with on every later run. Taking exec.Runner (not a bare Run-only interface)
 // is what lets the wrap live in here, where no future caller can forget it.
-func cloneRepo(ctx context.Context, run exec.Runner, name, dest string) error {
+func cloneRepo(ctx context.Context, run exec.Runner, name, dest, host string) error {
 	slog.Debug("Preparing to clone from GitHub.", "repo", name, "dest", dest)
-	_, err := githubauth.Runner(run).Run(ctx, "gh", "repo", "clone", name, dest)
+	_, err := githubauth.Runner(run, host).Run(ctx, "gh", "repo", "clone", name, dest)
 	if err != nil {
 		slog.Error("Failed to clone from GitHub.", "repo", name, "dest", dest, "error", err)
 		return fmt.Errorf("gh repo clone %s: %w", name, err)
@@ -140,9 +140,9 @@ func cloneRepo(ctx context.Context, run exec.Runner, name, dest string) error {
 // gh's credential handling for github.com, same as cloneRepo — the worktree
 // layout's bare-clone step — and the same in-function host pin, for the same
 // reason: a bare clone persists to disk too.
-func cloneBareRepo(ctx context.Context, run exec.Runner, name, dest string) error {
+func cloneBareRepo(ctx context.Context, run exec.Runner, name, dest, host string) error {
 	slog.Debug("Preparing to bare-clone from GitHub.", "repo", name, "dest", dest)
-	_, err := githubauth.Runner(run).Run(ctx, "gh", "repo", "clone", name, dest, "--", "--bare")
+	_, err := githubauth.Runner(run, host).Run(ctx, "gh", "repo", "clone", name, dest, "--", "--bare")
 	if err != nil {
 		slog.Error("Failed to bare-clone from GitHub.", "repo", name, "dest", dest, "error", err)
 		return fmt.Errorf("gh repo clone --bare %s: %w", name, err)

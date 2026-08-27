@@ -491,7 +491,7 @@ func TestLoad(t *testing.T) {
 		}
 	})
 
-	t.Run("malformed TOML returns defaults without error", func(t *testing.T) {
+	t.Run("malformed TOML returns defaults marked decode-degraded", func(t *testing.T) {
 		dir := redirectConfigDir(t)
 		cfgDir := filepath.Join(dir, "forgectl")
 		if err := os.MkdirAll(cfgDir, 0o700); err != nil {
@@ -502,8 +502,38 @@ func TestLoad(t *testing.T) {
 			t.Fatalf("write config: %v", err)
 		}
 		got := Load()
+		// The degraded marker is the ONLY thing set: a partially-decoded file
+		// must not silently pass for an absent one — a GHE deployment whose
+		// [github] host line was lost to a parse error would otherwise query
+		// public github.com. Host-sensitive seams (projects, review) read the
+		// marker and refuse loudly.
+		if !got.DecodeDegraded() {
+			t.Error("Load() with malformed file: DecodeDegraded() = false, want true")
+		}
+		got.decodeDegraded = false
 		if !reflect.DeepEqual(got, Config{}) {
-			t.Errorf("Load() with malformed file = %+v, want zero-value Config", got)
+			t.Errorf("Load() with malformed file = %+v, want zero-value Config apart from the degraded marker", got)
+		}
+	})
+
+	t.Run("valid file is not decode-degraded", func(t *testing.T) {
+		dir := redirectConfigDir(t)
+		cfgDir := filepath.Join(dir, "forgectl")
+		if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte("[github]\nhost = \"github.example.com\"\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		got := Load()
+		if got.DecodeDegraded() {
+			t.Error("Load() with valid file: DecodeDegraded() = true, want false")
+		}
+		if got.Github.Host != "github.example.com" {
+			t.Errorf("Github.Host = %q, want github.example.com", got.Github.Host)
+		}
+		if got.Github.IsZero() {
+			t.Error("GithubConfig.IsZero() = true with host set, want false")
 		}
 	})
 }
@@ -699,5 +729,63 @@ func TestPrConfig_IsZeroCoversEveryField(t *testing.T) {
 		if pc.IsZero() {
 			t.Errorf("a [pr] section setting only %s must not report as absent", name)
 		}
+	}
+}
+
+// TestGithubConfig_FieldSetIsPinned mirrors TestPrConfig_FieldSetIsPinned:
+// [github] is a SECURITY BOUNDARY carrying the host only. The host value is
+// what the gh subprocess pin and the token scrub key off, so a new field here
+// widens what a config file can steer and must be a deliberate act.
+func TestGithubConfig_FieldSetIsPinned(t *testing.T) {
+	want := map[string]bool{"Host": true}
+
+	tp := reflect.TypeOf(GithubConfig{})
+	got := make(map[string]bool, tp.NumField())
+	for i := 0; i < tp.NumField(); i++ {
+		got[tp.Field(i).Name] = true
+	}
+
+	for name := range got {
+		if !want[name] {
+			t.Errorf("GithubConfig gained field %q: [github] carries the host only — "+
+				"widening what a config file can steer must break this pin first", name)
+		}
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("GithubConfig lost field %q", name)
+		}
+	}
+}
+
+// TestGithubConfig_DecodeAndIsZero covers the [github] section's decode shape
+// and the house zero-means-absent convention.
+func TestGithubConfig_DecodeAndIsZero(t *testing.T) {
+	cfg, err := DecodeStrict([]byte("[github]\nhost = \"github.example.com\"\n"))
+	if err != nil {
+		t.Fatalf("DecodeStrict: %v", err)
+	}
+	if cfg.Github.Host != "github.example.com" {
+		t.Errorf("Github.Host = %q, want github.example.com", cfg.Github.Host)
+	}
+	if cfg.Github.IsZero() {
+		t.Error("IsZero() = true with host set, want false")
+	}
+	if !(GithubConfig{}).IsZero() {
+		t.Error("zero GithubConfig.IsZero() = false, want true")
+	}
+}
+
+// TestLoad_UnresolvableConfigDirIsDecodeDegraded: when the config file cannot
+// even be located, any [github] host the operator wrote is unreadable — the
+// host-sensitive seams must refuse, not silently query github.com.
+func TestLoad_UnresolvableConfigDirIsDecodeDegraded(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	if _, err := ConfigPath(); err == nil {
+		t.Skip("ConfigPath still resolves with HOME unset on this platform")
+	}
+	if got := Load(); !got.DecodeDegraded() {
+		t.Error("Load() with unresolvable config dir: DecodeDegraded() = false, want true")
 	}
 }

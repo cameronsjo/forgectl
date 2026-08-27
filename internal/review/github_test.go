@@ -64,7 +64,7 @@ func TestGitHubItems_BothLegsMapped(t *testing.T) {
 		return "", nil
 	}}
 
-	items, notes, err := NewGitHub(fake, []string{"cameronsjo"}).Items(context.Background())
+	items, notes, err := NewGitHub(fake, []string{"cameronsjo"}, GitHubHost).Items(context.Background())
 	if err != nil {
 		t.Fatalf("Items: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestGitHubItems_DegradedLegBecomesNote(t *testing.T) {
 		return "", nil
 	}}
 
-	items, notes, err := NewGitHub(fake, []string{"cameronsjo"}).Items(context.Background())
+	items, notes, err := NewGitHub(fake, []string{"cameronsjo"}, GitHubHost).Items(context.Background())
 	if err != nil {
 		t.Fatalf("Items: %v", err)
 	}
@@ -130,13 +130,13 @@ func TestGitHubItems_AllQueriesFailed(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		return "", errors.New("gh: not authenticated")
 	}}
-	if _, _, err := NewGitHub(fake, []string{"cameronsjo"}).Items(context.Background()); err == nil {
+	if _, _, err := NewGitHub(fake, []string{"cameronsjo"}, GitHubHost).Items(context.Background()); err == nil {
 		t.Error("every query failing must be an error")
 	}
 }
 
 func TestGitHubItems_NoOwners(t *testing.T) {
-	if _, _, err := NewGitHub(&exec.FakeRunner{}, nil).Items(context.Background()); err == nil {
+	if _, _, err := NewGitHub(&exec.FakeRunner{}, nil, GitHubHost).Items(context.Background()); err == nil {
 		t.Error("zero owners must be an error")
 	}
 }
@@ -149,7 +149,7 @@ func TestGitHubItems_RejectsMalformedOwner(t *testing.T) {
 	for _, owner := range []string{"bad owner", "-cameronsjo"} {
 		t.Run(owner, func(t *testing.T) {
 			fake := &exec.FakeRunner{}
-			if _, _, err := NewGitHub(fake, []string{owner}).Items(context.Background()); err == nil {
+			if _, _, err := NewGitHub(fake, []string{owner}, GitHubHost).Items(context.Background()); err == nil {
 				t.Error("malformed owner must be an error")
 			}
 			if len(fake.Calls) != 0 {
@@ -173,7 +173,7 @@ func TestGitHubItems_TruncationNote(t *testing.T) {
 		return "[]", nil
 	}}
 
-	_, notes, err := NewGitHub(fake, []string{"cameronsjo"}).Items(context.Background())
+	_, notes, err := NewGitHub(fake, []string{"cameronsjo"}, GitHubHost).Items(context.Background())
 	if err != nil {
 		t.Fatalf("Items: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestParseSearchIssues_HostileRows(t *testing.T) {
 	pullSmuggle := strings.Replace(issueRow("cameronsjo/forgectl", 2), "/issues/2", "/pull/2", 1)
 	good := issueRow("cameronsjo/forgectl", 3)
 
-	items, rawCount, err := parseSearchIssues("[" + bad + "," + pullSmuggle + "," + good + "]")
+	items, rawCount, err := parseSearchIssues("["+bad+","+pullSmuggle+","+good+"]", GitHubHost)
 	if err != nil {
 		t.Fatalf("parseSearchIssues: %v", err)
 	}
@@ -209,11 +209,53 @@ func TestParseSearchIssues_HostileRows(t *testing.T) {
 }
 
 func TestParseSearchIssues_MalformedAndEmpty(t *testing.T) {
-	if _, _, err := parseSearchIssues("{not an array"); err == nil {
+	if _, _, err := parseSearchIssues("{not an array", GitHubHost); err == nil {
 		t.Error("malformed JSON: want error, got nil")
 	}
-	items, rawCount, err := parseSearchIssues("   ")
+	items, rawCount, err := parseSearchIssues("   ", GitHubHost)
 	if err != nil || items != nil || rawCount != 0 {
 		t.Errorf("empty output: want (nil, 0, nil), got (%+v, %d, %v)", items, rawCount, err)
+	}
+}
+
+// TestNewGitHub_GHEHostStampsItemsAndPinsQueries: the effective host is one
+// value for both the subprocess pin and the Item stamp — a row can never
+// claim a host its query did not run against — and the non-default host
+// scrubs the token env vars.
+func TestNewGitHub_GHEHostStampsItemsAndPinsQueries(t *testing.T) {
+	t.Setenv("GH_HOST", "ambient.example.test")
+	t.Setenv("GH_ENTERPRISE_TOKEN", "ambient-enterprise-token")
+	const ghe = "github.example.com"
+	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		for _, a := range args {
+			if a == "issues" {
+				return `[{"number":7,"title":"t","url":"https://github.example.com/acme/tool/issues/7","author":{"login":"a"},"updatedAt":"2026-01-01T00:00:00Z","state":"open","labels":[],"repository":{"nameWithOwner":"acme/tool"}}]`, nil
+			}
+		}
+		return `[]`, nil
+	}}
+
+	items, notes, err := NewGitHub(fake, []string{"acme"}, ghe).Items(context.Background())
+	if err != nil {
+		t.Fatalf("Items: %v (notes %v)", err, notes)
+	}
+	if len(items) != 1 || items[0].Host != ghe {
+		t.Fatalf("items = %+v, want one item stamped Host=%q", items, ghe)
+	}
+	if key := items[0].Key(); key != ghe+"/acme/tool#7" {
+		t.Errorf("Key() = %q, want %q", key, ghe+"/acme/tool#7")
+	}
+	for _, c := range fake.Calls {
+		if c.Name != "gh" {
+			continue
+		}
+		if got := c.Env["GH_HOST"]; got != ghe {
+			t.Errorf("call %v ran with GH_HOST=%q, want %q", c.Args, got, ghe)
+		}
+		for _, k := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} {
+			if got, present := c.Env[k]; !present || got != "" {
+				t.Errorf("call %v: %s = %q (present=%v), want forced empty", c.Args, k, got, present)
+			}
+		}
 	}
 }
