@@ -84,7 +84,7 @@ func TestRunner_PinsGhToGitHubComDespiteAmbientHost(t *testing.T) {
 	t.Setenv("GH_HOST", "ghe.example.test")
 	fake := &exec.FakeRunner{}
 
-	if _, err := Runner(fake).Run(t.Context(), "gh", "api", "user"); err != nil {
+	if _, err := Runner(fake, DefaultHost).Run(t.Context(), "gh", "api", "user"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -92,15 +92,15 @@ func TestRunner_PinsGhToGitHubComDespiteAmbientHost(t *testing.T) {
 	if last.Name != "gh" {
 		t.Fatalf("command name = %q, want gh", last.Name)
 	}
-	if got := last.Env["GH_HOST"]; got != Host {
-		t.Fatalf("GH_HOST = %q, want %q", got, Host)
+	if got := last.Env["GH_HOST"]; got != DefaultHost {
+		t.Fatalf("GH_HOST = %q, want %q", got, DefaultHost)
 	}
 }
 
 func TestRunner_DelegatesNonGhUntouched(t *testing.T) {
 	fake := &exec.FakeRunner{}
 
-	if _, err := Runner(fake).Run(t.Context(), "git", "status"); err != nil {
+	if _, err := Runner(fake, DefaultHost).Run(t.Context(), "git", "status"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -122,7 +122,7 @@ func TestRunner_DelegatesNonGhUntouched(t *testing.T) {
 func TestRunner_RunWithEnvCannotEscapeThePin(t *testing.T) {
 	fake := &exec.FakeRunner{}
 
-	_, err := Runner(fake).RunWithEnv(t.Context(),
+	_, err := Runner(fake, DefaultHost).RunWithEnv(t.Context(),
 		map[string]string{"GH_HOST": "ghe.example.test", "GH_TOKEN": "keep-me"},
 		"gh", "api", "user")
 	if err != nil {
@@ -130,8 +130,8 @@ func TestRunner_RunWithEnvCannotEscapeThePin(t *testing.T) {
 	}
 
 	last := fake.Last()
-	if got := last.Env["GH_HOST"]; got != Host {
-		t.Errorf("GH_HOST = %q, want %q — the caller's value must not win", got, Host)
+	if got := last.Env["GH_HOST"]; got != DefaultHost {
+		t.Errorf("GH_HOST = %q, want %q — the caller's value must not win", got, DefaultHost)
 	}
 	if got := last.Env["GH_TOKEN"]; got != "keep-me" {
 		t.Errorf("GH_TOKEN = %q, want the caller's other vars preserved", got)
@@ -148,7 +148,7 @@ func TestRunner_RunWithInputRefusesGh(t *testing.T) {
 	t.Setenv("GH_HOST", "ghe.example.test")
 	fake := &exec.FakeRunner{}
 
-	_, err := Runner(fake).RunWithInput(t.Context(), "query{}", "gh", "api", "graphql", "--input", "-")
+	_, err := Runner(fake, DefaultHost).RunWithInput(t.Context(), "query{}", "gh", "api", "graphql", "--input", "-")
 
 	if !errors.Is(err, ErrUnpinnableGhPath) {
 		t.Fatalf("err = %v, want ErrUnpinnableGhPath", err)
@@ -164,7 +164,7 @@ func TestRunner_RunInteractiveRefusesGh(t *testing.T) {
 	t.Setenv("GH_HOST", "ghe.example.test")
 	fake := &exec.FakeRunner{}
 
-	err := Runner(fake).RunInteractive(t.Context(), "gh", "auth", "login")
+	err := Runner(fake, DefaultHost).RunInteractive(t.Context(), "gh", "auth", "login")
 
 	if !errors.Is(err, ErrUnpinnableGhPath) {
 		t.Fatalf("err = %v, want ErrUnpinnableGhPath", err)
@@ -178,7 +178,7 @@ func TestRunner_RunInteractiveRefusesGh(t *testing.T) {
 // the pin is a GitHub-identity control, so pbcopy and tmux must be untouched.
 func TestRunner_NonGhStdinAndInteractiveStillDelegate(t *testing.T) {
 	fake := &exec.FakeRunner{}
-	wrapped := Runner(fake)
+	wrapped := Runner(fake, DefaultHost)
 
 	if _, err := wrapped.RunWithInput(t.Context(), "clip me", "pbcopy"); err != nil {
 		t.Fatalf("RunWithInput(pbcopy): %v", err)
@@ -198,15 +198,15 @@ func TestRunner_NonGhStdinAndInteractiveStillDelegate(t *testing.T) {
 func TestRunner_DoubleWrapIsHarmless(t *testing.T) {
 	fake := &exec.FakeRunner{}
 
-	if _, err := Runner(Runner(fake)).Run(t.Context(), "gh", "api", "user"); err != nil {
+	if _, err := Runner(Runner(fake, DefaultHost), DefaultHost).Run(t.Context(), "gh", "api", "user"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
 	if len(fake.Calls) != 1 {
 		t.Fatalf("underlying calls = %d, want 1", len(fake.Calls))
 	}
-	if got := fake.Last().Env["GH_HOST"]; got != Host {
-		t.Fatalf("GH_HOST = %q, want %q", got, Host)
+	if got := fake.Last().Env["GH_HOST"]; got != DefaultHost {
+		t.Fatalf("GH_HOST = %q, want %q", got, DefaultHost)
 	}
 }
 
@@ -216,7 +216,7 @@ func TestRunner_CancelledContextBeatsDisagreeingRawError(t *testing.T) {
 	defer cancel()
 	fake := &hookFake{err: raw, out: "partial", hook: func(context.Context) { cancel() }}
 
-	out, err := Runner(fake).Run(ctx, "gh", "api", "user")
+	out, err := Runner(fake, DefaultHost).Run(ctx, "gh", "api", "user")
 
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
@@ -242,7 +242,7 @@ func TestRunner_ExpiredDeadlineBeatsDisagreeingRawError(t *testing.T) {
 	defer cancel()
 	fake := &hookFake{err: raw, hook: func(ctx context.Context) { <-ctx.Done() }}
 
-	_, err := Runner(fake).Run(ctx, "gh", "api", "user")
+	_, err := Runner(fake, DefaultHost).Run(ctx, "gh", "api", "user")
 
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
@@ -264,7 +264,7 @@ func TestRunner_LiveContextNormalizesRawContextCause(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &hookFake{err: tc.raw}
 
-			_, err := Runner(fake).Run(t.Context(), "gh", "api", "user")
+			_, err := Runner(fake, DefaultHost).Run(t.Context(), "gh", "api", "user")
 
 			if err != tc.want {
 				t.Fatalf("err = %v (%T), want the bare sentinel %v", err, err, tc.want)
@@ -277,7 +277,7 @@ func TestRunner_OrdinaryFailurePassesThroughUnchanged(t *testing.T) {
 	raw := errors.New("gh: HTTP 401")
 	fake := &hookFake{err: raw}
 
-	_, err := Runner(fake).Run(t.Context(), "gh", "api", "user")
+	_, err := Runner(fake, DefaultHost).Run(t.Context(), "gh", "api", "user")
 
 	if !errors.Is(err, raw) {
 		t.Fatalf("err = %v, want the raw error preserved for categorical classification", err)
@@ -300,5 +300,191 @@ func TestSafeContextSentinel(t *testing.T) {
 				t.Fatalf("SafeContextSentinel(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestResolveHost(t *testing.T) {
+	oversize := strings.Repeat("a", MaxHostBytes+1)
+	for _, tc := range []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"empty means default", "", DefaultHost, false},
+		{"whitespace only means default", "   \t", DefaultHost, false},
+		{"github.com passes", "github.com", "github.com", false},
+		{"ghe host passes", "github.example-corp.com", "github.example-corp.com", false},
+		{"uppercase is lowercased", "GitHub.Example.COM", "github.example.com", false},
+		{"surrounding whitespace trimmed", "  github.example.com  ", "github.example.com", false},
+		{"exactly MaxHostBytes passes", strings.Repeat("a", MaxHostBytes), strings.Repeat("a", MaxHostBytes), false},
+		{"port rejected", "github.example.com:8443", "", true},
+		{"scheme rejected", "https://github.example.com", "", true},
+		{"path rejected", "github.example.com/api", "", true},
+		{"interior whitespace rejected", "github example.com", "", true},
+		{"leading hyphen rejected", "-github.com", "", true},
+		{"trailing dot rejected", "github.com.", "", true},
+		{"oversize rejected", oversize, "", true},
+		{"env-shaped value rejected", "github.com\nGH_TOKEN=x", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveHost(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ResolveHost(%q) = %q, want error", tc.in, got)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("ResolveHost(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolveHost_ErrorNeverRendersValue is the leak test: a hostile config
+// line must not reach a terminal via its own rejection message.
+func TestResolveHost_ErrorNeverRendersValue(t *testing.T) {
+	hostile := "EVIL-$(id)-github.com:443/pwn"
+	_, err := ResolveHost(hostile)
+	if err == nil {
+		t.Fatal("want rejection")
+	}
+	if strings.Contains(err.Error(), "EVIL") || strings.Contains(err.Error(), "id)") {
+		t.Fatalf("error %q renders the rejected value", err)
+	}
+}
+
+// TestRunner_InvalidHostFailsClosedOnEveryGhPath: a Runner built over a host
+// that fails validation must refuse gh everywhere, before any spawn, while
+// non-gh commands still delegate.
+func TestRunner_InvalidHostFailsClosedOnEveryGhPath(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	wrapped := Runner(fake, "ghe.example.com:8443")
+
+	if _, err := wrapped.Run(t.Context(), "gh", "api", "user"); !errors.Is(err, ErrUnpinnableHost) {
+		t.Fatalf("Run err = %v, want ErrUnpinnableHost", err)
+	}
+	if _, err := wrapped.RunWithEnv(t.Context(), nil, "gh", "api", "user"); !errors.Is(err, ErrUnpinnableHost) {
+		t.Fatalf("RunWithEnv err = %v, want ErrUnpinnableHost", err)
+	}
+	if _, err := wrapped.RunWithInput(t.Context(), "q", "gh", "api", "graphql"); !errors.Is(err, ErrUnpinnableHost) {
+		t.Fatalf("RunWithInput err = %v, want ErrUnpinnableHost", err)
+	}
+	if err := wrapped.RunInteractive(t.Context(), "gh", "auth", "status"); !errors.Is(err, ErrUnpinnableHost) {
+		t.Fatalf("RunInteractive err = %v, want ErrUnpinnableHost", err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("underlying gh calls = %d (%+v), want 0 — the refusal must precede the spawn", len(fake.Calls), fake.Calls)
+	}
+	if _, err := wrapped.Run(t.Context(), "git", "status"); err != nil {
+		t.Fatalf("non-gh delegation: %v", err)
+	}
+	if got := fake.Last(); got.Name != "git" {
+		t.Fatalf("non-gh call = %+v, want git delegation despite the invalid host", got)
+	}
+}
+
+// TestRunner_ConfiguredHostPinBeatsAmbientAndCallerEnv: the pin stays total
+// with a configured host — ambient GH_HOST and a caller-supplied GH_HOST both
+// lose to the validated config value.
+func TestRunner_ConfiguredHostPinBeatsAmbientAndCallerEnv(t *testing.T) {
+	t.Setenv("GH_HOST", "ambient.example.test")
+	fake := &exec.FakeRunner{}
+	const ghe = "github.example.com"
+
+	_, err := Runner(fake, ghe).RunWithEnv(t.Context(),
+		map[string]string{"GH_HOST": "caller.example.test"}, "gh", "api", "user")
+	if err != nil {
+		t.Fatalf("RunWithEnv: %v", err)
+	}
+	if got := fake.Last().Env["GH_HOST"]; got != ghe {
+		t.Fatalf("GH_HOST = %q, want the configured %q", got, ghe)
+	}
+}
+
+// TestRunner_NonDefaultHostScrubsTokens: gh sends GH_ENTERPRISE_TOKEN to
+// whatever GH_HOST names and GH_TOKEN/GITHUB_TOKEN to github.com and
+// *.ghe.com, so on any non-default host all four credential variables are
+// forced empty — an ambient or caller-supplied token must never reach a gh
+// subprocess pointed at a configured host.
+func TestRunner_NonDefaultHostScrubsTokens(t *testing.T) {
+	fake := &exec.FakeRunner{}
+
+	_, err := Runner(fake, "github.example.com").RunWithEnv(t.Context(),
+		map[string]string{"GH_TOKEN": "leak-me", "GH_ENTERPRISE_TOKEN": "leak-me-too"},
+		"gh", "api", "user")
+	if err != nil {
+		t.Fatalf("RunWithEnv: %v", err)
+	}
+
+	env := fake.Last().Env
+	for _, k := range tokenEnvVars {
+		got, present := env[k]
+		if !present || got != "" {
+			t.Errorf("%s = %q (present=%v), want forced empty on a non-default host", k, got, present)
+		}
+	}
+	if got := env["GH_HOST"]; got != "github.example.com" {
+		t.Errorf("GH_HOST = %q, want github.example.com", got)
+	}
+}
+
+// TestRunner_DefaultHostLeavesTokensUntouched: the scrub is bound to the
+// non-default case — on github.com the operator's own tokens keep working.
+func TestRunner_DefaultHostLeavesTokensUntouched(t *testing.T) {
+	fake := &exec.FakeRunner{}
+
+	_, err := Runner(fake, "").RunWithEnv(t.Context(),
+		map[string]string{"GH_TOKEN": "keep-me"}, "gh", "api", "user")
+	if err != nil {
+		t.Fatalf("RunWithEnv: %v", err)
+	}
+
+	env := fake.Last().Env
+	if got := env["GH_TOKEN"]; got != "keep-me" {
+		t.Errorf("GH_TOKEN = %q, want the caller's value preserved on the default host", got)
+	}
+	for _, k := range []string{"GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} {
+		if _, present := env[k]; present {
+			t.Errorf("%s injected on the default host, want absent", k)
+		}
+	}
+}
+
+// TestRunner_ConfiguredHostRunScrubsToo: the plain Run path (no caller env)
+// gets the same scrub as RunWithEnv on a non-default host.
+func TestRunner_ConfiguredHostRunScrubsToo(t *testing.T) {
+	t.Setenv("GH_TOKEN", "ambient-token")
+	fake := &exec.FakeRunner{}
+
+	if _, err := Runner(fake, "github.example.com").Run(t.Context(), "gh", "api", "user"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	env := fake.Last().Env
+	for _, k := range tokenEnvVars {
+		if got, present := env[k]; !present || got != "" {
+			t.Errorf("%s = %q (present=%v), want forced empty", k, got, present)
+		}
+	}
+}
+
+// TestRunner_DoubleWrapSameHostIsHarmless mirrors the default-host double-wrap
+// test for a configured host — ResolveOwners wraps an already-wrapped runner
+// on the review path, so idempotency is load-bearing.
+func TestRunner_DoubleWrapSameHostIsHarmless(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	const ghe = "github.example.com"
+
+	if _, err := Runner(Runner(fake, ghe), ghe).Run(t.Context(), "gh", "api", "user"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(fake.Calls) != 1 {
+		t.Fatalf("underlying calls = %d, want 1", len(fake.Calls))
+	}
+	if got := fake.Last().Env["GH_HOST"]; got != ghe {
+		t.Fatalf("GH_HOST = %q, want %q", got, ghe)
 	}
 }

@@ -55,7 +55,7 @@ func TestValidOwner(t *testing.T) {
 func TestResolveOwners_ConfiguredSkipsDiscovery(t *testing.T) {
 	fake := loginFake("discovered", nil)
 
-	got, err := ResolveOwners(t.Context(), fake, []string{"Alpha", "alpha", "beta", "ALPHA"})
+	got, err := ResolveOwners(t.Context(), fake, []string{"Alpha", "alpha", "beta", "ALPHA"}, DefaultHost)
 	if err != nil {
 		t.Fatalf("ResolveOwners: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestResolveOwners_ConfiguredSkipsDiscovery(t *testing.T) {
 func TestResolveOwners_ReturnsDefensiveCopy(t *testing.T) {
 	configured := []string{"alpha", "beta"}
 
-	got, err := ResolveOwners(t.Context(), loginFake("", nil), configured)
+	got, err := ResolveOwners(t.Context(), loginFake("", nil), configured, DefaultHost)
 	if err != nil {
 		t.Fatalf("ResolveOwners: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestResolveOwners_RejectsBadConfiguredValuesBeforeAnyQuery(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := loginFake("", nil)
 
-			got, err := ResolveOwners(t.Context(), fake, tc.configured)
+			got, err := ResolveOwners(t.Context(), fake, tc.configured, DefaultHost)
 
 			if err == nil {
 				t.Fatalf("ResolveOwners = %v, want an error", got)
@@ -124,12 +124,12 @@ func TestResolveOwners_AcceptsExactBounds(t *testing.T) {
 		exactCount[i] = "owner" + strings.Repeat("z", i)
 	}
 
-	got, err := ResolveOwners(t.Context(), loginFake("", nil), []string{exactBytes})
+	got, err := ResolveOwners(t.Context(), loginFake("", nil), []string{exactBytes}, DefaultHost)
 	if err != nil || len(got) != 1 {
 		t.Fatalf("exactly MaxOwnerBytes: owners = %v, err = %v; want accepted", got, err)
 	}
 
-	got, err = ResolveOwners(t.Context(), loginFake("", nil), exactCount)
+	got, err = ResolveOwners(t.Context(), loginFake("", nil), exactCount, DefaultHost)
 	if err != nil || len(got) != MaxOwners {
 		t.Fatalf("exactly MaxOwners: len = %d, err = %v; want %d accepted without truncation", len(got), err, MaxOwners)
 	}
@@ -148,7 +148,7 @@ func TestResolveOwners_DiscoversLoginExactlyOnce(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := loginFake("octocat", nil)
 
-			got, err := ResolveOwners(t.Context(), fake, tc.configured)
+			got, err := ResolveOwners(t.Context(), fake, tc.configured, DefaultHost)
 			if err != nil {
 				t.Fatalf("ResolveOwners: %v", err)
 			}
@@ -163,8 +163,8 @@ func TestResolveOwners_DiscoversLoginExactlyOnce(t *testing.T) {
 			if call.Name != "gh" || strings.Join(call.Args, " ") != "api user --jq .login" {
 				t.Fatalf("discovery argv = %s %v, want gh api user --jq .login", call.Name, call.Args)
 			}
-			if got := call.Env["GH_HOST"]; got != Host {
-				t.Fatalf("discovery GH_HOST = %q, want %q despite the ambient enterprise host", got, Host)
+			if got := call.Env["GH_HOST"]; got != DefaultHost {
+				t.Fatalf("discovery GH_HOST = %q, want %q despite the ambient enterprise host", got, DefaultHost)
 			}
 		})
 	}
@@ -199,7 +199,7 @@ func TestResolveOwners_ParsesNormalizedRunnerOutput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := loginFake(tc.out, nil)
 
-			got, err := ResolveOwners(t.Context(), fake, nil)
+			got, err := ResolveOwners(t.Context(), fake, nil, DefaultHost)
 
 			if !tc.ok {
 				if err == nil {
@@ -224,7 +224,7 @@ func TestResolveOwners_OrdinaryDiscoveryFailureIsSafe(t *testing.T) {
 	hostile := errors.New("gh: \x1b[31mtoken ghp_deadbeef rejected\x1b[0m")
 	fake := loginFake("", hostile)
 
-	got, err := ResolveOwners(t.Context(), fake, nil)
+	got, err := ResolveOwners(t.Context(), fake, nil, DefaultHost)
 
 	if got != nil {
 		t.Fatalf("owners = %v, want nil", got)
@@ -243,7 +243,7 @@ func TestResolveOwners_PreservesContextIdentityAlongsideLoginSentinel(t *testing
 	defer cancel()
 	fake := &hookFake{err: raw, hook: func(context.Context) { cancel() }}
 
-	_, err := ResolveOwners(ctx, fake, nil)
+	_, err := ResolveOwners(ctx, fake, nil, DefaultHost)
 
 	if !errors.Is(err, ErrLoginUnavailable) {
 		t.Fatalf("err = %v, want errors.Is ErrLoginUnavailable", err)
