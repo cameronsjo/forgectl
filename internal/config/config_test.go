@@ -775,3 +775,17 @@ func TestGithubConfig_DecodeAndIsZero(t *testing.T) {
 		t.Error("zero GithubConfig.IsZero() = false, want true")
 	}
 }
+
+// TestLoad_UnresolvableConfigDirIsDecodeDegraded: when the config file cannot
+// even be located, any [github] host the operator wrote is unreadable — the
+// host-sensitive seams must refuse, not silently query github.com.
+func TestLoad_UnresolvableConfigDirIsDecodeDegraded(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	if _, err := ConfigPath(); err == nil {
+		t.Skip("ConfigPath still resolves with HOME unset on this platform")
+	}
+	if got := Load(); !got.DecodeDegraded() {
+		t.Error("Load() with unresolvable config dir: DecodeDegraded() = false, want true")
+	}
+}

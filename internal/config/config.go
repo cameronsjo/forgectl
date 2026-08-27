@@ -630,7 +630,12 @@ func (d LaunchDefaults) isZero() bool {
 func Load() Config {
 	path, err := ConfigPath()
 	if err != nil {
-		return Config{}
+		// The config file could not even be LOCATED — any [github] host the
+		// operator wrote is unreadable, so the host-sensitive seams must
+		// refuse rather than silently query github.com with tokens
+		// unscrubbed. This is the sibling of the malformed-file case below,
+		// reached one step earlier.
+		return Config{decodeDegraded: true}
 	}
 	return LoadPath(path)
 }

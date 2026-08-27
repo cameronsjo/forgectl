@@ -59,18 +59,26 @@ func newProjectsConfigErrorCmd(err error) *cobra.Command {
 	fail := func(*cobra.Command, []string) error {
 		return fmt.Errorf("projects: invalid config: %w", err)
 	}
+	// DisableFlagParsing + ArbitraryArgs on every node: the error tree
+	// declares none of the real tree's flags, so without this a
+	// `projects list --json` under a broken config would die on
+	// `unknown flag: --json` instead of the config error — fail-closed
+	// either way, but the stated cause must survive whatever argv the
+	// caller sends.
 	cmd := &cobra.Command{
-		Use:     "projects",
-		Aliases: []string{"proj"},
-		Short:   "Find and open projects across local, GitHub, and Gitea (clones on demand)",
-		RunE:    fail,
+		Use:                "projects",
+		Aliases:            []string{"proj"},
+		Short:              "Find and open projects across local, GitHub, and Gitea (clones on demand)",
+		Args:               cobra.ArbitraryArgs,
+		DisableFlagParsing: true,
+		RunE:               fail,
 	}
 	cmd.AddCommand(
-		&cobra.Command{Use: "pick", RunE: fail},
-		&cobra.Command{Use: "list [query]", Args: cobra.MaximumNArgs(1), RunE: fail},
-		&cobra.Command{Use: "clone <query>", Args: cobra.MaximumNArgs(1), RunE: fail},
-		&cobra.Command{Use: "worktree <query>", Args: cobra.MaximumNArgs(1), RunE: fail},
-		&cobra.Command{Use: "pull-all", RunE: fail},
+		&cobra.Command{Use: "pick", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "list [query]", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "clone <query>", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "worktree <query>", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "pull-all", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
 	)
 	applyAliases(cmd, projectAliases)
 	return cmd

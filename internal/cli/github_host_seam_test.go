@@ -177,3 +177,37 @@ func TestActiveHosts_PrependsEffectiveHost(t *testing.T) {
 		t.Fatalf("activeHosts = %v, want %v — the effective host prepended, host-less sources contributing nothing", got, want)
 	}
 }
+
+// TestSeamErrorTrees_SurviveUnknownFlags: the config-error trees declare no
+// flags, so without DisableFlagParsing a `--json` invocation under a broken
+// config would die on "unknown flag" instead of the stated config error.
+func TestSeamErrorTrees_SurviveUnknownFlags(t *testing.T) {
+	deps := module.Deps{Cfg: config.Config{Github: config.GithubConfig{Host: "bad host"}}, Runner: &exec.FakeRunner{}}
+	for _, tc := range []struct {
+		m    module.Manifest
+		args []string
+	}{
+		{projectsModule, []string{"list", "--json"}},
+		{projectsModule, []string{"--json"}},
+		{reviewModule, []string{"--json"}},
+		{reviewModule, []string{"mark", "a/b#1", "--json"}},
+	} {
+		err := runSeamVerb(t, tc.m, deps, tc.args...)
+		if err == nil || !strings.Contains(err.Error(), "invalid config") {
+			t.Errorf("%s %v: err = %v, want the config error to survive the unknown flag", tc.m.Name, tc.args, err)
+		}
+	}
+}
+
+// TestReviewSeam_RefusesGithubHostEqualToGiteaHost: two sources on one
+// hostname would collapse into one reviewed-marks key space.
+func TestReviewSeam_RefusesGithubHostEqualToGiteaHost(t *testing.T) {
+	deps := module.Deps{Cfg: config.Config{
+		Github: config.GithubConfig{Host: "git.example.com"},
+		Review: config.ReviewConfig{Gitea: config.GiteaConfig{Enabled: true, Host: "git.example.com"}},
+	}, Runner: &exec.FakeRunner{}}
+	err := runSeamVerb(t, reviewModule, deps)
+	if err == nil || !strings.Contains(err.Error(), "same hostname") {
+		t.Errorf("err = %v, want the same-hostname refusal", err)
+	}
+}

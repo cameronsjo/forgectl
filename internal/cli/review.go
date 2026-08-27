@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -46,6 +47,16 @@ func newReviewCmd(deps module.Deps) *cobra.Command {
 		return newReviewConfigErrorCmd(err)
 	}
 	if ok {
+		// Two sources on one hostname would collapse into one key space:
+		// Aggregate dedupes by host-qualified Key, so a GitHub row and a
+		// Gitea row with the same owner/repo/number would alias each
+		// other's reviewed marks, winner chosen by goroutine race. Nobody
+		// legitimate configures that; refuse loudly (categorical — the
+		// shared value is the operator's own two config lines, not
+		// rendered here).
+		if h, hasHost := giteaSrc.(interface{ Host() string }); hasHost && strings.EqualFold(h.Host(), effectiveHost) {
+			return newReviewConfigErrorCmd(errors.New("[github] host and [review.gitea] host are the same hostname; the two sources would collide in one key space"))
+		}
 		srcs = append(srcs, giteaSrc)
 	}
 	// err discarded: "" degrades to an empty store on read (LoadReviewed), and
@@ -68,16 +79,21 @@ func newReviewConfigErrorCmd(err error) *cobra.Command {
 	fail := func(*cobra.Command, []string) error {
 		return fmt.Errorf("review: invalid config: %w", err)
 	}
+	// DisableFlagParsing + ArbitraryArgs on every node: the error tree
+	// declares none of the real tree's flags, so `review --json` under a
+	// broken config must still report the config error, not
+	// `unknown flag: --json`.
 	cmd := &cobra.Command{
-		Use:   "review [--kind issue|pr] [--repo <owner/name>]",
-		Short: "Cross-project work inventory: open issues and PRs across your repos",
-		Args:  cobra.NoArgs,
-		RunE:  fail,
+		Use:                "review [--kind issue|pr] [--repo <owner/name>]",
+		Short:              "Cross-project work inventory: open issues and PRs across your repos",
+		Args:               cobra.ArbitraryArgs,
+		DisableFlagParsing: true,
+		RunE:               fail,
 	}
 	cmd.AddCommand(
-		&cobra.Command{Use: "mark <ref>", Args: cobra.ExactArgs(1), RunE: fail},
-		&cobra.Command{Use: "unmark <ref>", Args: cobra.ExactArgs(1), RunE: fail},
-		&cobra.Command{Use: "sync", Args: cobra.NoArgs, RunE: fail},
+		&cobra.Command{Use: "mark <ref>", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "unmark <ref>", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "sync", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
 	)
 	return cmd
 }
