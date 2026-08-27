@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -40,6 +41,14 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 
 			if host != "" && host != "github" && host != "gitea" {
 				return fmt.Errorf("invalid --host %q: want github or gitea", host)
+			}
+
+			// One stderr line names a non-default GitHub host, so a surprising
+			// inventory is never silently attributable to the wrong forge. The
+			// value is ResolveHost-validated at construction; termsafe guards
+			// the render anyway. Stderr only — a --json pipe stays clean.
+			if gh := client.GitHubHost(); gh != githubauth.DefaultHost {
+				fmt.Fprintf(cmd.ErrOrStderr(), "github host: %s\n", termsafe.SafeLine(gh))
 			}
 
 			repos, notes, err := client.Inventory(ctx)

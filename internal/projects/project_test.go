@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 )
 
 func TestParseRemoteURL(t *testing.T) {
@@ -26,7 +28,7 @@ func TestParseRemoteURL(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			host, owner, name := parseRemoteURL(tc.url)
+			host, owner, name := parseRemoteURL(tc.url, githubauth.DefaultHost)
 			if host != tc.wantHost || owner != tc.wantOwn || name != tc.wantNm {
 				t.Errorf("parseRemoteURL(%q) = (%q,%q,%q); want (%q,%q,%q)",
 					tc.url, host, owner, name, tc.wantHost, tc.wantOwn, tc.wantNm)
@@ -57,7 +59,7 @@ func TestParseCloneTarget(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r, ok := ParseCloneTarget(tc.arg)
+			r, ok := ParseCloneTarget(tc.arg, githubauth.DefaultHost)
 			if ok != tc.wantOK {
 				t.Fatalf("ParseCloneTarget(%q) ok = %v; want %v", tc.arg, ok, tc.wantOK)
 			}

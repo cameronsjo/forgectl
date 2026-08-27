@@ -9,13 +9,13 @@ import (
 	"github.com/cameronsjo/forgectl/internal/review"
 )
 
-func newReviewMarkCmd(reviewedPath string, hosts []string) *cobra.Command {
+func newReviewMarkCmd(reviewedPath, effectiveHost string, hosts []string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "mark <ref>",
 		Short: "Mark a work item reviewed (dims it until it sees new activity)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			key, err := review.ParseWorkRefForHosts(args[0], hosts)
+			key, err := review.ParseWorkRefForHosts(args[0], effectiveHost, hosts)
 			if err != nil {
 				return err
 			}
@@ -29,13 +29,13 @@ func newReviewMarkCmd(reviewedPath string, hosts []string) *cobra.Command {
 	}
 }
 
-func newReviewUnmarkCmd(reviewedPath string, hosts []string) *cobra.Command {
+func newReviewUnmarkCmd(reviewedPath, effectiveHost string, hosts []string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "unmark <ref>",
 		Short: "Clear a work item's reviewed mark (un-dims it)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			key, err := review.ParseWorkRefForHosts(args[0], hosts)
+			key, err := review.ParseWorkRefForHosts(args[0], effectiveHost, hosts)
 			if err != nil {
 				return err
 			}
@@ -49,7 +49,7 @@ func newReviewUnmarkCmd(reviewedPath string, hosts []string) *cobra.Command {
 	}
 }
 
-func newReviewSyncCmd(srcs []review.Source, reviewedPath string) *cobra.Command {
+func newReviewSyncCmd(srcs []review.Source, reviewedPath, effectiveHost string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "sync",
 		Short: "Prune reviewed marks for work items that are no longer open",
@@ -89,7 +89,7 @@ func newReviewSyncCmd(srcs []review.Source, reviewedPath string) *cobra.Command 
 			// (Gitea disabled, or simply not passed into srcs) is left
 			// untouched rather than pruned as "not in the open set" — see
 			// activeHosts and SyncKeysScoped.
-			if err := store.SyncKeysScoped(keys, activeHosts(srcs)); err != nil {
+			if err := store.SyncKeysScoped(keys, activeHosts(effectiveHost, srcs)); err != nil {
 				return fmt.Errorf("sync reviewed store: %w", err)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "synced reviewed store against %d open items\n", len(keys))

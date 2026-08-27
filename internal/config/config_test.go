@@ -491,7 +491,7 @@ func TestLoad(t *testing.T) {
 		}
 	})
 
-	t.Run("malformed TOML returns defaults without error", func(t *testing.T) {
+	t.Run("malformed TOML returns defaults marked decode-degraded", func(t *testing.T) {
 		dir := redirectConfigDir(t)
 		cfgDir := filepath.Join(dir, "forgectl")
 		if err := os.MkdirAll(cfgDir, 0o700); err != nil {
@@ -502,8 +502,38 @@ func TestLoad(t *testing.T) {
 			t.Fatalf("write config: %v", err)
 		}
 		got := Load()
+		// The degraded marker is the ONLY thing set: a partially-decoded file
+		// must not silently pass for an absent one — a GHE deployment whose
+		// [github] host line was lost to a parse error would otherwise query
+		// public github.com. Host-sensitive seams (projects, review) read the
+		// marker and refuse loudly.
+		if !got.DecodeDegraded() {
+			t.Error("Load() with malformed file: DecodeDegraded() = false, want true")
+		}
+		got.decodeDegraded = false
 		if !reflect.DeepEqual(got, Config{}) {
-			t.Errorf("Load() with malformed file = %+v, want zero-value Config", got)
+			t.Errorf("Load() with malformed file = %+v, want zero-value Config apart from the degraded marker", got)
+		}
+	})
+
+	t.Run("valid file is not decode-degraded", func(t *testing.T) {
+		dir := redirectConfigDir(t)
+		cfgDir := filepath.Join(dir, "forgectl")
+		if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte("[github]\nhost = \"github.example.com\"\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		got := Load()
+		if got.DecodeDegraded() {
+			t.Error("Load() with valid file: DecodeDegraded() = true, want false")
+		}
+		if got.Github.Host != "github.example.com" {
+			t.Errorf("Github.Host = %q, want github.example.com", got.Github.Host)
+		}
+		if got.Github.IsZero() {
+			t.Error("GithubConfig.IsZero() = true with host set, want false")
 		}
 	})
 }

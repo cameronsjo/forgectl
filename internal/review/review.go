@@ -30,8 +30,11 @@ const (
 	KindPR    Kind = "pr"
 )
 
-// GitHubHost is the Host every github.com-sourced Item carries. Phase C's
-// Gitea source stamps its own host, which is why Key() is host-qualified now.
+// GitHubHost is the DEFAULT GitHub host — the Host every GitHub-sourced Item
+// carries when no [github].host is configured. The effective host is instance
+// data on the GitHub source (NewGitHub) and a parameter to the work-ref
+// parser; this constant is what they default to. Phase C's Gitea source
+// stamps its own host, which is why Key() is host-qualified.
 const GitHubHost = "github.com"
 
 // Item is one open work item — an issue or a PR — surfaced by a Source.
@@ -78,9 +81,17 @@ func SortItems(items []Item) {
 	})
 }
 
-// The accepted work-ref URL form: a github.com issue or pull URL (optional
-// trailing slash), FULLY anchored like every ref regex in internal/pr.
-var reWorkURL = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/(?:issues|pull)/([0-9]+)/?$`)
+// gitHubWorkURLRe builds the accepted GitHub-family work-ref URL form for the
+// effective host: an issue or /pull/ URL (optional trailing slash), FULLY
+// anchored like every ref regex in internal/pr. `pull` (never `pulls`) keeps
+// GitHub-family strictness for a configured enterprise host too — the pattern
+// is per-host, the shape is not. The host is interpolated through
+// regexp.QuoteMeta: it is validated config, but a raw interpolation would
+// turn its dots into wildcards and any future metachar into pattern syntax
+// (step-0 security review, finding 2).
+func gitHubWorkURLRe(effectiveHost string) *regexp.Regexp {
+	return regexp.MustCompile(`^https://` + regexp.QuoteMeta(effectiveHost) + `/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/(?:issues|pull)/([0-9]+)/?$`)
+}
 
 // reGitHubSlug matches the unqualified default-host slug form: owner/repo#N
 // (exactly two slash-delimited segments before the '#').
@@ -104,44 +115,51 @@ var reHostSlug = regexp.MustCompile(`^(` + hostSeg + `)/([A-Za-z0-9._-]+)/([A-Za
 // in the pattern itself.
 var reHostWorkURL = regexp.MustCompile(`^https://(` + hostSeg + `)/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/(?:issues|pulls?)/([0-9]+)/?$`)
 
-// ParseWorkRef normalizes a user-typed work reference for the default host,
-// github.com — "owner/repo#N" or a full github.com issue/pull URL — to the
-// host-qualified reviewed-store key. It is ParseWorkRefForHosts with no
-// extra hosts configured; see that function for the host-qualified form
-// multi-source setups (Gitea) need.
+// ParseWorkRef normalizes a user-typed work reference for the DEFAULT GitHub
+// host, github.com — "owner/repo#N" or a full github.com issue/pull URL — to
+// the host-qualified reviewed-store key. It is ParseWorkRefForHosts with the
+// default effective host and no extra hosts configured; callers that live
+// under a configured [github].host must use ParseWorkRefForHosts with that
+// host instead, or their keys will disagree with the inventory's.
 func ParseWorkRef(s string) (key string, err error) {
-	return ParseWorkRefForHosts(s, nil)
+	return ParseWorkRefForHosts(s, GitHubHost, nil)
 }
 
-// ParseWorkRefForHosts normalizes a user-typed work reference the same way
-// ParseWorkRef does, plus two host-qualified forms — "host/owner/repo#N" and
-// a full issue/pull(s) URL against a non-github host — gated on hosts, the
-// caller-supplied allowlist of configured non-github hosts (mark/unmark pass
-// their configured Gitea host through here). github.com is always accepted
-// regardless of hosts. Every extracted owner/repo/number still rides
-// pr.RefFromParts, the one anchored validator every ref path shares.
-func ParseWorkRefForHosts(s string, hosts []string) (key string, err error) {
+// ParseWorkRefForHosts normalizes a user-typed work reference against the
+// deployment's effective GitHub host (githubauth ResolveHost output; the
+// unqualified "owner/repo#N" shorthand and the GitHub-shaped URL form both
+// resolve to it), plus two host-qualified forms — "host/owner/repo#N" and a
+// full issue/pull(s) URL — gated on hosts, the caller-supplied allowlist of
+// configured non-github hosts (mark/unmark pass their configured Gitea host
+// through here). No host is special-cased: a literal github.com ref under a
+// non-default effective host is REJECTED, deliberately — accepting it would
+// mint keys no active source re-verifies, i.e. never-prunable marks. Every
+// extracted owner/repo/number still rides pr.RefFromParts, the one anchored
+// validator every ref path shares.
+func ParseWorkRefForHosts(s, effectiveHost string, hosts []string) (key string, err error) {
 	s = strings.Trim(s, " \t")
 	if s == "" {
 		return "", fmt.Errorf("empty work reference")
 	}
-	if m := reWorkURL.FindStringSubmatch(s); m != nil {
-		return workKey(GitHubHost, m[1], m[2], m[3])
+	if m := gitHubWorkURLRe(effectiveHost).FindStringSubmatch(s); m != nil {
+		return workKey(effectiveHost, m[1], m[2], m[3])
 	}
 	if m := reGitHubSlug.FindStringSubmatch(s); m != nil {
-		return workKey(GitHubHost, m[1], m[2], m[3])
+		return workKey(effectiveHost, m[1], m[2], m[3])
 	}
 	if m := reHostWorkURL.FindStringSubmatch(s); m != nil {
-		if !hostAllowed(m[1], hosts) {
+		canonical, ok := allowedHostSpelling(m[1], effectiveHost, hosts)
+		if !ok {
 			return "", fmt.Errorf("work reference host %q is not configured", m[1])
 		}
-		return workKey(m[1], m[2], m[3], m[4])
+		return workKey(canonical, m[2], m[3], m[4])
 	}
 	if m := reHostSlug.FindStringSubmatch(s); m != nil {
-		if !hostAllowed(m[1], hosts) {
+		canonical, ok := allowedHostSpelling(m[1], effectiveHost, hosts)
+		if !ok {
 			return "", fmt.Errorf("work reference host %q is not configured", m[1])
 		}
-		return workKey(m[1], m[2], m[3], m[4])
+		return workKey(canonical, m[2], m[3], m[4])
 	}
 	return "", fmt.Errorf("unrecognized work reference %q (want owner/repo#N, host/owner/repo#N, or an issue/PR URL)", s)
 }
@@ -156,19 +174,26 @@ func workKey(host, owner, repo, num string) (string, error) {
 	return host + "/" + ref.String(), nil
 }
 
-// hostAllowed reports whether host is acceptable for a host-qualified work
-// ref: github.com always is; anything else must appear in hosts, the
-// caller-supplied allowlist of configured review sources.
-func hostAllowed(host string, hosts []string) bool {
-	if host == GitHubHost {
-		return true
+// allowedHostSpelling reports whether a typed host is acceptable for a
+// host-qualified work ref — the effective GitHub host, or any member of
+// hosts, the caller-supplied allowlist of configured review sources — and
+// returns the CONFIGURED spelling, so the minted key always matches the
+// spelling the source stamps on its items regardless of how the user typed
+// the host. Comparison folds case (hostnames are case-insensitive; a user
+// typing GitHub.MyCorp.com must not be told the host "is not configured").
+// There is no unconditional github.com arm any more: under a non-default
+// [github].host, github.com has no active source, and a key nobody
+// re-verifies is a mark nobody can ever prune.
+func allowedHostSpelling(host, effectiveHost string, hosts []string) (string, bool) {
+	if strings.EqualFold(host, effectiveHost) {
+		return effectiveHost, true
 	}
 	for _, h := range hosts {
-		if h == host {
-			return true
+		if strings.EqualFold(h, host) {
+			return h, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // itemFromParts builds a validated Item core from hostile tracker fields,

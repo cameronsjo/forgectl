@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 )
 
 // Project is a single entry in the local project list (the legacy local-only
@@ -182,7 +184,7 @@ func (r Repo) Key() string {
 //	git@github.com:cameronsjo/forgectl.git              (scp-like)
 //	https://github.com/cameronsjo/forgectl(.git)        (https)
 //	ssh://git@git.sjo.lol:222/cameron/homeclaw.git      (ssh with port)
-func parseRemoteURL(raw string) (host, owner, name string) {
+func parseRemoteURL(raw, gitHubHost string) (host, owner, name string) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", "", ""
@@ -216,11 +218,11 @@ func parseRemoteURL(raw string) (host, owner, name string) {
 	path = strings.TrimSuffix(path, ".git")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) < 2 || parts[0] == "" || parts[len(parts)-1] == "" {
-		return canonicalHost(hostname), "", ""
+		return canonicalHost(hostname, gitHubHost), "", ""
 	}
 	owner = parts[len(parts)-2]
 	name = parts[len(parts)-1]
-	return canonicalHost(hostname), owner, name
+	return canonicalHost(hostname, gitHubHost), owner, name
 }
 
 // ParseCloneTarget interprets a `projects clone` positional argument as an
@@ -233,8 +235,14 @@ func parseRemoteURL(raw string) (host, owner, name string) {
 // default-host branch clones it as a literal URL (cloneFromGitea runs a plain
 // `git clone`, not a Gitea-specific one, despite the name), so an https URL
 // works there too, not just ssh.
-func ParseCloneTarget(arg string) (Repo, bool) {
-	if host, owner, name := parseRemoteURL(arg); name != "" {
+//
+// gitHubHost is the deployment's configured GitHub host (githubauth
+// ResolveHost output): a URL naming that host maps to the "github" token, and
+// the bare "owner/repo" shorthand means "on the configured GitHub host" —
+// deployment-scoped, not github.com-scoped — because the clone it selects
+// runs through gh pinned to that host.
+func ParseCloneTarget(arg, gitHubHost string) (Repo, bool) {
+	if host, owner, name := parseRemoteURL(arg, gitHubHost); name != "" {
 		r := Repo{Host: host, Owner: owner, Name: name}
 		if host != "github" {
 			r.SSHURL = arg
@@ -261,13 +269,34 @@ func splitOwnerRepo(s string) (owner, name string, ok bool) {
 }
 
 // canonicalHost maps a remote hostname to the inventory's short host token.
-func canonicalHost(hostname string) string {
-	switch {
-	case hostname == "":
+//
+// The GitHub arm is an EXACT, case-insensitive match against the deployment's
+// configured GitHub host (with one trailing ":port" stripped from the remote
+// hostname first — a ported remote for the same host is still that host). It
+// was once a substring test, which stamped any hostname merely containing
+// "github.com" — e.g. "evil-github.com.attacker.net" — as trusted "github"
+// inventory; an exact compare closes that. Under a non-default configured
+// host, a leftover github.com clone maps to its raw hostname and shows as an
+// unmatched local dir — deliberate: it is not this deployment's GitHub.
+func canonicalHost(hostname, gitHubHost string) string {
+	if hostname == "" {
 		return ""
-	case strings.Contains(hostname, "github.com"):
+	}
+	// A zero-value Client (struct literal, no New) carries no host; that must
+	// mean the default, not "nothing matches github".
+	if gitHubHost == "" {
+		gitHubHost = githubauth.DefaultHost
+	}
+	bare := strings.ToLower(hostname)
+	if i := strings.LastIndex(bare, ":"); i >= 0 {
+		if port := bare[i+1:]; port != "" && strings.Trim(port, "0123456789") == "" {
+			bare = bare[:i]
+		}
+	}
+	switch {
+	case bare == gitHubHost:
 		return "github"
-	case strings.Contains(hostname, "git.sjo.lol"):
+	case bare == "git.sjo.lol":
 		return "gitea"
 	default:
 		return hostname

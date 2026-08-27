@@ -45,7 +45,7 @@ from projects list --json, or rerun interactively when no sshUrl is available.`,
 			}
 
 			if len(args) == 1 {
-				if r, ok := projects.ParseCloneTarget(args[0]); ok {
+				if r, ok := projects.ParseCloneTarget(args[0], client.GitHubHost()); ok {
 					return cloneOnly(ctx, client, cmd, r)
 				}
 			}

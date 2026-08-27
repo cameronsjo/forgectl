@@ -99,7 +99,7 @@ func TestGitHubItems_PinsEveryLegToGitHubCom(t *testing.T) {
 		return "[]", nil
 	}}
 
-	if _, _, err := NewGitHub(run, nil).Items(context.Background()); err != nil {
+	if _, _, err := NewGitHub(run, nil, GitHubHost).Items(context.Background()); err != nil {
 		t.Fatalf("Items: %v", err)
 	}
 
@@ -109,8 +109,8 @@ func TestGitHubItems_PinsEveryLegToGitHubCom(t *testing.T) {
 		if c.Name != "gh" {
 			continue
 		}
-		if got := c.Env["GH_HOST"]; got != githubauth.Host {
-			t.Errorf("call %v ran with GH_HOST=%q, want %q", c.Args, got, githubauth.Host)
+		if got := c.Env["GH_HOST"]; got != githubauth.DefaultHost {
+			t.Errorf("call %v ran with GH_HOST=%q, want %q", c.Args, got, githubauth.DefaultHost)
 		}
 		switch {
 		case isDiscovery(c):
@@ -129,7 +129,7 @@ func TestGitHubItems_PinsEveryLegToGitHubCom(t *testing.T) {
 func TestGitHubItems_ConfiguredOwnersSkipDiscovery(t *testing.T) {
 	run := &hookRunner{}
 
-	if _, _, err := NewGitHub(run, []string{"alpha", "Alpha", "beta"}).Items(context.Background()); err != nil {
+	if _, _, err := NewGitHub(run, []string{"alpha", "Alpha", "beta"}, GitHubHost).Items(context.Background()); err != nil {
 		t.Fatalf("Items: %v", err)
 	}
 
@@ -159,7 +159,7 @@ func TestGitHubItems_BoundsConcurrentQueries(t *testing.T) {
 		respond: func([]string) (string, error) { return "[]", nil },
 	}
 
-	if _, _, err := NewGitHub(run, owners).Items(context.Background()); err != nil {
+	if _, _, err := NewGitHub(run, owners, GitHubHost).Items(context.Background()); err != nil {
 		t.Fatalf("Items: %v", err)
 	}
 
@@ -194,7 +194,7 @@ func TestGitHubItems_FoldsInOwnerOrderRegardlessOfCompletion(t *testing.T) {
 		return "", errors.New("gh: \x1b[31mghp_deadbeef\x1b[0m")
 	}}
 
-	_, notes, err := NewGitHub(run, []string{"alpha", "beta"}).Items(context.Background())
+	_, notes, err := NewGitHub(run, []string{"alpha", "beta"}, GitHubHost).Items(context.Background())
 
 	if err == nil {
 		t.Fatal("every query failing must be an error")
@@ -235,7 +235,7 @@ func TestGitHubItems_PartialFailureKeepsHealthyRows(t *testing.T) {
 		return "[]", nil
 	}}
 
-	items, notes, err := NewGitHub(run, []string{"cameronsjo"}).Items(context.Background())
+	items, notes, err := NewGitHub(run, []string{"cameronsjo"}, GitHubHost).Items(context.Background())
 
 	if err != nil {
 		t.Fatalf("a partial failure must not fail the source: %v", err)
@@ -277,7 +277,7 @@ func TestGitHubItems_PreservesContextIdentityWithoutRawCause(t *testing.T) {
 				},
 			}
 
-			_, _, err := NewGitHub(run, []string{"cameronsjo"}).Items(ctx)
+			_, _, err := NewGitHub(run, []string{"cameronsjo"}, GitHubHost).Items(ctx)
 
 			if !errors.Is(err, ErrGitHubQueriesUnavailable) {
 				t.Fatalf("err = %v, want errors.Is ErrGitHubQueriesUnavailable", err)

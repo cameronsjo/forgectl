@@ -25,7 +25,7 @@ import (
 // execReview runs a review subcommand against src/store and returns stdout+stderr.
 func execReview(t *testing.T, src review.Source, reviewedPath string, args ...string) (string, string, error) {
 	t.Helper()
-	cmd := newReviewCmdForSources([]review.Source{src}, reviewedPath)
+	cmd := newReviewCmdForSources([]review.Source{src}, reviewedPath, review.GitHubHost)
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)

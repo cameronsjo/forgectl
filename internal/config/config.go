@@ -62,7 +62,9 @@ const logKeepDays = 7
 //	[sessions]           # forgectl sessions — cross-machine operational concordance ETL
 //	dsn     = "postgres://user@host:5433/concordance" # password via ~/.pgpass; env FORGECTL_SESSIONS_DSN wins
 //	machine = ""                     # provenance label; default: short hostname
-//	[projects]           # forgectl projects — GitHub.com inventory scope
+//	[github]             # deployment-wide GitHub host (spans projects + review)
+//	host = ""                        # GitHub hostname, e.g. "github.example.com"; empty = github.com
+//	[projects]           # forgectl projects — GitHub inventory scope
 //	owners = ["your-login"]          # gh repo list scope; unset/[] = authenticated login
 //	[review]             # forgectl review — cross-project work inventory
 //	owners = ["your-login"]          # gh search --owner scope; unset/[] = authenticated login
@@ -102,7 +104,23 @@ type Config struct {
 	Preflight PreflightConfig `toml:"preflight"`
 	Update    UpdateConfig    `toml:"update"`
 	Pr        PrConfig        `toml:"pr"`
+	Github    GithubConfig    `toml:"github"`
 	launchSet bool
+	// decodeDegraded records that the config file existed but failed to
+	// decode, so this Config may be missing sections the operator wrote.
+	// Host-sensitive consumers (projects, review) must refuse loudly rather
+	// than run against a silently-defaulted github.com — see DecodeDegraded.
+	decodeDegraded bool
+}
+
+// DecodeDegraded reports whether the loaded config file failed to decode and
+// this Config is a partial fallback. A tolerant Load() is right for launch
+// profiles, but a GitHub-Enterprise deployment whose [github] host line was
+// lost to a parse error would silently query public github.com and stamp rows
+// as that host's data — so the projects and review seams check this flag and
+// refuse with a config error instead.
+func (c Config) DecodeDegraded() bool {
+	return c.decodeDegraded
 }
 
 // HasLaunchSection distinguishes an explicitly present but empty [launch]
@@ -415,6 +433,31 @@ func (pc PrConfig) IsZero() bool {
 	return pc.MaxConcurrent == 0 && pc.Model == "" && pc.Effort == ""
 }
 
+// GithubConfig is the [github] section: the one GitHub host this deployment's
+// projects and review inventories talk to. A zero value means github.com. The
+// section is deliberately deployment-wide rather than per-module: divergent
+// per-module hosts would stamp clones and review keys with different hosts —
+// exactly the mislabeling internal/githubauth's pin exists to prevent. The
+// section name leaves room for a later [[github.hosts]] multi-source form
+// (declined for now — forgectl#412).
+//
+// SECURITY BOUNDARY — this section carries the host ONLY, and
+// TestGithubConfig_FieldSetIsPinned enforces that. The value is low-trust
+// config input: internal/githubauth.ResolveHost validates it against an
+// anchored hostname allowlist before it may reach a subprocess env, and any
+// non-default host has the gh token env vars scrubbed so a hostile host line
+// cannot redirect an ambient credential. Adding a field here that widens what
+// a config file can steer is a deliberate act that must break the pinning
+// test first.
+type GithubConfig struct {
+	Host string `toml:"host"`
+}
+
+// IsZero reports whether the [github] section was absent or empty.
+func (gc GithubConfig) IsZero() bool {
+	return gc.Host == ""
+}
+
 // GiteaConfig is the [review.gitea] section: forgectl review's opt-in second
 // source, a self-hosted Gitea instance enumerated over the tea CLI (Phase
 // C). A zero value means "section absent" or disabled — the review module
@@ -607,6 +650,7 @@ func LoadPath(path string) Config {
 	if err != nil && !os.IsNotExist(err) {
 		slog.Warn("Failed to decode config file; using built-in defaults for unreadable sections.",
 			"path", termsafe.QuotePath(path), "error", termsafe.SafeLine(err.Error()))
+		cfg.decodeDegraded = true
 	}
 	return cfg
 }

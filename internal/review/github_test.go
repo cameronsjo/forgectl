@@ -64,7 +64,7 @@ func TestGitHubItems_BothLegsMapped(t *testing.T) {
 		return "", nil
 	}}
 
-	items, notes, err := NewGitHub(fake, []string{"cameronsjo"}).Items(context.Background())
+	items, notes, err := NewGitHub(fake, []string{"cameronsjo"}, GitHubHost).Items(context.Background())
 	if err != nil {
 		t.Fatalf("Items: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestGitHubItems_DegradedLegBecomesNote(t *testing.T) {
 		return "", nil
 	}}
 
-	items, notes, err := NewGitHub(fake, []string{"cameronsjo"}).Items(context.Background())
+	items, notes, err := NewGitHub(fake, []string{"cameronsjo"}, GitHubHost).Items(context.Background())
 	if err != nil {
 		t.Fatalf("Items: %v", err)
 	}
@@ -130,13 +130,13 @@ func TestGitHubItems_AllQueriesFailed(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		return "", errors.New("gh: not authenticated")
 	}}
-	if _, _, err := NewGitHub(fake, []string{"cameronsjo"}).Items(context.Background()); err == nil {
+	if _, _, err := NewGitHub(fake, []string{"cameronsjo"}, GitHubHost).Items(context.Background()); err == nil {
 		t.Error("every query failing must be an error")
 	}
 }
 
 func TestGitHubItems_NoOwners(t *testing.T) {
-	if _, _, err := NewGitHub(&exec.FakeRunner{}, nil).Items(context.Background()); err == nil {
+	if _, _, err := NewGitHub(&exec.FakeRunner{}, nil, GitHubHost).Items(context.Background()); err == nil {
 		t.Error("zero owners must be an error")
 	}
 }
@@ -149,7 +149,7 @@ func TestGitHubItems_RejectsMalformedOwner(t *testing.T) {
 	for _, owner := range []string{"bad owner", "-cameronsjo"} {
 		t.Run(owner, func(t *testing.T) {
 			fake := &exec.FakeRunner{}
-			if _, _, err := NewGitHub(fake, []string{owner}).Items(context.Background()); err == nil {
+			if _, _, err := NewGitHub(fake, []string{owner}, GitHubHost).Items(context.Background()); err == nil {
 				t.Error("malformed owner must be an error")
 			}
 			if len(fake.Calls) != 0 {
@@ -173,7 +173,7 @@ func TestGitHubItems_TruncationNote(t *testing.T) {
 		return "[]", nil
 	}}
 
-	_, notes, err := NewGitHub(fake, []string{"cameronsjo"}).Items(context.Background())
+	_, notes, err := NewGitHub(fake, []string{"cameronsjo"}, GitHubHost).Items(context.Background())
 	if err != nil {
 		t.Fatalf("Items: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestParseSearchIssues_HostileRows(t *testing.T) {
 	pullSmuggle := strings.Replace(issueRow("cameronsjo/forgectl", 2), "/issues/2", "/pull/2", 1)
 	good := issueRow("cameronsjo/forgectl", 3)
 
-	items, rawCount, err := parseSearchIssues("[" + bad + "," + pullSmuggle + "," + good + "]")
+	items, rawCount, err := parseSearchIssues("["+bad+","+pullSmuggle+","+good+"]", GitHubHost)
 	if err != nil {
 		t.Fatalf("parseSearchIssues: %v", err)
 	}
@@ -209,10 +209,10 @@ func TestParseSearchIssues_HostileRows(t *testing.T) {
 }
 
 func TestParseSearchIssues_MalformedAndEmpty(t *testing.T) {
-	if _, _, err := parseSearchIssues("{not an array"); err == nil {
+	if _, _, err := parseSearchIssues("{not an array", GitHubHost); err == nil {
 		t.Error("malformed JSON: want error, got nil")
 	}
-	items, rawCount, err := parseSearchIssues("   ")
+	items, rawCount, err := parseSearchIssues("   ", GitHubHost)
 	if err != nil || items != nil || rawCount != 0 {
 		t.Errorf("empty output: want (nil, 0, nil), got (%+v, %d, %v)", items, rawCount, err)
 	}

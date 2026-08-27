@@ -5,7 +5,10 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"errors"
+
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/review"
 )
@@ -27,7 +30,18 @@ var reviewModule = module.Manifest{
 // than silently narrowing to GitHub-only — module.Manifest.New has no error
 // return, so this is the seam that surfaces the config error to the user.
 func newReviewCmd(deps module.Deps) *cobra.Command {
-	srcs := []review.Source{review.NewGitHub(deps.Runner, deps.Cfg.Review.Owners)}
+	// The [github] host gates the whole tree, same as projects: a decode-
+	// degraded config or an invalid host must fail loudly, never fall back to
+	// github.com — the fallback would query the wrong forge AND stamp its rows
+	// as this deployment's data (forgectl#412).
+	if deps.Cfg.DecodeDegraded() {
+		return newReviewConfigErrorCmd(errors.New("config file failed to decode; refusing to guess the github host"))
+	}
+	effectiveHost, err := githubauth.ResolveHost(deps.Cfg.Github.Host)
+	if err != nil {
+		return newReviewConfigErrorCmd(fmt.Errorf("invalid [github] host: %w", err))
+	}
+	srcs := []review.Source{review.NewGitHub(deps.Runner, deps.Cfg.Review.Owners, effectiveHost)}
 	giteaSrc, ok, err := resolveGiteaSource(deps)
 	if err != nil {
 		return newReviewConfigErrorCmd(err)
@@ -38,19 +52,22 @@ func newReviewCmd(deps module.Deps) *cobra.Command {
 	// err discarded: "" degrades to an empty store on read (LoadReviewed), and
 	// the write verbs fail loudly via persist()'s path=="" guard.
 	reviewedPath, _ := config.ReviewReviewedPath()
-	return newReviewCmdForSources(srcs, reviewedPath)
+	return newReviewCmdForSources(srcs, reviewedPath, effectiveHost)
 }
 
 // newReviewConfigErrorCmd builds a `review` command tree whose every leaf —
 // the bare command, mark, unmark, sync — fails immediately with err, before
-// touching the reviewed store or shelling out. Used when [review.gitea] is
-// configured (non-zero) but invalid: silently omitting the source (the prior
-// behavior) let a host typo pass unnoticed, and — worse — let review sync's
-// host-scoped prune leave every git.sjo.lol mark stranded with no active
-// source to protect it. A config error must be loud, not a warn-and-omit.
+// touching the reviewed store or shelling out. Used when a review-relevant
+// config section — [review.gitea], or the deployment-wide [github] host — is
+// present but invalid, or the config file failed to decode: silently omitting
+// or defaulting (the prior behavior for gitea) let a host typo pass
+// unnoticed, and — worse — let review sync's host-scoped prune leave marks
+// stranded with no active source to protect them. A config error must be
+// loud, not a warn-and-omit. err must already be categorical: no raw config
+// value rides it.
 func newReviewConfigErrorCmd(err error) *cobra.Command {
 	fail := func(*cobra.Command, []string) error {
-		return fmt.Errorf("review: invalid [review.gitea] config: %w", err)
+		return fmt.Errorf("review: invalid config: %w", err)
 	}
 	cmd := &cobra.Command{
 		Use:   "review [--kind issue|pr] [--repo <owner/name>]",
@@ -109,18 +126,25 @@ func extraHosts(srcs []review.Source) []string {
 	return hosts
 }
 
-// activeHosts is extraHosts plus github.com — github.com is always active
-// because newReviewCmd always includes a GitHub source unconditionally.
-// review sync uses this as the host-scoping allowlist for SyncKeysScoped: a
-// host outside this set has no active source THIS run, so its marks are
-// never eligible for pruning (see newReviewSyncCmd).
-func activeHosts(srcs []review.Source) []string {
-	return append([]string{review.GitHubHost}, extraHosts(srcs)...)
+// activeHosts is extraHosts plus the effective GitHub host — prepended
+// explicitly rather than discovered, because newReviewCmd always includes a
+// GitHub source unconditionally and the GitHub source deliberately exposes no
+// Host() (a duck-typed requirement on it would hollow out the fake-source
+// prune tests). review sync uses this as the host-scoping allowlist for
+// SyncKeysScoped: a host outside this set has no active source THIS run, so
+// its marks are never eligible for pruning (see newReviewSyncCmd). Under a
+// non-default [github].host, github.com itself is outside the set — old-host
+// marks go inert, never pruned.
+func activeHosts(effectiveHost string, srcs []review.Source) []string {
+	return append([]string{effectiveHost}, extraHosts(srcs)...)
 }
 
-// newReviewCmdForSources builds the command tree over explicit sources and a
-// reviewed-store path — the test seam (mirrors newPrPrsCmdForClient).
-func newReviewCmdForSources(srcs []review.Source, reviewedPath string) *cobra.Command {
+// newReviewCmdForSources builds the command tree over explicit sources, a
+// reviewed-store path, and the effective GitHub host — the test seam (mirrors
+// newPrPrsCmdForClient). effectiveHost threads to mark/unmark (work-ref
+// parsing) and sync (the prune allowlist); production passes ResolveHost
+// output, tests pass review.GitHubHost.
+func newReviewCmdForSources(srcs []review.Source, reviewedPath, effectiveHost string) *cobra.Command {
 	var (
 		asJSON bool
 		kind   string
@@ -169,9 +193,9 @@ issue/pull URL, alongside the plain "owner/repo#N" github.com form.
 
 	hosts := extraHosts(srcs)
 	cmd.AddCommand(
-		newReviewMarkCmd(reviewedPath, hosts),
-		newReviewUnmarkCmd(reviewedPath, hosts),
-		newReviewSyncCmd(srcs, reviewedPath),
+		newReviewMarkCmd(reviewedPath, effectiveHost, hosts),
+		newReviewUnmarkCmd(reviewedPath, effectiveHost, hosts),
+		newReviewSyncCmd(srcs, reviewedPath, effectiveHost),
 	)
 	return cmd
 }

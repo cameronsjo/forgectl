@@ -230,8 +230,15 @@ func TestModules_ConfigClaimsBijection(t *testing.T) {
 			claimed[m.ConfigKey] = true
 		}
 	}
+	// sharedSections are struct-kind config sections deliberately owned by no
+	// single module. [github] is the deployment-wide GitHub host: it spans the
+	// projects AND review modules by design (divergent per-module hosts would
+	// stamp clones and review keys with different hosts — forgectl#412), so
+	// under ADR-0005's ownership model it is a documented shared-section
+	// exception rather than an unclaimed drift.
+	sharedSections := map[string]bool{"github": true}
 	for s := range sections {
-		if !claimed[s] {
+		if !claimed[s] && !sharedSections[s] {
 			t.Errorf("config section %q has no owning module — assign a ConfigKey", s)
 		}
 	}
