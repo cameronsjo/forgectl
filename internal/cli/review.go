@@ -165,15 +165,17 @@ synced; the only local state is the reviewed-marks file, and new activity on an
 item auto-un-dims it.
 
 The owners come from [review] owners in config.toml. Leave that list unset (or
-empty) and review enumerates whoever gh is authenticated as on GitHub.com; the
-list is independent of [projects] owners and neither inherits from the other.
-Every GitHub query is pinned to github.com — GitHub Enterprise is not
-supported, and an ambient GH_HOST is overridden rather than queried.
+empty) and review enumerates whoever gh is authenticated as; the list is
+independent of [projects] owners and neither inherits from the other. Every
+GitHub query is pinned to the deployment's [github] host (default github.com)
+— an ambient GH_HOST is overridden rather than queried, and a non-default
+host requires a stored "gh auth login --hostname <host>" credential.
 
 An optional second source, a self-hosted Gitea instance, joins the inventory
 when [review.gitea] sets enabled = true and a host (enumerated over the tea
 CLI). Its items use host-qualified refs: "host/owner/repo#N" or a Gitea
-issue/pull URL, alongside the plain "owner/repo#N" github.com form.
+issue/pull URL, alongside the plain "owner/repo#N" form, which always means
+the configured GitHub host.
 
   forgectl review                       unified table (reviewed rows dimmed)
   forgectl review --json                machine-readable output

@@ -28,8 +28,10 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 		Long: "List every project across local clones, GitHub.com, and the\n" +
 			"self-hosted Gitea (git.sjo.lol/cameron), marking which are checked out.\n\n" +
 			"GitHub scope comes from [projects] owners in config.toml; leave it unset\n" +
-			"and forgectl lists the repos of whoever gh is authenticated as. Calls are\n" +
-			"pinned to github.com — GitHub Enterprise is not supported.\n\n" +
+			"and forgectl lists the repos of whoever gh is authenticated as. Every gh\n" +
+			"call is pinned to the deployment's [github] host (default github.com) —\n" +
+			"an ambient GH_HOST is overridden, and a non-default host requires a\n" +
+			"stored `gh auth login --hostname <host>` credential.\n\n" +
 			"Examples:\n" +
 			"  forgectl projects list                 # human table, all hosts\n" +
 			"  forgectl projects list --json          # machine-readable, for scripts\n" +
