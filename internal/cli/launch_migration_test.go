@@ -395,7 +395,7 @@ func TestMigrationRefusal_ExplicitlyEmptyLaunchTableRemainsAuthoritative(t *test
 		t.Fatalf("result = %+v, want refusal with empty config launch effective", result)
 	}
 	startup.Launch = result.Effective
-	resolved, source := resolveLaunchConfig(b, startup)
+	resolved, source := resolveLaunchConfig(b, startup, "")
 	if !resolved.IsZero() || source != b.ConfigPath {
 		t.Fatalf("resolved = %+v from %q, want authoritative empty config at %q", resolved, source, b.ConfigPath)
 	}
@@ -907,7 +907,7 @@ func TestIntegration_LaunchDarwinXDGAndControlRefusalMatrixHasZeroMutationAndSaf
 				t.Fatalf("status/refusal=%v/%v", boundary.Status, boundary.Refusal)
 			}
 
-			fallback, notice := autoMigrateOrWarnLegacyLaunch(boundary, config.Config{})
+			fallback, notice, _ := autoMigrateOrWarnLegacyLaunch(boundary, config.Config{})
 			if fallback.Defaults.Model != "sonnet" || notice == "" || termsafe.SafeLine(notice) != notice {
 				t.Fatalf("fallback=%+v notice=%q", fallback, notice)
 			}
@@ -915,7 +915,7 @@ func TestIntegration_LaunchDarwinXDGAndControlRefusalMatrixHasZeroMutationAndSaf
 			if decodeErr != nil {
 				t.Fatal(decodeErr)
 			}
-			shadow, shadowNotice := autoMigrateOrWarnLegacyLaunch(boundary, shadowCfg)
+			shadow, shadowNotice, _ := autoMigrateOrWarnLegacyLaunch(boundary, shadowCfg)
 			if shadow.Defaults.Model != "opus" || shadowNotice == "" || termsafe.SafeLine(shadowNotice) != shadowNotice {
 				t.Fatalf("shadow=%+v notice=%q", shadow, shadowNotice)
 			}
@@ -925,7 +925,7 @@ func TestIntegration_LaunchDarwinXDGAndControlRefusalMatrixHasZeroMutationAndSaf
 				t.Fatalf("explicit error=%v", safeExplicit)
 			}
 			t.Setenv(skipLegacyMigrateEnv, "1")
-			skipped, skipNotice := autoMigrateOrWarnLegacyLaunch(boundary, config.Config{})
+			skipped, skipNotice, _ := autoMigrateOrWarnLegacyLaunch(boundary, config.Config{})
 			if skipped.Defaults.Model != "sonnet" || skipNotice != "" {
 				t.Fatalf("skip fallback=%+v notice=%q", skipped, skipNotice)
 			}

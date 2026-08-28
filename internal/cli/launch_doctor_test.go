@@ -148,3 +148,44 @@ func TestIntegration_LaunchDoctor_WhollyUnrepresentableLegacy_Warns(t *testing.T
 		t.Fatalf("legacy claunch.conf was retired despite the refusal: %v", err)
 	}
 }
+
+// TestIntegration_LaunchDoctor_LabelsTheLegacySourceOnRefusal covers a label
+// that named the wrong file. autoMigrateOrWarnLegacyLaunch returns the legacy
+// profile when migration is declined, the caller assigns it into cfg.Launch,
+// and resolveLaunchConfig then could not tell it from a real [launch] section
+// — so doctor credited config.toml for a profile that came from claunch.conf,
+// naming a path that may not even exist (#418 review).
+func TestIntegration_LaunchDoctor_LabelsTheLegacySourceOnRefusal(t *testing.T) {
+	h := newLegacyHarnessWithBody(t, "[defaults]\nmodel = \"opus\"\nunknown_field = \"x\"\n")
+
+	stdout, _ := h.run(t, "doctor")
+
+	// The refusal notice on the line above already carries the legacy path, so
+	// a bare Contains for it passes with or without the label fix. Assert the
+	// launch-config line itself (#418 review).
+	wantLabel := "launch config: \"" + legacyConfigPath(h.base) + " (legacy)\""
+	if !strings.Contains(stdout, wantLabel) {
+		t.Errorf("doctor stdout = %q, want the launch config line to read %q", stdout, wantLabel)
+	}
+	if strings.Contains(stdout, "launch config: \""+childConfigPath(h.base)+"\"") {
+		t.Errorf("doctor stdout = %q, credits config.toml for a profile that came from the legacy file", stdout)
+	}
+}
+
+// TestIntegration_LaunchDoctor_LabelsTheLegacySourceWhenMigrationIsSkipped is
+// the same defect on the documented opt-out. FORGECTL_SKIP_LEGACY_MIGRATE=1 is
+// the supported way to keep a legacy file, so it is the path most likely to be
+// read — and it credited config.toml too.
+func TestIntegration_LaunchDoctor_LabelsTheLegacySourceWhenMigrationIsSkipped(t *testing.T) {
+	h := newLegacyHarnessWithBody(t, "[defaults]\nmodel = \"opus\"\n")
+
+	stdout, _ := h.runWithEnv(t, []string{"FORGECTL_SKIP_LEGACY_MIGRATE=1"}, "doctor")
+
+	wantLabel := "launch config: \"" + legacyConfigPath(h.base) + " (legacy)\""
+	if !strings.Contains(stdout, wantLabel) {
+		t.Errorf("doctor stdout = %q, want the launch config line to read %q", stdout, wantLabel)
+	}
+	if strings.Contains(stdout, "launch config: \""+childConfigPath(h.base)+"\"") {
+		t.Errorf("doctor stdout = %q, credits config.toml for a profile that came from the legacy file", stdout)
+	}
+}

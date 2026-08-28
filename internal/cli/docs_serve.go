@@ -24,7 +24,20 @@ import (
 
 // shutdownGrace bounds how long `docs serve` waits for in-flight requests to
 // finish after Ctrl-C/SIGTERM before forcing the listener closed.
-const shutdownGrace = 5 * time.Second
+//
+// It MUST stay clear of net/http's own rule for a StateNew connection — one
+// dialed but never used, which any client transport may leave behind
+// speculatively. Server.Shutdown will not close such a connection until
+// `unixSec < time.Now().Unix()-5`, and unixSec is truncated to whole seconds,
+// so eligibility can take up to 6.999s of real time; Shutdown then notices
+// only on its next poll, up to another 500ms. Call it ~7.5s worst case, not
+// the "five seconds" the constant in that expression suggests.
+//
+// A five-second grace tied that rule exactly, and Ctrl-C exited non-zero with
+// "context deadline exceeded" whenever such a connection existed. The forced
+// close below is the real guarantee; this window is what keeps that forced
+// close — and its warning — rare enough to still mean something.
+const shutdownGrace = 10 * time.Second
 
 // newDocsServeCmd builds `forgectl docs serve [dir|file ...]`.
 func newDocsServeCmd(deps module.Deps) *cobra.Command {
@@ -437,7 +450,7 @@ func runDocsServeWithRuntime(
 		// in-flight requests to finish, and an SSE stream never finishes on its
 		// own — so with an open reader tab, Shutdown would block the full
 		// shutdownGrace every single time and Ctrl-C would appear to hang for
-		// five seconds with nothing printed to explain it. Closing the broker
+		// the whole grace with nothing printed to explain it. Closing the broker
 		// first releases every /events handler, so the streams drain and
 		// Shutdown returns as soon as real requests are done.
 		events.Close()
@@ -445,6 +458,15 @@ func runDocsServeWithRuntime(
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
 		result = rt.shutdown(srv, shutdownCtx)
+		if errors.Is(result, context.DeadlineExceeded) {
+			// A drain that runs out of time is not a failed command. The
+			// operator asked the server to stop; it stops. Report the forced
+			// close so a hung connection is visible, then exit zero — exiting
+			// non-zero here would make an idle browser tab look like a crash.
+			closeErr := rt.closeServer(srv)
+			warnDocsServe(errOut, "warning: some connections were still open after %s; closed them (%v)", shutdownGrace, closeErr)
+			result = nil
+		}
 	}
 
 	closeDocsServeLease(rt, lease, errOut)

@@ -155,7 +155,7 @@ func TestRunDocsServe_IdentityEndpointSitsBehindTheSecurityGates(t *testing.T) {
 		if err != nil {
 			t.Errorf("runDocsServe after cancel: %v, want nil", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(shutdownWaitBudget):
 		t.Fatal("runDocsServe did not shut down")
 	}
 }
@@ -248,7 +248,7 @@ func TestRunDocsServe_ProtectedServer_IdentityStillAnswersUnauthenticated(t *tes
 		if err != nil {
 			t.Errorf("runDocsServe after cancel: %v, want nil", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(shutdownWaitBudget):
 		t.Fatal("runDocsServe did not shut down")
 	}
 }

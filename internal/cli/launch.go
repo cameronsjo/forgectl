@@ -141,12 +141,12 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	// migration path forgets.
 	usageEnabled := cfg.Launch.UsageStats
 
-	effLaunch, notice := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
+	effLaunch, notice, effFrom := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
 	if notice != "" {
 		fmt.Fprintln(os.Stderr, "forgectl: "+termsafe.SafeLine(notice))
 	}
 	cfg.Launch = effLaunch
-	lc, _ := resolveLaunchConfig(boundary, cfg)
+	lc, _ := resolveLaunchConfig(boundary, cfg, effFrom)
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -220,7 +220,15 @@ func legacyShadowWarning(boundary *config.LegacyMigrationBoundary, cfg config.Co
 // human source label. When that section is absent it falls back to a legacy
 // ~/.config/claunch/claunch.conf (zero-migration grace); when neither exists it
 // returns the empty config and points at where `forgectl launch init` writes.
-func resolveLaunchConfig(boundary *config.LegacyMigrationBoundary, cfg config.Config) (config.LaunchConfig, string) {
+func resolveLaunchConfig(boundary *config.LegacyMigrationBoundary, cfg config.Config, effectiveFrom string) (config.LaunchConfig, string) {
+	// A declined, skipped, or failed migration hands back a profile read from
+	// the legacy file. The caller has already assigned it into cfg.Launch, so
+	// HasLaunchSection below cannot tell it from a real [launch] section —
+	// crediting config.toml for it, and naming a path that need not even
+	// exist. The provenance settles it (#418 review).
+	if effectiveFrom != "" {
+		return cfg.Launch, effectiveFrom + " (legacy)"
+	}
 	path := ""
 	if boundary != nil {
 		path = boundary.ConfigPath
@@ -271,11 +279,14 @@ func resolveLaunchConfig(boundary *config.LegacyMigrationBoundary, cfg config.Co
 //
 //   - fallback scenario (cfg.Launch.IsZero()): import the legacy file
 //     wholesale into a fresh [launch] section (the same logic `launch
-//     migrate` runs on demand) — see autoMigrateFallback.
+//     migrate` runs on demand) — see migrateLocked's non-shadow branch,
+//     which renders via renderImportedLaunch.
 //   - shadow scenario (cfg.Launch non-zero, #114's "present but ignored"
 //     warning): additively merge the legacy file into [launch] — see
-//     autoMigrateShadow. This can never clobber or duplicate anything
-//     already set, so it's always safe to run without asking.
+//     migrateLocked's shadow branch, which merges via
+//     config.MergeLegacyIntoLaunch and renders via renderReplacedLaunch.
+//     This can never clobber or duplicate anything already set, so it's
+//     always safe to run without asking.
 //
 // In both of those the legacy file is renamed to claunch.conf.bak (never
 // deleted) so the warning stops recurring once there's nothing left to
@@ -286,18 +297,22 @@ func resolveLaunchConfig(boundary *config.LegacyMigrationBoundary, cfg config.Co
 // FORGECTL_SKIP_LEGACY_MIGRATE=1 disables all of this and restores the
 // original warn-only behavior (legacyShadowWarning).
 //
-// Returns the effective LaunchConfig for this invocation — cfg.Launch,
-// rewritten in place when a migration just ran, so callers don't need to
-// re-read config.toml — plus a message to print, or "" when there's nothing
-// to report.
-func autoMigrateOrWarnLegacyLaunch(boundary *config.LegacyMigrationBoundary, cfg config.Config) (config.LaunchConfig, string) {
+// Returns three values: the effective LaunchConfig for this invocation —
+// cfg.Launch, rewritten in place when a migration just ran, so callers don't
+// need to re-read config.toml — a message to print, or "" when there's
+// nothing to report, and the legacy path when that profile was read from the
+// legacy file rather than config.toml ("" when it came from config.toml).
+// Callers pass that third value to resolveLaunchConfig, which cannot
+// otherwise tell a legacy-sourced profile from a real [launch] section and
+// would credit config.toml for it (#418).
+func autoMigrateOrWarnLegacyLaunch(boundary *config.LegacyMigrationBoundary, cfg config.Config) (config.LaunchConfig, string, string) {
 	if os.Getenv(skipLegacyMigrateEnv) != "" {
 		if !cfg.HasLaunchSection() && boundary != nil {
 			if fallback, err := boundary.LoadReadOnlyLegacy(); err == nil {
-				return fallback, ""
+				return fallback, "", boundary.LegacyPath
 			}
 		}
-		return cfg.Launch, legacyShadowWarning(boundary, cfg)
+		return cfg.Launch, legacyShadowWarning(boundary, cfg), ""
 	}
 	result := migrateLegacyAutomatically(boundary, cfg, nativeMigrationTxnOps())
 	switch {
@@ -322,5 +337,5 @@ func autoMigrateOrWarnLegacyLaunch(boundary *config.LegacyMigrationBoundary, cfg
 				return termsafe.QuotePath(boundary.LegacyPath)
 			}(), "error", termsafe.SafeLine(result.Err.Error()), "commit", result.Commit, "backup", result.Backup, "retirement", result.Retirement)
 	}
-	return result.Effective, result.Notice
+	return result.Effective, result.Notice, result.EffectiveFrom
 }

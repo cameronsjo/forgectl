@@ -171,8 +171,8 @@ func TestRunDocsServe_ContextCancel_GracefulShutdown(t *testing.T) {
 		if err != nil {
 			t.Errorf("runDocsServe after cancel: %v, want nil (graceful shutdown)", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("runDocsServe did not return within 5s of context cancellation")
+	case <-time.After(shutdownWaitBudget):
+		t.Fatal("runDocsServe did not return within the shutdown wait budget after context cancellation")
 	}
 }
 
@@ -195,8 +195,8 @@ func TestRunDocsServe_OpenFlag_InvokesBrowserOpener(t *testing.T) {
 		cancel()
 	case err := <-done:
 		t.Fatalf("runDocsServe returned before invoking the browser opener: %v", err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("runDocsServe did not invoke the browser opener within 5s")
+	case <-time.After(shutdownWaitBudget):
+		t.Fatal("runDocsServe did not invoke the browser opener within the shutdown wait budget")
 	}
 
 	select {
@@ -204,8 +204,8 @@ func TestRunDocsServe_OpenFlag_InvokesBrowserOpener(t *testing.T) {
 		if err != nil {
 			t.Fatalf("runDocsServe shutdown: %v", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("runDocsServe did not shut down within 5s")
+	case <-time.After(shutdownWaitBudget):
+		t.Fatal("runDocsServe did not shut down within the shutdown wait budget")
 	}
 
 	if call.Name != "open" && call.Name != "xdg-open" {
@@ -363,7 +363,7 @@ func TestRunDocsServe_TokenFilePunctuationAuthenticatesWithoutOutputLeak(t *test
 		if err != nil {
 			t.Errorf("runDocsServe shutdown: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(shutdownWaitBudget):
 		t.Fatal("runDocsServe did not shut down")
 	}
 }
@@ -423,8 +423,8 @@ func TestRunDocsServe_Loopback_NoBearerTokenRequired(t *testing.T) {
 		if err != nil {
 			t.Errorf("runDocsServe after cancel: %v, want nil (graceful shutdown)", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("runDocsServe did not return within 5s of context cancellation")
+	case <-time.After(shutdownWaitBudget):
+		t.Fatal("runDocsServe did not return within the shutdown wait budget after context cancellation")
 	}
 }
 
@@ -493,8 +493,8 @@ func TestRunDocsServe_CrossSiteRequest_Rejected403(t *testing.T) {
 		if err != nil {
 			t.Errorf("runDocsServe after cancel: %v, want nil (graceful shutdown)", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("runDocsServe did not return within 5s of context cancellation")
+	case <-time.After(shutdownWaitBudget):
+		t.Fatal("runDocsServe did not return within the shutdown wait budget after context cancellation")
 	}
 }
 
@@ -640,8 +640,8 @@ func (s *servedDocs) stop(t *testing.T, label string) {
 		if err != nil {
 			t.Fatalf("server %s: runDocsServe returned %v, want nil after cancellation", label, err)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatalf("server %s did not shut down within 10s of cancellation", label)
+	case <-time.After(shutdownWaitBudget):
+		t.Fatalf("server %s did not shut down within the shutdown wait budget of cancellation", label)
 	}
 }
 
@@ -810,3 +810,11 @@ func TestRunDocsServe_OlderShutdownPreservesNewerDiscovery(t *testing.T) {
 		})
 	}
 }
+
+// shutdownWaitBudget is how long a test waits for runDocsServe to return after
+// cancelling its context. It is derived from the production grace rather than
+// written as a literal: a test budget at or below shutdownGrace turns a
+// deliberately slow drain into a test failure, which is exactly what happened
+// when both were 5s and net/http's own five-second StateNew rule sat on the
+// same number.
+const shutdownWaitBudget = shutdownGrace + 5*time.Second

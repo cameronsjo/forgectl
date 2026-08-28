@@ -32,10 +32,10 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 			// declared at process start, never what a migration produced.
 			usageEnabled := cfg.Launch.UsageStats
 
-			effLaunch, notice := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
+			effLaunch, notice, effFrom := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
 			cfg.Launch = effLaunch
 
-			lc, src := resolveLaunchConfig(boundary, cfg)
+			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
 
 			profile := launch.DefaultsProfile(lc)
 			if cwd, err := os.Getwd(); err == nil {
