@@ -911,10 +911,9 @@ func TestIntegration_LaunchFallback_AutoMigrates(t *testing.T) {
 // the regression test for the concurrency race code review caught: two
 // concurrent `forgectl launch` invocations can both observe
 // cfg.Launch.IsZero() == true at process start (that check runs once,
-// before either process's autoMigrateFallback re-checks anything) and both
+// before either process's migrateLocked re-checks anything) and both
 // attempt the fallback-scenario migration — each appending a full [launch]
-// section, since writeImportedLaunchSection's underlying appendLaunchSection
-// is a pure append with no re-check. The resulting duplicate TOML header
+// section, since renderImportedLaunch is a pure append with no re-check. The resulting duplicate TOML header
 // makes config.toml fail to decode for every subsequent invocation of any
 // subcommand (BurntSushi's decoder rejects a redefined table outright), with
 // only a stderr WARN as evidence and no self-repair — the legacy file is

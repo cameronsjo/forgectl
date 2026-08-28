@@ -181,7 +181,7 @@ func TestAwaitDocsServeEvent_Priority(t *testing.T) {
 					if !errors.Is(event.Err, row.wantErr) {
 						t.Fatalf("run %d: err = %v, want %v", i, event.Err, row.wantErr)
 					}
-				case <-time.After(5 * time.Second):
+				case <-time.After(shutdownWaitBudget):
 					t.Fatalf("run %d: awaitDocsServeEvent blocked on a fully preloaded state", i)
 				}
 			}
@@ -208,7 +208,7 @@ func TestAwaitDocsServeEvent_NilOperationBlocksUntilAHigherEvent(t *testing.T) {
 		if event.Kind != docsServeEventCancel {
 			t.Fatalf("kind = %d, want cancellation", event.Kind)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(shutdownWaitBudget):
 		t.Fatal("awaitDocsServeEvent did not wake on cancellation")
 	}
 }

@@ -17,9 +17,9 @@ import (
 // block per section, each appended only if that section is absent —
 // preserving every hand-edit and comment already on disk. It deliberately
 // never round-trips through toml.NewEncoder (that would decode-then-re-encode
-// and strip every comment); see hasSection/appendLaunchSection below for the
-// same append-if-absent discipline `forgectl launch init` already applies to
-// just [launch]. Template values are verified against their owning package's
+// and strip every comment); see hasSection below, and newInitCmd's append
+// loop that consults it, for the same append-if-absent discipline
+// `forgectl launch init` already applies to just [launch]. Template values are verified against their owning package's
 // actual fallback (Resolved*/IsZero methods, or the Client's own zero-value
 // behavior) rather than guessed — several match config.Config's top-of-file
 // doc comment, but that comment itself drifted from the real code in a few
@@ -226,8 +226,8 @@ type initSection struct {
 // initSections lists every scaffoldable block in file order. The host-scalar
 // preamble MUST stay first — it is the only block prependHostScalars ever
 // inserts ahead of existing content; every other block is appended in order
-// via appendLaunchSection. [launch] reuses launchScaffold (launch_init.go)
-// directly rather than a second copy.
+// by newInitCmd's loop, gated on hasSection. [launch] reuses launchScaffold
+// (launch_init.go) directly rather than a second copy.
 //
 // This list is hand-maintained and therefore drifts: it silently omitted
 // [preflight] and [update] for as long as those sections existed, so `forgectl

@@ -292,7 +292,7 @@ func (h *serveHarness) wait(t *testing.T) error {
 	select {
 	case err := <-h.done:
 		return err
-	case <-time.After(10 * time.Second):
+	case <-time.After(shutdownWaitBudget):
 		t.Fatalf("runDocsServeWithRuntime did not return within 10s; events: %v", h.fake.eventLog())
 		return nil
 	}
@@ -427,7 +427,7 @@ func TestRunDocsServeWithRuntime_IneligibleBranch_ServesWithoutAnIdentityRoute(t
 		if err != nil {
 			t.Errorf("shutdown = %v, want nil", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(shutdownWaitBudget):
 		t.Fatal("the server did not shut down")
 	}
 }
@@ -966,7 +966,54 @@ func TestRunDocsServeWithRuntime_RealHandlerAnswersTheRetryGeneration(t *testing
 		if err != nil {
 			t.Errorf("shutdown = %v, want nil", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(shutdownWaitBudget):
 		t.Fatal("the server did not shut down")
+	}
+}
+
+// TestRunDocsServe_DrainTimeoutForcesCloseAndExitsZero pins the Ctrl-C
+// contract. net/http's Server.Shutdown will not close a StateNew connection —
+// one a client transport dialed speculatively and never used — until it has
+// sat there five seconds, so a drain can legitimately run out of time with
+// nothing wrong. Reporting that as a command failure made an idle browser tab
+// look like a crash; `docs serve` now forces the close and exits zero, saying
+// so on stderr.
+func TestRunDocsServe_DrainTimeoutForcesCloseAndExitsZero(t *testing.T) {
+	fake := newFakeServeRuntime(3590)
+	// Discovery is out of scope here; making it ineligible reaches the banner
+	// without scripting a mint/probe/publish sequence.
+	fake.serversDirErr = errors.New("no config dir")
+	fake.shutdownErr = context.DeadlineExceeded
+
+	h := startServeHarness(t, fake)
+	h.waitForBanner(t)
+	h.cancel()
+
+	if err := h.wait(t); err != nil {
+		t.Errorf("runDocsServeWithRuntime = %v, want nil — a drain that ran out of time is not a failed command", err)
+	}
+	if _, _, _, closeServer, _, _ := fake.counts(); closeServer != 1 {
+		t.Errorf("closeServer calls = %d, want 1 — the drain timeout must force the listener closed", closeServer)
+	}
+	if !strings.Contains(h.stderr.String(), "still open") {
+		t.Errorf("stderr = %q, want it to report the forced close", h.stderr.String())
+	}
+}
+
+// TestRunDocsServe_NonTimeoutShutdownErrorStillFails is the control: only a
+// drain timeout is forgiven. A real Shutdown failure must still surface, or
+// the arm above would swallow every shutdown defect.
+func TestRunDocsServe_NonTimeoutShutdownErrorStillFails(t *testing.T) {
+	fake := newFakeServeRuntime(3590)
+	fake.serversDirErr = errors.New("no config dir")
+	fake.shutdownErr = errors.New("listener exploded")
+
+	h := startServeHarness(t, fake)
+	h.waitForBanner(t)
+	h.cancel()
+
+	err := h.wait(t)
+	if err == nil || !strings.Contains(err.Error(), "listener exploded") {
+		t.Fatalf("runDocsServeWithRuntime = %v, want the injected Shutdown error", err)
 	}
 }

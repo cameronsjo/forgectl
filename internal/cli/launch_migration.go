@@ -55,6 +55,11 @@ type MigrationResult struct {
 	BackupPath string
 	Notice     string
 	Err        error
+	// EffectiveFrom names the legacy file when Effective was read from it
+	// rather than from config.toml — a declined or failed migration hands
+	// back the legacy profile, and without this the caller cannot tell it
+	// from a real [launch] section and credits config.toml for it (#418).
+	EffectiveFrom string
 }
 
 type migrationTxnOps struct {
@@ -211,8 +216,12 @@ func refusalResult(boundary *config.LegacyMigrationBoundary, cfg config.Config, 
 	if !cfg.HasLaunchSection() {
 		if boundary != nil && boundary.Source != nil {
 			result.Effective = boundary.Source.Launch
+			result.EffectiveFrom = boundary.LegacyPath
 		} else if fallback, err := boundary.LoadReadOnlyLegacy(); err == nil {
 			result.Effective = fallback
+			if boundary != nil {
+				result.EffectiveFrom = boundary.LegacyPath
+			}
 		}
 	}
 	result.Notice = "automatic legacy migration skipped; source retained"
@@ -373,6 +382,7 @@ func migrateLocked(boundary *config.LegacyMigrationBoundary, ops migrationTxnOps
 					result.Effective = locked.Launch
 				} else {
 					result.Effective = boundary.Source.Launch
+					result.EffectiveFrom = boundary.LegacyPath
 				}
 			}
 			result.Notice = "legacy source retained because config commit did not become durable"

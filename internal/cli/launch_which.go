@@ -30,12 +30,12 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 			if err != nil {
 				return termsafe.Error(fmt.Errorf("determine working directory: %w", err))
 			}
-			effLaunch, notice := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
+			effLaunch, notice, effFrom := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
 			if notice != "" {
 				fmt.Fprintln(cmd.ErrOrStderr(), "forgectl: "+termsafe.SafeLine(notice))
 			}
 			cfg.Launch = effLaunch
-			lc, src := resolveLaunchConfig(boundary, cfg)
+			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
 			printLaunchProfile(cmd.OutOrStdout(), launch.Resolve(lc, cwd), cwd, src)
 			return nil
 		},

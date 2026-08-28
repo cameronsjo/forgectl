@@ -24,7 +24,15 @@ import (
 
 // shutdownGrace bounds how long `docs serve` waits for in-flight requests to
 // finish after Ctrl-C/SIGTERM before forcing the listener closed.
-const shutdownGrace = 5 * time.Second
+//
+// It MUST stay clear of net/http's own five-second rule: Server.Shutdown will
+// not close a StateNew connection — one dialed but never used, which any
+// client transport may leave behind speculatively — until it has sat there
+// five seconds. A grace equal to that raced it exactly, and Ctrl-C exited
+// non-zero with "context deadline exceeded" whenever such a connection
+// existed. The forced close below is the real guarantee; this is the drain
+// window, sized to clear net/http's rule rather than tie with it.
+const shutdownGrace = 8 * time.Second
 
 // newDocsServeCmd builds `forgectl docs serve [dir|file ...]`.
 func newDocsServeCmd(deps module.Deps) *cobra.Command {
@@ -445,6 +453,15 @@ func runDocsServeWithRuntime(
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
 		result = rt.shutdown(srv, shutdownCtx)
+		if errors.Is(result, context.DeadlineExceeded) {
+			// A drain that runs out of time is not a failed command. The
+			// operator asked the server to stop; it stops. Report the forced
+			// close so a hung connection is visible, then exit zero — exiting
+			// non-zero here would make an idle browser tab look like a crash.
+			_ = rt.closeServer(srv) //nolint:errcheck,gosec // already forcing the close; there is nothing left to recover
+			warnDocsServe(errOut, "warning: some connections were still open after %s; closed them", shutdownGrace)
+			result = nil
+		}
 	}
 
 	closeDocsServeLease(rt, lease, errOut)
