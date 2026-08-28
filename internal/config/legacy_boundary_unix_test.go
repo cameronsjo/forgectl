@@ -277,3 +277,111 @@ func TestBoundary_InjectedDeviceClassificationRefusesBeforeCapture(t *testing.T)
 		t.Fatalf("config parent was mutated: %v", err)
 	}
 }
+
+// TestBoundary_CarriesUndecodedKeys pins the forgectl#417 contract at its
+// source: a legacy file carrying fields forgectl cannot represent must expose
+// them on the snapshot, so the migration transaction can refuse to render,
+// back up, or retire a file it only partly understood. Decoding silently and
+// dropping the remainder is the lossy-supersession bug.
+func TestBoundary_CarriesUndecodedKeys(t *testing.T) {
+	body := []byte("[defaults]\nmodel = \"sonnet\"\nunknown_field = \"x\"\n\n[gateway]\ntoken = \"y\"\n")
+	env, _, _ := boundaryFixture(t, body)
+
+	b, err := PrepareLegacyMigrationBoundary(env, NativeMigrationFS())
+	if err != nil {
+		t.Fatalf("PrepareLegacyMigrationBoundary() error = %v", err)
+	}
+	defer b.Close() //nolint:errcheck // test cleanup; the assertions below carry the verdict
+	if b.Status != BoundaryMigratable {
+		t.Fatalf("Status = %v, want BoundaryMigratable (refusal=%v)", b.Status, b.Refusal)
+	}
+	if b.Source.Launch.Defaults.Model != "sonnet" {
+		t.Fatalf("decoded model = %q, want sonnet", b.Source.Launch.Defaults.Model)
+	}
+	got := b.Source.UndecodedKeys
+	want := []string{"defaults.unknown_field", "gateway", "gateway.token"}
+	if len(got) != len(want) {
+		t.Fatalf("UndecodedKeys = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("UndecodedKeys = %v, want %v (sorted)", got, want)
+		}
+	}
+}
+
+// TestBoundary_NoUndecodedKeysOnAFullyModelledFile is the control: without it
+// the test above could pass against an implementation that reports every key
+// as undecoded.
+func TestBoundary_NoUndecodedKeysOnAFullyModelledFile(t *testing.T) {
+	env, _, _ := boundaryFixture(t, []byte("[defaults]\nmodel = \"sonnet\"\n\n[[project]]\nmatch = \"/tmp\"\n"))
+
+	b, err := PrepareLegacyMigrationBoundary(env, NativeMigrationFS())
+	if err != nil {
+		t.Fatalf("PrepareLegacyMigrationBoundary() error = %v", err)
+	}
+	defer b.Close() //nolint:errcheck // test cleanup; the assertions below carry the verdict
+	if len(b.Source.UndecodedKeys) != 0 {
+		t.Fatalf("UndecodedKeys = %v, want none on a fully modelled file", b.Source.UndecodedKeys)
+	}
+}
+
+// TestBoundary_UnmigratableSiblingIsDerivedFromTheLegacyDirectory pins the one
+// way this probe can be silently wrong (#417). The config base and the legacy
+// base diverge whenever XDG_CONFIG_HOME is unset — that is the default on
+// darwin — so a probe derived from the config directory would report absent on
+// the exact file the probe exists to name.
+func TestBoundary_UnmigratableSiblingIsDerivedFromTheLegacyDirectory(t *testing.T) {
+	base, err := os.MkdirTemp("/tmp", "forgectl-417-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+
+	env := EnvSnapshot{Home: base, UserConfigHome: filepath.Join(base, "native")}
+	legacyDir := filepath.Join(base, ".config", "claunch")
+	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(legacyDir, "config.toml")
+	if err := os.WriteFile(sibling, []byte("[defaults]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A decoy in the config directory: a configDir-derived probe would find
+	// this one and report the wrong path.
+	configDir := filepath.Join(base, "native", "forgectl")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte("log_level = \"off\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := PrepareLegacyMigrationBoundary(env, NativeMigrationFS())
+	if err != nil {
+		t.Fatalf("PrepareLegacyMigrationBoundary() error = %v", err)
+	}
+	defer b.Close() //nolint:errcheck // test cleanup; the assertions below carry the verdict
+	if b.Status != BoundaryNoSource {
+		t.Fatalf("Status = %v, want BoundaryNoSource (no claunch.conf was written)", b.Status)
+	}
+	if filepath.Dir(b.ConfigPath) == filepath.Dir(b.LegacyPath) {
+		t.Fatalf("fixture does not diverge: config dir and legacy dir are both %q", filepath.Dir(b.ConfigPath))
+	}
+	if got := b.UnmigratableSiblingPath(); got != sibling {
+		t.Fatalf("UnmigratableSiblingPath() = %q, want %q (the legacy directory's sibling)", got, sibling)
+	}
+}
+
+// TestBoundary_NoUnmigratableSiblingWhenAbsent is the control for the probe.
+func TestBoundary_NoUnmigratableSiblingWhenAbsent(t *testing.T) {
+	env, _, _ := boundaryFixture(t, []byte("[defaults]\nmodel = \"sonnet\"\n"))
+	b, err := PrepareLegacyMigrationBoundary(env, NativeMigrationFS())
+	if err != nil {
+		t.Fatalf("PrepareLegacyMigrationBoundary() error = %v", err)
+	}
+	defer b.Close() //nolint:errcheck // test cleanup; the assertions below carry the verdict
+	if got := b.UnmigratableSiblingPath(); got != "" {
+		t.Fatalf("UnmigratableSiblingPath() = %q, want \"\" with no sibling present", got)
+	}
+}

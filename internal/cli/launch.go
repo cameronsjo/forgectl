@@ -277,8 +277,12 @@ func resolveLaunchConfig(boundary *config.LegacyMigrationBoundary, cfg config.Co
 //     autoMigrateShadow. This can never clobber or duplicate anything
 //     already set, so it's always safe to run without asking.
 //
-// Either way the legacy file is renamed to claunch.conf.bak (never deleted)
-// so the warning stops recurring once there's nothing left to migrate.
+// In both of those the legacy file is renamed to claunch.conf.bak (never
+// deleted) so the warning stops recurring once there's nothing left to
+// migrate. There is a third outcome: when the legacy file carries keys
+// LaunchConfig has no field for, migration is refused outright (#417) — the
+// source is left in place, nothing is rendered or backed up, and this
+// degrades to the warn arm rather than failing the launch.
 // FORGECTL_SKIP_LEGACY_MIGRATE=1 disables all of this and restores the
 // original warn-only behavior (legacyShadowWarning).
 //
@@ -296,7 +300,20 @@ func autoMigrateOrWarnLegacyLaunch(boundary *config.LegacyMigrationBoundary, cfg
 		return cfg.Launch, legacyShadowWarning(boundary, cfg)
 	}
 	result := migrateLegacyAutomatically(boundary, cfg, nativeMigrationTxnOps())
-	if result.Err != nil {
+	switch {
+	case errors.Is(result.Err, config.ErrLegacyUnsupportedFields):
+		// #417: a deliberate refusal, not a partial transaction. Nothing was
+		// rendered, backed up, or retired, and launch keeps reading the legacy
+		// file leniently — so this degrades to the warn arm rather than
+		// failing a launch.
+		slog.Warn("Declining to migrate a claunch.conf forgectl cannot fully represent.",
+			"path", func() string {
+				if boundary == nil {
+					return ""
+				}
+				return termsafe.QuotePath(boundary.LegacyPath)
+			}(), "error", termsafe.SafeLine(result.Err.Error()))
+	case result.Err != nil:
 		slog.Warn("Automatic claunch.conf migration did not fully retire the source.",
 			"path", func() string {
 				if boundary == nil {

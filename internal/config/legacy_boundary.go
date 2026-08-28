@@ -7,7 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strings"
 	"unicode"
+
+	"github.com/BurntSushi/toml"
 )
 
 // EnvSnapshot is the process environment used to resolve one legacy
@@ -25,6 +29,7 @@ var (
 	ErrLegacyPathControl          = errors.New("legacy migration path contains a control character")
 	ErrLegacyNonRegular           = errors.New("legacy migration source is not a regular file")
 	ErrLegacyMalformed            = errors.New("legacy migration source is malformed")
+	ErrLegacyUnsupportedFields    = errors.New("legacy migration source carries fields forgectl cannot represent")
 	ErrLegacyDrift                = errors.New("legacy migration source changed during the attempt")
 	ErrLegacySourceMissing        = errors.New("legacy migration source was retired by another process")
 	ErrLegacyMigrationUnsupported = errors.New("legacy migration is unsupported on this platform")
@@ -78,11 +83,51 @@ func sameStableMetadata(a, b stableFileMetadata) bool {
 // the one immutable payload used for both TOML decode and backup bytes;
 // comparison reads performed later never replace it.
 type LegacySnapshot struct {
-	Data     []byte
-	Launch   LaunchConfig
-	Identity FileIdentity
-	Mode     os.FileMode
-	platform legacySnapshotPlatform
+	Data   []byte
+	Launch LaunchConfig
+	// UndecodedKeys names every key in Data that LaunchConfig has no field
+	// for, as sorted dotted paths. A non-empty list means forgectl decoded
+	// only part of the file: rendering [launch] from Launch alone would drop
+	// the rest, so the migration transaction refuses to render, back up, or
+	// retire the source (#417). The read-only launch path stays lenient and
+	// ignores this.
+	UndecodedKeys []string
+	Identity      FileIdentity
+	Mode          os.FileMode
+	platform      legacySnapshotPlatform
+}
+
+// UnsupportedFieldsError wraps ErrLegacyUnsupportedFields with the offending
+// key names, following the precedent in internal/workflow/parse.go. Callers
+// render the names through termsafe: they are attacker-influenceable content
+// read out of a config file.
+func UnsupportedFieldsError(keys []string) error {
+	return fmt.Errorf("%w: %s", ErrLegacyUnsupportedFields, strings.Join(keys, ", "))
+}
+
+// decodeLegacyLaunch is the single TOML decode shared by every legacy read
+// site that goes through the migration boundary, so the keys the migration
+// path refuses on and the keys its read-only fallback tolerates can never
+// disagree. It returns the undecoded key names sorted; the caller decides
+// whether they are fatal.
+//
+// LoadLegacyLaunch (config.go) deliberately stays outside this: it is the
+// boundary-less compatibility loader, reached only when resolveLaunchConfig
+// has no boundary at all, and it is lenient by contract — it decodes nothing
+// it could refuse on, and nothing downstream of it can retire a file.
+func decodeLegacyLaunch(data []byte) (LaunchConfig, []string, error) {
+	var lc LaunchConfig
+	md, err := toml.Decode(string(data), &lc)
+	if err != nil {
+		return LaunchConfig{}, nil, fmt.Errorf("%w: %v", ErrLegacyMalformed, err)
+	}
+	undecoded := md.Undecoded()
+	keys := make([]string, 0, len(undecoded))
+	for _, k := range undecoded {
+		keys = append(keys, k.String())
+	}
+	sort.Strings(keys)
+	return stripLegacyUsageOptIn(lc), keys, nil
 }
 
 type legacySnapshotPlatform interface {
@@ -387,6 +432,30 @@ func candidateLegacyMigrationPaths(env EnvSnapshot, goos string) (configPath, le
 	}
 	return filepath.Clean(filepath.Join(configBase, "forgectl", "config.toml")),
 		filepath.Clean(filepath.Join(legacyBase, "claunch", "claunch.conf"))
+}
+
+// UnmigratableSiblingPath names a config file sitting in the legacy directory
+// that forgectl cannot migrate, or "" when there is none. forgectl migrates
+// the historical claunch.conf format only; a claunch that has since moved to
+// a config.toml of its own is neither a migration source nor absent, and
+// reporting it as absent sends the operator looking for a file that is right
+// there (#417).
+//
+// The path is derived from LegacyPath's own directory, never from the config
+// directory: on darwin those diverge (~/Library/Application Support vs
+// ~/.config), so a configDir-derived probe would report absent on the exact
+// file this exists to name. The file is probed for existence and never
+// opened: it is not an import source, and forgectl models no schema for it.
+func (b *LegacyMigrationBoundary) UnmigratableSiblingPath() string {
+	if b == nil || b.LegacyPath == "" {
+		return ""
+	}
+	candidate := filepath.Join(filepath.Dir(b.LegacyPath), "config.toml")
+	info, err := os.Lstat(candidate)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return candidate
 }
 
 func validateLegacyMigrationPaths(env EnvSnapshot, configPath, legacyPath string) error {

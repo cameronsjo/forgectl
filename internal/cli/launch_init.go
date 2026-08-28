@@ -170,9 +170,43 @@ func runLaunchMigrate(cmd *cobra.Command, boundary *config.LegacyMigrationBounda
 		if errors.Is(result.Err, config.ErrLegacyMalformed) {
 			return fmt.Errorf("legacy claunch.conf is malformed, not importing: %w", result.Err)
 		}
+		if errors.Is(result.Err, config.ErrNoLegacyLaunch) {
+			// #417: forgectl migrates the historical claunch.conf format only.
+			// A claunch that has since moved to a config.toml of its own is
+			// present, not absent — name it rather than send the operator
+			// looking for a file that is sitting right there.
+			if sibling := boundary.UnmigratableSiblingPath(); sibling != "" {
+				// The path goes to stdout, not into the returned error: the
+				// styled error renderer title-cases every word, which turns an
+				// absolute path into something the operator cannot copy
+				// (#418 review). The error stays terse and keeps the exit
+				// non-zero — nothing was imported.
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s is present but forgectl cannot migrate it — it migrates the historical claunch.conf format only, so settle that file by hand.\n",
+					termsafe.QuotePath(sibling))
+				return errors.New("found a config forgectl cannot migrate; nothing was imported")
+			}
+		}
+		if errors.Is(result.Err, config.ErrLegacyUnsupportedFields) {
+			// #417: importing would render [launch] from a partial decode and
+			// drop the rest. Name the fields so the operator can settle them
+			// by hand; forgectl migrates the historical format only.
+			// The key names are read off the error rather than re-derived
+			// from boundary.Source: one source for the list, and no second
+			// dereference of a snapshot this arm does not otherwise touch.
+			return fmt.Errorf("legacy claunch.conf carries settings forgectl cannot represent, not importing: %s",
+				termsafe.SafeLine(result.Err.Error()))
+		}
 		return result.Err
 	}
 	slog.Info("Successfully imported legacy claunch.conf.", "legacy_path", termsafe.QuotePath(boundary.LegacyPath), "config_path", termsafe.QuotePath(boundary.ConfigPath), "project_count", len(result.Effective.Projects))
+	// result.Notice is deliberately not reused here: the explicit surface
+	// prints the resolved paths the notice has no room for. A zero-profile
+	// import is legitimate ([defaults] and no [[project]]) and would otherwise
+	// read as a no-op, so it gets its own line.
+	if len(result.Effective.Projects) == 0 {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Imported launch defaults (no project profiles) from %s into %s\n", termsafe.QuotePath(boundary.LegacyPath), termsafe.QuotePath(boundary.ConfigPath))
+		return nil
+	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Imported %d launch profile(s) from %s into %s\n", len(result.Effective.Projects), termsafe.QuotePath(boundary.LegacyPath), termsafe.QuotePath(boundary.ConfigPath))
 	return nil
 }

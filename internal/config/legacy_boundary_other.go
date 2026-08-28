@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-
-	"github.com/BurntSushi/toml"
 )
 
 type nativeMigrationFS struct{}
@@ -64,9 +62,12 @@ func (nativeMigrationFS) loadReadOnly(path string) (LaunchConfig, error) {
 	if err != nil {
 		return LaunchConfig{}, err
 	}
-	var launch LaunchConfig
-	if _, err := toml.Decode(string(data), &launch); err != nil {
-		return LaunchConfig{}, fmt.Errorf("%w: %v", ErrLegacyMalformed, err)
+	// Lenient, matching the unix read-only path: shares the decode so both
+	// agree about what parses, and drops the undecoded key names because
+	// mutation (and so the #417 refusal) is unsupported on this platform.
+	launch, _, err := decodeLegacyLaunch(data)
+	if err != nil {
+		return LaunchConfig{}, err
 	}
-	return stripLegacyUsageOptIn(launch), nil
+	return launch, nil
 }

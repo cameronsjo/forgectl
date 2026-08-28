@@ -13,6 +13,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 type configAction uint8
@@ -218,6 +219,49 @@ func refusalResult(boundary *config.LegacyMigrationBoundary, cfg config.Config, 
 	return result
 }
 
+// unsupportedFieldsCause is the single predicate behind forgectl#417's gate,
+// shared by the automatic and the explicit surface so the two can never drift
+// apart on what counts as unrepresentable. It returns nil when the source was
+// decoded in full.
+func unsupportedFieldsCause(boundary *config.LegacyMigrationBoundary) error {
+	if boundary == nil || boundary.Source == nil || len(boundary.Source.UndecodedKeys) == 0 {
+		return nil
+	}
+	return config.UnsupportedFieldsError(boundary.Source.UndecodedKeys)
+}
+
+// unsupportedFieldsRefusal is forgectl#417's gate. A legacy source carrying
+// keys LaunchConfig has no field for was only partly decoded, so rendering
+// [launch] from that decode would drop the remainder — and the migration
+// transaction then backs up and unlinks the one file that still held it.
+// Refusing is a result, not a failure: the source stays on disk, config.toml
+// is untouched, and the caller keeps reading the legacy file leniently.
+func unsupportedFieldsRefusal(boundary *config.LegacyMigrationBoundary, cfg config.Config) (MigrationResult, bool) {
+	cause := unsupportedFieldsCause(boundary)
+	if cause == nil {
+		return MigrationResult{}, false
+	}
+	result := refusalResult(boundary, cfg, cause)
+	result.Notice = fmt.Sprintf(
+		"%s left in place: forgectl cannot represent %s, so migrating it would silently drop those settings — resolve them by hand, or set %s=1 to stop this notice",
+		termsafe.QuotePath(boundary.LegacyPath), summarizeKeys(boundary.Source.UndecodedKeys), skipLegacyMigrateEnv)
+	return result, true
+}
+
+// summarizeKeys renders an undecoded-key list for a one-line notice that
+// prints on every launch until the operator settles the file. A foreign schema
+// can contribute dozens of keys — and a nested table contributes its own name
+// as well as each child — so the list is capped rather than allowed to grow
+// into a wall of text on every invocation (#418 review).
+func summarizeKeys(keys []string) string {
+	const maxNamed = 5
+	if len(keys) <= maxNamed {
+		return termsafe.SafeLine(strings.Join(keys, ", "))
+	}
+	return fmt.Sprintf("%s (+%d more)",
+		termsafe.SafeLine(strings.Join(keys[:maxNamed], ", ")), len(keys)-maxNamed)
+}
+
 func authoritativePeerWinner(raw []byte, locked config.Config, source config.LaunchConfig) bool {
 	if !locked.HasLaunchSection() && !hasLaunchSection(raw) {
 		return false
@@ -277,6 +321,16 @@ func migrateLocked(boundary *config.LegacyMigrationBoundary, ops migrationTxnOps
 			return unprovedMissingSourceResult(boundary, locked, err)
 		}
 		return refusalResult(boundary, locked, err)
+	}
+
+	// Defense in depth, not a live branch: migrateLegacyAutomatically is the
+	// only caller today and gates on the same predicate before it, and
+	// UndecodedKeys is immutable between the two checks — so this arm cannot
+	// fire as the code stands. It is here for a future second caller of
+	// migrateLocked, which would otherwise reach the render/backup/unlink
+	// ladder ungated (#418 review).
+	if refusal, refused := unsupportedFieldsRefusal(boundary, locked); refused {
+		return refusal
 	}
 
 	shadow := locked.HasLaunchSection() || hasLaunchSection(raw)
@@ -389,7 +443,9 @@ func migrateLocked(boundary *config.LegacyMigrationBoundary, ops migrationTxnOps
 			"migrated %d profile(s) from claunch.conf into config.toml's [launch] section (old file kept as %s)",
 			len(boundary.Source.Launch.Projects), filepath.Base(result.BackupPath))
 	case added == 0:
-		result.Notice = "legacy config fully superseded, removed."
+		result.Notice = fmt.Sprintf(
+			"claunch.conf was fully superseded by config.toml's [launch] section, so nothing was merged (old file kept as %s)",
+			filepath.Base(result.BackupPath))
 	default:
 		result.Notice = fmt.Sprintf(
 			"merged %d addition(s) from claunch.conf into config.toml's [launch] section (old file kept as %s)",
@@ -404,6 +460,14 @@ func migrateLegacyAutomatically(boundary *config.LegacyMigrationBoundary, startu
 	}
 	if boundary.Status == config.BoundaryRefused {
 		return refusalResult(boundary, startup, boundary.Refusal)
+	}
+	// #417's gate runs before ensureParent, which mkdirs the config parent:
+	// a refusal must leave nothing behind, not even an empty directory the
+	// operator never asked for. migrateLocked re-checks it immediately before
+	// the render/backup/unlink ladder, so the guarantee does not depend on
+	// this call alone.
+	if refusal, refused := unsupportedFieldsRefusal(boundary, startup); refused {
+		return refusal
 	}
 	if err := config.ValidatePath(boundary.ConfigPath); err != nil {
 		return refusalResult(boundary, startup, err)
@@ -436,6 +500,10 @@ func migrateLegacyExplicit(boundary *config.LegacyMigrationBoundary, ops migrati
 	}
 	if boundary.Status == config.BoundaryRefused {
 		result.Err = boundary.Refusal
+		return result
+	}
+	if cause := unsupportedFieldsCause(boundary); cause != nil {
+		result.Err = cause
 		return result
 	}
 	if boundary.Source.Launch.IsZero() {

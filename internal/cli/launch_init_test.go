@@ -157,3 +157,91 @@ func TestIntegration_LaunchInit_FromClaunch_ImportedProfileDrivesLaunch(t *testi
 		t.Errorf("recorded args after import = %v, want %v (imported profile should drive launch identically to the legacy file it replaced)", got, want)
 	}
 }
+
+// TestIntegration_Launch_UnrepresentableLegacy_WarnsAndRetainsSource is
+// forgectl#417 end to end on the surface that actually destroys. An ordinary
+// `forgectl launch which` runs the automatic migration, which backs up and
+// unlinks claunch.conf — so a file forgectl only partly decoded must leave
+// that path untaken. The launch itself must still succeed: a refusal that
+// blocks launch is a worse bug than the silent loss it prevents.
+func TestIntegration_Launch_UnrepresentableLegacy_WarnsAndRetainsSource(t *testing.T) {
+	h := newLegacyHarnessWithBody(t, "[defaults]\nmodel = \"opus\"\nunknown_field = \"x\"\n")
+	legacyPath := legacyConfigPath(h.base)
+
+	stdout, stderr := h.run(t, "which")
+
+	if !strings.Contains(stderr, "unknown_field") {
+		t.Errorf("stderr = %q, want it to name the field forgectl cannot represent", stderr)
+	}
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("legacy claunch.conf was retired despite the refusal: %v", err)
+	}
+	// config.toml existed before the run (no [launch] section); the refusal
+	// must not have added one.
+	cfg, err := os.ReadFile(childConfigPath(h.base))
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	if strings.Contains(string(cfg), "[launch") {
+		t.Errorf("config.toml gained a [launch] section despite the refusal:\n%s", cfg)
+	}
+	// The read stays lenient: the modelled fields still drive the launch.
+	if !strings.Contains(stdout, "opus") {
+		t.Errorf("which stdout = %q, want the legacy model still resolved (a refusal must not blank the profile)", stdout)
+	}
+}
+
+// TestIntegration_LaunchMigrate_UnrepresentableLegacy_Refuses covers the
+// on-demand surface: `launch migrate` must exit non-zero naming the field, and
+// write nothing.
+func TestIntegration_LaunchMigrate_UnrepresentableLegacy_Refuses(t *testing.T) {
+	h := newLegacyHarnessWithBody(t, "[defaults]\nmodel = \"opus\"\nunknown_field = \"x\"\n")
+
+	stderr, err := h.runExpectErr(t, nil, "migrate")
+	if err == nil {
+		t.Fatal("`launch migrate` succeeded against an unrepresentable legacy config, want an error")
+	}
+	if !strings.Contains(stderr, "unknown_field") {
+		t.Errorf("stderr = %q, want it to name the field forgectl cannot represent", stderr)
+	}
+	if !strings.Contains(stderr, "cannot represent") {
+		t.Errorf("stderr = %q, want it to say forgectl cannot represent the settings", stderr)
+	}
+	if _, err := os.Stat(legacyConfigPath(h.base)); err != nil {
+		t.Fatalf("legacy claunch.conf was retired despite the refusal: %v", err)
+	}
+	cfg, err := os.ReadFile(childConfigPath(h.base))
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	if strings.Contains(string(cfg), "[launch") {
+		t.Errorf("config.toml gained a [launch] section despite the refusal:\n%s", cfg)
+	}
+}
+
+// TestIntegration_LaunchMigrate_DefaultsOnlyImport covers the second half of
+// #417's message fixes. A legacy file with [defaults] and no [[project]] is a
+// legitimate import, and `launch migrate` used to report it as
+// "Imported 0 launch profile(s)" — a success that reads as a no-op. Without
+// this test the whole zero-profile branch could be deleted and the suite would
+// stay green (#418 review).
+func TestIntegration_LaunchMigrate_DefaultsOnlyImport(t *testing.T) {
+	h := newLegacyHarnessWithBody(t, "[defaults]\nmodel = \"opus\"\n")
+
+	stdout, _ := h.run(t, "migrate")
+
+	if strings.Contains(stdout, "Imported 0 launch profile(s)") {
+		t.Errorf("stdout = %q, a defaults-only import must not report zero profiles", stdout)
+	}
+	if !strings.Contains(stdout, "Imported launch defaults (no project profiles)") {
+		t.Errorf("stdout = %q, want the defaults-only import line", stdout)
+	}
+	// The import still has to have happened.
+	cfg, err := os.ReadFile(childConfigPath(h.base))
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	if !strings.Contains(string(cfg), "opus") {
+		t.Errorf("config.toml = %q, want the imported defaults", cfg)
+	}
+}

@@ -973,3 +973,120 @@ func TestIntegration_LaunchDarwinForeignXDGPairRefusesWithoutMutation(t *testing
 		}
 	}
 }
+
+// TestMigrationTransaction_RefusesUnrepresentableFields is forgectl#417's core
+// contract. A legacy file carrying fields forgectl cannot represent must not
+// be rendered, backed up, or retired: rendering [launch] from the modelled
+// subset alone silently drops the rest, and the source that held it is then
+// deleted. The gate sits ahead of the whole transaction, so nothing is
+// written at all.
+func TestMigrationTransaction_RefusesUnrepresentableFields(t *testing.T) {
+	base := t.TempDir()
+	legacy := []byte("[defaults]\nmodel = \"sonnet\"\nunknown_field = \"x\"\n")
+	b := transactionBoundary(t, base, legacy)
+
+	result := migrateLegacyAutomatically(b, config.Config{}, nativeMigrationTxnOps())
+
+	if !errors.Is(result.Err, config.ErrLegacyUnsupportedFields) {
+		t.Fatalf("result.Err = %v, want it to wrap ErrLegacyUnsupportedFields", result.Err)
+	}
+	if !strings.Contains(result.Notice, "unknown_field") {
+		t.Errorf("notice = %q, want it to name the field forgectl cannot represent", result.Notice)
+	}
+	if result.Action != configUnchanged || result.Backup != backupNotAllocated || result.Retirement != retirementSourceRetained {
+		t.Fatalf("states = action:%v backup:%v retirement:%v, want unchanged/not-allocated/retained", result.Action, result.Backup, result.Retirement)
+	}
+	if got, err := os.ReadFile(b.LegacyPath); err != nil || string(got) != string(legacy) {
+		t.Fatalf("legacy source = %q, error %v; want it retained byte-identical", got, err)
+	}
+	if _, err := os.Lstat(b.ConfigPath); !os.IsNotExist(err) {
+		t.Fatalf("config.toml was written despite the refusal: %v", err)
+	}
+	if entries, err := os.ReadDir(filepath.Join(base, "claunch")); err == nil {
+		for _, e := range entries {
+			if strings.Contains(e.Name(), ".bak") {
+				t.Fatalf("a backup was allocated despite the refusal: %s", e.Name())
+			}
+		}
+	}
+	// The read stays lenient: launch must still see the fields it does model.
+	if result.Effective.Defaults.Model != "sonnet" {
+		t.Errorf("effective model = %q, want sonnet — a refusal must not blank the profile", result.Effective.Defaults.Model)
+	}
+}
+
+// TestMigrationTransaction_ExplicitRefusesUnrepresentableFields covers the
+// on-demand surface. `launch migrate` never unlinks, but it does render
+// [launch] from a partial decode — the same silent loss, one command earlier.
+func TestMigrationTransaction_ExplicitRefusesUnrepresentableFields(t *testing.T) {
+	base := t.TempDir()
+	b := transactionBoundary(t, base, []byte("[defaults]\nmodel = \"sonnet\"\nunknown_field = \"x\"\n"))
+
+	result := migrateLegacyExplicit(b, nativeMigrationTxnOps())
+
+	if !errors.Is(result.Err, config.ErrLegacyUnsupportedFields) {
+		t.Fatalf("result.Err = %v, want it to wrap ErrLegacyUnsupportedFields", result.Err)
+	}
+	if result.Action != configUnchanged {
+		t.Errorf("action = %v, want configUnchanged", result.Action)
+	}
+	if _, err := os.Lstat(b.ConfigPath); !os.IsNotExist(err) {
+		t.Fatalf("config.toml was written despite the refusal: %v", err)
+	}
+}
+
+// TestMigrationTransaction_SupersededNoticeNamesTheBackup pins the second half
+// of #417: "legacy config fully superseded, removed." asserted a deletion and
+// named no recovery path, unlike both of its sibling notices.
+func TestMigrationTransaction_SupersededNoticeNamesTheBackup(t *testing.T) {
+	base := t.TempDir()
+	b := transactionBoundary(t, base, []byte("[defaults]\nmodel = \"sonnet\"\n"))
+	configPath := filepath.Join(base, "forgectl", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A [launch] section that already carries everything the legacy file has,
+	// so MergeLegacyIntoLaunch adds nothing and the `added == 0` arm runs.
+	if err := os.WriteFile(configPath, []byte("[launch.defaults]\nmodel = \"sonnet\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{Model: "sonnet"}}}
+
+	result := migrateLegacyAutomatically(b, cfg, nativeMigrationTxnOps())
+	if result.Err != nil {
+		t.Fatalf("migration error = %v", result.Err)
+	}
+	if result.Retirement != retirementRemoved {
+		t.Fatalf("retirement = %v, want retirementRemoved", result.Retirement)
+	}
+	if result.BackupPath == "" {
+		t.Fatal("BackupPath is empty on a completed retirement")
+	}
+	if !strings.Contains(result.Notice, filepath.Base(result.BackupPath)) {
+		t.Errorf("notice = %q, want it to name the backup %q — a message asserting removal must carry the recovery pointer",
+			result.Notice, filepath.Base(result.BackupPath))
+	}
+}
+
+// TestMigrationTransaction_RefusalCreatesNoConfigDirectory pins the refusal as
+// a true no-op. migrateLegacyAutomatically calls ensureParent — which mkdirs
+// every missing ancestor of the config path — before it ever reaches the
+// locked transaction, so a gate placed only inside migrateLocked would still
+// leave a config directory behind on a first-ever run against a legacy file
+// forgectl declined to migrate.
+func TestMigrationTransaction_RefusalCreatesNoConfigDirectory(t *testing.T) {
+	base := t.TempDir()
+	b := transactionBoundary(t, base, []byte("[defaults]\nmodel = \"sonnet\"\nunknown_field = \"x\"\n"))
+	if _, err := os.Lstat(filepath.Dir(b.ConfigPath)); !os.IsNotExist(err) {
+		t.Fatalf("fixture already has a config parent at %q — the assertion below would pass vacuously", filepath.Dir(b.ConfigPath))
+	}
+
+	result := migrateLegacyAutomatically(b, config.Config{}, nativeMigrationTxnOps())
+
+	if !errors.Is(result.Err, config.ErrLegacyUnsupportedFields) {
+		t.Fatalf("result.Err = %v, want it to wrap ErrLegacyUnsupportedFields", result.Err)
+	}
+	if _, err := os.Lstat(filepath.Dir(b.ConfigPath)); !os.IsNotExist(err) {
+		t.Errorf("config parent %q was created despite the refusal — a declined migration must leave nothing behind", filepath.Dir(b.ConfigPath))
+	}
+}
