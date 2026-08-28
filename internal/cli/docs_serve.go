@@ -25,14 +25,19 @@ import (
 // shutdownGrace bounds how long `docs serve` waits for in-flight requests to
 // finish after Ctrl-C/SIGTERM before forcing the listener closed.
 //
-// It MUST stay clear of net/http's own five-second rule: Server.Shutdown will
-// not close a StateNew connection — one dialed but never used, which any
-// client transport may leave behind speculatively — until it has sat there
-// five seconds. A grace equal to that raced it exactly, and Ctrl-C exited
-// non-zero with "context deadline exceeded" whenever such a connection
-// existed. The forced close below is the real guarantee; this is the drain
-// window, sized to clear net/http's rule rather than tie with it.
-const shutdownGrace = 8 * time.Second
+// It MUST stay clear of net/http's own rule for a StateNew connection — one
+// dialed but never used, which any client transport may leave behind
+// speculatively. Server.Shutdown will not close such a connection until
+// `unixSec < time.Now().Unix()-5`, and unixSec is truncated to whole seconds,
+// so eligibility can take up to 6.999s of real time; Shutdown then notices
+// only on its next poll, up to another 500ms. Call it ~7.5s worst case, not
+// the "five seconds" the constant in that expression suggests.
+//
+// A five-second grace tied that rule exactly, and Ctrl-C exited non-zero with
+// "context deadline exceeded" whenever such a connection existed. The forced
+// close below is the real guarantee; this window is what keeps that forced
+// close — and its warning — rare enough to still mean something.
+const shutdownGrace = 10 * time.Second
 
 // newDocsServeCmd builds `forgectl docs serve [dir|file ...]`.
 func newDocsServeCmd(deps module.Deps) *cobra.Command {
@@ -445,7 +450,7 @@ func runDocsServeWithRuntime(
 		// in-flight requests to finish, and an SSE stream never finishes on its
 		// own — so with an open reader tab, Shutdown would block the full
 		// shutdownGrace every single time and Ctrl-C would appear to hang for
-		// five seconds with nothing printed to explain it. Closing the broker
+		// the whole grace with nothing printed to explain it. Closing the broker
 		// first releases every /events handler, so the streams drain and
 		// Shutdown returns as soon as real requests are done.
 		events.Close()
@@ -458,8 +463,8 @@ func runDocsServeWithRuntime(
 			// operator asked the server to stop; it stops. Report the forced
 			// close so a hung connection is visible, then exit zero — exiting
 			// non-zero here would make an idle browser tab look like a crash.
-			_ = rt.closeServer(srv) //nolint:errcheck,gosec // already forcing the close; there is nothing left to recover
-			warnDocsServe(errOut, "warning: some connections were still open after %s; closed them", shutdownGrace)
+			closeErr := rt.closeServer(srv)
+			warnDocsServe(errOut, "warning: some connections were still open after %s; closed them (%v)", shutdownGrace, closeErr)
 			result = nil
 		}
 	}

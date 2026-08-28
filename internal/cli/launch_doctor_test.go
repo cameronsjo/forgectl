@@ -149,14 +149,6 @@ func TestIntegration_LaunchDoctor_WhollyUnrepresentableLegacy_Warns(t *testing.T
 	}
 }
 
-// legacySourceLabelHarness is newLegacyHarness's shape with a config.toml that
-// exists but declares no [launch] section — the case a bare existence check on
-// the config path would not catch.
-func legacySourceLabelHarness(t *testing.T, body string) *harness {
-	t.Helper()
-	return newLegacyHarnessWithBody(t, body)
-}
-
 // TestIntegration_LaunchDoctor_LabelsTheLegacySourceOnRefusal covers a label
 // that named the wrong file. autoMigrateOrWarnLegacyLaunch returns the legacy
 // profile when migration is declined, the caller assigns it into cfg.Launch,
@@ -164,15 +156,16 @@ func legacySourceLabelHarness(t *testing.T, body string) *harness {
 // — so doctor credited config.toml for a profile that came from claunch.conf,
 // naming a path that may not even exist (#418 review).
 func TestIntegration_LaunchDoctor_LabelsTheLegacySourceOnRefusal(t *testing.T) {
-	h := legacySourceLabelHarness(t, "[defaults]\nmodel = \"opus\"\nunknown_field = \"x\"\n")
+	h := newLegacyHarnessWithBody(t, "[defaults]\nmodel = \"opus\"\nunknown_field = \"x\"\n")
 
 	stdout, _ := h.run(t, "doctor")
 
-	if !strings.Contains(stdout, "launch config: ") {
-		t.Fatalf("doctor stdout = %q, want a launch config line", stdout)
-	}
-	if !strings.Contains(stdout, legacyConfigPath(h.base)) {
-		t.Errorf("doctor stdout = %q, want the launch config credited to the legacy file %q", stdout, legacyConfigPath(h.base))
+	// The refusal notice on the line above already carries the legacy path, so
+	// a bare Contains for it passes with or without the label fix. Assert the
+	// launch-config line itself (#418 review).
+	wantLabel := "launch config: \"" + legacyConfigPath(h.base) + " (legacy)\""
+	if !strings.Contains(stdout, wantLabel) {
+		t.Errorf("doctor stdout = %q, want the launch config line to read %q", stdout, wantLabel)
 	}
 	if strings.Contains(stdout, "launch config: \""+childConfigPath(h.base)+"\"") {
 		t.Errorf("doctor stdout = %q, credits config.toml for a profile that came from the legacy file", stdout)
@@ -184,12 +177,13 @@ func TestIntegration_LaunchDoctor_LabelsTheLegacySourceOnRefusal(t *testing.T) {
 // the supported way to keep a legacy file, so it is the path most likely to be
 // read — and it credited config.toml too.
 func TestIntegration_LaunchDoctor_LabelsTheLegacySourceWhenMigrationIsSkipped(t *testing.T) {
-	h := legacySourceLabelHarness(t, "[defaults]\nmodel = \"opus\"\n")
+	h := newLegacyHarnessWithBody(t, "[defaults]\nmodel = \"opus\"\n")
 
 	stdout, _ := h.runWithEnv(t, []string{"FORGECTL_SKIP_LEGACY_MIGRATE=1"}, "doctor")
 
-	if !strings.Contains(stdout, legacyConfigPath(h.base)) {
-		t.Errorf("doctor stdout = %q, want the launch config credited to the legacy file %q", stdout, legacyConfigPath(h.base))
+	wantLabel := "launch config: \"" + legacyConfigPath(h.base) + " (legacy)\""
+	if !strings.Contains(stdout, wantLabel) {
+		t.Errorf("doctor stdout = %q, want the launch config line to read %q", stdout, wantLabel)
 	}
 	if strings.Contains(stdout, "launch config: \""+childConfigPath(h.base)+"\"") {
 		t.Errorf("doctor stdout = %q, credits config.toml for a profile that came from the legacy file", stdout)

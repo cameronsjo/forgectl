@@ -218,10 +218,11 @@ func refusalResult(boundary *config.LegacyMigrationBoundary, cfg config.Config, 
 			result.Effective = boundary.Source.Launch
 			result.EffectiveFrom = boundary.LegacyPath
 		} else if fallback, err := boundary.LoadReadOnlyLegacy(); err == nil {
+			// LoadReadOnlyLegacy is nil-receiver safe and returns
+			// ErrNoLegacyLaunch for a nil boundary, so reaching here proves
+			// boundary is non-nil — no guard needed.
 			result.Effective = fallback
-			if boundary != nil {
-				result.EffectiveFrom = boundary.LegacyPath
-			}
+			result.EffectiveFrom = boundary.LegacyPath
 		}
 	}
 	result.Notice = "automatic legacy migration skipped; source retained"
@@ -282,6 +283,12 @@ func authoritativePeerWinner(raw []byte, locked config.Config, source config.Lau
 func unprovedMissingSourceResult(boundary *config.LegacyMigrationBoundary, locked config.Config, cause error) MigrationResult {
 	result := refusalResult(boundary, locked, cause)
 	result.Retirement = retirementSourceMissingUnproved
+	// The effective profile is the captured snapshot, but the file it came
+	// from has just been proven gone — very possibly because a peer migrated
+	// it. Labelling it as the source would name a path the operator cannot
+	// open, which is the mirror of the defect EffectiveFrom exists to fix
+	// (#418 review).
+	result.EffectiveFrom = ""
 	result.Notice = "legacy source disappeared without authoritative peer-migration proof; captured fallback remains effective"
 	return result
 }

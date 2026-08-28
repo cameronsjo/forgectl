@@ -196,7 +196,7 @@ func TestRunDocsServe_OpenFlag_InvokesBrowserOpener(t *testing.T) {
 	case err := <-done:
 		t.Fatalf("runDocsServe returned before invoking the browser opener: %v", err)
 	case <-time.After(shutdownWaitBudget):
-		t.Fatal("runDocsServe did not invoke the browser opener within 5s")
+		t.Fatal("runDocsServe did not invoke the browser opener within the shutdown wait budget")
 	}
 
 	select {
@@ -641,7 +641,7 @@ func (s *servedDocs) stop(t *testing.T, label string) {
 			t.Fatalf("server %s: runDocsServe returned %v, want nil after cancellation", label, err)
 		}
 	case <-time.After(shutdownWaitBudget):
-		t.Fatalf("server %s did not shut down within 10s of cancellation", label)
+		t.Fatalf("server %s did not shut down within the shutdown wait budget of cancellation", label)
 	}
 }
 

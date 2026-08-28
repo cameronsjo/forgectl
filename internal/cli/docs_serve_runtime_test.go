@@ -293,7 +293,7 @@ func (h *serveHarness) wait(t *testing.T) error {
 	case err := <-h.done:
 		return err
 	case <-time.After(shutdownWaitBudget):
-		t.Fatalf("runDocsServeWithRuntime did not return within 10s; events: %v", h.fake.eventLog())
+		t.Fatalf("runDocsServeWithRuntime did not return within the shutdown wait budget; events: %v", h.fake.eventLog())
 		return nil
 	}
 }
