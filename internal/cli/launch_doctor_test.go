@@ -29,18 +29,27 @@ func unmigratableSiblingHarness(t *testing.T) *harness {
 func TestIntegration_LaunchMigrate_NamesAnUnmigratableSibling(t *testing.T) {
 	h := unmigratableSiblingHarness(t)
 
-	stderr, err := h.runExpectErr(t, nil, "migrate")
+	stdout, stderr, err := h.exec("migrate")
 	if err == nil {
-		t.Fatal("`launch migrate` succeeded with no claunch.conf present, want an error")
+		t.Fatal("`launch migrate` succeeded with no claunch.conf present, want a non-zero exit")
 	}
-	if !strings.Contains(stderr, "config.toml") {
-		t.Errorf("stderr = %q, want it to name the config.toml sitting in the claunch directory", stderr)
+	sibling := filepath.Join(filepath.Dir(legacyConfigPath(h.base)), "config.toml")
+	// The full path is asserted on stdout, where the styled error renderer
+	// cannot title-case it into something uncopyable (#418 review).
+	if !strings.Contains(stdout, sibling) {
+		t.Errorf("stdout = %q, want it to name the full path %q", stdout, sibling)
 	}
-	if strings.Contains(stderr, "no legacy claunch.conf found") {
-		t.Errorf("stderr = %q, a present-but-unmigratable file must not be reported as absent", stderr)
+	if !strings.Contains(stdout, "cannot migrate it") {
+		t.Errorf("stdout = %q, want it to say forgectl cannot migrate the file", stdout)
+	}
+	// The absent-file wording must be gone from the message itself, not merely
+	// reshaped by the renderer — asserting the lowercase form alone passed
+	// against a message that literally opened with it (#418 review).
+	both := strings.ToLower(stdout + stderr)
+	if strings.Contains(both, "no legacy claunch.conf found") {
+		t.Errorf("output = %q, a present-but-unmigratable file must not be reported as absent", both)
 	}
 	// Probed, never read: the file stays exactly as written.
-	sibling := filepath.Join(filepath.Dir(legacyConfigPath(h.base)), "config.toml")
 	got, err := os.ReadFile(sibling) //nolint:gosec // a path this test just constructed under t.TempDir
 	if err != nil || !strings.Contains(string(got), "opus") {
 		t.Fatalf("sibling config.toml = %q, error %v; want it untouched", got, err)
@@ -52,11 +61,12 @@ func TestIntegration_LaunchDoctor_NamesAnUnmigratableSibling(t *testing.T) {
 
 	stdout, _ := h.run(t, "doctor")
 
-	if !strings.Contains(stdout, "config.toml") {
-		t.Errorf("doctor stdout = %q, want it to name the config.toml sitting in the claunch directory", stdout)
+	sibling := filepath.Join(filepath.Dir(legacyConfigPath(h.base)), "config.toml")
+	if !strings.Contains(stdout, sibling) {
+		t.Errorf("doctor stdout = %q, want it to name the full path %q", stdout, sibling)
 	}
-	if !strings.Contains(stdout, "claunch") {
-		t.Errorf("doctor stdout = %q, want it to say which directory the file is in", stdout)
+	if !strings.Contains(stdout, "cannot migrate it") {
+		t.Errorf("doctor stdout = %q, want it to say forgectl cannot migrate the file", stdout)
 	}
 }
 
@@ -113,6 +123,26 @@ func TestIntegration_Launch_HostileUndecodedKeyIsNeutralized(t *testing.T) {
 	// key in their file.
 	if !strings.Contains(both, "resrever") {
 		t.Errorf("output = %q, want the key still identifiable after escaping", both)
+	}
+	if _, err := os.Stat(legacyConfigPath(h.base)); err != nil {
+		t.Fatalf("legacy claunch.conf was retired despite the refusal: %v", err)
+	}
+}
+
+// TestIntegration_LaunchDoctor_WhollyUnrepresentableLegacy_Warns covers the
+// input class the first doctor test missed. That fixture carried a modelled
+// `model` key, so `lc` was non-zero and doctor took its `default` arm — the
+// one arm that prints the notice. A legacy file forgectl models *nothing* of
+// leaves `lc` zero, takes the "no launch profiles configured" arm, and
+// reported exactly that while a refused claunch.conf sat right there: the same
+// defect the sibling probe exists to fix, one filename over.
+func TestIntegration_LaunchDoctor_WhollyUnrepresentableLegacy_Warns(t *testing.T) {
+	h := newLegacyHarnessWithBody(t, "[gateway]\ntoken = \"y\"\n")
+
+	stdout, _ := h.run(t, "doctor")
+
+	if !strings.Contains(stdout, "gateway") {
+		t.Errorf("doctor stdout = %q, want it to name the fields forgectl cannot represent", stdout)
 	}
 	if _, err := os.Stat(legacyConfigPath(h.base)); err != nil {
 		t.Fatalf("legacy claunch.conf was retired despite the refusal: %v", err)

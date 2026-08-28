@@ -218,3 +218,30 @@ func TestIntegration_LaunchMigrate_UnrepresentableLegacy_Refuses(t *testing.T) {
 		t.Errorf("config.toml gained a [launch] section despite the refusal:\n%s", cfg)
 	}
 }
+
+// TestIntegration_LaunchMigrate_DefaultsOnlyImport covers the second half of
+// #417's message fixes. A legacy file with [defaults] and no [[project]] is a
+// legitimate import, and `launch migrate` used to report it as
+// "Imported 0 launch profile(s)" — a success that reads as a no-op. Without
+// this test the whole zero-profile branch could be deleted and the suite would
+// stay green (#418 review).
+func TestIntegration_LaunchMigrate_DefaultsOnlyImport(t *testing.T) {
+	h := newLegacyHarnessWithBody(t, "[defaults]\nmodel = \"opus\"\n")
+
+	stdout, _ := h.run(t, "migrate")
+
+	if strings.Contains(stdout, "Imported 0 launch profile(s)") {
+		t.Errorf("stdout = %q, a defaults-only import must not report zero profiles", stdout)
+	}
+	if !strings.Contains(stdout, "Imported launch defaults (no project profiles)") {
+		t.Errorf("stdout = %q, want the defaults-only import line", stdout)
+	}
+	// The import still has to have happened.
+	cfg, err := os.ReadFile(childConfigPath(h.base))
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	if !strings.Contains(string(cfg), "opus") {
+		t.Errorf("config.toml = %q, want the imported defaults", cfg)
+	}
+}

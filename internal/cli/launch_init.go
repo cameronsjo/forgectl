@@ -176,8 +176,14 @@ func runLaunchMigrate(cmd *cobra.Command, boundary *config.LegacyMigrationBounda
 			// present, not absent — name it rather than send the operator
 			// looking for a file that is sitting right there.
 			if sibling := boundary.UnmigratableSiblingPath(); sibling != "" {
-				return fmt.Errorf("no legacy claunch.conf found, but %s is present — forgectl migrates the historical claunch.conf format only, so settle that file by hand",
+				// The path goes to stdout, not into the returned error: the
+				// styled error renderer title-cases every word, which turns an
+				// absolute path into something the operator cannot copy
+				// (#418 review). The error stays terse and keeps the exit
+				// non-zero — nothing was imported.
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s is present but forgectl cannot migrate it — it migrates the historical claunch.conf format only, so settle that file by hand.\n",
 					termsafe.QuotePath(sibling))
+				return errors.New("found a config forgectl cannot migrate; nothing was imported")
 			}
 		}
 		if errors.Is(result.Err, config.ErrLegacyUnsupportedFields) {

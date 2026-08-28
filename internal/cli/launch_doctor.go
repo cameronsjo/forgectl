@@ -77,6 +77,14 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 			if boundary == nil || !errors.Is(boundary.Refusal, config.ErrLegacyPathControl) {
 				parseErr = config.ValidatePath(configPath)
 			}
+			// The notice prints ahead of the switch, not inside one arm. A
+			// legacy file forgectl models nothing of leaves lc zero, which
+			// takes the "no launch profiles configured" arm — so gating the
+			// notice on the default arm silently dropped it for the exact
+			// input class #417 is about (#418 review).
+			if notice != "" {
+				_, _ = fmt.Fprintf(out, "%s %s\n", launchWarnMark, termsafe.SafeLine(notice))
+			}
 			switch {
 			case parseErr != nil:
 				healthy = false
@@ -101,9 +109,6 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 				}
 			default:
 				fmt.Fprintf(out, "%s launch config: %s (%d project profile(s))\n", launchOKMark, termsafe.QuotePath(src), len(lc.Projects))
-				if notice != "" {
-					fmt.Fprintf(out, "%s %s\n", launchWarnMark, termsafe.SafeLine(notice))
-				}
 			}
 
 			if !reportUsageStats(out, usageEnabled) {

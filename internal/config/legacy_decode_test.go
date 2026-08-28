@@ -140,7 +140,7 @@ func TestNativeMigrationFS_LoadReadOnly_IsLenient(t *testing.T) {
 	}
 }
 
-func TestNativeMigrationFS_LoadReadOnly_AbsentIsNotAnError(t *testing.T) {
+func TestNativeMigrationFS_LoadReadOnly_AbsentWrapsErrNoLegacyLaunch(t *testing.T) {
 	var fs nativeMigrationFS
 	got, err := fs.loadReadOnly(filepath.Join(t.TempDir(), "claunch.conf"))
 	if !errors.Is(err, ErrNoLegacyLaunch) {

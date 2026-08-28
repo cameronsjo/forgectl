@@ -18,7 +18,7 @@
 * **launch:** the automatic legacy migration — which every launch surface runs, and which backs up and deletes the legacy config — no longer retires a file it only partly decoded. A legacy config carrying settings forgectl cannot represent is now left in place, named on `launch which`/`doctor`, and refused by `launch migrate`, rather than rendered from the modelled subset and deleted ([#417](https://github.com/cameronsjo/forgectl/issues/417))
 * **launch:** the "fully superseded" notice now names the backup file, matching its two sibling notices — a message asserting a removal has to carry the recovery pointer ([#417](https://github.com/cameronsjo/forgectl/issues/417))
 * **launch:** `launch migrate` no longer reports "Imported 0 launch profile(s)" for a legitimate defaults-only import ([#417](https://github.com/cameronsjo/forgectl/issues/417))
-* **launch:** a config file sitting in the legacy directory that forgectl cannot migrate is now named by `launch migrate` and `launch doctor` instead of reported as "no legacy claunch.conf found" ([#417](https://github.com/cameronsjo/forgectl/issues/417))
+* **launch:** a config file sitting in the legacy directory that forgectl cannot migrate is now named, with its full path, by `launch migrate` and `launch doctor` instead of reported only as an absent `claunch.conf` ([#417](https://github.com/cameronsjo/forgectl/issues/417))
 * **projects:** remote-host stamping is now an exact match — a hostname merely *containing* `github.com` (e.g. `evil-github.com.attacker.net`) no longer stamps as trusted `github` inventory ([#412](https://github.com/cameronsjo/forgectl/issues/412))
 
 ### Behavior notes

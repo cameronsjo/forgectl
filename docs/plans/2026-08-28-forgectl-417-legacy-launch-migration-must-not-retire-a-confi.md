@@ -6,9 +6,9 @@ machine: "cf6e768835c7"
 approved_in: "pale-quill"
 approved_session_id: "e0ddd8eb-2343-4965-af79-3a3a0999bb22"
 status: in-review
-next: "PR review — open and land"
+next: "merge #418"
 branch: fix/417-legacy-migration-lossy-supersession
-pr: "—"
+pr: "https://github.com/cameronsjo/forgectl/pull/418"
 updated: 2026-08-28
 date: 2026-08-28
 ---
@@ -175,6 +175,8 @@ The gate belongs in `migrateLocked` **before** the `shadow` branch at `:282` —
 
 - **Task 1** — the plan says "mirror in `loadReadOnly`", but `loadReadOnly` returns a bare `LaunchConfig` and has no snapshot to carry keys on. Extracted a shared `decodeLegacyLaunch(data) (LaunchConfig, []string, error)` in `internal/config/legacy_boundary.go` instead: `Capture` keeps the keys, both `loadReadOnly` implementations discard them. All three decode sites now agree on what parses, and the read-only path stays lenient as the plan requires.
 - **Task 2** — the plan calls for routing the refusal to `autoMigrateOrWarnLegacyLaunch`'s warn arm; that arm already fires on any non-nil `result.Err`, so the routing was a `switch` giving the refusal its own log line ("Declining to migrate…") instead of the misleading "did not fully retire the source". Behavior is as specified; no new arm was needed.
+- **Task 2 (post-review)** — `launch doctor` printed the refusal notice only from its `default` arm, so a legacy file forgectl models *nothing* of left `lc` zero, took the "no launch profiles configured" arm, and reported exactly that while a refused `claunch.conf` sat beside it. The notice now prints ahead of the switch; `TestIntegration_LaunchDoctor_WhollyUnrepresentableLegacy_Warns` pins the input class the first doctor test missed (it carried a modelled `model` key, so it never took that arm).
+- **Task 3 (post-review)** — the unmigratable-sibling path moved out of the returned error and onto stdout. `fang`, the styled error renderer, title-cases every word, so an absolute path came out as `/Var/Folders/Wl/…` — unusable for copy-paste. The error stays terse and keeps the exit non-zero.
 - **Task 2 (post-panel)** — the refusal predicate was extracted to `unsupportedFieldsCause` and the gate hoisted into `migrateLegacyAutomatically` ahead of `ensureParent`, after the code-review and security arms both flagged that a refusal was still creating the config directory. See Learnings.
 - **Task 2** — one existing assertion moved: `TestIntegration_LaunchShadow_DuplicateProjectMatch_NoOverwrite` (`internal/cli/launch_test.go:837`) pinned the old `legacy config fully superseded, removed.` wording. Updated to the new notice and extended to require the backup name, which is the fix the plan asked for.
 

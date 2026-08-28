@@ -241,12 +241,25 @@ func unsupportedFieldsRefusal(boundary *config.LegacyMigrationBoundary, cfg conf
 	if cause == nil {
 		return MigrationResult{}, false
 	}
-	keys := termsafe.SafeLine(strings.Join(boundary.Source.UndecodedKeys, ", "))
 	result := refusalResult(boundary, cfg, cause)
 	result.Notice = fmt.Sprintf(
-		"claunch.conf left in place: forgectl cannot represent %s, so migrating it would silently drop those settings — resolve them by hand",
-		keys)
+		"%s left in place: forgectl cannot represent %s, so migrating it would silently drop those settings — resolve them by hand, or set %s=1 to stop this notice",
+		termsafe.QuotePath(boundary.LegacyPath), summarizeKeys(boundary.Source.UndecodedKeys), skipLegacyMigrateEnv)
 	return result, true
+}
+
+// summarizeKeys renders an undecoded-key list for a one-line notice that
+// prints on every launch until the operator settles the file. A foreign schema
+// can contribute dozens of keys — and a nested table contributes its own name
+// as well as each child — so the list is capped rather than allowed to grow
+// into a wall of text on every invocation (#418 review).
+func summarizeKeys(keys []string) string {
+	const maxNamed = 5
+	if len(keys) <= maxNamed {
+		return termsafe.SafeLine(strings.Join(keys, ", "))
+	}
+	return fmt.Sprintf("%s (+%d more)",
+		termsafe.SafeLine(strings.Join(keys[:maxNamed], ", ")), len(keys)-maxNamed)
 }
 
 func authoritativePeerWinner(raw []byte, locked config.Config, source config.LaunchConfig) bool {
@@ -310,6 +323,12 @@ func migrateLocked(boundary *config.LegacyMigrationBoundary, ops migrationTxnOps
 		return refusalResult(boundary, locked, err)
 	}
 
+	// Defense in depth, not a live branch: migrateLegacyAutomatically is the
+	// only caller today and gates on the same predicate before it, and
+	// UndecodedKeys is immutable between the two checks — so this arm cannot
+	// fire as the code stands. It is here for a future second caller of
+	// migrateLocked, which would otherwise reach the render/backup/unlink
+	// ladder ungated (#418 review).
 	if refusal, refused := unsupportedFieldsRefusal(boundary, locked); refused {
 		return refusal
 	}
