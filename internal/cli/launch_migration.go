@@ -13,6 +13,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 type configAction uint8
@@ -218,6 +219,24 @@ func refusalResult(boundary *config.LegacyMigrationBoundary, cfg config.Config, 
 	return result
 }
 
+// unsupportedFieldsRefusal is forgectl#417's gate. A legacy source carrying
+// keys LaunchConfig has no field for was only partly decoded, so rendering
+// [launch] from that decode would drop the remainder — and the migration
+// transaction then backs up and unlinks the one file that still held it.
+// Refusing is a result, not a failure: the source stays on disk, config.toml
+// is untouched, and the caller keeps reading the legacy file leniently.
+func unsupportedFieldsRefusal(boundary *config.LegacyMigrationBoundary, cfg config.Config) (MigrationResult, bool) {
+	if boundary == nil || boundary.Source == nil || len(boundary.Source.UndecodedKeys) == 0 {
+		return MigrationResult{}, false
+	}
+	keys := termsafe.SafeLine(strings.Join(boundary.Source.UndecodedKeys, ", "))
+	result := refusalResult(boundary, cfg, config.UnsupportedFieldsError(boundary.Source.UndecodedKeys))
+	result.Notice = fmt.Sprintf(
+		"claunch.conf left in place: forgectl cannot represent %s, so migrating it would silently drop those settings — resolve them by hand",
+		keys)
+	return result, true
+}
+
 func authoritativePeerWinner(raw []byte, locked config.Config, source config.LaunchConfig) bool {
 	if !locked.HasLaunchSection() && !hasLaunchSection(raw) {
 		return false
@@ -277,6 +296,10 @@ func migrateLocked(boundary *config.LegacyMigrationBoundary, ops migrationTxnOps
 			return unprovedMissingSourceResult(boundary, locked, err)
 		}
 		return refusalResult(boundary, locked, err)
+	}
+
+	if refusal, refused := unsupportedFieldsRefusal(boundary, locked); refused {
+		return refusal
 	}
 
 	shadow := locked.HasLaunchSection() || hasLaunchSection(raw)
@@ -389,7 +412,9 @@ func migrateLocked(boundary *config.LegacyMigrationBoundary, ops migrationTxnOps
 			"migrated %d profile(s) from claunch.conf into config.toml's [launch] section (old file kept as %s)",
 			len(boundary.Source.Launch.Projects), filepath.Base(result.BackupPath))
 	case added == 0:
-		result.Notice = "legacy config fully superseded, removed."
+		result.Notice = fmt.Sprintf(
+			"claunch.conf was fully superseded by config.toml's [launch] section, so nothing was merged (old file kept as %s)",
+			filepath.Base(result.BackupPath))
 	default:
 		result.Notice = fmt.Sprintf(
 			"merged %d addition(s) from claunch.conf into config.toml's [launch] section (old file kept as %s)",
@@ -436,6 +461,10 @@ func migrateLegacyExplicit(boundary *config.LegacyMigrationBoundary, ops migrati
 	}
 	if boundary.Status == config.BoundaryRefused {
 		result.Err = boundary.Refusal
+		return result
+	}
+	if len(boundary.Source.UndecodedKeys) > 0 {
+		result.Err = config.UnsupportedFieldsError(boundary.Source.UndecodedKeys)
 		return result
 	}
 	if boundary.Source.Launch.IsZero() {

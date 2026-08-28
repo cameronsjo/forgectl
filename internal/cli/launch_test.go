@@ -833,8 +833,13 @@ func TestIntegration_LaunchShadow_DuplicateProjectMatch_NoOverwrite(t *testing.T
 
 	_, stderr := h.run(t, "-p", "hi")
 
-	if !strings.Contains(stderr, "legacy config fully superseded, removed.") {
+	if !strings.Contains(stderr, "fully superseded by config.toml") {
 		t.Errorf("stderr = %q, want the fully-superseded notice (nothing new to merge)", stderr)
+	}
+	// The notice asserts a removal, so it must carry the recovery pointer its
+	// two sibling notices already carried (#417).
+	if !strings.Contains(stderr, "claunch.conf.bak") {
+		t.Errorf("stderr = %q, want the fully-superseded notice to name the backup", stderr)
 	}
 
 	// Nothing was added, so config.toml is left byte-identical — no rewrite

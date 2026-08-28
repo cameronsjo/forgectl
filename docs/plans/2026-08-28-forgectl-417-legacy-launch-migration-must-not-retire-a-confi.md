@@ -6,7 +6,7 @@ machine: "cf6e768835c7"
 approved_in: "pale-quill"
 approved_session_id: "e0ddd8eb-2343-4965-af79-3a3a0999bb22"
 status: in-progress
-next: "Task 2 — gate the destructive path and fix both misleading messages"
+next: "Task 3 — name a claunch config forgectl cannot migrate"
 branch: fix/417-legacy-migration-lossy-supersession
 pr: "—"
 updated: 2026-08-28
@@ -114,15 +114,15 @@ The gate belongs in `migrateLocked` **before** the `shadow` branch at `:282` —
 **Dispatch:** Serial (after Task 1) · in-context — placement must be read off the surrounding transaction, not a spec
 
 **Steps:**
-- [ ] Write failing test: undecoded keys present ⇒ `forgectl launch` reads the legacy config, warns, and leaves the source **on disk** with no `config.toml` written — expect RED
-- [ ] Write failing test: same fixture ⇒ `launch migrate` exits non-zero naming `unknown_field`, writing nothing — expect RED
-- [ ] Add the gate in `migrateLocked` before the `shadow` branch at `:282`, returning a refusal result ahead of every render, the backup ladder, and `sourceUnlink`
-- [ ] Route that refusal to `autoMigrateOrWarnLegacyLaunch`'s warn arm so `launch`/`which`/`doctor` degrade instead of failing
-- [ ] Refuse in `migrateLegacyExplicit` too, and surface `ErrLegacyUnsupportedFields` in `runLaunchMigrate` beside the existing `ErrLegacyMalformed` arm
-- [ ] Fix `migrateLocked`'s `added == 0` notice at `:391` to name `result.BackupPath`, matching its two sibling branches — a message asserting removal must carry the recovery pointer
-- [ ] Fix `launch_init.go:176` separately: it discards `result.Notice` and prints its own `Imported %d launch profile(s)`, so a zero-profile import needs its own line there. Different file from the notice switch — do not conflate them
-- [ ] Run — expect GREEN
-- [ ] Commit: `fix(launch): refuse to retire a legacy config with unrepresentable fields`
+- [x] Write failing test: undecoded keys present ⇒ `forgectl launch` reads the legacy config, warns, and leaves the source **on disk** with no `config.toml` written — expect RED
+- [x] Write failing test: same fixture ⇒ `launch migrate` exits non-zero naming `unknown_field`, writing nothing — expect RED
+- [x] Add the gate in `migrateLocked` before the `shadow` branch at `:282`, returning a refusal result ahead of every render, the backup ladder, and `sourceUnlink`
+- [x] Route that refusal to `autoMigrateOrWarnLegacyLaunch`'s warn arm so `launch`/`which`/`doctor` degrade instead of failing
+- [x] Refuse in `migrateLegacyExplicit` too, and surface `ErrLegacyUnsupportedFields` in `runLaunchMigrate` beside the existing `ErrLegacyMalformed` arm
+- [x] Fix `migrateLocked`'s `added == 0` notice at `:391` to name `result.BackupPath`, matching its two sibling branches — a message asserting removal must carry the recovery pointer
+- [x] Fix `launch_init.go:176` separately: it discards `result.Notice` and prints its own `Imported %d launch profile(s)`, so a zero-profile import needs its own line there. Different file from the notice switch — do not conflate them
+- [x] Run — expect GREEN
+- [x] Commit: `fix(launch): refuse to retire a legacy config with unrepresentable fields`
 
 ---
 
@@ -174,6 +174,8 @@ The gate belongs in `migrateLocked` **before** the `shadow` branch at `:282` —
 ## Deviations
 
 - **Task 1** — the plan says "mirror in `loadReadOnly`", but `loadReadOnly` returns a bare `LaunchConfig` and has no snapshot to carry keys on. Extracted a shared `decodeLegacyLaunch(data) (LaunchConfig, []string, error)` in `internal/config/legacy_boundary.go` instead: `Capture` keeps the keys, both `loadReadOnly` implementations discard them. All three decode sites now agree on what parses, and the read-only path stays lenient as the plan requires.
+- **Task 2** — the plan calls for routing the refusal to `autoMigrateOrWarnLegacyLaunch`'s warn arm; that arm already fires on any non-nil `result.Err`, so the routing was a `switch` giving the refusal its own log line ("Declining to migrate…") instead of the misleading "did not fully retire the source". Behavior is as specified; no new arm was needed.
+- **Task 2** — one existing assertion moved: `TestIntegration_LaunchShadow_DuplicateProjectMatch_NoOverwrite` (`internal/cli/launch_test.go:837`) pinned the old `legacy config fully superseded, removed.` wording. Updated to the new notice and extended to require the backup name, which is the fix the plan asked for.
 
 ## Learnings
 

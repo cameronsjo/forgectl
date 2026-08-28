@@ -296,7 +296,20 @@ func autoMigrateOrWarnLegacyLaunch(boundary *config.LegacyMigrationBoundary, cfg
 		return cfg.Launch, legacyShadowWarning(boundary, cfg)
 	}
 	result := migrateLegacyAutomatically(boundary, cfg, nativeMigrationTxnOps())
-	if result.Err != nil {
+	switch {
+	case errors.Is(result.Err, config.ErrLegacyUnsupportedFields):
+		// #417: a deliberate refusal, not a partial transaction. Nothing was
+		// rendered, backed up, or retired, and launch keeps reading the legacy
+		// file leniently — so this degrades to the warn arm rather than
+		// failing a launch.
+		slog.Warn("Declining to migrate a claunch.conf forgectl cannot fully represent.",
+			"path", func() string {
+				if boundary == nil {
+					return ""
+				}
+				return termsafe.QuotePath(boundary.LegacyPath)
+			}(), "error", termsafe.SafeLine(result.Err.Error()))
+	case result.Err != nil:
 		slog.Warn("Automatic claunch.conf migration did not fully retire the source.",
 			"path", func() string {
 				if boundary == nil {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -170,9 +171,24 @@ func runLaunchMigrate(cmd *cobra.Command, boundary *config.LegacyMigrationBounda
 		if errors.Is(result.Err, config.ErrLegacyMalformed) {
 			return fmt.Errorf("legacy claunch.conf is malformed, not importing: %w", result.Err)
 		}
+		if errors.Is(result.Err, config.ErrLegacyUnsupportedFields) {
+			// #417: importing would render [launch] from a partial decode and
+			// drop the rest. Name the fields so the operator can settle them
+			// by hand; forgectl migrates the historical format only.
+			return fmt.Errorf("legacy claunch.conf carries settings forgectl cannot represent, not importing: %s",
+				termsafe.SafeLine(strings.Join(boundary.Source.UndecodedKeys, ", ")))
+		}
 		return result.Err
 	}
 	slog.Info("Successfully imported legacy claunch.conf.", "legacy_path", termsafe.QuotePath(boundary.LegacyPath), "config_path", termsafe.QuotePath(boundary.ConfigPath), "project_count", len(result.Effective.Projects))
+	// result.Notice is deliberately not reused here: the explicit surface
+	// prints the resolved paths the notice has no room for. A zero-profile
+	// import is legitimate ([defaults] and no [[project]]) and would otherwise
+	// read as a no-op, so it gets its own line.
+	if len(result.Effective.Projects) == 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "Imported launch defaults (no project profiles) from %s into %s\n", termsafe.QuotePath(boundary.LegacyPath), termsafe.QuotePath(boundary.ConfigPath))
+		return nil
+	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Imported %d launch profile(s) from %s into %s\n", len(result.Effective.Projects), termsafe.QuotePath(boundary.LegacyPath), termsafe.QuotePath(boundary.ConfigPath))
 	return nil
 }
