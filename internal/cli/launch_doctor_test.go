@@ -93,3 +93,28 @@ func TestIntegration_LaunchDoctor_UnrepresentableLegacy_Warns(t *testing.T) {
 		t.Fatalf("legacy claunch.conf was retired by `doctor` despite the refusal: %v", err)
 	}
 }
+
+// TestIntegration_Launch_HostileUndecodedKeyIsNeutralized closes the #417
+// refusal's render loop end to end: an undecoded key name is attacker-
+// influenceable content read out of a config file, and it now reaches the
+// terminal on three surfaces. A bidi override decodes cleanly through TOML (it
+// is not a TOML control character), so termsafe is the only thing standing
+// between the file and the operator's terminal.
+func TestIntegration_Launch_HostileUndecodedKeyIsNeutralized(t *testing.T) {
+	h := newLegacyHarnessWithBody(t, "[defaults]\nmodel = \"opus\"\n\"own\u202eresrever\" = 1\n")
+
+	stdout, stderr := h.run(t, "which")
+	both := stdout + stderr
+
+	if strings.ContainsRune(both, '\u202e') {
+		t.Errorf("a raw bidi override reached the terminal unescaped; output = %q", both)
+	}
+	// Neutralized, not dropped — the operator still has to be able to find the
+	// key in their file.
+	if !strings.Contains(both, "resrever") {
+		t.Errorf("output = %q, want the key still identifiable after escaping", both)
+	}
+	if _, err := os.Stat(legacyConfigPath(h.base)); err != nil {
+		t.Fatalf("legacy claunch.conf was retired despite the refusal: %v", err)
+	}
+}
