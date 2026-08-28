@@ -7,7 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strings"
 	"unicode"
+
+	"github.com/BurntSushi/toml"
 )
 
 // EnvSnapshot is the process environment used to resolve one legacy
@@ -25,6 +29,7 @@ var (
 	ErrLegacyPathControl          = errors.New("legacy migration path contains a control character")
 	ErrLegacyNonRegular           = errors.New("legacy migration source is not a regular file")
 	ErrLegacyMalformed            = errors.New("legacy migration source is malformed")
+	ErrLegacyUnsupportedFields    = errors.New("legacy migration source carries fields forgectl cannot represent")
 	ErrLegacyDrift                = errors.New("legacy migration source changed during the attempt")
 	ErrLegacySourceMissing        = errors.New("legacy migration source was retired by another process")
 	ErrLegacyMigrationUnsupported = errors.New("legacy migration is unsupported on this platform")
@@ -78,11 +83,45 @@ func sameStableMetadata(a, b stableFileMetadata) bool {
 // the one immutable payload used for both TOML decode and backup bytes;
 // comparison reads performed later never replace it.
 type LegacySnapshot struct {
-	Data     []byte
-	Launch   LaunchConfig
-	Identity FileIdentity
-	Mode     os.FileMode
-	platform legacySnapshotPlatform
+	Data   []byte
+	Launch LaunchConfig
+	// UndecodedKeys names every key in Data that LaunchConfig has no field
+	// for, as sorted dotted paths. A non-empty list means forgectl decoded
+	// only part of the file: rendering [launch] from Launch alone would drop
+	// the rest, so the migration transaction refuses to render, back up, or
+	// retire the source (#417). The read-only launch path stays lenient and
+	// ignores this.
+	UndecodedKeys []string
+	Identity      FileIdentity
+	Mode          os.FileMode
+	platform      legacySnapshotPlatform
+}
+
+// UnsupportedFieldsError wraps ErrLegacyUnsupportedFields with the offending
+// key names, following the precedent in internal/workflow/parse.go. Callers
+// render the names through termsafe: they are attacker-influenceable content
+// read out of a config file.
+func UnsupportedFieldsError(keys []string) error {
+	return fmt.Errorf("%w: %s", ErrLegacyUnsupportedFields, strings.Join(keys, ", "))
+}
+
+// decodeLegacyLaunch is the single TOML decode every legacy read site shares,
+// so the keys the migration path refuses on and the keys the read-only path
+// tolerates can never disagree. It returns the undecoded key names sorted; the
+// caller decides whether they are fatal.
+func decodeLegacyLaunch(data []byte) (LaunchConfig, []string, error) {
+	var lc LaunchConfig
+	md, err := toml.Decode(string(data), &lc)
+	if err != nil {
+		return LaunchConfig{}, nil, fmt.Errorf("%w: %v", ErrLegacyMalformed, err)
+	}
+	undecoded := md.Undecoded()
+	keys := make([]string, 0, len(undecoded))
+	for _, k := range undecoded {
+		keys = append(keys, k.String())
+	}
+	sort.Strings(keys)
+	return stripLegacyUsageOptIn(lc), keys, nil
 }
 
 type legacySnapshotPlatform interface {

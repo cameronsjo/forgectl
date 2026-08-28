@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/BurntSushi/toml"
 	"golang.org/x/sys/unix"
 )
 
@@ -191,11 +190,10 @@ func (p *unixLegacyProbe) Capture() (*LegacySnapshot, error) {
 	if err := unix.Fstatat(p.parentFD, p.base, &post, unix.AT_SYMLINK_NOFOLLOW); err != nil || identityFromUnixStat(&post) != meta.Identity || !statMatchesInfo(&post, openedInfo) {
 		return nil, ErrLegacyDrift
 	}
-	var launch LaunchConfig
-	if _, err := toml.Decode(string(data), &launch); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrLegacyMalformed, err)
+	launch, undecoded, err := decodeLegacyLaunch(data)
+	if err != nil {
+		return nil, err
 	}
-	launch = stripLegacyUsageOptIn(launch)
 
 	plat := &unixLegacySnapshot{
 		parentFD: p.parentFD,
@@ -207,11 +205,12 @@ func (p *unixLegacyProbe) Capture() (*LegacySnapshot, error) {
 	p.owned = false // transfer the pinned parent descriptor to the snapshot.
 	closeFile = false
 	return &LegacySnapshot{
-		Data:     data,
-		Launch:   launch,
-		Identity: meta.Identity,
-		Mode:     meta.Mode,
-		platform: plat,
+		Data:          data,
+		Launch:        launch,
+		UndecodedKeys: undecoded,
+		Identity:      meta.Identity,
+		Mode:          meta.Mode,
+		platform:      plat,
 	}, nil
 }
 
@@ -530,9 +529,13 @@ func (nativeMigrationFS) loadReadOnly(path string) (LaunchConfig, error) {
 	if err != nil {
 		return LaunchConfig{}, fmt.Errorf("read legacy config read-only: %w", err)
 	}
-	var launch LaunchConfig
-	if _, err := toml.Decode(string(data), &launch); err != nil {
-		return LaunchConfig{}, fmt.Errorf("%w: %v", ErrLegacyMalformed, err)
+	// Deliberately lenient: this is the read-only launch path, where an
+	// unrepresentable field must not block a launch. It shares the decode so
+	// the two paths cannot disagree about what parses, and drops the
+	// undecoded names because only the migration path acts on them (#417).
+	launch, _, err := decodeLegacyLaunch(data)
+	if err != nil {
+		return LaunchConfig{}, err
 	}
-	return stripLegacyUsageOptIn(launch), nil
+	return launch, nil
 }

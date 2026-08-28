@@ -277,3 +277,51 @@ func TestBoundary_InjectedDeviceClassificationRefusesBeforeCapture(t *testing.T)
 		t.Fatalf("config parent was mutated: %v", err)
 	}
 }
+
+// TestBoundary_CarriesUndecodedKeys pins the forgectl#417 contract at its
+// source: a legacy file carrying fields forgectl cannot represent must expose
+// them on the snapshot, so the migration transaction can refuse to render,
+// back up, or retire a file it only partly understood. Decoding silently and
+// dropping the remainder is the lossy-supersession bug.
+func TestBoundary_CarriesUndecodedKeys(t *testing.T) {
+	body := []byte("[defaults]\nmodel = \"sonnet\"\nunknown_field = \"x\"\n\n[gateway]\ntoken = \"y\"\n")
+	env, _, _ := boundaryFixture(t, body)
+
+	b, err := PrepareLegacyMigrationBoundary(env, NativeMigrationFS())
+	if err != nil {
+		t.Fatalf("PrepareLegacyMigrationBoundary() error = %v", err)
+	}
+	defer b.Close()
+	if b.Status != BoundaryMigratable {
+		t.Fatalf("Status = %v, want BoundaryMigratable (refusal=%v)", b.Status, b.Refusal)
+	}
+	if b.Source.Launch.Defaults.Model != "sonnet" {
+		t.Fatalf("decoded model = %q, want sonnet", b.Source.Launch.Defaults.Model)
+	}
+	got := b.Source.UndecodedKeys
+	want := []string{"defaults.unknown_field", "gateway", "gateway.token"}
+	if len(got) != len(want) {
+		t.Fatalf("UndecodedKeys = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("UndecodedKeys = %v, want %v (sorted)", got, want)
+		}
+	}
+}
+
+// TestBoundary_NoUndecodedKeysOnAFullyModelledFile is the control: without it
+// the test above could pass against an implementation that reports every key
+// as undecoded.
+func TestBoundary_NoUndecodedKeysOnAFullyModelledFile(t *testing.T) {
+	env, _, _ := boundaryFixture(t, []byte("[defaults]\nmodel = \"sonnet\"\n\n[[project]]\nmatch = \"/tmp\"\n"))
+
+	b, err := PrepareLegacyMigrationBoundary(env, NativeMigrationFS())
+	if err != nil {
+		t.Fatalf("PrepareLegacyMigrationBoundary() error = %v", err)
+	}
+	defer b.Close()
+	if len(b.Source.UndecodedKeys) != 0 {
+		t.Fatalf("UndecodedKeys = %v, want none on a fully modelled file", b.Source.UndecodedKeys)
+	}
+}
