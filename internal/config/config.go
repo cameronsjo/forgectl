@@ -1119,25 +1119,6 @@ func LoadLegacyLaunch() (LaunchConfig, string, error) {
 	return stripLegacyUsageOptIn(lc), path, nil
 }
 
-// ValidateLegacyLaunch decodes the legacy claunch.conf and returns any parse
-// error. A missing file is valid (nil). `forgectl launch doctor` uses this as a
-// standalone health check to surface a broken legacy file instead of
-// misreporting it as "no profiles configured".
-func ValidateLegacyLaunch() error {
-	path, err := LegacyLaunchPath()
-	if err != nil {
-		return err
-	}
-	var lc LaunchConfig
-	if _, err := toml.DecodeFile(path, &lc); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	return nil
-}
-
 // MergeLegacyIntoLaunch performs the additive-only merge behind the
 // shadow-scenario auto-migration (#114): legacy claunch.conf fields are
 // folded into cfg.Launch only where the corresponding config.toml field is

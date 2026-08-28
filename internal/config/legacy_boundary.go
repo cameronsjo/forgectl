@@ -105,10 +105,16 @@ func UnsupportedFieldsError(keys []string) error {
 	return fmt.Errorf("%w: %s", ErrLegacyUnsupportedFields, strings.Join(keys, ", "))
 }
 
-// decodeLegacyLaunch is the single TOML decode every legacy read site shares,
-// so the keys the migration path refuses on and the keys the read-only path
-// tolerates can never disagree. It returns the undecoded key names sorted; the
-// caller decides whether they are fatal.
+// decodeLegacyLaunch is the single TOML decode shared by every legacy read
+// site that goes through the migration boundary, so the keys the migration
+// path refuses on and the keys its read-only fallback tolerates can never
+// disagree. It returns the undecoded key names sorted; the caller decides
+// whether they are fatal.
+//
+// LoadLegacyLaunch (config.go) deliberately stays outside this: it is the
+// boundary-less compatibility loader, reached only when resolveLaunchConfig
+// has no boundary at all, and it is lenient by contract — it decodes nothing
+// it could refuse on, and nothing downstream of it can retire a file.
 func decodeLegacyLaunch(data []byte) (LaunchConfig, []string, error) {
 	var lc LaunchConfig
 	md, err := toml.Decode(string(data), &lc)

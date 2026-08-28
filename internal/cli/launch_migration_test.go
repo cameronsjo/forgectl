@@ -1067,3 +1067,26 @@ func TestMigrationTransaction_SupersededNoticeNamesTheBackup(t *testing.T) {
 			result.Notice, filepath.Base(result.BackupPath))
 	}
 }
+
+// TestMigrationTransaction_RefusalCreatesNoConfigDirectory pins the refusal as
+// a true no-op. migrateLegacyAutomatically calls ensureParent — which mkdirs
+// every missing ancestor of the config path — before it ever reaches the
+// locked transaction, so a gate placed only inside migrateLocked would still
+// leave a config directory behind on a first-ever run against a legacy file
+// forgectl declined to migrate.
+func TestMigrationTransaction_RefusalCreatesNoConfigDirectory(t *testing.T) {
+	base := t.TempDir()
+	b := transactionBoundary(t, base, []byte("[defaults]\nmodel = \"sonnet\"\nunknown_field = \"x\"\n"))
+	if _, err := os.Lstat(filepath.Dir(b.ConfigPath)); !os.IsNotExist(err) {
+		t.Fatalf("fixture already has a config parent at %q — the assertion below would pass vacuously", filepath.Dir(b.ConfigPath))
+	}
+
+	result := migrateLegacyAutomatically(b, config.Config{}, nativeMigrationTxnOps())
+
+	if !errors.Is(result.Err, config.ErrLegacyUnsupportedFields) {
+		t.Fatalf("result.Err = %v, want it to wrap ErrLegacyUnsupportedFields", result.Err)
+	}
+	if _, err := os.Lstat(filepath.Dir(b.ConfigPath)); !os.IsNotExist(err) {
+		t.Errorf("config parent %q was created despite the refusal — a declined migration must leave nothing behind", filepath.Dir(b.ConfigPath))
+	}
+}

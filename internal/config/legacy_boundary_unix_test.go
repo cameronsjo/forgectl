@@ -291,7 +291,7 @@ func TestBoundary_CarriesUndecodedKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrepareLegacyMigrationBoundary() error = %v", err)
 	}
-	defer b.Close()
+	defer b.Close() //nolint:errcheck // test cleanup; the assertions below carry the verdict
 	if b.Status != BoundaryMigratable {
 		t.Fatalf("Status = %v, want BoundaryMigratable (refusal=%v)", b.Status, b.Refusal)
 	}
@@ -320,7 +320,7 @@ func TestBoundary_NoUndecodedKeysOnAFullyModelledFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrepareLegacyMigrationBoundary() error = %v", err)
 	}
-	defer b.Close()
+	defer b.Close() //nolint:errcheck // test cleanup; the assertions below carry the verdict
 	if len(b.Source.UndecodedKeys) != 0 {
 		t.Fatalf("UndecodedKeys = %v, want none on a fully modelled file", b.Source.UndecodedKeys)
 	}
@@ -361,7 +361,7 @@ func TestBoundary_UnmigratableSiblingIsDerivedFromTheLegacyDirectory(t *testing.
 	if err != nil {
 		t.Fatalf("PrepareLegacyMigrationBoundary() error = %v", err)
 	}
-	defer b.Close()
+	defer b.Close() //nolint:errcheck // test cleanup; the assertions below carry the verdict
 	if b.Status != BoundaryNoSource {
 		t.Fatalf("Status = %v, want BoundaryNoSource (no claunch.conf was written)", b.Status)
 	}
@@ -380,7 +380,7 @@ func TestBoundary_NoUnmigratableSiblingWhenAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrepareLegacyMigrationBoundary() error = %v", err)
 	}
-	defer b.Close()
+	defer b.Close() //nolint:errcheck // test cleanup; the assertions below carry the verdict
 	if got := b.UnmigratableSiblingPath(); got != "" {
 		t.Fatalf("UnmigratableSiblingPath() = %q, want \"\" with no sibling present", got)
 	}

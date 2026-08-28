@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -185,8 +184,11 @@ func runLaunchMigrate(cmd *cobra.Command, boundary *config.LegacyMigrationBounda
 			// #417: importing would render [launch] from a partial decode and
 			// drop the rest. Name the fields so the operator can settle them
 			// by hand; forgectl migrates the historical format only.
+			// The key names are read off the error rather than re-derived
+			// from boundary.Source: one source for the list, and no second
+			// dereference of a snapshot this arm does not otherwise touch.
 			return fmt.Errorf("legacy claunch.conf carries settings forgectl cannot represent, not importing: %s",
-				termsafe.SafeLine(strings.Join(boundary.Source.UndecodedKeys, ", ")))
+				termsafe.SafeLine(result.Err.Error()))
 		}
 		return result.Err
 	}
@@ -196,7 +198,7 @@ func runLaunchMigrate(cmd *cobra.Command, boundary *config.LegacyMigrationBounda
 	// import is legitimate ([defaults] and no [[project]]) and would otherwise
 	// read as a no-op, so it gets its own line.
 	if len(result.Effective.Projects) == 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "Imported launch defaults (no project profiles) from %s into %s\n", termsafe.QuotePath(boundary.LegacyPath), termsafe.QuotePath(boundary.ConfigPath))
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Imported launch defaults (no project profiles) from %s into %s\n", termsafe.QuotePath(boundary.LegacyPath), termsafe.QuotePath(boundary.ConfigPath))
 		return nil
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Imported %d launch profile(s) from %s into %s\n", len(result.Effective.Projects), termsafe.QuotePath(boundary.LegacyPath), termsafe.QuotePath(boundary.ConfigPath))

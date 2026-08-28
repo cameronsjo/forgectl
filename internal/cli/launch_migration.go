@@ -219,6 +219,17 @@ func refusalResult(boundary *config.LegacyMigrationBoundary, cfg config.Config, 
 	return result
 }
 
+// unsupportedFieldsCause is the single predicate behind forgectl#417's gate,
+// shared by the automatic and the explicit surface so the two can never drift
+// apart on what counts as unrepresentable. It returns nil when the source was
+// decoded in full.
+func unsupportedFieldsCause(boundary *config.LegacyMigrationBoundary) error {
+	if boundary == nil || boundary.Source == nil || len(boundary.Source.UndecodedKeys) == 0 {
+		return nil
+	}
+	return config.UnsupportedFieldsError(boundary.Source.UndecodedKeys)
+}
+
 // unsupportedFieldsRefusal is forgectl#417's gate. A legacy source carrying
 // keys LaunchConfig has no field for was only partly decoded, so rendering
 // [launch] from that decode would drop the remainder — and the migration
@@ -226,11 +237,12 @@ func refusalResult(boundary *config.LegacyMigrationBoundary, cfg config.Config, 
 // Refusing is a result, not a failure: the source stays on disk, config.toml
 // is untouched, and the caller keeps reading the legacy file leniently.
 func unsupportedFieldsRefusal(boundary *config.LegacyMigrationBoundary, cfg config.Config) (MigrationResult, bool) {
-	if boundary == nil || boundary.Source == nil || len(boundary.Source.UndecodedKeys) == 0 {
+	cause := unsupportedFieldsCause(boundary)
+	if cause == nil {
 		return MigrationResult{}, false
 	}
 	keys := termsafe.SafeLine(strings.Join(boundary.Source.UndecodedKeys, ", "))
-	result := refusalResult(boundary, cfg, config.UnsupportedFieldsError(boundary.Source.UndecodedKeys))
+	result := refusalResult(boundary, cfg, cause)
 	result.Notice = fmt.Sprintf(
 		"claunch.conf left in place: forgectl cannot represent %s, so migrating it would silently drop those settings — resolve them by hand",
 		keys)
@@ -430,6 +442,14 @@ func migrateLegacyAutomatically(boundary *config.LegacyMigrationBoundary, startu
 	if boundary.Status == config.BoundaryRefused {
 		return refusalResult(boundary, startup, boundary.Refusal)
 	}
+	// #417's gate runs before ensureParent, which mkdirs the config parent:
+	// a refusal must leave nothing behind, not even an empty directory the
+	// operator never asked for. migrateLocked re-checks it immediately before
+	// the render/backup/unlink ladder, so the guarantee does not depend on
+	// this call alone.
+	if refusal, refused := unsupportedFieldsRefusal(boundary, startup); refused {
+		return refusal
+	}
 	if err := config.ValidatePath(boundary.ConfigPath); err != nil {
 		return refusalResult(boundary, startup, err)
 	}
@@ -463,8 +483,8 @@ func migrateLegacyExplicit(boundary *config.LegacyMigrationBoundary, ops migrati
 		result.Err = boundary.Refusal
 		return result
 	}
-	if len(boundary.Source.UndecodedKeys) > 0 {
-		result.Err = config.UnsupportedFieldsError(boundary.Source.UndecodedKeys)
+	if cause := unsupportedFieldsCause(boundary); cause != nil {
+		result.Err = cause
 		return result
 	}
 	if boundary.Source.Launch.IsZero() {

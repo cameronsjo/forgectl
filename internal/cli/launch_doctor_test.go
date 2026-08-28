@@ -20,7 +20,7 @@ func unmigratableSiblingHarness(t *testing.T) *harness {
 		t.Fatalf("remove claunch.conf: %v", err)
 	}
 	sibling := filepath.Join(filepath.Dir(legacyPath), "config.toml")
-	if err := os.WriteFile(sibling, []byte("[defaults]\nmodel = \"opus\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(sibling, []byte("[defaults]\nmodel = \"opus\"\n"), 0o600); err != nil {
 		t.Fatalf("write sibling config.toml: %v", err)
 	}
 	return h
@@ -41,7 +41,8 @@ func TestIntegration_LaunchMigrate_NamesAnUnmigratableSibling(t *testing.T) {
 	}
 	// Probed, never read: the file stays exactly as written.
 	sibling := filepath.Join(filepath.Dir(legacyConfigPath(h.base)), "config.toml")
-	if got, err := os.ReadFile(sibling); err != nil || !strings.Contains(string(got), "opus") {
+	got, err := os.ReadFile(sibling) //nolint:gosec // a path this test just constructed under t.TempDir
+	if err != nil || !strings.Contains(string(got), "opus") {
 		t.Fatalf("sibling config.toml = %q, error %v; want it untouched", got, err)
 	}
 }
@@ -72,5 +73,23 @@ func TestIntegration_LaunchDoctor_SilentWithoutASibling(t *testing.T) {
 
 	if strings.Contains(stdout, "cannot migrate") {
 		t.Errorf("doctor stdout = %q, want no unmigratable-sibling line when there is no sibling", stdout)
+	}
+}
+
+// TestIntegration_LaunchDoctor_UnrepresentableLegacy_Warns closes the one
+// surface the #417 refusal was otherwise unpinned on. `which` and `migrate`
+// both have their own tests; doctor reaches the same refusal through a
+// different print path (its `notice` line), so a change that dropped the
+// notice there would go unnoticed everywhere else.
+func TestIntegration_LaunchDoctor_UnrepresentableLegacy_Warns(t *testing.T) {
+	h := newLegacyHarnessWithBody(t, "[defaults]\nmodel = \"opus\"\nunknown_field = \"x\"\n")
+
+	stdout, _ := h.run(t, "doctor")
+
+	if !strings.Contains(stdout, "unknown_field") {
+		t.Errorf("doctor stdout = %q, want it to name the field forgectl cannot represent", stdout)
+	}
+	if _, err := os.Stat(legacyConfigPath(h.base)); err != nil {
+		t.Fatalf("legacy claunch.conf was retired by `doctor` despite the refusal: %v", err)
 	}
 }

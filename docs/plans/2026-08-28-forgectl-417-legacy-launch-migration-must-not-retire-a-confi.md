@@ -5,8 +5,8 @@ session_id: "251e811e-1ff7-4e32-9c72-f78c99c348b3"
 machine: "cf6e768835c7"
 approved_in: "pale-quill"
 approved_session_id: "e0ddd8eb-2343-4965-af79-3a3a0999bb22"
-status: in-progress
-next: "Task 4 — changelog, regression floor, ship"
+status: in-review
+next: "PR review — open and land"
 branch: fix/417-legacy-migration-lossy-supersession
 pr: "—"
 updated: 2026-08-28
@@ -162,12 +162,12 @@ The gate belongs in `migrateLocked` **before** the `shadow` branch at `:282` —
 **Dispatch:** Serial (after Tasks 1-3) · in-context
 
 **Steps:**
-- [ ] Confirm `TestIntegration_LaunchInit_FromClaunch_ImportedProfileDrivesLaunch` (`internal/cli/launch_init_test.go:142`) stays green — a well-formed legacy file must still import and still retire exactly as before. Do not write a second copy
-- [ ] Confirm the dead `config.ValidateLegacyLaunch` (`internal/config/config.go:1126`, no callers in the main tree) is either wired to the new verdict or left untouched — decide explicitly, do not half-fix it
-- [ ] `go build ./... && go test ./...`
-- [ ] Add the `[Unreleased]` entry to the repo-root `CHANGELOG.md`
-- [ ] Open the PR with `Closes #417` as plain text, plus the producer-tuple trailer block (forgectl squash-merges, so the tuple rides the PR body too)
-- [ ] run `cadence-forge:polish`; fold findings
+- [x] Confirm `TestIntegration_LaunchInit_FromClaunch_ImportedProfileDrivesLaunch` (`internal/cli/launch_init_test.go:142`) stays green — a well-formed legacy file must still import and still retire exactly as before. Do not write a second copy
+- [x] Confirm the dead `config.ValidateLegacyLaunch` (`internal/config/config.go:1126`, no callers in the main tree) is either wired to the new verdict or left untouched — decide explicitly, do not half-fix it
+- [x] `go build ./... && go test ./...`
+- [x] Add the `[Unreleased]` entry to the repo-root `CHANGELOG.md`
+- [x] Open the PR with `Closes #417` as plain text, plus the producer-tuple trailer block (forgectl squash-merges, so the tuple rides the PR body too)
+- [x] run `cadence-forge:polish`; fold findings
 
 ---
 
@@ -175,11 +175,13 @@ The gate belongs in `migrateLocked` **before** the `shadow` branch at `:282` —
 
 - **Task 1** — the plan says "mirror in `loadReadOnly`", but `loadReadOnly` returns a bare `LaunchConfig` and has no snapshot to carry keys on. Extracted a shared `decodeLegacyLaunch(data) (LaunchConfig, []string, error)` in `internal/config/legacy_boundary.go` instead: `Capture` keeps the keys, both `loadReadOnly` implementations discard them. All three decode sites now agree on what parses, and the read-only path stays lenient as the plan requires.
 - **Task 2** — the plan calls for routing the refusal to `autoMigrateOrWarnLegacyLaunch`'s warn arm; that arm already fires on any non-nil `result.Err`, so the routing was a `switch` giving the refusal its own log line ("Declining to migrate…") instead of the misleading "did not fully retire the source". Behavior is as specified; no new arm was needed.
+- **Task 2 (post-panel)** — the refusal predicate was extracted to `unsupportedFieldsCause` and the gate hoisted into `migrateLegacyAutomatically` ahead of `ensureParent`, after the code-review and security arms both flagged that a refusal was still creating the config directory. See Learnings.
 - **Task 2** — one existing assertion moved: `TestIntegration_LaunchShadow_DuplicateProjectMatch_NoOverwrite` (`internal/cli/launch_test.go:837`) pinned the old `legacy config fully superseded, removed.` wording. Updated to the new notice and extended to require the backup name, which is the fix the plan asked for.
 
 ## Learnings
 
-*(empty at approval)*
+- **The gate had to sit one frame higher than the plan specified.** The plan placed the refusal in `migrateLocked`, ahead of every render, the backup ladder, and the unlink. That is correct as far as it goes, but `migrateLegacyAutomatically` calls `ensureParent` — which mkdirs the config parent — and `withLock` before it ever reaches `migrateLocked`. So a refusal still created a config directory the operator never asked for, on the exact first-ever-run path #417 is about. The repo's own README already stated the invariant this broke ("No pre-capture refusal creates the config directory, writer lock, config temp, config file, or backup"), which is what makes it a real finding rather than a preference. The gate now runs in both places; `TestMigrationTransaction_RefusalCreatesNoConfigDirectory` pins it and was verified to go red without the hoist.
+- **`config.ValidateLegacyLaunch` was deleted, not wired** (Task 4's owed ruling). It had no callers, its docstring claimed `launch doctor` used it when doctor calls `LoadReadOnlyLegacy` instead, and wiring it would have added a fourth `toml.Decode` site that could disagree with the shared helper — the exact divergence Task 1 removed.
 
 ---
 

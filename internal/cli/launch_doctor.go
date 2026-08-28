@@ -96,7 +96,7 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 				// forgectl cannot migrate, so "no profiles configured" does
 				// not read as "nothing is there".
 				if sibling := boundary.UnmigratableSiblingPath(); sibling != "" {
-					fmt.Fprintf(out, "%s %s is present but forgectl cannot migrate it — it migrates the historical claunch.conf format only\n",
+					_, _ = fmt.Fprintf(out, "%s %s is present but forgectl cannot migrate it — it migrates the historical claunch.conf format only\n",
 						launchWarnMark, termsafe.QuotePath(sibling))
 				}
 			default:
