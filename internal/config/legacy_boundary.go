@@ -428,6 +428,30 @@ func candidateLegacyMigrationPaths(env EnvSnapshot, goos string) (configPath, le
 		filepath.Clean(filepath.Join(legacyBase, "claunch", "claunch.conf"))
 }
 
+// UnmigratableSiblingPath names a config file sitting in the legacy directory
+// that forgectl cannot migrate, or "" when there is none. forgectl migrates
+// the historical claunch.conf format only; a claunch that has since moved to
+// a config.toml of its own is neither a migration source nor absent, and
+// reporting it as absent sends the operator looking for a file that is right
+// there (#417).
+//
+// The path is derived from LegacyPath's own directory, never from the config
+// directory: on darwin those diverge (~/Library/Application Support vs
+// ~/.config), so a configDir-derived probe would report absent on the exact
+// file this exists to name. The file is probed for existence and never
+// opened: it is not an import source, and forgectl models no schema for it.
+func (b *LegacyMigrationBoundary) UnmigratableSiblingPath() string {
+	if b == nil || b.LegacyPath == "" {
+		return ""
+	}
+	candidate := filepath.Join(filepath.Dir(b.LegacyPath), "config.toml")
+	info, err := os.Lstat(candidate)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return candidate
+}
+
 func validateLegacyMigrationPaths(env EnvSnapshot, configPath, legacyPath string) error {
 	for _, value := range []string{env.Home, env.XDGConfigHome, env.UserConfigHome, configPath, legacyPath} {
 		if containsUnicodeControl(value) {

@@ -6,7 +6,7 @@ machine: "cf6e768835c7"
 approved_in: "pale-quill"
 approved_session_id: "e0ddd8eb-2343-4965-af79-3a3a0999bb22"
 status: in-progress
-next: "Task 3 — name a claunch config forgectl cannot migrate"
+next: "Task 4 — changelog, regression floor, ship"
 branch: fix/417-legacy-migration-lossy-supersession
 pr: "—"
 updated: 2026-08-28
@@ -140,12 +140,12 @@ The gate belongs in `migrateLocked` **before** the `shadow` branch at `:282` —
 **Dispatch:** Serial (after Task 2 — shares `launch_init.go`) · in-context
 
 **Steps:**
-- [ ] Write failing test: sibling `config.toml` present, `claunch.conf` absent ⇒ `migrate` and `doctor` name the found file and the format mismatch instead of `no legacy claunch.conf found` — expect RED
-- [ ] Derive the probe as `filepath.Join(filepath.Dir(boundary.LegacyPath), "config.toml")` — **never** from `configDir()`, which resolves to `~/Library/Application Support` on darwin while the legacy base is `~/.config`, and would report absent on the exact file #417 is about
-- [ ] Probe existence only; never decode it, never treat it as an import source
-- [ ] Word it as a mismatch the operator resolves by hand — forgectl migrates the historical format only
-- [ ] Run — expect GREEN
-- [ ] Commit: `fix(launch): name a claunch config forgectl cannot migrate`
+- [x] Write failing test: sibling `config.toml` present, `claunch.conf` absent ⇒ `migrate` and `doctor` name the found file and the format mismatch instead of `no legacy claunch.conf found` — expect RED
+- [x] Derive the probe as `filepath.Join(filepath.Dir(boundary.LegacyPath), "config.toml")` — **never** from `configDir()`, which resolves to `~/Library/Application Support` on darwin while the legacy base is `~/.config`, and would report absent on the exact file #417 is about
+- [x] Probe existence only; never decode it, never treat it as an import source
+- [x] Word it as a mismatch the operator resolves by hand — forgectl migrates the historical format only
+- [x] Run — expect GREEN
+- [x] Commit: `fix(launch): name a claunch config forgectl cannot migrate`
 
 ---
 

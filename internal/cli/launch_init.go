@@ -171,6 +171,16 @@ func runLaunchMigrate(cmd *cobra.Command, boundary *config.LegacyMigrationBounda
 		if errors.Is(result.Err, config.ErrLegacyMalformed) {
 			return fmt.Errorf("legacy claunch.conf is malformed, not importing: %w", result.Err)
 		}
+		if errors.Is(result.Err, config.ErrNoLegacyLaunch) {
+			// #417: forgectl migrates the historical claunch.conf format only.
+			// A claunch that has since moved to a config.toml of its own is
+			// present, not absent — name it rather than send the operator
+			// looking for a file that is sitting right there.
+			if sibling := boundary.UnmigratableSiblingPath(); sibling != "" {
+				return fmt.Errorf("no legacy claunch.conf found, but %s is present — forgectl migrates the historical claunch.conf format only, so settle that file by hand",
+					termsafe.QuotePath(sibling))
+			}
+		}
 		if errors.Is(result.Err, config.ErrLegacyUnsupportedFields) {
 			// #417: importing would render [launch] from a partial decode and
 			// drop the rest. Name the fields so the operator can settle them

@@ -92,6 +92,13 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 				} else {
 					fmt.Fprintf(out, "%s no launch profiles configured — using built-in defaults (run `forgectl launch init`)\n", launchWarnMark)
 				}
+				// #417: name a config file in the legacy directory that
+				// forgectl cannot migrate, so "no profiles configured" does
+				// not read as "nothing is there".
+				if sibling := boundary.UnmigratableSiblingPath(); sibling != "" {
+					fmt.Fprintf(out, "%s %s is present but forgectl cannot migrate it — it migrates the historical claunch.conf format only\n",
+						launchWarnMark, termsafe.QuotePath(sibling))
+				}
 			default:
 				fmt.Fprintf(out, "%s launch config: %s (%d project profile(s))\n", launchOKMark, termsafe.QuotePath(src), len(lc.Projects))
 				if notice != "" {

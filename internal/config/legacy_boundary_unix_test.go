@@ -325,3 +325,63 @@ func TestBoundary_NoUndecodedKeysOnAFullyModelledFile(t *testing.T) {
 		t.Fatalf("UndecodedKeys = %v, want none on a fully modelled file", b.Source.UndecodedKeys)
 	}
 }
+
+// TestBoundary_UnmigratableSiblingIsDerivedFromTheLegacyDirectory pins the one
+// way this probe can be silently wrong (#417). The config base and the legacy
+// base diverge whenever XDG_CONFIG_HOME is unset — that is the default on
+// darwin — so a probe derived from the config directory would report absent on
+// the exact file the probe exists to name.
+func TestBoundary_UnmigratableSiblingIsDerivedFromTheLegacyDirectory(t *testing.T) {
+	base, err := os.MkdirTemp("/tmp", "forgectl-417-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+
+	env := EnvSnapshot{Home: base, UserConfigHome: filepath.Join(base, "native")}
+	legacyDir := filepath.Join(base, ".config", "claunch")
+	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(legacyDir, "config.toml")
+	if err := os.WriteFile(sibling, []byte("[defaults]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A decoy in the config directory: a configDir-derived probe would find
+	// this one and report the wrong path.
+	configDir := filepath.Join(base, "native", "forgectl")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte("log_level = \"off\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := PrepareLegacyMigrationBoundary(env, NativeMigrationFS())
+	if err != nil {
+		t.Fatalf("PrepareLegacyMigrationBoundary() error = %v", err)
+	}
+	defer b.Close()
+	if b.Status != BoundaryNoSource {
+		t.Fatalf("Status = %v, want BoundaryNoSource (no claunch.conf was written)", b.Status)
+	}
+	if filepath.Dir(b.ConfigPath) == filepath.Dir(b.LegacyPath) {
+		t.Fatalf("fixture does not diverge: config dir and legacy dir are both %q", filepath.Dir(b.ConfigPath))
+	}
+	if got := b.UnmigratableSiblingPath(); got != sibling {
+		t.Fatalf("UnmigratableSiblingPath() = %q, want %q (the legacy directory's sibling)", got, sibling)
+	}
+}
+
+// TestBoundary_NoUnmigratableSiblingWhenAbsent is the control for the probe.
+func TestBoundary_NoUnmigratableSiblingWhenAbsent(t *testing.T) {
+	env, _, _ := boundaryFixture(t, []byte("[defaults]\nmodel = \"sonnet\"\n"))
+	b, err := PrepareLegacyMigrationBoundary(env, NativeMigrationFS())
+	if err != nil {
+		t.Fatalf("PrepareLegacyMigrationBoundary() error = %v", err)
+	}
+	defer b.Close()
+	if got := b.UnmigratableSiblingPath(); got != "" {
+		t.Fatalf("UnmigratableSiblingPath() = %q, want \"\" with no sibling present", got)
+	}
+}
