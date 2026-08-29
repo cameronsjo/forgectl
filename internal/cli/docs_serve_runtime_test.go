@@ -1042,13 +1042,42 @@ func TestRunDocsServe_SteadyStateReturnWaitsForServe(t *testing.T) {
 	fake.holdServeGate = true
 
 	h := startServeHarness(t, fake)
+	// A blocked serve goroutine would otherwise outlive a failing run, parked
+	// on serveGate forever.
+	t.Cleanup(func() {
+		select {
+		case fake.serveGate <- http.ErrServerClosed:
+		default:
+		}
+	})
 	h.waitForBanner(t)
 	h.cancel()
+
+	// Wait for shutdown to have been CALLED before asserting the lifecycle has
+	// not returned. Without this the assertion is a bare timer: a harness
+	// goroutine descheduled past the window passes having observed nothing,
+	// which is the same silent-green failure this test exists to end. shutdown
+	// is the last thing that runs before the wait, so once it is recorded the
+	// only place left to block is background.Wait.
+	deadline := time.Now().Add(shutdownWaitBudget)
+	for {
+		if _, _, _, _, shutdown, _ := fake.counts(); shutdown > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("shutdown was never called; events: %v", fake.eventLog())
+		}
+		select {
+		case err := <-h.done:
+			t.Fatalf("runDocsServeWithRuntime returned (%v) while its serve goroutine was held — the steady-state return is not waiting", err)
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
 
 	select {
 	case err := <-h.done:
 		t.Fatalf("runDocsServeWithRuntime returned (%v) while its serve goroutine was still running — the steady-state return is not waiting", err)
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 	}
 
 	// Release the goroutine the lifecycle is waiting on; it may now finish.

@@ -494,11 +494,14 @@ func runDocsServeWithRuntime(
 
 	// Every return path from the first background.Add on waits, this one
 	// included, so no tracked goroutine outlives the command. (The returns
-	// above that Add need no wait — there is nothing tracked yet.) Bounded on both branches into here: on a serve
-	// result Serve has already returned — that result is what produced the
+	// above that Add need no wait — there is nothing tracked yet.)
+	//
+	// Bounded on both branches into here. The Serve leg: on a serve result
+	// Serve has already returned, since that result is what produced the
 	// event; on cancellation Shutdown, or the forced close above it, has made
-	// Serve return. See docsServeRuntime for the contract a substituted
-	// runtime owes this wait.
+	// it return. The probe leg: selfProbe's deferred cancel has already fired
+	// by the time steady state is reached. Both rest on the docsServeRuntime
+	// contract, which is where a substituted runtime's obligations are stated.
 	background.Wait()
 	closeDocsServeLease(rt, lease, errOut)
 	return result
