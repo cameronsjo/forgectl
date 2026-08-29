@@ -1,16 +1,5 @@
 # Changelog
 
-## [Unreleased]
-
-<!-- release-please generates a section per release from commit subjects; it
-     does not consume this block. Anything left here after a tag stays here, so
-     move these entries down under the version that shipped them when the
-     release PR lands. Nothing enforces it — see #422. -->
-
-### Bug Fixes
-
-* **docs:** `docs serve`'s steady-state return now waits for its tracked background goroutines, matching the two startup paths that already did — in practice the `serve` loop, which could still be in flight when the command returned. No race was observed; the invariant simply did not hold on all three paths
-
 ## [0.14.1](https://github.com/cameronsjo/forgectl/compare/v0.14.0...v0.14.1) (2026-08-28)
 
 
