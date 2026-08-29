@@ -103,6 +103,10 @@ type fakeServeRuntime struct {
 
 	shutdownErr error
 	leaseErr    error
+	// holdServeGate keeps shutdown and closeServer from releasing serveGate, so
+	// a test can hold the serve goroutine open and observe whether the
+	// lifecycle waits for it.
+	holdServeGate bool
 
 	// serveGate blocks the fake Serve until the test releases it, so a test can
 	// keep the server "running" for as long as it needs.
@@ -206,9 +210,11 @@ func (f *fakeServeRuntime) runtime() docsServeRuntime {
 			f.record("closeServer")
 			// A real Close makes Serve return; the fake does the same so the
 			// lifecycle's background wait can complete.
-			select {
-			case f.serveGate <- http.ErrServerClosed:
-			default:
+			if !f.holdServeGate {
+				select {
+				case f.serveGate <- http.ErrServerClosed:
+				default:
+				}
 			}
 			return nil
 		},
@@ -217,9 +223,11 @@ func (f *fakeServeRuntime) runtime() docsServeRuntime {
 			f.shutdownCalls++
 			f.mu.Unlock()
 			f.record("shutdown")
-			select {
-			case f.serveGate <- http.ErrServerClosed:
-			default:
+			if !f.holdServeGate {
+				select {
+				case f.serveGate <- http.ErrServerClosed:
+				default:
+				}
 			}
 			return f.shutdownErr
 		},
@@ -1015,5 +1023,37 @@ func TestRunDocsServe_NonTimeoutShutdownErrorStillFails(t *testing.T) {
 	err := h.wait(t)
 	if err == nil || !strings.Contains(err.Error(), "listener exploded") {
 		t.Fatalf("runDocsServeWithRuntime = %v, want the injected Shutdown error", err)
+	}
+}
+
+// TestRunDocsServe_SteadyStateReturnWaitsForServe is the regression guard on
+// the invariant this file's `background` comment states: no tracked goroutine
+// outlives the command. The steady-state return silently did not wait across
+// two releases, and nothing was red — the fakes release the serve goroutine
+// inside shutdown, so its completion was never observed.
+//
+// Here shutdown returns WITHOUT releasing it. The lifecycle must still be
+// blocked; releasing the gate is what lets it finish. That also exercises the
+// docsServeRuntime contract from the other side: this fake is deliberately the
+// non-conforming one, and the hang it produces is the documented consequence.
+func TestRunDocsServe_SteadyStateReturnWaitsForServe(t *testing.T) {
+	fake := newFakeServeRuntime(3590)
+	fake.serversDirErr = errors.New("no config dir")
+	fake.holdServeGate = true
+
+	h := startServeHarness(t, fake)
+	h.waitForBanner(t)
+	h.cancel()
+
+	select {
+	case err := <-h.done:
+		t.Fatalf("runDocsServeWithRuntime returned (%v) while its serve goroutine was still running — the steady-state return is not waiting", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	// Release the goroutine the lifecycle is waiting on; it may now finish.
+	fake.serveGate <- http.ErrServerClosed
+	if err := h.wait(t); err != nil {
+		t.Errorf("runDocsServeWithRuntime = %v, want nil once serve returned", err)
 	}
 }

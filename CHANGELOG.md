@@ -5,7 +5,7 @@
 <!-- release-please generates a section per release from commit subjects; it
      does not consume this block. Anything left here after a tag stays here, so
      move these entries down under the version that shipped them when the
-     release PR lands. Nothing enforces it. -->
+     release PR lands. Nothing enforces it — see #422. -->
 
 ### Bug Fixes
 
@@ -18,7 +18,6 @@
 
 * label the legacy launch source, repoint dead godoc, unrace docs serve shutdown ([#419](https://github.com/cameronsjo/forgectl/issues/419)) ([c2cd349](https://github.com/cameronsjo/forgectl/commit/c2cd3498ceb7ecbdac971821b4914cf473952929))
 * **launch:** refuse to retire a legacy config forgectl only partly understood ([#418](https://github.com/cameronsjo/forgectl/issues/418)) ([4c864c4](https://github.com/cameronsjo/forgectl/commit/4c864c450b40ef6164032b14e3812d967bd90b83))
-
 * **launch:** the automatic legacy migration — which every launch surface runs, and which backs up and deletes the legacy config — no longer retires a file it only partly decoded. A legacy config carrying settings forgectl cannot represent is now left in place, named on `launch which`/`doctor`, and refused by `launch migrate`, rather than rendered from the modelled subset and deleted ([#417](https://github.com/cameronsjo/forgectl/issues/417))
 * **launch:** the "fully superseded" notice now names the backup file, matching its two sibling notices — a message asserting a removal has to carry the recovery pointer ([#417](https://github.com/cameronsjo/forgectl/issues/417))
 * **launch:** `launch migrate` no longer reports "Imported 0 launch profile(s)" for a legitimate defaults-only import ([#417](https://github.com/cameronsjo/forgectl/issues/417))
