@@ -184,6 +184,13 @@ func resolveDocsToken(tokenFile, bindAddr string) (resolvedDocsToken, error) {
 // other and with real servers, and a mutable global would let one test observe
 // another's fakes. Not nil-means-default fields either — a test that forgot one
 // would silently exercise production behavior and report a pass.
+//
+// Contract an implementation MUST honour: `serve` returns once `shutdown` or
+// `closeServer` has been called on the same server. Every return path waits on
+// the goroutine running `serve`, and that wait is unbounded — a runtime whose
+// `shutdown` errors without closing its listeners would hang the command with
+// no output. net/http honours this (Serve returns ErrServerClosed as soon as
+// the server is marked shutting down); a fake must too.
 type docsServeRuntime struct {
 	listen      func(string) (net.Listener, error)
 	serversDir  func() (string, error)
@@ -364,9 +371,18 @@ func runDocsServeWithRuntime(
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// background tracks every goroutine this function starts. Waiting on it
-	// before returning is what makes "drain the started operations" structural
-	// rather than a sequence of receives a later edit could get out of step with.
+	// background tracks every goroutine whose completion this function depends
+	// on — the Serve loop and the discovery self-probe. Waiting on it before
+	// returning is what makes "drain the started operations" structural rather
+	// than a sequence of receives a later edit could get out of step with.
+	//
+	// It deliberately does NOT say "every goroutine this function starts": the
+	// live-reload watcher (`go watcher.Run(ctx)` below) is not tracked, and its
+	// lifetime is owned by the deferred watcher.Close() instead. On the
+	// serve-result path ctx is never cancelled, so Run is still selecting when
+	// this Wait returns. That is a real gap, not a wording nicety — the earlier
+	// wording claimed a completeness the code never had, and a Wait a reader
+	// trusts makes an over-promising comment more dangerous, not less.
 	var background sync.WaitGroup
 	serveCh := make(chan error, 1)
 	background.Add(1)
@@ -469,14 +485,12 @@ func runDocsServeWithRuntime(
 		}
 	}
 
-	// The steady-state path waits too. Both startup helpers already do, and
-	// the comment on `background` claims the wait is what makes draining
-	// structural — but this return did not wait, so rt.serve could still be
-	// in flight when the command returned. No race was ever observed (the
-	// serve goroutine only writes to a buffered channel), yet an invariant
-	// that holds on two of three paths is one a future goroutine would
-	// inherit the gap from. Shutdown or the forced close above has already
-	// made Serve return, so this is bounded.
+	// Every return path waits, this one included, so no tracked goroutine
+	// outlives the command. The wait is bounded on both branches into here:
+	// on a serve result, Serve has already returned — that result is what
+	// produced the event; on cancellation, Shutdown or the forced close above
+	// it has made Serve return. See docsServeRuntime for the contract a
+	// substituted runtime owes this wait.
 	background.Wait()
 	closeDocsServeLease(rt, lease, errOut)
 	return result
