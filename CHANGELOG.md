@@ -9,7 +9,7 @@
 
 ### Bug Fixes
 
-* **docs:** `docs serve`'s steady-state return now waits for its background goroutines, matching the two startup paths that already did — the `serve` goroutine could still be in flight when the command returned. No race was observed; the invariant simply did not hold on all three paths
+* **docs:** `docs serve`'s steady-state return now waits for its tracked background goroutines, matching the two startup paths that already did — in practice the `serve` loop, which could still be in flight when the command returned. No race was observed; the invariant simply did not hold on all three paths
 
 ## [0.14.1](https://github.com/cameronsjo/forgectl/compare/v0.14.0...v0.14.1) (2026-08-28)
 
@@ -40,6 +40,8 @@
 * **projects,review,config:** configurable GitHub host per deployment (`[github] host`) — the projects/review pin stays total, now pointed at the validated configured host; on any non-default host the gh token env vars are scrubbed so only the `gh auth login --hostname <host>` stored credential can be used ([#412](https://github.com/cameronsjo/forgectl/issues/412))
 
 ### Bug Fixes
+
+#### Detail
 
 * **projects:** remote-host stamping is now an exact match — a hostname merely *containing* `github.com` (e.g. `evil-github.com.attacker.net`) no longer stamps as trusted `github` inventory ([#412](https://github.com/cameronsjo/forgectl/issues/412))
 

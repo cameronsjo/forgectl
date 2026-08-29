@@ -193,9 +193,11 @@ func resolveDocsToken(tokenFile, bindAddr string) (resolvedDocsToken, error) {
 //     listeners would hang the command with no output. net/http honours this
 //     (Serve returns ErrServerClosed as soon as the server is marked shutting
 //     down); a fake must too.
-//   - `probe` returns when its context is cancelled. The discovery self-probe
-//     runs on a tracked goroutine whose only termination lever is that
-//     cancellation, so a probe that ignores ctx hangs the startup-abort path.
+//   - `probe` returns when its context is cancelled. On a healthy startup the
+//     self-probe ends by returning its own result; cancellation is the only
+//     lever the command holds over one that would not otherwise return. It
+//     runs on a tracked goroutine, so a probe that ignores ctx hangs every
+//     return path that waits — not just the abort.
 type docsServeRuntime struct {
 	listen      func(string) (net.Listener, error)
 	serversDir  func() (string, error)
@@ -385,9 +387,10 @@ func runDocsServeWithRuntime(
 	// live-reload watcher (`go watcher.Run(ctx)` below) is not tracked, and its
 	// lifetime is owned by the deferred watcher.Close() instead. The
 	// serve-result path does not itself cancel ctx, so Run can still be
-	// selecting when this Wait returns. That is a real gap, not a wording nicety — the earlier
-	// wording claimed a completeness the code never had, and a Wait a reader
-	// trusts makes an over-promising comment more dangerous, not less.
+	// selecting when this Wait returns. That is a real gap, not a wording
+	// nicety — the earlier wording claimed a completeness the code never had,
+	// and a Wait a reader trusts makes an over-promising comment more
+	// dangerous, not less.
 	var background sync.WaitGroup
 	serveCh := make(chan error, 1)
 	background.Add(1)
