@@ -40,8 +40,8 @@ graphics are unavailable.
 - [x] Add terminal Markdown, resource, diagram, and Kitty graphics primitives.
 - [x] Add the adaptive docs TUI and wire the native-first CLI entry points.
 - [x] Cover fallback, containment, navigation, resize, reload, and cleanup.
-- [x] Update help, README, and changelog.
-- [ ] Run fresh build, vet, tests, formatting, lint, and Ghostty acceptance.
+- [x] Update help and README; leave generated changelog prose to Release Please.
+- [x] Run fresh build, vet, tests, formatting, lint, and Ghostty acceptance.
 
 ## Acceptance
 

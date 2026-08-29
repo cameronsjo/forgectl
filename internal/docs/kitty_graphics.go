@@ -125,6 +125,7 @@ func KittyImageBlock(img image.Image, columns int) (transmission, placeholders s
 		Quite:            2,
 		ID:               int(id),
 		Format:           kitty.PNG,
+		Transmission:     kitty.Direct,
 		Chunk:            true,
 		Columns:          columns,
 		Rows:             rows,
