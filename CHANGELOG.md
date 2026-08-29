@@ -23,6 +23,7 @@
 
 ### Bug Fixes
 
+* **docs:** `docs serve`'s steady-state return now waits for its background goroutines, matching the two startup paths that already did — the `serve` goroutine could still be in flight when the command returned. No race was observed; the invariant simply did not hold on all three paths
 * **docs:** `docs serve` no longer exits non-zero on Ctrl-C when a client left an unused connection open. `net/http` will not close a `StateNew` connection until it has sat there five seconds, and the shutdown grace was also five seconds — a dead heat that surfaced as `context deadline exceeded`. The drain window now clears that rule, and a drain that still runs out of time forces the listener closed, warns, and exits zero
 * **launch:** `launch doctor` and `launch which` no longer credit `config.toml` for a launch profile that was read from the legacy `claunch.conf` — including on the documented `FORGECTL_SKIP_LEGACY_MIGRATE=1` path, where the label named a `config.toml` that need not exist at all
 * **launch:** the automatic legacy migration — which every launch surface runs, and which backs up and deletes the legacy config — no longer retires a file it only partly decoded. A legacy config carrying settings forgectl cannot represent is now left in place, named on `launch which`/`doctor`, and refused by `launch migrate`, rather than rendered from the modelled subset and deleted ([#417](https://github.com/cameronsjo/forgectl/issues/417))

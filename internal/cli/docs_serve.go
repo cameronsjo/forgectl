@@ -469,6 +469,15 @@ func runDocsServeWithRuntime(
 		}
 	}
 
+	// The steady-state path waits too. Both startup helpers already do, and
+	// the comment on `background` claims the wait is what makes draining
+	// structural — but this return did not wait, so rt.serve could still be
+	// in flight when the command returned. No race was ever observed (the
+	// serve goroutine only writes to a buffered channel), yet an invariant
+	// that holds on two of three paths is one a future goroutine would
+	// inherit the gap from. Shutdown or the forced close above has already
+	// made Serve return, so this is bounded.
+	background.Wait()
 	closeDocsServeLease(rt, lease, errOut)
 	return result
 }
