@@ -1116,10 +1116,10 @@ func TestRunDocsServe_AbortStartupWaitsForServe(t *testing.T) {
 // lifecycle unwinds through finishDocsServeStartup. The serve goroutine cannot
 // hold that wait open — its return is what produced the event — so the join
 // under test is the PROBE goroutine, which probeExitGate keeps alive past the
-// point finish reaches its wait. TestRunDocsServeWithRuntime_CancelAtReadiness
-// BarrierPublishesNothing already exercises the probe contract; what is new
-// here is observing the JOIN — that the lifecycle waits for that goroutine
-// rather than merely outliving it by luck.
+// point finish reaches its wait. The probe-returns-on-cancel contract is
+// already exercised by CancelAtReadinessBarrier (same file); what is new here
+// is observing the JOIN — that the lifecycle waits for that goroutine rather
+// than merely outliving it by luck.
 func TestRunDocsServe_FinishStartupWaitsForProbe(t *testing.T) {
 	fake := newFakeServeRuntime(3590)
 	fake.infoScript = []fakeInfoResult{{info: testGenerationInfo(0x31)}}
@@ -1190,8 +1190,10 @@ func awaitFakeCall(t *testing.T, fake *fakeServeRuntime, name string, called fun
 // names the goroutine the caller is holding open, because it differs per path
 // — the finish path deliberately lets serve return and holds the probe, so a
 // message naming serve there would send a reader down the one leg that test
-// rules out. Callers must have established, via awaitFakeCall, that the wait
-// under test is the only thing left to block on.
+// rules out. Callers must first have established that the wait under test is
+// the only thing left to block on — usually with awaitFakeCall, though the
+// finish path instead relies on its blocking send to serveGate having been
+// received, which is what proves serve already returned.
 func assertLifecycleBlocked(t *testing.T, h *serveHarness, held string) {
 	t.Helper()
 	select {
