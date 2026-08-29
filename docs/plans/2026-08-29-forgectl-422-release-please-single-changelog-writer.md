@@ -78,7 +78,7 @@ writer, or a manual post-release relocation step.
       boundary, and retain GitHub CI as the authoritative full-suite gate.
 - [x] Finish migration-PR polish, fix or disposition every finding, and update
       this checklist in the implementation commit.
-- [ ] Push the migration PR with `Refs #422`, inspect its exact remote head/diff,
+- [x] Push the migration PR with `Refs #422`, inspect its exact remote head/diff,
       and monitor CI and review to terminal state.
 - [ ] Merge the migration only after its verified gates pass; prove #423
       regenerates without `[Unreleased]` or lost #421 detail.
@@ -112,3 +112,8 @@ writer, or a manual post-release relocation step.
 - The migration fix-round found no remaining phase-1 issue. Phase 2 must verify
   the exact bot login and same-repository head repository in addition to the
   exact release branch name; a branch-name match alone is not an identity gate.
+- Migration PR #425 matched the five-file scope at implementation head
+  `0ee2ca5`; build-test, lint, macos-test, and helper passed in GitHub run
+  `33281092088`. CodeRabbit reported success only because its review was rate
+  limited, so the independent polish and fix-round are the substantive review
+  evidence.
