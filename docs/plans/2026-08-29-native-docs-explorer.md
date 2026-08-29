@@ -37,10 +37,10 @@ graphics are unavailable.
 
 - [x] Create an isolated worktree and feature branch from fresh `origin/main`.
 - [x] Persist and commit the approved plan before implementation.
-- [ ] Add terminal Markdown, resource, diagram, and Kitty graphics primitives.
-- [ ] Add the adaptive docs TUI and wire the native-first CLI entry points.
-- [ ] Cover fallback, containment, navigation, resize, reload, and cleanup.
-- [ ] Update help, README, and changelog.
+- [x] Add terminal Markdown, resource, diagram, and Kitty graphics primitives.
+- [x] Add the adaptive docs TUI and wire the native-first CLI entry points.
+- [x] Cover fallback, containment, navigation, resize, reload, and cleanup.
+- [x] Update help, README, and changelog.
 - [ ] Run fresh build, vet, tests, formatting, lint, and Ghostty acceptance.
 
 ## Acceptance

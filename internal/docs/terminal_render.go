@@ -36,6 +36,7 @@ type TerminalLink struct {
 
 type TerminalPage struct {
 	Content  string
+	Graphics string
 	Links    []TerminalLink
 	ImageIDs []uint32
 }
@@ -84,13 +85,14 @@ func RenderTerminal(source []byte, doc Doc, root Root, width int, graphics bool)
 			rendered.WriteString(fallbackWithError(fallback, err))
 			continue
 		}
-		block, id, err := KittyImageBlock(img, width-4)
+		transmission, placeholders, id, err := KittyImageBlock(img, width-4)
 		if err != nil {
 			rendered.WriteString(fallbackWithError(fallback, err))
 			continue
 		}
 		rendered.WriteString("\n")
-		rendered.WriteString(block)
+		page.Graphics += transmission
+		rendered.WriteString(placeholders)
 		rendered.WriteString("\n\n")
 		page.ImageIDs = append(page.ImageIDs, id)
 	}
@@ -239,7 +241,7 @@ func renderTerminalMedia(segment terminalSegment, doc Doc, root Root) (image.Ima
 	switch segment.kind {
 	case "mermaid":
 		if len(segment.source) > maxDiagramBytes {
-			return nil, fmt.Errorf("Mermaid source exceeds 1 MiB")
+			return nil, fmt.Errorf("Mermaid source exceeds 1 MiB") //nolint:staticcheck // Mermaid is a proper name.
 		}
 		pngBytes, err := raster.PNG(segment.source, 1,
 			mermaid.WithCustomTheme("artificer", mermaid.Palette{
@@ -248,7 +250,7 @@ func renderTerminalMedia(segment terminalSegment, doc Doc, root Root) (image.Ima
 			}),
 		)
 		if err != nil {
-			return nil, fmt.Errorf("Mermaid is unsupported or invalid: %w", err)
+			return nil, fmt.Errorf("Mermaid is unsupported or invalid: %w", err) //nolint:staticcheck // Mermaid is a proper name.
 		}
 		img, _, err := image.Decode(bytes.NewReader(pngBytes))
 		return img, err
@@ -324,11 +326,14 @@ func resolveTerminalResource(target string, doc Doc, root Root) (string, error) 
 }
 
 func decodeBoundedImage(path string) (image.Image, error) {
+	// path was canonicalized, contained to the selected docs root, extension
+	// checked, and statted as a regular file by resolveTerminalResource.
+	// #nosec G304 -- this is the validated local resource the user selected.
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	config, _, err := image.DecodeConfig(io.LimitReader(f, maxLocalImageBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("decode image metadata: %w", err)
@@ -347,11 +352,14 @@ func decodeBoundedImage(path string) (image.Image, error) {
 }
 
 func readBounded(path string, limit int64) ([]byte, error) {
+	// path passed the same canonical containment and regular-file validation as
+	// decodeBoundedImage.
+	// #nosec G304 -- this is the validated local resource the user selected.
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
 		return nil, err

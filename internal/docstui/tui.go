@@ -74,6 +74,9 @@ type model struct {
 	history    []location
 	currentIDs []uint32
 	allIDs     []uint32
+	// graphicsPreamble is consumed by the next View before Lipgloss sees it.
+	// APC payloads are protocol data, not layout content.
+	graphicsPreamble string
 }
 
 // Run owns the alternate-screen reader until the user quits or ctx is
@@ -90,7 +93,7 @@ func Run(ctx context.Context, idx *docs.Index, runner forgexec.Runner, mode docs
 	if err != nil {
 		return fmt.Errorf("start docs live reload: %w", err)
 	}
-	defer watcher.Close()
+	defer func() { _ = watcher.Close() }()
 	watchCtx, stopWatch := context.WithCancel(ctx)
 	defer stopWatch()
 	go watcher.Run(watchCtx)
@@ -98,7 +101,7 @@ func Run(ctx context.Context, idx *docs.Index, runner forgexec.Runner, mode docs
 	m := newModel(ctx, store, reloadC, runner, docs.KittyGraphicsEnabled(mode, os.Getenv))
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx), tea.WithInput(in), tea.WithOutput(out))
 	final, err := p.Run()
-	if fm, ok := final.(model); ok && len(fm.allIDs) > 0 {
+	if fm, ok := final.(*model); ok && len(fm.allIDs) > 0 {
 		_, _ = io.WriteString(out, docs.KittyCleanupSequence(fm.allIDs))
 	}
 	if err != nil {
@@ -107,14 +110,14 @@ func Run(ctx context.Context, idx *docs.Index, runner forgexec.Runner, mode docs
 	return nil
 }
 
-func newModel(ctx context.Context, store *docs.Store, reloadC <-chan string, runner forgexec.Runner, graphics bool) model {
+func newModel(ctx context.Context, store *docs.Store, reloadC <-chan string, runner forgexec.Runner, graphics bool) *model {
 	docsList := list.New(docItems(store.Current()), list.NewDefaultDelegate(), 0, 0)
 	docsList.Title = "Documents"
 	docsList.SetShowHelp(false)
 	linksList := list.New(nil, list.NewDefaultDelegate(), 0, 0)
 	linksList.Title = "Links"
 	linksList.SetShowHelp(false)
-	m := model{
+	m := &model{
 		ctx: ctx, store: store, reloadC: reloadC, runner: runner, graphics: graphics,
 		docsList: docsList, linksList: linksList, reader: viewport.New(0, 0),
 	}
@@ -133,7 +136,7 @@ func docItems(idx *docs.Index) []list.Item {
 	return items
 }
 
-func (m model) Init() tea.Cmd { return waitReload(m.reloadC) }
+func (m *model) Init() tea.Cmd { return waitReload(m.reloadC) }
 
 func waitReload(ch <-chan string) tea.Cmd {
 	return func() tea.Msg {
@@ -144,7 +147,7 @@ func waitReload(ch <-chan string) tea.Cmd {
 	}
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -240,9 +243,7 @@ func (m *model) load(doc docs.Doc, anchor string, push bool) {
 		m.status = errorStyle.Render(termsafe.SafeLine(err.Error()))
 		return
 	}
-	if len(m.currentIDs) > 0 {
-		page.Content = docs.KittyCleanupSequence(m.currentIDs) + page.Content
-	}
+	m.graphicsPreamble = docs.KittyCleanupSequence(m.currentIDs) + page.Graphics
 	m.current = doc
 	m.currentIDs = page.ImageIDs
 	m.allIDs = append(m.allIDs, page.ImageIDs...)
@@ -297,7 +298,7 @@ func (m *model) openLinks() {
 	m.linksList.SetSize(max(20, m.width-4), max(6, m.height-4))
 }
 
-func (m model) updateLinks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *model) updateLinks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "esc":
 		m.linkMode = false
@@ -315,7 +316,7 @@ func (m model) updateLinks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m model) follow(link docs.TerminalLink) (tea.Model, tea.Cmd) {
+func (m *model) follow(link docs.TerminalLink) (tea.Model, tea.Cmd) {
 	u, err := url.Parse(link.Target)
 	if err != nil {
 		m.status = errorStyle.Render("invalid link")
@@ -349,7 +350,7 @@ func (m model) follow(link docs.TerminalLink) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) confirmExternal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *model) confirmExternal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
 		target := m.pending.Target
@@ -387,7 +388,9 @@ func findAnchorLine(content, anchor string) int {
 	return 0
 }
 
-func (m model) View() string {
+func (m *model) View() string {
+	preamble := m.graphicsPreamble
+	m.graphicsPreamble = ""
 	header := accentStyle.Render("◆ forgectl docs")
 	if m.current.Title != "" {
 		header += mutedStyle.Render("  ·  " + termsafe.SafeLine(m.current.Title))
@@ -415,5 +418,5 @@ func (m model) View() string {
 			m.reader.View(),
 		)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return preamble + lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }

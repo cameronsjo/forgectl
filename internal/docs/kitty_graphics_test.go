@@ -44,22 +44,25 @@ func TestKittyImageBlock_UsesPlaceholdersAndContentIdentity(t *testing.T) {
 			blue.Set(x, y, color.RGBA{B: 255, A: 255})
 		}
 	}
-	block, redID, err := KittyImageBlock(red, 8)
+	transmission, placeholders, redID, err := KittyImageBlock(red, 8)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, blueID, err := KittyImageBlock(blue, 8)
+	_, _, blueID, err := KittyImageBlock(blue, 8)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if redID == blueID {
 		t.Fatal("same-sized images received the same ID")
 	}
-	if !strings.Contains(block, "\x1b_G") || !strings.ContainsRune(block, kitty.Placeholder) {
-		t.Fatalf("block lacks transmission or placeholder: %q", block)
+	if !strings.Contains(transmission, "\x1b_G") || !strings.Contains(transmission, ";") || strings.ContainsRune(transmission, kitty.Placeholder) {
+		t.Fatalf("transmission = %q", transmission)
 	}
-	if !utf8.ValidString(block) {
-		t.Fatal("block is not valid UTF-8")
+	if !strings.ContainsRune(placeholders, kitty.Placeholder) || strings.Contains(placeholders, "\x1b_G") {
+		t.Fatalf("placeholders = %q", placeholders)
+	}
+	if !utf8.ValidString(transmission) || !utf8.ValidString(placeholders) {
+		t.Fatal("Kitty output is not valid UTF-8")
 	}
 	cleanup := KittyCleanupSequence([]uint32{redID})
 	if !strings.Contains(cleanup, "a=d") || !strings.Contains(cleanup, "d=I") {

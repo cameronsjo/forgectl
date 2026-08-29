@@ -2,6 +2,7 @@ package docs
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"hash/fnv"
 	"image"
@@ -72,10 +73,12 @@ var numberToDiacritic = [...]rune{
 	0x735, 0x736, 0x73a, 0x73d, 0x73f, 0x740, 0x741, 0x743,
 }
 
-// KittyImageBlock transmits img once and returns placeholder rows that a TUI
-// can scroll like ordinary text. The returned IDs are deterministic for a
-// given image and size, so redraws replace instead of accumulating placements.
-func KittyImageBlock(img image.Image, columns int) (string, uint32, error) {
+// KittyImageBlock encodes img for transmission and returns separate placeholder
+// rows that a TUI can scroll like ordinary text. Keeping the protocol bytes out
+// of layout composition is important: width-aware renderers may deliberately
+// discard an APC payload while measuring it. The returned IDs are deterministic
+// for a given image and size, so redraws replace rather than accumulate.
+func KittyImageBlock(img image.Image, columns int) (transmission, placeholders string, id uint32, err error) {
 	if columns < 1 {
 		columns = 1
 	}
@@ -84,7 +87,7 @@ func KittyImageBlock(img image.Image, columns int) (string, uint32, error) {
 	}
 	bounds := img.Bounds()
 	if bounds.Dx() < 1 || bounds.Dy() < 1 {
-		return "", 0, fmt.Errorf("image has no pixels")
+		return "", "", 0, fmt.Errorf("image has no pixels")
 	}
 	// Terminal cells are approximately twice as tall as they are wide.
 	rows := (columns*bounds.Dy() + (bounds.Dx() * 2) - 1) / (bounds.Dx() * 2)
@@ -97,15 +100,18 @@ func KittyImageBlock(img image.Image, columns int) (string, uint32, error) {
 
 	h := fnv.New32a()
 	_, _ = fmt.Fprintf(h, "%dx%d:%dx%d", bounds.Dx(), bounds.Dy(), columns, rows)
-	var pixel [4]byte
+	var pixel [16]byte
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			r, g, b, a := img.At(x, y).RGBA()
-			pixel = [4]byte{byte(r >> 8), byte(g >> 8), byte(b >> 8), byte(a >> 8)}
+			binary.BigEndian.PutUint32(pixel[0:4], r)
+			binary.BigEndian.PutUint32(pixel[4:8], g)
+			binary.BigEndian.PutUint32(pixel[8:12], b)
+			binary.BigEndian.PutUint32(pixel[12:16], a)
 			_, _ = h.Write(pixel[:])
 		}
 	}
-	id := h.Sum32()
+	id = h.Sum32()
 	// The reader caps placeholders at 96 cells, so keep the most-significant
 	// byte within the same checked diacritic table.
 	id &= 0x5fffffff
@@ -129,7 +135,7 @@ func KittyImageBlock(img image.Image, columns int) (string, uint32, error) {
 		opts.ChunkFormatter = tmuxPassthrough
 	}
 	if err := kitty.EncodeGraphics(&tx, img, opts); err != nil {
-		return "", 0, err
+		return "", "", 0, err
 	}
 
 	r := int(id & 0xff)
@@ -137,8 +143,7 @@ func KittyImageBlock(img image.Image, columns int) (string, uint32, error) {
 	b := int((id >> 16) & 0xff)
 	most := int((id >> 24) & 0xff)
 	var out strings.Builder
-	out.WriteString(tx.String())
-	out.WriteString(fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b))
+	_, _ = fmt.Fprintf(&out, "\x1b[38;2;%d;%d;%dm", r, g, b)
 	for row := 0; row < rows; row++ {
 		for col := 0; col < columns; col++ {
 			out.WriteRune(kitty.Placeholder)
@@ -149,11 +154,11 @@ func KittyImageBlock(img image.Image, columns int) (string, uint32, error) {
 		out.WriteString("\x1b[39m")
 		if row != rows-1 {
 			out.WriteByte('\n')
-			out.WriteString(fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b))
+			_, _ = fmt.Fprintf(&out, "\x1b[38;2;%d;%d;%dm", r, g, b)
 		}
 	}
 	out.WriteString("\x1b[39m")
-	return out.String(), id, nil
+	return tx.String(), out.String(), id, nil
 }
 
 func tmuxPassthrough(sequence string) string {

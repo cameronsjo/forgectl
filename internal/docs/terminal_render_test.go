@@ -37,12 +37,11 @@ func TestRenderTerminal_TextLinksAndFallbacks(t *testing.T) {
 
 func TestRenderTerminal_LocalImageAndMermaid(t *testing.T) {
 	dir := t.TempDir()
-	docPath := filepath.Join(dir, "README.md")
 	dir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	docPath = filepath.Join(dir, "README.md")
+	docPath := filepath.Join(dir, "README.md")
 	imagePath := filepath.Join(dir, "pixel.png")
 	img := image.NewRGBA(image.Rect(0, 0, 8, 4))
 	img.Set(0, 0, color.RGBA{R: 255, A: 255})
@@ -68,8 +67,11 @@ func TestRenderTerminal_LocalImageAndMermaid(t *testing.T) {
 	if len(page.ImageIDs) != 2 {
 		t.Fatalf("image IDs = %v, content = %q", page.ImageIDs, page.Content)
 	}
-	if strings.Count(page.Content, string(kitty.Placeholder)) == 0 {
+	if strings.Count(page.Content, string(kitty.Placeholder)) == 0 || !strings.Contains(page.Graphics, "\x1b_G") {
 		t.Fatal("rendered media has no placeholders")
+	}
+	if strings.Contains(page.Content, "\x1b_G") {
+		t.Fatal("scrollable content contains Kitty transmission bytes")
 	}
 }
 

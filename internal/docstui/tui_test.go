@@ -13,7 +13,7 @@ import (
 	forgexec "github.com/cameronsjo/forgectl/internal/exec"
 )
 
-func testModel(t *testing.T) model {
+func testModel(t *testing.T) *model {
 	t.Helper()
 	dir := t.TempDir()
 	for name, body := range map[string]string{
@@ -47,14 +47,26 @@ func TestModel_AdaptiveLayoutAndNavigation(t *testing.T) {
 		t.Fatalf("wide view lacks current document: %q", m.View())
 	}
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
-	m = updated.(model)
+	m = updated.(*model)
 	if m.width >= narrowWidth || m.reader.Width != 58 {
 		t.Fatalf("narrow sizing: width=%d reader=%d", m.width, m.reader.Width)
 	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	m = updated.(model)
+	m = updated.(*model)
 	if m.focus != 1 {
 		t.Fatalf("focus = %d, want reader", m.focus)
+	}
+}
+
+func TestModel_GraphicsPreambleBypassesLayoutExactlyOnce(t *testing.T) {
+	m := testModel(t)
+	const transmission = "\x1b_Gf=100,i=7;payload\x1b\\"
+	m.graphicsPreamble = transmission
+	if got := m.View(); !strings.HasPrefix(got, transmission) {
+		t.Fatalf("first view altered or misplaced Kitty transmission: %q", got)
+	}
+	if got := m.View(); strings.Contains(got, transmission) {
+		t.Fatal("second view retransmitted consumed Kitty payload")
 	}
 }
 
@@ -70,7 +82,7 @@ func TestModel_InternalLinkHistoryAndExternalConfirmation(t *testing.T) {
 		}
 	}
 	updated, _ := m.follow(internal)
-	m = updated.(model)
+	m = updated.(*model)
 	if m.current.Title != "Next" || len(m.history) != 1 {
 		t.Fatalf("internal navigation: current=%q history=%d", m.current.Title, len(m.history))
 	}
@@ -79,12 +91,12 @@ func TestModel_InternalLinkHistoryAndExternalConfirmation(t *testing.T) {
 		t.Fatalf("back returned to %q", m.current.Title)
 	}
 	updated, _ = m.follow(external)
-	m = updated.(model)
+	m = updated.(*model)
 	if m.pending == nil || !strings.Contains(m.status, "system browser") {
 		t.Fatalf("external link did not require confirmation: pending=%v status=%q", m.pending, m.status)
 	}
 	updated, _ = m.confirmExternal(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
-	m = updated.(model)
+	m = updated.(*model)
 	if m.pending != nil {
 		t.Fatal("declined external link remained pending")
 	}
