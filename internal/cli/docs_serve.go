@@ -184,6 +184,19 @@ func resolveDocsToken(tokenFile, bindAddr string) (resolvedDocsToken, error) {
 // other and with real servers, and a mutable global would let one test observe
 // another's fakes. Not nil-means-default fields either — a test that forgot one
 // would silently exercise production behavior and report a pass.
+//
+// Two contracts an implementation MUST honour, because every return path waits
+// on the goroutines running them and that wait is unbounded:
+//
+//   - `serve` returns once `shutdown` or `closeServer` has been called on the
+//     same server. net/http honours this (Serve returns ErrServerClosed as
+//     soon as the server is marked shutting down); a fake must too.
+//   - `probe` returns when its context is cancelled. On a healthy startup the
+//     self-probe ends by returning its own result; cancellation is the only
+//     lever the command holds over one that would not otherwise return.
+//
+// Break either and the command hangs on the wait, with no further output to
+// explain it.
 type docsServeRuntime struct {
 	listen      func(string) (net.Listener, error)
 	serversDir  func() (string, error)
@@ -364,9 +377,22 @@ func runDocsServeWithRuntime(
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// background tracks every goroutine this function starts. Waiting on it
-	// before returning is what makes "drain the started operations" structural
-	// rather than a sequence of receives a later edit could get out of step with.
+	// background tracks every goroutine whose completion this function depends
+	// on — the Serve loop and the discovery self-probe. Waiting on it before
+	// returning is what makes "drain the started operations" structural rather
+	// than a sequence of receives a later edit could get out of step with.
+	//
+	// Not "every goroutine this function starts": the live-reload watcher
+	// (`go watcher.Run(ctx)` below) is untracked and is never joined on any
+	// path. Both `defer stop()` and `defer watcher.Close()` make Run return
+	// soon — by cancelling ctx and by closing the fsnotify Events channel —
+	// but neither makes it return FIRST, so Run can still be selecting, or
+	// inside a reload, when this function exits. That is safe because a late
+	// reload's effects all tolerate it: Broker.Publish never blocks (it holds
+	// the mutex only to fan out, and drops to a full subscriber buffer),
+	// Store.Swap is atomic, and re-arming the watch on a closed watcher
+	// returns an error that is discarded. A goroutine added here whose sink
+	// lacks those properties would need tracking.
 	var background sync.WaitGroup
 	serveCh := make(chan error, 1)
 	background.Add(1)
@@ -469,6 +495,17 @@ func runDocsServeWithRuntime(
 		}
 	}
 
+	// Every return path from the first background.Add on waits, this one
+	// included, so no tracked goroutine outlives the command. (The returns
+	// above that Add need no wait — there is nothing tracked yet.)
+	//
+	// Bounded on both branches into here. The Serve leg: on a serve result
+	// Serve has already returned, since that result is what produced the
+	// event; on cancellation Shutdown, or the forced close above it, has made
+	// it return. The probe leg: selfProbe's deferred cancel has already fired
+	// by the time steady state is reached. Both rest on the docsServeRuntime
+	// contract, which is where a substituted runtime's obligations are stated.
+	background.Wait()
 	closeDocsServeLease(rt, lease, errOut)
 	return result
 }

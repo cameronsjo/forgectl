@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+<!-- release-please generates a section per release from commit subjects; it
+     does not consume this block. Anything left here after a tag stays here, so
+     move these entries down under the version that shipped them when the
+     release PR lands. Nothing enforces it — see #422. -->
+
+### Bug Fixes
+
+* **docs:** `docs serve`'s steady-state return now waits for its tracked background goroutines, matching the two startup paths that already did — in practice the `serve` loop, which could still be in flight when the command returned. No race was observed; the invariant simply did not hold on all three paths
+
 ## [0.14.1](https://github.com/cameronsjo/forgectl/compare/v0.14.0...v0.14.1) (2026-08-28)
 
 
@@ -7,6 +18,12 @@
 
 * label the legacy launch source, repoint dead godoc, unrace docs serve shutdown ([#419](https://github.com/cameronsjo/forgectl/issues/419)) ([c2cd349](https://github.com/cameronsjo/forgectl/commit/c2cd3498ceb7ecbdac971821b4914cf473952929))
 * **launch:** refuse to retire a legacy config forgectl only partly understood ([#418](https://github.com/cameronsjo/forgectl/issues/418)) ([4c864c4](https://github.com/cameronsjo/forgectl/commit/4c864c450b40ef6164032b14e3812d967bd90b83))
+* **launch:** the automatic legacy migration — which every launch surface runs, and which backs up and deletes the legacy config — no longer retires a file it only partly decoded. A legacy config carrying settings forgectl cannot represent is now left in place, named on `launch which`/`doctor`, and refused by `launch migrate`, rather than rendered from the modelled subset and deleted ([#417](https://github.com/cameronsjo/forgectl/issues/417))
+* **launch:** the "fully superseded" notice now names the backup file, matching its two sibling notices — a message asserting a removal has to carry the recovery pointer ([#417](https://github.com/cameronsjo/forgectl/issues/417))
+* **launch:** `launch migrate` no longer reports "Imported 0 launch profile(s)" for a legitimate defaults-only import ([#417](https://github.com/cameronsjo/forgectl/issues/417))
+* **launch:** a config file sitting in the legacy directory that forgectl cannot migrate is now named, with its full path, by `launch migrate` and `launch doctor` instead of reported only as an absent `claunch.conf` ([#417](https://github.com/cameronsjo/forgectl/issues/417))
+* **launch:** `launch doctor` and `launch which` no longer credit `config.toml` for a launch profile that was read from the legacy `claunch.conf` — including on the documented `FORGECTL_SKIP_LEGACY_MIGRATE=1` path, where the label named a `config.toml` that need not exist at all
+* **docs:** `docs serve` no longer exits non-zero on Ctrl-C when a client left an unused connection open. `net/http` will not close a `StateNew` connection until it has sat there five seconds, and the shutdown grace was also five seconds — a dead heat that surfaced as `context deadline exceeded`. The drain window now clears that rule, and a drain that still runs out of time forces the listener closed, warns, and exits zero
 
 ## [0.14.0](https://github.com/cameronsjo/forgectl/compare/v0.13.0...v0.14.0) (2026-08-27)
 
@@ -14,21 +31,10 @@
 ### Features
 
 * configurable GitHub host — the pin stays total ([#412](https://github.com/cameronsjo/forgectl/issues/412)) ([#414](https://github.com/cameronsjo/forgectl/issues/414)) ([7c5b745](https://github.com/cameronsjo/forgectl/commit/7c5b7455ff8cef8954dc5a3762ca25d53067c1c4))
-
-## [Unreleased]
-
-### Features
-
 * **projects,review,config:** configurable GitHub host per deployment (`[github] host`) — the projects/review pin stays total, now pointed at the validated configured host; on any non-default host the gh token env vars are scrubbed so only the `gh auth login --hostname <host>` stored credential can be used ([#412](https://github.com/cameronsjo/forgectl/issues/412))
 
 ### Bug Fixes
 
-* **docs:** `docs serve` no longer exits non-zero on Ctrl-C when a client left an unused connection open. `net/http` will not close a `StateNew` connection until it has sat there five seconds, and the shutdown grace was also five seconds — a dead heat that surfaced as `context deadline exceeded`. The drain window now clears that rule, and a drain that still runs out of time forces the listener closed, warns, and exits zero
-* **launch:** `launch doctor` and `launch which` no longer credit `config.toml` for a launch profile that was read from the legacy `claunch.conf` — including on the documented `FORGECTL_SKIP_LEGACY_MIGRATE=1` path, where the label named a `config.toml` that need not exist at all
-* **launch:** the automatic legacy migration — which every launch surface runs, and which backs up and deletes the legacy config — no longer retires a file it only partly decoded. A legacy config carrying settings forgectl cannot represent is now left in place, named on `launch which`/`doctor`, and refused by `launch migrate`, rather than rendered from the modelled subset and deleted ([#417](https://github.com/cameronsjo/forgectl/issues/417))
-* **launch:** the "fully superseded" notice now names the backup file, matching its two sibling notices — a message asserting a removal has to carry the recovery pointer ([#417](https://github.com/cameronsjo/forgectl/issues/417))
-* **launch:** `launch migrate` no longer reports "Imported 0 launch profile(s)" for a legitimate defaults-only import ([#417](https://github.com/cameronsjo/forgectl/issues/417))
-* **launch:** a config file sitting in the legacy directory that forgectl cannot migrate is now named, with its full path, by `launch migrate` and `launch doctor` instead of reported only as an absent `claunch.conf` ([#417](https://github.com/cameronsjo/forgectl/issues/417))
 * **projects:** remote-host stamping is now an exact match — a hostname merely *containing* `github.com` (e.g. `evil-github.com.attacker.net`) no longer stamps as trusted `github` inventory ([#412](https://github.com/cameronsjo/forgectl/issues/412))
 
 ### Behavior notes
