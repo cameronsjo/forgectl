@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.1](https://github.com/cameronsjo/forgectl/compare/v0.14.0...v0.14.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* label the legacy launch source, repoint dead godoc, unrace docs serve shutdown ([#419](https://github.com/cameronsjo/forgectl/issues/419)) ([c2cd349](https://github.com/cameronsjo/forgectl/commit/c2cd3498ceb7ecbdac971821b4914cf473952929))
+* **launch:** refuse to retire a legacy config forgectl only partly understood ([#418](https://github.com/cameronsjo/forgectl/issues/418)) ([4c864c4](https://github.com/cameronsjo/forgectl/commit/4c864c450b40ef6164032b14e3812d967bd90b83))
+
 ## [0.14.0](https://github.com/cameronsjo/forgectl/compare/v0.13.0...v0.14.0) (2026-08-27)
 
 
