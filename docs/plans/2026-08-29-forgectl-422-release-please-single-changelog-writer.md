@@ -138,3 +138,11 @@ writer, or a manual post-release relocation step.
   without listeners passed while the sandbox refused TCP and Unix listener
   creation (`operation not permitted`). GitHub CI remains the authoritative
   full-suite gate.
+- Enforcement PR #426 matched the four-file scope at head `41e41fe`. Its first
+  CI run `33281586256` proved the ownership step itself passes on an ordinary PR
+  with no changelog edit; build-test, macos-test, and helper also passed. Lint
+  then found test-harness defects: commands lacked test-scoped contexts, the
+  fixed test arguments needed a narrow gosec disposition, and the temporary
+  changelog used broader permissions than necessary. The harness now uses
+  `t.Context()`, a reasoned test-only suppression, and mode `0600`; local
+  golangci-lint v2.13.1 reports zero issues with its matching Go toolchain.

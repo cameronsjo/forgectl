@@ -23,7 +23,7 @@ func TestChangelogOwnershipGuard(t *testing.T) {
 		t.Fatalf("resolve changelog guard: %v", err)
 	}
 
-	if output, err := runChangelogGuard(repo, guard, base, "contributor", "fix/docs", "cameronsjo/forgectl"); err != nil {
+	if output, err := runChangelogGuard(t, repo, guard, base, "contributor", "fix/docs", "cameronsjo/forgectl"); err != nil {
 		t.Fatalf("unchanged changelog rejected: %v\n%s", err, output)
 	}
 
@@ -96,7 +96,7 @@ func TestChangelogOwnershipGuard(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			output, err := runChangelogGuard(repo, guard, tt.base, tt.author, tt.headRef, tt.headRepo)
+			output, err := runChangelogGuard(t, repo, guard, tt.base, tt.author, tt.headRef, tt.headRepo)
 			if tt.wantErr && err == nil {
 				t.Fatalf("guard unexpectedly passed\n%s", output)
 			}
@@ -110,8 +110,9 @@ func TestChangelogOwnershipGuard(t *testing.T) {
 	}
 }
 
-func runChangelogGuard(repo, guard, base, author, headRef, headRepo string) (string, error) {
-	cmd := exec.Command(guard)
+func runChangelogGuard(t *testing.T, repo, guard, base, author, headRef, headRepo string) (string, error) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), guard)
 	cmd.Dir = repo
 	cmd.Env = append(os.Environ(),
 		"BASE_SHA="+base,
@@ -126,7 +127,8 @@ func runChangelogGuard(repo, guard, base, author, headRef, headRepo string) (str
 
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	// The arguments are fixed test fixtures, never external input.
+	cmd := exec.CommandContext(t.Context(), "git", args...) //nolint:gosec
 	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -137,7 +139,7 @@ func runGit(t *testing.T, dir string, args ...string) string {
 
 func writeTestChangelog(t *testing.T, repo, contents string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(repo, "CHANGELOG.md"), []byte(contents), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, "CHANGELOG.md"), []byte(contents), 0o600); err != nil {
 		t.Fatalf("write test changelog: %v", err)
 	}
 }
