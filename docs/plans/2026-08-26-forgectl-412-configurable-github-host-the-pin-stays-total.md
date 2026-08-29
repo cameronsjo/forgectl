@@ -1,6 +1,7 @@
 ---
-status: "in-flight"
-updated: "2026-08-26"
+status: "done"
+updated: "2026-08-28"
+pr: "https://github.com/cameronsjo/forgectl/pull/414"
 branch: "main"
 body_sha256: "8f29a221a5507ed19d76dee7f36df965335861d36638623132b9abe82716eb1a"
 session: "amber-fugue"
