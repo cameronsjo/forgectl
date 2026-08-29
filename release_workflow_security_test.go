@@ -8,9 +8,29 @@ import (
 )
 
 var (
-	fullActionSHA  = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	versionComment = regexp.MustCompile(`^# v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$`)
+	fullActionSHA          = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	versionComment         = regexp.MustCompile(`^# v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$`)
+	unreleasedHeading      = regexp.MustCompile(`(?mi)^##[ \t]+\[unreleased\][ \t]*\r?$`)
+	generatedVersionHeader = regexp.MustCompile(`(?m)^## \[[0-9]+\.[0-9]+\.[0-9]+\]\(`)
 )
+
+// TestChangelogHasNoUnreleasedLedger pins #422's first migration invariant.
+// Release Please derives versioned sections from squash commits (or their
+// PR-body commit overrides); it never consumes a hand-maintained Unreleased
+// section.
+func TestChangelogHasNoUnreleasedLedger(t *testing.T) {
+	data, err := os.ReadFile("CHANGELOG.md")
+	if err != nil {
+		t.Fatalf("read changelog: %v", err)
+	}
+	changelog := string(data)
+	if unreleasedHeading.MatchString(changelog) {
+		t.Error("CHANGELOG.md contains an Unreleased section; add consumer detail to the PR-body commit override described in AGENTS.md")
+	}
+	if !generatedVersionHeader.MatchString(changelog) {
+		t.Fatal("CHANGELOG.md contains no generated version section; the ownership guard matched no Release Please output")
+	}
+}
 
 // TestReleaseWorkflowActionsAreImmutable is the regression guard for #208.
 // The release job handles signing material and write-scoped tokens, so a
