@@ -20,15 +20,26 @@ var docsModule = module.Manifest{
 // are attached as subcommands, mirroring newBenchCmd's parent/subcommand
 // shape.
 func newDocsCmd(deps module.Deps) *cobra.Command {
+	var graphics string
 	cmd := &cobra.Command{
-		Use:   "docs",
-		Short: "Local markdown reader — render + serve an indexed doc set over loopback HTTP",
+		Use:   "docs [dir|file ...]",
+		Short: "Browse an indexed Markdown doc set in the terminal or over loopback HTTP",
+		Args:  cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if handled, err := docsHelpForNonTTY(cmd, args); handled {
+				return err
+			}
+			return runDocsBrowse(cmd, deps, args, graphics)
+		},
 		Long: `docs is forgectl's local markdown reader (forgectl#93): pure-Go
-server-side rendering (goldmark+GFM, class-based chroma highlighting,
-bluemonday sanitization), Artificer-themed, served over loopback HTTP so it
-behaves the same whether you're at the machine or SSH'd in from the headless
-workbench — no terminal-specific rendering, no popping between windows.
+rendering with an Artificer-themed terminal explorer as the ordinary path.
+Local images, SVG, and supported Mermaid diagrams render through the Kitty
+graphics protocol in compatible terminals such as Ghostty and fall back to
+readable text elsewhere. The loopback HTTP reader remains available for remote
+and phone access and for exact Mermaid.js rendering.
 
+  forgectl docs [dir|file ...]           browse in the terminal
+  forgectl docs browse [dir|file ...]    explicit spelling of the same reader
   forgectl docs serve [dir|file ...]     render + serve an indexed doc set
   forgectl docs serve --open             also open the system browser
   forgectl docs open [path]              point the browser at a doc on the
@@ -58,9 +69,11 @@ Protected servers cannot be opened directly with --open because browser
 navigation cannot attach an Authorization header.`,
 	}
 	cmd.AddCommand(
+		newDocsBrowseCmd(deps),
 		newDocsServeCmd(deps),
 		newDocsOpenCmd(deps),
 		newDocsListCmd(deps),
 	)
+	cmd.Flags().StringVar(&graphics, "graphics", "auto", "image mode for terminal browsing: auto, kitty, or off")
 	return cmd
 }
