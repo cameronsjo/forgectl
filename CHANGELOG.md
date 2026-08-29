@@ -5,7 +5,7 @@
 <!-- release-please writes a terse section per release from commit subjects and
      never touches this block, so anything left here after a release stays here
      forever. Entries move down into their released section when the tag is cut
-     (#421 review caught four releases' worth stranded here). -->
+     (#421 review found two tags' worth stranded here: 0.14.0 and 0.14.1). -->
 
 ### Bug Fixes
 
@@ -38,9 +38,12 @@
 #### Detail
 
 * **projects,review,config:** configurable GitHub host per deployment (`[github] host`) — the projects/review pin stays total, now pointed at the validated configured host; on any non-default host the gh token env vars are scrubbed so only the `gh auth login --hostname <host>` stored credential can be used ([#412](https://github.com/cameronsjo/forgectl/issues/412))
+
+### Bug Fixes
+
 * **projects:** remote-host stamping is now an exact match — a hostname merely *containing* `github.com` (e.g. `evil-github.com.attacker.net`) no longer stamps as trusted `github` inventory ([#412](https://github.com/cameronsjo/forgectl/issues/412))
 
-#### Behavior notes
+### Behavior notes
 
 * Flipping `[github] host` leaves old-host reviewed marks inert (never pruned, never re-verified) and leaves old-host clones as unmatched local dirs — deliberate, no migration tooling.
 * A config file that fails to decode now makes `projects` and `review` refuse loudly instead of silently defaulting the host to github.com.

@@ -185,12 +185,17 @@ func resolveDocsToken(tokenFile, bindAddr string) (resolvedDocsToken, error) {
 // another's fakes. Not nil-means-default fields either — a test that forgot one
 // would silently exercise production behavior and report a pass.
 //
-// Contract an implementation MUST honour: `serve` returns once `shutdown` or
-// `closeServer` has been called on the same server. Every return path waits on
-// the goroutine running `serve`, and that wait is unbounded — a runtime whose
-// `shutdown` errors without closing its listeners would hang the command with
-// no output. net/http honours this (Serve returns ErrServerClosed as soon as
-// the server is marked shutting down); a fake must too.
+// Two contracts an implementation MUST honour, because every return path waits
+// on the goroutines running them and that wait is unbounded:
+//
+//   - `serve` returns once `shutdown` or `closeServer` has been called on the
+//     same server. A runtime whose `shutdown` errors without closing its
+//     listeners would hang the command with no output. net/http honours this
+//     (Serve returns ErrServerClosed as soon as the server is marked shutting
+//     down); a fake must too.
+//   - `probe` returns when its context is cancelled. The discovery self-probe
+//     runs on a tracked goroutine whose only termination lever is that
+//     cancellation, so a probe that ignores ctx hangs the startup-abort path.
 type docsServeRuntime struct {
 	listen      func(string) (net.Listener, error)
 	serversDir  func() (string, error)
@@ -378,9 +383,9 @@ func runDocsServeWithRuntime(
 	//
 	// It deliberately does NOT say "every goroutine this function starts": the
 	// live-reload watcher (`go watcher.Run(ctx)` below) is not tracked, and its
-	// lifetime is owned by the deferred watcher.Close() instead. On the
-	// serve-result path ctx is never cancelled, so Run is still selecting when
-	// this Wait returns. That is a real gap, not a wording nicety — the earlier
+	// lifetime is owned by the deferred watcher.Close() instead. The
+	// serve-result path does not itself cancel ctx, so Run can still be
+	// selecting when this Wait returns. That is a real gap, not a wording nicety — the earlier
 	// wording claimed a completeness the code never had, and a Wait a reader
 	// trusts makes an over-promising comment more dangerous, not less.
 	var background sync.WaitGroup
