@@ -387,9 +387,12 @@ func runDocsServeWithRuntime(
 	// path. Both `defer stop()` and `defer watcher.Close()` make Run return
 	// soon — by cancelling ctx and by closing the fsnotify Events channel —
 	// but neither makes it return FIRST, so Run can still be selecting, or
-	// inside a reload, when this function exits. That is safe only because
-	// Broker.Publish is mutex-guarded and no-ops once closed; a goroutine
-	// added here with a less forgiving sink would need tracking.
+	// inside a reload, when this function exits. That is safe because a late
+	// reload's effects all tolerate it: Broker.Publish never blocks (it holds
+	// the mutex only to fan out, and drops to a full subscriber buffer),
+	// Store.Swap is atomic, and re-arming the watch on a closed watcher
+	// returns an error that is discarded. A goroutine added here whose sink
+	// lacks those properties would need tracking.
 	var background sync.WaitGroup
 	serveCh := make(chan error, 1)
 	background.Add(1)

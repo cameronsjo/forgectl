@@ -1050,45 +1050,22 @@ func TestRunDocsServe_SteadyStateReturnWaitsForServe(t *testing.T) {
 	fake := newFakeServeRuntime(3590)
 	fake.serversDirErr = errors.New("no config dir")
 	fake.holdServeGate = true
+	releaseServeGate(t, fake)
 
 	h := startServeHarness(t, fake)
-	// A blocked serve goroutine would otherwise outlive a failing run, parked
-	// on serveGate forever.
-	t.Cleanup(func() {
-		select {
-		case fake.serveGate <- http.ErrServerClosed:
-		default:
-		}
-	})
 	h.waitForBanner(t)
 	h.cancel()
 
-	// Wait for shutdown to have been CALLED before asserting the lifecycle has
-	// not returned. Without this the assertion is a bare timer: a harness
-	// goroutine descheduled past the window passes having observed nothing,
-	// which is the same silent-green failure this test exists to end. shutdown
-	// is the last thing that runs before the wait, so once it is recorded the
-	// only place left to block is background.Wait.
-	deadline := time.Now().Add(shutdownWaitBudget)
-	for {
-		if _, _, _, _, shutdown, _ := fake.counts(); shutdown > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("shutdown was never called; events: %v", fake.eventLog())
-		}
-		select {
-		case err := <-h.done:
-			t.Fatalf("runDocsServeWithRuntime returned (%v) while its serve goroutine was held — the steady-state return is not waiting", err)
-		case <-time.After(2 * time.Millisecond):
-		}
-	}
+	// shutdown is the last thing that runs before the wait, so once the fake
+	// records it the only place left to block is background.Wait. Gating on
+	// the recorded call rather than on a bare timer is what keeps the negative
+	// assertion below from passing having observed nothing.
+	awaitFakeCall(t, fake, "shutdown", func() bool {
+		_, _, _, _, shutdown, _ := fake.counts()
+		return shutdown > 0
+	}, h)
 
-	select {
-	case err := <-h.done:
-		t.Fatalf("runDocsServeWithRuntime returned (%v) while its serve goroutine was still running — the steady-state return is not waiting", err)
-	case <-time.After(100 * time.Millisecond):
-	}
+	assertLifecycleBlocked(t, h, "serve")
 
 	// Release the goroutine the lifecycle is waiting on; it may now finish.
 	fake.serveGate <- http.ErrServerClosed
@@ -1122,12 +1099,12 @@ func TestRunDocsServe_AbortStartupWaitsForServe(t *testing.T) {
 	releaseServeGate(t, fake)
 
 	h := startServeHarness(t, fake)
-	awaitFakeCall(t, fake, "closeServer", func() (int, bool) {
+	awaitFakeCall(t, fake, "closeServer", func() bool {
 		_, _, _, closeServer, _, _ := fake.counts()
-		return closeServer, closeServer > 0
+		return closeServer > 0
 	}, h)
 
-	assertLifecycleBlocked(t, h)
+	assertLifecycleBlocked(t, h, "serve")
 
 	fake.serveGate <- http.ErrServerClosed
 	if err := h.wait(t); !errors.Is(err, errDocsServeInternal) {
@@ -1139,8 +1116,10 @@ func TestRunDocsServe_AbortStartupWaitsForServe(t *testing.T) {
 // lifecycle unwinds through finishDocsServeStartup. The serve goroutine cannot
 // hold that wait open — its return is what produced the event — so the join
 // under test is the PROBE goroutine, which probeExitGate keeps alive past the
-// point finish reaches its wait. That also covers the probe half of the
-// docsServeRuntime contract, which nothing else exercises.
+// point finish reaches its wait. TestRunDocsServeWithRuntime_CancelAtReadiness
+// BarrierPublishesNothing already exercises the probe contract; what is new
+// here is observing the JOIN — that the lifecycle waits for that goroutine
+// rather than merely outliving it by luck.
 func TestRunDocsServe_FinishStartupWaitsForProbe(t *testing.T) {
 	fake := newFakeServeRuntime(3590)
 	fake.infoScript = []fakeInfoResult{{info: testGenerationInfo(0x31)}}
@@ -1156,15 +1135,15 @@ func TestRunDocsServe_FinishStartupWaitsForProbe(t *testing.T) {
 	t.Cleanup(release)
 
 	h := startServeHarness(t, fake)
-	awaitFakeCall(t, fake, "probe", func() (int, bool) {
+	awaitFakeCall(t, fake, "probe", func() bool {
 		_, probe, _, _, _, _ := fake.counts()
-		return probe, probe > 0
+		return probe > 0
 	}, h)
 
 	// Produce the Serve result that wins the arbitration. The probe goroutine
 	// is still held, so only finishDocsServeStartup's wait can block now.
 	fake.serveGate <- http.ErrServerClosed
-	assertLifecycleBlocked(t, h)
+	assertLifecycleBlocked(t, h, "probe")
 
 	release()
 	if err := h.wait(t); err != nil {
@@ -1189,11 +1168,11 @@ func releaseServeGate(t *testing.T, fake *fakeServeRuntime) {
 // awaitFakeCall blocks until count() reports the named call has happened,
 // failing if the lifecycle returns first — a return before the call means the
 // path under test was never reached, which must not read as a pass.
-func awaitFakeCall(t *testing.T, fake *fakeServeRuntime, name string, count func() (int, bool), h *serveHarness) {
+func awaitFakeCall(t *testing.T, fake *fakeServeRuntime, name string, called func() bool, h *serveHarness) {
 	t.Helper()
 	deadline := time.Now().Add(shutdownWaitBudget)
 	for {
-		if _, ok := count(); ok {
+		if called() {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -1207,14 +1186,17 @@ func awaitFakeCall(t *testing.T, fake *fakeServeRuntime, name string, count func
 	}
 }
 
-// assertLifecycleBlocked fails if the lifecycle has already returned. Callers
-// must have established, via awaitFakeCall, that the wait under test is the
-// only thing left to block on.
-func assertLifecycleBlocked(t *testing.T, h *serveHarness) {
+// assertLifecycleBlocked fails if the lifecycle has already returned. held
+// names the goroutine the caller is holding open, because it differs per path
+// — the finish path deliberately lets serve return and holds the probe, so a
+// message naming serve there would send a reader down the one leg that test
+// rules out. Callers must have established, via awaitFakeCall, that the wait
+// under test is the only thing left to block on.
+func assertLifecycleBlocked(t *testing.T, h *serveHarness, held string) {
 	t.Helper()
 	select {
 	case err := <-h.done:
-		t.Fatalf("runDocsServeWithRuntime returned (%v) while its serve goroutine was held — this path is not waiting", err)
+		t.Fatalf("runDocsServeWithRuntime returned (%v) while its %s goroutine was held — this path is not waiting", err, held)
 	case <-time.After(100 * time.Millisecond):
 	}
 }
