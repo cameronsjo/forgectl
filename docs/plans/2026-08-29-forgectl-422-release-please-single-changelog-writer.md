@@ -80,10 +80,10 @@ writer, or a manual post-release relocation step.
       this checklist in the implementation commit.
 - [x] Push the migration PR with `Refs #422`, inspect its exact remote head/diff,
       and monitor CI and review to terminal state.
-- [ ] Merge the migration only after its verified gates pass; prove #423
+- [x] Merge the migration only after its verified gates pass; prove #423
       regenerates without `[Unreleased]` or lost #421 detail.
-- [ ] Branch from migrated main and add the PR-level bot/branch ownership gate.
-- [ ] Mutation-test both ordinary-PR refusal and Release Please allowance.
+- [x] Branch from migrated main and add the PR-level bot/branch ownership gate.
+- [x] Mutation-test both ordinary-PR refusal and Release Please allowance.
 - [ ] Polish, deliver, and merge the enforcement PR with `Closes #422` after CI
       and review pass.
 - [ ] Prove #422 is closed and #423 remains a valid generated release PR.
@@ -117,3 +117,24 @@ writer, or a manual post-release relocation step.
   `33281092088`. CodeRabbit reported success only because its review was rate
   limited, so the independent polish and fix-round are the substantive review
   evidence.
+- Migration PR #425's final head `275568a` passed all four checks again in run
+  `33281174144` and squash-merged as `cc291ca`. GitHub interpreted explanatory
+  body prose as a close keyword despite `Refs #422`; the issue was immediately
+  reopened and a durable phase-boundary comment was added.
+- Release Please run `33281234369` passed after the migration merge. Release PR
+  #423 regenerated at `17f002f`, remained open and mergeable with four green CI
+  checks, retained the detailed #421 note, included #425, and contained no
+  `[Unreleased]` heading.
+- Phase 2 branched from migrated main `cc291ca`. Its executable guard test
+  proves an unchanged ordinary PR passes, an ordinary changelog edit fails, the
+  exact Release Please bot/branch/same-repository tuple passes, fork and branch
+  lookalikes and a different author fail, and a bad base commit fails closed.
+  PR #423's REST payload confirms the live tuple is exactly
+  `artificer-forge-bellows[bot]`, `release-please--branches--main`, and
+  `cameronsjo/forgectl`. The focused Go test,
+  full root-package test, `go vet .`, `actionlint .github/workflows/*.yml`,
+  `shellcheck scripts/check-changelog-owner.sh`, and `git diff --check` all
+  pass. `go test ./... -count=1` was also attempted; as in phase 1, packages
+  without listeners passed while the sandbox refused TCP and Unix listener
+  creation (`operation not permitted`). GitHub CI remains the authoritative
+  full-suite gate.
