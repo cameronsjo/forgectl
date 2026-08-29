@@ -1190,10 +1190,15 @@ func awaitFakeCall(t *testing.T, fake *fakeServeRuntime, name string, called fun
 // names the goroutine the caller is holding open, because it differs per path
 // — the finish path deliberately lets serve return and holds the probe, so a
 // message naming serve there would send a reader down the one leg that test
-// rules out. Callers must first have established that the wait under test is
-// the only thing left to block on — usually with awaitFakeCall, though the
-// finish path instead relies on its blocking send to serveGate having been
-// received, which is what proves serve already returned.
+// rules out.
+//
+// Callers must first have established that the wait under test is the only
+// thing left to block on. Each does it differently: the steady-state and abort
+// guards use awaitFakeCall, and the finish guard relies on probeExitGate
+// holding the probe goroutine unconditionally, so the wait cannot complete
+// whatever serve has done. A serveGate send does NOT establish it — that
+// channel is buffered at 1, so the send completes into the buffer and proves
+// nothing about the goroutine.
 func assertLifecycleBlocked(t *testing.T, h *serveHarness, held string) {
 	t.Helper()
 	select {
