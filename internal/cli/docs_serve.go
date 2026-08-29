@@ -189,15 +189,14 @@ func resolveDocsToken(tokenFile, bindAddr string) (resolvedDocsToken, error) {
 // on the goroutines running them and that wait is unbounded:
 //
 //   - `serve` returns once `shutdown` or `closeServer` has been called on the
-//     same server. A runtime whose `shutdown` errors without closing its
-//     listeners would hang the command with no output. net/http honours this
-//     (Serve returns ErrServerClosed as soon as the server is marked shutting
-//     down); a fake must too.
+//     same server. net/http honours this (Serve returns ErrServerClosed as
+//     soon as the server is marked shutting down); a fake must too.
 //   - `probe` returns when its context is cancelled. On a healthy startup the
 //     self-probe ends by returning its own result; cancellation is the only
-//     lever the command holds over one that would not otherwise return. It
-//     runs on a tracked goroutine, so a probe that ignores ctx hangs every
-//     return path that waits — not just the abort.
+//     lever the command holds over one that would not otherwise return.
+//
+// Break either and the command hangs on the wait, with no further output to
+// explain it.
 type docsServeRuntime struct {
 	listen      func(string) (net.Listener, error)
 	serversDir  func() (string, error)
@@ -383,14 +382,14 @@ func runDocsServeWithRuntime(
 	// returning is what makes "drain the started operations" structural rather
 	// than a sequence of receives a later edit could get out of step with.
 	//
-	// It deliberately does NOT say "every goroutine this function starts": the
-	// live-reload watcher (`go watcher.Run(ctx)` below) is not tracked, and its
-	// lifetime is owned by the deferred watcher.Close() instead. The
-	// serve-result path does not itself cancel ctx, so Run can still be
-	// selecting when this Wait returns. That is a real gap, not a wording
-	// nicety — the earlier wording claimed a completeness the code never had,
-	// and a Wait a reader trusts makes an over-promising comment more
-	// dangerous, not less.
+	// Not "every goroutine this function starts": the live-reload watcher
+	// (`go watcher.Run(ctx)` below) is untracked and is never joined on any
+	// path. Both `defer stop()` and `defer watcher.Close()` make Run return
+	// soon — by cancelling ctx and by closing the fsnotify Events channel —
+	// but neither makes it return FIRST, so Run can still be selecting, or
+	// inside a reload, when this function exits. That is safe only because
+	// Broker.Publish is mutex-guarded and no-ops once closed; a goroutine
+	// added here with a less forgiving sink would need tracking.
 	var background sync.WaitGroup
 	serveCh := make(chan error, 1)
 	background.Add(1)
@@ -494,11 +493,11 @@ func runDocsServeWithRuntime(
 	}
 
 	// Every return path waits, this one included, so no tracked goroutine
-	// outlives the command. The wait is bounded on both branches into here:
-	// on a serve result, Serve has already returned — that result is what
-	// produced the event; on cancellation, Shutdown or the forced close above
-	// it has made Serve return. See docsServeRuntime for the contract a
-	// substituted runtime owes this wait.
+	// outlives the command. Bounded on both branches into here: on a serve
+	// result Serve has already returned — that result is what produced the
+	// event; on cancellation Shutdown, or the forced close above it, has made
+	// Serve return. See docsServeRuntime for the contract a substituted
+	// runtime owes this wait.
 	background.Wait()
 	closeDocsServeLease(rt, lease, errOut)
 	return result

@@ -2,10 +2,10 @@
 
 ## [Unreleased]
 
-<!-- release-please writes a terse section per release from commit subjects and
-     never touches this block, so anything left here after a release stays here
-     forever. Entries move down into their released section when the tag is cut
-     (#421 review found two tags' worth stranded here: 0.14.0 and 0.14.1). -->
+<!-- release-please generates a section per release from commit subjects; it
+     does not consume this block. Anything left here after a tag stays here, so
+     move these entries down under the version that shipped them when the
+     release PR lands. Nothing enforces it. -->
 
 ### Bug Fixes
 
@@ -18,8 +18,6 @@
 
 * label the legacy launch source, repoint dead godoc, unrace docs serve shutdown ([#419](https://github.com/cameronsjo/forgectl/issues/419)) ([c2cd349](https://github.com/cameronsjo/forgectl/commit/c2cd3498ceb7ecbdac971821b4914cf473952929))
 * **launch:** refuse to retire a legacy config forgectl only partly understood ([#418](https://github.com/cameronsjo/forgectl/issues/418)) ([4c864c4](https://github.com/cameronsjo/forgectl/commit/4c864c450b40ef6164032b14e3812d967bd90b83))
-
-#### Detail
 
 * **launch:** the automatic legacy migration — which every launch surface runs, and which backs up and deletes the legacy config — no longer retires a file it only partly decoded. A legacy config carrying settings forgectl cannot represent is now left in place, named on `launch which`/`doctor`, and refused by `launch migrate`, rather than rendered from the modelled subset and deleted ([#417](https://github.com/cameronsjo/forgectl/issues/417))
 * **launch:** the "fully superseded" notice now names the backup file, matching its two sibling notices — a message asserting a removal has to carry the recovery pointer ([#417](https://github.com/cameronsjo/forgectl/issues/417))
@@ -35,13 +33,9 @@
 
 * configurable GitHub host — the pin stays total ([#412](https://github.com/cameronsjo/forgectl/issues/412)) ([#414](https://github.com/cameronsjo/forgectl/issues/414)) ([7c5b745](https://github.com/cameronsjo/forgectl/commit/7c5b7455ff8cef8954dc5a3762ca25d53067c1c4))
 
-#### Detail
-
 * **projects,review,config:** configurable GitHub host per deployment (`[github] host`) — the projects/review pin stays total, now pointed at the validated configured host; on any non-default host the gh token env vars are scrubbed so only the `gh auth login --hostname <host>` stored credential can be used ([#412](https://github.com/cameronsjo/forgectl/issues/412))
 
 ### Bug Fixes
-
-#### Detail
 
 * **projects:** remote-host stamping is now an exact match — a hostname merely *containing* `github.com` (e.g. `evil-github.com.attacker.net`) no longer stamps as trusted `github` inventory ([#412](https://github.com/cameronsjo/forgectl/issues/412))
 
