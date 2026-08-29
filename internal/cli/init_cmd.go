@@ -172,7 +172,7 @@ const reviewScaffold = `
 // comment names that port, but it appears nowhere else in the codebase; this
 // scaffold corrects the drift rather than propagating it.
 const docsScaffold = `
-# ── docs: local markdown reader (forgectl docs) ─────────────────────────────
+# ── docs: terminal + web markdown reader (forgectl docs) ───────────────────────
 [docs]
 # roots = ["~/Projects/notes"] # extra root dirs indexed alongside cwd/./docs (example)
 addr = "" # empty = 127.0.0.1 with a random port; set host:port to pin one

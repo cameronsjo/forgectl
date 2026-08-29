@@ -6,9 +6,8 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 )
 
-// docsModule declares the local markdown reader extension (ADR-0005): owns
-// the [docs] config section. See forgectl#93 for the full design; this is
-// PR1's slice (render + index, no live reload).
+// docsModule declares the local markdown reader extension (ADR-0005) and owns
+// the [docs] config section. See forgectl#93 for the full design.
 var docsModule = module.Manifest{
 	Name:      "docs",
 	Tier:      module.TierExtension,
@@ -47,10 +46,11 @@ and phone access and for exact Mermaid.js rendering.
   forgectl docs list [dir|file ...]      list the indexed docs, no server
   forgectl docs list --json              machine-readable output for scripts
 
-Diagrams render in the page: a fenced code block tagged mermaid becomes a live
-diagram themed from the same Artificer tokens as the rest of the reader, and
-both those and inline SVG pan and zoom (drag to pan, modifier-scroll or
-click-then-scroll to zoom, double-click or 0 to reset).
+In the terminal, a fenced code block tagged mermaid is rendered by a pure-Go
+renderer when supported and otherwise remains visible as source. In the web
+reader, Mermaid.js renders those blocks and Mermaid and inline SVG can pan and
+zoom (drag to pan, modifier-scroll or click-then-scroll to zoom, double-click
+or 0 to reset).
 
 With no arguments, both verbs index cwd, ./docs (if present), and
 $CADENCE_FIELD_REPORTS_DIR (if set), plus any extra roots configured in the

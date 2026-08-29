@@ -43,7 +43,7 @@ deep-dive get a link here.
 | `branch` | Prune stale/orphaned git branches (alias: `br`) | Usage below |
 | `clean` | Reclaim dep/build directories under a project root (alias: `cln`) | Usage below |
 | `docker` | Build/run/shell images tagged from git repo/branch/sha | Usage below |
-| `docs` | Local markdown reader: render + serve an indexed doc set over loopback HTTP | Usage below |
+| `docs` | Native terminal docs explorer, with the loopback web reader retained as a fallback | Usage below |
 | `net` | Check cached reachability of the configured probe endpoint | Usage below |
 | `proxy` | Apply config-defined profiles to the current shell through an explicit wrapper | [proxy](#proxy--current-shell-profiles) |
 | `k8s` | Safely stream ordinary kubectl logs, plus bounded namespace/exec/inspect helpers | [k8s](#k8s--bounded-terminal-safe-log-streaming) |
@@ -201,10 +201,15 @@ forgectl docker build [context] -- --platform linux/arm64  # args after -- pass 
 forgectl docker run [-- args...]         # run the built (or --tag) image
 forgectl docker shell                    # open a shell in the built (or --tag) image
 
-# docs — local markdown reader: render + serve an indexed doc set over loopback HTTP
+# docs — native terminal explorer; no separate browser for ordinary reading
+forgectl docs [dir|file ...]             # browse with the adaptive terminal UI (cwd by default)
+forgectl docs browse [dir|file ...]      # explicit spelling of the same terminal reader
+forgectl docs --graphics off             # keep the TUI but render media as readable text fallbacks
 forgectl docs serve [dir|file ...]       # render + serve, loopback-only (DNS-rebinding-safe)
 forgectl docs serve --open               # also open the system browser
 forgectl docs list [dir|file ...]        # list the indexed docs, no server (--json for scripting)
+
+# terminal docs keys: tab panes · / filter · enter open · l links · b back · q quit
 
 # net — check cached reachability of the configured probe endpoint
 forgectl net                             # show the cached (or freshly probed) answer
@@ -299,6 +304,20 @@ forgectl y last 5                        # print the 5 most recent zsh commands,
                                           #   piping or redirecting requires --allow-sensitive-output, an explicit
                                           #   acknowledgement only: forgectl does not scan or redact the history
 ```
+
+The docs terminal reader uses a two-pane document list and reader when space
+allows, then collapses to one pane in a narrow terminal. Relative Markdown
+links stay inside the reader; opening an external HTTP link always asks first.
+
+"Kitty graphics" is a terminal escape-sequence protocol for placing images in
+terminal cells. It does not require the Kitty app: Ghostty and several other
+terminal emulators implement the same protocol. `--graphics auto` (the default)
+enables it only for a recognized terminal, `--graphics kitty` forces it, and
+`--graphics off` disables image escape sequences. The reader supports local
+PNG, JPEG, static GIF, SVG, and the Mermaid syntax handled by its pure-Go
+renderer; remote images, invalid diagrams, and unsupported Mermaid features
+remain visible as deliberate text fallbacks. Use `docs serve` when you need
+remote or phone access, or the browser reader's Mermaid.js compatibility.
 
 The cask doesn't stage an `fx` command — it's a shell alias you add yourself:
 
