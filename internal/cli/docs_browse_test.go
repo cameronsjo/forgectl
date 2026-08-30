@@ -30,31 +30,27 @@ func TestDocsCommand_NonTTYBareInvocationKeepsHelpBehavior(t *testing.T) {
 	}
 }
 
-func TestDocsBrowse_RejectsNonTTYAndInvalidGraphics(t *testing.T) {
+func TestDocsPreview_RejectsNonTTY(t *testing.T) {
 	previous := docsStreamIsTerminal
 	t.Cleanup(func() { docsStreamIsTerminal = previous })
 	deps := module.Deps{Cfg: config.Config{}, Runner: &forgexec.FakeRunner{}}
-	cmd := newDocsBrowseCmd(deps)
+	cmd := newDocsCmd(deps)
 	cmd.SetIn(strings.NewReader(""))
 	cmd.SetOut(new(bytes.Buffer))
 	docsStreamIsTerminal = func(any) bool { return false }
-	if err := runDocsBrowse(cmd, deps, nil, "auto"); err == nil || !strings.Contains(err.Error(), "interactive terminal") {
+	if err := runDocsPreview(cmd, deps, nil); err == nil || !strings.Contains(err.Error(), "interactive terminal") {
 		t.Fatalf("non-TTY error = %v", err)
-	}
-	docsStreamIsTerminal = func(any) bool { return true }
-	if err := runDocsBrowse(cmd, deps, nil, "sixel"); err == nil || !strings.Contains(err.Error(), "invalid graphics mode") {
-		t.Fatalf("invalid graphics error = %v", err)
 	}
 }
 
-func TestDocsCommand_RegistersNativeAndLegacyEntrypoints(t *testing.T) {
+func TestDocsCommand_RegistersPreviewAndServerEntrypoints(t *testing.T) {
 	cmd := newDocsCmd(module.Deps{Cfg: config.Config{}, Runner: &forgexec.FakeRunner{}})
-	for _, name := range []string{"browse", "serve", "open", "list"} {
+	for _, name := range []string{"serve", "open", "list"} {
 		if found, _, err := cmd.Find([]string{name}); err != nil || found.Name() != name {
 			t.Fatalf("Find(%q) = %v, %v", name, found, err)
 		}
 	}
-	if cmd.Flag("graphics") == nil {
-		t.Fatal("bare docs command lacks --graphics")
+	if found, _, err := cmd.Find([]string{"browse"}); err == nil && found.Name() == "browse" {
+		t.Fatal("obsolete terminal browse command is still registered")
 	}
 }

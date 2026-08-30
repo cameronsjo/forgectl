@@ -19,26 +19,23 @@ var docsModule = module.Manifest{
 // are attached as subcommands, mirroring newBenchCmd's parent/subcommand
 // shape.
 func newDocsCmd(deps module.Deps) *cobra.Command {
-	var graphics string
 	cmd := &cobra.Command{
 		Use:   "docs [dir|file ...]",
-		Short: "Browse an indexed Markdown doc set in the terminal or over loopback HTTP",
+		Short: "Read an indexed Markdown doc set in an embedded HTML preview",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if handled, err := docsHelpForNonTTY(cmd, args); handled {
 				return err
 			}
-			return runDocsBrowse(cmd, deps, args, graphics)
+			return runDocsPreview(cmd, deps, args)
 		},
 		Long: `docs is forgectl's local markdown reader (forgectl#93): pure-Go
-rendering with an Artificer-themed terminal explorer as the ordinary path.
-Local images, SVG, and supported Mermaid diagrams render through the Kitty
-graphics protocol in compatible terminals such as Ghostty and fall back to
-readable text elsewhere. The loopback HTTP reader remains available for remote
-and phone access and for exact Mermaid.js rendering.
+rendering with an Artificer-themed HTML preview as the ordinary path. Inside
+cmux, the preview opens as a right-hand browser pane in the caller's workspace
+without taking focus. Elsewhere it opens in the system browser. The invoking
+terminal owns the foreground loopback server; press Ctrl-C there to stop it.
 
-  forgectl docs [dir|file ...]           browse in the terminal
-  forgectl docs browse [dir|file ...]    explicit spelling of the same reader
+  forgectl docs [dir|file ...]           serve + open the reading preview
   forgectl docs serve [dir|file ...]     render + serve an indexed doc set
   forgectl docs serve --open             also open the system browser
   forgectl docs open [path]              point the browser at a doc on the
@@ -46,11 +43,10 @@ and phone access and for exact Mermaid.js rendering.
   forgectl docs list [dir|file ...]      list the indexed docs, no server
   forgectl docs list --json              machine-readable output for scripts
 
-In the terminal, a fenced code block tagged mermaid is rendered by a pure-Go
-renderer when supported and otherwise remains visible as source. In the web
-reader, Mermaid.js renders those blocks and Mermaid and inline SVG can pan and
-zoom (drag to pan, modifier-scroll or click-then-scroll to zoom, double-click
-or 0 to reset).
+Mermaid.js renders fenced mermaid blocks, and Mermaid and inline SVG can pan and
+zoom (drag to pan, modifier-scroll or click-then-scroll to zoom, double-click or
+0 to reset). Reading settings in the app bar control body, heading, and code
+fonts plus text size, line height, and content width.
 
 With no arguments, both verbs index cwd, ./docs (if present), and
 $CADENCE_FIELD_REPORTS_DIR (if set), plus any extra roots configured in the
@@ -69,11 +65,9 @@ Protected servers cannot be opened directly with --open because browser
 navigation cannot attach an Authorization header.`,
 	}
 	cmd.AddCommand(
-		newDocsBrowseCmd(deps),
 		newDocsServeCmd(deps),
 		newDocsOpenCmd(deps),
 		newDocsListCmd(deps),
 	)
-	cmd.Flags().StringVar(&graphics, "graphics", "auto", "image mode for terminal browsing: auto, kitty, or off")
 	return cmd
 }

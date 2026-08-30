@@ -48,10 +48,10 @@ ordinary path, and address the reading gaps exposed by the live cmux proof.
 - [x] Prove a loopback reader can open in the caller's cmux workspace without
   stealing focus.
 - [x] Persist and commit the approved pivot before implementation.
-- [ ] Replace the bare docs/TUI entry point with embedded-cmux preview startup.
+- [x] Replace the bare docs/TUI entry point with embedded-cmux preview startup.
 - [ ] Add persisted reading typography and measure controls.
 - [ ] Serve contained local Markdown images through the loopback reader.
-- [ ] Remove terminal-reader code and dependencies.
+- [x] Remove terminal-reader code and dependencies.
 - [ ] Update help and README; leave generated changelog prose to Release Please.
 - [ ] Run fresh build, vet, tests, formatting, lint, and live cmux acceptance.
 - [ ] Update and push the existing pull request, then monitor its checks.

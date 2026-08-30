@@ -1,12 +1,11 @@
 // Package docs is the ops layer for `forgectl docs` (#93): a pure-Go local
 // markdown reader. It indexes a closed set of root directories and renders
-// their contents for both a terminal explorer and the retained loopback HTTP
-// reader. It knows nothing of Cobra — that decoupling is the house pattern
+// their contents through the loopback HTTP reader. It knows nothing of Cobra —
+// that decoupling is the house pattern
 // (see internal/tmux, internal/net).
 //
-// A filesystem Watcher rebuilds the Index and a Broker notifies both reader
-// frontends. The terminal path uses local-only media resolution and Kitty
-// graphics; the web path renders sanitized HTML and notifies browsers over SSE.
+// A filesystem Watcher rebuilds the Index and a Broker notifies readers over
+// SSE. The HTML renderer sanitizes Markdown before it reaches the browser.
 package docs
 
 import (
