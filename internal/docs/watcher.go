@@ -189,8 +189,9 @@ func (w *Watcher) refreshWatch(ev fsnotify.Event) {
 
 // relevant reports whether an event path should trigger a reload.
 //
-// It reuses AllowedExt and excludedDir rather than restating either, so the
-// watcher cannot disagree with the indexer about what counts as a doc. The
+// It reuses AllowedExt, AllowedMediaExt, and excludedDir rather than restating
+// them, so the watcher cannot disagree with the server about what can affect a
+// rendered doc. The
 // exclusion half is a security check, not a performance one: without it, a
 // write under .trash/ or node_modules/ would wake the reader up and rebuild the
 // index on behalf of a file the reader will then correctly refuse to serve —
@@ -202,7 +203,7 @@ func (w *Watcher) refreshWatch(ev fsnotify.Event) {
 // trigger a rebuild, so relevance is decided from the path string against the
 // already-canonical root paths.
 func (w *Watcher) relevant(path string) bool {
-	if !AllowedExt(path) {
+	if !AllowedExt(path) && !AllowedMediaExt(path) {
 		return false
 	}
 
@@ -211,8 +212,10 @@ func (w *Watcher) relevant(path string) bool {
 		if !withinRoot(root.Path, path) {
 			continue
 		}
-		// Naming a single file must not make its siblings live-reloadable any
-		// more than it makes them servable.
+		// A single-file root may serve an image only after proving that its sole
+		// doc references that image. The watcher does not parse every event's
+		// source to repeat that proof, so it conservatively reloads only the doc
+		// itself; a changed sibling image is visible after a manual refresh.
 		if root.OnlyFile != "" {
 			return path == root.OnlyFile
 		}

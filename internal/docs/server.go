@@ -198,6 +198,7 @@ func NewHandler(store *Store, events *Broker) http.Handler {
 
 	mux.HandleFunc("GET "+eventsPath, handleEvents(events))
 	mux.HandleFunc("GET "+locatePath, handleLocate(store))
+	mux.HandleFunc("GET /media/{root}", handleMedia(store))
 	mux.HandleFunc("GET /doc/{root}/{rest...}", handleDoc(store))
 	mux.HandleFunc("GET /{$}", handleIndexRoot(store))
 
@@ -357,6 +358,12 @@ func handleDoc(store *Store) http.HandlerFunc {
 		rendered, err := Render(source)
 		if err != nil {
 			slog.Error("docs: markdown render failed.", "root", root, "rest", rest, "error", err)
+			http.Error(w, "render failed", http.StatusInternalServerError)
+			return
+		}
+		rendered, err = RewriteLocalImageURLs(rendered, root, rest)
+		if err != nil {
+			slog.Error("docs: local image URL rewrite failed.", "root", root, "rest", rest, "error", err)
 			http.Error(w, "render failed", http.StatusInternalServerError)
 			return
 		}
