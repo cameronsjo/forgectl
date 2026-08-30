@@ -151,7 +151,7 @@ func TestRunner_RunWithEnvCannotEscapeThePin(t *testing.T) {
 
 func TestRunner_RunWithEnvFilteredPreservesCallerRemovalAndCannotEscapePin(t *testing.T) {
 	fake := &exec.FakeRunner{}
-	callerUnset := []string{"CALLER_REMOVE"}
+	callerUnset := []string{"CALLER_REMOVE", "GH_TOKEN"}
 
 	_, err := Runner(fake, "github.example.com").RunWithEnvFiltered(t.Context(),
 		map[string]string{"GH_HOST": "attacker.example", "GH_TOKEN": "leak-me", "KEEP": "value"},
@@ -171,7 +171,7 @@ func TestRunner_RunWithEnvFilteredPreservesCallerRemovalAndCannotEscapePin(t *te
 	if len(call.UnsetEnv) == 0 || call.UnsetEnv[0] != "CALLER_REMOVE" {
 		t.Errorf("removals = %v, want caller removal preserved first", call.UnsetEnv)
 	}
-	if len(callerUnset) != 1 || callerUnset[0] != "CALLER_REMOVE" {
+	if len(callerUnset) != 2 || callerUnset[0] != "CALLER_REMOVE" || callerUnset[1] != "GH_TOKEN" {
 		t.Fatalf("caller-owned removal slice mutated: %v", callerUnset)
 	}
 }

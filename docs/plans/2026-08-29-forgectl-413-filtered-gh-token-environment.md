@@ -74,7 +74,7 @@ default-host preservation, double wrapping, and invalid-host refusal.
       precedence across plain and explicit-environment calls.
 - [x] Run focused tests, the full relevant suite, vet, lint, formatting, and
       repository-wide tests with environmental boundaries recorded precisely.
-- [ ] Polish the full diff, fix or disposition every finding, and record the
+- [x] Polish the full diff, fix or disposition every finding, and record the
       release-note decision.
 - [ ] Push a PR that references #413 without closing the umbrella issue, then
       monitor CI and review to terminal state before merge.
@@ -100,3 +100,13 @@ default-host preservation, double wrapping, and invalid-host refusal.
   absent-override plus exact-removal contract. A fresh unrestricted
   `go test ./... -count=1` passes every package; focused tests, `go vet`,
   golangci-lint v2.13.1, gofmt, and `git diff --check` also pass.
+- Correctness polish found one missing edge-case assertion: a caller removal
+  set that already names a mandatory token must remain unmutated and must not
+  produce a duplicate removal. The tightened test passes, as does a fresh
+  unrestricted full suite and vet. Simplification review found no removable
+  layer: the new closed-interface method is the compile-time security gate the
+  approved design requires, while the production and fake implementations
+  prove different boundaries.
+- This is consumer-visible security hardening, so the PR body will carry a
+  Release Please commit override explaining the removal behavior. Generated
+  `CHANGELOG.md` remains untouched.
