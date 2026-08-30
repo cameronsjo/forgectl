@@ -201,15 +201,11 @@ forgectl docker build [context] -- --platform linux/arm64  # args after -- pass 
 forgectl docker run [-- args...]         # run the built (or --tag) image
 forgectl docker shell                    # open a shell in the built (or --tag) image
 
-# docs — native terminal explorer; no separate browser for ordinary reading
-forgectl docs [dir|file ...]             # browse with the adaptive terminal UI (cwd by default)
-forgectl docs browse [dir|file ...]      # explicit spelling of the same terminal reader
-forgectl docs --graphics off             # keep the TUI but render media as readable text fallbacks
+# docs — rich HTML reader embedded in the current cmux workspace
+forgectl docs [dir|file ...]             # serve + open a right-hand cmux browser pane (cwd by default)
 forgectl docs serve [dir|file ...]       # render + serve, loopback-only (DNS-rebinding-safe)
-forgectl docs serve --open               # also open the system browser
+forgectl docs serve --open               # serve + open a separate system-browser tab
 forgectl docs list [dir|file ...]        # list the indexed docs, no server (--json for scripting)
-
-# terminal docs keys: tab panes · / filter · enter open · l links · b back · q quit
 
 # net — check cached reachability of the configured probe endpoint
 forgectl net                             # show the cached (or freshly probed) answer
@@ -305,19 +301,21 @@ forgectl y last 5                        # print the 5 most recent zsh commands,
                                           #   acknowledgement only: forgectl does not scan or redact the history
 ```
 
-The docs terminal reader uses a two-pane document list and reader when space
-allows, then collapses to one pane in a narrow terminal. Relative Markdown
-links stay inside the reader; opening an external HTTP link always asks first.
+Inside cmux, the ordinary `docs` command creates a browser pane on the right of
+the invoking terminal without moving keyboard focus. The terminal owns the
+foreground loopback server, so leave it running while you read and press Ctrl-C
+there to close the server. Outside cmux, the same command opens the system
+browser instead. Use `docs serve` when another process should own presentation,
+or when you want remote or phone access through the existing address/token
+options.
 
-"Kitty graphics" is a terminal escape-sequence protocol for placing images in
-terminal cells. It does not require the Kitty app: Ghostty and several other
-terminal emulators implement the same protocol. `--graphics auto` (the default)
-enables it only for a recognized terminal, `--graphics kitty` forces it, and
-`--graphics off` disables image escape sequences. The reader supports local
-PNG, JPEG, static GIF, SVG, and the Mermaid syntax handled by its pure-Go
-renderer; remote images, invalid diagrams, and unsupported Mermaid features
-remain visible as deliberate text fallbacks. Use `docs serve` when you need
-remote or phone access, or the browser reader's Mermaid.js compatibility.
+The reader renders sanitized Markdown, syntax highlighting, tables, Mermaid,
+inline SVG, and relative local PNG, JPEG, GIF, WebP, AVIF, and SVG images. The
+`Aa` control independently changes body, heading, and code fonts, text size,
+line height, and line length; those choices persist in that browser. Relative
+images are served only when an indexed document references them and still pass
+the configured-root containment checks. Remote images remain blocked so opening
+a local document does not notify a third party.
 
 The cask doesn't stage an `fx` command — it's a shell alias you add yourself:
 

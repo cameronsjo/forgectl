@@ -52,7 +52,7 @@ ordinary path, and address the reading gaps exposed by the live cmux proof.
 - [x] Add persisted reading typography and measure controls.
 - [x] Serve contained local Markdown images through the loopback reader.
 - [x] Remove terminal-reader code and dependencies.
-- [ ] Update help and README; leave generated changelog prose to Release Please.
+- [x] Update help and README; leave generated changelog prose to Release Please.
 - [ ] Run fresh build, vet, tests, formatting, lint, and live cmux acceptance.
 - [ ] Update and push the existing pull request, then monitor its checks.
 

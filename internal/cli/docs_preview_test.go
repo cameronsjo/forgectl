@@ -25,7 +25,7 @@ func TestDocsCommand_NonTTYBareInvocationKeepsHelpBehavior(t *testing.T) {
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "browse") || !strings.Contains(out.String(), "serve") {
+	if !strings.Contains(out.String(), "serve + open the reading preview") || !strings.Contains(out.String(), "docs serve") {
 		t.Fatalf("help = %q", out.String())
 	}
 }
