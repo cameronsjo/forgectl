@@ -67,10 +67,10 @@ default-host preservation, double wrapping, and invalid-host refusal.
 - [x] Revalidate #413, #412/#414, current runner contracts, and `origin/main`.
 - [x] Record Cameron's approval of the filtered-environment slice.
 - [x] Persist this plan in its own commit before implementation.
-- [ ] Add and production-test the filtered environment execution primitive.
-- [ ] Make every runner implementation explicitly support the new method.
-- [ ] Route non-default-host `gh` calls through exact token removal.
-- [ ] Mutation/control-test absence, default-host preservation, and pin
+- [x] Add and production-test the filtered environment execution primitive.
+- [x] Make every runner implementation explicitly support the new method.
+- [x] Route non-default-host `gh` calls through exact token removal.
+- [x] Mutation/control-test absence, default-host preservation, and pin
       precedence across plain and explicit-environment calls.
 - [ ] Run focused tests, the full relevant suite, vet, lint, formatting, and
       repository-wide tests with environmental boundaries recorded precisely.
@@ -78,3 +78,19 @@ default-host preservation, double wrapping, and invalid-host refusal.
       release-note decision.
 - [ ] Push a PR that references #413 without closing the umbrella issue, then
       monitor CI and review to terminal state before merge.
+
+## Execution evidence
+
+- The real-process test uses POSIX `${name+x}` expansion to distinguish an
+  absent variable from an empty one. `RunWithEnvFiltered` reports the inherited
+  test credential absent while preserving an unrelated override; its embedded
+  `RunWithEnv` control reports an empty override present, proving the assertion
+  detects the old behavior rather than accepting it.
+- Wrapper tests prove all four credential names are absent from overrides and
+  present exactly once in the removal set for both plain `Run` and
+  `RunWithEnv`; default-host tokens remain untouched. The explicit filtered
+  path also proves caller removals survive, caller token overrides lose, the
+  validated host pin wins, and caller-owned slices are not mutated.
+- `go test ./... -run '^$' -count=1` passes with the matching Go 1.26.5
+  toolchain, compiling every package and proving all implementations of the
+  deliberately closed `exec.Runner` interface support the new method.

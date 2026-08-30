@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// Runner abstracts running an external command. Four modes:
+// Runner abstracts running an external command. Five modes:
 //
 //   - Run captures stdout for parsing (list-sessions, has-session, …).
 //   - RunInteractive hands the controlling tty to the child process, required
@@ -28,11 +28,16 @@ import (
 //     behavior needs pinning regardless of the caller's ambient env (e.g.
 //     `HOMEBREW_NO_AUTO_UPDATE=1`, so `brew outdated` can't silently trigger
 //     Homebrew's own implicit update-and-tap-refresh as a side effect).
+//   - RunWithEnvFiltered captures stdout like RunWithEnv, but first removes
+//     named variables from the inherited environment. Explicit overrides win
+//     over removals of the same name. This is the security boundary for a
+//     command that must not inherit ambient credentials.
 type Runner interface {
 	Run(ctx context.Context, name string, args ...string) (string, error)
 	RunInteractive(ctx context.Context, name string, args ...string) error
 	RunWithInput(ctx context.Context, stdin string, name string, args ...string) (string, error)
 	RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (string, error)
+	RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error)
 }
 
 // StreamingRunner is the narrow execution seam for commands whose output must
@@ -88,12 +93,47 @@ func (OSRunner) RunWithEnv(ctx context.Context, env map[string]string, name stri
 	return runAndWrap(cmd, "Preparing to run command with environment overrides.", "Successfully ran command with environment overrides.", "Failed to run command with environment overrides.", name, args)
 }
 
+// RunWithEnvFiltered executes name+args after removing unset from the inherited
+// environment and applying env overrides. An override wins when its key also
+// appears in unset, allowing callers to replace an ambient value deliberately.
+func (OSRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // structural argv is the purpose of this execution seam
+	cmd.Env = filteredEnvironment(env, unset)
+	return runAndWrap(cmd, "Preparing to run command with a filtered environment.", "Successfully ran command with a filtered environment.", "Failed to run command with a filtered environment.", name, args)
+}
+
+func filteredEnvironment(overrides map[string]string, unset []string) []string {
+	replaced := make(map[string]struct{}, len(overrides)+len(unset))
+	for _, key := range unset {
+		replaced[key] = struct{}{}
+	}
+	for key := range overrides {
+		replaced[key] = struct{}{}
+	}
+
+	inherited := os.Environ()
+	filtered := make([]string, 0, len(inherited)+len(overrides))
+	for _, entry := range inherited {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok {
+			if _, remove := replaced[key]; remove {
+				continue
+			}
+		}
+		filtered = append(filtered, entry)
+	}
+	for key, value := range overrides {
+		filtered = append(filtered, key+"="+value)
+	}
+	return filtered
+}
+
 // runAndWrap runs an already-configured *exec.Cmd (Stdin/Env set by the
 // caller, Stderr not yet wired) and converts its outcome into the Runner
 // contract: trimmed stdout on success, or a *CommandError — carrying stderr,
 // the captured stdout, and the exit code — on failure. Shared body behind
-// Run, RunWithInput, and RunWithEnv, which differ only in how they configure
-// cmd beforehand and which log messages they use.
+// Run, RunWithInput, RunWithEnv, and RunWithEnvFiltered, which differ only in
+// how they configure cmd beforehand and which log messages they use.
 func runAndWrap(cmd *exec.Cmd, preparingMsg, successMsg, failureMsg, name string, args []string) (string, error) {
 	slog.Debug(preparingMsg, "cmd", name, "args", args)
 	start := time.Now()

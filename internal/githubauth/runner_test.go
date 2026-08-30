@@ -50,11 +50,12 @@ func realExitError(t *testing.T) error {
 // test can cancel or expire the caller's context at the exact moment the
 // subprocess "fails". exec.FakeRunner cannot do this: it ignores ctx entirely.
 type hookFake struct {
-	hook   func(context.Context)
-	out    string
-	err    error
-	gotEnv map[string]string
-	calls  int
+	hook     func(context.Context)
+	out      string
+	err      error
+	gotEnv   map[string]string
+	gotUnset []string
+	calls    int
 }
 
 func (f *hookFake) Run(ctx context.Context, _ string, _ ...string) (string, error) {
@@ -68,6 +69,16 @@ func (f *hookFake) Run(ctx context.Context, _ string, _ ...string) (string, erro
 func (f *hookFake) RunWithEnv(ctx context.Context, env map[string]string, _ string, _ ...string) (string, error) {
 	f.calls++
 	f.gotEnv = env
+	if f.hook != nil {
+		f.hook(ctx)
+	}
+	return f.out, f.err
+}
+
+func (f *hookFake) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, _ string, _ ...string) (string, error) {
+	f.calls++
+	f.gotEnv = env
+	f.gotUnset = unset
 	if f.hook != nil {
 		f.hook(ctx)
 	}
@@ -135,6 +146,50 @@ func TestRunner_RunWithEnvCannotEscapeThePin(t *testing.T) {
 	}
 	if got := last.Env["GH_TOKEN"]; got != "keep-me" {
 		t.Errorf("GH_TOKEN = %q, want the caller's other vars preserved", got)
+	}
+}
+
+func TestRunner_RunWithEnvFilteredPreservesCallerRemovalAndCannotEscapePin(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	callerUnset := []string{"CALLER_REMOVE"}
+
+	_, err := Runner(fake, "github.example.com").RunWithEnvFiltered(t.Context(),
+		map[string]string{"GH_HOST": "attacker.example", "GH_TOKEN": "leak-me", "KEEP": "value"},
+		callerUnset, "gh", "api", "user")
+	if err != nil {
+		t.Fatalf("RunWithEnvFiltered: %v", err)
+	}
+
+	call := fake.Last()
+	if got := call.Env["GH_HOST"]; got != "github.example.com" {
+		t.Errorf("GH_HOST = %q, want configured host", got)
+	}
+	if got := call.Env["KEEP"]; got != "value" {
+		t.Errorf("KEEP = %q, want caller override preserved", got)
+	}
+	assertTokenRemovals(t, call)
+	if len(call.UnsetEnv) == 0 || call.UnsetEnv[0] != "CALLER_REMOVE" {
+		t.Errorf("removals = %v, want caller removal preserved first", call.UnsetEnv)
+	}
+	if len(callerUnset) != 1 || callerUnset[0] != "CALLER_REMOVE" {
+		t.Fatalf("caller-owned removal slice mutated: %v", callerUnset)
+	}
+}
+
+func TestRunner_RunWithEnvFilteredDelegatesNonGhUntouched(t *testing.T) {
+	fake := &exec.FakeRunner{}
+
+	if _, err := Runner(fake, "github.example.com").RunWithEnvFiltered(t.Context(),
+		map[string]string{"KEEP": "value"}, []string{"REMOVE"}, "git", "status"); err != nil {
+		t.Fatalf("RunWithEnvFiltered(git): %v", err)
+	}
+
+	call := fake.Last()
+	if _, present := call.Env["GH_HOST"]; present {
+		t.Errorf("non-gh call gained GH_HOST: %v", call.Env)
+	}
+	if len(call.UnsetEnv) != 1 || call.UnsetEnv[0] != "REMOVE" {
+		t.Errorf("non-gh removals = %v, want [REMOVE]", call.UnsetEnv)
 	}
 }
 
@@ -368,6 +423,9 @@ func TestRunner_InvalidHostFailsClosedOnEveryGhPath(t *testing.T) {
 	if _, err := wrapped.RunWithEnv(t.Context(), nil, "gh", "api", "user"); !errors.Is(err, ErrUnpinnableHost) {
 		t.Fatalf("RunWithEnv err = %v, want ErrUnpinnableHost", err)
 	}
+	if _, err := wrapped.RunWithEnvFiltered(t.Context(), nil, nil, "gh", "api", "user"); !errors.Is(err, ErrUnpinnableHost) {
+		t.Fatalf("RunWithEnvFiltered err = %v, want ErrUnpinnableHost", err)
+	}
 	if _, err := wrapped.RunWithInput(t.Context(), "q", "gh", "api", "graphql"); !errors.Is(err, ErrUnpinnableHost) {
 		t.Fatalf("RunWithInput err = %v, want ErrUnpinnableHost", err)
 	}
@@ -403,12 +461,12 @@ func TestRunner_ConfiguredHostPinBeatsAmbientAndCallerEnv(t *testing.T) {
 	}
 }
 
-// TestRunner_NonDefaultHostScrubsTokens: gh sends GH_ENTERPRISE_TOKEN to
+// TestRunner_NonDefaultHostRemovesTokens: gh sends GH_ENTERPRISE_TOKEN to
 // whatever GH_HOST names and GH_TOKEN/GITHUB_TOKEN to github.com and
 // *.ghe.com, so on any non-default host all four credential variables are
-// forced empty — an ambient or caller-supplied token must never reach a gh
+// absent — an ambient or caller-supplied token must never reach a gh
 // subprocess pointed at a configured host.
-func TestRunner_NonDefaultHostScrubsTokens(t *testing.T) {
+func TestRunner_NonDefaultHostRemovesTokens(t *testing.T) {
 	fake := &exec.FakeRunner{}
 
 	_, err := Runner(fake, "github.example.com").RunWithEnv(t.Context(),
@@ -418,14 +476,9 @@ func TestRunner_NonDefaultHostScrubsTokens(t *testing.T) {
 		t.Fatalf("RunWithEnv: %v", err)
 	}
 
-	env := fake.Last().Env
-	for _, k := range tokenEnvVars {
-		got, present := env[k]
-		if !present || got != "" {
-			t.Errorf("%s = %q (present=%v), want forced empty on a non-default host", k, got, present)
-		}
-	}
-	if got := env["GH_HOST"]; got != "github.example.com" {
+	call := fake.Last()
+	assertTokenRemovals(t, call)
+	if got := call.Env["GH_HOST"]; got != "github.example.com" {
 		t.Errorf("GH_HOST = %q, want github.example.com", got)
 	}
 }
@@ -452,9 +505,9 @@ func TestRunner_DefaultHostLeavesTokensUntouched(t *testing.T) {
 	}
 }
 
-// TestRunner_ConfiguredHostRunScrubsToo: the plain Run path (no caller env)
-// gets the same scrub as RunWithEnv on a non-default host.
-func TestRunner_ConfiguredHostRunScrubsToo(t *testing.T) {
+// TestRunner_ConfiguredHostRunRemovesTokensToo: the plain Run path (no caller
+// env) gets the same removal as RunWithEnv on a non-default host.
+func TestRunner_ConfiguredHostRunRemovesTokensToo(t *testing.T) {
 	t.Setenv("GH_TOKEN", "ambient-token")
 	fake := &exec.FakeRunner{}
 
@@ -462,10 +515,21 @@ func TestRunner_ConfiguredHostRunScrubsToo(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	env := fake.Last().Env
-	for _, k := range tokenEnvVars {
-		if got, present := env[k]; !present || got != "" {
-			t.Errorf("%s = %q (present=%v), want forced empty", k, got, present)
+	assertTokenRemovals(t, fake.Last())
+}
+
+func assertTokenRemovals(t *testing.T, call exec.Call) {
+	t.Helper()
+	counts := make(map[string]int, len(call.UnsetEnv))
+	for _, key := range call.UnsetEnv {
+		counts[key]++
+	}
+	for _, key := range tokenEnvVars {
+		if value, present := call.Env[key]; present {
+			t.Errorf("%s remains in overrides with value %q, want absent", key, value)
+		}
+		if counts[key] != 1 {
+			t.Errorf("%s removal count = %d in %v, want exactly 1", key, counts[key], call.UnsetEnv)
 		}
 	}
 }

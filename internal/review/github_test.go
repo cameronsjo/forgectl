@@ -221,7 +221,7 @@ func TestParseSearchIssues_MalformedAndEmpty(t *testing.T) {
 // TestNewGitHub_GHEHostStampsItemsAndPinsQueries: the effective host is one
 // value for both the subprocess pin and the Item stamp — a row can never
 // claim a host its query did not run against — and the non-default host
-// scrubs the token env vars.
+// removes the token env vars.
 func TestNewGitHub_GHEHostStampsItemsAndPinsQueries(t *testing.T) {
 	t.Setenv("GH_HOST", "ambient.example.test")
 	t.Setenv("GH_ENTERPRISE_TOKEN", "ambient-enterprise-token")
@@ -252,9 +252,16 @@ func TestNewGitHub_GHEHostStampsItemsAndPinsQueries(t *testing.T) {
 		if got := c.Env["GH_HOST"]; got != ghe {
 			t.Errorf("call %v ran with GH_HOST=%q, want %q", c.Args, got, ghe)
 		}
-		for _, k := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} {
-			if got, present := c.Env[k]; !present || got != "" {
-				t.Errorf("call %v: %s = %q (present=%v), want forced empty", c.Args, k, got, present)
+		removals := make(map[string]int, len(c.UnsetEnv))
+		for _, key := range c.UnsetEnv {
+			removals[key]++
+		}
+		for _, key := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} {
+			if value, present := c.Env[key]; present {
+				t.Errorf("call %v: %s remains in overrides with value %q, want absent", c.Args, key, value)
+			}
+			if removals[key] != 1 {
+				t.Errorf("call %v: %s removal count = %d in %v, want exactly 1", c.Args, key, removals[key], c.UnsetEnv)
 			}
 		}
 	}

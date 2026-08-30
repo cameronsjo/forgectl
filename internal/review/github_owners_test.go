@@ -39,9 +39,9 @@ type hookRunner struct {
 	hook    func(context.Context)
 }
 
-func (r *hookRunner) record(env map[string]string, name string, args []string) {
+func (r *hookRunner) record(env map[string]string, unset []string, name string, args []string) {
 	r.mu.Lock()
-	r.calls = append(r.calls, exec.Call{Name: name, Args: args, Env: env})
+	r.calls = append(r.calls, exec.Call{Name: name, Args: args, Env: env, UnsetEnv: unset})
 	r.inFlight++
 	r.peak = max(r.peak, r.inFlight)
 	r.mu.Unlock()
@@ -53,8 +53,8 @@ func (r *hookRunner) done() {
 	r.mu.Unlock()
 }
 
-func (r *hookRunner) call(ctx context.Context, env map[string]string, name string, args []string) (string, error) {
-	r.record(env, name, args)
+func (r *hookRunner) call(ctx context.Context, env map[string]string, unset []string, name string, args []string) (string, error) {
+	r.record(env, unset, name, args)
 	defer r.done()
 	if r.hook != nil {
 		r.hook(ctx)
@@ -66,15 +66,19 @@ func (r *hookRunner) call(ctx context.Context, env map[string]string, name strin
 }
 
 func (r *hookRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
-	return r.call(ctx, nil, name, args)
+	return r.call(ctx, nil, nil, name, args)
 }
 
 func (r *hookRunner) RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (string, error) {
-	return r.call(ctx, env, name, args)
+	return r.call(ctx, env, nil, name, args)
+}
+
+func (r *hookRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
+	return r.call(ctx, env, unset, name, args)
 }
 
 func (r *hookRunner) RunWithInput(ctx context.Context, _ string, name string, args ...string) (string, error) {
-	return r.call(ctx, nil, name, args)
+	return r.call(ctx, nil, nil, name, args)
 }
 
 func (r *hookRunner) RunInteractive(context.Context, string, ...string) error { return nil }
