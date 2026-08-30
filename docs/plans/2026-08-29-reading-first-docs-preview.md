@@ -42,7 +42,7 @@ especially at the narrow widths created by a right-hand cmux split.
 - [ ] Complete live cmux visual acceptance. The content-first shell was
   captured successfully; drawer open/filter/Escape/scrim behavior remains to
   be exercised after the session was stopped.
-- [ ] Push and document the stopping point in the draft pull request.
+- [x] Push and document the stopping point in draft pull request #427.
 
 ## Acceptance
 
