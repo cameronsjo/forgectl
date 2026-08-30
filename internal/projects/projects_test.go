@@ -896,12 +896,12 @@ func TestFanOut_PreservesOrder(t *testing.T) {
 	})
 }
 
-// TestInventory_GHEHostPinsAndScrubs: WithGitHubHost threads all the way to
+// TestInventory_GHEHostPinsAndRemovesTokens: WithGitHubHost threads all the way to
 // the gh subprocess env — the pin carries the configured host and, because it
-// is non-default, the token variables are forced empty. The observable
+// is non-default, the token variables are removed. The observable
 // consequence (finding 4): gh cannot use an ambient credential; only its
 // hosts.yml credential for that host remains.
-func TestInventory_GHEHostPinsAndScrubs(t *testing.T) {
+func TestInventory_GHEHostPinsAndRemovesTokens(t *testing.T) {
 	t.Setenv("GH_HOST", "ambient.example.test")
 	t.Setenv("GH_TOKEN", "ambient-token")
 	fake := &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
@@ -929,9 +929,16 @@ func TestInventory_GHEHostPinsAndScrubs(t *testing.T) {
 	if got := ghCall.Env["GH_HOST"]; got != "github.example.com" {
 		t.Errorf("GH_HOST = %q, want github.example.com", got)
 	}
-	for _, k := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} {
-		if got, present := ghCall.Env[k]; !present || got != "" {
-			t.Errorf("%s = %q (present=%v), want forced empty on a non-default host", k, got, present)
+	removals := make(map[string]int, len(ghCall.UnsetEnv))
+	for _, key := range ghCall.UnsetEnv {
+		removals[key]++
+	}
+	for _, key := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} {
+		if value, present := ghCall.Env[key]; present {
+			t.Errorf("%s remains in overrides with value %q, want absent", key, value)
+		}
+		if removals[key] != 1 {
+			t.Errorf("%s removal count = %d in %v, want exactly 1", key, removals[key], ghCall.UnsetEnv)
 		}
 	}
 }

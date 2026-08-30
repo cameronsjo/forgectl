@@ -72,7 +72,7 @@ default-host preservation, double wrapping, and invalid-host refusal.
 - [x] Route non-default-host `gh` calls through exact token removal.
 - [x] Mutation/control-test absence, default-host preservation, and pin
       precedence across plain and explicit-environment calls.
-- [ ] Run focused tests, the full relevant suite, vet, lint, formatting, and
+- [x] Run focused tests, the full relevant suite, vet, lint, formatting, and
       repository-wide tests with environmental boundaries recorded precisely.
 - [ ] Polish the full diff, fix or disposition every finding, and record the
       release-note decision.
@@ -94,3 +94,9 @@ default-host preservation, double wrapping, and invalid-host refusal.
 - `go test ./... -run '^$' -count=1` passes with the matching Go 1.26.5
   toolchain, compiling every package and proving all implementations of the
   deliberately closed `exec.Runner` interface support the new method.
+- The first unrestricted repository-wide run executed the listener-dependent
+  suites successfully and found two stale integration assertions in review and
+  projects that still required present-but-empty tokens. Both now assert the
+  absent-override plus exact-removal contract. A fresh unrestricted
+  `go test ./... -count=1` passes every package; focused tests, `go vet`,
+  golangci-lint v2.13.1, gofmt, and `git diff --check` also pass.
