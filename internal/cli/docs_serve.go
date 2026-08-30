@@ -495,7 +495,9 @@ func runDocsServeWithRuntimeMode(
 			workspaceID := os.Getenv("CMUX_WORKSPACE_ID")
 			if workspaceID != "" {
 				if openErr := docspkg.OpenCMUXPreview(ctx, deps.Runner, workspaceID, url); openErr == nil {
-					fmt.Fprintln(out, "  preview: embedded in cmux (server remains in this terminal)")
+					if _, writeErr := fmt.Fprintln(out, "  preview: embedded in cmux (server remains in this terminal)"); writeErr != nil {
+						warnDocsServe(errOut, "warning: failed to report embedded preview: %v", writeErr)
+					}
 				} else {
 					warnDocsServe(errOut, "warning: failed to open embedded cmux preview: %v", openErr)
 					openSystemBrowser(ctx, deps, url, out, errOut)
@@ -560,7 +562,9 @@ func openSystemBrowser(ctx context.Context, deps module.Deps, url string, out, e
 		warnDocsServe(errOut, "warning: failed to open system browser: %v", openErr)
 		return
 	}
-	fmt.Fprintln(out, "  preview: system browser (server remains in this terminal)")
+	if _, writeErr := fmt.Fprintln(out, "  preview: system browser (server remains in this terminal)"); writeErr != nil {
+		warnDocsServe(errOut, "warning: failed to report system-browser preview: %v", writeErr)
+	}
 }
 
 // abortDocsServeStartup unwinds a startup that failed after Serve began.

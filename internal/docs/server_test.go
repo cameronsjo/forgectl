@@ -30,6 +30,7 @@ package docs
 //              filesystem existence
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -115,7 +116,7 @@ func TestServer_StaticAssets_Served(t *testing.T) {
 func TestServer_ShellIncludesPersistedReadingControls(t *testing.T) {
 	idx, _ := testIndex(t)
 	rec := httptest.NewRecorder()
-	testHandler(idx).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	testHandler(idx).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
 
 	body := rec.Body.String()
 	for _, want := range []string{

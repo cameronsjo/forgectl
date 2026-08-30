@@ -148,7 +148,9 @@ func handleMedia(store *Store) http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
-		source, err := os.ReadFile(docPath)
+		// docPath came from Index.Resolve: canonical root containment, extension,
+		// and exact index membership have all been checked.
+		source, err := os.ReadFile(docPath) //nolint:gosec // resolved indexed document path, not a raw request path
 		if err != nil {
 			http.NotFound(w, r)
 			return
@@ -175,12 +177,18 @@ func handleMedia(store *Store) http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
-		file, err := os.Open(mediaPath)
+		// mediaPath came from ResolveMedia after reference authorization and the
+		// same canonical containment chain used for Markdown files.
+		file, err := os.Open(mediaPath) //nolint:gosec // resolved contained media path, not a raw request path
 		if err != nil {
 			http.NotFound(w, r)
 			return
 		}
-		defer file.Close()
+		defer func() {
+			if closeErr := file.Close(); closeErr != nil {
+				slog.Debug("docs: media file could not be closed.", "path", mediaPath, "error", closeErr)
+			}
+		}()
 		info, err := file.Stat()
 		if err != nil || !info.Mode().IsRegular() {
 			http.NotFound(w, r)

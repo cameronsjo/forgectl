@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -50,7 +51,7 @@ func TestServer_RelativeMarkdownImageIsServed(t *testing.T) {
 	h := testHandler(idx)
 
 	docRec := httptest.NewRecorder()
-	h.ServeHTTP(docRec, httptest.NewRequest(http.MethodGet, "/doc/"+label+"/guide/readme.md", nil))
+	h.ServeHTTP(docRec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/doc/"+label+"/guide/readme.md", nil))
 	if docRec.Code != http.StatusOK {
 		t.Fatalf("doc status = %d", docRec.Code)
 	}
@@ -61,7 +62,7 @@ func TestServer_RelativeMarkdownImageIsServed(t *testing.T) {
 	}
 
 	mediaRec := httptest.NewRecorder()
-	h.ServeHTTP(mediaRec, httptest.NewRequest(http.MethodGet, mediaURL, nil))
+	h.ServeHTTP(mediaRec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, mediaURL, nil))
 	if mediaRec.Code != http.StatusOK {
 		t.Fatalf("media status = %d, body: %s", mediaRec.Code, mediaRec.Body.String())
 	}
@@ -84,7 +85,7 @@ func TestServer_MediaRequiresDocumentReference(t *testing.T) {
 	label := idx.Roots()[0].Label
 	query := url.Values{"doc": {"readme.md"}, "path": {"secret.png"}}.Encode()
 	rec := httptest.NewRecorder()
-	testHandler(idx).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/media/"+label+"?"+query, nil))
+	testHandler(idx).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/media/"+label+"?"+query, nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
@@ -102,7 +103,7 @@ func TestServer_SingleFileRootMayServeItsReferencedSiblingImage(t *testing.T) {
 	label := idx.Roots()[0].Label
 	query := url.Values{"doc": {"readme.md"}, "path": {"sample.png"}}.Encode()
 	rec := httptest.NewRecorder()
-	testHandler(idx).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/media/"+label+"?"+query, nil))
+	testHandler(idx).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/media/"+label+"?"+query, nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
 	}
@@ -119,7 +120,7 @@ func TestServer_MediaUnderExcludedDirectoryIsRejected(t *testing.T) {
 	label := idx.Roots()[0].Label
 	query := url.Values{"doc": {"readme.md"}, "path": {".private/image.png"}}.Encode()
 	rec := httptest.NewRecorder()
-	testHandler(idx).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/media/"+label+"?"+query, nil))
+	testHandler(idx).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/media/"+label+"?"+query, nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
