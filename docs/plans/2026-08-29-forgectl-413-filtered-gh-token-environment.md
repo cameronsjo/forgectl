@@ -76,7 +76,7 @@ default-host preservation, double wrapping, and invalid-host refusal.
       repository-wide tests with environmental boundaries recorded precisely.
 - [x] Polish the full diff, fix or disposition every finding, and record the
       release-note decision.
-- [ ] Push a PR that references #413 without closing the umbrella issue, then
+- [x] Push a PR that references #413 without closing the umbrella issue, then
       monitor CI and review to terminal state before merge.
 
 ## Execution evidence
@@ -110,3 +110,10 @@ default-host preservation, double wrapping, and invalid-host refusal.
 - This is consumer-visible security hardening, so the PR body will carry a
   Release Please commit override explaining the removal behavior. Generated
   `CHANGELOG.md` remains untouched.
+- PR #428 matched the ten-file scope at head `af2209c`. Build-test, lint,
+  macos-test, and helper passed in GitHub run `33282699989`; CodeRabbit reviewed
+  the same head and generated no actionable comments, rating merge risk
+  minimal. Its generic 65% docstring-coverage warning is declined: the
+  uncovered functions are test-only interface adapter methods whose names and
+  direct delegation bodies already state the behavior, while the production
+  execution contract and helper are documented.
