@@ -38,9 +38,11 @@ especially at the narrow widths created by a right-hand cmux split.
 - [x] Reduce the header and make the current document the primary label.
 - [x] Tune article spacing and responsive behavior for a half-screen cmux pane.
 - [x] Update tests and user-facing documentation.
-- [ ] Run fresh formatting, JavaScript syntax, lint, vet, full tests, and live
-  cmux visual acceptance.
-- [ ] Push and monitor the updated pull request.
+- [x] Run fresh formatting, JavaScript syntax, lint, vet, and full tests.
+- [ ] Complete live cmux visual acceptance. The content-first shell was
+  captured successfully; drawer open/filter/Escape/scrim behavior remains to
+  be exercised after the session was stopped.
+- [ ] Push and document the stopping point in the draft pull request.
 
 ## Acceptance
 
@@ -52,3 +54,15 @@ especially at the narrow widths created by a right-hand cmux split.
   controls available without visually competing with the article.
 - Existing document rendering, local images, Mermaid, appearance persistence,
   and server security tests remain green.
+
+## Stopping point
+
+The reading-first shell is implemented and the automated verification is
+green. Live inspection confirmed that the article now starts directly beneath
+the compact toolbar with no stacked navigator. The remaining acceptance step
+is to exercise the navigator interactions in cmux and decide whether this
+visual direction is sufficiently native-feeling before taking the PR out of
+draft.
+
+Next action: rebuild the branch, run `forgectl docs .` inside cmux, then verify
+the navigator toggle, filter focus, Escape, scrim dismissal, and focus return.
