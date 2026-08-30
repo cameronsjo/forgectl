@@ -49,7 +49,7 @@ ordinary path, and address the reading gaps exposed by the live cmux proof.
   stealing focus.
 - [x] Persist and commit the approved pivot before implementation.
 - [x] Replace the bare docs/TUI entry point with embedded-cmux preview startup.
-- [ ] Add persisted reading typography and measure controls.
+- [x] Add persisted reading typography and measure controls.
 - [ ] Serve contained local Markdown images through the loopback reader.
 - [x] Remove terminal-reader code and dependencies.
 - [ ] Update help and README; leave generated changelog prose to Release Please.

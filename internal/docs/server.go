@@ -191,6 +191,8 @@ func NewHandler(store *Store, events *Broker) http.Handler {
 	mux.HandleFunc("GET /assets/svg-panzoom.js", serveStaticJS(panZoomJS))
 	mux.HandleFunc("GET /assets/artificer-tree.js", serveStaticJS(artificerTreeJS))
 	mux.HandleFunc("GET /assets/sidenav-filter.js", serveStaticJS(sidenavFilterJS))
+	mux.HandleFunc("GET /assets/reader.css", serveStaticCSS(readerCSS))
+	mux.HandleFunc("GET /assets/reader-settings.js", serveStaticJS(readerSettingsJS))
 	mux.HandleFunc("GET /assets/chroma.css", serveStaticCSS(ChromaCSS()))
 	mux.HandleFunc("GET /assets/diagram.css", serveStaticCSS(diagramCSS))
 

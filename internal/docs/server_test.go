@@ -98,7 +98,7 @@ func TestServer_StaticAssets_Served(t *testing.T) {
 	idx, _ := testIndex(t)
 	h := testHandler(idx)
 
-	for _, path := range []string{"/assets/artificer.css", "/assets/artificer-theme.js", "/assets/reload.js", "/assets/chroma.css", "/assets/sidenav-filter.js"} {
+	for _, path := range []string{"/assets/artificer.css", "/assets/artificer-theme.js", "/assets/reload.js", "/assets/chroma.css", "/assets/sidenav-filter.js", "/assets/reader.css", "/assets/reader-settings.js"} {
 		t.Run(path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
@@ -109,6 +109,27 @@ func TestServer_StaticAssets_Served(t *testing.T) {
 				t.Error("empty response body")
 			}
 		})
+	}
+}
+
+func TestServer_ShellIncludesPersistedReadingControls(t *testing.T) {
+	idx, _ := testIndex(t)
+	rec := httptest.NewRecorder()
+	testHandler(idx).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		`data-reader-setting="bodyFont"`,
+		`data-reader-setting="headingFont"`,
+		`data-reader-setting="codeFont"`,
+		`data-reader-setting="fontSize"`,
+		`data-reader-setting="lineHeight"`,
+		`data-reader-setting="measure"`,
+		`src="/assets/reader-settings.js"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("shell missing %q", want)
+		}
 	}
 }
 

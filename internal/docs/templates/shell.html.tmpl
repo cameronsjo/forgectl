@@ -7,10 +7,12 @@
 <link rel="stylesheet" href="/assets/artificer.css"/>
 <link rel="stylesheet" href="/assets/chroma.css"/>
 <link rel="stylesheet" href="/assets/diagram.css"/>
+<link rel="stylesheet" href="/assets/reader.css"/>
 <script src="/assets/artificer-theme.js" defer></script>
 <script src="/assets/reload.js" defer></script>
 <script src="/assets/artificer-tree.js" defer></script>
 <script src="/assets/sidenav-filter.js" defer></script>
+<script src="/assets/reader-settings.js" defer></script>
 <!-- mermaid must be parsed before its init script runs; both are deferred, and
      deferred scripts execute in document order, so this ordering is the
      dependency declaration. -->
@@ -24,6 +26,61 @@
     <a class="appbar__brand wordmark" href="/">forgectl docs</a>
     <div class="appbar__spacer"></div>
     <div class="appbar__actions">
+      <details class="reader-settings">
+        <summary class="btn btn--ghost btn--sm" aria-label="Reading settings">Aa</summary>
+        <div class="reader-settings__panel popover" aria-label="Reading settings">
+          <div class="field">
+            <label for="reader-body-font">Body</label>
+            <select class="select" id="reader-body-font" data-reader-setting="bodyFont">
+              <option value="literary">Literary serif</option>
+              <option value="humanist">Humanist sans</option>
+              <option value="system">System sans</option>
+              <option value="mono">Monospace</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="reader-heading-font">Headings</label>
+            <select class="select" id="reader-heading-font" data-reader-setting="headingFont">
+              <option value="humanist">Humanist sans</option>
+              <option value="literary">Literary serif</option>
+              <option value="system">System sans</option>
+              <option value="mono">Monospace</option>
+            </select>
+          </div>
+          <div class="field field--wide">
+            <label for="reader-code-font">Code</label>
+            <select class="select" id="reader-code-font" data-reader-setting="codeFont">
+              <option value="jetbrains">JetBrains Mono</option>
+              <option value="berkeley">Berkeley Mono</option>
+              <option value="system">System mono</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="reader-font-size">Text size</label>
+            <div class="reader-settings__range-line">
+              <input id="reader-font-size" type="range" min="14" max="24" step="1" data-reader-setting="fontSize"/>
+              <output class="reader-settings__value" data-reader-value="fontSize">18px</output>
+            </div>
+          </div>
+          <div class="field">
+            <label for="reader-line-height">Line height</label>
+            <div class="reader-settings__range-line">
+              <input id="reader-line-height" type="range" min="1.35" max="2" step="0.05" data-reader-setting="lineHeight"/>
+              <output class="reader-settings__value" data-reader-value="lineHeight">1.72</output>
+            </div>
+          </div>
+          <div class="field field--wide">
+            <label for="reader-measure">Line length</label>
+            <div class="reader-settings__range-line">
+              <input id="reader-measure" type="range" min="48" max="96" step="4" data-reader-setting="measure"/>
+              <output class="reader-settings__value" data-reader-value="measure">72ch</output>
+            </div>
+          </div>
+          <div class="reader-settings__footer">
+            <button class="btn btn--ghost btn--sm" type="button" data-reader-reset>Reset</button>
+          </div>
+        </div>
+      </details>
       <button class="theme-toggle" data-theme-toggle aria-label="Toggle theme"></button>
     </div>
   </header>
@@ -42,13 +99,15 @@
         {{end}}
       </nav>
     </aside>
-    <main class="surface-document container container--lg" style="padding:var(--s-xl)">
+    <main class="surface-document docs-reader">
+      <article class="reader-content">
       {{if .Content}}{{.Content}}{{else}}
       <div class="empty-state">
         <h2>No doc selected</h2>
         <p>Choose a document from the sidebar to start reading.</p>
       </div>
       {{end}}
+      </article>
     </main>
   </div>
 </div>

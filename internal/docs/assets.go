@@ -45,6 +45,17 @@ var reloadJS []byte
 //go:embed assets/sidenav-filter.js
 var sidenavFilterJS []byte
 
+// readerCSS and readerSettingsJS are the docs reader's deliberately local
+// presentation layer. Artificer provides the design tokens and primitives;
+// these files provide the reading measure and browser-persisted typography
+// controls that are specific to this application.
+//
+//go:embed assets/reader.css
+var readerCSS []byte
+
+//go:embed assets/reader-settings.js
+var readerSettingsJS []byte
+
 // mermaidJS is vendored mermaid (version, license, and sha256 recorded in
 // assets/provenance-mermaid.json). Embedded rather than loaded from a CDN: the
 // reader must render a diagram with no network call, because opening a local
