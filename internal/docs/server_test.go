@@ -147,7 +147,8 @@ func TestServer_ShellUsesReadingFirstNavigation(t *testing.T) {
 		`data-docs-nav aria-hidden="true"`,
 		`data-docs-nav-scrim`,
 		`src="/assets/reader-shell.js"`,
-		`class="reader-toolbar__title" href="/">Welcome</a>`,
+		`class="reader-toolbar__title">Welcome</span>`,
+		`class="theme-toggle theme-toggle--inline"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("shell missing %q", want)

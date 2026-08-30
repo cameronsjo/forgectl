@@ -65,10 +65,6 @@
   white-space: nowrap;
 }
 
-.reader-toolbar__title:hover {
-  color: var(--fg);
-}
-
 .reader-toolbar__actions {
   display: flex;
   align-items: center;
@@ -80,29 +76,18 @@
 }
 
 .reader-nav {
-  position: fixed;
   z-index: 35;
   top: var(--reader-toolbar-height);
-  bottom: 0;
-  left: 0;
   display: flex;
   width: min(320px, calc(100vw - 40px));
   flex-direction: column;
+  overflow: hidden;
   border-right: 1px solid var(--border);
   background: var(--bg-raised);
   box-shadow: 12px 0 36px color-mix(in srgb, #000 32%, transparent);
-  transform: translateX(calc(-100% - 16px));
-  transition: transform 160ms ease;
-  visibility: hidden;
-}
-
-[data-reader-shell][data-nav-open] .reader-nav {
-  transform: translateX(0);
-  visibility: visible;
 }
 
 .reader-nav__scrim {
-  position: fixed;
   z-index: 30;
   inset: var(--reader-toolbar-height) 0 0;
   width: auto;
@@ -111,16 +96,6 @@
   border: 0;
   background: color-mix(in srgb, #000 42%, transparent);
   cursor: default;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 160ms ease;
-  visibility: hidden;
-}
-
-[data-reader-shell][data-nav-open] .reader-nav__scrim {
-  opacity: 1;
-  pointer-events: auto;
-  visibility: visible;
 }
 
 .reader-nav__header {

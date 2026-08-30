@@ -27,7 +27,7 @@
     <button class="btn btn--ghost btn--sm reader-toolbar__nav-toggle" type="button" data-docs-nav-toggle aria-controls="docs-navigation" aria-expanded="false" aria-label="Open document navigator">
       <span class="reader-toolbar__nav-icon" aria-hidden="true"><i></i><i></i><i></i></span>
     </button>
-    <a class="reader-toolbar__title" href="/">{{if .DocTitle}}{{.DocTitle}}{{else}}forgectl docs{{end}}</a>
+    <span class="reader-toolbar__title">{{if .DocTitle}}{{.DocTitle}}{{else}}forgectl docs{{end}}</span>
     <div class="reader-toolbar__actions">
       <details class="reader-settings">
         <summary class="btn btn--ghost btn--sm" aria-label="Reading settings">Aa</summary>
@@ -84,12 +84,12 @@
           </div>
         </div>
       </details>
-      <button class="theme-toggle" data-theme-toggle aria-label="Toggle theme"></button>
+      <button class="theme-toggle theme-toggle--inline" data-theme-toggle aria-label="Toggle theme"></button>
     </div>
   </header>
   <div class="reader-shell__body">
-    <button class="reader-nav__scrim" type="button" data-docs-nav-scrim tabindex="-1" aria-label="Close document navigator"></button>
-    <aside class="reader-nav" id="docs-navigation" data-docs-nav aria-hidden="true" aria-label="Document navigator">
+    <button class="nav-scrim reader-nav__scrim" type="button" data-docs-nav-scrim tabindex="-1" aria-label="Close document navigator"></button>
+    <aside class="nav-drawer reader-nav" id="docs-navigation" data-docs-nav aria-hidden="true" aria-label="Document navigator">
       <div class="reader-nav__header">
         <span>Documents</span>
         <button class="btn btn--ghost btn--sm reader-nav__close" type="button" data-docs-nav-close aria-label="Close document navigator">×</button>
@@ -112,7 +112,7 @@
       {{if .Content}}{{.Content}}{{else}}
       <div class="empty-state">
         <h2>No doc selected</h2>
-        <p>Choose a document from the sidebar to start reading.</p>
+        <p>Choose a document from the navigator to start reading.</p>
       </div>
       {{end}}
       </article>
