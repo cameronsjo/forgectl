@@ -99,7 +99,7 @@ func TestServer_StaticAssets_Served(t *testing.T) {
 	idx, _ := testIndex(t)
 	h := testHandler(idx)
 
-	for _, path := range []string{"/assets/artificer.css", "/assets/artificer-theme.js", "/assets/reload.js", "/assets/chroma.css", "/assets/sidenav-filter.js", "/assets/reader.css", "/assets/reader-settings.js"} {
+	for _, path := range []string{"/assets/artificer.css", "/assets/artificer-theme.js", "/assets/reload.js", "/assets/chroma.css", "/assets/sidenav-filter.js", "/assets/reader.css", "/assets/reader-shell.js", "/assets/reader-settings.js"} {
 		t.Run(path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
@@ -131,6 +131,30 @@ func TestServer_ShellIncludesPersistedReadingControls(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("shell missing %q", want)
 		}
+	}
+}
+
+func TestServer_ShellUsesReadingFirstNavigation(t *testing.T) {
+	idx, label := testIndex(t)
+	rec := httptest.NewRecorder()
+	testHandler(idx).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/doc/"+label+"/welcome.md", nil))
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		`data-docs-nav-toggle`,
+		`aria-controls="docs-navigation"`,
+		`aria-expanded="false"`,
+		`data-docs-nav aria-hidden="true"`,
+		`data-docs-nav-scrim`,
+		`src="/assets/reader-shell.js"`,
+		`class="reader-toolbar__title" href="/">Welcome</a>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("shell missing %q", want)
+		}
+	}
+	if strings.Contains(body, `class="split-pane"`) {
+		t.Error("shell still uses a persistent or stacking split-pane navigator")
 	}
 }
 

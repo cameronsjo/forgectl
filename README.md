@@ -309,7 +309,9 @@ browser instead. Use `docs serve` when another process should own presentation,
 or when you want remote or phone access through the existing address/token
 options.
 
-The reader renders sanitized Markdown, syntax highlighting, tables, Mermaid,
+The reader opens directly on the document, with a compact preview toolbar and a
+document navigator that stays out of the reading path until opened. It renders
+sanitized Markdown, syntax highlighting, tables, Mermaid,
 inline SVG, and relative local PNG, JPEG, GIF, WebP, AVIF, and SVG images. The
 `Aa` control independently changes body, heading, and code fonts, text size,
 line height, and line length; those choices persist in that browser. Relative

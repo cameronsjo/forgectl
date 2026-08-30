@@ -45,13 +45,16 @@ var reloadJS []byte
 //go:embed assets/sidenav-filter.js
 var sidenavFilterJS []byte
 
-// readerCSS and readerSettingsJS are the docs reader's deliberately local
+// readerCSS, readerShellJS, and readerSettingsJS are the docs reader's deliberately local
 // presentation layer. Artificer provides the design tokens and primitives;
 // these files provide the reading measure and browser-persisted typography
 // controls that are specific to this application.
 //
 //go:embed assets/reader.css
 var readerCSS []byte
+
+//go:embed assets/reader-shell.js
+var readerShellJS []byte
 
 //go:embed assets/reader-settings.js
 var readerSettingsJS []byte
@@ -85,7 +88,7 @@ var diagramCSS []byte
 var shellTemplateSrc string
 
 // shellTemplate is the one page template the server renders: the
-// page-shell chrome (appbar, sidenav, filter box) plus a content slot for
+// compact preview chrome (toolbar, navigation drawer, filter box) plus a content slot for
 // either a rendered doc or the empty-state. Parsed once at package init —
 // a malformed embedded template is a startup-time panic, not a per-request
 // failure.

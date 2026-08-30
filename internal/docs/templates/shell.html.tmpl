@@ -12,6 +12,7 @@
 <script src="/assets/reload.js" defer></script>
 <script src="/assets/artificer-tree.js" defer></script>
 <script src="/assets/sidenav-filter.js" defer></script>
+<script src="/assets/reader-shell.js" defer></script>
 <script src="/assets/reader-settings.js" defer></script>
 <!-- mermaid must be parsed before its init script runs; both are deferred, and
      deferred scripts execute in document order, so this ordering is the
@@ -21,11 +22,13 @@
 <script src="/assets/svg-panzoom.js" defer></script>
 </head>
 <body class="surface-tool">
-<div class="page-shell">
-  <header class="appbar">
-    <a class="appbar__brand wordmark" href="/">forgectl docs</a>
-    <div class="appbar__spacer"></div>
-    <div class="appbar__actions">
+<div class="docs-shell" data-reader-shell>
+  <header class="reader-toolbar">
+    <button class="btn btn--ghost btn--sm reader-toolbar__nav-toggle" type="button" data-docs-nav-toggle aria-controls="docs-navigation" aria-expanded="false" aria-label="Open document navigator">
+      <span class="reader-toolbar__nav-icon" aria-hidden="true"><i></i><i></i><i></i></span>
+    </button>
+    <a class="reader-toolbar__title" href="/">{{if .DocTitle}}{{.DocTitle}}{{else}}forgectl docs{{end}}</a>
+    <div class="reader-toolbar__actions">
       <details class="reader-settings">
         <summary class="btn btn--ghost btn--sm" aria-label="Reading settings">Aa</summary>
         <div class="reader-settings__panel popover" aria-label="Reading settings">
@@ -84,13 +87,18 @@
       <button class="theme-toggle" data-theme-toggle aria-label="Toggle theme"></button>
     </div>
   </header>
-  <div class="split-pane" style="gap:0;min-height:calc(100vh - 52px)">
-    <aside style="border-right:1px solid var(--border);display:flex;flex-direction:column">
-      <div class="field" style="padding:var(--s-sm)">
+  <div class="reader-shell__body">
+    <button class="reader-nav__scrim" type="button" data-docs-nav-scrim tabindex="-1" aria-label="Close document navigator"></button>
+    <aside class="reader-nav" id="docs-navigation" data-docs-nav aria-hidden="true" aria-label="Document navigator">
+      <div class="reader-nav__header">
+        <span>Documents</span>
+        <button class="btn btn--ghost btn--sm reader-nav__close" type="button" data-docs-nav-close aria-label="Close document navigator">×</button>
+      </div>
+      <div class="field reader-nav__filter">
         <label class="field__label" for="doc-filter">Filter</label>
         <input class="input" id="doc-filter" type="search" placeholder="Filter docs…" autocomplete="off"/>
       </div>
-      <nav class="sidenav" aria-label="Indexed docs" style="border-radius:0;border:0;flex:1;overflow-y:auto">
+      <nav class="sidenav reader-nav__list" aria-label="Indexed docs">
         {{range .Groups}}
         <div class="sidenav__group">{{.Root}}</div>
         {{range .Docs}}

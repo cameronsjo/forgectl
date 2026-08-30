@@ -34,10 +34,10 @@ especially at the narrow widths created by a right-hand cmux split.
 ## Checklist
 
 - [x] Persist and commit the approved reading-first refinement.
-- [ ] Replace the stacking sidebar with an accessible off-canvas drawer.
-- [ ] Reduce the header and make the current document the primary label.
-- [ ] Tune article spacing and responsive behavior for a half-screen cmux pane.
-- [ ] Update tests and user-facing documentation.
+- [x] Replace the stacking sidebar with an accessible off-canvas drawer.
+- [x] Reduce the header and make the current document the primary label.
+- [x] Tune article spacing and responsive behavior for a half-screen cmux pane.
+- [x] Update tests and user-facing documentation.
 - [ ] Run fresh formatting, JavaScript syntax, lint, vet, full tests, and live
   cmux visual acceptance.
 - [ ] Push and monitor the updated pull request.
