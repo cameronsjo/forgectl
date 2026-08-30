@@ -54,7 +54,7 @@ ordinary path, and address the reading gaps exposed by the live cmux proof.
 - [x] Remove terminal-reader code and dependencies.
 - [x] Update help and README; leave generated changelog prose to Release Please.
 - [x] Run fresh build, vet, tests, formatting, lint, and live cmux acceptance.
-- [ ] Update and push the existing pull request, then monitor its checks.
+- [x] Update and push the existing pull request, then monitor its checks.
 
 ## Acceptance
 
