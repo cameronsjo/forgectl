@@ -10,6 +10,14 @@ package exec
 // FakeRunner.RunWithInput (Classification: test double)
 //   [x] Happy: the call is recorded on Calls with Input set to the piped stdin
 //   [x] Happy: RunFunc still produces the canned (name, args)-keyed output
+//
+// OSRunner.RunWithEnvFiltered (Classification: subprocess environment seam)
+//   [x] Invariant: an inherited variable is absent, not merely empty
+//   [x] Control: the old empty override remains observably present
+//   [x] Boundary: an explicit override wins over removal of the same name
+//
+// FakeRunner.RunWithEnvFiltered (Classification: test double)
+//   [x] Happy: both overrides and removals are observable on the recorded Call
 
 import (
 	"bytes"
@@ -136,6 +144,70 @@ func TestOSRunner_RunWithEnv_OverridesAmbientValue(t *testing.T) {
 	}
 	if ctrl != "ambient" {
 		t.Errorf("control output = %q, want %q", ctrl, "ambient")
+	}
+}
+
+// TestOSRunner_RunWithEnvFiltered_RemovesRatherThanEmpties is the production
+// process-boundary proof for #413. The shell's ${name+x} expansion distinguishes
+// an absent variable from one whose value is merely empty, so this assertion
+// cannot pass through the old empty-string scrub.
+func TestOSRunner_RunWithEnvFiltered_RemovesRatherThanEmpties(t *testing.T) {
+	const (
+		remove = "FORGECTL_TEST_FILTERED_REMOVE"
+		keep   = "FORGECTL_TEST_FILTERED_KEEP"
+	)
+	t.Setenv(remove, "ambient-secret")
+	t.Setenv(keep, "ambient-value")
+
+	out, err := (OSRunner{}).RunWithEnvFiltered(t.Context(),
+		map[string]string{keep: "overridden"}, []string{remove},
+		"sh", "-c", `if [ "${FORGECTL_TEST_FILTERED_REMOVE+x}" = x ]; then printf present; else printf absent; fi; printf ':%s' "$FORGECTL_TEST_FILTERED_KEEP"`)
+	if err != nil {
+		t.Fatalf("RunWithEnvFiltered: %v", err)
+	}
+	if out != "absent:overridden" {
+		t.Fatalf("filtered child environment = %q, want %q", out, "absent:overridden")
+	}
+
+	control, err := (OSRunner{}).RunWithEnv(t.Context(), map[string]string{remove: ""},
+		"sh", "-c", `if [ "${FORGECTL_TEST_FILTERED_REMOVE+x}" = x ]; then printf present; else printf absent; fi`)
+	if err != nil {
+		t.Fatalf("RunWithEnv control: %v", err)
+	}
+	if control != "present" {
+		t.Fatalf("empty-string control = %q, want present — verifier did not distinguish empty from absent", control)
+	}
+}
+
+func TestOSRunner_RunWithEnvFiltered_OverrideWinsSameNameRemoval(t *testing.T) {
+	const name = "FORGECTL_TEST_FILTERED_REPLACE"
+	t.Setenv(name, "ambient")
+
+	out, err := (OSRunner{}).RunWithEnvFiltered(t.Context(),
+		map[string]string{name: "replacement"}, []string{name},
+		"sh", "-c", `printf '%s' "$FORGECTL_TEST_FILTERED_REPLACE"`)
+	if err != nil {
+		t.Fatalf("RunWithEnvFiltered: %v", err)
+	}
+	if out != "replacement" {
+		t.Fatalf("filtered override = %q, want replacement", out)
+	}
+}
+
+func TestFakeRunner_RunWithEnvFiltered_RecordsOverridesAndRemovals(t *testing.T) {
+	fake := &FakeRunner{}
+
+	if _, err := fake.RunWithEnvFiltered(t.Context(),
+		map[string]string{"KEEP": "value"}, []string{"REMOVE"}, "gh", "api", "user"); err != nil {
+		t.Fatalf("RunWithEnvFiltered: %v", err)
+	}
+
+	call := fake.Last()
+	if got := call.Env["KEEP"]; got != "value" {
+		t.Errorf("call.Env[KEEP] = %q, want value", got)
+	}
+	if len(call.UnsetEnv) != 1 || call.UnsetEnv[0] != "REMOVE" {
+		t.Errorf("call.UnsetEnv = %v, want [REMOVE]", call.UnsetEnv)
 	}
 }
 

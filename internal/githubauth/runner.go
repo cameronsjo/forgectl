@@ -87,9 +87,10 @@ func ResolveHost(configured string) (string, error) {
 // GH_HOST names, and GH_TOKEN / GITHUB_TOKEN to github.com and *.ghe.com —
 // so once the pin's value is config-steerable, an ambient token plus one
 // hostile config line becomes a credential-redirect primitive. On any
-// non-default host the pinned runner scrubs all four (set empty, which gh
-// treats as unset), forcing gh to the hosts.yml credential stored for that
-// host by `gh auth login --hostname <host>`.
+// non-default host the pinned runner removes all four from the child process
+// environment, forcing gh to the hosts.yml credential stored for that host by
+// `gh auth login --hostname <host>`. This remains the bound on Linux, where
+// XDG_CONFIG_HOME can steer which config file supplied the pinned host.
 var tokenEnvVars = [4]string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
 
 // pinnedRunner wraps an exec.Runner so every `gh` invocation carries
@@ -102,7 +103,7 @@ var tokenEnvVars = [4]string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", 
 // written against RunWithInput or RunInteractive — or against any method added
 // to exec.Runner later — would reach the subprocess unpinned, with no compile
 // error and no test failure. With a named field the compiler refuses the type
-// until all four methods are written out, and each one has to state what it
+// until all five methods are written out, and each one has to state what it
 // does with `gh`.
 type pinnedRunner struct {
 	base exec.Runner
@@ -139,9 +140,10 @@ func Runner(run exec.Runner, host string) exec.Runner {
 	return pinnedRunner{base: run, host: resolved}
 }
 
-// pinEnv copies env (nil allowed) and applies the pin: on a non-default host
-// the four token variables are scrubbed first, and GH_HOST is set LAST so it
-// beats any caller-supplied value.
+// pinEnv copies env (nil allowed) and applies the pin. On a non-default host,
+// caller-supplied token overrides are deleted so they cannot defeat the
+// filtered-environment removal; GH_HOST is set last so it beats any
+// caller-supplied value.
 func (p pinnedRunner) pinEnv(env map[string]string) map[string]string {
 	pinned := make(map[string]string, len(env)+len(tokenEnvVars)+1)
 	for k, v := range env {
@@ -149,16 +151,37 @@ func (p pinnedRunner) pinEnv(env map[string]string) map[string]string {
 	}
 	if p.host != DefaultHost {
 		for _, k := range tokenEnvVars {
-			pinned[k] = ""
+			delete(pinned, k)
 		}
 	}
 	pinned["GH_HOST"] = p.host
 	return pinned
 }
 
-// Run pins `gh` to the configured host via RunWithEnv (which merges over the
-// process environment, so the supplied GH_HOST beats an ambient one) and
-// normalizes context failures. Anything that is not `gh` delegates unchanged.
+// pinUnset copies unset and, on a non-default host, adds every token variable
+// exactly once. Copying keeps the wrapper from mutating caller-owned slices.
+func (p pinnedRunner) pinUnset(unset []string) []string {
+	pinned := append([]string(nil), unset...)
+	if p.host == DefaultHost {
+		return pinned
+	}
+	seen := make(map[string]struct{}, len(pinned)+len(tokenEnvVars))
+	for _, key := range pinned {
+		seen[key] = struct{}{}
+	}
+	for _, key := range tokenEnvVars {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		pinned = append(pinned, key)
+		seen[key] = struct{}{}
+	}
+	return pinned
+}
+
+// Run pins `gh` to the configured host through the filtered-environment path
+// and normalizes context failures. Anything that is not `gh` delegates
+// unchanged.
 func (p pinnedRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
 	if name != "gh" {
 		return p.base.Run(ctx, name, args...)
@@ -166,7 +189,7 @@ func (p pinnedRunner) Run(ctx context.Context, name string, args ...string) (str
 	if p.host == "" {
 		return "", ErrUnpinnableHost
 	}
-	out, err := p.base.RunWithEnv(ctx, p.pinEnv(nil), name, args...)
+	out, err := p.base.RunWithEnvFiltered(ctx, p.pinEnv(nil), p.pinUnset(nil), name, args...)
 	if err != nil {
 		return out, classifyContextFailure(ctx, err)
 	}
@@ -177,7 +200,7 @@ func (p pinnedRunner) Run(ctx context.Context, name string, args ...string) (str
 // this override the wrapper would be asymmetric: a caller reaching for
 // RunWithEnv — the very method used to control a child's environment — would
 // silently escape the host pin, and could even supply its own GH_HOST or
-// token variables. The pin (and, on a non-default host, the token scrub) is
+// token variables. The pin (and, on a non-default host, the token removal) is
 // applied last so it beats anything in env.
 func (p pinnedRunner) RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (string, error) {
 	if name != "gh" {
@@ -186,7 +209,24 @@ func (p pinnedRunner) RunWithEnv(ctx context.Context, env map[string]string, nam
 	if p.host == "" {
 		return "", ErrUnpinnableHost
 	}
-	out, err := p.base.RunWithEnv(ctx, p.pinEnv(env), name, args...)
+	out, err := p.base.RunWithEnvFiltered(ctx, p.pinEnv(env), p.pinUnset(nil), name, args...)
+	if err != nil {
+		return out, classifyContextFailure(ctx, err)
+	}
+	return out, nil
+}
+
+// RunWithEnvFiltered preserves caller-requested removals while applying the
+// same total host pin and non-default token removal. Non-gh commands delegate
+// untouched; the wrapper's policy is specific to GitHub identity.
+func (p pinnedRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
+	if name != "gh" {
+		return p.base.RunWithEnvFiltered(ctx, env, unset, name, args...)
+	}
+	if p.host == "" {
+		return "", ErrUnpinnableHost
+	}
+	out, err := p.base.RunWithEnvFiltered(ctx, p.pinEnv(env), p.pinUnset(unset), name, args...)
 	if err != nil {
 		return out, classifyContextFailure(ctx, err)
 	}

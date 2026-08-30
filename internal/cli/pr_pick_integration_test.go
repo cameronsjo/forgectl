@@ -150,6 +150,14 @@ func (r *tmuxRoutingRunner) RunWithEnv(ctx context.Context, env map[string]strin
 	return r.fake.RunWithEnv(ctx, env, name, args...)
 }
 
+func (r *tmuxRoutingRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
+	r.record(name, args)
+	if r.isTmux(name) {
+		return r.real.RunWithEnvFiltered(ctx, env, unset, name, args...)
+	}
+	return r.fake.RunWithEnvFiltered(ctx, env, unset, name, args...)
+}
+
 // tmuxVerbs is the ordered list of tmux verbs the run issued.
 func (r *tmuxRoutingRunner) tmuxVerbs() []string {
 	var verbs []string
