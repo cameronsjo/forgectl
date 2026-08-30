@@ -1,5 +1,10 @@
 # Native docs explorer
 
+> Superseded by [Embedded docs preview](2026-08-29-embedded-docs-preview.md)
+> after live reading acceptance showed the rasterized terminal surface was not
+> competitive with the existing HTML renderer. Retained as the exploration
+> record, not the current implementation plan.
+
 ## Goal
 
 Make `forgectl docs` a terminal-native, Artificer-styled document explorer while

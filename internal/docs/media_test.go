@@ -10,7 +10,8 @@ import (
 )
 
 func TestRewriteLocalImageURLs_RewritesOnlyContainedRelativeImages(t *testing.T) {
-	rendered := `<p><img src="../images/architecture.svg#focus" alt="local">` +
+	rendered := `<svg viewBox="0 0 10 10"><linearGradient gradientUnits="userSpaceOnUse"></linearGradient></svg>` +
+		`<p><img src="../images/architecture.svg#focus" alt="local">` +
 		`<img src="https://example.com/tracker.png" alt="remote">` +
 		`<img src="data:image/png;base64,abc" alt="inline">` +
 		`<img src="../../../escape.png" alt="escape"></p>`
@@ -18,6 +19,9 @@ func TestRewriteLocalImageURLs_RewritesOnlyContainedRelativeImages(t *testing.T)
 	got, err := RewriteLocalImageURLs(rendered, "docs", "guide/setup/readme.md")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(got, `<svg viewBox="0 0 10 10"><linearGradient gradientUnits="userSpaceOnUse"></linearGradient></svg>`) {
+		t.Errorf("rewrite changed unrelated inline SVG markup: %s", got)
 	}
 	wantQuery := url.Values{"doc": {"guide/setup/readme.md"}, "path": {"guide/images/architecture.svg"}}.Encode()
 	if !strings.Contains(got, `/media/docs?`+strings.ReplaceAll(wantQuery, "&", "&amp;")+`#focus`) {

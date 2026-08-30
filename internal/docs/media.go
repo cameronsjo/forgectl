@@ -15,8 +15,6 @@ import (
 	"golang.org/x/net/html"
 )
 
-var errMediaNotReferenced = errors.New("media is not referenced by the document")
-
 var mediaTypes = map[string]string{
 	".avif": "image/avif",
 	".gif":  "image/gif",
@@ -56,7 +54,12 @@ func RewriteLocalImageURLs(rendered, rootLabel, docRel string) (string, error) {
 			return out.String(), nil
 		}
 
+		// Raw aliases the tokenizer's scratch buffer; Token may normalize names
+		// in that same buffer (notably SVG viewBox/linearGradient). Copy before
+		// asking for the parsed token so unrelated markup stays byte-for-byte.
+		rawToken := append([]byte(nil), tokens.Raw()...)
 		token := tokens.Token()
+		rewritten := false
 		if (tokenType == html.StartTagToken || tokenType == html.SelfClosingTagToken) && token.Data == "img" {
 			for i := range token.Attr {
 				if token.Attr[i].Key != "src" {
@@ -71,9 +74,14 @@ func RewriteLocalImageURLs(rendered, rootLabel, docRel string) (string, error) {
 				if fragment != "" {
 					token.Attr[i].Val += "#" + url.PathEscape(fragment)
 				}
+				rewritten = true
 			}
 		}
-		out.WriteString(token.String())
+		if rewritten {
+			out.WriteString(token.String())
+		} else {
+			out.Write(rawToken)
+		}
 	}
 }
 
@@ -146,8 +154,13 @@ func handleMedia(store *Store) http.HandlerFunc {
 			return
 		}
 		rendered, err := Render(source)
-		if err != nil || !renderedReferencesMedia(rendered, docRel, requested) {
-			slog.Debug("docs: media request was not referenced by its document.", "root", rootLabel, "doc", docRel, "media", requested, "error", errMediaNotReferenced)
+		if err != nil {
+			slog.Debug("docs: media source document could not be rendered.", "root", rootLabel, "doc", docRel, "error", err)
+			http.NotFound(w, r)
+			return
+		}
+		if !renderedReferencesMedia(rendered, docRel, requested) {
+			slog.Debug("docs: media request was not referenced by its document.", "root", rootLabel, "doc", docRel, "media", requested)
 			http.NotFound(w, r)
 			return
 		}

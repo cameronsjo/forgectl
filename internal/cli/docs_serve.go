@@ -231,7 +231,11 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 }
 
 func runDocsPreviewServer(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index) error {
-	return runDocsServeWithRuntimeMode(cmd, deps, idx, "", docsOpenEmbedded, "", productionDocsServeRuntime())
+	// The ordinary reading preview is always a private loopback process. A
+	// configured [docs].addr belongs to the explicit `docs serve` contract;
+	// inheriting a LAN bind here would require a bearer token and make the
+	// preview unable to open its own URL.
+	return runDocsServeWithRuntimeMode(cmd, deps, idx, httpsrv.LoopbackAddr, docsOpenEmbedded, "", productionDocsServeRuntime())
 }
 
 type docsOpenMode uint8
