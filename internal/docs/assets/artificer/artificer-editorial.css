@@ -22,7 +22,7 @@
    rhythm. Wrap a long-form page in <body class="surface-editorial"> (or any
    container). It is the inverse of .surface-tool — never combine the two. */
 .surface-editorial {
-  font-family: var(--font-sans);
+  font-family: var(--font-body);
   color: var(--fg);
   line-height: var(--t-body-lg-lh);
 }
@@ -39,7 +39,7 @@
   display: flex; align-items: center; flex-wrap: wrap;
   gap: var(--s-md) var(--s-lg);
   padding: var(--s-lg) 0;
-  font-family: var(--font-sans);
+  font-family: var(--font-body);
 }
 .masthead__brand { margin-right: auto; }   /* pushes nav + meta to the right */
 .masthead__nav {
@@ -112,7 +112,7 @@
   margin-bottom: var(--s-md);
 }
 .editorial-hero__title {
-  font-family: var(--font-sans); font-weight: 700;
+  font-family: var(--font-body); font-weight: 700;
   font-size: var(--t-headline-lg-size);
   line-height: var(--t-headline-lg-lh);
   letter-spacing: var(--t-headline-lg-ls);
@@ -130,7 +130,7 @@
 .entries { display: flex; flex-direction: column; gap: var(--s-2xl); max-width: var(--editorial-measure); }
 .entry { display: flex; flex-direction: column; gap: var(--s-sm); }
 .entry__title {
-  font-family: var(--font-sans); font-weight: 700;
+  font-family: var(--font-body); font-weight: 700;
   font-size: var(--t-headline-md-size); line-height: var(--t-headline-md-lh);
   color: var(--fg); margin: 0; text-decoration: none;
 }

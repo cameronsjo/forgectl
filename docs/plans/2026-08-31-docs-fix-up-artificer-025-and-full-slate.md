@@ -103,11 +103,11 @@ Two independent tracks share one branch. **Track A (assets):** `internal/docs/as
 
 **Steps:**
 - [x] Invoke `artificer-design-system:artificer-upgrade`; collect `versions[X].breaking[]` for X in (0.19.0, 0.25.0] from upstream `primitives.json`. **Expected answer, stated up front: exactly one event — 0.24.0 removes the React `useTheme` hook — N/A to a Go consumer. Any different result is the red flag** (the 0.10.1 trio — theme-key dot rename, `.tok-keyword`, px→rem — predates the 0.19 pin and proves nothing here)
-- [ ] Write `scripts/vendor-artificer.sh`: `vendor` mode wraps `npx @cameronsjo/artificer@<pin> vendor --dest internal/docs/assets/artificer --strict`; `--check` mode compares `provenance.json` `.version` against `npm view @cameronsjo/artificer version` (advisory drift detection). One verdict line, meaningful exit codes, TTY-aware color
-- [ ] Run it; delete `ARTIFICER-CHEATSHEET.md` in the same change; diff `artificer.css`/`artificer-theme.js`/`artificer-tree.js` against the template class list (Architecture) and eyeball `mermaid-init.js`/`diagram.css` token names against the new `tokens.json`
-- [ ] Verification (no server needed — measured output recorded here at execution): `grep -c 'v0.25.0' internal/docs/assets/artificer/artificer.css` ≥ 1, `jq -r .version internal/docs/assets/artificer/provenance.json` = `0.25.0`, `go build ./... && go test ./internal/docs/` green. Optional human check: `go run . docs serve` and look at a page
-- [ ] File the follow-up issue upstream: `artificer vendor --check` as a first-class flag (cameron-review finding)
-- [ ] Commit: `fix(docs): re-vendor Artificer 0.19.0 -> 0.25.0; add vendor script` (+ tuple trailers)
+- [x] Write `scripts/vendor-artificer.sh`: `vendor` mode wraps `npx @cameronsjo/artificer@<pin> vendor --dest internal/docs/assets/artificer --strict`; `--check` mode compares `provenance.json` `.version` against `npm view @cameronsjo/artificer version` (advisory drift detection). One verdict line, meaningful exit codes, TTY-aware color
+- [x] Run it; delete `ARTIFICER-CHEATSHEET.md` in the same change; diff `artificer.css`/`artificer-theme.js`/`artificer-tree.js` against the template class list (Architecture) and eyeball `mermaid-init.js`/`diagram.css` token names against the new `tokens.json`
+- [x] Verification (no server needed — measured output recorded here at execution): `grep -c 'v0.25.0' internal/docs/assets/artificer/artificer.css` ≥ 1, `jq -r .version internal/docs/assets/artificer/provenance.json` = `0.25.0`, `go build ./... && go test ./internal/docs/` green. Optional human check: `go run . docs serve` and look at a page
+- [x] File the follow-up issue upstream: `artificer vendor --check` as a first-class flag (cameron-review finding)
+- [x] Commit: `fix(docs): re-vendor Artificer 0.19.0 -> 0.25.0; add vendor script` (+ tuple trailers)
 
 ### Task 3 — RELEASING.md rewrite for release-please
 

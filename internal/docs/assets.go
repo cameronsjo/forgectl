@@ -8,12 +8,12 @@ import (
 // Vendored via the #219 adherence kit (`artificer vendor`, forgectl#93's
 // "Artificer vendoring" requirement) into assets/artificer/ — provenance.json
 // there records the exact source version and a sha256 per file; re-run
-// `artificer vendor --dest internal/docs/assets/artificer` from the repo
-// root to update. Only the two files the docs UI actually links are
-// individually embedded (rather than the whole vendored directory), so
-// tokens.json/provenance.json/the cheatsheet never become servable over
-// HTTP — go:embed's byte slices carry each file's version banner through
-// unmodified.
+// `scripts/vendor-artificer.sh` from the repo root to update (it pins the
+// version and verifies provenance; `--check` reports registry drift). Only
+// the three files the docs UI actually links are individually embedded
+// (rather than the whole vendored directory), so tokens.json/provenance.json
+// never become servable over HTTP — go:embed's byte slices carry each file's
+// version banner through unmodified.
 //
 //go:embed assets/artificer/artificer.css
 var artificerCSS []byte

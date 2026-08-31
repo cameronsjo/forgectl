@@ -1,0 +1,1215 @@
+{
+  "$schemaVersion": "1",
+  "$version": "0.25.0",
+  "$doc": "Primitive mint ledger (ADR 0037, #199). Provenance + adoption semantics for every shipped primitive. tokens.json owns token VALUES; scripts/css-token-set.baseline.json owns the token SET; this file owns grouping, vintage, recipes, and adoption signals. Gated by scripts/check-primitives.mjs (check:primitives). minted 'pending-backfill' marks an entry awaiting mechanical dating (all dated by #199 PR-3's backfill; the sentinel remains legal for future re-derivations); 'unreleased' marks a mint on a feature branch, swept to the release version by sync:primitives-vintage. The 'js' field names a VANILLA src/ behavior module (data- hook + window API); the 'react' field names the compiled React adapter component(s) for the primitive (@cameronsjo/artificer/react) — distinct fields because they are distinct consumption models.",
+  "primitives": {
+    "stack": {
+      "kind": "utility",
+      "minted": "0.7.0",
+      "classes": [
+        "stack"
+      ]
+    },
+    "cluster": {
+      "kind": "utility",
+      "minted": "0.7.0",
+      "classes": [
+        "cluster"
+      ]
+    },
+    "grid": {
+      "kind": "utility",
+      "minted": "0.7.0",
+      "classes": [
+        "grid-2",
+        "grid-3",
+        "grid-auto"
+      ]
+    },
+    "container": {
+      "kind": "utility",
+      "minted": "0.7.0",
+      "classes": [
+        "container"
+      ]
+    },
+    "layout-bleed": {
+      "kind": "utility",
+      "minted": "0.12.0",
+      "classes": [
+        "bleed-grid",
+        "full-bleed",
+        "measure-grid",
+        "media-fit",
+        "cq"
+      ]
+    },
+    "density": {
+      "kind": "utility",
+      "minted": "0.7.0",
+      "classes": [
+        "density-compact",
+        "density-cozy",
+        "density-comfortable"
+      ]
+    },
+    "surfaces": {
+      "kind": "utility",
+      "minted": "0.7.0",
+      "classes": [
+        "surface-tool",
+        "surface-document"
+      ]
+    },
+    "type-scale": {
+      "kind": "utility",
+      "minted": "0.7.0",
+      "classes": [
+        "t-headline-lg",
+        "t-headline-md",
+        "t-body-lg",
+        "t-body-md",
+        "t-label-md",
+        "t-label-sm",
+        "t-label-xs",
+        "t-code",
+        "t-mono-body-md",
+        "t-mono-headline-lg"
+      ]
+    },
+    "anchor": {
+      "kind": "utility",
+      "minted": "0.7.0",
+      "classes": [
+        "anchor"
+      ]
+    },
+    "num": {
+      "kind": "utility",
+      "minted": "0.7.0",
+      "classes": [
+        "num"
+      ],
+      "recipe": "Tabular number"
+    },
+    "meta": {
+      "kind": "utility",
+      "minted": "0.7.0",
+      "classes": [
+        "meta"
+      ]
+    },
+    "note": {
+      "kind": "utility",
+      "minted": "0.13.0",
+      "classes": [
+        "note"
+      ],
+      "recipe": "Short hint paragraph under a figure or field"
+    },
+    "section-title": {
+      "kind": "component",
+      "minted": "0.13.0",
+      "classes": [
+        "section-title"
+      ],
+      "recipe": "Doc-page section header"
+    },
+    "figure": {
+      "kind": "component",
+      "minted": "0.13.0",
+      "classes": [
+        "figure"
+      ],
+      "recipe": "Live-spec / doc-page example container"
+    },
+    "sr-only": {
+      "kind": "utility",
+      "minted": "0.7.0",
+      "classes": [
+        "sr-only"
+      ]
+    },
+    "skip-link": {
+      "kind": "utility",
+      "minted": "0.7.0",
+      "classes": [
+        "skip-link"
+      ]
+    },
+    "scroll-x": {
+      "kind": "utility",
+      "minted": "0.13.0",
+      "classes": [
+        "scroll-x"
+      ]
+    },
+    "divider": {
+      "kind": "utility",
+      "minted": "0.7.0",
+      "classes": [
+        "divider"
+      ]
+    },
+    "kbd": {
+      "kind": "utility",
+      "minted": "0.7.0",
+      "classes": [
+        "kbd"
+      ]
+    },
+    "pulse": {
+      "kind": "utility",
+      "minted": "0.7.0",
+      "classes": [
+        "pulse"
+      ]
+    },
+    "page-shell": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "page-shell"
+      ],
+      "recipe": "Add a settings page"
+    },
+    "app-shell": {
+      "kind": "component",
+      "minted": "0.12.0",
+      "classes": [
+        "app-shell",
+        "app-shell__content"
+      ],
+      "recipe": "App shell / full-viewport layout",
+      "variants": [
+        {
+          "class": "app-shell",
+          "minted": "0.24.0",
+          "note": "knobs, not overrides: --shell-rail (rail width, 240px default) and --shell-gap (rail-to-content column gap, 0 default) — consumers tune the grid via custom properties instead of redefining grid-template-columns"
+        }
+      ],
+      "react": "AppShell + AppShellContent"
+    },
+    "appbar": {
+      "kind": "component",
+      "minted": "0.10.1",
+      "classes": [
+        "appbar",
+        "appbar__actions",
+        "appbar__brand",
+        "appbar__menu-btn",
+        "appbar__search",
+        "appbar__spacer"
+      ],
+      "recipe": "Top app bar",
+      "react": "Appbar"
+    },
+    "sidenav": {
+      "kind": "component",
+      "minted": "0.10.1",
+      "classes": [
+        "sidenav",
+        "sidenav__group",
+        "sidenav__section",
+        "sidenav__footer",
+        "sidenav--sticky",
+        "label",
+        "count"
+      ],
+      "recipe": "Side navigation",
+      "variants": [
+        {
+          "class": "sidenav--sticky",
+          "minted": "0.24.0",
+          "note": "sticky rail — pins the sidenav while .app-shell__content scrolls; align-self:start is load-bearing (a stretch child has nowhere to stick); --sidenav-sticky-top clears sticky chrome above. Replaces consumer-invented sticky wrapper asides"
+        },
+        {
+          "class": "sidenav__section",
+          "minted": "0.23.0",
+          "note": "collapsible group — <details class=\"sidenav__section\"> whose <summary> carries the group-label treatment + twisty; rows keep full sidenav styling. The section holding [aria-current=\"page\"] must be rendered open (consumer JS owns the open attribute); sticky group labels deliberately don't apply inside <details>"
+        },
+        {
+          "class": "sidenav__footer",
+          "minted": "0.23.0",
+          "note": "bottom-anchored settings row (margin-top:auto in the min-height:100% drawer sidenav) — the theme toggle's drawer seat; pairs a text label with a canonical .theme-toggle--inline [data-theme-toggle] button"
+        }
+      ],
+      "react": "SideNav + SideNavFooter"
+    },
+    "nav-drawer": {
+      "kind": "component",
+      "minted": "0.10.1",
+      "classes": [
+        "nav-drawer",
+        "nav-scrim"
+      ],
+      "recipe": "Mobile nav drawer",
+      "react": "NavDrawer"
+    },
+    "crumb": {
+      "kind": "component",
+      "minted": "0.10.1",
+      "classes": [
+        "crumb",
+        "crumb__sep"
+      ],
+      "recipe": "Breadcrumb"
+    },
+    "btn": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "btn"
+      ],
+      "recipe": "Button"
+    },
+    "card": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "card"
+      ],
+      "recipe": "Selected card / selected row / active choice"
+    },
+    "badge": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "badge"
+      ],
+      "recipe": "Status pill"
+    },
+    "dot": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "dot"
+      ],
+      "recipe": "Status pill"
+    },
+    "glyph": {
+      "kind": "component",
+      "minted": "0.19.0",
+      "classes": [
+        "glyph"
+      ],
+      "recipe": "Dense table status / ✓✗~– cells",
+      "adoption": {
+        "supersedes": "raw emoji / hand-tinted spans in comparison grids",
+        "signals": [
+          {
+            "grep": "[✓✗~]</(td|span)",
+            "note": "bare status marks without .glyph tinting or role=img"
+          }
+        ]
+      }
+    },
+    "avatar": {
+      "kind": "component",
+      "minted": "0.10.1",
+      "classes": [
+        "avatar"
+      ],
+      "recipe": "Avatar"
+    },
+    "chip": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "chip",
+        "chip__count"
+      ],
+      "recipe": "Chip / facet tag"
+    },
+    "field": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "field",
+        "hint",
+        "error"
+      ],
+      "recipe": "Form field"
+    },
+    "form-controls": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "input",
+        "textarea",
+        "select",
+        "checkbox",
+        "radio",
+        "toggle",
+        "slider"
+      ],
+      "recipe": "Form field"
+    },
+    "search": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "search"
+      ],
+      "recipe": "Search input"
+    },
+    "file-field": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "file-field"
+      ],
+      "recipe": "File upload / dropzone"
+    },
+    "notif": {
+      "kind": "component",
+      "minted": "0.14.0",
+      "classes": [
+        "notif",
+        "notif__body",
+        "notif__msg",
+        "notif__title"
+      ],
+      "recipe": "Toast"
+    },
+    "toast-region": {
+      "kind": "component",
+      "minted": "0.15.0",
+      "classes": [
+        "toast-region",
+        "toast-region__more"
+      ],
+      "recipe": "Toast",
+      "adoption": {
+        "supersedes": "hand-rolled fixed-position toast stacks",
+        "signals": [
+          {
+            "grep": "position:\\s*fixed[^}]*toast",
+            "note": "custom toast positioning instead of .toast-region"
+          }
+        ]
+      }
+    },
+    "banner": {
+      "kind": "component",
+      "minted": "0.15.0",
+      "classes": [
+        "banner",
+        "banner__actions",
+        "banner__body"
+      ],
+      "recipe": "Persistent page banner"
+    },
+    "empty-state": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "empty-state",
+        "empty-state__body",
+        "empty-state__title"
+      ],
+      "recipe": "Empty state"
+    },
+    "skeleton": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "skeleton"
+      ],
+      "recipe": "Loading state"
+    },
+    "progress": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "progress",
+        "progress__bar"
+      ],
+      "recipe": "Loading state"
+    },
+    "live-value": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "live-value",
+        "live-value__dot",
+        "flash"
+      ],
+      "recipe": "Refreshing a value in place"
+    },
+    "live-tick": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "live-tick",
+        "last-updated"
+      ],
+      "recipe": "Live data indicator"
+    },
+    "table": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "table",
+        "group-row"
+      ],
+      "recipe": "Table"
+    },
+    "kv": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "kv"
+      ],
+      "recipe": "Key-value list"
+    },
+    "stat": {
+      "kind": "component",
+      "minted": "0.15.0",
+      "classes": [
+        "stat",
+        "stat__delta",
+        "stat__label",
+        "stat__row",
+        "stat__value",
+        "down"
+      ],
+      "recipe": "Stat card"
+    },
+    "kpi-strip": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "kpi-strip"
+      ],
+      "recipe": "KPI strip"
+    },
+    "tabs": {
+      "kind": "component",
+      "minted": "0.10.1",
+      "classes": [
+        "tabs"
+      ],
+      "js": {
+        "module": "artificer-tabs.js",
+        "api": "ArtificerTabs.enhance()",
+        "hook": "data-tabs"
+      },
+      "recipe": "Tabs / view switcher",
+      "adoption": {
+        "supersedes": "hand-rolled tab keyboard models (roving tabindex, arrow keys)",
+        "signals": [
+          {
+            "grep": "role=\"tablist\"",
+            "note": "ARIA tablist without ArtificerTabs.enhance() — the CSS alone is style-only"
+          }
+        ]
+      }
+    },
+    "timerange": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "timerange"
+      ],
+      "recipe": "Segmented control / view-param switch"
+    },
+    "accordion": {
+      "kind": "component",
+      "minted": "0.10.1",
+      "classes": [
+        "accordion",
+        "accordion__body"
+      ],
+      "recipe": "Accordion / disclosure"
+    },
+    "pagination": {
+      "kind": "component",
+      "minted": "0.15.0",
+      "classes": [
+        "pagination",
+        "pagination__gap"
+      ],
+      "recipe": "Pagination"
+    },
+    "tree": {
+      "kind": "component",
+      "minted": "0.15.0",
+      "classes": [
+        "tree",
+        "tree__group",
+        "tree__row",
+        "tree__twisty",
+        "tree__leaf",
+        "tree--static"
+      ],
+      "js": {
+        "module": "artificer-tree.js",
+        "api": "ArtificerTree.enhance()",
+        "hook": "data-tree"
+      },
+      "recipe": "Tree / file explorer / nested nav",
+      "demo": "live-spec/components-extended.html#tree",
+      "variants": [
+        {
+          "class": "tree--static",
+          "note": "native <details>/<summary> disclosure for no-JS/SSR contexts — deliberately not role=\"tree\"; nested disclosure is the honest a11y model here, so ArtificerTree.enhance() stays inert on it"
+        }
+      ],
+      "adoption": {
+        "supersedes": "hand-rolled nested-list explorers / custom disclosure rows",
+        "signals": [
+          {
+            "grep": "role=\"tree\"",
+            "note": "ARIA tree not on the .tree scaffold / ArtificerTree behavior"
+          }
+        ]
+      }
+    },
+    "menu": {
+      "kind": "component",
+      "minted": "0.15.0",
+      "classes": [
+        "menu",
+        "menu__hint",
+        "menu__label",
+        "menu__option",
+        "menu__sep"
+      ],
+      "js": {
+        "module": "artificer-options.js",
+        "api": "ArtificerOptions.enhance()",
+        "hook": "data-options"
+      },
+      "recipe": "Combobox / dropdown / palette"
+    },
+    "listbox": {
+      "kind": "component",
+      "minted": "0.15.0",
+      "classes": [
+        "listbox",
+        "listbox__hint",
+        "listbox__label",
+        "listbox__option",
+        "listbox__sep"
+      ],
+      "js": {
+        "module": "artificer-options.js",
+        "api": "ArtificerOptions.enhance()",
+        "hook": "data-options"
+      },
+      "recipe": "Combobox / dropdown / palette",
+      "adoption": {
+        "supersedes": "hand-rolled floating option lists / dropdown keyboard handling",
+        "signals": [
+          {
+            "grep": "role=\"listbox\"",
+            "note": "ARIA listbox without the .listbox primitive + ArtificerOptions"
+          }
+        ]
+      }
+    },
+    "palette-command": {
+      "kind": "component",
+      "minted": "0.15.0",
+      "classes": [
+        "palette",
+        "palette__empty",
+        "palette__search"
+      ],
+      "js": {
+        "module": "artificer-options.js",
+        "api": "ArtificerOptions.combobox()",
+        "hook": "input[data-combobox]"
+      },
+      "recipe": "Command palette / ⌘K",
+      "demo": "live-spec/components-extended.html"
+    },
+    "popover": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "popover"
+      ],
+      "recipe": "Combobox / dropdown / palette"
+    },
+    "tooltip": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "tooltip"
+      ],
+      "recipe": "Tooltip"
+    },
+    "modal": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "modal",
+        "modal__body",
+        "modal__footer",
+        "modal__title"
+      ],
+      "js": {
+        "module": "artificer-focus.js",
+        "api": "ArtificerFocus.trap()"
+      },
+      "recipe": "Confirmation dialog",
+      "demo": "live-spec/overlay.html"
+    },
+    "scrim": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "scrim"
+      ],
+      "recipe": "Confirmation dialog"
+    },
+    "split-pane": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "split-pane",
+        "pane--active",
+        "pane--inactive"
+      ],
+      "recipe": "Split pane / master-detail"
+    },
+    "workbench": {
+      "kind": "component",
+      "minted": "0.23.0",
+      "classes": [
+        "workbench",
+        "workbench__pane",
+        "workbench__header",
+        "workbench__editor"
+      ],
+      "recipe": "Text workbench / editor panes",
+      "demo": "live-spec/composition.html#workbench",
+      "adoption": {
+        "supersedes": "hand-rolled full-height textarea panes"
+      }
+    },
+    "dash": {
+      "kind": "component",
+      "minted": "0.10.1",
+      "classes": [
+        "dash",
+        "dash__actions",
+        "dash__title",
+        "dash__topbar"
+      ],
+      "demo": "live-spec/composition.html",
+      "recipe": "Dashboard shell"
+    },
+    "filter-bar": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "filter-bar",
+        "grow"
+      ],
+      "recipe": "Filter bar"
+    },
+    "charts": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "chart",
+        "chart__header",
+        "chart__legend",
+        "chart__plot",
+        "chart__title",
+        "chart__value",
+        "chart-annotation",
+        "chart-leader",
+        "strong",
+        "series-1",
+        "series-2",
+        "series-3",
+        "series-4",
+        "series-5",
+        "sparkline",
+        "sparkbars",
+        "line",
+        "area",
+        "last-point",
+        "gauge",
+        "fill",
+        "track"
+      ],
+      "demo": "live-spec/charts.html",
+      "recipe": "Chart / sparkline / gauge"
+    },
+    "bar-meter": {
+      "kind": "component",
+      "minted": "0.23.0",
+      "classes": [
+        "bar",
+        "bar__track",
+        "bar__fill"
+      ],
+      "demo": "live-spec/charts.html",
+      "recipe": "Horizontal bar / meter"
+    },
+    "diagrams": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "dia-node",
+        "dia-node-label",
+        "dia-node-meta",
+        "dia-edge",
+        "dia-edge-label",
+        "dia-rail",
+        "dia-swimlane-label"
+      ],
+      "demo": "live-spec/diagrams.html",
+      "recipe": "Architecture / flow diagram"
+    },
+    "diagram-flow": {
+      "kind": "component",
+      "minted": "0.23.0",
+      "classes": [
+        "dia-box",
+        "dia-box--accent",
+        "dia-box--ghost",
+        "dia-box--tab",
+        "flow",
+        "flow-frame",
+        "flow-frame__label",
+        "flow__link",
+        "flow__link--dashed",
+        "flow__step"
+      ],
+      "demo": "live-spec/diagrams.html",
+      "recipe": "HTML diagram node"
+    },
+    "spine-phase": {
+      "kind": "component",
+      "minted": "0.23.0",
+      "classes": [
+        "spine",
+        "phase",
+        "phase--accent",
+        "phase__body",
+        "phase__marker"
+      ],
+      "demo": "live-spec/diagrams.html",
+      "recipe": "Phased timeline"
+    },
+    "syntax": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "code",
+        "code-block",
+        "tok-comment",
+        "tok-constant",
+        "tok-fn",
+        "tok-function",
+        "tok-invalid",
+        "tok-keyword",
+        "tok-namespace",
+        "tok-number",
+        "tok-operator",
+        "tok-param",
+        "tok-string",
+        "tok-tag",
+        "tok-type",
+        "tok-variable"
+      ],
+      "recipe": "Syntax-highlighted code block"
+    },
+    "colophon": {
+      "kind": "component",
+      "minted": "0.20.0",
+      "classes": [
+        "colophon",
+        "colophon__fine",
+        "colophon__label",
+        "colophon__spine"
+      ],
+      "recipe": "Footer / colophon / fine print / attribution"
+    },
+    "wordmark": {
+      "kind": "component",
+      "minted": "0.10.1",
+      "classes": [
+        "wordmark"
+      ],
+      "recipe": "Brand wordmark"
+    },
+    "theme-toggle": {
+      "kind": "component",
+      "minted": "0.7.0",
+      "classes": [
+        "theme-toggle"
+      ],
+      "js": {
+        "module": "artificer-theme.js",
+        "api": "ArtificerTheme.bind() / observe()",
+        "hook": "data-theme-toggle"
+      },
+      "recipe": "Theme toggle"
+    },
+    "icons": {
+      "kind": "js-module",
+      "minted": "0.7.0",
+      "classes": [
+        "icon",
+        "i"
+      ],
+      "js": {
+        "module": "artificer-icons.js",
+        "api": "ArtificerIcons.hydrate() / observe()",
+        "hook": "data-icon"
+      }
+    },
+    "focus-trap": {
+      "kind": "js-module",
+      "minted": "0.7.0",
+      "classes": [],
+      "js": {
+        "module": "artificer-focus.js",
+        "api": "ArtificerFocus.trap()"
+      }
+    },
+    "masthead": {
+      "kind": "component",
+      "minted": "0.20.0",
+      "classes": [
+        "masthead",
+        "masthead__brand",
+        "masthead__meta",
+        "masthead__nav"
+      ],
+      "recipe": "Blog / editorial / document top nav / masthead"
+    },
+    "editorial": {
+      "kind": "carve",
+      "minted": "0.10.1",
+      "classes": [
+        "surface-editorial",
+        "editorial-hero",
+        "editorial-hero__kicker",
+        "editorial-hero__standfirst",
+        "editorial-hero__title",
+        "entries",
+        "entry",
+        "entry__excerpt",
+        "entry__meta",
+        "entry__title",
+        "prose",
+        "reveal",
+        "grain"
+      ]
+    },
+    "whimsy": {
+      "kind": "carve",
+      "minted": "0.8.0",
+      "classes": [
+        "whimsy",
+        "whimsy-char",
+        "whimsy-focus",
+        "whimsy-rule",
+        "whimsy-underline"
+      ],
+      "js": {
+        "module": "artificer-whimsy.js",
+        "api": "Whimsy.hydrate() / watch() / celebrate() / run()",
+        "hook": "data-whimsy"
+      },
+      "recipe": "Make it fun / playful / celebratory / rainbow",
+      "demo": "live-spec/whimsy.html"
+    },
+    "texture": {
+      "kind": "carve",
+      "minted": "0.13.0",
+      "classes": [
+        "tex-dots",
+        "tex-grain",
+        "tex-line",
+        "tex-paper",
+        "tex-raised"
+      ],
+      "recipe": "Make it feel like paper / give it grain / material / texture / depth",
+      "demo": "live-spec/texture.html"
+    },
+    "print": {
+      "kind": "utility",
+      "minted": "0.7.0",
+      "classes": [
+        "no-print",
+        "print-only",
+        "print-meta"
+      ]
+    },
+    "chart-tokens": {
+      "kind": "token-group",
+      "minted": "0.7.0",
+      "classes": [],
+      "tokens": [
+        "--series-1",
+        "--series-2",
+        "--series-3",
+        "--series-4",
+        "--series-5",
+        "--ramp-1",
+        "--ramp-2",
+        "--ramp-3",
+        "--ramp-4",
+        "--ramp-5",
+        "--diverge-low",
+        "--diverge-mid",
+        "--diverge-high",
+        "--chart-grid",
+        "--chart-grid-strong",
+        "--chart-axis"
+      ]
+    },
+    "breakpoints": {
+      "kind": "token-group",
+      "minted": "0.10.1",
+      "classes": [],
+      "tokens": [
+        "--bp-mobile",
+        "--bp-tablet",
+        "--bp-wide"
+      ]
+    },
+    "focus-ring": {
+      "kind": "token-group",
+      "minted": "0.10.1",
+      "classes": [],
+      "tokens": [
+        "--focus-width",
+        "--focus-offset",
+        "--focus-offset-loose",
+        "--focus-offset-inset"
+      ]
+    }
+  },
+  "versions": {
+    "0.10.1": {
+      "title": "v0.10.0 + v0.10.1 — navigation wave, SPA lifecycle, brandPurple ramp split (shipped as ONE commit; no consumer was ever on 0.10.0)",
+      "minted": [
+        "appbar",
+        "sidenav",
+        "nav-drawer",
+        "crumb",
+        "avatar",
+        "tabs",
+        "accordion",
+        "dash",
+        "wordmark",
+        "editorial",
+        "breakpoints",
+        "focus-ring"
+      ],
+      "breaking": [
+        {
+          "kind": "repurpose",
+          "what": "--t-*-size type-scale tokens",
+          "from": "px values",
+          "to": "rem values",
+          "why": "px overrides fight the scale and break browser zoom",
+          "adr": "0031"
+        },
+        {
+          "kind": "rename",
+          "what": "localStorage theme key",
+          "from": "artificer-theme",
+          "to": "artificer.theme",
+          "why": "custom toggles/React adapters on the hyphen key silently desync persisted theme",
+          "ref": "#36"
+        },
+        {
+          "kind": "rebind",
+          "what": ".code-block .tok-keyword",
+          "from": "--brand-purple",
+          "to": "--brand-purple-bright",
+          "why": "keywords render 1.67:1 (illegible) on the bare token",
+          "adr": "0018"
+        }
+      ],
+      "adoption": [
+        "tabs",
+        "sidenav",
+        "appbar",
+        "accordion",
+        "avatar"
+      ]
+    },
+    "0.11.0": {
+      "title": "nav wave-2: .tabs keyboard behavior + .sidenav hierarchy-at-scale",
+      "minted": [],
+      "breaking": [],
+      "adoption": [
+        "tabs"
+      ]
+    },
+    "0.12.0": {
+      "title": "responsive layer: app-shell, overflow-safe tracks, wide-screen tier",
+      "minted": [
+        "app-shell",
+        "layout-bleed"
+      ],
+      "breaking": [],
+      "adoption": [
+        "app-shell",
+        "layout-bleed"
+      ]
+    },
+    "0.13.0": {
+      "title": "trust layer · texture carve · whimsy attention · greeting · brand refresh",
+      "minted": [
+        "figure",
+        "note",
+        "scroll-x",
+        "section-title",
+        "texture"
+      ],
+      "breaking": [],
+      "adoption": [
+        "texture"
+      ]
+    },
+    "0.14.0": {
+      "title": ".notif primitive · trust-layer follow-through · gradients · encapsulation doctrine",
+      "minted": [
+        "notif"
+      ],
+      "breaking": [],
+      "adoption": [
+        "notif"
+      ]
+    },
+    "0.15.0": {
+      "title": "A1 conformance gate · the component mints (option-popover keystone + what it unlocks) · loading-feedback",
+      "minted": [
+        "banner",
+        "listbox",
+        "menu",
+        "pagination",
+        "palette-command",
+        "stat",
+        "toast-region",
+        "tree"
+      ],
+      "breaking": [],
+      "adoption": [
+        "menu",
+        "listbox",
+        "palette-command",
+        "tree",
+        "toast-region",
+        "banner",
+        "stat",
+        "pagination"
+      ]
+    },
+    "0.16.0": {
+      "title": "behavior modules (ArtificerOptions / ArtificerTree) · a11y floor · export gate",
+      "minted": [],
+      "breaking": [],
+      "adoption": [
+        "menu",
+        "listbox",
+        "palette-command",
+        "tree"
+      ]
+    },
+    "0.17.0": {
+      "title": "the fix wave: gates grow contracts · --radius-pill · canonical chrome",
+      "minted": [],
+      "breaking": [],
+      "adoption": []
+    },
+    "0.18.0": {
+      "title": "the re-true: every --t-*-size renders at its labeled px",
+      "minted": [],
+      "breaking": [
+        {
+          "kind": "repurpose",
+          "what": "root font-size + every --t-*-size binding",
+          "from": "root silently 87.5% (labels rendered at ~0.875x)",
+          "to": "html { font-size: 100% } — labels true",
+          "why": "everything token-bound grows ~14.3% (body 12.25 -> 14px); re-check dense layouts and any px assumptions",
+          "ref": "#211"
+        }
+      ],
+      "adoption": []
+    },
+    "0.18.1": {
+      "title": "reduced-motion patch: the whimsy glacial settle goes still",
+      "minted": [],
+      "breaking": [],
+      "adoption": []
+    },
+    "0.19.0": {
+      "title": "Lane 2 unification (one version, one rhythm) · .glyph anti-emoji mint · terminalBg elevation (ADR 0036, terminal themes)",
+      "minted": [
+        "glyph"
+      ],
+      "breaking": [],
+      "adoption": [
+        "glyph"
+      ]
+    },
+    "0.20.0": {
+      "title": "the mint ledger: primitives.json provenance + check:primitives gate + upgrade-skill adoption sweep (.masthead + .colophon mint)",
+      "minted": [
+        "colophon",
+        "masthead"
+      ],
+      "breaking": [],
+      "adoption": [
+        "masthead",
+        "colophon"
+      ]
+    },
+    "0.21.0": {
+      "title": "the install grows up: four new theme targets (herdr, flux, glamour, gum), gated install coverage, and the greeting reworded to \"kindness is a choice\"",
+      "minted": [],
+      "breaking": [],
+      "adoption": []
+    },
+    "0.22.0": {
+      "title": "the spine: .colophon__spine extends the colophon primitive with the identity/sign-off/links row two consumer sites had each built themselves",
+      "minted": [],
+      "breaking": [],
+      "adoption": [
+        "colophon"
+      ]
+    },
+    "0.22.1": {
+      "title": "btn--link: an action that reads as text — the missing way to render a <button> as a link, and the reason the colophon spine had to special-case buttons",
+      "minted": [],
+      "breaking": [],
+      "adoption": [
+        "btn"
+      ]
+    },
+    "0.24.0": {
+      "title": "chrome components: the compiled React adapter (@cameronsjo/artificer/react) single-sources the app shell; ambient d.ts for the vanilla modules; app-shell knobs + sticky rail",
+      "minted": [],
+      "breaking": [
+        {
+          "kind": "remove",
+          "what": "useTheme React hook (framework-adapters/react-components.tsx, copy-consumed only — never npm-imported)",
+          "from": "2-state dark/light hook duplicating the module's persistence",
+          "to": "canonical <ThemeToggle /> (artificer-theme.js owns state) + useThemeMode() for reactive reads",
+          "why": "the hook predated the 3-state canonical cycle and desynced from module-owned toggles"
+        }
+      ],
+      "adoption": [
+        "appbar",
+        "sidenav",
+        "nav-drawer",
+        "app-shell"
+      ]
+    }
+  },
+  "$exempt": []
+}

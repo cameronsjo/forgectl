@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   ARTIFICER · Whimsy helper · v0.19.0
+   ARTIFICER · Whimsy helper · v0.25.0
    ─────────────────────────────────────────────────────────────────────────
    Tiny, dependency-free. Pairs with artificer-whimsy.css. Exposes window.Whimsy.
 
@@ -47,7 +47,14 @@
 (function () {
   "use strict";
 
-  function igniteEl(el) { if (el) el.classList.add("whimsy"); }
+  // igniteEl is the opposite of clearEl (below) — un-clearing lets a fresh
+  // celebrate()/run()/ignite() re-light an element the caller previously
+  // turned off on purpose.
+  function igniteEl(el) {
+    if (!el) return;
+    delete el.dataset.whimsyCleared;
+    el.classList.add("whimsy");
+  }
 
   /* ── Dissolve bookkeeping ── el → in-flight { t1, t2 } timers ──────────────
      One entry per element currently mid-exit. cancelDissolve() is the single
@@ -71,10 +78,17 @@
     el.style.removeProperty("--whimsy-dissolve-fade");
   }
 
+  // Marks the element so the now-permanent observe() (autoInit, #325) can't
+  // re-light it: hydrate() skips a data-whimsy node flagged whimsyCleared,
+  // making a manual clear/dissolve durable across later DOM mutations
+  // instead of just the one hydrate pass a one-shot DOMContentLoaded used to
+  // guarantee. igniteEl() clears the flag so a fresh celebrate/run/ignite
+  // can still re-light it on purpose.
   function clearEl(el) {
     if (!el) return;
     cancelDissolve(el);
     el.classList.remove("whimsy");
+    el.dataset.whimsyCleared = "1";
   }
 
   /* ── Settle ── flow for N hue-cycles, then come to rest ────────────────── */
@@ -139,12 +153,18 @@
     root = root || document;
     var waves = root.querySelectorAll('[data-whimsy~="wave"]');
     for (var i = 0; i < waves.length; i++) {
+      // A whimsyCleared node was deliberately turned off (clearEl) — the
+      // permanent observer must not re-light it on the next mutation.
+      if (waves[i].dataset.whimsyCleared === "1") continue;
       waves[i].classList.add("whimsy", "whimsy--wave");
       splitWave(waves[i]);
     }
     // plain [data-whimsy] (no "wave") just gets the flowing gradient
     var plain = root.querySelectorAll('[data-whimsy=""], [data-whimsy="whimsy"]');
-    for (var j = 0; j < plain.length; j++) plain[j].classList.add("whimsy");
+    for (var j = 0; j < plain.length; j++) {
+      if (plain[j].dataset.whimsyCleared === "1") continue;
+      plain[j].classList.add("whimsy");
+    }
   }
 
   /* The "ultrathink" gesture. Watch a text input; when its value contains any
@@ -297,6 +317,15 @@
 
   /* ── Seasonal greeting ── pure spec + DOM application ──────────────────── */
 
+  // Off-season class token must be a single "whimsy--<word>" class — the
+  // observer now re-scans on every DOM mutation (#325), so this validates an
+  // attacker-controlled `data-whimsy-greeting-class` on any later-inserted
+  // node before it reaches classList.add(). An invalid token (whitespace,
+  // wrong prefix) falls back to the default rather than throwing
+  // InvalidCharacterError mid-observer-batch, which would otherwise abort
+  // hydration for every other node in that batch.
+  var WHIMSY_CLASS_RE = /^whimsy--[a-z0-9-]+$/;
+
   /* PURE — no DOM. Given a date, return the footer-greeting spec for its
      season. June (getMonth() === 5) is Pride: "happy pride" (no trailing
      period — explicit) with always-on vivid flow — intentionally the one view
@@ -321,12 +350,15 @@
     }
     // Off-season fallback. The line is the consumer's to set — via the
     // element's inline text or opts.default. Lines that fit the calm glacial
-    // drift: "kindness is free" (default) or "abide no hatred".
+    // drift: "kindness is a choice" (default) or "abide no hatred".
     // (Future idea: rotate one per day/month via a modulus on the date; for
     // now it's a deliberately stable per-surface choice, not a slot machine.)
+    var defaultClass = WHIMSY_CLASS_RE.test(opts.defaultClass || "")
+      ? opts.defaultClass
+      : "whimsy--glacial";
     return { season: "default",
-             text: opts.default || "kindness is free",
-             classes: ["whimsy", opts.defaultClass || "whimsy--glacial"] };
+             text: opts.default || "kindness is a choice",
+             classes: ["whimsy", defaultClass] };
   }
 
   /* DOM — scan [data-whimsy-greeting]; the element's inline text IS the
@@ -395,14 +427,20 @@
   if (typeof window !== "undefined") window.Whimsy = api;
   else if (typeof globalThis !== "undefined") globalThis.Whimsy = api;
 
+  // Arms observe() on ready so SPA-mounted [data-whimsy] / [data-whimsy-greeting]
+  // nodes hydrate without a manual call (matches the icons/theme autoInit
+  // shape — src/artificer-icons.js:231). Declared at IIFE scope, not inside
+  // the guard below, so a strict-mode ES5 parser never sees a block-scoped
+  // function declaration. observe() itself falls back to a single
+  // hydrate()+greeting() pass when MutationObserver is unavailable, so no
+  // separate branch is needed here.
+  function autoInit() { observe(document.body); }
+
   // DOM auto-run — guarded so `import`ing the module in Node (the unit test)
   // doesn't touch a document that isn't there.
   if (typeof document !== "undefined") {
     if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", function () { hydrate(); greeting(); });
-    } else {
-      hydrate();
-      greeting();
-    }
+      document.addEventListener("DOMContentLoaded", autoInit);
+    } else { autoInit(); }
   }
 })();
