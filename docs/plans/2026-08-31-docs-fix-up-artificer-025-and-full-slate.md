@@ -80,11 +80,11 @@ Two independent tracks share one branch. **Track A (assets):** `internal/docs/as
 **Report:** —
 
 **Steps:**
-- [ ] `git -C forgectl fetch origin` (local main is 4 commits behind; FETCH_HEAD dated Aug 29)
-- [ ] Re-read at `origin/main`: `AGENTS.md`, `CHANGELOG.md` head, `.github/workflows/`, `scripts/check-changelog-owner.sh` — confirm the changelog-ownership facts above still hold; deviations amend this plan loudly
-- [ ] `git worktree add .claude/worktrees/docs-fix-up -b plan/docs-fix-up origin/main` (no name collision — probed)
-- [ ] Persist this plan into the worktree's `docs/plans/`, commit (tuple trailers), `push -u`, draft PR with stub body
-- [ ] Re-`Read` every file at the worktree path before its first edit (absolute-path file-state trap)
+- [x] `git -C forgectl fetch origin` (local main is 4 commits behind; FETCH_HEAD dated Aug 29)
+- [x] Re-read at `origin/main`: `AGENTS.md`, `CHANGELOG.md` head, `.github/workflows/`, `scripts/check-changelog-owner.sh` — confirm the changelog-ownership facts above still hold; deviations amend this plan loudly
+- [x] `git worktree add .claude/worktrees/docs-fix-up -b plan/docs-fix-up origin/main` (no name collision — probed)
+- [x] Persist this plan into the worktree's `docs/plans/`, commit (tuple trailers), `push -u`, draft PR with stub body
+- [x] Re-`Read` every file at the worktree path before its first edit (absolute-path file-state trap)
 
 ### Task 2 — Artificer 0.19.0 → 0.25.0 re-vendor + committed script
 
@@ -102,7 +102,7 @@ Two independent tracks share one branch. **Track A (assets):** `internal/docs/as
 **Report:** —
 
 **Steps:**
-- [ ] Invoke `artificer-design-system:artificer-upgrade`; collect `versions[X].breaking[]` for X in (0.19.0, 0.25.0] from upstream `primitives.json`. **Expected answer, stated up front: exactly one event — 0.24.0 removes the React `useTheme` hook — N/A to a Go consumer. Any different result is the red flag** (the 0.10.1 trio — theme-key dot rename, `.tok-keyword`, px→rem — predates the 0.19 pin and proves nothing here)
+- [x] Invoke `artificer-design-system:artificer-upgrade`; collect `versions[X].breaking[]` for X in (0.19.0, 0.25.0] from upstream `primitives.json`. **Expected answer, stated up front: exactly one event — 0.24.0 removes the React `useTheme` hook — N/A to a Go consumer. Any different result is the red flag** (the 0.10.1 trio — theme-key dot rename, `.tok-keyword`, px→rem — predates the 0.19 pin and proves nothing here)
 - [ ] Write `scripts/vendor-artificer.sh`: `vendor` mode wraps `npx @cameronsjo/artificer@<pin> vendor --dest internal/docs/assets/artificer --strict`; `--check` mode compares `provenance.json` `.version` against `npm view @cameronsjo/artificer version` (advisory drift detection). One verdict line, meaningful exit codes, TTY-aware color
 - [ ] Run it; delete `ARTIFICER-CHEATSHEET.md` in the same change; diff `artificer.css`/`artificer-theme.js`/`artificer-tree.js` against the template class list (Architecture) and eyeball `mermaid-init.js`/`diagram.css` token names against the new `tokens.json`
 - [ ] Verification (no server needed — measured output recorded here at execution): `grep -c 'v0.25.0' internal/docs/assets/artificer/artificer.css` ≥ 1, `jq -r .version internal/docs/assets/artificer/provenance.json` = `0.25.0`, `go build ./... && go test ./internal/docs/` green. Optional human check: `go run . docs serve` and look at a page
@@ -123,10 +123,10 @@ Two independent tracks share one branch. **Track A (assets):** `internal/docs/as
 **Report:** resolved at dispatch time to `<mktemp -d>/task-3.md` by the orchestrator
 
 **Steps:**
-- [ ] Read `.github/workflows/{release-please,auto-tag,release}.yml` + `release-please-config.json` at the worktree; document the actual flow: conventional commits → release PR (`chore(main): release …`) → merge → auto-tag → goreleaser
-- [ ] Delete the manual `git tag` recipe. **State manual tagging as forbidden, not break-glass**: a hand-pushed tag does build (release.yml fires on tag push) but desynchronizes `.release-please-manifest.json` and wedges the release PR (`auto-tag.yml:12-17` documents the wedge)
-- [ ] Keep the `releasing-to-homebrew-tap` pointer and the `## Verify before tagging` goreleaser block (retitled to fit the new flow) — acceptance: doc mentions no hand-run `git tag`, names the release-PR flow, survives `forgectl docs serve` rendering
-- [ ] Orchestrator commits: `docs(releasing): rewrite for release-please; manual tagging is a wedge, not a path`
+- [x] Read `.github/workflows/{release-please,auto-tag,release}.yml` + `release-please-config.json` at the worktree; document the actual flow: conventional commits → release PR (`chore(main): release …`) → merge → auto-tag → goreleaser
+- [x] Delete the manual `git tag` recipe. **State manual tagging as forbidden, not break-glass**: a hand-pushed tag does build (release.yml fires on tag push) but desynchronizes `.release-please-manifest.json` and wedges the release PR (`auto-tag.yml:12-17` documents the wedge)
+- [x] Keep the `releasing-to-homebrew-tap` pointer and the `## Verify before tagging` goreleaser block (retitled to fit the new flow) — acceptance: doc mentions no hand-run `git tag`, names the release-PR flow, survives `forgectl docs serve` rendering
+- [x] Orchestrator commits: `docs(releasing): rewrite for release-please; manual tagging is a wedge, not a path`
 
 ### Task 4 — README: document gaps, then split deep-dives out
 
@@ -166,9 +166,9 @@ Two independent tracks share one branch. **Track A (assets):** `internal/docs/as
 **Report:** resolved at dispatch time to `<mktemp -d>/task-5.md` by the orchestrator
 
 **Steps:**
-- [ ] Per ADR, insert directly under the `# NNNN — <title>` line: a blank line, then `Status: Accepted` and `Date: <YYYY-MM-DD>` on their own lines, then a blank line. Date = first-commit date: `git log --follow --format=%as -- <file> | tail -1`. Status vocabulary: `Accepted` unless the ADR body itself says superseded/deprecated — then match the body and note it in the report
-- [ ] `docs/adr/README.md`: table of number · title (linked) · status · date
-- [ ] Orchestrator commits: `docs(adr): add status and date headers plus an index`
+- [x] Per ADR, insert directly under the `# NNNN — <title>` line: a blank line, then `Status: Accepted` and `Date: <YYYY-MM-DD>` on their own lines, then a blank line. Date = first-commit date: `git log --follow --format=%as -- <file> | tail -1`. Status vocabulary: `Accepted` unless the ADR body itself says superseded/deprecated — then match the body and note it in the report
+- [x] `docs/adr/README.md`: table of number · title (linked) · status · date
+- [x] Orchestrator commits: `docs(adr): add status and date headers plus an index`
 
 ### Task 6 — Integrate, review, ready flip
 
@@ -191,7 +191,9 @@ Two independent tracks share one branch. **Track A (assets):** `internal/docs/as
 
 ## Deviations
 
-*(empty at approval)*
+- **Task 1:** the persist-plan hook homed the plan in the meta-repo; redirected to forgectl `docs/plans/` per this plan's own Lane-A ruling (declined finding #1).
+- **Task 5:** all 8 ADRs already carry `- **Status:** Accepted (YYYY-MM-DD)` as their first bullet — the header-insertion step was moot (survey premise stale); only the index was created, and the commit message drops "status and date headers".
+- **Task 2 (note):** the 0.25.0 ledger's `versions{}` carries no 0.23.0/0.25.0 entries (releases without ledger events); the breaking[] walk over the keys present confirms the expected single 0.24.0 event.
 
 ## Learnings
 
