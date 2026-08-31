@@ -144,12 +144,12 @@ Two independent tracks share one branch. **Track A (assets):** `internal/docs/as
 **Report:** resolved at dispatch time to `<mktemp -d>/task-4.md` by the orchestrator
 
 **Steps:**
-- [ ] Page pattern (uniform, all ten files): H1 `# forgectl <group> — <one-liner from the roster>`, then `> Part of [forgectl](../../README.md) — see the [command roster](../../README.md#command-groups).`, then the section content verbatim; no front matter
-- [ ] Write `docs/commands/docs.md` from code, not invention: `docs open` registered at `internal/cli/docs.go:62`; token rules from the command's `Long` text (`docs.go:26-58`): token file absolute + owner-only, RFC 6750 bearer, protected servers can't be `--open`ed directly. Add one roster-table row link and a line in the README docs group's usage block naming `open`
-- [ ] Extract the 8 deep-dive sections (`README.md:339,372,459,502,546,616,809,862`) verbatim into their pages; move `## Configuration` to `docs/configuration.md`; **do not touch the `## Usage` fence (lines 62-301) — it alone keeps `TestModules_DocumentedInREADME` green**; `## How it fits together` and `### External commands`/`### Logging` stay in the README
-- [ ] Rewrite the roster table's `Docs` column: moved sections → `docs/commands/<group>.md` links (kills the 8 now-dead anchors); unmoved stay "Usage below"
-- [ ] Gate check: `go test ./internal/cli/ -run TestModules_DocumentedInREADME` green; link check: grep the README for `](#` anchors pointing at removed headings — zero hits
-- [ ] Orchestrator commits (two): `docs(readme): document docs open and the bearer-token surface`, `docs: split deep-dives into docs/commands/ and docs/configuration.md`
+- [x] Page pattern (uniform, all ten files): H1 `# forgectl <group> — <one-liner from the roster>`, then `> Part of [forgectl](../../README.md) — see the [command roster](../../README.md#command-groups).`, then the section content verbatim; no front matter
+- [x] Write `docs/commands/docs.md` from code, not invention: `docs open` registered at `internal/cli/docs.go:62`; token rules from the command's `Long` text (`docs.go:26-58`): token file absolute + owner-only, RFC 6750 bearer, protected servers can't be `--open`ed directly. Add one roster-table row link and a line in the README docs group's usage block naming `open`
+- [x] Extract the 8 deep-dive sections (`README.md:339,372,459,502,546,616,809,862`) verbatim into their pages; move `## Configuration` to `docs/configuration.md`; **do not touch the `## Usage` fence (lines 62-301) — it alone keeps `TestModules_DocumentedInREADME` green**; `## How it fits together` and `### External commands`/`### Logging` stay in the README
+- [x] Rewrite the roster table's `Docs` column: moved sections → `docs/commands/<group>.md` links (kills the 8 now-dead anchors); unmoved stay "Usage below"
+- [x] Gate check: `go test ./internal/cli/ -run TestModules_DocumentedInREADME` green; link check: grep the README for `](#` anchors pointing at removed headings — zero hits
+- [x] Orchestrator commits (two): `docs(readme): document docs open and the bearer-token surface`, `docs: split deep-dives into docs/commands/ and docs/configuration.md`
 
 ### Task 5 — ADR headers + index
 
@@ -190,6 +190,8 @@ Two independent tracks share one branch. **Track A (assets):** `internal/docs/as
 - [ ] Flip draft → ready
 
 ## Deviations
+
+- **Task 4:** `### Logging` was a subsection of the moved `## Configuration` span — the plan said both "move the section whole" and "Logging stays"; resolved by keeping Logging in `docs/configuration.md` (it documents `log_level`, a config key). Worker also reports the frontmatter guard false-firing on `docs/commands/*.md` writes (dir-name match) — feedback issue owed to cadence-hooks.
 
 - **Task 1:** the persist-plan hook homed the plan in the meta-repo; redirected to forgectl `docs/plans/` per this plan's own Lane-A ruling (declined finding #1).
 - **Task 5:** all 8 ADRs already carry `- **Status:** Accepted (YYYY-MM-DD)` as their first bullet — the header-insertion step was moot (survey premise stale); only the index was created, and the commit message drops "status and date headers".
