@@ -1,15 +1,19 @@
 # docs
 
 Index of forgectl's doc tree. The top-level `README.md` is the user-facing
-reference (install, commands, configuration); this directory holds the
-supporting record — why decisions were made, what was explored, and how the
-running system is operated.
+entry point (install, the command roster, the usage summary); this directory
+holds the reference pages it links to, plus the supporting record — why
+decisions were made, what was explored, and how the running system is
+operated.
 
 - **[`commands/`](commands/)** — per-command deep dives (env, launch, k8s,
   docs, …) split out of the README; the README keeps the full roster and
   usage summary.
 - **[`configuration.md`](configuration.md)** — every `config.toml` section,
   key by key, plus logging.
+- **[`artificer-adaptations.md`](artificer-adaptations.md)** — where this repo
+  bends the vendored Artificer design system, and why; each entry names the
+  upstream issue and the condition that retires it.
 - **[`adr/`](adr/README.md)** — Architecture Decision Records, with an index.
   Durable design decisions (the workflow DSL's shape, the module registry,
   checkpoint/resume semantics) with the reasoning behind them. Read these

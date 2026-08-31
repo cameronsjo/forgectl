@@ -15,7 +15,7 @@ brew install cameronsjo/tap/forgectl
 
 Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against the self-hosted Gitea, and `review` when `[review.gitea]` is enabled), `kubectl` (`k8s logs`), `docker` (`bench status`/`up`, `docker build/run/shell`, and `clean --docker`), `npm`/`pnpm`/`pip`/`go`/`brew` (`clean --caches` — each is independently opt-in and skipped, not required, when absent). `update`'s roster shares that same `brew`/`go`/`npm` dependency (`softwareupdate` is a macOS built-in) — each step is independently scoped, so a missing tool fails only its own step, never the others.
 
-Commands that actually launch a PR review — `forgectl pr <ref>`, `forgectl pr local`, and `forgectl pr pick` once admission establishes there is at least one ref to prepare — require **tmux 2.2 or newer**, for the dispatch-identity reasons in the `[pr]` section below. Read-only PR commands, any `--dry-run`, and empty, all-reviewed, or cap-full selections do not acquire that floor.
+Commands that actually launch a PR review — `forgectl pr <ref>`, `forgectl pr local`, and `forgectl pr pick` once admission establishes there is at least one ref to prepare — require **tmux 2.2 or newer**, for the dispatch-identity reasons in [docs/commands/pr.md](docs/commands/pr.md). Read-only PR commands, any `--dry-run`, and empty, all-reviewed, or cap-full selections do not acquire that floor.
 
 Reading a local clone's git state — `projects list`, `projects pick`, the project inventory, and `projects pull-all` — requires **Git 2.11.0 or newer**. That release introduced `git status --porcelain=v2 --branch`, which reports the working-tree state and the ahead/behind counts in a single command; forgectl reads both from that one call rather than spawning a second `rev-list` per clean repository. On older Git the command fails, the repository's status reads as unknown, and `pull-all` skips it rather than rebasing a tree whose state it could not establish.
 
@@ -167,11 +167,11 @@ forgectl sessions search "<query>"        # full-text search the concordance's r
 forgectl sessions why "<path|topic>"      # recent sessions whose runbooks explain a path or topic, newest first
 forgectl sessions last <repo>             # the newest session in a repo + the artifacts it left behind
 
-# env — safe .env management: key names visible, values never (see § env below)
+# env — safe .env management: key names visible, values never (see docs/commands/env.md)
 forgectl env keys [--file .env]                             # list KEY names only — never values
 forgectl env set KEY [--file .env] [--clipboard]             # value from piped stdin, no-echo prompt, or clipboard — never argv
 forgectl env get KEY --clipboard [--file .env]               # value to clipboard only; no print path exists
-forgectl env check [--file .env] [--example .env.example]    # missing/extra keys, names only (see § env below for exit codes)
+forgectl env check [--file .env] [--example .env.example]    # missing/extra keys, names only (see docs/commands/env.md for exit codes)
 forgectl env redact [--file .env]                            # print file with values masked ****
 #   --file must name an env file (.env, .env.*, *.env); --any-file overrides, TTY-confirmed only
 

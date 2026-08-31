@@ -11,8 +11,9 @@ import (
 // `scripts/vendor-artificer.sh` from the repo root to update (it pins the
 // version and verifies provenance; `--check` reports registry drift). Only
 // the three files the docs UI actually links are individually embedded
-// (rather than the whole vendored directory), so tokens.json/provenance.json
-// never become servable over HTTP — go:embed's byte slices carry each file's
+// (rather than the whole vendored directory), so the vendored metadata —
+// tokens.json, primitives.json, provenance.json — and every unlinked asset
+// never become servable over HTTP; go:embed's byte slices carry each file's
 // version banner through unmodified.
 //
 //go:embed assets/artificer/artificer.css

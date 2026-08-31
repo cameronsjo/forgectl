@@ -35,8 +35,9 @@ if [ "${1:-}" = "--check" ]; then
 fi
 
 echo "Vendoring $PKG@$PIN into $DEST (strict) ..."
-if ! npx --yes "$PKG@$PIN" vendor --dest "$DEST" --strict; then
-	rc=$?
+rc=0
+npx --yes "$PKG@$PIN" vendor --dest "$DEST" --strict || rc=$?
+if [ "$rc" -ne 0 ]; then
 	echo "${RED}FAIL${RESET}: artificer vendor exited $rc (7 = strict drift: hand-edited vendored files; resolve before re-vendoring)"
 	exit "$rc"
 fi
