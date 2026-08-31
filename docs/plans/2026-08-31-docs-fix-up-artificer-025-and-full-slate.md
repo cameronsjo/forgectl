@@ -183,8 +183,8 @@ Two independent tracks share one branch. **Track A (assets):** `internal/docs/as
 **Report:** —
 
 **Steps:**
-- [ ] Update `docs/README.md` index; spot-check three pages (one command page, `configuration.md`, the ADR index) render in `forgectl docs serve`
-- [ ] `go build ./... && go test ./...` green in the worktree
+- [x] Update `docs/README.md` index; spot-check three pages (one command page, `configuration.md`, the ADR index) render in `forgectl docs serve`
+- [x] `go build ./... && go test ./...` green in the worktree
 - [ ] Run diff-based reviewers against a diff built from the worktree (`cadence:code-reviewer`; polish's built-in arms no-op on sub-repo worktrees); fold findings; run `cadence-forge:polish` for the transcript gate
 - [ ] Compose the final PR body: summary, `BEGIN_COMMIT_OVERRIDE`/`END_COMMIT_OVERRIDE` release-notes block (this is the changelog channel), producer tuple; `cadence:redaction` scan; update the body
 - [ ] Flip draft → ready

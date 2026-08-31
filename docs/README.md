@@ -5,10 +5,16 @@ reference (install, commands, configuration); this directory holds the
 supporting record — why decisions were made, what was explored, and how the
 running system is operated.
 
-- **[`adr/`](adr/)** — Architecture Decision Records. Durable design
-  decisions (the workflow DSL's shape, the module registry, checkpoint/resume
-  semantics) with the reasoning behind them. Read these when a "why does it
-  work this way" question comes up; they don't get rewritten after the fact.
+- **[`commands/`](commands/)** — per-command deep dives (env, launch, k8s,
+  docs, …) split out of the README; the README keeps the full roster and
+  usage summary.
+- **[`configuration.md`](configuration.md)** — every `config.toml` section,
+  key by key, plus logging.
+- **[`adr/`](adr/README.md)** — Architecture Decision Records, with an index.
+  Durable design decisions (the workflow DSL's shape, the module registry,
+  checkpoint/resume semantics) with the reasoning behind them. Read these
+  when a "why does it work this way" question comes up; they don't get
+  rewritten after the fact.
 - **[`discovery/`](discovery/)** — dated research and audits (e.g. an
   audience/README review). A point-in-time snapshot, not a living document.
 - **[`operations/`](operations/)** — live runbooks for operating forgectl
