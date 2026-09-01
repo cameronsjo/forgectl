@@ -7,6 +7,19 @@
 <link rel="stylesheet" href="/assets/artificer.css"/>
 <link rel="stylesheet" href="/assets/chroma.css"/>
 <link rel="stylesheet" href="/assets/diagram.css"/>
+<style>
+  /* tree--static backing: artificer.css keys twisty rotation off
+     [role="treeitem"][aria-expanded] (the artificer-tree.js pattern), which a
+     server-rendered <details> tree never sets — rotate off the native open
+     state instead. Same story for the directory count: .sidenav a > .count
+     cannot match a <summary>, so re-state that treatment here. Inline <style>
+     is fine under the CSP (style-src carries 'unsafe-inline' already). */
+  .tree--static details[open] > summary > .tree__twisty { transform: rotate(90deg); }
+  .tree--static summary > .count {
+    margin-left: auto; font-variant-numeric: tabular-nums;
+    font-size: var(--t-label-sm-size); color: var(--fg-disabled);
+  }
+</style>
 <script src="/assets/artificer-theme.js" defer></script>
 <script src="/assets/reload.js" defer></script>
 <script src="/assets/artificer-tree.js" defer></script>

@@ -364,7 +364,7 @@ func handleDoc(store *Store) http.HandlerFunc {
 			CurrentRoot: root,
 			CurrentRel:  rest,
 			DocTitle:    doc.Title,
-			Content:     template.HTML(rendered), //nolint:gosec // rendered is bluemonday-sanitized in Render
+			Content:     template.HTML(rendered), //nolint:gosec // body is bluemonday-sanitized in Render; the frontmatter prefix is built there from html.EscapeString'd fragments only
 		})
 	}
 }
@@ -467,7 +467,7 @@ func buildTree(docs []Doc, currentRoot, currentRel string) []*treeNode {
 	dirs := map[string]*treeNode{}
 
 	for _, d := range docs {
-		link := toLinks([]Doc{d}, currentRoot, currentRel)[0]
+		link := toLink(d, currentRoot, currentRel)
 		segments := strings.Split(d.RelPath, "/")
 		parent := &top
 		prefix := ""
@@ -492,12 +492,16 @@ func buildTree(docs []Doc, currentRoot, currentRel string) []*treeNode {
 func toLinks(docs []Doc, currentRoot, currentRel string) []sidenavLink {
 	links := make([]sidenavLink, 0, len(docs))
 	for _, d := range docs {
-		links = append(links, sidenavLink{
-			Href:       "/doc/" + d.RootLabel + "/" + d.RelPath,
-			Title:      d.Title,
-			FilterText: strings.ToLower(d.Title + " " + d.RelPath),
-			Current:    d.RootLabel == currentRoot && d.RelPath == currentRel,
-		})
+		links = append(links, toLink(d, currentRoot, currentRel))
 	}
 	return links
+}
+
+func toLink(d Doc, currentRoot, currentRel string) sidenavLink {
+	return sidenavLink{
+		Href:       "/doc/" + d.RootLabel + "/" + d.RelPath,
+		Title:      d.Title,
+		FilterText: strings.ToLower(d.Title + " " + d.RelPath),
+		Current:    d.RootLabel == currentRoot && d.RelPath == currentRel,
+	}
 }

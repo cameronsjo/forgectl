@@ -20,10 +20,10 @@ func testTreeIndex(t *testing.T) (*Index, string) {
 	t.Helper()
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "README.md"), "# Top\n")
-	if err := os.MkdirAll(filepath.Join(dir, "commands"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "commands"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(dir, "adr"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "adr"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(dir, "commands", "env.md"), "# env\n")
@@ -39,7 +39,7 @@ func testTreeIndex(t *testing.T) (*Index, string) {
 func getBody(t *testing.T, h http.Handler, path string) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET %s = %d, want 200", path, rec.Code)
 	}
