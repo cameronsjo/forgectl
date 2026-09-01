@@ -547,7 +547,7 @@ func RenderDoc(source []byte) (RenderedDoc, error) {
 func countWords(source []byte) int {
 	body := source
 	if hasWellFormedFrontmatter(source) {
-		lines := bytes.SplitAfterN(source, []byte("\n"), -1)
+		lines := bytes.SplitAfter(source, []byte("\n"))
 		delim, count := frontmatterDelim(bytes.TrimSuffix(lines[0], []byte("\n")))
 		for i := 1; i < len(lines); i++ {
 			// Same closing-fence rule as hasWellFormedFrontmatter: the
