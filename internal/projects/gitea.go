@@ -7,17 +7,35 @@ import (
 	"strings"
 )
 
-// giteaList returns repos owned by the configured login on the self-hosted
-// Gitea (git.sjo.lol), via `tea repo ls --output tsv`. The TSV columns are
-// owner, name, type, ssh — so the SSH URL is already the port-222 form. The
-// header row and tea's stderr `NOTE: … falling back to login 'cameron'` line
-// are filtered out defensively (only well-formed 4-field rows survive), even
-// though OSRunner captures stdout alone. Returns the command error on failure
-// so Inventory can note the degraded host; callers treat a nil slice as "no
-// rows".
+// giteaList returns repos from the self-hosted Gitea via
+// `tea repo ls --output tsv`, letting tea resolve its own configured login.
+// The TSV columns are owner, name, type, ssh. The header row and tea's stderr
+// `NOTE: … falling back to login 'cameron'` line are filtered out defensively
+// (only well-formed 4-field rows survive), even though OSRunner captures
+// stdout alone. Returns the command error on failure so Inventory can note the
+// degraded host; callers treat a nil slice as "no rows".
+//
+// EACH ROW'S HOST COMES FROM ITS OWN CLONE URL, not from configuration. tea
+// reports the full URL in the fourth column — ssh or https, whichever the
+// server hands back — and parseRemoteURL already extracts a normalized
+// hostname from either form. That is strictly closer to the data than a
+// configured host would be: it is literally where the repo lives, it
+// generalizes to any Gitea instance without a config key, and it keeps a
+// personal hostname out of this source file.
+//
+// gitHubHost is passed only to reject with. Two rows are dropped rather than
+// filed, both fail-closed:
+//
+//   - No derivable hostname. There is no default to fall back to, and a
+//     hostless Repo keys as "local:" with an empty path — colliding with every
+//     other such row and displacing real local clones out of the inventory.
+//   - A hostname equal to the configured GitHub host. This is the one thing a
+//     hostile or misconfigured Gitea could do that matters: a row claiming the
+//     GitHub host would take the gh dispatch branch in Clone and Worktree, and
+//     be fetched from GitHub by the server's own owner/name strings.
 func giteaList(ctx context.Context, run interface {
 	Run(context.Context, string, ...string) (string, error)
-}) ([]Repo, error) {
+}, gitHubHost string) ([]Repo, error) {
 	slog.Debug("Preparing to fetch Gitea repos.")
 	out, err := run.Run(ctx, "tea", "repo", "ls", "--output", "tsv", "--limit", "1000")
 	if err != nil {
@@ -40,8 +58,22 @@ func giteaList(ctx context.Context, run interface {
 		if owner == "" || name == "" {
 			continue // malformed row — a real repo always has an owner and name
 		}
+		// Both become directories; drop rather than repair (see validRepoSegment).
+		if !validRepoSegment(owner) || !validRepoSegment(name) {
+			slog.Warn("Dropped a Gitea row whose owner or name is not a safe path segment.")
+			continue
+		}
+		host, _, _ := parseRemoteURL(ssh, gitHubHost)
+		if host == "" {
+			slog.Warn("Dropped a Gitea row with no derivable host in its clone URL.")
+			continue
+		}
+		if host == gitHubHost {
+			slog.Warn("Dropped a Gitea row claiming the configured GitHub host.")
+			continue
+		}
 		repos = append(repos, Repo{
-			Host:   "gitea",
+			Host:   host,
 			Owner:  owner,
 			Name:   name,
 			SSHURL: ssh,

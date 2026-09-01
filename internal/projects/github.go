@@ -103,8 +103,16 @@ func githubListOrg(ctx context.Context, run exec.Runner, org, host string) ([]Re
 
 	repos := make([]Repo, 0, len(raw))
 	for _, r := range raw {
+		// r.Name is server-supplied and becomes a directory. Drop rather than
+		// repair: a name we cannot file is a row we cannot act on, and a
+		// ".git"/".bare" name would collide with the layout itself. Categorical
+		// log — the rejected value is exactly the untrusted one.
+		if !validRepoSegment(r.Name) {
+			slog.Warn("Dropped a GitHub repo whose name is not a safe path segment.", "owner", org)
+			continue
+		}
 		repos = append(repos, Repo{
-			Host:    "github",
+			Host:    host,
 			Owner:   org,
 			Name:    r.Name,
 			SSHURL:  r.SSHURL,

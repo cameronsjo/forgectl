@@ -24,7 +24,7 @@ func TestGiteaList_ParsesTSVAndFiltersNoise(t *testing.T) {
 		},
 	}
 
-	repos, err := giteaList(context.Background(), fake)
+	repos, err := giteaList(context.Background(), fake, "github.com")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -32,7 +32,7 @@ func TestGiteaList_ParsesTSVAndFiltersNoise(t *testing.T) {
 		t.Fatalf("got %d repos, want 2 (header + stray + blank filtered out): %+v", len(repos), repos)
 	}
 
-	if repos[0].Host != "gitea" || repos[0].Owner != "cameron" || repos[0].Name != "RedditDownloader" {
+	if repos[0].Host != "git.sjo.lol" || repos[0].Owner != "cameron" || repos[0].Name != "RedditDownloader" {
 		t.Errorf("repo[0] = %+v; want gitea/cameron/RedditDownloader", repos[0])
 	}
 	if repos[0].SSHURL != "ssh://git@git.sjo.lol:222/cameron/RedditDownloader.git" {
@@ -62,7 +62,7 @@ func TestGiteaList_SkipsMalformedRowsAndTrimsCRLF(t *testing.T) {
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) { return out, nil },
 	}
-	repos, err := giteaList(context.Background(), fake)
+	repos, err := giteaList(context.Background(), fake, "github.com")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestGiteaList_CommandErrorPropagates(t *testing.T) {
 			return "", errors.New("dial tcp: no route to host")
 		},
 	}
-	repos, err := giteaList(context.Background(), fake)
+	repos, err := giteaList(context.Background(), fake, "github.com")
 	if err == nil {
 		t.Fatal("expected error to propagate so Inventory can note the host, got nil")
 	}

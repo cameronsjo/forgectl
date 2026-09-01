@@ -46,14 +46,18 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 		return "", fmt.Errorf("creating worktree base dir %s: %w", base, err)
 	}
 
-	switch r.Host {
-	case "github":
-		if err := cloneBareRepo(ctx, c.run, r.Owner+"/"+r.Name, bareDir, c.gitHubHost); err != nil {
+	// Same hostname predicate as Clone's, and it must stay in step with it: the
+	// gh arm is where GH_HOST is pinned and, on a non-default host, the four
+	// token env vars are scrubbed. A GitHub repo that fell to the else arm
+	// would bare-clone a server-supplied URL under ambient credentials — and a
+	// shorthand target, whose SSHURL is empty by construction, would fail
+	// outright.
+	if r.Host == c.effectiveGitHubHost() {
+		if err := cloneBareRepo(ctx, c.run, r.Owner+"/"+r.Name, bareDir, c.effectiveGitHubHost()); err != nil {
 			slog.Error("Failed to bare-clone from GitHub.", "repo", r.Owner+"/"+r.Name, "dest", bareDir, "error", err)
 			return "", err
 		}
-	default:
-		// gitea and any SSH-reachable host: bare-clone the URL directly.
+	} else {
 		if err := cloneBareFromURL(ctx, c.run, r.SSHURL, bareDir); err != nil {
 			slog.Error("Failed to bare-clone from host.", "host", r.Host, "name", r.Name, "dest", bareDir, "error", err)
 			return "", err

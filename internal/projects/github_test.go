@@ -294,7 +294,7 @@ func TestInventory_KeepsOwnerNotesAndOneAggregateNote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a GitHub outage must not fail the whole inventory: %v", err)
 	}
-	if len(repos) != 1 || repos[0].Host != "gitea" {
+	if len(repos) != 1 || repos[0].Host != "git.sjo.lol" {
 		t.Fatalf("repos = %+v, want the surviving Gitea row", repos)
 	}
 

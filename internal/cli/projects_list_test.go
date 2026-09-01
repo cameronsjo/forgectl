@@ -48,8 +48,8 @@ import (
 
 func TestFilterRepos_NoFilters_ReturnsAllUnchanged(t *testing.T) {
 	repos := []projects.Repo{
-		{Host: "github", Name: "alpha"},
-		{Host: "gitea", Name: "beta"},
+		{Host: "github.com", Name: "alpha"},
+		{Host: "git.sjo.lol", Name: "beta"},
 	}
 	got := filterRepos(repos, "", "")
 	if len(got) != 2 {
@@ -59,16 +59,16 @@ func TestFilterRepos_NoFilters_ReturnsAllUnchanged(t *testing.T) {
 
 func TestFilterRepos_HostFilter_KeepsOnlyMatchingHost(t *testing.T) {
 	repos := []projects.Repo{
-		{Host: "github", Name: "alpha"},
-		{Host: "gitea", Name: "beta"},
-		{Host: "github", Name: "gamma"},
+		{Host: "github.com", Name: "alpha"},
+		{Host: "git.sjo.lol", Name: "beta"},
+		{Host: "github.com", Name: "gamma"},
 	}
-	got := filterRepos(repos, "github", "")
+	got := filterRepos(repos, "github.com", "")
 	if len(got) != 2 {
 		t.Fatalf("host=github: got %d repos, want 2", len(got))
 	}
 	for _, r := range got {
-		if r.Host != "github" {
+		if r.Host != "github.com" {
 			t.Errorf("non-github host %q survived host filter", r.Host)
 		}
 	}
@@ -76,9 +76,9 @@ func TestFilterRepos_HostFilter_KeepsOnlyMatchingHost(t *testing.T) {
 
 func TestFilterRepos_QueryIsCaseInsensitiveSubstring(t *testing.T) {
 	repos := []projects.Repo{
-		{Host: "github", Name: "ForgeCTL"},
-		{Host: "gitea", Name: "homeclaw"},
-		{Host: "github", Name: "other"},
+		{Host: "github.com", Name: "ForgeCTL"},
+		{Host: "git.sjo.lol", Name: "homeclaw"},
+		{Host: "github.com", Name: "other"},
 	}
 	// "forge" must match "ForgeCTL" case-insensitively.
 	got := filterRepos(repos, "", "forge")
@@ -89,18 +89,18 @@ func TestFilterRepos_QueryIsCaseInsensitiveSubstring(t *testing.T) {
 
 func TestFilterRepos_HostAndQueryCombined(t *testing.T) {
 	repos := []projects.Repo{
-		{Host: "github", Name: "forgectl"},
-		{Host: "gitea", Name: "forgectl"}, // same name, different host
-		{Host: "github", Name: "other"},
+		{Host: "github.com", Name: "forgectl"},
+		{Host: "git.sjo.lol", Name: "forgectl"}, // same name, different host
+		{Host: "github.com", Name: "other"},
 	}
-	got := filterRepos(repos, "github", "forge")
-	if len(got) != 1 || got[0].Host != "github" {
+	got := filterRepos(repos, "github.com", "forge")
+	if len(got) != 1 || got[0].Host != "github.com" {
 		t.Errorf("host=github,query=forge: got %+v; want only github/forgectl", got)
 	}
 }
 
 func TestFilterRepos_NilInput_ReturnsEmpty(t *testing.T) {
-	got := filterRepos(nil, "github", "forge")
+	got := filterRepos(nil, "github.com", "forge")
 	if len(got) != 0 {
 		t.Errorf("nil input: got %d repos, want 0", len(got))
 	}
@@ -108,7 +108,7 @@ func TestFilterRepos_NilInput_ReturnsEmpty(t *testing.T) {
 
 func TestFilterRepos_QueryNoMatch_ReturnsEmpty(t *testing.T) {
 	repos := []projects.Repo{
-		{Host: "github", Name: "alpha"},
+		{Host: "github.com", Name: "alpha"},
 	}
 	got := filterRepos(repos, "", "zzzzz")
 	if len(got) != 0 {
@@ -134,7 +134,7 @@ func TestRenderRepoTable_EmptyList_WritesHeaderAndZeroCount(t *testing.T) {
 func TestRenderRepoTable_ClonedCleanRepo_StatusIsClean(t *testing.T) {
 	var out, errOut bytes.Buffer
 	repos := []projects.Repo{
-		{Host: "github", Owner: "cameronsjo", Name: "forgectl", Cloned: true,
+		{Host: "github.com", Owner: "cameronsjo", Name: "forgectl", Cloned: true,
 			Status: projects.GitStatus{State: projects.StatusOK}},
 	}
 	if err := renderRepoTable(&out, &errOut, repos); err != nil {
@@ -165,7 +165,7 @@ func TestRenderRepoTable_NotARepo_IsNotReportedClean(t *testing.T) {
 func TestRenderRepoTable_UnknownStatus_IsNotReportedClean(t *testing.T) {
 	var out, errOut bytes.Buffer
 	repos := []projects.Repo{
-		{Host: "github", Owner: "cameronsjo", Name: "flaky", Cloned: true,
+		{Host: "github.com", Owner: "cameronsjo", Name: "flaky", Cloned: true,
 			Status: projects.GitStatus{State: projects.StatusUnknown}},
 	}
 	if err := renderRepoTable(&out, &errOut, repos); err != nil {
@@ -182,7 +182,7 @@ func TestRenderRepoTable_UnknownStatus_IsNotReportedClean(t *testing.T) {
 func TestRenderRepoTable_UnclonedRepo_StatusIsUncloned(t *testing.T) {
 	var out, errOut bytes.Buffer
 	repos := []projects.Repo{
-		{Host: "github", Owner: "cameronsjo", Name: "newrepo", Cloned: false},
+		{Host: "github.com", Owner: "cameronsjo", Name: "newrepo", Cloned: false},
 	}
 	if err := renderRepoTable(&out, &errOut, repos); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -195,7 +195,7 @@ func TestRenderRepoTable_UnclonedRepo_StatusIsUncloned(t *testing.T) {
 func TestRenderRepoTable_RepoWithOwner_ShowsOwnerSlashName(t *testing.T) {
 	var out, errOut bytes.Buffer
 	repos := []projects.Repo{
-		{Host: "github", Owner: "cameronsjo", Name: "forgectl", Cloned: true},
+		{Host: "github.com", Owner: "cameronsjo", Name: "forgectl", Cloned: true},
 	}
 	if err := renderRepoTable(&out, &errOut, repos); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -208,7 +208,7 @@ func TestRenderRepoTable_RepoWithOwner_ShowsOwnerSlashName(t *testing.T) {
 func TestRenderRepoTable_MirrorRepo_HasMirrorSuffix(t *testing.T) {
 	var out, errOut bytes.Buffer
 	repos := []projects.Repo{
-		{Host: "gitea", Owner: "cameron", Name: "upstream", Mirror: true},
+		{Host: "git.sjo.lol", Owner: "cameron", Name: "upstream", Mirror: true},
 	}
 	if err := renderRepoTable(&out, &errOut, repos); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -234,9 +234,9 @@ func TestRenderRepoTable_EmptyHost_ShowsLocal(t *testing.T) {
 func TestRenderRepoTable_CountSummaryMatchesCounts(t *testing.T) {
 	var out, errOut bytes.Buffer
 	repos := []projects.Repo{
-		{Host: "github", Name: "cloned1", Cloned: true},
-		{Host: "github", Name: "cloned2", Cloned: true},
-		{Host: "gitea", Name: "remote1", Cloned: false},
+		{Host: "github.com", Name: "cloned1", Cloned: true},
+		{Host: "github.com", Name: "cloned2", Cloned: true},
+		{Host: "git.sjo.lol", Name: "remote1", Cloned: false},
 	}
 	if err := renderRepoTable(&out, &errOut, repos); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -295,8 +295,14 @@ func TestListCmd_InvalidHost_ReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for --host bitbucket, got nil")
 	}
-	if !strings.Contains(err.Error(), "invalid --host") {
-		t.Errorf("error = %q; want 'invalid --host'", err.Error())
+	// The rejection must NAME the hosts this inventory actually has. --host is
+	// a closed allowlist precisely so a typo cannot return a confident empty
+	// list, which is the same shape as a real "no repos there" answer.
+	if !strings.Contains(err.Error(), "unknown --host") {
+		t.Errorf("error = %q; want 'unknown --host'", err.Error())
+	}
+	if !strings.Contains(err.Error(), "github.com") {
+		t.Errorf("error = %q; it must name the hosts that ARE valid", err.Error())
 	}
 }
 
@@ -358,7 +364,7 @@ func TestListCmd_HostFlag_FiltersToGithubOnly(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
-	cmd.SetArgs([]string{"--host", "github"})
+	cmd.SetArgs([]string{"--host", "github.com"})
 
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)

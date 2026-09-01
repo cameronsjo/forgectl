@@ -15,6 +15,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
+	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -121,9 +122,14 @@ type Client struct {
 
 	// gitHubHost is the deployment's configured GitHub host ([github].host,
 	// already validated by githubauth.ResolveHost at the CLI seam). It pins
-	// every gh subprocess and anchors canonicalHost's "github" token. New
-	// defaults it to githubauth.DefaultHost.
+	// every gh subprocess and anchors canonicalHost's trusted arm. New defaults
+	// it to githubauth.DefaultHost; read it through effectiveGitHubHost, never
+	// directly, so a struct-literal Client gets the same default.
 	gitHubHost string
+
+	// wings is the resolved [[projects.wings]] placement table. The zero value
+	// is a valid empty table — every repo falls to the host tree.
+	wings WingTable
 }
 
 // Option configures a Client at construction. Options exist so the GitHub
@@ -158,7 +164,25 @@ func WithGitHubHost(host string) Option {
 // GitHubHost returns the deployment's effective GitHub host — the value every
 // gh subprocess is pinned to. CLI call sites need it for ParseCloneTarget and
 // the non-default-host stderr note.
-func (c *Client) GitHubHost() string { return c.gitHubHost }
+func (c *Client) GitHubHost() string { return c.effectiveGitHubHost() }
+
+// effectiveGitHubHost is the one place the zero-value fallback lives. A Client
+// built by struct literal (tests, and any future caller that skips New)
+// carries no host, and every consumer of that field now makes a SECURITY
+// decision with it: canonicalHost's trusted arm, and both clone dispatches.
+//
+// Without this, converting the dispatch from the constant `case "github"` to a
+// field comparison would inherit the hole rather than the defense — a
+// zero-value client would fail the trusted branch and fall through to cloning
+// a server-supplied URL with no GH_HOST pin and no token scrub. canonicalHost
+// has defaulted an empty host since the exact-match fix; this makes the same
+// defense reachable from the dispatch side.
+func (c *Client) effectiveGitHubHost() string {
+	if c.gitHubHost == "" {
+		return githubauth.DefaultHost
+	}
+	return c.gitHubHost
+}
 
 // WithGitBinary overrides the git executable used by status probes and pulls.
 // The path must already be absolute and clean; anything else selects the same
@@ -373,7 +397,7 @@ func (c *Client) localRepos(ctx context.Context) ([]Repo, error) {
 			url, err := c.run.Run(ctx, "git", "-C", p.Dir, "remote", "get-url", "origin")
 			if err == nil {
 				url = strings.TrimSpace(url)
-				if host, owner, name := parseRemoteURL(url, c.gitHubHost); name != "" {
+				if host, owner, name := parseRemoteURL(url, c.effectiveGitHubHost()); name != "" {
 					r.Host, r.Owner, r.Name = host, owner, name
 					// SSHURL is contractually an SSH clone URL; an HTTPS origin would
 					// mislabel it in the JSON inventory, so only store SSH-form origins.
@@ -417,11 +441,23 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 	}
 	const remoteHosts = 2
 	ch := make(chan hostResult, remoteHosts)
+	// These two labels name the SOURCE — which enumerator produced the rows —
+	// not the host a row lands on. They stay fixed strings on purpose: they
+	// order the notes deterministically below, and a Gitea run's rows can now
+	// carry any hostname (or none, if every row was dropped), so there is no
+	// single host to label the source with.
+	const (
+		sourceGitHub = "github"
+		sourceGitea  = "gitea"
+	)
 	go func() {
-		r, n, e := githubList(ctx, c.run, c.githubOwners, c.gitHubHost)
-		ch <- hostResult{"github", r, n, e}
+		r, n, e := githubList(ctx, c.run, c.githubOwners, c.effectiveGitHubHost())
+		ch <- hostResult{sourceGitHub, r, n, e}
 	}()
-	go func() { r, e := giteaList(ctx, c.run); ch <- hostResult{"gitea", r, nil, e} }()
+	go func() {
+		r, e := giteaList(ctx, c.run, c.effectiveGitHubHost())
+		ch <- hostResult{sourceGitea, r, nil, e}
+	}()
 
 	local, err := c.localRepos(ctx)
 	if err != nil {
@@ -445,7 +481,7 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 		fetched[res.host] = res
 	}
 	var remote []Repo
-	for _, host := range []string{"github", "gitea"} {
+	for _, host := range []string{sourceGitHub, sourceGitea} {
 		res := fetched[host]
 		notes = append(notes, res.notes...)
 		if res.err != nil {
@@ -503,7 +539,7 @@ func (c *Client) ListOrg(ctx context.Context, org string) ([]Repo, error) {
 	if !validPathSegment(org) {
 		return nil, fmt.Errorf("invalid GitHub org/user name %q", org)
 	}
-	return githubListOrg(ctx, c.run, org, c.gitHubHost)
+	return githubListOrg(ctx, c.run, org, c.effectiveGitHubHost())
 }
 
 // Clone checks out a remote Repo into the canonical Dir/host/owner/name layout
@@ -536,14 +572,16 @@ func (c *Client) Clone(ctx context.Context, r Repo) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return "", fmt.Errorf("creating canonical clone parent dirs for %s: %w", dest, err)
 	}
-	switch r.Host {
-	case "github":
-		if err := cloneRepo(ctx, c.run, r.Owner+"/"+r.Name, dest, c.gitHubHost); err != nil {
+	// The dispatch predicate is the HOSTNAME, not a token. Only the configured
+	// GitHub host clones through gh, which supplies its own URL under the
+	// GH_HOST pin and the non-default-host token scrub that cloneRepo applies
+	// internally. Every other host clones the URL the row carried.
+	if r.Host == c.effectiveGitHubHost() {
+		if err := cloneRepo(ctx, c.run, r.Owner+"/"+r.Name, dest, c.effectiveGitHubHost()); err != nil {
 			slog.Error("Failed to clone from GitHub.", "host", r.Host, "repo", r.Owner+"/"+r.Name, "dest", dest, "error", err)
 			return "", err
 		}
-	default:
-		// gitea and any SSH-reachable host: clone the URL directly.
+	} else {
 		if err := cloneFromGitea(ctx, c.run, r.SSHURL, dest); err != nil {
 			slog.Error("Failed to clone from host.", "host", r.Host, "name", r.Name, "dest", dest, "error", err)
 			return "", err
@@ -574,6 +612,32 @@ func validPathSegment(s string) bool {
 		!strings.ContainsAny(s, "/\\")
 }
 
+// maxRepoSegmentBytes bounds an owner or repo name used as a path segment.
+// POSIX NAME_MAX is 255 and resolve.go silently DROPS longer directory names,
+// so a row past this is unwritable and would also be invisible to the
+// launcher. 100 is GitHub's own limit for both an owner and a repo name.
+const maxRepoSegmentBytes = 100
+
+// validRepoSegment vets an owner or repo NAME arriving from a remote listing —
+// gh's JSON, tea's TSV — before it is stamped onto a Repo and becomes a
+// directory. validPathSegment is not enough here, and the gap is not
+// theoretical: it accepts a leading '.', so a repo literally named ".git"
+// yields a wing directory that isGitRepo then reports as a repo, hiding every
+// member of that wing; ".bare" collides with the worktree layout's object
+// store. It also accepts ':' (APFS-legal, rendered as '/' in Finder), control
+// characters and ANSI escapes, whitespace, homoglyphs, and any length.
+//
+// The charset is pr.ValidOwnerRepoPart's — the repo's one anchored owner/repo
+// predicate, reused rather than re-spelled — plus the leading-dot and length
+// bounds it does not carry. Rows failing this are dropped from the listing
+// rather than repaired: a name we cannot file is a row we cannot act on.
+func validRepoSegment(s string) bool {
+	return validPathSegment(s) &&
+		!strings.HasPrefix(s, ".") &&
+		len(s) <= maxRepoSegmentBytes &&
+		pr.ValidOwnerRepoPart(s)
+}
+
 // originMatches reports whether the git checkout at dir has an origin remote that
 // resolves to r's (host, owner, name) — i.e. dir really is r, not a same-named
 // repo from a different host.
@@ -582,7 +646,7 @@ func (c *Client) originMatches(ctx context.Context, dir string, r Repo) bool {
 	if err != nil {
 		return false
 	}
-	host, owner, name := parseRemoteURL(strings.TrimSpace(url), c.gitHubHost)
+	host, owner, name := parseRemoteURL(strings.TrimSpace(url), c.effectiveGitHubHost())
 	return host == r.Host && owner == r.Owner && name == r.Name
 }
 

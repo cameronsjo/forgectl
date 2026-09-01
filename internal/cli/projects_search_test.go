@@ -12,7 +12,7 @@ import (
 // the origin-derived repo name.
 func TestFilterRepos_MatchesLocalDirName(t *testing.T) {
 	repos := []projects.Repo{{
-		Host: "github", Owner: "someone", Name: "original",
+		Host: "github.com", Owner: "someone", Name: "original",
 		Cloned: true, LocalPath: "/Users/x/Projects/my-fork",
 	}}
 	if got := filterRepos(repos, "", "my-fork"); len(got) != 1 {
