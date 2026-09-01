@@ -32,19 +32,19 @@ func TestResolveWings_FailsClosed(t *testing.T) {
 			name:    "wing named after the default github host",
 			host:    "github.com",
 			wings:   []Wing{{Name: "github.com"}},
-			wantErr: "named after the configured [github] host",
+			wantErr: "is the configured [github] host",
 		},
 		{
 			name:    "wing named after a configured GHE host",
 			host:    "github.example.com",
 			wings:   []Wing{{Name: "github.example.com"}},
-			wantErr: "named after the configured [github] host",
+			wantErr: "is the configured [github] host",
 		},
 		{
 			name:    "wing name is case-insensitively the host",
 			host:    "github.com",
 			wings:   []Wing{{Name: "GitHub.com"}},
-			wantErr: "named after the configured [github] host",
+			wantErr: "is the configured [github] host",
 		},
 		{
 			name:    "two wings share a name",
@@ -124,9 +124,6 @@ func TestWingTable_LookupIsCaseInsensitive(t *testing.T) {
 		if got := table.For(tc.owner, tc.name); got != tc.want {
 			t.Errorf("For(%q, %q) = %q, want %q", tc.owner, tc.name, got, tc.want)
 		}
-	}
-	if got := len(table.Names()); got != 2 {
-		t.Errorf("Names() returned %d wings, want 2", got)
 	}
 }
 

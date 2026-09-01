@@ -3,8 +3,9 @@ package cli
 import (
 	"fmt"
 	"io"
+	"maps"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
@@ -26,8 +27,10 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list [query]",
 		Short: "List projects across local, GitHub, and Gitea (cloned + uncloned)",
-		Long: "List every project across local clones, GitHub.com, and the\n" +
-			"self-hosted Gitea (git.sjo.lol/cameron), marking which are checked out.\n\n" +
+		Long: "List every project across local clones, the configured GitHub host,\n" +
+			"and the Gitea instance tea is logged into, marking which are checked\n" +
+			"out. Each row's host is its full hostname; Gitea rows take theirs from\n" +
+			"the repo's own clone URL, so no Gitea host is configured anywhere.\n\n" +
 			"GitHub scope comes from [projects] owners in config.toml; leave it unset\n" +
 			"and forgectl lists the repos of whoever gh is authenticated as. Every gh\n" +
 			"call is pinned to the deployment's [github] host (default github.com) —\n" +
@@ -81,7 +84,7 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 					// whole diagnostic; the suggestion list is derived from
 					// server-supplied hostnames, so it goes through termsafe.
 					return fmt.Errorf("unknown --host %q; this inventory has: %s",
-						host, termsafe.SafeLine(strings.Join(sortedKeys(known), ", ")))
+						host, termsafe.SafeLine(strings.Join(slices.Sorted(maps.Keys(known)), ", ")))
 				}
 			}
 
@@ -138,17 +141,6 @@ func hostMatches(r projects.Repo, host string) bool {
 		return r.Host == ""
 	}
 	return strings.ToLower(r.Host) == host
-}
-
-// sortedKeys returns a map's keys in a stable order, so the "this inventory
-// has:" suggestion does not reshuffle between runs.
-func sortedKeys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // localHostFilter is the --host value naming repos with no parseable origin.

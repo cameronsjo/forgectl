@@ -175,7 +175,8 @@ func projectAmbiguityError(mode projectSelectionMode, count int) error {
 func openOrClone(ctx context.Context, client *projects.Client, cmd *cobra.Command, r projects.Repo) error {
 	dir := r.LocalPath
 	if !r.Cloned {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s/%s from %s…\n", termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), termsafe.SafeLine(r.Host))
+		// Best-effort diagnostic write, same as every stderr note here.
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s/%s from %s…\n", termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), termsafe.SafeLine(r.Host))
 		d, err := client.Clone(ctx, r)
 		if err != nil {
 			return err

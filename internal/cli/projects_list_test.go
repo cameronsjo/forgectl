@@ -23,7 +23,8 @@ package cli
 //   [x] Unhappy: --host with unrecognised value returns error
 //   [x] Happy: --json emits valid JSON array to stdout; count note on stderr
 //   [x] Happy: --json on empty result emits [] not null
-//   [x] Happy: --host github filters table to github rows only
+//   [x] Happy: --host github.com filters table to that host's rows only
+//   [x] Unhappy: --host rejects a hostname the inventory does not have
 //   [x] Happy: positional query arg filters table by name substring
 //   [x] Happy: degradation notes from Inventory appear on stderr, not stdout
 //   [x] Invariant: a note carrying terminal controls or a bidi override is

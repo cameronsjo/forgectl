@@ -254,7 +254,7 @@ func itoa(i int) string {
 func TestResolveTarget_FindsWingMember(t *testing.T) {
 	tmp := t.TempDir()
 	member := filepath.Join(tmp, "cadence-ecosystem", "forgectl")
-	if err := os.MkdirAll(filepath.Join(member, ".git"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(member, ".git"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	c := &Client{Dir: tmp}
@@ -274,7 +274,7 @@ func TestResolveTarget_FindsWingMember(t *testing.T) {
 // the owner directory and start a session in a folder of repos.
 func TestResolveTarget_WingPassRequiresGitMarker(t *testing.T) {
 	tmp := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(tmp, "github.com", "cameronsjo", "quickmd", ".git"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(tmp, "github.com", "cameronsjo", "quickmd", ".git"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := (&Client{Dir: tmp}).ResolveTarget("cameronsjo"); !errors.Is(err, ErrTargetNotFound) {
@@ -290,7 +290,7 @@ func TestResolveTarget_DuplicateCheckoutNamesBothPaths(t *testing.T) {
 	wing := filepath.Join(tmp, "cadence-ecosystem", "forgectl")
 	host := filepath.Join(tmp, "github.com", "cameronsjo", "forgectl")
 	for _, d := range []string{wing, host} {
-		if err := os.MkdirAll(filepath.Join(d, ".git"), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(d, ".git"), 0o750); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -312,13 +312,34 @@ func TestResolveTarget_DuplicateCheckoutNamesBothPaths(t *testing.T) {
 func TestResolveTarget_WingsDoNotDeepenTheWalk(t *testing.T) {
 	tmp := t.TempDir()
 	deep := filepath.Join(tmp, "wing", "member", "vendor", "buried")
-	if err := os.MkdirAll(filepath.Join(deep, ".git"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(deep, ".git"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(tmp, "wing", "member", ".git"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(tmp, "wing", "member", ".git"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := (&Client{Dir: tmp}).ResolveTarget("buried"); !errors.Is(err, ErrTargetNotFound) {
 		t.Errorf("a repo at depth 4 resolved = %v; want ErrTargetNotFound", err)
+	}
+}
+
+// TestResolveTarget_DoesNotDescendIntoAWingMember: a wing member is a
+// checkout, so its children are that repo's own contents — never repos in a
+// host tree. Matching one and then walking into it anyway let `launch
+// internal` resolve to <root>/<wing>/<repo>/internal, checked with isRealDir
+// alone and with no .git of its own: a session started inside a subdirectory
+// of an unrelated repo.
+func TestResolveTarget_DoesNotDescendIntoAWingMember(t *testing.T) {
+	tmp := t.TempDir()
+	member := filepath.Join(tmp, "cadence-ecosystem", "forgectl")
+	if err := os.MkdirAll(filepath.Join(member, ".git"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// An ordinary source directory inside that repo — not a project.
+	if err := os.MkdirAll(filepath.Join(member, "internal"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Client{Dir: tmp}).ResolveTarget("internal"); !errors.Is(err, ErrTargetNotFound) {
+		t.Errorf("resolving a wing member's subdirectory = %v; want ErrTargetNotFound", err)
 	}
 }

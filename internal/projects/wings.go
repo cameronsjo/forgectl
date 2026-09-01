@@ -45,57 +45,60 @@ func (t WingTable) For(owner, name string) string {
 	return t.byRepo[strings.ToLower(owner+"/"+name)]
 }
 
-// Names returns every configured wing name, for callers that need the
-// placement namespace itself rather than a per-repo answer.
-func (t WingTable) Names() []string {
-	seen := make(map[string]bool, len(t.byRepo))
-	out := make([]string, 0, len(t.byRepo))
-	for _, wing := range t.byRepo {
-		if !seen[wing] {
-			seen[wing] = true
-			out = append(out, wing)
-		}
+// ValidateWingName is the one wing-name rule, shared by the config table and
+// the `projects clone --wing` flag. It returns the normalized (lowercased,
+// trimmed) name.
+//
+// Two rejections, both because the name becomes a directory directly under the
+// projects root:
+//
+//  1. Outside the path-segment charset. ':' is APFS-legal and renders as '/'
+//     in Finder, a leading '.' hides the tree from ls, and a homoglyph makes
+//     two wings that look identical.
+//  2. Equal to the configured GitHub host. The wing directory and the host
+//     tree would be the same directory with different leaf semantics — a wing
+//     member sits one level down, a host-tree clone two — so a repo whose name
+//     matched an owner would land inside a real owner directory.
+//
+// It is a separate function because the flag is a SECOND entry point into the
+// same namespace and does not go through ResolveWings. Two entry points, one
+// rule.
+func ValidateWingName(gitHubHost, wing string) (string, error) {
+	name := strings.ToLower(strings.TrimSpace(wing))
+	if name == "" {
+		return "", fmt.Errorf("wing name is empty")
 	}
-	return out
+	if !githubauth.ValidHostSegment(name) {
+		// Categorical, like ResolveHost's own rejections: the value is
+		// operator input, but it is also about to be a directory name and the
+		// error prints to a terminal.
+		return "", fmt.Errorf("wing name is outside the allowed charset " +
+			"(lowercase letters, digits, '.' and '-'; it becomes a directory under the projects root)")
+	}
+	if name == gitHubHost {
+		return "", fmt.Errorf("wing name is the configured [github] host; " +
+			"a wing and a host tree cannot be the same directory")
+	}
+	return name, nil
 }
 
 // ResolveWings validates the `[[projects.wings]]` table against the resolved
 // GitHub host and builds the owner/name → wing lookup. gitHubHost must already
 // be githubauth.ResolveHost output.
 //
-// It fails closed on four config shapes, each of which would otherwise be a
-// silent misplacement:
-//
-//  1. A name outside the path-segment charset. The name becomes a directory
-//     directly under the projects root; ':' is APFS-legal and renders as '/'
-//     in Finder, a leading '.' hides the tree from ls, and a homoglyph makes
-//     two wings that look identical.
-//  2. A name equal to the GitHub host. The wing directory and the host tree
-//     would be the same directory, with different leaf semantics — wing
-//     members sit one level down, host-tree clones two.
-//  3. A repeated name. Two blocks naming one directory with different repos is
-//     a last-wins mapping with nothing to show for it.
-//  4. A repo claimed by two wings, or a repo entry that is not a safe
-//     "owner/name". These steer which tree a clone lands in, so an ambiguous
-//     or malformed entry must not resolve to a coin flip.
+// Beyond ValidateWingName's two rules it fails closed on two more shapes, each
+// of which would otherwise be a silent misplacement: a repeated name (two
+// blocks naming one directory with different repos is a last-wins mapping with
+// nothing to show for it), and a repo claimed by two wings or written as
+// something other than a safe "owner/name" (these steer which tree a clone
+// lands in, so an ambiguous entry must not resolve to a coin flip).
 func ResolveWings(gitHubHost string, wings []Wing) (WingTable, error) {
 	byRepo := make(map[string]string)
 	seenWing := make(map[string]bool, len(wings))
 	for i, w := range wings {
-		name := strings.ToLower(strings.TrimSpace(w.Name))
-		if name == "" {
-			return WingTable{}, fmt.Errorf("[[projects.wings]] entry %d has no name", i+1)
-		}
-		if !githubauth.ValidHostSegment(name) {
-			// Categorical, like ResolveHost's own rejections: the value is
-			// operator config, but it is also about to be a directory name and
-			// the error prints to a terminal.
-			return WingTable{}, fmt.Errorf("[[projects.wings]] entry %d has a name outside the allowed charset "+
-				"(lowercase letters, digits, '.' and '-'; it becomes a directory under the projects root)", i+1)
-		}
-		if name == gitHubHost {
-			return WingTable{}, fmt.Errorf("[[projects.wings]] entry %d is named after the configured [github] host; "+
-				"a wing and a host tree cannot be the same directory", i+1)
+		name, err := ValidateWingName(gitHubHost, w.Name)
+		if err != nil {
+			return WingTable{}, fmt.Errorf("[[projects.wings]] entry %d: %w", i+1, err)
 		}
 		if seenWing[name] {
 			return WingTable{}, fmt.Errorf("[[projects.wings]] entry %d repeats an earlier wing name", i+1)

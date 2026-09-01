@@ -315,7 +315,16 @@ func canonicalHost(hostname, gitHubHost string) string {
 	}
 	bare := strings.ToLower(hostname)
 	if i := strings.LastIndex(bare, ":"); i >= 0 {
-		if port := bare[i+1:]; port != "" && strings.Trim(port, "0123456789") == "" {
+		port := bare[i+1:]
+		// The colon must be the ONLY one, or this is an IPv6 address and its
+		// last group is not a port. url.Hostname() has already stripped both
+		// the brackets and any real port by the time an IPv6 remote reaches
+		// here, so a second strip eats address bits: "::1" and "::2" both
+		// became ":" — two different hosts, one Key(), so one silently
+		// suppressed the other in the inventory. Neither can reach the
+		// filesystem (ValidHostSegment rejects a colon), but Key() is not
+		// guarded by that.
+		if port != "" && !strings.Contains(bare[:i], ":") && strings.Trim(port, "0123456789") == "" {
 			bare = bare[:i]
 		}
 	}

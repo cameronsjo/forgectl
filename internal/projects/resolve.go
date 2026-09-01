@@ -235,16 +235,26 @@ func (c *Client) searchRoot(name string, budget *int) ([]string, error) {
 			// so without this it is walked THROUGH rather than matched, and
 			// `surface launch <name>` cannot find it.
 			//
-			// The gate is the .git marker, matching discoverWingCandidates
-			// rather than this function's usual isRealDir — a wing member is a
-			// checkout by definition, and requiring the marker is also what
-			// keeps a real owner directory (which holds repos but is not one)
-			// from matching here.
-			if owner == name && isGitRepo(ownerDir) {
-				matches = append(matches, ownerDir)
-				if len(matches) > maxCandidates {
-					return matches, nil
+			// The gate is isWingMember — the ONE definition, shared with
+			// discoverWingCandidates — rather than this function's usual
+			// isRealDir. Two walkers implementing the same layout rule is how
+			// `projects list` and `surface launch` come to disagree about what
+			// exists on disk.
+			//
+			// A wing member is a CHECKOUT, so its children are that repo's own
+			// contents — never repos in a host tree. Matching one and then
+			// walking into it anyway would let `launch internal` resolve to
+			// `<root>/<wing>/<repo>/internal`, checked with isRealDir alone and
+			// with no .git of its own: a session started inside a subdirectory
+			// of an unrelated repo. So this arm always continues, match or not.
+			if isWingMember(ownerDir) {
+				if owner == name {
+					matches = append(matches, ownerDir)
+					if len(matches) > maxCandidates {
+						return matches, nil
+					}
 				}
+				continue
 			}
 			repos, err := readDirNames(ownerDir, budget)
 			if err != nil {

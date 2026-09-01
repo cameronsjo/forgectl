@@ -314,21 +314,30 @@ func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error)
 		//
 		// A wing directory that is ALSO a repo is appended as a flat project
 		// too, since it is both; one that is not, is not.
+		// All three passes RUN, and none of them short-circuits the others.
+		// A directory can legitimately satisfy more than one: the
+		// cadence-ecosystem wing is itself a checkout (wing + flat), and a
+		// wing whose name happened to equal a host would otherwise hide that
+		// host's whole tree behind an early `continue`. Candidates are keyed
+		// by directory, so overlapping passes cannot double-count.
+		var found bool
 		if wing := discoverWingCandidates(top); len(wing) > 0 {
 			candidates = append(candidates, wing...)
-			if isGitRepo(top) {
-				candidates = append(candidates, discoverCandidate{e.Name(), top})
-			}
-			continue
+			found = true
+		}
+		if canon := discoverCanonicalHostCandidates(top); len(canon) > 0 {
+			candidates = append(candidates, canon...)
+			found = true
 		}
 		if isGitRepo(top) {
 			candidates = append(candidates, discoverCandidate{e.Name(), top})
 			continue
 		}
-		if canon := discoverCanonicalHostCandidates(top); len(canon) > 0 {
-			candidates = append(candidates, canon...)
+		if found {
 			continue
 		}
+		// Not a repo and holding none — a plain directory is still a project,
+		// which is what keeps a scratch notes folder listed.
 		candidates = append(candidates, discoverCandidate{e.Name(), top})
 	}
 
@@ -340,8 +349,22 @@ func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error)
 	return projects, nil
 }
 
+// isWingMember is THE definition of a wing member, and it is deliberately a
+// named predicate rather than an inline isGitRepo call.
+//
+// Two independent walkers apply this rule — discoverWingCandidates below (for
+// `projects list`) and searchRoot in resolve.go (for `surface launch`) — and a
+// layout rule implemented twice is exactly the shape that drifts: tighten the
+// marker in one and the two commands start disagreeing about what exists on
+// disk, with nothing red to show for it. One function, both callers.
+//
+// The rule is the .git marker, not merely being a directory. That is what
+// keeps an OWNER directory — which sits at the same depth and holds repos but
+// is not one — from matching.
+func isWingMember(dir string) bool { return isGitRepo(dir) }
+
 // discoverWingCandidates walks a potential wing directory (Dir/<wing>) ONE
-// level deep, collecting every child that carries a .git marker. Returns nil
+// level deep, collecting every child that isWingMember accepts. Returns nil
 // when there are none, signalling the caller that this is not a wing.
 //
 // DISCOVERY IS STRUCTURAL, not config-driven, and that is a deliberate split
@@ -368,7 +391,7 @@ func discoverWingCandidates(wingDir string) []discoverCandidate {
 			continue
 		}
 		child := filepath.Join(wingDir, e.Name())
-		if !isGitRepo(child) {
+		if !isWingMember(child) {
 			continue
 		}
 		out = append(out, discoverCandidate{e.Name(), child})
@@ -650,9 +673,18 @@ func (c *Client) CloneInto(ctx context.Context, r Repo, wing string) (string, er
 	// the whole reason it is safe: a stat alone would let any same-named but
 	// DIFFERENT repo suppress a legitimate clone. originMatches asks the
 	// checkout who it actually is.
-	if other, oerr := c.otherPlacement(r, wing); oerr == nil && other != dest {
-		if _, serr := os.Stat(other); serr == nil && c.originMatches(ctx, other, r) {
-			slog.Info("Repo already checked out under the other layout; not cloning a duplicate.",
+	for _, other := range c.otherPlacements(r, dest) {
+		// isGitRepo, not a bare Stat: `git -C <dir>` WALKS UP to find a
+		// repository, so probing a same-named non-repo directory nested under
+		// an ancestor checkout would return that ancestor's origin — and a
+		// match there would make Clone skip a legitimate clone and hand back
+		// the wrong path. localRepos guards the identical hazard for the same
+		// reason.
+		if !isGitRepo(other) {
+			continue
+		}
+		if c.originMatches(ctx, other, r) {
+			slog.Info("Repo already checked out under another layout; not cloning a duplicate.",
 				"existing", other, "wouldHaveBeen", dest)
 			return other, nil
 		}
@@ -720,13 +752,39 @@ func (c *Client) CloneInto(ctx context.Context, r Repo, wing string) (string, er
 // It returns an error rather than falling back, because falling back is how a
 // rejected value still ends up on disk under a different name.
 func Placement(root string, r Repo, wing string) (string, error) {
+	// OWNER AND NAME GO THROUGH validRepoSegment, NOT validPathSegment, and on
+	// BOTH branches even though a wing path contains no owner.
+	//
+	// Two separate reasons, both learned the hard way. The stronger guard,
+	// because a listing row is not the only way a repo name reaches this
+	// function: ParseCloneTarget's URL branch takes the last two path segments
+	// of an operator-supplied URL with no charset check of its own, so
+	// `clone https://host/owner/.git` would otherwise land a checkout whose
+	// leaf is `.git` — which makes isGitRepo report the PARENT as a repo and
+	// hides every sibling from the inventory. That is the exact defect this
+	// plan set out to fix, re-armed through a different door.
+	//
+	// On both branches, because Placement is the last checkpoint before Clone
+	// and Worktree dispatch and both build a `gh repo clone <owner>/<name>`
+	// argv from these fields. An owner that only the host branch rejected
+	// would still reach that argv on the wing path, where a leading '-' is
+	// flag injection. Re-homing only the segments the path happens to use is
+	// the classic "removal keeps the consumer, drops the control" downgrade.
 	name := strings.ToLower(r.Name)
-	if !validPathSegment(name) {
+	if !validRepoSegment(name) {
 		return "", fmt.Errorf("refusing to place a repo: unsafe name segment")
 	}
+	owner := strings.ToLower(r.Owner)
+	if !validRepoSegment(owner) {
+		return "", fmt.Errorf("refusing to place a repo: unsafe owner segment")
+	}
 	if wing != "" {
+		// The wing segment gets the HOST-tier guard, not validPathSegment's.
+		// A wing sits in the same depth-1 namespace as the host trees, so it
+		// needs the same charset — and this branch is reachable from the
+		// `--wing` flag, which does not go through ResolveWings.
 		w := strings.ToLower(wing)
-		if !validPathSegment(w) {
+		if !githubauth.ValidHostSegment(w) {
 			return "", fmt.Errorf("refusing to place a repo: unsafe wing segment")
 		}
 		return filepath.Join(root, w, name), nil
@@ -734,10 +792,6 @@ func Placement(root string, r Repo, wing string) (string, error) {
 	host := strings.ToLower(r.Host)
 	if !githubauth.ValidHostSegment(host) {
 		return "", fmt.Errorf("refusing to place a repo: unsafe host segment")
-	}
-	owner := strings.ToLower(r.Owner)
-	if !validPathSegment(owner) {
-		return "", fmt.Errorf("refusing to place a repo: unsafe owner segment")
 	}
 	return filepath.Join(root, host, owner, name), nil
 }
@@ -782,23 +836,36 @@ func validRepoSegment(s string) bool {
 		pr.ValidOwnerRepoPart(s)
 }
 
-// otherPlacement returns the path r would occupy under the OTHER of the two
-// filing rules: the host tree when wing routed it to a wing, and r's
-// configured wing when it did not.
+// otherPlacements returns every path r could legitimately occupy OTHER than
+// dest — the host tree, plus its configured wing.
 //
-// A repo with no wing at all has no other placement — the host tree is its
-// only home — so that case returns an error and the caller skips the probe.
-// It reports an error rather than "" so a guard failure can never be mistaken
-// for "checked and found nothing".
-func (c *Client) otherPlacement(r Repo, wing string) (string, error) {
-	if wing != "" {
-		return Placement(c.Dir, r, "")
+// It returns a slice rather than a single path because there are up to THREE
+// candidates, not two: `--wing foo` on a repo the table files under `bar`
+// makes `dest` the `foo` path, the host tree one alternative, and `bar` — the
+// place the repo most likely actually is — the other. Returning only "the
+// other one" would miss exactly the case an override creates, which is when a
+// duplicate is most likely.
+//
+// Unplaceable candidates are dropped rather than erroring: this is a probe, and
+// a path that cannot be composed is a path nothing can be checked out at.
+func (c *Client) otherPlacements(r Repo, dest string) []string {
+	var out []string
+	add := func(p string, err error) {
+		if err != nil || p == dest {
+			return
+		}
+		for _, seen := range out {
+			if seen == p {
+				return
+			}
+		}
+		out = append(out, p)
 	}
-	configured := c.WingFor(r)
-	if configured == "" {
-		return "", fmt.Errorf("repo has no wing; the host tree is its only placement")
+	add(Placement(c.Dir, r, ""))
+	if configured := c.WingFor(r); configured != "" {
+		add(Placement(c.Dir, r, configured))
 	}
-	return Placement(c.Dir, r, configured)
+	return out
 }
 
 // originMatches reports whether the git checkout at dir has an origin remote that

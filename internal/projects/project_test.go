@@ -345,17 +345,47 @@ func TestParseRemoteURL_GHEHost(t *testing.T) {
 // TestParseRemoteURL_IPv6Literal is the one form that can put a ':' into
 // Repo.Host — url.Hostname() strips a port, and the scp-like branch puts a
 // port in the PATH, so no ordinary ported URL reaches here with a colon.
-// validPathSegment accepts ':' (APFS-legal, rendered as '/' in Finder), which
-// is why the host segment needs its own charset guard rather than that one.
+//
+// It asserts the EXACT host, not merely that a colon survived. The weaker
+// assertion passed while canonicalHost was mangling these: its port-strip ran
+// a second time on an address url.Hostname() had already unbracketed, so
+// "::1" and "::2" both came out as ":" — two different hosts sharing one
+// Key(), where one silently suppresses the other in the inventory. A test that
+// only checks `strings.Contains(host, ":")` cannot tell that from correct
+// behavior, which is exactly why it has to compare values.
 func TestParseRemoteURL_IPv6Literal(t *testing.T) {
-	host, owner, name := parseRemoteURL("ssh://git@[::1]:22/acme/tool.git", "github.com")
-	if owner != "acme" || name != "tool" {
-		t.Fatalf("parseRemoteURL IPv6 = (%q,%q,%q), want owner/name parsed", host, owner, name)
+	for _, tc := range []struct{ url, wantHost string }{
+		{"ssh://git@[::1]:22/acme/tool.git", "::1"},
+		{"ssh://git@[::2]/acme/tool.git", "::2"},
+		{"ssh://git@[2001:db8::1]:22/a/b.git", "2001:db8::1"},
+	} {
+		t.Run(tc.url, func(t *testing.T) {
+			host, owner, name := parseRemoteURL(tc.url, "github.com")
+			if host != tc.wantHost {
+				t.Errorf("host = %q, want %q", host, tc.wantHost)
+			}
+			if owner == "" || name == "" {
+				t.Errorf("owner/name = %q/%q, want both parsed", owner, name)
+			}
+			// validPathSegment ACCEPTS a colon (APFS-legal, rendered as '/' in
+			// Finder), which is why the host segment needs its own charset.
+			if !validPathSegment(host) {
+				t.Errorf("validPathSegment(%q) rejected it; this test asserts the guard it MISSES", host)
+			}
+			if githubauth.ValidHostSegment(host) {
+				t.Errorf("ValidHostSegment(%q) accepted a colon-bearing host segment", host)
+			}
+		})
 	}
-	if !strings.Contains(host, ":") {
-		t.Skipf("host %q carries no colon; the segment guard is still what must reject it", host)
-	}
-	if githubauth.ValidHostSegment(host) {
-		t.Errorf("ValidHostSegment(%q) accepted a colon-bearing host segment", host)
+}
+
+// TestCanonicalHost_DistinctIPv6HostsKeepDistinctKeys is the collision half:
+// the mangling above made two different servers share a dedup identity, and
+// Key() is not guarded by ValidHostSegment the way a path is.
+func TestCanonicalHost_DistinctIPv6HostsKeepDistinctKeys(t *testing.T) {
+	a := Repo{Host: canonicalHost("::1", "github.com"), Owner: "o", Name: "n"}
+	b := Repo{Host: canonicalHost("::2", "github.com"), Owner: "o", Name: "n"}
+	if a.Key() == b.Key() {
+		t.Errorf("two different hosts share a key: %q — one would suppress the other in the inventory", a.Key())
 	}
 }
