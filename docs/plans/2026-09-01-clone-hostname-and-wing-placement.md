@@ -1,6 +1,7 @@
 ---
-status: "in-flight"
+status: "done"
 updated: "2026-09-01"
+next: "PR #433 open and ready — awaiting Cameron's review and merge"
 branch: "feat/hostname-and-wing-placement"
 body_sha256: "2415100a4c6a59aa3e6533ab414550ae1efd7a13af7a86e7608057274938e18a"
 session: "stone-anthem"
