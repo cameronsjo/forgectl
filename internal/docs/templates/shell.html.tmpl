@@ -36,8 +36,12 @@
       <nav class="sidenav" aria-label="Indexed docs" style="border-radius:0;border:0;flex:1;overflow-y:auto">
         {{range .Groups}}
         <div class="sidenav__group">{{.Root}}</div>
+        {{if .Tree}}
+        <ul class="tree tree--static" aria-label="{{.Root}}">{{template "treeNodes" .Tree}}</ul>
+        {{else}}
         {{range .Docs}}
         <a href="{{.Href}}" data-filter-text="{{.FilterText}}"{{if .Current}} aria-current="page"{{end}}><span class="label">{{.Title}}</span></a>
+        {{end}}
         {{end}}
         {{end}}
       </nav>
@@ -54,3 +58,4 @@
 </div>
 </body>
 </html>
+{{define "treeNodes"}}{{range .}}<li>{{if .Leaf}}<a class="tree__row tree__leaf" href="{{.Leaf.Href}}" data-filter-text="{{.Leaf.FilterText}}"{{if .Leaf.Current}} aria-current="page"{{end}}><span class="tree__twisty" aria-hidden="true"></span><span class="label">{{.Leaf.Title}}</span></a>{{else}}<details{{if .Open}} open{{end}}><summary class="tree__row"><span class="tree__twisty" aria-hidden="true"></span><span class="label">{{.Name}}</span> <span class="count">{{.Count}}</span></summary><ul class="tree__group">{{template "treeNodes" .Children}}</ul></details>{{end}}</li>{{end}}{{end}}

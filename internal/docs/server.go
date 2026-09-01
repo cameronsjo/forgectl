@@ -386,9 +386,13 @@ type shellData struct {
 	Groups   []sidenavGroup
 }
 
+// sidenavGroup renders one labeled section of the sidenav. Exactly one of
+// Docs (a flat link list — the Recent group) or Tree (a nested .tree--static
+// — every per-root group) is populated; the template branches on Tree.
 type sidenavGroup struct {
 	Root string
 	Docs []sidenavLink
+	Tree []*treeNode
 }
 
 type sidenavLink struct {
@@ -396,6 +400,17 @@ type sidenavLink struct {
 	Title      string
 	FilterText string
 	Current    bool
+}
+
+// treeNode is one row of a root's directory tree: a leaf (Leaf non-nil) or a
+// directory carrying its children, its descendant-leaf Count, and whether it
+// renders expanded (Open — true only on the path to the current doc).
+type treeNode struct {
+	Name     string
+	Count    int
+	Open     bool
+	Leaf     *sidenavLink
+	Children []*treeNode
 }
 
 func renderShell(w http.ResponseWriter, idx *Index, ctx pageContext) {
@@ -434,11 +449,44 @@ func buildGroups(idx *Index, currentRoot, currentRel string) []sidenavGroup {
 		sort.Slice(docs, func(i, j int) bool { return docs[i].RelPath < docs[j].RelPath })
 		groups = append(groups, sidenavGroup{
 			Root: root.Label,
-			Docs: toLinks(docs, currentRoot, currentRel),
+			Tree: buildTree(docs, currentRoot, currentRel),
 		})
 	}
 
 	return groups
+}
+
+// buildTree folds a root's sorted docs into a directory tree. Docs arrive
+// sorted by RelPath, so siblings come out alphabetical, files and directories
+// interleaved — the same order the flat list had, minus the repetition of
+// every ancestor directory in every row.
+func buildTree(docs []Doc, currentRoot, currentRel string) []*treeNode {
+	var top []*treeNode
+	// dirs maps a directory's path-so-far (joined segments) to its node, so
+	// sibling files landing after a directory's first child still find it.
+	dirs := map[string]*treeNode{}
+
+	for _, d := range docs {
+		link := toLinks([]Doc{d}, currentRoot, currentRel)[0]
+		segments := strings.Split(d.RelPath, "/")
+		parent := &top
+		prefix := ""
+		for _, dir := range segments[:len(segments)-1] {
+			prefix += dir + "/"
+			node, ok := dirs[prefix]
+			if !ok {
+				node = &treeNode{Name: dir}
+				dirs[prefix] = node
+				*parent = append(*parent, node)
+			}
+			node.Count++
+			node.Open = node.Open || link.Current
+			parent = &node.Children
+		}
+		leaf := link
+		*parent = append(*parent, &treeNode{Name: link.Title, Leaf: &leaf})
+	}
+	return top
 }
 
 func toLinks(docs []Doc, currentRoot, currentRel string) []sidenavLink {
