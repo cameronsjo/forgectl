@@ -31,12 +31,11 @@ func TestRender_FrontmatterBecomesDisclosure(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 	for _, want := range []string{
-		`<details class="frontmatter">`,
-		`<dl class="kv">`,
-		`<dt>status</dt>`,
-		`<dd>in-review</dd>`,
-		`<dt>branch</dt>`,
-		`<dd>plan/docs-fix-up</dd>`,
+		`<div class="props">`,
+		`<span class="chip">in-review</span>`,
+		`>status</span>`,
+		`>branch</span>`,
+		`plan/docs-fix-up`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("rendered output missing %q:\n%s", want, got)
@@ -57,9 +56,9 @@ func TestRender_FrontmatterKeyOrderPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	iStatus := strings.Index(got, "<dt>status</dt>")
-	iUpdated := strings.Index(got, "<dt>updated</dt>")
-	iBranch := strings.Index(got, "<dt>branch</dt>")
+	iStatus := strings.Index(got, ">status</span>")
+	iUpdated := strings.Index(got, ">updated</span>")
+	iBranch := strings.Index(got, ">branch</span>")
 	if iStatus < 0 || iUpdated < 0 || iBranch < 0 {
 		t.Fatalf("expected all three keys present:\n%s", got)
 	}
@@ -73,7 +72,7 @@ func TestRender_NoFrontmatterNoDisclosure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if strings.Contains(got, `class="frontmatter"`) {
+	if strings.Contains(got, `class="props"`) {
 		t.Errorf("disclosure block on a frontmatter-less doc:\n%s", got)
 	}
 }
@@ -148,5 +147,57 @@ func TestChromaCSS_UsesArtificerTokens(t *testing.T) {
 	}
 	if strings.Contains(css, "#272822") {
 		t.Error("chroma stylesheet still carries the monokai background")
+	}
+}
+
+// Docs-reader-v2 contracts (docs/plans/2026-09-01-docs-reader-v2.md):
+//   [x] Happy: GFM callout blockquotes become tiered .callout blocks
+//   [x] Sad: an ordinary blockquote stays a plain blockquote
+//   [x] Happy: RenderDoc returns the h2/h3 outline with ids, and a word count
+
+func TestRender_CalloutTiers(t *testing.T) {
+	got, err := Render([]byte("> [!WARNING]\n> mind the gap\n"))
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, want := range []string{`callout--warning`, `callout__title`, `mind the gap`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("callout output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "[!WARNING]") {
+		t.Errorf("callout marker leaked into output:\n%s", got)
+	}
+}
+
+func TestRender_PlainBlockquoteUntouched(t *testing.T) {
+	got, err := Render([]byte("> just a quote\n"))
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if strings.Contains(got, "callout") {
+		t.Errorf("plain blockquote gained callout chrome:\n%s", got)
+	}
+}
+
+func TestRenderDoc_OutlineAndWords(t *testing.T) {
+	doc, err := RenderDoc([]byte("# Top\n\nsome words here now\n\n## Alpha\n\nmore body\n\n### Deep\n\n## Beta\n"))
+	if err != nil {
+		t.Fatalf("RenderDoc: %v", err)
+	}
+	if len(doc.Outline) != 3 {
+		t.Fatalf("outline = %+v, want 3 items (h2 Alpha, h3 Deep, h2 Beta)", doc.Outline)
+	}
+	if doc.Outline[0].Text != "Alpha" || doc.Outline[0].Level != 2 || doc.Outline[0].ID != "alpha" {
+		t.Errorf("outline[0] = %+v", doc.Outline[0])
+	}
+	if doc.Outline[1].Text != "Deep" || doc.Outline[1].Level != 3 {
+		t.Errorf("outline[1] = %+v", doc.Outline[1])
+	}
+	if doc.Words < 8 || doc.Words > 20 {
+		t.Errorf("word count %d implausible for the fixture", doc.Words)
+	}
+	if doc.Minutes < 1 {
+		t.Errorf("minutes = %d, want >= 1", doc.Minutes)
 	}
 }
