@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.15.0](https://github.com/cameronsjo/forgectl/compare/v0.14.1...v0.15.0) (2026-09-01)
+
+
+### Features
+
+* **docs:** the reader gets its v2 shell — frontmatter renders as an always-visible properties block, GFM alert blockquotes become tiered callouts, an "On this page" outline and a status bar frame the document, the layout responds down to an off-canvas drawer, and mermaid diagrams sit in labeled cards with a reset control ([4965344](https://github.com/cameronsjo/forgectl/commit/4965344a3d1b057bedbf3873e704af4bfb5673cd))
+
+
+### Bug Fixes
+
+* **ci:** enforce release-please changelog ownership ([#426](https://github.com/cameronsjo/forgectl/issues/426)) ([27332b2](https://github.com/cameronsjo/forgectl/commit/27332b2b21bfd30bdecfc8e48e70ec3d7aac5685))
+* **ci:** pin remaining actions to immutable SHAs ([#424](https://github.com/cameronsjo/forgectl/issues/424)) ([9d76e49](https://github.com/cameronsjo/forgectl/commit/9d76e493d23a8915d3aa1ad7b1949ce63db50802))
+* **docs:** `docs serve`'s steady-state return now waits for its tracked background goroutines, matching the two startup paths that already did — in practice the `serve` loop, which could still be in flight when the command returned. No race was observed; the invariant simply did not hold on all three paths ([fe32cf6](https://github.com/cameronsjo/forgectl/commit/fe32cf691ecf8d8557cef946467ebd342f2e65e6))
+* **docs:** re-vendor the docs reader's Artificer assets 0.19.0 -&gt; 0.25.0, with a committed re-vendor script (`scripts/vendor-artificer.sh`, advisory `--check` drift mode) ([c969979](https://github.com/cameronsjo/forgectl/commit/c96997924851048e0a44f312ecdb6445341555d0))
+* **docs:** the reader now renders YAML/TOML frontmatter as a collapsed metadata disclosure instead of leaking it into the body as a broken heading; each indexed root renders as a collapsible directory tree (counts, current-path pre-expanded, filter-aware) instead of a flat list; and syntax highlighting follows the light/dark theme instead of a fixed monokai palette ([46ad601](https://github.com/cameronsjo/forgectl/commit/46ad601dc36ea108df6d13d2d95a7b4b8ff0395f))
+* **githubauth:** configured non-default GitHub hosts now launch `gh` with `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN` absent rather than empty, so the credential boundary no longer depends on GitHub CLI empty-value handling and applies to descendant processes ([5b26cfa](https://github.com/cameronsjo/forgectl/commit/5b26cfa27c110bbbc26deea5dd6b584a9ea7b625))
+* **release:** make release-please the changelog writer (phase 1) ([#425](https://github.com/cameronsjo/forgectl/issues/425)) ([cc291ca](https://github.com/cameronsjo/forgectl/commit/cc291ca84c2b9eb37dbf23347a0a7223fa4fd61d))
+
 ## [0.14.1](https://github.com/cameronsjo/forgectl/compare/v0.14.0...v0.14.1) (2026-08-28)
 
 
