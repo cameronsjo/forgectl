@@ -6,6 +6,8 @@ package docs
 //   [x] Sad: no frontmatter -> no disclosure block, body untouched
 //   [x] Sad: frontmatter values are HTML-escaped (no injection through metadata)
 //   [x] Sad: a mid-document thematic break still renders as <hr>
+//   [x] Sad: a LEADING thematic break (unterminated --- fence) keeps the body
+//   [x] Sad: a leading --- whose "block" is prose (not a YAML mapping) keeps the body
 
 import (
 	"strings"
@@ -61,7 +63,7 @@ func TestRender_FrontmatterKeyOrderPreserved(t *testing.T) {
 	if iStatus < 0 || iUpdated < 0 || iBranch < 0 {
 		t.Fatalf("expected all three keys present:\n%s", got)
 	}
-	if !(iStatus < iUpdated && iUpdated < iBranch) {
+	if iStatus >= iUpdated || iUpdated >= iBranch {
 		t.Errorf("keys out of document order (status=%d updated=%d branch=%d)", iStatus, iUpdated, iBranch)
 	}
 }
@@ -90,6 +92,40 @@ func TestRender_FrontmatterValuesEscaped(t *testing.T) {
 	}
 }
 
+// TestRender_LeadingThematicBreakKeepsBody pins the gate in Render: the
+// frontmatter extension's opener is greedy (any leading --- fence starts a
+// block, and an unterminated one consumes to end of file), so without
+// hasWellFormedFrontmatter a doc opening with a thematic break rendered as a
+// completely empty page.
+func TestRender_LeadingThematicBreakKeepsBody(t *testing.T) {
+	cases := map[string]string{
+		"unterminated":        "---\n\nText after break\n",
+		"bare_hr_only":        "---\n",
+		"prose_between_rules": "---\n\npara one\n\n---\n\npara two\n",
+		"yaml_list_block":     "---\n- a\n- b\n---\n\n# T\n",
+	}
+	for name, src := range cases {
+		got, err := Render([]byte(src))
+		if err != nil {
+			t.Fatalf("%s: Render: %v", name, err)
+		}
+		if strings.TrimSpace(got) == "" && strings.TrimSpace(src) != "---" {
+			t.Errorf("%s: body swallowed, rendered empty for %q", name, src)
+		}
+	}
+	// The prose case must keep BOTH paragraphs — para one sat inside what the
+	// ungated extension read as an (invalid) frontmatter block.
+	got, err := Render([]byte("---\n\npara one\n\n---\n\npara two\n"))
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, want := range []string{"para one", "para two"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("leading-rule doc lost %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestRender_MidDocumentThematicBreakSurvives(t *testing.T) {
 	got, err := Render([]byte("# A\n\nabove\n\n---\n\nbelow\n"))
 	if err != nil {
@@ -97,5 +133,20 @@ func TestRender_MidDocumentThematicBreakSurvives(t *testing.T) {
 	}
 	if !strings.Contains(got, "<hr") {
 		t.Errorf("mid-document thematic break lost:\n%s", got)
+	}
+}
+
+// TestChromaCSS_UsesArtificerTokens pins the syntax palette to the design
+// system: the served stylesheet must derive every color from Artificer vars,
+// never a hardcoded style palette (monokai's #272822 slab ignored the theme).
+func TestChromaCSS_UsesArtificerTokens(t *testing.T) {
+	css := string(ChromaCSS())
+	for _, want := range []string{"var(--fg-muted)", "var(--brand-purple-bright)", "var(--bg-inactive)"} {
+		if !strings.Contains(css, want) {
+			t.Errorf("chroma stylesheet missing %s", want)
+		}
+	}
+	if strings.Contains(css, "#272822") {
+		t.Error("chroma stylesheet still carries the monokai background")
 	}
 }

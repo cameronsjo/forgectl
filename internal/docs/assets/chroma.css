@@ -1,0 +1,81 @@
+/* Syntax highlighting for chroma's class-based output, mapped onto the
+   Artificer 12-role syntax map (artificer.css .code-block .tok-* rules) so
+   code blocks read as part of the page and follow the light/dark theme.
+   Replaces the generated monokai sheet, whose hardcoded palette ignored
+   both. Chroma emits <pre class="chroma">; that wrapper takes the same
+   treatment .code-block gives hand-authored blocks. */
+
+.chroma {
+  font-family: var(--font-mono);
+  font-size: var(--t-label-md-size);
+  line-height: 1.6;
+  background: var(--bg-inactive);
+  color: var(--fg);
+  padding: var(--s-md) var(--s-lg);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  overflow-x: auto;
+  white-space: pre;
+  margin: 0;
+}
+
+/* Comments and operators recede — tok-comment / tok-operator. */
+.chroma .c, .chroma .c1, .chroma .cm, .chroma .ch, .chroma .cs,
+.chroma .cp, .chroma .cpf { color: var(--fg-muted); font-style: italic; }
+.chroma .o, .chroma .ow, .chroma .p { color: var(--fg-muted); }
+
+/* Keywords — tok-keyword. */
+.chroma .k, .chroma .kd, .chroma .kn, .chroma .kp, .chroma .kr,
+.chroma .kv { color: var(--brand-purple-bright); }
+
+/* Types and classes — tok-type. */
+.chroma .kt, .chroma .nc, .chroma .nb { color: var(--accent-bright); }
+
+/* Strings — tok-string. */
+.chroma .s, .chroma .s1, .chroma .s2, .chroma .sb, .chroma .sc,
+.chroma .sd, .chroma .se, .chroma .sh, .chroma .si, .chroma .sx,
+.chroma .sr, .chroma .ss { color: var(--success-bright, var(--success)); }
+
+/* Numbers and constants — tok-number / tok-constant. */
+.chroma .m, .chroma .mb, .chroma .mf, .chroma .mh, .chroma .mi,
+.chroma .il, .chroma .mo, .chroma .kc, .chroma .no {
+  color: var(--attention-alt, var(--attention));
+}
+
+/* Functions — tok-fn. */
+.chroma .nf, .chroma .fm { color: var(--accent); }
+
+/* Namespaces — tok-namespace. */
+.chroma .nn { color: var(--cyan, var(--steel)); }
+
+/* Tags and attributes — tok-tag / tok-param. */
+.chroma .nt { color: var(--urgent-bright, var(--urgent)); }
+.chroma .na { color: var(--steel); }
+
+/* Variables stay body-colored — tok-variable. */
+.chroma .nv, .chroma .vc, .chroma .vg, .chroma .vi { color: var(--fg); }
+
+/* Errors — tok-invalid. */
+.chroma .err {
+  color: var(--urgent-bright, var(--urgent));
+  text-decoration: wavy underline;
+}
+
+/* Diff lines lean on the status pair. */
+.chroma .gd { color: var(--urgent-bright, var(--urgent)); }
+.chroma .gi { color: var(--success-bright, var(--success)); }
+.chroma .ge { font-style: italic; }
+.chroma .gs { font-weight: 600; }
+
+/* Line numbers and highlights, for chroma's table/line modes. */
+.chroma .lnt, .chroma .ln {
+  color: var(--fg-disabled);
+  -webkit-user-select: none;
+  user-select: none;
+  margin-right: 0.4em;
+  padding: 0 0.4em;
+}
+.chroma .hl { background-color: var(--bg-raised); }
+.chroma .lnlinks { outline: none; text-decoration: none; color: inherit; }
+.chroma .lntd { vertical-align: top; padding: 0; margin: 0; border: 0; }
+.chroma .lntable { border-spacing: 0; padding: 0; margin: 0; border: 0; }
