@@ -445,3 +445,60 @@ func TestWorktree_ForgedHostTokenDoesNotReachGh(t *testing.T) {
 		})
 	}
 }
+
+// TestWorktree_WingMemberLandsInTheWing pins the claim that a wing member's
+// worktree lands in the wing. Worktree takes no --wing flag, so the table on
+// the Client is the only mechanism — without it the claim has none.
+func TestWorktree_WingMemberLandsInTheWing(t *testing.T) {
+	tmp := t.TempDir()
+	table, err := ResolveWings("github.com", []Wing{
+		{Name: "cadence-ecosystem", Repos: []string{"cameronsjo/forgectl"}},
+	})
+	if err != nil {
+		t.Fatalf("ResolveWings: %v", err)
+	}
+	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("main", false)}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git", wings: table}
+
+	got, err := c.Worktree(context.Background(), Repo{
+		Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
+	}, "main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := filepath.Join(tmp, "cadence-ecosystem", "forgectl", "main"); got != want {
+		t.Errorf("worktree = %q; want %q", got, want)
+	}
+}
+
+// TestWorktree_FailedRunLeavesNoBaseBehind is the anti-bricking pin. Mkdir's
+// refuse-if-exists is this function's safety guard, so a base left behind by a
+// FAILED run makes that refusal permanent: one transient error and the repo
+// can never get a worktree again without a manual rm. The second call is the
+// actual assertion — it must be able to succeed.
+func TestWorktree_FailedRunLeavesNoBaseBehind(t *testing.T) {
+	tmp := t.TempDir()
+	failing := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "gh" {
+			return "", errors.New("transient network failure")
+		}
+		return worktreeRunFunc("main", false)(name, args)
+	}}
+	c := &Client{Dir: tmp, run: failing, gitBin: "git"}
+	r := Repo{Host: "github.com", Owner: "cameronsjo", Name: "forgectl"}
+
+	if _, err := c.Worktree(context.Background(), r, "main"); err == nil {
+		t.Fatal("expected the bare clone to fail")
+	}
+	base := filepath.Join(tmp, "github.com", "cameronsjo", "forgectl")
+	if _, err := os.Stat(base); !os.IsNotExist(err) {
+		t.Fatalf("%s survived a failed run; the next attempt is now permanently refused", base)
+	}
+
+	// The retry must work — that is the whole point.
+	healthy := &exec.FakeRunner{RunFunc: worktreeRunFunc("main", false)}
+	c2 := &Client{Dir: tmp, run: healthy, gitBin: "git"}
+	if _, err := c2.Worktree(context.Background(), r, "main"); err != nil {
+		t.Fatalf("retry after a failed run: %v", err)
+	}
+}

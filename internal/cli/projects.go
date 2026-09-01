@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/projects"
@@ -44,10 +45,32 @@ var projectsModule = module.Manifest{
 			// never rendered.
 			return newProjectsConfigErrorCmd(fmt.Errorf("invalid [github] host: %w", err))
 		}
+		// The wing table shares a directory namespace with the host trees, so
+		// it is resolved against the host and fails closed on a collision
+		// rather than silently misplacing a clone. Same posture as the host
+		// itself: a bad table is a config error, not a runtime surprise.
+		wings, err := projects.ResolveWings(host, toProjectWings(deps.Cfg.Projects.Wings))
+		if err != nil {
+			return newProjectsConfigErrorCmd(err)
+		}
 		return newProjectsCmd(projects.New(deps.Runner,
 			projects.WithGitHubOwners(deps.Cfg.Projects.Owners),
-			projects.WithGitHubHost(host)))
+			projects.WithGitHubHost(host),
+			projects.WithWings(wings)))
 	},
+}
+
+// toProjectWings converts the config section's wing entries to the projects
+// package's own value type. The two are separate because internal/config
+// cannot import internal/githubauth (config <- pr <- githubauth is a cycle),
+// so the validation the table needs lives on the projects side and config
+// stays plain data.
+func toProjectWings(wings []config.WingConfig) []projects.Wing {
+	out := make([]projects.Wing, 0, len(wings))
+	for _, w := range wings {
+		out = append(out, projects.Wing{Name: w.Name, Repos: w.Repos})
+	}
+	return out
 }
 
 // newProjectsConfigErrorCmd builds a `projects` command tree whose every leaf

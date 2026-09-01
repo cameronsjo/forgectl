@@ -161,6 +161,24 @@ func WithGitHubHost(host string) Option {
 	}
 }
 
+// WithWings sets the resolved [[projects.wings]] placement table. The table
+// must already be ResolveWings output — the CLI seam validates every name and
+// repo entry before construction. An empty table is the default: every repo
+// lands in the host tree.
+func WithWings(table WingTable) Option {
+	return func(c *Client) { c.wings = table }
+}
+
+// WingFor returns the wing r is filed into, or "" for the host tree. Exported
+// because the CLI's --dry-run and its "already cloned elsewhere" message need
+// the same answer Clone will act on, rather than recomputing it.
+func (c *Client) WingFor(r Repo) string { return c.wings.For(r.Owner, r.Name) }
+
+// ProjectsDir returns the resolved projects root ($PROJECTS_DIR, else
+// ~/Projects). Exported so --dry-run can call Placement without a Client-shaped
+// duplicate of the same resolution.
+func (c *Client) ProjectsDir() string { return c.Dir }
+
 // GitHubHost returns the deployment's effective GitHub host — the value every
 // gh subprocess is pinned to. CLI call sites need it for ParseCloneTarget and
 // the non-default-host stderr note.
@@ -542,21 +560,33 @@ func (c *Client) ListOrg(ctx context.Context, org string) ([]Repo, error) {
 	return githubListOrg(ctx, c.run, org, c.effectiveGitHubHost())
 }
 
-// Clone checks out a remote Repo into the canonical Dir/host/owner/name layout
-// (see canonicalDest), dispatching by host, and returns the local destination
-// path. A repo already present at its canonical dest is a no-op (returns its
-// path). github.com clones go through gh (credential handling); everything else
-// clones the SSH URL directly.
+// Clone checks out a remote Repo where Placement says it belongs — its wing if
+// it has one, otherwise the host/owner/name tree — dispatching by host, and
+// returns the local destination path. A repo already present at that dest is a
+// no-op (returns its path). Clones on the configured GitHub host go through gh
+// (credential handling and the host pin); everything else clones the SSH URL
+// directly.
 //
 // New clones always land in the canonical layout — the flat legacy layout is a
 // read-side (Discover) affordance only, so existing on-disk clones stay
 // findable without new clones perpetuating the collision-prone flat tree.
 func (c *Client) Clone(ctx context.Context, r Repo) (string, error) {
-	slog.Debug("Preparing to clone repo.", "host", r.Host, "owner", r.Owner, "name", r.Name)
-	if !validPathSegment(r.Host) || !validPathSegment(r.Owner) || !validPathSegment(r.Name) {
-		return "", fmt.Errorf("refusing to clone %s/%s/%s: unsafe path segment", r.Host, r.Owner, r.Name)
+	return c.CloneInto(ctx, r, c.WingFor(r))
+}
+
+// CloneInto is Clone with the wing supplied by the caller rather than looked
+// up — the seam `projects clone --wing <name>` uses to override the configured
+// table for one clone. An empty wing means the host tree, NOT "look it up":
+// the lookup is Clone's job, so a caller that means "consult the table" calls
+// Clone.
+func (c *Client) CloneInto(ctx context.Context, r Repo, wing string) (string, error) {
+	slog.Debug("Preparing to clone repo.", "host", r.Host, "owner", r.Owner, "name", r.Name, "wing", wing)
+	dest, err := Placement(c.Dir, r, wing)
+	if err != nil {
+		// Categorical: the rejected segments are exactly the untrusted values,
+		// and this string reaches a terminal. They are in the debug log above.
+		return "", fmt.Errorf("refusing to clone: %w", err)
 	}
-	dest := canonicalDest(c.Dir, r.Host, r.Owner, r.Name)
 	if _, err := os.Stat(dest); err == nil {
 		// Something is already at dest. Only treat it as "already cloned" when it
 		// really is THIS repo — the canonical layout already separates repos by
@@ -566,8 +596,10 @@ func (c *Client) Clone(ctx context.Context, r Repo) (string, error) {
 			slog.Debug("Repo already cloned, skipping clone.", "dest", dest, "name", r.Name)
 			return dest, nil
 		}
-		return "", fmt.Errorf("%s already exists but its origin is a different repo; "+
-			"%s/%s/%s collides — clone it elsewhere by hand", dest, r.Host, r.Owner, r.Name)
+		// dest is forgectl-composed from already-guarded segments, so it is
+		// safe to name; r.Host/Owner/Name are server-supplied and stay out.
+		return "", fmt.Errorf("%s already exists but its origin is a different repo — "+
+			"clone it elsewhere by hand", dest)
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return "", fmt.Errorf("creating canonical clone parent dirs for %s: %w", dest, err)
@@ -591,11 +623,52 @@ func (c *Client) Clone(ctx context.Context, r Repo) (string, error) {
 	return dest, nil
 }
 
-// canonicalDest returns the canonical clone destination dir/host/owner/name,
-// lowercased to mirror Repo.Key() — the filesystem tree is the mirror of the
-// dedup identity, so "where is it cloned" and "what is it" never disagree.
-func canonicalDest(dir, host, owner, name string) string {
-	return filepath.Join(dir, strings.ToLower(host), strings.ToLower(owner), strings.ToLower(name))
+// Placement returns where r is filed under root. It is the single path
+// formula, and it implements the estate's two filing rules verbatim:
+//
+//	wing != ""  ->  <root>/<wing>/<name>
+//	otherwise   ->  <root>/<host>/<owner>/<name>
+//
+// Every segment is lowercased, mirroring Repo.Key() — the filesystem tree is
+// the mirror of the dedup identity, so "where is it cloned" and "what is it"
+// never disagree.
+//
+// It promises A PATH, NOT A POLICY. Three callers with incompatible leaf
+// semantics use it — Clone writes a checkout there, Worktree writes a .bare
+// plus per-branch trees and refuses an existing leaf, the duplicate probe only
+// reads — and none of that belongs in a path formula.
+//
+// TWO TIERS OF SEGMENT GUARD, because the segments carry different risk. The
+// host is the only one that can arrive as an arbitrary hostname from a remote
+// URL, so it goes through githubauth.ValidHostSegment: an anchored charset
+// that rejects ':' (APFS-legal, rendered as '/' in Finder), a leading '.' (a
+// tree invisible to ls), control characters and ANSI escapes, homoglyphs, and
+// anything over-long. Owner, name, and wing keep validPathSegment's traversal
+// and flag-injection guards, which is what they need.
+//
+// It returns an error rather than falling back, because falling back is how a
+// rejected value still ends up on disk under a different name.
+func Placement(root string, r Repo, wing string) (string, error) {
+	name := strings.ToLower(r.Name)
+	if !validPathSegment(name) {
+		return "", fmt.Errorf("refusing to place a repo: unsafe name segment")
+	}
+	if wing != "" {
+		w := strings.ToLower(wing)
+		if !validPathSegment(w) {
+			return "", fmt.Errorf("refusing to place a repo: unsafe wing segment")
+		}
+		return filepath.Join(root, w, name), nil
+	}
+	host := strings.ToLower(r.Host)
+	if !githubauth.ValidHostSegment(host) {
+		return "", fmt.Errorf("refusing to place a repo: unsafe host segment")
+	}
+	owner := strings.ToLower(r.Owner)
+	if !validPathSegment(owner) {
+		return "", fmt.Errorf("refusing to place a repo: unsafe owner segment")
+	}
+	return filepath.Join(root, host, owner, name), nil
 }
 
 // validPathSegment rejects a host/owner/name value that would escape or

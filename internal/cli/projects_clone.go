@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/projects"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // newProjectsCloneCmd clones a repo into the canonical {host}/{org}/{repo}
@@ -26,6 +27,8 @@ import (
 // repeatedly to "make sure everything's checked out".
 func newProjectsCloneCmd(client *projects.Client) *cobra.Command {
 	var org string
+	var wing string
+	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "clone [query | url | owner/repo]",
 		Short: "Clone a project into the canonical {host}/{org}/{repo} layout",
@@ -37,16 +40,20 @@ from projects list --json, or rerun interactively when no sshUrl is available.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
+			if wing != "" && org != "" {
+				return fmt.Errorf("--wing and --org are mutually exclusive: --org clones a whole account, and filing all of it into one wing is never what you want")
+			}
+
 			if org != "" {
 				if len(args) != 0 {
 					return fmt.Errorf("--org does not take a query argument")
 				}
-				return cloneOrg(ctx, client, cmd, org)
+				return cloneOrg(ctx, client, cmd, org, dryRun)
 			}
 
 			if len(args) == 1 {
 				if r, ok := projects.ParseCloneTarget(args[0], client.GitHubHost()); ok {
-					return cloneOnly(ctx, client, cmd, r)
+					return cloneOnly(ctx, client, cmd, r, wing, dryRun)
 				}
 			}
 
@@ -67,7 +74,7 @@ from projects list --json, or rerun interactively when no sshUrl is available.`,
 					return fmt.Errorf("no project matching %q across local, GitHub, or Gitea", query)
 				}
 				if len(candidates) == 1 {
-					return cloneOnly(ctx, client, cmd, candidates[0])
+					return cloneOnly(ctx, client, cmd, candidates[0], wing, dryRun)
 				}
 				// Multiple matches → interactive selector below.
 			}
@@ -76,10 +83,12 @@ from projects list --json, or rerun interactively when no sshUrl is available.`,
 			if err != nil {
 				return err
 			}
-			return cloneOnly(ctx, client, cmd, chosen)
+			return cloneOnly(ctx, client, cmd, chosen, wing, dryRun)
 		},
 	}
 	cmd.Flags().StringVar(&org, "org", "", "bulk-clone every repo owned by this GitHub user/org")
+	cmd.Flags().StringVar(&wing, "wing", "", "file this clone under <projects>/<wing>/<repo>, overriding the [[projects.wings]] table")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print where the clone would land and exit, touching nothing")
 	return cmd
 }
 
@@ -87,7 +96,7 @@ from projects list --json, or rerun interactively when no sshUrl is available.`,
 // dest (or already-on-disk annotation) goes through cloneOnly, so the stdout
 // contract stays one path per line; a single repo's clone failure is reported
 // on stderr and counted rather than aborting the rest of the batch.
-func cloneOrg(ctx context.Context, client *projects.Client, cmd *cobra.Command, org string) error {
+func cloneOrg(ctx context.Context, client *projects.Client, cmd *cobra.Command, org string, dryRun bool) error {
 	repos, err := client.ListOrg(ctx, org)
 	if err != nil {
 		return fmt.Errorf("listing %s's GitHub repos: %w", org, err)
@@ -97,8 +106,9 @@ func cloneOrg(ctx context.Context, client *projects.Client, cmd *cobra.Command, 
 	}
 	var failed int
 	for _, r := range repos {
-		if err := cloneOnly(ctx, client, cmd, r); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "error: %s/%s: %v\n", r.Owner, r.Name, err)
+		if err := cloneOnly(ctx, client, cmd, r, "", dryRun); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "error: %s/%s: %v\n",
+				termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), err)
 			failed++
 		}
 	}
@@ -108,18 +118,40 @@ func cloneOrg(ctx context.Context, client *projects.Client, cmd *cobra.Command, 
 	return nil
 }
 
-// cloneOnly clones r into the canonical layout unless it's already on disk, in
-// which case it's annotated (stderr) rather than re-cloned — same
+// cloneOnly clones r where Placement says it belongs unless it's already on
+// disk, in which case it's annotated (stderr) rather than re-cloned — same
 // already-on-disk shape as openOrClone, minus the tmux Open step. The
-// destination path is the scriptable stdout contract.
-func cloneOnly(ctx context.Context, client *projects.Client, cmd *cobra.Command, r projects.Repo) error {
+// destination path is the scriptable stdout contract, and every branch here
+// honors it: exactly one path to stdout, diagnostics to stderr.
+//
+// wing overrides the configured table for this one clone; "" means "ask the
+// table", which is the normal path. dryRun resolves and prints the destination
+// without touching the filesystem.
+//
+// Owner, Name, and Host go through termsafe on the stderr lines: they are
+// server-supplied (gh JSON, tea TSV) and this is a terminal. LocalPath and
+// dest are forgectl-composed from guarded segments.
+func cloneOnly(ctx context.Context, client *projects.Client, cmd *cobra.Command, r projects.Repo, wing string, dryRun bool) error {
 	if r.Cloned {
-		fmt.Fprintf(cmd.ErrOrStderr(), "%s/%s already on disk at %s\n", r.Owner, r.Name, r.LocalPath)
+		fmt.Fprintf(cmd.ErrOrStderr(), "%s/%s already on disk at %s\n",
+			termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), r.LocalPath)
 		fmt.Fprintln(cmd.OutOrStdout(), r.LocalPath)
 		return nil
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s/%s from %s…\n", r.Owner, r.Name, r.Host)
-	dest, err := client.Clone(ctx, r)
+	if wing == "" {
+		wing = client.WingFor(r)
+	}
+	if dryRun {
+		dest, err := projects.Placement(client.ProjectsDir(), r, wing)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), dest)
+		return nil
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s/%s from %s…\n",
+		termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), termsafe.SafeLine(r.Host))
+	dest, err := client.CloneInto(ctx, r, wing)
 	if err != nil {
 		return err
 	}

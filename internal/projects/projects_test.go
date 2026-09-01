@@ -371,7 +371,10 @@ func TestClone_ExistingCanonicalDestWrongOriginErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an origin-mismatch error, got nil (would open the wrong repo)")
 	}
-	if !strings.Contains(err.Error(), "collides") {
+	// The message names the PATH (forgectl-composed from guarded segments) but
+	// not the host/owner/name, which are server-supplied and would otherwise
+	// reach a terminal unescaped.
+	if !strings.Contains(err.Error(), "origin is a different repo") {
 		t.Errorf("error should explain the collision, got: %v", err)
 	}
 	for _, call := range fake.Calls {
@@ -991,5 +994,154 @@ func TestClone_ZeroValueClientStillDispatchesGitHubThroughGh(t *testing.T) {
 	}
 	if last := fake.Last(); last.Name != "gh" {
 		t.Errorf("zero-value client dispatched %q, want gh — the default host was not applied", last.Name)
+	}
+}
+
+// canonicalDest is a test-only shim preserving the pre-Placement call shape,
+// so the many dest assertions read as (root, host, owner, name) rather than
+// constructing a Repo each time. It exercises the host-tree branch only —
+// wing placement has its own tests.
+func canonicalDest(root, host, owner, name string) string {
+	p, err := Placement(root, Repo{Host: host, Owner: owner, Name: name}, "")
+	if err != nil {
+		panic("canonicalDest test shim: " + err.Error())
+	}
+	return p
+}
+
+func TestPlacement_HostTreeMirrorsKey(t *testing.T) {
+	r := Repo{Host: "GitHub.COM", Owner: "CameronSjo", Name: "Forgectl"}
+	got, err := Placement("/base", r, "")
+	if err != nil {
+		t.Fatalf("Placement: %v", err)
+	}
+	want := filepath.Join("/base", "github.com", "cameronsjo", "forgectl")
+	if got != want {
+		t.Errorf("Placement = %q; want %q", got, want)
+	}
+	// The tree must mirror the dedup identity: same lowercasing, same order.
+	if !strings.HasSuffix(strings.ToLower(got), r.Key()) {
+		t.Errorf("Placement %q does not mirror Key() %q", got, r.Key())
+	}
+}
+
+// TestPlacement_WingDropsTheOwnerLevel pins estate rule 1: a wing member sits
+// one level under the root, not two. This is exactly why discovery has to look
+// at depth 2 as well — the level the owner would have occupied is gone.
+func TestPlacement_WingDropsTheOwnerLevel(t *testing.T) {
+	r := Repo{Host: "github.com", Owner: "CameronSjo", Name: "Forgectl"}
+	got, err := Placement("/base", r, "Cadence-Ecosystem")
+	if err != nil {
+		t.Fatalf("Placement: %v", err)
+	}
+	want := filepath.Join("/base", "cadence-ecosystem", "forgectl")
+	if got != want {
+		t.Errorf("Placement = %q; want %q", got, want)
+	}
+	if strings.Contains(got, "cameronsjo") || strings.Contains(got, "github.com") {
+		t.Errorf("wing placement kept a host or owner level: %q", got)
+	}
+}
+
+// TestPlacement_HostSegmentGuardRejectsWhatTraversalMisses is the two-tier
+// guard's whole reason for existing. Every value here passes validPathSegment
+// — the guard the host segment used to get — and every one of them is a
+// hostname a remote URL could produce.
+func TestPlacement_HostSegmentGuardRejectsWhatTraversalMisses(t *testing.T) {
+	for _, host := range []string{
+		"::1",                    // IPv6 literal: ':' is APFS-legal, Finder renders it as '/'
+		"host:8443",              // a colon by any other route
+		".hidden",                // a host tree invisible to ls
+		"hostname.",              // trailing root label; canonicalHost strips it, this catches a bypass
+		"host name",              // whitespace
+		"host\x1b[31m",           // ANSI escape
+		"hоst",                   // Cyrillic 'о' homoglyph
+		"-host",                  // flag injection
+		strings.Repeat("a", 254), // past NAME_MAX, and past the DNS limit
+	} {
+		t.Run(host, func(t *testing.T) {
+			if validPathSegment(host) == false && host == "-host" {
+				// -host is the one case the old guard DID catch; keep it in the
+				// table so the guard cannot regress on it either.
+				t.Log("also rejected by validPathSegment")
+			}
+			if _, err := Placement("/base", Repo{Host: host, Owner: "o", Name: "n"}, ""); err == nil {
+				t.Errorf("host %q was accepted as a path segment", host)
+			}
+		})
+	}
+}
+
+func TestPlacement_RejectsUnsafeOwnerNameAndWing(t *testing.T) {
+	base := Repo{Host: "github.com", Owner: "o", Name: "n"}
+	for _, tc := range []struct {
+		name string
+		r    Repo
+		wing string
+	}{
+		{"empty name", Repo{Host: "github.com", Owner: "o"}, ""},
+		{"traversal name", Repo{Host: "github.com", Owner: "o", Name: ".."}, ""},
+		{"slash in name", Repo{Host: "github.com", Owner: "o", Name: "a/b"}, ""},
+		{"flag name", Repo{Host: "github.com", Owner: "o", Name: "-n"}, ""},
+		{"empty owner", Repo{Host: "github.com", Name: "n"}, ""},
+		{"traversal owner", Repo{Host: "github.com", Owner: "..", Name: "n"}, ""},
+		{"traversal wing", base, ".."},
+		{"slash in wing", base, "a/b"},
+		{"flag wing", base, "-w"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Placement("/base", tc.r, tc.wing); err == nil {
+				t.Error("accepted an unsafe segment")
+			}
+		})
+	}
+}
+
+// TestPlacement_WingSkipsTheHostGuard documents a deliberate asymmetry: a wing
+// member's path never contains the host, so a repo on an unplaceable host is
+// still placeable into a wing. The host is only guarded where it is used.
+func TestPlacement_WingSkipsTheHostGuard(t *testing.T) {
+	got, err := Placement("/base", Repo{Host: "::1", Owner: "o", Name: "n"}, "w")
+	if err != nil {
+		t.Fatalf("a wing member should not be blocked by its host: %v", err)
+	}
+	if want := filepath.Join("/base", "w", "n"); got != want {
+		t.Errorf("Placement = %q, want %q", got, want)
+	}
+}
+
+// TestClone_WingMemberLandsInTheWing is the end-to-end half: the table on the
+// Client, not a flag, is what routes it — so `Worktree`, which takes no flag,
+// gets the same answer.
+func TestClone_WingMemberLandsInTheWing(t *testing.T) {
+	tmp := t.TempDir()
+	table, err := ResolveWings("github.com", []Wing{
+		{Name: "cadence-ecosystem", Repos: []string{"cameronsjo/forgectl"}},
+	})
+	if err != nil {
+		t.Fatalf("ResolveWings: %v", err)
+	}
+	fake := &exec.FakeRunner{}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git", wings: table}
+
+	dest, err := c.Clone(context.Background(), Repo{
+		Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := filepath.Join(tmp, "cadence-ecosystem", "forgectl"); dest != want {
+		t.Errorf("dest = %q; want %q", dest, want)
+	}
+
+	// A repo NOT in the table keeps the host tree — estate rule 2 verbatim.
+	dest, err = c.Clone(context.Background(), Repo{
+		Host: "github.com", Owner: "cameronsjo", Name: "unlisted",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := filepath.Join(tmp, "github.com", "cameronsjo", "unlisted"); dest != want {
+		t.Errorf("unlisted dest = %q; want the host tree %q", dest, want)
 	}
 }
