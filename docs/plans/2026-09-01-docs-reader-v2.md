@@ -1,11 +1,11 @@
 ---
-status: "in-review"
+status: "done"
 updated: "2026-09-01"
 branch: "feat/docs-reader-v2"
 session: "deft-sonata"
 session_id: "7fc5913c-2346-479f-a249-9d871812e47d"
 machine: "cf6e768835c7"
-next: "execute the checklist below; visual check against the claude.ai/design prototype"
+next: "none — shipped in PR #431 and released as v0.15.0"
 ---
 
 # Docs reader v2 — design handoff (execution plan)
