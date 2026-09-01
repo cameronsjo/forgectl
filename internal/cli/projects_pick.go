@@ -11,6 +11,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/projects"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 type projectSelectionMode uint8
@@ -174,7 +175,7 @@ func projectAmbiguityError(mode projectSelectionMode, count int) error {
 func openOrClone(ctx context.Context, client *projects.Client, cmd *cobra.Command, r projects.Repo) error {
 	dir := r.LocalPath
 	if !r.Cloned {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s/%s from %s…\n", r.Owner, r.Name, r.Host)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s/%s from %s…\n", termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), termsafe.SafeLine(r.Host))
 		d, err := client.Clone(ctx, r)
 		if err != nil {
 			return err

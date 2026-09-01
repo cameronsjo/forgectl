@@ -38,7 +38,7 @@ Several command groups own their own config section, documented alongside that c
 - [`launch`](commands/launch.md) — `[launch]`, per-project Claude Code / Codex / Pi profiles
 - [`pr`](commands/pr.md) — `[pr]`, the clean-room reviewer's own posture
 - [`proxy`](commands/proxy.md) — `[proxy.profiles]`, current-shell profiles
-- [`projects` and `review`](commands/projects-and-review.md) — `[projects]`, `[review]`, `[github]`, whose repos get enumerated
+- [`projects` and `review`](commands/projects-and-review.md) — `[projects]`, `[[projects.wings]]`, `[review]`, `[github]`, whose repos get enumerated and where clones land
 - [`bench`](commands/bench.md) — `[bench]`, interop with the local dev services
 - [`k8s`](commands/k8s.md) — bounded, terminal-safe log streaming
 - [`docs`](commands/docs.md) — `[docs]`, local markdown reader

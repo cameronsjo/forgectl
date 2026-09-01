@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/projects"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // newProjectsWorktreeCmd initializes a bare-repo worktree layout for a project
@@ -75,7 +76,7 @@ from projects list --json, or rerun interactively when no sshUrl is available.`,
 // new worktree dir on stdout (the scriptable contract); the progress line goes
 // to stderr so a `$(forgectl proj worktree …)` capture stays clean.
 func worktreeOnly(ctx context.Context, client *projects.Client, cmd *cobra.Command, r projects.Repo, branch string) error {
-	fmt.Fprintf(cmd.ErrOrStderr(), "Initializing worktree for %s/%s from %s…\n", r.Owner, r.Name, r.Host)
+	fmt.Fprintf(cmd.ErrOrStderr(), "Initializing worktree for %s/%s from %s…\n", termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), termsafe.SafeLine(r.Host))
 	dir, err := client.Worktree(ctx, r, branch)
 	if err != nil {
 		return err

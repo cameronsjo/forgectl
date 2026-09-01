@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased]
+
+### ⚠ BREAKING CHANGES
+
+* **projects:** `projects list --json` `host` is now the full hostname (`"github.com"`, `"git.sjo.lol"`, `"github.example.com"`) rather than the short tokens `"github"` / `"gitea"`. Scripts matching on those tokens must be updated. `--host` takes a hostname (or `"local"`) for the same reason, and is now a closed allowlist over the hosts the inventory actually has — a typo errors instead of returning an empty list.
+* **projects:** clones land at `<projects>/<host>/<owner>/<repo>` using the full hostname, not `<projects>/github/…`. No migration is performed and none is needed on an estate that never let forgectl build those trees; a `~/Projects/github/` directory from an earlier version is still readable via the legacy flat/host walks but is no longer written to.
+
+### Bug Fixes
+
+* **projects:** a remote whose bare hostname was literally `github` was stamped as trusted GitHub inventory. `canonicalHost` returned short tokens for two known hosts and the raw hostname for everything else — two kinds of value in one type — so the untrusted arm could produce the trusted arm's value. `forgectl projects clone https://github/evil/repo` dispatched to `gh repo clone evil/repo` against public github.com, cloning an attacker-chosen repo from a server the URL never named; the same input reached the bare-clone path through `projects worktree`. Separately, a checkout whose origin was `git@github:owner/name` keyed identically to the genuine repo and suppressed the real row in the inventory. Hostnames replace the tokens, so there is no token left to forge.
+* **projects:** a configured GitHub Enterprise host collapsed to the token `github`, sharing both a directory tree and a dedup bucket with a github.com repo of the same owner and name. Each host now files and keys under its own hostname.
+* **projects:** `projects list`, `pick`, `pull-all`, and `surface launch` did not see repos filed one level under the projects root — 68 of them on the author's machine. Discovery now walks that layout, ahead of the shortcut that treated a wing directory as a flat project and hid its members.
+* **projects:** `projects worktree` left its base directory behind when any step failed. That directory's existence is the function's own refuse-if-exists guard, so one transient network error made the failure permanent for that repo. The base is now removed on every failing path.
+* **projects:** repo and owner names arriving from `gh` and `tea` are validated before becoming directories. A repo named `.git` would have made a wing directory read as a repository and hidden every member of it; `.bare` collides with the worktree layout.
+* **projects:** the `HOST` and `REPO` columns, the picker badge, and the clone/worktree progress lines pass server-supplied text through `termsafe`.
+
+### Features
+
+* **projects:** `[[projects.wings]]` files named repos at `<projects>/<wing>/<repo>` instead of the host tree. Placement is configured because where a *new* clone belongs is a judgment disk state cannot make; discovery is structural, so a wing absent from the table is still listed. A wing name colliding with the configured `[github]` host fails config load.
+* **projects:** `projects clone --dry-run` prints where a target would land and exits without touching the filesystem; `--wing <name>` overrides the table for one clone.
+* **projects:** `clone` no longer mints a duplicate checkout across the two layouts — if the repo is already checked out under the other rule it prints that path and clones nothing. The probe compares origins, so a same-named but different repo does not suppress a legitimate clone.
+
 ## [0.15.0](https://github.com/cameronsjo/forgectl/compare/v0.14.1...v0.15.0) (2026-09-01)
 
 
