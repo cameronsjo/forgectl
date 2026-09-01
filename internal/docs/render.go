@@ -548,9 +548,11 @@ func countWords(source []byte) int {
 	body := source
 	if hasWellFormedFrontmatter(source) {
 		lines := bytes.SplitAfterN(source, []byte("\n"), -1)
+		delim, count := frontmatterDelim(bytes.TrimSuffix(lines[0], []byte("\n")))
 		for i := 1; i < len(lines); i++ {
-			trimmed := bytes.TrimRight(lines[i], "\r\n")
-			if len(trimmed) >= 3 && (bytes.Count(trimmed, []byte("-")) == len(trimmed) || bytes.Count(trimmed, []byte("+")) == len(trimmed)) {
+			// Same closing-fence rule as hasWellFormedFrontmatter: the
+			// closer repeats the opener's byte at the opener's length.
+			if d, c := frontmatterDelim(bytes.TrimSuffix(lines[i], []byte("\n"))); d == delim && c == count {
 				body = bytes.Join(lines[i+1:], nil)
 				break
 			}
@@ -574,9 +576,13 @@ func extractOutline(rendered string) []OutlineItem {
 		if m[1] == "3" {
 			level = 3
 		}
+		// The captured text is rendered HTML, so entities are escaped
+		// (&amp; etc.). Unescape back to plain text: the template escapes
+		// once more on output, and without this step "Q&A" displays as
+		// "Q&amp;A".
 		items = append(items, OutlineItem{
 			Level: level,
-			Text:  strings.TrimSpace(stripTags.ReplaceAllString(m[3], "")),
+			Text:  strings.TrimSpace(html.UnescapeString(stripTags.ReplaceAllString(m[3], ""))),
 			ID:    m[2],
 		})
 	}

@@ -12,7 +12,9 @@ forgectl docs open --print-url [path]    # print the resolved URL instead of ope
 forgectl docs list [dir|file ...]        # list the indexed docs, no server (--json for scripting)
 ```
 
-Diagrams render in the page: a fenced code block tagged `mermaid` becomes a live diagram themed from the same Artificer tokens as the rest of the reader, and both those and inline SVG pan and zoom (drag to pan, modifier-scroll or click-then-scroll to zoom, double-click or `0` to reset).
+Diagrams render in the page: a fenced code block tagged `mermaid` becomes a live diagram themed from the same Artificer tokens as the rest of the reader, and both those and inline SVG pan and zoom (drag to pan, modifier-scroll or click-then-scroll to zoom, double-click, `0`, or the diagram card's reset button to reset).
+
+The reading surface: the sidenav renders each indexed root as a collapsible directory tree (per-directory counts, current path pre-expanded, filter box that hides empty branches), and a document's YAML/TOML frontmatter renders as an always-visible properties block above the body instead of leaking into it. Longer documents get an "On this page" outline — a third column on wide viewports, an inline disclosure on narrow ones — GFM alert blockquotes (`> [!NOTE]` and kin) render as tiered callouts, and a status bar carries the serving address, document path, and reading time. Below 900px the sidenav becomes an off-canvas drawer behind the appbar toggle.
 
 ## Doc discovery
 

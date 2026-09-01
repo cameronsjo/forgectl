@@ -106,6 +106,8 @@ The live prototype has every treatment behind Tweaks props so alternates can be 
 
 ## Deviations
 
+- **Review finding declined:** the code-review arm restored `aria-current` on the flat Recent link, reading its removal as a regression — the design contract (verdict 2: one location marker per page; Recent is a shortcut list) removed it deliberately. Reverted the restoration; the reviewer's other fixes (outline entity unescape, `countWords` fence-rule reuse) stand.
+
 - **Mermaid/pan-zoom already shipped**: the spec's "vendor mermaid.min.js" and parts of pan/zoom predate it in-tree (`mermaid.min.js`, `mermaid-init.js` themed from `--dia-*` tokens, `svg-panzoom.js`). Those items execute as "wrap in `.embed` chrome and extend", not "vendor and build".
 
 ## Learnings
