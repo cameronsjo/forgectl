@@ -73,7 +73,7 @@ const logKeepDays = 7
 //	host    = "git.sjo.lol"          # required when enabled
 //	login   = "cameron"              # optional; omitted → tea's own configured default login
 //	owners  = ["cameron"]            # tea --owner scope, independent of [review] owners
-//	[docs]               # forgectl docs — local markdown reader
+//	[docs]               # forgectl docs — embedded HTML markdown reader
 //	roots = ["~/Projects/notes"]     # extra root dirs indexed alongside cwd/./docs
 //	addr  = "127.0.0.1:4712"         # --addr default when the flag is omitted
 //	[preflight]          # forgectl preflight — plugin/catalog alignment

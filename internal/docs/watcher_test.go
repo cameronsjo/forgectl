@@ -122,6 +122,15 @@ func TestWatcherRelevant_MarkdownInNestedDir_IsRelevant(t *testing.T) {
 	}
 }
 
+func TestWatcherRelevant_MediaUnderDirectoryRootIsRelevant(t *testing.T) {
+	w, root := relevanceFixture(t)
+
+	path := filepath.Join(root, "images", "architecture.svg")
+	if !w.relevant(path) {
+		t.Errorf("relevant(%q) = false, want true", path)
+	}
+}
+
 func TestWatcherRelevant_DotFileWithMarkdownExt_IsRelevant(t *testing.T) {
 	w, root := relevanceFixture(t)
 
@@ -199,7 +208,7 @@ func TestWatcherRelevant_SiblingOfSingleFileRoot_IsNotRelevant(t *testing.T) {
 func TestWatcherRelevant_NonMarkdownExtension_IsNotRelevant(t *testing.T) {
 	w, root := relevanceFixture(t)
 
-	for _, name := range []string{"notes.txt", "secret.env", "image.png", "noext"} {
+	for _, name := range []string{"notes.txt", "secret.env", "archive.zip", "noext"} {
 		path := filepath.Join(root, name)
 		if w.relevant(path) {
 			t.Errorf("relevant(%q) = true, want false — extension is not in the docs allowlist", path)

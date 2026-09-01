@@ -43,7 +43,7 @@ deep-dive get a link here.
 | `branch` | Prune stale/orphaned git branches (alias: `br`) | Usage below |
 | `clean` | Reclaim dep/build directories under a project root (alias: `cln`) | Usage below |
 | `docker` | Build/run/shell images tagged from git repo/branch/sha | Usage below |
-| `docs` | Local markdown reader: render + serve an indexed doc set over loopback HTTP | [docs](docs/commands/docs.md) |
+| `docs` | Native terminal docs explorer, with the loopback web reader retained as a fallback | [docs](docs/commands/docs.md) |
 | `net` | Check cached reachability of the configured probe endpoint | Usage below |
 | `proxy` | Apply config-defined profiles to the current shell through an explicit wrapper | [proxy](docs/commands/proxy.md) |
 | `k8s` | Safely stream ordinary kubectl logs, plus bounded namespace/exec/inspect helpers | [k8s](docs/commands/k8s.md) |
@@ -201,9 +201,10 @@ forgectl docker build [context] -- --platform linux/arm64  # args after -- pass 
 forgectl docker run [-- args...]         # run the built (or --tag) image
 forgectl docker shell                    # open a shell in the built (or --tag) image
 
-# docs — local markdown reader: render + serve an indexed doc set over loopback HTTP
+# docs — rich HTML reader embedded in the current cmux workspace
+forgectl docs [dir|file ...]             # serve + open a right-hand cmux browser pane (cwd by default)
 forgectl docs serve [dir|file ...]       # render + serve, loopback-only (DNS-rebinding-safe)
-forgectl docs serve --open               # also open the system browser
+forgectl docs serve --open               # serve + open a separate system-browser tab
 forgectl docs open [path]                # point the browser at a doc on the already-running reader
 forgectl docs list [dir|file ...]        # list the indexed docs, no server (--json for scripting)
 
@@ -300,6 +301,24 @@ forgectl y last 5                        # print the 5 most recent zsh commands,
                                           #   piping or redirecting requires --allow-sensitive-output, an explicit
                                           #   acknowledgement only: forgectl does not scan or redact the history
 ```
+
+Inside cmux, the ordinary `docs` command creates a browser pane on the right of
+the invoking terminal without moving keyboard focus. The terminal owns the
+foreground loopback server, so leave it running while you read and press Ctrl-C
+there to close the server. Outside cmux, the same command opens the system
+browser instead. Use `docs serve` when another process should own presentation,
+or when you want remote or phone access through the existing address/token
+options.
+
+The reader opens directly on the document, with a compact preview toolbar and a
+document navigator that stays out of the reading path until opened. It renders
+sanitized Markdown, syntax highlighting, tables, Mermaid,
+inline SVG, and relative local PNG, JPEG, GIF, WebP, AVIF, and SVG images. The
+`Aa` control independently changes body, heading, and code fonts, text size,
+line height, and line length; those choices persist in that browser. Relative
+images are served only when an indexed document references them and still pass
+the configured-root containment checks. Remote images remain blocked so opening
+a local document does not notify a third party.
 
 The cask doesn't stage an `fx` command — it's a shell alias you add yourself:
 

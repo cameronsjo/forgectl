@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/signal"
 	"strings"
 	"sync"
@@ -229,6 +230,22 @@ func runDocsServe(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, addr
 	return runDocsServeWithRuntime(cmd, deps, idx, addrFlag, openFlag, tokenFile, productionDocsServeRuntime())
 }
 
+func runDocsPreviewServer(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index) error {
+	// The ordinary reading preview is always a private loopback process. A
+	// configured [docs].addr belongs to the explicit `docs serve` contract;
+	// inheriting a LAN bind here would require a bearer token and make the
+	// preview unable to open its own URL.
+	return runDocsServeWithRuntimeMode(cmd, deps, idx, httpsrv.LoopbackAddr, docsOpenEmbedded, "", productionDocsServeRuntime())
+}
+
+type docsOpenMode uint8
+
+const (
+	docsOpenNone docsOpenMode = iota
+	docsOpenSystem
+	docsOpenEmbedded
+)
+
 // runDocsServeWithRuntime binds the listener, wires the security middleware
 // chain (forgectl#93 security-chain item 1, plus the cross-site rejecter
 // forgectl#178 adds) around the docs handler, publishes a generation-owned
@@ -260,6 +277,22 @@ func runDocsServeWithRuntime(
 	idx *docspkg.Index,
 	addrFlag string,
 	openFlag bool,
+	tokenFile string,
+	rt docsServeRuntime,
+) error {
+	mode := docsOpenNone
+	if openFlag {
+		mode = docsOpenSystem
+	}
+	return runDocsServeWithRuntimeMode(cmd, deps, idx, addrFlag, mode, tokenFile, rt)
+}
+
+func runDocsServeWithRuntimeMode(
+	cmd *cobra.Command,
+	deps module.Deps,
+	idx *docspkg.Index,
+	addrFlag string,
+	openMode docsOpenMode,
 	tokenFile string,
 	rt docsServeRuntime,
 ) error {
@@ -449,7 +482,7 @@ func runDocsServeWithRuntime(
 		fmt.Fprintln(out, "  live reload: on")
 	}
 
-	if openFlag {
+	if openMode != docsOpenNone {
 		// Don't open a tab that is guaranteed to 401. A browser navigation cannot
 		// carry an Authorization header, so on a token-protected server --open
 		// would reliably produce an unauthorized page and leave the operator
@@ -458,6 +491,20 @@ func runDocsServeWithRuntime(
 		// verbs consistent rather than correct in one place only.
 		if token != "" {
 			fmt.Fprintln(errOut, "note: not opening a browser — this server requires a bearer token, which a browser navigation cannot supply")
+		} else if openMode == docsOpenEmbedded {
+			workspaceID := os.Getenv("CMUX_WORKSPACE_ID")
+			if workspaceID != "" {
+				if openErr := docspkg.OpenCMUXPreview(ctx, deps.Runner, workspaceID, url); openErr == nil {
+					if _, writeErr := fmt.Fprintln(out, "  preview: embedded in cmux (server remains in this terminal)"); writeErr != nil {
+						warnDocsServe(errOut, "warning: failed to report embedded preview: %v", writeErr)
+					}
+				} else {
+					warnDocsServe(errOut, "warning: failed to open embedded cmux preview: %v", openErr)
+					openSystemBrowser(ctx, deps, url, out, errOut)
+				}
+			} else {
+				openSystemBrowser(ctx, deps, url, out, errOut)
+			}
 		} else if openErr := docspkg.OpenBrowser(ctx, deps.Runner, url); openErr != nil {
 			warnDocsServe(errOut, "warning: failed to open browser: %v", openErr)
 		}
@@ -508,6 +555,16 @@ func runDocsServeWithRuntime(
 	background.Wait()
 	closeDocsServeLease(rt, lease, errOut)
 	return result
+}
+
+func openSystemBrowser(ctx context.Context, deps module.Deps, url string, out, errOut io.Writer) {
+	if openErr := docspkg.OpenBrowser(ctx, deps.Runner, url); openErr != nil {
+		warnDocsServe(errOut, "warning: failed to open system browser: %v", openErr)
+		return
+	}
+	if _, writeErr := fmt.Fprintln(out, "  preview: system browser (server remains in this terminal)"); writeErr != nil {
+		warnDocsServe(errOut, "warning: failed to report system-browser preview: %v", writeErr)
+	}
 }
 
 // abortDocsServeStartup unwinds a startup that failed after Serve began.

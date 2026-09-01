@@ -191,12 +191,16 @@ func NewHandler(store *Store, events *Broker) http.Handler {
 	mux.HandleFunc("GET /assets/svg-panzoom.js", serveStaticJS(panZoomJS))
 	mux.HandleFunc("GET /assets/artificer-tree.js", serveStaticJS(artificerTreeJS))
 	mux.HandleFunc("GET /assets/sidenav-filter.js", serveStaticJS(sidenavFilterJS))
+	mux.HandleFunc("GET /assets/reader.css", serveStaticCSS(readerCSS))
+	mux.HandleFunc("GET /assets/reader-shell.js", serveStaticJS(readerShellJS))
+	mux.HandleFunc("GET /assets/reader-settings.js", serveStaticJS(readerSettingsJS))
 	mux.HandleFunc("GET /assets/nav-toggle.js", serveStaticJS(navToggleJS))
 	mux.HandleFunc("GET /assets/chroma.css", serveStaticCSS(ChromaCSS()))
 	mux.HandleFunc("GET /assets/diagram.css", serveStaticCSS(diagramCSS))
 
 	mux.HandleFunc("GET "+eventsPath, handleEvents(events))
 	mux.HandleFunc("GET "+locatePath, handleLocate(store))
+	mux.HandleFunc("GET /media/{root}", handleMedia(store))
 	mux.HandleFunc("GET /doc/{root}/{rest...}", handleDoc(store))
 	mux.HandleFunc("GET /{$}", handleIndexRoot(store))
 
@@ -356,6 +360,12 @@ func handleDoc(store *Store) http.HandlerFunc {
 		rendered, err := RenderDoc(source)
 		if err != nil {
 			slog.Error("docs: markdown render failed.", "root", root, "rest", rest, "error", err)
+			http.Error(w, "render failed", http.StatusInternalServerError)
+			return
+		}
+		rendered.HTML, err = RewriteLocalImageURLs(rendered.HTML, root, rest)
+		if err != nil {
+			slog.Error("docs: local image URL rewrite failed.", "root", root, "rest", rest, "error", err)
 			http.Error(w, "render failed", http.StatusInternalServerError)
 			return
 		}
