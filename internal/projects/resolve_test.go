@@ -245,3 +245,80 @@ func itoa(i int) string {
 	}
 	return string(b)
 }
+
+// TestResolveTarget_FindsWingMember covers `surface launch <name>` for a wing
+// member. searchRoot is an independent second implementation of the layout
+// rules, so it has to learn wings separately from Discover — and a wing member
+// sits exactly where an owner directory would, so without the pass it is
+// walked THROUGH rather than matched.
+func TestResolveTarget_FindsWingMember(t *testing.T) {
+	tmp := t.TempDir()
+	member := filepath.Join(tmp, "cadence-ecosystem", "forgectl")
+	if err := os.MkdirAll(filepath.Join(member, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := &Client{Dir: tmp}
+	got, err := c.ResolveTarget("forgectl")
+	if err != nil {
+		t.Fatalf("ResolveTarget: %v", err)
+	}
+	want, _ := filepath.EvalSymlinks(member)
+	if got != want {
+		t.Errorf("ResolveTarget = %q; want %q", got, want)
+	}
+}
+
+// TestResolveTarget_WingPassRequiresGitMarker keeps the wing pass from
+// swallowing an OWNER directory, which sits at the same depth and holds repos
+// but is not one. Without the .git gate, `launch cameronsjo` would resolve to
+// the owner directory and start a session in a folder of repos.
+func TestResolveTarget_WingPassRequiresGitMarker(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, "github.com", "cameronsjo", "quickmd", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Client{Dir: tmp}).ResolveTarget("cameronsjo"); !errors.Is(err, ErrTargetNotFound) {
+		t.Errorf("resolving an owner directory = %v; want ErrTargetNotFound", err)
+	}
+}
+
+// TestResolveTarget_DuplicateCheckoutNamesBothPaths: a repo checked out in
+// both a wing and the host tree is a real estate defect, and the refusal has
+// to say which two directories to reconcile. A bare count cannot be acted on.
+func TestResolveTarget_DuplicateCheckoutNamesBothPaths(t *testing.T) {
+	tmp := t.TempDir()
+	wing := filepath.Join(tmp, "cadence-ecosystem", "forgectl")
+	host := filepath.Join(tmp, "github.com", "cameronsjo", "forgectl")
+	for _, d := range []string{wing, host} {
+		if err := os.MkdirAll(filepath.Join(d, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := (&Client{Dir: tmp}).ResolveTarget("forgectl")
+	if !errors.Is(err, ErrTargetAmbiguous) {
+		t.Fatalf("err = %v; want ErrTargetAmbiguous", err)
+	}
+	for _, want := range []string{"cadence-ecosystem", "github.com"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q; the operator cannot act on a bare count", err, want)
+		}
+	}
+}
+
+// TestResolveTarget_WingsDoNotDeepenTheWalk pins the depth contract wings
+// inherit. A wing adds one KNOWN layout at depth 2, not unbounded depth — a
+// deeper walk would start matching vendored checkouts and node_modules, and
+// launching into a dependency is the failure that contract prevents.
+func TestResolveTarget_WingsDoNotDeepenTheWalk(t *testing.T) {
+	tmp := t.TempDir()
+	deep := filepath.Join(tmp, "wing", "member", "vendor", "buried")
+	if err := os.MkdirAll(filepath.Join(deep, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmp, "wing", "member", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Client{Dir: tmp}).ResolveTarget("buried"); !errors.Is(err, ErrTargetNotFound) {
+		t.Errorf("a repo at depth 4 resolved = %v; want ErrTargetNotFound", err)
+	}
+}

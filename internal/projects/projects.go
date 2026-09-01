@@ -305,6 +305,22 @@ func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error)
 			continue
 		}
 		top := filepath.Join(dir, e.Name())
+
+		// The WING pass runs BEFORE the isGitRepo shortcut, and the order is
+		// the entire fix. A wing directory can itself be a checkout — the
+		// cadence-ecosystem wing is one — so under the old order it took the
+		// flat branch and its members stayed invisible. Every one of the seven
+		// wings on this machine was under-reported that way.
+		//
+		// A wing directory that is ALSO a repo is appended as a flat project
+		// too, since it is both; one that is not, is not.
+		if wing := discoverWingCandidates(top); len(wing) > 0 {
+			candidates = append(candidates, wing...)
+			if isGitRepo(top) {
+				candidates = append(candidates, discoverCandidate{e.Name(), top})
+			}
+			continue
+		}
 		if isGitRepo(top) {
 			candidates = append(candidates, discoverCandidate{e.Name(), top})
 			continue
@@ -322,6 +338,42 @@ func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error)
 
 	sortProjects(projects)
 	return projects, nil
+}
+
+// discoverWingCandidates walks a potential wing directory (Dir/<wing>) ONE
+// level deep, collecting every child that carries a .git marker. Returns nil
+// when there are none, signalling the caller that this is not a wing.
+//
+// DISCOVERY IS STRUCTURAL, not config-driven, and that is a deliberate split
+// from placement. Gating discovery on the [[projects.wings]] table too would
+// have been one mechanism and more explicit — but a wing missing from config
+// would then be invisible to `projects list`, converting the defect this fixes
+// into a config-drift defect with the identical symptom. Disk state genuinely
+// is the authority for "what already lives here"; it is only "where should a
+// NEW clone go" that config has to answer.
+//
+// The match rule is the .git marker, matching discoverCanonicalHostCandidates
+// rather than a plain is-a-directory test. Verified against the live estate:
+// the seven wings score 4–28 children, while `github.com` and `git.sjo.lol`
+// score 0 (their repos sit a level deeper) and every residue directory scores
+// 0 — so the two layouts do not overlap.
+func discoverWingCandidates(wingDir string) []discoverCandidate {
+	entries, err := os.ReadDir(wingDir)
+	if err != nil {
+		return nil
+	}
+	var out []discoverCandidate
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		child := filepath.Join(wingDir, e.Name())
+		if !isGitRepo(child) {
+			continue
+		}
+		out = append(out, discoverCandidate{e.Name(), child})
+	}
+	return out
 }
 
 // discoverCanonicalHostCandidates walks a potential host bucket (Dir/<host>)

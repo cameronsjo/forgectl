@@ -1251,3 +1251,77 @@ func TestClone_DifferentRepoAtOtherLayoutDoesNotSuppress(t *testing.T) {
 		t.Error("no clone ran; a different repo at the other path suppressed a legitimate clone")
 	}
 }
+
+// TestDiscover_FindsWingMembers is the acceptance test in miniature. The wing
+// directory here is ITSELF a checkout — the cadence-ecosystem wing is, on the
+// real estate — which is exactly the case that used to hide every member: the
+// isGitRepo shortcut took the flat branch and never looked inside. Ordering
+// the wing pass first is the whole fix, so this test must keep the
+// wing-is-also-a-repo shape or it stops covering the defect.
+func TestDiscover_FindsWingMembers(t *testing.T) {
+	tmp := t.TempDir()
+	mk := func(parts ...string) {
+		if err := os.MkdirAll(filepath.Join(append(append([]string{tmp}, parts...), ".git")...), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("cadence-ecosystem")             // the wing is a repo itself
+	mk("cadence-ecosystem", "forgectl") // …and holds members
+	mk("cadence-ecosystem", "cadence")
+	mk("mcp", "some-mcp")                     // a wing that is NOT a repo
+	mk("github.com", "cameronsjo", "quickmd") // host tree, untouched
+	mk("flat-repo")                           // legacy flat, untouched
+	if err := os.MkdirAll(filepath.Join(tmp, "notes"), 0o755); err != nil {
+		t.Fatal(err) // a plain non-git dir stays a flat project
+	}
+
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}, gitBin: ""}
+	projs, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	got := make(map[string]string, len(projs))
+	for _, p := range projs {
+		got[p.Name] = p.Dir
+	}
+	for name, want := range map[string]string{
+		"forgectl":          filepath.Join(tmp, "cadence-ecosystem", "forgectl"),
+		"cadence":           filepath.Join(tmp, "cadence-ecosystem", "cadence"),
+		"some-mcp":          filepath.Join(tmp, "mcp", "some-mcp"),
+		"quickmd":           filepath.Join(tmp, "github.com", "cameronsjo", "quickmd"),
+		"flat-repo":         filepath.Join(tmp, "flat-repo"),
+		"notes":             filepath.Join(tmp, "notes"),
+		"cadence-ecosystem": filepath.Join(tmp, "cadence-ecosystem"),
+	} {
+		if got[name] != want {
+			t.Errorf("%s = %q; want %q", name, got[name], want)
+		}
+	}
+	// The wing that is NOT itself a repo must not be listed as a project.
+	if dir, ok := got["mcp"]; ok {
+		t.Errorf("a non-repo wing directory was listed as a project: %q", dir)
+	}
+}
+
+// TestDiscover_HostTreesAreNotMistakenForWings pins the boundary between the
+// two layouts. A host bucket's children are OWNER directories with no .git of
+// their own, so the wing pass scores zero on them and the host pass still
+// runs. Verified against the live estate, where github.com and git.sjo.lol
+// both score 0 while all seven wings score 4–28.
+func TestDiscover_HostTreesAreNotMistakenForWings(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, "github.com", "cameronsjo", "quickmd", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := discoverWingCandidates(filepath.Join(tmp, "github.com")); len(got) != 0 {
+		t.Errorf("a host bucket scored %d wing members: %+v", len(got), got)
+	}
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}, gitBin: ""}
+	projs, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(projs) != 1 || projs[0].Name != "quickmd" {
+		t.Errorf("host tree discovery = %+v; want just quickmd", projs)
+	}
+}
