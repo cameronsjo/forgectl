@@ -5,7 +5,8 @@
       "release-type": "go",
       "changelog-path": "CHANGELOG.md",
       "skip-github-release": true,
-      "include-v-in-tag": true
+      "include-v-in-tag": true,
+      "bump-minor-pre-major": true
     }
   }
 }
