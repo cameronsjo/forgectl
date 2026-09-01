@@ -172,7 +172,7 @@ main.surface-document { padding: var(--s-xl); overflow-y: auto; min-height: 0; }
 <body>
 <div id="shell" class="surface-tool" data-nav="auto">
   <header class="appbar appbar--static" style="flex: none">
-    <button class="nav-toggle" id="nav-toggle" aria-label="Toggle sidebar"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
+    <button class="nav-toggle" id="nav-toggle" aria-label="Toggle sidebar" aria-expanded="true" aria-controls="docs-nav"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
     <a class="appbar__brand wordmark" href="/">forgectl docs</a>
     <div class="appbar__spacer"></div>
     <div class="appbar__actions">
@@ -181,7 +181,7 @@ main.surface-document { padding: var(--s-xl); overflow-y: auto; min-height: 0; }
   </header>
   <div class="content-grid{{if not .Outline}} content-grid--no-outline{{end}}">
     <div id="drawer-scrim"></div>
-    <aside class="docs-nav">
+    <aside class="docs-nav" id="docs-nav">
       <div class="field">
         <label class="field__label" for="doc-filter">Filter</label>
         <input class="input" id="doc-filter" type="search" placeholder="Filter docs…" autocomplete="off"/>
@@ -201,7 +201,7 @@ main.surface-document { padding: var(--s-xl); overflow-y: auto; min-height: 0; }
     </aside>
     <main class="surface-document container container--lg">
       {{if .Outline}}
-      <details class="outline-inline"><summary>On this page</summary>{{template "outlineItems" .Outline}}</details>
+      <details class="outline-inline"><summary>On this page</summary><nav aria-label="On this page">{{template "outlineItems" .Outline}}</nav></details>
       {{end}}
       <div class="doc-body">
       {{if .Content}}{{.Content}}{{else}}

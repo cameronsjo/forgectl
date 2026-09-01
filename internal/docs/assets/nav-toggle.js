@@ -11,6 +11,13 @@
   var scrim = document.getElementById('drawer-scrim');
   if (!shell || !btn) return;
   var mq = window.matchMedia('(max-width: 900px)');
+  // The system convention (artificer.css): an expand/collapse trigger keeps
+  // aria-expanded current. Expanded = the nav is visible in the current mode.
+  function syncExpanded() {
+    var cur = shell.getAttribute('data-nav') || 'auto';
+    var open = cur === 'open' || (cur === 'auto' && !mq.matches);
+    btn.setAttribute('aria-expanded', String(open));
+  }
   btn.addEventListener('click', function () {
     var cur = shell.getAttribute('data-nav') || 'auto';
     if (mq.matches) {
@@ -18,11 +25,15 @@
     } else {
       shell.setAttribute('data-nav', cur === 'closed' ? 'auto' : 'closed');
     }
+    syncExpanded();
   });
   if (scrim) scrim.addEventListener('click', function () {
     shell.setAttribute('data-nav', 'auto');
+    syncExpanded();
   });
   mq.addEventListener('change', function () {
     shell.setAttribute('data-nav', 'auto');
+    syncExpanded();
   });
+  syncExpanded();
 })();

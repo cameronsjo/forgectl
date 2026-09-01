@@ -1,5 +1,5 @@
 ---
-status: "in-flight"
+status: "in-review"
 updated: "2026-09-01"
 branch: "feat/docs-reader-v2"
 session: "deft-sonata"
@@ -102,7 +102,7 @@ The live prototype has every treatment behind Tweaks props so alternates can be 
 - [x] Task-list + figure/figcaption + inline-code styling
 - [x] `go build ./... && go vet ./... && go test ./...` green; live visual pass at all 3 breakpoints
 - [x] Reconcile `2026-08-31-docs-reader-design-surface.md` → superseded by this plan
-- [ ] Polish (full roster) + conformance; PR body with override block + tuple; redaction; ready flip
+- [x] Polish (full roster) + conformance; PR body with override block + tuple; redaction; ready flip
 
 ## Deviations
 
