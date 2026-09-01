@@ -305,31 +305,35 @@ func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error)
 			continue
 		}
 		top := filepath.Join(dir, e.Name())
+		isRepo := isGitRepo(top)
 
-		// The WING pass runs BEFORE the isGitRepo shortcut, and the order is
-		// the entire fix. A wing directory can itself be a checkout — the
-		// cadence-ecosystem wing is one — so under the old order it took the
-		// flat branch and its members stayed invisible. Every one of the seven
-		// wings on this machine was under-reported that way.
-		//
-		// A wing directory that is ALSO a repo is appended as a flat project
-		// too, since it is both; one that is not, is not.
-		// All three passes RUN, and none of them short-circuits the others.
-		// A directory can legitimately satisfy more than one: the
-		// cadence-ecosystem wing is itself a checkout (wing + flat), and a
-		// wing whose name happened to equal a host would otherwise hide that
-		// host's whole tree behind an early `continue`. Candidates are keyed
-		// by directory, so overlapping passes cannot double-count.
+		// The wing pass runs whether or not `top` is itself a checkout: a wing
+		// directory can be both, and the cadence-ecosystem wing on this estate
+		// IS both. That case is exactly what the old isGitRepo short-circuit
+		// hid, and restoring the short-circuit here would re-hide it.
 		var found bool
 		if wing := discoverWingCandidates(top); len(wing) > 0 {
 			candidates = append(candidates, wing...)
 			found = true
 		}
-		if canon := discoverCanonicalHostCandidates(top); len(canon) > 0 {
-			candidates = append(candidates, canon...)
-			found = true
+
+		// The host pass does NOT run on a checkout, and the asymmetry is
+		// load-bearing. A checkout is never a host bucket, so this pass could
+		// only match at `<root>/<repo>/<owner>/<name>` — three levels inside a
+		// repo, which is where a vendored checkout, a submodule, or a test
+		// fixture repo lives. resolve.go's searchRoot names that exact hazard
+		// as why it stops at depth 2, and PullAll would run `git pull --rebase`
+		// in whatever it found. The wing pass matching one level shallower is
+		// the deliberate exception, because that layout is a real one; three
+		// levels inside a checkout is not.
+		if !isRepo {
+			if canon := discoverCanonicalHostCandidates(top); len(canon) > 0 {
+				candidates = append(candidates, canon...)
+				found = true
+			}
 		}
-		if isGitRepo(top) {
+
+		if isRepo {
 			candidates = append(candidates, discoverCandidate{e.Name(), top})
 			continue
 		}
@@ -751,6 +755,13 @@ func (c *Client) CloneInto(ctx context.Context, r Repo, wing string) (string, er
 //
 // It returns an error rather than falling back, because falling back is how a
 // rejected value still ends up on disk under a different name.
+//
+// ONE RULE IT CANNOT ENFORCE: a wing must also not be named after the
+// configured GitHub host, and Placement is not given that host. Both live
+// entry points do check it — ResolveWings for the config table, the --wing
+// flag at the CLI seam — via ValidateWingName. A future caller of the exported
+// CloneInto that skips both would get past this function; say so here rather
+// than let the comment imply a checkpoint this function does not have.
 func Placement(root string, r Repo, wing string) (string, error) {
 	// OWNER AND NAME GO THROUGH validRepoSegment, NOT validPathSegment, and on
 	// BOTH branches even though a wing path contains no owner.

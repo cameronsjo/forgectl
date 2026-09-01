@@ -1478,3 +1478,70 @@ func TestDiscover_WingNamedAfterAHostStillShowsTheHostTree(t *testing.T) {
 		}
 	}
 }
+
+// TestDiscover_DoesNotDescendIntoAFlatCheckout is the anti-vendoring pin.
+// Removing the isGitRepo short-circuit was necessary for wings, but it also
+// removed what kept the host pass out of checkouts — and PullAll runs
+// `git pull --rebase` in whatever discovery hands it. A vendored checkout, a
+// submodule, or a test fixture repo three levels inside a flat clone must not
+// become a project, let alone one that gets pulled.
+//
+// resolve.go's searchRoot names this exact hazard as why it stops at depth 2;
+// the two walkers must not disagree about it.
+func TestDiscover_DoesNotDescendIntoAFlatCheckout(t *testing.T) {
+	tmp := t.TempDir()
+	mk := func(parts ...string) {
+		if err := os.MkdirAll(filepath.Join(append(append([]string{tmp}, parts...), ".git")...), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("flatrepo")                             // a top-level checkout
+	mk("flatrepo", "vendor", "buried-dep")     // host-pass shape, 3 levels in
+	mk("flatrepo", "testdata", "fixture-repo") // same
+	mk("other", "cameronsjo", "real")          // a genuine host tree, untouched
+
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}, gitBin: ""}
+	projs, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	got := make(map[string]string, len(projs))
+	for _, p := range projs {
+		got[p.Name] = p.Dir
+	}
+	for _, forbidden := range []string{"buried-dep", "fixture-repo"} {
+		if dir, ok := got[forbidden]; ok {
+			t.Errorf("%q was discovered at %q — pull-all would run git pull --rebase in a vendored checkout", forbidden, dir)
+		}
+	}
+	if got["flatrepo"] != filepath.Join(tmp, "flatrepo") {
+		t.Errorf("the flat checkout itself must still be a project, got %q", got["flatrepo"])
+	}
+	if got["real"] != filepath.Join(tmp, "other", "cameronsjo", "real") {
+		t.Errorf("a genuine host tree must still be walked, got %q", got["real"])
+	}
+}
+
+// TestDiscover_WingMembersOfACheckoutAreStillFound is the deliberate exception
+// the test above brackets: the wing pass DOES run on a checkout, because a wing
+// directory can be both — cadence-ecosystem is. One level, not three.
+func TestDiscover_WingMembersOfACheckoutAreStillFound(t *testing.T) {
+	tmp := t.TempDir()
+	for _, p := range [][]string{{"wing"}, {"wing", "member"}} {
+		if err := os.MkdirAll(filepath.Join(append(append([]string{tmp}, p...), ".git")...), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}, gitBin: ""}
+	projs, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	got := make(map[string]bool, len(projs))
+	for _, p := range projs {
+		got[p.Name] = true
+	}
+	if !got["member"] || !got["wing"] {
+		t.Errorf("a wing that is also a checkout must yield both itself and its members, got %v", got)
+	}
+}
