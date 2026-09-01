@@ -66,6 +66,9 @@ const logKeepDays = 7
 //	host = ""                        # GitHub hostname, e.g. "github.example.com"; empty = github.com
 //	[projects]           # forgectl projects — GitHub inventory scope
 //	owners = ["your-login"]          # gh repo list scope; unset/[] = authenticated login
+//	[[projects.wings]]   # optional: file these repos under <root>/<name>/<repo>, not the host tree
+//	name  = "cadence-ecosystem"      # directory directly under the projects root
+//	repos = ["cameronsjo/cadence"]   # "owner/name", matched case-insensitively
 //	[review]             # forgectl review — cross-project work inventory
 //	owners = ["your-login"]          # gh search --owner scope; unset/[] = authenticated login
 //	[review.gitea]       # forgectl review — additional Gitea source (opt-in)
@@ -377,12 +380,37 @@ func (sc SessionsConfig) IsZero() bool {
 // input; internal/githubauth validates them against the anchored owner
 // charset and bounds the set before any subprocess is spawned.
 type ProjectsConfig struct {
-	Owners []string `toml:"owners"`
+	Owners []string     `toml:"owners"`
+	Wings  []WingConfig `toml:"wings"`
 }
 
-// IsZero reports whether the [projects] section was absent or empty.
+// IsZero reports whether the [projects] section was absent or empty. A section
+// carrying only wings is present: `[[projects.wings]]` with no `owners` is a
+// legitimate configuration (wings steer placement, owners steer enumeration),
+// and reporting it absent would make the CLI seam skip a table the operator
+// wrote.
 func (pc ProjectsConfig) IsZero() bool {
-	return len(pc.Owners) == 0
+	return len(pc.Owners) == 0 && len(pc.Wings) == 0
+}
+
+// WingConfig is one `[[projects.wings]]` entry: a named directory directly
+// under the projects root that a listed set of repos is filed into, instead of
+// the host/owner/name tree.
+//
+// This is PLACEMENT, and it is deliberately config rather than inference:
+// where a NEW clone belongs is a judgment call about how the operator groups
+// work, and disk state cannot answer it — a wing tells you what already lives
+// there, not what should. Wing DISCOVERY is the mirror-image decision and is
+// structural (a depth-1 directory holding at least one git repo), so a wing
+// missing from this table is still listed; it just is not a clone target.
+//
+// Name lands verbatim as a filesystem path segment directly under the projects
+// root, where it shares a namespace with the host trees — so it is validated
+// against the same anchored charset a host segment is, and a name colliding
+// with the configured GitHub host is refused at the CLI seam.
+type WingConfig struct {
+	Name  string   `toml:"name"`
+	Repos []string `toml:"repos"` // "owner/name", matched case-insensitively
 }
 
 // ReviewConfig is the [review] section: which owners `forgectl review` fans

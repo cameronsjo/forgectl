@@ -82,6 +82,35 @@ func ResolveHost(configured string) (string, error) {
 	return host, nil
 }
 
+// MaxHostSegmentBytes bounds a hostname used as a filesystem path segment.
+// It is deliberately tighter than MaxHostBytes, which bounds an argv/env
+// component: POSIX NAME_MAX is 255, so a 256-byte host is unwritable
+// (ENAMETOOLONG on mkdir) — and worse, internal/projects' resolve.go silently
+// DROPS directory names over 255 bytes, so such a tree would also be invisible
+// to the launcher. 253 is the DNS name limit, which is the real ceiling for
+// anything that is genuinely a hostname.
+const MaxHostSegmentBytes = 253
+
+// ValidHostSegment reports whether s is a normalized hostname safe to use
+// verbatim as a filesystem path segment and a store key.
+//
+// It is a PREDICATE over an already-normalized value, not a normalizer: the
+// projects tree writes directories named by this value, and a guard that
+// silently repaired its input would let a hostname reach the filesystem in a
+// spelling the dedup key never had. Callers normalize first (ResolveHost, or
+// canonicalHost's lowercase-and-strip) and assert here.
+//
+// It is a path-segment and store-key charset, NOT a DNS validator — it admits
+// values that are not valid DNS names (consecutive dots, over-long labels, a
+// bare single label, an IP literal), none of which are path-unsafe. What it
+// buys over a traversal-only guard is exactly the set a traversal guard
+// misses: ':' (legal in an APFS filename, rendered as '/' in Finder), a
+// leading '.' (a tree invisible to ls), whitespace, ASCII control characters
+// and ANSI escapes, all non-ASCII homoglyphs, and any over-long value.
+func ValidHostSegment(s string) bool {
+	return s != "" && len(s) <= MaxHostSegmentBytes && reHost.MatchString(s)
+}
+
 // tokenEnvVars are the credential variables gh consults for a host. gh sends
 // GH_ENTERPRISE_TOKEN / GITHUB_ENTERPRISE_TOKEN to whatever non-default
 // GH_HOST names, and GH_TOKEN / GITHUB_TOKEN to github.com and *.ghe.com —
