@@ -3,17 +3,21 @@ package docs
 import (
 	"bytes"
 	"fmt"
+	"html"
 	"regexp"
+	"sort"
+	"strings"
 	"sync"
 
 	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
-	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/yuin/goldmark"
 	highlighting "github.com/yuin/goldmark-highlighting/v2"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	goldmarkhtml "github.com/yuin/goldmark/renderer/html"
+	"go.abhg.dev/goldmark/frontmatter"
+	"gopkg.in/yaml.v3"
 )
 
 // chromaStyle is the fixed syntax-highlighting palette. It is deliberately
@@ -35,8 +39,18 @@ const chromaStyle = "monokai"
 // safe ONLY because every render is piped through sanitizer (below) before
 // it ever reaches a client; WithUnsafe alone, without the bluemonday pass,
 // would be an XSS hole.
-var markdown = goldmark.New(
-	goldmark.WithExtensions(
+var markdown = newMarkdown(true)
+
+// markdownPlain is the same pipeline without the frontmatter extension. It
+// serves any document hasWellFormedFrontmatter rejects: the extension treats
+// EVERY leading ---/+++ fence as an opener and, unterminated, consumes to end
+// of file — so a doc that merely opens with a thematic break would otherwise
+// render empty. Two instances beat one instance plus source rewriting; the
+// gate decides which parser sees the bytes, and neither path mutates them.
+var markdownPlain = newMarkdown(false)
+
+func newMarkdown(withFrontmatter bool) goldmark.Markdown {
+	extenders := []goldmark.Extender{
 		extension.GFM,
 		highlighting.NewHighlighting(
 			highlighting.WithStyle(chromaStyle),
@@ -46,10 +60,20 @@ var markdown = goldmark.New(
 		// never claims them — see mermaid.go for why a second renderer
 		// alongside the highlighting extension is not an option.
 		mermaidExtension{},
-	),
-	goldmark.WithParserOptions(parser.WithAutoHeadingID()),
-	goldmark.WithRendererOptions(goldmarkhtml.WithUnsafe()),
-)
+	}
+	if withFrontmatter {
+		// Consumes a leading YAML/TOML frontmatter block at parse time, so the
+		// delimiters stop rendering as a thematic break + mangled heading. The
+		// parsed data is read back per-render (frontmatter.Get) and presented
+		// as a collapsed metadata disclosure — see frontmatterHTML.
+		extenders = append(extenders, &frontmatter.Extender{})
+	}
+	return goldmark.New(
+		goldmark.WithExtensions(extenders...),
+		goldmark.WithParserOptions(parser.WithAutoHeadingID()),
+		goldmark.WithRendererOptions(goldmarkhtml.WithUnsafe()),
+	)
+}
 
 // sanitizer is the bluemonday policy applied to every rendered doc — the
 // hygiene pass named in forgectl#93 ("HTML sanitization as ordinary
@@ -427,29 +451,16 @@ func allowInlineSVG(p *bluemonday.Policy) {
 	p.AllowAttrs("maskUnits", "maskContentUnits").OnElements("mask")
 }
 
-// chromaCSS is the class-based syntax-highlighting stylesheet for
-// chromaStyle, generated once at package init via chroma's own CSS writer
-// (the same mechanism goldmark-highlighting uses internally) rather than
-// hand-copied — it can never drift from the style actually applied above.
-var chromaCSS = mustChromaCSS(chromaStyle)
-
-func mustChromaCSS(styleName string) []byte {
-	style := styles.Get(styleName)
-	if style == nil {
-		panic(fmt.Sprintf("docs: unknown chroma style %q", styleName))
-	}
-	formatter := chromahtml.New(chromahtml.WithClasses(true))
-	var buf bytes.Buffer
-	if err := formatter.WriteCSS(&buf, style); err != nil {
-		panic(fmt.Sprintf("docs: generating chroma CSS: %v", err))
-	}
-	return buf.Bytes()
-}
-
-// ChromaCSS returns the generated syntax-highlighting stylesheet — served by
-// the HTTP layer at a static asset path.
+// ChromaCSS returns the syntax-highlighting stylesheet served at
+// /assets/chroma.css. It is the hand-authored Artificer token mapping
+// (assets/chroma.css), not a chroma-generated style sheet: chroma's
+// class-based output names token TYPES, so the stylesheet is free to bind
+// them to the design system's theme-following vars instead of any fixed
+// palette. The trade against the old generated-monokai approach is
+// deliberate — a generated sheet could never drift from a style the page
+// no longer wants, while this one follows the theme the page actually has.
 func ChromaCSS() []byte {
-	return chromaCSS
+	return chromaArtificerCSS
 }
 
 // renderMu serializes goldmark.Convert calls. goldmark's Markdown value is
@@ -465,13 +476,168 @@ var renderMu sync.Mutex
 // styling allowed). The result is safe to embed directly into a response —
 // sanitization is the last step, not a pre-filter goldmark's raw-HTML
 // passthrough could bypass.
+//
+// A leading frontmatter block, when present, is rendered as a collapsed
+// disclosure ABOVE the sanitized body. That block is generated here from
+// parsed values with every fragment HTML-escaped, which is why prepending it
+// after sanitization does not reopen the XSS door the sanitizer closes: the
+// document author's bytes only ever reach it through html.EscapeString.
+// Building it post-sanitizer keeps the bluemonday allowlist untouched —
+// details/summary/dl stay denied for document-authored HTML.
 func Render(source []byte) (string, error) {
+	// Route through the frontmatter-aware parser only when a well-formed
+	// block actually opens the document. The extension's opener is greedy —
+	// any leading --- fence starts a block, and an unterminated one consumes
+	// the REST OF THE FILE — so without this gate a doc opening with a
+	// thematic break renders as an empty page.
+	md := markdown
+	if !hasWellFormedFrontmatter(source) {
+		md = markdownPlain
+	}
 	renderMu.Lock()
 	var buf bytes.Buffer
-	err := markdown.Convert(source, &buf)
+	ctx := parser.NewContext()
+	err := md.Convert(source, &buf, parser.WithContext(ctx))
 	renderMu.Unlock()
 	if err != nil {
 		return "", fmt.Errorf("render markdown: %w", err)
 	}
-	return string(sanitizer.SanitizeBytes(dropDuplicateSVGNamespaces(buf.Bytes()))), nil
+	body := string(sanitizer.SanitizeBytes(dropDuplicateSVGNamespaces(buf.Bytes())))
+	return frontmatterHTML(ctx) + body, nil
+}
+
+// hasWellFormedFrontmatter reports whether source opens with a frontmatter
+// block safe to hand to the frontmatter extension. It mirrors the extension's
+// own delimiter rules (a first line of three-plus repeated - or +, closed by
+// an identical line) and then applies the judgment the extension skips: a ---
+// fence shares syntax with a thematic break, so an unterminated block, or one
+// whose body is not a YAML mapping, is markdown — not metadata — and must
+// reach the parser that treats it that way. A +++ TOML fence collides with no
+// markdown syntax, so termination alone qualifies it.
+func hasWellFormedFrontmatter(source []byte) bool {
+	lines := bytes.Split(source, []byte("\n"))
+	delim, count := frontmatterDelim(lines[0])
+	if delim == 0 {
+		return false
+	}
+	for i := 1; i < len(lines); i++ {
+		d, c := frontmatterDelim(lines[i])
+		if d != delim || c != count {
+			continue
+		}
+		// First matching fence closes the block, same as the extension.
+		if delim == '+' {
+			return true
+		}
+		var m map[string]any
+		block := bytes.Join(lines[1:i], []byte("\n"))
+		// A nil (empty) mapping still counts: `---` immediately closed by
+		// `---` is legal, empty frontmatter, not a pair of thematic breaks.
+		return yaml.Unmarshal(block, &m) == nil
+	}
+	return false
+}
+
+// frontmatterDelim interprets one newline-stripped line as a frontmatter
+// fence: the opening byte (- or +) repeated for the whole line, minimum
+// three. Returns (0, 0) for anything else. The repeat count matters because
+// the closing fence must match it exactly.
+func frontmatterDelim(line []byte) (byte, int) {
+	line = bytes.TrimSuffix(line, []byte("\r"))
+	if len(line) < 3 {
+		return 0, 0
+	}
+	d := line[0]
+	if d != '-' && d != '+' {
+		return 0, 0
+	}
+	for _, c := range line[1:] {
+		if c != d {
+			return 0, 0
+		}
+	}
+	return d, len(line)
+}
+
+// frontmatterHTML renders a document's parsed frontmatter as a collapsed
+// Artificer disclosure (accordion + kv grid), or "" when the document has
+// none. Key order follows the document; a non-scalar value is shown as its
+// YAML flow form rather than flattened.
+func frontmatterHTML(ctx parser.Context) string {
+	fm := frontmatter.Get(ctx)
+	if fm == nil {
+		return ""
+	}
+	var node yaml.Node
+	if err := fm.Decode(&node); err != nil || len(node.Content) == 0 {
+		// TOML frontmatter (or unparseable YAML) has no yaml.Node form —
+		// fall back to the unordered map both formats can decode into.
+		return frontmatterHTMLUnordered(fm)
+	}
+	mapping := node.Content[0]
+	if mapping.Kind != yaml.MappingNode {
+		return frontmatterHTMLUnordered(fm)
+	}
+	var b strings.Builder
+	pairs := 0
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		key, value := mapping.Content[i], mapping.Content[i+1]
+		writeKV(&b, key.Value, yamlScalar(value))
+		pairs++
+	}
+	return wrapFrontmatter(b.String(), pairs)
+}
+
+func frontmatterHTMLUnordered(fm *frontmatter.Data) string {
+	var m map[string]any
+	if err := fm.Decode(&m); err != nil || len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	pairs := 0
+	for _, k := range keys {
+		b2, err := yaml.Marshal(m[k])
+		if err != nil {
+			continue // badge counts rendered pairs, so a skipped key is not counted
+		}
+		writeKV(&b, k, strings.TrimSpace(string(b2)))
+		pairs++
+	}
+	return wrapFrontmatter(b.String(), pairs)
+}
+
+func yamlScalar(n *yaml.Node) string {
+	if n.Kind == yaml.ScalarNode {
+		return n.Value
+	}
+	out, err := yaml.Marshal(n)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func writeKV(b *strings.Builder, key, value string) {
+	b.WriteString("<dt>")
+	b.WriteString(html.EscapeString(key))
+	b.WriteString("</dt><dd>")
+	b.WriteString(html.EscapeString(value))
+	b.WriteString("</dd>")
+}
+
+func wrapFrontmatter(kvBody string, pairs int) string {
+	if pairs == 0 {
+		return ""
+	}
+	noun := "keys"
+	if pairs == 1 {
+		noun = "key"
+	}
+	return fmt.Sprintf(`<div class="accordion surface-tool"><details class="frontmatter"><summary>Front matter <span class="badge">%d %s</span></summary><div class="accordion__body"><dl class="kv">%s</dl></div></details></div>`,
+		pairs, noun, kvBody)
 }

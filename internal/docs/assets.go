@@ -46,6 +46,14 @@ var reloadJS []byte
 //go:embed assets/sidenav-filter.js
 var sidenavFilterJS []byte
 
+// chromaArtificerCSS maps chroma's class-based token output onto the
+// Artificer syntax roles (the .tok-* map in artificer.css), replacing the
+// generated monokai sheet whose hardcoded palette ignored the theme. Served
+// at /assets/chroma.css via ChromaCSS().
+//
+//go:embed assets/chroma.css
+var chromaArtificerCSS []byte
+
 // mermaidJS is vendored mermaid (version, license, and sha256 recorded in
 // assets/provenance-mermaid.json). Embedded rather than loaded from a CDN: the
 // reader must render a diagram with no network call, because opening a local

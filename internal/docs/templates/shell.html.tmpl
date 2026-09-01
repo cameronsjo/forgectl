@@ -7,6 +7,19 @@
 <link rel="stylesheet" href="/assets/artificer.css"/>
 <link rel="stylesheet" href="/assets/chroma.css"/>
 <link rel="stylesheet" href="/assets/diagram.css"/>
+<style>
+  /* tree--static backing: artificer.css keys twisty rotation off
+     [role="treeitem"][aria-expanded] (the artificer-tree.js pattern), which a
+     server-rendered <details> tree never sets — rotate off the native open
+     state instead. Same story for the directory count: .sidenav a > .count
+     cannot match a <summary>, so re-state that treatment here. Inline <style>
+     is fine under the CSP (style-src carries 'unsafe-inline' already). */
+  .tree--static details[open] > summary > .tree__twisty { transform: rotate(90deg); }
+  .tree--static summary > .count {
+    margin-left: auto; font-variant-numeric: tabular-nums;
+    font-size: var(--t-label-sm-size); color: var(--fg-disabled);
+  }
+</style>
 <script src="/assets/artificer-theme.js" defer></script>
 <script src="/assets/reload.js" defer></script>
 <script src="/assets/artificer-tree.js" defer></script>
@@ -36,8 +49,12 @@
       <nav class="sidenav" aria-label="Indexed docs" style="border-radius:0;border:0;flex:1;overflow-y:auto">
         {{range .Groups}}
         <div class="sidenav__group">{{.Root}}</div>
+        {{if .Tree}}
+        <ul class="tree tree--static" aria-label="{{.Root}}">{{template "treeNodes" .Tree}}</ul>
+        {{else}}
         {{range .Docs}}
         <a href="{{.Href}}" data-filter-text="{{.FilterText}}"{{if .Current}} aria-current="page"{{end}}><span class="label">{{.Title}}</span></a>
+        {{end}}
         {{end}}
         {{end}}
       </nav>
@@ -54,3 +71,4 @@
 </div>
 </body>
 </html>
+{{define "treeNodes"}}{{range .}}<li>{{if .Leaf}}<a class="tree__row tree__leaf" href="{{.Leaf.Href}}" data-filter-text="{{.Leaf.FilterText}}"{{if .Leaf.Current}} aria-current="page"{{end}}><span class="tree__twisty" aria-hidden="true"></span><span class="label">{{.Leaf.Title}}</span></a>{{else}}<details{{if .Open}} open{{end}}><summary class="tree__row"><span class="tree__twisty" aria-hidden="true"></span><span class="label">{{.Name}}</span> <span class="count">{{.Count}}</span></summary><ul class="tree__group">{{template "treeNodes" .Children}}</ul></details>{{end}}</li>{{end}}{{end}}
