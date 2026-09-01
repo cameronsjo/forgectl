@@ -66,6 +66,7 @@ var readerShellJS []byte
 
 //go:embed assets/reader-settings.js
 var readerSettingsJS []byte
+
 // chromaArtificerCSS maps chroma's class-based token output onto the
 // Artificer syntax roles (the .tok-* map in artificer.css), replacing the
 // generated monokai sheet whose hardcoded palette ignored the theme. Served
