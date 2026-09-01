@@ -1,7 +1,7 @@
 ---
-status: in-flight
+status: done
 branch: fix/docs-frontmatter-and-tree
-next: design-iterate the docs reader (tree density, frontmatter treatment, code-block fit) — read this stub, open `forgectl docs serve`, compare against the Artificer live-spec
+next: superseded — every open lever ruled by docs/plans/2026-09-01-docs-reader-v2.md (built on feat/docs-reader-v2)
 ---
 
 # The docs reader as a design surface

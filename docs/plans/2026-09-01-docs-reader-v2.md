@@ -92,16 +92,16 @@ The live prototype has every treatment behind Tweaks props so alternates can be 
 
 ## Checklist (execution zone)
 
-- [ ] Worktree `feat/docs-reader-v2` from fresh `origin/main`; plan persisted + committed; push -u; draft PR
-- [ ] Density + aria-current: 24px tree rows, Recent loses `aria-current`, `flex: none` rows (template CSS + server.go)
-- [ ] `render.go`: properties block replaces the disclosure (icons map, `.chip` for status, escaped post-sanitizer); tests updated
-- [ ] `render.go`: GFM callout transform (`> [!NOTE|TIP|WARNING|DANGER/CAUTION]` → `.callout` tiers); tests
-- [ ] `render.go` + `server.go`: outline extraction (h2/h3 tree) + word count into template data; tests
-- [ ] Template: grid layout + 3 breakpoints, appbar nav toggle, outline pane + `outline-inline` fallback, status bar, note typography, props/callout/embed CSS
-- [ ] `assets/nav-toggle.js` (new, CSP-served); extend `svg-panzoom.js` with `.embed` wrap/reset; mermaid `.embed` chrome + token theme check in `mermaid-init.js`/`diagram.css`
-- [ ] Task-list + figure/figcaption + inline-code styling
-- [ ] `go build ./... && go vet ./... && go test ./...` green; live visual pass at all 3 breakpoints
-- [ ] Reconcile `2026-08-31-docs-reader-design-surface.md` → superseded by this plan
+- [x] Worktree `feat/docs-reader-v2` from fresh `origin/main`; plan persisted + committed; push -u; draft PR
+- [x] Density + aria-current: 24px tree rows, Recent loses `aria-current`, `flex: none` rows (template CSS + server.go)
+- [x] `render.go`: properties block replaces the disclosure (icons map, `.chip` for status, escaped post-sanitizer); tests updated
+- [x] `render.go`: GFM callout transform (`> [!NOTE|TIP|WARNING|DANGER/CAUTION]` → `.callout` tiers); tests
+- [x] `render.go` + `server.go`: outline extraction (h2/h3 tree) + word count into template data; tests
+- [x] Template: grid layout + 3 breakpoints, appbar nav toggle, outline pane + `outline-inline` fallback, status bar, note typography, props/callout/embed CSS
+- [x] `assets/nav-toggle.js` (new, CSP-served); extend `svg-panzoom.js` with `.embed` wrap/reset; mermaid `.embed` chrome + token theme check in `mermaid-init.js`/`diagram.css`
+- [x] Task-list + figure/figcaption + inline-code styling
+- [x] `go build ./... && go vet ./... && go test ./...` green; live visual pass at all 3 breakpoints
+- [x] Reconcile `2026-08-31-docs-reader-design-surface.md` → superseded by this plan
 - [ ] Polish (full roster) + conformance; PR body with override block + tuple; redaction; ready flip
 
 ## Deviations

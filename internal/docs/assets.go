@@ -38,6 +38,13 @@ var artificerTreeJS []byte
 //go:embed assets/reload.js
 var reloadJS []byte
 
+// navToggleJS is the sidenav collapse/drawer toggle (docs-reader-v2). Served
+// for the same CSP reason as sidenav-filter.js: script-src 'self' forbids
+// inline script.
+//
+//go:embed assets/nav-toggle.js
+var navToggleJS []byte
+
 // sidenavFilterJS is the sidenav filter box's behavior. It lives in a file, and
 // is embedded and served like every other asset, because the handler's
 // Content-Security-Policy sets script-src 'self' — the inline <script> this

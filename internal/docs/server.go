@@ -191,6 +191,7 @@ func NewHandler(store *Store, events *Broker) http.Handler {
 	mux.HandleFunc("GET /assets/svg-panzoom.js", serveStaticJS(panZoomJS))
 	mux.HandleFunc("GET /assets/artificer-tree.js", serveStaticJS(artificerTreeJS))
 	mux.HandleFunc("GET /assets/sidenav-filter.js", serveStaticJS(sidenavFilterJS))
+	mux.HandleFunc("GET /assets/nav-toggle.js", serveStaticJS(navToggleJS))
 	mux.HandleFunc("GET /assets/chroma.css", serveStaticCSS(ChromaCSS()))
 	mux.HandleFunc("GET /assets/diagram.css", serveStaticCSS(diagramCSS))
 
@@ -316,8 +317,8 @@ func serveStaticJS(body []byte) http.HandlerFunc {
 // handleIndexRoot renders the shell with the empty-state content — "/"
 // itself never resolves to a specific doc.
 func handleIndexRoot(store *Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		renderShell(w, store.Current(), pageContext{})
+	return func(w http.ResponseWriter, r *http.Request) {
+		renderShell(w, store.Current(), pageContext{Host: r.Host})
 	}
 }
 
@@ -352,7 +353,7 @@ func handleDoc(store *Store) http.HandlerFunc {
 			return
 		}
 
-		rendered, err := Render(source)
+		rendered, err := RenderDoc(source)
 		if err != nil {
 			slog.Error("docs: markdown render failed.", "root", root, "rest", rest, "error", err)
 			http.Error(w, "render failed", http.StatusInternalServerError)
@@ -364,7 +365,11 @@ func handleDoc(store *Store) http.HandlerFunc {
 			CurrentRoot: root,
 			CurrentRel:  rest,
 			DocTitle:    doc.Title,
-			Content:     template.HTML(rendered), //nolint:gosec // body is bluemonday-sanitized in Render; the frontmatter prefix is built there from html.EscapeString'd fragments only
+			Host:        r.Host,
+			Outline:     rendered.Outline,
+			Words:       rendered.Words,
+			Minutes:     rendered.Minutes,
+			Content:     template.HTML(rendered.HTML), //nolint:gosec // body is bluemonday-sanitized in Render; the frontmatter/callout additions are built there from html.EscapeString'd fragments and fixed markup only
 		})
 	}
 }
@@ -376,6 +381,10 @@ type pageContext struct {
 	CurrentRoot string
 	CurrentRel  string
 	DocTitle    string
+	Host        string
+	Outline     []OutlineItem
+	Words       int
+	Minutes     int
 	Content     template.HTML
 }
 
@@ -384,6 +393,14 @@ type shellData struct {
 	DocTitle string
 	Content  template.HTML
 	Groups   []sidenavGroup
+	// Status-bar + outline furniture (docs-reader-v2). Host comes from the
+	// request; DocPath is "root/rel" for the current doc, empty on the index.
+	Host     string
+	DocPath  string
+	DocCount int
+	Outline  []OutlineItem
+	Words    int
+	Minutes  int
 }
 
 // sidenavGroup renders one labeled section of the sidenav. Exactly one of
@@ -415,10 +432,20 @@ type treeNode struct {
 
 func renderShell(w http.ResponseWriter, idx *Index, ctx pageContext) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	docPath := ""
+	if ctx.CurrentRoot != "" {
+		docPath = ctx.CurrentRoot + "/" + ctx.CurrentRel
+	}
 	data := shellData{
 		DocTitle: ctx.DocTitle,
 		Content:  ctx.Content,
 		Groups:   buildGroups(idx, ctx.CurrentRoot, ctx.CurrentRel),
+		Host:     ctx.Host,
+		DocPath:  docPath,
+		DocCount: len(idx.List()),
+		Outline:  ctx.Outline,
+		Words:    ctx.Words,
+		Minutes:  ctx.Minutes,
 	}
 	if err := shellTemplate.Execute(w, data); err != nil {
 		slog.Error("docs: template execution failed.", "error", err)

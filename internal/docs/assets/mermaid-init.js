@@ -135,7 +135,42 @@
     });
   }
 
+  // Wrap each diagram in the .embed card (docs-reader-v2): a labeled header
+  // bar with a reset control, and a centered body. The reset button drives
+  // svg-panzoom through its own public gesture — a dblclick on the
+  // .dia-viewport it creates — so there is no second transform authority.
+  function wrapEmbeds() {
+    document.querySelectorAll("pre.mermaid").forEach(function (el) {
+      if (el.closest(".embed")) { return; }
+      var embed = document.createElement("div");
+      embed.className = "embed";
+      var bar = document.createElement("div");
+      bar.className = "embed-bar";
+      var label = document.createElement("span");
+      label.textContent = "mermaid";
+      var reset = document.createElement("button");
+      reset.type = "button";
+      reset.textContent = "reset";
+      reset.setAttribute("aria-label", "Reset diagram view");
+      reset.addEventListener("click", function () {
+        var viewport = embed.querySelector(".dia-viewport");
+        if (viewport) {
+          viewport.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+        }
+      });
+      bar.appendChild(label);
+      bar.appendChild(reset);
+      var body = document.createElement("div");
+      body.className = "embed-body";
+      el.parentNode.insertBefore(embed, el);
+      embed.appendChild(bar);
+      embed.appendChild(body);
+      body.appendChild(el);
+    });
+  }
+
   stashSources();
+  wrapEmbeds();
   render();
   watchTheme();
 })();
