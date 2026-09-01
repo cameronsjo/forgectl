@@ -1145,3 +1145,109 @@ func TestClone_WingMemberLandsInTheWing(t *testing.T) {
 		t.Errorf("unlisted dest = %q; want the host tree %q", dest, want)
 	}
 }
+
+// TestClone_DuplicateAcrossLayoutsIsANoOp covers the cross-tree probe. A repo
+// can be filed two ways — its wing or the host tree — and a clone routed to
+// one while already checked out at the other would mint the duplicate the
+// 2026-08-04 estate reorganization spent real effort removing.
+//
+// Both directions are tested, because the failure is symmetric and a one-sided
+// guard reads as working right up until the day the wing table changes.
+func TestClone_DuplicateAcrossLayoutsIsANoOp(t *testing.T) {
+	table, err := ResolveWings("github.com", []Wing{
+		{Name: "cadence-ecosystem", Repos: []string{"cameronsjo/forgectl"}},
+	})
+	if err != nil {
+		t.Fatalf("ResolveWings: %v", err)
+	}
+	r := Repo{Host: "github.com", Owner: "cameronsjo", Name: "forgectl"}
+	const origin = "git@github.com:cameronsjo/forgectl.git"
+
+	for _, tc := range []struct {
+		name     string
+		existing []string // path segments under tmp
+	}{
+		{"already in the host tree, routed to the wing", []string{"github.com", "cameronsjo", "forgectl"}},
+		{"already in the wing, routed to the host tree", []string{"cadence-ecosystem", "forgectl"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			existing := filepath.Join(append([]string{tmp}, tc.existing...)...)
+			if err := os.MkdirAll(filepath.Join(existing, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				if name == "git" && len(args) >= 4 && args[2] == "remote" {
+					return origin, nil
+				}
+				return "", nil
+			}}
+			c := &Client{Dir: tmp, run: fake, gitBin: "git", wings: table}
+
+			// The wing-routed call goes through Clone (which consults the
+			// table); the host-tree-routed call is the --wing "" override.
+			var dest string
+			if tc.existing[0] == "github.com" {
+				dest, err = c.Clone(context.Background(), r)
+			} else {
+				dest, err = c.CloneInto(context.Background(), r, "")
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if dest != existing {
+				t.Errorf("dest = %q; want the EXISTING checkout %q — the stdout contract is one usable path", dest, existing)
+			}
+			for _, call := range fake.Calls {
+				if strings.Contains(strings.Join(call.Args, " "), "clone") {
+					t.Errorf("a clone ran despite the repo already being checked out: %q %v", call.Name, call.Args)
+				}
+			}
+		})
+	}
+}
+
+// TestClone_DifferentRepoAtOtherLayoutDoesNotSuppress is why the probe is
+// originMatches and not a bare os.Stat. A same-NAMED but different repo
+// sitting at the other path must not suppress a legitimate clone — that would
+// be a silent wrong answer, which is worse than the duplicate.
+func TestClone_DifferentRepoAtOtherLayoutDoesNotSuppress(t *testing.T) {
+	tmp := t.TempDir()
+	table, err := ResolveWings("github.com", []Wing{
+		{Name: "cadence-ecosystem", Repos: []string{"cameronsjo/forgectl"}},
+	})
+	if err != nil {
+		t.Fatalf("ResolveWings: %v", err)
+	}
+	// Someone else's forgectl, checked out in the host tree.
+	decoy := filepath.Join(tmp, "github.com", "cameronsjo", "forgectl")
+	if err := os.MkdirAll(filepath.Join(decoy, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "git" && len(args) >= 4 && args[2] == "remote" {
+			return "git@github.com:someone-else/forgectl.git", nil
+		}
+		return "", nil
+	}}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git", wings: table}
+
+	dest, err := c.Clone(context.Background(), Repo{
+		Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := filepath.Join(tmp, "cadence-ecosystem", "forgectl"); dest != want {
+		t.Errorf("dest = %q; want %q — a DIFFERENT repo must not suppress the clone", dest, want)
+	}
+	var cloned bool
+	for _, call := range fake.Calls {
+		if strings.Contains(strings.Join(call.Args, " "), "clone") {
+			cloned = true
+		}
+	}
+	if !cloned {
+		t.Error("no clone ran; a different repo at the other path suppressed a legitimate clone")
+	}
+}

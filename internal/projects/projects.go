@@ -587,6 +587,25 @@ func (c *Client) CloneInto(ctx context.Context, r Repo, wing string) (string, er
 		// and this string reaches a terminal. They are in the debug log above.
 		return "", fmt.Errorf("refusing to clone: %w", err)
 	}
+	// A repo can be filed two ways — its wing, or the host tree — and only one
+	// of them is `dest`. Before creating anything, check whether it is ALREADY
+	// checked out at the other one. The 2026-08-04 estate reorganization spent
+	// real effort resolving duplicate checkouts; this is the cheap way not to
+	// mint new ones, and it also keeps adding or removing a wing entry from
+	// silently re-cloning every repo the entry moved.
+	//
+	// The probe is originMatches, not a bare os.Stat, and that distinction is
+	// the whole reason it is safe: a stat alone would let any same-named but
+	// DIFFERENT repo suppress a legitimate clone. originMatches asks the
+	// checkout who it actually is.
+	if other, oerr := c.otherPlacement(r, wing); oerr == nil && other != dest {
+		if _, serr := os.Stat(other); serr == nil && c.originMatches(ctx, other, r) {
+			slog.Info("Repo already checked out under the other layout; not cloning a duplicate.",
+				"existing", other, "wouldHaveBeen", dest)
+			return other, nil
+		}
+	}
+
 	if _, err := os.Stat(dest); err == nil {
 		// Something is already at dest. Only treat it as "already cloned" when it
 		// really is THIS repo — the canonical layout already separates repos by
@@ -709,6 +728,25 @@ func validRepoSegment(s string) bool {
 		!strings.HasPrefix(s, ".") &&
 		len(s) <= maxRepoSegmentBytes &&
 		pr.ValidOwnerRepoPart(s)
+}
+
+// otherPlacement returns the path r would occupy under the OTHER of the two
+// filing rules: the host tree when wing routed it to a wing, and r's
+// configured wing when it did not.
+//
+// A repo with no wing at all has no other placement — the host tree is its
+// only home — so that case returns an error and the caller skips the probe.
+// It reports an error rather than "" so a guard failure can never be mistaken
+// for "checked and found nothing".
+func (c *Client) otherPlacement(r Repo, wing string) (string, error) {
+	if wing != "" {
+		return Placement(c.Dir, r, "")
+	}
+	configured := c.WingFor(r)
+	if configured == "" {
+		return "", fmt.Errorf("repo has no wing; the host tree is its only placement")
+	}
+	return Placement(c.Dir, r, configured)
 }
 
 // originMatches reports whether the git checkout at dir has an origin remote that
