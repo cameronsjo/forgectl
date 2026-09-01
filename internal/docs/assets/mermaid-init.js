@@ -148,8 +148,11 @@
       bar.className = "embed-bar";
       var label = document.createElement("span");
       label.textContent = "mermaid";
+      var spacer = document.createElement("span");
+      spacer.className = "spacer";
       var reset = document.createElement("button");
       reset.type = "button";
+      reset.className = "embed-reset";
       reset.textContent = "reset";
       reset.setAttribute("aria-label", "Reset diagram view");
       reset.addEventListener("click", function () {
@@ -159,6 +162,7 @@
         }
       });
       bar.appendChild(label);
+      bar.appendChild(spacer);
       bar.appendChild(reset);
       var body = document.createElement("div");
       body.className = "embed-body";

@@ -106,6 +106,8 @@ The live prototype has every treatment behind Tweaks props so alternates can be 
 
 ## Deviations
 
+- **True-up pass (design zip):** the reference shell (`shell-reference.html`) was ported near-verbatim over the first spec-prose implementation: fixed-viewport flex shell with per-pane scrolling, `.doc-body` typography scope, bordered status-bar cells, reference callout/props/outline markup (outline now h1+h2, note icon is the star). Prototype`s `panzoom.js` NOT adopted — it binds before mermaid's async render (its `querySelector("svg")` finds nothing live) and would double-drive transforms against the shipped `svg-panzoom.js`; the reset button drives svg-panzoom instead. Its `nav-toggle.js` adopted verbatim. Prototype z-index literals (99/100) became `--z-overlay`/`--z-modal`; `.task-list`/`.doc-img` classes became `:has()`/element selectors (goldmark emits no wrapper classes); callout body stays native `<p>` siblings inside the blockquote with the reference's `.callout-body` treatment restated as `.callout > p`.
+
 - **Review finding declined:** the code-review arm restored `aria-current` on the flat Recent link, reading its removal as a regression — the design contract (verdict 2: one location marker per page; Recent is a shortcut list) removed it deliberately. Reverted the restoration; the reviewer's other fixes (outline entity unescape, `countWords` fence-rule reuse) stand.
 
 - **Mermaid/pan-zoom already shipped**: the spec's "vendor mermaid.min.js" and parts of pan/zoom predate it in-tree (`mermaid.min.js`, `mermaid-init.js` themed from `--dia-*` tokens, `svg-panzoom.js`). Those items execute as "wrap in `.embed` chrome and extend", not "vendor and build".

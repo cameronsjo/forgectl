@@ -506,8 +506,9 @@ func Render(source []byte) (string, error) {
 	return frontmatterHTML(ctx) + transformCallouts(body), nil
 }
 
-// OutlineItem is one "On this page" entry — an h2 or h3 with the id
-// goldmark's auto-heading pass assigned it.
+// OutlineItem is one "On this page" entry — an h1 or h2 with the id
+// goldmark's auto-heading pass assigned it (the reference shell's outline
+// shows the document title plus its sections; h3+ stays out).
 type OutlineItem struct {
 	Level int
 	Text  string
@@ -561,10 +562,10 @@ func countWords(source []byte) int {
 	return len(strings.Fields(string(body)))
 }
 
-// outlineHeading matches the h2/h3 elements of OUR rendered output — this
+// outlineHeading matches the h1/h2 elements of OUR rendered output — this
 // scans HTML the pipeline just produced, never document-authored bytes, so a
 // regexp over the known goldmark shape is sufficient.
-var outlineHeading = regexp.MustCompile(`(?s)<h([23]) id="([^"]+)">(.*?)</h[23]>`)
+var outlineHeading = regexp.MustCompile(`(?s)<h([12]) id="([^"]+)">(.*?)</h[12]>`)
 
 // stripTags removes inline markup from a heading's rendered text.
 var stripTags = regexp.MustCompile(`<[^>]*>`)
@@ -572,9 +573,9 @@ var stripTags = regexp.MustCompile(`<[^>]*>`)
 func extractOutline(rendered string) []OutlineItem {
 	var items []OutlineItem
 	for _, m := range outlineHeading.FindAllStringSubmatch(rendered, -1) {
-		level := 2
-		if m[1] == "3" {
-			level = 3
+		level := 1
+		if m[1] == "2" {
+			level = 2
 		}
 		// The captured text is rendered HTML, so entities are escaped
 		// (&amp; etc.). Unescape back to plain text: the template escapes
@@ -594,13 +595,18 @@ func extractOutline(rendered string) []OutlineItem {
 // warning→attention, danger→urgent; IMPORTANT reads as a note,
 // CAUTION as danger — GitHub's five kinds onto four tiers.
 var calloutTiers = map[string]struct{ tier, label, icon string }{
-	"NOTE":      {"note", "Note", `<circle cx="12" cy="12" r="9"/><path d="M12 16v-4"/><path d="M12 8h.01"/>`},
-	"IMPORTANT": {"note", "Important", `<circle cx="12" cy="12" r="9"/><path d="M12 16v-4"/><path d="M12 8h.01"/>`},
+	"NOTE":      {"note", "Note", calloutStarIcon},
+	"IMPORTANT": {"note", "Important", calloutStarIcon},
 	"TIP":       {"tip", "Tip", `<circle cx="12" cy="12" r="9"/><path d="m9 12 2 2 4-4"/>`},
 	"WARNING":   {"warning", "Warning", `<path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 20h16a2 2 0 0 0 1.73-2Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>`},
-	"CAUTION":   {"danger", "Caution", `<path d="M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86L7.86 2Z"/><path d="M12 8v4"/><path d="M12 16h.01"/>`},
-	"DANGER":    {"danger", "Danger", `<path d="M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86L7.86 2Z"/><path d="M12 8v4"/><path d="M12 16h.01"/>`},
+	"CAUTION":   {"danger", "Caution", calloutOctagonIcon},
+	"DANGER":    {"danger", "Danger", calloutOctagonIcon},
 }
+
+// calloutStarIcon is the reference shell's note glyph.
+const calloutStarIcon = `<path d="M12 3l1.9 5.8H20l-4.9 3.6 1.9 5.8-5-3.6-5 3.6 1.9-5.8L4 8.8h6.1z"/>`
+
+const calloutOctagonIcon = `<path d="M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86L7.86 2Z"/><path d="M12 8v4"/><path d="M12 16h.01"/>`
 
 // calloutOpen matches a sanitized blockquote whose first paragraph opens
 // with a GFM alert marker ([!NOTE] etc.).
@@ -615,7 +621,7 @@ func transformCallouts(rendered string) string {
 	return calloutOpen.ReplaceAllStringFunc(rendered, func(m string) string {
 		kind := calloutOpen.FindStringSubmatch(m)[1]
 		c := calloutTiers[kind]
-		return `<blockquote class="callout callout--` + c.tier + `"><p class="callout__title"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` + c.icon + `</svg>` + c.label + `</p><p>`
+		return `<blockquote class="callout ` + c.tier + `"><div class="callout-title"><svg viewBox="0 0 24 24" aria-hidden="true">` + c.icon + `</svg> ` + c.label + `</div><p>`
 	})
 }
 
@@ -739,9 +745,9 @@ func yamlScalar(n *yaml.Node) string {
 // paths); unknown keys fall back to propIconDot. These are OUR markup, never
 // document-authored, so they may safely join the post-sanitizer prefix.
 var propIcons = map[string]string{
-	"status": `<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/>`,
-	"branch": `<line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>`,
-	"next":   `<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>`,
+	"status": `<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>`,
+	"branch": `<path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>`,
+	"next":   `<path d="M5 12h14"/><path d="M13 6l6 6-6 6"/>`,
 }
 
 const propIconDot = `<circle cx="12" cy="12" r="3"/>`
@@ -751,29 +757,33 @@ func propIconSVG(key string) string {
 	if !ok {
 		body = propIconDot
 	}
-	return `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` + body + `</svg>`
+	// Sizing and stroke live in the shell CSS (.props-row .k svg) — the
+	// reference shell owns presentation; this emits geometry only.
+	return `<svg viewBox="0 0 24 24" aria-hidden="true">` + body + `</svg>`
 }
 
 func writeKV(b *strings.Builder, key, value string) {
 	b.WriteString(`<div class="props-row"><span class="k">`)
 	b.WriteString(propIconSVG(key))
 	b.WriteString(html.EscapeString(key))
-	b.WriteString(`</span><span class="v">`)
+	b.WriteString(`</span>`)
 	switch {
 	case key == "status":
 		// Enum-ish values read as a chip.
-		b.WriteString(`<span class="chip">`)
+		b.WriteString(`<span class="v"><span class="chip">`)
 		b.WriteString(html.EscapeString(value))
-		b.WriteString(`</span>`)
+		b.WriteString(`</span></span>`)
 	case key == "branch" || strings.Contains(value, "/"):
-		// Paths and branches align on tabular numerals.
-		b.WriteString(`<span class="num">`)
+		// Paths and branches align on tabular numerals (reference .v.dt).
+		b.WriteString(`<span class="v dt">`)
 		b.WriteString(html.EscapeString(value))
 		b.WriteString(`</span>`)
 	default:
+		b.WriteString(`<span class="v">`)
 		b.WriteString(html.EscapeString(value))
+		b.WriteString(`</span>`)
 	}
-	b.WriteString(`</span></div>`)
+	b.WriteString(`</div>`)
 }
 
 // wrapFrontmatter renders the Obsidian-style properties block — always

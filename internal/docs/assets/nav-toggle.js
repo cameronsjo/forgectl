@@ -1,44 +1,28 @@
-// Sidenav collapse/drawer toggle for `forgectl docs serve`.
-//
-// The shell root carries data-nav="open|closed|auto". Wide viewports read
-// "closed" as collapse-the-column; narrow viewports (≤900px, where the nav is
-// an off-canvas drawer) read "open" as slide-it-in. "auto" is the resting
-// state: column visible when wide, drawer closed when narrow. The scrim click
-// and any viewport crossing reset to "auto" so a choice made in one mode
-// never leaks into the other.
-//
-// A served asset, not an inline <script>: the server's CSP is script-src
-// 'self', so inline script fails silently in the browser (same story as
-// sidenav-filter.js).
+/* nav-toggle.js — sidebar drawer/collapse toggle. CSP: served asset, no inline.
+   Contract: button#nav-toggle sets data-nav on the shell root (#shell):
+   wide  (>900px): auto <-> closed  (collapses the nav column)
+   narrow(≤900px): auto <-> open    (off-canvas drawer)
+   Scrim click and any viewport crossing reset to auto, so a choice made in
+   one mode never leaks into the other. Ported from the design reference. */
 (function () {
-  "use strict";
-
-  var root = document.querySelector(".page-shell");
-  var btn = document.querySelector("[data-nav-toggle]");
-  var scrim = document.querySelector("[data-nav-scrim]");
-  if (!root || !btn) { return; }
-
-  var narrow = window.matchMedia("(max-width: 900px)");
-
-  function isOpen() {
-    var s = root.getAttribute("data-nav") || "auto";
-    if (s === "open") { return true; }
-    if (s === "closed") { return false; }
-    return !narrow.matches;
-  }
-
-  function setState(s) {
-    root.setAttribute("data-nav", s);
-    btn.setAttribute("aria-expanded", String(isOpen()));
-  }
-
-  btn.addEventListener("click", function () {
-    setState(isOpen() ? "closed" : "open");
+  'use strict';
+  var shell = document.getElementById('shell');
+  var btn = document.getElementById('nav-toggle');
+  var scrim = document.getElementById('drawer-scrim');
+  if (!shell || !btn) return;
+  var mq = window.matchMedia('(max-width: 900px)');
+  btn.addEventListener('click', function () {
+    var cur = shell.getAttribute('data-nav') || 'auto';
+    if (mq.matches) {
+      shell.setAttribute('data-nav', cur === 'open' ? 'auto' : 'open');
+    } else {
+      shell.setAttribute('data-nav', cur === 'closed' ? 'auto' : 'closed');
+    }
   });
-  if (scrim) {
-    scrim.addEventListener("click", function () { setState("auto"); });
-  }
-  narrow.addEventListener("change", function () { setState("auto"); });
-
-  setState(root.getAttribute("data-nav") || "auto");
+  if (scrim) scrim.addEventListener('click', function () {
+    shell.setAttribute('data-nav', 'auto');
+  });
+  mq.addEventListener('change', function () {
+    shell.setAttribute('data-nav', 'auto');
+  });
 })();

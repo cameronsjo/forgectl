@@ -35,7 +35,7 @@ func TestRender_FrontmatterBecomesDisclosure(t *testing.T) {
 		`<span class="chip">in-review</span>`,
 		`>status</span>`,
 		`>branch</span>`,
-		`plan/docs-fix-up`,
+		`<span class="v dt">plan/docs-fix-up</span>`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("rendered output missing %q:\n%s", want, got)
@@ -160,7 +160,7 @@ func TestRender_CalloutTiers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	for _, want := range []string{`callout--warning`, `callout__title`, `mind the gap`} {
+	for _, want := range []string{`class="callout warning"`, `callout-title`, `mind the gap`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("callout output missing %q:\n%s", want, got)
 		}
@@ -186,12 +186,12 @@ func TestRenderDoc_OutlineAndWords(t *testing.T) {
 		t.Fatalf("RenderDoc: %v", err)
 	}
 	if len(doc.Outline) != 3 {
-		t.Fatalf("outline = %+v, want 3 items (h2 Alpha, h3 Deep, h2 Beta)", doc.Outline)
+		t.Fatalf("outline = %+v, want 3 items (h1 Top, h2 Alpha, h2 Beta — h3 excluded)", doc.Outline)
 	}
-	if doc.Outline[0].Text != "Alpha" || doc.Outline[0].Level != 2 || doc.Outline[0].ID != "alpha" {
+	if doc.Outline[0].Text != "Top" || doc.Outline[0].Level != 1 || doc.Outline[0].ID != "top" {
 		t.Errorf("outline[0] = %+v", doc.Outline[0])
 	}
-	if doc.Outline[1].Text != "Deep" || doc.Outline[1].Level != 3 {
+	if doc.Outline[1].Text != "Alpha" || doc.Outline[1].Level != 2 || doc.Outline[1].ID != "alpha" {
 		t.Errorf("outline[1] = %+v", doc.Outline[1])
 	}
 	if doc.Words < 8 || doc.Words > 20 {
