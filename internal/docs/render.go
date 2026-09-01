@@ -3,7 +3,10 @@ package docs
 import (
 	"bytes"
 	"fmt"
+	"html"
 	"regexp"
+	"sort"
+	"strings"
 	"sync"
 
 	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
@@ -14,6 +17,8 @@ import (
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	goldmarkhtml "github.com/yuin/goldmark/renderer/html"
+	"go.abhg.dev/goldmark/frontmatter"
+	"gopkg.in/yaml.v3"
 )
 
 // chromaStyle is the fixed syntax-highlighting palette. It is deliberately
@@ -46,6 +51,11 @@ var markdown = goldmark.New(
 		// never claims them — see mermaid.go for why a second renderer
 		// alongside the highlighting extension is not an option.
 		mermaidExtension{},
+		// Consumes a leading YAML/TOML frontmatter block at parse time, so the
+		// delimiters stop rendering as a thematic break + mangled heading. The
+		// parsed data is read back per-render (frontmatter.Get) and presented
+		// as a collapsed metadata disclosure — see frontmatterHTML.
+		&frontmatter.Extender{},
 	),
 	goldmark.WithParserOptions(parser.WithAutoHeadingID()),
 	goldmark.WithRendererOptions(goldmarkhtml.WithUnsafe()),
@@ -465,13 +475,104 @@ var renderMu sync.Mutex
 // styling allowed). The result is safe to embed directly into a response —
 // sanitization is the last step, not a pre-filter goldmark's raw-HTML
 // passthrough could bypass.
+//
+// A leading frontmatter block, when present, is rendered as a collapsed
+// disclosure ABOVE the sanitized body. That block is generated here from
+// parsed values with every fragment HTML-escaped, which is why prepending it
+// after sanitization does not reopen the XSS door the sanitizer closes: the
+// document author's bytes only ever reach it through html.EscapeString.
+// Building it post-sanitizer keeps the bluemonday allowlist untouched —
+// details/summary/dl stay denied for document-authored HTML.
 func Render(source []byte) (string, error) {
 	renderMu.Lock()
 	var buf bytes.Buffer
-	err := markdown.Convert(source, &buf)
+	ctx := parser.NewContext()
+	err := markdown.Convert(source, &buf, parser.WithContext(ctx))
 	renderMu.Unlock()
 	if err != nil {
 		return "", fmt.Errorf("render markdown: %w", err)
 	}
-	return string(sanitizer.SanitizeBytes(dropDuplicateSVGNamespaces(buf.Bytes()))), nil
+	body := string(sanitizer.SanitizeBytes(dropDuplicateSVGNamespaces(buf.Bytes())))
+	return frontmatterHTML(ctx) + body, nil
+}
+
+// frontmatterHTML renders a document's parsed frontmatter as a collapsed
+// Artificer disclosure (accordion + kv grid), or "" when the document has
+// none. Key order follows the document; a non-scalar value is shown as its
+// YAML flow form rather than flattened.
+func frontmatterHTML(ctx parser.Context) string {
+	fm := frontmatter.Get(ctx)
+	if fm == nil {
+		return ""
+	}
+	var node yaml.Node
+	if err := fm.Decode(&node); err != nil || len(node.Content) == 0 {
+		// TOML frontmatter (or unparseable YAML) has no yaml.Node form —
+		// fall back to the unordered map both formats can decode into.
+		return frontmatterHTMLUnordered(fm)
+	}
+	mapping := node.Content[0]
+	if mapping.Kind != yaml.MappingNode {
+		return frontmatterHTMLUnordered(fm)
+	}
+	var b strings.Builder
+	pairs := 0
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		key, value := mapping.Content[i], mapping.Content[i+1]
+		writeKV(&b, key.Value, yamlScalar(value))
+		pairs++
+	}
+	return wrapFrontmatter(b.String(), pairs)
+}
+
+func frontmatterHTMLUnordered(fm *frontmatter.Data) string {
+	var m map[string]any
+	if err := fm.Decode(&m); err != nil || len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b2, err := yaml.Marshal(m[k])
+		if err != nil {
+			continue
+		}
+		writeKV(&b, k, strings.TrimSpace(string(b2)))
+	}
+	return wrapFrontmatter(b.String(), len(keys))
+}
+
+func yamlScalar(n *yaml.Node) string {
+	if n.Kind == yaml.ScalarNode {
+		return n.Value
+	}
+	out, err := yaml.Marshal(n)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func writeKV(b *strings.Builder, key, value string) {
+	b.WriteString("<dt>")
+	b.WriteString(html.EscapeString(key))
+	b.WriteString("</dt><dd>")
+	b.WriteString(html.EscapeString(value))
+	b.WriteString("</dd>")
+}
+
+func wrapFrontmatter(kvBody string, pairs int) string {
+	if pairs == 0 {
+		return ""
+	}
+	noun := "keys"
+	if pairs == 1 {
+		noun = "key"
+	}
+	return fmt.Sprintf(`<div class="accordion surface-tool"><details class="frontmatter"><summary>Front matter <span class="badge">%d %s</span></summary><div class="accordion__body"><dl class="kv">%s</dl></div></details></div>`,
+		pairs, noun, kvBody)
 }
