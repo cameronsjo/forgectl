@@ -14,12 +14,13 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 )
 
 // mkGitDir creates base/name with a .git marker so Discover treats it as a repo.
 func mkGitDir(t *testing.T, base, name string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Join(base, name, ".git"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(base, name, ".git"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -82,7 +83,7 @@ func TestInventory_MergeDedupCrossHost(t *testing.T) {
 	mkGitDir(t, tmp, "forgectl") // origin → github → dedups with gh list
 	mkGitDir(t, tmp, "homeclaw") // origin → gitea  → dedups with tea list
 	mkGitDir(t, tmp, "scratch")  // git, no origin  → local-only
-	if err := os.Mkdir(filepath.Join(tmp, "notes"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(tmp, "notes"), 0o750); err != nil {
 		t.Fatal(err) // non-git dir → local-only
 	}
 
@@ -113,24 +114,24 @@ func TestInventory_MergeDedupCrossHost(t *testing.T) {
 	}
 
 	// Local clones win: cloned, with LocalPath + identity from origin URL.
-	if r, ok := findRepo(repos, "github", "forgectl"); !ok || !r.Cloned || r.LocalPath == "" {
+	if r, ok := findRepo(repos, "github.com", "forgectl"); !ok || !r.Cloned || r.LocalPath == "" {
 		t.Errorf("github/forgectl should be cloned with a local path: %+v (found=%v)", r, ok)
 	}
-	if r, ok := findRepo(repos, "gitea", "homeclaw"); !ok || !r.Cloned || r.LocalPath == "" {
+	if r, ok := findRepo(repos, "git.sjo.lol", "homeclaw"); !ok || !r.Cloned || r.LocalPath == "" {
 		t.Errorf("gitea/homeclaw should be cloned with a local path: %+v (found=%v)", r, ok)
 	}
 
 	// Cross-host: github/homeclaw is a DISTINCT, uncloned row (not collapsed into
 	// the cloned gitea/homeclaw by bare name).
-	if r, ok := findRepo(repos, "github", "homeclaw"); !ok || r.Cloned {
+	if r, ok := findRepo(repos, "github.com", "homeclaw"); !ok || r.Cloned {
 		t.Errorf("github/homeclaw should exist and be uncloned (cross-host): %+v (found=%v)", r, ok)
 	}
 
 	// Remote-only repos present and uncloned.
-	if r, ok := findRepo(repos, "github", "newgh"); !ok || r.Cloned {
+	if r, ok := findRepo(repos, "github.com", "newgh"); !ok || r.Cloned {
 		t.Errorf("github/newgh should be uncloned: %+v (found=%v)", r, ok)
 	}
-	if r, ok := findRepo(repos, "gitea", "newgt"); !ok || r.Cloned {
+	if r, ok := findRepo(repos, "git.sjo.lol", "newgt"); !ok || r.Cloned {
 		t.Errorf("gitea/newgt should be uncloned: %+v (found=%v)", r, ok)
 	}
 
@@ -163,14 +164,16 @@ func TestInventory_DegradesWhenHostErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a single host outage must not fail the call: %v", err)
 	}
-	if len(repos) != 1 || repos[0].Host != "gitea" {
+	if len(repos) != 1 || repos[0].Host != "git.sjo.lol" {
 		t.Fatalf("expected the surviving gitea repo, got %+v", repos)
 	}
 	if len(notes) != 1 {
 		t.Fatalf("expected one degradation note, got %v", notes)
 	}
+	// The note names the SOURCE (which enumerator failed), not a hostname —
+	// a GitHub run that errors produced no rows, so it has no host to name.
 	if !strings.Contains(notes[0], "github") {
-		t.Errorf("note should name the failed host: %q", notes[0])
+		t.Errorf("note should name the failed source: %q", notes[0])
 	}
 }
 
@@ -181,13 +184,13 @@ func TestClone_DispatchesByHost(t *testing.T) {
 		fake := &exec.FakeRunner{}
 		c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 		dest, err := c.Clone(context.Background(), Repo{
-			Host: "github", Owner: "cameronsjo", Name: "newgh",
+			Host: "github.com", Owner: "cameronsjo", Name: "newgh",
 			SSHURL: "git@github.com:cameronsjo/newgh.git",
 		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		want := canonicalDest(tmp, "github", "cameronsjo", "newgh")
+		want := canonicalDest(tmp, "github.com", "cameronsjo", "newgh")
 		if dest != want {
 			t.Errorf("dest = %q; want %q", dest, want)
 		}
@@ -202,7 +205,7 @@ func TestClone_DispatchesByHost(t *testing.T) {
 		c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 		url := "ssh://git@git.sjo.lol:222/cameron/newgt.git"
 		if _, err := c.Clone(context.Background(), Repo{
-			Host: "gitea", Owner: "cameron", Name: "newgt", SSHURL: url,
+			Host: "git.sjo.lol", Owner: "cameron", Name: "newgt", SSHURL: url,
 		}); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -226,7 +229,7 @@ func TestClone_PinsGhToGitHubComDespiteAmbientHost(t *testing.T) {
 	c := &Client{Dir: t.TempDir(), run: fake, gitBin: "git"}
 
 	if _, err := c.Clone(context.Background(), Repo{
-		Host: "github", Owner: "cameronsjo", Name: "newgh",
+		Host: "github.com", Owner: "cameronsjo", Name: "newgh",
 	}); err != nil {
 		t.Fatalf("Clone: %v", err)
 	}
@@ -274,7 +277,7 @@ func TestClone_RejectsUnsafeName(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 	for _, name := range []string{"", ".", "..", "../escape", "a/b"} {
-		if _, err := c.Clone(context.Background(), Repo{Host: "gitea", Owner: "cameron", Name: name, SSHURL: "ssh://x"}); err == nil {
+		if _, err := c.Clone(context.Background(), Repo{Host: "git.sjo.lol", Owner: "cameron", Name: name, SSHURL: "ssh://x"}); err == nil {
 			t.Errorf("Clone(name=%q) should error on an unsafe name, got nil", name)
 		}
 	}
@@ -293,9 +296,9 @@ func TestClone_RejectsUnsafeHostOrOwner(t *testing.T) {
 	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 	cases := []struct{ host, owner string }{
 		{"../escape", "cameron"},
-		{"gitea", "../escape"},
+		{"git.sjo.lol", "../escape"},
 		{"", "cameron"},
-		{"gitea", ""},
+		{"git.sjo.lol", ""},
 		{"gitea/etc", "cameron"},
 	}
 	for _, tc := range cases {
@@ -323,15 +326,15 @@ func originGitea(name string, args []string) (string, error) {
 // while the other is already checked out no longer errors.
 func TestClone_CrossHostDissolvesCollision(t *testing.T) {
 	tmp := t.TempDir()
-	giteaDest := canonicalDest(tmp, "gitea", "cameron", "homeclaw")
-	if err := os.MkdirAll(giteaDest, 0o755); err != nil {
+	giteaDest := canonicalDest(tmp, "git.sjo.lol", "cameron", "homeclaw")
+	if err := os.MkdirAll(giteaDest, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	fake := &exec.FakeRunner{RunFunc: originGitea}
 	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	dest, err := c.Clone(context.Background(), Repo{
-		Host: "github", Owner: "cameronsjo", Name: "homeclaw",
+		Host: "github.com", Owner: "cameronsjo", Name: "homeclaw",
 		SSHURL: "git@github.com:cameronsjo/homeclaw.git",
 	})
 	if err != nil {
@@ -349,8 +352,8 @@ func TestClone_CrossHostDissolvesCollision(t *testing.T) {
 // cloned".
 func TestClone_ExistingCanonicalDestWrongOriginErrors(t *testing.T) {
 	tmp := t.TempDir()
-	dest := canonicalDest(tmp, "gitea", "cameron", "homeclaw")
-	if err := os.MkdirAll(dest, 0o755); err != nil {
+	dest := canonicalDest(tmp, "git.sjo.lol", "cameron", "homeclaw")
+	if err := os.MkdirAll(dest, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
@@ -362,13 +365,16 @@ func TestClone_ExistingCanonicalDestWrongOriginErrors(t *testing.T) {
 	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	_, err := c.Clone(context.Background(), Repo{
-		Host: "gitea", Owner: "cameron", Name: "homeclaw",
+		Host: "git.sjo.lol", Owner: "cameron", Name: "homeclaw",
 		SSHURL: "ssh://git@git.sjo.lol:222/cameron/homeclaw.git",
 	})
 	if err == nil {
 		t.Fatal("expected an origin-mismatch error, got nil (would open the wrong repo)")
 	}
-	if !strings.Contains(err.Error(), "collides") {
+	// The message names the PATH (forgectl-composed from guarded segments) but
+	// not the host/owner/name, which are server-supplied and would otherwise
+	// reach a terminal unescaped.
+	if !strings.Contains(err.Error(), "origin is a different repo") {
 		t.Errorf("error should explain the collision, got: %v", err)
 	}
 	for _, call := range fake.Calls {
@@ -380,8 +386,8 @@ func TestClone_ExistingCanonicalDestWrongOriginErrors(t *testing.T) {
 
 func TestClone_SameRepoIsIdempotent(t *testing.T) {
 	tmp := t.TempDir()
-	dest := canonicalDest(tmp, "gitea", "cameron", "homeclaw")
-	if err := os.MkdirAll(dest, 0o755); err != nil {
+	dest := canonicalDest(tmp, "git.sjo.lol", "cameron", "homeclaw")
+	if err := os.MkdirAll(dest, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	fake := &exec.FakeRunner{RunFunc: originGitea}
@@ -389,7 +395,7 @@ func TestClone_SameRepoIsIdempotent(t *testing.T) {
 
 	// Cloning the repo that's already there returns its path with no clone.
 	got, err := c.Clone(context.Background(), Repo{
-		Host: "gitea", Owner: "cameron", Name: "homeclaw",
+		Host: "git.sjo.lol", Owner: "cameron", Name: "homeclaw",
 		SSHURL: "ssh://git@git.sjo.lol:222/cameron/homeclaw.git",
 	})
 	if err != nil {
@@ -410,7 +416,7 @@ func TestClone_SameRepoIsIdempotent(t *testing.T) {
 func mkCanonicalGitDir(t *testing.T, base, host, owner, name string) string {
 	t.Helper()
 	dir := canonicalDest(base, host, owner, name)
-	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	return dir
@@ -423,9 +429,9 @@ func mkCanonicalGitDir(t *testing.T, base, host, owner, name string) string {
 // a flat, local-only project — not be swallowed by the canonical walk.
 func TestDiscover_FindsBothCanonicalAndFlatLayouts(t *testing.T) {
 	tmp := t.TempDir()
-	canonDir := mkCanonicalGitDir(t, tmp, "github", "cameronsjo", "forgectl")
+	canonDir := mkCanonicalGitDir(t, tmp, "github.com", "cameronsjo", "forgectl")
 	mkGitDir(t, tmp, "homeclaw") // legacy flat clone, still on disk
-	if err := os.Mkdir(filepath.Join(tmp, "notes"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(tmp, "notes"), 0o750); err != nil {
 		t.Fatal(err) // plain non-git dir, no canonical structure beneath it
 	}
 
@@ -449,10 +455,10 @@ func TestDiscover_FindsBothCanonicalAndFlatLayouts(t *testing.T) {
 	if p, ok := byName["notes"]; !ok || p.Dir != filepath.Join(tmp, "notes") {
 		t.Errorf("non-git flat dir not discovered correctly: %+v (found=%v)", p, ok)
 	}
-	// "github" (the host bucket) must not itself appear as a project — it was
+	// "github.com" (the host bucket) must not itself appear as a project — it was
 	// walked into, not treated as a flat clone.
-	if _, ok := byName["github"]; ok {
-		t.Errorf("host bucket %q leaked into the project list: %+v", "github", projs)
+	if _, ok := byName["github.com"]; ok {
+		t.Errorf("host bucket %q leaked into the project list: %+v", "github.com", projs)
 	}
 }
 
@@ -464,9 +470,9 @@ func TestDiscover_FindsBothCanonicalAndFlatLayouts(t *testing.T) {
 // StatusOK.
 func TestDiscover_NonGitDir_StatusIsNotRepo(t *testing.T) {
 	tmp := t.TempDir()
-	mkCanonicalGitDir(t, tmp, "github", "cameronsjo", "forgectl")
+	mkCanonicalGitDir(t, tmp, "github.com", "cameronsjo", "forgectl")
 	mkGitDir(t, tmp, "homeclaw")
-	if err := os.Mkdir(filepath.Join(tmp, "notes"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(tmp, "notes"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 
@@ -549,7 +555,7 @@ func TestInventory_StatusProcessBudget(t *testing.T) {
 				t.Errorf("expected no degradation notes, got %v", notes)
 			}
 
-			r, ok := findRepo(repos, "github", "forgectl")
+			r, ok := findRepo(repos, "github.com", "forgectl")
 			if !ok {
 				t.Fatalf("github/forgectl missing from inventory: %+v", repos)
 			}
@@ -588,7 +594,7 @@ func TestLocalRepos_NonRepo_SpawnsNoRemoteLookup(t *testing.T) {
 	tmp := t.TempDir()
 	mkGitDir(t, tmp, "realrepo")
 	nonRepo := filepath.Join(tmp, "notes")
-	if err := os.Mkdir(nonRepo, 0o755); err != nil {
+	if err := os.Mkdir(nonRepo, 0o750); err != nil {
 		t.Fatal(err)
 	}
 
@@ -616,9 +622,9 @@ func TestLocalRepos_NonRepo_SpawnsNoRemoteLookup(t *testing.T) {
 // canonical clone surfacing, not just the first found.
 func TestDiscover_CanonicalHostBucketMultipleOwnersAndRepos(t *testing.T) {
 	tmp := t.TempDir()
-	mkCanonicalGitDir(t, tmp, "gitea", "cameron", "homeclaw")
-	mkCanonicalGitDir(t, tmp, "gitea", "cameron", "forgectl")
-	mkCanonicalGitDir(t, tmp, "gitea", "otherowner", "sidecar")
+	mkCanonicalGitDir(t, tmp, "git.sjo.lol", "cameron", "homeclaw")
+	mkCanonicalGitDir(t, tmp, "git.sjo.lol", "cameron", "forgectl")
+	mkCanonicalGitDir(t, tmp, "git.sjo.lol", "otherowner", "sidecar")
 
 	c := &Client{Dir: tmp, run: &exec.FakeRunner{}, gitBin: "git"}
 	projs, err := c.Discover(context.Background())
@@ -633,8 +639,8 @@ func TestDiscover_CanonicalHostBucketMultipleOwnersAndRepos(t *testing.T) {
 // TestCanonicalDest_LowercasesAndMirrorsKey confirms the filesystem tree
 // matches Repo.Key()'s case-insensitive identity.
 func TestCanonicalDest_LowercasesAndMirrorsKey(t *testing.T) {
-	got := canonicalDest("/base", "GitHub", "CameronSjo", "Forgectl")
-	want := filepath.Join("/base", "github", "cameronsjo", "forgectl")
+	got := canonicalDest("/base", "GitHub.COM", "CameronSjo", "Forgectl")
+	want := filepath.Join("/base", "github.com", "cameronsjo", "forgectl")
 	if got != want {
 		t.Errorf("canonicalDest = %q; want %q", got, want)
 	}
@@ -650,7 +656,7 @@ func TestValidPathSegment_RejectsTraversalAndSeparators(t *testing.T) {
 			t.Errorf("validPathSegment(%q) = true, want false", s)
 		}
 	}
-	good := []string{"github", "cameronsjo", "git.sjo.lol", "forge-ctl"}
+	good := []string{"github.com", "cameronsjo", "git.sjo.lol", "forge-ctl"}
 	for _, s := range good {
 		if !validPathSegment(s) {
 			t.Errorf("validPathSegment(%q) = false, want true", s)
@@ -673,8 +679,8 @@ func mkMixedFanOutFixture(t *testing.T, tmp string) {
 	}
 	for i := 0; i < 10; i++ {
 		owner := "owner-" + strconv.Itoa(i)
-		mkCanonicalGitDir(t, tmp, "github", owner, "tool")
-		mkCanonicalGitDir(t, tmp, "gitea", owner, "tool")
+		mkCanonicalGitDir(t, tmp, "github.com", owner, "tool")
+		mkCanonicalGitDir(t, tmp, "git.sjo.lol", owner, "tool")
 	}
 }
 
@@ -940,5 +946,602 @@ func TestInventory_GHEHostPinsAndRemovesTokens(t *testing.T) {
 		if removals[key] != 1 {
 			t.Errorf("%s removal count = %d in %v, want exactly 1", key, removals[key], ghCall.UnsetEnv)
 		}
+	}
+}
+
+// TestClone_ForgedHostTokenDoesNotReachGh is the dispatch half of the
+// forgeable-token defect. Before hostnames replaced the short tokens, a remote
+// whose bare hostname was literally "github" came out of canonicalHost's
+// UNTRUSTED arm holding the TRUSTED arm's value, so `clone
+// https://github/evil/repo` ran `gh repo clone evil/repo` against public
+// github.com — cloning an attacker-chosen repo from a server the URL never
+// named.
+//
+// The zero-value Client here is deliberate and load-bearing twice over: it
+// carries no gitHubHost, so it also proves effectiveGitHubHost's default is
+// what the dispatch compares against. Without that default, this test would
+// pass for the wrong reason — every host would miss the gh branch.
+func TestClone_ForgedHostTokenDoesNotReachGh(t *testing.T) {
+	for _, host := range []string{"github", "GITHUB", "gitea", "github.com.attacker.net"} {
+		t.Run(host, func(t *testing.T) {
+			fake := &exec.FakeRunner{}
+			c := &Client{Dir: t.TempDir(), run: fake, gitBin: "git"}
+			url := "https://" + host + "/evil/repo"
+			if _, err := c.Clone(context.Background(), Repo{
+				Host: host, Owner: "evil", Name: "repo", SSHURL: url,
+			}); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if last := fake.Last(); last.Name == "gh" {
+				t.Fatalf("host %q reached gh (%v) — it must clone its own URL as a plain git clone", host, last.Args)
+			}
+		})
+	}
+}
+
+// TestClone_ZeroValueClientStillDispatchesGitHubThroughGh pins the other side
+// of the same default. A struct-literal Client carries no host; if the
+// dispatch compared against that empty field directly, a genuine github.com
+// repo would fall to the else arm and be cloned from a server-supplied URL
+// with no GH_HOST pin and no token scrub.
+func TestClone_ZeroValueClientStillDispatchesGitHubThroughGh(t *testing.T) {
+	fake := &exec.FakeRunner{}
+	c := &Client{Dir: t.TempDir(), run: fake, gitBin: "git"}
+	if _, err := c.Clone(context.Background(), Repo{
+		Host: githubauth.DefaultHost, Owner: "cameronsjo", Name: "forgectl",
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if last := fake.Last(); last.Name != "gh" {
+		t.Errorf("zero-value client dispatched %q, want gh — the default host was not applied", last.Name)
+	}
+}
+
+// canonicalDest is a test-only shim preserving the pre-Placement call shape,
+// so the many dest assertions read as (root, host, owner, name) rather than
+// constructing a Repo each time. It exercises the host-tree branch only —
+// wing placement has its own tests.
+func canonicalDest(root, host, owner, name string) string {
+	p, err := Placement(root, Repo{Host: host, Owner: owner, Name: name}, "")
+	if err != nil {
+		panic("canonicalDest test shim: " + err.Error())
+	}
+	return p
+}
+
+func TestPlacement_HostTreeMirrorsKey(t *testing.T) {
+	r := Repo{Host: "GitHub.COM", Owner: "CameronSjo", Name: "Forgectl"}
+	got, err := Placement("/base", r, "")
+	if err != nil {
+		t.Fatalf("Placement: %v", err)
+	}
+	want := filepath.Join("/base", "github.com", "cameronsjo", "forgectl")
+	if got != want {
+		t.Errorf("Placement = %q; want %q", got, want)
+	}
+	// The tree must mirror the dedup identity: same lowercasing, same order.
+	if !strings.HasSuffix(strings.ToLower(got), r.Key()) {
+		t.Errorf("Placement %q does not mirror Key() %q", got, r.Key())
+	}
+}
+
+// TestPlacement_WingDropsTheOwnerLevel pins estate rule 1: a wing member sits
+// one level under the root, not two. This is exactly why discovery has to look
+// at depth 2 as well — the level the owner would have occupied is gone.
+func TestPlacement_WingDropsTheOwnerLevel(t *testing.T) {
+	r := Repo{Host: "github.com", Owner: "CameronSjo", Name: "Forgectl"}
+	got, err := Placement("/base", r, "Cadence-Ecosystem")
+	if err != nil {
+		t.Fatalf("Placement: %v", err)
+	}
+	want := filepath.Join("/base", "cadence-ecosystem", "forgectl")
+	if got != want {
+		t.Errorf("Placement = %q; want %q", got, want)
+	}
+	if strings.Contains(got, "cameronsjo") || strings.Contains(got, "github.com") {
+		t.Errorf("wing placement kept a host or owner level: %q", got)
+	}
+}
+
+// TestPlacement_HostSegmentGuardRejectsWhatTraversalMisses is the two-tier
+// guard's whole reason for existing. Every value here passes validPathSegment
+// — the guard the host segment used to get — and every one of them is a
+// hostname a remote URL could produce.
+func TestPlacement_HostSegmentGuardRejectsWhatTraversalMisses(t *testing.T) {
+	for _, host := range []string{
+		"::1",                    // IPv6 literal: ':' is APFS-legal, Finder renders it as '/'
+		"host:8443",              // a colon by any other route
+		".hidden",                // a host tree invisible to ls
+		"hostname.",              // trailing root label; canonicalHost strips it, this catches a bypass
+		"host name",              // whitespace
+		"host\x1b[31m",           // ANSI escape
+		"hоst",                   // Cyrillic 'о' homoglyph
+		"-host",                  // flag injection
+		strings.Repeat("a", 254), // past NAME_MAX, and past the DNS limit
+	} {
+		t.Run(host, func(t *testing.T) {
+			if _, err := Placement("/base", Repo{Host: host, Owner: "o", Name: "n"}, ""); err == nil {
+				t.Errorf("host %q was accepted as a path segment", host)
+			}
+		})
+	}
+}
+
+func TestPlacement_RejectsUnsafeOwnerNameAndWing(t *testing.T) {
+	base := Repo{Host: "github.com", Owner: "o", Name: "n"}
+	for _, tc := range []struct {
+		name string
+		r    Repo
+		wing string
+	}{
+		{"empty name", Repo{Host: "github.com", Owner: "o"}, ""},
+		{"traversal name", Repo{Host: "github.com", Owner: "o", Name: ".."}, ""},
+		{"slash in name", Repo{Host: "github.com", Owner: "o", Name: "a/b"}, ""},
+		{"flag name", Repo{Host: "github.com", Owner: "o", Name: "-n"}, ""},
+		{"empty owner", Repo{Host: "github.com", Name: "n"}, ""},
+		{"traversal owner", Repo{Host: "github.com", Owner: "..", Name: "n"}, ""},
+		{"traversal wing", base, ".."},
+		{"slash in wing", base, "a/b"},
+		{"flag wing", base, "-w"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Placement("/base", tc.r, tc.wing); err == nil {
+				t.Error("accepted an unsafe segment")
+			}
+		})
+	}
+}
+
+// TestPlacement_WingSkipsTheHostGuard documents a deliberate asymmetry: a wing
+// member's path never contains the host, so a repo on an unplaceable host is
+// still placeable into a wing. The host is only guarded where it is used.
+func TestPlacement_WingSkipsTheHostGuard(t *testing.T) {
+	got, err := Placement("/base", Repo{Host: "::1", Owner: "o", Name: "n"}, "w")
+	if err != nil {
+		t.Fatalf("a wing member should not be blocked by its host: %v", err)
+	}
+	if want := filepath.Join("/base", "w", "n"); got != want {
+		t.Errorf("Placement = %q, want %q", got, want)
+	}
+}
+
+// TestClone_WingMemberLandsInTheWing is the end-to-end half: the table on the
+// Client, not a flag, is what routes it — so `Worktree`, which takes no flag,
+// gets the same answer.
+func TestClone_WingMemberLandsInTheWing(t *testing.T) {
+	tmp := t.TempDir()
+	table, err := ResolveWings("github.com", []Wing{
+		{Name: "cadence-ecosystem", Repos: []string{"cameronsjo/forgectl"}},
+	})
+	if err != nil {
+		t.Fatalf("ResolveWings: %v", err)
+	}
+	fake := &exec.FakeRunner{}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git", wings: table}
+
+	dest, err := c.Clone(context.Background(), Repo{
+		Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := filepath.Join(tmp, "cadence-ecosystem", "forgectl"); dest != want {
+		t.Errorf("dest = %q; want %q", dest, want)
+	}
+
+	// A repo NOT in the table keeps the host tree — estate rule 2 verbatim.
+	dest, err = c.Clone(context.Background(), Repo{
+		Host: "github.com", Owner: "cameronsjo", Name: "unlisted",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := filepath.Join(tmp, "github.com", "cameronsjo", "unlisted"); dest != want {
+		t.Errorf("unlisted dest = %q; want the host tree %q", dest, want)
+	}
+}
+
+// TestClone_DuplicateAcrossLayoutsIsANoOp covers the cross-tree probe. A repo
+// can be filed two ways — its wing or the host tree — and a clone routed to
+// one while already checked out at the other would mint the duplicate the
+// 2026-08-04 estate reorganization spent real effort removing.
+//
+// Both directions are tested, because the failure is symmetric and a one-sided
+// guard reads as working right up until the day the wing table changes.
+func TestClone_DuplicateAcrossLayoutsIsANoOp(t *testing.T) {
+	table, err := ResolveWings("github.com", []Wing{
+		{Name: "cadence-ecosystem", Repos: []string{"cameronsjo/forgectl"}},
+	})
+	if err != nil {
+		t.Fatalf("ResolveWings: %v", err)
+	}
+	r := Repo{Host: "github.com", Owner: "cameronsjo", Name: "forgectl"}
+	const origin = "git@github.com:cameronsjo/forgectl.git"
+
+	for _, tc := range []struct {
+		name     string
+		existing []string // path segments under tmp
+	}{
+		{"already in the host tree, routed to the wing", []string{"github.com", "cameronsjo", "forgectl"}},
+		{"already in the wing, routed to the host tree", []string{"cadence-ecosystem", "forgectl"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			existing := filepath.Join(append([]string{tmp}, tc.existing...)...)
+			if err := os.MkdirAll(filepath.Join(existing, ".git"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				if name == "git" && len(args) >= 4 && args[2] == "remote" {
+					return origin, nil
+				}
+				return "", nil
+			}}
+			c := &Client{Dir: tmp, run: fake, gitBin: "git", wings: table}
+
+			// The wing-routed call goes through Clone (which consults the
+			// table); the host-tree-routed call is the --wing "" override.
+			var dest string
+			if tc.existing[0] == "github.com" {
+				dest, err = c.Clone(context.Background(), r)
+			} else {
+				dest, err = c.CloneInto(context.Background(), r, "")
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if dest != existing {
+				t.Errorf("dest = %q; want the EXISTING checkout %q — the stdout contract is one usable path", dest, existing)
+			}
+			for _, call := range fake.Calls {
+				if strings.Contains(strings.Join(call.Args, " "), "clone") {
+					t.Errorf("a clone ran despite the repo already being checked out: %q %v", call.Name, call.Args)
+				}
+			}
+		})
+	}
+}
+
+// TestClone_DifferentRepoAtOtherLayoutDoesNotSuppress is why the probe is
+// originMatches and not a bare os.Stat. A same-NAMED but different repo
+// sitting at the other path must not suppress a legitimate clone — that would
+// be a silent wrong answer, which is worse than the duplicate.
+func TestClone_DifferentRepoAtOtherLayoutDoesNotSuppress(t *testing.T) {
+	tmp := t.TempDir()
+	table, err := ResolveWings("github.com", []Wing{
+		{Name: "cadence-ecosystem", Repos: []string{"cameronsjo/forgectl"}},
+	})
+	if err != nil {
+		t.Fatalf("ResolveWings: %v", err)
+	}
+	// Someone else's forgectl, checked out in the host tree.
+	decoy := filepath.Join(tmp, "github.com", "cameronsjo", "forgectl")
+	if err := os.MkdirAll(filepath.Join(decoy, ".git"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "git" && len(args) >= 4 && args[2] == "remote" {
+			return "git@github.com:someone-else/forgectl.git", nil
+		}
+		return "", nil
+	}}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git", wings: table}
+
+	dest, err := c.Clone(context.Background(), Repo{
+		Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := filepath.Join(tmp, "cadence-ecosystem", "forgectl"); dest != want {
+		t.Errorf("dest = %q; want %q — a DIFFERENT repo must not suppress the clone", dest, want)
+	}
+	var cloned bool
+	for _, call := range fake.Calls {
+		if strings.Contains(strings.Join(call.Args, " "), "clone") {
+			cloned = true
+		}
+	}
+	if !cloned {
+		t.Error("no clone ran; a different repo at the other path suppressed a legitimate clone")
+	}
+}
+
+// TestDiscover_FindsWingMembers is the acceptance test in miniature. The wing
+// directory here is ITSELF a checkout — the cadence-ecosystem wing is, on the
+// real estate — which is exactly the case that used to hide every member: the
+// isGitRepo shortcut took the flat branch and never looked inside. Ordering
+// the wing pass first is the whole fix, so this test must keep the
+// wing-is-also-a-repo shape or it stops covering the defect.
+func TestDiscover_FindsWingMembers(t *testing.T) {
+	tmp := t.TempDir()
+	mk := func(parts ...string) {
+		if err := os.MkdirAll(filepath.Join(append(append([]string{tmp}, parts...), ".git")...), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("cadence-ecosystem")             // the wing is a repo itself
+	mk("cadence-ecosystem", "forgectl") // …and holds members
+	mk("cadence-ecosystem", "cadence")
+	mk("mcp", "some-mcp")                     // a wing that is NOT a repo
+	mk("github.com", "cameronsjo", "quickmd") // host tree, untouched
+	mk("flat-repo")                           // legacy flat, untouched
+	if err := os.MkdirAll(filepath.Join(tmp, "notes"), 0o750); err != nil {
+		t.Fatal(err) // a plain non-git dir stays a flat project
+	}
+
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}, gitBin: ""}
+	projs, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	got := make(map[string]string, len(projs))
+	for _, p := range projs {
+		got[p.Name] = p.Dir
+	}
+	for name, want := range map[string]string{
+		"forgectl":          filepath.Join(tmp, "cadence-ecosystem", "forgectl"),
+		"cadence":           filepath.Join(tmp, "cadence-ecosystem", "cadence"),
+		"some-mcp":          filepath.Join(tmp, "mcp", "some-mcp"),
+		"quickmd":           filepath.Join(tmp, "github.com", "cameronsjo", "quickmd"),
+		"flat-repo":         filepath.Join(tmp, "flat-repo"),
+		"notes":             filepath.Join(tmp, "notes"),
+		"cadence-ecosystem": filepath.Join(tmp, "cadence-ecosystem"),
+	} {
+		if got[name] != want {
+			t.Errorf("%s = %q; want %q", name, got[name], want)
+		}
+	}
+	// The wing that is NOT itself a repo must not be listed as a project.
+	if dir, ok := got["mcp"]; ok {
+		t.Errorf("a non-repo wing directory was listed as a project: %q", dir)
+	}
+}
+
+// TestDiscover_HostTreesAreNotMistakenForWings pins the boundary between the
+// two layouts. A host bucket's children are OWNER directories with no .git of
+// their own, so the wing pass scores zero on them and the host pass still
+// runs. Verified against the live estate, where github.com and git.sjo.lol
+// both score 0 while all seven wings score 4–28.
+func TestDiscover_HostTreesAreNotMistakenForWings(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, "github.com", "cameronsjo", "quickmd", ".git"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if got := discoverWingCandidates(filepath.Join(tmp, "github.com")); len(got) != 0 {
+		t.Errorf("a host bucket scored %d wing members: %+v", len(got), got)
+	}
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}, gitBin: ""}
+	projs, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(projs) != 1 || projs[0].Name != "quickmd" {
+		t.Errorf("host tree discovery = %+v; want just quickmd", projs)
+	}
+}
+
+// TestPlacement_RejectsDotLeadingRepoNames is the "re-armed through a
+// different door" case. ParseCloneTarget's URL branch takes the last two path
+// segments with no charset check of its own, so a clone target can carry a
+// name validPathSegment happily accepts. A leaf named ".git" makes isGitRepo
+// report the PARENT directory as a repo, hiding every sibling from the
+// inventory — the exact defect this branch exists to fix.
+func TestPlacement_RejectsDotLeadingRepoNames(t *testing.T) {
+	for _, tc := range []struct {
+		what string
+		r    Repo
+		wing string
+	}{
+		{".git as the name, host tree", Repo{Host: "github.com", Owner: "o", Name: ".git"}, ""},
+		{".git as the name, wing", Repo{Host: "github.com", Owner: "o", Name: ".git"}, "w"},
+		{".bare as the name", Repo{Host: "github.com", Owner: "o", Name: ".bare"}, ""},
+		{".git as the owner", Repo{Host: "github.com", Owner: ".git", Name: "n"}, ""},
+		{"dot-leading owner on the WING path", Repo{Host: "github.com", Owner: ".hidden", Name: "n"}, "w"},
+		{"colon in the name", Repo{Host: "github.com", Owner: "o", Name: "a:b"}, ""},
+		{"ANSI escape in the name", Repo{Host: "github.com", Owner: "o", Name: "a\x1b[31mb"}, ""},
+		{"over-long name", Repo{Host: "github.com", Owner: "o", Name: strings.Repeat("a", 101)}, ""},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			// validPathSegment — the guard this used to use — accepts most of
+			// these, which is why the stronger one is load-bearing.
+			if _, err := Placement("/base", tc.r, tc.wing); err == nil {
+				t.Error("accepted a repo name/owner that must not become a directory")
+			}
+		})
+	}
+}
+
+// TestPlacement_WingSegmentTakesTheHostGuard: the --wing flag is a second
+// entry point into the depth-1 namespace and does not go through ResolveWings,
+// so Placement itself has to hold the line.
+func TestPlacement_WingSegmentTakesTheHostGuard(t *testing.T) {
+	r := Repo{Host: "github.com", Owner: "o", Name: "n"}
+	for _, wing := range []string{".hidden", "wing:8443", "wing space", "wíng", strings.Repeat("a", 254)} {
+		t.Run(wing, func(t *testing.T) {
+			if _, err := Placement("/base", r, wing); err == nil {
+				t.Errorf("wing %q was accepted as a directory under the projects root", wing)
+			}
+		})
+	}
+}
+
+// TestClone_OverrideWingStillFindsTheConfiguredWing covers the three-candidate
+// case. `--wing foo` on a repo the table files under `bar` makes foo the dest,
+// the host tree one alternative, and bar — where the repo most likely actually
+// is — the other. Probing only "the other one" misses exactly the case an
+// override creates.
+func TestClone_OverrideWingStillFindsTheConfiguredWing(t *testing.T) {
+	tmp := t.TempDir()
+	table, err := ResolveWings("github.com", []Wing{
+		{Name: "bar", Repos: []string{"cameronsjo/forgectl"}},
+	})
+	if err != nil {
+		t.Fatalf("ResolveWings: %v", err)
+	}
+	existing := filepath.Join(tmp, "bar", "forgectl")
+	if err := os.MkdirAll(filepath.Join(existing, ".git"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "git" && len(args) >= 4 && args[2] == "remote" {
+			return "git@github.com:cameronsjo/forgectl.git", nil
+		}
+		return "", nil
+	}}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git", wings: table}
+
+	dest, err := c.CloneInto(context.Background(), Repo{
+		Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
+	}, "foo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dest != existing {
+		t.Errorf("dest = %q; want the existing checkout at %q", dest, existing)
+	}
+	for _, call := range fake.Calls {
+		if strings.Contains(strings.Join(call.Args, " "), "clone") {
+			t.Error("a duplicate clone ran despite the repo living in its configured wing")
+		}
+	}
+}
+
+// TestClone_ProbeDoesNotWalkUpToAnAncestorRepo: `git -C <dir>` walks UP to
+// find a repository, so probing a same-named NON-repo directory nested under
+// an ancestor checkout would return that ancestor's origin — and a match there
+// would skip a legitimate clone and hand back the wrong path.
+func TestClone_ProbeDoesNotWalkUpToAnAncestorRepo(t *testing.T) {
+	tmp := t.TempDir()
+	table, err := ResolveWings("github.com", []Wing{
+		{Name: "wing", Repos: []string{"cameronsjo/forgectl"}},
+	})
+	if err != nil {
+		t.Fatalf("ResolveWings: %v", err)
+	}
+	// A plain directory at the host-tree path, with NO .git of its own.
+	decoy := filepath.Join(tmp, "github.com", "cameronsjo", "forgectl")
+	if err := os.MkdirAll(decoy, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// A runner that answers every `remote get-url` with the matching origin —
+	// i.e. the worst case, an ancestor repo that really is this repo.
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "git" && len(args) >= 4 && args[2] == "remote" {
+			return "git@github.com:cameronsjo/forgectl.git", nil
+		}
+		return "", nil
+	}}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git", wings: table}
+
+	dest, err := c.Clone(context.Background(), Repo{
+		Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dest == decoy {
+		t.Fatalf("the probe accepted a non-repo directory at %q; git walked up to an ancestor's origin", decoy)
+	}
+	if want := filepath.Join(tmp, "wing", "forgectl"); dest != want {
+		t.Errorf("dest = %q; want %q", dest, want)
+	}
+}
+
+// TestDiscover_WingNamedAfterAHostStillShowsTheHostTree: all three discovery
+// passes run, none short-circuits the others. A wing whose name collided with
+// a host would otherwise hide that host's entire tree behind an early return.
+func TestDiscover_WingNamedAfterAHostStillShowsTheHostTree(t *testing.T) {
+	tmp := t.TempDir()
+	// git.sjo.lol is simultaneously a host bucket (owner/repo below it) and,
+	// structurally, a wing (a direct child that is a repo).
+	for _, p := range [][]string{
+		{"git.sjo.lol", "wing-shaped-member"},
+		{"git.sjo.lol", "cameron", "real-host-tree-repo"},
+	} {
+		if err := os.MkdirAll(filepath.Join(append(append([]string{tmp}, p...), ".git")...), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}, gitBin: ""}
+	projs, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	got := make(map[string]bool, len(projs))
+	for _, p := range projs {
+		got[p.Name] = true
+	}
+	for _, want := range []string{"wing-shaped-member", "real-host-tree-repo"} {
+		if !got[want] {
+			t.Errorf("%q missing; one pass short-circuited the other (got %v)", want, got)
+		}
+	}
+}
+
+// TestDiscover_DoesNotDescendIntoAFlatCheckout is the anti-vendoring pin.
+// Removing the isGitRepo short-circuit was necessary for wings, but it also
+// removed what kept the host pass out of checkouts — and PullAll runs
+// `git pull --rebase` in whatever discovery hands it. A vendored checkout, a
+// submodule, or a test fixture repo three levels inside a flat clone must not
+// become a project, let alone one that gets pulled.
+//
+// resolve.go's searchRoot names this exact hazard as why it stops at depth 2;
+// the two walkers must not disagree about it.
+func TestDiscover_DoesNotDescendIntoAFlatCheckout(t *testing.T) {
+	tmp := t.TempDir()
+	mk := func(parts ...string) {
+		if err := os.MkdirAll(filepath.Join(append(append([]string{tmp}, parts...), ".git")...), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("flatrepo")                             // a top-level checkout
+	mk("flatrepo", "vendor", "buried-dep")     // host-pass shape, 3 levels in
+	mk("flatrepo", "testdata", "fixture-repo") // same
+	mk("other", "cameronsjo", "real")          // a genuine host tree, untouched
+
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}, gitBin: ""}
+	projs, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	got := make(map[string]string, len(projs))
+	for _, p := range projs {
+		got[p.Name] = p.Dir
+	}
+	for _, forbidden := range []string{"buried-dep", "fixture-repo"} {
+		if dir, ok := got[forbidden]; ok {
+			t.Errorf("%q was discovered at %q — pull-all would run git pull --rebase in a vendored checkout", forbidden, dir)
+		}
+	}
+	if got["flatrepo"] != filepath.Join(tmp, "flatrepo") {
+		t.Errorf("the flat checkout itself must still be a project, got %q", got["flatrepo"])
+	}
+	if got["real"] != filepath.Join(tmp, "other", "cameronsjo", "real") {
+		t.Errorf("a genuine host tree must still be walked, got %q", got["real"])
+	}
+}
+
+// TestDiscover_WingMembersOfACheckoutAreStillFound is the deliberate exception
+// the test above brackets: the wing pass DOES run on a checkout, because a wing
+// directory can be both — cadence-ecosystem is. One level, not three.
+func TestDiscover_WingMembersOfACheckoutAreStillFound(t *testing.T) {
+	tmp := t.TempDir()
+	for _, p := range [][]string{{"wing"}, {"wing", "member"}} {
+		if err := os.MkdirAll(filepath.Join(append(append([]string{tmp}, p...), ".git")...), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := &Client{Dir: tmp, run: &exec.FakeRunner{}, gitBin: ""}
+	projs, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	got := make(map[string]bool, len(projs))
+	for _, p := range projs {
+		got[p.Name] = true
+	}
+	if !got["member"] || !got["wing"] {
+		t.Errorf("a wing that is also a checkout must yield both itself and its members, got %v", got)
 	}
 }

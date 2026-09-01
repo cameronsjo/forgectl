@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 )
 
 // worktreeRunFunc is a NON-MASKING FakeRunner body: every git/gh subcommand the
@@ -79,13 +80,13 @@ func TestWorktree_CreatesBareAndWorktree(t *testing.T) {
 	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	got, err := c.Worktree(context.Background(), Repo{
-		Host: "github", Owner: "cameronsjo", Name: "forgectl",
+		Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
 	}, "mybranch")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	base := canonicalDest(tmp, "github", "cameronsjo", "forgectl")
+	base := canonicalDest(tmp, "github.com", "cameronsjo", "forgectl")
 	bareDir := filepath.Join(base, ".bare")
 
 	// Bare clone landed at <base>/.bare via gh, with --bare forwarded.
@@ -131,7 +132,7 @@ func TestWorktree_BareClonePinsGhToGitHubCom(t *testing.T) {
 	c := &Client{Dir: t.TempDir(), run: fake, gitBin: "git"}
 
 	if _, err := c.Worktree(context.Background(), Repo{
-		Host: "github", Owner: "cameronsjo", Name: "forgectl",
+		Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
 	}, "mybranch"); err != nil {
 		t.Fatalf("Worktree: %v", err)
 	}
@@ -154,13 +155,13 @@ func TestWorktree_DetectsDefaultBranch(t *testing.T) {
 
 	// No branch arg → defaultBranch parses `remote show origin`'s HEAD line.
 	got, err := c.Worktree(context.Background(), Repo{
-		Host: "github", Owner: "cameronsjo", Name: "forgectl",
+		Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
 	}, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	base := canonicalDest(tmp, "github", "cameronsjo", "forgectl")
+	base := canonicalDest(tmp, "github.com", "cameronsjo", "forgectl")
 	wantDir := filepath.Join(base, "main")
 	// The add must use the DETECTED branch, not a hardcoded fallback — proves
 	// detection actually ran and was consulted.
@@ -182,12 +183,12 @@ func TestWorktree_DefaultBranchFallback(t *testing.T) {
 	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	if _, err := c.Worktree(context.Background(), Repo{
-		Host: "github", Owner: "cameronsjo", Name: "forgectl",
+		Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
 	}, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	base := canonicalDest(tmp, "github", "cameronsjo", "forgectl")
+	base := canonicalDest(tmp, "github.com", "cameronsjo", "forgectl")
 	wantDir := filepath.Join(base, "main")
 	if !hasCall(fake.Calls, "git", "worktree add "+wantDir+" main") {
 		t.Errorf("expected fallback to main, calls: %+v", fake.Calls)
@@ -202,12 +203,12 @@ func TestWorktree_DefaultBranchUnknownFallsBackToMain(t *testing.T) {
 	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	if _, err := c.Worktree(context.Background(), Repo{
-		Host: "github", Owner: "cameronsjo", Name: "forgectl",
+		Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
 	}, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	base := canonicalDest(tmp, "github", "cameronsjo", "forgectl")
+	base := canonicalDest(tmp, "github.com", "cameronsjo", "forgectl")
 	wantDir := filepath.Join(base, "main")
 	if !hasCall(fake.Calls, "git", "worktree add "+wantDir+" main") {
 		t.Errorf("expected (unknown) HEAD to fall back to main, calls: %+v", fake.Calls)
@@ -223,12 +224,12 @@ func TestWorktree_WorktreeAddFallback(t *testing.T) {
 	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	if _, err := c.Worktree(context.Background(), Repo{
-		Host: "github", Owner: "cameronsjo", Name: "forgectl",
+		Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
 	}, "feature/foo"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	base := canonicalDest(tmp, "github", "cameronsjo", "forgectl")
+	base := canonicalDest(tmp, "github.com", "cameronsjo", "forgectl")
 	wantDir := filepath.Join(base, "feature", "foo")
 	if !hasCall(fake.Calls, "git", "worktree add "+wantDir+" origin/feature/foo -b feature/foo") {
 		t.Errorf("expected the origin/<branch> -b <branch> fallback, calls: %+v", fake.Calls)
@@ -237,7 +238,7 @@ func TestWorktree_WorktreeAddFallback(t *testing.T) {
 
 func TestWorktree_RefusesExistingDir(t *testing.T) {
 	tmp := t.TempDir()
-	base := canonicalDest(tmp, "github", "cameronsjo", "forgectl")
+	base := canonicalDest(tmp, "github.com", "cameronsjo", "forgectl")
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +246,7 @@ func TestWorktree_RefusesExistingDir(t *testing.T) {
 	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	if _, err := c.Worktree(context.Background(), Repo{
-		Host: "github", Owner: "cameronsjo", Name: "forgectl",
+		Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
 	}, "main"); err == nil {
 		t.Fatal("expected an error when base already exists, got nil")
 	}
@@ -261,7 +262,7 @@ func TestWorktree_RefusesExistingDir(t *testing.T) {
 // never be written through it into the symlink's target.
 func TestWorktree_RefusesSymlinkedBase(t *testing.T) {
 	tmp := t.TempDir()
-	base := canonicalDest(tmp, "github", "cameronsjo", "forgectl")
+	base := canonicalDest(tmp, "github.com", "cameronsjo", "forgectl")
 	decoy := filepath.Join(tmp, "decoy")
 	if err := os.MkdirAll(decoy, 0o755); err != nil {
 		t.Fatal(err)
@@ -276,7 +277,7 @@ func TestWorktree_RefusesSymlinkedBase(t *testing.T) {
 	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 	if _, err := c.Worktree(context.Background(), Repo{
-		Host: "github", Owner: "cameronsjo", Name: "forgectl",
+		Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
 	}, "main"); err == nil {
 		t.Fatal("expected a refusal when base is a pre-placed symlink, got nil")
 	}
@@ -295,9 +296,9 @@ func TestWorktree_RejectsUnsafeSegment(t *testing.T) {
 	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 	cases := []Repo{
 		{Host: "../escape", Owner: "cameronsjo", Name: "forgectl"},
-		{Host: "github", Owner: "..", Name: "forgectl"},
-		{Host: "github", Owner: "cameronsjo", Name: ""},
-		{Host: "github", Owner: "cameronsjo", Name: "a/b"},
+		{Host: "github.com", Owner: "..", Name: "forgectl"},
+		{Host: "github.com", Owner: "cameronsjo", Name: ""},
+		{Host: "github.com", Owner: "cameronsjo", Name: "a/b"},
 	}
 	for _, r := range cases {
 		if _, err := c.Worktree(context.Background(), r, "main"); err == nil {
@@ -315,7 +316,7 @@ func TestWorktree_RejectsUnsafeBranch(t *testing.T) {
 		fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("", false)}
 		c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 		if _, err := c.Worktree(context.Background(), Repo{
-			Host: "github", Owner: "cameronsjo", Name: "forgectl",
+			Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
 		}, branch); err == nil {
 			t.Errorf("Worktree(branch=%q) should reject an unsafe branch, got nil", branch)
 		}
@@ -334,17 +335,17 @@ func TestWorktree_LowercasesPath(t *testing.T) {
 	// Uppercase host/owner/name (non-github so it takes the SSH bare-clone path)
 	// must land at a lowercased canonical dest, mirroring Repo.Key().
 	got, err := c.Worktree(context.Background(), Repo{
-		Host: "Gitea", Owner: "Cameron", Name: "Homeclaw",
+		Host: "Git.SJO.lol", Owner: "Cameron", Name: "Homeclaw",
 		SSHURL: "ssh://git@git.sjo.lol:222/cameron/homeclaw.git",
 	}, "main")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := filepath.Join(canonicalDest(tmp, "Gitea", "Cameron", "Homeclaw"), "main")
+	want := filepath.Join(canonicalDest(tmp, "Git.SJO.lol", "Cameron", "Homeclaw"), "main")
 	if got != want {
 		t.Errorf("returned path = %q; want lowercased %q", got, want)
 	}
-	if !strings.Contains(got, filepath.Join("gitea", "cameron", "homeclaw")) {
+	if !strings.Contains(got, filepath.Join("git.sjo.lol", "cameron", "homeclaw")) {
 		t.Errorf("dest not lowercased: %q", got)
 	}
 }
@@ -356,7 +357,7 @@ func TestWorktree_NonGithubUsesBareGitClone(t *testing.T) {
 
 	url := "ssh://git@git.sjo.lol:222/cameron/homeclaw.git"
 	if _, err := c.Worktree(context.Background(), Repo{
-		Host: "gitea", Owner: "cameron", Name: "homeclaw", SSHURL: url,
+		Host: "git.sjo.lol", Owner: "cameron", Name: "homeclaw", SSHURL: url,
 	}, "main"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -393,5 +394,111 @@ func TestValidBranch(t *testing.T) {
 		if validBranch(b) {
 			t.Errorf("validBranch(%q) = true, want false", b)
 		}
+	}
+}
+
+// TestWorktree_GitHubRepoReachesCloneBareRepo pins the SECOND dispatch. It is
+// a separate switch from Clone's, in the bare-worktree path, and it is the one
+// a hostname migration silently breaks: cloneBareRepo applies the GH_HOST pin
+// and, on a non-default host, scrubs all four gh token env vars — inside the
+// function, where no caller can forget it. A GitHub repo falling to the else
+// arm loses both and bare-clones a server-supplied URL under ambient
+// credentials; a shorthand target, whose SSHURL is empty by construction,
+// fails outright.
+//
+// The zero-value Client is deliberate: it also proves effectiveGitHubHost's
+// default reaches this switch.
+func TestWorktree_GitHubRepoReachesCloneBareRepo(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("main", false)}
+	c := &Client{Dir: t.TempDir(), run: fake, gitBin: "git"}
+	if _, err := c.Worktree(context.Background(), Repo{
+		Host: githubauth.DefaultHost, Owner: "cameronsjo", Name: "forgectl",
+	}, "main"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var sawGhClone bool
+	for _, call := range fake.Calls {
+		if call.Name == "gh" && len(call.Args) >= 2 && call.Args[0] == "repo" && call.Args[1] == "clone" {
+			sawGhClone = true
+		}
+	}
+	if !sawGhClone {
+		t.Error("no `gh repo clone` ran — a GitHub worktree bare-cloned a raw URL, losing the host pin and the token scrub")
+	}
+}
+
+// TestWorktree_ForgedHostTokenDoesNotReachGh mirrors the Clone-side pin.
+func TestWorktree_ForgedHostTokenDoesNotReachGh(t *testing.T) {
+	for _, host := range []string{"github", "GITHUB", "gitea"} {
+		t.Run(host, func(t *testing.T) {
+			fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("main", false)}
+			c := &Client{Dir: t.TempDir(), run: fake, gitBin: "git"}
+			_, _ = c.Worktree(context.Background(), Repo{
+				Host: host, Owner: "evil", Name: "repo",
+				SSHURL: "https://" + host + "/evil/repo",
+			}, "main")
+			for _, call := range fake.Calls {
+				if call.Name == "gh" {
+					t.Fatalf("host %q reached gh (%v)", host, call.Args)
+				}
+			}
+		})
+	}
+}
+
+// TestWorktree_WingMemberLandsInTheWing pins the claim that a wing member's
+// worktree lands in the wing. Worktree takes no --wing flag, so the table on
+// the Client is the only mechanism — without it the claim has none.
+func TestWorktree_WingMemberLandsInTheWing(t *testing.T) {
+	tmp := t.TempDir()
+	table, err := ResolveWings("github.com", []Wing{
+		{Name: "cadence-ecosystem", Repos: []string{"cameronsjo/forgectl"}},
+	})
+	if err != nil {
+		t.Fatalf("ResolveWings: %v", err)
+	}
+	fake := &exec.FakeRunner{RunFunc: worktreeRunFunc("main", false)}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git", wings: table}
+
+	got, err := c.Worktree(context.Background(), Repo{
+		Host: "github.com", Owner: "cameronsjo", Name: "forgectl",
+	}, "main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := filepath.Join(tmp, "cadence-ecosystem", "forgectl", "main"); got != want {
+		t.Errorf("worktree = %q; want %q", got, want)
+	}
+}
+
+// TestWorktree_FailedRunLeavesNoBaseBehind is the anti-bricking pin. Mkdir's
+// refuse-if-exists is this function's safety guard, so a base left behind by a
+// FAILED run makes that refusal permanent: one transient error and the repo
+// can never get a worktree again without a manual rm. The second call is the
+// actual assertion — it must be able to succeed.
+func TestWorktree_FailedRunLeavesNoBaseBehind(t *testing.T) {
+	tmp := t.TempDir()
+	failing := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "gh" {
+			return "", errors.New("transient network failure")
+		}
+		return worktreeRunFunc("main", false)(name, args)
+	}}
+	c := &Client{Dir: tmp, run: failing, gitBin: "git"}
+	r := Repo{Host: "github.com", Owner: "cameronsjo", Name: "forgectl"}
+
+	if _, err := c.Worktree(context.Background(), r, "main"); err == nil {
+		t.Fatal("expected the bare clone to fail")
+	}
+	base := filepath.Join(tmp, "github.com", "cameronsjo", "forgectl")
+	if _, err := os.Stat(base); !os.IsNotExist(err) {
+		t.Fatalf("%s survived a failed run; the next attempt is now permanently refused", base)
+	}
+
+	// The retry must work — that is the whole point.
+	healthy := &exec.FakeRunner{RunFunc: worktreeRunFunc("main", false)}
+	c2 := &Client{Dir: tmp, run: healthy, gitBin: "git"}
+	if _, err := c2.Worktree(context.Background(), r, "main"); err != nil {
+		t.Fatalf("retry after a failed run: %v", err)
 	}
 }

@@ -38,6 +38,12 @@ import (
 // entirely by the provided RunFunc. PROJECTS_DIR is set to an empty temp dir
 // so localRepos contributes nothing — the test controls all output via gh/tea,
 // mirroring listFixture in projects_list_test.go.
+//   [x] Happy: --dry-run prints the host-tree destination and touches nothing
+//   [x] Happy: --dry-run --wing prints the wing destination, name normalized
+//   [x] Unhappy: --wing with --org is refused
+//   [x] Unhappy: --wing naming the configured GitHub host is refused
+//   [x] Unhappy: --wing outside the path-segment charset is refused
+
 func cloneFixture(t *testing.T, runFunc func(string, []string) (string, error)) *projects.Client {
 	t.Helper()
 	t.Setenv("PROJECTS_DIR", t.TempDir())
@@ -303,5 +309,124 @@ func TestCloneCmd_HostileNoteIsEscapedOnStderr(t *testing.T) {
 	// the path.
 	if !strings.Contains(body, `\x1b`) {
 		t.Errorf("want the escape sequence rendered as inert text, got %q", body)
+	}
+}
+
+// dryRunFixture builds a client over a fake runner rooted at a temp projects
+// dir, and returns both. The runner answers nothing, so any real clone attempt
+// is visible as a recorded call rather than a side effect.
+func dryRunFixture(t *testing.T) (*projects.Client, *exec.FakeRunner, string) {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("PROJECTS_DIR", root)
+	fake := &exec.FakeRunner{}
+	return projects.New(fake), fake, root
+}
+
+func runCloneCmd(t *testing.T, client *projects.Client, args ...string) (string, error) {
+	t.Helper()
+	var stdout bytes.Buffer
+	cmd := newProjectsCloneCmd(client)
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs(args)
+	err := cmd.ExecuteContext(context.Background())
+	return strings.TrimSpace(stdout.String()), err
+}
+
+// TestCloneCmd_DryRunPrintsDestinationAndTouchesNothing pins both halves of the
+// contract: the scriptable stdout path, and that nothing reached the disk or a
+// subprocess. The second half is the one that would silently regress — a
+// dry-run that quietly cloned would still print the right path.
+func TestCloneCmd_DryRunPrintsDestination(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want []string // path segments under the projects root
+	}{
+		{"host tree", []string{"--dry-run", "cameronsjo/quickmd"}, []string{"github.com", "cameronsjo", "quickmd"}},
+		{"wing override", []string{"--dry-run", "--wing", "testwing", "cameronsjo/quickmd"}, []string{"testwing", "quickmd"}},
+		{"wing name is normalized", []string{"--dry-run", "--wing", "TestWing", "cameronsjo/quickmd"}, []string{"testwing", "quickmd"}},
+		{"gitea url keeps its own host", []string{"--dry-run", "ssh://git@git.sjo.lol:222/cameron/homeclaw.git"}, []string{"git.sjo.lol", "cameron", "homeclaw"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, fake, root := dryRunFixture(t)
+			got, err := runCloneCmd(t, client, tc.args...)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if want := filepath.Join(append([]string{root}, tc.want...)...); got != want {
+				t.Errorf("stdout = %q; want %q", got, want)
+			}
+			for _, call := range fake.Calls {
+				if strings.Contains(strings.Join(call.Args, " "), "clone") {
+					t.Errorf("--dry-run ran a clone: %q %v", call.Name, call.Args)
+				}
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Errorf("--dry-run wrote %d entries under the projects root", len(entries))
+			}
+		})
+	}
+}
+
+// TestCloneCmd_RefusesUnsafeOrConflictingWing covers the flag's own guards. It
+// is a second entry point into the depth-1 namespace and does not go through
+// ResolveWings, so these checks are the only thing standing between the flag
+// and a directory name.
+func TestCloneCmd_RefusesUnsafeOrConflictingWing(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "with --org",
+			args:    []string{"--wing", "mcp", "--org", "cameronsjo"},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name:    "named after the github host",
+			args:    []string{"--dry-run", "--wing", "github.com", "cameronsjo/quickmd"},
+			wantErr: "configured [github] host",
+		},
+		{
+			name:    "leading dot hides the tree from ls",
+			args:    []string{"--dry-run", "--wing", ".hidden", "cameronsjo/quickmd"},
+			wantErr: "allowed charset",
+		},
+		{
+			name:    "colon renders as a slash in Finder",
+			args:    []string{"--dry-run", "--wing", "wing:8443", "cameronsjo/quickmd"},
+			wantErr: "allowed charset",
+		},
+		{
+			name:    "traversal",
+			args:    []string{"--dry-run", "--wing", "../escape", "cameronsjo/quickmd"},
+			wantErr: "allowed charset",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, fake, root := dryRunFixture(t)
+			_, err := runCloneCmd(t, client, tc.args...)
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q; want it to mention %q", err, tc.wantErr)
+			}
+			for _, call := range fake.Calls {
+				if strings.Contains(strings.Join(call.Args, " "), "clone") {
+					t.Errorf("a clone ran despite the refusal: %q %v", call.Name, call.Args)
+				}
+			}
+			if entries, _ := os.ReadDir(root); len(entries) != 0 {
+				t.Errorf("a refused clone wrote %d entries under the projects root", len(entries))
+			}
+		})
 	}
 }

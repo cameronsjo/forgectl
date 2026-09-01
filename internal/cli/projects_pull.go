@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/projects"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // newProjectsPullAllCmd builds `forgectl projects pull-all [dir]` — sequential
@@ -34,7 +35,11 @@ func newProjectsPullAllCmd(client *projects.Client) *cobra.Command {
 				if r.Status == projects.PullFailed {
 					failed++
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "%s %s (%s)\n", pullGlyph(r.Status), r.Name, r.Status)
+				// r.Name is a raw os.ReadDir entry name, not a validated segment — any
+				// directory under the projects root can carry ANSI or bidi controls
+				// into it. This site is a direct Fprintf, so it bypasses the central
+				// termsafe error seam that covers returned errors.
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s %s (%s)\n", pullGlyph(r.Status), termsafe.SafeLine(r.Name), r.Status)
 			}
 			if failed > 0 {
 				return fmt.Errorf("%d of %d repos failed to pull", failed, len(results))

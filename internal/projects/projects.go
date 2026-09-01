@@ -15,6 +15,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
+	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -121,9 +122,14 @@ type Client struct {
 
 	// gitHubHost is the deployment's configured GitHub host ([github].host,
 	// already validated by githubauth.ResolveHost at the CLI seam). It pins
-	// every gh subprocess and anchors canonicalHost's "github" token. New
-	// defaults it to githubauth.DefaultHost.
+	// every gh subprocess and anchors canonicalHost's trusted arm. New defaults
+	// it to githubauth.DefaultHost; read it through effectiveGitHubHost, never
+	// directly, so a struct-literal Client gets the same default.
 	gitHubHost string
+
+	// wings is the resolved [[projects.wings]] placement table. The zero value
+	// is a valid empty table — every repo falls to the host tree.
+	wings WingTable
 }
 
 // Option configures a Client at construction. Options exist so the GitHub
@@ -155,10 +161,46 @@ func WithGitHubHost(host string) Option {
 	}
 }
 
+// WithWings sets the resolved [[projects.wings]] placement table. The table
+// must already be ResolveWings output — the CLI seam validates every name and
+// repo entry before construction. An empty table is the default: every repo
+// lands in the host tree.
+func WithWings(table WingTable) Option {
+	return func(c *Client) { c.wings = table }
+}
+
+// WingFor returns the wing r is filed into, or "" for the host tree. Exported
+// because the CLI's --dry-run and its "already cloned elsewhere" message need
+// the same answer Clone will act on, rather than recomputing it.
+func (c *Client) WingFor(r Repo) string { return c.wings.For(r.Owner, r.Name) }
+
+// ProjectsDir returns the resolved projects root ($PROJECTS_DIR, else
+// ~/Projects). Exported so --dry-run can call Placement without a Client-shaped
+// duplicate of the same resolution.
+func (c *Client) ProjectsDir() string { return c.Dir }
+
 // GitHubHost returns the deployment's effective GitHub host — the value every
 // gh subprocess is pinned to. CLI call sites need it for ParseCloneTarget and
 // the non-default-host stderr note.
-func (c *Client) GitHubHost() string { return c.gitHubHost }
+func (c *Client) GitHubHost() string { return c.effectiveGitHubHost() }
+
+// effectiveGitHubHost is the one place the zero-value fallback lives. A Client
+// built by struct literal (tests, and any future caller that skips New)
+// carries no host, and every consumer of that field now makes a SECURITY
+// decision with it: canonicalHost's trusted arm, and both clone dispatches.
+//
+// Without this, converting the dispatch from the constant `case "github"` to a
+// field comparison would inherit the hole rather than the defense — a
+// zero-value client would fail the trusted branch and fall through to cloning
+// a server-supplied URL with no GH_HOST pin and no token scrub. canonicalHost
+// has defaulted an empty host since the exact-match fix; this makes the same
+// defense reachable from the dispatch side.
+func (c *Client) effectiveGitHubHost() string {
+	if c.gitHubHost == "" {
+		return githubauth.DefaultHost
+	}
+	return c.gitHubHost
+}
 
 // WithGitBinary overrides the git executable used by status probes and pulls.
 // The path must already be absolute and clean; anything else selects the same
@@ -263,14 +305,43 @@ func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error)
 			continue
 		}
 		top := filepath.Join(dir, e.Name())
-		if isGitRepo(top) {
+		isRepo := isGitRepo(top)
+
+		// The wing pass runs whether or not `top` is itself a checkout: a wing
+		// directory can be both, and the cadence-ecosystem wing on this estate
+		// IS both. That case is exactly what the old isGitRepo short-circuit
+		// hid, and restoring the short-circuit here would re-hide it.
+		var found bool
+		if wing := discoverWingCandidates(top); len(wing) > 0 {
+			candidates = append(candidates, wing...)
+			found = true
+		}
+
+		// The host pass does NOT run on a checkout, and the asymmetry is
+		// load-bearing. A checkout is never a host bucket, so this pass could
+		// only match at `<root>/<repo>/<owner>/<name>` — three levels inside a
+		// repo, which is where a vendored checkout, a submodule, or a test
+		// fixture repo lives. resolve.go's searchRoot names that exact hazard
+		// as why it stops at depth 2, and PullAll would run `git pull --rebase`
+		// in whatever it found. The wing pass matching one level shallower is
+		// the deliberate exception, because that layout is a real one; three
+		// levels inside a checkout is not.
+		if !isRepo {
+			if canon := discoverCanonicalHostCandidates(top); len(canon) > 0 {
+				candidates = append(candidates, canon...)
+				found = true
+			}
+		}
+
+		if isRepo {
 			candidates = append(candidates, discoverCandidate{e.Name(), top})
 			continue
 		}
-		if canon := discoverCanonicalHostCandidates(top); len(canon) > 0 {
-			candidates = append(candidates, canon...)
+		if found {
 			continue
 		}
+		// Not a repo and holding none — a plain directory is still a project,
+		// which is what keeps a scratch notes folder listed.
 		candidates = append(candidates, discoverCandidate{e.Name(), top})
 	}
 
@@ -280,6 +351,56 @@ func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error)
 
 	sortProjects(projects)
 	return projects, nil
+}
+
+// isWingMember is THE definition of a wing member, and it is deliberately a
+// named predicate rather than an inline isGitRepo call.
+//
+// Two independent walkers apply this rule — discoverWingCandidates below (for
+// `projects list`) and searchRoot in resolve.go (for `surface launch`) — and a
+// layout rule implemented twice is exactly the shape that drifts: tighten the
+// marker in one and the two commands start disagreeing about what exists on
+// disk, with nothing red to show for it. One function, both callers.
+//
+// The rule is the .git marker, not merely being a directory. That is what
+// keeps an OWNER directory — which sits at the same depth and holds repos but
+// is not one — from matching.
+func isWingMember(dir string) bool { return isGitRepo(dir) }
+
+// discoverWingCandidates walks a potential wing directory (Dir/<wing>) ONE
+// level deep, collecting every child that isWingMember accepts. Returns nil
+// when there are none, signalling the caller that this is not a wing.
+//
+// DISCOVERY IS STRUCTURAL, not config-driven, and that is a deliberate split
+// from placement. Gating discovery on the [[projects.wings]] table too would
+// have been one mechanism and more explicit — but a wing missing from config
+// would then be invisible to `projects list`, converting the defect this fixes
+// into a config-drift defect with the identical symptom. Disk state genuinely
+// is the authority for "what already lives here"; it is only "where should a
+// NEW clone go" that config has to answer.
+//
+// The match rule is the .git marker, matching discoverCanonicalHostCandidates
+// rather than a plain is-a-directory test. Verified against the live estate:
+// the seven wings score 4–28 children, while `github.com` and `git.sjo.lol`
+// score 0 (their repos sit a level deeper) and every residue directory scores
+// 0 — so the two layouts do not overlap.
+func discoverWingCandidates(wingDir string) []discoverCandidate {
+	entries, err := os.ReadDir(wingDir)
+	if err != nil {
+		return nil
+	}
+	var out []discoverCandidate
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		child := filepath.Join(wingDir, e.Name())
+		if !isWingMember(child) {
+			continue
+		}
+		out = append(out, discoverCandidate{e.Name(), child})
+	}
+	return out
 }
 
 // discoverCanonicalHostCandidates walks a potential host bucket (Dir/<host>)
@@ -373,7 +494,7 @@ func (c *Client) localRepos(ctx context.Context) ([]Repo, error) {
 			url, err := c.run.Run(ctx, "git", "-C", p.Dir, "remote", "get-url", "origin")
 			if err == nil {
 				url = strings.TrimSpace(url)
-				if host, owner, name := parseRemoteURL(url, c.gitHubHost); name != "" {
+				if host, owner, name := parseRemoteURL(url, c.effectiveGitHubHost()); name != "" {
 					r.Host, r.Owner, r.Name = host, owner, name
 					// SSHURL is contractually an SSH clone URL; an HTTPS origin would
 					// mislabel it in the JSON inventory, so only store SSH-form origins.
@@ -417,11 +538,23 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 	}
 	const remoteHosts = 2
 	ch := make(chan hostResult, remoteHosts)
+	// These two labels name the SOURCE — which enumerator produced the rows —
+	// not the host a row lands on. They stay fixed strings on purpose: they
+	// order the notes deterministically below, and a Gitea run's rows can now
+	// carry any hostname (or none, if every row was dropped), so there is no
+	// single host to label the source with.
+	const (
+		sourceGitHub = "github"
+		sourceGitea  = "gitea"
+	)
 	go func() {
-		r, n, e := githubList(ctx, c.run, c.githubOwners, c.gitHubHost)
-		ch <- hostResult{"github", r, n, e}
+		r, n, e := githubList(ctx, c.run, c.githubOwners, c.effectiveGitHubHost())
+		ch <- hostResult{sourceGitHub, r, n, e}
 	}()
-	go func() { r, e := giteaList(ctx, c.run); ch <- hostResult{"gitea", r, nil, e} }()
+	go func() {
+		r, e := giteaList(ctx, c.run, c.effectiveGitHubHost())
+		ch <- hostResult{sourceGitea, r, nil, e}
+	}()
 
 	local, err := c.localRepos(ctx)
 	if err != nil {
@@ -445,7 +578,7 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 		fetched[res.host] = res
 	}
 	var remote []Repo
-	for _, host := range []string{"github", "gitea"} {
+	for _, host := range []string{sourceGitHub, sourceGitea} {
 		res := fetched[host]
 		notes = append(notes, res.notes...)
 		if res.err != nil {
@@ -503,24 +636,64 @@ func (c *Client) ListOrg(ctx context.Context, org string) ([]Repo, error) {
 	if !validPathSegment(org) {
 		return nil, fmt.Errorf("invalid GitHub org/user name %q", org)
 	}
-	return githubListOrg(ctx, c.run, org, c.gitHubHost)
+	return githubListOrg(ctx, c.run, org, c.effectiveGitHubHost())
 }
 
-// Clone checks out a remote Repo into the canonical Dir/host/owner/name layout
-// (see canonicalDest), dispatching by host, and returns the local destination
-// path. A repo already present at its canonical dest is a no-op (returns its
-// path). github.com clones go through gh (credential handling); everything else
-// clones the SSH URL directly.
+// Clone checks out a remote Repo where Placement says it belongs — its wing if
+// it has one, otherwise the host/owner/name tree — dispatching by host, and
+// returns the local destination path. A repo already present at that dest is a
+// no-op (returns its path). Clones on the configured GitHub host go through gh
+// (credential handling and the host pin); everything else clones the SSH URL
+// directly.
 //
 // New clones always land in the canonical layout — the flat legacy layout is a
 // read-side (Discover) affordance only, so existing on-disk clones stay
 // findable without new clones perpetuating the collision-prone flat tree.
 func (c *Client) Clone(ctx context.Context, r Repo) (string, error) {
-	slog.Debug("Preparing to clone repo.", "host", r.Host, "owner", r.Owner, "name", r.Name)
-	if !validPathSegment(r.Host) || !validPathSegment(r.Owner) || !validPathSegment(r.Name) {
-		return "", fmt.Errorf("refusing to clone %s/%s/%s: unsafe path segment", r.Host, r.Owner, r.Name)
+	return c.CloneInto(ctx, r, c.WingFor(r))
+}
+
+// CloneInto is Clone with the wing supplied by the caller rather than looked
+// up — the seam `projects clone --wing <name>` uses to override the configured
+// table for one clone. An empty wing means the host tree, NOT "look it up":
+// the lookup is Clone's job, so a caller that means "consult the table" calls
+// Clone.
+func (c *Client) CloneInto(ctx context.Context, r Repo, wing string) (string, error) {
+	slog.Debug("Preparing to clone repo.", "host", r.Host, "owner", r.Owner, "name", r.Name, "wing", wing)
+	dest, err := Placement(c.Dir, r, wing)
+	if err != nil {
+		// Categorical: the rejected segments are exactly the untrusted values,
+		// and this string reaches a terminal. They are in the debug log above.
+		return "", fmt.Errorf("refusing to clone: %w", err)
 	}
-	dest := canonicalDest(c.Dir, r.Host, r.Owner, r.Name)
+	// A repo can be filed two ways — its wing, or the host tree — and only one
+	// of them is `dest`. Before creating anything, check whether it is ALREADY
+	// checked out at the other one. The 2026-08-04 estate reorganization spent
+	// real effort resolving duplicate checkouts; this is the cheap way not to
+	// mint new ones, and it also keeps adding or removing a wing entry from
+	// silently re-cloning every repo the entry moved.
+	//
+	// The probe is originMatches, not a bare os.Stat, and that distinction is
+	// the whole reason it is safe: a stat alone would let any same-named but
+	// DIFFERENT repo suppress a legitimate clone. originMatches asks the
+	// checkout who it actually is.
+	for _, other := range c.otherPlacements(r, dest) {
+		// isGitRepo, not a bare Stat: `git -C <dir>` WALKS UP to find a
+		// repository, so probing a same-named non-repo directory nested under
+		// an ancestor checkout would return that ancestor's origin — and a
+		// match there would make Clone skip a legitimate clone and hand back
+		// the wrong path. localRepos guards the identical hazard for the same
+		// reason.
+		if !isGitRepo(other) {
+			continue
+		}
+		if c.originMatches(ctx, other, r) {
+			slog.Info("Repo already checked out under another layout; not cloning a duplicate.",
+				"existing", other, "wouldHaveBeen", dest)
+			return other, nil
+		}
+	}
+
 	if _, err := os.Stat(dest); err == nil {
 		// Something is already at dest. Only treat it as "already cloned" when it
 		// really is THIS repo — the canonical layout already separates repos by
@@ -530,20 +703,24 @@ func (c *Client) Clone(ctx context.Context, r Repo) (string, error) {
 			slog.Debug("Repo already cloned, skipping clone.", "dest", dest, "name", r.Name)
 			return dest, nil
 		}
-		return "", fmt.Errorf("%s already exists but its origin is a different repo; "+
-			"%s/%s/%s collides — clone it elsewhere by hand", dest, r.Host, r.Owner, r.Name)
+		// dest is forgectl-composed from already-guarded segments, so it is
+		// safe to name; r.Host/Owner/Name are server-supplied and stay out.
+		return "", fmt.Errorf("%s already exists but its origin is a different repo — "+
+			"clone it elsewhere by hand", dest)
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return "", fmt.Errorf("creating canonical clone parent dirs for %s: %w", dest, err)
 	}
-	switch r.Host {
-	case "github":
-		if err := cloneRepo(ctx, c.run, r.Owner+"/"+r.Name, dest, c.gitHubHost); err != nil {
+	// The dispatch predicate is the HOSTNAME, not a token. Only the configured
+	// GitHub host clones through gh, which supplies its own URL under the
+	// GH_HOST pin and the non-default-host token scrub that cloneRepo applies
+	// internally. Every other host clones the URL the row carried.
+	if r.Host == c.effectiveGitHubHost() {
+		if err := cloneRepo(ctx, c.run, r.Owner+"/"+r.Name, dest, c.effectiveGitHubHost()); err != nil {
 			slog.Error("Failed to clone from GitHub.", "host", r.Host, "repo", r.Owner+"/"+r.Name, "dest", dest, "error", err)
 			return "", err
 		}
-	default:
-		// gitea and any SSH-reachable host: clone the URL directly.
+	} else {
 		if err := cloneFromGitea(ctx, c.run, r.SSHURL, dest); err != nil {
 			slog.Error("Failed to clone from host.", "host", r.Host, "name", r.Name, "dest", dest, "error", err)
 			return "", err
@@ -553,11 +730,81 @@ func (c *Client) Clone(ctx context.Context, r Repo) (string, error) {
 	return dest, nil
 }
 
-// canonicalDest returns the canonical clone destination dir/host/owner/name,
-// lowercased to mirror Repo.Key() — the filesystem tree is the mirror of the
-// dedup identity, so "where is it cloned" and "what is it" never disagree.
-func canonicalDest(dir, host, owner, name string) string {
-	return filepath.Join(dir, strings.ToLower(host), strings.ToLower(owner), strings.ToLower(name))
+// Placement returns where r is filed under root. It is the single path
+// formula, and it implements the estate's two filing rules verbatim:
+//
+//	wing != ""  ->  <root>/<wing>/<name>
+//	otherwise   ->  <root>/<host>/<owner>/<name>
+//
+// Every segment is lowercased, mirroring Repo.Key() — the filesystem tree is
+// the mirror of the dedup identity, so "where is it cloned" and "what is it"
+// never disagree.
+//
+// It promises A PATH, NOT A POLICY. Three callers with incompatible leaf
+// semantics use it — Clone writes a checkout there, Worktree writes a .bare
+// plus per-branch trees and refuses an existing leaf, the duplicate probe only
+// reads — and none of that belongs in a path formula.
+//
+// TWO TIERS OF SEGMENT GUARD, because the segments carry different risk. The
+// host is the only one that can arrive as an arbitrary hostname from a remote
+// URL, so it goes through githubauth.ValidHostSegment: an anchored charset
+// that rejects ':' (APFS-legal, rendered as '/' in Finder), a leading '.' (a
+// tree invisible to ls), control characters and ANSI escapes, homoglyphs, and
+// anything over-long. Owner, name, and wing keep validPathSegment's traversal
+// and flag-injection guards, which is what they need.
+//
+// It returns an error rather than falling back, because falling back is how a
+// rejected value still ends up on disk under a different name.
+//
+// ONE RULE IT CANNOT ENFORCE: a wing must also not be named after the
+// configured GitHub host, and Placement is not given that host. Both live
+// entry points do check it — ResolveWings for the config table, the --wing
+// flag at the CLI seam — via ValidateWingName. A future caller of the exported
+// CloneInto that skips both would get past this function; say so here rather
+// than let the comment imply a checkpoint this function does not have.
+func Placement(root string, r Repo, wing string) (string, error) {
+	// OWNER AND NAME GO THROUGH validRepoSegment, NOT validPathSegment, and on
+	// BOTH branches even though a wing path contains no owner.
+	//
+	// Two separate reasons, both learned the hard way. The stronger guard,
+	// because a listing row is not the only way a repo name reaches this
+	// function: ParseCloneTarget's URL branch takes the last two path segments
+	// of an operator-supplied URL with no charset check of its own, so
+	// `clone https://host/owner/.git` would otherwise land a checkout whose
+	// leaf is `.git` — which makes isGitRepo report the PARENT as a repo and
+	// hides every sibling from the inventory. That is the exact defect this
+	// plan set out to fix, re-armed through a different door.
+	//
+	// On both branches, because Placement is the last checkpoint before Clone
+	// and Worktree dispatch and both build a `gh repo clone <owner>/<name>`
+	// argv from these fields. An owner that only the host branch rejected
+	// would still reach that argv on the wing path, where a leading '-' is
+	// flag injection. Re-homing only the segments the path happens to use is
+	// the classic "removal keeps the consumer, drops the control" downgrade.
+	name := strings.ToLower(r.Name)
+	if !validRepoSegment(name) {
+		return "", fmt.Errorf("refusing to place a repo: unsafe name segment")
+	}
+	owner := strings.ToLower(r.Owner)
+	if !validRepoSegment(owner) {
+		return "", fmt.Errorf("refusing to place a repo: unsafe owner segment")
+	}
+	if wing != "" {
+		// The wing segment gets the HOST-tier guard, not validPathSegment's.
+		// A wing sits in the same depth-1 namespace as the host trees, so it
+		// needs the same charset — and this branch is reachable from the
+		// `--wing` flag, which does not go through ResolveWings.
+		w := strings.ToLower(wing)
+		if !githubauth.ValidHostSegment(w) {
+			return "", fmt.Errorf("refusing to place a repo: unsafe wing segment")
+		}
+		return filepath.Join(root, w, name), nil
+	}
+	host := strings.ToLower(r.Host)
+	if !githubauth.ValidHostSegment(host) {
+		return "", fmt.Errorf("refusing to place a repo: unsafe host segment")
+	}
+	return filepath.Join(root, host, owner, name), nil
 }
 
 // validPathSegment rejects a host/owner/name value that would escape or
@@ -574,6 +821,64 @@ func validPathSegment(s string) bool {
 		!strings.ContainsAny(s, "/\\")
 }
 
+// maxRepoSegmentBytes bounds an owner or repo name used as a path segment.
+// POSIX NAME_MAX is 255 and resolve.go silently DROPS longer directory names,
+// so a row past this is unwritable and would also be invisible to the
+// launcher. 100 is GitHub's own limit for both an owner and a repo name.
+const maxRepoSegmentBytes = 100
+
+// validRepoSegment vets an owner or repo NAME arriving from a remote listing —
+// gh's JSON, tea's TSV — before it is stamped onto a Repo and becomes a
+// directory. validPathSegment is not enough here, and the gap is not
+// theoretical: it accepts a leading '.', so a repo literally named ".git"
+// yields a wing directory that isGitRepo then reports as a repo, hiding every
+// member of that wing; ".bare" collides with the worktree layout's object
+// store. It also accepts ':' (APFS-legal, rendered as '/' in Finder), control
+// characters and ANSI escapes, whitespace, homoglyphs, and any length.
+//
+// The charset is pr.ValidOwnerRepoPart's — the repo's one anchored owner/repo
+// predicate, reused rather than re-spelled — plus the leading-dot and length
+// bounds it does not carry. Rows failing this are dropped from the listing
+// rather than repaired: a name we cannot file is a row we cannot act on.
+func validRepoSegment(s string) bool {
+	return validPathSegment(s) &&
+		!strings.HasPrefix(s, ".") &&
+		len(s) <= maxRepoSegmentBytes &&
+		pr.ValidOwnerRepoPart(s)
+}
+
+// otherPlacements returns every path r could legitimately occupy OTHER than
+// dest — the host tree, plus its configured wing.
+//
+// It returns a slice rather than a single path because there are up to THREE
+// candidates, not two: `--wing foo` on a repo the table files under `bar`
+// makes `dest` the `foo` path, the host tree one alternative, and `bar` — the
+// place the repo most likely actually is — the other. Returning only "the
+// other one" would miss exactly the case an override creates, which is when a
+// duplicate is most likely.
+//
+// Unplaceable candidates are dropped rather than erroring: this is a probe, and
+// a path that cannot be composed is a path nothing can be checked out at.
+func (c *Client) otherPlacements(r Repo, dest string) []string {
+	var out []string
+	add := func(p string, err error) {
+		if err != nil || p == dest {
+			return
+		}
+		for _, seen := range out {
+			if seen == p {
+				return
+			}
+		}
+		out = append(out, p)
+	}
+	add(Placement(c.Dir, r, ""))
+	if configured := c.WingFor(r); configured != "" {
+		add(Placement(c.Dir, r, configured))
+	}
+	return out
+}
+
 // originMatches reports whether the git checkout at dir has an origin remote that
 // resolves to r's (host, owner, name) — i.e. dir really is r, not a same-named
 // repo from a different host.
@@ -582,7 +887,7 @@ func (c *Client) originMatches(ctx context.Context, dir string, r Repo) bool {
 	if err != nil {
 		return false
 	}
-	host, owner, name := parseRemoteURL(strings.TrimSpace(url), c.gitHubHost)
+	host, owner, name := parseRemoteURL(strings.TrimSpace(url), c.effectiveGitHubHost())
 	return host == r.Host && owner == r.Owner && name == r.Name
 }
 

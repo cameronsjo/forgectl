@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -71,8 +72,9 @@ var (
 // the operator naming a directory explicitly. It may be anywhere, including
 // outside the project root, because an explicit path is an explicit choice.
 //
-// A bare name is a lookup, and it searches only beneath the root, only the two
-// layouts forgectl creates (flat, and host/owner/repo), and matches exactly.
+// A bare name is a lookup, and it searches only beneath the root, only the
+// three layouts forgectl creates (flat, wing/repo, and host/owner/repo), and
+// matches exactly.
 // Zero matches and several matches both fail; there is no nearest-match, no
 // prefix, and no interactive disambiguation, because the result of guessing
 // wrong is a session that runs in the wrong repository.
@@ -164,17 +166,33 @@ func (c *Client) resolveByName(name string) (string, error) {
 	case 1:
 		return canonicalDir(matches[0])
 	default:
-		return "", fmt.Errorf("%w: %d matches", ErrTargetAmbiguous, len(matches))
+		// NAME THE PATHS. A repo checked out in both a wing and the host tree
+		// yields two matches, and that is a real estate defect the operator
+		// has to go fix — a bare count tells them a duplicate exists but not
+		// which two directories to reconcile. Each goes through QuotePath: a
+		// directory under the root can be named anything a hand-made mkdir
+		// allows, forgectl's own placement guards notwithstanding. The NAME
+		// still is not echoed, for the reason given in the case-0 arm.
+		quoted := make([]string, 0, len(matches))
+		for _, m := range matches {
+			quoted = append(quoted, termsafe.QuotePath(m))
+		}
+		sort.Strings(quoted)
+		return "", fmt.Errorf("%w: %d matches: %s", ErrTargetAmbiguous, len(matches), strings.Join(quoted, ", "))
 	}
 }
 
-// searchRoot looks in the two layouts forgectl creates, in order.
+// searchRoot looks in the three layouts forgectl creates, in order.
 //
 // Flat first — `<root>/<name>` — because it is the common case and needs no
-// walk at all. Then host/owner/repo, which is the layout `forgectl pull` uses,
-// walked two levels deep and no further. A deeper walk would start finding
-// vendored checkouts and node_modules, and matching one of those would run a
-// session inside a dependency.
+// walk at all. Then wings, `<root>/<wing>/<name>`. Then host/owner/repo, the
+// layout `forgectl pull` uses, walked two levels deep and no further. A deeper
+// walk would start finding vendored checkouts and node_modules, and matching
+// one of those would run a session inside a dependency.
+//
+// Wings add one KNOWN layout, not unbounded depth: the wing pass matches at
+// depth 2, which this walk already reached to enumerate owners, so the depth
+// contract above is unchanged.
 // Matching compares directory entries byte-for-byte rather than stat'ing a
 // joined path, and that is not a stylistic preference. macOS's default
 // filesystem is case-insensitive: os.Lstat("<root>/CADENCE") succeeds when the
@@ -209,6 +227,33 @@ func (c *Client) searchRoot(name string, budget *int) ([]string, error) {
 		for _, owner := range owners {
 			ownerDir := filepath.Join(hostDir, owner)
 			if !isRealDir(ownerDir) {
+				continue
+			}
+
+			// The WING layout: <root>/<wing>/<name>, one level shallower than
+			// host/owner/repo. A wing member sits exactly where an owner would,
+			// so without this it is walked THROUGH rather than matched, and
+			// `surface launch <name>` cannot find it.
+			//
+			// The gate is isWingMember — the ONE definition, shared with
+			// discoverWingCandidates — rather than this function's usual
+			// isRealDir. Two walkers implementing the same layout rule is how
+			// `projects list` and `surface launch` come to disagree about what
+			// exists on disk.
+			//
+			// A wing member is a CHECKOUT, so its children are that repo's own
+			// contents — never repos in a host tree. Matching one and then
+			// walking into it anyway would let `launch internal` resolve to
+			// `<root>/<wing>/<repo>/internal`, checked with isRealDir alone and
+			// with no .git of its own: a session started inside a subdirectory
+			// of an unrelated repo. So this arm always continues, match or not.
+			if isWingMember(ownerDir) {
+				if owner == name {
+					matches = append(matches, ownerDir)
+					if len(matches) > maxCandidates {
+						return matches, nil
+					}
+				}
 				continue
 			}
 			repos, err := readDirNames(ownerDir, budget)

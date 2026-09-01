@@ -24,10 +24,15 @@ import (
 // through gh (credential handling); everything else bare-clones the SSH URL.
 func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, error) {
 	slog.Debug("Preparing to create worktree.", "host", r.Host, "owner", r.Owner, "name", r.Name, "branch", branch)
-	if !validPathSegment(r.Host) || !validPathSegment(r.Owner) || !validPathSegment(r.Name) {
-		return "", fmt.Errorf("refusing to create worktree for %s/%s/%s: unsafe path segment", r.Host, r.Owner, r.Name)
+	// Placement rejects BEFORE the os.Mkdir below, deliberately: a rejected
+	// repo that had already created its base dir would then be permanently
+	// refused by that Mkdir's own exist-guard.
+	base, err := Placement(c.Dir, r, c.WingFor(r))
+	if err != nil {
+		// Categorical, same as Clone's: the rejected segments are the
+		// untrusted values and this reaches a terminal.
+		return "", fmt.Errorf("refusing to create worktree: %w", err)
 	}
-	base := canonicalDest(c.Dir, r.Host, r.Owner, r.Name)
 	bareDir := filepath.Join(base, ".bare")
 
 	// Create the parent host/owner dirs, then the leaf with os.Mkdir — an atomic
@@ -46,14 +51,39 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 		return "", fmt.Errorf("creating worktree base dir %s: %w", base, err)
 	}
 
-	switch r.Host {
-	case "github":
-		if err := cloneBareRepo(ctx, c.run, r.Owner+"/"+r.Name, bareDir, c.gitHubHost); err != nil {
+	// Every failure from here on must remove base. The Mkdir above is an
+	// atomic create-or-fail whose refusal is this function's safety guard —
+	// so a base left behind by a FAILED run makes that guard permanent: one
+	// transient network error during the bare clone and this repo can never
+	// get a worktree again without a manual rm. Removing only what we just
+	// created (and only on the error paths) keeps the guard meaningful.
+	//
+	// RemoveAll, not Remove: by the time a later step fails, base holds .bare
+	// and the .git pointer. It is scoped to the directory this call created
+	// with its own Mkdir, which never followed a symlink.
+	success := false
+	defer func() {
+		if success {
+			return
+		}
+		if rmErr := os.RemoveAll(base); rmErr != nil {
+			slog.Warn("Failed to clean up a partial worktree base; a later run will refuse this path.",
+				"base", base, "error", rmErr)
+		}
+	}()
+
+	// Same hostname predicate as Clone's, and it must stay in step with it: the
+	// gh arm is where GH_HOST is pinned and, on a non-default host, the four
+	// token env vars are scrubbed. A GitHub repo that fell to the else arm
+	// would bare-clone a server-supplied URL under ambient credentials — and a
+	// shorthand target, whose SSHURL is empty by construction, would fail
+	// outright.
+	if r.Host == c.effectiveGitHubHost() {
+		if err := cloneBareRepo(ctx, c.run, r.Owner+"/"+r.Name, bareDir, c.effectiveGitHubHost()); err != nil {
 			slog.Error("Failed to bare-clone from GitHub.", "repo", r.Owner+"/"+r.Name, "dest", bareDir, "error", err)
 			return "", err
 		}
-	default:
-		// gitea and any SSH-reachable host: bare-clone the URL directly.
+	} else {
 		if err := cloneBareFromURL(ctx, c.run, r.SSHURL, bareDir); err != nil {
 			slog.Error("Failed to bare-clone from host.", "host", r.Host, "name", r.Name, "dest", bareDir, "error", err)
 			return "", err
@@ -94,6 +124,7 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 		}
 	}
 
+	success = true
 	slog.Info("Successfully created worktree.", "host", r.Host, "name", r.Name, "dest", worktreeDir, "branch", branch)
 	return worktreeDir, nil
 }

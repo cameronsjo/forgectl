@@ -81,11 +81,13 @@ forgectl init               # append (or, for the host-scalar preamble, prepend)
 # projects — cross-host project inventory (alias: proj)
 forgectl projects list [query]           # list all projects: local clones + your GitHub.com repos + git.sjo.lol/cameron
 forgectl projects list --json            # machine-readable JSON (safe to pipe; degradation notes go to stderr)
-forgectl projects list --host github     # filter to one host: github | gitea
-forgectl projects list --host gitea forge  # host filter + name substring
+forgectl projects list --host github.com # filter to one hostname (or "local")
+forgectl projects list --host git.sjo.lol forge  # host filter + name substring
 forgectl projects pick [query]           # picker with both descriptors TTY; otherwise sanitized candidates on stdout + exit 1 (aliases: p, open)
 forgectl projects                        # shorthand for pick; same headless candidate/exit-1 contract
 forgectl projects clone [query]          # picker with both descriptors TTY; otherwise candidates + exit 1 (use sshUrl from list --json)
+forgectl projects clone --dry-run <target>  # print where it would land and exit, touching nothing
+forgectl projects clone --wing mcp <target> # override the [[projects.wings]] table for this clone
 forgectl projects worktree <query> [branch] # same ambiguity contract as clone; use sshUrl from list --json
 
 # pr — clean-room pull-request review (the flagship review family)

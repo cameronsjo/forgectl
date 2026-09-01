@@ -27,11 +27,11 @@ func TestChooseRepo_HeadlessWritesCandidatesThenReturnsModeSpecificExit(t *testi
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	repos := []projects.Repo{
-		{Host: "github", Owner: "cameronsjo", Name: "forgectl", Cloned: false},
+		{Host: "github.com", Owner: "cameronsjo", Name: "forgectl", Cloned: false},
 		{Host: "", LocalPath: "/work/local", Cloned: true, Status: projects.GitStatus{State: projects.StatusOK}},
 	}
 	_, err := chooseRepo(cmd, repos, projectSelectionClone)
-	if got, want := stdout.String(), "github  cameronsjo/forgectl  uncloned\nlocal  path:/work/local  clean\n"; got != want {
+	if got, want := stdout.String(), "github.com  cameronsjo/forgectl  uncloned\nlocal  path:/work/local  clean\n"; got != want {
 		t.Errorf("candidate stdout = %q, want %q", got, want)
 	}
 	if got, want := err.Error(), "2 projects require a clone selection, and there is no interactive terminal — get the candidate's sshUrl from `forgectl projects list --json` and pass that URL; owner/repo is exact only for GitHub candidates, and any candidate without an sshUrl (including local-only) requires an interactive rerun; candidates are on stdout"; err == nil || got != want {
@@ -55,7 +55,7 @@ func TestChooseRepo_HeadlessPreservesFirstWriterError(t *testing.T) {
 	sentinel := errors.New("writer failed")
 	cmd := &cobra.Command{}
 	cmd.SetOut(failingWriter{err: sentinel})
-	_, err := chooseRepo(cmd, []projects.Repo{{Host: "github", Owner: "c", Name: "one"}}, projectSelectionWorktree)
+	_, err := chooseRepo(cmd, []projects.Repo{{Host: "github.com", Owner: "c", Name: "one"}}, projectSelectionWorktree)
 	if !errors.Is(err, sentinel) || err != sentinel {
 		t.Errorf("error = %v, want original sentinel", err)
 	}
@@ -67,7 +67,7 @@ func TestChooseRepo_HeadlessPreservesFirstWriterError(t *testing.T) {
 func TestChooseRepo_InteractiveCallsPickerOnceWithoutCandidateOutput(t *testing.T) {
 	prevTTY, prevPicker := isInteractiveTTY, pickRepoFn
 	isInteractiveTTY = func() bool { return interactiveTTY(true, true) }
-	want := projects.Repo{Host: "github", Owner: "c", Name: "selected"}
+	want := projects.Repo{Host: "github.com", Owner: "c", Name: "selected"}
 	pickerCalls := 0
 	pickRepoFn = func([]projects.Repo) (projects.Repo, error) { pickerCalls++; return want, nil }
 	t.Cleanup(func() { isInteractiveTTY, pickRepoFn = prevTTY, prevPicker })
@@ -75,7 +75,7 @@ func TestChooseRepo_InteractiveCallsPickerOnceWithoutCandidateOutput(t *testing.
 	cmd := &cobra.Command{}
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
-	got, err := chooseRepo(cmd, []projects.Repo{{Host: "github", Owner: "c", Name: "other"}}, projectSelectionPick)
+	got, err := chooseRepo(cmd, []projects.Repo{{Host: "github.com", Owner: "c", Name: "other"}}, projectSelectionPick)
 	if err != nil || got != want {
 		t.Errorf("chooseRepo = (%+v, %v), want (%+v, nil)", got, err, want)
 	}
@@ -109,7 +109,7 @@ func TestSafeCandidate_QuotesBidiControlsAndLayoutBytes(t *testing.T) {
 }
 
 func TestProjectCandidateLine_UnclonedMirrorKeepsMirrorMarker(t *testing.T) {
-	if got, want := projectCandidateLine(projects.Repo{Host: "gitea", Owner: "c", Name: "mirror", Mirror: true}), "gitea  c/mirror  uncloned, mirror"; got != want {
+	if got, want := projectCandidateLine(projects.Repo{Host: "git.sjo.lol", Owner: "c", Name: "mirror", Mirror: true}), "git.sjo.lol  c/mirror  uncloned, mirror"; got != want {
 		t.Errorf("candidate = %q, want %q", got, want)
 	}
 }

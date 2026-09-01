@@ -789,3 +789,56 @@ func TestLoad_UnresolvableConfigDirIsDecodeDegraded(t *testing.T) {
 		t.Error("Load() with unresolvable config dir: DecodeDegraded() = false, want true")
 	}
 }
+
+// TestProjectsConfig_WingsDecodeAndPresence covers the `[[projects.wings]]`
+// placement table. The IsZero case is the load-bearing one: a section carrying
+// only wings must NOT report absent, or the CLI seam skips a table the
+// operator wrote and every wing member silently lands in the host tree — the
+// exact misplacement the table exists to prevent.
+func TestProjectsConfig_WingsDecodeAndPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want ProjectsConfig
+		zero bool
+	}{
+		{
+			name: "wings only — present, not zero",
+			body: "[[projects.wings]]\nname = \"cadence-ecosystem\"\nrepos = [\"cameronsjo/cadence\"]\n",
+			want: ProjectsConfig{Wings: []WingConfig{{Name: "cadence-ecosystem", Repos: []string{"cameronsjo/cadence"}}}},
+		},
+		{
+			name: "owners only",
+			body: "[projects]\nowners = [\"first\"]\n",
+			want: ProjectsConfig{Owners: []string{"first"}},
+		},
+		{
+			name: "both",
+			body: "[projects]\nowners = [\"first\"]\n[[projects.wings]]\nname = \"mcp\"\nrepos = [\"cameronsjo/a\", \"cameronsjo/b\"]\n",
+			want: ProjectsConfig{Owners: []string{"first"}, Wings: []WingConfig{{Name: "mcp", Repos: []string{"cameronsjo/a", "cameronsjo/b"}}}},
+		},
+		{
+			name: "two wings keep order",
+			body: "[[projects.wings]]\nname = \"a\"\n[[projects.wings]]\nname = \"b\"\n",
+			want: ProjectsConfig{Wings: []WingConfig{{Name: "a"}, {Name: "b"}}},
+		},
+		{
+			name: "neither — absent",
+			body: "[review]\nowners = [\"reviewer\"]\n",
+			zero: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := DecodeStrict([]byte(tc.body))
+			if err != nil {
+				t.Fatalf("DecodeStrict: %v", err)
+			}
+			if !tc.zero && !reflect.DeepEqual(got.Projects, tc.want) {
+				t.Errorf("Projects = %+v, want %+v", got.Projects, tc.want)
+			}
+			if got.Projects.IsZero() != tc.zero {
+				t.Errorf("Projects.IsZero() = %v, want %v", got.Projects.IsZero(), tc.zero)
+			}
+		})
+	}
+}

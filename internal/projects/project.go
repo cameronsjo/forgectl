@@ -27,7 +27,11 @@ type Project struct {
 // derive it from their origin remote, never from the bare directory name, so a
 // repo that exists on both hosts stays two distinct rows.
 type Repo struct {
-	Host      string    `json:"host"`             // "github" | "gitea" | "" (local-only, no parseable origin)
+	// Host is the normalized hostname — "github.com", "git.sjo.lol",
+	// "github.example.com" — or "" for a local-only repo with no parseable
+	// origin. It is the `projects list --json` wire contract; it carried the
+	// short tokens "github"/"gitea" through v0.15.0.
+	Host      string    `json:"host"`
 	Owner     string    `json:"owner"`            // "cameronsjo" on github, "cameron" on gitea
 	Name      string    `json:"name"`             // repo name
 	SSHURL    string    `json:"sshUrl,omitempty"` // clone URL (gitea: ssh://…:222 form)
@@ -124,18 +128,18 @@ func (p Project) DisplayLine() string {
 	return p.Name + " " + label
 }
 
-// hostBadge returns a short host marker for inventory display.
+// hostBadge returns the host marker for inventory display: the hostname
+// itself, or "local" for a repo with no parseable origin.
+//
+// It deliberately does NOT map hostnames to friendlier labels. This is a Repo
+// method with no access to the deployment's configured hosts, so any mapping
+// would have to hardcode github.com — which silently drops a GitHub Enterprise
+// host's badge, the one case where knowing the host matters most.
 func (r Repo) hostBadge() string {
-	switch r.Host {
-	case "github":
-		return "gh"
-	case "gitea":
-		return "git.sjo.lol"
-	case "":
+	if r.Host == "" {
 		return "local"
-	default:
-		return r.Host
 	}
+	return r.Host
 }
 
 // DisplayLine builds the label shown in the cross-host picker: host marker,
@@ -161,7 +165,10 @@ func (r Repo) DisplayLine() string {
 	if r.Mirror {
 		name += " (mirror)"
 	}
-	return fmt.Sprintf("%-12s %s %s", r.hostBadge(), name, badge)
+	// Width 18 fits "github.example.com" and "git.sjo.lol"; a longer host
+	// simply pushes the rest of the line right rather than truncating, since
+	// the badge is the only thing that identifies which forge a row is on.
+	return fmt.Sprintf("%-18s %s %s", r.hostBadge(), name, badge)
 }
 
 // Key returns the dedup identity for a Repo. Repos with a parseable host+owner
@@ -174,10 +181,10 @@ func (r Repo) Key() string {
 	return strings.ToLower(r.Host + "/" + r.Owner + "/" + r.Name)
 }
 
-// parseRemoteURL extracts (host, owner, name) from a git remote URL. It maps the
-// known hosts to short tokens ("github", "gitea") so a local clone's origin
-// dedups against the remote-list rows; an unrecognised host returns its bare
-// hostname. Returns ("","","") when the URL can't be parsed into owner/name.
+// parseRemoteURL extracts (host, owner, name) from a git remote URL. host is
+// canonicalHost's normalized hostname, so a local clone's origin dedups
+// against the remote-list rows for the same host. Returns ("","","") when the
+// URL can't be parsed into owner/name.
 //
 // Handles the three forms in play:
 //
@@ -237,20 +244,28 @@ func parseRemoteURL(raw, gitHubHost string) (host, owner, name string) {
 // works there too, not just ssh.
 //
 // gitHubHost is the deployment's configured GitHub host (githubauth
-// ResolveHost output): a URL naming that host maps to the "github" token, and
-// the bare "owner/repo" shorthand means "on the configured GitHub host" —
-// deployment-scoped, not github.com-scoped — because the clone it selects
-// runs through gh pinned to that host.
+// ResolveHost output): the bare "owner/repo" shorthand means "on the
+// configured GitHub host" — deployment-scoped, not github.com-scoped —
+// because the clone it selects runs through gh pinned to that host. An empty
+// value means the default, matching canonicalHost's zero-value defense; both
+// go through the same fallback so a struct-literal caller cannot get a Repo
+// whose Host misses the dispatch.
 func ParseCloneTarget(arg, gitHubHost string) (Repo, bool) {
+	if gitHubHost == "" {
+		gitHubHost = githubauth.DefaultHost
+	}
 	if host, owner, name := parseRemoteURL(arg, gitHubHost); name != "" {
 		r := Repo{Host: host, Owner: owner, Name: name}
-		if host != "github" {
+		// Only a URL on the configured GitHub host clones through gh, which
+		// supplies its own URL. Everything else carries the operator's literal
+		// argument forward as the clone URL.
+		if host != gitHubHost {
 			r.SSHURL = arg
 		}
 		return r, true
 	}
 	if owner, name, ok := splitOwnerRepo(arg); ok {
-		return Repo{Host: "github", Owner: owner, Name: name}, true
+		return Repo{Host: gitHubHost, Owner: owner, Name: name}, true
 	}
 	return Repo{}, false
 }
@@ -268,16 +283,27 @@ func splitOwnerRepo(s string) (owner, name string, ok bool) {
 	return owner, name, true
 }
 
-// canonicalHost maps a remote hostname to the inventory's short host token.
+// canonicalHost normalizes a remote hostname into the inventory's host
+// identity: lowercased, with one trailing ":port" and one trailing "." (the
+// FQDN root label) stripped. Every host is its own identity — there are no
+// short tokens.
+//
+// THE TOKENS ARE WHY THIS RETURNS A HOSTNAME. It used to return "github" or
+// "gitea" for the two known hosts and the raw hostname for everything else —
+// two kinds of value in one type, with nothing distinguishing them. A remote
+// whose bare hostname was literally "github" therefore came out of the DEFAULT
+// arm holding the TRUSTED arm's value, and `clone https://github/evil/repo`
+// dispatched to `gh repo clone evil/repo` against public github.com. Returning
+// the hostname collapses the two kinds into one, so there is no token left to
+// forge. Do not reintroduce a short token for any host.
 //
 // The GitHub arm is an EXACT, case-insensitive match against the deployment's
-// configured GitHub host (with one trailing ":port" stripped from the remote
-// hostname first — a ported remote for the same host is still that host). It
-// was once a substring test, which stamped any hostname merely containing
-// "github.com" — e.g. "evil-github.com.attacker.net" — as trusted "github"
-// inventory; an exact compare closes that. Under a non-default configured
-// host, a leftover github.com clone maps to its raw hostname and shows as an
-// unmatched local dir — deliberate: it is not this deployment's GitHub.
+// configured GitHub host — a ported or trailing-dot remote for the same host
+// is still that host. It was once a substring test, which stamped any hostname
+// merely containing "github.com" (e.g. "evil-github.com.attacker.net") as
+// trusted inventory; an exact compare closes that, and it is preserved here.
+// The arm exists only to fold those spellings together: an unmatched host
+// returns its own normalized name and is simply not this deployment's GitHub.
 func canonicalHost(hostname, gitHubHost string) string {
 	if hostname == "" {
 		return ""
@@ -289,16 +315,25 @@ func canonicalHost(hostname, gitHubHost string) string {
 	}
 	bare := strings.ToLower(hostname)
 	if i := strings.LastIndex(bare, ":"); i >= 0 {
-		if port := bare[i+1:]; port != "" && strings.Trim(port, "0123456789") == "" {
+		port := bare[i+1:]
+		// The colon must be the ONLY one, or this is an IPv6 address and its
+		// last group is not a port. url.Hostname() has already stripped both
+		// the brackets and any real port by the time an IPv6 remote reaches
+		// here, so a second strip eats address bits: "::1" and "::2" both
+		// became ":" — two different hosts, one Key(), so one silently
+		// suppressed the other in the inventory. Neither can reach the
+		// filesystem (ValidHostSegment rejects a colon), but Key() is not
+		// guarded by that.
+		if port != "" && !strings.Contains(bare[:i], ":") && strings.Trim(port, "0123456789") == "" {
 			bare = bare[:i]
 		}
 	}
-	switch bare {
-	case gitHubHost:
-		return "github"
-	case "git.sjo.lol":
-		return "gitea"
-	default:
-		return hostname
+	// One trailing root label: "github.com." is the same host as "github.com",
+	// but would otherwise fork the dedup key AND fail the path-segment guard,
+	// so a legitimate FQDN remote would stop cloning entirely.
+	bare = strings.TrimSuffix(bare, ".")
+	if bare == gitHubHost {
+		return gitHubHost
 	}
+	return bare
 }
