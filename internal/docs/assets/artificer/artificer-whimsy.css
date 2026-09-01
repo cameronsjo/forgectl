@@ -367,8 +367,7 @@
    letters. OPT-IN = CHARACTER gradient: the gradient is mapped per glyph
    (Whimsy.hydrate() / data-whimsy="wave" → .whimsy-char cells, each painting its
    own slice). Word is the default; character is the opt-in capability the
-   travelling wave/bob rides on. See themes/_research/lane1-whimsy-gradient-
-   granularity.md. ════════════════════════════════════════════════════════ */
+   travelling wave/bob rides on. See CLAUDE.md § Whimsy. ════════════════════════════════════════════════════════ */
 
 /* Tiling sine for rainbow underlines — one clean period per 40px; start/end at
    the same phase so repeat-x butts seamlessly. */

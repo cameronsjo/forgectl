@@ -146,8 +146,11 @@
   }
 
   function enhanceAll() {
-    // Inline SVG authored in the doc, plus whatever mermaid has rendered by now.
-    document.querySelectorAll("main svg").forEach(enhance);
+    // Inline SVG authored in the doc, plus whatever mermaid has rendered by
+    // now. aria-hidden svgs are excluded: those are the reader's own chrome
+    // (property-block and callout icons), and wrapping an 11px icon in a
+    // pan/zoom viewport renders it as a giant bordered capsule.
+    document.querySelectorAll('main svg:not([aria-hidden="true"])').forEach(enhance);
   }
 
   // Mermaid renders asynchronously and replaces pre.mermaid contents, so the

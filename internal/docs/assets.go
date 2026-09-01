@@ -8,12 +8,13 @@ import (
 // Vendored via the #219 adherence kit (`artificer vendor`, forgectl#93's
 // "Artificer vendoring" requirement) into assets/artificer/ — provenance.json
 // there records the exact source version and a sha256 per file; re-run
-// `artificer vendor --dest internal/docs/assets/artificer` from the repo
-// root to update. Only the two files the docs UI actually links are
-// individually embedded (rather than the whole vendored directory), so
-// tokens.json/provenance.json/the cheatsheet never become servable over
-// HTTP — go:embed's byte slices carry each file's version banner through
-// unmodified.
+// `scripts/vendor-artificer.sh` from the repo root to update (it pins the
+// version and verifies provenance; `--check` reports registry drift). Only
+// the three files the docs UI actually links are individually embedded
+// (rather than the whole vendored directory), so the vendored metadata —
+// tokens.json, primitives.json, provenance.json — and every unlinked asset
+// never become servable over HTTP; go:embed's byte slices carry each file's
+// version banner through unmodified.
 //
 //go:embed assets/artificer/artificer.css
 var artificerCSS []byte
@@ -37,6 +38,13 @@ var artificerTreeJS []byte
 //go:embed assets/reload.js
 var reloadJS []byte
 
+// navToggleJS is the sidenav collapse/drawer toggle (docs-reader-v2). Served
+// for the same CSP reason as sidenav-filter.js: script-src 'self' forbids
+// inline script.
+//
+//go:embed assets/nav-toggle.js
+var navToggleJS []byte
+
 // sidenavFilterJS is the sidenav filter box's behavior. It lives in a file, and
 // is embedded and served like every other asset, because the handler's
 // Content-Security-Policy sets script-src 'self' — the inline <script> this
@@ -58,6 +66,13 @@ var readerShellJS []byte
 
 //go:embed assets/reader-settings.js
 var readerSettingsJS []byte
+// chromaArtificerCSS maps chroma's class-based token output onto the
+// Artificer syntax roles (the .tok-* map in artificer.css), replacing the
+// generated monokai sheet whose hardcoded palette ignored the theme. Served
+// at /assets/chroma.css via ChromaCSS().
+//
+//go:embed assets/chroma.css
+var chromaArtificerCSS []byte
 
 // mermaidJS is vendored mermaid (version, license, and sha256 recorded in
 // assets/provenance-mermaid.json). Embedded rather than loaded from a CDN: the

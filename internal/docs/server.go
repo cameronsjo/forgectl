@@ -194,6 +194,7 @@ func NewHandler(store *Store, events *Broker) http.Handler {
 	mux.HandleFunc("GET /assets/reader.css", serveStaticCSS(readerCSS))
 	mux.HandleFunc("GET /assets/reader-shell.js", serveStaticJS(readerShellJS))
 	mux.HandleFunc("GET /assets/reader-settings.js", serveStaticJS(readerSettingsJS))
+	mux.HandleFunc("GET /assets/nav-toggle.js", serveStaticJS(navToggleJS))
 	mux.HandleFunc("GET /assets/chroma.css", serveStaticCSS(ChromaCSS()))
 	mux.HandleFunc("GET /assets/diagram.css", serveStaticCSS(diagramCSS))
 
@@ -320,8 +321,8 @@ func serveStaticJS(body []byte) http.HandlerFunc {
 // handleIndexRoot renders the shell with the empty-state content — "/"
 // itself never resolves to a specific doc.
 func handleIndexRoot(store *Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		renderShell(w, store.Current(), pageContext{})
+	return func(w http.ResponseWriter, r *http.Request) {
+		renderShell(w, store.Current(), pageContext{Host: r.Host})
 	}
 }
 
@@ -356,13 +357,13 @@ func handleDoc(store *Store) http.HandlerFunc {
 			return
 		}
 
-		rendered, err := Render(source)
+		rendered, err := RenderDoc(source)
 		if err != nil {
 			slog.Error("docs: markdown render failed.", "root", root, "rest", rest, "error", err)
 			http.Error(w, "render failed", http.StatusInternalServerError)
 			return
 		}
-		rendered, err = RewriteLocalImageURLs(rendered, root, rest)
+		rendered.HTML, err = RewriteLocalImageURLs(rendered.HTML, root, rest)
 		if err != nil {
 			slog.Error("docs: local image URL rewrite failed.", "root", root, "rest", rest, "error", err)
 			http.Error(w, "render failed", http.StatusInternalServerError)
@@ -374,7 +375,11 @@ func handleDoc(store *Store) http.HandlerFunc {
 			CurrentRoot: root,
 			CurrentRel:  rest,
 			DocTitle:    doc.Title,
-			Content:     template.HTML(rendered), //nolint:gosec // rendered is bluemonday-sanitized in Render
+			Host:        r.Host,
+			Outline:     rendered.Outline,
+			Words:       rendered.Words,
+			Minutes:     rendered.Minutes,
+			Content:     template.HTML(rendered.HTML), //nolint:gosec // body is bluemonday-sanitized in Render; the frontmatter/callout additions are built there from html.EscapeString'd fragments and fixed markup only
 		})
 	}
 }
@@ -386,6 +391,10 @@ type pageContext struct {
 	CurrentRoot string
 	CurrentRel  string
 	DocTitle    string
+	Host        string
+	Outline     []OutlineItem
+	Words       int
+	Minutes     int
 	Content     template.HTML
 }
 
@@ -394,11 +403,23 @@ type shellData struct {
 	DocTitle string
 	Content  template.HTML
 	Groups   []sidenavGroup
+	// Status-bar + outline furniture (docs-reader-v2). Host comes from the
+	// request; DocPath is "root/rel" for the current doc, empty on the index.
+	Host     string
+	DocPath  string
+	DocCount int
+	Outline  []OutlineItem
+	Words    int
+	Minutes  int
 }
 
+// sidenavGroup renders one labeled section of the sidenav. Exactly one of
+// Docs (a flat link list — the Recent group) or Tree (a nested .tree--static
+// — every per-root group) is populated; the template branches on Tree.
 type sidenavGroup struct {
 	Root string
 	Docs []sidenavLink
+	Tree []*treeNode
 }
 
 type sidenavLink struct {
@@ -408,12 +429,33 @@ type sidenavLink struct {
 	Current    bool
 }
 
+// treeNode is one row of a root's directory tree: a leaf (Leaf non-nil) or a
+// directory carrying its children, its descendant-leaf Count, and whether it
+// renders expanded (Open — true only on the path to the current doc).
+type treeNode struct {
+	Name     string
+	Count    int
+	Open     bool
+	Leaf     *sidenavLink
+	Children []*treeNode
+}
+
 func renderShell(w http.ResponseWriter, idx *Index, ctx pageContext) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	docPath := ""
+	if ctx.CurrentRoot != "" {
+		docPath = ctx.CurrentRoot + "/" + ctx.CurrentRel
+	}
 	data := shellData{
 		DocTitle: ctx.DocTitle,
 		Content:  ctx.Content,
 		Groups:   buildGroups(idx, ctx.CurrentRoot, ctx.CurrentRel),
+		Host:     ctx.Host,
+		DocPath:  docPath,
+		DocCount: len(idx.List()),
+		Outline:  ctx.Outline,
+		Words:    ctx.Words,
+		Minutes:  ctx.Minutes,
 	}
 	if err := shellTemplate.Execute(w, data); err != nil {
 		slog.Error("docs: template execution failed.", "error", err)
@@ -444,22 +486,59 @@ func buildGroups(idx *Index, currentRoot, currentRel string) []sidenavGroup {
 		sort.Slice(docs, func(i, j int) bool { return docs[i].RelPath < docs[j].RelPath })
 		groups = append(groups, sidenavGroup{
 			Root: root.Label,
-			Docs: toLinks(docs, currentRoot, currentRel),
+			Tree: buildTree(docs, currentRoot, currentRel),
 		})
 	}
 
 	return groups
 }
 
+// buildTree folds a root's sorted docs into a directory tree. Docs arrive
+// sorted by RelPath, so siblings come out alphabetical, files and directories
+// interleaved — the same order the flat list had, minus the repetition of
+// every ancestor directory in every row.
+func buildTree(docs []Doc, currentRoot, currentRel string) []*treeNode {
+	var top []*treeNode
+	// dirs maps a directory's path-so-far (joined segments) to its node, so
+	// sibling files landing after a directory's first child still find it.
+	dirs := map[string]*treeNode{}
+
+	for _, d := range docs {
+		link := toLink(d, currentRoot, currentRel)
+		segments := strings.Split(d.RelPath, "/")
+		parent := &top
+		prefix := ""
+		for _, dir := range segments[:len(segments)-1] {
+			prefix += dir + "/"
+			node, ok := dirs[prefix]
+			if !ok {
+				node = &treeNode{Name: dir}
+				dirs[prefix] = node
+				*parent = append(*parent, node)
+			}
+			node.Count++
+			node.Open = node.Open || link.Current
+			parent = &node.Children
+		}
+		leaf := link
+		*parent = append(*parent, &treeNode{Name: link.Title, Leaf: &leaf})
+	}
+	return top
+}
+
 func toLinks(docs []Doc, currentRoot, currentRel string) []sidenavLink {
 	links := make([]sidenavLink, 0, len(docs))
 	for _, d := range docs {
-		links = append(links, sidenavLink{
-			Href:       "/doc/" + d.RootLabel + "/" + d.RelPath,
-			Title:      d.Title,
-			FilterText: strings.ToLower(d.Title + " " + d.RelPath),
-			Current:    d.RootLabel == currentRoot && d.RelPath == currentRel,
-		})
+		links = append(links, toLink(d, currentRoot, currentRel))
 	}
 	return links
+}
+
+func toLink(d Doc, currentRoot, currentRel string) sidenavLink {
+	return sidenavLink{
+		Href:       "/doc/" + d.RootLabel + "/" + d.RelPath,
+		Title:      d.Title,
+		FilterText: strings.ToLower(d.Title + " " + d.RelPath),
+		Current:    d.RootLabel == currentRoot && d.RelPath == currentRel,
+	}
 }
