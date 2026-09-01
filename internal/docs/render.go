@@ -503,7 +503,126 @@ func Render(source []byte) (string, error) {
 		return "", fmt.Errorf("render markdown: %w", err)
 	}
 	body := string(sanitizer.SanitizeBytes(dropDuplicateSVGNamespaces(buf.Bytes())))
-	return frontmatterHTML(ctx) + body, nil
+	return frontmatterHTML(ctx) + transformCallouts(body), nil
+}
+
+// OutlineItem is one "On this page" entry — an h1 or h2 with the id
+// goldmark's auto-heading pass assigned it (the reference shell's outline
+// shows the document title plus its sections; h3+ stays out).
+type OutlineItem struct {
+	Level int
+	Text  string
+	ID    string
+}
+
+// RenderedDoc is Render plus the page furniture the v2 shell wants: the
+// heading outline and a word count for the status bar.
+type RenderedDoc struct {
+	HTML    string
+	Outline []OutlineItem
+	Words   int
+	Minutes int
+}
+
+// RenderDoc renders a document and derives its outline and reading stats.
+func RenderDoc(source []byte) (RenderedDoc, error) {
+	rendered, err := Render(source)
+	if err != nil {
+		return RenderedDoc{}, err
+	}
+	words := countWords(source)
+	minutes := (words + 199) / 200
+	if minutes < 1 {
+		minutes = 1
+	}
+	return RenderedDoc{
+		HTML:    rendered,
+		Outline: extractOutline(rendered),
+		Words:   words,
+		Minutes: minutes,
+	}, nil
+}
+
+// countWords counts the body's words, skipping a well-formed frontmatter
+// block so metadata doesn't inflate the reading estimate.
+func countWords(source []byte) int {
+	body := source
+	if hasWellFormedFrontmatter(source) {
+		lines := bytes.SplitAfter(source, []byte("\n"))
+		delim, count := frontmatterDelim(bytes.TrimSuffix(lines[0], []byte("\n")))
+		for i := 1; i < len(lines); i++ {
+			// Same closing-fence rule as hasWellFormedFrontmatter: the
+			// closer repeats the opener's byte at the opener's length.
+			if d, c := frontmatterDelim(bytes.TrimSuffix(lines[i], []byte("\n"))); d == delim && c == count {
+				body = bytes.Join(lines[i+1:], nil)
+				break
+			}
+		}
+	}
+	return len(strings.Fields(string(body)))
+}
+
+// outlineHeading matches the h1/h2 elements of OUR rendered output — this
+// scans HTML the pipeline just produced, never document-authored bytes, so a
+// regexp over the known goldmark shape is sufficient.
+var outlineHeading = regexp.MustCompile(`(?s)<h([12]) id="([^"]+)">(.*?)</h[12]>`)
+
+// stripTags removes inline markup from a heading's rendered text.
+var stripTags = regexp.MustCompile(`<[^>]*>`)
+
+func extractOutline(rendered string) []OutlineItem {
+	var items []OutlineItem
+	for _, m := range outlineHeading.FindAllStringSubmatch(rendered, -1) {
+		level := 1
+		if m[1] == "2" {
+			level = 2
+		}
+		// The captured text is rendered HTML, so entities are escaped
+		// (&amp; etc.). Unescape back to plain text: the template escapes
+		// once more on output, and without this step "Q&A" displays as
+		// "Q&amp;A".
+		items = append(items, OutlineItem{
+			Level: level,
+			Text:  strings.TrimSpace(html.UnescapeString(stripTags.ReplaceAllString(m[3], ""))),
+			ID:    m[2],
+		})
+	}
+	return items
+}
+
+// calloutTiers maps a GFM alert kind to its Artificer tier and title icon.
+// Tier colors per the v2 handoff: note→accent, tip→success,
+// warning→attention, danger→urgent; IMPORTANT reads as a note,
+// CAUTION as danger — GitHub's five kinds onto four tiers.
+var calloutTiers = map[string]struct{ tier, label, icon string }{
+	"NOTE":      {"note", "Note", calloutStarIcon},
+	"IMPORTANT": {"note", "Important", calloutStarIcon},
+	"TIP":       {"tip", "Tip", `<circle cx="12" cy="12" r="9"/><path d="m9 12 2 2 4-4"/>`},
+	"WARNING":   {"warning", "Warning", `<path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 20h16a2 2 0 0 0 1.73-2Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>`},
+	"CAUTION":   {"danger", "Caution", calloutOctagonIcon},
+	"DANGER":    {"danger", "Danger", calloutOctagonIcon},
+}
+
+// calloutStarIcon is the reference shell's note glyph.
+const calloutStarIcon = `<path d="M12 3l1.9 5.8H20l-4.9 3.6 1.9 5.8-5-3.6-5 3.6 1.9-5.8L4 8.8h6.1z"/>`
+
+const calloutOctagonIcon = `<path d="M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86L7.86 2Z"/><path d="M12 8v4"/><path d="M12 16h.01"/>`
+
+// calloutOpen matches a sanitized blockquote whose first paragraph opens
+// with a GFM alert marker ([!NOTE] etc.).
+var calloutOpen = regexp.MustCompile(`(?s)<blockquote>\s*<p>\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION|DANGER)\]\s*`)
+
+// transformCallouts rewrites GFM alert blockquotes into tiered callout
+// markup. It runs AFTER sanitization on pipeline-produced HTML: the marker
+// arrives as escaped-safe text, and everything injected here is our own
+// fixed markup — the document author contributes only the already-sanitized
+// body that follows the marker.
+func transformCallouts(rendered string) string {
+	return calloutOpen.ReplaceAllStringFunc(rendered, func(m string) string {
+		kind := calloutOpen.FindStringSubmatch(m)[1]
+		c := calloutTiers[kind]
+		return `<blockquote class="callout ` + c.tier + `"><div class="callout-title"><svg viewBox="0 0 24 24" aria-hidden="true">` + c.icon + `</svg> ` + c.label + `</div><p>`
+	})
 }
 
 // hasWellFormedFrontmatter reports whether source opens with a frontmatter
@@ -622,22 +741,57 @@ func yamlScalar(n *yaml.Node) string {
 	return strings.TrimSpace(string(out))
 }
 
-func writeKV(b *strings.Builder, key, value string) {
-	b.WriteString("<dt>")
-	b.WriteString(html.EscapeString(key))
-	b.WriteString("</dt><dd>")
-	b.WriteString(html.EscapeString(value))
-	b.WriteString("</dd>")
+// propIcons maps known frontmatter keys to an 11px stroke icon (lucide
+// paths); unknown keys fall back to propIconDot. These are OUR markup, never
+// document-authored, so they may safely join the post-sanitizer prefix.
+var propIcons = map[string]string{
+	"status": `<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>`,
+	"branch": `<path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>`,
+	"next":   `<path d="M5 12h14"/><path d="M13 6l6 6-6 6"/>`,
 }
 
+const propIconDot = `<circle cx="12" cy="12" r="3"/>`
+
+func propIconSVG(key string) string {
+	body, ok := propIcons[key]
+	if !ok {
+		body = propIconDot
+	}
+	// Sizing and stroke live in the shell CSS (.props-row .k svg) — the
+	// reference shell owns presentation; this emits geometry only.
+	return `<svg viewBox="0 0 24 24" aria-hidden="true">` + body + `</svg>`
+}
+
+func writeKV(b *strings.Builder, key, value string) {
+	b.WriteString(`<div class="props-row"><span class="k">`)
+	b.WriteString(propIconSVG(key))
+	b.WriteString(html.EscapeString(key))
+	b.WriteString(`</span>`)
+	switch {
+	case key == "status":
+		// Enum-ish values read as a chip.
+		b.WriteString(`<span class="v"><span class="chip">`)
+		b.WriteString(html.EscapeString(value))
+		b.WriteString(`</span></span>`)
+	case key == "branch" || strings.Contains(value, "/"):
+		// Paths and branches align on tabular numerals (reference .v.dt).
+		b.WriteString(`<span class="v dt">`)
+		b.WriteString(html.EscapeString(value))
+		b.WriteString(`</span>`)
+	default:
+		b.WriteString(`<span class="v">`)
+		b.WriteString(html.EscapeString(value))
+		b.WriteString(`</span>`)
+	}
+	b.WriteString(`</div>`)
+}
+
+// wrapFrontmatter renders the Obsidian-style properties block — always
+// visible, no interaction cost (docs-reader-v2 handoff; supersedes the
+// collapsed-disclosure treatment #430 shipped).
 func wrapFrontmatter(kvBody string, pairs int) string {
 	if pairs == 0 {
 		return ""
 	}
-	noun := "keys"
-	if pairs == 1 {
-		noun = "key"
-	}
-	return fmt.Sprintf(`<div class="accordion surface-tool"><details class="frontmatter"><summary>Front matter <span class="badge">%d %s</span></summary><div class="accordion__body"><dl class="kv">%s</dl></div></details></div>`,
-		pairs, noun, kvBody)
+	return `<div class="props">` + kvBody + `</div>`
 }

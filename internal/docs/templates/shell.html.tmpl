@@ -8,22 +8,160 @@
 <link rel="stylesheet" href="/assets/chroma.css"/>
 <link rel="stylesheet" href="/assets/diagram.css"/>
 <style>
-  /* tree--static backing: artificer.css keys twisty rotation off
-     [role="treeitem"][aria-expanded] (the artificer-tree.js pattern), which a
-     server-rendered <details> tree never sets — rotate off the native open
-     state instead. Same story for the directory count: .sidenav a > .count
-     cannot match a <summary>, so re-state that treatment here. Inline <style>
-     is fine under the CSP (style-src carries 'unsafe-inline' already). */
-  .tree--static details[open] > summary > .tree__twisty { transform: rotate(90deg); }
-  .tree--static summary > .count {
-    margin-left: auto; font-variant-numeric: tabular-nums;
-    font-size: var(--t-label-sm-size); color: var(--fg-disabled);
+/* ═══ Docs reader shell — ported from the design reference (shell-reference.html,
+   docs/plans/2026-09-01-docs-reader-v2.md). Template-owned, not vendored.
+   Inline <style> is fine under the CSP (style-src carries 'unsafe-inline'). ═══ */
+html { background: var(--bg); }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font-interface, sans-serif); }
+a { color: var(--accent); } a:hover { color: var(--accent-bright); }
+
+/* ── tree--static backing (candidate to upstream) ── */
+.tree--static details[open] > summary > .tree__twisty { transform: rotate(90deg); }
+.tree--static summary > .count {
+  margin-left: auto; font-variant-numeric: tabular-nums;
+  font-size: var(--t-label-sm-size); color: var(--fg-disabled);
+}
+
+/* ── Tree density: 24px verdict (beats .sidenav a's 44px floor) ── */
+.sidenav .tree__row { min-height: 24px; font-size: 13px; }
+.sidenav a.tree__row { min-height: 24px; }
+.sidenav > a { min-height: 24px; font-size: 13px; }
+.sidenav > a, .sidenav > .sidenav__group, .sidenav > ul { flex: none; }
+
+/* ── Note typography for the document pane ── */
+main.surface-document { max-width: 820px; }
+.doc-body { font-size: 16px; line-height: 1.65; letter-spacing: 0.01em; word-spacing: 0.12em; }
+.doc-body h1, .doc-body h2, .doc-body h3, .doc-body h4 {
+  font-family: var(--font-mono); font-weight: 700; letter-spacing: -0.01em;
+  color: var(--accent); margin: 32px 0 8px;
+}
+.doc-body h1 { font-size: 28px; line-height: 1.3; margin-top: 0; }
+.doc-body h2 { font-size: 22px; line-height: 1.35; }
+.doc-body h3 { font-size: 18px; line-height: 1.4; }
+.doc-body :not(pre) > code { color: var(--accent); background: transparent; padding: 0 2px; }
+
+/* ── Properties frontmatter (render.go emits post-sanitizer, escaped fragments) ── */
+.props {
+  background: color-mix(in oklch, var(--bg-raised) 60%, transparent);
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  margin: 0 0 24px; font-family: var(--font-mono); font-size: 13px; overflow: hidden;
+}
+.props-row { display: flex; align-items: flex-start; gap: 12px; padding: 6px 12px; border-bottom: 1px solid var(--border); }
+.props-row:last-child { border-bottom: none; }
+.props-row .k { flex: 0 0 110px; display: flex; align-items: center; gap: 6px; color: var(--fg-secondary); font-size: 12px; padding-top: 3px; }
+.props-row .k svg { color: var(--fg-disabled); flex-shrink: 0; width: 11px; height: 11px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.props-row .v { flex: 1; min-width: 0; color: var(--fg); display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding-top: 1px; }
+.props-row .v .chip { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; background: color-mix(in oklch, var(--accent-fill) 14%, transparent); color: var(--accent); font-size: 11px; }
+.props-row .v.dt { font-variant-numeric: tabular-nums; }
+
+/* ── Callouts (GFM > [!NOTE] etc; tiers: note→accent, warning→attention, danger→urgent, tip→success) ── */
+.callout { border-left: 2px solid var(--steel); background: color-mix(in oklch, var(--steel) 10%, transparent); padding: 12px 16px; border-radius: 0 var(--radius-md) var(--radius-md) 0; margin: 16px 0; }
+.callout.note { border-left-color: var(--accent); background: color-mix(in oklch, var(--accent) 8%, transparent); }
+.callout.warning { border-left-color: var(--attention); background: color-mix(in oklch, var(--attention) 8%, transparent); }
+.callout.danger { border-left-color: var(--urgent); background: color-mix(in oklch, var(--urgent) 8%, transparent); }
+.callout.tip { border-left-color: var(--success); background: color-mix(in oklch, var(--success) 8%, transparent); }
+.callout-title { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-weight: 700; font-size: 13px; letter-spacing: 0.04em; color: var(--accent); }
+.callout.warning .callout-title { color: var(--attention); }
+.callout.danger .callout-title { color: var(--urgent); }
+.callout.tip .callout-title { color: var(--success); }
+.callout-title svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+/* Body copy stays native <p> siblings of the title (blockquote semantics kept);
+   these rules restate the reference's .callout-body treatment. */
+.callout > p { color: var(--fg); margin: 6px 0 0; line-height: 1.6; font-size: 0.95em; }
+
+/* ── Outline pane ── */
+.outline { border-left: 1px solid var(--border); padding: var(--s-md) 0; font-family: var(--font-mono); overflow-y: auto; }
+.outline-h { padding: var(--s-sm) 14px var(--s-xs); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-secondary); font-family: var(--font-interface); }
+.outline-item { display: block; font-size: 12px; padding: 3px 14px; color: var(--fg-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-decoration: none; }
+.outline-item.h1 { color: var(--fg); }
+.outline-item.h2 { padding-left: 28px; }
+.outline-item:hover { color: var(--fg); }
+.outline-inline { display: none; margin: 0 0 var(--s-lg); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 6px 12px; font-family: var(--font-mono); font-size: 12px; }
+.outline-inline summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; padding: 4px 0; font-family: var(--font-interface); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-secondary); }
+.outline-inline summary::-webkit-details-marker { display: none; }
+.outline-inline summary::after { content: ""; width: 6px; height: 6px; border-right: 1.5px solid var(--fg-secondary); border-bottom: 1.5px solid var(--fg-secondary); transform: rotate(45deg); transition: transform var(--dur-fast) var(--ease); }
+.outline-inline[open] summary::after { transform: rotate(-135deg); }
+.outline-inline .outline-item { padding: 3px 0; }
+.outline-inline .outline-item.h2 { padding-left: 14px; }
+
+/* ── Status bar ── */
+.statusbar { display: flex; align-items: stretch; border-top: 1px solid var(--border); background: var(--bg); font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 11px; color: var(--fg-secondary); }
+.status-item { padding: 5px 12px; display: flex; align-items: center; gap: 6px; border-right: 1px solid var(--border); }
+.status-item:last-child { border-right: none; }
+.status-spacer { flex: 1; }
+.live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
+
+/* ── Embeds ── */
+.embed { border: 1px solid var(--border); border-radius: var(--radius-md); background: color-mix(in oklch, var(--bg-raised) 50%, transparent); margin: 16px 0; overflow: hidden; }
+.embed-bar { display: flex; align-items: center; gap: 8px; padding: 4px 10px; border-bottom: 1px solid var(--border); font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-disabled); }
+.embed-bar .spacer { flex: 1; }
+.embed-bar button { background: none; border: 0; color: var(--fg-secondary); font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; cursor: pointer; padding: 2px 6px; border-radius: var(--radius-sm); }
+.embed-bar button:hover { color: var(--fg); background: var(--bg-raised); }
+.embed-body { padding: 16px; display: flex; justify-content: center; overflow: hidden; }
+.embed-body svg { max-width: 100%; height: auto; }
+/* mermaid theming onto Artificer tokens — the base theme is configured from
+   these same tokens in mermaid-init.js; the rules below also catch mermaid's
+   emitted classes directly. */
+.mm-node, .embed-body .node rect { fill: color-mix(in oklch, var(--accent-fill) 12%, var(--bg-raised)); stroke: var(--accent); stroke-width: 1; }
+.mm-node-alt { fill: color-mix(in oklch, var(--steel) 14%, var(--bg-raised)); stroke: var(--steel); stroke-width: 1; }
+.mm-label, .embed-body .nodeLabel { fill: var(--fg); color: var(--fg); font-family: var(--font-mono); font-size: 12px; }
+.mm-edge, .embed-body .edgePath path { stroke: var(--fg-disabled); stroke-width: 1.2; fill: none; }
+.mm-arrow { fill: var(--fg-disabled); }
+.mm-edge-label, .embed-body .edgeLabel { fill: var(--fg-secondary); color: var(--fg-secondary); font-family: var(--font-mono); font-size: 10px; }
+.doc-body figure { margin: 16px 0; }
+.doc-body figure img, .doc-body > img, .doc-body p > img { max-width: 100%; border-radius: var(--radius-md); border: 1px solid var(--border); display: block; }
+.doc-body figcaption { font-family: var(--font-mono); font-size: 11px; color: var(--fg-secondary); margin-top: 6px; }
+/* Task lists: goldmark emits no wrapper class, so :has() selects the shape. */
+.doc-body ul:has(> li > input[type="checkbox"]) { list-style: none; padding-left: 4px; }
+.doc-body li:has(> input[type="checkbox"]) { display: flex; align-items: baseline; gap: 8px; }
+.doc-body input[type="checkbox"] { accent-color: var(--accent); transform: translateY(1px); }
+
+/* ── Layout: grid + narrow screens ── */
+#shell { height: 100vh; display: flex; flex-direction: column; background: var(--bg); }
+.nav-toggle { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; background: none; border: 0; border-radius: var(--radius-sm); color: var(--fg-secondary); cursor: pointer; flex: none; }
+.nav-toggle:hover { color: var(--fg); background: var(--bg-raised); }
+.nav-toggle svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.content-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: 280px minmax(0, 1fr) 220px; }
+.content-grid--no-outline { grid-template-columns: 280px minmax(0, 1fr); }
+.docs-nav { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); }
+.docs-nav .field { padding: var(--s-sm); }
+.docs-nav .sidenav { border-radius: 0; border: 0; flex: 1; overflow-y: auto; }
+main.surface-document { padding: var(--s-xl); overflow-y: auto; min-height: 0; }
+#drawer-scrim { display: none; }
+@media (min-width: 901px) {
+  [data-nav="closed"] .docs-nav { display: none; }
+  [data-nav="closed"] .content-grid { grid-template-columns: minmax(0, 1fr) 220px; }
+  [data-nav="closed"] .content-grid--no-outline { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 1100px) {
+  .outline { display: none; }
+  .outline-inline { display: block; }
+  .content-grid, .content-grid--no-outline,
+  [data-nav="closed"] .content-grid { grid-template-columns: 280px minmax(0, 1fr); }
+  [data-nav="closed"] .content-grid, [data-nav="closed"] .content-grid--no-outline { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 900px) {
+  .content-grid, .content-grid--no-outline, [data-nav="closed"] .content-grid { grid-template-columns: minmax(0, 1fr); }
+  .docs-nav {
+    position: fixed; top: 0; bottom: 0; left: 0; width: min(300px, 85vw); z-index: var(--z-modal);
+    background: var(--bg-raised);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    transform: translateX(-100%); transition: transform 200ms var(--ease);
   }
+  [data-nav="open"] .docs-nav { transform: none; }
+  [data-nav="open"] #drawer-scrim { display: block; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: var(--z-overlay); }
+  main.surface-document { padding: var(--s-md); }
+}
+@media (prefers-reduced-motion: reduce) { .docs-nav { transition: none; } }
+@media (max-width: 640px) {
+  .status-item.opt { display: none; }
+}
 </style>
 <script src="/assets/artificer-theme.js" defer></script>
 <script src="/assets/reload.js" defer></script>
 <script src="/assets/artificer-tree.js" defer></script>
 <script src="/assets/sidenav-filter.js" defer></script>
+<script src="/assets/nav-toggle.js" defer></script>
 <!-- mermaid must be parsed before its init script runs; both are deferred, and
      deferred scripts execute in document order, so this ordering is the
      dependency declaration. -->
@@ -31,44 +169,66 @@
 <script src="/assets/mermaid-init.js" defer></script>
 <script src="/assets/svg-panzoom.js" defer></script>
 </head>
-<body class="surface-tool">
-<div class="page-shell">
-  <header class="appbar">
+<body>
+<div id="shell" class="surface-tool" data-nav="auto">
+  <header class="appbar appbar--static" style="flex: none">
+    <button class="nav-toggle" id="nav-toggle" aria-label="Toggle sidebar" aria-expanded="true" aria-controls="docs-nav"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
     <a class="appbar__brand wordmark" href="/">forgectl docs</a>
     <div class="appbar__spacer"></div>
     <div class="appbar__actions">
       <button class="theme-toggle" data-theme-toggle aria-label="Toggle theme"></button>
     </div>
   </header>
-  <div class="split-pane" style="gap:0;min-height:calc(100vh - 52px)">
-    <aside style="border-right:1px solid var(--border);display:flex;flex-direction:column">
-      <div class="field" style="padding:var(--s-sm)">
+  <div class="content-grid{{if not .Outline}} content-grid--no-outline{{end}}">
+    <div id="drawer-scrim"></div>
+    <aside class="docs-nav" id="docs-nav">
+      <div class="field">
         <label class="field__label" for="doc-filter">Filter</label>
         <input class="input" id="doc-filter" type="search" placeholder="Filter docs…" autocomplete="off"/>
       </div>
-      <nav class="sidenav" aria-label="Indexed docs" style="border-radius:0;border:0;flex:1;overflow-y:auto">
+      <nav class="sidenav" aria-label="Indexed docs">
         {{range .Groups}}
         <div class="sidenav__group">{{.Root}}</div>
         {{if .Tree}}
         <ul class="tree tree--static" aria-label="{{.Root}}">{{template "treeNodes" .Tree}}</ul>
         {{else}}
         {{range .Docs}}
-        <a href="{{.Href}}" data-filter-text="{{.FilterText}}"{{if .Current}} aria-current="page"{{end}}><span class="label">{{.Title}}</span></a>
+        <a href="{{.Href}}" data-filter-text="{{.FilterText}}"><span class="label">{{.Title}}</span></a>
         {{end}}
         {{end}}
         {{end}}
       </nav>
     </aside>
-    <main class="surface-document container container--lg" style="padding:var(--s-xl)">
+    <main class="surface-document container container--lg">
+      {{if .Outline}}
+      <details class="outline-inline"><summary>On this page</summary><nav aria-label="On this page">{{template "outlineItems" .Outline}}</nav></details>
+      {{end}}
+      <div class="doc-body">
       {{if .Content}}{{.Content}}{{else}}
       <div class="empty-state">
         <h2>No doc selected</h2>
         <p>Choose a document from the sidebar to start reading.</p>
       </div>
       {{end}}
+      </div>
     </main>
+    {{if .Outline}}
+    <aside class="outline" aria-label="On this page">
+      <div class="outline-h">On this page</div>
+      {{template "outlineItems" .Outline}}
+    </aside>
+    {{end}}
   </div>
+  <footer class="statusbar" style="flex: none">
+    <div class="status-item"><span class="live-dot" aria-hidden="true"></span>serving · {{.Host}}</div>
+    {{if .DocPath}}<div class="status-item opt">{{.DocPath}}</div>{{end}}
+    <div class="status-spacer"></div>
+    <div class="status-item opt">{{.DocCount}} docs indexed</div>
+    {{if .Words}}<div class="status-item">{{.Words}} words · {{.Minutes}} min</div>{{end}}
+    <div class="status-item opt">markdown</div>
+  </footer>
 </div>
 </body>
 </html>
+{{define "outlineItems"}}{{range .}}<a class="outline-item h{{.Level}}" href="#{{.ID}}">{{.Text}}</a>{{end}}{{end}}
 {{define "treeNodes"}}{{range .}}<li>{{if .Leaf}}<a class="tree__row tree__leaf" href="{{.Leaf.Href}}" data-filter-text="{{.Leaf.FilterText}}"{{if .Leaf.Current}} aria-current="page"{{end}}><span class="tree__twisty" aria-hidden="true"></span><span class="label">{{.Leaf.Title}}</span></a>{{else}}<details{{if .Open}} open{{end}}><summary class="tree__row"><span class="tree__twisty" aria-hidden="true"></span><span class="label">{{.Name}}</span> <span class="count">{{.Count}}</span></summary><ul class="tree__group">{{template "treeNodes" .Children}}</ul></details>{{end}}</li>{{end}}{{end}}
