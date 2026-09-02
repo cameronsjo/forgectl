@@ -28,9 +28,9 @@ The command will target the current Herdr pane by default, using `HERDR_PANE_ID`
 
 ## Implementation checklist
 
-- [ ] Add a `recipe` module with alias `r` and `afk` subcommand.
-- [ ] Add target resolution from `--target`, `HERDR_PANE_ID`, and `HERDR_ACTIVE_PANE_ID`.
-- [ ] Invoke Herdr CLI commands through testable runner seams.
-- [ ] Add unit tests for command registration, target resolution, and argv sequencing.
-- [ ] Update forgectl README/docs with `forgectl recipe afk` and `forgectl r afk`.
-- [ ] Run focused Go tests, then the agreed broader validation.
+- [x] Add a `recipe` module with alias `r` and `afk` subcommand.
+- [x] Add target resolution from `--target`, `HERDR_PANE_ID`, and `HERDR_ACTIVE_PANE_ID`.
+- [x] Invoke Herdr CLI commands through testable runner seams.
+- [x] Add unit tests for command registration, target resolution, and argv sequencing.
+- [x] Update forgectl README/docs with `forgectl recipe afk` and `forgectl r afk`.
+- [x] Run focused Go tests, then the agreed broader validation.
