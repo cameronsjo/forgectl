@@ -79,10 +79,10 @@ forgectl init               # append (or, for the host-scalar preamble, prepend)
                              #   never overwrites or reflows what's already there
 
 # projects — cross-host project inventory (alias: proj)
-forgectl projects list [query]           # list all projects: local clones + your GitHub.com repos + git.sjo.lol/cameron
+forgectl projects list [query]           # list all projects: local clones + your GitHub repos + your Gitea repos
 forgectl projects list --json            # machine-readable JSON (safe to pipe; degradation notes go to stderr)
 forgectl projects list --host github.com # filter to one hostname (or "local")
-forgectl projects list --host git.sjo.lol forge  # host filter + name substring
+forgectl projects list --host git.example.com forge  # host filter + name substring
 forgectl projects pick [query]           # picker with both descriptors TTY; otherwise sanitized candidates on stdout + exit 1 (aliases: p, open)
 forgectl projects                        # shorthand for pick; same headless candidate/exit-1 contract
 forgectl projects clone [query]          # picker with both descriptors TTY; otherwise candidates + exit 1 (use sshUrl from list --json)
@@ -349,7 +349,7 @@ forgectl tmux pick
 forgectl projects list / pick
     ├── local clone walk (git remote get-url)
     ├── gh repo list (github.com, per owner) ─┐ concurrent
-    └── tea repo ls  (git.sjo.lol/cameron)   ─┘
+    └── tea repo ls  (your Gitea host)       ─┘
 
 forgectl workflow run <name>
     └── parse a TOML step list → resolve params → plan (--dry-run stops here)
