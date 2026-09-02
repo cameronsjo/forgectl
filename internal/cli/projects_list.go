@@ -37,10 +37,10 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 			"an ambient GH_HOST is overridden, and a non-default host requires a\n" +
 			"stored `gh auth login --hostname <host>` credential.\n\n" +
 			"Examples:\n" +
-			"  forgectl projects list                      # human table, all hosts\n" +
-			"  forgectl projects list --json               # machine-readable, for scripts\n" +
-			"  forgectl projects list --host github.com    # only that host's repos\n" +
-			"  forgectl projects find homeclaw             # 'find' alias + a name filter",
+			"  forgectl projects list                         # human table, all hosts\n" +
+			"  forgectl projects list --json                  # machine-readable, for scripts\n" +
+			"  forgectl projects list --host git.example.com  # only that host's repos\n" +
+			"  forgectl projects find homeclaw                # 'find' alias + a name filter",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
