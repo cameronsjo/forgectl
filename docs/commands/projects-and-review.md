@@ -3,10 +3,10 @@
 > Part of [forgectl](../../README.md) — see the [command roster](../../README.md#command-groups).
 
 ```sh
-forgectl projects list [query]           # list all projects: local clones + your GitHub.com repos + git.sjo.lol/cameron
+forgectl projects list [query]           # list all projects: local clones + your GitHub repos + your Gitea repos
 forgectl projects list --json            # machine-readable JSON (safe to pipe; degradation notes go to stderr)
 forgectl projects list --host github.com   # filter to one hostname (or "local")
-forgectl projects list --host git.sjo.lol forge  # host filter + name substring
+forgectl projects list --host git.example.com forge  # host filter + name substring
 forgectl projects pick [query]           # picker with both descriptors TTY; otherwise sanitized candidates on stdout + exit 1 (aliases: p, open)
 forgectl projects                        # shorthand for pick; same headless candidate/exit-1 contract
 forgectl projects clone [query]          # picker with both descriptors TTY; otherwise candidates + exit 1 (use sshUrl from list --json)
@@ -28,7 +28,7 @@ candidate's `sshUrl` from `projects list --json` for an exact target, or rerun
 interactively when it has none. Project display rows are not universal command
 arguments.
 
-`projects` builds a unified inventory across local clones, GitHub, and the self-hosted Gitea. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean.
+`projects` builds a unified inventory across local clones, GitHub, and whichever Gitea instance `tea` is logged into. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean.
 
 ## On-disk layout
 
@@ -40,7 +40,7 @@ Three filing rules, and `projects clone` writes the first that applies:
 <projects>/<repo>                 # legacy flat clones (read-only affordance)
 ```
 
-`<host>` is the **full hostname** — `github.com`, `git.sjo.lol`,
+`<host>` is the **full hostname** — `github.com`, `git.example.com`,
 `github.example.com` — never a short token. Every segment is lowercased, so the
 tree mirrors a repo's dedup identity exactly.
 
