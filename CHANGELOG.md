@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.16.0](https://github.com/cameronsjo/forgectl/compare/v0.15.0...v0.16.0) (2026-09-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* **projects:** `projects list --json` `host` is now the full hostname (`github.com`, `git.sjo.lol`) rather than the short tokens `github`/`gitea`, and `--host` takes a hostname or `local` as a closed allowlist. Clones land under the full hostname. Scripts matching the old tokens must be updated.
+
+### Features
+
+* **projects:** `[[projects.wings]]` files named repos at `<projects>/<wing>/<repo>` instead of the host tree, and `projects clone` gains `--dry-run` and `--wing`. `clone` will not create a duplicate checkout across the two layouts. ([9e367a5](https://github.com/cameronsjo/forgectl/commit/9e367a5dcaa6332a0a987f6c2a9307e61583625b))
+* **projects:** `projects list --json` `host` is now the full hostname (`github.com`, `git.sjo.lol`) rather than the short tokens `github`/`gitea`, and `--host` takes a hostname or `local` as a closed allowlist. Clones land under the full hostname. Scripts matching the old tokens must be updated. ([9e367a5](https://github.com/cameronsjo/forgectl/commit/9e367a5dcaa6332a0a987f6c2a9307e61583625b))
+
+
+### Bug Fixes
+
+* **projects:** `projects list`, `pick`, `pull-all`, and `surface launch` did not see repos filed one level under the projects root. Discovery now walks that layout. ([9e367a5](https://github.com/cameronsjo/forgectl/commit/9e367a5dcaa6332a0a987f6c2a9307e61583625b))
+* **projects:** `projects worktree` left its base directory behind when any step failed, and that directory's existence is the command's own refuse-if-exists guard — so one transient error made the failure permanent for that repo. ([9e367a5](https://github.com/cameronsjo/forgectl/commit/9e367a5dcaa6332a0a987f6c2a9307e61583625b))
+* **projects:** a configured GitHub Enterprise host collapsed to the token `github`, sharing a clone directory and a dedup identity with a github.com repo of the same owner and name. Each host now files and keys under its own hostname. ([9e367a5](https://github.com/cameronsjo/forgectl/commit/9e367a5dcaa6332a0a987f6c2a9307e61583625b))
+* **projects:** a remote whose bare hostname was literally `github` was stamped as trusted GitHub inventory and cloned from github.com by owner/name — `canonicalHost` returned short host tokens into the same value space as untrusted hostnames, so the untrusted arm could produce the trusted arm's value. Host identity is now the full hostname everywhere, so there is no token to forge. ([9e367a5](https://github.com/cameronsjo/forgectl/commit/9e367a5dcaa6332a0a987f6c2a9307e61583625b))
+* **projects:** repo and owner names arriving from `gh`, `tea`, and clone-target URLs are validated before becoming directories. A repo named `.git` would have made its parent directory read as a repository and hidden every sibling from the inventory. ([9e367a5](https://github.com/cameronsjo/forgectl/commit/9e367a5dcaa6332a0a987f6c2a9307e61583625b))
+
 ## [0.15.0](https://github.com/cameronsjo/forgectl/compare/v0.14.1...v0.15.0) (2026-09-01)
 
 

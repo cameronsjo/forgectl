@@ -13,7 +13,7 @@ Built for two hands and one thumb:
 brew install cameronsjo/tap/forgectl
 ```
 
-Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against the self-hosted Gitea, and `review` when `[review.gitea]` is enabled), `kubectl` (`k8s logs`), `docker` (`bench status`/`up`, `docker build/run/shell`, and `clean --docker`), `npm`/`pnpm`/`pip`/`go`/`brew` (`clean --caches` — each is independently opt-in and skipped, not required, when absent). `update`'s roster shares that same `brew`/`go`/`npm` dependency (`softwareupdate` is a macOS built-in) — each step is independently scoped, so a missing tool fails only its own step, never the others.
+Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against whichever Gitea instance `tea` is logged into, and `review` when `[review.gitea]` is enabled), `kubectl` (`k8s logs`), `docker` (`bench status`/`up`, `docker build/run/shell`, and `clean --docker`), `npm`/`pnpm`/`pip`/`go`/`brew` (`clean --caches` — each is independently opt-in and skipped, not required, when absent). `update`'s roster shares that same `brew`/`go`/`npm` dependency (`softwareupdate` is a macOS built-in) — each step is independently scoped, so a missing tool fails only its own step, never the others.
 
 Commands that actually launch a PR review — `forgectl pr <ref>`, `forgectl pr local`, and `forgectl pr pick` once admission establishes there is at least one ref to prepare — require **tmux 2.2 or newer**, for the dispatch-identity reasons in [docs/commands/pr.md](docs/commands/pr.md). Read-only PR commands, any `--dry-run`, and empty, all-reviewed, or cap-full selections do not acquire that floor.
 
@@ -80,10 +80,10 @@ forgectl init               # append (or, for the host-scalar preamble, prepend)
                              #   never overwrites or reflows what's already there
 
 # projects — cross-host project inventory (alias: proj)
-forgectl projects list [query]           # list all projects: local clones + your GitHub.com repos + git.sjo.lol/cameron
+forgectl projects list [query]           # list all projects: local clones + your GitHub repos + your Gitea repos
 forgectl projects list --json            # machine-readable JSON (safe to pipe; degradation notes go to stderr)
 forgectl projects list --host github.com # filter to one hostname (or "local")
-forgectl projects list --host git.sjo.lol forge  # host filter + name substring
+forgectl projects list --host git.example.com forge  # host filter + name substring
 forgectl projects pick [query]           # picker with both descriptors TTY; otherwise sanitized candidates on stdout + exit 1 (aliases: p, open)
 forgectl projects                        # shorthand for pick; same headless candidate/exit-1 contract
 forgectl projects clone [query]          # picker with both descriptors TTY; otherwise candidates + exit 1 (use sshUrl from list --json)
@@ -354,7 +354,7 @@ forgectl tmux pick
 forgectl projects list / pick
     ├── local clone walk (git remote get-url)
     ├── gh repo list (github.com, per owner) ─┐ concurrent
-    └── tea repo ls  (git.sjo.lol/cameron)   ─┘
+    └── tea repo ls  (your Gitea host)       ─┘
 
 forgectl workflow run <name>
     └── parse a TOML step list → resolve params → plan (--dry-run stops here)
@@ -370,7 +370,7 @@ forgectl pr prs / dash / pick
 
 **Session names are matched exactly.** Every command that names a session — `tmux kill`, `tmux rename`, `projects open`, the TUI's actions — compares your argument to the session list with plain string equality, then acts on the session's native tmux id. tmux's own `-t` resolution does not run, so an abbreviation no longer finds a session: with only `forge-review` running, `forgectl tmux kill forge` reports `no such session: forge` instead of killing `forge-review`. Names containing spaces, punctuation, `*`, or a leading `=` work fine, because none of them are interpreted. If you relied on abbreviating, type the full name (`forgectl tmux ls` lists them). The one exception is `tmux pick`, which hands the name to `sesh connect` — matching there is sesh's smart naming, by design, and is unaffected by this.
 
-`projects` builds a unified inventory across local clones, GitHub, and the self-hosted Gitea. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean.
+`projects` builds a unified inventory across local clones, GitHub, and whichever Gitea instance `tea` is logged into. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean.
 
 `workflow` is the composition layer — a declarative TOML step list forgectl parses, plans, and executes through the same seams the hand-run verbs use. `--dry-run` prints the fully resolved plan without running a step. `--resume` picks a failed run back up from its first incomplete step, skipping the checkpointed steps whose inputs haven't changed, and `workflow status <name>` shows that checkpoint state; a resume re-verifies the blessing and refuses to replay across an edited definition. It also refuses when a step still to run needs an export that only a skipped step produced — a step's outputs aren't reconstructed from the sidecar, so those workflows must be run fresh. User workflows live in `workflows/` under the config dir (paths below), overriding shipped built-ins of the same name.
 
