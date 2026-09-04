@@ -71,6 +71,39 @@ func TestNewIndex_FileArg_NonMarkdown_Errors(t *testing.T) {
 	}
 }
 
+// TestNewIndex_FileArg_ScansHeadingsAndLinks pins the single-file-root path
+// (indexFileRoot) through the same scanDoc call the directory-walk path
+// (walkRoot) uses — a Doc built from a lone file argument must carry
+// non-nil Headings and Links exactly like one discovered by a directory
+// walk, not a bare Title-only stub.
+func TestNewIndex_FileArg_ScansHeadingsAndLinks(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "note.md")
+	writeFile(t, target, "# Note\n\n## A Heading\n\nSee [[other]] and [text](../elsewhere.md).\n")
+
+	idx, err := NewIndex([]string{target})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	docs := idx.List()
+	if len(docs) != 1 {
+		t.Fatalf("List() has %d docs, want 1: %+v", len(docs), docs)
+	}
+	doc := docs[0]
+	if doc.Headings == nil {
+		t.Error("Headings is nil, want the doc's headings")
+	}
+	if doc.Links == nil {
+		t.Error("Links is nil, want the doc's outbound links")
+	}
+	if len(doc.Headings) != 2 || doc.Headings[1].Text != "A Heading" {
+		t.Errorf("Headings = %+v, want [Note, A Heading]", doc.Headings)
+	}
+	if len(doc.Links) != 2 {
+		t.Errorf("Links = %+v, want 2 entries", doc.Links)
+	}
+}
+
 func TestNewIndex_MixedDirAndFileRoots(t *testing.T) {
 	dirRoot := t.TempDir()
 	writeFile(t, filepath.Join(dirRoot, "a.md"), "# A")

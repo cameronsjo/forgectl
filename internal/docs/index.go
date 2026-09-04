@@ -44,6 +44,16 @@ type Root struct {
 	// any resolved path other than OnlyFile: naming one file must not
 	// silently grant access to every other file in its directory.
 	OnlyFile string
+	// Kind classifies this root's link syntax and anchor semantics —
+	// RootDocs (ordinary relative markdown links) or RootVault (Obsidian
+	// wikilinks). Detected by detectRootKind (vault.go) at index-build
+	// time; Task 4's IndexOptions lets a caller override the detection.
+	Kind RootKind
+	// VaultPath is the directory containing the ".obsidian" folder that
+	// classified this root as RootVault — set only when Kind == RootVault.
+	// It may differ from Path when the configured root sits somewhere
+	// inside the vault rather than at the vault's own top.
+	VaultPath string
 }
 
 // Doc is one indexed markdown file.
@@ -61,6 +71,20 @@ type Doc struct {
 	// Title is the doc's first level-1 ("# ") heading, or its filename
 	// (without extension) if none is found.
 	Title string
+	// Aliases is the doc's frontmatter `aliases` value (a YAML list or a
+	// bare scalar, folded to a list) — empty when the doc has none or its
+	// root is RootDocs, where aliases are never consulted.
+	Aliases []string
+	// Headings is every heading scanDoc found in the doc, in document
+	// order, each carrying goldmark's auto-generated anchor slug.
+	Headings []Heading
+	// BlockIDs is the sorted, de-duplicated set of Obsidian "^block-id"
+	// markers found in the doc.
+	BlockIDs []string
+	// Links is every outbound link scanDoc found in the doc — wikilinks
+	// and plain markdown links whose destination carries no URL scheme —
+	// already split into the form ResolveLink (Task 3) consumes.
+	Links []LinkRef
 	// ModTime is the file's last-modified time, used to order "recents".
 	ModTime time.Time
 }
@@ -159,7 +183,8 @@ func indexDirRoot(labels map[string]bool, dir string) (Root, []Doc, error) {
 		return Root{}, nil, fmt.Errorf("docs root %q: %w", dir, err)
 	}
 	label := uniqueLabel(labels, filepath.Base(canonical))
-	root := Root{Label: label, Path: canonical}
+	kind, vaultPath := detectRootKind(canonical)
+	root := Root{Label: label, Path: canonical, Kind: kind, VaultPath: vaultPath}
 	docs, err := walkRoot(root)
 	if err != nil {
 		return Root{}, nil, fmt.Errorf("docs root %q: %w", dir, err)
@@ -192,9 +217,17 @@ func indexFileRoot(labels map[string]bool, file string) (Root, Doc, error) {
 
 	base := filepath.Base(real)
 	label := uniqueLabel(labels, strings.TrimSuffix(base, filepath.Ext(base)))
-	root := Root{Label: label, Path: parent, OnlyFile: real}
+	kind, vaultPath := detectRootKind(parent)
+	root := Root{Label: label, Path: parent, OnlyFile: real, Kind: kind, VaultPath: vaultPath}
 
 	fi, err := os.Stat(real)
+	if err != nil {
+		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
+	}
+	// Unlike walkRoot's per-file skip below, a scan failure on a single-file
+	// root IS a hard error: there is no "rest of the index" to fall back to
+	// serving without it.
+	meta, err := scanDoc(real, base)
 	if err != nil {
 		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
 	}
@@ -202,7 +235,11 @@ func indexFileRoot(labels map[string]bool, file string) (Root, Doc, error) {
 		RootLabel: label,
 		RelPath:   base,
 		AbsPath:   real,
-		Title:     titleFor(real, base),
+		Title:     meta.Title,
+		Aliases:   meta.Aliases,
+		Headings:  meta.Headings,
+		BlockIDs:  meta.BlockIDs,
+		Links:     meta.Links,
 		ModTime:   fi.ModTime(),
 	}
 	return root, doc, nil
@@ -294,16 +331,30 @@ func walkRoot(root Root) ([]Doc, error) {
 		if err != nil {
 			return err
 		}
+		relSlash := filepath.ToSlash(rel)
 		info, err := d.Info()
 		if err != nil {
 			return err
 		}
 
+		// A scan failure here (the file vanished or became unreadable
+		// between WalkDir's stat and this read) is skipped, the same
+		// posture as the EvalSymlinks failure above — one bad file must
+		// not fail the whole index build.
+		meta, err := scanDoc(path, relSlash)
+		if err != nil {
+			return nil
+		}
+
 		docs = append(docs, Doc{
 			RootLabel: root.Label,
-			RelPath:   filepath.ToSlash(rel),
+			RelPath:   relSlash,
 			AbsPath:   resolved,
-			Title:     titleFor(path, rel),
+			Title:     meta.Title,
+			Aliases:   meta.Aliases,
+			Headings:  meta.Headings,
+			BlockIDs:  meta.BlockIDs,
+			Links:     meta.Links,
 			ModTime:   info.ModTime(),
 		})
 		return nil
