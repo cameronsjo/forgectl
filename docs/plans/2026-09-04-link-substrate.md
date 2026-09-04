@@ -8,10 +8,10 @@ harness: "claude-code 2.1.261"
 machine: "cf6e768835c7"
 approved_in: "woven-lyre"
 approved_session_id: "1488f160-f360-414b-952e-1f3846a08602"
-status: planned
-next: "Task 1 spike → read-out committed to this doc's Learnings → seat's scope verdict → Tasks 2-5"
+status: in-progress
+next: "Task 2 types + scanDoc → Task 3 ResolveLink → Task 4 Backlinks → Task 5 cleanup + polish"
 branch: plan/link-substrate
-pr: "—"
+pr: "cameronsjo/forgectl#451"
 issue: cameronsjo/forgectl#443
 epic: cameronsjo/forgectl#442
 ---
@@ -81,8 +81,8 @@ Panel: plan-reviewer, red-team-reviewer ran — 13 findings, 13 folded in, 0 dec
 **Report:** —
 
 **Steps:**
-- [ ] Confirm the worktree and branch exist and the plan is committed (`git -C .claude/worktrees/link-substrate log --oneline -1 -- docs/plans/2026-09-04-link-substrate.md`)
-- [ ] Every later "this document" or `## Learnings` means that path; all `go get`, edits, and commits happen in that worktree
+- [x] Confirm the worktree and branch exist and the plan is committed (`git -C .claude/worktrees/link-substrate log --oneline -1 -- docs/plans/2026-09-04-link-substrate.md`)
+- [x] Every later "this document" or `## Learnings` means that path; all `go get`, edits, and commits happen in that worktree
 
 ---
 
@@ -101,13 +101,13 @@ Panel: plan-reviewer, red-team-reviewer ran — 13 findings, 13 folded in, 0 dec
 **Report:** `<reports-dir>/task-1.md` — reports-dir is the orchestrator's out-of-tree `mktemp -d`; write the integer read-out table there; reply with only the output of `wc -l` against that path
 
 **Steps:**
-- [ ] `go get go.abhg.dev/goldmark/wikilink@v0.6.0`; `go mod tidy`; assert `git diff --stat go.mod` shows one added line
-- [ ] Write the spike test: repeated `-roots` flag via `flag.Var` at package init (verified workable through `go test` package-list mode); for **each root separately** build a first-cut index (scan + tables + root-kind detection), `runtime.GC()`, read `MemStats`, resolve every link, collect integer counters, `runtime.GC()`, read `MemStats` again. Roots are never combined into one index; the field-reports root sits inside the vault root and would double-count.
-- [ ] Gate with `t.Skip` unless `FORGECTL_LINK_SPIKE=1`; verify the gate (recipe: `go test ./internal/docs/linkspike -v 2>&1 | grep -c SKIP` → `1`)
-- [ ] Measurement run, no `-v`: `FORGECTL_LINK_SPIKE=1 go test ./internal/docs/linkspike -run TestLinkSpike -timeout 300s -roots "$CADENCE_FIELD_REPORTS_DIR" -roots ./docs -roots "$OBSIDIAN_VAULT"` — the test writes its table to the path in `FORGECTL_LINK_SPIKE_OUT` (the report path) rather than to the test log
-- [ ] Record per root, integers only: `kind` (0/1), walk-up stop reason (0 found, 1 home, 2 device, 3 root); `docs`, `links` by form (plain, alias, embed, `#heading`, `#^block`, relative-path); `resolved`, `missNoTarget`, `missAmbiguous`, `missOutsideRoot`, miss ‰; `indexMS`, `resolveMS`; `heapAllocDelta`, `heapAllocPeak`; count of unresolved targets whose basename exists elsewhere in the vault root; count of ambiguous basenames; count of filenames containing `#`
-- [ ] Commit the read-out to `## Learnings` in this document with one provenance line: host digest, Go version, vault md count, field-reports md count: `chore(docs): link resolution spike read-out`
-- [ ] **Stop conditions, decided by the seat before Task 2:** (a) field-reports-root miss rate > 30% *and* more than half of the missed targets exist elsewhere in the vault → reopen the root-only scope decision; (b) `indexMS` > 1000 on the field-reports root or > 5000 vault-wide → stop, incremental indexing is a different issue; (c) `heapAllocDelta` > 50 MB vault-wide → stop, table representation needs interning; (d) ambiguous basenames > 5% of vault docs → Obsidian's same-folder-then-shortest-path tiebreak becomes a Task 3 requirement and `MissAmbiguous` narrows to true ties; (e) any filename containing `#` → the first-`#` split gets a documented caveat, otherwise none
+- [x] `go get go.abhg.dev/goldmark/wikilink@v0.6.0`; `go mod tidy`; assert `git diff --stat go.mod` shows one added line
+- [x] Write the spike test: repeated `-roots` flag via `flag.Var` at package init (verified workable through `go test` package-list mode); for **each root separately** build a first-cut index (scan + tables + root-kind detection), `runtime.GC()`, read `MemStats`, resolve every link, collect integer counters, `runtime.GC()`, read `MemStats` again. Roots are never combined into one index; the field-reports root sits inside the vault root and would double-count.
+- [x] Gate with `t.Skip` unless `FORGECTL_LINK_SPIKE=1`; verify the gate (recipe: `go test ./internal/docs/linkspike -v 2>&1 | grep -c SKIP` → `1`)
+- [x] Measurement run, no `-v`: `FORGECTL_LINK_SPIKE=1 go test ./internal/docs/linkspike -run TestLinkSpike -timeout 300s -roots "$CADENCE_FIELD_REPORTS_DIR" -roots ./docs -roots "$OBSIDIAN_VAULT"` — the test writes its table to the path in `FORGECTL_LINK_SPIKE_OUT` (the report path) rather than to the test log
+- [x] Record per root, integers only: `kind` (0/1), walk-up stop reason (0 found, 1 home, 2 device, 3 root); `docs`, `links` by form (plain, alias, embed, `#heading`, `#^block`, relative-path); `resolved`, `missNoTarget`, `missAmbiguous`, `missOutsideRoot`, miss ‰; `indexMS`, `resolveMS`; `heapAllocDelta`, `heapAllocPeak`; count of unresolved targets whose basename exists elsewhere in the vault root; count of ambiguous basenames; count of filenames containing `#`
+- [x] Commit the read-out to `## Learnings` in this document with one provenance line: host digest, Go version, vault md count, field-reports md count: `chore(docs): link resolution spike read-out`
+- [x] **Stop conditions, decided by the seat before Task 2:** (a) field-reports-root miss rate > 30% *and* more than half of the missed targets exist elsewhere in the vault → reopen the root-only scope decision; (b) `indexMS` > 1000 on the field-reports root or > 5000 vault-wide → stop, incremental indexing is a different issue; (c) `heapAllocDelta` > 50 MB vault-wide → stop, table representation needs interning; (d) ambiguous basenames > 5% of vault docs → Obsidian's same-folder-then-shortest-path tiebreak becomes a Task 3 requirement and `MissAmbiguous` narrows to true ties; (e) any filename containing `#` → the first-`#` split gets a documented caveat, otherwise none
 
 ---
 
@@ -211,4 +211,14 @@ Panel: plan-reviewer, red-team-reviewer ran — 13 findings, 13 folded in, 0 dec
 
 ## Learnings
 
-*(Task 1 read-out lands here: integers only, plus one provenance line — host digest, Go version, vault md count, field-reports md count)*
+### Task 1 read-out
+
+Provenance: host digest `cf6e768835c7`, Go `go1.26.5`, vault md count 3679, field-reports md count 809.
+
+| root# | kind | stopReason | docs | links_plain | links_alias | links_embed | links_heading | links_block | links_relpath | resolved | missNoTarget | missAmbiguous | missOutsideRoot | missPermille | indexMS | resolveMS | heapAllocDeltaBytes | heapAllocPeakBytes | unresolvedBasenameElsewhereInVault | ambiguousBasenames | filenamesWithHash |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 0 | 809 | 1131 | 377 | 0 | 0 | 0 | 20 | 1455 | 66 | 0 | 7 | 47 | 968 | 78 | -1071960 | 1906792 | 20 | 1 | 0 |
+| 2 | 0 | 1 | 47 | 0 | 0 | 0 | 0 | 0 | 50 | 26 | 4 | 0 | 20 | 480 | 35 | 0 | -124792 | 960296 | 0 | 1 | 0 |
+| 3 | 1 | 0 | 3679 | 4262 | 773 | 324 | 99 | 0 | 348 | 3328 | 2324 | 151 | 3 | 426 | 2338 | 2 | -6066784 | 6916472 | 63 | 61 | 5 |
+
+Seat verdict on the stop conditions: (a) field-reports miss rate 47‰ — root-only scope holds; (b) indexMS 968 field-reports / 2338 vault, both under the line, field-reports by 3%; (c) heap peak 6.9 MB — no interning; (d) ambiguous basenames 61 of 3679 vault docs (1.7%) — `MissAmbiguous` stays broad, no Obsidian tiebreak; (e) 5 vault filenames contain `#` — Task 3 documents the first-`#` split caveat on `ResolveLink`. The repo-docs root (root 2) misses 480‰, 20 of them outside-root: relative links from `docs/` into source files, expected and not a stop condition.
