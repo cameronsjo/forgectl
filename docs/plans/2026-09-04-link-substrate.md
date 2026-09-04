@@ -9,7 +9,7 @@ machine: "cf6e768835c7"
 approved_in: "woven-lyre"
 approved_session_id: "1488f160-f360-414b-952e-1f3846a08602"
 status: in-progress
-next: "Task 2 types + scanDoc → Task 3 ResolveLink → Task 4 Backlinks → Task 5 cleanup + polish"
+next: "Task 3 ResolveLink → Task 4 Backlinks → Task 5 cleanup + polish"
 branch: plan/link-substrate
 pr: "cameronsjo/forgectl#451"
 issue: cameronsjo/forgectl#443
@@ -129,12 +129,12 @@ Panel: plan-reviewer, red-team-reviewer ran — 13 findings, 13 folded in, 0 dec
 **Report:** `<reports-dir>/task-2.md`
 
 **Steps:**
-- [ ] Build the fixture tree: `vault/` with `.obsidian/app.json`, `index.md`, `notes/Alpha.md` (aliases list), `notes/beta.md` (alias scalar), `notes/deep/Alpha.md` (ambiguous basename), `notes/anchors.md` (`## Some Heading`, a paragraph ending `^blk-1`, and `### Sub` under it), `notes/orphan.md`; `repo/` with `index.md`, `guide.md` (`## Getting Started`), `sub/nested.md`; `single.md` at the fixture top for the single-file-root case
-- [ ] Failing tests for `detectRootKind`: fixture `vault/` → `RootVault`; `repo/` → `RootDocs`; a synthetic `.obsidian` placed above a temp root but below a simulated `$HOME` boundary → still `RootDocs`
-- [ ] Failing tests for `scanDoc`: title, aliases (list and scalar), headings with slug, block ids, outbound links by form
-- [ ] Failing test: a single-file root (`indexFileRoot`) yields a `Doc` with non-nil `Headings` and `Links`
-- [ ] Implement; run — expect GREEN; existing `index_test.go` green untouched
-- [ ] Commit: `feat(docs): typed roots and one-pass document scan`
+- [x] Build the fixture tree: `vault/` with `.obsidian/app.json`, `index.md`, `notes/Alpha.md` (aliases list), `notes/beta.md` (alias scalar), `notes/deep/Alpha.md` (ambiguous basename), `notes/anchors.md` (`## Some Heading`, a paragraph ending `^blk-1`, and `### Sub` under it), `notes/orphan.md`; `repo/` with `index.md`, `guide.md` (`## Getting Started`), `sub/nested.md`; `single.md` at the fixture top for the single-file-root case
+- [x] Failing tests for `detectRootKind`: fixture `vault/` → `RootVault`; `repo/` → `RootDocs`; a synthetic `.obsidian` placed above a temp root but below a simulated `$HOME` boundary → still `RootDocs`
+- [x] Failing tests for `scanDoc`: title, aliases (list and scalar), headings with slug, block ids, outbound links by form
+- [x] Failing test: a single-file root (`indexFileRoot`) yields a `Doc` with non-nil `Headings` and `Links`
+- [x] Implement; run — expect GREEN; existing `index_test.go` green untouched
+- [x] Commit: `feat(docs): typed roots and one-pass document scan`
 
 ---
 
