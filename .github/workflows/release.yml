@@ -10,7 +10,11 @@ jobs:
     # macOS, not ubuntu: the bless helper is a Swift package and needs an Apple
     # toolchain. The Go cross-build for linux/{amd64,arm64} still works from
     # here — every target is CGO_ENABLED=0.
-    runs-on: macos-latest
+    #
+    # Self-hosted: the M1 Max fleet's `ghr-forgectl` account. Tag-triggered only,
+    # so no fork-authored code reaches this job, and the signing certificate is
+    # imported into an ephemeral keychain on a guest destroyed and rebuilt nightly.
+    runs-on: [self-hosted, macOS, ARM64]
     permissions:
       contents: write
     env:

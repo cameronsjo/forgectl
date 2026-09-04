@@ -112,7 +112,12 @@ jobs:
     # job — this job exists so production wiring like the env clip client's
     # WithSensitive option is actually exercised in CI (#100). Build/Vet/gofmt
     # are platform-independent and stay ubuntu-only.
-    runs-on: macos-latest
+    #
+    # Self-hosted: the M1 Max fleet's daemon tier, an isolated `ghr-forgectl`
+    # account on a guest rebuilt nightly. Fork PRs need approval before any
+    # workflow runs here (`all_external_contributors`), which is the control that
+    # makes running a public repo's code on this host acceptable.
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -150,7 +155,9 @@ jobs:
         run: go test -v ./...
 
   helper:
-    runs-on: macos-latest
+    # Same fleet as macos-test above. Swift comes from the guest's Xcode at
+    # /usr/bin/swift, so this job needs nothing from Homebrew.
+    runs-on: [self-hosted, macOS, ARM64]
     defaults:
       run:
         working-directory: helper/forgectl-bless-helper
