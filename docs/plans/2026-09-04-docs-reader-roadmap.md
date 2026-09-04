@@ -14,6 +14,9 @@ kind: roadmap
 repo: forgectl
 target_path: docs/plans/2026-09-04-docs-reader-roadmap.md
 branch: plan/docs-reader-roadmap
+pr: 441
+epic: 442
+issues: [443, 444, 445, 446, 447, 448, 449, 450]
 ---
 
 # forgectl docs reader — Roadmap (2026-09-04)
