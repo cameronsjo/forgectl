@@ -78,6 +78,8 @@ Role map (`_palette.json` key → role): `accent`→Accent (header, selected, se
 - There is no `urgentFill` token. `$notes.urgentText` says bare `urgent` "is a fill/accent hue, not a text role", and `build.mjs` uses it as `statusBar.debuggingBackground`. **UrgentFill → `urgent`.**
 - `$notes.onUrgent` reads `ivory #f5ead0`. **OnUrgent → `ivory`, both modes.**
 
+**The role count is 17, not 15.** The list above is fifteen *palette keys*, and roles are not one-to-one with them: `attention` feeds two roles (Warn and Active), and `Contrast` needs the background it measures against, so `bg`→Bg joins as a role of its own. `RoleNames()` is therefore, in order: `Accent, OK, Danger, Warn, Active, Muted, Meta, Dim, Fg, Steel, Brand, SurfaceRaised, AccentFill, OnAccent, UrgentFill, OnUrgent, Bg`. The end-to-end check reads `.roles | length` == **17**.
+
 Two further `$notes` bear on the map and both leave it intact. `attentionNotTextRole` says `attention` is not a body-text colour — but it scopes itself explicitly: *"Console log-level coloring … is a separate terminal convention and out of scope."* forgectl is that convention, so `attention`→Warn/Active stands. `mutedGlyphFloor` records `fgMuted` at 3.05:1 dark, below the 4.5:1 text floor and above the 3:1 graphical one — fine for a glyph, so Muted must not carry text meaning alone. **Two-color rule** applies to chrome; status marks (`✓ ! ✗ -`) and log severity are exempt because glyph + text carry the state.
 
 **PR 2b — `refactor/theme-callsites`.** TUI, cli, k8s call sites move onto `deps.Theme`; the PR 1 shims retire into `theme.Writer`; the root enforcement test lands in the same PR as the last literal it forbids.
@@ -373,7 +375,7 @@ func (t Theme) Contrast(r Role) float64 // vs bg, for theme show's AA flag
 ## Verification (end to end)
 
 - PR 1: `go list -m all | grep -cE 'charmbracelet/(lipgloss|bubbletea|bubbles|huh) |muesli/termenv'` = `0` (main prints `5` today); golden renders unchanged; `NO_COLOR=1 go run . doctor | grep -c $'\x1b'` = `0`; pickers render dark
-- PR 2a: `go run . theme preview` shows gold/steel/brick/apothecary in dark, ink-on-ivory in light; `go run . --help` themed; `go run . theme show --json | jq '.roles | length'` = `15`; `go run . --help | cat | grep -c $'\x1b]11'` = `0`
+- PR 2a: `go run . theme preview` shows gold/steel/brick/apothecary in dark, ink-on-ivory in light; `go run . --help` themed; `go run . theme show --json | jq '.roles | length'` = `17`; `go run . --help | cat | grep -c $'\x1b]11'` = `0`
 - PR 2b: enforcement test green; piped-output table green; TUI opens inside tmux with no pause; side-by-side with the tmux status bar reads as one palette
 - PR 3: `go run .` shows seven rows at 40 and 80 cols with `↗` on Projects/Resume; `4` opens `projects pick` on the freed tty; `7` then `1` execs `launch`; `go run . tmux` shows the tmux-only menu; `go run . < /dev/null; echo $?` = `1` (fang prints usage; the `errHeadlessMenuRoute` text is swallowed by design — check the exit code, never the message)
 
