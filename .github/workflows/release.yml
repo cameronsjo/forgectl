@@ -87,15 +87,18 @@ jobs:
           security add-certificates -k "$KEYCHAIN_PATH" "$CA_PATH"
           rm -f "$CA_PATH"
 
-          # Fail here, not four steps later: assert the keychain holds at least one
-          # VALID codesigning identity, and print the search list so a wrong
-          # answer is diagnosable from the log.
-          security list-keychains -d user
+          # Fail here, not four steps later: assert the keychain holds a VALID
+          # Developer ID Application identity. `find-identity` exits 0 whatever it
+          # finds, so the assertion is a positive match on the identity name and
+          # anything else — zero identities, an unexpected output shape, an empty
+          # capture — fails closed. Diagnostics print only on failure.
           IDENTITIES="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")"
-          echo "$IDENTITIES"
           case "$IDENTITIES" in
-            *"0 valid identities found"*)
-              echo "::error::certificate imported but no valid codesigning identity — issuer chain or keychain search list is wrong on this runner"
+            *"Developer ID Application"*) ;;
+            *)
+              echo "$IDENTITIES"
+              security list-keychains -d user
+              echo "::error::certificate imported but no valid Developer ID Application identity — issuer chain or keychain search list is wrong on this runner"
               exit 1 ;;
           esac
 
@@ -203,3 +206,11 @@ jobs:
           # Arms the darwin build's post-hook codesign. A SECRET (following
           # cameronsjo/minute), empty until set, so the hook is a no-op until then.
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      # The ephemeral keychain holds the Developer ID private key with a partition
+      # list that lets codesign use it unattended. Delete it whether or not the
+      # release succeeded, rather than leaving it in $RUNNER_TEMP until the next
+      # job start clears it. Guarded on HAS_CERT: with no cert there is no keychain.
+      - name: Delete signing keychain
+        if: always() && env.HAS_CERT == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" || true
