@@ -74,17 +74,17 @@ func assertGolden(t *testing.T, name, got string) {
 
 func TestGoldenMenu(t *testing.T) {
 	forceTrueColor(t)
-	assertGolden(t, "menu", goldenModel(t).View())
+	assertGolden(t, "menu", goldenModel(t).View().Content)
 }
 
 func TestGoldenSessions(t *testing.T) {
 	forceTrueColor(t)
 	out, _ := goldenModel(t).Update(key("2"))
-	assertGolden(t, "sessions", out.(model).View())
+	assertGolden(t, "sessions", out.(model).View().Content)
 }
 
 func TestGoldenWindows(t *testing.T) {
 	forceTrueColor(t)
 	out, _ := goldenModel(t).Update(key("3"))
-	assertGolden(t, "windows", out.(model).View())
+	assertGolden(t, "windows", out.(model).View().Content)
 }

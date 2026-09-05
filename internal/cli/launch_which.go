@@ -5,7 +5,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -36,7 +36,7 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 			}
 			cfg.Launch = effLaunch
 			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
-			printLaunchProfile(cmd.OutOrStdout(), launch.Resolve(lc, cwd), cwd, src)
+			printLaunchProfile(colorOut(cmd), launch.Resolve(lc, cwd), cwd, src)
 			return nil
 		},
 	}

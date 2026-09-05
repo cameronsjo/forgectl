@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -178,7 +179,32 @@ func TestPrintDoctorReport_SanitizesForgedControlBytes(t *testing.T) {
 	if bytes.Count([]byte(rendered), []byte("\n")) != 2 {
 		t.Errorf("rendered = %q, want exactly 2 newlines (one detail line + one hint line) — a forged \\n produced an extra line", rendered)
 	}
-	if bytes.Contains([]byte(rendered), []byte("\x1b")) {
-		t.Errorf("rendered = %q, want no raw ESC byte — a forged CSI sequence survived to the terminal", rendered)
+
+	// The forged CSI must reach the terminal only in escaped, inert form. This
+	// is asserted directly rather than as "no ESC byte anywhere", which is what
+	// this test said before the charm v2 migration.
+	//
+	// That older phrasing passed for the wrong reason: lipgloss v1 resolved its
+	// colour profile from a global that was unset in a test binary, so the
+	// status marks rendered plain and the only ESC that could appear was a
+	// forged one. v2 renders truecolor unconditionally and downgrades at the
+	// writer, so the mark now carries a legitimate SGR sequence and the blanket
+	// assertion fires on forgectl's own styling.
+	//
+	// Stripping SGR (the only sequence forgectl composes) and asserting nothing
+	// is left keeps the general guarantee — a forged cursor-control, scroll, or
+	// erase sequence is not SGR, so it survives the strip and fails here.
+	if !strings.Contains(rendered, `\x1b[2K`) {
+		t.Errorf("rendered = %q, want the forged CSI present in ESCAPED form — its absence means the assertion below can no longer go red", rendered)
+	}
+	if bare := stripSGR(rendered); strings.Contains(bare, "\x1b") {
+		t.Errorf("rendered = %q, want no raw ESC beyond forgectl's own SGR styling — a forged control sequence survived to the terminal", rendered)
 	}
 }
+
+// sgrPattern matches a complete SGR sequence: ESC [ <params> m. SGR is the only
+// escape forgectl itself emits (foreground colours and bold), so removing it
+// leaves exactly the sequences that came from somewhere else.
+var sgrPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+func stripSGR(s string) string { return sgrPattern.ReplaceAllString(s, "") }

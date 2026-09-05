@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/doctor"
@@ -67,7 +67,7 @@ Exit codes: 0 every check ok (or skipped), 1 at least one check failed.`,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			report := doctor.Run(cmd.Context(), d)
-			out := cmd.OutOrStdout()
+			out := colorOut(cmd)
 			if asJSON {
 				if err := writeDoctorJSON(out, report); err != nil {
 					return WithExitCode(err, 2)

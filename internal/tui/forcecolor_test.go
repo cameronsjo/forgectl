@@ -1,23 +1,19 @@
 package tui
 
-import (
-	"testing"
-
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
-)
+import "testing"
 
 // forceTrueColor makes Style.Render emit truecolor SGR sequences inside the
 // test binary, which has no TTY and would otherwise render everything plain.
 //
-// This is the one seam the charm.land/v2 migration is allowed to change: v1
-// resolves the profile from a package global, while v2 moved the downgrade out
-// of Render and into the writer, so Render always emits truecolor and this
-// becomes a no-op. Both sides produce the same bytes, which is what lets the
-// goldens carry across the swap.
-func forceTrueColor(t *testing.T) {
-	t.Helper()
-	prev := lipgloss.ColorProfile()
-	lipgloss.SetColorProfile(termenv.TrueColor)
-	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
-}
+// This is the one seam the charm.land/v2 migration was allowed to change, and
+// on v2 it is a no-op by design. v1 resolved the colour profile from a package
+// global that Render consulted, so a test binary needed lipgloss.SetColorProfile
+// to get colour at all. v2 moved the downgrade out of Render and into
+// colorprofile.Writer: Render now always emits truecolor and there is no global
+// to set. Both sides produce the same bytes, which is what lets the goldens
+// captured on v1 carry across the swap unchanged.
+//
+// It stays as a function rather than being deleted at the call sites so the
+// goldens keep saying out loud that they depend on truecolor rendering — if a
+// future change reintroduces a profile global, this is where it gets set.
+func forceTrueColor(t *testing.T) { t.Helper() }
