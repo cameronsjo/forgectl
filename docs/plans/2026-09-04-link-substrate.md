@@ -9,7 +9,7 @@ machine: "cf6e768835c7"
 approved_in: "woven-lyre"
 approved_session_id: "1488f160-f360-414b-952e-1f3846a08602"
 status: in-progress
-next: "Task 4 Backlinks → Task 5 cleanup + polish"
+next: "polish → flip forgectl#451 ready → cadence reviewers → merge"
 branch: plan/link-substrate
 pr: "cameronsjo/forgectl#451"
 issue: cameronsjo/forgectl#443
@@ -179,9 +179,9 @@ Panel: plan-reviewer, red-team-reviewer ran — 13 findings, 13 folded in, 0 dec
 **Report:** `<reports-dir>/task-4.md`
 
 **Steps:**
-- [ ] Failing tests: `notes/Alpha.md` lists its linkers; `notes/orphan.md` returns empty and never panics; add a file, `Rebuild()`, assert tables and backlinks reflect it; `IndexOptions{RootKinds: {"repo": RootVault}}` flips the `repo/` fixture to vault semantics; a single-file root appears in `Backlinks` of the doc it links to
-- [ ] Implement; run — expect GREEN; `watcher_test.go` green untouched; both cobra call sites compile against the new helper
-- [ ] Commit: `feat(docs): Backlinks reverse index and root_kinds override`
+- [x] Failing tests: `notes/Alpha.md` lists its linkers; `notes/orphan.md` returns empty and never panics; add a file, `Rebuild()`, assert tables and backlinks reflect it; `IndexOptions{RootKinds: {"repo": RootVault}}` flips the `repo/` fixture to vault semantics; a single-file root appears in `Backlinks` of the doc it links to
+- [x] Implement; run — expect GREEN; `watcher_test.go` green untouched; both cobra call sites compile against the new helper
+- [x] Commit: `feat(docs): Backlinks reverse index and root_kinds override`
 
 ---
 
@@ -197,17 +197,20 @@ Panel: plan-reviewer, red-team-reviewer ran — 13 findings, 13 folded in, 0 dec
 **Report:** —
 
 **Steps:**
-- [ ] `git rm -r internal/docs/linkspike`; `go build ./... && go vet ./... && go test ./...` green
-- [ ] `golangci-lint run` clean on changed files
-- [ ] Changelog entry
-- [ ] Commit: `chore(docs): remove link resolution spike`
+- [x] `git rm -r internal/docs/linkspike`; `go build ./... && go vet ./... && go test ./...` green
+- [x] `golangci-lint run` clean on changed files
+- [x] Changelog entry
+- [x] Commit: `chore(docs): remove link resolution spike`
 - [ ] run `cadence-forge:polish`; fold findings (wrong-tree pointer: run the reviewer arms against a diff built from the worktree)
 
 ---
 
 ## Deviations
 
-*(empty at approval)*
+- **Task 5 changelog entry lives in the PR body, not `CHANGELOG.md`.** `AGENTS.md` says Release Please owns the file and CI's `check-changelog-owner.sh` fails any PR that edits it; the entry is a `BEGIN_COMMIT_OVERRIDE` block in forgectl#451's body, which Release Please reads at squash-merge.
+- **Task 2 kept `titleFor`.** `index_test.go` (frozen by the Global Constraints) calls it directly, so "deleted once unreferenced" never triggers; production code no longer calls it.
+- **Task 4 tested empty backlinks on `repo/sub/nested.md`**, not `notes/orphan.md`: the Task 2 fixture's `vault/index.md` links to orphan, and that file's content is pinned by a scan test. `vault/notes/linker.md` was added to give `Alpha.md` a real linker.
+- **Task 3 fixed a gofmt miss from Task 2** in `links.go`; CI caught it on the draft PR before Task 3 committed.
 
 ## Learnings
 
