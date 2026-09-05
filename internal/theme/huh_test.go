@@ -16,15 +16,35 @@ func TestHuh_IgnoresItsArgument(t *testing.T) {
 	}
 }
 
+// TestHuh_ResolvesFromReceiverIsDark asserts WHICH colour each side rendered,
+// not merely that the two differ.
+//
+// The earlier version of this test compared the two results and skipped when
+// they matched — so it had no assertion at all and could not fail. Worse, the
+// regression it is named for would have kept it green: if Huh() read the
+// passed bool instead of the receiver, the two calls below would still produce
+// two different colours, just swapped. Pinning each side to the receiver's own
+// Accent is what makes the swap detectable.
 func TestHuh_ResolvesFromReceiverIsDark(t *testing.T) {
 	dark := New(Options{}, true)
 	light := New(Options{}, false)
 
-	darkAccent := dark.Huh().Theme(false).Focused.Title.GetForeground()
-	lightAccent := light.Huh().Theme(true).Focused.Title.GetForeground()
+	// Each is deliberately passed the WRONG argument. A correct Huh() ignores
+	// it and follows the receiver.
+	gotDark := dark.Huh().Theme(false).Focused.Title.GetForeground()
+	gotLight := light.Huh().Theme(true).Focused.Title.GetForeground()
 
-	if darkAccent == lightAccent {
-		t.Skip("dark and light Artificer accent happen to render the same colour string; not a useful signal here")
+	wantDark := dark.Color(RoleAccent)
+	wantLight := light.Color(RoleAccent)
+
+	if wantDark == wantLight {
+		t.Fatal("dark and light Accent resolve to the same colour; this test cannot distinguish the two paths")
+	}
+	if gotDark != wantDark {
+		t.Errorf("dark theme rendered %v, want its own accent %v — Huh() followed the argument, not the receiver", gotDark, wantDark)
+	}
+	if gotLight != wantLight {
+		t.Errorf("light theme rendered %v, want its own accent %v — Huh() followed the argument, not the receiver", gotLight, wantLight)
 	}
 }
 

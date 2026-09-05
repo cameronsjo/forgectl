@@ -11,13 +11,16 @@ import (
 // "Against Bg" is wrong for the on-fill roles and would make theme show cry
 // wolf. OnAccent is ink, which sits on AccentFill and never on the page
 // background: measured against Bg it reads 1.12:1, and against the fill it
-// reads 5.65:1 — the number _palette.json's own $notes records for it. Same
-// for OnUrgent on UrgentFill. Reporting the first number would flag two
-// correct colours as failures and teach a reader to ignore the column.
+// reads 5.65:1 — the number _palette.json's own $notes records for that pair.
+// OnUrgent on UrgentFill is the same shape but NOT the same number: it
+// measures 5.14:1. Reporting the against-Bg figure would flag two correct
+// colours as failures and teach a reader to ignore the column.
 //
-// A malformed hex — which should not occur, since every colour here was either
-// generated from the vendored palette or validated by
-// config.ThemeConfig.Validate — resolves to luminance 0 rather than panicking.
+// A malformed hex resolves to luminance 0 rather than panicking. It should not
+// occur: a generated colour is validated by palettegen, and an override by
+// theme.FromConfig — which is the check that actually runs at startup, since
+// config.Load is tolerant and never calls config.ThemeConfig.Validate. Citing
+// that one here would name a gate this path does not pass through.
 func (t Theme) Contrast(r Role) float64 {
 	return contrastRatio(t.Hex(r), t.Hex(t.contrastAgainst(r)))
 }

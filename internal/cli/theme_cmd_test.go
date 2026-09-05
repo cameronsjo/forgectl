@@ -162,3 +162,47 @@ func themeFromTOML(t *testing.T, c config.ThemeConfig) theme.Theme {
 	}
 	return theme.New(opts, theme.Detect(opts.Mode, theme.Env{}, nil))
 }
+
+// TestResolveTheme_FallsBackOnBadConfig pins the startup path's refusal to
+// fail the run over a colour.
+//
+// A bad [theme] is reported by doctor and launch doctor through ValidatePath;
+// refusing to start here would trade a cosmetic problem for an unusable
+// binary. The review that prompted this test noted resolveTheme had no
+// coverage at all, so nothing would have caught a regression that panicked,
+// silently used zero Options, or dropped the warning.
+func TestResolveTheme_FallsBackOnBadConfig(t *testing.T) {
+	bad := config.Config{Theme: config.ThemeConfig{Preset: "chartreuse"}}
+
+	th := resolveTheme(bad)
+
+	if !th.IsDark() {
+		t.Error("the fallback theme is not dark; Default() must be used on the error path")
+	}
+	if th.PresetName() != "artificer" {
+		t.Errorf("fallback preset = %q, want artificer", th.PresetName())
+	}
+	// The fallback must be a WORKING theme, not a zero Options that happens to
+	// answer IsDark — a role has to resolve to a real colour.
+	if hex := th.Hex(theme.Role(0)); len(hex) != 7 || hex[0] != '#' {
+		t.Errorf("fallback theme resolved %q for the first role; want a #rrggbb colour", hex)
+	}
+}
+
+// TestResolveTheme_HonoursAGoodConfig is the other half: the fallback above
+// must not be what every config gets.
+func TestResolveTheme_HonoursAGoodConfig(t *testing.T) {
+	good := config.Config{Theme: config.ThemeConfig{
+		Mode:   "light",
+		Colors: map[string]config.ColorOverride{"accent": {Dark: "#abcdef", Light: "#abcdef"}},
+	}}
+
+	th := resolveTheme(good)
+
+	if th.IsDark() {
+		t.Error(`mode = "light" did not reach the resolved theme`)
+	}
+	if got := th.Hex(theme.Role(0)); got != "#abcdef" {
+		t.Errorf("accent = %q, want the configured #abcdef", got)
+	}
+}

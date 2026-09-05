@@ -10,6 +10,7 @@ package theme
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -120,11 +121,39 @@ func FromConfig(c config.ThemeConfig) (Options, error) {
 			if !ok {
 				return Options{}, fmt.Errorf("theme: unknown role %q; roles are %s", name, strings.Join(RoleNames(), ", "))
 			}
+			// The hex is checked HERE, not only in config.ThemeConfig.Validate.
+			// Validate runs on the strict-decode path (ValidatePath, which
+			// doctor uses); config.Load is deliberately tolerant and never
+			// calls it, so on the startup path an operator's [theme.colors]
+			// value reaches Theme.Hex unvalidated — and Theme.Hex's result is
+			// printed to a terminal by `theme show`. An ESC in a TOML string is
+			// expressible via \u, so "not a colour" and "a control sequence"
+			// are the same problem. This is the boundary that actually runs.
+			if err := checkOverrideHex(name, "dark", ov.Dark); err != nil {
+				return Options{}, err
+			}
+			if err := checkOverrideHex(name, "light", ov.Light); err != nil {
+				return Options{}, err
+			}
 			o.Overrides[r] = Pair{Dark: ov.Dark, Light: ov.Light}
 		}
 	}
 
 	return o, nil
+}
+
+// overrideHexRe is what a [theme.colors] value may be. An allowlist, because
+// the value reaches a terminal and enumerating the byte sequences a terminal
+// acts on is a list nobody finishes.
+var overrideHexRe = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+
+// checkOverrideHex rejects an override value that is not a #rrggbb colour. An
+// empty value is fine — it means "no override for that mode".
+func checkOverrideHex(role, mode, v string) error {
+	if v == "" || overrideHexRe.MatchString(v) {
+		return nil
+	}
+	return fmt.Errorf("theme: [theme.colors].%s %s = %q: must be a #rrggbb hex colour", role, mode, v)
 }
 
 // Theme is a fully-resolved colour set: a palette (preset plus overrides)
