@@ -11,10 +11,17 @@ jobs:
     # toolchain. The Go cross-build for linux/{amd64,arm64} still works from
     # here — every target is CGO_ENABLED=0.
     #
-    # Self-hosted: the M1 Max fleet's `ghr-forgectl` account. Tag-triggered only,
-    # so no fork-authored code reaches this job, and the signing certificate is
-    # imported into an ephemeral keychain on a guest destroyed and rebuilt nightly.
-    runs-on: [self-hosted, macOS, ARM64]
+    # GitHub-hosted, unlike the other macOS jobs: codesign cannot use the imported
+    # Developer ID identity on the fleet account. Measured across v0.17.0-v0.17.2 —
+    # the import succeeds, `find-identity -v -p codesigning` reports 1 valid
+    # identity in the ephemeral keychain, and `codesign` still answers
+    # "Developer ID Application: no identity found", with the keychain named
+    # explicitly. v0.16.0 signed the same certificate with the same command line
+    # on a hosted runner. The remaining difference is the runner's login/security
+    # session, which is a host-side question tracked in the fleet issue; releases
+    # run here until it is answered. Tag-triggered, so no fork-authored code
+    # reaches this job either way.
+    runs-on: macos-latest
     permissions:
       contents: write
     env:
