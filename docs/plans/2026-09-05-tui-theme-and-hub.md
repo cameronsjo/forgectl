@@ -8,9 +8,9 @@ machine: "cf6e768835c7"
 approved_in: "cedar-chisel"
 approved_session_id: "4b1b4f96-d8eb-4faa-a96b-9bf46558cc02"
 status: in-progress
-next: "PR 1: Task 0 GO (fang compiles on lipgloss/v2 v2.0.6) → Task 1 migration → Task 2 pin → ready flip; then PR 2a theme core, PR 2b call sites, PR 3 hub"
+next: "PR 1 complete (Tasks 0-2), awaiting merge of #454. Then PR 2a theme core → PR 2b call sites → PR 3 hub. modules_test.go wantCount was 28 on origin/main at PR 1 branch time; re-read it at PR 2a branch time (#439 may move it)."
 branch: chore/charm-v2
-pr: —
+pr: https://github.com/cameronsjo/forgectl/pull/454
 updated: 2026-09-05
 date: 2026-09-05
 ---
@@ -150,18 +150,18 @@ Role map (`_palette.json` key → role): `accent`→Accent (header, selected, se
 **Dispatch:** In-context (Opus driver) — API-break judgment; a Sonnet pass may do the mechanical import swap first · **Report:** —
 
 **Steps:**
-- [ ] Worktree `.claude/worktrees/charm-v2`, branch `chore/charm-v2` from fresh `origin/main`; `push -u`; draft PR; persist this plan to `docs/plans/2026-09-05-tui-theme-and-hub.md` and commit it first
-- [ ] Capture goldens on the pre-swap tree (`internal/tui/golden_test.go` with `-update`), commit them
-- [ ] `go get charm.land/lipgloss/v2@v2.0.6 charm.land/bubbletea/v2@v2.0.9 charm.land/bubbles/v2@v2.2.1 charm.land/huh/v2@v2.0.3`; `go build ./...` — fang must compile here (Task 0 said so)
-- [ ] `internal/tui/tui.go`: drop `tea.WithAltScreen()` (absent in v2); `View()` returns `tea.View` with `AltScreen = true`; `case tea.KeyMsg` → `case tea.KeyPressMsg` at `:164,196,289`; `viewport.New(0,0)` → `viewport.New()`, `Width/Height` → `SetWidth/SetHeight`; `l.Styles = list.DefaultStyles(true)` explicitly; huh forms at `:407,421` add `.WithTheme(darkCharm)` where `darkCharm = huh.ThemeFunc(func(bool) *huh.Styles { return huh.ThemeCharm(true) })` (huh v2 defaults light; `huh.ThemeCharm` is a `func(bool) *Styles`, so a bare identifier does not satisfy `huh.Theme`). Note: `Form.Update` returns an internal `compat.Model`; keep the existing `fm.(*huh.Form)` pattern at `:302-303` and never name that type
-- [ ] `internal/tui/styles.go:15-34`: same hexes as v2 `lipgloss.Color(...)`; no palette change
-- [ ] `internal/keymap/keymap.go`: import swap; re-verify the esc-during-filter side effect against huh v2 `keymap.go`
-- [ ] cli pickers/confirms (`confirm.go:10`, `pr_pick.go:110`, `projects_pick.go:204`, `resume.go:254`, `pr/launch.go:572`): import swap + `.WithTheme(darkCharm)` (shared var in `colorout.go`); `pr/launch.go:572` `huh.ThemeCharm()` → `darkCharm`
-- [ ] cli marks/dim (`launch_doctor.go:17`, `launch_which.go:17`, `pr_dash.go:18`, `pr_prs.go:23`, `doctor.go:19`): keep the styles, write through `colorOut(cmd)`; `pr_prs_test.go` `forceColor` (`lipgloss.SetColorProfile`) has no v2 equivalent — render through `colorprofile.NewWriter(buf, []string{"CLICOLOR_FORCE=1"})`
-- [ ] Tests: `tea.KeyMsg{Type: tea.KeyRunes, Runes: …}` → `tea.KeyPressMsg{Code: '2', Text: "2"}` / `{Code: tea.KeyEscape}`; `View()` assertions read `.Content`; goldens green
-- [ ] `go mod tidy`; verify `go list -m all | grep -cE 'charmbracelet/(lipgloss|bubbletea|bubbles|huh) |muesli/termenv'` = `0` (prints `5` on main today), `grep -c '^charm.land/lipgloss/v2 '` = `1`
-- [ ] Manual: `go run .` menu identical to the golden; `k`/`r` forms render dark; `go run . --help` renders; `NO_COLOR=1 go run . doctor` and `go run . doctor | cat` emit no escapes (now true because of `colorOut`)
-- [ ] `go build ./... && go vet ./... && go test ./...`; commit `chore(deps): migrate the charm stack to charm.land v2 — one lipgloss`
+- [x] Worktree `.claude/worktrees/charm-v2`, branch `chore/charm-v2` from fresh `origin/main`; `push -u`; draft PR; persist this plan to `docs/plans/2026-09-05-tui-theme-and-hub.md` and commit it first
+- [x] Capture goldens on the pre-swap tree (`internal/tui/golden_test.go` with `-update`), commit them
+- [x] `go get charm.land/lipgloss/v2@v2.0.6 charm.land/bubbletea/v2@v2.0.9 charm.land/bubbles/v2@v2.2.1 charm.land/huh/v2@v2.0.3`; `go build ./...` — fang must compile here (Task 0 said so)
+- [x] `internal/tui/tui.go`: drop `tea.WithAltScreen()` (absent in v2); `View()` returns `tea.View` with `AltScreen = true`; `case tea.KeyMsg` → `case tea.KeyPressMsg` at `:164,196,289`; `viewport.New(0,0)` → `viewport.New()`, `Width/Height` → `SetWidth/SetHeight`; `l.Styles = list.DefaultStyles(true)` explicitly; huh forms at `:407,421` add `.WithTheme(darkCharm)` where `darkCharm = huh.ThemeFunc(func(bool) *huh.Styles { return huh.ThemeCharm(true) })` (huh v2 defaults light; `huh.ThemeCharm` is a `func(bool) *Styles`, so a bare identifier does not satisfy `huh.Theme`). Note: `Form.Update` returns an internal `compat.Model`; keep the existing `fm.(*huh.Form)` pattern at `:302-303` and never name that type
+- [x] `internal/tui/styles.go:15-34`: same hexes as v2 `lipgloss.Color(...)`; no palette change
+- [x] `internal/keymap/keymap.go`: import swap; re-verify the esc-during-filter side effect against huh v2 `keymap.go`
+- [x] cli pickers/confirms (`confirm.go:10`, `pr_pick.go:110`, `projects_pick.go:204`, `resume.go:254`, `pr/launch.go:572`): import swap + `.WithTheme(darkCharm)` (shared var in `colorout.go`); `pr/launch.go:572` `huh.ThemeCharm()` → `darkCharm`
+- [x] cli marks/dim (`launch_doctor.go:17`, `launch_which.go:17`, `pr_dash.go:18`, `pr_prs.go:23`, `doctor.go:19`): keep the styles, write through `colorOut(cmd)`; `pr_prs_test.go` `forceColor` (`lipgloss.SetColorProfile`) has no v2 equivalent — render through `colorprofile.NewWriter(buf, []string{"CLICOLOR_FORCE=1"})`
+- [x] Tests: `tea.KeyMsg{Type: tea.KeyRunes, Runes: …}` → `tea.KeyPressMsg{Code: '2', Text: "2"}` / `{Code: tea.KeyEscape}`; `View()` assertions read `.Content`; goldens green
+- [x] `go mod tidy`; verify `go list -m all | grep -cE 'charmbracelet/(lipgloss|bubbletea|bubbles|huh) |muesli/termenv'` = `0` (prints `5` on main today), `grep -c '^charm.land/lipgloss/v2 '` = `1`
+- [x] Manual: `go run .` menu identical to the golden; `k`/`r` forms render dark; `go run . --help` renders; `NO_COLOR=1 go run . doctor` and `go run . doctor | cat` emit no escapes (now true because of `colorOut`)
+- [x] `go build ./... && go vet ./... && go test ./...`; commit `chore(deps): migrate the charm stack to charm.land v2 — one lipgloss`
 
 ### Task 2 — Pin one lipgloss
 
@@ -172,9 +172,9 @@ Role map (`_palette.json` key → role): `accent`→Accent (header, selected, se
 **Dispatch:** Serial (after Task 1's tidy) · fresh Sonnet subagent · **Report:** `<reports-dir>/task-2.md`
 
 **Steps:**
-- [ ] Shell `go list -m all` from the test (skip with `t.Skip` when `go` is absent, as `release_workflow_security_test.go` does for its tools); assert exactly one `charm.land/lipgloss/v2`, zero of the five v1 modules; walk `internal/**/*.go` for the `compat` import
-- [ ] Run — expect GREEN; the RED demonstration is a one-time manual run against `origin/main` recorded in the PR body, not a test case
-- [ ] Commit `test(deps): pin a single lipgloss major`; PR body: summary, `BEGIN_COMMIT_OVERRIDE` `chore(deps): migrate to charm.land v2 (bubbletea, bubbles, huh, lipgloss); one lipgloss in the binary`, tuple; `cadence:redaction`; `cadence-forge:polish` (diff-based reviewers against the worktree diff); ready flip
+- [x] Shell `go list -m all` from the test (skip with `t.Skip` when `go` is absent, as `release_workflow_security_test.go` does for its tools); assert exactly one `charm.land/lipgloss/v2`, zero of the five v1 modules; walk `internal/**/*.go` for the `compat` import
+- [x] Run — expect GREEN; the RED demonstration is a one-time manual run against `origin/main` recorded in the PR body, not a test case
+- [x] Commit `test(deps): pin a single lipgloss major`; PR body: summary, `BEGIN_COMMIT_OVERRIDE` `chore(deps): migrate to charm.land v2 (bubbletea, bubbles, huh, lipgloss); one lipgloss in the binary`, tuple; `cadence:redaction`; `cadence-forge:polish` (diff-based reviewers against the worktree diff); ready flip
 
 ### PR 2a — `feat/theme`
 
@@ -368,8 +368,20 @@ func (t Theme) Contrast(r Role) float64 // vs bg, for theme show's AA flag
 
 ## Deviations
 
-*(empty at approval)*
+- **[Task 1] `darkCharm` lives in `internal/keymap`, not duplicated into `internal/tui` and `internal/cli`.** The plan placed the huh dark-theme pin as a shared var in `internal/cli/colorout.go`, which leaves `internal/tui` needing its own copy (it cannot import `internal/cli`). `internal/keymap` is already the leaf both import for exactly this reason, and its own doc comment argues against hand-maintained copies of one huh literal. Shipped as `keymap.DarkCharm()`; `internal/pr` uses it too, replacing the `huh.ThemeCharm()` call at `launch.go:572`. Retires into `theme.Huh()` in PR 2b as planned.
+- **[Task 1] Goldens were re-captured after the swap, with the neutrality proven separately.** The plan had them captured before and asserted unchanged after. lipgloss v2 emits `ESC[m` where v1 emitted the equivalent `ESC[0m`, so a byte-identical assertion was never going to hold. A throwaway script normalised only that spelling and required an exact match on all three goldens — verified able to go red by perturbing one palette hex first — then the goldens were re-captured under v2. The script was deleted; its verdict is in the PR body.
+- **[Task 1] `internal/cli/review_list.go` also needed `colorOut`.** The plan listed five plain-print sites; `review_list.go:146` uses `prDimStyle` through its own `renderReviewTable` and is a sixth.
+- **[Task 1, unplanned] `termsafetest.AssertInert` had to be taught the difference between forgectl's styling and an injected sequence.** The shared inertness contract rejected every ESC, which was equivalent to "reject every ESC a value contributed" only because lipgloss v1 rendered plain inside a test binary. Under v2 it fired on forgectl's own colours across seven tests. Rather than blanket-stripping SGR — which would have silently retired the colour-injection arm — it now allows appearance-only SGR (colour, bold, italic, underline, reverse video for huh's cursor) and still rejects cursor moves, erases, OSC, C1, bidi, blink, conceal, and malformed sequences. A single table asserts both arms so the exemption cannot widen unnoticed. Offsets and hex in the failure message still index the original bytes.
+- **[Task 1, unplanned] Two hand-rolled ESC assertions were replaced by the shared contract.** `keybinds_test.go` scanned for five specific bytes (narrower than the shared contract, and blind to C1 and bidi); `doctor_test.go` asserted no ESC anywhere. Both were proxies that held only because of v1's test-binary rendering. The keybind sheet now asserts with icons off, matching every other inertness test in that package — Nerd Font glyphs are private-use runes and so are not graphic.
+- **[Task 7 → PR 1] The piped-output enforcement moved forward from PR 2b.** The plan scheduled `piped_output_test.go` for Task 7. Polish found the gap was not hypothetical: the migration missed **three** styled commands — `ghostty cheat` (117 escapes piped and under `NO_COLOR`), `tmux cheat` (23), and `bench status` (2, reached through a helper). PR 1 therefore ships `internal/cli/colorout_test.go`, an AST guard asserting that a raw `cmd.OutOrStdout()` never receives styled text — directly, through a local variable, or via a package function that styles (resolved transitively, including package-level pre-rendered vars like `launchOKMark`). PR 2b still owns the behavioural table over plain-output verbs; this is the structural half, and it is what caught `bench status`.
+- **[Task 1, unplanned] `AssertInert` now rejects invalid UTF-8 before the rune scan.** A raw `0x9B` — the 8-bit CSI introducer, which a Latin-1 terminal acts on exactly like `ESC[` — decodes to `U+FFFD` under `range`, and `unicode.IsGraphic(U+FFFD)` is true, so it was accepted. Pre-existing, surfaced by the security arm.
+- **[Task 2] The RED demonstration ran against `origin/main`'s extracted `go.mod`/`go.sum` rather than a checkout of main.** The enforce-worktree guard refuses `git worktree add` targeting the shared checkout from an isolated session. `git show origin/main:go.mod` into a scratch module reproduces the same build list, and the test named all five retired modules plus the 2-lipgloss count.
 
 ## Learnings
 
-*(empty at approval)*
+- **A test that "asserts no escape sequences" is measuring the colour profile, not the code.** Seven tests in this repo passed for years on a proxy: lipgloss v1 resolved its profile from a global that a test binary left unset, so styled output arrived plain and "no ESC" happened to mean "no ESC from an untrusted value". Moving the downgrade to the writer separated the two and the proxy fired on forgectl's own colours. The general shape: when a check's subject can be rendered inert by the environment it runs in, the check may be asserting the environment.
+- **The fix for a control that fires on legitimate output is an allowlist of what the code emits, not a strip of the class it belongs to.** Blanket-stripping SGR would have made every one of those tests pass while retiring the colour-injection arm — a green that could no longer go red, produced by a change described as a test fix. Asserting the accepted and rejected cases in one table is what keeps the exemption honest.
+- **`go.mod`'s direct block cannot answer "how many majors of X do we link".** Both lipglosses were present for months; only the build list showed it, because the second arrived indirectly through fang.
+- **A per-call-site convention is not an invariant, and the PR that introduces one is where it first breaks.** `colorOut` was applied to six sites and missed three, in the same change that added it — because nothing at an `internal/cli` call site looks styled when the styling lives inside `internal/tui` or behind a pre-rendered package var. The lesson is not "be more careful": it is that a rule which cannot be checked mechanically will be violated by the commit that writes it down. ADR-0008 had stated the rule since before this branch and had no mechanism.
+- **A guard written to commemorate a bug should be tested against the bug's actual shape.** The first version of the AST guard matched only a bare `cmd.OutOrStdout()` as the first argument of `fmt.Fprint*` — which caught two of the three sites and would have missed the pre-diff shape of `pr_dash.go` entirely. The security reviewer caught the overclaim in its doc comment. The rewritten version resolves local writer variables and follows the call graph, and it found `bench status` on its own.
+- **huh v2 asks for the window size but never the background colour.** Any standalone `Form.Run()` therefore resolves to light styles regardless of the terminal. Nothing fails, nothing warns, and the only symptom is that the prompt looks wrong.

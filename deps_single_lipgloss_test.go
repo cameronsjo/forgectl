@@ -70,7 +70,10 @@ func TestNoLipglossCompatShim(t *testing.T) {
 		if d.IsDir() || !strings.HasSuffix(path, ".go") {
 			return nil
 		}
-		data, readErr := os.ReadFile(path)
+		// G304/G122: path comes from walking this repo's own internal/ tree
+		// under the test's working directory — there is no external input and
+		// no attacker-controlled symlink to race.
+		data, readErr := os.ReadFile(path) //nolint:gosec
 		if readErr != nil {
 			return readErr
 		}
@@ -95,7 +98,7 @@ func buildList(t *testing.T) []string {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go not on PATH; cannot resolve the module build list")
 	}
-	out, err := exec.Command("go", "list", "-m", "all").CombinedOutput()
+	out, err := exec.CommandContext(t.Context(), "go", "list", "-m", "all").CombinedOutput()
 	if err != nil {
 		t.Fatalf("go list -m all: %v\n%s", err, out)
 	}

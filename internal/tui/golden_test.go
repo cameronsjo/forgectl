@@ -53,17 +53,19 @@ func goldenModel(t *testing.T) model {
 
 func assertGolden(t *testing.T, name, got string) {
 	t.Helper()
+	// name is a literal from the three test functions below, never external
+	// input, and the path is rooted at this package's own testdata dir.
 	path := filepath.Join("testdata", name+".golden")
 	if *updateGolden {
-		if err := os.MkdirAll("testdata", 0o755); err != nil {
+		if err := os.MkdirAll("testdata", 0o750); err != nil {
 			t.Fatalf("create testdata: %v", err)
 		}
-		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(got), 0o600); err != nil {
 			t.Fatalf("write golden %s: %v", path, err)
 		}
 		return
 	}
-	want, err := os.ReadFile(path)
+	want, err := os.ReadFile(path) //nolint:gosec // G304: path is testdata/<literal>.golden, not caller-supplied
 	if err != nil {
 		t.Fatalf("read golden %s (capture it with `go test ./internal/tui -run Golden -update`): %v", path, err)
 	}

@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -55,6 +56,14 @@ func Hostile(label string) string {
 // fail here without anybody remembering to extend the test.
 func AssertInert(t testReporter, label, out string) {
 	t.Helper()
+	// Invalid UTF-8 first, because the rune scan below cannot see it: ranging a
+	// string decodes a bad byte to U+FFFD, and unicode.IsGraphic(U+FFFD) is
+	// true, so a lone 0x9B — the 8-bit CSI introducer, which a Latin-1 terminal
+	// acts on exactly like ESC[ — would be accepted as an ordinary character.
+	if !utf8.ValidString(out) {
+		t.Fatal(inertFailure(label, utf8.RuneError, invalidUTF8Offset(out), out))
+		return
+	}
 	// Scan with forgectl's own styling removed, but report against the original
 	// so the failure message still carries the exact bytes that shipped.
 	scanned, offsets := stripOwnSGR(out)
@@ -67,6 +76,19 @@ func AssertInert(t testReporter, label, out string) {
 			return
 		}
 	}
+}
+
+// invalidUTF8Offset returns the byte offset of the first invalid UTF-8
+// sequence in s, so the failure points at the offending byte rather than at 0.
+func invalidUTF8Offset(s string) int {
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size <= 1 {
+			return i
+		}
+		i += size
+	}
+	return 0
 }
 
 // stripOwnSGR removes the SGR sequences forgectl's own styles emit, and only

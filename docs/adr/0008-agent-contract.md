@@ -72,3 +72,11 @@ Every forgectl verb MUST meet all of the following. These rules bind existing ve
   the probe result above is an input to that design's launch question.
 - Existing interactive UX for humans is unchanged — the contract narrows *when*
   interaction may occur, not what it looks like on a real TTY.
+- Rule 5's no-ANSI-off-a-TTY half is mechanically enforced, not left to review.
+  Styled output goes through `internal/cli`'s `colorOut`, which wraps the
+  command's stdout in a colour-profile writer that strips colour for a pipe or
+  `NO_COLOR`; `TestStyledPrintsGoThroughColorOut` fails the build when a print
+  renders styled text straight to `cmd.OutOrStdout()`. The check exists because
+  the charm v2 migration moved colour degradation out of the renderer and into
+  the writer, which silently broke this rule for two commands until a reviewer
+  caught them.

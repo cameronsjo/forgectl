@@ -117,8 +117,14 @@ func TestAssertInertAcceptsOnlyForgectlsOwnSGR(t *testing.T) {
 		{name: "underline color (unknown attribute)", out: "a\x1b[58;5;12mb", wantReject: true},
 		{name: "colon sub-parameter form", out: "a\x1b[38:2:1:2:3mb", wantReject: true},
 
-		{name: "C1 CSI", out: "a2Kb", wantReject: true},
-		{name: "bidi override", out: "a‮b", wantReject: true},
+		{name: "C1 CSI", out: "a\u009b2Kb", wantReject: true},
+		{name: "bidi override", out: "a\u202eb", wantReject: true},
+		// The RAW 8-bit CSI byte, not its UTF-8 encoding. A Latin-1 terminal
+		// acts on 0x9B exactly as it does on ESC[; ranging the string decodes it
+		// to U+FFFD, which IS graphic, so only the UTF-8 validity check catches
+		// it. The row above uses the UTF-8 encoding and never exercised this.
+		{name: "raw 0x9b byte", out: "a\x9b2Kb", wantReject: true},
+		{name: "raw continuation byte", out: "a\x80b", wantReject: true},
 	}
 
 	for _, tt := range tests {
