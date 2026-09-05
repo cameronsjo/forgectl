@@ -65,37 +65,158 @@ func TestExactlyOneLipgloss(t *testing.T) {
 // problem again, this time invisible to TestExactlyOneLipgloss because it is
 // one module.
 func TestNoLipglossCompatShim(t *testing.T) {
-	const shim = "charm.land/lipgloss/v2/compat"
+	// The whole module, not just internal/ — main.go and any future root-package
+	// file could import the shim and an internal/-only walk would stay green.
+	hits, err := findCompatShimImports(".")
+	if err != nil {
+		t.Fatalf("scan for the compat shim: %v", err)
+	}
+	for _, h := range hits {
+		t.Errorf("%s imports the lipgloss v1 compatibility shim; write against the v2 API directly", h)
+	}
+}
+
+// compatShim is the package whose whole purpose is to run v1-shaped code under
+// lipgloss v2 — reintroducing v1's colour semantics inside the v2 module.
+const compatShim = "charm.land/lipgloss/v2/compat"
+
+// findCompatShimImports walks root and returns every Go file importing the
+// shim.
+//
+// It parses import declarations rather than grepping the source. A Go import
+// path is a string literal and a RAW literal is legal, so a substring search for
+// the double-quoted spelling can be walked past — in a check whose entire job is
+// to be unwalkable. Unquoting the parsed path covers both forms.
+//
+// It is a function rather than test-body code so a test can point it at a
+// fixture directory and confirm it actually catches a shim import. A check
+// nothing exercises is a check nobody knows still works.
+func findCompatShimImports(root string) ([]string, error) {
 	fset := token.NewFileSet()
-	err := filepath.WalkDir("internal", func(path string, d os.DirEntry, err error) error {
+	var hits []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !strings.HasSuffix(path, ".go") {
+		if d.IsDir() {
+			// testdata holds deliberately odd fixtures; .git is not source.
+			if name := d.Name(); name == ".git" || name == "testdata" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
-		// Parsed rather than grepped. A Go import path is a string literal, and
-		// a RAW one is legal — `import compat ` + "`charm.land/lipgloss/v2/compat`" + ` —
-		// so a substring search for the double-quoted spelling can be walked
-		// past. Unquoting the parsed path covers both literal forms.
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
 		file, parseErr := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
 		if parseErr != nil {
-			return parseErr
+			// Recorded and skipped rather than returned: returning aborts the
+			// whole walk, so one unparseable file would hide a real shim import
+			// in every file after it.
+			hits = append(hits, path+" (unparseable: "+parseErr.Error()+")")
+			return nil
 		}
 		for _, imp := range file.Imports {
 			p, unquoteErr := strconv.Unquote(imp.Path.Value)
 			if unquoteErr != nil {
-				t.Errorf("%s: unparseable import path %s: %v", path, imp.Path.Value, unquoteErr)
+				hits = append(hits, path+" (unparseable import path "+imp.Path.Value+")")
 				continue
 			}
-			if p == shim {
-				t.Errorf("%s imports the lipgloss v1 compatibility shim; write against the v2 API directly", path)
+			if p == compatShim {
+				hits = append(hits, path)
 			}
 		}
 		return nil
 	})
+	return hits, err
+}
+
+// TestFindCompatShimImports runs the real scanner against fixtures, including
+// the raw-string import form that a substring search would walk past.
+//
+// It calls findCompatShimImports rather than re-deriving the parse in the test,
+// because a test that reimplements the thing it checks pins the standard
+// library's behaviour and not forgectl's — it would stay green if the scanner
+// regressed to a grep tomorrow.
+func TestFindCompatShimImports(t *testing.T) {
+	tests := []struct {
+		name    string
+		src     string
+		wantHit bool
+	}{
+		{
+			name:    "interpreted string import",
+			src:     "package p\nimport compat \"" + compatShim + "\"\n",
+			wantHit: true,
+		},
+		{
+			// Legal Go, and invisible to a search for the quoted spelling.
+			name:    "raw string import",
+			src:     "package p\nimport compat `" + compatShim + "`\n",
+			wantHit: true,
+		},
+		{
+			name: "blank-imported shim",
+			src:  "package p\nimport _ \"" + compatShim + "\"\n",
+			// A blank import still links the package and its side effects.
+			wantHit: true,
+		},
+		{
+			name: "unrelated import",
+			src:  "package p\nimport \"charm.land/lipgloss/v2\"\n",
+		},
+		{
+			// A mention in a comment or a string constant is not an import.
+			// Narrowing away from these was the point of parsing.
+			name: "shim named in a comment and a constant",
+			src:  "package p\n\n// see " + compatShim + "\nconst s = \"" + compatShim + "\"\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "x.go"), []byte(tt.src), 0o600); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+			hits, err := findCompatShimImports(dir)
+			if err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			if got := len(hits) > 0; got != tt.wantHit {
+				t.Errorf("found shim = %v, want %v (hits %v)\nsource:\n%s", got, tt.wantHit, hits, tt.src)
+			}
+		})
+	}
+}
+
+// TestFindCompatShimImports_KeepsWalkingPastAnUnparseableFile pins that one bad
+// file cannot hide a shim import in a file scanned after it. Returning the parse
+// error from the WalkDir callback aborts the walk, which fails closed for the
+// bad file and silently open for everything behind it.
+func TestFindCompatShimImports_KeepsWalkingPastAnUnparseableFile(t *testing.T) {
+	dir := t.TempDir()
+	// "aaa" sorts before "zzz", so the broken file is visited first.
+	if err := os.WriteFile(filepath.Join(dir, "aaa.go"), []byte("this is not go"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shimSrc := "package p\nimport compat \"" + compatShim + "\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "zzz.go"), []byte(shimSrc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	hits, err := findCompatShimImports(dir)
 	if err != nil {
-		t.Fatalf("walk internal: %v", err)
+		t.Fatalf("scan: %v", err)
+	}
+	found := false
+	for _, h := range hits {
+		if strings.HasSuffix(h, "zzz.go") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the shim import behind an unparseable file was not reported; hits = %v", hits)
 	}
 }
 

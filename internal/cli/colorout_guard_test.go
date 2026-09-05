@@ -4,7 +4,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"strings"
 	"testing"
 )
 
@@ -92,34 +91,5 @@ out = colorOut(cmd)`,
 	}
 }
 
-// TestCompatShimCheckReadsRawStringImports pins that the shim check parses
-// import declarations rather than grepping for the double-quoted spelling. A Go
-// import path may be a raw string literal, so a substring search can be walked
-// past — in a check whose whole job is to be unwalkable.
-func TestCompatShimCheckReadsRawStringImports(t *testing.T) {
-	const shim = "charm.land/lipgloss/v2/compat"
-	srcs := map[string]string{
-		"interpreted": "package p\nimport compat \"" + shim + "\"\n",
-		"raw string":  "package p\nimport compat `" + shim + "`\n",
-	}
-	for name, src := range srcs {
-		t.Run(name, func(t *testing.T) {
-			file, err := parser.ParseFile(token.NewFileSet(), "x.go", src, parser.ImportsOnly)
-			if err != nil {
-				t.Fatalf("parse: %v", err)
-			}
-			if len(file.Imports) != 1 {
-				t.Fatalf("expected 1 import, got %d", len(file.Imports))
-			}
-			// The check unquotes; a grep for the quoted form would match only
-			// the interpreted case.
-			got := strings.Trim(file.Imports[0].Path.Value, "\"`")
-			if got != shim {
-				t.Errorf("unquoted import = %q, want %q", got, shim)
-			}
-			if name == "raw string" && strings.Contains(src, "\""+shim+"\"") {
-				t.Error("the raw-string fixture accidentally contains the quoted spelling; it proves nothing")
-			}
-		})
-	}
-}
+// (The compat-shim scanner is exercised against fixtures in the root package,
+// where it lives — see TestFindCompatShimImports in deps_single_lipgloss_test.go.)

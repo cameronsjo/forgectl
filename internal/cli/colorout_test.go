@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"io/fs"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -27,6 +28,25 @@ import (
 //
 // Plain text through a raw writer is untouched, and so is JSON: those are
 // correct and are what most of this package does.
+//
+// WHAT IT CANNOT SEE, stated because an earlier version of this comment claimed
+// coverage it did not have, and that overclaim is the thing most likely to let
+// the next leak through. It is syntactic and intraprocedural, so it misses:
+//
+//   - a writer stored in a struct field or map (`s.out = cmd.OutOrStdout()`),
+//     since bindings are tracked by identifier name only;
+//   - a writer returned from a helper (`w := writerFor(cmd)`), since there is
+//     no interprocedural return tracking;
+//   - a name shadowed in an inner scope, which clears the outer binding for the
+//     rest of the function — the miss direction, not the false-positive one;
+//   - `io.WriteString(out, styled)` and `out.Write(...)`, which are not
+//     fmt.Fprint* and carry no styling this can name;
+//   - a hand-written "\x1b[" format string, which has no .Render and no styled
+//     var to match — that one is caught by the root theme-literal test instead.
+//
+// The behavioural table in PR 2b (running each plain-output verb with stdout
+// piped and asserting no escape) is what covers those; this guard is the fast
+// structural half.
 func TestStyledPrintsGoThroughColorOut(t *testing.T) {
 	fset := token.NewFileSet()
 	// SA1019: ParseDir is deprecated because it ignores build tags when
@@ -70,22 +90,31 @@ func TestStyledPrintsGoThroughColorOut(t *testing.T) {
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				noteWriterBinding(n, raw)
 				call, ok := n.(*ast.CallExpr)
-				if !ok || len(call.Args) == 0 || !isRawWriter(call.Args[0], raw) {
+				if !ok {
+					return true
+				}
+				// EVERY argument position, not just the first. k8s.go passes
+				// the writer third (`client.Logs(ctx, in, out, …)`), so an
+				// Args[0]-only check is blind to a whole file.
+				if !slices.ContainsFunc(call.Args, func(a ast.Expr) bool { return isRawWriter(a, raw) }) {
 					return true
 				}
 				sites++
 				what := ""
 				switch {
 				case isFprint(call.Fun):
-					for _, arg := range call.Args[1:] {
+					for _, arg := range call.Args {
 						if w := styledExpr(arg, styledVars, styling); w != "" {
 							what = w
 						}
 					}
 				default:
-					if id, ok := call.Fun.(*ast.Ident); ok && styling[id.Name] {
-						what = id.Name + " styles its output"
-					}
+					// Both `render(w)` and `tui.Render(w)` / `h.render(w)`. The
+					// selector form was invisible before, which was the most
+					// likely miss: styledExpr already treats a tui.* call as
+					// styling when it appears as an argument, so the package's
+					// own model said such a callee styles.
+					what = styledCallee(call.Fun, styling)
 				}
 				if what != "" {
 					pos := fset.Position(call.Pos())
@@ -199,6 +228,27 @@ func hasRenderCall(n ast.Node) bool {
 		return true
 	})
 	return found
+}
+
+// styledCallee describes the styling a callee performs, or "" if it does none.
+// It covers a bare identifier (`renderBenchReport(w, …)`), a package-qualified
+// call into internal/tui (`tui.KeybindSheet(w, …)`), and a method whose name is
+// known to style (`h.renderReport(w)`).
+func styledCallee(fun ast.Expr, styling map[string]bool) string {
+	switch f := fun.(type) {
+	case *ast.Ident:
+		if styling[f.Name] {
+			return f.Name + " styles its output"
+		}
+	case *ast.SelectorExpr:
+		if pkg, ok := f.X.(*ast.Ident); ok && pkg.Name == "tui" {
+			return "tui." + f.Sel.Name + " styles its output"
+		}
+		if styling[f.Sel.Name] {
+			return f.Sel.Name + " styles its output"
+		}
+	}
+	return ""
 }
 
 // noteWriterBinding updates raw when n binds a name to a writer — through
