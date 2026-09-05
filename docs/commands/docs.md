@@ -26,8 +26,8 @@ roots = ["~/Projects/forgectl/docs"]   # extra indexed roots, beyond the default
 addr  = ""                              # default bind address for `docs serve`
 
 [docs.root_kinds]                       # override per-root link semantics (see below)
-"~/Projects/forgectl/docs" = "docs"
-"." = "vault"
+"/absolute/path/to/notes" = "vault"
+"." = "docs"                            # relative to where forgectl runs; "~" is not expanded
 ```
 
 Naming directories or files on the command line replaces that default set entirely.

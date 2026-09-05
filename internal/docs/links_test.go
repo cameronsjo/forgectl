@@ -23,8 +23,15 @@ package docs
 //   [x] Pinning: a heading's Slug agrees with the id Render() actually emits
 //   [x] Happy: a "./" or "../" target in a vault resolves relative to the
 //       linking doc, and one that climbs past the root is MissOutsideRoot
+//   [x] Happy: a note whose name contains a dot ("Node.js.md") is linkable
+//       as [[Node.js]] and never mistaken for "Node.md"
+//   [x] Happy: a docs root keeps exact case and distinguishes "notes.md"
+//       from "notes.markdown"
+//   [x] Happy: a root-absolute markdown link ("/guide.md") resolves from
+//       the root, not the linking doc's directory
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -318,5 +325,70 @@ func TestResolveLink_VaultRelativeTargetResolvesFromLinkingDoc(t *testing.T) {
 		if doc == nil || doc.RelPath != c.want {
 			t.Errorf("ResolveLink(%q) doc = %+v, want %s", c.target, doc, c.want)
 		}
+	}
+}
+
+func TestResolveLink_DottedFilenameIsNotTruncated(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".obsidian"), 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "Node.js.md"), "# Node.js\n")
+	writeFile(t, filepath.Join(dir, "Node.md"), "# Node\n")
+	writeFile(t, filepath.Join(dir, "index.md"), "[[Node.js]] [[Node]]\n")
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	roots := idx.Roots()
+	from := mustFindDoc(t, idx, roots[0].Label, "index.md")
+
+	for target, want := range map[string]string{"Node.js": "Node.js.md", "Node": "Node.md", "Node.js.md": "Node.js.md"} {
+		doc, miss := idx.ResolveLink(from, target)
+		if miss != MissNone || doc == nil || doc.RelPath != want {
+			t.Errorf("ResolveLink(%q) = (%+v, %v), want %s", target, doc, miss, want)
+		}
+	}
+}
+
+func TestResolveLink_DocsRootKeepsExactCaseAndExtension(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "notes.md"), "# md\n")
+	writeFile(t, filepath.Join(dir, "notes.markdown"), "# markdown\n")
+	writeFile(t, filepath.Join(dir, "index.md"), "[a](notes.md) [b](notes.markdown)\n")
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	roots := idx.Roots()
+	if roots[0].Kind != RootDocs {
+		t.Fatalf("Kind = %v, want RootDocs", roots[0].Kind)
+	}
+	from := mustFindDoc(t, idx, roots[0].Label, "index.md")
+
+	for _, target := range []string{"notes.md", "notes.markdown"} {
+		doc, miss := idx.ResolveLink(from, target)
+		if miss != MissNone || doc == nil || doc.RelPath != target {
+			t.Errorf("ResolveLink(%q) = (%+v, %v), want an exact hit", target, doc, miss)
+		}
+	}
+	if doc, miss := idx.ResolveLink(from, "Notes.md"); miss != MissNoTarget || doc != nil {
+		t.Errorf("ResolveLink(Notes.md) on a docs root = (%+v, %v), want MissNoTarget — docs roots do not fold case", doc, miss)
+	}
+}
+
+func TestResolveLink_DocsRootAbsoluteLinkResolvesFromRoot(t *testing.T) {
+	idx := newLinksTestIndex(t)
+	from := mustFindDoc(t, idx, "repo", "sub/nested.md")
+
+	doc, miss := idx.ResolveLink(from, "/guide.md#getting-started")
+	if miss != MissNone {
+		t.Fatalf("miss = %v, want MissNone", miss)
+	}
+	if doc == nil || doc.RelPath != "guide.md" {
+		t.Errorf("doc = %+v, want guide.md (root-relative, not sub/guide.md)", doc)
+	}
+	if doc, miss := idx.ResolveLink(from, "/../guide.md"); miss != MissNone || doc == nil || doc.RelPath != "guide.md" {
+		t.Errorf("ResolveLink(/../guide.md) = (%+v, %v), want guide.md — a leading slash cannot climb above the root", doc, miss)
 	}
 }

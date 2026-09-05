@@ -55,6 +55,9 @@ func detectRootKind(canonical string) (RootKind, string) {
 			return RootDocs, ""
 		}
 		if hasDev {
+			// A parent that cannot be stat'd stops the walk too: the
+			// boundary can no longer be proven, and RootDocs is the
+			// default a root keeps when nothing proves it is a vault.
 			dev, ok := deviceOf(parent)
 			if !ok || dev != startDev {
 				return RootDocs, ""

@@ -71,8 +71,8 @@ type Doc struct {
 	// (without extension) if none is found.
 	Title string
 	// Aliases is the doc's frontmatter `aliases` value (a YAML list or a
-	// bare scalar, folded to a list) — empty when the doc has none or its
-	// root is RootDocs, where aliases are never consulted.
+	// bare scalar, folded to a list), scanned for every root. Only a
+	// RootVault root consults it during resolution.
 	Aliases []string
 	// Headings is every heading scanDoc found in the doc, in document
 	// order, each carrying goldmark's auto-generated anchor slug.
@@ -153,17 +153,30 @@ type IndexOptions struct {
 // rootKindFor returns the override for root path p, matching RootKinds
 // keys by absolute cleaned path rather than by the literal string. A key
 // or path that cannot be made absolute falls back to literal comparison.
-func (o IndexOptions) rootKindFor(p string) (RootKind, bool) {
+// Two keys that name the same root with different kinds are an error, not
+// a coin toss: map order would otherwise pick the winner per process.
+func (o IndexOptions) rootKindFor(p string) (RootKind, bool, error) {
 	if len(o.RootKinds) == 0 {
-		return RootDocs, false
+		return RootDocs, false, nil
 	}
 	want := comparablePath(p)
-	for key, kind := range o.RootKinds {
+	keys := make([]string, 0, len(o.RootKinds))
+	for key := range o.RootKinds {
 		if comparablePath(key) == want {
-			return kind, true
+			keys = append(keys, key)
 		}
 	}
-	return RootDocs, false
+	if len(keys) == 0 {
+		return RootDocs, false, nil
+	}
+	sort.Strings(keys)
+	kind := o.RootKinds[keys[0]]
+	for _, key := range keys[1:] {
+		if o.RootKinds[key] != kind {
+			return RootDocs, false, fmt.Errorf("root_kinds: %q and %q name the same root with different kinds", keys[0], key)
+		}
+	}
+	return kind, true, nil
 }
 
 // comparablePath is the form two root paths are compared in: absolute and
@@ -214,7 +227,10 @@ func NewIndexWithOptions(paths []string, opts IndexOptions) (*Index, error) {
 			return nil, fmt.Errorf("docs root %q: %w", p, err)
 		}
 
-		override, hasOverride := opts.rootKindFor(p)
+		override, hasOverride, err := opts.rootKindFor(p)
+		if err != nil {
+			return nil, fmt.Errorf("docs root %q: %w", p, err)
+		}
 
 		if info.IsDir() {
 			root, docs, err := indexDirRoot(labels, p, override, hasOverride)

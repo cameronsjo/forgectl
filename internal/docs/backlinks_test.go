@@ -20,6 +20,7 @@ package docs
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -236,5 +237,19 @@ func TestNewIndexWithOptions_RootKindOverrideMatchesByAbsolutePath(t *testing.T)
 	roots := idx.Roots()
 	if len(roots) != 1 || roots[0].Kind != RootVault {
 		t.Errorf("Roots() = %+v, want the relative override to apply as RootVault", roots)
+	}
+}
+
+func TestNewIndexWithOptions_ConflictingOverridesForOneRootIsAnError(t *testing.T) {
+	repoRel := filepath.Join("testdata", "links", "repo")
+	_, err := NewIndexWithOptions(
+		[]string{repoRel},
+		IndexOptions{RootKinds: map[string]RootKind{
+			repoRel:        RootVault,
+			"./" + repoRel: RootDocs,
+		}},
+	)
+	if err == nil || !strings.Contains(err.Error(), "root_kinds") {
+		t.Fatalf("NewIndexWithOptions with two spellings of one root and different kinds: err = %v, want a root_kinds conflict error", err)
 	}
 }

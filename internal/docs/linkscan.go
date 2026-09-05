@@ -37,6 +37,11 @@ type docMeta struct {
 // wikilink extension. Extensions that only affect rendered *output* (GFM,
 // syntax highlighting, frontmatter) are deliberately absent: scanDoc never
 // renders.
+//
+// Not locked: the index build that drives scanDoc is single-goroutine.
+// render.go serializes its twin behind renderMu because third-party
+// extensions may not be concurrency-safe; a parallel scan would need the
+// same treatment or one instance per worker.
 var linkMarkdown = newLinkMarkdown()
 
 func newLinkMarkdown() goldmark.Markdown {

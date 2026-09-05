@@ -109,30 +109,65 @@ type Heading struct {
 // ResolveLink reads it via Index.byRoot[from.RootLabel] — resolution never
 // crosses roots (Global Constraint).
 //
-// Key normalization, load-bearing for every table: every key is
-// lowercased, and byRel's key additionally has its markdown extension
-// stripped and uses forward slashes (it is built from Doc.RelPath, which is
-// already slash-normalized). Folding case matches Obsidian's own
-// case-insensitive link matching; Task 3 must apply the identical fold to
-// every target it looks up, or a correctly-cased document silently stops
-// matching a differently-cased link.
+// Key normalization, load-bearing for every table, lives in relKey and
+// nameKey: builder and every lookup go through them, so a target is folded
+// exactly as the doc that should match it was. Keys use forward slashes
+// (built from Doc.RelPath, which is already slash-normalized).
 //
-//   - byRel: lowercased, extension-stripped RelPath -> indices into
+//   - byRel: extension-stripped RelPath -> indices into
 //     Index.docs. The primary table for BOTH root kinds — a docs root
 //     resolves relative markdown links through it exclusively; a vault
 //     root tries it first, before falling back to byName then byAlias.
-//   - byName: lowercased basename (extension stripped, directory
-//     components dropped) -> indices into Index.docs. Vault-root only.
+//   - byName: basename (extension stripped, directory components dropped)
+//     -> indices into Index.docs. Built for every root; consulted for vault
+//     roots only.
 //   - byAlias: lowercased frontmatter alias -> indices into Index.docs.
-//     Vault-root only, and the last fallback.
+//     Built for every root; consulted for vault roots only, as the last
+//     fallback.
+//
+// Case: a vault root folds every key (fold == true), matching Obsidian's
+// case-insensitive links. A docs root keeps exact case — a relative markdown
+// link names one file exactly, and on a case-sensitive filesystem
+// "Guide.md" and "guide.md" are two files. The extension strip removes a
+// MARKDOWN extension only (stripMarkdownExt): "Node.js.md" keys as
+// "Node.js", never "Node".
 //
 // Values are []int — indices into Index.docs — rather than []*Doc, so the
 // table doesn't need to pin per-doc pointers independently of Index's own
 // slice-of-structs storage; Task 3 dereferences through Index.docs[i].
 type rootIndex struct {
+	// fold is true when keys are case-folded (vault roots).
+	fold    bool
 	byRel   map[string][]int
 	byName  map[string][]int
 	byAlias map[string][]int
+}
+
+// relKey folds a slash-separated relative path to byRel's key shape for
+// this root: markdown extension stripped, lowercased when the root folds.
+// Builder and every lookup go through it, so the fold is stated once.
+func (ri *rootIndex) relKey(p string) string {
+	key := stripMarkdownExt(p)
+	if ri.fold {
+		key = strings.ToLower(key)
+	}
+	return key
+}
+
+// nameKey is relKey applied to p's last path segment — byName's key shape.
+func (ri *rootIndex) nameKey(p string) string {
+	return ri.relKey(path.Base(p))
+}
+
+// stripMarkdownExt removes a markdown extension (AllowedExt: .md or
+// .markdown, any case) and nothing else. path.Ext would also strip the
+// ".js" from "Node.js", turning a distinct note into a lookup miss — or,
+// with a "Node.md" beside it, into a confident hit on the wrong file.
+func stripMarkdownExt(p string) string {
+	if AllowedExt(p) {
+		return strings.TrimSuffix(p, path.Ext(p))
+	}
+	return p
 }
 
 // buildRootIndexes builds one rootIndex per root, scanning docs once. Called
@@ -141,6 +176,7 @@ func buildRootIndexes(roots []Root, docs []Doc) map[string]*rootIndex {
 	out := make(map[string]*rootIndex, len(roots))
 	for _, r := range roots {
 		out[r.Label] = &rootIndex{
+			fold:    r.Kind == RootVault,
 			byRel:   map[string][]int{},
 			byName:  map[string][]int{},
 			byAlias: map[string][]int{},
@@ -151,10 +187,17 @@ func buildRootIndexes(roots []Root, docs []Doc) map[string]*rootIndex {
 		if !ok {
 			continue
 		}
-		relKey := normalizeRelKey(d.RelPath)
+		relKey := ri.relKey(d.RelPath)
 		ri.byRel[relKey] = append(ri.byRel[relKey], i)
+		if !ri.fold {
+			// A docs root keys the exact path too, so "[x](notes.md)" and
+			// "[x](notes.markdown)" each name one file; the stripped key
+			// above serves an extension-less link, which is then
+			// genuinely ambiguous when both files exist.
+			ri.byRel[d.RelPath] = append(ri.byRel[d.RelPath], i)
+		}
 
-		nameKey := normalizeNameKey(d.RelPath)
+		nameKey := ri.nameKey(d.RelPath)
 		ri.byName[nameKey] = append(ri.byName[nameKey], i)
 
 		for _, alias := range d.Aliases {
@@ -163,21 +206,6 @@ func buildRootIndexes(roots []Root, docs []Doc) map[string]*rootIndex {
 		}
 	}
 	return out
-}
-
-// normalizeRelKey folds a slash-separated relative path to byRel's key
-// shape: lowercase, markdown extension stripped. See rootIndex's doc
-// comment — every caller of every table MUST apply this identical fold.
-func normalizeRelKey(relPath string) string {
-	return strings.ToLower(strings.TrimSuffix(relPath, path.Ext(relPath)))
-}
-
-// normalizeNameKey folds a slash-separated path to byName's key shape: its
-// basename, lowercased, markdown extension stripped — normalizeRelKey
-// applied to the last path segment. Builder and lookups both go through
-// it, so the fold is stated once.
-func normalizeNameKey(p string) string {
-	return normalizeRelKey(path.Base(p))
 }
 
 // rootByLabel returns the Root with the given Label, if indexed.
@@ -207,17 +235,16 @@ func (idx *Index) pickCandidate(indices []int) (*Doc, Miss) {
 	}
 }
 
-// filterBySuffix narrows a byName candidate list to the ones whose
-// (normalized) RelPath ends with a "/"-qualified target — how
-// "[[deep/Alpha]]" picks the one Alpha.md a bare "[[Alpha]]" can't.
-// cleanLower is already lowercased and path.Clean'd; its own extension (if
-// any) is stripped so it compares against normalizeRelKey's shape.
-func filterBySuffix(docs []Doc, indices []int, cleanLower string) []int {
-	cleanLower = strings.TrimSuffix(cleanLower, path.Ext(cleanLower))
+// filterBySuffix narrows a byName candidate list to the ones whose RelPath
+// key ends with a "/"-qualified target — how "[[deep/Alpha]]" picks the one
+// Alpha.md a bare "[[Alpha]]" can't. clean is already path.Clean'd; both
+// sides go through relKey so they compare in the same shape.
+func filterBySuffix(ri *rootIndex, docs []Doc, indices []int, clean string) []int {
+	want := ri.relKey(clean)
 	var out []int
 	for _, i := range indices {
-		key := normalizeRelKey(docs[i].RelPath)
-		if key == cleanLower || strings.HasSuffix(key, "/"+cleanLower) {
+		key := ri.relKey(docs[i].RelPath)
+		if key == want || strings.HasSuffix(key, "/"+want) {
 			out = append(out, i)
 		}
 	}
@@ -231,17 +258,28 @@ func escapesRoot(clean string) bool {
 	return clean == ".." || strings.HasPrefix(clean, "../") || path.IsAbs(clean)
 }
 
-// resolveDocsDoc resolves path0 for a RootDocs caller: an ordinary relative
-// markdown link, joined against the calling doc's own directory — never
-// against the vault/root top, because a docs tree has no Obsidian
-// vault-root-relative convention. byRel is the only table a docs root ever
-// consults (Global Constraint).
+// resolveDocsDoc resolves path0 for a RootDocs caller: an ordinary
+// relative markdown link, joined against the calling doc's own directory.
+// A leading "/" is root-relative, as GitHub renders it — never the
+// filesystem root, and never joined onto the calling doc's directory
+// (path.Join would fold "/guide.md" from "sub/" into "sub/guide.md", a
+// confident hit on the wrong file when one exists there). byRel is the
+// only table a docs root ever consults (Global Constraint).
 func (idx *Index) resolveDocsDoc(rootIdx *rootIndex, from *Doc, path0 string) (*Doc, Miss) {
-	clean := path.Clean(path.Join(path.Dir(from.RelPath), path0))
+	var clean string
+	if path.IsAbs(path0) {
+		clean = strings.TrimPrefix(path.Clean(path0), "/")
+	} else {
+		clean = path.Clean(path.Join(path.Dir(from.RelPath), path0))
+	}
 	if escapesRoot(clean) {
 		return nil, MissOutsideRoot
 	}
-	return idx.pickCandidate(rootIdx.byRel[normalizeRelKey(clean)])
+	key := clean
+	if rootIdx.fold || !AllowedExt(clean) {
+		key = rootIdx.relKey(clean)
+	}
+	return idx.pickCandidate(rootIdx.byRel[key])
 }
 
 // isExplicitlyRelative reports whether a link target was authored relative
@@ -270,21 +308,19 @@ func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, from *Doc, path0 string) (
 	if escapesRoot(clean) {
 		return nil, MissOutsideRoot
 	}
-	cleanLower := strings.ToLower(clean)
-
-	if doc, miss := idx.pickCandidate(rootIdx.byRel[normalizeRelKey(clean)]); miss != MissNoTarget {
+	if doc, miss := idx.pickCandidate(rootIdx.byRel[rootIdx.relKey(clean)]); miss != MissNoTarget {
 		return doc, miss
 	}
 
-	candidates := rootIdx.byName[normalizeNameKey(clean)]
+	candidates := rootIdx.byName[rootIdx.nameKey(clean)]
 	if strings.Contains(clean, "/") {
-		candidates = filterBySuffix(idx.docs, candidates, cleanLower)
+		candidates = filterBySuffix(rootIdx, idx.docs, candidates, clean)
 	}
 	if doc, miss := idx.pickCandidate(candidates); miss != MissNoTarget {
 		return doc, miss
 	}
 
-	return idx.pickCandidate(rootIdx.byAlias[cleanLower])
+	return idx.pickCandidate(rootIdx.byAlias[strings.ToLower(clean)])
 }
 
 // resolveFragment checks target's fragment against doc's anchors, once the
@@ -295,9 +331,11 @@ func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, from *Doc, path0 string) (
 // simply never has any BlockIDs to match, so it always misses there). A
 // heading fragment matches on its LAST '#'-segment (the nested-heading
 // case, "[[note#A#B]]" -> match "B"): a docs root matches goldmark's exact
-// auto-ID slug (the Global Constraint's slug-agreement pin), a vault root
-// additionally accepts a case-folded match on the heading's rendered text,
-// mirroring Obsidian's own case-insensitive heading links.
+// auto-ID slug, case-sensitively — the slug is what a browser matches
+// against "id=", and a browser does not fold (the Global Constraint's
+// slug-agreement pin); a vault root additionally accepts a case-folded
+// match on the slug or the heading's rendered text, mirroring Obsidian's
+// own case-insensitive heading links.
 func (idx *Index) resolveFragment(kind RootKind, doc *Doc, fragment string) (*Doc, Miss) {
 	if fragment == "" {
 		return doc, MissNone

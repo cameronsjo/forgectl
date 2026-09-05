@@ -13,7 +13,7 @@ package docs
 // single-file-root behavior (indexFileRoot) has its own test plan in
 // index_file_root_test.go.
 //
-// titleFor (Classification: helper)
+// scanDoc title rule (Classification: helper)
 //   [x] Happy: extracts the first "# " heading
 //   [x] Happy: falls back to the filename when no heading is present
 //
