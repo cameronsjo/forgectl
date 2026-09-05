@@ -140,6 +140,7 @@ jobs:
           # runtime + secure timestamp) so Gatekeeper accepts it; otherwise keep
           # the ad-hoc signature that still satisfies the Secure Enclave.
           if [ "$HAS_CERT" = "true" ]; then
+            : "${SIGN_KEYCHAIN:?import step did not export a keychain}"
             codesign --keychain "$SIGN_KEYCHAIN" --sign "Developer ID Application" --options runtime --timestamp --force "$BIN"
           else
             codesign -s - -f "$BIN"
