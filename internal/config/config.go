@@ -515,11 +515,18 @@ func (gc GiteaConfig) IsZero() bool {
 type DocsConfig struct {
 	Roots []string `toml:"roots"`
 	Addr  string   `toml:"addr"`
+	// RootKinds overrides docs.detectRootKind's filesystem-based inference
+	// for a root, keyed by the root path exactly as it appears in Roots (or
+	// in the positional arguments to `docs serve`/`docs list`) — not a
+	// canonicalized form. Values are "docs" or "vault"; any other value is a
+	// config error (internal/cli's docsIndexOptions rejects it, naming the
+	// key, the value, and the two allowed values).
+	RootKinds map[string]string `toml:"root_kinds"`
 }
 
 // IsZero reports whether the [docs] section was absent or empty.
 func (dc DocsConfig) IsZero() bool {
-	return len(dc.Roots) == 0 && dc.Addr == ""
+	return len(dc.Roots) == 0 && dc.Addr == "" && len(dc.RootKinds) == 0
 }
 
 // PreflightConfig is the [preflight] section: `forgectl preflight`'s

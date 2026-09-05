@@ -11,13 +11,21 @@ package cli
 //
 // dedupPaths (Classification: helper)
 //   [x] Happy: "." and its absolute equivalent collapse to one entry
+//
+// docsIndexOptions (Classification: config -> docs.IndexOptions conversion)
+//   [x] Happy: empty RootKinds converts to a zero-value IndexOptions
+//   [x] Happy: "docs"/"vault" values convert to their RootKind constants,
+//       keyed by the config path exactly as written
+//   [x] Unhappy: an unknown value is a config error naming the key and value
 
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	docspkg "github.com/cameronsjo/forgectl/internal/docs"
 )
 
 func TestResolveDocsRoots_ArgsOverrideDefaults(t *testing.T) {
@@ -116,5 +124,44 @@ func TestDedupPaths_CollapsesEquivalentAbsolutePaths(t *testing.T) {
 	got := dedupPaths([]string{".", dir})
 	if len(got) != 1 {
 		t.Errorf("dedupPaths([., abs]) = %v, want exactly one entry", got)
+	}
+}
+
+func TestDocsIndexOptions_EmptyRootKindsIsZeroValue(t *testing.T) {
+	got, err := docsIndexOptions(config.DocsConfig{})
+	if err != nil {
+		t.Fatalf("docsIndexOptions: %v", err)
+	}
+	if len(got.RootKinds) != 0 {
+		t.Errorf("docsIndexOptions(empty) = %+v, want a zero-value IndexOptions", got)
+	}
+}
+
+func TestDocsIndexOptions_ConvertsKnownValues(t *testing.T) {
+	got, err := docsIndexOptions(config.DocsConfig{RootKinds: map[string]string{
+		"/vault/path": "vault",
+		"/docs/path":  "docs",
+	}})
+	if err != nil {
+		t.Fatalf("docsIndexOptions: %v", err)
+	}
+	if got.RootKinds["/vault/path"] != docspkg.RootVault {
+		t.Errorf("RootKinds[/vault/path] = %v, want RootVault", got.RootKinds["/vault/path"])
+	}
+	if got.RootKinds["/docs/path"] != docspkg.RootDocs {
+		t.Errorf("RootKinds[/docs/path] = %v, want RootDocs", got.RootKinds["/docs/path"])
+	}
+}
+
+func TestDocsIndexOptions_RejectsUnknownValue(t *testing.T) {
+	_, err := docsIndexOptions(config.DocsConfig{RootKinds: map[string]string{"/some/path": "wiki"}})
+	if err == nil {
+		t.Fatal("docsIndexOptions: want an error for an unknown root_kinds value, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{"/some/path", "wiki", "docs", "vault"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q does not name %q", msg, want)
+		}
 	}
 }

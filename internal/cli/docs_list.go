@@ -25,7 +25,11 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			idx, err := docspkg.NewIndex(roots)
+			opts, err := docsIndexOptions(deps.Cfg.Docs)
+			if err != nil {
+				return err
+			}
+			idx, err := docspkg.NewIndexWithOptions(roots, opts)
 			if err != nil {
 				return err
 			}
