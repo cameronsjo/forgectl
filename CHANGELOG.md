@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.17.3](https://github.com/cameronsjo/forgectl/compare/v0.17.2...v0.17.3) (2026-09-05)
+
+
+### Bug Fixes
+
+* **ci:** run the release job on a hosted runner until fleet signing works ([#462](https://github.com/cameronsjo/forgectl/issues/462)) ([2a3b37b](https://github.com/cameronsjo/forgectl/commit/2a3b37bc55410a39d2d59f38fc2add4df4a2ca34)), closes [#461](https://github.com/cameronsjo/forgectl/issues/461)
+
+## [0.17.2](https://github.com/cameronsjo/forgectl/compare/v0.17.1...v0.17.2) (2026-09-05)
+
+
+### Bug Fixes
+
+* **ci:** name the signing keychain on every codesign call ([#459](https://github.com/cameronsjo/forgectl/issues/459)) ([fbabaf3](https://github.com/cameronsjo/forgectl/commit/fbabaf381fe8bc6ede40b62d46259afec1f8c20b))
+
 ## [0.17.1](https://github.com/cameronsjo/forgectl/compare/v0.17.0...v0.17.1) (2026-09-05)
 
 
