@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/termsafe/termsafetest"
 	"github.com/cameronsjo/forgectl/internal/tmux"
@@ -71,9 +69,9 @@ func TestViewOfBenignFixtureIsAlreadyInert(t *testing.T) {
 	m := sized(newModel(context.Background(), tmux.New(fake), true), 80, 24)
 	out, _ := m.Update(key("2"))
 	m = out.(model)
-	termsafetest.AssertInert(t, "benign sessions screen", m.View())
-	if !strings.Contains(m.View(), "alpha") {
-		t.Fatalf("benign session name missing from the view; the control proves nothing:\n%s", m.View())
+	termsafetest.AssertInert(t, "benign sessions screen", m.View().Content)
+	if !strings.Contains(m.View().Content, "alpha") {
+		t.Fatalf("benign session name missing from the view; the control proves nothing:\n%s", m.View().Content)
 	}
 }
 
@@ -95,7 +93,7 @@ func TestScreensDrawNothingUnsafe(t *testing.T) {
 			m := hostileModel(t)
 			out, _ := m.Update(key(tc.key))
 			m = out.(model)
-			view := m.View()
+			view := m.View().Content
 			if view == "" {
 				t.Fatalf("%s screen drew nothing; the check would pass vacuously", tc.screen)
 			}
@@ -151,12 +149,12 @@ func TestConfirmPromptDrawsNothingUnsafe(t *testing.T) {
 	m := hostileModel(t)
 	out, _ := m.Update(key("2"))
 	m = out.(model)
-	out, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	out, _ = m.Update(key("k"))
 	m = out.(model)
 	if m.mode != formMode {
 		t.Fatalf("expected the confirmation form, got mode %v", m.mode)
 	}
-	termsafetest.AssertInert(t, "confirmation form", m.View())
+	termsafetest.AssertInert(t, "confirmation form", m.View().Content)
 }
 
 // TestRenamePromptDrawsNothingUnsafe pins startRename's %q boundary directly.
@@ -169,7 +167,7 @@ func TestRenamePromptDrawsNothingUnsafe(t *testing.T) {
 	if m.mode != formMode {
 		t.Fatalf("expected the rename form, got mode %v", m.mode)
 	}
-	view := m.View()
+	view := m.View().Content
 	if view == "" {
 		t.Fatal("rename form drew nothing; the check would pass vacuously")
 	}

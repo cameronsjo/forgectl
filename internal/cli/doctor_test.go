@@ -13,6 +13,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/doctor"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe/termsafetest"
 )
 
 // runDoctor builds `doctor` over d and executes it with args, mirroring
@@ -178,7 +179,26 @@ func TestPrintDoctorReport_SanitizesForgedControlBytes(t *testing.T) {
 	if bytes.Count([]byte(rendered), []byte("\n")) != 2 {
 		t.Errorf("rendered = %q, want exactly 2 newlines (one detail line + one hint line) — a forged \\n produced an extra line", rendered)
 	}
-	if bytes.Contains([]byte(rendered), []byte("\x1b")) {
-		t.Errorf("rendered = %q, want no raw ESC byte — a forged CSI sequence survived to the terminal", rendered)
+
+	// The forged CSI must reach the terminal only in escaped, inert form.
+	//
+	// This was "no ESC byte anywhere" before the charm v2 migration, which
+	// passed for the wrong reason: lipgloss v1 resolved its colour profile from
+	// a global that a test binary left unset, so the status marks rendered plain
+	// and the only ESC that could appear was a forged one. v2 renders truecolor
+	// unconditionally and downgrades at the writer, so the mark now carries a
+	// legitimate SGR sequence and the blanket assertion fires on forgectl's own
+	// styling.
+	//
+	// The replacement is the SHARED contract, not a local rewrite. An earlier
+	// draft of this test stripped SGR with its own `\x1b\[[0-9;]*m` regexp,
+	// which was a second and weaker definition of "forgectl's own styling" than
+	// termsafetest's: it accepted conceal and blink, and accepted a truncated or
+	// out-of-range extended-colour selector — exactly the shapes an injection
+	// takes. Two notions of safe in one package is the drift termsafetest exists
+	// to prevent.
+	if !strings.Contains(rendered, `\x1b[2K`) {
+		t.Errorf("rendered = %q, want the forged CSI present in ESCAPED form — its absence means the assertion below can no longer go red", rendered)
 	}
+	termsafetest.AssertInert(t, "doctor report", rendered)
 }

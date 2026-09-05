@@ -6,7 +6,7 @@ import (
 	"io"
 	"log/slog"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -114,7 +114,7 @@ func pickPRs(prs []pr.PR, store *pr.ReviewedStore) ([]pr.PR, error) {
 				Options(opts...).
 				Value(&chosen),
 		),
-	).WithKeyMap(keymap.Cancel()).Run()
+	).WithKeyMap(keymap.Cancel()).WithTheme(keymap.DarkCharm()).Run()
 	if err != nil {
 		return nil, err
 	}

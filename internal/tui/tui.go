@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/huh"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/meta"
@@ -112,7 +112,10 @@ type model struct {
 // executes Action after Run returns, when the terminal is free again.
 func Run(ctx context.Context, client *tmux.Client, noIcons bool) (Action, error) {
 	m := newModel(ctx, client, noIcons)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
+	// Bubble Tea v2 dropped WithAltScreen: the alt screen is a property of the
+	// View the model returns each frame, not a program-construction option.
+	// View() sets AltScreen instead.
+	p := tea.NewProgram(m, tea.WithContext(ctx))
 	final, err := p.Run()
 	if err != nil {
 		return Action{}, err
@@ -126,6 +129,11 @@ func Run(ctx context.Context, client *tmux.Client, noIcons bool) (Action, error)
 func newModel(ctx context.Context, client *tmux.Client, noIcons bool) model {
 	g := pickGlyphs(noIcons)
 	l := list.New(nil, itemDelegate{g: g}, 0, 0)
+	// v2's list styles are resolved against a background the caller supplies
+	// rather than probed globally. Everything else in the TUI is a fixed dark
+	// palette, so pin the list chrome to match; nothing here adapts to a light
+	// terminal today, and a half-adapted screen would be worse than a fixed one.
+	l.Styles = list.DefaultStyles(true)
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
 	l.SetShowHelp(false)
@@ -138,7 +146,7 @@ func newModel(ctx context.Context, client *tmux.Client, noIcons bool) model {
 		glyph:   g,
 		noIcons: noIcons,
 		l:       l,
-		tree:    viewport.New(0, 0),
+		tree:    viewport.New(),
 		mode:    menuMode,
 		title:   "menu",
 	}
@@ -161,7 +169,11 @@ func (m model) menuItems() []list.Item {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch t := msg.(type) {
-	case tea.KeyMsg:
+	// tea.KeyPressMsg, never tea.KeyMsg: in v2 KeyMsg is an interface that both
+	// a press and a RELEASE satisfy. On a terminal speaking the Kitty keyboard
+	// protocol every key would then be handled twice — one "q" would quit from
+	// a subscreen and again from the menu.
+	case tea.KeyPressMsg:
 		if t.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
@@ -188,12 +200,12 @@ func (m *model) applySize() {
 		body = 3
 	}
 	m.l.SetSize(m.width, body)
-	m.tree.Width = m.width
-	m.tree.Height = body
+	m.tree.SetWidth(m.width)
+	m.tree.SetHeight(body)
 }
 
 func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
-	km, ok := msg.(tea.KeyMsg)
+	km, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		var cmd tea.Cmd
 		m.l, cmd = m.l.Update(msg)
@@ -286,7 +298,7 @@ func (m model) activate(index int) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateTree(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if km, ok := msg.(tea.KeyMsg); ok {
+	if km, ok := msg.(tea.KeyPressMsg); ok {
 		switch km.String() {
 		case "q", "esc", "backspace":
 			m.toMenu()
@@ -406,7 +418,8 @@ func (m model) startConfirm(op opKind, session tmux.SessionIdentity) (tea.Model,
 	m.pendingSession = session
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewConfirm().Key("ok").Title(prompt).Affirmative("Yes").Negative("No"),
-	)).WithWidth(m.formWidth()).WithShowHelp(false).WithKeyMap(keymap.Cancel())
+	)).WithWidth(m.formWidth()).WithShowHelp(false).WithKeyMap(keymap.Cancel()).
+		WithTheme(keymap.DarkCharm())
 	m.mode = formMode
 	return m, m.form.Init()
 }
@@ -420,7 +433,8 @@ func (m model) startRename(session tmux.SessionIdentity) (tea.Model, tea.Cmd) {
 	// overrides inert inside the huh prompt.
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewInput().Key("name").Title(fmt.Sprintf("Rename %q to:", session.Name)),
-	)).WithWidth(m.formWidth()).WithShowHelp(false).WithKeyMap(keymap.Cancel())
+	)).WithWidth(m.formWidth()).WithShowHelp(false).WithKeyMap(keymap.Cancel()).
+		WithTheme(keymap.DarkCharm())
 	m.mode = formMode
 	return m, m.form.Init()
 }
@@ -476,7 +490,9 @@ func (m model) formWidth() int {
 	return w
 }
 
-func (m model) View() string {
+// View returns a tea.View rather than a string: Bubble Tea v2 made the alt
+// screen a per-frame property of the view, which is where WithAltScreen went.
+func (m model) View() tea.View {
 	header := m.headerView()
 	var body string
 	switch m.mode {
@@ -487,7 +503,9 @@ func (m model) View() string {
 	default:
 		body = m.l.View()
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, m.footerView())
+	v := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, header, body, m.footerView()))
+	v.AltScreen = true
+	return v
 }
 
 func (m model) headerView() string {
