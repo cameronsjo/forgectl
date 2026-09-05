@@ -568,10 +568,22 @@ func (tc ThemeConfig) Validate() error {
 	}
 	sort.Strings(keys)
 
+	// Canonical role name -> the spelling that claimed it. Role keys match
+	// case-insensitively, so `accent` and `ACCENT` are one role written twice,
+	// and TOML permits both in a table. Without this check ValidatePath reports
+	// the file as valid while theme.FromConfig rejects it at startup — doctor
+	// would say the config is fine about a config the binary refuses.
+	claimed := make(map[string]string, len(keys))
+
 	for _, key := range keys {
-		if !themeRoleSet[strings.ToLower(key)] {
+		canonical := strings.ToLower(key)
+		if !themeRoleSet[canonical] {
 			return fmt.Errorf("[theme].colors[%q]: unknown role; roles are %s", key, strings.Join(ThemeRoleNames, ", "))
 		}
+		if prev, dup := claimed[canonical]; dup {
+			return fmt.Errorf("[theme].colors: role %q set twice, as %q and %q; keep one", canonical, prev, key)
+		}
+		claimed[canonical] = key
 		c := tc.Colors[key]
 		if c.Dark == "" && c.Light == "" {
 			return fmt.Errorf("[theme].colors[%q]: no colour given", key)
@@ -629,6 +641,23 @@ func (co *ColorOverride) UnmarshalTOML(data any) error {
 				return fmt.Errorf("[theme.colors]: light must be a string, got %T", raw)
 			}
 			co.Light = s
+		}
+		// An unrecognized key is an ERROR, not something to drop. A typo like
+		// `{ dark = "#111111", ligth = "#222222" }` otherwise decodes with the
+		// misspelt half discarded and passes Validate, because Dark is set —
+		// so the operator's light colour silently never applies and nothing
+		// anywhere says so. This branch's doc comment promises a malformed
+		// entry fails loudly; without this it did not.
+		var unknown []string
+		for k := range v {
+			if k != "dark" && k != "light" {
+				unknown = append(unknown, k)
+			}
+		}
+		if len(unknown) > 0 {
+			sort.Strings(unknown)
+			return fmt.Errorf("[theme.colors]: unknown key(s) %s; a colour table takes only dark and light",
+				strings.Join(unknown, ", "))
 		}
 		return nil
 	default:

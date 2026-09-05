@@ -11,6 +11,7 @@ package theme
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -116,11 +117,30 @@ func FromConfig(c config.ThemeConfig) (Options, error) {
 
 	if len(c.Colors) > 0 {
 		o.Overrides = make(map[Role]Pair, len(c.Colors))
-		for name, ov := range c.Colors {
+		// Sorted, so a duplicate is reported deterministically rather than
+		// depending on which spelling Go's map iteration reached first.
+		names := make([]string, 0, len(c.Colors))
+		for name := range c.Colors {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		seen := make(map[Role]string, len(names))
+		for _, name := range names {
+			ov := c.Colors[name]
 			r, ok := roleByName(strings.ToLower(name))
 			if !ok {
 				return Options{}, fmt.Errorf("theme: unknown role %q; roles are %s", name, strings.Join(RoleNames(), ", "))
 			}
+			// Role names are matched case-insensitively, so `accent` and
+			// `ACCENT` are the same role written twice. TOML permits both keys
+			// in one table, and without this the winner is map iteration
+			// order — a config that renders differently run to run.
+			if prev, dup := seen[r]; dup {
+				return Options{}, fmt.Errorf("theme: [theme.colors] sets role %q twice, as %q and %q; keep one",
+					RoleNames()[r], prev, name)
+			}
+			seen[r] = name
 			// The hex is checked HERE, not only in config.ThemeConfig.Validate.
 			// Validate runs on the strict-decode path (ValidatePath, which
 			// doctor uses); config.Load is deliberately tolerant and never

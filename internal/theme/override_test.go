@@ -65,3 +65,33 @@ func TestFromConfig_RejectsHostileOverride(t *testing.T) {
 		t.Errorf("FromConfig rejected a dark-only override: %v", err)
 	}
 }
+
+// TestFromConfig_RejectsDuplicateRoleSpellings pins that one role cannot be
+// set twice under different spellings.
+//
+// Role names match case-insensitively, so `accent` and `ACCENT` are the same
+// role — but TOML permits both keys in one table. Without this the winner is
+// Go map iteration order, which is randomised: the same config file renders
+// different colours run to run, and nothing reports it.
+func TestFromConfig_RejectsDuplicateRoleSpellings(t *testing.T) {
+	_, err := FromConfig(config.ThemeConfig{Colors: map[string]config.ColorOverride{
+		"accent": {Dark: "#111111", Light: "#111111"},
+		"ACCENT": {Dark: "#222222", Light: "#222222"},
+	}})
+	if err == nil {
+		t.Fatal("FromConfig accepted the same role under two spellings; map order would pick the winner")
+	}
+	for _, want := range []string{"accent", "twice"} {
+		if !strings.Contains(strings.ToLower(err.Error()), want) {
+			t.Errorf("error should mention %q so the operator can find it: %v", want, err)
+		}
+	}
+
+	// Two DIFFERENT roles are of course fine.
+	if _, err := FromConfig(config.ThemeConfig{Colors: map[string]config.ColorOverride{
+		"accent": {Dark: "#111111", Light: "#111111"},
+		"fg":     {Dark: "#222222", Light: "#222222"},
+	}}); err != nil {
+		t.Errorf("FromConfig rejected two distinct roles: %v", err)
+	}
+}

@@ -25,20 +25,28 @@ func (t Theme) Writer(w io.Writer, env []string) io.Writer {
 	return colorprofile.NewWriter(w, colorEnv(env))
 }
 
-// colorEnv returns env with CLICOLOR_FORCE removed when NO_COLOR is set to a
-// non-empty value; otherwise env is returned untouched.
+// colorEnv normalises env so NO_COLOR is authoritative, or returns it
+// untouched when NO_COLOR is not set.
+//
+// Two edits, both narrowing. CLICOLOR_FORCE is removed so it cannot promote a
+// NoTTY profile to ANSI. And NO_COLOR is rewritten to "1", because
+// colorprofile parses the value with strconv.ParseBool
+// (colorprofile@v0.4.3 env.go:116) — so a spec-legal NO_COLOR=purple fails to
+// parse and the branch never fires, which no-color.org's "regardless of its
+// value" forbids. On a pipe that was masked by the profile already being
+// NoTTY; with a forced TTY profile it meant colour despite NO_COLOR.
 func colorEnv(env []string) []string {
 	if !noColorSet(env) {
 		return env
 	}
-	out := make([]string, 0, len(env))
+	out := make([]string, 0, len(env)+1)
 	for _, kv := range env {
-		if strings.HasPrefix(kv, "CLICOLOR_FORCE=") {
+		if strings.HasPrefix(kv, "CLICOLOR_FORCE=") || strings.HasPrefix(kv, "NO_COLOR=") {
 			continue
 		}
 		out = append(out, kv)
 	}
-	return out
+	return append(out, "NO_COLOR=1")
 }
 
 // noColorSet reports whether NO_COLOR is present with a non-empty value in
