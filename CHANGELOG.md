@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.0](https://github.com/cameronsjo/forgectl/compare/v0.16.0...v0.17.0) (2026-09-05)
+
+
+### Features
+
+* **docs:** link resolution substrate — `ResolveLink`, `Backlinks`, and per-root link tables in `internal/docs`, with Obsidian vault detection and a `[docs.root_kinds]` config override (`docs` | `vault`). No rendering change yet. ([f2e42c8](https://github.com/cameronsjo/forgectl/commit/f2e42c8269b3a01f3c45148777fce88801ff2021))
+* **recipe:** add herdr afk cleanup ([#439](https://github.com/cameronsjo/forgectl/issues/439)) ([223dc01](https://github.com/cameronsjo/forgectl/commit/223dc01b8a9488dc210a5fe47fd4a631fa23fe64))
+
 ## [0.16.0](https://github.com/cameronsjo/forgectl/compare/v0.15.0...v0.16.0) (2026-09-01)
 
 
