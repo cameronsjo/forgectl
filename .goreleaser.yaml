@@ -53,7 +53,10 @@ builds:
     # darwin — the linux build has no post-hook.
     hooks:
       post:
-        - cmd: sh -c 'if [ -n "$APPLE_TEAM_ID" ]; then codesign --sign "Developer ID Application" --options runtime --timestamp --force "$0"; fi' "{{ .Path }}"
+        # SIGN_KEYCHAIN names the release workflow's ephemeral keychain explicitly;
+        # the fleet runner's codesign does not see it through the search list.
+        # Unset (local/dev builds) falls back to the default search, as before.
+        - cmd: sh -c 'if [ -n "$APPLE_TEAM_ID" ]; then codesign ${SIGN_KEYCHAIN:+--keychain "$SIGN_KEYCHAIN"} --sign "Developer ID Application" --options runtime --timestamp --force "$0"; fi' "{{ .Path }}"
 
 archives:
   # Linux ships the Go binary alone — `workflow bless` is macOS-only (it needs
