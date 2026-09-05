@@ -73,6 +73,32 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           rm -f "$RUNNER_TEMP/certificate.p12"
 
+          # A Developer ID identity is only *valid* to codesign when its issuer
+          # chain resolves. GitHub-hosted images ship Apple's intermediates in the
+          # System keychain; a freshly provisioned self-hosted guest need not, and
+          # then the import above succeeds while `codesign` later reports
+          # "Developer ID Application: no identity found" (v0.17.0, the first
+          # release on the fleet). Add the Developer ID G2 intermediate to the
+          # ephemeral keychain, pinned by SHA-256 so a substituted download cannot
+          # become a trusted issuer.
+          CA_PATH="$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          curl -fsSL -o "$CA_PATH" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          echo "f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a  $CA_PATH" | shasum -a 256 -c -
+          security add-certificates -k "$KEYCHAIN_PATH" "$CA_PATH"
+          rm -f "$CA_PATH"
+
+          # Fail here, not four steps later: assert the keychain holds at least one
+          # VALID codesigning identity, and print the search list so a wrong
+          # answer is diagnosable from the log.
+          security list-keychains -d user
+          IDENTITIES="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")"
+          echo "$IDENTITIES"
+          case "$IDENTITIES" in
+            *"0 valid identities found"*)
+              echo "::error::certificate imported but no valid codesigning identity — issuer chain or keychain search list is wrong on this runner"
+              exit 1 ;;
+          esac
+
       # The helper reports the release version from its own `version` verb, so
       # stamp it from the tag before compiling. Mirrors the -X ldflags the Go
       # binary gets from goreleaser.
