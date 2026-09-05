@@ -1,5 +1,10 @@
 package docs
 
+import (
+	"path"
+	"strings"
+)
+
 // RootKind classifies how a root's link syntax and anchor semantics must be
 // interpreted. detectRootKind (vault.go) infers it from the filesystem;
 // Task 4's IndexOptions lets a caller override the inference.
@@ -124,9 +129,233 @@ type Heading struct {
 // Values are []int — indices into Index.docs — rather than []*Doc, so the
 // table doesn't need to pin per-doc pointers independently of Index's own
 // slice-of-structs storage; Task 3 dereferences through Index.docs[i].
-//nolint:unused // Task 3's NewIndex/ResolveLink populates and reads this; Task 2 builds the type only
 type rootIndex struct {
 	byRel   map[string][]int
 	byName  map[string][]int
 	byAlias map[string][]int
+}
+
+// buildRootIndexes builds one rootIndex per root, scanning docs once. Called
+// from NewIndex (index.go) right after the pathIndex loop.
+func buildRootIndexes(roots []Root, docs []Doc) map[string]*rootIndex {
+	out := make(map[string]*rootIndex, len(roots))
+	for _, r := range roots {
+		out[r.Label] = &rootIndex{
+			byRel:   map[string][]int{},
+			byName:  map[string][]int{},
+			byAlias: map[string][]int{},
+		}
+	}
+	for i, d := range docs {
+		ri, ok := out[d.RootLabel]
+		if !ok {
+			continue
+		}
+		relKey := normalizeRelKey(d.RelPath)
+		ri.byRel[relKey] = append(ri.byRel[relKey], i)
+
+		nameKey := strings.ToLower(strings.TrimSuffix(path.Base(d.RelPath), path.Ext(d.RelPath)))
+		ri.byName[nameKey] = append(ri.byName[nameKey], i)
+
+		for _, alias := range d.Aliases {
+			aliasKey := strings.ToLower(alias)
+			ri.byAlias[aliasKey] = append(ri.byAlias[aliasKey], i)
+		}
+	}
+	return out
+}
+
+// normalizeRelKey folds a slash-separated relative path to byRel's key
+// shape: lowercase, markdown extension stripped. See rootIndex's doc
+// comment — every caller of every table MUST apply this identical fold.
+func normalizeRelKey(relPath string) string {
+	return strings.ToLower(strings.TrimSuffix(relPath, path.Ext(relPath)))
+}
+
+// rootByLabel returns the Root with the given Label, if indexed.
+func (idx *Index) rootByLabel(label string) (Root, bool) {
+	for _, r := range idx.roots {
+		if r.Label == label {
+			return r, true
+		}
+	}
+	return Root{}, false
+}
+
+// pickCandidate turns a table lookup's index slice into a resolution
+// verdict: no indices is MissNoTarget (try the next table, or give up), one
+// index is the hit, more than one is MissAmbiguous — the seat's stop
+// condition (d) verdict (Task 1 Learnings) declined an Obsidian
+// same-folder-then-shortest-path tiebreak, so any true multi-match stays
+// ambiguous rather than being narrowed further.
+func (idx *Index) pickCandidate(indices []int) (*Doc, Miss) {
+	switch len(indices) {
+	case 0:
+		return nil, MissNoTarget
+	case 1:
+		return &idx.docs[indices[0]], MissNone
+	default:
+		return nil, MissAmbiguous
+	}
+}
+
+// filterBySuffix narrows a byName candidate list to the ones whose
+// (normalized) RelPath ends with a "/"-qualified target — how
+// "[[deep/Alpha]]" picks the one Alpha.md a bare "[[Alpha]]" can't.
+// cleanLower is already lowercased and path.Clean'd; its own extension (if
+// any) is stripped so it compares against normalizeRelKey's shape.
+func filterBySuffix(docs []Doc, indices []int, cleanLower string) []int {
+	cleanLower = strings.TrimSuffix(cleanLower, path.Ext(cleanLower))
+	var out []int
+	for _, i := range indices {
+		key := normalizeRelKey(docs[i].RelPath)
+		if key == cleanLower || strings.HasSuffix(key, "/"+cleanLower) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// escapesRoot reports whether a path.Clean'd target has walked outside the
+// root it's being resolved against: a leading ".." segment (after
+// path.Clean, the only way "up" can survive) or an absolute path.
+func escapesRoot(clean string) bool {
+	return clean == ".." || strings.HasPrefix(clean, "../") || path.IsAbs(clean)
+}
+
+// resolveDocsDoc resolves path0 for a RootDocs caller: an ordinary relative
+// markdown link, joined against the calling doc's own directory — never
+// against the vault/root top, because a docs tree has no Obsidian
+// vault-root-relative convention. byRel is the only table a docs root ever
+// consults (Global Constraint).
+func (idx *Index) resolveDocsDoc(rootIdx *rootIndex, from *Doc, path0 string) (*Doc, Miss) {
+	clean := path.Clean(path.Join(path.Dir(from.RelPath), path0))
+	if escapesRoot(clean) {
+		return nil, MissOutsideRoot
+	}
+	return idx.pickCandidate(rootIdx.byRel[normalizeRelKey(clean)])
+}
+
+// resolveVaultDoc resolves path0 for a RootVault caller: Obsidian's own
+// fallback chain — byRel (a path relative to the vault root) first, then
+// byName (a bare basename), then byAlias (a frontmatter alias) — stopping
+// at the first table that produces ANY answer, including an ambiguous one.
+// A "/" in the target narrows byName's candidates by RelPath suffix (the
+// "[[deep/Alpha]]" case); a bare basename never touches byRel at all.
+func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, path0 string) (*Doc, Miss) {
+	clean := path.Clean(path0)
+	if escapesRoot(clean) {
+		return nil, MissOutsideRoot
+	}
+	cleanLower := strings.ToLower(clean)
+
+	if doc, miss := idx.pickCandidate(rootIdx.byRel[normalizeRelKey(clean)]); miss != MissNoTarget {
+		return doc, miss
+	}
+
+	nameKey := strings.ToLower(strings.TrimSuffix(path.Base(clean), path.Ext(clean)))
+	candidates := rootIdx.byName[nameKey]
+	if strings.Contains(clean, "/") {
+		candidates = filterBySuffix(idx.docs, candidates, cleanLower)
+	}
+	if doc, miss := idx.pickCandidate(candidates); miss != MissNoTarget {
+		return doc, miss
+	}
+
+	return idx.pickCandidate(rootIdx.byAlias[cleanLower])
+}
+
+// resolveFragment checks target's fragment against doc's anchors, once the
+// file itself has resolved (or the link was fragment-only, in which case
+// doc is the calling doc itself). An empty fragment always succeeds — the
+// caller only wanted the file. A "^id" fragment is an Obsidian block-id
+// reference and is checked identically for both root kinds (a docs root
+// simply never has any BlockIDs to match, so it always misses there). A
+// heading fragment matches on its LAST '#'-segment (the nested-heading
+// case, "[[note#A#B]]" -> match "B"): a docs root matches goldmark's exact
+// auto-ID slug (the Global Constraint's slug-agreement pin), a vault root
+// additionally accepts a case-folded match on the heading's rendered text,
+// mirroring Obsidian's own case-insensitive heading links.
+func (idx *Index) resolveFragment(kind RootKind, doc *Doc, fragment string) (*Doc, Miss) {
+	if fragment == "" {
+		return doc, MissNone
+	}
+	if id, ok := strings.CutPrefix(fragment, "^"); ok {
+		for _, b := range doc.BlockIDs {
+			if b == id {
+				return doc, MissNone
+			}
+		}
+		return doc, MissNoTarget
+	}
+
+	segments := strings.Split(fragment, "#")
+	last := segments[len(segments)-1]
+
+	if kind == RootVault {
+		lastLower := strings.ToLower(last)
+		for _, h := range doc.Headings {
+			if h.Slug == lastLower || strings.ToLower(h.Text) == lastLower {
+				return doc, MissNone
+			}
+		}
+		return doc, MissNoTarget
+	}
+
+	for _, h := range doc.Headings {
+		if h.Slug == last {
+			return doc, MissNone
+		}
+	}
+	return doc, MissNoTarget
+}
+
+// ResolveLink resolves target — a link's raw target text, first-'#' split
+// exactly as scanDoc's LinkRef.Path/Fragment already are (a caller may pass
+// LinkRef.Raw directly; ResolveLink performs the identical first-'#' split
+// itself) — against the tables built for from's own root. Resolution NEVER
+// crosses roots: idx.byRoot[from.RootLabel] is the only table consulted
+// (Global Constraint).
+//
+// Contract: a non-nil Doc paired with MissNoTarget means the file itself
+// resolved but its anchor fragment did not; every other Miss returns a nil
+// Doc. MissNone means both the file (if any was named) and the fragment (if
+// any was given) resolved.
+//
+// Splitting on the first '#' is Obsidian's own limitation, not a shortcut
+// unique to this resolver: go.abhg.dev/goldmark/wikilink splits on the
+// LAST '#' (parser.go:83-85), so "[[note#A#B]]" needs recombining and
+// re-splitting on the first '#' to get the intended path "note" / fragment
+// "A#B" (see LinkRef.Path's doc comment) — but that reconstruction also
+// means a filename genuinely containing '#' can never be the target of a
+// link: everything from its first '#' onward reads as a fragment, with no
+// escape syntax. The Task 1 spike found five such filenames in the live
+// vault (Learnings); this is Obsidian's own limitation, carried through
+// unchanged, not a defect in this resolver.
+func (idx *Index) ResolveLink(from *Doc, target string) (*Doc, Miss) {
+	root, ok := idx.rootByLabel(from.RootLabel)
+	if !ok {
+		return nil, MissNoTarget
+	}
+	rootIdx := idx.byRoot[from.RootLabel]
+	if rootIdx == nil {
+		return nil, MissNoTarget
+	}
+
+	path0, fragment := splitFirstHash(target)
+
+	doc := from
+	if path0 != "" {
+		var miss Miss
+		if root.Kind == RootVault {
+			doc, miss = idx.resolveVaultDoc(rootIdx, path0)
+		} else {
+			doc, miss = idx.resolveDocsDoc(rootIdx, from, path0)
+		}
+		if miss != MissNone {
+			return doc, miss
+		}
+	}
+
+	return idx.resolveFragment(root.Kind, doc, fragment)
 }

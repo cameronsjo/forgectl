@@ -119,6 +119,11 @@ type Index struct {
 	// from the sidenav — reopening the excluded-directory leak through
 	// configuration instead of through code.
 	pathIndex map[docKey]bool
+	// byRoot holds one rootIndex per Root.Label, built by buildRootIndexes
+	// (links.go) right after pathIndex. ResolveLink (links.go) reads only
+	// idx.byRoot[from.RootLabel] — resolution never crosses roots (Global
+	// Constraint).
+	byRoot map[string]*rootIndex
 }
 
 // docKey identifies one indexed document by the root it was indexed under plus
@@ -173,6 +178,8 @@ func NewIndex(paths []string) (*Index, error) {
 	for _, d := range idx.docs {
 		idx.pathIndex[docKey{rootLabel: d.RootLabel, absPath: d.AbsPath}] = true
 	}
+
+	idx.byRoot = buildRootIndexes(idx.roots, idx.docs)
 	return idx, nil
 }
 
