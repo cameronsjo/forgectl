@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.1](https://github.com/cameronsjo/forgectl/compare/v0.17.0...v0.17.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **ci:** trust the Developer ID intermediate and assert a valid identity at import time ([#457](https://github.com/cameronsjo/forgectl/issues/457)) ([a3b8433](https://github.com/cameronsjo/forgectl/commit/a3b84330d51fc4ce54f9142c9a7043a776e8eb49))
+
 ## [0.17.0](https://github.com/cameronsjo/forgectl/compare/v0.16.0...v0.17.0) (2026-09-05)
 
 
