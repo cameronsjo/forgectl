@@ -9,7 +9,7 @@ machine: "cf6e768835c7"
 approved_in: "woven-lyre"
 approved_session_id: "1488f160-f360-414b-952e-1f3846a08602"
 status: in-progress
-next: "Task 3 ResolveLink → Task 4 Backlinks → Task 5 cleanup + polish"
+next: "Task 4 Backlinks → Task 5 cleanup + polish"
 branch: plan/link-substrate
 pr: "cameronsjo/forgectl#451"
 issue: cameronsjo/forgectl#443
@@ -154,11 +154,11 @@ Panel: plan-reviewer, red-team-reviewer ran — 13 findings, 13 folded in, 0 dec
 **Report:** `<reports-dir>/task-3.md`
 
 **Steps:**
-- [ ] Failing tests, one per row: vault basename hit; `MissNoTarget`; `MissAmbiguous` (two `Alpha.md`); `[[deep/Alpha]]` path-prefix disambiguation; `MissOutsideRoot` for `[[../repo/index]]` and `[../../etc/passwd](...)`; alias list; alias scalar; case fold; vault heading anchor hit and miss (doc + `MissNoTarget`); block id; nested heading `[[anchors#Some Heading#Sub]]` → doc + `MissNone` with fragment reconstructed as `Some Heading#Sub`; docs-root anchor `guide.md#getting-started`; within-root isolation both directions; fragment-only link resolves to `from`
-- [ ] The slug-agreement test: render `## Getting Started` through `Render()`, extract `id=`, assert equal to the resolver's slug
-- [ ] Implement the algorithm: reconstruct path and fragment per the Global Constraint; empty path → `from`; docs roots: relative path from `filepath.Dir(from.RelPath)`, `path.Clean`, leading `..` or `/` → `MissOutsideRoot`, look up `byRel`; vault roots: `byRel` (folded, ext optional) → `byName` → `byAlias`, a `/` in the target filters `byName` candidates by `RelPath` suffix; apply the Task 1 tiebreak decision; then the fragment check per root kind
-- [ ] Run — expect GREEN
-- [ ] Commit: `feat(docs): ResolveLink with Obsidian and GitHub anchor semantics`
+- [x] Failing tests, one per row: vault basename hit; `MissNoTarget`; `MissAmbiguous` (two `Alpha.md`); `[[deep/Alpha]]` path-prefix disambiguation; `MissOutsideRoot` for `[[../repo/index]]` and `[../../etc/passwd](...)`; alias list; alias scalar; case fold; vault heading anchor hit and miss (doc + `MissNoTarget`); block id; nested heading `[[anchors#Some Heading#Sub]]` → doc + `MissNone` with fragment reconstructed as `Some Heading#Sub`; docs-root anchor `guide.md#getting-started`; within-root isolation both directions; fragment-only link resolves to `from`
+- [x] The slug-agreement test: render `## Getting Started` through `Render()`, extract `id=`, assert equal to the resolver's slug
+- [x] Implement the algorithm: reconstruct path and fragment per the Global Constraint; empty path → `from`; docs roots: relative path from `filepath.Dir(from.RelPath)`, `path.Clean`, leading `..` or `/` → `MissOutsideRoot`, look up `byRel`; vault roots: `byRel` (folded, ext optional) → `byName` → `byAlias`, a `/` in the target filters `byName` candidates by `RelPath` suffix; apply the Task 1 tiebreak decision; then the fragment check per root kind
+- [x] Run — expect GREEN
+- [x] Commit: `feat(docs): ResolveLink with Obsidian and GitHub anchor semantics`
 
 ---
 
