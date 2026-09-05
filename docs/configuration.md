@@ -42,3 +42,33 @@ Several command groups own their own config section, documented alongside that c
 - [`bench`](commands/bench.md) — `[bench]`, interop with the local dev services
 - [`k8s`](commands/k8s.md) — bounded, terminal-safe log streaming
 - [`docs`](commands/docs.md) — `[docs]`, local markdown reader
+- [`theme`](commands/theme.md) — `[theme]`, `[theme.colors]`, the palette every styled surface draws from
+
+## Theme
+
+`[theme]` selects the palette every styled surface draws from — the TUI, huh
+prompts, doctor marks, and fang's `--help` and error frames. Defaults to the
+Artificer terminal palette, resolved dark.
+
+```toml
+[theme]
+preset = "artificer"  # "artificer" (default) | "legacy"
+mode   = "dark"       # "auto" (default) | "dark" | "light"
+
+[theme.colors]
+accent = "#dbbb6f"                                # one hex: both modes
+danger = { dark = "#e6a8a2", light = "#8a2418" }  # per mode
+```
+
+`mode = "auto"` asks the terminal for its background, but only where that is
+safe: both stdin and stdout must be a real TTY, `NO_COLOR` must be unset, and
+`TERM` must not be `screen*` or `tmux*`. A multiplexer does not forward the
+query, so **everything renders dark inside tmux** regardless of the terminal
+behind it. On a light terminal inside tmux, set `mode = "light"` explicitly —
+that is the case auto-detection cannot see.
+
+A bad `[theme]` never stops the binary starting: it is reported by `doctor` and
+`launch doctor`, and the default palette is used. Run `forgectl theme show` to
+see what actually resolved, including which roles came from an override and
+whether any override is inert. Role names and the contrast column are
+documented in [commands/theme.md](commands/theme.md).
