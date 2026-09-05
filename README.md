@@ -1,6 +1,6 @@
 # forgectl
 
-Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) has grown into the **workbench forge**: 28 composable command-group modules (see the table below) with a declarative workflow DSL as the composition layer.
+Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) has grown into the **workbench forge**: 29 composable command-group modules (see the table below) with a declarative workflow DSL as the composition layer.
 
 Built for two hands and one thumb:
 
@@ -21,7 +21,7 @@ Reading a local clone's git state — `projects list`, `projects pick`, the proj
 
 ## Command groups
 
-28 command groups, at a glance. `forgectl --help` lists them from the binary
+29 command groups, at a glance. `forgectl --help` lists them from the binary
 itself; this table is the scannable index — full verbs and flags for every
 group are in the `## Usage` roster below, and the groups with a dedicated
 deep-dive get a link here.
