@@ -63,8 +63,12 @@ func TestStyledPrintsGoThroughColorOut(t *testing.T) {
 			if !ok || fn.Body == nil {
 				continue
 			}
-			raw := rawWriterIdents(fn)
+			// Bindings are tracked as the walk proceeds, in source order, so a
+			// later `out = colorOut(cmd)` cannot retroactively clear an earlier
+			// styled write through `out := cmd.OutOrStdout()`.
+			raw := map[string]bool{}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				noteWriterBinding(n, raw)
 				call, ok := n.(*ast.CallExpr)
 				if !ok || len(call.Args) == 0 || !isRawWriter(call.Args[0], raw) {
 					return true
@@ -197,33 +201,44 @@ func hasRenderCall(n ast.Node) bool {
 	return found
 }
 
-// rawWriterIdents finds local variables in fn bound to a raw cmd.OutOrStdout().
-// An identifier later rebound to colorOut(...) drops out of the set, so
-// `out := cmd.OutOrStdout()` and `out := colorOut(cmd)` are told apart.
-func rawWriterIdents(fn *ast.FuncDecl) map[string]bool {
-	raw := map[string]bool{}
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		as, ok := n.(*ast.AssignStmt)
+// noteWriterBinding updates raw when n binds a name to a writer — through
+// either `out := cmd.OutOrStdout()` or `var out = cmd.OutOrStdout()`.
+//
+// It is called during the walk rather than in a prepass on purpose. A prepass
+// computes one final set, so a function that rebinds the name later
+// (`out = colorOut(cmd)`) would clear it for the whole body and hide an earlier
+// styled write through the raw writer.
+func noteWriterBinding(n ast.Node, raw map[string]bool) {
+	switch d := n.(type) {
+	case *ast.AssignStmt:
+		bindWriters(d.Lhs, d.Rhs, raw)
+	case *ast.ValueSpec: // var out = cmd.OutOrStdout()
+		lhs := make([]ast.Expr, len(d.Names))
+		for i, name := range d.Names {
+			lhs[i] = name
+		}
+		bindWriters(lhs, d.Values, raw)
+	}
+}
+
+// bindWriters pairs lhs names with rhs expressions, marking a name raw when it
+// takes a bare cmd.OutOrStdout() and clearing it when it takes colorOut(...).
+func bindWriters(lhs, rhs []ast.Expr, raw map[string]bool) {
+	for i, expr := range rhs {
+		if i >= len(lhs) {
+			break
+		}
+		id, ok := lhs[i].(*ast.Ident)
 		if !ok {
-			return true
+			continue
 		}
-		for i, rhs := range as.Rhs {
-			if i >= len(as.Lhs) {
-				break
-			}
-			id, ok := as.Lhs[i].(*ast.Ident)
-			if !ok {
-				continue
-			}
-			if isOutOrStdoutCall(rhs) {
-				raw[id.Name] = true
-			} else if isColorOutCall(rhs) {
-				delete(raw, id.Name)
-			}
+		switch {
+		case isOutOrStdoutCall(expr):
+			raw[id.Name] = true
+		case isColorOutCall(expr):
+			delete(raw, id.Name)
 		}
-		return true
-	})
-	return raw
+	}
 }
 
 // isRawWriter reports whether e is a raw cmd.OutOrStdout() — spelled inline, or

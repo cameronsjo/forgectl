@@ -1,9 +1,12 @@
 package main
 
 import (
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -62,7 +65,8 @@ func TestExactlyOneLipgloss(t *testing.T) {
 // problem again, this time invisible to TestExactlyOneLipgloss because it is
 // one module.
 func TestNoLipglossCompatShim(t *testing.T) {
-	const shim = `"charm.land/lipgloss/v2/compat"`
+	const shim = "charm.land/lipgloss/v2/compat"
+	fset := token.NewFileSet()
 	err := filepath.WalkDir("internal", func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -70,15 +74,23 @@ func TestNoLipglossCompatShim(t *testing.T) {
 		if d.IsDir() || !strings.HasSuffix(path, ".go") {
 			return nil
 		}
-		// G304/G122: path comes from walking this repo's own internal/ tree
-		// under the test's working directory — there is no external input and
-		// no attacker-controlled symlink to race.
-		data, readErr := os.ReadFile(path) //nolint:gosec
-		if readErr != nil {
-			return readErr
+		// Parsed rather than grepped. A Go import path is a string literal, and
+		// a RAW one is legal — `import compat ` + "`charm.land/lipgloss/v2/compat`" + ` —
+		// so a substring search for the double-quoted spelling can be walked
+		// past. Unquoting the parsed path covers both literal forms.
+		file, parseErr := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+		if parseErr != nil {
+			return parseErr
 		}
-		if strings.Contains(string(data), shim) {
-			t.Errorf("%s imports the lipgloss v1 compatibility shim; write against the v2 API directly", path)
+		for _, imp := range file.Imports {
+			p, unquoteErr := strconv.Unquote(imp.Path.Value)
+			if unquoteErr != nil {
+				t.Errorf("%s: unparseable import path %s: %v", path, imp.Path.Value, unquoteErr)
+				continue
+			}
+			if p == shim {
+				t.Errorf("%s imports the lipgloss v1 compatibility shim; write against the v2 API directly", path)
+			}
 		}
 		return nil
 	})
