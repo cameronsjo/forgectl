@@ -235,6 +235,11 @@ forgectl k8s exec -it pod/api -- sh                       # kubectl exec argv fo
 forgectl k8s inspect deployment/api                       # describe + get -o wide + events, in that fixed order
 forgectl k8s inspect pod/api-7f6c9 -n prod                # extra args forward to all three kubectl calls unchanged
 
+# theme — inspect the colours every styled surface draws from
+forgectl theme show                      # resolved hex per role, provenance, contrast
+forgectl theme show --json               # the same, machine-readable
+forgectl theme preview                   # render each role so you can see it
+
 # ghostty — theme + keybind reporting, parsed live from the ghostty CLI
 forgectl ghostty themes                  # custom themes, active one marked
 forgectl ghostty themes --all            # also list the themes bundled with ghostty

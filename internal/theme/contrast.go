@@ -5,16 +5,55 @@ import (
 	"strconv"
 )
 
-// Contrast returns the WCAG 2.x relative-contrast ratio between r and Bg, in
-// t's current mode — the number theme show compares against the 4.5:1 AA
-// text floor. A malformed hex (which should not occur — every colour reaching
-// here was either generated from the vendored palette or validated by
-// config.ThemeConfig.Validate) resolves to a luminance of 0 rather than
-// panicking.
+// Contrast returns the WCAG 2.x contrast ratio for r against the surface it is
+// actually drawn on, in t's current mode.
+//
+// "Against Bg" is wrong for the on-fill roles and would make theme show cry
+// wolf. OnAccent is ink, which sits on AccentFill and never on the page
+// background: measured against Bg it reads 1.12:1, and against the fill it
+// reads 5.65:1 — the number _palette.json's own $notes records for it. Same
+// for OnUrgent on UrgentFill. Reporting the first number would flag two
+// correct colours as failures and teach a reader to ignore the column.
+//
+// A malformed hex — which should not occur, since every colour here was either
+// generated from the vendored palette or validated by
+// config.ThemeConfig.Validate — resolves to luminance 0 rather than panicking.
 func (t Theme) Contrast(r Role) float64 {
-	fg := relativeLuminance(t.Hex(r))
-	bg := relativeLuminance(t.Hex(RoleBg))
-	lighter, darker := fg, bg
+	return contrastRatio(t.Hex(r), t.Hex(t.contrastAgainst(r)))
+}
+
+// contrastAgainst names the role r is drawn on top of.
+func (t Theme) contrastAgainst(r Role) Role {
+	switch r {
+	case RoleOnAccent:
+		return RoleAccentFill
+	case RoleOnUrgent:
+		return RoleUrgentFill
+	default:
+		return RoleBg
+	}
+}
+
+// CarriesText reports whether r is used as TEXT, and so whether its Contrast
+// is owed the 4.5:1 AA floor at all.
+//
+// This follows _palette.json's own $notes.ruleUsageSetsRatio — "the contrast a
+// colour MUST clear is a function of how it is USED, not the hue". A fill, a
+// raised surface, and the background itself carry no text obligation, so
+// flagging them below AA would be reporting a rule they were never under.
+func CarriesText(r Role) bool {
+	switch r {
+	case RoleAccentFill, RoleUrgentFill, RoleSurfaceRaised, RoleBg:
+		return false
+	default:
+		return true
+	}
+}
+
+// contrastRatio is the WCAG 2.x ratio between two "#rrggbb" colours.
+func contrastRatio(a, b string) float64 {
+	la, lb := relativeLuminance(a), relativeLuminance(b)
+	lighter, darker := la, lb
 	if darker > lighter {
 		lighter, darker = darker, lighter
 	}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 func TestVersionCmd_PrintsRootVersion(t *testing.T) {
@@ -48,7 +49,7 @@ func TestVersion_VerbMatchesFlagThroughFang(t *testing.T) {
 		root.SetErr(&buf)
 		root.SetArgs([]string{arg})
 
-		err := fang.Execute(context.Background(), root, fangOptions("9.9.9", "abcdef0123456")...)
+		err := fang.Execute(context.Background(), root, fangOptions("9.9.9", "abcdef0123456", theme.Default())...)
 		if err != nil {
 			t.Fatalf("fang.Execute(%q) error = %v", arg, err)
 		}
