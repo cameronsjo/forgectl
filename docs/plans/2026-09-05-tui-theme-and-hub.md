@@ -8,9 +8,10 @@ machine: "cf6e768835c7"
 approved_in: "cedar-chisel"
 approved_session_id: "4b1b4f96-d8eb-4faa-a96b-9bf46558cc02"
 status: in-progress
-next: "PR 1 (#454) is ready, all checks green, MERGEABLE/CLEAN — awaiting Cameron's merge. Then PR 2a theme core → PR 2b call sites → PR 3 hub. Re-read modules_test.go wantCount at PR 2a branch time: it was 28 when PR 1 branched and main has since gained the recipe module."
-branch: chore/charm-v2
-pr: https://github.com/cameronsjo/forgectl/pull/454
+pr_1: "https://github.com/cameronsjo/forgectl/pull/454 — MERGED 2026-09-05 as 19b5467"
+next: "PR 1 merged (19b5467). PR 2a in flight on feat/theme: Task 3 config -> Task 4 theme core -> Task 5 wiring. modules_test.go wantCount is 29 at PR 2a branch time; the theme module makes it 30."
+branch: feat/theme
+pr: "PR 2a — opened below"
 updated: 2026-09-05
 date: 2026-09-05
 ---
@@ -25,7 +26,9 @@ Color is three layers deep and none of them is the design system. The founding p
 
 Underneath: forgectl links **two lipgloss majors** — `github.com/charmbracelet/lipgloss v1.1.0` (TUI, huh, bubbles) and `charm.land/lipgloss/v2` (fang v1.0.0). Cameron ruled this the miss: collapse to one, don't bridge. The v2 line is GA (`lipgloss/v2 v2.0.6`, `bubbletea/v2 v2.0.9`, `bubbles/v2 v2.2.1`, `huh/v2 v2.0.3`; go directives ≤ 1.25.8, repo `go 1.26.0`; all confirmed on the proxy by the red-team seat).
 
-**Palette source (panel finding, Cameron's call):** Artificer's *terminal* palette is `themes/_palette.json` in the artificer-design-system repo — the source of truth behind its ghostty, tmux, gitmux, cmux, herdr, gum, glamour, and lazygit targets — and it disagrees with the web `tokens.json` (`brandPurple` `#9070d0` vs `#5a3a9a`). forgectl generates from `_palette.json`, fetched at a pinned tag, so it shows the same colors as the tmux status bar it sits beside. The themes directory is not on the npm package, so the fetch is GitHub raw at the pinned ref, never the sibling checkout.
+**Palette source (panel finding, Cameron's call):** Artificer's *terminal* palette is `themes/_palette.json` in the artificer-design-system repo — the source of truth behind its ghostty, tmux, gitmux, cmux, herdr, gum, glamour, and lazygit targets — and it disagrees with the web `tokens.json` (`brandPurple` `#9070d0` vs `#5a3a9a`). forgectl generates from `_palette.json`, fetched at a pinned ref, so it shows the same colors as the tmux status bar it sits beside. The themes directory is not on the npm package, so the fetch goes to GitHub at the pinned ref, never the sibling checkout.
+
+**Corrected at branch time — the fetch mechanism the plan named does not work.** `cameronsjo/artificer-design-system` is **private**, so an unauthenticated `raw.githubusercontent.com` URL 404s; the fetch uses `gh api .../contents/themes/_palette.json?ref=<sha>` instead, which carries the operator's credentials. And the repo has **no tags and no releases**, so there is no tag to pin — the pin is a commit SHA, which is immutable and therefore stronger. Pinned at `c5aa91b4b92826d931c21706b26764eb8b892f4d`, whose `_palette.json` carries `$version: 0.25.0` — the same version `internal/docs/assets/artificer/provenance.json` records for the vendored npm assets, so one pin does cover both artifacts as intended. Vendoring a file out of a private repo into this public one is not new: `tokens.json` from the same repo already ships here.
 
 Cameron's rulings this session: Artificer by default **with user config overrides**; theme reaches the **whole binary**; the menu exposes a **curated set of human-interactive verbs**; hub top level stays the **flat seven**.
 
@@ -67,7 +70,15 @@ Four PRs on four branches, strictly ordered. Each from a fresh `origin/main` wor
 
 **PR 2a — `feat/theme` (core, config, wiring, `theme` module; call sites untouched).** `internal/theme` (leaf: imports `config`, never `module`/`cli`/`tui`). `internal/theme/palettegen` (importable; `cmd/main.go` thin wrapper) renders `internal/theme/artificer_gen.go` from `internal/theme/artificer/_palette.json`, which `scripts/vendor-artificer.sh` fetches from `https://raw.githubusercontent.com/cameronsjo/artificer-design-system/<pinned-tag>/themes/_palette.json` alongside the npm vendor (same pin, one `--check`). `Theme` resolves dark/light at construction (`New(Options, isDark)`, `WithDark(bool) Theme`) and every accessor is argument-free: `Styles()`, `Marks()`, `Huh() huh.Theme`, `List() list.Styles`, `Fang() fang.ColorSchemeFunc`, `Writer(w io.Writer, env []string) io.Writer`. `Detect(mode Mode, env Env, probe func() bool) bool`: `dark|light` fixed; `auto` → dark for plain prints (no probe on the fast path — fang probes on its own for TTY help anyway), probe only where a Bubble Tea program or huh form is about to render and `env.StdinTTY && env.StdoutTTY && !env.NoColor && TERM ∉ {screen*, tmux*}`. The TUI issues `tea.RequestBackgroundColor` under the same predicate and rebuilds via `WithDark` on `BackgroundColorMsg`, so list, rows, and huh forms always agree. `config.ThemeConfig` (`[theme] preset = artificer|legacy`, `mode = auto|dark|light`, `[theme.colors] role = "#rrggbb" | {dark, light}`), validated in `ValidatePath`; `[theme.colors]` is exempt from `config`'s map redaction (hex is not a secret). `module.Deps.Theme` filled in `productionDeps`. New `theme` extension module: `theme preview` (swatch sheet, dark and light columns, huh confirm sample, fang snippet) and `theme show [--json]` (resolved hex per role, provenance preset/override/mode, AA contrast flag per role against `bg`, `warnings[]` for an ignored `[theme]`).
 
-Role map (`_palette.json` key → role): `accent`→Accent (header, selected, section titles) · `success`→OK · `urgentText`→Danger (bare `urgent` fails AA as text) · `attention`→Warn, Active · `fgMuted`→Muted · `fgSecondary`→Meta · `fgDisabled`→Dim · `fg`→Fg · `steel`→Steel (session names, paths, flags) · `brandPurpleBright`→Brand (forge glyph only) · `bgRaised`→SurfaceRaised · `accentFill`→AccentFill · `onAccent`→OnAccent · `urgentFill`→UrgentFill · `onUrgent`→OnUrgent. `RoleNames()` order is this list. **Two-color rule** applies to chrome; status marks (`✓ ! ✗ -`) and log severity are exempt because glyph + text carry the state.
+Role map (`_palette.json` key → role): `accent`→Accent (header, selected, section titles) · `success`→OK · `urgentText`→Danger (bare `urgent` fails AA as text) · `attention`→Warn, Active · `fgMuted`→Muted · `fgSecondary`→Meta · `fgDisabled`→Dim · `fg`→Fg · `steel`→Steel (session names, paths, flags) · `brandPurpleBright`→Brand (forge glyph only) · `bgRaised`→SurfaceRaised · `accentFill`→AccentFill · `ink`→OnAccent · `urgent`→UrgentFill · `ivory`→OnUrgent. `RoleNames()` order is this list.
+
+**Three of those were corrected against the palette at branch time** — the plan named `onAccent`, `urgentFill`, and `onUrgent`, and none of the three is a token. The palette's own `$notes` settle each, so none of this is a guess:
+
+- `onAccentDark` and `onAccentLight` both read `ink #20203e`, and `themes/build.mjs:113` states it with the measurement: *"ink in BOTH modes … ink 5.65:1 on accentFill, ivory 2.32"*. **OnAccent → `ink`, in both modes** — it does not flip.
+- There is no `urgentFill` token. `$notes.urgentText` says bare `urgent` "is a fill/accent hue, not a text role", and `build.mjs` uses it as `statusBar.debuggingBackground`. **UrgentFill → `urgent`.**
+- `$notes.onUrgent` reads `ivory #f5ead0`. **OnUrgent → `ivory`, both modes.**
+
+Two further `$notes` bear on the map and both leave it intact. `attentionNotTextRole` says `attention` is not a body-text colour — but it scopes itself explicitly: *"Console log-level coloring … is a separate terminal convention and out of scope."* forgectl is that convention, so `attention`→Warn/Active stands. `mutedGlyphFloor` records `fgMuted` at 3.05:1 dark, below the 4.5:1 text floor and above the 3:1 graphical one — fine for a glyph, so Muted must not carry text meaning alone. **Two-color rule** applies to chrome; status marks (`✓ ! ✗ -`) and log severity are exempt because glyph + text carry the state.
 
 **PR 2b — `refactor/theme-callsites`.** TUI, cli, k8s call sites move onto `deps.Theme`; the PR 1 shims retire into `theme.Writer`; the root enforcement test lands in the same PR as the last literal it forbids.
 
