@@ -35,18 +35,18 @@ var charmV1Modules = []string{
 // the other, and NO_COLOR compliance is decided by which one a given call site
 // happened to use.
 func TestExactlyOneLipgloss(t *testing.T) {
-	for _, line := range buildList(t) {
+	// Resolved once: `go list -m all` walks the whole module graph and is slow
+	// cold, and both checks below read the same list.
+	modules := buildList(t)
+
+	var lipgloss []string
+	for _, line := range modules {
 		path, _, _ := strings.Cut(line, " ")
 		for _, retired := range charmV1Modules {
 			if path == retired {
 				t.Errorf("%s is back in the build list; forgectl links one charm major (see docs/plans/2026-09-05-tui-theme-and-hub.md)", path)
 			}
 		}
-	}
-
-	var lipgloss []string
-	for _, line := range buildList(t) {
-		path, _, _ := strings.Cut(line, " ")
 		if strings.HasPrefix(path, "charm.land/lipgloss/") || path == "github.com/charmbracelet/lipgloss" {
 			lipgloss = append(lipgloss, path)
 		}

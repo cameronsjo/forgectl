@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -23,8 +24,18 @@ const oneSessionRow = "123" + sep + "456" + sep + "$1" + sep + "alpha" + sep +
 // release also satisfies, so tests construct the press explicitly — matching
 // what the model switches on, and keeping a release from being mistaken for a
 // second press.
+//
+// Single-rune only, enforced rather than assumed. A named or modified key
+// ("esc", "ctrl+c") does not round-trip through this shape: Code would take the
+// first letter while Text carried the whole name, producing a message that
+// matches the model's switch for the wrong reason — or not at all — and a test
+// that passes or fails on an accident. Build those with an explicit
+// tea.KeyPressMsg{Code: tea.KeyEscape} instead, as TestEscFromSubscreenReturnsToMenu does.
 func key(s string) tea.KeyPressMsg {
 	r := []rune(s)
+	if len(r) != 1 {
+		panic("tui test: key() takes exactly one rune, got " + strconv.Quote(s) + "; use tea.KeyPressMsg directly for named or modified keys")
+	}
 	return tea.KeyPressMsg{Code: r[0], Text: s}
 }
 

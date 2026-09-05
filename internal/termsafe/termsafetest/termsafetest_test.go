@@ -110,6 +110,13 @@ func TestAssertInertAcceptsOnlyForgectlsOwnSGR(t *testing.T) {
 		{name: "truncated 256-color params", out: "a\x1b[38;5mb", wantReject: true},
 		{name: "unknown extended color kind", out: "a\x1b[38;9;1mb", wantReject: true},
 		{name: "out-of-range color channel", out: "a\x1b[38;2;1;2;300mb", wantReject: true},
+		// Fail-closed on attributes this allowlist does not name. A future
+		// lipgloss that emits one of these should trip the assertion loudly and
+		// have the list widened deliberately — never be waved through as
+		// "probably ours".
+		{name: "underline color (unknown attribute)", out: "a\x1b[58;5;12mb", wantReject: true},
+		{name: "colon sub-parameter form", out: "a\x1b[38:2:1:2:3mb", wantReject: true},
+
 		{name: "C1 CSI", out: "a2Kb", wantReject: true},
 		{name: "bidi override", out: "a‮b", wantReject: true},
 	}

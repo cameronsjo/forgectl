@@ -142,6 +142,17 @@ func ownSGRLen(s string) int {
 // Rejected: blink (5, 6) and conceal (8). Conceal makes text unreadable while
 // leaving it in the output, which is the one appearance attribute that could
 // hide content a reader is being asked to approve.
+//
+// Unknown parameters FAIL CLOSED — an attribute not named here (underline
+// colour 58, say, or a colon-delimited sub-parameter form) is not stripped, so
+// its ESC reaches the scan and the assertion fails. That is the safe direction:
+// new legitimate styling surfaces as a loud test failure someone widens this
+// list for, while an injected sequence is never waved through as "probably
+// ours". It is also why this hand-written check is preferred over a general
+// CSI decoder — x/ansi would classify a colon form as valid SGR, which is
+// exactly the judgement this function must not delegate. lipgloss builds SGR
+// through x/ansi's semicolon-only emitters (`38;5;<n>`, `38;2;<r>;<g>;<b>`), so
+// the forms below are what the rendering stack can actually produce today.
 func ownSGRParams(params string) bool {
 	if params == "" { // ESC[m — bare reset, what lipgloss v2 emits
 		return true
