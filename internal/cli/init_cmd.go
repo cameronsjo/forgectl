@@ -215,6 +215,25 @@ const prScaffold = `
 # max_concurrent = 4 # cap on concurrent review windows; unset or <1 uses the built-in default
 `
 
+// themeScaffold is the [theme] section. Commented rather than active — a zero
+// ThemeConfig already means "TUI's own baked defaults" (ThemeConfig.IsZero),
+// so nothing here needs to be live for the TUI to render correctly.
+//
+// mode is recommended as "dark" unconditionally, not "auto": inside tmux
+// every pane renders dark regardless of the host terminal's own palette, so a
+// light terminal running inside tmux needs mode = "light" set explicitly to
+// match — "auto" would detect the terminal and get it backwards.
+const themeScaffold = `
+# ── theme: TUI colour theme (forgectl's charmbracelet UIs) ──────────────────
+[theme]
+# preset = "artificer" # "artificer" (default) | "legacy"
+# mode   = "dark"      # recommended: "dark". Inside tmux everything renders dark regardless of the
+#                       # host terminal, so a LIGHT terminal running inside tmux needs mode = "light" set here.
+# [theme.colors]
+# accent = "#dbbb6f"                              # scalar: sets both dark and light
+# danger = { dark = "#e6a8a2", light = "#8a2418" } # table: per-mode override
+`
+
 // initSection is one scaffoldable block: a config.toml section (or, for the
 // empty name, the host-scalar preamble) plus its annotated template.
 type initSection struct {
@@ -252,6 +271,7 @@ var initSections = []initSection{
 	{"preflight", "preflight", preflightScaffold},
 	{"update", "update", updateScaffold},
 	{"pr", "pr", prScaffold},
+	{"theme", "theme", themeScaffold},
 }
 
 // initModule declares the full-scaffold convenience extension (ADR-0005). It
