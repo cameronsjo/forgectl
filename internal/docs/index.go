@@ -10,7 +10,6 @@
 package docs
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -44,6 +43,16 @@ type Root struct {
 	// any resolved path other than OnlyFile: naming one file must not
 	// silently grant access to every other file in its directory.
 	OnlyFile string
+	// Kind classifies this root's link syntax and anchor semantics —
+	// RootDocs (ordinary relative markdown links) or RootVault (Obsidian
+	// wikilinks). Detected by detectRootKind (vault.go) at index-build
+	// time; Task 4's IndexOptions lets a caller override the detection.
+	Kind RootKind
+	// VaultPath is the directory containing the ".obsidian" folder that
+	// classified this root as RootVault — set only when Kind == RootVault.
+	// It may differ from Path when the configured root sits somewhere
+	// inside the vault rather than at the vault's own top.
+	VaultPath string
 }
 
 // Doc is one indexed markdown file.
@@ -61,6 +70,20 @@ type Doc struct {
 	// Title is the doc's first level-1 ("# ") heading, or its filename
 	// (without extension) if none is found.
 	Title string
+	// Aliases is the doc's frontmatter `aliases` value (a YAML list or a
+	// bare scalar, folded to a list), scanned for every root. Only a
+	// RootVault root consults it during resolution.
+	Aliases []string
+	// Headings is every heading scanDoc found in the doc, in document
+	// order, each carrying goldmark's auto-generated anchor slug.
+	Headings []Heading
+	// BlockIDs is the sorted, de-duplicated set of Obsidian "^block-id"
+	// markers found in the doc.
+	BlockIDs []string
+	// Links is every outbound link scanDoc found in the doc — wikilinks
+	// and plain markdown links whose destination carries no URL scheme —
+	// already split into the form ResolveLink (Task 3) consumes.
+	Links []LinkRef
 	// ModTime is the file's last-modified time, used to order "recents".
 	ModTime time.Time
 }
@@ -95,6 +118,76 @@ type Index struct {
 	// from the sidenav — reopening the excluded-directory leak through
 	// configuration instead of through code.
 	pathIndex map[docKey]bool
+	// byRoot holds one rootIndex per Root.Label, built by buildRootIndexes
+	// (links.go) right after pathIndex. ResolveLink (links.go) reads only
+	// idx.byRoot[from.RootLabel] — resolution never crosses roots (Global
+	// Constraint).
+	byRoot map[string]*rootIndex
+	// backlinks maps a doc's docKey to the indices (into docs) of every
+	// OTHER doc whose scanned Links resolve to it — built once, right after
+	// byRoot, by running ResolveLink over every outbound link. Because this
+	// reuses ResolveLink itself rather than a second lookup path, the
+	// forward and reverse answers can never disagree. Backlinks reads it.
+	backlinks map[docKey][]int
+	// opts is the IndexOptions this Index was built with. Rebuild reproduces
+	// it (NewIndexWithOptions(idx.paths, idx.opts)) so a live-reload rebuild
+	// carries forward the same root-kind overrides the caller configured —
+	// without this, Rebuild would silently drop them on the next filesystem
+	// change.
+	opts IndexOptions
+}
+
+// IndexOptions carries construction-time overrides for NewIndexWithOptions.
+type IndexOptions struct {
+	// RootKinds overrides detectRootKind's filesystem-based inference for a
+	// root, keyed by the root path as the caller wrote it. Keys and the
+	// paths argument are compared by absolute, cleaned form (rootKindFor),
+	// so "." / "./docs" / "docs/" in a config file match the absolute root
+	// the CLI derives for the same directory. Symlinks are not resolved on
+	// either side. A key that matches no entry in paths matches nothing; it
+	// is not an error, since a caller's config may list roots this
+	// particular invocation was not given.
+	RootKinds map[string]RootKind
+}
+
+// rootKindFor returns the override for root path p, matching RootKinds
+// keys by absolute cleaned path rather than by the literal string. A key
+// or path that cannot be made absolute falls back to literal comparison.
+// Two keys that name the same root with different kinds are an error, not
+// a coin toss: map order would otherwise pick the winner per process.
+func (o IndexOptions) rootKindFor(p string) (RootKind, bool, error) {
+	if len(o.RootKinds) == 0 {
+		return RootDocs, false, nil
+	}
+	want := comparablePath(p)
+	keys := make([]string, 0, len(o.RootKinds))
+	for key := range o.RootKinds {
+		if comparablePath(key) == want {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		return RootDocs, false, nil
+	}
+	sort.Strings(keys)
+	kind := o.RootKinds[keys[0]]
+	for _, key := range keys[1:] {
+		if o.RootKinds[key] != kind {
+			return RootDocs, false, fmt.Errorf("root_kinds: %q and %q name the same root with different kinds", keys[0], key)
+		}
+	}
+	return kind, true, nil
+}
+
+// comparablePath is the form two root paths are compared in: absolute and
+// cleaned, so relative spellings, "." segments, and trailing separators do
+// not defeat a match. An unresolvable path compares as written.
+func comparablePath(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	return abs
 }
 
 // docKey identifies one indexed document by the root it was indexed under plus
@@ -112,7 +205,16 @@ type docKey struct {
 // extension is a hard error — a docs server should never silently start
 // with fewer roots than the caller asked for.
 func NewIndex(paths []string) (*Index, error) {
-	idx := &Index{paths: append([]string(nil), paths...)}
+	return NewIndexWithOptions(paths, IndexOptions{})
+}
+
+// NewIndexWithOptions builds an Index over paths exactly as NewIndex does,
+// except a root named in opts.RootKinds skips detectRootKind's filesystem
+// probe and uses the given RootKind instead (see resolveRootKind for the
+// VaultPath interaction). NewIndex(paths) is a thin call to
+// NewIndexWithOptions(paths, IndexOptions{}).
+func NewIndexWithOptions(paths []string, opts IndexOptions) (*Index, error) {
+	idx := &Index{paths: append([]string(nil), paths...), opts: opts}
 	labels := map[string]bool{}
 
 	for _, p := range paths {
@@ -125,8 +227,13 @@ func NewIndex(paths []string) (*Index, error) {
 			return nil, fmt.Errorf("docs root %q: %w", p, err)
 		}
 
+		override, hasOverride, err := opts.rootKindFor(p)
+		if err != nil {
+			return nil, fmt.Errorf("docs root %q: %w", p, err)
+		}
+
 		if info.IsDir() {
-			root, docs, err := indexDirRoot(labels, p)
+			root, docs, err := indexDirRoot(labels, p, override, hasOverride)
 			if err != nil {
 				return nil, err
 			}
@@ -135,7 +242,7 @@ func NewIndex(paths []string) (*Index, error) {
 			continue
 		}
 
-		root, doc, err := indexFileRoot(labels, p)
+		root, doc, err := indexFileRoot(labels, p, override, hasOverride)
 		if err != nil {
 			return nil, err
 		}
@@ -149,17 +256,48 @@ func NewIndex(paths []string) (*Index, error) {
 	for _, d := range idx.docs {
 		idx.pathIndex[docKey{rootLabel: d.RootLabel, absPath: d.AbsPath}] = true
 	}
+
+	idx.byRoot = buildRootIndexes(idx.roots, idx.docs)
+	idx.backlinks = idx.buildBacklinks()
 	return idx, nil
 }
 
+// resolveRootKind decides one root's Kind: an override in opts.RootKinds
+// (NewIndexWithOptions) always wins over detectRootKind's filesystem probe,
+// but detectRootKind still runs unconditionally so a real ".obsidian"
+// ancestor's VaultPath is available to report even under an override.
+//
+//   - No override: detectRootKind's own answer, unchanged.
+//   - Override to RootDocs: RootDocs with VaultPath cleared — a docs-kind
+//     root has no vault to report, even if one happens to sit above it.
+//   - Override to RootVault: RootVault. If detectRootKind found a real
+//     ".obsidian" ancestor, its VaultPath is kept; otherwise VaultPath falls
+//     back to canonical itself — the override grants Obsidian-style
+//     wikilink/anchor semantics without requiring an actual ".obsidian"
+//     directory on disk.
+func resolveRootKind(canonical string, override RootKind, hasOverride bool) (RootKind, string) {
+	kind, vaultPath := detectRootKind(canonical)
+	if !hasOverride {
+		return kind, vaultPath
+	}
+	if override == RootDocs {
+		return RootDocs, ""
+	}
+	if kind == RootVault {
+		return RootVault, vaultPath
+	}
+	return RootVault, canonical
+}
+
 // indexDirRoot canonicalizes dir and walks it for markdown files.
-func indexDirRoot(labels map[string]bool, dir string) (Root, []Doc, error) {
+func indexDirRoot(labels map[string]bool, dir string, override RootKind, hasOverride bool) (Root, []Doc, error) {
 	canonical, err := CanonicalizeRoot(dir)
 	if err != nil {
 		return Root{}, nil, fmt.Errorf("docs root %q: %w", dir, err)
 	}
 	label := uniqueLabel(labels, filepath.Base(canonical))
-	root := Root{Label: label, Path: canonical}
+	kind, vaultPath := resolveRootKind(canonical, override, hasOverride)
+	root := Root{Label: label, Path: canonical, Kind: kind, VaultPath: vaultPath}
 	docs, err := walkRoot(root)
 	if err != nil {
 		return Root{}, nil, fmt.Errorf("docs root %q: %w", dir, err)
@@ -171,7 +309,7 @@ func indexDirRoot(labels map[string]bool, dir string) (Root, []Doc, error) {
 // The returned Root's Path is the file's canonical PARENT directory (needed
 // so ResolveInRoot has a directory to Join/EvalSymlinks against), but
 // Root.OnlyFile pins the one path Resolve will ever hand back for it.
-func indexFileRoot(labels map[string]bool, file string) (Root, Doc, error) {
+func indexFileRoot(labels map[string]bool, file string, override RootKind, hasOverride bool) (Root, Doc, error) {
 	abs, err := filepath.Abs(file)
 	if err != nil {
 		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
@@ -192,20 +330,38 @@ func indexFileRoot(labels map[string]bool, file string) (Root, Doc, error) {
 
 	base := filepath.Base(real)
 	label := uniqueLabel(labels, strings.TrimSuffix(base, filepath.Ext(base)))
-	root := Root{Label: label, Path: parent, OnlyFile: real}
+	kind, vaultPath := resolveRootKind(parent, override, hasOverride)
+	root := Root{Label: label, Path: parent, OnlyFile: real, Kind: kind, VaultPath: vaultPath}
 
 	fi, err := os.Stat(real)
 	if err != nil {
 		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
 	}
-	doc := Doc{
-		RootLabel: label,
-		RelPath:   base,
-		AbsPath:   real,
-		Title:     titleFor(real, base),
-		ModTime:   fi.ModTime(),
+	// Unlike walkRoot's per-file skip below, a scan failure on a single-file
+	// root IS a hard error: there is no "rest of the index" to fall back to
+	// serving without it.
+	meta, err := scanDoc(real, base)
+	if err != nil {
+		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
 	}
-	return root, doc, nil
+	return root, newDoc(label, base, real, fi.ModTime(), meta), nil
+}
+
+// newDoc is the one place a Doc is assembled from its scan result, so the
+// directory walk and the single-file root can never populate a different
+// subset of docMeta's fields.
+func newDoc(rootLabel, relPath, absPath string, modTime time.Time, meta docMeta) Doc {
+	return Doc{
+		RootLabel: rootLabel,
+		RelPath:   relPath,
+		AbsPath:   absPath,
+		Title:     meta.Title,
+		Aliases:   meta.Aliases,
+		Headings:  meta.Headings,
+		BlockIDs:  meta.BlockIDs,
+		Links:     meta.Links,
+		ModTime:   modTime,
+	}
 }
 
 // uniqueLabel returns base, or base suffixed with an incrementing counter if
@@ -294,46 +450,30 @@ func walkRoot(root Root) ([]Doc, error) {
 		if err != nil {
 			return err
 		}
+		relSlash := filepath.ToSlash(rel)
 		info, err := d.Info()
 		if err != nil {
 			return err
 		}
 
-		docs = append(docs, Doc{
-			RootLabel: root.Label,
-			RelPath:   filepath.ToSlash(rel),
-			AbsPath:   resolved,
-			Title:     titleFor(path, rel),
-			ModTime:   info.ModTime(),
-		})
+		// A scan failure here (the file became unreadable between
+		// WalkDir's stat and this read) keeps the doc in the index with
+		// its filename as the title and no link metadata — the posture
+		// the title-only scan always had. Dropping it would make a
+		// transient read error unlist a file that Resolve's request-time
+		// read may well succeed on a moment later.
+		meta, err := scanDoc(path, relSlash)
+		if err != nil {
+			meta = docMeta{Title: titleFromFilename(relSlash)}
+		}
+
+		docs = append(docs, newDoc(root.Label, relSlash, resolved, info.ModTime(), meta))
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return docs, nil
-}
-
-// titleFor returns a doc's first level-1 Markdown heading ("# Title"), or —
-// if none is found in the first 64 lines — its filename without extension.
-// This is a cheap scan, not a full parse; render.go's goldmark pass is the
-// source of truth for actual rendering.
-func titleFor(absPath, relPath string) string {
-	f, err := os.Open(absPath)
-	if err == nil {
-		defer f.Close()
-		scanner := bufio.NewScanner(f)
-		for i := 0; i < 64 && scanner.Scan(); i++ {
-			line := strings.TrimSpace(scanner.Text())
-			if after, ok := strings.CutPrefix(line, "# "); ok {
-				if t := strings.TrimSpace(after); t != "" {
-					return t
-				}
-			}
-		}
-	}
-	base := filepath.Base(relPath)
-	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
 // Rebuild re-walks this index's original root arguments and returns a fresh
@@ -352,7 +492,78 @@ func titleFor(absPath, relPath string) string {
 // server was running). Callers SHOULD keep serving the previous index in that
 // case rather than tearing the server down.
 func (idx *Index) Rebuild() (*Index, error) {
-	return NewIndex(idx.paths)
+	return NewIndexWithOptions(idx.paths, idx.opts)
+}
+
+// buildBacklinks maps every doc's docKey to the indices of every OTHER doc
+// whose scanned Links resolve to it. Called from NewIndexWithOptions right
+// after byRoot is built, since ResolveLink needs it — reusing ResolveLink
+// itself (rather than a second lookup path) is what guarantees the forward
+// and reverse answers can never disagree.
+//
+// A link counts once its FILE resolves, even if only its heading/block
+// fragment missed (MissNoTarget paired with a non-nil Doc): the target doc
+// was found, so it is still something the reader arrived at from this link.
+// A link that resolves back to the SAME doc (a self-link, or a fragment-only
+// link) is skipped — Backlinks answers "who else links here," and a doc is
+// never its own backlink.
+//
+// Each list is de-duplicated (a doc linking to the target more than once
+// appears once) and sorted by RelPath here, at build time, so Backlinks is
+// a lookup and a copy — never repeated sorting on a request path.
+func (idx *Index) buildBacklinks() map[docKey][]int {
+	sets := make(map[docKey]map[int]bool)
+	for i := range idx.docs {
+		from := &idx.docs[i]
+		for _, link := range from.Links {
+			target, _ := idx.resolveParts(from, link.Path, link.Fragment)
+			if target == nil {
+				continue
+			}
+			if target.RootLabel == from.RootLabel && target.AbsPath == from.AbsPath {
+				continue
+			}
+			key := docKey{rootLabel: target.RootLabel, absPath: target.AbsPath}
+			if sets[key] == nil {
+				sets[key] = map[int]bool{}
+			}
+			sets[key][i] = true
+		}
+	}
+	out := make(map[docKey][]int, len(sets))
+	for key, set := range sets {
+		indices := make([]int, 0, len(set))
+		for i := range set {
+			indices = append(indices, i)
+		}
+		sort.Slice(indices, func(a, b int) bool {
+			return idx.docs[indices[a]].RelPath < idx.docs[indices[b]].RelPath
+		})
+		out[key] = indices
+	}
+	return out
+}
+
+// Backlinks returns every indexed doc whose scanned Links resolve to d,
+// sorted by RelPath and de-duplicated (a doc linking to d more than once
+// appears once). d is looked up by its own (RootLabel, AbsPath) — a nil d,
+// or a Doc this Index never indexed, both return an empty slice rather than
+// panicking. The returned pointers alias this Index's own storage and are
+// read-only: an Index is never mutated in place (see the type comment), and
+// writing through one would race every handler reading the same Index.
+func (idx *Index) Backlinks(d *Doc) []*Doc {
+	if d == nil {
+		return nil
+	}
+	indices := idx.backlinks[docKey{rootLabel: d.RootLabel, absPath: d.AbsPath}]
+	if len(indices) == 0 {
+		return nil
+	}
+	out := make([]*Doc, 0, len(indices))
+	for _, i := range indices {
+		out = append(out, &idx.docs[i])
+	}
+	return out
 }
 
 // Roots returns the indexed roots in configuration order.
@@ -365,7 +576,22 @@ func (idx *Index) Roots() []Root {
 // List returns every indexed doc, most-recently-modified first.
 func (idx *Index) List() []Doc {
 	out := make([]Doc, len(idx.docs))
-	copy(out, idx.docs)
+	for i := range idx.docs {
+		out[i] = idx.docs[i].clone()
+	}
+	return out
+}
+
+// clone returns a Doc whose slice fields are independent copies, so a
+// caller holding a value from List or Find cannot write through a shared
+// backing array into this Index's own storage — which every handler reads
+// unsynchronized on the promise that an Index never changes.
+func (d Doc) clone() Doc {
+	out := d
+	out.Aliases = append([]string(nil), d.Aliases...)
+	out.Headings = append([]Heading(nil), d.Headings...)
+	out.BlockIDs = append([]string(nil), d.BlockIDs...)
+	out.Links = append([]LinkRef(nil), d.Links...)
 	return out
 }
 
@@ -377,7 +603,7 @@ func (idx *Index) List() []Doc {
 func (idx *Index) Find(rootLabel, relPath string) (Doc, bool) {
 	for _, d := range idx.docs {
 		if d.RootLabel == rootLabel && d.RelPath == relPath {
-			return d, true
+			return d.clone(), true
 		}
 	}
 	return Doc{}, false

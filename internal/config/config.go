@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -515,11 +516,44 @@ func (gc GiteaConfig) IsZero() bool {
 type DocsConfig struct {
 	Roots []string `toml:"roots"`
 	Addr  string   `toml:"addr"`
+	// RootKinds overrides docs.detectRootKind's filesystem-based inference
+	// for a root, keyed by the root path; internal/docs matches keys to
+	// roots by absolute cleaned path, so "." and "./docs" name the same
+	// roots the CLI derives. Values are RootKindDocs or RootKindVault; any
+	// other value is a config error (Validate names the key, the value, and
+	// the two allowed values).
+	RootKinds map[string]string `toml:"root_kinds"`
+}
+
+// The two values [docs].root_kinds accepts.
+const (
+	RootKindDocs  = "docs"
+	RootKindVault = "vault"
+)
+
+// Validate reports the first semantically invalid [docs] value, in key
+// order so the error is the same on every run. Only root_kinds carries a
+// closed value set today; Roots and Addr are validated by their consumers
+// against the filesystem and the network, which a config check cannot do.
+func (dc DocsConfig) Validate() error {
+	keys := make([]string, 0, len(dc.RootKinds))
+	for key := range dc.RootKinds {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		switch value := dc.RootKinds[key]; value {
+		case RootKindDocs, RootKindVault:
+		default:
+			return fmt.Errorf("[docs].root_kinds[%q] = %q: must be %q or %q", key, value, RootKindDocs, RootKindVault)
+		}
+	}
+	return nil
 }
 
 // IsZero reports whether the [docs] section was absent or empty.
 func (dc DocsConfig) IsZero() bool {
-	return len(dc.Roots) == 0 && dc.Addr == ""
+	return len(dc.Roots) == 0 && dc.Addr == "" && len(dc.RootKinds) == 0
 }
 
 // PreflightConfig is the [preflight] section: `forgectl preflight`'s
@@ -721,8 +755,11 @@ func ValidatePath(path string) error {
 	if err != nil {
 		return err
 	}
-	_, err = DecodeStrict(data)
-	return err
+	cfg, err := DecodeStrict(data)
+	if err != nil {
+		return err
+	}
+	return cfg.Docs.Validate()
 }
 
 // SetupLogger configures the global slog default from cfg and returns a Closer

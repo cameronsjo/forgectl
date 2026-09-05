@@ -152,6 +152,8 @@ github.com/yuin/goldmark-highlighting/v2 v2.0.0-20230729083705-37449abec8cc h1:+
 github.com/yuin/goldmark-highlighting/v2 v2.0.0-20230729083705-37449abec8cc/go.mod h1:ovIvrum6DQJA4QsJSovrkC4saKHQVs7TvcaeO8AIl5I=
 go.abhg.dev/goldmark/frontmatter v0.3.0 h1:ZOrMkeyyYzhlbenFNmOXyGFx1dFE8TgBWAgZfs9D5RA=
 go.abhg.dev/goldmark/frontmatter v0.3.0/go.mod h1:W3KXvVveKKxU1FIFZ7fgFFQrlkcolnDcOVmu19cCO9U=
+go.abhg.dev/goldmark/wikilink v0.6.0 h1:SKZANgMD7GMbaU0kBKTh52Ea9k3A3Y5ZifHoEPC1fuo=
+go.abhg.dev/goldmark/wikilink v0.6.0/go.mod h1:Sfaovp00aAVJ5khqIeDTTgkIfZrcurmJGlbntCJUbJY=
 go.yaml.in/yaml/v3 v3.0.4/go.mod h1:DhzuOOF2ATzADvBadXxruRBLzYTpT36CKvDb3+aBEFg=
 golang.org/x/exp v0.0.0-20231006140011-7918f672742d h1:jtJma62tbqLibJ5sFQz8bKtEM8rJBtfilJ2qTU199MI=
 golang.org/x/exp v0.0.0-20231006140011-7918f672742d/go.mod h1:ldy0pHrwJyGW56pPQzzkH36rKxoZW1tw7ZJpeKx+hdo=

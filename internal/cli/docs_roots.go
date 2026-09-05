@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	docspkg "github.com/cameronsjo/forgectl/internal/docs"
 )
 
 // cadenceFieldReportsEnv names the environment variable forgectl#93's
@@ -40,6 +41,29 @@ func resolveDocsRoots(args []string, cfg config.DocsConfig) ([]string, error) {
 	roots = append(roots, cfg.Roots...)
 
 	return dedupPaths(roots), nil
+}
+
+// docsIndexOptions converts a [docs] section's root_kinds map into the
+// docs.IndexOptions NewIndexWithOptions consumes, after config.DocsConfig's
+// own Validate has rejected any value outside "docs" | "vault". Keys pass
+// through as configured; internal/docs matches them to roots by absolute
+// path, so a config file may spell a root relatively.
+func docsIndexOptions(cfg config.DocsConfig) (docspkg.IndexOptions, error) {
+	if err := cfg.Validate(); err != nil {
+		return docspkg.IndexOptions{}, err
+	}
+	if len(cfg.RootKinds) == 0 {
+		return docspkg.IndexOptions{}, nil
+	}
+	kinds := make(map[string]docspkg.RootKind, len(cfg.RootKinds))
+	for key, value := range cfg.RootKinds {
+		if value == config.RootKindVault {
+			kinds[key] = docspkg.RootVault
+		} else {
+			kinds[key] = docspkg.RootDocs
+		}
+	}
+	return docspkg.IndexOptions{RootKinds: kinds}, nil
 }
 
 func isDir(path string) bool {
