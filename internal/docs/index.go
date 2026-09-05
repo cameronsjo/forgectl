@@ -516,7 +516,7 @@ func (idx *Index) buildBacklinks() map[docKey][]int {
 	for i := range idx.docs {
 		from := &idx.docs[i]
 		for _, link := range from.Links {
-			target, _ := idx.ResolveLink(from, link.Raw)
+			target, _ := idx.resolveParts(from, link.Path, link.Fragment)
 			if target == nil {
 				continue
 			}
@@ -576,7 +576,22 @@ func (idx *Index) Roots() []Root {
 // List returns every indexed doc, most-recently-modified first.
 func (idx *Index) List() []Doc {
 	out := make([]Doc, len(idx.docs))
-	copy(out, idx.docs)
+	for i := range idx.docs {
+		out[i] = idx.docs[i].clone()
+	}
+	return out
+}
+
+// clone returns a Doc whose slice fields are independent copies, so a
+// caller holding a value from List or Find cannot write through a shared
+// backing array into this Index's own storage — which every handler reads
+// unsynchronized on the promise that an Index never changes.
+func (d Doc) clone() Doc {
+	out := d
+	out.Aliases = append([]string(nil), d.Aliases...)
+	out.Headings = append([]Heading(nil), d.Headings...)
+	out.BlockIDs = append([]string(nil), d.BlockIDs...)
+	out.Links = append([]LinkRef(nil), d.Links...)
 	return out
 }
 
@@ -588,7 +603,7 @@ func (idx *Index) List() []Doc {
 func (idx *Index) Find(rootLabel, relPath string) (Doc, bool) {
 	for _, d := range idx.docs {
 		if d.RootLabel == rootLabel && d.RelPath == relPath {
-			return d, true
+			return d.clone(), true
 		}
 	}
 	return Doc{}, false

@@ -90,3 +90,33 @@ func TestDetectRootKind_HomeBoundaryStopsBeforeObsidianAtHome(t *testing.T) {
 		t.Errorf("detectRootKind(childRoot under simulated $HOME with .obsidian AT $HOME) vaultPath = %q, want empty", vaultPath)
 	}
 }
+
+func TestDetectRootKind_SymlinkedHomeIsStillTheBoundary(t *testing.T) {
+	base := t.TempDir()
+	realHome := filepath.Join(base, "real-home")
+	if err := os.MkdirAll(filepath.Join(realHome, ".obsidian"), 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	root := filepath.Join(realHome, "notes")
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	link := filepath.Join(base, "home-link")
+	if err := os.Symlink(realHome, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	// The walk compares against a canonical root; $HOME arrives as the
+	// symlink spelling and must still stop the walk at the real home.
+	t.Setenv("HOME", link)
+	restore := userHomeDir
+	userHomeDir = defaultUserHomeDir
+	t.Cleanup(func() { userHomeDir = restore })
+
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	if kind, _ := detectRootKind(canonical); kind != RootDocs {
+		t.Errorf("detectRootKind under a symlinked $HOME = %v, want RootDocs — ~/.obsidian must not make a child root a vault", kind)
+	}
+}

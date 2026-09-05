@@ -12,10 +12,18 @@ import (
 // mutating the real environment.
 var userHomeDir = defaultUserHomeDir
 
+// defaultUserHomeDir returns $HOME in the same canonical form the walk
+// compares against — symlink-resolved, since the root it is compared to
+// already is. A $HOME that is itself a symlink (as macOS temp dirs and
+// some network homes are) would otherwise never equal any walked path,
+// and the boundary would silently not exist.
 func defaultUserHomeDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(home); err == nil {
+		home = resolved
 	}
 	return filepath.Clean(home)
 }

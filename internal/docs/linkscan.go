@@ -231,14 +231,15 @@ func scanBody(body []byte) ([]Heading, []LinkRef, error) {
 			}
 			// A markdown destination is a URL reference, so a filename
 			// with spaces arrives percent-encoded ("My%20Doc.md"); goldmark
-			// keeps the source bytes verbatim. Decode so the target compares
-			// against the filename as it exists on disk. A malformed escape
-			// is left as written — the link is then a miss, which is the
-			// truthful answer for a destination no browser could open.
-			if decoded, err := url.PathUnescape(dest); err == nil {
-				dest = decoded
-			}
+			// keeps the source bytes verbatim. Split on '#' FIRST, then
+			// decode each side: an encoded "%23" is a literal '#' in the
+			// filename, and decoding before the split would turn it into a
+			// fragment boundary. A malformed escape is left as written —
+			// the link is then a miss, which is the truthful answer for a
+			// destination no browser could open.
 			path0, frag0 := splitFirstHash(dest)
+			path0 = pathUnescapeOrRaw(path0)
+			frag0 = pathUnescapeOrRaw(frag0)
 			links = append(links, LinkRef{
 				Raw:      dest,
 				Path:     path0,
@@ -269,6 +270,15 @@ func appendNodeText(b *strings.Builder, n ast.Node, source []byte) {
 	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
 		appendNodeText(b, c, source)
 	}
+}
+
+// pathUnescapeOrRaw percent-decodes s, or returns it unchanged when it is
+// not a valid escape sequence.
+func pathUnescapeOrRaw(s string) string {
+	if decoded, err := url.PathUnescape(s); err == nil {
+		return decoded
+	}
+	return s
 }
 
 // splitFirstHash splits s on its FIRST '#' — the Global Constraint's

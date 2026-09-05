@@ -286,7 +286,14 @@ func TestResolveLink_HeadingSlugAgreesWithRender(t *testing.T) {
 		t.Fatalf("guide.md has no %q heading in %+v", "Getting Started", guide.Headings)
 	}
 
-	html, err := Render([]byte("## Getting Started\n"))
+	// Render the fixture's own bytes, not a synthetic heading: goldmark
+	// suffixes a repeated id within one document ("getting-started-1"),
+	// so only the same document context pins the same slug.
+	src, err := os.ReadFile(guide.AbsPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	html, err := Render(src)
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
@@ -390,5 +397,53 @@ func TestResolveLink_DocsRootAbsoluteLinkResolvesFromRoot(t *testing.T) {
 	}
 	if doc, miss := idx.ResolveLink(from, "/../guide.md"); miss != MissNone || doc == nil || doc.RelPath != "guide.md" {
 		t.Errorf("ResolveLink(/../guide.md) = (%+v, %v), want guide.md — a leading slash cannot climb above the root", doc, miss)
+	}
+}
+
+func TestResolveLink_EncodedHashInFilenameStaysInPath(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "A#B.md"), "# Hash\n")
+	writeFile(t, filepath.Join(dir, "index.md"), "[x](A%23B.md)\n")
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	label := idx.Roots()[0].Label
+	from := mustFindDoc(t, idx, label, "index.md")
+	if len(from.Links) != 1 || from.Links[0].Path != "A#B.md" || from.Links[0].Fragment != "" {
+		t.Fatalf("Links = %+v, want Path A#B.md with no fragment", from.Links)
+	}
+	target := mustFindDoc(t, idx, label, "A#B.md")
+	got := idx.Backlinks(target)
+	if len(got) != 1 || got[0].RelPath != "index.md" {
+		t.Errorf("Backlinks(A#B.md) = %+v, want index.md — the encoded '#' must not be re-split", got)
+	}
+}
+
+func TestResolveLink_VaultRootAbsoluteIsVaultRelative(t *testing.T) {
+	idx := newLinksTestIndex(t)
+	from := mustFindDoc(t, idx, "vault", "notes/deep/Alpha.md")
+	doc, miss := idx.ResolveLink(from, "/notes/beta")
+	if miss != MissNone || doc == nil || doc.RelPath != "notes/beta.md" {
+		t.Errorf("ResolveLink(/notes/beta) = (%+v, %v), want notes/beta.md", doc, miss)
+	}
+}
+
+func TestIndex_ListAndFindReturnIndependentCopies(t *testing.T) {
+	idx := newLinksTestIndex(t)
+	anchors := mustFindDoc(t, idx, "vault", "notes/anchors.md")
+	if len(anchors.Headings) == 0 {
+		t.Fatal("anchors.md has no headings")
+	}
+	want := anchors.Headings[0].Slug
+	anchors.Headings[0].Slug = "tampered"
+	for _, d := range idx.List() {
+		if d.RootLabel == "vault" && d.RelPath == "notes/anchors.md" {
+			d.Headings[0].Slug = "tampered-again"
+		}
+	}
+	again := mustFindDoc(t, idx, "vault", "notes/anchors.md")
+	if again.Headings[0].Slug != want {
+		t.Errorf("Slug after writes through Find/List copies = %q, want %q untouched", again.Headings[0].Slug, want)
 	}
 }

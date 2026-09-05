@@ -294,7 +294,7 @@ func isExplicitlyRelative(target string) bool {
 // resolveVaultDoc resolves path0 for a RootVault caller. A target authored
 // relative to the linking doc ("./sibling.md", "../other.md") resolves
 // exactly as it would in a docs root — joined against from's directory.
-// Anything else takes Obsidian's own fallback chain — byRel (a path
+// A leading "/" is vault-root-relative. Anything else takes Obsidian's own fallback chain — byRel (a path
 // relative to the vault root) first, then byName (a bare basename), then
 // byAlias (a frontmatter alias) — stopping at the first table that produces
 // ANY answer, including an ambiguous one. A "/" in the target narrows
@@ -304,7 +304,10 @@ func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, from *Doc, path0 string) (
 	if isExplicitlyRelative(path0) {
 		return idx.resolveDocsDoc(rootIdx, from, path0)
 	}
-	clean := path.Clean(path0)
+	// Obsidian reads a leading "/" as vault-root-relative — the same
+	// place a bare path is already resolved from, so drop it rather than
+	// reading it as an escape.
+	clean := strings.TrimPrefix(path.Clean(path0), "/")
 	if escapesRoot(clean) {
 		return nil, MissOutsideRoot
 	}
@@ -393,6 +396,16 @@ func (idx *Index) resolveFragment(kind RootKind, doc *Doc, fragment string) (*Do
 // vault (Learnings); this is Obsidian's own limitation, carried through
 // unchanged, not a defect in this resolver.
 func (idx *Index) ResolveLink(from *Doc, target string) (*Doc, Miss) {
+	path0, fragment := splitFirstHash(target)
+	return idx.resolveParts(from, path0, fragment)
+}
+
+// resolveParts is ResolveLink after the split: path0 and fragment arrive
+// already separated, as scanDoc's LinkRef carries them. buildBacklinks
+// calls this directly so a path containing a literal '#' (authored as
+// "%23" in a markdown link and decoded by scanDoc) is looked up as the
+// path it is, rather than re-split at that '#'.
+func (idx *Index) resolveParts(from *Doc, path0, fragment string) (*Doc, Miss) {
 	if from == nil {
 		return nil, MissNoTarget
 	}
@@ -404,8 +417,6 @@ func (idx *Index) ResolveLink(from *Doc, target string) (*Doc, Miss) {
 	if rootIdx == nil {
 		return nil, MissNoTarget
 	}
-
-	path0, fragment := splitFirstHash(target)
 
 	doc := from
 	if path0 != "" {
