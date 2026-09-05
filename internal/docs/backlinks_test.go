@@ -216,3 +216,25 @@ func TestNewIndexWithOptions_OverrideToDocsClearsVaultPath(t *testing.T) {
 		t.Errorf("VaultPath = %q, want empty — an override to RootDocs clears it even though a real .obsidian directory exists here", roots[0].VaultPath)
 	}
 }
+
+func TestNewIndexWithOptions_RootKindOverrideMatchesByAbsolutePath(t *testing.T) {
+	repoRel := filepath.Join("testdata", "links", "repo")
+	repoAbs, err := filepath.Abs(repoRel)
+	if err != nil {
+		t.Fatalf("Abs: %v", err)
+	}
+	// The index is built over the absolute path (as the CLI derives it); the
+	// override is keyed the way a config file would spell it — relative,
+	// with a "./" prefix and a trailing separator.
+	idx, err := NewIndexWithOptions(
+		[]string{repoAbs},
+		IndexOptions{RootKinds: map[string]RootKind{"./" + repoRel + string(filepath.Separator): RootVault}},
+	)
+	if err != nil {
+		t.Fatalf("NewIndexWithOptions: %v", err)
+	}
+	roots := idx.Roots()
+	if len(roots) != 1 || roots[0].Kind != RootVault {
+		t.Errorf("Roots() = %+v, want the relative override to apply as RootVault", roots)
+	}
+}

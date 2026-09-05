@@ -13,6 +13,7 @@ package docs
 //       heading, block, nested-heading, relative markdown link)
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -112,23 +113,23 @@ func TestScanDoc_WikilinkFormsInVaultIndex(t *testing.T) {
 		t.Fatalf("scanDoc: %v", err)
 	}
 	want := []LinkRef{
-		{Path: "notes/orphan", Fragment: "", Embed: false, Form: FormPlain},
-		{Path: "notes/beta", Fragment: "", Embed: false, Form: FormAlias},
-		{Path: "notes/anchors", Fragment: "", Embed: true, Form: FormEmbed},
-		{Path: "notes/anchors", Fragment: "Some Heading", Embed: false, Form: FormHeading},
-		{Path: "notes/anchors", Fragment: "^blk-1", Embed: false, Form: FormBlock},
-		{Path: "notes/anchors", Fragment: "Some Heading#Sub", Embed: false, Form: FormHeading},
-		{Path: "deep/Alpha", Fragment: "", Embed: false, Form: FormPlain},
-		{Path: "../repo/index", Fragment: "", Embed: false, Form: FormPlain},
+		{Path: "notes/orphan", Fragment: "", Form: FormPlain},
+		{Path: "notes/beta", Fragment: "", Form: FormAlias},
+		{Path: "notes/anchors", Fragment: "", Form: FormEmbed},
+		{Path: "notes/anchors", Fragment: "Some Heading", Form: FormHeading},
+		{Path: "notes/anchors", Fragment: "^blk-1", Form: FormBlock},
+		{Path: "notes/anchors", Fragment: "Some Heading#Sub", Form: FormHeading},
+		{Path: "deep/Alpha", Fragment: "", Form: FormPlain},
+		{Path: "../repo/index", Fragment: "", Form: FormPlain},
 	}
 	if len(meta.Links) != len(want) {
 		t.Fatalf("Links has %d entries, want %d: %+v", len(meta.Links), len(want), meta.Links)
 	}
 	for i, w := range want {
 		got := meta.Links[i]
-		if got.Path != w.Path || got.Fragment != w.Fragment || got.Embed != w.Embed || got.Form != w.Form {
-			t.Errorf("Links[%d] = {Path:%q Fragment:%q Embed:%v Form:%v}, want {Path:%q Fragment:%q Embed:%v Form:%v}",
-				i, got.Path, got.Fragment, got.Embed, got.Form, w.Path, w.Fragment, w.Embed, w.Form)
+		if got.Path != w.Path || got.Fragment != w.Fragment || got.Form != w.Form {
+			t.Errorf("Links[%d] = {Path:%q Fragment:%q Form:%v}, want {Path:%q Fragment:%q Form:%v}",
+				i, got.Path, got.Fragment, got.Form, w.Path, w.Fragment, w.Form)
 		}
 	}
 }
@@ -151,5 +152,23 @@ func TestScanDoc_RelativeMarkdownLinksInRepoIndex(t *testing.T) {
 			t.Errorf("Links[%d] = {Path:%q Fragment:%q Form:%v}, want {Path:%q Fragment:%q Form:%v}",
 				i, got.Path, got.Fragment, got.Form, w.Path, w.Fragment, w.Form)
 		}
+	}
+}
+
+func TestScanDoc_PercentEncodedDestinationIsDecoded(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "page.md")
+	if err := os.WriteFile(path, []byte("[x](My%20Doc.md#a%20heading)\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	meta, err := scanDoc(path, "page.md")
+	if err != nil {
+		t.Fatalf("scanDoc: %v", err)
+	}
+	if len(meta.Links) != 1 {
+		t.Fatalf("Links = %+v, want exactly one", meta.Links)
+	}
+	if got := meta.Links[0]; got.Path != "My Doc.md" || got.Fragment != "a heading" {
+		t.Errorf("Links[0] = {Path:%q Fragment:%q}, want {Path:%q Fragment:%q}", got.Path, got.Fragment, "My Doc.md", "a heading")
 	}
 }

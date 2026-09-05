@@ -3,6 +3,8 @@ package docs
 import (
 	"bufio"
 	"bytes"
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,7 +13,6 @@ import (
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
-	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 	"go.abhg.dev/goldmark/wikilink"
 	"gopkg.in/yaml.v3"
@@ -29,11 +30,10 @@ type docMeta struct {
 }
 
 // linkMarkdown is the goldmark instance scanDoc parses document BODIES
-// with (frontmatter is stripped by hand before this ever sees the bytes;
-// see extractFrontmatterAliases). It carries only what scanDoc needs to
-// extract: auto heading IDs — which MUST agree with render.go's rendering
-// pipeline (parser.WithAutoHeadingID(), render.go:73) so a slug this
-// package computes matches the id the browser actually renders — and the
+// with (frontmatter is split off by splitFrontmatter before this ever sees
+// the bytes). It carries only what scanDoc needs to extract: the heading-id
+// rule, taken from render.go's headingParserOptions so the slug this
+// package computes is the id the browser actually renders, and the
 // wikilink extension. Extensions that only affect rendered *output* (GFM,
 // syntax highlighting, frontmatter) are deliberately absent: scanDoc never
 // renders.
@@ -41,7 +41,7 @@ var linkMarkdown = newLinkMarkdown()
 
 func newLinkMarkdown() goldmark.Markdown {
 	md := goldmark.New(
-		goldmark.WithParserOptions(parser.WithAutoHeadingID()),
+		goldmark.WithParserOptions(headingParserOptions()...),
 	)
 	(&wikilink.Extender{}).Extend(md)
 	return md
@@ -75,14 +75,20 @@ func scanDoc(absPath, relPath string) (docMeta, error) {
 
 	title := firstH1(source)
 	if title == "" {
-		base := filepath.Base(relPath)
-		title = strings.TrimSuffix(base, filepath.Ext(base))
+		title = titleFromFilename(relPath)
 	}
 
-	aliases, bodyOffset := extractFrontmatterAliases(source)
-	body := source[bodyOffset:]
+	body := source
+	var aliases []string
+	if fm, ok := splitFrontmatter(source); ok {
+		body = fm.body
+		aliases = frontmatterAliases(fm)
+	}
 
-	headings, links := scanBody(body)
+	headings, links, err := scanBody(body)
+	if err != nil {
+		return docMeta{}, fmt.Errorf("scan %s: %w", relPath, err)
+	}
 	blockIDs := scanBlockIDs(body)
 
 	return docMeta{
@@ -94,13 +100,25 @@ func scanDoc(absPath, relPath string) (docMeta, error) {
 	}, nil
 }
 
+// titleScanLines bounds firstH1's search for a "# " heading. A title is
+// expected near the top; scanning the whole file would make a heading
+// buried under a long preamble the title, and would cost a full line scan
+// on every doc that has none.
+const titleScanLines = 64
+
+// titleFromFilename is the title a document gets when firstH1 finds no
+// heading: its filename without extension.
+func titleFromFilename(relPath string) string {
+	base := filepath.Base(relPath)
+	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
 // firstH1 returns a document's first level-1 heading text, or "" if none
-// appears in the first 64 lines — the same cheap line scan titleFor used
-// to perform, preserved exactly so switching titleFor's callers to scanDoc
-// changes no observable title.
+// appears in the first titleScanLines lines. A cheap line scan, not a parse:
+// the heading text is taken verbatim, as the sidenav has always shown it.
 func firstH1(source []byte) string {
 	scanner := bufio.NewScanner(bytes.NewReader(source))
-	for i := 0; i < 64 && scanner.Scan(); i++ {
+	for i := 0; i < titleScanLines && scanner.Scan(); i++ {
 		line := strings.TrimSpace(scanner.Text())
 		if after, ok := strings.CutPrefix(line, "# "); ok {
 			if t := strings.TrimSpace(after); t != "" {
@@ -111,56 +129,19 @@ func firstH1(source []byte) string {
 	return ""
 }
 
-// isFrontmatterFence reports whether line (already stripped of its
-// trailing newline) is a YAML frontmatter delimiter: three or more '-' and
-// nothing else.
-func isFrontmatterFence(line []byte) bool {
-	line = bytes.TrimRight(line, "\r")
-	if len(line) < 3 {
-		return false
+// frontmatterAliases returns a YAML frontmatter block's `aliases` value,
+// accepting either a list or a bare scalar (folded to a one-element list).
+// A TOML (+++) block yields none: Obsidian aliases are a YAML convention,
+// and the plan scopes alias extraction to YAML.
+func frontmatterAliases(fm frontmatterBlock) []string {
+	if fm.delim != '-' {
+		return nil
 	}
-	for _, c := range line {
-		if c != '-' {
-			return false
-		}
+	var m map[string]any
+	if err := yaml.Unmarshal(fm.block, &m); err != nil {
+		return nil
 	}
-	return true
-}
-
-// extractFrontmatterAliases returns a document's frontmatter `aliases`
-// (accepting either a YAML list or a bare scalar, folded to a list here)
-// and the byte offset where the body starts (0 when there is no
-// well-formed leading YAML frontmatter block). TOML frontmatter (+++
-// fences) is intentionally not recognized — per the plan, its aliases are
-// simply not extracted, and it is treated as ordinary body content.
-func extractFrontmatterAliases(source []byte) (aliases []string, bodyOffset int) {
-	lines := bytes.SplitAfter(source, []byte("\n"))
-	if len(lines) == 0 {
-		return nil, 0
-	}
-	first := bytes.TrimSuffix(lines[0], []byte("\n"))
-	if !isFrontmatterFence(first) {
-		return nil, 0
-	}
-	for i := 1; i < len(lines); i++ {
-		line := bytes.TrimSuffix(lines[i], []byte("\n"))
-		if !isFrontmatterFence(line) {
-			continue
-		}
-		block := bytes.Join(lines[1:i], nil)
-		offset := 0
-		for j := 0; j <= i; j++ {
-			offset += len(lines[j])
-		}
-		var m map[string]any
-		if err := yaml.Unmarshal(block, &m); err == nil {
-			if v, ok := m["aliases"]; ok {
-				aliases = toStringList(v)
-			}
-		}
-		return aliases, offset
-	}
-	return nil, 0
+	return toStringList(m["aliases"])
 }
 
 func toStringList(v any) []string {
@@ -203,14 +184,14 @@ func scanBlockIDs(body []byte) []string {
 // the auto-generated id slug) and outbound links from both wikilinks
 // (go.abhg.dev/goldmark/wikilink) and plain markdown links whose
 // destination carries no URL scheme.
-func scanBody(body []byte) ([]Heading, []LinkRef) {
+func scanBody(body []byte) ([]Heading, []LinkRef, error) {
 	reader := text.NewReader(body)
 	doc := linkMarkdown.Parser().Parse(reader)
 
 	var headings []Heading
 	var links []LinkRef
 
-	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+	err := ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
 		}
@@ -243,6 +224,15 @@ func scanBody(body []byte) ([]Heading, []LinkRef) {
 			if isURLLike(dest) {
 				return ast.WalkContinue, nil
 			}
+			// A markdown destination is a URL reference, so a filename
+			// with spaces arrives percent-encoded ("My%20Doc.md"); goldmark
+			// keeps the source bytes verbatim. Decode so the target compares
+			// against the filename as it exists on disk. A malformed escape
+			// is left as written — the link is then a miss, which is the
+			// truthful answer for a destination no browser could open.
+			if decoded, err := url.PathUnescape(dest); err == nil {
+				dest = decoded
+			}
 			path0, frag0 := splitFirstHash(dest)
 			links = append(links, LinkRef{
 				Raw:      dest,
@@ -253,8 +243,11 @@ func scanBody(body []byte) ([]Heading, []LinkRef) {
 		}
 		return ast.WalkContinue, nil
 	})
+	if err != nil {
+		return nil, nil, err
+	}
 
-	return headings, links
+	return headings, links, nil
 }
 
 func headingText(n *ast.Heading, source []byte) string {
@@ -323,7 +316,6 @@ func wikilinkRef(wl *wikilink.Node, source []byte) LinkRef {
 		Raw:      raw,
 		Path:     path0,
 		Fragment: frag0,
-		Embed:    wl.Embed,
 		Form:     form,
 	}
 }

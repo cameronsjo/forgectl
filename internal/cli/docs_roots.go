@@ -44,29 +44,23 @@ func resolveDocsRoots(args []string, cfg config.DocsConfig) ([]string, error) {
 }
 
 // docsIndexOptions converts a [docs] section's root_kinds map into the
-// docs.IndexOptions NewIndexWithOptions consumes. Keys pass through exactly
-// as configured — no path normalization beyond what resolveDocsRoots already
-// applies to the root set itself — so an entry must name a root the same way
-// the caller's own roots argument does.
-//
-// An unknown value is a config error naming the offending key, its value,
-// and the two allowed values: internal/config carries no field-level
-// validation seam for [docs] (Validate/ValidatePath only surface TOML parse
-// errors, never semantic ones), so this helper is where "docs" | "vault" is
-// enforced.
+// docs.IndexOptions NewIndexWithOptions consumes, after config.DocsConfig's
+// own Validate has rejected any value outside "docs" | "vault". Keys pass
+// through as configured; internal/docs matches them to roots by absolute
+// path, so a config file may spell a root relatively.
 func docsIndexOptions(cfg config.DocsConfig) (docspkg.IndexOptions, error) {
+	if err := cfg.Validate(); err != nil {
+		return docspkg.IndexOptions{}, err
+	}
 	if len(cfg.RootKinds) == 0 {
 		return docspkg.IndexOptions{}, nil
 	}
 	kinds := make(map[string]docspkg.RootKind, len(cfg.RootKinds))
 	for key, value := range cfg.RootKinds {
-		switch value {
-		case "docs":
-			kinds[key] = docspkg.RootDocs
-		case "vault":
+		if value == config.RootKindVault {
 			kinds[key] = docspkg.RootVault
-		default:
-			return docspkg.IndexOptions{}, fmt.Errorf("[docs].root_kinds[%q] = %q: must be %q or %q", key, value, "docs", "vault")
+		} else {
+			kinds[key] = docspkg.RootDocs
 		}
 	}
 	return docspkg.IndexOptions{RootKinds: kinds}, nil

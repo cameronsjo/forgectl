@@ -84,9 +84,9 @@ type LinkRef struct {
 	// only its LAST segment against a heading is ResolveLink's job, not
 	// scanDoc's.
 	Fragment string
-	// Embed is true for an Obsidian embed (![[...]]).
-	Embed bool
-	// Form classifies the link's authored syntax; see LinkForm.
+	// Form classifies the link's authored syntax; see LinkForm. An
+	// Obsidian embed is Form == FormEmbed — there is no separate flag to
+	// keep in step with it.
 	Form LinkForm
 }
 
@@ -154,7 +154,7 @@ func buildRootIndexes(roots []Root, docs []Doc) map[string]*rootIndex {
 		relKey := normalizeRelKey(d.RelPath)
 		ri.byRel[relKey] = append(ri.byRel[relKey], i)
 
-		nameKey := strings.ToLower(strings.TrimSuffix(path.Base(d.RelPath), path.Ext(d.RelPath)))
+		nameKey := normalizeNameKey(d.RelPath)
 		ri.byName[nameKey] = append(ri.byName[nameKey], i)
 
 		for _, alias := range d.Aliases {
@@ -170,6 +170,14 @@ func buildRootIndexes(roots []Root, docs []Doc) map[string]*rootIndex {
 // comment — every caller of every table MUST apply this identical fold.
 func normalizeRelKey(relPath string) string {
 	return strings.ToLower(strings.TrimSuffix(relPath, path.Ext(relPath)))
+}
+
+// normalizeNameKey folds a slash-separated path to byName's key shape: its
+// basename, lowercased, markdown extension stripped — normalizeRelKey
+// applied to the last path segment. Builder and lookups both go through
+// it, so the fold is stated once.
+func normalizeNameKey(p string) string {
+	return normalizeRelKey(path.Base(p))
 }
 
 // rootByLabel returns the Root with the given Label, if indexed.
@@ -236,13 +244,28 @@ func (idx *Index) resolveDocsDoc(rootIdx *rootIndex, from *Doc, path0 string) (*
 	return idx.pickCandidate(rootIdx.byRel[normalizeRelKey(clean)])
 }
 
-// resolveVaultDoc resolves path0 for a RootVault caller: Obsidian's own
-// fallback chain — byRel (a path relative to the vault root) first, then
-// byName (a bare basename), then byAlias (a frontmatter alias) — stopping
-// at the first table that produces ANY answer, including an ambiguous one.
-// A "/" in the target narrows byName's candidates by RelPath suffix (the
-// "[[deep/Alpha]]" case); a bare basename never touches byRel at all.
-func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, path0 string) (*Doc, Miss) {
+// isExplicitlyRelative reports whether a link target was authored relative
+// to the linking document — it starts with "./" or "../". Obsidian resolves
+// such markdown-link paths against the source file's own directory, not
+// the vault top; every other vault target goes through the vault-relative
+// fallback chain.
+func isExplicitlyRelative(target string) bool {
+	return strings.HasPrefix(target, "./") || strings.HasPrefix(target, "../")
+}
+
+// resolveVaultDoc resolves path0 for a RootVault caller. A target authored
+// relative to the linking doc ("./sibling.md", "../other.md") resolves
+// exactly as it would in a docs root — joined against from's directory.
+// Anything else takes Obsidian's own fallback chain — byRel (a path
+// relative to the vault root) first, then byName (a bare basename), then
+// byAlias (a frontmatter alias) — stopping at the first table that produces
+// ANY answer, including an ambiguous one. A "/" in the target narrows
+// byName's candidates by RelPath suffix (the "[[deep/Alpha]]" case); a
+// bare basename never touches byRel at all.
+func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, from *Doc, path0 string) (*Doc, Miss) {
+	if isExplicitlyRelative(path0) {
+		return idx.resolveDocsDoc(rootIdx, from, path0)
+	}
 	clean := path.Clean(path0)
 	if escapesRoot(clean) {
 		return nil, MissOutsideRoot
@@ -253,8 +276,7 @@ func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, path0 string) (*Doc, Miss)
 		return doc, miss
 	}
 
-	nameKey := strings.ToLower(strings.TrimSuffix(path.Base(clean), path.Ext(clean)))
-	candidates := rootIdx.byName[nameKey]
+	candidates := rootIdx.byName[normalizeNameKey(clean)]
 	if strings.Contains(clean, "/") {
 		candidates = filterBySuffix(idx.docs, candidates, cleanLower)
 	}
@@ -333,6 +355,9 @@ func (idx *Index) resolveFragment(kind RootKind, doc *Doc, fragment string) (*Do
 // vault (Learnings); this is Obsidian's own limitation, carried through
 // unchanged, not a defect in this resolver.
 func (idx *Index) ResolveLink(from *Doc, target string) (*Doc, Miss) {
+	if from == nil {
+		return nil, MissNoTarget
+	}
 	root, ok := idx.rootByLabel(from.RootLabel)
 	if !ok {
 		return nil, MissNoTarget
@@ -348,7 +373,7 @@ func (idx *Index) ResolveLink(from *Doc, target string) (*Doc, Miss) {
 	if path0 != "" {
 		var miss Miss
 		if root.Kind == RootVault {
-			doc, miss = idx.resolveVaultDoc(rootIdx, path0)
+			doc, miss = idx.resolveVaultDoc(rootIdx, from, path0)
 		} else {
 			doc, miss = idx.resolveDocsDoc(rootIdx, from, path0)
 		}

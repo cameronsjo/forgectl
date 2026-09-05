@@ -21,6 +21,8 @@ package docs
 //       docs-root basename and vice versa
 //   [x] Happy: a fragment-only link ("#heading") resolves to the calling doc
 //   [x] Pinning: a heading's Slug agrees with the id Render() actually emits
+//   [x] Happy: a "./" or "../" target in a vault resolves relative to the
+//       linking doc, and one that climbs past the root is MissOutsideRoot
 
 import (
 	"path/filepath"
@@ -284,5 +286,37 @@ func TestResolveLink_HeadingSlugAgreesWithRender(t *testing.T) {
 	wantID := `id="` + slug + `"`
 	if !strings.Contains(html, wantID) {
 		t.Errorf("Render output %q does not contain %q (scanDoc slug %q)", html, wantID, slug)
+	}
+}
+
+func TestResolveLink_VaultRelativeTargetResolvesFromLinkingDoc(t *testing.T) {
+	idx := newLinksTestIndex(t)
+	from := mustFindDoc(t, idx, "vault", "notes/deep/Alpha.md")
+
+	cases := []struct {
+		target string
+		want   string
+		miss   Miss
+	}{
+		{"../beta.md", "notes/beta.md", MissNone},
+		{"./../anchors", "notes/anchors.md", MissNone},
+		{"../../index.md", "index.md", MissNone},
+		{"../../../repo/index.md", "", MissOutsideRoot},
+	}
+	for _, c := range cases {
+		doc, miss := idx.ResolveLink(from, c.target)
+		if miss != c.miss {
+			t.Errorf("ResolveLink(%q) miss = %v, want %v", c.target, miss, c.miss)
+			continue
+		}
+		if c.want == "" {
+			if doc != nil {
+				t.Errorf("ResolveLink(%q) doc = %+v, want nil", c.target, doc)
+			}
+			continue
+		}
+		if doc == nil || doc.RelPath != c.want {
+			t.Errorf("ResolveLink(%q) doc = %+v, want %s", c.target, doc, c.want)
+		}
 	}
 }

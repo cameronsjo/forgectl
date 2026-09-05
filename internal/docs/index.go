@@ -10,7 +10,6 @@
 package docs
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -141,12 +140,41 @@ type Index struct {
 // IndexOptions carries construction-time overrides for NewIndexWithOptions.
 type IndexOptions struct {
 	// RootKinds overrides detectRootKind's filesystem-based inference for a
-	// root, keyed by the root path EXACTLY as the caller passed it in
-	// NewIndexWithOptions's paths argument — not the canonicalized form. A
-	// key that does not match any entry in paths matches nothing; it is not
-	// an error, since a caller's config may list roots this particular
-	// invocation was not given.
+	// root, keyed by the root path as the caller wrote it. Keys and the
+	// paths argument are compared by absolute, cleaned form (rootKindFor),
+	// so "." / "./docs" / "docs/" in a config file match the absolute root
+	// the CLI derives for the same directory. Symlinks are not resolved on
+	// either side. A key that matches no entry in paths matches nothing; it
+	// is not an error, since a caller's config may list roots this
+	// particular invocation was not given.
 	RootKinds map[string]RootKind
+}
+
+// rootKindFor returns the override for root path p, matching RootKinds
+// keys by absolute cleaned path rather than by the literal string. A key
+// or path that cannot be made absolute falls back to literal comparison.
+func (o IndexOptions) rootKindFor(p string) (RootKind, bool) {
+	if len(o.RootKinds) == 0 {
+		return RootDocs, false
+	}
+	want := comparablePath(p)
+	for key, kind := range o.RootKinds {
+		if comparablePath(key) == want {
+			return kind, true
+		}
+	}
+	return RootDocs, false
+}
+
+// comparablePath is the form two root paths are compared in: absolute and
+// cleaned, so relative spellings, "." segments, and trailing separators do
+// not defeat a match. An unresolvable path compares as written.
+func comparablePath(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	return abs
 }
 
 // docKey identifies one indexed document by the root it was indexed under plus
@@ -186,7 +214,7 @@ func NewIndexWithOptions(paths []string, opts IndexOptions) (*Index, error) {
 			return nil, fmt.Errorf("docs root %q: %w", p, err)
 		}
 
-		override, hasOverride := opts.RootKinds[p]
+		override, hasOverride := opts.rootKindFor(p)
 
 		if info.IsDir() {
 			root, docs, err := indexDirRoot(labels, p, override, hasOverride)
@@ -300,18 +328,24 @@ func indexFileRoot(labels map[string]bool, file string, override RootKind, hasOv
 	if err != nil {
 		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
 	}
-	doc := Doc{
-		RootLabel: label,
-		RelPath:   base,
-		AbsPath:   real,
+	return root, newDoc(label, base, real, fi.ModTime(), meta), nil
+}
+
+// newDoc is the one place a Doc is assembled from its scan result, so the
+// directory walk and the single-file root can never populate a different
+// subset of docMeta's fields.
+func newDoc(rootLabel, relPath, absPath string, modTime time.Time, meta docMeta) Doc {
+	return Doc{
+		RootLabel: rootLabel,
+		RelPath:   relPath,
+		AbsPath:   absPath,
 		Title:     meta.Title,
 		Aliases:   meta.Aliases,
 		Headings:  meta.Headings,
 		BlockIDs:  meta.BlockIDs,
 		Links:     meta.Links,
-		ModTime:   fi.ModTime(),
+		ModTime:   modTime,
 	}
-	return root, doc, nil
 }
 
 // uniqueLabel returns base, or base suffixed with an incrementing counter if
@@ -406,54 +440,24 @@ func walkRoot(root Root) ([]Doc, error) {
 			return err
 		}
 
-		// A scan failure here (the file vanished or became unreadable
-		// between WalkDir's stat and this read) is skipped, the same
-		// posture as the EvalSymlinks failure above — one bad file must
-		// not fail the whole index build.
+		// A scan failure here (the file became unreadable between
+		// WalkDir's stat and this read) keeps the doc in the index with
+		// its filename as the title and no link metadata — the posture
+		// the title-only scan always had. Dropping it would make a
+		// transient read error unlist a file that Resolve's request-time
+		// read may well succeed on a moment later.
 		meta, err := scanDoc(path, relSlash)
 		if err != nil {
-			return nil
+			meta = docMeta{Title: titleFromFilename(relSlash)}
 		}
 
-		docs = append(docs, Doc{
-			RootLabel: root.Label,
-			RelPath:   relSlash,
-			AbsPath:   resolved,
-			Title:     meta.Title,
-			Aliases:   meta.Aliases,
-			Headings:  meta.Headings,
-			BlockIDs:  meta.BlockIDs,
-			Links:     meta.Links,
-			ModTime:   info.ModTime(),
-		})
+		docs = append(docs, newDoc(root.Label, relSlash, resolved, info.ModTime(), meta))
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return docs, nil
-}
-
-// titleFor returns a doc's first level-1 Markdown heading ("# Title"), or —
-// if none is found in the first 64 lines — its filename without extension.
-// This is a cheap scan, not a full parse; render.go's goldmark pass is the
-// source of truth for actual rendering.
-func titleFor(absPath, relPath string) string {
-	f, err := os.Open(absPath)
-	if err == nil {
-		defer f.Close()
-		scanner := bufio.NewScanner(f)
-		for i := 0; i < 64 && scanner.Scan(); i++ {
-			line := strings.TrimSpace(scanner.Text())
-			if after, ok := strings.CutPrefix(line, "# "); ok {
-				if t := strings.TrimSpace(after); t != "" {
-					return t
-				}
-			}
-		}
-	}
-	base := filepath.Base(relPath)
-	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
 // Rebuild re-walks this index's original root arguments and returns a fresh
@@ -487,8 +491,12 @@ func (idx *Index) Rebuild() (*Index, error) {
 // A link that resolves back to the SAME doc (a self-link, or a fragment-only
 // link) is skipped — Backlinks answers "who else links here," and a doc is
 // never its own backlink.
+//
+// Each list is de-duplicated (a doc linking to the target more than once
+// appears once) and sorted by RelPath here, at build time, so Backlinks is
+// a lookup and a copy — never repeated sorting on a request path.
 func (idx *Index) buildBacklinks() map[docKey][]int {
-	out := make(map[docKey][]int)
+	sets := make(map[docKey]map[int]bool)
 	for i := range idx.docs {
 		from := &idx.docs[i]
 		for _, link := range from.Links {
@@ -500,8 +508,22 @@ func (idx *Index) buildBacklinks() map[docKey][]int {
 				continue
 			}
 			key := docKey{rootLabel: target.RootLabel, absPath: target.AbsPath}
-			out[key] = append(out[key], i)
+			if sets[key] == nil {
+				sets[key] = map[int]bool{}
+			}
+			sets[key][i] = true
 		}
+	}
+	out := make(map[docKey][]int, len(sets))
+	for key, set := range sets {
+		indices := make([]int, 0, len(set))
+		for i := range set {
+			indices = append(indices, i)
+		}
+		sort.Slice(indices, func(a, b int) bool {
+			return idx.docs[indices[a]].RelPath < idx.docs[indices[b]].RelPath
+		})
+		out[key] = indices
 	}
 	return out
 }
@@ -510,7 +532,9 @@ func (idx *Index) buildBacklinks() map[docKey][]int {
 // sorted by RelPath and de-duplicated (a doc linking to d more than once
 // appears once). d is looked up by its own (RootLabel, AbsPath) — a nil d,
 // or a Doc this Index never indexed, both return an empty slice rather than
-// panicking.
+// panicking. The returned pointers alias this Index's own storage and are
+// read-only: an Index is never mutated in place (see the type comment), and
+// writing through one would race every handler reading the same Index.
 func (idx *Index) Backlinks(d *Doc) []*Doc {
 	if d == nil {
 		return nil
@@ -519,16 +543,10 @@ func (idx *Index) Backlinks(d *Doc) []*Doc {
 	if len(indices) == 0 {
 		return nil
 	}
-	seen := make(map[int]bool, len(indices))
 	out := make([]*Doc, 0, len(indices))
 	for _, i := range indices {
-		if seen[i] {
-			continue
-		}
-		seen[i] = true
 		out = append(out, &idx.docs[i])
 	}
-	sort.Slice(out, func(a, b int) bool { return out[a].RelPath < out[b].RelPath })
 	return out
 }
 

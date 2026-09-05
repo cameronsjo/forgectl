@@ -8,8 +8,8 @@ harness: "claude-code 2.1.261"
 machine: "cf6e768835c7"
 approved_in: "woven-lyre"
 approved_session_id: "1488f160-f360-414b-952e-1f3846a08602"
-status: in-progress
-next: "polish → flip forgectl#451 ready → cadence reviewers → merge"
+status: review
+next: "forgectl#451 ready → reviewer pass → merge"
 branch: plan/link-substrate
 pr: "cameronsjo/forgectl#451"
 issue: cameronsjo/forgectl#443
@@ -201,7 +201,7 @@ Panel: plan-reviewer, red-team-reviewer ran — 13 findings, 13 folded in, 0 dec
 - [x] `golangci-lint run` clean on changed files
 - [x] Changelog entry
 - [x] Commit: `chore(docs): remove link resolution spike`
-- [ ] run `cadence-forge:polish`; fold findings (wrong-tree pointer: run the reviewer arms against a diff built from the worktree)
+- [x] run `cadence-forge:polish`; fold findings (wrong-tree pointer: run the reviewer arms against a diff built from the worktree)
 
 ---
 
@@ -210,6 +210,7 @@ Panel: plan-reviewer, red-team-reviewer ran — 13 findings, 13 folded in, 0 dec
 - **Task 5 changelog entry lives in the PR body, not `CHANGELOG.md`.** `AGENTS.md` says Release Please owns the file and CI's `check-changelog-owner.sh` fails any PR that edits it; the entry is a `BEGIN_COMMIT_OVERRIDE` block in forgectl#451's body, which Release Please reads at squash-merge.
 - **Task 2 kept `titleFor`.** `index_test.go` (frozen by the Global Constraints) calls it directly, so "deleted once unreferenced" never triggers; production code no longer calls it.
 - **Task 4 tested empty backlinks on `repo/sub/nested.md`**, not `notes/orphan.md`: the Task 2 fixture's `vault/index.md` links to orphan, and that file's content is pinned by a scan test. `vault/notes/linker.md` was added to give `Alpha.md` a real linker.
+- **Polish folded 15 findings** (details in the PR body): `root_kinds` keys now match by absolute path; `DocsConfig.Validate` owns the `docs`|`vault` rule so `launch doctor` sees it; vault links written `./`/`../` resolve from the linking doc; percent-encoded markdown destinations decode; one frontmatter fence rule (`splitFrontmatter`) and one heading-id rule (`headingParserOptions`) shared with `render.go`; a transiently unreadable file keeps its filename title instead of vanishing; `titleFor` and `LinkRef.Embed` removed; backlinks sorted at build.
 - **Task 3 fixed a gofmt miss from Task 2** in `links.go`; CI caught it on the draft PR before Task 3 committed.
 
 ## Learnings

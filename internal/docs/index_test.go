@@ -146,25 +146,31 @@ func TestNewIndex_NonexistentRoot_Errors(t *testing.T) {
 	}
 }
 
-func TestTitleFor_ExtractsHeading(t *testing.T) {
+func TestScanDoc_Title_ExtractsHeading(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "page.md")
 	writeFile(t, path, "\n\n# The Real Title\n\nbody text\n")
 
-	got := titleFor(path, "page.md")
-	if got != "The Real Title" {
-		t.Errorf("titleFor = %q, want %q", got, "The Real Title")
+	meta, err := scanDoc(path, "page.md")
+	if err != nil {
+		t.Fatalf("scanDoc: %v", err)
+	}
+	if meta.Title != "The Real Title" {
+		t.Errorf("Title = %q, want %q", meta.Title, "The Real Title")
 	}
 }
 
-func TestTitleFor_FallsBackToFilename(t *testing.T) {
+func TestScanDoc_Title_FallsBackToFilename(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "no-heading.md")
 	writeFile(t, path, "just a paragraph, no heading\n")
 
-	got := titleFor(path, "no-heading.md")
-	if got != "no-heading" {
-		t.Errorf("titleFor = %q, want %q", got, "no-heading")
+	meta, err := scanDoc(path, "no-heading.md")
+	if err != nil {
+		t.Fatalf("scanDoc: %v", err)
+	}
+	if meta.Title != "no-heading" {
+		t.Errorf("Title = %q, want %q", meta.Title, "no-heading")
 	}
 }
 
