@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/doctor"
@@ -67,13 +67,15 @@ Exit codes: 0 every check ok (or skipped), 1 at least one check failed.`,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			report := doctor.Run(cmd.Context(), d)
-			out := cmd.OutOrStdout()
 			if asJSON {
-				if err := writeDoctorJSON(out, report); err != nil {
+				// Raw stdout, not colorOut: --json is a machine-readable
+				// payload and must never pass through a colour writer, the
+				// same split pr_prs.go and review_list.go make.
+				if err := writeDoctorJSON(cmd.OutOrStdout(), report); err != nil {
 					return WithExitCode(err, 2)
 				}
 			} else {
-				if err := printDoctorReport(out, report); err != nil {
+				if err := printDoctorReport(colorOut(cmd), report); err != nil {
 					return WithExitCode(err, 2)
 				}
 			}

@@ -44,7 +44,7 @@ func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string
 	if asJSON {
 		return emitReviewJSON(cmd.OutOrStdout(), items, store)
 	}
-	return renderReviewTable(cmd.OutOrStdout(), cmd.ErrOrStderr(), items, store)
+	return renderReviewTable(colorOut(cmd), cmd.ErrOrStderr(), items, store)
 }
 
 // filterItems applies the --kind/--repo filters. An empty filter passes all.

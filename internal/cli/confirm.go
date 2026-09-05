@@ -1,6 +1,10 @@
 package cli
 
-import "github.com/charmbracelet/huh"
+import (
+	"charm.land/huh/v2"
+
+	"github.com/cameronsjo/forgectl/internal/keymap"
+)
 
 // confirm shows a yes/no prompt for destructive actions. It returns the
 // user's choice; an error means the prompt couldn't run (e.g. no tty) or was
@@ -14,6 +18,7 @@ func confirm(prompt string) (bool, error) {
 		Affirmative("Yes").
 		Negative("No").
 		Value(&ok).
+		WithTheme(keymap.DarkCharm()).
 		Run()
 	return ok, err
 }

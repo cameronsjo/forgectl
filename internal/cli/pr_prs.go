@@ -8,7 +8,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -60,7 +60,7 @@ reviewed are dimmed; new activity on the PR auto-un-dims them.
 			if asJSON {
 				return emitPRsJSON(cmd.OutOrStdout(), prs, store)
 			}
-			return renderPRTable(cmd.OutOrStdout(), cmd.ErrOrStderr(), prs, store)
+			return renderPRTable(colorOut(cmd), cmd.ErrOrStderr(), prs, store)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")

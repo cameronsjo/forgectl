@@ -5,13 +5,17 @@ package tui
 import (
 	"os"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // Palette — matched to the live tmux status bar + gitmux on screen (lavender
 // accent, Tomorrow-family semantics) so forgectl feels of-a-piece with the
-// terminal. Lip Gloss degrades truecolor→256→16 and honors NO_COLOR for us.
-// Never use raw hex at a call site; reach for a named style below.
+// terminal. Never use raw hex at a call site; reach for a named style below.
+//
+// Lip Gloss v2 no longer degrades inside Render: the truecolor→256→16 downgrade
+// and the NO_COLOR check moved into colorprofile.Writer, which Bubble Tea owns
+// for everything drawn here. Plain-command prints in internal/cli have no
+// program to own that writer, which is why they go through colorOut instead.
 var (
 	colorAccent = lipgloss.Color("#B0B9F9") // lavender — tmux status / selection
 	colorOK     = lipgloss.Color("#b5bd68") // green — attached

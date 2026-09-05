@@ -5,7 +5,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -41,7 +41,7 @@ Rows you've marked reviewed are dimmed (new activity auto-un-dims them).`,
 			renderDegradationNotes(cmd, notes)
 
 			store := pr.LoadReviewed(reviewedPath)
-			out := cmd.OutOrStdout()
+			out := colorOut(cmd)
 			errOut := cmd.ErrOrStderr()
 
 			fmt.Fprintln(out, prSectionStyle.Render("active reviews"))

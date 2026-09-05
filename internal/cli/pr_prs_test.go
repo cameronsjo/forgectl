@@ -27,9 +27,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
-
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -64,13 +61,27 @@ func seedReviewed(t *testing.T, path string, ref pr.Ref, at time.Time) {
 	}
 }
 
-// forceColor forces a color profile so lipgloss emits ANSI to a non-TTY buffer,
-// restoring the prior profile after the test.
+// forceColor makes the dimmed-row tests see ANSI on a non-TTY buffer.
+//
+// Under lipgloss v1 this set a package global that Render consulted. v2 moved
+// the decision into colorprofile.Writer, which every styled command now writes
+// through (colorOut), and that writer reads the ENVIRONMENT rather than a
+// global — so the lever is CLICOLOR_FORCE, the same one an operator would use.
+// colorprofile raises a non-TTY writer to at least ANSI when it is set
+// (colorprofile@v0.4.3 env.go:93-102).
+//
+// NO_COLOR is cleared explicitly. It is not strictly required — a non-TTY
+// writer already starts at NoTTY, so the NO_COLOR branch is unreachable here —
+// but a developer with NO_COLOR exported should not have to wonder whether
+// these tests are measuring their shell or the code.
+//
+// TERM is pinned so the forced profile is ANSI256 rather than plain ANSI,
+// matching what this test asserted before the migration.
 func forceColor(t *testing.T) {
 	t.Helper()
-	prev := lipgloss.ColorProfile()
-	lipgloss.SetColorProfile(termenv.ANSI256)
-	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("CLICOLOR_FORCE", "1")
+	t.Setenv("TERM", "xterm-256color")
 }
 
 func TestPrsCmd_JSON_ReviewedField(t *testing.T) {

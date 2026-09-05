@@ -105,6 +105,10 @@ func Execute(ctx context.Context) error {
 		return err
 	}
 
+	// Before anything builds a colour writer — fang builds two of its own, and
+	// they are not reachable from a call site.
+	normalizeColorEnv()
+
 	env, err := captureEnvSnapshot()
 	if err != nil {
 		return err

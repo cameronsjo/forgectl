@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/keymap"
@@ -208,7 +208,7 @@ func pickRepo(repos []projects.Repo) (projects.Repo, error) {
 				Options(opts...).
 				Value(&chosen),
 		),
-	).WithKeyMap(keymap.Cancel()).Run()
+	).WithKeyMap(keymap.Cancel()).WithTheme(keymap.DarkCharm()).Run()
 	if err != nil {
 		return projects.Repo{}, err
 	}

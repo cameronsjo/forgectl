@@ -1,0 +1,22 @@
+[1;38;2;176;185;249m  forgectl[m[38;2;102;102;102m  ·  menu[m                               
+                                                   
+[38;2;176;185;249m▌[m[38;2;176;185;249m1 [m[1;38;2;176;185;249m  Pick[m                                         
+ [38;2;102;102;102m2 [m[38;2;197;200;198m  Sessions[m  [38;2;102;102;102mattach · rename · kill[m             
+ [38;2;102;102;102m3 [m[38;2;197;200;198m  Windows[m  [38;2;102;102;102mjump to any window, any session[m     
+ [38;2;102;102;102m4 [m[38;2;197;200;198m  Tree[m  [38;2;102;102;102mthe whole layout at a glance[m           
+ [38;2;102;102;102m5 [m[38;2;197;200;198m  Last[m  [38;2;102;102;102mback to the last session[m               
+ [38;2;102;102;102m6 [m[38;2;197;200;198m  Cheatsheet[m  [38;2;102;102;102mtmux terms + the keys that matter[m
+                                                   
+                                                   
+                                                   
+                                                   
+                                                   
+                                                   
+                                                   
+                                                   
+                                                   
+                                                   
+                                                   
+                                                   
+                                                   
+[38;2;102;102;102m1-6 / enter select · q/esc quit[m                    

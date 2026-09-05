@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 
@@ -258,7 +258,7 @@ func pickSession(sessions []resume.Session) (resume.Session, error) {
 				Options(opts...).
 				Value(&chosen),
 		),
-	).WithKeyMap(keymap.Cancel()).Run()
+	).WithKeyMap(keymap.Cancel()).WithTheme(keymap.DarkCharm()).Run()
 	if err != nil {
 		return resume.Session{}, err
 	}

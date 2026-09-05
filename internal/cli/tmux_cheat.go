@@ -18,7 +18,7 @@ func newTmuxCheatCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			noIcons, _ := cmd.Flags().GetBool("no-icons")
-			fmt.Fprintln(cmd.OutOrStdout(), tui.Cheatsheet(noIcons))
+			_, _ = fmt.Fprintln(colorOut(cmd), tui.Cheatsheet(noIcons))
 			return nil
 		},
 	}

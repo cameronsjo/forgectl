@@ -28,7 +28,7 @@ func newBenchStatusCmd(deps module.Deps) *cobra.Command {
 				enc.SetIndent("", "  ")
 				return enc.Encode(report)
 			}
-			renderBenchReport(cmd.OutOrStdout(), report)
+			renderBenchReport(colorOut(cmd), report)
 			return nil
 		},
 	}
