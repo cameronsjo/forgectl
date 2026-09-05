@@ -8,7 +8,7 @@ machine: "cf6e768835c7"
 approved_in: "cedar-chisel"
 approved_session_id: "4b1b4f96-d8eb-4faa-a96b-9bf46558cc02"
 status: in-progress
-next: "PR 1 complete (Tasks 0-2), awaiting merge of #454. Then PR 2a theme core → PR 2b call sites → PR 3 hub. modules_test.go wantCount was 28 on origin/main at PR 1 branch time; re-read it at PR 2a branch time (#439 may move it)."
+next: "PR 1 (#454) is ready, all checks green, MERGEABLE/CLEAN — awaiting Cameron's merge. Then PR 2a theme core → PR 2b call sites → PR 3 hub. Re-read modules_test.go wantCount at PR 2a branch time: it was 28 when PR 1 branched and main has since gained the recipe module."
 branch: chore/charm-v2
 pr: https://github.com/cameronsjo/forgectl/pull/454
 updated: 2026-09-05
@@ -375,6 +375,7 @@ func (t Theme) Contrast(r Role) float64 // vs bg, for theme show's AA flag
 - **[Task 1, unplanned] Two hand-rolled ESC assertions were replaced by the shared contract.** `keybinds_test.go` scanned for five specific bytes (narrower than the shared contract, and blind to C1 and bidi); `doctor_test.go` asserted no ESC anywhere. Both were proxies that held only because of v1's test-binary rendering. The keybind sheet now asserts with icons off, matching every other inertness test in that package — Nerd Font glyphs are private-use runes and so are not graphic.
 - **[Task 7 → PR 1] The piped-output enforcement moved forward from PR 2b.** The plan scheduled `piped_output_test.go` for Task 7. Polish found the gap was not hypothetical: the migration missed **three** styled commands — `ghostty cheat` (117 escapes piped and under `NO_COLOR`), `tmux cheat` (23), and `bench status` (2, reached through a helper). PR 1 therefore ships `internal/cli/colorout_test.go`, an AST guard asserting that a raw `cmd.OutOrStdout()` never receives styled text — directly, through a local variable, or via a package function that styles (resolved transitively, including package-level pre-rendered vars like `launchOKMark`). PR 2b still owns the behavioural table over plain-output verbs; this is the structural half, and it is what caught `bench status`.
 - **[Task 1, unplanned] `AssertInert` now rejects invalid UTF-8 before the rune scan.** A raw `0x9B` — the 8-bit CSI introducer, which a Latin-1 terminal acts on exactly like `ESC[` — decodes to `U+FFFD` under `range`, and `unicode.IsGraphic(U+FFFD)` is true, so it was accepted. Pre-existing, surfaced by the security arm.
+- **[PR 1] `main` was merged into the branch mid-flight, and had to be.** Release-please cut `0.17.0` (#452) after this branch was created. CI's `check-changelog-owner` compares the *merge* commit against the PR's original base SHA, so main's own `CHANGELOG.md` edit was attributed to this PR and `lint` went red on a branch that never touched the file. Merging `main` up cleared it; the underlying check defect is filed as forgectl#458. The merge also brought in a new `internal/cli/recipe.go`, which the new AST guard now covers.
 - **[Task 2] The RED demonstration ran against `origin/main`'s extracted `go.mod`/`go.sum` rather than a checkout of main.** The enforce-worktree guard refuses `git worktree add` targeting the shared checkout from an isolated session. `git show origin/main:go.mod` into a scratch module reproduces the same build list, and the test named all five retired modules plus the 2-lipgloss count.
 
 ## Learnings
