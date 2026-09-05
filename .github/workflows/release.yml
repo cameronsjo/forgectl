@@ -101,6 +101,14 @@ jobs:
               echo "::error::certificate imported but no valid Developer ID Application identity — issuer chain or keychain search list is wrong on this runner"
               exit 1 ;;
           esac
+          echo "$IDENTITIES" | tail -1
+
+          # v0.17.1 proved the identity valid in this keychain and codesign STILL
+          # reported "no identity found": the `list-keychains -s` write above does
+          # not reach the codesign process on the fleet runner's account. Name the
+          # keychain explicitly on every codesign call instead of depending on the
+          # search list — the helper step and goreleaser's post-hook read it here.
+          echo "SIGN_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
       # The helper reports the release version from its own `version` verb, so
       # stamp it from the tag before compiling. Mirrors the -X ldflags the Go
@@ -132,7 +140,7 @@ jobs:
           # runtime + secure timestamp) so Gatekeeper accepts it; otherwise keep
           # the ad-hoc signature that still satisfies the Secure Enclave.
           if [ "$HAS_CERT" = "true" ]; then
-            codesign --sign "Developer ID Application" --options runtime --timestamp --force "$BIN"
+            codesign --keychain "$SIGN_KEYCHAIN" --sign "Developer ID Application" --options runtime --timestamp --force "$BIN"
           else
             codesign -s - -f "$BIN"
           fi
