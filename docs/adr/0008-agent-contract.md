@@ -6,7 +6,7 @@
   the CLI rather than driving it, and a dogfood batch (#182–#202) filed four agent traps:
   an interactive picker reachable in `--dry-run` (#202), a swallowed escape (#200), a
   silent exit-0 on failure (#188, since fixed by #206), and invisible effective config
-  (#189). Related: 0005 (module architecture); the 2026-07-31 active-use pass plan.
+  (#189). Related: 0005 (module architecture); the 2026-07-31 active-use pass (tracked in the private ecosystem meta-repo).
 
 ## Context
 
