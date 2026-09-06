@@ -8,6 +8,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/termsafe/termsafetest"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -49,7 +50,7 @@ func hostileModel(t *testing.T) model {
 	t.Helper()
 	client := tmux.New(hostileRunner(),
 		tmux.WithLookPath(func(string) (string, error) { return "/usr/bin/sesh", nil }))
-	return sized(newModel(context.Background(), client, true), 80, 24)
+	return sized(newModel(context.Background(), client, true, theme.Default()), 80, 24)
 }
 
 // TestViewOfBenignFixtureIsAlreadyInert is the control every other assertion in
@@ -66,7 +67,7 @@ func TestViewOfBenignFixtureIsAlreadyInert(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
 		return oneSessionRow, nil
 	}}
-	m := sized(newModel(context.Background(), tmux.New(fake), true), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(fake), true, theme.Default()), 80, 24)
 	out, _ := m.Update(key("2"))
 	m = out.(model)
 	termsafetest.AssertInert(t, "benign sessions screen", m.View().Content)

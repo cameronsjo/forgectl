@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	forgexec "github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 type streamCall struct {
@@ -97,16 +98,26 @@ func TestLogs_EscapesHostileRunesBeforeAddingTrustedSeverityStyle(t *testing.T) 
 		return err
 	}}
 	var stdout, stderr bytes.Buffer
+	styles := theme.New(theme.Options{}, true).Styles()
+	// Render a lone marker rune through the same Danger style the transform
+	// applies to LevelError, then split around it to learn the exact
+	// prefix/suffix bytes the theme emits for this level — this test asserts
+	// the wrapping is present and un-tampered-with, not the theme's palette.
+	marker := styles.Danger.Render("\x00")
+	prefix, suffix, ok := strings.Cut(marker, "\x00")
+	if !ok {
+		t.Fatalf("styles.Danger.Render did not preserve the marker rune: %q", marker)
+	}
 
-	err := New(runner).Logs(context.Background(), nil, &stdout, &stderr, []string{"pod/api"}, LogsOptions{MinLevel: LevelTrace, Color: true})
+	err := New(runner).Logs(context.Background(), nil, &stdout, &stderr, []string{"pod/api"}, LogsOptions{MinLevel: LevelTrace, Color: true, Styles: styles})
 	if err != nil {
 		t.Fatalf("Logs: %v", err)
 	}
 	got := stdout.String()
-	if !strings.HasPrefix(got, "\x1b[31m") || !strings.HasSuffix(got, "\x1b[0m\n") {
-		t.Fatalf("trusted error style missing: %q", got)
+	if !strings.HasPrefix(got, prefix) || !strings.HasSuffix(got, suffix+"\n") {
+		t.Fatalf("trusted error style missing: got %q, want prefix %q and suffix %q", got, prefix, suffix)
 	}
-	withoutTrusted := strings.TrimSuffix(strings.TrimPrefix(got, "\x1b[31m"), "\x1b[0m\n")
+	withoutTrusted := strings.TrimSuffix(strings.TrimPrefix(got, prefix), suffix+"\n")
 	if strings.ContainsRune(withoutTrusted, '\u009b') || strings.ContainsRune(withoutTrusted, '\x7f') || strings.ContainsRune(withoutTrusted, '\u202e') {
 		t.Errorf("untrusted controls reached stdout: %q", withoutTrusted)
 	}

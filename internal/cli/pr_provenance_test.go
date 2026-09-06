@@ -17,6 +17,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	netpkg "github.com/cameronsjo/forgectl/internal/net"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // findCLICallVerb finds the first call to name whose first arg is verb — for
@@ -167,7 +168,7 @@ func TestPrLocalCmd_ClaudeUnaffectedByFlag(t *testing.T) {
 func TestPrRefCmd_CodexAlwaysRefused(t *testing.T) {
 	fake := prLocalFakeRunner()
 	cmd := newPrCmdForClient(config.Config{}, newPrLocalTestClient(t, fake),
-		netpkg.New(fake), filepath.Join(t.TempDir(), "reviewed.json"))
+		netpkg.New(fake), filepath.Join(t.TempDir(), "reviewed.json"), theme.Theme{})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(new(bytes.Buffer))

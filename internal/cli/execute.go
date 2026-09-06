@@ -165,7 +165,7 @@ func Execute(ctx context.Context) error {
 	switch decideRoute(root, args, isInteractiveTTY()) {
 	case routeTUI:
 		slog.Debug("Launching TUI.", "no_icons", noIcons)
-		return runAction(ctx, tmuxClient, noIcons)
+		return runAction(ctx, tmuxClient, noIcons, deps.Theme)
 	case routeHeadlessMenu:
 		// Route through Cobra/fang instead of the TUI: an unrecognized
 		// top-level verb hits cobra's own "unknown command" + "did you mean"
@@ -318,8 +318,8 @@ func renderStructuredTerminalError(w io.Writer, styles fang.Styles, err *structu
 // runAction opens the TUI and performs whatever jump it selected. Jumps that
 // need the tty (attach / sesh connect) run here, after Bubble Tea has released
 // the terminal.
-func runAction(ctx context.Context, client *tmux.Client, noIcons bool) error {
-	act, err := tui.Run(ctx, client, noIcons)
+func runAction(ctx context.Context, client *tmux.Client, noIcons bool, th theme.Theme) error {
+	act, err := tui.Run(ctx, client, noIcons, th)
 	if err != nil {
 		slog.Error("Failed to run TUI.", "error", err)
 		return err

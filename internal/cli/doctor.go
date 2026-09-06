@@ -3,20 +3,15 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
 
-	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/doctor"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
-
-// doctorSkipMark renders a StateSkip check — mirrors launch_doctor.go's
-// launchOKMark/launchWarnMark/launchFailMark (same package, reused as-is for
-// ok/warn/fail here) with one addition: skip needs its own neutral glyph,
-// since "not configured" is deliberately distinct from both "ok" and "warn".
-var doctorSkipMark = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render("-")
 
 // doctorModule declares the ecosystem-health-check extension (ADR-0005): no
 // config section of its own — every check reads a section another module
@@ -30,13 +25,13 @@ var doctorModule = module.Manifest{
 
 // newDoctorCmd builds `forgectl doctor` over the registry Deps.
 func newDoctorCmd(deps module.Deps) *cobra.Command {
-	return newDoctorCmdForDeps(doctor.NewDeps(deps.Cfg, deps.Runner))
+	return newDoctorCmdForDeps(doctor.NewDeps(deps.Cfg, deps.Runner), deps.Theme)
 }
 
 // newDoctorCmdForDeps builds the command over an already-constructed
 // doctor.Deps — split out so tests can inject fakes (mirrors
 // newUpdateCmdForClient) without going through the full module.Deps wiring.
-func newDoctorCmdForDeps(d doctor.Deps) *cobra.Command {
+func newDoctorCmdForDeps(d doctor.Deps, th theme.Theme) *cobra.Command {
 	var asJSON bool
 
 	cmd := &cobra.Command{
@@ -75,7 +70,8 @@ Exit codes: 0 every check ok (or skipped), 1 at least one check failed.`,
 					return WithExitCode(err, 2)
 				}
 			} else {
-				if err := printDoctorReport(colorOut(cmd), report); err != nil {
+				out := th.Writer(cmd.OutOrStdout(), os.Environ())
+				if err := printDoctorReport(out, report, th.Marks()); err != nil {
 					return WithExitCode(err, 2)
 				}
 			}
@@ -89,19 +85,19 @@ Exit codes: 0 every check ok (or skipped), 1 at least one check failed.`,
 	return cmd
 }
 
-// doctorMark returns the glyph for one Check's State — StateOK/Warn/Fail
-// reuse launch_doctor.go's existing marks (same package) so the two doctor
-// surfaces render identically; StateSkip gets its own neutral glyph.
-func doctorMark(s doctor.State) string {
+// doctorMark returns the glyph for one Check's State from marks — the same
+// theme.Marks launch_doctor.go renders from, so the two doctor surfaces
+// render identically; StateSkip reuses the theme's neutral Skip glyph.
+func doctorMark(s doctor.State, marks theme.Marks) string {
 	switch s {
 	case doctor.StateOK:
-		return launchOKMark
+		return marks.OK
 	case doctor.StateWarn:
-		return launchWarnMark
+		return marks.Warn
 	case doctor.StateFail:
-		return launchFailMark
+		return marks.Fail
 	default: // doctor.StateSkip
-		return doctorSkipMark
+		return marks.Skip
 	}
 }
 
@@ -117,9 +113,9 @@ func doctorMark(s doctor.State) string {
 // classes at this exact display boundary — the one place every check's output
 // converges before reaching a terminal. The --json path needs no such
 // treatment: encoding/json already escapes control bytes.
-func printDoctorReport(out io.Writer, report doctor.Report) error {
+func printDoctorReport(out io.Writer, report doctor.Report, marks theme.Marks) error {
 	for _, c := range report.Checks {
-		if _, err := fmt.Fprintf(out, "%s %-18s %s\n", doctorMark(c.State), c.Name, termsafe.SafeLine(c.Detail)); err != nil {
+		if _, err := fmt.Fprintf(out, "%s %-18s %s\n", doctorMark(c.State, marks), c.Name, termsafe.SafeLine(c.Detail)); err != nil {
 			return err
 		}
 		if c.Hint != "" {

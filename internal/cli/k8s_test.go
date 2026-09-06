@@ -13,6 +13,7 @@ import (
 
 	forgexec "github.com/cameronsjo/forgectl/internal/exec"
 	k8spkg "github.com/cameronsjo/forgectl/internal/k8s"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // realExitError runs a trivial child process that exits with code so tests
@@ -48,7 +49,7 @@ func (r *cliStreamingRunner) RunStreaming(_ context.Context, _ io.Reader, stdout
 
 func executeK8sLogs(t *testing.T, runner *cliStreamingRunner, args ...string) (*bytes.Buffer, *bytes.Buffer, error) {
 	t.Helper()
-	cmd := newK8sCmdForClient(k8spkg.New(runner), &forgexec.FakeRunner{})
+	cmd := newK8sCmdForClient(k8spkg.New(runner), &forgexec.FakeRunner{}, theme.Default().Styles())
 	stdout, stderr := new(bytes.Buffer), new(bytes.Buffer)
 	cmd.SetOut(stdout)
 	cmd.SetErr(stderr)
@@ -185,7 +186,7 @@ func TestK8sLogs_CancellationRemainsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	runner := &cliStreamingRunner{}
-	cmd := newK8sCmdForClient(k8spkg.New(runner), &forgexec.FakeRunner{})
+	cmd := newK8sCmdForClient(k8spkg.New(runner), &forgexec.FakeRunner{}, theme.Default().Styles())
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs([]string{"logs", "pod/api"})
@@ -200,7 +201,7 @@ func TestK8sLogs_CancellationRemainsCancellation(t *testing.T) {
 
 func executeK8sNs(t *testing.T, runner *forgexec.FakeRunner, args ...string) (*bytes.Buffer, error) {
 	t.Helper()
-	cmd := newK8sCmdForClient(k8spkg.New(&cliStreamingRunner{}), runner)
+	cmd := newK8sCmdForClient(k8spkg.New(&cliStreamingRunner{}), runner, theme.Default().Styles())
 	stdout := new(bytes.Buffer)
 	cmd.SetOut(stdout)
 	cmd.SetErr(io.Discard)
@@ -293,7 +294,7 @@ func TestK8sNs_OptsIntoKubectlExitCode(t *testing.T) {
 
 func executeK8sExec(t *testing.T, runner *forgexec.FakeRunner, args ...string) (*bytes.Buffer, error) {
 	t.Helper()
-	cmd := newK8sCmdForClient(k8spkg.New(&cliStreamingRunner{}), runner)
+	cmd := newK8sCmdForClient(k8spkg.New(&cliStreamingRunner{}), runner, theme.Default().Styles())
 	stdout := new(bytes.Buffer)
 	cmd.SetOut(stdout)
 	cmd.SetErr(io.Discard)
@@ -370,7 +371,7 @@ func TestK8sExec_OptsIntoKubectlExitCode(t *testing.T) {
 
 func executeK8sInspect(t *testing.T, runner *forgexec.FakeRunner, args ...string) (*bytes.Buffer, error) {
 	t.Helper()
-	cmd := newK8sCmdForClient(k8spkg.New(&cliStreamingRunner{}), runner)
+	cmd := newK8sCmdForClient(k8spkg.New(&cliStreamingRunner{}), runner, theme.Default().Styles())
 	stdout := new(bytes.Buffer)
 	cmd.SetOut(stdout)
 	cmd.SetErr(io.Discard)

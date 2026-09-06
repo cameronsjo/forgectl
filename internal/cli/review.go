@@ -11,6 +11,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/review"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // reviewModule declares the cross-project work-inventory extension
@@ -62,7 +63,7 @@ func newReviewCmd(deps module.Deps) *cobra.Command {
 	// err discarded: "" degrades to an empty store on read (LoadReviewed), and
 	// the write verbs fail loudly via persist()'s path=="" guard.
 	reviewedPath, _ := config.ReviewReviewedPath()
-	return newReviewCmdForSources(srcs, reviewedPath, effectiveHost)
+	return newReviewCmdForSources(srcs, reviewedPath, effectiveHost, deps.Theme)
 }
 
 // newReviewConfigErrorCmd builds a `review` command tree whose every leaf —
@@ -159,7 +160,7 @@ func activeHosts(effectiveHost string, srcs []review.Source) []string {
 // newPrPrsCmdForClient). effectiveHost threads to mark/unmark (work-ref
 // parsing) and sync (the prune allowlist); production passes ResolveHost
 // output, tests pass review.GitHubHost.
-func newReviewCmdForSources(srcs []review.Source, reviewedPath, effectiveHost string) *cobra.Command {
+func newReviewCmdForSources(srcs []review.Source, reviewedPath, effectiveHost string, th theme.Theme) *cobra.Command {
 	var (
 		asJSON bool
 		kind   string
@@ -201,7 +202,7 @@ the configured GitHub host.
   forgectl review sync                  prune marks for closed items`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runReviewList(cmd, srcs, reviewedPath, asJSON, kind, repo)
+			return runReviewList(cmd, srcs, reviewedPath, asJSON, kind, repo, th)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")

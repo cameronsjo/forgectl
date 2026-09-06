@@ -4,38 +4,6 @@ package tui
 
 import (
 	"os"
-
-	"charm.land/lipgloss/v2"
-)
-
-// Palette — matched to the live tmux status bar + gitmux on screen (lavender
-// accent, Tomorrow-family semantics) so forgectl feels of-a-piece with the
-// terminal. Never use raw hex at a call site; reach for a named style below.
-//
-// Lip Gloss v2 no longer degrades inside Render: the truecolor→256→16 downgrade
-// and the NO_COLOR check moved into colorprofile.Writer, which Bubble Tea owns
-// for everything drawn here. Plain-command prints in internal/cli have no
-// program to own that writer, which is why they go through colorOut instead.
-var (
-	colorAccent = lipgloss.Color("#B0B9F9") // lavender — tmux status / selection
-	colorOK     = lipgloss.Color("#b5bd68") // green — attached
-	colorDanger = lipgloss.Color("#cc6666") // red — destructive
-	colorActive = lipgloss.Color("#f0c674") // yellow — active window/pane
-	colorMuted  = lipgloss.Color("#666666") // metadata
-	colorCyan   = lipgloss.Color("#8abeb7") // accents
-	colorFg     = lipgloss.Color("#c5c8c6") // default text
-)
-
-var (
-	styleHeader   = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	styleAccent   = lipgloss.NewStyle().Foreground(colorAccent)
-	styleSelected = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	styleOK       = lipgloss.NewStyle().Foreground(colorOK)
-	styleDanger   = lipgloss.NewStyle().Foreground(colorDanger).Bold(true)
-	styleActive   = lipgloss.NewStyle().Foreground(colorActive)
-	styleMuted    = lipgloss.NewStyle().Foreground(colorMuted)
-	styleCyan     = lipgloss.NewStyle().Foreground(colorCyan)
-	styleFg       = lipgloss.NewStyle().Foreground(colorFg)
 )
 
 // glyphSet is the icon vocabulary. iconGlyphs uses Nerd Font glyphs (the

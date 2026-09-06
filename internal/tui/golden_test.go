@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -48,7 +49,7 @@ func row(fields ...string) string { return strings.Join(fields, sep) }
 func goldenModel(t *testing.T) model {
 	t.Helper()
 	fake := &exec.FakeRunner{RunFunc: goldenRows}
-	return sized(newModel(context.Background(), tmux.New(fake), false), 80, 24)
+	return sized(newModel(context.Background(), tmux.New(fake), false, theme.Default()), 80, 24)
 }
 
 func assertGolden(t *testing.T, name, got string) {

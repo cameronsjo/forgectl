@@ -24,7 +24,10 @@ import (
 //
 // The rule: inside package cli, a raw cmd.OutOrStdout() must not receive styled
 // text — not directly through fmt.Fprint*, not through a local variable, and
-// not by being handed to a helper that styles. Wrap it in colorOut(cmd).
+// not by being handed to a helper that styles. Wrap it in
+// deps.Theme.Writer(cmd.OutOrStdout(), os.Environ()) — colorOut(cmd) is the
+// legacy equivalent, kept only for the two call sites this migration could
+// not reach (see colorout.go's doc comment).
 //
 // Plain text through a raw writer is untouched, and so is JSON: those are
 // correct and are what most of this package does.
@@ -118,7 +121,7 @@ func TestStyledPrintsGoThroughColorOut(t *testing.T) {
 				}
 				if what != "" {
 					pos := fset.Position(call.Pos())
-					t.Errorf("%s:%d: styled output (%s) written to a raw cmd.OutOrStdout(); wrap it in colorOut(cmd) or it emits raw ANSI into pipes and under NO_COLOR (ADR-0008 rule 5)",
+					t.Errorf("%s:%d: styled output (%s) written to a raw cmd.OutOrStdout(); wrap it in deps.Theme.Writer(cmd.OutOrStdout(), os.Environ()) or it emits raw ANSI into pipes and under NO_COLOR (ADR-0008 rule 5)",
 						filepath.Base(name), pos.Line, what)
 				}
 				return true
@@ -285,7 +288,7 @@ func bindWriters(lhs, rhs []ast.Expr, raw map[string]bool) {
 		switch {
 		case isOutOrStdoutCall(expr):
 			raw[id.Name] = true
-		case isColorOutCall(expr):
+		case isSafeWriterCall(expr):
 			delete(raw, id.Name)
 		}
 	}
@@ -310,13 +313,30 @@ func isOutOrStdoutCall(e ast.Expr) bool {
 	return ok && sel.Sel.Name == "OutOrStdout"
 }
 
-func isColorOutCall(e ast.Expr) bool {
+// isSafeWriterCall reports whether e is a known theme-aware wrapper around a
+// raw writer — the legacy colorOut(cmd) shim, or any receiver's Writer(...)
+// method (th.Writer(w, env), deps.Theme.Writer(w, env)) — theme.Theme's
+// colorprofile-backed replacement. Both downgrade styled output to the
+// destination's colour profile before anything styled reaches it, so binding
+// a name to either result clears that name's raw status.
+//
+// The "any receiver" breadth on the selector form is a known widening: it
+// cannot distinguish theme.Theme.Writer from an unrelated same-named method
+// elsewhere in the package. Acceptable here because the guard is already
+// documented as a heuristic (see the miss list above), and package cli has no
+// other type exposing a two-arg Writer method today.
+func isSafeWriterCall(e ast.Expr) bool {
 	call, ok := e.(*ast.CallExpr)
 	if !ok {
 		return false
 	}
-	id, ok := call.Fun.(*ast.Ident)
-	return ok && id.Name == "colorOut"
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		return fun.Name == "colorOut"
+	case *ast.SelectorExpr:
+		return fun.Sel.Name == "Writer"
+	}
+	return false
 }
 
 // isFprint reports whether fun is fmt.Fprint, Fprintf, or Fprintln.

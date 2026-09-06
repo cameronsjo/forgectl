@@ -14,6 +14,7 @@ import (
 	envpkg "github.com/cameronsjo/forgectl/internal/env"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // confirmAnyFile is the --any-file confirmation seam — a package-level var
@@ -55,7 +56,7 @@ var (
 // env-named needs no confirmation at all (Locate's own name check would
 // pass it regardless), so that case returns allow=true without ever
 // consulting confirmAnyFile.
-func resolveAllowAnyFile(anyFile bool, file, cwd string) (bool, error) {
+func resolveAllowAnyFile(anyFile bool, file, cwd string, th theme.Theme) (bool, error) {
 	if !anyFile {
 		return false, nil
 	}
@@ -73,7 +74,7 @@ func resolveAllowAnyFile(anyFile bool, file, cwd string) (bool, error) {
 		// that does not exist and that someone will reasonably try to type.
 		return false, errors.New("an interactive terminal is required for --any-file")
 	}
-	ok, err := confirmAnyFile(fmt.Sprintf("%q is not a recognized env file (.env, .env.*, or *.env) — operate on it anyway?", resolved))
+	ok, err := confirmAnyFile(th, fmt.Sprintf("%q is not a recognized env file (.env, .env.*, or *.env) — operate on it anyway?", resolved))
 	if err != nil {
 		return false, err
 	}
@@ -105,13 +106,13 @@ func newEnvCmd(deps module.Deps) *cobra.Command {
 	// prints, and a length is itself signal about a secret (the plan
 	// declines a partial-redact reveal for the exact same reason).
 	client := envpkg.NewClient(clippkg.New(deps.Runner, clippkg.WithSensitive()))
-	return newEnvCmdForClient(client)
+	return newEnvCmdForClient(client, deps.Theme)
 }
 
 // newEnvCmdForClient builds the command over an already-constructed
 // client — split out so tests can inject a fake-wired *env.Client (mirrors
 // newYCmdForClient/newDockerCmdForClient) without going through newEnvCmd.
-func newEnvCmdForClient(client *envpkg.Client) *cobra.Command {
+func newEnvCmdForClient(client *envpkg.Client, th theme.Theme) *cobra.Command {
 	var file string
 	var anyFile bool
 
@@ -153,11 +154,11 @@ argv and transcript; forgectl can't close a channel it doesn't own.`,
 	cmd.PersistentFlags().BoolVar(&anyFile, "any-file", false, "allow a --file that isn't .env/.env.*/*.env, after an interactive confirmation (requires a tty)")
 
 	cmd.AddCommand(
-		newEnvKeysCmd(&file, &anyFile),
-		newEnvSetCmd(client, &file, &anyFile),
-		newEnvGetCmd(client, &file, &anyFile),
-		newEnvCheckCmd(&file, &anyFile),
-		newEnvRedactCmd(&file, &anyFile),
+		newEnvKeysCmd(&file, &anyFile, th),
+		newEnvSetCmd(client, &file, &anyFile, th),
+		newEnvGetCmd(client, &file, &anyFile, th),
+		newEnvCheckCmd(&file, &anyFile, th),
+		newEnvRedactCmd(&file, &anyFile, th),
 	)
 	return cmd
 }
@@ -180,7 +181,7 @@ func readDocument(realPath string) (*envpkg.Document, error) {
 }
 
 // newEnvKeysCmd builds `env keys`.
-func newEnvKeysCmd(file *string, anyFile *bool) *cobra.Command {
+func newEnvKeysCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 	return &cobra.Command{
 		Use:   "keys",
 		Short: "List KEY names — never values",
@@ -190,7 +191,7 @@ func newEnvKeysCmd(file *string, anyFile *bool) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			allow, err := resolveAllowAnyFile(*anyFile, *file, cwd)
+			allow, err := resolveAllowAnyFile(*anyFile, *file, cwd, th)
 			if err != nil {
 				return err
 			}
@@ -226,7 +227,7 @@ func newEnvKeysCmd(file *string, anyFile *bool) *cobra.Command {
 }
 
 // newEnvSetCmd builds `env set`.
-func newEnvSetCmd(client *envpkg.Client, file *string, anyFile *bool) *cobra.Command {
+func newEnvSetCmd(client *envpkg.Client, file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 	var clipboard bool
 
 	cmd := &cobra.Command{
@@ -247,7 +248,7 @@ func newEnvSetCmd(client *envpkg.Client, file *string, anyFile *bool) *cobra.Com
 			if err != nil {
 				return err
 			}
-			allow, err := resolveAllowAnyFile(*anyFile, *file, cwd)
+			allow, err := resolveAllowAnyFile(*anyFile, *file, cwd, th)
 			if err != nil {
 				return err
 			}
@@ -302,7 +303,7 @@ func resolveSetValue(cmd *cobra.Command, key string) (string, error) {
 }
 
 // newEnvGetCmd builds `env get`.
-func newEnvGetCmd(client *envpkg.Client, file *string, anyFile *bool) *cobra.Command {
+func newEnvGetCmd(client *envpkg.Client, file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 	var clipboard bool
 
 	cmd := &cobra.Command{
@@ -318,7 +319,7 @@ func newEnvGetCmd(client *envpkg.Client, file *string, anyFile *bool) *cobra.Com
 			if err != nil {
 				return err
 			}
-			allow, err := resolveAllowAnyFile(*anyFile, *file, cwd)
+			allow, err := resolveAllowAnyFile(*anyFile, *file, cwd, th)
 			if err != nil {
 				return err
 			}
@@ -339,7 +340,7 @@ func newEnvGetCmd(client *envpkg.Client, file *string, anyFile *bool) *cobra.Com
 // and/or extra keys — either counts as drift), 0 means clean. --json
 // (forgectl#105) emits the same verdict as {"missing":[...],"extra":[...]}
 // on stdout instead of the human sections, under the identical exit codes.
-func newEnvCheckCmd(file *string, anyFile *bool) *cobra.Command {
+func newEnvCheckCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 	var example string
 	var asJSON bool
 
@@ -353,7 +354,7 @@ func newEnvCheckCmd(file *string, anyFile *bool) *cobra.Command {
 				return err
 			}
 
-			allowFile, err := resolveAllowAnyFile(*anyFile, *file, cwd)
+			allowFile, err := resolveAllowAnyFile(*anyFile, *file, cwd, th)
 			if err != nil {
 				return err
 			}
@@ -369,7 +370,7 @@ func newEnvCheckCmd(file *string, anyFile *bool) *cobra.Command {
 				return err
 			}
 
-			allowExample, err := resolveAllowAnyFile(*anyFile, example, cwd)
+			allowExample, err := resolveAllowAnyFile(*anyFile, example, cwd, th)
 			if err != nil {
 				return err
 			}
@@ -455,7 +456,7 @@ func writeCheckJSON(out io.Writer, missing, extra []string) error {
 }
 
 // newEnvRedactCmd builds `env redact`.
-func newEnvRedactCmd(file *string, anyFile *bool) *cobra.Command {
+func newEnvRedactCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 	return &cobra.Command{
 		Use:   "redact",
 		Short: "Print --file with every value masked (****)",
@@ -465,7 +466,7 @@ func newEnvRedactCmd(file *string, anyFile *bool) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			allow, err := resolveAllowAnyFile(*anyFile, *file, cwd)
+			allow, err := resolveAllowAnyFile(*anyFile, *file, cwd, th)
 			if err != nil {
 				return err
 			}

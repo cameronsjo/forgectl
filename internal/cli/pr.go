@@ -12,6 +12,7 @@ import (
 	netpkg "github.com/cameronsjo/forgectl/internal/net"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // prAgentEnv is the environment override for the review agent, honored when
@@ -38,10 +39,10 @@ func newPrCmd(deps module.Deps) *cobra.Command {
 	// err discarded: a failed config-dir lookup yields "", which LoadReviewed
 	// reads as an empty store and persist() rejects loudly — never a silent bad write.
 	reviewedPath, _ := config.PrReviewedPath()
-	return newPrCmdForClient(cfg, client, netClient, reviewedPath)
+	return newPrCmdForClient(cfg, client, netClient, reviewedPath, deps.Theme)
 }
 
-func newPrCmdForClient(cfg config.Config, client *pr.Client, netClient *netpkg.Client, reviewedPath string) *cobra.Command {
+func newPrCmdForClient(cfg config.Config, client *pr.Client, netClient *netpkg.Client, reviewedPath string, th theme.Theme) *cobra.Command {
 
 	var (
 		agent    string
@@ -149,11 +150,11 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 		newPrOpenCmd(client),
 		newPrTeardownCmd(client),
 		newPrCleanupCmd(client),
-		newPrFindingsCmd(client),
+		newPrFindingsCmd(client, th),
 		newPrKeysCmd(),
-		newPrPrsCmd(client),
-		newPrDashCmd(client),
-		newPrPickCmd(client, cfg),
+		newPrPrsCmd(client, th),
+		newPrDashCmd(client, th),
+		newPrPickCmd(client, cfg, th),
 		newPrReviewedCmd(client),
 	)
 	return cmd

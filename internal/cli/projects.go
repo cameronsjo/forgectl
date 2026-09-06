@@ -10,6 +10,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/projects"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // projectAliases is the single source of truth for projects' subverb
@@ -56,7 +57,7 @@ var projectsModule = module.Manifest{
 		return newProjectsCmd(projects.New(deps.Runner,
 			projects.WithGitHubOwners(deps.Cfg.Projects.Owners),
 			projects.WithGitHubHost(host),
-			projects.WithWings(wings)))
+			projects.WithWings(wings)), deps.Theme)
 	},
 }
 
@@ -110,19 +111,19 @@ func newProjectsConfigErrorCmd(err error) *cobra.Command {
 // newProjectsCmd builds the `projects` parent command. The bare `forgectl projects`
 // (or `forgectl proj`) invocation runs the interactive picker — same zero-typing
 // affordance as `forgectl tmux`.
-func newProjectsCmd(client *projects.Client) *cobra.Command {
+func newProjectsCmd(client *projects.Client, th theme.Theme) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "projects",
 		Aliases: []string{"proj"},
 		Short:   "Find and open projects across local, GitHub, and Gitea (clones on demand)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return newProjectsPickCmd(client).RunE(cmd, nil)
+			return newProjectsPickCmd(client, th).RunE(cmd, nil)
 		},
 	}
-	cmd.AddCommand(newProjectsPickCmd(client))
+	cmd.AddCommand(newProjectsPickCmd(client, th))
 	cmd.AddCommand(newProjectsListCmd(client))
-	cmd.AddCommand(newProjectsCloneCmd(client))
-	cmd.AddCommand(newProjectsWorktreeCmd(client))
+	cmd.AddCommand(newProjectsCloneCmd(client, th))
+	cmd.AddCommand(newProjectsWorktreeCmd(client, th))
 	cmd.AddCommand(newProjectsPullAllCmd(client))
 	applyAliases(cmd, projectAliases)
 	return cmd

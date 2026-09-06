@@ -6,6 +6,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // reportUsageStats prints the launch-statistics line and reports whether the
@@ -18,32 +19,32 @@ import (
 // store through the same safe opener the writer uses — so every path it
 // tightened is named on its own line. A doctor that silently corrected a
 // widened store would destroy the evidence an operator called it to see.
-func reportUsageStats(out io.Writer, enabled bool) bool {
+func reportUsageStats(out io.Writer, enabled bool, marks theme.Marks) bool {
 	if !enabled {
-		fmt.Fprintf(out, "%s usage statistics: off (local-only opt-in; enable with [launch] usage_stats = true)\n", launchWarnMark)
+		_, _ = fmt.Fprintf(out, "%s usage statistics: off (local-only opt-in; enable with [launch] usage_stats = true)\n", marks.Warn)
 		return true
 	}
 
 	status, err := launch.InspectUsage()
 	if err != nil {
-		fmt.Fprintf(out, "%s usage statistics: state path unusable: %s\n", launchFailMark, termsafe.SafeLine(err.Error()))
+		_, _ = fmt.Fprintf(out, "%s usage statistics: state path unusable: %s\n", marks.Fail, termsafe.SafeLine(err.Error()))
 		return false
 	}
 	// Printed before the verdict lines, and before any refusal return, because
 	// a store can be narrowed on the leaf and still refused on a file below it.
-	reportUsageNarrowing(out, status.Narrowed)
+	reportUsageNarrowing(out, status.Narrowed, marks)
 	if status.Refusal != nil {
-		fmt.Fprintf(out, "%s usage statistics: on, but the store at %s was refused: %s\n",
-			launchFailMark, termsafe.QuotePath(status.Paths.Leaf), termsafe.SafeLine(status.Refusal.Error()))
+		_, _ = fmt.Fprintf(out, "%s usage statistics: on, but the store at %s was refused: %s\n",
+			marks.Fail, termsafe.QuotePath(status.Paths.Leaf), termsafe.SafeLine(status.Refusal.Error()))
 		return false
 	}
 	if !status.DataPresent {
-		fmt.Fprintf(out, "%s usage statistics: on, nothing recorded yet → %s\n",
-			launchOKMark, termsafe.QuotePath(status.Paths.Data))
+		_, _ = fmt.Fprintf(out, "%s usage statistics: on, nothing recorded yet → %s\n",
+			marks.OK, termsafe.QuotePath(status.Paths.Data))
 		return true
 	}
-	fmt.Fprintf(out, "%s usage statistics: on → %s (read it with `forgectl launch stats`)\n",
-		launchOKMark, termsafe.QuotePath(status.Paths.Data))
+	_, _ = fmt.Fprintf(out, "%s usage statistics: on → %s (read it with `forgectl launch stats`)\n",
+		marks.OK, termsafe.QuotePath(status.Paths.Data))
 	return true
 }
 
@@ -54,9 +55,9 @@ func reportUsageStats(out io.Writer, enabled bool) bool {
 // failing exit code would report a problem that no longer exists. What the
 // operator needs is the fact that something had widened it — one line per
 // path, so a store widened before doctor ran is still legible afterwards.
-func reportUsageNarrowing(out io.Writer, narrowed []string) {
+func reportUsageNarrowing(out io.Writer, narrowed []string, marks theme.Marks) {
 	for _, path := range narrowed {
-		fmt.Fprintf(out, "%s usage statistics: %s was more permissive than forgectl's own mode and has been tightened\n",
-			launchWarnMark, termsafe.QuotePath(path))
+		_, _ = fmt.Fprintf(out, "%s usage statistics: %s was more permissive than forgectl's own mode and has been tightened\n",
+			marks.Warn, termsafe.QuotePath(path))
 	}
 }

@@ -43,6 +43,13 @@ func TestWriterBindingTracking(t *testing.T) {
 			wantRaw: nil,
 		},
 		{
+			// theme.Writer is colorOut's replacement — every migrated call site
+			// binds through a receiver's Writer(...) method instead.
+			name:    "theme Writer binding is not raw",
+			body:    `out := th.Writer(cmd.OutOrStdout(), os.Environ())`,
+			wantRaw: nil,
+		},
+		{
 			// Rebinding must not retroactively clear the name. A prepass that
 			// computed one final set would report `out` safe here and miss any
 			// styled write between the two statements.

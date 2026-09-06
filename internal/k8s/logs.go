@@ -12,8 +12,11 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"charm.land/lipgloss/v2"
+
 	forgexec "github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // Level is an ordered log severity. Only recognized top-level JSON level or
@@ -54,6 +57,7 @@ func ParseLevel(value string) (Level, error) {
 type LogsOptions struct {
 	MinLevel Level
 	Color    bool
+	Styles   theme.Styles
 }
 
 // Client streams kubectl logs through terminal-safe line transforms.
@@ -250,7 +254,7 @@ func logLineTransform(out io.Writer, opts LogsOptions) lineTransform {
 		}
 		safe := termsafe.SafeLine(string(line))
 		if opts.Color && recognized {
-			safe = severityANSI(level) + safe + "\x1b[0m"
+			safe = severityStyle(opts.Styles, level).Render(safe)
 		}
 		if _, err := io.WriteString(out, safe); err != nil {
 			return err
@@ -286,21 +290,22 @@ func jsonSeverity(line []byte) (Level, bool) {
 	return level, err == nil
 }
 
-func severityANSI(level Level) string {
+// severityStyle maps a recognized severity to its theme style. The zero
+// value returned for an unmapped level renders unstyled rather than
+// panicking, matching the untouched-line behavior it replaces.
+func severityStyle(styles theme.Styles, level Level) lipgloss.Style {
 	switch level {
 	case LevelTrace:
-		return "\x1b[90m"
+		return styles.Dim
 	case LevelDebug:
-		return "\x1b[36m"
+		return styles.Steel
 	case LevelInfo:
-		return "\x1b[32m"
+		return styles.OK
 	case LevelWarn:
-		return "\x1b[33m"
-	case LevelError:
-		return "\x1b[31m"
-	case LevelFatal:
-		return "\x1b[1;31m"
+		return styles.Warn
+	case LevelError, LevelFatal:
+		return styles.Danger
 	default:
-		return ""
+		return lipgloss.Style{}
 	}
 }

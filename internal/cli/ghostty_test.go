@@ -21,6 +21,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	ghosttypkg "github.com/cameronsjo/forgectl/internal/ghostty"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 func ghosttyFixture(themesOut, keybindsOut, configOut string) *ghosttypkg.Client {
@@ -166,7 +167,7 @@ func TestGhosttyThemesCmd_SanitizesHostileThemeName(t *testing.T) {
 
 func TestGhosttyCheatCmd_RendersParsedKeybinds(t *testing.T) {
 	client := ghosttyFixture("", "keybind = escape=end_search\n", "")
-	cmd := newGhosttyCheatCmd(client)
+	cmd := newGhosttyCheatCmd(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))

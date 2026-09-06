@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -14,28 +15,23 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
-
-// prDimStyle dims a whole reviewed row. Convention is a muted foreground, not
-// .Faint() — mirrors internal/tui's styleMuted and launch_which's dim style.
-// It is applied to a FULL tabwriter line AFTER flush, never a per-cell string
-// before measurement (ANSI bytes inside a cell break column alignment).
-var prDimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
 // newPrPrsCmd builds `forgectl pr prs` over a freshly constructed client
 // (mirrors newNetCmd). The reviewed-store path is resolved here so the command
 // dims rows a prior review touched.
-func newPrPrsCmd(client *pr.Client) *cobra.Command {
+func newPrPrsCmd(client *pr.Client, th theme.Theme) *cobra.Command {
 	// err discarded: "" degrades to an empty store on read (LoadReviewed).
 	reviewedPath, _ := config.PrReviewedPath()
-	return newPrPrsCmdForClient(client, reviewedPath)
+	return newPrPrsCmdForClient(client, reviewedPath, th)
 }
 
 // newPrPrsCmdForClient builds the command over an already-constructed client
 // and an explicit reviewed-store path — the test seam (mirrors
 // newNetCmdForClient) so a fake-wired *pr.Client and a temp store can be
 // injected without touching the cfg-based constructor.
-func newPrPrsCmdForClient(client *pr.Client, reviewedPath string) *cobra.Command {
+func newPrPrsCmdForClient(client *pr.Client, reviewedPath string, th theme.Theme) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "prs",
@@ -60,7 +56,8 @@ reviewed are dimmed; new activity on the PR auto-un-dims them.
 			if asJSON {
 				return emitPRsJSON(cmd.OutOrStdout(), prs, store)
 			}
-			return renderPRTable(colorOut(cmd), cmd.ErrOrStderr(), prs, store)
+			out := th.Writer(cmd.OutOrStdout(), os.Environ())
+			return renderPRTable(out, cmd.ErrOrStderr(), prs, store, th.Styles().Muted)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
@@ -109,7 +106,7 @@ func emitPRsJSON(out io.Writer, prs []pr.PR, store *pr.ReviewedStore) error {
 // one-line count summary to errOut. Dimmed (reviewed) rows are styled per whole
 // line AFTER the tabwriter flush — laying the columns out in plain text first
 // so ANSI escape bytes never enter the width measurement.
-func renderPRTable(out, errOut io.Writer, prs []pr.PR, store *pr.ReviewedStore) error {
+func renderPRTable(out, errOut io.Writer, prs []pr.PR, store *pr.ReviewedStore, dimStyle lipgloss.Style) error {
 	var buf bytes.Buffer
 	tw := tabwriter.NewWriter(&buf, 0, 2, 2, ' ', 0)
 	if _, err := fmt.Fprintln(tw, "REPO\t#\tTITLE\tSTATE"); err != nil {
@@ -135,7 +132,7 @@ func renderPRTable(out, errOut io.Writer, prs []pr.PR, store *pr.ReviewedStore) 
 		line := lines[i+1]
 		if pr.Dimmed(p, store) {
 			reviewed++
-			line = prDimStyle.Render(line)
+			line = dimStyle.Render(line)
 		}
 		if _, err := fmt.Fprintln(out, line); err != nil {
 			return err

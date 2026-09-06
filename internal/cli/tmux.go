@@ -4,6 +4,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -35,13 +36,13 @@ var tmuxModule = module.Manifest{
 	ArgvTokens:   []string{"tm"},
 	SubAliases:   tmuxAliases,
 	New: func(deps module.Deps) *cobra.Command {
-		return newTmuxCmd(tmux.New(deps.Runner))
+		return newTmuxCmd(tmux.New(deps.Runner), deps.Theme)
 	},
 }
 
 // newTmuxCmd builds the `tmux` parent command. Verbs are attached in their own
 // files (tmux_ls.go, …) so each milestone adds a slice without churn here.
-func newTmuxCmd(client *tmux.Client) *cobra.Command {
+func newTmuxCmd(client *tmux.Client, th theme.Theme) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "tmux",
 		Aliases: []string{"tm"},
@@ -50,18 +51,18 @@ func newTmuxCmd(client *tmux.Client) *cobra.Command {
 		// bare invoke — tmux is the only module today).
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			noIcons, _ := cmd.Flags().GetBool("no-icons")
-			return runAction(cmd.Context(), client, noIcons)
+			return runAction(cmd.Context(), client, noIcons, th)
 		},
 	}
 	cmd.AddCommand(
 		newTmuxLsCmd(client),
 		newTmuxPickCmd(client),
-		newTmuxKillCmd(client),
+		newTmuxKillCmd(client, th),
 		newTmuxRenameCmd(client),
 		newTmuxWindowsCmd(client),
 		newTmuxTreeCmd(client),
 		newTmuxLastCmd(client),
-		newTmuxCheatCmd(),
+		newTmuxCheatCmd(th),
 	)
 	applyAliases(cmd, tmuxAliases)
 	return cmd

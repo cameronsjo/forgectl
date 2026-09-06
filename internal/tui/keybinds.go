@@ -5,6 +5,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/ghostty"
 	"github.com/cameronsjo/forgectl/internal/meta"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // KeybindSheet renders a Ghostty keybind cheatsheet — trigger, action, and
@@ -19,10 +20,15 @@ import (
 // parsed from a live `ghostty +list-keybinds` run.
 func KeybindSheet(rows []ghostty.Keybind, noIcons bool) string {
 	glyphs := pickGlyphs(noIcons)
-	triggerCol := styleAccent.Width(24)
+	// KeybindSheet's only caller (internal/cli's `ghostty keybinds` verb) is a
+	// plain-print path outside the TUI's Bubble Tea program, so it has no live
+	// theme.Theme to draw from — theme.Default() (Artificer, dark) is the same
+	// fixed palette every other print-only forgectl surface falls back to.
+	s := theme.Default().Styles()
+	triggerCol := s.Accent.Width(24)
 
 	var b strings.Builder
-	title := styleHeader.Render(meta.AppName + " · ghostty keybinds")
+	title := s.Header.Render(meta.AppName + " · ghostty keybinds")
 	b.WriteString(glyphs.Cheat + " " + title + "\n\n")
 
 	for _, row := range rows {
@@ -32,7 +38,7 @@ func KeybindSheet(rows []ghostty.Keybind, noIcons bool) string {
 		}
 		trigger := sanitizeControlBytes(row.Trigger)
 		desc = sanitizeControlBytes(desc)
-		b.WriteString("  " + triggerCol.Render(trigger) + styleMuted.Render(desc) + "\n")
+		b.WriteString("  " + triggerCol.Render(trigger) + s.Muted.Render(desc) + "\n")
 	}
 
 	return strings.TrimRight(b.String(), "\n")

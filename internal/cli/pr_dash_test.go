@@ -29,6 +29,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // dashRunner fakes gh search prs (dash's two queries), gh pr view (for a real
@@ -227,7 +228,7 @@ func TestSessionStatus_UnclassifiedMatchesTheDash(t *testing.T) {
 
 func TestDashCmd_ThreeSectionsRenderInOrder(t *testing.T) {
 	client := pr.New(dashRunner("[]"), pr.WithSessionsDir(t.TempDir()))
-	cmd := newPrDashCmdForClient(client, filepath.Join(t.TempDir(), "r.json"))
+	cmd := newPrDashCmdForClient(client, filepath.Join(t.TempDir(), "r.json"), theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -262,7 +263,7 @@ func TestDashCmd_ActiveReviewSurfacesFromRealBreadcrumb(t *testing.T) {
 		t.Fatalf("Prepare: %v", err)
 	}
 
-	cmd := newPrDashCmdForClient(client, filepath.Join(t.TempDir(), "r.json"))
+	cmd := newPrDashCmdForClient(client, filepath.Join(t.TempDir(), "r.json"), theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -288,7 +289,7 @@ func TestDashCmd_DimsReviewedRow(t *testing.T) {
 	seedReviewed(t, reviewedPath, pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42},
 		time.Date(2026, 7, 9, 13, 0, 0, 0, time.UTC))
 
-	cmd := newPrDashCmdForClient(client, reviewedPath)
+	cmd := newPrDashCmdForClient(client, reviewedPath, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -329,7 +330,7 @@ func TestDashCmd_DegradationNotesOnStderr(t *testing.T) {
 		return "", nil
 	}}
 	client := pr.New(fake, pr.WithSessionsDir(t.TempDir()))
-	cmd := newPrDashCmdForClient(client, filepath.Join(t.TempDir(), "r.json"))
+	cmd := newPrDashCmdForClient(client, filepath.Join(t.TempDir(), "r.json"), theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)

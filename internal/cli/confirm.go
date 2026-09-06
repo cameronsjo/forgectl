@@ -3,7 +3,7 @@ package cli
 import (
 	"charm.land/huh/v2"
 
-	"github.com/cameronsjo/forgectl/internal/keymap"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // confirm shows a yes/no prompt for destructive actions. It returns the
@@ -11,14 +11,14 @@ import (
 // aborted. NOT every caller offers a way to skip it: tmux_kill and update
 // each gate this behind their own --yes flag, but clean has no such flag —
 // every one of its destructive passes always confirms first.
-func confirm(prompt string) (bool, error) {
+func confirm(th theme.Theme, prompt string) (bool, error) {
 	ok := false
 	err := huh.NewConfirm().
 		Title(prompt).
 		Affirmative("Yes").
 		Negative("No").
 		Value(&ok).
-		WithTheme(keymap.DarkCharm()).
+		WithTheme(th.Huh()).
 		Run()
 	return ok, err
 }

@@ -10,6 +10,7 @@ import (
 
 	cleanpkg "github.com/cameronsjo/forgectl/internal/clean"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // cleanGroupAliases is clean's shorthand surface ("cln" — "cl" is claimed by
@@ -34,13 +35,13 @@ var cleanModule = module.Manifest{
 // follow-on) are the --caches/--docker opt-in passes.
 func newCleanCmd(deps module.Deps) *cobra.Command {
 	client := cleanpkg.New(deps.Runner, cleanpkg.WithCleanConfig(deps.Cfg.Clean))
-	return newCleanCmdForClient(client)
+	return newCleanCmdForClient(client, deps.Theme)
 }
 
 // newCleanCmdForClient builds the command over an already-constructed
 // client — split out so tests can inject a fake-wired *clean.Client (mirrors
 // newBranchCmdForClient) without going through newCleanCmd.
-func newCleanCmdForClient(client *cleanpkg.Client) *cobra.Command {
+func newCleanCmdForClient(client *cleanpkg.Client, th theme.Theme) *cobra.Command {
 	var (
 		root      string
 		typeFlag  string
@@ -123,7 +124,7 @@ verb that clears only the cache.`,
 				OlderThan: olderThan,
 				Apply:     apply,
 				Force:     force,
-			}, caches, docker)
+			}, caches, docker, th)
 		},
 	}
 	cmd.Flags().StringVar(&root, "root", "", "root directory to scan (default: ~/Projects, or [clean] default_root)")
@@ -143,18 +144,18 @@ verb that clears only the cache.`,
 // prevents a later one from running — every error is combined and
 // surfaced together at the end (errors.Join returns nil when errs is
 // empty, so the all-success case is unaffected).
-func runClean(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.CleanOptions, includeCaches, includeDocker bool) error {
+func runClean(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.CleanOptions, includeCaches, includeDocker bool, th theme.Theme) error {
 	var errs []error
-	if err := runCleanDirs(cmd, client, opts); err != nil {
+	if err := runCleanDirs(cmd, client, opts, th); err != nil {
 		errs = append(errs, fmt.Errorf("dep/build-dir pass: %w", err))
 	}
 	if includeCaches {
-		if err := runCleanCaches(cmd, client, opts.Apply); err != nil {
+		if err := runCleanCaches(cmd, client, opts.Apply, th); err != nil {
 			errs = append(errs, fmt.Errorf("caches pass: %w", err))
 		}
 	}
 	if includeDocker {
-		if err := runCleanDocker(cmd, client, opts.Apply); err != nil {
+		if err := runCleanDocker(cmd, client, opts.Apply, th); err != nil {
 			errs = append(errs, fmt.Errorf("docker pass: %w", err))
 		}
 	}
@@ -164,7 +165,7 @@ func runClean(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.CleanOp
 // runCleanDirs is the original dep/build-dir reclaim pass: scans, prints
 // the report, and — only with --apply, after a confirmation prompt —
 // deletes everything reclaimable, then reports actual reclaimed bytes.
-func runCleanDirs(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.CleanOptions) error {
+func runCleanDirs(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.CleanOptions, th theme.Theme) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
@@ -198,7 +199,7 @@ func runCleanDirs(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.Cle
 		return nil
 	}
 
-	ok, err := confirmFn(fmt.Sprintf("Delete %s across %d target(s)?", formatBytes(preview.TotalReclaimable), countReclaimable(preview.Items)))
+	ok, err := confirmFn(th, fmt.Sprintf("Delete %s across %d target(s)?", formatBytes(preview.TotalReclaimable), countReclaimable(preview.Items)))
 	if err != nil {
 		return err
 	}
@@ -242,7 +243,7 @@ func runCleanDirs(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.Cle
 // detected package-manager cache's size, then — only with apply, after its
 // OWN confirmation prompt (mirroring runCleanDirs' gate exactly) — each
 // tool's own prune command, isolated per tool.
-func runCleanCaches(cmd *cobra.Command, client *cleanpkg.Client, apply bool) error {
+func runCleanCaches(cmd *cobra.Command, client *cleanpkg.Client, apply bool, th theme.Theme) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
@@ -270,7 +271,7 @@ func runCleanCaches(cmd *cobra.Command, client *cleanpkg.Client, apply bool) err
 	if hasCacheKind(items, cleanpkg.CachePnpm) {
 		prompt += " (the pnpm figure sizes its WHOLE content-addressable store; store prune only removes unreferenced packages, so actual reclaim is typically much less)"
 	}
-	ok, err := confirmFn(prompt)
+	ok, err := confirmFn(th, prompt)
 	if err != nil {
 		return err
 	}
@@ -339,7 +340,7 @@ func cacheDisplayName(kind cleanpkg.CacheKind) string {
 // own reported reclaimable size per category, then — only with apply,
 // after its OWN confirmation prompt — each category's own prune command,
 // isolated per category.
-func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool) error {
+func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool, th theme.Theme) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
@@ -385,7 +386,7 @@ func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool) err
 	if unknown {
 		promptSize = "an unknown amount (one or more categories' size could not be parsed — see above)"
 	}
-	ok, err := confirmFn(fmt.Sprintf("Prune %s from docker (containers/images/volumes/build cache)?", promptSize))
+	ok, err := confirmFn(th, fmt.Sprintf("Prune %s from docker (containers/images/volumes/build cache)?", promptSize))
 	if err != nil {
 		return err
 	}

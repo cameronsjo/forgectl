@@ -87,7 +87,7 @@ flagged: the ratio a colour must clear follows how it is used, not its hue.`,
 			if asJSON {
 				return writeThemeJSON(cmd.OutOrStdout(), th)
 			}
-			return printThemeShow(colorOut(cmd), th)
+			return printThemeShow(th.Writer(cmd.OutOrStdout(), os.Environ()), th)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit a machine-readable report to stdout")
@@ -168,7 +168,7 @@ rule does not apply.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return printThemePreview(colorOut(cmd), th)
+			return printThemePreview(th.Writer(cmd.OutOrStdout(), os.Environ()), th)
 		},
 	}
 }

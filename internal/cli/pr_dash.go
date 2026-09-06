@@ -3,29 +3,26 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
 	"time"
 
-	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
-// prSectionStyle titles a dashboard block. Bold accent (color 110) matches the
-// launch-profile title style.
-var prSectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("110"))
-
 // newPrDashCmd builds `forgectl pr dash`.
-func newPrDashCmd(client *pr.Client) *cobra.Command {
+func newPrDashCmd(client *pr.Client, th theme.Theme) *cobra.Command {
 	// err discarded: "" degrades to an empty store on read (LoadReviewed).
 	reviewedPath, _ := config.PrReviewedPath()
-	return newPrDashCmdForClient(client, reviewedPath)
+	return newPrDashCmdForClient(client, reviewedPath, th)
 }
 
 // newPrDashCmdForClient is the test seam (mirrors newNetCmdForClient).
-func newPrDashCmdForClient(client *pr.Client, reviewedPath string) *cobra.Command {
+func newPrDashCmdForClient(client *pr.Client, reviewedPath string, th theme.Theme) *cobra.Command {
 	return &cobra.Command{
 		Use:   "dash",
 		Short: "Dashboard: active reviews, PRs awaiting you, and your open PRs",
@@ -41,21 +38,22 @@ Rows you've marked reviewed are dimmed (new activity auto-un-dims them).`,
 			renderDegradationNotes(cmd, notes)
 
 			store := pr.LoadReviewed(reviewedPath)
-			out := colorOut(cmd)
+			out := th.Writer(cmd.OutOrStdout(), os.Environ())
 			errOut := cmd.ErrOrStderr()
+			styles := th.Styles()
 
-			fmt.Fprintln(out, prSectionStyle.Render("active reviews"))
+			_, _ = fmt.Fprintln(out, styles.Accent.Render("active reviews"))
 			renderSessions(out, dash.ActiveReviews)
-			fmt.Fprintln(out)
+			_, _ = fmt.Fprintln(out)
 
-			fmt.Fprintln(out, prSectionStyle.Render("awaiting your review"))
-			if err := renderPRTable(out, errOut, dash.AwaitingYou, store); err != nil {
+			_, _ = fmt.Fprintln(out, styles.Accent.Render("awaiting your review"))
+			if err := renderPRTable(out, errOut, dash.AwaitingYou, store, styles.Muted); err != nil {
 				return err
 			}
-			fmt.Fprintln(out)
+			_, _ = fmt.Fprintln(out)
 
-			fmt.Fprintln(out, prSectionStyle.Render("your open PRs"))
-			return renderPRTable(out, errOut, dash.YourOpen, store)
+			_, _ = fmt.Fprintln(out, styles.Accent.Render("your open PRs"))
+			return renderPRTable(out, errOut, dash.YourOpen, store, styles.Muted)
 		},
 	}
 }
@@ -71,7 +69,7 @@ Rows you've marked reviewed are dimmed (new activity auto-un-dims them).`,
 // review, which is exactly the claim it cannot make.
 func renderSessions(out io.Writer, summaries []pr.SessionSummary) {
 	if len(summaries) == 0 {
-		fmt.Fprintln(out, "  (none)")
+		_, _ = fmt.Fprintln(out, "  (none)")
 		return
 	}
 	for _, s := range summaries {
@@ -87,7 +85,7 @@ func renderSessions(out io.Writer, summaries []pr.SessionSummary) {
 		// The path is a FILENAME chosen on disk, so it is the one field here
 		// that can carry ANSI or bidi controls; Ref is charset-constrained by
 		// ParseRef. Quote it, as every other human sink in the CLI does.
-		fmt.Fprintf(out, "  %s  (%s ago)  %s%s\n",
+		_, _ = fmt.Fprintf(out, "  %s  (%s ago)  %s%s\n",
 			s.Ref().String(), age, termsafe.QuotePath(s.Path()), suffix)
 	}
 }

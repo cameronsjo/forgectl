@@ -12,6 +12,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	updatepkg "github.com/cameronsjo/forgectl/internal/update"
 )
 
@@ -39,7 +40,7 @@ func fakeUpdateStep(name string, destructive bool, applyErr error) updatepkg.Ste
 // mirroring runPreflight's shape (preflight_test.go).
 func runUpdate(t *testing.T, client *updatepkg.Client, cfg config.UpdateConfig, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
-	cmd := newUpdateCmdForClient(client, cfg)
+	cmd := newUpdateCmdForClient(client, cfg, theme.Theme{})
 	var outBuf, errBuf bytes.Buffer
 	cmd.SetOut(&outBuf)
 	cmd.SetErr(&errBuf)
@@ -76,7 +77,7 @@ func stubConfirmSeams(t *testing.T, terminal bool, confirmFn func(string) (bool,
 
 	var prompts []string
 	prevConfirm := confirmUpdateDestructive
-	confirmUpdateDestructive = func(msg string) (bool, error) {
+	confirmUpdateDestructive = func(_ theme.Theme, msg string) (bool, error) {
 		prompts = append(prompts, msg)
 		return confirmFn(msg)
 	}

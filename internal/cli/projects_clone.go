@@ -8,6 +8,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // newProjectsCloneCmd clones a repo where Placement says it belongs — its wing
@@ -31,7 +32,7 @@ import (
 // additionally probes the other of the two placement rules before creating
 // anything, so routing a repo to a wing it is not yet filed under reports the
 // existing checkout instead of minting a duplicate.
-func newProjectsCloneCmd(client *projects.Client) *cobra.Command {
+func newProjectsCloneCmd(client *projects.Client, th theme.Theme) *cobra.Command {
 	var org string
 	var wing string
 	var dryRun bool
@@ -102,7 +103,7 @@ interactively when no sshUrl is available.`,
 				// Multiple matches → interactive selector below.
 			}
 
-			chosen, err := chooseRepo(cmd, candidates, projectSelectionClone)
+			chosen, err := chooseRepo(cmd, candidates, projectSelectionClone, th)
 			if err != nil {
 				return err
 			}

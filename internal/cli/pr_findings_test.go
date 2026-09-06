@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 func TestPrFindingsListCmd_PrintsPaths(t *testing.T) {
@@ -39,7 +40,7 @@ func TestPrFindingsListCmd_PrintsPaths(t *testing.T) {
 	}
 	client := pr.New(nil, pr.WithFindingsDir(dir))
 
-	cmd := newPrFindingsCmd(client)
+	cmd := newPrFindingsCmd(client, theme.Theme{})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetArgs([]string{"list"})
@@ -55,7 +56,7 @@ func TestPrFindingsListCmd_PrintsPaths(t *testing.T) {
 func TestPrFindingsListCmd_NoFindings(t *testing.T) {
 	client := pr.New(nil, pr.WithFindingsDir(filepath.Join(t.TempDir(), "absent")))
 
-	cmd := newPrFindingsCmd(client)
+	cmd := newPrFindingsCmd(client, theme.Theme{})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetArgs([]string{"list"})
@@ -80,7 +81,7 @@ func TestPrFindingsCleanupCmd_DryRun_ReportsAndDeletesNothing(t *testing.T) {
 	}
 	client := pr.New(nil, pr.WithFindingsDir(dir))
 
-	cmd := newPrFindingsCmd(client)
+	cmd := newPrFindingsCmd(client, theme.Theme{})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetArgs([]string{"cleanup", "--older-than", "24h"})
@@ -115,7 +116,7 @@ func TestPrFindingsCleanupCmd_NegativeOlderThan_ErrorsWithoutScanning(t *testing
 	}
 	client := pr.New(nil, pr.WithFindingsDir(dir))
 
-	cmd := newPrFindingsCmd(client)
+	cmd := newPrFindingsCmd(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -141,7 +142,7 @@ func TestPrFindingsCleanupCmd_ZeroOlderThan_PassesValidation(t *testing.T) {
 	}
 	client := pr.New(nil, pr.WithFindingsDir(dir))
 
-	cmd := newPrFindingsCmd(client)
+	cmd := newPrFindingsCmd(client, theme.Theme{})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetArgs([]string{"cleanup", "--older-than=0"})
@@ -162,7 +163,7 @@ func TestPrFindingsCleanupCmd_NothingToReclaim_ShortCircuitsBeforeConfirm(t *tes
 	dir := t.TempDir()
 	client := pr.New(nil, pr.WithFindingsDir(dir))
 
-	cmd := newPrFindingsCmd(client)
+	cmd := newPrFindingsCmd(client, theme.Theme{})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetArgs([]string{"cleanup", "--apply"})

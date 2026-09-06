@@ -5,22 +5,15 @@ import (
 	"io"
 	"os"
 
-	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
-var (
-	launchLabelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Width(14)
-	launchValueStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	launchTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("110"))
-	launchDimStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
-)
-
-func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Config) *cobra.Command {
+func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Config, th theme.Theme) *cobra.Command {
 	return &cobra.Command{
 		Use:   "which",
 		Short: "Print the resolved launch profile for the current directory",
@@ -36,21 +29,28 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 			}
 			cfg.Launch = effLaunch
 			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
-			printLaunchProfile(colorOut(cmd), launch.Resolve(lc, cwd), cwd, src)
+			out := th.Writer(cmd.OutOrStdout(), os.Environ())
+			printLaunchProfile(out, th, launch.Resolve(lc, cwd), cwd, src)
 			return nil
 		},
 	}
 }
 
-func printLaunchProfile(w io.Writer, p launch.Profile, cwd, confPath string) {
+func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, confPath string) {
+	styles := th.Styles()
+	labelStyle := styles.Muted.Width(14)
+	valueStyle := styles.Fg
+	titleStyle := styles.Accent
+	dimStyle := styles.Muted.Italic(true)
+
 	row := func(label, value string) {
-		_, _ = fmt.Fprintln(w, renderSafe(launchLabelStyle.Render, label)+renderSafe(launchValueStyle.Render, value))
+		_, _ = fmt.Fprintln(w, renderSafe(labelStyle.Render, label)+renderSafe(valueStyle.Render, value))
 	}
 	rowDim := func(label, value string) {
-		_, _ = fmt.Fprintln(w, renderSafe(launchLabelStyle.Render, label)+renderSafe(launchDimStyle.Render, value))
+		_, _ = fmt.Fprintln(w, renderSafe(labelStyle.Render, label)+renderSafe(dimStyle.Render, value))
 	}
 
-	_, _ = fmt.Fprintln(w, launchTitleStyle.Render("launch profile")+renderSafe(launchDimStyle.Render, "  "+cwd))
+	_, _ = fmt.Fprintln(w, titleStyle.Render("launch profile")+renderSafe(dimStyle.Render, "  "+cwd))
 	row("config", confPath)
 
 	matched := p.Match

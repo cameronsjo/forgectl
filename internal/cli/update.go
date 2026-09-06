@@ -13,6 +13,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	updatepkg "github.com/cameronsjo/forgectl/internal/update"
 )
 
@@ -28,14 +29,14 @@ var updateModule = module.Manifest{
 // newUpdateCmd builds `forgectl update` over the registry Deps.
 func newUpdateCmd(deps module.Deps) *cobra.Command {
 	client := updatepkg.New(deps.Runner)
-	return newUpdateCmdForClient(client, deps.Cfg.Update)
+	return newUpdateCmdForClient(client, deps.Cfg.Update, deps.Theme)
 }
 
 // newUpdateCmdForClient builds the command over an already-constructed
 // client — split out so tests can inject a fake-wired *update.Client
 // (mirrors newNetCmdForClient) without going through the full module.Deps
 // wiring.
-func newUpdateCmdForClient(client *updatepkg.Client, cfg config.UpdateConfig) *cobra.Command {
+func newUpdateCmdForClient(client *updatepkg.Client, cfg config.UpdateConfig, th theme.Theme) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Run weekly package-manager and OS maintenance as independently-scoped steps",
@@ -80,12 +81,12 @@ these effects when the relevant step is selected — decline (or omit
 Exit codes: 0 every selected step ok (or cleanly skipped), 1 one or more
 steps failed, 2 a harness error (bad --only name, log/report I/O failure).`,
 	}
-	cmd.AddCommand(newUpdateCheckCmd(client, cfg), newUpdateRunCmd(client, cfg))
+	cmd.AddCommand(newUpdateCheckCmd(client, cfg, th), newUpdateRunCmd(client, cfg, th))
 	return cmd
 }
 
 // newUpdateCheckCmd builds `update check` — always safe, never mutates.
-func newUpdateCheckCmd(client *updatepkg.Client, cfg config.UpdateConfig) *cobra.Command {
+func newUpdateCheckCmd(client *updatepkg.Client, cfg config.UpdateConfig, th theme.Theme) *cobra.Command {
 	var only []string
 	var asJSON bool
 
@@ -100,7 +101,7 @@ func newUpdateCheckCmd(client *updatepkg.Client, cfg config.UpdateConfig) *cobra
 		Short:         "Report what each maintenance step would find — no mutation, always safe",
 		Args:          cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpdatePass(cmd, client, cfg, updatepkg.Options{CheckOnly: true}, only, asJSON)
+			return runUpdatePass(cmd, client, cfg, updatepkg.Options{CheckOnly: true}, only, asJSON, th)
 		},
 	}
 	addRosterFlags(cmd, &only, &asJSON)
@@ -109,7 +110,7 @@ func newUpdateCheckCmd(client *updatepkg.Client, cfg config.UpdateConfig) *cobra
 
 // newUpdateRunCmd builds `update run` — applies maintenance; destructive
 // steps require --yes.
-func newUpdateRunCmd(client *updatepkg.Client, cfg config.UpdateConfig) *cobra.Command {
+func newUpdateRunCmd(client *updatepkg.Client, cfg config.UpdateConfig, th theme.Theme) *cobra.Command {
 	var only []string
 	var asJSON, yes bool
 
@@ -122,7 +123,7 @@ func newUpdateRunCmd(client *updatepkg.Client, cfg config.UpdateConfig) *cobra.C
 		Short:         "Apply weekly maintenance (destructive steps require --yes)",
 		Args:          cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpdatePass(cmd, client, cfg, updatepkg.Options{Yes: yes}, only, asJSON)
+			return runUpdatePass(cmd, client, cfg, updatepkg.Options{Yes: yes}, only, asJSON, th)
 		},
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt and apply destructive steps non-interactively (cron/CI) — brew upgrade --formula + cleanup (removes superseded Cellar versions), go clean (wipes the module cache machine-wide), npm update -g")
@@ -157,7 +158,7 @@ var confirmUpdateDestructive = confirm
 // false is never treated as an error here — it leaves the destructive
 // steps exactly as Skipped as they were before this gate existed
 // (Options.Yes simply stays unset), never a harness failure.
-func confirmDestructiveBatch(client *updatepkg.Client, only []string, stderr io.Writer) bool {
+func confirmDestructiveBatch(client *updatepkg.Client, only []string, stderr io.Writer, th theme.Theme) bool {
 	names := client.DestructiveStepNames(only)
 	if len(names) == 0 {
 		return false
@@ -166,7 +167,7 @@ func confirmDestructiveBatch(client *updatepkg.Client, only []string, stderr io.
 		return false
 	}
 	prompt := fmt.Sprintf("Apply %d destructive step(s) (%s)?", len(names), strings.Join(names, ", ")) + destructiveCaveat(names)
-	ok, err := confirmUpdateDestructive(prompt)
+	ok, err := confirmUpdateDestructive(th, prompt)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: confirmation prompt failed (%v); destructive step(s) will be skipped\n", err)
 		return false
@@ -200,7 +201,7 @@ func destructiveCaveat(names []string) string {
 // interactive confirmation, opens the transcript (stderr + a timestamped
 // log file, best-effort), runs the roster, prints the summary (JSON or
 // human), and maps the outcome to an exit code.
-func runUpdatePass(cmd *cobra.Command, client *updatepkg.Client, cfg config.UpdateConfig, opts updatepkg.Options, only []string, asJSON bool) error {
+func runUpdatePass(cmd *cobra.Command, client *updatepkg.Client, cfg config.UpdateConfig, opts updatepkg.Options, only []string, asJSON bool, th theme.Theme) error {
 	ctx := cmd.Context()
 
 	resolvedOnly := only
@@ -216,7 +217,7 @@ func runUpdatePass(cmd *cobra.Command, client *updatepkg.Client, cfg config.Upda
 	// this gate. `update run --yes` already carries explicit consent — no
 	// prompt. Only a bare `update run` with a destructive step selected
 	// reaches the confirmation.
-	if !opts.CheckOnly && !opts.Yes && confirmDestructiveBatch(client, resolvedOnly, cmd.ErrOrStderr()) {
+	if !opts.CheckOnly && !opts.Yes && confirmDestructiveBatch(client, resolvedOnly, cmd.ErrOrStderr(), th) {
 		opts.Yes = true
 	}
 

@@ -11,6 +11,7 @@ import (
 	internalexec "github.com/cameronsjo/forgectl/internal/exec"
 	netpkg "github.com/cameronsjo/forgectl/internal/net"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 func oldTmuxRunner() *internalexec.FakeRunner {
@@ -41,7 +42,7 @@ func TestPrRemoteDispatchCapabilityRefusesBeforePrepare(t *testing.T) {
 	fake := oldTmuxRunner()
 	client := pr.New(fake, pr.WithSessionsDir(t.TempDir()))
 	netClient := netpkg.New(fake)
-	cmd := newPrCmdForClient(config.Config{}, client, netClient, filepath.Join(t.TempDir(), "reviewed.json"))
+	cmd := newPrCmdForClient(config.Config{}, client, netClient, filepath.Join(t.TempDir(), "reviewed.json"), theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SilenceUsage = true

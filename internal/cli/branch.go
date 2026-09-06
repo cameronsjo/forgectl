@@ -8,6 +8,7 @@ import (
 
 	branchpkg "github.com/cameronsjo/forgectl/internal/branch"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // branchGroupAliases is branch's shorthand surface ("br") — migrated here
@@ -29,13 +30,13 @@ var branchModule = module.Manifest{
 // (no `forgectl git` parent) — see internal/branch's package doc for why.
 func newBranchCmd(deps module.Deps) *cobra.Command {
 	client := branchpkg.New(deps.Runner)
-	return newBranchCmdForClient(client)
+	return newBranchCmdForClient(client, deps.Theme)
 }
 
 // newBranchCmdForClient builds the command over an already-constructed
 // client — split out so tests can inject a fake-wired *branch.Client (mirrors
 // newNetCmdForClient/newDockerCmdForClient) without going through newBranchCmd.
-func newBranchCmdForClient(client *branchpkg.Client) *cobra.Command {
+func newBranchCmdForClient(client *branchpkg.Client, th theme.Theme) *cobra.Command {
 	var (
 		local, remote, includeGone, apply bool
 		remoteName                        string
@@ -73,7 +74,7 @@ never attempts — it only ever reports and deletes.`,
 				remoteName:  remoteName,
 				includeGone: includeGone,
 				apply:       apply,
-			})
+			}, th)
 		},
 	}
 	cmd.Flags().BoolVar(&local, "local", false, "consider local branches (default: both, if neither --local nor --remote is given)")
@@ -94,7 +95,7 @@ type branchRunOptions struct {
 
 // runBranch enumerates, prints the grouped report, and — only with --apply,
 // after a confirmation prompt — prunes everything classified safe-to-delete.
-func runBranch(cmd *cobra.Command, client *branchpkg.Client, opts branchRunOptions) error {
+func runBranch(cmd *cobra.Command, client *branchpkg.Client, opts branchRunOptions, th theme.Theme) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
@@ -124,7 +125,7 @@ func runBranch(cmd *cobra.Command, client *branchpkg.Client, opts branchRunOptio
 		return nil
 	}
 
-	ok, err := confirm(fmt.Sprintf("Delete %d branch(es) classified safe-to-delete?", len(report.SafeToDelete)))
+	ok, err := confirm(th, fmt.Sprintf("Delete %d branch(es) classified safe-to-delete?", len(report.SafeToDelete)))
 	if err != nil {
 		return err
 	}

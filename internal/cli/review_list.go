@@ -4,19 +4,22 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/review"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // runReviewList is the bare `forgectl review` body: aggregate, filter, render.
-func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string, asJSON bool, kind, repo string) error {
+func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string, asJSON bool, kind, repo string, th theme.Theme) error {
 	switch kind {
 	case "", string(review.KindIssue), string(review.KindPR):
 	default:
@@ -44,7 +47,8 @@ func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string
 	if asJSON {
 		return emitReviewJSON(cmd.OutOrStdout(), items, store)
 	}
-	return renderReviewTable(colorOut(cmd), cmd.ErrOrStderr(), items, store)
+	out := th.Writer(cmd.OutOrStdout(), os.Environ())
+	return renderReviewTable(out, cmd.ErrOrStderr(), items, store, th.Styles().Muted)
 }
 
 // filterItems applies the --kind/--repo filters. An empty filter passes all.
@@ -114,7 +118,7 @@ func emitReviewJSON(out io.Writer, items []review.Item, store *pr.ReviewedStore)
 // a one-line count summary to errOut. Dimmed (reviewed) rows are styled per
 // whole line AFTER the tabwriter flush — plain text lays the columns out
 // first, so ANSI escape bytes never enter the width measurement.
-func renderReviewTable(out, errOut io.Writer, items []review.Item, store *pr.ReviewedStore) error {
+func renderReviewTable(out, errOut io.Writer, items []review.Item, store *pr.ReviewedStore, dimStyle lipgloss.Style) error {
 	var buf bytes.Buffer
 	tw := tabwriter.NewWriter(&buf, 0, 2, 2, ' ', 0)
 	if _, err := fmt.Fprintln(tw, "KIND\tREPO\t#\tTITLE\tLABELS\tSTATE"); err != nil {
@@ -143,7 +147,7 @@ func renderReviewTable(out, errOut io.Writer, items []review.Item, store *pr.Rev
 		line := lines[i+1]
 		if store.IsReviewedKey(it.Key(), it.UpdatedAt) {
 			reviewed++
-			line = prDimStyle.Render(line)
+			line = dimStyle.Render(line)
 		}
 		if _, err := fmt.Fprintln(out, line); err != nil {
 			return err

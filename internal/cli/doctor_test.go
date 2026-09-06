@@ -14,13 +14,14 @@ import (
 	"github.com/cameronsjo/forgectl/internal/doctor"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/termsafe/termsafetest"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // runDoctor builds `doctor` over d and executes it with args, mirroring
 // runUpdate's shape (update_test.go).
 func runDoctor(t *testing.T, d doctor.Deps, args ...string) (stdout string, err error) {
 	t.Helper()
-	cmd := newDoctorCmdForDeps(d)
+	cmd := newDoctorCmdForDeps(d, theme.Theme{})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetArgs(args)
@@ -140,7 +141,7 @@ func TestDoctor_JSON_ReflectsHealthyFlag(t *testing.T) {
 func TestDoctorMark_CoversEveryState(t *testing.T) {
 	seen := map[string]bool{}
 	for _, s := range []doctor.State{doctor.StateOK, doctor.StateWarn, doctor.StateFail, doctor.StateSkip} {
-		mark := doctorMark(s)
+		mark := doctorMark(s, theme.Theme{}.Marks())
 		if mark == "" {
 			t.Errorf("doctorMark(%s) is empty", s)
 		}
@@ -171,7 +172,7 @@ func TestPrintDoctorReport_SanitizesForgedControlBytes(t *testing.T) {
 	}}
 
 	var out bytes.Buffer
-	if err := printDoctorReport(&out, report); err != nil {
+	if err := printDoctorReport(&out, report, theme.Theme{}.Marks()); err != nil {
 		t.Fatal(err)
 	}
 	rendered := out.String()

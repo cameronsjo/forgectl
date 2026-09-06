@@ -3,12 +3,14 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // newBenchStatusCmd builds `forgectl bench status [--json]`. The Claude-callable
@@ -28,7 +30,8 @@ func newBenchStatusCmd(deps module.Deps) *cobra.Command {
 				enc.SetIndent("", "  ")
 				return enc.Encode(report)
 			}
-			renderBenchReport(colorOut(cmd), report)
+			out := deps.Theme.Writer(cmd.OutOrStdout(), os.Environ())
+			renderBenchReport(out, report, deps.Theme.Marks())
 			return nil
 		},
 	}
@@ -38,24 +41,24 @@ func newBenchStatusCmd(deps module.Deps) *cobra.Command {
 
 // renderBenchReport writes the human health card: one glyph-led line per
 // component plus its indented probe details.
-func renderBenchReport(out io.Writer, r bench.Report) {
+func renderBenchReport(out io.Writer, r bench.Report, marks theme.Marks) {
 	for _, c := range []bench.Component{r.Hearth, r.Chronicle} {
-		fmt.Fprintf(out, "%s %s — %s\n", benchGlyph(c.State), c.Name, c.Reason)
+		_, _ = fmt.Fprintf(out, "%s %s — %s\n", benchGlyph(c.State, marks), c.Name, c.Reason)
 		for _, d := range c.Details {
-			fmt.Fprintf(out, "    %s\n", d)
+			_, _ = fmt.Fprintf(out, "    %s\n", d)
 		}
 	}
 }
 
 // benchGlyph maps a component State onto the launch_doctor glyph vocabulary:
 // ✓ healthy, ! needs attention (degraded or not-yet-configured), ✗ down.
-func benchGlyph(s bench.State) string {
+func benchGlyph(s bench.State, marks theme.Marks) string {
 	switch s {
 	case bench.StateOK:
-		return launchOKMark
+		return marks.OK
 	case bench.StateUnavailable:
-		return launchFailMark
+		return marks.Fail
 	default: // degraded, not-configured
-		return launchWarnMark
+		return marks.Warn
 	}
 }

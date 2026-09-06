@@ -20,6 +20,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/resume"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // resumeModule declares the cross-project session-resume extension (ADR-0005).
@@ -107,7 +108,7 @@ guard; test the ls output instead.`,
 			if len(args) == 1 {
 				filter = args[0]
 			}
-			return runResume(cmd, deps.Cfg, deps.LegacyBoundary, filter, limit, fork, dryRun)
+			return runResume(cmd, deps.Cfg, deps.LegacyBoundary, filter, limit, fork, dryRun, deps.Theme)
 		},
 	}
 	cmd.Flags().BoolVar(&fork, "fork", false, "branch a new session off the transcript instead of continuing it")
@@ -147,7 +148,7 @@ func scanFor(filter string, limit int) ([]resume.Session, error) {
 }
 
 // runResume is the pick-then-resume path.
-func runResume(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMigrationBoundary, filter string, limit int, fork, dryRun bool) error {
+func runResume(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMigrationBoundary, filter string, limit int, fork, dryRun bool, th theme.Theme) error {
 	sessions, err := scanSessions(filter, limit)
 	if err != nil {
 		return err
@@ -180,7 +181,7 @@ func runResume(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMig
 		// Opening the picker anyway is what ADR-0008 rule 1 forbids.
 		return ambiguousMatch(cmd, sessions, filter, dryRun)
 	default:
-		if picked, err = pickSessionFn(sessions); err != nil {
+		if picked, err = pickSessionFn(sessions, th); err != nil {
 			return WithExitCode(err, 1)
 		}
 	}
@@ -236,8 +237,9 @@ var pickSessionFn = pickSession
 
 // pickSession runs the single-select. Options are keyed by session id so a
 // selection round-trips unambiguously (the same reason pickPRs keys on a ref).
-func pickSession(sessions []resume.Session) (resume.Session, error) {
+func pickSession(sessions []resume.Session, th theme.Theme) (resume.Session, error) {
 	w := layoutFor(sessions, terminalWidth())
+	dimStyle := th.Styles().Muted
 	opts := make([]huh.Option[string], len(sessions))
 	for i, s := range sessions {
 		label := sessionRowWidth(s, w)
@@ -245,7 +247,7 @@ func pickSession(sessions []resume.Session) (resume.Session, error) {
 		// so before the selection does, the same way `pr pick` dims a PR it
 		// will skip.
 		if s.Live {
-			label = prDimStyle.Render(label)
+			label = dimStyle.Render(label)
 		}
 		opts[i] = huh.NewOption(label, s.ID)
 	}
@@ -258,7 +260,7 @@ func pickSession(sessions []resume.Session) (resume.Session, error) {
 				Options(opts...).
 				Value(&chosen),
 		),
-	).WithKeyMap(keymap.Cancel()).WithTheme(keymap.DarkCharm()).Run()
+	).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
 	if err != nil {
 		return resume.Session{}, err
 	}
