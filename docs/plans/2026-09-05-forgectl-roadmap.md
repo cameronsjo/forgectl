@@ -8,7 +8,7 @@ That Frame is the anchor for the cancellation test below. It is deliberately *fo
 
 Supersedes [`2026-07-01-forgectl-forge-roadmap.md`](2026-07-01-forgectl-forge-roadmap.md), whose platform-first spine (`#9 → #12 → #10 → #29`) is spent.
 
-Tracker: —
+Tracker: [cameronsjo/forgectl#474](https://github.com/cameronsjo/forgectl/issues/474)
 
 ## What the tracker gets wrong
 
@@ -34,7 +34,7 @@ Charting this required auditing 28 open issues against the tree, and the audit i
 
 ## Critical path (the spine)
 
-#299 → cap-wiring → drainer → #192 → #32
+#299 → #472 → #473 → #192 → #32
 
 Five items out of 28. Everything else has a workaround — usually "a human does it", which is exactly what this Frame removes, so the test is doing real work rather than waving items through. The scariest piece is **#299** (durable session lifecycle): it is the least understood, and a drainer that corrupts state while unattended is worse than no drainer at all. Spike it first even though it ships alongside the drainer.
 
@@ -52,9 +52,9 @@ Five items out of 28. Everything else has a workaround — usually "a human does
 
 | # | Item | Depends on | ~ |
 |---|------|-----------|---|
-| — | Wire the admission cap into the launch paths | #299 | ~ |
-| #194 | The drainer — empty the review backlog | cap-wiring | ~ |
-| #192 | Notify when the drainer auto-launches | #194 | ~ |
+| #472 | Wire the admission cap into the launch paths | #299 | ~ |
+| #473 | The drainer — empty the review backlog | #472 | ~ |
+| #192 | Notify when the drainer auto-launches | #473 | ~ |
 | #32 | `pr poll` — the auto-review daemon | #192 | ~ |
 | #444 | Render Obsidian-flavored markdown (docs spine) | #443 (done) | |
 | #445 | `docs check` — broken links and orphans | #444 | |
@@ -87,6 +87,6 @@ The docs-reader cluster is nine of the 28 open issues and still lands in Next ra
 
 ## Risks / open items
 
-- **The spine's middle two items are unfiled.** Cap-wiring and the drainer live inside #194's body, not as their own issues. Anyone picking this up from the tracker will not see them.
+- ~~The spine's middle two items are unfiled.~~ Resolved 2026-09-05: filed as #472 (cap-wiring) and #473 (drainer). #194 keeps the epic framing; its cap-is-unbuilt premise is corrected in #472.
 - **#299 is nine mechanisms in one issue.** It is the spine head *and* the largest single item; it likely wants splitting before it is worked, which is a decision for whoever starts it.
 - **This roadmap's ordering is a value judgment, not a constraint.** The dependency audit found no multi-hop chains among open issues, so a different Frame reorders almost everything. The staleness findings above survive any re-Frame; the spine does not.

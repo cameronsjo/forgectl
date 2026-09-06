@@ -7,13 +7,13 @@ harness: "claude-code 2.1.261"
 machine: "cf6e768835c7"
 approved_in: "cedar-chisel"
 approved_session_id: "4b1b4f96-d8eb-4faa-a96b-9bf46558cc02"
-status: in-progress
+status: in-flight
 pr_1: "https://github.com/cameronsjo/forgectl/pull/454 — MERGED 2026-09-05 as 19b5467"
 pr_2a: "https://github.com/cameronsjo/forgectl/pull/466 — MERGED 2026-09-05 as 9f07488"
-pr_2b: "https://github.com/cameronsjo/forgectl/pull/468 — ready for review, awaiting CI + CodeRabbit"
-next: "PR 2b (#468) is ready and reviewed; waiting on CI and CodeRabbit before merge. Then PR 3 feat/tui-hub: Task 8 internal/menu -> Task 9 entry-driven hub -> Task 10 registry hub -> Task 11 module entries -> Task 12 ADR-0009 + docs. Read modules_test.go wantCount at PR 3 branch time."
-branch: refactor/theme-callsites
-pr: "PR 2b — https://github.com/cameronsjo/forgectl/pull/468"
+pr_2b: "https://github.com/cameronsjo/forgectl/pull/468 — MERGED 2026-09-05 as 2bfbfbf"
+next: "PRs 1, 2a, 2b all merged — the theme work is done. Remaining: PR 3 feat/tui-hub, Tasks 8-12 (internal/menu leaf -> entry-driven hub -> registry-built hub -> module entries -> ADR-0009 + docs). Branch it from fresh origin/main; read modules_test.go wantCount at branch time. Two unticked steps are carried from earlier PRs, not oversights: Task 4 step 6 (file the artificer-design-system follow-up for a forgectl target in themes/build.mjs — verified absent 2026-09-05) and Task 7 step 4 (invoke artificer-feedback)."
+branch: feat/tui-hub (not yet created; branch from origin/main)
+pr: "PR 3 — not yet opened"
 updated: 2026-09-05
 date: 2026-09-05
 ---
@@ -203,11 +203,11 @@ Two further `$notes` bear on the map and both leave it intact. `attentionNotText
 **Dispatch:** Serial (wave 1 of PR 2a) · fresh Sonnet subagent · **Report:** `<reports-dir>/task-3.md`
 
 **Steps:**
-- [ ] Worktree `.claude/worktrees/theme`, branch `feat/theme` from fresh `origin/main` (after PR 1 merges); `push -u`; draft PR
-- [ ] TOML: `preset = "artificer"|"legacy"`, `mode = "auto"|"dark"|"light"`, `[theme.colors] <role> = "#rrggbb" | { dark = "#..", light = "#.." }`; `^#[0-9a-fA-F]{6}$`; unknown role error lists `ThemeRoleNames`: `[theme].colors["acent"]: unknown role; roles are accent, ok, danger, …`
-- [ ] `Load` stays tolerant; `Execute` warns once via `termsafe.SafeLine` and uses `Default()`; `ValidatePath` returns the error so `doctor` and `launch doctor` report a bad `[theme]` non-zero
-- [ ] `TestInitSections_CoversEveryStructSection` green; `config` prints `[theme]` with real hex values
-- [ ] Commit `feat(config): [theme] section — preset, mode, per-role color overrides`
+- [x] Worktree `.claude/worktrees/theme`, branch `feat/theme` from fresh `origin/main` (after PR 1 merges); `push -u`; draft PR
+- [x] TOML: `preset = "artificer"|"legacy"`, `mode = "auto"|"dark"|"light"`, `[theme.colors] <role> = "#rrggbb" | { dark = "#..", light = "#.." }`; `^#[0-9a-fA-F]{6}$`; unknown role error lists `ThemeRoleNames`: `[theme].colors["acent"]: unknown role; roles are accent, ok, danger, …`
+- [x] `Load` stays tolerant; `Execute` warns once via `termsafe.SafeLine` and uses `Default()`; `ValidatePath` returns the error so `doctor` and `launch doctor` report a bad `[theme]` non-zero
+- [x] `TestInitSections_CoversEveryStructSection` green; `config` prints `[theme]` with real hex values
+- [x] Commit `feat(config): [theme] section — preset, mode, per-role color overrides`
 
 ### Task 4 — `internal/theme` core and the generated Artificer palette
 
@@ -243,14 +243,14 @@ func (t Theme) Contrast(r Role) float64 // vs bg, for theme show's AA flag
 **Dispatch:** Serial (wave 2) · fresh Sonnet subagent · **Report:** `<reports-dir>/task-4.md`
 
 **Steps:**
-- [ ] `palettegen.Render(palette []byte) ([]byte, error)`: reads `_palette.json` dark/light role blocks, emits `func Artificer() Palette` with each key's comment as the role's doc comment; `go/format`; token path constant `theme.PalettePath = "artificer/_palette.json"` shared by the generator and `TestArtificerGen_IsCurrent`
-- [ ] `Legacy()`: today's `styles.go` hexes (lavender set) as the migration escape
-- [ ] `Huh()`: `huh.ThemeFunc` closure that ignores its `isDark` argument and uses `t.IsDark()` (huh v2 defaults light; standalone forms never request the background); from `huh.ThemeBase(t.IsDark())`: Title/selectors/prefix/prompt/cursor→Accent, Description→Meta, Unselected→Muted, Error→Danger, FocusedButton→OnAccent on AccentFill, BlurredButton→Muted on SurfaceRaised, Placeholder→Dim
-- [ ] `Fang()`: ignores the passed `LightDarkFunc`, uses `t.IsDark()`: Base→Fg, Title/Program/Command→Accent, Description/FlagDefault/Help→Meta, Codeblock→SurfaceRaised, DimmedArgument/Comment/Dash→Muted, Flag/QuotedString→Steel, Argument/ErrorDetails→Fg, ErrorHeader→{OnUrgent, UrgentFill}
-- [ ] `Detect`: `dark|light` fixed; `auto` → `probe()` only when `ShouldProbe`, else dark. `ShouldProbe` = `StdinTTY && StdoutTTY && !NoColor && !HasPrefix(Term,"screen") && !HasPrefix(Term,"tmux")`
-- [ ] Tests: `FromConfig` table; `Detect` truth table with a counting probe (tmux → 0 calls; NO_COLOR → 0; light/dark → 0; auto TTY → 1); zero `Theme{}` equals `Default()` per method; `TestArtificerGen_IsCurrent` (re-render, byte-compare, message names `go generate ./internal/theme`); `TestRoleNames_MatchConfig`; `Fang()` fills every `ColorScheme` field (reflect); `Huh()` returns dark styles for both `Theme(true)` and `Theme(false)` when resolved dark; `Writer` with `CLICOLOR_FORCE=1` emits ESC and with `NO_COLOR=1` emits none
+- [x] `palettegen.Render(palette []byte) ([]byte, error)`: reads `_palette.json` dark/light role blocks, emits `func Artificer() Palette` with each key's comment as the role's doc comment; `go/format`; token path constant `theme.PalettePath = "artificer/_palette.json"` shared by the generator and `TestArtificerGen_IsCurrent`
+- [x] `Legacy()`: today's `styles.go` hexes (lavender set) as the migration escape
+- [x] `Huh()`: `huh.ThemeFunc` closure that ignores its `isDark` argument and uses `t.IsDark()` (huh v2 defaults light; standalone forms never request the background); from `huh.ThemeBase(t.IsDark())`: Title/selectors/prefix/prompt/cursor→Accent, Description→Meta, Unselected→Muted, Error→Danger, FocusedButton→OnAccent on AccentFill, BlurredButton→Muted on SurfaceRaised, Placeholder→Dim
+- [x] `Fang()`: ignores the passed `LightDarkFunc`, uses `t.IsDark()`: Base→Fg, Title/Program/Command→Accent, Description/FlagDefault/Help→Meta, Codeblock→SurfaceRaised, DimmedArgument/Comment/Dash→Muted, Flag/QuotedString→Steel, Argument/ErrorDetails→Fg, ErrorHeader→{OnUrgent, UrgentFill}
+- [x] `Detect`: `dark|light` fixed; `auto` → `probe()` only when `ShouldProbe`, else dark. `ShouldProbe` = `StdinTTY && StdoutTTY && !NoColor && !HasPrefix(Term,"screen") && !HasPrefix(Term,"tmux")`
+- [x] Tests: `FromConfig` table; `Detect` truth table with a counting probe (tmux → 0 calls; NO_COLOR → 0; light/dark → 0; auto TTY → 1); zero `Theme{}` equals `Default()` per method; `TestArtificerGen_IsCurrent` (re-render, byte-compare, message names `go generate ./internal/theme`); `TestRoleNames_MatchConfig`; `Fang()` fills every `ColorScheme` field (reflect); `Huh()` returns dark styles for both `Theme(true)` and `Theme(false)` when resolved dark; `Writer` with `CLICOLOR_FORCE=1` emits ESC and with `NO_COLOR=1` emits none
 - [ ] File follow-up issue on `cameronsjo/artificer-design-system`: "a forgectl (Go) target in `themes/build.mjs`, or ship `_palette.json` on npm" — the pinned raw fetch is the interim
-- [ ] Commit `feat(theme): Artificer terminal palette generated from _palette.json; v2 styles, huh, list, fang adapters`
+- [x] Commit `feat(theme): Artificer terminal palette generated from _palette.json; v2 styles, huh, list, fang adapters`
 
 ### Task 5 — Wire the theme: `Deps`, `Execute`, fang, and the `theme` module
 
@@ -263,10 +263,10 @@ func (t Theme) Contrast(r Role) float64 // vs bg, for theme show's AA flag
 **Dispatch:** Serial (wave 3) · In-context · **Report:** —
 
 **Steps:**
-- [ ] `theme preview`: every role as swatch + glyph + sample row in dark and light columns, a huh confirm sample, a fang-styled snippet; Long says it breaks the two-color rule on purpose. `theme show`: hex per role, provenance (preset / override / mode / probed?), AA flag (`Contrast < 4.5` → `below AA`), `warnings[]`; `--json` emits the same as an object (pattern: `config --json`)
-- [ ] Test: `theme show --json` parses and lists every `RoleNames()`; `--help | cat` writes zero `\x1b]11` bytes (pins fang's TTY gate)
-- [ ] Manual: `go run . --help` in gold/steel; `go run . theme preview` under Ghostty and inside tmux; `mode = "light"` in a scratch config flips it
-- [ ] Commit `feat(theme): thread the theme through Deps, fang, and a theme module (preview, show)`; PR body with `BEGIN_COMMIT_OVERRIDE` `feat(theme): Artificer palette core, [theme] config, theme preview/show`, tuple; `cadence:redaction`; `cadence-forge:polish`; ready flip
+- [x] `theme preview`: every role as swatch + glyph + sample row in dark and light columns, a huh confirm sample, a fang-styled snippet; Long says it breaks the two-color rule on purpose. `theme show`: hex per role, provenance (preset / override / mode / probed?), AA flag (`Contrast < 4.5` → `below AA`), `warnings[]`; `--json` emits the same as an object (pattern: `config --json`)
+- [x] Test: `theme show --json` parses and lists every `RoleNames()`; `--help | cat` writes zero `\x1b]11` bytes (pins fang's TTY gate)
+- [x] Manual: `go run . --help` in gold/steel; `go run . theme preview` under Ghostty and inside tmux; `mode = "light"` in a scratch config flips it
+- [x] Commit `feat(theme): thread the theme through Deps, fang, and a theme module (preview, show)`; PR body with `BEGIN_COMMIT_OVERRIDE` `feat(theme): Artificer palette core, [theme] config, theme preview/show`, tuple; `cadence:redaction`; `cadence-forge:polish`; ready flip
 
 ### PR 2b — `refactor/theme-callsites`
 
@@ -282,10 +282,10 @@ func (t Theme) Contrast(r Role) float64 // vs bg, for theme show's AA flag
 **Dispatch:** Parallel (wave 1 of PR 2b) · three fresh Sonnet subagents, one per slice · **Report:** `<reports-dir>/task-6a.md`, `task-6b.md`, `task-6c.md`
 
 **Steps:**
-- [ ] Worktree `.claude/worktrees/theme-callsites`, branch `refactor/theme-callsites` from fresh `origin/main` (after PR 2a merges); `push -u`; draft PR
-- [ ] Each slice keeps its `\x1b[`-present/absent tests meaningful by rendering through `th.Writer(buf, []string{"CLICOLOR_FORCE=1"})` / `{"NO_COLOR=1"}`
-- [ ] `TestScreensDrawNothingUnsafe` and the huh-form unsafe tests green with `theme.Default()`
-- [ ] Orchestrator commits one per slice: `refactor(tui|cli|k8s): draw from internal/theme`
+- [x] Worktree `.claude/worktrees/theme-callsites`, branch `refactor/theme-callsites` from fresh `origin/main` (after PR 2a merges); `push -u`; draft PR
+- [x] Each slice keeps its `\x1b[`-present/absent tests meaningful by rendering through `th.Writer(buf, []string{"CLICOLOR_FORCE=1"})` / `{"NO_COLOR=1"}`
+- [x] `TestScreensDrawNothingUnsafe` and the huh-form unsafe tests green with `theme.Default()`
+- [x] Orchestrator commits one per slice: `refactor(tui|cli|k8s): draw from internal/theme`
 
 ### Task 7 — Enforcement, piped-output test, docs, ship PR 2b
 
@@ -296,11 +296,11 @@ func (t Theme) Contrast(r Role) float64 // vs bg, for theme show's AA flag
 **Interfaces:** Consumes Task 6 · **Dispatch:** Serial (wave 2) · In-context · **Report:** —
 
 **Steps:**
-- [ ] Enforcement test: `go/parser` over `main.go` + `internal/**/*.go`, skip `_test.go`, `internal/theme/`, `internal/termsafe/termsafetest/`, `.claude/`; flag `ast.BasicLit` STRING containing `\x1b[`/`\033[`, selectors `lipgloss.Color`, `huh.Theme*`, imports of `charm.land/lipgloss/v2/compat` or any charm v1 path; message names file:line and "use internal/theme". RED demonstration is a one-time manual run against `origin/main`, recorded in the PR body
-- [ ] `piped_output_test.go`: table over every plain-output verb reachable with a `FakeRunner` (`doctor`, `launch which`, `launch doctor`, `pr dash`, `pr prs`, `review`, `bench status`, `tmux ls`, `theme show`); stdout = buffer with env `NO_COLOR=1`; assert zero `\x1b` bytes
-- [ ] Manual acceptance (dogfood): the TUI in a tmux pane under Ghostty `artificer-dark`, beside the Artificer tmux status bar and gitmux — accent, steel, and danger read as the same colors. Record the verdict in the PR body
+- [x] Enforcement test: `go/parser` over `main.go` + `internal/**/*.go`, skip `_test.go`, `internal/theme/`, `internal/termsafe/termsafetest/`, `.claude/`; flag `ast.BasicLit` STRING containing `\x1b[`/`\033[`, selectors `lipgloss.Color`, `huh.Theme*`, imports of `charm.land/lipgloss/v2/compat` or any charm v1 path; message names file:line and "use internal/theme". RED demonstration is a one-time manual run against `origin/main`, recorded in the PR body
+- [x] `piped_output_test.go`: table over every plain-output verb reachable with a `FakeRunner` (`doctor`, `launch which`, `launch doctor`, `pr dash`, `pr prs`, `review`, `bench status`, `tmux ls`, `theme show`); stdout = buffer with env `NO_COLOR=1`; assert zero `\x1b` bytes
+- [x] Manual acceptance (dogfood): the TUI in a tmux pane under Ghostty `artificer-dark`, beside the Artificer tmux status bar and gitmux — accent, steel, and danger read as the same colors. Record the verdict in the PR body
 - [ ] Invoke `artificer-design-system:artificer-feedback` (background)
-- [ ] `go build ./... && go vet ./... && go test ./...`; PR body with `BEGIN_COMMIT_OVERRIDE` `feat(theme): every colored surface draws from the Artificer palette; NO_COLOR and pipes stay plain`, tuple; `cadence:redaction`; `cadence-forge:polish`; ready flip
+- [x] `go build ./... && go vet ./... && go test ./...`; PR body with `BEGIN_COMMIT_OVERRIDE` `feat(theme): every colored surface draws from the Artificer palette; NO_COLOR and pipes stay plain`, tuple; `cadence:redaction`; `cadence-forge:polish`; ready flip
 
 ### PR 3 — `feat/tui-hub`
 
