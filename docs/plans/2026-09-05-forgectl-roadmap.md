@@ -6,6 +6,8 @@ forgectl stops needing a human in the loop for routine forge work: reviews queue
 
 That Frame is the anchor for the cancellation test below. It is deliberately *forward*-looking — the founding Frame ("forgectl as the workbench forge", epic #1) is substantially built, which is why so little of the open tracker lands on the spine.
 
+Supersedes [`2026-07-01-forgectl-forge-roadmap.md`](2026-07-01-forgectl-forge-roadmap.md), whose platform-first spine (`#9 → #12 → #10 → #29`) is spent.
+
 Tracker: —
 
 ## What the tracker gets wrong
@@ -66,7 +68,7 @@ Five items out of 28. Everything else has a workaround — usually "a human does
 | #464 | `recipe afk` passes an unvalidated herdr target | — | |
 | #413 | `githubauth` follow-ups — unpinned `gh` callers | — | |
 
-The docs-reader cluster is nine of the 28 open issues and still lands in Next rather than on the spine: Obsidian is the workaround, so omitting it does not cancel the Frame. It has its own epic (#442) and roadmap (`docs/plans/2026-09-04-docs-reader-roadmap.md`); this roadmap defers to those for its internal order.
+The docs-reader cluster is nine of the 28 open issues and still lands in Next rather than on the spine: Obsidian is the workaround, so omitting it does not cancel the Frame. It has its own epic (#442) — and a roadmap doc that is still on the unmerged `plan/docs-reader-roadmap` branch rather than on `main`; this roadmap defers to those for its internal order.
 
 ## Later
 

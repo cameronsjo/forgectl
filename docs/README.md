@@ -24,8 +24,11 @@ operated.
 - **[`operations/`](operations/)** — live runbooks for operating forgectl
   itself day to day. Unlike `adr/` and `discovery/`, these are meant to be
   kept current.
-- **[`plans/`](plans/)** — historical planning documents for features and
-  refactors as they were built. Read as history, not as a spec still in
-  force — the shipped behavior and its ADR are the current truth.
+- **[`plans/`](plans/)** — planning documents for features and refactors as
+  they were built. Read a *feature* plan as history, not as a spec still in
+  force — the shipped behavior and its ADR are the current truth. The
+  exception is a file named `*-roadmap.md`: those are forward-looking and
+  current until a later one supersedes them, which the superseded file says
+  at its top.
 - **[`RELEASING.md`](RELEASING.md)** — the release process for cutting a new
   forgectl version.
