@@ -11,6 +11,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/step"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // Tier sorts modules into the load-bearing core and the individually
@@ -38,6 +39,13 @@ type Deps struct {
 	// error string. Production fills it; a module that needs it refuses on
 	// nil rather than falling back to Runner, which logs its argv by design.
 	SensitiveRunner exec.SensitiveRunner
+
+	// Theme is the resolved colour set every styled surface draws from. It is
+	// a value, not a pointer or an interface, precisely so a module that
+	// forgets to check it still gets a working theme: theme.Theme's zero value
+	// is the Artificer palette resolved dark, identical to theme.Default().
+	// There is no nil to guard and no "unset" state to discover at a call site.
+	Theme theme.Theme
 }
 
 // Manifest declares one module: its canonical verb, tier, config-section

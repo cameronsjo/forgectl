@@ -1,0 +1,202 @@
+{
+  "$description": "Artificer · canonical palette source-of-truth. Edit a hex here and run `node themes/build.mjs` to regenerate Claude Code, Ghostty, and VS Code. Obsidian is hand-authored — manually re-check obsidian/Artificer/theme.css `--art-*` tokens after a palette change.",
+  "$version": "0.25.0",
+  "$lockedDate": "2024-11",
+
+  "$roles": {
+    "syntax": {
+      "keyword":   "brandPurpleBright",
+      "string":    "successBright",
+      "comment":   "fgMuted",
+      "type":      "accentBright",
+      "constant":  "attentionAlt",
+      "function":  "accent",
+      "namespace": "cyan",
+      "parameter": "steel",
+      "tag":       "urgentBright",
+      "operator":  "fgMuted",
+      "variable":  "fg",
+      "invalid":   "urgentBright"
+    }
+  },
+
+  "dark": {
+    "bg":           "#292c33",
+    "terminalBg":   "#313540",
+    "bgRaised":     "#313540",
+    "bgOverlay":    "#3c4150",
+    "bgFloat":      "#474d60",
+    "bgFloatHover": "#525a70",
+    "bgInactive":   "#1d1f21",
+    "ansiBlack":    "#5f6576",
+    "ansiBrightBlack":"#9aa2b3",
+    "ansiRose":     "#c4808a",
+    "ansiBrightRose":"#d9a6ae",
+    "ansiRed":      "#d07a72",
+    "ansiBrightRed":"#e6a8a2",
+    "ansiGreen":    "#6fae82",
+    "ansiBrightGreen":"#7ab88c",
+
+    "fg":           "#e8e6e1",
+    "fgSecondary":  "#c5c8c6",
+    "fgMuted":      "#5a7a8a",
+    "fgDisabled":   "#666666",
+    "border":       "#4a4f5c",
+    "borderLifted": "#5a606e",
+
+    "accent":       "#dbbb6f",
+    "accentBright": "#e3c885",
+    "accentFill":   "#c4932a",
+    "selectionFill":"#7a5a10",
+
+    "attention":    "#c4808a",
+    "attentionAlt": "#d6936a",
+    "attentionFill":"#c4808a",
+
+    "urgent":       "#a04540",
+    "urgentBright": "#b85a55",
+    "urgentText":   "#e6a8a2",
+
+    "success":      "#4a8a5e",
+    "successBright":"#5fa073",
+    "successFill":  "#2d6644",
+
+    "steel":        "#b8cad4",
+    "steelBright":  "#9fb6c4",
+    "steelFill":    "#5a7a8a",
+
+    "brandPurple":     "#9070d0",
+    "brandPurpleDeep": "#331567",
+    "brandPurpleBright":"#b095e0",
+
+    "cyan":         "#7da6a4",
+    "cyanBright":   "#9bc1bf",
+
+    "diffAddBg":    "#1f3a28",
+    "diffAddDim":   "#1a2a20",
+    "diffAddWord":  "#2d5a3a",
+
+    "diffDelBg":    "#3a1f1d",
+    "diffDelDim":   "#2a1816",
+    "diffDelWord":  "#5a2e2a",
+
+    "ink":          "#20203e",
+    "ivory":        "#f5ead0"
+  },
+
+  "light": {
+    "bg":           "#f5ead0",
+    "terminalBg":   "#f5ead0",
+    "bgRaised":     "#eddcc0",
+    "bgOverlay":    "#e4d4b0",
+    "bgFloat":      "#dbcca0",
+    "bgFloatHover": "#d0bd8c",
+    "bgInactive":   "#dcc99c",
+    "ansiBlack":    "#f5ead0",
+    "ansiBrightBlack":"#8a8070",
+    "ansiRose":     "#924753",
+    "ansiBrightRose":"#74303c",
+    "ansiRed":      "#8a2418",
+    "ansiBrightRed":"#a04540",
+    "ansiGreen":    "#2a5a3a",
+    "ansiBrightGreen":"#3a7050",
+
+    "fg":           "#20203e",
+    "fgSecondary":  "#4a3f2a",
+    "fgMuted":      "#5a7a8a",
+    "fgDisabled":   "#8a8070",
+    "border":       "#cbb88a",
+    "borderLifted": "#b8a674",
+
+    "accent":       "#7a5a10",
+    "accentBright": "#866010",
+    "accentFill":   "#c4932a",
+    "selectionFill":"#c4932a",
+
+    "attention":    "#8a6618",
+    "attentionAlt": "#a04500",
+    "attentionFill":"#dbbb6f",
+
+    "urgent":       "#8a2418",
+    "urgentBright": "#a04540",
+    "urgentText":   "#8a2418",
+
+    "success":      "#2a5a3a",
+    "successBright":"#3a7050",
+    "successFill":  "#2a5a3a",
+
+    "steel":        "#2e4a5a",
+    "steelBright":  "#406278",
+    "steelFill":    "#5a7a8a",
+
+    "brandPurple":     "#4a25a0",
+    "brandPurpleDeep": "#331567",
+    "brandPurpleBright":"#5a35b0",
+
+    "cyan":         "#3a6a68",
+    "cyanBright":   "#4a8280",
+
+    "diffAddBg":    "#d8e4cc",
+    "diffAddDim":   "#e4ecdc",
+    "diffAddWord":  "#b0c8a0",
+
+    "diffDelBg":    "#ecd6d4",
+    "diffDelDim":   "#f0dedc",
+    "diffDelWord":  "#d8a8a4",
+
+    "ink":          "#20203e",
+    "ivory":        "#f5ead0"
+  },
+
+  "$notes": {
+    "warmDarkFgTrial": "CONCLUDED — bone #e8e6e1 stands. Owner trial 2026-08-31 (PR #446, reverted same day): dark fg was warmed toward ivory to fix text reading stark/cool. Full ivory #f5ead0 was rejected at preview (too yellow); the minted 50% OKLab midpoint #eee8d9 (parchment, 11.44:1 on bg) shipped for a live beta and was ALSO rejected as too yellow in use. Ruling: dark fg stays bone. Do not re-propose a yellow-warm fg; if stark-reading recurs, investigate the fg ramp temperature (fgSecondary #c5c8c6) or vault-side overrides (an italic-color #FFFFFF Style Settings override was live during the original complaint) before touching fg. No Lane 1 ratification owed — the palette override was withdrawn; the gold-heading Obsidian default from the same PR STANDS and still rides the Lane 2 catch-up.",
+    "v0.6": "Palette locked Nov 2024. Apothecary green replaces olive; brick replaces vermillion; lifted/deep purple replaces lilac; midnight indigo replaces navy.",
+    "v0.6.1": "Dark brandPurple+Bright lifted to pass AA on bg (#9070d0 ~3.6:1, #b095e0 ~5.5:1). Light brandPurpleBright deepened via chroma not lightness (#6a30d0 ~6:1). Adopted from Lane 1 design session 2026-05-13.",
+    "v0.7.0": "Adds syntax role map (keyword/string/comment/type/constant/function/namespace/parameter/tag/operator/variable/invalid) routing to existing tokens. brandPurpleBright=keyword, successBright=string, accent=function, accentBright=type, attentionAlt=constant, cyan=namespace, steel=parameter, urgentBright=tag/invalid, fgSecondary=comment/operator. All roles pass WCAG AA on both bgs; tag+invalid sit at AA-Large (3.08:1) reinforced by visual treatment.",
+    "v0.7.1": "Reroute comment from fgSecondary → steelFill (#5a7a8a). fgSecondary at 8.29:1 dark / 8.63:1 light was too close to fg (11.21 / 13.13) — comments visually clashed with bone variables. AA-Large floor, steel-blue tint that recedes cleanly from bone (dark) and ink (light). Superseded by v0.7.2 schema: comment now resolves through dedicated fgMuted token.",
+    "v0.7.2": "Lane 1 ratification of 0.7.0/0.7.1. Three changes: (1) introduces fgMuted (#5a7a8a both modes) as a dedicated muted-foreground token sitting between fgSecondary and fgDisabled — semantic fix for v0.7.1 borrowing steelFill (a fill token) as text. (2) Moves syntax role map from per-mode `dark.syntax`/`light.syntax` to top-level `$roles.syntax` — role mapping is mode-independent; only token-to-hex resolution is per-mode. (3) Reroutes operator from fgSecondary → fgMuted; operators get meaning from position, not prominence. fgMuted contrast: 3.05:1 dark, 3.83:1 light (AA-L, conventional muted-text floor). Adopted from Lane 1 design session. (ADR 0028)",
+    "brandPurpleBrightDirection": "Bright variant inverts direction per mode: lighter than base on dark (lift), more chromatic and not necessarily lighter on light (saturate). Both express 'more emphasis than base on the current surface.' Don't rename — the token describes role, not lightness direction.",
+    "brandPurpleBrightDualBinding": "brandPurpleBright drives both the status-pill accent role (since v0.6.1 lift) AND the syntax `keyword` role (since v0.7.0). Lane 1 accepts the dual binding — YAGNI to split. When retuning brandPurpleBright in the future, validate against BOTH surfaces: status pills on bgRaised/bgOverlay AND syntax keywords on bg. A change that improves one and degrades the other is a regression, not a tradeoff. (ADR 0018)",
+    "v0.10.1": "Lane 1 ruling: ratifies dark brandPurpleBright at #b095e0 (5.47:1 on bg, AA pass) and light at #5a35b0 (6.83:1 on ivory). This is the syntax-keyword foreground via $roles.syntax.keyword — needs the full 4.5:1 (keyword is unreinforced; syntaxAALarge carve does NOT cover it). The shipping CSS was at #7050b8 (2.35:1 fail) and the CSS had no --brand-purple-bright token at all — .code-block .tok-keyword was binding to bare --brand-purple (#5a3a9a = 1.67:1, illegible). Also: bare brandPurple stays at #5a3a9a — it is NOT a foreground role ON THE WEB (chart series-3 + .whimsy--brand gradient stop). NOTE: the 'never a foreground role' clause is WEB-SCOPED — see brandPurpleSurfaceSplit for the editor/terminal side. The 'dual-use pill tension' the older $notes warned about does not bind in canonical CSS — no purple badge exists; Bright is foreground-only. See themes/_research/brandpurple-answer-key.md before re-proposing.",
+    "v0.10.2": "Lane 1 palette-hygiene batch, verified against canonical before apply (design-session base was a stale 0.7.2 version stamp; values matched 0.10.1). #99: light accentBright #8a6618 (4.40:1, sub-AA for syntax `type` on ivory) → #866010 (4.75:1); dark accentBright #e3c885 unchanged; lift preserved (lighter than accent #7a5a10). Re-verified --accent-bright hover on bgRaised 4.22:1 / bgOverlay 3.88:1 (both up from 3.91/3.59). Clears the only KNOWN_SUB_AA gate entry (type:light). #100-F2: mint attentionFill (dark #c4808a = attention; light #dbbb6f = accent gold, ink-on 8.49:1) — homes the retired orphan #e0b558 and clears it from the #61 lint allowlist. #80: mint successFill (dark #2d6644, ivory-on 5.67:1; light #2a5a3a = success, 6.70:1) and rebind .badge--success/.dot--success off bare --success (dark #4a8a5e = 3.45:1 sub-AA shipping bug) onto --success-fill; add .card--success (bare --success left-border accent, not a fill). #96: mint --border-lifted CSS var from existing palette borderLifted (dark #5a606e 2.22:1 / light #b8a674 2.01:1) and rebind --dia-rail off the faint color-mix onto it. #36: categorical scale capped at 5 (seriesCapPolicy). All fills/rails are non-text per ruleUsageSetsRatio.",
+    "v0.19.0": "Lane 1 ratification of #122 (axe UI-contrast sweep) + #235 (muted-glyph floor), 2026-06-13. (A) light onAccent ivory #f5ead0 → ink #20203e on accentFill #c4932a: 2.32:1 FAIL → 5.65:1 AA — fixes the light primary CTA + accent badges system-wide; reuses the ink token, no mint. (B) mint urgentText (dark #e6a8a2, light #8a2418) for .field>.error body text — bare urgent fails AA as text (dark #a04540 ~2.27:1 on bg). (C) attention is not a text role: rebind attention-colored body text → fg; tier signal stays on border+dot (attentionNotTextRole). (D) .pane--inactive sub-AA recession is intentional, allowlist kept (paneInactiveSubAA). (E) document-surface prose links carry a persistent underline; tool surfaces keep hover/focus (linkUnderlinePolicy). #235: WONTFIX — the 3:1 graphical floor suffices for role=img glyphs (mutedGlyphFloor). All ratios recomputed on disk before apply; Lane 1's 'already committed at v0.19.0' headline was a stale $version stamp — the values were actually applied here.",
+    "urgentText": "Lifted error-text red for body copy — bare urgent is a fill/accent hue, not a text role (dark #a04540 ~2.27:1 on bg, sub-AA). Dark #e6a8a2 clears AA on every panel: bg 6.98:1 / bgRaised 6.12:1 / bgOverlay 5.08:1. Light #8a2418 (= light urgent, already AA-strong) on ivory = 7.49:1. Bound to --urgent-text, consumed by .field>.error. Minted v0.19.0 (#122-B). Decorative urgent (cards, empty-state titles, danger menu options) keeps bare --urgent — those are reinforced by dot/icon/border, never color alone. (ADR 0016)",
+    "attentionNotTextRole": "v0.19.0 (#122-C): attention is a fill/border/dot hue, NOT a body-text color. As text it fails AA (light #8a6618 on ivory 4.40:1; dark surfaces similar). Rule: tier meaning rides border + dot + label, never attention-colored glyphs. Demo bindings that used attention as text were rebound to --fg; the tier signal is unaffected. Console log-level coloring (.console .warn/.err) is a separate terminal convention and out of scope. (ADR 0015)",
+    "mutedGlyphFloor": "v0.19.0 (#235 WONTFIX): comparison-grid glyphs (.glyph--muted etc.) on fgMuted #5a7a8a measure 3.05:1 dark / 3.83:1 light — below the 4.5:1 TEXT floor but at/above the 3:1 GRAPHICAL floor (WCAG SC 1.4.11). Glyphs ship as role=img + aria-label (graphical objects, not text), so 3:1 governs and no lifted token is needed. ruleUsageSetsRatio: the required ratio follows usage — a labeled graphic is not body text. (ADR 0015)",
+    "paneInactiveSubAA": "v0.19.0 (#122-D): .pane--inactive intentionally recedes below AA (fgSecondary on bgInactive ~3.97 dark / ~2.35 light) WHILE inactive — recession IS the signal; the active pane always carries full AA. Documented, allowlisted (not a defect). Don't 'fix' by lifting the inactive contrast — that erases the active/inactive distinction. (ADR 0015)",
+    "linkUnderlinePolicy": "v0.19.0 (#122-E): document-surface (default) prose links carry a persistent underline (WCAG 1.4.1 — a link in a text block must be distinguished by more than color). Tool surfaces (.surface-tool) keep underline on hover/focus only — dense UI chrome reads links by position. Chrome links (nav/crumb/tab/btn) opt out via their own text-decoration:none. (ADR 0004)",
+    "attentionFill": "Fill form of attention; tracks the mode's attention HUE — dark #c4808a (= attention, dusty rose; --on-attention ink 5.09:1), light #dbbb6f (burnished gold = dark.accent; ink 8.49:1). Was a CSS/tokens-only orphan (light #e0b558, retired pre-v0.6 gold) until v0.10.2 homed it in the palette. Pair with --on-attention (#20203e). (ADR 0016)",
+    "successFill": "Deep apothecary-green fill for success badges/dots/chips — deeper than bare success so ivory-on clears AA. Dark #2d6644 (5.67:1), light #2a5a3a (= success, 6.70:1). Minted v0.10.2 because .badge--success/.dot--success were bound to bare --success (dark #4a8a5e = 3.45:1, sub-AA). .card--success uses bare --success (left-border accent), NOT this fill. (ADR 0016)",
+    "seriesCapPolicy": "v0.10.2: the categorical scale is CAPPED at 5 (--series-1..5, aliased to accent/steel/brandPurple/success/attention so they track theme). No 6th hue, no unnamed extended scale — 5 is near the perceptual limit and is exactly the set of mutually-distinct theme-tracking hues the palette provides; a 6th would repeat a hue or import off-palette (breaks Hard rule #1). Beyond 5 is a re-encode signal: split charts, group the tail, or use the single-hue sequential --ramp-1..5 for magnitude.",
+    "brandPurpleSurfaceSplit": "Owner ruling 2026-05-31: bare brandPurple carries TWO values BY SURFACE, and this is intentional, not drift. (a) Palette token brandPurple = #9070d0 — the FOREGROUND value: build.mjs routes it to ANSI 5 (normal magenta) and the Claude Code accent labels (remember/suggestion/planMode/subagent), all glyph text on the terminal bg; 3.60:1, the legible normal-magenta distinct from #b095e0 (ANSI 13 bright). LIVE GHOSTTY IS GROUND TRUTH (~/.config/ghostty/themes/artificer-dark: palette=5=9070d0). (b) Web --brand-purple = #5a3a9a — a DECORATIVE override (chart series-3 fill, .whimsy--brand gradient stop, box outlines); never text, so 1.67:1 is fine. The web CSS deliberately overrides the palette token here. Same hue, two jobs. The lint allowlists #5a3a9a as the sanctioned web decorative literal. Consumed editor artifacts (claude-code/*.json, vscode) already carry #9070d0; the annotated artificer-dark.jsonc reading copy lags at #5a3a9a + a v0.6 banner (non-consumed — full refresh deferred to the editor-theme pass). (ADR 0014)",
+    "ruleHexWithoutRatio": "A hex without a ratio is not a decision. Any change to brandPurple* or any $roles.syntax.* binding MUST cite the resolved foreground hex AND the measured contrast against bg/bgRaised/ivory using scripts/contrast.mjs. Eyeballed contrast is the recurring root cause (3 incidents through v0.10.1).",
+    "ruleUsageSetsRatio": "A ratio target without a usage is not a spec. The contrast a color MUST clear is a function of how it is USED and laid out, not the hue: a foreground glyph/text needs WCAG AA (4.5:1), but the same hue as an outline, fill, gradient stop, or chart series carries no text-contrast obligation. Tune the hue to the job — don't force one value to satisfy both. (Owner principle, 2026-05-31: 'readability of a dark purple is different than dark purple being an outline on a box.') Worked example: brandPurpleSurfaceSplit.",
+    "selectionBgDark":  "SUPERSEDED v0.20.0 (#278) — see selectionFill. Dark selection uses dark.selectionFill #7a5a10: fg #e8e6e1 on it = 5.11:1 (text-AA ✓); the fill itself vs bg #292c33 = 2.19:1 — fill lens, no text-contrast floor (ruleUsageSetsRatio). Ratifies the #263 owner override; the prior 'Use accentFill (#c4932a)' ruling (a 5.03:1 slab, judged too loud for selection feel) is retired for dark.",
+    "selectionFill": "Selection-highlight FILL. Dark #7a5a10 (warm-deep bronze) — numerically equal to light.accent but a DIFFERENT JOB: light.accent is interactive foreground text (5.33:1 on ivory); this is a quiet selection block (2.19:1 vs bg, intentional per ruleUsageSetsRatio; selected text #e8e6e1 on it = 5.11:1 AA ✓). Light #c4932a (= accentFill — minted both modes for token symmetry, per successFill/urgentText precedent) with ink #20203e = 5.65:1 ✓. Minted v0.20.0 (#278), promoting the build.mjs ghosttyTheme() '7a5a10' literal; Lane 3 repoints selection-background to P.selectionFill (both modes — the mode ternary on the background drops; the foreground ternary fg/ink stays) and regenerates.",
+    "selectionBgLight": "Use accent (#7a5a10) at low alpha, or accentFill #c4932a.",
+    "onAccentDark":  "ink #20203e",
+    "onAccentLight": "ink #20203e",
+    "onUrgent":      "ivory #f5ead0",
+    "onSuccess":     "ivory #f5ead0",
+    "ansiBlack": "Terminal ANSI-0, lifted off the terminal canvas so black-foreground text stays visible instead of vanishing. Dark #5f6576 = 2.11:1 on terminalBg #313540 (sub-AA BY DESIGN — a background slot, below slot 8; ruleUsageSetsRatio). RE-DERIVED at ADR 0036: the canvas moved bg → terminalBg, so the old #565b68 fell to 1.80:1 and gave back ADR 0001's gain. Light = bg #f5ead0, unchanged (dark-only lift). build.mjs routes it to Ghostty palette=0 only; VS Code's integrated terminal deliberately stays on bg (deferral commented inline). (ADR 0001, ADR 0036) Repo mint #251 (merged 2026-07-03) retro-ratified BLESSED AS-IS by Lane 1 v0.20.0.",
+    "terminalBg": "THE TERMINAL IS A RAISED SURFACE. Ghostty / Claude Code / every TUI is an application running ON the desktop, not the desktop itself — so the terminal canvas is NOT the substrate. Dark #313540 (one rung above bg; equal to bgRaised TODAY but semantically distinct: bgRaised = 'GUI cards and panels', terminalBg = 'the elevation the terminal lives at'. If the GUI elevation retunes, the terminal must not silently follow). Light = bg #f5ead0, unchanged — light INVERTS elevation (its bgRaised is darker than bg), so it needs its own reasoning; deferred. Consumed by Ghostty background + cursor-text, tmux status/message, Claude Code clawd_background. NOT by VS Code editor.background or Obsidian — those are true substrate. Do NOT 'fix' this back to P.bg. (ADR 0036)",
+    "bgFloat": "Fourth elevation rung, minted at ADR 0036 because the terminal canvas rose to terminalBg and pushed the Claude Code user-message chip up to bgOverlay — leaving its hover with nowhere to go. Dark #474d60 continues the existing ramp (+8,+9,+13 → +11,+12,+16). Light #dbcca0 continues the light ramp — LIVE since v0.21.0 (#332): the chip binds to bgFloat in BOTH modes (the dark-only guard dropped; see userMessageBandSeparation), so light bgFloat has a real consumer. Hover partner: bgFloatHover. (ADR 0036, amended v0.21.0)",
+    "ansiBrightBlack": "Lifted #737a8d → #9aa2b3 at ADR 0042 (2026-09-02): 2.86:1 was a hard AA fail for the comments, quote bars, and Claude Code `subtle` text it paints; #9aa2b3 = 4.8:1 on terminalBg. Slot 0 #5f6576 stays, so ADR 0001's 0<8 ordering holds with a wider gap. Also now binds Claude Code promptBorder (was border #4a4f5c, 1.5:1, invisible). Prior derivation kept below. — Terminal ANSI-8, split off fgDisabled at ADR 0036. The lifted canvas dropped BOTH slot 0 and slot 8: re-deriving slot 0 alone to #5f6576 (2.11:1) put it ABOVE fgDisabled #666666 (2.13:1) — a 0.02 gap that inverts ADR 0001's 0<8 brightness ordering. fgDisabled is NOT terminal-only (VS Code, gh-dash, lazygit, tokens.json), so lifting it would reach the web. Dark #737a8d = 2.86:1 on terminalBg, restoring a real 0<8 gap (2.11 / 2.86, comparable to the old 2.06 / 2.43) with zero web blast radius. Light #8a8070 (= fgDisabled) — preserves today's binding exactly. Owner-selected from a truecolor playground on the real canvas, same method as ADR 0001. (ADR 0036)",
+    "ansiRose": "Terminal ANSI-4 (normal blue SLOT, rose VALUE). Dark #c4808a = dark.attention byte-for-byte — Pi's syntax rose, the literal ask of #444; 4.53:1 on bg, 3.97:1 on terminalBg (the canvas Claude Code actually paints on, ADR 0036). The sub-AA 3.97 is RECORDED, NOT HIDDEN: ANSI foreground slots carry no repo text floor (ruleUsageSetsRatio; same lens as ADR 0001's ansiBlack). Light #924753, 5.41:1 on ivory. Bright member is lighter on dark and darker on light per ANSI light-theme convention — direction lives in the hexes, never a mode conditional. Naming is slot-role (ansiBlack/ansiBrightBlack precedent) — the declined alternative was a bare rose/roseBright pair, which would have recreated the slot-inversion steel/steelBright carried in these slots. Terminal-only (PALETTE_ONLY): no CSS var, no tokens.json leaf, $roles.syntax untouched (parameter stays steel; every truecolor steel use is unaffected). Shipped repo-side #444/PR #449, owner-approved live; retro-ratified BLESSED AS-IS by Lane 1 v0.21.0 under the #251/ADR 0001 precedent.",
+    "ansiBrightRose": "Terminal ANSI-12 (bright blue SLOT, rose VALUE). Dark #d9a6ae — 6.67:1 on bg, 5.84:1 on terminalBg (AA on both). Light #74303c — 7.87:1 on ivory. One 349–351° rose band with ansiRose. Blessed as-is v0.21.0 with its pair. (#444)",
+    "ansiRed": "Terminal ANSI-1 (ADR 0042, 2026-09-02). Dark #d07a72 = 3.9:1 on terminalBg — the dimmer member of the red pair, for fills and glyphs, not running text (no mid-red clears 4.5 on this canvas). Was urgent #a04540 at 2.0:1. Light #8a2418 = urgent, unchanged. urgent itself stays the web/VS Code/fill red; this key is terminal-only.",
+    "ansiBrightRed": "Terminal ANSI-9 and Claude Code error/red text (ADR 0042). Dark #e6a8a2 = urgentText byte-for-byte (6.1:1 on terminalBg) — the palette already had a passing text red; the terminal just never used it. Was urgentBright #b85a55 at 2.7:1. Owner-confirmed on a live beta ('I like that brighter red 9'). Light #a04540 = urgentBright, unchanged. Distinct from the rose pair (slots 4/12, 349–351°) by hue: this is a true red at ~5°.",
+    "ansiGreen": "Terminal ANSI-2 and Claude Code success/autoAccept/green text (ADR 0042). Dark #6fae82 = 4.7:1 on terminalBg; was success #4a8a5e at 3.0:1. Light #2a5a3a = success, unchanged. success stays the fill/web green and keeps its onSuccess pairing; this key is terminal-only.",
+    "ansiBrightGreen": "Terminal ANSI-10 (ADR 0042). Dark #7ab88c = 5.3:1 on terminalBg, brighter pair of ansiGreen; was successBright #5fa073 at 3.9:1. Light #3a7050 = successBright, unchanged.",
+    "ansiRoseCollisionAccepted": "Lane-1 ruling v0.21.0 (#444): dark #c4808a is now the THIRD palette key at that hex (attention, attentionFill, ansiRose), and inside Claude Code the same hex also paints warning, fastMode, the subagent pink and rainbow_violet. ACCEPTED, not drift — the owner eyeballed the live surface and approved, and the numeric collision is exactly the brandPurpleSurfaceSplit shape: one hex, several jobs, each with its own lens. The split lever is ALREADY BUILT: ansiRose is its own terminal-only key, so a future divergence is a one-hex edit with zero blast radius on attention/attentionFill. No pre-emptive split is minted (nothing yet needs it). Trigger to revisit: a request to retune attention that would drag the terminal slot, or vice versa.",
+    "ansiRoseAdjacency": "Recorded under #444 (v0.21.0), no action: (a) light ansiRose #924753 vs light urgentBright #a04540 measure 1.05:1 against EACH OTHER — slots 4 and 9 are near-indistinguishable in light mode. Slot-vs-slot separation is a legibility concern, not a WCAG floor, and it is a LIGHT-MODE defect only; docketed to the deferred light-elevation pass (lightElevationDeferral / #296) rather than amended, because amending light rose today would break the single-hue-band invariant #444 shipped for a mode with no user. (b) Zed's derived dim_blue (#c4808a at ~70% composited on the dark canvas = #966770) measures 2.98:1 — a derived dim lens, no floor. (c) AAA give-up vs the outgoing steel pair is ~1.4–1.6:1 per pairing (steel 7.26 / steelBright 5.81 on terminalBg); AAA is not the repo floor anywhere, so this is a cost, not a regression.",
+    "notificationSoundPolicy": "Lane-1 ruling v0.20.0 (#93): SILENT BY DEFAULT. Notifications are visual-only — badge, dot, banner, tier color per attentionNotTextRole; no notification plays audio out of the box. Audible escalation exists only as a justified carve-out: it must (a) name the specific event class (e.g. urgent-tier build failure blocking the active task), (b) be opt-in or trivially disableable, and (c) never be the sole carrier of meaning — the visual tier signal must already be present (mirrors WCAG 1.4.1 logic: sound augments, never substitutes). A sound without a named event class and a visual twin is not a notification, it is noise.",
+    "typeOpticalPass": "Lane-1 eyeball pass v0.20.0 (#214), post-re-true (~14% token-bound growth), rendered system reviewed 2026-07-11 (typography.html, components.html, both modes): NO REGRESSIONS. Headline scale (lg 28 / md 22) holds hierarchy; buttons, badges, status dots, inputs, accordion absorb the growth without wrapping or overflow; specimen and scan-hierarchy sections read correctly; small-caps section labels sit small relative to the grown body but legible and intentional. Ship as-is; details in themes/_research/lane1-278-ansiblack-ratification.md.",
+    "bgFloatHover": "Hover partner of bgFloat — NOT a fifth elevation rung. The ADR 0036 ladder stays four deep (bg → bgRaised → bgOverlay → bgFloat); this is the transient hover value for a surface already sitting at the top of it, minted v0.21.0 (#332) because the user-message band now binds to bgFloat and had no rung left to hover into. Dark #525a70 (1.78:1 vs terminalBg, a 1.22 step off the band; fg-on 5.51 ✓ — fgSecondary-on 4.08 is sub-AA and the band's body text is fg, re-checked by Lane 3: nothing secondary-tier lives on the hover band). Light #d0bd8c (1.55:1 vs ivory, 1.16 step; ink-on 8.48 ✓). Do not reuse borderLifted #5a606e / border #cbb88a here even though they measure close — borrowing a border token as a surface fill is the v0.7.1 steelFill-as-text mistake.",
+    "userMessageBandSeparation": "Lane-1 ruling v0.21.0 (#332): the band was measured against the wrong canvas. Claude Code fullscreen paints on terminalBg (ADR 0036, and the build.mjs comment above the binding says so), so dark's real separation was #3c4150 on #313540 = 1.20:1 — not the 1.37 the issue cites against bg. Light was 1.13:1. Both are below the ~1.2 island recommendation the build already cites elsewhere, and the band's entire job is to be seen, so the recession is a mis-binding, not a paneInactiveSubAA-style intentional recess. RULING: rebind both modes to bgFloat (dark #474d60 = 1.46:1 on terminalBg; light #dbcca0 = 1.33:1 on ivory) and hover to the new bgFloatHover. No dedicated band token is minted — an existing rung fits, so rule 3 forbids one. The mode ternary on both band lines DROPS (the selectionFill shape). Text budget re-measured, not assumed: fg #e8e6e1 on the lifted band = 6.74:1 and fgSecondary = 4.98:1, both AA. Light stays the weaker mode at 1.33; the real fix there is elevation, which rides #296.",
+    "cmuxDiffVendorFallback": "Lane-1 ruling v0.21.0 (#301, ACCEPTED FALLBACK — recorded trade, cousin of mutedGlyphFloor / paneInactiveSubAA). cmux derives diff-viewer file-status glyphs from the live ANSI palette (slots 2/10 green, 1/9 red) and enforces its own ~4.5:1 text floor; on terminalBg successBright #5fa073 = 3.95 and urgentBright #b85a55 = 2.70, so its guard substitutes vendor #8fd88f / #ff8a80 — the last off-palette chrome. Accepted, for three reasons. (1) There is no cmux-only lever: cmux.json carries sidebarAppearance + workspaceColors and NO diff-status color keys — the diff viewer is the same unreachable tier-3 surface as the hardcoded cmux accent (#239). (2) The only reachable lever is slots 9/10, shared ANSI real estate feeding every terminal, Helix, Neovim, Zed, WezTerm and the web syntax roles tag/invalid/string — a blast radius wildly out of proportion to one glyph pair. (3) #122-B already ruled this exact question the other way round: when a red needed 4.5, the answer was a dedicated text-tier token (urgentText), NOT moving the existing bright. cmux's guard is enforcing our own floor for us; the cost is Hard rule #1 (off-palette hue) on two 12px glyphs whose meaning is carried by position and filename, never color alone. SUNSET/TRIGGER: if cmux ever exposes diff-status color keys, bind deleted → urgentText #e6a8a2 (6.12:1 on terminalBg ✓) and mint a lifted apothecary green for added (no dark green in the palette clears 4.5 on terminalBg today — successBright is 3.95). Do NOT mint that green speculatively: there is no consumer.",
+    "lightElevationDeferral": "Lane-1 standing disposition v0.21.0 (#296, DEFERRED BY DESIGN — not un-scheduled by accident). ADR 0036 lifted the terminal canvas dark-only, so light still has terminalBg == bg, ansiBlack == bg (ADR 0001's invisible black, live in light), and inverted elevation (bgRaised is DARKER than bg). Nothing is broken: light renders byte-identical to before, and every light ratio in this round clears its floor. The pass is deferred until light mode has a real user — a full light-elevation model is a palette-wide re-derivation (four rungs, terminal canvas, ANSI 0/8, every generated target) and re-deriving it against zero usage would be guessing dressed as rigor. Two findings are docketed here rather than fixed piecemeal: the light ansiRose/urgentBright 1.05:1 slot adjacency (ansiRoseAdjacency) and the light user band's 1.33:1 ceiling (userMessageBandSeparation). Re-open on first real light-mode use, or on any third light finding — three is a pattern, and the pass gets scheduled.",
+    "v0.21.0": "Lane-1 ratification batch, every ratio measured 2026-08-31 against canonical (_palette.json + scripts/contrast.mjs) and independently re-confirmed repo-side at apply. (#444) ansiRose / ansiBrightRose retro-ratified BLESSED AS-IS — dark #c4808a (4.53 bg / 3.97 terminalBg, sub-AA by usage) / #d9a6ae (6.67 / 5.84), light #924753 (5.41 ivory) / #74303c (7.87); collision and adjacency recorded (ansiRoseCollisionAccepted, ansiRoseAdjacency), light adjacency docketed to #296. (#332) user-message band re-measured against its REAL canvas (terminalBg, ADR 0036): dark 1.20 not 1.37, light 1.13 — rebound to bgFloat both modes (1.46 / 1.33, fg-on 6.74 / ink-on 9.84, both ternaries drop) with a new bgFloatHover (dark #525a70, light #d0bd8c). (#301) cmux diff glyphs — vendor fallback ACCEPTED, zero regen, sunset recorded (cmuxDiffVendorFallback). (#296) light elevation DEFERRED as a standing disposition (lightElevationDeferral). Sandbox catch-up beyond the agenda: the mirror's palette lacked five repo-shipped keys (terminalBg, bgFloat, ansiBrightBlack + the rose pair) — pasted sandbox-side; canonical already carried all but bgFloatHover. Net CANONICAL delta: +1 token both modes (bgFloatHover). Sandbox $version 0.20.0 → 0.21.0 (ratification-round numbering; canonical $version rides the release train). REGEN: node themes/build.mjs (#332 only).",
+    "v0.20.0": "Lane-1 ratification batch, all ratios measured against canonical 2026-07-11 and independently re-confirmed. (#278) mint selectionFill — dark #7a5a10 (promotes the build.mjs ghosttyTheme dark-selection literal; fg-on 5.11:1 ✓, fill-vs-bg 2.19:1 fill-lens OK), light #c4932a (= accentFill, symmetry; ink-on 5.65:1 ✓); selectionBgDark superseded. (#251 catch-up) ansiBlack blessed as-is and pasted into sandbox — dark #565b68 (2.06:1 on bg, sub-AA by design, background slot), light #f5ead0 (= bg, dark-only lift); Ghostty palette=0 only, VS Code deferral stands (ADR 0001). (#93) notificationSoundPolicy — silent by default, audible escalation carve-out only. (#214) type optical pass — no regressions, ship as-is (typeOpticalPass). Net palette delta: +2 tokens both modes (selectionFill, ansiBlack — the latter already canonical repo-side). $version rides the release train (stamp-at-merge). REGEN: node themes/build.mjs (Lane 3 also repoints the ghostty selection-background literal to P.selectionFill)."
+  }
+}

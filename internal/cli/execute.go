@@ -18,6 +18,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 	"github.com/cameronsjo/forgectl/internal/tui"
 )
@@ -176,13 +177,13 @@ func Execute(ctx context.Context) error {
 		// success.
 		logDispatch("Headless; routing to Cobra/fang instead of the TUI.", root, args)
 		root.SetOut(os.Stderr)
-		if err := execCommand(ctx, root, args); err != nil {
+		if err := execCommand(ctx, root, args, deps.Theme); err != nil {
 			return err
 		}
 		return errHeadlessMenuRoute
 	default:
 		logDispatch("Dispatching to command verb.", root, args)
-		return execCommand(ctx, root, args)
+		return execCommand(ctx, root, args, deps.Theme)
 	}
 }
 
@@ -239,6 +240,7 @@ func productionDeps(cfg config.Config, boundary *config.LegacyMigrationBoundary)
 		Runner:          exec.OSRunner{},
 		LegacyBoundary:  boundary,
 		SensitiveRunner: exec.NewOSSensitiveRunner(),
+		Theme:           resolveTheme(cfg),
 	}
 }
 
@@ -246,9 +248,9 @@ func productionDeps(cfg config.Config, boundary *config.LegacyMigrationBoundary)
 // errors, and version output. Shared by the normal-dispatch and
 // headless-menu-route paths in Execute; the only difference between them is
 // where fang writes output, which the caller sets via root.SetOut first.
-func execCommand(ctx context.Context, root *cobra.Command, args []string) error {
+func execCommand(ctx context.Context, root *cobra.Command, args []string, th theme.Theme) error {
 	root.SetArgs(args)
-	return fang.Execute(ctx, root, fangOptions(meta.Version, meta.Commit)...)
+	return fang.Execute(ctx, root, fangOptions(meta.Version, meta.Commit, th)...)
 }
 
 // fangOptions builds the fang.Option set every dispatch runs under: the version
@@ -256,11 +258,15 @@ func execCommand(ctx context.Context, root *cobra.Command, args []string) error 
 // Extracted so TestVersion_VerbMatchesFlagThroughFang can call the exact same
 // wiring instead of a parallel hand-rolled copy — an option added here is
 // automatically exercised by that regression guard too.
-func fangOptions(version, commit string) []fang.Option {
+func fangOptions(version, commit string, th theme.Theme) []fang.Option {
 	return []fang.Option{
 		fang.WithVersion(version),
 		fang.WithCommit(commit),
 		fang.WithErrorHandler(termsafeErrorHandler),
+		// fang renders --help, --version and every error frame, so without
+		// this the most-seen surface in the binary is the only one not drawing
+		// from the palette.
+		fang.WithColorSchemeFunc(th.Fang()),
 	}
 }
 
