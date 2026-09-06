@@ -9,9 +9,9 @@ import (
 	"charm.land/huh/v2"
 
 	"github.com/cameronsjo/forgectl/internal/config"
-	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -570,6 +570,6 @@ func confirmReview(review string) (bool, error) {
 				Negative("Cancel").
 				Value(&ok),
 		),
-	).WithTheme(keymap.DarkCharm()).Run()
+	).WithTheme(theme.Default().Huh()).Run()
 	return ok, err
 }
