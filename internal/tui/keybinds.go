@@ -18,13 +18,8 @@ import (
 // Built beside Cheatsheet (tmux), not a refactor of it — that one is
 // hard-coded tmux content; this one is driven entirely by rows a caller
 // parsed from a live `ghostty +list-keybinds` run.
-func KeybindSheet(rows []ghostty.Keybind, noIcons bool) string {
+func KeybindSheet(rows []ghostty.Keybind, noIcons bool, s theme.Styles) string {
 	glyphs := pickGlyphs(noIcons)
-	// KeybindSheet's only caller (internal/cli's `ghostty keybinds` verb) is a
-	// plain-print path outside the TUI's Bubble Tea program, so it has no live
-	// theme.Theme to draw from — theme.Default() (Artificer, dark) is the same
-	// fixed palette every other print-only forgectl surface falls back to.
-	s := theme.Default().Styles()
 	triggerCol := s.Accent.Width(24)
 
 	var b strings.Builder

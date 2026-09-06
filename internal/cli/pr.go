@@ -34,7 +34,7 @@ var prModule = module.Manifest{
 // review command group, building its own pr/net clients from deps.Runner.
 func newPrCmd(deps module.Deps) *cobra.Command {
 	cfg := deps.Cfg
-	client := pr.New(deps.Runner)
+	client := pr.New(deps.Runner, pr.WithApprovalTheme(deps.Theme))
 	netClient := netpkg.New(deps.Runner, netpkg.WithNetConfig(cfg.Net))
 	// err discarded: a failed config-dir lookup yields "", which LoadReviewed
 	// reads as an empty store and persist() rejects loudly — never a silent bad write.

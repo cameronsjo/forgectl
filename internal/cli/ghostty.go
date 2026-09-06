@@ -123,7 +123,7 @@ func newGhosttyCheatCmd(client *ghosttypkg.Client, th theme.Theme) *cobra.Comman
 			}
 			noIcons, _ := cmd.Flags().GetBool("no-icons")
 			out := th.Writer(cmd.OutOrStdout(), os.Environ())
-			_, _ = fmt.Fprintln(out, tui.KeybindSheet(binds, noIcons))
+			_, _ = fmt.Fprintln(out, tui.KeybindSheet(binds, noIcons, th.Styles()))
 			return nil
 		},
 	}

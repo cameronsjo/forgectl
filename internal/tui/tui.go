@@ -218,6 +218,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.theme = m.theme.WithDark(t.IsDark())
 			m.styles = m.theme.Styles()
 			m.l.Styles = m.theme.List()
+			// The cheatsheet is the one screen whose content is already
+			// rendered into a viewport and can be rebuilt from nothing but
+			// styles, so it is the one that must be. Nothing orders this
+			// message against a keypress: the terminal answers when it
+			// answers, and a slow reply arriving after `6` would otherwise
+			// leave dark-theme text on a light terminal until the user backed
+			// out and reopened. treeMode's content came from tmux and cannot
+			// be regenerated without re-running the query.
+			if m.mode == cheatMode {
+				m.tree.SetContent(Cheatsheet(m.noIcons, m.styles))
+			}
 			m.applySize()
 		}
 	}
