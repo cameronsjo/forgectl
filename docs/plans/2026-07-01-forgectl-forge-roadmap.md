@@ -1,5 +1,10 @@
 # forgectl — Roadmap (2026-07-01)
 
+> **Superseded by [`2026-09-05-forgectl-roadmap.md`](2026-09-05-forgectl-roadmap.md).**
+> Its spine (`#9 → #12 → #10 → #29`) is spent: `#29` shipped as the `pr` review
+> family, and `#9`/`#10`/`#12` were never re-filed as open issues. Kept as the
+> record of what the forge was aiming at in July, not as current direction.
+
 ## Context
 
 Grow forgectl from a tmux-UX helper into the **workbench forge** — the operations layer beside
