@@ -4,26 +4,27 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/meta"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // Cheatsheet returns a scannable tmux primer — the three words and the keys
 // that actually matter — styled to the forgectl palette. Bindings reflect the
 // dotfiles tmux config (prefix = Ctrl+Space). Shared by the TUI cheatsheet
 // screen and the `tmux cheat` verb.
-func Cheatsheet(noIcons bool) string {
-	keyCol := styleAccent.Width(16)
+func Cheatsheet(noIcons bool, s theme.Styles) string {
+	keyCol := s.Accent.Width(16)
 
 	var b strings.Builder
-	title := styleHeader.Render(meta.AppName + " · tmux cheatsheet")
-	b.WriteString(title + styleMuted.Render("   (prefix = Ctrl+Space)") + "\n\n")
+	title := s.Header.Render(meta.AppName + " · tmux cheatsheet")
+	b.WriteString(title + s.Muted.Render("   (prefix = Ctrl+Space)") + "\n\n")
 
-	section := func(name string) { b.WriteString(styleHeader.Render(name) + "\n") }
+	section := func(name string) { b.WriteString(s.Header.Render(name) + "\n") }
 	row := func(keys, desc string) {
-		b.WriteString("  " + keyCol.Render(keys) + styleMuted.Render(desc) + "\n")
+		b.WriteString("  " + keyCol.Render(keys) + s.Muted.Render(desc) + "\n")
 	}
 
 	section("The three words")
-	b.WriteString(threeWordsDiagram() + "\n\n")
+	b.WriteString(threeWordsDiagram(s) + "\n\n")
 	row("session", "a whole workspace — survives disconnect")
 	row("window", "a tab inside a session")
 	row("pane", "a split inside a window — two things at once")
@@ -59,7 +60,7 @@ func Cheatsheet(noIcons bool) string {
 // display width; the colored label spans are zero-width ANSI, so alignment holds
 // regardless of NO_COLOR (Lip Gloss drops the codes there). Box-drawing glyphs
 // are plain Unicode, not Nerd Font — they render even in --no-icons terminals.
-func threeWordsDiagram() string {
+func threeWordsDiagram(s theme.Styles) string {
 	lines := []string{
 		"┌─ session ─────────────────────┐",
 		"│  ┌─ window ─┐  ┌─ window ─┐   │",
@@ -73,9 +74,9 @@ func threeWordsDiagram() string {
 	// words is a substring of another, so the replacements don't collide;
 	// "pane" recolors all three occurrences.
 	block := strings.Join(lines, "\n")
-	block = strings.ReplaceAll(block, "session", styleAccent.Render("session"))
-	block = strings.ReplaceAll(block, "window", styleCyan.Render("window"))
-	block = strings.ReplaceAll(block, "pane", styleActive.Render("pane"))
+	block = strings.ReplaceAll(block, "session", s.Accent.Render("session"))
+	block = strings.ReplaceAll(block, "window", s.Steel.Render("window"))
+	block = strings.ReplaceAll(block, "pane", s.Active.Render("pane"))
 
 	var b strings.Builder
 	for _, ln := range strings.Split(block, "\n") {

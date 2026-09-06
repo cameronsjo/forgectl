@@ -35,13 +35,14 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 func TestChoosePRs_HeadlessWritesExecutableSanitizedCandidates(t *testing.T) {
 	prevTTY, prevPicker := isInteractiveTTY, pickPRsFn
 	isInteractiveTTY = func() bool { return interactiveTTY(false, true) }
 	pickerCalls := 0
-	pickPRsFn = func([]pr.PR, *pr.ReviewedStore) ([]pr.PR, error) {
+	pickPRsFn = func([]pr.PR, *pr.ReviewedStore, theme.Theme) ([]pr.PR, error) {
 		pickerCalls++
 		return nil, errors.New("picker reached")
 	}
@@ -52,7 +53,7 @@ func TestChoosePRs_HeadlessWritesExecutableSanitizedCandidates(t *testing.T) {
 	cmd := &cobra.Command{}
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
-	_, err := choosePRs(cmd, prs, store)
+	_, err := choosePRs(cmd, prs, store, theme.Theme{})
 	if got, want := stdout.String(), "cameronsjo/forgectl#42  safe\nc/r#7  bad"+`\x1b[31m\t\n`+"\n"; got != want {
 		t.Errorf("stdout = %q, want %q", got, want)
 	}
@@ -68,7 +69,7 @@ func TestPrPickCommand_HeadlessWritesCandidatesAndDoesNotLaunch(t *testing.T) {
 	prevTTY, prevPicker := isInteractiveTTY, pickPRsFn
 	isInteractiveTTY = func() bool { return interactiveTTY(true, false) }
 	pickerCalls := 0
-	pickPRsFn = func([]pr.PR, *pr.ReviewedStore) ([]pr.PR, error) {
+	pickPRsFn = func([]pr.PR, *pr.ReviewedStore, theme.Theme) ([]pr.PR, error) {
 		pickerCalls++
 		return nil, errors.New("picker reached")
 	}
@@ -76,7 +77,7 @@ func TestPrPickCommand_HeadlessWritesCandidatesAndDoesNotLaunch(t *testing.T) {
 
 	searchJSON := "[" + prSearchRow("cameronsjo/forgectl", 42) + "," + prSearchRow("cameronsjo/forgectl", 7) + "]"
 	fake := &exec.FakeRunner{RunFunc: prsRunFunc(searchJSON)}
-	cmd := newPrPickCmdForClient(pr.New(fake), config.Config{}, filepath.Join(t.TempDir(), "reviewed.json"))
+	cmd := newPrPickCmdForClient(pr.New(fake), config.Config{}, filepath.Join(t.TempDir(), "reviewed.json"), theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -101,11 +102,11 @@ func TestPrPickCommand_HeadlessWriterErrorStopsBeforePickerOrLaunch(t *testing.T
 	prevTTY, prevPicker := isInteractiveTTY, pickPRsFn
 	isInteractiveTTY = func() bool { return interactiveTTY(false, true) }
 	pickerCalls := 0
-	pickPRsFn = func([]pr.PR, *pr.ReviewedStore) ([]pr.PR, error) { pickerCalls++; return nil, nil }
+	pickPRsFn = func([]pr.PR, *pr.ReviewedStore, theme.Theme) ([]pr.PR, error) { pickerCalls++; return nil, nil }
 	t.Cleanup(func() { isInteractiveTTY, pickPRsFn = prevTTY, prevPicker })
 	sentinel := errors.New("candidate writer failed")
 	fake := &exec.FakeRunner{RunFunc: prsRunFunc("[" + prSearchRow("c/r", 1) + "," + prSearchRow("c/r", 2) + "]")}
-	cmd := newPrPickCmdForClient(pr.New(fake), config.Config{}, filepath.Join(t.TempDir(), "reviewed.json"))
+	cmd := newPrPickCmdForClient(pr.New(fake), config.Config{}, filepath.Join(t.TempDir(), "reviewed.json"), theme.Theme{})
 	cmd.SetOut(failingWriter{err: sentinel})
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SilenceUsage = true
@@ -126,12 +127,12 @@ func TestChoosePRs_HeadlessPreservesFirstWriterError(t *testing.T) {
 	prevTTY, prevPicker := isInteractiveTTY, pickPRsFn
 	isInteractiveTTY = func() bool { return interactiveTTY(true, false) }
 	pickerCalls := 0
-	pickPRsFn = func([]pr.PR, *pr.ReviewedStore) ([]pr.PR, error) { pickerCalls++; return nil, nil }
+	pickPRsFn = func([]pr.PR, *pr.ReviewedStore, theme.Theme) ([]pr.PR, error) { pickerCalls++; return nil, nil }
 	t.Cleanup(func() { isInteractiveTTY, pickPRsFn = prevTTY, prevPicker })
 	sentinel := errors.New("writer failed")
 	cmd := &cobra.Command{}
 	cmd.SetOut(failingWriter{err: sentinel})
-	_, err := choosePRs(cmd, []pr.PR{{Ref: pr.Ref{Owner: "c", Repo: "r", Number: 1}}}, pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json")))
+	_, err := choosePRs(cmd, []pr.PR{{Ref: pr.Ref{Owner: "c", Repo: "r", Number: 1}}}, pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json")), theme.Theme{})
 	if !errors.Is(err, sentinel) || err != sentinel {
 		t.Errorf("error = %v, want original sentinel", err)
 	}
@@ -145,13 +146,13 @@ func TestChoosePRs_InteractiveCallsPickerOnceWithoutCandidateOutput(t *testing.T
 	isInteractiveTTY = func() bool { return interactiveTTY(true, true) }
 	want := []pr.PR{{Ref: pr.Ref{Owner: "c", Repo: "r", Number: 1}}}
 	pickerCalls := 0
-	pickPRsFn = func([]pr.PR, *pr.ReviewedStore) ([]pr.PR, error) { pickerCalls++; return want, nil }
+	pickPRsFn = func([]pr.PR, *pr.ReviewedStore, theme.Theme) ([]pr.PR, error) { pickerCalls++; return want, nil }
 	t.Cleanup(func() { isInteractiveTTY, pickPRsFn = prevTTY, prevPicker })
 
 	cmd := &cobra.Command{}
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
-	got, err := choosePRs(cmd, want, pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json")))
+	got, err := choosePRs(cmd, want, pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json")), theme.Theme{})
 	if err != nil || len(got) != 1 || got[0].Ref != want[0].Ref {
 		t.Errorf("choosePRs = (%+v, %v), want (%+v, nil)", got, err, want)
 	}
@@ -181,12 +182,13 @@ func TestPRPickerLabel_VisibleEscapesAndOrdinaryStability(t *testing.T) {
 	store := pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json"))
 	ref := pr.Ref{Owner: "c", Repo: "r", Number: 1}
 	ordinary := "Fix café picker — issue #324"
-	if got, want := prPickerLabel(pr.PR{Ref: ref, Title: ordinary}, store), "c/r#1  "+ordinary; got != want {
+	dimStyle := theme.Theme{}.Styles().Muted
+	if got, want := prPickerLabel(pr.PR{Ref: ref, Title: ordinary}, store, dimStyle), "c/r#1  "+ordinary; got != want {
 		t.Errorf("ordinary picker label = %q, want byte-identical %q", got, want)
 	}
 
-	c1 := prPickerLabel(pr.PR{Ref: ref, Title: "left\u009bright"}, store)
-	bidi := prPickerLabel(pr.PR{Ref: ref, Title: "left\u202eright"}, store)
+	c1 := prPickerLabel(pr.PR{Ref: ref, Title: "left\u009bright"}, store, dimStyle)
+	bidi := prPickerLabel(pr.PR{Ref: ref, Title: "left\u202eright"}, store, dimStyle)
 	if c1 != `c/r#1  left\u009bright` {
 		t.Errorf("C1 picker label = %q", c1)
 	}

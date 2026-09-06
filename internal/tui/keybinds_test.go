@@ -21,13 +21,14 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/ghostty"
 	"github.com/cameronsjo/forgectl/internal/termsafe/termsafetest"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 func TestKeybindSheet_CommentPreferredOverAction(t *testing.T) {
 	rows := []ghostty.Keybind{
 		{Trigger: "super+ctrl+t", Action: `text:\x00c`, Comment: "New tmux window"},
 	}
-	out := KeybindSheet(rows, false)
+	out := KeybindSheet(rows, false, theme.Default().Styles())
 	if !strings.Contains(out, "New tmux window") {
 		t.Errorf("expected comment in output, got: %s", out)
 	}
@@ -40,7 +41,7 @@ func TestKeybindSheet_NoCommentRendersRawAction(t *testing.T) {
 	rows := []ghostty.Keybind{
 		{Trigger: "escape", Action: "end_search"},
 	}
-	out := KeybindSheet(rows, false)
+	out := KeybindSheet(rows, false, theme.Default().Styles())
 	if !strings.Contains(out, "end_search") {
 		t.Errorf("expected raw action in output, got: %s", out)
 	}
@@ -52,7 +53,7 @@ func TestKeybindSheet_EveryTriggerAppears(t *testing.T) {
 		{Trigger: "super+w", Action: "close_surface"},
 		{Trigger: "super+ctrl+=", Action: "equalize_splits"},
 	}
-	out := KeybindSheet(rows, false)
+	out := KeybindSheet(rows, false, theme.Default().Styles())
 	for _, row := range rows {
 		if !strings.Contains(out, row.Trigger) {
 			t.Errorf("expected trigger %q in output, got: %s", row.Trigger, out)
@@ -62,7 +63,7 @@ func TestKeybindSheet_EveryTriggerAppears(t *testing.T) {
 
 func TestKeybindSheet_NoIcons_UsesASCIIGlyph(t *testing.T) {
 	rows := []ghostty.Keybind{{Trigger: "escape", Action: "end_search"}}
-	out := KeybindSheet(rows, true)
+	out := KeybindSheet(rows, true, theme.Default().Styles())
 	if !strings.HasPrefix(out, asciiGlyphs.Cheat) {
 		t.Errorf("expected output to start with ascii cheat glyph %q, got: %s", asciiGlyphs.Cheat, out)
 	}
@@ -86,7 +87,7 @@ func TestKeybindSheet_SanitizesHostileBytes(t *testing.T) {
 	// glyph table rather than on anything the hostile payload contributed. The
 	// glyph set is orthogonal to sanitization, and
 	// TestKeybindSheet_NoIcons_UsesASCIIGlyph covers the switch itself.
-	out := KeybindSheet(rows, true)
+	out := KeybindSheet(rows, true, theme.Default().Styles())
 
 	// The shared contract rather than a local byte list. This test used to scan
 	// for 0x00/0x01/0x07/0x1b/0x7f by hand, which was a second, subtly narrower

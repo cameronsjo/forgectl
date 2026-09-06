@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"image/color"
 	"strconv"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -45,7 +47,7 @@ func sized(m model, w, h int) model {
 }
 
 func TestMenuViewRenders(t *testing.T) {
-	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true, theme.Default()), 80, 24)
 	view := m.View().Content
 	for _, want := range []string{"forgectl", "Pick", "Sessions", "Windows", "Tree", "Last", "Cheatsheet"} {
 		if !strings.Contains(view, want) {
@@ -60,7 +62,7 @@ func TestNumberKeyNavigatesAndAttaches(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
 		return oneSessionRow, nil
 	}}
-	m := sized(newModel(context.Background(), tmux.New(fake), true), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(fake), true, theme.Default()), 80, 24)
 
 	out, _ := m.Update(key("2"))
 	m = out.(model)
@@ -84,7 +86,7 @@ func TestNumberKeyNavigatesAndAttaches(t *testing.T) {
 }
 
 func TestCheatFromMenu(t *testing.T) {
-	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true, theme.Default()), 80, 24)
 	out, _ := m.Update(key("6")) // Cheatsheet
 	m = out.(model)
 	if m.mode != cheatMode {
@@ -96,7 +98,7 @@ func TestCheatFromMenu(t *testing.T) {
 }
 
 func TestCheatsheetContent(t *testing.T) {
-	cs := Cheatsheet(true)
+	cs := Cheatsheet(true, theme.Default().Styles())
 	for _, want := range []string{"session", "window", "pane", "prefix |", "Ctrl+Space"} {
 		if !strings.Contains(cs, want) {
 			t.Errorf("cheatsheet missing %q", want)
@@ -111,7 +113,7 @@ func TestKillOthersEntersConfirm(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
 		return oneSessionRow, nil
 	}}
-	m := sized(newModel(context.Background(), tmux.New(fake), true), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(fake), true, theme.Default()), 80, 24)
 
 	out, _ := m.Update(key("2"))
 	m = out.(model)
@@ -138,7 +140,7 @@ func TestKillOthersEntersConfirm(t *testing.T) {
 }
 
 func TestLastFromMenu(t *testing.T) {
-	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true, theme.Default()), 80, 24)
 	out, _ := m.Update(key("5")) // Last
 	m = out.(model)
 	if m.action.Kind != ActionLast {
@@ -147,7 +149,7 @@ func TestLastFromMenu(t *testing.T) {
 }
 
 func TestEscFromSubscreenReturnsToMenu(t *testing.T) {
-	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true, theme.Default()), 80, 24)
 	out, _ := m.Update(key("3")) // Windows
 	m = out.(model)
 	if m.mode != windowsMode {
@@ -160,12 +162,34 @@ func TestEscFromSubscreenReturnsToMenu(t *testing.T) {
 	}
 }
 
+// TestBackgroundColorMsgRepaintsStyles pins the Init probe's one consumer:
+// receiving a BackgroundColorMsg must actually flip the rendered palette, not
+// just record the bit. theme.Artificer's accent hex differs between dark
+// (#dbbb6f) and light (#7a5a10) modes, so the header render below carries the
+// difference directly — this would stay green even if WithDark's return value
+// were silently dropped instead of reassigned onto m.theme/m.styles.
+func TestBackgroundColorMsgRepaintsStyles(t *testing.T) {
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true, theme.Default()), 80, 24)
+	before := m.View().Content
+
+	out, _ := m.Update(tea.BackgroundColorMsg{Color: color.White})
+	m = out.(model)
+
+	if m.theme.IsDark() {
+		t.Fatal("expected WithDark(false) after a light BackgroundColorMsg")
+	}
+	after := m.View().Content
+	if before == after {
+		t.Error("BackgroundColorMsg did not change the rendered view; styles were not rebuilt")
+	}
+}
+
 func TestSessionItemNarrowDropsMetadata(t *testing.T) {
 	// Narrow rows (iPhone/Termius) must drop the windows/path metadata column;
 	// wide rows must include it.
 	it := sessionItem{s: tmux.Session{Name: "alpha", Windows: 3, Path: "/Users/cam/x"}}
-	wide := it.render(0, false, false, asciiGlyphs)
-	narrow := it.render(0, false, true, asciiGlyphs)
+	wide := it.render(0, false, false, asciiGlyphs, theme.Default().Styles())
+	narrow := it.render(0, false, true, asciiGlyphs, theme.Default().Styles())
 
 	if !strings.Contains(wide, "/Users/cam/x") {
 		t.Errorf("wide row should include the path: %q", wide)

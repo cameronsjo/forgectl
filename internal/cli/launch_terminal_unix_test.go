@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 func TestLaunchDoctor_ControlRefusalNeverParsesPotentiallyBlockingConfigPath(t *testing.T) {
@@ -40,7 +41,7 @@ func TestLaunchDoctor_ControlRefusalNeverParsesPotentiallyBlockingConfigPath(t *
 		t.Fatalf("status/refusal=%v/%v", boundary.Status, boundary.Refusal)
 	}
 
-	cmd := newLaunchDoctorCmd(boundary, config.Config{})
+	cmd := newLaunchDoctorCmd(boundary, config.Config{}, theme.Theme{})
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	done := make(chan error, 1)

@@ -67,6 +67,7 @@ import (
 	envpkg "github.com/cameronsjo/forgectl/internal/env"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // initEnvGitRepo makes dir a real (enough) git repo for env.Locate's
@@ -144,7 +145,7 @@ func TestEnvKeysCmd_NamesOnly(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -167,7 +168,7 @@ func TestEnvKeysCmd_SkipsMalformedNote(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -193,7 +194,7 @@ func TestEnvKeysCmd_EmptyFile_EmptyStdout(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -213,7 +214,7 @@ func TestEnvKeysCmd_MissingFile_Errors(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"keys"})
@@ -234,7 +235,7 @@ func TestEnvSetCmd_FromPipedStdin(t *testing.T) {
 
 	const sentinel = "s3ntinel-VALUE-77x"
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetIn(strings.NewReader(sentinel + "\n"))
 	cmd.SetOut(&stdout)
@@ -268,7 +269,7 @@ func TestEnvSetCmd_StripsTrailingNewline(t *testing.T) {
 			forceNonTTY(t)
 
 			client, _ := envFixture()
-			cmd := newEnvCmdForClient(client)
+			cmd := newEnvCmdForClient(client, theme.Theme{})
 			cmd.SetIn(strings.NewReader(input))
 			cmd.SetOut(new(bytes.Buffer))
 			cmd.SetErr(new(bytes.Buffer))
@@ -301,7 +302,7 @@ func TestEnvSetCmd_Clipboard(t *testing.T) {
 		}
 		return "", nil
 	}
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"set", "KEY", "--clipboard"})
@@ -332,7 +333,7 @@ func TestEnvSetCmd_ClipboardWinsOverPipedStdin(t *testing.T) {
 		}
 		return "", nil
 	}
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetIn(strings.NewReader("from-stdin-value\n"))
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
@@ -358,7 +359,7 @@ func TestEnvSetCmd_TTYPrompt_ViaSeam(t *testing.T) {
 	forceTTYWithPassword(t, sentinel, nil)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -387,7 +388,7 @@ func TestEnvSetCmd_NewFile_0600(t *testing.T) {
 	forceNonTTY(t)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetIn(strings.NewReader("value1\n"))
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
@@ -412,7 +413,7 @@ func TestEnvSetCmd_EmptyStdin_Refused(t *testing.T) {
 	forceNonTTY(t)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetIn(strings.NewReader(""))
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
@@ -437,7 +438,7 @@ func TestEnvSetCmd_HostileArgvKey_RefusedNoArgumentEcho(t *testing.T) {
 	hostileKey := "KEY=" + hostileValue
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	// Even with stdin piped, the key check must fire before it's read.
 	cmd.SetIn(strings.NewReader("unrelated\n"))
 	var stdout, stderr bytes.Buffer
@@ -471,7 +472,7 @@ func TestEnvSetCmd_DuplicateKey_Refused(t *testing.T) {
 	forceNonTTY(t)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetIn(strings.NewReader("3\n"))
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
@@ -496,7 +497,7 @@ func TestEnvSetCmd_EmptyStdin_KeyShapedSecretArg_NoTokenEcho(t *testing.T) {
 
 	const keyShapedSecret = "SEKRIT_valuelikelooking_ab12cd34"
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetIn(strings.NewReader(""))
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
@@ -561,7 +562,7 @@ func TestEnvGetCmd_Clipboard_ConfirmationOnly(t *testing.T) {
 	slogBuf := captureSlog(t)
 
 	client, fake := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -590,7 +591,7 @@ func TestEnvGetCmd_RequiresClipboard(t *testing.T) {
 	t.Chdir(repo)
 
 	client, fake := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -616,7 +617,7 @@ func TestEnvGetCmd_MissingKey_Errors(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"get", "MISSING", "--clipboard"})
@@ -633,7 +634,7 @@ func TestEnvGetCmd_HostileArgvValue_RefusedNoArgumentEcho(t *testing.T) {
 
 	const hostileValue = "SENTINEL_should_never_appear!!"
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -666,7 +667,7 @@ func TestEnvGetCmd_KeyShapedSecret_RefusedNoArgumentEcho(t *testing.T) {
 
 	const keyShapedSecret = "sk_live_S3NTINEL_valid_key_shape"
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -696,7 +697,7 @@ func TestEnvCheckCmd_NoDrift_ExitZero(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -729,7 +730,7 @@ func TestEnvCheckCmd_ExtraOnly_PrintsOnlyExtraSection(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -764,7 +765,7 @@ func TestEnvCheckCmd_MissingKey_ExitOne(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -794,7 +795,7 @@ func TestEnvCheckCmd_ExtraKey_ReportedExitOne(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -823,7 +824,7 @@ func TestEnvCheckCmd_MissingExampleFile_ExitTwo(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"check"})
@@ -854,7 +855,7 @@ func TestEnvCheckCmd_MissingFile_ExitTwo(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"check"})
@@ -880,7 +881,7 @@ func TestEnvCheckCmd_JSON_Clean_EmptyArraysNotNull(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -920,7 +921,7 @@ func TestEnvCheckCmd_JSON_Drift_ReportsNamesAndExitsOne(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -958,7 +959,7 @@ func TestEnvCheckCmd_FileAndExampleFlagsCompose(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"check", "--file", ".env.prod", "--example", ".env.example"})
@@ -981,7 +982,7 @@ func TestEnvRedactCmd_MasksValues(t *testing.T) {
 	slogBuf := captureSlog(t)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -1014,7 +1015,7 @@ func TestEnvRedactCmd_MultilinePEM_NoBodyLine(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -1035,7 +1036,7 @@ func TestEnvRedactCmd_MissingFile_Errors(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"redact"})
@@ -1073,7 +1074,7 @@ func TestEnvCmds_NonEnvFile_Refused(t *testing.T) {
 			forceNonTTY(t)
 
 			client, _ := envFixture()
-			cmd := newEnvCmdForClient(client)
+			cmd := newEnvCmdForClient(client, theme.Theme{})
 			cmd.SetIn(strings.NewReader("payload\n"))
 			cmd.SetOut(new(bytes.Buffer))
 			cmd.SetErr(new(bytes.Buffer))
@@ -1105,7 +1106,7 @@ func TestEnvKeysCmd_EnvShapedNames_Accepted(t *testing.T) {
 			t.Chdir(repo)
 
 			client, _ := envFixture()
-			cmd := newEnvCmdForClient(client)
+			cmd := newEnvCmdForClient(client, theme.Theme{})
 			var stdout bytes.Buffer
 			cmd.SetOut(&stdout)
 			cmd.SetErr(new(bytes.Buffer))
@@ -1133,7 +1134,7 @@ func TestEnvSetCmd_AnyFile_NonTTY_RefusedOutright(t *testing.T) {
 	forceNonTTY(t) // isTerminal() == false — --any-file must refuse before ever prompting
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetIn(strings.NewReader("value\n"))
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
@@ -1170,11 +1171,11 @@ func TestEnvSetCmd_AnyFile_TTYConfirmedYes_Allowed(t *testing.T) {
 	forceTTYWithPassword(t, "value1", nil)
 
 	prevConfirm := confirmAnyFile
-	confirmAnyFile = func(string) (bool, error) { return true, nil }
+	confirmAnyFile = func(theme.Theme, string) (bool, error) { return true, nil }
 	t.Cleanup(func() { confirmAnyFile = prevConfirm })
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"set", "KEY", "--file", ".git/config", "--any-file"})
@@ -1206,11 +1207,11 @@ func TestEnvSetCmd_AnyFile_TTYConfirmedNo_Refused(t *testing.T) {
 	t.Cleanup(func() { isTerminal = prevTerm })
 
 	prevConfirm := confirmAnyFile
-	confirmAnyFile = func(string) (bool, error) { return false, nil }
+	confirmAnyFile = func(theme.Theme, string) (bool, error) { return false, nil }
 	t.Cleanup(func() { confirmAnyFile = prevConfirm })
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetIn(strings.NewReader("value1\n"))
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
@@ -1249,11 +1250,11 @@ func TestEnvCheckCmd_AnyFile_ConfirmsBothFileAndExample(t *testing.T) {
 
 	var confirmed []string
 	prevConfirm := confirmAnyFile
-	confirmAnyFile = func(msg string) (bool, error) { confirmed = append(confirmed, msg); return true, nil }
+	confirmAnyFile = func(_ theme.Theme, msg string) (bool, error) { confirmed = append(confirmed, msg); return true, nil }
 	t.Cleanup(func() { confirmAnyFile = prevConfirm })
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"check", "--file", "file.cfg", "--example", "example.cfg", "--any-file"})
@@ -1289,10 +1290,10 @@ func TestResolveAllowAnyFile_SymlinkBindsToResolvedPath(t *testing.T) {
 
 	var gotMsg string
 	prevConfirm := confirmAnyFile
-	confirmAnyFile = func(msg string) (bool, error) { gotMsg = msg; return true, nil }
+	confirmAnyFile = func(_ theme.Theme, msg string) (bool, error) { gotMsg = msg; return true, nil }
 	t.Cleanup(func() { confirmAnyFile = prevConfirm })
 
-	allow, err := resolveAllowAnyFile(true, ".env", repo)
+	allow, err := resolveAllowAnyFile(true, ".env", repo, theme.Theme{})
 	if err != nil {
 		t.Fatalf("resolveAllowAnyFile: %v", err)
 	}
@@ -1324,7 +1325,7 @@ func TestResolveAllowAnyFile_EnvNamedTarget_NoConfirmation(t *testing.T) {
 
 	calls := 0
 	prevConfirm := confirmAnyFile
-	confirmAnyFile = func(string) (bool, error) { calls++; return true, nil }
+	confirmAnyFile = func(theme.Theme, string) (bool, error) { calls++; return true, nil }
 	t.Cleanup(func() { confirmAnyFile = prevConfirm })
 	// isTerminal is deliberately left at its real value: if the confirm
 	// seam were reached at all on a non-tty test run, the TTY gate would
@@ -1332,7 +1333,7 @@ func TestResolveAllowAnyFile_EnvNamedTarget_NoConfirmation(t *testing.T) {
 	// calls proves the env-named short-circuit fired, not just that the
 	// prompt was skipped for some other reason.
 
-	allow, err := resolveAllowAnyFile(true, ".env", repo)
+	allow, err := resolveAllowAnyFile(true, ".env", repo, theme.Theme{})
 	if err != nil {
 		t.Fatalf("resolveAllowAnyFile: %v", err)
 	}
@@ -1361,7 +1362,7 @@ func TestEnvKeysCmd_OutsideRepo_Refused(t *testing.T) {
 	t.Chdir(repo)
 
 	client, _ := envFixture()
-	cmd := newEnvCmdForClient(client)
+	cmd := newEnvCmdForClient(client, theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"keys", "--file", "../outside/secret.env"})

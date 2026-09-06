@@ -58,7 +58,16 @@ type Env struct {
 // hangs until its own timeout). This is the one predicate every probe site
 // (Execute's plain-print path, huh forms, the TUI) shares — it does not
 // itself decide whether to probe, only whether probing is safe.
-func ShouldProbe(_ Mode, env Env) bool {
+func ShouldProbe(mode Mode, env Env) bool {
+	// An explicit mode is an ANSWER, so there is nothing to ask. This used to
+	// ignore its Mode argument — the parameter was named `_` — which meant a
+	// config saying `mode = "light"` still probed, and the TUI then overwrote
+	// the setting with whatever the terminal replied. That defeats the one
+	// escape hatch documented for the case detection cannot get right: a light
+	// terminal, where the operator has to say so by hand.
+	if mode != ModeAuto {
+		return false
+	}
 	if !env.StdinTTY || !env.StdoutTTY || env.NoColor {
 		return false
 	}

@@ -4,16 +4,19 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
+	"golang.org/x/term"
 
 	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -21,8 +24,8 @@ import (
 // forgectl never composed — a tmux session or window name, a sesh candidate, an
 // exec diagnostic quoting one — so it goes through termsafe.SafeLine before any
 // styling. Escape sequences in a name would otherwise repaint the TUI's chrome.
-func errStatus(prefix string, err error) string {
-	return styleDanger.Render(termsafe.SafeLine("✗ " + prefix + err.Error()))
+func errStatus(prefix string, err error, s theme.Styles) string {
+	return s.Danger.Render(termsafe.SafeLine("✗ " + prefix + err.Error()))
 }
 
 // ActionKind is the deferred jump the TUI selected. Jumps that need the tty
@@ -85,6 +88,12 @@ type model struct {
 	glyph   glyphSet
 	noIcons bool
 
+	// theme is the resolved palette; styles is its Styles() cached on the
+	// model so a hot render path (item delegate, footer) never recomputes it
+	// per row. Both are rebuilt together on a tea.BackgroundColorMsg.
+	theme  theme.Theme
+	styles theme.Styles
+
 	width, height int
 	mode          mode
 	title         string
@@ -110,8 +119,8 @@ type model struct {
 
 // Run drives the TUI and returns the deferred Action (if any). The caller
 // executes Action after Run returns, when the terminal is free again.
-func Run(ctx context.Context, client *tmux.Client, noIcons bool) (Action, error) {
-	m := newModel(ctx, client, noIcons)
+func Run(ctx context.Context, client *tmux.Client, noIcons bool, th theme.Theme) (Action, error) {
+	m := newModel(ctx, client, noIcons, th)
 	// Bubble Tea v2 dropped WithAltScreen: the alt screen is a property of the
 	// View the model returns each frame, not a program-construction option.
 	// View() sets AltScreen instead.
@@ -126,14 +135,11 @@ func Run(ctx context.Context, client *tmux.Client, noIcons bool) (Action, error)
 	return Action{}, nil
 }
 
-func newModel(ctx context.Context, client *tmux.Client, noIcons bool) model {
+func newModel(ctx context.Context, client *tmux.Client, noIcons bool, th theme.Theme) model {
 	g := pickGlyphs(noIcons)
-	l := list.New(nil, itemDelegate{g: g}, 0, 0)
-	// v2's list styles are resolved against a background the caller supplies
-	// rather than probed globally. Everything else in the TUI is a fixed dark
-	// palette, so pin the list chrome to match; nothing here adapts to a light
-	// terminal today, and a half-adapted screen would be worse than a fixed one.
-	l.Styles = list.DefaultStyles(true)
+	st := th.Styles()
+	l := list.New(nil, itemDelegate{g: g, styles: st}, 0, 0)
+	l.Styles = th.List()
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
 	l.SetShowHelp(false)
@@ -145,6 +151,8 @@ func newModel(ctx context.Context, client *tmux.Client, noIcons bool) model {
 		client:  client,
 		glyph:   g,
 		noIcons: noIcons,
+		theme:   th,
+		styles:  st,
 		l:       l,
 		tree:    viewport.New(),
 		mode:    menuMode,
@@ -154,7 +162,23 @@ func newModel(ctx context.Context, client *tmux.Client, noIcons bool) model {
 	return m
 }
 
-func (m model) Init() tea.Cmd { return nil }
+// Init requests the terminal's background colour only where probing it is
+// safe (theme.ShouldProbe): both stdin and stdout must be a real TTY, and
+// TERM must not be a multiplexer that swallows the OSC 11 response. Elsewhere
+// the theme stays pinned to whatever th.Mode() already resolved (dark by
+// default), and no probe command goes out at all.
+func (m model) Init() tea.Cmd {
+	env := theme.Env{
+		StdinTTY:  term.IsTerminal(int(os.Stdin.Fd())),
+		StdoutTTY: term.IsTerminal(int(os.Stdout.Fd())),
+		Term:      os.Getenv("TERM"),
+		NoColor:   os.Getenv("NO_COLOR") != "",
+	}
+	if theme.ShouldProbe(m.theme.Mode(), env) {
+		return tea.RequestBackgroundColor
+	}
+	return nil
+}
 
 func (m model) menuItems() []list.Item {
 	return []list.Item{
@@ -180,6 +204,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = t.Width, t.Height
 		m.applySize()
+	case tea.BackgroundColorMsg:
+		// Bubble Tea v2 delivers this once, early — the one reply to Init's
+		// RequestBackgroundColor. Rebuild everything derived from the theme so
+		// list chrome, rows, and (on the next form) huh forms all agree.
+		//
+		// Guarded on ModeAuto even though Init only asks under ModeAuto: an
+		// answer nobody asked for must not silently override a configured
+		// mode. Bubble Tea can deliver this unsolicited, and a terminal is
+		// free to volunteer it — so the decision to accept lives with the
+		// setting, not with whether a message happened to arrive.
+		if m.theme.Mode() == theme.ModeAuto {
+			m.theme = m.theme.WithDark(t.IsDark())
+			m.styles = m.theme.Styles()
+			m.l.Styles = m.theme.List()
+			// The cheatsheet is the one screen whose content is already
+			// rendered into a viewport and can be rebuilt from nothing but
+			// styles, so it is the one that must be. Nothing orders this
+			// message against a keypress: the terminal answers when it
+			// answers, and a slow reply arriving after `6` would otherwise
+			// leave dark-theme text on a light terminal until the user backed
+			// out and reopened. treeMode's content came from tmux and cannot
+			// be regenerated without re-running the query.
+			if m.mode == cheatMode {
+				m.tree.SetContent(Cheatsheet(m.noIcons, m.styles))
+			}
+			m.applySize()
+		}
 	}
 
 	switch m.mode {
@@ -194,7 +245,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *model) applySize() {
 	narrow := m.width < 60
-	m.l.SetDelegate(itemDelegate{g: m.glyph, narrow: narrow})
+	m.l.SetDelegate(itemDelegate{g: m.glyph, narrow: narrow, styles: m.styles})
 	body := m.height - 4
 	if body < 3 {
 		body = 3
@@ -342,7 +393,7 @@ func (m *model) enterPick() {
 	names, err := m.client.SeshList(m.ctx)
 	if err != nil {
 		slog.Error("Failed to load sesh sessions.", "error", err)
-		m.status = errStatus("sesh: ", err)
+		m.status = errStatus("sesh: ", err, m.styles)
 	}
 	items := make([]list.Item, 0, len(names))
 	for _, n := range names {
@@ -357,7 +408,7 @@ func (m *model) enterSessions() {
 	sessions, err := m.client.ListSessions(m.ctx)
 	if err != nil {
 		slog.Error("Failed to load sessions.", "error", err)
-		m.status = errStatus("tmux: ", err)
+		m.status = errStatus("tmux: ", err, m.styles)
 	}
 	items := make([]list.Item, 0, len(sessions))
 	for _, s := range sessions {
@@ -372,7 +423,7 @@ func (m *model) enterWindows() {
 	windows, err := m.client.ListWindows(m.ctx)
 	if err != nil {
 		slog.Error("Failed to load windows.", "error", err)
-		m.status = errStatus("tmux: ", err)
+		m.status = errStatus("tmux: ", err, m.styles)
 	}
 	items := make([]list.Item, 0, len(windows))
 	for _, w := range windows {
@@ -387,7 +438,7 @@ func (m *model) enterTree() {
 	out, err := m.client.Tree(m.ctx, !m.noIcons)
 	if err != nil {
 		slog.Error("Failed to load tree.", "error", err)
-		m.status = errStatus("tmux: ", err)
+		m.status = errStatus("tmux: ", err, m.styles)
 	}
 	m.tree.SetContent(out)
 	m.tree.GotoTop()
@@ -396,7 +447,7 @@ func (m *model) enterTree() {
 }
 
 func (m *model) enterCheat() {
-	m.tree.SetContent(Cheatsheet(m.noIcons))
+	m.tree.SetContent(Cheatsheet(m.noIcons, m.styles))
 	m.tree.GotoTop()
 	m.title = "cheatsheet"
 	m.mode = cheatMode
@@ -419,7 +470,7 @@ func (m model) startConfirm(op opKind, session tmux.SessionIdentity) (tea.Model,
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewConfirm().Key("ok").Title(prompt).Affirmative("Yes").Negative("No"),
 	)).WithWidth(m.formWidth()).WithShowHelp(false).WithKeyMap(keymap.Cancel()).
-		WithTheme(keymap.DarkCharm())
+		WithTheme(m.theme.Huh())
 	m.mode = formMode
 	return m, m.form.Init()
 }
@@ -434,7 +485,7 @@ func (m model) startRename(session tmux.SessionIdentity) (tea.Model, tea.Cmd) {
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewInput().Key("name").Title(fmt.Sprintf("Rename %q to:", session.Name)),
 	)).WithWidth(m.formWidth()).WithShowHelp(false).WithKeyMap(keymap.Cancel()).
-		WithTheme(keymap.DarkCharm())
+		WithTheme(m.theme.Huh())
 	m.mode = formMode
 	return m, m.form.Init()
 }
@@ -473,10 +524,10 @@ func (m *model) applyPending() {
 // reintroduce the gap.
 func (m *model) setStatus(err error, ok string) {
 	if err != nil {
-		m.status = errStatus("", err)
+		m.status = errStatus("", err, m.styles)
 		return
 	}
-	m.status = styleOK.Render(termsafe.SafeLine("✓ " + ok))
+	m.status = m.styles.OK.Render(termsafe.SafeLine("✓ " + ok))
 }
 
 func (m model) formWidth() int {
@@ -509,8 +560,8 @@ func (m model) View() tea.View {
 }
 
 func (m model) headerView() string {
-	brand := styleHeader.Render(m.glyph.Forge + "  " + meta.AppName)
-	return brand + styleMuted.Render("  ·  "+m.title)
+	brand := m.styles.Brand.Render(m.glyph.Forge) + "  " + m.styles.Header.Render(meta.AppName)
+	return brand + m.styles.Muted.Render("  ·  "+m.title)
 }
 
 func (m model) footerView() string {
@@ -533,7 +584,7 @@ func (m model) footerView() string {
 		hint = "enter confirm · esc cancel"
 	}
 	if m.status != "" {
-		return m.status + "\n" + styleMuted.Render(hint)
+		return m.status + "\n" + m.styles.Muted.Render(hint)
 	}
-	return styleMuted.Render(hint)
+	return m.styles.Muted.Render(hint)
 }

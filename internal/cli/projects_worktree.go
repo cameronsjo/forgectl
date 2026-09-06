@@ -8,6 +8,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // newProjectsWorktreeCmd initializes a bare-repo worktree layout for a project
@@ -23,7 +24,7 @@ import (
 //
 // The new worktree dir is printed on stdout (the scriptable contract); progress
 // annotations go to stderr, same split as `clone`.
-func newProjectsWorktreeCmd(client *projects.Client) *cobra.Command {
+func newProjectsWorktreeCmd(client *projects.Client, th theme.Theme) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "worktree <query | url | owner/repo> [branch]",
 		Aliases: []string{"wt"},
@@ -62,7 +63,7 @@ from projects list --json, or rerun interactively when no sshUrl is available.`,
 				return worktreeOnly(ctx, client, cmd, candidates[0], branch)
 			}
 
-			chosen, err := chooseRepo(cmd, candidates, projectSelectionWorktree)
+			chosen, err := chooseRepo(cmd, candidates, projectSelectionWorktree, th)
 			if err != nil {
 				return err
 			}

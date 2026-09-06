@@ -17,6 +17,7 @@ import (
 	k8spkg "github.com/cameronsjo/forgectl/internal/k8s"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 var k8sModule = module.Manifest{
@@ -34,10 +35,10 @@ var k8sOutputIsTerminal = func(out io.Writer) bool {
 
 func newK8sCmd(deps module.Deps) *cobra.Command {
 	streamer, _ := deps.Runner.(forgexec.StreamingRunner)
-	return newK8sCmdForClient(k8spkg.New(streamer), deps.Runner)
+	return newK8sCmdForClient(k8spkg.New(streamer), deps.Runner, deps.Theme.Styles())
 }
 
-func newK8sCmdForClient(client *k8spkg.Client, runner forgexec.Runner) *cobra.Command {
+func newK8sCmdForClient(client *k8spkg.Client, runner forgexec.Runner, styles theme.Styles) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "k8s",
 		Short: "Focused Kubernetes helpers",
@@ -45,7 +46,7 @@ func newK8sCmdForClient(client *k8spkg.Client, runner forgexec.Runner) *cobra.Co
 define deployment manifests, choose pods, or manage cluster configuration beyond
 reading and switching the current context's namespace (ns).`,
 	}
-	cmd.AddCommand(newK8sLogsCmd(client))
+	cmd.AddCommand(newK8sLogsCmd(client, styles))
 	cmd.AddCommand(newK8sNsCmd(runner))
 	cmd.AddCommand(newK8sExecCmd(runner))
 	cmd.AddCommand(newK8sInspectCmd(runner))
@@ -276,7 +277,7 @@ type k8sLogsInvocation struct {
 	help        bool
 }
 
-func newK8sLogsCmd(client *k8spkg.Client) *cobra.Command {
+func newK8sLogsCmd(client *k8spkg.Client, styles theme.Styles) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "logs [forgectl flags] <kubectl logs args...>",
 		Short: "Stream terminal-safe kubectl logs with severity filtering",
@@ -316,6 +317,7 @@ and is disabled when stdout is not a terminal or NO_COLOR is present.`,
 			err = client.Logs(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr(), invocation.kubectlArgs, k8spkg.LogsOptions{
 				MinLevel: invocation.level,
 				Color:    color,
+				Styles:   styles,
 			})
 			return wrapK8sCommandError(err)
 		},

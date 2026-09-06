@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/launch"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // TestPrintLaunchProfile_EnvValuesAreWithheld: `launch which`'s env row prints
@@ -16,7 +17,7 @@ import (
 // surfaces render the same map under the same policy.
 func TestPrintLaunchProfile_EnvValuesAreWithheld(t *testing.T) {
 	var buf bytes.Buffer
-	printLaunchProfile(&buf, launch.Profile{
+	printLaunchProfile(&buf, theme.Theme{}, launch.Profile{
 		Harness: "claude",
 		Model:   "opus",
 		Env: map[string]string{
@@ -55,7 +56,7 @@ func TestPrintLaunchProfile_EnvValuesAreWithheld(t *testing.T) {
 // by the key-presence assertions above, not by this test.)
 func TestPrintLaunchProfile_NoEnvRowWhenUnset(t *testing.T) {
 	var buf bytes.Buffer
-	printLaunchProfile(&buf, launch.Profile{
+	printLaunchProfile(&buf, theme.Theme{}, launch.Profile{
 		Harness: "claude",
 		Model:   "opus",
 	}, "/tmp/cwd", "/tmp/config.toml")
@@ -63,7 +64,7 @@ func TestPrintLaunchProfile_NoEnvRowWhenUnset(t *testing.T) {
 	// Anchored on the rendered LABEL, not a bare "env" substring: three
 	// letters matched against the whole render would also trip on a config
 	// path like ~/.envs, or any future row label containing "env".
-	if strings.Contains(buf.String(), launchLabelStyle.Render("env")) {
+	if strings.Contains(buf.String(), theme.Theme{}.Styles().Muted.Width(14).Render("env")) {
 		t.Errorf("`launch which` printed an env row for a profile with no env:\n%s", buf.String())
 	}
 }
@@ -91,7 +92,7 @@ func TestRenderSafe_EscapesAttackerTextBeforeTrustedANSI(t *testing.T) {
 func TestPrintLaunchProfile_EscapesEveryUntrustedSurfaceToOneLinePerRow(t *testing.T) {
 	attack := "x\tline\nforged\r\x1b[2K\x7f\u009b\u202e"
 	var buf bytes.Buffer
-	printLaunchProfile(&buf, launch.Profile{
+	printLaunchProfile(&buf, theme.Theme{}, launch.Profile{
 		Match:          attack,
 		Harness:        attack,
 		Model:          attack,
@@ -116,7 +117,7 @@ func TestPrintLaunchProfile_EscapesEveryUntrustedSurfaceToOneLinePerRow(t *testi
 func TestPrintLaunchProfile_EscapesPiProvider(t *testing.T) {
 	attack := "lm-studio\nforged\x1b[2K\u202e"
 	var buf bytes.Buffer
-	printLaunchProfile(&buf, launch.Profile{
+	printLaunchProfile(&buf, theme.Theme{}, launch.Profile{
 		Harness:  "pi",
 		Provider: attack,
 		Model:    "qwen/qwen3-coder-next",

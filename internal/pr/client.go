@@ -10,6 +10,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -54,6 +55,13 @@ type Client struct {
 	// Runner unless approve returns true. Defaults to a huh confirm; tests
 	// inject a deterministic decision.
 	approve func(review string) (bool, error)
+
+	// approvalTheme styles the default gate's huh form. It is a separate field
+	// rather than a captured value because New installs the default approver
+	// before options run, so a theme supplied by an option would arrive too
+	// late to be closed over. Zero value is Artificer dark, which is what the
+	// gate rendered before it was themed at all.
+	approvalTheme theme.Theme
 
 	// isTTY reports whether an interactive gate can be shown. When false (or
 	// --headless), the post path stages only and never auto-posts.
@@ -102,6 +110,18 @@ func WithApprover(fn func(review string) (bool, error)) Option {
 	return func(c *Client) { c.approve = fn }
 }
 
+// WithApprovalTheme supplies the resolved theme the default approval gate
+// renders with, so `[theme]` preset, mode, and colour overrides reach the one
+// form that decides whether a review gets posted. It styles the gate; it never
+// changes what the gate decides.
+//
+// A no-op when WithApprover replaced the gate — an injected approver owns its
+// own presentation, and silently restyling someone else's function would be
+// the wrong kind of helpful.
+func WithApprovalTheme(th theme.Theme) Option {
+	return func(c *Client) { c.approvalTheme = th }
+}
+
 // WithTTYCheck overrides the interactive-TTY detection — used in tests.
 func WithTTYCheck(fn func() bool) Option {
 	return func(c *Client) { c.isTTY = fn }
@@ -118,7 +138,6 @@ func New(run exec.Runner, opts ...Option) *Client {
 		run:         run,
 		tmuxClient:  tmux.New(run),
 		tmuxSession: defaultTmuxSession,
-		approve:     confirmReview,
 		isTTY:       launch.IsInteractiveTTY,
 		dispatchWait: func(ctx context.Context) error {
 			timer := time.NewTimer(8 * time.Second)
@@ -139,6 +158,12 @@ func New(run exec.Runner, opts ...Option) *Client {
 	}
 	for _, opt := range opts {
 		opt(c)
+	}
+	// The default gate is installed after options so it can read the theme one
+	// of them may have supplied. WithApprover still wins: an approver it set is
+	// non-nil here and is left alone.
+	if c.approve == nil {
+		c.approve = func(review string) (bool, error) { return confirmReview(review, c.approvalTheme) }
 	}
 	return c
 }

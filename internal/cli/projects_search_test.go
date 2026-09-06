@@ -5,6 +5,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/projects"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // A fork whose local directory name differs from its upstream repo name must
@@ -29,7 +30,7 @@ func TestFilterRepos_MatchesLocalDirName(t *testing.T) {
 // The list command's aliases (find/l/ls) must resolve so `forgectl projects find`
 // runs the list command rather than falling through to the TUI.
 func TestProjectsListAliasesResolve(t *testing.T) {
-	parent := newProjectsCmd(projects.New(&exec.FakeRunner{}))
+	parent := newProjectsCmd(projects.New(&exec.FakeRunner{}), theme.Theme{})
 	for _, alias := range []string{"find", "l", "ls", "list"} {
 		if c := findChild(parent, alias); c == nil || c.Name() != "list" {
 			t.Errorf("alias %q did not resolve to the list command", alias)

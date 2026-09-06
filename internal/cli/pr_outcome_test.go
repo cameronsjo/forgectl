@@ -33,6 +33,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	netpkg "github.com/cameronsjo/forgectl/internal/net"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // remoteReviewCmd wires `forgectl pr <ref>` over a ledger-backed runner, with a
@@ -48,7 +49,7 @@ func remoteReviewCmd(t *testing.T, l *tmuxLedger) (*cobra.Command, *bytes.Buffer
 		pr.WithTmuxSession(l.session),
 		pr.WithDispatchWait(func(context.Context) error { return nil }),
 	)
-	cmd := newPrCmdForClient(config.Config{}, client, netpkg.New(fake), filepath.Join(t.TempDir(), "reviewed.json"))
+	cmd := newPrCmdForClient(config.Config{}, client, netpkg.New(fake), filepath.Join(t.TempDir(), "reviewed.json"), theme.Theme{})
 	out := new(bytes.Buffer)
 	cmd.SetOut(out)
 	cmd.SetErr(new(bytes.Buffer))

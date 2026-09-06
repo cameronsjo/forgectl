@@ -3,17 +3,19 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 func TestCheatsheet_NonEmpty(t *testing.T) {
-	got := Cheatsheet(false)
+	got := Cheatsheet(false, theme.Default().Styles())
 	if strings.TrimSpace(got) == "" {
 		t.Error("Cheatsheet() returned empty string")
 	}
 }
 
 func TestCheatsheet_ContainsExpectedSections(t *testing.T) {
-	got := Cheatsheet(false)
+	got := Cheatsheet(false, theme.Default().Styles())
 	sections := []string{
 		"The three words",
 		"Split",
@@ -29,7 +31,7 @@ func TestCheatsheet_ContainsExpectedSections(t *testing.T) {
 }
 
 func TestCheatsheet_ContainsKeyBindings(t *testing.T) {
-	got := Cheatsheet(false)
+	got := Cheatsheet(false, theme.Default().Styles())
 	bindings := []string{"prefix", "prefix |", "prefix d"}
 	for _, b := range bindings {
 		if !strings.Contains(got, b) {
@@ -39,7 +41,7 @@ func TestCheatsheet_ContainsKeyBindings(t *testing.T) {
 }
 
 func TestCheatsheet_ContainsThreeWordsDiagram(t *testing.T) {
-	got := Cheatsheet(false)
+	got := Cheatsheet(false, theme.Default().Styles())
 	// The nested box should be present (top-left corner is a reliable marker
 	// that survives the colored label substitution).
 	if !strings.Contains(got, "┌") {
@@ -48,8 +50,8 @@ func TestCheatsheet_ContainsThreeWordsDiagram(t *testing.T) {
 }
 
 func TestCheatsheet_NoIconsModeProducesSameStructure(t *testing.T) {
-	withIcons := Cheatsheet(false)
-	noIcons := Cheatsheet(true)
+	withIcons := Cheatsheet(false, theme.Default().Styles())
+	noIcons := Cheatsheet(true, theme.Default().Styles())
 	// Both modes should contain the same section headers.
 	for _, section := range []string{"The three words", "Split", "Sessions"} {
 		if !strings.Contains(noIcons, section) {
