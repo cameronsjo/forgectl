@@ -10,6 +10,26 @@ import (
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
+// pipedVerbs are the plain-output commands a fake runner can drive. Both the
+// absence table and its positive control walk this same list, so a verb cannot
+// be asserted clean without also being shown capable of colour.
+var pipedVerbs = [][]string{
+	{"doctor"},
+	{"launch", "which"},
+	{"launch", "doctor"},
+	{"bench", "status"},
+	{"tmux", "cheat"},
+	{"ghostty", "cheat"},
+	{"theme", "show"},
+	{"theme", "preview"},
+	// `review` is deliberately absent. Its styled path needs review.Source
+	// fixtures, not a runner, so through this root-level harness it renders no
+	// rows and therefore no colour — its clean run would have asserted nothing.
+	// The per-verb positive control below is what caught that; the verb's own
+	// dimming is covered directly by TestReviewCmd_Table_DimsReviewedRow, which
+	// builds the sources it needs.
+}
+
 // TestPlainVerbsEmitNoEscapesWhenPiped is the behavioural half of the colour
 // boundary; colorout_test.go is the structural half.
 //
@@ -30,19 +50,7 @@ func TestPlainVerbsEmitNoEscapesWhenPiped(t *testing.T) {
 		Theme:  theme.Default(),
 	}
 
-	verbs := [][]string{
-		{"doctor"},
-		{"launch", "which"},
-		{"launch", "doctor"},
-		{"bench", "status"},
-		{"tmux", "cheat"},
-		{"ghostty", "cheat"},
-		{"theme", "show"},
-		{"theme", "preview"},
-		{"review"},
-	}
-
-	for _, argv := range verbs {
+	for _, argv := range pipedVerbs {
 		t.Run(strings.Join(argv, " "), func(t *testing.T) {
 			t.Setenv("NO_COLOR", "")
 			t.Setenv("CLICOLOR_FORCE", "")
@@ -66,29 +74,38 @@ func TestPlainVerbsEmitNoEscapesWhenPiped(t *testing.T) {
 	}
 }
 
-// TestPipedOutputProbeCanFail is the positive control for the table above.
+// TestPipedOutputProbeCanFail is the positive control for the table above,
+// run PER VERB rather than once.
 //
-// Every assertion there is "no escape appeared". If the harness could not
-// produce one — a fake runner that renders nothing, a root that never runs —
-// the whole table would pass while testing nothing. This forces colour on and
-// requires it to show up.
+// Every assertion up there is "no escape appeared", which a verb that renders
+// nothing at all satisfies for the wrong reason — a fake runner returning
+// empty, a subcommand that bailed before printing. Running one verb forced and
+// generalising would have left the other eight assumed. This measures each of
+// them: under CLICOLOR_FORCE every verb in the table must produce colour, so
+// its clean run above means something.
 func TestPipedOutputProbeCanFail(t *testing.T) {
-	t.Setenv("NO_COLOR", "")
-	t.Setenv("CLICOLOR_FORCE", "1")
-	t.Setenv("TERM", "xterm-256color")
-
 	deps := module.Deps{
 		Runner: &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) { return "", nil }},
 		Theme:  theme.Default(),
 	}
-	root := newRoot(deps)
-	var stdout, stderr bytes.Buffer
-	root.SetOut(&stdout)
-	root.SetErr(&stderr)
-	root.SetArgs([]string{"theme", "preview"})
-	_ = root.Execute()
 
-	if !strings.ContainsRune(stdout.String(), 0x1b) {
-		t.Fatal("forced colour produced no escape; the table above cannot go red and proves nothing")
+	for _, argv := range pipedVerbs {
+		t.Run(strings.Join(argv, " "), func(t *testing.T) {
+			t.Setenv("NO_COLOR", "")
+			t.Setenv("CLICOLOR_FORCE", "1")
+			t.Setenv("TERM", "xterm-256color")
+
+			root := newRoot(deps)
+			var stdout, stderr bytes.Buffer
+			root.SetOut(&stdout)
+			root.SetErr(&stderr)
+			root.SetArgs(argv)
+			_ = root.Execute()
+
+			if !strings.ContainsRune(stdout.String(), 0x1b) {
+				t.Errorf("%s produced no escape under CLICOLOR_FORCE; its clean run in the table above proves nothing\n%q",
+					strings.Join(argv, " "), stdout.String())
+			}
+		})
 	}
 }

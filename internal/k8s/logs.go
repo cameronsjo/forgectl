@@ -303,7 +303,13 @@ func severityStyle(styles theme.Styles, level Level) lipgloss.Style {
 		return styles.OK
 	case LevelWarn:
 		return styles.Warn
-	case LevelError, LevelFatal:
+	case LevelError:
+		// Danger without its bold. The pre-theme code distinguished the two —
+		// ESC[31m for error, ESC[1;31m for fatal — and collapsing both onto
+		// styles.Danger (which is bold) would have made every error line look
+		// like the old fatal one, erasing the escalation an operator scans for.
+		return styles.Danger.Bold(false)
+	case LevelFatal:
 		return styles.Danger
 	default:
 		return lipgloss.Style{}

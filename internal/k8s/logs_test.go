@@ -103,10 +103,23 @@ func TestLogs_EscapesHostileRunesBeforeAddingTrustedSeverityStyle(t *testing.T) 
 	// applies to LevelError, then split around it to learn the exact
 	// prefix/suffix bytes the theme emits for this level — this test asserts
 	// the wrapping is present and un-tampered-with, not the theme's palette.
-	marker := styles.Danger.Render("\x00")
+	// Derived from severityStyle for the level under test, not from
+	// styles.Danger directly: Error and Fatal share the Danger hue but not its
+	// weight (Fatal keeps the bold, Error drops it, preserving the escalation
+	// the pre-theme escapes had). Reading the mapping here means a future
+	// re-map cannot silently desync the expectation from the code.
+	marker := severityStyle(styles, LevelError).Render("\x00")
 	prefix, suffix, ok := strings.Cut(marker, "\x00")
 	if !ok {
 		t.Fatalf("styles.Danger.Render did not preserve the marker rune: %q", marker)
+	}
+	// Both halves must be non-empty, or HasPrefix/HasSuffix below degenerate to
+	// HasPrefix(got, "") — trivially true, and the assertion would pass against
+	// output carrying no styling at all. The previous version hardcoded the
+	// escape and could not fail this way; deriving it from the theme is more
+	// robust to a palette change but introduces exactly this hazard.
+	if prefix == "" || suffix == "" {
+		t.Fatalf("styles.Danger rendered no escape (prefix %q, suffix %q); this test cannot go red", prefix, suffix)
 	}
 
 	err := New(runner).Logs(context.Background(), nil, &stdout, &stderr, []string{"pod/api"}, LogsOptions{MinLevel: LevelTrace, Color: true, Styles: styles})

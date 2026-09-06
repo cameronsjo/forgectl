@@ -11,14 +11,26 @@ import (
 	"testing"
 )
 
-// themeExemptDirs are the paths allowed to name a colour or an escape.
+// paletteOwner is the one package allowed to name a colour. It IS the palette;
+// that is the point of it.
+var paletteOwner = filepath.Join("internal", "theme")
+
+// escapeExemptDirs may write a raw escape sequence, and nothing more.
 //
-//   - internal/theme owns the palette; that is the point of the package.
-//   - internal/termsafe and its test helper reason ABOUT escape sequences, so
-//     they must be able to write one.
-var themeExemptDirs = []string{
-	filepath.Join("internal", "theme"),
+// internal/termsafe reasons ABOUT escapes — neutralising them is its whole
+// job — so it cannot do that without writing one. It gets no exemption from
+// the colour checks: reasoning about escapes is not a reason to name a hex,
+// and skipping the directory outright would have granted both.
+var escapeExemptDirs = []string{
 	filepath.Join("internal", "termsafe"),
+}
+
+// lipglossAliases are the identifiers lipgloss is imported under here. The
+// check keys on the identifier at the call site, so an aliased import would
+// otherwise walk straight past it.
+var lipglossAliases = map[string]bool{
+	"lipgloss": true,
+	"lg":       true,
 }
 
 // TestNoColorLiteralsOutsideTheme is the guard that makes the migration stick.
@@ -52,10 +64,11 @@ func TestNoColorLiteralsOutsideTheme(t *testing.T) {
 			case ".git", "testdata", "node_modules", "dist":
 				return filepath.SkipDir
 			}
-			for _, exempt := range themeExemptDirs {
-				if path == exempt {
-					return filepath.SkipDir
-				}
+			// Only the palette owner is skipped wholesale. Everything else is
+			// walked, so the colour checks still apply inside a directory that
+			// is merely allowed to write an escape.
+			if path == paletteOwner {
+				return filepath.SkipDir
 			}
 			return nil
 		}
@@ -68,6 +81,12 @@ func TestNoColorLiteralsOutsideTheme(t *testing.T) {
 		}
 
 		isTest := strings.HasSuffix(path, "_test.go")
+		escapeExempt := false
+		for _, dir := range escapeExemptDirs {
+			if strings.HasPrefix(path, dir+string(filepath.Separator)) {
+				escapeExempt = true
+			}
+		}
 		file, parseErr := parser.ParseFile(fset, path, nil, 0)
 		if parseErr != nil {
 			t.Errorf("%s: %v", path, parseErr)
@@ -94,7 +113,7 @@ func TestNoColorLiteralsOutsideTheme(t *testing.T) {
 				// bytes, so no pattern separates them, and a rule that cannot
 				// tell them apart would block the security tests to protect a
 				// convention. Production code is where the rule has teeth.
-				if isTest {
+				if isTest || escapeExempt {
 					return true
 				}
 				// The literal's raw text, so an escape written as \x1b is
@@ -108,9 +127,13 @@ func TestNoColorLiteralsOutsideTheme(t *testing.T) {
 				if !ok {
 					return true
 				}
-				if pkg.Name == "lipgloss" && e.Sel.Name == "Color" {
-					t.Errorf("%s:%d: lipgloss.Color outside internal/theme; add a role to the palette instead",
-						path, fset.Position(e.Pos()).Line)
+				// The whole Color family, not just Color. RGBColor, ANSIColor,
+				// Color256, AdaptiveColor and CompleteColor all name a colour
+				// just as directly, and a guard that lists one of them invites
+				// the next person to reach for a sibling.
+				if lipglossAliases[pkg.Name] && strings.Contains(e.Sel.Name, "Color") {
+					t.Errorf("%s:%d: %s.%s outside internal/theme; add a role to the palette instead",
+						path, fset.Position(e.Pos()).Line, pkg.Name, e.Sel.Name)
 				}
 				if pkg.Name == "huh" && strings.HasPrefix(e.Sel.Name, "Theme") {
 					t.Errorf("%s:%d: huh.%s outside internal/theme; use Theme.Huh()",

@@ -208,10 +208,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Bubble Tea v2 delivers this once, early — the one reply to Init's
 		// RequestBackgroundColor. Rebuild everything derived from the theme so
 		// list chrome, rows, and (on the next form) huh forms all agree.
-		m.theme = m.theme.WithDark(t.IsDark())
-		m.styles = m.theme.Styles()
-		m.l.Styles = m.theme.List()
-		m.applySize()
+		//
+		// Guarded on ModeAuto even though Init only asks under ModeAuto: an
+		// answer nobody asked for must not silently override a configured
+		// mode. Bubble Tea can deliver this unsolicited, and a terminal is
+		// free to volunteer it — so the decision to accept lives with the
+		// setting, not with whether a message happened to arrive.
+		if m.theme.Mode() == theme.ModeAuto {
+			m.theme = m.theme.WithDark(t.IsDark())
+			m.styles = m.theme.Styles()
+			m.l.Styles = m.theme.List()
+			m.applySize()
+		}
 	}
 
 	switch m.mode {
