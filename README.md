@@ -243,6 +243,15 @@ forgectl theme show                      # resolved hex per role, provenance, co
 forgectl theme show --json               # the same, machine-readable
 forgectl theme preview                   # render each role so you can see it
 
+# tasks — read-only Vikunja task browser, local cache, no write verbs
+# one-time setup: store a READ-ONLY API token in the login keychain (prompts for the value)
+#   security add-generic-password -s vikunja-readonly -a "$USER" -w
+forgectl tasks ls                        # list open tasks
+forgectl tasks ls --json                 # the same, machine-readable
+forgectl tasks show 42                   # one task, its detail and its relations
+forgectl tasks ready                     # open tasks with no active "blocked" relation, by position
+forgectl tasks ls --keychain-service X   # read the token from a different keychain item
+
 # ghostty — theme + keybind reporting, parsed live from the ghostty CLI
 forgectl ghostty themes                  # custom themes, active one marked
 forgectl ghostty themes --all            # also list the themes bundled with ghostty
