@@ -83,6 +83,17 @@ func orNone(s string) string {
 	return s
 }
 
+// isTailscaleCGNAT reports whether ip is in 100.64.0.0/10.
+//
+// Accepted with NO gateway corroboration, unlike the private-range arm — and
+// that asymmetry is deliberate but load-bearing, so it is stated here rather
+// than left to be rediscovered. RFC 6598 is SHARED carrier-grade NAT space,
+// not Tailscale's: mobile carriers, many ISPs, and some campus networks hand
+// out addresses in it, so a hostile resolver on such a network can steer the
+// hostname into an always-allowed range. For this range the pin is therefore
+// not the control — TLS certificate verification is, and a wrong server fails
+// the handshake rather than receiving the token. Weakening TLS on this path
+// removes the only thing standing here. See docs/adr/0009 §3b.
 func isTailscaleCGNAT(ip net.IP) bool {
 	_, block, err := net.ParseCIDR("100.64.0.0/10")
 	return err == nil && block.Contains(ip)

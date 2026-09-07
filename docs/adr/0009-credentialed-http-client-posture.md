@@ -63,6 +63,28 @@ therefore returns the addresses it vetted and `NewClient` installs a
 against the hostname, so substituting the address weakens nothing: a wrong
 address now fails the handshake instead of receiving the credential.
 
+**3b. The CGNAT arm is uncorroborated, and TLS is the control there.**
+`100.64.0.0/10` is accepted with no gateway check, on the premise that the
+tailnet name is the sanctioned off-LAN path. That premise is narrower than
+the range: RFC 6598 is *shared* carrier-grade NAT space, handed out by
+mobile carriers, many ISPs, and some campus networks — so a split-horizon
+resolver on such a network can steer the hostname to a CGNAT address that
+belongs to a stranger, and this arm accepts it where the identical
+situation in RFC1918 space is refused.
+
+This is recorded rather than fixed, deliberately. The corroboration
+available — requiring a `utun` interface to hold a `100.64/10` address —
+buys a defence-in-depth layer behind a control that already holds: TLS
+certificate verification means the wrong server fails the handshake and
+never receives the token. The cost is a second interface-enumeration
+dependency in the pin's hot path, on a policy that is already the most
+platform-specific thing in this package. **So the honest statement is that
+for the CGNAT range the pin is not the control — TLS is**, and anyone
+weakening TLS verification on this path (an `InsecureSkipVerify`, a custom
+`RootCAs`, a proxy that terminates it) removes the only thing standing
+there. Revisit if a second credentialed client appears, or if the pin ever
+has to stand alone.
+
 **4. Unreachable, unauthorized, and refused are different outcomes, all the
 way out.** `ErrUnreachable`, `ErrUnauthorized`, and `ErrHostRefused` are
 distinct sentinels, matched with `errors.Is` and mapped to distinct process
