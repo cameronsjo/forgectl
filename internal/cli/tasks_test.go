@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -87,23 +88,68 @@ func runTasksCmd(t *testing.T, deps module.Deps, args ...string) (stdout, stderr
 	return outBuf.String(), errBuf.String(), err
 }
 
+// captureProcessStd swaps the PROCESS's os.Stdout and os.Stderr for the
+// duration of fn and returns whatever was written to them.
+//
+// This exists because runTasksCmd captures only cobra's OWN writers, and a
+// leak does not have to go through them: a stray fmt.Println, a debug
+// fmt.Fprintln(os.Stderr, …), or a panic trace all bypass the cobra buffers
+// entirely. Measured 2026-09-07 — a deliberate `fmt.Fprintln(os.Stderr,
+// token.Header())` injected into loadTasksSnapshot left the leak test GREEN,
+// so the load-bearing assertion had a hole exactly the width of the most
+// likely accident. The cobra-writer capture stays; this is added coverage,
+// not a replacement.
+func captureProcessStd(t *testing.T, fn func()) (stdout, stderr string) {
+	t.Helper()
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	origOut, origErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outW, errW
+
+	// Drain concurrently: a pipe's buffer is finite, so reading only after fn
+	// returns would deadlock on output larger than it.
+	outCh, errCh := make(chan string, 1), make(chan string, 1)
+	go func() { var b bytes.Buffer; _, _ = io.Copy(&b, outR); outCh <- b.String() }()
+	go func() { var b bytes.Buffer; _, _ = io.Copy(&b, errR); errCh <- b.String() }()
+
+	func() {
+		defer func() {
+			os.Stdout, os.Stderr = origOut, origErr
+			_ = outW.Close()
+			_ = errW.Close()
+		}()
+		fn()
+	}()
+	return <-outCh, <-errCh
+}
+
 // TestTasksCommands_TokenNeverLeaks is the load-bearing test: a recognizable
 // fake token is seeded at the keychain seam, every tasks command is run, and
-// every output surface — stdout, stderr, the returned error's string, and
-// the on-disk cache file — is grepped for the literal. None may contain it.
+// every output surface — cobra's stdout and stderr, the PROCESS's os.Stdout
+// and os.Stderr, the returned error's string, and the on-disk cache file —
+// is grepped for the literal. None may contain it.
 func TestTasksCommands_TokenNeverLeaks(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	_, runner := withFakeTasksBackend(t, fakeVikunjaHandler(t))
 	deps := module.Deps{Runner: runner, Theme: theme.Default()}
 
 	var surfaces []string
-	for _, args := range [][]string{{"ls"}, {"ls", "--json"}, {"show", "1"}, {"show", "1", "--json"}, {"ready"}, {"ready", "--json"}} {
-		stdout, stderr, err := runTasksCmd(t, deps, args...)
-		surfaces = append(surfaces, stdout, stderr)
-		if err != nil {
-			surfaces = append(surfaces, err.Error())
+	procOut, procErr := captureProcessStd(t, func() {
+		for _, args := range [][]string{{"ls"}, {"ls", "--json"}, {"show", "1"}, {"show", "1", "--json"}, {"ready"}, {"ready", "--json"}} {
+			stdout, stderr, err := runTasksCmd(t, deps, args...)
+			surfaces = append(surfaces, stdout, stderr)
+			if err != nil {
+				surfaces = append(surfaces, err.Error())
+			}
 		}
-	}
+	})
+	surfaces = append(surfaces, procOut, procErr)
 
 	cachePath, pathErr := config.TasksCachePath()
 	if pathErr != nil {
