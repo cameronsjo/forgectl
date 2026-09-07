@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"sort"
 	"strconv"
 	"time"
@@ -23,9 +24,17 @@ import (
 // other and from the default 1 so a caller can tell "the box is down" (2,
 // matching the reference probe script's UNREACHABLE) from "the credential is
 // bad" (3, matching its UNAUTHENTICATED/FORBIDDEN) without parsing text.
+//
+// exitTasksHostRefused (4) is the one code with no counterpart in that probe
+// script, which folds a pinning refusal into its generic precondition exit.
+// It is broken out here because a refusal to send the credential is a
+// security verdict, and collapsing it into the default 1 makes it
+// indistinguishable from a malformed task id — so a script cannot alert on
+// the case that most warrants alerting.
 const (
 	exitTasksUnreachable  = 2
 	exitTasksUnauthorized = 3
+	exitTasksHostRefused  = 4
 )
 
 // tasksModule declares the tasks extension (ADR-0005): a read-only Vikunja
@@ -107,7 +116,7 @@ func newTasksLsCmd(deps module.Deps, host, keychainService *string) *cobra.Comma
 			if err != nil {
 				return tasksExitError(err)
 			}
-			reportCacheFallback(cmd.ErrOrStderr(), fromCache, snap)
+			reportCacheFallback(cmd.ErrOrStderr(), *host, fromCache, snap)
 			if asJSON {
 				rows := snapshotToLsJSON(snap, false)
 				if rows == nil {
@@ -155,7 +164,7 @@ func newTasksShowCmd(deps module.Deps, host, keychainService *string) *cobra.Com
 			if err != nil {
 				return tasksExitError(err)
 			}
-			reportCacheFallback(cmd.ErrOrStderr(), fromCache, snap)
+			reportCacheFallback(cmd.ErrOrStderr(), *host, fromCache, snap)
 
 			task, ok := findTask(snap.Tasks, id)
 			if !ok {
@@ -166,7 +175,7 @@ func newTasksShowCmd(deps module.Deps, host, keychainService *string) *cobra.Com
 				enc.SetIndent("", "  ")
 				return enc.Encode(task)
 			}
-			return printTaskDetail(cmd.OutOrStdout(), task)
+			return printTaskDetail(deps.Theme.Writer(cmd.OutOrStdout(), nil), task)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the task as machine-readable JSON")
@@ -237,19 +246,22 @@ dependency store.`,
 			if err != nil {
 				return tasksExitError(err)
 			}
-			reportCacheFallback(cmd.ErrOrStderr(), fromCache, snap)
+			reportCacheFallback(cmd.ErrOrStderr(), *host, fromCache, snap)
 
-			ready := tasks.Ready(snap.Tasks)
+			readySnap := tasks.Snapshot{Tasks: tasks.Ready(snap.Tasks)}
 			if asJSON {
-				rows := make([]tasksLsJSON, 0, len(ready))
-				for _, t := range ready {
-					rows = append(rows, tasksLsJSON{ID: t.ID, Title: t.Title, Done: t.Done, Position: t.Position})
+				// Same row-builder as ls, deliberately: a second hand-rolled
+				// copy is how the two verbs' JSON shapes drift apart when a
+				// field is added to one of them.
+				rows := snapshotToLsJSON(readySnap, false)
+				if rows == nil {
+					rows = []tasksLsJSON{}
 				}
 				enc := termsafe.JSONEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
 				return enc.Encode(rows)
 			}
-			return printTasksList(cmd.OutOrStdout(), tasks.Snapshot{Tasks: ready}, false)
+			return printTasksList(deps.Theme.Writer(cmd.OutOrStdout(), nil), readySnap, false)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit a machine-readable list to stdout")
@@ -275,23 +287,55 @@ func loadTasksSnapshot(ctx context.Context, runner exec.Runner, host, keychainSe
 	}
 	client, err := newTasksClient(ctx, runner, host, token)
 	if err != nil {
-		if tasks.IsUnreachable(err) {
+		if mayServeCache(err) {
 			return cachedTasksSnapshot(err)
 		}
 		return tasks.Snapshot{}, false, err
 	}
 	snap, err := client.FetchAll(ctx)
 	if err != nil {
-		if tasks.IsUnreachable(err) {
+		if mayServeCache(err) {
 			return cachedTasksSnapshot(err)
 		}
 		return tasks.Snapshot{}, false, err
 	}
 	snap.FetchedAt = time.Now().UTC()
-	if path, pathErr := config.TasksCachePath(); pathErr == nil {
-		_ = tasks.SaveCache(path, snap) // best-effort; a cache write failure must not fail the command
-	}
+	cacheSnapshot(ctx, snap)
 	return snap, false, nil
+}
+
+// cacheSnapshot writes the fetched snapshot to the local cache. A cache
+// write failure must not fail the command — the data is already in hand —
+// but it must not be silent either: an unwritable cache dir means the NEXT
+// network outage has no fallback, and the operator would otherwise learn
+// that only during the outage. So the failure is logged rather than
+// discarded, which is also what keeps this out of the `_ =` shape the Go
+// rules forbid.
+func cacheSnapshot(ctx context.Context, snap tasks.Snapshot) {
+	path, err := config.TasksCachePath()
+	if err != nil {
+		slog.WarnContext(ctx, "Could not resolve the tasks cache path, skipping the cache write. A later network outage will have no fallback data.",
+			"error", err)
+		return
+	}
+	if err := tasks.SaveCache(path, snap); err != nil {
+		slog.WarnContext(ctx, "Failed to write the tasks cache. The command succeeded, but a later network outage will have no fallback data.",
+			"path", path, "error", err)
+	}
+}
+
+// mayServeCache decides whether err is the kind of failure a stale cache may
+// paper over. Only a genuine network failure is.
+//
+// The IsHostRefused arm is not redundant with the sentinels being distinct —
+// it is the second lock on the same door. A refusal to send the credential
+// must never be served from cache, because cache-serving returns a nil error
+// and the command then exits 0: the security verdict would present as a
+// successful run. That is strictly worse than losing the exit code, and it
+// is one careless `%w` in the client away, so the guard is stated here too
+// rather than resting on the wrap being right forever.
+func mayServeCache(err error) bool {
+	return tasks.IsUnreachable(err) && !tasks.IsHostRefused(err)
 }
 
 // cachedTasksSnapshot loads the local cache after a network failure. If no
@@ -309,12 +353,17 @@ func cachedTasksSnapshot(cause error) (tasks.Snapshot, bool, error) {
 	return snap, true, nil
 }
 
-func reportCacheFallback(stderr io.Writer, fromCache bool, snap tasks.Snapshot) {
+// reportCacheFallback names the host that actually failed, not the default
+// one: under --host the operator is otherwise told a different instance is
+// down than the one they asked for, during exactly the incident this notice
+// exists to explain.
+func reportCacheFallback(stderr io.Writer, host string, fromCache bool, snap tasks.Snapshot) {
 	if !fromCache {
 		return
 	}
 	age := time.Since(snap.FetchedAt).Round(time.Second)
-	fmt.Fprintf(stderr, "forgectl: tasks.sjo.lol unreachable — serving cached data, %s old\n", age) //nolint:errcheck // best-effort stderr notice
+	fmt.Fprintf(stderr, "forgectl: %s unreachable — serving cached data, %s old\n", //nolint:errcheck // best-effort stderr notice
+		termsafe.SafeLine(host), age)
 }
 
 // tasksExitError maps a tasks package sentinel to its distinct exit code
@@ -323,6 +372,8 @@ func tasksExitError(err error) error {
 	switch {
 	case tasks.IsUnauthorized(err):
 		return WithExitCode(err, exitTasksUnauthorized)
+	case tasks.IsHostRefused(err):
+		return WithExitCode(err, exitTasksHostRefused)
 	case tasks.IsUnreachable(err):
 		return WithExitCode(err, exitTasksUnreachable)
 	default:

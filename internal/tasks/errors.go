@@ -24,3 +24,10 @@ var (
 	// this path, so decoding is refused before it can be attempted.
 	ErrUnexpectedStatus = errors.New("tasks: unexpected response status")
 )
+
+// IsHostRefused reports whether err (or anything it wraps) is the host-pinning
+// refusal. It is deliberately NOT folded into ErrUnreachable: "I declined to
+// send the credential here" and "the box is down" call for different operator
+// responses, and a caller that cannot tell them apart cannot alert on the
+// security one.
+func IsHostRefused(err error) bool { return errors.Is(err, ErrHostRefused) }

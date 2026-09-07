@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -261,5 +262,57 @@ func TestTasksReady_ExcludesActiveBlocker_EndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "write the plan") {
 		t.Fatalf("ready output missing the unblocked task: %q", stdout)
+	}
+}
+
+// TestTasksLs_HostRefused_DoesNotFallBackToCacheAndExitsFour is the pin for
+// a fail-quiet the SECOND security pass found in the FIRST pass's fix.
+//
+// The host-pin refusal reaches Client.get as the dialer's error. Wrapping it
+// into ErrUnreachable there (with %v, which destroys the sentinel) sent it
+// down the cache-fallback path — which returns a nil error, so the command
+// printed "serving cached data" and exited 0. A refusal to send the
+// credential presented as a successful run: strictly worse than losing the
+// exit code, and invisible.
+func TestTasksLs_HostRefused_DoesNotFallBackToCacheAndExitsFour(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	// Seed a cache so a wrongful fallback is observable rather than inferred.
+	cachePath, err := config.TasksCachePath()
+	if err != nil {
+		t.Fatalf("config.TasksCachePath: %v", err)
+	}
+	if mkErr := os.MkdirAll(filepath.Dir(cachePath), 0o700); mkErr != nil {
+		t.Fatal(mkErr)
+	}
+	stale := tasks.Snapshot{Tasks: []tasks.Task{{ID: 99, Title: "stale cached task"}}}
+	if saveErr := tasks.SaveCache(cachePath, stale); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+
+	runner := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			if name == "security" {
+				return tasksTestFakeToken, nil
+			}
+			return "", nil
+		},
+	}
+	orig := newTasksClient
+	newTasksClient = func(_ context.Context, _ exec.Runner, _ string, _ tasks.Token) (*tasks.Client, error) {
+		return nil, fmt.Errorf("%w: test refusal", tasks.ErrHostRefused)
+	}
+	t.Cleanup(func() { newTasksClient = orig })
+
+	deps := module.Deps{Runner: runner, Theme: theme.Default()}
+	stdout, _, err := runTasksCmd(t, deps, "ls")
+	if err == nil {
+		t.Fatal("ls with a refused host = nil error, want a failure — a pin refusal must never exit 0")
+	}
+	if strings.Contains(stdout, "stale cached task") {
+		t.Fatal("a host-pin refusal must never fall back to cached data")
+	}
+	if got := ExitCode(err); got != exitTasksHostRefused {
+		t.Fatalf("ExitCode = %d, want %d (host refused)", got, exitTasksHostRefused)
 	}
 }

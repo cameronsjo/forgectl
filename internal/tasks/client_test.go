@@ -6,7 +6,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
 func TestClient_401ProducesUnauthorizedAndNeverDecodesBody(t *testing.T) {
@@ -80,5 +83,60 @@ func TestClient_SendsBearerHeaderNotArgv(t *testing.T) {
 	}
 	if want := "Bearer " + fakeToken; gotAuth != want {
 		t.Fatalf("Authorization header = %q, want %q", gotAuth, want)
+	}
+}
+
+// TestNewClient_InstallsThePinnedDialer asserts the WIRING, not the dialer.
+//
+// This test exists because the dialer's own tests passed with the
+// `DialContext: pinnedDialer(...)` line deleted from NewClient — measured,
+// not hypothesised. A correct control that nothing routes traffic through is
+// indistinguishable from no control, and the unit tests could not tell the
+// difference. So: build a real Client and assert its transport carries a
+// DialContext, which is the one observable proof the pin is on the path the
+// bearer token actually takes.
+func TestNewClient_InstallsThePinnedDialer(t *testing.T) {
+	runner := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			if name == "route" {
+				return "gateway: " + HomelabGateway + "\n", nil
+			}
+			return "", nil
+		},
+	}
+	// An IP literal resolves to itself, so this needs no DNS.
+	c, err := NewClient(context.Background(), runner, "192.168.1.102", newToken("tk_"+strings.Repeat("a", 40)))
+	if err != nil {
+		t.Fatalf("NewClient = %v, want nil", err)
+	}
+	tr, ok := c.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport is %T, want *http.Transport", c.httpClient.Transport)
+	}
+	if tr.DialContext == nil {
+		t.Fatal("transport has no DialContext — the host pin is not on the request path, " +
+			"so http.Transport will resolve the hostname itself and the pin constrains nothing")
+	}
+}
+
+// TestFetchAllPages_StopsAtTheCap pins the bound on a loop whose termination
+// was otherwise decided entirely by the server: a host returning a full page
+// forever spun it and grew the result slice without limit.
+func TestFetchAllPages_StopsAtTheCap(t *testing.T) {
+	var pages int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		pages++
+		full := make([]map[string]any, pageSize) // always a FULL page: never terminates on its own
+		_ = json.NewEncoder(w).Encode(full)
+	}))
+	defer srv.Close()
+
+	c := NewClientForTesting(srv.URL, newToken("tk_"+strings.Repeat("a", 40)))
+	_, err := fetchAllPages[map[string]any](context.Background(), c, "/tasks")
+	if !errors.Is(err, ErrUnexpectedStatus) {
+		t.Fatalf("fetchAllPages against a never-ending server = %v, want errors.Is(ErrUnexpectedStatus)", err)
+	}
+	if pages != maxPages {
+		t.Fatalf("made %d requests, want exactly maxPages (%d)", pages, maxPages)
 	}
 }

@@ -12,3 +12,4 @@ Records of significant design decisions made in forgectl development.
 | 0006 | [Workflow blessing: user-presence signing, not author signing](0006-workflow-blessing-user-presence-signing.md) | Accepted | 2026-07-12 |
 | 0007 | [Workflow checkpoint/resume: run-state sidecar](0007-workflow-checkpoint-resume.md) | Accepted | 2026-07-15 |
 | 0008 | [Agent contract: every verb must be drivable without a TTY](0008-agent-contract.md) | Accepted | 2026-08-01 |
+| 0009 | [Credentialed HTTP client posture: keychain-sourced, host-pinned, read-only by grant](0009-credentialed-http-client-posture.md) | Draft | 2026-09-07 |

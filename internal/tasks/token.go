@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -30,11 +31,22 @@ const Redacted = "[redacted]"
 // instance) without any code change.
 const DefaultKeychainService = "vikunja-readonly"
 
+// keychainTimeout bounds the `security find-generic-password` call. It is
+// generous relative to a keychain read that succeeds instantly, because the
+// case it exists for is one that never returns: a locked keychain or an ACL
+// prompt with nobody at the console.
+const keychainTimeout = 15 * time.Second
+
 // tokenShape is a Vikunja API token: "tk_" followed by hex. Asserted before
 // the value is ever sent anywhere, so a truncated keychain read produces a
 // loud local error instead of a bare header and a misleading 401/403 that
 // reads as a verdict about the server.
-var tokenShape = regexp.MustCompile(`^tk_[0-9a-f]{40,}$`)
+//
+// Hex is matched case-insensitively: the digits mean the same thing in
+// either case, and rejecting an uppercase copy would report "malformed
+// token" — which reads as data corruption — for a value that is simply
+// spelled differently.
+var tokenShape = regexp.MustCompile(`^tk_[0-9a-fA-F]{40,}$`)
 
 // Token is an opaque bearer credential. The payload lives behind a closure —
 // not a plain string field — for the same reason internal/exec.SecretArg's
@@ -99,8 +111,21 @@ var ErrTokenMalformed = fmt.Errorf("tasks: keychain entry does not look like a V
 // credential. The returned Token's payload is revealed exactly once, into
 // this closure; nothing above this function ever sees the raw string.
 func ReadToken(ctx context.Context, runner exec.Runner, service string) (Token, error) {
+	// Bounded on purpose. A locked keychain, or an item whose ACL demands
+	// interactive confirmation, makes `security` block on a GUI prompt with
+	// no deadline of its own — so an unbounded call here hangs the command
+	// forever while every network call in this package is capped at 10s.
+	ctx, cancel := context.WithTimeout(ctx, keychainTimeout)
+	defer cancel()
+
 	out, err := runner.Run(ctx, "security", "find-generic-password", "-s", service, "-w")
 	if err != nil {
+		// err is DELIBERATELY dropped rather than wrapped. exec.CommandError
+		// retains the child's stdout in its exported Output field, and this
+		// child's stdout is the bearer token — a nonzero exit does not mean
+		// stdout was empty. Wrapping it to "improve the error context" would
+		// put the credential into any error string, log line, or %+v that
+		// ever renders this error. Do not add %w here.
 		return Token{}, fmt.Errorf("%w: service %q", ErrTokenNotFound, service)
 	}
 	value := strings.TrimSpace(out)
@@ -108,7 +133,10 @@ func ReadToken(ctx context.Context, runner exec.Runner, service string) (Token, 
 		return Token{}, fmt.Errorf("%w: service %q", ErrTokenNotFound, service)
 	}
 	if !tokenShape.MatchString(value) {
-		return Token{}, ErrTokenMalformed
+		// Names the service but never the value — an operator running two
+		// instances needs to know WHICH entry is bad, and the malformed
+		// value itself is still a credential.
+		return Token{}, fmt.Errorf("%w: service %q", ErrTokenMalformed, service)
 	}
 	return newToken(value), nil
 }
