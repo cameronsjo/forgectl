@@ -1277,6 +1277,22 @@ func PrFindingsDir() (string, error) {
 	return filepath.Join(dir, "pr-findings"), nil
 }
 
+// TasksCachePath returns the on-disk path for the `forgectl tasks` local
+// cache: <os.UserConfigDir()>/forgectl/tasks-cache.json (macOS: ~/Library/
+// Application Support/forgectl/tasks-cache.json; Linux: ~/.config/forgectl/
+// tasks-cache.json). It derives from the same configDir() base as
+// ConfigPath/NetCachePath, so none of them drift. The cache holds only
+// task/project/label data (internal/tasks.Snapshot carries no credential
+// field) — the bearer token is read fresh from the keychain every run and
+// never touches disk.
+func TasksCachePath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "tasks-cache.json"), nil
+}
+
 // ResumeStoreDir returns the forgectl-owned directory that holds `forgectl
 // resume` session snapshots: <os.UserConfigDir()>/forgectl/resume-sessions
 // (macOS: ~/Library/Application Support/forgectl/resume-sessions; Linux:

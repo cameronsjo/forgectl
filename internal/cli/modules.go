@@ -43,5 +43,6 @@ func allModules() []module.Manifest {
 		recipeModule,
 		k8sModule,
 		themeModule,
+		tasksModule,
 	}
 }
