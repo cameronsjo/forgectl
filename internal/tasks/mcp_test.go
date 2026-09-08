@@ -117,14 +117,18 @@ func TestFence_EscapesCaseVariantDelimiters(t *testing.T) {
 
 func TestFence_NeutralisesControlSequences(t *testing.T) {
 	f := fence{nonce: "0123abcd"}
-	got, ok := f.wrap("title\x1b[31m red ‮ reversed")
+	// The bidi override is written as an ESCAPE, not as a literal character.
+	// A literal U+202E in source is itself the Trojan Source problem this test
+	// is about — it would reverse how the rest of this line renders in a
+	// reviewer's editor, which is precisely the trick being tested for.
+	got, ok := f.wrap("title\x1b[31m red \u202e reversed")
 	if !ok {
 		t.Fatal("wrap refused text it should have escaped")
 	}
 	if strings.ContainsRune(got, '\x1b') {
 		t.Fatalf("an ESC survived the fence: %q", got)
 	}
-	if strings.ContainsRune(got, '‮') {
+	if strings.ContainsRune(got, '\u202e') {
 		t.Fatalf("a bidi override survived the fence: %q", got)
 	}
 }

@@ -16,7 +16,10 @@ import (
 func writeTokenFile(t *testing.T, content string, mode os.FileMode) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
+	// 0700, not 0600: a DIRECTORY needs the execute bit to be traversable, so
+	// the gosec rule's file-shaped advice would make the token file below
+	// unreachable rather than more private. Owner-only either way.
+	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // G302: a directory needs 0700; 0600 makes it non-traversable
 		t.Fatalf("chmod tempdir: %v", err)
 	}
 	path := filepath.Join(dir, "token")

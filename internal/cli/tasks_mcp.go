@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -187,19 +188,24 @@ func serveMCPHTTP(cmd *cobra.Command, server *mcp.Server, addr string) error {
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Bind BEFORE the serving goroutine starts, so a port already in use is
+	// returned to the caller as a startup failure. Binding inside the
+	// goroutine makes an unusable address indistinguishable from a healthy
+	// start until the first request arrives.
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("tasks mcp: cannot listen on %s: %w", addr, err)
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "forgectl tasks mcp: serving streamable HTTP on %s/mcp\n", ln.Addr()) //nolint:errcheck // best-effort startup notice
+
 	errCh := make(chan error, 1)
 	go func() {
-		ln, err := net.Listen("tcp", addr)
-		if err != nil {
-			errCh <- fmt.Errorf("tasks mcp: cannot listen on %s: %w", addr, err)
-			return
+		serveErr := httpServer.Serve(ln)
+		if errors.Is(serveErr, http.ErrServerClosed) {
+			serveErr = nil
 		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "forgectl tasks mcp: serving streamable HTTP on %s/mcp\n", ln.Addr()) //nolint:errcheck // best-effort startup notice
-		if serveErr := httpServer.Serve(ln); serveErr != nil && serveErr != http.ErrServerClosed {
-			errCh <- serveErr
-			return
-		}
-		errCh <- nil
+		errCh <- serveErr
 	}()
 
 	select {
