@@ -68,16 +68,33 @@ fail() {
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
-# Step 4 files a task and asserts a 401. Pointed at a WRITE credential the
-# assertion goes red AND a real row lands on the shared board with nobody
-# cleaning it up — the writer profile cannot delete it, so it takes a human in
-# the UI. Refuse up front rather than discover it from the wreckage.
+# Step 4 files a task and asserts a 401, so a WRITE credential would leave a
+# real row on the shared board that the writer profile cannot delete.
+#
+# The name check below is a CONVENIENCE, not a control — nothing stops a
+# write-capable credential being stored under a name containing "readonly", and
+# treating a string as a permission would be exactly the kind of check that
+# cannot fail for the reason it claims. The actual protection is that the
+# verifier treats an unexpectedly SUCCESSFUL create as a failure and prints the
+# created id for manual cleanup; that arm keys on what the board did, not on
+# what the entry is called.
 case "$KEYCHAIN_SERVICE" in
 *readonly* | *read-only* | *ro) ;;
 *)
 	echo "${RED}REFUSING${RESET} keychain service '$KEYCHAIN_SERVICE': this smoke test files a task and asserts it is REFUSED." >&2
 	echo "Against a write credential the create SUCCEEDS — the assertion fails and a real task is left on the board." >&2
-	echo "Re-run with a read-only entry (a service name containing 'readonly'), or use the container transport for write testing." >&2
+	echo "Re-run with a read-only entry, or use the container transport for write testing." >&2
+	echo "(This is a name check, not a permission check — it catches the obvious mistake, not a mislabelled entry.)" >&2
+	exit 2
+	;;
+esac
+
+# --expect-projects must be an integer HERE, not inside the verifier: a
+# non-numeric value raises from int() there, which would leave no verdicts and
+# exit 0 — a broken check reading as a clean pass.
+case "$EXPECTED_PROJECTS" in
+'' | *[!0-9]*)
+	echo "--expect-projects must be a non-negative integer, got '$EXPECTED_PROJECTS'" >&2
 	exit 2
 	;;
 esac
@@ -113,19 +130,25 @@ fi
 # One python pass over the frames, so each assertion reads the same parsed
 # data. Parsing the same file five times with grep is how two assertions end
 # up disagreeing about what the server said.
-python3 - "$WORKDIR/out.jsonl" "$EXPECTED_PROJECTS" >"$WORKDIR/verdicts.txt" <<'PY'
+if ! python3 - "$WORKDIR/out.jsonl" "$EXPECTED_PROJECTS" >"$WORKDIR/verdicts.txt" <<'PY'
 import json, sys
 
+# A non-JSON line on stdout is a FAILURE, not something to skip past. stdout is
+# the transport on stdio, so anything there that is not a frame means something
+# corrupted the session — and silently continuing would let that be reported as
+# a clean run.
 frames = {}
 with open(sys.argv[1]) as fh:
-    for line in fh:
+    for lineno, line in enumerate(fh, 1):
         line = line.strip()
         if not line:
             continue
         try:
             frame = json.loads(line)
         except json.JSONDecodeError:
-            continue
+            print("FAIL stdout line %d is not a JSON-RPC frame, so the transport was corrupted: %s"
+                  % (lineno, line[:120]))
+            sys.exit(1)
         if "id" in frame:
             frames[frame["id"]] = frame
 
@@ -162,12 +185,26 @@ create_is_err = create.get("result", {}).get("isError", False)
 # used. The sentinel renders as "rejected the credential" and carries the 401;
 # an earlier version of this assertion looked for "unauthorized", which the
 # message never contains — so it reported a red against correct behaviour.
-verdict(create_is_err and "401" in create_text and "rejected the credential" in create_text,
-        "create_task was refused 401 under the read-only entry — meaningful ONLY because the read above passed (got: %s)"
-        % create_text.strip()[:140])
+if not create_is_err:
+    # The create SUCCEEDED. This is the write-credential case the name check
+    # up front cannot actually detect, and it is a failure here for two
+    # reasons: the read-only assertion is false, and a real row now exists on
+    # the shared board that this profile cannot delete. Say so, with the id.
+    verdict(False,
+            "create_task SUCCEEDED — this credential is NOT read-only, and a task was just filed on the live board. "
+            "Delete it by hand in the UI. Server said: %s" % create_text.strip()[:200])
+else:
+    verdict("401" in create_text and "rejected the credential" in create_text,
+            "create_task was refused 401 under the read-only entry — meaningful ONLY because the read above passed (got: %s)"
+            % create_text.strip()[:140])
 
 print("\n".join(out))
 PY
+then
+	echo "VERDICT: FAIL — the transcript verifier itself failed; treat this as a failed run, not a clean one" >&2
+	cat "$WORKDIR/verdicts.txt" >&2 2>/dev/null || true
+	exit 1
+fi
 
 while IFS= read -r line; do
 	case "$line" in

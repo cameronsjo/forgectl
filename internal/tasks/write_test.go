@@ -109,10 +109,29 @@ func TestAddComment_SendsPutToTheCommentRoute(t *testing.T) {
 	}
 }
 
+// TestAddComment_RefusesAnEmptyBody asserts the refusal is LOCAL, by proving
+// no request was made.
+//
+// An earlier version pointed the client at a dead address (127.0.0.1:1) and
+// only checked that err was non-nil — which it would have been anyway, from
+// the dial failure, if the local refusal were deleted. The test could not go
+// red on the regression it names. A live server plus a "was it called" flag is
+// what actually distinguishes "refused here" from "refused by the network".
 func TestAddComment_RefusesAnEmptyBody(t *testing.T) {
-	client := NewClientForTesting("http://127.0.0.1:1", newToken(fakeToken))
+	var called bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id": 1}`))
+	}))
+	defer srv.Close()
+
+	client := NewClientForTesting(srv.URL, newToken(fakeToken))
 	if _, err := client.AddComment(context.Background(), 42, "  \n "); err == nil {
 		t.Fatal("AddComment with a blank body = nil error, want a refusal")
+	}
+	if called {
+		t.Fatal("AddComment with a blank body reached the server — it must refuse locally")
 	}
 }
 

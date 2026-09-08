@@ -235,6 +235,16 @@ func serveMCPHTTP(cmd *cobra.Command, server *mcp.Server, addr string) error {
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		// IdleTimeout falls back to ReadTimeout when unset, and ReadTimeout is
+		// unset too — so an idle keep-alive connection would never be closed,
+		// and a listener meant to run for months accumulates connections
+		// nothing reclaims.
+		//
+		// ReadTimeout and WriteTimeout stay unset ON PURPOSE: the streamable
+		// transport holds a long-lived SSE response open, and a WriteTimeout
+		// would cut it mid-stream at a wall-clock deadline that has nothing to
+		// do with whether the connection is healthy.
+		IdleTimeout: 2 * time.Minute,
 	}
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
@@ -321,7 +331,12 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 	// idle sessions (mcpSessionTimeout), which is the real defence — but a
 	// healthcheck running every 30s for months should not lean on a timeout to
 	// clean up after itself.
-	releasePingSession(ctx, url, resp.Header.Get("Mcp-Session-Id"))
+	//
+	// It gets its OWN deadline rather than sharing ctx: if initialize consumed
+	// most of pingTimeout, ctx can already be expired here, and net/http would
+	// then refuse to send the DELETE before it left the process — leaving the
+	// session behind in exactly the runs where cleanup matters most.
+	releasePingSession(cmd.Context(), url, resp.Header.Get("Mcp-Session-Id"))
 
 	if !hasJSONRPCResult(raw) {
 		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body carries no JSON-RPC result", url, resp.StatusCode), 1)
@@ -334,10 +349,12 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 // failure here is ignored on purpose: this is tidy-up, and a healthcheck that
 // went red because it could not clean up would report the service unhealthy
 // for a reason that has nothing to do with the service.
-func releasePingSession(ctx context.Context, url, sessionID string) {
+func releasePingSession(parent context.Context, url, sessionID string) {
 	if sessionID == "" {
 		return
 	}
+	ctx, cancel := context.WithTimeout(parent, pingTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
 		return

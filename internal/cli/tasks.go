@@ -68,11 +68,15 @@ The three read verbs issue GETs only. ` + "`mcp`" + ` also exposes create_task a
 add_comment — but what any tool can actually do is decided by the credential's
 own grant, not by this binary.
 
-The bearer token is read fresh from the macOS login keychain on every run
-(service name below) and never touches argv, a log line, an error string, or
-the local cache. A revoked token fails loudly; it never falls back to stale
-cache data. A network failure MAY fall back to cache, and states the cache's
-age when it does.`,
+The bearer token is read fresh on every run — from the macOS login keychain
+(service name below) for every verb here, EXCEPT ` + "`mcp --http`" + `, which has no
+keychain to read and takes ` + "`--token-file`" + ` instead. There is no
+environment-variable source on either path. The token never touches argv, a log
+line, an error string, or the local cache.
+
+A revoked token fails loudly; it never falls back to stale cache data. A
+network failure MAY fall back to cache, and states the cache's age when it
+does.`,
 	}
 	cmd.PersistentFlags().StringVar(&host, "host", tasks.DefaultHost, "Vikunja API host")
 	cmd.PersistentFlags().StringVar(&keychainService, "keychain-service", tasks.DefaultKeychainService,

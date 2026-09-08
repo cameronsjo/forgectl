@@ -123,8 +123,11 @@ func TestRunMCPPing_SucceedsAgainstARealStreamableHandler(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "probe", Version: "1"}, nil)
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server },
 		&mcp.StreamableHTTPOptions{SessionTimeout: mcpSessionTimeout})
+	// Wrapped exactly as production wraps it. Mounting the bare handler would
+	// let a future tightening of the origin policy pass here and 403 in the
+	// container, which is the shape of test that reassures without covering.
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", handler)
+	mux.Handle("/mcp", http.NewCrossOriginProtection().Handler(handler))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -164,8 +167,11 @@ func TestRunMCPPing_DoesNotLeakSessions(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "probe", Version: "1"}, nil)
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server },
 		&mcp.StreamableHTTPOptions{SessionTimeout: mcpSessionTimeout})
+	// Wrapped exactly as production wraps it. Mounting the bare handler would
+	// let a future tightening of the origin policy pass here and 403 in the
+	// container, which is the shape of test that reassures without covering.
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", handler)
+	mux.Handle("/mcp", http.NewCrossOriginProtection().Handler(handler))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 

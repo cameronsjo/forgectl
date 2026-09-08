@@ -12,11 +12,13 @@ package tasks
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -131,7 +133,29 @@ const maxTokenFileSize = 4096
 // a value that is not shaped like a Vikunja API token, and a file whose mode
 // grants read to group or other. None of the three names the value.
 func ReadTokenFile(path string) (Token, error) {
-	info, err := os.Stat(path)
+	// Open FIRST, then validate the open descriptor and read from it. Doing
+	// os.Stat(path) followed by os.ReadFile(path) resolves the path twice, and
+	// between those two calls the path can be replaced — so a symlink or file
+	// swap defeats the regular-file check, the mode check, AND the size
+	// ceiling in one move, while every check reports having passed. One
+	// descriptor means every check and the read describe the same file.
+	//
+	// O_NOFOLLOW is deliberately NOT set: a token file legitimately reaches
+	// its content through a symlink in some deployments (a Kubernetes secret
+	// mount is the common one), and the checks below run against the resolved
+	// file's own mode, which is what actually matters.
+	// O_NONBLOCK matters as much as the descriptor does: opening a FIFO for
+	// reading BLOCKS until a writer appears, so a plain os.Open would hang
+	// here — before the non-regular-file refusal below ever gets to run, and
+	// before the listener opens. Non-blocking makes the open return so the
+	// check can refuse it.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // path is an operator-supplied flag value; this IS the credential source, and the fd is validated below
+	if err != nil {
+		return Token{}, fmt.Errorf("%w: %s", ErrTokenNotFound, termsafe.QuotePath(path))
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
 	if err != nil {
 		// os.Stat's error text carries the PATH, never the contents, so it is
 		// safe to include — and the path is what an operator needs in order
@@ -163,9 +187,17 @@ func ReadTokenFile(path string) (Token, error) {
 			ErrTokenMalformed, termsafe.QuotePath(path), info.Size(), maxTokenFileSize)
 	}
 
-	raw, err := os.ReadFile(path) //nolint:gosec // path is an operator-supplied flag value, stat-checked above; this IS the credential source
+	// Read from the DESCRIPTOR that was just validated, not from the path
+	// again — re-opening would reintroduce the swap window the whole shape of
+	// this function exists to close. LimitReader is belt-and-braces over the
+	// Size() ceiling above: Size() is a snapshot, and the bound that actually
+	// governs how much is read into memory should be on the read itself.
+	raw, err := io.ReadAll(io.LimitReader(f, maxTokenFileSize+1))
 	if err != nil {
 		return Token{}, fmt.Errorf("%w: %s", ErrTokenNotFound, termsafe.QuotePath(path))
+	}
+	if len(raw) > maxTokenFileSize {
+		return Token{}, fmt.Errorf("%w: %s is over %d bytes", ErrTokenMalformed, termsafe.QuotePath(path), maxTokenFileSize)
 	}
 	value := strings.TrimSpace(string(raw))
 	if value == "" {
