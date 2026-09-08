@@ -184,6 +184,28 @@ It is weaker than §3 because the operator asserts the address rather than the
 network corroborating it. It is bounded to `--http` for that reason, and the
 flag is refused on stdio.
 
+**`--pin-ip` is REQUIRED with `--http`, not merely accepted there** — a security
+review's finding, and the reasoning is worth keeping because the hole was
+opened by *omitting* a flag rather than by setting one. With an empty list the
+policy falls back to §3, and inside a container §3 has no live acceptance arm
+left except "public: accepted": there is no `route` binary, so the gateway
+lookup returns `""` and the private arm can never pass. A poisoned resolver
+answering with an attacker-controlled public address would then be admitted,
+with TLS as the sole remaining control — exactly the posture the pin exists to
+replace, reached by leaving an argument out.
+
+**11. The HTTP listener has no authentication of its own, and that is stated
+rather than implied.** Cross-origin protection is applied explicitly (the SDK's
+own guard is conditional on an environment variable and on a loopback bind, so
+the default is no check at all on a process holding a write credential). It
+stops a browser being walked into calling `create_task`; it stops nothing else.
+
+Anything that can open a TCP connection to the port reaches every tool. The
+access control is therefore entirely **network position and the gateway**: a
+two-member network with the gateway as the only other peer, and the gateway's
+own per-tool authorization. A deployment that publishes this port to a LAN has
+no boundary left, and nothing in this binary would report that.
+
 **10. A startup assertion that the host is really Vikunja.** `AssertVikunja`
 requires JSON with a `version` field from `GET /api/v1/info` before the server
 accepts a single tool call. The estate's own reverse proxy answers an
