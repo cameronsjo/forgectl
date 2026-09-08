@@ -1,8 +1,8 @@
 # 0009. Credentialed HTTP client posture: keychain-sourced, host-pinned, read-only by grant
 
-**Status: Draft**
+**Status: Accepted**
 
-Date: 2026-09-07
+Date: 2026-09-07 (amended 2026-09-08 for the MCP server: §7, §8, §9)
 
 ## Context
 
@@ -103,6 +103,94 @@ exists to refuse decoding rather than to describe it.
 The token carries no write scope. The board's only writer is the operator,
 which is what makes usage of the board measurable as human use.
 
+*Superseded in part by §8: the stdio transport's default keychain entry is
+still read-only and the sentence above still describes it. A separately-minted
+write credential now exists for the container transport, held by a different
+identity.*
+
+## Amendment, 2026-09-08 — `forgectl tasks mcp`
+
+`forgectl tasks mcp` serves the same client to an MCP client over stdio, or to
+a container over streamable HTTP. That adds a second credential source, a
+second host-pin arm, and a write grant. Each is a separate decision.
+
+**7. The container transport reads its token from a FILE, and there is no
+environment-variable source.** `--http` requires `--token-file` and refuses at
+startup naming both flags. `ReadTokenFile` refuses a missing file, a directory
+(the shape a bind mount takes when its source is absent on the host), a
+group- or world-readable mode, an oversized file, and a value that is not
+`tk_<40+ hex>` — naming the path in every refusal and the value in none.
+
+The reasoning is about *readers*, not about secrecy in the abstract. An
+environment variable is readable through `docker inspect`, through
+`/proc/<pid>/environ`, and in the rendered compose file on disk. A mounted
+file is the same disclosure class on disk and closes both runtime readers. It
+is a narrowing, not a solution, and the mode check is what stops it being
+undone by a default umask. `os.Getenv` must never become a third source here;
+adding one would silently re-open both readers with nothing red to show for it.
+
+**8. The write grant belongs to the CREDENTIAL, not to this binary.**
+`create_task` and `add_comment` exist in the tool set unconditionally. What
+either can actually do is decided by the token's scope and the bot user's
+project permission — two gates, neither of them here. The stdio default
+(`vikunja-readonly`) therefore gets a tool error on `create_task`, and
+`scripts/mcp-stdio-smoke.sh` asserts exactly that, in an order that matters: a
+passing read runs first, because an out-of-scope write and a revoked token
+both answer `401` and the refusal means nothing without it.
+
+Two things make a write attributable rather than anonymous. One bot user per
+agent, so board history names which agent wrote a row; and a `created-by:`
+trailer appended to every `create_task` description, so a row in the UI leads
+back to the call that made it without a second lookup.
+
+`create_task` pre-reads the project and refuses the write when that read
+fails. Fail-closed by decision: a project the credential cannot read is one it
+must not write to, and the write's own `401` could not have told the operator
+which of the two it was.
+
+**8a. Board text is untrusted input, and the fence is a mitigation, not a
+boundary.** Anything that can file a task can write text an agent will read.
+Every title, description, and comment this server returns is wrapped in a
+per-response `<board-text-NONCE>` fence (8 hex, `crypto/rand`), with any
+occurrence of the delimiter inside the text escaped — keyed on the delimiter
+*prefix*, not on this response's nonce, so a title carrying some other
+response's delimiter cannot survive either. Text that cannot be safely fenced
+is dropped, never returned raw.
+
+State the limit plainly: this gives the reading agent a stated frame and stops
+the text from closing that frame itself. It does not make the text safe, and
+an agent that ignores the frame is not protected by it. The controls that
+actually bound damage are the token's scope and the gateway's tool
+authorization.
+
+**9. `--pin-ip` is a second, weaker trust arm, bounded to the HTTP
+transport.** Inside a container the default gateway is the container network's,
+never the homelab's, so §3's corroboration can never succeed there and the
+client could not dial the LAN address it is deployed to reach.
+
+`--pin-ip` replaces that corroboration with an operator-supplied allow list —
+and it is an INTERSECTION, not a fallback. An address is dialed only when it is
+in the list *and* the base policy admits it with the private-range arm keyed on
+list membership. An unlisted private address stays refused; loopback,
+link-local, unspecified, and multicast stay refused; and a **public address is
+refused even when listed**, which is the arm that keeps a flag added to narrow
+the client from being the thing that widens it. Both call sites honour the
+list — `checkHostPinning` and `pinnedDialer` — because a list applied at only
+one of them re-opens the check-once gap §3a had to close. The list is never
+consulted when resolution fails: that path returns `ErrUnreachable` first, so
+the list can never act as a set of addresses to dial anyway.
+
+It is weaker than §3 because the operator asserts the address rather than the
+network corroborating it. It is bounded to `--http` for that reason, and the
+flag is refused on stdio.
+
+**10. A startup assertion that the host is really Vikunja.** `AssertVikunja`
+requires JSON with a `version` field from `GET /api/v1/info` before the server
+accepts a single tool call. The estate's own reverse proxy answers an
+unmatched host with `200` and a landing page, so without this a mis-pointed
+server starts cleanly, passes its healthcheck, and fails hours later as a
+confusing tool error rather than a refusal to start.
+
 ## Consequences
 
 - Every capability claim about this token is **empirical**. The token cannot
@@ -120,13 +208,24 @@ which is what makes usage of the board measurable as human use.
   changes the blast radius from "read data that is already the operator's" to
   "mutate a store with no trash on project delete".
 
-TODO — settle before flipping this ADR from Draft to Accepted:
+Settled 2026-09-08, flipping this ADR from Draft to Accepted:
 
-- TODO: does the host-pinning policy belong in `internal/tasks`, or should it
-  move to a shared `internal/net` policy layer once a second credentialed
-  client exists? Recorded here as a one-client decision on purpose.
-- TODO: name the token rotation and revocation trigger, and where it is
-  written down.
-- TODO: confirm whether `HomelabGateway` should stay a compile-time constant
-  or become configuration once a second machine with a different gateway
-  needs this command.
+- **Where the host-pinning policy lives.** It stays in `internal/tasks`. There
+  is still exactly one credentialed client; `--pin-ip` added an arm to the
+  same policy rather than a second consumer of it. Revisit when a genuinely
+  different client appears, not when this one grows a flag.
+- **Rotation and revocation trigger.** Rotation is triggered by the token's
+  own `expires_at` (90 days for the container credential) or by any suspected
+  disclosure. The procedure is not written here, deliberately — it is
+  operational and lives with the deployment, in the homelab repo's
+  `docs/runbooks/vikunja-bot-user.md` § Rotating a bot token, with the
+  identity and expiry ledger in the estate's Vikunja identities runbook. What
+  this ADR owes it is the invariant: a rotation is not proven by the absence
+  of a `401`, because a dead token and an out-of-scope one answer alike — a
+  passing read is the proof.
+- **`HomelabGateway` stays a compile-time constant.** The case that would have
+  argued for configuration — a second machine on a different gateway — turned
+  out to be the container, and `--pin-ip` answers it directly and more
+  narrowly than a configurable gateway would: a configurable gateway is a
+  value an attacker-influenced config could set to whatever the resolver
+  answers, whereas the pin list must name the address itself.

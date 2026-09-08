@@ -230,3 +230,74 @@ jobs:
       - name: Delete signing keychain
         if: always() && env.HAS_CERT == 'true'
         run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" || true
+
+  image:
+    # ubuntu, not the macOS job above: this publishes a linux/amd64 container
+    # image and needs buildx + a Docker daemon, neither of which the macOS
+    # runner has. It is a separate job rather than a step so a container-build
+    # failure cannot take the signed macOS release down with it — the binaries
+    # and the cask are what most users consume, and the image serves one
+    # deployed service.
+    #
+    # The image exists for `forgectl tasks mcp --http` and nothing else. Every
+    # forgectl release now publishes it, and a homelab service pins it BY
+    # DIGEST in compose precisely so cutting a CLI release cannot move that
+    # container on its own.
+    name: Publish container image
+    runs-on: ubuntu-latest
+    permissions:
+      # packages:write is the whole point of this job; contents:read is the
+      # floor for the checkout. Neither is granted at workflow level, so the
+      # macOS job above keeps its contents:write and gains no package scope.
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # One tag, the release version. No `latest` — a moving tag on an image a
+      # live service pulls is exactly the drift the digest pin in compose
+      # exists to prevent, and publishing one invites someone to use it.
+      - name: Build and push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        id: build
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.description=forgectl tasks mcp — MCP server over a Vikunja board
+
+      # The digest is what a consuming compose file pins, so print it where a
+      # deploy session can read it out of the run log without a registry call.
+      - name: Report the digest
+        run: |
+          set -euo pipefail
+          echo "digest: ${{ steps.build.outputs.digest }}"
+          {
+            echo "### Container image"
+            echo
+            echo '```'
+            echo "ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}"
+            echo '```'
+            echo
+            echo "Pin this digest in the consuming compose file — never the tag."
+          } >> "$GITHUB_STEP_SUMMARY"

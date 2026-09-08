@@ -1,0 +1,11 @@
+# The image builds one Go binary. Everything below is either irrelevant to
+# that build or must not enter the build context at all.
+.git
+.github
+.claude
+helper
+docs
+scripts
+*.md
+Dockerfile
+.dockerignore

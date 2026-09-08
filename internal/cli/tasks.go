@@ -37,9 +37,10 @@ const (
 	exitTasksHostRefused  = 4
 )
 
-// tasksModule declares the tasks extension (ADR-0005): a read-only Vikunja
-// client, a local cache, and three verbs (ls/show/ready). It claims no
-// config section — host and keychain service are flags/env, not persisted
+// tasksModule declares the tasks extension (ADR-0005): a credentialed Vikunja
+// client, a local cache, three read verbs (ls/show/ready), and an MCP server
+// over the same client (mcp). It claims no config section — host, keychain
+// service, and the mcp transport flags are flags/env, not persisted
 // preferences, so there is nothing here for the config registry to own.
 var tasksModule = module.Manifest{
 	Name: "tasks",
