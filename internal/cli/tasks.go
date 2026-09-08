@@ -37,9 +37,10 @@ const (
 	exitTasksHostRefused  = 4
 )
 
-// tasksModule declares the tasks extension (ADR-0005): a read-only Vikunja
-// client, a local cache, and three verbs (ls/show/ready). It claims no
-// config section — host and keychain service are flags/env, not persisted
+// tasksModule declares the tasks extension (ADR-0005): a credentialed Vikunja
+// client, a local cache, three read verbs (ls/show/ready), and an MCP server
+// over the same client (mcp). It claims no config section — host, keychain
+// service, and the mcp transport flags are flags/env, not persisted
 // preferences, so there is nothing here for the config registry to own.
 var tasksModule = module.Manifest{
 	Name: "tasks",
@@ -52,20 +53,30 @@ func newTasksCmd(deps module.Deps) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "tasks",
-		Short: "Browse a Vikunja task board (read-only)",
-		Long: `tasks is a read-only client for a Vikunja instance: a local cache of what
-it returns, and three verbs over that data.
+		Short: "Browse a Vikunja task board, or serve it as an MCP server",
+		Long: `tasks is a client for a Vikunja instance: a local cache of what it returns,
+three read verbs over that data, and an MCP server over the same client.
 
   forgectl tasks ls             list open tasks
   forgectl tasks show <id>      one task, its detail and its relations
   forgectl tasks ready          open tasks with no active "blocked" relation,
                                  ranked by Vikunja's own position field
+  forgectl tasks mcp            serve the board to an MCP client (stdio, or
+                                 streamable HTTP with --http)
 
-The bearer token is read fresh from the macOS login keychain on every run
-(service name below) and never touches argv, a log line, an error string, or
-the local cache. A revoked token fails loudly; it never falls back to stale
-cache data. A network failure MAY fall back to cache, and states the cache's
-age when it does.`,
+The three read verbs issue GETs only. ` + "`mcp`" + ` also exposes create_task and
+add_comment — but what any tool can actually do is decided by the credential's
+own grant, not by this binary.
+
+The bearer token is read fresh on every run — from the macOS login keychain
+(service name below) for every verb here, EXCEPT ` + "`mcp --http`" + `, which has no
+keychain to read and takes ` + "`--token-file`" + ` instead. There is no
+environment-variable source on either path. The token never touches argv, a log
+line, an error string, or the local cache.
+
+A revoked token fails loudly; it never falls back to stale cache data. A
+network failure MAY fall back to cache, and states the cache's age when it
+does.`,
 	}
 	cmd.PersistentFlags().StringVar(&host, "host", tasks.DefaultHost, "Vikunja API host")
 	cmd.PersistentFlags().StringVar(&keychainService, "keychain-service", tasks.DefaultKeychainService,
@@ -75,6 +86,7 @@ age when it does.`,
 		newTasksLsCmd(deps, &host, &keychainService),
 		newTasksShowCmd(deps, &host, &keychainService),
 		newTasksReadyCmd(deps, &host, &keychainService),
+		newTasksMCPCmd(deps, &host, &keychainService),
 	)
 	return cmd
 }

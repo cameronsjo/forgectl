@@ -12,13 +12,17 @@ package tasks
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Redacted is the fixed rendering every token-carrying type in this package
@@ -103,6 +107,109 @@ var ErrTokenNotFound = fmt.Errorf("tasks: no token found in the login keychain")
 // Vikunja API token (tk_<hex>). Refuse to send it anywhere rather than
 // discover the truncation from a confusing 401.
 var ErrTokenMalformed = fmt.Errorf("tasks: keychain entry does not look like a Vikunja API token")
+
+// ErrTokenFileMode reports a token file readable by anyone but its owner.
+// Refused rather than warned about: a group- or world-readable credential
+// file works perfectly, so nothing downstream would ever surface it, and the
+// container transport exists precisely to keep the token out of the two
+// runtime readers (`docker inspect` and /proc/1/environ) that an env var
+// exposes. A file every process on the host can read gives that back.
+var ErrTokenFileMode = fmt.Errorf("tasks: token file is readable by more than its owner")
+
+// maxTokenFileSize bounds the read. A token is ~50 bytes; anything near this
+// ceiling is a wrong path (a log, a mounted directory's contents), and the
+// bound is what stops the wrong path from being read into memory at all.
+const maxTokenFileSize = 4096
+
+// ReadTokenFile reads a bearer token from path — the container transport's
+// credential source, where there is no login keychain to read.
+//
+// It is deliberately NOT an environment-variable constructor. An env var is
+// readable through `docker inspect`, through /proc/<pid>/environ, and in the
+// rendered compose file; a mounted file is the same disclosure class on disk
+// but closes both runtime readers (ADR 0009 §7).
+//
+// Three refusals, all before the value could reach a request: a missing file,
+// a value that is not shaped like a Vikunja API token, and a file whose mode
+// grants read to group or other. None of the three names the value.
+func ReadTokenFile(path string) (Token, error) {
+	// Open FIRST, then validate the open descriptor and read from it. Doing
+	// os.Stat(path) followed by os.ReadFile(path) resolves the path twice, and
+	// between those two calls the path can be replaced — so a symlink or file
+	// swap defeats the regular-file check, the mode check, AND the size
+	// ceiling in one move, while every check reports having passed. One
+	// descriptor means every check and the read describe the same file.
+	//
+	// O_NOFOLLOW is deliberately NOT set: a token file legitimately reaches
+	// its content through a symlink in some deployments (a Kubernetes secret
+	// mount is the common one), and the checks below run against the resolved
+	// file's own mode, which is what actually matters.
+	// O_NONBLOCK matters as much as the descriptor does: opening a FIFO for
+	// reading BLOCKS until a writer appears, so a plain os.Open would hang
+	// here — before the non-regular-file refusal below ever gets to run, and
+	// before the listener opens. Non-blocking makes the open return so the
+	// check can refuse it.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // path is an operator-supplied flag value; this IS the credential source, and the fd is validated below
+	if err != nil {
+		return Token{}, fmt.Errorf("%w: %s", ErrTokenNotFound, termsafe.QuotePath(path))
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		// os.Stat's error text carries the PATH, never the contents, so it is
+		// safe to include — and the path is what an operator needs in order
+		// to fix a wrong mount.
+		return Token{}, fmt.Errorf("%w: %s", ErrTokenNotFound, termsafe.QuotePath(path))
+	}
+	if info.IsDir() {
+		// Docker creates an empty DIRECTORY at a bind-mount source that does
+		// not exist on the host, so this is the shape a missing secret takes
+		// in the deployment this function serves — not a hypothetical.
+		return Token{}, fmt.Errorf("%w: %s is a directory, not a file — a bind mount whose source was missing on the host",
+			ErrTokenNotFound, termsafe.QuotePath(path))
+	}
+	if !info.Mode().IsRegular() {
+		// The size bound below is derived from Stat, and Stat reports size 0
+		// for a FIFO, a device node, and a procfs entry — so a non-regular
+		// file sails past the ceiling and os.ReadFile then reads unbounded,
+		// or blocks forever on a FIFO with no writer. That last case hangs
+		// startup BEFORE the listener opens, which presents as a container
+		// that never becomes healthy rather than as a bad credential path.
+		return Token{}, fmt.Errorf("%w: %s is not a regular file (mode %s)",
+			ErrTokenNotFound, termsafe.QuotePath(path), info.Mode().Type())
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		return Token{}, fmt.Errorf("%w: %s is mode %04o, want 0400 or 0600", ErrTokenFileMode, termsafe.QuotePath(path), mode)
+	}
+	if info.Size() > maxTokenFileSize {
+		return Token{}, fmt.Errorf("%w: %s is %d bytes — a token file is under %d",
+			ErrTokenMalformed, termsafe.QuotePath(path), info.Size(), maxTokenFileSize)
+	}
+
+	// Read from the DESCRIPTOR that was just validated, not from the path
+	// again — re-opening would reintroduce the swap window the whole shape of
+	// this function exists to close. LimitReader is belt-and-braces over the
+	// Size() ceiling above: Size() is a snapshot, and the bound that actually
+	// governs how much is read into memory should be on the read itself.
+	raw, err := io.ReadAll(io.LimitReader(f, maxTokenFileSize+1))
+	if err != nil {
+		return Token{}, fmt.Errorf("%w: %s", ErrTokenNotFound, termsafe.QuotePath(path))
+	}
+	if len(raw) > maxTokenFileSize {
+		return Token{}, fmt.Errorf("%w: %s is over %d bytes", ErrTokenMalformed, termsafe.QuotePath(path), maxTokenFileSize)
+	}
+	value := strings.TrimSpace(string(raw))
+	if value == "" {
+		return Token{}, fmt.Errorf("%w: %s is empty", ErrTokenNotFound, termsafe.QuotePath(path))
+	}
+	if !tokenShape.MatchString(value) {
+		// Names the path, never the value — the malformed value is still a
+		// credential, and this error string reaches a startup log.
+		return Token{}, fmt.Errorf("%w: %s", ErrTokenMalformed, termsafe.QuotePath(path))
+	}
+	return newToken(value), nil
+}
 
 // ReadToken reads service's value from the macOS login keychain via
 // `security find-generic-password -s <service> -w`. The value travels on
