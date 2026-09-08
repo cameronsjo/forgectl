@@ -52,14 +52,20 @@ func newTasksCmd(deps module.Deps) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "tasks",
-		Short: "Browse a Vikunja task board (read-only)",
-		Long: `tasks is a read-only client for a Vikunja instance: a local cache of what
-it returns, and three verbs over that data.
+		Short: "Browse a Vikunja task board, or serve it as an MCP server",
+		Long: `tasks is a client for a Vikunja instance: a local cache of what it returns,
+three read verbs over that data, and an MCP server over the same client.
 
   forgectl tasks ls             list open tasks
   forgectl tasks show <id>      one task, its detail and its relations
   forgectl tasks ready          open tasks with no active "blocked" relation,
                                  ranked by Vikunja's own position field
+  forgectl tasks mcp            serve the board to an MCP client (stdio, or
+                                 streamable HTTP with --http)
+
+The three read verbs issue GETs only. ` + "`mcp`" + ` also exposes create_task and
+add_comment — but what any tool can actually do is decided by the credential's
+own grant, not by this binary.
 
 The bearer token is read fresh from the macOS login keychain on every run
 (service name below) and never touches argv, a log line, an error string, or
@@ -75,6 +81,7 @@ age when it does.`,
 		newTasksLsCmd(deps, &host, &keychainService),
 		newTasksShowCmd(deps, &host, &keychainService),
 		newTasksReadyCmd(deps, &host, &keychainService),
+		newTasksMCPCmd(deps, &host, &keychainService),
 	)
 	return cmd
 }
