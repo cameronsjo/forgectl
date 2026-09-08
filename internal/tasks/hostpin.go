@@ -83,6 +83,107 @@ func orNone(s string) string {
 	return s
 }
 
+// classifyIPWithPins is classifyIP under an explicit allow list (`--pin-ip`).
+//
+// The list is an INTERSECTION, never a fallback. With a list set, an address
+// is admitted only when BOTH hold:
+//
+//  1. it is a member of the list, and
+//  2. the base policy admits it — with the private-range arm's GATEWAY
+//     corroboration replaced by that membership, and the public arm removed.
+//
+// Each half is doing separate work, and reading it as an "or" gets the
+// direction of every arm wrong:
+//
+//   - An unlisted private address stays REFUSED. The list replaces the
+//     gateway corroboration; it does not widen the private arm, so a
+//     container that can never satisfy the gateway check does not thereby
+//     gain the whole RFC1918 space.
+//   - A listed PUBLIC address is REFUSED, even though bare classifyIP accepts
+//     public addresses (TLS is the control there). A flag added to NARROW the
+//     client must not be the one thing that admits an address the operator
+//     pinned by mistake — and the deployment this exists for reaches a LAN
+//     address, so a public answer is already the wrong answer.
+//   - Loopback, link-local, unspecified, and multicast are refused exactly as
+//     before. Listing one does not make it dialable.
+//   - An EMPTY list means no list: the base policy stands unchanged, so the
+//     stdio transport's behaviour does not move at all.
+//
+// The Tailscale CGNAT arm survives under a list because the tailnet name is
+// still the sanctioned off-LAN path (ADR 0009 §3b), but it must ALSO be
+// listed — the uncorroborated arm does not get to skip the intersection.
+func classifyIPWithPins(ip net.IP, gateway string, pins []net.IP) (allowed bool, reason string) {
+	if len(pins) == 0 {
+		return classifyIP(ip, gateway)
+	}
+	if ip == nil {
+		return false, "did not resolve to a usable address"
+	}
+	if !ipInList(ip, pins) {
+		return false, fmt.Sprintf("resolves to %s, which is not in the --pin-ip list %s", ip, formatIPList(pins))
+	}
+	// The unconditional refusals are the base policy's, re-run verbatim: a
+	// pinned loopback is still a loopback.
+	switch {
+	case ip.IsUnspecified():
+		return false, fmt.Sprintf("resolves to %s (unspecified)", ip)
+	case ip.IsLoopback():
+		return false, fmt.Sprintf("resolves to %s (loopback)", ip)
+	case ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast():
+		return false, fmt.Sprintf("resolves to %s (link-local)", ip)
+	case ip.IsMulticast() || ip.IsInterfaceLocalMulticast():
+		return false, fmt.Sprintf("resolves to %s (multicast)", ip)
+	case isTailscaleCGNAT(ip):
+		return true, fmt.Sprintf("resolves to %s (tailnet, in the --pin-ip list)", ip)
+	case ip.IsPrivate():
+		return true, fmt.Sprintf("resolves to %s (private, in the --pin-ip list)", ip)
+	}
+	return false, fmt.Sprintf(
+		"resolves to public address %s — --pin-ip admits private and tailnet addresses only, so listing a public address does not make it dialable", ip)
+}
+
+func ipInList(ip net.IP, list []net.IP) bool {
+	for _, candidate := range list {
+		if candidate.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// formatIPList renders a pin list for a refusal message. An empty list renders
+// as "(empty)" rather than "[]" so the operator can tell "no list" from "a
+// list with nothing in it" while reading the error.
+func formatIPList(list []net.IP) string {
+	if len(list) == 0 {
+		return "(empty)"
+	}
+	parts := make([]string, 0, len(list))
+	for _, ip := range list {
+		parts = append(parts, ip.String())
+	}
+	return "[" + strings.Join(parts, " ") + "]"
+}
+
+// ParsePinList turns the repeated --pin-ip flag values into addresses,
+// refusing anything that is not an IP literal. A HOSTNAME here would be a
+// second name to resolve inside the very control that exists to bound
+// resolution, so it is rejected rather than looked up.
+func ParsePinList(values []string) ([]net.IP, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	out := make([]net.IP, 0, len(values))
+	for _, v := range values {
+		ip := net.ParseIP(strings.TrimSpace(v))
+		if ip == nil {
+			return nil, fmt.Errorf("tasks: --pin-ip %q is not an IP address — the flag takes literal addresses, never hostnames", v)
+		}
+		out = append(out, ip)
+	}
+	return out, nil
+}
+
 // isTailscaleCGNAT reports whether ip is in 100.64.0.0/10.
 //
 // Accepted with NO gateway corroboration, unlike the private-range arm — and
@@ -146,7 +247,13 @@ func defaultGateway(ctx context.Context, runner exec.Runner) string {
 // its own stated threat. The caller MUST dial only the returned addresses;
 // pinnedDialer is the mechanism, and the gateway rides along so a dial-time
 // re-check needs no second `route` call.
-func checkHostPinning(ctx context.Context, runner exec.Runner, host string) (vetted []net.IP, gateway string, err error) {
+// pins, when non-empty, is the `--pin-ip` allow list and the policy becomes
+// the intersection documented on classifyIPWithPins. The list is consulted
+// ONLY to judge an address that resolution actually produced: a name that does
+// not resolve is ErrUnreachable and returns before the list is read, because
+// treating the list as a set of addresses to dial anyway would bypass the
+// resolution this function exists to vet.
+func checkHostPinning(ctx context.Context, runner exec.Runner, host string, pins []net.IP) (vetted []net.IP, gateway string, err error) {
 	ips, err := resolveHost(ctx, host)
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: %s does not resolve: %v", ErrUnreachable, host, err)
@@ -156,8 +263,13 @@ func checkHostPinning(ctx context.Context, runner exec.Runner, host string) (vet
 	}
 	gateway = defaultGateway(ctx, runner)
 	for _, ip := range ips {
-		if allowed, reason := classifyIP(ip, gateway); !allowed {
-			return nil, "", fmt.Errorf("%w: %s %s", ErrHostRefused, host, reason)
+		if allowed, reason := classifyIPWithPins(ip, gateway, pins); !allowed {
+			// The refusal names all three things an operator needs to fix it:
+			// the hostname asked for, everything it resolved to, and the list
+			// that was applied. Naming only the offending address leaves them
+			// guessing whether the list or the DNS answer is wrong.
+			return nil, "", fmt.Errorf("%w: %s %s (resolved to %s; --pin-ip list %s)",
+				ErrHostRefused, host, reason, formatIPList(ips), formatIPList(pins))
 		}
 	}
 	return ips, gateway, nil
@@ -171,8 +283,17 @@ func checkHostPinning(ctx context.Context, runner exec.Runner, host string) (vet
 //
 // The port from the requested address is preserved — only the host part is
 // replaced, so an instance on a non-443 port still works.
-func pinnedDialer(vetted []net.IP, gateway string) func(context.Context, string, string) (net.Conn, error) {
-	return pinnedDialerWithClassifier(vetted, gateway, classifyIP)
+//
+// pins is the same `--pin-ip` list checkHostPinning was given. It is applied
+// HERE TOO, not only at construction: the check and the dial are two call
+// sites of one policy, and a list honoured at only one of them re-opens the
+// check-once gap the vetted-address substitution already had to close. The
+// concrete shape it guards against is a later edit that widens the vetted set
+// without widening the list.
+func pinnedDialer(vetted []net.IP, gateway string, pins []net.IP) func(context.Context, string, string) (net.Conn, error) {
+	return pinnedDialerWithClassifier(vetted, gateway, func(ip net.IP, gw string) (bool, string) {
+		return classifyIPWithPins(ip, gw, pins)
+	})
 }
 
 // pinnedDialerWithClassifier is pinnedDialer with the policy injected. The

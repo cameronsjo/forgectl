@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -45,10 +46,22 @@ type Client struct {
 // validated; NewClient does not read the keychain itself, so a caller can
 // unit-test client construction without one.
 func NewClient(ctx context.Context, runner exec.Runner, host string, token Token) (*Client, error) {
+	return NewClientWithPins(ctx, runner, host, token, nil)
+}
+
+// NewClientWithPins is NewClient under an explicit `--pin-ip` allow list. The
+// list is an intersection with the base policy, not a fallback — see
+// classifyIPWithPins. A nil or empty list is exactly NewClient.
+//
+// It exists as a second constructor rather than a changed NewClient signature
+// because `forgectl tasks ls|show|ready` and the board hook call NewClient and
+// have no list to pass; a widened signature would make every one of them state
+// "no pins" at a call site that has nothing to say about pinning.
+func NewClientWithPins(ctx context.Context, runner exec.Runner, host string, token Token, pins []net.IP) (*Client, error) {
 	if !token.Present() {
 		return nil, fmt.Errorf("tasks: no token supplied")
 	}
-	vetted, gateway, err := checkHostPinning(ctx, runner, host)
+	vetted, gateway, err := checkHostPinning(ctx, runner, host, pins)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +89,7 @@ func NewClient(ctx context.Context, runner exec.Runner, host string, token Token
 				// `host` (the URL is unchanged), so substituting the address
 				// weakens nothing: a wrong address now fails the handshake
 				// instead of receiving the bearer token.
-				DialContext: pinnedDialer(vetted, gateway),
+				DialContext: pinnedDialer(vetted, gateway, pins),
 			},
 		},
 	}, nil

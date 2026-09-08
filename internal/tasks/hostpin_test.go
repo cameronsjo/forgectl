@@ -54,7 +54,7 @@ func TestClassifyIP_PublicAllowed(t *testing.T) {
 // real entry point (checkHostPinning), not just the pure classifier.
 func TestCheckHostPinning_RefusesLoopbackResolution(t *testing.T) {
 	runner := &exec.FakeRunner{}
-	_, _, err := checkHostPinning(context.Background(), runner, "127.0.0.1")
+	_, _, err := checkHostPinning(context.Background(), runner, "127.0.0.1", nil)
 	if err == nil {
 		t.Fatal("checkHostPinning(127.0.0.1) = nil, want ErrHostRefused")
 	}
@@ -72,7 +72,7 @@ func TestCheckHostPinning_AllowsHomelabLANWithMatchingGateway(t *testing.T) {
 			return "", nil
 		},
 	}
-	vetted, gateway, err := checkHostPinning(context.Background(), runner, "192.168.1.102")
+	vetted, gateway, err := checkHostPinning(context.Background(), runner, "192.168.1.102", nil)
 	if err != nil {
 		t.Fatalf("checkHostPinning(homelab LAN IP, matching gateway) = %v, want nil", err)
 	}
@@ -96,7 +96,7 @@ func TestCheckHostPinning_RefusesRFC1918OffHomelab(t *testing.T) {
 			return "", nil
 		},
 	}
-	_, _, err := checkHostPinning(context.Background(), runner, "192.168.1.102")
+	_, _, err := checkHostPinning(context.Background(), runner, "192.168.1.102", nil)
 	if !errors.Is(err, ErrHostRefused) {
 		t.Fatalf("checkHostPinning(RFC1918, foreign gateway) = %v, want errors.Is(ErrHostRefused)", err)
 	}
@@ -178,7 +178,7 @@ func TestPinnedDialer_DialsOnlyTheVettedAddress(t *testing.T) {
 }
 
 func TestPinnedDialer_RefusesWhenAPinnedAddressFailsTheClassifier(t *testing.T) {
-	dial := pinnedDialer([]net.IP{net.ParseIP("127.0.0.1")}, HomelabGateway)
+	dial := pinnedDialer([]net.IP{net.ParseIP("127.0.0.1")}, HomelabGateway, nil)
 	_, err := dial(context.Background(), "tcp", "tasks.example:443")
 	if !errors.Is(err, ErrHostRefused) {
 		t.Fatalf("dial to a loopback pin = %v, want errors.Is(ErrHostRefused)", err)

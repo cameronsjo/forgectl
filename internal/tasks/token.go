@@ -13,12 +13,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Redacted is the fixed rendering every token-carrying type in this package
@@ -103,6 +105,69 @@ var ErrTokenNotFound = fmt.Errorf("tasks: no token found in the login keychain")
 // Vikunja API token (tk_<hex>). Refuse to send it anywhere rather than
 // discover the truncation from a confusing 401.
 var ErrTokenMalformed = fmt.Errorf("tasks: keychain entry does not look like a Vikunja API token")
+
+// ErrTokenFileMode reports a token file readable by anyone but its owner.
+// Refused rather than warned about: a group- or world-readable credential
+// file works perfectly, so nothing downstream would ever surface it, and the
+// container transport exists precisely to keep the token out of the two
+// runtime readers (`docker inspect` and /proc/1/environ) that an env var
+// exposes. A file every process on the host can read gives that back.
+var ErrTokenFileMode = fmt.Errorf("tasks: token file is readable by more than its owner")
+
+// maxTokenFileSize bounds the read. A token is ~50 bytes; anything near this
+// ceiling is a wrong path (a log, a mounted directory's contents), and the
+// bound is what stops the wrong path from being read into memory at all.
+const maxTokenFileSize = 4096
+
+// ReadTokenFile reads a bearer token from path — the container transport's
+// credential source, where there is no login keychain to read.
+//
+// It is deliberately NOT an environment-variable constructor. An env var is
+// readable through `docker inspect`, through /proc/<pid>/environ, and in the
+// rendered compose file; a mounted file is the same disclosure class on disk
+// but closes both runtime readers (ADR 0009 §7).
+//
+// Three refusals, all before the value could reach a request: a missing file,
+// a value that is not shaped like a Vikunja API token, and a file whose mode
+// grants read to group or other. None of the three names the value.
+func ReadTokenFile(path string) (Token, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		// os.Stat's error text carries the PATH, never the contents, so it is
+		// safe to include — and the path is what an operator needs in order
+		// to fix a wrong mount.
+		return Token{}, fmt.Errorf("%w: %s", ErrTokenNotFound, termsafe.QuotePath(path))
+	}
+	if info.IsDir() {
+		// Docker creates an empty DIRECTORY at a bind-mount source that does
+		// not exist on the host, so this is the shape a missing secret takes
+		// in the deployment this function serves — not a hypothetical.
+		return Token{}, fmt.Errorf("%w: %s is a directory, not a file — a bind mount whose source was missing on the host",
+			ErrTokenNotFound, termsafe.QuotePath(path))
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		return Token{}, fmt.Errorf("%w: %s is mode %04o, want 0400 or 0600", ErrTokenFileMode, termsafe.QuotePath(path), mode)
+	}
+	if info.Size() > maxTokenFileSize {
+		return Token{}, fmt.Errorf("%w: %s is %d bytes — a token file is under %d",
+			ErrTokenMalformed, termsafe.QuotePath(path), info.Size(), maxTokenFileSize)
+	}
+
+	raw, err := os.ReadFile(path) //nolint:gosec // path is an operator-supplied flag value, stat-checked above; this IS the credential source
+	if err != nil {
+		return Token{}, fmt.Errorf("%w: %s", ErrTokenNotFound, termsafe.QuotePath(path))
+	}
+	value := strings.TrimSpace(string(raw))
+	if value == "" {
+		return Token{}, fmt.Errorf("%w: %s is empty", ErrTokenNotFound, termsafe.QuotePath(path))
+	}
+	if !tokenShape.MatchString(value) {
+		// Names the path, never the value — the malformed value is still a
+		// credential, and this error string reaches a startup log.
+		return Token{}, fmt.Errorf("%w: %s", ErrTokenMalformed, termsafe.QuotePath(path))
+	}
+	return newToken(value), nil
+}
 
 // ReadToken reads service's value from the macOS login keychain via
 // `security find-generic-password -s <service> -w`. The value travels on
