@@ -68,6 +68,20 @@ fail() {
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
+# Step 4 files a task and asserts a 401. Pointed at a WRITE credential the
+# assertion goes red AND a real row lands on the shared board with nobody
+# cleaning it up — the writer profile cannot delete it, so it takes a human in
+# the UI. Refuse up front rather than discover it from the wreckage.
+case "$KEYCHAIN_SERVICE" in
+*readonly* | *read-only* | *ro) ;;
+*)
+	echo "${RED}REFUSING${RESET} keychain service '$KEYCHAIN_SERVICE': this smoke test files a task and asserts it is REFUSED." >&2
+	echo "Against a write credential the create SUCCEEDS — the assertion fails and a real task is left on the board." >&2
+	echo "Re-run with a read-only entry (a service name containing 'readonly'), or use the container transport for write testing." >&2
+	exit 2
+	;;
+esac
+
 step "building forgectl"
 if ! go build -o "$WORKDIR/forgectl" "$REPO_ROOT" 2>"$WORKDIR/build.log"; then
 	cat "$WORKDIR/build.log" >&2

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -39,6 +40,11 @@ const (
 const (
 	maxDescriptionRunes = 2000
 	truncationMarker    = " …[truncated]"
+	// maxTitleShowRunes bounds a title on the way OUT. maxTitleRunes bounds
+	// what this client WRITES, which says nothing about a title authored in
+	// the Vikunja UI — and up to 200 of those arrive in one list_tasks result,
+	// each of them untrusted text.
+	maxTitleShowRunes = 300
 )
 
 // delimiterPrefix is the substring that opens or closes a fence, with the
@@ -90,7 +96,17 @@ func (f fence) wrap(s string) (string, bool) {
 	// Fail closed on anything the escaping did not catch. This cannot fire
 	// today; it is here so that a future edit to delimiterRe that stops
 	// matching some spelling turns into a dropped field rather than a raw one.
-	if strings.Contains(strings.ToLower(escaped), "<board-text-") {
+	//
+	// It re-runs delimiterRe rather than testing for a substring. A
+	// `strings.Contains(escaped, "<board-text-")` check — the obvious
+	// spelling — misses "</board-text-" entirely, because the '/' breaks the
+	// substring; and the CLOSING delimiter is the one that ends a fence early,
+	// so that version is blind to precisely the case it exists to catch. A
+	// bare "board-text-" check is the opposite error: escaping leaves that
+	// token intact by design ("&lt;/board-text-"), so it would drop every
+	// successfully-escaped field. The regex is the only form that means
+	// "a delimiter survived".
+	if delimiterRe.MatchString(escaped) {
 		return "", false
 	}
 	return f.open() + escaped + f.close(), true
@@ -104,6 +120,17 @@ func (f fence) wrapOrDrop(s string) string {
 		return "[board text omitted: could not be safely fenced]"
 	}
 	return out
+}
+
+// wrapLine is wrapOrDrop for a field rendered on ONE line of a list.
+//
+// Newlines survive the fence on purpose (a markdown description needs them),
+// but in a one-row-per-line listing a title containing "\n  #99 [done]
+// project 1 …" forges rows that no board row produced. An agent that respects
+// the fence is unharmed; one that skims lines is reading fabricated entries.
+// Descriptions keep their newlines; single-line renderings do not.
+func (f fence) wrapLine(s string) string {
+	return f.wrapOrDrop(strings.ReplaceAll(strings.ReplaceAll(s, "\r", " "), "\n", " "))
 }
 
 // sanitizeBoardText neutralises terminal control sequences and bidi overrides
@@ -213,14 +240,38 @@ type (
 	}
 )
 
-// NewMCPServer builds the MCP server over client. clientName names the caller
-// in the created-by trailer every create_task write appends.
+// NewMCPServer builds the MCP server over client. defaultClientName is the
+// created-by trailer's fallback, used only when the connected client declared
+// no name of its own at initialize — see callerName.
 //
 // Six tools, raw names. The names matter beyond this file: the estate gateway
 // prefixes them for clients (`vikunja_create_task`) while its authorization
 // rules match the RAW name, so renaming one here silently changes what a
 // gateway rule does or does not cover.
-func NewMCPServer(client *Client, clientName string) *mcp.Server {
+// callerName resolves who to name in a created-by trailer.
+//
+// The transport-level fallback alone cannot do this job: one HTTP container
+// serves every agent behind the gateway, so a compile-time string would put
+// "forgectl (http)" on every row and record the TRANSPORT where the trailer
+// promises the CALLER. The client's own declared name from `initialize` is the
+// only thing on the wire that distinguishes them.
+//
+// It is untrusted — a client declares whatever it likes — which is exactly why
+// it belongs in a provenance trailer rather than in an authorization decision,
+// and why createDescription sanitizes it. A row's real attribution is the bot
+// identity the token belongs to; this narrows it further when it can.
+func callerName(req *mcp.CallToolRequest, fallback string) string {
+	if req == nil || req.Session == nil {
+		return fallback
+	}
+	params := req.Session.InitializeParams()
+	if params == nil || params.ClientInfo == nil || strings.TrimSpace(params.ClientInfo.Name) == "" {
+		return fallback
+	}
+	return truncateRunes(params.ClientInfo.Name, 100)
+}
+
+func NewMCPServer(client *Client, defaultClientName string) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: MCPServerName, Version: MCPServerVersion}, nil)
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -240,7 +291,7 @@ func NewMCPServer(client *Client, clientName string) *mcp.Server {
 		var b strings.Builder
 		fmt.Fprintf(&b, "%d project(s):\n", len(projects))
 		for _, p := range projects {
-			fmt.Fprintf(&b, "  #%d %s\n", p.ID, f.wrapOrDrop(p.Title))
+			fmt.Fprintf(&b, "  #%d %s\n", p.ID, f.wrapLine(truncateRunes(p.Title, maxTitleShowRunes)))
 		}
 		return toolText(b.String()), nil, nil
 	})
@@ -262,8 +313,12 @@ func NewMCPServer(client *Client, clientName string) *mcp.Server {
 		includeDone := in.Done != nil && *in.Done
 		limit := clampLimit(in.Limit)
 
+		// Count every match, render only the first `limit` of them. Counting
+		// as we render would make "50 task(s), limit 50" ambiguous between
+		// "exactly 50 matched" and "there are more" — and the agent has no way
+		// to tell those apart or to ask for the rest.
 		var b strings.Builder
-		shown := 0
+		matched, shown := 0, 0
 		for _, task := range all {
 			if !includeDone && task.Done {
 				continue
@@ -271,13 +326,17 @@ func NewMCPServer(client *Client, clientName string) *mcp.Server {
 			if in.ProjectID > 0 && task.ProjectID != in.ProjectID {
 				continue
 			}
+			matched++
 			if shown >= limit {
-				break
+				continue
 			}
 			shown++
-			fmt.Fprintf(&b, "  #%d [%s] project %d %s\n", task.ID, doneLabel(task.Done), task.ProjectID, f.wrapOrDrop(task.Title))
+			fmt.Fprintf(&b, "  #%d [%s] project %d %s\n", task.ID, doneLabel(task.Done), task.ProjectID, f.wrapLine(truncateRunes(task.Title, maxTitleShowRunes)))
 		}
-		header := fmt.Sprintf("%d task(s), limit %d:\n", shown, limit)
+		header := fmt.Sprintf("%d task(s):\n", matched)
+		if matched > shown {
+			header = fmt.Sprintf("%d task(s), showing the first %d — raise `limit` (cap %d) for more:\n", matched, shown, maxListLimit)
+		}
 		return toolText(header + b.String()), nil, nil
 	})
 
@@ -296,14 +355,30 @@ func NewMCPServer(client *Client, clientName string) *mcp.Server {
 			return toolError("could not read task %d: %v", in.ID, err), nil, nil
 		}
 		var b strings.Builder
-		fmt.Fprintf(&b, "#%d [%s] project %d\ntitle: %s\n", task.ID, doneLabel(task.Done), task.ProjectID, f.wrapOrDrop(task.Title))
+		fmt.Fprintf(&b, "#%d [%s] project %d\ntitle: %s\n", task.ID, doneLabel(task.Done), task.ProjectID, f.wrapLine(truncateRunes(task.Title, maxTitleShowRunes)))
 		if task.Description != "" {
 			fmt.Fprintf(&b, "description: %s\n", f.wrapOrDrop(truncateRunes(task.Description, maxDescriptionRunes)))
 		}
-		for kind, related := range task.RelatedTasks {
-			for _, rel := range related {
+		// Sorted, so the same task renders identically on every call. Go
+		// randomises map iteration, and an agent diffing two get_task results
+		// would otherwise see phantom changes.
+		//
+		// The KIND is fenced like everything else off the wire. Vikunja
+		// restricts relation kinds to a fixed enum today, so this is not a
+		// demonstrated injection path — but it arrives as a JSON object key
+		// from the same untrusted response as the titles beside it, and
+		// leaving one server-supplied string on the unfenced side of a
+		// boundary this file otherwise applies uniformly is how the exception
+		// outlives the reason for it.
+		kinds := make([]string, 0, len(task.RelatedTasks))
+		for kind := range task.RelatedTasks {
+			kinds = append(kinds, kind)
+		}
+		sort.Strings(kinds)
+		for _, kind := range kinds {
+			for _, rel := range task.RelatedTasks[kind] {
 				fmt.Fprintf(&b, "relation %s: #%d [%s] %s\n",
-					sanitizeBoardText(kind), rel.ID, doneLabel(rel.Done), f.wrapOrDrop(rel.Title))
+					f.wrapLine(kind), rel.ID, doneLabel(rel.Done), f.wrapLine(truncateRunes(rel.Title, maxTitleShowRunes)))
 			}
 		}
 		return toolText(b.String()), nil, nil
@@ -324,13 +399,22 @@ func NewMCPServer(client *Client, clientName string) *mcp.Server {
 			return toolError("could not list tasks: %v", err), nil, nil
 		}
 		ready := Ready(all)
-		if len(ready) > defaultListLimit {
+		// Capture the total BEFORE slicing. Reading len() afterwards reports
+		// the truncated count as if it were the whole answer, so a board with
+		// 300 ready tasks says "50 ready task(s)" — a confident, wrong
+		// statement about the board with nothing marking it as partial.
+		total := len(ready)
+		if total > defaultListLimit {
 			ready = ready[:defaultListLimit]
 		}
 		var b strings.Builder
-		fmt.Fprintf(&b, "%d ready task(s):\n", len(ready))
+		if total > len(ready) {
+			fmt.Fprintf(&b, "%d ready task(s), showing the first %d:\n", total, len(ready))
+		} else {
+			fmt.Fprintf(&b, "%d ready task(s):\n", total)
+		}
 		for _, task := range ready {
-			fmt.Fprintf(&b, "  #%d project %d %s\n", task.ID, task.ProjectID, f.wrapOrDrop(task.Title))
+			fmt.Fprintf(&b, "  #%d project %d %s\n", task.ID, task.ProjectID, f.wrapLine(truncateRunes(task.Title, maxTitleShowRunes)))
 		}
 		return toolText(b.String()), nil, nil
 	})
@@ -339,7 +423,7 @@ func NewMCPServer(client *Client, clientName string) *mcp.Server {
 		Name: "create_task",
 		Description: "File a new task in a project. Refuses a blank title. The credential's grant decides " +
 			"which projects accept a write; a project it cannot read is refused before the write is attempted.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in createTaskInput) (*mcp.CallToolResult, any, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in createTaskInput) (*mcp.CallToolResult, any, error) {
 		f, errResult := fenceOrError()
 		if errResult != nil {
 			return errResult, nil, nil
@@ -355,12 +439,13 @@ func NewMCPServer(client *Client, clientName string) *mcp.Server {
 			return toolError("create_task: refusing to write to project %d because the pre-read of that project failed: %v",
 				in.ProjectID, err), nil, nil
 		}
-		created, err := client.CreateTask(ctx, in.ProjectID, in.Title, createDescription(in.Description, clientName))
+		created, err := client.CreateTask(ctx, in.ProjectID, in.Title,
+			createDescription(in.Description, callerName(req, defaultClientName)))
 		if err != nil {
 			return toolError("create_task: %v", err), nil, nil
 		}
 		return toolText(fmt.Sprintf("created task #%d in project %d: %s",
-			created.ID, in.ProjectID, f.wrapOrDrop(created.Title))), nil, nil
+			created.ID, in.ProjectID, f.wrapLine(truncateRunes(created.Title, maxTitleShowRunes)))), nil, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -370,6 +455,16 @@ func NewMCPServer(client *Client, clientName string) *mcp.Server {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in addCommentInput) (*mcp.CallToolResult, any, error) {
 		if strings.TrimSpace(in.Body) == "" {
 			return toolError("add_comment: body is required and must not be blank"), nil, nil
+		}
+		// The same fail-closed pre-read create_task performs, for the same
+		// reason: a task this credential cannot READ is one it must not
+		// comment on, and the write's own 401 cannot distinguish "out of
+		// scope" from "revoked token". Applying the rule to only one of two
+		// write verbs would leave the ADR stating a general decision that the
+		// code half-keeps.
+		if _, err := client.FetchTask(ctx, in.TaskID); err != nil {
+			return toolError("add_comment: refusing to comment on task %d because the pre-read of that task failed: %v",
+				in.TaskID, err), nil, nil
 		}
 		comment, err := client.AddComment(ctx, in.TaskID, in.Body)
 		if err != nil {

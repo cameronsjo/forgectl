@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -161,6 +162,25 @@ func TestTruncateRunes_MarksTruncation(t *testing.T) {
 
 // ---- server wiring ----------------------------------------------------
 
+// lastCreated records the description the stub board last received on a
+// create. Mutex-guarded because the stub serves on its own goroutine.
+var lastCreated struct {
+	mu          sync.Mutex
+	description string
+}
+
+func setLastCreatedDescription(d string) {
+	lastCreated.mu.Lock()
+	defer lastCreated.mu.Unlock()
+	lastCreated.description = d
+}
+
+func lastCreatedDescription() string {
+	lastCreated.mu.Lock()
+	defer lastCreated.mu.Unlock()
+	return lastCreated.description
+}
+
 // stubBoard is a fake Vikunja that answers the handful of routes the tools
 // use. It exists so the MCP surface can be exercised end to end (through a
 // real client session) with no live instance and no credential.
@@ -178,6 +198,11 @@ func stubBoard(t *testing.T) *httptest.Server {
 		case r.URL.Path == "/projects/1/tasks" && r.Method == http.MethodPut:
 			body := map[string]any{}
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			if d, ok := body["description"].(string); ok {
+				setLastCreatedDescription(d)
+			} else {
+				setLastCreatedDescription("")
+			}
 			w.WriteHeader(http.StatusCreated)
 			out, _ := json.Marshal(map[string]any{"id": 99, "title": body["title"], "description": body["description"], "project_id": 1})
 			_, _ = w.Write(out)
@@ -334,9 +359,7 @@ func TestCreateTask_RefusesWhenThePreReadFails(t *testing.T) {
 	}
 }
 
-func TestCreateTask_AppendsTheCreatedByTrailer(t *testing.T) {
-	srv := stubBoard(t)
-	client := NewClientForTesting(srv.URL, newToken(fakeToken))
+func TestCreateDescription_AppendsTheCreatedByTrailer(t *testing.T) {
 	desc := createDescription("a note", "hermes")
 	if !strings.Contains(desc, "created-by: hermes") {
 		t.Fatalf("description does not carry the created-by trailer: %q", desc)
@@ -344,7 +367,42 @@ func TestCreateTask_AppendsTheCreatedByTrailer(t *testing.T) {
 	if !strings.Contains(desc, "a note") {
 		t.Fatalf("the trailer replaced the caller's description: %q", desc)
 	}
-	_ = client
+	if bare := createDescription("", "hermes"); !strings.HasPrefix(bare, "created-by: hermes") {
+		t.Fatalf("an empty description should be just the trailer, got %q", bare)
+	}
+}
+
+// TestCreateTask_TrailerNamesTheCONNECTEDClient is the point of the trailer.
+// A compile-time transport string ("forgectl (http)") is the same on every row
+// when one container serves every agent behind the gateway — it records the
+// TRANSPORT where the trailer promises the CALLER. The client's declared name
+// from initialize is the only thing on the wire that separates them.
+func TestCreateTask_TrailerNamesTheConnectedClient(t *testing.T) {
+	srv := stubBoard(t)
+	client := NewClientForTesting(srv.URL, newToken(fakeToken))
+	server := NewMCPServer(client, "fallback-should-not-be-used")
+
+	t1, t2 := mcp.NewInMemoryTransports()
+	if _, err := server.Connect(context.Background(), t1, nil); err != nil {
+		t.Fatalf("server.Connect: %v", err)
+	}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "hermes", Version: "1"}, nil).
+		Connect(context.Background(), t2, nil)
+	if err != nil {
+		t.Fatalf("client.Connect: %v", err)
+	}
+	defer func() { _ = cs.Close() }()
+
+	if _, isErr := callText(t, cs, "create_task", map[string]any{"project_id": 1, "title": "ship it"}); isErr {
+		t.Fatal("create_task returned a tool error")
+	}
+	got := lastCreatedDescription()
+	if !strings.Contains(got, "created-by: hermes") {
+		t.Fatalf("trailer = %q, want it to name the connected client 'hermes'", got)
+	}
+	if strings.Contains(got, "fallback-should-not-be-used") {
+		t.Fatalf("trailer used the constructor fallback while a client name was available: %q", got)
+	}
 }
 
 func TestCreateTask_Succeeds(t *testing.T) {

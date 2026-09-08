@@ -1,11 +1,9 @@
 package tasks
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 )
@@ -31,61 +29,24 @@ type Comment struct {
 	Comment string `json:"comment"`
 }
 
-// put performs one bounded, redacting PUT against path with a JSON body, and
-// returns the response body — status asserted BEFORE any decode, for the same
-// reason get does it: Vikunja answers an out-of-scope write with 401 and a
-// JSON *object*, and a decoder aimed at the created resource would otherwise
-// read that rejection as a successful, oddly-empty creation.
+// unauthorizedOnWrite is appended to a 401/403 raised by a write. It is the
+// status an out-of-scope write gets AND the status a dead token gets on
+// everything (ADR 0009), and the difference is not visible from here — a
+// caller reading only "unauthorized" will otherwise conclude the credential is
+// revoked when its scope is simply narrower than the call.
+const unauthorizedOnWrite = " (an out-of-scope write and a revoked token both answer this; a passing READ is what tells them apart)"
+
+// put performs one bounded, redacting PUT against path with a JSON body,
+// through the same credentialed request path every read uses (Client.do), so
+// the deadline, the auth header, the host-pin escape hatch, the bounded read,
+// and the status-before-decode assertion cannot drift between verbs.
 //
 // PUT, not POST, is deliberate and is Vikunja's own shape: PUT
 // /projects/{id}/tasks creates a task, and POST /tasks/{id} updates one. A
 // client that reached for POST here would be issuing an UPDATE against a
 // route that does not exist.
 func (c *Client) put(ctx context.Context, path string, payload any) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
-	defer cancel()
-
-	// termsafe:allow-raw-json outbound API request body, never terminal output
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("tasks: encode request body: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+path, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("tasks: build request: %w", err)
-	}
-	req.Header.Set("Authorization", c.token.Header())
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		// A host-pin refusal escapes with its sentinel intact, for the same
-		// reason it does in get: folding it into ErrUnreachable would let a
-		// caller's cache-or-retry path present a security verdict as success.
-		if IsHostRefused(err) {
-			return nil, err
-		}
-		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	switch {
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		// This is the status an out-of-scope write gets AND the status a dead
-		// token gets on everything (ADR 0009). The message says so, because
-		// the difference is not visible from here and a caller reading only
-		// "unauthorized" will otherwise conclude the credential is revoked.
-		return nil, fmt.Errorf("%w: %s -> %d (an out-of-scope write and a revoked token both answer this; a passing READ is what tells them apart)",
-			ErrUnauthorized, path, resp.StatusCode)
-	case resp.StatusCode < 200 || resp.StatusCode >= 300:
-		return nil, fmt.Errorf("%w: %s -> %d", ErrUnexpectedStatus, path, resp.StatusCode)
-	}
-	if readErr != nil {
-		return nil, fmt.Errorf("%w: read body: %v", ErrUnreachable, readErr)
-	}
-	return respBody, nil
+	return c.do(ctx, http.MethodPut, path, nil, payload, unauthorizedOnWrite)
 }
 
 // CreateTask creates a task in projectID via PUT /projects/{id}/tasks and

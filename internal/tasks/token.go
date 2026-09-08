@@ -145,6 +145,16 @@ func ReadTokenFile(path string) (Token, error) {
 		return Token{}, fmt.Errorf("%w: %s is a directory, not a file — a bind mount whose source was missing on the host",
 			ErrTokenNotFound, termsafe.QuotePath(path))
 	}
+	if !info.Mode().IsRegular() {
+		// The size bound below is derived from Stat, and Stat reports size 0
+		// for a FIFO, a device node, and a procfs entry — so a non-regular
+		// file sails past the ceiling and os.ReadFile then reads unbounded,
+		// or blocks forever on a FIFO with no writer. That last case hangs
+		// startup BEFORE the listener opens, which presents as a container
+		// that never becomes healthy rather than as a bad credential path.
+		return Token{}, fmt.Errorf("%w: %s is not a regular file (mode %s)",
+			ErrTokenNotFound, termsafe.QuotePath(path), info.Mode().Type())
+	}
 	if mode := info.Mode().Perm(); mode&0o077 != 0 {
 		return Token{}, fmt.Errorf("%w: %s is mode %04o, want 0400 or 0600", ErrTokenFileMode, termsafe.QuotePath(path), mode)
 	}

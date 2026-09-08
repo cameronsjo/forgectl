@@ -1,6 +1,7 @@
 package tasks
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -31,9 +32,16 @@ const pageSize = 50
 // mechanism.
 const requestTimeout = 10 * time.Second
 
-// Client is a read-only Vikunja API client. It never mutates: only GET
-// requests are ever issued, and no method here can be reached through any
-// other verb.
+// Client is a credentialed Vikunja API client. It issues GETs, plus the two
+// CREATING PUTs in write.go (CreateTask, AddComment). It never updates and
+// never deletes: there is no POST or DELETE helper, so no method here can
+// reach one.
+//
+// It is no longer read-only, and the distinction matters for anyone reasoning
+// about blast radius. Whether a write SUCCEEDS is not decided here at all — it
+// is decided by the token's scope and the bot user's project permission, two
+// gates outside this process (ADR 0009 §8). A read-only credential gets a 401
+// from these same methods, which is the intended shape, not a failure.
 type Client struct {
 	baseURL    string
 	token      Token
@@ -122,6 +130,32 @@ func NewClientForTesting(baseURL string, token Token) *Client {
 // checked BEFORE any decode is attempted: a 401 body decoded as a task list
 // would otherwise read as a confident empty result instead of a rejection.
 func (c *Client) get(ctx context.Context, path string, query url.Values) ([]byte, error) {
+	return c.do(ctx, http.MethodGet, path, query, nil, "")
+}
+
+// do is the one credentialed request path: deadline, auth header, redirect
+// refusal, the host-pin escape hatch, the bounded read, and the status
+// assertion — for every verb.
+//
+// It exists because get and put were near-identical and had already drifted
+// apart in two places (the response cap and the 401 message) with nothing
+// recording whether that was a decision. The cost of two copies is not
+// duplication for its own sake: it is that the NEXT change to this shape — a
+// retry, a header, a redaction — has to be made twice, and the second copy is
+// the one that gets missed.
+//
+// The two genuinely different behaviours are parameters:
+//   - payload nil means no body, and no Content-Type is set.
+//   - unauthorizedNote is appended to a 401/403 error. Reads leave it empty;
+//     writes explain that an out-of-scope write and a revoked token are
+//     indistinguishable here.
+func (c *Client) do(
+	ctx context.Context,
+	method, path string,
+	query url.Values,
+	payload any,
+	unauthorizedNote string,
+) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 
@@ -129,12 +163,26 @@ func (c *Client) get(ctx context.Context, path string, query url.Values) ([]byte
 	if len(query) > 0 {
 		full += "?" + query.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, full, nil)
+
+	var reqBody io.Reader
+	if payload != nil {
+		// termsafe:allow-raw-json outbound API request body, never terminal output
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("tasks: encode request body: %w", err)
+		}
+		reqBody = bytes.NewReader(encoded)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, full, reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("tasks: build request: %w", err)
 	}
 	req.Header.Set("Authorization", c.token.Header())
 	req.Header.Set("Accept", "application/json")
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -158,7 +206,7 @@ func (c *Client) get(ctx context.Context, path string, query url.Values) ([]byte
 
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		return nil, fmt.Errorf("%w: %s -> %d", ErrUnauthorized, path, resp.StatusCode)
+		return nil, fmt.Errorf("%w: %s -> %d%s", ErrUnauthorized, path, resp.StatusCode, unauthorizedNote)
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
 		return nil, fmt.Errorf("%w: %s -> %d", ErrUnexpectedStatus, path, resp.StatusCode)
 	}
