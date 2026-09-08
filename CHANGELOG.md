@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.18.0](https://github.com/cameronsjo/forgectl/compare/v0.17.3...v0.18.0) (2026-09-08)
+
+
+### Features
+
+* **tasks:** `forgectl tasks mcp` — an MCP server over the Vikunja board, stdio or streamable HTTP, published as a distroless container image ([c844b88](https://github.com/cameronsjo/forgectl/commit/c844b889e6df1f4e1bfe2253a6140743a48bb4f2))
+* **tasks:** read-only Vikunja client with ls/show/ready ([#476](https://github.com/cameronsjo/forgectl/issues/476)) ([2e8406e](https://github.com/cameronsjo/forgectl/commit/2e8406e346e4f8dd83044c2c3616c1ee38e2285f))
+* **theme:** Artificer terminal palette, [theme] config with per-role overrides, and theme show/preview ([9f07488](https://github.com/cameronsjo/forgectl/commit/9f074884a124ccd0fa317fabb4268099c049c123))
+* **theme:** every coloured surface draws from the Artificer palette; NO_COLOR and pipes stay plain ([2bfbfbf](https://github.com/cameronsjo/forgectl/commit/2bfbfbf3ac87ffaef2355de1ef04fef2d400522e))
+* **theme:** style fang's help, version and error output from the palette ([9f07488](https://github.com/cameronsjo/forgectl/commit/9f074884a124ccd0fa317fabb4268099c049c123))
+
+
+### Bug Fixes
+
+* **cli:** honour NO_COLOR over CLICOLOR_FORCE, including in fang help and error output ([19b5467](https://github.com/cameronsjo/forgectl/commit/19b5467b2c470871ded7a4b025ca7376d2c7f2a3))
+* **cli:** send every styled command through a colour-profile writer so NO_COLOR and pipes stay plain ([19b5467](https://github.com/cameronsjo/forgectl/commit/19b5467b2c470871ded7a4b025ca7376d2c7f2a3))
+* **recipe:** submit /compact through agent prompt, not the unreleased type-submit ([#475](https://github.com/cameronsjo/forgectl/issues/475)) ([360d2dd](https://github.com/cameronsjo/forgectl/commit/360d2ddbbed678e82597aff900c7acf0ab87cdce))
+
 ## [0.17.3](https://github.com/cameronsjo/forgectl/compare/v0.17.2...v0.17.3) (2026-09-05)
 
 
