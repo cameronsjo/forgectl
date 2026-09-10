@@ -99,8 +99,15 @@ func findCompatShimImports(root string) ([]string, error) {
 			return err
 		}
 		if d.IsDir() {
-			// testdata holds deliberately odd fixtures; .git is not source.
-			if name := d.Name(); name == ".git" || name == "testdata" {
+			// testdata holds deliberately odd fixtures.
+			if d.Name() == "testdata" {
+				return filepath.SkipDir
+			}
+			// Dot-directories (.git, .claude — including nested worktrees under
+			// .claude/worktrees/) are never source; skip the whole family by name
+			// shape rather than enumerating each one. path != root guards the
+			// walk root itself, whose DirEntry.Name() can also start with ".".
+			if path != root && strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
 			}
 			return nil
