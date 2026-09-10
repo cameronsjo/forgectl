@@ -1,11 +1,17 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/fang"
+	"github.com/spf13/cobra"
+
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 	"github.com/cameronsjo/forgectl/internal/tui"
 )
@@ -191,3 +197,103 @@ func TestDispatchAction_StaleIdentityIsRefused(t *testing.T) {
 type mockExitErr struct{}
 
 func (e *mockExitErr) Error() string { return "exit status 1" }
+
+// --- leadsWithPath / path-preserving error rendering (forgectl#481) ---
+
+func TestLeadsWithPath(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		msg  string
+		want bool
+	}{
+		{name: "leading dotfile", msg: ".env not found", want: true},
+		{name: "leading absolute path", msg: "/etc/passwd is unreadable", want: true},
+		{name: "leading relative path", msg: "config/local.toml not found", want: true},
+		{name: "prose with a path later", msg: "example file .env.example not found", want: false},
+		{name: "ordinary prose", msg: "plain failure", want: false},
+		{name: "empty", msg: "", want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := leadsWithPath(tt.msg); got != tt.want {
+				t.Errorf("leadsWithPath(%q) = %t, want %t", tt.msg, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFangErrorSinkKeepsPathCaseForLeadingPathErrors pins the specific
+// corruption fang's ErrorText transform causes: it title-cases only the
+// FIRST WORD of a message, so a path-leading error like ".env not found"
+// arrives as ".Env not found" — a spelling that does not exist and that a
+// --file value the user typed byte-for-byte should never grow letters it
+// did not have.
+func TestFangErrorSinkKeepsPathCaseForLeadingPathErrors(t *testing.T) {
+	root := &cobra.Command{
+		Use:          "forgectl",
+		SilenceUsage: true,
+		RunE: func(*cobra.Command, []string) error {
+			return errors.New(".env not found")
+		},
+	}
+	var stderr bytes.Buffer
+	root.SetOut(new(bytes.Buffer))
+	root.SetErr(&stderr)
+	root.SetArgs(nil)
+
+	if err := fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef", theme.Default())...); err == nil {
+		t.Fatal("expected the command to fail")
+	}
+	out := stderr.String()
+	if !strings.Contains(out, ".env not found.") {
+		t.Errorf("path-leading error lost its original case: %q", out)
+	}
+	if strings.Contains(out, ".Env") {
+		t.Errorf("path-leading error was title-cased: %q", out)
+	}
+}
+
+// TestFangErrorSinkStructuredHeadlinePathLeadingKeepsCase is
+// renderStructuredTerminalError's sibling of the test above — the
+// structured error surface applies the same UnsetTransform guard to its
+// headline.
+func TestFangErrorSinkStructuredHeadlinePathLeadingKeepsCase(t *testing.T) {
+	root := &cobra.Command{
+		Use:          "forgectl",
+		SilenceUsage: true,
+		Args: func(*cobra.Command, []string) error {
+			return &structuredTerminalError{headline: "/etc/passwd is unreadable"}
+		},
+		RunE: func(*cobra.Command, []string) error { return nil },
+	}
+	var stderr bytes.Buffer
+	root.SetOut(new(bytes.Buffer))
+	root.SetErr(&stderr)
+	root.SetArgs(nil)
+
+	if err := fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef", theme.Default())...); err == nil {
+		t.Fatal("expected the command to fail")
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "/etc/passwd is unreadable.") {
+		t.Errorf("structured headline lost its original case: %q", out)
+	}
+	if strings.Contains(out, "/Etc") {
+		t.Errorf("structured headline was title-cased: %q", out)
+	}
+}
+
+// TestTermsafeErrorHandler_SilentCodedError_RendersNothing pins
+// silentCodedError's whole reason to exist: env check --json has already
+// written its one JSON object to stderr, and fang's error frame must not
+// be appended after it.
+func TestTermsafeErrorHandler_SilentCodedError_RendersNothing(t *testing.T) {
+	var buf bytes.Buffer
+	err := &silentCodedError{code: 2}
+	termsafeErrorHandler(&buf, fang.Styles{}, err)
+	if buf.Len() != 0 {
+		t.Errorf("termsafeErrorHandler wrote %q for a silentCodedError, want nothing", buf.String())
+	}
+	if got := ExitCode(err); got != 2 {
+		t.Errorf("ExitCode(silentCodedError) = %d, want 2", got)
+	}
+}

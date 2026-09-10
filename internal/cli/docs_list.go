@@ -118,25 +118,6 @@ func deadlineRoot(err error, fallback string) string {
 	return fallback
 }
 
-// docsListDeadlineError is docs list's own silent-coded-error type: rendered
-// through termsafeErrorHandler as nothing at all, because reportDocsListDeadline
-// already wrote everything the operator gets — the human message on stderr, or
-// (under --json) the one JSON error object. Wrapping it in WithExitCode is
-// what still gets exit 2 to `main` (exitcode.go's ExitCode walks the chain for
-// a *codedError, so this type composes with it rather than replacing it).
-//
-// Task 3 (a parallel PR, forgectl#481) is adding a general-purpose
-// silentCodedError{code int} type to execute.go for the same "render nothing,
-// carry a code" shape. This task does not wait on that merge — it defines its
-// own minimal equivalent here, and Task 1's polish reconciles the two into
-// one shared type.
-type docsListDeadlineError struct {
-	err error
-}
-
-func (e *docsListDeadlineError) Error() string { return e.err.Error() }
-func (e *docsListDeadlineError) Unwrap() error { return e.err }
-
 // docsListDeadlineJSON is the --json wire shape for a `docs list` deadline
 // failure: stdout stays empty and this is the only thing written to stderr.
 type docsListDeadlineJSON struct {
@@ -147,8 +128,8 @@ type docsListDeadlineJSON struct {
 
 // reportDocsListDeadline handles a walk that stopped on ctx.Err(): under
 // --json it writes exactly one JSON object to stderr and leaves stdout
-// untouched (printDocsList is never called), then returns a silent error so
-// termsafeErrorHandler renders nothing more; otherwise it lets the normal
+// untouched (printDocsList is never called), then returns a silentCodedError
+// (execute.go) so termsafeErrorHandler renders nothing more; otherwise it lets the normal
 // human-readable error path render walkErr, which already names the root
 // (NewIndexContext). Either way the process exits 2.
 func reportDocsListDeadline(cmd *cobra.Command, root string, walkErr error, asJSON bool) error {
@@ -160,7 +141,7 @@ func reportDocsListDeadline(cmd *cobra.Command, root string, walkErr error, asJS
 	if encErr := enc.Encode(obj); encErr != nil {
 		return WithExitCode(fmt.Errorf("docs list: encode deadline error: %w", encErr), 2)
 	}
-	return WithExitCode(&docsListDeadlineError{err: walkErr}, 2)
+	return newSilentCodedError(2)
 }
 
 // docJSON is the --json wire shape for one entry of `forgectl docs list`.

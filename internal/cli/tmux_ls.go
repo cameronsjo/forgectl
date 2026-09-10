@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -10,10 +11,40 @@ import (
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
+// tmuxLsRowJSON is the --json wire shape for one `tmux ls` row — the same
+// four fields the human table's marker/name/count/path columns show.
+type tmuxLsRowJSON struct {
+	Name     string `json:"name"`
+	Windows  int    `json:"windows"`
+	Attached bool   `json:"attached"`
+	Path     string `json:"path"`
+}
+
+// writeTmuxLsJSON encodes sessions as a JSON array through the sanctioned
+// termsafe seam. Name and Path are tmux's, not forgectl's, so they are
+// untrusted text — the encoder's own terminal-escaping is what neutralizes
+// them here, the same guarantee SafeLine gives the human table. An empty
+// result encodes [], never null.
+func writeTmuxLsJSON(w io.Writer, sessions []tmux.Session) error {
+	rows := make([]tmuxLsRowJSON, 0, len(sessions))
+	for _, s := range sessions {
+		rows = append(rows, tmuxLsRowJSON{
+			Name:     s.Name,
+			Windows:  s.Windows,
+			Attached: s.Attached,
+			Path:     s.Path,
+		})
+	}
+	enc := termsafe.JSONEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(rows)
+}
+
 // newTmuxLsCmd lists sessions as a plain aligned table. The colored,
 // icon-aware rendering is the TUI's job (M5); this is the power-mode glance.
 func newTmuxLsCmd(client *tmux.Client) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "ls",
 		Short: "List tmux sessions",
 		Args:  cobra.NoArgs,
@@ -23,6 +54,9 @@ func newTmuxLsCmd(client *tmux.Client) *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
+			if asJSON {
+				return writeTmuxLsJSON(out, sessions)
+			}
 			if len(sessions) == 0 {
 				fmt.Fprintln(out, "no tmux sessions")
 				return nil
@@ -50,4 +84,6 @@ func newTmuxLsCmd(client *tmux.Client) *cobra.Command {
 			return w.Flush()
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"name":...,"windows":...,"attached":...,"path":...}] to stdout`)
+	return cmd
 }

@@ -99,8 +99,15 @@ func findCompatShimImports(root string) ([]string, error) {
 			return err
 		}
 		if d.IsDir() {
-			// testdata holds deliberately odd fixtures; .git is not source.
-			if name := d.Name(); name == ".git" || name == "testdata" {
+			// testdata holds deliberately odd fixtures.
+			if d.Name() == "testdata" {
+				return filepath.SkipDir
+			}
+			// Dot-directories (.git, .claude — including nested worktrees under
+			// .claude/worktrees/) are never source; skip the whole family by name
+			// shape rather than enumerating each one. path != root guards the
+			// walk root itself, whose DirEntry.Name() can also start with ".".
+			if path != root && strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -217,6 +224,31 @@ func TestFindCompatShimImports_KeepsWalkingPastAnUnparseableFile(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("the shim import behind an unparseable file was not reported; hits = %v", hits)
+	}
+}
+
+// TestFindCompatShimImports_SkipsDotDirectories pins the forgectl#480 fix: a
+// shim import planted under a nested dot-directory — the same shape as a
+// `.claude/worktrees/<slug>` checkout left behind by another session — must
+// never surface as a hit. Without the skip, this test fails exactly the way
+// TestNoColorLiteralsOutsideTheme did against a real worktree tree.
+func TestFindCompatShimImports_SkipsDotDirectories(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, ".claude", "worktrees", "some-other-session")
+	if err := os.MkdirAll(nested, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	shimSrc := "package p\nimport compat \"" + compatShim + "\"\n"
+	if err := os.WriteFile(filepath.Join(nested, "x.go"), []byte(shimSrc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	hits, err := findCompatShimImports(dir)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Errorf("shim import under a nested dot-directory was reported, want it skipped; hits = %v", hits)
 	}
 }
 
