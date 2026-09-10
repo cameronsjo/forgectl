@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/fang"
+	cterm "github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
@@ -292,7 +293,62 @@ func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
 		renderStructuredTerminalError(w, styles, structured)
 		return
 	}
-	fang.DefaultErrorHandler(w, styles, termsafe.Error(err))
+	// env check --json (forgectl#481) has already written its one JSON
+	// object to stderr by the time it returns this — fang's error frame
+	// must render nothing on top of it, or the agent-facing "exactly one
+	// object" contract breaks.
+	if _, ok := err.(*silentCodedError); ok {
+		return
+	}
+	safe := termsafe.Error(err)
+	if leadsWithPath(safe.Error()) {
+		renderPathLeadingError(w, styles, safe)
+		return
+	}
+	fang.DefaultErrorHandler(w, styles, safe)
+}
+
+// leadsWithPath reports whether msg's first word looks like a filesystem
+// path — one fang's ErrorText style would title-case via its
+// titleFirstWord transform, corrupting exactly the byte-identical spelling
+// a caller typed or compares against (env_test.go's --json path field,
+// this file's own path-preserving tests). Both error surfaces
+// (termsafeErrorHandler and renderStructuredTerminalError) route a
+// path-leading message through UnsetTransform() instead of fang's default.
+func leadsWithPath(msg string) bool {
+	first, _, _ := strings.Cut(msg, " ")
+	if first == "" {
+		return false
+	}
+	return strings.Contains(first, "/") || strings.HasPrefix(first, ".")
+}
+
+// renderPathLeadingError mirrors fang.DefaultErrorHandler (help.go) except
+// the message line renders through styles.ErrorText.UnsetTransform() —
+// fang's own ErrorText.Render title-cases only the message's first word
+// (titleFirstWord), so ".env not found" would otherwise arrive on screen as
+// ".Env not found", a spelling that does not exist.
+//
+// This deliberately omits DefaultErrorHandler's trailing "Try --help for
+// usage" block (its isUsageError check): today no message can satisfy both
+// leadsWithPath and isUsageError, because isUsageError only matches one of
+// five fixed cobra/pflag prefixes ("unknown flag:", "flag needs an
+// argument:", …), none of which is a path. That's an invariant of the
+// CURRENT set of prefixes and this hand-copy, not something the compiler
+// enforces — a new cobra/pflag usage-error prefix, or a fang release that
+// restructures DefaultErrorHandler, can silently make this diverge. If a
+// path-leading message ever needs the usage hint too, add the same
+// isUsageError-shaped check here rather than assuming it still can't happen.
+func renderPathLeadingError(w io.Writer, styles fang.Styles, err error) {
+	if f, ok := w.(cterm.File); ok {
+		if !cterm.IsTerminal(f.Fd()) {
+			_, _ = fmt.Fprintln(w, err.Error())
+			return
+		}
+	}
+	_, _ = fmt.Fprintln(w, styles.ErrorHeader.String())
+	_, _ = fmt.Fprintln(w, styles.ErrorText.UnsetTransform().Render(err.Error()+"."))
+	_, _ = fmt.Fprintln(w)
 }
 
 // renderStructuredTerminalError applies fang's normal error styles one safe
@@ -302,7 +358,11 @@ func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
 // sanitizer boundary.
 func renderStructuredTerminalError(w io.Writer, styles fang.Styles, err *structuredTerminalError) {
 	_, _ = fmt.Fprintln(w, styles.ErrorHeader.String())
-	_, _ = fmt.Fprintln(w, styles.ErrorText.Render(err.headline+"."))
+	headline := styles.ErrorText
+	if leadsWithPath(err.headline) {
+		headline = headline.UnsetTransform()
+	}
+	_, _ = fmt.Fprintln(w, headline.Render(err.headline+"."))
 	if len(err.suggestions) > 0 {
 		_, _ = fmt.Fprintln(w)
 		_, _ = fmt.Fprintln(w, styles.ErrorText.Render("Did you mean this?"))
@@ -313,6 +373,23 @@ func renderStructuredTerminalError(w io.Writer, styles fang.Styles, err *structu
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, styles.ErrorText.UnsetWidth().Render("Try --help for usage."))
 	_, _ = fmt.Fprintln(w)
+}
+
+// silentCodedError marks an error whose message has already been written to
+// stderr by the caller (env check --json's one-object contract, forgectl#481)
+// — termsafeErrorHandler renders nothing for it, and ExitCode still resolves
+// its code (exitcode.go) so main's os.Exit(cli.ExitCode(err)) is unaffected.
+type silentCodedError struct {
+	code int
+}
+
+func (e *silentCodedError) Error() string { return "" }
+func (e *silentCodedError) ExitCode() int { return e.code }
+
+// newSilentCodedError mirrors WithExitCode's shape for the render-nothing
+// case.
+func newSilentCodedError(code int) error {
+	return &silentCodedError{code: code}
 }
 
 // runAction opens the TUI and performs whatever jump it selected. Jumps that
