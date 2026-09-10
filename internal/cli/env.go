@@ -163,27 +163,6 @@ argv and transcript; forgectl can't close a channel it doesn't own.`,
 	return cmd
 }
 
-// repoRelativePath renders resolved — an absolute, symlink-resolved path
-// from envpkg.Locate/ResolveTarget — relative to the repository root, so a
-// not-found message names what the caller can act on without leaking the
-// absolute filesystem location a symlink or --any-file confirmation
-// resolved to (that text reaches both a rendered terminal error and a
-// --json object an agent transcript captures verbatim). Falls back to
-// resolved itself if the root can't be re-derived — Locate having already
-// succeeded means one exists, so this is a defensive fallback, not an
-// expected path.
-func repoRelativePath(cwd, resolved string) string {
-	root, err := envpkg.RepoRoot(cwd)
-	if err != nil {
-		return resolved
-	}
-	rel, err := filepath.Rel(root, resolved)
-	if err != nil {
-		return resolved
-	}
-	return rel
-}
-
 // readDocument opens and parses realPath — the shared read used by every
 // subcommand that doesn't go through the domain Client (keys, check,
 // redact touch no clipboard, so they read directly via the exported
@@ -221,7 +200,7 @@ func newEnvKeysCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 				return err
 			}
 			if !exists {
-				return fmt.Errorf("env file %s not found", repoRelativePath(cwd, realPath))
+				return fmt.Errorf("env file %s not found", envpkg.RelativeToRepoRoot(cwd, realPath))
 			}
 			doc, err := readDocument(realPath)
 			if err != nil {
@@ -457,7 +436,7 @@ Exit codes: 0 the file matches the example · 1 keys are missing or extra · 2 t
 // absolute path can name a directory the caller never typed, and --json
 // output lands in agent transcripts verbatim.
 func notFoundCheckError(cmd *cobra.Command, cwd, resolved, wordingFmt string, asJSON bool) error {
-	rel := repoRelativePath(cwd, resolved)
+	rel := envpkg.RelativeToRepoRoot(cwd, resolved)
 	if asJSON {
 		if err := writeCheckErrorJSON(cmd.ErrOrStderr(), rel); err != nil {
 			return err
@@ -539,7 +518,7 @@ func newEnvRedactCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command
 				return err
 			}
 			if !exists {
-				return fmt.Errorf("env file %s not found", repoRelativePath(cwd, realPath))
+				return fmt.Errorf("env file %s not found", envpkg.RelativeToRepoRoot(cwd, realPath))
 			}
 			doc, err := readDocument(realPath)
 			if err != nil {

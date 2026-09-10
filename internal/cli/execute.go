@@ -323,11 +323,22 @@ func leadsWithPath(msg string) bool {
 	return strings.Contains(first, "/") || strings.HasPrefix(first, ".")
 }
 
-// renderPathLeadingError mirrors fang.DefaultErrorHandler exactly, except
+// renderPathLeadingError mirrors fang.DefaultErrorHandler (help.go) except
 // the message line renders through styles.ErrorText.UnsetTransform() —
 // fang's own ErrorText.Render title-cases only the message's first word
 // (titleFirstWord), so ".env not found" would otherwise arrive on screen as
 // ".Env not found", a spelling that does not exist.
+//
+// This deliberately omits DefaultErrorHandler's trailing "Try --help for
+// usage" block (its isUsageError check): today no message can satisfy both
+// leadsWithPath and isUsageError, because isUsageError only matches one of
+// five fixed cobra/pflag prefixes ("unknown flag:", "flag needs an
+// argument:", …), none of which is a path. That's an invariant of the
+// CURRENT set of prefixes and this hand-copy, not something the compiler
+// enforces — a new cobra/pflag usage-error prefix, or a fang release that
+// restructures DefaultErrorHandler, can silently make this diverge. If a
+// path-leading message ever needs the usage hint too, add the same
+// isUsageError-shaped check here rather than assuming it still can't happen.
 func renderPathLeadingError(w io.Writer, styles fang.Styles, err error) {
 	if f, ok := w.(cterm.File); ok {
 		if !cterm.IsTerminal(f.Fd()) {

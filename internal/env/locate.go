@@ -158,6 +158,29 @@ func RepoRoot(cwd string) (string, error) {
 	return realRoot, nil
 }
 
+// RelativeToRepoRoot renders resolved — an absolute, symlink-resolved path
+// from Locate/ResolveTarget/CopyValue — relative to the repository root for
+// cwd, so a not-found or no-such-key message names what the caller can act
+// on rather than the machine-specific absolute path (a security ruling,
+// forgectl#481): the resolved form can name a directory the user never
+// typed, and that text reaches a rendered terminal error, a --json object,
+// or a session transcript verbatim. Every caller across both this package
+// (CopyValue's messages) and internal/cli (env.go's) shares this one
+// derivation. Falls back to resolved itself if the root can't be
+// re-derived — the caller having already resolved via Locate/ResolveTarget
+// means one exists, so this is a defensive fallback, not an expected path.
+func RelativeToRepoRoot(cwd, resolved string) string {
+	root, err := RepoRoot(cwd)
+	if err != nil {
+		return resolved
+	}
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil {
+		return resolved
+	}
+	return rel
+}
+
 // findRepoRoot walks up from start looking for a .git entry — a directory
 // for an ordinary repo, a file for a worktree (its .git is a "gitdir: …"
 // pointer file). No up-walk helper exists elsewhere in forgectl; this is
