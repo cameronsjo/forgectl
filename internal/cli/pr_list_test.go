@@ -19,6 +19,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -26,6 +27,131 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/pr"
 )
+
+// TestPrListJSON_KeySet pins the exact per-row key set of `pr list --json`.
+func TestPrListJSON_KeySet(t *testing.T) {
+	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 9}
+	fake := prListRunner(nil, listWinRow("forgectl", pickWindowName(t, 9)))
+	got, err := runPrList2JSON(t, fake, ref)
+	if err != nil {
+		t.Fatalf("pr list --json: %v", err)
+	}
+
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(got), &rows); err != nil {
+		t.Fatalf("stdout did not parse as a JSON array: %v\n%s", err, got)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1: %s", len(rows), got)
+	}
+	want := []string{"ref", "created_at", "path", "status"}
+	if len(rows[0]) != len(want) {
+		t.Fatalf("row keys = %v, want exactly %v", keysOf(rows[0]), want)
+	}
+	for _, k := range want {
+		if _, ok := rows[0][k]; !ok {
+			t.Errorf("missing key %q; got %v", k, keysOf(rows[0]))
+		}
+	}
+}
+
+// TestPrListJSON_RowsMatchHumanTable asserts the JSON row's ref/status carry
+// the same values the human table's columns 1 and 4 show.
+func TestPrListJSON_RowsMatchHumanTable(t *testing.T) {
+	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 9}
+	fake := prListRunner(nil, listWinRow("forgectl", pickWindowName(t, 9)), listWinRow("forgectl", "shell"))
+
+	humanOut, err := runPrList(t, fake, ref)
+	if err != nil {
+		t.Fatalf("pr list: %v", err)
+	}
+
+	fake2 := prListRunner(nil, listWinRow("forgectl", pickWindowName(t, 9)), listWinRow("forgectl", "shell"))
+	jsonOut, err := runPrList2JSON(t, fake2, ref)
+	if err != nil {
+		t.Fatalf("pr list --json: %v", err)
+	}
+
+	var rows []struct {
+		Ref    string `json:"ref"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(jsonOut), &rows); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if !strings.Contains(humanOut, rows[0].Ref) {
+		t.Errorf("json ref %q not found in human table:\n%s", rows[0].Ref, humanOut)
+	}
+	if rows[0].Status != "live" {
+		t.Errorf("status = %q, want %q", rows[0].Status, "live")
+	}
+}
+
+// TestPrListJSON_EmptyIsArrayNeverNull: no active sessions must encode as
+// [], never null, so a caller can range over it unconditionally.
+func TestPrListJSON_EmptyIsArrayNeverNull(t *testing.T) {
+	got := runPrListOverJSON(t, prListRunner(nil), nil, nil)
+	if strings.TrimSpace(got) != "[]" {
+		t.Errorf("no-sessions --json = %q, want []", got)
+	}
+}
+
+// TestPrListJSON_EmptyIsArrayNeverNull_StdoutOnlyOnSuccess pins the "no
+// stderr on success under --json" clause.
+func TestPrListJSON_NoStderrOnSuccess(t *testing.T) {
+	sessionsDir := t.TempDir()
+	client := pr.New(prListRunner(nil), pr.WithSessionsDir(sessionsDir), pr.WithTmuxSession("forgectl"))
+	cmd := newPrListCmd(client)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("pr list --json: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty on success", stderr.String())
+	}
+}
+
+// runPrList2JSON is runPrList's --json sibling: prepares one real review
+// session against fake, then runs `pr list --json` over it.
+func runPrList2JSON(t *testing.T, fake *exec.FakeRunner, ref pr.Ref) (string, error) {
+	t.Helper()
+	fakeClaudeBin(t)
+	client := pr.New(fake, pr.WithSessionsDir(t.TempDir()), pr.WithTmuxSession("forgectl"))
+	if _, err := client.Prepare(context.Background(), ref, pr.PrepareOpts{Agent: "claude"}); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	cmd := newPrListCmd(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--json"})
+	err := cmd.ExecuteContext(context.Background())
+	return stdout.String(), err
+}
+
+// runPrListOverJSON is runPrListOver's --json sibling.
+func runPrListOverJSON(t *testing.T, fake *exec.FakeRunner, live, stale []pr.Ref) string {
+	t.Helper()
+	sessionsDir := t.TempDir()
+	seedSummaries(t, sessionsDir, live, stale)
+	client := pr.New(fake, pr.WithSessionsDir(sessionsDir), pr.WithTmuxSession("forgectl"))
+
+	cmd := newPrListCmd(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("pr list --json: %v", err)
+	}
+	return stdout.String()
+}
 
 // listWinRow builds one `tmux list-windows -a` fixture line in the format
 // internal/tmux parses: generation identity, session, index, name, active,

@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -229,8 +231,18 @@ func windowStatus(live map[pr.Ref]bool, ref pr.Ref, tmuxOK bool) string {
 	return "window gone"
 }
 
+// prListRowJSON is the --json wire shape for one `pr list` row — the same
+// four fields as the human table's tab-separated columns, in the same order.
+type prListRowJSON struct {
+	Ref       string `json:"ref"`
+	CreatedAt string `json:"created_at"`
+	Path      string `json:"path"`
+	Status    string `json:"status"`
+}
+
 func newPrListCmd(client *pr.Client) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List active clean-room review sessions",
 		Args:  cobra.NoArgs,
@@ -240,10 +252,6 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
-			if len(summaries) == 0 {
-				fmt.Fprintln(out, "no active review sessions")
-				return nil
-			}
 			// A breadcrumb only proves a review was DISPATCHED, never that it
 			// survived: tmux new-window exits 0 before the agent runs, and a
 			// window whose agent dies is destroyed outright. Cross-check each
@@ -254,16 +262,13 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 			// a question worth asking, so a list of nothing but stale records
 			// issues zero tmux calls — and in a mixed list, an unreadable tmux
 			// degrades only the live rows.
-			refs := make([]pr.Ref, 0, len(summaries))
-			for _, s := range summaries {
-				if s.IsWorkspaceLive() {
-					refs = append(refs, s.Ref())
-				}
+			live, tmuxOK := prListLiveness(cmd.Context(), client, summaries)
+			if asJSON {
+				return writePrListJSON(out, summaries, live, tmuxOK)
 			}
-			var live map[pr.Ref]bool
-			tmuxOK := true
-			if len(refs) > 0 {
-				live, tmuxOK = client.WindowsLive(cmd.Context(), refs)
+			if len(summaries) == 0 {
+				_, _ = fmt.Fprintln(out, "no active review sessions")
+				return nil
 			}
 			for _, s := range summaries {
 				// Status is APPENDED, never inserted. The breadcrumb path is
@@ -287,6 +292,46 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"ref":...,"created_at":...,"path":...,"status":...}] to stdout`)
+	return cmd
+}
+
+// prListLiveness cross-checks each live-workspace summary against tmux's
+// window list, exactly once, and returns the map both the human table and
+// the --json rows read `sessionStatus` against. A stale-only list issues
+// zero tmux calls, matching the human path's cost contract.
+func prListLiveness(ctx context.Context, client *pr.Client, summaries []pr.SessionSummary) (live map[pr.Ref]bool, tmuxOK bool) {
+	refs := make([]pr.Ref, 0, len(summaries))
+	for _, s := range summaries {
+		if s.IsWorkspaceLive() {
+			refs = append(refs, s.Ref())
+		}
+	}
+	tmuxOK = true
+	if len(refs) > 0 {
+		live, tmuxOK = client.WindowsLive(ctx, refs)
+	}
+	return live, tmuxOK
+}
+
+// writePrListJSON encodes the active review sessions as a JSON array through
+// the sanctioned termsafe seam. An empty result encodes [], never null: the
+// path is the one field here that can carry attacker-controlled bytes (a
+// FILENAME chosen on disk), and the encoder's own escaping is what makes it
+// terminal-safe on the way out — no QuotePathIfUnsafe pass is needed here.
+func writePrListJSON(out io.Writer, summaries []pr.SessionSummary, live map[pr.Ref]bool, tmuxOK bool) error {
+	rows := make([]prListRowJSON, 0, len(summaries))
+	for _, s := range summaries {
+		rows = append(rows, prListRowJSON{
+			Ref:       s.Ref().String(),
+			CreatedAt: s.CreatedAt().Format(time.RFC3339),
+			Path:      s.Path(),
+			Status:    sessionStatus(live, s, tmuxOK),
+		})
+	}
+	enc := termsafe.JSONEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(rows)
 }
 
 func newPrAttachCmd(client *pr.Client) *cobra.Command {

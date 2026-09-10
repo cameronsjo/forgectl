@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -194,11 +195,22 @@ func runWorkflowBless(cmd *cobra.Command, deps module.Deps, name string) error {
 	return nil
 }
 
+// workflowVerifyJSON is the --json wire shape for `workflow verify`. Only a
+// passing outcome is ever encoded — a failure returns an error before
+// anything is written, matching the human path's non-zero exit and leaving
+// stdout empty on both surfaces.
+type workflowVerifyJSON struct {
+	Name    string `json:"name"`
+	Builtin bool   `json:"builtin"`
+	Valid   bool   `json:"valid"`
+}
+
 // newWorkflowVerifyCmd builds `forgectl workflow verify <name>`: a read-only
 // preflight (CI, a pre-run check) that reports whether a workflow is blessed and
 // its blessing valid, exiting non-zero on any failure.
 func newWorkflowVerifyCmd() *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "verify <name>",
 		Short: "Check that a workflow is blessed and its blessing is valid",
 		Args:  cobra.ExactArgs(1),
@@ -211,17 +223,35 @@ func newWorkflowVerifyCmd() *cobra.Command {
 				return err
 			}
 			if src.Builtin {
+				if asJSON {
+					return writeWorkflowVerifyJSON(out, name, true)
+				}
 				fmt.Fprintf(out, "%s: built-in — exempt from blessing\n", name)
 				return nil
 			}
 			if err := verifierFactory().Verify(src.Path, src.Data); err != nil {
-				// Returning the error prints the typed reason and exits non-zero.
+				// Returning the error prints the typed reason and exits non-zero;
+				// under --json nothing has been written to stdout at this point.
 				return fmt.Errorf("workflow %q: %w", name, err)
+			}
+			if asJSON {
+				return writeWorkflowVerifyJSON(out, name, false)
 			}
 			fmt.Fprintf(out, "%s: blessed and valid\n", name)
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"name":...,"builtin":...,"valid":...} to stdout`)
+	return cmd
+}
+
+// writeWorkflowVerifyJSON encodes a successful verify outcome through the
+// sanctioned termsafe seam. Valid is always true here: the caller has
+// already returned on any verify failure.
+func writeWorkflowVerifyJSON(out io.Writer, name string, builtin bool) error {
+	enc := termsafe.JSONEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(workflowVerifyJSON{Name: name, Builtin: builtin, Valid: true})
 }
 
 // newWorkflowTrustCmd builds the `forgectl workflow trust` parent: establishing
