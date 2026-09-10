@@ -5,11 +5,11 @@ model: "claude-fable-5-1"
 harness: "claude-code 2.1.267"
 machine: "cf6e768835c7"
 approved_session_id: "bcffd4ae-076f-40f2-8c6d-b7c2835e4e52"
-status: in-progress
-next: "Task 1 (#479) in flight on feat/hub-menu; #485 (Task 6) reconciled with main, merge when green; Task 7 own cadence-monorepo session after all forgectl PRs merge"
+status: in-flight
+next: "Task 1 landed as cameronsjo/forgectl#490 (draft, 4 commits, tests green, unreviewed). Resume: merge origin/main into feat/hub-menu (#485 landed after its base), dispatch code-review + UX review over the worktree diff, fold findings, flip ready, merge. Then Task 7 (using-forgectl skill) as its own cadence-monorepo session. #488 (stray MCP polish) awaits its own review."
 branch: plan/hub-menu
-pr: cameronsjo/forgectl#484, #485, #486, #487 (Tasks 4, 6, 3, 5)
-updated: 2026-09-09
+pr: cameronsjo/forgectl#490 (Task 1, draft); merged: #484, #485, #486, #487
+updated: 2026-09-10
 date: 2026-09-09
 ---
 
@@ -113,13 +113,13 @@ Panel: plan-reviewer ×2, red-team-reviewer, user-experience-reviewer, agent-exp
 **Report:** `<reports-dir>/task-1.md`
 
 **Steps, in this commit order:**
-- [ ] Commit 1 `fix(cli): group parents refuse stray tokens` — `Args: cobra.NoArgs` on the three parents; table test in `execute_test.go` that walks `root.Commands()` and fails on any parent with `len(Commands())>0`, a `RunE`, no `Args`, and not in an explicit allowlist (`launch`); Go test that `tmux frobnicate` returns cobra's unknown-command error, never a Bubble Tea TTY error
-- [ ] Commit 2 `feat(tui): bare forgectl opens a hub over every module; tmux jumper stays one row` — `buildHub` table test (fake root with both tiers, config present and absent: row order per Architecture, `N` in the all-commands label, `NeedsArgs` on `pr <ref>`); `shouldLaunchTUI` table test (`[]` true; `frobnicate`, `tmux frobnicate`, `lauch` false); esc test (`menuMode` + esc → `hubMode`, no `tea.Quit`; `hubMode` + esc → quit); `ActionRunVerb` re-enters the pipeline (test: a hub-selected `launch which` and a typed `launch which` produce the same argv path); `NeedsArgs` leaf prints `$ forgectl pr <ref>` and returns nil
-- [ ] Commit 3 `feat(cli): group root help by tier; root Long names the menu` — groups; `Long`; unknown-command tail text; test asserts the tail string in `renderStructuredTerminalError`
-- [ ] Commit 4 `docs(adr): ADR-0005 addendum — the hub menu; README module count`
-- [ ] `go build ./... && go vet ./... && go test ./... && golangci-lint run --new-from-rev=origin/main` all exit 0
-- [ ] `go build -o forgectl .`; probes recorded in the PR body: bare invoke headless exits 1 with usage on stderr and 0 bytes stdout; `frobnicate` exits 1 naming the unknown command with no suggestion block; `lauch` prints `Did you mean this?` with `launch`; `tmux frobnicate` prints cobra's error, no `Bubbletea`; `quarantine restor` prints cobra's error and touches no file
-- [ ] Push; draft PR `Closes #479`, body carries `## Measured` and one `BEGIN_COMMIT_OVERRIDE` block describing the bare-invoke and unknown-verb changes
+- [x] Commit 1 `fix(cli): group parents refuse stray tokens` — `Args: cobra.NoArgs` on the three parents; table test in `execute_test.go` that walks `root.Commands()` and fails on any parent with `len(Commands())>0`, a `RunE`, no `Args`, and not in an explicit allowlist (`launch`); Go test that `tmux frobnicate` returns cobra's unknown-command error, never a Bubble Tea TTY error
+- [x] Commit 2 `feat(tui): bare forgectl opens a hub over every module; tmux jumper stays one row` — `buildHub` table test (fake root with both tiers, config present and absent: row order per Architecture, `N` in the all-commands label, `NeedsArgs` on `pr <ref>`); `shouldLaunchTUI` table test (`[]` true; `frobnicate`, `tmux frobnicate`, `lauch` false); esc test (`menuMode` + esc → `hubMode`, no `tea.Quit`; `hubMode` + esc → quit); `ActionRunVerb` re-enters the pipeline (test: a hub-selected `launch which` and a typed `launch which` produce the same argv path); `NeedsArgs` leaf prints `$ forgectl pr <ref>` and returns nil
+- [x] Commit 3 `feat(cli): group root help by tier; root Long names the menu` — groups; `Long`; unknown-command tail text; test asserts the tail string in `renderStructuredTerminalError`
+- [x] Commit 4 `docs(adr): ADR-0005 addendum — the hub menu; README module count`
+- [x] `go build ./... && go vet ./... && go test ./... && golangci-lint run --new-from-rev=origin/main` all exit 0
+- [x] `go build -o forgectl .`; probes recorded in the PR body: bare invoke headless exits 1 with usage on stderr and 0 bytes stdout; `frobnicate` exits 1 naming the unknown command with no suggestion block; `lauch` prints `Did you mean this?` with `launch`; `tmux frobnicate` prints cobra's error, no `Bubbletea`; `quarantine restor` prints cobra's error and touches no file
+- [x] Push; draft PR `Closes #479`, body carries `## Measured` and one `BEGIN_COMMIT_OVERRIDE` block describing the bare-invoke and unknown-verb changes
 - [ ] run `cadence-forge:polish`; fold findings
 
 ---
@@ -260,6 +260,9 @@ Premise note: the hang was observed twice on 2026-09-09 by the agent-experience 
 - **Task 3 touched `internal/env/locate.go` and `internal/env/env.go`** (not in its file list): a repo-relative path needed a root accessor (`RepoRoot`, `RelativeToRepoRoot`), and the review folded the same not-found wording into `env get`. Merged as #486.
 - **Task 4: the plan cited `TestSingleLipgloss`, which does not exist**; the real test is `TestNoLipglossCompatShim`. The reproduce step used that name. Merged as #484.
 - **Task 6 defined `docsListDeadlineError` while Task 3 was unmerged**, as the plan allowed; the orchestrator folded it into `silentCodedError` when merging `main` into #485 (`7c1eeaa`), not in Task 1's polish.
+- **Task 1: `buildHub` dropped the `mods []module.Manifest` parameter.** Calling `allModules()` from inside `tmuxModule`'s constructor is a Go initialization cycle; `root.go` stamps `forgectl:hub-order` and `forgectl:hub-tier` cobra annotations instead and `buildHub(root, configPresent)` reads them. Hub tier bookkeeping is therefore separate from root help's `GroupID` (setting a `GroupID` before `AddGroup` panics at `Execute()`).
+- **Task 1 added `tui.ActionShowInvocation`** beside `ActionRunVerb`: a `NeedsArgs` leaf prints the invocation and runs nothing, a different post-teardown contract.
+- **Task 1's review pass did not run**: the session closed first. #490 is draft and unreviewed.
 - **`cadence-forge:polish` was dropped from Task 1's dispatch**: in Task 5 it ran `code-review --fix` against the last commit on the primary checkout and left 79 lines of edits on `main`. Those became #488. Tasks 1 and 6 ran `cadence:code-reviewer` on a worktree diff instead.
 
 ## Learnings
