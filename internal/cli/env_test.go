@@ -869,6 +869,97 @@ func TestEnvCheckCmd_MissingFile_ExitTwo(t *testing.T) {
 	}
 }
 
+// checkErrorJSONWire mirrors checkErrorJSON's wire shape for decoding in
+// tests without exporting the type.
+type checkErrorJSONWire struct {
+	Error string `json:"error"`
+	Code  string `json:"code"`
+	Path  string `json:"path"`
+}
+
+func TestEnvCheckCmd_JSON_MissingFile_OneStderrObject_ExitTwo(t *testing.T) {
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, ".env.example"), []byte("A=\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+
+	client, _ := envFixture()
+	cmd := newEnvCmdForClient(client, theme.Theme{})
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"check", "--json"})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("check --json with a missing --file returned nil error, want exit 2")
+	}
+	if code := ExitCode(err); code != 2 {
+		t.Errorf("ExitCode(err) = %d, want 2", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty under --json exit 2", stdout.String())
+	}
+
+	dec := json.NewDecoder(&stderr)
+	var got checkErrorJSONWire
+	if decErr := dec.Decode(&got); decErr != nil {
+		t.Fatalf("stderr = %q, not valid JSON: %v", stderr.String(), decErr)
+	}
+	if dec.More() {
+		t.Fatalf("stderr carried more than one JSON value: %q", stderr.String())
+	}
+	if got.Error != "env file not found" {
+		t.Errorf("error = %q, want %q", got.Error, "env file not found")
+	}
+	if got.Code != "file_not_found" {
+		t.Errorf("code = %q, want %q", got.Code, "file_not_found")
+	}
+	if got.Path != ".env" {
+		t.Errorf("path = %q, want repo-relative %q (never the resolved absolute path)", got.Path, ".env")
+	}
+	if strings.ContainsRune(stderr.String(), 0x1b) {
+		t.Errorf("stderr contained an ESC byte: %q", stderr.String())
+	}
+}
+
+func TestEnvCheckCmd_JSON_MissingExampleFile_OneStderrObject_ExitTwo(t *testing.T) {
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("A=1\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+
+	client, _ := envFixture()
+	cmd := newEnvCmdForClient(client, theme.Theme{})
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"check", "--json"})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("check --json with a missing --example returned nil error, want exit 2")
+	}
+	if code := ExitCode(err); code != 2 {
+		t.Errorf("ExitCode(err) = %d, want 2", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty under --json exit 2", stdout.String())
+	}
+
+	var got checkErrorJSONWire
+	if decErr := json.Unmarshal(stderr.Bytes(), &got); decErr != nil {
+		t.Fatalf("stderr = %q, not valid JSON: %v", stderr.String(), decErr)
+	}
+	if got.Path != ".env.example" {
+		t.Errorf("path = %q, want repo-relative %q", got.Path, ".env.example")
+	}
+}
+
 func TestEnvCheckCmd_JSON_Clean_EmptyArraysNotNull(t *testing.T) {
 	repo := t.TempDir()
 	initEnvGitRepo(t, repo)
@@ -922,9 +1013,9 @@ func TestEnvCheckCmd_JSON_Drift_ReportsNamesAndExitsOne(t *testing.T) {
 
 	client, _ := envFixture()
 	cmd := newEnvCmdForClient(client, theme.Theme{})
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
-	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetErr(&stderr)
 	cmd.SetArgs([]string{"check", "--json"})
 
 	err := cmd.ExecuteContext(context.Background())
@@ -933,6 +1024,12 @@ func TestEnvCheckCmd_JSON_Drift_ReportsNamesAndExitsOne(t *testing.T) {
 	}
 	if code := ExitCode(err); code != 1 {
 		t.Errorf("ExitCode(err) = %d, want 1 (drift)", code)
+	}
+	// Drift is a comparison result, not the missing-file class the
+	// silentCodedError stderr object exists for — nothing should land on
+	// stderr here.
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty for a drift result under --json", stderr.String())
 	}
 
 	var got checkJSON

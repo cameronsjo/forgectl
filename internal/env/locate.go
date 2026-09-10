@@ -134,6 +134,30 @@ func Locate(fileFlag, cwd string, allowAnyFile bool) (realPath string, exists bo
 	return resolved, exists, nil
 }
 
+// RepoRoot returns the resolved (symlink-following) repository root for
+// cwd — the same walk-up ResolveTarget performs internally, exposed so a
+// caller can render a path RELATIVE to it instead of the absolute,
+// symlink-resolved form ResolveTarget/Locate return. A caller composing a
+// not-found message needs this: the resolved path can name a directory
+// (and a machine-specific absolute prefix) the user never typed, and that
+// text reaches both a rendered terminal error and a --json object an agent
+// transcript captures verbatim.
+func RepoRoot(cwd string) (string, error) {
+	absCwd, err := filepath.Abs(cwd)
+	if err != nil {
+		return "", fmt.Errorf("resolve cwd: %w", err)
+	}
+	root, err := findRepoRoot(absCwd)
+	if err != nil {
+		return "", err
+	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve repository root %s: %w", root, err)
+	}
+	return realRoot, nil
+}
+
 // findRepoRoot walks up from start looking for a .git entry — a directory
 // for an ordinary repo, a file for a worktree (its .git is a "gitdir: …"
 // pointer file). No up-walk helper exists elsewhere in forgectl; this is
