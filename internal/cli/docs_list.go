@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -37,6 +38,10 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if limit < 0 {
+				return fmt.Errorf("--limit must be 0 or a positive count, not %d", limit)
+			}
+
 			roots, err := resolveDocsRoots(args, deps.Cfg.Docs)
 			if err != nil {
 				return err
@@ -53,15 +58,35 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 			if len(roots) > 0 {
 				progressRoot = roots[0]
 			}
+			// mu and printed together make the progress line and any later
+			// write to the same stderr sink mutually exclusive: the AfterFunc
+			// callback and RunE's own goroutine never call cmd.ErrOrStderr()
+			// concurrently (that race corrupted interleaved writes), and
+			// setting printed under the lock before RunE writes anything else
+			// also stops a progress line from appearing AFTER the result —
+			// timer.Stop() alone only prevents a FUTURE fire; it does not
+			// wait for one already in flight.
+			var mu sync.Mutex
+			printed := false
 			timer := time.AfterFunc(docsListProgressDelay, func() {
+				mu.Lock()
+				defer mu.Unlock()
+				if printed {
+					return
+				}
+				printed = true
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "indexing %s …\n", termsafe.SafeLine(progressRoot))
 			})
 			defer timer.Stop()
 
 			idx, err := docspkg.NewIndexContext(ctx, roots, opts)
+			mu.Lock()
+			printed = true
+			mu.Unlock()
+			timer.Stop()
 			if err != nil {
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-					return reportDocsListDeadline(cmd, progressRoot, err, asJSON)
+					return reportDocsListDeadline(cmd, deadlineRoot(err, progressRoot), err, asJSON)
 				}
 				return err
 			}
@@ -75,8 +100,22 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
 	cmd.Flags().DurationVar(&timeout, "timeout", 15*time.Second, "walk deadline, e.g. 15s or 2m")
-	cmd.Flags().IntVar(&limit, "limit", 0, "stop after N entries (0 or unset: no limit)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "print only the first N entries, after the full walk completes (0 or unset: no limit)")
 	return cmd
+}
+
+// deadlineRoot reports which root a deadline stopped on: the exact root a
+// *docspkg.WalkDeadlineError carries, when the error is one, since
+// NewIndexContext may be walking any of several roots and the one that
+// actually stalled is not necessarily the caller's first. fallback is used
+// only for an error that reached this path without that type (defensive; no
+// known caller of NewIndexContext returns one otherwise).
+func deadlineRoot(err error, fallback string) string {
+	var deadline *docspkg.WalkDeadlineError
+	if errors.As(err, &deadline) {
+		return deadline.Root
+	}
+	return fallback
 }
 
 // docsListDeadlineError is docs list's own silent-coded-error type: rendered

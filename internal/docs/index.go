@@ -224,9 +224,10 @@ func NewIndexWithOptions(paths []string, opts IndexOptions) (*Index, error) {
 // NewIndexContext builds an Index exactly as NewIndexWithOptions does, except
 // each directory walk (walkRoot) checks ctx.Err() on every directory entry it
 // visits and stops early when the caller's deadline or cancellation fires —
-// see docs list's --timeout (forgectl#483). A canceled or expired ctx does
-// not fail the roots already walked; it fails the ONE root being walked when
-// ctx.Err() first fires, and the error names that root and wraps ctx.Err().
+// see docs list's --timeout (forgectl#483). ctx.Err() firing while walking
+// one root fails the WHOLE build: NewIndexContext returns early with a
+// *WalkDeadlineError naming that root and wrapping ctx.Err(), discarding any
+// roots already walked along with it — there is no partial Index to return.
 func NewIndexContext(ctx context.Context, paths []string, opts IndexOptions) (*Index, error) {
 	idx := &Index{paths: append([]string(nil), paths...), opts: opts}
 	labels := map[string]bool{}
@@ -305,11 +306,16 @@ func resolveRootKind(canonical string, override RootKind, hasOverride bool) (Roo
 
 // indexDirRoot canonicalizes dir and walks it for markdown files.
 //
-// A ctx.Err() from walkRoot is returned as-is, not re-wrapped with "docs root
-// %q": walkRoot already names the root that stopped (NewIndexContext), and a
-// second "docs root %q" layer would name it twice without adding information.
-// Every other walkRoot error (a real filesystem fault) keeps the existing
-// wrap.
+// A *WalkDeadlineError from walkRoot is returned as-is, not re-wrapped with
+// "docs root %q": walkRoot already names the root that stopped
+// (NewIndexContext), and a second "docs root %q" layer would name it twice
+// without adding information. The check is on the ERROR's own type
+// (errors.As), not on ctx.Err() at the time indexDirRoot happens to look —
+// checking the ambient context instead of the concrete error would
+// misclassify a real filesystem fault (e.g. permission denied) as a deadline
+// error whenever the two race, discarding its "docs root %q" wrap for no
+// reason. Every other walkRoot error (a real filesystem fault) keeps the
+// existing wrap.
 func indexDirRoot(ctx context.Context, labels map[string]bool, dir string, override RootKind, hasOverride bool) (Root, []Doc, error) {
 	canonical, err := CanonicalizeRoot(dir)
 	if err != nil {
@@ -320,7 +326,8 @@ func indexDirRoot(ctx context.Context, labels map[string]bool, dir string, overr
 	root := Root{Label: label, Path: canonical, Kind: kind, VaultPath: vaultPath}
 	docs, err := walkRoot(ctx, root)
 	if err != nil {
-		if ctx.Err() != nil {
+		var deadline *WalkDeadlineError
+		if errors.As(err, &deadline) {
 			return Root{}, nil, err
 		}
 		return Root{}, nil, fmt.Errorf("docs root %q: %w", dir, err)
@@ -429,6 +436,25 @@ func excludedDir(name string) bool {
 	return hiddenOrVendorDir[name] || strings.HasPrefix(name, ".")
 }
 
+// WalkDeadlineError is returned when a walk stops because ctx.Err() fired
+// (NewIndexContext, forgectl#483) — Root is the specific root that was being
+// walked at that moment, which the caller needs and cannot otherwise recover:
+// NewIndexContext may be building an Index over several paths, and the one
+// that stalled is not necessarily the first. A caller reporting the deadline
+// (docs list's --json error object) should errors.As for this type rather
+// than assuming its own first root argument, which does not track which of
+// several roots was actually in progress.
+type WalkDeadlineError struct {
+	Root string
+	Err  error
+}
+
+func (e *WalkDeadlineError) Error() string {
+	return fmt.Sprintf("docs index: walk of %s stopped: %s", e.Root, e.Err)
+}
+
+func (e *WalkDeadlineError) Unwrap() error { return e.Err }
+
 // walkRoot discovers markdown files under root. It does not follow symlinks
 // for either directories or files during the walk — fs.WalkDir already
 // doesn't descend into a symlinked directory, and a symlinked file is
@@ -443,7 +469,7 @@ func walkRoot(ctx context.Context, root Root) ([]Doc, error) {
 			return err
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return fmt.Errorf("docs index: walk of %s stopped: %w", root.Path, ctxErr)
+			return &WalkDeadlineError{Root: root.Path, Err: ctxErr}
 		}
 		if d.IsDir() {
 			if path != root.Path && excludedDir(d.Name()) {
