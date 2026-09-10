@@ -276,6 +276,51 @@ func TestQuarantineRestorReturnsCobraErrorAndTouchesNothing(t *testing.T) {
 	}
 }
 
+// --- ActionRunVerb re-enters the typed dispatch pipeline (forgectl#479) ---
+
+// TestRunHubVerb_MatchesTypedDispatch pins the Architecture's re-entry
+// claim directly: a hub-selected "launch which" and a typed "forgectl
+// launch which" must produce byte-identical stdout, because runHubVerb
+// hands the same argv to the same execCommand a typed invocation uses —
+// launchIntercept and the extension rungs apply either way.
+func TestRunHubVerb_MatchesTypedDispatch(t *testing.T) {
+	t.Setenv(skipLegacyMigrateEnv, "1") // skip the migration side-effects; not what this test is about
+
+	deps := module.Deps{Runner: &exec.FakeRunner{}, Theme: theme.Default()}
+	argv := []string{"launch", "which"}
+
+	var hubOut bytes.Buffer
+	hubRoot := newRoot(deps)
+	hubRoot.SetOut(&hubOut)
+	hubRoot.SetErr(new(bytes.Buffer))
+	if err := runHubVerb(context.Background(), deps, hubRoot, argv, deps.Theme); err != nil {
+		t.Fatalf("runHubVerb() error = %v", err)
+	}
+
+	var typedOut bytes.Buffer
+	typedRoot := newRoot(deps)
+	typedRoot.SetOut(&typedOut)
+	typedRoot.SetErr(new(bytes.Buffer))
+	if err := execCommand(context.Background(), typedRoot, argv, deps.Theme); err != nil {
+		t.Fatalf("execCommand() error = %v", err)
+	}
+
+	if hubOut.String() != typedOut.String() {
+		t.Errorf("hub-selected output differs from typed dispatch:\nhub:   %q\ntyped: %q", hubOut.String(), typedOut.String())
+	}
+}
+
+// TestRunAction_ActionShowInvocationPrintsAndDoesNotRun pins the NeedsArgs
+// leaf's contract: the caller prints "$ forgectl <line>" (placeholder
+// intact) to stderr and runs nothing.
+func TestRunAction_ActionShowInvocationPrintsAndDoesNotRun(t *testing.T) {
+	th := theme.Default()
+	line := hubDollarLine(th, []string{"pr", "<ref>"})
+	if !strings.Contains(line, "$ forgectl pr <ref>") {
+		t.Errorf("hubDollarLine(...) = %q, want it to contain %q", line, "$ forgectl pr <ref>")
+	}
+}
+
 // --- leadsWithPath / path-preserving error rendering (forgectl#481) ---
 
 func TestLeadsWithPath(t *testing.T) {
