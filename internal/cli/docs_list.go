@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,15 +13,29 @@ import (
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
+// docsListProgressDelay is how long `docs list` waits with no output before
+// telling the operator which root it's still walking — long enough that a
+// normal, fast index never prints it, short enough that a hung or
+// cloud-backed root doesn't read as the command having stalled silently.
+const docsListProgressDelay = 2 * time.Second
+
 // newDocsListCmd builds `forgectl docs list [dir|file ...]` — lists the
 // indexed doc set without binding a server.
 func newDocsListCmd(deps module.Deps) *cobra.Command {
 	var asJSON bool
+	var timeout time.Duration
+	var limit int
 
 	cmd := &cobra.Command{
 		Use:   "list [dir|file ...]",
 		Short: "List the indexed docs, most-recently-modified first",
 		Args:  cobra.ArbitraryArgs,
+		// SilenceUsage/SilenceErrors mirror env.go's own setting: a deadline
+		// error under --json has already put its ONE JSON object on stderr
+		// (reportDocsListDeadline); cobra's own "Error: ..." line and usage
+		// block would be a second, conflicting write to the same stream.
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			roots, err := resolveDocsRoots(args, deps.Cfg.Docs)
 			if err != nil {
@@ -29,15 +45,83 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			idx, err := docspkg.NewIndexWithOptions(roots, opts)
+
+			ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
+			defer cancel()
+
+			progressRoot := ""
+			if len(roots) > 0 {
+				progressRoot = roots[0]
+			}
+			timer := time.AfterFunc(docsListProgressDelay, func() {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "indexing %s …\n", termsafe.SafeLine(progressRoot))
+			})
+			defer timer.Stop()
+
+			idx, err := docspkg.NewIndexContext(ctx, roots, opts)
 			if err != nil {
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					return reportDocsListDeadline(cmd, progressRoot, err, asJSON)
+				}
 				return err
 			}
-			return printDocsList(cmd, idx.List(), asJSON)
+
+			docs := idx.List()
+			if limit > 0 && limit < len(docs) {
+				docs = docs[:limit]
+			}
+			return printDocsList(cmd, docs, asJSON)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().DurationVar(&timeout, "timeout", 15*time.Second, "walk deadline, e.g. 15s or 2m")
+	cmd.Flags().IntVar(&limit, "limit", 0, "stop after N entries (0 or unset: no limit)")
 	return cmd
+}
+
+// docsListDeadlineError is docs list's own silent-coded-error type: rendered
+// through termsafeErrorHandler as nothing at all, because reportDocsListDeadline
+// already wrote everything the operator gets — the human message on stderr, or
+// (under --json) the one JSON error object. Wrapping it in WithExitCode is
+// what still gets exit 2 to `main` (exitcode.go's ExitCode walks the chain for
+// a *codedError, so this type composes with it rather than replacing it).
+//
+// Task 3 (a parallel PR, forgectl#481) is adding a general-purpose
+// silentCodedError{code int} type to execute.go for the same "render nothing,
+// carry a code" shape. This task does not wait on that merge — it defines its
+// own minimal equivalent here, and Task 1's polish reconciles the two into
+// one shared type.
+type docsListDeadlineError struct {
+	err error
+}
+
+func (e *docsListDeadlineError) Error() string { return e.err.Error() }
+func (e *docsListDeadlineError) Unwrap() error { return e.err }
+
+// docsListDeadlineJSON is the --json wire shape for a `docs list` deadline
+// failure: stdout stays empty and this is the only thing written to stderr.
+type docsListDeadlineJSON struct {
+	Error string `json:"error"`
+	Code  int    `json:"code"`
+	Root  string `json:"root"`
+}
+
+// reportDocsListDeadline handles a walk that stopped on ctx.Err(): under
+// --json it writes exactly one JSON object to stderr and leaves stdout
+// untouched (printDocsList is never called), then returns a silent error so
+// termsafeErrorHandler renders nothing more; otherwise it lets the normal
+// human-readable error path render walkErr, which already names the root
+// (NewIndexContext). Either way the process exits 2.
+func reportDocsListDeadline(cmd *cobra.Command, root string, walkErr error, asJSON bool) error {
+	if !asJSON {
+		return WithExitCode(walkErr, 2)
+	}
+	obj := docsListDeadlineJSON{Error: walkErr.Error(), Code: 2, Root: root}
+	enc := termsafe.JSONEncoder(cmd.ErrOrStderr())
+	if encErr := enc.Encode(obj); encErr != nil {
+		return WithExitCode(fmt.Errorf("docs list: encode deadline error: %w", encErr), 2)
+	}
+	return WithExitCode(&docsListDeadlineError{err: walkErr}, 2)
 }
 
 // docJSON is the --json wire shape for one entry of `forgectl docs list`.

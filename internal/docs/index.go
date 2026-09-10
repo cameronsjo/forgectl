@@ -10,6 +10,7 @@
 package docs
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -212,8 +213,21 @@ func NewIndex(paths []string) (*Index, error) {
 // except a root named in opts.RootKinds skips detectRootKind's filesystem
 // probe and uses the given RootKind instead (see resolveRootKind for the
 // VaultPath interaction). NewIndex(paths) is a thin call to
-// NewIndexWithOptions(paths, IndexOptions{}).
+// NewIndexWithOptions(paths, IndexOptions{}), which is itself a thin call to
+// NewIndexContext(context.Background(), paths, opts) — neither existing
+// entry point changes behavior; context.Background() never cancels, so
+// ctx.Err() never fires on that path.
 func NewIndexWithOptions(paths []string, opts IndexOptions) (*Index, error) {
+	return NewIndexContext(context.Background(), paths, opts)
+}
+
+// NewIndexContext builds an Index exactly as NewIndexWithOptions does, except
+// each directory walk (walkRoot) checks ctx.Err() on every directory entry it
+// visits and stops early when the caller's deadline or cancellation fires —
+// see docs list's --timeout (forgectl#483). A canceled or expired ctx does
+// not fail the roots already walked; it fails the ONE root being walked when
+// ctx.Err() first fires, and the error names that root and wraps ctx.Err().
+func NewIndexContext(ctx context.Context, paths []string, opts IndexOptions) (*Index, error) {
 	idx := &Index{paths: append([]string(nil), paths...), opts: opts}
 	labels := map[string]bool{}
 
@@ -233,7 +247,7 @@ func NewIndexWithOptions(paths []string, opts IndexOptions) (*Index, error) {
 		}
 
 		if info.IsDir() {
-			root, docs, err := indexDirRoot(labels, p, override, hasOverride)
+			root, docs, err := indexDirRoot(ctx, labels, p, override, hasOverride)
 			if err != nil {
 				return nil, err
 			}
@@ -290,7 +304,13 @@ func resolveRootKind(canonical string, override RootKind, hasOverride bool) (Roo
 }
 
 // indexDirRoot canonicalizes dir and walks it for markdown files.
-func indexDirRoot(labels map[string]bool, dir string, override RootKind, hasOverride bool) (Root, []Doc, error) {
+//
+// A ctx.Err() from walkRoot is returned as-is, not re-wrapped with "docs root
+// %q": walkRoot already names the root that stopped (NewIndexContext), and a
+// second "docs root %q" layer would name it twice without adding information.
+// Every other walkRoot error (a real filesystem fault) keeps the existing
+// wrap.
+func indexDirRoot(ctx context.Context, labels map[string]bool, dir string, override RootKind, hasOverride bool) (Root, []Doc, error) {
 	canonical, err := CanonicalizeRoot(dir)
 	if err != nil {
 		return Root{}, nil, fmt.Errorf("docs root %q: %w", dir, err)
@@ -298,8 +318,11 @@ func indexDirRoot(labels map[string]bool, dir string, override RootKind, hasOver
 	label := uniqueLabel(labels, filepath.Base(canonical))
 	kind, vaultPath := resolveRootKind(canonical, override, hasOverride)
 	root := Root{Label: label, Path: canonical, Kind: kind, VaultPath: vaultPath}
-	docs, err := walkRoot(root)
+	docs, err := walkRoot(ctx, root)
 	if err != nil {
+		if ctx.Err() != nil {
+			return Root{}, nil, err
+		}
 		return Root{}, nil, fmt.Errorf("docs root %q: %w", dir, err)
 	}
 	return root, docs, nil
@@ -413,11 +436,14 @@ func excludedDir(name string) bool {
 // walking outside root. (Defense in depth only: the request-time
 // ResolveInRoot chain in security.go re-verifies every serve regardless of
 // what the index contains.)
-func walkRoot(root Root) ([]Doc, error) {
+func walkRoot(ctx context.Context, root Root) ([]Doc, error) {
 	var docs []Doc
 	err := filepath.WalkDir(root.Path, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("docs index: walk of %s stopped: %w", root.Path, ctxErr)
 		}
 		if d.IsDir() {
 			if path != root.Path && excludedDir(d.Name()) {

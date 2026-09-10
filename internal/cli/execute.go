@@ -292,6 +292,17 @@ func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
 		renderStructuredTerminalError(w, styles, structured)
 		return
 	}
+	// docsListDeadlineError (docs_list.go, forgectl#483) already wrote the
+	// operator's only message — the one JSON object `docs list --json`
+	// puts on stderr on a deadline — before returning, so rendering
+	// anything else here would be a second, conflicting line on the same
+	// stream. Task 3 (forgectl#481, a parallel PR) adds a general-purpose
+	// silentCodedError with the same "render nothing" contract; this check
+	// and that one are reconciled into a single type in Task 1's polish.
+	var silent *docsListDeadlineError
+	if errors.As(err, &silent) {
+		return
+	}
 	fang.DefaultErrorHandler(w, styles, termsafe.Error(err))
 }
 

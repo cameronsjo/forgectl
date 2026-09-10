@@ -7,6 +7,11 @@ package cli
 //   [x] Happy: human output lists the doc's root, path, and title
 //   [x] Happy: an empty root reports "no docs found" rather than an empty table
 //   [x] Unhappy: a nonexistent root argument surfaces NewIndex's error
+//   [x] Happy: --limit 3 prints three rows in both the human and --json shapes
+//   [x] Unhappy: a --timeout deadline under --json leaves stdout empty and
+//       writes exactly one JSON error object to stderr, exit code 2
+//   [x] Unhappy: a --timeout deadline without --json renders a human error
+//       naming the root, exit code 2
 
 import (
 	"bytes"
@@ -16,7 +21,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	docspkg "github.com/cameronsjo/forgectl/internal/docs"
 	"github.com/cameronsjo/forgectl/internal/module"
 )
 
@@ -93,5 +100,127 @@ func TestDocsListCmd_NonexistentRoot_Errors(t *testing.T) {
 
 	if err := cmd.ExecuteContext(context.Background()); err == nil {
 		t.Fatal("expected an error for a nonexistent root")
+	}
+}
+
+func writeDocsListFixture(t *testing.T, n int) string {
+	t.Helper()
+	dir := t.TempDir()
+	for i := 0; i < n; i++ {
+		name := filepath.Join(dir, "page"+strings.Repeat("x", i)+".md")
+		if err := os.WriteFile(name, []byte("# Page"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+func TestDocsListCmd_Limit_HumanShape_PrintsNRows(t *testing.T) {
+	dir := writeDocsListFixture(t, 5)
+
+	cmd := newDocsListCmd(module.Deps{})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--limit", "3", dir})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %d rows, want 3: %q", len(lines), stdout.String())
+	}
+}
+
+func TestDocsListCmd_Limit_JSONShape_ParsesAsThreeElementArray(t *testing.T) {
+	dir := writeDocsListFixture(t, 5)
+
+	cmd := newDocsListCmd(module.Deps{})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--json", "--limit", "3", dir})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got []docJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not a valid JSON array: %v\nstdout: %s", err, stdout.String())
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d entries, want 3: %+v", len(got), got)
+	}
+}
+
+func TestDocsListCmd_Deadline_JSON_EmptyStdoutOneStderrObjectExit2(t *testing.T) {
+	dir := writeDocsListFixture(t, 5)
+
+	cmd := newDocsListCmd(module.Deps{})
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json", "--timeout", "1ns", dir})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("expected a deadline error, got nil")
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+	var obj docsListDeadlineJSON
+	dec := json.NewDecoder(&stderr)
+	if decErr := dec.Decode(&obj); decErr != nil {
+		t.Fatalf("stderr is not a valid JSON object: %v\nstderr: %s", decErr, stderr.String())
+	}
+	if dec.More() {
+		t.Errorf("stderr carries more than one JSON value: %s", stderr.String())
+	}
+	if obj.Code != 2 {
+		t.Errorf("obj.Code = %d, want 2", obj.Code)
+	}
+	if obj.Root != dir {
+		t.Errorf("obj.Root = %q, want %q", obj.Root, dir)
+	}
+	if got := ExitCode(err); got != 2 {
+		t.Errorf("ExitCode(err) = %d, want 2", got)
+	}
+}
+
+func TestDocsListCmd_Deadline_Human_NamesRootExit2(t *testing.T) {
+	dir := writeDocsListFixture(t, 5)
+
+	cmd := newDocsListCmd(module.Deps{})
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--timeout", "1ns", dir})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("expected a deadline error, got nil")
+	}
+	canonical, canonErr := docspkg.CanonicalizeRoot(dir)
+	if canonErr != nil {
+		t.Fatalf("CanonicalizeRoot(%q): %v", dir, canonErr)
+	}
+	if !strings.Contains(err.Error(), canonical) {
+		t.Errorf("err = %q, want it to name the root %q", err.Error(), canonical)
+	}
+	if got := ExitCode(err); got != 2 {
+		t.Errorf("ExitCode(err) = %d, want 2", got)
+	}
+}
+
+func TestDocsListCmd_TimeoutDefault_Is15Seconds(t *testing.T) {
+	cmd := newDocsListCmd(module.Deps{})
+	f := cmd.Flags().Lookup("timeout")
+	if f == nil {
+		t.Fatal("--timeout flag not registered")
+	}
+	if f.DefValue != (15 * time.Second).String() {
+		t.Errorf("--timeout default = %q, want %q", f.DefValue, (15 * time.Second).String())
 	}
 }
