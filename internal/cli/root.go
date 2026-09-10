@@ -17,15 +17,24 @@ import (
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
+// everydayGroupID and moreGroupID are root help's two cobra groups
+// (ADR-0005 addendum): every module's GroupID follows its Tier directly, so
+// promoting/demoting a module's tier (modules_test.go's core-set pin) moves
+// its help placement for free.
+const (
+	everydayGroupID = "everyday"
+	moreGroupID     = "more"
+)
+
 // hubOrderAnnotation and hubTierAnnotation are cobra Annotations keys
 // buildHub (hub.go) reads back off root's constructed children to classify
 // and order hub rows without calling allModules() itself — a
 // module.Manifest.New closure that did (tmux's hub row needs the hub) would
 // create a package initialization cycle back through tmuxModule's own var
-// initializer. Annotations, not cobra's own GroupID/AddGroup (added
-// separately for root help's tier grouping): cobra panics at Execute if a
-// command's GroupID names a group root never registered, which would
-// couple the hub's internal bookkeeping to root help's presentation.
+// initializer. Annotations, not root help's GroupID: buildHub needs the
+// tier and registry order regardless of whether root help's grouping ever
+// changes shape, and the two are deliberately kept independent so a change
+// to one cannot silently break the other.
 //
 // hubOrderAnnotation recovers each module's allModules() registry
 // position — cobra's own Commands() getter sorts alphabetically by
@@ -82,8 +91,10 @@ func showRootHelp(*cobra.Command, []string) error { return pflag.ErrHelp }
 // (ADR-0005).
 func newRoot(deps module.Deps) *cobra.Command {
 	root := &cobra.Command{
-		Use:     meta.AppName,
-		Short:   meta.Tagline,
+		Use:   meta.AppName,
+		Short: meta.Tagline,
+		Long: `Two ways in: type a command — forgectl tmux ls — or run forgectl with no
+arguments for a menu over every command group.`,
 		Version: meta.Version,
 		Args:    safeRootArgs,
 		RunE:    showRootHelp,
@@ -97,6 +108,11 @@ func newRoot(deps module.Deps) *cobra.Command {
 	root.SuggestionsMinimumDistance = 2
 	// Honored by the TUI and the tree verb; swaps Nerd Font glyphs for ASCII.
 	root.PersistentFlags().Bool("no-icons", false, "use ASCII markers instead of Nerd Font glyphs")
+
+	root.AddGroup(
+		&cobra.Group{ID: everydayGroupID, Title: "Everyday:"},
+		&cobra.Group{ID: moreGroupID, Title: "More:"},
+	)
 
 	for i, m := range allModules() {
 		cmd := m.New(deps)
@@ -114,8 +130,10 @@ func newRoot(deps module.Deps) *cobra.Command {
 		// copy is the safety net for any constructor that doesn't.
 		applyAliases(cmd, m.SubAliases)
 		tier := hubTierCore
+		cmd.GroupID = everydayGroupID
 		if m.Tier == module.TierExtension {
 			tier = hubTierExtension
+			cmd.GroupID = moreGroupID
 		}
 		cmd.Annotations = map[string]string{
 			hubOrderAnnotation: strconv.Itoa(i),

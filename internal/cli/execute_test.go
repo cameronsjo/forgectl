@@ -405,6 +405,29 @@ func TestFangErrorSinkStructuredHeadlinePathLeadingKeepsCase(t *testing.T) {
 	}
 }
 
+// TestUnknownCommandTailPointsToTheMenu pins the unknown-command tail's
+// updated text (forgectl#479): the old fang-authored "Try --help for usage."
+// grows a second clause pointing at the hub.
+func TestUnknownCommandTailPointsToTheMenu(t *testing.T) {
+	var buf bytes.Buffer
+	err := &structuredTerminalError{headline: `unknown command "frobnicate" for "forgectl"`}
+	renderStructuredTerminalError(&buf, fang.Styles{}, err)
+	want := "Try --help for usage, or run forgectl with no arguments for the menu."
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("unknown-command tail = %q, want it to contain %q", buf.String(), want)
+	}
+}
+
+// TestRootLongNamesTheMenu pins root's Long text verbatim (Architecture).
+func TestRootLongNamesTheMenu(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	want := `Two ways in: type a command — forgectl tmux ls — or run forgectl with no
+arguments for a menu over every command group.`
+	if root.Long != want {
+		t.Errorf("root.Long = %q, want %q", root.Long, want)
+	}
+}
+
 // TestTermsafeErrorHandler_SilentCodedError_RendersNothing pins
 // silentCodedError's whole reason to exist: env check --json has already
 // written its one JSON object to stderr, and fang's error frame must not

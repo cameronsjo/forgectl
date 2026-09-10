@@ -376,7 +376,7 @@ func renderStructuredTerminalError(w io.Writer, styles fang.Styles, err *structu
 		}
 	}
 	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintln(w, styles.ErrorText.UnsetWidth().Render("Try --help for usage."))
+	_, _ = fmt.Fprintln(w, styles.ErrorText.UnsetWidth().Render("Try --help for usage, or run forgectl with no arguments for the menu."))
 	_, _ = fmt.Fprintln(w)
 }
 
