@@ -227,6 +227,31 @@ func TestFindCompatShimImports_KeepsWalkingPastAnUnparseableFile(t *testing.T) {
 	}
 }
 
+// TestFindCompatShimImports_SkipsDotDirectories pins the forgectl#480 fix: a
+// shim import planted under a nested dot-directory — the same shape as a
+// `.claude/worktrees/<slug>` checkout left behind by another session — must
+// never surface as a hit. Without the skip, this test fails exactly the way
+// TestNoColorLiteralsOutsideTheme did against a real worktree tree.
+func TestFindCompatShimImports_SkipsDotDirectories(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, ".claude", "worktrees", "some-other-session")
+	if err := os.MkdirAll(nested, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	shimSrc := "package p\nimport compat \"" + compatShim + "\"\n"
+	if err := os.WriteFile(filepath.Join(nested, "x.go"), []byte(shimSrc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	hits, err := findCompatShimImports(dir)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Errorf("shim import under a nested dot-directory was reported, want it skipped; hits = %v", hits)
+	}
+}
+
 // buildList returns `go list -m all`, one module per line.
 //
 // Shelling out to the toolchain is the only way to see the resolved build
