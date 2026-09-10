@@ -6,9 +6,9 @@ harness: "claude-code 2.1.267"
 machine: "cf6e768835c7"
 approved_session_id: "bcffd4ae-076f-40f2-8c6d-b7c2835e4e52"
 status: in-progress
-next: "wave 0 dispatched (Tasks 3, 4, 5, 6); Task 1 after Task 3 merges; Task 7 own session after the forgectl PRs merge"
+next: "Task 1 (#479) in flight on feat/hub-menu; #485 (Task 6) reconciled with main, merge when green; Task 7 own cadence-monorepo session after all forgectl PRs merge"
 branch: plan/hub-menu
-pr: —
+pr: cameronsjo/forgectl#484, #485, #486, #487 (Tasks 4, 6, 3, 5)
 updated: 2026-09-09
 date: 2026-09-09
 ---
@@ -142,11 +142,11 @@ Panel: plan-reviewer ×2, red-team-reviewer, user-experience-reviewer, agent-exp
 **Report:** `<reports-dir>/task-3.md`
 
 **Steps:**
-- [ ] Tests above RED, then GREEN
-- [ ] `go build ./... && go vet ./... && go test ./internal/cli/...`
-- [ ] `go build -o forgectl .`; probe in a temp repo with no `.env`: `env keys` prints the path in its original case (recorded in PR body)
-- [ ] Commit: `fix(cli): errors keep paths as written; env check documents exit codes; config names init` — push, draft PR `Closes #481`
-- [ ] run `cadence-forge:polish`; fold findings
+- [x] Tests above RED, then GREEN
+- [x] `go build ./... && go vet ./... && go test ./internal/cli/...`
+- [x] `go build -o forgectl .`; probe in a temp repo with no `.env`: `env keys` prints the path in its original case (recorded in PR body)
+- [x] Commit: `fix(cli): errors keep paths as written; env check documents exit codes; config names init` — push, draft PR `Closes #481`
+- [x] run `cadence-forge:polish`; fold findings
 
 ---
 
@@ -163,11 +163,11 @@ Panel: plan-reviewer ×2, red-team-reviewer, user-experience-reviewer, agent-exp
 **Report:** `<reports-dir>/task-4.md`
 
 **Steps:**
-- [ ] Reproduce from the primary checkout (read-only): `go test . -run 'TestNoColorLiteralsOutsideTheme|TestSingleLipgloss'` FAILS with `.claude/worktrees/` lines in the output
-- [ ] Fix in the worktree; postcondition from the primary checkout: the same command exits 0 and its output contains zero `.claude/` lines (assert the postcondition, not a before/after count: other sessions add and prune worktrees)
-- [ ] `git check-ignore -v .claude/worktrees/x` names the tracked `.gitignore` line
-- [ ] Commit: `fix(test): tree-walking tests skip dot-directories; ignore nested worktrees` — push, draft PR `Closes #480`
-- [ ] run `cadence-forge:polish`
+- [x] Reproduce from the primary checkout (read-only): `go test . -run 'TestNoColorLiteralsOutsideTheme|TestSingleLipgloss'` FAILS with `.claude/worktrees/` lines in the output
+- [x] Fix in the worktree; postcondition from the primary checkout: the same command exits 0 and its output contains zero `.claude/` lines (assert the postcondition, not a before/after count: other sessions add and prune worktrees)
+- [x] `git check-ignore -v .claude/worktrees/x` names the tracked `.gitignore` line
+- [x] Commit: `fix(test): tree-walking tests skip dot-directories; ignore nested worktrees` — push, draft PR `Closes #480`
+- [x] run `cadence-forge:polish`
 
 ---
 
@@ -186,11 +186,11 @@ Panel: plan-reviewer ×2, red-team-reviewer, user-experience-reviewer, agent-exp
 **Report:** `<reports-dir>/task-5.md`
 
 **Steps:**
-- [ ] Read `internal/cli/json_encoder_wiring_test.go` first; every emitter goes through the sanctioned seam
-- [ ] Per verb: test RED, implement, GREEN. JSON to stdout only; under `--json` nothing on stderr on success
-- [ ] `go build -o forgectl .`; probe: `./forgectl launch which --json` parses, `.model` is `"opus"` on this machine, and `grep -c ANTHROPIC` over the output is 0 (recorded in PR body)
-- [ ] Commit: `feat(cli): --json on launch which, pr list, tmux ls, workflow list, status, and verify` — push, draft PR. Body: `Part of #482; the remaining verbs stay tracked there` (no closing verb)
-- [ ] run `cadence-forge:polish`; fold findings
+- [x] Read `internal/cli/json_encoder_wiring_test.go` first; every emitter goes through the sanctioned seam
+- [x] Per verb: test RED, implement, GREEN. JSON to stdout only; under `--json` nothing on stderr on success
+- [x] `go build -o forgectl .`; probe: `./forgectl launch which --json` parses, `.model` is `"opus"` on this machine, and `grep -c ANTHROPIC` over the output is 0 (recorded in PR body)
+- [x] Commit: `feat(cli): --json on launch which, pr list, tmux ls, workflow list, status, and verify` — push, draft PR. Body: `Part of #482; the remaining verbs stay tracked there` (no closing verb)
+- [x] run `cadence-forge:polish`; fold findings
 
 ---
 
@@ -211,12 +211,12 @@ Premise note: the hang was observed twice on 2026-09-09 by the agent-experience 
 **Report:** `<reports-dir>/task-6.md`
 
 **Steps:**
-- [ ] Test: canceled context → error names the root and wraps `context.Canceled`; RED then GREEN
-- [ ] Test: `--limit 3` prints three rows in both shapes; `--json` still parses with `jq -e 'type=="array"'`
-- [ ] Test: deadline under `--json` → stdout empty, stderr one JSON object, exit 2
-- [ ] `go build -o forgectl .`; probe: `./forgectl docs list --json --limit 3` parses and has 3 entries (recorded in PR body)
-- [ ] Commit: `feat(docs): docs list walks under a deadline and can be bounded` — push, draft PR `Closes #483`, body notes the premise did not reproduce for one seat
-- [ ] run `cadence-forge:polish`; fold findings
+- [x] Test: canceled context → error names the root and wraps `context.Canceled`; RED then GREEN
+- [x] Test: `--limit 3` prints three rows in both shapes; `--json` still parses with `jq -e 'type=="array"'`
+- [x] Test: deadline under `--json` → stdout empty, stderr one JSON object, exit 2
+- [x] `go build -o forgectl .`; probe: `./forgectl docs list --json --limit 3` parses and has 3 entries (recorded in PR body)
+- [x] Commit: `feat(docs): docs list walks under a deadline and can be bounded` — push, draft PR `Closes #483`, body notes the premise did not reproduce for one seat
+- [x] run `cadence-forge:polish`; fold findings
 
 ---
 
@@ -257,7 +257,10 @@ Premise note: the hang was observed twice on 2026-09-09 by the agent-experience 
 
 ## Deviations
 
-*(empty at approval)*
+- **Task 3 touched `internal/env/locate.go` and `internal/env/env.go`** (not in its file list): a repo-relative path needed a root accessor (`RepoRoot`, `RelativeToRepoRoot`), and the review folded the same not-found wording into `env get`. Merged as #486.
+- **Task 4: the plan cited `TestSingleLipgloss`, which does not exist**; the real test is `TestNoLipglossCompatShim`. The reproduce step used that name. Merged as #484.
+- **Task 6 defined `docsListDeadlineError` while Task 3 was unmerged**, as the plan allowed; the orchestrator folded it into `silentCodedError` when merging `main` into #485 (`7c1eeaa`), not in Task 1's polish.
+- **`cadence-forge:polish` was dropped from Task 1's dispatch**: in Task 5 it ran `code-review --fix` against the last commit on the primary checkout and left 79 lines of edits on `main`. Those became #488. Tasks 1 and 6 ran `cadence:code-reviewer` on a worktree diff instead.
 
 ## Learnings
 
