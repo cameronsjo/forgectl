@@ -25,6 +25,7 @@ helper/forgectl-bless-helper/.build/
 .claude/agent-memory/
 .claude/test-output/
 .claude/sessions/
+.claude/worktrees/
 
 # local probe builds
 /fgc
