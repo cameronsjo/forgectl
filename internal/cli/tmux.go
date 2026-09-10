@@ -47,6 +47,12 @@ func newTmuxCmd(client *tmux.Client, th theme.Theme) *cobra.Command {
 		Use:     "tmux",
 		Aliases: []string{"tm"},
 		Short:   "Wrangle tmux sessions, windows, and panes",
+		// A stray subverb (a typo like `frobnicate`) must not fall through to
+		// RunE below and silently open the menu — Args rejects it with
+		// cobra's own unknown-command error before RunE ever runs
+		// (forgectl#479; TestGroupParentsRefuseStrayTokens pins this for
+		// every group parent).
+		Args: cobra.NoArgs,
 		// `forgectl tmux` with no verb opens the tmux menu (the same TUI as a
 		// bare invoke — tmux is the only module today).
 		RunE: func(cmd *cobra.Command, _ []string) error {

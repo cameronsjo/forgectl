@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 	"github.com/cameronsjo/forgectl/internal/tui"
@@ -197,6 +199,82 @@ func TestDispatchAction_StaleIdentityIsRefused(t *testing.T) {
 type mockExitErr struct{}
 
 func (e *mockExitErr) Error() string { return "exit status 1" }
+
+// --- group parents refuse stray tokens (forgectl#479) ---
+
+// hubArgsAllowlist names parents that legitimately take arbitrary args on
+// their own invocation — launch's Use is "launch [harness args…]", the
+// pre-Cobra passthrough for the launcher. Every other parent with
+// subcommands and its own RunE must reject a stray token via Args, or a typo
+// of a real subverb (quarantine's `restor` for `restore`) falls through to
+// that RunE with the typo as an ignored positional.
+var hubArgsAllowlist = map[string]bool{"launch": true}
+
+// TestGroupParentsRefuseStrayTokens walks every top-level command: a parent
+// with subcommands AND its own RunE must declare Args, or an unmatched
+// subverb reaches that RunE instead of Cobra's own unknown-command error.
+// Commit ordering matters here: this must be true before shouldLaunchTUI's
+// unknown-subverb arm is removed, because that arm is today the only thing
+// standing between `quarantine restor` and a real quarantine hide.
+func TestGroupParentsRefuseStrayTokens(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	for _, cmd := range root.Commands() {
+		if len(cmd.Commands()) == 0 || cmd.RunE == nil {
+			continue
+		}
+		if hubArgsAllowlist[cmd.Name()] {
+			continue
+		}
+		if cmd.Args == nil {
+			t.Errorf("command %q has subcommands and its own RunE but no Args validator — a stray subverb falls through to RunE instead of Cobra's unknown-command error", cmd.Name())
+		}
+	}
+}
+
+// TestTmuxFrobnicateReturnsCobraError pins the fix directly: an unknown
+// tmux subverb must fail with Cobra's own error, never open the TUI (which
+// would read as a Bubble Tea error/hang under go test's non-terminal stdio).
+func TestTmuxFrobnicateReturnsCobraError(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	root.SetOut(new(bytes.Buffer))
+	root.SetErr(new(bytes.Buffer))
+	root.SetArgs([]string{"tmux", "frobnicate"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected an error for an unknown tmux subverb, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown command") {
+		t.Errorf("error = %q, want cobra's unknown-command error", err.Error())
+	}
+}
+
+// TestQuarantineRestorReturnsCobraErrorAndTouchesNothing pins the
+// destructive half of the same fix: a typo of `restore` must never reach
+// runQuarantineHide.
+func TestQuarantineRestorReturnsCobraErrorAndTouchesNothing(t *testing.T) {
+	dir := t.TempDir()
+	claudeMd := dir + "/CLAUDE.md"
+	if err := os.WriteFile(claudeMd, []byte("hi"), 0o600); err != nil {
+		t.Fatalf("seed CLAUDE.md: %v", err)
+	}
+
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	root.SetOut(new(bytes.Buffer))
+	root.SetErr(new(bytes.Buffer))
+	root.SetArgs([]string{"quarantine", "restor", "--root", dir})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected an error for the unknown subverb `restor`, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown command") {
+		t.Errorf("error = %q, want cobra's unknown-command error", err.Error())
+	}
+	if _, statErr := os.Stat(claudeMd); statErr != nil {
+		t.Errorf("CLAUDE.md should still be present at its original name, stat error: %v", statErr)
+	}
+}
 
 // --- leadsWithPath / path-preserving error rendering (forgectl#481) ---
 
