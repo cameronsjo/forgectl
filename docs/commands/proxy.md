@@ -55,18 +55,26 @@ inherited nothing fails at the first request. Name a profile as
 launch_profile = "work"
 ```
 
-Three commands start a harness and all three inject it: `launch`, `resume`, and
-`surface launch`. It applies whether or not the calling shell ever ran
-`proxy use`. The injected block sits *under* a launch profile's own `env`, so a
+Four commands start a harness and all four inject it: `launch`, `resume`,
+`surface launch`, and `pr`. It applies whether or not the calling shell ever ran
+`proxy use`. `forgectl launch which` names the injected variables, so you can
+confirm a profile is in play without reading a value. The injected block sits *under* a launch profile's own `env`, so a
 `[[launch.project]]` block still wins for a directory that needs different
 values — but set **both** spellings there if you do, since an override of
 `HTTPS_PROXY` alone leaves `https_proxy` to the injected block.
 
-`forgectl pr` is **not** covered. Its clean-room reviewer runs in a tmux window,
-which inherits the tmux *server's* environment, and the window-creation call
-takes no environment argument. On a proxy-only network the reviewer fails at its
-first network call — so export the profile in the shell that started the tmux
-server, or run `pr` from a shell that has run `proxy use`.
+`forgectl pr` is covered too, with one difference worth knowing. Its clean-room
+reviewer runs in a tmux window, and tmux can set a variable on a new window but
+cannot unset one — so a variable the profile omits arrives **empty** there
+rather than absent. For an HTTP client those are the same thing; for a program
+that checks whether a variable exists at all, they are not.
+
+The other difference is disclosure. tmux takes the environment on its command
+line, and **process command lines are readable by other accounts on the
+machine** — not just yours. That is fine for a proxy URL with no credentials in
+it. If your proxy URL carries a username and password, do not name that profile
+as `launch_profile`; export it in the shell that starts the tmux server instead,
+where it stays in an environment rather than an argument list.
 
 A profile field that is set is applied to both spellings; a field the profile
 omits **removes** both spellings from the harness's environment, exactly as

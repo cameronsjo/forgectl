@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -169,8 +170,63 @@ func (c *Client) ResolveWindowExact(ctx context.Context, session SessionIdentity
 // immediately before creation, and both calls route through tmuxArgs so a
 // socket-pinned client cannot accidentally read one server and write another.
 func (c *Client) NewWindow(ctx context.Context, session SessionIdentity, name, dir string, command ...string) (WindowIdentity, error) {
+	return c.NewWindowWithEnv(ctx, session, name, dir, nil, command...)
+}
+
+// ErrBadEnvAssignment reports an environment entry NewWindowWithEnv refuses.
+// The key must be a POSIX-shaped variable name, which is what keeps the entry
+// from being parsed as a tmux flag: a name cannot begin with `-`, so `-e` can
+// never be handed something that reads as an option instead of an operand.
+var ErrBadEnvAssignment = errors.New("tmux: environment entry is not a KEY=VALUE assignment with a valid name")
+
+// validateEnvAssignment accepts `KEY=VALUE` where KEY is `[A-Za-z_][A-Za-z0-9_]*`
+// and VALUE carries no NUL and no newline. The value bans are about the sink,
+// not the shell: a NUL cannot cross exec at all, and a newline in a tmux
+// command-line argument is what a crafted value would use to forge a second
+// command in output a human or a parser reads back.
+func validateEnvAssignment(entry string) error {
+	key, value, found := strings.Cut(entry, "=")
+	if !found || key == "" {
+		return fmt.Errorf("%w", ErrBadEnvAssignment)
+	}
+	for i, r := range key {
+		switch {
+		case r == '_', r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return fmt.Errorf("%w", ErrBadEnvAssignment)
+		}
+	}
+	if strings.ContainsAny(value, "\x00\n\r") {
+		return fmt.Errorf("%w", ErrBadEnvAssignment)
+	}
+	return nil
+}
+
+// NewWindowWithEnv is NewWindow plus per-window environment entries, each a
+// `KEY=VALUE` string rendered as one `-e` flag. Without it a new window gets
+// the tmux SERVER's environment, which was fixed when the server started and
+// has no relationship to the environment forgectl resolved.
+//
+// DISCLOSURE, stated because it is not obvious: `-e` puts the value on the
+// tmux command line, and process command lines are readable by other accounts
+// on the machine — not just the same uid. That is acceptable for a proxy URL
+// with no credentials in it and NOT acceptable for one that carries a
+// password. Callers own that judgment; this function does not inspect values.
+//
+// There is no removal form: tmux new-window can set a variable and cannot
+// unset one, so a caller wanting a variable gone passes it as empty rather
+// than omitting it.
+func (c *Client) NewWindowWithEnv(
+	ctx context.Context, session SessionIdentity, name, dir string, env []string, command ...string,
+) (WindowIdentity, error) {
 	if name == "" {
 		return WindowIdentity{}, fmt.Errorf("cannot create a tmux window with an empty name")
+	}
+	for _, e := range env {
+		if err := validateEnvAssignment(e); err != nil {
+			return WindowIdentity{}, fmt.Errorf("create window %q: %w", name, err)
+		}
 	}
 	current, err := c.RevalidateSession(ctx, session)
 	if err != nil {
@@ -183,6 +239,9 @@ func (c *Client) NewWindow(ctx context.Context, session SessionIdentity, name, d
 	args := c.tmuxArgs("new-window", "-P", "-F", IdentityFormat, "-t", target, "-n", name)
 	if dir != "" {
 		args = append(args, "-c", dir)
+	}
+	for _, e := range env {
+		args = append(args, "-e", e)
 	}
 	if len(command) != 0 {
 		args = append(args, "--")

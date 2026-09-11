@@ -405,7 +405,13 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 		return Dispatch{}, err
 	}
 	command := append([]string{codexPath}, codexArgs...)
-	window, err := c.tmuxClient.NewWindow(ctx, session, name, sess.Workspace, command...)
+	// Same environment as the Claude half — see the note there. Two reviewers
+	// reaching the network by different paths would be a posture nobody chose.
+	windowEnv, err := c.resolveWindowEnv()
+	if err != nil {
+		return Dispatch{}, err
+	}
+	window, err := c.tmuxClient.NewWindowWithEnv(ctx, session, name, sess.Workspace, windowEnv, command...)
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("open Codex review window: %w", err)
 	}
@@ -579,7 +585,17 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	slog.Debug("Preparing to dispatch review into tmux window.",
 		"session_id", session.ID, "window", name, "workspace", sess.Workspace)
 	command := append([]string{claudePath}, claudeArgs...)
-	window, err := c.tmuxClient.NewWindow(ctx, session, name, sess.Workspace, command...)
+	// With windowEnv the review inherits the environment forgectl resolved
+	// rather than the tmux server's, which was fixed when the server started.
+	// On a proxy-only network the server's copy is what made a review die at
+	// its first request, and this file's own comment above names that failure
+	// mode: an empty pane and no error anywhere. Resolving here rather than at
+	// construction keeps a bad [proxy] launch_profile from failing `pr list`.
+	windowEnv, err := c.resolveWindowEnv()
+	if err != nil {
+		return Dispatch{}, err
+	}
+	window, err := c.tmuxClient.NewWindowWithEnv(ctx, session, name, sess.Workspace, windowEnv, command...)
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("open review window: %w", err)
 	}

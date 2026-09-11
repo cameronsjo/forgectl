@@ -24,7 +24,7 @@ func TestBuildLaunchWhichJSON_KeySet(t *testing.T) {
 		Match:          "cadence-ecosystem",
 		AddDir:         []string{"/tmp/extra"},
 		Env:            map[string]string{"ANTHROPIC_API_KEY": "sk-ant-hunter2"},
-	}, "/tmp/cwd", "/tmp/config.toml")
+	}, "/tmp/cwd", "/tmp/config.toml", nil)
 
 	raw, err := json.Marshal(got)
 	if err != nil {
@@ -34,7 +34,8 @@ func TestBuildLaunchWhichJSON_KeySet(t *testing.T) {
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	want := []string{"directory", "config", "matched", "harness", "model", "effort", "permission_mode", "allow_danger", "env_keys", "add_dir"}
+	want := []string{"directory", "config", "matched", "harness", "model", "effort",
+		"permission_mode", "allow_danger", "env_keys", "injected_env_keys", "add_dir"}
 	if len(decoded) != len(want) {
 		t.Fatalf("key set = %v, want exactly %v", keysOf(decoded), want)
 	}
@@ -58,10 +59,10 @@ func TestBuildLaunchWhichJSON_RowsMatchHumanTable(t *testing.T) {
 		AddDir:         []string{"/tmp/extra"},
 		Env:            map[string]string{"ANTHROPIC_API_KEY": "x", "FOO": "y"},
 	}
-	got := buildLaunchWhichJSON(profile, "/tmp/cwd", "/tmp/config.toml")
+	got := buildLaunchWhichJSON(profile, "/tmp/cwd", "/tmp/config.toml", nil)
 
 	var buf bytes.Buffer
-	printLaunchProfile(&buf, theme.Theme{}, profile, "/tmp/cwd", "/tmp/config.toml")
+	printLaunchProfile(&buf, theme.Theme{}, profile, "/tmp/cwd", "/tmp/config.toml", nil)
 	human := buf.String()
 
 	for _, want := range []string{profile.Harness, profile.Model, profile.Effort, profile.PermissionMode, profile.Match, "/tmp/extra"} {
@@ -91,7 +92,7 @@ func TestBuildLaunchWhichJSON_RowsMatchHumanTable(t *testing.T) {
 // no-env, no-add-dir profile: both slice fields must encode as [], never null,
 // so a caller can range over them without a nil guard.
 func TestBuildLaunchWhichJSON_EmptyCollectionsAreArraysNeverNull(t *testing.T) {
-	got := buildLaunchWhichJSON(launch.Profile{Harness: "claude", Model: "opus"}, "/tmp/cwd", "/tmp/config.toml")
+	got := buildLaunchWhichJSON(launch.Profile{Harness: "claude", Model: "opus"}, "/tmp/cwd", "/tmp/config.toml", nil)
 	raw, err := json.Marshal(got)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -114,7 +115,7 @@ func TestBuildLaunchWhichJSON_NoEnvValuesEmitted(t *testing.T) {
 			"ANTHROPIC_API_KEY": "sk-ant-hunter2",
 			"FOO":               "plainbarvalue",
 		},
-	}, "/tmp/cwd", "/tmp/config.toml")
+	}, "/tmp/cwd", "/tmp/config.toml", nil)
 	raw, err := json.Marshal(got)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -139,7 +140,7 @@ func TestNewLaunchWhichCmd_JSONFailingRunLeavesStdoutEmpty(t *testing.T) {
 	// pins the achievable half of the contract: an encoder error propagates
 	// without a partial write reaching a real io.Writer beforehand.
 	buf := failingWriter{err: errWriteFailed}
-	if err := writeLaunchWhichJSON(buf, launch.Profile{Harness: "claude"}, "/tmp/cwd", "/tmp/config.toml"); err == nil {
+	if err := writeLaunchWhichJSON(buf, launch.Profile{Harness: "claude"}, "/tmp/cwd", "/tmp/config.toml", nil); err == nil {
 		t.Fatal("expected an error from a failing writer, got nil")
 	}
 }
@@ -174,7 +175,7 @@ func TestPrintLaunchProfile_EnvValuesAreWithheld(t *testing.T) {
 			"ANTHROPIC_API_KEY": "sk-ant-hunter2",
 			"FOO":               "plainbarvalue",
 		},
-	}, "/tmp/cwd", "/tmp/config.toml")
+	}, "/tmp/cwd", "/tmp/config.toml", nil)
 	out := buf.String()
 
 	// Both values, not just the secret-looking one: the policy is every value,
@@ -209,7 +210,7 @@ func TestPrintLaunchProfile_NoEnvRowWhenUnset(t *testing.T) {
 	printLaunchProfile(&buf, theme.Theme{}, launch.Profile{
 		Harness: "claude",
 		Model:   "opus",
-	}, "/tmp/cwd", "/tmp/config.toml")
+	}, "/tmp/cwd", "/tmp/config.toml", nil)
 
 	// Anchored on the rendered LABEL, not a bare "env" substring: three
 	// letters matched against the whole render would also trip on a config
@@ -249,7 +250,7 @@ func TestPrintLaunchProfile_EscapesEveryUntrustedSurfaceToOneLinePerRow(t *testi
 		PermissionMode: attack,
 		AddDir:         []string{attack},
 		Env:            map[string]string{attack: "withheld"},
-	}, attack, attack)
+	}, attack, attack, nil)
 	out := buf.String()
 	if strings.ContainsAny(out, "\t\r\x7f") || strings.Contains(out, "\x1b[2K") || strings.ContainsRune(out, '\u009b') || strings.ContainsRune(out, '\u202e') {
 		t.Fatalf("profile output contains attacker controls: %q", out)
@@ -271,7 +272,7 @@ func TestPrintLaunchProfile_EscapesPiProvider(t *testing.T) {
 		Harness:  "pi",
 		Provider: attack,
 		Model:    "qwen/qwen3-coder-next",
-	}, "/tmp/cwd", "/tmp/config.toml")
+	}, "/tmp/cwd", "/tmp/config.toml", nil)
 	out := buf.String()
 	if strings.Contains(out, "\x1b[2K") || strings.ContainsRune(out, '\u202e') || strings.Contains(out, "lm-studio\nforged") {
 		t.Fatalf("Pi provider output contains attacker controls: %q", out)

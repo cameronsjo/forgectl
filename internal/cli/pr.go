@@ -37,7 +37,14 @@ var prModule = module.Manifest{
 // review command group, building its own pr/net clients from deps.Runner.
 func newPrCmd(deps module.Deps) *cobra.Command {
 	cfg := deps.Cfg
-	client := pr.New(deps.Runner, pr.WithApprovalTheme(deps.Theme))
+	// The window-env resolver runs at dispatch, not here — a bad [proxy]
+	// launch_profile must not make `pr list` or `pr teardown` fail on a config
+	// neither one reads. injectedWindowEnv is the same composer the launch,
+	// resume, and surface-launch paths use.
+	client := pr.New(deps.Runner,
+		pr.WithApprovalTheme(deps.Theme),
+		pr.WithWindowEnv(func() ([]string, error) { return injectedWindowEnv(cfg) }),
+	)
 	netClient := netpkg.New(deps.Runner, netpkg.WithNetConfig(cfg.Net))
 	// err discarded: a failed config-dir lookup yields "", which LoadReviewed
 	// reads as an empty store and persist() rejects loudly — never a silent bad write.
