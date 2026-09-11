@@ -55,27 +55,39 @@ inherited nothing fails at the first request. Name a profile as
 launch_profile = "work"
 ```
 
-This covers all three paths that start a harness — `launch`, `resume`, and
-`surface launch` — and applies whether or not the calling shell ever ran
+Three commands start a harness and all three inject it: `launch`, `resume`, and
+`surface launch`. It applies whether or not the calling shell ever ran
 `proxy use`. The injected block sits *under* a launch profile's own `env`, so a
 `[[launch.project]]` block still wins for a directory that needs different
-values.
+values — but set **both** spellings there if you do, since an override of
+`HTTPS_PROXY` alone leaves `https_proxy` to the injected block.
 
-Every supported variable is injected, and a field the profile omits is injected
-as the empty string rather than left alone. That is deliberate: the merge
-overrides the calling shell's environment key by key, so an omitted key would
-let a stale exported value survive into the harness — the one thing naming a
-profile is meant to prevent. Empty reads as no-proxy in the clients that matter,
-which is the same effect `use` gets by unsetting the pair.
+`forgectl pr` is **not** covered. Its clean-room reviewer runs in a tmux window,
+which inherits the tmux *server's* environment, and the window-creation call
+takes no environment argument. On a proxy-only network the reviewer fails at its
+first network call — so export the profile in the shell that started the tmux
+server, or run `pr` from a shell that has run `proxy use`.
 
-A `launch_profile` naming no configured profile **refuses the launch**. Falling
-back to the shell's variables would reach the network by a path nobody chose,
-and would look like a successful launch.
+A profile field that is set is applied to both spellings; a field the profile
+omits **removes** both spellings from the harness's environment, exactly as
+`proxy use` unsets them. Removal rather than emptying is what makes a profile
+switch deterministic: an untouched key would let a stale exported value survive
+into the harness, and an emptied key is worse than either for `NO_PROXY`, whose
+empty value means "no bypass exceptions" and would send loopback traffic to the
+proxy.
+
+A `launch_profile` naming no configured profile — or naming one that sets no
+values — **refuses the launch**, with exit code 2, before anything is written to
+disk. Falling back to the shell's variables would reach the network by a path
+nobody chose, and would look like a successful launch. `forgectl launch doctor`
+reports the same refusal, so a typo surfaces without starting anything.
 
 `launch_profile` is the profile *name*, which is not sensitive and prints
 normally in `forgectl config`. The values it selects stay redacted there, and no
 launch surface renders them: the banner prints argv, and `launch which` prints
-env *keys*.
+env *keys*. The harness itself is a different matter — it can read its own
+environment, so a proxy URL carrying credentials is readable by the agent and by
+anything it runs.
 
 ## Read-only verbs
 

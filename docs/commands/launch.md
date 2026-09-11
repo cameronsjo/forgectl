@@ -86,10 +86,11 @@ An `effort` outside the five accepted levels is rejected before anything is laun
 `FORGECTL_CODEX_BIN` / `codex_binary_path` / `codex`, or
 `FORGECTL_PI_BIN` / `pi_binary_path` / `pi`.
 
-**On a network that requires a proxy**, set `[proxy] launch_profile` and every
-launch, resume, and surface launch injects that profile's variables into the
-harness environment — see [proxy](proxy.md). A profile's `env` still wins over
-the injected values.
+**On a network that requires a proxy**, set `[proxy] launch_profile` and
+`launch`, `resume`, and `surface launch` all inject that profile's variables
+into the harness environment — see [proxy](proxy.md), which also covers the
+`forgectl pr` reviewer, whose tmux window this does not reach. A profile's `env`
+still wins over the injected values.
 
 Codex modes translate to `codex`, `codex resume --last`, `codex fork --last`,
 and `codex exec`. Clean-room reviews accept `--agent codex` only for

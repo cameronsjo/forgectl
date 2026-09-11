@@ -60,9 +60,15 @@ timeout_ms  = 1000      # probe dial timeout, milliseconds
 // proxyScaffold names the schema without installing a machine-specific
 // endpoint. Profile values may contain credentials, so the example remains
 // commented and `forgectl config` exposes only configured profile names.
+// launch_profile stays commented too: uncommenting it alone would name a
+// profile that does not exist, which every launch path refuses.
 const proxyScaffold = `
-# ── proxy: named current-shell proxy profiles (forgectl proxy) ──────────────
+# ── proxy: named proxy profiles (forgectl proxy) ────────────────────────────
 [proxy]
+# launch_profile names the profile every launch, resume, and surface launch
+# puts into the harness environment. A name matching no profile below is
+# refused rather than launching unproxied.
+# launch_profile = "work"
 # [proxy.profiles.work]
 # http_proxy  = "http://proxy.example:8080"
 # https_proxy = "http://proxy.example:8080"

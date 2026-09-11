@@ -471,9 +471,14 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	// is a pure function of the config, so it must not arrive after this command
 	// has written to disk, and --dry-run's contract below is that its exit code
 	// is the one the real run would give.
-	injected, err := injectedLaunchEnv(cfg)
+	//
+	// Exit 2, not 1: resume.md decodes exit 1 as "no session matched, change
+	// the filter", and no filter change can fix a bad launch_profile. 2 is the
+	// refusal code this file already uses for the live-session case, and the
+	// code `launch` and `surface launch` give for this same config.
+	injected, unset, err := injectedLaunchEnv(cfg)
 	if err != nil {
-		return WithExitCode(termsafe.Error(err), 1)
+		return WithExitCode(termsafe.Error(err), 2)
 	}
 
 	// --dry-run is the headless escape. Resuming exec-replaces this process
@@ -530,7 +535,12 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 		return WithExitCode(fmt.Errorf("enter %s: %s", safeTerm(s.Cwd), safeTerm(err.Error())), 1)
 	}
 
-	env := launch.MergeEnv(os.Environ(), launch.MergeMaps(injected, profile.Env))
+	// Same layering BuildInvocation does: removals hit the inherited snapshot
+	// only, so a profile Env entry naming a removed variable still lands.
+	env := launch.MergeEnv(
+		launch.StripEnv(os.Environ(), unset),
+		launch.MergeMaps(injected, profile.Env),
+	)
 	fmt.Fprintf(errOut, "forgectl: resuming %s in %s\n", safeTerm(displayName(s)), safeTerm(s.Cwd))
 	slog.Debug("Preparing to exec claude for a resume.", "session", s.ID, "cwd", s.Cwd, "fork", fork)
 

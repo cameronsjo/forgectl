@@ -207,6 +207,33 @@ func MergeEnv(base []string, extra map[string]string) []string {
 	return out
 }
 
+// StripEnv returns base without any entry whose key is in keys. It is the
+// removal MergeEnv cannot express: a map of overrides can only assign, and
+// assigning the empty string is not the same as removing the variable for a
+// consumer that tests presence rather than truthiness — or for NO_PROXY, whose
+// empty value means "no bypass exceptions" rather than "no proxy".
+func StripEnv(base []string, keys []string) []string {
+	if len(keys) == 0 {
+		return base
+	}
+	drop := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		drop[k] = struct{}{}
+	}
+	out := make([]string, 0, len(base))
+	for _, e := range base {
+		k := e
+		if i := strings.IndexByte(e, '='); i >= 0 {
+			k = e[:i]
+		}
+		if _, dropped := drop[k]; dropped {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 // MergeMaps overlays over onto base, returning a new map in which over's keys
 // win. Either argument may be nil/empty. Used to layer the profile env over
 // injected bench defaults so a user-set profile value beats an injected one.

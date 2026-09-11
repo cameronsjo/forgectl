@@ -148,7 +148,7 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		return err
 	}
 
-	injected, err := injectedLaunchEnv(deps.Cfg)
+	injected, unset, err := injectedLaunchEnv(deps.Cfg)
 	if err != nil {
 		return WithExitCode(termsafe.Error(err), 2)
 	}
@@ -159,6 +159,7 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		Args:        nil,
 		BaseEnv:     surfaceLaunchEnvironment(os.Environ()),
 		InjectedEnv: injected,
+		UnsetEnv:    unset,
 		Resolve:     launch.ResolveBinary,
 	})
 	if err != nil {

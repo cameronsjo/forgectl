@@ -1,64 +1,46 @@
 package proxy
 
 import (
-	"errors"
-	"fmt"
-
 	"github.com/cameronsjo/forgectl/internal/config"
 )
 
-// ErrUnknownLaunchProfile reports a launch_profile naming a profile the config
-// does not define. Refusing beats launching unproxied: a typo that fell back to
-// the calling shell's variables would leave the harness reaching the network by
-// a path the operator did not choose, and the launch would look successful.
-// The message names the profile because a profile NAME is not sensitive — only
-// its values are.
-var ErrUnknownLaunchProfile = errors.New("proxy: launch_profile names no configured profile")
-
-// ErrEmptyLaunchProfile reports a launch_profile naming a profile that sets no
-// values. Distinct from ErrEmptyProfile, whose message sends the operator to
-// `proxy off` — advice about the shell protocol that would neither explain nor
-// fix an empty launch profile.
-var ErrEmptyLaunchProfile = errors.New("proxy: launch_profile names a profile that sets no values")
-
 // LaunchEnv returns the environment a launched harness needs to reach the
-// network through pc.LaunchProfile, or nil when no launch profile is
-// configured. It is the second sanctioned sink for profile values, alongside
+// network through pc.LaunchProfile: the variables to set, and the variables to
+// REMOVE from the inherited environment. Both are empty when no launch profile
+// is configured. It is the second sanctioned sink for profile values, alongside
 // Use's shell protocol: both walk profileVariables, so neither can support a
 // variable or a spelling the other silently misses.
 //
-// Every supported variable is present in the result, and an absent profile
-// field maps to the EMPTY STRING rather than being omitted. That is what makes
-// a launch deterministic: the merge that applies this map overrides the calling
-// shell's snapshot key by key, so an omitted key would let a stale exported
-// value survive into the child — the one thing a named profile exists to
-// prevent. Empty reads as no-proxy in the consumers that matter (Go's
-// net/http/httpproxy, libcurl, and the undici client Node harnesses run on),
-// which is the same effect Use gets by unsetting the pair.
-func LaunchEnv(pc config.ProxyConfig) (map[string]string, error) {
-	if pc.LaunchProfile == "" {
-		return nil, nil
-	}
-
-	profile, ok := pc.Profiles[pc.LaunchProfile]
-	if !ok {
-		return nil, fmt.Errorf("%w: %q", ErrUnknownLaunchProfile, pc.LaunchProfile)
-	}
-	if profile.IsZero() {
-		return nil, fmt.Errorf("%w: %q", ErrEmptyLaunchProfile, pc.LaunchProfile)
+// An absent profile field removes both spellings rather than setting them
+// empty, which is the same thing Use does and the invariant ProxyProfile
+// documents. Empty is not a synonym for absent here: NO_PROXY's meaning is
+// inverted relative to the other three — an empty NO_PROXY says "no bypass
+// exceptions", so a profile that sets https_proxy and omits no_proxy would
+// clobber the shell's NO_PROXY=localhost and route loopback traffic through
+// the corporate proxy. Removal is what makes a profile switch deterministic
+// AND leaves no half-applied variable behind.
+func LaunchEnv(pc config.ProxyConfig) (set map[string]string, unset []string, err error) {
+	profile, ok, err := pc.ResolveLaunchProfile()
+	if err != nil || !ok {
+		return nil, nil, err
 	}
 
 	variables := profileVariables(profile)
-	env := make(map[string]string, len(variables)*2)
+	set = make(map[string]string, len(variables)*2)
+	unset = make([]string, 0, len(variables)*2)
 	for _, v := range variables {
+		if v.value == "" {
+			unset = append(unset, v.upper, v.lower)
+			continue
+		}
 		// A NUL cannot survive the exec boundary any more than it can survive a
 		// shell variable, so it is rejected here rather than becoming a silently
 		// truncated value or an opaque EINVAL from the exec itself.
 		if err := rejectNUL(v.value); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		env[v.upper] = v.value
-		env[v.lower] = v.value
+		set[v.upper] = v.value
+		set[v.lower] = v.value
 	}
-	return env, nil
+	return set, unset, nil
 }

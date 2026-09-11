@@ -93,7 +93,12 @@ type InvocationRequest struct {
 	Args        []string
 	BaseEnv     []string
 	InjectedEnv map[string]string
-	Resolve     BinaryResolver
+	// UnsetEnv names variables to REMOVE from BaseEnv rather than override.
+	// InjectedEnv cannot express removal, and setting a variable empty is not
+	// the same as not setting it — see StripEnv. The profile's own Env still
+	// wins over a removal, because it is the operator naming a value explicitly.
+	UnsetEnv []string
+	Resolve  BinaryResolver
 }
 
 // BuiltInvocation is the invocation plus the two things the caller needs to
@@ -145,13 +150,17 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 	// else too would let an injected value beat the profile value that exists to
 	// override it.
 	extra := MergeMaps(req.InjectedEnv, profile.Env)
+	// Removals apply to the inherited snapshot only, so a profile Env entry
+	// naming the same variable still lands — the operator's explicit value
+	// outranks an injected default's removal, exactly as it outranks its set.
+	base := StripEnv(cloneStrings(req.BaseEnv), req.UnsetEnv)
 
 	return BuiltInvocation{
 		Invocation: Invocation{
 			Harness: profile.Harness,
 			Binary:  binary,
 			Args:    harnessArgs,
-			Env:     MergeEnv(cloneStrings(req.BaseEnv), extra),
+			Env:     MergeEnv(base, extra),
 			CWD:     req.CWD,
 		},
 		Profile: profile,

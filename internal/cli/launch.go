@@ -141,6 +141,16 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	// migration path forgets.
 	usageEnabled := cfg.Launch.UsageStats
 
+	// Before the automatic legacy migration below, which renames claunch.conf
+	// and rewrites config.toml: this refusal is a pure function of the config,
+	// so it must not arrive after a launch has already written to disk. The
+	// builder layers the set block UNDER the profile's env, so a profile value
+	// wins over an injected default. Contents and rationale: injectedLaunchEnv.
+	injected, unset, err := injectedLaunchEnv(cfg)
+	if err != nil {
+		return WithExitCode(termsafe.Error(err), 2)
+	}
+
 	effLaunch, notice, effFrom := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
 	if notice != "" {
 		fmt.Fprintln(os.Stderr, "forgectl: "+termsafe.SafeLine(notice))
@@ -152,19 +162,13 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	if err != nil {
 		return termsafe.Error(fmt.Errorf("determine working directory: %w", err))
 	}
-	// The builder layers this block UNDER the profile's env, so a profile value
-	// wins over an injected default. Contents and refusal rationale:
-	// injectedLaunchEnv.
-	injected, err := injectedLaunchEnv(cfg)
-	if err != nil {
-		return termsafe.Error(err)
-	}
 	built, err := launch.BuildInvocation(launch.InvocationRequest{
 		Config:      lc,
 		CWD:         cwd,
 		Args:        args,
 		BaseEnv:     os.Environ(),
 		InjectedEnv: injected,
+		UnsetEnv:    unset,
 		Resolve:     launch.ResolveBinary,
 	})
 	if err != nil {

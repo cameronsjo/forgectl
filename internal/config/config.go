@@ -44,7 +44,8 @@ const logKeepDays = 7
 //	probe_port = 443
 //	ttl_seconds = 60
 //	timeout_ms = 1000
-//	[proxy]              # forgectl proxy — named current-shell proxy profiles
+//	[proxy]              # forgectl proxy — named proxy profiles
+//	launch_profile = "work"   # applied to every launch/resume/surface launch
 //	[proxy.profiles.work]
 //	http_proxy  = "http://proxy.example:8080"
 //	https_proxy = "http://proxy.example:8080"
@@ -260,6 +261,47 @@ type ProxyConfig struct {
 	// calling shell exported, which is the behaviour of every release before
 	// this field existed.
 	LaunchProfile string `toml:"launch_profile"`
+}
+
+// ErrUnknownLaunchProfile reports a launch_profile naming a profile the config
+// does not define. Refusing beats launching unproxied: a typo that fell back to
+// the calling shell's variables would leave the harness reaching the network by
+// a path the operator did not choose, and the launch would look successful.
+// The message names the profile because a profile NAME is not sensitive — only
+// its values are.
+var ErrUnknownLaunchProfile = errors.New("proxy: launch_profile names no configured profile")
+
+// ErrEmptyLaunchProfile reports a launch_profile naming a profile that sets no
+// values. Distinct from internal/proxy's ErrEmptyProfile, whose message sends
+// the operator to `proxy off` — advice about the shell protocol that would
+// neither explain nor fix an empty launch profile.
+var ErrEmptyLaunchProfile = errors.New("proxy: launch_profile names a profile that sets no values")
+
+// ResolveLaunchProfile returns the profile named by LaunchProfile, or ok=false
+// when no launch profile is configured. It lives here rather than in
+// internal/proxy so `forgectl launch doctor` can reach the same refusal the
+// launch paths hit: a doctor that cannot see this key reports a healthy config
+// while every launch refuses.
+func (pc ProxyConfig) ResolveLaunchProfile() (profile ProxyProfile, ok bool, err error) {
+	if pc.LaunchProfile == "" {
+		return ProxyProfile{}, false, nil
+	}
+	profile, found := pc.Profiles[pc.LaunchProfile]
+	if !found {
+		return ProxyProfile{}, false, fmt.Errorf("%w: %q", ErrUnknownLaunchProfile, pc.LaunchProfile)
+	}
+	if profile.IsZero() {
+		return ProxyProfile{}, false, fmt.Errorf("%w: %q", ErrEmptyLaunchProfile, pc.LaunchProfile)
+	}
+	return profile, true, nil
+}
+
+// Validate reports a proxy section that would make every launch refuse. It
+// checks only the launch profile's resolvability; profile VALUES are validated
+// at their sink, where the representability rules live.
+func (pc ProxyConfig) Validate() error {
+	_, _, err := pc.ResolveLaunchProfile()
+	return err
 }
 
 // IsZero reports whether the section configures nothing: no named profiles and
@@ -927,6 +969,9 @@ func ValidatePath(path string) error {
 		return err
 	}
 	if err := cfg.Docs.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Proxy.Validate(); err != nil {
 		return err
 	}
 	return cfg.Theme.Validate()
