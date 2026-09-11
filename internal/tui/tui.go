@@ -420,10 +420,16 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) activate(index int) (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case hubMode:
-		if index < 0 || index >= len(m.hub) {
+		// m.l.Index()/number-key raw indices are positions in the FILTERED
+		// list, not m.hub — indexing m.hub directly runs the wrong row once a
+		// filter narrows the visible set (charm.land/bubbles/v2 list.Index()
+		// docs: "consider using GlobalIndex() instead" for exactly this).
+		// SelectedItem() is filter-aware.
+		it, ok := m.l.SelectedItem().(hubItem)
+		if !ok {
 			return m, nil
 		}
-		entry := m.hub[index]
+		entry := it.entry
 		if entry.Name == "tmux" {
 			// tmux's hub row opens today's unchanged tmux jumper rather than
 			// a drill-down list (Architecture: "opens today's menuMode
@@ -440,10 +446,11 @@ func (m model) activate(index int) (tea.Model, tea.Cmd) {
 		m.enterLeaves(entry)
 		return m, nil
 	case leavesMode:
-		if index < 0 || index >= len(m.leaves) {
+		it, ok := m.l.SelectedItem().(leafItem)
+		if !ok {
 			return m, nil
 		}
-		leaf := m.leaves[index]
+		leaf := it.leaf
 		if leaf.NeedsArgs {
 			m.action = Action{Kind: ActionShowInvocation, Argv: strings.Fields(usageLine(m.leavesParent, leaf))}
 			return m, tea.Quit
