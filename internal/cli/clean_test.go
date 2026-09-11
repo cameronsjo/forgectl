@@ -48,6 +48,7 @@ import (
 
 	cleanpkg "github.com/cameronsjo/forgectl/internal/clean"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 func TestCleanCmd_DryRun_ReportsReclaimableAndTouchesNothing(t *testing.T) {
@@ -62,7 +63,7 @@ func TestCleanCmd_DryRun_ReportsReclaimableAndTouchesNothing(t *testing.T) {
 	}
 
 	client := cleanpkg.New(&exec.FakeRunner{}, cleanpkg.WithRoot(root))
-	cmd := newCleanCmdForClient(client)
+	cmd := newCleanCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -94,7 +95,7 @@ func TestCleanCmd_RootFlag_OverridesDefault(t *testing.T) {
 	// --root should be scanned.
 	defaultRoot := t.TempDir()
 	client := cleanpkg.New(&exec.FakeRunner{}, cleanpkg.WithRoot(defaultRoot))
-	cmd := newCleanCmdForClient(client)
+	cmd := newCleanCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -111,7 +112,7 @@ func TestCleanCmd_RootFlag_OverridesDefault(t *testing.T) {
 func TestCleanCmd_InvalidType_RejectedBeforeScan(t *testing.T) {
 	root := t.TempDir()
 	client := cleanpkg.New(&exec.FakeRunner{}, cleanpkg.WithRoot(root))
-	cmd := newCleanCmdForClient(client)
+	cmd := newCleanCmdForClient(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -137,7 +138,7 @@ func TestCleanCmd_TypeConflictsWithCachesOrDocker(t *testing.T) {
 			root := t.TempDir()
 			fake := &exec.FakeRunner{}
 			client := cleanpkg.New(fake, cleanpkg.WithRoot(root))
-			cmd := newCleanCmdForClient(client)
+			cmd := newCleanCmdForClient(client, theme.Theme{})
 			var stdout, stderr bytes.Buffer
 			cmd.SetOut(&stdout)
 			cmd.SetErr(&stderr)
@@ -174,7 +175,7 @@ func TestCleanCmd_DirsPassFailureDoesNotBlockCachesPass(t *testing.T) {
 		return "", nil
 	}}
 	client := cleanpkg.New(fake) // no WithRoot: root resolution genuinely fails
-	cmd := newCleanCmdForClient(client)
+	cmd := newCleanCmdForClient(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -209,7 +210,7 @@ func TestCleanCmd_CachesFlag_DryRun_NoPruneCalls(t *testing.T) {
 		return "", nil
 	}}
 	client := cleanpkg.New(fake, cleanpkg.WithRoot(root))
-	cmd := newCleanCmdForClient(client)
+	cmd := newCleanCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -249,7 +250,7 @@ func TestCleanCmd_DockerFlag_DryRun_NoPruneCalls(t *testing.T) {
 		return "", nil
 	}}
 	client := cleanpkg.New(fake, cleanpkg.WithRoot(root))
-	cmd := newCleanCmdForClient(client)
+	cmd := newCleanCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -278,7 +279,7 @@ func TestCleanCmd_NoFlags_NeverTouchesCachesOrDocker(t *testing.T) {
 	root := t.TempDir()
 	fake := &exec.FakeRunner{}
 	client := cleanpkg.New(fake, cleanpkg.WithRoot(root))
-	cmd := newCleanCmdForClient(client)
+	cmd := newCleanCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -297,7 +298,7 @@ func TestCleanCmd_NoFlags_NeverTouchesCachesOrDocker(t *testing.T) {
 
 func TestCleanCmd_AliasResolvesToCanonicalVerb(t *testing.T) {
 	client := cleanpkg.New(&exec.FakeRunner{})
-	cmd := newCleanCmdForClient(client)
+	cmd := newCleanCmdForClient(client, theme.Theme{})
 
 	found := false
 	for _, a := range cmd.Aliases {
@@ -317,7 +318,7 @@ func TestCleanCmd_AliasResolvesToCanonicalVerb(t *testing.T) {
 func withConfirmFn(t *testing.T, fn func(string) (bool, error)) {
 	t.Helper()
 	orig := confirmFn
-	confirmFn = fn
+	confirmFn = func(_ theme.Theme, prompt string) (bool, error) { return fn(prompt) }
 	t.Cleanup(func() { confirmFn = orig })
 }
 
@@ -338,7 +339,7 @@ func TestCleanCmd_CachesApply_ConfirmYes_ReachesPrune(t *testing.T) {
 		return "", nil
 	}}
 	client := cleanpkg.New(fake, cleanpkg.WithRoot(t.TempDir()))
-	cmd := newCleanCmdForClient(client)
+	cmd := newCleanCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -376,7 +377,7 @@ func TestCleanCmd_CachesApply_ConfirmNo_NeverPrunes(t *testing.T) {
 		return "", nil
 	}}
 	client := cleanpkg.New(fake, cleanpkg.WithRoot(t.TempDir()))
-	cmd := newCleanCmdForClient(client)
+	cmd := newCleanCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -431,7 +432,7 @@ func TestCleanCmd_CachesCancelDoesNotAbortDockerPass(t *testing.T) {
 		return "", nil
 	}}
 	client := cleanpkg.New(fake, cleanpkg.WithRoot(t.TempDir()))
-	cmd := newCleanCmdForClient(client)
+	cmd := newCleanCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -480,7 +481,7 @@ func TestCleanCmd_DockerFlag_UnparseableSize_ReportsUnknownNotNothing(t *testing
 		return "", nil
 	}}
 	client := cleanpkg.New(fake, cleanpkg.WithRoot(root))
-	cmd := newCleanCmdForClient(client)
+	cmd := newCleanCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -524,7 +525,7 @@ func TestCleanCmd_DockerFlag_PartialUnparseable_PreviewAndPromptAgree(t *testing
 		return "", nil
 	}}
 	client := cleanpkg.New(fake, cleanpkg.WithRoot(root))
-	cmd := newCleanCmdForClient(client)
+	cmd := newCleanCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -570,7 +571,7 @@ func TestCleanCmd_CachesApply_PnpmDetected_PromptCarriesMismatchCaveat(t *testin
 		return "", nil
 	}}
 	client := cleanpkg.New(fake, cleanpkg.WithRoot(t.TempDir()))
-	cmd := newCleanCmdForClient(client)
+	cmd := newCleanCmdForClient(client, theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))

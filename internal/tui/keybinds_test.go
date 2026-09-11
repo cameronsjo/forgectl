@@ -20,13 +20,15 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/ghostty"
+	"github.com/cameronsjo/forgectl/internal/termsafe/termsafetest"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 func TestKeybindSheet_CommentPreferredOverAction(t *testing.T) {
 	rows := []ghostty.Keybind{
 		{Trigger: "super+ctrl+t", Action: `text:\x00c`, Comment: "New tmux window"},
 	}
-	out := KeybindSheet(rows, false)
+	out := KeybindSheet(rows, false, theme.Default().Styles())
 	if !strings.Contains(out, "New tmux window") {
 		t.Errorf("expected comment in output, got: %s", out)
 	}
@@ -39,7 +41,7 @@ func TestKeybindSheet_NoCommentRendersRawAction(t *testing.T) {
 	rows := []ghostty.Keybind{
 		{Trigger: "escape", Action: "end_search"},
 	}
-	out := KeybindSheet(rows, false)
+	out := KeybindSheet(rows, false, theme.Default().Styles())
 	if !strings.Contains(out, "end_search") {
 		t.Errorf("expected raw action in output, got: %s", out)
 	}
@@ -51,7 +53,7 @@ func TestKeybindSheet_EveryTriggerAppears(t *testing.T) {
 		{Trigger: "super+w", Action: "close_surface"},
 		{Trigger: "super+ctrl+=", Action: "equalize_splits"},
 	}
-	out := KeybindSheet(rows, false)
+	out := KeybindSheet(rows, false, theme.Default().Styles())
 	for _, row := range rows {
 		if !strings.Contains(out, row.Trigger) {
 			t.Errorf("expected trigger %q in output, got: %s", row.Trigger, out)
@@ -61,7 +63,7 @@ func TestKeybindSheet_EveryTriggerAppears(t *testing.T) {
 
 func TestKeybindSheet_NoIcons_UsesASCIIGlyph(t *testing.T) {
 	rows := []ghostty.Keybind{{Trigger: "escape", Action: "end_search"}}
-	out := KeybindSheet(rows, true)
+	out := KeybindSheet(rows, true, theme.Default().Styles())
 	if !strings.HasPrefix(out, asciiGlyphs.Cheat) {
 		t.Errorf("expected output to start with ascii cheat glyph %q, got: %s", asciiGlyphs.Cheat, out)
 	}
@@ -79,17 +81,25 @@ func TestKeybindSheet_SanitizesHostileBytes(t *testing.T) {
 		{Trigger: hostile, Action: hostile},
 		{Trigger: "escape", Action: hostile, Comment: hostile},
 	}
-	out := KeybindSheet(rows, false)
+	// Rendered with icons OFF, matching every other inertness assertion in this
+	// package. Nerd Font glyphs live in the Unicode private use area, which is
+	// not graphic, so an icon render trips the shared contract on forgectl's own
+	// glyph table rather than on anything the hostile payload contributed. The
+	// glyph set is orthogonal to sanitization, and
+	// TestKeybindSheet_NoIcons_UsesASCIIGlyph covers the switch itself.
+	out := KeybindSheet(rows, true, theme.Default().Styles())
 
-	// Check for the specific hostile bytes the payload embeds — not the
-	// full 0x00-0x1F range, since KeybindSheet's own row/line structure
-	// legitimately uses "\n" (0x0a) as a separator; that's the renderer's
-	// formatting, not leaked hostile content.
-	for _, b := range []byte{0x00, 0x01, 0x07, 0x1b, 0x7f} {
-		if strings.ContainsRune(out, rune(b)) {
-			t.Errorf("KeybindSheet output still contains hostile byte 0x%02x: %q", b, out)
-		}
-	}
+	// The shared contract rather than a local byte list. This test used to scan
+	// for 0x00/0x01/0x07/0x1b/0x7f by hand, which was a second, subtly narrower
+	// notion of "safe" than the one every other output boundary asserts — the
+	// exact drift termsafetest exists to prevent. AssertInert also covers the
+	// C1 and bidi classes the hand-written list never mentioned.
+	//
+	// It permits the appearance-only SGR forgectl's own styles emit, which is
+	// why this became necessary at the charm v2 migration: lipgloss v2 renders
+	// colour unconditionally, so the sheet's own headings now carry ESC. The
+	// hostile payload's cursor-control sequences are still rejected.
+	termsafetest.AssertInert(t, "keybind sheet", out)
 	for _, want := range []string{"safe", "trigger", "end", "escape"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("KeybindSheet dropped visible content %q: got %q", want, out)

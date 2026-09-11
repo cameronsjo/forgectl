@@ -7,12 +7,13 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // newTmuxKillCmd kills a session, confirming first unless --yes is given. With
 // --others it kills every session EXCEPT the named one.
-func newTmuxKillCmd(client *tmux.Client) *cobra.Command {
+func newTmuxKillCmd(client *tmux.Client, th theme.Theme) *cobra.Command {
 	var yes, others bool
 	cmd := &cobra.Command{
 		Use:   "kill <session>",
@@ -36,7 +37,7 @@ func newTmuxKillCmd(client *tmux.Client) *cobra.Command {
 				prompt = fmt.Sprintf("Kill ALL sessions except %q?", name)
 			}
 			if !yes {
-				ok, err := confirm(prompt)
+				ok, err := confirm(th, prompt)
 				if err != nil {
 					return err
 				}

@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	netpkg "github.com/cameronsjo/forgectl/internal/net"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // prAgentEnv is the environment override for the review agent, honored when
@@ -33,15 +36,15 @@ var prModule = module.Manifest{
 // review command group, building its own pr/net clients from deps.Runner.
 func newPrCmd(deps module.Deps) *cobra.Command {
 	cfg := deps.Cfg
-	client := pr.New(deps.Runner)
+	client := pr.New(deps.Runner, pr.WithApprovalTheme(deps.Theme))
 	netClient := netpkg.New(deps.Runner, netpkg.WithNetConfig(cfg.Net))
 	// err discarded: a failed config-dir lookup yields "", which LoadReviewed
 	// reads as an empty store and persist() rejects loudly — never a silent bad write.
 	reviewedPath, _ := config.PrReviewedPath()
-	return newPrCmdForClient(cfg, client, netClient, reviewedPath)
+	return newPrCmdForClient(cfg, client, netClient, reviewedPath, deps.Theme)
 }
 
-func newPrCmdForClient(cfg config.Config, client *pr.Client, netClient *netpkg.Client, reviewedPath string) *cobra.Command {
+func newPrCmdForClient(cfg config.Config, client *pr.Client, netClient *netpkg.Client, reviewedPath string, th theme.Theme) *cobra.Command {
 
 	var (
 		agent    string
@@ -149,11 +152,11 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 		newPrOpenCmd(client),
 		newPrTeardownCmd(client),
 		newPrCleanupCmd(client),
-		newPrFindingsCmd(client),
+		newPrFindingsCmd(client, th),
 		newPrKeysCmd(),
-		newPrPrsCmd(client),
-		newPrDashCmd(client),
-		newPrPickCmd(client, cfg),
+		newPrPrsCmd(client, th),
+		newPrDashCmd(client, th),
+		newPrPickCmd(client, cfg, th),
 		newPrReviewedCmd(client),
 	)
 	return cmd
@@ -228,8 +231,18 @@ func windowStatus(live map[pr.Ref]bool, ref pr.Ref, tmuxOK bool) string {
 	return "window gone"
 }
 
+// prListRowJSON is the --json wire shape for one `pr list` row — the same
+// four fields as the human table's tab-separated columns, in the same order.
+type prListRowJSON struct {
+	Ref       string `json:"ref"`
+	CreatedAt string `json:"created_at"`
+	Path      string `json:"path"`
+	Status    string `json:"status"`
+}
+
 func newPrListCmd(client *pr.Client) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List active clean-room review sessions",
 		Args:  cobra.NoArgs,
@@ -239,10 +252,6 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
-			if len(summaries) == 0 {
-				fmt.Fprintln(out, "no active review sessions")
-				return nil
-			}
 			// A breadcrumb only proves a review was DISPATCHED, never that it
 			// survived: tmux new-window exits 0 before the agent runs, and a
 			// window whose agent dies is destroyed outright. Cross-check each
@@ -253,16 +262,13 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 			// a question worth asking, so a list of nothing but stale records
 			// issues zero tmux calls — and in a mixed list, an unreadable tmux
 			// degrades only the live rows.
-			refs := make([]pr.Ref, 0, len(summaries))
-			for _, s := range summaries {
-				if s.IsWorkspaceLive() {
-					refs = append(refs, s.Ref())
-				}
+			live, tmuxOK := prListLiveness(cmd.Context(), client, summaries)
+			if asJSON {
+				return writePrListJSON(out, summaries, live, tmuxOK)
 			}
-			var live map[pr.Ref]bool
-			tmuxOK := true
-			if len(refs) > 0 {
-				live, tmuxOK = client.WindowsLive(cmd.Context(), refs)
+			if len(summaries) == 0 {
+				_, _ = fmt.Fprintln(out, "no active review sessions")
+				return nil
 			}
 			for _, s := range summaries {
 				// Status is APPENDED, never inserted. The breadcrumb path is
@@ -286,6 +292,46 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"ref":...,"created_at":...,"path":...,"status":...}] to stdout`)
+	return cmd
+}
+
+// prListLiveness cross-checks each live-workspace summary against tmux's
+// window list, exactly once, and returns the map both the human table and
+// the --json rows read `sessionStatus` against. A stale-only list issues
+// zero tmux calls, matching the human path's cost contract.
+func prListLiveness(ctx context.Context, client *pr.Client, summaries []pr.SessionSummary) (live map[pr.Ref]bool, tmuxOK bool) {
+	refs := make([]pr.Ref, 0, len(summaries))
+	for _, s := range summaries {
+		if s.IsWorkspaceLive() {
+			refs = append(refs, s.Ref())
+		}
+	}
+	tmuxOK = true
+	if len(refs) > 0 {
+		live, tmuxOK = client.WindowsLive(ctx, refs)
+	}
+	return live, tmuxOK
+}
+
+// writePrListJSON encodes the active review sessions as a JSON array through
+// the sanctioned termsafe seam. An empty result encodes [], never null: the
+// path is the one field here that can carry attacker-controlled bytes (a
+// FILENAME chosen on disk), and the encoder's own escaping is what makes it
+// terminal-safe on the way out — no QuotePathIfUnsafe pass is needed here.
+func writePrListJSON(out io.Writer, summaries []pr.SessionSummary, live map[pr.Ref]bool, tmuxOK bool) error {
+	rows := make([]prListRowJSON, 0, len(summaries))
+	for _, s := range summaries {
+		rows = append(rows, prListRowJSON{
+			Ref:       s.Ref().String(),
+			CreatedAt: s.CreatedAt().Format(time.RFC3339),
+			Path:      s.Path(),
+			Status:    sessionStatus(live, s, tmuxOK),
+		})
+	}
+	enc := termsafe.JSONEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(rows)
 }
 
 func newPrAttachCmd(client *pr.Client) *cobra.Command {

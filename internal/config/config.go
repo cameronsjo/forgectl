@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -89,6 +91,12 @@ const logKeepDays = 7
 //	max_concurrent = 4   # live "pr-*" tmux windows allowed at once; <= 0 = default (4)
 //	model  = ""          # reviewer model; unset = the ambient launch profile's
 //	effort = ""          # reviewer effort; unset = the ambient profile's, re-derived when model is set
+//	[theme]              # forgectl TUI colour theme
+//	preset = "artificer" # "artificer" (default) | "legacy"
+//	mode   = "dark"      # "auto" (default) | "dark" | "light"
+//	[theme.colors]
+//	accent = "#dbbb6f"                              # scalar: both modes
+//	danger = { dark = "#e6a8a2", light = "#8a2418" } # table: per mode
 type Config struct {
 	NoIcons   bool            `toml:"no_icons"`
 	LogLevel  string          `toml:"log_level"`
@@ -108,6 +116,7 @@ type Config struct {
 	Update    UpdateConfig    `toml:"update"`
 	Pr        PrConfig        `toml:"pr"`
 	Github    GithubConfig    `toml:"github"`
+	Theme     ThemeConfig     `toml:"theme"`
 	launchSet bool
 	// decodeDegraded records that the config file existed but failed to
 	// decode, so this Config may be missing sections the operator wrote.
@@ -507,6 +516,155 @@ func (gc GiteaConfig) IsZero() bool {
 	return !gc.Enabled && gc.Host == "" && gc.Login == "" && len(gc.Owners) == 0
 }
 
+// ThemeRoleNames lists every colour role the TUI theme accepts, in the exact
+// order they are documented to an operator — the [theme].colors keys, and the
+// list ThemeConfig.Validate joins into its "unknown role" error.
+var ThemeRoleNames = []string{
+	"accent", "ok", "danger", "warn", "active", "muted", "meta", "dim", "fg", "steel",
+	"brand", "surfaceraised", "accentfill", "onaccent", "urgentfill", "onurgent", "bg",
+}
+
+// themeRoleSet is ThemeRoleNames as a lookup set, built once. Role keys are
+// compared case-insensitively, so the set holds only the canonical (already
+// lowercase) spellings.
+var themeRoleSet = func() map[string]bool {
+	set := make(map[string]bool, len(ThemeRoleNames))
+	for _, name := range ThemeRoleNames {
+		set[name] = true
+	}
+	return set
+}()
+
+// hexColorRe matches a strict #rrggbb hex colour — no shorthand, no alpha.
+var hexColorRe = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+
+// ThemeConfig is the [theme] section: which built-in palette the TUI starts
+// from, which mode it renders in, and any per-role colour overrides. A zero
+// value means "section absent" — the TUI applies its own baked defaults.
+type ThemeConfig struct {
+	Preset string                   `toml:"preset"`
+	Mode   string                   `toml:"mode"`
+	Colors map[string]ColorOverride `toml:"colors"`
+}
+
+// Validate reports the first semantically invalid [theme] value. Colors is
+// walked in sorted key order so the error is the same on every run, mirroring
+// DocsConfig.Validate above.
+func (tc ThemeConfig) Validate() error {
+	switch tc.Preset {
+	case "", "artificer", "legacy":
+	default:
+		return fmt.Errorf("[theme].preset = %q: must be \"artificer\" or \"legacy\"", tc.Preset)
+	}
+	switch tc.Mode {
+	case "", "auto", "dark", "light":
+	default:
+		return fmt.Errorf("[theme].mode = %q: must be \"auto\", \"dark\", or \"light\"", tc.Mode)
+	}
+
+	keys := make([]string, 0, len(tc.Colors))
+	for key := range tc.Colors {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	// Canonical role name -> the spelling that claimed it. Role keys match
+	// case-insensitively, so `accent` and `ACCENT` are one role written twice,
+	// and TOML permits both in a table. Without this check ValidatePath reports
+	// the file as valid while theme.FromConfig rejects it at startup — doctor
+	// would say the config is fine about a config the binary refuses.
+	claimed := make(map[string]string, len(keys))
+
+	for _, key := range keys {
+		canonical := strings.ToLower(key)
+		if !themeRoleSet[canonical] {
+			return fmt.Errorf("[theme].colors[%q]: unknown role; roles are %s", key, strings.Join(ThemeRoleNames, ", "))
+		}
+		if prev, dup := claimed[canonical]; dup {
+			return fmt.Errorf("[theme].colors: role %q set twice, as %q and %q; keep one", canonical, prev, key)
+		}
+		claimed[canonical] = key
+		c := tc.Colors[key]
+		if c.Dark == "" && c.Light == "" {
+			return fmt.Errorf("[theme].colors[%q]: no colour given", key)
+		}
+		if c.Dark != "" && !hexColorRe.MatchString(c.Dark) {
+			return fmt.Errorf("[theme].colors[%q].dark = %q: must be a #rrggbb hex colour", key, c.Dark)
+		}
+		if c.Light != "" && !hexColorRe.MatchString(c.Light) {
+			return fmt.Errorf("[theme].colors[%q].light = %q: must be a #rrggbb hex colour", key, c.Light)
+		}
+	}
+	return nil
+}
+
+// IsZero reports whether the [theme] section was absent or empty.
+func (tc ThemeConfig) IsZero() bool {
+	return tc.Preset == "" && tc.Mode == "" && len(tc.Colors) == 0
+}
+
+// ColorOverride is one role's colour, either a single hex value used for both
+// modes or a per-mode pair. A field left empty means "no override for that
+// mode" — it is not itself a colour value, and ThemeConfig.Validate treats
+// both fields empty as an error rather than a silent no-op, since a bare
+// `role = {}` in the file is never what an operator meant.
+type ColorOverride struct {
+	Dark  string `toml:"dark"`
+	Light string `toml:"light"`
+}
+
+// UnmarshalTOML accepts either TOML spelling [theme.colors] writes: a bare
+// hex string, which sets both Dark and Light, or a table with "dark"/"light"
+// keys, either of which may be omitted. Any other TOML shape is a decode
+// error naming what was found, so a malformed [theme.colors] entry fails
+// loudly here rather than leaving both fields silently empty. ThemeConfig.Validate
+// (not this method) is responsible for checking that the resulting strings
+// are well-formed hex colours — Load must stay tolerant, and only strict
+// decode callers (ValidatePath) reject a bad value.
+func (co *ColorOverride) UnmarshalTOML(data any) error {
+	switch v := data.(type) {
+	case string:
+		co.Dark = v
+		co.Light = v
+		return nil
+	case map[string]any:
+		if raw, ok := v["dark"]; ok {
+			s, ok := raw.(string)
+			if !ok {
+				return fmt.Errorf("[theme.colors]: dark must be a string, got %T", raw)
+			}
+			co.Dark = s
+		}
+		if raw, ok := v["light"]; ok {
+			s, ok := raw.(string)
+			if !ok {
+				return fmt.Errorf("[theme.colors]: light must be a string, got %T", raw)
+			}
+			co.Light = s
+		}
+		// An unrecognized key is an ERROR, not something to drop. A typo like
+		// `{ dark = "#111111", ligth = "#222222" }` otherwise decodes with the
+		// misspelt half discarded and passes Validate, because Dark is set —
+		// so the operator's light colour silently never applies and nothing
+		// anywhere says so. This branch's doc comment promises a malformed
+		// entry fails loudly; without this it did not.
+		var unknown []string
+		for k := range v {
+			if k != "dark" && k != "light" {
+				unknown = append(unknown, k)
+			}
+		}
+		if len(unknown) > 0 {
+			sort.Strings(unknown)
+			return fmt.Errorf("[theme.colors]: unknown key(s) %s; a colour table takes only dark and light",
+				strings.Join(unknown, ", "))
+		}
+		return nil
+	default:
+		return fmt.Errorf("[theme.colors]: expected a hex string or a {dark=, light=} table, got %T", data)
+	}
+}
+
 // DocsConfig is the [docs] section: extra root directories `forgectl docs`
 // indexes alongside its built-in defaults (cwd, ./docs), and the bind address
 // `serve` uses when --addr is omitted. A zero value means "section absent" —
@@ -515,11 +673,44 @@ func (gc GiteaConfig) IsZero() bool {
 type DocsConfig struct {
 	Roots []string `toml:"roots"`
 	Addr  string   `toml:"addr"`
+	// RootKinds overrides docs.detectRootKind's filesystem-based inference
+	// for a root, keyed by the root path; internal/docs matches keys to
+	// roots by absolute cleaned path, so "." and "./docs" name the same
+	// roots the CLI derives. Values are RootKindDocs or RootKindVault; any
+	// other value is a config error (Validate names the key, the value, and
+	// the two allowed values).
+	RootKinds map[string]string `toml:"root_kinds"`
+}
+
+// The two values [docs].root_kinds accepts.
+const (
+	RootKindDocs  = "docs"
+	RootKindVault = "vault"
+)
+
+// Validate reports the first semantically invalid [docs] value, in key
+// order so the error is the same on every run. Only root_kinds carries a
+// closed value set today; Roots and Addr are validated by their consumers
+// against the filesystem and the network, which a config check cannot do.
+func (dc DocsConfig) Validate() error {
+	keys := make([]string, 0, len(dc.RootKinds))
+	for key := range dc.RootKinds {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		switch value := dc.RootKinds[key]; value {
+		case RootKindDocs, RootKindVault:
+		default:
+			return fmt.Errorf("[docs].root_kinds[%q] = %q: must be %q or %q", key, value, RootKindDocs, RootKindVault)
+		}
+	}
+	return nil
 }
 
 // IsZero reports whether the [docs] section was absent or empty.
 func (dc DocsConfig) IsZero() bool {
-	return len(dc.Roots) == 0 && dc.Addr == ""
+	return len(dc.Roots) == 0 && dc.Addr == "" && len(dc.RootKinds) == 0
 }
 
 // PreflightConfig is the [preflight] section: `forgectl preflight`'s
@@ -721,8 +912,14 @@ func ValidatePath(path string) error {
 	if err != nil {
 		return err
 	}
-	_, err = DecodeStrict(data)
-	return err
+	cfg, err := DecodeStrict(data)
+	if err != nil {
+		return err
+	}
+	if err := cfg.Docs.Validate(); err != nil {
+		return err
+	}
+	return cfg.Theme.Validate()
 }
 
 // SetupLogger configures the global slog default from cfg and returns a Closer
@@ -1078,6 +1275,22 @@ func PrFindingsDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "pr-findings"), nil
+}
+
+// TasksCachePath returns the on-disk path for the `forgectl tasks` local
+// cache: <os.UserConfigDir()>/forgectl/tasks-cache.json (macOS: ~/Library/
+// Application Support/forgectl/tasks-cache.json; Linux: ~/.config/forgectl/
+// tasks-cache.json). It derives from the same configDir() base as
+// ConfigPath/NetCachePath, so none of them drift. The cache holds only
+// task/project/label data (internal/tasks.Snapshot carries no credential
+// field) — the bearer token is read fresh from the keychain every run and
+// never touches disk.
+func TasksCachePath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "tasks-cache.json"), nil
 }
 
 // ResumeStoreDir returns the forgectl-owned directory that holds `forgectl

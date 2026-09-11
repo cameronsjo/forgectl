@@ -6,12 +6,13 @@ import (
 	"io"
 	"strings"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 type projectSelectionMode uint8
@@ -34,7 +35,7 @@ var pickRepoFn = pickRepo
 // Choosing an uncloned repo clones it (by host) into the projects dir first,
 // then opens it in tmux — same zero-typing affordance as before, now reaching
 // repos that aren't checked out yet.
-func newProjectsPickCmd(client *projects.Client) *cobra.Command {
+func newProjectsPickCmd(client *projects.Client, th theme.Theme) *cobra.Command {
 	return &cobra.Command{
 		Use:   "pick [query]",
 		Short: "Open a project in tmux (interactive or by name; clones if needed)",
@@ -68,7 +69,7 @@ when possible, inspect identities with projects list --json, or rerun interactiv
 				// Multiple matches → interactive selector below.
 			}
 
-			chosen, err := chooseRepo(cmd, candidates, projectSelectionPick)
+			chosen, err := chooseRepo(cmd, candidates, projectSelectionPick, th)
 			if err != nil {
 				return err
 			}
@@ -77,9 +78,9 @@ when possible, inspect identities with projects list --json, or rerun interactiv
 	}
 }
 
-func chooseRepo(cmd *cobra.Command, repos []projects.Repo, mode projectSelectionMode) (projects.Repo, error) {
+func chooseRepo(cmd *cobra.Command, repos []projects.Repo, mode projectSelectionMode, th theme.Theme) (projects.Repo, error) {
 	if isInteractiveTTY() {
-		return pickRepoFn(repos)
+		return pickRepoFn(repos, th)
 	}
 	if err := writeProjectCandidates(cmd.OutOrStdout(), repos); err != nil {
 		return projects.Repo{}, err
@@ -189,7 +190,7 @@ func openOrClone(ctx context.Context, client *projects.Client, cmd *cobra.Comman
 // pickRepo runs huh.NewSelect over the inventory and returns the chosen repo.
 // Options are keyed by Repo.Key() so the selection round-trips unambiguously
 // even when the same name exists on both hosts.
-func pickRepo(repos []projects.Repo) (projects.Repo, error) {
+func pickRepo(repos []projects.Repo, th theme.Theme) (projects.Repo, error) {
 	opts := make([]huh.Option[string], len(repos))
 	byKey := make(map[string]projects.Repo, len(repos))
 	for i, r := range repos {
@@ -208,7 +209,7 @@ func pickRepo(repos []projects.Repo) (projects.Repo, error) {
 				Options(opts...).
 				Value(&chosen),
 		),
-	).WithKeyMap(keymap.Cancel()).Run()
+	).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
 	if err != nil {
 		return projects.Repo{}, err
 	}

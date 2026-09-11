@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.18.0](https://github.com/cameronsjo/forgectl/compare/v0.17.3...v0.18.0) (2026-09-08)
+
+
+### Features
+
+* **tasks:** `forgectl tasks mcp` — an MCP server over the Vikunja board, stdio or streamable HTTP, published as a distroless container image ([c844b88](https://github.com/cameronsjo/forgectl/commit/c844b889e6df1f4e1bfe2253a6140743a48bb4f2))
+* **tasks:** read-only Vikunja client with ls/show/ready ([#476](https://github.com/cameronsjo/forgectl/issues/476)) ([2e8406e](https://github.com/cameronsjo/forgectl/commit/2e8406e346e4f8dd83044c2c3616c1ee38e2285f))
+* **theme:** Artificer terminal palette, [theme] config with per-role overrides, and theme show/preview ([9f07488](https://github.com/cameronsjo/forgectl/commit/9f074884a124ccd0fa317fabb4268099c049c123))
+* **theme:** every coloured surface draws from the Artificer palette; NO_COLOR and pipes stay plain ([2bfbfbf](https://github.com/cameronsjo/forgectl/commit/2bfbfbf3ac87ffaef2355de1ef04fef2d400522e))
+* **theme:** style fang's help, version and error output from the palette ([9f07488](https://github.com/cameronsjo/forgectl/commit/9f074884a124ccd0fa317fabb4268099c049c123))
+
+
+### Bug Fixes
+
+* **cli:** honour NO_COLOR over CLICOLOR_FORCE, including in fang help and error output ([19b5467](https://github.com/cameronsjo/forgectl/commit/19b5467b2c470871ded7a4b025ca7376d2c7f2a3))
+* **cli:** send every styled command through a colour-profile writer so NO_COLOR and pipes stay plain ([19b5467](https://github.com/cameronsjo/forgectl/commit/19b5467b2c470871ded7a4b025ca7376d2c7f2a3))
+* **recipe:** submit /compact through agent prompt, not the unreleased type-submit ([#475](https://github.com/cameronsjo/forgectl/issues/475)) ([360d2dd](https://github.com/cameronsjo/forgectl/commit/360d2ddbbed678e82597aff900c7acf0ab87cdce))
+
+## [0.17.3](https://github.com/cameronsjo/forgectl/compare/v0.17.2...v0.17.3) (2026-09-05)
+
+
+### Bug Fixes
+
+* **ci:** run the release job on a hosted runner until fleet signing works ([#462](https://github.com/cameronsjo/forgectl/issues/462)) ([2a3b37b](https://github.com/cameronsjo/forgectl/commit/2a3b37bc55410a39d2d59f38fc2add4df4a2ca34)), closes [#461](https://github.com/cameronsjo/forgectl/issues/461)
+
+## [0.17.2](https://github.com/cameronsjo/forgectl/compare/v0.17.1...v0.17.2) (2026-09-05)
+
+
+### Bug Fixes
+
+* **ci:** name the signing keychain on every codesign call ([#459](https://github.com/cameronsjo/forgectl/issues/459)) ([fbabaf3](https://github.com/cameronsjo/forgectl/commit/fbabaf381fe8bc6ede40b62d46259afec1f8c20b))
+
+## [0.17.1](https://github.com/cameronsjo/forgectl/compare/v0.17.0...v0.17.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **ci:** trust the Developer ID intermediate and assert a valid identity at import time ([#457](https://github.com/cameronsjo/forgectl/issues/457)) ([a3b8433](https://github.com/cameronsjo/forgectl/commit/a3b84330d51fc4ce54f9142c9a7043a776e8eb49))
+
+## [0.17.0](https://github.com/cameronsjo/forgectl/compare/v0.16.0...v0.17.0) (2026-09-05)
+
+
+### Features
+
+* **docs:** link resolution substrate — `ResolveLink`, `Backlinks`, and per-root link tables in `internal/docs`, with Obsidian vault detection and a `[docs.root_kinds]` config override (`docs` | `vault`). No rendering change yet. ([f2e42c8](https://github.com/cameronsjo/forgectl/commit/f2e42c8269b3a01f3c45148777fce88801ff2021))
+* **recipe:** add herdr afk cleanup ([#439](https://github.com/cameronsjo/forgectl/issues/439)) ([223dc01](https://github.com/cameronsjo/forgectl/commit/223dc01b8a9488dc210a5fe47fd4a631fa23fe64))
+
 ## [0.16.0](https://github.com/cameronsjo/forgectl/compare/v0.15.0...v0.16.0) (2026-09-01)
 
 

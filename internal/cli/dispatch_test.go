@@ -6,6 +6,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -128,7 +129,7 @@ func TestDecideRoute(t *testing.T) {
 // — root.Find(["tmux","rm"]) must land on the kill command.
 func TestCobraAliasResolution(t *testing.T) {
 	client := tmux.New(&exec.FakeRunner{})
-	root := newTmuxCmd(client)
+	root := newTmuxCmd(client, theme.Theme{})
 
 	cases := map[string]string{
 		"rm":  "kill",

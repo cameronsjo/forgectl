@@ -24,9 +24,24 @@ With no arguments, both `serve` and `list` index cwd, `./docs` (if present), and
 [docs]
 roots = ["~/Projects/forgectl/docs"]   # extra indexed roots, beyond the defaults
 addr  = ""                              # default bind address for `docs serve`
+
+[docs.root_kinds]                       # override per-root link semantics (see below)
+"/absolute/path/to/notes" = "vault"
+"." = "docs"                            # relative to where forgectl runs; "~" is not expanded
 ```
 
 Naming directories or files on the command line replaces that default set entirely.
+
+### Root kinds
+
+Every root is classified as `docs` or `vault` when it is indexed. A root is a `vault` when it, or a directory above it (stopping at your home directory, a filesystem boundary, or `/`), contains an Obsidian `.obsidian/` folder; anything else is `docs`. The kind decides how links inside that root resolve:
+
+| Kind | Link target | Anchor |
+|---|---|---|
+| `docs` | relative markdown path from the linking file (`[x](../guide.md)`) | GitHub-style heading slug (`#getting-started`) |
+| `vault` | wikilink by vault-relative path, bare note name, or frontmatter alias (`[[Note]]`, `[[folder/Note]]`); a `./` or `../` markdown path resolves from the linking file | heading text or slug (`#Some Heading`), or a block id (`#^blk-1`) |
+
+Links never resolve across roots. `[docs.root_kinds]` forces a kind when detection gets it wrong, keyed by the root path as you wrote it in `roots` or on the command line — relative spellings such as `.` match the same directory the CLI derives. A value other than `docs` or `vault` is a config error, and `forgectl launch doctor` reports it.
 
 ## Bearer-token surface
 

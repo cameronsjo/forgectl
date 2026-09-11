@@ -46,6 +46,16 @@ var redactedKeys = map[string]bool{
 // redactedPlaceholder stands in for a redacted value in both output modes.
 const redactedPlaceholder = "(redacted)"
 
+// themeColorsKey is the one map leaf EXEMPT from leafValue's map-value
+// redaction policy. Every other map leaf's values are withheld on the theory
+// that a map is the likeliest home for a credential (LaunchDefaults.Env,
+// ProxyProfile) — but a hex colour is not a secret, and withholding it would
+// make `forgectl config` useless for the one thing an operator debugging a
+// theme actually wants to see: what each role resolved to. The exemption is
+// scoped to this exact dotted key, not to "any map named colors" or "any
+// map under [theme]", so it cannot widen to cover a future sensitive map.
+const themeColorsKey = "theme.colors"
+
 // configEntry is one leaf of config.Config as rendered by the walk: a dotted
 // key, its value, and whether the config file actually set it.
 type configEntry struct {
@@ -187,6 +197,12 @@ func walkStruct(v reflect.Value, prefix string, rep config.Report, out *[]config
 			continue
 		}
 		display, value := leafValue(fv)
+		if key == themeColorsKey && fv.Kind() == reflect.Map {
+			// The narrow exemption: render the actual colours instead of
+			// leafValue's keys-only rendering, and never mark this leaf
+			// Redacted below — nothing was withheld.
+			display, value = themeColorsValue(fv)
+		}
 		entry := configEntry{
 			Key:     key,
 			Group:   prefix,
@@ -199,7 +215,7 @@ func walkStruct(v reflect.Value, prefix string, rep config.Report, out *[]config
 			entry.Value = redactedPlaceholder
 			entry.display = redactedPlaceholder
 			entry.Redacted = true
-		case fv.Kind() == reflect.Map && fv.Len() > 0:
+		case key != themeColorsKey && fv.Kind() == reflect.Map && fv.Len() > 0:
 			// leafValue already dropped the values; say so, so a reader is
 			// never left thinking the key set is the whole content.
 			entry.Redacted = true
@@ -255,6 +271,42 @@ func tomlFieldName(f reflect.StructField) (string, bool) {
 // only the values need withholding.
 func redactedMapDisplay(keys []string) string {
 	return "{" + strings.Join(keys, " ") + "}"
+}
+
+// themeColorEntry is one [theme.colors] role in --json — the exempted map's
+// visible-values shape, mirroring configEntry's own field naming.
+type themeColorEntry struct {
+	Role  string `json:"role"`
+	Dark  string `json:"dark,omitempty"`
+	Light string `json:"light,omitempty"`
+}
+
+// themeColorsValue renders the [theme.colors] map's actual values — see
+// themeColorsKey for why this map alone is exempt from the keys-only map
+// policy leafValue otherwise applies. v must be a
+// reflect.Value of map[string]config.ColorOverride; any other shape falls
+// back to an empty rendering rather than panicking, since a type change here
+// is a config.go concern this function has no way to react to.
+func themeColorsValue(v reflect.Value) (display string, value any) {
+	colors, ok := v.Interface().(map[string]config.ColorOverride)
+	if !ok || len(colors) == 0 {
+		return "{}", []themeColorEntry{}
+	}
+
+	keys := make([]string, 0, len(colors))
+	for key := range colors {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	entries := make([]themeColorEntry, 0, len(keys))
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		c := colors[key]
+		entries = append(entries, themeColorEntry{Role: key, Dark: c.Dark, Light: c.Light})
+		parts = append(parts, fmt.Sprintf("%s(dark=%s light=%s)", key, c.Dark, c.Light))
+	}
+	return "{" + strings.Join(parts, " ") + "}", entries
 }
 
 // leafValue renders one non-struct field for display and for --json. The three
@@ -396,7 +448,7 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 	case rep.PathErr != nil:
 		fmt.Fprintf(out, "config file: (unavailable: %s)\n", termsafe.SafeLine(rep.PathErr.Error()))
 	case !rep.Found:
-		fmt.Fprintf(out, "config file: %s (not found — using defaults)\n", termsafe.QuotePath(rep.Path))
+		_, _ = fmt.Fprintf(out, "config file: %s (not found — using defaults; run forgectl init to create one)\n", termsafe.QuotePath(rep.Path))
 	default:
 		fmt.Fprintf(out, "config file: %s\n", termsafe.QuotePath(rep.Path))
 	}

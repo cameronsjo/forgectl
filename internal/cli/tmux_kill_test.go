@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -40,7 +41,7 @@ func absentRunner() *exec.FakeRunner { return sessionsRunner() }
 func TestKillCmd_YesFlagSkipsConfirm(t *testing.T) {
 	fake := existsRunner()
 	client := tmux.New(fake)
-	cmd := newTmuxKillCmd(client)
+	cmd := newTmuxKillCmd(client, theme.Theme{})
 
 	var out bytes.Buffer
 	cmd.SetOut(&out)
@@ -71,7 +72,7 @@ func TestKillCmd_YesFlagSkipsConfirm(t *testing.T) {
 func TestKillCmd_OthersFlagRoutesToKillOthers(t *testing.T) {
 	fake := existsRunner()
 	client := tmux.New(fake)
-	cmd := newTmuxKillCmd(client)
+	cmd := newTmuxKillCmd(client, theme.Theme{})
 
 	var out bytes.Buffer
 	cmd.SetOut(&out)
@@ -87,7 +88,7 @@ func TestKillCmd_OthersFlagRoutesToKillOthers(t *testing.T) {
 
 func TestKillCmd_MissingSessionErrors(t *testing.T) {
 	client := tmux.New(absentRunner())
-	cmd := newTmuxKillCmd(client)
+	cmd := newTmuxKillCmd(client, theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetArgs([]string{"--yes", "nosuch"})
 
@@ -106,7 +107,7 @@ func TestKillCmd_MissingSessionErrors(t *testing.T) {
 // bare name fell through to the prefix sibling and killed it.
 func TestKillCmd_PrefixSiblingIsNotKilled(t *testing.T) {
 	fake := sessionsRunner("forge-review")
-	cmd := newTmuxKillCmd(tmux.New(fake))
+	cmd := newTmuxKillCmd(tmux.New(fake), theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetArgs([]string{"--yes", "forge"})
 
@@ -141,7 +142,7 @@ func TestKillCmd_OthersRefusesStaleIdentity(t *testing.T) {
 		// By revalidation time the server has restarted: same $0, new generation.
 		return strings.Join([]string{"999", "999", "$0", "mysession", "1", "0", "1700000000", "/w"}, "\x1f"), nil
 	}}
-	cmd := newTmuxKillCmd(tmux.New(fake))
+	cmd := newTmuxKillCmd(tmux.New(fake), theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetArgs([]string{"--yes", "--others", "mysession"})
 

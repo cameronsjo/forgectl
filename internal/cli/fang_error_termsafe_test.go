@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe/termsafetest"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // TestFangErrorSinkEmitsNothingUnsafe pins the sink that renders every error
@@ -37,7 +38,7 @@ func TestFangErrorSinkEmitsNothingUnsafe(t *testing.T) {
 	root.SetErr(&stderr)
 	root.SetArgs(nil)
 
-	if err := fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef")...); err == nil {
+	if err := fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef", theme.Default())...); err == nil {
 		t.Fatal("expected the command to fail; the check would pass vacuously")
 	}
 	if stderr.Len() == 0 {
@@ -62,7 +63,7 @@ func TestFangErrorSinkKeepsUsageDetection(t *testing.T) {
 	root.SetErr(&stderr)
 	root.SetArgs([]string{"--nope"})
 
-	if err := fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef")...); err == nil {
+	if err := fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef", theme.Default())...); err == nil {
 		t.Fatal("expected an unknown-flag failure")
 	}
 	// The hint itself is the evidence: fang prints it only when its prefix
@@ -86,7 +87,7 @@ func TestFangErrorSinkKeepsOrdinarySingleLineErrors(t *testing.T) {
 	root.SetErr(&stderr)
 	root.SetArgs(nil)
 
-	if err := fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef")...); err == nil {
+	if err := fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef", theme.Default())...); err == nil {
 		t.Fatal("expected the command to fail")
 	}
 	out := stderr.String()
@@ -114,7 +115,7 @@ func TestFangErrorSinkPreservesSafeSuggestionStructure(t *testing.T) {
 	root.SetErr(&stderr)
 	root.SetArgs([]string{"tmuxx"})
 
-	err := fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef")...)
+	err := fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef", theme.Default())...)
 	if err == nil {
 		t.Fatal("expected an unknown-command failure")
 	}
@@ -153,7 +154,7 @@ func TestFangErrorSinkQuotesHostileSuggestionFields(t *testing.T) {
 	root.SetErr(&stderr)
 	root.SetArgs([]string{unknown})
 
-	if err := fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef")...); err == nil {
+	if err := fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef", theme.Default())...); err == nil {
 		t.Fatal("expected an unknown-command failure")
 	}
 	out := stderr.String()

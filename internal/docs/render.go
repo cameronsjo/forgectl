@@ -70,9 +70,18 @@ func newMarkdown(withFrontmatter bool) goldmark.Markdown {
 	}
 	return goldmark.New(
 		goldmark.WithExtensions(extenders...),
-		goldmark.WithParserOptions(parser.WithAutoHeadingID()),
+		goldmark.WithParserOptions(headingParserOptions()...),
 		goldmark.WithRendererOptions(goldmarkhtml.WithUnsafe()),
 	)
+}
+
+// headingParserOptions is the ONE place the heading-id rule is configured.
+// Both the rendering pipeline above and scanDoc's link parser (linkscan.go)
+// build their goldmark instance from it, so the slug the resolver matches an
+// anchor against is, by construction, the id the browser is handed — the two
+// cannot drift apart through one call site being edited without the other.
+func headingParserOptions() []parser.Option {
+	return []parser.Option{parser.WithAutoHeadingID()}
 }
 
 // sanitizer is the bluemonday policy applied to every rendered doc — the
@@ -547,17 +556,8 @@ func RenderDoc(source []byte) (RenderedDoc, error) {
 // block so metadata doesn't inflate the reading estimate.
 func countWords(source []byte) int {
 	body := source
-	if hasWellFormedFrontmatter(source) {
-		lines := bytes.SplitAfter(source, []byte("\n"))
-		delim, count := frontmatterDelim(bytes.TrimSuffix(lines[0], []byte("\n")))
-		for i := 1; i < len(lines); i++ {
-			// Same closing-fence rule as hasWellFormedFrontmatter: the
-			// closer repeats the opener's byte at the opener's length.
-			if d, c := frontmatterDelim(bytes.TrimSuffix(lines[i], []byte("\n"))); d == delim && c == count {
-				body = bytes.Join(lines[i+1:], nil)
-				break
-			}
-		}
+	if fm, ok := splitFrontmatter(source); ok {
+		body = fm.body
 	}
 	return len(strings.Fields(string(body)))
 }
@@ -634,27 +634,60 @@ func transformCallouts(rendered string) string {
 // reach the parser that treats it that way. A +++ TOML fence collides with no
 // markdown syntax, so termination alone qualifies it.
 func hasWellFormedFrontmatter(source []byte) bool {
-	lines := bytes.Split(source, []byte("\n"))
-	delim, count := frontmatterDelim(lines[0])
+	_, ok := splitFrontmatter(source)
+	return ok
+}
+
+// frontmatterBlock is splitFrontmatter's view of a document: the fence byte that
+// opened the block, the block's raw bytes (fences excluded), and the body
+// that follows the closing fence.
+type frontmatterBlock struct {
+	delim byte
+	block []byte
+	body  []byte
+}
+
+// splitFrontmatter is the ONE place the frontmatter fence rule lives: a
+// first line of three-plus repeated - or +, closed by the first later line
+// that repeats the same byte at the same length. A --- block must also
+// decode as a YAML mapping (an empty mapping counts) — see
+// hasWellFormedFrontmatter for why; a +++ TOML block needs only
+// termination. Every consumer — the renderer's well-formedness gate,
+// countWords, and scanDoc's alias extraction — reads through this function
+// so they can never disagree about where a document's metadata ends and
+// its body begins.
+func splitFrontmatter(source []byte) (frontmatterBlock, bool) {
+	lines := bytes.SplitAfter(source, []byte("\n"))
+	if len(lines) == 0 {
+		return frontmatterBlock{}, false
+	}
+	delim, count := frontmatterDelim(bytes.TrimSuffix(lines[0], []byte("\n")))
 	if delim == 0 {
-		return false
+		return frontmatterBlock{}, false
 	}
 	for i := 1; i < len(lines); i++ {
-		d, c := frontmatterDelim(lines[i])
+		d, c := frontmatterDelim(bytes.TrimSuffix(lines[i], []byte("\n")))
 		if d != delim || c != count {
 			continue
 		}
+		fm := frontmatterBlock{
+			delim: delim,
+			block: bytes.Join(lines[1:i], nil),
+			body:  bytes.Join(lines[i+1:], nil),
+		}
 		// First matching fence closes the block, same as the extension.
 		if delim == '+' {
-			return true
+			return fm, true
 		}
 		var m map[string]any
-		block := bytes.Join(lines[1:i], []byte("\n"))
 		// A nil (empty) mapping still counts: `---` immediately closed by
 		// `---` is legal, empty frontmatter, not a pair of thematic breaks.
-		return yaml.Unmarshal(block, &m) == nil
+		if yaml.Unmarshal(fm.block, &m) != nil {
+			return frontmatterBlock{}, false
+		}
+		return fm, true
 	}
-	return false
+	return frontmatterBlock{}, false
 }
 
 // frontmatterDelim interprets one newline-stripped line as a frontmatter

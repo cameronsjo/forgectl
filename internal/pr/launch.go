@@ -6,11 +6,12 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -556,7 +557,7 @@ func (c *Client) PostReview(ctx context.Context, sess Session, review string, he
 // confirmReview is the default human approval gate: it surfaces the drafted
 // review and asks for an explicit yes/no. It requires a TTY (huh renders an
 // interactive form); PostReview only calls it when isTTY reports true.
-func confirmReview(review string) (bool, error) {
+func confirmReview(review string, th theme.Theme) (bool, error) {
 	ok := false
 	err := huh.NewForm(
 		huh.NewGroup(
@@ -569,6 +570,6 @@ func confirmReview(review string) (bool, error) {
 				Negative("Cancel").
 				Value(&ok),
 		),
-	).WithTheme(huh.ThemeCharm()).Run()
+	).WithTheme(th.Huh()).Run()
 	return ok, err
 }

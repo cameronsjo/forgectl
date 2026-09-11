@@ -40,6 +40,9 @@ func allModules() []module.Manifest {
 		upgradeModule,
 		resumeModule,
 		surfaceModule,
+		recipeModule,
 		k8sModule,
+		themeModule,
+		tasksModule,
 	}
 }

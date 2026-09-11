@@ -6,27 +6,29 @@ import (
 	"io"
 	"log/slog"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 var pickPRsFn = pickPRs
 
 // newPrPickCmd builds `forgectl pr pick`. It needs cfg to launch the review
 // agent (Launch resolves the claude posture from the launch profile).
-func newPrPickCmd(client *pr.Client, cfg config.Config) *cobra.Command {
+func newPrPickCmd(client *pr.Client, cfg config.Config, th theme.Theme) *cobra.Command {
 	// err discarded: "" degrades to an empty store on read (LoadReviewed).
 	reviewedPath, _ := config.PrReviewedPath()
-	return newPrPickCmdForClient(client, cfg, reviewedPath)
+	return newPrPickCmdForClient(client, cfg, reviewedPath, th)
 }
 
 // newPrPickCmdForClient is the test seam — an already-wired client, cfg, and an
 // explicit reviewed-store path.
-func newPrPickCmdForClient(client *pr.Client, cfg config.Config, reviewedPath string) *cobra.Command {
+func newPrPickCmdForClient(client *pr.Client, cfg config.Config, reviewedPath string, th theme.Theme) *cobra.Command {
 	var noVerify bool
 	cmd := &cobra.Command{
 		Use:   "pick",
@@ -54,7 +56,7 @@ to stdout and exits 1; each printed ref works with forgectl pr <ref>.`,
 			}
 
 			store := pr.LoadReviewed(reviewedPath)
-			selected, err := choosePRs(cmd, prs, store)
+			selected, err := choosePRs(cmd, prs, store, th)
 			if err != nil {
 				return err
 			}
@@ -69,9 +71,9 @@ to stdout and exits 1; each printed ref works with forgectl pr <ref>.`,
 	return cmd
 }
 
-func choosePRs(cmd *cobra.Command, prs []pr.PR, store *pr.ReviewedStore) ([]pr.PR, error) {
+func choosePRs(cmd *cobra.Command, prs []pr.PR, store *pr.ReviewedStore, th theme.Theme) ([]pr.PR, error) {
 	if isInteractiveTTY() {
-		return pickPRsFn(prs, store)
+		return pickPRsFn(prs, store, th)
 	}
 	if err := writePRCandidates(cmd.OutOrStdout(), prs, store); err != nil {
 		return nil, err
@@ -97,13 +99,14 @@ func prCandidateLine(item pr.PR, store *pr.ReviewedStore) string {
 }
 
 // pickPRs runs the multiselect and returns the chosen PRs (input PR order
-// preserved). Reviewed options are rendered dimmed via prDimStyle. Options are
-// keyed by Ref.String() so a selection round-trips unambiguously.
-func pickPRs(prs []pr.PR, store *pr.ReviewedStore) ([]pr.PR, error) {
+// preserved). Reviewed options are rendered dimmed via th's muted style.
+// Options are keyed by Ref.String() so a selection round-trips unambiguously.
+func pickPRs(prs []pr.PR, store *pr.ReviewedStore, th theme.Theme) ([]pr.PR, error) {
+	dimStyle := th.Styles().Muted
 	opts := make([]huh.Option[string], len(prs))
 	for i, p := range prs {
 		refKey := p.Ref.String()
-		opts[i] = huh.NewOption(prPickerLabel(p, store), refKey)
+		opts[i] = huh.NewOption(prPickerLabel(p, store, dimStyle), refKey)
 	}
 
 	var chosen []string
@@ -114,7 +117,7 @@ func pickPRs(prs []pr.PR, store *pr.ReviewedStore) ([]pr.PR, error) {
 				Options(opts...).
 				Value(&chosen),
 		),
-	).WithKeyMap(keymap.Cancel()).Run()
+	).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
 	if err != nil {
 		return nil, err
 	}
@@ -136,10 +139,10 @@ func pickPRs(prs []pr.PR, store *pr.ReviewedStore) ([]pr.PR, error) {
 // prPickerLabel renders the human-only picker label. Both dynamic fields cross
 // the shared terminal boundary; SafeLine leaves ordinary text byte-identical
 // and visibly escapes controls rather than silently erasing evidence of them.
-func prPickerLabel(p pr.PR, store *pr.ReviewedStore) string {
+func prPickerLabel(p pr.PR, store *pr.ReviewedStore, dimStyle lipgloss.Style) string {
 	label := fmt.Sprintf("%s  %s", safeTerm(p.Ref.String()), safeTerm(p.Title))
 	if pr.Dimmed(p, store) {
-		label = prDimStyle.Render(label + "  (reviewed)")
+		label = dimStyle.Render(label + "  (reviewed)")
 	}
 	return label
 }

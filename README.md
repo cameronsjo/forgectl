@@ -1,6 +1,6 @@
 # forgectl
 
-Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) has grown into the **workbench forge**: 28 composable command-group modules (see the table below) with a declarative workflow DSL as the composition layer.
+Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) has grown into the **workbench forge**: 29 composable command-group modules (see the table below) with a declarative workflow DSL as the composition layer.
 
 Built for two hands and one thumb:
 
@@ -21,7 +21,7 @@ Reading a local clone's git state — `projects list`, `projects pick`, the proj
 
 ## Command groups
 
-28 command groups, at a glance. `forgectl --help` lists them from the binary
+29 command groups, at a glance. `forgectl --help` lists them from the binary
 itself; this table is the scannable index — full verbs and flags for every
 group are in the `## Usage` roster below, and the groups with a dedicated
 deep-dive get a link here.
@@ -36,6 +36,7 @@ deep-dive get a link here.
 | `launch` | Per-project Claude Code / Codex CLI / Pi launcher (alias: `cl`) | [launch](docs/commands/launch.md) |
 | `resume` | Get back into a Claude Code session after a terminal restart | [resume](docs/commands/resume.md) |
 | `surface` | Start a harness inside a terminal manager (tmux/cmux/herdr) without exposing its invocation | Usage below |
+| `recipe` | Run small built-in workbench recipes (alias: `r`) | Usage below |
 | `workflow` | Run declarative workflows composing forgectl's other verbs (alias: `flow`) | Usage below |
 | `bench` | Discover, health-check, and wire the local dev bench (hearth, chronicle) | [bench](docs/commands/bench.md) |
 | `sessions` | Drain local session ledgers into the cross-machine concordance | Usage below |
@@ -141,6 +142,13 @@ forgectl resume snapshot --quiet   # same, silent — the form a Stop hook uses
 forgectl surface launch <target> --surface tmux           # tmux, cmux, or herdr — always explicit, never a default
 forgectl surface launch . --surface tmux --name review     # override the display name (defaults to the target dir's name)
 
+# recipe — run small built-in workbench recipes (alias: r)
+forgectl recipe afk                       # journal the current Herdr agent, then /compact it
+forgectl recipe afk --target w1:p2        # override the Herdr target; r afk is the same command group alias
+forgectl recipe afk --compact-only        # skip /journal — for a caller that already journaled
+forgectl recipe afk --rename parked       # /rename the session before compacting
+forgectl recipe afk --skip-receipt        # do not read the pane back to confirm /compact ran
+
 # workflow — run declarative workflows composing forgectl's other verbs (alias: flow)
 forgectl workflow run <name>              # run a workflow by name
 forgectl workflow run <name> --param k=v  # override a workflow param (repeatable)
@@ -229,6 +237,20 @@ forgectl k8s ns staging                                  # switch the current co
 forgectl k8s exec -it pod/api -- sh                       # kubectl exec argv forwarded verbatim, real TTY wired through
 forgectl k8s inspect deployment/api                       # describe + get -o wide + events, in that fixed order
 forgectl k8s inspect pod/api-7f6c9 -n prod                # extra args forward to all three kubectl calls unchanged
+
+# theme — inspect the colours every styled surface draws from
+forgectl theme show                      # resolved hex per role, provenance, contrast
+forgectl theme show --json               # the same, machine-readable
+forgectl theme preview                   # render each role so you can see it
+
+# tasks — read-only Vikunja task browser, local cache, no write verbs
+# one-time setup: store a READ-ONLY API token in the login keychain (prompts for the value)
+#   security add-generic-password -s vikunja-readonly -a "$USER" -w
+forgectl tasks ls                        # list open tasks
+forgectl tasks ls --json                 # the same, machine-readable
+forgectl tasks show 42                   # one task, its detail and its relations
+forgectl tasks ready                     # open tasks with no active "blocked" relation, by position
+forgectl tasks ls --keychain-service X   # read the token from a different keychain item
 
 # ghostty — theme + keybind reporting, parsed live from the ghostty CLI
 forgectl ghostty themes                  # custom themes, active one marked

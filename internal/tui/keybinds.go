@@ -5,6 +5,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/ghostty"
 	"github.com/cameronsjo/forgectl/internal/meta"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // KeybindSheet renders a Ghostty keybind cheatsheet — trigger, action, and
@@ -17,12 +18,12 @@ import (
 // Built beside Cheatsheet (tmux), not a refactor of it — that one is
 // hard-coded tmux content; this one is driven entirely by rows a caller
 // parsed from a live `ghostty +list-keybinds` run.
-func KeybindSheet(rows []ghostty.Keybind, noIcons bool) string {
+func KeybindSheet(rows []ghostty.Keybind, noIcons bool, s theme.Styles) string {
 	glyphs := pickGlyphs(noIcons)
-	triggerCol := styleAccent.Width(24)
+	triggerCol := s.Accent.Width(24)
 
 	var b strings.Builder
-	title := styleHeader.Render(meta.AppName + " · ghostty keybinds")
+	title := s.Header.Render(meta.AppName + " · ghostty keybinds")
 	b.WriteString(glyphs.Cheat + " " + title + "\n\n")
 
 	for _, row := range rows {
@@ -32,7 +33,7 @@ func KeybindSheet(rows []ghostty.Keybind, noIcons bool) string {
 		}
 		trigger := sanitizeControlBytes(row.Trigger)
 		desc = sanitizeControlBytes(desc)
-		b.WriteString("  " + triggerCol.Render(trigger) + styleMuted.Render(desc) + "\n")
+		b.WriteString("  " + triggerCol.Render(trigger) + s.Muted.Render(desc) + "\n")
 	}
 
 	return strings.TrimRight(b.String(), "\n")

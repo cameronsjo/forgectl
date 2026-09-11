@@ -27,12 +27,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
-
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // prSearchRow renders one gh-search-prs JSON object for slug#number.
@@ -64,13 +62,27 @@ func seedReviewed(t *testing.T, path string, ref pr.Ref, at time.Time) {
 	}
 }
 
-// forceColor forces a color profile so lipgloss emits ANSI to a non-TTY buffer,
-// restoring the prior profile after the test.
+// forceColor makes the dimmed-row tests see ANSI on a non-TTY buffer.
+//
+// Under lipgloss v1 this set a package global that Render consulted. v2 moved
+// the decision into colorprofile.Writer, which every styled command now writes
+// through (colorOut), and that writer reads the ENVIRONMENT rather than a
+// global — so the lever is CLICOLOR_FORCE, the same one an operator would use.
+// colorprofile raises a non-TTY writer to at least ANSI when it is set
+// (colorprofile@v0.4.3 env.go:93-102).
+//
+// NO_COLOR is cleared explicitly. It is not strictly required — a non-TTY
+// writer already starts at NoTTY, so the NO_COLOR branch is unreachable here —
+// but a developer with NO_COLOR exported should not have to wonder whether
+// these tests are measuring their shell or the code.
+//
+// TERM is pinned so the forced profile is ANSI256 rather than plain ANSI,
+// matching what this test asserted before the migration.
 func forceColor(t *testing.T) {
 	t.Helper()
-	prev := lipgloss.ColorProfile()
-	lipgloss.SetColorProfile(termenv.ANSI256)
-	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("CLICOLOR_FORCE", "1")
+	t.Setenv("TERM", "xterm-256color")
 }
 
 func TestPrsCmd_JSON_ReviewedField(t *testing.T) {
@@ -82,7 +94,7 @@ func TestPrsCmd_JSON_ReviewedField(t *testing.T) {
 	seedReviewed(t, reviewedPath, pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42},
 		time.Date(2026, 7, 9, 13, 0, 0, 0, time.UTC))
 
-	cmd := newPrPrsCmdForClient(client, reviewedPath)
+	cmd := newPrPrsCmdForClient(client, reviewedPath, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -112,7 +124,7 @@ func TestPrsCmd_JSON_ReviewedField(t *testing.T) {
 
 func TestPrsCmd_JSON_EmptyIsArray(t *testing.T) {
 	client := pr.New(&exec.FakeRunner{RunFunc: prsRunFunc("[]")})
-	cmd := newPrPrsCmdForClient(client, filepath.Join(t.TempDir(), "r.json"))
+	cmd := newPrPrsCmdForClient(client, filepath.Join(t.TempDir(), "r.json"), theme.Theme{})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
@@ -134,7 +146,7 @@ func TestPrsCmd_Table_DimsReviewedRow(t *testing.T) {
 	seedReviewed(t, reviewedPath, pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42},
 		time.Date(2026, 7, 9, 13, 0, 0, 0, time.UTC))
 
-	cmd := newPrPrsCmdForClient(client, reviewedPath)
+	cmd := newPrPrsCmdForClient(client, reviewedPath, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -180,7 +192,7 @@ func TestPrsCmd_DegradationNotesOnStderr(t *testing.T) {
 		}
 		return "", nil
 	}})
-	cmd := newPrPrsCmdForClient(client, filepath.Join(t.TempDir(), "r.json"))
+	cmd := newPrPrsCmdForClient(client, filepath.Join(t.TempDir(), "r.json"), theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -202,7 +214,7 @@ func TestRenderPRTable_VisiblyEscapesUnsafeTitlesAndKeepsThemDistinct(t *testing
 	}
 	store := pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json"))
 	var stdout, stderr bytes.Buffer
-	if err := renderPRTable(&stdout, &stderr, prs, store); err != nil {
+	if err := renderPRTable(&stdout, &stderr, prs, store, theme.Theme{}.Styles().Muted); err != nil {
 		t.Fatal(err)
 	}
 
@@ -231,7 +243,7 @@ func TestRenderPRTable_OrdinaryTitleIsByteStable(t *testing.T) {
 	}}
 	store := pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json"))
 	var stdout, stderr bytes.Buffer
-	if err := renderPRTable(&stdout, &stderr, prs, store); err != nil {
+	if err := renderPRTable(&stdout, &stderr, prs, store, theme.Theme{}.Styles().Muted); err != nil {
 		t.Fatal(err)
 	}
 	if got := safeTerm(title); got != title {

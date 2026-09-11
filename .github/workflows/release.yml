@@ -11,10 +11,17 @@ jobs:
     # toolchain. The Go cross-build for linux/{amd64,arm64} still works from
     # here — every target is CGO_ENABLED=0.
     #
-    # Self-hosted: the M1 Max fleet's `ghr-forgectl` account. Tag-triggered only,
-    # so no fork-authored code reaches this job, and the signing certificate is
-    # imported into an ephemeral keychain on a guest destroyed and rebuilt nightly.
-    runs-on: [self-hosted, macOS, ARM64]
+    # GitHub-hosted, unlike the other macOS jobs: codesign cannot use the imported
+    # Developer ID identity on the fleet account. Measured across v0.17.0-v0.17.2 —
+    # the import succeeds, `find-identity -v -p codesigning` reports 1 valid
+    # identity in the ephemeral keychain, and `codesign` still answers
+    # "Developer ID Application: no identity found", with the keychain named
+    # explicitly. v0.16.0 signed the same certificate with the same command line
+    # on a hosted runner. The remaining difference is the runner's login/security
+    # session, which is a host-side question tracked in the fleet issue; releases
+    # run here until it is answered. Tag-triggered, so no fork-authored code
+    # reaches this job either way.
+    runs-on: macos-latest
     permissions:
       contents: write
     env:
@@ -73,6 +80,43 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           rm -f "$RUNNER_TEMP/certificate.p12"
 
+          # A Developer ID identity is only *valid* to codesign when its issuer
+          # chain resolves. GitHub-hosted images ship Apple's intermediates in the
+          # System keychain; a freshly provisioned self-hosted guest need not, and
+          # then the import above succeeds while `codesign` later reports
+          # "Developer ID Application: no identity found" (v0.17.0, the first
+          # release on the fleet). Add the Developer ID G2 intermediate to the
+          # ephemeral keychain, pinned by SHA-256 so a substituted download cannot
+          # become a trusted issuer.
+          CA_PATH="$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          curl -fsSL -o "$CA_PATH" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          echo "f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a  $CA_PATH" | shasum -a 256 -c -
+          security add-certificates -k "$KEYCHAIN_PATH" "$CA_PATH"
+          rm -f "$CA_PATH"
+
+          # Fail here, not four steps later: assert the keychain holds a VALID
+          # Developer ID Application identity. `find-identity` exits 0 whatever it
+          # finds, so the assertion is a positive match on the identity name and
+          # anything else — zero identities, an unexpected output shape, an empty
+          # capture — fails closed. Diagnostics print only on failure.
+          IDENTITIES="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")"
+          case "$IDENTITIES" in
+            *"Developer ID Application"*) ;;
+            *)
+              echo "$IDENTITIES"
+              security list-keychains -d user
+              echo "::error::certificate imported but no valid Developer ID Application identity — issuer chain or keychain search list is wrong on this runner"
+              exit 1 ;;
+          esac
+          echo "$IDENTITIES" | tail -1
+
+          # v0.17.1 proved the identity valid in this keychain and codesign STILL
+          # reported "no identity found": the `list-keychains -s` write above does
+          # not reach the codesign process on the fleet runner's account. Name the
+          # keychain explicitly on every codesign call instead of depending on the
+          # search list — the helper step and goreleaser's post-hook read it here.
+          echo "SIGN_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
       # The helper reports the release version from its own `version` verb, so
       # stamp it from the tag before compiling. Mirrors the -X ldflags the Go
       # binary gets from goreleaser.
@@ -103,7 +147,8 @@ jobs:
           # runtime + secure timestamp) so Gatekeeper accepts it; otherwise keep
           # the ad-hoc signature that still satisfies the Secure Enclave.
           if [ "$HAS_CERT" = "true" ]; then
-            codesign --sign "Developer ID Application" --options runtime --timestamp --force "$BIN"
+            : "${SIGN_KEYCHAIN:?import step did not export a keychain}"
+            codesign --keychain "$SIGN_KEYCHAIN" --sign "Developer ID Application" --options runtime --timestamp --force "$BIN"
           else
             codesign -s - -f "$BIN"
           fi
@@ -177,3 +222,82 @@ jobs:
           # Arms the darwin build's post-hook codesign. A SECRET (following
           # cameronsjo/minute), empty until set, so the hook is a no-op until then.
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      # The ephemeral keychain holds the Developer ID private key with a partition
+      # list that lets codesign use it unattended. Delete it whether or not the
+      # release succeeded, rather than leaving it in $RUNNER_TEMP until the next
+      # job start clears it. Guarded on HAS_CERT: with no cert there is no keychain.
+      - name: Delete signing keychain
+        if: always() && env.HAS_CERT == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" || true
+
+  image:
+    # ubuntu, not the macOS job above: this publishes a linux/amd64 container
+    # image and needs buildx + a Docker daemon, neither of which the macOS
+    # runner has. It is a separate job rather than a step so a container-build
+    # failure cannot take the signed macOS release down with it — the binaries
+    # and the cask are what most users consume, and the image serves one
+    # deployed service.
+    #
+    # The image exists for `forgectl tasks mcp --http` and nothing else. Every
+    # forgectl release now publishes it, and a homelab service pins it BY
+    # DIGEST in compose precisely so cutting a CLI release cannot move that
+    # container on its own.
+    name: Publish container image
+    runs-on: ubuntu-latest
+    permissions:
+      # packages:write is the whole point of this job; contents:read is the
+      # floor for the checkout. Neither is granted at workflow level, so the
+      # macOS job above keeps its contents:write and gains no package scope.
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # One tag, the release version. No `latest` — a moving tag on an image a
+      # live service pulls is exactly the drift the digest pin in compose
+      # exists to prevent, and publishing one invites someone to use it.
+      - name: Build and push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        id: build
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.description=forgectl tasks mcp — MCP server over a Vikunja board
+
+      # The digest is what a consuming compose file pins, so print it where a
+      # deploy session can read it out of the run log without a registry call.
+      - name: Report the digest
+        run: |
+          set -euo pipefail
+          echo "digest: ${{ steps.build.outputs.digest }}"
+          {
+            echo "### Container image"
+            echo
+            echo '```'
+            echo "ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}"
+            echo '```'
+            echo
+            echo "Pin this digest in the consuming compose file — never the tag."
+          } >> "$GITHUB_STEP_SUMMARY"

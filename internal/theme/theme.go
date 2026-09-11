@@ -1,0 +1,259 @@
+// Package theme is the single source every colored surface in forgectl draws
+// from — the Artificer terminal palette, resolved per role, with a config
+// escape hatch (preset, mode, per-role overrides) and adapters for lipgloss,
+// huh, bubbles' list, and fang.
+//
+// It is a leaf over internal/config: it may import config to decode
+// [theme], and must never import internal/cli, internal/tui, or
+// internal/module — every one of those imports theme, not the reverse.
+package theme
+
+import (
+	"fmt"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/config"
+)
+
+// Mode is the [theme].mode a config or Options declares — which background
+// a Theme resolves against, or whether to detect it.
+type Mode int
+
+const (
+	// ModeAuto detects the terminal background where it is safe to probe
+	// (ShouldProbe), and falls back to dark otherwise.
+	ModeAuto Mode = iota
+	// ModeDark always resolves dark, with zero probe calls.
+	ModeDark
+	// ModeLight always resolves light, with zero probe calls.
+	ModeLight
+)
+
+// Options is a fully-resolved [theme] section: which preset to start from,
+// which mode to render, and any per-role colour overrides. FromConfig builds
+// one from config.ThemeConfig; New turns one into a Theme.
+type Options struct {
+	Preset    string
+	Mode      Mode
+	Overrides map[Role]Pair
+}
+
+// Env is the environment Detect and ShouldProbe read to decide whether
+// probing the terminal background is safe. It is a plain struct — not read
+// from os.Environ() internally — so callers (Execute, the TUI, tests) control
+// exactly what it sees.
+type Env struct {
+	StdinTTY  bool
+	StdoutTTY bool
+	Term      string
+	NoColor   bool
+}
+
+// ShouldProbe reports whether it is safe to ask the terminal for its
+// background colour: both stdin and stdout must be a real TTY, NO_COLOR must
+// be unset, and TERM must not be a multiplexer that intercepts the query
+// (screen*, tmux* — those never forward the OSC 11 response, so a probe there
+// hangs until its own timeout). This is the one predicate every probe site
+// (Execute's plain-print path, huh forms, the TUI) shares — it does not
+// itself decide whether to probe, only whether probing is safe.
+func ShouldProbe(mode Mode, env Env) bool {
+	// An explicit mode is an ANSWER, so there is nothing to ask. This used to
+	// ignore its Mode argument — the parameter was named `_` — which meant a
+	// config saying `mode = "light"` still probed, and the TUI then overwrote
+	// the setting with whatever the terminal replied. That defeats the one
+	// escape hatch documented for the case detection cannot get right: a light
+	// terminal, where the operator has to say so by hand.
+	if mode != ModeAuto {
+		return false
+	}
+	if !env.StdinTTY || !env.StdoutTTY || env.NoColor {
+		return false
+	}
+	if strings.HasPrefix(env.Term, "screen") || strings.HasPrefix(env.Term, "tmux") {
+		return false
+	}
+	return true
+}
+
+// Detect resolves isDark for mode. ModeDark and ModeLight are fixed and never
+// call probe. ModeAuto calls probe only when ShouldProbe(mode, env) is true;
+// otherwise — including when probe is nil — it returns dark, since dark is
+// the far more common terminal background and a theme that guesses wrong is
+// recoverable (WithDark) while one that panics is not.
+func Detect(mode Mode, env Env, probe func() bool) bool {
+	switch mode {
+	case ModeDark:
+		return true
+	case ModeLight:
+		return false
+	default: // ModeAuto
+		if probe == nil || !ShouldProbe(mode, env) {
+			return true
+		}
+		return probe()
+	}
+}
+
+// FromConfig maps a decoded config.ThemeConfig onto Options, translating
+// preset/mode strings and [theme.colors] role names into their typed forms.
+// It returns an error naming the bad value rather than defaulting silently —
+// config.ThemeConfig.Validate should already have caught this for a strict
+// decode, but FromConfig owns the domain mapping and re-checks rather than
+// trusting an unvalidated ThemeConfig (Load stays tolerant; theme.FromConfig
+// is a stricter boundary a caller may choose to enforce).
+func FromConfig(c config.ThemeConfig) (Options, error) {
+	var o Options
+
+	switch c.Preset {
+	case "", "artificer", "legacy":
+		o.Preset = c.Preset
+	default:
+		return Options{}, fmt.Errorf("theme: unknown preset %q; must be \"artificer\" or \"legacy\"", c.Preset)
+	}
+
+	switch c.Mode {
+	case "", "auto":
+		o.Mode = ModeAuto
+	case "dark":
+		o.Mode = ModeDark
+	case "light":
+		o.Mode = ModeLight
+	default:
+		return Options{}, fmt.Errorf("theme: unknown mode %q; must be \"auto\", \"dark\", or \"light\"", c.Mode)
+	}
+
+	if len(c.Colors) > 0 {
+		o.Overrides = make(map[Role]Pair, len(c.Colors))
+		// Sorted, so a duplicate is reported deterministically rather than
+		// depending on which spelling Go's map iteration reached first.
+		names := make([]string, 0, len(c.Colors))
+		for name := range c.Colors {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		seen := make(map[Role]string, len(names))
+		for _, name := range names {
+			ov := c.Colors[name]
+			r, ok := roleByName(strings.ToLower(name))
+			if !ok {
+				return Options{}, fmt.Errorf("theme: unknown role %q; roles are %s", name, strings.Join(RoleNames(), ", "))
+			}
+			// Role names are matched case-insensitively, so `accent` and
+			// `ACCENT` are the same role written twice. TOML permits both keys
+			// in one table, and without this the winner is map iteration
+			// order — a config that renders differently run to run.
+			if prev, dup := seen[r]; dup {
+				return Options{}, fmt.Errorf("theme: [theme.colors] sets role %q twice, as %q and %q; keep one",
+					RoleNames()[r], prev, name)
+			}
+			seen[r] = name
+			// The hex is checked HERE, not only in config.ThemeConfig.Validate.
+			// Validate runs on the strict-decode path (ValidatePath, which
+			// doctor uses); config.Load is deliberately tolerant and never
+			// calls it, so on the startup path an operator's [theme.colors]
+			// value reaches Theme.Hex unvalidated — and Theme.Hex's result is
+			// printed to a terminal by `theme show`. An ESC in a TOML string is
+			// expressible via \u, so "not a colour" and "a control sequence"
+			// are the same problem. This is the boundary that actually runs.
+			if err := checkOverrideHex(name, "dark", ov.Dark); err != nil {
+				return Options{}, err
+			}
+			if err := checkOverrideHex(name, "light", ov.Light); err != nil {
+				return Options{}, err
+			}
+			o.Overrides[r] = Pair{Dark: ov.Dark, Light: ov.Light}
+		}
+	}
+
+	return o, nil
+}
+
+// overrideHexRe is what a [theme.colors] value may be. An allowlist, because
+// the value reaches a terminal and enumerating the byte sequences a terminal
+// acts on is a list nobody finishes.
+var overrideHexRe = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+
+// checkOverrideHex rejects an override value that is not a #rrggbb colour. An
+// empty value is fine — it means "no override for that mode".
+func checkOverrideHex(role, mode, v string) error {
+	if v == "" || overrideHexRe.MatchString(v) {
+		return nil
+	}
+	return fmt.Errorf("theme: [theme.colors].%s %s = %q: must be a #rrggbb hex colour", role, mode, v)
+}
+
+// Theme is a fully-resolved colour set: a palette (preset plus overrides)
+// pinned to one background. Every accessor is argument-free — the isDark
+// decision is made once, at construction (New) or WithDark, not re-derived
+// per call.
+//
+// The zero value Theme{} behaves exactly like Default() for every method
+// (TestTheme_ZeroValueMatchesDefault pins this): module.Deps.Theme is a zero
+// value in any test that does not set it, and it must render usable styles
+// rather than panicking or emitting empty hex.
+//
+// The background is stored INVERTED — isLight, not isDark — so that the zero
+// value resolves to DARK. forgectl is dark-first everywhere else, and a
+// zero-value Theme rendering light on a dark terminal is the same defect this
+// package exists to prevent: huh v2 ships exactly that bug, defaulting a
+// standalone form to light because its own flag zero-values to false
+// (internal/keymap pins it dark for that reason). A field whose safe state is
+// its zero state cannot be got wrong by forgetting to set it.
+type Theme struct {
+	opts Options
+	// isLight is the inverse of the question every caller asks. Read it
+	// through IsDark; nothing outside this file should touch it.
+	isLight bool
+}
+
+// New builds a Theme from o, pinned to isDark.
+func New(o Options, isDark bool) Theme {
+	return Theme{opts: o, isLight: !isDark}
+}
+
+// Default is the zero-configuration Theme: Artificer, resolved DARK — see the
+// Theme.isLight field comment for why the zero value lands there rather than
+// on light. Callers that need a real runtime default should still go through
+// FromConfig and Detect; Default exists so code that only ever sees
+// module.Deps.Theme's zero value gets a working, correctly-oriented theme.
+func Default() Theme {
+	return Theme{}
+}
+
+// palette resolves t's preset (defaulting to Artificer) with overrides
+// applied.
+func (t Theme) palette() Palette {
+	base := Artificer()
+	if t.opts.Preset == "legacy" {
+		base = Legacy()
+	}
+	return base.withOverrides(t.opts.Overrides)
+}
+
+// WithDark returns a copy of t pinned to isDark — the TUI calls this from a
+// tea.BackgroundColorMsg to rebuild every style once real terminal state
+// arrives.
+func (t Theme) WithDark(isDark bool) Theme {
+	t.isLight = !isDark
+	return t
+}
+
+// Mode reports the Mode this Theme was configured with — ModeAuto for a
+// Theme built from a zero Options, since that is FromConfig's mapping of an
+// absent or "auto" [theme].mode.
+func (t Theme) Mode() Mode {
+	return t.opts.Mode
+}
+
+// IsDark reports which background this Theme is currently pinned to.
+func (t Theme) IsDark() bool {
+	return !t.isLight
+}
+
+// Hex returns the resolved hex colour for r, in this Theme's current mode.
+func (t Theme) Hex(r Role) string {
+	return t.palette().hex(r, t.IsDark())
+}

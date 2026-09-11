@@ -32,6 +32,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/projects"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // cloneFixture builds a *projects.Client whose Inventory returns repos driven
@@ -54,7 +55,7 @@ func cloneFixture(t *testing.T, runFunc func(string, []string) (string, error)) 
 func TestCloneCmd_UniqueQueryMatch_UnclonedRepo_ClonesAndPrintsDest(t *testing.T) {
 	ghJSON := `[{"name":"forgectl","sshUrl":"git@github.com:cameronsjo/forgectl.git","isPrivate":false}]`
 	client := cloneFixture(t, twoHostRunFunc(ghJSON, "owner\tname\ttype\tssh\n"))
-	cmd := newProjectsCloneCmd(client)
+	cmd := newProjectsCloneCmd(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -92,7 +93,7 @@ func TestCloneCmd_UniqueQueryMatch_AlreadyCloned_AnnotatesInsteadOfCloning(t *te
 	}
 	client := projects.New(fake)
 
-	cmd := newProjectsCloneCmd(client)
+	cmd := newProjectsCloneCmd(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -115,7 +116,7 @@ func TestCloneCmd_UniqueQueryMatch_AlreadyCloned_AnnotatesInsteadOfCloning(t *te
 func TestCloneCmd_NoMatch_ReturnsError(t *testing.T) {
 	ghJSON := `[{"name":"forgectl","sshUrl":"git@github.com:cameronsjo/forgectl.git","isPrivate":false}]`
 	client := cloneFixture(t, twoHostRunFunc(ghJSON, "owner\tname\ttype\tssh\n"))
-	cmd := newProjectsCloneCmd(client)
+	cmd := newProjectsCloneCmd(client, theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"nonexistent"})
@@ -131,7 +132,7 @@ func TestCloneCmd_NoMatch_ReturnsError(t *testing.T) {
 
 func TestCloneCmd_EmptyInventory_ReturnsError(t *testing.T) {
 	client := cloneFixture(t, twoHostRunFunc("[]", "owner\tname\ttype\tssh\n"))
-	cmd := newProjectsCloneCmd(client)
+	cmd := newProjectsCloneCmd(client, theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"anything"})
@@ -150,7 +151,7 @@ func TestCloneCmd_OwnerRepoArg_ClonesDirectlyBypassingInventory(t *testing.T) {
 		t.Fatalf("unexpected call bypassing direct clone: %s %v", name, args)
 		return "", nil
 	})
-	cmd := newProjectsCloneCmd(client)
+	cmd := newProjectsCloneCmd(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -178,7 +179,7 @@ func TestCloneCmd_Org_BulkClonesEveryListedRepo(t *testing.T) {
 		}
 		return "", nil
 	})
-	cmd := newProjectsCloneCmd(client)
+	cmd := newProjectsCloneCmd(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -198,7 +199,7 @@ func TestCloneCmd_Org_BulkClonesEveryListedRepo(t *testing.T) {
 
 func TestCloneCmd_OrgWithQueryArg_ReturnsError(t *testing.T) {
 	client := cloneFixture(t, twoHostRunFunc("[]", ""))
-	cmd := newProjectsCloneCmd(client)
+	cmd := newProjectsCloneCmd(client, theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"--org", "anthropics", "some-query"})
@@ -212,7 +213,7 @@ func TestCloneCmd_OrgListFailure_Propagates(t *testing.T) {
 	client := cloneFixture(t, func(name string, args []string) (string, error) {
 		return "", errors.New("gh: not authenticated")
 	})
-	cmd := newProjectsCloneCmd(client)
+	cmd := newProjectsCloneCmd(client, theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"--org", "anthropics"})
@@ -226,7 +227,7 @@ func TestCloneCmd_OrgNoRepos_ReturnsError(t *testing.T) {
 	client := cloneFixture(t, func(name string, args []string) (string, error) {
 		return "[]", nil
 	})
-	cmd := newProjectsCloneCmd(client)
+	cmd := newProjectsCloneCmd(client, theme.Theme{})
 	cmd.SetOut(new(bytes.Buffer))
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"--org", "anthropics"})
@@ -249,7 +250,7 @@ func TestCloneCmd_DegradationNotes_AppearOnStderrNotStdout(t *testing.T) {
 		}
 		return "", nil
 	})
-	cmd := newProjectsCloneCmd(client)
+	cmd := newProjectsCloneCmd(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -285,7 +286,7 @@ func TestCloneCmd_HostileNoteIsEscapedOnStderr(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: twoHostRunFunc("[]", "owner\tname\ttype\tssh\n")}
 	client := projects.New(fake)
 
-	cmd := newProjectsCloneCmd(client)
+	cmd := newProjectsCloneCmd(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -326,7 +327,7 @@ func dryRunFixture(t *testing.T) (*projects.Client, *exec.FakeRunner, string) {
 func runCloneCmd(t *testing.T, client *projects.Client, args ...string) (string, error) {
 	t.Helper()
 	var stdout bytes.Buffer
-	cmd := newProjectsCloneCmd(client)
+	cmd := newProjectsCloneCmd(client, theme.Theme{})
 	cmd.SetOut(&stdout)
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs(args)

@@ -33,6 +33,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -208,6 +209,76 @@ func TestPostReview_ApprovedPosts(t *testing.T) {
 	if !equalArgs(last.Args, want) {
 		t.Errorf("post argv = %v, want %v", last.Args, want)
 	}
+}
+
+// TestApprovalGate_ThemeAndApproverPrecedence pins the construction order the
+// approval gate now depends on.
+//
+// New installs the default gate AFTER options run, so it can read a theme an
+// option supplied. That reordering puts a security-critical field on a code
+// path that did not exist before, and two properties have to hold: an injected
+// approver still wins (WithApprover must not be quietly replaced by the
+// default), and a gate always exists (a nil approver must never survive
+// construction, since PostReview calls it unconditionally).
+func TestApprovalGate_ThemeAndApproverPrecedence(t *testing.T) {
+	t.Run("an injected approver survives WithApprovalTheme", func(t *testing.T) {
+		called := false
+		c := New(&exec.FakeRunner{},
+			WithApprover(func(string) (bool, error) { called = true; return false, nil }),
+			WithApprovalTheme(theme.New(theme.Options{}, false)),
+		)
+		if _, err := c.approve("body"); err != nil {
+			t.Fatalf("approve: %v", err)
+		}
+		if !called {
+			t.Error("the default gate replaced an injected approver; WithApprover must win")
+		}
+	})
+
+	t.Run("option order does not decide the winner", func(t *testing.T) {
+		called := false
+		c := New(&exec.FakeRunner{},
+			WithApprovalTheme(theme.New(theme.Options{}, false)),
+			WithApprover(func(string) (bool, error) { called = true; return false, nil }),
+		)
+		if _, err := c.approve("body"); err != nil {
+			t.Fatalf("approve: %v", err)
+		}
+		if !called {
+			t.Error("the default gate replaced an injected approver supplied second")
+		}
+	})
+
+	t.Run("a gate always exists", func(t *testing.T) {
+		// The fail-closed half. PostReview calls approve unconditionally, so a
+		// nil here is a panic on the one path that guards posting.
+		for name, c := range map[string]*Client{
+			"no options":       New(&exec.FakeRunner{}),
+			"theme only":       New(&exec.FakeRunner{}, WithApprovalTheme(theme.Default())),
+			"explicitly nil":   New(&exec.FakeRunner{}, WithApprover(nil)),
+			"nil then a theme": New(&exec.FakeRunner{}, WithApprover(nil), WithApprovalTheme(theme.Default())),
+		} {
+			if c.approve == nil {
+				t.Errorf("%s: no approval gate installed", name)
+			}
+		}
+	})
+
+	t.Run("the theme reaches the gate", func(t *testing.T) {
+		// confirmReview renders a huh form, which needs a TTY, so the gate
+		// itself cannot run here. What is checkable is that the theme the
+		// option carried is the one the default closure would hand it, and
+		// that the two modes are actually distinguishable — without the second
+		// assertion this compares a value against itself.
+		light := theme.New(theme.Options{Mode: theme.ModeLight}, false)
+		c := New(&exec.FakeRunner{}, WithApprovalTheme(light))
+		if c.approvalTheme.IsDark() {
+			t.Error("light theme did not reach the client")
+		}
+		if !New(&exec.FakeRunner{}).approvalTheme.IsDark() {
+			t.Error("the zero-value theme is not dark, so this test cannot tell the modes apart")
+		}
+	})
 }
 
 func TestLaunch_InlineDispatch(t *testing.T) {

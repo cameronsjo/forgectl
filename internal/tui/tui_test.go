@@ -2,12 +2,15 @@ package tui
 
 import (
 	"context"
+	"image/color"
+	"strconv"
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -19,8 +22,23 @@ const sep = "\x1f"
 const oneSessionRow = "123" + sep + "456" + sep + "$1" + sep + "alpha" + sep +
 	"1" + sep + "0" + sep + "1700000000" + sep + "/tmp"
 
-func key(s string) tea.KeyMsg {
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+// key builds a single-rune KEY PRESS. tea.KeyMsg is an interface in v2 that a
+// release also satisfies, so tests construct the press explicitly — matching
+// what the model switches on, and keeping a release from being mistaken for a
+// second press.
+//
+// Single-rune only, enforced rather than assumed. A named or modified key
+// ("esc", "ctrl+c") does not round-trip through this shape: Code would take the
+// first letter while Text carried the whole name, producing a message that
+// matches the model's switch for the wrong reason — or not at all — and a test
+// that passes or fails on an accident. Build those with an explicit
+// tea.KeyPressMsg{Code: tea.KeyEscape} instead, as TestEscFromSubscreenReturnsToMenu does.
+func key(s string) tea.KeyPressMsg {
+	r := []rune(s)
+	if len(r) != 1 {
+		panic("tui test: key() takes exactly one rune, got " + strconv.Quote(s) + "; use tea.KeyPressMsg directly for named or modified keys")
+	}
+	return tea.KeyPressMsg{Code: r[0], Text: s}
 }
 
 func sized(m model, w, h int) model {
@@ -29,8 +47,8 @@ func sized(m model, w, h int) model {
 }
 
 func TestMenuViewRenders(t *testing.T) {
-	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true), 80, 24)
-	view := m.View()
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true, theme.Default()), 80, 24)
+	view := m.View().Content
 	for _, want := range []string{"forgectl", "Pick", "Sessions", "Windows", "Tree", "Last", "Cheatsheet"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("menu view missing %q\n%s", want, view)
@@ -44,7 +62,7 @@ func TestNumberKeyNavigatesAndAttaches(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
 		return oneSessionRow, nil
 	}}
-	m := sized(newModel(context.Background(), tmux.New(fake), true), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(fake), true, theme.Default()), 80, 24)
 
 	out, _ := m.Update(key("2"))
 	m = out.(model)
@@ -68,19 +86,19 @@ func TestNumberKeyNavigatesAndAttaches(t *testing.T) {
 }
 
 func TestCheatFromMenu(t *testing.T) {
-	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true, theme.Default()), 80, 24)
 	out, _ := m.Update(key("6")) // Cheatsheet
 	m = out.(model)
 	if m.mode != cheatMode {
 		t.Fatalf("expected cheatMode after '6', got %v", m.mode)
 	}
-	if !strings.Contains(m.View(), "pane") {
+	if !strings.Contains(m.View().Content, "pane") {
 		t.Errorf("cheat view should explain 'pane'")
 	}
 }
 
 func TestCheatsheetContent(t *testing.T) {
-	cs := Cheatsheet(true)
+	cs := Cheatsheet(true, theme.Default().Styles())
 	for _, want := range []string{"session", "window", "pane", "prefix |", "Ctrl+Space"} {
 		if !strings.Contains(cs, want) {
 			t.Errorf("cheatsheet missing %q", want)
@@ -95,11 +113,11 @@ func TestKillOthersEntersConfirm(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
 		return oneSessionRow, nil
 	}}
-	m := sized(newModel(context.Background(), tmux.New(fake), true), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(fake), true, theme.Default()), 80, 24)
 
 	out, _ := m.Update(key("2"))
 	m = out.(model)
-	out, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("K")})
+	out, _ = m.Update(key("K"))
 	m = out.(model)
 
 	if m.mode != formMode {
@@ -116,13 +134,13 @@ func TestKillOthersEntersConfirm(t *testing.T) {
 	if m.pendingSession.Generation.PID == "" {
 		t.Error("pending identity is not generation-qualified; a restart between confirm and act would go unnoticed")
 	}
-	if !strings.Contains(m.View(), "alpha") {
+	if !strings.Contains(m.View().Content, "alpha") {
 		t.Error("the confirmation prompt should still render the session NAME")
 	}
 }
 
 func TestLastFromMenu(t *testing.T) {
-	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true, theme.Default()), 80, 24)
 	out, _ := m.Update(key("5")) // Last
 	m = out.(model)
 	if m.action.Kind != ActionLast {
@@ -131,16 +149,38 @@ func TestLastFromMenu(t *testing.T) {
 }
 
 func TestEscFromSubscreenReturnsToMenu(t *testing.T) {
-	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true, theme.Default()), 80, 24)
 	out, _ := m.Update(key("3")) // Windows
 	m = out.(model)
 	if m.mode != windowsMode {
 		t.Fatalf("expected windowsMode, got %v", m.mode)
 	}
-	out, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	out, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	m = out.(model)
 	if m.mode != menuMode {
 		t.Errorf("esc should return to menu, got %v", m.mode)
+	}
+}
+
+// TestBackgroundColorMsgRepaintsStyles pins the Init probe's one consumer:
+// receiving a BackgroundColorMsg must actually flip the rendered palette, not
+// just record the bit. theme.Artificer's accent hex differs between dark
+// (#dbbb6f) and light (#7a5a10) modes, so the header render below carries the
+// difference directly — this would stay green even if WithDark's return value
+// were silently dropped instead of reassigned onto m.theme/m.styles.
+func TestBackgroundColorMsgRepaintsStyles(t *testing.T) {
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true, theme.Default()), 80, 24)
+	before := m.View().Content
+
+	out, _ := m.Update(tea.BackgroundColorMsg{Color: color.White})
+	m = out.(model)
+
+	if m.theme.IsDark() {
+		t.Fatal("expected WithDark(false) after a light BackgroundColorMsg")
+	}
+	after := m.View().Content
+	if before == after {
+		t.Error("BackgroundColorMsg did not change the rendered view; styles were not rebuilt")
 	}
 }
 
@@ -148,8 +188,8 @@ func TestSessionItemNarrowDropsMetadata(t *testing.T) {
 	// Narrow rows (iPhone/Termius) must drop the windows/path metadata column;
 	// wide rows must include it.
 	it := sessionItem{s: tmux.Session{Name: "alpha", Windows: 3, Path: "/Users/cam/x"}}
-	wide := it.render(0, false, false, asciiGlyphs)
-	narrow := it.render(0, false, true, asciiGlyphs)
+	wide := it.render(0, false, false, asciiGlyphs, theme.Default().Styles())
+	narrow := it.render(0, false, true, asciiGlyphs, theme.Default().Styles())
 
 	if !strings.Contains(wide, "/Users/cam/x") {
 		t.Errorf("wide row should include the path: %q", wide)

@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // defaultFindingsOlderThan is `pr findings cleanup`'s default --older-than
@@ -18,7 +19,7 @@ const defaultFindingsOlderThan = 720 * time.Hour
 // newPrFindingsCmd builds `forgectl pr findings` — the reclaim path for the
 // durable findings dir (config.PrFindingsDir): list what's there, and
 // cleanup (dry-run by default) to reclaim old ones.
-func newPrFindingsCmd(client *pr.Client) *cobra.Command {
+func newPrFindingsCmd(client *pr.Client, th theme.Theme) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "findings",
 		Short: "List or reclaim durable findings from local clean-room reviews",
@@ -26,7 +27,7 @@ func newPrFindingsCmd(client *pr.Client) *cobra.Command {
 	}
 	cmd.AddCommand(
 		newPrFindingsListCmd(client),
-		newPrFindingsCleanupCmd(client),
+		newPrFindingsCleanupCmd(client, th),
 	)
 	return cmd
 }
@@ -54,7 +55,7 @@ func newPrFindingsListCmd(client *pr.Client) *cobra.Command {
 	}
 }
 
-func newPrFindingsCleanupCmd(client *pr.Client) *cobra.Command {
+func newPrFindingsCleanupCmd(client *pr.Client, th theme.Theme) *cobra.Command {
 	var (
 		olderThan time.Duration
 		apply     bool
@@ -77,7 +78,7 @@ findings dirs under the durable findings store.`,
 			if err := validateFindingsOlderThan(olderThan); err != nil {
 				return err
 			}
-			return runPrFindingsCleanup(cmd, client, olderThan, apply)
+			return runPrFindingsCleanup(cmd, client, olderThan, apply, th)
 		},
 	}
 	cmd.Flags().DurationVar(&olderThan, "older-than", defaultFindingsOlderThan, "only consider findings dirs older than this (>= 0; 0 reclaims everything)")
@@ -109,7 +110,7 @@ func validateFindingsOlderThan(d time.Duration) error {
 // paths, re-validating each one at removal time (still TOCTOU-safe: a path
 // that stopped qualifying is skipped with a note, not re-scanned into a
 // different set).
-func runPrFindingsCleanup(cmd *cobra.Command, client *pr.Client, olderThan time.Duration, apply bool) error {
+func runPrFindingsCleanup(cmd *cobra.Command, client *pr.Client, olderThan time.Duration, apply bool, th theme.Theme) error {
 	out := cmd.OutOrStdout()
 
 	preview, err := client.FindingsCleanup(olderThan, false)
@@ -130,7 +131,7 @@ func runPrFindingsCleanup(cmd *cobra.Command, client *pr.Client, olderThan time.
 		return nil
 	}
 
-	ok, err := confirm(fmt.Sprintf("Delete %d findings dir(s)?", len(preview)))
+	ok, err := confirm(th, fmt.Sprintf("Delete %d findings dir(s)?", len(preview)))
 	if err != nil {
 		return err
 	}

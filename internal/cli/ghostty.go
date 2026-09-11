@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -9,6 +10,7 @@ import (
 	ghosttypkg "github.com/cameronsjo/forgectl/internal/ghostty"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tui"
 )
 
@@ -23,7 +25,7 @@ var ghosttyModule = module.Manifest{
 	Tier:      module.TierExtension,
 	ConfigKey: "",
 	New: func(deps module.Deps) *cobra.Command {
-		return newGhosttyCmd(ghosttypkg.New(deps.Runner))
+		return newGhosttyCmd(ghosttypkg.New(deps.Runner), deps.Theme)
 	},
 }
 
@@ -31,7 +33,7 @@ var ghosttyModule = module.Manifest{
 // constructed client — split out so tests can inject a fake-wired
 // *ghostty.Client (mirrors newNetCmdForClient) without going through the
 // module.Deps wiring.
-func newGhosttyCmd(client *ghosttypkg.Client) *cobra.Command {
+func newGhosttyCmd(client *ghosttypkg.Client, th theme.Theme) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ghostty",
 		Short: "Ghostty theme + keybind reporting",
@@ -46,7 +48,7 @@ Read-only: writing a theme choice back to the config (--set) is deferred.`,
 	}
 	cmd.AddCommand(
 		newGhosttyThemesCmd(client),
-		newGhosttyCheatCmd(client),
+		newGhosttyCheatCmd(client, th),
 	)
 	return cmd
 }
@@ -109,7 +111,7 @@ func newGhosttyThemesCmd(client *ghosttypkg.Client) *cobra.Command {
 // newGhosttyCheatCmd builds `ghostty cheat`: the keybind cheatsheet, parsed
 // live from `+list-keybinds` (forgectl#7's acceptance criterion — "not
 // hard-coded"). Mirrors newTmuxCheatCmd's shape.
-func newGhosttyCheatCmd(client *ghosttypkg.Client) *cobra.Command {
+func newGhosttyCheatCmd(client *ghosttypkg.Client, th theme.Theme) *cobra.Command {
 	return &cobra.Command{
 		Use:   "cheat",
 		Short: "ghostty keybind cheatsheet, parsed live from +list-keybinds",
@@ -120,7 +122,8 @@ func newGhosttyCheatCmd(client *ghosttypkg.Client) *cobra.Command {
 				return err
 			}
 			noIcons, _ := cmd.Flags().GetBool("no-icons")
-			fmt.Fprintln(cmd.OutOrStdout(), tui.KeybindSheet(binds, noIcons))
+			out := th.Writer(cmd.OutOrStdout(), os.Environ())
+			_, _ = fmt.Fprintln(out, tui.KeybindSheet(binds, noIcons, th.Styles()))
 			return nil
 		},
 	}

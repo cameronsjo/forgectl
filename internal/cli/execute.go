@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/fang"
+	cterm "github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 	"github.com/cameronsjo/forgectl/internal/tui"
 )
@@ -105,6 +107,10 @@ func Execute(ctx context.Context) error {
 		return err
 	}
 
+	// Before anything builds a colour writer — fang builds two of its own, and
+	// they are not reachable from a call site.
+	normalizeColorEnv()
+
 	env, err := captureEnvSnapshot()
 	if err != nil {
 		return err
@@ -160,7 +166,7 @@ func Execute(ctx context.Context) error {
 	switch decideRoute(root, args, isInteractiveTTY()) {
 	case routeTUI:
 		slog.Debug("Launching TUI.", "no_icons", noIcons)
-		return runAction(ctx, tmuxClient, noIcons)
+		return runAction(ctx, tmuxClient, noIcons, deps.Theme)
 	case routeHeadlessMenu:
 		// Route through Cobra/fang instead of the TUI: an unrecognized
 		// top-level verb hits cobra's own "unknown command" + "did you mean"
@@ -172,13 +178,13 @@ func Execute(ctx context.Context) error {
 		// success.
 		logDispatch("Headless; routing to Cobra/fang instead of the TUI.", root, args)
 		root.SetOut(os.Stderr)
-		if err := execCommand(ctx, root, args); err != nil {
+		if err := execCommand(ctx, root, args, deps.Theme); err != nil {
 			return err
 		}
 		return errHeadlessMenuRoute
 	default:
 		logDispatch("Dispatching to command verb.", root, args)
-		return execCommand(ctx, root, args)
+		return execCommand(ctx, root, args, deps.Theme)
 	}
 }
 
@@ -235,6 +241,7 @@ func productionDeps(cfg config.Config, boundary *config.LegacyMigrationBoundary)
 		Runner:          exec.OSRunner{},
 		LegacyBoundary:  boundary,
 		SensitiveRunner: exec.NewOSSensitiveRunner(),
+		Theme:           resolveTheme(cfg),
 	}
 }
 
@@ -242,9 +249,9 @@ func productionDeps(cfg config.Config, boundary *config.LegacyMigrationBoundary)
 // errors, and version output. Shared by the normal-dispatch and
 // headless-menu-route paths in Execute; the only difference between them is
 // where fang writes output, which the caller sets via root.SetOut first.
-func execCommand(ctx context.Context, root *cobra.Command, args []string) error {
+func execCommand(ctx context.Context, root *cobra.Command, args []string, th theme.Theme) error {
 	root.SetArgs(args)
-	return fang.Execute(ctx, root, fangOptions(meta.Version, meta.Commit)...)
+	return fang.Execute(ctx, root, fangOptions(meta.Version, meta.Commit, th)...)
 }
 
 // fangOptions builds the fang.Option set every dispatch runs under: the version
@@ -252,11 +259,15 @@ func execCommand(ctx context.Context, root *cobra.Command, args []string) error 
 // Extracted so TestVersion_VerbMatchesFlagThroughFang can call the exact same
 // wiring instead of a parallel hand-rolled copy — an option added here is
 // automatically exercised by that regression guard too.
-func fangOptions(version, commit string) []fang.Option {
+func fangOptions(version, commit string, th theme.Theme) []fang.Option {
 	return []fang.Option{
 		fang.WithVersion(version),
 		fang.WithCommit(commit),
 		fang.WithErrorHandler(termsafeErrorHandler),
+		// fang renders --help, --version and every error frame, so without
+		// this the most-seen surface in the binary is the only one not drawing
+		// from the palette.
+		fang.WithColorSchemeFunc(th.Fang()),
 	}
 }
 
@@ -282,7 +293,62 @@ func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
 		renderStructuredTerminalError(w, styles, structured)
 		return
 	}
-	fang.DefaultErrorHandler(w, styles, termsafe.Error(err))
+	// env check --json (forgectl#481) has already written its one JSON
+	// object to stderr by the time it returns this — fang's error frame
+	// must render nothing on top of it, or the agent-facing "exactly one
+	// object" contract breaks.
+	if _, ok := err.(*silentCodedError); ok {
+		return
+	}
+	safe := termsafe.Error(err)
+	if leadsWithPath(safe.Error()) {
+		renderPathLeadingError(w, styles, safe)
+		return
+	}
+	fang.DefaultErrorHandler(w, styles, safe)
+}
+
+// leadsWithPath reports whether msg's first word looks like a filesystem
+// path — one fang's ErrorText style would title-case via its
+// titleFirstWord transform, corrupting exactly the byte-identical spelling
+// a caller typed or compares against (env_test.go's --json path field,
+// this file's own path-preserving tests). Both error surfaces
+// (termsafeErrorHandler and renderStructuredTerminalError) route a
+// path-leading message through UnsetTransform() instead of fang's default.
+func leadsWithPath(msg string) bool {
+	first, _, _ := strings.Cut(msg, " ")
+	if first == "" {
+		return false
+	}
+	return strings.Contains(first, "/") || strings.HasPrefix(first, ".")
+}
+
+// renderPathLeadingError mirrors fang.DefaultErrorHandler (help.go) except
+// the message line renders through styles.ErrorText.UnsetTransform() —
+// fang's own ErrorText.Render title-cases only the message's first word
+// (titleFirstWord), so ".env not found" would otherwise arrive on screen as
+// ".Env not found", a spelling that does not exist.
+//
+// This deliberately omits DefaultErrorHandler's trailing "Try --help for
+// usage" block (its isUsageError check): today no message can satisfy both
+// leadsWithPath and isUsageError, because isUsageError only matches one of
+// five fixed cobra/pflag prefixes ("unknown flag:", "flag needs an
+// argument:", …), none of which is a path. That's an invariant of the
+// CURRENT set of prefixes and this hand-copy, not something the compiler
+// enforces — a new cobra/pflag usage-error prefix, or a fang release that
+// restructures DefaultErrorHandler, can silently make this diverge. If a
+// path-leading message ever needs the usage hint too, add the same
+// isUsageError-shaped check here rather than assuming it still can't happen.
+func renderPathLeadingError(w io.Writer, styles fang.Styles, err error) {
+	if f, ok := w.(cterm.File); ok {
+		if !cterm.IsTerminal(f.Fd()) {
+			_, _ = fmt.Fprintln(w, err.Error())
+			return
+		}
+	}
+	_, _ = fmt.Fprintln(w, styles.ErrorHeader.String())
+	_, _ = fmt.Fprintln(w, styles.ErrorText.UnsetTransform().Render(err.Error()+"."))
+	_, _ = fmt.Fprintln(w)
 }
 
 // renderStructuredTerminalError applies fang's normal error styles one safe
@@ -292,7 +358,11 @@ func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
 // sanitizer boundary.
 func renderStructuredTerminalError(w io.Writer, styles fang.Styles, err *structuredTerminalError) {
 	_, _ = fmt.Fprintln(w, styles.ErrorHeader.String())
-	_, _ = fmt.Fprintln(w, styles.ErrorText.Render(err.headline+"."))
+	headline := styles.ErrorText
+	if leadsWithPath(err.headline) {
+		headline = headline.UnsetTransform()
+	}
+	_, _ = fmt.Fprintln(w, headline.Render(err.headline+"."))
 	if len(err.suggestions) > 0 {
 		_, _ = fmt.Fprintln(w)
 		_, _ = fmt.Fprintln(w, styles.ErrorText.Render("Did you mean this?"))
@@ -305,11 +375,28 @@ func renderStructuredTerminalError(w io.Writer, styles fang.Styles, err *structu
 	_, _ = fmt.Fprintln(w)
 }
 
+// silentCodedError marks an error whose message has already been written to
+// stderr by the caller (env check --json's one-object contract, forgectl#481)
+// — termsafeErrorHandler renders nothing for it, and ExitCode still resolves
+// its code (exitcode.go) so main's os.Exit(cli.ExitCode(err)) is unaffected.
+type silentCodedError struct {
+	code int
+}
+
+func (e *silentCodedError) Error() string { return "" }
+func (e *silentCodedError) ExitCode() int { return e.code }
+
+// newSilentCodedError mirrors WithExitCode's shape for the render-nothing
+// case.
+func newSilentCodedError(code int) error {
+	return &silentCodedError{code: code}
+}
+
 // runAction opens the TUI and performs whatever jump it selected. Jumps that
 // need the tty (attach / sesh connect) run here, after Bubble Tea has released
 // the terminal.
-func runAction(ctx context.Context, client *tmux.Client, noIcons bool) error {
-	act, err := tui.Run(ctx, client, noIcons)
+func runAction(ctx context.Context, client *tmux.Client, noIcons bool, th theme.Theme) error {
+	act, err := tui.Run(ctx, client, noIcons, th)
 	if err != nil {
 		slog.Error("Failed to run TUI.", "error", err)
 		return err

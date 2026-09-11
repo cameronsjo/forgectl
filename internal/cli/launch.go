@@ -83,6 +83,7 @@ func isOwnLaunchVerb(tok string) bool {
 func newLaunchCmd(deps module.Deps) *cobra.Command {
 	cfg := deps.Cfg
 	boundary := deps.LegacyBoundary
+	th := deps.Theme
 	cmd := &cobra.Command{
 		Use:     "launch [harness args…]",
 		Aliases: []string{"cl"},
@@ -107,10 +108,10 @@ with "forgectl launch init".`,
 		},
 	}
 	cmd.AddCommand(
-		newLaunchWhichCmd(boundary, cfg),
+		newLaunchWhichCmd(boundary, cfg, th),
 		newLaunchEditCmd(),
 		newLaunchInitCmd(boundary),
-		newLaunchDoctorCmd(boundary, cfg),
+		newLaunchDoctorCmd(boundary, cfg, th),
 		newLaunchMigrateCmd(boundary),
 		newLaunchStatsCmd(),
 	)

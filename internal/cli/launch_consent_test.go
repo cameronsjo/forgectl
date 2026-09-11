@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // The scaffold is where an operator meets this feature, so the disclosure it
@@ -48,7 +49,7 @@ func TestLaunchDoctor_DisabledIsHealthyAndCreatesNothing(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", base)
 
 	out := &strings.Builder{}
-	if healthy := reportUsageStats(out, false); !healthy {
+	if healthy := reportUsageStats(out, false, theme.Theme{}.Marks()); !healthy {
 		t.Fatal("disabled collection reported as unhealthy; off is a legitimate choice")
 	}
 	if !strings.Contains(out.String(), "off") {
@@ -64,7 +65,7 @@ func TestLaunchDoctor_EnabledInspectsWithoutCreating(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", base)
 
 	out := &strings.Builder{}
-	if healthy := reportUsageStats(out, true); !healthy {
+	if healthy := reportUsageStats(out, true, theme.Theme{}.Marks()); !healthy {
 		t.Fatalf("an absent store reported as unhealthy: %q", out.String())
 	}
 	if _, err := os.Lstat(base); !os.IsNotExist(err) {
@@ -99,7 +100,7 @@ func TestLaunchDoctor_ReportsEveryPermissionItTightened(t *testing.T) {
 	}
 
 	out := &strings.Builder{}
-	if healthy := reportUsageStats(out, true); !healthy {
+	if healthy := reportUsageStats(out, true, theme.Theme{}.Marks()); !healthy {
 		t.Fatalf("a store doctor successfully tightened reported as unhealthy: %q", out.String())
 	}
 	for _, path := range []string{leaf, data} {
@@ -135,7 +136,7 @@ func TestLaunchDoctor_SaysNothingWhenNothingWasTightened(t *testing.T) {
 	}
 
 	out := &strings.Builder{}
-	if healthy := reportUsageStats(out, true); !healthy {
+	if healthy := reportUsageStats(out, true, theme.Theme{}.Marks()); !healthy {
 		t.Fatalf("a well-formed store reported as unhealthy: %q", out.String())
 	}
 	if strings.Contains(out.String(), "tightened") {
@@ -159,7 +160,7 @@ func TestLaunchDoctor_RefusedStoreIsUnhealthyAndNamed(t *testing.T) {
 	}
 
 	out := &strings.Builder{}
-	if healthy := reportUsageStats(out, true); healthy {
+	if healthy := reportUsageStats(out, true, theme.Theme{}.Marks()); healthy {
 		t.Fatalf("a symlinked data file reported as healthy: %q", out.String())
 	}
 	if !strings.Contains(out.String(), "refused") {

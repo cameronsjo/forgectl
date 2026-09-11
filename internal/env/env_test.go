@@ -73,6 +73,35 @@ func TestCopyValue_MissingKey_Errors(t *testing.T) {
 	if strings.Contains(err.Error(), "MISSING") {
 		t.Errorf("error %q echoes the missing key; a not-found token may be a secret pasted into the key slot", err.Error())
 	}
+	// forgectl#481: the file name in the message must be repo-relative, not
+	// the absolute path Locate resolved to — the absolute form can name a
+	// directory the caller never typed and would otherwise land verbatim in
+	// a rendered error or an agent transcript.
+	if strings.Contains(err.Error(), repo) {
+		t.Errorf("error %q leaked the absolute repo path %q", err.Error(), repo)
+	}
+	if !strings.Contains(err.Error(), ".env ") {
+		t.Errorf("error %q, want the repo-relative name %q", err.Error(), ".env")
+	}
+}
+
+func TestCopyValue_MissingFile_ErrorsWithRepoRelativePath(t *testing.T) {
+	repo := t.TempDir()
+	initGitRepo(t, repo)
+
+	fake := &exec.FakeRunner{}
+	client := NewClient(clip.New(fake, clip.WithGOOS("darwin")))
+
+	err := client.CopyValue(context.Background(), repo, ".env", "KEY", false)
+	if err == nil {
+		t.Fatal("CopyValue against a missing file returned nil error, want a refusal")
+	}
+	if strings.Contains(err.Error(), repo) {
+		t.Errorf("error %q leaked the absolute repo path %q", err.Error(), repo)
+	}
+	if !strings.Contains(err.Error(), "env file .env not found") {
+		t.Errorf("error = %q, want %q", err.Error(), "env file .env not found")
+	}
 }
 
 func TestCopyValue_ClipboardFailure_Surfaced(t *testing.T) {

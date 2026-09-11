@@ -332,6 +332,62 @@ func TestConfig_ProxyProfileNamesVisibleValuesWithheld(t *testing.T) {
 	}
 }
 
+// TestConfig_ThemeColorsValuesAreVisible is the narrow exemption
+// TestConfig_ProxyProfileNamesVisibleValuesWithheld is the negative control
+// for: [theme.colors] holds hex colours, not secrets, so this command must
+// print the actual values rather than withholding them like every other map
+// leaf.
+func TestConfig_ThemeColorsValuesAreVisible(t *testing.T) {
+	body := `[theme.colors]
+accent = "#dbbb6f"
+danger = { dark = "#e6a8a2", light = "#8a2418" }
+`
+	text := runConfig(t, body)
+	for _, want := range []string{"#dbbb6f", "#e6a8a2", "#8a2418"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("human config output withheld theme colour %q, want it visible; got:\n%s", want, text)
+		}
+	}
+
+	doc, raw := runConfigJSONRaw(t, body)
+	for _, want := range []string{"#dbbb6f", "#e6a8a2", "#8a2418"} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("--json output withheld theme colour %q, want it visible; got:\n%s", want, raw)
+		}
+	}
+	e := findEntry(t, doc, "theme.colors")
+	if e.Redacted {
+		t.Error("theme.colors redacted = true, want false — hex colours are not secrets")
+	}
+	if !e.Set {
+		t.Error("theme.colors set = false, want true")
+	}
+}
+
+// TestConfig_ThemeColorsExemptionIsNarrow is the negative control for the
+// exemption above: it must not have widened redaction policy for maps in
+// general — [proxy.profiles], a genuinely sensitive map, must still withhold
+// its values.
+func TestConfig_ThemeColorsExemptionIsNarrow(t *testing.T) {
+	const opaqueValue = "opaque-proxy-value-still-withheld"
+	body := "[proxy.profiles.work]\nhttp_proxy = \"" + opaqueValue + "\"\n" +
+		"[theme.colors]\naccent = \"#dbbb6f\"\n"
+
+	text := runConfig(t, body)
+	if strings.Contains(text, opaqueValue) {
+		t.Fatalf("human config output leaked proxy value after adding the theme.colors exemption: %q", text)
+	}
+
+	doc, raw := runConfigJSONRaw(t, body)
+	if strings.Contains(raw, opaqueValue) {
+		t.Fatalf("--json output leaked proxy value after adding the theme.colors exemption: %q", raw)
+	}
+	e := findEntry(t, doc, "proxy.profiles")
+	if !e.Redacted || !e.Set {
+		t.Errorf("proxy.profiles redacted=%v set=%v, want both true — the theme.colors exemption must not widen", e.Redacted, e.Set)
+	}
+}
+
 // TestConfig_EveryBindableFieldIsTagged extends configStructSections' fatal
 // from top-level sections to every field at every depth.
 //

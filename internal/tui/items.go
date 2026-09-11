@@ -4,25 +4,28 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/list"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // rowItem is a list item that knows how to render itself in one line, with the
-// glyph set and narrow-mode preference supplied by the delegate. Single-line
-// rows keep the lists readable at ~40 columns (iPhone/Termius).
+// glyph set, narrow-mode preference, and theme styles supplied by the
+// delegate. Single-line rows keep the lists readable at ~40 columns
+// (iPhone/Termius).
 type rowItem interface {
 	list.Item
-	render(index int, selected, narrow bool, g glyphSet) string
+	render(index int, selected, narrow bool, g glyphSet, s theme.Styles) string
 }
 
 // itemDelegate renders rowItems. Height 1 / spacing 0 → compact, mobile-first.
 type itemDelegate struct {
 	g      glyphSet
 	narrow bool
+	styles theme.Styles
 }
 
 func (d itemDelegate) Height() int                         { return 1 }
@@ -30,20 +33,23 @@ func (d itemDelegate) Spacing() int                        { return 0 }
 func (d itemDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
 func (d itemDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
 	if ri, ok := item.(rowItem); ok {
-		fmt.Fprint(w, ri.render(index, index == m.Index(), d.narrow, d.g))
+		// w is Bubble Tea's list renderer writing into an in-memory buffer, not
+		// a real sink — a write failure here isn't actionable, and Render's
+		// signature (no error return) gives nothing to propagate it to anyway.
+		_, _ = fmt.Fprint(w, ri.render(index, index == m.Index(), d.narrow, d.g, d.styles))
 	}
 }
 
 // cursor + number prefix shared by every row.
-func leader(index int, selected bool) string {
+func leader(index int, selected bool, s theme.Styles) string {
 	num := "  "
 	if index < 9 {
 		num = fmt.Sprintf("%d ", index+1)
 	}
 	if selected {
-		return styleAccent.Render("▌") + styleAccent.Render(num)
+		return s.Accent.Render("▌") + s.Accent.Render(num)
 	}
-	return " " + styleMuted.Render(num)
+	return " " + s.Muted.Render(num)
 }
 
 // --- menu ---
@@ -55,15 +61,15 @@ type menuItem struct {
 }
 
 func (i menuItem) FilterValue() string { return i.label }
-func (i menuItem) render(index int, selected, narrow bool, g glyphSet) string {
+func (i menuItem) render(index int, selected, narrow bool, g glyphSet, s theme.Styles) string {
 	label := i.glyph(g) + "  " + i.label
 	if selected {
-		return leader(index, true) + styleSelected.Render(label)
+		return leader(index, true, s) + s.Selected.Render(label)
 	}
 	if narrow {
-		return leader(index, false) + styleFg.Render(label)
+		return leader(index, false, s) + s.Fg.Render(label)
 	}
-	return leader(index, false) + styleFg.Render(label) + "  " + styleMuted.Render(i.desc)
+	return leader(index, false, s) + s.Fg.Render(label) + "  " + s.Muted.Render(i.desc)
 }
 
 // Every row from here down renders text forgectl did not compose: session
@@ -81,12 +87,12 @@ func (i menuItem) render(index int, selected, narrow bool, g glyphSet) string {
 type pickItem string
 
 func (i pickItem) FilterValue() string { return string(i) }
-func (i pickItem) render(index int, selected, narrow bool, g glyphSet) string {
+func (i pickItem) render(index int, selected, narrow bool, g glyphSet, s theme.Styles) string {
 	label := g.Session + "  " + termsafe.SafeLine(string(i))
 	if selected {
-		return leader(index, true) + styleSelected.Render(label)
+		return leader(index, true, s) + s.Selected.Render(label)
 	}
-	return leader(index, false) + styleFg.Render(label)
+	return leader(index, false, s) + s.Fg.Render(label)
 }
 
 // --- session ---
@@ -94,18 +100,18 @@ func (i pickItem) render(index int, selected, narrow bool, g glyphSet) string {
 type sessionItem struct{ s tmux.Session }
 
 func (i sessionItem) FilterValue() string { return i.s.Name }
-func (i sessionItem) render(index int, selected, narrow bool, g glyphSet) string {
-	marker := styleMuted.Render(g.Detached)
+func (i sessionItem) render(index int, selected, narrow bool, g glyphSet, s theme.Styles) string {
+	marker := s.Muted.Render(g.Detached)
 	if i.s.Attached {
-		marker = styleOK.Render(g.Attached)
+		marker = s.OK.Render(g.Attached)
 	}
 	name := termsafe.SafeLine(i.s.Name)
 	if selected {
-		name = styleSelected.Render(name)
+		name = s.Selected.Render(name)
 	} else {
-		name = styleFg.Render(name)
+		name = s.Fg.Render(name)
 	}
-	row := leader(index, selected) + marker + " " + name
+	row := leader(index, selected, s) + marker + " " + name
 	if narrow {
 		return row
 	}
@@ -114,7 +120,7 @@ func (i sessionItem) render(index int, selected, narrow bool, g glyphSet) string
 		unit = "window"
 	}
 	meta := fmt.Sprintf("  %d %s · %s", i.s.Windows, unit, termsafe.SafeLine(i.s.Path))
-	return row + styleMuted.Render(meta)
+	return row + s.Muted.Render(meta)
 }
 
 // --- window ---
@@ -122,17 +128,17 @@ func (i sessionItem) render(index int, selected, narrow bool, g glyphSet) string
 type windowItem struct{ w tmux.Window }
 
 func (i windowItem) FilterValue() string { return i.w.Session + " " + i.w.Name }
-func (i windowItem) render(index int, selected, narrow bool, g glyphSet) string {
-	sess := styleCyan.Render(termsafe.SafeLine(i.w.Session))
+func (i windowItem) render(index int, selected, narrow bool, g glyphSet, s theme.Styles) string {
+	sess := s.Steel.Render(termsafe.SafeLine(i.w.Session))
 	name := termsafe.SafeLine(i.w.Name)
 	if i.w.Active {
-		name = styleActive.Render(name)
+		name = s.Active.Render(name)
 	} else if selected {
-		name = styleSelected.Render(name)
+		name = s.Selected.Render(name)
 	} else {
-		name = styleFg.Render(name)
+		name = s.Fg.Render(name)
 	}
-	row := leader(index, selected) + g.Window + " " + sess + styleMuted.Render(" · ") + name
+	row := leader(index, selected, s) + g.Window + " " + sess + s.Muted.Render(" · ") + name
 	if narrow {
 		return row
 	}
@@ -140,5 +146,5 @@ func (i windowItem) render(index int, selected, narrow bool, g glyphSet) string 
 	if i.w.Panes == 1 {
 		unit = "pane"
 	}
-	return row + styleMuted.Render(fmt.Sprintf("  %d %s", i.w.Panes, unit))
+	return row + s.Muted.Render(fmt.Sprintf("  %d %s", i.w.Panes, unit))
 }

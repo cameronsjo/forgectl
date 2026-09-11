@@ -20,12 +20,13 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/review"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // execReview runs a review subcommand against src/store and returns stdout+stderr.
 func execReview(t *testing.T, src review.Source, reviewedPath string, args ...string) (string, string, error) {
 	t.Helper()
-	cmd := newReviewCmdForSources([]review.Source{src}, reviewedPath, review.GitHubHost)
+	cmd := newReviewCmdForSources([]review.Source{src}, reviewedPath, review.GitHubHost, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
