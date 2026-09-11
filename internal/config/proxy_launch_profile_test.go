@@ -37,7 +37,8 @@ func TestValidatePath_SurfacesLaunchProfileError(t *testing.T) {
 // would look identical.
 func TestValidatePath_AcceptsAResolvableLaunchProfile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
-	body := "[proxy]\nlaunch_profile = \"work\"\n[proxy.profiles.work]\nhttp_proxy = \"http://proxy.example:8080\"\n"
+	body := "[proxy]\nlaunch_profile = \"work\"\n[proxy.profiles.work]\n" +
+		"http_proxy = \"http://proxy.example:8080\"\nno_proxy = \"localhost,127.0.0.1\"\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -61,9 +62,61 @@ func TestLoad_TolerantOfAnUnresolvableLaunchProfile(t *testing.T) {
 	}
 }
 
+// TestResolveLaunchProfile_RefusesAProxyWithNoBypassList pins the rule an
+// earlier version of this feature got wrong in the opposite direction. It
+// assumed removing an omitted no_proxy (rather than emptying it) protected
+// loopback. Measured 2026-09-11, curl 8.7.1: absent and empty no_proxy behave
+// identically, and NEITHER bypasses loopback — with http_proxy set,
+// `http://localhost:9/` was dialed at the proxy under both, and direct only
+// once no_proxy named localhost. So the removal bought determinism and nothing
+// else, and the loopback hole needed closing here instead.
+//
+// The refusal is the closure: a profile cannot route traffic without saying
+// what to exempt. Every launch path and `launch doctor` share it, so there is
+// no surface on which this config looks viable.
+func TestResolveLaunchProfile_RefusesAProxyWithNoBypassList(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		profile ProxyProfile
+		wantErr error
+	}{
+		{"http with no bypass", ProxyProfile{HTTPProxy: "http://p.example:8080"}, ErrLaunchProfileNoBypass},
+		{"https with no bypass", ProxyProfile{HTTPSProxy: "http://p.example:8080"}, ErrLaunchProfileNoBypass},
+		{"socks with no bypass", ProxyProfile{AllProxy: "socks5://p.example:1080"}, ErrLaunchProfileNoBypass},
+		// A bypass list alone routes nothing, so there is nothing to exempt
+		// from and no hole to close. It must not be caught by this rule.
+		{"bypass list alone is fine", ProxyProfile{NoProxy: "localhost"}, nil},
+		{"a proxy plus a bypass list is fine", ProxyProfile{HTTPProxy: "http://p.example:8080", NoProxy: "localhost"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pc := ProxyConfig{
+				Profiles:      map[string]ProxyProfile{"p": tc.profile},
+				LaunchProfile: "p",
+			}
+			if err := pc.Validate(); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Validate = %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantErr == nil {
+				return
+			}
+			// The message must be actionable without naming a value: an
+			// operator has to know which field to add, and the URL that is
+			// missing its exemption must not ride along.
+			msg := pc.Validate().Error()
+			if !strings.Contains(msg, "no_proxy") {
+				t.Errorf("message = %q, want it to name the field to add", msg)
+			}
+			if strings.Contains(msg, "p.example") {
+				t.Errorf("message leaked a profile value: %q", msg)
+			}
+		})
+	}
+}
+
 func TestResolveLaunchProfile(t *testing.T) {
-	work := ProxyProfile{HTTPProxy: "http://proxy.example:8080"}
-	profiles := map[string]ProxyProfile{"work": work, "blank": {}}
+	work := ProxyProfile{HTTPProxy: "http://proxy.example:8080", NoProxy: "localhost,127.0.0.1"}
+	noBypass := ProxyProfile{HTTPProxy: "http://proxy.example:8080"}
+	profiles := map[string]ProxyProfile{"work": work, "blank": {}, "nobypass": noBypass}
 
 	for _, tc := range []struct {
 		name    string
@@ -75,6 +128,7 @@ func TestResolveLaunchProfile(t *testing.T) {
 		{name: "a configured profile resolves", named: "work", wantOK: true},
 		{name: "a typo is refused", named: "wrok", wantErr: ErrUnknownLaunchProfile},
 		{name: "a profile with no values is refused", named: "blank", wantErr: ErrEmptyLaunchProfile},
+		{name: "a profile routing traffic with no bypass list is refused", named: "nobypass", wantErr: ErrLaunchProfileNoBypass},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pc := ProxyConfig{Profiles: profiles, LaunchProfile: tc.named}

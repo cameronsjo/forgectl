@@ -67,7 +67,8 @@ const proxyScaffold = `
 [proxy]
 # launch_profile names the profile every launch, resume, and surface launch
 # puts into the harness environment. A name matching no profile below is
-# refused rather than launching unproxied.
+# refused rather than launching unproxied, and so is a profile that names a
+# proxy without a no_proxy — loopback is not exempt by default.
 # launch_profile = "work"
 # [proxy.profiles.work]
 # http_proxy  = "http://proxy.example:8080"

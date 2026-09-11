@@ -56,16 +56,23 @@ func TestLaunchEnvSetsBothSpellingsForEveryVariable(t *testing.T) {
 // TestLaunchEnvRemovesAbsentFieldsRatherThanEmptyingThem pins the semantic the
 // rest of the codebase already documents: ProxyProfile says an omitted value
 // UNSETS both spellings, and Use implements that with `unset`. Emptying instead
-// would diverge for any consumer testing presence rather than truthiness — and
-// for NO_PROXY it inverts the meaning, since an empty NO_PROXY says "no bypass
-// exceptions" and would route loopback traffic through the proxy.
+// would diverge for any consumer testing presence rather than truthiness.
+//
+// This test does NOT claim removal protects loopback — it does not, and the
+// fixture below cannot reach the no_proxy case anyway, because
+// config.ErrLaunchProfileNoBypass refuses a profile that routes traffic and
+// names no bypass list. The fixture therefore sets no_proxy and omits the other
+// three, which is the reachable shape.
 func TestLaunchEnvRemovesAbsentFieldsRatherThanEmptyingThem(t *testing.T) {
-	set, unset, err := LaunchEnv(launchFixture(config.ProxyProfile{HTTPSProxy: "https://proxy.example:8443"}))
+	set, unset, err := LaunchEnv(launchFixture(config.ProxyProfile{
+		HTTPSProxy: "https://proxy.example:8443",
+		NoProxy:    "localhost,127.0.0.1",
+	}))
 	if err != nil {
 		t.Fatalf("LaunchEnv: %v", err)
 	}
 
-	wantUnset := []string{"ALL_PROXY", "HTTP_PROXY", "NO_PROXY", "all_proxy", "http_proxy", "no_proxy"}
+	wantUnset := []string{"ALL_PROXY", "HTTP_PROXY", "all_proxy", "http_proxy"}
 	if got := slices.Sorted(slices.Values(unset)); !slices.Equal(got, wantUnset) {
 		t.Errorf("unset = %v, want %v", got, wantUnset)
 	}
@@ -129,7 +136,10 @@ func TestLaunchEnvRefusesAnEmptyProfile(t *testing.T) {
 // environment entry handed to exec is a NUL-terminated C string, so the byte
 // would truncate the value rather than fail loudly.
 func TestLaunchEnvRefusesAValueTheExecCannotCarry(t *testing.T) {
-	_, _, err := LaunchEnv(launchFixture(config.ProxyProfile{HTTPProxy: "http://proxy.example:8080\x00evil"}))
+	_, _, err := LaunchEnv(launchFixture(config.ProxyProfile{
+		HTTPProxy: "http://proxy.example:8080\x00evil",
+		NoProxy:   "localhost",
+	}))
 	if !errors.Is(err, ErrUnrepresentable) {
 		t.Fatalf("err = %v, want ErrUnrepresentable", err)
 	}

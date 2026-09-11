@@ -71,16 +71,29 @@ server, or run `pr` from a shell that has run `proxy use`.
 A profile field that is set is applied to both spellings; a field the profile
 omits **removes** both spellings from the harness's environment, exactly as
 `proxy use` unsets them. Removal rather than emptying is what makes a profile
-switch deterministic: an untouched key would let a stale exported value survive
-into the harness, and an emptied key is worse than either for `NO_PROXY`, whose
-empty value means "no bypass exceptions" and would send loopback traffic to the
-proxy.
+switch deterministic — an untouched key would let a stale exported value survive
+into the harness — and it keeps the two ways of applying a profile in agreement
+for a client that checks whether a variable is *present* rather than what it
+says.
 
-A `launch_profile` naming no configured profile — or naming one that sets no
-values — **refuses the launch**, with exit code 2, before anything is written to
-disk. Falling back to the shell's variables would reach the network by a path
-nobody chose, and would look like a successful launch. `forgectl launch doctor`
-reports the same refusal, so a typo surfaces without starting anything.
+### A launch profile must carry a `no_proxy`
+
+**`launch_profile` refuses a profile that names a proxy and no `no_proxy`.** An
+absent `no_proxy` and an empty one behave identically, and neither exempts
+loopback: measured with curl 8.7.1, `http://localhost:9/` went to the proxy in
+both cases and went direct only once `no_proxy` named `localhost`. Go is the
+exception — it exempts loopback ahead of the bypass list — so forgectl's own
+requests are unaffected while the harness's `curl`, `libcurl`, and Node
+subprocesses are not. Since `forgectl launch` also points the harness at a
+loopback telemetry collector, a profile with no bypass list would send local
+traffic to the corporate proxy. Include `localhost` and `127.0.0.1` at minimum.
+
+A `launch_profile` also **refuses the launch** when it names no configured
+profile, or names one that sets no values. All three refusals exit 2 before
+anything is written to disk. Falling back to the shell's variables would reach
+the network by a path nobody chose, and would look like a successful launch.
+`forgectl launch doctor` reports all three, so a bad key surfaces without
+starting anything.
 
 `launch_profile` is the profile *name*, which is not sensitive and prints
 normally in `forgectl config`. The values it selects stay redacted there, and no

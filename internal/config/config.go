@@ -277,6 +277,25 @@ var ErrUnknownLaunchProfile = errors.New("proxy: launch_profile names no configu
 // neither explain nor fix an empty launch profile.
 var ErrEmptyLaunchProfile = errors.New("proxy: launch_profile names a profile that sets no values")
 
+// ErrLaunchProfileNoBypass reports a launch profile that routes traffic through
+// a proxy but names no bypass list. Measured 2026-09-11 with curl 8.7.1: an
+// ABSENT no_proxy and an EMPTY no_proxy are equivalent, and NEITHER bypasses
+// loopback — `http://localhost:9/` was dialed at the proxy under both, and
+// direct only with no_proxy=localhost. So a profile omitting no_proxy sends the
+// harness's loopback requests to the proxy, whoever operates it.
+//
+// Only Go hard-codes a loopback exemption ahead of the bypass list, so
+// forgectl's own HTTP is immune and a Go test suite cannot see this. The
+// harness's curl, libcurl, and Node subprocesses are not immune — and forgectl
+// points the harness at a loopback OTLP collector in the same breath.
+//
+// Refusing is cheap to satisfy (add one field) and the alternative is a silent
+// egress path the operator did not choose, which is the same harm the
+// unknown-profile refusal exists to prevent.
+var ErrLaunchProfileNoBypass = errors.New(
+	"proxy: launch_profile sets a proxy but no no_proxy, so the harness would send loopback traffic to it; " +
+		"add no_proxy (include localhost and 127.0.0.1) to the profile")
+
 // ResolveLaunchProfile returns the profile named by LaunchProfile, or ok=false
 // when no launch profile is configured. It lives here rather than in
 // internal/proxy so `forgectl launch doctor` can reach the same refusal the
@@ -292,6 +311,9 @@ func (pc ProxyConfig) ResolveLaunchProfile() (profile ProxyProfile, ok bool, err
 	}
 	if profile.IsZero() {
 		return ProxyProfile{}, false, fmt.Errorf("%w: %q", ErrEmptyLaunchProfile, pc.LaunchProfile)
+	}
+	if profile.RoutesTraffic() && profile.NoProxy == "" {
+		return ProxyProfile{}, false, fmt.Errorf("%w: %q", ErrLaunchProfileNoBypass, pc.LaunchProfile)
 	}
 	return profile, true, nil
 }
@@ -325,6 +347,13 @@ type ProxyProfile struct {
 // IsZero reports whether the profile sets no proxy value at all.
 func (p ProxyProfile) IsZero() bool {
 	return p.HTTPProxy == "" && p.HTTPSProxy == "" && p.AllProxy == "" && p.NoProxy == ""
+}
+
+// RoutesTraffic reports whether the profile names a proxy for any scheme. It
+// deliberately excludes NoProxy, which routes nothing — it only carves
+// exceptions out of whatever the other three set.
+func (p ProxyProfile) RoutesTraffic() bool {
+	return p.HTTPProxy != "" || p.HTTPSProxy != "" || p.AllProxy != ""
 }
 
 // The methods below make the never-print guarantee a property of the type
