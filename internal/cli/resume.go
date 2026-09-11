@@ -467,6 +467,15 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	}
 	args := launch.ResumeArgs(profile, s.ID, fork)
 
+	// Before the dry-run branch and before any task is restored: a refusal here
+	// is a pure function of the config, so it must not arrive after this command
+	// has written to disk, and --dry-run's contract below is that its exit code
+	// is the one the real run would give.
+	injected, err := injectedLaunchEnv(cfg)
+	if err != nil {
+		return WithExitCode(termsafe.Error(err), 1)
+	}
+
 	// --dry-run is the headless escape. Resuming exec-replaces this process
 	// with an INTERACTIVE claude (ResumeArgs injects --ide, which rules out a
 	// -p/--print form), so without this there is no way to ask "what would
@@ -521,10 +530,6 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 		return WithExitCode(fmt.Errorf("enter %s: %s", safeTerm(s.Cwd), safeTerm(err.Error())), 1)
 	}
 
-	injected, err := injectedLaunchEnv(cfg)
-	if err != nil {
-		return WithExitCode(termsafe.Error(err), 1)
-	}
 	env := launch.MergeEnv(os.Environ(), launch.MergeMaps(injected, profile.Env))
 	fmt.Fprintf(errOut, "forgectl: resuming %s in %s\n", safeTerm(displayName(s)), safeTerm(s.Cwd))
 	slog.Debug("Preparing to exec claude for a resume.", "session", s.ID, "cwd", s.Cwd, "fork", fork)

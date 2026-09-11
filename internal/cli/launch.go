@@ -152,14 +152,9 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	if err != nil {
 		return termsafe.Error(fmt.Errorf("determine working directory: %w", err))
 	}
-	// The injected block (bench telemetry, the launch proxy profile) sits UNDER
-	// the profile's env (the builder layers it that way), so a profile value
-	// wins over an injected default. With telemetry off and no launch proxy
-	// profile, the block is nil and the merge reduces to the profile env alone.
-	//
-	// A launch_profile naming no configured profile refuses here rather than
-	// launching: reaching the network by an unintended path is the failure this
-	// setting exists to prevent, and it would otherwise look like success.
+	// The builder layers this block UNDER the profile's env, so a profile value
+	// wins over an injected default. Contents and refusal rationale:
+	// injectedLaunchEnv.
 	injected, err := injectedLaunchEnv(cfg)
 	if err != nil {
 		return termsafe.Error(err)

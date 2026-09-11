@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -102,13 +103,19 @@ func TestLaunchEnvRefusesAnUnknownProfile(t *testing.T) {
 	}
 }
 
+// TestLaunchEnvRefusesAnEmptyProfile also pins which sentinel it refuses with:
+// ErrEmptyProfile's message directs the operator to `proxy off`, which is
+// advice about the shell protocol and would not fix an empty launch profile.
 func TestLaunchEnvRefusesAnEmptyProfile(t *testing.T) {
-	_, err := LaunchEnv(config.ProxyConfig{
-		Profiles:      map[string]config.ProxyProfile{"work": {}},
-		LaunchProfile: "work",
-	})
-	if !errors.Is(err, ErrEmptyProfile) {
-		t.Fatalf("err = %v, want ErrEmptyProfile", err)
+	_, err := LaunchEnv(launchFixture(config.ProxyProfile{}))
+	if !errors.Is(err, ErrEmptyLaunchProfile) {
+		t.Fatalf("err = %v, want ErrEmptyLaunchProfile", err)
+	}
+	if errors.Is(err, ErrEmptyProfile) {
+		t.Errorf("err = %q, which sends the operator to the shell protocol's `proxy off`", err)
+	}
+	if got := err.Error(); !strings.Contains(got, `"work"`) {
+		t.Errorf("err = %q, want it to name the profile", got)
 	}
 }
 
@@ -123,10 +130,5 @@ func TestLaunchEnvRefusesAValueTheExecCannotCarry(t *testing.T) {
 }
 
 func sortedKeys(env map[string]string) []string {
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	return keys
+	return slices.Sorted(maps.Keys(env))
 }

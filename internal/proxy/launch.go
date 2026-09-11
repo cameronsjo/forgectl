@@ -15,6 +15,12 @@ import (
 // its values are.
 var ErrUnknownLaunchProfile = errors.New("proxy: launch_profile names no configured profile")
 
+// ErrEmptyLaunchProfile reports a launch_profile naming a profile that sets no
+// values. Distinct from ErrEmptyProfile, whose message sends the operator to
+// `proxy off` — advice about the shell protocol that would neither explain nor
+// fix an empty launch profile.
+var ErrEmptyLaunchProfile = errors.New("proxy: launch_profile names a profile that sets no values")
+
 // LaunchEnv returns the environment a launched harness needs to reach the
 // network through pc.LaunchProfile, or nil when no launch profile is
 // configured. It is the second sanctioned sink for profile values, alongside
@@ -39,7 +45,7 @@ func LaunchEnv(pc config.ProxyConfig) (map[string]string, error) {
 		return nil, fmt.Errorf("%w: %q", ErrUnknownLaunchProfile, pc.LaunchProfile)
 	}
 	if profile.IsZero() {
-		return nil, ErrEmptyProfile
+		return nil, fmt.Errorf("%w: %q", ErrEmptyLaunchProfile, pc.LaunchProfile)
 	}
 
 	variables := profileVariables(profile)
