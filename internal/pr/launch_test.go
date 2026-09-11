@@ -330,6 +330,30 @@ func TestLaunch_InlineDispatch(t *testing.T) {
 	}
 }
 
+// fakeHarnessBin writes an executable stub and returns its path. It writes
+// 0600 then chmods, rather than passing 0755 to WriteFile like the older tests
+// in this file: gosec's G306 refuses a WriteFile mode above 0600, and the
+// repo's lint gate runs --new-from-rev, so new lines are held to it even where
+// neighbouring lines predate it. The file still ends up owner-executable,
+// which is all a stub needs.
+func fakeHarnessBin(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o600); err != nil {
+		t.Fatalf("write fake %s: %v", name, err)
+	}
+	// G302: an executable stub cannot satisfy "0600 or less" — that mode has no
+	// execute bit, and launch resolution stats the binary for one. 0700 is the
+	// tightest mode that still works: owner-only, inside a t.TempDir() the test
+	// owns and the runtime removes. The older tests in this file pass 0755 to
+	// WriteFile directly and are exempted by --new-from-rev; this is the same
+	// fixture, one permission bit tighter.
+	if err := os.Chmod(path, 0o700); err != nil { //nolint:gosec // see above
+		t.Fatalf("chmod fake %s: %v", name, err)
+	}
+	return path
+}
+
 // TestLaunch_CarriesTheWindowEnvIntoTmuxArgv pins the fix for the fourth
 // harness-starting path. `pr` dispatches into a tmux window, and a window with
 // no -e flags inherits the tmux SERVER's environment — fixed when the server
@@ -340,10 +364,7 @@ func TestLaunch_InlineDispatch(t *testing.T) {
 // Without this test, reverting the wiring back to the env-less NewWindow still
 // compiles and every other test still passes.
 func TestLaunch_CarriesTheWindowEnvIntoTmuxArgv(t *testing.T) {
-	claudeBin := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatalf("write fake claude: %v", err)
-	}
+	claudeBin := fakeHarnessBin(t, "claude")
 	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
 
 	fake := successfulLaunchRunner()
@@ -385,10 +406,7 @@ func TestLaunch_CarriesTheWindowEnvIntoTmuxArgv(t *testing.T) {
 // must produce the argv it produced before the env resolver existed, or every
 // existing `pr` user's behavior changed.
 func TestLaunch_WithoutWindowEnvPassesNoEFlags(t *testing.T) {
-	claudeBin := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatalf("write fake claude: %v", err)
-	}
+	claudeBin := fakeHarnessBin(t, "claude")
 	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
 
 	fake := successfulLaunchRunner()
@@ -407,10 +425,7 @@ func TestLaunch_WithoutWindowEnvPassesNoEFlags(t *testing.T) {
 // made windowEnv a function: a bad [proxy] launch_profile must stop the
 // dispatch, and it must stop it before tmux creates anything.
 func TestLaunch_RefusesWhenTheWindowEnvCannotResolve(t *testing.T) {
-	claudeBin := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatalf("write fake claude: %v", err)
-	}
+	claudeBin := fakeHarnessBin(t, "claude")
 	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
 
 	refusal := errors.New("launch_profile names no configured profile")
