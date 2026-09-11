@@ -72,8 +72,19 @@ func Off() string {
 // metacharacter; an embedded quote closes the run, emits a backslash-escaped
 // quote, then reopens it. NUL is the one byte a shell variable cannot carry.
 func quote(value string) (string, error) {
-	if strings.IndexByte(value, 0) >= 0 {
-		return "", ErrUnrepresentable
+	if err := rejectNUL(value); err != nil {
+		return "", err
 	}
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'", nil
+}
+
+// rejectNUL reports the one byte neither sink can represent: a shell variable
+// cannot carry it, and an environment entry handed to exec is a NUL-terminated
+// C string that would silently truncate there. Shared so the shell protocol and
+// the launch environment cannot disagree about what is representable.
+func rejectNUL(value string) error {
+	if strings.IndexByte(value, 0) >= 0 {
+		return ErrUnrepresentable
+	}
+	return nil
 }

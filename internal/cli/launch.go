@@ -8,7 +8,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
@@ -153,16 +152,24 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	if err != nil {
 		return termsafe.Error(fmt.Errorf("determine working directory: %w", err))
 	}
-	// The bench telemetry block is injected UNDER the profile's env (the builder
-	// layers it that way), so a profile value wins over an injected default.
-	// When telemetry is off, TelemetryEnv is nil and the merge reduces to the
-	// profile env alone.
+	// The injected block (bench telemetry, the launch proxy profile) sits UNDER
+	// the profile's env (the builder layers it that way), so a profile value
+	// wins over an injected default. With telemetry off and no launch proxy
+	// profile, the block is nil and the merge reduces to the profile env alone.
+	//
+	// A launch_profile naming no configured profile refuses here rather than
+	// launching: reaching the network by an unintended path is the failure this
+	// setting exists to prevent, and it would otherwise look like success.
+	injected, err := injectedLaunchEnv(cfg)
+	if err != nil {
+		return termsafe.Error(err)
+	}
 	built, err := launch.BuildInvocation(launch.InvocationRequest{
 		Config:      lc,
 		CWD:         cwd,
 		Args:        args,
 		BaseEnv:     os.Environ(),
-		InjectedEnv: bench.TelemetryEnv(cfg),
+		InjectedEnv: injected,
 		Resolve:     launch.ResolveBinary,
 	})
 	if err != nil {

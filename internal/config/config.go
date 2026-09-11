@@ -246,16 +246,26 @@ func (nc NetConfig) IsZero() bool {
 }
 
 // ProxyConfig is the [proxy] section: named profiles whose values are emitted
-// only by `forgectl proxy use NAME` for a shell wrapper to capture and eval.
+// only by `forgectl proxy use NAME` for a shell wrapper to capture and eval,
+// or injected into a launched harness's environment by LaunchProfile.
 // The generic config renderer deliberately exposes profile names but, because
 // Profiles is a map, applies its map-value redaction policy to every value.
 type ProxyConfig struct {
 	Profiles map[string]ProxyProfile `toml:"profiles"`
+
+	// LaunchProfile names the profile every launch injects into the harness
+	// environment. A profile name is not sensitive — only its values are — so
+	// this renders plain in config output while the profile it names stays
+	// redacted. Empty means launches inherit whatever proxy variables the
+	// calling shell exported, which is the behaviour of every release before
+	// this field existed.
+	LaunchProfile string `toml:"launch_profile"`
 }
 
-// IsZero reports whether no named proxy profiles are configured.
+// IsZero reports whether the section configures nothing: no named profiles and
+// no launch profile.
 func (pc ProxyConfig) IsZero() bool {
-	return len(pc.Profiles) == 0
+	return len(pc.Profiles) == 0 && pc.LaunchProfile == ""
 }
 
 // ProxyProfile is one [proxy.profiles.NAME] table. Each configured value is

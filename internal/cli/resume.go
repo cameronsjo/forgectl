@@ -14,12 +14,12 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 
-	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/resume"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -521,7 +521,11 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 		return WithExitCode(fmt.Errorf("enter %s: %s", safeTerm(s.Cwd), safeTerm(err.Error())), 1)
 	}
 
-	env := launch.MergeEnv(os.Environ(), launch.MergeMaps(bench.TelemetryEnv(cfg), profile.Env))
+	injected, err := injectedLaunchEnv(cfg)
+	if err != nil {
+		return WithExitCode(termsafe.Error(err), 1)
+	}
+	env := launch.MergeEnv(os.Environ(), launch.MergeMaps(injected, profile.Env))
 	fmt.Fprintf(errOut, "forgectl: resuming %s in %s\n", safeTerm(displayName(s)), safeTerm(s.Cwd))
 	slog.Debug("Preparing to exec claude for a resume.", "session", s.ID, "cwd", s.Cwd, "fork", fork)
 
