@@ -943,9 +943,10 @@ func DecodeStrict(data []byte) (Config, error) {
 	return cfg, err
 }
 
-// Validate decodes the config file and returns any parse error. A missing file
-// is valid (built-in defaults). Used by `forgectl launch doctor` to surface a
-// malformed config that Load() tolerated with a warning.
+// Validate decodes the config file and checks the sections that carry semantic
+// rules — see ValidatePath. A missing file is valid (built-in defaults). Used
+// by `forgectl launch doctor` to surface a config that Load() tolerated with a
+// warning, whether it was malformed or merely unlaunchable.
 func Validate() error {
 	path, err := ConfigPath()
 	if err != nil {
@@ -954,8 +955,13 @@ func Validate() error {
 	return ValidatePath(path)
 }
 
-// ValidatePath strictly decodes the already-resolved config path. A missing
-// file remains valid and selects built-in defaults.
+// ValidatePath strictly decodes the already-resolved config path, then asks
+// each section that owns a semantic rule to check itself — [docs], [proxy],
+// and [theme]. A missing file remains valid and selects built-in defaults.
+//
+// The semantic half is the point for `launch doctor`: a config can decode
+// cleanly and still be one every launch path refuses, and a doctor that only
+// parsed would report it healthy.
 func ValidatePath(path string) error {
 	data, err := ReadPath(path)
 	if os.IsNotExist(err) {

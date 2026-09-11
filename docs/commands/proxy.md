@@ -48,7 +48,7 @@ A shell wrapper covers the shell. It does not cover the harness `forgectl launch
 starts, which is a child process with its own environment — and on a network
 where the harness can only reach the internet through a proxy, a launch that
 inherited nothing fails at the first request. Name a profile as
-`launch_profile` and every launch injects it:
+`launch_profile` and the launch verbs inject it:
 
 ```toml
 [proxy]
