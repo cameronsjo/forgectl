@@ -291,8 +291,15 @@ func checkHostPinning(ctx context.Context, runner exec.Runner, host string, pins
 // concrete shape it guards against is a later edit that widens the vetted set
 // without widening the list.
 func pinnedDialer(vetted []net.IP, gateway string, pins []net.IP) func(context.Context, string, string) (net.Conn, error) {
+	// The list is COPIED for the same reason the vetted set below is: it is
+	// caller-owned, it outlives this call inside the closure, and it decides
+	// what the dialer will connect to. A caller that reuses or appends to the
+	// slice after construction would otherwise be editing dial policy on a live
+	// credentialed client, with nothing at the call site suggesting it.
+	pinned := make([]net.IP, len(pins))
+	copy(pinned, pins)
 	return pinnedDialerWithClassifier(vetted, gateway, func(ip net.IP, gw string) (bool, string) {
-		return classifyIPWithPins(ip, gw, pins)
+		return classifyIPWithPins(ip, gw, pinned)
 	})
 }
 
