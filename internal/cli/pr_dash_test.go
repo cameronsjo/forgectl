@@ -582,4 +582,3 @@ func TestDashPhaseNote_EveryPhaseExceptActiveYieldsANote(t *testing.T) {
 		}
 	}
 }
-
