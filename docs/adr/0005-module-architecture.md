@@ -157,3 +157,29 @@ The dispatch pipeline's rungs, in order: normalize argv → `launch` intercept �
   module, proving the seam with two contributors.
 - The refactor is 100% user-invisible: every flag, verb, alias, and help string is preserved,
   pinned by the existing test suite plus the new registry tests.
+
+## Addendum (2026-09-09): the hub menu
+
+Bare `forgectl` opens a hub over every registered module (forgectl#479), not just the tmux
+jumper. This amends two things this ADR describes above, and confirms one alternative it
+declined still holds:
+
+- **"Manifest-derived TUI menu" stays declined, in its original narrow shape** — no new
+  `Menu` hook, no manifest field. The hub instead derives its rows from the live cobra tree
+  (`root.Commands()`, each child's `Short`/`Commands()`) plus each module's `Tier` — data
+  the registry already carries. `internal/cli/hub.go`'s `buildHub` is the one new file; it
+  is not the manifest-contributed menu this ADR's Alternatives section rejected.
+- **`shouldLaunchTUI` narrows to its bare-invoke arm only.** An unknown top-level verb and an
+  unknown subverb of a known group (`tmux frobnicate`) both used to fall into the TUI/menu
+  route (the "unknown-verb TUI fallthrough" this ADR's dispatch-rung section assumed); they
+  now reach Cobra/fang's own unknown-command error directly, on TTY and headless alike. This
+  is safe only because the group parents that have both subcommands and their own `RunE`
+  (`tmux`, `projects`, `quarantine`) now declare `Args: cobra.NoArgs` — without that, a typo
+  of a real subverb (`quarantine restor`) would fall through to the parent's `RunE` instead
+  of erroring, which for `quarantine` means a real (if reversible) file-hide running by
+  accident.
+- **The tmux jumper is one row of the hub, not the whole menu.** `tui.Run`'s tmux-specific
+  screen (six actions: pick/sessions/windows/tree/last/cheat) is unchanged in content and
+  reachable exactly as before via `forgectl tmux` (which now opens it directly, `StartInTmux`
+  in the hub's `RunOptions`) or via the hub's `tmux` row. The hub is the new outer level; esc
+  from the tmux screen returns to the hub rather than quitting.

@@ -1,11 +1,11 @@
 # forgectl
 
-Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) has grown into the **workbench forge**: 29 composable command-group modules (see the table below) with a declarative workflow DSL as the composition layer.
+Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) has grown into the **workbench forge**: 31 composable command-group modules (see the table below) with a declarative workflow DSL as the composition layer.
 
 Built for two hands and one thumb:
 
 - **Power mode** — typed verbs (`forgectl tmux ls`, `forgectl tmux pick`). Full keyboard, full control.
-- **Thumb mode** — bare `forgectl` opens a TUI menu. Number-key select. Narrow-screen. Forgiving input. Works fine in Termius over mosh.
+- **Thumb mode** — bare `forgectl` opens a hub over every command group: the six daily verbs plus a filterable "all commands" row over the rest, with the old tmux jumper preserved as one row. Number-key select. Narrow-screen. Forgiving input. Works fine in Termius over mosh.
 
 ## Install
 
