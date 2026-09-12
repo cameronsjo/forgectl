@@ -11,6 +11,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
@@ -201,6 +202,34 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) (D
 			sess.Ref.String(),
 		)
 	}
+	// PHASE ORDER IS THE CRASH-SAFETY PROPERTY, and it is why the record write
+	// brackets the dispatch rather than following it:
+	//
+	//	prepared --(fsynced)--> launching --> tmux new-window --> active
+	//
+	// A crash anywhere in that span leaves `launching`, which says exactly where
+	// it died and which `pr repair` settles by looking the window up by its
+	// derived name. Writing `active` first — or writing nothing until after the
+	// window exists — leaves a record that cannot distinguish "no window was
+	// ever created" from "a window exists and nobody recorded it".
+	if err := c.beginLaunch(ctx, sess); err != nil {
+		return Dispatch{}, err
+	}
+	dispatch, err := c.dispatch(ctx, sess, cfg)
+	if err != nil {
+		c.parkNeedsRepair(ctx, sess, "launch failed: "+err.Error())
+		return Dispatch{}, err
+	}
+	if err := c.completeLaunch(ctx, sess, dispatch); err != nil {
+		return Dispatch{}, err
+	}
+	return dispatch, nil
+}
+
+// dispatch routes to the agent's launch path. It is separated from Launch so
+// the phase bracket above wraps EVERY agent path identically — a per-path
+// bracket is how one of them ends up missing it.
+func (c *Client) dispatch(ctx context.Context, sess Session, cfg config.Config) (Dispatch, error) {
 	switch path := LaunchPathFor(sess.Agent); path {
 	case InlineSeeded:
 		return c.launchInline(ctx, sess, cfg)
@@ -210,6 +239,76 @@ func (c *Client) Launch(ctx context.Context, sess Session, cfg config.Config) (D
 		return c.launchCodex(ctx, sess, cfg)
 	default:
 		return Dispatch{}, fmt.Errorf("unknown launch path %v for agent %q", path, sess.Agent)
+	}
+}
+
+// beginLaunch fsyncs `launching` before any window can exist. A session with
+// no record path (a caller that built a Session literal, or a dry-run plan) has
+// nothing to bracket and passes through.
+func (c *Client) beginLaunch(ctx context.Context, sess Session) error {
+	if sess.Path == "" {
+		return nil
+	}
+	if err := c.transition(ctx, sess.Path, PhasePrepared, PhaseLaunching, nil); err != nil {
+		slog.Error("Refusing to dispatch a review: the session record could not be moved to launching.",
+			"ref", sess.Ref.String(), "path", sess.Path, "error", err)
+		return fmt.Errorf("record the launch of %s before opening its window: %w", sess.Ref.String(), err)
+	}
+	return nil
+}
+
+// completeLaunch records the window that now exists. Both failures here are
+// the dangerous ones — a real window with no record of it — so each parks the
+// record in needs-repair with a reason naming the window, which is the only
+// pointer `pr repair --adopt-window` has left.
+func (c *Client) completeLaunch(ctx context.Context, sess Session, dispatch Dispatch) error {
+	if sess.Path == "" {
+		return nil
+	}
+	if !validWindowID(dispatch.WindowID) {
+		reason := fmt.Sprintf("windowId failed validation: got %s", termsafe.QuotePath(dispatch.WindowID))
+		slog.Error("A review window was created but its identity is not generation-qualified.",
+			"ref", sess.Ref.String(), "path", sess.Path)
+		c.parkNeedsRepair(ctx, sess, reason)
+		return fmt.Errorf("review window for %s was created but %s", sess.Ref.String(), reason)
+	}
+	err := c.transition(ctx, sess.Path, PhaseLaunching, PhaseActive, func(bc *Breadcrumb) error {
+		bc.WindowID = dispatch.WindowID
+		return nil
+	})
+	if err == nil {
+		return nil
+	}
+	reason := fmt.Sprintf("rename after window created: %v; window %s exists", err, nativeWindowID(dispatch.WindowID))
+	slog.Error("A review window exists but the session record could not be moved to active.",
+		"ref", sess.Ref.String(), "path", sess.Path, "window", nativeWindowID(dispatch.WindowID), "error", err)
+	c.parkNeedsRepair(ctx, sess, reason)
+	return fmt.Errorf("review window for %s was created but the record could not be updated: %w", sess.Ref.String(), err)
+}
+
+// nativeWindowID pulls the "@N" out of a newDispatch identity for a human
+// message. It never becomes a tmux operand — every action re-resolves by
+// derived name — so an unsplittable value degrades to the whole string rather
+// than failing.
+func nativeWindowID(id string) string {
+	parts := strings.Split(id, tmux.FieldSep)
+	if len(parts) == 3 {
+		return parts[2]
+	}
+	return id
+}
+
+// parkNeedsRepair is best-effort by construction: it runs on a path that is
+// already returning an error, and its own failure must not shadow that one.
+// It is logged loudly instead, because a needs-repair write that did not land
+// is the case where a clean room goes unrecorded.
+func (c *Client) parkNeedsRepair(ctx context.Context, sess Session, reason string) {
+	if sess.Path == "" {
+		return
+	}
+	if err := c.markNeedsRepair(ctx, sess.Path, reason); err != nil {
+		slog.Error("Failed to park a session record in needs-repair; its clean room may be unaccounted for.",
+			"ref", sess.Ref.String(), "path", sess.Path, "reason", reason, "error", err)
 	}
 }
 

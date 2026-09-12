@@ -98,7 +98,16 @@ func (r *tmuxRoutingRunner) record(name string, args []string) {
 	if len(args) > 0 {
 		verb = args[0]
 	}
+	// Count BREADCRUMBS, not directory entries: the sessions dir also holds
+	// the lifecycle lock file, which every locked verb creates and which is
+	// not a review session.
 	entries, _ := os.ReadDir(r.sessionsDir)
+	breadcrumbs := 0
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
+			breadcrumbs++
+		}
+	}
 	newWorkspaces := 0
 	for path := range workspaceSet(r.tempRoot) {
 		if !r.baseline[path] {
@@ -110,7 +119,7 @@ func (r *tmuxRoutingRunner) record(name string, args []string) {
 	defer r.mu.Unlock()
 	r.checkpoints = append(r.checkpoints, checkpoint{
 		name: name, verb: verb,
-		breadcrumbs:   len(entries),
+		breadcrumbs:   breadcrumbs,
 		newWorkspaces: newWorkspaces,
 		socketExists:  statErr == nil,
 	})
@@ -251,7 +260,9 @@ func TestLaunchPickedIsolatedTmux_FirstServer(t *testing.T) {
 			// live proof that `new-session -P -F` returns an identity the
 			// package can parse.
 			verbs := router.tmuxVerbs()
-			wantPrefix := []string{"list-windows", "-V", "display-message", "-V", "display-message", "list-sessions", "new-session", "list-sessions", "new-window"}
+			// Two list-windows up front: the admission read that sizes the batch,
+			// then the one inside the reservation hold that claims the slots.
+			wantPrefix := []string{"list-windows", "-V", "display-message", "list-windows", "-V", "display-message", "list-sessions", "new-session", "list-sessions", "new-window"}
 			if len(verbs) < len(wantPrefix) {
 				t.Fatalf("tmux verbs = %v, want at least %v", verbs, wantPrefix)
 			}

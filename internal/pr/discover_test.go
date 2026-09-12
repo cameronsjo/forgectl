@@ -417,7 +417,7 @@ func TestPrepareMany_SameRepoSerialized(t *testing.T) {
 	client := New(fake, WithSessionsDir(t.TempDir()))
 	// Four PRs, all from the same repo → all must serialize.
 	refs := []Ref{testRef(1), testRef(2), testRef(3), testRef(4)}
-	results := client.PrepareMany(context.Background(), refs, PrepareOpts{})
+	results := client.PrepareMany(context.Background(), refs, 0, PrepareOpts{})
 
 	if len(results) != len(refs) {
 		t.Fatalf("got %d results, want %d", len(results), len(refs))
@@ -464,7 +464,7 @@ func TestPrepareMany_InputOrder(t *testing.T) {
 		{Owner: "cameronsjo", Repo: "bravo", Number: 2},
 		{Owner: "cameronsjo", Repo: "charlie", Number: 3},
 	}
-	results := client.PrepareMany(context.Background(), refs, PrepareOpts{})
+	results := client.PrepareMany(context.Background(), refs, 0, PrepareOpts{})
 	for i, r := range results {
 		if r.Ref != refs[i] {
 			t.Errorf("results[%d].Ref = %s, want %s (input order broken)", i, r.Ref, refs[i])
@@ -492,12 +492,46 @@ func TestPrepareMany_PerItemErrorCaptured(t *testing.T) {
 		{Owner: "cameronsjo", Repo: "alpha", Number: 1},
 		{Owner: "cameronsjo", Repo: "bravo", Number: 2}, // this one fails
 	}
-	results := client.PrepareMany(context.Background(), refs, PrepareOpts{})
+	results := client.PrepareMany(context.Background(), refs, 0, PrepareOpts{})
 	if results[0].Err != nil {
 		t.Errorf("results[0] should have succeeded, got err: %v", results[0].Err)
 	}
 	if results[1].Err == nil {
 		t.Errorf("results[1] should carry the gh pr view failure, got nil")
+	}
+
+	// THE SLOT MUST NOT LEAK. The failing ref's reservation has no workspace —
+	// `gh pr view` fails before one is ever created — so parking it in
+	// needs-repair is the only thing that stops it holding capacity forever.
+	// Asserting only on results[1].Err left that park untested, and it never ran.
+	summaries, unreadable, err := client.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if unreadable != 0 {
+		t.Fatalf("unreadable = %d, want 0", unreadable)
+	}
+	var parked SessionSummary
+	for _, s := range summaries {
+		if s.Ref() == refs[1] {
+			parked = s
+		}
+	}
+	if parked.Path() == "" {
+		t.Fatalf("no record for the failed ref; summaries = %+v", summaries)
+	}
+	if parked.Phase() != PhaseNeedsRepair {
+		t.Fatalf("failed reservation is in phase %q, want needs-repair — it is holding a slot", parked.Phase())
+	}
+	bc, _, err := loadBreadcrumbRecord(parked.Path(), client.SessionsDir())
+	if err != nil {
+		t.Fatalf("reload the parked record: %v", err)
+	}
+	if !strings.Contains(bc.RepairReason, "prepare failed") {
+		t.Errorf("repairReason = %q, want the prepare failure", bc.RepairReason)
+	}
+	if occ := occupancyFromSnapshot(summaries, 0, map[string]bool{}); occ != 1 {
+		t.Errorf("occupied = %d, want 1 (only the succeeded ref) — a parked failure must release its slot", occ)
 	}
 }
 

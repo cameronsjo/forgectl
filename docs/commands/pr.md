@@ -60,6 +60,58 @@ These rows are also why a stale-only `pr list` makes no tmux calls at all: a mis
 
 Teardown refuses rather than guesses. It re-checks the breadcrumb's identity and exact contents, and re-confirms the workspace is still absent, immediately before unlinking; anything that changed underneath it — the file rewritten, replaced, or swapped for a symlink, the workspace reappearing — is a refusal that leaves the record in place. A record whose workspace exists but is not a forgectl sandbox is neither live nor cleanly missing, so it is left alone entirely: `pr list` skips it and teardown refuses it. That state means something unexpected wrote to the session-state dir, and deleting it on a guess would destroy the evidence.
 
+## Phases, and settling a session that got stuck
+
+A review session is recorded before it is dispatched, not after, so a crash at any point leaves a record that says where it died rather than a record that lies. The phase is what that record *says*; whether a tmux window exists is observed separately, every time.
+
+| Phase | What it means | Holds a slot? |
+|---|---|---|
+| `queued` | Intent only. No clean room, nothing dispatched. | no |
+| `preparing` | A slot is reserved and the clone is in flight. | yes |
+| `prepared` | The clean room exists; nothing has launched. | yes |
+| `launching` | Written and fsynced *before* `tmux new-window`. | yes |
+| `active` | A window exists, and its generation-qualified id is recorded. | yes (as a live window) |
+| `needs-repair` | A step could not prove its own outcome. Always carries a reason. | no |
+| `-` | A record written before phases existed. | no |
+
+The slot accounting is why `preparing`, `prepared`, and `launching` count: each has claimed capacity that no window reflects yet. `queued` has claimed nothing, and `needs-repair` is deliberately released so a crashed session cannot hold a slot forever — it is visible to `pr repair` and it is your call.
+
+`forgectl pr repair` with no arguments lists every record in one of those unsettled phases, with the reason it carries, whether its derived window is live, and whether its clean room still exists. It exits 1 when anything needs settling — in both output shapes, so `--json` hears the same answer the human text gives — and 0 when nothing does.
+
+A record this build **cannot read** — a torn write, a hand edit, a record a newer forgectl wrote — is listed too, as a row whose phase and outcome are both `unreadable`, carrying the path and the decode error. That row is the most urgent one in the report: every command that counts records refuses while it exists, so an unreadable record blocks every launch.
+
+Only `--forget-if-absent` can settle it, and it **sets the record aside rather than removing it** — the file is renamed to `<name>.json.unreadable-<timestamp>`, which clears the block (every enumeration filters on `.json`) while the bytes stay on disk for whoever can read them. That matters because "cannot read" is a wider class than a torn file: a perfectly intact record written by a *newer* forgectl, describing a live session with a live clean room, lands here too, and deleting it would orphan that directory with nothing naming it.
+
+Three things guard the set-aside, because it is the only arm that cannot prove what it is acting on. It reads the `ref` out of the raw bytes on a best-effort basis and **refuses while that ref's review window is live** — the newer-forgectl case, settled by the build that owns it rather than by this one. It takes the same confirmation as `--rollback` (`--yes` off a terminal). And its audit row carries the record's own bytes, capped, clamped, and shrunk until the row fits its line limit — the row records how many bytes there were and says so when it had to truncate, because every other field in that row is derived from a decode that did not happen, and the row must never be the reason a set-aside fails.
+
+**Nothing in forgectl removes a set-aside file.** It sits outside every enumeration by design, so `pr list`, `pr teardown`, `pr cleanup`, and `pr repair` all ignore or refuse it — which is what makes the rename safe, and also means you delete it by hand once you have read it, or once a build that understands it has.
+
+### The runbook
+
+Gather the evidence first, in this order:
+
+1. `forgectl pr repair --json` — what the records say, and what was observed beside them.
+2. `tmux list-windows -a` — the ground truth the report's `window_live` column came from.
+3. `git -C <workspace> status` in any clean room the report names — whether there is work in it you care about.
+
+Then settle each record with exactly one of three modes:
+
+```bash
+forgectl pr repair <breadcrumb> --apply --adopt-window       # the window is really there; record it
+forgectl pr repair <breadcrumb> --apply --rollback           # remove the clean room and the record
+forgectl pr repair <breadcrumb> --apply --forget-if-absent   # remove only a record whose window and clean room are both gone
+```
+
+**`--rollback` is the default when there is no window and nothing in the workspace you want.** Reach for `--adopt-window` when the window is live and the record simply lost track of it — after a crash between `new-window` and the record write, which is exactly what a `launching` record with a live window means.
+
+`--adopt-window` takes no window operand, on purpose: the window is re-derived from the ref the same way every other verb derives it, so no operator-supplied tmux target can steer it, and it refuses when the name resolves to a window under a different session. It also refuses when the clean room is not a live forgectl workspace, because adopting promotes the record to one `pr teardown` will remove.
+
+`--rollback` refuses while the window is live, refuses when the window list cannot be read at all (an unreadable list is not an absent window), and refuses a recorded workspace that is neither a live clean room nor cleanly absent. Off a terminal it requires `--yes`; on one it asks a question that names the removal, separately from the gate that approves posting a review. `--dry-run` prints what any mode would do and touches nothing — including off a terminal, where it needs no `--yes`, because there is nothing to confirm.
+
+Every refusal happens **before** the intent row is written. A row with no completion beside it is the signal that a rollback died mid-delete, so a refused mutation that wrote one would forge exactly that signal and send someone hunting a directory nothing ever touched.
+
+Every `--apply` writes a line to `<sessions dir>/repair.jsonl` **before** it mutates anything and completes that line afterwards. That ordering is what makes a half-finished rollback recoverable: once the record is gone, the intent row is the only thing left naming the clean room on disk. `forgectl pr repair --history [--json]` reads it back.
+
 **`pr list` is the after-the-fact view; the launch commands check the same thing at dispatch time.** Once every window is open, forgectl waits **eight seconds**, lists windows exactly once, and reports any review that has already vanished. Eight seconds is the observed window in which a rejected `model` gets rejected — long enough to catch it, short enough not to stall the command. It is a bounded observation, not a guarantee: an agent that dies at nine seconds still dispatches "successfully", and `pr list` remains the way to find it later.
 
 Matching a dispatch back to a window has to survive two things that ordinary lookups do not — a second, older window carrying the same name, and a tmux server restart that reissues native window ids from `@0`. So forgectl captures the server PID, the server start time, and the native window id together, in the same `new-window` call that creates the window. Those three format fields are the reason for the floor: tmux documents all of them from **2.2** onward. `tmux -V` is checked before any review workspace exists, so an old, missing, or unreadable binary refuses up front:

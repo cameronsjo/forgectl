@@ -33,26 +33,40 @@ import (
 //
 // It takes the lifecycle lock so it never reads a record mid-rename.
 func (c *Client) List(ctx context.Context) (summaries []SessionSummary, unreadable int, err error) {
+	var skipped []unreadableRecord
 	err = c.withLifecycleLock(ctx, "list", func() error {
 		var lerr error
-		summaries, unreadable, lerr = c.listLocked()
+		summaries, skipped, lerr = c.listLocked()
 		return lerr
 	})
-	return summaries, unreadable, err
+	return summaries, len(skipped), err
+}
+
+// unreadableRecord is a file in the session directory that this build could not
+// turn into a row — a torn write, a hand edit, or a record a newer forgectl
+// wrote.
+//
+// It carries the path and the reason because a COUNT is not actionable: every
+// arm that counts records refuses while one of these exists, so the operator
+// has to be told which file and why, or the refusal names no way out.
+type unreadableRecord struct {
+	path string
+	err  error
 }
 
 // listLocked is List's core for callers that already hold the lifecycle
 // lock (Cleanup). Composite verbs call this; they never re-enter List.
-func (c *Client) listLocked() ([]SessionSummary, int, error) {
+func (c *Client) listLocked() ([]SessionSummary, []unreadableRecord, error) {
 	entries, err := os.ReadDir(c.sessionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, 0, nil
+			return nil, nil, nil
 		}
-		return nil, 0, fmt.Errorf("read pr sessions dir: %w", err)
+		return nil, nil, fmt.Errorf("read pr sessions dir: %w", err)
 	}
 	var summaries []SessionSummary
-	var live, missing, none, invalid int
+	var skipped []unreadableRecord
+	var live, missing, none int
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 			continue
@@ -61,7 +75,7 @@ func (c *Client) listLocked() ([]SessionSummary, int, error) {
 		sum, err := c.loadSummary(path)
 		if err != nil {
 			slog.Warn("Skipping unreadable pr breadcrumb.", "path", path, "error", err)
-			invalid++
+			skipped = append(skipped, unreadableRecord{path: path, err: err})
 			continue
 		}
 		switch {
@@ -80,8 +94,8 @@ func (c *Client) listLocked() ([]SessionSummary, int, error) {
 	// One aggregate at debug altitude. Per-record warnings above keep their
 	// existing altitude; no path or ref is added here, so listing stays quiet
 	// and leaks nothing new.
-	slog.Debug("Listed pr session breadcrumbs.", "live", live, "missing", missing, "none", none, "unreadable", invalid)
-	return summaries, invalid, nil
+	slog.Debug("Listed pr session breadcrumbs.", "live", live, "missing", missing, "none", none, "unreadable", len(skipped))
+	return summaries, skipped, nil
 }
 
 // loadSummary builds one presentation row: record validation, then workspace

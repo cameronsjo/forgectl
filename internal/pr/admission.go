@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
@@ -200,10 +201,20 @@ func (c *Client) VerifyDispatched(ctx context.Context, dispatches []Dispatch) ([
 // ok is false when the live count could not be read — callers MUST treat
 // that as fail-closed and refuse to launch anything rather than assume free
 // capacity.
+// It counts RECORDS as well as windows: a session in preparing, prepared, or
+// launching has reserved a slot whose window does not exist yet (or died
+// before anyone observed it), and counting only tmux would hand that slot out
+// twice. `queued` and `needs-repair` do not occupy — the first has reserved
+// nothing, the second is the operator's call through `pr repair`.
 func (c *Client) Admit(ctx context.Context, cfgMax int) (max, live, free int, ok bool) {
 	max = MaxConcurrentReviews(cfgMax)
-	live, ok = c.LiveReviews(ctx)
-	if !ok {
+	err := c.withLifecycleLock(ctx, "admit", func() error {
+		var lerr error
+		live, lerr = c.occupiedLocked(ctx)
+		return lerr
+	})
+	if err != nil {
+		slog.Warn("Refusing to report free review slots: the occupancy count could not be read.", "error", err)
 		return max, 0, 0, false
 	}
 	free = max - live
@@ -211,4 +222,223 @@ func (c *Client) Admit(ctx context.Context, cfgMax int) (max, live, free int, ok
 		free = 0
 	}
 	return max, live, free, true
+}
+
+// occupiedLocked counts the review slots in use: live `pr-` windows plus every
+// record in preparing/prepared/launching whose derived window is NOT already
+// among them (counting both would double-count a healthy in-flight launch).
+//
+// It refuses — rather than returning a short count — when any record could not
+// be read or when tmux could not be read at all. A count that silently omits
+// what it could not see is the shape that hands out an occupied slot.
+func (c *Client) occupiedLocked(ctx context.Context) (int, error) {
+	summaries, unreadable, err := c.listLocked()
+	if err != nil {
+		return 0, err
+	}
+	if len(unreadable) > 0 {
+		return 0, fmt.Errorf("%d session record(s) could not be read, so the review count would be short — "+
+			"settle them with 'forgectl pr repair' before launching", len(unreadable))
+	}
+	return c.occupancyFrom(ctx, summaries)
+}
+
+// occupiesASlot reports whether a recorded phase holds a review slot.
+func occupiesASlot(p Phase) bool {
+	return p == PhasePreparing || p == PhasePrepared || p == PhaseLaunching
+}
+
+// errReviewCapReached is the admission refusal. It carries the numbers the
+// CLI's three-line message renders, so the wording lives at the surface and
+// the decision lives here.
+type errReviewCapReached struct {
+	Max  int
+	Live int
+}
+
+func (e *errReviewCapReached) Error() string {
+	return fmt.Sprintf("review cap reached (max %d, %d running) — nothing prepared", e.Max, e.Live)
+}
+
+// reserve claims one review slot for ref and writes the `preparing` record
+// that holds it, all under ONE lock hold.
+//
+// The hold covers the count and the write and nothing else: the clone that
+// follows runs outside the lock, against a slot already reserved. That is the
+// whole point of the phase record — it bridges the long operations the lock
+// must never span.
+//
+// It refuses at the cap, on any unreadable record, and on a ref that already
+// has a record in any phase but needs-repair (naming that record). A refusal
+// writes nothing.
+func (c *Client) reserve(ctx context.Context, ref Ref, cfgMax int, opts PrepareOpts) (string, error) {
+	var path string
+	err := c.withLifecycleLock(ctx, "reserve", func() error {
+		p, err := c.reserveLocked(ctx, ref, cfgMax, opts)
+		path = p
+		return err
+	})
+	return path, err
+}
+
+// reservation is one lock hold's view of the world: the records that existed
+// when the hold began, and how many slots they and tmux account for. A BATCH
+// of reservations shares one — reading the directory and forking tmux once per
+// ref would be N times the cost and, worse, would let the two disagree with
+// each other partway through a batch.
+type reservation struct {
+	summaries []SessionSummary
+	occupied  int
+}
+
+// openReservation takes the one snapshot a lock hold reserves against.
+func (c *Client) openReservation(ctx context.Context) (*reservation, error) {
+	summaries, unreadable, err := c.listLocked()
+	if err != nil {
+		return nil, err
+	}
+	if len(unreadable) > 0 {
+		slog.Error("Refusing to reserve a review slot: some session records could not be read.",
+			"unreadable", len(unreadable), "first", unreadable[0].path)
+		return nil, fmt.Errorf("%d session record(s) could not be read, so the review count would be short — "+
+			"settle them with 'forgectl pr repair' before launching", len(unreadable))
+	}
+	occupied, err := c.occupancyFrom(ctx, summaries)
+	if err != nil {
+		return nil, err
+	}
+	return &reservation{summaries: summaries, occupied: occupied}, nil
+}
+
+// reserveLocked is reserve's core for a caller already holding the lock.
+func (c *Client) reserveLocked(ctx context.Context, ref Ref, cfgMax int, opts PrepareOpts) (string, error) {
+	res, err := c.openReservation(ctx)
+	if err != nil {
+		return "", err
+	}
+	return c.reserveFrom(res, ref, cfgMax, opts)
+}
+
+// reserveFrom claims one slot against an open reservation, accounting for it
+// so the next ref in the same batch sees it.
+func (c *Client) reserveFrom(res *reservation, ref Ref, cfgMax int, opts PrepareOpts) (string, error) {
+	maxN := MaxConcurrentReviews(cfgMax)
+	summaries := res.summaries
+	if existing, ok := recordForRef(summaries, ref); ok {
+		slog.Error("Refusing to reserve a review slot: the ref already has a session record.",
+			"ref", ref.String(), "path", existing.Path(), "phase", string(existing.Phase()))
+		return "", fmt.Errorf("%s already has a session record at %s (phase %s); "+
+			"discard it with 'forgectl pr teardown %s' or settle it with 'forgectl pr repair'",
+			ref.String(), existing.Path(), phaseOrLegacy(existing.Phase()), existing.Path())
+	}
+	if res.occupied >= maxN {
+		slog.Warn("Refusing to reserve a review slot: the concurrency cap is reached.",
+			"max", maxN, "occupied", res.occupied, "ref", ref.String())
+		return "", &errReviewCapReached{Max: maxN, Live: res.occupied}
+	}
+	bc := Breadcrumb{
+		Ref:        ref.String(),
+		Agent:      opts.Agent,
+		CreatedAt:  time.Now().UTC(),
+		Local:      ref.IsLocal(),
+		Provenance: EffectiveProvenance(ref, opts.Provenance).persisted(),
+		Version:    breadcrumbVersion,
+		Phase:      PhasePreparing,
+		Revision:   1,
+	}
+	path, err := writeBreadcrumbFS(c.fs, c.sessionsDir, ref, bc)
+	if err != nil {
+		return "", err
+	}
+	// Account for the slot this call just took, so the next ref in the same
+	// batch cannot be granted it too.
+	res.occupied++
+	res.summaries = append(res.summaries, SessionSummary{
+		ref: ref, path: path, createdAt: bc.CreatedAt,
+		availability: workspaceAvailabilityNone, phase: PhasePreparing,
+	})
+	slog.Info("Successfully reserved a review slot.", "ref", ref.String(), "path", path, "max", maxN, "occupied", res.occupied)
+	return path, nil
+}
+
+// occupancyFrom counts slots from an already-taken listing, so a caller that
+// has one does not pay for a second directory walk (and cannot disagree with
+// itself about what was on disk).
+func (c *Client) occupancyFrom(ctx context.Context, summaries []SessionSummary) (int, error) {
+	liveWindows, names, ok := c.reviewWindowSnapshot(ctx)
+	if !ok {
+		return 0, fmt.Errorf("the tmux review window count could not be read; " +
+			"check `tmux list-windows -a`, then retry")
+	}
+	return occupancyFromSnapshot(summaries, liveWindows, names), nil
+}
+
+// reviewWindowSnapshot reads the window list ONCE and answers both questions
+// admission asks of it: how many review windows are live, and which review
+// window names exist. Two separate reads (LiveReviews then WindowsLive) would
+// fork tmux twice per decision and — worse — could disagree with each other,
+// since the server moves between them.
+func (c *Client) reviewWindowSnapshot(ctx context.Context) (live int, names map[string]bool, ok bool) {
+	wins, err := c.tmuxClient.ListWindows(ctx)
+	if err != nil {
+		return 0, nil, false
+	}
+	names = make(map[string]bool, len(wins))
+	for _, w := range wins {
+		if w.Session != c.tmuxSession {
+			continue
+		}
+		names[w.Name] = true
+		if strings.HasPrefix(w.Name, reviewWindowPrefix) {
+			live++
+		}
+	}
+	return live, names, true
+}
+
+// occupancyFromSnapshot adds the RECORD term to the live-window count: a
+// session in preparing/prepared/launching holds a slot whose window does not
+// exist yet, and one whose window DOES exist is already counted by the live
+// tally — so only the windowless ones are added.
+//
+// A ref with no derivable window name counts as occupied. That is the
+// conservative direction on purpose: it can only grant fewer slots, never more.
+func occupancyFromSnapshot(summaries []SessionSummary, liveWindows int, names map[string]bool) int {
+	reserved := 0
+	for _, s := range summaries {
+		if !occupiesASlot(s.Phase()) {
+			continue
+		}
+		name, err := ReviewWindowName(s.Ref())
+		if err != nil || !names[name] {
+			reserved++
+		}
+	}
+	return liveWindows + reserved
+}
+
+// recordForRef finds an existing record for ref that BLOCKS a new reservation.
+// A needs-repair record does not block: it is the state an operator is
+// expected to settle, and refusing a fresh launch on it would make a crashed
+// session permanently un-relaunchable.
+func recordForRef(summaries []SessionSummary, ref Ref) (SessionSummary, bool) {
+	for _, s := range summaries {
+		if s.Ref() != ref {
+			continue
+		}
+		if s.Phase() == PhaseNeedsRepair {
+			continue
+		}
+		return s, true
+	}
+	return SessionSummary{}, false
+}
+
+// phaseOrLegacy renders a phase for an operator-facing message, naming the one
+// state that has no phase rather than printing an empty string at them.
+func phaseOrLegacy(p Phase) string {
+	if p == "" {
+		return "legacy, no phase"
+	}
+	return string(p)
 }

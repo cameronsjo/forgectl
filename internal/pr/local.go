@@ -34,6 +34,10 @@ type PrepareLocalOpts struct {
 	// review: `pr local` reviews whatever the working tree currently holds, and
 	// after `gh pr checkout` that is someone else's commit.
 	Provenance ReviewProvenance
+
+	// RecordPath names an already-reserved `preparing` record to complete,
+	// exactly as PrepareOpts.RecordPath does for the remote path.
+	RecordPath string
 }
 
 // PrepareLocal resolves the local HEAD of the repo at path, sandboxes it into
@@ -166,13 +170,17 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 		CreatedAt:  sess.CreatedAt,
 		Local:      true,
 		Provenance: provenance.persisted(),
+		Version:    breadcrumbVersion,
+		Phase:      PhasePrepared,
+		Revision:   1,
 	}
-	bcPath, err := c.writeBreadcrumb(ctx, ref, bc)
+	bcPath, createdAt, err := c.recordPrepared(ctx, ref, bc, opts.RecordPath)
 	if err != nil {
 		c.teardownLocalArtifacts(ctx, workspace, findingsDir)
 		return Session{}, err
 	}
 	sess.Path = bcPath
+	sess.CreatedAt = createdAt
 
 	slog.Info("Successfully prepared local clean-room review.", "ref", ref.String(), "workspace", workspace, "findings", findingsDir)
 	return sess, nil

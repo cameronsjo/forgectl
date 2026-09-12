@@ -194,7 +194,11 @@ func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd
 	// is third-party by construction — bulk is the route where an unnoticed
 	// escalation would be widest, and it is declared here rather than left to
 	// the zero value so the intent is legible.
-	results := client.PrepareMany(ctx, refs, pr.PrepareOpts{
+	// The cap is re-read inside PrepareMany's single lock hold, where the
+	// reservations are written. The Admit call above is what decides how many
+	// refs to attempt; the reservation is what actually claims the slots, and
+	// only it is race-free against a peer launcher.
+	results := client.PrepareMany(ctx, refs, cfg.Pr.MaxConcurrent, pr.PrepareOpts{
 		Agent:      resolveAgent(""),
 		Provenance: pr.ReviewProvenanceThirdParty,
 	})

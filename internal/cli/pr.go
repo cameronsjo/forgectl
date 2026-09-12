@@ -70,6 +70,7 @@ human approval gate.
   forgectl pr attach <breadcrumb>  jump to a review window
   forgectl pr open <breadcrumb>    open a shell in the clean room
   forgectl pr teardown <breadcrumb>  discard a session
+  forgectl pr repair               settle sessions whose record and reality disagree
   forgectl pr cleanup <YYYY-MM-DD>   discard all sessions from a day
   forgectl pr findings list|cleanup  reclaim durable local-review findings
   forgectl pr keys                 tmux-review cheatsheet
@@ -151,6 +152,7 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 		newPrAttachCmd(client),
 		newPrOpenCmd(client),
 		newPrTeardownCmd(client),
+		newPrRepairCmd(client),
 		newPrCleanupCmd(client),
 		newPrFindingsCmd(client, th),
 		newPrKeysCmd(),
@@ -271,7 +273,20 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List active clean-room review sessions",
-		Args:  cobra.NoArgs,
+		Long: `list prints one tab-separated row per recorded review session:
+
+  REF   CREATED   PATH   WINDOW   PHASE
+
+WINDOW is what tmux reports RIGHT NOW — live, window gone, or ? when tmux
+could not be read at all. PHASE is what the record SAYS about how far the
+session got. The two are separate on purpose: a record reading 'launching'
+beside 'no window' is a session that died between the two, and
+'forgectl pr repair' is what settles that disagreement. PHASE is '-' on a
+record written before phases existed.
+
+Fields are append-only: PATH is field 3 and stays there, because it is the
+operand 'forgectl pr teardown' takes.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			summaries, unreadable, err := client.List(cmd.Context())
 			if err != nil {
@@ -460,6 +475,7 @@ const prKeysText = `clean-room review — tmux keys that matter
     pr attach <b>   jump to a review window by breadcrumb
     pr open <b>     open a shell in the clean-room workspace
     pr teardown <b> discard the session (restore + remove workspace)
+    pr repair       settle a session whose record and reality disagree
 
 Nothing is posted to the PR without passing forgectl's approval gate.
 `

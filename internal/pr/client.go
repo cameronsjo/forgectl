@@ -43,6 +43,13 @@ type Client struct {
 	// writer — see the residual note on discardStale.
 	lockWait time.Duration
 
+	// onLock, when non-nil, is called with ("acquire"|"release") around every
+	// successful lifecycle-lock hold. It exists so an in-package test can prove
+	// a composite verb takes ONE hold and does no long work inside it — the
+	// ordering property the crash-safety design rests on, which is otherwise
+	// invisible from outside. Never set in production.
+	onLock func(verb, event string)
+
 	// findingsDir is the forgectl-owned directory (config.PrFindingsDir) that
 	// holds `forgectl pr local` findings — the deliverable of a local
 	// clean-room review, which must outlive the disposable workspace.
@@ -57,6 +64,14 @@ type Client struct {
 	// Runner unless approve returns true. Defaults to a huh confirm; tests
 	// inject a deterministic decision.
 	approve func(review string) (bool, error)
+
+	// confirmRemoval is the gate on a DESTRUCTIVE repair. It is a separate seam
+	// from approve on purpose: approve authorizes posting a review, and its huh
+	// form asks "Post this review to the PR?" — a question whose yes must never
+	// have meant "delete this clean room". Sharing one field also meant a caller
+	// wiring an auto-approver for posting silently auto-approved deletions.
+	// Defaults to a huh confirm naming the removal; tests inject a decision.
+	confirmRemoval func(prompt string) (bool, error)
 
 	// approvalTheme styles the default gate's huh form. It is a separate field
 	// rather than a captured value because New installs the default approver
@@ -110,6 +125,16 @@ func WithTmuxClient(client *tmux.Client) Option {
 // deterministic approve/deny without a TTY.
 func WithApprover(fn func(review string) (bool, error)) Option {
 	return func(c *Client) { c.approve = fn }
+}
+
+// WithRemovalConfirmer overrides the destructive-repair confirmation gate —
+// used in tests to drive the interactive path without a TTY.
+//
+// Deliberately NOT the same option as WithApprover: a caller that wants
+// unattended review posting must not thereby consent to unattended deletion of
+// a clean room, so the two decisions are wired separately or not at all.
+func WithRemovalConfirmer(fn func(prompt string) (bool, error)) Option {
+	return func(c *Client) { c.confirmRemoval = fn }
 }
 
 // WithApprovalTheme supplies the resolved theme the default approval gate
@@ -184,6 +209,9 @@ func New(run exec.Runner, opts ...Option) *Client {
 	// non-nil here and is left alone.
 	if c.approve == nil {
 		c.approve = func(review string) (bool, error) { return confirmReview(review, c.approvalTheme) }
+	}
+	if c.confirmRemoval == nil {
+		c.confirmRemoval = func(prompt string) (bool, error) { return confirmRemoval(prompt, c.approvalTheme) }
 	}
 	return c
 }
