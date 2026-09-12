@@ -218,18 +218,37 @@ func TestPrRepair_UnreadableRecordIsReportedAndExitsNonzero(t *testing.T) {
 // TestPrRepair_ForgetSettlesAnUnreadableRecord closes the loop: the row the
 // report now shows has a command that removes it, so the only escape is no
 // longer a manual rm that no message mentions.
-func TestPrRepair_ForgetSettlesAnUnreadableRecord(t *testing.T) {
+func TestPrRepair_ForgetSetsAnUnreadableRecordAside(t *testing.T) {
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "o-r-9-1.json")
 	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	client := repairCmdClient(t, dir)
-	if _, _, err := runPrRepair(t, client, bad, "--apply", "--forget-if-absent"); err != nil {
-		t.Fatalf("forget an unreadable record: %v", err)
+	// The arm is gated: it is the only one that cannot prove what it acts on.
+	if _, _, err := runPrRepair(t, client, bad, "--apply", "--forget-if-absent"); err == nil {
+		t.Fatal("expected a refusal off a TTY without --yes")
 	}
+	if _, _, err := runPrRepair(t, client, bad, "--apply", "--forget-if-absent", "--yes"); err != nil {
+		t.Fatalf("set aside an unreadable record: %v", err)
+	}
+	// SET ASIDE, not removed: the .json name is gone (so nothing is blocked)
+	// but the bytes survive under a name no enumeration sees.
 	if _, serr := os.Stat(bad); !errors.Is(serr, os.ErrNotExist) {
-		t.Errorf("the record is still on disk: %v", serr)
+		t.Errorf("the original name is still on disk: %v", serr)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preserved := false
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), filepath.Base(bad)+".unreadable-") {
+			preserved = true
+		}
+	}
+	if !preserved {
+		t.Errorf("the record was unlinked rather than set aside; dir = %v", entries)
 	}
 	out, _, err := runPrRepair(t, client)
 	if err != nil {

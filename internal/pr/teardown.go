@@ -3,11 +3,14 @@ package pr
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/quarantine"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
@@ -346,28 +349,39 @@ func (c *Client) discardRecordOnly(member breadcrumbMember) error {
 	return nil
 }
 
-// discardUndecodableRecord removes a record this build cannot decode, and is
-// reachable only through `pr repair --apply --forget-if-absent`.
+// unreadableSuffix is what an undecodable record's name becomes when it is set
+// aside. The extension is deliberately no longer ".json": every enumeration in
+// this package filters on that (listLocked, resolveBreadcrumbEntry,
+// recordedWorkspaceFor), so the rename clears the block on admission without
+// destroying anything.
+const unreadableSuffix = ".unreadable-"
+
+// setAsideUndecodableRecord RENAMES a record this build cannot decode out of
+// the enumerated set. It is reachable only through
+// `pr repair --apply --forget-if-absent`.
+//
+// IT DOES NOT UNLINK, and that is the whole design. "Cannot decode" is not only
+// a torn write: validateLifecycleFields refuses any record whose version this
+// build does not know, so an INTACT record written by a newer forgectl — live
+// clean room, live window — lands here too. Deleting it would orphan a
+// directory with nothing naming it (the exact leak discardStale exists to
+// prevent) and make a newer build's session invisible to the build that owns
+// it. A rename costs nothing, clears the block just as well, and leaves the
+// bytes for whoever can read them.
 //
 // It runs the same pinned-handle identity protocol as discardStale and
-// discardRecordOnly, minus every step that needs a decode. That is the whole
-// design: the protocol's authority comes from dev+ino identity and byte
+// discardRecordOnly, minus every step that needs a decode. That is the honest
+// minimum: the protocol's authority comes from dev+ino identity and byte
 // equality, neither of which requires understanding the file. So this proves
-// exactly WHICH file it unlinks while claiming nothing about what the file
-// said.
+// exactly WHICH file it moves while claiming nothing about what the file said.
 //
-// WHAT IT CANNOT PROVE, stated rather than assumed: an undecodable record may
-// still have named a clean room, and there is no way to read it. The caller
-// logs that, writes it into the audit row, and the operator accepts it by
-// choosing this verb. The alternative was worse — such a record refuses every
-// counting arm, so it blocks every launch, and the only escape was a manual
-// `rm` that no forgectl message mentioned.
-func (c *Client) discardUndecodableRecord(member breadcrumbMember) error {
-	slog.Debug("Preparing to discard a session record this build cannot read.", "path", member.path)
+// It returns the new base name so the caller can name it to the operator.
+func (c *Client) setAsideUndecodableRecord(member breadcrumbMember) (string, error) {
+	slog.Debug("Preparing to set aside a session record this build cannot read.", "path", member.path)
 
 	root, err := os.OpenRoot(c.sessionsDir)
 	if err != nil {
-		return fmt.Errorf("pin pr sessions dir %s: %w", c.sessionsDir, err)
+		return "", fmt.Errorf("pin pr sessions dir %s: %w", c.sessionsDir, err)
 	}
 	defer func() {
 		if cerr := root.Close(); cerr != nil {
@@ -377,53 +391,79 @@ func (c *Client) discardUndecodableRecord(member breadcrumbMember) error {
 
 	dirInfo, err := root.Lstat(".")
 	if err != nil {
-		return fmt.Errorf("re-stat pr sessions dir: %w", err)
+		return "", fmt.Errorf("re-stat pr sessions dir: %w", err)
 	}
 	if !os.SameFile(dirInfo, member.dirInfo) {
-		return fmt.Errorf("pr sessions dir %s changed identity during repair; refusing to remove %s",
+		return "", fmt.Errorf("pr sessions dir %s changed identity during repair; refusing to move %s",
 			c.sessionsDir, member.displayPath)
 	}
 
 	name := filepath.Base(member.path)
 	info, err := root.Lstat(name)
 	if err != nil {
-		return fmt.Errorf("re-stat breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+		return "", fmt.Errorf("re-stat breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
 	}
 	if !os.SameFile(info, member.info) {
-		return fmt.Errorf("breadcrumb %s changed identity during repair; refusing to remove it", member.displayPath)
+		return "", fmt.Errorf("breadcrumb %s changed identity during repair; refusing to move it", member.displayPath)
 	}
 	if !staleMemberIsRegular(info) {
-		return fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to remove it", member.displayPath)
+		return "", fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to move it", member.displayPath)
 	}
 
 	file, err := root.Open(name)
 	if err != nil {
-		return fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+		return "", fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
 	}
 	data, readErr := readBreadcrumbBytes(file)
 	closeErr := file.Close()
 	if readErr != nil {
-		return fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(readErr))
+		return "", fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(readErr))
 	}
 	if closeErr != nil {
-		return fmt.Errorf("close breadcrumb %s after re-read: %w", member.displayPath, termsafe.Error(closeErr))
+		return "", fmt.Errorf("close breadcrumb %s after re-read: %w", member.displayPath, termsafe.Error(closeErr))
 	}
 	if !bytes.Equal(data, member.bytes) {
-		return fmt.Errorf("breadcrumb %s changed on disk during repair; refusing to remove it", member.displayPath)
+		return "", fmt.Errorf("breadcrumb %s changed on disk during repair; refusing to move it", member.displayPath)
 	}
 	// A file that became READABLE between the report and the apply is no longer
 	// the thing this verb was authorized for — byte equality above already
 	// refuses that, and this is the assertion that says so out loud.
 	if _, err := decodeBreadcrumbRecord(data, member.path); err == nil {
-		return fmt.Errorf("breadcrumb %s is readable after all; settle it as an ordinary record rather than forgetting it",
+		return "", fmt.Errorf("breadcrumb %s is readable after all; settle it as an ordinary record rather than setting it aside",
 			member.displayPath)
 	}
 
-	if err := root.Remove(name); err != nil {
-		return fmt.Errorf("remove breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+	aside, err := c.freeAsideName(root, name)
+	if err != nil {
+		return "", err
 	}
-	slog.Info("Successfully discarded an undecodable session record.", "path", member.path)
-	return nil
+	if err := root.Rename(name, aside); err != nil {
+		return "", fmt.Errorf("set breadcrumb %s aside: %w", member.displayPath, termsafe.Error(err))
+	}
+	slog.Info("Successfully set an unreadable session record aside; its bytes are preserved under a new name.",
+		"was", member.path, "now", filepath.Join(c.sessionsDir, aside))
+	return aside, nil
+}
+
+// freeAsideName picks the set-aside name, and refuses to clobber. The
+// second-resolution timestamp alone can collide when two records are settled
+// inside one second, and this function exists so that collision costs a random
+// suffix rather than the other record's bytes.
+func (c *Client) freeAsideName(root *os.Root, name string) (string, error) {
+	candidate := name + unreadableSuffix + strconv.FormatInt(time.Now().UTC().Unix(), 10)
+	if _, err := root.Lstat(candidate); errors.Is(err, fs.ErrNotExist) {
+		return candidate, nil
+	}
+	suffix, err := randomSuffix()
+	if err != nil {
+		return "", fmt.Errorf("derive a free set-aside name for %s: %w", termsafe.QuotePath(name), err)
+	}
+	candidate += "-" + suffix
+	if _, err := root.Lstat(candidate); !errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("cannot find a free set-aside name for %s; %s is taken",
+			termsafe.QuotePath(name), termsafe.QuotePath(candidate))
+	}
+	return candidate, nil
 }
 
 // sameBreadcrumbRecord reports whether two decoded records agree on every

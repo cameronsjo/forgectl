@@ -2,6 +2,7 @@ package pr
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -28,6 +29,11 @@ const (
 const (
 	repairOutcomeRefused    = "refused"
 	repairOutcomeUnreadable = "unreadable"
+	// repairOutcomeSetAside is what settling an unreadable record does: the
+	// file is RENAMED out of the enumerated set, never unlinked, because this
+	// is the one arm that cannot say what it is acting on.
+	repairOutcomeSetAside      = "set-aside"
+	repairOutcomeWouldSetAside = "would-set-aside"
 	// repairPhaseUnreadable stands in the FromPhase column for a record whose
 	// phase could not be read. It is deliberately not one of the six real
 	// phases: nothing may treat it as a lifecycle state.
@@ -222,7 +228,7 @@ func (c *Client) repairApplyLocked(ctx context.Context, opts RepairOpts) (Repair
 	}
 	bc, decodeErr := decodeBreadcrumbRecord(member.bytes, member.path)
 	if decodeErr != nil {
-		return c.repairUndecodableLocked(opts, member, decodeErr)
+		return c.repairUndecodableLocked(ctx, opts, member, decodeErr)
 	}
 	member.breadcrumb = bc
 	ref, err := refFromRecord(bc)
@@ -252,13 +258,27 @@ func (c *Client) repairApplyLocked(ctx context.Context, opts RepairOpts) (Repair
 // while no verb can decode it, and before this the only way out was a manual
 // `rm` that no message ever named.
 //
-// Only --forget-if-absent may settle it, and what it can honestly claim is
-// narrow: the pinned-handle protocol proves WHICH file is being unlinked from
-// dev+ino and byte equality, neither of which needs a decode. It cannot prove
-// the record named no clean room, because it cannot read the record — so that
-// is stated in the refusal path, logged, and written into the audit row rather
-// than quietly assumed.
-func (c *Client) repairUndecodableLocked(opts RepairOpts, member breadcrumbMember, decodeErr error) (RepairItem, error) {
+// IT SETS THE RECORD ASIDE RATHER THAN REMOVING IT. "Cannot decode" is a wider
+// class than a torn write: validateLifecycleFields refuses any record whose
+// version this build does not know, so an INTACT record written by a newer
+// forgectl — live clean room, live window, phase active — arrives here too.
+// A rename out of the `.json` namespace clears the block just as well as an
+// unlink and destroys nothing.
+//
+// Three things guard it, because this is the only arm that cannot prove what it
+// is acting on:
+//
+//   - a BEST-EFFORT ref read from the raw bytes, used for one thing only —
+//     refusing while that ref's window is live. It is never trusted for
+//     anything else, and a ref that does not parse simply means the check
+//     cannot run.
+//   - the same confirmation gate as --rollback (--yes off a terminal), because
+//     the ordinary forget earns its ungated pass by proving absence first and
+//     this one proves nothing.
+//   - an audit row carrying the path, the extracted ref, and the record's own
+//     bytes, capped and clamped — for the one removal that cannot say what it
+//     removed, an empty trail is the worst possible outcome.
+func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, member breadcrumbMember, decodeErr error) (RepairItem, error) {
 	item := RepairItem{
 		RecordPath: member.path,
 		FromPhase:  repairPhaseUnreadable,
@@ -267,31 +287,141 @@ func (c *Client) repairUndecodableLocked(opts RepairOpts, member breadcrumbMembe
 	}
 	if !opts.ForgetIfAbsent {
 		return item, fmt.Errorf("this build cannot read session record %s, so it cannot adopt or roll it back: %w — "+
-			"settle it with 'forgectl pr repair %s --apply %s', which removes the record without reading it",
-			member.displayPath, decodeErr, opts.Record, RepairModeForgetIfAbsent)
+			"set it aside with 'forgectl pr repair %s --apply %s', which moves the record out of the way without reading it",
+			member.displayPath, decodeErr, member.displayPath, RepairModeForgetIfAbsent)
 	}
-	item.ToPhase = "removed"
+
+	// BEST EFFORT, and bounded to one question. A newer-version record is the
+	// undecodable subclass that actually matters, and it carries a plain "ref"
+	// string; refusing while that window is live closes the case where this arm
+	// would otherwise hide a running session from the build that owns it.
+	if ref, ok := refFromRawRecord(member.bytes); ok {
+		item.Ref = ref.String()
+		live, tmuxOK := c.WindowLive(ctx, ref)
+		if !tmuxOK {
+			return item, fmt.Errorf("refusing to set %s aside: the tmux window list could not be read, "+
+				"and an unreadable list is not an absent window — check `tmux list-windows -a`, then retry",
+				member.displayPath)
+		}
+		item.WindowLive = live
+		if live {
+			return item, fmt.Errorf("refusing to set %s aside: it names %s, whose review window is still live — "+
+				"this record was written by a build that reads a record format this one does not, so the session is "+
+				"running and only that build can settle it", member.displayPath, ref.String())
+		}
+	}
+
+	item.ToPhase = "set aside"
+	// The preview precedes the gate: --dry-run mutates nothing.
 	if opts.DryRun {
-		item.Outcome = "would-forget"
+		item.Outcome = repairOutcomeWouldSetAside
 		return item, nil
 	}
-	slog.Warn("Removing a session record this build cannot read; whether it named a clean room cannot be checked.",
+	if !opts.Yes {
+		if !c.isTTY() {
+			return item, fmt.Errorf("refusing to set %s aside without confirmation: this build cannot read the record, "+
+				"so it cannot say what the record described, and there is no terminal to confirm on — pass --yes to proceed",
+				member.displayPath)
+		}
+		approved, err := c.confirmRemoval(setAsidePrompt(member, decodeErr))
+		if err != nil {
+			return item, fmt.Errorf("set-aside confirmation: %w", err)
+		}
+		if !approved {
+			item.Outcome = "declined"
+			return item, nil
+		}
+	}
+
+	slog.Warn("Setting aside a session record this build cannot read; whether it named a clean room cannot be checked.",
 		"path", member.path, "error", decodeErr)
-	rowID, err := c.beginRepairRow(Breadcrumb{Phase: repairPhaseUnreadable}, Ref{}, RepairModeForgetIfAbsent, "", member.path)
+	row := RepairRow{
+		Ref:        item.Ref,
+		RecordPath: member.path,
+		FromPhase:  repairPhaseUnreadable,
+		Mode:       RepairModeForgetIfAbsent,
+		Record:     cappedRecordBytes(member.bytes),
+	}
+	rowID, err := c.beginRepairRow(row)
 	if err != nil {
-		item.Outcome = repairOutcomeRefused
 		return item, err
 	}
-	if err := c.discardUndecodableRecord(member); err != nil {
+	aside, err := c.setAsideUndecodableRecord(member)
+	if err != nil {
 		item.Outcome = repairOutcomeFailed
 		item.Error = err.Error()
-		c.completeRepairRow(rowID, Breadcrumb{Phase: repairPhaseUnreadable}, Ref{}, RepairModeForgetIfAbsent, "", member.path, err)
+		c.completeRepairRow(rowID, row, err)
 		return item, err
 	}
-	c.completeRepairRow(rowID, Breadcrumb{Phase: repairPhaseUnreadable}, Ref{}, RepairModeForgetIfAbsent, "", member.path, nil)
-	item.Outcome = "forgotten"
-	slog.Info("Successfully discarded a session record this build could not read.", "path", member.path)
+	c.completeRepairRow(rowID, row, nil)
+	item.Outcome = repairOutcomeSetAside
+	item.ToPhase = aside
+	slog.Info("Successfully set aside a session record this build could not read.",
+		"was", member.path, "now", aside)
 	return item, nil
+}
+
+// maxAuditRecordBytes caps how much of an unreadable record's own bytes ride in
+// the audit row. The row must stay inside the log's line limit, and the point is
+// to preserve enough to identify what was set aside — not to mirror the file.
+const maxAuditRecordBytes = 4 << 10
+
+// cappedRecordBytes is the audit payload for a record nothing can decode: its
+// raw bytes, capped and terminal-clamped. This is the whole reason the trail is
+// not empty for the one case it was built for — no other field can name what
+// was set aside, because nothing could read it.
+//
+// The cap is applied twice: once to the raw bytes, and again after clamping,
+// because escaping a control-heavy record expands it. Truncating on a byte
+// boundary can split a rune; the value is evidence for a human, never parsed,
+// and the row must fit the log's line limit.
+func cappedRecordBytes(raw []byte) string {
+	if len(raw) > maxAuditRecordBytes {
+		raw = raw[:maxAuditRecordBytes]
+	}
+	clamped := termsafe.SafeLine(string(raw))
+	if len(clamped) > maxAuditRecordBytes {
+		clamped = clamped[:maxAuditRecordBytes]
+	}
+	return clamped
+}
+
+// refFromRawRecord reads just enough of an unparseable record to ask whether a
+// window is live: the ref, and the local flag the window name derives from.
+//
+// It is DELIBERATELY the tolerant decoder — a plain Unmarshal, no
+// duplicate-key rejection, no unknown-field refusal — which is the opposite of
+// what decodeBreadcrumb does, and is safe for exactly one reason: the result is
+// used only to REFUSE. It never reaches an argv, a path, or a write. A record
+// that lies here can only cause a refusal to set itself aside, which is the
+// direction that costs nothing.
+func refFromRawRecord(data []byte) (Ref, bool) {
+	var shallow struct {
+		Ref   string `json:"ref"`
+		Local bool   `json:"local"`
+	}
+	if err := json.Unmarshal(data, &shallow); err != nil || shallow.Ref == "" {
+		return Ref{}, false
+	}
+	ref, err := ParseRef(shallow.Ref)
+	if err != nil || !ref.Complete() {
+		return Ref{}, false
+	}
+	if shallow.Local {
+		ref = ref.asLocal()
+	}
+	return ref, true
+}
+
+// setAsidePrompt is what the confirmation gate shows for a record nothing can
+// read. It says plainly what is and is not known, because that uncertainty is
+// the entire reason this arm has a gate at all.
+func setAsidePrompt(member breadcrumbMember, decodeErr error) string {
+	return fmt.Sprintf("Set aside a session record this build cannot read?\n"+
+		"  record: %s\n"+
+		"  reason: %s\n"+
+		"  the file is renamed, not deleted — but whether it named a clean room cannot be checked",
+		member.displayPath, termsafe.SafeLine(decodeErr.Error()))
 }
 
 // repairAdoptLocked promotes a record to `active` against a window that really
@@ -314,7 +444,7 @@ func (c *Client) repairAdoptLocked(ctx context.Context, member breadcrumbMember,
 		return item, fmt.Errorf("refusing to adopt %s: its workspace %s is not a live clean room, "+
 			"and adopting would promote the record to one 'pr teardown' removes — "+
 			"use 'forgectl pr repair %s --apply %s' instead",
-			ref.String(), termsafe.QuotePath(bc.Workspace), member.path, RepairModeRollback)
+			ref.String(), termsafe.QuotePath(bc.Workspace), member.displayPath, RepairModeRollback)
 	}
 	window, err := c.resolveReviewWindow(ctx, ref)
 	if err != nil {
@@ -339,7 +469,8 @@ func (c *Client) repairAdoptLocked(ctx context.Context, member breadcrumbMember,
 		item.Outcome = "would-adopt"
 		return item, nil
 	}
-	rowID, err := c.beginRepairRow(bc, ref, RepairModeAdoptWindow, adopted.WindowID, member.path)
+	row := repairRowFor(member, ref, RepairModeAdoptWindow, adopted.WindowID)
+	rowID, err := c.beginRepairRow(row)
 	if err != nil {
 		item.Outcome = repairOutcomeRefused
 		return item, err
@@ -347,10 +478,10 @@ func (c *Client) repairAdoptLocked(ctx context.Context, member breadcrumbMember,
 	if err := c.writeAdoptedRecord(member.path, bc, adopted.WindowID); err != nil {
 		item.Outcome = repairOutcomeFailed
 		item.Error = err.Error()
-		c.completeRepairRow(rowID, bc, ref, RepairModeAdoptWindow, adopted.WindowID, member.path, err)
+		c.completeRepairRow(rowID, row, err)
 		return item, err
 	}
-	c.completeRepairRow(rowID, bc, ref, RepairModeAdoptWindow, adopted.WindowID, member.path, nil)
+	c.completeRepairRow(rowID, row, nil)
 	item.Outcome = "adopted"
 	slog.Info("Successfully adopted a live review window into its session record.",
 		"ref", ref.String(), "path", member.path, "window", nativeWindowID(adopted.WindowID))
@@ -368,6 +499,13 @@ func (c *Client) writeAdoptedRecord(path string, bc Breadcrumb, windowID string)
 			rec.RepairReason = ""
 			return nil
 		})
+	}
+	// The legacy branch bypasses transitionOnce, so it does not inherit that
+	// function's read-and-write-name-the-same-file guard. Its one caller passes
+	// an already-resolved member path; this is the backstop a second caller
+	// would otherwise be missing.
+	if err := c.assertDirectSessionsDirEntry(path); err != nil {
+		return err
 	}
 	next := bc
 	next.Version = breadcrumbVersion
@@ -410,7 +548,7 @@ func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, memb
 		item.Outcome = repairOutcomeRefused
 		return item, fmt.Errorf("refusing to roll back %s: its review window is still live — "+
 			"adopt it with 'forgectl pr repair %s --apply %s', or close the window first",
-			ref.String(), member.path, RepairModeAdoptWindow)
+			ref.String(), member.displayPath, RepairModeAdoptWindow)
 	}
 	// Teardown refuses a workspace that is neither a live sandbox nor cleanly
 	// absent, so establish that here rather than discovering it after the intent
@@ -446,7 +584,8 @@ func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, memb
 			return item, nil
 		}
 	}
-	rowID, err := c.beginRepairRow(bc, ref, RepairModeRollback, "", member.path)
+	row := repairRowFor(member, ref, RepairModeRollback, "")
+	rowID, err := c.beginRepairRow(row)
 	if err != nil {
 		item.Outcome = repairOutcomeRefused
 		return item, err
@@ -454,13 +593,13 @@ func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, memb
 	if err := c.teardownLocked(ctx, member.path); err != nil {
 		item.Outcome = repairOutcomeFailed
 		item.Error = err.Error()
-		c.completeRepairRow(rowID, bc, ref, RepairModeRollback, "", member.path, err)
+		c.completeRepairRow(rowID, row, err)
 		slog.Error("A repair rollback failed partway; the clean room is recoverable from the repair audit log.",
 			"ref", ref.String(), "workspace", bc.Workspace, "log", c.repairLogPath(), "error", err)
 		return item, fmt.Errorf("roll back %s: %w — its clean room %s is named in %s",
 			ref.String(), err, termsafe.QuotePath(bc.Workspace), termsafe.QuotePath(c.repairLogPath()))
 	}
-	c.completeRepairRow(rowID, bc, ref, RepairModeRollback, "", member.path, nil)
+	c.completeRepairRow(rowID, row, nil)
 	item.Outcome = "rolled-back"
 	slog.Info("Successfully rolled back an unfinished review session.", "ref", ref.String(), "path", member.path)
 	return item, nil
@@ -520,7 +659,7 @@ func (c *Client) repairForgetLocked(ctx context.Context, opts RepairOpts, member
 	if live {
 		item.Outcome = repairOutcomeRefused
 		return item, fmt.Errorf("refusing to forget %s: its review window still exists — "+
-			"adopt it with 'forgectl pr repair %s --apply %s'", ref.String(), member.path, RepairModeAdoptWindow)
+			"adopt it with 'forgectl pr repair %s --apply %s'", ref.String(), member.displayPath, RepairModeAdoptWindow)
 	}
 	// Forget's whole claim is that nothing is left behind. Live means a clean
 	// room is; Invalid means SOMETHING is at that path and this build cannot say
@@ -529,14 +668,15 @@ func (c *Client) repairForgetLocked(ctx context.Context, opts RepairOpts, member
 		item.Outcome = repairOutcomeRefused
 		return item, fmt.Errorf("refusing to forget %s: its recorded workspace %s is not cleanly absent, and forgetting "+
 			"the record would leave it with nothing pointing at it — use 'forgectl pr repair %s --apply %s'",
-			ref.String(), termsafe.QuotePath(bc.Workspace), member.path, RepairModeRollback)
+			ref.String(), termsafe.QuotePath(bc.Workspace), member.displayPath, RepairModeRollback)
 	}
 	item.ToPhase = "removed"
 	if opts.DryRun {
 		item.Outcome = "would-forget"
 		return item, nil
 	}
-	rowID, err := c.beginRepairRow(bc, ref, RepairModeForgetIfAbsent, "", member.path)
+	row := repairRowFor(member, ref, RepairModeForgetIfAbsent, "")
+	rowID, err := c.beginRepairRow(row)
 	if err != nil {
 		item.Outcome = repairOutcomeRefused
 		return item, err
@@ -544,30 +684,33 @@ func (c *Client) repairForgetLocked(ctx context.Context, opts RepairOpts, member
 	if err := c.teardownLocked(ctx, member.path); err != nil {
 		item.Outcome = repairOutcomeFailed
 		item.Error = err.Error()
-		c.completeRepairRow(rowID, bc, ref, RepairModeForgetIfAbsent, "", member.path, err)
+		c.completeRepairRow(rowID, row, err)
 		return item, fmt.Errorf("forget %s: %w", ref.String(), err)
 	}
-	c.completeRepairRow(rowID, bc, ref, RepairModeForgetIfAbsent, "", member.path, nil)
+	c.completeRepairRow(rowID, row, nil)
 	item.Outcome = "forgotten"
 	slog.Info("Successfully discarded a session record whose window and clean room were both gone.",
 		"ref", ref.String(), "path", member.path)
 	return item, nil
 }
 
-// beginRepairRow writes the write-ahead intent. A failure here REFUSES the
-// mutation rather than proceeding without a trail: the row is the recovery
-// pointer, so a rollback with no row is the one shape that can lose a clean
-// room outright.
-func (c *Client) beginRepairRow(bc Breadcrumb, ref Ref, mode, windowID, record string) (string, error) {
+// beginRepairRow writes the write-ahead intent. The caller supplies the
+// descriptive fields; this stamps the timestamp, the row id, the actor, and the
+// outcome, so those four can never be spelled differently by two call sites.
+//
+// A failure here REFUSES the mutation rather than proceeding without a trail:
+// the row is the recovery pointer, so a removal with no row is the one shape
+// that can lose a clean room outright.
+func (c *Client) beginRepairRow(row RepairRow) (string, error) {
 	id, err := randomSuffix()
 	if err != nil {
 		return "", fmt.Errorf("derive repair audit row id: %w", err)
 	}
-	row := RepairRow{
-		TS: time.Now().UTC(), ID: id, Actor: repairActor(), Ref: ref.String(),
-		RecordPath: record, FromPhase: string(bc.Phase), Mode: mode,
-		WindowID: windowID, Workspace: bc.Workspace, Outcome: repairOutcomeIntent,
-	}
+	row.TS = time.Now().UTC()
+	row.ID = id
+	row.Actor = repairActor()
+	row.Outcome = repairOutcomeIntent
+	row.Error = ""
 	if err := c.appendRepairRowLocked(row); err != nil {
 		return "", fmt.Errorf("record the repair intent before acting: %w — nothing was changed", err)
 	}
@@ -577,19 +720,32 @@ func (c *Client) beginRepairRow(bc Breadcrumb, ref Ref, mode, windowID, record s
 // completeRepairRow closes out an intent. Its own failure cannot undo the
 // mutation that already happened, so it is logged rather than returned — the
 // dangling intent row is itself the honest record of that.
-func (c *Client) completeRepairRow(id string, bc Breadcrumb, ref Ref, mode, windowID, record string, cause error) {
-	row := RepairRow{
-		TS: time.Now().UTC(), ID: id, Actor: repairActor(), Ref: ref.String(),
-		RecordPath: record, FromPhase: string(bc.Phase), Mode: mode,
-		WindowID: windowID, Workspace: bc.Workspace, Outcome: repairOutcomeApplied,
-	}
+func (c *Client) completeRepairRow(id string, row RepairRow, cause error) {
+	row.TS = time.Now().UTC()
+	row.ID = id
+	row.Actor = repairActor()
+	row.Outcome = repairOutcomeApplied
+	row.Error = ""
 	if cause != nil {
 		row.Outcome = repairOutcomeFailed
 		row.Error = termsafe.SafeLine(cause.Error())
 	}
 	if err := c.appendRepairRowLocked(row); err != nil {
 		slog.Error("Failed to complete a repair audit row; the intent row is left dangling, which is the honest record.",
-			"id", id, "ref", ref.String(), "error", err)
+			"id", id, "ref", row.Ref, "error", err)
+	}
+}
+
+// repairRowFor builds the descriptive half of an audit row for a decodable
+// record, so the three arms cannot disagree about what a row carries.
+func repairRowFor(member breadcrumbMember, ref Ref, mode, windowID string) RepairRow {
+	return RepairRow{
+		Ref:        ref.String(),
+		RecordPath: member.path,
+		FromPhase:  string(member.breadcrumb.Phase),
+		Mode:       mode,
+		WindowID:   windowID,
+		Workspace:  member.breadcrumb.Workspace,
 	}
 }
 

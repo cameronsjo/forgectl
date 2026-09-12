@@ -593,10 +593,11 @@ func TestRepair_UnreadableRecordIsAReportRow(t *testing.T) {
 	}
 }
 
-func TestRepairForgetIfAbsent_SettlesAnUnreadableRecord(t *testing.T) {
+func TestRepairForgetIfAbsent_SetsAnUnreadableRecordAside(t *testing.T) {
 	c := repairClient(t, repairRunner(nil))
 	bad := filepath.Join(c.SessionsDir(), "o-r-9-1.json")
-	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
+	raw := []byte("{not json")
+	if err := os.WriteFile(bad, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// The other two arms cannot read it, so they must refuse and name the one
@@ -606,17 +607,25 @@ func TestRepairForgetIfAbsent_SettlesAnUnreadableRecord(t *testing.T) {
 	} else if !strings.Contains(err.Error(), RepairModeForgetIfAbsent) {
 		t.Errorf("refusal %q does not name the mode that can settle it", err)
 	}
+	// And this arm is gated: it is the only one that cannot prove what it acts on.
+	if _, err := c.Repair(context.Background(), RepairOpts{Record: bad, Apply: true, ForgetIfAbsent: true}); err == nil {
+		t.Fatal("expected a refusal off a TTY without --yes")
+	} else if !strings.Contains(err.Error(), "--yes") {
+		t.Errorf("refusal %q does not name --yes", err)
+	}
+	if _, serr := os.Stat(bad); serr != nil {
+		t.Fatalf("a refusal moved the record: %v", serr)
+	}
 
-	report, err := c.Repair(context.Background(), RepairOpts{Record: bad, Apply: true, ForgetIfAbsent: true})
+	report, err := c.Repair(context.Background(), RepairOpts{Record: bad, Apply: true, ForgetIfAbsent: true, Yes: true})
 	if err != nil {
-		t.Fatalf("forget an unreadable record: %v", err)
+		t.Fatalf("set aside an unreadable record: %v", err)
 	}
-	if len(report.Items) != 1 || report.Items[0].Outcome != "forgotten" {
-		t.Fatalf("report = %+v, want one forgotten item", report.Items)
+	if len(report.Items) != 1 || report.Items[0].Outcome != repairOutcomeSetAside {
+		t.Fatalf("report = %+v, want one set-aside item", report.Items)
 	}
-	if _, serr := os.Stat(bad); !errors.Is(serr, os.ErrNotExist) {
-		t.Errorf("the unreadable record is still on disk: %v", serr)
-	}
+	assertSetAside(t, c, bad, raw)
+
 	rows, err := c.readRepairLog()
 	if err != nil {
 		t.Fatal(err)
@@ -626,6 +635,171 @@ func TestRepairForgetIfAbsent_SettlesAnUnreadableRecord(t *testing.T) {
 	}
 	if rows[0].RecordPath != bad {
 		t.Errorf("intent row path = %q, want %q", rows[0].RecordPath, bad)
+	}
+	if rows[0].Record != string(raw) {
+		t.Errorf("intent row record = %q, want the record's own bytes %q — the only field that can name what was set aside",
+			rows[0].Record, raw)
+	}
+}
+
+// assertSetAside proves the rename happened rather than an unlink: no .json
+// entry remains (so nothing is blocked), and a sibling carrying the original
+// bytes does.
+func assertSetAside(t *testing.T, c *Client, was string, want []byte) {
+	t.Helper()
+	entries, err := os.ReadDir(c.SessionsDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, serr := os.Stat(was); !errors.Is(serr, os.ErrNotExist) {
+		t.Errorf("the original name still exists: %v", serr)
+	}
+	var aside string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), filepath.Base(was)+unreadableSuffix) {
+			aside = filepath.Join(c.SessionsDir(), e.Name())
+		}
+		if filepath.Ext(e.Name()) == ".json" {
+			t.Errorf("a .json entry survives, so the launch block is not cleared: %s", e.Name())
+		}
+	}
+	if aside == "" {
+		t.Fatalf("no set-aside file in %v — the record was unlinked, not preserved", entries)
+	}
+	got, err := os.ReadFile(aside) //nolint:gosec // a path this test just enumerated in its own t.TempDir
+	if err != nil {
+		t.Fatalf("read the set-aside file: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("set-aside bytes = %q, want the original %q", got, want)
+	}
+}
+
+// TestRepairSetAside_RefusesWhileANewerBuildsWindowIsLive is the reviewer's
+// probe. A record written by a NEWER forgectl is intact and describes a running
+// session, but this build cannot decode it (the version is unknown), so it
+// lands on the same arm a torn file does. Removing it would orphan a live clean
+// room and hide the session from the build that owns it.
+func TestRepairSetAside_RefusesWhileANewerBuildsWindowIsLive(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 1}
+	name := mustWindowName(t, ref)
+	ws := fakeWorkspace(t)
+	future := []byte(`{"workspace":"` + ws + `","ref":"o/r#1","agent":"claude",` +
+		`"createdAt":"2026-09-12T00:00:00Z","version":3,"phase":"active","revision":4}` + "\n")
+
+	// Window live: the refusal.
+	c := repairClient(t, repairRunner(nil, sessionWinRow("forgectl", "$1", name)))
+	rec := filepath.Join(c.SessionsDir(), "o-r-1-1.json")
+	if err := os.WriteFile(rec, future, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := c.Repair(context.Background(), RepairOpts{})
+	if err != nil {
+		t.Fatalf("inspect: %v", err)
+	}
+	if len(report.Items) != 1 || report.Items[0].Outcome != repairOutcomeUnreadable {
+		t.Fatalf("report = %+v, want one unreadable row", report.Items)
+	}
+	_, err = c.Repair(context.Background(), RepairOpts{Record: rec, Apply: true, ForgetIfAbsent: true, Yes: true})
+	if err == nil {
+		t.Fatal("expected a refusal: the record names a ref whose review window is live")
+	}
+	if !strings.Contains(err.Error(), ref.String()) {
+		t.Errorf("refusal %q does not name the ref it read out of the record", err)
+	}
+	if _, serr := os.Stat(rec); serr != nil {
+		t.Errorf("a refusal moved the record: %v", serr)
+	}
+	if _, serr := os.Stat(ws); serr != nil {
+		t.Errorf("a refusal touched the clean room: %v", serr)
+	}
+
+	// Window gone: it sets aside, and the launch block clears.
+	dead := repairClient(t, repairRunner(nil))
+	deadRec := filepath.Join(dead.SessionsDir(), "o-r-1-1.json")
+	if err := os.WriteFile(deadRec, future, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dead.reserve(context.Background(), Ref{Owner: "o", Repo: "r", Number: 2}, 4, PrepareOpts{Agent: "claude"}); err == nil {
+		t.Fatal("setup: an unreadable record should block a reservation")
+	}
+	if _, err := dead.Repair(context.Background(), RepairOpts{Record: deadRec, Apply: true, ForgetIfAbsent: true, Yes: true}); err != nil {
+		t.Fatalf("set aside: %v", err)
+	}
+	entries, _ := os.ReadDir(dead.SessionsDir())
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".json" {
+			t.Errorf("a .json entry survives: %s", e.Name())
+		}
+	}
+	if _, err := dead.reserve(context.Background(), Ref{Owner: "o", Repo: "r", Number: 2}, 4, PrepareOpts{Agent: "claude"}); err != nil {
+		t.Errorf("launches are still blocked after setting the record aside: %v", err)
+	}
+	rows, err := dead.readRepairLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) < 1 {
+		t.Fatal("no audit row")
+	}
+	if rows[0].Ref != ref.String() {
+		t.Errorf("intent row ref = %q, want the best-effort %q", rows[0].Ref, ref.String())
+	}
+	if !strings.Contains(rows[0].Record, `"version":3`) {
+		t.Errorf("intent row record = %q, want the record's own bytes", rows[0].Record)
+	}
+}
+
+// TestRepairSetAside_InteractiveGateHonorsBothAnswers: this arm is gated for
+// the same reason rollback is, and by the same confirmer.
+func TestRepairSetAside_InteractiveGateHonorsBothAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		answer    bool
+		wantAside bool
+	}{
+		{"approved", true, true},
+		{"declined", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var prompted string
+			postApprovals := 0
+			c := New(repairRunner(nil),
+				WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+				WithTmuxSession("forgectl"), WithLockWait(2*time.Second),
+				WithTTYCheck(func() bool { return true }),
+				WithApprover(func(string) (bool, error) { postApprovals++; return true, nil }),
+				WithRemovalConfirmer(func(prompt string) (bool, error) { prompted = prompt; return tc.answer, nil }),
+			)
+			bad := filepath.Join(c.SessionsDir(), "o-r-9-1.json")
+			raw := []byte("{not json")
+			if err := os.WriteFile(bad, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			report, err := c.Repair(context.Background(), RepairOpts{Record: bad, Apply: true, ForgetIfAbsent: true})
+			if err != nil {
+				t.Fatalf("set aside: %v", err)
+			}
+			if postApprovals != 0 {
+				t.Errorf("the review-POSTING approver was consulted %d time(s)", postApprovals)
+			}
+			if !strings.Contains(prompted, "cannot read") {
+				t.Errorf("prompt %q does not say the record could not be read", prompted)
+			}
+			if tc.wantAside {
+				if report.Items[0].Outcome != repairOutcomeSetAside {
+					t.Fatalf("outcome = %q, want %q", report.Items[0].Outcome, repairOutcomeSetAside)
+				}
+				assertSetAside(t, c, bad, raw)
+				return
+			}
+			if report.Items[0].Outcome != "declined" {
+				t.Fatalf("outcome = %q, want declined", report.Items[0].Outcome)
+			}
+			if _, serr := os.Stat(bad); serr != nil {
+				t.Errorf("a declined set-aside moved the record: %v", serr)
+			}
+		})
 	}
 }
 

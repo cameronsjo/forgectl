@@ -54,6 +54,12 @@ type RepairRow struct {
 	Workspace  string    `json:"workspace,omitempty"`
 	Outcome    string    `json:"outcome"`
 	Error      string    `json:"error,omitempty"`
+	// Record carries the subject record's own bytes, capped and clamped, and is
+	// written for ONE case: a record this build cannot decode. Every other field
+	// here is derived from a decode, so for that case they are all empty — and a
+	// trail that names nothing is worthless for the one removal that cannot say
+	// what it removed.
+	Record string `json:"record,omitempty"`
 }
 
 // repairLogPath is the log's location inside the client's sessions dir.
