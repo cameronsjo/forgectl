@@ -84,19 +84,32 @@ func resolveEnvTarget(anyFile bool, file, cwd string, th theme.Theme) (envpkg.Ta
 	if err != nil {
 		return envpkg.Target{}, err
 	}
+	// A refusal from here on abandons a target that OWNS an open descriptor on
+	// its containing directory, so the refusal has to close it. Callers only
+	// defer Close on a target they were actually given, and cannot close one
+	// the error path never handed back. Routing every refusal through one
+	// closure is what keeps the next branch added here from leaking: the
+	// caller-side `defer` pattern gives no signal at all when a return is
+	// missed, and the cost lands on the long-lived process (the TUI resolving
+	// repeatedly), not the one-shot command.
+	refuse := func(err error) (envpkg.Target, error) {
+		target.Close()
+		return envpkg.Target{}, err
+	}
+
 	clearErr := target.Clear()
 	if clearErr == nil {
 		return target, nil
 	}
 	if !anyFile {
-		return envpkg.Target{}, clearErr
+		return refuse(clearErr)
 	}
 	if !isTerminal() {
 		// Phrased to lead with a word, not the flag: fang title-cases the
 		// first token when it renders an error, so "--any-file requires …"
 		// reaches the user as "--Any-File requires …" — a flag spelling
 		// that does not exist and that someone will reasonably try to type.
-		return envpkg.Target{}, errors.New("an interactive terminal is required for --any-file")
+		return refuse(errors.New("an interactive terminal is required for --any-file"))
 	}
 	// Prompts with the repo-relative resolved path: resolved so a human
 	// cannot approve a file they never saw (a `.env` symlinked to
@@ -105,10 +118,10 @@ func resolveEnvTarget(anyFile bool, file, cwd string, th theme.Theme) (envpkg.Ta
 	// (forgectl#481).
 	ok, err := confirmAnyFile(th, fmt.Sprintf("%q is not a recognized env file (.env, .env.*, or *.env) — operate on it anyway?", target.Rel()))
 	if err != nil {
-		return envpkg.Target{}, err
+		return refuse(err)
 	}
 	if !ok {
-		return envpkg.Target{}, fmt.Errorf("refusing %s: --any-file confirmation declined", target.Rel())
+		return refuse(fmt.Errorf("refusing %s: --any-file confirmation declined", target.Rel()))
 	}
 	return target, nil
 }

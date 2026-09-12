@@ -32,13 +32,17 @@ import (
 // stores a symlink as mode 120000, so a hostile repo delivers that by being
 // cloned — no local step required.
 //
-// Two checks, and which one fires is worth stating precisely because the
-// intuitive guess is wrong. The Lstat is what refuses a non-regular entry,
-// including a FIFO — and the reason is NOT that the open would block: an
-// O_RDWR open on a FIFO returns immediately (measured). It is that locking and
-// then writing through a FIFO is meaningless. O_NOFOLLOW refuses a symlink,
-// including a dangling one, and closes the window between the Lstat and the
-// open.
+// Three checks, and which one fires is worth stating precisely because the
+// intuitive guess is wrong. The Lstat below refuses a non-regular entry that
+// is already there, and gives the operator the actionable message — but it is
+// NOT what makes the refusal sound, because its answer is stale the moment it
+// returns. O_NOFOLLOW refuses a symlink, including a dangling one, and closes
+// the Lstat→open window for a symlink ONLY. A swap to a FIFO inside that same
+// window is not a symlink, so nothing above catches it; openLock's own
+// post-open check on the descriptor is what does. The reason to refuse a FIFO
+// is not that the open would block — an O_RDWR open on one returns immediately
+// (measured) — it is that locking and writing through it is meaningless, and
+// two writers on two FIFO inodes would both think they held this lock.
 //
 // Containment needs no separate check here, and the one that used to be here
 // was worse than nothing: sandbox.WithinWorkspace falls back to the

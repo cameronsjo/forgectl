@@ -224,6 +224,36 @@ the document it sees is sops' own yaml.v3 re-emission: tabs, CRLF, flow
 mappings, anchors, and multi-document streams are all normalised away before
 the line model sees them. The refusals stay as a contract on the function.
 
+## Two review findings from forgectl#515, fixed here
+
+CodeRabbit raised three findings on the base PR. One was already fixed there
+(`dc8b7ef`); the other two land on this branch, because this branch contains
+the base and the write path this feature adds depends on exactly that lock
+correctness.
+
+**`openLock` did not validate the descriptor it returned.** `withFileLock`
+Lstats the lock name and then opens it, and `O_NOFOLLOW` closes that window for
+a symlink ONLY — a swap to a FIFO inside the same window is not a symlink, so
+nothing caught it. Since flock locks an open file description, two writers on
+two FIFO inodes would both believe they held the lock, and the parse→write
+section that exists to prevent a lost update would stop preventing one.
+`openLock` now does the same post-open regular-file check `openRegular`
+already did. The doc comment claiming the Lstat refused a FIFO was corrected
+rather than deleted — the fourth instance of this repo's signature defect, a
+comment asserting a control the code did not have.
+
+Verified with a negative control: with the check reverted, the new `fifo`
+subtest fails and the `symlink` subtest still passes, which is what proves the
+new check is what adds the FIFO refusal rather than duplicating `O_NOFOLLOW`.
+
+**Four refusal branches abandoned an open directory descriptor.** A `Target`
+owns a dirfd, and `resolveEnvTarget` returned `Target{}` on four refusal paths
+without closing it, so a long-lived process refusing repeatedly retained one
+descriptor per attempt. Every refusal now routes through one closure, which is
+what keeps the next branch added there from leaking — a caller-side `defer`
+gives no signal when a return is missed. The test fixture and the one direct
+`ResolveTarget` test close theirs too.
+
 ## Out of scope
 
 - Reading or listing SOPS values (`env get --sops`, `env keys --sops`).

@@ -155,12 +155,24 @@ func openatCreate(dirfd int, name string, flags int, perm uint32) (int, error) {
 }
 
 // openLock creates or opens name inside the pinned directory as a lock file,
-// refusing a symlink.
+// refusing a symlink and anything that is not a regular file.
 //
-// A FIFO here does NOT block — O_RDWR on a FIFO succeeds immediately — so the
-// caller's Lstat is what refuses one, not this open. That is worth stating
-// because the opposite is the intuitive guess: the blocking case is the
-// read-only open above.
+// O_RDWR on a FIFO does NOT block — it returns immediately (measured on darwin
+// 25.5) — which is why this open needs no O_NONBLOCK and why it cannot rely on
+// blocking to refuse one. The post-open check is what refuses it.
+//
+// That check has to live HERE, not in the caller. withFileLock does Lstat the
+// name first, and O_NOFOLLOW closes the gap between that Lstat and this open
+// for a SYMLINK only: a swap to a FIFO in the same window is not a symlink, so
+// O_NOFOLLOW has nothing to say about it and the Lstat's answer is already
+// stale. The descriptor is the only thing that can be asked about the inode
+// actually opened, so the question gets asked of the descriptor — the same
+// pairing openRegular above uses, for the same reason.
+//
+// What it costs to omit: flock locks an open file description, so two writers
+// each holding a lock on a different FIFO inode both believe they hold the
+// lock, and the parse→write section that exists to prevent a lost update stops
+// preventing one.
 func (d *dirPin) openLock(name string) (*os.File, error) {
 	fd, err := openatCreate(d.fd, name, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if errors.Is(err, unix.ELOOP) {
@@ -169,7 +181,17 @@ func (d *dirPin) openLock(name string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return os.NewFile(uintptr(fd), name), nil
+	f := os.NewFile(uintptr(fd), name)
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, errNotRegular
+	}
+	return f, nil
 }
 
 // lstat reports name's permission bits and whether it is a regular file,
