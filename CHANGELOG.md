@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.19.0](https://github.com/cameronsjo/forgectl/compare/v0.18.0...v0.19.0) (2026-09-12)
+
+
+### Features
+
+* **cli:** add --json to launch which, pr list, tmux ls, workflow list, workflow status, and workflow verify ([2a4b281](https://github.com/cameronsjo/forgectl/commit/2a4b281a8115feb944e05aa8345412c8c5482b1a))
+* **cli:** bare forgectl opens a hub reaching every command group instead of only the tmux jumper; an unknown top-level verb or subverb (e.g. a typo) now always fails with Cobra's own unknown-command error rather than silently opening a menu ([137f8f1](https://github.com/cameronsjo/forgectl/commit/137f8f11fb5418f9aa12c552515508c383625e64))
+* **cli:** docs list gains --timeout (deadline, default 15s) and --limit (bound row count, default unlimited) ([91a907c](https://github.com/cameronsjo/forgectl/commit/91a907cc8e3867860cd93d507803d6d1b7c29f85))
+* **env:** env set --sops writes one key into a SOPS file, value never in argv ([b42f1a5](https://github.com/cameronsjo/forgectl/commit/b42f1a500348e9121ac2a092d085331bf2cc83d3))
+* **env:** env set --sops writes one key into a SOPS file, value never in argv ([8cf2084](https://github.com/cameronsjo/forgectl/commit/8cf2084429fff9ced33243205b4aece94600db95))
+* **pr:** admission cap on every launch path, --queue defers to the drainer ([#472](https://github.com/cameronsjo/forgectl/issues/472) Task 3) ([#516](https://github.com/cameronsjo/forgectl/issues/516)) ([1c47683](https://github.com/cameronsjo/forgectl/commit/1c47683741b4f5b9846e6851e314b2f42615368c))
+* **pr:** durable launch phases, slot reservation, and pr repair ([#299](https://github.com/cameronsjo/forgectl/issues/299) Task 2) ([#502](https://github.com/cameronsjo/forgectl/issues/502)) ([ca71948](https://github.com/cameronsjo/forgectl/commit/ca7194882b0f5fa57f113baa70d385612c54927a))
+* **pr:** lifecycle lock, atomic breadcrumb writer, and v2 record fields ([#299](https://github.com/cameronsjo/forgectl/issues/299)) ([#497](https://github.com/cameronsjo/forgectl/issues/497)) ([2b4c3a0](https://github.com/cameronsjo/forgectl/commit/2b4c3a025191caf8bedd2f41884227907f55b072))
+* **pr:** pr repair --prune reaps set-aside records and compacts the audit log ([#511](https://github.com/cameronsjo/forgectl/issues/511)) ([e0c3340](https://github.com/cameronsjo/forgectl/commit/e0c33403967f5d97968ffc4c0e1447f83c88225f))
+* **pr:** queue and drain verbs ([#473](https://github.com/cameronsjo/forgectl/issues/473) Task 4) ([#518](https://github.com/cameronsjo/forgectl/issues/518)) ([f12019e](https://github.com/cameronsjo/forgectl/commit/f12019e6416fe06f7c03cd718f2bf6b6fd874acd))
+* **sops:** pure domain package — path grammar, value rules, and the line editor ([bbcd762](https://github.com/cameronsjo/forgectl/commit/bbcd7626d2ac7bf3b3c2f50b24aec8d3c3966aa9))
+
+
+### Bug Fixes
+
+* **cli:** errors keep paths as written; env check documents exit codes; config names init ([#486](https://github.com/cameronsjo/forgectl/issues/486)) ([bf03b23](https://github.com/cameronsjo/forgectl/commit/bf03b23995cf5a56872b8bfdb29651ee2aceba5e))
+* **env:** the confirmed --any-file path is the path that gets written ([e4c2009](https://github.com/cameronsjo/forgectl/commit/e4c200937623b83c1bbe3954c4a1ad280742161e))
+* **env:** the confirmed --any-file path is the path that gets written ([7bdf6b6](https://github.com/cameronsjo/forgectl/commit/7bdf6b6895121c9de9c4742bbdcdfe87ce4da1a4))
+* **env:** the lock open validates its own descriptor, and refusals close theirs ([d40cf53](https://github.com/cameronsjo/forgectl/commit/d40cf53ad4490a60183a24a3d3f43496e90b4924))
+* **pr:** dash flags needs-repair rows with their reason and stops calling queued records an internal error ([#509](https://github.com/cameronsjo/forgectl/issues/509)) ([dcd29a2](https://github.com/cameronsjo/forgectl/commit/dcd29a2327e67634c6e49e5b01057ef80186814c))
+* **pr:** teardown and cleanup write the same intent-then-complete audit rows repair does ([#510](https://github.com/cameronsjo/forgectl/issues/510)) ([cf7e768](https://github.com/cameronsjo/forgectl/commit/cf7e76849fe29274f04dd10da9744c1149e34c4c))
+* **sops:** the block refusal names the rule, not the key the operator supplied ([281ff61](https://github.com/cameronsjo/forgectl/commit/281ff61b26155b58acd1ecdadf3a3f79591411c3))
+* **sops:** the rules check walks the whole path and the verifier resolves it ([59538fc](https://github.com/cameronsjo/forgectl/commit/59538fc13beb01bfc912d4f5b1284fdbe1c65df4))
+* **tasks:** mcp --http requires --pin-ip; pinned dialer copies its list; --ping keeps the body read error ([#488](https://github.com/cameronsjo/forgectl/issues/488)) ([94d2d65](https://github.com/cameronsjo/forgectl/commit/94d2d65c720a411f689c7ee16fa9a0c42ecd9c8c))
+* **test:** tree-walking tests skip dot-directories; ignore nested worktrees ([#484](https://github.com/cameronsjo/forgectl/issues/484)) ([f0a3255](https://github.com/cameronsjo/forgectl/commit/f0a32555dd26df6fc7a2d619f0efd6db1d4c8869))
+
 ## [0.18.0](https://github.com/cameronsjo/forgectl/compare/v0.17.3...v0.18.0) (2026-09-08)
 
 
