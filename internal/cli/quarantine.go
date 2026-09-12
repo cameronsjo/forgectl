@@ -93,6 +93,11 @@ os.Rename — reversible, unlike workflow's destructive strip step.
 
 Targets default to the canonical instruction-file list; override with
 repeatable --targets.`,
+		// A stray subverb (a typo like `restor`) must not fall through to
+		// RunE below — RunE here is Hide, a real mutation, so a typo of
+		// `restore` must never silently run it (forgectl#479;
+		// TestGroupParentsRefuseStrayTokens).
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runQuarantineHide(cmd, client, f)
 		},

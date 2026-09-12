@@ -116,6 +116,9 @@ func newProjectsCmd(client *projects.Client, th theme.Theme) *cobra.Command {
 		Use:     "projects",
 		Aliases: []string{"proj"},
 		Short:   "Find and open projects across local, GitHub, and Gitea (clones on demand)",
+		// A stray subverb must not fall through to RunE below (forgectl#479;
+		// TestGroupParentsRefuseStrayTokens).
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return newProjectsPickCmd(client, th).RunE(cmd, nil)
 		},

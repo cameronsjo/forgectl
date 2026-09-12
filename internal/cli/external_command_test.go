@@ -123,14 +123,18 @@ func TestExternalCommand_IneligiblePrefixesNeverProbe(t *testing.T) {
 	}
 }
 
+// TestExternalCommand_BareDashStaysMenuShorthand is stale in name only: "-"
+// still never probes as an external command, but the hub's routing arm no
+// longer intercepts it as an unknown top-level verb (forgectl#479) — it
+// reaches Cobra/fang like any other unrecognized token.
 func TestExternalCommand_BareDashStaysMenuShorthand(t *testing.T) {
 	root := newRoot(module.Deps{Runner: &runnerexec.FakeRunner{}})
 	assertExternalCommandDoesNotProbe(t, root, []string{"-"})
-	if got := decideRoute(root, []string{"-"}, true); got != routeTUI {
-		t.Errorf("interactive bare dash route = %v, want routeTUI", got)
+	if got := decideRoute(root, []string{"-"}, true); got != routeDispatch {
+		t.Errorf("interactive bare dash route = %v, want routeDispatch", got)
 	}
-	if got := decideRoute(root, []string{"-"}, false); got != routeHeadlessMenu {
-		t.Errorf("headless bare dash route = %v, want routeHeadlessMenu", got)
+	if got := decideRoute(root, []string{"-"}, false); got != routeDispatch {
+		t.Errorf("headless bare dash route = %v, want routeDispatch", got)
 	}
 }
 
@@ -138,11 +142,14 @@ func TestExternalCommand_KnownParentUnknownSubverbNeverProbes(t *testing.T) {
 	root := newRoot(module.Deps{Runner: &runnerexec.FakeRunner{}})
 	args := []string{"tmux", "frobnicate"}
 	assertExternalCommandDoesNotProbe(t, root, args)
-	if got := decideRoute(root, args, true); got != routeTUI {
-		t.Errorf("interactive route = %v, want routeTUI", got)
+	// tmux's Args: cobra.NoArgs (forgectl#479) is what makes this
+	// routeDispatch safe: the stray subverb hits cobra's own unknown-command
+	// error instead of falling through to tmux's RunE.
+	if got := decideRoute(root, args, true); got != routeDispatch {
+		t.Errorf("interactive route = %v, want routeDispatch", got)
 	}
-	if got := decideRoute(root, args, false); got != routeHeadlessMenu {
-		t.Errorf("headless route = %v, want routeHeadlessMenu", got)
+	if got := decideRoute(root, args, false); got != routeDispatch {
+		t.Errorf("headless route = %v, want routeDispatch", got)
 	}
 }
 
