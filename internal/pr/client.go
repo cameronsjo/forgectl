@@ -3,7 +3,6 @@ package pr
 import (
 	"context"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -31,15 +30,18 @@ type Client struct {
 	// loaded path resolves to inside it. Injectable for tests.
 	sessionsDir string
 
-	// sessionsMu serializes this Client's own mutations of sessionsDir: a
-	// teardown holds it from membership resolution through the final unlink,
-	// and breadcrumb writes take it too, so one Client cannot read a record
-	// while replacing it.
+	// fs is the record writer's filesystem seam (record.go). Production is the
+	// real filesystem; tests inject a fault-and-log double.
+	fs recordFS
+
+	// lockWait bounds withLifecycleLock's wait for the cross-process lifecycle
+	// lock (lifecycle_unix.go). Zero means the default; tests shorten it.
 	//
-	// SCOPE, STATED HONESTLY: this prevents benign in-process races within one
-	// Client. It is NOT cross-process locking and NOT protection against a
-	// hostile same-uid writer — see the residual note on discardStale.
-	sessionsMu sync.Mutex
+	// The lifecycle lock replaced the former in-process sessionsMu: every site
+	// that serialized record reads and writes now serializes them across
+	// processes too. It is still NOT protection against a hostile same-uid
+	// writer — see the residual note on discardStale.
+	lockWait time.Duration
 
 	// findingsDir is the forgectl-owned directory (config.PrFindingsDir) that
 	// holds `forgectl pr local` findings — the deliverable of a local
@@ -132,12 +134,30 @@ func WithDispatchWait(fn func(context.Context) error) Option {
 	return func(c *Client) { c.dispatchWait = fn }
 }
 
+// WithRecordFS injects the record writer's filesystem seam — used in tests to
+// fail one named step of the atomic write and to log the call order.
+func WithRecordFS(rfs recordFS) Option {
+	return func(c *Client) {
+		if rfs != nil {
+			c.fs = rfs
+		}
+	}
+}
+
+// WithLockWait overrides how long withLifecycleLock waits for the lifecycle
+// lock before refusing — used in tests to make contention observable in
+// milliseconds.
+func WithLockWait(d time.Duration) Option {
+	return func(c *Client) { c.lockWait = d }
+}
+
 // New builds a Client over the given Runner.
 func New(run exec.Runner, opts ...Option) *Client {
 	c := &Client{
 		run:         run,
 		tmuxClient:  tmux.New(run),
 		tmuxSession: defaultTmuxSession,
+		fs:          osRecordFS{},
 		isTTY:       launch.IsInteractiveTTY,
 		dispatchWait: func(ctx context.Context) error {
 			timer := time.NewTimer(8 * time.Second)

@@ -44,7 +44,7 @@ func TestPrListJSON_KeySet(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d, want 1: %s", len(rows), got)
 	}
-	want := []string{"ref", "created_at", "path", "status"}
+	want := []string{"ref", "created_at", "path", "status", "phase"}
 	if len(rows[0]) != len(want) {
 		t.Fatalf("row keys = %v, want exactly %v", keysOf(rows[0]), want)
 	}
@@ -273,10 +273,11 @@ func TestPrList_MixedBatchesOnlyLiveRefs(t *testing.T) {
 	if liveLine == "" || staleLine == "" {
 		t.Fatalf("both rows must render:\n%s", got)
 	}
-	if !strings.HasSuffix(liveLine, "\t?") {
+	// Status is field 4; phase (field 5) is "-" on these legacy records.
+	if !strings.HasSuffix(liveLine, "\t?\t-") {
 		t.Errorf("the live row must degrade to %q under an unreadable tmux: %q", "?", liveLine)
 	}
-	if !strings.HasSuffix(staleLine, "\t"+workspaceMissingStatus) {
+	if !strings.HasSuffix(staleLine, "\t"+workspaceMissingStatus+"\t-") {
 		t.Errorf("the stale row must report %q regardless of tmux: %q", workspaceMissingStatus, staleLine)
 	}
 }
@@ -340,8 +341,8 @@ func TestPrList_LiveWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pr list: %v", err)
 	}
-	if !strings.Contains(got, "\tlive\n") {
-		t.Errorf("pr list output missing a trailing \"live\" status column:\n%s", got)
+	if !strings.Contains(got, "\tlive\t-\n") {
+		t.Errorf("pr list output missing the \"live\" status column (field 4) before the phase column:\n%s", got)
 	}
 	if !strings.Contains(got, ref.String()) {
 		t.Errorf("pr list output missing the ref:\n%s", got)
@@ -354,8 +355,8 @@ func TestPrList_LiveWindow(t *testing.T) {
 	// assertion here, and still hand `cut -f3` a timestamp.
 	line := strings.TrimSuffix(got, "\n")
 	fields := strings.Split(line, "\t")
-	if len(fields) != 4 {
-		t.Fatalf("pr list row has %d tab-separated fields, want exactly 4 (ref, created, breadcrumb, status):\n%s", len(fields), got)
+	if len(fields) != 5 {
+		t.Fatalf("pr list row has %d tab-separated fields, want exactly 5 (ref, created, breadcrumb, status, phase):\n%s", len(fields), got)
 	}
 	if fields[0] != ref.String() {
 		t.Errorf("field 1 = %q, want the ref %q", fields[0], ref.String())
@@ -365,6 +366,9 @@ func TestPrList_LiveWindow(t *testing.T) {
 	}
 	if fields[3] != "live" {
 		t.Errorf("field 4 = %q, want the status %q", fields[3], "live")
+	}
+	if fields[4] != "-" {
+		t.Errorf("field 5 = %q, want %q — the recorded phase, and a legacy record has none", fields[4], "-")
 	}
 }
 
@@ -394,8 +398,8 @@ func TestPrList_UnreadableTmux_DegradesAndSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pr list must succeed when tmux is unreadable, got: %v", err)
 	}
-	if !strings.Contains(got, "\t?\n") {
-		t.Errorf("pr list output missing a trailing \"?\" status for an unreadable tmux:\n%s", got)
+	if !strings.Contains(got, "\t?\t-\n") {
+		t.Errorf("pr list output missing the \"?\" status (field 4) for an unreadable tmux:\n%s", got)
 	}
 	if strings.Contains(got, "window gone") {
 		t.Errorf("an unreadable tmux must NOT render \"window gone\" — that would flag every "+

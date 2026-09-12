@@ -51,12 +51,16 @@ var staleMemberIsRegular = func(info fs.FileInfo) bool { return info.Mode().IsRe
 // through the existing error handling, but it cannot cross branches after
 // mutation has started.
 func (c *Client) Teardown(ctx context.Context, path string) error {
-	// Held across membership, classification, and the final unlink so this
-	// Client cannot race itself. Cleanup deliberately does NOT hold it around
-	// its Teardown calls; each candidate reacquires it here.
-	c.sessionsMu.Lock()
-	defer c.sessionsMu.Unlock()
+	// The lifecycle lock is held across membership, classification, and the
+	// final unlink so no forgectl process can race this one. It is
+	// non-reentrant: Cleanup takes it ONCE and calls teardownLocked per
+	// candidate rather than re-entering here.
+	return c.withLifecycleLock(ctx, "teardown", func() error { return c.teardownLocked(ctx, path) })
+}
 
+// teardownLocked is Teardown's core for a caller that already holds the
+// lifecycle lock.
+func (c *Client) teardownLocked(ctx context.Context, path string) error {
 	member, err := c.resolveBreadcrumbMember(path)
 	if err != nil {
 		return err
@@ -262,7 +266,13 @@ func sameBreadcrumbRecord(a, b Breadcrumb) bool {
 		a.Ref == b.Ref &&
 		a.Agent == b.Agent &&
 		a.Local == b.Local &&
-		a.CreatedAt.Equal(b.CreatedAt)
+		a.CreatedAt.Equal(b.CreatedAt) &&
+		a.Provenance == b.Provenance &&
+		a.Version == b.Version &&
+		a.Phase == b.Phase &&
+		a.Revision == b.Revision &&
+		a.WindowID == b.WindowID &&
+		a.RepairReason == b.RepairReason
 }
 
 // discard performs the actual teardown for an already-validated session: undo
@@ -335,25 +345,32 @@ func (c *Client) discard(ctx context.Context, sess Session) error {
 // One failure is retained as the first error while later candidates continue,
 // matching the existing cleanup contract.
 func (c *Client) Cleanup(ctx context.Context, date string) error {
-	summaries, err := c.List()
-	if err != nil {
-		return err
-	}
-	var discarded int
-	var firstErr error
-	for _, sum := range summaries {
-		if sum.CreatedAt().UTC().Format("2006-01-02") != date {
-			continue
+	// One lock hold for the whole sweep: the lock is non-reentrant, so the
+	// listing and every teardown go through the *Locked cores.
+	return c.withLifecycleLock(ctx, "cleanup", func() error {
+		summaries, unreadable, err := c.listLocked()
+		if err != nil {
+			return err
 		}
-		if err := c.Teardown(ctx, sum.Path()); err != nil {
-			slog.Error("Failed to tear down session during cleanup.", "path", sum.Path(), "error", err)
-			if firstErr == nil {
-				firstErr = err
+		if unreadable > 0 {
+			slog.Warn("Cleanup is sweeping past records it could not read.", "unreadable", unreadable)
+		}
+		var discarded int
+		var firstErr error
+		for _, sum := range summaries {
+			if sum.CreatedAt().UTC().Format("2006-01-02") != date {
+				continue
 			}
-			continue
+			if err := c.teardownLocked(ctx, sum.Path()); err != nil {
+				slog.Error("Failed to tear down session during cleanup.", "path", sum.Path(), "error", err)
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			discarded++
 		}
-		discarded++
-	}
-	slog.Info("Cleanup complete.", "date", date, "discarded", discarded)
-	return firstErr
+		slog.Info("Cleanup complete.", "date", date, "discarded", discarded)
+		return firstErr
+	})
 }

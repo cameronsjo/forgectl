@@ -109,7 +109,7 @@ func TestPrList_LeavesAnOrdinaryPathVerbatim(t *testing.T) {
 	sessionsDir := t.TempDir()
 	seedSummaries(t, sessionsDir, nil, []pr.Ref{{Owner: "o", Repo: "r", Number: 1}})
 	client := pr.New(&exec.FakeRunner{}, pr.WithSessionsDir(sessionsDir), pr.WithTmuxSession("forgectl"))
-	summaries, err := client.List()
+	summaries, _, err := client.List()
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -124,8 +124,8 @@ func TestPrList_LeavesAnOrdinaryPathVerbatim(t *testing.T) {
 	}
 
 	fields := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\t")
-	if len(fields) != 4 {
-		t.Fatalf("want 4 tab-separated fields, got %d: %q", len(fields), stdout.String())
+	if len(fields) != 5 {
+		t.Fatalf("want 5 tab-separated fields, got %d: %q", len(fields), stdout.String())
 	}
 	if fields[2] != summaries[0].Path() {
 		t.Errorf("field 3 = %q, want the raw breadcrumb path %q — this is what `pr teardown` is fed",
@@ -136,7 +136,7 @@ func TestPrList_LeavesAnOrdinaryPathVerbatim(t *testing.T) {
 func TestPrDash_EscapesAControlBearingBreadcrumbName(t *testing.T) {
 	sessionsDir := seedHostileBreadcrumb(t)
 	client := pr.New(&exec.FakeRunner{}, pr.WithSessionsDir(sessionsDir))
-	summaries, err := client.List()
+	summaries, _, err := client.List()
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

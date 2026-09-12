@@ -29,6 +29,11 @@ const (
 	// lexically absent beneath a parent directory that itself exists and
 	// resolves. Only this state may authorize a breadcrumb-only stale unlink.
 	workspaceAvailabilityMissing
+	// workspaceAvailabilityNone means the record legitimately has no
+	// workspace yet — a queued or preparing session, where nothing has been
+	// cloned. It is neither live nor missing: there is nothing to act on and
+	// nothing that went away.
+	workspaceAvailabilityNone
 )
 
 // workspaceMissingError reports the one narrow state that authorizes stale

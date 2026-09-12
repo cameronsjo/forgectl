@@ -13,8 +13,9 @@ import (
 )
 
 // List returns a presentation row for every review session recorded in the
-// session-state dir whose workspace is either LIVE or cleanly MISSING, sorted
-// newest first.
+// session-state dir whose workspace is LIVE, cleanly MISSING, or legitimately
+// NONE (queued/preparing), sorted newest first — and the count of records it
+// could NOT read.
 //
 // Rows are SessionSummary, not Session, because a stale record has no workspace
 // to act on and must still be listable — a row the user cannot see is a row
@@ -22,17 +23,36 @@ import (
 //
 // Each breadcrumb goes through the same location+record validation as every
 // other consumer; anything that fails, or whose workspace classifies invalid,
-// is skipped (logged), not fatal — one corrupt file must not blind the list.
-func (c *Client) List() ([]SessionSummary, error) {
+// is skipped (logged) rather than fatal — one corrupt file must not blind the
+// list. But the skip is COUNTED and returned, because the log line that
+// reports it lands in a handler a default install discards: an older binary
+// reading a newer record, or a torn file, would otherwise vanish from the
+// listing silently, exit 0, and read as a torn-down session. `pr list` prints
+// the count; any arm that COUNTS records (admission, drain) refuses on a
+// nonzero value rather than proceeding on a short count.
+//
+// It takes the lifecycle lock so it never reads a record mid-rename.
+func (c *Client) List() (summaries []SessionSummary, unreadable int, err error) {
+	err = c.withLifecycleLock(context.Background(), "list", func() error {
+		var lerr error
+		summaries, unreadable, lerr = c.listLocked()
+		return lerr
+	})
+	return summaries, unreadable, err
+}
+
+// listLocked is List's core for callers that already hold the lifecycle
+// lock (Cleanup). Composite verbs call this; they never re-enter List.
+func (c *Client) listLocked() ([]SessionSummary, int, error) {
 	entries, err := os.ReadDir(c.sessionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, 0, nil
 		}
-		return nil, fmt.Errorf("read pr sessions dir: %w", err)
+		return nil, 0, fmt.Errorf("read pr sessions dir: %w", err)
 	}
 	var summaries []SessionSummary
-	var live, missing, invalid int
+	var live, missing, none, invalid int
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 			continue
@@ -40,7 +60,7 @@ func (c *Client) List() ([]SessionSummary, error) {
 		path := filepath.Join(c.sessionsDir, e.Name())
 		sum, err := c.loadSummary(path)
 		if err != nil {
-			slog.Warn("Skipping invalid pr breadcrumb.", "path", path, "error", err)
+			slog.Warn("Skipping unreadable pr breadcrumb.", "path", path, "error", err)
 			invalid++
 			continue
 		}
@@ -49,6 +69,8 @@ func (c *Client) List() ([]SessionSummary, error) {
 			missing++
 		case sum.IsWorkspaceLive():
 			live++
+		case sum.IsWorkspaceNone():
+			none++
 		}
 		summaries = append(summaries, sum)
 	}
@@ -58,8 +80,8 @@ func (c *Client) List() ([]SessionSummary, error) {
 	// One aggregate at debug altitude. Per-record warnings above keep their
 	// existing altitude; no path or ref is added here, so listing stays quiet
 	// and leaks nothing new.
-	slog.Debug("Listed pr session breadcrumbs.", "live", live, "missing", missing, "invalid_skipped", invalid)
-	return summaries, nil
+	slog.Debug("Listed pr session breadcrumbs.", "live", live, "missing", missing, "none", none, "unreadable", invalid)
+	return summaries, invalid, nil
 }
 
 // loadSummary builds one presentation row: record validation, then workspace
@@ -74,6 +96,13 @@ func (c *Client) loadSummary(path string) (SessionSummary, error) {
 	if err != nil {
 		return SessionSummary{}, err
 	}
+	// A queued or preparing record has no workspace by design; the validator
+	// has already tied that allowance to exactly those phases, so there is
+	// nothing to classify.
+	if bc.Workspace == "" {
+		return SessionSummary{ref: ref, path: path, createdAt: bc.CreatedAt,
+			availability: workspaceAvailabilityNone, phase: bc.Phase}, nil
+	}
 	// Live and missing are both presentable, so their errors are discarded on
 	// purpose — classifyWorkspace returns the typed missing error alongside a
 	// perfectly listable row, and only a consumer that ACTS on the workspace
@@ -84,7 +113,7 @@ func (c *Client) loadSummary(path string) (SessionSummary, error) {
 	default:
 		return SessionSummary{}, fmt.Errorf("breadcrumb %s: %w", termsafe.QuotePath(path), err)
 	}
-	return SessionSummary{ref: ref, path: path, createdAt: bc.CreatedAt, availability: avail}, nil
+	return SessionSummary{ref: ref, path: path, createdAt: bc.CreatedAt, availability: avail, phase: bc.Phase}, nil
 }
 
 // refFromRecord restores the Ref a breadcrumb records. Locality cannot ride
