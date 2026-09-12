@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 	"github.com/cameronsjo/forgectl/internal/tui"
@@ -198,6 +200,127 @@ type mockExitErr struct{}
 
 func (e *mockExitErr) Error() string { return "exit status 1" }
 
+// --- group parents refuse stray tokens (forgectl#479) ---
+
+// hubArgsAllowlist names parents that legitimately take arbitrary args on
+// their own invocation — launch's Use is "launch [harness args…]", the
+// pre-Cobra passthrough for the launcher. Every other parent with
+// subcommands and its own RunE must reject a stray token via Args, or a typo
+// of a real subverb (quarantine's `restor` for `restore`) falls through to
+// that RunE with the typo as an ignored positional.
+var hubArgsAllowlist = map[string]bool{"launch": true}
+
+// TestGroupParentsRefuseStrayTokens walks every top-level command: a parent
+// with subcommands AND its own RunE must declare Args, or an unmatched
+// subverb reaches that RunE instead of Cobra's own unknown-command error.
+// Commit ordering matters here: this must be true before shouldLaunchTUI's
+// unknown-subverb arm is removed, because that arm is today the only thing
+// standing between `quarantine restor` and a real quarantine hide.
+func TestGroupParentsRefuseStrayTokens(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	for _, cmd := range root.Commands() {
+		if len(cmd.Commands()) == 0 || cmd.RunE == nil {
+			continue
+		}
+		if hubArgsAllowlist[cmd.Name()] {
+			continue
+		}
+		if cmd.Args == nil {
+			t.Errorf("command %q has subcommands and its own RunE but no Args validator — a stray subverb falls through to RunE instead of Cobra's unknown-command error", cmd.Name())
+		}
+	}
+}
+
+// TestTmuxFrobnicateReturnsCobraError pins the fix directly: an unknown
+// tmux subverb must fail with Cobra's own error, never open the TUI (which
+// would read as a Bubble Tea error/hang under go test's non-terminal stdio).
+func TestTmuxFrobnicateReturnsCobraError(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	root.SetOut(new(bytes.Buffer))
+	root.SetErr(new(bytes.Buffer))
+	root.SetArgs([]string{"tmux", "frobnicate"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected an error for an unknown tmux subverb, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown command") {
+		t.Errorf("error = %q, want cobra's unknown-command error", err.Error())
+	}
+}
+
+// TestQuarantineRestorReturnsCobraErrorAndTouchesNothing pins the
+// destructive half of the same fix: a typo of `restore` must never reach
+// runQuarantineHide.
+func TestQuarantineRestorReturnsCobraErrorAndTouchesNothing(t *testing.T) {
+	dir := t.TempDir()
+	claudeMd := dir + "/CLAUDE.md"
+	if err := os.WriteFile(claudeMd, []byte("hi"), 0o600); err != nil {
+		t.Fatalf("seed CLAUDE.md: %v", err)
+	}
+
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	root.SetOut(new(bytes.Buffer))
+	root.SetErr(new(bytes.Buffer))
+	root.SetArgs([]string{"quarantine", "restor", "--root", dir})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected an error for the unknown subverb `restor`, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown command") {
+		t.Errorf("error = %q, want cobra's unknown-command error", err.Error())
+	}
+	if _, statErr := os.Stat(claudeMd); statErr != nil {
+		t.Errorf("CLAUDE.md should still be present at its original name, stat error: %v", statErr)
+	}
+}
+
+// --- ActionRunVerb re-enters the typed dispatch pipeline (forgectl#479) ---
+
+// TestRunHubVerb_MatchesTypedDispatch pins the Architecture's re-entry
+// claim directly: a hub-selected "launch which" and a typed "forgectl
+// launch which" must produce byte-identical stdout, because runHubVerb
+// hands the same argv to the same execCommand a typed invocation uses —
+// launchIntercept and the extension rungs apply either way.
+func TestRunHubVerb_MatchesTypedDispatch(t *testing.T) {
+	t.Setenv(skipLegacyMigrateEnv, "1") // skip the migration side-effects; not what this test is about
+
+	deps := module.Deps{Runner: &exec.FakeRunner{}, Theme: theme.Default()}
+	argv := []string{"launch", "which"}
+
+	var hubOut bytes.Buffer
+	hubRoot := newRoot(deps)
+	hubRoot.SetOut(&hubOut)
+	hubRoot.SetErr(new(bytes.Buffer))
+	if err := runHubVerb(context.Background(), deps, hubRoot, argv, deps.Theme); err != nil {
+		t.Fatalf("runHubVerb() error = %v", err)
+	}
+
+	var typedOut bytes.Buffer
+	typedRoot := newRoot(deps)
+	typedRoot.SetOut(&typedOut)
+	typedRoot.SetErr(new(bytes.Buffer))
+	if err := execCommand(context.Background(), typedRoot, argv, deps.Theme); err != nil {
+		t.Fatalf("execCommand() error = %v", err)
+	}
+
+	if hubOut.String() != typedOut.String() {
+		t.Errorf("hub-selected output differs from typed dispatch:\nhub:   %q\ntyped: %q", hubOut.String(), typedOut.String())
+	}
+}
+
+// TestRunAction_ActionShowInvocationPrintsAndDoesNotRun pins the NeedsArgs
+// leaf's contract: the caller prints "$ forgectl <line>" (placeholder
+// intact) to stderr and runs nothing.
+func TestRunAction_ActionShowInvocationPrintsAndDoesNotRun(t *testing.T) {
+	th := theme.Default()
+	line := hubDollarLine(th, []string{"pr", "<ref>"})
+	if !strings.Contains(line, "$ forgectl pr <ref>") {
+		t.Errorf("hubDollarLine(...) = %q, want it to contain %q", line, "$ forgectl pr <ref>")
+	}
+}
+
 // --- leadsWithPath / path-preserving error rendering (forgectl#481) ---
 
 func TestLeadsWithPath(t *testing.T) {
@@ -279,6 +402,29 @@ func TestFangErrorSinkStructuredHeadlinePathLeadingKeepsCase(t *testing.T) {
 	}
 	if strings.Contains(out, "/Etc") {
 		t.Errorf("structured headline was title-cased: %q", out)
+	}
+}
+
+// TestUnknownCommandTailPointsToTheMenu pins the unknown-command tail's
+// updated text (forgectl#479): the old fang-authored "Try --help for usage."
+// grows a second clause pointing at the hub.
+func TestUnknownCommandTailPointsToTheMenu(t *testing.T) {
+	var buf bytes.Buffer
+	err := &structuredTerminalError{headline: `unknown command "frobnicate" for "forgectl"`}
+	renderStructuredTerminalError(&buf, fang.Styles{}, err)
+	want := "Try --help for usage, or run forgectl with no arguments for the menu."
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("unknown-command tail = %q, want it to contain %q", buf.String(), want)
+	}
+}
+
+// TestRootLongNamesTheMenu pins root's Long text verbatim (Architecture).
+func TestRootLongNamesTheMenu(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	want := `Two ways in: type a command — forgectl tmux ls — or run forgectl with no
+arguments for a menu over every command group.`
+	if root.Long != want {
+		t.Errorf("root.Long = %q, want %q", root.Long, want)
 	}
 }
 

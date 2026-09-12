@@ -178,6 +178,14 @@ func clampLimit(n int) int {
 	}
 }
 
+// maxTrailerRunes is the room reserved for the created-by trailer inside
+// maxDescriptionSendRunes. The trailer is appended AFTER the caller's text, so
+// without a reserve a caller who sized their description exactly to the limit
+// is refused by CreateTask with a rune count they did not author — an error
+// that describes the server's own addition and reads as a caller mistake.
+// The trailer is a fixed ~60 runes plus a client name callerName caps at 100.
+const maxTrailerRunes = 200
+
 // createDescription appends the provenance trailer every create_task write
 // carries. A board row is otherwise anonymous, and the point of one bot user
 // per agent is that a row can be traced back to the call that made it — the
@@ -288,8 +296,22 @@ func NewMCPServer(client *Client, defaultClientName string) *mcp.Server {
 		if err != nil {
 			return toolError("could not list projects: %v", err), nil, nil
 		}
+		// Capped like every other listing here. An uncapped list_projects was
+		// the one tool that could return the whole board in a single result:
+		// FetchProjects paginates to exhaustion (up to maxItems), and every
+		// title in it is untrusted text. Same shape as ready_tasks — the total
+		// is captured before the slice so a truncated answer never reports its
+		// own length as the board's.
+		total := len(projects)
+		if total > maxListLimit {
+			projects = projects[:maxListLimit]
+		}
 		var b strings.Builder
-		fmt.Fprintf(&b, "%d project(s):\n", len(projects))
+		if total > len(projects) {
+			fmt.Fprintf(&b, "%d project(s), showing the first %d:\n", total, len(projects))
+		} else {
+			fmt.Fprintf(&b, "%d project(s):\n", total)
+		}
 		for _, p := range projects {
 			fmt.Fprintf(&b, "  #%d %s\n", p.ID, f.wrapLine(truncateRunes(p.Title, maxTitleShowRunes)))
 		}
@@ -334,7 +356,13 @@ func NewMCPServer(client *Client, defaultClientName string) *mcp.Server {
 			fmt.Fprintf(&b, "  #%d [%s] project %d %s\n", task.ID, doneLabel(task.Done), task.ProjectID, f.wrapLine(truncateRunes(task.Title, maxTitleShowRunes)))
 		}
 		header := fmt.Sprintf("%d task(s):\n", matched)
-		if matched > shown {
+		switch {
+		case matched > shown && shown >= maxListLimit:
+			// Already at the cap. Telling the caller to raise `limit` here is
+			// advice that cannot work, and an agent following it burns a second
+			// call to get the identical result. Name the lever that does work.
+			header = fmt.Sprintf("%d task(s), showing the first %d — that is the cap; narrow with `project_id` to see the rest:\n", matched, shown)
+		case matched > shown:
 			header = fmt.Sprintf("%d task(s), showing the first %d — raise `limit` (cap %d) for more:\n", matched, shown, maxListLimit)
 		}
 		return toolText(header + b.String()), nil, nil
@@ -430,6 +458,15 @@ func NewMCPServer(client *Client, defaultClientName string) *mcp.Server {
 		}
 		if strings.TrimSpace(in.Title) == "" {
 			return toolError("create_task: title is required and must not be blank"), nil, nil
+		}
+		// Bound the CALLER's description against the caller's own budget, before
+		// the trailer is appended. CreateTask's bound runs on the combined text,
+		// so leaving this to it reports a length that includes the server's
+		// trailer — a refusal that names a number the caller cannot reconcile
+		// with what it sent.
+		if n := len([]rune(in.Description)); n > maxDescriptionSendRunes-maxTrailerRunes {
+			return toolError("create_task: description is %d characters, over the %d limit (the remaining %d are reserved for the created-by trailer)",
+				n, maxDescriptionSendRunes-maxTrailerRunes, maxTrailerRunes), nil, nil
 		}
 		// Pre-read, fail closed. A project this credential cannot READ is one
 		// it must not write to, and the write's own 401 cannot distinguish

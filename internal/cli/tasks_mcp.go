@@ -80,11 +80,14 @@ TRANSPORTS AND CREDENTIALS
              source, deliberately: an env var is readable through
              docker inspect and /proc/<pid>/environ.
 
-  --pin-ip   repeatable, --http only. An INTERSECTION with the host-pinning
-             policy, not a fallback: an address is dialed only if it is in this
-             list AND the policy admits it, with list membership standing in
-             for the default-gateway corroboration. A public address is refused
-             even when listed.
+  --pin-ip   repeatable, and REQUIRED with --http (rejected without it). An
+             INTERSECTION with the host-pinning policy, not a fallback: an
+             address is dialed only if it is in this list AND the policy admits
+             it, with list membership standing in for the default-gateway
+             corroboration. A public address is refused even when listed. It is
+             required rather than offered because inside a container there is no
+             ` + "`route`" + ` binary, so the gateway corroboration can never pass and an
+             empty list would fall through to accepting any public address.
 
   --ping     probe a local --http listener with an initialize request and exit
              0 on a JSON-RPC result. This is the container healthcheck.`,
@@ -101,7 +104,7 @@ TRANSPORTS AND CREDENTIALS
 
 	cmd.Flags().StringVar(&httpAddr, "http", "", "serve streamable HTTP on this address (e.g. :3000) instead of stdio")
 	cmd.Flags().StringVar(&tokenFile, "token-file", "", "read the bearer token from this file (required with --http)")
-	cmd.Flags().StringArrayVar(&pinIPs, "pin-ip", nil, "allow-list one address the host may resolve to (repeatable, --http only)")
+	cmd.Flags().StringArrayVar(&pinIPs, "pin-ip", nil, "allow-list one address the host may resolve to (repeatable; REQUIRED with --http, rejected without it)")
 	cmd.Flags().BoolVar(&ping, "ping", false, "probe the local --http address with an initialize request and exit 0 on a result")
 	return cmd
 }
@@ -323,7 +326,11 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s did not answer: %w", url, err), exitTasksUnreachable)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// The read error is kept rather than discarded. Dropping it makes a body
+	// that FAILED TO ARRIVE byte-identical to one that arrived malformed, and
+	// the verdict below would then blame the server's payload for a transport
+	// fault — a confident, wrong statement about the service being probed.
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d", url, resp.StatusCode), 1)
 	}
@@ -338,6 +345,9 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 	// session behind in exactly the runs where cleanup matters most.
 	releasePingSession(cmd.Context(), url, resp.Header.Get("Mcp-Session-Id"))
 
+	if readErr != nil {
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body could not be read: %w", url, resp.StatusCode, readErr), exitTasksUnreachable)
+	}
 	if !hasJSONRPCResult(raw) {
 		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body carries no JSON-RPC result", url, resp.StatusCode), 1)
 	}

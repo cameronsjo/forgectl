@@ -47,7 +47,7 @@ func sized(m model, w, h int) model {
 }
 
 func TestMenuViewRenders(t *testing.T) {
-	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true, theme.Default()), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{StartInTmux: true, NoIcons: true, Theme: theme.Default()}), 80, 24)
 	view := m.View().Content
 	for _, want := range []string{"forgectl", "Pick", "Sessions", "Windows", "Tree", "Last", "Cheatsheet"} {
 		if !strings.Contains(view, want) {
@@ -62,7 +62,7 @@ func TestNumberKeyNavigatesAndAttaches(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
 		return oneSessionRow, nil
 	}}
-	m := sized(newModel(context.Background(), tmux.New(fake), true, theme.Default()), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(fake), RunOptions{StartInTmux: true, NoIcons: true, Theme: theme.Default()}), 80, 24)
 
 	out, _ := m.Update(key("2"))
 	m = out.(model)
@@ -86,7 +86,7 @@ func TestNumberKeyNavigatesAndAttaches(t *testing.T) {
 }
 
 func TestCheatFromMenu(t *testing.T) {
-	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true, theme.Default()), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{StartInTmux: true, NoIcons: true, Theme: theme.Default()}), 80, 24)
 	out, _ := m.Update(key("6")) // Cheatsheet
 	m = out.(model)
 	if m.mode != cheatMode {
@@ -113,7 +113,7 @@ func TestKillOthersEntersConfirm(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
 		return oneSessionRow, nil
 	}}
-	m := sized(newModel(context.Background(), tmux.New(fake), true, theme.Default()), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(fake), RunOptions{StartInTmux: true, NoIcons: true, Theme: theme.Default()}), 80, 24)
 
 	out, _ := m.Update(key("2"))
 	m = out.(model)
@@ -140,7 +140,7 @@ func TestKillOthersEntersConfirm(t *testing.T) {
 }
 
 func TestLastFromMenu(t *testing.T) {
-	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true, theme.Default()), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{StartInTmux: true, NoIcons: true, Theme: theme.Default()}), 80, 24)
 	out, _ := m.Update(key("5")) // Last
 	m = out.(model)
 	if m.action.Kind != ActionLast {
@@ -149,7 +149,7 @@ func TestLastFromMenu(t *testing.T) {
 }
 
 func TestEscFromSubscreenReturnsToMenu(t *testing.T) {
-	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true, theme.Default()), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{StartInTmux: true, NoIcons: true, Theme: theme.Default()}), 80, 24)
 	out, _ := m.Update(key("3")) // Windows
 	m = out.(model)
 	if m.mode != windowsMode {
@@ -169,7 +169,7 @@ func TestEscFromSubscreenReturnsToMenu(t *testing.T) {
 // difference directly — this would stay green even if WithDark's return value
 // were silently dropped instead of reassigned onto m.theme/m.styles.
 func TestBackgroundColorMsgRepaintsStyles(t *testing.T) {
-	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), true, theme.Default()), 80, 24)
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{StartInTmux: true, NoIcons: true, Theme: theme.Default()}), 80, 24)
 	before := m.View().Content
 
 	out, _ := m.Update(tea.BackgroundColorMsg{Color: color.White})
@@ -181,6 +181,142 @@ func TestBackgroundColorMsgRepaintsStyles(t *testing.T) {
 	after := m.View().Content
 	if before == after {
 		t.Error("BackgroundColorMsg did not change the rendered view; styles were not rebuilt")
+	}
+}
+
+// hubTestModel starts a model in hubMode with two entries: a leafless
+// module ("doctor") and one with a NeedsArgs leaf ("pr").
+func hubTestModel() model {
+	hub := []HubEntry{
+		{Name: "tmux", Short: "sessions, windows, tree", Core: true},
+		{Name: "doctor", Short: "health check", Core: false},
+		{Name: "pr", Short: "review a PR", Core: true, Leaves: []HubLeaf{
+			{Name: "pr", Short: "review a PR", Use: "pr <ref>", NeedsArgs: true},
+			{Name: "list", Short: "list sessions", Use: "list"},
+		}},
+	}
+	return sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{Hub: hub, Theme: theme.Default()}), 80, 24)
+}
+
+func TestHub_StartsInHubMode(t *testing.T) {
+	m := hubTestModel()
+	if m.mode != hubMode {
+		t.Fatalf("expected hubMode by default, got %v", m.mode)
+	}
+}
+
+func TestHub_EscQuits(t *testing.T) {
+	m := hubTestModel()
+	out, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = out.(model)
+	if m.mode != hubMode {
+		t.Errorf("esc from hubMode should stay in hubMode (quit is the cmd, not a mode change), got %v", m.mode)
+	}
+	if cmd == nil {
+		t.Error("esc from hubMode should return tea.Quit, got nil cmd")
+	}
+}
+
+// TestTmuxRowEntersMenuModeUnchanged pins the special case: selecting the
+// hub's tmux row opens today's tmux jumper (menuMode) rather than a leaves
+// list.
+func TestTmuxRowEntersMenuModeUnchanged(t *testing.T) {
+	m := hubTestModel() // tmux is index 0
+	out, _ := m.Update(key("1"))
+	m = out.(model)
+	if m.mode != menuMode {
+		t.Fatalf("selecting the tmux hub row should enter menuMode, got %v", m.mode)
+	}
+}
+
+// TestMenuEscReturnsToHub pins the changed esc semantics: menuMode's esc now
+// goes to the hub rather than quitting.
+func TestMenuEscReturnsToHub(t *testing.T) {
+	m := hubTestModel()
+	out, _ := m.Update(key("1")) // tmux row -> menuMode
+	m = out.(model)
+	if m.mode != menuMode {
+		t.Fatalf("expected menuMode, got %v", m.mode)
+	}
+	out, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = out.(model)
+	if m.mode != hubMode {
+		t.Errorf("esc from menuMode should return to hubMode, got %v", m.mode)
+	}
+	if cmd != nil {
+		t.Error("esc from menuMode should not quit")
+	}
+}
+
+// TestHub_LeaflessEntryRunsDirectly pins doctor's leafless-row behavior:
+// selecting it quits with an ActionRunVerb for its own name.
+func TestHub_LeaflessEntryRunsDirectly(t *testing.T) {
+	m := hubTestModel() // doctor is index 1
+	out, cmd := m.Update(key("2"))
+	m = out.(model)
+	if m.action.Kind != ActionRunVerb {
+		t.Fatalf("expected ActionRunVerb, got %+v", m.action)
+	}
+	if len(m.action.Argv) != 1 || m.action.Argv[0] != "doctor" {
+		t.Errorf("Argv = %v, want [doctor]", m.action.Argv)
+	}
+	if cmd == nil {
+		t.Error("selecting a leafless entry should quit")
+	}
+}
+
+// TestHub_NeedsArgsLeafShowsInvocationWithoutRunning pins the pr <ref>
+// contract: selecting it quits with ActionShowInvocation and the
+// placeholder still in the Argv, never ActionRunVerb.
+func TestHub_NeedsArgsLeafShowsInvocationWithoutRunning(t *testing.T) {
+	m := hubTestModel()
+	out, _ := m.Update(key("3")) // pr row -> leavesMode
+	m = out.(model)
+	if m.mode != leavesMode {
+		t.Fatalf("expected leavesMode, got %v", m.mode)
+	}
+	out, cmd := m.Update(key("1")) // pr's own NeedsArgs leaf
+	m = out.(model)
+	if m.action.Kind != ActionShowInvocation {
+		t.Fatalf("expected ActionShowInvocation, got %+v", m.action)
+	}
+	if got := strings.Join(m.action.Argv, " "); got != "pr <ref>" {
+		t.Errorf("Argv joined = %q, want %q", got, "pr <ref>")
+	}
+	if cmd == nil {
+		t.Error("a NeedsArgs leaf should still quit (back to the shell)")
+	}
+}
+
+// TestHub_LeafRunsWithFullArgv pins the complete-argv case: selecting
+// "list" under pr's leaves quits with ActionRunVerb{Argv: [pr list]}.
+func TestHub_LeafRunsWithFullArgv(t *testing.T) {
+	m := hubTestModel()
+	out, _ := m.Update(key("3")) // pr row -> leavesMode
+	m = out.(model)
+	out, _ = m.Update(key("2")) // pr's "list" leaf
+	m = out.(model)
+	if m.action.Kind != ActionRunVerb {
+		t.Fatalf("expected ActionRunVerb, got %+v", m.action)
+	}
+	if strings.Join(m.action.Argv, " ") != "pr list" {
+		t.Errorf("Argv = %v, want [pr list]", m.action.Argv)
+	}
+}
+
+// TestLeavesEscReturnsToHub pins leavesMode's esc target: back to the hub,
+// not menuMode.
+func TestLeavesEscReturnsToHub(t *testing.T) {
+	m := hubTestModel()
+	out, _ := m.Update(key("3")) // pr row -> leavesMode
+	m = out.(model)
+	out, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = out.(model)
+	if m.mode != hubMode {
+		t.Errorf("esc from leavesMode should return to hubMode, got %v", m.mode)
+	}
+	if cmd != nil {
+		t.Error("esc from leavesMode should not quit")
 	}
 }
 

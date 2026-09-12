@@ -48,6 +48,11 @@ func TestNormalizeArgs_DoesNotMutateInput(t *testing.T) {
 	}
 }
 
+// TestShouldLaunchTUI pins the hub-era narrowing (forgectl#479): the TUI
+// opens on a bare invoke only. An unknown top-level verb and an unknown
+// subverb of a known group both fall through to Cobra/fang's own
+// unknown-command error now — the group parents' new Args: cobra.NoArgs
+// (tmux/projects/quarantine) is what makes that safe (TestGroupParentsRefuseStrayTokens).
 func TestShouldLaunchTUI(t *testing.T) {
 	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
 	cases := []struct {
@@ -55,18 +60,14 @@ func TestShouldLaunchTUI(t *testing.T) {
 		args []string
 		want bool
 	}{
-		{"bare invoke", []string{}, true},
-		{"unknown top-level verb", []string{"frobnicate"}, true},
-		{"unknown tmux subverb", []string{"tmux", "frobnicate"}, true},
+		{"bare invoke launches the hub", []string{}, true},
+		{"unknown top-level verb stays with cobra", []string{"frobnicate"}, false},
+		{"unknown tmux subverb stays with cobra", []string{"tmux", "frobnicate"}, false},
+		{"typo'd verb stays with cobra (did-you-mean)", []string{"lauch"}, false},
 		{"known verb does not launch", []string{"tmux", "ls"}, false},
 		{"known alias does not launch", []string{"tmux", "kill", "x"}, false},
-		// A runnable parent that takes a positional (`pr <ref>`) must dispatch its
-		// arg to Cobra, not be mistaken for an unknown subverb → menu.
 		{"pr with ref positional stays with cobra", []string{"pr", "owner/repo#1"}, false},
 		{"pr known subverb does not launch", []string{"pr", "list"}, false},
-		// A group whose parent takes value-flags: the flag VALUE is a non-flag
-		// token and must reach Cobra, not be mistaken for an unknown subverb →
-		// menu (the review Use line declares this via its [--…] placeholders).
 		{"review repo-flag value stays with cobra", []string{"review", "--json", "--repo", "owner/name"}, false},
 		{"review kind-flag value stays with cobra", []string{"review", "--kind", "issue"}, false},
 		{"review known subverb does not launch", []string{"review", "mark", "owner/repo#1"}, false},
@@ -78,8 +79,8 @@ func TestShouldLaunchTUI(t *testing.T) {
 		{"no-icons flag alone stays with fang", []string{"--no-icons"}, false},
 		// Flag + known verb: --no-icons should not prevent Cobra dispatch
 		{"no-icons plus known verb stays with cobra", []string{"--no-icons", "tmux", "ls"}, false},
-		// Flag + unknown verb still routes to TUI
-		{"no-icons plus unknown verb launches TUI", []string{"--no-icons", "frobnicate"}, true},
+		// Flag + unknown verb now stays with cobra too (the hub only opens bare)
+		{"no-icons plus unknown verb stays with cobra", []string{"--no-icons", "frobnicate"}, false},
 		{"bare version verb stays with cobra", []string{"version"}, false},
 	}
 	for _, tc := range cases {
@@ -105,12 +106,15 @@ func TestDecideRoute(t *testing.T) {
 		tty  bool
 		want menuRoute
 	}{
-		{"bare invoke, tty draws the menu", []string{}, true, routeTUI},
+		{"bare invoke, tty draws the hub", []string{}, true, routeTUI},
 		{"bare invoke, headless routes to cobra", []string{}, false, routeHeadlessMenu},
-		{"unknown top-level verb, tty draws the menu (kept)", []string{"frobnicate"}, true, routeTUI},
-		{"unknown top-level verb, headless routes to cobra", []string{"frobnicate"}, false, routeHeadlessMenu},
-		{"unknown tmux subverb, tty draws the menu", []string{"tmux", "frobnicate"}, true, routeTUI},
-		{"unknown tmux subverb, headless routes to cobra", []string{"tmux", "frobnicate"}, false, routeHeadlessMenu},
+		// The hub's routing arm no longer intercepts an unknown verb — cobra's
+		// own unknown-command error fires on TTY and headless alike now that
+		// the group parents refuse a stray subverb themselves (forgectl#479).
+		{"unknown top-level verb, tty routes to cobra", []string{"frobnicate"}, true, routeDispatch},
+		{"unknown top-level verb, headless routes to cobra", []string{"frobnicate"}, false, routeDispatch},
+		{"unknown tmux subverb, tty routes to cobra", []string{"tmux", "frobnicate"}, true, routeDispatch},
+		{"unknown tmux subverb, headless routes to cobra", []string{"tmux", "frobnicate"}, false, routeDispatch},
 		{"known verb dispatches regardless of tty (interactive)", []string{"tmux", "ls"}, true, routeDispatch},
 		{"known verb dispatches regardless of tty (headless)", []string{"tmux", "ls"}, false, routeDispatch},
 		{"version flag dispatches even headless", []string{"--version"}, false, routeDispatch},
@@ -129,7 +133,7 @@ func TestDecideRoute(t *testing.T) {
 // — root.Find(["tmux","rm"]) must land on the kill command.
 func TestCobraAliasResolution(t *testing.T) {
 	client := tmux.New(&exec.FakeRunner{})
-	root := newTmuxCmd(client, theme.Theme{})
+	root := newTmuxCmd(module.Deps{Theme: theme.Theme{}}, client)
 
 	cases := map[string]string{
 		"rm":  "kill",

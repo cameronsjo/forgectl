@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/viewport"
@@ -40,6 +41,16 @@ const (
 	ActionAttachWindow
 	ActionPick
 	ActionLast
+	// ActionRunVerb is a hub-selected command with a complete argv (no
+	// missing positional). The caller re-enters the same argv dispatch
+	// pipeline a typed invocation takes (execute.go's runAction), printing
+	// "$ forgectl <argv>" to stderr first.
+	ActionRunVerb
+	// ActionShowInvocation is a hub-selected leaf that NEEDS an argument the
+	// hub cannot supply (e.g. pr's <ref>). The caller prints
+	// "$ forgectl <argv>" — with the placeholder still in it — to stderr and
+	// runs nothing, so the operator has the line to complete by hand.
+	ActionShowInvocation
 )
 
 // Action is what Run returns for the caller to execute post-teardown.
@@ -54,11 +65,62 @@ const (
 // Pick is the exception, and deliberately so: it is a sesh candidate name
 // handed to `sesh connect`, not a tmux target, so there is no tmux object to
 // qualify.
+//
+// Argv is ActionRunVerb/ActionShowInvocation's payload: registry-derived
+// command/subcommand identifiers (ActionRunVerb) or a Use-line placeholder
+// text split on whitespace (ActionShowInvocation) — either way tokens this
+// program composed, never user input, so nothing here needs shell quoting.
 type Action struct {
 	Kind    ActionKind
 	Pick    string
 	Session tmux.SessionIdentity
 	Window  tmux.WindowIdentity
+	Argv    []string
+}
+
+// HubEntry is one row of the hub's top screen, or one row of the flattened
+// "all commands" screen the hub's extension-tier aggregate row opens into.
+// Leaves is empty for a module with no runnable subverbs (e.g. doctor) —
+// selecting such a row runs it directly instead of drilling in.
+type HubEntry struct {
+	Name   string
+	Short  string
+	Core   bool
+	Leaves []HubLeaf
+}
+
+// HubLeaf is one runnable verb inside a HubEntry's drill-down list. NeedsArgs
+// mirrors internal/cli's parentTakesArg predicate: true when Use carries a
+// placeholder ("pr <ref>") the hub cannot fill in, in which case selecting
+// the leaf shows the invocation rather than running it.
+type HubLeaf struct {
+	Name      string
+	Short     string
+	Use       string
+	NeedsArgs bool
+}
+
+// hubAllCommandsPrefix identifies the synthetic aggregate HubEntry buildHub
+// appends for the extension tier. Its Leaves are flattened one level deeper
+// than a normal entry's — each Name is already a complete argv joined by
+// spaces ("docker prune", or "doctor" for a leafless module) — so leaf
+// selection there builds Argv by splitting the leaf's own Name instead of
+// pairing it with the enclosing entry's Name.
+const hubAllCommandsPrefix = "all commands"
+
+func isAllCommandsEntry(name string) bool {
+	return strings.HasPrefix(name, hubAllCommandsPrefix)
+}
+
+// RunOptions configures Run. Hub is the full ordered row set buildHub
+// produced (cli.buildHub); StartInTmux skips the hub and opens directly in
+// the tmux jumper (menuMode) — bare `forgectl tmux`'s behavior — with the hub
+// still one esc away.
+type RunOptions struct {
+	Hub         []HubEntry
+	StartInTmux bool
+	NoIcons     bool
+	Theme       theme.Theme
 }
 
 type mode int
@@ -71,6 +133,8 @@ const (
 	treeMode
 	cheatMode
 	formMode
+	hubMode
+	leavesMode
 )
 
 type opKind int
@@ -115,12 +179,21 @@ type model struct {
 	status string
 
 	action Action
+
+	// hub is the full ordered row set from RunOptions.Hub — hubMode's list.
+	hub []HubEntry
+	// leaves is the drill-down list currently shown in leavesMode, and
+	// leavesParent is the enclosing HubEntry's Name — leafArgv/usageLine need
+	// it to build the right Argv (or detect the flattened "all commands"
+	// screen, where a leaf's own Name is already the full argv).
+	leaves       []HubLeaf
+	leavesParent string
 }
 
 // Run drives the TUI and returns the deferred Action (if any). The caller
 // executes Action after Run returns, when the terminal is free again.
-func Run(ctx context.Context, client *tmux.Client, noIcons bool, th theme.Theme) (Action, error) {
-	m := newModel(ctx, client, noIcons, th)
+func Run(ctx context.Context, client *tmux.Client, opts RunOptions) (Action, error) {
+	m := newModel(ctx, client, opts)
 	// Bubble Tea v2 dropped WithAltScreen: the alt screen is a property of the
 	// View the model returns each frame, not a program-construction option.
 	// View() sets AltScreen instead.
@@ -135,11 +208,11 @@ func Run(ctx context.Context, client *tmux.Client, noIcons bool, th theme.Theme)
 	return Action{}, nil
 }
 
-func newModel(ctx context.Context, client *tmux.Client, noIcons bool, th theme.Theme) model {
-	g := pickGlyphs(noIcons)
-	st := th.Styles()
+func newModel(ctx context.Context, client *tmux.Client, opts RunOptions) model {
+	g := pickGlyphs(opts.NoIcons)
+	st := opts.Theme.Styles()
 	l := list.New(nil, itemDelegate{g: g, styles: st}, 0, 0)
-	l.Styles = th.List()
+	l.Styles = opts.Theme.List()
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
 	l.SetShowHelp(false)
@@ -150,16 +223,41 @@ func newModel(ctx context.Context, client *tmux.Client, noIcons bool, th theme.T
 		ctx:     ctx,
 		client:  client,
 		glyph:   g,
-		noIcons: noIcons,
-		theme:   th,
+		noIcons: opts.NoIcons,
+		theme:   opts.Theme,
 		styles:  st,
 		l:       l,
 		tree:    viewport.New(),
-		mode:    menuMode,
-		title:   "menu",
+		mode:    hubMode,
+		title:   "hub",
+		hub:     opts.Hub,
 	}
-	m.l.SetItems(m.menuItems())
+	if opts.StartInTmux {
+		m.title = "menu"
+		m.mode = menuMode
+		m.l.SetItems(m.menuItems())
+		return m
+	}
+	m.setList(hubItems(m.hub))
 	return m
+}
+
+// hubItems renders entries as list rows.
+func hubItems(entries []HubEntry) []list.Item {
+	items := make([]list.Item, 0, len(entries))
+	for _, e := range entries {
+		items = append(items, hubItem{entry: e})
+	}
+	return items
+}
+
+// hubLeafItems renders leaves as list rows.
+func hubLeafItems(leaves []HubLeaf) []list.Item {
+	items := make([]list.Item, 0, len(leaves))
+	for _, l := range leaves {
+		items = append(items, leafItem{leaf: l})
+	}
+	return items
 }
 
 // Init requests the terminal's background colour only where probing it is
@@ -273,11 +371,20 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	key := km.String()
 	switch key {
 	case "q", "esc":
-		if m.mode == menuMode {
+		switch m.mode {
+		case hubMode:
 			return m, tea.Quit
+		case menuMode, leavesMode:
+			// The hub is the quit level: a bare invoke's tmux jumper and any
+			// module's leaf list both back out to the hub, not straight to
+			// the shell (Architecture: "q/esc in hubMode quits; in menuMode
+			// returns to the hub").
+			m.toHub()
+			return m, nil
+		default:
+			m.toMenu()
+			return m, nil
 		}
-		m.toMenu()
-		return m, nil
 	case "enter":
 		return m.activate(m.l.Index())
 	}
@@ -312,6 +419,44 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 // activate handles enter / number select per screen.
 func (m model) activate(index int) (tea.Model, tea.Cmd) {
 	switch m.mode {
+	case hubMode:
+		// m.l.Index()/number-key raw indices are positions in the FILTERED
+		// list, not m.hub — indexing m.hub directly runs the wrong row once a
+		// filter narrows the visible set (charm.land/bubbles/v2 list.Index()
+		// docs: "consider using GlobalIndex() instead" for exactly this).
+		// SelectedItem() is filter-aware.
+		it, ok := m.l.SelectedItem().(hubItem)
+		if !ok {
+			return m, nil
+		}
+		entry := it.entry
+		if entry.Name == "tmux" {
+			// tmux's hub row opens today's unchanged tmux jumper rather than
+			// a drill-down list (Architecture: "opens today's menuMode
+			// screen unchanged in content").
+			m.title = "menu"
+			m.setList(m.menuItems())
+			m.mode = menuMode
+			return m, nil
+		}
+		if len(entry.Leaves) == 0 {
+			m.action = Action{Kind: ActionRunVerb, Argv: []string{entry.Name}}
+			return m, tea.Quit
+		}
+		m.enterLeaves(entry)
+		return m, nil
+	case leavesMode:
+		it, ok := m.l.SelectedItem().(leafItem)
+		if !ok {
+			return m, nil
+		}
+		leaf := it.leaf
+		if leaf.NeedsArgs {
+			m.action = Action{Kind: ActionShowInvocation, Argv: strings.Fields(usageLine(m.leavesParent, leaf))}
+			return m, tea.Quit
+		}
+		m.action = Action{Kind: ActionRunVerb, Argv: leafArgv(m.leavesParent, leaf)}
+		return m, tea.Quit
 	case menuMode:
 		switch index {
 		case 0:
@@ -387,6 +532,58 @@ func (m *model) toMenu() {
 	m.title = "menu"
 	m.setList(m.menuItems())
 	m.mode = menuMode
+}
+
+// toHub returns to the hub's top screen — the quit level every other screen
+// (menuMode, leavesMode) backs out to on q/esc.
+func (m *model) toHub() {
+	m.status = ""
+	m.title = "hub"
+	m.setList(hubItems(m.hub))
+	m.mode = hubMode
+}
+
+// enterLeaves opens entry's drill-down list.
+func (m *model) enterLeaves(entry HubEntry) {
+	m.status = ""
+	m.title = entry.Name
+	m.leaves = entry.Leaves
+	m.leavesParent = entry.Name
+	m.setList(hubLeafItems(entry.Leaves))
+	m.mode = leavesMode
+}
+
+// leafArgv builds the argv to run leaf, given the HubEntry.Name it was
+// listed under. Inside the "all commands" aggregate, a leaf's own Name is
+// already a complete argv joined by spaces (buildHub flattened it there);
+// everywhere else the module name and the leaf name are the two tokens.
+func leafArgv(entryName string, leaf HubLeaf) []string {
+	if isAllCommandsEntry(entryName) {
+		return strings.Fields(leaf.Name)
+	}
+	if leaf.Name == entryName {
+		// The synthetic bare-module leaf a NeedsArgs module contributes
+		// (e.g. pr's own "pr <ref>") — running it means invoking the module
+		// alone, not module+module.
+		return []string{entryName}
+	}
+	return []string{entryName, leaf.Name}
+}
+
+// usageLine returns the placeholder-carrying invocation text for a NeedsArgs
+// leaf — "pr <ref>", or "projects clone <query>" for a subcommand whose own
+// Use line (cobra convention) omits the parent's name.
+func usageLine(entryName string, leaf HubLeaf) string {
+	mod := entryName
+	if isAllCommandsEntry(entryName) {
+		if fields := strings.Fields(leaf.Name); len(fields) > 0 {
+			mod = fields[0]
+		}
+	}
+	if leaf.Use == mod || strings.HasPrefix(leaf.Use, mod+" ") {
+		return leaf.Use
+	}
+	return mod + " " + leaf.Use
 }
 
 func (m *model) enterPick() {
@@ -568,8 +765,12 @@ func (m model) footerView() string {
 	narrow := m.width < 60
 	var hint string
 	switch m.mode {
+	case hubMode:
+		hint = "↑↓ move · 1-9 jump · enter select · / filter · q/esc quit · forgectl --help lists every command"
 	case menuMode:
-		hint = "1-6 / enter select · q/esc quit"
+		hint = "1-6 / enter select · q/esc back"
+	case leavesMode:
+		hint = "↑↓ · 1-9 · enter select · / filter · q/esc back"
 	case sessionsMode:
 		if narrow {
 			hint = "↑↓ · enter attach · k kill · r rename · q/esc back"
