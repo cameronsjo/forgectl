@@ -1,6 +1,6 @@
 ---
-status: in-flight
-next: "Task 4 PR is open on feat/pr-drain; merge lands the whole spine. Owed after merge: the live scripts/dogfood-drain.sh --launch pass, and status: done"
+status: done
+next: "done — all four PRs merged (#497, #502, #516, #518). Owed outside the plan: the live scripts/dogfood-drain.sh --launch pass; #299's remaining unchecked items, if any, get their own issues"
 branch: plan/review-autonomy-spine
 pr: cameronsjo/forgectl#495
 updated: 2026-09-12
