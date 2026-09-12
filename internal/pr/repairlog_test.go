@@ -18,6 +18,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // stubLogFile is a repairLogFile over an in-memory buffer, with one injectable
@@ -264,5 +265,47 @@ func TestMarshalRepairRow_EachFieldAloneCanOverflowAndIsShrunk(t *testing.T) {
 				t.Errorf("note = %q, want it to name the truncated %s", back.RecordNote, f.Label)
 			}
 		})
+	}
+}
+
+// TestComposeRepairActor_CutsOnARuneBoundary is the actor field's own version
+// of the cap defect: the bound was a plain byte slice, so a session id of
+// multi-byte runes could be cut mid-sequence, and json.Marshal then rewrote the
+// orphan to U+FFFD — quietly changing the one field that says who ran the
+// command. The session id comes from the environment, so multi-byte content in
+// it is input, not a hypothesis.
+func TestComposeRepairActor_CutsOnARuneBoundary(t *testing.T) {
+	// 6-byte username, then a session id of 3-byte runes: the actor is
+	// "abcdef session=" (15 bytes) plus 3n, so the 256-byte bound lands 241
+	// bytes into the id — not a multiple of three, and therefore inside a rune.
+	actor := composeRepairActor("abcdef", strings.Repeat("好", 200))
+	if len(actor) > maxActorBytes {
+		t.Fatalf("actor is %d bytes, over the %d bound", len(actor), maxActorBytes)
+	}
+	if !utf8.ValidString(actor) {
+		t.Fatalf("actor is not valid UTF-8: %q", actor[max(0, len(actor)-8):])
+	}
+	if !strings.HasPrefix(actor, "abcdef session=") {
+		t.Fatalf("actor = %q, want it to keep the identifying prefix", actor)
+	}
+
+	// And it survives the marshal VERBATIM — the whole point, since a rewritten
+	// actor reads as a real value nobody typed.
+	data, err := marshalRepairRow(RepairRow{
+		TS: fixedTime(), ID: "abcdef0123456789", Actor: actor,
+		FromPhase: repairPhaseUnreadable, Mode: RepairModeForgetIfAbsent, Outcome: repairOutcomeIntent,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back RepairRow
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("row does not parse: %v", err)
+	}
+	if back.Actor != actor {
+		t.Errorf("actor round-tripped as %q, want the composed %q", back.Actor, actor)
+	}
+	if strings.ContainsRune(back.Actor, utf8.RuneError) {
+		t.Errorf("actor carries U+FFFD, so json.Marshal rewrote bytes the field was supposed to preserve: %q", back.Actor)
 	}
 }

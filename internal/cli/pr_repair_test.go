@@ -18,6 +18,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -259,6 +260,188 @@ func TestPrRepair_ForgetSetsAnUnreadableRecordAside(t *testing.T) {
 	}
 }
 
+// --- --prune ---------------------------------------------------------------
+
+func TestPrPrune_RefusesAlongsideApplyNamingBoth(t *testing.T) {
+	_, _, err := runPrRepair(t, repairCmdClient(t, t.TempDir()), "--prune", "--apply", "--rollback")
+	if err == nil {
+		t.Fatal("expected a refusal: --prune and --apply do different things")
+	}
+	for _, want := range []string{"--prune", "--apply"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not name %q", err, want)
+		}
+	}
+}
+
+func TestPrPrune_RefusesAlongsideHistoryNamingBoth(t *testing.T) {
+	_, _, err := runPrRepair(t, repairCmdClient(t, t.TempDir()), "--prune", "--history")
+	if err == nil {
+		t.Fatal("expected a refusal: --history reads the trail, --prune rewrites it")
+	}
+	for _, want := range []string{"--prune", "--history"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not name %q", err, want)
+		}
+	}
+}
+
+// TestPrPrune_RetentionFlagsRefuseWithoutPrune: a flag that silently does
+// nothing is the shape where an operator believes a window was applied and it
+// was not.
+func TestPrPrune_RetentionFlagsRefuseWithoutPrune(t *testing.T) {
+	for _, flag := range []string{"--older-than=7d", "--log-retention=7d"} {
+		t.Run(flag, func(t *testing.T) {
+			_, _, err := runPrRepair(t, repairCmdClient(t, t.TempDir()), flag)
+			if err == nil {
+				t.Fatalf("expected a refusal: %s only applies to --prune", flag)
+			}
+			if !strings.Contains(err.Error(), "--prune") {
+				t.Errorf("refusal %q does not name --prune", err)
+			}
+		})
+	}
+}
+
+func TestPrPrune_RefusesAMalformedRetentionWindow(t *testing.T) {
+	for _, args := range [][]string{
+		{"--prune", "--older-than=0"},
+		{"--prune", "--log-retention=-1d"},
+		{"--prune", "--older-than=whenever"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			_, _, err := runPrRepair(t, repairCmdClient(t, t.TempDir()), args...)
+			if err == nil {
+				t.Fatal("expected a refusal: the retention window is not a positive duration")
+			}
+		})
+	}
+}
+
+func TestPrPruneJSON_ShapeIsAnObjectWithItemsAndLog(t *testing.T) {
+	out, _, err := runPrRepair(t, repairCmdClient(t, t.TempDir()), "--prune", "--json", "--yes")
+	if err != nil {
+		t.Fatalf("pr repair --prune --json: %v — a no-op sweep is an action that succeeded", err)
+	}
+	var report struct {
+		Items []map[string]json.RawMessage `json:"items"`
+		Log   map[string]json.RawMessage   `json:"log"`
+	}
+	if err := json.NewDecoder(strings.NewReader(out)).Decode(&report); err != nil {
+		t.Fatalf("stdout did not parse as the report object: %v\n%s", err, out)
+	}
+	if report.Items == nil {
+		t.Errorf("items encoded as null, want []: %s", out)
+	}
+	for _, k := range []string{"path", "dropped", "kept", "outcome"} {
+		if _, ok := report.Log[k]; !ok {
+			t.Errorf("log is missing key %q: %s", k, out)
+		}
+	}
+}
+
+// TestPrPrune_HumanRowShape covers both halves of the sweep's output: a row per
+// file, and the log line, which is the only place the compaction result shows
+// without --json.
+func TestPrPrune_HumanRowShape(t *testing.T) {
+	dir := t.TempDir()
+	// Young by its name, so it is listed and kept rather than removed.
+	aside := filepath.Join(dir, "o-r-1-1.json.unreadable-"+strconv.FormatInt(time.Now().UTC().Unix(), 10))
+	if err := os.WriteFile(aside, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := runPrRepair(t, repairCmdClient(t, dir), "--prune", "--yes")
+	if err != nil {
+		t.Fatalf("pr repair --prune: %v", err)
+	}
+	if !strings.Contains(out, filepath.Base(aside)) {
+		t.Errorf("stdout = %q, want the set-aside file named", out)
+	}
+	if !strings.Contains(out, "kept") {
+		t.Errorf("stdout = %q, want the outcome column", out)
+	}
+	if !strings.Contains(out, "log\t") {
+		t.Errorf("stdout = %q, want the compaction line", out)
+	}
+	if _, serr := os.Stat(aside); serr != nil {
+		t.Errorf("a file inside the retention window was removed: %v", serr)
+	}
+}
+
+func TestPrPrune_EmptySweepSaysSoAndExitsZero(t *testing.T) {
+	out, _, err := runPrRepair(t, repairCmdClient(t, t.TempDir()), "--prune", "--yes")
+	if err != nil {
+		t.Fatalf("pr repair --prune: %v", err)
+	}
+	if !strings.Contains(out, "no set-aside records to prune") {
+		t.Errorf("stdout = %q, want the empty-state line", out)
+	}
+}
+
+// TestPrPrune_RefusesAPositionalBreadcrumb closes the last hole in the prune
+// grammar. The operand reads as "sweep this one record"; the sweep is
+// directory-wide and unlinks, so ignoring it silently is the shape where an
+// operator believes a scope was applied and it was not — and --yes skips the
+// confirm prompt that would otherwise have shown the real file count.
+func TestPrPrune_RefusesAPositionalBreadcrumb(t *testing.T) {
+	dir := t.TempDir()
+	path := seedRepairRecord(t, dir, "o/r#1", "preparing", "")
+	aside := filepath.Join(dir, "o-r-2-1.json.unreadable-1700000000")
+	if err := os.WriteFile(aside, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := runPrRepair(t, repairCmdClient(t, dir), path, "--prune", "--yes")
+	if err == nil {
+		t.Fatal("expected a refusal: --prune takes no breadcrumb")
+	}
+	for _, want := range []string{"--prune", "no breadcrumb"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not mention %q", err, want)
+		}
+	}
+	// And the refusal is BEFORE dispatch: nothing was swept.
+	if _, serr := os.Stat(aside); serr != nil {
+		t.Errorf("the sweep ran anyway and removed a set-aside file: %v", serr)
+	}
+}
+
+// TestPrPrune_RefusesEachApplyModeFlag: --rollback means "remove the one record
+// I named". Running a directory-wide sweep under it would be the same silent
+// re-scoping, one flag further in.
+func TestPrPrune_RefusesEachApplyModeFlag(t *testing.T) {
+	for _, mode := range []string{"--rollback", "--adopt-window", "--forget-if-absent"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			aside := filepath.Join(dir, "o-r-2-1.json.unreadable-1700000000")
+			if err := os.WriteFile(aside, []byte("{not json"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err := runPrRepair(t, repairCmdClient(t, dir), "--prune", mode, "--yes")
+			if err == nil {
+				t.Fatalf("expected a refusal: --prune and %s cannot be combined", mode)
+			}
+			for _, want := range []string{"--prune", mode} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal %q does not name %q", err, want)
+				}
+			}
+			if _, serr := os.Stat(aside); serr != nil {
+				t.Errorf("the sweep ran anyway and removed a set-aside file: %v", serr)
+			}
+		})
+	}
+}
+
+// TestPrPrune_RefusesABreadcrumbEvenWithoutYes proves the operand check does not
+// ride on the confirmation gate: it is grammar, settled before any I/O.
+func TestPrPrune_RefusesABreadcrumbEvenWithoutYes(t *testing.T) {
+	dir := t.TempDir()
+	path := seedRepairRecord(t, dir, "o/r#1", "preparing", "")
+	if _, _, err := runPrRepair(t, repairCmdClient(t, dir), path, "--prune", "--dry-run"); err == nil {
+		t.Fatal("expected a refusal: --prune takes no breadcrumb, even under --dry-run")
+	}
+}
+
 // TestPrRepairHistory_RendersTheVerbColumn: the trail now carries teardown and
 // cleanup rows beside repair's, so the human view has to say which verb removed
 // the thing. A row written before the field existed renders "-" rather than
@@ -335,4 +518,91 @@ func TestPrRepairHistory_ClampsTheVerbModeAndOutcomeColumns(t *testing.T) {
 	if !strings.Contains(out, "teardown") {
 		t.Errorf("the verb's graphic text was lost in clamping:\n%q", out)
 	}
+}
+
+// TestPrRepairHistory_RendersThePruneVerbAndItsDetail: prune is the only verb
+// that unlinks, so the trail has to name it as its own verb rather than as a
+// spelling of repair. And a compaction row's record_path is the log itself, so
+// without the detail line the row says only "prune touched this file" — the
+// count of what it dropped lives nowhere else in this view.
+func TestPrRepairHistory_RendersThePruneVerbAndItsDetail(t *testing.T) {
+	dir := t.TempDir()
+	client := repairCmdClient(t, dir)
+	// One old settled pair for compaction to drop, and one set-aside file past
+	// its window for the sweep to unlink — so both prune row shapes land.
+	aside := filepath.Join(dir, "o-r-1-1.json.unreadable-1735689601")
+	if err := os.WriteFile(aside, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A settled pair old enough to be past the log window. It is written by
+	// hand because the CLI cannot backdate a row, and the point of the test is
+	// what compaction reports about rows it drops.
+	old := time.Now().UTC().Add(-200 * 24 * time.Hour).Format(time.RFC3339Nano)
+	var log bytes.Buffer
+	for _, outcome := range []string{"intent", "applied"} {
+		row, err := json.Marshal(pr.RepairRow{
+			TS: mustParseTime(t, old), ID: "0123456789abcdef", Verb: "repair",
+			Mode: "--rollback", Outcome: outcome, RecordPath: "/tmp/gone.json",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		log.Write(row)
+		log.WriteByte('\n')
+	}
+	if err := os.WriteFile(filepath.Join(dir, "repair.jsonl"), log.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := runPrRepair(t, client, "--prune", "--yes", "--older-than=1h", "--log-retention=1h"); err != nil {
+		t.Fatalf("pr repair --prune: %v", err)
+	}
+
+	out, _, err := runPrRepair(t, client, "--history")
+	if err != nil {
+		t.Fatalf("pr repair --history: %v", err)
+	}
+	if !strings.Contains(out, "prune") {
+		t.Errorf("history does not carry the prune verb:\n%s", out)
+	}
+	if !strings.Contains(out, "detail: dropped ") {
+		t.Errorf("history does not carry the compaction summary:\n%s", out)
+	}
+
+	// And the JSON view agrees, so a script hears the same answer.
+	jsonOut, _, err := runPrRepair(t, client, "--history", "--json")
+	if err != nil {
+		t.Fatalf("pr repair --history --json: %v", err)
+	}
+	var rows []struct {
+		Verb   string `json:"verb"`
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal([]byte(jsonOut), &rows); err != nil {
+		t.Fatalf("history did not parse: %v\n%s", err, jsonOut)
+	}
+	var sawVerb, sawDetail bool
+	for _, r := range rows {
+		if r.Verb == "prune" {
+			sawVerb = true
+		}
+		if strings.HasPrefix(r.Detail, "dropped ") {
+			sawDetail = true
+		}
+	}
+	if !sawVerb {
+		t.Errorf("no row carries verb=prune: %s", jsonOut)
+	}
+	if !sawDetail {
+		t.Errorf("no row carries the compaction detail: %s", jsonOut)
+	}
+}
+
+func mustParseTime(t *testing.T, s string) time.Time {
+	t.Helper()
+	ts, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ts
 }

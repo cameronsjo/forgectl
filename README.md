@@ -106,6 +106,7 @@ forgectl pr attach <breadcrumb>          # jump to a review window (also: open <
                                           #   <breadcrumb> is the session path `pr list` prints
 forgectl pr repair                       # list sessions stuck between phases; exits 1 when any need settling
 forgectl pr repair <b> --apply --rollback   # settle one: --adopt-window, --rollback, or --forget-if-absent
+forgectl pr repair --prune               # reap set-aside records past retention and compact the repair audit log
 forgectl pr keys                         # tmux cheatsheet for driving a review
 
 When both stdin and stdout are terminals, these selectors keep their existing
