@@ -109,6 +109,8 @@ forgectl pr teardown <breadcrumb>        # discard a review session OR a queue e
 forgectl pr repair                       # list sessions stuck between phases; exits 1 when any need settling
 forgectl pr repair <b> --apply --rollback   # settle one: --adopt-window, --rollback, or --forget-if-absent
 forgectl pr repair --prune               # reap set-aside records past retention and compact the repair audit log
+forgectl pr queue                        # list reviews waiting for the drainer, oldest first
+forgectl pr drain                        # launch queued reviews as cap slots free up (--watch, --dry-run, --json)
 forgectl pr keys                         # tmux cheatsheet for driving a review
 
 When both stdin and stdout are terminals, these selectors keep their existing

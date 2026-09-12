@@ -75,6 +75,8 @@ human approval gate.
   forgectl pr teardown <breadcrumb>  discard a session or queue entry
   forgectl pr repair               settle sessions whose record and reality disagree
   forgectl pr cleanup <YYYY-MM-DD>   discard all sessions from a day
+  forgectl pr queue                 list reviews waiting for the drainer
+  forgectl pr drain                 launch queued reviews as cap slots free up
   forgectl pr findings list|cleanup  reclaim durable local-review findings
   forgectl pr keys                 tmux-review cheatsheet
 
@@ -211,6 +213,8 @@ exits 0, to be started later by 'forgectl pr drain --once'.`,
 		newPrTeardownCmd(client),
 		newPrRepairCmd(client),
 		newPrCleanupCmd(client),
+		newPrQueueCmd(client),
+		newPrDrainCmd(client, cfg),
 		newPrFindingsCmd(client, th),
 		newPrKeysCmd(),
 		newPrPrsCmd(client, th),
@@ -567,6 +571,8 @@ const prKeysText = `clean-room review — tmux keys that matter
     pr open <b>     open a shell in the clean-room workspace
     pr teardown <b> discard a session or queue entry
     pr repair       settle a session whose record and reality disagree
+    pr queue        list reviews waiting for the drainer
+    pr drain        launch queued reviews as cap slots free up
 
 Nothing is posted to the PR without passing forgectl's approval gate.
 `

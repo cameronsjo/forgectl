@@ -16,6 +16,8 @@ forgectl pr reviewed sync                # prune reviewed marks for PRs that are
 forgectl pr list                         # list active clean-room review sessions
 forgectl pr attach <breadcrumb>          # jump to a review window (also: open <b>, teardown <b>)
                                           #   <breadcrumb> is the session path `pr list` prints
+forgectl pr queue                        # list reviews waiting for the drainer, oldest first
+forgectl pr drain                        # launch queued reviews as concurrency-cap slots free up
 forgectl pr keys                         # tmux cheatsheet for driving a review
 ```
 
@@ -121,6 +123,43 @@ forgectl pr repair --prune --older-than 7d --log-retention 30d
 **A stamp before 2025-01-01 is treated the same way: a clock that lied, not an old file.** The stamp is written from `time.Now()`, so a host that sets a record aside before NTP has synced names it at 1970 — which reads as decades of age, past every window, and the next sweep would unlink a record seconds old. Below that floor the name counts as undated, and the row says the clock was not trusted rather than that the name was unreadable. A stamp in the *future* needs no floor: it yields a negative age, which is inside every window, so the file is kept as young.
 
 `--prune` is the only repair arm that **unlinks** rather than renames, so it refuses in four directions, each per file rather than for the whole sweep: a record whose ref names a **live window**; every ref-bearing record when the **window list cannot be read at all** (a ref-less record names no window, so an unreadable list says nothing about it and it proceeds); a file that is **no longer a regular file**; and a file whose bytes **changed** between the enumeration and the re-read through the pinned directory handle. Off a terminal it requires `--yes` — except when there is nothing to do, which returns before the gate, and under `--dry-run`, which has nothing to confirm. Each removal writes its intent row, carrying the file's own bytes, **before** the unlink: once the file is gone that row is the only trace it ever existed.
+
+## The drainer
+
+`forgectl pr queue` lists every `queued` record, oldest first by `createdAt` — the exact order `forgectl pr drain` claims them in. Nothing there has a workspace or a tmux window yet.
+
+`forgectl pr drain` runs one pass by default: it takes the lifecycle lock, counts how many concurrency-cap slots are free, refuses the **whole pass** if any record could not be read, and otherwise claims the oldest queued records — up to however many slots are free — moving each to `preparing` under that one lock hold. The lock is released before anything slow happens: each claimed record is then prepared and launched through the identical `Prepare` → `Launch` path `forgectl pr <ref>` uses, cloning and dispatching outside the lock.
+
+```bash
+forgectl pr drain                 # one pass, then exit (the default)
+forgectl pr drain --watch         # keep draining every --interval (default 60s)
+forgectl pr drain --dry-run       # print what a pass would launch, create nothing
+forgectl pr drain --json          # emit the pass report as JSON
+```
+
+Every pass prints one line, because a default install discards the `slog` handler and a `--watch` operator needs to see it happening without one:
+
+```text
+pass=3 free=2 queued=5 launching=1 launched=2 failed=0 next=1m0s
+```
+
+`--dry-run` prints `N queued, M free — would launch owner/repo#41, owner/repo#42` instead, and claims, prepares, and launches nothing.
+
+**A launch failure is retried, not fatal.** It records `attempts`, `lastError`, and `lastAttemptAt` on the record and returns it to `queued` for a later pass to try again. At **3** failed attempts the record is parked in `needs-repair` with a reason naming the count and the last error (`drain: 3 attempts, last: …`), and no further pass claims it — `forgectl pr repair` is what settles it from there.
+
+**Resumability comes from the phase record, not from the drainer's own state.** A drainer killed mid-pass leaves `preparing` or `launching` records, which occupy their slots until `forgectl pr repair` settles them, so the next pass can never double-launch the same ref — proven by two `Client`s racing one queued record: exactly one of them launches it.
+
+Exit code for a single pass (the default): **0** when the queue was empty or every launch succeeded; **1** when the cap or a record could not be read, or any launch in the pass failed — the same "a script can ask this" contract `pr repair`'s inspect exit code follows, and `--json` hears the identical answer the human text gives. `--watch` runs until canceled and exits non-zero only after **three consecutive** whole-pass refusals; a per-record failure is logged and the loop continues. `--interval` without `--watch` refuses, since there is no loop for it to time.
+
+### Triage checklist when the queue looks stuck
+
+Work through these in order — each rules out the layer above it before you look at the one below:
+
+1. **Is the cap readable?** `forgectl pr drain --json` (or `pr repair --json`) — a `refusal` naming the tmux window count means nothing below this line can run yet; check `tmux list-windows -a` directly.
+2. **Is the lifecycle lock held by someone else?** A drain or repair that hangs rather than refusing is waiting on the lock; a concurrent `pr <ref>`, `pr pick`, or another `pr drain` holds it briefly by design, but a lock held past `lockWait` names the holder in its timeout error.
+3. **How many slots are `preparing`/`prepared`/`launching`?** `forgectl pr repair` (no `--apply`) lists every one of them — those are the slots a drain pass sees as occupied before it claims anything new.
+4. **Are any records unreadable?** `forgectl pr list`'s stderr note and `pr repair --json`'s `unreadable` rows both surface this — a single unreadable record blocks every launch, drain included, until `pr repair --apply --forget-if-absent` (or `--adopt-window`/`--rollback`, as the case warrants) settles it.
+5. **What's actually queued?** `forgectl pr queue` — the FIFO order a healthy drain pass will work through once the four checks above are clear.
 
 ### The runbook
 
