@@ -258,3 +258,47 @@ func TestPrRepair_ForgetSetsAnUnreadableRecordAside(t *testing.T) {
 		t.Errorf("stdout = %q, want the empty state once nothing is left", out)
 	}
 }
+
+// TestPrRepairHistory_RendersTheVerbColumn: the trail now carries teardown and
+// cleanup rows beside repair's, so the human view has to say which verb removed
+// the thing. A row written before the field existed renders "-" rather than
+// being read as a repair — the log is hand-editable, so an absent verb is
+// unknown, never a claim.
+func TestPrRepairHistory_RendersTheVerbColumn(t *testing.T) {
+	dir := t.TempDir()
+	rows := []pr.RepairRow{
+		{TS: time.Now().UTC(), ID: "a", Verb: "teardown", Outcome: "applied", Ref: "o/r#1", RecordPath: "/tmp/one.json"},
+		{TS: time.Now().UTC(), ID: "b", Mode: "--rollback", Outcome: "applied", Ref: "o/r#2", RecordPath: "/tmp/two.json"},
+	}
+	var log bytes.Buffer
+	for _, r := range rows {
+		data, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		log.Write(data)
+		log.WriteByte('\n')
+	}
+	if err := os.WriteFile(filepath.Join(dir, "repair.jsonl"), log.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := runPrRepair(t, repairCmdClient(t, dir), "--history")
+	if err != nil {
+		t.Fatalf("pr repair --history: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("history lines = %d, want one per row:\n%s", len(lines), out)
+	}
+	want := [][2]string{{"teardown", "-"}, {"-", "--rollback"}}
+	for i, line := range lines {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 6 {
+			t.Fatalf("line %d has %d columns, want timestamp, verb, mode, outcome, ref, path: %q", i, len(fields), line)
+		}
+		if fields[1] != want[i][0] || fields[2] != want[i][1] {
+			t.Errorf("line %d verb/mode = %q/%q, want %q/%q", i, fields[1], fields[2], want[i][0], want[i][1])
+		}
+	}
+}

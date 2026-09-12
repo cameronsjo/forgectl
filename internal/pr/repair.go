@@ -357,6 +357,7 @@ func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, m
 	slog.Warn("Setting aside a session record this build cannot read; whether it named a clean room cannot be checked.",
 		"path", member.path, "error", decodeErr)
 	row := RepairRow{
+		Verb:        auditVerbRepair,
 		Ref:         item.Ref,
 		RecordPath:  member.path,
 		FromPhase:   repairPhaseUnreadable,
@@ -611,6 +612,9 @@ func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, memb
 		item.Outcome = repairOutcomeRefused
 		return item, err
 	}
+	// Deliberately the UNAUDITED core: the pair opened just above is this
+	// mutation's only row, and a row written inside would nest a second pair
+	// inside it.
 	if err := c.teardownLocked(ctx, member.path); err != nil {
 		item.Outcome = repairOutcomeFailed
 		item.Error = err.Error()
@@ -702,6 +706,8 @@ func (c *Client) repairForgetLocked(ctx context.Context, opts RepairOpts, member
 		item.Outcome = repairOutcomeRefused
 		return item, err
 	}
+	// Deliberately the UNAUDITED core, for the same reason the rollback arm
+	// gives: the pair opened just above is this mutation's only row.
 	if err := c.teardownLocked(ctx, member.path); err != nil {
 		item.Outcome = repairOutcomeFailed
 		item.Error = err.Error()
@@ -761,6 +767,7 @@ func (c *Client) completeRepairRow(id string, row RepairRow, cause error) {
 // record, so the three arms cannot disagree about what a row carries.
 func repairRowFor(member breadcrumbMember, ref Ref, mode, windowID string) RepairRow {
 	return RepairRow{
+		Verb:       auditVerbRepair,
 		Ref:        ref.String(),
 		RecordPath: member.path,
 		FromPhase:  string(member.breadcrumb.Phase),
