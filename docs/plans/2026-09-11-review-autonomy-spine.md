@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Task 2 is committed and pushed on feat/pr-lifecycle-phases; the orchestrator runs polish and opens its PR → Task 3 (fresh Sonnet subagent, branch feat/pr-admission-everywhere) → Task 4; merge this plan PR (#495) whenever"
+next: "Task 2 draft PR is open on feat/pr-lifecycle-phases for Cameron to review and merge → Task 3 (fresh Sonnet subagent, branch feat/pr-admission-everywhere) → Task 4"
 branch: plan/review-autonomy-spine
 pr: cameronsjo/forgectl#495
 updated: 2026-09-11
@@ -109,7 +109,7 @@ Panel: plan-reviewer (conflict lens), plan-reviewer (buildability lens), red-tea
 - [x] Run — expect GREEN; vet; lint; `go test -run Isolated ./internal/tmux`
 - [x] `docs/commands/pr.md` phase table + repair runbook; `README.md` and `pr.go` verb lists
 - [x] Commit: `feat(pr): durable launch phases, slot reservation, and pr repair (#299)` with the producer tuple; the body names which #299 items landed (1, 2, 3, 6) and that the rest stay open — no closing keyword
-- [ ] run `cadence-forge:polish` (diff-based arms; security-reviewer on the diff: it adds a destructive verb); fold findings; open PR
+- [x] run `cadence-forge:polish` (diff-based arms; security-reviewer on the diff: it adds a destructive verb); fold findings; open PR — three rounds: code 2 Important + security 4 Important at `4de8a66`, folded in `97ff31a`; security 1 new Important folded in `074c2db`; security 1 new Important folded in `7b13ef7`; draft PR opened
 
 ### Task 3 — The cap on every launch path, `--queue`, `queued` records end to end
 
