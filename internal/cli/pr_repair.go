@@ -26,6 +26,9 @@ func newPrRepairCmd(client *pr.Client) *cobra.Command {
 		yes            bool
 		asJSON         bool
 		history        bool
+		prune          bool
+		olderThan      string
+		logRetention   string
 	)
 	cmd := &cobra.Command{
 		Use:   "repair [breadcrumb]",
@@ -40,13 +43,28 @@ own outcome — and settles the one you name.
   forgectl pr repair <breadcrumb> --apply --rollback              remove the clean room and the record
   forgectl pr repair <breadcrumb> --apply --forget-if-absent      remove only a record whose window and clean room are both gone
 
+  forgectl pr repair --prune                                      reap set-aside records and compact the audit log
+
 --adopt-window takes no window operand: the window is re-derived from the ref
 exactly as every other verb derives it, so no operator-supplied tmux target can
 steer it. --rollback refuses while the window is live, refuses when the window
 list cannot be read at all, and off a terminal requires --yes. --dry-run prints
-what each would do and touches nothing. --history shows the audit trail.`,
+what each would do and touches nothing. --history shows the audit trail.
+
+--prune is the housekeeping sweep, and the only arm that UNLINKS: it removes
+set-aside records (<name>.json.unreadable-<timestamp>) older than --older-than,
+and drops settled rows older than --log-retention from the audit log. A file's
+age comes from its NAME, never its mtime, which a rename preserves. It refuses
+per file: a live window, an unreadable window list, or a file that changed
+underfoot stops that file and nothing else.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validatePruneFlags(cmd, prune, apply, history); err != nil {
+				return err
+			}
+			if prune {
+				return runRepairPrune(cmd, client, olderThan, logRetention, dryRun, yes, asJSON)
+			}
 			if history {
 				return runRepairHistory(cmd, client, asJSON)
 			}
@@ -88,7 +106,117 @@ what each would do and touches nothing. --history shows the audit trail.`,
 	cmd.Flags().BoolVar(&yes, "yes", false, "confirm a destructive repair without a terminal prompt")
 	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"items":[…]} to stdout`)
 	cmd.Flags().BoolVar(&history, "history", false, "show the repair audit trail instead of the current state")
+	cmd.Flags().BoolVar(&prune, "prune", false, "remove set-aside records past their retention window and compact the audit log")
+	cmd.Flags().StringVar(&olderThan, "older-than", defaultAsideRetention,
+		"with --prune: how old a set-aside record's name must say it is before it is removed")
+	cmd.Flags().StringVar(&logRetention, "log-retention", defaultLogRetention,
+		"with --prune: how far back the audit log keeps settled rows")
 	return cmd
+}
+
+// Prune's retention defaults. A set-aside record is evidence someone may still
+// need to read, and the audit log is sometimes the last pointer to a clean
+// room, so both windows are generous: the cost of keeping a file too long is
+// disk, and the cost of dropping it too early is unrecoverable.
+const (
+	defaultAsideRetention = "30d"
+	defaultLogRetention   = "90d"
+)
+
+// validatePruneFlags enforces the argument grammar BEFORE any I/O, in
+// validateRepairOpts's style: a malformed invocation never reaches the
+// filesystem, the lifecycle lock, or tmux.
+//
+// The retention flags refuse outside --prune rather than being ignored. A flag
+// that silently does nothing is the shape where an operator believes a window
+// was applied and it was not.
+func validatePruneFlags(cmd *cobra.Command, prune, apply, history bool) error {
+	if prune && apply {
+		return fmt.Errorf("--prune and --apply do different things and cannot be combined: " +
+			"--apply settles one named record, --prune sweeps records that were already set aside")
+	}
+	if prune && history {
+		return fmt.Errorf("--prune and --history cannot be combined: " +
+			"--history reads the audit trail, --prune rewrites it")
+	}
+	if prune {
+		return nil
+	}
+	for _, name := range []string{"older-than", "log-retention"} {
+		if cmd.Flags().Changed(name) {
+			return fmt.Errorf("--%s only applies to --prune; add --prune, or drop the flag", name)
+		}
+	}
+	return nil
+}
+
+// runRepairPrune is the housekeeping arm. It exits 0 on success: unlike the
+// inspect, this is an ACTION, and "how many files did you remove" is not the
+// yes/no question an exit code answers.
+func runRepairPrune(cmd *cobra.Command, client *pr.Client, olderThan, logRetention string, dryRun, yes, asJSON bool) error {
+	aside, err := pr.ParseRetention(olderThan)
+	if err != nil {
+		return fmt.Errorf("--older-than: %w", err)
+	}
+	logWindow, err := pr.ParseRetention(logRetention)
+	if err != nil {
+		return fmt.Errorf("--log-retention: %w", err)
+	}
+	report, err := client.Prune(cmd.Context(), pr.PruneOpts{
+		OlderThan:    aside,
+		LogRetention: logWindow,
+		DryRun:       dryRun,
+		Yes:          yes,
+	})
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return writePruneJSON(cmd.OutOrStdout(), report)
+	}
+	return writePruneHuman(cmd.OutOrStdout(), report)
+}
+
+// writePruneJSON encodes {"items":[…],"log":{…}} — an object, never a bare
+// array, because the sweep answers two questions and a list of files could only
+// carry one of them. Items is never null.
+func writePruneJSON(out io.Writer, report pr.PruneReport) error {
+	if report.Items == nil {
+		report.Items = []pr.PruneItem{}
+	}
+	enc := termsafe.JSONEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(report)
+}
+
+// writePruneHuman prints one row per file plus one line for the log, so the
+// two halves of the sweep are both visible without --json.
+func writePruneHuman(out io.Writer, report pr.PruneReport) error {
+	if len(report.Items) == 0 {
+		_, _ = fmt.Fprintln(out, "no set-aside records to prune")
+	}
+	for _, it := range report.Items {
+		age := it.Age
+		if age == "" {
+			// A blank column would read as "brand new" rather than "nobody
+			// could tell", which is the difference that decides whether the
+			// file was removable at all.
+			age = "?"
+		}
+		_, _ = fmt.Fprintf(out, "%s\t%s\t%s\n", age, it.Outcome, termsafe.QuotePathIfUnsafe(it.Path))
+		if it.Reason != "" {
+			_, _ = fmt.Fprintf(out, "  reason: %s\n", safeTerm(it.Reason))
+		}
+		if it.Error != "" {
+			_, _ = fmt.Fprintf(out, "  error: %s\n", safeTerm(it.Error))
+		}
+	}
+	_, _ = fmt.Fprintf(out, "log\t%s\t%s (dropped %d, kept %d)\n",
+		report.Log.Outcome, termsafe.QuotePathIfUnsafe(report.Log.Path), report.Log.Dropped, report.Log.Kept)
+	if report.Log.Error != "" {
+		_, _ = fmt.Fprintf(out, "  error: %s\n", safeTerm(report.Log.Error))
+	}
+	return nil
 }
 
 // runRepairHistory prints the audit trail. It is a separate arm rather than a

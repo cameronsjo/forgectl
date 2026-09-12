@@ -18,6 +18,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -256,5 +257,123 @@ func TestPrRepair_ForgetSetsAnUnreadableRecordAside(t *testing.T) {
 	}
 	if !strings.Contains(out, "no records need repair") {
 		t.Errorf("stdout = %q, want the empty state once nothing is left", out)
+	}
+}
+
+// --- --prune ---------------------------------------------------------------
+
+func TestPrPrune_RefusesAlongsideApplyNamingBoth(t *testing.T) {
+	_, _, err := runPrRepair(t, repairCmdClient(t, t.TempDir()), "--prune", "--apply", "--rollback")
+	if err == nil {
+		t.Fatal("expected a refusal: --prune and --apply do different things")
+	}
+	for _, want := range []string{"--prune", "--apply"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not name %q", err, want)
+		}
+	}
+}
+
+func TestPrPrune_RefusesAlongsideHistoryNamingBoth(t *testing.T) {
+	_, _, err := runPrRepair(t, repairCmdClient(t, t.TempDir()), "--prune", "--history")
+	if err == nil {
+		t.Fatal("expected a refusal: --history reads the trail, --prune rewrites it")
+	}
+	for _, want := range []string{"--prune", "--history"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not name %q", err, want)
+		}
+	}
+}
+
+// TestPrPrune_RetentionFlagsRefuseWithoutPrune: a flag that silently does
+// nothing is the shape where an operator believes a window was applied and it
+// was not.
+func TestPrPrune_RetentionFlagsRefuseWithoutPrune(t *testing.T) {
+	for _, flag := range []string{"--older-than=7d", "--log-retention=7d"} {
+		t.Run(flag, func(t *testing.T) {
+			_, _, err := runPrRepair(t, repairCmdClient(t, t.TempDir()), flag)
+			if err == nil {
+				t.Fatalf("expected a refusal: %s only applies to --prune", flag)
+			}
+			if !strings.Contains(err.Error(), "--prune") {
+				t.Errorf("refusal %q does not name --prune", err)
+			}
+		})
+	}
+}
+
+func TestPrPrune_RefusesAMalformedRetentionWindow(t *testing.T) {
+	for _, args := range [][]string{
+		{"--prune", "--older-than=0"},
+		{"--prune", "--log-retention=-1d"},
+		{"--prune", "--older-than=whenever"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			_, _, err := runPrRepair(t, repairCmdClient(t, t.TempDir()), args...)
+			if err == nil {
+				t.Fatal("expected a refusal: the retention window is not a positive duration")
+			}
+		})
+	}
+}
+
+func TestPrPruneJSON_ShapeIsAnObjectWithItemsAndLog(t *testing.T) {
+	out, _, err := runPrRepair(t, repairCmdClient(t, t.TempDir()), "--prune", "--json", "--yes")
+	if err != nil {
+		t.Fatalf("pr repair --prune --json: %v — a no-op sweep is an action that succeeded", err)
+	}
+	var report struct {
+		Items []map[string]json.RawMessage `json:"items"`
+		Log   map[string]json.RawMessage   `json:"log"`
+	}
+	if err := json.NewDecoder(strings.NewReader(out)).Decode(&report); err != nil {
+		t.Fatalf("stdout did not parse as the report object: %v\n%s", err, out)
+	}
+	if report.Items == nil {
+		t.Errorf("items encoded as null, want []: %s", out)
+	}
+	for _, k := range []string{"path", "dropped", "kept", "outcome"} {
+		if _, ok := report.Log[k]; !ok {
+			t.Errorf("log is missing key %q: %s", k, out)
+		}
+	}
+}
+
+// TestPrPrune_HumanRowShape covers both halves of the sweep's output: a row per
+// file, and the log line, which is the only place the compaction result shows
+// without --json.
+func TestPrPrune_HumanRowShape(t *testing.T) {
+	dir := t.TempDir()
+	// Young by its name, so it is listed and kept rather than removed.
+	aside := filepath.Join(dir, "o-r-1-1.json.unreadable-"+strconv.FormatInt(time.Now().UTC().Unix(), 10))
+	if err := os.WriteFile(aside, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := runPrRepair(t, repairCmdClient(t, dir), "--prune", "--yes")
+	if err != nil {
+		t.Fatalf("pr repair --prune: %v", err)
+	}
+	if !strings.Contains(out, filepath.Base(aside)) {
+		t.Errorf("stdout = %q, want the set-aside file named", out)
+	}
+	if !strings.Contains(out, "kept") {
+		t.Errorf("stdout = %q, want the outcome column", out)
+	}
+	if !strings.Contains(out, "log\t") {
+		t.Errorf("stdout = %q, want the compaction line", out)
+	}
+	if _, serr := os.Stat(aside); serr != nil {
+		t.Errorf("a file inside the retention window was removed: %v", serr)
+	}
+}
+
+func TestPrPrune_EmptySweepSaysSoAndExitsZero(t *testing.T) {
+	out, _, err := runPrRepair(t, repairCmdClient(t, t.TempDir()), "--prune", "--yes")
+	if err != nil {
+		t.Fatalf("pr repair --prune: %v", err)
+	}
+	if !strings.Contains(out, "no set-aside records to prune") {
+		t.Errorf("stdout = %q, want the empty-state line", out)
 	}
 }

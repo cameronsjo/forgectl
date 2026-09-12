@@ -84,7 +84,21 @@ Only `--forget-if-absent` can settle it, and it **sets the record aside rather t
 
 Three things guard the set-aside, because it is the only arm that cannot prove what it is acting on. It reads the `ref` out of the raw bytes on a best-effort basis and **refuses while that ref's review window is live** — the newer-forgectl case, settled by the build that owns it rather than by this one. It takes the same confirmation as `--rollback` (`--yes` off a terminal). And its audit row carries the record's own bytes, capped, clamped, and shrunk until the row fits its line limit — the row records how many bytes there were and says so when it had to truncate, because every other field in that row is derived from a decode that did not happen, and the row must never be the reason a set-aside fails.
 
-**Nothing in forgectl removes a set-aside file.** It sits outside every enumeration by design, so `pr list`, `pr teardown`, `pr cleanup`, and `pr repair` all ignore or refuse it — which is what makes the rename safe, and also means you delete it by hand once you have read it, or once a build that understands it has.
+**That ref read is best-effort, and it often finds nothing.** A torn write — the canonical corrupt record — yields no `ref` at all, so the liveness refusal cannot run, and the record is set aside **without a liveness check**. It is not refused: refusing there would refuse exactly the record class this arm exists to clear, leaving a manual `rm` as the only escape again. Instead the gap is said out loud — the report leaves `window_live` at `?` rather than claiming `no window`, a warning names the file, and the confirmation prompt carries the line `no ref could be read, so whether its review window is live was not checked`. The intact newer-forgectl record is the case that *does* carry a readable ref, and it is the case the guard was built for.
+
+A set-aside file sits outside every enumeration by design, so `pr list`, `pr teardown`, `pr cleanup`, and the ordinary `pr repair` arms all ignore it — which is what makes the rename safe. **One verb removes it, and only once it is old: `pr repair --prune`.**
+
+```bash
+forgectl pr repair --prune                                  # reap set-aside records, compact the audit log
+forgectl pr repair --prune --dry-run                        # what it would do, touching nothing
+forgectl pr repair --prune --older-than 7d --log-retention 30d
+```
+
+`--older-than` defaults to **30d** and `--log-retention` to **90d**; both refuse a zero or negative window, and both refuse outside `--prune` rather than being silently ignored. `--prune` cannot be combined with `--apply` or `--history`. It exits **0** on success: it is an action, not a survey, so "how many files did you remove" is not a question the exit code answers.
+
+**A file's age comes from its NAME, never its mtime.** A rename preserves mtime, so a set-aside file's mtime dates the record's last write — usually long before it was set aside, which would hand it to the sweep early. The set-aside second is stamped into the name once (`<name>.json.unreadable-<unix>`, plus a random suffix when two land in the same second), and that stamp is the only clock this reads. **A name whose stamp cannot be read is listed and kept, never removed** — deleting a file whose age nothing established is the one outcome no retention window justifies.
+
+`--prune` is the only repair arm that **unlinks** rather than renames, so it refuses in four directions, each per file rather than for the whole sweep: a record whose ref names a **live window**; every ref-bearing record when the **window list cannot be read at all** (a ref-less record names no window, so an unreadable list says nothing about it and it proceeds); a file that is **no longer a regular file**; and a file whose bytes **changed** between the enumeration and the re-read through the pinned directory handle. Off a terminal it requires `--yes` — except when there is nothing to do, which returns before the gate, and under `--dry-run`, which has nothing to confirm. Each removal writes its intent row, carrying the file's own bytes, **before** the unlink: once the file is gone that row is the only trace it ever existed.
 
 ### The runbook
 
@@ -111,6 +125,10 @@ forgectl pr repair <breadcrumb> --apply --forget-if-absent   # remove only a rec
 Every refusal happens **before** the intent row is written. A row with no completion beside it is the signal that a rollback died mid-delete, so a refused mutation that wrote one would forge exactly that signal and send someone hunting a directory nothing ever touched.
 
 Every `--apply` writes a line to `<sessions dir>/repair.jsonl` **before** it mutates anything and completes that line afterwards. That ordering is what makes a half-finished rollback recoverable: once the record is gone, the intent row is the only thing left naming the clean room on disk. `forgectl pr repair --history [--json]` reads it back.
+
+`--prune` compacts that log, and **what it keeps unconditionally is the point**. It drops one thing only: an intent row with an `applied` or `failed` completion beside it, both older than `--log-retention`. Everything else survives at any age — an **unpaired intent** (that is the signal a repair died mid-delete, and its workspace field is the only pointer left to a possibly-orphaned clean room), a line that **does not parse** (nothing may drop what it cannot read, and it is preserved byte for byte), a row carrying **no timestamp** (no age was established, so no retention decision exists) and every row sharing its id, and a pair **straddling the cutoff**, which is kept whole so a completion can never outlive the intent it settles.
+
+The rewrite is a temp file, fsynced, renamed over the log, with the directory fsynced after — and its own intent row is appended to the **live** log first, then carried into the replacement. So a crash before the rename leaves the intact old log plus one dangling intent, which reads as "a compaction started"; a crash after leaves the new log carrying the same row, which reads as "a compaction happened". There is no window in which the log is shorter than it should be with nothing saying why.
 
 **`pr list` is the after-the-fact view; the launch commands check the same thing at dispatch time.** Once every window is open, forgectl waits **eight seconds**, lists windows exactly once, and reports any review that has already vanished. Eight seconds is the observed window in which a rejected `model` gets rejected — long enough to catch it, short enough not to stall the command. It is a bounded observation, not a guarantee: an agent that dies at nine seconds still dispatches "successfully", and `pr list` remains the way to find it later.
 
