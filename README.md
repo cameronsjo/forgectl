@@ -194,8 +194,8 @@ forgectl env redact [--file .env]                            # print file with v
 forgectl env set a.b.key --sops [--file secrets.sops.yaml]   # one key into a SOPS-encrypted YAML file
 #   --sops takes a dotted path, defaults to secrets.sops.yaml at the repo root, and
 #   requires sops on PATH. The target must BOTH be named *.sops.yaml / *.sops.yml /
-#   *.enc.yaml / *.enc.yml / secrets[.*].yaml / secrets[.*].yml AND carry a top-level
-#   sops: block; there is no --any-file escape.
+#   *.enc.yaml / *.enc.yml / secrets.yaml / secrets.yml / secrets.*.yaml /
+#   secrets.*.yml AND carry a top-level sops: block; there is no --any-file escape.
 #   Untouched values keep byte-identical ciphertext, so the diff is the one key you set
 #   plus sops' own lastmodified and mac. Add *.sops.yaml.lock to .gitignore — the lock
 #   helper leaves a non-secret sibling behind by design.
