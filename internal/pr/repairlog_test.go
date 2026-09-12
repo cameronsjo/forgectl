@@ -10,10 +10,12 @@ package pr
 //   [x] A failed truncate is reported alongside the original cause
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -155,5 +157,112 @@ func TestAppendRepairRowLocked_CreatesThe0600Log(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].ID != "a" {
 		t.Errorf("rows = %+v, want the one row back", rows)
+	}
+}
+
+// TestRepairRow_EveryStringFieldHasASizingDecision is the structural guard, and
+// it is the point of this whole round. The same defect returned three times,
+// one field over each time — Record, then Ref, then Workspace — because the
+// shrink loop was a hand-picked list and the row was not. Reflecting over the
+// struct makes the set exhaustive: a new string field added without a decision
+// fails here rather than silently reopening the class.
+func TestRepairRow_EveryStringFieldHasASizingDecision(t *testing.T) {
+	var row RepairRow
+	shrinkable := map[string]bool{}
+	for _, f := range shrinkableRowFields(&row) {
+		if shrinkable[f.Name] {
+			t.Errorf("field %s is listed twice in the shrink order", f.Name)
+		}
+		shrinkable[f.Name] = true
+	}
+
+	rt := reflect.TypeOf(row)
+	seen := 0
+	for i := range rt.NumField() {
+		field := rt.Field(i)
+		if field.Type.Kind() != reflect.String {
+			continue
+		}
+		seen++
+		_, bounded := boundedRowFields[field.Name]
+		switch {
+		case shrinkable[field.Name] && bounded:
+			t.Errorf("field %s is both shrunk and declared bounded; pick one", field.Name)
+		case !shrinkable[field.Name] && !bounded:
+			t.Errorf("field %s has no sizing decision: add it to shrinkableRowFields, "+
+				"or to boundedRowFields with the bound that makes leaving it out safe", field.Name)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("reflected over no string fields; the guard is asserting nothing")
+	}
+	// And the reverse: a name in either list that is not a field at all is a
+	// rename nobody finished.
+	for name := range boundedRowFields {
+		if _, ok := rt.FieldByName(name); !ok {
+			t.Errorf("boundedRowFields names %s, which is not a field on RepairRow", name)
+		}
+	}
+	for name := range shrinkable {
+		if _, ok := rt.FieldByName(name); !ok {
+			t.Errorf("the shrink order names %s, which is not a field on RepairRow", name)
+		}
+	}
+	for name, why := range boundedRowFields {
+		if strings.TrimSpace(why) == "" {
+			t.Errorf("boundedRowFields[%s] states no bound", name)
+		}
+	}
+}
+
+// TestMarshalRepairRow_EachFieldAloneCanOverflowAndIsShrunk fills each
+// shrinkable field, one at a time, with far more than the line budget of the
+// worst-expanding byte, and proves the row still lands — with the note naming
+// that field, so the truncation is never silent.
+//
+// The allowlisted fields are deliberately absent: 12 KiB in Mode or Outcome is
+// not an input production can construct (they are package constants), and the
+// structural test above is what holds their bounds. Asserting against a value
+// no producer can emit would be testing the test.
+func TestMarshalRepairRow_EachFieldAloneCanOverflowAndIsShrunk(t *testing.T) {
+	var probe RepairRow
+	for _, f := range shrinkableRowFields(&probe) {
+		t.Run(f.Name, func(t *testing.T) {
+			row := RepairRow{
+				TS: fixedTime(), ID: "abcdef0123456789",
+				FromPhase: repairPhaseUnreadable, Mode: RepairModeForgetIfAbsent,
+				Outcome: repairOutcomeIntent,
+			}
+			// Find the same field on THIS row and fill it. Every byte expands
+			// six-fold on marshal, so 12 KiB clears the 8 KiB limit alone.
+			var target *string
+			for _, g := range shrinkableRowFields(&row) {
+				if g.Name == f.Name {
+					target = g.Value
+				}
+			}
+			if target == nil {
+				t.Fatalf("field %s vanished between two calls", f.Name)
+			}
+			*target = strings.Repeat("<", 12<<10)
+
+			data, err := marshalRepairRow(row)
+			if err != nil {
+				t.Fatalf("an oversized %s refused the row: %v", f.Name, err)
+			}
+			if len(data) > maxRepairLogLineBytes {
+				t.Fatalf("encoded row is %d bytes, over the %d limit", len(data), maxRepairLogLineBytes)
+			}
+			if n := strings.Count(string(data), "\n"); n != 1 || data[len(data)-1] != '\n' {
+				t.Fatalf("row is not exactly one newline-terminated line (%d newlines)", n)
+			}
+			var back RepairRow
+			if err := json.Unmarshal(data, &back); err != nil {
+				t.Fatalf("row does not parse: %v", err)
+			}
+			if !strings.Contains(back.RecordNote, f.Label) {
+				t.Errorf("note = %q, want it to name the truncated %s", back.RecordNote, f.Label)
+			}
+		})
 	}
 }

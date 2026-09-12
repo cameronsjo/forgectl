@@ -134,6 +134,52 @@ func (c *Client) appendRepairRowLocked(row RepairRow) error {
 	return nil
 }
 
+// shrinkableField is one variable-length string on a row, paired with the
+// label the truncation note uses.
+//
+// Name is the Go FIELD NAME, and it is load-bearing: a structural test reflects
+// over RepairRow and asserts every string field appears either here or in
+// boundedRowFields, so a new field added without a sizing decision fails the
+// build rather than silently reopening the class of defect this whole loop
+// exists to close.
+type shrinkableField struct {
+	Name  string
+	Label string
+	Value *string
+}
+
+// shrinkableRowFields lists every variable-length string on a row, in the order
+// they are given up.
+//
+// ORDER IS PROTECTION, ascending: the first entry is sacrificed first, the last
+// survives longest. So the ranking is by what a reader needs at the floor —
+// the record path names the row's subject, the workspace is the only pointer
+// left to a clean room once the record is gone, and the actor is diagnostic
+// that nothing reads to decide anything.
+func shrinkableRowFields(row *RepairRow) []shrinkableField {
+	return []shrinkableField{
+		{"Record", "record", &row.Record},
+		{"Actor", "actor", &row.Actor},
+		{"Ref", "ref", &row.Ref},
+		{"Error", "error", &row.Error},
+		{"WindowID", "window id", &row.WindowID},
+		{"Workspace", "workspace", &row.Workspace},
+		{"RecordPath", "record path", &row.RecordPath},
+	}
+}
+
+// boundedRowFields names every string field on RepairRow that is NOT shrunk,
+// with the bound that makes leaving it out safe. The structural test reads this
+// map, so a bound asserted here is a claim the suite checks rather than a
+// comment nobody revisits.
+var boundedRowFields = map[string]string{
+	"ID":         "16 hex characters from randomSuffix",
+	"FromPhase":  "a package constant or repairPhaseUnreadable",
+	"Mode":       "one of the three RepairMode constants",
+	"Outcome":    "one of the repairOutcome constants",
+	"RecordNote": "derived here from fixed templates and two decimal ints per clause, ASCII, and recomputed inside the measurement",
+}
+
 // marshalRepairRow encodes one newline-terminated row that FITS, by
 // construction.
 //
@@ -146,43 +192,26 @@ func (c *Client) appendRepairRowLocked(row RepairRow) error {
 // `>`, and `&` to six bytes each. A 4 KiB clamped payload of `<` marshals to
 // 24 KiB, so capping a payload before encoding it measures the wrong thing.
 //
-// So every field whose length comes from outside is shrunk against the ENCODED
-// length, in the order below — least identifying first, because what survives
-// at the floor should be what names the file:
+// The lesson that produced this shape: the defect returned twice, one field
+// over each time — first through `Record`, then `Ref`, then `Workspace`. So the
+// loop is written over the FIELD SET rather than over a hand-picked few, and
+// the structural test above makes the set exhaustive by construction. Every
+// string on the row is either shrunk here or listed in boundedRowFields with
+// its bound.
 //
-//	record      the subject's own bytes; the biggest and the most divisible
-//	ref         read best-effort from a record nothing could decode, so it is
-//	            charset-validated but NOT length-validated (ref.go bounds the
-//	            alphabet, never the size)
-//	error       the decode failure, which quotes the path and so inherits its
-//	            length
-//	record path last, because losing it costs the row its subject
-//
-// Anything still on the row after all four are empty is fixed-width (the
-// timestamp, the 16-hex id), a constant (phase, mode, outcome), or bounded at
-// its source (the actor, by maxActorBytes) — so the final error is unreachable
-// rather than merely unlikely. It is kept because "unreachable" is a claim
-// about today's fields, and a new unbounded one should fail loudly here rather
-// than silently overflow the line.
+// The remaining fields are fixed-width, constants, or derived here, which makes
+// the final error unreachable. It is kept anyway: "unreachable" is a claim
+// about today's fields, and a future one should fail loudly here rather than
+// silently overflow the line.
 func marshalRepairRow(row RepairRow) ([]byte, error) {
-	original := map[string]int{
-		"record": len(row.Record), "ref": len(row.Ref),
-		"error": len(row.Error), "record path": len(row.RecordPath),
+	fields := shrinkableRowFields(&row)
+	original := make(map[string]int, len(fields))
+	for _, f := range fields {
+		original[f.Label] = len(*f.Value)
 	}
 	shrunk := map[string]bool{}
-	// Ordered least-identifying first. Taking a pointer into the local copy is
-	// what lets the loop rewrite a field without a switch per iteration.
-	fields := []struct {
-		name  string
-		value *string
-	}{
-		{"record", &row.Record},
-		{"ref", &row.Ref},
-		{"error", &row.Error},
-		{"record path", &row.RecordPath},
-	}
 	for {
-		row.RecordNote = shrinkNote(original, shrunk, row)
+		row.RecordNote = shrinkNote(fields, original, shrunk)
 		// termsafe:allow-raw-json persisted audit row, never command output
 		data, err := json.Marshal(row)
 		if err != nil {
@@ -194,11 +223,11 @@ func marshalRepairRow(row RepairRow) ([]byte, error) {
 		}
 		trimmed := false
 		for _, f := range fields {
-			if *f.value == "" {
+			if *f.Value == "" {
 				continue
 			}
-			*f.value = halveString(*f.value)
-			shrunk[f.name] = true
+			*f.Value = halveString(*f.Value)
+			shrunk[f.Label] = true
 			trimmed = true
 			break
 		}
@@ -212,25 +241,24 @@ func marshalRepairRow(row RepairRow) ([]byte, error) {
 // shrinkNote renders what the row had to give up, so a truncated value can
 // never read as the whole one. A shrunken ref matters most: it stays
 // charset-valid, so without this note it would look like a real, shorter ref.
-func shrinkNote(original map[string]int, shrunk map[string]bool, row RepairRow) string {
+//
+// It is recomputed at the top of each pass, BEFORE the marshal, so its own
+// bytes are inside the measurement rather than added after it.
+func shrinkNote(fields []shrinkableField, original map[string]int, shrunk map[string]bool) string {
 	if len(shrunk) == 0 {
 		return ""
 	}
-	now := map[string]int{
-		"record": len(row.Record), "ref": len(row.Ref),
-		"error": len(row.Error), "record path": len(row.RecordPath),
-	}
 	notes := make([]string, 0, len(shrunk))
-	for _, name := range []string{"record", "ref", "error", "record path"} {
-		if !shrunk[name] {
+	for _, f := range fields {
+		if !shrunk[f.Label] {
 			continue
 		}
-		if now[name] == 0 {
-			notes = append(notes, fmt.Sprintf("the %s's %d bytes did not fit this row and were elided", name, original[name]))
+		if len(*f.Value) == 0 {
+			notes = append(notes, fmt.Sprintf("the %s's %d bytes did not fit this row and were elided", f.Label, original[f.Label]))
 			continue
 		}
 		notes = append(notes, fmt.Sprintf("the %s was truncated from %d bytes to %d to fit this row",
-			name, original[name], now[name]))
+			f.Label, original[f.Label], len(*f.Value)))
 	}
 	return strings.Join(notes, "; ")
 }

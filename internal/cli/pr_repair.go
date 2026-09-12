@@ -116,6 +116,13 @@ func runRepairHistory(cmd *cobra.Command, client *pr.Client, asJSON bool) error 
 		_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\n",
 			r.TS.Format("2006-01-02T15:04:05Z07:00"), r.Mode, r.Outcome,
 			safeTerm(r.Ref), termsafe.QuotePathIfUnsafe(r.RecordPath))
+		// The note is not optional detail. A shrunken ref or workspace stays
+		// well-formed, so without this line the default reader sees a truncated
+		// value as a complete one — the exact mistake the note exists to
+		// prevent, in the one view that was dropping it.
+		if r.RecordNote != "" {
+			_, _ = fmt.Fprintf(out, "  note: %s\n", safeTerm(r.RecordNote))
+		}
 	}
 	return nil
 }
