@@ -73,9 +73,10 @@ type tmuxLedger struct {
 	// prepared clean room behind.
 	launchFails map[string]bool
 	// listErr, when set, is returned once list-windows has been called more than
-	// listErrAfter times. Bulk lists at admission and again at verification, so
-	// listErrAfter=1 fails exactly the verification sweep; a single review never
-	// reaches admission, so 0 fails its only list.
+	// listErrAfter times. Bulk lists at admission, again inside the reservation
+	// hold, and again at verification, so listErrAfter=2 fails exactly the
+	// verification sweep; a single review never reaches admission, so 0 fails
+	// its only list.
 	listErr      error
 	listErrAfter int
 
@@ -293,11 +294,13 @@ func TestLaunchPicked_BulkOrderingAndAccounting(t *testing.T) {
 		}
 	}
 
-	// One wait, one verification list. Admission lists once before any dispatch,
-	// so two list calls total for the whole invocation.
+	// One wait, one verification list. Admission reads the window list TWICE
+	// before any dispatch — once for the free-slot message, and once inside the
+	// reservation hold that actually claims the slots. The second read is the
+	// race-free one; the first only decides how many refs to attempt.
 	listCalls, windowCalls := ledger.counts()
-	if listCalls != 2 {
-		t.Errorf("list-windows calls = %d, want 2 (admission + one verification sweep)", listCalls)
+	if listCalls != 3 {
+		t.Errorf("list-windows calls = %d, want 3 (admission + reservation + one verification sweep)", listCalls)
 	}
 	if windowCalls != 3 {
 		t.Errorf("new-window calls = %d, want 3 (one per prepared ref)", windowCalls)
@@ -346,8 +349,8 @@ func TestLaunchPicked_AllDispatchesLive(t *testing.T) {
 	if err := launchPicked(context.Background(), client, config.Config{}, cmd, pickRefs(1, 2), emptyStore(t), false); err != nil {
 		t.Fatalf("launchPicked: %v", err)
 	}
-	if listCalls, _ := ledger.counts(); listCalls != 2 {
-		t.Errorf("list-windows calls = %d, want 2", listCalls)
+	if listCalls, _ := ledger.counts(); listCalls != 3 {
+		t.Errorf("list-windows calls = %d, want 3 (admission + reservation + verification)", listCalls)
 	}
 	assertCompletion(t, readLog(t), map[string]any{"launched": 2.0, "verify": "live", "gone": 0.0})
 }
@@ -358,7 +361,9 @@ func TestLaunchPicked_VerificationListErrorIsUnknown(t *testing.T) {
 
 	ledger := newTmuxLedger("forgectl")
 	// Admission's list succeeds; the verification sweep's does not.
-	ledger.listErr, ledger.listErrAfter = errors.New("boom: tmux exploded"), 1
+	// Admission and the reservation both list successfully; the verification
+	// sweep — the third read — does not.
+	ledger.listErr, ledger.listErrAfter = errors.New("boom: tmux exploded"), 2
 	fake := ledger.runner()
 	client := verifyingClient(t, ledger, fake)
 
@@ -399,8 +404,8 @@ func TestLaunchPicked_CanceledWaitIsUnknownWithoutListing(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "dispatch state is unknown") {
 		t.Fatalf("error = %v, want the unknown wrapper", err)
 	}
-	if listCalls, _ := ledger.counts(); listCalls != 1 {
-		t.Errorf("list-windows calls = %d, want 1 — a failed wait must not list", listCalls)
+	if listCalls, _ := ledger.counts(); listCalls != 2 {
+		t.Errorf("list-windows calls = %d, want 2 (admission + reservation) — a failed wait must not list", listCalls)
 	}
 	assertCompletion(t, readLog(t), map[string]any{"launched": 1.0, "verify": "unknown", "gone": 0.0})
 }
@@ -428,8 +433,8 @@ func TestLaunchPicked_NoVerifySkipsWaitAndSweep(t *testing.T) {
 	if waits != 0 {
 		t.Errorf("waits = %d, want 0 under --no-verify", waits)
 	}
-	if listCalls, _ := ledger.counts(); listCalls != 1 {
-		t.Errorf("list-windows calls = %d, want 1 (admission only)", listCalls)
+	if listCalls, _ := ledger.counts(); listCalls != 2 {
+		t.Errorf("list-windows calls = %d, want 2 (admission + reservation only)", listCalls)
 	}
 	// --no-verify is wait-only: the floor and capability probe still ran.
 	if !hasTmuxCall(fake.Calls, "-V") || !hasTmuxCall(fake.Calls, "display-message") {

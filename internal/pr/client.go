@@ -43,6 +43,13 @@ type Client struct {
 	// writer — see the residual note on discardStale.
 	lockWait time.Duration
 
+	// onLock, when non-nil, is called with ("acquire"|"release") around every
+	// successful lifecycle-lock hold. It exists so an in-package test can prove
+	// a composite verb takes ONE hold and does no long work inside it — the
+	// ordering property the crash-safety design rests on, which is otherwise
+	// invisible from outside. Never set in production.
+	onLock func(verb, event string)
+
 	// findingsDir is the forgectl-owned directory (config.PrFindingsDir) that
 	// holds `forgectl pr local` findings — the deliverable of a local
 	// clean-room review, which must outlive the disposable workspace.

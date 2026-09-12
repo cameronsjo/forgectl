@@ -104,6 +104,8 @@ forgectl pr reviewed sync                # prune reviewed marks for PRs that are
 forgectl pr list                         # list active clean-room review sessions
 forgectl pr attach <breadcrumb>          # jump to a review window (also: open <b>, teardown <b>)
                                           #   <breadcrumb> is the session path `pr list` prints
+forgectl pr repair                       # list sessions stuck between phases; exits 1 when any need settling
+forgectl pr repair <b> --apply --rollback   # settle one: --adopt-window, --rollback, or --forget-if-absent
 forgectl pr keys                         # tmux cheatsheet for driving a review
 
 When both stdin and stdout are terminals, these selectors keep their existing

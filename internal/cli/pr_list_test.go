@@ -341,7 +341,7 @@ func TestPrList_LiveWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pr list: %v", err)
 	}
-	if !strings.Contains(got, "\tlive\t-\n") {
+	if !strings.Contains(got, "\tlive\tprepared\n") {
 		t.Errorf("pr list output missing the \"live\" status column (field 4) before the phase column:\n%s", got)
 	}
 	if !strings.Contains(got, ref.String()) {
@@ -367,8 +367,11 @@ func TestPrList_LiveWindow(t *testing.T) {
 	if fields[3] != "live" {
 		t.Errorf("field 4 = %q, want the status %q", fields[3], "live")
 	}
-	if fields[4] != "-" {
-		t.Errorf("field 5 = %q, want %q — the recorded phase, and a legacy record has none", fields[4], "-")
+	// Prepare writes a version-2 record, so a freshly prepared session reports
+	// its phase here. The legacy "-" rendering is pinned separately, over a
+	// seeded pre-phase record.
+	if fields[4] != "prepared" {
+		t.Errorf("field 5 = %q, want %q — the phase Prepare records", fields[4], "prepared")
 	}
 }
 
@@ -398,7 +401,7 @@ func TestPrList_UnreadableTmux_DegradesAndSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pr list must succeed when tmux is unreadable, got: %v", err)
 	}
-	if !strings.Contains(got, "\t?\t-\n") {
+	if !strings.Contains(got, "\t?\tprepared\n") {
 		t.Errorf("pr list output missing the \"?\" status (field 4) for an unreadable tmux:\n%s", got)
 	}
 	if strings.Contains(got, "window gone") {

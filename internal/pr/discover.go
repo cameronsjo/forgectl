@@ -277,9 +277,34 @@ type PrepResult struct {
 // checkouts, and a keyed mutex (on ref.Slug()) serializes any goroutines that
 // share a clone so their checkouts never race the same repo. Per-item errors
 // land in PrepResult.Err; the call itself never fails.
-func (c *Client) PrepareMany(ctx context.Context, refs []Ref, opts PrepareOpts) []PrepResult {
+func (c *Client) PrepareMany(ctx context.Context, refs []Ref, cfgMax int, opts PrepareOpts) []PrepResult {
 	slog.Debug("Preparing to prepare multiple PRs concurrently.", "count", len(refs))
 	results := make([]PrepResult, len(refs))
+
+	// ONE lock hold reserves every slot, before a single goroutine starts. The
+	// alternative — reserving inside each goroutine — would take N holds and
+	// interleave them with a peer launcher's, so a batch could half-reserve and
+	// then hit the cap partway through. Nothing is held across wg.Wait() below:
+	// the clones run against slots already claimed.
+	reserved := make([]string, len(refs))
+	reserveErr := make([]error, len(refs))
+	if err := c.withLifecycleLock(ctx, "reserve", func() error {
+		res, err := c.openReservation(ctx)
+		if err != nil {
+			return err
+		}
+		for i, ref := range refs {
+			path, rerr := c.reserveFrom(res, ref, cfgMax, opts)
+			reserved[i], reserveErr[i] = path, rerr
+		}
+		return nil
+	}); err != nil {
+		for i, ref := range refs {
+			results[i] = PrepResult{Ref: ref, Err: err}
+		}
+		return results
+	}
+
 	km := newKeyedMutex()
 	sem := make(chan struct{}, prepareConcurrency)
 	var wg sync.WaitGroup
@@ -287,6 +312,12 @@ func (c *Client) PrepareMany(ctx context.Context, refs []Ref, opts PrepareOpts) 
 	for i, ref := range refs {
 		i, ref := i, ref
 		results[i].Ref = ref
+		if reserveErr[i] != nil {
+			results[i].Err = reserveErr[i]
+			continue
+		}
+		refOpts := opts
+		refOpts.RecordPath = reserved[i]
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -302,9 +333,18 @@ func (c *Client) PrepareMany(ctx context.Context, refs []Ref, opts PrepareOpts) 
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			sess, err := c.Prepare(ctx, ref, opts)
+			sess, err := c.Prepare(ctx, ref, refOpts)
 			results[i].Session = sess
 			results[i].Err = err
+			if err != nil {
+				// The reservation is now a `preparing` record with no clean
+				// room behind it, which would hold its slot forever. Park it so
+				// `pr repair` can settle it rather than leaking the slot.
+				if merr := c.markNeedsRepair(ctx, refOpts.RecordPath, "prepare failed: "+err.Error()); merr != nil {
+					slog.Error("Failed to park a reservation whose prepare failed; its slot stays reserved.",
+						"ref", ref.String(), "path", refOpts.RecordPath, "error", merr)
+				}
+			}
 		}()
 	}
 	wg.Wait()

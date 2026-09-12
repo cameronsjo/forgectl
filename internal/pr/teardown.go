@@ -66,6 +66,14 @@ func (c *Client) teardownLocked(ctx context.Context, path string) error {
 		return err
 	}
 
+	// A record that legitimately has no workspace — queued, or a reservation
+	// that never got its clean room — is classified NONE rather than missing,
+	// and there is nothing to restore, kill, or remove but the record itself.
+	// It is checked before classifyWorkspace because an empty pathname is not a
+	// pathname that went away.
+	if member.breadcrumb.Workspace == "" {
+		return c.discardRecordOnly(member)
+	}
 	avail, availErr := classifyWorkspace(member.breadcrumb.Workspace)
 	switch avail {
 	case workspaceAvailabilityMissing:
@@ -254,6 +262,87 @@ func (c *Client) discardStale(member breadcrumbMember) error {
 		return fmt.Errorf("remove breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
 	}
 	slog.Info("Successfully discarded a stale review breadcrumb.", "ref", bc.Ref)
+	return nil
+}
+
+// discardRecordOnly removes a record that never had a workspace — a queued
+// entry, or a reservation whose clean room was never created.
+//
+// It runs the same pinned-handle identity protocol discardStale does, minus
+// the workspace re-classification, and it re-proves the one fact that
+// authorizes it: the record STILL carries no workspace. That re-proof is the
+// whole safety argument. Without it, a record that gained a workspace between
+// the classification and the unlink would have its only pointer deleted, which
+// is exactly the leak the stale path exists to prevent.
+//
+// It issues ZERO Runner calls and performs no quarantine restore, sandbox
+// teardown, git, or tmux action. There is nothing to act on.
+func (c *Client) discardRecordOnly(member breadcrumbMember) error {
+	slog.Debug("Preparing to discard a session record with no workspace.",
+		"ref", member.breadcrumb.Ref, "path", member.path, "phase", string(member.breadcrumb.Phase))
+
+	root, err := os.OpenRoot(c.sessionsDir)
+	if err != nil {
+		return fmt.Errorf("pin pr sessions dir %s: %w", c.sessionsDir, err)
+	}
+	defer func() {
+		if cerr := root.Close(); cerr != nil {
+			slog.Debug("Failed to close the pinned pr sessions dir handle.", "error", cerr)
+		}
+	}()
+
+	dirInfo, err := root.Lstat(".")
+	if err != nil {
+		return fmt.Errorf("re-stat pr sessions dir: %w", err)
+	}
+	if !os.SameFile(dirInfo, member.dirInfo) {
+		return fmt.Errorf("pr sessions dir %s changed identity during teardown; refusing to remove %s",
+			c.sessionsDir, member.displayPath)
+	}
+
+	name := filepath.Base(member.path)
+	info, err := root.Lstat(name)
+	if err != nil {
+		return fmt.Errorf("re-stat breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+	}
+	if !os.SameFile(info, member.info) {
+		return fmt.Errorf("breadcrumb %s changed identity during teardown; refusing to remove it", member.displayPath)
+	}
+	if !staleMemberIsRegular(info) {
+		return fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to remove it", member.displayPath)
+	}
+
+	file, err := root.Open(name)
+	if err != nil {
+		return fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+	}
+	data, readErr := readBreadcrumbBytes(file)
+	closeErr := file.Close()
+	if readErr != nil {
+		return fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(readErr))
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close breadcrumb %s after re-read: %w", member.displayPath, termsafe.Error(closeErr))
+	}
+	if !bytes.Equal(data, member.bytes) {
+		return fmt.Errorf("breadcrumb %s changed on disk during teardown; refusing to remove it", member.displayPath)
+	}
+	bc, err := decodeBreadcrumbRecord(data, member.path)
+	if err != nil {
+		return fmt.Errorf("re-validate breadcrumb before removal: %w", err)
+	}
+	if !sameBreadcrumbRecord(bc, member.breadcrumb) {
+		return fmt.Errorf("breadcrumb %s decoded differently during teardown; refusing to remove it", member.displayPath)
+	}
+	if bc.Workspace != "" {
+		return fmt.Errorf("breadcrumb %s now names a workspace; refusing to remove it as a record-only entry",
+			member.displayPath)
+	}
+
+	if err := root.Remove(name); err != nil {
+		return fmt.Errorf("remove breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+	}
+	slog.Info("Successfully discarded a session record that had no workspace.", "ref", bc.Ref)
 	return nil
 }
 

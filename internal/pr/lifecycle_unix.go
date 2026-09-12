@@ -129,6 +129,10 @@ func (c *Client) withLifecycleLock(ctx context.Context, verb string, fn func() e
 		}
 	}
 	defer func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN) }()
+	if c.onLock != nil {
+		c.onLock(verb, "acquire")
+		defer c.onLock(verb, "release")
+	}
 
 	// The holder body is written only AFTER acquisition, so a refused caller
 	// never overwrites the real holder's identity.

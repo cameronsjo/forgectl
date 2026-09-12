@@ -50,6 +50,13 @@ type PrepareOpts struct {
 	// unconfined path just the same, which is why a caller that forgets is
 	// safe rather than sorry.
 	Provenance ReviewProvenance
+
+	// RecordPath names an ALREADY-RESERVED `preparing` record to complete
+	// rather than creating a fresh one: reserve wrote it under the lifecycle
+	// lock to hold a slot, and Prepare moves that same file to `prepared` once
+	// the workspace exists. Empty means Prepare writes its own record — the
+	// shape every unreserved caller still takes.
+	RecordPath string
 }
 
 // ghPRView is the subset of `gh pr view --json …` output the core consumes.
@@ -149,16 +156,50 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 		Provenance: provenance.persisted(),
 		// Local stays false: this is a remote PR. The zero value is the
 		// deliberate answer here, not an omission.
+		Version:  breadcrumbVersion,
+		Phase:    PhasePrepared,
+		Revision: 1,
 	}
-	path, err := c.writeBreadcrumb(ctx, ref, bc)
+	path, createdAt, err := c.recordPrepared(ctx, ref, bc, opts.RecordPath)
 	if err != nil {
 		_ = sandbox.Teardown(ctx, c.run, workspace)
 		return Session{}, err
 	}
 	sess.Path = path
+	sess.CreatedAt = createdAt
 
 	slog.Info("Successfully prepared clean-room review.", "ref", ref.String(), "workspace", workspace)
 	return sess, nil
+}
+
+// recordPrepared lands the `prepared` record for a freshly built clean room —
+// either by completing the reservation at recordPath, or by writing a new
+// record when the caller did not reserve one.
+//
+// Completing a reservation is a TRANSITION, not a rewrite: the reserved file
+// already holds the slot and its name encodes the reservation's timestamp, so
+// the workspace is written INTO it rather than beside it. That is what keeps
+// the slot accounted for exactly once from reserve through teardown. It
+// returns the record's own createdAt so the Session and the file on disk agree
+// about when the session began.
+func (c *Client) recordPrepared(ctx context.Context, ref Ref, bc Breadcrumb, recordPath string) (string, time.Time, error) {
+	if recordPath == "" {
+		path, err := c.writeBreadcrumb(ctx, ref, bc)
+		return path, bc.CreatedAt, err
+	}
+	var createdAt time.Time
+	err := c.transition(ctx, recordPath, PhasePreparing, PhasePrepared, func(rec *Breadcrumb) error {
+		rec.Workspace = bc.Workspace
+		rec.Agent = bc.Agent
+		rec.Provenance = bc.Provenance
+		rec.Local = bc.Local
+		createdAt = rec.CreatedAt
+		return nil
+	})
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return recordPath, createdAt, nil
 }
 
 // sandboxAndQuarantine creates the workspace via sandbox.Sandbox and

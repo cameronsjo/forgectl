@@ -417,7 +417,7 @@ func TestPrepareMany_SameRepoSerialized(t *testing.T) {
 	client := New(fake, WithSessionsDir(t.TempDir()))
 	// Four PRs, all from the same repo → all must serialize.
 	refs := []Ref{testRef(1), testRef(2), testRef(3), testRef(4)}
-	results := client.PrepareMany(context.Background(), refs, PrepareOpts{})
+	results := client.PrepareMany(context.Background(), refs, 0, PrepareOpts{})
 
 	if len(results) != len(refs) {
 		t.Fatalf("got %d results, want %d", len(results), len(refs))
@@ -464,7 +464,7 @@ func TestPrepareMany_InputOrder(t *testing.T) {
 		{Owner: "cameronsjo", Repo: "bravo", Number: 2},
 		{Owner: "cameronsjo", Repo: "charlie", Number: 3},
 	}
-	results := client.PrepareMany(context.Background(), refs, PrepareOpts{})
+	results := client.PrepareMany(context.Background(), refs, 0, PrepareOpts{})
 	for i, r := range results {
 		if r.Ref != refs[i] {
 			t.Errorf("results[%d].Ref = %s, want %s (input order broken)", i, r.Ref, refs[i])
@@ -492,7 +492,7 @@ func TestPrepareMany_PerItemErrorCaptured(t *testing.T) {
 		{Owner: "cameronsjo", Repo: "alpha", Number: 1},
 		{Owner: "cameronsjo", Repo: "bravo", Number: 2}, // this one fails
 	}
-	results := client.PrepareMany(context.Background(), refs, PrepareOpts{})
+	results := client.PrepareMany(context.Background(), refs, 0, PrepareOpts{})
 	if results[0].Err != nil {
 		t.Errorf("results[0] should have succeeded, got err: %v", results[0].Err)
 	}
