@@ -1112,3 +1112,47 @@ func TestCappedRecordBytes_CutsOnARuneBoundary(t *testing.T) {
 		t.Errorf("capped payload is %d bytes, over the %d cap", len(got), maxAuditRecordBytes)
 	}
 }
+
+// TestRepairSetAside_ARefLessRecordProceedsAndSaysTheCheckDidNotRun is the
+// honest-uncertainty case. A torn write is the CANONICAL corrupt record and it
+// yields no ref, so the liveness refusal — the one guard that reads the record
+// at all — cannot run. Refusing there would refuse exactly the record class
+// this verb exists to clear, leaving `rm` as the only escape again. So it
+// proceeds, reports the liveness as UNKNOWN rather than as absent, and says so
+// in the prompt a human approves.
+func TestRepairSetAside_ARefLessRecordProceedsAndSaysTheCheckDidNotRun(t *testing.T) {
+	var prompted string
+	c := New(repairRunner(nil),
+		WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+		WithTmuxSession("forgectl"), WithLockWait(2*time.Second),
+		WithTTYCheck(func() bool { return true }),
+		WithRemovalConfirmer(func(prompt string) (bool, error) { prompted = prompt; return true, nil }),
+	)
+	bad := filepath.Join(c.SessionsDir(), "o-r-9-1.json")
+	// A torn write: the bytes stop mid-record, so no field parses at all.
+	raw := []byte(`{"workspace":"/tmp/forgectl-workflow-x","ref":"o/r#`)
+	if err := os.WriteFile(bad, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := c.Repair(context.Background(), RepairOpts{Record: bad, Apply: true, ForgetIfAbsent: true})
+	if err != nil {
+		t.Fatalf("set aside a torn-write record: %v — a ref-less record must not refuse", err)
+	}
+	if len(report.Items) != 1 || report.Items[0].Outcome != repairOutcomeSetAside {
+		t.Fatalf("report = %+v, want one set-aside item", report.Items)
+	}
+	// nil, not false: no window was checked, and rendering "no window" would
+	// state a fact nobody established.
+	if got := report.Items[0].WindowLive; got != nil {
+		t.Errorf("WindowLive = %v, want nil — no ref means no liveness check ran", fmtBoolPtr(got))
+	}
+	if report.Items[0].Ref != "" {
+		t.Errorf("Ref = %q, want empty — nothing readable named one", report.Items[0].Ref)
+	}
+	if !strings.Contains(prompted, "no ref could be read") ||
+		!strings.Contains(prompted, "was not checked") {
+		t.Errorf("prompt %q does not say the liveness check could not run", prompted)
+	}
+	assertSetAside(t, c, bad, raw)
+}
