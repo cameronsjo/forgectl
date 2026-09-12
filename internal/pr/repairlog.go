@@ -19,8 +19,11 @@ import (
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
-// repairLogName is the write-ahead intent and audit trail every `pr repair
-// --apply` appends to, a sibling of the records it describes.
+// repairLogName is the write-ahead intent and audit trail every destructive
+// session verb appends to — `pr repair --apply`, `pr teardown`, and
+// `pr cleanup` — a sibling of the records it describes. The name is historical:
+// it is kept as-is so existing trails stay readable, and each row says which
+// verb wrote it.
 //
 // The .jsonl extension is load-bearing: List enumerates only .json names, so
 // this file can never be mistaken for a session record.
@@ -46,6 +49,21 @@ const (
 	repairOutcomeFailed  = "failed"
 )
 
+// The destructive session verbs a row can name. A row's verb is WHICH COMMAND
+// removed the thing, which is a different question from repair's Mode: Mode
+// holds the flag spelling `pr repair --apply` was given, and is empty for every
+// other verb. A new destructive verb adds a constant here and nothing else.
+const (
+	auditVerbRepair   = "repair"
+	auditVerbTeardown = "teardown"
+	auditVerbCleanup  = "cleanup"
+	// auditVerbPrune is the housekeeping sweep. It is its own verb rather than a
+	// spelling of repair because it is the only one that UNLINKS: a reader
+	// scanning the trail for what destroyed something needs to tell "a record
+	// was renamed out of the way" from "a file is gone".
+	auditVerbPrune = "prune"
+)
+
 // RepairRow is one line of the repair log — the intent written BEFORE a
 // mutation, or the completion written after it. The two are paired by ID.
 type RepairRow struct {
@@ -55,11 +73,15 @@ type RepairRow struct {
 	Ref        string    `json:"ref"`
 	RecordPath string    `json:"record_path"`
 	FromPhase  string    `json:"from_phase"`
-	Mode       string    `json:"mode"`
-	WindowID   string    `json:"window_id,omitempty"`
-	Workspace  string    `json:"workspace,omitempty"`
-	Outcome    string    `json:"outcome"`
-	Error      string    `json:"error,omitempty"`
+	// Verb names the command that removed the thing. The omitempty is
+	// deliberate: rows written before this field existed carry no verb, and an
+	// absent verb must read as unknown rather than as a claim that a repair ran.
+	Verb      string `json:"verb,omitempty"`
+	Mode      string `json:"mode"`
+	WindowID  string `json:"window_id,omitempty"`
+	Workspace string `json:"workspace,omitempty"`
+	Outcome   string `json:"outcome"`
+	Error     string `json:"error,omitempty"`
 	// Record carries the subject record's own bytes, capped and clamped, and is
 	// written for ONE case: a record this build cannot decode. Every other field
 	// here is derived from a decode, so for that case they are all empty — and a
@@ -72,6 +94,11 @@ type RepairRow struct {
 	// RecordNote says so when any variable-length field on this row had to be
 	// shrunk or dropped to fit the line. Silence means every field is whole.
 	RecordNote string `json:"record_note,omitempty"`
+	// Detail is the row's own summary of what it did, for a mode whose subject
+	// is not a single record — compaction writes "dropped N rows, kept M" here,
+	// because its RecordPath names the log rather than anything that was
+	// removed.
+	Detail string `json:"detail,omitempty"`
 }
 
 // repairLogPath is the log's location inside the client's sessions dir.
@@ -89,18 +116,28 @@ func repairActor() string {
 	if u, err := user.Current(); err == nil && u.Username != "" {
 		name = u.Username
 	}
-	if sid := os.Getenv("CLAUDE_CODE_SESSION_ID"); sid != "" {
-		name += " session=" + termsafe.SafeLine(sid)
+	return composeRepairActor(name, os.Getenv("CLAUDE_CODE_SESSION_ID"))
+}
+
+// composeRepairActor is repairActor's pure half: the two self-asserted halves
+// joined and bounded.
+//
+// BOUNDED, because the session id is an environment value and the row it lands
+// in has a line limit. An unbounded field here could push a row past that
+// limit, and the one row that must never fail to write is the write-ahead
+// intent — so the field that nothing reads to decide anything is the field that
+// gets clipped.
+//
+// The cut lands on a RUNE boundary. A plain byte slice at maxActorBytes can
+// split a multi-byte sequence, and json.Marshal then rewrites the orphan to
+// U+FFFD — silently changing a field that is supposed to say who ran the
+// command. A session id is an environment value, so multi-byte content in it is
+// input, not a hypothetical.
+func composeRepairActor(name, sessionID string) string {
+	if sessionID != "" {
+		name += " session=" + termsafe.SafeLine(sessionID)
 	}
-	// BOUNDED, because the session id is an environment value and the row it
-	// lands in has a line limit. An unbounded field here could push a row past
-	// that limit, and the one row that must never fail to write is the
-	// write-ahead intent — so the field that nothing reads to decide anything
-	// is the field that gets clipped.
-	if len(name) > maxActorBytes {
-		name = name[:maxActorBytes]
-	}
-	return name
+	return truncateString(name, maxActorBytes)
 }
 
 // appendRepairRowLocked appends one row, fsynced, to the repair log. The
@@ -159,6 +196,7 @@ type shrinkableField struct {
 func shrinkableRowFields(row *RepairRow) []shrinkableField {
 	return []shrinkableField{
 		{"Record", "record", &row.Record},
+		{"Detail", "detail", &row.Detail},
 		{"Actor", "actor", &row.Actor},
 		{"Ref", "ref", &row.Ref},
 		{"Error", "error", &row.Error},
@@ -175,6 +213,7 @@ func shrinkableRowFields(row *RepairRow) []shrinkableField {
 var boundedRowFields = map[string]string{
 	"ID":         "16 hex characters from randomSuffix",
 	"FromPhase":  "a package constant or repairPhaseUnreadable",
+	"Verb":       "one of the auditVerb constants",
 	"Mode":       "one of the three RepairMode constants",
 	"Outcome":    "one of the repairOutcome constants",
 	"RecordNote": "derived here from fixed templates and two decimal ints per clause, ASCII, and recomputed inside the measurement",
@@ -304,7 +343,11 @@ type repairLogFile interface {
 // is the one line the log exists to preserve. So the offset is captured first and
 // the file is truncated back to it on any failure: the log loses the row it could
 // not write, and nothing else.
-func appendRepairRow(f repairLogFile, data []byte) error {
+//
+// It is a var so a test can stage the crash this whole ordering exists for: an
+// append that fails BETWEEN an intent and its completion, leaving the dangling
+// row that says a mutation happened and was never closed out.
+var appendRepairRow = func(f repairLogFile, data []byte) error {
 	start, err := f.Seek(0, io.SeekEnd)
 	if err != nil {
 		return fmt.Errorf("locate the end of the repair audit log: %w", err)

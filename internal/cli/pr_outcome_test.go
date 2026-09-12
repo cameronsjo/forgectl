@@ -91,13 +91,14 @@ func reviewTempRoot(t *testing.T) {
 
 func TestPrRemoteDispatchVerificationOutcomes(t *testing.T) {
 	tests := []struct {
-		name      string
-		dieAll    bool
-		listErr   error
-		args      []string
-		wantErr   string
-		wantOut   string
-		forbidOut string
+		name         string
+		dieAll       bool
+		listErr      error
+		listErrAfter int
+		args         []string
+		wantErr      string
+		wantOut      string
+		forbidOut    string
 	}{
 		{
 			name:    "live",
@@ -112,11 +113,16 @@ func TestPrRemoteDispatchVerificationOutcomes(t *testing.T) {
 			forbidOut: "prepared clean-room review",
 		},
 		{
-			name:      "unknown",
-			listErr:   errors.New("boom: tmux exploded"),
-			args:      []string{"cameronsjo/forgectl#42"},
-			wantErr:   "dispatch state is unknown",
-			forbidOut: "prepared clean-room review",
+			// listErrAfter=1: a single review now DOES list once at admission
+			// (Reserve, Task 3) before the launch it is testing here — that
+			// first read must succeed so the row still exercises what it is
+			// named for, the verification SWEEP's list failing.
+			name:         "unknown",
+			listErr:      errors.New("boom: tmux exploded"),
+			listErrAfter: 1,
+			args:         []string{"cameronsjo/forgectl#42"},
+			wantErr:      "dispatch state is unknown",
+			forbidOut:    "prepared clean-room review",
 		},
 		{
 			// --no-verify drops the observation, not the dispatch: the window
@@ -131,7 +137,8 @@ func TestPrRemoteDispatchVerificationOutcomes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ledger := newTmuxLedger("forgectl")
 			ledger.dieAll = tt.dieAll
-			ledger.listErr = tt.listErr // a single review never lists at admission
+			ledger.listErr = tt.listErr
+			ledger.listErrAfter = tt.listErrAfter
 			cmd, out := remoteReviewCmd(t, ledger)
 			cmd.SetArgs(tt.args)
 
@@ -146,13 +153,14 @@ func TestPrRemoteDispatchVerificationOutcomes(t *testing.T) {
 
 func TestPrLocalDispatchVerificationOutcomes(t *testing.T) {
 	tests := []struct {
-		name      string
-		dieAll    bool
-		listErr   error
-		noVerify  bool
-		wantErr   string
-		wantOut   string
-		forbidOut string
+		name         string
+		dieAll       bool
+		listErr      error
+		listErrAfter int
+		noVerify     bool
+		wantErr      string
+		wantOut      string
+		forbidOut    string
 	}{
 		{name: "live", wantOut: "prepared local clean-room review of main @"},
 		{
@@ -162,10 +170,15 @@ func TestPrLocalDispatchVerificationOutcomes(t *testing.T) {
 			forbidOut: "prepared local clean-room review",
 		},
 		{
-			name:      "unknown",
-			listErr:   errors.New("boom: tmux exploded"),
-			wantErr:   "dispatch state is unknown",
-			forbidOut: "prepared local clean-room review",
+			// listErrAfter=1: same reasoning as the remote table above — `pr
+			// local` now reserves (Task 3) before Launch, which lists once at
+			// admission; that first read must succeed so this row still tests
+			// the verification sweep's list failing, not admission's.
+			name:         "unknown",
+			listErr:      errors.New("boom: tmux exploded"),
+			listErrAfter: 1,
+			wantErr:      "dispatch state is unknown",
+			forbidOut:    "prepared local clean-room review",
 		},
 		{name: "no-verify over a dying window", dieAll: true, noVerify: true, wantOut: "prepared local clean-room review of main @"},
 	}
@@ -174,6 +187,7 @@ func TestPrLocalDispatchVerificationOutcomes(t *testing.T) {
 			ledger := newTmuxLedger("forgectl")
 			ledger.dieAll = tt.dieAll
 			ledger.listErr = tt.listErr
+			ledger.listErrAfter = tt.listErrAfter
 			cmd, out := localReviewCmd(t, ledger)
 			args := []string{t.TempDir()}
 			if tt.noVerify {

@@ -27,6 +27,7 @@ type SessionSummary struct {
 	createdAt    time.Time
 	availability workspaceAvailability
 	phase        Phase
+	repairReason string
 }
 
 // Ref is the reviewed pull request.
@@ -36,6 +37,11 @@ func (s SessionSummary) Ref() Ref { return s.ref }
 // record, which predates phases. It is presentation data, never authority:
 // whether a window exists is observed through WindowsLive, not read here.
 func (s SessionSummary) Phase() Phase { return s.phase }
+
+// RepairReason is the diagnostic a needs-repair record carries, written at
+// the throw site. It is empty on every other phase — validation ties the
+// two together — so a non-empty value here always means needs-repair.
+func (s SessionSummary) RepairReason() string { return s.repairReason }
 
 // IsWorkspaceNone reports a queued or preparing record, which has no
 // workspace yet and is neither live nor missing.

@@ -38,9 +38,8 @@ concurrently (same-repo checkouts serialized) and each launches a clean-room
 review. A PR you've already marked reviewed is dimmed in the list and skipped
 at launch, so a bulk pick never re-opens a review you've finished. Bulk
 launches are capped at 4 concurrent reviews by default (override via [pr]
-max_concurrent in config.toml); PRs past the cap are deferred, not prepared.
-The cap governs this bulk 'pick' command only — a single 'forgectl pr <ref>'
-review bypasses admission by design. With both stdin and stdout attached to terminals,
+max_concurrent in config.toml). PRs past the cap are queued for 'forgectl pr
+drain', not discarded. With both stdin and stdout attached to terminals,
 pick uses the existing multiselect. Otherwise it writes sanitized owner/repo#N candidates
 to stdout and exits 1; each printed ref works with forgectl pr <ref>.`,
 		Args: cobra.NoArgs,
@@ -172,36 +171,50 @@ func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd
 		return nil
 	}
 
-	maxN, live, free, ok := client.Admit(ctx, cfg.Pr.MaxConcurrent)
+	// Every PR the picker surfaces came from a forge query, so the whole batch
+	// is third-party by construction — bulk is the route where an unnoticed
+	// escalation would be widest, and it is declared here rather than left to
+	// the zero value so the intent is legible.
+	//
+	// One value, built once, and used by BOTH dispositions a ref can get:
+	// prepared now, or queued for the drainer. A queue path with its own
+	// hardcoded agent and provenance would store a pairing the launch path
+	// never agreed to the day this batch gains an --agent flag.
+	batchOpts := pr.PrepareOpts{
+		Agent:      resolveAgent(""),
+		Provenance: pr.ReviewProvenanceThirdParty,
+	}
+	// Same fast fail `pr <ref>` runs before its reservation. Every picked ref
+	// is third-party, so a pairing the gate refuses would otherwise reserve N
+	// slots and park N needs-repair records on the launch branch, or persist a
+	// queued record the drainer refuses hours later on the queue branch.
+	if err := pr.CheckAgentForReview(batchOpts.Agent, batchOpts.Provenance); err != nil {
+		return err
+	}
+
+	maxN, _, free, ok := client.Admit(ctx, cfg.Pr.MaxConcurrent)
 	if !ok {
 		return fmt.Errorf("cannot read the tmux review window count — refusing to launch %d review(s); "+
 			"never mass-launch on an unreadable count. Check `tmux list-windows -a`, then retry", len(refs))
 	}
 	if free == 0 {
-		fmt.Fprintf(errOut, "review cap reached (max %d, %d already running) — nothing launched; re-run 'forgectl pr pick' as reviews finish\n", maxN, live)
+		queuePickedRefs(ctx, client, refs, batchOpts, maxN, errOut)
 		return nil
 	}
-	deferred := 0
+	var overflow []pr.Ref
 	if len(refs) > free {
-		deferred = len(refs) - free
+		overflow = refs[free:]
 		refs = refs[:free]
 	}
 	if err := client.CheckDispatchCapability(ctx); err != nil {
 		return err
 	}
 
-	// Every PR the picker surfaces came from a forge query, so the whole batch
-	// is third-party by construction — bulk is the route where an unnoticed
-	// escalation would be widest, and it is declared here rather than left to
-	// the zero value so the intent is legible.
 	// The cap is re-read inside PrepareMany's single lock hold, where the
 	// reservations are written. The Admit call above is what decides how many
 	// refs to attempt; the reservation is what actually claims the slots, and
 	// only it is race-free against a peer launcher.
-	results := client.PrepareMany(ctx, refs, cfg.Pr.MaxConcurrent, pr.PrepareOpts{
-		Agent:      resolveAgent(""),
-		Provenance: pr.ReviewProvenanceThirdParty,
-	})
+	results := client.PrepareMany(ctx, refs, cfg.Pr.MaxConcurrent, batchOpts)
 	launched := 0
 	prepareFailed := 0
 	launchFailed := 0
@@ -222,8 +235,9 @@ func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd
 		fmt.Fprintf(out, "launched clean-room review of %s\n", r.Ref.String())
 		launched++
 	}
-	if deferred > 0 {
-		fmt.Fprintf(errOut, "%d PR(s) deferred by the concurrency cap (max %d) — not prepared, not marked reviewed; re-run 'forgectl pr pick' as reviews finish\n", deferred, maxN)
+	queued := 0
+	if len(overflow) > 0 {
+		queued = queuePickedRefs(ctx, client, overflow, batchOpts, maxN, errOut)
 	}
 	// A launch failure leaves a prepared clean room (workspace + breadcrumb) on
 	// disk — Phase 1 keeps it so the review is retryable/tearable. In bulk these
@@ -232,6 +246,30 @@ func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd
 		fmt.Fprintf(errOut, "%d review(s) prepared but failed to launch — their clean rooms remain; discard via 'forgectl pr list' then 'pr teardown <breadcrumb>'\n", launchFailed)
 	}
 	verification := verifyReviewDispatches(ctx, client, dispatches, noVerify)
-	slog.Info("Successfully completed bulk launch.", "launched", launched, "prepareFailed", prepareFailed, "launchFailed", launchFailed, "skipped", skipped, "deferred", deferred, "verify", dispatchVerificationLogValue(verification.State), "gone", len(verification.Gone))
+	slog.Info("Successfully completed bulk launch.", "launched", launched, "prepareFailed", prepareFailed, "launchFailed", launchFailed, "skipped", skipped, "queued", queued, "verify", dispatchVerificationLogValue(verification.State), "gone", len(verification.Gone))
 	return dispatchVerificationError(verification)
+}
+
+// queuePickedRefs writes a `queued` record for every ref past the
+// concurrency cap — either the whole batch (free == 0) or the truncated
+// remainder — and prints the one-line summary the design names. It reports
+// per-ref queue failures (e.g. a duplicate from an earlier pick) without
+// aborting the rest, and returns how many actually landed.
+//
+// opts is the batch's own PrepareOpts, passed in rather than rebuilt: a queued
+// record is the drainer's input, so it must carry exactly the agent and
+// provenance the same batch would have launched with.
+func queuePickedRefs(ctx context.Context, client *pr.Client, refs []pr.Ref, opts pr.PrepareOpts, maxN int, errOut io.Writer) int {
+	n := 0
+	for _, ref := range refs {
+		if _, err := client.Queue(ctx, ref, opts); err != nil {
+			_, _ = fmt.Fprintf(errOut, "queue %s failed: %v\n", ref.String(), err)
+			continue
+		}
+		n++
+	}
+	if n > 0 {
+		_, _ = fmt.Fprintf(errOut, "%d PR(s) queued by the concurrency cap (max %d) — start them with 'forgectl pr drain --once'\n", n, maxN)
+	}
+	return n
 }

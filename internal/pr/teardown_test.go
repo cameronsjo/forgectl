@@ -14,6 +14,7 @@ package pr
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -263,5 +264,298 @@ func TestCleanup_DateScoped(t *testing.T) {
 	}
 	if _, err := os.Stat(pOther); err != nil {
 		t.Error("other day's session should be untouched")
+	}
+}
+
+// auditRows reads the audit trail the way an operator would, failing the test
+// rather than the caller when the log itself cannot be read.
+func auditRows(t *testing.T, c *Client) []RepairRow {
+	t.Helper()
+	rows, err := c.readRepairLog()
+	if err != nil {
+		t.Fatalf("read the audit log: %v", err)
+	}
+	return rows
+}
+
+// TestTeardown_WritesIntentAndCompletion is the headline: `pr teardown` removes
+// a clean room, so it owes the same write-ahead pair `pr repair --rollback`
+// writes. Without it, the one row that names a clean room mid-delete does not
+// exist for the verb operators reach for most.
+func TestTeardown_WritesIntentAndCompletion(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 21}
+	c := testClient(t, &exec.FakeRunner{})
+	path, ws := seedSession(t, c, ref, time.Now().UTC())
+
+	if err := c.Teardown(context.Background(), path); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	rows := auditRows(t, c)
+	if len(rows) != 2 {
+		t.Fatalf("audit rows = %d, want intent + completion: %+v", len(rows), rows)
+	}
+	if rows[0].ID != rows[1].ID || rows[0].ID == "" {
+		t.Errorf("rows are not paired by id: %q and %q", rows[0].ID, rows[1].ID)
+	}
+	if rows[0].Outcome != repairOutcomeIntent || rows[1].Outcome != repairOutcomeApplied {
+		t.Errorf("outcomes = %q then %q, want %q then %q",
+			rows[0].Outcome, rows[1].Outcome, repairOutcomeIntent, repairOutcomeApplied)
+	}
+	for i, r := range rows {
+		if r.Verb != auditVerbTeardown {
+			t.Errorf("row %d verb = %q, want %q", i, r.Verb, auditVerbTeardown)
+		}
+		// Mode is repair's flag spelling. A teardown has no flag, and filling it
+		// in would make the trail claim a repair ran.
+		if r.Mode != "" {
+			t.Errorf("row %d mode = %q, want empty on a teardown row", i, r.Mode)
+		}
+		if r.Workspace != ws {
+			t.Errorf("row %d workspace = %q, want %q — the only pointer left to the clean room", i, r.Workspace, ws)
+		}
+		if r.RecordPath != path {
+			t.Errorf("row %d record path = %q, want %q", i, r.RecordPath, path)
+		}
+	}
+}
+
+// TestTeardown_StaleAndRecordOnlyAlsoWriteRows covers the two arms that delete
+// a record without touching a workspace. They remove less, but they remove the
+// only thing naming a review, so their removal is just as much a trail event.
+func TestTeardown_StaleAndRecordOnlyAlsoWriteRows(t *testing.T) {
+	cases := []struct {
+		name string
+		seed func(t *testing.T, c *Client, ref Ref) (path, workspace string)
+	}{
+		{"stale workspace", func(t *testing.T, c *Client, ref Ref) (string, string) {
+			t.Helper()
+			return seedStaleSession(t, c, ref, time.Now().UTC())
+		}},
+		{"record only", func(t *testing.T, c *Client, ref Ref) (string, string) {
+			t.Helper()
+			return seedPhaseRecord(t, c, ref, PhaseQueued, ""), ""
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ref := Ref{Owner: "o", Repo: "r", Number: 22}
+			c := testClient(t, &exec.FakeRunner{})
+			path, ws := tc.seed(t, c, ref)
+
+			if err := c.Teardown(context.Background(), path); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			rows := auditRows(t, c)
+			if len(rows) != 2 {
+				t.Fatalf("audit rows = %d, want intent + completion: %+v", len(rows), rows)
+			}
+			if rows[0].Outcome != repairOutcomeIntent || rows[1].Outcome != repairOutcomeApplied {
+				t.Errorf("outcomes = %q then %q, want intent then applied", rows[0].Outcome, rows[1].Outcome)
+			}
+			for i, r := range rows {
+				if r.Verb != auditVerbTeardown {
+					t.Errorf("row %d verb = %q, want %q", i, r.Verb, auditVerbTeardown)
+				}
+				if r.Workspace != ws {
+					t.Errorf("row %d workspace = %q, want %q", i, r.Workspace, ws)
+				}
+			}
+		})
+	}
+}
+
+// TestTeardown_QueuedRecordRemovesFileCallsNoSandboxTeardown is Task 3's own
+// positive control on the #472 spine: `pr teardown` on a `queued` record
+// (no workspace, by construction — reserve.go/session.go's Queue) must land
+// through discardRecordOnly, never through the live/stale sandbox path. The
+// seam is overridden to FAIL, so a stray call surfaces as a test failure
+// rather than a silent no-op success.
+func TestTeardown_QueuedRecordRemovesFileCallsNoSandboxTeardown(t *testing.T) {
+	orig := sandboxTeardown
+	sandboxTeardown = func(context.Context, exec.Runner, string) error {
+		t.Fatal("sandbox teardown must never run for a queued (workspace-less) record")
+		return nil
+	}
+	t.Cleanup(func() { sandboxTeardown = orig })
+
+	c := testClient(t, &exec.FakeRunner{})
+	ref := Ref{Owner: "o", Repo: "r", Number: 99}
+	path := seedPhaseRecord(t, c, ref, PhaseQueued, "")
+
+	if err := c.Teardown(context.Background(), path); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("breadcrumb %s should be removed; stat err = %v", path, err)
+	}
+	for _, call := range c.run.(*exec.FakeRunner).Calls {
+		if call.Name == "git" || call.Name == "tmux" {
+			t.Errorf("a queued teardown must touch no workspace or window; saw %s %v", call.Name, call.Args)
+		}
+	}
+}
+
+// TestTeardown_RefusalWritesNoRow is the ordering rule the repair arms already
+// hold to: a dangling intent means a delete died partway, so a refusal that
+// wrote one would forge that signal and send someone hunting a directory
+// nothing ever touched.
+func TestTeardown_RefusalWritesNoRow(t *testing.T) {
+	c := testClient(t, &exec.FakeRunner{})
+	seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 23}, time.Now().UTC())
+
+	outside := filepath.Join(t.TempDir(), "attacker.json")
+	if err := os.WriteFile(outside, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	for _, operand := range []string{outside, filepath.Join(c.SessionsDir(), "*.json")} {
+		if err := c.Teardown(context.Background(), operand); err == nil {
+			t.Errorf("expected teardown to refuse %q", operand)
+		}
+	}
+	if rows := auditRows(t, c); len(rows) != 0 {
+		t.Errorf("audit rows = %d, want none: a refusal changed nothing to record: %+v", len(rows), rows)
+	}
+}
+
+// TestTeardown_InvalidWorkspaceRefusalWritesNoRow covers the refusal that lives
+// past classification — the default arm — rather than in membership, which is
+// where an intent row written too early would land.
+func TestTeardown_InvalidWorkspaceRefusalWritesNoRow(t *testing.T) {
+	c := testClient(t, &exec.FakeRunner{})
+	path := seedInvalidSession(t, c, Ref{Owner: "o", Repo: "r", Number: 24}, time.Now().UTC())
+
+	if err := c.Teardown(context.Background(), path); err == nil {
+		t.Fatal("a workspace that is neither live nor cleanly absent must be refused")
+	}
+	if rows := auditRows(t, c); len(rows) != 0 {
+		t.Errorf("audit rows = %d, want none: %+v", len(rows), rows)
+	}
+}
+
+// TestTeardown_DriftRefusalCompletesTheRowAsFailed pins the other side of the
+// ordering rule. Drift is caught INSIDE the discard arms, after the intent row
+// is on disk, so it completes the pair as failed rather than leaving a dangling
+// intent that would read as a delete that died mid-way.
+func TestTeardown_DriftRefusalCompletesTheRowAsFailed(t *testing.T) {
+	c := testClient(t, &exec.FakeRunner{})
+	path, _ := seedStaleSession(t, c, Ref{Owner: "o", Repo: "r", Number: 25}, time.Now().UTC())
+
+	orig := staleMemberIsRegular
+	staleMemberIsRegular = func(fs.FileInfo) bool { return false }
+	t.Cleanup(func() { staleMemberIsRegular = orig })
+
+	if err := c.Teardown(context.Background(), path); err == nil {
+		t.Fatal("observed drift must refuse the removal")
+	}
+	rows := auditRows(t, c)
+	if len(rows) != 2 {
+		t.Fatalf("audit rows = %d, want intent + a failed completion: %+v", len(rows), rows)
+	}
+	if rows[1].Outcome != repairOutcomeFailed {
+		t.Errorf("completion outcome = %q, want %q", rows[1].Outcome, repairOutcomeFailed)
+	}
+	if rows[1].Error == "" {
+		t.Error("a failed completion with no error says nothing about why")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("a refused teardown removed the record: %v", err)
+	}
+}
+
+// TestCleanup_WritesOneRowPairPerRecord: a sweep is N removals, not one, and a
+// trail that collapsed them would name only the last clean room.
+func TestCleanup_WritesOneRowPairPerRecord(t *testing.T) {
+	c := testClient(t, &exec.FakeRunner{})
+	day := time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC)
+	other := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 31}, day)
+	seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 32}, day)
+	pOther, _ := seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 33}, other)
+
+	if err := c.Cleanup(context.Background(), "2026-07-08"); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if _, err := os.Stat(pOther); err != nil {
+		t.Errorf("cleanup swept a record outside the date: %v", err)
+	}
+	rows := auditRows(t, c)
+	if len(rows) != 4 {
+		t.Fatalf("audit rows = %d, want one pair per swept record: %+v", len(rows), rows)
+	}
+	ids := map[string]int{}
+	for i, r := range rows {
+		if r.Verb != auditVerbCleanup {
+			t.Errorf("row %d verb = %q, want %q", i, r.Verb, auditVerbCleanup)
+		}
+		ids[r.ID]++
+	}
+	if len(ids) != 2 {
+		t.Errorf("distinct row ids = %d, want one per swept record: %+v", len(ids), rows)
+	}
+	for id, n := range ids {
+		if n != 2 {
+			t.Errorf("row id %s appears %d times, want an intent and a completion", id, n)
+		}
+	}
+}
+
+// TestRepairRollback_WritesExactlyOnePair is the nested-pair regression pin.
+// repairRollbackLocked writes its own intent row and then calls the UNAUDITED
+// teardown core; auditing that core instead of the two outer verbs would give
+// this one mutation two intents and two completions, which is exactly the shape
+// that means "a delete died mid-way" to anyone reading the trail.
+func TestRepairRollback_WritesExactlyOnePair(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 41}
+	c := repairClient(t, repairRunner(nil))
+	ws := fakeWorkspace(t)
+	if err := os.RemoveAll(ws); err != nil {
+		t.Fatalf("stale the workspace: %v", err)
+	}
+	path := seedPhaseRecord(t, c, ref, PhaseLaunching, ws)
+
+	if _, err := c.Repair(context.Background(), RepairOpts{Record: path, Apply: true, Rollback: true, Yes: true}); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	rows := auditRows(t, c)
+	if len(rows) != 2 {
+		t.Fatalf("audit rows = %d, want exactly one intent and one completion: %+v", len(rows), rows)
+	}
+	for i, r := range rows {
+		if r.Verb != auditVerbRepair {
+			t.Errorf("row %d verb = %q, want %q — the repair owns this mutation", i, r.Verb, auditVerbRepair)
+		}
+		if r.Mode != RepairModeRollback {
+			t.Errorf("row %d mode = %q, want %q", i, r.Mode, RepairModeRollback)
+		}
+	}
+}
+
+// TestTeardown_AuditLogIsNotEnumerated: the trail lives beside the records it
+// describes, so the enumerations must keep ignoring it. A .jsonl admitted as a
+// record would block every launch as unreadable.
+func TestTeardown_AuditLogIsNotEnumerated(t *testing.T) {
+	c := repairClient(t, repairRunner(nil))
+	path, _ := seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 51}, time.Now().UTC())
+
+	if err := c.Teardown(context.Background(), path); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(c.SessionsDir(), repairLogName)); err != nil {
+		t.Fatalf("setup: the teardown wrote no audit log to enumerate past: %v", err)
+	}
+	summaries, unreadable, err := c.listLocked()
+	if err != nil {
+		t.Fatalf("listLocked: %v", err)
+	}
+	if len(unreadable) != 0 {
+		t.Errorf("the audit log was admitted as an unreadable record: %+v", unreadable)
+	}
+	for _, sum := range summaries {
+		if filepath.Base(sum.Path()) == repairLogName {
+			t.Errorf("the audit log was listed as a session record: %s", sum.Path())
+		}
+	}
+	if _, err := c.reserve(context.Background(), Ref{Owner: "o", Repo: "r", Number: 52}, 4, PrepareOpts{Agent: "claude"}); err != nil {
+		t.Errorf("reserve refuses with the audit log present: %v", err)
 	}
 }

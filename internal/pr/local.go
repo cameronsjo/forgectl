@@ -38,6 +38,23 @@ type PrepareLocalOpts struct {
 	// RecordPath names an already-reserved `preparing` record to complete,
 	// exactly as PrepareOpts.RecordPath does for the remote path.
 	RecordPath string
+
+	// HeadOid is the already-resolved HEAD commit this review is pinned to,
+	// as returned by ResolveLocalHead. When set, PrepareLocal uses it instead
+	// of running its own `git rev-parse HEAD`.
+	//
+	// This exists so a reserving caller reads HEAD exactly ONCE. The
+	// reservation is keyed on the Ref derived from the oid, and the record's
+	// ref is never rewritten when recordPrepared completes it — so a second
+	// read that saw a moved HEAD would leave the record naming commit A while
+	// the workspace, the tmux window name, and the tree the agent reviews were
+	// all commit B. Teardown and repair both resolve the window from the
+	// record's ref, so they would then target a window that does not exist.
+	//
+	// It is an optimisation of the read, NOT a channel for an arbitrary
+	// commit: an unset value takes the original self-resolving path, and every
+	// path guard still runs either way.
+	HeadOid string
 }
 
 // PrepareLocal resolves the local HEAD of the repo at path, sandboxes it into
@@ -66,9 +83,16 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	if err != nil {
 		return Session{}, fmt.Errorf("resolve local HEAD branch: %w", err)
 	}
-	headOid, err := c.run.Run(ctx, "git", "-C", absPath, "rev-parse", "HEAD")
-	if err != nil {
-		return Session{}, fmt.Errorf("resolve local HEAD commit: %w", err)
+	// Read HEAD only when the caller has not already resolved it. A reserving
+	// caller (ResolveLocalHead → Reserve → here) passes the oid its
+	// reservation is keyed on, so the record, the workspace, and the window
+	// name can never name different commits. See PrepareLocalOpts.HeadOid.
+	headOid := opts.HeadOid
+	if headOid == "" {
+		headOid, err = c.run.Run(ctx, "git", "-C", absPath, "rev-parse", "HEAD")
+		if err != nil {
+			return Session{}, fmt.Errorf("resolve local HEAD commit: %w", err)
+		}
 	}
 
 	ref := newLocalRef(headOid)

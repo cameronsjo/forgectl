@@ -29,6 +29,8 @@ Logging is **off by default**. Set `log_level` to `debug` for the full narrative
 
 With `log_file = ""` (the default target once a level is set), forgectl writes to a daily file — `forgectl-YYYY-MM-DD.log` — in the config dir and prunes any such file older than 7 days on startup. Set `log_file = "-"` to log to stderr instead, or give an explicit path to opt out of rotation.
 
+**Running `forgectl pr drain --watch` as a long-lived watcher is the case this matters most for.** Its own one-line-per-pass summary (`pass=… free=… queued=…`) prints regardless of `log_level` — it is a plain stdout write, not a log — but that line is deliberately terse: it names the pass counts, not *why* a given launch failed. Set `log_level = "info"` (or `debug` for the full subprocess narrative) with an explicit `log_file` when running `--watch` unattended, so a launch failure's `slog` detail lands somewhere a stdout-discarding process supervisor won't drop it.
+
 ## Per-command config sections
 
 Several command groups own their own config section, documented alongside that command:
