@@ -481,3 +481,54 @@ func containsStr(ss []string, want string) bool {
 	}
 	return false
 }
+
+// TestLaunchPicked_RefusedAgentPairingCreatesNoState pins the gate ahead of the
+// batch reservation. Every picked ref is third-party, so an agent the gate
+// refuses for third-party content must refuse before a single slot is reserved
+// or a single queued record is written — on both the launch branch and the
+// free-zero queue branch. Without the gate the launch branch parked N
+// needs-repair records and the queue branch persisted a record the drainer
+// would refuse hours later.
+func TestLaunchPicked_RefusedAgentPairingCreatesNoState(t *testing.T) {
+	fakeCodexBin(t)
+	t.Setenv("FORGECTL_PR_AGENT", "codex")
+
+	for _, tc := range []struct {
+		name string
+		cap  int
+	}{
+		{"launch branch", 2},
+		{"queue branch at free zero", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := prepareRunner()
+			sessionsDir := t.TempDir()
+			client := pr.New(fake, pr.WithSessionsDir(sessionsDir), pr.WithTmuxSession("forgectl"),
+				pr.WithDispatchWait(func(context.Context) error { return nil }))
+			store := pr.LoadReviewed(filepath.Join(t.TempDir(), "pr-reviewed.json"))
+			updated := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+			selected := []pr.PR{
+				{Ref: pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 1}, Title: "one", UpdatedAt: updated},
+			}
+			cmd, _, _ := newTestCmd()
+			cfg := config.Config{Pr: config.PrConfig{MaxConcurrent: tc.cap}}
+
+			err := launchPicked(context.Background(), client, cfg, cmd, selected, store, false)
+			if err == nil {
+				t.Fatal("want the agent gate to refuse a codex review of third-party content")
+			}
+			entries, readErr := os.ReadDir(sessionsDir)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			for _, e := range entries {
+				if filepath.Ext(e.Name()) == ".json" {
+					t.Errorf("a refused pairing wrote a session record: %s", e.Name())
+				}
+			}
+			if windows := tmuxWindows(fake.Calls); len(windows) != 0 {
+				t.Errorf("a refused pairing launched windows: %v", windows)
+			}
+		})
+	}
+}

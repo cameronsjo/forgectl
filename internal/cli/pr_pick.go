@@ -184,6 +184,13 @@ func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd
 		Agent:      resolveAgent(""),
 		Provenance: pr.ReviewProvenanceThirdParty,
 	}
+	// Same fast fail `pr <ref>` runs before its reservation. Every picked ref
+	// is third-party, so a pairing the gate refuses would otherwise reserve N
+	// slots and park N needs-repair records on the launch branch, or persist a
+	// queued record the drainer refuses hours later on the queue branch.
+	if err := pr.CheckAgentForReview(batchOpts.Agent, batchOpts.Provenance); err != nil {
+		return err
+	}
 
 	maxN, _, free, ok := client.Admit(ctx, cfg.Pr.MaxConcurrent)
 	if !ok {
