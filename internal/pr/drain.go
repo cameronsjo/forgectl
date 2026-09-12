@@ -25,7 +25,15 @@ const (
 	drainOutcomeRetryQueued  = "retry-queued"
 	drainOutcomeNeedsRepair  = "needs-repair"
 	drainOutcomeClaimFailure = "claim-failed"
+	drainOutcomeRefused      = "refused"
 )
+
+// errLocalNotDrainable is the reason a queued LOCAL record is refused at claim
+// time. It mirrors Queue's writer-side refusal (session.go) in the reader, so
+// a record that never went through Queue is stopped before it is claimed,
+// cloned, or handed to an agent.
+const errLocalNotDrainable = "local reviews cannot be drained: a local session's findings directory is never " +
+	"persisted and a reloaded local session refuses to launch — review it now with 'forgectl pr local', not later"
 
 // DrainOpts drives one `pr drain` pass.
 //
@@ -101,9 +109,23 @@ type DrainReport struct {
 // opts.MaxAttempts, in which case it is parked in `needs-repair` with a
 // reason naming the attempt count and the last error, and no further pass
 // will pick it up (queued records are the only ones drain claims).
+//
+// A retry is offered ONLY when the failure landed before dispatch. A record
+// Launch already parked, or a ref whose review window is resolvable (or whose
+// tmux is unreadable), is left parked with its workspace intact and is never
+// retried — see settleDrainFailure.
 func (c *Client) Drain(ctx context.Context, cfg config.Config, opts DrainOpts) (DrainReport, error) {
 	if opts.MaxAttempts <= 0 {
 		opts.MaxAttempts = DefaultDrainMaxAttempts
+	}
+	// Dispatch capability is checked ONCE, before anything is claimed, exactly
+	// as the human path checks it before reserving (internal/cli/pr.go). A tmux
+	// that cannot dispatch fails every launch in the pass, so asking it here
+	// costs one probe and refuses the whole pass; asking it per record instead
+	// means N clones and N teardowns before N records park in needs-repair.
+	if err := c.CheckDispatchCapability(ctx); err != nil {
+		slog.Error("Refusing a drain pass: this host cannot dispatch a review window.", "error", err)
+		return DrainReport{Items: []DrainItem{}, Refusal: termsafe.SafeLine(err.Error())}, nil
 	}
 	report, claimed := c.claimQueuedPass(ctx, cfg, opts)
 	if report.Refusal != "" {
@@ -166,15 +188,40 @@ func (c *Client) claimQueuedPass(ctx context.Context, cfg config.Config, opts Dr
 		report.Free = free
 
 		var queued []SessionSummary
+		refused := 0
 		for _, s := range summaries {
 			switch s.Phase() {
 			case PhaseQueued:
+				// READER-SIDE MIRROR of Queue's local-ref refusal (session.go).
+				// Queue refuses to WRITE a local queued record; nothing refused
+				// to READ one, so a hand-written or forged record with
+				// `local: true` was claimed, cloned, and carried all the way to
+				// Launch's own local refusal — which that function's comment
+				// calls an incidental second barrier. The refusal belongs at the
+				// claim, where the record is still untouched.
+				if s.Ref().IsLocal() {
+					slog.Error("Refusing to claim a queued review: local reviews cannot be drained.",
+						"ref", s.Ref().String(), "path", s.Path())
+					report.Items = append(report.Items, DrainItem{
+						Ref:        s.Ref().String(),
+						RecordPath: s.Path(),
+						FromPhase:  string(PhaseQueued),
+						ToPhase:    string(PhaseQueued),
+						Outcome:    drainOutcomeRefused,
+						Error:      errLocalNotDrainable,
+					})
+					refused++
+					continue
+				}
 				queued = append(queued, s)
 			case PhasePreparing, PhasePrepared, PhaseLaunching:
 				report.Launching++
 			}
 		}
-		report.Queued = len(queued)
+		// Refused records are still queued on disk, so they count toward the
+		// queue depth the report names — they are simply never claimed.
+		report.Queued = len(queued) + refused
+		report.Failed += refused
 		sort.Slice(queued, func(i, j int) bool {
 			return queued[i].CreatedAt().Before(queued[j].CreatedAt())
 		})
@@ -219,9 +266,15 @@ func (c *Client) drainItem(ctx context.Context, cfg config.Config, s SessionSumm
 		return item
 	}
 
+	// provenanceFromRecord, not ParseReviewProvenance: it applies the joint
+	// shape check (breadcrumb.go), so a record claiming authorship without the
+	// canonical local shape warns here too. The outcome is identical either way
+	// — EffectiveProvenance downgrades a remote ref regardless — but the
+	// unattended path is the one with nobody watching, so it is the last place
+	// that warning should be missing.
 	prepOpts := PrepareOpts{
 		Agent:      bc.Agent,
-		Provenance: ParseReviewProvenance(bc.Provenance),
+		Provenance: provenanceFromRecord(bc),
 		RecordPath: path,
 	}
 	sess, err := c.Prepare(ctx, ref, prepOpts)
@@ -235,24 +288,72 @@ func (c *Client) drainItem(ctx context.Context, cfg config.Config, s SessionSumm
 	}
 
 	item.Error = termsafe.SafeLine(err.Error())
-	outcome, toPhase := c.settleDrainFailure(ctx, path, bc.Attempts, maxAttempts, err)
+	outcome, toPhase := c.settleDrainFailure(ctx, ref, path, bc.Attempts, maxAttempts, err)
 	item.Outcome = outcome
 	item.ToPhase = toPhase
 	return item
 }
 
-// settleDrainFailure records the failed attempt on the record — regardless of
-// what phase Prepare/Launch left it in (queued's own `preparing`, or a
-// needs-repair Launch itself already wrote on a dispatch failure) — and moves
-// it to `queued` for a future pass to retry, or to `needs-repair` once
-// attempts is exhausted. It uses the wildcard `from` (anyPhase) for the same
-// reason markNeedsRepair does: the caller does not know, and must not have to
-// know, which phase the failure left the record in.
-func (c *Client) settleDrainFailure(ctx context.Context, path string, priorAttempts, maxAttempts int, cause error) (outcome, toPhase string) {
+// settleDrainFailure records the failed attempt on the record and decides
+// whether the ref may be retried at all.
+//
+// A RETRY IS ONLY SAFE WHEN THE FAILURE LANDED BEFORE DISPATCH. Launch returns
+// an error on two branches where the tmux window ALREADY EXISTS and the review
+// agent is running — a windowId that is not generation-qualified, and a failed
+// `launching -> active` transition — and both park the record in needs-repair
+// with a reason naming the window, which is the only pointer
+// `pr repair --adopt-window` has left (launch.go's completeLaunch). Requeuing
+// one of those would delete the clean room under a live agent, erase that
+// pointer, and let a later pass launch a SECOND agent for the same ref. So the
+// settlement reads the two signals that distinguish the cases and refuses to
+// retry on either: the record arriving already parked, and a window resolvable
+// by the ref's derived name. An unreadable tmux counts as "a window may exist"
+// — the fail-closed direction, matching WindowLive's own contract that
+// unreadable is not "gone".
+//
+// Only a failure with NEITHER signal — a clone or `gh` failure before dispatch
+// — returns the record to `queued` for another pass, or parks it once attempts
+// are exhausted.
+func (c *Client) settleDrainFailure(ctx context.Context, ref Ref, path string, priorAttempts, maxAttempts int, cause error) (outcome, toPhase string) {
 	attempts := priorAttempts + 1
 	lastError := termsafe.SafeLine(cause.Error())
-	exhausted := attempts >= maxAttempts
 
+	bc, _, rerr := loadBreadcrumbRecord(path, c.sessionsDir)
+	if rerr != nil {
+		slog.Error("Failed to re-read a session record after a drain launch failure; it was left as the failure found it.",
+			"ref", ref.String(), "path", path, "error", rerr)
+		return drainOutcomeClaimFailure, ""
+	}
+	if bc.Phase == PhaseNeedsRepair {
+		// Launch already parked it with a reason naming the window. Record the
+		// attempt WITHOUT touching RepairReason, Workspace, or WindowID: this
+		// record is now `pr repair`'s to settle, not the drainer's to retry.
+		return c.recordParkedAttempt(ctx, ref, path, attempts, lastError,
+			"a review window may already exist for this ref")
+	}
+	if live, ok := c.WindowLive(ctx, ref); !ok || live {
+		reason := fmt.Sprintf("drain: launch failed with a review window present (or tmux unreadable) for %s; "+
+			"settle it with 'forgectl pr repair --adopt-window' — last: %s", ref.String(), lastError)
+		slog.Error("Refusing to retry a drained review: a window for this ref may be live, so its clean room stays.",
+			"ref", ref.String(), "path", path, "windowReadable", ok, "error", cause)
+		if terr := c.transition(ctx, path, anyPhase, PhaseNeedsRepair, func(rec *Breadcrumb) error {
+			rec.Attempts = attempts
+			rec.LastError = lastError
+			rec.LastAttempt = time.Now().UTC()
+			rec.RepairReason = termsafe.SafeLine(reason)
+			return nil
+		}); terr != nil {
+			slog.Error("Failed to park a drained review whose window may be live.",
+				"ref", ref.String(), "path", path, "error", terr)
+			return drainOutcomeClaimFailure, ""
+		}
+		return drainOutcomeNeedsRepair, string(PhaseNeedsRepair)
+	}
+
+	// No park, no window: the failure happened before anything was dispatched,
+	// so the workspace this attempt may have cloned is nobody's and the ref is
+	// safe to retry.
+	exhausted := attempts >= maxAttempts
 	target := PhaseQueued
 	outcome = drainOutcomeRetryQueued
 	if exhausted {
@@ -260,29 +361,31 @@ func (c *Client) settleDrainFailure(ctx context.Context, path string, priorAttem
 		outcome = drainOutcomeNeedsRepair
 	}
 
-	err := c.transition(ctx, path, anyPhase, target, func(bc *Breadcrumb) error {
-		bc.Attempts = attempts
-		bc.LastError = lastError
-		bc.LastAttempt = time.Now().UTC()
+	// The mutator is side-effect-free and idempotent BY CONTRACT:
+	// transitionLocked re-runs it once on a revision mismatch, and it holds the
+	// lifecycle lock while it does. The workspace removal therefore happens
+	// after this returns — a recursive delete of a full clone must never stall
+	// every other lifecycle-lock user (another drainer, `pr <ref>`, `pr pick`,
+	// `pr repair`) for its duration.
+	var cleared string
+	err := c.transition(ctx, path, anyPhase, target, func(rec *Breadcrumb) error {
+		rec.Attempts = attempts
+		rec.LastError = lastError
+		rec.LastAttempt = time.Now().UTC()
 		if exhausted {
-			bc.RepairReason = fmt.Sprintf("drain: %d attempts, last: %s", attempts, lastError)
+			rec.RepairReason = fmt.Sprintf("drain: %d attempts, last: %s", attempts, lastError)
 			// A retry that got as far as a workspace leaves it behind for
 			// `pr repair` to inspect; needs-repair does not require an empty
 			// workspace.
-		} else {
-			bc.RepairReason = ""
-			// queued must not carry a workspace: a retried Prepare clones a
-			// fresh one, so any workspace this failed attempt created would
-			// otherwise leak. Best-effort teardown; its own failure must not
-			// shadow the launch error already being reported.
-			if bc.Workspace != "" {
-				if terr := sandboxTeardown(ctx, c.run, bc.Workspace); terr != nil {
-					slog.Error("Failed to tear down the workspace from a failed drain attempt; it may need manual removal.",
-						"path", path, "workspace", bc.Workspace, "error", terr)
-				}
-				bc.Workspace = ""
-			}
+			return nil
 		}
+		rec.RepairReason = ""
+		// queued must not carry a workspace or a window: a retried Prepare
+		// clones a fresh one, and a stale windowId on a queued record names a
+		// window this ref no longer has.
+		cleared = rec.Workspace
+		rec.Workspace = ""
+		rec.WindowID = ""
 		return nil
 	})
 	if err != nil {
@@ -290,5 +393,35 @@ func (c *Client) settleDrainFailure(ctx context.Context, path string, priorAttem
 			"path", path, "target", string(target), "error", err)
 		return drainOutcomeClaimFailure, ""
 	}
+	// Best-effort, outside the lock; its own failure must not shadow the launch
+	// error already being reported. sandboxTeardown carries the prefix and
+	// symlink checks that bound every removal in this package.
+	if cleared != "" {
+		if terr := sandboxTeardown(ctx, c.run, cleared); terr != nil {
+			slog.Error("Failed to tear down the workspace from a failed drain attempt; it may need manual removal.",
+				"path", path, "workspace", cleared, "error", terr)
+		}
+	}
 	return outcome, string(target)
+}
+
+// recordParkedAttempt records one more failed attempt on a record Launch
+// ALREADY parked in needs-repair, preserving the repair reason, the workspace,
+// and the window id it wrote. The phase does not move (needs-repair to
+// needs-repair) — the write exists so the attempt count and last error stay
+// truthful for `pr repair`.
+func (c *Client) recordParkedAttempt(ctx context.Context, ref Ref, path string, attempts int, lastError, why string) (outcome, toPhase string) {
+	slog.Error("Refusing to retry a drained review: its record is already parked in needs-repair.",
+		"ref", ref.String(), "path", path, "why", why)
+	if err := c.transition(ctx, path, PhaseNeedsRepair, PhaseNeedsRepair, func(rec *Breadcrumb) error {
+		rec.Attempts = attempts
+		rec.LastError = lastError
+		rec.LastAttempt = time.Now().UTC()
+		return nil
+	}); err != nil {
+		slog.Error("Failed to record a drain attempt on an already-parked record.",
+			"ref", ref.String(), "path", path, "error", err)
+		return drainOutcomeClaimFailure, ""
+	}
+	return drainOutcomeNeedsRepair, string(PhaseNeedsRepair)
 }

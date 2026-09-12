@@ -9,11 +9,20 @@ package pr
 //       as it does for reserve/Admit, so drain claims fewer queued records
 //       when one is already in flight
 //   [x] An unreadable record refuses the WHOLE pass before claiming anything
-//   [x] A launch failure returns the record to `queued` with attempts=1 and
-//       lastError set
-//   [x] A third failure (attempts already 2) moves the record to
+//   [x] A PRE-DISPATCH failure (gh/clone) returns the record to `queued` with
+//       attempts=1 and lastError set
+//   [x] A third pre-dispatch failure (attempts already 2) moves the record to
 //       `needs-repair` with a reason naming the attempt count, and it is no
 //       longer counted as `queued` on the next listing
+//   [x] A failure AFTER the window exists leaves the record parked in
+//       needs-repair with its window-naming reason and its workspace, and the
+//       next pass launches nothing for that ref
+//   [x] A failure with a live window on an unparked record parks it and tears
+//       down nothing
+//   [x] A pre-dispatch failure's workspace teardown happens OUTSIDE the
+//       lifecycle lock
+//   [x] A queued record marked local is refused at claim time: never claimed,
+//       never cloned, reported as refused
 //   [x] Two Clients racing one queued record launch it exactly once
 //   [x] `--dry-run` claims nothing, launches nothing, and reports would-launch
 //   [x] A mixed pass (one success, one failure) reports both items
@@ -73,6 +82,19 @@ func drainLaunchRunner(failOn map[int]error) *exec.FakeRunner {
 			}
 		}
 		return "", nil
+	}}
+}
+
+// drainGhFailRunner fails `gh pr view` for every ref — a PRE-DISPATCH
+// failure, the one shape a retry is safe for: no clone happened, no window
+// exists, and Launch was never reached, so nothing parked the record.
+func drainGhFailRunner() *exec.FakeRunner {
+	inner := drainLaunchRunner(nil).RunFunc
+	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view" {
+			return "", errors.New("boom: gh could not read the PR")
+		}
+		return inner(name, args)
 	}}
 }
 
@@ -267,7 +289,9 @@ func TestDrain_UnreadableRecordRefusesWholePass(t *testing.T) {
 
 func TestDrain_LaunchFailureReturnsToQueuedWithAttempts(t *testing.T) {
 	dir := t.TempDir()
-	run := drainLaunchRunner(map[int]error{1: errors.New("boom: agent refused")})
+	// A gh failure: nothing was cloned and no window exists, so this is the
+	// one failure shape the drainer may retry.
+	run := drainGhFailRunner()
 	c := drainClient(t, dir, run)
 	seedQueued(t, c, testRef(1), time.Now().UTC(), 0)
 
@@ -298,7 +322,7 @@ func TestDrain_LaunchFailureReturnsToQueuedWithAttempts(t *testing.T) {
 
 func TestDrain_ThirdFailureMovesToNeedsRepair(t *testing.T) {
 	dir := t.TempDir()
-	run := drainLaunchRunner(map[int]error{1: errors.New("boom: agent refused again")})
+	run := drainGhFailRunner()
 	c := drainClient(t, dir, run)
 	// Two prior failed attempts already recorded.
 	seedQueued(t, c, testRef(1), time.Now().UTC(), 2)
@@ -428,6 +452,277 @@ func TestDrain_MixedPassOneSuccessOneFailure(t *testing.T) {
 	}
 	if len(report.Items) != 2 {
 		t.Fatalf("items = %+v, want 2", report.Items)
+	}
+}
+
+// drainWindowExistsRunner creates the review window for ref but hands back a
+// windowId that is NOT generation-qualified, which is one of the two Launch
+// branches where the agent is running and the record is parked in needs-repair
+// with a reason naming the window. list-windows then reports that window, so
+// both retry-stopping signals are present.
+func drainWindowExistsRunner(t *testing.T, ref Ref) (*exec.FakeRunner, *int) {
+	t.Helper()
+	name, err := ReviewWindowName(ref)
+	if err != nil {
+		t.Fatalf("review window name: %v", err)
+	}
+	newWindows := 0
+	created := false
+	opened := false
+	row := strings.Join([]string{"123", "456", "@9", "$1", "forgectl", "1", name, "1", "1"}, "\x1f")
+	run := &exec.FakeRunner{RunFunc: func(cmd string, args []string) (string, error) {
+		switch {
+		case cmd == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
+			return `{"headRefName":"feature","headRefOid":"abc123",` +
+				`"headRepositoryOwner":{"login":"cameronsjo"},"headRepository":{"name":"forgectl"}}`, nil
+		case cmd == "git" && len(args) > 0 && args[0] == "clone":
+			return "", nil
+		case cmd == "tmux" && len(args) > 0:
+			switch args[0] {
+			case "-V":
+				return "tmux 3.7b", nil
+			case "display-message":
+				return "123\x1f456\x1f@0", nil
+			case "list-sessions":
+				if created {
+					return "123\x1f456\x1f$1\x1fforgectl\x1f1\x1f0\x1f0\x1f/tmp", nil
+				}
+				return "", nil
+			case "new-session":
+				created = true
+				return "123\x1f456\x1f$1", nil
+			case "list-windows":
+				if opened {
+					return row, nil
+				}
+				return "", nil
+			case "new-window":
+				newWindows++
+				opened = true
+				// A real window whose identity is not generation-qualified:
+				// the server start time is not numeric, so validWindowID
+				// refuses it after the window already exists.
+				return "123\x1fnot-a-timestamp\x1f@9", nil
+			}
+		}
+		return "", nil
+	}}
+	return run, &newWindows
+}
+
+func TestDrain_FailureAfterWindowExistsStaysParkedAndIsNotRetried(t *testing.T) {
+	dir := t.TempDir()
+	ref := testRef(1)
+	run, newWindows := drainWindowExistsRunner(t, ref)
+	c := drainClient(t, dir, run)
+	seedQueued(t, c, ref, time.Now().UTC(), 0)
+
+	report, err := c.Drain(context.Background(), config.Config{}, DrainOpts{})
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(report.Items) != 1 || report.Items[0].Outcome != drainOutcomeNeedsRepair {
+		t.Fatalf("items = %+v, want one needs-repair item (a live window must not be retried)", report.Items)
+	}
+	if report.Failed != 1 {
+		t.Errorf("Failed = %d, want 1", report.Failed)
+	}
+
+	bc := readRecordByRef(t, dir, ref)
+	if bc.Phase != PhaseNeedsRepair {
+		t.Fatalf("phase = %q, want needs-repair", bc.Phase)
+	}
+	// Launch's own reason — naming the window — is the only pointer
+	// `pr repair --adopt-window` has left, and the drainer must not erase it
+	// or overwrite it with a "drain: N attempts" reason.
+	windowName, nerr := ReviewWindowName(ref)
+	if nerr != nil {
+		t.Fatalf("review window name: %v", nerr)
+	}
+	if !strings.Contains(bc.RepairReason, windowName) {
+		t.Errorf("repairReason = %q, want Launch's window-naming reason preserved", bc.RepairReason)
+	}
+	if strings.HasPrefix(bc.RepairReason, "drain:") {
+		t.Errorf("repairReason = %q, want the drainer to leave Launch's reason alone", bc.RepairReason)
+	}
+	if bc.Workspace == "" {
+		t.Fatal("workspace was cleared from the record; the agent's clean room must stay")
+	}
+	if _, serr := os.Stat(bc.Workspace); serr != nil {
+		t.Errorf("workspace %s was removed under a live agent: %v", bc.Workspace, serr)
+	}
+	if bc.Attempts != 1 {
+		t.Errorf("attempts = %d, want 1 recorded on the parked record", bc.Attempts)
+	}
+
+	// The next pass claims nothing and opens no second window for the ref.
+	report2, err := c.Drain(context.Background(), config.Config{}, DrainOpts{})
+	if err != nil {
+		t.Fatalf("second Drain: %v", err)
+	}
+	if report2.Queued != 0 || len(report2.Items) != 0 {
+		t.Fatalf("second pass = %+v, want nothing queued and nothing claimed", report2)
+	}
+	if *newWindows != 1 {
+		t.Errorf("tmux new-window called %d times, want exactly 1 — a parked ref must never launch again", *newWindows)
+	}
+}
+
+func TestSettleDrainFailure_LiveWindowParksAndTearsDownNothing(t *testing.T) {
+	dir := t.TempDir()
+	ref := testRef(4)
+	run, _ := drainWindowExistsRunner(t, ref)
+	// The window is reported from the start: this is the record Launch failed
+	// to park (its own park is best-effort), still sitting in `launching`.
+	name, err := ReviewWindowName(ref)
+	if err != nil {
+		t.Fatalf("review window name: %v", err)
+	}
+	row := strings.Join([]string{"123", "456", "@9", "$1", "forgectl", "1", name, "1", "1"}, "\x1f")
+	inner := run.RunFunc
+	run.RunFunc = func(cmd string, args []string) (string, error) {
+		if cmd == "tmux" && len(args) > 0 && args[0] == "list-windows" {
+			return row, nil
+		}
+		return inner(cmd, args)
+	}
+	c := drainClient(t, dir, run)
+	ws := fakeWorkspace(t)
+	path := seedPhaseRecord(t, c, ref, PhaseLaunching, ws)
+
+	teardowns := 0
+	orig := sandboxTeardown
+	sandboxTeardown = func(context.Context, exec.Runner, string) error { teardowns++; return nil }
+	t.Cleanup(func() { sandboxTeardown = orig })
+
+	outcome, toPhase := c.settleDrainFailure(context.Background(), ref, path, 0, 3, errors.New("boom: dispatch reported an error"))
+	if outcome != drainOutcomeNeedsRepair || toPhase != string(PhaseNeedsRepair) {
+		t.Fatalf("outcome = %q/%q, want needs-repair", outcome, toPhase)
+	}
+	if teardowns != 0 {
+		t.Errorf("sandboxTeardown called %d times, want 0 — the window may be live", teardowns)
+	}
+	bc := readRecord(t, path)
+	if bc.Phase != PhaseNeedsRepair {
+		t.Fatalf("phase = %q, want needs-repair", bc.Phase)
+	}
+	if bc.Workspace != ws {
+		t.Errorf("workspace = %q, want it untouched (%q)", bc.Workspace, ws)
+	}
+	if !strings.Contains(bc.RepairReason, "adopt-window") {
+		t.Errorf("repairReason = %q, want it to name the way out", bc.RepairReason)
+	}
+}
+
+func TestSettleDrainFailure_PreDispatchRequeuesAndRemovesWorkspaceOutsideTheLock(t *testing.T) {
+	dir := t.TempDir()
+	ref := testRef(5)
+	run := drainLaunchRunner(nil) // list-windows reports no window
+	c := drainClient(t, dir, run)
+	ws := fakeWorkspace(t)
+	path := seedPhaseRecord(t, c, ref, PhasePreparing, "")
+	// Give the record a workspace the way a completed Prepare would.
+	if terr := c.transition(context.Background(), path, PhasePreparing, PhasePrepared, func(rec *Breadcrumb) error {
+		rec.Workspace = ws
+		return nil
+	}); terr != nil {
+		t.Fatalf("seed a prepared record with a workspace: %v", terr)
+	}
+
+	var mu sync.Mutex
+	var log []string
+	note := func(s string) { mu.Lock(); log = append(log, s); mu.Unlock() }
+	c.onLock = func(verb, event string) { note(event + ":" + verb) }
+	var torn []string
+	orig := sandboxTeardown
+	sandboxTeardown = func(_ context.Context, _ exec.Runner, workspace string) error {
+		note("teardown")
+		torn = append(torn, workspace)
+		return nil
+	}
+	t.Cleanup(func() { sandboxTeardown = orig })
+
+	outcome, toPhase := c.settleDrainFailure(context.Background(), ref, path, 0, 3, errors.New("boom: clone failed"))
+	if outcome != drainOutcomeRetryQueued || toPhase != string(PhaseQueued) {
+		t.Fatalf("outcome = %q/%q, want retry-queued/queued", outcome, toPhase)
+	}
+	bc := readRecord(t, path)
+	if bc.Phase != PhaseQueued || bc.Attempts != 1 {
+		t.Fatalf("record = phase %q attempts %d, want queued/1", bc.Phase, bc.Attempts)
+	}
+	if bc.Workspace != "" || bc.WindowID != "" {
+		t.Errorf("requeued record still names workspace %q / window %q", bc.Workspace, bc.WindowID)
+	}
+	if len(torn) != 1 || torn[0] != ws {
+		t.Fatalf("tore down %v, want exactly [%s]", torn, ws)
+	}
+
+	// THE REMOVAL MUST NOT HAPPEN UNDER THE LOCK: a recursive delete of a full
+	// clone would stall every other lifecycle-lock user for its duration.
+	mu.Lock()
+	defer mu.Unlock()
+	held := 0
+	for _, e := range log {
+		switch {
+		case strings.HasPrefix(e, "acquire:"):
+			held++
+		case strings.HasPrefix(e, "release:"):
+			held--
+		case e == "teardown" && held > 0:
+			t.Fatalf("workspace teardown ran inside a lifecycle-lock hold; log = %v", log)
+		}
+	}
+}
+
+func TestDrain_QueuedLocalRecordIsRefusedAtClaim(t *testing.T) {
+	dir := t.TempDir()
+	run := drainLaunchRunner(nil)
+	launches := 0
+	inner := run.RunFunc
+	run.RunFunc = func(name string, args []string) (string, error) {
+		if name == "git" && len(args) > 0 && args[0] == "clone" {
+			launches++
+		}
+		if name == "tmux" && len(args) > 0 && args[0] == "new-window" {
+			launches++
+		}
+		return inner(name, args)
+	}
+	c := drainClient(t, dir, run)
+
+	ref := newLocalRef("abc1234def")
+	bc := Breadcrumb{
+		Ref: ref.String(), Agent: "claude", CreatedAt: time.Now().UTC(), Local: true,
+		Provenance: ReviewProvenanceOperatorAuthored.persisted(),
+		Version:    breadcrumbVersion, Phase: PhaseQueued, Revision: 1,
+	}
+	path, err := writeBreadcrumb(c.SessionsDir(), ref, bc)
+	if err != nil {
+		t.Fatalf("seed queued local record: %v", err)
+	}
+
+	report, err := c.Drain(context.Background(), config.Config{}, DrainOpts{})
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(report.Items) != 1 || report.Items[0].Outcome != drainOutcomeRefused {
+		t.Fatalf("items = %+v, want one refused item", report.Items)
+	}
+	if !strings.Contains(report.Items[0].Error, "local reviews cannot be drained") {
+		t.Errorf("item error = %q, want the local refusal reason", report.Items[0].Error)
+	}
+	if report.Failed != 1 {
+		t.Errorf("Failed = %d, want 1", report.Failed)
+	}
+	if launches != 0 {
+		t.Errorf("clone/new-window ran %d times, want 0 — a local record is refused before it is claimed", launches)
+	}
+	after := readRecord(t, path)
+	if after.Phase != PhaseQueued {
+		t.Errorf("phase = %q, want still queued (never claimed to preparing)", after.Phase)
+	}
+	if after.Revision != 1 {
+		t.Errorf("revision = %d, want 1 — the record must not be written at all", after.Revision)
 	}
 }
 

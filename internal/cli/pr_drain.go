@@ -118,7 +118,7 @@ func runDrainWatch(cmd *cobra.Command, client *pr.Client, cfg config.Config, opt
 			consecutiveRefusals++
 			if consecutiveRefusals >= drainWatchRefusalLimit {
 				return WithExitCode(fmt.Errorf(
-					"drain refused %d consecutive passes, last: %s", consecutiveRefusals, report.Refusal), 1)
+					"drain refused %d consecutive passes, last: %s", consecutiveRefusals, safeTerm(report.Refusal)), 1)
 			}
 		} else {
 			consecutiveRefusals = 0
@@ -164,10 +164,20 @@ func writeDrainHuman(out io.Writer, report pr.DrainReport, dryRun bool, next tim
 		}
 		refs := make([]string, 0, len(report.Items))
 		for _, it := range report.Items {
+			// A refused record is not a would-launch row: naming it as one
+			// would promise a launch the next real pass will not perform.
+			if it.Outcome == "refused" {
+				continue
+			}
 			refs = append(refs, it.Ref)
 		}
-		_, _ = fmt.Fprintf(out, "%d queued, %d free — would launch %s\n",
-			report.Queued, report.Free, strings.Join(refs, ", "))
+		if len(refs) == 0 {
+			_, _ = fmt.Fprintf(out, "%d queued, %d free — would launch nothing\n", report.Queued, report.Free)
+		} else {
+			_, _ = fmt.Fprintf(out, "%d queued, %d free — would launch %s\n",
+				report.Queued, report.Free, strings.Join(refs, ", "))
+		}
+		writeDrainRefusedItems(out, report)
 		return
 	}
 	if report.Queued == 0 && len(report.Items) == 0 {
@@ -188,12 +198,24 @@ func writeDrainHuman(out io.Writer, report pr.DrainReport, dryRun bool, next tim
 	}
 }
 
+// writeDrainRefusedItems prints the records a pass refused to claim at all —
+// a queued local review is the only shape today. They are printed on the
+// dry-run arm too, where the would-launch list deliberately omits them.
+func writeDrainRefusedItems(out io.Writer, report pr.DrainReport) {
+	for _, it := range report.Items {
+		if it.Outcome != "refused" {
+			continue
+		}
+		_, _ = fmt.Fprintf(out, "  %s: refused: %s\n", it.Ref, safeTerm(it.Error))
+	}
+}
+
 // drainExitCode is the honest code for one pass: 1 when the pass refused
 // outright or any launch failed, 0 otherwise — the same "a script can ask
 // this" contract `pr repair`'s inspect exit code follows.
 func drainExitCode(report pr.DrainReport) error {
 	if report.Refusal != "" {
-		return WithExitCode(fmt.Errorf("drain pass refused: %s", report.Refusal), 1)
+		return WithExitCode(fmt.Errorf("drain pass refused: %s", safeTerm(report.Refusal)), 1)
 	}
 	if report.Failed > 0 {
 		return WithExitCode(fmt.Errorf("%d review(s) failed to launch this pass", report.Failed), 1)

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Dogfoods `forgectl pr <ref> --queue` + `forgectl pr drain` against two real
 # PRs (forgectl#473): queues both, drains one pass, and asserts the pass
-# report. Uses a scratch HOME so it never touches a real ~/.config/forgectl.
+# report. Uses a scratch HOME *and* scratch XDG dirs so it never touches a real
+# ~/.config/forgectl on either macOS or Linux.
 #
 # Usage: scripts/dogfood-drain.sh [--launch] <ref1> <ref2> [path/to/forgectl]
 #
@@ -38,13 +39,28 @@ fi
 SCRATCH=$(mktemp -d)
 trap 'rm -rf "$SCRATCH"' EXIT
 
+# HOME ALONE DOES NOT ISOLATE ON LINUX. forgectl resolves its state dir through
+# os.UserConfigDir(), which reads $XDG_CONFIG_HOME first there and only falls
+# back to $HOME/.config — so with XDG_CONFIG_HOME set (the common case) a
+# HOME-only override writes real queued records into the operator's real
+# session dir, where the next real `pr drain` would launch them. XDG_STATE_HOME
+# is overridden too (internal/config/usage_base.go reads it); XDG_DATA_HOME and
+# XDG_CACHE_HOME are not read by this binary. macOS ignores all of these
+# (os.UserConfigDir is HOME-derived), which is exactly why a run here would not
+# surface the gap.
+SCRATCH_ENV=(env
+  "HOME=$SCRATCH"
+  "XDG_CONFIG_HOME=$SCRATCH/config"
+  "XDG_STATE_HOME=$SCRATCH/state"
+)
+
 echo "--- queue $REF1 ---"
-HOME="$SCRATCH" "$BIN" pr "$REF1" --queue
+"${SCRATCH_ENV[@]}" "$BIN" pr "$REF1" --queue
 echo "--- queue $REF2 ---"
-HOME="$SCRATCH" "$BIN" pr "$REF2" --queue
+"${SCRATCH_ENV[@]}" "$BIN" pr "$REF2" --queue
 
 echo "--- pr queue ---"
-HOME="$SCRATCH" "$BIN" pr queue
+"${SCRATCH_ENV[@]}" "$BIN" pr queue
 
 DRAIN_ARGS=(pr drain --once --json)
 if [ "$DRY_RUN" = true ]; then
@@ -52,7 +68,7 @@ if [ "$DRY_RUN" = true ]; then
 fi
 
 echo "--- ${DRAIN_ARGS[*]} ---"
-REPORT=$(HOME="$SCRATCH" "$BIN" "${DRAIN_ARGS[@]}")
+REPORT=$("${SCRATCH_ENV[@]}" "$BIN" "${DRAIN_ARGS[@]}")
 RC=$?
 echo "$REPORT"
 
