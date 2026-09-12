@@ -19,8 +19,11 @@ import (
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
-// repairLogName is the write-ahead intent and audit trail every `pr repair
-// --apply` appends to, a sibling of the records it describes.
+// repairLogName is the write-ahead intent and audit trail every destructive
+// session verb appends to — `pr repair --apply`, `pr teardown`, and
+// `pr cleanup` — a sibling of the records it describes. The name is historical:
+// it is kept as-is so existing trails stay readable, and each row says which
+// verb wrote it.
 //
 // The .jsonl extension is load-bearing: List enumerates only .json names, so
 // this file can never be mistaken for a session record.
@@ -46,6 +49,16 @@ const (
 	repairOutcomeFailed  = "failed"
 )
 
+// The destructive session verbs a row can name. A row's verb is WHICH COMMAND
+// removed the thing, which is a different question from repair's Mode: Mode
+// holds the flag spelling `pr repair --apply` was given, and is empty for every
+// other verb. A new destructive verb adds a constant here and nothing else.
+const (
+	auditVerbRepair   = "repair"
+	auditVerbTeardown = "teardown"
+	auditVerbCleanup  = "cleanup"
+)
+
 // RepairRow is one line of the repair log — the intent written BEFORE a
 // mutation, or the completion written after it. The two are paired by ID.
 type RepairRow struct {
@@ -55,11 +68,15 @@ type RepairRow struct {
 	Ref        string    `json:"ref"`
 	RecordPath string    `json:"record_path"`
 	FromPhase  string    `json:"from_phase"`
-	Mode       string    `json:"mode"`
-	WindowID   string    `json:"window_id,omitempty"`
-	Workspace  string    `json:"workspace,omitempty"`
-	Outcome    string    `json:"outcome"`
-	Error      string    `json:"error,omitempty"`
+	// Verb names the command that removed the thing. The omitempty is
+	// deliberate: rows written before this field existed carry no verb, and an
+	// absent verb must read as unknown rather than as a claim that a repair ran.
+	Verb      string `json:"verb,omitempty"`
+	Mode      string `json:"mode"`
+	WindowID  string `json:"window_id,omitempty"`
+	Workspace string `json:"workspace,omitempty"`
+	Outcome   string `json:"outcome"`
+	Error     string `json:"error,omitempty"`
 	// Record carries the subject record's own bytes, capped and clamped, and is
 	// written for ONE case: a record this build cannot decode. Every other field
 	// here is derived from a decode, so for that case they are all empty — and a
@@ -175,6 +192,7 @@ func shrinkableRowFields(row *RepairRow) []shrinkableField {
 var boundedRowFields = map[string]string{
 	"ID":         "16 hex characters from randomSuffix",
 	"FromPhase":  "a package constant or repairPhaseUnreadable",
+	"Verb":       "one of the auditVerb constants",
 	"Mode":       "one of the three RepairMode constants",
 	"Outcome":    "one of the repairOutcome constants",
 	"RecordNote": "derived here from fixed templates and two decimal ints per clause, ASCII, and recomputed inside the measurement",

@@ -44,7 +44,8 @@ own outcome — and settles the one you name.
 exactly as every other verb derives it, so no operator-supplied tmux target can
 steer it. --rollback refuses while the window is live, refuses when the window
 list cannot be read at all, and off a terminal requires --yes. --dry-run prints
-what each would do and touches nothing. --history shows the audit trail.`,
+what each would do and touches nothing. --history shows the session audit trail,
+which carries teardown and cleanup rows beside repair's.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if history {
@@ -87,7 +88,8 @@ what each would do and touches nothing. --history shows the audit trail.`,
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would happen and touch nothing")
 	cmd.Flags().BoolVar(&yes, "yes", false, "confirm a destructive repair without a terminal prompt")
 	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"items":[…]} to stdout`)
-	cmd.Flags().BoolVar(&history, "history", false, "show the repair audit trail instead of the current state")
+	cmd.Flags().BoolVar(&history, "history", false,
+		"show the session audit trail (repair, teardown, cleanup) instead of the current state")
 	return cmd
 }
 
@@ -113,8 +115,12 @@ func runRepairHistory(cmd *cobra.Command, client *pr.Client, asJSON bool) error 
 		return nil
 	}
 	for _, r := range rows {
-		_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\n",
-			r.TS.Format("2006-01-02T15:04:05Z07:00"), r.Mode, r.Outcome,
+		// The verb column says which command removed the thing. An empty verb
+		// renders "-" because the row predates the field — the log is
+		// hand-editable and was written before teardown and cleanup recorded
+		// themselves, so silence there is unknown, never "this was a repair".
+		_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			r.TS.Format("2006-01-02T15:04:05Z07:00"), safeTerm(dashIfEmpty(r.Verb)), safeTerm(dashIfEmpty(r.Mode)), safeTerm(r.Outcome),
 			safeTerm(r.Ref), termsafe.QuotePathIfUnsafe(r.RecordPath))
 		// The note is not optional detail. A shrunken ref or workspace stays
 		// well-formed, so without this line the default reader sees a truncated
@@ -125,6 +131,15 @@ func runRepairHistory(cmd *cobra.Command, client *pr.Client, asJSON bool) error 
 		}
 	}
 	return nil
+}
+
+// dashIfEmpty renders an absent column as "-" so a blank cell cannot be read
+// as a value the row actually carried.
+func dashIfEmpty(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 // writeRepairJSON encodes the report as an object (not a bare array) so a
