@@ -375,8 +375,20 @@ func TestEnvSetCmd_TTYPrompt_ViaSeam(t *testing.T) {
 	if want := "KEY=" + sentinel + "\n"; string(got) != want {
 		t.Errorf("file content = %q, want %q", got, want)
 	}
-	if !strings.Contains(stderr.String(), "Value for KEY: ") {
+	if !strings.Contains(stderr.String(), "Value: ") {
 		t.Errorf("stderr = %q, want the no-echo prompt text", stderr.String())
+	}
+	// The prompt must not name the key. A prompt precedes any write and is
+	// abandoned on Ctrl-C, so it never earns the right to echo its argument
+	// — and `env set sk_live_…` is an ordinary typo that would otherwise put
+	// a live credential in the transcript with nothing written.
+	//
+	// Scoped to the prompt line rather than all of stderr: a bare
+	// Contains(stderr, "KEY") would break on any future stderr line that
+	// legitimately names a key, which is a test about the prompt failing for
+	// an unrelated reason.
+	if strings.Contains(stderr.String(), "Value for ") {
+		t.Errorf("stderr = %q, want the prompt to name no key", stderr.String())
 	}
 	assertNoSecretInOutput(t, sentinel, stdout.String(), stderr.String())
 }
@@ -1390,12 +1402,12 @@ func TestResolveAllowAnyFile_SymlinkBindsToResolvedPath(t *testing.T) {
 	confirmAnyFile = func(_ theme.Theme, msg string) (bool, error) { gotMsg = msg; return true, nil }
 	t.Cleanup(func() { confirmAnyFile = prevConfirm })
 
-	allow, err := resolveAllowAnyFile(true, ".env", repo, theme.Theme{})
+	target, err := resolveEnvTarget(true, ".env", repo, theme.Theme{})
 	if err != nil {
-		t.Fatalf("resolveAllowAnyFile: %v", err)
+		t.Fatalf("resolveEnvTarget: %v", err)
 	}
-	if !allow {
-		t.Error("allow = false, want true")
+	if want := filepath.Join(".git", "config"); target.Rel() != want {
+		t.Errorf("target.Rel() = %q, want %q", target.Rel(), want)
 	}
 	if !strings.Contains(gotMsg, filepath.Join(".git", "config")) {
 		t.Errorf("confirm message = %q, want it to contain the RESOLVED path %s", gotMsg, filepath.Join(".git", "config"))
@@ -1409,11 +1421,11 @@ func TestResolveAllowAnyFile_SymlinkBindsToResolvedPath(t *testing.T) {
 	}
 }
 
-// TestResolveAllowAnyFile_EnvNamedTarget_NoConfirmation proves an
+// TestResolveEnvTarget_EnvNamedTarget_NoConfirmation proves an
 // already-env-named resolved target skips the confirmation seam entirely —
-// Locate's own name check would pass it regardless of --any-file, so a
-// prompt would be pure noise (and, on a non-tty run, a spurious refusal).
-func TestResolveAllowAnyFile_EnvNamedTarget_NoConfirmation(t *testing.T) {
+// Target.Clear passes it regardless of --any-file, so a prompt would be pure
+// noise (and, on a non-tty run, a spurious refusal).
+func TestResolveEnvTarget_EnvNamedTarget_NoConfirmation(t *testing.T) {
 	repo := t.TempDir()
 	initEnvGitRepo(t, repo)
 	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("A=1\n"), 0o600); err != nil {
@@ -1430,15 +1442,230 @@ func TestResolveAllowAnyFile_EnvNamedTarget_NoConfirmation(t *testing.T) {
 	// calls proves the env-named short-circuit fired, not just that the
 	// prompt was skipped for some other reason.
 
-	allow, err := resolveAllowAnyFile(true, ".env", repo, theme.Theme{})
+	target, err := resolveEnvTarget(true, ".env", repo, theme.Theme{})
 	if err != nil {
-		t.Fatalf("resolveAllowAnyFile: %v", err)
+		t.Fatalf("resolveEnvTarget: %v", err)
 	}
-	if !allow {
-		t.Error("allow = false, want true (an env-named target needs no confirmation)")
+	if target.Rel() != ".env" {
+		t.Errorf("target.Rel() = %q, want %q", target.Rel(), ".env")
 	}
 	if calls != 0 {
 		t.Errorf("confirmAnyFile called %d time(s), want 0 for an already-env-named target", calls)
+	}
+}
+
+// TestEnvSetCmd_ConfirmedPathIsWrittenPath is the regression test for the
+// time-of-check/time-of-use defect the Target type exists to close, and it is
+// written as the exploit rather than as a unit assertion because the exploit
+// is the only thing that distinguishes the fixed shape from the broken one.
+//
+// The broken shape resolved --file once to build the confirmation prompt,
+// returned a bare bool, and let the caller resolve the raw flag string AGAIN
+// to decide what to write. The stub below stands in for the operator's
+// think-time at that prompt: it repoints the symlink before answering yes.
+// Under the old code the prompt said "notes.txt" and the write landed in
+// .git/config — and `core.fsmonitor` is run by the next `git status`, so the
+// payload is arbitrary execution.
+//
+// The primary assertion is that the write went to the path the human was
+// shown, not that it refused — either would be safe, and landing on the
+// flipped target is the only unsafe outcome.
+//
+// But a purely negative assertion is a check that cannot distinguish "the fix
+// works" from "the command stopped working", so this also asserts the write
+// LANDED on the confirmed file. Without that arm the test stays green if
+// `--any-file` regresses to refusing unconditionally, or if the symlink branch
+// stops resolving at all.
+func TestEnvSetCmd_ConfirmedPathIsWrittenPath(t *testing.T) {
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+
+	const gitConfigOriginal = "[core]\n\trepositoryformatversion = 0\n"
+	gitConfig := filepath.Join(repo, ".git", "config")
+	// 0644 is what git itself writes, and the fixture has to be realistic:
+	// the whole point is that this file is an ordinary, world-readable config
+	// that becomes an execution sink when a key lands in it.
+	if err := os.WriteFile(gitConfig, []byte(gitConfigOriginal), 0o644); err != nil { //nolint:gosec // G306: matches git's own mode; see above
+		t.Fatalf("WriteFile the repo config: %v", err)
+	}
+	decoy := filepath.Join(repo, "notes.txt")
+	if err := os.WriteFile(decoy, []byte("SEED=0\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile notes.txt: %v", err)
+	}
+
+	link := filepath.Join(repo, "link")
+	if err := os.Symlink(decoy, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	prevTerm := isTerminal
+	isTerminal = func() bool { return true }
+	t.Cleanup(func() { isTerminal = prevTerm })
+
+	var gotMsg string
+	prevConfirm := confirmAnyFile
+	confirmAnyFile = func(_ theme.Theme, msg string) (bool, error) {
+		gotMsg = msg
+		// The flip, inside the confirmation window.
+		if err := os.Remove(link); err != nil {
+			return false, err
+		}
+		if err := os.Symlink(gitConfig, link); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	t.Cleanup(func() { confirmAnyFile = prevConfirm })
+
+	t.Chdir(repo)
+	client, _ := envFixture()
+	cmd := newEnvCmdForClient(client, theme.Theme{})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"set", "fsmonitor", "--file", "link", "--any-file"})
+
+	// isTerminal is stubbed true above, so `set` takes the no-echo prompt
+	// branch and never reads cmd.InOrStdin(); readPassword is the seam.
+	const payload = "/tmp/pwn.sh"
+	prevRead := readPassword
+	readPassword = func() (string, error) { return payload, nil }
+	t.Cleanup(func() { readPassword = prevRead })
+
+	execErr := cmd.ExecuteContext(context.Background())
+
+	if !strings.Contains(gotMsg, "notes.txt") {
+		t.Fatalf("confirm message = %q, want it to name notes.txt (the pre-flip resolved target)", gotMsg)
+	}
+
+	// The load-bearing assertion: .git/config is untouched, whether the
+	// command succeeded against the confirmed file or refused outright.
+	got, err := os.ReadFile(gitConfig) //nolint:gosec // G304: a path this test built inside its own t.TempDir()
+	if err != nil {
+		t.Fatalf("ReadFile the repo config: %v", err)
+	}
+	if string(got) != gitConfigOriginal {
+		t.Fatalf(".git/config was written (exec err = %v): %q\nwant unchanged %q — the confirmed path was notes.txt", execErr, got, gitConfigOriginal)
+	}
+	if strings.Contains(string(got), "fsmonitor") {
+		t.Fatal("the repo config gained an fsmonitor entry — the write followed the flipped symlink")
+	}
+
+	// The positive arm: the write reached the file the human confirmed. This
+	// is what keeps the test able to go red — a command that refused
+	// everything, or stopped resolving the symlink at all, would satisfy every
+	// assertion above.
+	if execErr != nil {
+		t.Fatalf("set returned %v, want it to succeed against the confirmed target", execErr)
+	}
+	decoyGot, err := os.ReadFile(decoy) //nolint:gosec // G304: a path this test built inside its own t.TempDir()
+	if err != nil {
+		t.Fatalf("ReadFile the confirmed target: %v", err)
+	}
+	if !strings.Contains(string(decoyGot), "fsmonitor="+payload) {
+		t.Errorf("the confirmed target = %q, want it to carry the written key", decoyGot)
+	}
+}
+
+// TestEnvSetCmd_ParentSwapDuringConfirmation is the second half of the
+// confirmation-window regression, and the reason env.Target carries an open
+// directory descriptor rather than just a resolved path.
+//
+// Carrying the path fixed the symlinked-TARGET case and left this one wide
+// open: with every consumer still opening that path BY STRING, swapping an
+// intermediate DIRECTORY during the prompt redirected the write exactly as
+// before. A security review reproduced the original payload this way against
+// the half-fixed tree — a prompt reading "sub/config" wrote core.fsmonitor
+// into .git/config and exited zero.
+//
+// So the assertion is the same one as the sibling test, against a different
+// attack: the write reaches the directory that was resolved, whatever the path
+// now spells.
+func TestEnvSetCmd_ParentSwapDuringConfirmation(t *testing.T) {
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+
+	const configOriginal = "[core]\n\trepositoryformatversion = 0\n"
+	repoConfig := filepath.Join(repo, ".git", "config")
+	if err := os.WriteFile(repoConfig, []byte(configOriginal), 0o644); err != nil { //nolint:gosec // G306: matches the mode git itself writes
+		t.Fatalf("WriteFile the repo config: %v", err)
+	}
+
+	// `sub` is a REAL directory at resolution time. That is load-bearing: if
+	// it were already a symlink, EvalSymlinks would resolve it away during
+	// resolution and flipping it afterwards could not affect anything — which
+	// is a test that passes against the broken code too. The attack needs a
+	// genuine directory that is REPLACED by a symlink inside the window.
+	subDir := filepath.Join(repo, "sub")
+	if err := os.Mkdir(subDir, 0o750); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "config"), []byte("SEED=0\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile the decoy: %v", err)
+	}
+	// Where the original directory is moved to, so the test can read back
+	// what the pinned descriptor actually wrote.
+	movedDir := filepath.Join(repo, "sub-moved")
+
+	prevTerm := isTerminal
+	isTerminal = func() bool { return true }
+	t.Cleanup(func() { isTerminal = prevTerm })
+
+	const payload = "/tmp/pwn.sh"
+	prevRead := readPassword
+	readPassword = func() (string, error) { return payload, nil }
+	t.Cleanup(func() { readPassword = prevRead })
+
+	var gotMsg string
+	prevConfirm := confirmAnyFile
+	confirmAnyFile = func(_ theme.Theme, msg string) (bool, error) {
+		gotMsg = msg
+		// The flip, inside the confirmation window: move the real `sub` aside
+		// and put a symlink to `.git` in its place. Any later walk of the
+		// string "<repo>/sub/config" now lands on .git/config.
+		if err := os.Rename(subDir, movedDir); err != nil {
+			return false, err
+		}
+		if err := os.Symlink(filepath.Join(repo, ".git"), subDir); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	t.Cleanup(func() { confirmAnyFile = prevConfirm })
+
+	t.Chdir(repo)
+	client, _ := envFixture()
+	cmd := newEnvCmdForClient(client, theme.Theme{})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"set", "fsmonitor", "--file", filepath.Join("sub", "config"), "--any-file"})
+
+	execErr := cmd.ExecuteContext(context.Background())
+
+	if !strings.Contains(gotMsg, filepath.Join("sub", "config")) {
+		t.Fatalf("confirm message = %q, want it to name the confirmed target", gotMsg)
+	}
+
+	got, err := os.ReadFile(repoConfig) //nolint:gosec // G304: a path this test built inside its own t.TempDir()
+	if err != nil {
+		t.Fatalf("ReadFile the repo config: %v", err)
+	}
+	if string(got) != configOriginal {
+		t.Fatalf("the repo config was written (exec err = %v): %q\nwant unchanged — the confirmed directory was sub/, not .git/", execErr, got)
+	}
+
+	// Positive arm, same reasoning as the sibling test: without it, a command
+	// that refused everything would pass. The write must have reached the
+	// ORIGINAL directory, which is now at sub-moved/ — that is what proves the
+	// descriptor followed the inode rather than the name.
+	if execErr != nil {
+		t.Fatalf("set returned %v, want it to succeed against the confirmed target", execErr)
+	}
+	decoyGot, err := os.ReadFile(filepath.Join(movedDir, "config")) //nolint:gosec // G304: a path this test built inside its own t.TempDir()
+	if err != nil {
+		t.Fatalf("ReadFile the confirmed target: %v", err)
+	}
+	if !strings.Contains(string(decoyGot), "fsmonitor="+payload) {
+		t.Errorf("the confirmed target = %q, want it to carry the written key", decoyGot)
 	}
 }
 

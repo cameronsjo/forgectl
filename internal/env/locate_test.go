@@ -2,11 +2,13 @@ package env
 
 // Test plan for locate.go
 //
-// Locate (Classification: filesystem safety rail, real temp-dir fixtures)
-//   [x] Happy: a file inside the repo resolves, exists=true (incl. a
-//       non-.env name like .env.prod — Locate has no opinion on filename)
+// locate == ResolveTarget + Target.Clear (Classification: filesystem safety
+// rail, real temp-dir fixtures)
+//   [x] Happy: a file inside the repo resolves, Exists=true (incl. a
+//       non-.env name like .env.prod — ResolveTarget has no opinion on
+//       filename; Clear is what holds one)
 //   [x] Happy: a not-yet-existing file inside the repo resolves,
-//       exists=false, when its parent directory is inside the repo
+//       Exists=false, when its parent directory is inside the repo
 //   [x] Happy: a worktree's .git (a FILE, not a directory) is recognized
 //   [x] Refused: no .git found walking up from cwd at all
 //   [x] Refused: a plain ../ escape outside the repo root
@@ -17,6 +19,9 @@ package env
 //       regular file
 //   [x] Refused: an existing target that resolves to a FIFO, not a regular
 //       file
+//   [x] Target.Rel is repo-relative, never the absolute resolved path
+//   [x] A containment refusal names what the caller typed, not the resolved
+//       path (which is by definition outside the repo)
 
 import (
 	"os"
@@ -26,6 +31,42 @@ import (
 	"syscall"
 	"testing"
 )
+
+// locate composes the two production halves internal/cli's resolveEnvTarget
+// composes: one ResolveTarget, then Target.Clear. It carries no copy of the
+// refusal wording, so a test cannot keep passing while production's message
+// drifts.
+//
+// It deliberately has no allowAnyFile parameter. An earlier version took one
+// and bypassed Clear unconditionally, which made every test using it assert
+// against a fixture rather than production: the real bypass is gated behind
+// isTerminal() AND an operator confirmation, neither of which a helper can
+// stand in for. The --any-file path is covered where it actually lives, in
+// internal/cli's TestResolveAllowAnyFile_SymlinkBindsToResolvedPath and
+// TestEnvSetCmd_ConfirmedPathIsWrittenPath.
+func locate(fileFlag, cwd string) (Target, error) {
+	target, err := ResolveTarget(fileFlag, cwd)
+	if err != nil {
+		return Target{}, err
+	}
+	if err := target.Clear(); err != nil {
+		return Target{}, err
+	}
+	return target, nil
+}
+
+// mustTarget resolves and clears fileFlag or fails the test — the fixture
+// equivalent of what the CLI hands a Client method. Tests take this route
+// rather than building a Target literal so a fixture cannot assert against a
+// target production would have refused.
+func mustTarget(t *testing.T, fileFlag, cwd string) Target {
+	t.Helper()
+	target, err := locate(fileFlag, cwd)
+	if err != nil {
+		t.Fatalf("locate(%q): %v", fileFlag, err)
+	}
+	return target
+}
 
 // initGitRepo makes dir a real (enough) git repo for findRepoRoot's walk-up
 // — it only ever needs a .git directory to exist, no real git binary
@@ -39,8 +80,8 @@ func initGitRepo(t *testing.T, dir string) {
 
 // resolvedPath resolves symlinks in path — t.TempDir() on macOS returns a
 // path under /var/folders/... that is itself a symlink to
-// /private/var/folders/..., and Locate resolves everything through
-// EvalSymlinks, so an expected-path comparison must do the same. Mirrors
+// /private/var/folders/..., and resolution goes through EvalSymlinks, so an
+// expected-path comparison must do the same. Mirrors
 // internal/clean/clean_test.go's identical helper.
 func resolvedPath(t *testing.T, path string) string {
 	t.Helper()
@@ -59,15 +100,18 @@ func TestLocate_InRepo_OK(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	real, exists, err := Locate(".env.prod", root, false)
+	target, err := locate(".env.prod", root)
 	if err != nil {
-		t.Fatalf("Locate: %v", err)
+		t.Fatalf("locate: %v", err)
 	}
-	if !exists {
-		t.Error("exists = false, want true")
+	if !target.Exists {
+		t.Error("Exists = false, want true")
 	}
-	if want := filepath.Join(resolvedPath(t, root), ".env.prod"); real != want {
-		t.Errorf("real = %q, want %q", real, want)
+	if want := filepath.Join(resolvedPath(t, root), ".env.prod"); target.path != want {
+		t.Errorf("Path = %q, want %q", target.path, want)
+	}
+	if want := resolvedPath(t, root); target.root != want {
+		t.Errorf("Root = %q, want %q", target.root, want)
 	}
 }
 
@@ -75,15 +119,15 @@ func TestLocate_NewFileInRepo_Allowed(t *testing.T) {
 	root := t.TempDir()
 	initGitRepo(t, root)
 
-	real, exists, err := Locate(".env.new", root, false)
+	target, err := locate(".env.new", root)
 	if err != nil {
-		t.Fatalf("Locate: %v", err)
+		t.Fatalf("locate: %v", err)
 	}
-	if exists {
-		t.Error("exists = true, want false")
+	if target.Exists {
+		t.Error("Exists = true, want false")
 	}
-	if want := filepath.Join(resolvedPath(t, root), ".env.new"); real != want {
-		t.Errorf("real = %q, want %q", real, want)
+	if want := filepath.Join(resolvedPath(t, root), ".env.new"); target.path != want {
+		t.Errorf("Path = %q, want %q", target.path, want)
 	}
 }
 
@@ -95,21 +139,21 @@ func TestLocate_WorktreeGitFile_OK(t *testing.T) {
 		t.Fatalf("WriteFile .git: %v", err)
 	}
 
-	_, exists, err := Locate(".env", root, false)
+	target, err := locate(".env", root)
 	if err != nil {
-		t.Fatalf("Locate: %v", err)
+		t.Fatalf("locate: %v", err)
 	}
-	if exists {
-		t.Error("exists = true, want false (file wasn't created)")
+	if target.Exists {
+		t.Error("Exists = true, want false (file wasn't created)")
 	}
 }
 
 func TestLocate_NotARepo_Refused(t *testing.T) {
 	root := t.TempDir() // no .git anywhere up from here
 
-	_, _, err := Locate(".env", root, false)
+	_, err := locate(".env", root)
 	if err == nil {
-		t.Fatal("Locate outside any git repo returned nil error, want a refusal")
+		t.Fatal("locate outside any git repo returned nil error, want a refusal")
 	}
 }
 
@@ -128,9 +172,20 @@ func TestLocate_OutsideRepo_Refused(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	_, _, err := Locate("../outside/secret.env", repo, false)
+	_, err := locate("../outside/secret.env", repo)
 	if err == nil {
-		t.Fatal("Locate with a ../ escape returned nil error, want a refusal")
+		t.Fatal("locate with a ../ escape returned nil error, want a refusal")
+	}
+	// The refusal must name what the caller typed. filepath.Base alone would
+	// render this as "secret.env", which names nothing the operator can act
+	// on and does not distinguish it from an in-repo file of the same name.
+	if !strings.Contains(err.Error(), "outside/secret.env") {
+		t.Errorf("error = %q, want it to name the argument as typed", err.Error())
+	}
+	// And it must NOT name the resolved path, which is by definition outside
+	// the repository and carries a machine-specific prefix (forgectl#481).
+	if strings.Contains(err.Error(), resolvedPath(t, outside)) {
+		t.Errorf("error = %q, want it to omit the resolved absolute path", err.Error())
 	}
 }
 
@@ -148,9 +203,9 @@ func TestLocate_SymlinkedFileEscape_Refused(t *testing.T) {
 		t.Skipf("symlink unsupported: %v", err)
 	}
 
-	_, _, err := Locate(".env", repo, false)
+	_, err := locate(".env", repo)
 	if err == nil {
-		t.Fatal("Locate through a symlinked file escaping the repo returned nil error, want a refusal")
+		t.Fatal("locate through a symlinked file escaping the repo returned nil error, want a refusal")
 	}
 }
 
@@ -164,9 +219,9 @@ func TestLocate_ExistingDirectory_Refused(t *testing.T) {
 		t.Fatalf("Mkdir: %v", err)
 	}
 
-	_, _, err := Locate(".env", root, false)
+	_, err := locate(".env", root)
 	if err == nil {
-		t.Fatal("Locate against a directory target returned nil error, want a refusal")
+		t.Fatal("locate against a directory target returned nil error, want a refusal")
 	}
 	if !strings.Contains(err.Error(), "not a regular file") {
 		t.Errorf("error = %q, want it to name the regular-file rule", err.Error())
@@ -184,14 +239,39 @@ func TestLocate_ExistingFIFO_Refused(t *testing.T) {
 		t.Skipf("Mkfifo unsupported in this environment: %v", err)
 	}
 
-	// A FIFO with no writer would block os.Open/parseFile forever — Locate
+	// A FIFO with no writer would block os.Open/parseFile forever — resolution
 	// must refuse it before any caller ever opens it.
-	_, _, err := Locate(".env", root, false)
+	_, err := locate(".env", root)
 	if err == nil {
-		t.Fatal("Locate against a FIFO target returned nil error, want a refusal")
+		t.Fatal("locate against a FIFO target returned nil error, want a refusal")
 	}
 	if !strings.Contains(err.Error(), "not a regular file") {
 		t.Errorf("error = %q, want it to name the regular-file rule", err.Error())
+	}
+}
+
+func TestTargetRel_IsRepoRelative(t *testing.T) {
+	root := t.TempDir()
+	initGitRepo(t, root)
+	sub := filepath.Join(root, "svc", "api")
+	// Ordinary source-tree modes, deliberately: a loose-permission .env is
+	// exactly the input this rail has to accept and then tighten.
+	if err := os.MkdirAll(sub, 0o755); err != nil { //nolint:gosec // G301: an ordinary source subdirectory
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, ".env"), []byte("KEY=1\n"), 0o644); err != nil { //nolint:gosec // G306: see above
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	target, err := locate(filepath.Join("svc", "api", ".env"), root)
+	if err != nil {
+		t.Fatalf("locate: %v", err)
+	}
+	if want := filepath.Join("svc", "api", ".env"); target.Rel() != want {
+		t.Errorf("Rel() = %q, want %q", target.Rel(), want)
+	}
+	if filepath.IsAbs(target.Rel()) {
+		t.Errorf("Rel() = %q, want a relative path", target.Rel())
 	}
 }
 
@@ -213,6 +293,11 @@ func TestIsEnvFileName_Allowlist(t *testing.T) {
 		// before "rc"), and doesn't end with ".env" either — it's a real
 		// RCE sink (direnv executes it) and must NOT be on the allowlist.
 		{".envrc", false},
+		// Byte-exact, deliberately. APFS is case-insensitive, so ".ENV"
+		// names the same file as ".env" — and this refusing means the
+		// allowlist errs toward refusing a legitimate file, never toward
+		// admitting a non-env one. Failing in that direction is the point.
+		{".ENV", false},
 	}
 	for _, c := range cases {
 		if got := IsEnvFileName(c.base); got != c.want {
@@ -231,12 +316,12 @@ func TestLocate_EnvShapedNames_Accepted(t *testing.T) {
 				t.Fatalf("WriteFile: %v", err)
 			}
 
-			_, exists, err := Locate(name, root, false)
+			target, err := locate(name, root)
 			if err != nil {
-				t.Fatalf("Locate(%q): %v", name, err)
+				t.Fatalf("locate(%q): %v", name, err)
 			}
-			if !exists {
-				t.Errorf("exists = false, want true for %q", name)
+			if !target.Exists {
+				t.Errorf("Exists = false, want true for %q", name)
 			}
 		})
 	}
@@ -251,9 +336,9 @@ func TestLocate_NonEnvFile_Refused(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	_, _, err := Locate(".git/config", repo, false)
+	_, err := locate(".git/config", repo)
 	if err == nil {
-		t.Fatal("Locate against .git/config returned nil error, want a refusal (not an env file)")
+		t.Fatal("locate against .git/config returned nil error, want a refusal (not an env file)")
 	}
 	if !strings.Contains(err.Error(), "not an env file") {
 		t.Errorf("error = %q, want it to name the not-an-env-file rule", err.Error())
@@ -268,23 +353,53 @@ func TestLocate_NonEnvFile_Refused(t *testing.T) {
 	}
 }
 
-func TestLocate_NonEnvFile_AllowAnyFileSkipsCheck(t *testing.T) {
+// TestResolveTarget_NonEnvFile_ResolvesButDoesNotClear pins the split between
+// the two halves: ResolveTarget has no opinion on the filename and resolves a
+// non-env target successfully, and Clear is the only thing that refuses it.
+// That separation is what lets the CLI learn WHICH path it is about to bypass
+// the allowlist for before asking a human about it.
+//
+// This replaces a test that drove the old locate helper with allowAnyFile=true.
+// That helper's bypass was unconditional while production's is gated on a tty
+// and a confirmation, so the test asserted the fixture's behaviour rather than
+// the command's. The bypass itself is covered in internal/cli, against the real
+// command tree.
+func TestResolveTarget_NonEnvFile_ResolvesButDoesNotClear(t *testing.T) {
 	repo := t.TempDir()
 	initGitRepo(t, repo)
-	gitConfig := filepath.Join(repo, ".git", "config")
-	if err := os.WriteFile(gitConfig, []byte("[core]\n"), 0o644); err != nil {
+	repoConfig := filepath.Join(repo, ".git", "config")
+	if err := os.WriteFile(repoConfig, []byte("[core]\n"), 0o644); err != nil { //nolint:gosec // G306: matches the mode git itself writes
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	real, exists, err := Locate(".git/config", repo, true)
+	target, err := ResolveTarget(filepath.Join(".git", "config"), repo)
 	if err != nil {
-		t.Fatalf("Locate with allowAnyFile=true: %v", err)
+		t.Fatalf("ResolveTarget: %v", err)
 	}
-	if !exists {
-		t.Error("exists = false, want true")
+	if !target.Exists {
+		t.Error("Exists = false, want true")
 	}
-	if want := filepath.Join(resolvedPath(t, repo), ".git", "config"); real != want {
-		t.Errorf("real = %q, want %q", real, want)
+	if want := filepath.Join(resolvedPath(t, repo), ".git", "config"); target.path != want {
+		t.Errorf("Path = %q, want %q", target.path, want)
+	}
+	if err := target.Clear(); err == nil {
+		t.Error("Clear() returned nil, want the not-an-env-file refusal")
+	}
+}
+
+// TestTargetClear_UnresolvedTarget_Refused proves the unexported path fields
+// do their job: the only Target another package can construct is one with no
+// path, and every entry point refuses it rather than acting on an empty string.
+func TestTargetClear_UnresolvedTarget_Refused(t *testing.T) {
+	if err := (Target{Exists: true}).Clear(); err == nil {
+		t.Error("Clear() on an unresolved Target returned nil, want a refusal")
+	}
+	if _, err := OpenTarget(Target{Exists: true}); err == nil {
+		t.Error("OpenTarget on an unresolved Target returned nil, want a refusal")
+	}
+	client := NewClient(nil)
+	if _, err := client.SetValue(Target{Exists: true}, "KEY", "value"); err == nil {
+		t.Error("SetValue on an unresolved Target returned nil, want a refusal")
 	}
 }
 
@@ -302,8 +417,8 @@ func TestLocate_SymlinkedDirEscape_Refused(t *testing.T) {
 	// PARENT (escape, a symlink to outside) must still be re-checked for
 	// containment rather than trusted just because it's "inside" repo
 	// lexically.
-	_, _, err := Locate(filepath.Join("escape", ".env"), repo, false)
+	_, err := locate(filepath.Join("escape", ".env"), repo)
 	if err == nil {
-		t.Fatal("Locate through a symlinked directory escaping the repo returned nil error, want a refusal")
+		t.Fatal("locate through a symlinked directory escaping the repo returned nil error, want a refusal")
 	}
 }

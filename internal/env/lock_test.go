@@ -34,6 +34,7 @@ func TestSetValue_ConcurrentDistinctKeys_BothSurvive(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
+	target := mustTarget(t, ".env", repo)
 	client := NewClient(clip.New(&exec.FakeRunner{}, clip.WithGOOS("darwin")))
 
 	const n = 2
@@ -55,7 +56,7 @@ func TestSetValue_ConcurrentDistinctKeys_BothSurvive(t *testing.T) {
 			defer done.Done()
 			ready.Done()
 			<-start
-			_, err := client.SetValue(repo, ".env", keys[i], values[i], false)
+			_, err := client.SetValue(target, keys[i], values[i])
 			errs[i] = err
 		}(i)
 	}
@@ -103,6 +104,7 @@ func TestSetValue_ConcurrentDistinctKeys_NewFile_BothSurvive(t *testing.T) {
 	envPath := filepath.Join(repo, ".env")
 	// Deliberately no pre-seed WriteFile here — the file must not exist yet.
 
+	target := mustTarget(t, ".env", repo)
 	client := NewClient(clip.New(&exec.FakeRunner{}, clip.WithGOOS("darwin")))
 
 	const n = 2
@@ -121,7 +123,7 @@ func TestSetValue_ConcurrentDistinctKeys_NewFile_BothSurvive(t *testing.T) {
 			defer done.Done()
 			ready.Done()
 			<-start
-			_, err := client.SetValue(repo, ".env", keys[i], values[i], false)
+			_, err := client.SetValue(target, keys[i], values[i])
 			errs[i] = err
 		}(i)
 	}

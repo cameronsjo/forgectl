@@ -40,7 +40,7 @@ func TestCopyValue_CopiesToClipboard(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	client := NewClient(clip.New(fake, clip.WithGOOS("darwin")))
 
-	if err := client.CopyValue(context.Background(), repo, ".env", "KEY", false); err != nil {
+	if err := client.CopyValue(context.Background(), mustTarget(t, ".env", repo), "KEY"); err != nil {
 		t.Fatalf("CopyValue: %v", err)
 	}
 
@@ -63,7 +63,7 @@ func TestCopyValue_MissingKey_Errors(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	client := NewClient(clip.New(fake, clip.WithGOOS("darwin")))
 
-	err := client.CopyValue(context.Background(), repo, ".env", "MISSING", false)
+	err := client.CopyValue(context.Background(), mustTarget(t, ".env", repo), "MISSING")
 	if err == nil {
 		t.Fatal("CopyValue with a missing key returned nil error, want a refusal")
 	}
@@ -92,7 +92,7 @@ func TestCopyValue_MissingFile_ErrorsWithRepoRelativePath(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	client := NewClient(clip.New(fake, clip.WithGOOS("darwin")))
 
-	err := client.CopyValue(context.Background(), repo, ".env", "KEY", false)
+	err := client.CopyValue(context.Background(), mustTarget(t, ".env", repo), "KEY")
 	if err == nil {
 		t.Fatal("CopyValue against a missing file returned nil error, want a refusal")
 	}
@@ -122,7 +122,7 @@ func TestCopyValue_ClipboardFailure_Surfaced(t *testing.T) {
 	}
 	client := NewClient(clip.New(fake, clip.WithGOOS("darwin")))
 
-	err := client.CopyValue(context.Background(), repo, ".env", "KEY", false)
+	err := client.CopyValue(context.Background(), mustTarget(t, ".env", repo), "KEY")
 	if err == nil {
 		t.Fatal("CopyValue with a failing pbcopy returned nil error, want it surfaced")
 	}
@@ -144,7 +144,7 @@ func TestSetFromClipboard_PastesAndWrites(t *testing.T) {
 	}
 	client := NewClient(clip.New(fake, clip.WithGOOS("darwin")))
 
-	tightened, err := client.SetFromClipboard(context.Background(), repo, ".env", "KEY", false)
+	tightened, err := client.SetFromClipboard(context.Background(), mustTarget(t, ".env", repo), "KEY")
 	if err != nil {
 		t.Fatalf("SetFromClipboard: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestSetFromClipboard_ClipboardFailure_Surfaced(t *testing.T) {
 	}
 	client := NewClient(clip.New(fake, clip.WithGOOS("darwin")))
 
-	_, err := client.SetFromClipboard(context.Background(), repo, ".env", "KEY", false)
+	_, err := client.SetFromClipboard(context.Background(), mustTarget(t, ".env", repo), "KEY")
 	if err == nil {
 		t.Fatal("SetFromClipboard with a failing pbpaste returned nil error, want it surfaced")
 	}
@@ -191,7 +191,7 @@ func TestSetFromClipboard_InvalidKey_NeverTouchesClipboard(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	client := NewClient(clip.New(fake, clip.WithGOOS("darwin")))
 
-	_, err := client.SetFromClipboard(context.Background(), repo, ".env", "not a valid key", false)
+	_, err := client.SetFromClipboard(context.Background(), mustTarget(t, ".env", repo), "not a valid key")
 	if err == nil {
 		t.Fatal("SetFromClipboard with an invalid key returned nil error, want a refusal")
 	}

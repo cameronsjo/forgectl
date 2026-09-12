@@ -84,6 +84,8 @@ func Diff(file, example *Document) (missing, extra []string)
 
 **Corrected post-ship (shipped behavior, not this draft's original text):** `Locate` grew an `allowAnyFile bool` param (the `--any-file` escape hatch) and now enforces the env-filename allowlist itself rather than leaving it to callers; its resolution steps 1-4 below were extracted into an exported `ResolveTarget(fileFlag, cwd string) (resolved string, exists bool, err error)` so the CLI's `--any-file` confirmation can bind to the canonical resolved path (`internal/cli/env.go`'s `resolveAllowAnyFile`) without a second, divergent resolution implementation — `Locate` is now a thin wrapper: call `ResolveTarget`, then apply the name check.
 
+**Corrected again 2026-09-12 — the shape above shipped a demonstrated defect and no longer exists.** Returning a bool from the confirmation while leaving callers to re-resolve the flag string is exactly the exploitable gap; `Locate` is deleted and `ResolveTarget` now returns an `env.Target` value. See § Deviations for what replaced it and why the v1 residual-risk ruling was overturned.
+
 ```go
 func ResolveTarget(fileFlag, cwd string) (resolved string, exists bool, err error)
 func Locate(fileFlag, cwd string, allowAnyFile bool) (realPath string, exists bool, err error)
@@ -136,6 +138,27 @@ House style: individual named funcs, cobra harness, `FakeRunner`, `t.TempDir` wi
 2. README/help **residual-risk disclosure** ships in commit 5: clipboard contents are readable by every local process and persisted by clipboard managers (Raycast/Maccy/Alfred) — and how to clear; non-inline producers are the documented default; one-line agent-write threat statement (the operator is granting agents write authority over repo-contained env files; containment + 0600 + atomicity bound the blast radius).
 
 **Accepted residual risk (named, not fixed in v1):** hardlink *read* exfil (`ln /outside/secret ./x.env` — creating the hardlink already implies access; write path is neutralized by rename); TOCTOU between Locate and write (local single-operator CLI; openat hardening is overkill). Both recorded in the README security notes.
+
+## Deviations
+
+**2026-09-12 — the accepted resolve-to-write TOCTOU is no longer accepted, and `Locate` is gone.**
+
+This plan's v1 ruling above ("local single-operator CLI; openat hardening is overkill") was overturned by a security review run ahead of extending this module to SOPS files (#498). The ruling rested on the wrong threat model: the attacker is not a second local operator, it is a **cloned repository**. Git stores a symlink as mode `120000`, so a hostile repo ships one and needs no local access at all. Two consequences were demonstrated against the real binary, not argued:
+
+1. The `--any-file` confirmation resolved `--file` once to build its prompt and returned a bare bool, leaving each caller to resolve the raw flag string again. Repointing a symlink during the prompt moved the write to a different file than the one confirmed — `core.fsmonitor` into `.git/config`, which git executes on the next `git status`.
+2. `withFileLock` derived `realPath + ".lock"` and opened it following symlinks, so a repo shipping `.env.lock` as a symlink got an out-of-repo file created while `env set` reported success.
+
+**What changed against the plan's § Architecture (line 85):** `Locate` and `RelativeToRepoRoot` are deleted. Resolution returns an `env.Target` value carrying the resolved path, the repository root, an existence snapshot, and an open descriptor on the containing directory, with every field but `Exists` unexported so a Target that skipped resolution is not constructible from another package. The allowlist refusal moves to `Target.Clear`. Every `env.Client` method and CLI subcommand takes a `Target` rather than a `(file string, allowAnyFile bool)` pair — a bool cannot carry a path, which is what makes the original defect unrepresentable rather than merely guarded.
+
+**Openat-style hardening: adopted, and it turned out to be load-bearing rather than overkill.** The first attempt carried only the path and opened it with `O_NOFOLLOW`, which closes the final-component case. A security review then reproduced the *identical* exploit against that tree by swapping an intermediate **directory** during the confirmation — `sub/config` in the prompt, `core.fsmonitor` in `.git/config`, exit zero. So `Target` now holds a directory descriptor pinned at resolution and every operation is an `openat`/`renameat`/`fstatat` relative to it, following the pattern `internal/privdir` already uses. Both attacks have regression tests, and both were confirmed to go red against the shape that preceded them.
+
+**What remains, stated precisely:** the directory is pinned by path immediately after resolution, so its own components are walked once more at that instant — microseconds, not operator think-time, and the ordinary same-uid local race that predates this command. Eliminating it would need a component-by-component walk from the repository root.
+
+**One platform finding worth carrying forward:** `unix.Openat` with `O_CREAT` on darwin 25.5 returns spurious `ENOENT` under concurrency — measured at 582 failures in 800 attempts with four racers on one name, where `os.OpenFile` with identical flags on the identical directory succeeded 800 of 800. Sequentially it never occurs. `openatCreate` retries `ENOENT` for `O_CREAT` opens only (where it is self-contradictory) and never for the read-only opens, where `ENOENT` is the real answer that distinguishes a new file from an existing one. Without that retry the pre-existing concurrency tests fail at roughly 70%, and the failure reads as a bug in the locking.
+
+**Also changed, and not part of the refactor:** the no-echo prompt is now `Value: ` rather than § Command surface's `Value for KEY: `. A prompt precedes any write and is abandoned on Ctrl-C, so it never earns the right to echo its argument — and `env set sk_live_…` is an ordinary typo that would otherwise put a live credential in the transcript with nothing written. This is the one user-visible string change in the fix.
+
+Lower-severity findings from the same review were filed rather than folded in: #512, #513, #514. The `--any-file` TTY-gate claim in `docs/commands/env.md` was also **wrong, not merely stale** — an agent inside a terminal multiplexer pane has a real pty and can answer the prompt — and that doc now describes the gate as covering the ptyless case rather than bounding an agent.
 
 ## Execution mechanics
 
