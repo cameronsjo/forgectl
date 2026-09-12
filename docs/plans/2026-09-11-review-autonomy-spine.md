@@ -1,9 +1,10 @@
 ---
-status: planned
-next: "approval → Task 1 substrate PR in this session → Tasks 2-4 dispatched as each predecessor merges"
+status: in-flight
+next: "Cameron reviews/merges forgectl#497 (Task 1) → dispatch Task 2 (fresh Opus subagent, branch feat/pr-lifecycle-phases off main) → Task 3 → Task 4; merge this plan PR (#495) whenever"
 branch: plan/review-autonomy-spine
-pr: —
+pr: cameronsjo/forgectl#495
 updated: 2026-09-11
+approved_session_id: c2d13fd6-30bc-409a-989c-cd5ad22073fd
 date: 2026-09-11
 session_id: c2d13fd6-30bc-409a-989c-cd5ad22073fd
 model: claude-fable-5-1
@@ -78,14 +79,14 @@ Panel: plan-reviewer (conflict lens), plan-reviewer (buildability lens), red-tea
 **Report:** —
 
 **Steps:**
-- [ ] Failing tests: lock excludes a second holder (two `Client`s on one dir, separate fds); a held lock times out with a message carrying the holder body and the lock path; a killed-holder fd released by close lets the next acquire (in-process: close the fd, acquire); `withLifecycleLock` nested from inside `fn` fails the test by timing out (documents non-reentrancy); writer leaves no temp on each injected failure (open, write short, sync, rename, dirsync); writer calls `SyncDir` on the success path (assert via the fake's call log); writer refuses on revision mismatch and on absent-destination-with-expectRevision>0; v2 validation rejects a missing `phase`/`revision`, an unknown phase, `active` without `windowId`, a `windowId` not in the `FieldSep` spelling, `needs-repair` without a reason, a reason on any other phase, an empty workspace on `prepared`; `queued` with an empty workspace loads and lists; legacy record still loads and lists; `List` reports one unreadable record for a file with an unknown key and still returns the readable rows; `pr list` prints the stderr line and exits 0; `pr list --json` rows carry `phase`; `pr list` human field 3 is still the breadcrumb path
-- [ ] Run — expect RED
-- [ ] Implement `lifecycle_unix.go` / `lifecycle_other.go` (other: refuse with a named error), `record.go`, `phase.go`; route `writeBreadcrumb` through the writer under the lock; retire `sessionsMu`; split `Teardown`/`teardownLocked`, `List`/`listLocked`; `Cleanup` takes the lock once and calls `teardownLocked`; extend `sameBreadcrumbRecord`; add `workspaceAvailabilityNone`
-- [ ] Run — expect GREEN; `go vet ./...`; `golangci-lint run`
-- [ ] Write `scripts/verify-v2-list-surfaces-unreadable.sh`: `HOME=<mktemp -d>` (the real lever — `configDir()` is `os.UserConfigDir()/forgectl`, `config.go:1032-1038`; there is no `FORGECTL_CONFIG_DIR`, and `HOME` also moves gh/git config, which the script states), write one breadcrumb with an unknown key into `$HOME/Library/Application Support/forgectl/pr-sessions/` (Linux: `$HOME/.config/forgectl/pr-sessions/`), run the freshly built `forgectl pr list`, assert stderr contains `1 record(s) could not be read` and exit is 0; exit non-zero otherwise. Run it and record the measured output inline in the PR body
-- [ ] `docs/commands/pr.md`: a note that an older forgectl hides v2 records from `pr list` silently and refuses them loudly on `pr teardown`; upgrade rather than downgrade; there is no migration back. Same text in the commit body as the release note
-- [ ] Commit: `feat(pr): lifecycle lock, atomic breadcrumb writer, and v2 record fields (#299)` with the producer tuple
-- [ ] run `cadence-forge:polish` (diff-based arms from the worktree; `cadence-forge:security-reviewer` on the diff since it touches the hostile-input validator); fold findings; open PR
+- [x] Failing tests: lock excludes a second holder (two `Client`s on one dir, separate fds); a held lock times out with a message carrying the holder body and the lock path; a killed-holder fd released by close lets the next acquire (in-process: close the fd, acquire); `withLifecycleLock` nested from inside `fn` fails the test by timing out (documents non-reentrancy); writer leaves no temp on each injected failure (open, write short, sync, rename, dirsync); writer calls `SyncDir` on the success path (assert via the fake's call log); writer refuses on revision mismatch and on absent-destination-with-expectRevision>0; v2 validation rejects a missing `phase`/`revision`, an unknown phase, `active` without `windowId`, a `windowId` not in the `FieldSep` spelling, `needs-repair` without a reason, a reason on any other phase, an empty workspace on `prepared`; `queued` with an empty workspace loads and lists; legacy record still loads and lists; `List` reports one unreadable record for a file with an unknown key and still returns the readable rows; `pr list` prints the stderr line and exits 0; `pr list --json` rows carry `phase`; `pr list` human field 3 is still the breadcrumb path
+- [x] Run — expect RED
+- [x] Implement `lifecycle_unix.go` / `lifecycle_other.go` (other: refuse with a named error), `record.go`, `phase.go`; route `writeBreadcrumb` through the writer under the lock; retire `sessionsMu`; split `Teardown`/`teardownLocked`, `List`/`listLocked`; `Cleanup` takes the lock once and calls `teardownLocked`; extend `sameBreadcrumbRecord`; add `workspaceAvailabilityNone`
+- [x] Run — expect GREEN; `go vet ./...`; `golangci-lint run`
+- [x] Write `scripts/verify-v2-list-surfaces-unreadable.sh`: `HOME=<mktemp -d>` (the real lever — `configDir()` is `os.UserConfigDir()/forgectl`, `config.go:1032-1038`; there is no `FORGECTL_CONFIG_DIR`, and `HOME` also moves gh/git config, which the script states), write one breadcrumb with an unknown key into `$HOME/Library/Application Support/forgectl/pr-sessions/` (Linux: `$HOME/.config/forgectl/pr-sessions/`), run the freshly built `forgectl pr list`, assert stderr contains `1 record(s) could not be read` and exit is 0; exit non-zero otherwise. Run it and record the measured output inline in the PR body — measured: `VERDICT: PASS pr list exits 0 and names the record it could not read`
+- [x] `docs/commands/pr.md`: a note that an older forgectl hides v2 records from `pr list` silently and refuses them loudly on `pr teardown`; upgrade rather than downgrade; there is no migration back. Same text in the commit body as the release note
+- [x] Commit: `feat(pr): lifecycle lock, atomic breadcrumb writer, and v2 record fields (#299)` with the producer tuple — `d147641`
+- [x] run `cadence-forge:polish` (diff-based arms from the worktree; `cadence-forge:security-reviewer` on the diff since it touches the hostile-input validator); fold findings; open PR — security clean + 3 nits, code review 2 Important + nits, all folded in `a9a4f27`
 
 ### Task 2 — Phases, reservation, and `pr repair`
 
@@ -160,8 +161,11 @@ Panel: plan-reviewer (conflict lens), plan-reviewer (buildability lens), red-tea
 
 ## Deviations
 
-- none yet
+- **2026-09-11 — Task 1: the writer does not validate the record it writes.** The plan implied the atomic writer validates before writing. The loader is the boundary (a breadcrumb is hostile input on the way back in), and the existing tests that prove that boundary seed forged records through the package-level writer, so validating on the way out would make those tests unable to stage the very file they exist to reject. Reality-forced; validation stays at load.
+- **2026-09-11 — Task 1: `List` takes a context and the sessions-dir check is writable-only.** Both from the polish pass. `List(ctx)` so `pr list` is cancellable while waiting on the lock; the mode assertion refuses group/other-**writable** (`0o022`), not accessible (`0o077`), because a stricter check refused every `t.TempDir` and the threat is a writer. Chosen improvement.
+- **2026-09-11 — Task 1: `sameBreadcrumbRecord` also compares `Provenance`.** Not in the Task 1 file list; strictly more conservative for the stale-unlink identity check. Chosen improvement, declared in the commit body.
 
 ## Learnings
 
-- none yet
+- **A legacy record's phase renders as `-`, not `active`.** The design says legacy is *treated* as active for slot counting; the presentation layer shows the record said nothing. The two live in different layers on purpose (Task 2's admission reads the design rule; `pr list` reads the record).
+- **`t.TempDir` leaves are `0777` under umask.** Any test-facing check on directory mode must be about writability by others, or every Go test dir fails it, and a lock test that waits on a goroutine that already returned hangs to the package timeout rather than failing.
