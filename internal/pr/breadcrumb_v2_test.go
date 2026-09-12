@@ -14,6 +14,7 @@ package pr
 //   [x] One undecodable file yields unreadable=1 and the readable rows
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,7 +87,7 @@ func TestList_LegacyAndQueuedRecordsBothList(t *testing.T) {
 		t.Fatalf("seed queued: %v", err)
 	}
 
-	rows, unreadable, err := c.List()
+	rows, unreadable, err := c.List(context.Background())
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -119,7 +120,7 @@ func TestList_SurfacesUnreadableRecords(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(c.SessionsDir(), "o-r-9-1.json"), bad, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rows, unreadable, err := c.List()
+	rows, unreadable, err := c.List(context.Background())
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

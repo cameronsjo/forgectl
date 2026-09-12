@@ -109,7 +109,7 @@ func TestPrList_LeavesAnOrdinaryPathVerbatim(t *testing.T) {
 	sessionsDir := t.TempDir()
 	seedSummaries(t, sessionsDir, nil, []pr.Ref{{Owner: "o", Repo: "r", Number: 1}})
 	client := pr.New(&exec.FakeRunner{}, pr.WithSessionsDir(sessionsDir), pr.WithTmuxSession("forgectl"))
-	summaries, _, err := client.List()
+	summaries, _, err := client.List(context.Background())
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestPrList_LeavesAnOrdinaryPathVerbatim(t *testing.T) {
 func TestPrDash_EscapesAControlBearingBreadcrumbName(t *testing.T) {
 	sessionsDir := seedHostileBreadcrumb(t)
 	client := pr.New(&exec.FakeRunner{}, pr.WithSessionsDir(sessionsDir))
-	summaries, _, err := client.List()
+	summaries, _, err := client.List(context.Background())
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

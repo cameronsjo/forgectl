@@ -143,6 +143,24 @@ func TestLifecycleLock_TimeoutNamesHolderAndPath(t *testing.T) {
 	}
 }
 
+func TestLifecycleLock_RefusesAnOtherWritableSessionsDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777); err != nil { //nolint:gosec // the point of the test is a world-writable dir
+		t.Fatal(err)
+	}
+	c := lockClient(t, dir, time.Second)
+	err := c.withLifecycleLock(context.Background(), "test", func() error {
+		t.Fatal("fn ran under a world-writable sessions dir")
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "chmod 0700") {
+		t.Fatalf("err = %v, want a refusal naming chmod 0700", err)
+	}
+	if _, lerr := os.Lstat(filepath.Join(dir, lifecycleLockName)); !errors.Is(lerr, os.ErrNotExist) {
+		t.Errorf("a refused acquisition must create no lock file")
+	}
+}
+
 func TestLifecycleLock_NestedAcquisitionIsRefused(t *testing.T) {
 	dir := t.TempDir()
 	c := lockClient(t, dir, 200*time.Millisecond)

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,6 +71,25 @@ func (c *Client) withLifecycleLock(ctx context.Context, verb string, fn func() e
 	if err := os.MkdirAll(c.sessionsDir, 0o700); err != nil {
 		return fmt.Errorf("create pr sessions dir: %w", err)
 	}
+	// The lock's exclusivity and every 0600 record under it rest on the
+	// directory itself being private. MkdirAll only sets the mode on a dir it
+	// creates, so a pre-existing dir is asserted here rather than assumed.
+	dirInfo, err := os.Stat(c.sessionsDir)
+	if err != nil {
+		return fmt.Errorf("stat pr sessions dir: %w", err)
+	}
+	if !dirInfo.IsDir() {
+		return fmt.Errorf("pr sessions dir %s is not a directory", termsafe.QuotePath(c.sessionsDir))
+	}
+	// Group- or other-WRITABLE is the refusal, not merely accessible: a writer
+	// is what can plant a record or a symlink under the lock, and a readable
+	// dir gives away nothing the 0600 records do not already withhold. (A
+	// stricter 0o077 test also refuses every t.TempDir, whose leaf is 0777
+	// under umask.)
+	if perm := dirInfo.Mode().Perm(); perm&0o022 != 0 {
+		return fmt.Errorf("pr sessions dir %s is mode %04o and writable by others; run chmod 0700 on it",
+			termsafe.QuotePath(c.sessionsDir), perm)
+	}
 	lockPath := filepath.Join(c.sessionsDir, lifecycleLockName)
 	fd, err := unix.Open(lockPath, unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
@@ -115,8 +135,15 @@ func (c *Client) withLifecycleLock(ctx context.Context, verb string, fn func() e
 	host, _ := os.Hostname()
 	body := fmt.Sprintf("pid=%d verb=%s started=%s host=%s\n",
 		os.Getpid(), verb, time.Now().UTC().Format(time.RFC3339), host)
-	if err := f.Truncate(0); err == nil {
-		_, _ = f.WriteAt([]byte(body), 0)
+	// A failure here leaves the lock HELD and fn running — correct — but the
+	// diagnostic body the next contender's timeout reads would be stale, so
+	// the failure is logged rather than swallowed.
+	if err := f.Truncate(0); err != nil {
+		slog.Warn("Failed to truncate the lifecycle lock body; the holder text a later timeout reports may be stale.",
+			"path", lockPath, "error", err)
+	} else if _, err := f.WriteAt([]byte(body), 0); err != nil {
+		slog.Warn("Failed to write the lifecycle lock holder body; a later timeout will report an unknown holder.",
+			"path", lockPath, "error", err)
 	}
 
 	return fn()

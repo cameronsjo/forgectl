@@ -32,8 +32,8 @@ import (
 // nonzero value rather than proceeding on a short count.
 //
 // It takes the lifecycle lock so it never reads a record mid-rename.
-func (c *Client) List() (summaries []SessionSummary, unreadable int, err error) {
-	err = c.withLifecycleLock(context.Background(), "list", func() error {
+func (c *Client) List(ctx context.Context) (summaries []SessionSummary, unreadable int, err error) {
+	err = c.withLifecycleLock(ctx, "list", func() error {
 		var lerr error
 		summaries, unreadable, lerr = c.listLocked()
 		return lerr

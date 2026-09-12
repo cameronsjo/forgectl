@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,7 +150,15 @@ func writeRecordAtomic(rfs recordFS, dir, name string, data []byte, expectRevisi
 	if err != nil {
 		return fmt.Errorf("open temp record: %w", termsafe.Error(err))
 	}
-	discard := func() { _ = rfs.Remove(tmp) }
+	// A temp that cannot be removed is harmless clutter — List enumerates only
+	// .json names and this one starts with a dot — but an operator diagnosing
+	// debris in the sessions dir deserves a line naming it.
+	discard := func() {
+		if err := rfs.Remove(tmp); err != nil {
+			slog.Warn("Failed to remove a temp session record after a write failure; it is never read, but it is left behind.",
+				"path", tmp, "error", err)
+		}
+	}
 
 	n, err := f.Write(data)
 	if err != nil {

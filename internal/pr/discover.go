@@ -143,7 +143,7 @@ func (c *Client) PRs(ctx context.Context) ([]PR, []string, error) {
 func (c *Client) Dash(ctx context.Context) (Dashboard, []string, error) {
 	var notes []string
 
-	active, unreadable, err := c.List()
+	active, unreadable, err := c.List(ctx)
 	if err != nil {
 		// Categorical, for the same reason as the query legs below: c.List
 		// reads a breadcrumb dir whose path and contents are filesystem

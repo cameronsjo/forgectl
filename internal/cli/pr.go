@@ -273,7 +273,7 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 		Short: "List active clean-room review sessions",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			summaries, unreadable, err := client.List()
+			summaries, unreadable, err := client.List(cmd.Context())
 			if err != nil {
 				return err
 			}
