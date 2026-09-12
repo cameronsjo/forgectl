@@ -32,6 +32,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -981,5 +982,130 @@ func TestRepairSetAside_AnEscapeDenseRecordStillSettles(t *testing.T) {
 	}
 	if rows[0].RecordNote == "" {
 		t.Error("the payload was shrunk with no note saying so")
+	}
+}
+
+// TestMarshalRepairRow_NeverErrorsOnAnyFieldCombination is the contract stated
+// in docs/commands/pr.md: the row is never the reason a set-aside fails. Ref is
+// the field that reopened it — read best-effort from a record nothing could
+// decode, charset-validated but never length-validated — so the table walks
+// every combination of oversized variable-length fields, not just the payload.
+func TestMarshalRepairRow_NeverErrorsOnAnyFieldCombination(t *testing.T) {
+	big := func(fill string, n int) string { return strings.Repeat(fill, n) }
+	for _, fill := range []string{"<", `"`, "a"} {
+		for _, tc := range []struct {
+			name string
+			row  RepairRow
+		}{
+			{"oversized ref", RepairRow{Ref: big(fill, 8000)}},
+			{"oversized record", RepairRow{Record: big(fill, 8000)}},
+			{"oversized error", RepairRow{Error: big(fill, 8000)}},
+			{"oversized record path", RepairRow{RecordPath: big(fill, 8000)}},
+			{"everything oversized", RepairRow{
+				Ref: big(fill, 8000), Record: big(fill, 8000),
+				Error: big(fill, 8000), RecordPath: big(fill, 8000),
+			}},
+		} {
+			t.Run(tc.name+"/fill="+fill, func(t *testing.T) {
+				row := tc.row
+				row.TS, row.ID, row.Actor = fixedTime(), "abcdef0123456789", repairActor()
+				row.FromPhase, row.Mode, row.Outcome = repairPhaseUnreadable, RepairModeForgetIfAbsent, repairOutcomeIntent
+				data, err := marshalRepairRow(row)
+				if err != nil {
+					t.Fatalf("the row refused to encode: %v", err)
+				}
+				if len(data) > maxRepairLogLineBytes {
+					t.Fatalf("encoded row is %d bytes, over the %d limit", len(data), maxRepairLogLineBytes)
+				}
+				if n := strings.Count(string(data), "\n"); n != 1 || data[len(data)-1] != '\n' {
+					t.Fatalf("row is not exactly one newline-terminated line (%d newlines)", n)
+				}
+				var back RepairRow
+				if err := json.Unmarshal(data, &back); err != nil {
+					t.Fatalf("row does not parse: %v", err)
+				}
+				if back.RecordNote == "" {
+					t.Error("a field was shrunk with no note saying so — a truncated ref reads as a real one")
+				}
+				if !utf8.ValidString(back.Ref) || !utf8.ValidString(back.Record) {
+					t.Error("a cut landed mid-rune")
+				}
+			})
+		}
+	}
+}
+
+// TestRepairSetAside_ARecordWithAnEnormousRefStillSettles is the reviewer's
+// crafted record: a valid but ~7.8 KiB ref that strict decoding rejects. Before
+// the fix its intent row could not be written, so the one verb that clears an
+// unreadable record refused and every launch stayed blocked.
+func TestRepairSetAside_ARecordWithAnEnormousRefStillSettles(t *testing.T) {
+	c := repairClient(t, repairRunner(nil))
+	// 4000, not 3900. MEASURED: at 3900 the row still fits once the record
+	// payload alone is elided, so the pre-fix loop survived it and a test built
+	// on that length would pin nothing. At 4000 the row is 8258 bytes with no
+	// record at all, which is where shrinking only the payload runs out and the
+	// ref has to give.
+	huge := strings.Repeat("a", 4000)
+	raw := []byte(`{"ref":"` + huge + "/" + huge + `#1","version":9}`)
+	if len(raw) > maxBreadcrumbRecordBytes {
+		t.Fatalf("setup: the fixture is %d bytes, past the %d record limit", len(raw), maxBreadcrumbRecordBytes)
+	}
+	bad := filepath.Join(c.SessionsDir(), "o-r-9-1.json")
+	if err := os.WriteFile(bad, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// It really does block launches first.
+	if _, err := c.reserve(context.Background(), Ref{Owner: "o", Repo: "r", Number: 2}, 4, PrepareOpts{Agent: "claude"}); err == nil {
+		t.Fatal("setup: an unreadable record should block a reservation")
+	}
+
+	report, err := c.Repair(context.Background(), RepairOpts{Record: bad, Apply: true, ForgetIfAbsent: true, Yes: true})
+	if err != nil {
+		t.Fatalf("a record with an enormous ref must still be settleable: %v", err)
+	}
+	if report.Items[0].Outcome != repairOutcomeSetAside {
+		t.Fatalf("outcome = %q, want %q", report.Items[0].Outcome, repairOutcomeSetAside)
+	}
+	assertSetAside(t, c, bad, raw)
+	if _, err := c.reserve(context.Background(), Ref{Owner: "o", Repo: "r", Number: 2}, 4, PrepareOpts{Agent: "claude"}); err != nil {
+		t.Errorf("launches are still blocked after the set-aside: %v", err)
+	}
+
+	rows, err := c.readRepairLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("audit rows = %d, want intent + completion", len(rows))
+	}
+	for i, r := range rows {
+		if r.RecordPath != bad {
+			t.Errorf("row %d lost the path that names its subject: %q", i, r.RecordPath)
+		}
+		// The REF note specifically: a shrunken ref stays charset-valid, so
+		// without the note it reads as a real, shorter ref. Asserting on the
+		// note's content is also what keeps this test discriminating — a note
+		// about the record alone is what the pre-fix code already produced.
+		if !strings.Contains(r.RecordNote, "the ref was truncated") {
+			t.Errorf("row %d note = %q, want it to name the truncated ref", i, r.RecordNote)
+		}
+		if fullRef := huge + "/" + huge + "#1"; len(r.Ref) >= len(fullRef) {
+			t.Errorf("row %d ref is %d bytes; it was not shrunk from %d", i, len(r.Ref), len(fullRef))
+		}
+	}
+}
+
+// TestCappedRecordBytes_CutsOnARuneBoundary: a split rune would be folded to
+// U+FFFD downstream — the one silent byte rewrite this payload exists to avoid.
+func TestCappedRecordBytes_CutsOnARuneBoundary(t *testing.T) {
+	// Multi-byte runes straddling the cap in both the raw and the clamped cut.
+	raw := []byte(strings.Repeat("é", maxAuditRecordBytes))
+	got := cappedRecordBytes(raw)
+	if !utf8.ValidString(got) {
+		t.Fatalf("capped payload is not valid UTF-8: %q", got[max(0, len(got)-8):])
+	}
+	if len(got) > maxAuditRecordBytes {
+		t.Errorf("capped payload is %d bytes, over the %d cap", len(got), maxAuditRecordBytes)
 	}
 }

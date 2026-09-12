@@ -397,15 +397,14 @@ const maxAuditRecordBytes = 4 << 10
 // because escaping a control-heavy record expands it. Truncating on a byte
 // boundary can split a rune; the value is evidence for a human, never parsed,
 // and the row must fit the log's line limit.
+// Both cuts land on a rune boundary. The raw cut is where a multi-byte
+// sequence could be split, and SafeLine would fold the orphan to U+FFFD; the
+// clamped cut is where json.Marshal would do the same. Either is the one silent
+// byte rewrite this payload exists to avoid, so the invariant is held in both
+// places rather than in one.
 func cappedRecordBytes(raw []byte) string {
-	if len(raw) > maxAuditRecordBytes {
-		raw = raw[:maxAuditRecordBytes]
-	}
-	clamped := termsafe.SafeLine(string(raw))
-	if len(clamped) > maxAuditRecordBytes {
-		clamped = clamped[:maxAuditRecordBytes]
-	}
-	return clamped
+	clamped := termsafe.SafeLine(truncateString(string(raw), maxAuditRecordBytes))
+	return truncateString(clamped, maxAuditRecordBytes)
 }
 
 // refFromRawRecord reads just enough of an unparseable record to ask whether a

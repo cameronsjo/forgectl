@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -68,8 +69,8 @@ type RepairRow struct {
 	// RecordBytes is the subject record's UNTRUNCATED length, so a shrunken or
 	// elided Record still says how much there was.
 	RecordBytes int `json:"record_bytes,omitempty"`
-	// RecordNote says so when Record had to be shrunk or dropped to fit the
-	// line. Silence means Record is the whole capped payload.
+	// RecordNote says so when any variable-length field on this row had to be
+	// shrunk or dropped to fit the line. Silence means every field is whole.
 	RecordNote string `json:"record_note,omitempty"`
 }
 
@@ -143,16 +144,45 @@ func (c *Client) appendRepairRowLocked(row RepairRow) error {
 // input-dependent in a way a byte cap cannot see: `termsafe.SafeLine` preserves
 // every graphic rune, then `json.Marshal` doubles `"` and `\` and expands `<`,
 // `>`, and `&` to six bytes each. A 4 KiB clamped payload of `<` marshals to
-// 24 KiB, so capping the payload before encoding it measured the wrong thing and
-// a `<`-dense record became unsettleable with no forgectl escape at all.
+// 24 KiB, so capping a payload before encoding it measures the wrong thing.
 //
-// So the payload is shrunk against the ENCODED length: marshal, halve `Record`,
-// repeat, and if even an empty `Record` will not fit, say so. Every other field
-// is bounded at its source (a path by the filesystem, the actor by
-// maxActorBytes, the rest by charset), which is what makes the floor reachable.
+// So every field whose length comes from outside is shrunk against the ENCODED
+// length, in the order below — least identifying first, because what survives
+// at the floor should be what names the file:
+//
+//	record      the subject's own bytes; the biggest and the most divisible
+//	ref         read best-effort from a record nothing could decode, so it is
+//	            charset-validated but NOT length-validated (ref.go bounds the
+//	            alphabet, never the size)
+//	error       the decode failure, which quotes the path and so inherits its
+//	            length
+//	record path last, because losing it costs the row its subject
+//
+// Anything still on the row after all four are empty is fixed-width (the
+// timestamp, the 16-hex id), a constant (phase, mode, outcome), or bounded at
+// its source (the actor, by maxActorBytes) — so the final error is unreachable
+// rather than merely unlikely. It is kept because "unreachable" is a claim
+// about today's fields, and a new unbounded one should fail loudly here rather
+// than silently overflow the line.
 func marshalRepairRow(row RepairRow) ([]byte, error) {
-	original := len(row.Record)
+	original := map[string]int{
+		"record": len(row.Record), "ref": len(row.Ref),
+		"error": len(row.Error), "record path": len(row.RecordPath),
+	}
+	shrunk := map[string]bool{}
+	// Ordered least-identifying first. Taking a pointer into the local copy is
+	// what lets the loop rewrite a field without a switch per iteration.
+	fields := []struct {
+		name  string
+		value *string
+	}{
+		{"record", &row.Record},
+		{"ref", &row.Ref},
+		{"error", &row.Error},
+		{"record path", &row.RecordPath},
+	}
 	for {
+		row.RecordNote = shrinkNote(original, shrunk, row)
 		// termsafe:allow-raw-json persisted audit row, never command output
 		data, err := json.Marshal(row)
 		if err != nil {
@@ -162,30 +192,68 @@ func marshalRepairRow(row RepairRow) ([]byte, error) {
 		if len(data) <= maxRepairLogLineBytes {
 			return data, nil
 		}
-		if row.Record == "" {
-			return nil, fmt.Errorf("repair audit row exceeds the %d-byte line limit with no record payload left to drop",
+		trimmed := false
+		for _, f := range fields {
+			if *f.value == "" {
+				continue
+			}
+			*f.value = halveString(*f.value)
+			shrunk[f.name] = true
+			trimmed = true
+			break
+		}
+		if !trimmed {
+			return nil, fmt.Errorf("repair audit row exceeds the %d-byte line limit with every variable-length field already dropped",
 				maxRepairLogLineBytes)
 		}
-		row.Record = halveString(row.Record)
-		if row.Record == "" {
-			row.RecordNote = fmt.Sprintf("the record's %d clamped bytes did not fit this row and were elided", original)
+	}
+}
+
+// shrinkNote renders what the row had to give up, so a truncated value can
+// never read as the whole one. A shrunken ref matters most: it stays
+// charset-valid, so without this note it would look like a real, shorter ref.
+func shrinkNote(original map[string]int, shrunk map[string]bool, row RepairRow) string {
+	if len(shrunk) == 0 {
+		return ""
+	}
+	now := map[string]int{
+		"record": len(row.Record), "ref": len(row.Ref),
+		"error": len(row.Error), "record path": len(row.RecordPath),
+	}
+	notes := make([]string, 0, len(shrunk))
+	for _, name := range []string{"record", "ref", "error", "record path"} {
+		if !shrunk[name] {
 			continue
 		}
-		row.RecordNote = fmt.Sprintf("the record's %d clamped bytes were truncated to %d to fit this row",
-			original, len(row.Record))
+		if now[name] == 0 {
+			notes = append(notes, fmt.Sprintf("the %s's %d bytes did not fit this row and were elided", name, original[name]))
+			continue
+		}
+		notes = append(notes, fmt.Sprintf("the %s was truncated from %d bytes to %d to fit this row",
+			name, original[name], now[name]))
 	}
+	return strings.Join(notes, "; ")
 }
 
 // halveString halves s on a rune boundary. The payload is evidence a human
 // reads, never parsed, so a clean boundary matters only so the row stays valid
 // UTF-8 — which json.Marshal would otherwise paper over with replacement
 // characters, quietly changing the bytes the trail is supposed to preserve.
-func halveString(s string) string {
-	half := len(s) / 2
-	for half > 0 && !utf8.RuneStart(s[half]) {
-		half--
+//
+// It always returns something strictly shorter for a non-empty input (len/2
+// then walking DOWN to a rune start), which is what makes the loop above
+// terminate.
+func halveString(s string) string { return truncateString(s, len(s)/2) }
+
+// truncateString cuts s to at most n bytes, walking down to a rune boundary.
+func truncateString(s string, n int) string {
+	if n >= len(s) {
+		return s
 	}
-	return s[:half]
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // repairLogFile is the seam appendRepairRow needs: append, roll back a partial
