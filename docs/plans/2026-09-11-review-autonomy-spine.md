@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Task 4 is committed and pushed on feat/pr-drain; the orchestrator reviews and opens its PR; the live dogfood run is owed"
+next: "Task 4 PR is open on feat/pr-drain; merge lands the whole spine. Owed after merge: the live scripts/dogfood-drain.sh --launch pass, and status: done"
 branch: plan/review-autonomy-spine
 pr: cameronsjo/forgectl#495
 updated: 2026-09-12
@@ -154,8 +154,8 @@ Panel: plan-reviewer (conflict lens), plan-reviewer (buildability lens), red-tea
 - [x] Run — expect GREEN; vet; lint
 - [x] Write `scripts/dogfood-drain.sh`: queue two named PRs with `--queue`, run `pr drain --once --json`, assert two `launched` items, print the report; run it (in `--dry-run` form — see Deviations) against two real PRs and record the measured output inline in the PR body
 - [x] `docs/commands/pr.md` triage section; `README.md`; `pr.go` lists
-- [ ] Commit: `feat(pr): queue and drain verbs (#473)` with the producer tuple
-- [ ] run `cadence-forge:polish`; fold findings; open PR with plain-text `Closes #473`
+- [x] Commit: `feat(pr): queue and drain verbs (#473)` with the producer tuple — `8c04073`, script default `dd49816`, retry fixes `4e73dfa`
+- [x] run `cadence-forge:polish`; fold findings; open PR with plain-text `Closes #473` — code 1 Important + security 4 Important at `8c04073`, all folded; PR opened; the live `--launch` dogfood pass is owed
 
 ---
 
