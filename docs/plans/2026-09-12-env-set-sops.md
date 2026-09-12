@@ -2,6 +2,7 @@
 status: complete
 branch: feat/env-set-sops
 base_branch: fix/any-file-confirm
+pr: forgectl#517
 base_pr: forgectl#515
 issue: forgectl#498
 approved_in: session
