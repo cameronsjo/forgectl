@@ -3,19 +3,22 @@
 # PRs (forgectl#473): queues both, drains one pass, and asserts the pass
 # report. Uses a scratch HOME so it never touches a real ~/.config/forgectl.
 #
-# Usage: scripts/dogfood-drain.sh [--dry-run] <ref1> <ref2> [path/to/forgectl]
+# Usage: scripts/dogfood-drain.sh [--launch] <ref1> <ref2> [path/to/forgectl]
 #
-# --dry-run queues both refs for real, then runs `pr drain --dry-run --json`
-# and asserts the report names both refs as would-launch — it creates no
-# workspace and dispatches no tmux window. Without --dry-run the drain pass
-# is a REAL launch: it clones each head, dispatches a review agent into a
-# tmux window under the `forgectl` session, and is the orchestrator's to run
-# — not a step this script takes on its own.
+# By default the script queues both refs (inside the scratch HOME), runs
+# `pr drain --dry-run --json`, and asserts the report names both refs as
+# would-launch. It creates no workspace and dispatches no tmux window. The
+# live pass is opt-in: with --launch the drain clones each head and dispatches
+# a review agent into a tmux window under the `forgectl` session. Muscle memory
+# runs the safe path; the destructive one has to be named.
 set -uo pipefail
 
-DRY_RUN=false
-if [ "${1:-}" = "--dry-run" ]; then
-  DRY_RUN=true
+DRY_RUN=true
+if [ "${1:-}" = "--launch" ]; then
+  DRY_RUN=false
+  shift
+elif [ "${1:-}" = "--dry-run" ]; then
+  # Accepted for compatibility; it is already the default.
   shift
 fi
 
@@ -24,7 +27,7 @@ REF2=${2:-}
 BIN=${3:-$(command -v forgectl || true)}
 
 if [ -z "$REF1" ] || [ -z "$REF2" ]; then
-  echo "usage: $0 [--dry-run] <ref1> <ref2> [path/to/forgectl]" >&2
+  echo "usage: $0 [--launch] <ref1> <ref2> [path/to/forgectl]" >&2
   exit 2
 fi
 if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
