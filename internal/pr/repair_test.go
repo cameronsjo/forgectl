@@ -24,9 +24,11 @@ package pr
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -124,11 +126,11 @@ func TestRepair_InspectReportsWorkspaceAndWindowObservations(t *testing.T) {
 	if len(report.Items) != 1 {
 		t.Fatalf("items = %d, want 1", len(report.Items))
 	}
-	if !report.Items[0].WindowLive {
-		t.Error("WindowLive = false, want true — the derived window is in the listing")
+	if got := report.Items[0].WindowLive; got == nil || !*got {
+		t.Errorf("WindowLive = %v, want a known true — the derived window is in the listing", fmtBoolPtr(got))
 	}
-	if !report.Items[0].WorkspaceExists {
-		t.Error("WorkspaceExists = false, want true")
+	if got := report.Items[0].WorkspaceExists; got == nil || !*got {
+		t.Errorf("WorkspaceExists = %v, want a known true", fmtBoolPtr(got))
 	}
 }
 
@@ -867,5 +869,117 @@ func TestRepairRollback_RefusesAnUnactionableWorkspaceBeforeTheIntentRow(t *test
 	}
 	if _, serr := os.Stat(path); serr != nil {
 		t.Errorf("a refusal removed the record: %v", serr)
+	}
+}
+
+// fmtBoolPtr renders an observation for a failure message, keeping "unknown"
+// distinguishable from "false" — which is the whole point of the pointer.
+func fmtBoolPtr(v *bool) string {
+	if v == nil {
+		return "unknown"
+	}
+	return strconv.FormatBool(*v)
+}
+
+// TestMarshalRepairRow_FitsByConstruction is the reviewer's table. termsafe
+// preserves every graphic rune and json.Marshal then doubles `"` and `\\` and
+// expands `<`, `>` and `&` to six bytes each — so a byte cap applied before
+// encoding measured the wrong thing, and an escape-dense record made its own
+// audit row too big. Since beginRepairRow refuses to mutate without a trail,
+// that turned the only verb that can clear an unreadable record into one that
+// could not, with no forgectl escape at all.
+func TestMarshalRepairRow_FitsByConstruction(t *testing.T) {
+	for _, fill := range []string{"<", ">", "&", `"`, `\\`, "a", "\u00e9"} {
+		t.Run("fill="+fill, func(t *testing.T) {
+			raw := []byte(strings.Repeat(fill, 6000))
+			row := RepairRow{
+				TS: fixedTime(), ID: "abcdef0123456789", Actor: repairActor(),
+				Ref: "o/r#1", RecordPath: "/tmp/sessions/o-r-1-1.json",
+				FromPhase: repairPhaseUnreadable, Mode: RepairModeForgetIfAbsent,
+				Outcome: repairOutcomeIntent,
+				Record:  cappedRecordBytes(raw), RecordBytes: len(raw),
+			}
+			data, err := marshalRepairRow(row)
+			if err != nil {
+				t.Fatalf("the row size refused the write: %v", err)
+			}
+			if len(data) > maxRepairLogLineBytes {
+				t.Fatalf("encoded row is %d bytes, over the %d limit", len(data), maxRepairLogLineBytes)
+			}
+			if n := strings.Count(string(data), "\n"); n != 1 || data[len(data)-1] != '\n' {
+				t.Fatalf("row is not exactly one newline-terminated line (%d newlines)", n)
+			}
+			var back RepairRow
+			if err := json.Unmarshal(data, &back); err != nil {
+				t.Fatalf("row does not parse: %v", err)
+			}
+			if back.RecordBytes != len(raw) {
+				t.Errorf("record_bytes = %d, want the untruncated %d", back.RecordBytes, len(raw))
+			}
+			// Whenever the payload was shrunk, the row must say so rather than
+			// presenting a truncated record as the whole thing.
+			if len(back.Record) < len(row.Record) && back.RecordNote == "" {
+				t.Error("the record was shrunk with no note saying so")
+			}
+		})
+	}
+}
+
+// TestMarshalRepairRow_ElidesRatherThanRefusing pins the floor: a payload that
+// cannot fit at any size yields a row with an empty Record and a note, never an
+// error that would block the set-aside.
+func TestMarshalRepairRow_ElidesRatherThanRefusing(t *testing.T) {
+	row := RepairRow{
+		TS: fixedTime(), ID: "abcdef0123456789", Actor: repairActor(),
+		RecordPath: "/tmp/sessions/o-r-1-1.json", Mode: RepairModeForgetIfAbsent,
+		Outcome: repairOutcomeIntent,
+		// Every byte expands six-fold, so even one eighth of this will not fit.
+		Record: strings.Repeat("<", maxRepairLogLineBytes), RecordBytes: 99999,
+	}
+	data, err := marshalRepairRow(row)
+	if err != nil {
+		t.Fatalf("the floor refused a row: %v", err)
+	}
+	var back RepairRow
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("row does not parse: %v", err)
+	}
+	if back.RecordNote == "" {
+		t.Error("the payload was dropped with no note saying so")
+	}
+	if back.RecordPath == "" || back.RecordBytes == 0 {
+		t.Error("the row lost the fields that name what was acted on")
+	}
+}
+
+// TestRepairSetAside_AnEscapeDenseRecordStillSettles is finding 6 end to end:
+// the record is set aside, and the audit trail survives.
+func TestRepairSetAside_AnEscapeDenseRecordStillSettles(t *testing.T) {
+	c := repairClient(t, repairRunner(nil))
+	bad := filepath.Join(c.SessionsDir(), "o-r-9-1.json")
+	raw := []byte("{" + strings.Repeat("<", 6000))
+	if err := os.WriteFile(bad, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := c.Repair(context.Background(), RepairOpts{Record: bad, Apply: true, ForgetIfAbsent: true, Yes: true})
+	if err != nil {
+		t.Fatalf("an escape-dense record must still be settleable: %v", err)
+	}
+	if report.Items[0].Outcome != repairOutcomeSetAside {
+		t.Fatalf("outcome = %q, want %q", report.Items[0].Outcome, repairOutcomeSetAside)
+	}
+	assertSetAside(t, c, bad, raw)
+	rows, err := c.readRepairLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("audit rows = %d, want intent + completion", len(rows))
+	}
+	if rows[0].RecordBytes != len(raw) {
+		t.Errorf("record_bytes = %d, want %d", rows[0].RecordBytes, len(raw))
+	}
+	if rows[0].RecordNote == "" {
+		t.Error("the payload was shrunk with no note saying so")
 	}
 }

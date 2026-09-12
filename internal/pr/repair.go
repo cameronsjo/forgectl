@@ -60,13 +60,19 @@ type RepairOpts struct {
 // RepairItem is one row of a repair report — what the record SAID, what was
 // OBSERVED beside it, and what (if anything) was done.
 type RepairItem struct {
-	Ref             string `json:"ref"`
-	RecordPath      string `json:"record_path"`
-	FromPhase       string `json:"from_phase"`
-	ToPhase         string `json:"to_phase,omitempty"`
-	Reason          string `json:"reason,omitempty"`
-	WindowLive      bool   `json:"window_live"`
-	WorkspaceExists bool   `json:"workspace_exists"`
+	Ref        string `json:"ref"`
+	RecordPath string `json:"record_path"`
+	FromPhase  string `json:"from_phase"`
+	ToPhase    string `json:"to_phase,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	// WindowLive and WorkspaceExists are POINTERS because nil means unknown,
+	// which is a real state on the unreadable arm: a record this build cannot
+	// decode may carry no readable ref to derive a window from and no readable
+	// workspace to stat. A plain bool there asserted `false` about a clean room
+	// that demonstrably existed — a report making a positive claim it could not
+	// support, which is worse than admitting the gap.
+	WindowLive      *bool  `json:"window_live,omitempty"`
+	WorkspaceExists *bool  `json:"workspace_exists,omitempty"`
 	Outcome         string `json:"outcome"`
 	Error           string `json:"error,omitempty"`
 }
@@ -74,6 +80,21 @@ type RepairItem struct {
 // RepairReport is what `pr repair` returns and `--json` encodes.
 type RepairReport struct {
 	Items []RepairItem `json:"items"`
+}
+
+// boolPtr is the observation constructor: a KNOWN true or false, as opposed to
+// the nil that means nobody could find out.
+func boolPtr(v bool) *bool { return &v }
+
+// observedWindow renders one liveness observation: nil when tmux itself could
+// not be read, because an unreadable window list says nothing about any
+// individual window and reporting `false` there would flag every healthy review
+// as dead.
+func observedWindow(tmuxOK, live bool) *bool {
+	if !tmuxOK {
+		return nil
+	}
+	return &live
 }
 
 // repairPhases are the phases a record can be stuck in. `queued` has reserved
@@ -200,8 +221,8 @@ func (c *Client) repairInspectLocked(ctx context.Context) (RepairReport, error) 
 			Ref:             s.Ref().String(),
 			RecordPath:      s.Path(),
 			FromPhase:       string(s.Phase()),
-			WindowLive:      tmuxOK && windowLive[s.Ref()],
-			WorkspaceExists: s.IsWorkspaceLive(),
+			WindowLive:      observedWindow(tmuxOK, windowLive[s.Ref()]),
+			WorkspaceExists: boolPtr(s.IsWorkspaceLive()),
 			Outcome:         "inspect",
 		}
 		if lerr == nil {
@@ -241,7 +262,7 @@ func (c *Client) repairApplyLocked(ctx context.Context, opts RepairOpts) (Repair
 		RecordPath:      member.path,
 		FromPhase:       string(bc.Phase),
 		Reason:          bc.RepairReason,
-		WorkspaceExists: avail == workspaceAvailabilityLive,
+		WorkspaceExists: boolPtr(avail == workspaceAvailabilityLive),
 	}
 	switch {
 	case opts.AdoptWindow:
@@ -303,7 +324,7 @@ func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, m
 				"and an unreadable list is not an absent window — check `tmux list-windows -a`, then retry",
 				member.displayPath)
 		}
-		item.WindowLive = live
+		item.WindowLive = &live
 		if live {
 			return item, fmt.Errorf("refusing to set %s aside: it names %s, whose review window is still live — "+
 				"this record was written by a build that reads a record format this one does not, so the session is "+
@@ -336,11 +357,12 @@ func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, m
 	slog.Warn("Setting aside a session record this build cannot read; whether it named a clean room cannot be checked.",
 		"path", member.path, "error", decodeErr)
 	row := RepairRow{
-		Ref:        item.Ref,
-		RecordPath: member.path,
-		FromPhase:  repairPhaseUnreadable,
-		Mode:       RepairModeForgetIfAbsent,
-		Record:     cappedRecordBytes(member.bytes),
+		Ref:         item.Ref,
+		RecordPath:  member.path,
+		FromPhase:   repairPhaseUnreadable,
+		Mode:        RepairModeForgetIfAbsent,
+		Record:      cappedRecordBytes(member.bytes),
+		RecordBytes: len(member.bytes),
 	}
 	rowID, err := c.beginRepairRow(row)
 	if err != nil {
@@ -463,7 +485,7 @@ func (c *Client) repairAdoptLocked(ctx context.Context, member breadcrumbMember,
 		return item, fmt.Errorf("refusing to adopt %s: the resolved window identity %s is not generation-qualified",
 			ref.String(), termsafe.QuotePath(adopted.WindowID))
 	}
-	item.WindowLive = true
+	item.WindowLive = boolPtr(true)
 	item.ToPhase = string(PhaseActive)
 	if dryRun {
 		item.Outcome = "would-adopt"
@@ -543,7 +565,7 @@ func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, memb
 		return item, fmt.Errorf("refusing to roll back %s: the tmux window list could not be read, "+
 			"and an unreadable list is not an absent window — check `tmux list-windows -a`, then retry", ref.String())
 	}
-	item.WindowLive = live
+	item.WindowLive = &live
 	if live {
 		item.Outcome = repairOutcomeRefused
 		return item, fmt.Errorf("refusing to roll back %s: its review window is still live — "+
@@ -655,7 +677,7 @@ func (c *Client) repairForgetLocked(ctx context.Context, opts RepairOpts, member
 		return item, fmt.Errorf("refusing to forget %s: the tmux window list could not be read, "+
 			"and an unreadable list is not an absent window — check `tmux list-windows -a`, then retry", ref.String())
 	}
-	item.WindowLive = live
+	item.WindowLive = &live
 	if live {
 		item.Outcome = repairOutcomeRefused
 		return item, fmt.Errorf("refusing to forget %s: its review window still exists — "+

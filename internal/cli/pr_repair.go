@@ -183,16 +183,26 @@ func repairExitCode(report pr.RepairReport, apply bool) error {
 
 // windowObservation renders what tmux said, never what the record claims — the
 // distinction `pr repair` exists to surface.
+//
+// A nil observation prints "?" rather than a negative: on an unreadable record
+// there may be no readable ref to derive a window from, and on an unreadable
+// tmux there is no answer about any window. Rendering either as "no window"
+// would state a fact nobody established.
 func windowObservation(it pr.RepairItem) string {
-	if it.WindowLive {
-		return "window live"
-	}
-	return "no window"
+	return observation(it.WindowLive, "window live", "no window")
 }
 
 func workspaceObservation(it pr.RepairItem) string {
-	if it.WorkspaceExists {
-		return "clean room present"
+	return observation(it.WorkspaceExists, "clean room present", "no clean room")
+}
+
+func observation(known *bool, whenTrue, whenFalse string) string {
+	switch {
+	case known == nil:
+		return "?"
+	case *known:
+		return whenTrue
+	default:
+		return whenFalse
 	}
-	return "no clean room"
 }

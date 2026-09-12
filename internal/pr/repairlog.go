@@ -13,6 +13,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -29,6 +30,10 @@ const repairLogName = "repair.jsonl"
 // hand-editable like every other file in a 0700 dir, so the reader treats it
 // as input rather than as its own output.
 const maxRepairLogLineBytes = 8 << 10
+
+// maxActorBytes bounds the actor field, whose session-id half comes from the
+// environment. See repairActor for why an unbounded field here is a hazard.
+const maxActorBytes = 256
 
 // Repair outcomes recorded in the log. The intent value is the one that
 // matters operationally: a row carrying it with no completion beside it is a
@@ -60,6 +65,12 @@ type RepairRow struct {
 	// trail that names nothing is worthless for the one removal that cannot say
 	// what it removed.
 	Record string `json:"record,omitempty"`
+	// RecordBytes is the subject record's UNTRUNCATED length, so a shrunken or
+	// elided Record still says how much there was.
+	RecordBytes int `json:"record_bytes,omitempty"`
+	// RecordNote says so when Record had to be shrunk or dropped to fit the
+	// line. Silence means Record is the whole capped payload.
+	RecordNote string `json:"record_note,omitempty"`
 }
 
 // repairLogPath is the log's location inside the client's sessions dir.
@@ -80,6 +91,14 @@ func repairActor() string {
 	if sid := os.Getenv("CLAUDE_CODE_SESSION_ID"); sid != "" {
 		name += " session=" + termsafe.SafeLine(sid)
 	}
+	// BOUNDED, because the session id is an environment value and the row it
+	// lands in has a line limit. An unbounded field here could push a row past
+	// that limit, and the one row that must never fail to write is the
+	// write-ahead intent — so the field that nothing reads to decide anything
+	// is the field that gets clipped.
+	if len(name) > maxActorBytes {
+		name = name[:maxActorBytes]
+	}
 	return name
 }
 
@@ -95,14 +114,9 @@ func (c *Client) appendRepairRowLocked(row RepairRow) error {
 	if err := os.MkdirAll(c.sessionsDir, 0o700); err != nil {
 		return fmt.Errorf("create pr sessions dir: %w", err)
 	}
-	// termsafe:allow-raw-json persisted audit row, never command output
-	data, err := json.Marshal(row)
+	data, err := marshalRepairRow(row)
 	if err != nil {
-		return fmt.Errorf("encode repair audit row: %w", err)
-	}
-	data = append(data, '\n')
-	if len(data) > maxRepairLogLineBytes {
-		return fmt.Errorf("repair audit row exceeds the %d-byte line limit", maxRepairLogLineBytes)
+		return err
 	}
 	f, err := os.OpenFile(c.repairLogPath(), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600) //nolint:gosec // inside the 0700 sessions dir
 	if err != nil {
@@ -117,6 +131,61 @@ func (c *Client) appendRepairRowLocked(row RepairRow) error {
 		return fmt.Errorf("close repair audit log: %w", closeErr)
 	}
 	return nil
+}
+
+// marshalRepairRow encodes one newline-terminated row that FITS, by
+// construction.
+//
+// THE SIZE MUST NEVER REFUSE THE WRITE. `beginRepairRow` treats a failed append
+// as a refusal to mutate — correct, since a removal with no trail is the one
+// shape that can lose a clean room — but that makes the row's own size a gate on
+// the only verb that can clear an unreadable record. And the size is
+// input-dependent in a way a byte cap cannot see: `termsafe.SafeLine` preserves
+// every graphic rune, then `json.Marshal` doubles `"` and `\` and expands `<`,
+// `>`, and `&` to six bytes each. A 4 KiB clamped payload of `<` marshals to
+// 24 KiB, so capping the payload before encoding it measured the wrong thing and
+// a `<`-dense record became unsettleable with no forgectl escape at all.
+//
+// So the payload is shrunk against the ENCODED length: marshal, halve `Record`,
+// repeat, and if even an empty `Record` will not fit, say so. Every other field
+// is bounded at its source (a path by the filesystem, the actor by
+// maxActorBytes, the rest by charset), which is what makes the floor reachable.
+func marshalRepairRow(row RepairRow) ([]byte, error) {
+	original := len(row.Record)
+	for {
+		// termsafe:allow-raw-json persisted audit row, never command output
+		data, err := json.Marshal(row)
+		if err != nil {
+			return nil, fmt.Errorf("encode repair audit row: %w", err)
+		}
+		data = append(data, '\n')
+		if len(data) <= maxRepairLogLineBytes {
+			return data, nil
+		}
+		if row.Record == "" {
+			return nil, fmt.Errorf("repair audit row exceeds the %d-byte line limit with no record payload left to drop",
+				maxRepairLogLineBytes)
+		}
+		row.Record = halveString(row.Record)
+		if row.Record == "" {
+			row.RecordNote = fmt.Sprintf("the record's %d clamped bytes did not fit this row and were elided", original)
+			continue
+		}
+		row.RecordNote = fmt.Sprintf("the record's %d clamped bytes were truncated to %d to fit this row",
+			original, len(row.Record))
+	}
+}
+
+// halveString halves s on a rune boundary. The payload is evidence a human
+// reads, never parsed, so a clean boundary matters only so the row stays valid
+// UTF-8 — which json.Marshal would otherwise paper over with replacement
+// characters, quietly changing the bytes the trail is supposed to preserve.
+func halveString(s string) string {
+	half := len(s) / 2
+	for half > 0 && !utf8.RuneStart(s[half]) {
+		half--
+	}
+	return s[:half]
 }
 
 // repairLogFile is the seam appendRepairRow needs: append, roll back a partial
