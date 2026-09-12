@@ -21,6 +21,11 @@ const (
 	RepairModeAdoptWindow    = "--adopt-window"
 	RepairModeRollback       = "--rollback"
 	RepairModeForgetIfAbsent = "--forget-if-absent"
+	// RepairModePrune is the housekeeping sweep, and it is deliberately NOT one
+	// of the three `--apply` modes: it takes no breadcrumb, acts on files that
+	// are already outside every enumeration, and is the only repair mode that
+	// UNLINKS rather than renames.
+	RepairModePrune = "--prune"
 )
 
 // Report outcomes. `unreadable` is the one that is not an action: it names a
@@ -316,7 +321,19 @@ func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, m
 	// undecodable subclass that actually matters, and it carries a plain "ref"
 	// string; refusing while that window is live closes the case where this arm
 	// would otherwise hide a running session from the build that owns it.
-	if ref, ok := refFromRawRecord(member.bytes); ok {
+	ref, refKnown := refFromRawRecord(member.bytes)
+	if !refKnown {
+		// The liveness refusal below is the only guard that reads the record at
+		// all, so a record yielding no ref gets NO liveness check — not a
+		// passing one. Saying so is the whole fix: item.WindowLive stays nil
+		// (the report renders "?"), the log says why, and the confirmation
+		// prompt carries the same sentence. Refusing instead would be worse: a
+		// torn write is the canonical corrupt record, this is the only verb that
+		// can clear it, and refusing would send the operator back to `rm`.
+		slog.Warn("Setting aside a session record with no readable ref; whether its review window is live was not checked.",
+			"path", member.path, "error", decodeErr)
+	}
+	if refKnown {
 		item.Ref = ref.String()
 		live, tmuxOK := c.WindowLive(ctx, ref)
 		if !tmuxOK {
@@ -344,7 +361,7 @@ func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, m
 				"so it cannot say what the record described, and there is no terminal to confirm on — pass --yes to proceed",
 				member.displayPath)
 		}
-		approved, err := c.confirmRemoval(setAsidePrompt(member, decodeErr))
+		approved, err := c.confirmRemoval(setAsidePrompt(member, decodeErr, refKnown))
 		if err != nil {
 			return item, fmt.Errorf("set-aside confirmation: %w", err)
 		}
@@ -357,6 +374,7 @@ func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, m
 	slog.Warn("Setting aside a session record this build cannot read; whether it named a clean room cannot be checked.",
 		"path", member.path, "error", decodeErr)
 	row := RepairRow{
+		Verb:        auditVerbRepair,
 		Ref:         item.Ref,
 		RecordPath:  member.path,
 		FromPhase:   repairPhaseUnreadable,
@@ -416,6 +434,22 @@ func cappedRecordBytes(raw []byte) string {
 // used only to REFUSE. It never reaches an argv, a path, or a write. A record
 // that lies here can only cause a refusal to set itself aside, which is the
 // direction that costs nothing.
+//
+// IT OFTEN FINDS NOTHING, and a ref-less record still proceeds. What it yields,
+// measured against the literal body below:
+//
+//	torn write (the canonical corrupt record)   no ref — Unmarshal fails
+//	intact record from a newer forgectl         a ref — the field is plain and present
+//	a nested or renamed "ref" field             no ref — the shallow struct misses it
+//	an empty or null "ref"                      no ref — ParseRef refuses
+//	a ref that is not owner/repo#N              no ref — Complete() refuses
+//
+// So the case this check exists for — the newer build's live session — is the
+// one case it reliably answers, and the torn write is the one it reliably
+// cannot. Refusing on "no ref" would therefore refuse exactly the record class
+// `--forget-if-absent` was built to clear, leaving `rm` as the only escape
+// again. The caller proceeds and SAYS SO instead, in the log and in the
+// confirmation prompt.
 func refFromRawRecord(data []byte) (Ref, bool) {
 	var shallow struct {
 		Ref   string `json:"ref"`
@@ -437,12 +471,19 @@ func refFromRawRecord(data []byte) (Ref, bool) {
 // setAsidePrompt is what the confirmation gate shows for a record nothing can
 // read. It says plainly what is and is not known, because that uncertainty is
 // the entire reason this arm has a gate at all.
-func setAsidePrompt(member breadcrumbMember, decodeErr error) string {
-	return fmt.Sprintf("Set aside a session record this build cannot read?\n"+
+// refKnown is what changes the prompt. When false, the one guard that reads the
+// record could not run at all, and the human approving the move deserves that
+// sentence rather than a prompt that reads identically to the checked case.
+func setAsidePrompt(member breadcrumbMember, decodeErr error, refKnown bool) string {
+	prompt := fmt.Sprintf("Set aside a session record this build cannot read?\n"+
 		"  record: %s\n"+
 		"  reason: %s\n"+
 		"  the file is renamed, not deleted — but whether it named a clean room cannot be checked",
 		member.displayPath, termsafe.SafeLine(decodeErr.Error()))
+	if !refKnown {
+		prompt += "\n  no ref could be read, so whether its review window is live was not checked"
+	}
+	return prompt
 }
 
 // repairAdoptLocked promotes a record to `active` against a window that really
@@ -611,6 +652,9 @@ func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, memb
 		item.Outcome = repairOutcomeRefused
 		return item, err
 	}
+	// Deliberately the UNAUDITED core: the pair opened just above is this
+	// mutation's only row, and a row written inside would nest a second pair
+	// inside it.
 	if err := c.teardownLocked(ctx, member.path); err != nil {
 		item.Outcome = repairOutcomeFailed
 		item.Error = err.Error()
@@ -702,6 +746,8 @@ func (c *Client) repairForgetLocked(ctx context.Context, opts RepairOpts, member
 		item.Outcome = repairOutcomeRefused
 		return item, err
 	}
+	// Deliberately the UNAUDITED core, for the same reason the rollback arm
+	// gives: the pair opened just above is this mutation's only row.
 	if err := c.teardownLocked(ctx, member.path); err != nil {
 		item.Outcome = repairOutcomeFailed
 		item.Error = err.Error()
@@ -761,6 +807,7 @@ func (c *Client) completeRepairRow(id string, row RepairRow, cause error) {
 // record, so the three arms cannot disagree about what a row carries.
 func repairRowFor(member breadcrumbMember, ref Ref, mode, windowID string) RepairRow {
 	return RepairRow{
+		Verb:       auditVerbRepair,
 		Ref:        ref.String(),
 		RecordPath: member.path,
 		FromPhase:  string(member.breadcrumb.Phase),

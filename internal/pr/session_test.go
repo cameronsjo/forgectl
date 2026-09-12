@@ -302,6 +302,145 @@ func TestSandboxAndQuarantine_QuarantineFailureTearsDownWorkspace(t *testing.T) 
 	}
 }
 
+// Test plan for Queue (session.go) — the #472 v2 "queued" writer.
+//
+//   [x] Happy: writes a `queued` v2 record with no workspace, persisting
+//       Agent and Provenance
+//   [x] Invariant: never persists FindingsDir (there is nothing to persist —
+//       Queue takes no Session, only Ref+PrepareOpts, so the field cannot
+//       even be threaded through)
+//   [x] Boundary: a second Queue on the same ref refuses, naming the first
+//       record's path
+//   [x] Unhappy: a local ref is refused before any write
+
+func TestQueue_WritesQueuedRecordNoWorkspace(t *testing.T) {
+	c := testClient(t, ghViewRunner())
+	ref := Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}
+
+	path, err := c.Queue(context.Background(), ref, PrepareOpts{Agent: "claude", Provenance: ReviewProvenanceThirdParty})
+	if err != nil {
+		t.Fatalf("Queue: %v", err)
+	}
+	if path == "" {
+		t.Fatal("Queue returned an empty path")
+	}
+
+	summaries, unreadable, err := c.List(context.Background())
+	if err != nil || unreadable != 0 {
+		t.Fatalf("List: %+v, %d, %v", summaries, unreadable, err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("summaries = %+v, want exactly one", summaries)
+	}
+	s := summaries[0]
+	if s.Phase() != PhaseQueued {
+		t.Errorf("phase = %q, want %q", s.Phase(), PhaseQueued)
+	}
+	if !s.IsWorkspaceNone() {
+		t.Errorf("a queued record must carry no workspace; summary = %+v", s)
+	}
+
+	data, err := os.ReadFile(path) //nolint:gosec // test-owned temp dir
+	if err != nil {
+		t.Fatalf("read record: %v", err)
+	}
+	if !strings.Contains(string(data), `"claude"`) {
+		t.Errorf("record %s does not persist Agent; body: %s", path, data)
+	}
+}
+
+func TestQueue_DuplicateRefusesNamingFirstRecord(t *testing.T) {
+	c := testClient(t, ghViewRunner())
+	ref := Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}
+
+	first, err := c.Queue(context.Background(), ref, PrepareOpts{})
+	if err != nil {
+		t.Fatalf("first Queue: %v", err)
+	}
+
+	_, err = c.Queue(context.Background(), ref, PrepareOpts{})
+	if err == nil {
+		t.Fatal("second Queue on the same ref: want an error, got nil")
+	}
+	if !strings.Contains(err.Error(), first) {
+		t.Errorf("error = %q, want it to name the first record %q", err.Error(), first)
+	}
+
+	summaries, _, err := c.List(context.Background())
+	if err != nil || len(summaries) != 1 {
+		t.Fatalf("List after duplicate Queue: %+v, %v — want still exactly one record", summaries, err)
+	}
+}
+
+func TestQueue_RefusesLocalRef(t *testing.T) {
+	c := testClient(t, ghViewRunner())
+	localRef := newLocalRef("deadbeefcafe1234567890abcdef1234567890")
+
+	if _, err := c.Queue(context.Background(), localRef, PrepareOpts{}); err == nil {
+		t.Fatal("Queue on a local ref: want an error, got nil")
+	}
+
+	summaries, _, err := c.List(context.Background())
+	if err != nil || len(summaries) != 0 {
+		t.Fatalf("List after a refused local Queue: %+v, %v — want none", summaries, err)
+	}
+}
+
+// Test plan for Reserve/ReviewCapReached (session.go over admission.go's
+// reserve) — the exported seam `pr <ref>` and `pr local` call before
+// Prepare/PrepareLocal (#472).
+//
+//   [x] Happy: below the cap, Reserve writes a `preparing` record
+//   [x] Boundary: at the cap, Reserve refuses and ReviewCapReached extracts
+//       (max, live) from the error
+//   [x] Invariant: an unrelated error does not satisfy ReviewCapReached
+
+func TestReserve_BelowCap_WritesPreparingRecord(t *testing.T) {
+	c := testClient(t, ghViewRunner())
+	ref := Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}
+
+	path, err := c.Reserve(context.Background(), ref, 4, PrepareOpts{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	summaries, _, err := c.List(context.Background())
+	if err != nil || len(summaries) != 1 {
+		t.Fatalf("List: %+v, %v", summaries, err)
+	}
+	if summaries[0].Path() != path {
+		t.Errorf("recorded path = %q, want %q", summaries[0].Path(), path)
+	}
+	if summaries[0].Phase() != PhasePreparing {
+		t.Errorf("phase = %q, want %q", summaries[0].Phase(), PhasePreparing)
+	}
+}
+
+func TestReserve_AtCap_ReviewCapReachedExtractsNumbers(t *testing.T) {
+	c := testClient(t, ghViewRunner())
+	// Occupy the sole slot first.
+	if _, err := c.Reserve(context.Background(), Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 1}, 1, PrepareOpts{}); err != nil {
+		t.Fatalf("occupying Reserve: %v", err)
+	}
+
+	_, err := c.Reserve(context.Background(), Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 2}, 1, PrepareOpts{})
+	if err == nil {
+		t.Fatal("Reserve at the cap: want an error, got nil")
+	}
+	maxN, liveN, ok := ReviewCapReached(err)
+	if !ok {
+		t.Fatalf("ReviewCapReached(%v) = false, want true", err)
+	}
+	if maxN != 1 || liveN != 1 {
+		t.Errorf("ReviewCapReached = (%d, %d), want (1, 1)", maxN, liveN)
+	}
+}
+
+func TestReviewCapReached_UnrelatedErrorReturnsFalse(t *testing.T) {
+	if _, _, ok := ReviewCapReached(errors.New("boom")); ok {
+		t.Error("ReviewCapReached on an unrelated error = true, want false")
+	}
+}
+
 func equalArgs(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

@@ -3,8 +3,10 @@ package pr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/quarantine"
@@ -255,4 +257,133 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// Reserve claims one review slot for ref and writes the `preparing` record
+// that holds it — reserve (admission.go) exported for callers outside this
+// package. Every launch path but the bulk PrepareMany fan-out (which shares
+// one reservation across a batch under a single lock hold) reserves through
+// here: `pr <ref>` and `pr local` each claim exactly one slot per call, before
+// Prepare/PrepareLocal completes the same record with PrepareOpts.RecordPath.
+//
+// A cap refusal surfaces as *errReviewCapReached, unexported; callers outside
+// this package read it through ReviewCapReached rather than a type assertion.
+func (c *Client) Reserve(ctx context.Context, ref Ref, cfgMax int, opts PrepareOpts) (string, error) {
+	return c.reserve(ctx, ref, cfgMax, opts)
+}
+
+// ReviewCapReached reports whether err is (or wraps) the admission refusal
+// Reserve returns at the concurrency cap, and if so, the numbers the
+// three-line CLI refusal renders.
+func ReviewCapReached(err error) (maxN, liveN int, ok bool) {
+	var capErr *errReviewCapReached
+	if errors.As(err, &capErr) {
+		return capErr.Max, capErr.Live, true
+	}
+	return 0, 0, false
+}
+
+// ResolveLocalHead resolves path's local HEAD commit and returns both the
+// synthetic local Ref PrepareLocal would derive for it and the full oid that
+// Ref was derived from — the read-only half of PrepareLocal's opening git
+// rev-parse pair (headOid only; the branch name is not needed to derive a
+// Ref), exposed so a caller can Reserve a slot BEFORE entering PrepareLocal,
+// exactly as `pr <ref>` reserves against a Ref it already has from ResolveRef.
+//
+// The oid comes back alongside the Ref because a Ref cannot carry it: a local
+// Ref stores only the first 7 hex characters (newLocalRef, local.go). The
+// caller threads the full oid into PrepareLocalOpts.HeadOid so HEAD is read
+// exactly ONCE per `pr local` run — a HEAD that moved between two reads would
+// key the reservation and the record to one commit while the workspace,
+// window name, and reviewed tree were pinned to another.
+//
+// It runs the same location guards PrepareLocal runs (RejectOptionLike,
+// rejectCleanRoomPath) so a caller cannot reserve against a path PrepareLocal
+// would then refuse — the reservation and the prepare must agree on legality,
+// not just on identity.
+func (c *Client) ResolveLocalHead(ctx context.Context, path string) (Ref, string, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return Ref{}, "", fmt.Errorf("resolve path %q: %w", path, err)
+	}
+	if err := sandbox.RejectOptionLike("path", absPath); err != nil {
+		return Ref{}, "", err
+	}
+	if err := c.rejectCleanRoomPath(absPath); err != nil {
+		return Ref{}, "", err
+	}
+	headOid, err := c.run.Run(ctx, "git", "-C", absPath, "rev-parse", "HEAD")
+	if err != nil {
+		return Ref{}, "", fmt.Errorf("resolve local HEAD commit: %w", err)
+	}
+	return newLocalRef(headOid), headOid, nil
+}
+
+// ParkFailedReservation parks the reservation at recordPath in `needs-repair`
+// with reason, for a caller whose Prepare/PrepareLocal failed AFTER Reserve
+// succeeded — markNeedsRepair (phase.go) exported for callers outside this
+// package.
+//
+// Without it the reservation stays a `preparing` record with no clean room
+// behind it: it holds its slot against the cap forever and blocks every retry
+// of the same ref. PrepareMany already does this inline at its own throw site
+// (discover.go); the single-ref launch paths in internal/cli reach it through
+// here, so a transient `gh` or clone failure costs a retry rather than a slot.
+func (c *Client) ParkFailedReservation(ctx context.Context, recordPath, reason string) error {
+	return c.markNeedsRepair(ctx, recordPath, reason)
+}
+
+// Queue writes a `queued` v2 record for ref under the lifecycle lock: intent
+// only, no workspace, no slot, waiting for `forgectl pr drain` (#473). It
+// dedups against every phase but needs-repair — naming the existing record,
+// exactly as reserve does — and it refuses a local ref: PrepareLocal never
+// persists FindingsDir (session.go's own Session.FindingsDir doc) and Launch
+// refuses a reloaded local session, so a queued local review could never
+// launch; queuing one would be a promise this build cannot keep.
+func (c *Client) Queue(ctx context.Context, ref Ref, opts PrepareOpts) (string, error) {
+	if ref.IsLocal() {
+		return "", errors.New("local reviews cannot be queued: a local session's findings directory is never " +
+			"persisted and a reloaded local session refuses to launch — review it now with 'forgectl pr local', not later")
+	}
+	var path string
+	err := c.withLifecycleLock(ctx, "queue", func() error {
+		p, err := c.queueLocked(ref, opts)
+		path = p
+		return err
+	})
+	return path, err
+}
+
+// queueLocked is Queue's core for a caller already holding the lifecycle
+// lock.
+func (c *Client) queueLocked(ref Ref, opts PrepareOpts) (string, error) {
+	summaries, unreadable, err := c.listLocked()
+	if err != nil {
+		return "", err
+	}
+	if len(unreadable) > 0 {
+		return "", fmt.Errorf("%d session record(s) could not be read, so a duplicate queue entry could not be ruled out — "+
+			"settle them with 'forgectl pr repair' before queuing", len(unreadable))
+	}
+	if existing, ok := recordForRef(summaries, ref); ok {
+		slog.Error("Refusing to queue a review: the ref already has a session record.",
+			"ref", ref.String(), "path", existing.Path(), "phase", string(existing.Phase()))
+		return "", duplicateRecordRefusal(ref, existing)
+	}
+	bc := Breadcrumb{
+		Ref:        ref.String(),
+		Agent:      opts.Agent,
+		CreatedAt:  time.Now().UTC(),
+		Local:      ref.IsLocal(),
+		Provenance: EffectiveProvenance(ref, opts.Provenance).persisted(),
+		Version:    breadcrumbVersion,
+		Phase:      PhaseQueued,
+		Revision:   1,
+	}
+	path, err := writeBreadcrumbFS(c.fs, c.sessionsDir, ref, bc)
+	if err != nil {
+		return "", err
+	}
+	slog.Info("Successfully queued a review for the drainer.", "ref", ref.String(), "path", path)
+	return path, nil
 }
