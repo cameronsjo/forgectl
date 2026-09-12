@@ -148,12 +148,14 @@ func TestDirPin_OpenRegular_OpensAnOrdinaryFile(t *testing.T) {
 
 func TestDirPin_PinDir_RefusesASymlinkedDirectory(t *testing.T) {
 	base := t.TempDir()
-	real := filepath.Join(base, "real")
-	if err := os.Mkdir(real, 0o750); err != nil {
+	// Not `real`: that shadows a Go predeclared identifier, which the
+	// predeclared linter flags and which this repo's config enables.
+	realDir := filepath.Join(base, "real")
+	if err := os.Mkdir(realDir, 0o750); err != nil {
 		t.Fatalf("Mkdir: %v", err)
 	}
 	link := filepath.Join(base, "link")
-	if err := os.Symlink(real, link); err != nil {
+	if err := os.Symlink(realDir, link); err != nil {
 		t.Skipf("symlink unsupported: %v", err)
 	}
 
