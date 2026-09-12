@@ -27,6 +27,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/pr"
@@ -256,6 +258,105 @@ func TestPrLocalCmd_PrepareLocalFailurePropagatesAndPrintsNothing(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), "resolve local HEAD branch") {
 		t.Errorf("error = %q, want it to mention resolving local HEAD branch", err.Error())
+	}
+}
+
+// localReviewCmdCapped is localReviewCmd's (pr_outcome_test.go) sibling with
+// an explicit cfg, so a cap test can set MaxConcurrent — plus the client, so
+// a test can List() what the command left behind. It shares the same
+// ledger-backed tmux double: reserve now runs before PrepareLocal (#472), so
+// `pr local` needs the same live-window seeding a cap test on `pr <ref>` does.
+func localReviewCmdCapped(t *testing.T, l *tmuxLedger, cfg config.Config) (*cobra.Command, *bytes.Buffer, *pr.Client) {
+	t.Helper()
+	fakeClaudeBin(t)
+	reviewTempRoot(t)
+	git := prLocalFakeRunner().RunFunc
+	fake := l.runnerWith(git)
+	client := pr.New(fake,
+		pr.WithSessionsDir(t.TempDir()),
+		pr.WithFindingsDir(t.TempDir()),
+		pr.WithTmuxSession(l.session),
+		pr.WithDispatchWait(func(context.Context) error { return nil }),
+	)
+	cmd := newPrLocalCmd(client, cfg)
+	out := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SilenceUsage = true
+	return cmd, out, client
+}
+
+func TestPrLocalCmd_BelowCap_ReservesThenLaunchesActive(t *testing.T) {
+	ledger := newTmuxLedger("forgectl")
+	cmd, out, client := localReviewCmdCapped(t, ledger, config.Config{Pr: config.PrConfig{MaxConcurrent: 4}})
+	cmd.SetArgs([]string{t.TempDir(), "--no-verify"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out.String(), "prepared local clean-room review of main @") {
+		t.Errorf("stdout = %q, want the success line", out.String())
+	}
+
+	summaries, unreadable, err := client.List(context.Background())
+	if err != nil || unreadable != 0 {
+		t.Fatalf("List: %+v, %d, %v", summaries, unreadable, err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("summaries = %+v, want exactly one record", summaries)
+	}
+	if summaries[0].Phase() != pr.PhaseActive {
+		t.Errorf("phase = %q, want %q", summaries[0].Phase(), pr.PhaseActive)
+	}
+}
+
+func TestPrLocalCmd_AtCap_RefusesWithTwoLineMessageNoQueueOption(t *testing.T) {
+	ledger := newTmuxLedger("forgectl")
+	ledger.live = append(ledger.live, ledgerWindow{id: "@0", name: "pr-already-running"})
+	cmd, out, client := localReviewCmdCapped(t, ledger, config.Config{Pr: config.PrConfig{MaxConcurrent: 1}})
+	cmd.SetArgs([]string{t.TempDir()})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("want an error at the cap, got nil")
+	}
+	for _, want := range []string{
+		"review cap reached (max 1, 1 running) — nothing prepared.",
+		"see them:   forgectl pr list",
+		"raise it:   [pr] max_concurrent in config.toml",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want line %q", err.Error(), want)
+		}
+	}
+	if strings.Contains(err.Error(), "--queue") {
+		t.Errorf("error = %q, `pr local` has no --queue to offer", err.Error())
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing printed on refusal", out.String())
+	}
+	summaries, unreadable, listErr := client.List(context.Background())
+	if listErr != nil || unreadable != 0 {
+		t.Fatalf("List: %+v, %d, %v", summaries, unreadable, listErr)
+	}
+	if len(summaries) != 0 {
+		t.Errorf("summaries = %+v, want none — refusal must write no record", summaries)
+	}
+}
+
+func TestPrLocalCmd_QueueFlagDoesNotExist(t *testing.T) {
+	fake := prLocalFakeRunner()
+	client := newPrLocalTestClient(t, fake)
+
+	cmd := newPrLocalCmd(client, config.Config{})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--queue"})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "unknown flag: --queue") {
+		t.Errorf("error = %v, want cobra's unknown-flag refusal for --queue", err)
 	}
 }
 

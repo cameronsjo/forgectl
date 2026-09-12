@@ -3,9 +3,9 @@ package cli
 // Test plan for launchPicked's verification, ordering, and accounting
 // (pr_pick.go's post-dispatch half — plan step 6).
 //
-//   [x] Combined: admit three of four, defer one, fail one launch after
+//   [x] Combined: admit three of four, queue one, fail one launch after
 //       preparation, dispatch two, make one exact dispatch gone. One wait and
-//       one verification list; per-ref lines, the deferral summary, and the
+//       one verification list; per-ref lines, the queue summary, and the
 //       cleanup summary all land before the returned verification error; the
 //       completion log carries verify=gone, gone=1 alongside the old counts.
 //   [x] All dispatched windows survive → verify=live, gone=0, nil error.
@@ -306,7 +306,7 @@ func TestLaunchPicked_BulkOrderingAndAccounting(t *testing.T) {
 		t.Errorf("new-window calls = %d, want 3 (one per prepared ref)", windowCalls)
 	}
 
-	// Per-ref success lines survive, and #4 was deferred rather than prepared.
+	// Per-ref success lines survive, and #4 was queued rather than prepared.
 	for _, n := range []int{1, 2} {
 		want := fmt.Sprintf("launched clean-room review of cameronsjo/forgectl#%d", n)
 		if !strings.Contains(out.String(), want) {
@@ -314,26 +314,26 @@ func TestLaunchPicked_BulkOrderingAndAccounting(t *testing.T) {
 		}
 	}
 	if strings.Contains(out.String(), "cameronsjo/forgectl#4") {
-		t.Errorf("stdout = %q, deferred ref must not report a launch", out.String())
+		t.Errorf("stdout = %q, queued ref must not report a launch", out.String())
 	}
 
 	// Every summary precedes the returned error, which is the last thing to
 	// happen. Assert their relative order on stderr.
 	stderr := errOut.String()
 	launchLine := strings.Index(stderr, "launch cameronsjo/forgectl#3 failed")
-	deferLine := strings.Index(stderr, "1 PR(s) deferred by the concurrency cap")
+	queueLine := strings.Index(stderr, "1 PR(s) queued by the concurrency cap")
 	cleanupLine := strings.Index(stderr, "1 review(s) prepared but failed to launch")
-	if launchLine < 0 || deferLine < 0 || cleanupLine < 0 {
-		t.Fatalf("stderr = %q, want per-ref failure, deferral, and cleanup summaries", stderr)
+	if launchLine < 0 || queueLine < 0 || cleanupLine < 0 {
+		t.Fatalf("stderr = %q, want per-ref failure, queue, and cleanup summaries", stderr)
 	}
-	if launchLine >= deferLine || deferLine >= cleanupLine {
-		t.Errorf("stderr = %q, want per-ref line, then deferral, then cleanup", stderr)
+	if launchLine >= queueLine || queueLine >= cleanupLine {
+		t.Errorf("stderr = %q, want per-ref line, then queue, then cleanup", stderr)
 	}
 
 	record := readLog(t)
 	assertCompletion(t, record, map[string]any{
 		"launched": 2.0, "prepareFailed": 0.0, "launchFailed": 1.0,
-		"skipped": 0.0, "deferred": 1.0, "verify": "gone", "gone": 1.0,
+		"skipped": 0.0, "queued": 1.0, "verify": "gone", "gone": 1.0,
 	})
 }
 

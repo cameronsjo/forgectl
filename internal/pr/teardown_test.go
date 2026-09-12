@@ -364,6 +364,37 @@ func TestTeardown_StaleAndRecordOnlyAlsoWriteRows(t *testing.T) {
 	}
 }
 
+// TestTeardown_QueuedRecordRemovesFileCallsNoSandboxTeardown is Task 3's own
+// positive control on the #472 spine: `pr teardown` on a `queued` record
+// (no workspace, by construction — reserve.go/session.go's Queue) must land
+// through discardRecordOnly, never through the live/stale sandbox path. The
+// seam is overridden to FAIL, so a stray call surfaces as a test failure
+// rather than a silent no-op success.
+func TestTeardown_QueuedRecordRemovesFileCallsNoSandboxTeardown(t *testing.T) {
+	orig := sandboxTeardown
+	sandboxTeardown = func(context.Context, exec.Runner, string) error {
+		t.Fatal("sandbox teardown must never run for a queued (workspace-less) record")
+		return nil
+	}
+	t.Cleanup(func() { sandboxTeardown = orig })
+
+	c := testClient(t, &exec.FakeRunner{})
+	ref := Ref{Owner: "o", Repo: "r", Number: 99}
+	path := seedPhaseRecord(t, c, ref, PhaseQueued, "")
+
+	if err := c.Teardown(context.Background(), path); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("breadcrumb %s should be removed; stat err = %v", path, err)
+	}
+	for _, call := range c.run.(*exec.FakeRunner).Calls {
+		if call.Name == "git" || call.Name == "tmux" {
+			t.Errorf("a queued teardown must touch no workspace or window; saw %s %v", call.Name, call.Args)
+		}
+	}
+}
+
 // TestTeardown_RefusalWritesNoRow is the ordering rule the repair arms already
 // hold to: a dangling intent means a delete died partway, so a refusal that
 // wrote one would forge that signal and send someone hunting a directory

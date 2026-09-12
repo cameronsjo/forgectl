@@ -9,7 +9,8 @@ package cli
 //       prepare, no launch — with a one-line skip note on stderr (decision 1)
 //   [x] Boundary: all selections dimmed → nothing launched, explanatory note
 //   [x] Boundary: selections exceed the concurrency cap → only the cap's worth
-//       prepared/launched, the rest deferred with a one-line note (decision 2)
+//       prepared/launched, the rest queued for the drainer with a one-line
+//       note (decision 2, revised by #472 — queue, not defer)
 //   [x] Unhappy: the live tmux window count is unreadable → refuse the whole
 //       batch, fail-closed — no prepare (no clone) for anything
 //
@@ -354,11 +355,12 @@ func TestLaunchPicked_AllReviewed_NothingLaunched(t *testing.T) {
 	}
 }
 
-func TestLaunchPicked_CapDefersExcess(t *testing.T) {
+func TestLaunchPicked_CapQueuesTruncatedRemainder(t *testing.T) {
 	fakeClaudeBin(t)
 
 	fake := prepareRunner()
-	client := pr.New(fake, pr.WithSessionsDir(t.TempDir()), pr.WithTmuxSession("forgectl"),
+	sessionsDir := t.TempDir()
+	client := pr.New(fake, pr.WithSessionsDir(sessionsDir), pr.WithTmuxSession("forgectl"),
 		pr.WithDispatchWait(func(context.Context) error { return nil }))
 	store := pr.LoadReviewed(filepath.Join(t.TempDir(), "pr-reviewed.json"))
 
@@ -379,8 +381,68 @@ func TestLaunchPicked_CapDefersExcess(t *testing.T) {
 	if len(windows) != 2 {
 		t.Errorf("want exactly 2 launched windows under cap 2, got %d: %v", len(windows), windows)
 	}
-	if !strings.Contains(errOut.String(), "1 PR(s) deferred") {
-		t.Errorf("want deferred note on stderr, got %q", errOut.String())
+	if !strings.Contains(errOut.String(), "1 PR(s) queued by the concurrency cap (max 2) — start them with 'forgectl pr drain --once'") {
+		t.Errorf("want queued note on stderr, got %q", errOut.String())
+	}
+
+	summaries, unreadable, err := client.List(context.Background())
+	if err != nil || unreadable != 0 {
+		t.Fatalf("List: %+v, %d, %v", summaries, unreadable, err)
+	}
+	queuedRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 3}
+	found := false
+	for _, s := range summaries {
+		if s.Ref() == queuedRef {
+			found = true
+			if s.Phase() != pr.PhaseQueued {
+				t.Errorf("queued remainder phase = %q, want %q", s.Phase(), pr.PhaseQueued)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("truncated remainder %s was not queued; summaries=%+v", queuedRef.String(), summaries)
+	}
+}
+
+func TestLaunchPicked_FreeZeroQueuesAllSelected(t *testing.T) {
+	fakeClaudeBin(t)
+
+	ledger := newTmuxLedger("forgectl")
+	// One live review window already occupies the sole slot under a cap of 1,
+	// so admission sees free == 0 before any prepare is attempted.
+	ledger.live = append(ledger.live, ledgerWindow{id: "@0", name: "pr-already-running"})
+	fake := ledger.runner()
+	client := verifyingClient(t, ledger, fake)
+	store := pr.LoadReviewed(filepath.Join(t.TempDir(), "pr-reviewed.json"))
+
+	cmd, out, errOut := newTestCmd()
+	cfg := config.Config{Pr: config.PrConfig{MaxConcurrent: 1}}
+	if err := launchPicked(context.Background(), client, cfg, cmd, pickRefs(1, 2), store, false); err != nil {
+		t.Fatalf("launchPicked: %v", err)
+	}
+
+	if windows := tmuxWindows(fake.Calls); len(windows) != 0 {
+		t.Errorf("free == 0 must launch nothing; windows = %v", windows)
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout = %q, want no launch lines when free == 0", out.String())
+	}
+	if !strings.Contains(errOut.String(), "2 PR(s) queued by the concurrency cap (max 1) — start them with 'forgectl pr drain --once'") {
+		t.Errorf("want queued note on stderr, got %q", errOut.String())
+	}
+
+	summaries, unreadable, err := client.List(context.Background())
+	if err != nil || unreadable != 0 {
+		t.Fatalf("List: %+v, %d, %v", summaries, unreadable, err)
+	}
+	queued := 0
+	for _, s := range summaries {
+		if s.Phase() == pr.PhaseQueued {
+			queued++
+		}
+	}
+	if queued != 2 {
+		t.Errorf("queued records = %d, want 2; summaries=%+v", queued, summaries)
 	}
 }
 
