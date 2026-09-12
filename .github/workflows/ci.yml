@@ -43,6 +43,34 @@ jobs:
         timeout-minutes: 3
         run: sudo apt-get update && sudo apt-get install -y tmux
 
+      - name: Install sops and age
+        # internal/sops' integration tests drive the real sops binary: they
+        # mint an age identity, encrypt a fixture, and assert the measured
+        # behaviour `env set --sops` is built on — the exit status for an
+        # unchanged file, the absence of a trailing newline from
+        # `--extract --output`, and that untouched values keep byte-identical
+        # ciphertext. None of that is checkable without the binary.
+        #
+        # Installed from the release tarballs rather than apt, because Ubuntu's
+        # archive carries neither at a usable version.
+        #
+        # Bounded for the same reason the tmux step is: a download step that
+        # stops making progress leaves a PR with no Linux signal while reading
+        # as "CI is slow".
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/sops \
+            https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux.amd64
+          sudo install -m 0755 /tmp/sops /usr/local/bin/sops
+          curl -fsSL -o /tmp/age.tgz \
+            https://github.com/FiloSottile/age/releases/download/v1.2.1/age-v1.2.1-linux-amd64.tar.gz
+          tar -xzf /tmp/age.tgz -C /tmp
+          sudo install -m 0755 /tmp/age/age /usr/local/bin/age
+          sudo install -m 0755 /tmp/age/age-keygen /usr/local/bin/age-keygen
+          sops --version --disable-version-check
+          age-keygen --version
+
       - name: Build
         run: go build ./...
 
@@ -50,12 +78,22 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        # FORGECTL_REQUIRE_TMUX turns those tests' skips into failures: on a
-        # runner where they are meant to run, a skip and a pass must not look
-        # alike.
+        # Each FORGECTL_REQUIRE_* turns a tool-absent skip into a failure: on a
+        # runner where these tests are meant to run, a skip and a pass must not
+        # look alike. The env gate is what enforces that, not the install step
+        # above — a step is a file anyone can edit in a PR, and deleting it
+        # would otherwise just make the tests quietly stop running.
         env:
           FORGECTL_REQUIRE_TMUX: '1'
+          FORGECTL_REQUIRE_SOPS_INTEGRATION: '1'
         run: go test ./...
+
+      - name: Real-sops integration tests (named)
+        # Same tests, -v: the run log naming each Integration test as PASS is
+        # the readable proof they executed rather than skipped.
+        env:
+          FORGECTL_REQUIRE_SOPS_INTEGRATION: '1'
+        run: go test -v -count=1 -run Integration ./internal/sops
 
       - name: Real-tmux grammar tests (named)
         # Same tests, -v: the run log naming each *Isolated test as PASS is the
@@ -146,12 +184,25 @@ jobs:
         timeout-minutes: 5
         run: brew list tmux || brew install tmux
 
+      - name: Install sops and age
+        # Darwin is the platform these measurements were taken on, so it is the
+        # one where the integration tests matter most: the spurious-ENOENT
+        # behaviour of openat with O_CREAT, the FIFO open that blocks without
+        # O_NONBLOCK, and sops' own exit statuses were all measured here.
+        # `brew list ||` keeps the step reentrant for the same reason the tmux
+        # step above does.
+        timeout-minutes: 5
+        run: |
+          brew list sops || brew install sops
+          brew list age || brew install age
+
       - name: Test (Darwin-gated coverage)
         # -v is deliberate: the run log naming each formerly-skipped test as
-        # PASS is the proof this coverage exists. FORGECTL_REQUIRE_TMUX makes a
-        # missing tmux a failure rather than a silent skip.
+        # PASS is the proof this coverage exists. Each FORGECTL_REQUIRE_* makes
+        # a missing tool a failure rather than a silent skip.
         env:
           FORGECTL_REQUIRE_TMUX: '1'
+          FORGECTL_REQUIRE_SOPS_INTEGRATION: '1'
         run: go test -v ./...
 
   helper:

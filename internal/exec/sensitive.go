@@ -105,6 +105,21 @@ const (
 	KindHerdrProbe
 	KindHerdrCleanup
 
+	// KindSopsEdit drives `sops <file>` with forgectl re-invoked as the
+	// editor. KindSopsExtract is the read-back that proves what landed.
+	//
+	// These route through the sensitive seam rather than Runner for a reason
+	// the ordinary path cannot satisfy: sops' stderr quotes the offending
+	// line of the document it failed to parse, and that line is
+	// `key: '<the secret>'`. Runner's runAndWrap logs stderr at Error level —
+	// which survives any configured log level and can be pointed at a file on
+	// disk — and retains it on *CommandError, which fang renders. Here,
+	// nothing logged or returned can render a payload, and both streams are
+	// capped so the measured 8.4 MB of sops re-invocation stderr cannot grow
+	// the heap.
+	KindSopsEdit
+	KindSopsExtract
+
 	kindCount
 )
 
@@ -131,6 +146,9 @@ var kindNames = [kindCount]string{
 	KindHerdrReconcile: "herdr.reconcile",
 	KindHerdrProbe:     "herdr.probe",
 	KindHerdrCleanup:   "herdr.cleanup",
+
+	KindSopsEdit:    "sops.edit",
+	KindSopsExtract: "sops.extract",
 }
 
 // Valid reports whether k names a real operation. The zero value does not.
@@ -334,6 +352,20 @@ const (
 	envKeyCmuxQuiet      = "CMUX_QUIET"
 	envKeyHerdrConfig    = "HERDR_CONFIG_PATH"
 	envKeyTmux           = "TMUX"
+
+	// The sops editor protocol. Three variables, not five: the work directory
+	// is named once and the value file, the result file, the nonce file, and
+	// the invocation counter all sit at fixed names inside it. Every name
+	// added here is a name an attacker could try to set, so the smaller
+	// surface is the point.
+	//
+	// Note what is NOT here: the value. Its containing directory's path
+	// travels; the secret itself never enters an environment, which is
+	// readable from /proc on Linux for the lifetime of the process.
+	envKeySopsEditor  = "EDITOR"
+	envKeySopsWorkdir = "FORGECTL_SOPS_WORKDIR"
+	envKeySopsPath    = "FORGECTL_SOPS_PATH"
+	envKeySopsNonce   = "FORGECTL_SOPS_NONCE"
 )
 
 type envOp uint8
@@ -389,6 +421,36 @@ func ReplaceHerdrConfigPath(path string) EnvMutation {
 // redirected to whichever server the caller happens to be sitting inside.
 func UnsetTmux() EnvMutation {
 	return EnvMutation{key: envKeyTmux, op: envOpUnset}
+}
+
+// ReplaceSopsEditor points sops' EDITOR at a command. sops shell-word-splits
+// the value (quotes honoured) and appends the decrypted temp file as the only
+// argument — measured on 3.13.3, including the self-exec case.
+func ReplaceSopsEditor(command string) EnvMutation {
+	return EnvMutation{key: envKeySopsEditor, value: Secret(command), op: envOpReplace}
+}
+
+// ReplaceSopsWorkdir names the private directory holding the value file, the
+// nonce, the result, and the invocation counter.
+func ReplaceSopsWorkdir(path string) EnvMutation {
+	return EnvMutation{key: envKeySopsWorkdir, value: Secret(path), op: envOpReplace}
+}
+
+// ReplaceSopsPath carries the dotted key path the editor must write.
+func ReplaceSopsPath(path string) EnvMutation {
+	return EnvMutation{key: envKeySopsPath, value: Secret(path), op: envOpReplace}
+}
+
+// ReplaceSopsNonce carries the per-run nonce the editor checks against the
+// copy in its work directory.
+//
+// Without it the editor subcommand is a bare arbitrary-YAML-write primitive:
+// anyone able to run forgectl could set the path and work directory by hand
+// and have it insert a line into any YAML file the user can write — a
+// workflow file, for one. A flag or a variable an agent can type is not a
+// bound on an agent; a value it cannot predict is.
+func ReplaceSopsNonce(nonce string) EnvMutation {
+	return EnvMutation{key: envKeySopsNonce, value: Secret(nonce), op: envOpReplace}
 }
 
 func (EnvMutation) String() string                { return Redacted }

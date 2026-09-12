@@ -202,11 +202,11 @@ func TestWouldStoreCleartext(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadPlaintextRules: %v", err)
 			}
-			clear, reason := rules.WouldStoreCleartext(c.key)
-			if clear != c.wantClear {
-				t.Fatalf("WouldStoreCleartext(%q) = %v (%q), want %v", c.key, clear, reason, c.wantClear)
+			isClear, reason := rules.WouldStoreCleartext(c.key)
+			if isClear != c.wantClear {
+				t.Fatalf("WouldStoreCleartext(%q) = %v (%q), want %v", c.key, isClear, reason, c.wantClear)
 			}
-			if !clear {
+			if !isClear {
 				return
 			}
 			if !strings.Contains(reason, c.wantReason) {
