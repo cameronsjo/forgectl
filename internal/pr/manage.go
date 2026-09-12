@@ -115,7 +115,7 @@ func (c *Client) loadSummary(path string) (SessionSummary, error) {
 	// nothing to classify.
 	if bc.Workspace == "" {
 		return SessionSummary{ref: ref, path: path, createdAt: bc.CreatedAt,
-			availability: workspaceAvailabilityNone, phase: bc.Phase}, nil
+			availability: workspaceAvailabilityNone, phase: bc.Phase, repairReason: bc.RepairReason}, nil
 	}
 	// Live and missing are both presentable, so their errors are discarded on
 	// purpose — classifyWorkspace returns the typed missing error alongside a
@@ -127,7 +127,7 @@ func (c *Client) loadSummary(path string) (SessionSummary, error) {
 	default:
 		return SessionSummary{}, fmt.Errorf("breadcrumb %s: %w", termsafe.QuotePath(path), err)
 	}
-	return SessionSummary{ref: ref, path: path, createdAt: bc.CreatedAt, availability: avail, phase: bc.Phase}, nil
+	return SessionSummary{ref: ref, path: path, createdAt: bc.CreatedAt, availability: avail, phase: bc.Phase, repairReason: bc.RepairReason}, nil
 }
 
 // refFromRecord restores the Ref a breadcrumb records. Locality cannot ride

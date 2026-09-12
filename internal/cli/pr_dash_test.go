@@ -14,6 +14,15 @@ package cli
 //   [x] Happy: a reviewed PR in awaiting/open is dimmed (ANSI wrap), matching
 //       the `prs` command's dim contract
 //   [x] Happy: per-query degradation notes land on stderr, not stdout
+//
+// phaseNote / renderSessions phase annotation (#499)
+//   [x] needs-repair with a live workspace shows the phase and the reason
+//   [x] needs-repair with no workspace shows phase + reason, not workspaceMissingStatus
+//   [x] queued and preparing rows carry their phase name, not workspaceUnclassifiedStatus
+//   [x] a repairReason carrying an ANSI escape renders with no raw 0x1b byte
+//   [x] an active row carries no bracket note
+//   [x] the legacy fixture (no phase) still renders no note
+//   [x] every pr.Phase constant except active yields a non-empty phaseNote
 
 import (
 	"bytes"
@@ -344,3 +353,233 @@ func TestDashCmd_DegradationNotesOnStderr(t *testing.T) {
 		t.Errorf("degradation note missing from stderr: %q", stderr.String())
 	}
 }
+
+// phasedRecord describes one v2 lifecycle breadcrumb for seedPhasedSummaries.
+// It only carries the choices validateBreadcrumbRecord actually enforces:
+// queued, preparing, and needs-repair may omit a workspace; every other phase
+// requires one. Only an active record needs a windowId.
+type phasedRecord struct {
+	ref           pr.Ref
+	phase         pr.Phase
+	repairReason  string
+	withWorkspace bool
+}
+
+// seedPhasedSummaries writes v2 records directly to sessionsDir — version 2,
+// revision 1, phase, and an optional repairReason and workspace — and returns
+// them through Client.List, the same real-record path seedSummaries uses.
+// SessionSummary's fields are private precisely so a test cannot hand-build
+// one; a phase-bearing fixture has to go through the loader like any other.
+func seedPhasedSummaries(t *testing.T, sessionsDir string, recs []phasedRecord) []pr.SessionSummary {
+	t.Helper()
+	for i, rec := range recs {
+		body := map[string]any{
+			"ref":       rec.ref.String(),
+			"agent":     "claude",
+			"createdAt": time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano),
+			"version":   2,
+			"revision":  1,
+			"phase":     string(rec.phase),
+		}
+		if rec.repairReason != "" {
+			body["repairReason"] = rec.repairReason
+		}
+		if rec.withWorkspace {
+			ws, err := os.MkdirTemp("", "forgectl-workflow-test-*")
+			if err != nil {
+				t.Fatalf("seed workspace: %v", err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(ws) })
+			body["workspace"] = ws
+		}
+		if rec.phase == pr.PhaseActive {
+			body["windowId"] = fmt.Sprintf("123\x1f456\x1f@%d", i+1)
+		}
+		data, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal phased breadcrumb: %v", err)
+		}
+		name := fmt.Sprintf("%s-%s-%d-%d.json", rec.ref.Owner, rec.ref.Repo, rec.ref.Number, time.Now().UnixNano()+int64(i))
+		if err := os.WriteFile(filepath.Join(sessionsDir, name), append(data, '\n'), 0o600); err != nil {
+			t.Fatalf("seed phased breadcrumb: %v", err)
+		}
+	}
+
+	client := pr.New(&exec.FakeRunner{}, pr.WithSessionsDir(sessionsDir))
+	summaries, unreadable, err := client.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if unreadable != 0 {
+		t.Fatalf("List found %d unreadable records", unreadable)
+	}
+	if len(summaries) != len(recs) {
+		t.Fatalf("List returned %d summaries, want %d", len(summaries), len(recs))
+	}
+	return summaries
+}
+
+// TestDashRenderSessions_NeedsRepairLiveWorkspace_ShowsPhaseAndReason pins case 1:
+// a needs-repair record with a live workspace must render its phase and the
+// diagnostic reason, not the healthy-looking unmarked row it got before #499.
+func TestDashRenderSessions_NeedsRepairLiveWorkspace_ShowsPhaseAndReason(t *testing.T) {
+	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 10}
+	summaries := seedPhasedSummaries(t, t.TempDir(), []phasedRecord{
+		{ref: ref, phase: pr.PhaseNeedsRepair, repairReason: "launch failed: window closed", withWorkspace: true},
+	})
+
+	var out bytes.Buffer
+	renderSessions(&out, summaries)
+	got := out.String()
+
+	if !strings.Contains(got, "needs-repair") {
+		t.Errorf("missing phase in output: %q", got)
+	}
+	if !strings.Contains(got, "launch failed: window closed") {
+		t.Errorf("missing repair reason in output: %q", got)
+	}
+}
+
+// TestDashRenderSessions_NeedsRepairNoWorkspace_ShowsPhaseAndReason pins case 2: a
+// needs-repair record with no workspace (a reservation whose clone failed)
+// must show its phase and reason, and must NOT be labeled workspaceMissingStatus
+// — a park with no workspace by design is not the same state as one whose
+// workspace was deleted out from under it.
+func TestDashRenderSessions_NeedsRepairNoWorkspace_ShowsPhaseAndReason(t *testing.T) {
+	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 11}
+	summaries := seedPhasedSummaries(t, t.TempDir(), []phasedRecord{
+		{ref: ref, phase: pr.PhaseNeedsRepair, repairReason: "clone failed: no space left on device"},
+	})
+
+	var out bytes.Buffer
+	renderSessions(&out, summaries)
+	got := out.String()
+
+	if !strings.Contains(got, "needs-repair") {
+		t.Errorf("missing phase in output: %q", got)
+	}
+	if !strings.Contains(got, "clone failed: no space left on device") {
+		t.Errorf("missing repair reason in output: %q", got)
+	}
+	if strings.Contains(got, workspaceMissingStatus) {
+		t.Errorf("a workspace-none needs-repair row must not be labeled %q: %q", workspaceMissingStatus, got)
+	}
+}
+
+// TestDashRenderSessions_QueuedAndPreparing_ShowPhaseNotUnclassified pins case 3:
+// queued and preparing rows have no workspace by design, and must carry their
+// phase name rather than falling into the unclassified-workspace internal
+// error the old three-arm switch produced.
+func TestDashRenderSessions_QueuedAndPreparing_ShowPhaseNotUnclassified(t *testing.T) {
+	queuedRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 12}
+	preparingRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 13}
+	summaries := seedPhasedSummaries(t, t.TempDir(), []phasedRecord{
+		{ref: queuedRef, phase: pr.PhaseQueued},
+		{ref: preparingRef, phase: pr.PhasePreparing},
+	})
+
+	var out bytes.Buffer
+	renderSessions(&out, summaries)
+	got := out.String()
+
+	if strings.Contains(got, workspaceUnclassifiedStatus) {
+		t.Errorf("queued/preparing rows must not print %q: %q", workspaceUnclassifiedStatus, got)
+	}
+	if !strings.Contains(got, "queued") {
+		t.Errorf("missing queued phase in output: %q", got)
+	}
+	if !strings.Contains(got, "preparing") {
+		t.Errorf("missing preparing phase in output: %q", got)
+	}
+}
+
+// TestDashRenderSessions_RepairReasonEscapesAnsi pins case 4: a repairReason is
+// written at an arbitrary throw site and can carry a captured process's raw
+// output, so it is untrusted the same way a breadcrumb path is. The rendered
+// line must carry no raw ESC byte.
+func TestDashRenderSessions_RepairReasonEscapesAnsi(t *testing.T) {
+	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 14}
+	summaries := seedPhasedSummaries(t, t.TempDir(), []phasedRecord{
+		{ref: ref, phase: pr.PhaseNeedsRepair, repairReason: "launch failed: \x1b[31mboom"},
+	})
+
+	var out bytes.Buffer
+	renderSessions(&out, summaries)
+	got := out.String()
+
+	if strings.Contains(got, "\x1b") {
+		t.Errorf("repair reason must not carry a raw ESC byte into the terminal: %q", got)
+	}
+}
+
+// TestDashRenderSessions_ActiveRow_NoPhaseNote pins case 5: active is the
+// unmarked baseline. A record actively under review must render exactly as
+// it did before phases existed, carrying no bracket note.
+func TestDashRenderSessions_ActiveRow_NoPhaseNote(t *testing.T) {
+	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 15}
+	summaries := seedPhasedSummaries(t, t.TempDir(), []phasedRecord{
+		{ref: ref, phase: pr.PhaseActive, withWorkspace: true},
+	})
+
+	var out bytes.Buffer
+	renderSessions(&out, summaries)
+	got := out.String()
+
+	if strings.Contains(got, "[") {
+		t.Errorf("an active row must carry no bracket phase note: %q", got)
+	}
+}
+
+// TestDashRenderSessions_LegacyFixture_NoPhaseNote pins case 6: the pre-#299
+// legacy fixture (no phase field at all) must keep rendering with no note —
+// phaseNote's empty-phase branch is the one guaranteeing that.
+func TestDashRenderSessions_LegacyFixture_NoPhaseNote(t *testing.T) {
+	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 16}
+	summaries := seedSummaries(t, t.TempDir(), []pr.Ref{ref}, nil)
+
+	var out bytes.Buffer
+	renderSessions(&out, summaries)
+	got := out.String()
+
+	if strings.Contains(got, "[") {
+		t.Errorf("a legacy (phaseless) row must carry no bracket note: %q", got)
+	}
+}
+
+// TestDashPhaseNote_EveryPhaseExceptActiveYieldsANote pins case 7: active and the
+// legacy empty phase are the only silent cases. Every phase this build knows
+// about — including one a future build might add to the switch's default arm
+// — must render by name rather than reading as a healthy review.
+func TestDashPhaseNote_EveryPhaseExceptActiveYieldsANote(t *testing.T) {
+	allPhases := []pr.Phase{
+		pr.PhaseQueued, pr.PhasePreparing, pr.PhasePrepared,
+		pr.PhaseLaunching, pr.PhaseActive, pr.PhaseNeedsRepair,
+	}
+	for i, phase := range allPhases {
+		rec := phasedRecord{
+			ref:   pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 20 + i},
+			phase: phase,
+		}
+		switch phase {
+		case pr.PhaseQueued, pr.PhasePreparing:
+			// no workspace by design
+		case pr.PhaseNeedsRepair:
+			rec.repairReason = "some diagnostic"
+		default:
+			rec.withWorkspace = true
+		}
+		summaries := seedPhasedSummaries(t, t.TempDir(), []phasedRecord{rec})
+
+		note := phaseNote(summaries[0])
+		if phase == pr.PhaseActive {
+			if note != "" {
+				t.Errorf("phase %q: phaseNote = %q, want empty", phase, note)
+			}
+			continue
+		}
+		if note == "" {
+			t.Errorf("phase %q: phaseNote returned empty, want a non-empty note", phase)
+		}
+	}
+}
+
