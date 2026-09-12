@@ -147,6 +147,15 @@ refused path into an existence oracle.
 **`env.RepoRoot` came back.** forgectl#515 deleted it as dead; the `--sops`
 default lives at the repository root, so it now has a caller.
 
+**The macOS runner installs sops from the release asset, not Homebrew.** The
+plan said "beside the `tmux` installs", and `brew install sops` fails outright
+on the self-hosted runner: its Homebrew prefix is owned by another user, so the
+step dies with `/opt/homebrew` not writable. The neighbouring tmux step only
+survives because tmux is already in the image and its `brew list`
+short-circuits — nothing absent is installable through brew there. Both
+binaries now install from checksum-verified release assets into a runner-owned
+directory added to `PATH`, matching the ubuntu job.
+
 **`openatCreate` retries a spurious `ENOENT`.** Not in the plan, and not
 optional: `unix.Openat` with `O_CREAT` on darwin returned 582 spurious `ENOENT`
 in 800 concurrent attempts where `os.OpenFile` with identical flags returned

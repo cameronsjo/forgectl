@@ -197,12 +197,45 @@ jobs:
         # Darwin is where sops' behaviour was measured — the exit status for an
         # unchanged file, the absent trailing newline from `--extract`, and the
         # unbounded editor re-invocation loop — so it is the platform whose
-        # integration run is worth the most. `brew list ||` keeps the step
-        # reentrant for the same reason the tmux step above does.
+        # integration run is worth the most.
+        #
+        # NOT brew, unlike the tmux step above. This is a self-hosted runner
+        # whose Homebrew prefix is owned by another user: `brew install sops`
+        # fails with "The following directories are not writable by your user:
+        # /opt/homebrew". The tmux step survives only because tmux is already in
+        # the image, so its `brew list` short-circuits and `brew install` never
+        # runs. Anything NOT already installed is unreachable through brew here.
+        #
+        # So the release assets are installed into a runner-owned directory and
+        # that directory is prepended to PATH for later steps. Same
+        # checksum-before-install discipline as the ubuntu job, and the same
+        # reason: pinning the tag alone does not help, because a tag can move.
+        #
+        # The sops digest is from the publisher's own
+        # sops-v3.13.3.checksums.txt. age publishes no checksums file (only
+        # sigstore .proof files), so its digest was computed locally from the
+        # release asset — the same basis as the linux digest in the ubuntu job.
         timeout-minutes: 5
         run: |
-          brew list sops || brew install sops
-          brew list age || brew install age
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+          curl -fsSL -o /tmp/sops \
+            https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.darwin.arm64
+          echo 'b97c0d434aab577dc40310e8d22ff9e45eef4c80638ab978daae9b4681c59286  /tmp/sops' | shasum -a 256 -c -
+          install -m 0755 /tmp/sops "$HOME/.local/bin/sops"
+
+          curl -fsSL -o /tmp/age.tgz \
+            https://github.com/FiloSottile/age/releases/download/v1.2.1/age-v1.2.1-darwin-arm64.tar.gz
+          echo 'cf79875bd5970dc2dac60c87fa50cee1ff1f9a41b0eb273f65e174aff37c367a  /tmp/age.tgz' | shasum -a 256 -c -
+          rm -rf /tmp/age
+          tar -xzf /tmp/age.tgz -C /tmp
+          install -m 0755 /tmp/age/age "$HOME/.local/bin/age"
+          install -m 0755 /tmp/age/age-keygen "$HOME/.local/bin/age-keygen"
+
+          "$HOME/.local/bin/sops" --version --disable-version-check
+          "$HOME/.local/bin/age-keygen" --version
 
       - name: Test (Darwin-gated coverage)
         # -v is deliberate: the run log naming each formerly-skipped test as
