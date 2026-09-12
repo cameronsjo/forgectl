@@ -302,3 +302,37 @@ func TestPrRepairHistory_RendersTheVerbColumn(t *testing.T) {
 		}
 	}
 }
+
+// TestPrRepairHistory_ClampsTheVerbModeAndOutcomeColumns pins the terminal sink
+// on the three columns a hand-edited log can fill with anything. The log is
+// declared untrusted input, and a raw ESC[2K + CR in the verb column would let a
+// row repaint itself as any verb, outcome, ref, or path in the one view that
+// exists to answer "which command removed the thing".
+func TestPrRepairHistory_ClampsTheVerbModeAndOutcomeColumns(t *testing.T) {
+	dir := t.TempDir()
+	row := pr.RepairRow{
+		TS: time.Now().UTC(), ID: "a",
+		Verb: "teardown\x1b[2K\rrepair", Mode: "--rollback\x1b[31m", Outcome: "applied\x07",
+		Ref: "o/r#1", RecordPath: "/tmp/one.json",
+	}
+	data, err := json.Marshal(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "repair.jsonl"), append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := runPrRepair(t, repairCmdClient(t, dir), "--history")
+	if err != nil {
+		t.Fatalf("pr repair --history: %v", err)
+	}
+	for _, raw := range []string{"\x1b", "\r", "\x07"} {
+		if strings.Contains(out, raw) {
+			t.Errorf("history output carries a raw %q byte from the log:\n%q", raw, out)
+		}
+	}
+	if !strings.Contains(out, "teardown") {
+		t.Errorf("the verb's graphic text was lost in clamping:\n%q", out)
+	}
+}

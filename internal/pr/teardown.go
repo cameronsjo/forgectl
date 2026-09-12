@@ -170,6 +170,13 @@ func (c *Client) auditedTeardownLocked(ctx context.Context, verb, path string) e
 		return err
 	}
 	row := teardownRowFor(verb, plan.member)
+	if plan.kind == teardownKindLive {
+		// The live arm deletes the workspace loadSession read on its second
+		// pass over the record, not the one the member's first read carried.
+		// The row is the recovery pointer once the record is gone, so it names
+		// the path that is actually removed.
+		row.Workspace = plan.sess.Workspace
+	}
 	rowID, err := c.beginRepairRow(row)
 	if err != nil {
 		return err

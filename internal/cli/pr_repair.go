@@ -120,7 +120,7 @@ func runRepairHistory(cmd *cobra.Command, client *pr.Client, asJSON bool) error 
 		// hand-editable and was written before teardown and cleanup recorded
 		// themselves, so silence there is unknown, never "this was a repair".
 		_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			r.TS.Format("2006-01-02T15:04:05Z07:00"), dashIfEmpty(r.Verb), dashIfEmpty(r.Mode), r.Outcome,
+			r.TS.Format("2006-01-02T15:04:05Z07:00"), safeTerm(dashIfEmpty(r.Verb)), safeTerm(dashIfEmpty(r.Mode)), safeTerm(r.Outcome),
 			safeTerm(r.Ref), termsafe.QuotePathIfUnsafe(r.RecordPath))
 		// The note is not optional detail. A shrunken ref or workspace stays
 		// well-formed, so without this line the default reader sees a truncated
