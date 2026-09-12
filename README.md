@@ -15,7 +15,7 @@ brew install cameronsjo/tap/forgectl
 
 Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against whichever Gitea instance `tea` is logged into, and `review` when `[review.gitea]` is enabled), `kubectl` (`k8s logs`), `docker` (`bench status`/`up`, `docker build/run/shell`, and `clean --docker`), `npm`/`pnpm`/`pip`/`go`/`brew` (`clean --caches` — each is independently opt-in and skipped, not required, when absent). `update`'s roster shares that same `brew`/`go`/`npm` dependency (`softwareupdate` is a macOS built-in) — each step is independently scoped, so a missing tool fails only its own step, never the others.
 
-Commands that actually launch a PR review — `forgectl pr <ref>`, `forgectl pr local`, and `forgectl pr pick` once admission establishes there is at least one ref to prepare — require **tmux 2.2 or newer**, for the dispatch-identity reasons in [docs/commands/pr.md](docs/commands/pr.md). Read-only PR commands, any `--dry-run`, and empty, all-reviewed, or cap-full selections do not acquire that floor.
+Commands that actually launch a PR review — `forgectl pr <ref>`, `forgectl pr local`, and `forgectl pr pick` once admission establishes there is at least one ref to prepare — require **tmux 2.2 or newer**, for the dispatch-identity reasons in [docs/commands/pr.md](docs/commands/pr.md). Read-only PR commands, any `--dry-run`, `--queue`, and empty, all-reviewed, or cap-full selections do not acquire that floor.
 
 Reading a local clone's git state — `projects list`, `projects pick`, the project inventory, and `projects pull-all` — requires **Git 2.11.0 or newer**. That release introduced `git status --porcelain=v2 --branch`, which reports the working-tree state and the ahead/behind counts in a single command; forgectl reads both from that one call rather than spawning a second `rev-list` per clean repository. On older Git the command fails, the repository's status reads as unknown, and `pull-all` skips it rather than rebasing a tree whose state it could not establish.
 
@@ -94,6 +94,7 @@ forgectl projects worktree <query> [branch] # same ambiguity contract as clone; 
 # pr — clean-room pull-request review (the flagship review family)
 forgectl pr <ref>                        # prepare + launch an isolated, deny-by-default review (owner/repo#N, a PR URL, or a bare N)
 forgectl pr <ref> --dry-run              # resolve + print the plan, create nothing
+forgectl pr <ref> --queue                # at (or below) the cap, defer to the drainer instead of launching now
 forgectl pr prs                          # cross-repo open PRs (authored, assigned, review-requested); reviewed rows dimmed
 forgectl pr prs --json                   # machine-readable JSON (safe to pipe; notes go to stderr)
 forgectl pr dash                         # dashboard: active reviews, PRs awaiting you, your open PRs
@@ -101,9 +102,10 @@ forgectl pr pick                         # multiselect with both descriptors TTY
 forgectl pr reviewed mark <ref>          # mark a PR reviewed (dims it until the PR sees new activity)
 forgectl pr reviewed unmark <ref>        # clear a PR's reviewed mark
 forgectl pr reviewed sync                # prune reviewed marks for PRs that are no longer open
-forgectl pr list                         # list active clean-room review sessions
+forgectl pr list                         # list active clean-room review sessions (queued rows show phase `queued`)
 forgectl pr attach <breadcrumb>          # jump to a review window (also: open <b>, teardown <b>)
                                           #   <breadcrumb> is the session path `pr list` prints
+forgectl pr teardown <breadcrumb>        # discard a review session OR a queue entry
 forgectl pr repair                       # list sessions stuck between phases; exits 1 when any need settling
 forgectl pr repair <b> --apply --rollback   # settle one: --adopt-window, --rollback, or --forget-if-absent
 forgectl pr repair --prune               # reap set-aside records past retention and compact the repair audit log

@@ -88,7 +88,7 @@ const logKeepDays = 7
 //	roster  = []          # step names to run when --only is omitted; empty = every roster step
 //	log_dir = ""          # transcript log directory; empty = <config dir>/update-logs
 //	[pr]                 # forgectl pr — bulk-launch cap and clean-room reviewer posture
-//	max_concurrent = 4   # live "pr-*" tmux windows allowed at once; <= 0 = default (4)
+//	max_concurrent = 4   # governs every launch path (pr <ref>, pr local, pr pick, pr drain); <= 0 = default (4)
 //	model  = ""          # reviewer model; unset = the ambient launch profile's
 //	effort = ""          # reviewer effort; unset = the ambient profile's, re-derived when model is set
 //	[theme]              # forgectl TUI colour theme

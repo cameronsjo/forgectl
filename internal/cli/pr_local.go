@@ -40,7 +40,14 @@ The --agent codex reviewer is NOT confined the way the default is: its sandbox
 scopes writes and network but not which commands run, so it can execute shell
 and read your whole home directory. It therefore requires --operator-authored,
 which asserts that you wrote the code under review. A local path does not imply
-that — ` + "`gh pr checkout`" + ` puts someone else's commit in your own repo.`,
+that — ` + "`gh pr checkout`" + ` puts someone else's commit in your own repo.
+
+The concurrency cap ([pr] max_concurrent in config.toml) governs this command
+too, alongside ` + "`pr <ref>`" + ` and ` + "`pr pick`" + `. At the cap it refuses with nothing
+prepared. There is no --queue here: a local session's findings are never
+persisted to its breadcrumb and a reloaded local session refuses to launch, so
+a queued local review could never be started by the drainer — review it now
+or not at all.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := "."
@@ -48,29 +55,65 @@ that — ` + "`gh pr checkout`" + ` puts someone else's commit in your own repo.
 				path = args[0]
 			}
 			ctx := cmd.Context()
-			if !dryRun {
-				if err := client.CheckDispatchCapability(ctx); err != nil {
-					return err
-				}
-			}
 
-			sess, err := client.PrepareLocal(ctx, path, pr.PrepareLocalOpts{
+			prepOpts := pr.PrepareLocalOpts{
 				Agent:      resolveAgent(agent),
 				DryRun:     dryRun,
 				Provenance: localProvenance(operatorAuthored),
-			})
-			if err != nil {
-				return err
 			}
 
 			out := cmd.OutOrStdout()
 			if dryRun {
+				sess, err := client.PrepareLocal(ctx, path, prepOpts)
+				if err != nil {
+					return err
+				}
 				displayAgent := agentDisplayLabel(sess.Agent)
 				fmt.Fprintf(out, "plan: local review %s @ %s\n", sess.HeadRef, sess.HeadOid)
 				fmt.Fprintf(out, "  agent: %s\n", displayAgent)
 				fmt.Fprintln(out, "  worktree -> quarantine -> launch agent (local profile: read-only git, no network CLI, one writable findings dir)")
 				fmt.Fprintln(out, "  (dry-run: no workspace, window, or breadcrumb created)")
 				return nil
+			}
+
+			if err := client.CheckDispatchCapability(ctx); err != nil {
+				return err
+			}
+
+			// ResolveLocalHead runs the location refusals (option-like path,
+			// clean-room path) and reads HEAD once. The oid it returns is
+			// threaded into PrepareLocal below so the reservation, the record,
+			// the workspace, and the tmux window name all name one commit even
+			// if HEAD moves mid-run.
+			localRef, headOid, err := client.ResolveLocalHead(ctx, path)
+			if err != nil {
+				return err
+			}
+			// The provenance gate is a pure policy refusal — no I/O decides it
+			// — so it runs BEFORE the reservation, and a refused review leaves
+			// nothing on disk. That is what `pr local`'s own Long text and
+			// PrepareLocal's ordering comment both promise; a refusal after
+			// Reserve would leave a `preparing` record holding a slot.
+			// PrepareLocal and Launch both re-check.
+			if err := pr.CheckAgentForReview(prepOpts.Agent, pr.EffectiveProvenance(localRef, prepOpts.Provenance)); err != nil {
+				return err
+			}
+			recordPath, err := client.Reserve(ctx, localRef, cfg.Pr.MaxConcurrent, pr.PrepareOpts{
+				Agent:      prepOpts.Agent,
+				Provenance: prepOpts.Provenance,
+			})
+			if err != nil {
+				if maxN, liveN, ok := pr.ReviewCapReached(err); ok {
+					return localReviewCapRefusal(maxN, liveN)
+				}
+				return err
+			}
+			prepOpts.RecordPath = recordPath
+			prepOpts.HeadOid = headOid
+
+			sess, err := client.PrepareLocal(ctx, path, prepOpts)
+			if err != nil {
+				return parkReservation(ctx, client, recordPath, localRef.String(), err)
 			}
 
 			dispatch, err := client.Launch(ctx, sess, cfg)
@@ -94,6 +137,16 @@ that — ` + "`gh pr checkout`" + ` puts someone else's commit in your own repo.
 		"assert that you wrote the code under review; required for --agent codex, "+
 			"which permits the reviewer arbitrary shell and host-wide reads")
 	return cmd
+}
+
+// localReviewCapRefusal is `pr local`'s admission refusal at the cap. It has
+// no --queue line: `pr local` never accepts that flag, for the reason its
+// own Long text gives.
+func localReviewCapRefusal(maxN, liveN int) error {
+	return fmt.Errorf("review cap reached (max %d, %d running) — nothing prepared.\n"+
+		"  see them:   forgectl pr list\n"+
+		"  raise it:   [pr] max_concurrent in config.toml",
+		maxN, liveN)
 }
 
 // localProvenance maps the --operator-authored flag onto the provenance axis.

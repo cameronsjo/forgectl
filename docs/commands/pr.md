@@ -5,6 +5,7 @@
 ```sh
 forgectl pr <ref>                        # prepare + launch an isolated, deny-by-default review (owner/repo#N, a PR URL, or a bare N)
 forgectl pr <ref> --dry-run              # resolve + print the plan, create nothing
+forgectl pr <ref> --queue                # defer to 'forgectl pr drain' instead of launching now
 forgectl pr prs                          # cross-repo open PRs (authored, assigned, review-requested); reviewed rows dimmed
 forgectl pr prs --json                   # machine-readable JSON (safe to pipe; notes go to stderr)
 forgectl pr dash                         # dashboard: active reviews, PRs awaiting you, your open PRs
@@ -77,6 +78,21 @@ A review session is recorded before it is dispatched, not after, so a crash at a
 | `-` | A record written before phases existed. | no |
 
 The slot accounting is why `preparing`, `prepared`, and `launching` count: each has claimed capacity that no window reflects yet. `queued` has claimed nothing, and `needs-repair` is deliberately released so a crashed session cannot hold a slot forever — it is visible to `pr repair` and it is your call.
+
+## The concurrency cap on every launch path
+
+`[pr] max_concurrent` (default 4) governs every way a review can start, not just bulk `pr pick`: `forgectl pr <ref>` and `forgectl pr local` both reserve a slot before doing any work, under the same lock and the same accounting `pr pick` already used. At the cap, `pr <ref>` and `pr local` refuse with nothing prepared — no workspace, no clean room, no record beyond what was already there:
+
+```
+review cap reached (max 4, 4 running) — nothing prepared.
+  see them:   forgectl pr list
+  queue it:   forgectl pr owner/repo#42 --queue   (then: forgectl pr drain --once)
+  raise it:   [pr] max_concurrent in config.toml
+```
+
+`forgectl pr <ref> --queue` sidesteps the cap check entirely: it writes a `queued` record (no workspace, no tmux, no dispatch-capability floor) and exits 0, printing the record's path. That record sits until `forgectl pr drain` (the drainer, forgectl#473) claims it, or until `pr teardown <breadcrumb>` discards it directly. `pr local` has no `--queue`: a local review's findings directory is never persisted to its breadcrumb, and `Launch` refuses a reloaded local session outright, so a queued local review could never be started later — review it now or not at all.
+
+`forgectl pr pick` extends the same rule to bulk: PRs past the cap are **queued for the drainer, not discarded**. When every slot is already taken, the whole selection is queued; when only some fit, the truncated remainder is queued while the rest launch. Either way `pick` prints `N PR(s) queued by the concurrency cap (max M) — start them with 'forgectl pr drain --once'` and exits 0, because it did do something. `pr list` shows a queued entry with phase `queued`, not `workspace missing` — a queued record has no workspace by design, and that is the point, not damage.
 
 `forgectl pr repair` with no arguments lists every record in one of those unsettled phases, with the reason it carries, whether its derived window is live, and whether its clean room still exists. It exits 1 when anything needs settling — in both output shapes, so `--json` hears the same answer the human text gives — and 0 when nothing does.
 

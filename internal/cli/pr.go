@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"time"
 
@@ -51,6 +52,7 @@ func newPrCmdForClient(cfg config.Config, client *pr.Client, netClient *netpkg.C
 		headless bool
 		dryRun   bool
 		noVerify bool
+		queue    bool
 	)
 
 	cmd := &cobra.Command{
@@ -65,18 +67,24 @@ human approval gate.
   forgectl pr owner/repo#42        prepare + launch a review
   forgectl pr 42                   same, resolving owner/repo from origin
   forgectl pr <ref> --dry-run      resolve + print the plan, create nothing
+  forgectl pr <ref> --queue        defer to the drainer instead of launching now
   forgectl pr local                offline review of local committed changes
   forgectl pr list                 list active review sessions
   forgectl pr attach <breadcrumb>  jump to a review window
   forgectl pr open <breadcrumb>    open a shell in the clean room
-  forgectl pr teardown <breadcrumb>  discard a session
+  forgectl pr teardown <breadcrumb>  discard a session or queue entry
   forgectl pr repair               settle sessions whose record and reality disagree
   forgectl pr cleanup <YYYY-MM-DD>   discard all sessions from a day
   forgectl pr findings list|cleanup  reclaim durable local-review findings
   forgectl pr keys                 tmux-review cheatsheet
 
 The <ref> is validated by an anchored regex: owner/repo#N, a github.com PR
-URL, or a bare number. Fetched PR content is treated as hostile input.`,
+URL, or a bare number. Fetched PR content is treated as hostile input.
+
+The concurrency cap ([pr] max_concurrent in config.toml) governs every launch
+path — this command, 'pr local', and 'pr pick' alike. At the cap this command
+refuses with nothing prepared; --queue writes a queued record instead and
+exits 0, to be started later by 'forgectl pr drain --once'.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -90,35 +98,83 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 				fmt.Fprintln(cmd.ErrOrStderr(), "warning: network unreachable; the gh round-trip may fail")
 			}
 
-			if !dryRun {
-				if err := client.CheckDispatchCapability(ctx); err != nil {
-					return err
-				}
-			}
-			sess, err := client.Prepare(ctx, ref, pr.PrepareOpts{
-				Agent:    resolveAgent(agent),
-				DryRun:   dryRun,
-				Headless: headless,
-				// A named PR ref is a third party's content by construction,
-				// whatever the owner spells and whoever opened it. There is no
-				// flag to override this and there must not be one: an operator
-				// reviewing their OWN branch locally uses `pr local
-				// --operator-authored`, which reviews the tree in front of them
-				// rather than a fetched head.
+			// A named PR ref is a third party's content by construction,
+			// whatever the owner spells and whoever opened it. There is no
+			// flag to override this and there must not be one: an operator
+			// reviewing their OWN branch locally uses `pr local
+			// --operator-authored`, which reviews the tree in front of them
+			// rather than a fetched head.
+			prepOpts := pr.PrepareOpts{
+				Agent:      resolveAgent(agent),
+				DryRun:     dryRun,
+				Headless:   headless,
 				Provenance: pr.ReviewProvenanceThirdParty,
-			})
-			if err != nil {
+			}
+
+			// Every pure policy refusal runs HERE, before any of the three
+			// branches below, because none of them needs I/O to decide it and
+			// all three owe the same answer.
+			//
+			// Ahead of --queue it closes the one gap where a queued record
+			// could store an agent/provenance pairing the immediate path
+			// refuses: the drainer would then hit the refusal hours later, on
+			// someone else's command, instead of here on the operator's.
+			// Ahead of Reserve it keeps the promise this command's own Long
+			// text makes — at the cap it "refuses with nothing prepared", and
+			// a refusal after Reserve would leave a `preparing` record holding
+			// a slot. Prepare and Launch both re-check; these are the fast
+			// fail, not the authoritative gate.
+			if err := pr.CheckAgentForReview(prepOpts.Agent, pr.EffectiveProvenance(ref, prepOpts.Provenance)); err != nil {
 				return err
 			}
 
 			out := cmd.OutOrStdout()
 			if dryRun {
+				sess, err := client.Prepare(ctx, ref, prepOpts)
+				if err != nil {
+					return err
+				}
 				displayAgent := agentDisplayLabel(resolveAgent(agent))
 				fmt.Fprintf(out, "plan: review %s\n", sess.Ref.String())
 				fmt.Fprintf(out, "  head: %s @ %s (%s)\n", sess.HeadRef, sess.HeadOid, sess.HeadRepo)
 				fmt.Fprintf(out, "  agent: %s\n", displayAgent)
 				fmt.Fprintln(out, "  (dry-run: no workspace, window, or breadcrumb created)")
 				return nil
+			}
+
+			// --queue always defers to the drainer rather than attempting a
+			// launch now: it is an explicit choice, not merely a fallback the
+			// cap refusal below offers, so it never even attempts reserve —
+			// and never touches tmux at all, so it needs no dispatch-capability
+			// floor (the same reasoning `pr pick`'s cap-full branch already
+			// applies).
+			if queue {
+				path, err := client.Queue(ctx, ref, prepOpts)
+				if err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(out, "queued %s\n", ref.String())
+				_, _ = fmt.Fprintf(out, "  record: %s\n", path)
+				_, _ = fmt.Fprintln(out, "  start it: forgectl pr drain --once")
+				return nil
+			}
+
+			if err := client.CheckDispatchCapability(ctx); err != nil {
+				return err
+			}
+
+			recordPath, err := client.Reserve(ctx, ref, cfg.Pr.MaxConcurrent, prepOpts)
+			if err != nil {
+				if maxN, liveN, ok := pr.ReviewCapReached(err); ok {
+					return reviewCapRefusal(maxN, liveN, ref)
+				}
+				return err
+			}
+			prepOpts.RecordPath = recordPath
+
+			sess, err := client.Prepare(ctx, ref, prepOpts)
+			if err != nil {
+				return parkReservation(ctx, client, recordPath, ref.String(), err)
 			}
 
 			dispatch, err := client.Launch(ctx, sess, cfg)
@@ -145,6 +201,7 @@ URL, or a bare number. Fetched PR content is treated as hostile input.`,
 	cmd.Flags().BoolVar(&headless, "headless", false, "stage only; never show the interactive approval gate or auto-post")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve and print the plan without creating anything")
 	cmd.Flags().BoolVar(&noVerify, "no-verify", false, "skip the delayed post-dispatch window check")
+	cmd.Flags().BoolVar(&queue, "queue", false, "defer to 'forgectl pr drain' instead of launching now; writes a queued record and exits 0")
 
 	cmd.AddCommand(
 		newPrLocalCmd(client, cfg),
@@ -180,6 +237,40 @@ func agentDisplayLabel(agent string) string {
 		return "claude (default, inline-seeded)"
 	}
 	return agent
+}
+
+// reviewCapRefusal is the three-line admission refusal `pr <ref>` and `pr
+// local` return at the cap: what's running, how to defer, how to raise it.
+// The wording is pinned by the design doc so a script or a human reading the
+// message finds the same two next steps every time.
+func reviewCapRefusal(maxN, liveN int, ref pr.Ref) error {
+	return fmt.Errorf("review cap reached (max %d, %d running) — nothing prepared.\n"+
+		"  see them:   forgectl pr list\n"+
+		"  queue it:   forgectl pr %s --queue   (then: forgectl pr drain --once)\n"+
+		"  raise it:   [pr] max_concurrent in config.toml",
+		maxN, liveN, ref.String())
+}
+
+// parkReservation settles a reservation whose prepare failed AFTER the slot
+// was claimed, then returns the original prepare error unchanged — the single
+// -ref launch paths' equivalent of PrepareMany's inline park (internal/pr's
+// discover.go), so the two admission routes leak nothing on the same failure.
+//
+// Without the park, a failed prepare leaves a `preparing` record with no clean
+// room behind it: it counts against the cap forever and blocks every retry of
+// the same ref, so four transient `gh` failures would exhaust a default cap of
+// four and refuse every later launch. A park makes the cost of a transient
+// failure one retry.
+//
+// The prepare error is what the operator sees. A failure to park is logged and
+// swallowed rather than returned, because replacing the real diagnosis with a
+// bookkeeping error would hide why the review did not start.
+func parkReservation(ctx context.Context, client *pr.Client, recordPath, ref string, cause error) error {
+	if err := client.ParkFailedReservation(ctx, recordPath, "prepare failed: "+cause.Error()); err != nil {
+		slog.Error("Failed to park a reservation whose prepare failed; its slot stays reserved.",
+			"ref", ref, "path", recordPath, "error", err)
+	}
+	return cause
 }
 
 // workspaceMissingStatus is the `pr list` / `pr dash` label for a review whose
@@ -412,7 +503,7 @@ func newPrTeardownCmd(client *pr.Client) *cobra.Command {
 	// close are unrelated commands (forgectl#190). Do not re-add it.
 	return &cobra.Command{
 		Use:   "teardown <breadcrumb>",
-		Short: "Discard a review session (restore + remove workspace)",
+		Short: "Discard a review session or queue entry",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := client.Teardown(cmd.Context(), args[0]); err != nil {
@@ -474,7 +565,7 @@ const prKeysText = `clean-room review — tmux keys that matter
   forgectl pr
     pr attach <b>   jump to a review window by breadcrumb
     pr open <b>     open a shell in the clean-room workspace
-    pr teardown <b> discard the session (restore + remove workspace)
+    pr teardown <b> discard a session or queue entry
     pr repair       settle a session whose record and reality disagree
 
 Nothing is posted to the PR without passing forgectl's approval gate.
