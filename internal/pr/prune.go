@@ -42,10 +42,32 @@ const (
 // hex-encoded.
 const asideSuffixHexLen = 16
 
+// asideStampFloor is the earliest set-aside stamp this build will believe:
+// 2025-01-01T00:00:00Z, comfortably before forgectl's first release and
+// therefore before any set-aside file can exist.
+//
+// A STAMP BELOW IT IS A CLOCK THAT LIED, NOT AN OLD FILE. freeAsideName writes
+// the stamp from time.Now(), so a host that has not synced NTP yet — a fresh
+// container or VM — names a record it set aside seconds ago at 1970. Read as an
+// age, that is ~56 years: past every retention window, so the next sweep would
+// unlink a brand-new record permanently. The floor routes those names into the
+// same branch an unreadable name takes: LISTED, never removed, which is the
+// rule parseAsideAge's own doc comment states.
+//
+// The floor is deliberately in the past rather than "within N years of now":
+// the clock that produced the stamp is the same clock that would evaluate such
+// a rule, so a rule reading `now` cannot detect the failure it exists for.
+const asideStampFloor = 1735689600 // 2025-01-01T00:00:00Z
+
 // maxRetentionDays bounds the `<N>d` retention form. It exists so the
 // multiplication into a time.Duration cannot overflow into a small or negative
 // window, which would read as a retention the operator never asked for.
 const maxRetentionDays = 100 * 365
+
+// minRetention is the shortest window parseRetention will accept. See its doc
+// comment: refusing only zero left `1ns` as an equivalent way to say "remove
+// everything", which is what a unit typo produces.
+const minRetention = time.Hour
 
 // PruneOpts drives one `pr repair --prune` invocation.
 type PruneOpts struct {
@@ -102,9 +124,11 @@ func ParseRetention(s string) (time.Duration, error) { return parseRetention(s) 
 // parseRetention reads a retention window: everything time.ParseDuration
 // accepts, plus the `<N>d` form nobody wants to spell as hours.
 //
-// Zero and negative REFUSE rather than defaulting. A window of zero would mean
-// "everything is past retention", which is the one value an operator could type
-// by accident and the one value whose consequence is unrecoverable.
+// ANYTHING UNDER minRetention REFUSES, not just zero and negative. Refusing
+// only zero was a floor in name alone: `--older-than 1ns` puts every record
+// past retention just as completely, and it is exactly the value a unit typo
+// produces. A window shorter than an hour is not a retention policy, and the
+// consequence of getting it wrong here is an unlink.
 func parseRetention(s string) (time.Duration, error) {
 	text := strings.TrimSpace(s)
 	if text == "" {
@@ -127,9 +151,10 @@ func parseRetention(s string) (time.Duration, error) {
 		return 0, fmt.Errorf("%s is not a duration; give something like 30d, 720h, or 90m",
 			termsafe.QuotePath(text))
 	}
-	if d <= 0 {
-		return 0, fmt.Errorf("retention window %s must be positive; a zero window would put every record past retention",
-			termsafe.QuotePath(text))
+	if d < minRetention {
+		return 0, fmt.Errorf("retention window %s is shorter than the %s floor; "+
+			"a window that short puts every record past retention, which is what a unit typo looks like",
+			termsafe.QuotePath(text), minRetention)
 	}
 	return d, nil
 }
@@ -144,8 +169,21 @@ func parseRetention(s string) (time.Duration, error) {
 //
 // A name it cannot read yields no time, and the caller LISTS such a file rather
 // than removing it. Anything else would mean deleting a file whose age nothing
-// established.
+// established. A stamp below asideStampFloor is treated the same way, for the
+// same reason: an untrusted clock establishes nothing either.
 func parseAsideAge(name string) (time.Time, bool) {
+	ts, ok := parseAsideStamp(name)
+	if !ok || ts.Unix() < asideStampFloor {
+		return time.Time{}, false
+	}
+	return ts, true
+}
+
+// parseAsideStamp is the name parse WITHOUT the trusted-clock floor — the
+// literal bytes of the name, and nothing about whether they are believable.
+// Split out so the caller can tell an UNREADABLE name from a readable one whose
+// clock lied, which are the same outcome but not the same message.
+func parseAsideStamp(name string) (time.Time, bool) {
 	idx := strings.LastIndex(name, unreadableSuffix)
 	if idx < 0 || !strings.HasSuffix(name[:idx], ".json") {
 		return time.Time{}, false
@@ -177,6 +215,18 @@ func parseAsideAge(name string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return time.Unix(secs, 0).UTC(), true
+}
+
+// undatedReason says WHY a name yielded no usable age, because "kept" alone
+// names no way forward and the two causes call for different actions: an
+// unreadable name is someone's hand edit, an epoch-era one is a host whose
+// clock was not synced when the record was set aside.
+func undatedReason(name string) string {
+	if ts, ok := parseAsideStamp(name); ok && ts.Unix() < asideStampFloor {
+		return fmt.Sprintf("its set-aside stamp (%s) predates the %s floor, so the clock that wrote it was not trusted",
+			ts.Format(time.RFC3339), time.Unix(asideStampFloor, 0).UTC().Format(time.RFC3339))
+	}
+	return "its name carries no readable set-aside timestamp, so nothing established its age"
 }
 
 // classifyRepairRows decides what compaction may drop, over the log's RAW
@@ -400,6 +450,19 @@ func (c *Client) enumerateAsideFiles(now time.Time, olderThan time.Duration) (fs
 	if err != nil {
 		return nil, nil, fmt.Errorf("read pr sessions dir: %w", err)
 	}
+	// The pin READS through the same kind of handle the removal re-reads
+	// through. Opening by path would follow a symlink swapped in between the
+	// Lstat and the open, putting another file's bytes into the audit row —
+	// and then the pinned re-read would be comparing against those.
+	root, err := os.OpenRoot(c.sessionsDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("pin pr sessions dir %s: %w", termsafe.QuotePath(c.sessionsDir), err)
+	}
+	defer func() {
+		if cerr := root.Close(); cerr != nil {
+			slog.Debug("Failed to close the pinned pr sessions dir handle.", "error", cerr)
+		}
+	}()
 
 	var candidates []*asideCandidate
 	for _, e := range entries {
@@ -420,7 +483,7 @@ func (c *Client) enumerateAsideFiles(now time.Time, olderThan time.Duration) (fs
 		stamp, dated := parseAsideAge(name)
 		if !dated {
 			cand.item.Outcome = pruneOutcomeKept
-			cand.item.Reason = "its name carries no readable set-aside timestamp, so nothing established its age"
+			cand.item.Reason = undatedReason(name)
 			continue
 		}
 		age := now.Sub(stamp)
@@ -430,7 +493,7 @@ func (c *Client) enumerateAsideFiles(now time.Time, olderThan time.Duration) (fs
 			cand.item.Reason = fmt.Sprintf("it was set aside %s ago, inside the %s window", renderAge(age), renderAge(olderThan))
 			continue
 		}
-		if err := c.pinAsideCandidate(cand); err != nil {
+		if err := pinAsideCandidate(root, cand); err != nil {
 			cand.item.Outcome = pruneOutcomeRefused
 			cand.item.Error = termsafe.SafeLine(err.Error())
 			continue
@@ -445,8 +508,13 @@ func (c *Client) enumerateAsideFiles(now time.Time, olderThan time.Duration) (fs
 // authorized against. A file that cannot be pinned is refused rather than
 // removed: the audit row carries these bytes, and an unlink whose row names
 // nothing is the one shape that loses the file outright.
-func (c *Client) pinAsideCandidate(cand *asideCandidate) error {
-	info, err := os.Lstat(cand.path)
+// Both the stat and the read go through the PINNED directory handle rather
+// than by path. By path, a symlink swapped in between the Lstat and the open
+// would put an unrelated file's bytes into the audit row — and since the
+// removal's byte comparison is against exactly these bytes, the comparison
+// would then agree with itself about the wrong file.
+func pinAsideCandidate(root *os.Root, cand *asideCandidate) error {
+	info, err := root.Lstat(cand.name)
 	if err != nil {
 		return fmt.Errorf("stat set-aside record %s: %w", termsafe.QuotePath(cand.path), termsafe.Error(err))
 	}
@@ -454,17 +522,9 @@ func (c *Client) pinAsideCandidate(cand *asideCandidate) error {
 		return fmt.Errorf("set-aside record %s is not a regular file; refusing to remove it",
 			termsafe.QuotePath(cand.path))
 	}
-	file, err := os.Open(cand.path) //nolint:gosec // an entry this function just enumerated inside the 0700 sessions dir
+	data, err := readFileInRoot(root, cand.name)
 	if err != nil {
-		return fmt.Errorf("read set-aside record %s: %w", termsafe.QuotePath(cand.path), termsafe.Error(err))
-	}
-	data, readErr := readBreadcrumbBytes(file)
-	closeErr := file.Close()
-	if readErr != nil {
-		return fmt.Errorf("read set-aside record %s: %w", termsafe.QuotePath(cand.path), termsafe.Error(readErr))
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close set-aside record %s: %w", termsafe.QuotePath(cand.path), termsafe.Error(closeErr))
+		return err
 	}
 	cand.info = info
 	cand.bytes = data
@@ -610,18 +670,24 @@ func (c *Client) removeAsideFile(cand *asideCandidate, dirInfo fs.FileInfo) erro
 // It is a var because that comparison is the one guard with no other way to
 // exercise it: the window it protects is between the identity checks and the
 // read, so staging a real writer there would be a race a test cannot win.
-var readAsideBytes = func(root *os.Root, name string) ([]byte, error) {
+var readAsideBytes = readFileInRoot
+
+// readFileInRoot reads one bounded file through a pinned directory handle. It
+// is the shared body behind the pin read and the re-read, so the two cannot
+// drift into reading the file differently — which would make their byte
+// comparison meaningless.
+func readFileInRoot(root *os.Root, name string) ([]byte, error) {
 	file, err := root.Open(name)
 	if err != nil {
-		return nil, fmt.Errorf("re-read set-aside record %s: %w", termsafe.QuotePath(name), termsafe.Error(err))
+		return nil, fmt.Errorf("read set-aside record %s: %w", termsafe.QuotePath(name), termsafe.Error(err))
 	}
 	data, readErr := readBreadcrumbBytes(file)
 	closeErr := file.Close()
 	if readErr != nil {
-		return nil, fmt.Errorf("re-read set-aside record %s: %w", termsafe.QuotePath(name), termsafe.Error(readErr))
+		return nil, fmt.Errorf("read set-aside record %s: %w", termsafe.QuotePath(name), termsafe.Error(readErr))
 	}
 	if closeErr != nil {
-		return nil, fmt.Errorf("close set-aside record %s after re-read: %w", termsafe.QuotePath(name), termsafe.Error(closeErr))
+		return nil, fmt.Errorf("close set-aside record %s after reading: %w", termsafe.QuotePath(name), termsafe.Error(closeErr))
 	}
 	return data, nil
 }

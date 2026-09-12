@@ -377,3 +377,67 @@ func TestPrPrune_EmptySweepSaysSoAndExitsZero(t *testing.T) {
 		t.Errorf("stdout = %q, want the empty-state line", out)
 	}
 }
+
+// TestPrPrune_RefusesAPositionalBreadcrumb closes the last hole in the prune
+// grammar. The operand reads as "sweep this one record"; the sweep is
+// directory-wide and unlinks, so ignoring it silently is the shape where an
+// operator believes a scope was applied and it was not — and --yes skips the
+// confirm prompt that would otherwise have shown the real file count.
+func TestPrPrune_RefusesAPositionalBreadcrumb(t *testing.T) {
+	dir := t.TempDir()
+	path := seedRepairRecord(t, dir, "o/r#1", "preparing", "")
+	aside := filepath.Join(dir, "o-r-2-1.json.unreadable-1700000000")
+	if err := os.WriteFile(aside, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := runPrRepair(t, repairCmdClient(t, dir), path, "--prune", "--yes")
+	if err == nil {
+		t.Fatal("expected a refusal: --prune takes no breadcrumb")
+	}
+	for _, want := range []string{"--prune", "no breadcrumb"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not mention %q", err, want)
+		}
+	}
+	// And the refusal is BEFORE dispatch: nothing was swept.
+	if _, serr := os.Stat(aside); serr != nil {
+		t.Errorf("the sweep ran anyway and removed a set-aside file: %v", serr)
+	}
+}
+
+// TestPrPrune_RefusesEachApplyModeFlag: --rollback means "remove the one record
+// I named". Running a directory-wide sweep under it would be the same silent
+// re-scoping, one flag further in.
+func TestPrPrune_RefusesEachApplyModeFlag(t *testing.T) {
+	for _, mode := range []string{"--rollback", "--adopt-window", "--forget-if-absent"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			aside := filepath.Join(dir, "o-r-2-1.json.unreadable-1700000000")
+			if err := os.WriteFile(aside, []byte("{not json"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err := runPrRepair(t, repairCmdClient(t, dir), "--prune", mode, "--yes")
+			if err == nil {
+				t.Fatalf("expected a refusal: --prune and %s cannot be combined", mode)
+			}
+			for _, want := range []string{"--prune", mode} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal %q does not name %q", err, want)
+				}
+			}
+			if _, serr := os.Stat(aside); serr != nil {
+				t.Errorf("the sweep ran anyway and removed a set-aside file: %v", serr)
+			}
+		})
+	}
+}
+
+// TestPrPrune_RefusesABreadcrumbEvenWithoutYes proves the operand check does not
+// ride on the confirmation gate: it is grammar, settled before any I/O.
+func TestPrPrune_RefusesABreadcrumbEvenWithoutYes(t *testing.T) {
+	dir := t.TempDir()
+	path := seedRepairRecord(t, dir, "o/r#1", "preparing", "")
+	if _, _, err := runPrRepair(t, repairCmdClient(t, dir), path, "--prune", "--dry-run"); err == nil {
+		t.Fatal("expected a refusal: --prune takes no breadcrumb, even under --dry-run")
+	}
+}

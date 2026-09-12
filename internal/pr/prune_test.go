@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +59,18 @@ func TestParseAsideAge(t *testing.T) {
 		{"a non-hex collision suffix", "o-r-1-1.json" + unreadableSuffix + "1757000000-zzzzzzzzzzzzzzzz", false, 0},
 		{"a negative timestamp", "o-r-1-1.json" + unreadableSuffix + "-1757000000", false, 0},
 		{"the log itself", repairLogName, false, 0},
+		// An epoch-era stamp is a clock that lied, not a 56-year-old file: a
+		// host that set the record aside before NTP synced names a brand-new
+		// record at 1970, and believing that age would unlink it on the first
+		// sweep. Undated, therefore listed and kept.
+		{"the epoch itself", "o-r-1-1.json" + unreadableSuffix + "0", false, 0},
+		{"one second after the epoch", "o-r-1-1.json" + unreadableSuffix + "1", false, 0},
+		{"one second below the floor", "o-r-1-1.json" + unreadableSuffix + strconv.FormatInt(asideStampFloor-1, 10), false, 0},
+		{"the floor itself", "o-r-1-1.json" + unreadableSuffix + strconv.FormatInt(asideStampFloor, 10), true, asideStampFloor},
+		{"one second above the floor", "o-r-1-1.json" + unreadableSuffix + strconv.FormatInt(asideStampFloor+1, 10), true, asideStampFloor + 1},
+		// A future stamp is readable and believed; the age comes out negative,
+		// so the sweep keeps it as young rather than removing it.
+		{"a future stamp", "o-r-1-1.json" + unreadableSuffix + "4102444800", true, 4102444800},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, ok := parseAsideAge(tc.input)
@@ -83,6 +96,7 @@ func TestParseRetention(t *testing.T) {
 		{"30d", 30 * 24 * time.Hour, false},
 		{"720h", 720 * time.Hour, false},
 		{"1h30m", 90 * time.Minute, false},
+		{"1h", time.Hour, false},
 		{"0", 0, true},
 		{"0d", 0, true},
 		{"-1d", 0, true},
@@ -91,6 +105,12 @@ func TestParseRetention(t *testing.T) {
 		{"", 0, true},
 		{"30days", 0, true},
 		{"1.5d", 0, true},
+		// Under the floor. Refusing only zero was a floor in name alone: each
+		// of these says "remove everything" just as completely, and each is
+		// what a unit typo produces.
+		{"1ns", 0, true},
+		{"1ms", 0, true},
+		{"59m", 0, true},
 	} {
 		t.Run(tc.input, func(t *testing.T) {
 			got, err := parseRetention(tc.input)
@@ -702,5 +722,69 @@ func TestPruneReport_JSONShape(t *testing.T) {
 	}
 	if back.Log == nil {
 		t.Errorf("log encoded as null, want an object: %s", data)
+	}
+}
+
+// TestPrune_AnEpochEraStampIsListedNeverRemoved is the sweep-level half of the
+// floor: a host that set a record aside before its clock synced names it at
+// 1970, which reads as decades old and is past every window. The floor routes
+// it into the same branch an unreadable name takes.
+func TestPrune_AnEpochEraStampIsListedNeverRemoved(t *testing.T) {
+	c := pruneClient(t, repairRunner(nil))
+	path := filepath.Join(c.SessionsDir(), "o-r-1-1.json"+unreadableSuffix+"0")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := c.Prune(context.Background(), defaultPruneOpts())
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if len(report.Items) != 1 || report.Items[0].Outcome != pruneOutcomeKept {
+		t.Fatalf("items = %+v, want the file listed and kept", report.Items)
+	}
+	if !strings.Contains(report.Items[0].Reason, "predates") ||
+		!strings.Contains(report.Items[0].Reason, "not trusted") {
+		t.Errorf("reason = %q, want it to say the clock was not trusted", report.Items[0].Reason)
+	}
+	if _, serr := os.Stat(path); serr != nil {
+		t.Errorf("a record whose clock lied was unlinked: %v", serr)
+	}
+}
+
+// TestPrune_AFutureStampIsKeptAsYoung: a stamp ahead of the clock yields a
+// negative age, which is inside every window. Kept, not removed.
+func TestPrune_AFutureStampIsKeptAsYoung(t *testing.T) {
+	c := pruneClient(t, repairRunner(nil))
+	stamp := time.Now().UTC().Add(365 * 24 * time.Hour).Unix()
+	path := filepath.Join(c.SessionsDir(), "o-r-1-1.json"+unreadableSuffix+strconv.FormatInt(stamp, 10))
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := c.Prune(context.Background(), defaultPruneOpts())
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if len(report.Items) != 1 || report.Items[0].Outcome != pruneOutcomeKept {
+		t.Fatalf("items = %+v, want the file kept", report.Items)
+	}
+	if _, serr := os.Stat(path); serr != nil {
+		t.Errorf("a future-stamped record was unlinked: %v", serr)
+	}
+}
+
+// TestPrune_TheReasonDistinguishesAnUnreadableNameFromAnUntrustedClock: both
+// are kept, but they call for different actions — a hand edit versus an
+// unsynced host — so the row must not say the same thing about each.
+func TestPrune_TheReasonDistinguishesAnUnreadableNameFromAnUntrustedClock(t *testing.T) {
+	unreadable := undatedReason("o-r-1-1.json" + unreadableSuffix + "whenever")
+	untrusted := undatedReason("o-r-1-1.json" + unreadableSuffix + "0")
+	if unreadable == untrusted {
+		t.Fatalf("both causes render the same reason %q", unreadable)
+	}
+	if !strings.Contains(unreadable, "no readable set-aside timestamp") {
+		t.Errorf("unreadable reason = %q", unreadable)
+	}
+	if !strings.Contains(untrusted, "predates") {
+		t.Errorf("untrusted-clock reason = %q", untrusted)
 	}
 }

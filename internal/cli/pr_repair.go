@@ -59,7 +59,22 @@ per file: a live window, an unreadable window list, or a file that changed
 underfoot stops that file and nothing else.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := validatePruneFlags(cmd, prune, apply, history); err != nil {
+			// The whole prune grammar is settled BEFORE dispatch, so no
+			// combination reaches a verb that would quietly ignore half of it.
+			if err := validatePruneFlags(cmd, pruneGrammar{
+				prune:   prune,
+				apply:   apply,
+				history: history,
+				args:    args,
+				// A SLICE, not a map: this feeds a refusal message, and map
+				// iteration order would make the wording of a two-mode refusal
+				// vary between runs.
+				modes: []modeFlag{
+					{pr.RepairModeAdoptWindow, adoptWindow},
+					{pr.RepairModeRollback, rollback},
+					{pr.RepairModeForgetIfAbsent, forgetIfAbsent},
+				},
+			}); err != nil {
 				return err
 			}
 			if prune {
@@ -123,23 +138,55 @@ const (
 	defaultLogRetention   = "90d"
 )
 
+// modeFlag pairs an --apply mode's flag name with whether it was given, so a
+// refusal can name the one the operator actually typed.
+type modeFlag struct {
+	name string
+	set  bool
+}
+
+// pruneGrammar is everything the prune refusals need to see at once: the arm
+// flags, the positional operand, and the three --apply modes.
+type pruneGrammar struct {
+	prune   bool
+	apply   bool
+	history bool
+	args    []string
+	modes   []modeFlag
+}
+
 // validatePruneFlags enforces the argument grammar BEFORE any I/O, in
 // validateRepairOpts's style: a malformed invocation never reaches the
 // filesystem, the lifecycle lock, or tmux.
 //
-// The retention flags refuse outside --prune rather than being ignored. A flag
-// that silently does nothing is the shape where an operator believes a window
-// was applied and it was not.
-func validatePruneFlags(cmd *cobra.Command, prune, apply, history bool) error {
-	if prune && apply {
-		return fmt.Errorf("--prune and --apply do different things and cannot be combined: " +
-			"--apply settles one named record, --prune sweeps records that were already set aside")
+// EVERY REFUSAL NAMES BOTH SIDES, and the direction is symmetric: a retention
+// flag without --prune refuses, and an operand or a mode flag WITH --prune
+// refuses. A flag or operand that silently does nothing is the shape where an
+// operator believes a scope was applied and it was not — and under --prune that
+// belief is expensive, because the operand reads as "sweep this one record"
+// while the sweep is directory-wide and unlinks.
+func validatePruneFlags(cmd *cobra.Command, g pruneGrammar) error {
+	if g.prune && g.apply {
+		return fmt.Errorf("--prune and --apply cannot be combined: " +
+			"--apply settles the one record you name, --prune sweeps every record that was already set aside")
 	}
-	if prune && history {
+	if g.prune && g.history {
 		return fmt.Errorf("--prune and --history cannot be combined: " +
 			"--history reads the audit trail, --prune rewrites it")
 	}
-	if prune {
+	if g.prune {
+		for _, m := range g.modes {
+			if m.set {
+				return fmt.Errorf("--prune and %s cannot be combined: "+
+					"%s settles the one record you name, --prune sweeps the whole session directory", m.name, m.name)
+			}
+		}
+		if len(g.args) > 0 {
+			return fmt.Errorf("--prune takes no breadcrumb: it sweeps every set-aside record in the session "+
+				"directory, so naming %s would not scope it — drop the operand, "+
+				"or settle that one record with --apply instead",
+				termsafe.QuotePath(g.args[0]))
+		}
 		return nil
 	}
 	for _, name := range []string{"older-than", "log-retention"} {
