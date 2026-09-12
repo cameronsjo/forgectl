@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Dogfoods `forgectl pr <ref> --queue` + `forgectl pr drain` against two real
+# PRs (forgectl#473): queues both, drains one pass, and asserts the pass
+# report. Uses a scratch HOME so it never touches a real ~/.config/forgectl.
+#
+# Usage: scripts/dogfood-drain.sh [--dry-run] <ref1> <ref2> [path/to/forgectl]
+#
+# --dry-run queues both refs for real, then runs `pr drain --dry-run --json`
+# and asserts the report names both refs as would-launch — it creates no
+# workspace and dispatches no tmux window. Without --dry-run the drain pass
+# is a REAL launch: it clones each head, dispatches a review agent into a
+# tmux window under the `forgectl` session, and is the orchestrator's to run
+# — not a step this script takes on its own.
+set -uo pipefail
+
+DRY_RUN=false
+if [ "${1:-}" = "--dry-run" ]; then
+  DRY_RUN=true
+  shift
+fi
+
+REF1=${1:-}
+REF2=${2:-}
+BIN=${3:-$(command -v forgectl || true)}
+
+if [ -z "$REF1" ] || [ -z "$REF2" ]; then
+  echo "usage: $0 [--dry-run] <ref1> <ref2> [path/to/forgectl]" >&2
+  exit 2
+fi
+if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+  echo "VERDICT: FAIL no forgectl binary (pass a path or put one on PATH)" >&2
+  exit 2
+fi
+
+SCRATCH=$(mktemp -d)
+trap 'rm -rf "$SCRATCH"' EXIT
+
+echo "--- queue $REF1 ---"
+HOME="$SCRATCH" "$BIN" pr "$REF1" --queue
+echo "--- queue $REF2 ---"
+HOME="$SCRATCH" "$BIN" pr "$REF2" --queue
+
+echo "--- pr queue ---"
+HOME="$SCRATCH" "$BIN" pr queue
+
+DRAIN_ARGS=(pr drain --once --json)
+if [ "$DRY_RUN" = true ]; then
+  DRAIN_ARGS=(pr drain --once --dry-run --json)
+fi
+
+echo "--- ${DRAIN_ARGS[*]} ---"
+REPORT=$(HOME="$SCRATCH" "$BIN" "${DRAIN_ARGS[@]}")
+RC=$?
+echo "$REPORT"
+
+if [ "$RC" -ne 0 ]; then
+  echo "VERDICT: FAIL drain exited $RC" >&2
+  exit 1
+fi
+
+if [ "$DRY_RUN" = true ]; then
+  if ! command grep -q "$REF1" <<<"$REPORT" || ! command grep -q "$REF2" <<<"$REPORT"; then
+    echo "VERDICT: FAIL dry-run report does not name both refs as would-launch" >&2
+    exit 1
+  fi
+  echo "VERDICT: PASS dry-run named both refs; nothing was launched"
+  exit 0
+fi
+
+LAUNCHED=$(printf '%s' "$REPORT" | command grep -o '"launched":[0-9]*' | head -1 | command grep -o '[0-9]*$')
+if [ "${LAUNCHED:-0}" -ne 2 ]; then
+  echo "VERDICT: FAIL launched=$LAUNCHED, want 2" >&2
+  exit 1
+fi
+echo "VERDICT: PASS drained and launched both queued reviews"
