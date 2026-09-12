@@ -63,35 +63,36 @@ func NewClient(clipClient *clip.Client) *Client {
 	return &Client{clip: clipClient}
 }
 
-// CopyValue resolves key's value in file and copies it to the system
+// CopyValue resolves key's value in target and copies it to the system
 // clipboard. The value is never returned — this is the domain half of
 // `get`'s structural "no print path exists" guarantee; the CLI command
-// only ever learns whether this call succeeded. allowAnyFile is threaded
-// straight through to Locate — see its doc comment and the CLI's
-// resolveAllowAnyFile for the --any-file TTY-gated escape hatch.
-func (c *Client) CopyValue(ctx context.Context, cwd, file, key string, allowAnyFile bool) error {
+// only ever learns whether this call succeeded.
+//
+// It takes an already-resolved Target rather than a --file string and a
+// bool. That is the shape of the fix described on Target itself: a method
+// that re-resolved the flag could disagree with what the caller cleared.
+func (c *Client) CopyValue(ctx context.Context, target Target, key string) error {
 	if !ValidKey(key) {
 		return errInvalidKey()
 	}
-	realPath, exists, err := Locate(file, cwd, allowAnyFile)
-	if err != nil {
+	if err := target.validate(); err != nil {
 		return err
 	}
-	if !exists {
+	if !target.Exists {
 		// "env file %s not found" (not "%s not found") and the repo-relative
 		// form mirror internal/cli/env.go's sibling not-found messages: the
 		// absolute, symlink-resolved path can name a directory the caller
 		// never typed, and it must not lead the message either (fang's
 		// error style title-cases only the first word — forgectl#481).
-		return fmt.Errorf("env file %s not found", RelativeToRepoRoot(cwd, realPath))
+		return fmt.Errorf("env file %s not found", target.Rel())
 	}
-	doc, err := parseFile(realPath)
+	doc, err := parseFile(target)
 	if err != nil {
 		return err
 	}
 	value, ok := doc.Get(key)
 	if !ok {
-		return errKeyNotFound(RelativeToRepoRoot(cwd, realPath))
+		return errKeyNotFound(target.Rel())
 	}
 	return c.clip.Copy(ctx, value)
 }
@@ -101,11 +102,11 @@ func (c *Client) CopyValue(ctx context.Context, cwd, file, key string, allowAnyF
 // sources, both already resolved to a plain string by the CLI layer before
 // this is called. SetFromClipboard is the clipboard-sourced sibling that
 // shares this exact pipeline after its own clip.Paste.
-func (c *Client) SetValue(cwd, file, key, value string, allowAnyFile bool) (tightened bool, err error) {
+func (c *Client) SetValue(target Target, key, value string) (tightened bool, err error) {
 	if !ValidKey(key) {
 		return false, errInvalidKey()
 	}
-	return c.commitSet(cwd, file, key, value, allowAnyFile)
+	return c.commitSet(target, key, value)
 }
 
 // SetFromClipboard pastes the current clipboard contents and runs them
@@ -113,7 +114,7 @@ func (c *Client) SetValue(cwd, file, key, value string, allowAnyFile bool) (tigh
 // paste — "ValidKey first, refuse before touching the file or reading
 // input" applies to the clipboard source exactly as it does to stdin: a
 // hostile key argument must never even trigger a clipboard read.
-func (c *Client) SetFromClipboard(ctx context.Context, cwd, file, key string, allowAnyFile bool) (tightened bool, err error) {
+func (c *Client) SetFromClipboard(ctx context.Context, target Target, key string) (tightened bool, err error) {
 	if !ValidKey(key) {
 		return false, errInvalidKey()
 	}
@@ -121,32 +122,33 @@ func (c *Client) SetFromClipboard(ctx context.Context, cwd, file, key string, al
 	if err != nil {
 		return false, err
 	}
-	return c.commitSet(cwd, file, key, value, allowAnyFile)
+	return c.commitSet(target, key, value)
 }
 
 // commitSet is the shared `set` tail once key is already validated and
-// value already sourced: Locate → Parse (an empty Document when the file
+// value already sourced: lock → Parse (an empty Document when the file
 // doesn't exist yet) → strip exactly one trailing "\n" or "\r\n" off
 // rawValue → refuse an empty result → Document.Set (refuses a duplicate
-// key) → Bytes → writeAtomic. Locate stays outside the lock — its path
-// resolution is deterministic and doesn't touch realPath's content — but
-// its `exists` return is filesystem STATE, not a path, and is deliberately
-// discarded here: loadOrEmpty re-derives existence itself, under the lock,
-// by attempting the open. Trusting the pre-lock `exists` would reopen the
-// exact race withFileLock exists to close, just on the new-file branch —
-// two concurrent sets against a not-yet-existing file both observe
-// exists=false before either acquires the lock, so the second to acquire
-// would still load a fresh empty Document and silently discard the first
-// caller's already-written key. See lock_unix.go's doc comment for the
-// existing-file half of this same race.
-func (c *Client) commitSet(cwd, file, key, rawValue string, allowAnyFile bool) (tightened bool, err error) {
-	realPath, _, err := Locate(file, cwd, allowAnyFile)
-	if err != nil {
+// key) → Bytes → writeAtomic.
+//
+// target.Exists is deliberately NOT consulted: loadOrEmpty re-derives
+// existence itself, under the lock, by attempting the open. Trusting the
+// pre-lock snapshot would reopen the exact race withFileLock exists to
+// close, just on the new-file branch — two concurrent sets against a
+// not-yet-existing file both observe Exists=false before either acquires
+// the lock, so the second to acquire would still load a fresh empty
+// Document and silently discard the first caller's already-written key.
+// See lock_unix.go's doc comment for the existing-file half of this same
+// race.
+func (c *Client) commitSet(target Target, key, rawValue string) (tightened bool, err error) {
+	// The one check both SetValue and SetFromClipboard share, placed here so
+	// neither can be given an unresolved Target by a future caller.
+	if err := target.validate(); err != nil {
 		return false, err
 	}
 
-	err = withFileLock(realPath, func() error {
-		doc, loadErr := loadOrEmpty(realPath)
+	err = withFileLock(target, func() error {
+		doc, loadErr := loadOrEmpty(target)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -172,7 +174,7 @@ func (c *Client) commitSet(cwd, file, key, rawValue string, allowAnyFile bool) (
 		}
 
 		var writeErr error
-		tightened, writeErr = writeAtomic(realPath, doc.Bytes())
+		tightened, writeErr = writeAtomic(target, doc.Bytes())
 		return writeErr
 	})
 	if err != nil {
@@ -197,41 +199,83 @@ func stripTrailingNewline(s string) string {
 	return s
 }
 
-// loadOrEmpty parses realPath, or returns a fresh empty Document when the
+// loadOrEmpty parses target, or returns a fresh empty Document when the
 // file doesn't exist. Existence is decided HERE, by the open itself, never
-// by a caller-supplied boolean: called from inside commitSet's withFileLock
-// closure, this is the point in the pipeline where "does the file exist" is
-// no longer stale — Locate's own `exists` return was a pre-lock snapshot
-// that a concurrent writer can invalidate between the check and the lock
-// acquisition (Locate already confirmed the parent directory is inside the
-// repo, so a not-yet-existing target is otherwise fine to treat as the
-// "new file" branch of `set`).
-func loadOrEmpty(realPath string) (*Document, error) {
-	f, err := os.Open(realPath)
+// by target.Exists: called from inside commitSet's withFileLock closure,
+// this is the point in the pipeline where "does the file exist" is no
+// longer stale — Exists was a pre-lock snapshot that a concurrent writer
+// can invalidate between the check and the lock acquisition (resolution
+// already confirmed the parent directory is inside the repo, so a
+// not-yet-existing target is otherwise fine to treat as the "new file"
+// branch of `set`).
+//
+// The open refuses a symlink. ResolveTarget followed every symlink to
+// produce target.path, so a symlink there now is one that appeared after
+// resolution — and following it would read a file outside the repository
+// and copy its bytes into the in-repo target.
+func loadOrEmpty(target Target) (*Document, error) {
+	f, err := target.dir.openRegular(target.base)
 	if errors.Is(err, fs.ErrNotExist) {
 		return &Document{}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", realPath, err)
+		return nil, openRefusal(target, err)
 	}
 	defer func() { _ = f.Close() }()
 	doc, err := Parse(f)
 	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", realPath, err)
+		return nil, fmt.Errorf("parse %s: %w", target.Rel(), err)
 	}
 	return doc, nil
 }
 
-// parseFile opens and parses realPath. Errors carry the path only.
-func parseFile(realPath string) (*Document, error) {
-	f, err := os.Open(realPath)
+// openRefusal renders an open failure, naming the rule for the two cases that
+// mean "what is at this name is no longer what was resolved" and falling back
+// to the wrapped OS error otherwise.
+func openRefusal(target Target, err error) error {
+	switch {
+	case errors.Is(err, errIsSymlink), errors.Is(err, errNotRegular):
+		return fmt.Errorf("refusing %s: %w", target.Rel(), err)
+	default:
+		return fmt.Errorf("open %s: %w", target.Rel(), err)
+	}
+}
+
+// OpenTarget opens a cleared target for reading, refusing a final component
+// that became a symlink after resolution (see loadOrEmpty for why that is a
+// refusal rather than a follow). Exported for the CLI subcommands that read a
+// document without going through a Client method — they get the same open
+// rather than an os.Open of their own, so there is one open with the check and
+// not two where only one has it.
+func OpenTarget(target Target) (*os.File, error) {
+	if err := target.validate(); err != nil {
+		return nil, err
+	}
+	f, err := target.dir.openRegular(target.base)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", realPath, err)
+		return nil, openRefusal(target, err)
+	}
+	return f, nil
+}
+
+// parseFile opens and parses target, refusing a symlink for the reason
+// loadOrEmpty states.
+//
+// This package's own format strings carry the repo-relative path only. A
+// wrapped OS error is a separate matter: %w on an *fs.PathError still renders
+// the absolute path underneath ("open .env: open /Users/…/.env: permission
+// denied"), so the forgectl#481 guarantee covers the text forgectl composes,
+// not every byte an error chain can produce. Worth knowing before treating a
+// wrapped error as safe for a --json field.
+func parseFile(target Target) (*Document, error) {
+	f, err := OpenTarget(target)
+	if err != nil {
+		return nil, err
 	}
 	defer func() { _ = f.Close() }()
 	doc, err := Parse(f)
 	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", realPath, err)
+		return nil, fmt.Errorf("parse %s: %w", target.Rel(), err)
 	}
 	return doc, nil
 }

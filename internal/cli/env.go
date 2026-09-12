@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -36,52 +35,80 @@ var (
 	}
 )
 
-// resolveAllowAnyFile decides the allowAnyFile bool env.Locate consults,
-// enforcing the --any-file escape hatch's TTY gate. A flag an agent can
-// type is not a bound on an agent — the threat this whole command defends
-// against is an injected agent driving forgectl into writing an arbitrary
+// resolveEnvTarget resolves --file ONCE and returns the cleared target every
+// env subcommand then operates on. It is the single place the env-file-name
+// allowlist and the --any-file escape hatch are applied.
+//
+// # Why one resolution, and why the path travels
+//
+// This function used to return a bool, and each caller then re-resolved the
+// raw --file string to decide what to touch. Two resolutions of the same
+// mutable input, separated by the operator's think-time at a confirmation
+// prompt, is a time-of-check/time-of-use gap — and it was exploitable, not
+// theoretical. With `link -> notes.txt` in a repo, `env set sshCommand
+// --file link --any-file` prompted with "notes.txt"; repointing `link` at
+// `.git/config` before answering moved the write there, and `core.fsmonitor`
+// is executed by the next `git status`. The confirmed path and the written
+// path were simply two different files, and no test could have caught it
+// because the seam carried nothing to compare.
+//
+// So a resolved env.Target is the return value. A bool cannot carry a path,
+// which is what makes that gap unrepresentable rather than merely closed.
+//
+// Returning the path alone would not have been enough, and the first attempt
+// at this fix proved it: with the path travelling but every consumer still
+// opening it BY STRING, swapping an intermediate directory during the prompt
+// reproduced the identical exploit — a prompt reading "sub/config" wrote
+// core.fsmonitor into .git/config and exited zero. A Target therefore also
+// carries an open descriptor on its containing directory, pinned at
+// resolution, and every read, write, and rename happens relative to that
+// descriptor. See env.dirPin for the mechanism and for the narrow race it
+// does not claim to close.
+//
+// A Target owns that descriptor, so every caller here closes it.
+//
+// # What the TTY gate actually bounds
+//
+// The threat is an injected agent driving forgectl into writing an arbitrary
 // repo file (.git/config, .envrc, a Makefile — any KEY=value-shaped sink),
 // and an agent can pass --any-file exactly as easily as it can pass --file.
-// What it cannot do is answer an interactive confirmation a human grants in
-// seconds — so the TTY gate, not the flag, is the actual bound.
-//
-// When anyFile is false this is a no-op (the ordinary env-file-name check
-// in Locate applies). When anyFile is true, file is resolved to its
-// CANONICAL path first (env.ResolveTarget — the exact symlink-following,
-// repo-containing resolution Locate itself performs) so the confirmation a
-// human grants is bound to what will actually be touched, not the raw
-// --file argument: a `.env` symlinked to `.git/config` must prompt with
-// ".git/config", never ".env" — prompting with the raw argument would let a
-// human approve a file they never saw. A resolved target that's already
-// env-named needs no confirmation at all (Locate's own name check would
-// pass it regardless), so that case returns allow=true without ever
-// consulting confirmAnyFile.
-func resolveAllowAnyFile(anyFile bool, file, cwd string, th theme.Theme) (bool, error) {
-	if !anyFile {
-		return false, nil
-	}
-	resolved, _, err := envpkg.ResolveTarget(file, cwd)
+// The gate stops an agent with no pty, which is the common case: a harness
+// tool call, a CI step, a pipeline. It does NOT stop an agent running inside
+// a terminal multiplexer pane, where stdin is a real pty and a prompt is
+// answerable — this repo's own estate runs agents that way. Read the gate as
+// "raises the cost and covers the ptyless case", not as a boundary.
+func resolveEnvTarget(anyFile bool, file, cwd string, th theme.Theme) (envpkg.Target, error) {
+	target, err := envpkg.ResolveTarget(file, cwd)
 	if err != nil {
-		return false, err
+		return envpkg.Target{}, err
 	}
-	if envpkg.IsEnvFileName(filepath.Base(resolved)) {
-		return true, nil
+	clearErr := target.Clear()
+	if clearErr == nil {
+		return target, nil
+	}
+	if !anyFile {
+		return envpkg.Target{}, clearErr
 	}
 	if !isTerminal() {
 		// Phrased to lead with a word, not the flag: fang title-cases the
 		// first token when it renders an error, so "--any-file requires …"
 		// reaches the user as "--Any-File requires …" — a flag spelling
 		// that does not exist and that someone will reasonably try to type.
-		return false, errors.New("an interactive terminal is required for --any-file")
+		return envpkg.Target{}, errors.New("an interactive terminal is required for --any-file")
 	}
-	ok, err := confirmAnyFile(th, fmt.Sprintf("%q is not a recognized env file (.env, .env.*, or *.env) — operate on it anyway?", resolved))
+	// Prompts with the repo-relative resolved path: resolved so a human
+	// cannot approve a file they never saw (a `.env` symlinked to
+	// `.git/config` must read ".git/config"), and relative because the
+	// absolute form carries a machine-specific prefix into a transcript
+	// (forgectl#481).
+	ok, err := confirmAnyFile(th, fmt.Sprintf("%q is not a recognized env file (.env, .env.*, or *.env) — operate on it anyway?", target.Rel()))
 	if err != nil {
-		return false, err
+		return envpkg.Target{}, err
 	}
 	if !ok {
-		return false, fmt.Errorf("refusing %s: --any-file confirmation declined", filepath.Base(resolved))
+		return envpkg.Target{}, fmt.Errorf("refusing %s: --any-file confirmation declined", target.Rel())
 	}
-	return true, nil
+	return target, nil
 }
 
 // envKeyPattern documents ValidKey's regex for CLI-side error messages —
@@ -163,19 +190,19 @@ argv and transcript; forgectl can't close a channel it doesn't own.`,
 	return cmd
 }
 
-// readDocument opens and parses realPath — the shared read used by every
-// subcommand that doesn't go through the domain Client (keys, check,
-// redact touch no clipboard, so they read directly via the exported
-// env.Locate/env.Parse rather than a Client method).
-func readDocument(realPath string) (*envpkg.Document, error) {
-	f, err := os.Open(realPath)
+// readDocument opens and parses a cleared target — the shared read used by
+// every subcommand that doesn't go through the domain Client (keys, check,
+// redact touch no clipboard, so they read directly via env.OpenTarget/
+// env.Parse rather than a Client method).
+func readDocument(target envpkg.Target) (*envpkg.Document, error) {
+	f, err := envpkg.OpenTarget(target)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", realPath, err)
+		return nil, err
 	}
 	defer f.Close()
 	doc, err := envpkg.Parse(f)
 	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", realPath, err)
+		return nil, fmt.Errorf("parse %s: %w", target.Rel(), err)
 	}
 	return doc, nil
 }
@@ -191,18 +218,15 @@ func newEnvKeysCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			allow, err := resolveAllowAnyFile(*anyFile, *file, cwd, th)
+			target, err := resolveEnvTarget(*anyFile, *file, cwd, th)
 			if err != nil {
 				return err
 			}
-			realPath, exists, err := envpkg.Locate(*file, cwd, allow)
-			if err != nil {
-				return err
+			defer target.Close()
+			if !target.Exists {
+				return fmt.Errorf("env file %s not found", target.Rel())
 			}
-			if !exists {
-				return fmt.Errorf("env file %s not found", envpkg.RelativeToRepoRoot(cwd, realPath))
-			}
-			doc, err := readDocument(realPath)
+			doc, err := readDocument(target)
 			if err != nil {
 				return err
 			}
@@ -248,29 +272,30 @@ func newEnvSetCmd(client *envpkg.Client, file *string, anyFile *bool, th theme.T
 			if err != nil {
 				return err
 			}
-			allow, err := resolveAllowAnyFile(*anyFile, *file, cwd, th)
+			target, err := resolveEnvTarget(*anyFile, *file, cwd, th)
 			if err != nil {
 				return err
 			}
+			defer target.Close()
 
 			var tightened bool
 			if clipboard {
-				tightened, err = client.SetFromClipboard(cmd.Context(), cwd, *file, key, allow)
+				tightened, err = client.SetFromClipboard(cmd.Context(), target, key)
 			} else {
 				var value string
-				value, err = resolveSetValue(cmd, key)
+				value, err = resolveSetValue(cmd)
 				if err != nil {
 					return err
 				}
-				tightened, err = client.SetValue(cwd, *file, key, value, allow)
+				tightened, err = client.SetValue(target, key, value)
 			}
 			if err != nil {
 				return err
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "set %s in %s\n", key, *file)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "set %s in %s\n", key, target.Rel())
 			if tightened {
-				fmt.Fprintf(cmd.ErrOrStderr(), "tightened %s to 0600\n", *file)
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "tightened %s to 0600\n", target.Rel())
 			}
 			return nil
 		},
@@ -284,7 +309,16 @@ func newEnvSetCmd(client *envpkg.Client, file *string, anyFile *bool, th theme.T
 // interactive no-echo prompt. The trailing-newline strip and empty-value
 // refusal happen downstream, in the domain's shared set pipeline — this
 // only sources the raw string.
-func resolveSetValue(cmd *cobra.Command, key string) (string, error) {
+//
+// The prompt deliberately does NOT name the key. This package's asymmetry
+// rule is that a token is safe to echo only once it is provably a key name,
+// and `set`'s success message earns that by having written it; a prompt
+// earns nothing, because it precedes any write and is abandoned on Ctrl-C.
+// `forgectl env set sk_live_51H8xY2eZvKYlo2C` is an ordinary typo, and
+// naming the argument here would put that secret in the transcript with
+// nothing written to show for it. The operator just typed the key, so
+// repeating it adds no information anyway.
+func resolveSetValue(cmd *cobra.Command) (string, error) {
 	if !isTerminal() {
 		data, err := io.ReadAll(cmd.InOrStdin())
 		if err != nil {
@@ -293,7 +327,7 @@ func resolveSetValue(cmd *cobra.Command, key string) (string, error) {
 		return string(data), nil
 	}
 
-	fmt.Fprintf(cmd.ErrOrStderr(), "Value for %s: ", key)
+	_, _ = fmt.Fprint(cmd.ErrOrStderr(), "Value: ")
 	value, err := readPassword()
 	fmt.Fprintln(cmd.ErrOrStderr())
 	if err != nil {
@@ -319,11 +353,12 @@ func newEnvGetCmd(client *envpkg.Client, file *string, anyFile *bool, th theme.T
 			if err != nil {
 				return err
 			}
-			allow, err := resolveAllowAnyFile(*anyFile, *file, cwd, th)
+			target, err := resolveEnvTarget(*anyFile, *file, cwd, th)
 			if err != nil {
 				return err
 			}
-			if err := client.CopyValue(cmd.Context(), cwd, *file, key, allow); err != nil {
+			defer target.Close()
+			if err := client.CopyValue(cmd.Context(), target, key); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "copied %s to clipboard\n", key)
@@ -358,34 +393,28 @@ Exit codes: 0 the file matches the example · 1 keys are missing or extra · 2 t
 				return err
 			}
 
-			allowFile, err := resolveAllowAnyFile(*anyFile, *file, cwd, th)
+			fileTarget, err := resolveEnvTarget(*anyFile, *file, cwd, th)
 			if err != nil {
 				return err
 			}
-			fileReal, fileExists, err := envpkg.Locate(*file, cwd, allowFile)
-			if err != nil {
-				return err
+			defer fileTarget.Close()
+			if !fileTarget.Exists {
+				return notFoundCheckError(cmd, fileTarget, "env file %s not found", asJSON)
 			}
-			if !fileExists {
-				return notFoundCheckError(cmd, cwd, fileReal, "env file %s not found", asJSON)
-			}
-			fileDoc, err := readDocument(fileReal)
+			fileDoc, err := readDocument(fileTarget)
 			if err != nil {
 				return err
 			}
 
-			allowExample, err := resolveAllowAnyFile(*anyFile, example, cwd, th)
+			exampleTarget, err := resolveEnvTarget(*anyFile, example, cwd, th)
 			if err != nil {
 				return err
 			}
-			exampleReal, exampleExists, err := envpkg.Locate(example, cwd, allowExample)
-			if err != nil {
-				return err
+			defer exampleTarget.Close()
+			if !exampleTarget.Exists {
+				return notFoundCheckError(cmd, exampleTarget, "example file %s not found", asJSON)
 			}
-			if !exampleExists {
-				return notFoundCheckError(cmd, cwd, exampleReal, "example file %s not found", asJSON)
-			}
-			exampleDoc, err := readDocument(exampleReal)
+			exampleDoc, err := readDocument(exampleTarget)
 			if err != nil {
 				return err
 			}
@@ -435,8 +464,8 @@ Exit codes: 0 the file matches the example · 1 keys are missing or extra · 2 t
 // so they can't drift (security ruling, forgectl#481): the resolved
 // absolute path can name a directory the caller never typed, and --json
 // output lands in agent transcripts verbatim.
-func notFoundCheckError(cmd *cobra.Command, cwd, resolved, wordingFmt string, asJSON bool) error {
-	rel := envpkg.RelativeToRepoRoot(cwd, resolved)
+func notFoundCheckError(cmd *cobra.Command, target envpkg.Target, wordingFmt string, asJSON bool) error {
+	rel := target.Rel()
 	if asJSON {
 		if err := writeCheckErrorJSON(cmd.ErrOrStderr(), rel); err != nil {
 			return err
@@ -509,18 +538,15 @@ func newEnvRedactCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command
 			if err != nil {
 				return err
 			}
-			allow, err := resolveAllowAnyFile(*anyFile, *file, cwd, th)
+			target, err := resolveEnvTarget(*anyFile, *file, cwd, th)
 			if err != nil {
 				return err
 			}
-			realPath, exists, err := envpkg.Locate(*file, cwd, allow)
-			if err != nil {
-				return err
+			defer target.Close()
+			if !target.Exists {
+				return fmt.Errorf("env file %s not found", target.Rel())
 			}
-			if !exists {
-				return fmt.Errorf("env file %s not found", envpkg.RelativeToRepoRoot(cwd, realPath))
-			}
-			doc, err := readDocument(realPath)
+			doc, err := readDocument(target)
 			if err != nil {
 				return err
 			}

@@ -9,6 +9,6 @@ package env
 // build), so fail-open here just keeps `go build`/`go test` usable on a
 // contributor's non-unix machine rather than leaving a real gap in a
 // shipped binary.
-func withFileLock(_ string, fn func() error) error {
+func withFileLock(_ Target, fn func() error) error {
 	return fn()
 }
