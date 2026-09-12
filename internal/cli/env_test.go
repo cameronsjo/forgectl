@@ -100,12 +100,30 @@ func envFixture() (*envpkg.Client, *exec.FakeRunner) {
 // wrong" — the distinction matters for the 42 tests here that are about the
 // .env route and should never touch sops at all.
 func newEnvTestCmd(client *envpkg.Client, th theme.Theme) *cobra.Command {
-	return newEnvCmdForClient(
+	cmd, _ := newEnvTestCmdWithClip(client, th)
+	return cmd
+}
+
+// newEnvTestCmdWithClip is newEnvTestCmd plus a handle on the clipboard's own
+// FakeRunner, for the tests that drive the --sops route's clipboard source.
+// That route reads the clipboard DIRECTLY rather than through
+// env.Client.SetFromClipboard, because SetFromClipboard runs the whole .env
+// pipeline and would append a plaintext KEY=value line to an encrypted file —
+// so it needs its own reachable fake.
+func newEnvTestCmdWithClip(client *envpkg.Client, th theme.Theme) (*cobra.Command, *exec.FakeRunner) {
+	clipFake := &exec.FakeRunner{}
+	cmd := newEnvCmdForClient(
 		client,
 		sopspkg.NewClient(&exec.FakeSensitiveRunner{}),
-		clippkg.New(&exec.FakeRunner{}, clippkg.WithGOOS("darwin")),
+		// WithSensitive() matches what newEnvCmd builds in production. Without
+		// it the clipboard layer logs the pasted byte count, and a length is
+		// itself signal about a secret — it distinguishes key types and tracks
+		// rotations, which is the same reason `redact` masks to a fixed ****.
+		// A fixture that omits it could not catch a regression that dropped it.
+		clippkg.New(clipFake, clippkg.WithGOOS("darwin"), clippkg.WithSensitive()),
 		th,
 	)
+	return cmd, clipFake
 }
 
 // forceNonTTY overrides the isTerminal seam to false (the piped-stdin

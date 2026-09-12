@@ -214,6 +214,67 @@ func (r *readProbe) Read(p []byte) (int, error) {
 	return n, nil
 }
 
+// TestEnvSetSops_ClipboardRouteReadsTheClipboardDirectly pins the wiring the
+// plan called out as easy to get wrong: `--sops --clipboard` must NOT go
+// through env.Client.SetFromClipboard, which runs the whole .env pipeline and
+// would append a plaintext `KEY=value` line to an encrypted file.
+//
+// The assertion is that the clipboard was PASTED FROM and the encrypted file
+// is unchanged. The command then fails, because these tests wire a fake
+// sensitive runner rather than a real sops — which is the point: the paste has
+// already happened by then, so a route that never pasted would fail this test
+// while a route that appended a plaintext line would fail the file check.
+func TestEnvSetSops_ClipboardRouteReadsTheClipboardDirectly(t *testing.T) {
+	repo := sopsCLIFixture(t)
+	forceNonTTY(t)
+	t.Chdir(repo)
+
+	const sentinel = "s3ntinel-VALUE-77x"
+	client, _ := envFixture()
+	cmd, clipFake := newEnvTestCmdWithClip(client, theme.Theme{})
+	clipFake.RunFunc = func(name string, _ []string) (string, error) {
+		if name == "pbpaste" {
+			return sentinel, nil
+		}
+		return "", nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"set", "agentgateway.from_clipboard", "--sops", "--clipboard"})
+	err := cmd.ExecuteContext(context.Background())
+
+	pasted := false
+	for _, call := range clipFake.Calls {
+		if call.Name == "pbpaste" {
+			pasted = true
+		}
+	}
+	if !pasted {
+		t.Error("the clipboard was never pasted from on the --sops --clipboard route")
+	}
+
+	// Whatever happened next, the encrypted file must not have gained a
+	// plaintext line.
+	got, readErr := os.ReadFile(filepath.Join(repo, "secrets.sops.yaml")) //nolint:gosec // G304: a fixture this test created
+	if readErr != nil {
+		t.Fatalf("ReadFile: %v", readErr)
+	}
+	if string(got) != sopsFixtureDoc {
+		t.Errorf("the encrypted file changed: %q", got)
+	}
+	if strings.Contains(string(got), sentinel) {
+		t.Error("the clipboard value was written into the encrypted file in plaintext")
+	}
+
+	errText := ""
+	if err != nil {
+		errText = err.Error()
+	}
+	assertNoSecretInOutput(t, sentinel, stdout.String(), stderr.String()+errText)
+}
+
 func TestSopsEdit_RefusesWithoutTheProtocol(t *testing.T) {
 	cases := []struct {
 		name  string
