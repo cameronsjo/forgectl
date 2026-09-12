@@ -50,6 +50,7 @@ func locate(fileFlag, cwd string) (Target, error) {
 		return Target{}, err
 	}
 	if err := target.Clear(); err != nil {
+		target.Close()
 		return Target{}, err
 	}
 	return target, nil
@@ -59,12 +60,17 @@ func locate(fileFlag, cwd string) (Target, error) {
 // equivalent of what the CLI hands a Client method. Tests take this route
 // rather than building a Target literal so a fixture cannot assert against a
 // target production would have refused.
+// A Target owns an open directory descriptor, so the fixture registers its
+// close the same way production defers one. Without it a package-wide test run
+// retains one descriptor per resolution until the binary exits, which is a
+// leak a table test can multiply well past a default ulimit.
 func mustTarget(t *testing.T, fileFlag, cwd string) Target {
 	t.Helper()
 	target, err := locate(fileFlag, cwd)
 	if err != nil {
 		t.Fatalf("locate(%q): %v", fileFlag, err)
 	}
+	t.Cleanup(target.Close)
 	return target
 }
 
@@ -376,6 +382,7 @@ func TestResolveTarget_NonEnvFile_ResolvesButDoesNotClear(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveTarget: %v", err)
 	}
+	defer target.Close()
 	if !target.Exists {
 		t.Error("Exists = false, want true")
 	}

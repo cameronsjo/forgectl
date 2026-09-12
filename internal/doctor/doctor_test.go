@@ -168,6 +168,59 @@ func TestCheckGh(t *testing.T) {
 	}
 }
 
+func TestCheckSops(t *testing.T) {
+	// Absent is StateSkip, not StateFail: sops is needed only for
+	// `env set --sops`, and a machine that never writes an encrypted secret
+	// is not unhealthy for lacking it. StateFail would make `doctor` exit
+	// non-zero on every machine that does not use the feature.
+	d := Deps{LookPath: fakeLookPath()}
+	check := checkSops(context.Background(), d)
+	if check.State != StateSkip {
+		t.Errorf("sops absent: state = %q, want skip", check.State)
+	}
+	if check.Hint == "" {
+		t.Error("sops absent: hint is empty, want the install command")
+	}
+
+	// Present but unrunnable.
+	fr := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
+		return "", &exec.CommandError{Name: "sops", Stderr: "bad binary", Err: errors.New("exit status 1")}
+	}}
+	d = Deps{LookPath: fakeLookPath("sops"), Runner: fr}
+	if check := checkSops(context.Background(), d); check.State != StateFail || check.Hint == "" {
+		t.Errorf("sops unrunnable: state = %q, hint = %q; want fail with a hint", check.State, check.Hint)
+	}
+
+	// Present and runnable: the Detail must carry the VERSION, not merely
+	// "found". The behaviour `env set --sops` is built on is version-specific
+	// and measured rather than documented — the editor re-invocation loop, the
+	// exit status for an unchanged file, the absent trailing newline from
+	// --extract — so the version is the one fact a later debugging session
+	// needs from this line.
+	fr = &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
+		return "sops 3.13.3 (latest)", nil
+	}}
+	d = Deps{LookPath: fakeLookPath("sops"), Runner: fr}
+	check = checkSops(context.Background(), d)
+	if check.State != StateOK {
+		t.Errorf("sops present: state = %q, want ok", check.State)
+	}
+	if !strings.Contains(check.Detail, "3.13.3") {
+		t.Errorf("detail = %q, want it to carry the version", check.Detail)
+	}
+
+	// A multi-line answer is trimmed to its first line: `sops --version` can
+	// append an update notice, and a multi-line Detail breaks the report's
+	// one-check-per-line shape.
+	fr = &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
+		return "sops 3.13.3\nA new version is available!", nil
+	}}
+	d = Deps{LookPath: fakeLookPath("sops"), Runner: fr}
+	if check := checkSops(context.Background(), d); strings.Contains(check.Detail, "\n") {
+		t.Errorf("detail = %q, want a single line", check.Detail)
+	}
+}
+
 func TestFromBenchComponent(t *testing.T) {
 	cases := []struct {
 		in   bench.State

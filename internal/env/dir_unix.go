@@ -155,21 +155,48 @@ func openatCreate(dirfd int, name string, flags int, perm uint32) (int, error) {
 }
 
 // openLock creates or opens name inside the pinned directory as a lock file,
-// refusing a symlink.
+// refusing a symlink and anything that is not a regular file.
 //
-// A FIFO here does NOT block — O_RDWR on a FIFO succeeds immediately — so the
-// caller's Lstat is what refuses one, not this open. That is worth stating
-// because the opposite is the intuitive guess: the blocking case is the
-// read-only open above.
+// O_NONBLOCK and the post-open check are both here, and the flag is not
+// redundant with the one above it. O_RDWR on a FIFO returned immediately when
+// measured on darwin 25.5, but POSIX leaves O_RDWR on a FIFO UNDEFINED, and it
+// permits a blocking open for a character device that supports non-blocking
+// mode — so a measurement on one platform is not a guarantee, and a blocking
+// open would stall before the check below ever runs. O_NONBLOCK has no effect
+// on regular-file I/O, which is the only case that reaches the return, so it
+// costs nothing to hold.
+//
+// The post-open check has to live HERE, not in the caller. withFileLock does Lstat the
+// name first, and O_NOFOLLOW closes the gap between that Lstat and this open
+// for a SYMLINK only: a swap to a FIFO in the same window is not a symlink, so
+// O_NOFOLLOW has nothing to say about it and the Lstat's answer is already
+// stale. The descriptor is the only thing that can be asked about the inode
+// actually opened, so the question gets asked of the descriptor — the same
+// pairing openRegular above uses, for the same reason.
+//
+// What it costs to omit: flock locks an open file description, so two writers
+// each holding a lock on a different FIFO inode both believe they hold the
+// lock, and the parse→write section that exists to prevent a lost update stops
+// preventing one.
 func (d *dirPin) openLock(name string) (*os.File, error) {
-	fd, err := openatCreate(d.fd, name, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	fd, err := openatCreate(d.fd, name, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0o600)
 	if errors.Is(err, unix.ELOOP) {
 		return nil, errIsSymlink
 	}
 	if err != nil {
 		return nil, err
 	}
-	return os.NewFile(uintptr(fd), name), nil
+	f := os.NewFile(uintptr(fd), name)
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, errNotRegular
+	}
+	return f, nil
 }
 
 // lstat reports name's permission bits and whether it is a regular file,

@@ -147,5 +147,11 @@ arguments for a menu over every command group.`,
 	// leaf verb outside the registry, alongside --version.
 	root.AddCommand(newVersionCmd())
 
+	// The editor `env set --sops` points sops at — forgectl re-invoking
+	// itself. Registered outside the registry because it is not a verb anyone
+	// runs: it is half of an internal protocol, and its own guards (not its
+	// Hidden flag) are what make it safe to expose at all.
+	root.AddCommand(newSopsEditCmd())
+
 	return root
 }

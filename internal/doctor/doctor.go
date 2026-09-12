@@ -19,6 +19,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/bless"
@@ -116,6 +117,7 @@ func Run(ctx context.Context, d Deps) Report {
 	checks = append(checks, checkBinary(d, "tmux", "tmux not found on PATH — install with `brew install tmux`"))
 	checks = append(checks, checkBinary(d, "ghostty", "ghostty not found on PATH — install from https://ghostty.org"))
 	checks = append(checks, checkBinary(d, "cmux", "cmux not found on PATH — see https://github.com/cameronsjo/cmux"))
+	checks = append(checks, checkSops(ctx, d))
 	checks = append(checks, checkGh(ctx, d))
 	checks = append(checks, benchChecks(ctx, d)...)
 	checks = append(checks, checkTrustStore(d))
@@ -196,6 +198,41 @@ func checkGh(ctx context.Context, d Deps) Check {
 		return Check{Name: "gh", State: StateFail, Detail: err.Error(), Hint: "run `gh auth login`"}
 	}
 	return Check{Name: "gh", State: StateOK, Detail: "authenticated"}
+}
+
+// checkSops reports the sops VERSION, not merely its presence.
+//
+// `env set --sops` depends on behaviour that is version-specific and measured
+// rather than documented: the exit status for an unchanged file, the absence of
+// a trailing newline from `--extract --output`, and the editor re-invocation
+// loop on an unparseable document. A doctor line that said only "found" would
+// leave the one fact a future debugging session needs out of the report.
+//
+// A missing sops is StateSkip rather than StateFail: it is needed only for
+// `env set --sops`, and a machine that never writes an encrypted secret is not
+// unhealthy for lacking it.
+func checkSops(ctx context.Context, d Deps) Check {
+	if _, err := d.LookPath("sops"); err != nil {
+		return Check{
+			Name:   "sops",
+			State:  StateSkip,
+			Detail: "not found on PATH — only needed for `forgectl env set --sops`",
+			Hint:   "install with `brew install sops`",
+		}
+	}
+	out, err := d.Runner.Run(ctx, "sops", "--version", "--disable-version-check")
+	if err != nil {
+		return Check{Name: "sops", State: StateFail, Detail: err.Error(), Hint: "reinstall with `brew reinstall sops`"}
+	}
+	return Check{Name: "sops", State: StateOK, Detail: firstLine(out)}
+}
+
+// firstLine trims a command's output to its first line. `sops --version` can
+// append an update notice, and a multi-line Detail breaks the report's
+// one-check-per-line shape.
+func firstLine(s string) string {
+	line, _, _ := strings.Cut(s, "\n")
+	return strings.TrimSpace(line)
 }
 
 // benchChecks folds bench.Status's hearth and chronicle components into doctor

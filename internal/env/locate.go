@@ -79,6 +79,20 @@ func (t Target) Close() {
 	t.dir.close()
 }
 
+// Abs returns the absolute resolved path.
+//
+// It exists for one narrow purpose: handing a path to a CHILD PROCESS that
+// must open the file itself. Nothing in this package uses it, and nothing in
+// this package should — every operation here goes through the pinned
+// descriptor, which is what makes the resolution meaningful.
+//
+// A child given this string re-resolves it with its own implementation, so the
+// pin's guarantee does not extend across that boundary. The caller is
+// responsible for the window: `env set --sops` closes it by holding the file
+// lock across the child's whole lifetime and verifying the result afterwards,
+// rather than by trusting the path.
+func (t Target) Abs() string { return t.path }
+
 // validate refuses a Target that did not come from ResolveTarget. Since every
 // field that matters is unexported, the only such value is a literal built
 // outside this package, and the missing descriptor is what gives it away.
@@ -263,6 +277,29 @@ func ResolveTarget(fileFlag, cwd string) (Target, error) {
 	}
 
 	return t, nil
+}
+
+// RepoRoot returns the resolved (symlink-following) repository root for cwd.
+//
+// A caller holding a Target should render paths with Target.Rel instead; this
+// exists for a caller that needs the root BEFORE it has a target — `env set
+// --sops`, whose default file lives at the repository root rather than in the
+// current directory, and which must therefore know the root in order to build
+// the path it then resolves.
+func RepoRoot(cwd string) (string, error) {
+	absCwd, err := filepath.Abs(cwd)
+	if err != nil {
+		return "", fmt.Errorf("resolve cwd: %w", err)
+	}
+	root, err := findRepoRoot(absCwd)
+	if err != nil {
+		return "", err
+	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve repository root: %w", err)
+	}
+	return realRoot, nil
 }
 
 // findRepoRoot walks up from start looking for a .git entry — a directory

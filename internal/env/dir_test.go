@@ -146,6 +146,94 @@ func TestDirPin_OpenRegular_OpensAnOrdinaryFile(t *testing.T) {
 	}
 }
 
+// TestDirPin_OpenLock_RefusesSwappedEntries covers the lock open specifically,
+// rather than leaning on the openRegular table above.
+//
+// The reason it needs its own coverage is that withFileLock Lstats the lock
+// name before calling openLock, so a reader can conclude the open is already
+// protected. It is not: the Lstat's answer is stale by the time the open runs,
+// and O_NOFOLLOW closes that window for a symlink ONLY. Asking openLock
+// directly — with the entry already in place, exactly as a swap inside the
+// window would leave it — is what tests the descriptor-side check rather than
+// the caller's.
+//
+// What it costs to lose: flock locks an open file description, so two writers
+// on two FIFO inodes both believe they hold the lock and the parse→write
+// section stops preventing a lost update.
+func TestDirPin_OpenLock_RefusesSwappedEntries(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, dir, name string)
+		want  error
+	}{
+		{
+			name: "fifo",
+			setup: func(t *testing.T, dir, name string) {
+				if err := syscall.Mkfifo(filepath.Join(dir, name), 0o600); err != nil {
+					t.Skipf("Mkfifo unsupported: %v", err)
+				}
+			},
+			want: errNotRegular,
+		},
+		{
+			name: "symlink",
+			setup: func(t *testing.T, dir, name string) {
+				outside := filepath.Join(t.TempDir(), "victim")
+				if err := os.Symlink(outside, filepath.Join(dir, name)); err != nil {
+					t.Skipf("symlink unsupported: %v", err)
+				}
+			},
+			want: errIsSymlink,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			pin, err := pinDir(dir)
+			if err != nil {
+				t.Fatalf("pinDir: %v", err)
+			}
+			t.Cleanup(pin.close)
+			c.setup(t, dir, ".env.lock")
+
+			f, err := pin.openLock(".env.lock")
+			if f != nil {
+				_ = f.Close()
+				t.Error("openLock returned a usable descriptor, want a refusal")
+			}
+			if !isSentinel(err, c.want) {
+				t.Errorf("err = %v, want %v", err, c.want)
+			}
+		})
+	}
+}
+
+// The green that makes the two refusals above mean something: a guard that
+// refused every lock open would satisfy them both and break every write.
+func TestDirPin_OpenLock_CreatesAnOrdinaryLockFile(t *testing.T) {
+	dir := t.TempDir()
+	pin, err := pinDir(dir)
+	if err != nil {
+		t.Fatalf("pinDir: %v", err)
+	}
+	t.Cleanup(pin.close)
+
+	f, err := pin.openLock(".env.lock")
+	if err != nil {
+		t.Fatalf("openLock on a fresh name: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := os.Lstat(filepath.Join(dir, ".env.lock"))
+	if err != nil {
+		t.Fatalf("Lstat: %v", err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Errorf("lock file mode = %v, want a regular file", info.Mode())
+	}
+}
+
 func TestDirPin_PinDir_RefusesASymlinkedDirectory(t *testing.T) {
 	base := t.TempDir()
 	// Not `real`: that shadows a Go predeclared identifier, which the

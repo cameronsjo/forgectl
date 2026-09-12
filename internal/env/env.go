@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"strings"
@@ -256,6 +257,54 @@ func OpenTarget(target Target) (*os.File, error) {
 		return nil, openRefusal(target, err)
 	}
 	return f, nil
+}
+
+// ReadTarget reads the whole file through the pinned descriptor.
+//
+// Exported for internal/sops, which needs the raw bytes of a SOPS document to
+// run its format checks against — and must run them against the bytes it
+// read, never a re-open by name, or the final path component can be swapped
+// between the check and the use.
+func ReadTarget(target Target) ([]byte, error) {
+	f, err := OpenTarget(target)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", target.Rel(), err)
+	}
+	return data, nil
+}
+
+// WriteTarget writes data over the target atomically, through the pinned
+// descriptor. Exported for internal/sops' restore path, so a restore has the
+// same containment every other write here does.
+//
+// writeAtomic's `tightened` report is deliberately dropped: a restore puts
+// back bytes that were already present, so a permission note about it would
+// describe the state before the operation that failed.
+func WriteTarget(target Target, data []byte) error {
+	if err := target.validate(); err != nil {
+		return err
+	}
+	_, err := writeAtomic(target, data)
+	return err
+}
+
+// WithFileLock runs fn while holding the target's exclusive lock.
+//
+// Exported for internal/sops, which holds it across an entire sops subprocess
+// so a concurrent writer cannot interleave with a decrypt-edit-encrypt cycle.
+// That is a far longer hold than the .env path needs, and it is the point: the
+// child re-resolves the path by name, so the lock is what bounds the window a
+// pinned descriptor cannot reach across a process boundary.
+func WithFileLock(target Target, fn func() error) error {
+	if err := target.validate(); err != nil {
+		return err
+	}
+	return withFileLock(target, fn)
 }
 
 // parseFile opens and parses target, refusing a symlink for the reason

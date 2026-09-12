@@ -43,6 +43,43 @@ jobs:
         timeout-minutes: 3
         run: sudo apt-get update && sudo apt-get install -y tmux
 
+      - name: Install sops and age
+        # internal/sops' integration tests drive the real sops binary: they
+        # mint an age identity, encrypt a fixture, and assert the measured
+        # behaviour `env set --sops` is built on — the exit status for an
+        # unchanged file, the absence of a trailing newline from
+        # `--extract --output`, and that untouched values keep byte-identical
+        # ciphertext. None of that is checkable without the binary.
+        #
+        # Installed from the release tarballs rather than apt, because Ubuntu's
+        # archive carries neither at a usable version.
+        #
+        # Bounded for the same reason the tmux step is: a download step that
+        # stops making progress leaves a PR with no Linux signal while reading
+        # as "CI is slow".
+        # Both downloads are CHECKSUM-VERIFIED before anything is installed.
+        # `sudo install` runs the asset as root's problem thereafter, so a
+        # swapped or compromised release would execute in CI with nothing
+        # between it and the runner. Pinning the tag alone does not help: a tag
+        # can be moved.
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/sops \
+            https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux.amd64
+          echo 'e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b  /tmp/sops' | sha256sum -c -
+          sudo install -m 0755 /tmp/sops /usr/local/bin/sops
+
+          curl -fsSL -o /tmp/age.tgz \
+            https://github.com/FiloSottile/age/releases/download/v1.2.1/age-v1.2.1-linux-amd64.tar.gz
+          echo '7df45a6cc87d4da11cc03a539a7470c15b1041ab2b396af088fe9990f7c79d50  /tmp/age.tgz' | sha256sum -c -
+          tar -xzf /tmp/age.tgz -C /tmp
+          sudo install -m 0755 /tmp/age/age /usr/local/bin/age
+          sudo install -m 0755 /tmp/age/age-keygen /usr/local/bin/age-keygen
+
+          sops --version --disable-version-check
+          age-keygen --version
+
       - name: Build
         run: go build ./...
 
@@ -50,12 +87,22 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        # FORGECTL_REQUIRE_TMUX turns those tests' skips into failures: on a
-        # runner where they are meant to run, a skip and a pass must not look
-        # alike.
+        # Each FORGECTL_REQUIRE_* turns a tool-absent skip into a failure: on a
+        # runner where these tests are meant to run, a skip and a pass must not
+        # look alike. The env gate is what enforces that, not the install step
+        # above — a step is a file anyone can edit in a PR, and deleting it
+        # would otherwise just make the tests quietly stop running.
         env:
           FORGECTL_REQUIRE_TMUX: '1'
+          FORGECTL_REQUIRE_SOPS_INTEGRATION: '1'
         run: go test ./...
+
+      - name: Real-sops integration tests (named)
+        # Same tests, -v: the run log naming each Integration test as PASS is
+        # the readable proof they executed rather than skipped.
+        env:
+          FORGECTL_REQUIRE_SOPS_INTEGRATION: '1'
+        run: go test -v -count=1 -run Integration ./internal/sops
 
       - name: Real-tmux grammar tests (named)
         # Same tests, -v: the run log naming each *Isolated test as PASS is the
@@ -146,12 +193,57 @@ jobs:
         timeout-minutes: 5
         run: brew list tmux || brew install tmux
 
+      - name: Install sops and age
+        # Darwin is where sops' behaviour was measured — the exit status for an
+        # unchanged file, the absent trailing newline from `--extract`, and the
+        # unbounded editor re-invocation loop — so it is the platform whose
+        # integration run is worth the most.
+        #
+        # NOT brew, unlike the tmux step above. This is a self-hosted runner
+        # whose Homebrew prefix is owned by another user: `brew install sops`
+        # fails with "The following directories are not writable by your user:
+        # /opt/homebrew". The tmux step survives only because tmux is already in
+        # the image, so its `brew list` short-circuits and `brew install` never
+        # runs. Anything NOT already installed is unreachable through brew here.
+        #
+        # So the release assets are installed into a runner-owned directory and
+        # that directory is prepended to PATH for later steps. Same
+        # checksum-before-install discipline as the ubuntu job, and the same
+        # reason: pinning the tag alone does not help, because a tag can move.
+        #
+        # The sops digest is from the publisher's own
+        # sops-v3.13.3.checksums.txt. age publishes no checksums file (only
+        # sigstore .proof files), so its digest was computed locally from the
+        # release asset — the same basis as the linux digest in the ubuntu job.
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+          curl -fsSL -o /tmp/sops \
+            https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.darwin.arm64
+          echo 'b97c0d434aab577dc40310e8d22ff9e45eef4c80638ab978daae9b4681c59286  /tmp/sops' | shasum -a 256 -c -
+          install -m 0755 /tmp/sops "$HOME/.local/bin/sops"
+
+          curl -fsSL -o /tmp/age.tgz \
+            https://github.com/FiloSottile/age/releases/download/v1.2.1/age-v1.2.1-darwin-arm64.tar.gz
+          echo 'cf79875bd5970dc2dac60c87fa50cee1ff1f9a41b0eb273f65e174aff37c367a  /tmp/age.tgz' | shasum -a 256 -c -
+          rm -rf /tmp/age
+          tar -xzf /tmp/age.tgz -C /tmp
+          install -m 0755 /tmp/age/age "$HOME/.local/bin/age"
+          install -m 0755 /tmp/age/age-keygen "$HOME/.local/bin/age-keygen"
+
+          "$HOME/.local/bin/sops" --version --disable-version-check
+          "$HOME/.local/bin/age-keygen" --version
+
       - name: Test (Darwin-gated coverage)
         # -v is deliberate: the run log naming each formerly-skipped test as
-        # PASS is the proof this coverage exists. FORGECTL_REQUIRE_TMUX makes a
-        # missing tmux a failure rather than a silent skip.
+        # PASS is the proof this coverage exists. Each FORGECTL_REQUIRE_* makes
+        # a missing tool a failure rather than a silent skip.
         env:
           FORGECTL_REQUIRE_TMUX: '1'
+          FORGECTL_REQUIRE_SOPS_INTEGRATION: '1'
         run: go test -v ./...
 
   helper:

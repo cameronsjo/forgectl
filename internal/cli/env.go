@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -12,6 +13,7 @@ import (
 	clippkg "github.com/cameronsjo/forgectl/internal/clip"
 	envpkg "github.com/cameronsjo/forgectl/internal/env"
 	"github.com/cameronsjo/forgectl/internal/module"
+	sopspkg "github.com/cameronsjo/forgectl/internal/sops"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
@@ -82,19 +84,32 @@ func resolveEnvTarget(anyFile bool, file, cwd string, th theme.Theme) (envpkg.Ta
 	if err != nil {
 		return envpkg.Target{}, err
 	}
+	// A refusal from here on abandons a target that OWNS an open descriptor on
+	// its containing directory, so the refusal has to close it. Callers only
+	// defer Close on a target they were actually given, and cannot close one
+	// the error path never handed back. Routing every refusal through one
+	// closure is what keeps the next branch added here from leaking: the
+	// caller-side `defer` pattern gives no signal at all when a return is
+	// missed, and the cost lands on the long-lived process (the TUI resolving
+	// repeatedly), not the one-shot command.
+	refuse := func(err error) (envpkg.Target, error) {
+		target.Close()
+		return envpkg.Target{}, err
+	}
+
 	clearErr := target.Clear()
 	if clearErr == nil {
 		return target, nil
 	}
 	if !anyFile {
-		return envpkg.Target{}, clearErr
+		return refuse(clearErr)
 	}
 	if !isTerminal() {
 		// Phrased to lead with a word, not the flag: fang title-cases the
 		// first token when it renders an error, so "--any-file requires …"
 		// reaches the user as "--Any-File requires …" — a flag spelling
 		// that does not exist and that someone will reasonably try to type.
-		return envpkg.Target{}, errors.New("an interactive terminal is required for --any-file")
+		return refuse(errors.New("an interactive terminal is required for --any-file"))
 	}
 	// Prompts with the repo-relative resolved path: resolved so a human
 	// cannot approve a file they never saw (a `.env` symlinked to
@@ -103,10 +118,10 @@ func resolveEnvTarget(anyFile bool, file, cwd string, th theme.Theme) (envpkg.Ta
 	// (forgectl#481).
 	ok, err := confirmAnyFile(th, fmt.Sprintf("%q is not a recognized env file (.env, .env.*, or *.env) — operate on it anyway?", target.Rel()))
 	if err != nil {
-		return envpkg.Target{}, err
+		return refuse(err)
 	}
 	if !ok {
-		return envpkg.Target{}, fmt.Errorf("refusing %s: --any-file confirmation declined", target.Rel())
+		return refuse(fmt.Errorf("refusing %s: --any-file confirmation declined", target.Rel()))
 	}
 	return target, nil
 }
@@ -132,14 +147,20 @@ func newEnvCmd(deps module.Deps) *cobra.Command {
 	// log field — env's whole reason to exist is that a value never
 	// prints, and a length is itself signal about a secret (the plan
 	// declines a partial-redact reveal for the exact same reason).
-	client := envpkg.NewClient(clippkg.New(deps.Runner, clippkg.WithSensitive()))
-	return newEnvCmdForClient(client, deps.Theme)
+	clip := clippkg.New(deps.Runner, clippkg.WithSensitive())
+	client := envpkg.NewClient(clip)
+	// The sops driver runs over the SENSITIVE seam, not deps.Runner: sops'
+	// stderr quotes the line it failed to parse, and that line holds the
+	// value. deps.SensitiveRunner is nil when a caller did not wire one, and
+	// nil is correct to pass through — the sops route refuses rather than
+	// silently falling back to the argv-logging path.
+	return newEnvCmdForClient(client, sopspkg.NewClient(deps.SensitiveRunner), clip, deps.Theme)
 }
 
 // newEnvCmdForClient builds the command over an already-constructed
 // client — split out so tests can inject a fake-wired *env.Client (mirrors
 // newYCmdForClient/newDockerCmdForClient) without going through newEnvCmd.
-func newEnvCmdForClient(client *envpkg.Client, th theme.Theme) *cobra.Command {
+func newEnvCmdForClient(client *envpkg.Client, sopsClient *sopspkg.Client, clip *clippkg.Client, th theme.Theme) *cobra.Command {
 	var file string
 	var anyFile bool
 
@@ -182,7 +203,7 @@ argv and transcript; forgectl can't close a channel it doesn't own.`,
 
 	cmd.AddCommand(
 		newEnvKeysCmd(&file, &anyFile, th),
-		newEnvSetCmd(client, &file, &anyFile, th),
+		newEnvSetCmd(client, sopsClient, clip, &file, &anyFile, th),
 		newEnvGetCmd(client, &file, &anyFile, th),
 		newEnvCheckCmd(&file, &anyFile, th),
 		newEnvRedactCmd(&file, &anyFile, th),
@@ -251,8 +272,9 @@ func newEnvKeysCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 }
 
 // newEnvSetCmd builds `env set`.
-func newEnvSetCmd(client *envpkg.Client, file *string, anyFile *bool, th theme.Theme) *cobra.Command {
+func newEnvSetCmd(client *envpkg.Client, sopsClient *sopspkg.Client, clip *clippkg.Client, file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 	var clipboard bool
+	var useSops bool
 
 	cmd := &cobra.Command{
 		Use:   "set KEY",
@@ -260,18 +282,39 @@ func newEnvSetCmd(client *envpkg.Client, file *string, anyFile *bool, th theme.T
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key := args[0]
-			// Checked here, BEFORE reading stdin or touching the clipboard —
-			// not just inside the domain pipeline — so a hostile key shape
-			// (env set KEY=VALUE) refuses without ever consuming input.
-			// "ValidKey first, refuse before touching the file or reading
-			// input" applies to the CLI's own input-sourcing step, too.
-			if !envpkg.ValidKey(key) {
+			// The key gate BRANCHES, and it stays in this position.
+			//
+			// Checking here — before stdin is read or the clipboard is
+			// touched — is what makes a hostile key shape (`env set
+			// KEY=VALUE`) refuse without consuming input. But the two routes
+			// have different grammars: ValidKey forbids dots and hyphens,
+			// so under --sops it would reject every dotted path the feature
+			// exists to accept. Branching keeps the ordering and admits the
+			// right shape on each route.
+			if useSops {
+				if _, err := sopspkg.ParsePath(key); err != nil {
+					return err
+				}
+			} else if !envpkg.ValidKey(key) {
 				return fmt.Errorf("key must match %s; values are piped or --clipboard, never argv", envKeyPattern)
 			}
+
+			// --any-file is inert on the sops route (it never reaches the
+			// env-file allowlist), so accepting it silently would imply a
+			// bypass that does not exist. Refusing says so.
+			if useSops && *anyFile {
+				return errors.New("--any-file does not apply with --sops; a SOPS target must match " + sopspkg.NameShapes())
+			}
+
 			cwd, err := os.Getwd()
 			if err != nil {
 				return err
 			}
+
+			if useSops {
+				return runEnvSetSops(cmd, sopsClient, clip, *file, cwd, key, clipboard)
+			}
+
 			target, err := resolveEnvTarget(*anyFile, *file, cwd, th)
 			if err != nil {
 				return err
@@ -301,7 +344,98 @@ func newEnvSetCmd(client *envpkg.Client, file *string, anyFile *bool, th theme.T
 		},
 	}
 	cmd.Flags().BoolVar(&clipboard, "clipboard", false, "read the value from the clipboard (wins over piped stdin)")
+	cmd.Flags().BoolVar(&useSops, "sops", false, "write one dotted KEY path into a SOPS-encrypted YAML file instead of a .env file")
 	return cmd
+}
+
+// sopsDefaultFile is the target `--sops` uses when --file was not given. It
+// resolves against the REPOSITORY ROOT rather than the current directory,
+// which is where these files live; without that the .env default would
+// silently aim at the wrong file and the failure would read as a sops problem
+// rather than a path one.
+const sopsDefaultFile = "secrets.sops.yaml"
+
+// runEnvSetSops is the --sops route: resolve and gate the target, source the
+// value, hand both to the driver.
+//
+// # The gate, and why there is no escape hatch
+//
+// A SOPS file is named secrets.sops.yaml, which the .env allowlist refuses —
+// so this route needs an allowlist of its own rather than a bypass of that
+// one. Three conditions, all required: the path resolves inside the
+// repository (env.ResolveTarget), its basename matches a SOPS shape, and its
+// CONTENT carries a top-level sops: mapping. The name check alone would admit
+// a plain YAML file someone called secrets.sops.yaml; the content check alone
+// would admit any encrypted document anywhere in the tree.
+//
+// A SOPS file under some other name is unreachable, deliberately. The
+// alternative is an interactive confirmation, and that is the path that
+// carried the time-of-check/time-of-use defect fixed in the commit this
+// branch sits on. Refusing costs a rename and takes a whole class of bug off
+// the table.
+func runEnvSetSops(cmd *cobra.Command, sopsClient *sopspkg.Client, clip *clippkg.Client, file, cwd, key string, clipboard bool) error {
+	// The .env default would aim at the wrong file, so substitute this
+	// route's own default when --file was not given. Changed() reads the
+	// parent's persistent flag correctly — pflag shares the *Flag pointer.
+	if !cmd.Flags().Changed("file") {
+		root, err := envpkg.RepoRoot(cwd)
+		if err != nil {
+			return err
+		}
+		file = filepath.Join(root, sopsDefaultFile)
+	}
+
+	target, err := envpkg.ResolveTarget(file, cwd)
+	if err != nil {
+		return err
+	}
+	defer target.Close()
+
+	// The NAME check precedes the existence check, and the order matters twice
+	// over. A refused name should refuse on the name whatever the filesystem
+	// says — "not found" is the wrong reason and sends the operator looking
+	// for a missing file rather than at their --file argument. And answering
+	// existence first turns a refused path into an existence oracle, which is
+	// a disclosure a refusal has no business making.
+	if !sopspkg.IsSOPSFileName(filepath.Base(target.Abs())) {
+		return fmt.Errorf("refusing %s: --sops requires a target named one of %s", target.Rel(), sopspkg.NameShapes())
+	}
+	if !target.Exists {
+		// Creating a file is out of scope, and a rule-named refusal beats a
+		// raw os.Open error that reads as an internal fault.
+		return fmt.Errorf("%s not found; --sops edits an existing SOPS file and does not create one", target.Rel())
+	}
+
+	// Sourced after the target is gated, so a refusable target never consumes
+	// input — the same ordering the key gate follows.
+	var value string
+	if clipboard {
+		// client.SetFromClipboard runs the whole .env pipeline and would
+		// append a plaintext KEY=value line to an encrypted file, so the
+		// clipboard is read directly here and handed to the sops driver.
+		value, err = clip.Paste(cmd.Context())
+	} else {
+		value, err = resolveSetValue(cmd)
+	}
+	if err != nil {
+		return err
+	}
+
+	outcome, err := sopsClient.SetValue(cmd.Context(), target, key, value)
+	if err != nil {
+		return err
+	}
+
+	// The outcomes are distinguished because replacing a key is a rotation
+	// and adding one is new configuration — an operator reading a transcript
+	// wants to know which happened.
+	switch outcome {
+	case sopspkg.OutcomeAdded:
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "added %s to %s\n", key, target.Rel())
+	default:
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "replaced %s in %s\n", key, target.Rel())
+	}
+	return nil
 }
 
 // resolveSetValue reads the value `set` will use when --clipboard wasn't
