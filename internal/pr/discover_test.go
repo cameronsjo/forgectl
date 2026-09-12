@@ -499,6 +499,40 @@ func TestPrepareMany_PerItemErrorCaptured(t *testing.T) {
 	if results[1].Err == nil {
 		t.Errorf("results[1] should carry the gh pr view failure, got nil")
 	}
+
+	// THE SLOT MUST NOT LEAK. The failing ref's reservation has no workspace —
+	// `gh pr view` fails before one is ever created — so parking it in
+	// needs-repair is the only thing that stops it holding capacity forever.
+	// Asserting only on results[1].Err left that park untested, and it never ran.
+	summaries, unreadable, err := client.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if unreadable != 0 {
+		t.Fatalf("unreadable = %d, want 0", unreadable)
+	}
+	var parked SessionSummary
+	for _, s := range summaries {
+		if s.Ref() == refs[1] {
+			parked = s
+		}
+	}
+	if parked.Path() == "" {
+		t.Fatalf("no record for the failed ref; summaries = %+v", summaries)
+	}
+	if parked.Phase() != PhaseNeedsRepair {
+		t.Fatalf("failed reservation is in phase %q, want needs-repair — it is holding a slot", parked.Phase())
+	}
+	bc, _, err := loadBreadcrumbRecord(parked.Path(), client.SessionsDir())
+	if err != nil {
+		t.Fatalf("reload the parked record: %v", err)
+	}
+	if !strings.Contains(bc.RepairReason, "prepare failed") {
+		t.Errorf("repairReason = %q, want the prepare failure", bc.RepairReason)
+	}
+	if occ := occupancyFromSnapshot(summaries, 0, map[string]bool{}); occ != 1 {
+		t.Errorf("occupied = %d, want 1 (only the succeeded ref) — a parked failure must release its slot", occ)
+	}
 }
 
 // TestParseSearchPRs_KeepsRealLocalOwner is the regression guard for the

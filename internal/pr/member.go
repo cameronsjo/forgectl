@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/cameronsjo/forgectl/internal/sandbox"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -57,6 +58,33 @@ type breadcrumbMember struct {
 // which the caller meant, so only an EXACT lexical name settles it; any other
 // operand shape is rejected with zero mutation.
 func (c *Client) resolveBreadcrumbMember(operand string) (breadcrumbMember, error) {
+	member, err := c.resolveBreadcrumbEntry(operand)
+	if err != nil {
+		return breadcrumbMember{}, err
+	}
+	bc, err := decodeBreadcrumbRecord(member.bytes, member.path)
+	if err != nil {
+		return breadcrumbMember{}, err
+	}
+	member.breadcrumb = bc
+	return member, nil
+}
+
+// resolveBreadcrumbEntry is resolveBreadcrumbMember's identity half: everything
+// up to and including the authorized bytes, WITHOUT decoding them. The returned
+// member's breadcrumb field is the zero value.
+//
+// It exists for exactly one caller — `pr repair --apply --forget-if-absent` on a
+// record this build cannot decode. That record blocks every launch (the
+// counting paths refuse on it) while no verb can read it, so the one escape has
+// to be a removal that proves WHICH file it is unlinking without ever claiming
+// to know what the file says. The pinned-handle protocol downstream answers
+// that question from dev+ino and byte equality, neither of which needs a
+// decode.
+//
+// Every other caller goes through resolveBreadcrumbMember: a decode failure is
+// a refusal there, and must stay one.
+func (c *Client) resolveBreadcrumbEntry(operand string) (breadcrumbMember, error) {
 	canonicalDir, err := filepath.EvalSymlinks(c.sessionsDir)
 	if err != nil {
 		return breadcrumbMember{}, fmt.Errorf("resolve pr sessions dir %s: %w", c.sessionsDir, err)
@@ -163,9 +191,28 @@ func (c *Client) resolveBreadcrumbMember(operand string) (breadcrumbMember, erro
 		return breadcrumbMember{}, fmt.Errorf("breadcrumb %s is not a regular file", termsafe.QuotePath(selected.lexical))
 	}
 
-	bc, data, err := loadBreadcrumbRecord(selected.lexical, c.sessionsDir)
+	// LOCATION guard first, then the bytes — the same order loadBreadcrumbRecord
+	// applies, and for the same reason: membership inside the forgectl-owned dir
+	// is settled before the file is read.
+	if !sandbox.WithinWorkspace(c.sessionsDir, selected.lexical) {
+		slog.Error("Breadcrumb path escapes session-state dir; refusing.", "path", selected.lexical, "sessionsDir", c.sessionsDir)
+		return breadcrumbMember{}, fmt.Errorf("breadcrumb %s is not inside the forgectl session-state dir",
+			termsafe.QuotePath(selected.lexical))
+	}
+	file, err := os.Open(selected.lexical) //nolint:gosec // location-validated directly above
 	if err != nil {
-		return breadcrumbMember{}, err
+		return breadcrumbMember{}, fmt.Errorf("read breadcrumb %s: %w",
+			termsafe.QuotePath(selected.lexical), termsafe.Error(err))
+	}
+	data, readErr := readBreadcrumbBytes(file)
+	closeErr := file.Close()
+	if readErr != nil {
+		return breadcrumbMember{}, fmt.Errorf("read breadcrumb %s: %w",
+			termsafe.QuotePath(selected.lexical), termsafe.Error(readErr))
+	}
+	if closeErr != nil {
+		return breadcrumbMember{}, fmt.Errorf("close breadcrumb %s: %w",
+			termsafe.QuotePath(selected.lexical), termsafe.Error(closeErr))
 	}
 	return breadcrumbMember{
 		path:        selected.lexical,
@@ -173,7 +220,6 @@ func (c *Client) resolveBreadcrumbMember(operand string) (breadcrumbMember, erro
 		info:        info,
 		dirInfo:     dirInfo,
 		bytes:       data,
-		breadcrumb:  bc,
 	}, nil
 }
 

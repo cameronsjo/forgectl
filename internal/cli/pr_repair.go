@@ -67,9 +67,17 @@ what each would do and touches nothing. --history shows the audit trail.`,
 				return err
 			}
 			if asJSON {
-				return writeRepairJSON(cmd.OutOrStdout(), report)
+				if err := writeRepairJSON(cmd.OutOrStdout(), report); err != nil {
+					return err
+				}
+			} else if err := writeRepairHuman(cmd, report, apply); err != nil {
+				return err
 			}
-			return writeRepairHuman(cmd, report, apply)
+			// The exit code is decided once, for both output shapes. An inspect
+			// that found unsettled records exits 1 — that is the question a
+			// script asks `pr repair`, and answering it only in the human text
+			// would make `--json` the one caller that cannot hear the answer.
+			return repairExitCode(report, apply)
 		},
 	}
 	cmd.Flags().BoolVar(&apply, "apply", false, "act on the named breadcrumb (requires exactly one mode below)")
@@ -125,10 +133,7 @@ func writeRepairJSON(out io.Writer, report pr.RepairReport) error {
 	return enc.Encode(report)
 }
 
-// writeRepairHuman renders the report and sets the exit code. An inspect that
-// found unsettled records exits 1: `pr repair` is the verb a script runs to ask
-// whether anything needs a human, and exiting 0 on "four sessions are stuck"
-// would make that question unanswerable from the exit status.
+// writeRepairHuman renders the report. The exit code is repairExitCode's.
 func writeRepairHuman(cmd *cobra.Command, report pr.RepairReport, apply bool) error {
 	out := cmd.OutOrStdout()
 	if len(report.Items) == 0 {
@@ -136,21 +141,43 @@ func writeRepairHuman(cmd *cobra.Command, report pr.RepairReport, apply bool) er
 		return nil
 	}
 	for _, it := range report.Items {
+		ref := safeTerm(it.Ref)
+		if ref == "" {
+			// An unreadable record has no ref to print, and a blank first
+			// column would read as a row that simply lost its name.
+			ref = "(unreadable)"
+		}
 		_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\n",
-			safeTerm(it.Ref), it.FromPhase, windowObservation(it), workspaceObservation(it),
+			ref, it.FromPhase, windowObservation(it), workspaceObservation(it),
 			termsafe.QuotePathIfUnsafe(it.RecordPath))
 		if it.Reason != "" {
 			_, _ = fmt.Fprintf(out, "  reason: %s\n", safeTerm(it.Reason))
+		}
+		if it.Error != "" {
+			_, _ = fmt.Fprintf(out, "  error: %s\n", safeTerm(it.Error))
 		}
 		if it.Outcome != "" && it.Outcome != "inspect" {
 			_, _ = fmt.Fprintf(out, "  %s\n", it.Outcome)
 		}
 	}
-	if apply {
+	if !apply {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			"%d record(s) need settling — see `forgectl pr repair --help` for the three ways to settle one\n", len(report.Items))
+	}
+	return nil
+}
+
+// repairExitCode is the honest code for an inspect: 1 when anything needs
+// settling, 0 when nothing does.
+//
+// `pr repair` is the verb a script runs to ask whether a human is needed, so
+// exiting 0 on "four sessions are stuck" would make that question unanswerable
+// from the exit status. An --apply that reached here succeeded, so it exits 0
+// regardless of what the report describes.
+func repairExitCode(report pr.RepairReport, apply bool) error {
+	if apply || len(report.Items) == 0 {
 		return nil
 	}
-	_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-		"%d record(s) need settling — see `forgectl pr repair --help` for the three ways to settle one\n", len(report.Items))
 	return WithExitCode(fmt.Errorf("%d review session(s) are unsettled", len(report.Items)), 1)
 }
 

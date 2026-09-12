@@ -49,9 +49,18 @@ func (p Phase) valid() bool {
 }
 
 // allowsEmptyWorkspace reports whether a record in phase p may carry no
-// workspace: nothing has been cloned yet for a queued or preparing session.
+// workspace.
+//
+// Queued and preparing have not cloned anything yet. needs-repair joins them
+// because a reservation whose clone FAILED has no workspace either, and parking
+// it is the only thing that stops its slot leaking — a rule that refused the
+// park would leave the record stuck in preparing, holding capacity, with no
+// reason recorded anywhere. What makes that safe is that the diagnostic lives
+// in repairReason, which needs-repair already requires, and that
+// discardRecordOnly settles a workspace-less record without ever reaching a
+// facility that deletes directories.
 func (p Phase) allowsEmptyWorkspace() bool {
-	return p == PhaseQueued || p == PhasePreparing
+	return p == PhaseQueued || p == PhasePreparing || p == PhaseNeedsRepair
 }
 
 // anyPhase is the wildcard `from` for a transition that must land regardless
@@ -103,6 +112,17 @@ func (c *Client) transitionOnce(path string, from, to Phase, mut func(*Breadcrum
 	if !to.valid() {
 		return fmt.Errorf("refusing to write unknown phase %q to %s", string(to), termsafe.QuotePath(path))
 	}
+	// READ AND WRITE MUST NAME THE SAME FILE. The write below addresses the
+	// record as sessionsDir + basename, so a path that merely CONTAINS the
+	// sessions dir — a subdirectory entry, a symlink resolving in — would be
+	// read from one file and written over a different one that happens to share
+	// a basename. loadBreadcrumbRecord's containment check does not settle that;
+	// only the parent directory does. Callers should hand this a path that came
+	// out of resolveBreadcrumbMember; this is the backstop for the ones that
+	// build it another way.
+	if err := c.assertDirectSessionsDirEntry(path); err != nil {
+		return err
+	}
 	bc, _, err := loadBreadcrumbRecord(path, c.sessionsDir)
 	if err != nil {
 		return err
@@ -145,6 +165,32 @@ func (c *Client) transitionOnce(path string, from, to Phase, mut func(*Breadcrum
 	}
 	slog.Debug("Moved a session record to its next phase.",
 		"path", path, "from", string(bc.Phase), "to", string(to), "revision", next.Revision)
+	return nil
+}
+
+// assertDirectSessionsDirEntry refuses any path that is not a direct child of
+// the canonical session directory.
+//
+// It compares RESOLVED parents, not the lexical string, so a symlinked sessions
+// dir keeps working and a symlink pointing into the dir from a subdirectory
+// cannot pass by spelling. The record itself is deliberately NOT resolved: an
+// in-directory symlink is refused here rather than followed, because following
+// it is what would let the write land somewhere the read never looked.
+func (c *Client) assertDirectSessionsDirEntry(path string) error {
+	canonicalDir, err := filepath.EvalSymlinks(c.sessionsDir)
+	if err != nil {
+		return fmt.Errorf("resolve pr sessions dir %s: %w", termsafe.QuotePath(c.sessionsDir), err)
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("resolve the directory holding %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
+	}
+	if parent != canonicalDir {
+		slog.Error("Refusing a record write: the record is not a direct entry of the pr session directory.",
+			"path", path, "parent", parent, "sessionsDir", canonicalDir)
+		return fmt.Errorf("session record %s does not sit directly in the pr session directory; refusing to write it",
+			termsafe.QuotePath(path))
+	}
 	return nil
 }
 

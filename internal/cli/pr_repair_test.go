@@ -14,14 +14,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"github.com/cameronsjo/forgectl/internal/pr"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/cameronsjo/forgectl/internal/exec"
-	"github.com/cameronsjo/forgectl/internal/pr"
 )
 
 func repairCmdClient(t *testing.T, sessionsDir string) *pr.Client {
@@ -97,15 +96,21 @@ func TestPrRepairJSON_EmptyIsArrayNeverNull(t *testing.T) {
 func TestPrRepairJSON_ItemShape(t *testing.T) {
 	dir := t.TempDir()
 	seedRepairRecord(t, dir, "o/r#1", "preparing", "")
+	// An inspect that found something to settle exits 1 in BOTH output shapes —
+	// that is the question a script asks pr repair, and answering it only in the
+	// human text would make --json the one caller that cannot hear the answer.
 	out, _, err := runPrRepair(t, repairCmdClient(t, dir), "--json")
-	if err != nil {
-		t.Fatalf("pr repair --json: %v", err)
+	if err == nil {
+		t.Fatal("pr repair --json with an unsettled record should exit nonzero")
 	}
+	// A standalone cobra command prints usage to stdout after a RunE error, so
+	// decode the first JSON value rather than the whole buffer (a test-harness
+	// artifact: the real root sets SilenceUsage).
 	var report struct {
 		Items []map[string]json.RawMessage `json:"items"`
 	}
-	if err := json.Unmarshal([]byte(out), &report); err != nil {
-		t.Fatalf("unmarshal: %v\n%s", err, out)
+	if err := json.NewDecoder(strings.NewReader(out)).Decode(&report); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out)
 	}
 	if len(report.Items) != 1 {
 		t.Fatalf("items = %d, want 1: %s", len(report.Items), out)
@@ -189,4 +194,48 @@ func TestPrRepairHistory_ReturnsTheRows(t *testing.T) {
 	}
 }
 
-var _ = exec.FakeRunner{}
+// TestPrRepair_UnreadableRecordIsReportedAndExitsNonzero is the survey verb
+// answering the opposite of the truth: an unreadable record refuses every
+// launch, and `pr repair` used to print "no records need repair" and exit 0.
+func TestPrRepair_UnreadableRecordIsReportedAndExitsNonzero(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "o-r-9-1.json")
+	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := runPrRepair(t, repairCmdClient(t, dir))
+	if err == nil {
+		t.Fatal("an unreadable record must not exit 0")
+	}
+	if strings.Contains(out, "no records need repair") {
+		t.Errorf("stdout = %q, want the unreadable row rather than the empty-state line", out)
+	}
+	if !strings.Contains(out, "unreadable") || !strings.Contains(out, filepath.Base(bad)) {
+		t.Errorf("stdout = %q, want it to name the file and why it could not be read", out)
+	}
+}
+
+// TestPrRepair_ForgetSettlesAnUnreadableRecord closes the loop: the row the
+// report now shows has a command that removes it, so the only escape is no
+// longer a manual rm that no message mentions.
+func TestPrRepair_ForgetSettlesAnUnreadableRecord(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "o-r-9-1.json")
+	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := repairCmdClient(t, dir)
+	if _, _, err := runPrRepair(t, client, bad, "--apply", "--forget-if-absent"); err != nil {
+		t.Fatalf("forget an unreadable record: %v", err)
+	}
+	if _, serr := os.Stat(bad); !errors.Is(serr, os.ErrNotExist) {
+		t.Errorf("the record is still on disk: %v", serr)
+	}
+	out, _, err := runPrRepair(t, client)
+	if err != nil {
+		t.Fatalf("inspect after settling should exit 0: %v", err)
+	}
+	if !strings.Contains(out, "no records need repair") {
+		t.Errorf("stdout = %q, want the empty state once nothing is left", out)
+	}
+}

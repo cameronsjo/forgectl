@@ -346,6 +346,86 @@ func (c *Client) discardRecordOnly(member breadcrumbMember) error {
 	return nil
 }
 
+// discardUndecodableRecord removes a record this build cannot decode, and is
+// reachable only through `pr repair --apply --forget-if-absent`.
+//
+// It runs the same pinned-handle identity protocol as discardStale and
+// discardRecordOnly, minus every step that needs a decode. That is the whole
+// design: the protocol's authority comes from dev+ino identity and byte
+// equality, neither of which requires understanding the file. So this proves
+// exactly WHICH file it unlinks while claiming nothing about what the file
+// said.
+//
+// WHAT IT CANNOT PROVE, stated rather than assumed: an undecodable record may
+// still have named a clean room, and there is no way to read it. The caller
+// logs that, writes it into the audit row, and the operator accepts it by
+// choosing this verb. The alternative was worse — such a record refuses every
+// counting arm, so it blocks every launch, and the only escape was a manual
+// `rm` that no forgectl message mentioned.
+func (c *Client) discardUndecodableRecord(member breadcrumbMember) error {
+	slog.Debug("Preparing to discard a session record this build cannot read.", "path", member.path)
+
+	root, err := os.OpenRoot(c.sessionsDir)
+	if err != nil {
+		return fmt.Errorf("pin pr sessions dir %s: %w", c.sessionsDir, err)
+	}
+	defer func() {
+		if cerr := root.Close(); cerr != nil {
+			slog.Debug("Failed to close the pinned pr sessions dir handle.", "error", cerr)
+		}
+	}()
+
+	dirInfo, err := root.Lstat(".")
+	if err != nil {
+		return fmt.Errorf("re-stat pr sessions dir: %w", err)
+	}
+	if !os.SameFile(dirInfo, member.dirInfo) {
+		return fmt.Errorf("pr sessions dir %s changed identity during repair; refusing to remove %s",
+			c.sessionsDir, member.displayPath)
+	}
+
+	name := filepath.Base(member.path)
+	info, err := root.Lstat(name)
+	if err != nil {
+		return fmt.Errorf("re-stat breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+	}
+	if !os.SameFile(info, member.info) {
+		return fmt.Errorf("breadcrumb %s changed identity during repair; refusing to remove it", member.displayPath)
+	}
+	if !staleMemberIsRegular(info) {
+		return fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to remove it", member.displayPath)
+	}
+
+	file, err := root.Open(name)
+	if err != nil {
+		return fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+	}
+	data, readErr := readBreadcrumbBytes(file)
+	closeErr := file.Close()
+	if readErr != nil {
+		return fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(readErr))
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close breadcrumb %s after re-read: %w", member.displayPath, termsafe.Error(closeErr))
+	}
+	if !bytes.Equal(data, member.bytes) {
+		return fmt.Errorf("breadcrumb %s changed on disk during repair; refusing to remove it", member.displayPath)
+	}
+	// A file that became READABLE between the report and the apply is no longer
+	// the thing this verb was authorized for — byte equality above already
+	// refuses that, and this is the assertion that says so out loud.
+	if _, err := decodeBreadcrumbRecord(data, member.path); err == nil {
+		return fmt.Errorf("breadcrumb %s is readable after all; settle it as an ordinary record rather than forgetting it",
+			member.displayPath)
+	}
+
+	if err := root.Remove(name); err != nil {
+		return fmt.Errorf("remove breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+	}
+	slog.Info("Successfully discarded an undecodable session record.", "path", member.path)
+	return nil
+}
+
 // sameBreadcrumbRecord reports whether two decoded records agree on every
 // field that carries security meaning. Byte equality already implies this;
 // checking both means a future decoder change cannot quietly widen what
@@ -441,8 +521,9 @@ func (c *Client) Cleanup(ctx context.Context, date string) error {
 		if err != nil {
 			return err
 		}
-		if unreadable > 0 {
-			slog.Warn("Cleanup is sweeping past records it could not read.", "unreadable", unreadable)
+		if len(unreadable) > 0 {
+			slog.Warn("Cleanup is sweeping past records it could not read.",
+				"unreadable", len(unreadable), "first", unreadable[0].path)
 		}
 		var discarded int
 		var firstErr error

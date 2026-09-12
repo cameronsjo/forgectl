@@ -236,9 +236,9 @@ func (c *Client) occupiedLocked(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if unreadable > 0 {
+	if len(unreadable) > 0 {
 		return 0, fmt.Errorf("%d session record(s) could not be read, so the review count would be short — "+
-			"settle them with 'forgectl pr repair' before launching", unreadable)
+			"settle them with 'forgectl pr repair' before launching", len(unreadable))
 	}
 	return c.occupancyFrom(ctx, summaries)
 }
@@ -297,11 +297,11 @@ func (c *Client) openReservation(ctx context.Context) (*reservation, error) {
 	if err != nil {
 		return nil, err
 	}
-	if unreadable > 0 {
+	if len(unreadable) > 0 {
 		slog.Error("Refusing to reserve a review slot: some session records could not be read.",
-			"unreadable", unreadable)
+			"unreadable", len(unreadable), "first", unreadable[0].path)
 		return nil, fmt.Errorf("%d session record(s) could not be read, so the review count would be short — "+
-			"settle them with 'forgectl pr repair' before launching", unreadable)
+			"settle them with 'forgectl pr repair' before launching", len(unreadable))
 	}
 	occupied, err := c.occupancyFrom(ctx, summaries)
 	if err != nil {

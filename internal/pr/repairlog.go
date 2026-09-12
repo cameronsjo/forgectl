@@ -98,23 +98,61 @@ func (c *Client) appendRepairRowLocked(row RepairRow) error {
 	if len(data) > maxRepairLogLineBytes {
 		return fmt.Errorf("repair audit row exceeds the %d-byte line limit", maxRepairLogLineBytes)
 	}
-	f, err := os.OpenFile(c.repairLogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // inside the 0700 sessions dir
+	f, err := os.OpenFile(c.repairLogPath(), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600) //nolint:gosec // inside the 0700 sessions dir
 	if err != nil {
 		return fmt.Errorf("open repair audit log: %w", termsafe.Error(err))
 	}
-	n, writeErr := f.Write(data)
-	if writeErr == nil && n != len(data) {
-		writeErr = fmt.Errorf("%w (wrote %d of %d bytes)", io.ErrShortWrite, n, len(data))
-	}
-	if writeErr == nil {
-		writeErr = f.Sync()
-	}
+	writeErr := appendRepairRow(f, data)
 	closeErr := f.Close()
 	if writeErr != nil {
 		return fmt.Errorf("write repair audit row: %w", writeErr)
 	}
 	if closeErr != nil {
 		return fmt.Errorf("close repair audit log: %w", closeErr)
+	}
+	return nil
+}
+
+// repairLogFile is the seam appendRepairRow needs: append, roll back a partial
+// append, and flush. Production is *os.File; a test drives a short-writing
+// double through it, which is the only way to reach the truncation branch.
+type repairLogFile interface {
+	io.Writer
+	Seek(offset int64, whence int) (int64, error)
+	Truncate(size int64) error
+	Sync() error
+}
+
+// appendRepairRow writes one complete row, or leaves the file exactly as it
+// found it.
+//
+// A SHORT WRITE MUST NOT SURVIVE. The previous form returned the error but left
+// the partial bytes in place, so the next append concatenated onto a truncated
+// line and readRepairLog dropped the merged result as unparseable — costing BOTH
+// rows. On an out-of-space tail that is the intent row naming a clean room, which
+// is the one line the log exists to preserve. So the offset is captured first and
+// the file is truncated back to it on any failure: the log loses the row it could
+// not write, and nothing else.
+func appendRepairRow(f repairLogFile, data []byte) error {
+	start, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return fmt.Errorf("locate the end of the repair audit log: %w", err)
+	}
+	rollback := func(cause error) error {
+		if terr := f.Truncate(start); terr != nil {
+			return fmt.Errorf("%w (and the partial row could not be rolled back: %v)", cause, terr)
+		}
+		return cause
+	}
+	n, err := f.Write(data)
+	if err != nil {
+		return rollback(fmt.Errorf("append repair audit row: %w", err))
+	}
+	if n != len(data) {
+		return rollback(fmt.Errorf("append repair audit row: %w (wrote %d of %d bytes)", io.ErrShortWrite, n, len(data)))
+	}
+	if err := f.Sync(); err != nil {
+		return rollback(fmt.Errorf("flush repair audit row: %w", err))
 	}
 	return nil
 }

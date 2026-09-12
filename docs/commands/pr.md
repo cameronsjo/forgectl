@@ -76,7 +76,9 @@ A review session is recorded before it is dispatched, not after, so a crash at a
 
 The slot accounting is why `preparing`, `prepared`, and `launching` count: each has claimed capacity that no window reflects yet. `queued` has claimed nothing, and `needs-repair` is deliberately released so a crashed session cannot hold a slot forever — it is visible to `pr repair` and it is your call.
 
-`forgectl pr repair` with no arguments lists every record in one of those unsettled phases, with the reason it carries, whether its derived window is live, and whether its clean room still exists. It exits 1 when anything needs settling, so a script can ask the question from the exit status alone; `--json` emits the same report.
+`forgectl pr repair` with no arguments lists every record in one of those unsettled phases, with the reason it carries, whether its derived window is live, and whether its clean room still exists. It exits 1 when anything needs settling — in both output shapes, so `--json` hears the same answer the human text gives — and 0 when nothing does.
+
+A record this build **cannot read** — a torn write, a hand edit, a record a newer forgectl wrote — is listed too, as a row whose phase and outcome are both `unreadable`, carrying the path and the decode error. That row is the most urgent one in the report: every command that counts records refuses while it exists, so an unreadable record blocks every launch. Only `--forget-if-absent` can settle it, and what that removal claims is deliberately narrow — the pinned-handle protocol proves *which* file is unlinked from its inode identity and its exact bytes, neither of which needs a decode, but it cannot prove the record named no clean room, because it cannot read the record. That limit is logged and written into the audit row rather than assumed away.
 
 ### The runbook
 
@@ -98,7 +100,9 @@ forgectl pr repair <breadcrumb> --apply --forget-if-absent   # remove only a rec
 
 `--adopt-window` takes no window operand, on purpose: the window is re-derived from the ref the same way every other verb derives it, so no operator-supplied tmux target can steer it, and it refuses when the name resolves to a window under a different session. It also refuses when the clean room is not a live forgectl workspace, because adopting promotes the record to one `pr teardown` will remove.
 
-`--rollback` refuses while the window is live, and refuses when the window list cannot be read at all — an unreadable list is not an absent window. Off a terminal it requires `--yes`. `--dry-run` prints what any mode would do and touches nothing.
+`--rollback` refuses while the window is live, refuses when the window list cannot be read at all (an unreadable list is not an absent window), and refuses a recorded workspace that is neither a live clean room nor cleanly absent. Off a terminal it requires `--yes`; on one it asks a question that names the removal, separately from the gate that approves posting a review. `--dry-run` prints what any mode would do and touches nothing — including off a terminal, where it needs no `--yes`, because there is nothing to confirm.
+
+Every refusal happens **before** the intent row is written. A row with no completion beside it is the signal that a rollback died mid-delete, so a refused mutation that wrote one would forge exactly that signal and send someone hunting a directory nothing ever touched.
 
 Every `--apply` writes a line to `<sessions dir>/repair.jsonl` **before** it mutates anything and completes that line afterwards. That ordering is what makes a half-finished rollback recoverable: once the record is gone, the intent row is the only thing left naming the clean room on disk. `forgectl pr repair --history [--json]` reads it back.
 

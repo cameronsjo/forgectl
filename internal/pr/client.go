@@ -65,6 +65,14 @@ type Client struct {
 	// inject a deterministic decision.
 	approve func(review string) (bool, error)
 
+	// confirmRemoval is the gate on a DESTRUCTIVE repair. It is a separate seam
+	// from approve on purpose: approve authorizes posting a review, and its huh
+	// form asks "Post this review to the PR?" — a question whose yes must never
+	// have meant "delete this clean room". Sharing one field also meant a caller
+	// wiring an auto-approver for posting silently auto-approved deletions.
+	// Defaults to a huh confirm naming the removal; tests inject a decision.
+	confirmRemoval func(prompt string) (bool, error)
+
 	// approvalTheme styles the default gate's huh form. It is a separate field
 	// rather than a captured value because New installs the default approver
 	// before options run, so a theme supplied by an option would arrive too
@@ -117,6 +125,16 @@ func WithTmuxClient(client *tmux.Client) Option {
 // deterministic approve/deny without a TTY.
 func WithApprover(fn func(review string) (bool, error)) Option {
 	return func(c *Client) { c.approve = fn }
+}
+
+// WithRemovalConfirmer overrides the destructive-repair confirmation gate —
+// used in tests to drive the interactive path without a TTY.
+//
+// Deliberately NOT the same option as WithApprover: a caller that wants
+// unattended review posting must not thereby consent to unattended deletion of
+// a clean room, so the two decisions are wired separately or not at all.
+func WithRemovalConfirmer(fn func(prompt string) (bool, error)) Option {
+	return func(c *Client) { c.confirmRemoval = fn }
 }
 
 // WithApprovalTheme supplies the resolved theme the default approval gate
@@ -191,6 +209,9 @@ func New(run exec.Runner, opts ...Option) *Client {
 	// non-nil here and is left alone.
 	if c.approve == nil {
 		c.approve = func(review string) (bool, error) { return confirmReview(review, c.approvalTheme) }
+	}
+	if c.confirmRemoval == nil {
+		c.confirmRemoval = func(prompt string) (bool, error) { return confirmRemoval(prompt, c.approvalTheme) }
 	}
 	return c
 }

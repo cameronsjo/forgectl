@@ -22,6 +22,7 @@ package pr
 //   [x] repair and cleanup each complete without a lock timeout
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -381,5 +382,316 @@ func TestRepairAndCleanup_CompleteWithoutALockTimeout(t *testing.T) {
 	}
 	if err := c.Cleanup(context.Background(), time.Now().UTC().Format("2006-01-02")); err != nil {
 		t.Fatalf("cleanup deadlocked or failed: %v", err)
+	}
+}
+
+// TestRepairAdoptWindow_CannotWriteThroughASubdirectoryOperand is the
+// wrong-record write, pinned. The atomic writer addresses a record as
+// sessionsDir + basename, so an operand that merely RESOLVES into the sessions
+// dir — a subdirectory entry, a symlink pointing in — would be read from one
+// file and written over a different one sharing its basename. The victim's
+// clean-room pointer would be destroyed and a record would read `active` for a
+// ref it was never written for.
+func TestRepairAdoptWindow_CannotWriteThroughASubdirectoryOperand(t *testing.T) {
+	victimRef := Ref{Owner: "o", Repo: "r", Number: 1}
+	decoyRef := Ref{Owner: "o", Repo: "r", Number: 99}
+	name := mustWindowName(t, decoyRef)
+	c := repairClient(t, repairRunner(nil, sessionWinRow("forgectl", "$1", name)))
+
+	// The victim: a real member whose basename the decoy will share.
+	victimPath := seedPhaseRecord(t, c, victimRef, PhasePrepared, fakeWorkspace(t))
+	victimBefore, err := os.ReadFile(victimPath) //nolint:gosec // test-owned temp dir
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The decoy: same basename, one directory down, naming a different ref.
+	sub := filepath.Join(c.SessionsDir(), "sub")
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	decoy := Breadcrumb{
+		Workspace: fakeWorkspace(t), Ref: decoyRef.String(), Agent: "claude",
+		CreatedAt: time.Now().UTC(), Version: breadcrumbVersion, Phase: PhasePrepared, Revision: 1,
+	}
+	decoyData, err := encodeBreadcrumb(decoy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoyPath := filepath.Join(sub, filepath.Base(victimPath))
+	if err := os.WriteFile(decoyPath, decoyData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = c.Repair(context.Background(), RepairOpts{Record: decoyPath, Apply: true, AdoptWindow: true})
+	if err == nil {
+		t.Fatal("expected a refusal: the operand is not an enumerated member of the sessions dir")
+	}
+	after, rerr := os.ReadFile(victimPath) //nolint:gosec // test-owned temp dir
+	if rerr != nil {
+		t.Fatalf("the victim record was removed: %v", rerr)
+	}
+	if !bytes.Equal(victimBefore, after) {
+		t.Fatalf("a sub-directory operand rewrote the top-level record:\nbefore %s\nafter  %s", victimBefore, after)
+	}
+}
+
+// TestTransition_RefusesAPathThatIsNotADirectSessionsDirEntry drives the
+// backstop directly: even handed a decoded, valid record one level down,
+// transition must refuse rather than write to sessionsDir/<basename>.
+func TestTransition_RefusesAPathThatIsNotADirectSessionsDirEntry(t *testing.T) {
+	c := testClient(t, &exec.FakeRunner{})
+	ref := Ref{Owner: "o", Repo: "r", Number: 1}
+	top := seedPhaseRecord(t, c, ref, PhasePrepared, fakeWorkspace(t))
+	before, err := os.ReadFile(top) //nolint:gosec // test-owned temp dir
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sub := filepath.Join(c.SessionsDir(), "sub")
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(sub, filepath.Base(top))
+	if err := os.WriteFile(nested, before, 0o600); err != nil { //nolint:gosec // a path this test built inside its own t.TempDir
+		t.Fatal(err)
+	}
+
+	err = c.transition(context.Background(), nested, PhasePrepared, PhaseLaunching, nil)
+	if err == nil {
+		t.Fatal("expected a refusal: the record is not a direct entry of the sessions dir")
+	}
+	if !strings.Contains(err.Error(), "directly") {
+		t.Errorf("refusal %q does not say the record must sit directly in the session directory", err)
+	}
+	after, _ := os.ReadFile(top) //nolint:gosec // test-owned temp dir
+	if !bytes.Equal(before, after) {
+		t.Error("the top-level record was rewritten through a nested path")
+	}
+}
+
+// TestRepairRollback_InteractiveGateNamesTheRemovalAndHonorsBothAnswers covers
+// the gate a human actually meets. It must be the REMOVAL confirmer, never the
+// review-posting approver: a caller that wired an auto-approver for posting
+// must not thereby have consented to deleting a clean room.
+func TestRepairRollback_InteractiveGateNamesTheRemovalAndHonorsBothAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		answer   bool
+		wantGone bool
+		wantOut  string
+	}{
+		{"approved", true, true, "rolled-back"},
+		{"declined", false, false, "declined"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ref := Ref{Owner: "o", Repo: "r", Number: 1}
+			var prompted string
+			postApprovals := 0
+			c := New(repairRunner(nil),
+				WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+				WithTmuxSession("forgectl"), WithLockWait(2*time.Second),
+				WithTTYCheck(func() bool { return true }),
+				WithApprover(func(string) (bool, error) { postApprovals++; return true, nil }),
+				WithRemovalConfirmer(func(prompt string) (bool, error) { prompted = prompt; return tc.answer, nil }),
+			)
+			ws := fakeWorkspace(t)
+			path := seedPhaseRecord(t, c, ref, PhaseLaunching, ws)
+
+			report, err := c.Repair(context.Background(), RepairOpts{Record: path, Apply: true, Rollback: true})
+			if err != nil {
+				t.Fatalf("rollback: %v", err)
+			}
+			if postApprovals != 0 {
+				t.Errorf("the review-POSTING approver was consulted %d time(s) for a deletion", postApprovals)
+			}
+			if !strings.Contains(prompted, ref.String()) || !strings.Contains(prompted, ws) {
+				t.Errorf("prompt %q does not name both the ref and the clean room being removed", prompted)
+			}
+			if len(report.Items) != 1 || report.Items[0].Outcome != tc.wantOut {
+				t.Fatalf("report = %+v, want outcome %q", report.Items, tc.wantOut)
+			}
+			_, serr := os.Stat(ws)
+			if tc.wantGone && serr == nil {
+				t.Error("an approved rollback left the clean room behind")
+			}
+			if !tc.wantGone && serr != nil {
+				t.Errorf("a declined rollback removed the clean room: %v", serr)
+			}
+			if _, serr := os.Stat(path); (serr == nil) == tc.wantGone {
+				t.Errorf("record present=%v, want present=%v", serr == nil, !tc.wantGone)
+			}
+		})
+	}
+}
+
+// TestRollbackPrompt_ClampsControlBytes: a workspace only has to be an absolute
+// path to validate, so it can carry control or bidi bytes — and this is the one
+// surface a human is asked to approve a deletion on.
+func TestRollbackPrompt_ClampsControlBytes(t *testing.T) {
+	bc := Breadcrumb{Workspace: "/tmp/forgectl-workflow-\x1b[2Kevil", Ref: "o/r#1"}
+	got := rollbackPrompt(Ref{Owner: "o", Repo: "r", Number: 1}, bc)
+	if strings.Contains(got, "\x1b") {
+		t.Errorf("prompt carries a raw escape byte: %q", got)
+	}
+}
+
+// TestMarkNeedsRepair_ParksAReservationWithNoWorkspace is the park that could
+// never run: a reservation has no workspace, and needs-repair used to require
+// one, so every failed prepare left its slot held forever with no reason
+// recorded.
+func TestMarkNeedsRepair_ParksAReservationWithNoWorkspace(t *testing.T) {
+	c := testClient(t, &exec.FakeRunner{})
+	ref := Ref{Owner: "o", Repo: "r", Number: 1}
+	path := seedPhaseRecord(t, c, ref, PhasePreparing, "")
+
+	if err := c.markNeedsRepair(context.Background(), path, "prepare failed: gh said no"); err != nil {
+		t.Fatalf("markNeedsRepair on a reservation: %v", err)
+	}
+	bc := readRecord(t, path)
+	if bc.Phase != PhaseNeedsRepair {
+		t.Fatalf("phase = %q, want needs-repair", bc.Phase)
+	}
+	if !strings.Contains(bc.RepairReason, "gh said no") {
+		t.Errorf("repairReason = %q, want the prepare failure", bc.RepairReason)
+	}
+	// And it no longer holds a slot: needs-repair is released for the operator.
+	summaries, _, err := c.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if occ := occupancyFromSnapshot(summaries, 0, map[string]bool{}); occ != 0 {
+		t.Errorf("occupied = %d, want 0 — a parked record must release its slot", occ)
+	}
+}
+
+// TestRepair_UnreadableRecordIsAReportRow: such a record refuses every counting
+// arm, so it blocks every launch. Reporting "no records need repair" while
+// `pr pick` is refused is a survey verb answering the opposite of the truth.
+func TestRepair_UnreadableRecordIsAReportRow(t *testing.T) {
+	c := repairClient(t, repairRunner(nil))
+	bad := filepath.Join(c.SessionsDir(), "o-r-9-1.json")
+	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := c.Repair(context.Background(), RepairOpts{})
+	if err != nil {
+		t.Fatalf("Repair inspect: %v", err)
+	}
+	if len(report.Items) != 1 {
+		t.Fatalf("items = %d, want the unreadable row: %+v", len(report.Items), report.Items)
+	}
+	got := report.Items[0]
+	if got.Outcome != repairOutcomeUnreadable {
+		t.Errorf("outcome = %q, want %q", got.Outcome, repairOutcomeUnreadable)
+	}
+	if got.RecordPath != bad {
+		t.Errorf("record path = %q, want %q — a count names no way out", got.RecordPath, bad)
+	}
+	if got.Error == "" {
+		t.Error("the row carries no decode error")
+	}
+}
+
+func TestRepairForgetIfAbsent_SettlesAnUnreadableRecord(t *testing.T) {
+	c := repairClient(t, repairRunner(nil))
+	bad := filepath.Join(c.SessionsDir(), "o-r-9-1.json")
+	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The other two arms cannot read it, so they must refuse and name the one
+	// that can.
+	if _, err := c.Repair(context.Background(), RepairOpts{Record: bad, Apply: true, Rollback: true, Yes: true}); err == nil {
+		t.Fatal("expected --rollback to refuse a record it cannot read")
+	} else if !strings.Contains(err.Error(), RepairModeForgetIfAbsent) {
+		t.Errorf("refusal %q does not name the mode that can settle it", err)
+	}
+
+	report, err := c.Repair(context.Background(), RepairOpts{Record: bad, Apply: true, ForgetIfAbsent: true})
+	if err != nil {
+		t.Fatalf("forget an unreadable record: %v", err)
+	}
+	if len(report.Items) != 1 || report.Items[0].Outcome != "forgotten" {
+		t.Fatalf("report = %+v, want one forgotten item", report.Items)
+	}
+	if _, serr := os.Stat(bad); !errors.Is(serr, os.ErrNotExist) {
+		t.Errorf("the unreadable record is still on disk: %v", serr)
+	}
+	rows, err := c.readRepairLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("audit rows = %d, want intent + completion", len(rows))
+	}
+	if rows[0].RecordPath != bad {
+		t.Errorf("intent row path = %q, want %q", rows[0].RecordPath, bad)
+	}
+}
+
+// TestRepairForgetIfAbsent_RefusesOnALiveWindow is the plan matrix's other
+// forget refusal: a window still exists, so the record names something.
+func TestRepairForgetIfAbsent_RefusesOnALiveWindow(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 1}
+	name := mustWindowName(t, ref)
+	c := repairClient(t, repairRunner(nil, sessionWinRow("forgectl", "$1", name)))
+	path := seedPhaseRecord(t, c, ref, PhasePreparing, "")
+
+	_, err := c.Repair(context.Background(), RepairOpts{Record: path, Apply: true, ForgetIfAbsent: true})
+	if err == nil {
+		t.Fatal("expected a refusal: the review window still exists")
+	}
+	if !strings.Contains(err.Error(), RepairModeAdoptWindow) {
+		t.Errorf("refusal %q does not name the mode that settles a live window", err)
+	}
+	if _, serr := os.Stat(path); serr != nil {
+		t.Errorf("a refusal removed the record: %v", serr)
+	}
+	if _, serr := os.Stat(filepath.Join(c.SessionsDir(), repairLogName)); serr == nil {
+		t.Error("a refusal wrote an intent row — that forges the died-mid-delete signal")
+	}
+}
+
+// TestRepairRollback_DryRunNeedsNoConfirmationOffATTY: --dry-run mutates
+// nothing, so gating the preview on a destructive confirmation refuses the one
+// invocation that was always safe.
+func TestRepairRollback_DryRunNeedsNoConfirmationOffATTY(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 1}
+	c := repairClient(t, repairRunner(nil)) // isTTY false, and no --yes below
+	ws := fakeWorkspace(t)
+	path := seedPhaseRecord(t, c, ref, PhaseLaunching, ws)
+
+	report, err := c.Repair(context.Background(), RepairOpts{Record: path, Apply: true, Rollback: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("--dry-run off a TTY should need no --yes: %v", err)
+	}
+	if len(report.Items) != 1 || report.Items[0].Outcome != "would-rollback" {
+		t.Fatalf("report = %+v, want would-rollback", report.Items)
+	}
+	if _, serr := os.Stat(ws); serr != nil {
+		t.Errorf("--dry-run removed the clean room: %v", serr)
+	}
+}
+
+// TestRepairRollback_RefusesAnUnactionableWorkspaceBeforeTheIntentRow: a
+// dangling intent with no completion is the signal that a rollback died
+// mid-delete, so a refusal that wrote one would forge it.
+func TestRepairRollback_RefusesAnUnactionableWorkspaceBeforeTheIntentRow(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 1}
+	c := repairClient(t, repairRunner(nil))
+	// An existing directory with no sandbox prefix: neither live nor cleanly
+	// absent, so teardown cannot act on it.
+	notASandbox := t.TempDir()
+	path := seedPhaseRecord(t, c, ref, PhaseLaunching, notASandbox)
+
+	_, err := c.Repair(context.Background(), RepairOpts{Record: path, Apply: true, Rollback: true, Yes: true})
+	if err == nil {
+		t.Fatal("expected a refusal: the workspace is neither a clean room nor cleanly absent")
+	}
+	if _, serr := os.Stat(filepath.Join(c.SessionsDir(), repairLogName)); serr == nil {
+		t.Error("a refusal wrote an intent row — that forges the died-mid-delete signal")
+	}
+	if _, serr := os.Stat(path); serr != nil {
+		t.Errorf("a refusal removed the record: %v", serr)
 	}
 }
