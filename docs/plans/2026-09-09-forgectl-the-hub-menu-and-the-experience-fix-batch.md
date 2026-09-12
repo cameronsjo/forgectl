@@ -5,11 +5,11 @@ model: "claude-fable-5-1"
 harness: "claude-code 2.1.267"
 machine: "cf6e768835c7"
 approved_session_id: "bcffd4ae-076f-40f2-8c6d-b7c2835e4e52"
-status: in-flight
-next: "Task 1 landed as cameronsjo/forgectl#490 (draft, 4 commits, tests green, unreviewed). Resume: merge origin/main into feat/hub-menu (#485 landed after its base), dispatch code-review + UX review over the worktree diff, fold findings, flip ready, merge. Then Task 7 (using-forgectl skill) as its own cadence-monorepo session. #488 (stray MCP polish) awaits its own review."
+status: done
+next: "All forgectl tasks (1, 3, 4, 5, 6) merged. Task 7 (using-forgectl skill catch-up) remains as its own cadence-monorepo session, tracked separately — not a forgectl-repo obligation."
 branch: plan/hub-menu
-pr: cameronsjo/forgectl#490 (Task 1, draft); merged: #484, #485, #486, #487
-updated: 2026-09-10
+pr: merged: cameronsjo/forgectl#484, #485, #486, #487, #488, #490
+updated: 2026-09-11
 date: 2026-09-09
 ---
 
@@ -120,7 +120,7 @@ Panel: plan-reviewer ×2, red-team-reviewer, user-experience-reviewer, agent-exp
 - [x] `go build ./... && go vet ./... && go test ./... && golangci-lint run --new-from-rev=origin/main` all exit 0
 - [x] `go build -o forgectl .`; probes recorded in the PR body: bare invoke headless exits 1 with usage on stderr and 0 bytes stdout; `frobnicate` exits 1 naming the unknown command with no suggestion block; `lauch` prints `Did you mean this?` with `launch`; `tmux frobnicate` prints cobra's error, no `Bubbletea`; `quarantine restor` prints cobra's error and touches no file
 - [x] Push; draft PR `Closes #479`, body carries `## Measured` and one `BEGIN_COMMIT_OVERRIDE` block describing the bare-invoke and unknown-verb changes
-- [ ] run `cadence-forge:polish`; fold findings
+- [x] Review ran as `cadence:code-reviewer` (sonnet) over the worktree diff, two passes: found 1 Critical (`activate()`'s `hubMode`/`leavesMode` indexed the raw list cursor instead of the filtered `SelectedItem()` — a filtered selection could run the wrong, possibly destructive, command); fixed and re-reviewed clean. Merged as #490.
 
 ---
 
@@ -264,6 +264,7 @@ Premise note: the hang was observed twice on 2026-09-09 by the agent-experience 
 - **Task 1 added `tui.ActionShowInvocation`** beside `ActionRunVerb`: a `NeedsArgs` leaf prints the invocation and runs nothing, a different post-teardown contract.
 - **Task 1's review pass did not run**: the session closed first. #490 is draft and unreviewed.
 - **`cadence-forge:polish` was dropped from Task 1's dispatch**: in Task 5 it ran `code-review --fix` against the last commit on the primary checkout and left 79 lines of edits on `main`. Those became #488. Tasks 1 and 6 ran `cadence:code-reviewer` on a worktree diff instead.
+- **Task 1's deferred review pass surfaced a real Critical on pickup**: `activate()`'s `hubMode`/`leavesMode` cases indexed `m.hub`/`m.leaves` by the raw list-cursor position, which bubbles' `list.Index()` documents as filtered-list-relative — a filter narrowing the visible rows could make Enter or a number-key jump run a different, possibly destructive, command than the one shown selected. Fixed by switching both cases to `m.l.SelectedItem()` with a type assertion (the pattern `pickMode`/`sessionsMode`/`windowsMode` already used); re-reviewed clean. A sibling instance of the same bug in `menuMode`'s `activate()` predates this PR and is out of its scope; filed as cameronsjo/forgectl#496.
 
 ## Learnings
 
