@@ -200,7 +200,7 @@ func newEnvKeysCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 				return err
 			}
 			if !exists {
-				return fmt.Errorf("%s not found", realPath)
+				return fmt.Errorf("env file %s not found", envpkg.RelativeToRepoRoot(cwd, realPath))
 			}
 			doc, err := readDocument(realPath)
 			if err != nil {
@@ -347,7 +347,11 @@ func newEnvCheckCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command 
 	cmd := &cobra.Command{
 		Use:   "check",
 		Short: "Report keys missing from/extra vs --example (default .env.example) — names only",
-		Args:  cobra.NoArgs,
+		Long: `check reports keys missing from, or extra in, --file compared against --example
+(default .env.example) — names only, values never read for comparison.
+
+Exit codes: 0 the file matches the example · 1 keys are missing or extra · 2 the file or the example was not found`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -363,7 +367,7 @@ func newEnvCheckCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command 
 				return err
 			}
 			if !fileExists {
-				return WithExitCode(fmt.Errorf("%s not found", fileReal), 2)
+				return notFoundCheckError(cmd, cwd, fileReal, "env file %s not found", asJSON)
 			}
 			fileDoc, err := readDocument(fileReal)
 			if err != nil {
@@ -379,7 +383,7 @@ func newEnvCheckCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command 
 				return err
 			}
 			if !exampleExists {
-				return WithExitCode(fmt.Errorf("example file %s not found", exampleReal), 2)
+				return notFoundCheckError(cmd, cwd, exampleReal, "example file %s not found", asJSON)
 			}
 			exampleDoc, err := readDocument(exampleReal)
 			if err != nil {
@@ -419,6 +423,45 @@ func newEnvCheckCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command 
 	cmd.Flags().StringVar(&example, "example", ".env.example", "path to the example file to check against")
 	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"missing":[...],"extra":[...]} to stdout instead of the human sections`)
 	return cmd
+}
+
+// notFoundCheckError reports --file or --example being absent. Under
+// --json it writes the agent-facing contract — exactly one
+// {"error":"env file not found","code":"file_not_found","path":"…"} object
+// on stderr, stdout untouched — and returns a silentCodedError so fang
+// renders nothing on top of it; otherwise it returns the human wording
+// (wordingFmt, one of "env file %s not found" / "example file %s not
+// found") wrapped for exit 2. Both surfaces use the same repo-relative path
+// so they can't drift (security ruling, forgectl#481): the resolved
+// absolute path can name a directory the caller never typed, and --json
+// output lands in agent transcripts verbatim.
+func notFoundCheckError(cmd *cobra.Command, cwd, resolved, wordingFmt string, asJSON bool) error {
+	rel := envpkg.RelativeToRepoRoot(cwd, resolved)
+	if asJSON {
+		if err := writeCheckErrorJSON(cmd.ErrOrStderr(), rel); err != nil {
+			return err
+		}
+		return newSilentCodedError(2)
+	}
+	// wordingFmt is always one of the two fixed local literals passed by
+	// the RunE closures above — never derived from input.
+	return WithExitCode(fmt.Errorf(wordingFmt, rel), 2)
+}
+
+// checkErrorJSON is env check --json's file-not-found wire shape
+// (forgectl#481) — distinct from checkJSON, which reports a completed
+// comparison's missing/extra keys.
+type checkErrorJSON struct {
+	Error string `json:"error"`
+	Code  string `json:"code"`
+	Path  string `json:"path"`
+}
+
+// writeCheckErrorJSON encodes the not-found object to out (stderr).
+func writeCheckErrorJSON(out io.Writer, path string) error {
+	enc := termsafe.JSONEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(checkErrorJSON{Error: "env file not found", Code: "file_not_found", Path: path})
 }
 
 // printSection writes a check section and its key names, and writes
@@ -475,7 +518,7 @@ func newEnvRedactCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command
 				return err
 			}
 			if !exists {
-				return fmt.Errorf("%s not found", realPath)
+				return fmt.Errorf("env file %s not found", envpkg.RelativeToRepoRoot(cwd, realPath))
 			}
 			doc, err := readDocument(realPath)
 			if err != nil {

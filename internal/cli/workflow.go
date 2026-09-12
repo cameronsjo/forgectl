@@ -274,8 +274,26 @@ func resumeOptions(out io.Writer, name string, data []byte, plan workflow.Plan, 
 // newWorkflowListCmd builds `forgectl workflow list` — a stub that shows the
 // embedded built-in workflow names. Listing user-directory workflows is a
 // follow-on (the spike ships one built-in, clean-room-review).
+// workflowListRowJSON is the --json wire shape for one `workflow list` row —
+// one field, matching the one name the human table prints per line.
+type workflowListRowJSON struct {
+	Name string `json:"name"`
+}
+
+// buildWorkflowListJSON converts sorted workflow names into the --json row
+// shape. Never returns nil: an empty slice in produces an empty (non-nil)
+// slice out, so the encoder emits [] rather than null.
+func buildWorkflowListJSON(names []string) []workflowListRowJSON {
+	rows := make([]workflowListRowJSON, 0, len(names))
+	for _, n := range names {
+		rows = append(rows, workflowListRowJSON{Name: n})
+	}
+	return rows
+}
+
 func newWorkflowListCmd() *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List resolvable workflow names",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -283,18 +301,48 @@ func newWorkflowListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			sort.Strings(names)
 			out := cmd.OutOrStdout()
+			if asJSON {
+				enc := termsafe.JSONEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(buildWorkflowListJSON(names))
+			}
 			if len(names) == 0 {
 				fmt.Fprintln(out, "no built-in workflows")
 				return nil
 			}
-			sort.Strings(names)
 			for _, n := range names {
 				fmt.Fprintln(out, n)
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"name":...}] to stdout`)
+	return cmd
+}
+
+// workflowStatusStepJSON is the --json wire shape for one checkpointed step.
+type workflowStatusStepJSON struct {
+	Index       int    `json:"index"`
+	Uses        string `json:"uses"`
+	CompletedAt string `json:"completed_at"`
+}
+
+// workflowStatusJSON is the --json wire shape for `workflow status`. HasState
+// distinguishes "no saved run" from a zero-value run — the same information
+// the human path's early-return sentence carries. Steps is never nil, so an
+// empty run encodes [] rather than null; Note carries the definition-changed
+// or load-error sentence when one applies, "" otherwise (present unconditionally
+// so the key set never depends on which branch ran).
+type workflowStatusJSON struct {
+	Name      string                   `json:"name"`
+	HasState  bool                     `json:"has_state"`
+	RunID     string                   `json:"run_id"`
+	StartedAt string                   `json:"started_at"`
+	UpdatedAt string                   `json:"updated_at"`
+	Steps     []workflowStatusStepJSON `json:"steps"`
+	Note      string                   `json:"note"`
 }
 
 // newWorkflowStatusCmd builds `forgectl workflow status <name>`: a read-only
@@ -302,7 +350,8 @@ func newWorkflowListCmd() *cobra.Command {
 // It touches no trust chain and prompts for nothing — it only reads the local
 // run-state sidecar.
 func newWorkflowStatusCmd() *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "status <name>",
 		Short: "Show the last run's per-step checkpoint state",
 		Args:  cobra.ExactArgs(1),
@@ -315,6 +364,8 @@ func newWorkflowStatusCmd() *cobra.Command {
 			// terminal. The argv name goes through the same boundary rather than
 			// being trusted for being typed — one rule for the whole renderer is
 			// what keeps the next field added here from being the exception.
+			// Under --json the termsafe seam is termsafe.JSONEncoder instead, so
+			// the raw (unescaped) strings go straight into the payload built below.
 			name := termsafe.SafeLine(args[0])
 			out := cmd.OutOrStdout()
 
@@ -323,8 +374,33 @@ func newWorkflowStatusCmd() *cobra.Command {
 				return err
 			}
 			if !ok {
+				if asJSON {
+					enc := termsafe.JSONEncoder(out)
+					enc.SetIndent("", "  ")
+					return enc.Encode(workflowStatusJSON{Name: args[0], Steps: []workflowStatusStepJSON{}})
+				}
 				fmt.Fprintf(out, "%s: no saved run state (never run, or last run completed cleanly)\n", name)
 				return nil
+			}
+
+			note := workflowStatusNote(args[0], name, state)
+
+			if asJSON {
+				steps := make([]workflowStatusStepJSON, 0, len(state.Steps))
+				for _, s := range state.Steps {
+					steps = append(steps, workflowStatusStepJSON{Index: s.Index, Uses: s.Uses, CompletedAt: s.CompletedAt})
+				}
+				enc := termsafe.JSONEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(workflowStatusJSON{
+					Name:      state.Workflow,
+					HasState:  true,
+					RunID:     state.RunID,
+					StartedAt: state.StartedAt,
+					UpdatedAt: state.UpdatedAt,
+					Steps:     steps,
+					Note:      note,
+				})
 			}
 
 			fmt.Fprintf(out, "%s — run %s\n", termsafe.SafeLine(state.Workflow), termsafe.SafeLine(state.RunID))
@@ -339,33 +415,48 @@ func newWorkflowStatusCmd() *cobra.Command {
 				}
 			}
 
-			// The two note lines below are note-shaped output that deliberately
-			// does NOT route through renderDegradationNotes (#291). That sink
-			// writes to stderr, because its callers all have a --json stdout to
-			// keep clean; these two are body text of a human-only report and
-			// belong on stdout with the rest of it. What they must share with the
-			// shared sink is the termsafe boundary, and they do.
-			//
-			// If the definition changed since this run, --resume will refuse it
-			// (a resume never replays across an edited file) — say so up front.
-			// The hash covers the WHOLE file, so any byte change invalidates every
-			// checkpoint, not just the edited step.
-			if src, err := workflow.Load(args[0]); err == nil {
-				if workflow.DefinitionHash(src.Data) != state.DefinitionHash {
-					fmt.Fprintf(out, "  note: %s has changed since this run (any edit to the file invalidates every checkpoint) — resume will be refused; run it fresh\n", name)
-				}
-			} else {
-				// The current definition is missing or unreadable — --resume can't
-				// proceed without it, so say so rather than silently dropping the
-				// error and implying a clean resume is available. The error text is
-				// escaped through termsafe.Error rather than SafeLine so that a
-				// wrapped *os.PathError cannot reinsert the raw path its own Error
-				// method would print.
-				fmt.Fprintf(out, "  note: could not load the current definition of %s (%v) — resume is unavailable until it loads\n", name, termsafe.Error(err))
+			// The note line below is note-shaped output that deliberately does
+			// NOT route through renderDegradationNotes (#291). That sink writes
+			// to stderr, because its callers all have a --json stdout to keep
+			// clean; this is body text of the human report and belongs on
+			// stdout with the rest of it. What it must share with the shared
+			// sink is the termsafe boundary, and it does.
+			if note != "" {
+				_, _ = fmt.Fprintf(out, "  note: %s\n", termsafe.SafeLine(note))
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false,
+		`emit {"name":...,"has_state":...,"run_id":...,"started_at":...,"updated_at":...,"steps":[...],"note":...} to stdout`)
+	return cmd
+}
+
+// workflowStatusNote computes the drifted-definition or load-error sentence
+// `workflow status` appends after the checkpoint list, shared by the human
+// and --json renderings so the two surfaces cannot drift on when a note
+// applies. Returns "" when neither condition holds.
+//
+// If the definition changed since this run, --resume will refuse it (a
+// resume never replays across an edited file) — say so up front. The hash
+// covers the WHOLE file, so any byte change invalidates every checkpoint,
+// not just the edited step.
+func workflowStatusNote(rawName, safeName string, state workflow.RunState) string {
+	src, err := workflow.Load(rawName)
+	if err != nil {
+		// The current definition is missing or unreadable — --resume can't
+		// proceed without it, so say so rather than silently dropping the
+		// error and implying a clean resume is available. The error text is
+		// escaped through termsafe.Error rather than SafeLine so that a
+		// wrapped *os.PathError cannot reinsert the raw path its own Error
+		// method would print. The result is already terminal-safe, so both
+		// the human and --json callers use it as-is with no further escaping.
+		return fmt.Sprintf("could not load the current definition of %s (%v) — resume is unavailable until it loads", safeName, termsafe.Error(err))
+	}
+	if workflow.DefinitionHash(src.Data) != state.DefinitionHash {
+		return fmt.Sprintf("%s has changed since this run (any edit to the file invalidates every checkpoint) — resume will be refused; run it fresh", safeName)
+	}
+	return ""
 }
 
 // parseParams turns repeatable --param key=value flags into a map. A

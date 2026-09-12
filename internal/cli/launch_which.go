@@ -14,7 +14,8 @@ import (
 )
 
 func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Config, th theme.Theme) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "which",
 		Short: "Print the resolved launch profile for the current directory",
 		Args:  cobra.NoArgs,
@@ -24,16 +25,76 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 				return termsafe.Error(fmt.Errorf("determine working directory: %w", err))
 			}
 			effLaunch, notice, effFrom := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
-			if notice != "" {
+			if notice != "" && !asJSON {
 				fmt.Fprintln(cmd.ErrOrStderr(), "forgectl: "+termsafe.SafeLine(notice))
 			}
 			cfg.Launch = effLaunch
 			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
+			profile := launch.Resolve(lc, cwd)
+			if asJSON {
+				return writeLaunchWhichJSON(cmd.OutOrStdout(), profile, cwd, src)
+			}
 			out := th.Writer(cmd.OutOrStdout(), os.Environ())
-			printLaunchProfile(out, th, launch.Resolve(lc, cwd), cwd, src)
+			printLaunchProfile(out, th, profile, cwd, src)
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false,
+		`emit {"directory":...,"config":...,"matched":...,"harness":...,"model":...,"effort":...,"permission_mode":...,"allow_danger":...,"env_keys":[...],"add_dir":[...]} to stdout`)
+	return cmd
+}
+
+// launchWhichJSON is the --json wire shape for `launch which`. Env is
+// represented only by its sorted key NAMES — the same key-names-only rule
+// printLaunchProfile's terminal row applies, because `which` output (human or
+// machine) is the kind of thing pasted into an issue or an agent transcript,
+// and a configured env value is exactly where a secret lives.
+type launchWhichJSON struct {
+	Directory      string   `json:"directory"`
+	Config         string   `json:"config"`
+	Matched        string   `json:"matched"`
+	Harness        string   `json:"harness"`
+	Model          string   `json:"model"`
+	Effort         string   `json:"effort"`
+	PermissionMode string   `json:"permission_mode"`
+	AllowDanger    bool     `json:"allow_danger"`
+	EnvKeys        []string `json:"env_keys"`
+	AddDir         []string `json:"add_dir"`
+}
+
+// buildLaunchWhichJSON converts a resolved profile into the --json wire
+// shape. Slice fields are never nil so the encoder emits [] rather than null
+// for a profile with no env or no add-dir entries.
+func buildLaunchWhichJSON(p launch.Profile, cwd, confPath string) launchWhichJSON {
+	envKeys := launch.SortedEnvKeys(p.Env)
+	if envKeys == nil {
+		envKeys = []string{}
+	}
+	addDir := p.AddDir
+	if addDir == nil {
+		addDir = []string{}
+	}
+	return launchWhichJSON{
+		Directory:      cwd,
+		Config:         confPath,
+		Matched:        p.Match,
+		Harness:        p.Harness,
+		Model:          p.Model,
+		Effort:         p.Effort,
+		PermissionMode: p.PermissionMode,
+		AllowDanger:    p.AllowDanger,
+		EnvKeys:        envKeys,
+		AddDir:         addDir,
+	}
+}
+
+// writeLaunchWhichJSON encodes the profile through the sanctioned termsafe
+// seam. Nothing is written before a marshal error, so a failing writer or
+// encoder never leaves a partial document on stdout.
+func writeLaunchWhichJSON(w io.Writer, p launch.Profile, cwd, confPath string) error {
+	enc := termsafe.JSONEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(buildLaunchWhichJSON(p, cwd, confPath))
 }
 
 func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, confPath string) {

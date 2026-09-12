@@ -46,8 +46,8 @@ func errInvalidKey() error {
 // this whole package exists to prevent. "Not found" is the branch where the
 // argument is least likely to be a key name, so it is the branch that must
 // stay quietest.
-func errKeyNotFound(realPath string) error {
-	return fmt.Errorf("no such key in %s (run `forgectl env keys` to list them)", realPath)
+func errKeyNotFound(relPath string) error {
+	return fmt.Errorf("no such key in %s (run `forgectl env keys` to list them)", relPath)
 }
 
 // Client is the domain entry point for forgectl env's clipboard-touching
@@ -78,7 +78,12 @@ func (c *Client) CopyValue(ctx context.Context, cwd, file, key string, allowAnyF
 		return err
 	}
 	if !exists {
-		return fmt.Errorf("%s not found", realPath)
+		// "env file %s not found" (not "%s not found") and the repo-relative
+		// form mirror internal/cli/env.go's sibling not-found messages: the
+		// absolute, symlink-resolved path can name a directory the caller
+		// never typed, and it must not lead the message either (fang's
+		// error style title-cases only the first word — forgectl#481).
+		return fmt.Errorf("env file %s not found", RelativeToRepoRoot(cwd, realPath))
 	}
 	doc, err := parseFile(realPath)
 	if err != nil {
@@ -86,7 +91,7 @@ func (c *Client) CopyValue(ctx context.Context, cwd, file, key string, allowAnyF
 	}
 	value, ok := doc.Get(key)
 	if !ok {
-		return errKeyNotFound(realPath)
+		return errKeyNotFound(RelativeToRepoRoot(cwd, realPath))
 	}
 	return c.clip.Copy(ctx, value)
 }

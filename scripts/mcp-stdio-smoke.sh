@@ -28,17 +28,32 @@ KEYCHAIN_SERVICE="vikunja-readonly"
 HOST="tasks.sjo.lol"
 EXPECTED_PROJECTS=3
 
+# Every flag here takes a value, and a missing one must exit 2 (the documented
+# bad-argument code) with a message naming the flag. Reaching "$2" unguarded
+# instead dies on `set -u` with "$2: unbound variable" and exit 1 — which is the
+# code this script reserves for A FAILED ASSERTION, so a typo in the invocation
+# reports as a failing smoke run against the board.
+need_value() {
+	if [ "$2" -lt 2 ]; then
+		echo "$1 requires a value" >&2
+		exit 2
+	fi
+}
+
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--keychain-service)
+		need_value "$1" "$#"
 		KEYCHAIN_SERVICE="$2"
 		shift 2
 		;;
 	--host)
+		need_value "$1" "$#"
 		HOST="$2"
 		shift 2
 		;;
 	--expect-projects)
+		need_value "$1" "$#"
 		EXPECTED_PROJECTS="$2"
 		shift 2
 		;;

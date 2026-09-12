@@ -148,3 +148,45 @@ func (i windowItem) render(index int, selected, narrow bool, g glyphSet, s theme
 	}
 	return row + s.Muted.Render(fmt.Sprintf("  %d %s", i.w.Panes, unit))
 }
+
+// --- hub (top-level module rows, and the flattened "all commands" screen) ---
+
+// hubItem renders one HubEntry row. Name/Short are program-authored (cobra
+// Short strings compiled into this binary), the same trust level as
+// menuItem's literals, so no termsafe boundary is needed here.
+type hubItem struct{ entry HubEntry }
+
+func (i hubItem) FilterValue() string { return i.entry.Name }
+func (i hubItem) render(index int, selected, narrow bool, _ glyphSet, s theme.Styles) string {
+	label := i.entry.Name
+	if selected {
+		return leader(index, true, s) + s.Selected.Render(label)
+	}
+	if narrow || i.entry.Short == "" {
+		return leader(index, false, s) + s.Fg.Render(label)
+	}
+	return leader(index, false, s) + s.Fg.Render(label) + "  " + s.Muted.Render(i.entry.Short)
+}
+
+// --- hub leaf (one runnable verb inside a module's drill-down list) ---
+
+type leafItem struct{ leaf HubLeaf }
+
+func (i leafItem) FilterValue() string { return i.leaf.Name }
+func (i leafItem) render(index int, selected, narrow bool, _ glyphSet, s theme.Styles) string {
+	label := i.leaf.Name
+	// A leaf needing an argument shows its Use line as the description
+	// (Architecture: "pr <ref> — needs a ref") rather than its Short, so the
+	// row itself states what's missing.
+	desc := i.leaf.Short
+	if i.leaf.NeedsArgs {
+		desc = i.leaf.Use
+	}
+	if selected {
+		return leader(index, true, s) + s.Selected.Render(label)
+	}
+	if narrow || desc == "" {
+		return leader(index, false, s) + s.Fg.Render(label)
+	}
+	return leader(index, false, s) + s.Fg.Render(label) + "  " + s.Muted.Render(desc)
+}

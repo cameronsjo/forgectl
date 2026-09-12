@@ -4,8 +4,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/module"
-	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
+	"github.com/cameronsjo/forgectl/internal/tui"
 )
 
 // tmuxAliases maps each canonical tmux verb to its aliases — the single
@@ -36,22 +36,38 @@ var tmuxModule = module.Manifest{
 	ArgvTokens:   []string{"tm"},
 	SubAliases:   tmuxAliases,
 	New: func(deps module.Deps) *cobra.Command {
-		return newTmuxCmd(tmux.New(deps.Runner), deps.Theme)
+		return newTmuxCmd(deps, tmux.New(deps.Runner))
 	},
 }
 
 // newTmuxCmd builds the `tmux` parent command. Verbs are attached in their own
 // files (tmux_ls.go, …) so each milestone adds a slice without churn here.
-func newTmuxCmd(client *tmux.Client, th theme.Theme) *cobra.Command {
+func newTmuxCmd(deps module.Deps, client *tmux.Client) *cobra.Command {
+	th := deps.Theme
 	cmd := &cobra.Command{
 		Use:     "tmux",
 		Aliases: []string{"tm"},
 		Short:   "Wrangle tmux sessions, windows, and panes",
-		// `forgectl tmux` with no verb opens the tmux menu (the same TUI as a
-		// bare invoke — tmux is the only module today).
+		// A stray subverb (a typo like `frobnicate`) must not fall through to
+		// RunE below and silently open the menu — Args rejects it with
+		// cobra's own unknown-command error before RunE ever runs
+		// (forgectl#479; TestGroupParentsRefuseStrayTokens pins this for
+		// every group parent).
+		Args: cobra.NoArgs,
+		// `forgectl tmux` with no verb opens the tmux jumper directly (the
+		// hub row's behavior for tmux) — StartInTmux skips the hub screen,
+		// but the hub is still one esc away, so it's built from cmd.Root()
+		// (resolved at run time, once the whole tree exists) rather than
+		// threaded through construction.
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			noIcons, _ := cmd.Flags().GetBool("no-icons")
-			return runAction(cmd.Context(), client, noIcons, th)
+			opts := tui.RunOptions{
+				Hub:         buildHub(cmd.Root(), configFilePresent()),
+				StartInTmux: true,
+				NoIcons:     noIcons,
+				Theme:       th,
+			}
+			return runAction(cmd.Context(), deps, cmd.Root(), client, opts)
 		},
 	}
 	cmd.AddCommand(

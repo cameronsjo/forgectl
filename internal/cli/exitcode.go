@@ -46,5 +46,12 @@ func ExitCode(err error) int {
 	if errors.As(err, &coded) {
 		return coded.ExitCode()
 	}
+	// silentCodedError (execute.go) opts in to a typed exit code the same
+	// way, but is a distinct concrete type so termsafeErrorHandler can
+	// pattern-match it separately to render nothing.
+	var silent *silentCodedError
+	if errors.As(err, &silent) {
+		return silent.ExitCode()
+	}
 	return 1
 }

@@ -94,7 +94,14 @@ func TestNoColorLiteralsOutsideTheme(t *testing.T) {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "testdata", "node_modules", "dist":
+			case "testdata", "node_modules", "dist":
+				return filepath.SkipDir
+			}
+			// Dot-directories (.git, .claude — including nested worktrees under
+			// .claude/worktrees/) are never source; skip the whole family by name
+			// shape rather than enumerating each one. path != "." guards the walk
+			// root itself, whose DirEntry.Name() is also ".".
+			if path != "." && strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
 			}
 			// Only the palette owner is skipped wholesale. Everything else is

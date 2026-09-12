@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/fang"
+	cterm "github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
@@ -165,7 +166,12 @@ func Execute(ctx context.Context) error {
 	switch decideRoute(root, args, isInteractiveTTY()) {
 	case routeTUI:
 		slog.Debug("Launching TUI.", "no_icons", noIcons)
-		return runAction(ctx, tmuxClient, noIcons, deps.Theme)
+		opts := tui.RunOptions{
+			Hub:     buildHub(root, configFilePresent()),
+			NoIcons: noIcons,
+			Theme:   deps.Theme,
+		}
+		return runAction(ctx, deps, root, tmuxClient, opts)
 	case routeHeadlessMenu:
 		// Route through Cobra/fang instead of the TUI: an unrecognized
 		// top-level verb hits cobra's own "unknown command" + "did you mean"
@@ -292,7 +298,62 @@ func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
 		renderStructuredTerminalError(w, styles, structured)
 		return
 	}
-	fang.DefaultErrorHandler(w, styles, termsafe.Error(err))
+	// env check --json (forgectl#481) has already written its one JSON
+	// object to stderr by the time it returns this — fang's error frame
+	// must render nothing on top of it, or the agent-facing "exactly one
+	// object" contract breaks.
+	if _, ok := err.(*silentCodedError); ok {
+		return
+	}
+	safe := termsafe.Error(err)
+	if leadsWithPath(safe.Error()) {
+		renderPathLeadingError(w, styles, safe)
+		return
+	}
+	fang.DefaultErrorHandler(w, styles, safe)
+}
+
+// leadsWithPath reports whether msg's first word looks like a filesystem
+// path — one fang's ErrorText style would title-case via its
+// titleFirstWord transform, corrupting exactly the byte-identical spelling
+// a caller typed or compares against (env_test.go's --json path field,
+// this file's own path-preserving tests). Both error surfaces
+// (termsafeErrorHandler and renderStructuredTerminalError) route a
+// path-leading message through UnsetTransform() instead of fang's default.
+func leadsWithPath(msg string) bool {
+	first, _, _ := strings.Cut(msg, " ")
+	if first == "" {
+		return false
+	}
+	return strings.Contains(first, "/") || strings.HasPrefix(first, ".")
+}
+
+// renderPathLeadingError mirrors fang.DefaultErrorHandler (help.go) except
+// the message line renders through styles.ErrorText.UnsetTransform() —
+// fang's own ErrorText.Render title-cases only the message's first word
+// (titleFirstWord), so ".env not found" would otherwise arrive on screen as
+// ".Env not found", a spelling that does not exist.
+//
+// This deliberately omits DefaultErrorHandler's trailing "Try --help for
+// usage" block (its isUsageError check): today no message can satisfy both
+// leadsWithPath and isUsageError, because isUsageError only matches one of
+// five fixed cobra/pflag prefixes ("unknown flag:", "flag needs an
+// argument:", …), none of which is a path. That's an invariant of the
+// CURRENT set of prefixes and this hand-copy, not something the compiler
+// enforces — a new cobra/pflag usage-error prefix, or a fang release that
+// restructures DefaultErrorHandler, can silently make this diverge. If a
+// path-leading message ever needs the usage hint too, add the same
+// isUsageError-shaped check here rather than assuming it still can't happen.
+func renderPathLeadingError(w io.Writer, styles fang.Styles, err error) {
+	if f, ok := w.(cterm.File); ok {
+		if !cterm.IsTerminal(f.Fd()) {
+			_, _ = fmt.Fprintln(w, err.Error())
+			return
+		}
+	}
+	_, _ = fmt.Fprintln(w, styles.ErrorHeader.String())
+	_, _ = fmt.Fprintln(w, styles.ErrorText.UnsetTransform().Render(err.Error()+"."))
+	_, _ = fmt.Fprintln(w)
 }
 
 // renderStructuredTerminalError applies fang's normal error styles one safe
@@ -302,7 +363,11 @@ func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
 // sanitizer boundary.
 func renderStructuredTerminalError(w io.Writer, styles fang.Styles, err *structuredTerminalError) {
 	_, _ = fmt.Fprintln(w, styles.ErrorHeader.String())
-	_, _ = fmt.Fprintln(w, styles.ErrorText.Render(err.headline+"."))
+	headline := styles.ErrorText
+	if leadsWithPath(err.headline) {
+		headline = headline.UnsetTransform()
+	}
+	_, _ = fmt.Fprintln(w, headline.Render(err.headline+"."))
 	if len(err.suggestions) > 0 {
 		_, _ = fmt.Fprintln(w)
 		_, _ = fmt.Fprintln(w, styles.ErrorText.Render("Did you mean this?"))
@@ -311,24 +376,74 @@ func renderStructuredTerminalError(w io.Writer, styles fang.Styles, err *structu
 		}
 	}
 	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintln(w, styles.ErrorText.UnsetWidth().Render("Try --help for usage."))
+	_, _ = fmt.Fprintln(w, styles.ErrorText.UnsetWidth().Render("Try --help for usage, or run forgectl with no arguments for the menu."))
 	_, _ = fmt.Fprintln(w)
 }
 
+// silentCodedError marks an error whose message has already been written to
+// stderr by the caller (env check --json's one-object contract, forgectl#481)
+// — termsafeErrorHandler renders nothing for it, and ExitCode still resolves
+// its code (exitcode.go) so main's os.Exit(cli.ExitCode(err)) is unaffected.
+type silentCodedError struct {
+	code int
+}
+
+func (e *silentCodedError) Error() string { return "" }
+func (e *silentCodedError) ExitCode() int { return e.code }
+
+// newSilentCodedError mirrors WithExitCode's shape for the render-nothing
+// case.
+func newSilentCodedError(code int) error {
+	return &silentCodedError{code: code}
+}
+
 // runAction opens the TUI and performs whatever jump it selected. Jumps that
-// need the tty (attach / sesh connect) run here, after Bubble Tea has released
-// the terminal.
-func runAction(ctx context.Context, client *tmux.Client, noIcons bool, th theme.Theme) error {
-	act, err := tui.Run(ctx, client, noIcons, th)
+// need the tty (attach / sesh connect / a hub-selected verb) run here, after
+// Bubble Tea has released the terminal.
+func runAction(ctx context.Context, deps module.Deps, root *cobra.Command, client *tmux.Client, opts tui.RunOptions) error {
+	act, err := tui.Run(ctx, client, opts)
 	if err != nil {
 		slog.Error("Failed to run TUI.", "error", err)
 		return err
 	}
-	if act.Kind == tui.ActionNone {
+	switch act.Kind {
+	case tui.ActionNone:
 		slog.Debug("TUI exited with no action.")
 		return nil
+	case tui.ActionRunVerb:
+		return runHubVerb(ctx, deps, root, act.Argv, opts.Theme)
+	case tui.ActionShowInvocation:
+		fmt.Fprintln(os.Stderr, hubDollarLine(opts.Theme, act.Argv))
+		return nil
+	default:
+		return dispatchAction(ctx, client, act)
 	}
-	return dispatchAction(ctx, client, act)
+}
+
+// hubDollarLine renders a hub-selected invocation's echo line — the "$ "
+// prefix is always present (the signal under NO_COLOR); the rest is muted
+// when the theme is styled.
+func hubDollarLine(th theme.Theme, argv []string) string {
+	return th.Styles().Muted.Render("$ " + meta.AppName + " " + strings.Join(argv, " "))
+}
+
+// runHubVerb re-enters the same argv dispatch pipeline a typed command
+// takes: launchIntercept and the extension rungs both apply to a
+// hub-selected `launch` exactly as they do to a typed one.
+func runHubVerb(ctx context.Context, deps module.Deps, root *cobra.Command, argv []string, th theme.Theme) error {
+	fmt.Fprintln(os.Stderr, hubDollarLine(th, argv))
+	if rest, ok := launchIntercept(argv); ok {
+		if handled, err := runLaunch(deps, rest); handled {
+			if err != nil {
+				fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(err.Error()))
+			}
+			return err
+		}
+	}
+	if handled, err := tryExtensionRungs(root, argv, defaultExternalCommandRuntime()); handled {
+		return err
+	}
+	return execCommand(ctx, root, argv, th)
 }
 
 // dispatchAction routes a TUI action to the appropriate client call. Separated
@@ -359,36 +474,22 @@ var builtinVerbs = map[string]bool{
 	"__complete": true, "__completeNoDesc": true,
 }
 
-// shouldLaunchTUI decides whether to open the menu instead of dispatching a
-// verb: bare invocation, an unknown top-level verb, or an unknown subverb of a
-// command group (e.g. `tmux frobnicate`). Flag-only invocations (--version,
-// --help) stay with fang — only non-flag garbage falls into the menu. The
-// check is against the live command/alias set (not root.Find), so it's immune
-// to Cobra/fang's lazy registration of help/completion/man during Execute.
-func shouldLaunchTUI(root *cobra.Command, args []string) bool {
-	first, idx := firstNonFlag(args)
-	if first == "" {
-		// Flags only (--version/--help) → fang; truly empty → bare-invoke menu.
-		return len(args) == 0
-	}
-	if builtinVerbs[first] {
+// shouldLaunchTUI decides whether to open the hub instead of dispatching a
+// verb: a bare invocation only (forgectl#479 — the hub-menu addendum to
+// ADR-0005 narrows this to one arm). An unknown top-level verb and an unknown
+// subverb of a known group (e.g. `tmux frobnicate`) both now reach Cobra/fang
+// directly: root's Args validator (safeRootArgs) and the group parents' own
+// Args: cobra.NoArgs (tmux/projects/quarantine) turn those into cobra's own
+// unknown-command error instead of falling through to a RunE that ignores
+// its args — which is why the ordering in this PR's Commit 1 (those Args
+// additions) has to land before this narrowing.
+func shouldLaunchTUI(_ *cobra.Command, args []string) bool {
+	first, _ := firstNonFlag(args)
+	if first != "" {
 		return false
 	}
-	child := findChild(root, first)
-	if child == nil {
-		return true // unknown top-level verb → menu
-	}
-	// Known command group with an unrecognized leftover subverb → menu — but
-	// only when the parent does NOT itself take a positional. A parent like
-	// `pr <ref>` legitimately accepts an argument that is not a subcommand, so
-	// its args must reach Cobra/fang rather than being mistaken for menu garbage;
-	// a pure group like `tmux` treats an unknown token as a bad subverb → menu.
-	if len(child.Commands()) > 0 && !parentTakesArg(child) {
-		if sub, _ := firstNonFlag(args[idx+1:]); sub != "" && findChild(child, sub) == nil {
-			return true
-		}
-	}
-	return false
+	// Flags only (--version/--help) → fang; truly empty → bare-invoke hub.
+	return len(args) == 0
 }
 
 // menuRoute is Execute's routing decision for a parsed argv.

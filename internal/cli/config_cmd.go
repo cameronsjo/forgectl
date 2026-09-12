@@ -448,7 +448,7 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 	case rep.PathErr != nil:
 		fmt.Fprintf(out, "config file: (unavailable: %s)\n", termsafe.SafeLine(rep.PathErr.Error()))
 	case !rep.Found:
-		fmt.Fprintf(out, "config file: %s (not found — using defaults)\n", termsafe.QuotePath(rep.Path))
+		_, _ = fmt.Fprintf(out, "config file: %s (not found — using defaults; run forgectl init to create one)\n", termsafe.QuotePath(rep.Path))
 	default:
 		fmt.Fprintf(out, "config file: %s\n", termsafe.QuotePath(rep.Path))
 	}
