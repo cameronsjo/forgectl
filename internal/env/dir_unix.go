@@ -157,11 +157,16 @@ func openatCreate(dirfd int, name string, flags int, perm uint32) (int, error) {
 // openLock creates or opens name inside the pinned directory as a lock file,
 // refusing a symlink and anything that is not a regular file.
 //
-// O_RDWR on a FIFO does NOT block — it returns immediately (measured on darwin
-// 25.5) — which is why this open needs no O_NONBLOCK and why it cannot rely on
-// blocking to refuse one. The post-open check is what refuses it.
+// O_NONBLOCK and the post-open check are both here, and the flag is not
+// redundant with the one above it. O_RDWR on a FIFO returned immediately when
+// measured on darwin 25.5, but POSIX leaves O_RDWR on a FIFO UNDEFINED, and it
+// permits a blocking open for a character device that supports non-blocking
+// mode — so a measurement on one platform is not a guarantee, and a blocking
+// open would stall before the check below ever runs. O_NONBLOCK has no effect
+// on regular-file I/O, which is the only case that reaches the return, so it
+// costs nothing to hold.
 //
-// That check has to live HERE, not in the caller. withFileLock does Lstat the
+// The post-open check has to live HERE, not in the caller. withFileLock does Lstat the
 // name first, and O_NOFOLLOW closes the gap between that Lstat and this open
 // for a SYMLINK only: a swap to a FIFO in the same window is not a symlink, so
 // O_NOFOLLOW has nothing to say about it and the Lstat's answer is already
@@ -174,7 +179,7 @@ func openatCreate(dirfd int, name string, flags int, perm uint32) (int, error) {
 // lock, and the parse→write section that exists to prevent a lost update stops
 // preventing one.
 func (d *dirPin) openLock(name string) (*os.File, error) {
-	fd, err := openatCreate(d.fd, name, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	fd, err := openatCreate(d.fd, name, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0o600)
 	if errors.Is(err, unix.ELOOP) {
 		return nil, errIsSymlink
 	}

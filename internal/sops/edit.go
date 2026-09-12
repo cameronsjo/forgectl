@@ -127,11 +127,20 @@ func SetScalar(doc []byte, path []string, value string) ([]byte, Outcome, error)
 	leaf := path[len(path)-1]
 	if idx := findLeaf(lines, start, end, wantIndent, leaf); idx >= 0 {
 		if leafIsMappingHeader(lines, idx, wantIndent, leaf) {
-			// Leads with a word, not the key. fang title-cases an error's first
-			// token when it renders, so starting with %q produced `"App" names
-			// a block` — a capitalisation of the operator's own key, which
-			// reads as a different key than the one they typed.
-			return nil, OutcomeUnspecified, fmt.Errorf("the path names a block rather than a value (%q); only a scalar key can be set", leaf)
+			// Names the rule and not the segment, the same discipline every
+			// other refusal in this package follows: ParsePath's grammar is
+			// wide enough that plenty of provider token formats parse as one
+			// valid segment, so a secret pasted into the key slot reaches
+			// here — and this message is relayed out of the child process to
+			// the operator's terminal, which is the transcript the feature
+			// exists to keep the value out of.
+			//
+			// It also leads with a word rather than the segment for a second
+			// reason: fang title-cases an error's first token when it renders,
+			// so opening with the key produced `"App" names a block` — a
+			// capitalisation of the operator's own key, reading as a different
+			// key than the one they typed.
+			return nil, OutcomeUnspecified, errors.New("the path names a block rather than a value; only a scalar key can be set")
 		}
 		lines[idx] = replaceValue(lines[idx], value)
 		return joinLines(lines), OutcomeReplaced, nil

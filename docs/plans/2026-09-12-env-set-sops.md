@@ -254,6 +254,38 @@ what keeps the next branch added there from leaking — a caller-side `defer`
 gives no signal when a return is missed. The test fixture and the one direct
 `ResolveTarget` test close theirs too.
 
+## Bot review round — four findings, all fixed
+
+**The block refusal echoed the leaf segment.** `SetScalar`'s
+names-a-block refusal carried the segment in `%q`, and that message is relayed
+out of the child process to the operator's terminal. `ParsePath`'s grammar
+admits plenty of provider token formats as one valid segment, so a secret
+pasted into the key slot arrived as the leaf and was printed — a direct
+violation of this plan's own refusal rule. The message now names only the rule.
+The test asserts no refusal echoes the leaf, with a negative control proving
+the assertion goes red when it does.
+
+The ancestor segments still name the block they could not find, and the
+asymmetry is deliberate: a mistyped block name is the commonest mistake on this
+path and the only actionable thing the message can carry, and an ancestor is not
+the paste site — a bare pasted secret is a single-segment path, whose whole walk
+is the leaf.
+
+That first assertion was itself over-broad and had to be fixed before it meant
+anything: the sequence refusal reads "only scalar keys in a mapping", and the
+fixture's leaf was named `key`, so a substring match caught an English word
+rather than an echo. The refusal fixtures now use an unmistakable leaf.
+
+**`openLock` gained `O_NONBLOCK`.** The comment justified its absence from a
+darwin measurement, but POSIX leaves `O_RDWR` on a FIFO undefined and permits a
+blocking open for a character device that supports non-blocking mode — either
+of which would stall before the regular-file check ran. The flag has no effect
+on regular-file I/O, which is the only case that reaches the return.
+
+**Two doc corrections.** The command reference listed a value's rejected bytes
+as "a C0 control byte" when `NormalizeValue` accepts tab, and the README's
+target allowlist omitted every `.yml` form the code accepts.
+
 ## Out of scope
 
 - Reading or listing SOPS values (`env get --sops`, `env keys --sops`).

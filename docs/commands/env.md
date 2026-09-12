@@ -45,7 +45,7 @@ The two obvious alternatives both fail that. `sops set file '["a"]["b"]' '"value
 | A path naming a block rather than a scalar | Writing a scalar over a mapping header strands its children |
 | A dotted key *name* | `a.b.c` cannot distinguish `{a, b.c}` from `{a, b, c}`; escaping is a surface for a case no estate file has |
 | The top-level `sops` block | It holds the file's own recipients, MAC, and rules |
-| A value with a newline, a C0 control byte, or invalid UTF-8 | YAML forbids these in a scalar, and the resulting unparseable document makes sops re-invoke its editor **without bound** |
+| A value with a newline, a C0 control byte other than tab, or invalid UTF-8 | YAML forbids these in a scalar, and the resulting unparseable document makes sops re-invoke its editor **without bound** |
 | A document shape the line model cannot bound | A sequence where a mapping was expected, tab indentation, a multi-document stream, a header with a trailing comment — each would mis-place the key and corrupt the file silently |
 
 **Out of scope:** reading or listing SOPS values, creating a missing file or block, non-scalar values, and key rotation or recipient management.

@@ -195,43 +195,43 @@ func TestSetScalar_Refusals(t *testing.T) {
 		{
 			name:    "a missing block",
 			doc:     "other:\n    k: 'v'\n",
-			path:    []string{"nosuchblock", "key"},
+			path:    []string{"nosuchblock", "s3ntinel_leaf"},
 			wantMsg: "no block",
 		},
 		{
 			name:    "a missing intermediate block",
 			doc:     "a:\n    other:\n        k: 'v'\n",
-			path:    []string{"a", "missing", "leaf"},
+			path:    []string{"a", "missing", "s3ntinel_leaf"},
 			wantMsg: "no block",
 		},
 		{
 			name:    "a sequence where a mapping was expected",
 			doc:     "block:\n    - one\n    - two\n",
-			path:    []string{"block", "key"},
+			path:    []string{"block", "s3ntinel_leaf"},
 			wantMsg: "sequence",
 		},
 		{
 			name:    "a comment indented at or below the header",
 			doc:     "block:\n# a column-zero note inside the block\n    k: 'v'\n",
-			path:    []string{"block", "key"},
+			path:    []string{"block", "s3ntinel_leaf"},
 			wantMsg: "ambiguous",
 		},
 		{
 			name:    "tab indentation",
 			doc:     "block:\n\tk: 'v'\n",
-			path:    []string{"block", "key"},
+			path:    []string{"block", "s3ntinel_leaf"},
 			wantMsg: "tab indentation",
 		},
 		{
 			name:    "a multi-document stream",
 			doc:     "---\nblock:\n    k: 'v'\n",
-			path:    []string{"block", "key"},
+			path:    []string{"block", "s3ntinel_leaf"},
 			wantMsg: "multi-document",
 		},
 		{
 			name:    "a header carrying a trailing comment",
 			doc:     "block: # notes\n    k: 'v'\n",
-			path:    []string{"block", "key"},
+			path:    []string{"block", "s3ntinel_leaf"},
 			wantMsg: "trailing comment",
 		},
 		{
@@ -248,8 +248,8 @@ func TestSetScalar_Refusals(t *testing.T) {
 			// document does not parse as YAML" — a message that names nothing
 			// they can act on and reads as a forgectl bug.
 			name:    "a leaf that names a block rather than a value",
-			doc:     "block:\n    sub:\n        k: 'v'\n",
-			path:    []string{"block", "sub"},
+			doc:     "block:\n    s3ntinel_leaf:\n        k: 'v'\n",
+			path:    []string{"block", "s3ntinel_leaf"},
 			wantMsg: "names a block rather than a value",
 		},
 	}
@@ -267,11 +267,25 @@ func TestSetScalar_Refusals(t *testing.T) {
 			if outcome != OutcomeUnspecified {
 				t.Errorf("outcome = %v, want unspecified on a refusal", outcome)
 			}
-			// A refusal must never echo the value. The path may be a secret
-			// too (the sops grammar admits plenty of credential shapes), but
-			// the value certainly is.
+			// A refusal must never echo the value.
 			if strings.Contains(err.Error(), sentinel) {
 				t.Errorf("error %q echoed the value", err.Error())
+			}
+			// Nor the LEAF segment. ParsePath's grammar admits plenty of
+			// provider token formats as a single valid segment, so a secret
+			// pasted into the key slot arrives as the leaf — and these
+			// messages are relayed out of the child process to the operator's
+			// terminal, which is the transcript this feature exists to keep
+			// the value out of.
+			//
+			// The asymmetry with the ancestor segments is deliberate, not an
+			// oversight: "no block %q at this level" names a mistyped block,
+			// which is the commonest mistake on this path and the only
+			// actionable thing the message can carry. An ancestor is not the
+			// paste site — a bare pasted secret is a single-segment path,
+			// whose whole walk is the leaf.
+			if leaf := lastSegment(c.path); leaf != "" && strings.Contains(err.Error(), leaf) {
+				t.Errorf("error %q echoed the leaf segment %q", err.Error(), leaf)
 			}
 			if got != nil {
 				t.Errorf("document = %q, want nil on a refusal", got)
@@ -437,4 +451,13 @@ func TestSetScalar_NoDuplicateKeyOnReplace(t *testing.T) {
 	if err := yaml.Unmarshal(got, &probe); err != nil {
 		t.Errorf("the emitted document does not parse (duplicate key?): %v\n%s", err, got)
 	}
+}
+
+// lastSegment returns path's leaf, or "" for an empty path — the segment a
+// pasted secret would occupy, which no refusal may echo.
+func lastSegment(path []string) string {
+	if len(path) == 0 {
+		return ""
+	}
+	return path[len(path)-1]
 }
