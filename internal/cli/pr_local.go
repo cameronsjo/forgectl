@@ -80,8 +80,22 @@ or not at all.`,
 				return err
 			}
 
-			localRef, err := client.ResolveLocalHead(ctx, path)
+			// ResolveLocalHead runs the location refusals (option-like path,
+			// clean-room path) and reads HEAD once. The oid it returns is
+			// threaded into PrepareLocal below so the reservation, the record,
+			// the workspace, and the tmux window name all name one commit even
+			// if HEAD moves mid-run.
+			localRef, headOid, err := client.ResolveLocalHead(ctx, path)
 			if err != nil {
+				return err
+			}
+			// The provenance gate is a pure policy refusal — no I/O decides it
+			// — so it runs BEFORE the reservation, and a refused review leaves
+			// nothing on disk. That is what `pr local`'s own Long text and
+			// PrepareLocal's ordering comment both promise; a refusal after
+			// Reserve would leave a `preparing` record holding a slot.
+			// PrepareLocal and Launch both re-check.
+			if err := pr.CheckAgentForReview(prepOpts.Agent, pr.EffectiveProvenance(localRef, prepOpts.Provenance)); err != nil {
 				return err
 			}
 			recordPath, err := client.Reserve(ctx, localRef, cfg.Pr.MaxConcurrent, pr.PrepareOpts{
@@ -95,10 +109,11 @@ or not at all.`,
 				return err
 			}
 			prepOpts.RecordPath = recordPath
+			prepOpts.HeadOid = headOid
 
 			sess, err := client.PrepareLocal(ctx, path, prepOpts)
 			if err != nil {
-				return err
+				return parkReservation(ctx, client, recordPath, localRef.String(), err)
 			}
 
 			dispatch, err := client.Launch(ctx, sess, cfg)

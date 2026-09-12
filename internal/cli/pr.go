@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"time"
 
@@ -110,6 +111,23 @@ exits 0, to be started later by 'forgectl pr drain --once'.`,
 				Provenance: pr.ReviewProvenanceThirdParty,
 			}
 
+			// Every pure policy refusal runs HERE, before any of the three
+			// branches below, because none of them needs I/O to decide it and
+			// all three owe the same answer.
+			//
+			// Ahead of --queue it closes the one gap where a queued record
+			// could store an agent/provenance pairing the immediate path
+			// refuses: the drainer would then hit the refusal hours later, on
+			// someone else's command, instead of here on the operator's.
+			// Ahead of Reserve it keeps the promise this command's own Long
+			// text makes — at the cap it "refuses with nothing prepared", and
+			// a refusal after Reserve would leave a `preparing` record holding
+			// a slot. Prepare and Launch both re-check; these are the fast
+			// fail, not the authoritative gate.
+			if err := pr.CheckAgentForReview(prepOpts.Agent, pr.EffectiveProvenance(ref, prepOpts.Provenance)); err != nil {
+				return err
+			}
+
 			out := cmd.OutOrStdout()
 			if dryRun {
 				sess, err := client.Prepare(ctx, ref, prepOpts)
@@ -156,7 +174,7 @@ exits 0, to be started later by 'forgectl pr drain --once'.`,
 
 			sess, err := client.Prepare(ctx, ref, prepOpts)
 			if err != nil {
-				return err
+				return parkReservation(ctx, client, recordPath, ref.String(), err)
 			}
 
 			dispatch, err := client.Launch(ctx, sess, cfg)
@@ -231,6 +249,28 @@ func reviewCapRefusal(maxN, liveN int, ref pr.Ref) error {
 		"  queue it:   forgectl pr %s --queue   (then: forgectl pr drain --once)\n"+
 		"  raise it:   [pr] max_concurrent in config.toml",
 		maxN, liveN, ref.String())
+}
+
+// parkReservation settles a reservation whose prepare failed AFTER the slot
+// was claimed, then returns the original prepare error unchanged — the single
+// -ref launch paths' equivalent of PrepareMany's inline park (internal/pr's
+// discover.go), so the two admission routes leak nothing on the same failure.
+//
+// Without the park, a failed prepare leaves a `preparing` record with no clean
+// room behind it: it counts against the cap forever and blocks every retry of
+// the same ref, so four transient `gh` failures would exhaust a default cap of
+// four and refuse every later launch. A park makes the cost of a transient
+// failure one retry.
+//
+// The prepare error is what the operator sees. A failure to park is logged and
+// swallowed rather than returned, because replacing the real diagnosis with a
+// bookkeeping error would hide why the review did not start.
+func parkReservation(ctx context.Context, client *pr.Client, recordPath, ref string, cause error) error {
+	if err := client.ParkFailedReservation(ctx, recordPath, "prepare failed: "+cause.Error()); err != nil {
+		slog.Error("Failed to park a reservation whose prepare failed; its slot stays reserved.",
+			"ref", ref, "path", recordPath, "error", err)
+	}
+	return cause
 }
 
 // workspaceMissingStatus is the `pr list` / `pr dash` label for a review whose

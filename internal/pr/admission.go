@@ -327,9 +327,7 @@ func (c *Client) reserveFrom(res *reservation, ref Ref, cfgMax int, opts Prepare
 	if existing, ok := recordForRef(summaries, ref); ok {
 		slog.Error("Refusing to reserve a review slot: the ref already has a session record.",
 			"ref", ref.String(), "path", existing.Path(), "phase", string(existing.Phase()))
-		return "", fmt.Errorf("%s already has a session record at %s (phase %s); "+
-			"discard it with 'forgectl pr teardown %s' or settle it with 'forgectl pr repair'",
-			ref.String(), existing.Path(), phaseOrLegacy(existing.Phase()), existing.Path())
+		return "", duplicateRecordRefusal(ref, existing)
 	}
 	if res.occupied >= maxN {
 		slog.Warn("Refusing to reserve a review slot: the concurrency cap is reached.",
@@ -432,6 +430,25 @@ func recordForRef(summaries []SessionSummary, ref Ref) (SessionSummary, bool) {
 		return s, true
 	}
 	return SessionSummary{}, false
+}
+
+// duplicateRecordRefusal renders the refusal both admission surfaces give when
+// a ref already holds a blocking record — `reserve` (a launch) and `queueLocked`
+// (a queue entry) — so the two can never drift apart on the remedy they name.
+//
+// The remedy is phase-dependent, and that is the whole point: `pr repair` only
+// settles records with a workspace behind them, so it does not list a `queued`
+// record at all. Offering it there would send the operator to a command that
+// prints nothing, with no second suggestion to fall back on. `pr teardown
+// <path>` clears every phase, so it is always named first and, for a queued
+// record, named alone.
+func duplicateRecordRefusal(ref Ref, existing SessionSummary) error {
+	remedy := fmt.Sprintf("discard it with 'forgectl pr teardown %s'", existing.Path())
+	if existing.Phase() != PhaseQueued {
+		remedy += " or settle it with 'forgectl pr repair'"
+	}
+	return fmt.Errorf("%s already has a session record at %s (phase %s); %s",
+		ref.String(), existing.Path(), phaseOrLegacy(existing.Phase()), remedy)
 }
 
 // phaseOrLegacy renders a phase for an operator-facing message, naming the one

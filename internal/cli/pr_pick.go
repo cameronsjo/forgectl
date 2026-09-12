@@ -171,13 +171,27 @@ func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd
 		return nil
 	}
 
+	// Every PR the picker surfaces came from a forge query, so the whole batch
+	// is third-party by construction — bulk is the route where an unnoticed
+	// escalation would be widest, and it is declared here rather than left to
+	// the zero value so the intent is legible.
+	//
+	// One value, built once, and used by BOTH dispositions a ref can get:
+	// prepared now, or queued for the drainer. A queue path with its own
+	// hardcoded agent and provenance would store a pairing the launch path
+	// never agreed to the day this batch gains an --agent flag.
+	batchOpts := pr.PrepareOpts{
+		Agent:      resolveAgent(""),
+		Provenance: pr.ReviewProvenanceThirdParty,
+	}
+
 	maxN, _, free, ok := client.Admit(ctx, cfg.Pr.MaxConcurrent)
 	if !ok {
 		return fmt.Errorf("cannot read the tmux review window count — refusing to launch %d review(s); "+
 			"never mass-launch on an unreadable count. Check `tmux list-windows -a`, then retry", len(refs))
 	}
 	if free == 0 {
-		queuePickedRefs(ctx, client, refs, maxN, errOut)
+		queuePickedRefs(ctx, client, refs, batchOpts, maxN, errOut)
 		return nil
 	}
 	var overflow []pr.Ref
@@ -189,18 +203,11 @@ func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd
 		return err
 	}
 
-	// Every PR the picker surfaces came from a forge query, so the whole batch
-	// is third-party by construction — bulk is the route where an unnoticed
-	// escalation would be widest, and it is declared here rather than left to
-	// the zero value so the intent is legible.
 	// The cap is re-read inside PrepareMany's single lock hold, where the
 	// reservations are written. The Admit call above is what decides how many
 	// refs to attempt; the reservation is what actually claims the slots, and
 	// only it is race-free against a peer launcher.
-	results := client.PrepareMany(ctx, refs, cfg.Pr.MaxConcurrent, pr.PrepareOpts{
-		Agent:      resolveAgent(""),
-		Provenance: pr.ReviewProvenanceThirdParty,
-	})
+	results := client.PrepareMany(ctx, refs, cfg.Pr.MaxConcurrent, batchOpts)
 	launched := 0
 	prepareFailed := 0
 	launchFailed := 0
@@ -223,7 +230,7 @@ func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd
 	}
 	queued := 0
 	if len(overflow) > 0 {
-		queued = queuePickedRefs(ctx, client, overflow, maxN, errOut)
+		queued = queuePickedRefs(ctx, client, overflow, batchOpts, maxN, errOut)
 	}
 	// A launch failure leaves a prepared clean room (workspace + breadcrumb) on
 	// disk — Phase 1 keeps it so the review is retryable/tearable. In bulk these
@@ -241,13 +248,14 @@ func launchPicked(ctx context.Context, client *pr.Client, cfg config.Config, cmd
 // remainder — and prints the one-line summary the design names. It reports
 // per-ref queue failures (e.g. a duplicate from an earlier pick) without
 // aborting the rest, and returns how many actually landed.
-func queuePickedRefs(ctx context.Context, client *pr.Client, refs []pr.Ref, maxN int, errOut io.Writer) int {
+//
+// opts is the batch's own PrepareOpts, passed in rather than rebuilt: a queued
+// record is the drainer's input, so it must carry exactly the agent and
+// provenance the same batch would have launched with.
+func queuePickedRefs(ctx context.Context, client *pr.Client, refs []pr.Ref, opts pr.PrepareOpts, maxN int, errOut io.Writer) int {
 	n := 0
 	for _, ref := range refs {
-		if _, err := client.Queue(ctx, ref, pr.PrepareOpts{
-			Agent:      resolveAgent(""),
-			Provenance: pr.ReviewProvenanceThirdParty,
-		}); err != nil {
+		if _, err := client.Queue(ctx, ref, opts); err != nil {
 			_, _ = fmt.Fprintf(errOut, "queue %s failed: %v\n", ref.String(), err)
 			continue
 		}

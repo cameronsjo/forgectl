@@ -283,33 +283,54 @@ func ReviewCapReached(err error) (maxN, liveN int, ok bool) {
 	return 0, 0, false
 }
 
-// ResolveLocalHead resolves path's local HEAD commit and returns the
-// synthetic local Ref PrepareLocal would derive for it — the read-only half
-// of PrepareLocal's opening git rev-parse pair (headOid only; the branch name
-// is not needed to derive a Ref), exposed so a caller can Reserve a slot
-// BEFORE entering PrepareLocal, exactly as `pr <ref>` reserves against a Ref
-// it already has from ResolveRef.
+// ResolveLocalHead resolves path's local HEAD commit and returns both the
+// synthetic local Ref PrepareLocal would derive for it and the full oid that
+// Ref was derived from — the read-only half of PrepareLocal's opening git
+// rev-parse pair (headOid only; the branch name is not needed to derive a
+// Ref), exposed so a caller can Reserve a slot BEFORE entering PrepareLocal,
+// exactly as `pr <ref>` reserves against a Ref it already has from ResolveRef.
+//
+// The oid comes back alongside the Ref because a Ref cannot carry it: a local
+// Ref stores only the first 7 hex characters (newLocalRef, local.go). The
+// caller threads the full oid into PrepareLocalOpts.HeadOid so HEAD is read
+// exactly ONCE per `pr local` run — a HEAD that moved between two reads would
+// key the reservation and the record to one commit while the workspace,
+// window name, and reviewed tree were pinned to another.
 //
 // It runs the same location guards PrepareLocal runs (RejectOptionLike,
 // rejectCleanRoomPath) so a caller cannot reserve against a path PrepareLocal
 // would then refuse — the reservation and the prepare must agree on legality,
 // not just on identity.
-func (c *Client) ResolveLocalHead(ctx context.Context, path string) (Ref, error) {
+func (c *Client) ResolveLocalHead(ctx context.Context, path string) (Ref, string, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return Ref{}, fmt.Errorf("resolve path %q: %w", path, err)
+		return Ref{}, "", fmt.Errorf("resolve path %q: %w", path, err)
 	}
 	if err := sandbox.RejectOptionLike("path", absPath); err != nil {
-		return Ref{}, err
+		return Ref{}, "", err
 	}
 	if err := c.rejectCleanRoomPath(absPath); err != nil {
-		return Ref{}, err
+		return Ref{}, "", err
 	}
 	headOid, err := c.run.Run(ctx, "git", "-C", absPath, "rev-parse", "HEAD")
 	if err != nil {
-		return Ref{}, fmt.Errorf("resolve local HEAD commit: %w", err)
+		return Ref{}, "", fmt.Errorf("resolve local HEAD commit: %w", err)
 	}
-	return newLocalRef(headOid), nil
+	return newLocalRef(headOid), headOid, nil
+}
+
+// ParkFailedReservation parks the reservation at recordPath in `needs-repair`
+// with reason, for a caller whose Prepare/PrepareLocal failed AFTER Reserve
+// succeeded — markNeedsRepair (phase.go) exported for callers outside this
+// package.
+//
+// Without it the reservation stays a `preparing` record with no clean room
+// behind it: it holds its slot against the cap forever and blocks every retry
+// of the same ref. PrepareMany already does this inline at its own throw site
+// (discover.go); the single-ref launch paths in internal/cli reach it through
+// here, so a transient `gh` or clone failure costs a retry rather than a slot.
+func (c *Client) ParkFailedReservation(ctx context.Context, recordPath, reason string) error {
+	return c.markNeedsRepair(ctx, recordPath, reason)
 }
 
 // Queue writes a `queued` v2 record for ref under the lifecycle lock: intent
@@ -347,9 +368,7 @@ func (c *Client) queueLocked(ref Ref, opts PrepareOpts) (string, error) {
 	if existing, ok := recordForRef(summaries, ref); ok {
 		slog.Error("Refusing to queue a review: the ref already has a session record.",
 			"ref", ref.String(), "path", existing.Path(), "phase", string(existing.Phase()))
-		return "", fmt.Errorf("%s already has a session record at %s (phase %s); "+
-			"discard it with 'forgectl pr teardown %s' or settle it with 'forgectl pr repair'",
-			ref.String(), existing.Path(), phaseOrLegacy(existing.Phase()), existing.Path())
+		return "", duplicateRecordRefusal(ref, existing)
 	}
 	bc := Breadcrumb{
 		Ref:        ref.String(),

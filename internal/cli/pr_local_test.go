@@ -22,6 +22,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -367,4 +368,162 @@ func findCLICall(calls []exec.Call, name string) (exec.Call, bool) {
 		}
 	}
 	return exec.Call{}, false
+}
+
+// --- Fix round on the security review's Important findings (local path) ---
+//
+//   [x] The agent gate refuses BEFORE Reserve, so a refused local review
+//       leaves zero records
+//   [x] HEAD is read exactly once: a git double whose HEAD moves between
+//       calls still yields a record ref and a window name that agree
+//   [x] A PrepareLocal failure after Reserve parks the reservation
+
+// TestPrLocalCmd_CodexWithoutOperatorAuthored_RefusesBeforeReserving pins the
+// ordering PrepareLocal's own comment promises — "a refusal creates no state
+// at all" — now that the reservation happens before PrepareLocal runs.
+func TestPrLocalCmd_CodexWithoutOperatorAuthored_RefusesBeforeReserving(t *testing.T) {
+	ledger := newTmuxLedger("forgectl")
+	cmd, out, client := localReviewCmdCapped(t, ledger, config.Config{Pr: config.PrConfig{MaxConcurrent: 4}})
+	cmd.SetArgs([]string{t.TempDir(), "--agent", "codex"})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("want a refusal for --agent codex without --operator-authored, got nil")
+	}
+	if !strings.Contains(err.Error(), "codex") {
+		t.Errorf("error = %q, want the Codex confinement refusal", err.Error())
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing printed on refusal", out.String())
+	}
+	summaries, unreadable, listErr := client.List(context.Background())
+	if listErr != nil || unreadable != 0 {
+		t.Fatalf("List: %+v, %d, %v", summaries, unreadable, listErr)
+	}
+	if len(summaries) != 0 {
+		t.Errorf("summaries = %+v, want none — a pure policy refusal must reserve nothing", summaries)
+	}
+}
+
+// movingHeadRunner is prLocalFakeRunner's git half with a HEAD that advances on
+// every `rev-parse HEAD`. Two reads of HEAD would key the reservation (and so
+// the record) to the first commit while the workspace and tmux window were
+// pinned to the second, which is exactly the disagreement teardown and repair
+// cannot survive: both resolve the window from the record's ref.
+func movingHeadRunner(oids []string) func(string, []string) (string, error) {
+	call := 0
+	return func(name string, args []string) (string, error) {
+		if name == "git" && len(args) >= 3 && args[2] == "rev-parse" {
+			for _, a := range args {
+				if a == "--abbrev-ref" {
+					return "main", nil
+				}
+			}
+			oid := oids[len(oids)-1]
+			if call < len(oids) {
+				oid = oids[call]
+			}
+			call++
+			return oid, nil
+		}
+		return "", nil
+	}
+}
+
+func TestPrLocalCmd_MovingHead_RecordRefAndWindowNameAgree(t *testing.T) {
+	fakeClaudeBin(t)
+	reviewTempRoot(t)
+	ledger := newTmuxLedger("forgectl")
+	fake := ledger.runnerWith(movingHeadRunner([]string{
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"cccccccccccccccccccccccccccccccccccccccc",
+	}))
+	client := pr.New(fake,
+		pr.WithSessionsDir(t.TempDir()),
+		pr.WithFindingsDir(t.TempDir()),
+		pr.WithTmuxSession(ledger.session),
+		pr.WithDispatchWait(func(context.Context) error { return nil }),
+	)
+	cmd := newPrLocalCmd(client, config.Config{Pr: config.PrConfig{MaxConcurrent: 4}})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{t.TempDir(), "--no-verify"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	summaries, unreadable, err := client.List(context.Background())
+	if err != nil || unreadable != 0 {
+		t.Fatalf("List: %+v, %d, %v", summaries, unreadable, err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("summaries = %+v, want exactly one record", summaries)
+	}
+	wantName, err := pr.ReviewWindowName(summaries[0].Ref())
+	if err != nil {
+		t.Fatalf("ReviewWindowName(%v): %v", summaries[0].Ref(), err)
+	}
+	var dispatched []string
+	for _, w := range ledger.live {
+		dispatched = append(dispatched, w.name)
+	}
+	if len(dispatched) != 1 || dispatched[0] != wantName {
+		t.Errorf("dispatched windows = %v, want exactly [%s] — the record's ref and the window "+
+			"must name one commit even though HEAD moved between reads", dispatched, wantName)
+	}
+}
+
+// TestPrLocalCmd_PrepareFailureParksTheReservation mirrors the remote path: a
+// failure after the slot is claimed must not leave the slot held.
+func TestPrLocalCmd_PrepareFailureParksTheReservation(t *testing.T) {
+	fakeClaudeBin(t)
+	reviewTempRoot(t)
+	ledger := newTmuxLedger("forgectl")
+	fake := ledger.runnerWith(func(name string, args []string) (string, error) {
+		if name == "git" && len(args) >= 3 && args[2] == "rev-parse" {
+			for _, a := range args {
+				if a == "--abbrev-ref" {
+					// ResolveLocalHead has already reserved by the time
+					// PrepareLocal reads the branch name, so failing here is a
+					// post-reserve failure.
+					return "", errors.New("boom: git could not name the branch")
+				}
+			}
+			return "deadbeefcafe1234567890abcdef1234567890", nil
+		}
+		return "", nil
+	})
+	client := pr.New(fake,
+		pr.WithSessionsDir(t.TempDir()),
+		pr.WithFindingsDir(t.TempDir()),
+		pr.WithTmuxSession(ledger.session),
+		pr.WithDispatchWait(func(context.Context) error { return nil }),
+	)
+	cmd := newPrLocalCmd(client, config.Config{Pr: config.PrConfig{MaxConcurrent: 1}})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{t.TempDir()})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("want the git failure to propagate, got nil")
+	}
+	if !strings.Contains(err.Error(), "boom: git could not name the branch") {
+		t.Errorf("error = %q, want the original git failure, not a bookkeeping error", err.Error())
+	}
+
+	summaries, unreadable, listErr := client.List(context.Background())
+	if listErr != nil || unreadable != 0 {
+		t.Fatalf("List: %+v, %d, %v", summaries, unreadable, listErr)
+	}
+	if len(summaries) != 1 || summaries[0].Phase() != pr.PhaseNeedsRepair {
+		t.Fatalf("summaries = %+v, want exactly one needs-repair record", summaries)
+	}
+	if _, live, free, ok := client.Admit(context.Background(), 1); !ok || free != 1 || live != 0 {
+		t.Errorf("Admit = live %d, free %d, ok %v; want live 0, free 1 — a parked record holds no slot", live, free, ok)
+	}
 }
