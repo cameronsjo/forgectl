@@ -56,17 +56,40 @@ var staleMemberIsRegular = func(info fs.FileInfo) bool { return info.Mode().IsRe
 func (c *Client) Teardown(ctx context.Context, path string) error {
 	// The lifecycle lock is held across membership, classification, and the
 	// final unlink so no forgectl process can race this one. It is
-	// non-reentrant: Cleanup takes it ONCE and calls teardownLocked per
+	// non-reentrant: Cleanup takes it ONCE and calls auditedTeardownLocked per
 	// candidate rather than re-entering here.
-	return c.withLifecycleLock(ctx, "teardown", func() error { return c.teardownLocked(ctx, path) })
+	return c.withLifecycleLock(ctx, "teardown", func() error {
+		return c.auditedTeardownLocked(ctx, auditVerbTeardown, path)
+	})
 }
 
-// teardownLocked is Teardown's core for a caller that already holds the
-// lifecycle lock.
-func (c *Client) teardownLocked(ctx context.Context, path string) error {
+// teardownKind is which of the three removal arms a planned teardown will take.
+type teardownKind int
+
+const (
+	teardownKindRecordOnly teardownKind = iota
+	teardownKindStale
+	teardownKindLive
+)
+
+// teardownPlan is everything a teardown decided before it touched anything:
+// which record it is authorized to act on, which arm acts, and — for the live
+// arm only — the session reloaded through the authoritative path.
+type teardownPlan struct {
+	member breadcrumbMember
+	kind   teardownKind
+	sess   Session
+}
+
+// planTeardownLocked runs every check and every refusal, and mutates nothing.
+//
+// It exists so the audited wrapper can write its intent row AFTER the last
+// refusal: a dangling intent means a removal died mid-way, so a refused
+// teardown that wrote one would forge that signal.
+func (c *Client) planTeardownLocked(path string) (teardownPlan, error) {
 	member, err := c.resolveBreadcrumbMember(path)
 	if err != nil {
-		return err
+		return teardownPlan{}, err
 	}
 
 	// A record that legitimately has no workspace — queued, or a reservation
@@ -75,22 +98,109 @@ func (c *Client) teardownLocked(ctx context.Context, path string) error {
 	// It is checked before classifyWorkspace because an empty pathname is not a
 	// pathname that went away.
 	if member.breadcrumb.Workspace == "" {
-		return c.discardRecordOnly(member)
+		return teardownPlan{member: member, kind: teardownKindRecordOnly}, nil
 	}
 	avail, availErr := classifyWorkspace(member.breadcrumb.Workspace)
 	switch avail {
 	case workspaceAvailabilityMissing:
-		return c.discardStale(member)
+		return teardownPlan{member: member, kind: teardownKindStale}, nil
 	case workspaceAvailabilityLive:
 		// Strict live reload through the authoritative path — never the
 		// operand — so the session acted on is the record just verified.
 		sess, err := c.loadSession(member.path)
 		if err != nil {
-			return err
+			return teardownPlan{}, err
 		}
-		return c.discard(ctx, sess)
+		return teardownPlan{member: member, kind: teardownKindLive, sess: sess}, nil
 	default:
-		return fmt.Errorf("cannot tear down breadcrumb %s: %w", member.displayPath, availErr)
+		return teardownPlan{}, fmt.Errorf("cannot tear down breadcrumb %s: %w", member.displayPath, availErr)
+	}
+}
+
+// executeTeardownLocked performs the arm the plan chose. The discard functions
+// re-prove every fact they act on, so a drift observed here is a refusal after
+// the plan rather than a check the plan skipped.
+func (c *Client) executeTeardownLocked(ctx context.Context, plan teardownPlan) error {
+	switch plan.kind {
+	case teardownKindRecordOnly:
+		return c.discardRecordOnly(plan.member)
+	case teardownKindStale:
+		return c.discardStale(plan.member)
+	case teardownKindLive:
+		return c.discard(ctx, plan.sess)
+	default:
+		return fmt.Errorf("cannot tear down breadcrumb %s: unknown teardown arm", plan.member.displayPath)
+	}
+}
+
+// teardownLocked is Teardown's core for a caller that already holds the
+// lifecycle lock.
+//
+// IT WRITES NO AUDIT ROW, on purpose. Its callers are `pr repair --rollback`
+// and `pr repair --forget-if-absent` (repair.go), and each has already written
+// its own intent row before calling here. A row written here would nest inside
+// that pair, giving one mutation two intents and two completions — which is the
+// exact shape that means "a removal died mid-way" to whoever reads the trail.
+// The verbs that own their mutation outright go through auditedTeardownLocked.
+func (c *Client) teardownLocked(ctx context.Context, path string) error {
+	plan, err := c.planTeardownLocked(path)
+	if err != nil {
+		return err
+	}
+	return c.executeTeardownLocked(ctx, plan)
+}
+
+// auditedTeardownLocked is the teardown core plus the write-ahead pair, for the
+// verbs whose mutation nothing else is recording: `pr teardown` and
+// `pr cleanup`.
+//
+// THE ORDER IS THE POINT. Every refusal lives in the plan, which runs first, so
+// a refused teardown writes nothing at all. Once the intent row is on disk the
+// removal is underway, so a drift refusal raised inside discardStale or
+// discardRecordOnly completes the pair as `failed` rather than leaving a
+// dangling intent — a dangling intent is reserved for a removal that died
+// without being able to say so.
+//
+// A failure to write the intent row REFUSES the mutation, matching the repair
+// arms: the row is the only pointer left to a clean room once the record is
+// gone.
+func (c *Client) auditedTeardownLocked(ctx context.Context, verb, path string) error {
+	plan, err := c.planTeardownLocked(path)
+	if err != nil {
+		return err
+	}
+	row := teardownRowFor(verb, plan.member)
+	if plan.kind == teardownKindLive {
+		// The live arm deletes the workspace loadSession read on its second
+		// pass over the record, not the one the member's first read carried.
+		// The row is the recovery pointer once the record is gone, so it names
+		// the path that is actually removed.
+		row.Workspace = plan.sess.Workspace
+	}
+	rowID, err := c.beginRepairRow(row)
+	if err != nil {
+		return err
+	}
+	execErr := c.executeTeardownLocked(ctx, plan)
+	c.completeRepairRow(rowID, row, execErr)
+	return execErr
+}
+
+// teardownRowFor builds the descriptive half of a teardown or cleanup row, so
+// the two verbs cannot disagree about what a row carries.
+//
+// Mode stays empty: it holds `pr repair`'s flag spelling, and filling it in here
+// would make the trail claim a repair ran. Record and RecordBytes stay empty
+// too — those carry the raw bytes of a record that could not be DECODED, and
+// every field here comes from a decode that succeeded.
+func teardownRowFor(verb string, member breadcrumbMember) RepairRow {
+	return RepairRow{
+		Verb:       verb,
+		Ref:        member.breadcrumb.Ref,
+		RecordPath: member.path,
+		FromPhase:  string(member.breadcrumb.Phase),
+		WindowID:   member.breadcrumb.WindowID,
+		Workspace:  member.breadcrumb.Workspace,
 	}
 }
 
@@ -571,7 +681,7 @@ func (c *Client) Cleanup(ctx context.Context, date string) error {
 			if sum.CreatedAt().UTC().Format("2006-01-02") != date {
 				continue
 			}
-			if err := c.teardownLocked(ctx, sum.Path()); err != nil {
+			if err := c.auditedTeardownLocked(ctx, auditVerbCleanup, sum.Path()); err != nil {
 				slog.Error("Failed to tear down session during cleanup.", "path", sum.Path(), "error", err)
 				if firstErr == nil {
 					firstErr = err

@@ -587,6 +587,7 @@ func (c *Client) pruneOne(cand *asideCandidate, dirInfo fs.FileInfo) {
 		Ref:         cand.refString(),
 		RecordPath:  cand.path,
 		FromPhase:   repairPhaseUnreadable,
+		Verb:        auditVerbPrune,
 		Mode:        RepairModePrune,
 		Record:      cappedRecordBytes(cand.bytes),
 		RecordBytes: len(cand.bytes),
@@ -723,6 +724,7 @@ func (c *Client) compactRepairLog(cutoff time.Time, out *PruneLog) {
 	// every pass after it (an unpaired intent is never dropped).
 	row := RepairRow{
 		RecordPath: c.repairLogPath(),
+		Verb:       auditVerbPrune,
 		Mode:       RepairModePrune,
 		Detail:     fmt.Sprintf("dropped %d rows, kept %d", dropped, len(keep)),
 	}

@@ -76,16 +76,39 @@ func renderSessions(out io.Writer, summaries []pr.SessionSummary) {
 		age := time.Since(s.CreatedAt()).Round(time.Second)
 		suffix := ""
 		switch {
+		case s.IsWorkspaceNone():
+			// queued or preparing: no workspace by design. The phase note below
+			// carries it; "workspace missing" is the word for damage.
 		case s.IsWorkspaceMissing():
 			suffix = "  (" + workspaceMissingStatus + ")"
-		case !s.IsWorkspaceLive():
-			// Neither predicate holds: not a state to render silently.
+		case s.IsWorkspaceLive():
+		default:
 			suffix = "  (" + workspaceUnclassifiedStatus + ")"
 		}
 		// The path is a FILENAME chosen on disk, so it is the one field here
 		// that can carry ANSI or bidi controls; Ref is charset-constrained by
 		// ParseRef. Quote it, as every other human sink in the CLI does.
-		_, _ = fmt.Fprintf(out, "  %s  (%s ago)  %s%s\n",
-			s.Ref().String(), age, termsafe.QuotePath(s.Path()), suffix)
+		_, _ = fmt.Fprintf(out, "  %s  (%s ago)  %s%s%s\n",
+			s.Ref().String(), age, termsafe.QuotePath(s.Path()), suffix, phaseNote(s))
+	}
+}
+
+// phaseNote annotates a dash row with what the record SAYS about itself.
+// Active is the unmarked baseline and a legacy record has no phase to
+// report, so those two are the only silent cases: anything else — including
+// a phase a later build adds — renders by name rather than reading as a
+// healthy review.
+func phaseNote(s pr.SessionSummary) string {
+	switch s.Phase() {
+	case "", pr.PhaseActive:
+		return ""
+	case pr.PhaseNeedsRepair:
+		reason := safeTerm(s.RepairReason())
+		if reason == "" {
+			reason = "no reason recorded"
+		}
+		return "  [needs-repair: " + reason + "]"
+	default:
+		return "  [" + string(s.Phase()) + "]"
 	}
 }

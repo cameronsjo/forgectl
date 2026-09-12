@@ -441,3 +441,168 @@ func TestPrPrune_RefusesABreadcrumbEvenWithoutYes(t *testing.T) {
 		t.Fatal("expected a refusal: --prune takes no breadcrumb, even under --dry-run")
 	}
 }
+
+// TestPrRepairHistory_RendersTheVerbColumn: the trail now carries teardown and
+// cleanup rows beside repair's, so the human view has to say which verb removed
+// the thing. A row written before the field existed renders "-" rather than
+// being read as a repair — the log is hand-editable, so an absent verb is
+// unknown, never a claim.
+func TestPrRepairHistory_RendersTheVerbColumn(t *testing.T) {
+	dir := t.TempDir()
+	rows := []pr.RepairRow{
+		{TS: time.Now().UTC(), ID: "a", Verb: "teardown", Outcome: "applied", Ref: "o/r#1", RecordPath: "/tmp/one.json"},
+		{TS: time.Now().UTC(), ID: "b", Mode: "--rollback", Outcome: "applied", Ref: "o/r#2", RecordPath: "/tmp/two.json"},
+	}
+	var log bytes.Buffer
+	for _, r := range rows {
+		data, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		log.Write(data)
+		log.WriteByte('\n')
+	}
+	if err := os.WriteFile(filepath.Join(dir, "repair.jsonl"), log.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := runPrRepair(t, repairCmdClient(t, dir), "--history")
+	if err != nil {
+		t.Fatalf("pr repair --history: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("history lines = %d, want one per row:\n%s", len(lines), out)
+	}
+	want := [][2]string{{"teardown", "-"}, {"-", "--rollback"}}
+	for i, line := range lines {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 6 {
+			t.Fatalf("line %d has %d columns, want timestamp, verb, mode, outcome, ref, path: %q", i, len(fields), line)
+		}
+		if fields[1] != want[i][0] || fields[2] != want[i][1] {
+			t.Errorf("line %d verb/mode = %q/%q, want %q/%q", i, fields[1], fields[2], want[i][0], want[i][1])
+		}
+	}
+}
+
+// TestPrRepairHistory_ClampsTheVerbModeAndOutcomeColumns pins the terminal sink
+// on the three columns a hand-edited log can fill with anything. The log is
+// declared untrusted input, and a raw ESC[2K + CR in the verb column would let a
+// row repaint itself as any verb, outcome, ref, or path in the one view that
+// exists to answer "which command removed the thing".
+func TestPrRepairHistory_ClampsTheVerbModeAndOutcomeColumns(t *testing.T) {
+	dir := t.TempDir()
+	row := pr.RepairRow{
+		TS: time.Now().UTC(), ID: "a",
+		Verb: "teardown\x1b[2K\rrepair", Mode: "--rollback\x1b[31m", Outcome: "applied\x07",
+		Ref: "o/r#1", RecordPath: "/tmp/one.json",
+	}
+	data, err := json.Marshal(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "repair.jsonl"), append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err := runPrRepair(t, repairCmdClient(t, dir), "--history")
+	if err != nil {
+		t.Fatalf("pr repair --history: %v", err)
+	}
+	for _, raw := range []string{"\x1b", "\r", "\x07"} {
+		if strings.Contains(out, raw) {
+			t.Errorf("history output carries a raw %q byte from the log:\n%q", raw, out)
+		}
+	}
+	if !strings.Contains(out, "teardown") {
+		t.Errorf("the verb's graphic text was lost in clamping:\n%q", out)
+	}
+}
+
+// TestPrRepairHistory_RendersThePruneVerbAndItsDetail: prune is the only verb
+// that unlinks, so the trail has to name it as its own verb rather than as a
+// spelling of repair. And a compaction row's record_path is the log itself, so
+// without the detail line the row says only "prune touched this file" — the
+// count of what it dropped lives nowhere else in this view.
+func TestPrRepairHistory_RendersThePruneVerbAndItsDetail(t *testing.T) {
+	dir := t.TempDir()
+	client := repairCmdClient(t, dir)
+	// One old settled pair for compaction to drop, and one set-aside file past
+	// its window for the sweep to unlink — so both prune row shapes land.
+	aside := filepath.Join(dir, "o-r-1-1.json.unreadable-1735689601")
+	if err := os.WriteFile(aside, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A settled pair old enough to be past the log window. It is written by
+	// hand because the CLI cannot backdate a row, and the point of the test is
+	// what compaction reports about rows it drops.
+	old := time.Now().UTC().Add(-200 * 24 * time.Hour).Format(time.RFC3339Nano)
+	var log bytes.Buffer
+	for _, outcome := range []string{"intent", "applied"} {
+		row, err := json.Marshal(pr.RepairRow{
+			TS: mustParseTime(t, old), ID: "0123456789abcdef", Verb: "repair",
+			Mode: "--rollback", Outcome: outcome, RecordPath: "/tmp/gone.json",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		log.Write(row)
+		log.WriteByte('\n')
+	}
+	if err := os.WriteFile(filepath.Join(dir, "repair.jsonl"), log.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := runPrRepair(t, client, "--prune", "--yes", "--older-than=1h", "--log-retention=1h"); err != nil {
+		t.Fatalf("pr repair --prune: %v", err)
+	}
+
+	out, _, err := runPrRepair(t, client, "--history")
+	if err != nil {
+		t.Fatalf("pr repair --history: %v", err)
+	}
+	if !strings.Contains(out, "prune") {
+		t.Errorf("history does not carry the prune verb:\n%s", out)
+	}
+	if !strings.Contains(out, "detail: dropped ") {
+		t.Errorf("history does not carry the compaction summary:\n%s", out)
+	}
+
+	// And the JSON view agrees, so a script hears the same answer.
+	jsonOut, _, err := runPrRepair(t, client, "--history", "--json")
+	if err != nil {
+		t.Fatalf("pr repair --history --json: %v", err)
+	}
+	var rows []struct {
+		Verb   string `json:"verb"`
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal([]byte(jsonOut), &rows); err != nil {
+		t.Fatalf("history did not parse: %v\n%s", err, jsonOut)
+	}
+	var sawVerb, sawDetail bool
+	for _, r := range rows {
+		if r.Verb == "prune" {
+			sawVerb = true
+		}
+		if strings.HasPrefix(r.Detail, "dropped ") {
+			sawDetail = true
+		}
+	}
+	if !sawVerb {
+		t.Errorf("no row carries verb=prune: %s", jsonOut)
+	}
+	if !sawDetail {
+		t.Errorf("no row carries the compaction detail: %s", jsonOut)
+	}
+}
+
+func mustParseTime(t *testing.T, s string) time.Time {
+	t.Helper()
+	ts, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ts
+}
