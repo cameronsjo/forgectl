@@ -990,6 +990,9 @@ func TestRepairSetAside_AnEscapeDenseRecordStillSettles(t *testing.T) {
 // the field that reopened it — read best-effort from a record nothing could
 // decode, charset-validated but never length-validated — so the table walks
 // every combination of oversized variable-length fields, not just the payload.
+// The fill is 12000 bytes so a plain-ASCII field overflows the line on its own:
+// at 8000 the row only crossed the limit when the actor carried a session id,
+// which CI does not set, so the note assertion failed there and nowhere else.
 func TestMarshalRepairRow_NeverErrorsOnAnyFieldCombination(t *testing.T) {
 	big := func(fill string, n int) string { return strings.Repeat(fill, n) }
 	for _, fill := range []string{"<", `"`, "a"} {
@@ -997,13 +1000,13 @@ func TestMarshalRepairRow_NeverErrorsOnAnyFieldCombination(t *testing.T) {
 			name string
 			row  RepairRow
 		}{
-			{"oversized ref", RepairRow{Ref: big(fill, 8000)}},
-			{"oversized record", RepairRow{Record: big(fill, 8000)}},
-			{"oversized error", RepairRow{Error: big(fill, 8000)}},
-			{"oversized record path", RepairRow{RecordPath: big(fill, 8000)}},
+			{"oversized ref", RepairRow{Ref: big(fill, 12000)}},
+			{"oversized record", RepairRow{Record: big(fill, 12000)}},
+			{"oversized error", RepairRow{Error: big(fill, 12000)}},
+			{"oversized record path", RepairRow{RecordPath: big(fill, 12000)}},
 			{"everything oversized", RepairRow{
-				Ref: big(fill, 8000), Record: big(fill, 8000),
-				Error: big(fill, 8000), RecordPath: big(fill, 8000),
+				Ref: big(fill, 12000), Record: big(fill, 12000),
+				Error: big(fill, 12000), RecordPath: big(fill, 12000),
 			}},
 		} {
 			t.Run(tc.name+"/fill="+fill, func(t *testing.T) {
