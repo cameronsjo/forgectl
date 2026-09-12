@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Task 3 is committed and pushed on feat/pr-admission-everywhere; the orchestrator reviews and opens its PR → Task 4 (fresh Sonnet subagent)"
+next: "Task 3 PR is open on feat/pr-admission-everywhere for review and merge → Task 4 (fresh Sonnet subagent, branch feat/pr-drainer): pr queue and pr drain"
 branch: plan/review-autonomy-spine
 pr: cameronsjo/forgectl#495
 updated: 2026-09-11
@@ -130,8 +130,8 @@ Panel: plan-reviewer (conflict lens), plan-reviewer (buildability lens), red-tea
 - [x] Run — expect RED
 - [x] Implement
 - [x] Run — expect GREEN; vet; lint
-- [ ] Commit: `feat(pr): admission cap on every launch path, --queue defers to the drainer (#472)` with the producer tuple
-- [ ] run `cadence-forge:polish`; fold findings; open PR with plain-text `Closes #472`
+- [x] Commit: `feat(pr): admission cap on every launch path, --queue defers to the drainer (#472)` with the producer tuple — `19abd46`, fixes in `9d5417f`
+- [x] run `cadence-forge:polish`; fold findings; open PR with plain-text `Closes #472` — code review clean, security 3 Important at `19abd46` folded in `9d5417f`; PR opened
 
 ### Task 4 — `pr queue` and `pr drain`
 
