@@ -80,19 +80,31 @@ func runEnvSet(t *testing.T, repo string, args ...string) (stdoutText, stderrTex
 //
 // `agentgateway.llm_key_hermes` fails env.ValidKey, which forbids dots — so
 // before the branch existed, every --sops invocation refused on the key before
-// --sops was ever consulted. The assertion is that the refusal is NOT the
-// key-pattern one; the command still fails here, because these tests have no
-// sops binary wired, and that is fine: the gate is what is under test.
+// --sops was ever consulted.
+//
+// The command is expected to FAIL here, just for a later reason: these tests
+// wire a fake sensitive runner, so the driver gets no real sops. Asserting
+// err != nil and then that the message is not the key-pattern one is what
+// keeps this from being vacuous — an earlier version returned early when err
+// was nil, which would have passed on a tree where the gate refused
+// everything for some unrelated reason.
 func TestEnvSetSops_DottedPathPassesTheGate(t *testing.T) {
 	repo := sopsCLIFixture(t)
 	forceNonTTY(t)
 
 	_, _, err := runEnvSet(t, repo, "set", "agentgateway.llm_key_hermes", "--sops")
 	if err == nil {
-		return // A machine with sops wired could legitimately succeed.
+		t.Fatal("command succeeded, want it to reach the driver and fail there (no real sops is wired)")
 	}
 	if strings.Contains(err.Error(), envKeyPattern) {
 		t.Errorf("error = %q, want the dotted path to pass the key gate rather than hit ValidKey", err.Error())
+	}
+	// And it must have got past the target gate too, or this would be
+	// asserting only that some earlier check fired.
+	for _, earlier := range []string{"requires a target named one of", "does not create one", "--any-file does not apply"} {
+		if strings.Contains(err.Error(), earlier) {
+			t.Errorf("error = %q, want it to reach the driver rather than stop at the target gate", err.Error())
+		}
 	}
 }
 

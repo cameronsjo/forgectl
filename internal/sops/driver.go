@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/cameronsjo/forgectl/internal/env"
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -131,8 +133,10 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 	if err != nil {
 		return OutcomeUnspecified, fmt.Errorf("refusing %s: %w", target.Rel(), err)
 	}
-	leaf := segments[len(segments)-1]
-	if cleartext, reason := rules.WouldStoreCleartext(leaf); cleartext {
+	// The WHOLE path, not the leaf: sops applies these rules to a key and its
+	// entire subtree, so an ancestor decides the outcome. See
+	// WouldStoreCleartext for the measurement.
+	if cleartext, reason := rules.WouldStoreCleartext(segments); cleartext {
 		// Names the rule and the file, never the path — the sops grammar
 		// admits plenty of real credential shapes, so a token pasted into the
 		// key slot reaches here.
@@ -160,7 +164,7 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 	res, runErr := c.runner.RunSensitive(editCtx, exec.SensitiveCommand{
 		Kind: exec.KindSopsEdit,
 		Path: exec.Secret(sopsBin),
-		Args: []exec.Arg{exec.EndOfOptions(), exec.Opaque(target.Abs())},
+		Args: []exec.Arg{exec.MustFixed("--disable-version-check"), exec.EndOfOptions(), exec.Opaque(target.Abs())},
 		Env: []exec.EnvMutation{
 			exec.ReplaceSopsEditor(editor),
 			exec.ReplaceSopsWorkdir(work.dir),
@@ -170,12 +174,6 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 		StdoutCap: outputCap,
 		StderrCap: outputCap,
 	})
-
-	// sops' own output must never reach a rendered error: a YAML parse error
-	// quotes the offending line, and the offending line carries the value.
-	// It is written to a 0600 file inside the work directory instead, and the
-	// path is named so an operator can read it deliberately.
-	logPath, logErr := work.captureOutput(res)
 
 	switch {
 	case runErr == nil:
@@ -198,8 +196,28 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 		if reason := work.readEditorError(); reason != "" {
 			return OutcomeUnspecified, fmt.Errorf("%s — %s is unchanged", reason, target.Rel())
 		}
+		// Only NOW is sops' own output worth keeping, and only because there
+		// is nothing better to offer. It is captured here rather than
+		// unconditionally after the run: capturing on every path left a file
+		// in $TMPDIR that nothing deleted and nothing referenced, on every
+		// successful run that produced any output at all — including every
+		// idempotent re-set, which always prints "File has not changed". A
+		// file whose stated purpose is to hold output that may quote
+		// `key: '<the secret>'` must not accumulate unreferenced copies.
+		logPath, logErr := work.captureOutput(res)
 		return OutcomeUnspecified, sopsRefusalError(target, logPath, logErr)
 	}
+
+	// The staged plaintext has served its purpose the moment sops returns, so
+	// it goes now rather than at cleanup. The work directory is a sibling of
+	// the target and therefore INSIDE the repository, and there is no signal
+	// handler on this path — a Ctrl-C during a KMS round-trip skips the
+	// deferred cleanup and leaves `value` (0600, the secret verbatim) where
+	// `git add -A` will commit it. Measured: reproduced on the first of forty
+	// kill attempts. Shrinking the window to the span where the file must
+	// exist is most of the fix; a signal handler and a location outside the
+	// work tree are tracked separately.
+	work.discardStagedValue()
 
 	outcome, err := c.verify(ctx, sopsBin, target, segments, value, work)
 	if err != nil {
@@ -242,6 +260,7 @@ func (c *Client) verify(ctx context.Context, sopsBin string, target env.Target, 
 		Path: exec.Secret(sopsBin),
 		Args: []exec.Arg{
 			exec.MustFixed("--decrypt"),
+			exec.MustFixed("--disable-version-check"),
 			exec.MustFixed("--extract"),
 			exec.Opaque(JoinExtract(segments)),
 			exec.MustFixed("--output"),
@@ -260,6 +279,9 @@ func (c *Client) verify(ctx context.Context, sopsBin string, target env.Target, 
 	}
 
 	landed, err := os.ReadFile(landedPath) //nolint:gosec // G304: a path this process created inside its own 0700 work dir
+	// Removed as soon as it is read: it is a second plaintext copy of the
+	// secret, in a directory that sits inside the repository.
+	work.discardLandedValue()
 	if err != nil {
 		return OutcomeUnspecified, errors.New("the write could not be verified — the file has been restored")
 	}
@@ -279,29 +301,74 @@ func (c *Client) verify(ctx context.Context, sopsBin string, target env.Target, 
 	if err != nil {
 		return OutcomeUnspecified, err
 	}
-	if err := assertLineEncrypted(after, segments[len(segments)-1]); err != nil {
+	if err := assertEncryptedAtPath(after, segments); err != nil {
 		return OutcomeUnspecified, err
 	}
 
 	return work.readOutcome(), nil
 }
 
-// assertLineEncrypted requires the key's line in the re-read ciphertext to
-// carry a sops ENC marker.
-func assertLineEncrypted(doc []byte, leaf string) error {
-	for _, raw := range strings.Split(string(doc), "\n") {
-		trimmed := strings.TrimSpace(raw)
-		if !strings.HasPrefix(trimmed, leaf+":") {
-			continue
-		}
-		if strings.Contains(trimmed, "ENC[AES256_GCM,") {
-			return nil
-		}
-		// The line is NOT ciphertext. Say so without quoting the line, which
-		// by definition holds the plaintext.
-		return errors.New("the value was written in the clear rather than encrypted — the file has been restored")
+// assertEncryptedAtPath requires the scalar at exactly path in the re-read
+// ciphertext to carry a sops ENC marker.
+//
+// # Why this resolves the path instead of scanning lines
+//
+// The first version scanned for a line whose trimmed text began with
+// `leaf + ":"`, anywhere in the document, and that made the assertion
+// DOCUMENT-ORDER DEPENDENT. A same-named key elsewhere that happened to be
+// encrypted satisfied it. Proven by reordering one write: with an encrypted
+// `app.token` above a cleartext `notes_unencrypted.token`, the scan matched
+// app's line and the run reported success with the secret in plaintext; move
+// the cleartext line first and the same write correctly went red.
+//
+// So the check that the design calls the one that matters most was the check
+// that could not be made to go red on demand. It resolves the path properly
+// now. The prefix match was sloppy too — `leaf+":"` also matches
+// `token:anything`.
+func assertEncryptedAtPath(doc []byte, path []string) error {
+	var root yaml.Node
+	if err := yaml.Unmarshal(doc, &root); err != nil {
+		return errors.New("the re-read file does not parse as YAML — the file has been restored")
 	}
-	return errors.New("the written key could not be found in the re-read file — the file has been restored")
+
+	node := &root
+	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+		node = node.Content[0]
+	}
+	for _, segment := range path {
+		next := mappingValue(node, segment)
+		if next == nil {
+			return errors.New("the written key could not be found in the re-read file — the file has been restored")
+		}
+		node = next
+	}
+
+	if node.Kind != yaml.ScalarNode {
+		return errors.New("the written key is not a scalar in the re-read file — the file has been restored")
+	}
+	if strings.HasPrefix(node.Value, "ENC[AES256_GCM,") {
+		return nil
+	}
+	// NOT ciphertext. Said without quoting the value, which by definition
+	// holds the plaintext this refusal exists to report.
+	return errors.New("the value was written in the clear rather than encrypted — the file has been restored")
+}
+
+// mappingValue returns the value node for key in a mapping node, or nil.
+//
+// A yaml.v3 mapping stores Content as alternating key, value pairs, so this
+// steps by two. Anything that is not a mapping has no keys to look up, which
+// is a miss rather than an error — the caller reports the path as unfound.
+func mappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
 }
 
 // executablePath is a seam over os.Executable.
@@ -424,10 +491,17 @@ func (w *workDir) captureOutput(res exec.SensitiveResult) (string, error) {
 
 // readOutcome reports what __sops-edit recorded, defaulting to replaced.
 //
-// The default matters: the rc=200 "file has not changed" path means the editor
-// wrote identical bytes, so it never recorded anything — and the key
-// provably already holds this value, which is a replacement that happened to
-// be a no-op rather than an addition.
+// The rc=200 "file has not changed" path is NOT why the default exists, which
+// an earlier version of this comment got backwards. The editor does run on
+// that path — identical bytes are what it produced — and it records `result`
+// before writing the document, so a real value is there to read.
+//
+// The default fires only when the child died before recording, or the file is
+// unreadable. Reporting "replaced" then is a guess about a write of unknown
+// shape, and it is the safer guess: verify has already proven the value is
+// present and encrypted at the requested path, so the only question left is
+// whether the key was new, and calling a new key "replaced" understates
+// rather than overstates what happened.
 func (w *workDir) readOutcome() Outcome {
 	recorded, err := os.ReadFile(filepath.Join(w.dir, "result"))
 	if err != nil {
@@ -480,6 +554,20 @@ func (w *workDir) restore(target env.Target) error {
 		return errors.New("the restored file does not match the backup")
 	}
 	return nil
+}
+
+// discardStagedValue removes the plaintext value file. Errors are dropped: the
+// deferred cleanup removes the whole directory anyway, so this is about
+// shortening the window, not about being the only remover.
+func (w *workDir) discardStagedValue() {
+	_ = os.Remove(filepath.Join(w.dir, "value"))
+}
+
+// discardLandedValue removes the decrypted read-back. Same reasoning as
+// discardStagedValue — it is a second plaintext copy of the same secret and
+// has no reason to outlive the comparison it exists for.
+func (w *workDir) discardLandedValue() {
+	_ = os.Remove(filepath.Join(w.dir, "landed"))
 }
 
 func (w *workDir) cleanup() { _ = os.RemoveAll(w.dir) }

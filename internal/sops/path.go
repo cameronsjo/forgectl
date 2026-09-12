@@ -69,8 +69,22 @@ func ParsePath(path string) ([]string, error) {
 			return nil, errBadPath()
 		}
 	}
+	// `sops` at the root is the metadata block: the recipients, the MAC, the
+	// encryption rules. Writing a scalar into it would corrupt the file's own
+	// bookkeeping.
+	//
+	// It is currently unreachable anyway, because sops omits that block from
+	// the buffer it hands the editor, so the walk refuses with "no block". But
+	// that is an accident of sops' behaviour rather than a rule, and a rule is
+	// what this should rest on.
+	if segments[0] == sopsMetadataKey {
+		return nil, errors.New("the top-level `sops` block holds the file's own encryption metadata and cannot be written")
+	}
 	return segments, nil
 }
+
+// sopsMetadataKey is the root key holding a SOPS document's metadata.
+const sopsMetadataKey = "sops"
 
 // JoinExtract renders segments as the bracketed address `sops --extract`
 // takes: ["a"]["b"]. Every segment has already passed segmentPattern, which

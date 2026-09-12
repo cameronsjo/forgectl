@@ -362,10 +362,22 @@ const (
 	// Note what is NOT here: the value. Its containing directory's path
 	// travels; the secret itself never enters an environment, which is
 	// readable from /proc on Linux for the lifetime of the process.
-	envKeySopsEditor  = "EDITOR"
-	envKeySopsWorkdir = "FORGECTL_SOPS_WORKDIR"
-	envKeySopsPath    = "FORGECTL_SOPS_PATH"
-	envKeySopsNonce   = "FORGECTL_SOPS_NONCE"
+	envKeySopsEditor = "EDITOR"
+)
+
+// The sops editor protocol's variable names, EXPORTED so the reading side
+// (internal/cli's `__sops-edit`) references these rather than keeping its own
+// copies.
+//
+// They were spelled twice, in two packages, with a comment on the other side
+// describing itself as a mirror. Renaming one side compiled clean, passed
+// every unit test, and broke only the real subprocess — which is covered
+// exclusively by gated integration tests. A shared constant prevents the
+// drift; a test asserting two literals are equal would only have detected it.
+const (
+	EnvSopsWorkdir = "FORGECTL_SOPS_WORKDIR"
+	EnvSopsPath    = "FORGECTL_SOPS_PATH"
+	EnvSopsNonce   = "FORGECTL_SOPS_NONCE"
 )
 
 type envOp uint8
@@ -433,24 +445,27 @@ func ReplaceSopsEditor(command string) EnvMutation {
 // ReplaceSopsWorkdir names the private directory holding the value file, the
 // nonce, the result, and the invocation counter.
 func ReplaceSopsWorkdir(path string) EnvMutation {
-	return EnvMutation{key: envKeySopsWorkdir, value: Secret(path), op: envOpReplace}
+	return EnvMutation{key: EnvSopsWorkdir, value: Secret(path), op: envOpReplace}
 }
 
 // ReplaceSopsPath carries the dotted key path the editor must write.
 func ReplaceSopsPath(path string) EnvMutation {
-	return EnvMutation{key: envKeySopsPath, value: Secret(path), op: envOpReplace}
+	return EnvMutation{key: EnvSopsPath, value: Secret(path), op: envOpReplace}
 }
 
 // ReplaceSopsNonce carries the per-run nonce the editor checks against the
 // copy in its work directory.
 //
-// Without it the editor subcommand is a bare arbitrary-YAML-write primitive:
-// anyone able to run forgectl could set the path and work directory by hand
-// and have it insert a line into any YAML file the user can write — a
-// workflow file, for one. A flag or a variable an agent can type is not a
-// bound on an agent; a value it cannot predict is.
+// It bounds a STRAY invocation — sops re-running the editor after a run's
+// files are gone, a replay from a stale environment, a hand-typed call that
+// forgot the protocol. It is NOT a privilege boundary, and an earlier version
+// of this comment claimed it was: a caller who can set this process's
+// environment can also create the directory and nonce file it names, so the
+// nonce buys nothing against them. It does not need to, either — a caller who
+// can exec forgectl can already write YAML with a shell. The full reasoning
+// is on internal/cli's newSopsEditCmd, and this comment used to contradict it.
 func ReplaceSopsNonce(nonce string) EnvMutation {
-	return EnvMutation{key: envKeySopsNonce, value: Secret(nonce), op: envOpReplace}
+	return EnvMutation{key: EnvSopsNonce, value: Secret(nonce), op: envOpReplace}
 }
 
 func (EnvMutation) String() string                { return Redacted }

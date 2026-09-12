@@ -240,6 +240,18 @@ func TestSetScalar_Refusals(t *testing.T) {
 			path:    nil,
 			wantMsg: "path is empty",
 		},
+		{
+			// A leaf naming a block would otherwise write a scalar over the
+			// header and leave its children stranded at their old depth, which
+			// yaml.v3 rejects. The child's own parse catches that and the
+			// encrypted file survives, but the operator gets "the edited
+			// document does not parse as YAML" — a message that names nothing
+			// they can act on and reads as a forgectl bug.
+			name:    "a leaf that names a block rather than a value",
+			doc:     "block:\n    sub:\n        k: 'v'\n",
+			path:    []string{"block", "sub"},
+			wantMsg: "names a block rather than a value",
+		},
 	}
 
 	for _, c := range cases {
@@ -347,6 +359,62 @@ func TestSetScalar_AddedKeyRoundTrips(t *testing.T) {
 	}
 	if decoded.Block["other"] != "x" {
 		t.Errorf("the untouched sibling decoded as %q, want %q", decoded.Block["other"], "x")
+	}
+}
+
+// TestSetScalar_ColonBearingSiblingIsNotDestroyed is the regression test for a
+// silent data-loss bug: a bare prefix match on `leaf + ":"` also matched a
+// DIFFERENT key whose name merely began that way.
+//
+// `a:b: 'v'` is valid YAML and decodes to the key `a:b`, so it can legitimately
+// sit in a SOPS file. Setting `a` matched that line, and since replaceValue
+// cuts at the first colon, the result was `a: 'new'` — the key `a:b` and its
+// encrypted value gone, reported as `replaced a`, and passing every downstream
+// check, because extracting `["block"]["a"]` then returns exactly the value
+// that was supplied.
+//
+// So this asserts the ORIGINAL key survives, not merely that the write
+// happened.
+func TestSetScalar_ColonBearingSiblingIsNotDestroyed(t *testing.T) {
+	const doc = "block:\n    a:b: 'keepme'\n"
+
+	got, outcome, err := SetScalar([]byte(doc), []string{"block", "a"}, "new")
+	if err != nil {
+		// Refusing is also acceptable — the point is that `a:b` is not eaten.
+		t.Logf("refused: %v", err)
+		return
+	}
+	if !strings.Contains(string(got), "a:b:") {
+		t.Fatalf("the key `a:b` was destroyed (outcome %v):\n%s", outcome, got)
+	}
+
+	var decoded struct {
+		Block map[string]string `yaml:"block"`
+	}
+	if err := yaml.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("the emitted document does not parse: %v\n%s", err, got)
+	}
+	if decoded.Block["a:b"] != "keepme" {
+		t.Errorf("block[\"a:b\"] = %q, want %q — the original key lost its value", decoded.Block["a:b"], "keepme")
+	}
+	if decoded.Block["a"] != "new" {
+		t.Errorf("block[\"a\"] = %q, want %q", decoded.Block["a"], "new")
+	}
+}
+
+// TestSetScalar_NoSpaceAfterColonIsNotAMapping pins the sibling case: YAML
+// reads `key:value` with no space as a plain scalar, not a mapping, so it must
+// not be matched as a key either.
+func TestSetScalar_NoSpaceAfterColonIsNotAMapping(t *testing.T) {
+	const doc = "block:\n    keep:value\n"
+
+	got, _, err := SetScalar([]byte(doc), []string{"block", "keep"}, "new")
+	if err != nil {
+		t.Logf("refused: %v", err)
+		return
+	}
+	if !strings.Contains(string(got), "keep:value") {
+		t.Errorf("the `keep:value` scalar was rewritten as a key:\n%s", got)
 	}
 }
 

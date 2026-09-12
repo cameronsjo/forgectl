@@ -177,20 +177,60 @@ func compileRule(pattern, field string) (*regexp.Regexp, error) {
 // WouldStoreCleartext reports whether key falls outside this file's encryption
 // rules, and why.
 //
-// The four rules are checked in the order sops applies them, and each reason
-// names the RULE and the field it came from — never the key, which may itself
-// be a secret pasted into the wrong slot.
-func (r PlaintextRules) WouldStoreCleartext(key string) (bool, string) {
-	switch {
-	case r.unencryptedSuffix != "" && strings.HasSuffix(key, r.unencryptedSuffix):
-		return true, fmt.Sprintf("the key ends with the file's unencrypted_suffix (%q)", r.unencryptedSuffix)
-	case r.encryptedSuffix != "" && !strings.HasSuffix(key, r.encryptedSuffix):
-		return true, fmt.Sprintf("the file encrypts only keys ending with its encrypted_suffix (%q)", r.encryptedSuffix)
-	case r.encryptedRegex != nil && !r.encryptedRegex.MatchString(key):
-		return true, "the key does not match the file's encrypted_regex"
-	case r.unencryptedRegex != nil && r.unencryptedRegex.MatchString(key):
-		return true, "the key matches the file's unencrypted_regex"
-	default:
-		return false, ""
+// # Why it takes the whole path and not just the leaf
+//
+// sops applies these rules to a key AND ITS WHOLE SUBTREE, so an ancestor
+// decides the outcome for everything beneath it. Measured on 3.13.3:
+//
+//	unencrypted_suffix: _unencrypted  →  notes_unencrypted.token   CLEARTEXT
+//	encrypted_regex: ^app$            →  app.token, app.inner.deep  both ENCRYPTED
+//
+// Testing the leaf alone gets both cases wrong, in opposite directions. A path
+// whose PARENT carries the suffix passes the check and the secret lands in
+// plaintext, reported as success — the exact failure this function exists to
+// prevent. And an ancestor-scoped encrypted_regex falsely refuses every key
+// beneath the block it matches, which makes the feature unusable on such a
+// file.
+//
+// The parameter is []string rather than a string so the leaf-only call cannot
+// be written again by accident. That is the real fix; the walk is its
+// consequence.
+//
+// Every reason names the RULE and the field it came from — never a segment,
+// which may itself be a secret pasted into the wrong slot.
+func (r PlaintextRules) WouldStoreCleartext(path []string) (bool, string) {
+	// An unencrypted rule matching ANY segment wins: everything beneath that
+	// segment is excluded from encryption, and this key is beneath it.
+	for _, segment := range path {
+		if r.unencryptedSuffix != "" && strings.HasSuffix(segment, r.unencryptedSuffix) {
+			return true, fmt.Sprintf("a key on this path ends with the file's unencrypted_suffix (%q)", r.unencryptedSuffix)
+		}
+		if r.unencryptedRegex != nil && r.unencryptedRegex.MatchString(segment) {
+			return true, "a key on this path matches the file's unencrypted_regex"
+		}
 	}
+
+	// An encrypted rule is an allowlist, and a match at an ANCESTOR covers the
+	// subtree — so it is satisfied when any segment matches, and violated only
+	// when none does.
+	if r.encryptedSuffix != "" && !anySegment(path, func(s string) bool {
+		return strings.HasSuffix(s, r.encryptedSuffix)
+	}) {
+		return true, fmt.Sprintf("the file encrypts only keys ending with its encrypted_suffix (%q), and no key on this path does", r.encryptedSuffix)
+	}
+	if r.encryptedRegex != nil && !anySegment(path, r.encryptedRegex.MatchString) {
+		return true, "no key on this path matches the file's encrypted_regex"
+	}
+
+	return false, ""
+}
+
+// anySegment reports whether pred holds for at least one segment.
+func anySegment(path []string, pred func(string) bool) bool {
+	for _, segment := range path {
+		if pred(segment) {
+			return true
+		}
+	}
+	return false
 }

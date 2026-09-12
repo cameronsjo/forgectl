@@ -26,6 +26,19 @@ import (
 	"testing"
 )
 
+// segmentEchoed reports whether reason contains any path segment. Every
+// segment is a candidate secret — the sops path grammar admits hyphens and so
+// matches more real credential shapes than internal/env's ValidKey — so a
+// reason must name the RULE and never the input.
+func segmentEchoed(reason string, path []string) bool {
+	for _, segment := range path {
+		if strings.Contains(reason, segment) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestIsSOPSFile(t *testing.T) {
 	cases := []struct {
 		name string
@@ -122,21 +135,73 @@ func TestWouldStoreCleartext(t *testing.T) {
 	cases := []struct {
 		name       string
 		doc        string
-		key        string
+		path       []string
 		wantClear  bool
 		wantReason string
 	}{
+		// The ANCESTOR cases are the reason this takes a path rather than a
+		// leaf, and they were a live defect: a secret landed in plaintext and
+		// the command reported success. Measured against sops 3.13.3 —
+		// `unencrypted_suffix: _unencrypted` leaves the whole subtree under
+		// `notes_unencrypted` in the clear, and `encrypted_regex: ^app$`
+		// encrypts everything under `app` however deep.
+		{
+			name:       "an ancestor carries the unencrypted_suffix",
+			doc:        "sops:\n    unencrypted_suffix: _unencrypted\n    mac: ENC[x]\n",
+			path:       []string{"notes_unencrypted", "token"},
+			wantClear:  true,
+			wantReason: "unencrypted_suffix",
+		},
+		{
+			name:       "a middle segment carries the unencrypted_suffix",
+			doc:        "sops:\n    unencrypted_suffix: _unencrypted\n    mac: ENC[x]\n",
+			path:       []string{"app", "notes_unencrypted", "deep", "token"},
+			wantClear:  true,
+			wantReason: "unencrypted_suffix",
+		},
+		{
+			name:      "an ancestor satisfies the encrypted_regex",
+			doc:       "sops:\n    encrypted_regex: '^app$'\n    mac: ENC[x]\n",
+			path:      []string{"app", "token"},
+			wantClear: false,
+		},
+		{
+			name:      "a distant ancestor satisfies the encrypted_regex",
+			doc:       "sops:\n    encrypted_regex: '^app$'\n    mac: ENC[x]\n",
+			path:      []string{"app", "inner", "deep"},
+			wantClear: false,
+		},
+		{
+			name:       "no segment satisfies the encrypted_regex",
+			doc:        "sops:\n    encrypted_regex: '^app$'\n    mac: ENC[x]\n",
+			path:       []string{"other", "token"},
+			wantClear:  true,
+			wantReason: "encrypted_regex",
+		},
+		{
+			name:      "an ancestor satisfies the encrypted_suffix",
+			doc:       "sops:\n    encrypted_suffix: _secret\n    mac: ENC[x]\n",
+			path:      []string{"api_secret", "token"},
+			wantClear: false,
+		},
+		{
+			name:       "an ancestor matches the unencrypted_regex",
+			doc:        "sops:\n    unencrypted_regex: '^public_'\n    mac: ENC[x]\n",
+			path:       []string{"public_block", "token"},
+			wantClear:  true,
+			wantReason: "unencrypted_regex",
+		},
 		{
 			name:       "unencrypted_suffix matches",
 			doc:        "sops:\n    unencrypted_suffix: _unencrypted\n    mac: ENC[x]\n",
-			key:        "foo_unencrypted",
+			path:       []string{"foo_unencrypted"},
 			wantClear:  true,
 			wantReason: "unencrypted_suffix",
 		},
 		{
 			name:      "unencrypted_suffix does not match",
 			doc:       "sops:\n    unencrypted_suffix: _unencrypted\n    mac: ENC[x]\n",
-			key:       "llm_key_hermes",
+			path:      []string{"llm_key_hermes"},
 			wantClear: false,
 		},
 		{
@@ -145,53 +210,53 @@ func TestWouldStoreCleartext(t *testing.T) {
 			// real sops would write in the clear.
 			name:       "the _unencrypted default applies with no rule configured",
 			doc:        "sops:\n    mac: ENC[x]\n    version: 3.13.3\n",
-			key:        "token_unencrypted",
+			path:       []string{"token_unencrypted"},
 			wantClear:  true,
 			wantReason: "unencrypted_suffix",
 		},
 		{
 			name:      "the default admits an ordinary key",
 			doc:       "sops:\n    mac: ENC[x]\n",
-			key:       "ordinary_key",
+			path:      []string{"ordinary_key"},
 			wantClear: false,
 		},
 		{
 			name:       "encrypted_suffix refuses a non-matching key",
 			doc:        "sops:\n    encrypted_suffix: _secret\n    mac: ENC[x]\n",
-			key:        "plain_key",
+			path:       []string{"plain_key"},
 			wantClear:  true,
 			wantReason: "encrypted_suffix",
 		},
 		{
 			name:      "encrypted_suffix admits a matching key",
 			doc:       "sops:\n    encrypted_suffix: _secret\n    mac: ENC[x]\n",
-			key:       "api_secret",
+			path:      []string{"api_secret"},
 			wantClear: false,
 		},
 		{
 			name:       "encrypted_regex refuses a non-matching key",
 			doc:        "sops:\n    encrypted_regex: '^(data|token)$'\n    mac: ENC[x]\n",
-			key:        "other",
+			path:       []string{"other"},
 			wantClear:  true,
 			wantReason: "encrypted_regex",
 		},
 		{
 			name:      "encrypted_regex admits a matching key",
 			doc:       "sops:\n    encrypted_regex: '^(data|token)$'\n    mac: ENC[x]\n",
-			key:       "token",
+			path:      []string{"token"},
 			wantClear: false,
 		},
 		{
 			name:       "unencrypted_regex refuses a matching key",
 			doc:        "sops:\n    unencrypted_regex: '^public_'\n    mac: ENC[x]\n",
-			key:        "public_url",
+			path:       []string{"public_url"},
 			wantClear:  true,
 			wantReason: "unencrypted_regex",
 		},
 		{
 			name:      "unencrypted_regex admits a non-matching key",
 			doc:       "sops:\n    unencrypted_regex: '^public_'\n    mac: ENC[x]\n",
-			key:       "private_token",
+			path:      []string{"private_token"},
 			wantClear: false,
 		},
 	}
@@ -202,9 +267,9 @@ func TestWouldStoreCleartext(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadPlaintextRules: %v", err)
 			}
-			isClear, reason := rules.WouldStoreCleartext(c.key)
+			isClear, reason := rules.WouldStoreCleartext(c.path)
 			if isClear != c.wantClear {
-				t.Fatalf("WouldStoreCleartext(%q) = %v (%q), want %v", c.key, isClear, reason, c.wantClear)
+				t.Fatalf("WouldStoreCleartext(%v) = %v (%q), want %v", c.path, isClear, reason, c.wantClear)
 			}
 			if !isClear {
 				return
@@ -214,7 +279,7 @@ func TestWouldStoreCleartext(t *testing.T) {
 			}
 			// The reason names the RULE, never the key — a key slot holds a
 			// pasted secret often enough that this has to hold here too.
-			if strings.Contains(reason, c.key) {
+			if segmentEchoed(reason, c.path) {
 				t.Errorf("reason %q echoed the key", reason)
 			}
 		})

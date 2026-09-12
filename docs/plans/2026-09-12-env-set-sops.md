@@ -1,7 +1,8 @@
 ---
 status: complete
 branch: feat/env-set-sops
-pr: forgectl#516
+base_branch: fix/any-file-confirm
+base_pr: forgectl#515
 issue: forgectl#498
 approved_in: session
 approved_session_id: 2d4b9aa6-61b9-4645-8591-016fae184f38
@@ -149,6 +150,69 @@ default lives at the repository root, so it now has a caller.
 optional: `unix.Openat` with `O_CREAT` on darwin returned 582 spurious `ENOENT`
 in 800 concurrent attempts where `os.OpenFile` with identical flags returned
 800/800. Landed with forgectl#515.
+
+## Review round — three Criticals, all reproduced
+
+A two-arm Opus review (security, correctness) over the finished branch found
+three Critical defects. None was a design mistake; all three were the same
+shape of error — a check that looked right and could not go red on the case it
+existed for.
+
+**The encryption-rule check tested only the leaf.** sops applies
+`unencrypted_suffix` and friends to a key AND ITS WHOLE SUBTREE, so a path
+whose *parent* carried `_unencrypted` passed the check and the secret landed in
+plaintext with the command reporting success — reproduced end to end, the exact
+failure the check was built to prevent. `WouldStoreCleartext` now takes
+`[]string` and walks every segment with sops' real precedence; the signature
+change is what stops the leaf-only call being written again. The same bug ran
+backwards too: an ancestor-scoped `encrypted_regex` falsely refused every key
+beneath the block it matched, which made the feature unusable on such a file.
+
+**The encrypted-at-path assertion was document-order dependent.** It scanned
+for the first line whose trimmed text began with `leaf + ":"`, anywhere in the
+document, so any same-named encrypted key elsewhere satisfied it — including
+sops' own `mac`. Proven by reordering one write: identical input passed with
+the secret in plaintext, or correctly went red, depending only on which line
+came first. So the check the design calls "the one that matters most" was the
+one that could not be made to go red on demand. It resolves the path through
+`yaml.v3` now.
+
+**A bare prefix match destroyed a colon-bearing sibling.** `a:b: 'v'` is valid
+YAML and decodes to the key `a:b`; setting `a` matched that line, and since the
+replace cuts at the first colon the result was `a: 'new'` — another key and its
+encrypted value gone, reported as `replaced a`, passing every downstream check
+because extracting the path then returns exactly what was supplied. `findLeaf`
+now requires a space or end-of-line after the colon.
+
+**Also folded in:** a leaf naming a block now refuses by name rather than
+emitting YAML the child rejects; the staged plaintext and the decrypted
+read-back are deleted the moment they are consumed, shrinking the window in
+which a Ctrl-C could leave a committable secret in the work tree; `__sops-edit`
+refuses a symlinked or non-mapping target, closing the one write in forgectl
+that had no containment at all; the sops output capture happens only on the
+path that reports it, rather than orphaning a file in `$TMPDIR` on every
+successful run; both sops calls pass `--disable-version-check`; the protocol's
+environment-variable names are now shared constants rather than literals
+spelled in two packages; CI verifies the `sops` and `age` download checksums
+before installing them; and `docs/commands/env.md` gained the `--sops`
+reference plus a note that the flag widens the authority `env set` grants.
+
+**Three comments were corrected rather than deleted**, each having claimed a
+control the code did not have: `readOutcome`'s stated reason for its default
+was factually wrong about which path reaches it, `ReplaceSopsNonce` still
+described the nonce as a privilege boundary and contradicted the two artifacts
+that correctly do not, and the editor's write claimed a mode restatement
+prevented a umask from widening a file it cannot affect.
+
+**Came back clean and worth recording:** the unbounded-loop defence held
+against every value the reviewer could find, including the Unicode line breaks
+`U+0085`/`U+2028`/`U+2029` that `NormalizeValue` permits — `U+0085` corrupted
+the round-trip and the byte-exact comparison caught it, which is the check that
+the declined trailing-newline strip would have masked. And `SetScalar`'s
+refusal list turns out to be largely unreachable through the driver, because
+the document it sees is sops' own yaml.v3 re-emission: tabs, CRLF, flow
+mappings, anchors, and multi-document streams are all normalised away before
+the line model sees them. The refusals stay as a contract on the function.
 
 ## Out of scope
 

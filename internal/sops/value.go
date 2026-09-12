@@ -34,7 +34,7 @@ func NormalizeValue(raw string) (string, error) {
 		return "", errors.New("value exceeds the 64KiB scalar ceiling")
 	}
 
-	value := StripOneTrailingNewline(raw)
+	value := stripOneTrailingNewline(raw)
 
 	switch {
 	case value == "":
@@ -57,17 +57,17 @@ func NormalizeValue(raw string) (string, error) {
 	return value, nil
 }
 
-// StripOneTrailingNewline removes exactly one trailing "\n" or "\r\n" — what a
+// stripOneTrailingNewline removes exactly one trailing "\n" or "\r\n" — what a
 // piped value or a clipboard paste carries from the producing command's own
 // line ending. Interior whitespace is never touched, and a value with no
 // trailing newline (the interactive no-echo prompt) passes through unchanged.
 //
 // Exactly one, never a trim: a secret whose real last character is a newline is
 // unusual but legal, and a greedy strip would silently corrupt it. This mirrors
-// internal/env.StripTrailingNewline, which the .env path uses — the same rule,
-// stated once per package rather than shared, because the packages are
-// otherwise independent.
-func StripOneTrailingNewline(s string) string {
+// internal/env's own unexported stripTrailingNewline, which the .env path
+// uses — the same rule, stated once per package rather than shared, because
+// the packages are otherwise independent.
+func stripOneTrailingNewline(s string) string {
 	if strings.HasSuffix(s, "\r\n") {
 		return s[:len(s)-2]
 	}

@@ -126,6 +126,13 @@ func SetScalar(doc []byte, path []string, value string) ([]byte, Outcome, error)
 
 	leaf := path[len(path)-1]
 	if idx := findLeaf(lines, start, end, wantIndent, leaf); idx >= 0 {
+		if leafIsMappingHeader(lines, idx, wantIndent, leaf) {
+			// Leads with a word, not the key. fang title-cases an error's first
+			// token when it renders, so starting with %q produced `"App" names
+			// a block` — a capitalisation of the operator's own key, which
+			// reads as a different key than the one they typed.
+			return nil, OutcomeUnspecified, fmt.Errorf("the path names a block rather than a value (%q); only a scalar key can be set", leaf)
+		}
 		lines[idx] = replaceValue(lines[idx], value)
 		return joinLines(lines), OutcomeReplaced, nil
 	}
@@ -252,9 +259,23 @@ func bodyIndent(lines []line, start, end, headerIndent int) (int, error) {
 
 // findLeaf locates an existing `<indent><leaf>:` line, or -1.
 //
-// The trailing colon in the match is what stops `llm_key_hermes_old:` from
-// matching `llm_key_hermes`, and the exact-indent requirement is what keeps a
-// same-named key in a nested block from being mistaken for this one.
+// The trailing colon stops `llm_key_hermes_old:` from matching
+// `llm_key_hermes`, and the exact-indent requirement keeps a same-named key in
+// a nested block from being mistaken for this one.
+//
+// # Why the colon is not enough on its own
+//
+// A bare prefix match on `leaf + ":"` also matches a DIFFERENT key whose name
+// merely begins that way: the key `a:b` matches the leaf `a`, and since
+// replaceValue cuts at the first colon, replacing `a` would rewrite
+// `    a:b: 'v'` as `    a: 'new'` — destroying a real key and its encrypted
+// value, reporting `replaced a`, and passing every downstream check, because
+// the extract of `["block"]["a"]` then returns exactly the value supplied.
+//
+// `a:b: 'v'` is valid YAML and decodes to the key `a:b`, so it can legitimately
+// be in a SOPS file. Requiring a space or end-of-line after the colon is what
+// separates the two. It also refuses the `key:value` no-space shape, which
+// YAML reads as a plain scalar rather than a mapping at all.
 func findLeaf(lines []line, start, end, wantIndent int, leaf string) int {
 	prefix := strings.Repeat(" ", wantIndent) + leaf + ":"
 	for i := start; i < end; i++ {
@@ -262,11 +283,40 @@ func findLeaf(lines []line, start, end, wantIndent int, leaf string) int {
 		if l.isBlank() || l.isComment() || l.indent() != wantIndent {
 			continue
 		}
-		if strings.HasPrefix(l.text, prefix) {
+		if !strings.HasPrefix(l.text, prefix) {
+			continue
+		}
+		rest := l.text[len(prefix):]
+		if rest == "" || rest[0] == ' ' || rest[0] == '\t' {
 			return i
 		}
 	}
 	return -1
+}
+
+// leafIsMappingHeader reports whether the line at idx is a block header rather
+// than a scalar assignment — `sub:` with indented content beneath it.
+//
+// Writing a scalar over a mapping header produces invalid YAML: the header's
+// children survive at their old depth under what is now a scalar, which
+// yaml.v3 rejects with `did not find expected key`. The child's own parse
+// catches that and the encrypted file survives, but the operator gets "the
+// edited document does not parse as YAML", which names nothing they can act
+// on and reads as a forgectl bug. Refusing by name here says what is actually
+// wrong: the path names a block, not a value.
+func leafIsMappingHeader(lines []line, idx, wantIndent int, leaf string) bool {
+	// A line carrying anything after the colon is an assignment, not a header.
+	if strings.TrimSpace(lines[idx].text) != leaf+":" {
+		return false
+	}
+	for i := idx + 1; i < len(lines); i++ {
+		l := lines[i]
+		if l.isBlank() || l.isComment() {
+			continue
+		}
+		return l.indent() > wantIndent
+	}
+	return false
 }
 
 // insertionPoint returns the index to insert a new key at, walking back past

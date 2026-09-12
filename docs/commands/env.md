@@ -11,7 +11,46 @@ forgectl env get KEY --clipboard [--file .env]               # value to clipboar
 forgectl env check [--file .env] [--example .env.example]    # missing/extra keys, names only
 forgectl env redact [--file .env]                            # print file with values masked ****
 #   --file must name an env file (.env, .env.*, *.env); --any-file overrides, TTY-confirmed only
+
+forgectl env set a.b.key --sops [--file secrets.sops.yaml]   # one key into a SOPS-encrypted YAML file
+#   dotted path, arbitrary depth; defaults to secrets.sops.yaml at the REPO ROOT
+#   requires `sops` on PATH (`forgectl doctor` reports its version)
 ```
+
+## `--sops` — writing into a SOPS-encrypted file
+
+The same guarantee as the `.env` path, for SOPS YAML: the value arrives on piped stdin, a no-echo prompt, or `--clipboard`, and never enters an argv, terminal output, or a transcript.
+
+The two obvious alternatives both fail that. `sops set file '["a"]["b"]' '"value"'` puts the plaintext in argv — visible in `ps`, left in shell history. `sops file` opens `$EDITOR` on the whole decrypted document, which is a lot of exposed plaintext to paste one line into.
+
+**How it works.** `sops <file>` decrypts to a temp file, runs `$EDITOR`, and re-encrypts whatever comes back. forgectl sets `EDITOR` to itself (a hidden `__sops-edit` subcommand), passes the key path in the environment, and passes the value as a **file whose path** is in the environment. The value itself never enters an environment or an argv.
+
+**The diff is reviewable, deliberately.** The edit is line-wise text, not a YAML round-trip: re-emitting the document would reflow every block and reorder keys, and in an encrypted file every reflowed line is a ciphertext change. Untouched values keep byte-identical ciphertext, so a replace changes 3 lines — the value plus sops' own `lastmodified` and `mac` — and an add changes 2 and removes 1.
+
+**Success means it landed encrypted.** After the write, forgectl decrypts the value back and compares it byte-exactly, *and* re-parses the ciphertext to confirm the scalar at that exact path carries an `ENC[AES256_GCM,` marker. The second check is not redundant: a value stored in cleartext round-trips through a decrypt perfectly well, so a round-trip alone cannot detect it.
+
+**Target rules — both must hold, and there is no escape hatch:**
+
+- the filename matches `*.sops.yaml`, `*.sops.yml`, `*.enc.yaml`, `*.enc.yml`, `secrets.yaml`, `secrets.yml`, or `secrets.*.yaml`/`.yml`
+- the file content carries a top-level `sops:` mapping
+
+`--any-file` is refused with `--sops` rather than silently ignored. A SOPS file under some other name is unreachable — that is a deliberate refusal, not a gap: the alternative is an interactive confirmation, and the confirmation path is where a time-of-check/time-of-use defect lived. Renaming the file costs less than that surface.
+
+**What it refuses, and why refusing is the right answer:**
+
+| Refusal | Reason |
+|---|---|
+| A missing block, at any depth | A block forgectl invented would encrypt fine and the consumer would read nothing from it |
+| A path whose key *or any ancestor* falls outside the file's encryption rules | sops would write the value in **cleartext** beside its encrypted siblings — measured live with `unencrypted_suffix` in force |
+| A path naming a block rather than a scalar | Writing a scalar over a mapping header strands its children |
+| A dotted key *name* | `a.b.c` cannot distinguish `{a, b.c}` from `{a, b, c}`; escaping is a surface for a case no estate file has |
+| The top-level `sops` block | It holds the file's own recipients, MAC, and rules |
+| A value with a newline, a C0 control byte, or invalid UTF-8 | YAML forbids these in a scalar, and the resulting unparseable document makes sops re-invoke its editor **without bound** |
+| A document shape the line model cannot bound | A sequence where a mapping was expected, tab indentation, a multi-document stream, a header with a trailing comment — each would mis-place the key and corrupt the file silently |
+
+**Out of scope:** reading or listing SOPS values, creating a missing file or block, non-scalar values, and key rotation or recipient management.
+
+**Gitignore `*.sops.yaml.lock`.** The lock helper leaves a non-secret sibling beside whatever it locked, by design.
 
 **`env check`'s exit codes are part of its contract, not incidental:** exit `1` means the file and its example both exist but disagree — missing and/or extra keys (drift); exit `2` means either the env file or the `--example` file is absent, so no comparison could run at all. `env check --json` emits the drift as a single object on stdout, `{"missing":[...],"extra":[...]}`, for scripted callers.
 
@@ -35,6 +74,7 @@ forgectl env set API_KEY                                   # interactive, no ech
   Two things changed. Resolution happens exactly once, and its result travels as a value rather than a boolean, so the path a human confirms is the path that gets written. And that value carries an **open descriptor on the containing directory**, pinned at resolution, with every read, write, and rename performed relative to it — so no later operation re-walks the path by name. That second half is what closes the interesting case: a fix that carried only the path still let an *intermediate directory* be swapped during the confirmation, which redirected the write exactly as the original bug did.
 
   **What remains:** the directory is pinned by path immediately after resolution, so its own components are walked once more at that instant — a window of microseconds rather than of operator think-time, and the same ordinary same-uid local race that predates this command. Closing even that would need a component-by-component walk from the repository root.
+- **`--sops` widens the authority `env set` grants, and the paragraph below predates it.** Granting a session `env set` now also grants write authority over repo-contained **SOPS documents** — a materially larger thing than a `.env`, because a SOPS file typically holds production credentials rather than local development ones. The bounds are the same in shape (repo containment, a filename allowlist, a content check) and there is no `--any-file` override on that route, but the *blast radius* of the authority is bigger. Grant it deliberately.
 - **Agent-write threat model, one line:** running `env set`/`env get` under an agent grants that agent write authority over repo-contained **env files** for the duration of the session — containment (refuses outside the git repo), the env-file-name rule (below), 0600 permissions, and atomic writes bound the blast radius, but they don't remove the authority itself. The two subcommands grant distinct authorities: `env set` is **write** authority (the agent can create or overwrite a key in the file); `env get --clipboard` is **read/exfil** authority (the agent can copy an existing secret to the clipboard, where — see the residual-risk note above — any local process or clipboard manager can then read it too). Granting one does not imply granting the other.
 
 **Safety notes:**

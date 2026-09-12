@@ -125,13 +125,9 @@ func sopsFixture(t *testing.T) (repo string, target env.Target) {
 	return repo, target
 }
 
-// testClient builds a Client over the real sensitive runner, and points
-// os.Executable's answer at the test binary by way of the editor command.
-//
-// The editor is forgectl's own `__sops-edit`, so these tests need a built
-// forgectl on disk. Building it here rather than assuming one keeps the test
-// self-contained and pins the CURRENT tree's editor rather than whatever
-// happens to be installed.
+// testClient builds a Client over the REAL sensitive runner, so these tests
+// drive actual subprocesses rather than a fake. Pointing the editor at a
+// built forgectl is buildForgectl's job, not this one.
 func testClient(t *testing.T) *Client {
 	t.Helper()
 	return NewClient(fcexec.NewOSSensitiveRunner())
@@ -142,7 +138,14 @@ func testClient(t *testing.T) *Client {
 // forgectl carrying this tree's __sops-edit.
 func buildForgectl(t *testing.T) {
 	t.Helper()
+	// Gated like the tool checks: under FORGECTL_REQUIRE_SOPS_INTEGRATION a
+	// missing toolchain is a failure, not a skip. Without this, the gate had a
+	// hole — every test in this file would have skipped silently on a runner
+	// with no `go` on PATH while the gate reported nothing wrong.
 	if _, err := exec.LookPath("go"); err != nil {
+		if os.Getenv("FORGECTL_REQUIRE_SOPS_INTEGRATION") == "1" {
+			t.Fatalf("go is not on PATH and FORGECTL_REQUIRE_SOPS_INTEGRATION=1: %v", err)
+		}
 		t.Skipf("go is not on PATH: %v", err)
 	}
 	dir, err := os.MkdirTemp("", "fcbin")
@@ -163,7 +166,7 @@ func buildForgectl(t *testing.T) {
 }
 
 func TestIntegration_RoundTripAndDiffShape(t *testing.T) {
-	repo, target := sopsFixture(t)
+	_, target := sopsFixture(t)
 	buildForgectl(t)
 
 	before, err := os.ReadFile(target.Abs()) //nolint:gosec // G304: a fixture this test created
@@ -222,7 +225,6 @@ func TestIntegration_RoundTripAndDiffShape(t *testing.T) {
 		t.Errorf("%d lines changed, want 3 (the value plus sops' lastmodified and mac): %v", changed, changedKeys(beforeLines, afterLines))
 	}
 
-	_ = repo
 }
 
 // TestIntegration_ExtractWritesNoTrailingNewline pins the measurement the
@@ -230,6 +232,48 @@ func TestIntegration_RoundTripAndDiffShape(t *testing.T) {
 // terminator, the comparison would fail for every value and the driver would
 // restore every write — so this is the assertion that explains why there is
 // no strip.
+// TestIntegration_EditorOverrideTook proves no real editor was involved, which
+// the test plan claimed and nothing asserted.
+//
+// It matters because the whole design rests on sops running OUR editor. If the
+// override silently failed, sops would fall back to $EDITOR or vi — and on a
+// CI runner with neither, or with a non-interactive one, the run could still
+// look like a pass for the wrong reason. Pointing the override at a script
+// that records its invocation is the only way to see the difference.
+func TestIntegration_EditorOverrideTook(t *testing.T) {
+	_, target := sopsFixture(t)
+
+	marker := filepath.Join(t.TempDir(), "invoked")
+	script := filepath.Join(t.TempDir(), "fake-editor.sh")
+	body := "#!/bin/sh\necho \"$1\" > " + marker + "\nexit 1\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil { //nolint:gosec // G306: a script this test must be able to execute
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	prev := executablePath
+	// selfEditorCommand appends " __sops-edit", which the script ignores.
+	executablePath = func() (string, error) { return script, nil }
+	t.Cleanup(func() { executablePath = prev })
+
+	// Exits 1, so the driver restores and refuses — that is expected. What is
+	// under test is that the script ran at all.
+	_, err := testClient(t).SetValue(context.Background(), target, "agentgateway.llm_key_hermes", "v")
+	if err == nil {
+		t.Fatal("SetValue succeeded with an editor that exits 1, want a refusal")
+	}
+
+	recorded, readErr := os.ReadFile(marker) //nolint:gosec // G304: a path this test created
+	if readErr != nil {
+		t.Fatalf("the editor override did not run — sops used something else: %v", readErr)
+	}
+	// sops passes the decrypted temp file as the only argument.
+	if handed := strings.TrimSpace(string(recorded)); handed == "" {
+		t.Error("the editor ran with no argument, want the decrypted temp path")
+	} else if handed == target.Abs() {
+		t.Errorf("the editor was handed the ENCRYPTED file (%s), want sops' decrypted temp copy", handed)
+	}
+}
+
 func TestIntegration_ExtractWritesNoTrailingNewline(t *testing.T) {
 	_, target := sopsFixture(t)
 

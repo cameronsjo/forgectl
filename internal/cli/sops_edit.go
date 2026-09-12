@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	execpkg "github.com/cameronsjo/forgectl/internal/exec"
 	sopspkg "github.com/cameronsjo/forgectl/internal/sops"
 )
 
@@ -25,12 +26,14 @@ const (
 	sopsCountFile  = "count"
 )
 
-// Environment variables the driver sets and this command reads. Mirrored from
-// internal/exec's mutation constructors, which own the write side.
+// Environment variables the driver sets and this command reads, aliased from
+// internal/exec rather than re-spelled. They were literals in both places
+// once, and a rename on either side compiled clean, passed every unit test,
+// and broke only the real subprocess.
 const (
-	sopsWorkdirEnv = "FORGECTL_SOPS_WORKDIR"
-	sopsPathEnv    = "FORGECTL_SOPS_PATH"
-	sopsNonceEnv   = "FORGECTL_SOPS_NONCE"
+	sopsWorkdirEnv = execpkg.EnvSopsWorkdir
+	sopsPathEnv    = execpkg.EnvSopsPath
+	sopsNonceEnv   = execpkg.EnvSopsNonce
 )
 
 // newSopsEditCmd builds the hidden `__sops-edit` subcommand: the editor sops
@@ -169,9 +172,9 @@ func runSopsEdit(tempPath string) error {
 		return err
 	}
 
-	doc, err := os.ReadFile(tempPath) //nolint:gosec // G304: the path sops passed us as its editor argument
+	doc, err := readEditorTarget(tempPath)
 	if err != nil {
-		return errors.New("the document sops provided is unreadable")
+		return err
 	}
 
 	edited, outcome, err := sopspkg.SetScalar(doc, path, value)
@@ -193,12 +196,62 @@ func runSopsEdit(tempPath string) error {
 		return errors.New("could not record the outcome")
 	}
 
-	// 0600 matches what sops created the temp file as; the mode is restated
-	// rather than inherited so a umask cannot widen it.
+	// 0600 is the mode sops created its temp file as, restated so a NEW file
+	// would get it too. It is not a control over the existing file: os.WriteFile
+	// applies a mode only at creation, so the target keeps whatever permissions
+	// it already had. An earlier version of this comment claimed it prevented a
+	// umask from widening the file, which it does not do.
 	if err := os.WriteFile(tempPath, edited, 0o600); err != nil { //nolint:gosec // G306: 0600, the mode sops itself used
 		return errors.New("could not write the edited document")
 	}
 	return nil
+}
+
+// readEditorTarget reads the document sops handed us, refusing a target this
+// command has no business writing.
+//
+// # Why this exists even though the nonce is not a boundary
+//
+// It closes a containment ASYMMETRY rather than a privilege one. Every other
+// write in forgectl goes through env.ResolveTarget, a pinned directory
+// descriptor, and a symlink refusal. This one wrote wherever argv[1] pointed,
+// following symlinks — demonstrated writing through a symlink into a file
+// outside any repository, with no sops involvement, by replaying a work
+// directory that a killed run had left on disk.
+//
+// That is not an escalation: reading the leftover nonce needs the same uid,
+// and the same uid can write YAML with a shell. What it was is the one write
+// in forgectl with no containment at all, which turns a leftover directory
+// from "a secret at rest" into "a live capability at rest". Two checks fix the
+// asymmetry: refuse a symlink, and require the target to already be a
+// mapping-shaped YAML document — sops' decrypted buffer always is, and an
+// arbitrary file someone aimed us at very often is not.
+//
+//nolint:gosec // G703: the path is argv from sops; the Lstat, symlink, regular-file and YAML-shape checks below ARE the containment, and there is no canonical location to compare it against — sops chooses its own temp path.
+func readEditorTarget(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, errors.New("the document sops provided is unreadable")
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("the document to edit is a symlink; refusing")
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("the document to edit is not a regular file; refusing")
+	}
+
+	doc, err := os.ReadFile(path) //nolint:gosec // G304: the path sops passed as its editor argument, Lstat-checked immediately above
+	if err != nil {
+		return nil, errors.New("the document sops provided is unreadable")
+	}
+
+	// A mapping at the root is what sops' decrypted buffer always is, and what
+	// SetScalar needs in order to mean anything.
+	var probe map[string]any
+	if err := yaml.Unmarshal(doc, &probe); err != nil || probe == nil {
+		return nil, errors.New("the document to edit is not a YAML mapping; refusing")
+	}
+	return doc, nil
 }
 
 // checkSopsNonce requires the environment's nonce to equal the one in the

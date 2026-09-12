@@ -57,17 +57,26 @@ jobs:
         # Bounded for the same reason the tmux step is: a download step that
         # stops making progress leaves a PR with no Linux signal while reading
         # as "CI is slow".
+        # Both downloads are CHECKSUM-VERIFIED before anything is installed.
+        # `sudo install` runs the asset as root's problem thereafter, so a
+        # swapped or compromised release would execute in CI with nothing
+        # between it and the runner. Pinning the tag alone does not help: a tag
+        # can be moved.
         timeout-minutes: 3
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/sops \
             https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux.amd64
+          echo 'e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b  /tmp/sops' | sha256sum -c -
           sudo install -m 0755 /tmp/sops /usr/local/bin/sops
+
           curl -fsSL -o /tmp/age.tgz \
             https://github.com/FiloSottile/age/releases/download/v1.2.1/age-v1.2.1-linux-amd64.tar.gz
+          echo '7df45a6cc87d4da11cc03a539a7470c15b1041ab2b396af088fe9990f7c79d50  /tmp/age.tgz' | sha256sum -c -
           tar -xzf /tmp/age.tgz -C /tmp
           sudo install -m 0755 /tmp/age/age /usr/local/bin/age
           sudo install -m 0755 /tmp/age/age-keygen /usr/local/bin/age-keygen
+
           sops --version --disable-version-check
           age-keygen --version
 
@@ -185,12 +194,11 @@ jobs:
         run: brew list tmux || brew install tmux
 
       - name: Install sops and age
-        # Darwin is the platform these measurements were taken on, so it is the
-        # one where the integration tests matter most: the spurious-ENOENT
-        # behaviour of openat with O_CREAT, the FIFO open that blocks without
-        # O_NONBLOCK, and sops' own exit statuses were all measured here.
-        # `brew list ||` keeps the step reentrant for the same reason the tmux
-        # step above does.
+        # Darwin is where sops' behaviour was measured — the exit status for an
+        # unchanged file, the absent trailing newline from `--extract`, and the
+        # unbounded editor re-invocation loop — so it is the platform whose
+        # integration run is worth the most. `brew list ||` keeps the step
+        # reentrant for the same reason the tmux step above does.
         timeout-minutes: 5
         run: |
           brew list sops || brew install sops
