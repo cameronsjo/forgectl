@@ -167,7 +167,7 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 		Local:      true,
 		Provenance: provenance.persisted(),
 	}
-	bcPath, err := c.writeBreadcrumb(ref, bc)
+	bcPath, err := c.writeBreadcrumb(ctx, ref, bc)
 	if err != nil {
 		c.teardownLocalArtifacts(ctx, workspace, findingsDir)
 		return Session{}, err

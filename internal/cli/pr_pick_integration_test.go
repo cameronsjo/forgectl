@@ -373,7 +373,7 @@ func TestLaunchPickedIsolatedTmux_RefusesAtAdmission(t *testing.T) {
 
 func mustListSessions(t *testing.T, client *pr.Client) []pr.SessionSummary {
 	t.Helper()
-	sessions, err := client.List()
+	sessions, _, err := client.List(context.Background())
 	if err != nil {
 		t.Fatalf("list sessions: %v", err)
 	}

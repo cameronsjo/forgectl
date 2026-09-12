@@ -68,7 +68,7 @@ func TestList_IncludesStaleBreadcrumbs(t *testing.T) {
 	stalePath, _ := seedStaleSession(t, c, staleRef, newest)
 	seedInvalidSession(t, c, Ref{Owner: "o", Repo: "r", Number: 3}, newest)
 
-	got, err := c.List()
+	got, _, err := c.List(context.Background())
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

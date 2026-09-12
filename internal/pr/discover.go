@@ -143,13 +143,16 @@ func (c *Client) PRs(ctx context.Context) ([]PR, []string, error) {
 func (c *Client) Dash(ctx context.Context) (Dashboard, []string, error) {
 	var notes []string
 
-	active, err := c.List()
+	active, unreadable, err := c.List(ctx)
 	if err != nil {
 		// Categorical, for the same reason as the query legs below: c.List
 		// reads a breadcrumb dir whose path and contents are filesystem
 		// material, and the error text carries it verbatim.
 		slog.Warn("Active-reviews section degraded.", "error", err)
 		notes = append(notes, "active-reviews: listing failed")
+	}
+	if unreadable > 0 {
+		notes = append(notes, fmt.Sprintf("active-reviews: %d record(s) could not be read", unreadable))
 	}
 
 	const sections = 2

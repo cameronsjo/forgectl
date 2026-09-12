@@ -2,6 +2,7 @@ package pr
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 const maxBreadcrumbRecordBytes = 8 << 10
@@ -55,6 +57,40 @@ type Breadcrumb struct {
 	// written unasserted one byte-identical rather than inventing a second
 	// spelling for the same state.
 	Provenance string `json:"provenance,omitempty"`
+
+	// The fields below are the version-2 lifecycle record (forgectl#299). Every
+	// one is omitempty for ONE reason: a legacy record (no version) must keep
+	// writing and reading byte-identically. A version-2 record always carries
+	// version, phase, and revision, and validateBreadcrumbRecord refuses one
+	// that does not, so an empty phase can never masquerade as an absent one.
+	//
+	// Old binaries refuse to DECODE these keys (DisallowUnknownFields) but do
+	// not fail closed on `pr list`: List skips an undecodable record and logs
+	// to a handler a default install discards. This build surfaces the skip
+	// count instead; the downgrade behaviour is a release note, not a code
+	// path anyone can fix here.
+
+	// Version is breadcrumbVersion on every record this build writes with a
+	// phase; absent (0) on a legacy record.
+	Version int `json:"version,omitempty"`
+	// Phase is the durable lifecycle state — what the record SAYS.
+	Phase Phase `json:"phase,omitempty"`
+	// Revision is the compare-and-write counter, starting at 1.
+	Revision int `json:"revision,omitempty"`
+	// WindowID is the exact string newDispatch produces — server pid, server
+	// start, and native window id joined by tmux.FieldSep. Required on an
+	// active record, forbidden elsewhere. It is NEVER authority for a tmux
+	// action on its own; every consumer revalidates by derived name under the
+	// client's session.
+	WindowID string `json:"windowId,omitempty"`
+	// RepairReason names the expectation that broke, written at the throw
+	// site. Required exactly when Phase is needs-repair.
+	RepairReason string `json:"repairReason,omitempty"`
+	// Attempts, LastError, and LastAttempt record drain launch attempts on a
+	// queued record so a poison entry stops consuming passes.
+	Attempts    int       `json:"attempts,omitempty"`
+	LastError   string    `json:"lastError,omitempty"`
+	LastAttempt time.Time `json:"lastAttemptAt,omitzero"`
 }
 
 // provenanceFromRecord resolves a breadcrumb's EFFECTIVE provenance, and it is
@@ -110,38 +146,50 @@ func breadcrumbFilename(ref Ref, createdAt time.Time) string {
 	return fmt.Sprintf("%s-%s-%d-%d.json", ref.Owner, ref.Repo, ref.Number, createdAt.UnixNano())
 }
 
-// writeBreadcrumb is the client-owned write path: it takes the same mutex
-// teardown holds, so one Client cannot replace a breadcrumb while another of
-// its own operations is reading and verifying it. Breadcrumb names are already
-// unique by ref and creation nanosecond, so this rarely contends — having a
-// single ownership point is what makes the invariant explicit rather than
-// incidental.
-func (c *Client) writeBreadcrumb(ref Ref, bc Breadcrumb) (string, error) {
-	c.sessionsMu.Lock()
-	defer c.sessionsMu.Unlock()
-	return writeBreadcrumb(c.sessionsDir, ref, bc)
+// writeBreadcrumb is the client-owned write path: it creates a NEW record
+// under the lifecycle lock through the atomic writer, so no other forgectl
+// process can read a half-written file or race the create. Breadcrumb names
+// are unique by ref and creation nanosecond, so the create-only expectation
+// is the honest one.
+func (c *Client) writeBreadcrumb(ctx context.Context, ref Ref, bc Breadcrumb) (string, error) {
+	var path string
+	err := c.withLifecycleLock(ctx, "write", func() error {
+		p, err := writeBreadcrumbFS(c.fs, c.sessionsDir, ref, bc)
+		path = p
+		return err
+	})
+	return path, err
 }
 
-// writeBreadcrumb writes bc into sessionsDir and returns the file path. The
-// directory is created if absent (0700 — session state is private).
+// writeBreadcrumb writes bc into sessionsDir as a new record and returns the
+// file path. It is the lock-free, seam-free form tests use to seed a
+// directory; production goes through the Client method above.
 func writeBreadcrumb(sessionsDir string, ref Ref, bc Breadcrumb) (string, error) {
+	return writeBreadcrumbFS(osRecordFS{}, sessionsDir, ref, bc)
+}
+
+// writeBreadcrumbFS is the shared core: create the directory (0700 — session
+// state is private), encode, and hand the bytes to the atomic writer with a
+// create-only expectation.
+func writeBreadcrumbFS(rfs recordFS, sessionsDir string, ref Ref, bc Breadcrumb) (string, error) {
 	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
 		return "", fmt.Errorf("create pr sessions dir: %w", err)
 	}
-	// termsafe:allow-raw-json persisted PR breadcrumb, never command output
-	data, err := json.MarshalIndent(bc, "", "  ")
+	// Deliberately NO record validation here. The loader is the boundary — a
+	// breadcrumb is hostile input on the way BACK IN — and the tests that prove
+	// that boundary seed forged records through this writer. Validating on the
+	// way out would make those tests unable to stage the very file they exist
+	// to reject.
+	data, err := encodeBreadcrumb(bc)
 	if err != nil {
-		return "", fmt.Errorf("marshal breadcrumb: %w", err)
+		return "", err
 	}
-	data = append(data, '\n')
-	if len(data) > maxBreadcrumbRecordBytes {
-		return "", errBreadcrumbRecordTooLarge
+	name := breadcrumbFilename(ref, bc.CreatedAt)
+	if err := writeRecordAtomic(rfs, sessionsDir, name, data, expectNewRecord); err != nil {
+		return "", fmt.Errorf("write breadcrumb %s: %w", termsafe.QuotePath(name), err)
 	}
-	path := filepath.Join(sessionsDir, breadcrumbFilename(ref, bc.CreatedAt))
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return "", fmt.Errorf("write breadcrumb %s: %w", path, err)
-	}
-	slog.Debug("Wrote pr session breadcrumb.", "path", path, "ref", bc.Ref)
+	path := filepath.Join(sessionsDir, name)
+	slog.Debug("Wrote pr session breadcrumb.", "path", path, "ref", bc.Ref, "phase", string(bc.Phase))
 	return path, nil
 }
 
@@ -383,7 +431,10 @@ func loadBreadcrumb(path, sessionsDir string) (Breadcrumb, error) {
 // a perfectly valid record — that is the whole premise of #212. Nor does it
 // require a nonempty Agent, which legacy breadcrumbs omit.
 func validateBreadcrumbRecord(bc Breadcrumb) error {
-	if bc.Workspace == "" {
+	if err := validateLifecycleFields(bc); err != nil {
+		return err
+	}
+	if bc.Workspace == "" && (bc.Version != breadcrumbVersion || !bc.Phase.allowsEmptyWorkspace()) {
 		return fmt.Errorf("missing workspace")
 	}
 	if bc.Ref == "" {
@@ -422,10 +473,71 @@ func validateBreadcrumbRecord(bc Breadcrumb) error {
 	}
 	// The pathname shape is a RECORD property (it constrains what the string
 	// can ever mean); whether that path exists is an actionability question.
-	if !filepath.IsAbs(bc.Workspace) {
+	if bc.Workspace != "" && !filepath.IsAbs(bc.Workspace) {
 		return fmt.Errorf("workspace %q must be an absolute path", bc.Workspace)
 	}
 	return nil
+}
+
+// validateLifecycleFields enforces the version-2 rules, and — just as
+// load-bearing — that a legacy record carries NONE of them. A record that
+// claims no version but smuggles a phase is not a legacy record and not a v2
+// record; it is refused rather than read under either set of rules.
+func validateLifecycleFields(bc Breadcrumb) error {
+	switch bc.Version {
+	case 0:
+		if bc.Phase != "" || bc.Revision != 0 || bc.WindowID != "" || bc.RepairReason != "" ||
+			bc.Attempts != 0 || bc.LastError != "" || !bc.LastAttempt.IsZero() {
+			return fmt.Errorf("lifecycle fields present on a record with no version; a versioned record must declare version %d", breadcrumbVersion)
+		}
+		return nil
+	case breadcrumbVersion:
+	default:
+		return fmt.Errorf("unsupported record version %d (this build reads %d); upgrade forgectl", bc.Version, breadcrumbVersion)
+	}
+	if bc.Phase == "" {
+		return fmt.Errorf("version %d record has no phase", breadcrumbVersion)
+	}
+	if !bc.Phase.valid() {
+		return fmt.Errorf("unknown phase %q", string(bc.Phase))
+	}
+	if bc.Revision < 1 {
+		return fmt.Errorf("version %d record has no revision", breadcrumbVersion)
+	}
+	if bc.Phase == PhaseActive && bc.WindowID == "" {
+		return fmt.Errorf("active record has no windowId")
+	}
+	if bc.Phase != PhaseActive && bc.WindowID != "" {
+		return fmt.Errorf("windowId is only valid on an active record (phase is %q)", string(bc.Phase))
+	}
+	if bc.WindowID != "" && !validWindowID(bc.WindowID) {
+		return fmt.Errorf("windowId %q is not a generation-qualified window identity", bc.WindowID)
+	}
+	if bc.Phase == PhaseNeedsRepair && bc.RepairReason == "" {
+		return fmt.Errorf("needs-repair record has no repairReason")
+	}
+	if bc.Phase != PhaseNeedsRepair && bc.RepairReason != "" {
+		return fmt.Errorf("repairReason is only valid on a needs-repair record (phase is %q)", string(bc.Phase))
+	}
+	return nil
+}
+
+// validWindowID accepts exactly the spelling newDispatch (launch.go) produces:
+// three non-empty fields joined by tmux.FieldSep, the first two numeric (server
+// pid, server start time) and the third a native window id "@N". A bare "@N"
+// is refused because it names a different window after a server restart.
+func validWindowID(id string) bool {
+	parts := strings.Split(id, tmux.FieldSep)
+	if len(parts) != 3 {
+		return false
+	}
+	for _, p := range parts[:2] {
+		if p == "" || strings.Trim(p, "0123456789") != "" {
+			return false
+		}
+	}
+	w := parts[2]
+	return len(w) > 1 && w[0] == '@' && strings.Trim(w[1:], "0123456789") == ""
 }
 
 // validateWorkspace confirms workspace is an existing directory whose base

@@ -26,10 +26,22 @@ type SessionSummary struct {
 	path         string
 	createdAt    time.Time
 	availability workspaceAvailability
+	phase        Phase
 }
 
 // Ref is the reviewed pull request.
 func (s SessionSummary) Ref() Ref { return s.ref }
+
+// Phase is what the record SAYS its lifecycle state is — empty on a legacy
+// record, which predates phases. It is presentation data, never authority:
+// whether a window exists is observed through WindowsLive, not read here.
+func (s SessionSummary) Phase() Phase { return s.phase }
+
+// IsWorkspaceNone reports a queued or preparing record, which has no
+// workspace yet and is neither live nor missing.
+func (s SessionSummary) IsWorkspaceNone() bool {
+	return s.availability == workspaceAvailabilityNone
+}
 
 // Path is the breadcrumb pathname — the operand `pr teardown` takes.
 func (s SessionSummary) Path() string { return s.path }
@@ -47,8 +59,8 @@ func (s SessionSummary) IsWorkspaceMissing() bool {
 	return s.availability == workspaceAvailabilityMissing
 }
 
-// NOTE FOR CONSUMERS: both predicates are false on the zero value, and that
-// is the intended fail-closed shape. A summary for which NEITHER predicate
+// NOTE FOR CONSUMERS: all three predicates are false on the zero value, and
+// that is the intended fail-closed shape. A summary for which NO predicate
 // holds never comes out of List — it means a summary was constructed outside
 // the loader — so a consumer that sees one is looking at an internal error and
 // must say so, not invent a label for it.

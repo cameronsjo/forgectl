@@ -122,7 +122,7 @@ func seedSummaries(t *testing.T, sessionsDir string, live, stale []pr.Ref) []pr.
 	}
 
 	client := pr.New(&exec.FakeRunner{}, pr.WithSessionsDir(sessionsDir))
-	summaries, err := client.List()
+	summaries, _, err := client.List(context.Background())
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

@@ -46,7 +46,9 @@ cameronsjo/forgectl#41   2026-08-04T09:10:02Z  …/forgectl/pr-sessions/camerons
 cameronsjo/forgectl#39   2026-08-03T16:41:55Z  …/forgectl/pr-sessions/cameronsjo-forgectl-39-….json   workspace missing
 ```
 
-The status is the last field, appended rather than inserted, so the breadcrumb stays field 3 for anything already parsing this output.
+The status is field 4 and the recorded phase is field 5, both appended rather than inserted, so the breadcrumb stays field 3 for anything already parsing this output. Status is what tmux *observes* right now; phase is what the session record *says* (`-` on a record written before phases existed). A disagreement between the two is what `pr repair` settles. `pr list --json` carries the same `phase` key.
+
+**Session records are versioned as of this release.** A record written with a phase carries `version: 2`, and an older forgectl cannot read it: `pr teardown` refuses such a record loudly, but `pr list` on an older build skips it and prints fewer rows with exit 0 and no message. Upgrade rather than downgrade; there is no migration back. A current build does the opposite for records *it* cannot read (a torn file, or a record from a newer build): `pr list` still exits 0 and prints `N record(s) could not be read` on stderr, and any command that counts records to make a decision refuses instead of proceeding on a short count. `scripts/verify-v2-list-surfaces-unreadable.sh` re-proves that behaviour against a built binary.
 
 A breadcrumb's filename is the one field here that is read off disk rather than parsed, so a name carrying terminal control or bidi characters is escaped as a Go-quoted literal instead of being printed raw. The escaping is conditional: an ordinary path prints verbatim, so field 3 remains exactly the argument `pr teardown` takes. `pr dash` quotes the path unconditionally — it is a human view, not a parsing target.
 

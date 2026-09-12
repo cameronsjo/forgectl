@@ -211,6 +211,11 @@ const workspaceUnclassifiedStatus = "internal error: unclassified workspace stat
 // for why it is an internal error rather than a label.
 func sessionStatus(live map[pr.Ref]bool, s pr.SessionSummary, tmuxOK bool) string {
 	switch {
+	case s.IsWorkspaceNone():
+		// A queued or preparing record has no workspace by design; its phase
+		// IS its status, and rendering "workspace missing" — the word for
+		// damage — over a healthy intended state would send a user to teardown.
+		return string(s.Phase())
 	case s.IsWorkspaceMissing():
 		return workspaceMissingStatus
 	case s.IsWorkspaceLive():
@@ -218,6 +223,25 @@ func sessionStatus(live map[pr.Ref]bool, s pr.SessionSummary, tmuxOK bool) strin
 	default:
 		return workspaceUnclassifiedStatus
 	}
+}
+
+// phaseLabel renders the recorded phase for the human table: the phase
+// itself, or "-" for a legacy record that predates phases. Quiet ground —
+// absence is the signal, not a glyph.
+func phaseLabel(s pr.SessionSummary) string {
+	if s.Phase() == "" {
+		return "-"
+	}
+	return string(s.Phase())
+}
+
+// unreadableRecordsNote is what `pr list` prints on stderr when List skipped
+// records it could not decode. It exists because the slog warning that also
+// fires lands in a handler a default install discards, and an older binary
+// reading newer records would otherwise show fewer rows, exit 0, and say
+// nothing.
+func unreadableRecordsNote(n int) string {
+	return fmt.Sprintf("%d record(s) could not be read — they are not listed; an older forgectl cannot read records a newer one wrote", n)
 }
 
 // windowStatus renders one live session's review-window liveness.
@@ -232,12 +256,14 @@ func windowStatus(live map[pr.Ref]bool, ref pr.Ref, tmuxOK bool) string {
 }
 
 // prListRowJSON is the --json wire shape for one `pr list` row — the same
-// four fields as the human table's tab-separated columns, in the same order.
+// five fields as the human table's tab-separated columns, in the same order.
+// phase was added last (ADR-0008: additive only); it is "" on a legacy record.
 type prListRowJSON struct {
 	Ref       string `json:"ref"`
 	CreatedAt string `json:"created_at"`
 	Path      string `json:"path"`
 	Status    string `json:"status"`
+	Phase     string `json:"phase"`
 }
 
 func newPrListCmd(client *pr.Client) *cobra.Command {
@@ -247,9 +273,12 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 		Short: "List active clean-room review sessions",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			summaries, err := client.List()
+			summaries, unreadable, err := client.List(cmd.Context())
 			if err != nil {
 				return err
+			}
+			if unreadable > 0 {
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), unreadableRecordsNote(unreadable))
 			}
 			out := cmd.OutOrStdout()
 			// A breadcrumb only proves a review was DISPATCHED, never that it
@@ -271,10 +300,13 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 				return nil
 			}
 			for _, s := range summaries {
-				// Status is APPENDED, never inserted. The breadcrumb path is
-				// field 3 and README documents it as what `pr teardown` is fed,
-				// so a script cutting field 3 keeps working; shifting it would
-				// hand those callers a timestamp.
+				// Status and phase are APPENDED, never inserted. The breadcrumb
+				// path is field 3 and README documents it as what `pr teardown`
+				// is fed, so a script cutting field 3 keeps working; shifting it
+				// would hand those callers a timestamp. Phase is field 5:
+				// status (field 4) is what tmux OBSERVES right now, phase is
+				// what the record SAYS, and a disagreement between the two is
+				// what `pr repair` settles.
 				//
 				// The path is a FILENAME chosen on disk, so it is the one field
 				// here that can carry ANSI or bidi controls; Ref is
@@ -284,15 +316,16 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 				// ordinary path prints verbatim and field 3 stays exactly
 				// what teardown is fed, while a control-bearing one prints
 				// as a quoted literal instead of driving the terminal.
-				fmt.Fprintf(out, "%s\t%s\t%s\t%s\n",
+				_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\n",
 					s.Ref().String(), s.CreatedAt().Format(time.RFC3339),
 					termsafe.QuotePathIfUnsafe(s.Path()),
-					sessionStatus(live, s, tmuxOK))
+					sessionStatus(live, s, tmuxOK),
+					phaseLabel(s))
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"ref":...,"created_at":...,"path":...,"status":...}] to stdout`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"ref":...,"created_at":...,"path":...,"status":...,"phase":...}] to stdout`)
 	return cmd
 }
 
@@ -327,6 +360,7 @@ func writePrListJSON(out io.Writer, summaries []pr.SessionSummary, live map[pr.R
 			CreatedAt: s.CreatedAt().Format(time.RFC3339),
 			Path:      s.Path(),
 			Status:    sessionStatus(live, s, tmuxOK),
+			Phase:     string(s.Phase()),
 		})
 	}
 	enc := termsafe.JSONEncoder(out)
