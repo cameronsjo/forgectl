@@ -145,13 +145,25 @@ homebrew_casks:
     # an unsigned build, they carry only an ad-hoc signature — enough for a Secure
     # Enclave key but not for Gatekeeper — so the xattr strip is still required.
     # Notarization would let this be dropped; it is not shipped yet.
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/forgectl"]
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/forgectl-bless-helper"]
-          end
+    #
+    # goreleaser's `hooks.post.install` wraps whatever body it's given in the
+    # legacy `postflight do ... end` stanza (forgectl#523, goreleaser#6870 —
+    # tracked for a real `install_steps` key in goreleaser v2.19, not yet
+    # released). `custom_block` is Go-templated like every other string field
+    # here (confirmed by a local `goreleaser release --snapshot`: a literal
+    # `{{staged_path}}` fails the render with `function "staged_path" not
+    # defined`), so it's not truly raw — the modern `postflight_steps` form
+    # needs `{{staged_path}}` to survive goreleaser's own template pass and
+    # reach Homebrew's step-runner intact. `{{"{{staged_path}}"}}` is a Go
+    # template action that emits that literal string. Leave `hooks.post`
+    # unset so goreleaser never emits its own postflight block alongside it.
+    custom_block: |
+      postflight_steps do
+        on_macos do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{"{{staged_path}}"}}/forgectl"]
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{"{{staged_path}}"}}/forgectl-bless-helper"]
+        end
+      end
 
 release:
   github:
