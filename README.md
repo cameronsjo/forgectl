@@ -150,11 +150,12 @@ forgectl surface launch <target> --surface tmux           # tmux, cmux, or herdr
 forgectl surface launch . --surface tmux --name review     # override the display name (defaults to the target dir's name)
 
 # recipe — run small built-in workbench recipes (alias: r)
-forgectl recipe afk                       # journal the current Herdr agent, then /compact it
+forgectl recipe afk                       # run /go:afk on the current Herdr agent, then /compact it
 forgectl recipe afk --target w1:p2        # override the Herdr target; r afk is the same command group alias
-forgectl recipe afk --compact-only        # skip /journal — for a caller that already journaled
+forgectl recipe afk --compact-only        # skip the prompt step — for a caller that already journaled
 forgectl recipe afk --rename parked       # /rename the session before compacting
 forgectl recipe afk --skip-receipt        # do not read the pane back to confirm /compact ran
+forgectl recipe afk --prompt /cadence:journaling  # submit a different slash command instead of /go:afk
 
 # workflow — run declarative workflows composing forgectl's other verbs (alias: flow)
 forgectl workflow run <name>              # run a workflow by name
