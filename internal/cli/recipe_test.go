@@ -137,39 +137,41 @@ func TestRecipeAfkSteps(t *testing.T) {
 		want   [][]string
 	}{
 		{
-			name: "another pane journals with --wait then compacts",
+			name: "another pane prompts with --wait then compacts",
+			opts: recipeAfkOptions{Prompt: "/go:afk"},
 			want: [][]string{
-				{"agent", "prompt", "w1:p2", "/journal", "--wait"},
+				{"agent", "prompt", "w1:p2", "/go:afk", "--wait"},
 				{"agent", "prompt", "w1:p2", "/compact"},
 			},
 		},
 		{
 			name:   "self target drops --wait",
+			opts:   recipeAfkOptions{Prompt: "/go:afk"},
 			isSelf: true,
 			want: [][]string{
-				{"agent", "prompt", "w1:p2", "/journal"},
+				{"agent", "prompt", "w1:p2", "/go:afk"},
 				{"agent", "prompt", "w1:p2", "/compact"},
 			},
 		},
 		{
-			name: "compact-only skips the journal",
-			opts: recipeAfkOptions{CompactOnly: true},
+			name: "compact-only skips the prompt",
+			opts: recipeAfkOptions{Prompt: "/go:afk", CompactOnly: true},
 			want: [][]string{
 				{"agent", "prompt", "w1:p2", "/compact"},
 			},
 		},
 		{
-			name: "rename runs between journal and compact",
-			opts: recipeAfkOptions{Rename: "afk-parked"},
+			name: "rename runs between the prompt and compact",
+			opts: recipeAfkOptions{Prompt: "/go:afk", Rename: "afk-parked"},
 			want: [][]string{
-				{"agent", "prompt", "w1:p2", "/journal", "--wait"},
+				{"agent", "prompt", "w1:p2", "/go:afk", "--wait"},
 				{"agent", "prompt", "w1:p2", "/rename afk-parked", "--wait"},
 				{"agent", "prompt", "w1:p2", "/compact"},
 			},
 		},
 		{
 			name:   "compact-only with rename on self",
-			opts:   recipeAfkOptions{CompactOnly: true, Rename: "afk-parked"},
+			opts:   recipeAfkOptions{Prompt: "/go:afk", CompactOnly: true, Rename: "afk-parked"},
 			isSelf: true,
 			want: [][]string{
 				{"agent", "prompt", "w1:p2", "/rename afk-parked"},
@@ -204,12 +206,12 @@ func TestRecipeAfkUsesAgentPromptForCompact(t *testing.T) {
 	withoutRecipeSleep(t)
 	fake := compactedRunner()
 
-	if err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Target: "reviewer"}); err != nil {
+	if err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Target: "reviewer", Prompt: "/go:afk"}); err != nil {
 		t.Fatalf("runRecipeAfk() error = %v, want nil", err)
 	}
 
 	want := []exec.Call{
-		{Name: "herdr", Args: []string{"agent", "prompt", "reviewer", "/journal", "--wait"}},
+		{Name: "herdr", Args: []string{"agent", "prompt", "reviewer", "/go:afk", "--wait"}},
 		{Name: "herdr", Args: []string{"agent", "prompt", "reviewer", "/compact"}},
 	}
 	if got := submissionCalls(fake.Calls); !reflect.DeepEqual(got, want) {
@@ -234,7 +236,7 @@ func TestRecipeAfkPreflightsBeforeJournal(t *testing.T) {
 		return "", nil
 	}}
 
-	err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{})
+	err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Prompt: "/go:afk"})
 	if !errors.Is(err, preflightErr) {
 		t.Fatalf("runRecipeAfk() error = %v, want wrapped preflight error", err)
 	}
@@ -247,7 +249,7 @@ func TestRecipeAfkSelfTargetOmitsWait(t *testing.T) {
 	withRecipeEnv(t, map[string]string{herdrPaneIDEnv: "w1:p2"})
 	fake := compactedRunner()
 
-	if err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{}); err != nil {
+	if err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Prompt: "/go:afk"}); err != nil {
 		t.Fatalf("runRecipeAfk() error = %v, want nil", err)
 	}
 
@@ -268,7 +270,7 @@ func TestRecipeAfkCompactOnlySkipsJournal(t *testing.T) {
 	withRecipeEnv(t, map[string]string{herdrPaneIDEnv: "w1:p2"})
 	fake := compactedRunner()
 
-	if err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{CompactOnly: true}); err != nil {
+	if err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Prompt: "/go:afk", CompactOnly: true}); err != nil {
 		t.Fatalf("runRecipeAfk() error = %v, want nil", err)
 	}
 
@@ -282,7 +284,7 @@ func TestRecipeAfkRenameSubmitsSlashRename(t *testing.T) {
 	withRecipeEnv(t, map[string]string{herdrPaneIDEnv: "w1:p2"})
 	fake := compactedRunner()
 
-	if err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Rename: "parked-for-reset"}); err != nil {
+	if err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Prompt: "/go:afk", Rename: "parked-for-reset"}); err != nil {
 		t.Fatalf("runRecipeAfk() error = %v, want nil", err)
 	}
 
@@ -311,7 +313,7 @@ func TestRecipeAfkFailsWhenPaneNeverShowsCompaction(t *testing.T) {
 		return "", nil
 	}}
 
-	err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Target: "reviewer"})
+	err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Target: "reviewer", Prompt: "/go:afk"})
 	if err == nil {
 		t.Fatal("runRecipeAfk() error = nil, want a missing-receipt error")
 	}
@@ -334,7 +336,7 @@ func TestRecipeAfkRejectsStaleCompactMarker(t *testing.T) {
 		return "", nil
 	}}
 
-	err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Target: "reviewer"})
+	err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Target: "reviewer", Prompt: "/go:afk"})
 	if err == nil {
 		t.Fatal("runRecipeAfk() error = nil, want a stale-marker rejection")
 	}
@@ -355,7 +357,7 @@ func TestRecipeAfkSelfTargetSkipsReceipt(t *testing.T) {
 		return "", nil
 	}}
 
-	if err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{}); err != nil {
+	if err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Prompt: "/go:afk"}); err != nil {
 		t.Fatalf("runRecipeAfk() error = %v, want nil", err)
 	}
 	for _, call := range fake.Calls {
@@ -369,7 +371,7 @@ func TestRecipeAfkSkipReceiptStopsAfterSubmission(t *testing.T) {
 	withRecipeEnv(t, map[string]string{herdrPaneIDEnv: "w1:p2"})
 	fake := &exec.FakeRunner{}
 
-	if err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Target: "reviewer", SkipReceipt: true}); err != nil {
+	if err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Target: "reviewer", Prompt: "/go:afk", SkipReceipt: true}); err != nil {
 		t.Fatalf("runRecipeAfk() error = %v, want nil", err)
 	}
 	if len(fake.Calls) == 0 {
@@ -387,7 +389,7 @@ func TestRecipeAfkUsesExplicitTarget(t *testing.T) {
 	withoutRecipeSleep(t)
 	fake := compactedRunner()
 
-	if err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Target: "reviewer"}); err != nil {
+	if err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Target: "reviewer", Prompt: "/go:afk"}); err != nil {
 		t.Fatalf("runRecipeAfk() error = %v, want nil", err)
 	}
 
@@ -462,7 +464,7 @@ func TestRecipeAfkRenameAllowlist(t *testing.T) {
 		{"tab", "parked\tmore"},
 		{"delete", "parked\x7f"},
 		{"blank", "   "},
-		{"over length", strings.Repeat("a", maxRecipeRenameRunes+1)},
+		{"over length", strings.Repeat("a", maxRecipePastedRunes+1)},
 		{"compact marker defeats the receipt", "Compacting"},
 		{"compact marker embedded", "run-Compacted-now"},
 	}
@@ -477,6 +479,63 @@ func TestRecipeAfkRenameAllowlist(t *testing.T) {
 		if err := validateRecipeRename(ok); err != nil {
 			t.Fatalf("validateRecipeRename(%q) = %v, want nil", ok, err)
 		}
+	}
+}
+
+// TestRecipeAfkPromptAllowlist pins the allowlist, not a denylist, for the
+// same reason as TestRecipeAfkRenameAllowlist: --prompt reaches the target
+// pane through the same herdr agent prompt path as --rename.
+func TestRecipeAfkPromptAllowlist(t *testing.T) {
+	rejected := []struct {
+		name  string
+		value string
+	}{
+		{"blank", ""},
+		{"no leading slash", "go:afk"},
+		{"blank after slash", "/"},
+		{"space", "/go afk"},
+		{"dot", "/go.afk"},
+		{"escape byte", "/go:afk\x1b"},
+		{"newline", "/go:afk\n/compact"},
+		{"compact marker defeats the receipt", "/Compacting"},
+		{"compact marker embedded", "/run-Compacted-now"},
+		{"over length", "/" + strings.Repeat("a", maxRecipePastedRunes)},
+	}
+	for _, tt := range rejected {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateRecipePrompt(tt.value); err == nil {
+				t.Fatalf("validateRecipePrompt(%q) = nil, want rejection", tt.value)
+			}
+		})
+	}
+	for _, ok := range []string{"/go:afk", "/journal", "/cadence:journaling"} {
+		if err := validateRecipePrompt(ok); err != nil {
+			t.Fatalf("validateRecipePrompt(%q) = %v, want nil", ok, err)
+		}
+	}
+}
+
+// TestRecipeAfkRejectsExplicitEmptyPrompt is the regression for a real finding
+// from the security review that shipped this flag: cobra's own default already
+// fills opts.Prompt with defaultRecipePrompt when --prompt is omitted, so the
+// CLI path only ever sees Prompt == "" when a caller explicitly passed
+// --prompt "". Silently promoting that to defaultRecipePrompt would turn a
+// caller's mistake into /go:afk's push-and-open-a-PR running on the resolved
+// target pane — runRecipeAfk must reject it instead, the same as any other
+// invalid --prompt, and must not spend any side effect first.
+func TestRecipeAfkRejectsExplicitEmptyPrompt(t *testing.T) {
+	withRecipeEnv(t, map[string]string{herdrPaneIDEnv: "w1:p2"})
+	fake := &exec.FakeRunner{}
+
+	err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Target: "reviewer", Prompt: ""})
+	if err == nil {
+		t.Fatal("runRecipeAfk() error = nil, want rejection of an explicit empty --prompt")
+	}
+	if ExitCode(err) != 2 {
+		t.Fatalf("ExitCode(error) = %d, want 2", ExitCode(err))
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("calls = %#v, want none — an explicit empty --prompt must not silently become the default", fake.Calls)
 	}
 }
 
@@ -555,13 +614,13 @@ func TestRecipeAfkStopsBeforeCompactWhenJournalFails(t *testing.T) {
 	withRecipeEnv(t, map[string]string{herdrPaneIDEnv: "w1:p2"})
 	journalErr := errors.New("journal failed")
 	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
-		if len(args) >= 4 && args[3] == "/journal" {
+		if len(args) >= 4 && args[3] == "/go:afk" {
 			return "", journalErr
 		}
 		return "", nil
 	}}
 
-	err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{})
+	err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Prompt: "/go:afk"})
 	if !errors.Is(err, journalErr) {
 		t.Fatalf("runRecipeAfk() error = %v, want wrapped journal error", err)
 	}
@@ -586,6 +645,25 @@ func TestRecipeCommandAliasAndAfkSubcommand(t *testing.T) {
 	}
 	if len(submissionCalls(fake.Calls)) != 2 {
 		t.Fatalf("calls = %#v, want journal and compact", fake.Calls)
+	}
+}
+
+func TestRecipeAfkCommandPromptFlagOverridesDefault(t *testing.T) {
+	withRecipeEnv(t, map[string]string{herdrPaneIDEnv: "w1:p2"})
+	fake := compactedRunner()
+	root := newRoot(module.Deps{Runner: fake})
+	root.SetArgs([]string{"recipe", "afk", "--prompt", "/cadence:journaling"})
+
+	if err := root.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("ExecuteContext() error = %v, want nil", err)
+	}
+
+	want := []exec.Call{
+		{Name: "herdr", Args: []string{"agent", "prompt", "w1:p2", "/cadence:journaling"}},
+		{Name: "herdr", Args: []string{"agent", "prompt", "w1:p2", "/compact"}},
+	}
+	if got := submissionCalls(fake.Calls); !reflect.DeepEqual(got, want) {
+		t.Fatalf("calls = %#v, want %#v", got, want)
 	}
 }
 

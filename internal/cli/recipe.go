@@ -34,9 +34,16 @@ var recipeCompactMarkers = []string{"Compacting", "Compacted", "Compact summary"
 // target and a wrong answer to "is this me".
 var herdrTargetEnvKeys = []string{herdrPaneIDEnv, herdrActivePaneIDEnv}
 
-// maxRecipeRenameRunes bounds a name that is pasted into another pane's input
-// in a single submission.
-const maxRecipeRenameRunes = 128
+// maxRecipePastedRunes bounds a value that is pasted into another pane's
+// input in a single submission — shared by --rename and --prompt, both of
+// which land in the same input box the same way.
+const maxRecipePastedRunes = 128
+
+// defaultRecipePrompt is what --prompt submits instead of /journal when the
+// flag is not given. /go:afk (the go plugin) pushes, opens a draft PR,
+// journals, and files loose ends — a superset of the bare /journal this
+// recipe used to hardcode.
+const defaultRecipePrompt = "/go:afk"
 
 // recipeReadLines is how much of the pane the receipt check reads back. Wide
 // enough that a compaction line is not scrolled past between polls, narrow
@@ -59,6 +66,7 @@ var (
 type recipeAfkOptions struct {
 	Target      string
 	Rename      string
+	Prompt      string
 	CompactOnly bool
 	SkipReceipt bool
 }
@@ -94,7 +102,8 @@ func newRecipeAfkCmd(deps module.Deps) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&opts.Target, "target", "", "Herdr agent name or pane id (defaults to HERDR_PANE_ID, then HERDR_ACTIVE_PANE_ID)")
 	cmd.Flags().StringVar(&opts.Rename, "rename", "", "Rename the session with /rename <name> before compacting")
-	cmd.Flags().BoolVar(&opts.CompactOnly, "compact-only", false, "Skip /journal and run /compact alone (for a caller that already journaled)")
+	cmd.Flags().StringVar(&opts.Prompt, "prompt", defaultRecipePrompt, "Slash command to submit as the first step")
+	cmd.Flags().BoolVar(&opts.CompactOnly, "compact-only", false, "Skip the prompt step and run /compact alone (for a caller that already journaled)")
 	cmd.Flags().BoolVar(&opts.SkipReceipt, "skip-receipt", false, "Do not read the pane back to confirm /compact ran")
 	return cmd
 }
@@ -111,6 +120,17 @@ func runRecipeAfk(ctx context.Context, runner exec.Runner, opts recipeAfkOptions
 		if err := validateRecipeRename(opts.Rename); err != nil {
 			return WithExitCode(err, 2)
 		}
+	}
+	// No empty-to-default fallback here, deliberately: the --prompt flag's
+	// cobra default already sets opts.Prompt to defaultRecipePrompt before any
+	// parsing happens, so the CLI path only ever sees Prompt == "" when the
+	// caller explicitly passed --prompt "". Silently promoting that to the
+	// powerful default (push, open a draft PR, journal, file loose ends) would
+	// turn a caller's typo into an irreversible side effect on the resolved
+	// target pane, which may not be their own. An explicit empty value is
+	// rejected below, same as every other invalid --prompt.
+	if err := validateRecipePrompt(opts.Prompt); err != nil {
+		return WithExitCode(err, 2)
 	}
 
 	// Preflight before the first side effect. `agent get` is the honest probe:
@@ -175,8 +195,8 @@ func recipeAfkSteps(opts recipeAfkOptions, target string, isSelf bool) []herdrSt
 
 	if !opts.CompactOnly {
 		steps = append(steps, herdrStep{
-			Args:     withWait([]string{"agent", "prompt", target, "/journal"}),
-			Describe: "run /journal through herdr agent prompt",
+			Args:     withWait([]string{"agent", "prompt", target, opts.Prompt}),
+			Describe: fmt.Sprintf("run %s through herdr agent prompt", opts.Prompt),
 		})
 	}
 
@@ -322,8 +342,8 @@ func validateRecipeRename(name string) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("invalid --rename %q: must not be blank", name)
 	}
-	if n := len([]rune(name)); n > maxRecipeRenameRunes {
-		return fmt.Errorf("invalid --rename: %d runes exceeds the %d-rune limit", n, maxRecipeRenameRunes)
+	if n := len([]rune(name)); n > maxRecipePastedRunes {
+		return fmt.Errorf("invalid --rename: %d runes exceeds the %d-rune limit", n, maxRecipePastedRunes)
 	}
 	for _, r := range name {
 		ok := r == ' ' || strings.ContainsRune("._-", r) ||
@@ -340,6 +360,39 @@ func validateRecipeRename(name string) error {
 	for _, marker := range recipeCompactMarkers {
 		if strings.Contains(name, marker) {
 			return fmt.Errorf("invalid --rename %q: must not contain %q, which the /compact receipt check looks for", name, marker)
+		}
+	}
+	return nil
+}
+
+// validateRecipePrompt allowlists the slash command. It reaches herdr through
+// the same `agent prompt` path as --rename, so the same reasoning applies:
+// enumerating disallowed bytes is the losing game, and an allowlist is the
+// only form that cannot fail open on an unlisted escape sequence.
+func validateRecipePrompt(prompt string) error {
+	if !strings.HasPrefix(prompt, "/") {
+		return fmt.Errorf("invalid --prompt %q: must start with %q", prompt, "/")
+	}
+	body := prompt[1:]
+	if strings.TrimSpace(body) == "" {
+		return fmt.Errorf("invalid --prompt %q: must not be blank after %q", prompt, "/")
+	}
+	if n := len([]rune(prompt)); n > maxRecipePastedRunes {
+		return fmt.Errorf("invalid --prompt: %d runes exceeds the %d-rune limit", n, maxRecipePastedRunes)
+	}
+	for _, r := range body {
+		ok := r == ':' || r == '-' ||
+			(r < unicode.MaxASCII && (unicode.IsLetter(r) || unicode.IsDigit(r)))
+		if !ok {
+			return fmt.Errorf("invalid --prompt %q: contains %q; allowed are ASCII letters, digits, %q, and %q", prompt, r, ":", "-")
+		}
+	}
+	// Matches validateRecipeRename's rule for the same reason: a prompt
+	// carrying a compaction marker would satisfy the receipt check without
+	// /compact doing anything, breaking the two checks' independence.
+	for _, marker := range recipeCompactMarkers {
+		if strings.Contains(prompt, marker) {
+			return fmt.Errorf("invalid --prompt %q: must not contain %q, which the /compact receipt check looks for", prompt, marker)
 		}
 	}
 	return nil

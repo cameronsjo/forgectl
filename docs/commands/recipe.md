@@ -4,11 +4,12 @@ A recipe is a fixed sequence of other tools' calls, wired together because the
 sequence itself is the fiddly part. `afk` is the only recipe today.
 
 ```bash
-forgectl recipe afk                       # journal the current Herdr agent, then /compact it
+forgectl recipe afk                       # run /go:afk on the current Herdr agent, then /compact it
 forgectl recipe afk --target w1:p2        # override the Herdr target; r afk is the same command group alias
-forgectl recipe afk --compact-only        # skip /journal — for a caller that already journaled
+forgectl recipe afk --compact-only        # skip the prompt step — for a caller that already journaled
 forgectl recipe afk --rename parked       # /rename the session before compacting
 forgectl recipe afk --skip-receipt        # do not read the pane back to confirm /compact ran
+forgectl recipe afk --prompt /cadence:journaling  # submit a different slash command instead of /go:afk
 ```
 
 ## `afk` — journal and compact the current Herdr agent pane
@@ -29,8 +30,11 @@ would otherwise surface only after `/journal` has already spent a model call.
 
 **Steps, in order:**
 
-1. `/journal` — skipped when `--compact-only` is set, for a caller that
-   already journaled.
+1. `--prompt` — defaults to `/go:afk` (the `go` plugin), which pushes,
+   opens a draft PR, updates the journal, and files loose ends — a superset
+   of the bare `/journal` this recipe used to hardcode. Pass `--prompt` to
+   submit a different slash command instead; skipped when `--compact-only`
+   is set, for a caller that already journaled.
 2. `/rename <name>` — only when `--rename` is given.
 3. `/compact` — always runs.
 
@@ -81,7 +85,24 @@ doing anything, breaking the two checks' independence.
 **`--target` is allowlisted too** (letters, digits, `._-:/@`), and a leading
 `-` is refused outright — not for injection (herdr never parses the target as
 a flag), but so a malformed target fails with a legible error here instead of
-a confusing herdr-side one after `/journal` has already run.
+a confusing herdr-side one after the first step has already run.
+
+**`--prompt` is allowlisted the same way as `--rename`**, including the same
+128-rune limit: it must start with `/`, and after that only ASCII letters,
+digits, `:`, and `-` are allowed — covering plugin-namespaced commands like
+`/go:afk` and `/cadence:journaling` — and it is refused if it contains one of
+the receipt markers above, for the same independence reason. That check only
+sees the flag's literal text, though: it cannot see what the named command
+*prints*. A `--prompt` naming a command whose own output happens to render
+one of the receipt markers can satisfy the receipt check without `/compact`
+having run — the allowlist keeps the pane's input safe, not the correctness
+of an arbitrary command's output.
+
+`--prompt ""` is rejected, not silently replaced with the default: cobra
+already fills the default when the flag is omitted, so an explicit empty
+value only reaches validation when a caller typed `--prompt ""` on purpose,
+and treating that as "use the default" would turn a caller's mistake into
+`/go:afk`'s push-and-open-a-PR running on the resolved target pane.
 
 ### Flags
 
@@ -89,11 +110,12 @@ a confusing herdr-side one after `/journal` has already run.
 | --- | --- |
 | `--target` | Herdr agent name or pane id. Defaults to `HERDR_PANE_ID`, then `HERDR_ACTIVE_PANE_ID` |
 | `--rename` | Run `/rename <name>` before `/compact` |
-| `--compact-only` | Skip `/journal`, run `/compact` alone — for a caller that already journaled |
+| `--prompt` | Slash command to submit as the first step. Defaults to `/go:afk` |
+| `--compact-only` | Skip the prompt step, run `/compact` alone — for a caller that already journaled |
 | `--skip-receipt` | Do not read the pane back to confirm `/compact` ran |
 
 ### Exit codes
 
-`2` — no target resolves, an invalid `--target`, or an invalid `--rename`.
-Any other non-zero exit names the failing step (preflight, a herdr call, or
-the receipt read) in its error text.
+`2` — no target resolves, an invalid `--target`, an invalid `--rename`, or an
+invalid `--prompt`. Any other non-zero exit names the failing step (preflight,
+a herdr call, or the receipt read) in its error text.
