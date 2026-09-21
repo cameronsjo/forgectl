@@ -160,11 +160,9 @@ jobs:
     # WithSensitive option is actually exercised in CI (#100). Build/Vet/gofmt
     # are platform-independent and stay ubuntu-only.
     #
-    # Self-hosted: the M1 Max fleet's daemon tier, an isolated `ghr-forgectl`
-    # account on a guest rebuilt nightly. Fork PRs need approval before any
-    # workflow runs here (`all_external_contributors`), which is the control that
-    # makes running a public repo's code on this host acceptable.
-    runs-on: [self-hosted, macOS, ARM64]
+    # GitHub-hosted: free for public repositories. The job installs its own
+    # dependencies below.
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -199,17 +197,13 @@ jobs:
         # unbounded editor re-invocation loop — so it is the platform whose
         # integration run is worth the most.
         #
-        # NOT brew, unlike the tmux step above. This is a self-hosted runner
-        # whose Homebrew prefix is owned by another user: `brew install sops`
-        # fails with "The following directories are not writable by your user:
-        # /opt/homebrew". The tmux step survives only because tmux is already in
-        # the image, so its `brew list` short-circuits and `brew install` never
-        # runs. Anything NOT already installed is unreachable through brew here.
-        #
-        # So the release assets are installed into a runner-owned directory and
-        # that directory is prepended to PATH for later steps. Same
-        # checksum-before-install discipline as the ubuntu job, and the same
-        # reason: pinning the tag alone does not help, because a tag can move.
+        # Pinned release tarball + checksum, not brew — kept on the
+        # GitHub-hosted runner too, for reproducibility and integrity: a
+        # specific, verified sops/age version is what these tests were
+        # measured against, and brew would leave the version unpinned with no
+        # integrity check. Same checksum-before-install discipline as the
+        # ubuntu job, and the same reason: pinning the tag alone does not
+        # help, because a tag can move.
         #
         # The sops digest is from the publisher's own
         # sops-v3.13.3.checksums.txt. age publishes no checksums file (only
@@ -247,9 +241,10 @@ jobs:
         run: go test -v ./...
 
   helper:
-    # Same fleet as macos-test above. Swift comes from the guest's Xcode at
-    # /usr/bin/swift, so this job needs nothing from Homebrew.
-    runs-on: [self-hosted, macOS, ARM64]
+    # GitHub-hosted, same reasoning as macos-test above. Swift comes from the
+    # runner's Xcode at /usr/bin/swift, so this job needs nothing from
+    # Homebrew.
+    runs-on: macos-latest
     defaults:
       run:
         working-directory: helper/forgectl-bless-helper
