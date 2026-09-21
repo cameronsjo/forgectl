@@ -197,16 +197,39 @@ jobs:
         # unbounded editor re-invocation loop — so it is the platform whose
         # integration run is worth the most.
         #
-        # Plain brew install: the old release-tarball-plus-checksum workaround
-        # existed only because that runner's Homebrew prefix was owned by
-        # another user (`brew install` failed with a not-writable error).
-        # GitHub-hosted `macos-latest` has a genuinely writable, per-job
-        # Homebrew prefix, so that constraint doesn't apply here.
+        # Pinned release tarball + checksum, not brew — kept on the
+        # GitHub-hosted runner too, for reproducibility and integrity: a
+        # specific, verified sops/age version is what these tests were
+        # measured against, and brew would leave the version unpinned with no
+        # integrity check. Same checksum-before-install discipline as the
+        # ubuntu job, and the same reason: pinning the tag alone does not
+        # help, because a tag can move.
+        #
+        # The sops digest is from the publisher's own
+        # sops-v3.13.3.checksums.txt. age publishes no checksums file (only
+        # sigstore .proof files), so its digest was computed locally from the
+        # release asset — the same basis as the linux digest in the ubuntu job.
         timeout-minutes: 5
         run: |
-          brew install sops age
-          sops --version --disable-version-check
-          age-keygen --version
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+          curl -fsSL -o /tmp/sops \
+            https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.darwin.arm64
+          echo 'b97c0d434aab577dc40310e8d22ff9e45eef4c80638ab978daae9b4681c59286  /tmp/sops' | shasum -a 256 -c -
+          install -m 0755 /tmp/sops "$HOME/.local/bin/sops"
+
+          curl -fsSL -o /tmp/age.tgz \
+            https://github.com/FiloSottile/age/releases/download/v1.2.1/age-v1.2.1-darwin-arm64.tar.gz
+          echo 'cf79875bd5970dc2dac60c87fa50cee1ff1f9a41b0eb273f65e174aff37c367a  /tmp/age.tgz' | shasum -a 256 -c -
+          rm -rf /tmp/age
+          tar -xzf /tmp/age.tgz -C /tmp
+          install -m 0755 /tmp/age/age "$HOME/.local/bin/age"
+          install -m 0755 /tmp/age/age-keygen "$HOME/.local/bin/age-keygen"
+
+          "$HOME/.local/bin/sops" --version --disable-version-check
+          "$HOME/.local/bin/age-keygen" --version
 
       - name: Test (Darwin-gated coverage)
         # -v is deliberate: the run log naming each formerly-skipped test as
