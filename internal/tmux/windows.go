@@ -183,7 +183,9 @@ var ErrBadEnvAssignment = errors.New("tmux: environment entry is not a KEY=VALUE
 // and VALUE carries no NUL and no newline. The value bans are about the sink,
 // not the shell: a NUL cannot cross exec at all, and a newline in a tmux
 // command-line argument is what a crafted value would use to forge a second
-// command in output a human or a parser reads back.
+// command in output a human or a parser reads back. A trailing ";" is refused
+// because tmux ends a command at any argument ending in one, which would split
+// the new-window argv. A ";" inside the value is harmless.
 func validateEnvAssignment(entry string) error {
 	key, value, found := strings.Cut(entry, "=")
 	if !found || key == "" {
@@ -197,7 +199,7 @@ func validateEnvAssignment(entry string) error {
 			return fmt.Errorf("%w", ErrBadEnvAssignment)
 		}
 	}
-	if strings.ContainsAny(value, "\x00\n\r") {
+	if strings.ContainsAny(value, "\x00\n\r") || strings.HasSuffix(value, ";") {
 		return fmt.Errorf("%w", ErrBadEnvAssignment)
 	}
 	return nil

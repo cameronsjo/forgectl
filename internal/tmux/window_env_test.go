@@ -111,6 +111,7 @@ func TestValidateEnvAssignment(t *testing.T) {
 		// A value may legally contain '=' — a proxy URL with a query string
 		// does. Only the FIRST '=' separates.
 		{"equals inside the value", "ALL_PROXY=socks5://h:1080?a=b", true},
+		{"semicolon inside the value", "NO_PROXY=a;b", true},
 
 		{"no equals at all", "HTTPS_PROXY", false},
 		{"empty key", "=value", false},
@@ -121,6 +122,9 @@ func TestValidateEnvAssignment(t *testing.T) {
 		// anything that reads tmux's argv back; NUL cannot cross exec at all.
 		{"newline in the value", "HTTPS_PROXY=http://a\nkill-server", false},
 		{"carriage return in the value", "HTTPS_PROXY=http://a\rx", false},
+		// tmux ends a command at an argument ending in ";", so a value ending
+		// in one splits the new-window argv. A ";" inside a value is harmless.
+		{"trailing semicolon in the value", "NO_PROXY=localhost;", false},
 		{"NUL in the value", "HTTPS_PROXY=http://a\x00x", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
