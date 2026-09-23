@@ -97,18 +97,25 @@ loopback telemetry collector, a profile with no bypass list would send local
 traffic to the corporate proxy. Include `localhost` and `127.0.0.1` at minimum.
 
 A `launch_profile` also **refuses the launch** when it names no configured
-profile, or names one that sets no values. All three refusals exit 2 before
-anything is written to disk. Falling back to the shell's variables would reach
-the network by a path nobody chose, and would look like a successful launch.
-`forgectl launch doctor` reports all three, so a bad key surfaces without
+profile, or names one that sets no values. Falling back to the shell's variables
+would reach the network by a path nobody chose, and would look like a successful
+launch.
+
+It also **refuses credentials in a proxy URL** (`http://user:pass@host`). The
+`pr` window path hands the launch environment to tmux as `-e KEY=VAL`
+arguments, so a password there would sit on the command line, readable by any
+local user through `ps`. Authenticate to the proxy some other way.
+
+All four refusals exit 2 before anything is written to disk.
+`forgectl launch doctor` reports all four, so a bad key surfaces without
 starting anything.
 
 `launch_profile` is the profile *name*, which is not sensitive and prints
 normally in `forgectl config`. The values it selects stay redacted there, and no
 launch surface renders them: the banner prints argv, and `launch which` prints
 env *keys*. The harness itself is a different matter — it can read its own
-environment, so a proxy URL carrying credentials is readable by the agent and by
-anything it runs.
+environment, so every proxy value is readable by the agent and by anything it
+runs. That is one more reason a launch profile refuses credentials.
 
 ## Read-only verbs
 

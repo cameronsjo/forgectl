@@ -113,6 +113,41 @@ func TestResolveLaunchProfile_RefusesAProxyWithNoBypassList(t *testing.T) {
 	}
 }
 
+// TestResolveLaunchProfile_RefusesCredentialsInAProxyURL pins the refusal of
+// userinfo in a launch profile. The `pr` window path hands the launch
+// environment to tmux as `-e KEY=VAL` arguments, so a password in a proxy URL
+// would sit on argv, readable by every local user through ps. The shell
+// protocol (`proxy use`) does not resolve a launch profile and is unaffected.
+func TestResolveLaunchProfile_RefusesCredentialsInAProxyURL(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		profile ProxyProfile
+		wantErr error
+	}{
+		{"user and password in http_proxy", ProxyProfile{HTTPProxy: "http://u:secretpw@p.example:8080", NoProxy: "localhost"}, ErrLaunchProfileCredentials}, //nolint:gosec // G101: a fake credential the refusal must catch
+		{"user only in https_proxy", ProxyProfile{HTTPSProxy: "http://u@p.example:8080", NoProxy: "localhost"}, ErrLaunchProfileCredentials},
+		{"userinfo in all_proxy", ProxyProfile{AllProxy: "socks5://u:secretpw@p.example:1080", NoProxy: "localhost"}, ErrLaunchProfileCredentials},
+		// curl accepts a proxy with no scheme, so the check must too.
+		{"userinfo with no scheme", ProxyProfile{HTTPProxy: "u:secretpw@p.example:8080", NoProxy: "localhost"}, ErrLaunchProfileCredentials},
+		// Negative controls: a plain proxy URL, and an '@' in the bypass list,
+		// which is not a URL and carries no credential.
+		{"no userinfo is fine", ProxyProfile{HTTPProxy: "http://p.example:8080", NoProxy: "localhost"}, nil},
+		{"no scheme and no userinfo is fine", ProxyProfile{HTTPProxy: "p.example:8080", NoProxy: "localhost"}, nil},
+		{"an '@' in the bypass list is fine", ProxyProfile{HTTPProxy: "http://p.example:8080", NoProxy: "localhost,a@b.example"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pc := ProxyConfig{Profiles: map[string]ProxyProfile{"p": tc.profile}, LaunchProfile: "p"}
+			_, _, err := pc.ResolveLaunchProfile()
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("ResolveLaunchProfile = %v, want %v", err, tc.wantErr)
+			}
+			if err != nil && strings.Contains(err.Error(), "secretpw") {
+				t.Errorf("message leaked the credential: %q", err)
+			}
+		})
+	}
+}
+
 func TestResolveLaunchProfile(t *testing.T) {
 	work := ProxyProfile{HTTPProxy: "http://proxy.example:8080", NoProxy: "localhost,127.0.0.1"}
 	noBypass := ProxyProfile{HTTPProxy: "http://proxy.example:8080"}

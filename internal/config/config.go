@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -315,7 +316,50 @@ func (pc ProxyConfig) ResolveLaunchProfile() (profile ProxyProfile, ok bool, err
 	if profile.RoutesTraffic() && profile.NoProxy == "" {
 		return ProxyProfile{}, false, fmt.Errorf("%w: %q", ErrLaunchProfileNoBypass, pc.LaunchProfile)
 	}
+	if field, found := profile.credentialField(); found {
+		return ProxyProfile{}, false, fmt.Errorf("%w: %q sets %s", ErrLaunchProfileCredentials, pc.LaunchProfile, field)
+	}
 	return profile, true, nil
+}
+
+// ErrLaunchProfileCredentials reports a launch profile whose proxy URL carries
+// userinfo (user:pass@). The `pr` window path passes the launch environment to
+// tmux as `-e KEY=VAL` arguments, so the credential would sit on argv, where
+// any local user can read it through ps. The message names the field, never
+// its value.
+var ErrLaunchProfileCredentials = errors.New(
+	"proxy: launch_profile puts credentials in a proxy URL, which would expose them on the command line; " +
+		"remove the user:pass@ part and authenticate to the proxy another way")
+
+// credentialField reports the first proxy field whose URL carries userinfo. A
+// value with no scheme is parsed as http://, the way curl reads it. A value
+// that does not parse at all counts as carrying credentials when it contains
+// an '@', so a malformed URL fails closed rather than slipping through.
+func (p ProxyProfile) credentialField() (string, bool) {
+	for _, f := range []struct{ name, value string }{
+		{"http_proxy", p.HTTPProxy},
+		{"https_proxy", p.HTTPSProxy},
+		{"all_proxy", p.AllProxy},
+	} {
+		if f.value == "" {
+			continue
+		}
+		raw := f.value
+		if !strings.Contains(raw, "://") {
+			raw = "http://" + raw
+		}
+		u, err := url.Parse(raw)
+		if err != nil {
+			if strings.Contains(f.value, "@") {
+				return f.name, true
+			}
+			continue
+		}
+		if u.User != nil {
+			return f.name, true
+		}
+	}
+	return "", false
 }
 
 // Validate reports a proxy section that would make every launch refuse. It
