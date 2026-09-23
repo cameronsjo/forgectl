@@ -129,11 +129,17 @@ func TestResolveLaunchProfile_RefusesCredentialsInAProxyURL(t *testing.T) {
 		{"userinfo in all_proxy", ProxyProfile{AllProxy: "socks5://u:secretpw@p.example:1080", NoProxy: "localhost"}, ErrLaunchProfileCredentials},
 		// curl accepts a proxy with no scheme, so the check must too.
 		{"userinfo with no scheme", ProxyProfile{HTTPProxy: "u:secretpw@p.example:8080", NoProxy: "localhost"}, ErrLaunchProfileCredentials},
+		// curl and Node read one and three slashes after the scheme as an
+		// authority; Go's url.Parse reads them as a path with no user.
+		{"userinfo after one slash", ProxyProfile{HTTPProxy: "http:/u:secretpw@p.example:8080", NoProxy: "localhost"}, ErrLaunchProfileCredentials},        //nolint:gosec // G101: a fake credential the refusal must catch
+		{"userinfo after three slashes", ProxyProfile{HTTPSProxy: "http:///u:secretpw@p.example:8080", NoProxy: "localhost"}, ErrLaunchProfileCredentials}, //nolint:gosec // G101: a fake credential the refusal must catch
+		{"userinfo after four slashes", ProxyProfile{AllProxy: "socks5:////u@p.example:1080", NoProxy: "localhost"}, ErrLaunchProfileCredentials},
 		// Negative controls: a plain proxy URL, and an '@' in the bypass list,
 		// which is not a URL and carries no credential.
 		{"no userinfo is fine", ProxyProfile{HTTPProxy: "http://p.example:8080", NoProxy: "localhost"}, nil},
 		{"no scheme and no userinfo is fine", ProxyProfile{HTTPProxy: "p.example:8080", NoProxy: "localhost"}, nil},
 		{"an '@' in the bypass list is fine", ProxyProfile{HTTPProxy: "http://p.example:8080", NoProxy: "localhost,a@b.example"}, nil},
+		{"an .@. in the path is fine", ProxyProfile{HTTPProxy: "http://p.example:8080/x@y", NoProxy: "localhost"}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pc := ProxyConfig{Profiles: map[string]ProxyProfile{"p": tc.profile}, LaunchProfile: "p"}

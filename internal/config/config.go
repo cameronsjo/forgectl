@@ -350,9 +350,17 @@ func (p ProxyProfile) credentialField() (string, bool) {
 // proxy. A value that does not parse counts as carrying userinfo when it
 // contains an '@', so a malformed URL fails closed rather than slipping
 // through. The empty string carries none.
+//
+// Two readings run, and either one refuses. Go's url.Parse is one; the other
+// is authorityHasAt, because curl and Node read `http:/u:p@h` and
+// `http:///u:p@h` as user:pass@h while url.Parse reads them as a path with no
+// user. The consumer's parser decides where a credential goes, not ours.
 func URLHasUserinfo(value string) bool {
 	if value == "" {
 		return false
+	}
+	if authorityHasAt(value) {
+		return true
 	}
 	raw := value
 	if !strings.Contains(raw, "://") {
@@ -1563,3 +1571,42 @@ func MergeLegacyIntoLaunch(cfg Config, legacy LaunchConfig) (merged LaunchConfig
 type nopCloser struct{}
 
 func (nopCloser) Close() error { return nil }
+
+// HasURLScheme reports whether value begins with a URL scheme followed by a
+// slash (`http:/`, `socks5://`). It is how a caller that must not read every
+// value as a URL (no_proxy may hold an '@') picks out the ones that are.
+func HasURLScheme(value string) bool {
+	_, rest, ok := cutScheme(value)
+	return ok && strings.HasPrefix(rest, "/")
+}
+
+// authorityHasAt reports an '@' in the authority of value, read the lenient
+// way curl and Node read it: drop a leading scheme, then every slash after
+// it, and look for '@' before the first '/', '?' or '#'. A value with no
+// scheme is all authority up to its first '/'.
+func authorityHasAt(value string) bool {
+	rest := value
+	if _, afterScheme, ok := cutScheme(value); ok && strings.HasPrefix(afterScheme, "/") {
+		rest = strings.TrimLeft(afterScheme, "/")
+	}
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	return strings.Contains(rest, "@")
+}
+
+// cutScheme splits a leading RFC 3986 scheme (`ALPHA *( ALPHA / DIGIT / "+" /
+// "-" / "." ) ":"`) off value. ok is false when value has none.
+func cutScheme(value string) (scheme, rest string, ok bool) {
+	for i, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+		case i > 0 && (r >= '0' && r <= '9' || r == '+' || r == '-' || r == '.'):
+		case i > 0 && r == ':':
+			return value[:i], value[i+1:], true
+		default:
+			return "", value, false
+		}
+	}
+	return "", value, false
+}

@@ -140,3 +140,20 @@ func TestInjectedLaunchKeys_CarriesTheRefusal(t *testing.T) {
 		t.Fatalf("err = %v, want config.ErrUnknownLaunchProfile", err)
 	}
 }
+
+// TestInjectedWindowEnv_RefusesSlashVariantCredentials pins the forms Go's
+// url.Parse reads as userless but curl and Node read as user:pass@host. The
+// OTLP endpoint reaches argv only through injectedWindowEnv, so this is its
+// only refusal.
+func TestInjectedWindowEnv_RefusesSlashVariantCredentials(t *testing.T) {
+	for _, endpoint := range []string{
+		"http:/u:secretpw@collector.example:4317",   //nolint:gosec // G101: a fake credential the refusal must catch
+		"http:///u:secretpw@collector.example:4317", //nolint:gosec // G101: a fake credential the refusal must catch
+	} {
+		cfg := config.Config{Bench: config.BenchConfig{Telemetry: true, OTLPEndpoint: endpoint}}
+		_, err := injectedWindowEnv(cfg)
+		if !errors.Is(err, errWindowEnvCredentials) {
+			t.Fatalf("injectedWindowEnv(%q) err = %v, want errWindowEnvCredentials", endpoint, err)
+		}
+	}
+}

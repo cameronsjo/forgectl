@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -91,7 +90,9 @@ func injectedWindowEnv(cfg config.Config) ([]string, error) {
 		// Only a value with a scheme is read as a URL here. A scheme-less
 		// proxy value was already checked by the launch-profile refusal, and
 		// reading every value as a URL would misread an '@' in no_proxy.
-		if v := set[k]; strings.Contains(v, "://") && config.URLHasUserinfo(v) {
+		// HasURLScheme, not "://", so the one-slash form `http:/u:p@h` that
+		// curl accepts is checked too.
+		if v := set[k]; config.HasURLScheme(v) && config.URLHasUserinfo(v) {
 			return nil, fmt.Errorf("%w: %s", errWindowEnvCredentials, k)
 		}
 		entries = append(entries, k+"="+set[k])
