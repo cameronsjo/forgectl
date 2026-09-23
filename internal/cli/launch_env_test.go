@@ -72,6 +72,41 @@ func TestInjectedWindowEnv_CarriesTheRefusal(t *testing.T) {
 	}
 }
 
+// TestInjectedWindowEnv_RefusesCredentialsOnArgv pins the argv sink's own
+// check. Window entries reach tmux as `-e KEY=VAL` arguments, readable by any
+// local user through ps. The launch-profile refusal covers the proxy values;
+// this covers every other injected URL, such as a telemetry endpoint.
+func TestInjectedWindowEnv_RefusesCredentialsOnArgv(t *testing.T) {
+	cfg := config.Config{Bench: config.BenchConfig{ //nolint:gosec // G101: a fake credential the refusal must catch
+		Telemetry:    true,
+		OTLPEndpoint: "http://u:secretpw@collector.example:4317",
+	}}
+	_, err := injectedWindowEnv(cfg)
+	if !errors.Is(err, errWindowEnvCredentials) {
+		t.Fatalf("err = %v, want errWindowEnvCredentials", err)
+	}
+	if strings.Contains(err.Error(), "secretpw") {
+		t.Errorf("message leaked the credential: %q", err)
+	}
+	if !strings.Contains(err.Error(), "OTEL_EXPORTER_OTLP_ENDPOINT") {
+		t.Errorf("message = %q, want it to name the variable", err)
+	}
+
+	// Negative control: the same config with no userinfo passes, and so does an
+	// '@' in a value that is not a URL.
+	cfg.Bench.OTLPEndpoint = "http://collector.example:4317"
+	if _, err := injectedWindowEnv(cfg); err != nil {
+		t.Fatalf("injectedWindowEnv without userinfo: %v", err)
+	}
+	withAt := proxyLaunchCfg()
+	p := withAt.Proxy.Profiles["work"]
+	p.NoProxy = "localhost,a@b.example"
+	withAt.Proxy.Profiles["work"] = p
+	if _, err := injectedWindowEnv(withAt); err != nil {
+		t.Fatalf("injectedWindowEnv with an '@' in no_proxy: %v", err)
+	}
+}
+
 // TestInjectedLaunchKeys_NamesBothDirectionsWithoutValues pins what `launch
 // which` renders. Before this existed no verb could answer "will my proxy be
 // applied?", because the injected block is deliberately absent from the launch

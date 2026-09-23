@@ -331,35 +331,38 @@ var ErrLaunchProfileCredentials = errors.New(
 	"proxy: launch_profile puts credentials in a proxy URL, which would expose them on the command line; " +
 		"remove the user:pass@ part and authenticate to the proxy another way")
 
-// credentialField reports the first proxy field whose URL carries userinfo. A
-// value with no scheme is parsed as http://, the way curl reads it. A value
-// that does not parse at all counts as carrying credentials when it contains
-// an '@', so a malformed URL fails closed rather than slipping through.
+// credentialField reports the first proxy field whose URL carries userinfo.
 func (p ProxyProfile) credentialField() (string, bool) {
 	for _, f := range []struct{ name, value string }{
 		{"http_proxy", p.HTTPProxy},
 		{"https_proxy", p.HTTPSProxy},
 		{"all_proxy", p.AllProxy},
 	} {
-		if f.value == "" {
-			continue
-		}
-		raw := f.value
-		if !strings.Contains(raw, "://") {
-			raw = "http://" + raw
-		}
-		u, err := url.Parse(raw)
-		if err != nil {
-			if strings.Contains(f.value, "@") {
-				return f.name, true
-			}
-			continue
-		}
-		if u.User != nil {
+		if URLHasUserinfo(f.value) {
 			return f.name, true
 		}
 	}
 	return "", false
+}
+
+// URLHasUserinfo reports whether value, read as a URL, carries a user:pass@
+// part. A value with no scheme is parsed as http://, the way curl reads a
+// proxy. A value that does not parse counts as carrying userinfo when it
+// contains an '@', so a malformed URL fails closed rather than slipping
+// through. The empty string carries none.
+func URLHasUserinfo(value string) bool {
+	if value == "" {
+		return false
+	}
+	raw := value
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return strings.Contains(value, "@")
+	}
+	return u.User != nil
 }
 
 // Validate reports a proxy section that would make every launch refuse. It

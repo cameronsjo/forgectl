@@ -137,8 +137,9 @@ func WithFindingsDir(dir string) Option {
 // validated by the tmux boundary, not here, so one refusal covers every caller.
 //
 // DISCLOSURE: these reach the tmux command line, and process command lines are
-// readable by other accounts on the machine. Pass a credential-bearing value
-// only if that is acceptable; forgectl does not inspect values.
+// readable by other accounts on the machine. This package does not inspect
+// values; the production resolver (internal/cli's injectedWindowEnv) refuses
+// a URL carrying user:pass@ before it gets here.
 func WithWindowEnv(resolve func() ([]string, error)) Option {
 	return func(c *Client) { c.windowEnv = resolve }
 }

@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"errors"
+	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -54,6 +57,14 @@ func injectedLaunchKeys(cfg config.Config) ([]string, error) {
 	return keys, nil
 }
 
+// errWindowEnvCredentials reports an injected URL carrying user:pass@ on its
+// way to a tmux window. Window entries reach tmux as `-e KEY=VAL` arguments,
+// readable by any local user through ps. The message names the variable,
+// never its value.
+var errWindowEnvCredentials = errors.New(
+	"launch environment puts credentials in a URL, which a review window would expose on the command line; " +
+		"remove the user:pass@ part")
+
 // injectedWindowEnv flattens the same composer into the `KEY=VALUE` entries a
 // tmux review window is created with, so `forgectl pr` reaches the network by
 // the posture the operator configured rather than whatever the tmux server
@@ -77,6 +88,12 @@ func injectedWindowEnv(cfg config.Config) ([]string, error) {
 	}
 	entries := make([]string, 0, len(set)+len(unset))
 	for _, k := range slices.Sorted(maps.Keys(set)) {
+		// Only a value with a scheme is read as a URL here. A scheme-less
+		// proxy value was already checked by the launch-profile refusal, and
+		// reading every value as a URL would misread an '@' in no_proxy.
+		if v := set[k]; strings.Contains(v, "://") && config.URLHasUserinfo(v) {
+			return nil, fmt.Errorf("%w: %s", errWindowEnvCredentials, k)
+		}
 		entries = append(entries, k+"="+set[k])
 	}
 	for _, k := range slices.Sorted(slices.Values(unset)) {
