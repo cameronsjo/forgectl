@@ -31,16 +31,26 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 			cfg.Launch = effLaunch
 			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
 			profile := launch.Resolve(lc, cwd)
+			// The injected block is not part of the profile, so without this
+			// `which` reports a posture that omits variables the launch will
+			// carry — and a bad [proxy] launch_profile printed as a clean
+			// posture that every launch refuses. Exit 2 matches the launch
+			// paths: a read-only verb must not disagree with them about
+			// whether this config can launch.
+			injected, err := injectedLaunchKeys(cfg)
+			if err != nil {
+				return WithExitCode(termsafe.Error(err), 2)
+			}
 			if asJSON {
-				return writeLaunchWhichJSON(cmd.OutOrStdout(), profile, cwd, src)
+				return writeLaunchWhichJSON(cmd.OutOrStdout(), profile, cwd, src, injected)
 			}
 			out := th.Writer(cmd.OutOrStdout(), os.Environ())
-			printLaunchProfile(out, th, profile, cwd, src)
+			printLaunchProfile(out, th, profile, cwd, src, injected)
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,
-		`emit {"directory":...,"config":...,"matched":...,"harness":...,"model":...,"effort":...,"permission_mode":...,"allow_danger":...,"env_keys":[...],"add_dir":[...]} to stdout`)
+		`emit {"directory":...,"config":...,"matched":...,"harness":...,"model":...,"effort":...,"permission_mode":...,"allow_danger":...,"env_keys":[...],"injected_env_keys":[...],"add_dir":[...]} to stdout`)
 	return cmd
 }
 
@@ -59,45 +69,55 @@ type launchWhichJSON struct {
 	PermissionMode string   `json:"permission_mode"`
 	AllowDanger    bool     `json:"allow_danger"`
 	EnvKeys        []string `json:"env_keys"`
-	AddDir         []string `json:"add_dir"`
+	// InjectedEnvKeys names the variables forgectl itself adds to the harness
+	// environment — the bench telemetry block and the [proxy] launch_profile.
+	// Names only, same rule as EnvKeys: this answers "will my proxy be
+	// applied?", which no verb could answer before, without putting a proxy
+	// URL on a surface that gets pasted into an issue.
+	InjectedEnvKeys []string `json:"injected_env_keys"`
+	AddDir          []string `json:"add_dir"`
 }
 
 // buildLaunchWhichJSON converts a resolved profile into the --json wire
 // shape. Slice fields are never nil so the encoder emits [] rather than null
 // for a profile with no env or no add-dir entries.
-func buildLaunchWhichJSON(p launch.Profile, cwd, confPath string) launchWhichJSON {
+func buildLaunchWhichJSON(p launch.Profile, cwd, confPath string, injected []string) launchWhichJSON {
 	envKeys := launch.SortedEnvKeys(p.Env)
 	if envKeys == nil {
 		envKeys = []string{}
+	}
+	if injected == nil {
+		injected = []string{}
 	}
 	addDir := p.AddDir
 	if addDir == nil {
 		addDir = []string{}
 	}
 	return launchWhichJSON{
-		Directory:      cwd,
-		Config:         confPath,
-		Matched:        p.Match,
-		Harness:        p.Harness,
-		Model:          p.Model,
-		Effort:         p.Effort,
-		PermissionMode: p.PermissionMode,
-		AllowDanger:    p.AllowDanger,
-		EnvKeys:        envKeys,
-		AddDir:         addDir,
+		Directory:       cwd,
+		Config:          confPath,
+		Matched:         p.Match,
+		Harness:         p.Harness,
+		Model:           p.Model,
+		Effort:          p.Effort,
+		PermissionMode:  p.PermissionMode,
+		AllowDanger:     p.AllowDanger,
+		EnvKeys:         envKeys,
+		InjectedEnvKeys: injected,
+		AddDir:          addDir,
 	}
 }
 
 // writeLaunchWhichJSON encodes the profile through the sanctioned termsafe
 // seam. Nothing is written before a marshal error, so a failing writer or
 // encoder never leaves a partial document on stdout.
-func writeLaunchWhichJSON(w io.Writer, p launch.Profile, cwd, confPath string) error {
+func writeLaunchWhichJSON(w io.Writer, p launch.Profile, cwd, confPath string, injected []string) error {
 	enc := termsafe.JSONEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(buildLaunchWhichJSON(p, cwd, confPath))
+	return enc.Encode(buildLaunchWhichJSON(p, cwd, confPath, injected))
 }
 
-func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, confPath string) {
+func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, confPath string, injected []string) {
 	styles := th.Styles()
 	labelStyle := styles.Muted.Width(14)
 	valueStyle := styles.Fg
@@ -150,6 +170,12 @@ func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, conf
 	// reflect.Map arm in internal/cli/config_cmd.go.
 	if len(p.Env) > 0 {
 		row("env", redactedMapDisplay(launch.SortedEnvKeys(p.Env)))
+	}
+	// Injected is a separate row from env on purpose: one is what the operator
+	// configured for this directory, the other is what forgectl adds on top,
+	// and collapsing them would hide which is which.
+	if len(injected) > 0 {
+		row("injected", redactedMapDisplay(injected))
 	}
 	for i, d := range p.AddDir {
 		label := ""

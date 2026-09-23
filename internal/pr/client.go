@@ -88,6 +88,33 @@ type Client struct {
 	// zero-cost waiter; production waits long enough to observe delayed harness
 	// startup failures without sleeping once per review.
 	dispatchWait func(context.Context) error
+
+	// windowEnv resolves the environment forgectl adds to a review window, as
+	// `KEY=VALUE` entries. It is a FUNCTION rather than a slice for two
+	// reasons, both load-bearing:
+	//
+	//   - Import direction. The one composer every launch path shares lives in
+	//     internal/cli, which internal/pr cannot import. A closure carries it
+	//     in without a shared-types package.
+	//   - Refusal timing. Composing can fail (an unresolvable [proxy]
+	//     launch_profile), and that refusal belongs to the verbs that START a
+	//     harness. Resolving at construction would make `pr list` and
+	//     `pr teardown` fail on a config neither one reads.
+	//
+	// nil means the window inherits the tmux SERVER's environment, which is the
+	// behaviour of every release before this field existed. A review on a
+	// proxy-only network fails at its first request under that default, which
+	// is what this field exists to fix.
+	windowEnv func() ([]string, error)
+}
+
+// resolveWindowEnv is the single reader of windowEnv, so the nil default and
+// the refusal are handled once rather than at each dispatch site.
+func (c *Client) resolveWindowEnv() ([]string, error) {
+	if c.windowEnv == nil {
+		return nil, nil
+	}
+	return c.windowEnv()
 }
 
 // Option configures a Client at construction.
@@ -103,6 +130,18 @@ func WithSessionsDir(dir string) Option {
 // config.PrFindingsDir()) — used in tests to point at a temp dir.
 func WithFindingsDir(dir string) Option {
 	return func(c *Client) { c.findingsDir = dir }
+}
+
+// WithWindowEnv supplies the resolver for the environment every review window
+// is created with — see Client.windowEnv for why it is a function. Entries are
+// validated by the tmux boundary, not here, so one refusal covers every caller.
+//
+// DISCLOSURE: these reach the tmux command line, and process command lines are
+// readable by other accounts on the machine. This package does not inspect
+// values; the production resolver (internal/cli's injectedWindowEnv) refuses
+// a URL carrying user:pass@ before it gets here.
+func WithWindowEnv(resolve func() ([]string, error)) Option {
+	return func(c *Client) { c.windowEnv = resolve }
 }
 
 // WithTmuxSession overrides the tmux session review windows are created under.

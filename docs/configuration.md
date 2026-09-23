@@ -19,7 +19,9 @@ log_file  = ""      # "" = auto (daily-rotated file); "-" = stderr; or an explic
 
 That marker is the point. Every section's zero value means "absent, built-in defaults apply", so a value alone cannot tell a key you never set from a key you misspelled. The command also lists **unrecognized keys** — anything in the file that bound to no field, which catches `probe_hostt` and a key filed under the wrong section — and surfaces the decode error from a malformed file instead of silently defaulting past it. Resolved values that differ from the stored ones (the `off` log level, the dated log path, the launch binary chosen by `FORGECTL_CLAUDE_BIN` > `binary_path` > `PATH`) print in their own labeled blocks.
 
-`sessions.dsn` renders as `(redacted)`; its `(set)`/`(default)` marker is the useful signal and a connection string can carry a password. `launch.defaults.env` and `proxy.profiles` render their **key names only** for the same reason — they hold arbitrary environment values or credential-bearing proxy URLs. `forgectl launch which` applies the same policy to the launch map. The only forgectl output containing proxy values is the purpose-built `proxy use` shell protocol described in the [proxy](commands/proxy.md) doc; capture it through the wrapper rather than displaying it.
+`sessions.dsn` renders as `(redacted)`; its `(set)`/`(default)` marker is the useful signal and a connection string can carry a password. `launch.defaults.env` and `proxy.profiles` render their **key names only** for the same reason — they hold arbitrary environment values or credential-bearing proxy URLs. `forgectl launch which` applies the same policy to the launch map. `proxy.launch_profile` is a profile **name**, not a value, so it renders plain while the profile it names stays redacted.
+
+Proxy values reach exactly two forgectl outputs, both purpose-built and neither a display surface: the `proxy use` shell protocol, and the environment of a harness started with `proxy.launch_profile` set — both described in the [proxy](commands/proxy.md) doc. Capture the shell protocol through the wrapper rather than displaying it. Note what the second one implies: a launched agent can read its own environment, so every proxy value is readable by the harness and anything it runs. A `forgectl pr` review window receives the same environment as tmux `-e KEY=VALUE` arguments, which any local user can read on the command line, so a launch profile whose proxy URL carries `user:pass@` is refused.
 
 `--json` emits the same information machine-readably and is the stable surface — the human rendering may reflow.
 
@@ -39,7 +41,7 @@ Several command groups own their own config section, documented alongside that c
 - [`resume`](commands/resume.md) — session resume across repos
 - [`launch`](commands/launch.md) — `[launch]`, per-project Claude Code / Codex / Pi profiles
 - [`pr`](commands/pr.md) — `[pr]`, the clean-room reviewer's own posture
-- [`proxy`](commands/proxy.md) — `[proxy.profiles]`, current-shell profiles
+- [`proxy`](commands/proxy.md) — `[proxy.profiles]`, named profiles; `launch_profile` applies one to every launch
 - [`projects` and `review`](commands/projects-and-review.md) — `[projects]`, `[[projects.wings]]`, `[review]`, `[github]`, whose repos get enumerated and where clones land
 - [`bench`](commands/bench.md) — `[bench]`, interop with the local dev services
 - [`k8s`](commands/k8s.md) — bounded, terminal-safe log streaming

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -44,7 +45,8 @@ const logKeepDays = 7
 //	probe_port = 443
 //	ttl_seconds = 60
 //	timeout_ms = 1000
-//	[proxy]              # forgectl proxy — named current-shell proxy profiles
+//	[proxy]              # forgectl proxy — named proxy profiles
+//	launch_profile = "work"   # applied to every launch/resume/surface launch
 //	[proxy.profiles.work]
 //	http_proxy  = "http://proxy.example:8080"
 //	https_proxy = "http://proxy.example:8080"
@@ -246,16 +248,143 @@ func (nc NetConfig) IsZero() bool {
 }
 
 // ProxyConfig is the [proxy] section: named profiles whose values are emitted
-// only by `forgectl proxy use NAME` for a shell wrapper to capture and eval.
+// only by `forgectl proxy use NAME` for a shell wrapper to capture and eval,
+// or injected into a launched harness's environment by LaunchProfile.
 // The generic config renderer deliberately exposes profile names but, because
 // Profiles is a map, applies its map-value redaction policy to every value.
 type ProxyConfig struct {
 	Profiles map[string]ProxyProfile `toml:"profiles"`
+
+	// LaunchProfile names the profile every launch injects into the harness
+	// environment. A profile name is not sensitive — only its values are — so
+	// this renders plain in config output while the profile it names stays
+	// redacted. Empty means launches inherit whatever proxy variables the
+	// calling shell exported, which is the behaviour of every release before
+	// this field existed.
+	LaunchProfile string `toml:"launch_profile"`
 }
 
-// IsZero reports whether no named proxy profiles are configured.
+// ErrUnknownLaunchProfile reports a launch_profile naming a profile the config
+// does not define. Refusing beats launching unproxied: a typo that fell back to
+// the calling shell's variables would leave the harness reaching the network by
+// a path the operator did not choose, and the launch would look successful.
+// The message names the profile because a profile NAME is not sensitive — only
+// its values are.
+var ErrUnknownLaunchProfile = errors.New("proxy: launch_profile names no configured profile")
+
+// ErrEmptyLaunchProfile reports a launch_profile naming a profile that sets no
+// values. Distinct from internal/proxy's ErrEmptyProfile, whose message sends
+// the operator to `proxy off` — advice about the shell protocol that would
+// neither explain nor fix an empty launch profile.
+var ErrEmptyLaunchProfile = errors.New("proxy: launch_profile names a profile that sets no values")
+
+// ErrLaunchProfileNoBypass reports a launch profile that routes traffic through
+// a proxy but names no bypass list. Measured 2026-09-11 with curl 8.7.1: an
+// ABSENT no_proxy and an EMPTY no_proxy are equivalent, and NEITHER bypasses
+// loopback — `http://localhost:9/` was dialed at the proxy under both, and
+// direct only with no_proxy=localhost. So a profile omitting no_proxy sends the
+// harness's loopback requests to the proxy, whoever operates it.
+//
+// Only Go hard-codes a loopback exemption ahead of the bypass list, so
+// forgectl's own HTTP is immune and a Go test suite cannot see this. The
+// harness's curl, libcurl, and Node subprocesses are not immune — and forgectl
+// points the harness at a loopback OTLP collector in the same breath.
+//
+// Refusing is cheap to satisfy (add one field) and the alternative is a silent
+// egress path the operator did not choose, which is the same harm the
+// unknown-profile refusal exists to prevent.
+var ErrLaunchProfileNoBypass = errors.New(
+	"proxy: launch_profile sets a proxy but no no_proxy, so the harness would send loopback traffic to it; " +
+		"add no_proxy (include localhost and 127.0.0.1) to the profile")
+
+// ResolveLaunchProfile returns the profile named by LaunchProfile, or ok=false
+// when no launch profile is configured. It lives here rather than in
+// internal/proxy so `forgectl launch doctor` can reach the same refusal the
+// launch paths hit: a doctor that cannot see this key reports a healthy config
+// while every launch refuses.
+func (pc ProxyConfig) ResolveLaunchProfile() (profile ProxyProfile, ok bool, err error) {
+	if pc.LaunchProfile == "" {
+		return ProxyProfile{}, false, nil
+	}
+	profile, found := pc.Profiles[pc.LaunchProfile]
+	if !found {
+		return ProxyProfile{}, false, fmt.Errorf("%w: %q", ErrUnknownLaunchProfile, pc.LaunchProfile)
+	}
+	if profile.IsZero() {
+		return ProxyProfile{}, false, fmt.Errorf("%w: %q", ErrEmptyLaunchProfile, pc.LaunchProfile)
+	}
+	if profile.RoutesTraffic() && profile.NoProxy == "" {
+		return ProxyProfile{}, false, fmt.Errorf("%w: %q", ErrLaunchProfileNoBypass, pc.LaunchProfile)
+	}
+	if field, found := profile.credentialField(); found {
+		return ProxyProfile{}, false, fmt.Errorf("%w: %q sets %s", ErrLaunchProfileCredentials, pc.LaunchProfile, field)
+	}
+	return profile, true, nil
+}
+
+// ErrLaunchProfileCredentials reports a launch profile whose proxy URL carries
+// userinfo (user:pass@). The `pr` window path passes the launch environment to
+// tmux as `-e KEY=VAL` arguments, so the credential would sit on argv, where
+// any local user can read it through ps. The message names the field, never
+// its value.
+var ErrLaunchProfileCredentials = errors.New(
+	"proxy: launch_profile puts credentials in a proxy URL, which would expose them on the command line; " +
+		"remove the user:pass@ part and authenticate to the proxy another way")
+
+// credentialField reports the first proxy field whose URL carries userinfo.
+func (p ProxyProfile) credentialField() (string, bool) {
+	for _, f := range []struct{ name, value string }{
+		{"http_proxy", p.HTTPProxy},
+		{"https_proxy", p.HTTPSProxy},
+		{"all_proxy", p.AllProxy},
+	} {
+		if URLHasUserinfo(f.value) {
+			return f.name, true
+		}
+	}
+	return "", false
+}
+
+// URLHasUserinfo reports whether value, read as a URL, carries a user:pass@
+// part. A value with no scheme is parsed as http://, the way curl reads a
+// proxy. A value that does not parse counts as carrying userinfo when it
+// contains an '@', so a malformed URL fails closed rather than slipping
+// through. The empty string carries none.
+//
+// Two readings run, and either one refuses. Go's url.Parse is one; the other
+// is authorityHasAt, because curl and Node read `http:/u:p@h` and
+// `http:///u:p@h` as user:pass@h while url.Parse reads them as a path with no
+// user. The consumer's parser decides where a credential goes, not ours.
+func URLHasUserinfo(value string) bool {
+	if value == "" {
+		return false
+	}
+	if authorityHasAt(value) {
+		return true
+	}
+	raw := value
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return strings.Contains(value, "@")
+	}
+	return u.User != nil
+}
+
+// Validate reports a proxy section that would make every launch refuse. It
+// checks only the launch profile's resolvability; profile VALUES are validated
+// at their sink, where the representability rules live.
+func (pc ProxyConfig) Validate() error {
+	_, _, err := pc.ResolveLaunchProfile()
+	return err
+}
+
+// IsZero reports whether the section configures nothing: no named profiles and
+// no launch profile.
 func (pc ProxyConfig) IsZero() bool {
-	return len(pc.Profiles) == 0
+	return len(pc.Profiles) == 0 && pc.LaunchProfile == ""
 }
 
 // ProxyProfile is one [proxy.profiles.NAME] table. Each configured value is
@@ -273,6 +402,13 @@ type ProxyProfile struct {
 // IsZero reports whether the profile sets no proxy value at all.
 func (p ProxyProfile) IsZero() bool {
 	return p.HTTPProxy == "" && p.HTTPSProxy == "" && p.AllProxy == "" && p.NoProxy == ""
+}
+
+// RoutesTraffic reports whether the profile names a proxy for any scheme. It
+// deliberately excludes NoProxy, which routes nothing — it only carves
+// exceptions out of whatever the other three set.
+func (p ProxyProfile) RoutesTraffic() bool {
+	return p.HTTPProxy != "" || p.HTTPSProxy != "" || p.AllProxy != ""
 }
 
 // The methods below make the never-print guarantee a property of the type
@@ -891,9 +1027,10 @@ func DecodeStrict(data []byte) (Config, error) {
 	return cfg, err
 }
 
-// Validate decodes the config file and returns any parse error. A missing file
-// is valid (built-in defaults). Used by `forgectl launch doctor` to surface a
-// malformed config that Load() tolerated with a warning.
+// Validate decodes the config file and checks the sections that carry semantic
+// rules — see ValidatePath. A missing file is valid (built-in defaults). Used
+// by `forgectl launch doctor` to surface a config that Load() tolerated with a
+// warning, whether it was malformed or merely unlaunchable.
 func Validate() error {
 	path, err := ConfigPath()
 	if err != nil {
@@ -902,8 +1039,13 @@ func Validate() error {
 	return ValidatePath(path)
 }
 
-// ValidatePath strictly decodes the already-resolved config path. A missing
-// file remains valid and selects built-in defaults.
+// ValidatePath strictly decodes the already-resolved config path, then asks
+// each section that owns a semantic rule to check itself — [docs], [proxy],
+// and [theme]. A missing file remains valid and selects built-in defaults.
+//
+// The semantic half is the point for `launch doctor`: a config can decode
+// cleanly and still be one every launch path refuses, and a doctor that only
+// parsed would report it healthy.
 func ValidatePath(path string) error {
 	data, err := ReadPath(path)
 	if os.IsNotExist(err) {
@@ -917,6 +1059,9 @@ func ValidatePath(path string) error {
 		return err
 	}
 	if err := cfg.Docs.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Proxy.Validate(); err != nil {
 		return err
 	}
 	return cfg.Theme.Validate()
@@ -1426,3 +1571,42 @@ func MergeLegacyIntoLaunch(cfg Config, legacy LaunchConfig) (merged LaunchConfig
 type nopCloser struct{}
 
 func (nopCloser) Close() error { return nil }
+
+// HasURLScheme reports whether value begins with a URL scheme followed by a
+// slash (`http:/`, `socks5://`). It is how a caller that must not read every
+// value as a URL (no_proxy may hold an '@') picks out the ones that are.
+func HasURLScheme(value string) bool {
+	_, rest, ok := cutScheme(value)
+	return ok && strings.HasPrefix(rest, "/")
+}
+
+// authorityHasAt reports an '@' in the authority of value, read the lenient
+// way curl and Node read it: drop a leading scheme, then every slash after
+// it, and look for '@' before the first '/', '?' or '#'. A value with no
+// scheme is all authority up to its first '/'.
+func authorityHasAt(value string) bool {
+	rest := value
+	if _, afterScheme, ok := cutScheme(value); ok && strings.HasPrefix(afterScheme, "/") {
+		rest = strings.TrimLeft(afterScheme, "/")
+	}
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	return strings.Contains(rest, "@")
+}
+
+// cutScheme splits a leading RFC 3986 scheme (`ALPHA *( ALPHA / DIGIT / "+" /
+// "-" / "." ) ":"`) off value. ok is false when value has none.
+func cutScheme(value string) (scheme, rest string, ok bool) {
+	for i, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+		case i > 0 && (r >= '0' && r <= '9' || r == '+' || r == '-' || r == '.'):
+		case i > 0 && r == ':':
+			return value[:i], value[i+1:], true
+		default:
+			return "", value, false
+		}
+	}
+	return "", value, false
+}

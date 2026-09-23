@@ -17,9 +17,10 @@ hearth_dir    = "~/Projects/hearth"      # else $HEARTH_DIR; unset ⇒ hearth re
 chronicle_dir = "~/Projects/chronicle"   # else $CHRONICLE_DIR
 otlp_endpoint = "http://localhost:16317" # hearth's frozen OTLP transport (baked default)
 otlp_protocol = "grpc"                    # baked default
-telemetry     = false                     # opt-in: inject OTLP env into `forgectl launch` sessions
+telemetry     = false                     # opt-in: inject OTLP env into launched sessions
 ```
 
 - **`bench status`** probes each component — `docker compose -p hearth ps` plus HTTP/OTLP reachability, and `chronicle status --json` corroborated against `docker compose -p sessions ps` (chronicle's DB containers) plus the `local.chronicle-sync` LaunchAgent. Each resolves to `ok | degraded | unavailable | not-configured` with a human reason; a missing `docker`, an unloaded daemon, or an unconfigured dir is a graceful state, never an error, so `bench status` always exits 0. `--json` emits the report to stdout for scripting.
-- **`telemetry = true`** injects the Claude-Code-tailored OpenTelemetry env block into launched sessions so their metrics and logs flow to the local collector. Opt-in: with it off, no session points at a collector. A profile `env` value wins over the injected default. `forgectl launch doctor` shows the current telemetry state.
+- **`telemetry = true`** injects the Claude-Code-tailored OpenTelemetry env block into launched sessions so their metrics and logs flow to the local collector. Opt-in: with it off, no session points at a collector. A profile `env` value wins over the injected default. `forgectl launch doctor` shows the current telemetry state. `launch`, `resume`, `surface launch`, and `forgectl pr`'s tmux reviewer all inject it. `forgectl launch which` names the injected variables so you can confirm it without reading the source.
+- **The collector lives on loopback, so a proxy profile can cut it off.** `otlp_endpoint` defaults to `localhost:16317`. If you set `[proxy] launch_profile` (see [proxy](proxy.md)), that profile must carry a `no_proxy` (forgectl refuses one without it) and it must include `localhost` — otherwise the session's OTLP exporter dials the collector through the corporate proxy and the metrics never arrive.
 - **`bench up`** brings the configured services up via their own entrypoints (hearth's `scripts/start.sh`, chronicle's `make sync`); an unconfigured service is skipped with a note. **`bench open`** opens a service UI in the browser (`open` on macOS, `xdg-open` elsewhere).

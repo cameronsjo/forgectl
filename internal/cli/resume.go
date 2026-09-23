@@ -14,12 +14,12 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 
-	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/resume"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -467,6 +467,20 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	}
 	args := launch.ResumeArgs(profile, s.ID, fork)
 
+	// Before the dry-run branch and before any task is restored: a refusal here
+	// is a pure function of the config, so it must not arrive after this command
+	// has written to disk, and --dry-run's contract below is that its exit code
+	// is the one the real run would give.
+	//
+	// Exit 2, not 1: resume.md decodes exit 1 as "no session matched, change
+	// the filter", and no filter change can fix a bad launch_profile. 2 is the
+	// refusal code this file already uses for the live-session case, and the
+	// code `launch` and `surface launch` give for this same config.
+	injected, unset, err := injectedLaunchEnv(cfg)
+	if err != nil {
+		return WithExitCode(termsafe.Error(err), 2)
+	}
+
 	// --dry-run is the headless escape. Resuming exec-replaces this process
 	// with an INTERACTIVE claude (ResumeArgs injects --ide, which rules out a
 	// -p/--print form), so without this there is no way to ask "what would
@@ -521,7 +535,12 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 		return WithExitCode(fmt.Errorf("enter %s: %s", safeTerm(s.Cwd), safeTerm(err.Error())), 1)
 	}
 
-	env := launch.MergeEnv(os.Environ(), launch.MergeMaps(bench.TelemetryEnv(cfg), profile.Env))
+	// Same layering BuildInvocation does: removals hit the inherited snapshot
+	// only, so a profile Env entry naming a removed variable still lands.
+	env := launch.MergeEnv(
+		launch.StripEnv(os.Environ(), unset),
+		launch.MergeMaps(injected, profile.Env),
+	)
 	fmt.Fprintf(errOut, "forgectl: resuming %s in %s\n", safeTerm(displayName(s)), safeTerm(s.Cwd))
 	slog.Debug("Preparing to exec claude for a resume.", "session", s.ID, "cwd", s.Cwd, "fork", fork)
 

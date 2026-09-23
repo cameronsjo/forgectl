@@ -46,7 +46,7 @@ deep-dive get a link here.
 | `docker` | Build/run/shell images tagged from git repo/branch/sha | Usage below |
 | `docs` | Local markdown reader: render + serve an indexed doc set over loopback HTTP | [docs](docs/commands/docs.md) |
 | `net` | Check cached reachability of the configured probe endpoint | Usage below |
-| `proxy` | Apply config-defined profiles to the current shell through an explicit wrapper | [proxy](docs/commands/proxy.md) |
+| `proxy` | Apply a named proxy profile to the current shell, or to every launched harness | [proxy](docs/commands/proxy.md) |
 | `k8s` | Safely stream ordinary kubectl logs, plus bounded namespace/exec/inspect helpers | [k8s](docs/commands/k8s.md) |
 | `ghostty` | Theme + keybind reporting, parsed live from the ghostty CLI | Usage below |
 | `pip` | Comment- and whitespace-preserving `pip.conf` editor | Usage below |
@@ -238,11 +238,12 @@ forgectl net                             # show the cached (or freshly probed) a
 forgectl net --refresh                   # force a new probe, bypassing the cache
 forgectl net --json                      # machine-readable output for scripting
 
-# proxy — apply config-defined profiles to the current shell through an explicit wrapper
+# proxy — apply a named profile to the current shell, or to every launched harness
 forgectl proxy use NAME                  # emit a fixed export/unset batch (does not mutate the parent shell)
 forgectl proxy off                       # emit unsets for every supported upper/lower-case variable
 forgectl proxy list                      # list configured profile names only — never a value
 forgectl proxy status                    # matched profile + per-variable set/unset — never a value
+#   [proxy] launch_profile = "work"     # apply one profile to every launch/resume/surface launch
 
 # k8s — safely stream ordinary kubectl logs, plus small bounded namespace/exec/inspect helpers
 forgectl k8s logs deployment/api -f                     # forward resource/follow args directly to kubectl logs
@@ -425,7 +426,7 @@ configuration even though VS Code settings are not quarantined wholesale.
 
 ## Configuration
 
-Optional; forgectl runs with sensible defaults and no config file. Host-level settings (`no_icons`, `log_level`, `log_file`), per-command config sections (`[launch]`, `[pr]`, `[proxy.profiles]`, `[projects]`, `[review]`, `[github]`, `[bench]`, `[docs]`), and logging behavior are documented in [docs/configuration.md](docs/configuration.md).
+Optional; forgectl runs with sensible defaults and no config file. Host-level settings (`no_icons`, `log_level`, `log_file`), per-command config sections (`[launch]`, `[pr]`, `[proxy]`, `[projects]`, `[review]`, `[github]`, `[bench]`, `[docs]`), and logging behavior are documented in [docs/configuration.md](docs/configuration.md).
 
 ## License
 

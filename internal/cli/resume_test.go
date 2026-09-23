@@ -241,6 +241,47 @@ func TestResumeSession_RefusesLiveButNotWithFork(t *testing.T) {
 	}
 }
 
+// TestResumeSession_DryRunCarriesTheLaunchProfileRefusal pins the contract the
+// --dry-run branch states in its own comment: it "exits with the code the real
+// run would, so a script can trust the dry-run's verdict and not just its
+// text." A config refusal resolved after that branch would break exactly that
+// — the dry run would report a viable resume the real run declines. Resolving
+// it before the branch also keeps the refusal ahead of the task restore, so a
+// typo cannot write task files and then fail.
+func TestResumeSession_DryRunCarriesTheLaunchProfileRefusal(t *testing.T) {
+	fakeClaudeBin(t)
+	pinResumePaths(t)
+	pinCwd(t)
+
+	cfg := config.Config{Proxy: config.ProxyConfig{
+		Profiles:      map[string]config.ProxyProfile{"work": {HTTPProxy: "http://proxy.example:8080"}},
+		LaunchProfile: "wrok",
+	}}
+
+	cmd, _, _ := newTestCmd()
+	err := resumeSession(cmd, cfg, nil, deadSession(t), false, true)
+	if err == nil {
+		t.Fatal("--dry-run reported a viable resume that the real run refuses")
+	}
+	if !strings.Contains(err.Error(), "wrok") {
+		t.Errorf("refusal = %v, want it to name the profile that is missing", err)
+	}
+	// Exit 2, not 1. docs/commands/resume.md decodes 1 as "no session matched,
+	// change the filter", and no filter change fixes a bad launch_profile — a
+	// script reading 1 here would retry forever. 2 is this file's refusal code
+	// and the one `launch` and `surface launch` give for the same config.
+	if got := ExitCode(err); got != 2 {
+		t.Errorf("exit code = %d, want 2 — 1 decodes as \"no session matched\"", got)
+	}
+
+	// The control: the same fixture with no launch profile must dry-run clean,
+	// or the assertion above could be failing for an unrelated reason.
+	cmd, _, _ = newTestCmd()
+	if err := resumeSession(cmd, config.Config{}, nil, deadSession(t), false, true); err != nil {
+		t.Fatalf("control dry run failed without any launch profile: %v", err)
+	}
+}
+
 // TestPrintSessions_EmptyIsCalm checks the cold-start path says so plainly
 // rather than printing an empty table.
 func TestPrintSessions_EmptyIsCalm(t *testing.T) {

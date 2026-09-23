@@ -86,6 +86,17 @@ An `effort` outside the five accepted levels is rejected before anything is laun
 `FORGECTL_CODEX_BIN` / `codex_binary_path` / `codex`, or
 `FORGECTL_PI_BIN` / `pi_binary_path` / `pi`.
 
+**On a network that requires a proxy**, set `[proxy] launch_profile` and
+`launch`, `resume`, `surface launch`, and the `forgectl pr` reviewer all inject
+that profile's variables into the harness environment — see [proxy](proxy.md),
+which covers the two ways the `pr` path differs. A profile's `env` still wins
+over the injected values.
+
+**`launch which` names what gets injected.** An `injected` row (and
+`injected_env_keys` under `--json`) lists the variable names forgectl adds on
+top of the profile, with a `-` prefix on any it removes. Names only, never
+values — the same rule the `env` row follows.
+
 Codex modes translate to `codex`, `codex resume --last`, `codex fork --last`,
 and `codex exec`. Clean-room reviews accept `--agent codex` only for
 `forgectl pr local --operator-authored` — code you state that you wrote.
