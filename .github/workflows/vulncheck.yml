@@ -14,6 +14,11 @@ name: Vulncheck
 # A standard-library finding is fixed by a Go patch release, not by this
 # repo. check-latest makes the job scan with the newest 1.26 patch, the same
 # toolchain a fresh build gets, instead of whatever the runner image cached.
+#
+# When a run goes red, read the finding's module line. "Standard library":
+# re-run once a Go patch with the fix is out, then cut a release so shipped
+# binaries carry it. A module: bump it to the fixed version (go get, go mod
+# tidy) in its own PR.
 
 on:
   push:

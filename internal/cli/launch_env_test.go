@@ -178,3 +178,33 @@ func TestInjectedWindowEnv_RefusesQueryStringOnArgv(t *testing.T) {
 		t.Errorf("message = %q, want it to name the variable", err)
 	}
 }
+
+// TestInjectedWindowEnv_RefusesSchemelessQuery pins a review follow-up: an
+// endpoint without a scheme ("host:4318/v1?api_key=…") skipped the query
+// check because only scheme'd values were read as URLs. The refusal also
+// names the config setting the value came from, not just the env var.
+func TestInjectedWindowEnv_RefusesSchemelessQuery(t *testing.T) {
+	cfg := config.Config{Bench: config.BenchConfig{
+		Telemetry:    true,
+		OTLPEndpoint: "ingest.example:4318/v1?api_key=secretkey123", //nolint:gosec // G101: a fake key the refusal must catch
+	}}
+	_, err := injectedWindowEnv(cfg)
+	if !errors.Is(err, errWindowEnvQuery) {
+		t.Fatalf("err = %v, want errWindowEnvQuery", err)
+	}
+	if strings.Contains(err.Error(), "secretkey123") {
+		t.Errorf("message leaked the key: %q", err)
+	}
+	if !strings.Contains(err.Error(), "[bench].otlp_endpoint") {
+		t.Errorf("message = %q, want it to name the config setting", err)
+	}
+}
+
+func TestEndpointForDisplay_HidesQuery(t *testing.T) {
+	if got := endpointForDisplay("https://ingest.example/v1?api_key=k"); got != "https://ingest.example/v1?[query hidden]" {
+		t.Errorf("got %q", got)
+	}
+	if got := endpointForDisplay("http://localhost:16317"); got != "http://localhost:16317" {
+		t.Errorf("got %q", got)
+	}
+}

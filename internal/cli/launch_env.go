@@ -79,7 +79,22 @@ var errWindowEnvCredentials = errors.New(
 // harness's own environment or a header config, never from this URL.
 var errWindowEnvQuery = errors.New(
 	"launch environment puts a query string in a URL, which a review window would expose on the command line; " +
-		"remove the ?… part and pass any key another way")
+		"remove the ?… part and give the collector its key through its headers config or the harness environment")
+
+// windowEnvSource names an injected variable together with the config setting
+// it comes from, so a refusal points at the line to edit rather than at an
+// environment variable the operator never set by hand.
+func windowEnvSource(key string) string {
+	switch {
+	case key == "OTEL_EXPORTER_OTLP_ENDPOINT":
+		return key + " (from [bench].otlp_endpoint)"
+	case strings.EqualFold(key, "HTTP_PROXY"), strings.EqualFold(key, "HTTPS_PROXY"),
+		strings.EqualFold(key, "ALL_PROXY"), strings.EqualFold(key, "NO_PROXY"):
+		return key + " (from the [proxy] launch_profile)"
+	default:
+		return key
+	}
+}
 
 // injectedWindowEnv flattens the same composer into the `KEY=VALUE` entries a
 // tmux review window is created with, so `forgectl pr` reaches the network by
@@ -109,13 +124,16 @@ func injectedWindowEnv(cfg config.Config) ([]string, error) {
 		// reading every value as a URL would misread an '@' in no_proxy.
 		// HasURLScheme, not "://", so the one-slash form `http:/u:p@h` that
 		// curl accepts is checked too.
-		if v := set[k]; config.HasURLScheme(v) {
-			if config.URLHasUserinfo(v) {
-				return nil, fmt.Errorf("%w: %s", errWindowEnvCredentials, k)
-			}
-			if strings.Contains(v, "?") {
-				return nil, fmt.Errorf("%w: %s", errWindowEnvQuery, k)
-			}
+		v := set[k]
+		if config.HasURLScheme(v) && config.URLHasUserinfo(v) {
+			return nil, fmt.Errorf("%s: %w", windowEnvSource(k), errWindowEnvCredentials)
+		}
+		// The query check does not wait for a scheme: an endpoint written as
+		// "host:4318/v1?api_key=…" is still a URL to the client that reads it,
+		// and no injected value (a proxy, an endpoint, a no_proxy list, a
+		// telemetry switch) has a legitimate '?'.
+		if strings.Contains(v, "?") {
+			return nil, fmt.Errorf("%s: %w", windowEnvSource(k), errWindowEnvQuery)
 		}
 		entries = append(entries, k+"="+set[k])
 	}

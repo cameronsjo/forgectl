@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -114,9 +115,17 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 			// off is a valid choice (a machine with no local collector).
 			if cfg.Bench.Telemetry {
 				_, _ = fmt.Fprintf(out, "%s telemetry: on → %s (%s)\n", marks.OK,
-					termsafe.SafeLine(cfg.Bench.ResolvedOTLPEndpoint()), termsafe.SafeLine(cfg.Bench.ResolvedOTLPProtocol()))
+					termsafe.SafeLine(endpointForDisplay(cfg.Bench.ResolvedOTLPEndpoint())), termsafe.SafeLine(cfg.Bench.ResolvedOTLPProtocol()))
 			} else {
 				_, _ = fmt.Fprintf(out, "%s telemetry: off (enable with [bench].telemetry = true)\n", marks.Warn)
+			}
+
+			// The same check `forgectl pr` runs before it opens a review window,
+			// so doctor is never green for a config pr would refuse. The
+			// refusal names the setting, never its value.
+			if _, err := injectedWindowEnv(cfg); err != nil {
+				_, _ = fmt.Fprintf(out, "%s review-window environment: %s\n", marks.Fail, termsafe.SafeLine(err.Error()))
+				healthy = false
 			}
 
 			if !healthy {
@@ -125,4 +134,14 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 			return nil
 		},
 	}
+}
+
+// endpointForDisplay drops a query string before an endpoint is printed. A
+// query is where an ingest key rides, and `forgectl pr` refuses one for that
+// reason; doctor must not print the key it is about to report as refused.
+func endpointForDisplay(endpoint string) string {
+	if i := strings.IndexByte(endpoint, '?'); i >= 0 {
+		return endpoint[:i] + "?[query hidden]"
+	}
+	return endpoint
 }

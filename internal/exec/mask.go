@@ -80,7 +80,11 @@ func (m argMask) args(args []string) []string {
 // its key: KEY=[redacted] rather than a bare [redacted].
 func (m argMask) text(s string) string {
 	for _, entry := range m.entries {
-		s = strings.ReplaceAll(s, entry, m.shown[entry])
+		if len(entry) >= minScrubLen {
+			s = strings.ReplaceAll(s, entry, m.shown[entry])
+		} else {
+			s = replaceWholeWord(s, entry, m.shown[entry])
+		}
 	}
 	for _, v := range m.values {
 		if len(v) >= minScrubLen {

@@ -252,10 +252,10 @@ func (c *Client) NewWindowWithEnv(
 		args = append(args, "--")
 		args = append(args, command...)
 	}
-	// The -e values reach tmux's argv but never the debug log or the error
-	// text: a profile value the config renderer keeps redacted would otherwise
-	// land in both whenever tmux fails (#529).
-	out, err := c.run.Run(exec.WithMaskedAssignments(ctx, env), c.tmuxBin, args...)
+	// The -e values that could carry a secret reach tmux's argv but never the
+	// debug log or the error text: a profile value the config renderer keeps
+	// redacted would otherwise land in both whenever tmux fails (#529).
+	out, err := c.run.Run(exec.WithMaskedAssignments(ctx, secretBearing(env)), c.tmuxBin, args...)
 	if err != nil {
 		return WindowIdentity{}, fmt.Errorf("create window %q: %w", name, err)
 	}
@@ -272,6 +272,22 @@ func (c *Client) NewWindowWithEnv(
 		SessionID:  current.ID,
 		Name:       name,
 	}, nil
+}
+
+// secretBearing keeps the entries whose value could hold a secret: anything
+// shaped like a URL or host:port (a ':', '/', '?' or '@'), which is where a
+// key or a password rides. Plain constants such as the telemetry switches
+// ("1", "true", "grpc") are left out on purpose: masking them also scrubs
+// tmux's own error text, turning "can't find window: @1" into "@[redacted]",
+// and the window target is what `pr repair` needs.
+func secretBearing(env []string) []string {
+	var out []string
+	for _, e := range env {
+		if _, value, ok := strings.Cut(e, "="); ok && strings.ContainsAny(value, ":/?@") {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // KillWindow kills the window the identity names, revalidating generation and

@@ -107,3 +107,12 @@ func TestMaskText_AdjacentShortValuesStayGlued(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// TestMaskText_ShortEntryOnlyAsWholeWord: a short KEY=VALUE entry must not
+// rewrite a longer token that merely contains it ("X=a" inside "MAX=abc").
+func TestMaskText_ShortEntryOnlyAsWholeWord(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"X=a"}))
+	if got := m.text("MAX=abc and X=a"); got != "MAX=abc and X="+Redacted {
+		t.Errorf("got %q", got)
+	}
+}
