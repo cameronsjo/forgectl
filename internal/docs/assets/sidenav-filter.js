@@ -71,6 +71,14 @@
       }
     });
 
+    // Say so when nothing matches, rather than leaving a blank sidebar.
+    var empty = document.getElementById("filter-empty");
+    if (empty) {
+      var anyLink = links.some(function (a) { return matches(a, q); });
+      empty.hidden = anyLink;
+      empty.textContent = anyLink ? "" : "No docs match \u201c" + input.value.trim() + "\u201d.";
+    }
+
     groups.forEach(function (g) {
       var anyVisible = false;
       var sib = g.nextElementSibling;

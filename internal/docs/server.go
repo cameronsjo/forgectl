@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -332,7 +333,6 @@ func serveFont(w http.ResponseWriter, r *http.Request) {
 	// body is one of the nine embedded woff2 files, served as font/woff2 with
 	// nosniff from SecurityHeaders: a browser never parses it as HTML.
 	_, _ = w.Write(body) //nolint:gosec // G705: embedded font bytes, not request-derived content
-
 }
 
 func serveStaticJS(body []byte) http.HandlerFunc {
@@ -388,7 +388,7 @@ func buildHome(idx *Index) *homeData {
 			Href:     "/doc/" + d.RootLabel + "/" + d.RelPath,
 			Title:    d.Title,
 			Path:     d.RootLabel + "/" + d.RelPath,
-			Modified: d.ModTime.Local().Format("2006-01-02"),
+			Modified: modifiedLabel(d.ModTime, time.Now()),
 		})
 	}
 	return home
@@ -607,4 +607,14 @@ func toLink(d Doc, currentRoot, currentRel string) sidenavLink {
 		FilterText: strings.ToLower(d.Title + " " + d.RelPath),
 		Current:    d.RootLabel == currentRoot && d.RelPath == currentRel,
 	}
+}
+
+// modifiedLabel shows a time for a doc changed today and a date otherwise, so
+// the "Recently changed" rows can be told apart on a busy day.
+func modifiedLabel(mod, now time.Time) string {
+	mod, now = mod.Local(), now.Local()
+	if mod.Year() == now.Year() && mod.YearDay() == now.YearDay() {
+		return "today " + mod.Format("15:04")
+	}
+	return mod.Format("2006-01-02")
 }

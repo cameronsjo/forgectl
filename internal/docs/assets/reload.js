@@ -71,7 +71,13 @@
     var open = {};
     if (!root) { return open; }
     root.querySelectorAll("details").forEach(function (d, i) {
-      open[detailsKey(d, i)] = d.open;
+      // While a filter query is live, sidenav-filter.js has forced every
+      // folder open or shut and kept the reader's own state in
+      // data-open-at-rest. Carry that, not the forced state, or clearing the
+      // box after a reload would leave every matched folder sprung open.
+      open[detailsKey(d, i)] = d.dataset.openAtRest !== undefined
+        ? d.dataset.openAtRest === "1"
+        : d.open;
     });
     return open;
   }
@@ -87,6 +93,42 @@
         d.open = open[k] || (keepServerOpen && d.open);
       }
     });
+  }
+
+  // The swap replaces the nodes that hold keyboard focus, which would drop it
+  // to <body>. Remember the focused control by something the fresh page
+  // shares (an href, an id, a folder's label) and put focus back on it.
+  function focusKey() {
+    var el = document.activeElement;
+    if (!el || el === document.body) { return null; }
+    if (el.id) { return { id: el.id }; }
+    var href = el.getAttribute && el.getAttribute("href");
+    if (href) { return { href: href, cls: el.className }; }
+    if (el.tagName === "SUMMARY") {
+      var label = el.querySelector(".label");
+      if (label) { return { summary: label.textContent }; }
+    }
+    return null;
+  }
+
+  function restoreFocus(key) {
+    if (!key) { return; }
+    var el = null;
+    if (key.id) {
+      el = document.getElementById(key.id);
+    } else if (key.href) {
+      Array.prototype.some.call(document.querySelectorAll("a[href]"), function (a) {
+        if (a.getAttribute("href") === key.href && a.className === key.cls) { el = a; return true; }
+        return false;
+      });
+    } else if (key.summary) {
+      Array.prototype.some.call(document.querySelectorAll("summary"), function (s) {
+        var label = s.querySelector(".label");
+        if (label && label.textContent === key.summary) { el = s; return true; }
+        return false;
+      });
+    }
+    if (el && el !== document.activeElement) { el.focus({ preventScroll: true }); }
   }
 
   function replace(sel, fresh) {
@@ -110,6 +152,7 @@
     var bodyOpen = openDetails(document.querySelector(".doc-body"));
     var inlineOutline = document.querySelector("details.outline-inline");
     var inlineOpen = inlineOutline ? inlineOutline.open : false;
+    var focus = focusKey();
 
     document.title = fresh.title;
     // <main> itself stays: it is the scroll container, and svg-panzoom.js
@@ -133,6 +176,7 @@
     }
     if (window.ForgectlMermaid) { window.ForgectlMermaid.refresh(); }
     applyAnchor(anchor);
+    restoreFocus(focus);
     return true;
   }
 
@@ -184,9 +228,17 @@
       })
       .then(function (html) {
         var fresh = new DOMParser().parseFromString(html, "text/html");
-        if (!swap(fresh)) { fullReload(); }
+        if (!swap(fresh)) {
+          console.debug("[forgectl docs] live reload: page changed shape; reloading in full");
+          fullReload();
+        }
       })
-      .catch(function () { fullReload(); })
+      .catch(function (err) {
+        // Logged so a swap path that always falls back is distinguishable
+        // from a working one in devtools; the reader sees a full reload.
+        console.debug("[forgectl docs] live reload: in-place update failed; reloading in full:", err);
+        fullReload();
+      })
       .then(function () {
         busy = false;
         if (again) { again = false; refresh(); }

@@ -38,6 +38,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testIndex(t *testing.T) (*Index, string) {
@@ -486,5 +487,15 @@ func TestServer_Fonts_OnlyVendoredFontsResolve(t *testing.T) {
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("%s: status %d, want 404", path, rec.Code)
 		}
+	}
+}
+
+func TestModifiedLabel(t *testing.T) {
+	now := time.Date(2026, 9, 25, 18, 0, 0, 0, time.Local)
+	if got := modifiedLabel(time.Date(2026, 9, 25, 9, 5, 0, 0, time.Local), now); got != "today 09:05" {
+		t.Errorf("same day: got %q", got)
+	}
+	if got := modifiedLabel(time.Date(2026, 9, 24, 23, 0, 0, 0, time.Local), now); got != "2026-09-24" {
+		t.Errorf("earlier day: got %q", got)
 	}
 }

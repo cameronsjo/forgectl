@@ -391,7 +391,7 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Number-key select (thumb mode) — jump straight to that row and act.
 	if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
-		if idx := int(key[0] - '1'); idx < len(m.l.Items()) {
+		if idx := int(key[0] - '1'); idx < len(m.l.VisibleItems()) {
 			m.l.Select(idx)
 			return m.activate()
 		}
