@@ -109,12 +109,14 @@ func newRecipeAfkCmd(deps module.Deps) *cobra.Command {
 }
 
 func runRecipeAfk(ctx context.Context, runner exec.Runner, opts recipeAfkOptions) error {
-	target, ok := resolveRecipeHerdrTarget(opts.Target)
+	target, source, ok := resolveRecipeHerdrTarget(opts.Target)
 	if !ok {
 		return WithExitCode(fmt.Errorf("no Herdr target found; pass --target or run inside a Herdr pane with %s or %s set", herdrPaneIDEnv, herdrActivePaneIDEnv), 2)
 	}
 	if err := validateRecipeHerdrTarget(target); err != nil {
-		return WithExitCode(err, 2)
+		// Name the source: a bad value inherited from HERDR_PANE_ID gives the
+		// operator no other path back to the variable that set it (#464).
+		return WithExitCode(fmt.Errorf("%w (from %s)", err, source), 2)
 	}
 	if opts.Rename != "" {
 		if err := validateRecipeRename(opts.Rename); err != nil {
@@ -398,14 +400,14 @@ func validateRecipePrompt(prompt string) error {
 	return nil
 }
 
-func resolveRecipeHerdrTarget(explicit string) (string, bool) {
+func resolveRecipeHerdrTarget(explicit string) (target, source string, ok bool) {
 	if explicit != "" {
-		return explicit, true
+		return explicit, "--target", true
 	}
 	for _, key := range herdrTargetEnvKeys {
 		if value, ok := lookupRecipeEnv(key); ok && value != "" {
-			return value, true
+			return value, key, true
 		}
 	}
-	return "", false
+	return "", "", false
 }
