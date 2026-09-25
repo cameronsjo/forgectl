@@ -8,8 +8,22 @@ set -eu
 : "${HEAD_REPO:?HEAD_REPO must be set}"
 : "${BASE_REPO:?BASE_REPO must be set}"
 
+# Judge only the PR's own commits. In CI, HEAD is the pull-request merge
+# commit, which also carries every main commit since the branch point: a
+# release cut landing there edits CHANGELOG.md and would be blamed on this PR
+# (#458). A three-dot diff starts at the merge base of BASE_SHA and the PR head,
+# so it holds whether BASE_SHA is the old branch point or the current main tip.
+pr_head=${HEAD_SHA:-}
+if [ -z "$pr_head" ]; then
+	if git rev-parse --verify --quiet HEAD^2 >/dev/null; then
+		pr_head=$(git rev-parse HEAD^2)
+	else
+		pr_head=$(git rev-parse HEAD)
+	fi
+fi
+
 set +e
-git diff --quiet "$BASE_SHA" HEAD -- CHANGELOG.md
+git diff --quiet "$BASE_SHA...$pr_head" -- CHANGELOG.md
 diff_status=$?
 set -e
 
@@ -20,7 +34,7 @@ case "$diff_status" in
 	1)
 		;;
 	*)
-		echo "::error::Unable to compare CHANGELOG.md with base commit $BASE_SHA." >&2
+		echo "::error::Unable to compare CHANGELOG.md with base commit $BASE_SHA (PR head $pr_head)." >&2
 		exit "$diff_status"
 		;;
 esac

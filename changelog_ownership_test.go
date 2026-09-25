@@ -110,6 +110,48 @@ func TestChangelogOwnershipGuard(t *testing.T) {
 	}
 }
 
+// TestChangelogOwnershipGuardIgnoresMainsOwnReleaseEdit pins #458. In CI the
+// checkout is the pull-request merge commit, which also carries any release
+// that landed on main after the branch point. That release's CHANGELOG.md
+// edit belongs to main, not to the PR, whichever base SHA the event reports.
+func TestChangelogOwnershipGuardIgnoresMainsOwnReleaseEdit(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-b", "main")
+	runGit(t, repo, "config", "user.name", "Forgectl Test")
+	runGit(t, repo, "config", "user.email", "forgectl-test@example.invalid")
+	writeTestChangelog(t, repo, "# Changelog\n")
+	runGit(t, repo, "add", "CHANGELOG.md")
+	runGit(t, repo, "commit", "-m", "initial changelog")
+	branchPoint := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
+
+	runGit(t, repo, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repo, "code.txt"), []byte("change\n"), 0o600); err != nil {
+		t.Fatalf("write code: %v", err)
+	}
+	runGit(t, repo, "add", "code.txt")
+	runGit(t, repo, "commit", "-m", "feature change")
+
+	runGit(t, repo, "checkout", "main")
+	writeTestChangelog(t, repo, "# Changelog\n\n## 1.0.0\n")
+	runGit(t, repo, "add", "CHANGELOG.md")
+	runGit(t, repo, "commit", "-m", "release")
+	mainTip := strings.TrimSpace(runGit(t, repo, "rev-parse", "HEAD"))
+
+	// Recreate refs/pull/N/merge: main's tip merged with the PR head.
+	runGit(t, repo, "checkout", "--detach", mainTip)
+	runGit(t, repo, "merge", "--no-ff", "-m", "merge pr", "feature")
+
+	guard, err := filepath.Abs("scripts/check-changelog-owner.sh")
+	if err != nil {
+		t.Fatalf("resolve changelog guard: %v", err)
+	}
+	for _, base := range []string{branchPoint, mainTip} {
+		if output, err := runChangelogGuard(t, repo, guard, base, "contributor", "feature", "cameronsjo/forgectl"); err != nil {
+			t.Fatalf("base %s: a release on main was blamed on the PR: %v\n%s", base, err, output)
+		}
+	}
+}
+
 func runChangelogGuard(t *testing.T, repo, guard, base, author, headRef, headRepo string) (string, error) {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), guard)
