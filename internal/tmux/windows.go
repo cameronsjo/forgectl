@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -215,6 +216,8 @@ func validateEnvAssignment(entry string) error {
 // on the machine — not just the same uid. That is acceptable for a proxy URL
 // with no credentials in it and NOT acceptable for one that carries a
 // password. Callers own that judgment; this function does not inspect values.
+// It does keep them out of what forgectl writes down: the log and the error
+// show each entry as KEY=[redacted].
 //
 // There is no removal form: tmux new-window can set a variable and cannot
 // unset one, so a caller wanting a variable gone passes it as empty rather
@@ -249,7 +252,10 @@ func (c *Client) NewWindowWithEnv(
 		args = append(args, "--")
 		args = append(args, command...)
 	}
-	out, err := c.run.Run(ctx, c.tmuxBin, args...)
+	// The -e values that could carry a secret reach tmux's argv but never the
+	// debug log or the error text: a profile value the config renderer keeps
+	// redacted would otherwise land in both whenever tmux fails (#529).
+	out, err := c.run.Run(exec.WithMaskedAssignments(ctx, secretBearing(env)), c.tmuxBin, args...)
 	if err != nil {
 		return WindowIdentity{}, fmt.Errorf("create window %q: %w", name, err)
 	}
@@ -266,6 +272,22 @@ func (c *Client) NewWindowWithEnv(
 		SessionID:  current.ID,
 		Name:       name,
 	}, nil
+}
+
+// secretBearing keeps the entries whose value could hold a secret: anything
+// shaped like a URL or host:port (a ':', '/', '?' or '@'), which is where a
+// key or a password rides. Plain constants such as the telemetry switches
+// ("1", "true", "grpc") are left out on purpose: masking them also scrubs
+// tmux's own error text, turning "can't find window: @1" into "@[redacted]",
+// and the window target is what `pr repair` needs.
+func secretBearing(env []string) []string {
+	var out []string
+	for _, e := range env {
+		if _, value, ok := strings.Cut(e, "="); ok && strings.ContainsAny(value, ":/?@") {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // KillWindow kills the window the identity names, revalidating generation and

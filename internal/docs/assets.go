@@ -1,7 +1,7 @@
 package docs
 
 import (
-	_ "embed"
+	"embed"
 	"html/template"
 )
 
@@ -29,6 +29,15 @@ var artificerThemeJS []byte
 //
 //go:embed assets/artificer/artificer-tree.js
 var artificerTreeJS []byte
+
+// artificerFonts is the vendored web fonts (`artificer vendor --fonts`). Only
+// the woff2 files are embedded: artificer.css links all nine by relative
+// @font-face URL, so each is a linked asset like the files above, and nothing
+// else in that directory becomes servable. Without them the reader fell back
+// to whatever the font stack found next.
+//
+//go:embed assets/artificer/assets/fonts/*.woff2
+var artificerFonts embed.FS
 
 // reloadJS is this repo's own live-reload client (not vendored) — the browser
 // half of the SSE loop in server.go/watcher.go. Embedded per-file alongside the

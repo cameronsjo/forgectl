@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -64,6 +65,37 @@ var errWindowEnvCredentials = errors.New(
 	"launch environment puts credentials in a URL, which a review window would expose on the command line; " +
 		"remove the user:pass@ part")
 
+// errWindowEnvQuery reports an injected URL carrying a query string on its way
+// to a tmux window. A query is where an ingest key usually rides
+// (`?api_key=…`), and it would sit on the command line for as long as tmux
+// runs (#529).
+//
+// The rule is "no query", not "no secret-looking query", because nothing here
+// can tell a key from an innocent parameter, and none of the URLs this
+// composer emits (a proxy, an OTLP collector) needs one. A secret in the URL
+// PATH is not caught: it cannot be told from an ordinary path. The OTLP
+// endpoint is treated as non-secret configuration, which is why `launch
+// doctor` prints it; a collector that needs a key should take it from the
+// harness's own environment or a header config, never from this URL.
+var errWindowEnvQuery = errors.New(
+	"launch environment puts a query string in a URL, which a review window would expose on the command line; " +
+		"remove the ?… part and give the collector its key through its headers config or the harness environment")
+
+// windowEnvSource names an injected variable together with the config setting
+// it comes from, so a refusal points at the line to edit rather than at an
+// environment variable the operator never set by hand.
+func windowEnvSource(key string) string {
+	switch {
+	case key == "OTEL_EXPORTER_OTLP_ENDPOINT":
+		return key + " (from [bench].otlp_endpoint)"
+	case strings.EqualFold(key, "HTTP_PROXY"), strings.EqualFold(key, "HTTPS_PROXY"),
+		strings.EqualFold(key, "ALL_PROXY"), strings.EqualFold(key, "NO_PROXY"):
+		return key + " (from the [proxy] launch_profile)"
+	default:
+		return key
+	}
+}
+
 // injectedWindowEnv flattens the same composer into the `KEY=VALUE` entries a
 // tmux review window is created with, so `forgectl pr` reaches the network by
 // the posture the operator configured rather than whatever the tmux server
@@ -87,13 +119,21 @@ func injectedWindowEnv(cfg config.Config) ([]string, error) {
 	}
 	entries := make([]string, 0, len(set)+len(unset))
 	for _, k := range slices.Sorted(maps.Keys(set)) {
-		// Only a value with a scheme is read as a URL here. A scheme-less
-		// proxy value was already checked by the launch-profile refusal, and
-		// reading every value as a URL would misread an '@' in no_proxy.
-		// HasURLScheme, not "://", so the one-slash form `http:/u:p@h` that
-		// curl accepts is checked too.
-		if v := set[k]; config.HasURLScheme(v) && config.URLHasUserinfo(v) {
-			return nil, fmt.Errorf("%w: %s", errWindowEnvCredentials, k)
+		// Every value except the no_proxy list is read as a URL, scheme or
+		// not: "user:pass@collector:4318" is still a credential on argv. The
+		// no_proxy list is exempt because an '@' there is not userinfo.
+		// URLHasUserinfo reads the authority the lenient way curl does, so
+		// the one-slash form `http:/u:p@h` is caught too.
+		v := set[k]
+		if !strings.EqualFold(k, "NO_PROXY") && config.URLHasUserinfo(v) {
+			return nil, fmt.Errorf("%s: %w", windowEnvSource(k), errWindowEnvCredentials)
+		}
+		// The query check does not wait for a scheme: an endpoint written as
+		// "host:4318/v1?api_key=…" is still a URL to the client that reads it,
+		// and no injected value (a proxy, an endpoint, a no_proxy list, a
+		// telemetry switch) has a legitimate '?'.
+		if strings.Contains(v, "?") {
+			return nil, fmt.Errorf("%s: %w", windowEnvSource(k), errWindowEnvQuery)
 		}
 		entries = append(entries, k+"="+set[k])
 	}

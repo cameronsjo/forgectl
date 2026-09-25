@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -114,9 +115,17 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 			// off is a valid choice (a machine with no local collector).
 			if cfg.Bench.Telemetry {
 				_, _ = fmt.Fprintf(out, "%s telemetry: on → %s (%s)\n", marks.OK,
-					termsafe.SafeLine(cfg.Bench.ResolvedOTLPEndpoint()), termsafe.SafeLine(cfg.Bench.ResolvedOTLPProtocol()))
+					termsafe.SafeLine(endpointForDisplay(cfg.Bench.ResolvedOTLPEndpoint())), termsafe.SafeLine(cfg.Bench.ResolvedOTLPProtocol()))
 			} else {
 				_, _ = fmt.Fprintf(out, "%s telemetry: off (enable with [bench].telemetry = true)\n", marks.Warn)
+			}
+
+			// The same check `forgectl pr` runs before it opens a review window,
+			// so doctor is never green for a config pr would refuse. The
+			// refusal names the setting, never its value.
+			if _, err := injectedWindowEnv(cfg); err != nil {
+				_, _ = fmt.Fprintf(out, "%s review-window environment: %s\n", marks.Fail, termsafe.SafeLine(err.Error()))
+				healthy = false
 			}
 
 			if !healthy {
@@ -125,4 +134,26 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 			return nil
 		},
 	}
+}
+
+// endpointForDisplay hides the parts of an endpoint that carry secrets before
+// it is printed: the query string, where an ingest key rides, and any
+// user:pass@ userinfo. `forgectl pr` refuses both for that reason; doctor must
+// not print the secret it is about to report as refused.
+func endpointForDisplay(endpoint string) string {
+	if i := strings.IndexByte(endpoint, '?'); i >= 0 {
+		endpoint = endpoint[:i] + "?[query hidden]"
+	}
+	start := 0
+	if i := strings.Index(endpoint, "://"); i >= 0 {
+		start = i + len("://")
+	}
+	end := len(endpoint)
+	if i := strings.IndexAny(endpoint[start:], "/?#"); i >= 0 {
+		end = start + i
+	}
+	if at := strings.LastIndexByte(endpoint[start:end], '@'); at >= 0 {
+		endpoint = endpoint[:start] + "[userinfo hidden]" + endpoint[start+at:]
+	}
+	return endpoint
 }

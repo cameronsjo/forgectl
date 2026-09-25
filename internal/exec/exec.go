@@ -69,7 +69,7 @@ type OSRunner struct{}
 // always mean the command produced nothing worth seeing (e.g. `npm outdated`
 // exits 1 precisely when its output has something to report).
 func (OSRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
-	return runAndWrap(exec.CommandContext(ctx, name, args...), "Preparing to run command.", "Successfully ran command.", "Failed to run command.", name, args)
+	return runAndWrap(exec.CommandContext(ctx, name, args...), "Preparing to run command.", "Successfully ran command.", "Failed to run command.", maskFrom(ctx), name, args) //nolint:gosec // structural argv is the purpose of this execution seam
 }
 
 // RunWithInput executes name+args with stdin piped in and returns trimmed
@@ -78,7 +78,7 @@ func (OSRunner) Run(ctx context.Context, name string, args ...string) (string, e
 func (OSRunner) RunWithInput(ctx context.Context, stdin string, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = strings.NewReader(stdin)
-	return runAndWrap(cmd, "Preparing to run command with stdin.", "Successfully ran command with stdin.", "Failed to run command with stdin.", name, args)
+	return runAndWrap(cmd, "Preparing to run command with stdin.", "Successfully ran command with stdin.", "Failed to run command with stdin.", maskFrom(ctx), name, args)
 }
 
 // RunWithEnv executes name+args with env merged on top of the inherited
@@ -90,7 +90,7 @@ func (OSRunner) RunWithEnv(ctx context.Context, env map[string]string, name stri
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
-	return runAndWrap(cmd, "Preparing to run command with environment overrides.", "Successfully ran command with environment overrides.", "Failed to run command with environment overrides.", name, args)
+	return runAndWrap(cmd, "Preparing to run command with environment overrides.", "Successfully ran command with environment overrides.", "Failed to run command with environment overrides.", maskFrom(ctx), name, args)
 }
 
 // RunWithEnvFiltered executes name+args after removing unset from the inherited
@@ -99,7 +99,7 @@ func (OSRunner) RunWithEnv(ctx context.Context, env map[string]string, name stri
 func (OSRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // structural argv is the purpose of this execution seam
 	cmd.Env = filteredEnvironment(env, unset)
-	return runAndWrap(cmd, "Preparing to run command with a filtered environment.", "Successfully ran command with a filtered environment.", "Failed to run command with a filtered environment.", name, args)
+	return runAndWrap(cmd, "Preparing to run command with a filtered environment.", "Successfully ran command with a filtered environment.", "Failed to run command with a filtered environment.", maskFrom(ctx), name, args)
 }
 
 func filteredEnvironment(overrides map[string]string, unset []string) []string {
@@ -133,22 +133,25 @@ func filteredEnvironment(overrides map[string]string, unset []string) []string {
 // contract: trimmed stdout on success, or a *CommandError — carrying stderr,
 // the captured stdout, and the exit code — on failure. Shared body behind
 // Run, RunWithInput, RunWithEnv, and RunWithEnvFiltered, which differ only in
-// how they configure cmd beforehand and which log messages they use.
-func runAndWrap(cmd *exec.Cmd, preparingMsg, successMsg, failureMsg, name string, args []string) (string, error) {
-	slog.Debug(preparingMsg, "cmd", name, "args", args)
+// how they configure cmd beforehand and which log messages they use. mask
+// governs every rendering of argv and stderr (WithMaskedAssignments); cmd
+// itself was built from the real args.
+func runAndWrap(cmd *exec.Cmd, preparingMsg, successMsg, failureMsg string, mask argMask, name string, args []string) (string, error) {
+	shown := mask.args(args)
+	slog.Debug(preparingMsg, "cmd", name, "args", shown)
 	start := time.Now()
 
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		trimmed := strings.TrimRight(string(out), "\n")
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+		trimmed := mask.text(strings.TrimRight(string(out), "\n"))
+		if msg := mask.text(strings.TrimSpace(stderr.String())); msg != "" {
 			slog.Error(failureMsg, "cmd", name, "stderr", msg, "error", err)
-			return "", &CommandError{Name: name, Args: args, Stderr: msg, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
+			return "", &CommandError{Name: name, Args: shown, Stderr: msg, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
 		}
 		slog.Error(failureMsg, "cmd", name, "error", err)
-		return "", &CommandError{Name: name, Args: args, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
+		return "", &CommandError{Name: name, Args: shown, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
 	}
 	slog.Debug(successMsg, "cmd", name, "duration", time.Since(start).Round(time.Millisecond))
 	return strings.TrimRight(string(out), "\n"), nil
@@ -156,7 +159,7 @@ func runAndWrap(cmd *exec.Cmd, preparingMsg, successMsg, failureMsg, name string
 
 // RunInteractive wires the child to the real stdio so it can drive the tty.
 func (OSRunner) RunInteractive(ctx context.Context, name string, args ...string) error {
-	slog.Debug("Preparing to run interactive command.", "cmd", name, "args", args)
+	slog.Debug("Preparing to run interactive command.", "cmd", name, "args", maskFrom(ctx).args(args))
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

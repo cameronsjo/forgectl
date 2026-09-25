@@ -67,6 +67,16 @@ archives:
       - forgectl-linux
     formats: ["tar.gz"]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      # Stated explicitly (not goreleaser's default list) so the font licenses
+      # can ride along; see the darwin entry for why the defaults are restated.
+      - LICENSE*
+      - README*
+      - CHANGELOG*
+      # The binary embeds the Artificer web fonts (docs serve), and their SIL
+      # OFL requires the license to travel with them.
+      - src: internal/docs/assets/font-licenses/*
+        dst: font-licenses
 
   # macOS additionally carries forgectl-bless-helper (a universal, ad-hoc-signed
   # Swift binary staged by the release workflow at dist-helper/). It must sit at
@@ -87,6 +97,8 @@ archives:
       - LICENSE*
       - README*
       - CHANGELOG*
+      - src: internal/docs/assets/font-licenses/*
+        dst: font-licenses
       - src: dist-helper/forgectl-bless-helper
         strip_parent: true
 

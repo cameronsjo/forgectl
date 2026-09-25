@@ -1170,3 +1170,21 @@ func TestLaunchCodex_RejectsOptionLikeModel(t *testing.T) {
 		t.Errorf("a refused value must issue ZERO Runner calls; got %+v", fake.Calls)
 	}
 }
+
+// TestCheckDispatchCapability_RefusesABadWindowEnv pins the operability
+// follow-up to #529: a window env the dispatch would refuse (a bad launch
+// profile, a URL with credentials or a query string) must fail the early
+// preflight, before any workspace or needs-repair record exists, and before
+// tmux is asked anything.
+func TestCheckDispatchCapability_RefusesABadWindowEnv(t *testing.T) {
+	refusal := errors.New("launch environment puts a query string in a URL")
+	fake := successfulLaunchRunner()
+	c := New(fake, WithWindowEnv(func() ([]string, error) { return nil, refusal }))
+
+	if err := c.CheckDispatchCapability(context.Background()); !errors.Is(err, refusal) {
+		t.Fatalf("CheckDispatchCapability error = %v, want the resolver's refusal", err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("preflight ran %d command(s) before refusing: %+v", len(fake.Calls), fake.Calls)
+	}
+}

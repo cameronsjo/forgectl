@@ -491,8 +491,11 @@ var renderMu sync.Mutex
 // parsed values with every fragment HTML-escaped, which is why prepending it
 // after sanitization does not reopen the XSS door the sanitizer closes: the
 // document author's bytes only ever reach it through html.EscapeString.
-// Building it post-sanitizer keeps the bluemonday allowlist untouched —
-// details/summary/dl stay denied for document-authored HTML.
+// Building it post-sanitizer keeps the bluemonday allowlist untouched. (An
+// earlier version of this comment said details/summary stay denied for
+// document-authored HTML; UGCPolicy has always allowed them, with only the
+// `open` attribute on <details>. TestRender_DetailsAllowedWithOpenOnly pins
+// that.)
 func Render(source []byte) (string, error) {
 	// Route through the frontmatter-aware parser only when a well-formed
 	// block actually opens the document. The extension's opener is greedy —
@@ -515,9 +518,10 @@ func Render(source []byte) (string, error) {
 	return frontmatterHTML(ctx) + transformCallouts(body), nil
 }
 
-// OutlineItem is one "On this page" entry — an h1 or h2 with the id
-// goldmark's auto-heading pass assigned it (the reference shell's outline
-// shows the document title plus its sections; h3+ stays out).
+// OutlineItem is one "On this page" entry — an h2 or h3 with the id
+// goldmark's auto-heading pass assigned it. The h1 stays out: it is the page
+// title, already the first thing on the page, and repeating it as the
+// outline's first row only pushed the sections down. h4+ stays out too.
 type OutlineItem struct {
 	Level int
 	Text  string
@@ -562,10 +566,10 @@ func countWords(source []byte) int {
 	return len(strings.Fields(string(body)))
 }
 
-// outlineHeading matches the h1/h2 elements of OUR rendered output — this
+// outlineHeading matches the h2/h3 elements of OUR rendered output — this
 // scans HTML the pipeline just produced, never document-authored bytes, so a
 // regexp over the known goldmark shape is sufficient.
-var outlineHeading = regexp.MustCompile(`(?s)<h([12]) id="([^"]+)">(.*?)</h[12]>`)
+var outlineHeading = regexp.MustCompile(`(?s)<h([23]) id="([^"]+)">(.*?)</h[23]>`)
 
 // stripTags removes inline markup from a heading's rendered text.
 var stripTags = regexp.MustCompile(`<[^>]*>`)
@@ -573,9 +577,9 @@ var stripTags = regexp.MustCompile(`<[^>]*>`)
 func extractOutline(rendered string) []OutlineItem {
 	var items []OutlineItem
 	for _, m := range outlineHeading.FindAllStringSubmatch(rendered, -1) {
-		level := 1
-		if m[1] == "2" {
-			level = 2
+		level := 2
+		if m[1] == "3" {
+			level = 3
 		}
 		// The captured text is rendered HTML, so entities are escaped
 		// (&amp; etc.). Unescape back to plain text: the template escapes
