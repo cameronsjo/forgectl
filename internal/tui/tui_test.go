@@ -337,3 +337,23 @@ func TestSessionItemNarrowDropsMetadata(t *testing.T) {
 		t.Errorf("narrow row must still show the name: %q", narrow)
 	}
 }
+
+// TestMenuFilteredSelectionActsOnShownRow pins #496: with the tmux menu
+// filtered down to one row, "1" and enter act on the row shown, not on the
+// unfiltered menu's first row (Pick).
+func TestMenuFilteredSelectionActsOnShownRow(t *testing.T) {
+	for _, act := range []tea.KeyPressMsg{key("1"), {Code: tea.KeyEnter}} {
+		m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{StartInTmux: true, NoIcons: true, Theme: theme.Default()}), 80, 24)
+		// SetFilterText filters synchronously; typing "/cheat" would leave the
+		// matches in an async cmd the test never runs.
+		m.l.SetFilterText("cheat")
+		if len(m.l.VisibleItems()) != 1 {
+			t.Fatalf("filter setup: expected 1 visible row, got %d", len(m.l.VisibleItems()))
+		}
+		out, _ := m.Update(act)
+		m = out.(model)
+		if m.mode != cheatMode {
+			t.Errorf("%q on a menu filtered to Cheatsheet: expected cheatMode, got %v", act.String(), m.mode)
+		}
+	}
+}

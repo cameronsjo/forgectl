@@ -458,19 +458,26 @@ func (m model) activate(index int) (tea.Model, tea.Cmd) {
 		m.action = Action{Kind: ActionRunVerb, Argv: leafArgv(m.leavesParent, leaf)}
 		return m, tea.Quit
 	case menuMode:
-		switch index {
-		case 0:
+		// Switch on the row itself, not its position: with a filter applied,
+		// index counts visible rows, so position 0 is whatever survived the
+		// filter (#496). SelectedItem() is filter-aware, as in hubMode.
+		it, ok := m.l.SelectedItem().(menuItem)
+		if !ok {
+			return m, nil
+		}
+		switch it.label {
+		case "Pick":
 			m.enterPick()
-		case 1:
+		case "Sessions":
 			m.enterSessions()
-		case 2:
+		case "Windows":
 			m.enterWindows()
-		case 3:
+		case "Tree":
 			m.enterTree()
-		case 4:
+		case "Last":
 			m.action = Action{Kind: ActionLast}
 			return m, tea.Quit
-		case 5:
+		case "Cheatsheet":
 			m.enterCheat()
 		}
 		return m, nil
