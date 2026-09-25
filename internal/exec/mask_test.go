@@ -64,3 +64,46 @@ func TestOSRunner_NoMask_ArgvUnchangedInError(t *testing.T) {
 		t.Errorf("unmasked argv should render as before, got %v", err)
 	}
 }
+
+// TestMaskText_ShortValueEchoedBare pins a CodeRabbit finding on #531: a
+// marked value under minScrubLen echoed on its own used to survive.
+func TestMaskText_ShortValueEchoedBare(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"K=hunter2"}))
+	got := m.text("tmux: bad value hunter2 here")
+	if strings.Contains(got, "hunter2") {
+		t.Errorf("short value survived: %q", got)
+	}
+}
+
+// TestMaskText_ShortValueOnlyAsWholeWord keeps the short-value rule from
+// mangling unrelated text: "1" is redacted where it stands alone, not inside
+// "10" or "v1.2".
+func TestMaskText_ShortValueOnlyAsWholeWord(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"T=1"}))
+	got := m.text("exit 1 after 10 tries on v1.2")
+	want := "exit " + Redacted + " after 10 tries on v1.2"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestMaskText_LongerValueBeforeItsPrefix pins the other #531 finding: when
+// one marked value is a prefix of another, replacing the shorter one first
+// left the longer one's tail — here, the token — in the text.
+func TestMaskText_LongerValueBeforeItsPrefix(t *testing.T) {
+	entries := []string{"BASE=https://ingest.example", "ENDPOINT=https://ingest.example/v1/tok-secret-123"}
+	for i := 0; i < 20; i++ { // map iteration order used to decide this; run it enough to catch that
+		m := maskFrom(WithMaskedAssignments(context.Background(), entries))
+		got := m.text("posting to https://ingest.example/v1/tok-secret-123 failed")
+		if strings.Contains(got, "tok-secret-123") {
+			t.Fatalf("token tail survived: %q", got)
+		}
+	}
+}
+
+func TestMaskText_AdjacentShortValuesStayGlued(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"T=1"}))
+	if got := m.text("pane 11 and 1"); got != "pane 11 and "+Redacted {
+		t.Errorf("got %q", got)
+	}
+}

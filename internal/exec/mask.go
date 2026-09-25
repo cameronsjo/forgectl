@@ -2,13 +2,14 @@ package exec
 
 import (
 	"context"
+	"sort"
 	"strings"
 )
 
-// minScrubLen is the shortest bare value scrubbed out of stderr. The whole
-// KEY=VALUE entry is always scrubbed; a bare value shorter than this is not,
-// because replacing a "1" or a "grpc" everywhere in a tmux error would mangle
-// it without protecting anything worth protecting.
+// minScrubLen is the length from which a bare value is scrubbed wherever it
+// appears. A shorter one is scrubbed only where it stands as a whole word:
+// replacing every "1" or "grpc" inside a tmux error would mangle it, but a
+// short value echoed on its own must still not survive.
 const minScrubLen = 8
 
 type maskKey struct{}
@@ -17,8 +18,12 @@ type maskKey struct{}
 // element mapped to its display form, plus the bare values to scrub from
 // stderr.
 type argMask struct {
-	shown  map[string]string
-	values []string
+	shown map[string]string
+	// entries and values are sorted longest first, so a value that is a
+	// prefix of another never gets replaced first and leaves the longer
+	// one's tail in the text.
+	entries []string
+	values  []string
 }
 
 // WithMaskedAssignments returns a context under which the Runner never
@@ -42,10 +47,11 @@ func WithMaskedAssignments(ctx context.Context, entries []string) context.Contex
 			continue
 		}
 		m.shown[e] = key + "=" + Redacted
-		if len(value) >= minScrubLen {
-			m.values = append(m.values, value)
-		}
+		m.entries = append(m.entries, e)
+		m.values = append(m.values, value)
 	}
+	longestFirst(m.entries)
+	longestFirst(m.values)
 	return context.WithValue(ctx, maskKey{}, m)
 }
 
@@ -73,11 +79,58 @@ func (m argMask) args(args []string) []string {
 // text scrubs whole entries first, then bare values, so an echoed entry keeps
 // its key: KEY=[redacted] rather than a bare [redacted].
 func (m argMask) text(s string) string {
-	for entry, shown := range m.shown {
-		s = strings.ReplaceAll(s, entry, shown)
+	for _, entry := range m.entries {
+		s = strings.ReplaceAll(s, entry, m.shown[entry])
 	}
 	for _, v := range m.values {
-		s = strings.ReplaceAll(s, v, Redacted)
+		if len(v) >= minScrubLen {
+			s = strings.ReplaceAll(s, v, Redacted)
+		} else {
+			s = replaceWholeWord(s, v, Redacted)
+		}
 	}
 	return s
+}
+
+// longestFirst sorts in place by descending length, ties in lexical order so
+// the result does not depend on input order.
+func longestFirst(xs []string) {
+	sort.Slice(xs, func(i, j int) bool {
+		if len(xs[i]) != len(xs[j]) {
+			return len(xs[i]) > len(xs[j])
+		}
+		return xs[i] < xs[j]
+	})
+}
+
+// replaceWholeWord replaces each occurrence of v in s that is not glued to a
+// word character on either side. The check applies only at an edge where v
+// itself starts or ends with a word character, so a value like "a:b" is still
+// found next to a letter.
+func replaceWholeWord(s, v, with string) string {
+	var b strings.Builder
+	last := 0 // end of the text already copied to b
+	for from := 0; ; {
+		rel := strings.Index(s[from:], v)
+		if rel < 0 {
+			b.WriteString(s[last:])
+			return b.String()
+		}
+		i := from + rel
+		end := i + len(v)
+		// Neighbors are read from the original string, so a match right
+		// after another occurrence still sees the byte before it.
+		gluedBefore := i > 0 && isWordByte(v[0]) && isWordByte(s[i-1])
+		gluedAfter := end < len(s) && isWordByte(v[len(v)-1]) && isWordByte(s[end])
+		if !gluedBefore && !gluedAfter {
+			b.WriteString(s[last:i])
+			b.WriteString(with)
+			last = end
+		}
+		from = end
+	}
+}
+
+func isWordByte(c byte) bool {
+	return c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
