@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -64,6 +65,22 @@ var errWindowEnvCredentials = errors.New(
 	"launch environment puts credentials in a URL, which a review window would expose on the command line; " +
 		"remove the user:pass@ part")
 
+// errWindowEnvQuery reports an injected URL carrying a query string on its way
+// to a tmux window. A query is where an ingest key usually rides
+// (`?api_key=…`), and it would sit on the command line for as long as tmux
+// runs (#529).
+//
+// The rule is "no query", not "no secret-looking query", because nothing here
+// can tell a key from an innocent parameter, and none of the URLs this
+// composer emits (a proxy, an OTLP collector) needs one. A secret in the URL
+// PATH is not caught: it cannot be told from an ordinary path. The OTLP
+// endpoint is treated as non-secret configuration, which is why `launch
+// doctor` prints it; a collector that needs a key should take it from the
+// harness's own environment or a header config, never from this URL.
+var errWindowEnvQuery = errors.New(
+	"launch environment puts a query string in a URL, which a review window would expose on the command line; " +
+		"remove the ?… part and pass any key another way")
+
 // injectedWindowEnv flattens the same composer into the `KEY=VALUE` entries a
 // tmux review window is created with, so `forgectl pr` reaches the network by
 // the posture the operator configured rather than whatever the tmux server
@@ -92,8 +109,13 @@ func injectedWindowEnv(cfg config.Config) ([]string, error) {
 		// reading every value as a URL would misread an '@' in no_proxy.
 		// HasURLScheme, not "://", so the one-slash form `http:/u:p@h` that
 		// curl accepts is checked too.
-		if v := set[k]; config.HasURLScheme(v) && config.URLHasUserinfo(v) {
-			return nil, fmt.Errorf("%w: %s", errWindowEnvCredentials, k)
+		if v := set[k]; config.HasURLScheme(v) {
+			if config.URLHasUserinfo(v) {
+				return nil, fmt.Errorf("%w: %s", errWindowEnvCredentials, k)
+			}
+			if strings.Contains(v, "?") {
+				return nil, fmt.Errorf("%w: %s", errWindowEnvQuery, k)
+			}
 		}
 		entries = append(entries, k+"="+set[k])
 	}

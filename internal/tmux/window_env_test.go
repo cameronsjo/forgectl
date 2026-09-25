@@ -138,3 +138,37 @@ func TestValidateEnvAssignment(t *testing.T) {
 		})
 	}
 }
+
+// failingNewWindowRunner answers revalidation from the fake and sends
+// new-window through the REAL runner, with sh standing in for tmux and
+// failing, so the error text is produced by the same code production uses.
+type failingNewWindowRunner struct{ *exec.FakeRunner }
+
+func (r failingNewWindowRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	if len(args) > 0 && args[0] == "new-window" {
+		return exec.OSRunner{}.Run(ctx, "sh", append([]string{"-c", `echo "no server: $*" >&2; exit 1`, "sh"}, args...)...)
+	}
+	return r.FakeRunner.Run(ctx, name, args...)
+}
+
+// TestNewWindowWithEnv_FailureDoesNotRenderValues pins #529: a failed
+// new-window must not put an -e value into the error the pr verb prints, even
+// when the child echoes its argv back on stderr.
+func TestNewWindowWithEnv_FailureDoesNotRenderValues(t *testing.T) {
+	fake, _, session := envFixture(t)
+	c := New(failingNewWindowRunner{fake})
+	identityEnv(c, "", "/tmp")
+
+	const secret = "https://ingest.example/v1/token-abcdef123456"
+	_, err := c.NewWindowWithEnv(context.Background(), session, "review", "/repo",
+		[]string{"OTEL_EXPORTER_OTLP_ENDPOINT=" + secret}, "claude")
+	if err == nil {
+		t.Fatal("expected new-window to fail")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error renders the -e value: %v", err)
+	}
+	if !strings.Contains(err.Error(), "OTEL_EXPORTER_OTLP_ENDPOINT="+exec.Redacted) {
+		t.Errorf("error should still name the variable: %v", err)
+	}
+}

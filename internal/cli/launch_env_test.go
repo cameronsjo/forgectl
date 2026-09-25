@@ -157,3 +157,24 @@ func TestInjectedWindowEnv_RefusesSlashVariantCredentials(t *testing.T) {
 		}
 	}
 }
+
+// TestInjectedWindowEnv_RefusesQueryStringOnArgv pins #529's second half: a
+// URL's query string is where an ingest key usually rides
+// (https://ingest.example/v1?api_key=…), and the userinfo check never looked
+// there. The message names the variable, never the value.
+func TestInjectedWindowEnv_RefusesQueryStringOnArgv(t *testing.T) {
+	cfg := config.Config{Bench: config.BenchConfig{
+		Telemetry:    true,
+		OTLPEndpoint: "https://ingest.example/v1?api_key=secretkey123", //nolint:gosec // G101: a fake key the refusal must catch
+	}}
+	_, err := injectedWindowEnv(cfg)
+	if !errors.Is(err, errWindowEnvQuery) {
+		t.Fatalf("err = %v, want errWindowEnvQuery", err)
+	}
+	if strings.Contains(err.Error(), "secretkey123") {
+		t.Errorf("message leaked the key: %q", err)
+	}
+	if !strings.Contains(err.Error(), "OTEL_EXPORTER_OTLP_ENDPOINT") {
+		t.Errorf("message = %q, want it to name the variable", err)
+	}
+}

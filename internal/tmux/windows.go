@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -215,6 +216,8 @@ func validateEnvAssignment(entry string) error {
 // on the machine — not just the same uid. That is acceptable for a proxy URL
 // with no credentials in it and NOT acceptable for one that carries a
 // password. Callers own that judgment; this function does not inspect values.
+// It does keep them out of what forgectl writes down: the log and the error
+// show each entry as KEY=[redacted].
 //
 // There is no removal form: tmux new-window can set a variable and cannot
 // unset one, so a caller wanting a variable gone passes it as empty rather
@@ -249,7 +252,10 @@ func (c *Client) NewWindowWithEnv(
 		args = append(args, "--")
 		args = append(args, command...)
 	}
-	out, err := c.run.Run(ctx, c.tmuxBin, args...)
+	// The -e values reach tmux's argv but never the debug log or the error
+	// text: a profile value the config renderer keeps redacted would otherwise
+	// land in both whenever tmux fails (#529).
+	out, err := c.run.Run(exec.WithMaskedAssignments(ctx, env), c.tmuxBin, args...)
 	if err != nil {
 		return WindowIdentity{}, fmt.Errorf("create window %q: %w", name, err)
 	}
