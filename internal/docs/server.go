@@ -198,6 +198,9 @@ func NewHandler(store *Store, events *Broker) http.Handler {
 	mux.HandleFunc("GET /assets/nav-toggle.js", serveStaticJS(navToggleJS))
 	mux.HandleFunc("GET /assets/chroma.css", serveStaticCSS(ChromaCSS()))
 	mux.HandleFunc("GET /assets/diagram.css", serveStaticCSS(diagramCSS))
+	// artificer.css names its fonts as url('assets/fonts/…') relative to
+	// itself, which resolves to this doubled path.
+	mux.HandleFunc("GET /assets/assets/fonts/{name}", serveFont)
 
 	mux.HandleFunc("GET "+eventsPath, handleEvents(events))
 	mux.HandleFunc("GET "+locatePath, handleLocate(store))
@@ -308,6 +311,25 @@ func serveStaticCSS(body []byte) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "no-cache") // #93 PR1 has no cache-busting scheme yet; correctness over speed
 		w.Write(body)
 	}
+}
+
+// serveFont serves one vendored woff2 by file name. {name} is a single path
+// segment, and embed.FS refuses any name that is not a file in that one
+// directory, so there is no traversal to guard beyond the suffix check.
+func serveFont(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !strings.HasSuffix(name, ".woff2") {
+		http.NotFound(w, r)
+		return
+	}
+	body, err := artificerFonts.ReadFile("assets/artificer/assets/fonts/" + name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "font/woff2")
+	w.Header().Set("Cache-Control", "no-cache") // same as every other asset here
+	w.Write(body)
 }
 
 func serveStaticJS(body []byte) http.HandlerFunc {

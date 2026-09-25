@@ -445,3 +445,46 @@ func TestServer_ShellReferencesOnlySameOriginAssets(t *testing.T) {
 		})
 	}
 }
+
+// TestServer_Fonts_ServedWhereTheCSSLooks pins the Artificer web fonts. The
+// vendored artificer.css names them as url('assets/fonts/…'), relative to
+// /assets/artificer.css, so the browser asks for /assets/assets/fonts/…. Before
+// they were vendored every one 404'd and the reader silently fell back to the
+// next face in the stack.
+func TestServer_Fonts_ServedWhereTheCSSLooks(t *testing.T) {
+	idx, _ := testIndex(t)
+	h := testHandler(idx)
+
+	css := string(artificerCSS)
+	for _, m := range regexp.MustCompile(`url\('(assets/fonts/[^']+\.woff2)'\)`).FindAllStringSubmatch(css, -1) {
+		path := "/assets/" + m[1]
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: status %d, want 200 — artificer.css references a font the reader does not serve", path, rec.Code)
+			continue
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "font/woff2" {
+			t.Errorf("%s: Content-Type %q, want font/woff2", path, ct)
+		}
+		if !strings.HasPrefix(rec.Body.String(), "wOF2") {
+			t.Errorf("%s: body is not a woff2 file", path)
+		}
+	}
+}
+
+func TestServer_Fonts_OnlyVendoredFontsResolve(t *testing.T) {
+	idx, _ := testIndex(t)
+	h := testHandler(idx)
+	for _, path := range []string{
+		"/assets/assets/fonts/nope.woff2",
+		"/assets/assets/fonts/..%2fartificer.css",
+		"/assets/assets/fonts/provenance.json",
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s: status %d, want 404", path, rec.Code)
+		}
+	}
+}
