@@ -23,7 +23,7 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 // assignment marked secret stays out of the debug log, the error text, and
 // echoed stderr, while the command itself still receives the real value.
 func TestOSRunner_MaskedAssignments_NeverRenderValue(t *testing.T) {
-	const secret = "https://ingest.example/v1?api_key=hunter2hunter2"
+	const secret = "https://ingest.example/v1?api_key=hunter2hunter2" //nolint:gosec // G101: a fake key the mask must hide
 	entry := "OTEL_EXPORTER_OTLP_ENDPOINT=" + secret
 	logs := captureLogs(t)
 

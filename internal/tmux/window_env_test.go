@@ -159,7 +159,7 @@ func TestNewWindowWithEnv_FailureDoesNotRenderValues(t *testing.T) {
 	c := New(failingNewWindowRunner{fake})
 	identityEnv(c, "", "/tmp")
 
-	const secret = "https://ingest.example/v1/token-abcdef123456"
+	const secret = "https://ingest.example/v1/token-abcdef123456" //nolint:gosec // G101: a fake token the mask must hide
 	_, err := c.NewWindowWithEnv(context.Background(), session, "review", "/repo",
 		[]string{"OTEL_EXPORTER_OTLP_ENDPOINT=" + secret}, "claude")
 	if err == nil {

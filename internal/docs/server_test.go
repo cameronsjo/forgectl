@@ -459,7 +459,7 @@ func TestServer_Fonts_ServedWhereTheCSSLooks(t *testing.T) {
 	for _, m := range regexp.MustCompile(`url\('(assets/fonts/[^']+\.woff2)'\)`).FindAllStringSubmatch(css, -1) {
 		path := "/assets/" + m[1]
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
 		if rec.Code != http.StatusOK {
 			t.Errorf("%s: status %d, want 200 — artificer.css references a font the reader does not serve", path, rec.Code)
 			continue
@@ -482,7 +482,7 @@ func TestServer_Fonts_OnlyVendoredFontsResolve(t *testing.T) {
 		"/assets/assets/fonts/provenance.json",
 	} {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("%s: status %d, want 404", path, rec.Code)
 		}

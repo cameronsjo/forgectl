@@ -329,7 +329,10 @@ func serveFont(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "font/woff2")
 	w.Header().Set("Cache-Control", "no-cache") // same as every other asset here
-	w.Write(body)
+	// body is one of the nine embedded woff2 files, served as font/woff2 with
+	// nosniff from SecurityHeaders: a browser never parses it as HTML.
+	_, _ = w.Write(body) //nolint:gosec // G705: embedded font bytes, not request-derived content
+
 }
 
 func serveStaticJS(body []byte) http.HandlerFunc {

@@ -69,7 +69,7 @@ type OSRunner struct{}
 // always mean the command produced nothing worth seeing (e.g. `npm outdated`
 // exits 1 precisely when its output has something to report).
 func (OSRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
-	return runAndWrap(exec.CommandContext(ctx, name, args...), "Preparing to run command.", "Successfully ran command.", "Failed to run command.", maskFrom(ctx), name, args)
+	return runAndWrap(exec.CommandContext(ctx, name, args...), "Preparing to run command.", "Successfully ran command.", "Failed to run command.", maskFrom(ctx), name, args) //nolint:gosec // structural argv is the purpose of this execution seam
 }
 
 // RunWithInput executes name+args with stdin piped in and returns trimmed
