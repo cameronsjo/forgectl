@@ -119,13 +119,13 @@ func injectedWindowEnv(cfg config.Config) ([]string, error) {
 	}
 	entries := make([]string, 0, len(set)+len(unset))
 	for _, k := range slices.Sorted(maps.Keys(set)) {
-		// Only a value with a scheme is read as a URL here. A scheme-less
-		// proxy value was already checked by the launch-profile refusal, and
-		// reading every value as a URL would misread an '@' in no_proxy.
-		// HasURLScheme, not "://", so the one-slash form `http:/u:p@h` that
-		// curl accepts is checked too.
+		// Every value except the no_proxy list is read as a URL, scheme or
+		// not: "user:pass@collector:4318" is still a credential on argv. The
+		// no_proxy list is exempt because an '@' there is not userinfo.
+		// URLHasUserinfo reads the authority the lenient way curl does, so
+		// the one-slash form `http:/u:p@h` is caught too.
 		v := set[k]
-		if config.HasURLScheme(v) && config.URLHasUserinfo(v) {
+		if !strings.EqualFold(k, "NO_PROXY") && config.URLHasUserinfo(v) {
 			return nil, fmt.Errorf("%s: %w", windowEnvSource(k), errWindowEnvCredentials)
 		}
 		// The query check does not wait for a scheme: an endpoint written as

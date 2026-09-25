@@ -136,12 +136,24 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 	}
 }
 
-// endpointForDisplay drops a query string before an endpoint is printed. A
-// query is where an ingest key rides, and `forgectl pr` refuses one for that
-// reason; doctor must not print the key it is about to report as refused.
+// endpointForDisplay hides the parts of an endpoint that carry secrets before
+// it is printed: the query string, where an ingest key rides, and any
+// user:pass@ userinfo. `forgectl pr` refuses both for that reason; doctor must
+// not print the secret it is about to report as refused.
 func endpointForDisplay(endpoint string) string {
 	if i := strings.IndexByte(endpoint, '?'); i >= 0 {
-		return endpoint[:i] + "?[query hidden]"
+		endpoint = endpoint[:i] + "?[query hidden]"
+	}
+	start := 0
+	if i := strings.Index(endpoint, "://"); i >= 0 {
+		start = i + len("://")
+	}
+	end := len(endpoint)
+	if i := strings.IndexAny(endpoint[start:], "/?#"); i >= 0 {
+		end = start + i
+	}
+	if at := strings.LastIndexByte(endpoint[start:end], '@'); at >= 0 {
+		endpoint = endpoint[:start] + "[userinfo hidden]" + endpoint[start+at:]
 	}
 	return endpoint
 }
