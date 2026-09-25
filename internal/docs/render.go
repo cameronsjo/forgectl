@@ -491,8 +491,11 @@ var renderMu sync.Mutex
 // parsed values with every fragment HTML-escaped, which is why prepending it
 // after sanitization does not reopen the XSS door the sanitizer closes: the
 // document author's bytes only ever reach it through html.EscapeString.
-// Building it post-sanitizer keeps the bluemonday allowlist untouched —
-// details/summary/dl stay denied for document-authored HTML.
+// Building it post-sanitizer keeps the bluemonday allowlist untouched. (An
+// earlier version of this comment said details/summary stay denied for
+// document-authored HTML; UGCPolicy has always allowed them, with only the
+// `open` attribute on <details>. TestRender_DetailsAllowedWithOpenOnly pins
+// that.)
 func Render(source []byte) (string, error) {
 	// Route through the frontmatter-aware parser only when a well-formed
 	// block actually opens the document. The extension's opener is greedy —

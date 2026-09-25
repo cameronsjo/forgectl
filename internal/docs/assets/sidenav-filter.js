@@ -23,17 +23,13 @@
   // it and cannot assume that adjacency.
   if (!input) { return; }
 
-  var links = Array.prototype.slice.call(
-    document.querySelectorAll(".sidenav a[data-filter-text]"));
-  var groups = Array.prototype.slice.call(
-    document.querySelectorAll(".sidenav .sidenav__group"));
-  var dirs = Array.prototype.slice.call(
-    document.querySelectorAll(".sidenav details"));
-
-  // Remember each directory's server-rendered open state (the path to the
-  // current doc) so clearing the filter restores it instead of leaving the
-  // whole tree sprung open.
-  dirs.forEach(function (d) { d.dataset.openAtRest = d.open ? "1" : ""; });
+  // Nodes are looked up on every keystroke, not once at load: live reload
+  // (reload.js) swaps the whole sidenav in place, and a list captured at load
+  // would keep filtering rows that are no longer in the page. reload.js
+  // re-applies a live query by dispatching an input event after each swap.
+  function all(sel) {
+    return Array.prototype.slice.call(document.querySelectorAll(sel));
+  }
 
   function matches(a, q) {
     if (q === "") { return true; }
@@ -42,6 +38,17 @@
 
   input.addEventListener("input", function () {
     var q = input.value.trim().toLowerCase();
+    var links = all(".sidenav a[data-filter-text]");
+    var groups = all(".sidenav .sidenav__group");
+    var dirs = all(".sidenav details");
+
+    // Remember each directory's server-rendered open state (the path to the
+    // current doc) the first time a query touches it, so clearing the filter
+    // restores it instead of leaving the whole tree sprung open. A freshly
+    // swapped-in sidenav has no record yet and gets one here.
+    dirs.forEach(function (d) {
+      if (d.dataset.openAtRest === undefined) { d.dataset.openAtRest = d.open ? "1" : ""; }
+    });
 
     links.forEach(function (a) {
       var row = a.closest("li") || a;
@@ -54,7 +61,14 @@
         function (a) { return matches(a, q); });
       var row = d.closest("li") || d;
       row.style.display = anyHit ? "" : "none";
-      d.open = q === "" ? d.dataset.openAtRest === "1" : anyHit;
+      if (q === "") {
+        d.open = d.dataset.openAtRest === "1";
+        // Forget it once restored, so the next query records whatever the
+        // reader has opened or closed by hand since.
+        delete d.dataset.openAtRest;
+      } else {
+        d.open = anyHit;
+      }
     });
 
     groups.forEach(function (g) {
