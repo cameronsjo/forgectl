@@ -1,0 +1,51 @@
+name: Vulncheck
+
+# govulncheck reports only vulnerabilities whose affected symbols forgectl's
+# build actually reaches, so a finding here is a problem this binary has, not
+# an advisory to triage (#514).
+#
+# GATING DECISION: this job BLOCKS. A reachable vulnerability is a real
+# defect, and the baseline was cleared before the gate landed (the x/text
+# bump). It runs as its own workflow, not a step in CI, so a new advisory
+# turns this check red without making an unrelated feature's build-test job
+# look broken. The weekly schedule surfaces a new advisory on main even when
+# no PR is open.
+#
+# A standard-library finding is fixed by a Go patch release, not by this
+# repo. check-latest makes the job scan with the newest 1.26 patch, the same
+# toolchain a fresh build gets, instead of whatever the runner image cached.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    - cron: '17 9 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: govulncheck
+        # Pinned by version; the Go checksum database verifies the module, so
+        # this is the same supply-chain footing as a go.sum entry.
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
