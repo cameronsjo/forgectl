@@ -483,3 +483,56 @@ func TestPrepareLocal_RefusesCleanRoomAcrossTMPDIRChange(t *testing.T) {
 		})
 	}
 }
+
+// TestPrepareLocal_RefusesCleanRoomFromRecordStrictDecoderRejects pins the
+// clean-room guard's TOLERANT reader (#504). recordedWorkspaceFor reads the
+// workspace string without the strict record decoder, so a breadcrumb from a
+// newer forgectl (a version this build does not read) still refuses its
+// workspace. Routing that reader through decodeBreadcrumbRecord would skip the
+// record and allow the path; this test goes red when that happens.
+func TestPrepareLocal_RefusesCleanRoomFromRecordStrictDecoderRejects(t *testing.T) {
+	elsewhere := t.TempDir()
+	workspace := filepath.Join(elsewhere, "forgectl-workflow-future1")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+
+	sessionsDir := t.TempDir()
+	c := New(localGitRunner(), WithSessionsDir(sessionsDir), WithTmuxSession("forgectl"))
+
+	ref := Ref{Owner: "o", Repo: "r", Number: 1}
+	path, err := writeBreadcrumb(sessionsDir, ref, Breadcrumb{
+		Version:   breadcrumbVersion + 1,
+		Workspace: workspace,
+		Ref:       ref.String(),
+		Agent:     "claude",
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("write breadcrumb: %v", err)
+	}
+	// The fixture must be one the strict decoder rejects, or this test proves
+	// nothing about the tolerant reader.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read breadcrumb: %v", err)
+	}
+	if _, err := decodeBreadcrumbRecord(data, path); err == nil {
+		t.Fatal("fixture precondition: the strict decoder must reject a newer-version record")
+	}
+
+	// The workspace sits outside the current $TMPDIR, so only the recorded
+	// breadcrumb can refuse it; the prefix scan cannot.
+	t.Setenv("TMPDIR", t.TempDir())
+
+	_, err = c.PrepareLocal(context.Background(), workspace, PrepareLocalOpts{
+		Agent:      "codex",
+		Provenance: ReviewProvenanceOperatorAuthored,
+	})
+	if err == nil {
+		t.Fatal("a clean-room workspace recorded by a newer forgectl must still be refused")
+	}
+	if !strings.Contains(err.Error(), "clean-room workspace") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}

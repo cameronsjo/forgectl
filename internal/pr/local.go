@@ -296,6 +296,12 @@ func (c *Client) rejectCleanRoomPath(absPath string) error {
 // for this use: the recorded string is only ever compared against a candidate
 // path in order to REFUSE. It never becomes an argv, and a broader view here
 // can only refuse more, never act on more.
+//
+// Do not route this through decodeBreadcrumbRecord: the strict decoder rejects
+// a record from a newer forgectl, and skipping it here would ALLOW its
+// workspace. TestPrepareLocal_RefusesCleanRoomFromRecordStrictDecoderRejects
+// pins that. repair.go's refFromRawRecord is the other tolerant reader, kept
+// tolerant for the same reason.
 func (c *Client) recordedWorkspaceFor(real string) (string, bool) {
 	entries, err := os.ReadDir(c.sessionsDir)
 	if err != nil {
