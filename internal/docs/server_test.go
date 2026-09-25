@@ -3,7 +3,7 @@ package docs
 // Test plan for server.go
 //
 // NewHandler (Classification: API handler)
-//   [x] Happy: "/" renders the shell with the empty-state
+//   [x] Happy: "/" renders the shell with the landing page
 //   [x] Happy: a valid /doc/{root}/{rest} renders the doc's content
 //   [x] Happy: static assets (artificer.css, artificer-theme.js, reload.js, chroma.css) are served
 //   [x] Unhappy (security): a traversal attempt through the HTTP route 404s
@@ -60,8 +60,8 @@ func testHandler(idx *Index) http.Handler {
 	return NewHandler(NewStore(idx), NewBroker())
 }
 
-func TestServer_Root_RendersEmptyState(t *testing.T) {
-	idx, _ := testIndex(t)
+func TestServer_Root_RendersLandingPage(t *testing.T) {
+	idx, label := testIndex(t)
 	h := testHandler(idx)
 
 	rec := httptest.NewRecorder()
@@ -70,8 +70,12 @@ func TestServer_Root_RendersEmptyState(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	if !strings.Contains(rec.Body.String(), "No doc selected") {
-		t.Errorf("body missing empty-state copy: %s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, "Recently changed") {
+		t.Errorf("body missing the landing page's recent table: %s", body)
+	}
+	if !strings.Contains(body, `href="/doc/`+label+`/welcome.md"`) {
+		t.Errorf("landing page does not link the indexed doc: %s", body)
 	}
 }
 

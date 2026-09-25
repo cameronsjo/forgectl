@@ -27,18 +27,38 @@ a { color: var(--accent); } a:hover { color: var(--accent-bright); }
 .sidenav a.tree__row { min-height: 24px; }
 .sidenav > a { min-height: 24px; font-size: 13px; }
 .sidenav > a, .sidenav > .sidenav__group, .sidenav > ul { flex: none; }
+/* One row box for files and folders. A file row is an <a>, so it also picks
+   up .sidenav a's 6px 10px padding, which pushed every file a few pixels
+   right of the folder rows beside it. */
+.sidenav .tree__row, .sidenav > a { padding: 2px var(--s-sm); }
+/* One line per row. Titles are a doc's whole h1, and a long one wrapped to
+   five lines; the full title is in the row's title attribute. */
+.sidenav .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── Note typography for the document pane ── */
 main.surface-document { max-width: 820px; }
-.doc-body { font-size: 16px; line-height: 1.65; letter-spacing: 0.01em; word-spacing: 0.12em; }
+.doc-body { font-size: 16px; line-height: 1.65; }
+/* Headings are --fg, not --accent: in Artificer the gold means "you can
+   click this", so gold headings read as links next to the real ones. */
 .doc-body h1, .doc-body h2, .doc-body h3, .doc-body h4 {
   font-family: var(--font-mono); font-weight: 700; letter-spacing: -0.01em;
-  color: var(--accent); margin: 32px 0 8px;
+  color: var(--fg); margin: 32px 0 8px;
 }
 .doc-body h1 { font-size: 28px; line-height: 1.3; margin-top: 0; }
 .doc-body h2 { font-size: 22px; line-height: 1.35; }
 .doc-body h3 { font-size: 18px; line-height: 1.4; }
 .doc-body :not(pre) > code { color: var(--accent); background: transparent; padding: 0 2px; }
+/* Code stays mono all the way down. artificer.css sets the body face on
+   every descendant of .surface-document and rescues only bare code/kbd, so
+   chroma's token <span>s inside a <pre> fell back to the prose face and the
+   columns of a highlighted block stopped lining up. */
+.doc-body pre, .doc-body pre *, .doc-body code * { font-family: var(--font-mono); }
+/* A plain quote: a quiet rule on the left. Callouts are blockquotes too and
+   carry their own tier styling below. */
+.doc-body blockquote:not(.callout) {
+  margin: 16px 0; padding: 0 0 0 var(--s-md);
+  border-left: 2px solid var(--border); color: var(--fg-secondary);
+}
 
 /* ── Properties frontmatter (render.go emits post-sanitizer, escaped fragments) ── */
 .props {
@@ -73,8 +93,7 @@ main.surface-document { max-width: 820px; }
 .outline { border-left: 1px solid var(--border); padding: var(--s-md) 0; font-family: var(--font-mono); overflow-y: auto; }
 .outline-h { padding: var(--s-sm) 14px var(--s-xs); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-secondary); font-family: var(--font-interface); }
 .outline-item { display: block; font-size: 12px; padding: 3px 14px; color: var(--fg-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-decoration: none; }
-.outline-item.h1 { color: var(--fg); }
-.outline-item.h2 { padding-left: 28px; }
+.outline-item.h3 { padding-left: 28px; }
 .outline-item:hover { color: var(--fg); }
 .outline-inline { display: none; margin: 0 0 var(--s-lg); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 6px 12px; font-family: var(--font-mono); font-size: 12px; }
 .outline-inline summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; padding: 4px 0; font-family: var(--font-interface); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-secondary); }
@@ -82,7 +101,7 @@ main.surface-document { max-width: 820px; }
 .outline-inline summary::after { content: ""; width: 6px; height: 6px; border-right: 1.5px solid var(--fg-secondary); border-bottom: 1.5px solid var(--fg-secondary); transform: rotate(45deg); transition: transform var(--dur-fast) var(--ease); }
 .outline-inline[open] summary::after { transform: rotate(-135deg); }
 .outline-inline .outline-item { padding: 3px 0; }
-.outline-inline .outline-item.h2 { padding-left: 14px; }
+.outline-inline .outline-item.h3 { padding-left: 14px; }
 
 /* ── Status bar ── */
 .statusbar { display: flex; align-items: stretch; border-top: 1px solid var(--border); background: var(--bg); font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 11px; color: var(--fg-secondary); }
@@ -123,8 +142,20 @@ main.surface-document { max-width: 820px; }
 .nav-toggle svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .content-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: 280px minmax(0, 1fr) 220px; }
 .content-grid--no-outline { grid-template-columns: 280px minmax(0, 1fr); }
-.docs-nav { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); }
-.docs-nav .field { padding: var(--s-sm); }
+.docs-nav { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); background: var(--bg-raised); }
+.docs-nav .search { margin: var(--s-sm) var(--s-sm) 0; }
+.docs-nav .search svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.docs-nav .search > input { padding: 6px 0; font-size: 13px; }
+
+/* ── Landing page ── */
+.home h1 { margin-bottom: 0; }
+.home .table { width: 100%; }
+/* The doc title is the row header (it becomes the card header when the
+   table reflows under 640px), but it reads as a link, not a column label. */
+.home .table tbody th { font-family: inherit; font-size: inherit; font-weight: 500; letter-spacing: normal; text-transform: none; }
+.home .table a { text-decoration: none; }
+.home .table .path { color: var(--fg-secondary); font-family: var(--font-mono); font-size: 13px; overflow-wrap: anywhere; }
+.home .table .num { white-space: nowrap; }
 .docs-nav .sidenav { border-radius: 0; border: 0; flex: 1; overflow-y: auto; }
 main.surface-document { padding: var(--s-xl); overflow-y: auto; min-height: 0; }
 #drawer-scrim { display: none; }
@@ -182,9 +213,10 @@ main.surface-document { padding: var(--s-xl); overflow-y: auto; min-height: 0; }
   <div class="content-grid{{if not .Outline}} content-grid--no-outline{{end}}">
     <div id="drawer-scrim"></div>
     <aside class="docs-nav" id="docs-nav">
-      <div class="field">
-        <label class="field__label" for="doc-filter">Filter</label>
-        <input class="input" id="doc-filter" type="search" placeholder="Filter docs…" autocomplete="off"/>
+      <div class="search">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <label class="sr-only" for="doc-filter">Filter docs</label>
+        <input id="doc-filter" type="search" placeholder="Filter docs…" autocomplete="off"/>
       </div>
       <nav class="sidenav" aria-label="Indexed docs">
         {{range .Groups}}
@@ -193,7 +225,7 @@ main.surface-document { padding: var(--s-xl); overflow-y: auto; min-height: 0; }
         <ul class="tree tree--static" aria-label="{{.Root}}">{{template "treeNodes" .Tree}}</ul>
         {{else}}
         {{range .Docs}}
-        <a href="{{.Href}}" data-filter-text="{{.FilterText}}"><span class="label">{{.Title}}</span></a>
+        <a href="{{.Href}}" title="{{.Title}}" data-filter-text="{{.FilterText}}"><span class="label">{{.Title}}</span></a>
         {{end}}
         {{end}}
         {{end}}
@@ -204,12 +236,28 @@ main.surface-document { padding: var(--s-xl); overflow-y: auto; min-height: 0; }
       <details class="outline-inline"><summary>On this page</summary><nav aria-label="On this page">{{template "outlineItems" .Outline}}</nav></details>
       {{end}}
       <div class="doc-body">
-      {{if .Content}}{{.Content}}{{else}}
-      <div class="empty-state">
-        <h2>No doc selected</h2>
-        <p>Choose a document from the sidebar to start reading.</p>
+      {{if .Content}}{{.Content}}{{else if .Home}}{{if .Home.Recent}}
+      <div class="home">
+        <h1>Indexed docs</h1>
+        <p class="meta">{{.DocCount}} docs across {{len .Home.Roots}} {{if eq (len .Home.Roots) 1}}root{{else}}roots{{end}}. Pick one from the sidebar, or start with a recent change.</p>
+        <h2>Recently changed</h2>
+        <table class="table table--responsive">
+          <thead><tr><th scope="col">Doc</th><th scope="col">Path</th><th scope="col" class="num">Modified</th></tr></thead>
+          <tbody>
+          {{range .Home.Recent}}<tr><th scope="row"><a href="{{.Href}}">{{.Title}}</a></th><td><span class="path">{{.Path}}</span></td><td class="num" data-label="Modified">{{.Modified}}</td></tr>
+          {{end}}</tbody>
+        </table>
+        <h2>Roots</h2>
+        <dl class="kv">
+          {{range .Home.Roots}}<dt>{{.Label}}</dt><dd class="num">{{.Count}} docs</dd>
+          {{end}}</dl>
       </div>
-      {{end}}
+      {{else}}
+      <div class="empty-state">
+        <p class="empty-state__title">No docs indexed</p>
+        <p class="empty-state__body">forgectl found no markdown files in the directories it was given. Restart <code>forgectl docs serve</code> with a directory that holds <code>.md</code> files.</p>
+      </div>
+      {{end}}{{end}}
       </div>
     </main>
     {{if .Outline}}
@@ -225,10 +273,9 @@ main.surface-document { padding: var(--s-xl); overflow-y: auto; min-height: 0; }
     <div class="status-spacer"></div>
     <div class="status-item opt">{{.DocCount}} docs indexed</div>
     {{if .Words}}<div class="status-item">{{.Words}} words · {{.Minutes}} min</div>{{end}}
-    <div class="status-item opt">markdown</div>
   </footer>
 </div>
 </body>
 </html>
 {{define "outlineItems"}}{{range .}}<a class="outline-item h{{.Level}}" href="#{{.ID}}">{{.Text}}</a>{{end}}{{end}}
-{{define "treeNodes"}}{{range .}}<li>{{if .Leaf}}<a class="tree__row tree__leaf" href="{{.Leaf.Href}}" data-filter-text="{{.Leaf.FilterText}}"{{if .Leaf.Current}} aria-current="page"{{end}}><span class="tree__twisty" aria-hidden="true"></span><span class="label">{{.Leaf.Title}}</span></a>{{else}}<details{{if .Open}} open{{end}}><summary class="tree__row"><span class="tree__twisty" aria-hidden="true"></span><span class="label">{{.Name}}</span> <span class="count">{{.Count}}</span></summary><ul class="tree__group">{{template "treeNodes" .Children}}</ul></details>{{end}}</li>{{end}}{{end}}
+{{define "treeNodes"}}{{range .}}<li>{{if .Leaf}}<a class="tree__row tree__leaf" href="{{.Leaf.Href}}" title="{{.Leaf.Title}}" data-filter-text="{{.Leaf.FilterText}}"{{if .Leaf.Current}} aria-current="page"{{end}}><span class="tree__twisty" aria-hidden="true"></span><span class="label">{{.Leaf.Title}}</span></a>{{else}}<details{{if .Open}} open{{end}}><summary class="tree__row"><span class="tree__twisty" aria-hidden="true"></span><span class="label">{{.Name}}</span> <span class="count">{{.Count}}</span></summary><ul class="tree__group">{{template "treeNodes" .Children}}</ul></details>{{end}}</li>{{end}}{{end}}

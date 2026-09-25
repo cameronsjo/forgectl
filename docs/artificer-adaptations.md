@@ -27,13 +27,14 @@ feedback issue filed upstream.
 - **Upstream issue:** #448 (filed via this skill)
 - **Retire when:** new mints ship with populated `adoption.signals[]`.
 
-## A4 — `field__label` class cleanup deferred
+## A4 — `field__label` class cleanup deferred (retired 2026-09-25)
 
 - **Dated:** 2026-08-31 · app @ pre-1.0 · Artificer @ 0.25.0
 - **What diverges:** forgectl's docs shell template uses class `field__label`, which was never an `artificer.css` class (the system styles `.field > label` via a child selector).
 - **Why necessary:** N/A — this is forgectl's own bug, not an Artificer gap; flagged upstream only because it shows an upgrade-verification class list built from a template can overclaim without a canonical class inventory to check against.
 - **Upstream issue:** #448 (filed via this skill)
 - **Retire when:** forgectl fixes its own template to drop the unused class.
+- **Retired:** 2026-09-25. The filter box is now Artificer's `.search` primitive with an `.sr-only` label; `field__label` is gone from the template.
 
 ## A5 — terminal palette consumed from `_palette.json`, not `tokens.json`
 
