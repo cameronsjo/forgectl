@@ -51,7 +51,8 @@ main.surface-document { max-width: 820px; }
 /* Code stays mono all the way down. artificer.css sets the body face on
    every descendant of .surface-document and rescues only bare code/kbd, so
    chroma's token <span>s inside a <pre> fell back to the prose face and the
-   columns of a highlighted block stopped lining up. */
+   columns of a highlighted block stopped lining up. Fixed upstream after
+   Artificer 0.26.0 (docs/artificer-adaptations.md A6). */
 .doc-body pre, .doc-body pre *, .doc-body code * { font-family: var(--font-mono); }
 /* A plain quote: a quiet rule on the left. Callouts are blockquotes too and
    carry their own tier styling below. */
@@ -95,10 +96,14 @@ main.surface-document { max-width: 820px; }
 .outline-item { display: block; font-size: 12px; padding: 3px 14px; color: var(--fg-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-decoration: none; }
 .outline-item.h3 { padding-left: 28px; }
 .outline-item:hover { color: var(--fg); }
+/* Nav rows take the ring inside the row, like .sidenav: the outline pane
+   scrolls, and a ring drawn outside the row was clipped at its edge. */
+.outline-item:focus-visible { outline-offset: var(--focus-offset-inset); }
 .outline-inline { display: none; margin: 0 0 var(--s-lg); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 6px 12px; font-family: var(--font-mono); font-size: 12px; }
 .outline-inline summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; padding: 4px 0; font-family: var(--font-interface); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-secondary); }
 .outline-inline summary::-webkit-details-marker { display: none; }
 .outline-inline summary::after { content: ""; width: 6px; height: 6px; border-right: 1.5px solid var(--fg-secondary); border-bottom: 1.5px solid var(--fg-secondary); transform: rotate(45deg); transition: transform var(--dur-fast) var(--ease); }
+.outline-inline summary:focus-visible { outline: var(--focus-width) solid var(--accent); outline-offset: var(--focus-offset); border-radius: var(--radius-sm); }
 .outline-inline[open] summary::after { transform: rotate(-135deg); }
 .outline-inline .outline-item { padding: 3px 0; }
 .outline-inline .outline-item.h3 { padding-left: 14px; }
@@ -146,6 +151,10 @@ main.surface-document { max-width: 820px; }
 .docs-nav .search { margin: var(--s-sm) var(--s-sm) 0; }
 .docs-nav .search svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .docs-nav .search > input { padding: 6px 0; font-size: 13px; }
+/* One ring: the .search border already turns --accent on focus. Fixed
+   upstream in Artificer after 0.26.0; drop this once the vendored copy has it
+   (docs/artificer-adaptations.md A6). */
+.docs-nav .search > input:focus-visible { outline: none; }
 
 /* ── Landing page ── */
 .home h1 { margin-bottom: 0; }
@@ -158,6 +167,10 @@ main.surface-document { max-width: 820px; }
 .home .table .num { white-space: nowrap; }
 .docs-nav .sidenav { border-radius: 0; border: 0; flex: 1; overflow-y: auto; }
 main.surface-document { padding: var(--s-xl); overflow-y: auto; min-height: 0; }
+/* The document pane scrolls, so with no link in view the browser makes the
+   pane itself the keyboard stop. Give it the house ring, inset so the grid's
+   edges don't clip it. */
+main.surface-document:focus-visible { outline: var(--focus-width) solid var(--accent); outline-offset: var(--focus-offset-inset); }
 #drawer-scrim { display: none; }
 @media (min-width: 901px) {
   [data-nav="closed"] .docs-nav { display: none; }

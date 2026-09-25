@@ -19,6 +19,14 @@
   margin: 0;
 }
 
+/* A highlighted block overflows sideways, so the browser makes it a
+   keyboard stop. Without this it got the browser's default ring (near-black
+   on the dark theme); .code-block's own rule in artificer.css, restated. */
+.chroma:focus-visible {
+  outline: var(--focus-width) solid var(--accent);
+  outline-offset: var(--focus-offset);
+}
+
 /* Comments and operators recede — tok-comment / tok-operator. */
 .chroma .c, .chroma .c1, .chroma .cm, .chroma .ch, .chroma .cs,
 .chroma .cp, .chroma .cpf { color: var(--fg-muted); font-style: italic; }

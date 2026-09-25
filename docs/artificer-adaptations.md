@@ -44,3 +44,11 @@ feedback issue filed upstream.
 - **Role mapping:** seventeen roles, documented with their palette keys in [`docs/commands/theme.md`](commands/theme.md). Three are worth noting because the obvious name is wrong: `danger` is `urgentText` and not bare `urgent` (which fails AA as text at ~2.27:1 on the dark background), `onaccent` is `ink` in **both** modes, and there is no `urgentFill` token — bare `urgent` is the fill hue.
 - **Upstream issue:** none filed. A forgectl target in `themes/build.mjs` would be the canonical shape, but it needs a delivery channel for the terminal palette that does not exist yet; the pinned fetch gets the same bytes today.
 - **Retire when:** the design system publishes `_palette.json` on npm, or gains a Go target that generates this file directly.
+
+## A6 — shell-template patches for two Artificer 0.25.0/0.26.0 bugs
+
+- **Dated:** 2026-09-25 · app @ pre-1.0 · Artificer @ 0.25.0
+- **What diverges:** the docs shell template restates two rules that belong in `artificer.css`: `pre` and everything inside `pre`/`code` hold `--font-mono` on a `.surface-document`, and the `.search` input's own focus ring is suppressed so only the box border shows focus.
+- **Why necessary:** `.surface-document *` set the prose face on chroma's token `<span>`s, so code-block columns drifted; and `.search` drew two nested accent rings on keyboard focus.
+- **Upstream fix:** `cameronsjo/artificer-design-system` branch `claude/forgectl-docs-serve-ux-7kcvjz`, commit `ba42053`, with a Playwright regression guard. Unreleased as of 0.26.0.
+- **Retire when:** the vendored Artificer version includes that commit. Delete the two template rules marked "A6" and the `.doc-body pre` font rule.
