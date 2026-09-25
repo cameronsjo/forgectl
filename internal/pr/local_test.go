@@ -493,7 +493,7 @@ func TestPrepareLocal_RefusesCleanRoomAcrossTMPDIRChange(t *testing.T) {
 func TestPrepareLocal_RefusesCleanRoomFromRecordStrictDecoderRejects(t *testing.T) {
 	elsewhere := t.TempDir()
 	workspace := filepath.Join(elsewhere, "forgectl-workflow-future1")
-	if err := os.MkdirAll(workspace, 0o755); err != nil {
+	if err := os.MkdirAll(workspace, 0o750); err != nil {
 		t.Fatalf("mkdir workspace: %v", err)
 	}
 
@@ -513,7 +513,7 @@ func TestPrepareLocal_RefusesCleanRoomFromRecordStrictDecoderRejects(t *testing.
 	}
 	// The fixture must be one the strict decoder rejects, or this test proves
 	// nothing about the tolerant reader.
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // path is the breadcrumb this test just wrote under t.TempDir()
 	if err != nil {
 		t.Fatalf("read breadcrumb: %v", err)
 	}
