@@ -46,6 +46,10 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26'
+          # Build on the newest 1.26 patch, not the runner image's cached one:
+          # standard-library security fixes arrive in patch releases, and the
+          # Vulncheck workflow scans against the newest patch too.
+          check-latest: true
 
       # Import the Developer-ID signing certificate into an ephemeral keychain so
       # the helper and the darwin binaries can be Developer-ID signed. Gated on the
