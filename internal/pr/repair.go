@@ -450,6 +450,9 @@ func cappedRecordBytes(raw []byte) string {
 // `--forget-if-absent` was built to clear, leaving `rm` as the only escape
 // again. The caller proceeds and SAYS SO instead, in the log and in the
 // confirmation prompt.
+//
+// local.go's recordedWorkspaceFor is the other tolerant reader: it skips the
+// strict decoder so a newer build's record still refuses its clean room.
 func refFromRawRecord(data []byte) (Ref, bool) {
 	var shallow struct {
 		Ref   string `json:"ref"`

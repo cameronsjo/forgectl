@@ -8,8 +8,32 @@ set -eu
 : "${HEAD_REPO:?HEAD_REPO must be set}"
 : "${BASE_REPO:?BASE_REPO must be set}"
 
+# A base that is not a commit must fail, never read as "no change".
+if ! git rev-parse --verify --quiet "$BASE_SHA^{commit}" >/dev/null; then
+	echo "::error::Unable to compare CHANGELOG.md with base commit $BASE_SHA." >&2
+	exit 2
+fi
+
+# Judge only what the PR itself changes (#458). In CI, HEAD is GitHub's
+# pull-request merge commit: its first parent is the current base tip and its
+# second is the PR head (HEAD_SHA). Diffing HEAD^1..HEAD is then exactly the
+# PR's effect on the base as it stands, so a release cut that landed on main
+# after the branch point is not blamed on the PR, and no merge-base choice is
+# involved (a criss-cross history cannot hide an edit behind one).
+#
+# Anything else (HEAD_SHA unset, a local run, a PR tip that merged main in)
+# falls back to the older BASE_SHA..HEAD comparison. It can over-block on a
+# stale base, but never passes an edit the PR made.
+from=$BASE_SHA
+head_sha=${HEAD_SHA:-}
+if [ -n "$head_sha" ] &&
+	second=$(git rev-parse --verify --quiet HEAD^2) &&
+	[ "$second" = "$(git rev-parse --verify --quiet "$head_sha^{commit}")" ]; then
+	from=$(git rev-parse HEAD^1)
+fi
+
 set +e
-git diff --quiet "$BASE_SHA" HEAD -- CHANGELOG.md
+git diff --quiet "$from" HEAD -- CHANGELOG.md
 diff_status=$?
 set -e
 
@@ -20,7 +44,7 @@ case "$diff_status" in
 	1)
 		;;
 	*)
-		echo "::error::Unable to compare CHANGELOG.md with base commit $BASE_SHA." >&2
+		echo "::error::Unable to compare CHANGELOG.md between $from and HEAD." >&2
 		exit "$diff_status"
 		;;
 esac

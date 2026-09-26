@@ -79,6 +79,7 @@ func TestResolveRecipeHerdrTarget(t *testing.T) {
 		explicit string
 		env      map[string]string
 		want     string
+		wantSrc  string
 		wantErr  bool
 	}{
 		{
@@ -86,6 +87,7 @@ func TestResolveRecipeHerdrTarget(t *testing.T) {
 			explicit: "reviewer",
 			env:      map[string]string{herdrPaneIDEnv: "w1:p2"},
 			want:     "reviewer",
+			wantSrc:  "--target",
 		},
 		{
 			name: "pane id env wins over active pane env",
@@ -93,12 +95,14 @@ func TestResolveRecipeHerdrTarget(t *testing.T) {
 				herdrPaneIDEnv:       "w1:p2",
 				herdrActivePaneIDEnv: "w1:p3",
 			},
-			want: "w1:p2",
+			want:    "w1:p2",
+			wantSrc: herdrPaneIDEnv,
 		},
 		{
-			name: "active pane fallback",
-			env:  map[string]string{herdrActivePaneIDEnv: "w1:p3"},
-			want: "w1:p3",
+			name:    "active pane fallback",
+			env:     map[string]string{herdrActivePaneIDEnv: "w1:p3"},
+			want:    "w1:p3",
+			wantSrc: herdrActivePaneIDEnv,
 		},
 		{
 			name:    "missing target fails",
@@ -110,7 +114,7 @@ func TestResolveRecipeHerdrTarget(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			withRecipeEnv(t, tt.env)
-			got, ok := resolveRecipeHerdrTarget(tt.explicit)
+			got, src, ok := resolveRecipeHerdrTarget(tt.explicit)
 			if tt.wantErr {
 				if ok {
 					t.Fatal("resolveRecipeHerdrTarget() = ok, want missing target")
@@ -120,10 +124,24 @@ func TestResolveRecipeHerdrTarget(t *testing.T) {
 			if !ok {
 				t.Fatal("resolveRecipeHerdrTarget() = missing target, want ok")
 			}
-			if got != tt.want {
-				t.Fatalf("resolveRecipeHerdrTarget() = %q, want %q", got, tt.want)
+			if got != tt.want || src != tt.wantSrc {
+				t.Fatalf("resolveRecipeHerdrTarget() = %q from %q, want %q from %q", got, src, tt.want, tt.wantSrc)
 			}
 		})
+	}
+}
+
+// TestRecipeAfkBadTargetNamesItsSource pins #464: a malformed target inherited
+// from the environment names the variable that supplied it, and nothing runs.
+func TestRecipeAfkBadTargetNamesItsSource(t *testing.T) {
+	withRecipeEnv(t, map[string]string{herdrPaneIDEnv: "--config=/tmp/x"})
+	fake := &exec.FakeRunner{}
+	err := runRecipeAfk(context.Background(), fake, recipeAfkOptions{Prompt: "/go:afk"})
+	if err == nil || !strings.Contains(err.Error(), "from "+herdrPaneIDEnv) {
+		t.Fatalf("runRecipeAfk() error = %v, want it to name %s", err, herdrPaneIDEnv)
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("runRecipeAfk() ran %d commands on a rejected target", len(fake.Calls))
 	}
 }
 
