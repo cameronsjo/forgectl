@@ -38,7 +38,9 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
+	"github.com/spf13/cobra"
 )
 
 // dashRunner fakes gh search prs (dash's two queries), gh pr view (for a real
@@ -580,5 +582,35 @@ func TestDashPhaseNote_EveryPhaseExceptActiveYieldsANote(t *testing.T) {
 		if note == "" {
 			t.Errorf("phase %q: phaseNote returned empty, want a non-empty note", phase)
 		}
+	}
+}
+
+// TestRepairReason_CappedTheSameOnDashAndRepair pins #506: a reason built from
+// subprocess error text can be any length, so both human sinks cap it through
+// repairReasonLine and show the same text.
+func TestRepairReason_CappedTheSameOnDashAndRepair(t *testing.T) {
+	reason := "launch failed: " + strings.Repeat("stderr noise ", 100)
+	want := repairReasonLine(reason)
+	if !strings.HasSuffix(want, termsafe.TruncatedMarker) {
+		t.Fatalf("a %d-byte reason should be truncated: %q", len(reason), want)
+	}
+
+	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 31}
+	summaries := seedPhasedSummaries(t, t.TempDir(), []phasedRecord{
+		{ref: ref, phase: pr.PhaseNeedsRepair, repairReason: reason},
+	})
+	var dash bytes.Buffer
+	renderSessions(&dash, summaries)
+	if !strings.Contains(dash.String(), "[needs-repair: "+want+"]") {
+		t.Errorf("pr dash does not show the capped reason:\n%s", dash.String())
+	}
+
+	var rep bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&rep)
+	report := pr.RepairReport{Items: []pr.RepairItem{{Ref: ref.String(), Outcome: "inspect", Reason: reason}}}
+	_ = writeRepairHuman(cmd, report, false)
+	if !strings.Contains(rep.String(), "  reason: "+want+"\n") {
+		t.Errorf("pr repair does not show the capped reason:\n%s", rep.String())
 	}
 }
