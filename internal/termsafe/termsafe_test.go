@@ -267,8 +267,8 @@ func TestSafeLineMax(t *testing.T) {
 		{"exactly the cap is not marked", long, 50, long},
 		{"over the cap is cut and marked", long, 10, strings.Repeat("x", 10) + TruncatedMarker},
 		{"zero means no cap", long, 0, long},
-		// An escape is kept or dropped whole: "ab" fits, the 6-rune ‮ does not.
-		{"never splits an escape", "ab‮cd", 5, "ab" + TruncatedMarker},
+		// An escape is kept or dropped whole: "ab" fits, the 6-rune \u202e does not.
+		{"never splits an escape", "ab\u202ecd", 5, "ab" + TruncatedMarker},
 		// Controls expand when escaped; the cap counts the expansion.
 		{"counts escaped runes", strings.Repeat("\x00", 20), 12, `\x00\x00\x00` + TruncatedMarker},
 	}
@@ -282,7 +282,7 @@ func TestSafeLineMax(t *testing.T) {
 }
 
 func TestSafeLineMaxOutputIsInert(t *testing.T) {
-	in := strings.Repeat("a\x1b[2J ‮", 100)
+	in := strings.Repeat("a\x1b[2J\u2028\u202e", 100)
 	got := SafeLineMax(in, 57)
 	for _, r := range got {
 		if IsUnsafeTerminalRune(r) || !unicode.IsGraphic(r) {
