@@ -8,22 +8,32 @@ set -eu
 : "${HEAD_REPO:?HEAD_REPO must be set}"
 : "${BASE_REPO:?BASE_REPO must be set}"
 
-# Judge only the PR's own commits. In CI, HEAD is the pull-request merge
-# commit, which also carries every main commit since the branch point: a
-# release cut landing there edits CHANGELOG.md and would be blamed on this PR
-# (#458). A three-dot diff starts at the merge base of BASE_SHA and the PR head,
-# so it holds whether BASE_SHA is the old branch point or the current main tip.
-pr_head=${HEAD_SHA:-}
-if [ -z "$pr_head" ]; then
-	if git rev-parse --verify --quiet HEAD^2 >/dev/null; then
-		pr_head=$(git rev-parse HEAD^2)
-	else
-		pr_head=$(git rev-parse HEAD)
-	fi
+# A base that is not a commit must fail, never read as "no change".
+if ! git rev-parse --verify --quiet "$BASE_SHA^{commit}" >/dev/null; then
+	echo "::error::Unable to compare CHANGELOG.md with base commit $BASE_SHA." >&2
+	exit 2
+fi
+
+# Judge only what the PR itself changes (#458). In CI, HEAD is GitHub's
+# pull-request merge commit: its first parent is the current base tip and its
+# second is the PR head (HEAD_SHA). Diffing HEAD^1..HEAD is then exactly the
+# PR's effect on the base as it stands, so a release cut that landed on main
+# after the branch point is not blamed on the PR, and no merge-base choice is
+# involved (a criss-cross history cannot hide an edit behind one).
+#
+# Anything else (HEAD_SHA unset, a local run, a PR tip that merged main in)
+# falls back to the older BASE_SHA..HEAD comparison. It can over-block on a
+# stale base, but never passes an edit the PR made.
+from=$BASE_SHA
+head_sha=${HEAD_SHA:-}
+if [ -n "$head_sha" ] &&
+	second=$(git rev-parse --verify --quiet HEAD^2) &&
+	[ "$second" = "$(git rev-parse --verify --quiet "$head_sha^{commit}")" ]; then
+	from=$(git rev-parse HEAD^1)
 fi
 
 set +e
-git diff --quiet "$BASE_SHA...$pr_head" -- CHANGELOG.md
+git diff --quiet "$from" HEAD -- CHANGELOG.md
 diff_status=$?
 set -e
 
@@ -34,7 +44,7 @@ case "$diff_status" in
 	1)
 		;;
 	*)
-		echo "::error::Unable to compare CHANGELOG.md with base commit $BASE_SHA (PR head $pr_head)." >&2
+		echo "::error::Unable to compare CHANGELOG.md between $from and HEAD." >&2
 		exit "$diff_status"
 		;;
 esac
