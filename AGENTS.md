@@ -54,10 +54,10 @@ Gotchas agent sessions have hit here. Each one cost a CI cycle or a debugging de
 - The reader scrolls inside `main.surface-document`, not `window`, so
   `window.scrollY` is always 0.
 - Stop a leftover server by its port before starting a new one:
-  `fuser -k <port>/tcp` or `lsof -ti tcp:<port> -sTCP:LISTEN | xargs kill`. Do not use
-  `pkill -f "docs serve"`, which also matches the calling shell and kills it
-  (exit 144), or `pkill -x forgectl`, which also kills forgectl's MCP server
-  and other sessions' processes.
+  `fuser -k <port>/tcp`, or `lsof -ti tcp:<port> -sTCP:LISTEN | xargs kill`.
+  Do not use `pkill -f "docs serve"`, which also matches the calling shell and
+  kills it (exit 144), or `pkill -x forgectl`, which also kills forgectl's MCP
+  server and other sessions' processes.
 - In claude.ai cloud sessions, import Playwright from
   `$(npm root -g)/playwright/index.mjs` and launch Chromium with
   `executablePath: '/opt/pw-browsers/chromium'`.
