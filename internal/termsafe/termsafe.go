@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // IsUnsafeTerminalRune reports whether r is a Cc control or a Unicode
@@ -44,18 +45,51 @@ func IsUnsafeTerminalRune(r rune) bool {
 func SafeLine(s string) string {
 	var safe strings.Builder
 	for _, r := range s {
-		if !IsUnsafeTerminalRune(r) && unicode.IsGraphic(r) {
-			safe.WriteRune(r)
-			continue
-		}
-		quoted := strconv.QuoteRuneToGraphic(r)
-		if len(quoted) >= 2 {
-			safe.WriteString(quoted[1 : len(quoted)-1])
-		} else {
-			safe.WriteString(quoted)
-		}
+		safe.WriteString(safeRune(r))
 	}
 	return safe.String()
+}
+
+// TruncatedMarker ends a SafeLineMax result that dropped text, so a reader
+// can tell a capped value from one that simply ended there.
+const TruncatedMarker = " … [truncated]"
+
+// SafeLineMax is SafeLine capped at maxRunes runes of OUTPUT, for a sink
+// whose value can be arbitrarily long (#506). The cap counts escaped runes,
+// so a string of controls cannot expand past it, and it cuts only between
+// whole escapes: a \u202e is kept or dropped entire, never split into text
+// that reads as something else. A cut value ends in TruncatedMarker, which
+// is not counted against maxRunes. maxRunes < 1 means no cap.
+func SafeLineMax(s string, maxRunes int) string {
+	if maxRunes < 1 {
+		return SafeLine(s)
+	}
+	var safe strings.Builder
+	used := 0
+	for _, r := range s {
+		piece := safeRune(r)
+		n := utf8.RuneCountInString(piece)
+		if used+n > maxRunes {
+			safe.WriteString(TruncatedMarker)
+			return safe.String()
+		}
+		safe.WriteString(piece)
+		used += n
+	}
+	return safe.String()
+}
+
+// safeRune is SafeLine's per-rune rule: a safe graphic rune as itself, any
+// other rune as its Go graphic escape without the surrounding quotes.
+func safeRune(r rune) string {
+	if !IsUnsafeTerminalRune(r) && unicode.IsGraphic(r) {
+		return string(r)
+	}
+	quoted := strconv.QuoteRuneToGraphic(r)
+	if len(quoted) >= 2 {
+		return quoted[1 : len(quoted)-1]
+	}
+	return quoted
 }
 
 // QuoteText visibly quotes an untrusted text field without allowing it to

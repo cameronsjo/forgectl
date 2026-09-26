@@ -254,3 +254,43 @@ func TestVisibleQuotingDoesNotBroadenSharedClassifier(t *testing.T) {
 		}
 	}
 }
+
+func TestSafeLineMax(t *testing.T) {
+	long := strings.Repeat("x", 50)
+	tests := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{"under the cap is SafeLine", "boom\x1b[31m", 40, SafeLine("boom\x1b[31m")},
+		{"exactly the cap is not marked", long, 50, long},
+		{"over the cap is cut and marked", long, 10, strings.Repeat("x", 10) + TruncatedMarker},
+		{"zero means no cap", long, 0, long},
+		// An escape is kept or dropped whole: "ab" fits, the 6-rune \u202e does not.
+		{"never splits an escape", "ab\u202ecd", 5, "ab" + TruncatedMarker},
+		// Controls expand when escaped; the cap counts the expansion.
+		{"counts escaped runes", strings.Repeat("\x00", 20), 12, `\x00\x00\x00` + TruncatedMarker},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SafeLineMax(tt.in, tt.max); got != tt.want {
+				t.Errorf("SafeLineMax(%q, %d) = %q, want %q", tt.in, tt.max, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSafeLineMaxOutputIsInert(t *testing.T) {
+	in := strings.Repeat("a\x1b[2J\u2028\u202e", 100)
+	got := SafeLineMax(in, 57)
+	for _, r := range got {
+		if IsUnsafeTerminalRune(r) || !unicode.IsGraphic(r) {
+			t.Fatalf("SafeLineMax output carries unsafe rune %U: %q", r, got)
+		}
+	}
+	body := strings.TrimSuffix(got, TruncatedMarker)
+	if n := utf8.RuneCountInString(body); n > 57 {
+		t.Errorf("body is %d runes, want <= 57", n)
+	}
+}

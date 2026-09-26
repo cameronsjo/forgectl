@@ -103,7 +103,7 @@ func phaseNote(s pr.SessionSummary) string {
 	case "", pr.PhaseActive:
 		return ""
 	case pr.PhaseNeedsRepair:
-		reason := safeTerm(s.RepairReason())
+		reason := repairReasonLine(s.RepairReason())
 		if reason == "" {
 			reason = "no reason recorded"
 		}

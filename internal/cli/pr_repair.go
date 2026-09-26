@@ -355,7 +355,7 @@ func writeRepairHuman(cmd *cobra.Command, report pr.RepairReport, apply bool) er
 			ref, it.FromPhase, windowObservation(it), workspaceObservation(it),
 			termsafe.QuotePathIfUnsafe(it.RecordPath))
 		if it.Reason != "" {
-			_, _ = fmt.Fprintf(out, "  reason: %s\n", safeTerm(it.Reason))
+			_, _ = fmt.Fprintf(out, "  reason: %s\n", repairReasonLine(it.Reason))
 		}
 		if it.Error != "" {
 			_, _ = fmt.Fprintf(out, "  error: %s\n", safeTerm(it.Error))
@@ -409,4 +409,17 @@ func observation(known *bool, whenTrue, whenFalse string) string {
 	default:
 		return whenFalse
 	}
+}
+
+// maxRepairReasonRunes caps a needs-repair reason on the human sinks. The
+// reason is built from subprocess error text at the throw site, so it can be
+// any length (#506). The cap counts runes, not screen columns, and the
+// truncation marker comes on top of it.
+const maxRepairReasonRunes = 200
+
+// repairReasonLine is the ONE human rendering of a needs-repair reason, shared
+// by `pr repair` and `pr dash` so both surfaces show the same capped text.
+// `pr repair --json` still carries the full value.
+func repairReasonLine(reason string) string {
+	return termsafe.SafeLineMax(reason, maxRepairReasonRunes)
 }
