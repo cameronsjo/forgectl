@@ -29,3 +29,48 @@ END_COMMIT_OVERRIDE
 Release Please reads that block from the merged squash PR and generates the
 versioned changelog entry. Use at most one override block per PR. Changes with no
 consumer effect need no release-note override.
+
+## Working notes
+
+Gotchas agent sessions have hit here. Each one cost a CI cycle or a debugging detour.
+
+### Build and lint
+
+- Build with `go build .` from the repo root. There is no `cmd/forgectl`.
+- Lint with `golangci-lint` v2.13.1 to match CI. `.golangci.yml` sets
+  `new-from-rev: origin/main`, so CI fails on any new finding. In a shallow
+  clone, run `git fetch --depth=50 origin main` first.
+- New code uses `httptest.NewRequestWithContext(t.Context(), …)` (the `noctx`
+  check rejects `httptest.NewRequest`). Annotate a fake test secret
+  `//nolint:gosec // G101: a fake …`.
+
+### The docs reader (`forgectl docs serve`)
+
+- `internal/docs/assets/*.js` has no test harness and CI never runs it. Verify
+  a change with a Playwright script against a running `docs serve`, and say so
+  in the PR.
+- Load pages with `waitUntil: 'load'`, never `'networkidle'`. The live-reload
+  SSE stream never goes idle.
+- The reader scrolls inside `main.surface-document`, not `window`, so
+  `window.scrollY` is always 0.
+- The reader shows "disconnected" about 27s after the server stops. Give that
+  wait a timeout of 60s or more.
+- Stop a leftover server with `pkill -x <binary-name>` before starting a new
+  one. `pkill -f "docs serve"` also matches the calling shell and kills it
+  (exit 144).
+- In claude.ai cloud sessions, import Playwright from
+  `$(npm root -g)/playwright/index.mjs` and launch Chromium with
+  `executablePath: '/opt/pw-browsers/chromium'`.
+
+### Vendored Artificer
+
+- Re-vendor only with `scripts/vendor-artificer.sh`, which passes `--fonts`.
+  The OFL texts in `internal/docs/assets/font-licenses/` must stay in both
+  goreleaser archive `files` lists.
+- Local patches over Artificer and their retirement conditions live in
+  `docs/artificer-adaptations.md`. Check it after every re-vendor.
+
+### Review
+
+- CodeRabbit is capped at one review per hour and lags behind pushes. Do not
+  wait on it as a gate, and never tick its paid on-demand review box.
