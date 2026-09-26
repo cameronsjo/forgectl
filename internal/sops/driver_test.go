@@ -212,17 +212,21 @@ func TestIntegration_RoundTripAndDiffShape(t *testing.T) {
 		}
 	}
 
-	// The changed-line count: one content line plus sops' lastmodified and
-	// mac. Counted directly rather than through git, so the test needs no
-	// repository history.
-	changed := 0
-	for key, line := range afterLines {
-		if beforeLines[key] != line {
-			changed++
+	// Which lines changed: the value and sops' mac always; lastmodified too,
+	// except when the fixture's encryption and this write land in the same
+	// second, since sops stores it at one-second resolution. Counting to a
+	// fixed 3 made that a timing flake on fast runners. Compared directly
+	// rather than through git, so the test needs no repository history.
+	changed := changedKeys(beforeLines, afterLines)
+	must := map[string]bool{"llm_key_hermes": true, "mac": true}
+	for _, key := range changed {
+		if !must[key] && key != "lastmodified" {
+			t.Errorf("unexpected changed line %q (changed: %v)", key, changed)
 		}
+		delete(must, key)
 	}
-	if changed != 3 {
-		t.Errorf("%d lines changed, want 3 (the value plus sops' lastmodified and mac): %v", changed, changedKeys(beforeLines, afterLines))
+	for key := range must {
+		t.Errorf("expected the %q line to change (changed: %v)", key, changed)
 	}
 
 }
