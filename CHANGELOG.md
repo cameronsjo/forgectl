@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.19.0](https://github.com/cameronsjo/forgectl/compare/v0.18.0...v0.19.0) (2026-09-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **proxy:** refuse a launch profile that proxies with no bypass list
+* **proxy:** remove omitted launch-profile variables instead of emptying them
+
+### Features
+
+* **cli:** add --json to launch which, pr list, tmux ls, workflow list, workflow status, and workflow verify ([2a4b281](https://github.com/cameronsjo/forgectl/commit/2a4b281a8115feb944e05aa8345412c8c5482b1a))
+* **cli:** bare forgectl opens a hub reaching every command group instead of only the tmux jumper; an unknown top-level verb or subverb (e.g. a typo) now always fails with Cobra's own unknown-command error rather than silently opening a menu ([137f8f1](https://github.com/cameronsjo/forgectl/commit/137f8f11fb5418f9aa12c552515508c383625e64))
+* **cli:** docs list gains --timeout (deadline, default 15s) and --limit (bound row count, default unlimited) ([91a907c](https://github.com/cameronsjo/forgectl/commit/91a907cc8e3867860cd93d507803d6d1b7c29f85))
+* **docs:** show recently changed docs and per-root counts on the docs reader landing page ([6c82c8c](https://github.com/cameronsjo/forgectl/commit/6c82c8c43a10ea0f81ee9997c1d43977b1c692b9))
+* **env:** env set --sops writes one key into a SOPS file, value never in argv ([b42f1a5](https://github.com/cameronsjo/forgectl/commit/b42f1a500348e9121ac2a092d085331bf2cc83d3))
+* **env:** env set --sops writes one key into a SOPS file, value never in argv ([8cf2084](https://github.com/cameronsjo/forgectl/commit/8cf2084429fff9ced33243205b4aece94600db95))
+* **pr,launch:** inject the launch environment into the clean-room reviewer, and name it in `launch which` ([95687db](https://github.com/cameronsjo/forgectl/commit/95687db8569a1fce82ca4e5ad8da184de8b9d460))
+* **pr:** admission cap on every launch path, --queue defers to the drainer ([#472](https://github.com/cameronsjo/forgectl/issues/472) Task 3) ([#516](https://github.com/cameronsjo/forgectl/issues/516)) ([1c47683](https://github.com/cameronsjo/forgectl/commit/1c47683741b4f5b9846e6851e314b2f42615368c))
+* **pr:** durable launch phases, slot reservation, and pr repair ([#299](https://github.com/cameronsjo/forgectl/issues/299) Task 2) ([#502](https://github.com/cameronsjo/forgectl/issues/502)) ([ca71948](https://github.com/cameronsjo/forgectl/commit/ca7194882b0f5fa57f113baa70d385612c54927a))
+* **pr:** lifecycle lock, atomic breadcrumb writer, and v2 record fields ([#299](https://github.com/cameronsjo/forgectl/issues/299)) ([#497](https://github.com/cameronsjo/forgectl/issues/497)) ([2b4c3a0](https://github.com/cameronsjo/forgectl/commit/2b4c3a025191caf8bedd2f41884227907f55b072))
+* **proxy:** apply a named launch profile to every launched harness ([2fc6dcd](https://github.com/cameronsjo/forgectl/commit/2fc6dcdf2239633cc0d0629a13979eb736b412a2))
+* **proxy:** apply a named profile to every launched harness ([043a8e3](https://github.com/cameronsjo/forgectl/commit/043a8e306c202a2d79f74b0383b1868a252bae94))
+* **pr:** pr repair --prune reaps set-aside records and compacts the audit log ([#511](https://github.com/cameronsjo/forgectl/issues/511)) ([e0c3340](https://github.com/cameronsjo/forgectl/commit/e0c33403967f5d97968ffc4c0e1447f83c88225f))
+* **pr:** queue and drain verbs ([#473](https://github.com/cameronsjo/forgectl/issues/473) Task 4) ([#518](https://github.com/cameronsjo/forgectl/issues/518)) ([f12019e](https://github.com/cameronsjo/forgectl/commit/f12019e6416fe06f7c03cd718f2bf6b6fd874acd))
+* **recipe:** submit --prompt (default /go:afk) instead of a hardcoded /journal, allowlisted like --rename ([7dd9bf2](https://github.com/cameronsjo/forgectl/commit/7dd9bf21dac8a2636d09ba845e0bfc882d60048c))
+* **recipe:** submit --prompt (default /go:afk) instead of a hardcoded /journal, allowlisted like --rename ([46eaee2](https://github.com/cameronsjo/forgectl/commit/46eaee21c01f3c189285758497f4d85acca4b66b))
+* **sops:** pure domain package — path grammar, value rules, and the line editor ([bbcd762](https://github.com/cameronsjo/forgectl/commit/bbcd7626d2ac7bf3b3c2f50b24aec8d3c3966aa9))
+
+
+### Bug Fixes
+
+* **cask:** emit postflight_steps instead of deprecated postflight ([#525](https://github.com/cameronsjo/forgectl/issues/525)) ([a96b17f](https://github.com/cameronsjo/forgectl/commit/a96b17f6225d87edaa915cf07cd786df4fbe3689)), closes [#523](https://github.com/cameronsjo/forgectl/issues/523)
+* **ci:** diff GitHub's merge commit against its first parent in the changelog check ([8cd4cba](https://github.com/cameronsjo/forgectl/commit/8cd4cba3af17d2d6ae5fd9afbfdf940f69c123d7)), closes [#458](https://github.com/cameronsjo/forgectl/issues/458)
+* **ci:** judge only the PR's own commits in the changelog-owner check ([1f7fe7e](https://github.com/cameronsjo/forgectl/commit/1f7fe7e6134b0726052320e929bf3f9dfb9b1493)), closes [#458](https://github.com/cameronsjo/forgectl/issues/458)
+* **cli:** errors keep paths as written; env check documents exit codes; config names init ([#486](https://github.com/cameronsjo/forgectl/issues/486)) ([bf03b23](https://github.com/cameronsjo/forgectl/commit/bf03b23995cf5a56872b8bfdb29651ee2aceba5e))
+* **docs:** give every keyboard stop in the docs reader the Artificer focus ring ([6c82c8c](https://github.com/cameronsjo/forgectl/commit/6c82c8c43a10ea0f81ee9997c1d43977b1c692b9))
+* **docs:** keep the closed sidebar drawer out of the Tab order and add a skip link ([ae5cbc4](https://github.com/cameronsjo/forgectl/commit/ae5cbc4baf87813f8a5b8f607bfaec2ac7d10d87))
+* **docs:** keep the page with a banner when the open doc is deleted, and show "disconnected" when live reload gives up ([ae5cbc4](https://github.com/cameronsjo/forgectl/commit/ae5cbc4baf87813f8a5b8f607bfaec2ac7d10d87))
+* **docs:** keep the reading position, opened folders, and filter when a doc changes during live reload ([6c82c8c](https://github.com/cameronsjo/forgectl/commit/6c82c8c43a10ea0f81ee9997c1d43977b1c692b9))
+* **docs:** load the Artificer web fonts in the docs reader ([6c82c8c](https://github.com/cameronsjo/forgectl/commit/6c82c8c43a10ea0f81ee9997c1d43977b1c692b9))
+* **docs:** raise sidebar folder counts to AA contrast ([ae5cbc4](https://github.com/cameronsjo/forgectl/commit/ae5cbc4baf87813f8a5b8f607bfaec2ac7d10d87))
+* **docs:** render code blocks in mono and stop styling headings as links in the docs reader ([6c82c8c](https://github.com/cameronsjo/forgectl/commit/6c82c8c43a10ea0f81ee9997c1d43977b1c692b9))
+* **env:** the confirmed --any-file path is the path that gets written ([e4c2009](https://github.com/cameronsjo/forgectl/commit/e4c200937623b83c1bbe3954c4a1ad280742161e))
+* **env:** the confirmed --any-file path is the path that gets written ([7bdf6b6](https://github.com/cameronsjo/forgectl/commit/7bdf6b6895121c9de9c4742bbdcdfe87ce4da1a4))
+* **env:** the lock open validates its own descriptor, and refusals close theirs ([d40cf53](https://github.com/cameronsjo/forgectl/commit/d40cf53ad4490a60183a24a3d3f43496e90b4924))
+* herdr target source, changelog-owner check; test: clean-room tolerant reader; chore: dependabot labels ([b32c062](https://github.com/cameronsjo/forgectl/commit/b32c06271fdcc552d02f23ed0c61283806581be3))
+* **pr:** cap the needs-repair reason on pr repair and pr dash ([#535](https://github.com/cameronsjo/forgectl/issues/535)) ([292fc15](https://github.com/cameronsjo/forgectl/commit/292fc15d3e00d78f7f1d4c8bcfacdcc161ee4d10))
+* **pr:** dash flags needs-repair rows with their reason and stops calling queued records an internal error ([#509](https://github.com/cameronsjo/forgectl/issues/509)) ([dcd29a2](https://github.com/cameronsjo/forgectl/commit/dcd29a2327e67634c6e49e5b01057ef80186814c))
+* **pr:** keep review-window environment values out of logs and errors, and refuse URLs with query strings ([6c82c8c](https://github.com/cameronsjo/forgectl/commit/6c82c8c43a10ea0f81ee9997c1d43977b1c692b9))
+* **proxy:** refuse a launch profile that proxies with no bypass list ([1103ab3](https://github.com/cameronsjo/forgectl/commit/1103ab391df0416f4381e3bc0b63bdb68d07a650))
+* **proxy:** refuse credentials after one or three slashes ([ef0caee](https://github.com/cameronsjo/forgectl/commit/ef0caeefb0d819edd6d103436bacc4d2b9772a0b))
+* **proxy:** refuse credentials in a launch profile's proxy URL ([b317a7b](https://github.com/cameronsjo/forgectl/commit/b317a7b78406c097bdc8f683ff5b3d10abbb747c))
+* **proxy:** remove omitted launch-profile variables instead of emptying them ([c9559b7](https://github.com/cameronsjo/forgectl/commit/c9559b72cb0544003a3511d73e3871f4f1af30e7))
+* **proxy:** resolve the launch profile before anything can be written ([2a4b058](https://github.com/cameronsjo/forgectl/commit/2a4b058721a4dae420d0493af9b838bcec3c7e61))
+* **pr:** refuse credentials in any URL a review window would put on argv ([7389972](https://github.com/cameronsjo/forgectl/commit/738997245970c6e6a7e74c2499845c968c2138c9))
+* **pr:** teardown and cleanup write the same intent-then-complete audit rows repair does ([#510](https://github.com/cameronsjo/forgectl/issues/510)) ([cf7e768](https://github.com/cameronsjo/forgectl/commit/cf7e76849fe29274f04dd10da9744c1149e34c4c))
+* **recipe:** name the source of a rejected herdr target ([28d3917](https://github.com/cameronsjo/forgectl/commit/28d39176335b21e13363f3dd36b23d34ad47904e)), closes [#464](https://github.com/cameronsjo/forgectl/issues/464)
+* **sops:** the block refusal names the rule, not the key the operator supplied ([281ff61](https://github.com/cameronsjo/forgectl/commit/281ff61b26155b58acd1ecdadf3a3f79591411c3))
+* **sops:** the rules check walks the whole path and the verifier resolves it ([59538fc](https://github.com/cameronsjo/forgectl/commit/59538fc13beb01bfc912d4f5b1284fdbe1c65df4))
+* **tasks:** mcp --http requires --pin-ip; pinned dialer copies its list; --ping keeps the body read error ([#488](https://github.com/cameronsjo/forgectl/issues/488)) ([94d2d65](https://github.com/cameronsjo/forgectl/commit/94d2d65c720a411f689c7ee16fa9a0c42ecd9c8c))
+* **test:** tree-walking tests skip dot-directories; ignore nested worktrees ([#484](https://github.com/cameronsjo/forgectl/issues/484)) ([f0a3255](https://github.com/cameronsjo/forgectl/commit/f0a32555dd26df6fc7a2d619f0efd6db1d4c8869))
+* **tmux:** refuse an env value ending in a semicolon ([2657e85](https://github.com/cameronsjo/forgectl/commit/2657e858017a3ad0987a581368b7449fb1f9530c))
+* **tui:** act on the selected tmux-menu row when a filter is applied ([6c82c8c](https://github.com/cameronsjo/forgectl/commit/6c82c8c43a10ea0f81ee9997c1d43977b1c692b9))
+* **tui:** tmux menu acts on the selected row, not its filtered position ([fa73978](https://github.com/cameronsjo/forgectl/commit/fa73978973acbd2f12171713ecf2106a02402780)), closes [#496](https://github.com/cameronsjo/forgectl/issues/496)
+
 ## [0.18.0](https://github.com/cameronsjo/forgectl/compare/v0.17.3...v0.18.0) (2026-09-08)
 
 
