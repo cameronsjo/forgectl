@@ -18,9 +18,14 @@
 // text), so restoring to it keeps the reader in the same paragraph.
 //
 // Anything the swap cannot express falls back to a full reload with the same
-// anchor carried through sessionStorage: a failed fetch, a doc that no longer
-// resolves, or a page whose layout changed shape (an outline appearing or
-// going away).
+// anchor carried through sessionStorage: a failed fetch or a page whose layout
+// changed shape (an outline appearing or going away).
+//
+// A doc that no longer resolves (404: deleted or renamed) is the exception.
+// A reload would land on the server's bare 404 page, which has no shell and
+// no reload client, so restoring the file could never bring the page back.
+// The current page stays up with a banner instead; the next change that makes
+// the path resolve again swaps the doc back in and the banner goes with it.
 (function () {
   "use strict";
 
@@ -212,6 +217,34 @@
     applyAnchor(saved.anchor);
   }
 
+  // The open doc was deleted or renamed. The banner sits inside .doc-body, so
+  // the swap that restores the doc replaces it.
+  function showMissing() {
+    if (document.getElementById("doc-missing")) { return; }
+    var body = document.querySelector(".doc-body");
+    if (!body) { return; }
+    var banner = document.createElement("div");
+    banner.id = "doc-missing";
+    banner.className = "banner banner--attention";
+    banner.setAttribute("role", "status");
+    var text = document.createElement("div");
+    text.className = "banner__body";
+    text.textContent = "This doc was moved or deleted; it reappears here if restored.";
+    banner.appendChild(text);
+    body.prepend(banner);
+  }
+
+  // The stream gave up, so this page no longer updates. Say so where it said
+  // "serving": the dot changes tier and the text changes with it.
+  function showDisconnected() {
+    var item = document.getElementById("live-status");
+    if (!item) { return; }
+    var dot = item.querySelector(".live-dot");
+    var text = item.querySelector(".live-status__text");
+    if (dot) { dot.classList.add("live-dot--down"); }
+    if (text) { text.textContent = "disconnected — restart forgectl docs serve for live updates"; }
+  }
+
   // Changes arrive in bursts (an editor's save is often several writes), so a
   // reload that starts while one is in flight runs once more afterwards rather
   // than overlapping it.
@@ -223,10 +256,12 @@
     busy = true;
     fetch(location.pathname, { cache: "no-store", credentials: "same-origin" })
       .then(function (res) {
+        if (res.status === 404) { showMissing(); return null; }
         if (!res.ok) { throw new Error("status " + res.status); }
         return res.text();
       })
       .then(function (html) {
+        if (html === null) { return; }
         var fresh = new DOMParser().parseFromString(html, "text/html");
         if (!swap(fresh)) {
           console.debug("[forgectl docs] live reload: page changed shape; reloading in full");
@@ -254,10 +289,20 @@
     // the terminal) — so stop retrying after a run of failures instead of
     // reconnecting forever against a port nothing is listening on.
     var failures = 0;
-    source.onopen = function () { failures = 0; };
+    var opened = false;
+    source.onopen = function () { failures = 0; opened = true; };
     source.onerror = function () {
-      if (source.readyState === EventSource.CLOSED) { return; }
-      if (++failures >= 10) { source.close(); }
+      if (source.readyState === EventSource.CLOSED) {
+        // Closed by the browser: the server answered with something that is
+        // not a stream. Before the first open that means live reload is off
+        // for this server (the endpoint 404s), and "serving" is still true.
+        if (opened) { showDisconnected(); }
+        return;
+      }
+      if (++failures >= 10) {
+        source.close();
+        showDisconnected();
+      }
     };
   }
 

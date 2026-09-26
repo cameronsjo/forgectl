@@ -227,3 +227,26 @@ func TestShell_LinksTheReloadClient(t *testing.T) {
 		t.Errorf("shell does not link the reload client; embedding it is not enough to make live reload work. Body: %s", rec.Body.String())
 	}
 }
+
+// reload.js and the skip link find their targets by id and class, so a
+// template edit that renames one breaks them silently. Pin the hooks.
+func TestShell_CarriesTheHooksItsScriptsUse(t *testing.T) {
+	idx, _ := testIndex(t)
+	h := testHandler(idx)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
+	body := rec.Body.String()
+
+	for _, want := range []string{
+		`<a class="skip-link" href="#doc-main">`, // skip link and its target
+		`<main id="doc-main"`,
+		`id="live-status"`, // reload.js marks it when the stream gives up
+		`class="live-status__text"`,
+		`class="doc-body"`, // reload.js puts the missing-doc banner here
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("shell is missing %q", want)
+		}
+	}
+}
