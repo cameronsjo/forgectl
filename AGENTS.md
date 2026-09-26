@@ -53,11 +53,11 @@ Gotchas agent sessions have hit here. Each one cost a CI cycle or a debugging de
   SSE stream never goes idle.
 - The reader scrolls inside `main.surface-document`, not `window`, so
   `window.scrollY` is always 0.
-- The reader shows "disconnected" about 27s after the server stops. Give that
-  wait a timeout of 60s or more.
-- Stop a leftover server with `pkill -x <binary-name>` before starting a new
-  one. `pkill -f "docs serve"` also matches the calling shell and kills it
-  (exit 144).
+- Stop a leftover server by its port before starting a new one:
+  `fuser -k <port>/tcp` or `lsof -ti :<port> | xargs kill`. Do not use
+  `pkill -f "docs serve"`, which also matches the calling shell and kills it
+  (exit 144), or `pkill -x forgectl`, which also kills forgectl's MCP server
+  and other sessions' processes.
 - In claude.ai cloud sessions, import Playwright from
   `$(npm root -g)/playwright/index.mjs` and launch Chromium with
   `executablePath: '/opt/pw-browsers/chromium'`.
