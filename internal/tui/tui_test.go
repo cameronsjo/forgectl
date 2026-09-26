@@ -338,22 +338,31 @@ func TestSessionItemNarrowDropsMetadata(t *testing.T) {
 	}
 }
 
-// TestMenuFilteredSelectionActsOnShownRow pins #496: with the tmux menu
-// filtered down to one row, "1" and enter act on the row shown, not on the
-// unfiltered menu's first row (Pick).
-func TestMenuFilteredSelectionActsOnShownRow(t *testing.T) {
-	for _, act := range []tea.KeyPressMsg{key("1"), {Code: tea.KeyEnter}} {
-		m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{StartInTmux: true, NoIcons: true, Theme: theme.Default()}), 80, 24)
-		// SetFilterText filters synchronously; typing "/cheat" would leave the
-		// matches in an async cmd the test never runs.
-		m.l.SetFilterText("cheat")
-		if len(m.l.VisibleItems()) != 1 {
-			t.Fatalf("filter setup: expected 1 visible row, got %d", len(m.l.VisibleItems()))
-		}
-		out, _ := m.Update(act)
-		m = out.(model)
-		if m.mode != cheatMode {
-			t.Errorf("%q on a menu filtered to Cheatsheet: expected cheatMode, got %v", act.String(), m.mode)
-		}
+// TestMenuActivatesFilteredRow pins #496: with a filter applied, the raw list
+// index is a position in the FILTERED rows, so menuMode must act on the
+// selected item, not on its index. Filtering to "Last" leaves one row at
+// filtered index 0 — which the raw-index switch read as Pick.
+func TestMenuActivatesFilteredRow(t *testing.T) {
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{StartInTmux: true, NoIcons: true, Theme: theme.Default()}), 80, 24)
+	m.l.SetFilterText("Last")
+	if got := len(m.l.VisibleItems()); got != 1 {
+		t.Fatalf("filter left %d rows, want 1", got)
+	}
+	out, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = out.(model)
+	if m.action.Kind != ActionLast {
+		t.Errorf("enter on the filtered Last row: action = %+v, mode = %v; want ActionLast", m.action, m.mode)
+	}
+}
+
+// TestMenuDigitBeyondFilteredRowsIsIgnored: with a filter leaving one row, a
+// digit past it must do nothing rather than select a hidden row.
+func TestMenuDigitBeyondFilteredRowsIsIgnored(t *testing.T) {
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{StartInTmux: true, NoIcons: true, Theme: theme.Default()}), 80, 24)
+	m.l.SetFilterText("Last")
+	out, _ := m.Update(key("3"))
+	m = out.(model)
+	if m.action.Kind != 0 || m.mode != menuMode {
+		t.Errorf("digit 3 with one visible row: action = %+v, mode = %v; want no action, still in the menu", m.action, m.mode)
 	}
 }

@@ -315,6 +315,13 @@ func (c *Client) parkNeedsRepair(ctx context.Context, sess Session, reason strin
 // CheckDispatchCapability refuses unsupported or unidentifiable tmux before a
 // caller creates any review workspace or breadcrumb.
 func (c *Client) CheckDispatchCapability(ctx context.Context) error {
+	// The window env is resolved here too, so a config the dispatch would
+	// refuse (a bad launch profile, a URL with credentials or a query string)
+	// fails before any workspace or needs-repair record exists. Dispatch
+	// resolves it again, and that later check stays the authoritative one.
+	if _, err := c.resolveWindowEnv(); err != nil {
+		return err
+	}
 	_, err := c.tmuxClient.CheckGenerationCapability(ctx)
 	return err
 }

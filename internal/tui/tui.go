@@ -280,12 +280,12 @@ func (m model) Init() tea.Cmd {
 
 func (m model) menuItems() []list.Item {
 	return []list.Item{
-		menuItem{"Pick", "connect or smart-create (sesh)", func(g glyphSet) string { return g.Pick }},
-		menuItem{"Sessions", "attach · rename · kill", func(g glyphSet) string { return g.Session }},
-		menuItem{"Windows", "jump to any window, any session", func(g glyphSet) string { return g.Window }},
-		menuItem{"Tree", "the whole layout at a glance", func(g glyphSet) string { return g.Tree }},
-		menuItem{"Last", "back to the last session", func(g glyphSet) string { return g.Last }},
-		menuItem{"Cheatsheet", "tmux terms + the keys that matter", func(g glyphSet) string { return g.Cheat }},
+		menuItem{menuPick, "Pick", "connect or smart-create (sesh)", func(g glyphSet) string { return g.Pick }},
+		menuItem{menuSessions, "Sessions", "attach · rename · kill", func(g glyphSet) string { return g.Session }},
+		menuItem{menuWindows, "Windows", "jump to any window, any session", func(g glyphSet) string { return g.Window }},
+		menuItem{menuTree, "Tree", "the whole layout at a glance", func(g glyphSet) string { return g.Tree }},
+		menuItem{menuLast, "Last", "back to the last session", func(g glyphSet) string { return g.Last }},
+		menuItem{menuCheat, "Cheatsheet", "tmux terms + the keys that matter", func(g glyphSet) string { return g.Cheat }},
 	}
 }
 
@@ -386,14 +386,14 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "enter":
-		return m.activate(m.l.Index())
+		return m.activate()
 	}
 
 	// Number-key select (thumb mode) — jump straight to that row and act.
 	if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
-		if idx := int(key[0] - '1'); idx < len(m.l.Items()) {
+		if idx := int(key[0] - '1'); idx < len(m.l.VisibleItems()) {
 			m.l.Select(idx)
-			return m.activate(idx)
+			return m.activate()
 		}
 	}
 
@@ -416,8 +416,10 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// activate handles enter / number select per screen.
-func (m model) activate(index int) (tea.Model, tea.Cmd) {
+// activate handles enter / number select per screen. It takes no index:
+// every mode reads the filter-aware SelectedItem(), because a raw index is a
+// position in the FILTERED list (#496).
+func (m model) activate() (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case hubMode:
 		// m.l.Index()/number-key raw indices are positions in the FILTERED
@@ -458,26 +460,24 @@ func (m model) activate(index int) (tea.Model, tea.Cmd) {
 		m.action = Action{Kind: ActionRunVerb, Argv: leafArgv(m.leavesParent, leaf)}
 		return m, tea.Quit
 	case menuMode:
-		// Switch on the row itself, not its position: with a filter applied,
-		// index counts visible rows, so position 0 is whatever survived the
-		// filter (#496). SelectedItem() is filter-aware, as in hubMode.
+		// Same filter-aware SelectedItem() as hubMode above (#496).
 		it, ok := m.l.SelectedItem().(menuItem)
 		if !ok {
 			return m, nil
 		}
-		switch it.label {
-		case "Pick":
+		switch it.act {
+		case menuPick:
 			m.enterPick()
-		case "Sessions":
+		case menuSessions:
 			m.enterSessions()
-		case "Windows":
+		case menuWindows:
 			m.enterWindows()
-		case "Tree":
+		case menuTree:
 			m.enterTree()
-		case "Last":
+		case menuLast:
 			m.action = Action{Kind: ActionLast}
 			return m, tea.Quit
-		case "Cheatsheet":
+		case menuCheat:
 			m.enterCheat()
 		}
 		return m, nil

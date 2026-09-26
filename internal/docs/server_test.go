@@ -3,7 +3,7 @@ package docs
 // Test plan for server.go
 //
 // NewHandler (Classification: API handler)
-//   [x] Happy: "/" renders the shell with the empty-state
+//   [x] Happy: "/" renders the shell with the landing page
 //   [x] Happy: a valid /doc/{root}/{rest} renders the doc's content
 //   [x] Happy: static assets (artificer.css, artificer-theme.js, reload.js, chroma.css) are served
 //   [x] Unhappy (security): a traversal attempt through the HTTP route 404s
@@ -38,6 +38,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testIndex(t *testing.T) (*Index, string) {
@@ -60,8 +61,8 @@ func testHandler(idx *Index) http.Handler {
 	return NewHandler(NewStore(idx), NewBroker())
 }
 
-func TestServer_Root_RendersEmptyState(t *testing.T) {
-	idx, _ := testIndex(t)
+func TestServer_Root_RendersLandingPage(t *testing.T) {
+	idx, label := testIndex(t)
 	h := testHandler(idx)
 
 	rec := httptest.NewRecorder()
@@ -70,8 +71,12 @@ func TestServer_Root_RendersEmptyState(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	if !strings.Contains(rec.Body.String(), "No doc selected") {
-		t.Errorf("body missing empty-state copy: %s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, "Recently changed") {
+		t.Errorf("body missing the landing page's recent table: %s", body)
+	}
+	if !strings.Contains(body, `href="/doc/`+label+`/welcome.md"`) {
+		t.Errorf("landing page does not link the indexed doc: %s", body)
 	}
 }
 
@@ -439,5 +444,58 @@ func TestServer_ShellReferencesOnlySameOriginAssets(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestServer_Fonts_ServedWhereTheCSSLooks pins the Artificer web fonts. The
+// vendored artificer.css names them as url('assets/fonts/…'), relative to
+// /assets/artificer.css, so the browser asks for /assets/assets/fonts/…. Before
+// they were vendored every one 404'd and the reader silently fell back to the
+// next face in the stack.
+func TestServer_Fonts_ServedWhereTheCSSLooks(t *testing.T) {
+	idx, _ := testIndex(t)
+	h := testHandler(idx)
+
+	css := string(artificerCSS)
+	for _, m := range regexp.MustCompile(`url\('(assets/fonts/[^']+\.woff2)'\)`).FindAllStringSubmatch(css, -1) {
+		path := "/assets/" + m[1]
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: status %d, want 200 — artificer.css references a font the reader does not serve", path, rec.Code)
+			continue
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "font/woff2" {
+			t.Errorf("%s: Content-Type %q, want font/woff2", path, ct)
+		}
+		if !strings.HasPrefix(rec.Body.String(), "wOF2") {
+			t.Errorf("%s: body is not a woff2 file", path)
+		}
+	}
+}
+
+func TestServer_Fonts_OnlyVendoredFontsResolve(t *testing.T) {
+	idx, _ := testIndex(t)
+	h := testHandler(idx)
+	for _, path := range []string{
+		"/assets/assets/fonts/nope.woff2",
+		"/assets/assets/fonts/..%2fartificer.css",
+		"/assets/assets/fonts/provenance.json",
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s: status %d, want 404", path, rec.Code)
+		}
+	}
+}
+
+func TestModifiedLabel(t *testing.T) {
+	now := time.Date(2026, 9, 25, 18, 0, 0, 0, time.Local)
+	if got := modifiedLabel(time.Date(2026, 9, 25, 9, 5, 0, 0, time.Local), now); got != "today 09:05" {
+		t.Errorf("same day: got %q", got)
+	}
+	if got := modifiedLabel(time.Date(2026, 9, 24, 23, 0, 0, 0, time.Local), now); got != "2026-09-24" {
+		t.Errorf("earlier day: got %q", got)
 	}
 }

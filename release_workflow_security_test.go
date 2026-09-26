@@ -103,6 +103,40 @@ func TestReleaseWorkflowCheckoutDoesNotPersistCredentials(t *testing.T) {
 	}
 }
 
+// TestReleaseWorkflowBuildsWithLatestGoPatch pins check-latest on every
+// setup-go step. go-version '1.26' alone lets setup-go use whatever 1.26 patch
+// the runner image cached, so a release binary could ship on a patch older than
+// the one the Vulncheck workflow scanned — with standard-library fixes that
+// scan assumed were present.
+func TestReleaseWorkflowBuildsWithLatestGoPatch(t *testing.T) {
+	lines := releaseWorkflowLines(t)
+	setups := 0
+	for i, line := range lines {
+		if !strings.Contains(strings.TrimSpace(line), "uses: actions/setup-go@") {
+			continue
+		}
+		setups++
+		usesIndent := leadingWhitespace(line)
+		found := false
+		for j := i + 1; j < len(lines); j++ {
+			trimmed := strings.TrimSpace(lines[j])
+			if strings.HasPrefix(trimmed, "- ") && leadingWhitespace(lines[j]) < usesIndent {
+				break
+			}
+			if trimmed == "check-latest: true" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("release.yml:%d: setup-go must set check-latest: true in the same step", i+1)
+		}
+	}
+	if setups == 0 {
+		t.Fatal("release.yml contains no setup-go step; the guard matched nothing")
+	}
+}
+
 func releaseWorkflowLines(t *testing.T) []string {
 	t.Helper()
 	data, err := os.ReadFile(".github/workflows/release.yml")

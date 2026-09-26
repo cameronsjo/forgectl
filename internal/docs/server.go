@@ -10,12 +10,17 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // recentCount is how many docs the "Recent" sidenav group shows.
 const recentCount = 5
+
+// homeRecentCount is how many docs the landing page's "Recently changed"
+// table shows — Artificer's seven-item list cap.
+const homeRecentCount = 7
 
 // eventsPath is where the live-reload SSE stream is served. Declared as a
 // constant because the embedded reload client (assets/reload.js) must agree
@@ -194,6 +199,9 @@ func NewHandler(store *Store, events *Broker) http.Handler {
 	mux.HandleFunc("GET /assets/nav-toggle.js", serveStaticJS(navToggleJS))
 	mux.HandleFunc("GET /assets/chroma.css", serveStaticCSS(ChromaCSS()))
 	mux.HandleFunc("GET /assets/diagram.css", serveStaticCSS(diagramCSS))
+	// artificer.css names its fonts as url('assets/fonts/…') relative to
+	// itself, which resolves to this doubled path.
+	mux.HandleFunc("GET /assets/assets/fonts/{name}", serveFont)
 
 	mux.HandleFunc("GET "+eventsPath, handleEvents(events))
 	mux.HandleFunc("GET "+locatePath, handleLocate(store))
@@ -306,6 +314,27 @@ func serveStaticCSS(body []byte) http.HandlerFunc {
 	}
 }
 
+// serveFont serves one vendored woff2 by file name. {name} is a single path
+// segment, and embed.FS refuses any name that is not a file in that one
+// directory, so there is no traversal to guard beyond the suffix check.
+func serveFont(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if !strings.HasSuffix(name, ".woff2") {
+		http.NotFound(w, r)
+		return
+	}
+	body, err := artificerFonts.ReadFile("assets/artificer/assets/fonts/" + name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "font/woff2")
+	w.Header().Set("Cache-Control", "no-cache") // same as every other asset here
+	// body is one of the nine embedded woff2 files, served as font/woff2 with
+	// nosniff from SecurityHeaders: a browser never parses it as HTML.
+	_, _ = w.Write(body) //nolint:gosec // G705: embedded font bytes, not request-derived content
+}
+
 func serveStaticJS(body []byte) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
@@ -314,12 +343,55 @@ func serveStaticJS(body []byte) http.HandlerFunc {
 	}
 }
 
-// handleIndexRoot renders the shell with the empty-state content — "/"
-// itself never resolves to a specific doc.
+// handleIndexRoot renders the shell with the landing page — "/" itself
+// never resolves to a specific doc, so it shows what is indexed instead: each
+// root with its doc count, and the most recently changed docs.
 func handleIndexRoot(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		renderShell(w, store.Current(), pageContext{Host: r.Host})
+		idx := store.Current()
+		renderShell(w, idx, pageContext{Host: r.Host, Home: buildHome(idx)})
 	}
+}
+
+// homeData is the landing page's content. Nil on doc pages.
+type homeData struct {
+	Roots  []homeRoot
+	Recent []homeDoc
+}
+
+type homeRoot struct {
+	Label string
+	Count int
+}
+
+type homeDoc struct {
+	Href     string
+	Title    string
+	Path     string
+	Modified string
+}
+
+func buildHome(idx *Index) *homeData {
+	all := idx.List() // already most-recently-modified first
+	home := &homeData{}
+	for _, root := range idx.Roots() {
+		n := 0
+		for _, d := range all {
+			if d.RootLabel == root.Label {
+				n++
+			}
+		}
+		home.Roots = append(home.Roots, homeRoot{Label: root.Label, Count: n})
+	}
+	for _, d := range all[:min(homeRecentCount, len(all))] {
+		home.Recent = append(home.Recent, homeDoc{
+			Href:     "/doc/" + d.RootLabel + "/" + d.RelPath,
+			Title:    d.Title,
+			Path:     d.RootLabel + "/" + d.RelPath,
+			Modified: modifiedLabel(d.ModTime, time.Now()),
+		})
+	}
+	return home
 }
 
 // handleDoc resolves {root}/{rest...} through the Index's traversal chain
@@ -386,6 +458,7 @@ type pageContext struct {
 	Words       int
 	Minutes     int
 	Content     template.HTML
+	Home        *homeData
 }
 
 // shellData is the template's data contract (templates/shell.html.tmpl).
@@ -401,6 +474,8 @@ type shellData struct {
 	Outline  []OutlineItem
 	Words    int
 	Minutes  int
+	// Home is the landing page's content; nil on every doc page.
+	Home *homeData
 }
 
 // sidenavGroup renders one labeled section of the sidenav. Exactly one of
@@ -446,6 +521,7 @@ func renderShell(w http.ResponseWriter, idx *Index, ctx pageContext) {
 		Outline:  ctx.Outline,
 		Words:    ctx.Words,
 		Minutes:  ctx.Minutes,
+		Home:     ctx.Home,
 	}
 	if err := shellTemplate.Execute(w, data); err != nil {
 		slog.Error("docs: template execution failed.", "error", err)
@@ -531,4 +607,14 @@ func toLink(d Doc, currentRoot, currentRel string) sidenavLink {
 		FilterText: strings.ToLower(d.Title + " " + d.RelPath),
 		Current:    d.RootLabel == currentRoot && d.RelPath == currentRel,
 	}
+}
+
+// modifiedLabel shows a time for a doc changed today and a date otherwise, so
+// the "Recently changed" rows can be told apart on a busy day.
+func modifiedLabel(mod, now time.Time) string {
+	mod, now = mod.Local(), now.Local()
+	if mod.Year() == now.Year() && mod.YearDay() == now.YearDay() {
+		return "today " + mod.Format("15:04")
+	}
+	return mod.Format("2006-01-02")
 }

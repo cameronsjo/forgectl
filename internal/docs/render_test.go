@@ -96,3 +96,36 @@ func TestChromaCSS_NonEmptyWithClassPrefix(t *testing.T) {
 		t.Errorf("ChromaCSS() missing .chroma class rules: %s", css)
 	}
 }
+
+// TestRender_DetailsAllowedWithOpenOnly pins what UGCPolicy already does for
+// #448: <details>/<summary> render as collapsibles with markdown inside, and
+// an author's event handlers and data- attributes die. (`id` passes, as it
+// does on every element under this policy.)
+func TestRender_DetailsAllowedWithOpenOnly(t *testing.T) {
+	src := "<details open onclick=\"alert(1)\" data-x=\"y\" id=\"d\"><summary onmouseover=\"alert(2)\" data-y=\"z\">More</summary>\n\nHidden **body**.\n\n</details>\n"
+	got, err := Render([]byte(src))
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !strings.Contains(got, "<details open") || !strings.Contains(got, "<summary>More</summary>") {
+		t.Fatalf("details/summary did not survive the sanitizer:\n%s", got)
+	}
+	if !strings.Contains(got, "<strong>body</strong>") {
+		t.Errorf("markdown inside the collapsible did not render:\n%s", got)
+	}
+	for _, banned := range []string{"onclick", "onmouseover", "alert", "data-x", "data-y"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("sanitizer let %q through:\n%s", banned, got)
+		}
+	}
+}
+
+func TestRender_DetailsClosedByDefault(t *testing.T) {
+	got, err := Render([]byte("<details><summary>S</summary>\n\nx\n\n</details>\n"))
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !strings.Contains(got, "<details>") {
+		t.Errorf("a closed collapsible should render closed:\n%s", got)
+	}
+}

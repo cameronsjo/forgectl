@@ -55,10 +55,25 @@ func leader(index int, selected bool, s theme.Styles) string {
 // --- menu ---
 
 type menuItem struct {
+	act   menuAct
 	label string
 	desc  string
 	glyph func(g glyphSet) string
 }
+
+// menuAct names what a tmux-jumper row does. activate switches on it rather
+// than on the row's list index, because the index is a position in the
+// FILTERED list once a filter narrows it (#496).
+type menuAct int
+
+const (
+	menuPick menuAct = iota
+	menuSessions
+	menuWindows
+	menuTree
+	menuLast
+	menuCheat
+)
 
 func (i menuItem) FilterValue() string { return i.label }
 func (i menuItem) render(index int, selected, narrow bool, g glyphSet, s theme.Styles) string {

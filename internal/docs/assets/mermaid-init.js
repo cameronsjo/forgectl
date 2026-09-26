@@ -177,4 +177,16 @@
   wrapEmbeds();
   render();
   watchTheme();
+
+  // Live reload (reload.js) swaps the document body in place, so the diagrams
+  // it brings in are new, unrendered pre.mermaid blocks. refresh runs the same
+  // first-render path over them; already-rendered diagrams elsewhere are gone
+  // with the old body. svg-panzoom.js needs no hook: it watches <main>.
+  window.ForgectlMermaid = {
+    refresh: function () {
+      stashSources();
+      wrapEmbeds();
+      render();
+    }
+  };
 })();
