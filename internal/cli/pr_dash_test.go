@@ -35,6 +35,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/pr"
@@ -593,6 +594,9 @@ func TestRepairReason_CappedTheSameOnDashAndRepair(t *testing.T) {
 	want := repairReasonLine(reason)
 	if !strings.HasSuffix(want, termsafe.TruncatedMarker) {
 		t.Fatalf("a %d-byte reason should be truncated: %q", len(reason), want)
+	}
+	if n := utf8.RuneCountInString(strings.TrimSuffix(want, termsafe.TruncatedMarker)); n > maxRepairReasonRunes {
+		t.Fatalf("capped reason body is %d runes, want <= %d", n, maxRepairReasonRunes)
 	}
 
 	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 31}

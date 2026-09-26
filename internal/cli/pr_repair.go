@@ -413,7 +413,8 @@ func observation(known *bool, whenTrue, whenFalse string) string {
 
 // maxRepairReasonRunes caps a needs-repair reason on the human sinks. The
 // reason is built from subprocess error text at the throw site, so it can be
-// any length; this keeps it to a couple of terminal lines (#506).
+// any length (#506). The cap counts runes, not screen columns, and the
+// truncation marker comes on top of it.
 const maxRepairReasonRunes = 200
 
 // repairReasonLine is the ONE human rendering of a needs-repair reason, shared

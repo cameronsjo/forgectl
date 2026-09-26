@@ -285,7 +285,7 @@ func TestSafeLineMaxOutputIsInert(t *testing.T) {
 	in := strings.Repeat("a\x1b[2J ‮", 100)
 	got := SafeLineMax(in, 57)
 	for _, r := range got {
-		if IsUnsafeTerminalRune(r) || !unicode.IsGraphic(r) && r != ' ' {
+		if IsUnsafeTerminalRune(r) || !unicode.IsGraphic(r) {
 			t.Fatalf("SafeLineMax output carries unsafe rune %U: %q", r, got)
 		}
 	}
