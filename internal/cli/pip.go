@@ -3,8 +3,8 @@ package cli
 import (
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -138,16 +138,53 @@ type pipEntryJSON struct {
 	Value   string `json:"value"`
 }
 
-// pipValueToken matches one whitespace-separated token of a pip value.
-var pipValueToken = regexp.MustCompile(`\S+`)
+// isPipSeparator reports whether r splits a pip list value. pip splits with
+// Python's str.split(), which breaks on every Unicode whitespace rune plus the
+// ASCII separators \x1c-\x1f. Matching that set exactly matters: a separator
+// pip honours but this does not would hand endpointForDisplay two URLs as one
+// token, and it only reads the first.
+func isPipSeparator(r rune) bool {
+	return unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f)
+}
 
-// redactPipValue applies endpointForDisplay to every whitespace-separated
+// redactPipValue applies endpointForDisplay to every separator-delimited
 // token, not the line as a whole: pip accepts several URLs on one
 // extra-index-url line, and endpointForDisplay only reads the first URL it
 // is given, so a second credentialed URL would pass through untouched.
-// Whitespace between tokens is kept as written.
+// Separators are kept as written.
 func redactPipValue(v string) string {
-	return pipValueToken.ReplaceAllStringFunc(v, endpointForDisplay)
+	var b strings.Builder
+	start := -1
+	flush := func(end int) {
+		if start >= 0 {
+			b.WriteString(redactPipToken(v[start:end]))
+			start = -1
+		}
+	}
+	for i, r := range v {
+		if isPipSeparator(r) {
+			flush(i)
+			b.WriteRune(r)
+			continue
+		}
+		if start < 0 {
+			start = i
+		}
+	}
+	flush(len(v))
+	return b.String()
+}
+
+// redactPipToken hides one token's userinfo and query. A token that still
+// carries an "@" afterwards is one endpointForDisplay could not parse as a
+// URL — an unencoded "#" or "/" inside a password stops its host scan
+// before the "@" — so the whole token is hidden rather than trusted.
+func redactPipToken(tok string) string {
+	out := endpointForDisplay(tok)
+	if strings.Contains(strings.ReplaceAll(out, "[userinfo hidden]@", ""), "@") {
+		return "[value hidden]"
+	}
+	return out
 }
 
 // buildPipShowJSON parses data into the --json wire shape.
@@ -210,7 +247,7 @@ func newPipShowCmd(client *pippkg.Client) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&path, "path", "", "pip.conf path (default: OS-resolved location)")
-	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"path":...,"entries":[{"section":...,"key":...,"value":...}]} to stdout (URL credentials and queries hidden)`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"path":...,"entries":[{"section":...,"key":...,"value":...}]} to stdout (URL userinfo and queries hidden; a token in a URL path is not)`)
 	return cmd
 }
 

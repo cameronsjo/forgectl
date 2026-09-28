@@ -127,3 +127,29 @@ func TestPipShow_JSON_HidesEveryURLOnOneLine(t *testing.T) {
 		t.Errorf("Entries = %+v, want one value %q", got.Entries, want)
 	}
 }
+
+// pip splits list values with Python's str.split(), so every separator it
+// honours must split redaction too, or the second URL's token leaks.
+func TestRedactPipValue_EverySeparatorPipSplitsOn(t *testing.T) {
+	const secret = "tok-sep-482" //nolint:gosec // G101: a fake credential the output must hide
+	for _, sep := range []string{" ", "\t", "\v", "\f", "\u0085", " ", " ", "　", "\x1c", "\x1f"} {
+		in := "https://a.example/simple" + sep + "https://u:" + secret + "@b.example/simple" //nolint:gosec // G101: fake credential
+		got := redactPipValue(in)
+		if strings.Contains(got, secret) {
+			t.Errorf("separator %q: leaked %q", sep, got)
+		}
+		if !strings.Contains(got, sep) {
+			t.Errorf("separator %q not preserved: %q", sep, got)
+		}
+	}
+}
+
+// A password with an unencoded "#" or "/" defeats URL parsing, so the token
+// is hidden whole rather than printed.
+func TestRedactPipValue_UnparseableUserinfoHiddenWhole(t *testing.T) {
+	for _, in := range []string{"https://u:p#tok-h-482@h/simple", "https://u:pa/tok-s-482@h/simple"} { //nolint:gosec // G101: fake credential
+		if got := redactPipValue(in); strings.Contains(got, "tok-") {
+			t.Errorf("redactPipValue(%q) = %q, leaked", in, got)
+		}
+	}
+}
