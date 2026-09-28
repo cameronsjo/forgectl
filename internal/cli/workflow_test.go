@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -381,5 +382,47 @@ func TestWorkflowTrustList_NoAnchorGivesActionableError(t *testing.T) {
 	err := cmd.ExecuteContext(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "trust init") {
 		t.Fatalf("want an actionable trust-init error, got %v", err)
+	}
+}
+
+func TestWorkflowTrustList_JSON(t *testing.T) {
+	store := bless.Store{
+		Schema:      bless.StoreSchema,
+		AnchorKeyID: "sha256:anchor",
+		Keys: []bless.TrustedKey{{
+			KeyID: "sha256:key", Machine: "sjomba", Pubkey: "UFVCS0VZ", AddedAt: "2026-07-12T00:00:00Z",
+		}},
+	}
+	swapTrustStorer(t, fakeTrustStorer{store: store})
+	cmd := newWorkflowTrustListCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("trust list --json: %v", err)
+	}
+	var got trustListJSON
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out.String())
+	}
+	if got.AnchorKeyID != "sha256:anchor" || len(got.Keys) != 1 || got.Keys[0].Machine != "sjomba" {
+		t.Errorf("got %+v", got)
+	}
+	if strings.Contains(out.String(), "UFVCS0VZ") {
+		t.Errorf("key material leaked into --json:\n%s", out.String())
+	}
+}
+
+func TestWorkflowTrustList_JSONNoKeysIsArray(t *testing.T) {
+	swapTrustStorer(t, fakeTrustStorer{store: bless.Store{Schema: bless.StoreSchema, AnchorKeyID: "sha256:anchor"}})
+	cmd := newWorkflowTrustListCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("trust list --json: %v", err)
+	}
+	if !strings.Contains(out.String(), `"keys": []`) {
+		t.Errorf("no enrolled keys should encode keys as []:\n%s", out.String())
 	}
 }

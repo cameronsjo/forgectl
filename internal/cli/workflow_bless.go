@@ -564,7 +564,8 @@ func stageTrustFile(target string, data []byte) (string, error) {
 // newWorkflowTrustListCmd builds `forgectl workflow trust list`: print the
 // anchor key id and every enrolled machine key.
 func newWorkflowTrustListCmd() *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List the trust anchor and enrolled machine keys",
 		Args:  cobra.NoArgs,
@@ -573,6 +574,9 @@ func newWorkflowTrustListCmd() *cobra.Command {
 			store, err := trustStorerFactory().TrustedStore()
 			if err != nil {
 				return trustChainError(err)
+			}
+			if asJSON {
+				return writeTrustListJSON(out, store)
 			}
 			fmt.Fprintf(out, "anchor key: %s\n", store.AnchorKeyID)
 			if len(store.Keys) == 0 {
@@ -589,6 +593,35 @@ func newWorkflowTrustListCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false,
+		`emit {"anchor_key_id":...,"keys":[{"key_id":...,"machine":...,"added_at":...}]} to stdout`)
+	return cmd
+}
+
+// trustListJSON is the --json wire shape for `workflow trust list`: the
+// anchor id and the enrolled keys the human view prints. Key ids only; no
+// key material is on this surface in either form.
+type trustListJSON struct {
+	AnchorKeyID string             `json:"anchor_key_id"`
+	Keys        []trustListKeyJSON `json:"keys"`
+}
+
+type trustListKeyJSON struct {
+	KeyID   string `json:"key_id"`
+	Machine string `json:"machine"`
+	AddedAt string `json:"added_at"`
+}
+
+// writeTrustListJSON encodes the trust store listing; keys encode [] when
+// none are enrolled, never null.
+func writeTrustListJSON(w io.Writer, store bless.Store) error {
+	keys := make([]trustListKeyJSON, 0, len(store.Keys))
+	for _, k := range store.Keys {
+		keys = append(keys, trustListKeyJSON{KeyID: k.KeyID, Machine: k.Machine, AddedAt: k.AddedAt})
+	}
+	enc := termsafe.JSONEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(trustListJSON{AnchorKeyID: store.AnchorKeyID, Keys: keys})
 }
 
 // trustChainError decorates a TrustedStore failure with the actionable fix. A

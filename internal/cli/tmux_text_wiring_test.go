@@ -17,6 +17,7 @@ type tmuxTextKind struct {
 var tmuxTextSources = map[string]tmuxTextKind{
 	"ListSessions":        {collection: &tmuxTextKind{fields: map[string]bool{"Name": true, "Path": true}}},
 	"ListWindows":         {collection: &tmuxTextKind{fields: map[string]bool{"Session": true, "Name": true}}},
+	"ListPanes":           {collection: &tmuxTextKind{fields: map[string]bool{"Title": true, "Command": true}}},
 	"ResolveSessionExact": {fields: map[string]bool{"Name": true}},
 	"SeshList":            {collection: &tmuxTextKind{scalar: true}},
 	// Tree applies the text boundary inside internal/tmux while composing the
@@ -106,7 +107,9 @@ func TestTmuxTextUsesApprovedRenderers(t *testing.T) {
 		"tmux_ls.go":     1,
 		"tmux_pick.go":   1,
 		"tmux_rename.go": 1,
-		"tmux_tree.go":   1,
+		// Tree, plus the three listings `tree --json` assembles; those reach
+		// only the escaping JSON encoder, never a fmt text construction.
+		"tmux_tree.go":   4,
 		"tmux_window.go": 1,
 	}
 	for name, got := range byFile {

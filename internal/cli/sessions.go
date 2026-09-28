@@ -166,6 +166,7 @@ func newSessionsSearchCmd(cfg config.Config) *cobra.Command {
 		dsn     string
 		project string
 		limit   int
+		asJSON  bool
 	)
 	cmd := &cobra.Command{
 		Use:   "search <query>",
@@ -175,13 +176,17 @@ index (title-weighted tsvector; trigram fallback for partial tokens), so any
 machine can find a runbook or field report it did not author.
 
   forgectl sessions search "colima split brain"
-  forgectl sessions search --project cadence "worktree guard"`,
+  forgectl sessions search --project cadence "worktree guard"
+  forgectl sessions search "colima" --json | jq .`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return withConcordance(cmd, dsn, cfg.Sessions, func(concordance *sessions.Concordance) error {
 				hits, err := concordance.SearchRunbooks(cmd.Context(), args[0], project, limit)
 				if err != nil {
 					return err
+				}
+				if asJSON {
+					return writeSearchHitsJSON(cmd.OutOrStdout(), hits)
 				}
 				return printSearchHits(cmd.OutOrStdout(), hits)
 			})
@@ -190,7 +195,38 @@ machine can find a runbook or field report it did not author.
 	cmd.Flags().StringVar(&dsn, "dsn", "", "concordance DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
 	cmd.Flags().StringVar(&project, "project", "", "restrict matches to one project")
 	cmd.Flags().IntVar(&limit, "limit", 10, "maximum hits to return")
+	cmd.Flags().BoolVar(&asJSON, "json", false,
+		`emit [{"path":...,"title":...,"type":...,"project":...,"machine":...,"rank":...,"snippet":...}] to stdout`)
 	return cmd
+}
+
+// searchHitJSON is the stable --json shape for one `sessions search` hit —
+// the same path/title/type/project/machine/snippet the human line shows, plus
+// the rank that orders them. Decoupled from sessions.SearchHit so the CLI
+// contract doesn't drift with the query struct (the whyDTO rule).
+type searchHitJSON struct {
+	Path    string  `json:"path"`
+	Title   string  `json:"title"`
+	Type    string  `json:"type"`
+	Project string  `json:"project"`
+	Machine string  `json:"machine"`
+	Rank    float32 `json:"rank"`
+	Snippet string  `json:"snippet"`
+}
+
+// writeSearchHitsJSON encodes hits as a JSON array. Indexed content is
+// untrusted, and — as for printWhyHits — the JSON path carries it unaltered
+// and lets termsafe.JSONEncoder escape it; safeTerm quoting would corrupt the
+// machine contract. No hits encodes [], never null.
+func writeSearchHitsJSON(out io.Writer, hits []sessions.SearchHit) error {
+	rows := make([]searchHitJSON, 0, len(hits))
+	for _, h := range hits {
+		rows = append(rows, searchHitJSON{
+			Path: h.Path, Title: h.Title, Type: h.Type, Project: h.Project,
+			Machine: h.Machine, Rank: h.Rank, Snippet: h.Snippet,
+		})
+	}
+	return writeJSON(out, rows)
 }
 
 // printSearchHits owns the terminal boundary for concordance search results.

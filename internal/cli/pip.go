@@ -2,11 +2,14 @@ package cli
 
 import (
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/module"
 	pippkg "github.com/cameronsjo/forgectl/internal/pip"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // pipModule declares the pip.conf-editor extension (ADR-0005): no config
@@ -110,9 +113,72 @@ func newPipRestoreCmd(client *pippkg.Client) *cobra.Command {
 	return cmd
 }
 
+// pipShowJSON is the --json wire shape for `pip show`: the resolved path
+// (what `pip path` prints) and the active entries of the effective pip.conf
+// the human output prints. Entries is [] (never null) for a missing or empty
+// file. Comment lines — including entries `pip remove` commented out — are
+// not entries and do not appear.
+type pipShowJSON struct {
+	Path    string         `json:"path"`
+	Entries []pipEntryJSON `json:"entries"`
+}
+
+// pipEntryJSON is one active `key = value` entry. Key is lowercased, the way
+// pip's configparser reads it. Value is the text after the delimiter, with
+// continuation lines joined by "\n", and each line passed through
+// endpointForDisplay — the redaction `launch doctor` applies to the OTLP
+// endpoint — because an index-url is where a registry token rides
+// (https://__token__:secret@host/simple, or ?token=…). A JSON payload is
+// pasted into agent transcripts verbatim, so the secret-bearing URL parts
+// are hidden here even though the human `show` prints the file as-is.
+type pipEntryJSON struct {
+	Section string `json:"section"`
+	Key     string `json:"key"`
+	Value   string `json:"value"`
+}
+
+// buildPipShowJSON parses data into the --json wire shape.
+func buildPipShowJSON(path string, data []byte) pipShowJSON {
+	entries := []pipEntryJSON{}
+	for _, l := range pippkg.Parse(data).Lines {
+		switch l.Kind {
+		case pippkg.KindEntry:
+			trimmed := strings.TrimSpace(l.Raw)
+			// The key already parsed, so the first delimiter is present;
+			// IndexAny finds the same one parseEntryKey chose.
+			value := ""
+			if i := strings.IndexAny(trimmed, "=:"); i >= 0 {
+				value = strings.TrimSpace(trimmed[i+1:])
+			}
+			entries = append(entries, pipEntryJSON{Section: l.Section, Key: l.Key, Value: endpointForDisplay(value)})
+		case pippkg.KindContinuation:
+			if len(entries) == 0 {
+				continue
+			}
+			last := &entries[len(entries)-1]
+			cont := endpointForDisplay(strings.TrimSpace(l.Raw))
+			if last.Value == "" {
+				last.Value = cont
+			} else {
+				last.Value += "\n" + cont
+			}
+		}
+	}
+	return pipShowJSON{Path: path, Entries: entries}
+}
+
+// writePipShowJSON encodes the parsed pip.conf through the sanctioned
+// termsafe seam, whose escaping neutralizes any control bytes in the file.
+func writePipShowJSON(w io.Writer, path string, data []byte) error {
+	enc := termsafe.JSONEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(buildPipShowJSON(path, data))
+}
+
 // newPipShowCmd builds `pip show`.
 func newPipShowCmd(client *pippkg.Client) *cobra.Command {
 	var path string
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "show",
 		Short: "Print the effective pip.conf",
@@ -123,11 +189,15 @@ func newPipShowCmd(client *pippkg.Client) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if asJSON {
+				return writePipShowJSON(cmd.OutOrStdout(), c.Path(), data)
+			}
 			_, err = cmd.OutOrStdout().Write(data)
 			return err
 		},
 	}
 	cmd.Flags().StringVar(&path, "path", "", "pip.conf path (default: OS-resolved location)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"path":...,"entries":[{"section":...,"key":...,"value":...}]} to stdout (URL credentials and queries hidden)`)
 	return cmd
 }
 

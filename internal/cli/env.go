@@ -228,9 +228,31 @@ func readDocument(target envpkg.Target) (*envpkg.Document, error) {
 	return doc, nil
 }
 
+// envKeysJSON is the --json wire shape for `env keys` — the key NAMES the
+// human output lists one per line, plus the count the human path notes on
+// stderr as "skipped N malformed line(s)". Names only, never values: a value
+// is exactly what this command exists to keep off every surface, and a JSON
+// payload lands in agent transcripts verbatim. Keys is [] (never null) for an
+// empty file.
+type envKeysJSON struct {
+	Keys             []string `json:"keys"`
+	SkippedMalformed int      `json:"skipped_malformed"`
+}
+
+// writeEnvKeysJSON encodes keys/malformed as envKeysJSON to out.
+func writeEnvKeysJSON(out io.Writer, keys []string, malformed int) error {
+	if keys == nil {
+		keys = []string{}
+	}
+	enc := termsafe.JSONEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(envKeysJSON{Keys: keys, SkippedMalformed: malformed})
+}
+
 // newEnvKeysCmd builds `env keys`.
 func newEnvKeysCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "keys",
 		Short: "List KEY names — never values",
 		Args:  cobra.NoArgs,
@@ -252,16 +274,21 @@ func newEnvKeysCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 				return err
 			}
 
-			out := cmd.OutOrStdout()
-			for _, k := range doc.Keys() {
-				fmt.Fprintln(out, k)
-			}
-
 			malformed := 0
 			for _, l := range doc.Lines {
 				if l.Kind == envpkg.KindMalformed {
 					malformed++
 				}
+			}
+
+			out := cmd.OutOrStdout()
+			if asJSON {
+				// The malformed count rides in the payload, so the stderr
+				// note would only repeat it.
+				return writeEnvKeysJSON(out, doc.Keys(), malformed)
+			}
+			for _, k := range doc.Keys() {
+				_, _ = fmt.Fprintln(out, k)
 			}
 			if malformed > 0 {
 				fmt.Fprintf(cmd.ErrOrStderr(), "skipped %d malformed line(s)\n", malformed)
@@ -269,6 +296,8 @@ func newEnvKeysCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"keys":[...],"skipped_malformed":...} to stdout — key names only, never values`)
+	return cmd
 }
 
 // newEnvSetCmd builds `env set`.
