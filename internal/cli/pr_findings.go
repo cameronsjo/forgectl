@@ -2,11 +2,13 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -33,7 +35,8 @@ func newPrFindingsCmd(client *pr.Client, th theme.Theme) *cobra.Command {
 }
 
 func newPrFindingsListCmd(client *pr.Client) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List findings directories from local clean-room reviews",
 		Args:  cobra.NoArgs,
@@ -43,6 +46,9 @@ func newPrFindingsListCmd(client *pr.Client) *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
+			if asJSON {
+				return writeFindingsListJSON(out, entries)
+			}
 			if len(entries) == 0 {
 				fmt.Fprintln(out, "no findings")
 				return nil
@@ -53,6 +59,33 @@ func newPrFindingsListCmd(client *pr.Client) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"path":...,"modified_at":...,"size_bytes":...}] to stdout`)
+	return cmd
+}
+
+// findingsRowJSON is the --json wire shape for one `pr findings list` row:
+// the human columns, with the size as raw bytes rather than a rounded label.
+type findingsRowJSON struct {
+	Path       string `json:"path"`
+	ModifiedAt string `json:"modified_at"`
+	SizeBytes  int64  `json:"size_bytes"`
+}
+
+// writeFindingsListJSON encodes the findings dirs through the sanctioned
+// termsafe seam; a path is a filename chosen on disk, so the encoder's
+// escaping is what makes it terminal-safe. An empty result encodes [].
+func writeFindingsListJSON(w io.Writer, entries []pr.FindingsEntry) error {
+	rows := make([]findingsRowJSON, 0, len(entries))
+	for _, e := range entries {
+		rows = append(rows, findingsRowJSON{
+			Path:       e.Path,
+			ModifiedAt: e.ModTime.Format(time.RFC3339),
+			SizeBytes:  e.Size,
+		})
+	}
+	enc := termsafe.JSONEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(rows)
 }
 
 func newPrFindingsCleanupCmd(client *pr.Client, th theme.Theme) *cobra.Command {

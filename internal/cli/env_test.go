@@ -262,6 +262,83 @@ func TestEnvKeysCmd_MissingFile_Errors(t *testing.T) {
 	}
 }
 
+// TestEnvKeysCmd_JSON_NamesOnly pins `env keys --json` (#482): valid JSON
+// carrying exactly the keys/skipped_malformed field set, key names in
+// first-seen order, the malformed count in the payload rather than on stderr,
+// and no value anywhere in the output.
+func TestEnvKeysCmd_JSON_NamesOnly(t *testing.T) {
+	const sentinel = "sk_live_sentinel_value_482"
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("not-a-line\nA="+sentinel+"\nB=2\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+	logs := captureSlog(t)
+
+	client, _ := envFixture()
+	cmd := newEnvTestCmd(client, theme.Theme{})
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"keys", "--json"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &fields); err != nil {
+		t.Fatalf("stdout = %q, not valid JSON: %v", stdout.String(), err)
+	}
+	if len(fields) != 2 || fields["keys"] == nil || fields["skipped_malformed"] == nil {
+		t.Errorf("field set = %v, want exactly keys and skipped_malformed", fields)
+	}
+	var got envKeysJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if strings.Join(got.Keys, ",") != "A,B" {
+		t.Errorf("Keys = %v, want [A B]", got.Keys)
+	}
+	if got.SkippedMalformed != 1 {
+		t.Errorf("SkippedMalformed = %d, want 1", got.SkippedMalformed)
+	}
+	if stderr.String() != "" {
+		t.Errorf("stderr = %q, want empty in --json mode", stderr.String())
+	}
+	assertNoSecretInOutput(t, sentinel, stdout.String(), stderr.String(), logs.String())
+}
+
+func TestEnvKeysCmd_JSON_EmptyFile_EmptyArrayNotNull(t *testing.T) {
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte{}, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+
+	client, _ := envFixture()
+	cmd := newEnvTestCmd(client, theme.Theme{})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"keys", "--json"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got envKeysJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout = %q, not valid JSON: %v", stdout.String(), err)
+	}
+	if got.Keys == nil || len(got.Keys) != 0 {
+		t.Errorf("Keys = %#v, want a non-nil empty slice", got.Keys)
+	}
+	if !strings.Contains(stdout.String(), `"keys": []`) {
+		t.Errorf("stdout = %q, want keys encoded as []", stdout.String())
+	}
+}
+
 // --- set ---
 
 func TestEnvSetCmd_FromPipedStdin(t *testing.T) {

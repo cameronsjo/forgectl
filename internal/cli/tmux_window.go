@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -13,7 +14,8 @@ import (
 // newTmuxWindowsCmd lists every window across all sessions, with its jump
 // target. The TUI turns these into a one-keystroke cross-session jump (M5).
 func newTmuxWindowsCmd(client *tmux.Client) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "windows",
 		Short: "List windows across all sessions",
 		Args:  cobra.NoArgs,
@@ -23,6 +25,9 @@ func newTmuxWindowsCmd(client *tmux.Client) *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
+			if asJSON {
+				return writeTmuxWindowsJSON(out, windows)
+			}
 			if len(windows) == 0 {
 				fmt.Fprintln(out, "no windows")
 				return nil
@@ -50,4 +55,41 @@ func newTmuxWindowsCmd(client *tmux.Client) *cobra.Command {
 			return w.Flush()
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false,
+		`emit [{"id":...,"session_id":...,"session":...,"index":...,"name":...,"active":...,"panes":...}] to stdout`)
+	return cmd
+}
+
+// tmuxWindowRowJSON is the --json wire shape for one `tmux windows` row: the
+// human table's columns plus the native ids, which are what every jump
+// actually targets.
+type tmuxWindowRowJSON struct {
+	ID        string `json:"id"`
+	SessionID string `json:"session_id"`
+	Session   string `json:"session"`
+	Index     int    `json:"index"`
+	Name      string `json:"name"`
+	Active    bool   `json:"active"`
+	Panes     int    `json:"panes"`
+}
+
+// writeTmuxWindowsJSON encodes windows through the sanctioned termsafe seam;
+// the session and window names are tmux's, so the encoder's escaping is what
+// neutralizes them. An empty result encodes [], never null.
+func writeTmuxWindowsJSON(w io.Writer, windows []tmux.Window) error {
+	rows := make([]tmuxWindowRowJSON, 0, len(windows))
+	for _, win := range windows {
+		rows = append(rows, tmuxWindowRowJSON{
+			ID:        win.ID,
+			SessionID: win.SessionID,
+			Session:   win.Session,
+			Index:     win.Index,
+			Name:      win.Name,
+			Active:    win.Active,
+			Panes:     win.Panes,
+		})
+	}
+	enc := termsafe.JSONEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(rows)
 }

@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,5 +189,91 @@ func TestIntegration_LaunchDoctor_LabelsTheLegacySourceWhenMigrationIsSkipped(t 
 	}
 	if strings.Contains(stdout, "launch config: \""+childConfigPath(h.base)+"\"") {
 		t.Errorf("doctor stdout = %q, credits config.toml for a profile that came from the legacy file", stdout)
+	}
+}
+
+// TestIntegration_LaunchDoctor_JSON pins `launch doctor --json` (#482):
+// stdout is exactly one JSON document with the checks/healthy field set, each
+// check carries name/state/detail, the OTLP endpoint gets the same redaction
+// the human line applies (query and userinfo hidden), and the exit code
+// matches the human path's — this config is one `pr` refuses, so both exit
+// non-zero.
+func TestIntegration_LaunchDoctor_JSON(t *testing.T) {
+	h := newHarness(t)
+	const secret = "s3cr3t-482"
+	body := "[bench]\ntelemetry = true\notlp_endpoint = \"http://user:" + secret + "@collector:4318/v1?api_key=" + secret + "\"\n" //nolint:gosec // G101: a fake credential the output must hide
+	f, err := os.OpenFile(childConfigPath(h.base), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open config: %v", err)
+	}
+	if _, err := f.WriteString(body); err != nil {
+		t.Fatalf("append config: %v", err)
+	}
+	_ = f.Close()
+
+	stdout, stderr, jsonErr := h.exec("doctor", "--json")
+	_, _, humanErr := h.exec("doctor")
+	if (jsonErr == nil) != (humanErr == nil) {
+		t.Fatalf("exit differs: --json err=%v, human err=%v", jsonErr, humanErr)
+	}
+	if jsonErr == nil {
+		t.Fatalf("doctor --json exited 0 for a config pr refuses; stdout=%s", stdout)
+	}
+	if strings.Contains(stdout+stderr, secret) {
+		t.Fatalf("output leaked the endpoint secret:\nstdout=%s\nstderr=%s", stdout, stderr)
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stdout), &fields); err != nil {
+		t.Fatalf("stdout is not a single JSON document: %v\n%s", err, stdout)
+	}
+	if len(fields) != 2 || fields["checks"] == nil || fields["healthy"] == nil {
+		t.Errorf("field set = %v, want exactly checks and healthy", fields)
+	}
+	var got launchDoctorJSON
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Healthy {
+		t.Error("healthy = true, want false for a non-zero exit")
+	}
+	var telemetry, reviewEnv bool
+	for _, c := range got.Checks {
+		if c.Name == "" || c.Detail == "" {
+			t.Errorf("check has an empty name or detail: %+v", c)
+		}
+		switch c.State {
+		case "ok", "warn", "fail":
+		default:
+			t.Errorf("check %q has state %q, want ok|warn|fail", c.Name, c.State)
+		}
+		if c.Name == "telemetry" {
+			telemetry = true
+			if !strings.Contains(c.Detail, "[userinfo hidden]") || !strings.Contains(c.Detail, "[query hidden]") {
+				t.Errorf("telemetry detail = %q, want userinfo and query hidden", c.Detail)
+			}
+		}
+		if c.Name == "review_window_env" && c.State == "fail" {
+			reviewEnv = true
+		}
+	}
+	if !telemetry || !reviewEnv {
+		t.Errorf("checks = %+v, want a telemetry check and a failing review_window_env check", got.Checks)
+	}
+}
+
+// TestWriteLaunchDoctorJSON_EmptyChecksIsArray pins the [] rule for the
+// wire shape: no checks encodes "checks": [], never null.
+func TestWriteLaunchDoctorJSON_EmptyChecksIsArray(t *testing.T) {
+	var out bytes.Buffer
+	if err := writeLaunchDoctorJSON(&out, nil, true); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("not valid JSON: %v\n%s", err, out.String())
+	}
+	if string(got["checks"]) != "[]" {
+		t.Errorf("checks = %s, want []", got["checks"])
 	}
 }

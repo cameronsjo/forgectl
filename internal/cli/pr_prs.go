@@ -82,6 +82,14 @@ type prRowJSON struct {
 // emitPRsJSON writes the PR rows as an indented JSON array to out. An empty
 // result emits [] (never null), matching the projects --json contract.
 func emitPRsJSON(out io.Writer, prs []pr.PR, store *pr.ReviewedStore) error {
+	enc := termsafe.JSONEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(prRowsJSON(prs, store))
+}
+
+// prRowsJSON builds the PR rows `pr prs --json` and `pr dash --json` share.
+// An empty input yields an empty slice, so it encodes [] rather than null.
+func prRowsJSON(prs []pr.PR, store *pr.ReviewedStore) []prRowJSON {
 	rows := make([]prRowJSON, 0, len(prs))
 	for _, p := range prs {
 		rows = append(rows, prRowJSON{
@@ -97,9 +105,7 @@ func emitPRsJSON(out io.Writer, prs []pr.PR, store *pr.ReviewedStore) error {
 			Reviewed:  pr.Dimmed(p, store),
 		})
 	}
-	enc := termsafe.JSONEncoder(out)
-	enc.SetIndent("", "  ")
-	return enc.Encode(rows)
+	return rows
 }
 
 // renderPRTable writes a grep-friendly REPO/#/TITLE/STATE table to out and a

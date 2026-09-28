@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -9,6 +10,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/quarantine"
 	"github.com/cameronsjo/forgectl/internal/step"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // quarantineModule declares the instruction-file quarantine extension
@@ -143,14 +145,17 @@ func newQuarantineRestoreCmd(client *quarantine.Client) *cobra.Command {
 // filesystem, so it needs no *quarantine.Client.
 func newQuarantineStatusCmd() *cobra.Command {
 	f := &quarantineFlags{}
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show which instruction files are currently quarantined",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runQuarantineStatus(cmd, f)
+			return runQuarantineStatus(cmd, f, asJSON)
 		},
 	}
 	f.register(cmd, false)
+	cmd.Flags().BoolVar(&asJSON, "json", false,
+		`emit [{"target":...,"state":"present|quarantined|absent","path":...,"quarantined_path":...}] to stdout`)
 	return cmd
 }
 
@@ -231,9 +236,31 @@ func runQuarantineRestore(cmd *cobra.Command, client *quarantine.Client, f *quar
 	return nil
 }
 
+// quarantineStatusRowJSON is the --json wire shape for one `quarantine
+// status` row — the target and state the human "target: state" line shows,
+// plus the two paths that state was decided from (the original and its
+// quarantined form under the active scheme).
+type quarantineStatusRowJSON struct {
+	Target          string `json:"target"`
+	State           string `json:"state"`
+	Path            string `json:"path"`
+	QuarantinedPath string `json:"quarantined_path"`
+}
+
+// writeQuarantineStatusJSON encodes rows as a JSON array through the
+// sanctioned termsafe seam. An empty target set encodes [], never null.
+func writeQuarantineStatusJSON(w io.Writer, rows []quarantineStatusRowJSON) error {
+	if rows == nil {
+		rows = []quarantineStatusRowJSON{}
+	}
+	enc := termsafe.JSONEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(rows)
+}
+
 // runQuarantineStatus reports, per target, whether the original path is
 // present, the quarantined form exists, or neither is found.
-func runQuarantineStatus(cmd *cobra.Command, f *quarantineFlags) error {
+func runQuarantineStatus(cmd *cobra.Command, f *quarantineFlags, asJSON bool) error {
 	scheme, err := quarantine.ParseScheme(f.scheme)
 	if err != nil {
 		return err
@@ -252,7 +279,7 @@ func runQuarantineStatus(cmd *cobra.Command, f *quarantineFlags) error {
 		return err
 	}
 
-	out := cmd.OutOrStdout()
+	rows := make([]quarantineStatusRowJSON, 0, len(moves))
 	for i, m := range moves {
 		state := "absent"
 		switch {
@@ -261,7 +288,20 @@ func runQuarantineStatus(cmd *cobra.Command, f *quarantineFlags) error {
 		case pathExists(m.To):
 			state = "quarantined"
 		}
-		fmt.Fprintf(out, "%s: %s\n", targets[i], state)
+		rows = append(rows, quarantineStatusRowJSON{
+			Target:          targets[i],
+			State:           state,
+			Path:            m.From,
+			QuarantinedPath: m.To,
+		})
+	}
+
+	out := cmd.OutOrStdout()
+	if asJSON {
+		return writeQuarantineStatusJSON(out, rows)
+	}
+	for _, r := range rows {
+		_, _ = fmt.Fprintf(out, "%s: %s\n", r.Target, r.State)
 	}
 	return nil
 }

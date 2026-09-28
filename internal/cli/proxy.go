@@ -52,8 +52,69 @@ const (
 	noMatchMessage    = "no configured profile matches the current environment"
 )
 
+// proxyListRowJSON is the --json wire shape for one `proxy list` row — the
+// profile name the human list prints, and nothing else: no profile value is
+// read or emitted.
+type proxyListRowJSON struct {
+	Name string `json:"name"`
+}
+
+// writeProxyListJSON encodes names as a JSON array through the sanctioned
+// termsafe seam. An empty configuration encodes [], never null.
+func writeProxyListJSON(w io.Writer, names []string) error {
+	rows := make([]proxyListRowJSON, 0, len(names))
+	for _, name := range names {
+		rows = append(rows, proxyListRowJSON{Name: name})
+	}
+	enc := termsafe.JSONEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(rows)
+}
+
+// proxyStatusJSON is the --json wire shape for `proxy status`. It mirrors the
+// human report's redaction exactly: the matched profile's name and per-variable
+// set/unset, never a value. When no profile matches, Variables is [] — the
+// human path prints only the verdict there, because which variable diverged is
+// itself a fact about a configured value.
+type proxyStatusJSON struct {
+	Matched   bool                `json:"matched"`
+	Profile   string              `json:"profile"`
+	Variables []proxyVariableJSON `json:"variables"`
+}
+
+// proxyVariableJSON is one proxy variable's presence: its lowercase name and
+// whether any spelling carries a non-empty value.
+type proxyVariableJSON struct {
+	Name string `json:"name"`
+	Set  bool   `json:"set"`
+}
+
+// buildProxyStatusJSON converts a match verdict into the --json wire shape.
+// Variables is never nil so the encoder emits [] rather than null.
+func buildProxyStatusJSON(name string, matched bool, lookup proxypkg.Lookup) proxyStatusJSON {
+	status := proxyStatusJSON{Matched: matched, Variables: []proxyVariableJSON{}}
+	if !matched {
+		return status
+	}
+	status.Profile = name
+	env := proxypkg.Environment(lookup)
+	status.Variables = make([]proxyVariableJSON, 0, len(env))
+	for _, v := range env {
+		status.Variables = append(status.Variables, proxyVariableJSON{Name: v.Name, Set: v.Set})
+	}
+	return status
+}
+
+// writeProxyStatusJSON encodes the status through the sanctioned termsafe seam.
+func writeProxyStatusJSON(w io.Writer, status proxyStatusJSON) error {
+	enc := termsafe.JSONEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(status)
+}
+
 func newProxyListCmd(deps module.Deps) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List configured profile names",
 		Long: `list prints the name of every configured profile, one per line, sorted.
@@ -61,6 +122,11 @@ Names come from config.toml keys; no profile value is read or printed.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			names := proxypkg.Names(deps.Cfg.Proxy.Profiles)
+			if asJSON {
+				// [] is the whole answer for an empty configuration; the
+				// stderr notice is the human path's, not the machine's.
+				return writeProxyListJSON(cmd.OutOrStdout(), names)
+			}
 			if len(names) == 0 {
 				// Stdout stays a clean name list for a caller piping it, so
 				// the informational line goes to stderr.
@@ -76,6 +142,8 @@ Names come from config.toml keys; no profile value is read or printed.`,
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"name":...}] to stdout`)
+	return cmd
 }
 
 // newProxyStatusCmd takes its environment reader as a parameter rather than
@@ -84,7 +152,8 @@ Names come from config.toml keys; no profile value is read or printed.`,
 // resolves once and would then route unrelated tests' requests through a host
 // that does not exist.
 func newProxyStatusCmd(deps module.Deps, lookup proxypkg.Lookup) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Report which configured profile the current environment carries",
 		Long: `status names the configured profile whose values the current environment
@@ -98,6 +167,9 @@ profile, which is the state this verb exists to make visible.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			name, matched := proxypkg.Match(deps.Cfg.Proxy.Profiles, lookup)
+			if asJSON {
+				return writeProxyStatusJSON(cmd.OutOrStdout(), buildProxyStatusJSON(name, matched, lookup))
+			}
 			if !matched {
 				// Stdout, unlike list's empty case: "nothing matches" IS
 				// this verb's answer, not the absence of one.
@@ -116,6 +188,9 @@ profile, which is the state this verb exists to make visible.`,
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false,
+		`emit {"matched":...,"profile":...,"variables":[{"name":...,"set":...}]} to stdout`)
+	return cmd
 }
 
 // variableState renders presence, the only shape a proxy variable reports.

@@ -246,3 +246,62 @@ func TestFmtTs(t *testing.T) {
 		t.Errorf("RFC3339 round-trip off: %q", got)
 	}
 }
+
+// TestWriteSearchHitsJSON pins `sessions search --json` (#482): valid JSON,
+// the documented field set, and the stored value carried unaltered (no
+// safeTerm quoting on the machine path).
+func TestWriteSearchHitsJSON(t *testing.T) {
+	hits := []sessions.SearchHit{{
+		Path: "hearth/colima.md", Title: "Colima split brain", Project: "hearth",
+		Type: "field-report", Machine: "m1", Rank: 0.5, Snippet: "phantom <<default>> VM",
+	}}
+	var out bytes.Buffer
+	if err := writeSearchHitsJSON(&out, hits); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal(out.Bytes(), &raw); err != nil {
+		t.Fatalf("--json output is not valid JSON: %v\n%s", err, out.String())
+	}
+	if len(raw) != 1 {
+		t.Fatalf("want 1 hit, got %d", len(raw))
+	}
+	for _, k := range []string{"path", "title", "type", "project", "machine", "rank", "snippet"} {
+		if raw[0][k] == nil {
+			t.Errorf("hit is missing field %q: %s", k, out.String())
+		}
+	}
+	if len(raw[0]) != 7 {
+		t.Errorf("hit has %d fields, want 7: %s", len(raw[0]), out.String())
+	}
+	var got []searchHitJSON
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	g := got[0]
+	if g.Path != "hearth/colima.md" || g.Title != "Colima split brain" || g.Project != "hearth" ||
+		g.Type != "field-report" || g.Machine != "m1" || g.Rank != 0.5 || g.Snippet != "phantom <<default>> VM" {
+		t.Errorf("fields off: %+v", g)
+	}
+}
+
+func TestWriteSearchHitsJSON_EmptyIsArray(t *testing.T) {
+	var out bytes.Buffer
+	if err := writeSearchHitsJSON(&out, nil); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if strings.TrimSpace(out.String()) != "[]" {
+		t.Errorf("empty --json result must be [], got %q", out.String())
+	}
+}
+
+func TestSessionsSearch_HasJSONFlag(t *testing.T) {
+	parent := newSessionsCmd(module.Deps{Runner: &exec.FakeRunner{}})
+	search := findChild(parent, "search")
+	if search == nil {
+		t.Fatal("search did not register")
+	}
+	if search.Flags().Lookup("json") == nil {
+		t.Error("sessions search has no --json flag (ADR-0008 rule 2)")
+	}
+}
