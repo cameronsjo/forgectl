@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -137,6 +138,18 @@ type pipEntryJSON struct {
 	Value   string `json:"value"`
 }
 
+// pipValueToken matches one whitespace-separated token of a pip value.
+var pipValueToken = regexp.MustCompile(`\S+`)
+
+// redactPipValue applies endpointForDisplay to every whitespace-separated
+// token, not the line as a whole: pip accepts several URLs on one
+// extra-index-url line, and endpointForDisplay only reads the first URL it
+// is given, so a second credentialed URL would pass through untouched.
+// Whitespace between tokens is kept as written.
+func redactPipValue(v string) string {
+	return pipValueToken.ReplaceAllStringFunc(v, endpointForDisplay)
+}
+
 // buildPipShowJSON parses data into the --json wire shape.
 func buildPipShowJSON(path string, data []byte) pipShowJSON {
 	entries := []pipEntryJSON{}
@@ -150,13 +163,13 @@ func buildPipShowJSON(path string, data []byte) pipShowJSON {
 			if i := strings.IndexAny(trimmed, "=:"); i >= 0 {
 				value = strings.TrimSpace(trimmed[i+1:])
 			}
-			entries = append(entries, pipEntryJSON{Section: l.Section, Key: l.Key, Value: endpointForDisplay(value)})
+			entries = append(entries, pipEntryJSON{Section: l.Section, Key: l.Key, Value: redactPipValue(value)})
 		case pippkg.KindContinuation:
 			if len(entries) == 0 {
 				continue
 			}
 			last := &entries[len(entries)-1]
-			cont := endpointForDisplay(strings.TrimSpace(l.Raw))
+			cont := redactPipValue(strings.TrimSpace(l.Raw))
 			if last.Value == "" {
 				last.Value = cont
 			} else {

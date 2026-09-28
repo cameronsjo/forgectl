@@ -14,6 +14,9 @@ import (
 // makes --json a MUST on those, so a verb with one of these names that does
 // not declare --json is a broken promise an agent will act on (#482: exit 1,
 // "Unknown flag: --json", read as "nothing there").
+//
+// The check keys on the leaf NAME, so a state verb named anything else (an
+// "info", a "why") is not covered. Add its name here when one ships.
 var stateVerbNames = map[string]bool{
 	"list": true, "ls": true, "status": true, "show": true, "which": true,
 	"doctor": true, "dash": true, "tree": true, "windows": true, "keys": true,

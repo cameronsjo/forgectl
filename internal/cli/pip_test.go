@@ -102,3 +102,28 @@ func TestPipShow_Human_Verbatim(t *testing.T) {
 		t.Errorf("stdout = %q, want %q", stdout, body)
 	}
 }
+
+// pip accepts several URLs on one extra-index-url line, and each can carry
+// its own token. Every one must be hidden, not only the first.
+func TestPipShow_JSON_HidesEveryURLOnOneLine(t *testing.T) {
+	const s1, s2 = "tok-first-482", "tok-second-482"
+	path := filepath.Join(t.TempDir(), "pip.conf")
+	body := "[global]\nextra-index-url = https://u:" + s1 + "@a.example/simple https://u:" + s2 + "@b.example/simple?k=" + s2 + "\n" //nolint:gosec // G101: fake credentials the output must hide
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	stdout, _ := runPipShow(t, path, "--json")
+	for _, secret := range []string{s1, s2} {
+		if strings.Contains(stdout, secret) {
+			t.Errorf("--json leaked %q:\n%s", secret, stdout)
+		}
+	}
+	var got pipShowJSON
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("decode: %v\n%s", err, stdout)
+	}
+	want := "https://[userinfo hidden]@a.example/simple https://[userinfo hidden]@b.example/simple?[query hidden]"
+	if len(got.Entries) != 1 || got.Entries[0].Value != want {
+		t.Errorf("Entries = %+v, want one value %q", got.Entries, want)
+	}
+}
