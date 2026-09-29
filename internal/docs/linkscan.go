@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/parser"
+	goldmarkhtml "github.com/yuin/goldmark/renderer/html"
 	"github.com/yuin/goldmark/text"
 	"go.abhg.dev/goldmark/wikilink"
 	"gopkg.in/yaml.v3"
@@ -101,9 +103,10 @@ func scanDoc(absPath, relPath string) (docMeta, error) {
 
 // scanDocFor is scanDoc for a document in a root of the given kind. A vault
 // root parses with linkMarkdownVault, whose comment parsers and heading-id
-// transformer are the render's own, and takes its title from the parse
-// (vaultTitle), so %% comment text reaches none of the title, headings,
-// slugs, links or block ids.
+// transformer are the render's own, so %% comment text reaches none of the
+// title, headings, slugs, links or block ids. Both kinds take their title
+// from the parse (parsedTitle); only an over-cap document falls back to
+// firstH1's line scan.
 func scanDocFor(kind RootKind, absPath, relPath string) (docMeta, error) {
 	f, err := os.Open(absPath) //nolint:gosec // G304: absPath is a doc walkRoot/indexFileRoot already resolved under a canonicalized, operator-configured root
 	if err != nil {
@@ -117,18 +120,18 @@ func scanDocFor(kind RootKind, absPath, relPath string) (docMeta, error) {
 		return docMeta{}, err
 	}
 
-	title := firstH1(source)
-	if kind == RootVault && title != "" {
-		// Past the cap there is no whole-document parse, so the vault title
-		// is the line scan's, parsed on its own to drop its comments; a
-		// heading inside a %% block of an over-cap note can still reach it.
-		title = vaultLineTitle(title)
-	}
-	if title == "" {
-		title = titleFromFilename(relPath)
-	}
-
 	if len(source) > maxScanBytes {
+		// Past the cap there is no whole-document parse, so the title is
+		// firstH1's line scan; a vault title is then parsed on its own to
+		// drop its comments. A "# " line inside a fence or a %% block of an
+		// over-cap document can still reach it.
+		title := firstH1(source)
+		if kind == RootVault && title != "" {
+			title = vaultLineTitle(title)
+		}
+		if title == "" {
+			title = titleFromFilename(relPath)
+		}
 		slog.Debug("docs: document exceeds scan cap; indexed by title only.",
 			"path", relPath, "limit", maxScanBytes)
 		return docMeta{Title: title}, nil
@@ -162,11 +165,12 @@ func scanDocFor(kind RootKind, absPath, relPath string) (docMeta, error) {
 		}
 	}
 	blockIDs := scanBlockIDs(body, scan.masked, scan.hidden)
-	if kind == RootVault {
-		title = vaultTitle(source, len(source)-len(body), body, scan.h1s)
-		if title == "" {
-			title = titleFromFilename(relPath)
-		}
+	// Within the cap the title comes from the parse, in both root kinds, so
+	// a "# " line inside a code fence, a $$ block, an indented code block or
+	// the frontmatter is never a title the page does not render.
+	title := parsedTitle(source, len(source)-len(body), body, scan.h1s)
+	if title == "" {
+		title = titleFromFilename(relPath)
 	}
 	headings, links := scan.headings, scan.links
 
@@ -193,16 +197,18 @@ const maxScanBytes = 1 << 20
 // on every doc that has none.
 const titleScanLines = 64
 
-// titleFromFilename is the title a document gets when firstH1 finds no
-// heading: its filename without extension.
+// titleFromFilename is the title a document gets when no title heading is
+// found: its filename without extension.
 func titleFromFilename(relPath string) string {
 	base := filepath.Base(relPath)
 	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
 // firstH1 returns a document's first level-1 heading text, or "" if none
-// appears in the first titleScanLines lines. A cheap line scan, not a parse:
-// the heading text is taken verbatim, as the sidenav has always shown it.
+// appears in the first titleScanLines lines. A cheap line scan, not a parse,
+// used only for a document over the scan cap: it does not know a code fence
+// or a $$ block from a heading, which is why a parsed document takes
+// parsedTitle instead.
 func firstH1(source []byte) string {
 	scanner := bufio.NewScanner(bytes.NewReader(source))
 	for i := 0; i < titleScanLines && scanner.Scan(); i++ {
@@ -326,7 +332,7 @@ type bodyScan struct {
 	// hidden holds each inline comment's source range; a block-id marker
 	// inside one is not indexed.
 	hidden []text.Segment
-	// h1s holds each level-1 heading, in document order, for vaultTitle.
+	// h1s holds each level-1 heading, in document order, for parsedTitle.
 	h1s []h1Candidate
 }
 
@@ -398,7 +404,7 @@ func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 			if !ok {
 				return ast.WalkContinue, nil
 			}
-			if kind == RootVault && h.Level == 1 && h.Lines().Len() > 0 {
+			if h.Level == 1 && h.Lines().Len() > 0 {
 				// One visibleSource walk, over the first line only, per
 				// H1: linear in the heading, however many lines it has.
 				first := h.Lines().At(0)
@@ -497,13 +503,14 @@ func (li *lineIndex) line(offset int) int {
 	return sort.Search(len(li.starts), func(i int) bool { return li.starts[i] > offset })
 }
 
-// vaultTitle is firstH1's rule applied to the parsed document instead of raw
-// lines: the first level-1 heading within titleScanLines lines whose line,
-// trimmed, starts with "# ", its text taken from the parse with comments cut
-// out (visibleSource). Taking candidates from the parse means a "# " line
-// inside a %% block (or a code block) is never a title. bodyOffset is where
-// body starts in source, past any frontmatter.
-func vaultTitle(source []byte, bodyOffset int, body []byte, h1s []h1Candidate) string {
+// parsedTitle is firstH1's rule applied to the parsed document instead of
+// raw lines: the first level-1 heading within titleScanLines lines whose
+// line, trimmed, starts with "# ", its text taken from the parse with
+// comments cut out (visibleSource). Taking candidates from the parse means a
+// "# " line inside a %% block, a code block, a $$ block or the frontmatter is
+// never a title. bodyOffset is where body starts in source, past any
+// frontmatter.
+func parsedTitle(source []byte, bodyOffset int, body []byte, h1s []h1Candidate) string {
 	for _, h := range h1s {
 		if bytes.Count(source[:bodyOffset+h.at], []byte("\n")) >= titleScanLines {
 			break
@@ -541,7 +548,8 @@ func headingText(n *ast.Heading, source []byte) string {
 	return b.String()
 }
 
-// appendNodeText flattens n's inline nodes into their text, in one walk.
+// appendNodeText flattens n's inline nodes into their rendered text, in one
+// walk: markup is gone, escapes and entities are resolved.
 // It is the one heading-text builder for both root kinds; a docs root reads
 // Text nowhere (its anchors match the slug), so both kinds share the rule
 // that a line break is a space. The vault-only
@@ -566,16 +574,43 @@ func appendNodeText(b *strings.Builder, n ast.Node, source []byte) {
 		b.WriteString(delim)
 		return
 	case *ast.Text:
-		b.Write(t.Segment.Value(source))
+		appendRenderedText(b, t, source)
 		// A setext heading's line break reads as a space, as it renders.
 		if t.SoftLineBreak() || t.HardLineBreak() {
 			b.WriteByte(' ')
 		}
 		return
+	case *ast.AutoLink:
+		// "<https://x>" or a GFM bare URL has no Text child; the page
+		// shows its label, as written.
+		b.Write(t.Label(source))
+		return
 	}
 	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
 		appendNodeText(b, c, source)
 	}
+}
+
+// appendRenderedText writes t's text as the page shows it. A raw segment
+// (a code span's) is written as is; any other goes through goldmark's own
+// text writer, which drops a backslash escape and resolves an entity
+// reference, and is then unescaped back from HTML. So "foo\_bar" reads
+// "foo_bar" and "&amp;" reads "&", as they render.
+func appendRenderedText(b *strings.Builder, t *ast.Text, source []byte) {
+	v := t.Segment.Value(source)
+	if t.IsRaw() {
+		b.Write(v)
+		return
+	}
+	var buf bytes.Buffer
+	w := bufio.NewWriter(&buf)
+	goldmarkhtml.DefaultWriter.Write(w, v)
+	if err := w.Flush(); err != nil {
+		// A bytes.Buffer never fails a write; keep the source text if it did.
+		b.Write(v)
+		return
+	}
+	b.WriteString(html.UnescapeString(buf.String()))
 }
 
 // pathUnescapeOrRaw percent-decodes s, or returns it unchanged when it is
