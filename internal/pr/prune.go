@@ -237,9 +237,10 @@ func undatedReason(name string) string {
 //   - an UNPAIRED intent is kept at any age. That row is the signal that a
 //     repair died mid-delete, and its workspace field is the only thing naming
 //     a possibly-orphaned clean room. Age does not make it less true.
-//   - an UNPARSEABLE line is kept, verbatim. Nothing may drop what it cannot
-//     read, and readRepairLog already skips such a line on the way out, so
-//     keeping it costs a reader nothing.
+//   - an UNPARSEABLE line is kept, verbatim, and so is an OVER-LONG one
+//     (maxRepairLogLineBytes or more) whether or not it would decode. Nothing
+//     may drop what it cannot read, and readRepairLogTail already skips both
+//     on the way out, so keeping them costs a reader nothing.
 //   - a row with no timestamp is kept, and so is every row sharing its id: no
 //     age was established, so no retention decision is available.
 //   - a pair straddling the cutoff is kept whole, so a completion can never
@@ -259,6 +260,13 @@ func classifyRepairRows(lines [][]byte, cutoff time.Time) ([][]byte, int) {
 	groups := make(map[string]*group, len(lines))
 	ids := make([]string, len(lines))
 	for i, line := range lines {
+		// An over-long line is kept unparsed even if it would decode: every
+		// reader skips it (readRepairLogTail), so no reader could have seen
+		// it settle, and the rewriter must not be the one place it counts.
+		// The bound matches readRepairLogTail's buffer exactly.
+		if len(line) >= maxRepairLogLineBytes {
+			continue
+		}
 		var row RepairRow
 		if err := json.Unmarshal(line, &row); err != nil || row.ID == "" {
 			continue
@@ -758,9 +766,17 @@ func (c *Client) compactRepairLog(cutoff time.Time, out *PruneLog) {
 		"path", c.repairLogPath(), "dropped", dropped, "kept", len(keep))
 }
 
-// readRepairLogLines returns the log's raw lines, oldest first. It is the
-// RAW-BYTES counterpart to readRepairLog, which decodes and therefore silently
-// drops what it cannot parse — the one thing a rewriter must never do.
+// readRepairLogLines returns the log's raw lines, oldest first, each without
+// its '\n'. It is the RAW-BYTES counterpart to readRepairLogTail, which decodes
+// and therefore skips what it cannot parse — the one thing a rewriter must
+// never do.
+//
+// A line is NOT bounded here, unlike in readRepairLogTail: an over-long line
+// is returned whole so compaction can carry it through byte for byte
+// (forgectl#544). Bounding it would either fail the read, which refused every
+// --prune from then on, or truncate the line, which is dropping by another
+// name. The whole log is already held in memory on this path; one more long
+// line changes nothing about that.
 func (c *Client) readRepairLogLines() ([][]byte, error) {
 	f, err := os.Open(c.repairLogPath()) //nolint:gosec // inside the 0700 sessions dir
 	if err != nil {
@@ -772,19 +788,21 @@ func (c *Client) readRepairLogLines() ([][]byte, error) {
 	defer func() { _ = f.Close() }()
 
 	var lines [][]byte
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 4096), maxRepairLogLineBytes)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
+	r := bufio.NewReaderSize(f, maxRepairLogLineBytes)
+	for {
+		// ReadBytes returns a fresh slice, so no clone is needed. Only the
+		// '\n' is stripped: a '\r' before it is content, kept verbatim.
+		line, rerr := r.ReadBytes('\n')
+		if rerr != nil && !errors.Is(rerr, io.EOF) {
+			return nil, fmt.Errorf("read repair audit log: %w", rerr)
 		}
-		lines = append(lines, bytes.Clone(line))
+		if line = bytes.TrimSuffix(line, []byte("\n")); len(line) > 0 {
+			lines = append(lines, line)
+		}
+		if rerr != nil {
+			return lines, nil // io.EOF, after a final line with no '\n'
+		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read repair audit log: %w", err)
-	}
-	return lines, nil
 }
 
 // writeRepairLogAtomic replaces the log with lines, mirroring
