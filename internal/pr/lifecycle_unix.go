@@ -69,8 +69,10 @@ func (e *lockBusyError) Error() string {
 //     hung tmux server holds the lock for the budget plus exec's
 //     pipeWaitDelay (500 ms) per site, not indefinitely. The sites are
 //     teardown's window kill (killReviewWindow, through resolveReviewWindow),
-//     reached from `pr teardown`, from `pr cleanup`, and from `pr repair
-//     --rollback` and `--forget-if-absent`; the occupancy read (reviewWindowSnapshot) in
+//     reached from `pr teardown`, from `pr cleanup` (which shares ONE budget
+//     across its whole sweep and skips the remaining live sessions once it
+//     is spent), and from `pr repair --rollback` and `--forget-if-absent`;
+//     the occupancy read (reviewWindowSnapshot) in
 //     admit, reserve, PrepareMany's batch reserve, and drain's claim; the
 //     liveness read (WindowsLive, WindowLive) in `pr repair`'s inspect,
 //     undecodable set-aside, rollback and forget arms and in `pr repair

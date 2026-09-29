@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,5 +152,138 @@ func TestTeardown_DuplicateReviewWindowNamesParkAndKillNothing(t *testing.T) {
 	bc := readRecord(t, path)
 	if bc.Phase != PhaseNeedsRepair || bc.RepairReason != windowAmbiguousReason {
 		t.Errorf("record = phase %q reason %q, want needs-repair with the ambiguity reason", bc.Phase, bc.RepairReason)
+	}
+}
+
+// seedCleanupSweep seeds n live prepared records plus one stale record (its
+// workspace already gone), all created today, and returns the live paths and
+// workspaces and the stale path.
+func seedCleanupSweep(t *testing.T, c *Client, n int) (live, wss []string, stale string) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		ws := fakeWorkspace(t)
+		live = append(live, seedPhaseRecord(t, c, Ref{Owner: "o", Repo: "r", Number: 41 + i}, PhasePrepared, ws))
+		wss = append(wss, ws)
+	}
+	gone := fakeWorkspace(t)
+	stale = seedPhaseRecord(t, c, Ref{Owner: "o", Repo: "r", Number: 40}, PhasePrepared, gone)
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatal(err)
+	}
+	return live, wss, stale
+}
+
+// TestCleanup_HungTmuxSharesOneBudgetAndSkipsTheRest is forgectl#648: a sweep
+// holds the lifecycle lock throughout, so it shares ONE tmux budget rather
+// than spending one per session. After the first timeout, the remaining live
+// sessions are skipped untouched (not parked, not asked of tmux at all), while
+// a stale session, which never calls tmux, is still settled.
+func TestCleanup_HungTmuxSharesOneBudgetAndSkipsTheRest(t *testing.T) {
+	shrinkLockedTmuxBudget(t, 150*time.Millisecond)
+	h := &hangingTmux{FakeRunner: reviewServer()}
+	c := New(h, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+		WithApprover(func(string) (bool, error) { return false, nil }),
+		WithTTYCheck(func() bool { return false }))
+	live, wss, stale := seedCleanupSweep(t, c, 3)
+
+	var err error
+	runBounded(t, "Cleanup", func() { err = c.Cleanup(context.Background(), time.Now().UTC().Format("2006-01-02")) })
+	if !errors.Is(err, ErrWindowKillTimedOut) {
+		t.Fatalf("Cleanup err = %v, want the first session's ErrWindowKillTimedOut", err)
+	}
+	parked := 0
+	for i, path := range live {
+		switch got := readRecord(t, path).Phase; got {
+		case PhaseNeedsRepair:
+			parked++
+		case PhasePrepared:
+		default:
+			t.Errorf("%s: phase %q, want parked (the one that timed out) or untouched", path, got)
+		}
+		if _, serr := os.Stat(wss[i]); serr != nil {
+			t.Errorf("workspace %s was removed while tmux was unresponsive: %v", wss[i], serr)
+		}
+	}
+	if parked != 1 {
+		t.Errorf("%d sessions were attempted against a hung tmux, want 1: the rest must be skipped", parked)
+	}
+	asked := 0
+	for _, call := range h.Calls {
+		if call.Name == "tmux" && len(call.Args) > 0 && call.Args[0] == "list-sessions" {
+			asked++
+		}
+	}
+	if asked != 1 {
+		t.Errorf("tmux was asked to resolve the review session %d times, want 1", asked)
+	}
+	if _, serr := os.Stat(stale); !os.IsNotExist(serr) {
+		t.Errorf("the stale record needs no tmux and should still be swept: %v", serr)
+	}
+}
+
+// TestCleanup_BudgetChargesOnlyTmuxTime: the shared budget is tmux time, not
+// wall-clock time. A sweep whose local removals alone outlast the budget must
+// still tear down every healthy session.
+func TestCleanup_BudgetChargesOnlyTmuxTime(t *testing.T) {
+	shrinkLockedTmuxBudget(t, 50*time.Millisecond)
+	orig := sandboxTeardown
+	sandboxTeardown = func(ctx context.Context, run exec.Runner, workspace string) error {
+		time.Sleep(80 * time.Millisecond) // slower than the whole tmux budget
+		return orig(ctx, run, workspace)
+	}
+	t.Cleanup(func() { sandboxTeardown = orig })
+	refs := []Ref{{Owner: "o", Repo: "r", Number: 41}, {Owner: "o", Repo: "r", Number: 42}}
+	c := New(reviewServer(mustWindowName(t, refs[0]), mustWindowName(t, refs[1])),
+		WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+		WithApprover(func(string) (bool, error) { return false, nil }),
+		WithTTYCheck(func() bool { return false }))
+	live, _, _ := seedCleanupSweep(t, c, 2)
+
+	if err := c.Cleanup(context.Background(), time.Now().UTC().Format("2006-01-02")); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	for _, path := range live {
+		if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+			t.Errorf("%s survived a healthy sweep: %v", path, serr)
+		}
+	}
+}
+
+// TestTeardown_TimedOutKillNamesTheWindow is the other half of forgectl#648: a
+// kill that timed out must leave the window recorded somewhere. The schema
+// allows a windowId only on an active record, so the park names the window in
+// its reason, and the error names it too, which is what reaches the operator
+// when the record cannot be parked at all.
+func TestTeardown_TimedOutKillNamesTheWindow(t *testing.T) {
+	shrinkLockedTmuxBudget(t, 100*time.Millisecond)
+	for _, tc := range []struct {
+		name   string
+		legacy bool
+	}{{"v2 record parks with the window", false}, {"legacy record names it in the error", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ref := Ref{Owner: "o", Repo: "r", Number: 45}
+			name := mustWindowName(t, ref)
+			h := &hangingTmux{FakeRunner: reviewServer(name), blockVerb: "kill-window"}
+			c := New(h, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+				WithApprover(func(string) (bool, error) { return false, nil }),
+				WithTTYCheck(func() bool { return false }))
+			var path string
+			if tc.legacy {
+				path, _ = seedSession(t, c, ref, time.Now().UTC())
+			} else {
+				path = seedPhaseRecord(t, c, ref, PhasePrepared, fakeWorkspace(t))
+			}
+			want := name + " (@5)"
+			err := c.Teardown(context.Background(), path)
+			if !errors.Is(err, ErrWindowKillTimedOut) || !strings.Contains(err.Error(), want) {
+				t.Fatalf("err = %v, want ErrWindowKillTimedOut naming %q", err, want)
+			}
+			if tc.legacy {
+				return
+			}
+			if reason := readRecord(t, path).RepairReason; !strings.Contains(reason, want) {
+				t.Errorf("parked reason %q does not name the window %q", reason, want)
+			}
+		})
 	}
 }

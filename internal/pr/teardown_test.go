@@ -592,8 +592,8 @@ func assertParkedNotDiscarded(t *testing.T, c *Client, path, ws string, err erro
 		t.Errorf("the workspace must be kept while the window state is unknown: %v", serr)
 	}
 	bc := readRecord(t, path)
-	if bc.Phase != PhaseNeedsRepair || bc.RepairReason != "window kill timed out (tmux unresponsive)" {
-		t.Errorf("record = phase %q reason %q, want needs-repair with the timeout reason", bc.Phase, bc.RepairReason)
+	if bc.Phase != PhaseNeedsRepair || !strings.HasPrefix(bc.RepairReason, "window kill timed out (tmux unresponsive); review window pr-") {
+		t.Errorf("record = phase %q reason %q, want needs-repair with the timeout reason naming the window", bc.Phase, bc.RepairReason)
 	}
 	start := time.Now()
 	if lerr := c.withLifecycleLock(context.Background(), "probe", func() error { return nil }); lerr != nil {
