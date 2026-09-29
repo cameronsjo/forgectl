@@ -33,7 +33,7 @@ type planEntry struct{ file, title, status string }
 
 func readPlan(t *testing.T, dir, name string) planEntry {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(dir, name))
+	raw, err := os.ReadFile(filepath.Clean(filepath.Join(dir, name)))
 	if err != nil {
 		t.Fatalf("read %s: %v", name, err)
 	}
@@ -133,12 +133,12 @@ func TestPlansIndex(t *testing.T) {
 	want := renderPlansIndex(entries)
 	readme := filepath.Join(dir, "README.md")
 	if *updatePlansIndex {
-		if err := os.WriteFile(readme, []byte(want), 0o644); err != nil {
+		if err := os.WriteFile(readme, []byte(want), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return
 	}
-	got, err := os.ReadFile(readme)
+	got, err := os.ReadFile(filepath.Clean(readme))
 	if err != nil {
 		t.Fatalf("%v; generate it with: go test -run TestPlansIndex -update .", err)
 	}
