@@ -9,6 +9,8 @@
 //
 //   - ordinary inline and display math renders, delimiters stripped, TeX
 //     stashed in data-math-source, and ForgectlMath.refresh() re-renders it;
+//   - a mid-line $$ is prose in the docs root, and $$ on its own lines is
+//     display math there;
 //   - single-dollar math is math in the vault root and prose in the docs
 //     root;
 //   - the source scan: nesting at its limit (depth 100) renders; past it the
@@ -101,6 +103,20 @@ const fixtures = {
     root: 'docs',
     body: 'Set $HOME/bin:$PATH and pay $5 or $6.\n',
     want: 'none',
+  },
+  // In a docs root, a mid-line $$ is the shell's PID or currency, not math
+  // (forgectl#650)...
+  'docs-pid.md': {
+    root: 'docs',
+    body: 'Run tmp=/tmp/x.$$; rm /tmp/y.$$ as PID $$ of the shell, for $$5 or $$10.\n',
+    want: 'none',
+  },
+  // ...while $$ on lines of its own, even straight after text, is still
+  // display math there.
+  'docs-display.md': {
+    root: 'docs',
+    body: 'Display:\n$$\n\\sum_i x_i\n$$\n',
+    want: 'rendered',
   },
   // The source scan: at most 100 levels of nesting. Plain groups build
   // about one DOM level each, so only the source scan can skip these.

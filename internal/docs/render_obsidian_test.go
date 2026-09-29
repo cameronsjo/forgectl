@@ -1013,3 +1013,49 @@ func TestRenderCallout_CustomTitle(t *testing.T) {
 		}
 	}
 }
+
+// A character reference that ends a line renders the same in both root
+// kinds (forgectl#665). The vault flavour's '#' trigger (tagParser) split
+// "x&#62;" into two text nodes at a line end, so neither half was a
+// reference and the vault page showed "x&amp;#62;".
+func TestRenderVault_LineFinalCharRefMatchesDocs(t *testing.T) {
+	refs := []string{"&#62;", "&#x3e;", "&#X3E;", "&gt;"}
+	shapes := []string{
+		"x%s\n",           // paragraph, last line
+		"x%s",             // paragraph, no trailing newline
+		"a x%s\nb\n",      // paragraph, soft-broken line
+		"a x%s  \nb\n",    // paragraph, hard-broken line
+		"# x%s\n",         // heading
+		"- x%s\n- y\n",    // tight list item
+		"> x%s\n",         // blockquote
+		"x%s ^blk-1\n",    // before a block-id marker
+		"**b** x%s\n",     // after inline markup
+		"x%s\n\n#tag x\n", // with a real tag elsewhere
+	}
+	for _, ref := range refs {
+		for _, shape := range shapes {
+			src := strings.Replace(shape, "%s", ref, 1)
+			vault, docs := renderKind(t, src, RootVault), renderKind(t, src, RootDocs)
+			if !strings.Contains(vault, "x&gt;") || strings.Contains(vault, "&amp;") {
+				t.Errorf("vault %q = %q, want the reference resolved to x&gt;", src, vault)
+			}
+			if strings.Contains(src, "^blk-1") || strings.Contains(src, "#tag") {
+				continue // vault-only markup: the outputs differ by design
+			}
+			if vault != docs {
+				t.Errorf("%q: vault %q != docs %q", src, vault, docs)
+			}
+		}
+	}
+}
+
+// A callout title reads the rendered paragraph, so it inherited #665.
+func TestRenderVault_CalloutTitleCharRef(t *testing.T) {
+	for _, ref := range []string{"&#62;", "&#x3e;", "&gt;"} {
+		src := "> [!tip] x" + ref + "\n> body\n"
+		out := renderKind(t, src, RootVault)
+		if !strings.Contains(out, "</svg> x&gt;</div>") || strings.Contains(out, "&amp;") {
+			t.Errorf("callout %q = %q, want the title x&gt;", src, out)
+		}
+	}
+}
