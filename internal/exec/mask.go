@@ -29,8 +29,9 @@ type argMask struct {
 // WithMaskedAssignments returns a context under which the Runner never
 // renders the VALUE of any of these KEY=VALUE argv elements. It covers the
 // three places a Runner writes argv down: the debug log, *CommandError's text,
-// and the stderr and failure-path stdout it retains and logs. Each shows as
-// KEY=[redacted].
+// and the stderr and failure-path stdout that CommandError keeps (and, for
+// stderr, the log line). Each shows as KEY=[redacted]. Stdout returned on
+// success is not scrubbed.
 //
 // The child still receives the real value. What this does NOT cover is the
 // process table: argv is readable through ps for the life of the process, so
