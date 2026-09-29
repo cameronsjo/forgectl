@@ -93,6 +93,11 @@ func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
 // So "It costs $5 and $10" stays text (the second $ follows a space), and so
 // does "echo $HOME and $PATH". A backslash-escaped byte is skipped while
 // scanning, so \$ inside math never closes it.
+//
+// A candidate that crosses another inline construct's syntax is also left as
+// text (see crossesMarkdown): math is found before links, code spans,
+// autolinks and raw HTML, so without that check "[$HOME](a.md) and
+// [$PATH](b.md)" would turn half of each link into math.
 type mathInlineParser struct{}
 
 func (mathInlineParser) Trigger() []byte { return []byte{'$'} }
@@ -159,18 +164,45 @@ func (mathInlineParser) Parse(_ ast.Node, block text.Reader, _ parser.Context) a
 	}
 }
 
-// newMathInline builds the node, or rewinds and returns nil for empty math.
+// newMathInline builds the node, or rewinds and returns nil for empty math
+// and for a candidate that crosses other markdown.
 // GitHub's $`…`$ form wraps the TeX in backticks to protect it from markdown;
 // the backticks are not TeX, so one is dropped from each end.
 func newMathInline(tex []byte, display bool, block text.Reader, line int, pos text.Segment) ast.Node {
 	if len(tex) >= 2 && tex[0] == '`' && tex[len(tex)-1] == '`' {
 		tex = tex[1 : len(tex)-1]
+	} else if bytes.IndexByte(tex, '`') >= 0 {
+		// A backtick outside the $`…`$ form belongs to a code span.
+		block.SetPosition(line, pos)
+		return nil
 	}
-	if len(tex) == 0 {
+	if len(tex) == 0 || crossesMarkdown(tex) {
 		block.SetPosition(line, pos)
 		return nil
 	}
 	return &mathInline{tex: tex, display: display}
+}
+
+// crossesMarkdown reports whether a math candidate contains the syntax of a
+// link ("](") or of an autolink or raw-HTML tag ("<" followed by an ASCII
+// letter, "/", "!" or "?"). Either means the $ pair straddles another
+// construct, and keeping the text literal is the safe reading. A spaced
+// comparison such as "a < b" is not a tag opener and stays math; "a<b" does
+// not, which is the price of keeping links and tags intact.
+func crossesMarkdown(tex []byte) bool {
+	if bytes.Contains(tex, []byte("](")) {
+		return true
+	}
+	for i := 0; i+1 < len(tex); i++ {
+		if tex[i] != '<' {
+			continue
+		}
+		switch c := tex[i+1]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c == '/', c == '!', c == '?':
+			return true
+		}
+	}
+	return false
 }
 
 // mathBlockParser parses $$ display blocks. Two opener shapes:
@@ -201,6 +233,14 @@ func (mathBlockParser) Open(_ ast.Node, reader text.Reader, pc parser.Context) (
 	rest := line[pos+len(mathDelim):]
 
 	if util.IsBlank(rest) {
+		// A paragraph holding an unclosed $$ (Obsidian's "$$x = 1" then a
+		// bare "$$" closer) owns this line: it is that math's closer, and
+		// opening a block here would run it to the NEXT $$ in the document.
+		// Declining lets the paragraph continue and the inline parser close
+		// the math across the soft break.
+		if last := pc.LastOpenedBlock().Node; ast.IsParagraph(last) && countDisplayDelims(last.Lines(), reader.Source())%2 == 1 {
+			return nil, parser.NoChildren
+		}
 		reader.AdvanceToEOL()
 		return &mathBlock{}, parser.NoChildren
 	}
@@ -220,6 +260,39 @@ func (mathBlockParser) Open(_ ast.Node, reader text.Reader, pc parser.Context) (
 	node.Lines().Append(text.NewSegment(start, start+closer))
 	reader.AdvanceToEOL()
 	return node, parser.NoChildren
+}
+
+// countDisplayDelims counts the unescaped, non-overlapping $$ in lines.
+func countDisplayDelims(lines *text.Segments, source []byte) int {
+	n := 0
+	for i := 0; i < lines.Len(); i++ {
+		seg := lines.At(i)
+		b := seg.Value(source)
+		for j := 0; j < len(b); j++ {
+			switch {
+			case b[j] == '\\':
+				j++
+			case b[j] == '$' && j+1 < len(b) && b[j+1] == '$':
+				n++
+				j++
+			}
+		}
+	}
+	return n
+}
+
+// endsWithDisplayDelim reports whether b ends in an unescaped $$, so a
+// closing line of "a \\$$" (a literal dollar, then $) does not close.
+func endsWithDisplayDelim(b []byte) bool {
+	for j := 0; j < len(b); j++ {
+		switch {
+		case b[j] == '\\':
+			j++
+		case b[j] == '$' && j == len(b)-2 && b[j+1] == '$':
+			return true
+		}
+	}
+	return false
 }
 
 // findDisplayCloser returns the index of the first unescaped $$ in b, or -1.
@@ -243,7 +316,7 @@ func (mathBlockParser) Continue(node ast.Node, reader text.Reader, _ parser.Cont
 	}
 	line, segment := reader.PeekLine()
 	trimmed := util.TrimRightSpace(line)
-	if bytes.HasSuffix(trimmed, []byte(mathDelim)) {
+	if endsWithDisplayDelim(trimmed) {
 		// "x $$" closes the block with "x" as its last line.
 		if body := util.TrimRightSpace(trimmed[:len(trimmed)-len(mathDelim)]); !util.IsBlank(body) {
 			seg := text.NewSegmentPadding(segment.Start, segment.Start+len(body)-segment.Padding, segment.Padding)
@@ -354,16 +427,29 @@ func (mathRenderer) renderBlock(w util.BufWriter, source []byte, n ast.Node, ent
 type mathExtension struct{}
 
 func (mathExtension) Extend(m goldmark.Markdown) {
+	m.Parser().AddOptions(mathBlockParserOptions()...)
 	m.Parser().AddOptions(
 		// No other inline parser triggers on '$', so this priority only has to
 		// stay clear of the ones other extensions use.
 		parser.WithInlineParsers(util.Prioritized(mathInlineParser{}, 150)),
-		// Ahead of FencedCodeBlockParser (700). Nothing else triggers on '$'
-		// either; the paragraph parser is the fallback when this declines.
-		parser.WithBlockParsers(util.Prioritized(mathBlockParser{}, 650)),
 		parser.WithASTTransformers(util.Prioritized(mathFenceTransformer{}, 110)),
 	)
 	m.Renderer().AddOptions(renderer.WithNodeRenderers(
 		util.Prioritized(mathRenderer{}, 100),
 	))
+}
+
+// mathBlockParserOptions registers the $$ block parser. It is the ONE place
+// that parser is configured, because linkscan's parser (newLinkMarkdown) must
+// see the same block structure the renderer does: a "# x" or a link inside a
+// $$ block is TeX, and a scan that parsed it as a heading or link would hand
+// the resolver a slug or target the rendered page does not have. The inline
+// parser is not shared: heading ids come from the raw source line, and a
+// candidate holding link syntax is never math (crossesMarkdown).
+func mathBlockParserOptions() []parser.Option {
+	return []parser.Option{
+		// Ahead of FencedCodeBlockParser (700). Nothing else triggers on '$';
+		// the paragraph parser is the fallback when this declines.
+		parser.WithBlockParsers(util.Prioritized(mathBlockParser{}, 650)),
+	}
 }

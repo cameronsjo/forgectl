@@ -22,17 +22,32 @@ package docs
 //   [x] Unhappy: a stray "$$$" in prose does not open a block that swallows
 //                the rest of the document
 //
+//   [x] Unhappy: a $ pair straddling a link, code span, autolink or raw-HTML
+//                tag is not math; a spaced "a < b" still is
+//   [x] Pinned limitation: "export PATH=$HOME/bin:$PATH" renders math
+//   [x] Unhappy: an Obsidian-style bare $$ closer does not open a block
+//   [x] Unhappy: a line ending in \$$ does not close a block
+//
 // escaping (Classification: security)
-//   [x] Unhappy (security): markup inside inline math comes out as text
+//   [x] Unhappy (security): tag-shaped inline candidates leave nothing live
+//   [x] Unhappy (security): the inline renderer escapes TeX by itself
 //   [x] Unhappy (security): markup inside a display block comes out as text
 //
 // heading ids (Classification: core logic)
-//   [x] Happy: math in a heading does not change its id (linkscan parses
-//              without math, so the two must agree)
+//   [x] Happy: math in a heading does not change its id
+//   [x] Happy: linkscan's slugs equal the rendered ids around $$ blocks, and
+//              a link inside a $$ block is not indexed
 
 import (
+	"bytes"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	goldmarkhtml "github.com/yuin/goldmark/renderer/html"
 )
 
 const (
@@ -209,23 +224,165 @@ func TestRender_Math_OtherFencesUntouched(t *testing.T) {
 	}
 }
 
-func TestRender_Math_InlineMarkupEscaped(t *testing.T) {
+// A tag inside $…$ is not math at all (crossesMarkdown), so it reaches the
+// sanitizer as ordinary raw HTML; what matters is that nothing live survives.
+func TestRender_Math_InlineMarkupNotLive(t *testing.T) {
 	for _, src := range []string{
 		"$<img src=x onerror=alert(1)>$",
 		"$</span><script>alert(1)</script>$",
 	} {
 		t.Run(src, func(t *testing.T) {
 			out := renderOrFail(t, src)
-			if !strings.Contains(out, mathSpanOpen+"$&lt;") {
-				t.Errorf("markup was not escaped inside the math span: %s", out)
-			}
-			// onerror= may survive as escaped text; a live tag may not.
-			for _, bad := range []string{"<img", "<script"} {
+			for _, bad := range []string{"onerror", "<script"} {
 				if strings.Contains(out, bad) {
 					t.Errorf("output carries a live %q: %s", bad, out)
 				}
 			}
 		})
+	}
+}
+
+// The renderer escapes inline TeX on its own, without leaning on the parser's
+// refusal of tag-shaped candidates or on the sanitizer: render a hostile node
+// directly through a pipeline that has neither.
+func TestMathRenderer_InlineEscapes(t *testing.T) {
+	md := goldmark.New(
+		goldmark.WithExtensions(mathExtension{}),
+		goldmark.WithRendererOptions(goldmarkhtml.WithUnsafe()),
+	)
+	doc := ast.NewDocument()
+	para := ast.NewParagraph()
+	doc.AppendChild(doc, para)
+	para.AppendChild(para, &mathInline{tex: []byte(`</span><script>alert(1)</script>`)})
+
+	var buf bytes.Buffer
+	if err := md.Renderer().Render(&buf, nil, doc); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "<script") {
+		t.Errorf("inline TeX was written unescaped: %s", out)
+	}
+	if want := mathSpanOpen + "$&lt;/span&gt;&lt;script&gt;"; !strings.Contains(out, want) {
+		t.Errorf("output missing %q: %s", want, out)
+	}
+}
+
+// Comparison operators that are not tag openers stay math, and are escaped.
+func TestRender_Math_SpacedComparisonStaysMath(t *testing.T) {
+	out := renderOrFail(t, "if $a < b$ and $c<1$ then")
+
+	if want := mathSpanOpen + "$a &lt; b$</span>"; !strings.Contains(out, want) {
+		t.Errorf("output missing %q: %s", want, out)
+	}
+	if want := mathSpanOpen + "$c&lt;1$</span>"; !strings.Contains(out, want) {
+		t.Errorf("output missing %q: %s", want, out)
+	}
+}
+
+// A $ pair that straddles a link, code span or autolink is not math: the other
+// construct keeps its syntax.
+func TestRender_Math_DoesNotCrossOtherConstructs(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{"[$HOME](a.md) and [$PATH](b.md)", `<a href="a.md" rel="nofollow">$HOME</a> and <a href="b.md" rel="nofollow">$PATH</a>`},
+		{"x $y `z$` w", "<code>z$</code>"},
+		{"$a <http://x/b$c> d", `<a href="http://x/b$c"`},
+		{"$a <span title=\"q$\">b</span>", `<span>b</span>`},
+	} {
+		t.Run(tc.src, func(t *testing.T) {
+			out := renderOrFail(t, tc.src)
+			if strings.Contains(out, `class="math`) {
+				t.Errorf("rendered math across another construct: %s", out)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("output missing %q: %s", tc.want, out)
+			}
+		})
+	}
+}
+
+// Known limitation, pinned so a change to it is deliberate: pandoc's rules
+// read "$HOME/bin:$" as math, because the second $ follows a non-space and is
+// not followed by a digit. The shell line has to go in a code span.
+func TestRender_Math_ShellAssignmentLimitation(t *testing.T) {
+	out := renderOrFail(t, "export PATH=$HOME/bin:$PATH")
+
+	if want := mathSpanOpen + "$HOME/bin:$</span>"; !strings.Contains(out, want) {
+		t.Errorf("the pinned limitation changed, want %q: %s", want, out)
+	}
+}
+
+// Obsidian writes "$$x = 1" and closes with a bare "$$" line. That closer
+// belongs to the paragraph's open math; if it opened a block instead, the
+// block would run to the next $$ and swallow everything in between.
+func TestRender_Math_ObsidianCloserDoesNotOpenBlock(t *testing.T) {
+	out := renderOrFail(t, obsidianCloserFixture)
+
+	for _, want := range []string{
+		`<span class="math math-display">$$x = 1` + "\n" + `$$</span>`,
+		`<h1 id="heading">Heading</h1>`,
+		`<a href="a.md" rel="nofollow">link</a>`,
+		`<strong>bold</strong>`,
+		mathDivOpen + "$$\ny\n$$</div>",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q: %s", want, out)
+		}
+	}
+}
+
+const obsidianCloserFixture = "$$x = 1\n$$\n\n# Heading\n\nSee [link](a.md) and **bold**.\n\n$$\ny\n$$\n"
+
+// A closing line ending in an escaped dollar ("\$$") is a literal dollar
+// followed by $, not the closer.
+func TestRender_Math_EscapedDelimiterDoesNotCloseBlock(t *testing.T) {
+	out := renderOrFail(t, "$$\na \\$$\nb\n$$\n")
+
+	if want := mathDivOpen + "$$\na \\$$\nb\n$$</div>"; !strings.Contains(out, want) {
+		t.Errorf("output missing %q: %s", want, out)
+	}
+}
+
+// renderedIDs returns every id attribute in rendered HTML, in order.
+func renderedIDs(t *testing.T, src string) []string {
+	t.Helper()
+	var ids []string
+	for _, m := range regexp.MustCompile(`<h[1-6] id="([^"]*)"`).FindAllStringSubmatch(renderOrFail(t, src), -1) {
+		ids = append(ids, m[1])
+	}
+	return ids
+}
+
+// linkscan must see the block structure the renderer does, or the resolver
+// indexes headings and links the rendered page does not have.
+func TestScanBody_MathBlockParity(t *testing.T) {
+	for name, src := range map[string]string{
+		"heading in block": "$$\n# x\n$$\n\n# x\n",
+		"obsidian closer":  obsidianCloserFixture,
+	} {
+		t.Run(name, func(t *testing.T) {
+			headings, _, _, err := scanBody([]byte(src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var slugs []string
+			for _, h := range headings {
+				slugs = append(slugs, h.Slug)
+			}
+			if ids := renderedIDs(t, src); !slices.Equal(slugs, ids) {
+				t.Errorf("scanned slugs %v, rendered ids %v", slugs, ids)
+			}
+		})
+	}
+}
+
+func TestScanBody_LinkInsideMathBlockNotIndexed(t *testing.T) {
+	_, links, _, err := scanBody([]byte("$$\n[x](inside.md)\n$$\n\n[y](outside.md)\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 || !strings.Contains(links[0].Path, "outside") {
+		t.Errorf("want only the link outside the block, got %+v", links)
 	}
 }
 
