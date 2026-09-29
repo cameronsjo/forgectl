@@ -572,7 +572,7 @@ type hangingTmux struct {
 
 func (h *hangingTmux) Run(ctx context.Context, name string, args ...string) (string, error) {
 	if name == "tmux" && len(args) > 0 && (h.blockVerb == "" || args[0] == h.blockVerb) {
-		h.FakeRunner.Run(ctx, name, args...) //nolint:errcheck // only the call ledger matters
+		_, _ = h.FakeRunner.Run(ctx, name, args...) // only the call ledger matters
 		<-ctx.Done()
 		return "", ctx.Err()
 	}
@@ -635,8 +635,8 @@ func TestTeardown_HungTmuxParksTheRecordAndReleasesTheLock(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("Teardown is still blocked on tmux; the lock would be held indefinitely")
 			}
-			if _, ok := findCallVerb(h.FakeRunner.Calls, "tmux", firstNonEmpty(tc.hang, "list-sessions")); !ok {
-				t.Errorf("the hanging tmux call was never issued; the test did not exercise the bound: %+v", h.FakeRunner.Calls)
+			if _, ok := findCallVerb(h.Calls, "tmux", firstNonEmpty(tc.hang, "list-sessions")); !ok {
+				t.Errorf("the hanging tmux call was never issued; the test did not exercise the bound: %+v", h.Calls)
 			}
 		})
 	}
