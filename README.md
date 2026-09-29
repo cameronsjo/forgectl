@@ -232,6 +232,7 @@ forgectl docs serve [dir|file ...]       # render + serve, loopback-only (DNS-re
 forgectl docs serve --open               # also open the system browser
 forgectl docs open [path]                # point the browser at a doc on the already-running reader
 forgectl docs list [dir|file ...]        # list the indexed docs, no server (--json for scripting)
+forgectl docs check [dir|file ...]       # broken links, broken anchors, orphan pages (exit 1 on findings; --json)
 
 # net — check cached reachability of the configured probe endpoint
 forgectl net                             # show the cached (or freshly probed) answer
