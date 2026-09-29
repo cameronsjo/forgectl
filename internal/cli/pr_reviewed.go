@@ -50,7 +50,7 @@ func newPrReviewedMarkCmd(client *pr.Client, reviewedPath string) *cobra.Command
 			if err != nil {
 				return err
 			}
-			store := pr.LoadReviewed(reviewedPath)
+			store := pr.LoadReviewed(reviewedPath, pr.WithDefaultHost(client.GitHubHost()))
 			if err := store.Mark(ref); err != nil {
 				return fmt.Errorf("mark %s reviewed: %w", ref.String(), err)
 			}
@@ -70,7 +70,7 @@ func newPrReviewedUnmarkCmd(client *pr.Client, reviewedPath string) *cobra.Comma
 			if err != nil {
 				return err
 			}
-			store := pr.LoadReviewed(reviewedPath)
+			store := pr.LoadReviewed(reviewedPath, pr.WithDefaultHost(client.GitHubHost()))
 			if err := store.Unmark(ref); err != nil {
 				return fmt.Errorf("unmark %s: %w", ref.String(), err)
 			}
@@ -112,7 +112,7 @@ func newPrReviewedSyncCmd(client *pr.Client, reviewedPath string) *cobra.Command
 				fmt.Fprintln(cmd.ErrOrStderr(), "no open PRs found across your queries; skipping prune to avoid wiping the store")
 				return nil
 			}
-			store := pr.LoadReviewed(reviewedPath)
+			store := pr.LoadReviewed(reviewedPath, pr.WithDefaultHost(client.GitHubHost()))
 			if err := store.Sync(openRefs); err != nil {
 				return fmt.Errorf("sync reviewed store: %w", err)
 			}

@@ -40,7 +40,7 @@ Rows you've marked reviewed are dimmed (new activity auto-un-dims them).`,
 			// document, and a degraded leg still shows as an empty array.
 			renderDegradationNotes(cmd, notes)
 
-			store := pr.LoadReviewed(reviewedPath)
+			store := pr.LoadReviewed(reviewedPath, pr.WithDefaultHost(client.GitHubHost()))
 			if asJSON {
 				return writePrDashJSON(cmd.OutOrStdout(), dash, store)
 			}
