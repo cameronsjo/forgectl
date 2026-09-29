@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # forgectl `workflow` — DSL design spike (2026-07-01)
 
 > Design artifact for the roadmap's spine head (#9). Doubles as the implementation spec for the

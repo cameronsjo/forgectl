@@ -1,5 +1,5 @@
 ---
-status: "in-review"
+status: in-flight
 updated: "2026-08-31"
 branch: "plan/docs-fix-up"
 body_sha256: "5efbf4e1edbf15f844140131a2a6f6205eae0cfe519221ad4ec457030a4bc6b5"

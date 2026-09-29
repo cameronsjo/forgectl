@@ -1,3 +1,7 @@
+---
+orphan_ok: true
+---
+
 # Audience Review: forgectl README + CLI surface (Artifact/UX mode)
 
 Panel: six cast personas, degraded fallback path (cast generated this session —
