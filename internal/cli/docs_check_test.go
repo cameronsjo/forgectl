@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -272,6 +273,10 @@ func TestDocsCheckCmd_DeadlineEncodeFailureNamesCheck(t *testing.T) {
 //   [x] Unhappy: --json carries the skipped array and still exits 2
 //   [x] Happy: a clean tree's --json carries an empty skipped array
 //   [x] Unhappy: docs list, a tolerant verb, prints the note on stderr and exits 0
+//   [x] Unhappy: --json exit 2 is a silent error; reasons carry no path
+//   [x] Unhappy: a skip plus an error finding exits 2, summary counts both
+//   [x] Unhappy: docs list --json keeps stderr clean (#649)
+//   [x] Unhappy: docs read and docs serve print the note too
 // The fault is injected through docspkg.InjectWalkFaultForTest, so these run
 // as root, where chmod cannot make a directory unreadable.
 
@@ -311,6 +316,113 @@ func TestDocsCheckCmd_SkippedPathJSONField(t *testing.T) {
 		t.Fatalf("skipped = %v, want 2 entries", got.Skipped)
 	}
 	assertKeys(t, "skipped entry", got.Skipped[0], "root", "path", "reason")
+	// The reason is the bare cause: the entry already names root + relative
+	// path, so the absolute path must not ride along in reason.
+	for _, sp := range got.Skipped {
+		if r, _ := sp["reason"].(string); r == "" || strings.Contains(r, dir) || strings.Contains(r, "/") {
+			t.Errorf("reason = %q, want the bare cause with no path", r)
+		}
+	}
+}
+
+// Under --json the partial-tree exit 2 is silent (the report is the whole
+// answer): the returned error renders nothing, so Execute prints no
+// "Error: ..." line after the JSON.
+func TestDocsCheckCmd_SkippedPathJSONReturnsSilentError(t *testing.T) {
+	dir := t.TempDir()
+	docsCheckWrite(t, filepath.Join(dir, "README.md"), "# R\n")
+	t.Cleanup(docspkg.InjectWalkFaultForTest())
+
+	cmd := newDocsCheckCmd(module.Deps{})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--json", dir})
+	err := cmd.ExecuteContext(context.Background())
+	var silent *silentCodedError
+	if !errors.As(err, &silent) || err.Error() != "" || ExitCode(err) != 2 {
+		t.Fatalf("err = %#v (%q), want a silent exit-2 error", err, err)
+	}
+}
+
+// Exit 2 (partial tree) outranks exit 1 (error findings), and the human
+// summary still counts the error findings the report printed.
+func TestDocsCheckCmd_SkippedPathOutranksErrorFinding(t *testing.T) {
+	dir := t.TempDir()
+	docsCheckWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[x](missing.md)\n")
+	t.Cleanup(docspkg.InjectWalkFaultForTest())
+
+	cmd := newDocsCheckCmd(module.Deps{})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{dir})
+	err := cmd.ExecuteContext(context.Background())
+	if code := ExitCode(err); code != 2 {
+		t.Fatalf("exit = %d (err %v), want 2: a partial tree outranks error findings", code, err)
+	}
+	if !strings.Contains(stdout.String(), "broken_link missing.md") {
+		t.Errorf("the error finding must still be reported:\n%s", stdout.String())
+	}
+	if !strings.Contains(err.Error(), "could not be read") || !strings.Contains(err.Error(), "1 error finding(s)") {
+		t.Errorf("summary = %q, want the skip count and the error-finding count", err.Error())
+	}
+}
+
+// Under --json the tolerant list keeps stderr clear of the plain-text note
+// (#649: stderr carries at most one JSON object) and still exits 0.
+func TestDocsListCmd_SkippedPathJSONKeepsStderrClean(t *testing.T) {
+	dir := t.TempDir()
+	docsCheckWrite(t, filepath.Join(dir, "README.md"), "# R\n")
+	t.Cleanup(docspkg.InjectWalkFaultForTest())
+
+	cmd := newDocsListCmd(module.Deps{})
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json", dir})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("docs list --json: %v", err)
+	}
+	if stderr.String() != "" {
+		t.Errorf("stderr = %q, want empty under --json", stderr.String())
+	}
+	var docs []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &docs); err != nil || len(docs) != 1 {
+		t.Errorf("stdout = %s (err %v), want a one-entry array", stdout.String(), err)
+	}
+}
+
+func TestDocsReadCmd_SkippedPathPrintsStderrNote(t *testing.T) {
+	docsReadFixture(t)
+	t.Cleanup(docspkg.InjectWalkFaultForTest())
+
+	res := runDocsReadForTest(t, "README.md")
+	if res.err != nil {
+		t.Fatalf("docs read: %v", res.err)
+	}
+	if !strings.Contains(res.stderr, "unreadable path(s) under") {
+		t.Errorf("stderr note missing: %q", res.stderr)
+	}
+}
+
+func TestDocsServeCmd_SkippedPathPrintsStderrNote(t *testing.T) {
+	dir := t.TempDir()
+	docsCheckWrite(t, filepath.Join(dir, "README.md"), "# R\n")
+	t.Cleanup(docspkg.InjectWalkFaultForTest())
+
+	cmd := newDocsServeCmd(module.Deps{})
+	var stderr bytes.Buffer
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(&stderr)
+	// A relative --token-file fails in runDocsServe before any bind, after
+	// the note has been printed.
+	cmd.SetArgs([]string{"--token-file", "relative-token", dir})
+	if err := cmd.ExecuteContext(context.Background()); err == nil {
+		t.Fatal("expected the token-file error")
+	}
+	if !strings.Contains(stderr.String(), "unreadable path(s) under") {
+		t.Errorf("stderr note missing: %q", stderr.String())
+	}
 }
 
 func TestDocsCheckCmd_CleanTreeJSONSkippedIsEmptyArray(t *testing.T) {

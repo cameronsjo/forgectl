@@ -71,7 +71,10 @@ type SearchError struct {
 // more indexed hit existed past the limit. Skipped counts hits that were
 // dropped rather than returned: hits outside the index, paths rg could only
 // report as raw bytes, and oversized records. A root that failed is never
-// counted in Skipped; it is listed in Errors.
+// counted in Skipped; it is listed in Errors. SkippedPaths lists the paths
+// the index walk could not read (the same {root, path, reason} entries as
+// `docs check`'s skipped array), so docs under them were never searched; it
+// is never nil.
 type SearchResponse struct {
 	Backend   string         `json:"backend"`
 	Query     string         `json:"query"`
@@ -79,6 +82,9 @@ type SearchResponse struct {
 	Truncated bool           `json:"truncated"`
 	Skipped   int            `json:"skipped"`
 	Errors    []SearchError  `json:"errors"`
+	// SkippedPaths is additive (ADR-0008): a separate key because Skipped
+	// already counts dropped hits.
+	SkippedPaths []SkippedPath `json:"skipped_paths"`
 }
 
 // ValidateQuery rejects a query before any subprocess sees it: an empty or
@@ -162,7 +168,10 @@ func rgArgs(query, path string) []string {
 // are still searched; only an expired or cancelled ctx aborts the search. A
 // missing rg wraps ErrNoSearchBackend.
 func (s Searcher) Search(ctx context.Context, idx *Index, q string, limit int) (SearchResponse, error) {
-	resp := SearchResponse{Backend: SearchBackendRipgrep, Query: q, Results: []SearchResult{}, Errors: []SearchError{}}
+	resp := SearchResponse{Backend: SearchBackendRipgrep, Query: q, Results: []SearchResult{}, Errors: []SearchError{}, SkippedPaths: []SkippedPath{}}
+	if idx != nil {
+		resp.SkippedPaths = append(resp.SkippedPaths, idx.skipped...)
+	}
 	if err := ValidateQuery(q); err != nil {
 		return resp, err
 	}

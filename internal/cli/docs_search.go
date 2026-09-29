@@ -92,7 +92,12 @@ config error, or an expired --timeout exits 2, and under --json writes one
 			if err != nil {
 				return docsFail(cmd, "docs search", deadlineRoot(err, ""), err, 2, asJSON)
 			}
-			noteSkippedPaths(cmd.ErrOrStderr(), idx)
+			// Under --json stderr is reserved for the one error object (#649),
+			// so the note stays out of it; the skipped paths travel in the
+			// stdout payload where it has room (docs search's skipped_paths).
+			if !asJSON {
+				noteSkippedPaths(cmd.ErrOrStderr(), idx)
+			}
 
 			searcher := docspkg.Searcher{Runner: streamer, LookPath: docsSearchLookPath}
 			resp, err := searcher.Search(ctx, idx, query, limit)

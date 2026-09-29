@@ -168,12 +168,27 @@ func (idx *Index) Skipped() []SkippedPath {
 	return append([]SkippedPath(nil), idx.skipped...)
 }
 
+// skipReason is the recorded reason for a skipped path: the bare cause
+// ("permission denied"), not err.Error(), whose *fs.PathError form repeats
+// the absolute path. The skip entry already names the path as root label
+// plus relative path, and that is all `docs check` output may carry.
+func skipReason(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) && pe.Err != nil {
+		return pe.Err.Error()
+	}
+	return err.Error()
+}
+
 // walkDir is the directory walk walkRoot runs. It is a seam so tests can
 // inject a walk error without relying on file modes, which root ignores.
 var walkDir = filepath.WalkDir
 
 // faultEntry is the synthetic fs.DirEntry InjectWalkFaultForTest reports.
-type faultEntry struct{ dir bool }
+type faultEntry struct {
+	dir  bool
+	path string
+}
 
 func (e faultEntry) Name() string { return "fault" }
 func (e faultEntry) IsDir() bool  { return e.dir }
@@ -183,7 +198,9 @@ func (e faultEntry) Type() fs.FileMode {
 	}
 	return 0
 }
-func (e faultEntry) Info() (fs.FileInfo, error) { return nil, fs.ErrNotExist }
+func (e faultEntry) Info() (fs.FileInfo, error) {
+	return nil, &fs.PathError{Op: "lstat", Path: e.path, Err: fs.ErrNotExist}
+}
 
 // InjectWalkFaultForTest makes every index walk additionally report a
 // permission error for the subdirectory "locked" and a vanished entry
@@ -197,8 +214,12 @@ func InjectWalkFaultForTest() (restore func()) {
 		if err := prev(root, fn); err != nil {
 			return err
 		}
-		_ = fn(filepath.Join(root, "locked"), faultEntry{dir: true}, fs.ErrPermission)
-		_ = fn(filepath.Join(root, "gone.md"), faultEntry{}, nil)
+		// The errors carry the absolute path, as the real walk's do, so a test
+		// can prove the recorded reason drops it.
+		locked := filepath.Join(root, "locked")
+		_ = fn(locked, faultEntry{dir: true, path: locked}, &fs.PathError{Op: "open", Path: locked, Err: fs.ErrPermission})
+		gone := filepath.Join(root, "gone.md")
+		_ = fn(gone, faultEntry{path: gone}, nil)
 		return nil
 	}
 	return func() { walkDir = prev }
@@ -573,7 +594,7 @@ func walkRoot(ctx context.Context, root Root) ([]Doc, []SkippedPath, error) {
 			}
 			slog.Warn("docs: skipped an unreadable path during the index walk.",
 				"root", root.Label, "path", path, "error", err)
-			skip(path, err.Error())
+			skip(path, skipReason(err))
 			if d != nil && d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -605,7 +626,7 @@ func walkRoot(ctx context.Context, root Root) ([]Doc, []SkippedPath, error) {
 		// index-build failure.
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
-			skip(path, err.Error())
+			skip(path, skipReason(err))
 			return nil
 		}
 		resolved = filepath.Clean(resolved)
@@ -620,7 +641,7 @@ func walkRoot(ctx context.Context, root Root) ([]Doc, []SkippedPath, error) {
 			// The file vanished between the readdir and the stat.
 			slog.Warn("docs: skipped a file that vanished during the index walk.",
 				"root", root.Label, "path", path, "error", err)
-			skip(path, err.Error())
+			skip(path, skipReason(err))
 			return nil
 		}
 

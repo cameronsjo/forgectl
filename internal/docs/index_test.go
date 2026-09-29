@@ -31,6 +31,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -406,7 +407,8 @@ func TestNewIndex_InjectedWalkErrors_RecordedAndSiblingsIndexed(t *testing.T) {
 		if err := filepath.WalkDir(root, fn); err != nil {
 			return err
 		}
-		_ = fn(filepath.Join(root, "locked"), stubEntry{name: "locked", dir: true}, fs.ErrPermission)
+		locked := filepath.Join(root, "locked")
+		_ = fn(locked, stubEntry{name: "locked", dir: true}, &fs.PathError{Op: "open", Path: locked, Err: fs.ErrPermission})
 		// A file the walk listed that is gone by the time EvalSymlinks runs.
 		_ = fn(filepath.Join(root, "gone.md"), stubEntry{name: "gone.md"}, nil)
 		return nil
@@ -425,6 +427,14 @@ func TestNewIndex_InjectedWalkErrors_RecordedAndSiblingsIndexed(t *testing.T) {
 	}
 	if got[0].Root != idx.Roots()[0].Label || got[0].Reason == "" {
 		t.Errorf("skipped entry lacks root label or reason: %+v", got[0])
+	}
+	// Reasons are the bare cause: the absolute path in the *fs.PathError
+	// (and in EvalSymlinks' lstat error for gone.md) must not leak into them.
+	if got[0].Reason != fs.ErrPermission.Error() {
+		t.Errorf("locked reason = %q, want %q", got[0].Reason, fs.ErrPermission.Error())
+	}
+	if strings.Contains(got[1].Reason, "/") {
+		t.Errorf("gone.md reason = %q, want no path", got[1].Reason)
 	}
 }
 

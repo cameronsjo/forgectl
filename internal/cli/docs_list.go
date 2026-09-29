@@ -92,7 +92,12 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 				}
 				return docsFail(cmd, "docs list", "", err, 2, asJSON)
 			}
-			noteSkippedPaths(cmd.ErrOrStderr(), idx)
+			// Under --json stderr is reserved for the one error object (#649),
+			// so the note stays out of it. The bare-array output has no room for
+			// the skipped paths either; docs check --json lists them.
+			if !asJSON {
+				noteSkippedPaths(cmd.ErrOrStderr(), idx)
+			}
 
 			docs := idx.List()
 			if limit > 0 && limit < len(docs) {

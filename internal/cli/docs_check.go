@@ -116,11 +116,14 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 				// its report is already on stdout, so docsFail's stderr error
 				// object (for verbs that produced nothing) is not emitted under
 				// --json. Human mode keeps a one-line reason on stderr.
-				perr := fmt.Errorf("docs check: %d path(s) could not be read; the result covers a partial tree", n)
 				if asJSON {
 					return newSilentCodedError(2)
 				}
-				return WithExitCode(perr, 2)
+				msg := fmt.Sprintf("docs check: %d path(s) could not be read; the result covers a partial tree", n)
+				if e := report.Errors(); e > 0 {
+					msg += fmt.Sprintf(" (and %d error finding(s))", e)
+				}
+				return WithExitCode(errors.New(msg), 2)
 			}
 
 			// Only an error-severity finding fails the check; a deprecated page
@@ -146,8 +149,10 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 }
 
 // noteSkippedPaths prints one stderr line per root that lost paths to an
-// unreadable-path skip. It is unconditional on purpose: the skip is otherwise
-// signalled only through slog, which the default log_level "off" discards.
+// unreadable-path skip. It ignores the log level on purpose: the skip is
+// otherwise signalled only through slog, which the default log_level "off"
+// discards. Callers skip it under --json, where stderr carries at most the
+// one {"error","code","root"} object (#649).
 func noteSkippedPaths(w io.Writer, idx *docspkg.Index) {
 	counts := map[string]int{}
 	var order []string
