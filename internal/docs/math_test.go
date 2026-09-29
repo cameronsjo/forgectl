@@ -201,7 +201,8 @@ func TestRender_Math_TrailingSpaceAfterInlineOpener(t *testing.T) {
 
 // strayCloserFixtures each leave a bare $$ closer behind: display math
 // written after text, whose paragraph something (a blank line, an ATX
-// heading, a thematic break, a setext underline) ends before the closer. That
+// heading, a thematic break, a setext underline) ends before the closer, or
+// a $$ followed by a fence. That
 // stray $$ must stay literal rather than open a block that runs to the next
 // $$ or EOF, and the real display block later in the document must still be
 // one.
@@ -211,6 +212,12 @@ var strayCloserFixtures = map[string]string{
 	"thematic break":   "Def:\n$$\n***\n$$" + strayCloserTail,
 	"setext underline": "para\n$$\nx\n===\n$$" + strayCloserTail,
 	"obsidian + blank": "$$x = 1\n\n$$" + strayCloserTail,
+	// A fence opener after a $$ must not be absorbed into a math block, or
+	// the fence's closer is left outside to open a fence that runs to EOF.
+	"stray closer then fence": "Intro:\n$$\na\n\n$$\n```bash\necho pid $$\n```" + strayCloserTail,
+	"heading then fence":      "# T\n$$\n```sh\nkill -9 $$\n```" + strayCloserTail,
+	"backtick fence in $$":    "$$\n```\nx\n$$\n```" + strayCloserTail,
+	"tilde fence in $$":       "$$\n~~~\nx\n$$\n~~~" + strayCloserTail,
 }
 
 const strayCloserTail = "\n\n## After\n\n[link](a.md)\n\n$$\ny\n$$\n"

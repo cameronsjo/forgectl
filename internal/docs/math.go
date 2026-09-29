@@ -290,9 +290,14 @@ func (mathBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Conte
 }
 
 // hasDisplayCloserAhead reports whether, in the lines after the one starting
-// at from, a closing line (isDisplayCloserLine) comes before any blank line or
-// the end of the source. It reads raw lines, so callers only use it at
-// document top level.
+// at from, a closing line (isDisplayCloserLine) comes before any blank line,
+// any fence line (isFenceLine), or the end of the source. It reads raw lines,
+// so callers only use it at document top level.
+//
+// A fence line ends the search for the same keep-when-unsure reason as a
+// blank line: TeX never contains one, and a block that swallowed a fence's
+// opener would leave its closer outside to open a fence running to EOF
+// ("$$" then "```sh" / "kill -9 $$" / "```" is shell, not math).
 func hasDisplayCloserAhead(source []byte, from int) bool {
 	nl := bytes.IndexByte(source[from:], '\n')
 	if nl < 0 {
@@ -304,7 +309,7 @@ func hasDisplayCloserAhead(source []byte, from int) bool {
 			end = i + n
 		}
 		line := source[i:end]
-		if util.IsBlank(line) {
+		if util.IsBlank(line) || isFenceLine(line) {
 			return false
 		}
 		if isDisplayCloserLine(line) {
@@ -313,6 +318,24 @@ func hasDisplayCloserAhead(source []byte, from int) bool {
 		i = end + 1
 	}
 	return false
+}
+
+// isFenceLine reports whether line could open or close a fenced code block:
+// up to three spaces of indent, then three or more backticks or tildes.
+func isFenceLine(line []byte) bool {
+	i := 0
+	for i < len(line) && i < 3 && line[i] == ' ' {
+		i++
+	}
+	if i >= len(line) || (line[i] != '`' && line[i] != '~') {
+		return false
+	}
+	c, n := line[i], 0
+	for i < len(line) && line[i] == c {
+		i++
+		n++
+	}
+	return n >= 3
 }
 
 // isDisplayCloserLine is the one closing-line test, shared by the look-ahead
