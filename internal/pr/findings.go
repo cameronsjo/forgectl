@@ -240,7 +240,21 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, full string, unma
 		// slash would make Lstat follow a symlink to its target and report a
 		// plain directory, defeating the symlink check that follows.
 		full = filepath.Clean(full)
-		info, err := os.Lstat(full)
+		// The store is opened ONCE, and the plain-dir check and the removal
+		// below both go through that handle (forgectl#644). A path-based
+		// RemoveAll after an Lstat re-resolved every component at removal
+		// time, so a store (or ancestor) swapped for a symlink between the
+		// check and the removal redirected it outside the store. The handle
+		// pins the directory that was checked, and os.Root refuses any name
+		// that would climb out of it.
+		root, err := os.OpenRoot(c.findingsDir)
+		if err != nil {
+			slog.Warn("Skipping findings removal target: the findings store cannot be opened.", "path", full, "error", err)
+			return nil
+		}
+		defer func() { _ = root.Close() }()
+		name := filepath.Base(full)
+		info, err := root.Lstat(name)
 		if err != nil {
 			slog.Warn("Skipping findings removal target that no longer exists.", "path", full, "error", err)
 			return nil
@@ -274,7 +288,7 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, full string, unma
 		if err != nil {
 			return fmt.Errorf("remove findings dir %s: %w", full, err)
 		}
-		rerr := findingsRemoveAll(full)
+		rerr := findingsRemoveAll(root, name)
 		c.completeRepairRow(rowID, row, rerr)
 		if rerr != nil {
 			slog.Error("Failed to remove findings dir.", "path", full, "error", rerr)
@@ -290,11 +304,16 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, full string, unma
 	return removed, nil
 }
 
-// findingsRemoveAll is a seam over os.RemoveAll so a test can make one removal
-// fail and prove the completion row records it as failed — a chmod-based
-// failure is ignored by root, which is how this suite runs in some containers.
-// Tests that swap it must not call t.Parallel.
-var findingsRemoveAll = os.RemoveAll
+// findingsRemoveAll removes name, a direct child of the store, through the
+// store handle root: it never follows a symlink out of the store, and a
+// final-component symlink is unlinked rather than followed.
+//
+// It is a seam so a test can make one removal fail and prove the completion
+// row records it as failed — a chmod-based failure is ignored by root, which
+// is how this suite runs in some containers — or swap the store between the
+// checks and the removal (forgectl#644). Tests that swap it must not call
+// t.Parallel.
+var findingsRemoveAll = (*os.Root).RemoveAll
 
 // findingsDirSize sums the size of every regular file under root,
 // recursively — a best-effort accounting for the `pr findings list` report
