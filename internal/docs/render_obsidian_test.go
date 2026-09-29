@@ -902,31 +902,39 @@ func TestScanVault_TitleUnchanged(t *testing.T) {
 	}
 }
 
-// TestScan_LongSetextHeadingIsLinear: a 5000-line setext H1 must scan in
-// time proportional to its size, in both root kinds. The bound is relative
-// to a same-size document with no heading, best of several runs, so a slow
-// CI machine slows both sides alike; a per-line re-walk of the heading is
-// about a hundred times the baseline.
+// TestScan_LongSetextHeadingIsLinear: a long setext H1 must scan in work
+// proportional to its size, in both root kinds. The measure is a count, not a
+// clock: the nodes visibleSource walks while scanning. A wall-clock ratio
+// flaked under CPU load (#639); a count cannot. One walk over the first line
+// visits every node under the heading once, so the count tracks the line
+// count; a per-line re-walk of the heading squares it.
+//
+// Mutation: in scanBodyFor's KindHeading case, call visibleSource for every
+// line of the heading, not just the first. The count then grows with the
+// square of the line count and this goes red.
 func TestScan_LongSetextHeadingIsLinear(t *testing.T) {
-	heading := []byte(strings.Repeat("word line\n", 5000) + "===\n")
-	plain := []byte(strings.Repeat("word line\n", 5000))
-	best := func(kind RootKind, src []byte) time.Duration {
-		fastest := time.Duration(1<<63 - 1)
-		for range 5 {
-			start := time.Now()
-			if _, err := scanBodyFor(kind, src); err != nil {
-				t.Fatal(err)
-			}
-			if d := time.Since(start); d < fastest {
-				fastest = d
-			}
+	visits := func(kind RootKind, lines int) int64 {
+		src := []byte(strings.Repeat("word line\n", lines) + "===\n")
+		before := visibleSourceVisits.Load()
+		if _, err := scanBodyFor(kind, src); err != nil {
+			t.Fatal(err)
 		}
-		return fastest
+		return visibleSourceVisits.Load() - before
 	}
+	const small, large = 1000, 4000
 	for _, kind := range []RootKind{RootDocs, RootVault} {
-		base, got := best(kind, plain), best(kind, heading)
-		if got > 10*base+20*time.Millisecond {
-			t.Errorf("kind %v: setext heading scan %v against a %v baseline", kind, got, base)
+		s, l := visits(kind, small), visits(kind, large)
+		if s == 0 {
+			t.Fatalf("kind %v: no visibleSource walk counted; the test measures nothing", kind)
+		}
+		// Linear: l is about 4*s. Quadratic: about 16*s. 8 splits them.
+		if l > 8*s {
+			t.Errorf("kind %v: %d lines walked %d nodes, %d lines walked %d: more than linear", kind, small, s, large, l)
+		}
+		// Absolute cap, so a document whose baseline is already quadratic
+		// cannot pass on the ratio alone.
+		if l > 8*large {
+			t.Errorf("kind %v: %d lines walked %d nodes, want at most %d", kind, large, l, 8*large)
 		}
 	}
 }
