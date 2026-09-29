@@ -105,7 +105,8 @@ confirmation prompt.
   forgectl pr findings cleanup --apply              reclaim, after confirming
 
 This never touches the disposable review workspace or a live session — only
-findings dirs under the durable findings store.`,
+findings dirs under the durable findings store. --apply records each removal
+in the audit log, which forgectl pr repair --history reads back.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := validateFindingsOlderThan(olderThan); err != nil {
@@ -132,21 +133,23 @@ func validateFindingsOlderThan(d time.Duration) error {
 	return nil
 }
 
-// runPrFindingsCleanup scans exactly ONCE via FindingsCleanup(olderThan,
+// runPrFindingsCleanup scans exactly ONCE via FindingsCleanup(ctx, olderThan,
 // false) — mirroring runClean's scan-once-reuse-twice shape (internal/cli/
 // clean.go): the SAME set is printed at the preview, shown in the confirm
 // prompt, and (only with --apply, after confirming) handed to
-// client.FindingsRemove to delete. A second FindingsCleanup(olderThan, true)
+// client.FindingsRemove to delete. A second FindingsCleanup(ctx, olderThan, true)
 // call would re-derive its target set from a fresh ReadDir, and could
 // silently diverge from what the user just confirmed if the filesystem
 // changed in between; FindingsRemove instead removes exactly the confirmed
 // paths, re-validating each one at removal time (still TOCTOU-safe: a path
 // that stopped qualifying is skipped with a note, not re-scanned into a
-// different set).
+// different set). Each removal takes the lifecycle lock and writes the
+// intent-then-completion audit pair `pr repair --history` shows, so a busy
+// lock or an unwritable audit log stops the run before that dir is touched.
 func runPrFindingsCleanup(cmd *cobra.Command, client *pr.Client, olderThan time.Duration, apply bool, th theme.Theme) error {
 	out := cmd.OutOrStdout()
 
-	preview, err := client.FindingsCleanup(olderThan, false)
+	preview, err := client.FindingsCleanup(cmd.Context(), olderThan, false)
 	if err != nil {
 		return err
 	}
@@ -173,7 +176,7 @@ func runPrFindingsCleanup(cmd *cobra.Command, client *pr.Client, olderThan time.
 		return nil
 	}
 
-	removed, err := client.FindingsRemove(preview)
+	removed, err := client.FindingsRemove(cmd.Context(), preview)
 	if err != nil {
 		return err
 	}

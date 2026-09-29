@@ -79,7 +79,7 @@ func TestPrFindingsCleanupCmd_DryRun_ReportsAndDeletesNothing(t *testing.T) {
 	if err := os.Chtimes(oldDir, old, old); err != nil {
 		t.Fatalf("Chtimes: %v", err)
 	}
-	client := pr.New(nil, pr.WithFindingsDir(dir))
+	client := pr.New(nil, pr.WithFindingsDir(dir), pr.WithSessionsDir(t.TempDir()))
 
 	cmd := newPrFindingsCmd(client, theme.Theme{})
 	var out bytes.Buffer
@@ -114,7 +114,7 @@ func TestPrFindingsCleanupCmd_NegativeOlderThan_ErrorsWithoutScanning(t *testing
 	if err := os.MkdirAll(oldDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	client := pr.New(nil, pr.WithFindingsDir(dir))
+	client := pr.New(nil, pr.WithFindingsDir(dir), pr.WithSessionsDir(t.TempDir()))
 
 	cmd := newPrFindingsCmd(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
@@ -140,7 +140,7 @@ func TestPrFindingsCleanupCmd_ZeroOlderThan_PassesValidation(t *testing.T) {
 	if err := os.MkdirAll(oldDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	client := pr.New(nil, pr.WithFindingsDir(dir))
+	client := pr.New(nil, pr.WithFindingsDir(dir), pr.WithSessionsDir(t.TempDir()))
 
 	cmd := newPrFindingsCmd(client, theme.Theme{})
 	var out bytes.Buffer
@@ -161,7 +161,7 @@ func TestPrFindingsCleanupCmd_NothingToReclaim_ShortCircuitsBeforeConfirm(t *tes
 	// reclaim" branch before ever reaching the confirm() gate — the only way
 	// this test can pass --apply without a tty/huh stub.
 	dir := t.TempDir()
-	client := pr.New(nil, pr.WithFindingsDir(dir))
+	client := pr.New(nil, pr.WithFindingsDir(dir), pr.WithSessionsDir(t.TempDir()))
 
 	cmd := newPrFindingsCmd(client, theme.Theme{})
 	var out bytes.Buffer
