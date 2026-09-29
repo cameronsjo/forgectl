@@ -375,3 +375,26 @@ func TestScanDoc_FrontmatterAliasesAndTrust(t *testing.T) {
 		t.Errorf("trust = (%q, %q), want (deprecated, 2026-09-23T00:00:00Z)", meta.Status, meta.StaleAfter)
 	}
 }
+
+// A link or wikilink written inside an image's alt text is shown only as alt
+// text, so it is not indexed (forgectl#596). A link beside the image, and a
+// link nested in ordinary link text, still are: they render as links.
+// Mutation: drop either hasImageAncestor check in scanBodyFor and both root
+// kinds go red (the docs-root scan indexes wikilinks too).
+func TestScanBody_LinksInsideImageAltAreNotIndexed(t *testing.T) {
+	src := "![alt [in](in.md) [[wiki]] end](pic.png) [out](out.md)\n\n[[l](l.md)](m.md)\n"
+	for _, kind := range []RootKind{RootDocs, RootVault} {
+		scan, err := scanBodyFor(kind, []byte(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, l := range scan.links {
+			got = append(got, l.Raw)
+		}
+		want := []string{"out.md", "l.md"}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("kind %v: links = %q, want %q", kind, got, want)
+		}
+	}
+}

@@ -510,3 +510,18 @@ func TestCheckAt_StaleFindingWireKeys(t *testing.T) {
 		t.Errorf("stale finding keys = %s, want kind,path,root,stale_after", got)
 	}
 }
+
+// A link inside image alt text is not a link on the page, so docs check does
+// not report it broken (forgectl#596). The control link beside it proves the
+// check ran. Mutation: drop the hasImageAncestor check on ast.KindLink in
+// scanBodyFor and this reports two broken links.
+func TestCheck_LinkInsideImageAltIsNotBroken(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n\n![see [gone](alt-missing.md)](pic.png) [x](missing.md)\n")
+	checkWrite(t, filepath.Join(dir, "pic.png"), "png\n")
+
+	got := findingsOf(checkIndex(t, dir).Check(), FindingBrokenLink)
+	if len(got) != 1 || got[0].Target != "missing.md" {
+		t.Fatalf("broken_link findings = %+v, want only missing.md", got)
+	}
+}
