@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # Forgectl #422 — Release Please as the Single Changelog Writer
 
 ## Goal

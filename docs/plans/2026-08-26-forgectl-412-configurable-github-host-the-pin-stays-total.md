@@ -1,5 +1,5 @@
 ---
-status: "done"
+status: done
 updated: "2026-08-28"
 pr: "https://github.com/cameronsjo/forgectl/pull/414"
 branch: "main"
