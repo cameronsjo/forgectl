@@ -45,7 +45,6 @@ var jsonContractExempt = map[string]string{
 	"pip restore":            "reports no state; it changes something and the exit code is the outcome",
 	"pr attach":              "opens or attaches an interactive surface (browser, tmux, shell, container, editor session); it reports no state",
 	"pr cleanup":             "reports no state; it changes something and the exit code is the outcome",
-	"pr findings cleanup":    "a dry-run/report arm of a mutating verb: a flag arm, out of scope for this walk (see the note above)",
 	"pr keys":                "a static cheatsheet; it reports no state",
 	"pr local":               "opens or attaches an interactive surface (browser, tmux, shell, container, editor session); it reports no state",
 	"pr open":                "opens or attaches an interactive surface (browser, tmux, shell, container, editor session); it reports no state",
