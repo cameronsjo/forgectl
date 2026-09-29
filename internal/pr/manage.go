@@ -14,7 +14,7 @@ import (
 
 // List returns a presentation row for every review session recorded in the
 // session-state dir whose workspace is LIVE, cleanly MISSING, or legitimately
-// NONE (queued/preparing), sorted newest first — and the count of records it
+// NONE (queued/preparing/needs-repair), sorted newest first — and the count of records it
 // could NOT read.
 //
 // Rows are SessionSummary, not Session, because a stale record has no workspace
@@ -110,9 +110,9 @@ func (c *Client) loadSummary(path string) (SessionSummary, error) {
 	if err != nil {
 		return SessionSummary{}, err
 	}
-	// A queued or preparing record has no workspace by design; the validator
-	// has already tied that allowance to exactly those phases, so there is
-	// nothing to classify.
+	// A queued, preparing, or needs-repair record may have no workspace; the
+	// validator has already tied that allowance to those phases
+	// (allowsEmptyWorkspace), so there is nothing to classify.
 	if bc.Workspace == "" {
 		return SessionSummary{ref: ref, path: path, createdAt: bc.CreatedAt,
 			availability: workspaceAvailabilityNone, phase: bc.Phase, repairReason: bc.RepairReason}, nil

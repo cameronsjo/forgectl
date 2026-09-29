@@ -77,8 +77,8 @@ type prDashJSON struct {
 }
 
 // prDashReviewJSON is one active-review row. Workspace names the same
-// three-way state renderSessions marks — "live", "missing", "none" (queued or
-// preparing) — plus "unclassified", which the human view prints as an
+// three-way state renderSessions marks — "live", "missing", "none" (queued,
+// preparing, or needs-repair) — plus "unclassified", which the human view prints as an
 // internal error rather than letting it read as healthy.
 type prDashReviewJSON struct {
 	Ref          string `json:"ref"`
@@ -148,7 +148,7 @@ func renderSessions(out io.Writer, summaries []pr.SessionSummary) {
 		suffix := ""
 		switch {
 		case s.IsWorkspaceNone():
-			// queued or preparing: no workspace by design. The phase note below
+			// queued, preparing, or needs-repair: no workspace by design. The phase note below
 			// carries it; "workspace missing" is the word for damage.
 		case s.IsWorkspaceMissing():
 			suffix = "  (" + workspaceMissingStatus + ")"
