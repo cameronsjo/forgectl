@@ -67,7 +67,7 @@ func TestNotify_ScriptSourceIsConstantRegardlessOfInput(t *testing.T) {
 func TestNotify_ControlCharsEscapedAndLengthCapped(t *testing.T) {
 	fake := &exec.FakeRunner{}
 	c := New(fake, WithGOOS("darwin"))
-	body := "a\nb\x1b[31mred‮evil" + strings.Repeat("x", 1000)
+	body := "a\nb\x1b[31mred\u202eevil" + strings.Repeat("x", 1000)
 
 	if err := c.Notify(context.Background(), "Review started", body); err != nil {
 		t.Fatalf("Notify: %v", err)
@@ -78,7 +78,7 @@ func TestNotify_ControlCharsEscapedAndLengthCapped(t *testing.T) {
 			t.Fatalf("body arg carries control byte %#x at %d: %q", got[i], i, got)
 		}
 	}
-	if strings.ContainsRune(got, '‮') {
+	if strings.ContainsRune(got, '\u202e') {
 		t.Errorf("body arg carries U+202E: %q", got)
 	}
 	if !strings.HasSuffix(got, termsafe.TruncatedMarker) {
