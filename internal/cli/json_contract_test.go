@@ -17,12 +17,14 @@ import (
 //
 // The check keys on the leaf NAME, so a state verb named anything else (an
 // "info", a "why") is not covered. Add its name here when one ships. It also
-// matches leaf names only, so a state-reporting flag arm (e.g. `pr repair
-// --history`) is not covered by this test.
+// matches leaf names only, so a state-reporting flag arm is not covered by
+// this test; `pr repair --history` is one, which is why `pr history` exists as
+// a leaf (#508).
 var stateVerbNames = map[string]bool{
 	"list": true, "ls": true, "status": true, "show": true, "which": true,
 	"doctor": true, "dash": true, "tree": true, "windows": true, "keys": true,
 	"search": true, "check": true, "verify": true, "stats": true, "prs": true,
+	"history": true,
 }
 
 // jsonContractExempt names state-shaped verbs that deliberately take no
