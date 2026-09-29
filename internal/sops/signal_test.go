@@ -15,7 +15,11 @@ package sops
 //   [x] A signal before the span (target untouched) keeps nothing
 //   [x] A signal after settle (target proven) keeps nothing
 //   [x] An existing file at the keep path is never replaced
-//   [x] A normal return inside the span keeps nothing (only a signal does)
+//   [x] A normal return inside the span (a failed restore, a panic) keeps the
+//       backup; one outside it keeps nothing
+//   [x] keepBackup reports where the backup went
+//   [x] With the keep path taken, a normal return leaves the work directory
+//       holding the backup and nothing else
 
 import (
 	"os"
@@ -298,9 +302,12 @@ func TestGuard_KeepNeverReplacesAnExistingFile(t *testing.T) {
 	g.release()
 }
 
-// Only a signal keeps the backup. A normal return, even one that never
-// reached settle, goes through cleanup and keeps nothing.
-func TestGuard_NormalReturnInsideMutationKeepsNothing(t *testing.T) {
+// A normal return from inside the span means the target was never verified
+// and no restore was proven: a failed restore, or a panic. Cleanup keeps the
+// backup then, exactly as a signal does (cameronsjo/forgectl#652). It used to
+// keep nothing, so "could NOT be restored" was followed by deleting the one
+// copy that could.
+func TestGuard_NormalReturnInsideMutationKeepsBackup(t *testing.T) {
 	ch := make(chan os.Signal, 1)
 	death := newFakeDeath()
 	g := startPlaintextGuard(ch, noStop, death.die)
@@ -314,7 +321,112 @@ func TestGuard_NormalReturnInsideMutationKeepsNothing(t *testing.T) {
 	g.release()
 
 	assertGone(t, work.dir)
-	if _, err := os.Lstat(keep); !os.IsNotExist(err) {
-		t.Errorf("a normal return kept a backup at %s (err %v)", keep, err)
+	got, err := os.ReadFile(filepath.Clean(keep))
+	if err != nil {
+		t.Fatalf("a return inside the span lost the ciphertext backup: %v", err)
+	}
+	if string(got) != backupCiphertext {
+		t.Errorf("the kept backup = %q, want the ciphertext unchanged", got)
+	}
+	if n := len(death.snapshot()); n != 0 {
+		t.Errorf("die was called %d times on a normal return", n)
+	}
+}
+
+// A normal return after settle, or before the span, keeps nothing: the
+// target is proven or untouched, and a kept backup would only make the next
+// run refuse for nothing.
+func TestGuard_NormalReturnOutsideMutationKeepsNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(g *plaintextGuard)
+	}{
+		{"before the edit launches", func(*plaintextGuard) {}},
+		{"after settle", func(g *plaintextGuard) { g.beginMutation(); g.settle() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := startPlaintextGuard(make(chan os.Signal, 1), noStop, newFakeDeath().die)
+			create, keep := backedWorkDir(t)
+			work, err := g.track(create)
+			if err != nil {
+				t.Fatalf("track: %v", err)
+			}
+			tc.setup(g)
+			g.cleanup()
+			g.release()
+
+			assertGone(t, work.dir)
+			if _, err := os.Lstat(keep); !os.IsNotExist(err) {
+				t.Errorf("a proven or untouched return kept a backup at %s (err %v)", keep, err)
+			}
+		})
+	}
+}
+
+// keepBackup reports where the backup went, so the restore-failure error can
+// name it, and the deferred cleanup after it changes nothing.
+func TestGuard_KeepBackupReportsWhereItWent(t *testing.T) {
+	g := startPlaintextGuard(make(chan os.Signal, 1), noStop, newFakeDeath().die)
+	create, keep := backedWorkDir(t)
+	work, err := g.track(create)
+	if err != nil {
+		t.Fatalf("track: %v", err)
+	}
+	g.beginMutation()
+	if got := g.keepBackup(); got != keep {
+		t.Errorf("keepBackup() = %q, want %q", got, keep)
+	}
+	g.cleanup()
+	g.release()
+	assertGone(t, work.dir)
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("the backup is not at %s: %v", keep, err)
+	}
+}
+
+// When the keep path is taken, a normal return has no child that could write
+// into the work directory, so the directory stays holding the backup and
+// nothing else: the backup is never lost, and no plaintext stays with it.
+func TestGuard_KeepPathTakenLeavesOnlyTheBackup(t *testing.T) {
+	g := startPlaintextGuard(make(chan os.Signal, 1), noStop, newFakeDeath().die)
+	create, keep := backedWorkDir(t)
+	const earlier = "an earlier run's evidence"
+	if err := os.WriteFile(keep, []byte(earlier), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	work, err := g.track(create)
+	if err != nil {
+		t.Fatalf("track: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(work.dir, "1234"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work.dir, "1234", "doc.yaml"), []byte("a: s3cr3t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g.beginMutation()
+	if got := g.keepBackup(); got != work.backup {
+		t.Errorf("keepBackup() = %q, want the backup left in place at %q", got, work.backup)
+	}
+	g.cleanup()
+	g.release()
+
+	entries, err := os.ReadDir(work.dir)
+	if err != nil {
+		t.Fatalf("the work directory holding the only backup was removed: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "backup" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("the kept work directory holds %v, want only the backup", names)
+	}
+	got, err := os.ReadFile(filepath.Clean(work.backup))
+	if err != nil || string(got) != backupCiphertext {
+		t.Errorf("the backup = %q, %v; want the ciphertext unchanged", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Clean(keep)); err != nil || string(got) != earlier {
+		t.Errorf("the existing file at the keep path was replaced: %q, %v", got, err)
 	}
 }

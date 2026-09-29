@@ -10,6 +10,7 @@ import (
 	"sort"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // List returns a presentation row for every review session recorded in the
@@ -224,6 +225,10 @@ func (c *Client) Attach(ctx context.Context, path string) error {
 		return err
 	}
 	window, err := c.resolveReviewWindow(ctx, sess.Ref)
+	if errors.Is(err, tmux.ErrAmbiguousWindow) {
+		return fmt.Errorf("select review window %q: %w — two windows carry this review's name; "+
+			"close the one that is not the review, then settle the record with 'forgectl pr repair'", name, err)
+	}
 	if err != nil {
 		return fmt.Errorf("select review window %q: %w — the window may predate a "+
 			"forgectl upgrade that renamed review windows; relaunch the review with `pr <ref>`", name, err)

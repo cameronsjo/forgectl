@@ -161,6 +161,10 @@ func Execute(ctx context.Context) error {
 	tmuxClient := tmux.New(exec.OSRunner{})
 	root := buildRoot(deps)
 	args := normalizeArgs(processArgs())
+	if err := configParseGate(cfg, root, args); err != nil {
+		fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(err.Error()))
+		return WithExitCode(err, 2)
+	}
 
 	// The launcher intercept runs before TUI/fang routing: `forgectl launch …`
 	// (and its `cl` alias) must reach claude byte-clean for builder/agents

@@ -11,8 +11,16 @@ import (
 )
 
 // ReviewedStore is the local, offline reviewed-state authority for `forgectl
-// pr`: it maps a PR's canonical "owner/repo#N" form (Ref.String) to the
-// timestamp it was last marked reviewed.
+// pr`: it maps a PR's host-qualified "host/owner/repo#N" form (reviewedKey) to
+// the timestamp it was last marked reviewed.
+//
+// The host is part of the key (#668): owner/repo#N alone would let a mark on
+// one forge dim the same-numbered PR in a same-named repo on another. Marks
+// written before that carry no host ("owner/repo#N"); they are read as the
+// store's default host (the configured [github] host) and never as "any
+// host". A Mark on the default host rewrites its legacy entry under the
+// qualified key — a one-way migration on write. A local (offline) session has
+// no forge and keeps its unqualified "local/repo#N" key.
 //
 // Timestamp-not-boolean is load-bearing: dimming and the picker's skip both
 // derive from a single comparison — reviewedAt >= the PR's latest activity —
@@ -25,6 +33,10 @@ type ReviewedStore struct {
 	path string
 	at   map[string]time.Time
 	now  func() time.Time
+
+	// defaultHost is what an empty Ref.Host means, and the only host a legacy
+	// host-less key is ever read as. Empty is treated as github.com.
+	defaultHost string
 }
 
 // ReviewedOption configures a ReviewedStore at load time.
@@ -34,6 +46,66 @@ type ReviewedOption func(*ReviewedStore)
 // reviewedAt timestamp is deterministic (mirrors net.WithNow).
 func WithNow(fn func() time.Time) ReviewedOption {
 	return func(s *ReviewedStore) { s.now = fn }
+}
+
+// WithDefaultHost sets the host an empty Ref.Host means — the configured
+// [github] host. It is also the sole host that legacy host-less marks belong to.
+func WithDefaultHost(host string) ReviewedOption {
+	return func(s *ReviewedStore) { s.defaultHost = host }
+}
+
+// storeHost is the host a ref's mark lives under: its own, else the store's
+// default. ok is false for a host that fails validation — such a ref cannot
+// be keyed safely, so it is never marked and never reads as reviewed.
+func (s *ReviewedStore) storeHost(ref Ref) (string, bool) {
+	host := ref.Host
+	if host == "" {
+		host = s.defaultHost
+	}
+	if host == "" {
+		host = defaultGitHubHost
+	}
+	host = strings.ToLower(host)
+	return host, ValidHostSegment(host)
+}
+
+// keys returns the qualified key a ref's mark is stored under and, when the
+// ref is on the store's default host, the legacy host-less key that may still
+// hold an older mark for it. Both are "" when the ref cannot be keyed. A local
+// ref has one key: its unqualified String() form.
+func (s *ReviewedStore) keys(ref Ref) (qualified, legacy string) {
+	if ref.IsLocal() {
+		return ref.String(), ""
+	}
+	host, ok := s.storeHost(ref)
+	if !ok {
+		return "", ""
+	}
+	qualified = host + "/" + ref.String()
+	def := s.defaultHost
+	if def == "" {
+		def = defaultGitHubHost
+	}
+	if host == strings.ToLower(def) {
+		legacy = ref.String()
+	}
+	return qualified, legacy
+}
+
+// lookup returns the newest mark among a ref's qualified and legacy keys.
+func (s *ReviewedStore) lookup(ref Ref) (time.Time, bool) {
+	q, l := s.keys(ref)
+	var best time.Time
+	found := false
+	for _, k := range []string{q, l} {
+		if k == "" {
+			continue
+		}
+		if at, ok := s.at[k]; ok && (!found || at.After(best)) {
+			best, found = at, true
+		}
+	}
+	return best, found
 }
 
 // LoadReviewed reads the reviewed-state store at path. A missing, unreadable,
@@ -66,7 +138,18 @@ func LoadReviewed(path string, opts ...ReviewedOption) *ReviewedStore {
 }
 
 // Mark stamps ref as reviewed at the current clock and persists the store.
-func (s *ReviewedStore) Mark(ref Ref) error { return s.MarkKey(ref.String()) }
+// The mark is keyed by host; a legacy host-less entry for the same PR on the
+// default host is dropped in the same write.
+func (s *ReviewedStore) Mark(ref Ref) error {
+	q, l := s.keys(ref)
+	if q == "" {
+		return errors.New("pr: cannot mark reviewed: the PR's host failed validation")
+	}
+	if l != "" {
+		delete(s.at, l)
+	}
+	return s.MarkKey(q)
+}
 
 // MarkKey is Mark for a caller that keys entries by an arbitrary canonical
 // string (internal/review's host-qualified "host/owner/repo#N" keys) rather
@@ -84,7 +167,29 @@ func (s *ReviewedStore) MarkKey(key string) error {
 
 // Unmark clears ref's reviewed mark and persists. A ref that was never marked
 // is a no-op — no write fires.
-func (s *ReviewedStore) Unmark(ref Ref) error { return s.UnmarkKey(ref.String()) }
+// Both the qualified key and, on the default host, the legacy key are cleared.
+func (s *ReviewedStore) Unmark(ref Ref) error {
+	q, l := s.keys(ref)
+	if q == "" {
+		return nil
+	}
+	changed := false
+	for _, k := range []string{q, l} {
+		if _, ok := s.at[k]; k != "" && ok {
+			delete(s.at, k)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if err := s.persist(); err != nil {
+		slog.Error("Failed to unmark reviewed.", "key", q, "error", err)
+		return err
+	}
+	slog.Info("Successfully unmarked reviewed.", "key", q)
+	return nil
+}
 
 // UnmarkKey is Unmark for string-keyed callers (see MarkKey).
 func (s *ReviewedStore) UnmarkKey(key string) error {
@@ -107,7 +212,8 @@ func (s *ReviewedStore) UnmarkKey(key string) error {
 // updatedAt) makes a previously-marked PR read as unreviewed again — the
 // auto-un-dim falls out of this comparison, so there is no separate un-dim path.
 func (s *ReviewedStore) IsReviewed(ref Ref, latestActivity time.Time) bool {
-	return s.IsReviewedKey(ref.String(), latestActivity)
+	at, ok := s.lookup(ref)
+	return ok && !at.Before(latestActivity)
 }
 
 // IsReviewedKey is IsReviewed for string-keyed callers (see MarkKey) — the
@@ -125,19 +231,55 @@ func (s *ReviewedStore) IsReviewedKey(key string, latestActivity time.Time) bool
 // the CLI-layer "previously marked reviewed" note on an explicit `pr <ref>`
 // launch — a note only, never a skip.
 func (s *ReviewedStore) ReviewedAt(ref Ref) (time.Time, bool) {
-	at, ok := s.at[ref.String()]
-	return at, ok
+	return s.lookup(ref)
 }
 
 // Sync prunes any stored entry whose ref is not in openRefs and persists when
 // anything changed. It keeps the store from growing without bound as PRs close
 // and merge — `pr reviewed sync` feeds it the current open set.
 func (s *ReviewedStore) Sync(openRefs []Ref) error {
-	keys := make([]string, len(openRefs))
-	for i, r := range openRefs {
-		keys[i] = r.String()
+	open := make(map[string]bool, len(openRefs))
+	hosts := make(map[string]bool)
+	for _, r := range openRefs {
+		q, l := s.keys(r)
+		if q == "" {
+			continue
+		}
+		open[q] = true
+		if l != "" {
+			open[l] = true
+		}
+		if !r.IsLocal() {
+			host, _ := s.storeHost(r)
+			hosts[host] = true
+		}
 	}
-	return s.SyncKeys(keys)
+	changed := false
+	for key := range s.at {
+		if open[key] {
+			continue
+		}
+		// A qualified key is only prunable when its host had refs in this
+		// run's open set: a host absent from it was not queried, which is not
+		// the same as everything on it closing. A legacy key is the default
+		// host's, and the open set is always that host's.
+		if host, _, ok := strings.Cut(key, "/"); ok && isQualifiedKey(key) && !hosts[host] {
+			continue
+		}
+		delete(s.at, key)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return s.persist()
+}
+
+// isQualifiedKey reports whether key has the "host/owner/repo#N" shape (two
+// slashes before the '#') rather than the legacy "owner/repo#N".
+func isQualifiedKey(key string) bool {
+	head, _, _ := strings.Cut(key, "#")
+	return strings.Count(head, "/") >= 2
 }
 
 // SyncKeys is Sync for string-keyed callers (see MarkKey).

@@ -403,6 +403,16 @@ func TestSensitiveCommand_ValidateRefusesBeforeStart(t *testing.T) {
 		"stdout cap over ceil": func(c *SensitiveCommand) { c.StdoutCap = MaxOutputBytes + 1 },
 		"zero stderr cap":      func(c *SensitiveCommand) { c.StderrCap = 0 },
 		"stderr cap over ceil": func(c *SensitiveCommand) { c.StderrCap = MaxOutputBytes + 1 },
+		// TMPDIR belongs to the sops edit alone, and only as an absolute path.
+		"sops tmpdir on another kind": func(c *SensitiveCommand) { c.Env = []EnvMutation{ReplaceSopsTmpdir("/work/dir")} },
+		"sops tmpdir relative": func(c *SensitiveCommand) {
+			c.Kind = KindSopsEdit
+			c.Env = []EnvMutation{ReplaceSopsTmpdir("work/dir")}
+		},
+		"sops tmpdir on the extract": func(c *SensitiveCommand) {
+			c.Kind = KindSopsExtract
+			c.Env = []EnvMutation{ReplaceSopsTmpdir("/work/dir")}
+		},
 	}
 
 	runner := NewOSSensitiveRunner()
@@ -436,6 +446,15 @@ func TestSensitiveCommand_ValidateRefusesBeforeStart(t *testing.T) {
 	escaped.Args = []Arg{MustFixed("send-keys"), EndOfOptions(), Opaque("-rf")}
 	if err := escaped.validate(); err != nil {
 		t.Errorf("an end-of-options separator did not release the dash refusal: %v", err)
+	}
+
+	// The same mutation on the one call it exists for, with an absolute path,
+	// is accepted.
+	edit := base()
+	edit.Kind = KindSopsEdit
+	edit.Env = []EnvMutation{ReplaceSopsTmpdir("/work/dir")}
+	if err := edit.validate(); err != nil {
+		t.Errorf("an absolute TMPDIR on the sops edit was refused: %v", err)
 	}
 
 	// A cap at the ceiling, and one narrower than it, are both legitimate.

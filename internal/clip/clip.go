@@ -119,6 +119,10 @@ func (c *Client) Paste(ctx context.Context) (string, error) {
 	slog.Debug("Preparing to paste from clipboard.")
 	out, err := c.run.Run(ctx, "pbpaste")
 	if err != nil {
+		// pbpaste's stdout is the clipboard, and a failing Runner call keeps
+		// it on CommandError.Output (#664); the clipboard may hold a secret
+		// (forgectl env set --clipboard), so it never rides the error.
+		err = exec.WithoutOutput(err)
 		slog.Error("Failed to paste from clipboard.", "error", err)
 		return "", err
 	}

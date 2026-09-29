@@ -81,7 +81,7 @@ func TestNewIndex_FileArg_NonMarkdown_Errors(t *testing.T) {
 func TestNewIndex_FileArg_ScansHeadingsAndLinks(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "note.md")
-	writeFile(t, target, "# Note\n\n## A Heading\n\nSee [[other]] and [text](../elsewhere.md).\n")
+	writeFile(t, target, "# Note\n\n## A Heading\n\nSee [other](other.md) and [text](../elsewhere.md).\n")
 
 	idx, err := NewIndex([]string{target})
 	if err != nil {

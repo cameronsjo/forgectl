@@ -91,7 +91,7 @@ func TestCleanup_MixedStatesContinuesAndReportsFirstError(t *testing.T) {
 
 	// An invalid record is skipped by List, so the sweep never selects it and
 	// returns no error for it — it is left visible rather than deleted blind.
-	err := c.Cleanup(context.Background(), "2026-07-08")
+	_, err := c.Cleanup(context.Background(), "2026-07-08")
 	if !errors.Is(err, errFirst) {
 		t.Fatalf("Cleanup must report the FIRST failure, got %v", err)
 	}
@@ -133,7 +133,7 @@ func TestCleanup_AllSucceedingCandidatesAreRemoved(t *testing.T) {
 	livePath, liveWS := seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 1}, day)
 	stalePath, _ := seedStaleSession(t, c, Ref{Owner: "o", Repo: "r", Number: 2}, day)
 
-	if err := c.Cleanup(context.Background(), "2026-07-08"); err != nil {
+	if _, err := c.Cleanup(context.Background(), "2026-07-08"); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	for name, path := range map[string]string{"live": livePath, "stale": stalePath} {
@@ -158,7 +158,7 @@ func TestCleanup_SelectsStaleBreadcrumbs(t *testing.T) {
 	stale, _ := seedStaleSession(t, c, Ref{Owner: "o", Repo: "r", Number: 1}, day)
 	keep, _ := seedStaleSession(t, c, Ref{Owner: "o", Repo: "r", Number: 2}, other)
 
-	if err := c.Cleanup(context.Background(), "2026-07-08"); err != nil {
+	if _, err := c.Cleanup(context.Background(), "2026-07-08"); err != nil {
 		t.Fatalf("Cleanup with a stale breadcrumb: %v", err)
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {

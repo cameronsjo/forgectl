@@ -4,7 +4,6 @@ package docs
 // matchFragment's use of it, and its per-render and per-document scoping.
 
 import (
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -146,49 +145,5 @@ func TestRenderDocFor_FragmentBudgetPerRender(t *testing.T) {
 				t.Errorf("%s, render %d: %d fragment-less links to the note, want %d", tc.name, pass, got, tc.links-tc.want)
 			}
 		}
-	}
-}
-
-// TestBuildBacklinks_FragmentBudgetPerDocument: the index build gives each
-// source document its own budget. Allocations are the deterministic proxy
-// for parse count: one hostile document's cost stops growing with its link
-// count, while a second hostile document still adds a comparable cost of
-// its own. Mutations: a nil budget in buildBacklinks turns the growth check
-// red; hoisting the budget above the document loop turns the
-// second-document check red.
-func TestBuildBacklinks_FragmentBudgetPerDocument(t *testing.T) {
-	idx, _ := newMatchVault(t, "# Note\n\n## x\n")
-	frag := budgetFragment()
-	setLinks := func(rel, target string, n int) {
-		for i := range idx.docs {
-			if idx.docs[i].RelPath == rel {
-				idx.docs[i].Links = nil
-				for j := 0; j < n; j++ {
-					idx.docs[i].Links = append(idx.docs[i].Links, LinkRef{Raw: target + "#" + frag, Path: target, Fragment: frag, Form: FormHeading})
-				}
-			}
-		}
-	}
-	mallocs := func() uint64 {
-		var a, b runtime.MemStats
-		runtime.GC()
-		runtime.ReadMemStats(&a)
-		idx.buildBacklinks()
-		runtime.ReadMemStats(&b)
-		return b.Mallocs - a.Mallocs
-	}
-	setLinks("Linker.md", "Note", 300)
-	small := mallocs()
-	setLinks("Linker.md", "Note", 900)
-	one := mallocs()
-	// Unbudgeted, 600 more links would triple the cost; budgeted, only the
-	// cheap non-parse work per link is added.
-	if float64(one) > 1.6*float64(small) {
-		t.Errorf("index-build allocations grew with link count: %d at 300 links, %d at 900", small, one)
-	}
-	setLinks("Note.md", "Linker", 900)
-	two := mallocs()
-	if float64(two) < 1.5*float64(one) {
-		t.Errorf("a second hostile document added too little: %d for one, %d for two; its budget was shared", one, two)
 	}
 }

@@ -17,12 +17,12 @@ import (
 
 // newDocsCheckCmd builds `forgectl docs check [dir|file ...]` — reports broken
 // links, broken anchors, ambiguous links, orphan pages, and deprecated or
-// stale docs (OKF status / stale_after frontmatter) across the docs-kind
-// roots, without binding a server.
+// stale docs (OKF status / stale_after frontmatter) across every
+// root (vault roots by the reader's vault rules, links only), without binding a server.
 //
 // Exit contract: 0 clean, or only info findings; 1 error-severity findings (the
 // report is complete on stdout); 2 the check could not run (bad root, deadline,
-// no docs-kind root, bad flag) under the shared docsFail contract, or could not
+// bad flag) under the shared docsFail contract, or could not
 // vouch for the tree: the index walk skipped an unreadable path, so docs inside
 // it went unchecked and links into it read as broken. The skipped paths are
 // listed (human output) or in report.skipped (--json).
@@ -32,7 +32,7 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "check [dir|file ...]",
-		Short: "Report broken links, orphan pages, and deprecated or stale docs in docs roots",
+		Short: "Report broken links, orphan pages, and deprecated or stale docs",
 		Args:  cobra.ArbitraryArgs,
 		// Silenced for the same reason docs list is: a failure under --json
 		// has already written its one JSON object to stderr.
@@ -67,24 +67,6 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 			}
 
 			report := idx.Check()
-
-			checked := 0
-			for _, r := range report.Roots {
-				if r.Checked {
-					checked++
-					continue
-				}
-				// Under --json stderr is reserved for the one error object
-				// (#649, #672); the skip is visible in roots[].skipped.
-				if asJSON {
-					continue
-				}
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "skipping vault root %s: %s\n",
-					termsafe.SafeLine(r.Label), termsafe.SafeLine(r.Skipped))
-			}
-			if checked == 0 {
-				return fail("", errors.New("docs check: no docs-kind root to check (vault roots are skipped)"))
-			}
 
 			if asJSON {
 				enc := termsafe.JSONEncoder(cmd.OutOrStdout())

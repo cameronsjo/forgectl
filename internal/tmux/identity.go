@@ -180,6 +180,11 @@ var (
 	// exactly. It is deliberately NOT satisfied by a prefix or glob sibling:
 	// that fallback is forgectl#237.
 	ErrSessionNotFound = errors.New("no tmux session with that exact name")
+	// ErrAmbiguousWindow reports that more than one window in a session carries
+	// the requested name exactly. tmux permits duplicate window names inside a
+	// session, so picking the first would act on a window chosen by listing
+	// order rather than by identity.
+	ErrAmbiguousWindow = errors.New("more than one tmux window with that exact name")
 	// ErrNoServer reports that no tmux server is running on the socket THIS
 	// client selects — the default one derived from the environment, or the
 	// pinned one when the client carries a socket. It is the one classification
