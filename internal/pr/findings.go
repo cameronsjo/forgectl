@@ -98,16 +98,27 @@ func findingsRemovalCandidate(findingsDir, full string, isDir bool, modTime, cut
 // exactly, so on a case-insensitive volume a differently-cased spelling is
 // likewise refused rather than accepted.
 //
+// An empty findingsDir is refused outright (forgectl#575): New leaves it empty
+// when config.PrFindingsDir fails, and filepath.Clean("") is ".", which would
+// make every bare "forgectl-findings-*" name a child of the process cwd. The
+// base name must also be strictly longer than the prefix, because
+// os.MkdirTemp always appends a random suffix, so a dir named exactly
+// findingsDirPrefix is not one PrepareLocal made.
+//
 // The clean == root test is belt and braces: filepath.Dir(clean) == root
 // already excludes the store everywhere but the filesystem root, and the
 // root's base name never carries the prefix.
 func isFindingsStoreChild(findingsDir, full string) bool {
+	if findingsDir == "" {
+		return false
+	}
 	root := filepath.Clean(findingsDir)
 	clean := filepath.Clean(full)
 	if clean == root || filepath.Dir(clean) != root {
 		return false
 	}
-	return strings.HasPrefix(filepath.Base(clean), findingsDirPrefix)
+	base := filepath.Base(clean)
+	return len(base) > len(findingsDirPrefix) && strings.HasPrefix(base, findingsDirPrefix)
 }
 
 // FindingsCleanup reports findings directories older than olderThan. With
@@ -175,18 +186,22 @@ func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, a
 // rather than silently re-scanned into a different set. A skip writes no row,
 // because nothing happened.
 //
+// Each returned path is the cleaned spelling that was actually removed, the
+// same string the audit row records as RecordPath — not the caller's spelling,
+// which may carry a trailing slash or dot segments.
+//
 // The first error stops the run and returns the paths removed so far: a busy
 // lock, a cancelled ctx, an intent row that could not be written (the removal
 // is refused and the dir is left in place), or a failed removal.
 func (c *Client) FindingsRemove(ctx context.Context, paths []string) ([]string, error) {
 	var removed []string
 	for _, full := range paths {
-		ok, err := c.removeFindingsDirAudited(ctx, full)
+		got, err := c.removeFindingsDirAudited(ctx, full)
 		if err != nil {
 			return removed, err
 		}
-		if ok {
-			removed = append(removed, full)
+		if got != "" {
+			removed = append(removed, got)
 		}
 	}
 	return removed, nil
@@ -194,15 +209,15 @@ func (c *Client) FindingsRemove(ctx context.Context, paths []string) ([]string, 
 
 // removeFindingsDirAudited is FindingsRemove's per-path body: one lock hold
 // covering the re-checks, the intent row, the removal, and the completion row,
-// in that order. It reports whether the dir was removed; a skipped path is
-// (false, nil).
+// in that order. It returns the cleaned path it removed (the audit row's
+// RecordPath); a skipped path is ("", nil).
 //
 // The row mirrors teardownRowFor's shape for a subject that is not a session
 // record: RecordPath names the findings dir and Detail its size, while Ref,
 // Mode, FromPhase, and Workspace stay empty — filling any of them would make
 // the trail claim a session was involved.
-func (c *Client) removeFindingsDirAudited(ctx context.Context, full string) (bool, error) {
-	removed := false
+func (c *Client) removeFindingsDirAudited(ctx context.Context, full string) (string, error) {
+	removed := ""
 	err := c.withLifecycleLock(ctx, auditVerbFindingsCleanup, func() error {
 		if !isFindingsStoreChild(c.findingsDir, full) {
 			slog.Warn("Skipping findings removal target that is not a findings dir directly under the store.", "path", full)
@@ -241,11 +256,11 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, full string) (boo
 			return fmt.Errorf("remove findings dir %s: %w", full, rerr)
 		}
 		slog.Info("Reclaimed findings dir.", "path", full)
-		removed = true
+		removed = full
 		return nil
 	})
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	return removed, nil
 }

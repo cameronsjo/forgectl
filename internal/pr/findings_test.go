@@ -51,11 +51,18 @@ package pr
 //       its in-store target both survive, no row
 //   [x] A store reached through a symlink still reclaims its own children
 //       (the shape check compares the configured spelling, not the resolved one)
+//   [x] An empty store (WithFindingsDir("")) never removes a cwd-relative
+//       findings dir, and writes no row (#575)
+//   [x] The returned path is the cleaned spelling removed, equal to the audit
+//       row's RecordPath, even when the caller passed a trailing slash (#575)
 //
 // isFindingsStoreChild (Classification: pure lexical shape check, #558)
 //   [x] Accepts only a prefixed direct child; refuses the store, trailing
 //       slash and dot spellings of it, deeper nesting, a ".." climb to a
-//       sibling, an unprefixed name, and a differently-cased prefix
+//       sibling, an unprefixed name, a differently-cased prefix, and a name
+//       that is the bare prefix with no MkdirTemp suffix (#575)
+//   [x] Refuses everything under an empty store, which would otherwise clean
+//       to "." and adopt the cwd (#575)
 //
 // FindingsCleanup preview
 //   [x] An unprefixed dir in the store is never offered as a candidate, so
@@ -617,7 +624,7 @@ func TestIsFindingsStoreChild(t *testing.T) {
 		{"sibling of the store", sibling, false},
 		{"unprefixed child", filepath.Join(store, "notes"), false},
 		{"differently cased prefix", filepath.Join(store, strings.ToUpper(findingsDirPrefix)+"abc"), false},
-		{"bare prefix only", filepath.Join(store, findingsDirPrefix), true},
+		{"bare prefix only", filepath.Join(store, findingsDirPrefix), false},
 	}
 	// Filesystem root as the store, the one spelling where filepath.Dir(x) ==
 	// x. The root's base name never carries the prefix, so the prefix check
@@ -631,6 +638,93 @@ func TestIsFindingsStoreChild(t *testing.T) {
 		}
 		if got := isFindingsStoreChild(store+sep, tc.full); got != tc.want {
 			t.Errorf("%s: with a trailing-slash store, isFindingsStoreChild(%q) = %v, want %v", tc.name, tc.full, got, tc.want)
+		}
+	}
+}
+
+// TestIsFindingsStoreChild_EmptyStoreRefused pins the empty-store refusal at
+// the predicate: filepath.Clean("") is ".", so without it a bare prefixed name
+// reads as a direct child of the cwd.
+func TestIsFindingsStoreChild_EmptyStoreRefused(t *testing.T) {
+	for _, full := range []string{
+		findingsDirPrefix + "x",
+		"." + string(filepath.Separator) + findingsDirPrefix + "x",
+	} {
+		if isFindingsStoreChild("", full) {
+			t.Errorf("isFindingsStoreChild(%q, %q) = true, want an empty store refused", "", full)
+		}
+	}
+}
+
+// TestFindingsRemove_EmptyStoreNeverTouchesCwd replays the #575 probe: New
+// leaves findingsDir empty when config.PrFindingsDir fails, and before the
+// refusal FindingsRemove took an empty store to mean the cwd and removed
+// ./forgectl-findings-cwd. Not parallel: t.Chdir changes process state.
+func TestFindingsRemove_EmptyStoreNeverTouchesCwd(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	name := findingsDirPrefix + "cwd"
+	victim := filepath.Join(cwd, name)
+	if err := os.Mkdir(victim, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(victim, "findings.md"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := findingsClient(t, "")
+
+	removed, err := c.FindingsRemove(t.Context(), []string{name, "." + string(filepath.Separator) + name})
+	if err != nil {
+		t.Fatalf("FindingsRemove: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("FindingsRemove removed %v, want nothing under an empty store", removed)
+	}
+	if _, err := os.Stat(filepath.Join(victim, "findings.md")); err != nil {
+		t.Errorf("cwd-relative %q lost its contents, want it untouched: %v", victim, err)
+	}
+	if rows := auditRows(t, c); len(rows) != 0 {
+		t.Errorf("audit rows = %+v, want none for a refused path", rows)
+	}
+
+	got, err := c.FindingsCleanup(t.Context(), 0, true)
+	if err != nil {
+		t.Fatalf("FindingsCleanup: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("FindingsCleanup under an empty store = %v, want nothing", got)
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("cwd-relative %q was removed by cleanup: %v", victim, err)
+	}
+}
+
+// TestFindingsRemove_ReturnsCleanedPath pins that the returned path is the one
+// the audit row names: a caller passing a trailing slash gets back the cleaned
+// spelling that was actually removed, not its own.
+func TestFindingsRemove_ReturnsCleanedPath(t *testing.T) {
+	store := t.TempDir()
+	c := findingsClient(t, store)
+	want := filepath.Join(store, findingsDirPrefix+"x")
+	mustMkdir(t, want)
+
+	removed, err := c.FindingsRemove(t.Context(), []string{want + string(filepath.Separator)})
+	if err != nil {
+		t.Fatalf("FindingsRemove: %v", err)
+	}
+	if len(removed) != 1 || removed[0] != want {
+		t.Fatalf("FindingsRemove returned %q, want [%q]", removed, want)
+	}
+	if _, err := os.Stat(want); !os.IsNotExist(err) {
+		t.Errorf("%q survived (err=%v), want it removed", want, err)
+	}
+	rows := auditRows(t, c)
+	if len(rows) == 0 {
+		t.Fatal("no audit rows, want an intent/completion pair")
+	}
+	for _, r := range rows {
+		if r.RecordPath != removed[0] {
+			t.Errorf("audit row RecordPath = %q, want it to match the returned %q", r.RecordPath, removed[0])
 		}
 	}
 }
