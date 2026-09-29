@@ -24,6 +24,7 @@ package env
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -280,7 +281,7 @@ func TestConcurrentSetsNeverRefuseEachOther(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := range 25 {
-				key := "K" + string(rune('A'+i)) + string(rune('A'+j%26))
+				key := fmt.Sprintf("K%d_%d", i, j)
 				if _, err := (&Client{}).SetValue(tg, key, "v"); err != nil {
 					errs <- err
 					return

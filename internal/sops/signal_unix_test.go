@@ -27,6 +27,7 @@ package sops
 import (
 	"bufio"
 	"context"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -470,11 +471,16 @@ func TestLateSignalKeepsBackupAndNextSetRefuses(t *testing.T) {
 // assertNoPlaintextUnder fails if any regular file under root holds secret.
 func assertNoPlaintextUnder(t *testing.T, root, secret string) {
 	t.Helper()
-	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+	err = fs.WalkDir(r.FS(), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || !d.Type().IsRegular() {
 			return err
 		}
-		data, err := os.ReadFile(filepath.Clean(p))
+		data, err := r.ReadFile(p)
 		if err != nil {
 			return err
 		}
