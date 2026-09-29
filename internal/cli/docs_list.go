@@ -18,7 +18,8 @@ import (
 // telling the operator which root it's still walking — long enough that a
 // normal, fast index never prints it, short enough that a hung or
 // cloud-backed root doesn't read as the command having stalled silently.
-const docsListProgressDelay = 2 * time.Second
+// A var so tests can shrink it to force the progress path.
+var docsListProgressDelay = 2 * time.Second
 
 // newDocsListCmd builds `forgectl docs list [dir|file ...]` — lists the
 // indexed doc set without binding a server.
@@ -77,6 +78,12 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 					return
 				}
 				printed = true
+				// Under --json stderr is reserved for the one error object
+				// (#649, #672): a slow walk that then hits its deadline would
+				// otherwise put this text line ahead of it.
+				if asJSON {
+					return
+				}
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "indexing %s …\n", termsafe.SafeLine(progressRoot))
 			})
 			defer timer.Stop()

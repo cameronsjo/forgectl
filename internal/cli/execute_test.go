@@ -332,6 +332,8 @@ func TestLeadsWithPath(t *testing.T) {
 		{name: "leading dotfile", msg: ".env not found", want: true},
 		{name: "leading absolute path", msg: "/etc/passwd is unreadable", want: true},
 		{name: "leading relative path", msg: "config/local.toml not found", want: true},
+		{name: "leading long flag", msg: "--limit must be at least 1, not 0", want: true},
+		{name: "leading short flag", msg: "-n must be positive", want: true},
 		{name: "prose with a path later", msg: "example file .env.example not found", want: false},
 		{name: "ordinary prose", msg: "plain failure", want: false},
 		{name: "empty", msg: "", want: false},
@@ -372,6 +374,39 @@ func TestFangErrorSinkKeepsPathCaseForLeadingPathErrors(t *testing.T) {
 	}
 	if strings.Contains(out, ".Env") {
 		t.Errorf("path-leading error was title-cased: %q", out)
+	}
+}
+
+// TestFangErrorSinkKeepsFlagCaseForLeadingFlagErrors is the flag-token twin
+// (forgectl#670): "--limit must be ..." must not become "--Limit", and an
+// ordinary message must still be capitalised.
+func TestFangErrorSinkKeepsFlagCaseForLeadingFlagErrors(t *testing.T) {
+	for _, tt := range []struct {
+		msg, want, notWant string
+	}{
+		{"--limit must be at least 1, not 0", "--limit must be at least 1, not 0.", "--Limit"},
+		{"plain failure", "Plain failure.", ""},
+	} {
+		root := &cobra.Command{
+			Use:          "forgectl",
+			SilenceUsage: true,
+			RunE:         func(*cobra.Command, []string) error { return errors.New(tt.msg) },
+		}
+		var stderr bytes.Buffer
+		root.SetOut(new(bytes.Buffer))
+		root.SetErr(&stderr)
+		root.SetArgs(nil)
+
+		if err := fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef", theme.Default())...); err == nil {
+			t.Fatal("expected the command to fail")
+		}
+		out := stderr.String()
+		if !strings.Contains(out, tt.want) {
+			t.Errorf("message %q rendered as %q, want it to contain %q", tt.msg, out, tt.want)
+		}
+		if tt.notWant != "" && strings.Contains(out, tt.notWant) {
+			t.Errorf("message %q was title-cased: %q", tt.msg, out)
+		}
 	}
 }
 

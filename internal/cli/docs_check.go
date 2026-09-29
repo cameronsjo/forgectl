@@ -74,6 +74,11 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 					checked++
 					continue
 				}
+				// Under --json stderr is reserved for the one error object
+				// (#649, #672); the skip is visible in roots[].skipped.
+				if asJSON {
+					continue
+				}
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "skipping vault root %s: %s\n",
 					termsafe.SafeLine(r.Label), termsafe.SafeLine(r.Skipped))
 			}
@@ -136,7 +141,7 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 				}
 				return WithExitCode(errors.New(msg), 1)
 			}
-			if info > 0 {
+			if info > 0 && !asJSON {
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "docs check: %d informational finding(s), no errors\n", info)
 			}
 			return nil

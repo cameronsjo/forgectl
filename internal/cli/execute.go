@@ -343,18 +343,20 @@ func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
 }
 
 // leadsWithPath reports whether msg's first word looks like a filesystem
-// path — one fang's ErrorText style would title-case via its
+// path or a flag token ("--limit", "-n") — one fang's ErrorText style would title-case via its
 // titleFirstWord transform, corrupting exactly the byte-identical spelling
 // a caller typed or compares against (env_test.go's --json path field,
 // this file's own path-preserving tests). Both error surfaces
 // (termsafeErrorHandler and renderStructuredTerminalError) route a
 // path-leading message through UnsetTransform() instead of fang's default.
+// A flag token needs the same treatment: title-casing "--limit must be at
+// least 1" yields "--Limit", a flag that does not exist (forgectl#670).
 func leadsWithPath(msg string) bool {
 	first, _, _ := strings.Cut(msg, " ")
 	if first == "" {
 		return false
 	}
-	return strings.Contains(first, "/") || strings.HasPrefix(first, ".")
+	return strings.Contains(first, "/") || strings.HasPrefix(first, ".") || strings.HasPrefix(first, "-")
 }
 
 // renderPathLeadingError mirrors fang.DefaultErrorHandler (help.go) except
