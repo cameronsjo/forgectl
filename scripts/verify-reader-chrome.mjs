@@ -4,10 +4,15 @@
 // reader's scripts or shell template and say so in the PR.
 //
 // A doc can carry any class, and the sanitizer keeps some chrome tags
-// (<aside>, <details>). This serves one hostile doc that plants a copy of
-// every chrome class the scripts once looked up, and checks that the real
-// chrome still does its job:
+// (<aside>, <details>). Mermaid renders in the browser after the sanitizer,
+// and its own DOMPurify keeps data-*, so a diagram label can carry a data-fc
+// hook until mermaid-init.js scrubs it. This serves one hostile doc that
+// plants a copy of every chrome class the scripts once looked up, plus
+// data-fc hooks in a classDiagram label and in an htmlLabels flowchart, and
+// checks that the real chrome still does its job:
 //
+//   - no data-fc hook survives inside the doc body once mermaid has rendered,
+//     on first load and again after a live-reload swap re-renders it;
 //   - the sidebar filter folds and hides only the sidenav, never the doc's
 //     planted <div class="sidenav"> with its <details> and group heading;
 //   - a live-reload swap updates the real outline pane and status bar, not
@@ -16,6 +21,10 @@
 //   - the nav toggle drives the real shell;
 //   - the copy handler still cleans a selection inside a planted
 //     <div class="doc-body">;
+//   - a live-reload swap keeps focus on a doc link that mimics a sidenav
+//     link's href and class, rather than moving it to the sidenav;
+//   - a swap that adds text above a heading slugged "doc-filter" (a chrome
+//     id) keeps that heading where the reader had it;
 //   - deleting the doc puts the missing banner in the real doc body.
 //
 // Usage: node scripts/verify-reader-chrome.mjs [path/to/forgectl]
@@ -77,8 +86,41 @@ const planted = [
   '<div class="doc-body"><p>PLANTED-BODY copy me</p></div>',
 ].join('\n\n');
 
-function hostile(extra) {
-  return `# Hostile\n\n## First\n\n${planted}\n\n## Second\n\nsome words here.\n${extra}`;
+// Rendered by mermaid, which keeps data-* in labels. The flowchart turns on
+// htmlLabels with a doc-level init directive, which the reader's own config
+// sets false.
+const mermaidPlants = [
+  '```mermaid\nclassDiagram\nclass Foo["<i data-fc=\'outline\'>MER-CLASS</i>"]\n```',
+  '```mermaid\n%%{init: {"flowchart": {"htmlLabels": true}}}%%\nflowchart LR\n' +
+    '  A["<details open data-fc=\'sidenav\'><summary>MER-DETAILS</summary>x</details>' +
+    '<span data-fc=\'outline\'>MER-OUTLINE</span><span data-fc=\'statusbar\'>s</span>' +
+    '<span data-fc=\'live-status\'>l</span><span data-fc=\'doc-missing\'>m</span>"]\n```',
+].join('\n\n');
+
+// Enough prose that the doc pane scrolls, with a heading whose slug is the
+// id of the chrome filter box.
+const filler = Array.from({ length: 40 }, (_, i) => `Paragraph ${i} of filler text for scrolling.`).join('\n\n');
+
+function hostile({ above = '', extra = '', mimic = '' } = {}) {
+  return `# Hostile\n\n${above}\n\n## First\n\n${planted}\n\n${mermaidPlants}\n\n${mimic}\n\n` +
+    `## Second\n\nsome words here.\n\n${filler}\n\n## Doc filter\n\n${filler}\n${extra}`;
+}
+
+// Waits until every diagram in the doc body has rendered to SVG.
+async function mermaidRendered(page) {
+  await page.waitForFunction(() => {
+    const pres = document.querySelectorAll('[data-fc="doc-body"] pre.mermaid');
+    return pres.length === 2 && [...pres].every((p) => p.querySelector('svg'));
+  }, null, { timeout: 20000 });
+  // One more task, so an async scrub would have run too.
+  await page.waitForTimeout(100);
+}
+
+async function noForgedHooks(page, when) {
+  const forged = await page.evaluate(() =>
+    [...document.querySelector('[data-fc="doc-body"]').querySelectorAll('[data-fc]')]
+      .map((el) => `${el.localName}[data-fc=${el.getAttribute('data-fc')}]`));
+  if (forged.length > 0) problems.push(`${when}: forged hooks inside the doc body: ${forged.join(', ')}`);
 }
 
 const bin = process.argv[2] || (() => {
@@ -91,7 +133,7 @@ const root = join(scratch, 'docs');
 mkdirSync(root, { recursive: true });
 writeFileSync(join(root, 'README.md'), '# Readme\n');
 const docPath = join(root, 'hostile.md');
-writeFileSync(docPath, hostile(''));
+writeFileSync(docPath, hostile());
 
 const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
@@ -117,13 +159,27 @@ try {
   ].filter((s) => document.querySelector('[data-fc="doc-body"]').querySelector(s)).length);
   if (plantedCount !== 4) problems.push(`fixture: ${plantedCount}/4 planted elements survived; the checks below prove nothing`);
 
+  await mermaidRendered(page);
+  // Fixture sanity: the labels rendered as markup, not as escaped text.
+  const labels = await page.evaluate(() => {
+    const body = document.querySelector('[data-fc="doc-body"]');
+    return {
+      cls: [...body.querySelectorAll('pre.mermaid i')].some((i) => i.textContent === 'MER-CLASS'),
+      det: [...body.querySelectorAll('pre.mermaid details')].some((d) => d.textContent.includes('MER-DETAILS')),
+    };
+  });
+  if (!labels.cls || !labels.det) problems.push(`fixture: mermaid labels did not render as markup ${JSON.stringify(labels)}; the hook checks prove nothing`);
+  await noForgedHooks(page, 'first render');
+
   // Sidebar filter: a query that matches no doc.
   await page.fill('[data-fc="doc-filter"]', 'zzz-no-such-doc');
   const filter = await page.evaluate(() => {
     const body = document.querySelector('[data-fc="doc-body"]');
     const det = [...body.querySelectorAll('details')].find((d) => d.textContent.includes('PLANTED-DETAILS'));
     const grp = [...body.querySelectorAll('.sidenav__group')].find((g) => g.textContent.includes('PLANTED-GROUP'));
+    const mer = [...body.querySelectorAll('pre.mermaid details')].find((d) => d.textContent.includes('MER-DETAILS'));
     return {
+      merOpen: mer ? mer.open : null,
       detOpen: det.open,
       detShown: getComputedStyle(det).display !== 'none',
       detMarked: det.dataset.openAtRest !== undefined,
@@ -132,6 +188,7 @@ try {
     };
   });
   if (!filter.detOpen || !filter.detShown || filter.detMarked) problems.push(`filter: reached the doc's planted <details> ${JSON.stringify(filter)}`);
+  if (filter.merOpen === false) problems.push('filter: folded a <details> inside a mermaid label');
   if (!filter.grpShown) problems.push('filter: hid the doc\'s planted .sidenav__group');
   if (!filter.empty) problems.push('filter: the real "no docs match" note did not show');
   await page.fill('[data-fc="doc-filter"]', '');
@@ -158,10 +215,17 @@ try {
   if (!copied.handled || !copied.text.includes('PLANTED-BODY')) problems.push(`copy: ${JSON.stringify(copied)}`);
 
   // Live reload: add a heading and some words; the swap must update the real
-  // outline and status bar, in place.
+  // outline and status bar, in place. The edit also adds a doc link that
+  // copies the first sidenav link's href and class, for the focus probe.
   await page.evaluate(() => { window.__noFullReload = true; });
   const wordsBefore = await page.textContent('[data-fc="statusbar"]');
-  writeFileSync(docPath, hostile('\n## Added Heading\n\nmany more words to change the count here now.\n'));
+  const side = await page.evaluate(() => {
+    const a = document.querySelector('[data-fc="sidenav"] a[href]');
+    return { href: a.getAttribute('href'), cls: a.className };
+  });
+  const mimic = `<a href="${side.href}"${side.cls ? ` class="${side.cls}"` : ''}>MIMIC-LINK</a>`;
+  const added = '\n## Added Heading\n\nmany more words to change the count here now.\n';
+  writeFileSync(docPath, hostile({ extra: added, mimic }));
   try {
     await page.waitForFunction(
       () => document.querySelector('[data-fc="doc-body"]').textContent.includes('Added Heading'),
@@ -180,6 +244,49 @@ try {
   if (!swapped.outline) problems.push('live reload: the real outline pane is stale (the swap went to the planted aside)');
   if (!swapped.plantedIntact) problems.push('live reload: the planted aside was replaced by chrome');
   if (swapped.status === wordsBefore) problems.push('live reload: the status bar did not update');
+  await mermaidRendered(page);
+  await noForgedHooks(page, 'after a swap');
+
+  // Focus and reading position across a swap. Focus the mimic link, put the
+  // "Doc filter" heading 10px above the top of the pane, then add text
+  // ABOVE it, so only a heading-anchored restore keeps it in place.
+  const pos = await page.evaluate(() => {
+    const link = [...document.querySelectorAll('[data-fc="doc-body"] a')].find((a) => a.textContent === 'MIMIC-LINK');
+    if (!link) return null;
+    link.focus({ preventScroll: true });
+    const main = document.querySelector('[data-fc="doc-main"]');
+    const h = main.querySelector('#doc-filter');
+    if (!h) return { noHeading: true };
+    main.scrollTop += h.getBoundingClientRect().top - main.getBoundingClientRect().top + 10;
+    return { delta: main.getBoundingClientRect().top - h.getBoundingClientRect().top };
+  });
+  if (pos === null) {
+    problems.push('focus probe: the mimic link is not in the doc');
+  } else if (pos.noHeading) {
+    problems.push('scroll probe: no heading with id doc-filter in the doc; the probe proves nothing');
+  } else {
+    const above = Array.from({ length: 20 }, (_, i) => `Inserted paragraph ${i} above everything.`).join('\n\n');
+    writeFileSync(docPath, hostile({ above, extra: added, mimic }));
+    try {
+      await page.waitForFunction(
+        () => document.querySelector('[data-fc="doc-body"]').textContent.includes('Inserted paragraph 19'),
+        null, { timeout: 15000 });
+    } catch {
+      problems.push('live reload: the doc body never picked up the second edit');
+    }
+    const after2 = await page.evaluate(() => {
+      const main = document.querySelector('[data-fc="doc-main"]');
+      const h = main.querySelector('#doc-filter');
+      const f = document.activeElement;
+      return {
+        delta: main.getBoundingClientRect().top - h.getBoundingClientRect().top,
+        focusInDoc: !!f && !!f.closest('[data-fc="doc-body"]'),
+        focusText: f ? f.textContent : null,
+      };
+    });
+    if (!after2.focusInDoc || after2.focusText !== 'MIMIC-LINK') problems.push(`focus: a swap moved focus off the doc link to ${JSON.stringify(after2.focusText)}`);
+    if (Math.abs(after2.delta - pos.delta) > 2) problems.push(`scroll: the "Doc filter" heading moved ${after2.delta - pos.delta}px across a swap (anchor restore used the chrome id)`);
+  }
 
   // Deleting the doc puts the banner in the real doc body.
   unlinkSync(docPath);

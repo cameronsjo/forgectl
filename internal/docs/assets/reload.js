@@ -34,8 +34,10 @@
   // Chrome is found by data-fc, never by class or tag (forgectl#643). The
   // sanitizer lets a doc carry any class and some of these tags (a raw
   // <aside class="outline"> survives it), and a planted copy that comes first
-  // in document order would be the one a lookup returns. It strips every
-  // data-* attribute, so a doc cannot carry a data-fc.
+  // in document order would be the one a lookup returns. A data-fc cannot be
+  // planted: the sanitizer strips every data-* attribute from the doc, and
+  // mermaid-init.js scrubs data-fc from rendered diagrams, whose own
+  // sanitizer keeps data-*.
   var MAIN = '[data-fc="doc-main"]';
   var SIDENAV = '[data-fc="sidenav"]';
   var DOC_BODY = '[data-fc="doc-body"]';
@@ -117,31 +119,52 @@
   // The swap replaces the nodes that hold keyboard focus, which would drop it
   // to <body>. Remember the focused control by something the fresh page
   // shares (an href, an id, a folder's label) and put focus back on it.
+  //
+  // The key also records the data-fc region the control sat in, and the
+  // match is looked up only inside that region of the fresh page. A doc can
+  // carry any id, href or class, so a page-wide lookup could move focus from
+  // a doc link onto a sidenav link that shares its href and class, or onto
+  // whichever element comes first with a colliding id (forgectl#643).
   function focusKey() {
     var el = document.activeElement;
     if (!el || el === document.body) { return null; }
-    if (el.id) { return { id: el.id }; }
+    var region = el.closest("[data-fc]");
+    var key = { region: region ? region.getAttribute("data-fc") : null };
+    if (el.id) { key.id = el.id; return key; }
     var href = el.getAttribute && el.getAttribute("href");
-    if (href) { return { href: href, cls: el.className }; }
+    if (href) { key.href = href; key.cls = el.className; return key; }
     if (el.tagName === "SUMMARY") {
       var label = el.querySelector(".label");
-      if (label) { return { summary: label.textContent }; }
+      if (label) { key.summary = label.textContent; return key; }
     }
     return null;
   }
 
+  // Every element matching sel in root's subtree, root itself first when it
+  // matches (a focused control can be its own region, like the filter box).
+  function within(root, sel) {
+    var found = Array.prototype.slice.call(root.querySelectorAll(sel));
+    if (root.matches(sel)) { found.unshift(root); }
+    return found;
+  }
+
   function restoreFocus(key) {
     if (!key) { return; }
+    // Outside every region (only the skip link) the page is the region.
+    var root = key.region === null
+      ? document.documentElement
+      : document.querySelector('[data-fc="' + CSS.escape(key.region) + '"]');
+    if (!root) { return; }
     var el = null;
     if (key.id) {
-      el = document.getElementById(key.id);
+      el = within(root, "#" + CSS.escape(key.id))[0] || null;
     } else if (key.href) {
-      Array.prototype.some.call(document.querySelectorAll("a[href]"), function (a) {
+      within(root, "a[href]").some(function (a) {
         if (a.getAttribute("href") === key.href && a.className === key.cls) { el = a; return true; }
         return false;
       });
     } else if (key.summary) {
-      Array.prototype.some.call(document.querySelectorAll("summary"), function (s) {
+      within(root, "summary").some(function (s) {
         var label = s.querySelector(".label");
         if (label && label.textContent === key.summary) { el = s; return true; }
         return false;

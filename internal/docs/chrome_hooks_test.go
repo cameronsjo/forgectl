@@ -4,8 +4,10 @@ package docs
 //
 // The reader's JS and CSS find chrome elements by a data-fc attribute, never
 // by id. A document can produce any id (a heading slug, or raw HTML), so an id
-// lookup can be captured by content; the sanitizer strips every data-*
-// attribute, so a doc cannot produce a data-fc.
+// lookup can be captured by content. A doc cannot plant a data-fc: the
+// sanitizer strips every data-* attribute, and mermaid-init.js scrubs data-fc
+// from rendered diagrams after render, because mermaid's own sanitizer keeps
+// data-* (forgectl#643).
 //
 //   [x] Happy: a doc whose headings slug to every chrome id leaves each
 //              data-fc hook on exactly one element, the chrome's
@@ -18,7 +20,9 @@ package docs
 //              querySelectorAll, closest, matches, getElementsBy*) is either
 //              rooted at a data-fc hook or on a reviewed list of content-level
 //              lookups with its reason, so a new class- or tag-based chrome
-//              lookup fails here (forgectl#643)
+//              lookup fails here (forgectl#643). doc-main and doc-body are
+//              content roots: a lookup UNDER them reaches the doc's own
+//              elements, so it needs a listed reason too
 //   [x] Edge:  a lookup the scan cannot resolve (a variable selector, a
 //              wrapper's parameter) is listed too, and a wrapper's call sites
 //              are checked in its place
@@ -30,6 +34,15 @@ package docs
 //              data-fc hook
 //   [x] Happy: the live-status item keeps the full text in a title and wraps
 //              the host in a span the 480px rule can hide
+//
+// Known limits of the lookup scan, accepted rather than solved:
+//   - contentLookups is keyed by selector, not call site, so a reviewed
+//     selector reused elsewhere in the same script passes unreviewed;
+//   - it sees only dotted method calls: bracket access
+//     (document["querySelector"](…)), an aliased or bound method, or a
+//     selector built outside a string constant and + escapes it.
+// The browser half of this is scripts/verify-reader-chrome.mjs, which also
+// covers the client-side mermaid render a Go test cannot see.
 
 import (
 	"net/http"
@@ -44,7 +57,7 @@ import (
 
 var chromeIDs = []string{
 	"shell", "nav-toggle", "drawer-scrim", "docs-nav", "doc-filter",
-	"filter-empty", "live-status", "doc-missing",
+	"filter-empty", "doc-main", "live-status", "doc-missing",
 }
 
 func chromePage(t *testing.T, md string) string {
@@ -184,6 +197,7 @@ var contentLookups = map[string]map[string]string{
 		".math": "content: the formulas it renders",
 	},
 	"mermaid-init.js": {
+		`pre.mermaid [data-fc], [id^="dmermaid-"] [data-fc]`: "scrubs hooks forged inside rendered diagrams",
 		"pre.mermaid":   "content: the diagrams it renders",
 		".embed":        "content: the frame it wraps around a diagram",
 		".dia-viewport": "scoped to an .embed this script created",
@@ -194,11 +208,14 @@ var contentLookups = map[string]map[string]string{
 		"details":                     "on a sidenav or doc-body root found by data-fc, or up from one",
 		":scope > summary .label":     "under a <details> from a data-fc root",
 		".label":                      "under the focused element or a <summary>",
-		"a[href]":                     "focus restore: the control the reader had focused, chrome or content",
-		"summary":                     "focus restore: the control the reader had focused, chrome or content",
-		".live-dot":                   "under the live-status data-fc hook",
-		".live-status__text":          "under the live-status data-fc hook",
-		"sel":                         "replace()'s parameter; its call sites are checked instead",
+		"[data-fc]":                   "focus restore: the nearest hook above the focused control, recorded as its region",
+		`'[data-fc="' + CSS.escape(key.region) + '"]'`: "focus restore: the region recorded from a real hook",
+		`"#" + CSS.escape(key.id)`:                     "focus restore: inside the recorded region",
+		"a[href]":                                      "focus restore: inside the recorded region",
+		"summary":                                      "focus restore: inside the recorded region",
+		".live-dot":                                    "under the live-status data-fc hook",
+		".live-status__text":                           "under the live-status data-fc hook",
+		"sel":                                          "replace()'s and within()'s parameter; their call sites are checked instead",
 	},
 	"sidenav-filter.js": {
 		"sel":                 "all()'s parameter; its call sites are checked instead",
@@ -206,17 +223,18 @@ var contentLookups = map[string]map[string]string{
 		"a[data-filter-text]": "under a sidenav node; data-filter-text is server-set and the sanitizer strips data-*",
 	},
 	"svg-panzoom.js": {
+		`[data-fc="doc-main"] svg:not([aria-hidden="true"])`: "content: inline and rendered SVG in the doc pane",
 		".katex":     "content: KaTeX output inside the doc",
 		".dia-stage": "scoped to a viewport this script created",
 	},
 }
 
-// selectorWrappers names each script's helper that takes a selector and
-// queries the document with it. Its call sites are scanned like the query
-// methods themselves.
-var selectorWrappers = map[string]string{
-	"reload.js":         "replace",
-	"sidenav-filter.js": "all",
+// selectorWrappers names each script's helpers that take a selector and
+// query the document with it, and which argument (0-based) the selector is.
+// Their call sites are scanned like the query methods themselves.
+var selectorWrappers = map[string]map[string]int{
+	"reload.js":         {"replace": 0, "within": 1},
+	"sidenav-filter.js": {"all": 0},
 }
 
 var (
@@ -224,10 +242,11 @@ var (
 	jsStringVar  = regexp.MustCompile(`(?m)^\s*var ([A-Z_]+) = (?:"([^"]*)"|'([^']*)');`)
 )
 
-// jsFirstArg returns the source text of the call argument starting at src[i],
-// up to a top-level comma or the closing paren. It skips string literals, so
-// a paren or comma inside a selector string does not end it.
-func jsFirstArg(src string, i int) string {
+// jsArg returns the source text of the n-th (0-based) argument of the call
+// whose argument list starts at src[i], or "" when the call has fewer. It
+// skips string literals, so a paren or comma inside a selector string does
+// not end an argument.
+func jsArg(src string, i, n int) string {
 	depth := 0
 	for j := i; j < len(src); j++ {
 		switch c := src[j]; c {
@@ -241,16 +260,23 @@ func jsFirstArg(src string, i int) string {
 			depth++
 		case ')', ']':
 			if depth == 0 {
-				return strings.TrimSpace(src[i:j])
+				if n == 0 {
+					return strings.TrimSpace(src[i:j])
+				}
+				return ""
 			}
 			depth--
 		case ',':
 			if depth == 0 {
-				return strings.TrimSpace(src[i:j])
+				if n == 0 {
+					return strings.TrimSpace(src[i:j])
+				}
+				n--
+				i = j + 1
 			}
 		}
 	}
-	return strings.TrimSpace(src[i:])
+	return ""
 }
 
 // jsResolve evaluates a selector expression made of string literals and the
@@ -271,9 +297,14 @@ func jsResolve(expr string, consts map[string]string) (sel string, ok bool) {
 	return b.String(), true
 }
 
+// contentRoots are the hooks whose subtree is the document itself. The hook
+// alone is chrome, but a selector descending from it reaches doc content.
+var contentRoots = []string{`[data-fc="doc-main"]`, `[data-fc="doc-body"]`}
+
 // dataFcRooted reports whether every comma-separated selector in sel starts
 // with a compound carrying a data-fc attribute, so it can only match inside
-// (or on) a shell element. Commas inside brackets or parens do not split.
+// (or on) a shell element, and none descends from a content root. Commas
+// inside brackets or parens do not split.
 func dataFcRooted(sel string) bool {
 	depth := 0
 	start := 0
@@ -311,6 +342,11 @@ func dataFcRooted(sel string) bool {
 		if !strings.Contains(p[:end], `[data-fc="`) {
 			return false
 		}
+		for _, root := range contentRoots {
+			if end < len(p) && strings.Contains(p[:end], root) {
+				return false
+			}
+		}
 	}
 	return true
 }
@@ -322,15 +358,15 @@ type chromeLookup struct {
 }
 
 // scanChromeLookups returns every DOM query call in src, and every call to the
-// script's selector wrapper (when it has one) in place of the query inside it.
-// wrapperCalls counts the latter, so a renamed wrapper cannot pass unseen.
-func scanChromeLookups(src, wrapper string) (out []chromeLookup, wrapperCalls int) {
+// script's selector wrappers in place of the query inside them. wrapperCalls
+// counts the latter per wrapper, so a renamed wrapper cannot pass unseen.
+func scanChromeLookups(src string, wrappers map[string]int) (out []chromeLookup, wrapperCalls map[string]int) {
 	consts := map[string]string{}
 	for _, m := range jsStringVar.FindAllStringSubmatch(src, -1) {
 		consts[m[1]] = m[2] + m[3]
 	}
-	add := func(argStart int) {
-		expr := jsFirstArg(src, argStart)
+	add := func(argStart, n int) {
+		expr := jsArg(src, argStart, n)
 		l := chromeLookup{key: expr, line: strings.Count(src[:argStart], "\n") + 1}
 		if sel, ok := jsResolve(expr, consts); ok {
 			l.key, l.rooted = sel, dataFcRooted(sel)
@@ -338,16 +374,17 @@ func scanChromeLookups(src, wrapper string) (out []chromeLookup, wrapperCalls in
 		out = append(out, l)
 	}
 	for _, m := range domQueryCall.FindAllStringIndex(src, -1) {
-		add(m[1])
+		add(m[1], 0)
 	}
-	if wrapper != "" {
+	wrapperCalls = map[string]int{}
+	for wrapper, n := range wrappers {
 		call := regexp.MustCompile(`(?:^|[^.\w])` + wrapper + `\(`)
 		for _, m := range call.FindAllStringIndex(src, -1) {
 			if strings.HasSuffix(src[:m[1]], "function "+wrapper+"(") {
 				continue
 			}
-			wrapperCalls++
-			add(m[1])
+			wrapperCalls[wrapper]++
+			add(m[1], n)
 		}
 	}
 	return out, wrapperCalls
@@ -356,10 +393,11 @@ func scanChromeLookups(src, wrapper string) (out []chromeLookup, wrapperCalls in
 func TestChrome_ScriptsFindChromeOnlyByDataFc(t *testing.T) {
 	for _, f := range chromeScripts {
 		src := chromeRead(t, filepath.Join("assets", f))
-		w := selectorWrappers[f]
-		lookups, calls := scanChromeLookups(src, w)
-		if w != "" && calls == 0 {
-			t.Errorf("%s: no call to its selector wrapper %s(); update selectorWrappers", f, w)
+		lookups, calls := scanChromeLookups(src, selectorWrappers[f])
+		for w := range selectorWrappers[f] {
+			if calls[w] == 0 {
+				t.Errorf("%s: no call to its selector wrapper %s(); update selectorWrappers", f, w)
+			}
 		}
 		if len(lookups) == 0 {
 			t.Errorf("%s: the scan found no DOM lookups; it has stopped seeing them", f)
