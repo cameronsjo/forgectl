@@ -52,7 +52,20 @@ A leading `~` or `~/` in `roots` and in the `root_kinds` keys expands to your ho
 
 Naming directories or files on the command line replaces that default set entirely.
 
-Exit codes: `docs list` exits 0 when it lists (an empty list included) and 2 when it could not produce the list (bad root, bad config, a bad flag or `--limit`, `--timeout` deadline); under `--json` a failure past flag parsing leaves stdout empty and writes exactly one `{"error","code","root"}` object to stderr (`root` is empty unless a deadline stopped on a specific root). `docs serve` exits 0 after a clean Ctrl-C and 2 when the server could not be set up (bad root, bad config, index failure, a bad flag, the retired `--token`). A bind failure or an unusable `--token-file` still exits 1. `docs check` and `docs search` have their own contracts, below.
+### Exit codes and errors
+
+Every docs verb shares one "could not run" contract ([#604](https://github.com/cameronsjo/forgectl/issues/604)):
+
+- **Exit 2** when the verb fails before it starts its real work: an unreadable or missing root, a bad `[docs]` config, a bad flag or a wrong number of arguments, a `--timeout` deadline, no search backend, no reader to open, a bind failure, an unusable `--token-file`, or the retired `--token`.
+- **Under `--json`**, on the verbs that declare it (`list`, `check`, `search`), that failure leaves stdout empty and writes exactly one `{"error","code","root"}` object to stderr. This includes flag and argument errors, even a `--json` written after the bad flag. `root` is always present and is empty unless a deadline stopped on a specific root. Verbs without `--json` (`serve`, `open`, `read`) print the human error and exit 2.
+- The object's shape is additive-only ([ADR-0008](../adr/0008-agent-contract.md) rule 2): `root` was already documented for `docs list`, so it stays a fixed key rather than being omitted when empty, and `docs search` gained it.
+
+Two things sit outside the contract, on purpose:
+
+- **A partial result exits 1.** `docs check` with findings, and `docs search` when rg could not fully search a root, did run; their output is complete on stdout. Under `--json` a partial `docs search` also writes one `{"error","code","root"}` object (code 1, `root` empty) to stderr.
+- **`docs read` passes mdroll's exit status through** (see [`docs read`](#docs-read-in-the-terminal)), so a 2 from `read` is ambiguous once mdroll has started. The contract applies only before the child does; a failure to start mdroll is still a 2.
+
+`docs serve` exits 0 after a clean Ctrl-C. A failure once the server is listening (the serve loop itself failing) is the server's own and exits 1.
 
 ### Root kinds
 
@@ -83,7 +96,7 @@ The kind also picks the markdown dialect: a `vault` root renders the Obsidian hi
 - **Orphans.** A root-level `README` or `index` page is never an orphan, and a single-file root has no orphans. A `README.md` in a subdirectory is an ordinary doc, but a directory link from another doc (`[plans](plans/)`, or root-relative `/plans`) counts as a link to that directory's `README` or `index` page (any case, any indexed extension), the page GitHub shows for it. A target ending in `/`, or in a `.` or `..` segment, always names the directory, even when a `plans.md` sits beside it. Only the orphan check counts it this way: the link still resolves to no doc in the reader. Other docs in that directory still need a link of their own.
 - **Vault roots are skipped.** A root detected or configured as a `vault` is not checked yet: a note on stderr says so, and if no docs-kind root remains the command exits 2.
 - **Trust signals.** `deprecated` and `stale` follow the Open Knowledge Format v0.2 §5.4/§5.5 (SPEC at `ad30107`). Both are findings, so they exit 1 like any other. The reader also badges them, in the properties block and in the status bar. OKF changed `stale_after` from a date to a datetime inside v0.2 without a version bump; date-only values written against the older text are ignored, per the current spec and its reference implementation. Coverage gaps: vault roots are not checked (see above), though the reader still badges their docs, and a doc over 1 MiB is indexed by title only, so it gets no finding and no status-bar badge, though its properties block still badges.
-- **Exit codes.** 0 clean; 1 findings (the complete report is on stdout); 2 the check could not run (unreadable root, `--timeout` deadline, no docs-kind root, bad flag).
+- **Exit codes.** 0 clean; 1 findings (the complete report is on stdout); 2 the check could not run (unreadable root, `--timeout` deadline, no docs-kind root, bad flag), under the shared contract above.
 
 Human output is one line per finding, `<root>/<path>: <kind> <target>`; a link finding (`broken_link`, `ambiguous_link`, `broken_anchor`) names its source line as `<root>/<path>:<line>: <kind> <target>`, and a `stale` line ends with its `stale_after` value instead of a target. `line` is 1-based and counts every line of the file as written, frontmatter included, so it can feed a CI annotation directly. Findings are grouped by root, in configured order, then by path. Within a file, link findings come first, sorted by line, and the lineless findings follow, sorted by kind. `--json` prints one object:
 
@@ -137,7 +150,7 @@ The backend is [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`), which mu
 {"backend":"ripgrep","query":"needle","results":[{"root":"docs","path":"guide.md","title":"Guide","line":12,"snippet":"the needle in the guide"}],"truncated":false,"skipped":0,"errors":[]}
 ```
 
-Exit codes: no match exits 0 with an empty `results` (human output says `no matches` on stderr). When rg could not fully search a root, the other roots are still searched and every hit found is printed, then the command exits 1 with the reason on stderr: one line per failed root, or under `--json` one `{"error","code"}` object on stderr alongside the full response, `errors` included, on stdout. A missing `rg`, an empty or invalid query, or an expired `--timeout` exits 2; under `--json` that leaves stdout empty and writes exactly one `{"error","code"}` object to stderr.
+Exit codes: no match exits 0 with an empty `results` (human output says `no matches` on stderr). When rg could not fully search a root, the other roots are still searched and every hit found is printed, then the command exits 1 with the reason on stderr: one line per failed root, or under `--json` one `{"error","code","root"}` object on stderr alongside the full response, `errors` included, on stdout. A missing `rg`, an empty or invalid query, a bad `--limit`, a root or config error, or an expired `--timeout` exits 2; under `--json` that leaves stdout empty and writes exactly one `{"error","code","root"}` object to stderr (the shared contract above). The partial-result object is the same shape with code 1.
 
 ## `docs open` steers, never starts
 
@@ -151,7 +164,7 @@ A legacy server (predating generation-owned discovery) has no freshness endpoint
 
 `docs read <file>` opens one document from the default doc set (the same roots `docs serve` and `docs list` index with no arguments). `<file>` is a path on disk or a root-relative `<root>/<path>` name as `docs list` prints it, and either way it resolves through the index: a file outside the indexed roots, under an excluded directory, or not markdown is refused.
 
-When [mdroll](https://github.com/tokuhirom/mdroll) is on `PATH`, `read` runs it as `mdroll --watch --no-remote-images -- <absolute path>`, with no shell and with forgectl's stdin, stdout, and stderr handed straight through, so mdroll's own keys (search, TOC, link picker) work. `--watch` stands in for the HTML reader's live reload, and `--` keeps a document named like a flag from being parsed as one (`forgectl docs read -- -odd.md` gets such a name past forgectl's own parser). mdroll's exit status becomes forgectl's; if a signal kills mdroll, forgectl exits 128 plus the signal number, as a shell would. An mdroll reachable only through a relative `PATH` entry is refused and treated as absent.
+When [mdroll](https://github.com/tokuhirom/mdroll) is on `PATH`, `read` runs it as `mdroll --watch --no-remote-images -- <absolute path>`, with no shell and with forgectl's stdin, stdout, and stderr handed straight through, so mdroll's own keys (search, TOC, link picker) work. `--watch` stands in for the HTML reader's live reload, and `--` keeps a document named like a flag from being parsed as one (`forgectl docs read -- -odd.md` gets such a name past forgectl's own parser). mdroll's exit status becomes forgectl's (the one carve-out from the exit-2 contract above); if a signal kills mdroll, forgectl exits 128 plus the signal number, as a shell would. An mdroll reachable only through a relative `PATH` entry is refused and treated as absent.
 
 `--no-remote-images` keeps mdroll from fetching `http(s)` images, which it does by default: a remote image in a document is a tracking beacon, and the HTML reader blocks it with `img-src 'self' data:`. Beyond that one flag, `docs read` follows mdroll's own content policy, not the HTML reader's — mdroll does its own rendering, and forgectl's sanitizer and CSP do not apply to it.
 

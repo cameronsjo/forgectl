@@ -258,7 +258,7 @@ func TestDocsCheckCmd_DeadlineEncodeFailureNamesCheck(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a deadline error, got nil")
 	}
-	if !strings.HasPrefix(err.Error(), "docs check: encode deadline error") {
+	if !strings.HasPrefix(err.Error(), "docs check: encode error") {
 		t.Errorf("err = %q, want it to name docs check", err.Error())
 	}
 	if got := ExitCode(err); got != 2 {
