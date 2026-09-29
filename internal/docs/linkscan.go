@@ -23,13 +23,15 @@ import (
 
 // docMeta is scanDoc's one-pass result — everything Doc needs about a
 // document (Title, Aliases, Headings, BlockIDs, Links) read from a single
-// file open.
+// file open, plus the raw OKF trust fields (Status, StaleAfter; see trust.go).
 type docMeta struct {
-	Title    string
-	Aliases  []string
-	Headings []Heading
-	BlockIDs []string
-	Links    []LinkRef
+	Title      string
+	Aliases    []string
+	Headings   []Heading
+	BlockIDs   []string
+	Links      []LinkRef
+	Status     string
+	StaleAfter string
 }
 
 // linkMarkdown is the goldmark instance scanDoc parses document BODIES
@@ -55,6 +57,8 @@ var linkMarkdownVault = newLinkMarkdown(true)
 func newLinkMarkdown(vault bool) goldmark.Markdown {
 	md := goldmark.New(
 		goldmark.WithParserOptions(headingParserOptions(vault)...),
+		// Parse-only: a $$ block's lines are TeX, not headings or links.
+		goldmark.WithParserOptions(mathBlockParserOptions()...),
 	)
 	// Parse-only: never render with this instance. The default resolver turns [[https://x/]] into an external href the sanitizer keeps.
 	(&wikilink.Extender{}).Extend(md)
@@ -137,9 +141,11 @@ func scanDocFor(kind RootKind, absPath, relPath string) (docMeta, error) {
 
 	body := source
 	var aliases []string
+	var status, staleAfter string
 	if fm, ok := splitFrontmatter(source); ok {
 		body = fm.body
 		aliases = frontmatterAliases(fm)
+		status, staleAfter = frontmatterTrust(fm)
 	}
 
 	scan, err := scanBodyFor(kind, body)
@@ -156,11 +162,13 @@ func scanDocFor(kind RootKind, absPath, relPath string) (docMeta, error) {
 	headings, links := scan.headings, scan.links
 
 	return docMeta{
-		Title:    title,
-		Aliases:  aliases,
-		Headings: headings,
-		BlockIDs: blockIDs,
-		Links:    links,
+		Title:      title,
+		Aliases:    aliases,
+		Headings:   headings,
+		BlockIDs:   blockIDs,
+		Links:      links,
+		Status:     status,
+		StaleAfter: staleAfter,
 	}, nil
 }
 

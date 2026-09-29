@@ -74,6 +74,16 @@ main.surface-document { max-width: 820px; }
 .props-row .v { flex: 1; min-width: 0; color: var(--fg); display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding-top: 1px; }
 .props-row .v .chip { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; background: color-mix(in oklch, var(--accent-fill) 14%, transparent); color: var(--accent); font-size: 11px; }
 .props-row .v.dt { font-variant-numeric: tabular-nums; }
+/* OKF trust badges (properties block + status bar). Deliberately NOT
+   Artificer's .chip: that class is interactive (cursor, hover, aria-pressed,
+   a 44px min-height under pointer: coarse), and a badge is a label. The text
+   carries the meaning, so the tier colour is never the only signal. Colours
+   are Artificer's solid .badge--attention / .badge--urgent pairs: the 14%
+   tint the status chip uses left light-theme --attention text at 3.9:1 on
+   the properties block, under AA for 11px text. */
+.trust-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; font-size: 11px; line-height: 1.4; font-family: var(--font-mono); }
+.trust-badge--stale { background: var(--attention-fill); color: var(--on-attention); }
+.trust-badge--deprecated { background: var(--urgent-fill); color: var(--on-urgent); }
 
 /* ── Callouts (GFM > [!NOTE] etc; tiers: note→accent, warning→attention, danger→urgent, tip→success) ── */
 .callout { border-left: 2px solid var(--steel); background: color-mix(in oklch, var(--steel) 10%, transparent); padding: 12px 16px; border-radius: 0 var(--radius-md) var(--radius-md) 0; margin: 16px 0; }
@@ -313,6 +323,8 @@ main.surface-document:focus-visible { outline: var(--focus-width) solid var(--ac
   <footer class="statusbar" style="flex: none">
     <div class="status-item" id="live-status" role="status"><span class="live-dot" aria-hidden="true"></span><span class="live-status__text">serving · {{.Host}}</span></div>
     {{if .DocPath}}<div class="status-item opt">{{.DocPath}}</div>{{end}}
+    {{if .Trust.Deprecated}}<div class="status-item"><span class="trust-badge trust-badge--deprecated">deprecated</span></div>{{end}}
+    {{if .Trust.Stale}}<div class="status-item"><span class="trust-badge trust-badge--stale" title="stale since {{.Trust.StaleAfter}}">stale</span></div>{{end}}
     <div class="status-spacer"></div>
     <div class="status-item opt">{{.DocCount}} {{if eq .DocCount 1}}doc{{else}}docs{{end}} indexed</div>
     {{if .Words}}<div class="status-item">{{.Words}} words · {{.Minutes}} min</div>{{end}}

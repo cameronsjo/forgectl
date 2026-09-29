@@ -385,7 +385,7 @@ func buildHome(idx *Index) *homeData {
 	}
 	for _, d := range all[:min(homeRecentCount, len(all))] {
 		home.Recent = append(home.Recent, homeDoc{
-			Href:     "/doc/" + d.RootLabel + "/" + d.RelPath,
+			Href:     docHref(d.RootLabel, d.RelPath),
 			Title:    d.Title,
 			Path:     d.RootLabel + "/" + d.RelPath,
 			Modified: modifiedLabel(d.ModTime, time.Now()),
@@ -483,6 +483,9 @@ type shellData struct {
 	Minutes  int
 	// Home is the landing page's content; nil on every doc page.
 	Home *homeData
+	// Trust is the current doc's OKF trust signals (trust.go), badged in
+	// the status bar; zero on the index.
+	Trust trustState
 }
 
 // sidenavGroup renders one labeled section of the sidenav. Exactly one of
@@ -529,6 +532,13 @@ func renderShell(w http.ResponseWriter, idx *Index, ctx pageContext) {
 		Words:    ctx.Words,
 		Minutes:  ctx.Minutes,
 		Home:     ctx.Home,
+	}
+	if ctx.CurrentRoot != "" {
+		// Read from the index, not the render, so the status bar needs no
+		// second frontmatter parse and handleDoc stays untouched.
+		if d, ok := idx.Find(ctx.CurrentRoot, ctx.CurrentRel); ok {
+			data.Trust = evalTrust(d.Status, d.StaleAfter, trustNow())
+		}
 	}
 	if err := shellTemplate.Execute(w, data); err != nil {
 		slog.Error("docs: template execution failed.", "error", err)
@@ -609,7 +619,7 @@ func toLinks(docs []Doc, currentRoot, currentRel string) []sidenavLink {
 
 func toLink(d Doc, currentRoot, currentRel string) sidenavLink {
 	return sidenavLink{
-		Href:       "/doc/" + d.RootLabel + "/" + d.RelPath,
+		Href:       docHref(d.RootLabel, d.RelPath),
 		Title:      d.Title,
 		FilterText: strings.ToLower(d.Title + " " + d.RelPath),
 		Current:    d.RootLabel == currentRoot && d.RelPath == currentRel,

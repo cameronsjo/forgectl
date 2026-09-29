@@ -211,9 +211,11 @@ func TestIndex_Resolve_Traversal_Rejected(t *testing.T) {
 	}
 	label := idx.Roots()[0].Label
 
-	_, err = idx.Resolve(label, "../../../../etc/passwd")
-	if !errors.Is(err, ErrOutsideRoot) {
-		t.Errorf("Resolve traversal: err = %v, want ErrOutsideRoot", err)
+	// The ../ run is clamped at the root, so this names <root>/etc/passwd,
+	// which does not exist: ErrNotFound, never the real /etc/passwd.
+	got, err := idx.Resolve(label, "../../../../etc/passwd")
+	if !errors.Is(err, ErrNotFound) || got != "" {
+		t.Errorf("Resolve traversal = %q, %v, want \"\", ErrNotFound", got, err)
 	}
 }
 

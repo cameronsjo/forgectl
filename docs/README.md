@@ -7,7 +7,7 @@ decisions were made, what was explored, and how the running system is
 operated.
 
 - **[`commands/`](commands/)** — per-command deep dives (env, launch, k8s,
-  docs, …) split out of the README; the README keeps the full roster and
+  docs, [recipe](commands/recipe.md), …) split out of the README; the README keeps the full roster and
   usage summary.
 - **[`configuration.md`](configuration.md)** — every `config.toml` section,
   key by key, plus logging.

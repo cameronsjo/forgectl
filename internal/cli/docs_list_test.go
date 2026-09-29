@@ -6,13 +6,15 @@ package cli
 //   [x] Happy: --json emits a valid JSON array with root/path/title/modTime
 //   [x] Happy: human output lists the doc's root, path, and title
 //   [x] Happy: an empty root reports "no docs found" rather than an empty table
-//   [x] Unhappy: a nonexistent root argument surfaces NewIndex's error
+//   [x] Unhappy: a nonexistent root argument surfaces NewIndex's error, exit 2
+//   [x] Security: human output escapes terminal controls in a filename and in
+//       a doc's H1 (forgectl#598)
 //   [x] Happy: --limit 3 prints three rows in both the human and --json shapes
 //   [x] Unhappy: a --timeout deadline under --json leaves stdout empty and
 //       writes exactly one JSON error object to stderr, exit code 2
 //   [x] Unhappy: a --timeout deadline without --json renders a human error
 //       naming the root, exit code 2
-//   [x] Unhappy: --limit rejects a negative count
+//   [x] Unhappy: --limit rejects a negative count, exit 2
 //
 // deadlineRoot (Classification: helper — which root actually stalled)
 //   [x] Happy: a *docspkg.WalkDeadlineError's own Root wins over the
@@ -106,8 +108,44 @@ func TestDocsListCmd_NonexistentRoot_Errors(t *testing.T) {
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{filepath.Join(t.TempDir(), "missing")})
 
-	if err := cmd.ExecuteContext(context.Background()); err == nil {
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
 		t.Fatal("expected an error for a nonexistent root")
+	}
+	// 2, not the default 1: the list could not be produced (forgectl#577).
+	if got := ExitCode(err); got != 2 {
+		t.Errorf("ExitCode(err) = %d, want 2", got)
+	}
+}
+
+// A filename and a doc's H1 both reach the human table, and both come from
+// disk, so neither may put a raw control byte on the terminal (forgectl#598).
+func TestDocsListCmd_HumanOutput_EscapesTerminalControls(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "e\x1b[31mvil.md"), []byte("# Plain\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "page.md"), []byte("# Hi\x1b]0;pwned\x07\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newDocsListCmd(module.Deps{})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{dir})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := stdout.String()
+	if strings.ContainsAny(out, "\x1b\x07") {
+		t.Errorf("stdout carries a raw control byte: %q", out)
+	}
+	for _, want := range []string{"e\\x1b[31mvil.md", "Hi\\x1b]0;pwned\\a"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout = %q, want the escaped form %q", out, want)
+		}
 	}
 }
 
@@ -239,8 +277,12 @@ func TestDocsListCmd_NegativeLimit_Errors(t *testing.T) {
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"--limit", "-1", dir})
 
-	if err := cmd.ExecuteContext(context.Background()); err == nil {
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
 		t.Fatal("expected an error for --limit -1")
+	}
+	if got := ExitCode(err); got != 2 {
+		t.Errorf("ExitCode(err) = %d, want 2", got)
 	}
 }
 

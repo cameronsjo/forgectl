@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -165,6 +166,31 @@ func TestCheckGh(t *testing.T) {
 	d = Deps{LookPath: fakeLookPath("gh"), Runner: fr}
 	if check := checkGh(context.Background(), d); check.State != StateOK {
 		t.Errorf("gh authenticated: state = %q, want ok", check.State)
+	}
+}
+
+func TestCheckMdroll(t *testing.T) {
+	// Absent is StateSkip, not StateWarn or StateFail: `docs read` falls back
+	// to the HTML reader, so a machine without mdroll is not unhealthy.
+	check := checkMdroll(Deps{LookPath: fakeLookPath()})
+	if check.State != StateSkip {
+		t.Errorf("mdroll absent: state = %q, want skip", check.State)
+	}
+	if check.Hint == "" {
+		t.Error("mdroll absent: hint is empty, want where to get it")
+	}
+
+	// Found only through a relative PATH entry: docs read refuses to run it,
+	// so the row says that rather than OK or "not found".
+	relative := func(string) (string, error) { return "mdroll", osexec.ErrDot }
+	check = checkMdroll(Deps{LookPath: relative})
+	if check.State != StateSkip || !strings.Contains(check.Detail, "relative PATH entry") {
+		t.Errorf("mdroll via relative PATH: state = %q, detail = %q; want skip naming the relative entry", check.State, check.Detail)
+	}
+
+	check = checkMdroll(Deps{LookPath: fakeLookPath("mdroll")})
+	if check.State != StateOK || check.Detail != "/usr/bin/mdroll" {
+		t.Errorf("mdroll present: state = %q, detail = %q; want ok with the resolved path", check.State, check.Detail)
 	}
 }
 

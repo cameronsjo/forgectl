@@ -376,16 +376,19 @@ func sanitizeFSError(err error) error {
 	return err
 }
 
-// DocURL builds the reader URL for a (root, relPath) pair on this server.
-// relPath segments are escaped so a space or a '#' in a filename cannot
-// truncate or reshape the path.
+// DocURL builds the reader URL for a (root, relPath) pair on this server:
+// docHref's escaped path behind this server's scheme and host, so the
+// /doc/<root>/<rel> layout lives in docHref alone.
 func (info ServerInfo) DocURL(rootLabel, relPath string) string {
-	u := url.URL{
-		Scheme: "http",
-		Host:   info.Addr,
-		Path:   "/doc/" + rootLabel + "/" + relPath,
-	}
-	return u.String()
+	return (&url.URL{Scheme: "http", Host: info.Addr}).String() + docHref(rootLabel, relPath)
+}
+
+// docHref is the escaped, host-less reader path for a (root, relPath) pair,
+// for hrefs rendered into pages and for DocURL. A '#' or '?' in a filename
+// would otherwise start a fragment or query and truncate the link, and a
+// space could truncate the path a browser sends.
+func docHref(rootLabel, relPath string) string {
+	return (&url.URL{Path: "/doc/" + rootLabel + "/" + relPath}).String()
 }
 
 // BaseURL is the reader's index page.

@@ -85,6 +85,11 @@ type Doc struct {
 	// and plain markdown links whose destination carries no URL scheme —
 	// already split into the form ResolveLink (Task 3) consumes.
 	Links []LinkRef
+	// Status and StaleAfter are the raw OKF trust fields from YAML
+	// frontmatter (see trust.go). They are stored unevaluated: whether a doc
+	// is stale depends on the clock, so readers call evalTrust at read time.
+	Status     string
+	StaleAfter string
 	// ModTime is the file's last-modified time, used to order "recents".
 	ModTime time.Time
 }
@@ -402,15 +407,17 @@ func indexFileRoot(labels map[string]bool, file string, override RootKind, hasOv
 // subset of docMeta's fields.
 func newDoc(rootLabel, relPath, absPath string, modTime time.Time, meta docMeta) Doc {
 	return Doc{
-		RootLabel: rootLabel,
-		RelPath:   relPath,
-		AbsPath:   absPath,
-		Title:     meta.Title,
-		Aliases:   meta.Aliases,
-		Headings:  meta.Headings,
-		BlockIDs:  meta.BlockIDs,
-		Links:     meta.Links,
-		ModTime:   modTime,
+		RootLabel:  rootLabel,
+		RelPath:    relPath,
+		AbsPath:    absPath,
+		Title:      meta.Title,
+		Aliases:    meta.Aliases,
+		Headings:   meta.Headings,
+		BlockIDs:   meta.BlockIDs,
+		Links:      meta.Links,
+		Status:     meta.Status,
+		StaleAfter: meta.StaleAfter,
+		ModTime:    modTime,
 	}
 }
 
