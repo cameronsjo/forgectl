@@ -556,7 +556,7 @@ func renderWith(source []byte, kind RootKind, resolve wikilinkResolver) (string,
 	}
 	renderMu.Lock()
 	var buf bytes.Buffer
-	ctx := parser.NewContext()
+	ctx := newParseContext()
 	if kind == RootVault && resolve != nil {
 		ctx.Set(wikilinkResolverKey, resolve)
 	}
@@ -565,7 +565,7 @@ func renderWith(source []byte, kind RootKind, resolve wikilinkResolver) (string,
 	if err != nil {
 		return "", fmt.Errorf("render markdown: %w", err)
 	}
-	body := string(sanitizer.SanitizeBytes(dropDuplicateSVGNamespaces(buf.Bytes())))
+	body := balanceFragment(string(sanitizer.SanitizeBytes(dropDuplicateSVGNamespaces(buf.Bytes()))))
 	return frontmatterHTML(ctx) + transformCallouts(body, kind), nil
 }
 

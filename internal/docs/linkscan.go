@@ -343,7 +343,7 @@ func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 	if kind == RootVault {
 		md = linkMarkdownVault
 	}
-	ctx := parser.NewContext()
+	ctx := newParseContext()
 	doc := md.Parser().Parse(reader, parser.WithContext(ctx))
 
 	var headings []Heading
