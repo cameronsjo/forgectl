@@ -798,18 +798,21 @@ func (c *Client) discard(ctx context.Context, sess Session, budget *tmuxBudget) 
 // workspace from scratch — so a record that changed between the listing and
 // the teardown is judged on what it is NOW, not on what List saw.
 //
-// One failure is retained as the first error while later candidates continue,
-// matching the existing cleanup contract.
+// Later candidates continue past a failure. The returned error is the FIRST
+// failure, matching the existing cleanup contract; the report carries every
+// session's outcome, so a caller can describe each failure rather than only
+// the first (forgectl#666).
 //
 // Every live teardown in the sweep draws on ONE tmux budget (forgectl#648), so
 // a hung tmux holds the lock for one lockedTmuxBudget rather than one per
 // session. Once it is spent, the remaining LIVE sessions are skipped with
 // ErrTmuxBudgetSpent and left untouched; stale and record-only sessions never
 // call tmux, so the sweep still settles them.
-func (c *Client) Cleanup(ctx context.Context, date string) error {
+func (c *Client) Cleanup(ctx context.Context, date string) (CleanupReport, error) {
+	var report CleanupReport
 	// One lock hold for the whole sweep: the lock is non-reentrant, so the
 	// listing and every teardown go through the *Locked cores.
-	return c.withLifecycleLock(ctx, "cleanup", func() error {
+	err := c.withLifecycleLock(ctx, "cleanup", func() error {
 		summaries, unreadable, err := c.listLocked()
 		if err != nil {
 			return err
@@ -818,7 +821,6 @@ func (c *Client) Cleanup(ctx context.Context, date string) error {
 			slog.Warn("Cleanup is sweeping past records it could not read.",
 				"unreadable", len(unreadable), "first", unreadable[0].path)
 		}
-		var discarded int
 		var firstErr error
 		budget := newTmuxBudget()
 		warnedSkip := false
@@ -836,14 +838,34 @@ func (c *Client) Cleanup(ctx context.Context, date string) error {
 				} else {
 					slog.Error("Failed to tear down session during cleanup.", "path", sum.Path(), "error", err)
 				}
+				report.Failed = append(report.Failed, CleanupFailure{Path: sum.Path(), Ref: sum.Ref().String(), Err: err})
 				if firstErr == nil {
 					firstErr = err
 				}
 				continue
 			}
-			discarded++
+			report.Discarded++
 		}
-		slog.Info("Cleanup complete.", "date", date, "discarded", discarded)
+		slog.Info("Cleanup complete.", "date", date, "discarded", report.Discarded, "failed", len(report.Failed))
 		return firstErr
 	})
+	return report, err
+}
+
+// CleanupReport is what one cleanup sweep did: how many sessions it discarded,
+// and each session it did not, in sweep order. Failed is empty when the sweep
+// never started (the lock was busy, the listing failed); the error says why.
+type CleanupReport struct {
+	Discarded int
+	Failed    []CleanupFailure
+}
+
+// CleanupFailure is one session a sweep did not discard. Err is that session's
+// own error: ErrWindowKillTimedOut (with or without ErrRecordNotParked) for a
+// kill tmux never answered, ErrTmuxBudgetSpent for a live session skipped
+// after that, or whatever refused or failed the teardown.
+type CleanupFailure struct {
+	Path string
+	Ref  string
+	Err  error
 }

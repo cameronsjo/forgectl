@@ -611,15 +611,55 @@ func newPrCleanupCmd(client *pr.Client) *cobra.Command {
 			if _, err := time.Parse("2006-01-02", args[0]); err != nil {
 				return fmt.Errorf("invalid date %q: want YYYY-MM-DD", args[0])
 			}
-			if err := client.Cleanup(cmd.Context(), args[0]); err != nil {
-				noteWindowKillTimeout(cmd, err, "")
-				return err
+			report, err := client.Cleanup(cmd.Context(), args[0])
+			if err != nil {
+				if len(report.Failed) == 0 {
+					return err
+				}
+				for _, f := range report.Failed {
+					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), cleanupFailureLine(f))
+				}
+				return &cleanupIncompleteError{date: args[0], report: report, first: err}
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "cleaned up sessions from %s\n", args[0])
 			return nil
 		},
 	}
 }
+
+// cleanupFailureLine describes ONE session a cleanup sweep did not discard,
+// worded for that session's own outcome (forgectl#666). The sweep carries on
+// past a failure, so a single note describing only the first — and claiming
+// "nothing was removed" for a sweep that removed plenty — misled.
+func cleanupFailureLine(f pr.CleanupFailure) string {
+	switch {
+	case errors.Is(f.Err, pr.ErrTmuxBudgetSpent):
+		return fmt.Sprintf("skipped %s: tmux stopped answering earlier in this sweep, so it was not attempted and "+
+			"nothing of it was touched. Once tmux responds, run 'forgectl pr cleanup' again",
+			termsafe.QuotePathIfUnsafe(f.Path))
+	case errors.Is(f.Err, pr.ErrWindowKillTimedOut):
+		return windowKillTimeoutNote(f.Path, !errors.Is(f.Err, pr.ErrRecordNotParked))
+	default:
+		return fmt.Sprintf("failed %s: %s", termsafe.QuotePathIfUnsafe(f.Path), termsafe.SafeLine(f.Err.Error()))
+	}
+}
+
+// cleanupIncompleteError is what `pr cleanup` returns when any session was not
+// discarded. Each one has already been named on stderr, so the message is the
+// tally rather than a repeat of the first failure; Unwrap keeps that first
+// failure reachable, and the exit stays 1 as it always was.
+type cleanupIncompleteError struct {
+	date   string
+	report pr.CleanupReport
+	first  error
+}
+
+func (e *cleanupIncompleteError) Error() string {
+	return fmt.Sprintf("cleanup of %s: %d session(s) not cleaned up (named above), %d cleaned up",
+		e.date, len(e.report.Failed), e.report.Discarded)
+}
+
+func (e *cleanupIncompleteError) Unwrap() error { return e.first }
 
 func newPrKeysCmd() *cobra.Command {
 	return &cobra.Command{

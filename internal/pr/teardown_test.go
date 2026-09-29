@@ -258,7 +258,7 @@ func TestCleanup_DateScoped(t *testing.T) {
 	pToday, _ := seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 1}, today)
 	pOther, _ := seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 2}, other)
 
-	if err := c.Cleanup(context.Background(), "2026-07-08"); err != nil {
+	if _, err := c.Cleanup(context.Background(), "2026-07-08"); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	if _, err := os.Stat(pToday); !os.IsNotExist(err) {
@@ -474,7 +474,7 @@ func TestCleanup_WritesOneRowPairPerRecord(t *testing.T) {
 	seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 32}, day)
 	pOther, _ := seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 33}, other)
 
-	if err := c.Cleanup(context.Background(), "2026-07-08"); err != nil {
+	if _, err := c.Cleanup(context.Background(), "2026-07-08"); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	if _, err := os.Stat(pOther); err != nil {

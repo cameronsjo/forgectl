@@ -383,7 +383,7 @@ func TestRepairAndCleanup_CompleteWithoutALockTimeout(t *testing.T) {
 	if _, err := c.Repair(context.Background(), RepairOpts{Record: path, Apply: true, Rollback: true, Yes: true}); err != nil {
 		t.Fatalf("repair --rollback deadlocked or failed: %v", err)
 	}
-	if err := c.Cleanup(context.Background(), time.Now().UTC().Format("2006-01-02")); err != nil {
+	if _, err := c.Cleanup(context.Background(), time.Now().UTC().Format("2006-01-02")); err != nil {
 		t.Fatalf("cleanup deadlocked or failed: %v", err)
 	}
 }

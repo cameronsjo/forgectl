@@ -187,7 +187,7 @@ func TestCleanup_HungTmuxSharesOneBudgetAndSkipsTheRest(t *testing.T) {
 	live, wss, stale := seedCleanupSweep(t, c, 3)
 
 	var err error
-	runBounded(t, "Cleanup", func() { err = c.Cleanup(context.Background(), time.Now().UTC().Format("2006-01-02")) })
+	runBounded(t, "Cleanup", func() { _, err = c.Cleanup(context.Background(), time.Now().UTC().Format("2006-01-02")) })
 	if !errors.Is(err, ErrWindowKillTimedOut) {
 		t.Fatalf("Cleanup err = %v, want the first session's ErrWindowKillTimedOut", err)
 	}
@@ -239,7 +239,7 @@ func TestCleanup_BudgetChargesOnlyTmuxTime(t *testing.T) {
 		WithTTYCheck(func() bool { return false }))
 	live, _, _ := seedCleanupSweep(t, c, 2)
 
-	if err := c.Cleanup(context.Background(), time.Now().UTC().Format("2006-01-02")); err != nil {
+	if _, err := c.Cleanup(context.Background(), time.Now().UTC().Format("2006-01-02")); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	for _, path := range live {
