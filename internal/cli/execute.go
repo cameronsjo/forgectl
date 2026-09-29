@@ -46,6 +46,30 @@ var isInteractiveTTY = func() bool {
 
 func interactiveTTY(stdinTTY, stdoutTTY bool) bool { return stdinTTY && stdoutTTY }
 
+// fangTrustsProbe reports whether to believe the background fang detected.
+// Fang v1.0.0 probes only when os.Stdout is a TTY (and otherwise passes a
+// hard-coded light placeholder), so both halves are required: fang actually
+// probed, and forgectl's own policy allows a probe in this environment
+// (stdin TTY, NO_COLOR unset, TERM not screen*/tmux*). Package-level so tests
+// can pin either answer. It reads os.Stdout, not root.OutOrStdout(): fang
+// checks os.Stdout even when SetOut redirects its writer.
+var fangTrustsProbe = func() bool {
+	return fangTrustsProbeFor(
+		cterm.IsTerminal(os.Stdout.Fd()),
+		theme.Env{
+			StdinTTY:  term.IsTerminal(int(os.Stdin.Fd())),
+			StdoutTTY: term.IsTerminal(int(os.Stdout.Fd())),
+			Term:      os.Getenv("TERM"),
+			NoColor:   os.Getenv("NO_COLOR") != "",
+		},
+	)
+}
+
+// fangTrustsProbeFor is the pure decision behind fangTrustsProbe.
+func fangTrustsProbeFor(fangProbed bool, env theme.Env) bool {
+	return fangProbed && theme.ShouldProbe(theme.ModeAuto, env)
+}
+
 // The startup steps Execute runs, behind package-level seams so the entry
 // tests can replace each with a fail-if-called sentinel. That is how the
 // ordering guarantee is asserted rather than merely read: `surface _exec` must
@@ -272,7 +296,7 @@ func fangOptions(version, commit string, th theme.Theme) []fang.Option {
 		// fang renders --help, --version and every error frame, so without
 		// this the most-seen surface in the binary is the only one not drawing
 		// from the palette.
-		fang.WithColorSchemeFunc(th.Fang()),
+		fang.WithColorSchemeFunc(th.Fang(fangTrustsProbe())),
 	}
 }
 
