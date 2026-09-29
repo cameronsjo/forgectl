@@ -359,9 +359,9 @@ func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, from *Doc, path0 string) (
 //
 // matchFragment also returns the anchor a rendered link jumps to: the
 // matching heading's Slug, the id the page renders on it, or for a "^id"
-// block reference the indexed block id itself, which a vault page renders
-// as the block's id (blockIDTransformer). The anchor is always a value
-// from the indexed Doc, never the fragment as written. A vault fragment
+// block reference blockAnchor of the indexed block id, the id a vault page
+// renders on the block (blockIDTransformer). The anchor is always built
+// from the indexed Doc, never from the fragment as written. A vault fragment
 // takes the FIRST heading that matches, so a duplicate heading's link lands
 // where the resolver says it does, never on its "-1" twin. An empty
 // fragment yields no anchor.
@@ -372,7 +372,7 @@ func matchFragment(kind RootKind, doc *Doc, fragment string) (anchor string, ok 
 	if id, isBlock := strings.CutPrefix(fragment, "^"); isBlock {
 		for _, b := range doc.BlockIDs {
 			if b == id {
-				return b, true
+				return blockAnchor(b), true
 			}
 		}
 		return "", false

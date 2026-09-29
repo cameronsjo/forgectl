@@ -446,20 +446,21 @@ func (commentBlockParser) CanAcceptIndentedLine() bool { return false }
 // ── ^block-id ──────────────────────────────────────────────────────────────
 
 // blockIDTransformer renders Obsidian's trailing block-id marker
-// ("text ^blk-1") as an id on the block, so a [[note#^blk-1]] link can jump
-// to it, and removes the marker text from the page. It runs on every vault
-// instance, render and scan alike; the scan's BlockIDs still come from
-// scanBlockIDs, and every id placed here is one of them: the same
-// blockIDPattern on a line that is neither code nor comment.
+// ("text ^blk-1") as an id on the block (blockAnchor: id="^blk-1"), so a
+// [[note#^blk-1]] link can jump to it, and removes the marker text from
+// the page. It runs on every vault instance, render and scan alike; the
+// scan's BlockIDs still come from scanBlockIDs, and every id placed here
+// is one of them: the same blockIDPattern on a line that is neither code
+// nor comment.
 //
 // It is deliberately narrower than the scan. It handles only a paragraph
 // (the id goes on its <p>) and a tight list item's text (on its <li>), and
 // only when the marker ends the block's last line, follows whitespace or
-// starts the line ("r^2" is text), leaves the block with other content,
-// and sits wholly in the block's trailing text. Anything else, such as a
-// heading (whose id is its slug), a standalone "^id" line, or a marker
-// under inline markup, keeps its text and gets no id: its link still
-// opens the note, at the top.
+// starts the line ("r^2" is text), leaves the block with other content of
+// any kind, and sits wholly in the block's trailing text. Anything else,
+// such as a heading (whose id is its slug), a standalone "^id" block, or a
+// marker under inline markup, keeps its text and gets no id: its link
+// still opens the note, at the top.
 type blockIDTransformer struct{}
 
 func (blockIDTransformer) Transform(doc *ast.Document, reader text.Reader, _ parser.Context) {
@@ -485,9 +486,18 @@ func (blockIDTransformer) Transform(doc *ast.Document, reader text.Reader, _ par
 			continue
 		}
 		if id, ok := stripBlockID(b, source); ok {
-			target.SetAttributeString("id", []byte(id))
+			target.SetAttributeString("id", []byte(blockAnchor(id)))
 		}
 	}
+}
+
+// blockAnchor is the id a block with Obsidian block id id renders under:
+// "^id", as Obsidian writes it. The '^' keeps it in its own namespace: a
+// heading's id is a goldmark slug, which never holds a '^', and neither
+// does any id the reader's own page furniture uses, so a block can never
+// take either one's id.
+func blockAnchor(id string) string {
+	return "^" + id
 }
 
 // blockIDTarget is the node a marker at the end of block b gives its id to:
@@ -514,9 +524,9 @@ func blockIDTarget(b ast.Node, source []byte) ast.Node {
 }
 
 // stripBlockID removes a trailing " ^id" from block b's inline text and
-// returns id. It changes nothing and reports false unless every byte from
-// the whitespace before the '^' to the end of the id sits in b's trailing
-// Text children and some content is left before it.
+// returns id. It changes nothing and reports false unless the marker, from
+// its '^' to the end of the id, sits in b's trailing Text children and some
+// content, of any kind, is left before it.
 func stripBlockID(b ast.Node, source []byte) (string, bool) {
 	lines := b.Lines()
 	if lines.Len() == 0 {
@@ -528,21 +538,26 @@ func stripBlockID(b ast.Node, source []byte) (string, bool) {
 	if m == nil || (m[0] > 0 && line[m[0]-1] != ' ' && line[m[0]-1] != '\t') {
 		return "", false
 	}
-	cut := last.Start + m[0]
+	caret := last.Start + m[0]
+	cut := caret
 	for cut > last.Start && (source[cut-1] == ' ' || source[cut-1] == '\t') {
 		cut--
 	}
-	// Walk back over the trailing children to the one holding cut. Every
-	// one of them must be Text: the marker is only ever plain text, and
-	// anything else there (a comment, a code span) means it is not.
+	// Walk back over the trailing Text children from the end of the line
+	// to cut, dropping each one wholly past it and trimming the one that
+	// straddles it. The walk stops at the first child that is not Text:
+	// whatever it is (emphasis, a code span, a link, a comment), it is
+	// the content before the marker, left as it is.
 	var drop []ast.Node
 	var trim *ast.Text
+	start := -1
 	c := b.LastChild()
 	for ; c != nil; c = c.PreviousSibling() {
 		t, ok := c.(*ast.Text)
 		if !ok {
-			return "", false
+			break
 		}
+		start = t.Segment.Start
 		if t.Segment.Start >= cut {
 			drop = append(drop, t)
 			continue
@@ -551,6 +566,11 @@ func stripBlockID(b ast.Node, source []byte) (string, bool) {
 			trim = t
 		}
 		break
+	}
+	// The Text walked must reach the '^'; if it does not, some other node
+	// holds part of the marker, and it is not one.
+	if start < 0 || start > caret {
+		return "", false
 	}
 	if c == nil {
 		// Nothing precedes the marker: a standalone "^id" block.
@@ -561,6 +581,12 @@ func stripBlockID(b ast.Node, source []byte) (string, bool) {
 	}
 	for _, n := range drop {
 		b.RemoveChild(b, n)
+	}
+	// "para\n^id" leaves "para" ending in the line break it had before
+	// the marker's line.
+	if t, ok := b.LastChild().(*ast.Text); ok {
+		t.SetSoftLineBreak(false)
+		t.SetHardLineBreak(false)
 	}
 	return string(line[m[2]:m[3]]), true
 }
@@ -763,6 +789,9 @@ var (
 
 // rawAnchorDepth is depth after raw, an inline raw-HTML tag: one more for
 // an <a> open tag, one fewer (never below zero) for its close tag.
+// Known divergence: HTML5 also ends a comment at "--!>", which goldmark's
+// comment rule does not, so an "<a" the browser reads as commented out can
+// still count here; that only ever leaves a wikilink as source text.
 func rawAnchorDepth(depth int, raw *ast.RawHTML, source []byte) int {
 	var tag []byte
 	for i := 0; i < raw.Segments.Len(); i++ {

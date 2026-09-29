@@ -151,20 +151,20 @@ func TestRenderVault_WikilinkAnchorMissLinksDoc(t *testing.T) {
 }
 
 // TestRenderVault_WikilinkBlockRefLinksDoc: a block link that resolves
-// jumps to the block, whose id the target page renders
-// (blockIDTransformer), by the indexed id rather than the "^" fragment.
+// jumps to the block, whose "^blk-1" id the target page renders
+// (blockIDTransformer), built from the indexed id; url.URL escapes the '^'.
 func TestRenderVault_WikilinkBlockRefLinksDoc(t *testing.T) {
 	idx := newLinksTestIndex(t)
 	from := mustFindDoc(t, idx, "vault", "index.md")
 	out := renderVaultFrom(t, idx, from, "[[notes/anchors#^blk-1]]\n")
-	if !strings.Contains(out, `<a class="wikilink" href="/doc/vault/notes/anchors.md#blk-1" rel="nofollow">`) {
+	if !strings.Contains(out, `<a class="wikilink" href="/doc/vault/notes/anchors.md#%5Eblk-1" rel="nofollow">`) {
 		t.Errorf("block link: %s", out)
 	}
 	if strings.Contains(out, "wikilink-miss") {
 		t.Errorf("block link marked as a miss: %s", out)
 	}
 	for _, a := range tagAttrs(out) {
-		if a[0] == "href" && a[1] != "/doc/vault/notes/anchors.md#blk-1" {
+		if a[0] == "href" && a[1] != "/doc/vault/notes/anchors.md#%5Eblk-1" {
 			t.Errorf("block link href = %q", a[1])
 		}
 	}
