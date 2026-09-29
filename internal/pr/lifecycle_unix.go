@@ -56,8 +56,14 @@ func (e *lockBusyError) Error() string {
 //     split into a locked shell and an unlocked *Locked core, and a composite
 //     verb (repair, drain, cleanup) takes the lock ONCE and calls the cores.
 //   - SHORT HOLDS ONLY. The lock covers record reads and writes and the
-//     admission decision. It is never held across a clone, a gh call, or a
-//     tmux new-window; the phase record is what bridges those.
+//     admission decision. It is never held across network work (a clone, a gh
+//     call) or a tmux new-window; the phase record is what bridges those.
+//     ONE CARVE-OUT: an audited destructive verb may remove a local directory
+//     under the hold — teardown's sandbox removal and `pr findings cleanup`
+//     both do — because its intent row, the removal, and its completion row
+//     must be atomic with respect to `pr repair --prune`, which compacts the
+//     audit log by rename under this lock. The carve-out covers local removal
+//     only; it never licenses the network or dispatch work above.
 //   - BOUNDED WAIT. flock has no timeout, so acquisition polls LOCK_NB every
 //     lockPollInterval up to c.lockWait and then returns *lockBusyError.
 //   - KERNEL RELEASE. Closing the descriptor releases the lock, including on
