@@ -64,11 +64,33 @@ func (e *lockBusyError) Error() string {
 //     must be atomic with respect to `pr repair --prune`, which compacts the
 //     audit log by rename under this lock. The carve-out covers local removal
 //     only; it never licenses the network or dispatch work above.
+//     SECOND CARVE-OUT: that same teardown's tmux window kill (killReviewWindow),
+//     which runs first and under a single teardownTmuxBudget deadline. It cannot
+//     move out from under the lock: the window is found by the review's name, so
+//     after release a new admission of the same ref could create a same-named
+//     window and the kill would hit it. The deadline, not a release, is what
+//     keeps a hung tmux from holding the lock — it holds the lock for the budget
+//     plus exec's pipeWaitDelay (500 ms) at most, not indefinitely. When the
+//     budget runs out the window's state is unknown, so teardown fails closed:
+//     the record is parked in needs-repair and nothing is removed. The local
+//     removal that follows (restore renames, os.RemoveAll) is os work with no
+//     subprocess and no context, so it is bounded by neither; that is why it is
+//     a carve-out rather than a budget.
 //   - BOUNDED WAIT. flock has no timeout, so acquisition polls LOCK_NB every
 //     lockPollInterval up to c.lockWait and then returns *lockBusyError.
 //   - KERNEL RELEASE. Closing the descriptor releases the lock, including on
 //     process death, so a crashed holder never wedges the next caller. The
 //     holder body left in the file is diagnostic text, never a liveness claim.
+//   - ADVISORY, SAME-UID. flock binds only processes that ask for it. The audit
+//     log's append (last-byte separator check, write, and a short-write
+//     rollback Truncate) is atomic only against holders of this lock; a
+//     same-uid writer that skips it can interleave with the check, and a
+//     rollback can then truncate that writer's bytes. That is an accepted
+//     residual, not a gap to close: the writer already owns the 0700 dir and
+//     every record and log in it, so it can forge or delete any row directly
+//     and the lock was never a defense against it. The log's file-type check
+//     (a FIFO or symlink is refused) covers the cases that could hang or
+//     redirect the appender. (forgectl#570)
 //
 // Two hosts sharing one $HOME (NFS, a synced volume) share this directory,
 // and flock over NFS is advisory at best. Out of scope; stated so it is on the

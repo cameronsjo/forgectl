@@ -184,6 +184,17 @@ func filteredEnvironment(overrides map[string]string, unset []string) []string {
 	return filtered
 }
 
+// pipeWaitDelay bounds how long Wait lingers for the output pipes after the
+// child has exited or its context was cancelled. Without it, a grandchild that
+// inherits stdout/stderr (a script's `sleep 30 &`) keeps the pipe open, so
+// CommandContext's SIGKILL of the direct child does not end the call: Wait
+// blocks until the grandchild lets go. That defeats every context deadline
+// callers rely on, including the lifecycle-lock-held tmux budget in
+// internal/pr (#556). 500 ms is ample for a live child to flush what it already
+// wrote and short enough not to matter against the seconds-scale deadlines
+// above it.
+const pipeWaitDelay = 500 * time.Millisecond
+
 // runAndWrap runs an already-configured *exec.Cmd (Stdin/Env set by the
 // caller, Stderr not yet wired) and converts its outcome into the Runner
 // contract: trimmed stdout on success, or a *CommandError — carrying stderr,
@@ -198,11 +209,24 @@ func runAndWrap(cmd *exec.Cmd, ceiling int, preparingMsg, successMsg, failureMsg
 	slog.Debug(preparingMsg, "cmd", name, "args", shown)
 	start := time.Now()
 
+	// Unlike RunSensitive, runAndWrap has no Complete flag: it returns full
+	// stdout or an error, and a stderr cut to its tail says so via
+	// CommandError.StderrDropped.
 	stderr := &tailBuffer{limit: maxStderrTail}
 	stdout := &ceilingWriter{limit: ceiling, proc: func() *os.Process { return cmd.Process }}
 	cmd.Stderr = stderr
 	cmd.Stdout = stdout
+	cmd.WaitDelay = pipeWaitDelay
 	err := cmd.Run()
+	// A child that exited 0 while a grandchild still held the pipes (git over
+	// ssh ControlPersist) succeeded; WaitDelay only stopped us waiting on them.
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		slog.Debug("Command succeeded but a descendant kept its output pipes open; stopped waiting.", "cmd", name)
+		err = nil
+	}
+	// The ceiling check comes AFTER the WaitDelay forgiveness and overrides it,
+	// so an overflow can never be excused as a clean exit: ErrOutputTooLarge
+	// always wins.
 	if stdout.over {
 		// Checked before err: the kill is ours, so err only says "signal:
 		// killed" or echoes the write error. No stdout rides along, masked or
