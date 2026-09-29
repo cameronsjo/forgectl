@@ -125,6 +125,10 @@ type Config struct {
 	// Host-sensitive consumers (projects, review) must refuse loudly rather
 	// than run against a silently-defaulted github.com — see DecodeDegraded.
 	decodeDegraded bool
+	// decodeErr is the parse failure behind decodeDegraded, already worded for
+	// the operator (file, line and column). Nil unless the file existed and
+	// failed to parse — an absent file and an unreadable one never set it.
+	decodeErr error
 }
 
 // DecodeDegraded reports whether the loaded config file failed to decode and
@@ -135,6 +139,14 @@ type Config struct {
 // refuse with a config error instead.
 func (c Config) DecodeDegraded() bool {
 	return c.decodeDegraded
+}
+
+// DecodeError returns why config.toml failed to parse, or nil when it parsed
+// or was absent. The error names the file and, for a syntax error, the line
+// and column. Execute refuses to run most commands on a non-nil value rather
+// than fall back to defaults the operator never chose (forgectl#653).
+func (c Config) DecodeError() error {
+	return c.decodeErr
 }
 
 // HasLaunchSection distinguishes an explicitly present but empty [launch]
@@ -1033,7 +1045,9 @@ func (d LaunchDefaults) isZero() bool {
 }
 
 // Load reads the config file. A missing file is not an error — it yields
-// defaults. On a malformed file, Load logs a loud warning instead of silently
+// defaults. Load itself stays tolerant of a malformed file (and records the
+// parse failure in DecodeError); cli.Execute is what refuses to run most
+// commands on it. On a malformed file, Load logs a loud warning instead of silently
 // returning a zero Config (which would also wipe the [launch] profiles); it
 // returns whatever the decoder populated before erroring. Load runs before
 // SetupLogger, so the warning reaches the default stderr handler regardless of
@@ -1067,8 +1081,23 @@ func LoadPath(path string) Config {
 		slog.Warn("Failed to decode config file; using built-in defaults for unreadable sections.",
 			"path", termsafe.QuotePath(path), "error", termsafe.SafeLine(err.Error()))
 		cfg.decodeDegraded = true
+		if decodeErr != nil {
+			cfg.decodeErr = describeDecodeError(path, decodeErr)
+		}
 	}
 	return cfg
+}
+
+// describeDecodeError words a config parse failure for the operator: the file
+// and, when the decoder located the fault, its line and column. The underlying
+// error stays on the chain.
+func describeDecodeError(path string, err error) error {
+	var pe toml.ParseError
+	if errors.As(err, &pe) && pe.Position.Line > 0 {
+		return fmt.Errorf("config file %s does not parse (line %d, column %d): %w",
+			termsafe.QuotePath(path), pe.Position.Line, pe.Position.Col, err)
+	}
+	return fmt.Errorf("config file %s does not parse: %w", termsafe.QuotePath(path), err)
 }
 
 // DecodeStrict decodes an immutable config snapshot and retains table

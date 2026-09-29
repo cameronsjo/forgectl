@@ -50,10 +50,10 @@ each domain already knows how to make — it never reimplements one:
   forgectl version   the Homebrew tap's reachability + forgectl's own currency
 
 Every check runs independently — one failing check never hides another. An
-unconfigured optional integration (no bench dir, no trust store) reports "-"
-(skipped), not a failure.
+unconfigured optional integration (no bench dir, no trust anchor or trust
+store) reports "-" (skipped), not a failure.
 
-Exit codes: 0 every check ok (or skipped), 1 at least one check failed.`,
+Exit codes: 0 every check ok, warn, or skipped; 1 at least one check failed.`,
 		Args: cobra.NoArgs,
 		// SilenceUsage/SilenceErrors mirror update.go's identical setting —
 		// --json is spec'd to emit ONLY the machine-readable report on

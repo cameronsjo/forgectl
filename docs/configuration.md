@@ -7,6 +7,8 @@ Optional. forgectl runs with sensible defaults and no config file. To persist pr
 - macOS: `~/Library/Application Support/forgectl/config.toml`
 - Linux: `~/.config/forgectl/config.toml`
 
+A `config.toml` that exists but does not parse is an error, not a fallback to defaults: every command exits `2` and names the file, line and column. Only an absent file selects the defaults. `forgectl config` (alias `cfg`), `doctor`, `launch edit` and `launch doctor`, plus help, version and completion, still run so you can find and fix the file. `init` does not: it refuses to rewrite a file it cannot parse.
+
 User workflow files share the same base: `<config dir>/workflows/<name>.workflow.toml`.
 
 ```toml

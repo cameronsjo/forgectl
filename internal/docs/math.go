@@ -120,11 +120,20 @@ func opensMath(line []byte, delim int) bool {
 // dialect (Obsidian) has it, and off for docs roots, where "$" is far more
 // often shell (PATH=$HOME/bin:$PATH) than math. With it off, only the $$…$$
 // form is inline math, and a lone $ is text.
-type mathInlineParser struct{ singleDollar bool }
+//
+// midLineDisplay lets $$…$$ open and close anywhere in a line. It is on for
+// vault roots (Obsidian's inline $$…$$) and off for docs roots, where "$$" in
+// prose is far more often the shell's PID ("tmp=/tmp/x.$$; rm /tmp/y.$$")
+// or currency than math (forgectl#650). With it off, $$ is math only when it
+// is block-shaped: the opening $$ has nothing but whitespace before it on its
+// line, and the closing $$ nothing but whitespace after it on its line. That
+// still takes the display math the block parser hands down: $$ lines straight
+// after paragraph text, and $$ blocks inside a list item or blockquote.
+type mathInlineParser struct{ singleDollar, midLineDisplay bool }
 
 func (mathInlineParser) Trigger() []byte { return []byte{'$'} }
 
-func (p mathInlineParser) Parse(_ ast.Node, block text.Reader, _ parser.Context) ast.Node {
+func (p mathInlineParser) Parse(parent ast.Node, block text.Reader, _ parser.Context) ast.Node {
 	line, _ := block.PeekLine()
 	delim := 1
 	if len(line) > 1 && line[1] == '$' {
@@ -134,6 +143,10 @@ func (p mathInlineParser) Parse(_ ast.Node, block text.Reader, _ parser.Context)
 		return nil
 	}
 	if !opensMath(line, delim) {
+		return nil
+	}
+	blockShaped := delim == 2 && !p.midLineDisplay
+	if blockShaped && !startsItsLine(parent, block) {
 		return nil
 	}
 
@@ -166,6 +179,12 @@ func (p mathInlineParser) Parse(_ ast.Node, block text.Reader, _ parser.Context)
 			}
 			if delim == 2 {
 				if i+1 < len(line) && line[i+1] == '$' {
+					// The first unescaped $$ is the closer; a block-shaped
+					// one must end its line, or there is no math here.
+					if blockShaped && !util.IsBlank(line[i+2:]) {
+						block.SetPosition(startLine, startPos)
+						return nil
+					}
 					tex = append(tex, line[:i]...)
 					block.Advance(i + 2)
 					return newMathInline(tex, true, block, startLine, startPos)
@@ -187,6 +206,22 @@ func (p mathInlineParser) Parse(_ ast.Node, block text.Reader, _ parser.Context)
 		}
 		block.AdvanceLine()
 	}
+}
+
+// startsItsLine reports whether the reader sits at the start of its line in
+// parent's content, whitespace aside. The line segments are parent's own, so
+// a container prefix ("> ", list indentation) is already outside them.
+func startsItsLine(parent ast.Node, block text.Reader) bool {
+	idx, pos := block.Position()
+	lines := parent.Lines()
+	if idx < 0 || idx >= lines.Len() {
+		return false
+	}
+	start := lines.At(idx).Start
+	if start > pos.Start {
+		return false
+	}
+	return util.IsBlank(block.Source()[start:pos.Start])
 }
 
 // newMathInline builds the node, or rewinds and returns nil for empty math
@@ -498,9 +533,9 @@ func (mathRenderer) renderBlock(w util.BufWriter, source []byte, n ast.Node, ent
 // mathExtension wires the parsers, the fence transformer and the renderer as
 // one unit, so no node kind is ever produced without a renderer for it.
 //
-// singleDollar turns on inline $…$ (see mathInlineParser). The zero value is
-// the docs-root dialect.
-type mathExtension struct{ singleDollar bool }
+// singleDollar turns on inline $…$ and midLineDisplay a $$…$$ anywhere in a
+// line (see mathInlineParser). The zero value is the docs-root dialect.
+type mathExtension struct{ singleDollar, midLineDisplay bool }
 
 func (e mathExtension) Extend(m goldmark.Markdown) {
 	m.Parser().AddOptions(mathBlockParserOptions()...)
