@@ -106,6 +106,14 @@ type Client struct {
 	// proxy-only network fails at its first request under that default, which
 	// is what this field exists to fix.
 	windowEnv func() ([]string, error)
+
+	// notifier posts the desktop notification the drainer sends when it
+	// launches a queued review. nil — the default — sends nothing. It is an
+	// interface rather than *notify.Client so this package need not import
+	// the notification sink at all; internal/cli wires the real one.
+	notifier interface {
+		Notify(ctx context.Context, title, body string) error
+	}
 }
 
 // resolveWindowEnv is the single reader of windowEnv, so the nil default and
@@ -213,6 +221,14 @@ func WithRecordFS(rfs recordFS) Option {
 // milliseconds.
 func WithLockWait(d time.Duration) Option {
 	return func(c *Client) { c.lockWait = d }
+}
+
+// WithNotifier supplies the notifier the drainer calls once per successful
+// launch. nil leaves notifications off, which is the default.
+func WithNotifier(n interface {
+	Notify(ctx context.Context, title, body string) error
+}) Option {
+	return func(c *Client) { c.notifier = n }
 }
 
 // New builds a Client over the given Runner.

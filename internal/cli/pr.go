@@ -13,6 +13,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/module"
 	netpkg "github.com/cameronsjo/forgectl/internal/net"
+	"github.com/cameronsjo/forgectl/internal/notify"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
@@ -44,6 +45,9 @@ func newPrCmd(deps module.Deps) *cobra.Command {
 	client := pr.New(deps.Runner,
 		pr.WithApprovalTheme(deps.Theme),
 		pr.WithWindowEnv(func() ([]string, error) { return injectedWindowEnv(cfg) }),
+		// The drainer's review-started notification (#192). A no-op off
+		// macOS; `pr drain --no-notify` suppresses it per pass.
+		pr.WithNotifier(notify.New(deps.Runner)),
 	)
 	netClient := netpkg.New(deps.Runner, netpkg.WithNetConfig(cfg.Net))
 	// err discarded: a failed config-dir lookup yields "", which LoadReviewed

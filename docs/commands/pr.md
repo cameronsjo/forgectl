@@ -137,6 +137,7 @@ forgectl pr drain                 # one pass, then exit (the default)
 forgectl pr drain --watch         # keep draining every --interval (default 60s)
 forgectl pr drain --dry-run       # print what a pass would launch, create nothing
 forgectl pr drain --json          # emit the pass report as JSON
+forgectl pr drain --no-notify     # launch without the macOS notification
 ```
 
 Every pass prints one line, because a default install discards the `slog` handler and a `--watch` operator needs to see it happening without one:
@@ -146,6 +147,8 @@ pass=3 free=2 queued=5 launching=1 launched=2 failed=0 next=1m0s
 ```
 
 `--dry-run` prints `N queued, M free — would launch owner/repo#41, owner/repo#42` instead, and claims, prepares, and launches nothing.
+
+**Each successful launch posts a macOS notification**, titled `Review started` with the `owner/repo#N` ref as its body, so a `--watch` drainer running in a background pane still tells you when a review is ready to look at. Nothing is sent on `--dry-run`, for a launch that failed, or on any platform but macOS, and `--no-notify` turns it off for the pass. A notification that fails to send is logged at warn level and never changes the pass report or the exit code: the review launched either way. The title and body reach `osascript` as positional arguments, never as script text.
 
 **A launch failure is retried, not fatal.** It records `attempts`, `lastError`, and `lastAttemptAt` on the record and returns it to `queued` for a later pass to try again. At **3** failed attempts the record is parked in `needs-repair` with a reason naming the count and the last error (`drain: 3 attempts, last: …`), and no further pass claims it — `forgectl pr repair` is what settles it from there.
 

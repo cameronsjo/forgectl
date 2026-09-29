@@ -33,6 +33,7 @@ func newPrDrainCmd(client *pr.Client, cfg config.Config) *cobra.Command {
 		interval time.Duration
 		dryRun   bool
 		asJSON   bool
+		noNotify bool
 	)
 	cmd := &cobra.Command{
 		Use:   "drain",
@@ -47,6 +48,7 @@ forever, and 'forgectl pr repair' is what settles it.
   forgectl pr drain --watch         keep draining every --interval (default 60s)
   forgectl pr drain --dry-run       print what a pass would launch, create nothing
   forgectl pr drain --json          emit the pass report as JSON
+  forgectl pr drain --no-notify     launch without the macOS notification
 
 A drainer killed mid-pass leaves 'preparing' or 'launching' records, which
 occupy their slots until 'forgectl pr repair' settles them — the next pass
@@ -56,7 +58,12 @@ Exit code for a single pass (the default): 0 when the queue was empty or
 every launch succeeded; 1 when the cap or a record could not be read, or any
 launch in the pass failed. --watch runs until canceled and exits non-zero
 only after three consecutive whole-pass refusals; a per-record failure is
-logged and the loop continues.`,
+logged and the loop continues.
+
+On macOS each successful launch posts a desktop notification (title "Review
+started", body the owner/repo#N ref). Nothing is sent on --dry-run, for a
+failed launch, or on other platforms, and a notification that fails to send is
+logged and never changes the exit code.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if watch && once && cmd.Flags().Changed("once") {
@@ -68,7 +75,7 @@ logged and the loop continues.`,
 			if interval <= 0 {
 				interval = defaultDrainInterval
 			}
-			opts := pr.DrainOpts{DryRun: dryRun}
+			opts := pr.DrainOpts{DryRun: dryRun, NoNotify: noNotify}
 			if !watch {
 				report, err := client.Drain(cmd.Context(), cfg, opts)
 				if err != nil {
@@ -88,6 +95,7 @@ logged and the loop continues.`,
 	cmd.Flags().DurationVar(&interval, "interval", defaultDrainInterval, "how often --watch drains (requires --watch)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what a pass would launch and create nothing")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the pass report as JSON")
+	cmd.Flags().BoolVar(&noNotify, "no-notify", false, "do not send a desktop notification when a queued review launches (macOS only)")
 	return cmd
 }
 

@@ -27,6 +27,13 @@ package pr
 //   [x] `--dry-run` claims nothing, launches nothing, and reports would-launch
 //   [x] A mixed pass (one success, one failure) reports both items
 //   [x] An empty queue reports zero queued/launched/failed and no items
+//
+// Drain notifications (#192)
+//   [x] A mixed pass notifies exactly once, for the launched ref only
+//   [x] `--dry-run` never notifies
+//   [x] NoNotify suppresses the notification on a real launch
+//   [x] A notifier error changes nothing in the outcome or the counts
+//   [x] A refused pass (and a record refused at claim) never notifies
 
 import (
 	"context"
@@ -740,4 +747,166 @@ func TestDrain_EmptyQueueReportsZero(t *testing.T) {
 	if report.Free != DefaultMaxConcurrentReviews {
 		t.Errorf("Free = %d, want the full default cap", report.Free)
 	}
+}
+
+// recordingNotifier is the drain tests' notifier double: it records every
+// (title, body) and returns err from each call.
+type recordingNotifier struct {
+	mu    sync.Mutex
+	calls [][2]string
+	err   error
+}
+
+func (n *recordingNotifier) Notify(_ context.Context, title, body string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.calls = append(n.calls, [2]string{title, body})
+	return n.err
+}
+
+func (n *recordingNotifier) got() [][2]string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([][2]string(nil), n.calls...)
+}
+
+// drainNotifyClient is drainClient with a recording notifier wired in.
+func drainNotifyClient(t *testing.T, dir string, run *exec.FakeRunner, n *recordingNotifier) *Client {
+	t.Helper()
+	fakeClaude(t)
+	return New(run, WithSessionsDir(dir), WithFindingsDir(t.TempDir()),
+		WithTmuxSession("forgectl"), WithLockWait(2*time.Second), WithNotifier(n))
+}
+
+func TestDrain_NotifiesOncePerSuccessfulLaunchOnly(t *testing.T) {
+	dir := t.TempDir()
+	// Same fixture as the mixed pass: the oldest launches, the second fails.
+	run := drainLaunchRunner(map[int]error{2: errors.New("boom: second agent refused")})
+	n := &recordingNotifier{}
+	c := drainNotifyClient(t, dir, run, n)
+	base := time.Now().UTC().Add(-time.Hour)
+	seedQueued(t, c, testRef(1), base, 0)
+	seedQueued(t, c, testRef(2), base.Add(time.Minute), 0)
+
+	report, err := c.Drain(context.Background(), config.Config{}, DrainOpts{})
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if report.Launched != 1 || report.Failed != 1 {
+		t.Fatalf("report = %+v, want Launched=1 Failed=1", report)
+	}
+	got := n.got()
+	want := [2]string{"Review started", testRef(1).String()}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("notifications = %q, want exactly %q", got, want)
+	}
+}
+
+func TestDrain_DryRunNeverNotifies(t *testing.T) {
+	dir := t.TempDir()
+	n := &recordingNotifier{}
+	c := drainNotifyClient(t, dir, drainLaunchRunner(nil), n)
+	seedQueued(t, c, testRef(1), time.Now().UTC(), 0)
+
+	report, err := c.Drain(context.Background(), config.Config{}, DrainOpts{DryRun: true})
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(report.Items) != 1 || report.Items[0].Outcome != drainOutcomeWouldLaunch {
+		t.Fatalf("items = %+v, want one would-launch item", report.Items)
+	}
+	if got := n.got(); len(got) != 0 {
+		t.Errorf("notifications = %q, want none on --dry-run", got)
+	}
+}
+
+func TestDrain_NoNotifySuppresses(t *testing.T) {
+	dir := t.TempDir()
+	n := &recordingNotifier{}
+	c := drainNotifyClient(t, dir, drainLaunchRunner(nil), n)
+	seedQueued(t, c, testRef(1), time.Now().UTC(), 0)
+
+	report, err := c.Drain(context.Background(), config.Config{}, DrainOpts{NoNotify: true})
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if report.Launched != 1 {
+		t.Fatalf("report = %+v, want Launched=1", report)
+	}
+	if got := n.got(); len(got) != 0 {
+		t.Errorf("notifications = %q, want none under NoNotify", got)
+	}
+}
+
+func TestDrain_NotifierErrorDoesNotFailTheLaunch(t *testing.T) {
+	dir := t.TempDir()
+	n := &recordingNotifier{err: errors.New("osascript notification: boom")}
+	c := drainNotifyClient(t, dir, drainLaunchRunner(nil), n)
+	seedQueued(t, c, testRef(1), time.Now().UTC(), 0)
+
+	report, err := c.Drain(context.Background(), config.Config{}, DrainOpts{})
+	if err != nil {
+		t.Fatalf("Drain: %v, want nil — a failed notification must not fail the pass", err)
+	}
+	if len(n.got()) != 1 {
+		t.Fatalf("notifications = %q, want the one attempted call", n.got())
+	}
+	if report.Launched != 1 || report.Failed != 0 || report.Refusal != "" {
+		t.Fatalf("report = %+v, want Launched=1 Failed=0 and no refusal", report)
+	}
+	if len(report.Items) != 1 || report.Items[0].Outcome != drainOutcomeLaunched || report.Items[0].Error != "" {
+		t.Fatalf("items = %+v, want one clean launched item", report.Items)
+	}
+	if bc := readRecordByRef(t, dir, testRef(1)); bc.Phase != PhaseActive {
+		t.Errorf("phase = %q, want active — the review launched", bc.Phase)
+	}
+}
+
+func TestDrain_RefusedPassNeverNotifies(t *testing.T) {
+	t.Run("whole pass refused on an unreadable record", func(t *testing.T) {
+		dir := t.TempDir()
+		n := &recordingNotifier{}
+		c := drainNotifyClient(t, dir, drainLaunchRunner(nil), n)
+		seedQueued(t, c, testRef(1), time.Now().UTC(), 0)
+		bad := []byte(`{"workspace":"/tmp/x","ref":"o/r#9","createdAt":"2026-09-11T00:00:00Z","futureKey":true}` + "\n")
+		if err := os.WriteFile(filepath.Join(dir, "o-r-9-1.json"), bad, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		report, err := c.Drain(context.Background(), config.Config{}, DrainOpts{})
+		if err != nil {
+			t.Fatalf("Drain: %v", err)
+		}
+		if report.Refusal == "" {
+			t.Fatal("expected a pass refusal")
+		}
+		if got := n.got(); len(got) != 0 {
+			t.Errorf("notifications = %q, want none on a refused pass", got)
+		}
+	})
+	t.Run("queued local record refused at claim", func(t *testing.T) {
+		dir := t.TempDir()
+		n := &recordingNotifier{}
+		c := drainNotifyClient(t, dir, drainLaunchRunner(nil), n)
+		local := newLocalRef("abc1234def")
+		bc := Breadcrumb{
+			Ref: local.String(), Agent: "claude", CreatedAt: time.Now().UTC(), Local: true,
+			Provenance: ReviewProvenanceOperatorAuthored.persisted(),
+			Version:    breadcrumbVersion, Phase: PhaseQueued, Revision: 1,
+		}
+		if _, err := writeBreadcrumb(c.SessionsDir(), local, bc); err != nil {
+			t.Fatalf("seed local queued record: %v", err)
+		}
+
+		report, err := c.Drain(context.Background(), config.Config{}, DrainOpts{})
+		if err != nil {
+			t.Fatalf("Drain: %v", err)
+		}
+		if len(report.Items) != 1 || report.Items[0].Outcome != drainOutcomeRefused {
+			t.Fatalf("items = %+v, want one refused item", report.Items)
+		}
+		if got := n.got(); len(got) != 0 {
+			t.Errorf("notifications = %q, want none for a record refused at claim", got)
+		}
+	})
 }
