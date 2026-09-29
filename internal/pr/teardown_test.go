@@ -606,13 +606,13 @@ func assertParkedNotDiscarded(t *testing.T, c *Client, path, ws string, err erro
 
 // TestTeardown_HungTmuxParksTheRecordAndReleasesTheLock is forgectl#556. The
 // tmux kill stays under the lifecycle lock, so a wedged tmux must be cut off by
-// teardownTmuxBudget, and because the window's state is then unknown the
+// lockedTmuxBudget, and because the window's state is then unknown the
 // teardown fails closed: it parks the record in needs-repair and removes
 // nothing, rather than discarding a record whose window may still be live.
 func TestTeardown_HungTmuxParksTheRecordAndReleasesTheLock(t *testing.T) {
-	old := teardownTmuxBudget
-	teardownTmuxBudget = 100 * time.Millisecond
-	t.Cleanup(func() { teardownTmuxBudget = old })
+	old := lockedTmuxBudget
+	lockedTmuxBudget = 100 * time.Millisecond
+	t.Cleanup(func() { lockedTmuxBudget = old })
 
 	for _, tc := range []struct{ name, hang string }{
 		{"resolution hangs", ""},
@@ -647,9 +647,9 @@ func TestTeardown_HungTmuxParksTheRecordAndReleasesTheLock(t *testing.T) {
 // it was, and the error must say so (ErrRecordNotParked) rather than let a
 // caller report a parked record that was never written.
 func TestTeardown_HungTmuxOnALegacyRecordSaysItWasNotParked(t *testing.T) {
-	old := teardownTmuxBudget
-	teardownTmuxBudget = 100 * time.Millisecond
-	t.Cleanup(func() { teardownTmuxBudget = old })
+	old := lockedTmuxBudget
+	lockedTmuxBudget = 100 * time.Millisecond
+	t.Cleanup(func() { lockedTmuxBudget = old })
 	ref := Ref{Owner: "o", Repo: "r", Number: 24}
 	h := &hangingTmux{FakeRunner: reviewServer(mustWindowName(t, ref))}
 	c := New(h, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
@@ -686,9 +686,9 @@ func TestTeardown_RealTmuxGrandchildHoldingThePipesIsBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	old := teardownTmuxBudget
-	teardownTmuxBudget = 300 * time.Millisecond
-	t.Cleanup(func() { teardownTmuxBudget = old })
+	old := lockedTmuxBudget
+	lockedTmuxBudget = 300 * time.Millisecond
+	t.Cleanup(func() { lockedTmuxBudget = old })
 
 	ref := Ref{Owner: "o", Repo: "r", Number: 23}
 	c := New(exec.OSRunner{}, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),

@@ -145,6 +145,12 @@ func parsePanes(out string) ([]Pane, error) {
 // sessions can each hold a `pr-o-r-1` — so matching on name alone would find a
 // window in somebody else's session, and killing it during teardown would take
 // down an unrelated review.
+//
+// Names are not unique INSIDE a session either — tmux accepts a second
+// `new-window -n` with a name already in use — so two exact matches refuse with
+// ErrAmbiguousWindow, the way ResolveSessionExact refuses duplicate sessions.
+// Returning the first would let listing order decide which window a teardown
+// kills or an attach selects.
 func (c *Client) ResolveWindowExact(ctx context.Context, session SessionIdentity, name string) (WindowIdentity, error) {
 	if err := ValidateSessionID(session.ID); err != nil {
 		return WindowIdentity{}, err
@@ -153,17 +159,24 @@ func (c *Client) ResolveWindowExact(ctx context.Context, session SessionIdentity
 	if err != nil {
 		return WindowIdentity{}, err
 	}
-	selector := c.currentSelector()
-	for _, w := range windows {
-		if w.SessionID != session.ID || w.Name != name {
+	var found *Window
+	for i := range windows {
+		if windows[i].SessionID != session.ID || windows[i].Name != name {
 			continue
 		}
-		if err := ValidateWindowID(w.ID); err != nil {
-			return WindowIdentity{}, err
+		if found != nil {
+			return WindowIdentity{}, fmt.Errorf("%w: %q is held by both %s and %s in session %s; refusing to guess which one",
+				ErrAmbiguousWindow, name, found.ID, windows[i].ID, session.ID)
 		}
-		return w.Identity(selector), nil
+		found = &windows[i]
 	}
-	return WindowIdentity{}, fmt.Errorf("%w: no window named %q in session %s", ErrObjectGone, name, session.ID)
+	if found == nil {
+		return WindowIdentity{}, fmt.Errorf("%w: no window named %q in session %s", ErrObjectGone, name, session.ID)
+	}
+	if err := ValidateWindowID(found.ID); err != nil {
+		return WindowIdentity{}, err
+	}
+	return found.Identity(c.currentSelector()), nil
 }
 
 // NewWindow creates a window under the generation-qualified session and
