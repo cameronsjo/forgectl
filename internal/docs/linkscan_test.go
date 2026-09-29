@@ -302,6 +302,30 @@ func TestScanDoc_OverCap_TitleFromPrefixNoLinkMeta(t *testing.T) {
 	}
 }
 
+// TestScanDoc_OverCap_TitleSkipsFrontmatterComments: an over-cap document's
+// line-scan title comes from the body, not from a YAML "# comment" line in
+// its frontmatter.
+func TestScanDoc_OverCap_TitleSkipsFrontmatterComments(t *testing.T) {
+	for name, tc := range map[string]struct{ head, want string }{
+		"body heading wins": {"---\n# yaml comment\ntitle: t\n---\n# Real\n", "Real"},
+		"no body heading":   {"---\n# yaml comment\n---\n\n", "big"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "big.md")
+			if err := os.WriteFile(p, []byte(padToSize(tc.head, maxScanBytes+1)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			meta, err := scanDoc(p, "big.md")
+			if err != nil {
+				t.Fatalf("scanDoc: %v", err)
+			}
+			if meta.Title != tc.want {
+				t.Errorf("Title = %q, want %q", meta.Title, tc.want)
+			}
+		})
+	}
+}
+
 func TestScanDoc_AtCap_FullyScanned(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "edge.md")
 	content := padToSize("# Edge\n\n[[target]]\n", maxScanBytes)
