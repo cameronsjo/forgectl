@@ -60,6 +60,11 @@ func TestWriteAllowlist(t *testing.T) {
 	if len(s.Permissions.Allow) == 0 {
 		t.Error("allow list is empty; read-only inspection should be permitted")
 	}
+	for _, a := range s.Permissions.Allow {
+		if strings.HasPrefix(a, "Bash(rg") {
+			t.Errorf("written PR-mode allow list grants rg: %q", a)
+		}
+	}
 	for _, want := range []string{
 		"Bash(gh pr view 42 --repo github.com/o/r)",
 		"Bash(gh pr diff 42 --repo github.com/o/r)",
@@ -111,25 +116,24 @@ func TestDenyPosting_CoversMutatingGhGroups(t *testing.T) {
 	}
 }
 
-// TestAllowReadOnly_LayersRgOverBaseReadOnly covers the baseReadOnly
-// extraction: PR-mode's allowReadOnly must still carry every baseReadOnly entry
-// (the shared surface) plus exactly rg (baseReadOnly deliberately excludes rg —
-// ripgrep's --pre flag is a command-execution primitive local mode's
-// no-approval-gate posture can't accept), with no accidental loss or
-// duplication from the append-based composition. It must carry NO gh entry:
-// the gh reads are generated per session as exact rules (prGhReadRules), and a
-// static gh prefix here is the forgectl#673 hole coming back.
-func TestAllowReadOnly_LayersRgOverBaseReadOnly(t *testing.T) {
-	for _, want := range baseReadOnly {
-		if !contains(allowReadOnly, want) {
-			t.Errorf("allowReadOnly missing shared baseReadOnly entry %q", want)
+// TestAllowReadOnly_IsExactlyBaseReadOnly covers PR mode's static surface: it
+// must equal baseReadOnly, with NO rg and NO gh entry. rg's --pre runs a
+// program per searched file, and a quoted spelling (`rg --"pre"=sh …`) slips
+// past any deny pattern, so rg cannot be granted in any form (forgectl#673).
+// The gh reads are generated per session as exact rules (prGhReadRules); a
+// static gh prefix here is the #673 hole coming back.
+func TestAllowReadOnly_IsExactlyBaseReadOnly(t *testing.T) {
+	if !equalArgs(allowReadOnly, baseReadOnly) {
+		t.Errorf("allowReadOnly = %v, want exactly baseReadOnly %v", allowReadOnly, baseReadOnly)
+	}
+	perms, err := prGhReadRules("github.com", Ref{Owner: "o", Repo: "r", Number: 1})
+	if err != nil {
+		t.Fatalf("prGhReadRules: %v", err)
+	}
+	for _, a := range append(append([]string{}, allowReadOnly...), perms...) {
+		if strings.HasPrefix(a, "Bash(rg") {
+			t.Errorf("PR-mode allow list grants rg (%q); rg --pre is a command-execution primitive", a)
 		}
-	}
-	if !contains(allowReadOnly, "Bash(rg:*)") {
-		t.Errorf("allowReadOnly missing entry %q", "Bash(rg:*)")
-	}
-	if len(allowReadOnly) != len(baseReadOnly)+1 {
-		t.Errorf("allowReadOnly has %d entries, want exactly baseReadOnly (%d) + rg", len(allowReadOnly), len(baseReadOnly))
 	}
 	for _, a := range allowReadOnly {
 		if strings.HasPrefix(a, "Bash(gh") {
@@ -273,7 +277,7 @@ func TestPrGhReadRules_RefusesValuesOutsideTheCharsets(t *testing.T) {
 // TestLocalAllowReadOnly_IsExactlyBaseReadOnly covers the other extraction
 // consumer: local mode grants no rg (no approval-gate backstop) and no gh
 // entries at all, i.e. localAllowReadOnly must equal baseReadOnly exactly
-// (not allowReadOnly, which layers rg on top).
+// (allowReadOnly is the same set; PR mode adds only its generated gh reads).
 func TestLocalAllowReadOnly_IsExactlyBaseReadOnly(t *testing.T) {
 	if len(localAllowReadOnly) != len(baseReadOnly) {
 		t.Fatalf("localAllowReadOnly has %d entries, want %d (== baseReadOnly)", len(localAllowReadOnly), len(baseReadOnly))

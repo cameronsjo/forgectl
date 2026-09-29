@@ -616,8 +616,8 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// its first request, and this file's own comment above names that failure
 	// mode: an empty pane and no error anywhere. Resolving here rather than at
 	// construction keeps a bad [proxy] launch_profile from failing `pr list`.
-	// For a PR on a host other than github.com it also pins gh to that host and
-	// empties the token variables (reviewWindowEnv, forgectl#673).
+	// It also empties the gh token variables the review cannot need, and on a
+	// host other than github.com pins GH_HOST (reviewWindowEnv, forgectl#673).
 	windowEnv, err := c.reviewWindowEnv(sess)
 	if err != nil {
 		return Dispatch{}, err

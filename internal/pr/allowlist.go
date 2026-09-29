@@ -29,14 +29,21 @@ type permissions struct {
 
 // baseReadOnly is the read-only inspection surface both review modes share:
 // read the tree and run read-only git/file commands. Every entry is
-// inspection, never mutation or posting. Deliberately excludes `rg`: ripgrep's
-// `--pre <cmd>` flag runs an arbitrary program per searched file, a real
-// command-execution primitive. allowReadOnly (PR mode) accepts that risk
-// behind PostReview's human approval gate; local mode has no such gate, so
-// localAllowReadOnly grants exactly baseReadOnly and never adds rg back — the
-// built-in Grep tool (already granted) covers search without shelling out to
-// a binary that can execute arbitrary commands. Kept as a single shared slice
-// so the two modes' genuinely common surface cannot drift out of sync.
+// inspection, never mutation or posting. Kept as a single shared slice so the
+// two modes' genuinely common surface cannot drift out of sync.
+//
+// Neither mode grants `rg`. ripgrep's `--pre COMMAND` runs COMMAND on every
+// searched file, so `rg --pre sh x file` executes a script straight out of a
+// hostile PR head, and that command reaches the network with the window's
+// environment, whatever the gh rules say. A deny rule cannot close it: Claude
+// Code matches Bash rules against the command TEXT, and the shell removes
+// quotes after that, so `rg --"pre"=sh x file` and `rg --p"r"e sh x file`
+// carry no `--pre` substring yet still run the preprocessor (both measured on
+// ripgrep 14.1.0). `-z/--search-zip` also spawns subprocesses: a fixed set of
+// decompressors (gzip, bzip2, xz, lz4, brotli, zstd), each resolved on PATH. The built-in Grep tool covers
+// search without a subprocess the agent can steer. PR mode used to accept rg
+// behind PostReview's approval gate, but that gate bounds posting, not what a
+// command does while it runs (forgectl#673).
 var baseReadOnly = []string{
 	"Read",
 	"Grep",
@@ -51,12 +58,10 @@ var baseReadOnly = []string{
 }
 
 // allowReadOnly is the static part of a PR-mode review's permitted actions:
-// baseReadOnly plus rg (see baseReadOnly's doc — safe here behind the approval
-// gate). The gh reads are NOT here: prGhReadRules generates them per session,
-// naming the PR's own number, host, and base repository (forgectl#673).
-var allowReadOnly = append(append([]string{}, baseReadOnly...),
-	"Bash(rg:*)",
-)
+// exactly baseReadOnly (no rg — see baseReadOnly's doc). The gh reads are NOT
+// here: prGhReadRules generates them per session, naming the PR's own number,
+// host, and base repository (forgectl#673).
+var allowReadOnly = append([]string{}, baseReadOnly...)
 
 // prGhReadCommands are the only gh invocations a PR-mode review agent may run,
 // spelled exactly as the agent must type them. Each names the PR by number and
@@ -178,10 +183,10 @@ func writeAllowlist(workspace, host string, ref Ref) (string, error) {
 // entries as baseReadOnly, copied rather than aliased — a bare slice-header
 // assignment here would share baseReadOnly's backing array, so an in-place
 // mutation of either slice (e.g. index-assignment) would silently corrupt the
-// other, defeating the point of the two having independent names. Unlike
-// allowReadOnly, it grants no rg (no approval-gate backstop — see
-// baseReadOnly's doc) and no gh entries at all — local mode permits no
-// GitHub round-trip, not even a read-only one.
+// other, defeating the point of the two having independent names. Like
+// allowReadOnly it grants no rg (see baseReadOnly's doc); unlike PR mode it
+// gets no generated gh reads either — local mode permits no GitHub
+// round-trip, not even a read-only one.
 var localAllowReadOnly = append([]string{}, baseReadOnly...)
 
 // localDenyNetwork is deliberately broader than denyPosting: it denies every

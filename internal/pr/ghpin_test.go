@@ -10,16 +10,31 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 )
 
-// TestPinReviewWindowEnv_GitHubComIsUnchanged: on github.com the pin adds
-// nothing, so a github.com review's window argv is what it was before #673.
-func TestPinReviewWindowEnv_GitHubComIsUnchanged(t *testing.T) {
-	in := []string{"HTTPS_PROXY=http://proxy.example:8080", "GH_HOST=ambient.example"}
-	got := pinReviewWindowEnv(in, "github.com")
-	if !slices.Equal(got, in) {
-		t.Errorf("pinReviewWindowEnv on github.com = %v, want %v unchanged", got, in)
+// TestPinReviewWindowEnv_GitHubComEmptiesOnlyEnterpriseTokens: a github.com
+// review never needs the enterprise token pair, so its window carries them
+// empty, including over a caller-supplied value. It keeps GH_TOKEN (gh on
+// github.com needs it) and leaves GH_HOST alone (the allowed reads name
+// github.com in --repo).
+func TestPinReviewWindowEnv_GitHubComEmptiesOnlyEnterpriseTokens(t *testing.T) {
+	in := []string{
+		"HTTPS_PROXY=http://proxy.example:8080",
+		"GH_HOST=ambient.example",
+		"GH_TOKEN=keep",
+		"GH_ENTERPRISE_TOKEN=leak",
 	}
-	if got := pinReviewWindowEnv(nil, "github.com"); len(got) != 0 {
-		t.Errorf("pinReviewWindowEnv(nil, github.com) = %v, want empty", got)
+	got := pinReviewWindowEnv(in, "github.com")
+	want := []string{
+		"HTTPS_PROXY=http://proxy.example:8080",
+		"GH_HOST=ambient.example",
+		"GH_TOKEN=keep",
+		"GH_ENTERPRISE_TOKEN=",
+		"GITHUB_ENTERPRISE_TOKEN=",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("pinReviewWindowEnv on github.com = %v, want %v", got, want)
+	}
+	if got := pinReviewWindowEnv(nil, "github.com"); !slices.Equal(got, []string{"GH_ENTERPRISE_TOKEN=", "GITHUB_ENTERPRISE_TOKEN="}) {
+		t.Errorf("pinReviewWindowEnv(nil, github.com) = %v, want only the emptied enterprise pair", got)
 	}
 }
 

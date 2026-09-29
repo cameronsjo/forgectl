@@ -402,10 +402,11 @@ func TestLaunch_CarriesTheWindowEnvIntoTmuxArgv(t *testing.T) {
 	}
 }
 
-// TestLaunch_WithoutWindowEnvPassesNoEFlags is the control: the default client
-// must produce the argv it produced before the env resolver existed, or every
-// existing `pr` user's behavior changed.
-func TestLaunch_WithoutWindowEnvPassesNoEFlags(t *testing.T) {
+// TestLaunch_WithoutWindowEnvPassesOnlyTheTokenPin is the control: with no
+// resolver configured, a github.com review's window gets no -e beyond the
+// forgectl#673 pin, which empties the enterprise token pair. Anything more
+// would change every existing `pr` user's window environment.
+func TestLaunch_WithoutWindowEnvPassesOnlyTheTokenPin(t *testing.T) {
 	claudeBin := fakeHarnessBin(t, "claude")
 	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
 
@@ -416,8 +417,18 @@ func TestLaunch_WithoutWindowEnvPassesNoEFlags(t *testing.T) {
 	if _, err := c.Launch(context.Background(), sess, config.Config{}); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	if contains(fake.Last().Args, "-e") {
-		t.Errorf("an -e flag appeared with no resolver configured: %v", fake.Last().Args)
+	args := fake.Last().Args
+	var envs []string
+	for i, a := range args {
+		if a == "--" {
+			break
+		}
+		if a == "-e" && i+1 < len(args) {
+			envs = append(envs, args[i+1])
+		}
+	}
+	if want := []string{"GH_ENTERPRISE_TOKEN=", "GITHUB_ENTERPRISE_TOKEN="}; !slices.Equal(envs, want) {
+		t.Errorf("window -e entries = %v, want exactly %v", envs, want)
 	}
 }
 
