@@ -13,9 +13,11 @@ import (
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/yuin/goldmark"
 	highlighting "github.com/yuin/goldmark-highlighting/v2"
+	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	goldmarkhtml "github.com/yuin/goldmark/renderer/html"
+	"github.com/yuin/goldmark/text"
 	"go.abhg.dev/goldmark/frontmatter"
 	"gopkg.in/yaml.v3"
 )
@@ -537,6 +539,15 @@ func render(source []byte, kind RootKind) (string, error) {
 // resolve, or any other root kind, renders exactly as render does. resolve
 // runs under renderMu, so it must never render.
 func renderWith(source []byte, kind RootKind, resolve wikilinkResolver) (string, error) {
+	rendered, _, err := renderHidden(source, kind, resolve)
+	return rendered, err
+}
+
+// renderHidden is renderWith that also returns the source range of every
+// %% comment the page hides (vault roots only; nil otherwise), taken from
+// the same parse the page is rendered from, so countWords can leave comment
+// text out of the reading estimate.
+func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (string, []text.Segment, error) {
 	// Route through the frontmatter-aware parser only when a well-formed
 	// block actually opens the document. The extension's opener is greedy —
 	// any leading --- fence starts a block, and an unterminated one consumes
@@ -560,13 +571,65 @@ func renderWith(source []byte, kind RootKind, resolve wikilinkResolver) (string,
 	if kind == RootVault && resolve != nil {
 		ctx.Set(wikilinkResolverKey, resolve)
 	}
-	err := md.Convert(source, &buf, parser.WithContext(ctx))
+	// md.Convert split in two, so the parsed tree can be read for comments.
+	doc := md.Parser().Parse(text.NewReader(source), parser.WithContext(ctx))
+	err := md.Renderer().Render(&buf, source, doc)
+	var hidden []text.Segment
+	if err == nil && kind == RootVault {
+		hidden = hiddenComments(doc, ctx)
+	}
 	renderMu.Unlock()
 	if err != nil {
-		return "", fmt.Errorf("render markdown: %w", err)
+		return "", nil, fmt.Errorf("render markdown: %w", err)
 	}
 	body := balanceFragment(string(sanitizer.SanitizeBytes(dropDuplicateSVGNamespaces(buf.Bytes()))))
-	return frontmatterHTML(ctx) + transformCallouts(body, kind), nil
+	return frontmatterHTML(ctx) + transformCallouts(body, kind), hidden, nil
+}
+
+// hiddenComments returns the source range of every %% comment in a parsed
+// vault document: each inline comment span, each block comment's lines
+// (opener and closer included), and each comment in a paragraph
+// commentTransformer removed from the tree.
+func hiddenComments(doc ast.Node, pc parser.Context) []text.Segment {
+	var hidden []text.Segment
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch c := n.(type) {
+		case *commentSpanNode:
+			hidden = append(hidden, text.NewSegment(c.Start, c.Stop))
+			return ast.WalkSkipChildren, nil
+		case *commentBlockNode:
+			if lines := c.Lines(); lines.Len() > 0 {
+				hidden = append(hidden, text.NewSegment(lines.At(0).Start, lines.At(lines.Len()-1).Stop))
+			}
+			return ast.WalkSkipChildren, nil
+		}
+		return ast.WalkContinue, nil
+	})
+	return append(hidden, removedComments(pc)...)
+}
+
+// cutSegments returns source with every segment in cuts removed; cuts may
+// overlap and come in any order.
+func cutSegments(source []byte, cuts []text.Segment) []byte {
+	if len(cuts) == 0 {
+		return source
+	}
+	sorted := append([]text.Segment(nil), cuts...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Start < sorted[j].Start })
+	out := make([]byte, 0, len(source))
+	at := 0
+	for _, c := range sorted {
+		lo, hi := max(c.Start, at), min(c.Stop, len(source))
+		if lo >= hi {
+			continue
+		}
+		out = append(out, source[at:lo]...)
+		at = hi
+	}
+	return append(out, source[at:]...)
 }
 
 // OutlineItem is one "On this page" entry — an h2 or h3 with the id
@@ -605,11 +668,12 @@ func RenderDocFor(kind RootKind, source []byte, idx *Index, from *Doc) (Rendered
 			return idx.wikilinkTarget(from, ref)
 		})
 	}
-	rendered, err := renderWith(source, kind, resolve)
+	rendered, hidden, err := renderHidden(source, kind, resolve)
 	if err != nil {
 		return RenderedDoc{}, err
 	}
-	words := countWords(source)
+	// A vault page's %% comments are not on the page, so they are not read.
+	words := countWords(cutSegments(source, hidden))
 	minutes := (words + 199) / 200
 	if minutes < 1 {
 		minutes = 1

@@ -746,3 +746,26 @@ func TestRenderVault_PercentInsideWikilinkIsNotACloser(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderVault_WordsSkipComments: a vault page's reading estimate counts
+// only what the page shows. Inline comments, a block comment (opener and
+// closer lines included), and a line holding only a comment all drop out;
+// a docs root, which renders %% as text, still counts it.
+func TestRenderVault_WordsSkipComments(t *testing.T) {
+	const src = "---\ntitle: x y z\n---\n# Title %%one two%%\n\nshown%%glued%%word %%three%%\n\n%%\nfour five six\n%%\n\n%%seven eight%%\n\nlast\n"
+	vault, err := RenderDocFor(RootVault, []byte(src), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "#", "Title", "shownword", "last".
+	if vault.Words != 4 {
+		t.Errorf("vault words = %d, want 4", vault.Words)
+	}
+	docs, err := RenderDocFor(RootDocs, []byte(src), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := countWords([]byte(src)); docs.Words != want {
+		t.Errorf("docs words = %d, want the raw count %d", docs.Words, want)
+	}
+}
