@@ -58,14 +58,16 @@ import (
 //   - stdout is kept in the exported CommandError.Output field. Error() does
 //     not include it, but any code that reaches the *CommandError, directly or
 //     through errors.As, can read it. Treat a CommandError from a command that
-//     may print a secret as secret-bearing; internal/tasks/token.go drops such
-//     an error for this reason.
+//     may print a secret as secret-bearing: internal/tasks/token.go drops such
+//     an error whole, and internal/clip's Paste passes it through
+//     WithoutOutput.
 //   - both streams are bounded. stderr keeps its last 64 KiB (maxStderrTail),
 //     drains and discards the rest, and records the dropped count on
 //     CommandError.StderrDropped; a chatty stderr never fails a command.
 //     stdout has a hard ceiling (maxStdoutBytes) that kills the child and
 //     fails with ErrOutputTooLarge and no partial output, so a caller never
-//     parses a prefix as the whole stream.
+//     parses a prefix as the whole stream. RunDiscardingStdout
+//     (DiscardingRunner) keeps no stdout and so has no ceiling.
 //
 // Two seams narrow this, and neither makes a true secret safe, because argv
 // stays readable through ps for the life of the process. WithMaskedAssignments
@@ -90,6 +92,18 @@ type Runner interface {
 // grow a method it cannot meaningfully exercise.
 type StreamingRunner interface {
 	RunStreaming(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error
+}
+
+// DiscardingRunner is the optional seam for a caller that runs a command only
+// for whether it succeeds and throws its stdout away. RunDiscardingStdout
+// behaves like Runner.Run on the failure path (a *CommandError carrying the
+// masked stderr tail and the exit code, with an empty Output) but sends stdout
+// to a discard sink instead of capturing it, so a command that prints more
+// than maxStdoutBytes still succeeds. A caller type-asserts for it and falls
+// back to Run, so a Runner that does not implement it (a test fake, a
+// policy-enforcing wrapper) keeps working unchanged and is never bypassed.
+type DiscardingRunner interface {
+	RunDiscardingStdout(ctx context.Context, name string, args ...string) error
 }
 
 // HomebrewNoAutoUpdate disables Homebrew's own implicit "auto-update and
@@ -126,6 +140,13 @@ func (r OSRunner) ceiling() int {
 // exits 1 precisely when its output has something to report).
 func (r OSRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
 	return runAndWrap(exec.CommandContext(ctx, name, args...), r.ceiling(), "Preparing to run command.", "Successfully ran command.", "Failed to run command.", maskFrom(ctx), name, args) //nolint:gosec // structural argv is the purpose of this execution seam
+}
+
+// RunDiscardingStdout executes name+args like Run but discards stdout rather
+// than capturing it, so no stdout ceiling applies (DiscardingRunner).
+func (r OSRunner) RunDiscardingStdout(ctx context.Context, name string, args ...string) error {
+	_, err := runAndWrap(exec.CommandContext(ctx, name, args...), discardStdout, "Preparing to run command, discarding stdout.", "Successfully ran command, discarding stdout.", "Failed to run command, discarding stdout.", maskFrom(ctx), name, args) //nolint:gosec // structural argv is the purpose of this execution seam
+	return err
 }
 
 // RunWithInput executes name+args with stdin piped in and returns trimmed
@@ -213,7 +234,7 @@ func runAndWrap(cmd *exec.Cmd, ceiling int, preparingMsg, successMsg, failureMsg
 	// stdout or an error, and a stderr cut to its tail says so via
 	// CommandError.StderrDropped.
 	stderr := &tailBuffer{limit: maxStderrTail}
-	stdout := &ceilingWriter{limit: ceiling, proc: func() *os.Process { return cmd.Process }}
+	stdout := &ceilingWriter{limit: ceiling, discard: ceiling == discardStdout, proc: func() *os.Process { return cmd.Process }}
 	cmd.Stderr = stderr
 	cmd.Stdout = stdout
 	cmd.WaitDelay = pipeWaitDelay
@@ -318,6 +339,46 @@ func (e *CommandError) Error() string {
 }
 
 func (e *CommandError) Unwrap() error { return e.Err }
+
+// WithoutOutput returns err with the captured stdout removed from every
+// *CommandError it carries, for a caller whose command's stdout IS the
+// payload (pbpaste's is the clipboard): a nonzero exit does not mean stdout
+// was empty, and Output is readable by anything that holds the error. Stderr,
+// ExitCode and Err are kept, so errors.As and errors.Is behave as before.
+//
+// When err is itself a *CommandError, a copy is returned and err is left
+// alone. Every *CommandError deeper in the tree, through Unwrap() error and
+// through the Unwrap() []error of errors.Join or a multi-%w fmt.Errorf, is
+// cleared in place: a chain cannot be rebuilt around a copy, and the caller
+// that just received the error from the Runner is its only holder.
+func WithoutOutput(err error) error {
+	// A direct assertion, not errors.As: only the top-level case can be
+	// replaced by a copy.
+	if top, ok := err.(*CommandError); ok {
+		cp := *top
+		cp.Output = ""
+		clearOutputs(cp.Err)
+		return &cp
+	}
+	clearOutputs(err)
+	return err
+}
+
+// clearOutputs clears Output on every *CommandError in err's tree, in place.
+func clearOutputs(err error) {
+	switch e := err.(type) {
+	case nil:
+	case *CommandError:
+		e.Output = ""
+		clearOutputs(e.Err)
+	case interface{ Unwrap() []error }:
+		for _, inner := range e.Unwrap() {
+			clearOutputs(inner)
+		}
+	case interface{ Unwrap() error }:
+		clearOutputs(e.Unwrap())
+	}
+}
 
 // exitCodeOf extracts the process exit code from err via *os/exec.ExitError,
 // or -1 when err doesn't wrap one (the command never started, the context

@@ -15,6 +15,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -223,5 +225,37 @@ func TestPaste_NonDarwin_FailsFastWithoutTouchingRunner(t *testing.T) {
 	}
 	if len(fake.Calls) != 0 {
 		t.Errorf("Runner was called %d times, want 0 (guard must short-circuit)", len(fake.Calls))
+	}
+}
+
+// TestPaste_FailingPbpasteDropsItsStdoutFromTheError pins #664's own example:
+// pbpaste's stdout is the clipboard, and a failing Runner call keeps a
+// command's stdout on CommandError.Output. A fake pbpaste on PATH prints a
+// secret and exits nonzero through the real OSRunner; the error Paste returns
+// (and the line it logs) must carry none of it, while the exit code, the
+// stderr, and errors.As to *exec.CommandError survive.
+//
+// Mutation: drop the exec.WithoutOutput call in Paste and Output carries the
+// secret.
+func TestPaste_FailingPbpasteDropsItsStdoutFromTheError(t *testing.T) {
+	const secret = "clipboard-secret-664-value" //nolint:gosec // G101: a fake clipboard secret the error must not carry
+	dir := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s\\n' '" + secret + "'\necho 'pbpaste: no pasteboard' >&2\nexit 3\n"
+	if err := os.WriteFile(filepath.Join(dir, "pbpaste"), []byte(script), 0o700); err != nil { //nolint:gosec // G306: the fake pbpaste must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	logs := captureSlog(t)
+
+	_, err := New(exec.OSRunner{}, WithGOOS("darwin")).Paste(context.Background())
+	var cmdErr *exec.CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error = %T (%v), want a *exec.CommandError", err, err)
+	}
+	if cmdErr.Output != "" || strings.Contains(err.Error(), secret) || strings.Contains(logs.String(), secret) {
+		t.Fatalf("the clipboard rode the error:\nOutput: %q\nError(): %s\nlogs: %s", cmdErr.Output, err, logs.String())
+	}
+	if cmdErr.ExitCode != 3 || cmdErr.Stderr != "pbpaste: no pasteboard" {
+		t.Errorf("ExitCode = %d, Stderr = %q; want 3 and the child's stderr kept", cmdErr.ExitCode, cmdErr.Stderr)
 	}
 }
