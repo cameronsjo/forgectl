@@ -1,5 +1,5 @@
 {
-  "$comment": "Vendored test fixture for internal/pr/reviewsandbox_schema_test.go. Source: https://json.schemastore.org/claude-code-settings.json (served from https://www.schemastore.org/claude-code-settings.json), fetched 2026-09-29, Last-Modified Tue, 29 Sep 2026 16:01:48 GMT, sha256 6d4a6e3c7adedffce8079ccaef0a4bab5f5718b054421b4475c788a0ae4bedfe of the fetched bytes. Community-maintained (SchemaStore), checked against Claude Code 2.1.284. Not authoritative: `claude doctor` is (see TestReviewSettingsJSON_ClaudeDoctorAcceptsIt). Unmodified apart from this $comment key.",
+  "$comment": "Vendored test fixture for internal/pr/reviewsandbox_schema_test.go, written by scripts/vendor-claude-settings-schema.sh. Source: https://json.schemastore.org/claude-code-settings.json, fetched 2026-09-29, Last-Modified Tue, 29 Sep 2026 16:01:48 GMT, sha256 6d4a6e3c7adedffce8079ccaef0a4bab5f5718b054421b4475c788a0ae4bedfe of the fetched bytes. Copyright JSON Schema Store (Mads Kristensen and Contributors), licensed under the Apache License 2.0; see LICENSE-schemastore beside this file. Community-maintained, not authoritative: claude doctor is (see TestReviewSettingsJSON_ClaudeDoctorAcceptsIt). Unmodified apart from this $comment key.",
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://json.schemastore.org/claude-code-settings.json",
   "$defs": {

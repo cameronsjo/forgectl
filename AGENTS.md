@@ -76,6 +76,16 @@ Gotchas agent sessions have hit here. Each one cost a CI cycle or a debugging de
 - Local patches over Artificer and their retirement conditions live in
   `docs/artificer-adaptations.md`. Check it after every re-vendor.
 
+### Vendored Claude Code settings schema
+
+- `internal/pr/testdata/claude-code-settings.schema.json` is SchemaStore's
+  Claude Code settings schema (Apache-2.0; licence and NOTICE in
+  `internal/pr/testdata/LICENSE-schemastore`). The reviewer's `--settings`
+  document is validated against it, because one wrong-typed key makes Claude
+  Code drop the whole document silently (forgectl#694).
+- Refresh it only with `scripts/vendor-claude-settings-schema.sh`, which prints
+  the new sha256, then run `go test ./internal/pr/`.
+
 ### Review
 
 - CodeRabbit is capped at one review per hour and lags behind pushes. Do not

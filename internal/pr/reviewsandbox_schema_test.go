@@ -16,9 +16,12 @@ package pr
 //       source and version); remote and local profiles
 //   [x] control: the round-2 shape (allowMachLookup: false) and a typoed
 //       key both FAIL that schema, so the check can go red
+//   [x] the top-level keys the posture rests on are present by exact
+//       spelling (the schema's top level admits any key)
 //   [x] live contract, gated: `claude doctor` reports no invalid setting for
-//       the emitted document (FORGECTL_REQUIRE_CLAUDE_CONTRACT=1 makes a
-//       missing claude a failure rather than a skip)
+//       the emitted document, after a negative control proves it flags one
+//       it must reject (FORGECTL_REQUIRE_CLAUDE_CONTRACT=1 makes a missing
+//       claude a failure rather than a skip)
 
 import (
 	"context"
@@ -88,9 +91,29 @@ func decodeInstance(t *testing.T, doc string) map[string]any {
 func TestReviewSettingsJSON_ValidatesAgainstTheSettingsSchema(t *testing.T) {
 	schema := settingsSchema(t)
 	for name, doc := range emittedDocuments(t) {
-		if err := schema.Validate(decodeInstance(t, doc)); err != nil {
+		instance := decodeInstance(t, doc)
+		if err := schema.Validate(instance); err != nil {
 			t.Errorf("%s: the reviewer's --settings document fails the Claude Code settings schema, "+
 				"so Claude Code would drop ALL of it (permissions, sandbox, hooks) and run the reviewer unconfined: %v", name, err)
+		}
+		// The schema's top level allows any key (additionalProperties: true),
+		// so a misspelled top-level key would pass it silently. Pin the ones
+		// the posture rests on by their exact spelling.
+		if instance["disableAllHooks"] != true {
+			t.Errorf("%s: top-level disableAllHooks = %v, want true under that exact key", name, instance["disableAllHooks"])
+		}
+		perms, ok := instance["permissions"].(map[string]any)
+		if !ok {
+			t.Errorf("%s: no top-level permissions object under that exact key", name)
+			continue
+		}
+		for _, key := range []string{"allow", "deny"} {
+			if list, ok := perms[key].([]any); !ok || len(list) == 0 {
+				t.Errorf("%s: permissions.%s = %v, want a non-empty list", name, key, perms[key])
+			}
+		}
+		if _, ok := instance["sandbox"].(map[string]any); !ok {
+			t.Errorf("%s: no top-level sandbox object under that exact key", name)
 		}
 	}
 }
@@ -136,6 +159,13 @@ func TestSettingsSchema_RejectsTheShapesThatVoidTheDocument(t *testing.T) {
 // any it would reject under "Invalid settings"; a --settings document is
 // validated by the same rules, so each emitted document is placed as a
 // project settings file in a scratch directory and checked there.
+//
+// A negative control runs first: a document with the round-2 defect
+// (allowMachLookup as a boolean) MUST be flagged. Without it this test could
+// never go red — a path spelled differently from the one doctor prints (macOS
+// temp dirs sit behind the /var -> /private/var symlink, and doctor prints the
+// physical path), or a reworded "Invalid settings" heading, would pass every
+// document unread.
 func TestReviewSettingsJSON_ClaudeDoctorAcceptsIt(t *testing.T) {
 	required := os.Getenv("FORGECTL_REQUIRE_CLAUDE_CONTRACT") == "1"
 	claude, err := osexec.LookPath("claude")
@@ -148,33 +178,61 @@ func TestReviewSettingsJSON_ClaudeDoctorAcceptsIt(t *testing.T) {
 	if !required && testing.Short() {
 		t.Skip("-short: the claude contract check starts claude")
 	}
-	for name, doc := range emittedDocuments(t) {
-		dir := t.TempDir()
-		if err := os.Mkdir(filepath.Join(dir, ".claude"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		settingsPath := filepath.Join(dir, ".claude", "settings.json")
-		if err := os.WriteFile(settingsPath, []byte(doc), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
-		cmd := osexec.CommandContext(ctx, claude, "doctor") //nolint:gosec // G204: the claude binary resolved on PATH, fixed arguments
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "CLAUDECODE=")
-		out, runErr := cmd.CombinedOutput()
-		cancel()
-		if runErr != nil {
-			t.Fatalf("%s: claude doctor: %v\n%s", name, runErr, out)
-		}
-		text := string(out)
-		if !strings.Contains(text, "Claude Code doctor") {
-			t.Fatalf("%s: claude doctor printed nothing recognisable, so this check proves nothing:\n%s", name, text)
-		}
-		if _, after, found := strings.Cut(text, "Invalid settings"); found {
-			block, _, _ := strings.Cut(after, "\n\n")
-			if strings.Contains(block, settingsPath) {
-				t.Errorf("%s: claude rejects the reviewer's settings document, so it would drop all of it:%s", name, block)
-			}
+
+	docs := emittedDocuments(t)
+	bad := decodeInstance(t, docs["local"])
+	bad["sandbox"].(map[string]any)["network"].(map[string]any)["allowMachLookup"] = false
+	badDoc, err := json.Marshal(bad) // termsafe:allow-raw-json test fixture, never command output
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flagged, block := doctorFlags(t, claude, string(badDoc)); !flagged {
+		t.Fatalf("negative control: claude doctor did not flag a document it must reject "+
+			"(allowMachLookup as a boolean), so this test cannot see a rejection at all. Doctor output:\n%s", block)
+	}
+
+	for name, doc := range docs {
+		if flagged, block := doctorFlags(t, claude, doc); flagged {
+			t.Errorf("%s: claude rejects the reviewer's settings document, so it would drop all of it:%s", name, block)
 		}
 	}
+}
+
+// doctorFlags writes doc as a project settings file in a fresh scratch
+// directory, runs `claude doctor` there, and reports whether doctor lists
+// that file under "Invalid settings", with the text it matched against.
+// The directory is symlink-resolved first, because doctor prints the
+// physical path.
+func doctorFlags(t *testing.T, claude, doc string) (bool, string) {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
+	defer cancel()
+	cmd := osexec.CommandContext(ctx, claude, "doctor") //nolint:gosec // G204: the claude binary resolved on PATH, fixed arguments
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "CLAUDECODE=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("claude doctor: %v\n%s", err, out)
+	}
+	text := string(out)
+	if !strings.Contains(text, "Claude Code doctor") {
+		t.Fatalf("claude doctor printed nothing recognisable:\n%s", text)
+	}
+	_, after, found := strings.Cut(text, "Invalid settings")
+	if !found {
+		return false, text
+	}
+	block, _, _ := strings.Cut(after, "\n\n")
+	return strings.Contains(block, settingsPath), block
 }
