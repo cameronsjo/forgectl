@@ -33,6 +33,8 @@ workbench — no terminal-specific rendering, no popping between windows.
   forgectl docs serve --open             also open the system browser
   forgectl docs open [path]              point the browser at a doc on the
                                          already-running reader
+  forgectl docs read <file>              read one doc in the terminal with
+                                         mdroll, or in the HTML reader
   forgectl docs list [dir|file ...]      list the indexed docs, no server
   forgectl docs list --json              machine-readable output for scripts
   forgectl docs check [dir|file ...]     report broken links, broken anchors,
@@ -66,6 +68,7 @@ navigation cannot attach an Authorization header.`,
 	cmd.AddCommand(
 		newDocsServeCmd(deps),
 		newDocsOpenCmd(deps),
+		newDocsReadCmd(deps),
 		newDocsListCmd(deps),
 		newDocsCheckCmd(deps),
 		newDocsSearchCmd(deps),
