@@ -511,8 +511,44 @@ func TestLoad(t *testing.T) {
 			t.Error("Load() with malformed file: DecodeDegraded() = false, want true")
 		}
 		got.decodeDegraded = false
+		got.decodeErr = nil
 		if !reflect.DeepEqual(got, Config{}) {
 			t.Errorf("Load() with malformed file = %+v, want zero-value Config apart from the degraded marker", got)
+		}
+	})
+
+	t.Run("malformed TOML records the file and parse position", func(t *testing.T) {
+		dir := redirectConfigDir(t)
+		cfgDir := filepath.Join(dir, "forgectl")
+		if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte("log_level = \"info\"\nthis = = broken\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		derr := Load().DecodeError()
+		if derr == nil {
+			t.Fatal("DecodeError() = nil for a file that does not parse")
+		}
+		if !strings.Contains(derr.Error(), "config.toml") || !strings.Contains(derr.Error(), "line 2, column") {
+			t.Errorf("DecodeError() = %q, want the file name and a line/column", derr)
+		}
+	})
+
+	t.Run("absent and valid files have no DecodeError", func(t *testing.T) {
+		dir := redirectConfigDir(t)
+		if err := Load().DecodeError(); err != nil {
+			t.Errorf("absent file: DecodeError() = %v, want nil", err)
+		}
+		cfgDir := filepath.Join(dir, "forgectl")
+		if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte("log_level = \"info\"\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		if err := Load().DecodeError(); err != nil {
+			t.Errorf("valid file: DecodeError() = %v, want nil", err)
 		}
 	})
 

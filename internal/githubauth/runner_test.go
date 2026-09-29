@@ -5,11 +5,13 @@ import (
 	"errors"
 	"os"
 	osexec "os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/pr"
 )
 
 // helperProcessEnv gates the re-exec helper below: the test binary re-runs
@@ -588,5 +590,18 @@ func TestRunner_RunStreamingRefusesGh(t *testing.T) {
 	}
 	if len(fake.Calls) != 0 {
 		t.Fatalf("underlying calls = %d, want 0", len(fake.Calls))
+	}
+}
+
+// TestTokenScrubRuleIsSharedWithTheReviewWindow: the runner and the review
+// window (internal/pr) apply one scrub rule, pr.GHTokenVarsToScrub. It keys
+// on pr's own default host, so the two packages' spellings of github.com must
+// agree, or a pinned runner on DefaultHost would scrub what it should keep.
+func TestTokenScrubRuleIsSharedWithTheReviewWindow(t *testing.T) {
+	if got := pr.GHTokenVarsToScrub(DefaultHost); len(got) != 0 {
+		t.Errorf("GHTokenVarsToScrub(%q) = %v, want none on the default host", DefaultHost, got)
+	}
+	if got := pr.GHTokenVarsToScrub("github.example.com"); !slices.Equal(got, tokenEnvVars[:]) {
+		t.Errorf("GHTokenVarsToScrub(non-default) = %v, want %v", got, tokenEnvVars)
 	}
 }
