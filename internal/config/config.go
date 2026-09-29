@@ -812,9 +812,11 @@ type DocsConfig struct {
 	// RootKinds overrides docs.detectRootKind's filesystem-based inference
 	// for a root, keyed by the root path; internal/docs matches keys to
 	// roots by absolute cleaned path, so "." and "./docs" name the same
-	// roots the CLI derives. Values are RootKindDocs or RootKindVault; any
-	// other value is a config error (Validate names the key, the value, and
-	// the two allowed values).
+	// roots the CLI derives. A leading "~" or "~/" in a key expands to the
+	// home directory at use (ExpandHome), not at decode, so the printable
+	// effective config shows the path as written. Values are RootKindDocs or
+	// RootKindVault; any other value is a config error (Validate names the
+	// key, the value, and the two allowed values).
 	RootKinds map[string]string `toml:"root_kinds"`
 }
 
@@ -847,6 +849,43 @@ func (dc DocsConfig) Validate() error {
 // IsZero reports whether the [docs] section was absent or empty.
 func (dc DocsConfig) IsZero() bool {
 	return len(dc.Roots) == 0 && dc.Addr == "" && len(dc.RootKinds) == 0
+}
+
+// ExpandHome returns a copy of dc with a leading "~" or "~/" expanded to home
+// in every Roots entry and every RootKinds key. It runs at use, not at decode,
+// so the printable effective configuration keeps the paths as written. Two
+// keys that expand to the same path with different kinds are an error; with
+// the same kind they merge.
+func (dc DocsConfig) ExpandHome(home string) (DocsConfig, error) {
+	out := dc
+	if dc.Roots != nil {
+		out.Roots = make([]string, len(dc.Roots))
+		for i, r := range dc.Roots {
+			out.Roots[i] = expandTilde(r, home)
+		}
+	}
+	if dc.RootKinds == nil {
+		return out, nil
+	}
+	keys := make([]string, 0, len(dc.RootKinds))
+	for key := range dc.RootKinds {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out.RootKinds = make(map[string]string, len(dc.RootKinds))
+	origin := make(map[string]string, len(dc.RootKinds))
+	for _, key := range keys {
+		expanded := expandTilde(key, home)
+		value := dc.RootKinds[key]
+		if prev, ok := origin[expanded]; ok && out.RootKinds[expanded] != value {
+			return DocsConfig{}, fmt.Errorf("[docs].root_kinds: %q and %q name the same root with different kinds", prev, key)
+		}
+		if _, ok := origin[expanded]; !ok {
+			origin[expanded] = key
+		}
+		out.RootKinds[expanded] = value
+	}
+	return out, nil
 }
 
 // PreflightConfig is the [preflight] section: `forgectl preflight`'s

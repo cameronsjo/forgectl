@@ -8,6 +8,7 @@ package cli
 //   [x] Happy: no args includes ./docs when it exists
 //   [x] Happy: config.Docs.Roots is additive to the defaults
 //   [x] Happy: $CADENCE_FIELD_REPORTS_DIR is included when set and it exists
+//   [x] Happy: a leading ~ in config roots expands to the home directory
 //
 // dedupPaths (Classification: helper)
 //   [x] Happy: "." and its absolute equivalent collapse to one entry
@@ -17,6 +18,8 @@ package cli
 //   [x] Happy: "docs"/"vault" values convert to their RootKind constants,
 //       keyed by the config path exactly as written
 //   [x] Unhappy: an unknown value is a config error naming the key and value
+//   [x] Happy: a leading ~ in a root_kinds key expands, and the index
+//       classifies that root with the configured kind
 
 import (
 	"os"
@@ -163,5 +166,51 @@ func TestDocsIndexOptions_RejectsUnknownValue(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error %q does not name %q", msg, want)
 		}
+	}
+}
+
+func TestResolveDocsRoots_ExpandsTildeInConfigRoots(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("CADENCE_FIELD_REPORTS_DIR", "")
+	t.Chdir(t.TempDir())
+
+	got, err := resolveDocsRoots(nil, config.DocsConfig{Roots: []string{"~/notes"}})
+	if err != nil {
+		t.Fatalf("resolveDocsRoots: %v", err)
+	}
+	want := filepath.Join(home, "notes")
+	if got[len(got)-1] != want {
+		t.Errorf("resolveDocsRoots = %v, want last entry %q", got, want)
+	}
+}
+
+func TestDocsIndexOptions_ExpandsTildeKeys(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	vault := filepath.Join(home, "v")
+	if err := os.MkdirAll(vault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vault, "a.md"), []byte("# A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts, err := docsIndexOptions(config.DocsConfig{RootKinds: map[string]string{"~/v": "vault"}})
+	if err != nil {
+		t.Fatalf("docsIndexOptions: %v", err)
+	}
+	if got := opts.RootKinds[vault]; got != docspkg.RootVault {
+		t.Fatalf("RootKinds = %v, want %q keyed by the expanded path", opts.RootKinds, vault)
+	}
+
+	idx, err := docspkg.NewIndexWithOptions([]string{vault}, opts)
+	if err != nil {
+		t.Fatalf("NewIndexWithOptions: %v", err)
+	}
+	if k := idx.Roots()[0].Kind; k != docspkg.RootVault {
+		t.Errorf("root Kind = %v, want RootVault", k)
 	}
 }

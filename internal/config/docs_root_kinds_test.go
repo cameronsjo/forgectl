@@ -9,6 +9,11 @@ package config
 //   [x] Unhappy: Validate rejects an unknown value, naming the key, and
 //       reports the alphabetically first bad key when several are bad
 //   [x] Unhappy: ValidatePath surfaces that error for `launch doctor`
+//
+// DocsConfig.ExpandHome (Classification: use-time path expansion)
+//   [x] Happy: ~ and ~/ expand in Roots and RootKinds keys; abs/rel untouched
+//   [x] Unhappy: two keys expanding to one path with different kinds error
+//   [x] Edge: two keys expanding to one path with the same kind merge
 
 import (
 	"os"
@@ -73,5 +78,44 @@ func TestValidatePath_SurfacesRootKindsError(t *testing.T) {
 	}
 	if err := ValidatePath(path); err == nil || !strings.Contains(err.Error(), "root_kinds") {
 		t.Errorf("ValidatePath = %v, want a root_kinds error", err)
+	}
+}
+
+func TestDocsConfig_ExpandHome(t *testing.T) {
+	dc := DocsConfig{
+		Roots:     []string{"~/notes", "~", "/abs", "rel"},
+		RootKinds: map[string]string{"~/v": "vault", "rel": "docs"},
+	}
+	got, err := dc.ExpandHome("/h")
+	if err != nil {
+		t.Fatalf("ExpandHome: %v", err)
+	}
+	if want := []string{"/h/notes", "/h", "/abs", "rel"}; !reflect.DeepEqual(got.Roots, want) {
+		t.Errorf("Roots = %v, want %v", got.Roots, want)
+	}
+	if want := map[string]string{"/h/v": "vault", "rel": "docs"}; !reflect.DeepEqual(got.RootKinds, want) {
+		t.Errorf("RootKinds = %v, want %v", got.RootKinds, want)
+	}
+	if dc.Roots[0] != "~/notes" || dc.RootKinds["~/v"] != "vault" {
+		t.Errorf("ExpandHome mutated its receiver: %+v", dc)
+	}
+}
+
+func TestDocsConfig_ExpandHome_CollidingKindsError(t *testing.T) {
+	dc := DocsConfig{RootKinds: map[string]string{"~/n": "vault", "/h/n": "docs"}}
+	_, err := dc.ExpandHome("/h")
+	if err == nil || !strings.Contains(err.Error(), "same root with different kinds") {
+		t.Fatalf("ExpandHome err = %v, want a colliding-kinds error", err)
+	}
+}
+
+func TestDocsConfig_ExpandHome_CollidingSameKindMerges(t *testing.T) {
+	dc := DocsConfig{RootKinds: map[string]string{"~/n": "vault", "/h/n": "vault"}}
+	got, err := dc.ExpandHome("/h")
+	if err != nil {
+		t.Fatalf("ExpandHome: %v", err)
+	}
+	if want := map[string]string{"/h/n": "vault"}; !reflect.DeepEqual(got.RootKinds, want) {
+		t.Errorf("RootKinds = %v, want %v", got.RootKinds, want)
 	}
 }

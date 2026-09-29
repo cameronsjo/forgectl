@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -53,7 +55,9 @@ func newLinkMarkdown() goldmark.Markdown {
 }
 
 // blockIDPattern matches a trailing Obsidian block-id marker on a line:
-// "...paragraph text ^block-id".
+// "...paragraph text ^block-id". scanBlockIDs applies it only to lines that
+// are not part of a code block: a "^id" inside a fence or an indented block
+// is code, not a marker.
 var blockIDPattern = regexp.MustCompile(`\^([A-Za-z0-9_-]+)\s*$`)
 
 // urlSchemePrefix matches a markdown link destination that already names a
@@ -73,7 +77,14 @@ func isURLLike(dest string) bool {
 // markers, and outbound links from both wikilinks and plain markdown links
 // whose destination carries no URL scheme.
 func scanDoc(absPath, relPath string) (docMeta, error) {
-	source, err := os.ReadFile(absPath) //nolint:gosec // G304: absPath is a doc walkRoot/indexFileRoot already resolved under a canonicalized, operator-configured root
+	f, err := os.Open(absPath) //nolint:gosec // G304: absPath is a doc walkRoot/indexFileRoot already resolved under a canonicalized, operator-configured root
+	if err != nil {
+		return docMeta{}, err
+	}
+	defer func() { _ = f.Close() }()
+	// Read one byte past the cap so an over-cap file is detected without
+	// reading the rest of it.
+	source, err := io.ReadAll(io.LimitReader(f, maxScanBytes+1))
 	if err != nil {
 		return docMeta{}, err
 	}
@@ -83,6 +94,12 @@ func scanDoc(absPath, relPath string) (docMeta, error) {
 		title = titleFromFilename(relPath)
 	}
 
+	if len(source) > maxScanBytes {
+		slog.Debug("docs: document exceeds scan cap; indexed by title only.",
+			"path", relPath, "limit", maxScanBytes)
+		return docMeta{Title: title}, nil
+	}
+
 	body := source
 	var aliases []string
 	if fm, ok := splitFrontmatter(source); ok {
@@ -90,11 +107,11 @@ func scanDoc(absPath, relPath string) (docMeta, error) {
 		aliases = frontmatterAliases(fm)
 	}
 
-	headings, links, err := scanBody(body)
+	headings, links, code, err := scanBody(body)
 	if err != nil {
 		return docMeta{}, fmt.Errorf("scan %s: %w", relPath, err)
 	}
-	blockIDs := scanBlockIDs(body)
+	blockIDs := scanBlockIDs(body, code)
 
 	return docMeta{
 		Title:    title,
@@ -104,6 +121,12 @@ func scanDoc(absPath, relPath string) (docMeta, error) {
 		Links:    links,
 	}, nil
 }
+
+// maxScanBytes bounds how much of one document scanDoc reads and parses. It
+// caps peak memory per file during an index build, and the watcher rebuilds
+// on every filesystem event. A larger document is still listed, by title
+// only, with no aliases, headings, block ids or links.
+const maxScanBytes = 1 << 20
 
 // titleScanLines bounds firstH1's search for a "# " heading. A title is
 // expected near the top; scanning the whole file would make a heading
@@ -167,15 +190,25 @@ func toStringList(v any) []string {
 }
 
 // scanBlockIDs returns the sorted, de-duplicated set of Obsidian block ids
-// ("^block-id" suffixes) found in body.
-func scanBlockIDs(body []byte) []string {
+// ("^block-id" suffixes) found in body, skipping every line that overlaps a
+// code segment (fenced or indented code block content, and fence info
+// strings). Overlap, not line-start containment: a blockquoted code
+// segment starts after its "> " prefix.
+func scanBlockIDs(body []byte, code []text.Segment) []string {
 	seen := map[string]bool{}
-	scanner := bufio.NewScanner(bytes.NewReader(body))
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		if m := blockIDPattern.FindSubmatch(scanner.Bytes()); m != nil {
-			seen[string(m[1])] = true
+	for start := 0; start < len(body); {
+		end := len(body)
+		next := end
+		if nl := bytes.IndexByte(body[start:], '\n'); nl >= 0 {
+			end = start + nl
+			next = end + 1
 		}
+		if !overlapsAny(code, start, next) {
+			if m := blockIDPattern.FindSubmatch(body[start:end]); m != nil {
+				seen[string(m[1])] = true
+			}
+		}
+		start = next
 	}
 	ids := make([]string, 0, len(seen))
 	for id := range seen {
@@ -185,22 +218,47 @@ func scanBlockIDs(body []byte) []string {
 	return ids
 }
 
+func overlapsAny(segs []text.Segment, start, end int) bool {
+	for _, seg := range segs {
+		if seg.Start < end && seg.Stop > start {
+			return true
+		}
+	}
+	return false
+}
+
 // scanBody walks body's goldmark AST once, collecting headings (text plus
 // the auto-generated id slug) and outbound links from both wikilinks
 // (go.abhg.dev/goldmark/wikilink) and plain markdown links whose
-// destination carries no URL scheme.
-func scanBody(body []byte) ([]Heading, []LinkRef, error) {
+// destination carries no URL scheme. It also returns the source segments of
+// every code block (fenced content, fence info strings, indented blocks) so
+// scanBlockIDs can mask them.
+func scanBody(body []byte) ([]Heading, []LinkRef, []text.Segment, error) {
 	reader := text.NewReader(body)
 	doc := linkMarkdown.Parser().Parse(reader)
 
 	var headings []Heading
 	var links []LinkRef
+	var code []text.Segment
 
 	err := ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
 		}
 		switch n.Kind() {
+		case ast.KindFencedCodeBlock:
+			if fb, ok := n.(*ast.FencedCodeBlock); ok {
+				for i := 0; i < fb.Lines().Len(); i++ {
+					code = append(code, fb.Lines().At(i))
+				}
+				if fb.Info != nil {
+					code = append(code, fb.Info.Segment)
+				}
+			}
+		case ast.KindCodeBlock:
+			for i := 0; i < n.Lines().Len(); i++ {
+				code = append(code, n.Lines().At(i))
+			}
 		case ast.KindHeading:
 			h, ok := n.(*ast.Heading)
 			if !ok {
@@ -250,10 +308,10 @@ func scanBody(body []byte) ([]Heading, []LinkRef, error) {
 		return ast.WalkContinue, nil
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	return headings, links, nil
+	return headings, links, code, nil
 }
 
 func headingText(n *ast.Heading, source []byte) string {
