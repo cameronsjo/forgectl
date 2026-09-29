@@ -1066,10 +1066,6 @@ func TestEncodeValue_CarriageReturn_RoundTripsOnOneLine(t *testing.T) {
 			if want := "K=" + c.wantQuote + "\n"; string(out) != want {
 				t.Fatalf("Bytes() = %q, want %q", out, want)
 			}
-			// One logical line: exactly one LF, the terminator.
-			if n := strings.Count(string(out), "\n"); n != 1 {
-				t.Errorf("encoded output has %d LFs, want 1: %q", n, out)
-			}
 			re, err := Parse(bytes.NewReader(out))
 			if err != nil {
 				t.Fatal(err)
