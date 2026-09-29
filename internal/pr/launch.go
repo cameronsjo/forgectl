@@ -580,11 +580,21 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 		return Dispatch{}, fmt.Errorf("clean-room review profile invalid: %w", err)
 	}
 
-	var prompt string
+	// Refuse before anything is dispatched when Claude Code's sandbox cannot
+	// run here. The allow-list alone does not confine the reviewer: an
+	// allowed read-only git command can write and then execute (forgectl#694),
+	// and the sandbox is what bounds that. There is deliberately no opt-out.
+	if err := c.sandboxSupported(); err != nil {
+		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
+	}
+
+	var prompt, ghHost string
 	if sess.Ref.IsLocal() {
 		// Grant --add-dir for the escape-hatch findings dir. Without this, the
 		// permission-scoped Write(<dir>/**) allowlist rule is moot — Claude Code
-		// won't expose a path outside the launch cwd at all.
+		// won't expose a path outside the launch cwd at all. It is also what
+		// makes the dir writable inside the sandbox, where it is the only
+		// writable root besides the per-user temp directory.
 		profile.AddDir = append(profile.AddDir, sess.FindingsDir)
 		prompt = localReviewPrompt(sess.FindingsDir, true)
 	} else {
@@ -592,9 +602,17 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 		if err != nil {
 			return Dispatch{}, err
 		}
+		ghHost = host
 		prompt = remoteReviewPrompt(host, sess.Ref)
 	}
-	claudeArgs := launch.BuilderArgs(profile, []string{"-p", prompt})
+	// The sandbox block goes on the command line as well as in the
+	// workspace's settings.local.json: --settings outranks every settings
+	// file but managed ones, and it is a scope where strictAllowlist counts.
+	sandboxFlag, err := reviewSandboxFlag(sess.Workspace, ghHost)
+	if err != nil {
+		return Dispatch{}, err
+	}
+	claudeArgs := launch.BuilderArgs(profile, []string{"--settings", sandboxFlag, "-p", prompt})
 
 	if err := c.CheckDispatchCapability(ctx); err != nil {
 		return Dispatch{}, err

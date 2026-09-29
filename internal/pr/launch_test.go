@@ -404,8 +404,9 @@ func TestLaunch_CarriesTheWindowEnvIntoTmuxArgv(t *testing.T) {
 
 // TestLaunch_WithoutWindowEnvPassesOnlyTheTokenPin is the control: with no
 // resolver configured, a github.com review's window gets no -e beyond the
-// forgectl#673 pin, which empties the enterprise token pair. Anything more
-// would change every existing `pr` user's window environment.
+// forgectl#694 git pins and the forgectl#673 pin, which empties the
+// enterprise token pair. Anything more would change every existing `pr`
+// user's window environment.
 func TestLaunch_WithoutWindowEnvPassesOnlyTheTokenPin(t *testing.T) {
 	claudeBin := fakeHarnessBin(t, "claude")
 	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
@@ -427,7 +428,8 @@ func TestLaunch_WithoutWindowEnvPassesOnlyTheTokenPin(t *testing.T) {
 			envs = append(envs, args[i+1])
 		}
 	}
-	if want := []string{"GH_ENTERPRISE_TOKEN=", "GITHUB_ENTERPRISE_TOKEN="}; !slices.Equal(envs, want) {
+	want := append(append([]string{}, reviewGitEnv...), "GH_ENTERPRISE_TOKEN=", "GITHUB_ENTERPRISE_TOKEN=")
+	if !slices.Equal(envs, want) {
 		t.Errorf("window -e entries = %v, want exactly %v", envs, want)
 	}
 }

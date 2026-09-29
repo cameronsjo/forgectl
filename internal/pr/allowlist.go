@@ -17,6 +17,11 @@ import (
 // human approval gate, never by the agent itself.
 type allowlistSettings struct {
 	Permissions permissions `json:"permissions"`
+	// Sandbox is the OS sandbox the reviewer's Bash commands run under
+	// (reviewsandbox.go). Launch passes the same block with --settings, which
+	// is the copy that decides; this one records the posture beside the
+	// permission rules for anyone reading the workspace.
+	Sandbox sandboxSettings `json:"sandbox"`
 }
 
 type permissions struct {
@@ -27,10 +32,21 @@ type permissions struct {
 	Deny        []string `json:"deny"`
 }
 
-// baseReadOnly is the read-only inspection surface both review modes share:
-// read the tree and run read-only git/file commands. Every entry is
-// inspection, never mutation or posting. Kept as a single shared slice so the
-// two modes' genuinely common surface cannot drift out of sync.
+// baseReadOnly is the inspection surface both review modes share: the read
+// tools and a handful of git/file commands chosen for reading. Kept as a
+// single shared slice so the two modes' genuinely common surface cannot drift
+// out of sync.
+//
+// It is NOT a proof that each entry is read-only. A Bash rule is a prefix
+// over command text, and it admits every flag the command takes. Some of
+// those flags write (`git log` alone accepts an output-file flag, which
+// Claude Code's redirect check does not treat as a redirect), and git runs
+// commands its configuration names. An allowed command can therefore do more
+// than read, and no deny rule over the text can enumerate that away
+// (forgectl#694). What bounds it is the OS sandbox the reviewer runs under
+// (reviewsandbox.go): the workspace is not writable and the network is
+// limited to the PR's host. Treat this list as what the reviewer may ASK to
+// run, and the sandbox as what a run can reach.
 //
 // Neither mode grants `rg`. ripgrep's `--pre COMMAND` runs COMMAND on every
 // searched file, so `rg --pre sh x file` executes a script straight out of a
@@ -172,11 +188,15 @@ func writeAllowlist(workspace, host string, ref Ref) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	sb, err := reviewSandbox(workspace, host)
+	if err != nil {
+		return "", err
+	}
 	return writeSettings(workspace, permissions{
 		DefaultMode: "plan",
 		Allow:       append(append([]string{}, allowReadOnly...), ghReads...),
 		Deny:        denyPosting,
-	})
+	}, sb)
 }
 
 // localAllowReadOnly is the local session's permitted-action set: the same
@@ -235,20 +255,24 @@ func localProfile(findingsDir string) permissions {
 // writeLocalAllowlist writes localProfile's settings into workspace's
 // .claude/ dir and returns its path. Mirrors writeAllowlist.
 func writeLocalAllowlist(workspace, findingsDir string) (string, error) {
-	return writeSettings(workspace, localProfile(findingsDir))
+	sb, err := reviewSandbox(workspace, "")
+	if err != nil {
+		return "", err
+	}
+	return writeSettings(workspace, localProfile(findingsDir), sb)
 }
 
-// writeSettings writes perms into workspace's .claude/settings.local.json and
-// returns its path — the shared write core for writeAllowlist and
-// writeLocalAllowlist.
-func writeSettings(workspace string, perms permissions) (string, error) {
+// writeSettings writes perms and the sandbox block into workspace's
+// .claude/settings.local.json and returns its path — the shared write core for
+// writeAllowlist and writeLocalAllowlist.
+func writeSettings(workspace string, perms permissions, sb sandboxSettings) (string, error) {
 	slog.Debug("Preparing to write clean-room allowlist.", "workspace", workspace)
 	dir := filepath.Join(workspace, ".claude")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		slog.Error("Failed to create allowlist dir.", "dir", dir, "error", err)
 		return "", fmt.Errorf("create allowlist dir: %w", err)
 	}
-	settings := allowlistSettings{Permissions: perms}
+	settings := allowlistSettings{Permissions: perms, Sandbox: sb}
 	// termsafe:allow-raw-json persisted Claude settings file, never command output
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
