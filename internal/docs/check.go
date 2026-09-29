@@ -109,12 +109,13 @@ type CheckReport struct {
 	Skipped []SkippedPath `json:"skipped"`
 }
 
-const vaultSkipReason = "vault roots are not checked yet"
-
-// Check reports broken links, ambiguous links, broken anchors, orphan pages,
-// and deprecated or stale docs across every docs-kind root. Vault roots are
-// skipped. Links that leave their root are counted, not reported: they work
-// on GitHub.
+// Check reports broken links, ambiguous links and broken anchors across every
+// root, plus orphan pages and deprecated or stale docs across docs-kind roots.
+// A vault root gets the link findings only, resolved by the reader's own
+// vault rules (wikilinks by name, path or alias): daily and inbox notes are
+// orphans by nature, so orphans are never reported there, and the OKF trust
+// signals are a docs-tree convention. Links that leave their root are counted,
+// not reported: they work on GitHub.
 //
 // It resolves through resolveParts, never ResolveLink, so a path containing a
 // literal '#' (authored "%23") is not re-split — the same reason
@@ -145,28 +146,18 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 		cr := CheckedRoot{Label: r.Label, Kind: "docs", Checked: true, Docs: docCounts[r.Label]}
 		if r.Kind == RootVault {
 			cr.Kind = "vault"
-			cr.Checked = false
-			cr.Skipped = vaultSkipReason
 		}
 		report.Roots = append(report.Roots, cr)
 	}
 
-	// Only checked (docs-kind) roots count: a skip under a vault root does not
-	// make a verdict that was never going to be given any less complete.
-	for _, sp := range idx.skipped {
-		if rootByLabel[sp.Root].Kind != RootVault {
-			report.Skipped = append(report.Skipped, sp)
-		}
-	}
+	report.Skipped = append(report.Skipped, idx.skipped...)
 
 	dirInbound := idx.dirLinkInbound(rootByLabel)
 
 	for i := range idx.docs {
 		from := &idx.docs[i]
 		root := rootByLabel[from.RootLabel]
-		if root.Kind == RootVault {
-			continue
-		}
+		vault := root.Kind == RootVault
 		for _, l := range from.Links {
 			target, miss := idx.resolveParts(from, l.Path, l.Fragment, nil)
 			var kind FindingKind
@@ -182,7 +173,7 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 				switch {
 				case target != nil:
 					kind = FindingBrokenAnchor
-				case existsInRoot(root, from, l.Path):
+				case existsInRoot(root, from, l.Path, vault):
 					// A directory or non-markdown file: real, just not a doc.
 					continue
 				default:
@@ -194,6 +185,9 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 			report.Findings = append(report.Findings, Finding{
 				Kind: kind, Root: from.RootLabel, Path: from.RelPath, Target: l.Raw, Line: l.Line,
 			})
+		}
+		if vault {
+			continue
 		}
 		if root.OnlyFile == "" && len(idx.Backlinks(from)) == 0 && !dirInbound[i] && !isRootIndex(from.RelPath) {
 			if from.OrphanOK {
@@ -273,13 +267,24 @@ func isLinkFinding(k FindingKind) bool {
 // existsInRoot reports whether the link path names something on disk inside
 // root, for targets that resolve to no indexed doc (a directory, a LICENSE, an
 // image). The clean path is built the way resolveDocsDoc builds it. It reads
-// nothing; ResolveInRoot refuses a symlink that escapes the root.
-func existsInRoot(root Root, from *Doc, linkPath string) bool {
+// nothing; ResolveInRoot refuses a symlink that escapes the root. In a vault
+// a wikilink names a file from the vault root, not from the linking note, so
+// the root-relative spelling counts too ("[[assets/logo.png]]").
+func existsInRoot(root Root, from *Doc, linkPath string, vault bool) bool {
 	clean, ok := linkTargetPath(from, linkPath)
-	if !ok {
+	if ok {
+		if _, err := ResolveInRoot(root.Path, clean); err == nil {
+			return true
+		}
+	}
+	if !vault || linkPath == "" {
 		return false
 	}
-	_, err := ResolveInRoot(root.Path, clean)
+	rel := strings.TrimPrefix(path.Clean(linkPath), "/")
+	if escapesRoot(rel) {
+		return false
+	}
+	_, err := ResolveInRoot(root.Path, rel)
 	return err == nil
 }
 

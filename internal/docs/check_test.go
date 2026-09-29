@@ -26,7 +26,10 @@ package docs
 //   [x] Happy: a link finding carries the source line of the file as written,
 //       frontmatter lines included
 //   [x] Happy: an out-of-root link is counted, never reported
-//   [x] Happy: a vault root is skipped and reported as unchecked
+//   [x] Happy: a vault root is checked: broken/ambiguous wikilinks and broken
+//       heading and ^block anchors are findings, orphans are never
+//   [x] Happy: a vault wikilink to an attachment (bare or root-relative) is not broken
+//   [x] Happy: the checked-in vault fixture checks clean, its outside-root link counted
 //   [x] Happy: a single-file root has no orphans
 //   [x] Happy: findings sort by root, path, then link findings by line, target
 //       and kind, then lineless findings by kind — not walk order
@@ -327,19 +330,20 @@ func TestCheck_OutsideRootCountedNotReported(t *testing.T) {
 	}
 }
 
-func TestCheck_VaultRootSkipped(t *testing.T) {
+func TestCheck_VaultRootChecked(t *testing.T) {
 	docsDir := t.TempDir()
 	checkWrite(t, filepath.Join(docsDir, "README.md"), "# R\n")
 	vault := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	checkWrite(t, filepath.Join(vault, "n.md"), "# N\n\n[[missing]]\n")
+	checkWrite(t, filepath.Join(vault, "n.md"), "# N\n\n[[missing]]\n[[t#^nope]]\n[[t#No Such]]\n[[t#^blk]]\n[[dup]]\n")
+	checkWrite(t, filepath.Join(vault, "t.md"), "# T\n\nPara. ^blk\n")
+	checkWrite(t, filepath.Join(vault, "a/dup.md"), "# A\n")
+	checkWrite(t, filepath.Join(vault, "b/dup.md"), "# B\n")
+	checkWrite(t, filepath.Join(vault, "daily.md"), "# Daily\n")
 
 	r := checkIndex(t, docsDir, vault).Check()
-	if len(r.Roots) != 2 {
-		t.Fatalf("roots = %+v, want 2", r.Roots)
-	}
 	var docsRoot, vaultRoot CheckedRoot
 	for _, cr := range r.Roots {
 		if cr.Kind == "vault" {
@@ -351,11 +355,53 @@ func TestCheck_VaultRootSkipped(t *testing.T) {
 	if !docsRoot.Checked || docsRoot.Skipped != "" {
 		t.Errorf("docs root = %+v, want checked", docsRoot)
 	}
-	if vaultRoot.Checked || vaultRoot.Skipped == "" || vaultRoot.Docs != 1 {
-		t.Errorf("vault root = %+v, want unchecked with a reason and 1 doc", vaultRoot)
+	if !vaultRoot.Checked || vaultRoot.Skipped != "" || vaultRoot.Docs != 5 {
+		t.Errorf("vault root = %+v, want checked, no skip reason, 5 docs", vaultRoot)
 	}
+	got := map[string]bool{}
+	for _, f := range r.Findings {
+		if f.Root != vaultRoot.Label {
+			t.Errorf("finding %+v outside the vault", f)
+		}
+		got[string(f.Kind)+" "+f.Target] = true
+	}
+	want := []string{
+		"broken_link missing", "broken_anchor t#^nope", "broken_anchor t#No Such", "ambiguous_link dup",
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("findings = %+v, missing %q", r.Findings, w)
+		}
+	}
+	if len(r.Findings) != len(want) {
+		t.Errorf("findings = %+v, want exactly %d (valid [[t#^blk]] silent, no orphans)", r.Findings, len(want))
+	}
+	if r.Summary.Orphans != 0 || r.Summary.IgnoredOrphans != 0 {
+		t.Errorf("summary = %+v, want no orphan accounting in a vault", r.Summary)
+	}
+}
+
+func TestCheck_VaultAttachmentLinkNotBroken(t *testing.T) {
+	vault := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	checkWrite(t, filepath.Join(vault, "notes/n.md"), "# N\n\n[[assets/logo.png]]\n[[assets/nope.png]]\n")
+	checkWrite(t, filepath.Join(vault, "assets/logo.png"), "x")
+
+	r := checkIndex(t, vault).Check()
+	if len(r.Findings) != 1 || r.Findings[0].Kind != FindingBrokenLink || r.Findings[0].Target != "assets/nope.png" {
+		t.Errorf("findings = %+v, want only the missing attachment as broken_link", r.Findings)
+	}
+}
+
+func TestCheck_VaultFixtureClean(t *testing.T) {
+	r := checkIndex(t, filepath.Join(copyLinksFixture(t), "vault")).Check()
 	if len(r.Findings) != 0 {
-		t.Errorf("findings = %+v, want none from a skipped vault root", r.Findings)
+		t.Errorf("findings = %+v, want none from the fixture vault", r.Findings)
+	}
+	if r.Summary.OutsideRootLinks != 1 {
+		t.Errorf("outside_root_links = %d, want 1 ([[../repo/index]])", r.Summary.OutsideRootLinks)
 	}
 }
 

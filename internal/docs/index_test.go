@@ -495,7 +495,7 @@ func TestCheck_ReportsSkippedPaths(t *testing.T) {
 	}
 }
 
-func TestCheck_SkipUnderVaultRootIsNotReported(t *testing.T) {
+func TestCheck_SkipUnderVaultRootIsReported(t *testing.T) {
 	vault := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
 		t.Fatal(err)
@@ -515,7 +515,7 @@ func TestCheck_SkipUnderVaultRootIsNotReported(t *testing.T) {
 	if len(idx.Skipped()) != 1 {
 		t.Fatalf("index should still record the skip: %+v", idx.Skipped())
 	}
-	if rep := idx.Check(); len(rep.Skipped) != 0 {
-		t.Errorf("a vault root is never checked, so its skips must not fail the check: %+v", rep.Skipped)
+	if rep := idx.Check(); len(rep.Skipped) != 1 || rep.Skipped[0].Rel != "locked" {
+		t.Errorf("a vault root is checked, so its skip must reach the report: %+v", rep.Skipped)
 	}
 }
