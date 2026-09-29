@@ -1,6 +1,6 @@
 // Package exec is the process-execution seam for the whole tool.
 //
-// Everything that shells out to tmux or sesh goes through a Runner. Production
+// Every non-interactive shell-out goes through a Runner. Production
 // uses OSRunner; tests inject a fake (see exec_test helpers / FakeRunner) so
 // command construction and branching can be asserted without a live tmux server.
 package exec
@@ -32,6 +32,29 @@ import (
 //     named variables from the inherited environment. Explicit overrides win
 //     over removals of the same name. This is the security boundary for a
 //     command that must not inherit ambient credentials.
+//
+// # Where a Runner records what a command prints
+//
+// The OSRunner methods that capture output (Run, RunWithInput, RunWithEnv,
+// RunWithEnvFiltered) write a failed command's output down in these places:
+//
+//   - stderr is logged at Error level by runAndWrap, which bypasses any
+//     configured level filter and, by default, lands in a dated log file on
+//     disk. It is also embedded in CommandError.Error(), so it shows in
+//     rendered CLI output.
+//   - stdout is retained in the exported CommandError.Output. Error() does
+//     not render it, but any %+v or structured dump of the error does, and a
+//     caller that wraps the error with %w hands that dump to its own callers.
+//     internal/tasks/token.go drops the error for this reason.
+//   - neither stream is capped today, so a chatty child grows the heap.
+//
+// Two seams narrow this, and neither makes a true secret safe, because argv
+// stays readable through ps for the life of the process. WithMaskedAssignments
+// hides the values of marked KEY=VALUE argv elements and scrubs them from the
+// stderr and stdout the Runner retains and logs; it does not mask any other
+// text a child prints. SensitiveRunner logs metadata only and caps both
+// streams, but it serves only its closed CommandKind set. A command whose
+// output may carry a secret needs its own path, not Runner.
 type Runner interface {
 	Run(ctx context.Context, name string, args ...string) (string, error)
 	RunInteractive(ctx context.Context, name string, args ...string) error
