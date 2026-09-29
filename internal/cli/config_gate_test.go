@@ -1,13 +1,18 @@
 package cli
 
 import (
-	"errors"
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/module"
 )
 
 func loadMalformedConfig(t *testing.T) config.Config {
@@ -24,19 +29,27 @@ func loadMalformedConfig(t *testing.T) config.Config {
 	return cfg
 }
 
+func gateRoot() *cobra.Command {
+	return newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+}
+
 func TestConfigParseGate_RefusesMostCommands(t *testing.T) {
 	cfg := loadMalformedConfig(t)
+	root := gateRoot()
 	for _, args := range [][]string{
 		{"docs", "list", "--json"},
 		{"docs", "check", "--json"},
+		{"docs", "list", "--", "--help"},
 		{"tmux", "ls"},
 		{"--no-icons", "pr", "list"},
 		{},
+		{"init"},
 		{"launch", "which"},
+		{"launch", "init"},
 		{"launch", "--", "--help"},
 		{"cl", "stats"},
 	} {
-		err := configParseGate(cfg, args)
+		err := configParseGate(cfg, root, args)
 		if err == nil {
 			t.Errorf("args %q: gate passed a malformed config", args)
 			continue
@@ -49,15 +62,43 @@ func TestConfigParseGate_RefusesMostCommands(t *testing.T) {
 
 func TestConfigParseGate_RecoveryVerbsStillRun(t *testing.T) {
 	cfg := loadMalformedConfig(t)
+	root := gateRoot()
 	for _, args := range [][]string{
-		{"config"}, {"config", "--json"}, {"init"}, {"doctor", "--json"},
+		{"config"}, {"cfg"}, {"cfg", "--json"}, {"config", "--json"}, {"doctor", "--json"},
 		{"--no-icons", "doctor"}, {"help"}, {"completion", "bash"}, {"version"},
-		{"docs", "--help"}, {"--version"}, {"-h"},
-		{"launch", "init"}, {"launch", "edit"}, {"cl", "doctor"}, {"launch", "--help"},
+		{"docs", "--help"}, {"docs", "list", "-h"}, {"--version"}, {"-h"},
+		{"launch", "edit"}, {"cl", "doctor"}, {"launch", "--help"},
 	} {
-		if err := configParseGate(cfg, args); err != nil {
+		if err := configParseGate(cfg, root, args); err != nil {
 			t.Errorf("args %q: recovery path was refused: %v", args, err)
 		}
+	}
+}
+
+// TestConfigParseGate_AliasesFollowTheirCommand sweeps every registered
+// command and alias: an alias must get exactly its command's verdict, so an
+// exempt verb's shorthand passes and every other alias stays gated.
+func TestConfigParseGate_AliasesFollowTheirCommand(t *testing.T) {
+	cfg := loadMalformedConfig(t)
+	root := gateRoot()
+	sawExemptAlias := false
+	for _, cmd := range root.Commands() {
+		want := configParseGate(cfg, root, []string{cmd.Name()}) == nil
+		if cmd.Name() == "launch" {
+			continue // bare launch is gated; its own-verbs are covered above
+		}
+		for _, alias := range cmd.Aliases {
+			got := configParseGate(cfg, root, []string{alias}) == nil
+			if got != want {
+				t.Errorf("alias %q of %q: exempt=%t, but the command itself is exempt=%t", alias, cmd.Name(), got, want)
+			}
+			if want {
+				sawExemptAlias = true
+			}
+		}
+	}
+	if !sawExemptAlias {
+		t.Error("sweep found no alias of an exempt verb; the cfg alias should be one")
 	}
 }
 
@@ -71,18 +112,42 @@ func TestConfigParseGate_ValidOrAbsentConfigPasses(t *testing.T) {
 		"valid":  config.LoadPath(good),
 		"absent": config.LoadPath(filepath.Join(dir, "missing.toml")),
 	} {
-		if err := configParseGate(cfg, []string{"docs", "list"}); err != nil {
+		if err := configParseGate(cfg, gateRoot(), []string{"docs", "list"}); err != nil {
 			t.Errorf("%s config: gate refused: %v", name, err)
 		}
 	}
 }
 
-func TestConfigParseGate_ExitsTwo(t *testing.T) {
-	err := WithExitCode(configParseGate(loadMalformedConfig(t), []string{"docs", "list"}), 2)
-	if got := ExitCode(err); got != 2 {
-		t.Errorf("exit code = %d, want 2", got)
+// TestExecute_MalformedConfigExitsTwo drives the real Execute wiring: process
+// argv, the real config load, the gate, and the stderr line.
+func TestExecute_MalformedConfigExitsTwo(t *testing.T) {
+	home := t.TempDir()
+	cfgDir := filepath.Join(home, ".config", "forgectl")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if errors.Unwrap(err) == nil {
-		t.Error("gate error lost its chain")
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte("this = = broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	withArgs(t, "docs", "list", "--json")
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevStderr := os.Stderr
+	os.Stderr = w
+	execErr := Execute(context.Background())
+	os.Stderr = prevStderr
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+
+	if got := ExitCode(execErr); got != 2 {
+		t.Fatalf("Execute exit code = %d (err %v), want 2", got, execErr)
+	}
+	if !strings.Contains(string(out), "config.toml") || !strings.Contains(string(out), "line 1, column") {
+		t.Errorf("stderr must name the file and position, got %q", out)
 	}
 }

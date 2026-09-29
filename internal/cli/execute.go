@@ -161,7 +161,7 @@ func Execute(ctx context.Context) error {
 	tmuxClient := tmux.New(exec.OSRunner{})
 	root := buildRoot(deps)
 	args := normalizeArgs(processArgs())
-	if err := configParseGate(cfg, args); err != nil {
+	if err := configParseGate(cfg, root, args); err != nil {
 		fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(err.Error()))
 		return WithExitCode(err, 2)
 	}
