@@ -74,7 +74,7 @@ func TestEcho_ProjectsCloneOrgIsCapped(t *testing.T) {
 // ghFailure is a failed gh call as the real runner reports it: the
 // CommandError's text is gh's stderr, which the host chooses (#658).
 func ghFailure(name string, args []string) error {
-	return &forgexec.CommandError{Name: name, Args: args, Stderr: "STDERRMARKER\x1b[2J‮", ExitCode: 1, Err: errors.New("exit status 1")}
+	return &forgexec.CommandError{Name: name, Args: args, Stderr: "STDERRMARKER\x1b[2J\u202e", ExitCode: 1, Err: errors.New("exit status 1")}
 }
 
 // assertNoSubprocessText: the text shows neither gh's stderr nor a raw

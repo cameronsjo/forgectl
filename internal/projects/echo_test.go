@@ -19,7 +19,7 @@ import (
 // subprocessFailure is a failed call as the real runner reports it. Its
 // Error() renders argv and stderr, so both carry markers.
 func subprocessFailure(name string, args []string) error {
-	return &exec.CommandError{Name: name, Args: args, Stderr: "remote: STDERRMARKER\x1b[2J‮", ExitCode: 128, Err: errors.New("exit status 128")}
+	return &exec.CommandError{Name: name, Args: args, Stderr: "remote: STDERRMARKER\x1b[2J\u202e", ExitCode: 128, Err: errors.New("exit status 128")}
 }
 
 func failingRunner() *exec.FakeRunner {
@@ -36,7 +36,7 @@ func assertCategorical(t *testing.T, err error, want string) {
 		t.Fatal("want an error")
 	}
 	msg := err.Error()
-	for _, s := range []string{"STDERRMARKER", "SECRETTOK", "BRANCHMARKER", "\x1b", "‮"} {
+	for _, s := range []string{"STDERRMARKER", "SECRETTOK", "BRANCHMARKER", "\x1b", "\u202e"} {
 		if strings.Contains(msg, s) {
 			t.Fatalf("error %q echoes %q", msg, s)
 		}

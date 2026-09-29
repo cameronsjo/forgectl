@@ -12,7 +12,7 @@ import (
 
 // hostileRef is a refname git accepts that a hostile remote could advertise:
 // a bidi override and a C1 CSI (U+009B) around a marker.
-const hostileRef = "feat/‮MARKER\u009b2J"
+const hostileRef = "feat/\u202eMARKER\u009b2J"
 
 // assertTerminalSafeLines: no line of out carries a raw unsafe rune.
 func assertTerminalSafeLines(t *testing.T, out string) {
@@ -35,7 +35,7 @@ func assertTerminalSafeLines(t *testing.T, out string) {
 func TestPrintPruneResults_EscapesNamesAndErrors(t *testing.T) {
 	for _, r := range []branchpkg.PruneResult{
 		{Name: hostileRef, Err: errors.New("cause \u009b2J")},
-		{Name: hostileRef, Skipped: true, Reason: "not safe ‮"},
+		{Name: hostileRef, Skipped: true, Reason: "not safe \u202e"},
 		{Name: hostileRef, Deleted: true},
 	} {
 		var out bytes.Buffer
@@ -47,7 +47,7 @@ func TestPrintPruneResults_EscapesNamesAndErrors(t *testing.T) {
 func TestPrintBranchGroup_EscapesNames(t *testing.T) {
 	var out bytes.Buffer
 	printBranchGroup(&out, "safe-to-delete", []branchpkg.Classification{{
-		Info: branchpkg.Info{Name: hostileRef}, Reason: "merged ‮",
+		Info: branchpkg.Info{Name: hostileRef}, Reason: "merged \u202e",
 	}})
 	assertTerminalSafeLines(t, out.String())
 }
