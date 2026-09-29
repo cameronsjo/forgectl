@@ -1207,3 +1207,21 @@ func assertLifecycleBlocked(t *testing.T, h *serveHarness, held string) {
 	case <-time.After(100 * time.Millisecond):
 	}
 }
+
+// A failed startup self-probe means the server cannot confirm it is serving its
+// own discovery generation: exit 2, the "could not run" code (forgectl#604).
+// Mutation: drop WithExitCode(publishErr, 2) at the publish site in
+// runDocsServeOpening and the exit code reads 1.
+func TestRunDocsServeWithRuntime_ProbeFailure_ExitsTwo(t *testing.T) {
+	fake := newFakeServeRuntime(3591)
+	fake.infoScript = []fakeInfoResult{{info: testGenerationInfo(0x11)}}
+	fake.probeScript = []error{errors.New("no answer")}
+
+	err := startServeHarness(t, fake).wait(t)
+	if !errors.Is(err, errDocsServeProbe) {
+		t.Fatalf("runDocsServeWithRuntime = %v, want errDocsServeProbe", err)
+	}
+	if got := ExitCode(err); got != 2 {
+		t.Errorf("ExitCode = %d, want 2", got)
+	}
+}

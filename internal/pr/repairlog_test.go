@@ -511,3 +511,104 @@ func TestReadRepairLogTail_ReadsAFinalLineWithNoNewline(t *testing.T) {
 		t.Errorf("rows = %+v, want the unterminated final row kept", rows)
 	}
 }
+
+func intentRow(id string) RepairRow { return RepairRow{ID: id, Outcome: repairOutcomeIntent} }
+func doneRow(id string) RepairRow   { return RepairRow{ID: id, Outcome: repairOutcomeApplied} }
+
+func seedRows(t *testing.T, c *Client, rows ...RepairRow) {
+	t.Helper()
+	var log strings.Builder
+	for _, r := range rows {
+		log.WriteString(repairRowLine(t, r))
+	}
+	writeRepairLogRaw(t, c, log.String())
+}
+
+// TestScanRepairLogTail_CountsOnlyDisplacedIntentsNoCompletionCloses covers
+// every way a displaced intent can be paired, with a ring of 4 over ten rows.
+// Displaced: U, P (intent), P (completion), S (intent), filler, L (intent).
+// Only U is unpaired: P's completion was displaced too, S's completion is
+// still in the ring at the end, and L's completion arrived after L left it.
+func TestScanRepairLogTail_CountsOnlyDisplacedIntentsNoCompletionCloses(t *testing.T) {
+	c := testClient(t, nil)
+	seedRows(t, c,
+		intentRow("U"), intentRow("P"), doneRow("P"), intentRow("S"), doneRow("f1"),
+		intentRow("L"), doneRow("S"), doneRow("f2"), doneRow("f3"), doneRow("L"))
+
+	tail, err := c.scanRepairLogTail(4, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tail.omitted != 6 {
+		t.Fatalf("omitted = %d, want 6", tail.omitted)
+	}
+	if tail.omittedUnpaired != 1 || tail.unpairedCapped {
+		t.Errorf("omittedUnpaired = %d (capped %v), want exactly 1 (U) and not capped", tail.omittedUnpaired, tail.unpairedCapped)
+	}
+}
+
+// TestScanRepairLogTail_AnIntentStillInTheRingIsNotCounted: an unpaired intent
+// the view still shows is visible already, so it must not be in the omitted
+// count.
+func TestScanRepairLogTail_AnIntentStillInTheRingIsNotCounted(t *testing.T) {
+	c := testClient(t, nil)
+	seedRows(t, c, doneRow("a"), doneRow("b"), intentRow("visible"))
+	tail, err := c.scanRepairLogTail(1, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tail.omitted != 2 || tail.omittedUnpaired != 0 {
+		t.Errorf("omitted=%d unpaired=%d, want 2 and 0", tail.omitted, tail.omittedUnpaired)
+	}
+}
+
+// TestScanRepairLogTail_UnpairedTrackingIsCapped: past the cap the count stops
+// growing and says it is a lower bound, so heap stays bounded.
+func TestScanRepairLogTail_UnpairedTrackingIsCapped(t *testing.T) {
+	c := testClient(t, nil)
+	var rows []RepairRow
+	for i := 0; i < 5; i++ {
+		rows = append(rows, intentRow(fmt.Sprintf("u%d", i)))
+	}
+	rows = append(rows, doneRow("x"))
+	seedRows(t, c, rows...)
+	tail, err := c.scanRepairLogTail(1, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tail.omittedUnpaired != 3 || !tail.unpairedCapped {
+		t.Errorf("omittedUnpaired=%d capped=%v, want 3 and capped", tail.omittedUnpaired, tail.unpairedCapped)
+	}
+}
+
+// TestScanRepairLogTail_UndecodableLinesAreNeverAttributed: a garbled line that
+// merely mentions an intent stays in skipped and adds nothing to the count.
+func TestScanRepairLogTail_UndecodableLinesAreNeverAttributed(t *testing.T) {
+	c := testClient(t, nil)
+	writeRepairLogRaw(t, c, `{"id":"g","outcome":"intent"`+"\n"+repairRowLine(t, doneRow("a"))+repairRowLine(t, doneRow("b")))
+	tail, err := c.scanRepairLogTail(1, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tail.skipped != 1 || tail.omittedUnpaired != 0 {
+		t.Errorf("skipped=%d unpaired=%d, want 1 and 0", tail.skipped, tail.omittedUnpaired)
+	}
+}
+
+// TestRepairHistory_ReportsOmittedUnpairedIntents runs the public path over
+// more than MaxRepairHistoryRows rows.
+func TestRepairHistory_ReportsOmittedUnpairedIntents(t *testing.T) {
+	c := testClient(t, nil)
+	rows := []RepairRow{intentRow("u10")}
+	for i := 0; i < MaxRepairHistoryRows+50; i++ {
+		rows = append(rows, doneRow(fmt.Sprintf("d%d", i)))
+	}
+	seedRows(t, c, rows...)
+	trail, err := c.RepairHistory(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trail.OmittedUnpaired != 1 || trail.OmittedUnpairedCapped || trail.Omitted != 51 {
+		t.Errorf("trail = omitted %d, unpaired %d, capped %v; want 51, 1, false", trail.Omitted, trail.OmittedUnpaired, trail.OmittedUnpairedCapped)
+	}
+}

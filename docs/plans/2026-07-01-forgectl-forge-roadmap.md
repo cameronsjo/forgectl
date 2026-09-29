@@ -1,3 +1,7 @@
+---
+status: superseded
+---
+
 # forgectl — Roadmap (2026-07-01)
 
 > **Superseded by [`2026-09-05-forgectl-roadmap.md`](2026-09-05-forgectl-roadmap.md).**

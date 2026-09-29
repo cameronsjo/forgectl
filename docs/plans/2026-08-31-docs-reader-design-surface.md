@@ -1,5 +1,5 @@
 ---
-status: done
+status: superseded
 branch: fix/docs-frontmatter-and-tree
 next: superseded — every open lever ruled by docs/plans/2026-09-01-docs-reader-v2.md (built on feat/docs-reader-v2)
 ---

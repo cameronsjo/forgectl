@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # forgectl workflow blessing — user-presence signing for the workflow DSL
 
 **Target repo:** `cameronsjo/forgectl` · **Issue:** #10 (reframed) · **Lands on:** current `main` (PR #83's module architecture **merged 2026-07-12**, `de768a9`)

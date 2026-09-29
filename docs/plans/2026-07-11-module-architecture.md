@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # forgectl Module Architecture
 
 > Panel: plan-reviewer ×2 (conflict, underspecification) + owner-review ran — 2 Critical (shared root), 5 Important, 5 advisory, plus owner-lens recommendations; all folded in, 0 declined (4 owner questions routed to Cameron and answered: Phase 6 dropped, Phase-4 ship gate, count-pin growth cap).

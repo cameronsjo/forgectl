@@ -216,7 +216,7 @@ func TestDocsListCmd_Deadline_JSON_EmptyStdoutOneStderrObjectExit2(t *testing.T)
 	if stdout.Len() != 0 {
 		t.Errorf("stdout = %q, want empty", stdout.String())
 	}
-	var obj docsListDeadlineJSON
+	var obj docsErrorJSON
 	dec := json.NewDecoder(&stderr)
 	if decErr := dec.Decode(&obj); decErr != nil {
 		t.Fatalf("stderr is not a valid JSON object: %v\nstderr: %s", decErr, stderr.String())
@@ -288,7 +288,7 @@ func TestDocsListCmd_NonDeadlineFailure_JSON_EmptyStdoutOneStderrObjectExit2(t *
 	if stdout.Len() != 0 {
 		t.Errorf("stdout = %q, want empty", stdout.String())
 	}
-	var obj docsListDeadlineJSON
+	var obj docsErrorJSON
 	dec := json.NewDecoder(&stderr)
 	if decErr := dec.Decode(&obj); decErr != nil {
 		t.Fatalf("stderr is not a JSON object: %v\nstderr: %s", decErr, stderr.String())

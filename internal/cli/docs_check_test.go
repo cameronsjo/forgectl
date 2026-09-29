@@ -138,7 +138,7 @@ func TestDocsCheckCmd_JSONSchemaFrozen(t *testing.T) {
 		t.Errorf("schema_version = %v, want 1", got["schema_version"])
 	}
 	assertKeys(t, "summary", got["summary"].(map[string]any),
-		"broken_links", "ambiguous_links", "broken_anchors", "orphans", "outside_root_links",
+		"broken_links", "ambiguous_links", "broken_anchors", "orphans", "ignored_orphans", "outside_root_links",
 		"deprecated", "stale")
 
 	byKind := map[string]map[string]any{}
@@ -258,7 +258,7 @@ func TestDocsCheckCmd_DeadlineEncodeFailureNamesCheck(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a deadline error, got nil")
 	}
-	if !strings.HasPrefix(err.Error(), "docs check: encode deadline error") {
+	if !strings.HasPrefix(err.Error(), "docs check: encode error") {
 		t.Errorf("err = %q, want it to name docs check", err.Error())
 	}
 	if got := ExitCode(err); got != 2 {
