@@ -251,10 +251,7 @@ func TestSessionSinks_AgreeAcrossWorkspaceAndPhase(t *testing.T) {
 		phase pr.Phase
 		seed  func(t *testing.T) pr.SessionSummary
 	}
-	allPhases := []pr.Phase{
-		pr.PhaseQueued, pr.PhasePreparing, pr.PhasePrepared,
-		pr.PhaseLaunching, pr.PhaseActive, pr.PhaseNeedsRepair,
-	}
+	allPhases := pr.KnownPhases()
 	// Validation refuses a workspace-less record in these phases.
 	needsWorkspace := map[pr.Phase]bool{
 		pr.PhasePrepared: true, pr.PhaseLaunching: true, pr.PhaseActive: true,
@@ -307,6 +304,9 @@ func TestSessionSinks_AgreeAcrossWorkspaceAndPhase(t *testing.T) {
 		mode: "unclassified",
 		seed: func(*testing.T) pr.SessionSummary { return pr.SessionSummary{} },
 	})
+	// The literal 18 is deliberate: the phase loop above now follows
+	// pr.KnownPhases(), so adding a phase grows the matrix and trips this guard
+	// until a human confirms the new phase's cells and updates the number.
 	if len(cells) != 18 {
 		t.Fatalf("matrix has %d cells, want 18 (15 phased + 2 legacy + 1 unclassified); a phase or mode was added without updating this test", len(cells))
 	}
@@ -718,10 +718,7 @@ func TestDashRenderSessions_LegacyFixture_NoPhaseNote(t *testing.T) {
 // about — including one a future build might add to the switch's default arm
 // — must render by name rather than reading as a healthy review.
 func TestDashPhaseNote_EveryPhaseExceptActiveYieldsANote(t *testing.T) {
-	allPhases := []pr.Phase{
-		pr.PhaseQueued, pr.PhasePreparing, pr.PhasePrepared,
-		pr.PhaseLaunching, pr.PhaseActive, pr.PhaseNeedsRepair,
-	}
+	allPhases := pr.KnownPhases()
 	for i, phase := range allPhases {
 		rec := phasedRecord{
 			ref:   pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 20 + i},

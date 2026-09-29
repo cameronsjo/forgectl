@@ -36,14 +36,30 @@ const (
 	PhaseNeedsRepair Phase = "needs-repair"
 )
 
-// valid reports whether p is one of the six phases this build knows. An
-// unknown phase on a version-2 record is refused at validation rather than
+// knownPhases is the roster of phases this build knows, in lifecycle order.
+// It is the single source of truth: valid() and KnownPhases() both read it, so
+// a phase added here is recognised everywhere without a second list to update.
+var knownPhases = [...]Phase{
+	PhaseQueued, PhasePreparing, PhasePrepared, PhaseLaunching, PhaseActive, PhaseNeedsRepair,
+}
+
+// KnownPhases returns every phase this build knows, in lifecycle order. Each
+// call returns a fresh slice, so a caller cannot mutate the roster. Tests
+// range over it instead of hand-listing phases, so a newly added phase is
+// covered rather than silently skipped.
+func KnownPhases() []Phase {
+	return append([]Phase(nil), knownPhases[:]...)
+}
+
+// valid reports whether p is one of the phases this build knows (knownPhases).
+// An unknown phase on a version-2 record is refused at validation rather than
 // mapped to anything, because a phase this build cannot name is one it cannot
 // reason about.
 func (p Phase) valid() bool {
-	switch p {
-	case PhaseQueued, PhasePreparing, PhasePrepared, PhaseLaunching, PhaseActive, PhaseNeedsRepair:
-		return true
+	for _, k := range knownPhases {
+		if p == k {
+			return true
+		}
 	}
 	return false
 }
