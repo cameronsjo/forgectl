@@ -18,6 +18,12 @@ package docs
 //   [x] Happy: a single-file root has no orphans
 //   [x] Happy: findings sort by root, path, kind, target — not walk order
 //   [x] Happy: no findings encodes as [], never null
+//   [x] Unhappy: a passed stale_after is one stale finding carrying the value;
+//       a future one is none
+//   [x] Unhappy: status: deprecated is one deprecated finding
+//   [x] Happy: a past date-only stale_after is no finding
+//   [x] Happy: a stale doc in a vault root is no finding
+//   [x] Happy: a stale finding encodes as kind, root, path, stale_after
 //
 // isRootIndex, existsInRoot are exercised through Check.
 
@@ -25,6 +31,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -303,5 +310,89 @@ func TestCheck_EmptyFindingsEncodeAsArray(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"schema_version":1`) {
 		t.Errorf("JSON = %s, want schema_version 1", raw)
+	}
+}
+
+func TestCheckAt_Stale(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "---\nstale_after: 2026-09-28T12:00:00Z\n---\n# R\n")
+
+	r := checkIndex(t, dir).CheckAt(trustTestNow)
+	got := findingsOf(r, FindingStale)
+	if len(got) != 1 || len(r.Findings) != 1 {
+		t.Fatalf("findings = %+v, want exactly one stale", r.Findings)
+	}
+	if got[0].Path != "README.md" || got[0].StaleAfter != "2026-09-28T12:00:00Z" {
+		t.Errorf("finding = %+v, want README.md carrying its stale_after", got[0])
+	}
+	if r.Summary.Stale != 1 || r.Summary.Deprecated != 0 {
+		t.Errorf("summary = %+v, want Stale 1, Deprecated 0", r.Summary)
+	}
+
+	checkWrite(t, filepath.Join(dir, "README.md"), "---\nstale_after: 2026-09-30T12:00:00Z\n---\n# R\n")
+	if r := checkIndex(t, dir).CheckAt(trustTestNow); len(r.Findings) != 0 {
+		t.Errorf("future stale_after findings = %+v, want none", r.Findings)
+	}
+}
+
+func TestCheckAt_Deprecated(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "---\nstatus: deprecated\n---\n# R\n")
+
+	r := checkIndex(t, dir).CheckAt(trustTestNow)
+	if got := findingsOf(r, FindingDeprecated); len(got) != 1 || len(r.Findings) != 1 {
+		t.Fatalf("findings = %+v, want exactly one deprecated", r.Findings)
+	}
+	if r.Summary.Deprecated != 1 {
+		t.Errorf("Summary.Deprecated = %d, want 1", r.Summary.Deprecated)
+	}
+}
+
+func TestCheckAt_DateOnlyStaleAfterIgnored(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "---\nstale_after: 2020-01-01\n---\n# R\n")
+
+	if r := checkIndex(t, dir).CheckAt(trustTestNow); len(r.Findings) != 0 {
+		t.Errorf("findings = %+v, want none for a date-only value", r.Findings)
+	}
+}
+
+func TestCheckAt_VaultStaleNotReported(t *testing.T) {
+	docsDir := t.TempDir()
+	checkWrite(t, filepath.Join(docsDir, "README.md"), "# R\n")
+	vault := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	checkWrite(t, filepath.Join(vault, "n.md"), "---\nstale_after: 2026-09-28T12:00:00Z\nstatus: deprecated\n---\n# N\n")
+
+	if r := checkIndex(t, docsDir, vault).CheckAt(trustTestNow); len(r.Findings) != 0 {
+		t.Errorf("findings = %+v, want none from a vault root", r.Findings)
+	}
+}
+
+func TestCheckAt_StaleFindingWireKeys(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "---\nstale_after: 2026-09-28T12:00:00Z\n---\n# R\n")
+
+	r := checkIndex(t, dir).CheckAt(trustTestNow)
+	if len(r.Findings) != 1 {
+		t.Fatalf("findings = %+v, want one", r.Findings)
+	}
+	raw, err := json.Marshal(r.Findings[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if got := strings.Join(keys, ","); got != "kind,path,root,stale_after" {
+		t.Errorf("stale finding keys = %s, want kind,path,root,stale_after", got)
 	}
 }
