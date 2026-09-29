@@ -115,7 +115,7 @@ exits 2.`,
 			if err != nil {
 				return docsFail(cmd, "docs search", "", err, 2, asJSON)
 			}
-			return printDocsSearch(cmd, resp, limit, asJSON)
+			return printDocsSearch(cmd, resp, asJSON)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
@@ -137,8 +137,8 @@ type docsSearchPartialJSON = docsErrorJSON
 // exit 1 with its reason on stderr: under --json one {"error","code","root"} object
 // (stdout still carries the full response, errors array included), otherwise
 // one line per failed root.
-func printDocsSearch(cmd *cobra.Command, resp docspkg.SearchResponse, limit int, asJSON bool) error {
-	if err := printDocsSearchResults(cmd, resp, limit, asJSON); err != nil {
+func printDocsSearch(cmd *cobra.Command, resp docspkg.SearchResponse, asJSON bool) error {
+	if err := printDocsSearchResults(cmd, resp, asJSON); err != nil {
 		return err
 	}
 	if len(resp.Errors) == 0 {
@@ -160,16 +160,13 @@ func printDocsSearch(cmd *cobra.Command, resp docspkg.SearchResponse, limit int,
 	return newSilentCodedError(1)
 }
 
-func printDocsSearchResults(cmd *cobra.Command, resp docspkg.SearchResponse, limit int, asJSON bool) error {
+func printDocsSearchResults(cmd *cobra.Command, resp docspkg.SearchResponse, asJSON bool) error {
 	out := cmd.OutOrStdout()
 	if asJSON {
 		return termsafe.JSONEncoder(out).Encode(resp)
 	}
-	if len(resp.Results) == 0 {
-		if len(resp.Errors) == 0 {
-			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "no matches")
-		}
-		return nil
+	if len(resp.Results) == 0 && len(resp.Errors) == 0 {
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "no matches")
 	}
 	for _, r := range resp.Results {
 		_, _ = fmt.Fprintf(out, "%s  %s:%d  %s\n",
@@ -179,7 +176,9 @@ func printDocsSearchResults(cmd *cobra.Command, resp docspkg.SearchResponse, lim
 			termsafe.SafeLineMax(r.Snippet, docsSearchSnippetRunes))
 	}
 	if resp.Truncated {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "showing the first %d results; raise --limit for more\n", limit)
+		// Worded for both backends: under qmd, truncated can be set with
+		// fewer than limit results shown (qmd's window came back full).
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "more matches may exist; narrow the query or raise --limit")
 	}
 	return nil
 }

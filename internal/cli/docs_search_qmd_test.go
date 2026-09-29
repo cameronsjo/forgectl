@@ -11,11 +11,14 @@ package cli
 //       overrides it
 //   [x] Unhappy: a bad --backend, and a bad search_backend config value,
 //       exit 2 with one JSON error object before anything runs
+//   [x] Happy: the truncation hint holds when qmd's full window leaves fewer
+//       than --limit results, or none
 //   [x] Unhappy: qmd output that is not one JSON array exits 2 under
 //       --json with stdout empty and one error object on stderr
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -100,13 +103,74 @@ func TestDocsSearchBackendFromConfig(t *testing.T) {
 	if runner.name != "/usr/bin/qmd" {
 		t.Errorf("config search_backend=qmd ran %q, want qmd", runner.name)
 	}
+}
 
-	runner = &searchRunner{FakeRunner: &forgexec.FakeRunner{}}
-	if _, _, err := runDocsSearchCfg(t, cfg, runner, "--backend", "ripgrep", "needle"); err != nil {
+func TestDocsSearchBackendFlagOverridesConfig(t *testing.T) {
+	docsSearchFixture(t)
+	stubSearchLookPath(t, bothBackends)
+	cfg := config.DocsConfig{SearchBackend: "qmd"}
+
+	runner := &searchRunner{FakeRunner: &forgexec.FakeRunner{}}
+	stdout, _, err := runDocsSearchCfg(t, cfg, runner, "--json", "--backend", "ripgrep", "needle")
+	if err != nil {
 		t.Fatalf("docs search: %v", err)
 	}
-	if runner.name != "/usr/bin/rg" {
-		t.Errorf("--backend ripgrep over config qmd ran %q, want rg", runner.name)
+	if runner.name != "/usr/bin/rg" || !strings.Contains(stdout, `"backend":"ripgrep"`) {
+		t.Errorf("--backend ripgrep over config qmd ran %q, stdout %s; want rg and backend ripgrep", runner.name, stdout)
+	}
+}
+
+// qmdWindowJSON is a full qmd -n window for --limit 1 (10 rows): inRoot rows
+// naming page, the rest outside every root.
+func qmdWindowJSON(t *testing.T, page string, inRoot int) string {
+	t.Helper()
+	rows := make([]map[string]any, 0, 10)
+	for i := range 10 {
+		file := fmt.Sprintf("/elsewhere/other-%d.md", i)
+		if i < inRoot {
+			file = page
+		}
+		rows = append(rows, map[string]any{"score": 1, "file": file, "line": i + 1, "snippet": "needle"})
+	}
+	b, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// Under qmd, truncated can be set with fewer than --limit results shown, so
+// the human hint must not claim a count of results it did not show.
+func TestDocsSearchQMDTruncationHint(t *testing.T) {
+	for name, tc := range map[string]struct {
+		inRoot    int
+		wantLines int
+		wantNoHit bool
+	}{
+		"fewer than limit survive": {inRoot: 1, wantLines: 1},
+		"none survive":             {inRoot: 0, wantLines: 0, wantNoHit: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			page := docsSearchFixture(t)
+			stubSearchLookPath(t, bothBackends)
+			runner := &searchRunner{FakeRunner: &forgexec.FakeRunner{}, stdout: qmdWindowJSON(t, page, tc.inRoot)}
+			stdout, stderr, err := runDocsSearch(t, runner, "--backend", "qmd", "--limit", "1", "needle")
+			if err != nil {
+				t.Fatalf("docs search: %v", err)
+			}
+			if got := strings.Count(stdout, "\n"); got != tc.wantLines {
+				t.Errorf("stdout has %d lines, want %d: %q", got, tc.wantLines, stdout)
+			}
+			if !strings.Contains(stderr, "more matches may exist") {
+				t.Errorf("stderr = %q, want the more-matches hint", stderr)
+			}
+			if strings.Contains(stderr, "first") {
+				t.Errorf("stderr = %q claims a count of results shown", stderr)
+			}
+			if tc.wantNoHit != strings.Contains(stderr, "no matches") {
+				t.Errorf("stderr = %q, want \"no matches\" = %v", stderr, tc.wantNoHit)
+			}
+		})
 	}
 }
 

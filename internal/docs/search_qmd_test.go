@@ -20,7 +20,7 @@ package docs
 //       even when fewer than limit hits survive the gate
 //   [x] Happy: qmdWindow is limit*10, capped at 1000, never below limit+1,
 //       and never past maxQMDRows (no overflow at math.MaxInt)
-//   [x] Happy: the snippet's "@@ … @@" header is dropped
+//   [x] Happy: the snippet's "@@ … @@" header is dropped and the text trimmed
 //   [x] Happy: overlapping roots return a shared doc once, first root wins
 //   [x] Unhappy: an unknown backend is refused before anything runs
 //   [x] Unhappy: output past maxQMDOutputBytes fails closed
@@ -263,6 +263,20 @@ func TestQMDSnippetDropsHeader(t *testing.T) {
 	}
 	if got := resp.Results[0].Snippet; got != "needle here more" {
 		t.Errorf("Snippet = %q, want the text without the @@ header, newlines folded", got)
+	}
+}
+
+// Live qmd 2.8.3 output led the snippet body with a space; it is trimmed,
+// with or without the @@ header.
+func TestQMDSnippetTextTrims(t *testing.T) {
+	for in, want := range map[string]string{
+		"@@ -3,1 @@ (2 before, 0 after)\n  needle here \n": "needle here",
+		"  needle here\t":        "needle here",
+		"@@ -1,1 @@ header only": "",
+	} {
+		if got := qmdSnippetText(in); got != want {
+			t.Errorf("qmdSnippetText(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

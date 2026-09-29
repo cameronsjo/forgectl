@@ -95,9 +95,11 @@ type qmdHit struct {
 //
 // qmd's stdout must be exactly one JSON array. Anything else, including a
 // banner line before the JSON, fails closed with ErrSearchBackendFailed and
-// no results, as does a non-zero exit. The query never reaches the error
-// text. A missing qmd wraps ErrNoSearchBackend; an expired or cancelled ctx
-// is returned as itself.
+// no results, as does a non-zero exit. The query never reaches argv logging
+// (StreamingRunner does not log argv) or forgectl's own error text; on a
+// failed run qmd's own stderr is surfaced, sanitised and capped, and qmd may
+// echo the query there. A missing qmd wraps ErrNoSearchBackend; an expired or
+// cancelled ctx is returned as itself.
 //
 // Truncated is set when a gated hit existed past limit, and also when qmd
 // returned its whole -n window: qmd ranked more rows than it printed, so
@@ -236,13 +238,15 @@ func gateQMDHit(idx *Index, roots []Root, titles map[searchKey]string, cwd strin
 }
 
 // qmdSnippetText drops the diff-style "@@ -start,count @@ (…)" header qmd
-// puts on the first line of every snippet, leaving the document text.
+// puts on the first line of every snippet, leaving the document text with
+// surrounding whitespace trimmed (qmd 2.8.3 was seen to lead with a space).
 func qmdSnippetText(s string) string {
 	if strings.HasPrefix(s, "@@ ") {
-		if i := strings.IndexByte(s, '\n'); i >= 0 {
-			return s[i+1:]
+		i := strings.IndexByte(s, '\n')
+		if i < 0 {
+			return ""
 		}
-		return ""
+		s = s[i+1:]
 	}
-	return s
+	return strings.TrimSpace(s)
 }

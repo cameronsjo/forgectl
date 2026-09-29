@@ -151,7 +151,7 @@ The default backend is [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`), 
 - Docs whose paths are not valid UTF-8 are not searchable; rg can only report such a path as raw bytes, and those hits are counted in `skipped`.
 - **Results are ordered and stable.** Roots are searched in their configured order, and rg walks each root in path order (`--sort=path`, which also keeps rg to a single worker), so the same query over the same tree returns the same results, and `--limit` always keeps the same prefix. A doc reachable through two overlapping roots (cwd and `./docs`, say) is returned once, under the first root.
 
-`--json` prints one object to stdout. `backend` names the backend that ran, either `ripgrep` or `qmd`. `results` is always an array, and each result carries `root`, `path`, `title`, `line`, and `snippet`. `truncated` is true when more hits existed past `--limit`, or, under qmd, when qmd's result window came back full. `errors` is always an array of `{root, message}`, one per root rg could not fully search (an unreadable file, say, or output that could not be parsed).
+`--json` prints one object to stdout. `backend` names the backend that ran, either `ripgrep` or `qmd`. `results` is always an array, and each result carries `root`, `path`, `title`, `line`, and `snippet`. `truncated` is true when more hits existed past `--limit`, or, under qmd, when qmd's result window came back full, so under qmd it can be set with fewer than `--limit` results. Human output then ends with a note on stderr that more matches may exist. `errors` is always an array of `{root, message}`, one per root rg could not fully search (an unreadable file, say, or output that could not be parsed).
 
 ```json
 {"backend":"ripgrep","query":"needle","results":[{"root":"docs","path":"guide.md","title":"Guide","line":12,"snippet":"the needle in the guide"}],"truncated":false,"skipped":0,"errors":[]}
@@ -170,7 +170,7 @@ forgectl runs `qmd search --json --full-path -n <N> -- <query>` with no shell, u
 - **Results follow qmd's ranking**, not path order, and a query is a set of BM25 terms rather than rg's fixed string. The snippet is qmd's, with its `@@ … @@` header removed and its lines joined.
 - **qmd's output must be exactly one JSON array.** Text before or after the array, a second JSON value, or output over 8 MB is refused rather than guessed at. That failure, a non-zero qmd exit, and a missing qmd all exit 2 under the shared contract above. qmd has no per-root partial result, so it never exits 1.
 
-The pure-JSON premise comes from reading the qmd 2.8.3 source, where `search --json` prints only `JSON.stringify` output or `[]` to stdout and sends its warnings to stderr. It has not yet been checked against a running qmd. If a qmd version prints anything else to stdout, `docs search --backend qmd` fails closed with exit 2 and returns nothing.
+The pure-JSON premise was verified against qmd 2.8.3: `search --json --full-path` prints only a JSON array (or `[]`) to stdout and sends its warnings to stderr, including for queries that look like flags or carry quotes or parentheses. If another qmd version prints anything else to stdout, `docs search --backend qmd` fails closed with exit 2 and returns nothing.
 
 ## `docs open` steers, never starts
 
