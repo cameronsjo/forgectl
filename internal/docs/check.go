@@ -178,13 +178,22 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 		if fa.Path != fb.Path {
 			return fa.Path < fb.Path
 		}
-		if fa.Kind != fb.Kind {
-			return fa.Kind < fb.Kind
+		// Within one file, link findings come first in source order (line,
+		// then target, then kind) so path:line output reads top to bottom;
+		// the lineless orphan, deprecated and stale findings follow by kind.
+		la, lb := isLinkFinding(fa.Kind), isLinkFinding(fb.Kind)
+		if la != lb {
+			return la
 		}
-		if fa.Target != fb.Target {
-			return fa.Target < fb.Target
+		if la {
+			if fa.Line != fb.Line {
+				return fa.Line < fb.Line
+			}
+			if fa.Target != fb.Target {
+				return fa.Target < fb.Target
+			}
 		}
-		return fa.Line < fb.Line
+		return fa.Kind < fb.Kind
 	})
 
 	for _, f := range report.Findings {
@@ -204,6 +213,12 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 		}
 	}
 	return report
+}
+
+// isLinkFinding reports whether k is a link kind, the findings that carry a
+// Target and Line.
+func isLinkFinding(k FindingKind) bool {
+	return k == FindingBrokenLink || k == FindingAmbiguousLink || k == FindingBrokenAnchor
 }
 
 // existsInRoot reports whether the link path names something on disk inside
