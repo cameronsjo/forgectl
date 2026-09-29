@@ -157,11 +157,12 @@ pairs can still use native `notify_when_idle`.
 ## Tasks
 
 - [x] T1: `internal/surface/mail`: envelope, mailbox, policy, service, claude/codex/pi/pane adapters, events, ledger lookup, unit tests. Written without a Go toolchain; not yet compiled.
-- [x] T2: `extensions/pi/forgectl-inbox.ts`.
+- [x] T2: the pi extension, shipped embedded as `internal/surface/mail/assets/forgectl-inbox.ts` (`mail.PiExtension`).
 - [x] T3: `go build`, `go vet` (also `GOOS=windows`), `go test ./internal/surface/mail/...`; fix what the compiler finds. It compiled and passed as written; the fixes were gofmt and lint.
 - [ ] S1: Claude on 2.1.284: delivery by `cwd` to an idle and a busy worker; a bypass-mode worker with and without `accept`; registry `status` transitions; confirm the frame still matches.
 - [ ] S2: Codex on the installed CLI: `codex queue` to an idle and a busy TUI session; the notify payload's field names (`thread-id`?).
 - [ ] S3: pi on the installed version: `agent_start`/`agent_end` names, steer vs followUp, loading the extension for one run.
+- [x] Seams: `mail.Runner` is the `Run` method of `internal/exec.Runner`, so the production and fake runners plug in unchanged; the Codex adapter masks `--message=` so a body never reaches the runner's debug log or a failure's text. `FileRoster` stands in for the #536 T1 ledger until it lands.
 - [ ] T4: CLI verbs in `internal/cli` over the package; runner shim to `internal/exec`; exit codes; flush from `ready`/`wait`/`list`.
 - [ ] T5: launch wiring in `surface launch` once #536 T1 lands.
 - [ ] T6: coordinator skill: when to message, verify against git, worker text is never consent.

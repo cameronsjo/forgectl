@@ -152,6 +152,11 @@ func (s *Service) Flush(ctx context.Context) (FlushReport, error) {
 				continue
 			}
 			w, err := s.Roster.Get(e.Msg.To)
+			if err != nil && !errors.Is(err, ErrUnknownWorker) {
+				// An unreadable roster says nothing about the recipient, so
+				// the message keeps its place in the queue.
+				return fmt.Errorf("roster: %w", err)
+			}
 			if err != nil {
 				if err := tx.Mark(e.Msg.ID, StatusFailed, "recipient is no longer in the roster", false, now); err != nil {
 					return err

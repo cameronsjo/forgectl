@@ -198,3 +198,58 @@ func TestApplyEventRecordsCodexThread(t *testing.T) {
 		t.Fatal("accepted a thread id that starts with a dash")
 	}
 }
+
+// brokenRoster fails every read after the send, the way a roster.json caught
+// mid-write by another tool or made unreadable would.
+type brokenRoster struct {
+	Roster
+	broken bool
+}
+
+func (b *brokenRoster) Get(name string) (Worker, error) {
+	if b.broken {
+		return Worker{}, errors.New("roster.json: unexpected end of JSON input")
+	}
+	return b.Roster.Get(name)
+}
+
+func TestFlushKeepsMessageQueuedWhenRosterUnreadable(t *testing.T) {
+	ad := &fakeAdapter{errs: []error{NotReady("not started")}}
+	s, clock := newTestService(t, ad)
+	br := &brokenRoster{Roster: s.Roster}
+	s.Roster = br
+	ctx := context.Background()
+	if _, err := s.Send(ctx, "coord", "pi-1", "hello", PriorityNext); err != nil {
+		t.Fatal(err)
+	}
+	br.broken = true
+	clock.add(time.Minute)
+	if _, err := s.Flush(ctx); err == nil {
+		t.Fatal("flush over an unreadable roster succeeded")
+	}
+	entries, err := s.Messages(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Status != StatusQueued {
+		t.Fatalf("entries = %+v, want the message still queued", entries)
+	}
+}
+
+func TestFlushFailsMessageToRemovedWorker(t *testing.T) {
+	ad := &fakeAdapter{errs: []error{NotReady("not started")}}
+	s, clock := newTestService(t, ad)
+	ctx := context.Background()
+	if _, err := s.Send(ctx, "coord", "pi-1", "hello", PriorityNext); err != nil {
+		t.Fatal(err)
+	}
+	s.Roster = FileRoster{Dir: t.TempDir()}
+	clock.add(time.Minute)
+	rep, err := s.Flush(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Failed != 1 {
+		t.Fatalf("report %+v, want the message to a removed worker failed", rep)
+	}
+}

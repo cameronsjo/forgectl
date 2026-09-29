@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+
+	fexec "github.com/cameronsjo/forgectl/internal/exec"
 )
 
-// Runner runs a command and returns its output. It matches the shape of
-// forgectl's internal/exec runner; T4 adds the one-line shim if it differs.
+// Runner is the one method CodexAdapter needs from forgectl's execution seam.
+// Every internal/exec.Runner satisfies it, the production OSRunner and the
+// FakeRunner test double alike.
 type Runner interface {
-	Run(ctx context.Context, name string, args ...string) ([]byte, error)
+	Run(ctx context.Context, name string, args ...string) (string, error)
 }
 
 // CodexAdapter delivers with `codex queue`, which reaches a session on the
@@ -43,9 +46,13 @@ func (a CodexAdapter) Deliver(ctx context.Context, w Worker, m Message, text str
 		bin = "codex"
 	}
 	// --flag=value keeps a value that starts with a dash from reading as a flag.
-	out, err := a.Runner.Run(ctx, bin, "queue", "--thread="+w.ThreadID, "--message="+text)
-	if err != nil {
-		return "", NotReady("codex queue: %v: %s", err, oneLine(out, 200))
+	message := "--message=" + text
+	// The runner writes argv into its debug log and into a failure's error
+	// text. The body belongs on argv, not in either, so it is masked there;
+	// the error then carries codex's stderr instead of the message.
+	ctx = fexec.WithMaskedAssignments(ctx, []string{message})
+	if _, err := a.Runner.Run(ctx, bin, "queue", "--thread="+w.ThreadID, message); err != nil {
+		return "", NotReady("codex queue: %s", oneLine([]byte(err.Error()), 300))
 	}
 	return "queued on codex thread " + w.ThreadID, nil
 }

@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// PiAdapter talks to the forgectl pi extension (extensions/pi/forgectl-inbox.ts)
+// PiAdapter talks to the forgectl pi extension (assets/forgectl-inbox.ts)
 // over the unix socket forgectl hands it at launch in FORGECTL_INBOX. One
 // request per connection: a JSON line in, a JSON line back.
 type PiAdapter struct {
