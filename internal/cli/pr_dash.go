@@ -164,6 +164,17 @@ func renderSessions(out io.Writer, summaries []pr.SessionSummary) {
 	}
 }
 
+// needsRepairNote is the "  [needs-repair: <reason>]" suffix `pr dash` and
+// `pr list` both put on a needs-repair row, so the two surfaces word it
+// identically. The caller decides whether the row is needs-repair.
+func needsRepairNote(s pr.SessionSummary) string {
+	reason := repairReasonLine(s.RepairReason())
+	if reason == "" {
+		reason = "no reason recorded"
+	}
+	return "  [needs-repair: " + reason + "]"
+}
+
 // phaseNote annotates a dash row with what the record SAYS about itself.
 // Active is the unmarked baseline and a legacy record has no phase to
 // report, so those two are the only silent cases: anything else — including
@@ -174,11 +185,7 @@ func phaseNote(s pr.SessionSummary) string {
 	case "", pr.PhaseActive:
 		return ""
 	case pr.PhaseNeedsRepair:
-		reason := repairReasonLine(s.RepairReason())
-		if reason == "" {
-			reason = "no reason recorded"
-		}
-		return "  [needs-repair: " + reason + "]"
+		return needsRepairNote(s)
 	default:
 		return "  [" + string(s.Phase()) + "]"
 	}

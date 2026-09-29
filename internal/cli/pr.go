@@ -366,13 +366,19 @@ func windowStatus(live map[pr.Ref]bool, ref pr.Ref, tmuxOK bool) string {
 
 // prListRowJSON is the --json wire shape for one `pr list` row — the same
 // five fields as the human table's tab-separated columns, in the same order.
-// phase was added last (ADR-0008: additive only); it is "" on a legacy record.
+// phase and repair_reason were added last (ADR-0008: additive only); phase is ""
+// on a legacy record. repair_reason matches `pr dash`: always present, the same
+// capped text the human sinks show, "" unless the record is needs-repair.
 type prListRowJSON struct {
 	Ref       string `json:"ref"`
 	CreatedAt string `json:"created_at"`
 	Path      string `json:"path"`
 	Status    string `json:"status"`
 	Phase     string `json:"phase"`
+	// RepairReason has no omitempty, like prDashReviewJSON's, so a script reads
+	// both surfaces the same way. It is capped by repairReasonLine;
+	// `pr repair --json` carries the full value.
+	RepairReason string `json:"repair_reason"`
 }
 
 func newPrListCmd(client *pr.Client) *cobra.Command {
@@ -392,7 +398,11 @@ beside 'no window' is a session that died between the two, and
 record written before phases existed.
 
 Fields are append-only: PATH is field 3 and stays there, because it is the
-operand 'forgectl pr teardown' takes.`,
+operand 'forgectl pr teardown' takes.
+
+A needs-repair row ends with '  [needs-repair: <reason>]' after the fifth
+column, the same wording 'forgectl pr dash' uses; --json carries it as
+repair_reason ("" on every other row).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			summaries, unreadable, err := client.List(cmd.Context())
@@ -438,16 +448,24 @@ operand 'forgectl pr teardown' takes.`,
 				// ordinary path prints verbatim and field 3 stays exactly
 				// what teardown is fed, while a control-bearing one prints
 				// as a quoted literal instead of driving the terminal.
-				_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\n",
+				//
+				// A needs-repair row gets its reason as a suffix AFTER the five
+				// columns (#542), worded exactly as `pr dash` words it, so no
+				// field moves and a script cutting by tab still sees five.
+				note := ""
+				if s.Phase() == pr.PhaseNeedsRepair {
+					note = needsRepairNote(s)
+				}
+				_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s%s\n",
 					s.Ref().String(), s.CreatedAt().Format(time.RFC3339),
 					termsafe.QuotePathIfUnsafe(s.Path()),
 					sessionStatus(live, s, tmuxOK),
-					phaseLabel(s))
+					phaseLabel(s), note)
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"ref":...,"created_at":...,"path":...,"status":...,"phase":...}] to stdout`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"ref":...,"created_at":...,"path":...,"status":...,"phase":...,"repair_reason":...}] to stdout`)
 	return cmd
 }
 
@@ -483,6 +501,8 @@ func writePrListJSON(out io.Writer, summaries []pr.SessionSummary, live map[pr.R
 			Path:      s.Path(),
 			Status:    sessionStatus(live, s, tmuxOK),
 			Phase:     string(s.Phase()),
+
+			RepairReason: repairReasonLine(s.RepairReason()),
 		})
 	}
 	enc := termsafe.JSONEncoder(out)

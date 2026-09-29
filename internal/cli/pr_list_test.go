@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cameronsjo/forgectl/internal/termsafe"
+
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/pr"
 )
@@ -44,7 +46,7 @@ func TestPrListJSON_KeySet(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d, want 1: %s", len(rows), got)
 	}
-	want := []string{"ref", "created_at", "path", "status", "phase"}
+	want := []string{"ref", "created_at", "path", "status", "phase", "repair_reason"}
 	if len(rows[0]) != len(want) {
 		t.Fatalf("row keys = %v, want exactly %v", keysOf(rows[0]), want)
 	}
@@ -407,5 +409,82 @@ func TestPrList_UnreadableTmux_DegradesAndSucceeds(t *testing.T) {
 	if strings.Contains(got, "window gone") {
 		t.Errorf("an unreadable tmux must NOT render \"window gone\" — that would flag every "+
 			"healthy review as dead:\n%s", got)
+	}
+}
+
+// listOverPhased runs `pr list` (human and --json) over records seeded through
+// the real loader, and returns both outputs plus the summaries for dash.
+func listOverPhased(t *testing.T, recs []phasedRecord) (human string, jsonRows []prListRowJSON, summaries []pr.SessionSummary) {
+	t.Helper()
+	dir := t.TempDir()
+	summaries = seedPhasedSummaries(t, dir, recs)
+	run := func(args ...string) string {
+		client := pr.New(prListRunner(nil), pr.WithSessionsDir(dir), pr.WithTmuxSession("forgectl"))
+		cmd := newPrListCmd(client)
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(new(bytes.Buffer))
+		cmd.SetArgs(args)
+		if err := cmd.ExecuteContext(context.Background()); err != nil {
+			t.Fatalf("pr list %v: %v", args, err)
+		}
+		return out.String()
+	}
+	human = run()
+	if err := json.Unmarshal([]byte(run("--json")), &jsonRows); err != nil {
+		t.Fatalf("--json did not parse: %v", err)
+	}
+	return human, jsonRows, summaries
+}
+
+// TestPrList_ShowsWhyASessionNeedsRepair is forgectl#542: the reason `pr dash`
+// and `pr repair` show must be on `pr list` too, worded and capped identically,
+// in both the human row (a suffix after the five columns) and --json.
+func TestPrList_ShowsWhyASessionNeedsRepair(t *testing.T) {
+	long := "launch failed: " + strings.Repeat("stderr noise ", 100)
+	repairRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 41}
+	queuedRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 43}
+	human, rows, summaries := listOverPhased(t, []phasedRecord{
+		{ref: repairRef, phase: pr.PhaseNeedsRepair, repairReason: long},
+		{ref: queuedRef, phase: pr.PhaseQueued},
+	})
+
+	byRef := map[string]prListRowJSON{}
+	for _, r := range rows {
+		byRef[r.Ref] = r
+	}
+	want := repairReasonLine(long)
+	if !strings.HasSuffix(want, termsafe.TruncatedMarker) {
+		t.Fatalf("fixture reason should be capped: %q", want)
+	}
+	if got := byRef[repairRef.String()].RepairReason; got != want {
+		t.Errorf("json repair_reason = %q, want the dash-capped %q", got, want)
+	}
+	if got := byRef[queuedRef.String()].RepairReason; got != "" {
+		t.Errorf("a queued row carries repair_reason %q, want empty", got)
+	}
+
+	// The suffix must be exactly what dash appends for the same summary, and
+	// must sit after five tab columns.
+	for _, s := range summaries {
+		var line string
+		for _, l := range strings.Split(human, "\n") {
+			if strings.HasPrefix(l, s.Ref().String()+"\t") {
+				line = l
+			}
+		}
+		if line == "" {
+			t.Fatalf("no human row for %s:\n%s", s.Ref(), human)
+		}
+		if got := strings.Count(line, "\t"); got != 4 {
+			t.Errorf("%s: %d tabs, want 4 (five columns): %q", s.Ref(), got, line)
+		}
+		if s.Phase() == pr.PhaseNeedsRepair {
+			if note := phaseNote(s); !strings.HasSuffix(line, phaseLabel(s)+note) {
+				t.Errorf("%s: row %q does not end with dash's note %q", s.Ref(), line, note)
+			}
+		} else if strings.Contains(line, "[") {
+			t.Errorf("%s: a non-needs-repair row grew a suffix: %q", s.Ref(), line)
+		}
 	}
 }
