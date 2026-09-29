@@ -69,7 +69,7 @@ Two things sit outside the contract, on purpose:
 
 In short: 2 = could not run; 1 = error findings or a partial search; 0 = clean, or `docs check` with only `info` findings.
 
-`docs serve` exits 0 after a clean Ctrl-C. Discovery has two failure modes. When the server cannot confirm it is serving its own discovery generation (its startup self-probe gets no answer, discovery publication reports success without a lease, or picking a fresh generation after a collision fails), startup is aborted before the banner and it is "could not run" (exit 2). A failed discovery-record write, an ordinary publish error or running out of collision retries only prints a warning: the server keeps serving without being discoverable by `docs open`, and exits 0 on a clean Ctrl-C. A failure after the server is up (the serve loop itself failing) is the server's own and exits 1.
+`docs serve` exits 0 after a clean Ctrl-C. Discovery has two failure modes. When the server cannot confirm it is serving its own discovery generation (its startup self-probe gets no answer, discovery publication reports success without a lease, or picking its initial discovery generation fails before the server starts), startup is aborted before the banner and it is "could not run" (exit 2). A failed discovery-record write, an ordinary publish error, failing to pick a fresh generation after a collision, or running out of collision retries only prints a warning: the server keeps serving without being discoverable by `docs open`, and exits 0 on a clean Ctrl-C. A failure after the server is up (the serve loop itself failing) is the server's own and exits 1.
 
 ### Root kinds
 
