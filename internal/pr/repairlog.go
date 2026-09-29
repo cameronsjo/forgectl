@@ -44,6 +44,15 @@ const maxRepairLogLineBytes = 8 << 10
 // can seed past it.
 const MaxRepairHistoryRows = 2000
 
+// maxTrackedEvictedIntents bounds the map readRepairLogTail keeps of intent
+// rows the ring displaced, so counting them costs bounded heap however long the
+// log is. A tracked entry is one ID string (a few dozen bytes), so the cap is
+// well under a megabyte. It is sized far above any plausible count of genuinely
+// unpaired intents — each is a rollback that died mid-way — so reaching it
+// means the log is badly wrong, which is the case the "at least" rendering is
+// for. An unexported var so a test can shrink it.
+var maxTrackedEvictedIntents = 10_000
+
 // maxActorBytes bounds the actor field, whose session-id half comes from the
 // environment. See repairActor for why an unbounded field here is a hazard.
 const maxActorBytes = 256
@@ -468,6 +477,24 @@ var appendRepairRow = func(f repairLogFile, data []byte) error {
 	return nil
 }
 
+// repairTail is what one bounded pass over the log yields.
+type repairTail struct {
+	rows []RepairRow
+	// omitted counts older decodable rows displaced by the limit.
+	omitted int
+	// skipped counts lines that did not decode or were over-long.
+	skipped int
+	// omittedUnpaired counts displaced intent rows that no completion row
+	// closes anywhere in the log — the one row type the log exists to keep
+	// visible. It counts decodable rows only: an undecodable line stays in
+	// skipped and is never attributed, since guessing at its content would let
+	// a hand edit steer the count. With unpairedCapped it is a lower bound.
+	omittedUnpaired int
+	// unpairedCapped reports that the tracking map filled, so omittedUnpaired
+	// is "at least" that many.
+	unpairedCapped bool
+}
+
 // readRepairLogTail returns the newest limit decodable rows, oldest first, how
 // many older decodable rows it displaced, and how many lines it skipped. A line
 // that does not decode, or that exceeds maxRepairLogLineBytes, is skipped
@@ -480,17 +507,53 @@ var appendRepairRow = func(f repairLogFile, data []byte) error {
 // Memory is bounded by limit rows plus one line buffer. The slice is NOT
 // preallocated to limit, because a caller may pass math.MaxInt.
 func (c *Client) readRepairLogTail(limit int) (rows []RepairRow, omitted, skipped int, err error) {
+	t, err := c.scanRepairLogTail(limit, maxTrackedEvictedIntents)
+	return t.rows, t.omitted, t.skipped, err
+}
+
+// scanRepairLogTail is readRepairLogTail plus the count of displaced intents
+// still unpaired. An intent always precedes its completion in the file, and
+// the ring displaces oldest first, so a displaced intent's completion is either
+// still in the ring when the pass ends (checked at the end) or was displaced
+// too (cancelled in displaced, which runs after the intent's own displacement). trackCap bounds the
+// map of displaced intent IDs; past it an intent is counted but not tracked, so
+// it can no longer be cancelled and the total is reported as a lower bound.
+func (c *Client) scanRepairLogTail(limit, trackCap int) (tail repairTail, err error) {
 	if limit < 1 {
 		limit = 1
 	}
 	f, err := openRepairLogFile(c.repairLogPath(), os.O_RDONLY, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, 0, 0, nil
+			return repairTail{}, nil
 		}
-		return nil, 0, 0, fmt.Errorf("read repair audit log: %w", termsafe.Error(err))
+		return repairTail{}, fmt.Errorf("read repair audit log: %w", termsafe.Error(err))
 	}
 	defer func() { _ = f.Close() }()
+
+	var rows []RepairRow
+	var omitted, skipped int
+	unpaired := map[string]struct{}{} // displaced intent IDs with no completion seen yet
+	unpairedNoID := 0                 // displaced intents with no ID: nothing can ever close them
+	capped := false
+	// displaced is called with each row the ring pushes out.
+	displaced := func(r RepairRow) {
+		if r.Outcome != repairOutcomeIntent {
+			// A displaced completion closes the displaced intent it pairs with;
+			// the intent left the ring first, so it is already tracked.
+			delete(unpaired, r.ID)
+			return
+		}
+		if len(unpaired)+unpairedNoID >= trackCap {
+			capped = true
+			return
+		}
+		if r.ID == "" {
+			unpairedNoID++
+			return
+		}
+		unpaired[r.ID] = struct{}{}
+	}
 
 	head := 0 // index of the oldest row once the ring is full
 	keep := func(line []byte) {
@@ -507,6 +570,7 @@ func (c *Client) readRepairLogTail(limit int) (rows []RepairRow, omitted, skippe
 			rows = append(rows, row)
 			return
 		}
+		displaced(rows[head])
 		rows[head] = row
 		head = (head + 1) % limit
 		omitted++
@@ -536,10 +600,17 @@ func (c *Client) readRepairLogTail(limit int) (rows []RepairRow, omitted, skippe
 			keep(line) // a final line with no trailing newline
 			break
 		}
-		return nil, 0, 0, fmt.Errorf("read repair audit log: %w", rerr)
+		return repairTail{}, fmt.Errorf("read repair audit log: %w", rerr)
 	}
 	if head > 0 {
 		rows = append(rows[head:], rows[:head]...)
+	}
+	// A completion still in the ring closes a displaced intent whose pair
+	// straddled the ring boundary.
+	for _, row := range rows {
+		if row.Outcome != repairOutcomeIntent {
+			delete(unpaired, row.ID)
+		}
 	}
 	if skipped > 0 {
 		attrs := []any{"skipped", skipped, "path", c.repairLogPath()}
@@ -548,7 +619,10 @@ func (c *Client) readRepairLogTail(limit int) (rows []RepairRow, omitted, skippe
 		}
 		slog.Warn("Skipped unreadable rows in the pr repair audit log.", attrs...)
 	}
-	return rows, omitted, skipped, nil
+	return repairTail{
+		rows: rows, omitted: omitted, skipped: skipped,
+		omittedUnpaired: len(unpaired) + unpairedNoID, unpairedCapped: capped,
+	}, nil
 }
 
 // RepairTrail is the bounded result of RepairHistory.
@@ -561,6 +635,14 @@ type RepairTrail struct {
 	// still in the file — nothing on the read path drops them — but they are
 	// not in Rows, so a caller must say so rather than show a gapless trail.
 	Skipped int
+	// OmittedUnpaired counts the omitted rows that are intents with no
+	// completion anywhere in the log — rollbacks that died mid-way, whose
+	// workspace field is the only pointer left to a clean room. It is part of
+	// Omitted, never in addition to it.
+	OmittedUnpaired int
+	// OmittedUnpairedCapped means OmittedUnpaired is a lower bound: tracking
+	// hit its cap.
+	OmittedUnpairedCapped bool
 	// Path is the log file, so a caller can say where the rest lives.
 	Path string
 }
@@ -571,8 +653,9 @@ type RepairTrail struct {
 func (c *Client) RepairHistory(ctx context.Context) (RepairTrail, error) {
 	trail := RepairTrail{Path: c.repairLogPath()}
 	err := c.withLifecycleLock(ctx, "repair-history", func() error {
-		var rerr error
-		trail.Rows, trail.Omitted, trail.Skipped, rerr = c.readRepairLogTail(MaxRepairHistoryRows)
+		tail, rerr := c.scanRepairLogTail(MaxRepairHistoryRows, maxTrackedEvictedIntents)
+		trail.Rows, trail.Omitted, trail.Skipped = tail.rows, tail.omitted, tail.skipped
+		trail.OmittedUnpaired, trail.OmittedUnpairedCapped = tail.omittedUnpaired, tail.unpairedCapped
 		return rerr
 	})
 	return trail, err

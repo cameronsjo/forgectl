@@ -785,3 +785,42 @@ func TestPrHistory_IsRegisteredUnderPr(t *testing.T) {
 		t.Fatalf("pr history is not registered: %v", err)
 	}
 }
+
+// TestPrHistory_NamesOmittedUnpairedIntentsOnStderrOnly (forgectl#570): the
+// count of displaced intents with no completion is on stderr, and --json
+// stdout stays a bare array of exactly the newest rows.
+func TestPrHistory_NamesOmittedUnpairedIntentsOnStderrOnly(t *testing.T) {
+	dir := t.TempDir()
+	var log bytes.Buffer
+	add := func(id, outcome string) {
+		data, err := json.Marshal(pr.RepairRow{TS: time.Unix(1700000000, 0).UTC(), ID: id, Outcome: outcome})
+		if err != nil {
+			t.Fatal(err)
+		}
+		log.Write(data)
+		log.WriteByte('\n')
+	}
+	add("lost", "intent")
+	add("paired", "intent")
+	add("paired", "applied")
+	for i := 0; i < pr.MaxRepairHistoryRows; i++ {
+		add(fmt.Sprintf("d%d", i), "applied")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "repair.jsonl"), log.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, errOut, err := runPrHistory(t, repairCmdClient(t, dir), "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errOut, "3 older rows") || !strings.Contains(errOut, "1 of the omitted rows are intents with no completion") {
+		t.Errorf("stderr = %q, want the omitted count and exactly one unpaired intent", errOut)
+	}
+	if strings.Contains(out, "unpaired") || strings.Contains(out, "no completion") {
+		t.Errorf("stdout carries the note: the bare array must not change")
+	}
+	var rows []pr.RepairRow
+	if err := json.Unmarshal([]byte(out), &rows); err != nil || len(rows) != pr.MaxRepairHistoryRows {
+		t.Errorf("stdout is not a bare array of %d rows: %v", pr.MaxRepairHistoryRows, err)
+	}
+}
