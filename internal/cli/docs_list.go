@@ -33,7 +33,7 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 		Args:  cobra.ArbitraryArgs,
 		// SilenceUsage/SilenceErrors mirror env.go's own setting: a deadline
 		// error under --json has already put its ONE JSON object on stderr
-		// (reportDocsListDeadline); cobra's own "Error: ..." line and usage
+		// (docsFail); cobra's own "Error: ..." line and usage
 		// block would be a second, conflicting write to the same stream.
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -41,16 +41,16 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 			// Exit contract, as docs check: 0 listed (an empty list included);
 			// 2 the list could not be produced (bad flag, bad root, deadline).
 			if limit < 0 {
-				return reportDocsListDeadline(cmd, "docs list", "", fmt.Errorf("--limit must be 0 or a positive count, not %d", limit), asJSON)
+				return docsFail(cmd, "docs list", "", fmt.Errorf("--limit must be 0 or a positive count, not %d", limit), 2, asJSON)
 			}
 
 			roots, err := resolveDocsRoots(args, deps.Cfg.Docs)
 			if err != nil {
-				return reportDocsListDeadline(cmd, "docs list", "", err, asJSON)
+				return docsFail(cmd, "docs list", "", err, 2, asJSON)
 			}
 			opts, err := docsIndexOptions(deps.Cfg.Docs)
 			if err != nil {
-				return reportDocsListDeadline(cmd, "docs list", "", err, asJSON)
+				return docsFail(cmd, "docs list", "", err, 2, asJSON)
 			}
 
 			ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
@@ -88,9 +88,9 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 			timer.Stop()
 			if err != nil {
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-					return reportDocsListDeadline(cmd, "docs list", deadlineRoot(err, progressRoot), err, asJSON)
+					return docsFail(cmd, "docs list", deadlineRoot(err, progressRoot), err, 2, asJSON)
 				}
-				return reportDocsListDeadline(cmd, "docs list", "", err, asJSON)
+				return docsFail(cmd, "docs list", "", err, 2, asJSON)
 			}
 
 			docs := idx.List()
@@ -103,9 +103,7 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
 	cmd.Flags().DurationVar(&timeout, "timeout", 15*time.Second, "walk deadline, e.g. 15s or 2m")
 	cmd.Flags().IntVar(&limit, "limit", 0, "print only the first N entries, after the full walk completes (0 or unset: no limit)")
-	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
-		return WithExitCode(err, 2)
-	})
+	cmd.SetFlagErrorFunc(docsFlagError("docs list"))
 	return cmd
 }
 
@@ -121,37 +119,6 @@ func deadlineRoot(err error, fallback string) string {
 		return deadline.Root
 	}
 	return fallback
-}
-
-// docsListDeadlineJSON is the --json wire shape for a `docs list` deadline
-// failure: stdout stays empty and this is the only thing written to stderr.
-type docsListDeadlineJSON struct {
-	Error string `json:"error"`
-	Code  int    `json:"code"`
-	Root  string `json:"root"`
-}
-
-// reportDocsListDeadline handles a walk that stopped on ctx.Err(): under
-// --json it writes exactly one JSON object to stderr and leaves stdout
-// untouched (printDocsList is never called), then returns a silentCodedError
-// (execute.go) so termsafeErrorHandler renders nothing more; otherwise it lets the normal
-// human-readable error path render walkErr, which already names the root
-// (NewIndexContext). Either way the process exits 2. verb names the command
-// ("docs list", "docs check") in the one message this function writes itself.
-//
-// `docs list` also routes its other could-not-list failures (bad flag value,
-// bad root, config error) here with root "" so --json stays one object on
-// stderr whatever the failure; the object then carries an empty "root".
-func reportDocsListDeadline(cmd *cobra.Command, verb, root string, walkErr error, asJSON bool) error {
-	if !asJSON {
-		return WithExitCode(walkErr, 2)
-	}
-	obj := docsListDeadlineJSON{Error: walkErr.Error(), Code: 2, Root: root}
-	enc := termsafe.JSONEncoder(cmd.ErrOrStderr())
-	if encErr := enc.Encode(obj); encErr != nil {
-		return WithExitCode(fmt.Errorf("%s: encode deadline error: %w", verb, encErr), 2)
-	}
-	return newSilentCodedError(2)
 }
 
 // docJSON is the --json wire shape for one entry of `forgectl docs list`.

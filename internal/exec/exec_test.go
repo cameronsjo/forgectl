@@ -284,3 +284,21 @@ func TestOSRunner_ExitZeroWithADescendantHoldingThePipesSucceeds(t *testing.T) {
 		t.Errorf("Run took %v; it waited on the descendant's pipe", d)
 	}
 }
+
+// TestOSRunner_OverflowStillFailsClosedWhenTheChildExitsZeroWithHeldPipes: the
+// WaitDelay forgiveness must never excuse an over-ceiling stdout. The child
+// writes past the ceiling, backgrounds a pipe holder, and exits 0; the result
+// must be ErrOutputTooLarge with no output, not a clean success.
+func TestOSRunner_OverflowStillFailsClosedWhenTheChildExitsZeroWithHeldPipes(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "overflow")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 0123456789ABCDEF\nsleep 5 >/dev/null &\nexit 0\n"), 0o700); err != nil { //nolint:gosec // test-owned script
+		t.Fatal(err)
+	}
+	out, err := OSRunner{stdoutCeiling: 8}.Run(context.Background(), script)
+	if !errors.Is(err, ErrOutputTooLarge) {
+		t.Fatalf("err = %v (out %q), want ErrOutputTooLarge", err, out)
+	}
+	if out != "" {
+		t.Errorf("out = %q, want no partial output", out)
+	}
+}
