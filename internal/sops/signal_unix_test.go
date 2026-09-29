@@ -8,8 +8,10 @@ package sops
 //
 //   [x] The work directory, plaintext included, is gone after the signal
 //   [x] The child died BY the signal it received (re-raised), not by exit;
-//       for SIGQUIT, by Go's own default (goroutine dump, exit 2)
-//   [x] Every signal in guardedSignals on unix: SIGTERM, SIGINT, SIGHUP, SIGQUIT
+//       for SIGQUIT and SIGABRT, by Go's own default (goroutine dump, exit 2)
+//   [x] Every signal in guardedSignals on unix: SIGTERM, SIGINT, SIGHUP,
+//       SIGQUIT, SIGABRT — and the table below is checked against that list,
+//       so a signal added there cannot go untested
 //   [x] The window was real: the staged value existed when the signal went in
 //
 // sops itself is not needed. The runner is a fake that blocks, which is the
@@ -91,10 +93,10 @@ func TestSignalDuringPlaintextWindowRemovesWorkDir(t *testing.T) {
 		return
 	}
 
-	for _, tc := range []struct {
+	cases := []struct {
 		name string
 		sig  syscall.Signal
-		// goExit2 marks SIGQUIT: after the guard re-raises it, the Go
+		// goExit2 marks SIGQUIT and SIGABRT: after the guard re-raises it, the Go
 		// runtime's default takes over, which dumps goroutines and exits 2
 		// rather than dying by the signal. That is also what an unguarded
 		// forgectl does, so the status cannot tell the two apart — the
@@ -105,7 +107,22 @@ func TestSignalDuringPlaintextWindowRemovesWorkDir(t *testing.T) {
 		{"SIGINT", syscall.SIGINT, false},
 		{"SIGHUP", syscall.SIGHUP, false},
 		{"SIGQUIT", syscall.SIGQUIT, true},
-	} {
+		{"SIGABRT", syscall.SIGABRT, true},
+	}
+	// Every guarded signal must have a row: a signal added to guardedSignals
+	// with no real-process test is a claim nobody watched hold.
+	for _, g := range guardedSignals {
+		found := false
+		for _, tc := range cases {
+			if tc.sig == g {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("guarded signal %v has no real-signal case", g)
+		}
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			// A child inherits an ignored signal, and the guard deliberately
 			// leaves an inherited ignore alone (nohup's SIGHUP, a background
@@ -197,7 +214,7 @@ func TestSignalDuringPlaintextWindowRemovesWorkDir(t *testing.T) {
 // Every guarded signal gets its 128+N fallback status, derived rather than
 // tabled, so a signal added to guardedSignals cannot fall through to 1.
 func TestExitStatusForGuardedSignals(t *testing.T) {
-	want := map[syscall.Signal]int{syscall.SIGINT: 130, syscall.SIGTERM: 143, syscall.SIGHUP: 129, syscall.SIGQUIT: 131}
+	want := map[syscall.Signal]int{syscall.SIGINT: 130, syscall.SIGTERM: 143, syscall.SIGHUP: 129, syscall.SIGQUIT: 131, syscall.SIGABRT: 134}
 	for _, sig := range guardedSignals {
 		s, ok := sig.(syscall.Signal)
 		if !ok {

@@ -194,7 +194,7 @@ func (g *plaintextGuard) release() {
 }
 
 // exitStatusFor is the conventional 128+N status for a caught signal (130 for
-// SIGINT, 143 for SIGTERM, 129 for SIGHUP, 131 for SIGQUIT). It is the
+// SIGINT, 143 for SIGTERM, 129 for SIGHUP, 131 for SIGQUIT, 134 for SIGABRT). It is the
 // fallback where re-raising is unavailable or did not take. Derived from the
 // signal number rather than tabled, so a signal added to guardedSignals cannot
 // ship without a status.
