@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // minScrubLen is the length from which a bare value is scrubbed wherever it
@@ -97,6 +98,42 @@ func (m argMask) text(s string) string {
 		}
 	}
 	return s
+}
+
+// straddleLen returns how many leading bytes of s to drop so that no masked
+// value is split at the start of what remains. s is the tail of a longer
+// stream, so a value that began before the cut shows up here only as its end:
+// a proper suffix of the value, which text can no longer match. straddleLen
+// drops the longest such suffix s starts with, then checks the new start
+// again, because values can overlap in the stream and removing one fragment
+// can expose the end of another. It works on the raw bytes, before masking,
+// so no replacement text can shift where a fragment ends. Every drop removes
+// at least one byte, so the loop ends. A coincidental match (the stream
+// happens to start with the last byte of some value) only drops a few more
+// bytes of a tail that is already cut, which is harmless.
+func (m argMask) straddleLen(s string) int {
+	total := 0
+	for {
+		n := 0
+		for _, v := range m.values {
+			for l := min(len(v)-1, len(s)); l > n; l-- {
+				if strings.HasPrefix(s, v[len(v)-l:]) {
+					n = l
+					break
+				}
+			}
+		}
+		// Neither the cut nor a drop respects rune boundaries; do not start
+		// the text on a continuation byte.
+		for n < len(s) && !utf8.RuneStart(s[n]) {
+			n++
+		}
+		if n == 0 {
+			return total
+		}
+		s = s[n:]
+		total += n
+	}
 }
 
 // longestFirst sorts in place by descending length, ties in lexical order so
