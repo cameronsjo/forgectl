@@ -128,16 +128,17 @@ func ValidHostSegment(s string) bool {
 	return pr.ValidHostSegment(s)
 }
 
-// tokenEnvVars are the credential variables gh consults for a host. gh sends
-// GH_ENTERPRISE_TOKEN / GITHUB_ENTERPRISE_TOKEN to whatever non-default
-// GH_HOST names, and GH_TOKEN / GITHUB_TOKEN to github.com and *.ghe.com —
-// so once the pin's value is config-steerable, an ambient token plus one
-// hostile config line becomes a credential-redirect primitive. On any
-// non-default host the pinned runner removes all four from the child process
-// environment, forcing gh to the hosts.yml credential stored for that host by
-// `gh auth login --hostname <host>`. This remains the bound on Linux, where
-// XDG_CONFIG_HOME can steer which config file supplied the pinned host.
-var tokenEnvVars = [4]string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
+// tokenEnvVars are the credential variables gh consults for a host
+// (pr.GHTokenEnvVars, which documents which host each one reaches). Once the
+// pin's value is config-steerable, an ambient token plus one hostile config
+// line becomes a credential-redirect primitive, so on any non-default host the
+// pinned runner removes all four from the child process environment, forcing
+// gh to the hosts.yml credential stored for that host by `gh auth login
+// --hostname <host>`. This remains the bound on Linux, where XDG_CONFIG_HOME
+// can steer which config file supplied the pinned host. Which variables to
+// remove for a host is pr.GHTokenVarsToScrub, the one rule the review window's
+// environment (internal/pr) applies too.
+var tokenEnvVars = pr.GHTokenEnvVars
 
 // pinnedRunner wraps an exec.Runner so every `gh` invocation carries
 // GH_HOST=host, and so any cancellation or deadline failure is converted to a
@@ -195,10 +196,8 @@ func (p pinnedRunner) pinEnv(env map[string]string) map[string]string {
 	for k, v := range env {
 		pinned[k] = v
 	}
-	if p.host != DefaultHost {
-		for _, k := range tokenEnvVars {
-			delete(pinned, k)
-		}
+	for _, k := range pr.GHTokenVarsToScrub(p.host) {
+		delete(pinned, k)
 	}
 	pinned["GH_HOST"] = p.host
 	return pinned
@@ -208,14 +207,15 @@ func (p pinnedRunner) pinEnv(env map[string]string) map[string]string {
 // exactly once. Copying keeps the wrapper from mutating caller-owned slices.
 func (p pinnedRunner) pinUnset(unset []string) []string {
 	pinned := append([]string(nil), unset...)
-	if p.host == DefaultHost {
+	scrub := pr.GHTokenVarsToScrub(p.host)
+	if len(scrub) == 0 {
 		return pinned
 	}
-	seen := make(map[string]struct{}, len(pinned)+len(tokenEnvVars))
+	seen := make(map[string]struct{}, len(pinned)+len(scrub))
 	for _, key := range pinned {
 		seen[key] = struct{}{}
 	}
-	for _, key := range tokenEnvVars {
+	for _, key := range scrub {
 		if _, ok := seen[key]; ok {
 			continue
 		}
