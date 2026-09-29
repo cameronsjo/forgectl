@@ -20,11 +20,19 @@ type maskKey struct{}
 // stderr.
 type argMask struct {
 	shown map[string]string
-	// entries and values are sorted longest first, so a value that is a
-	// prefix of another never gets replaced first and leaves the longer
-	// one's tail in the text.
-	entries []string
-	values  []string
+	// pats is every string text scrubs, whole entries and bare values
+	// together, sorted longest first (entries before values at equal length),
+	// so runShown finds the longest entry that starts a run first.
+	pats []maskPat
+	// values is the bare values, for straddleLen.
+	values []string
+}
+
+// maskPat is one string text scrubs and what a run starting with it renders
+// as: KEY=[redacted] for a whole entry, so an echoed entry keeps its key, and
+// [redacted] for a bare value.
+type maskPat struct {
+	text, shown string
 }
 
 // WithMaskedAssignments returns a context under which the Runner does not
@@ -51,10 +59,21 @@ func WithMaskedAssignments(ctx context.Context, entries []string) context.Contex
 			continue
 		}
 		m.shown[e] = key + "=" + Redacted
-		m.entries = append(m.entries, e)
+		m.pats = append(m.pats, maskPat{text: e, shown: m.shown[e]}, maskPat{text: value, shown: Redacted})
 		m.values = append(m.values, value)
 	}
-	longestFirst(m.entries)
+	sort.Slice(m.pats, func(i, j int) bool {
+		a, b := m.pats[i], m.pats[j]
+		if len(a.text) != len(b.text) {
+			return len(a.text) > len(b.text)
+		}
+		// An entry and a value of equal length and text: the entry, so the
+		// key shows. Then lexical, so the order never depends on input order.
+		if a.text != b.text {
+			return a.text < b.text
+		}
+		return a.shown != Redacted && b.shown == Redacted
+	})
 	longestFirst(m.values)
 	return context.WithValue(ctx, maskKey{}, m)
 }
@@ -80,24 +99,148 @@ func (m argMask) args(args []string) []string {
 	return out
 }
 
-// text scrubs whole entries first, then bare values, so an echoed entry keeps
-// its key: KEY=[redacted] rather than a bare [redacted].
+// text scrubs every marked entry and value from s.
+//
+// Masked values can overlap in the text (the end of one is the start of
+// another), so replacing one value at a time is not enough: whichever goes
+// first consumes the shared bytes, and the other no longer matches, leaving
+// its unshared part in the clear (#661). text works in two phases instead.
+// cover finds every byte that lies inside a qualifying match of any pattern,
+// overlapping matches included; text then replaces each maximal run of
+// covered bytes once. A run that starts with a whole entry renders as
+// KEY=[redacted], so an echoed entry keeps its key; any other run renders as
+// [redacted].
 func (m argMask) text(s string) string {
-	for _, entry := range m.entries {
-		if len(entry) >= minScrubLen {
-			s = strings.ReplaceAll(s, entry, m.shown[entry])
-		} else {
-			s = replaceWholeWord(s, entry, m.shown[entry])
+	if len(m.pats) == 0 {
+		return s
+	}
+	covered := m.cover(s)
+	if covered == nil {
+		return s
+	}
+	var b strings.Builder
+	last := 0 // end of the text already copied to b
+	for i := 0; i < len(s); {
+		if !covered.has(i) {
+			i++
+			continue
+		}
+		end := i + 1
+		for end < len(s) && covered.has(end) {
+			end++
+		}
+		b.WriteString(s[last:i])
+		b.WriteString(m.runShown(s[i:end]))
+		last, i = end, end
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// runShown is what one covered run renders as: KEY=[redacted] when a whole
+// entry starts the run and lies inside it (the longest such entry), else
+// [redacted]. The key is the only text shown, and the argv rendering already
+// shows it.
+func (m argMask) runShown(run string) string {
+	for _, p := range m.pats {
+		if p.shown != Redacted && strings.HasPrefix(run, p.text) {
+			return p.shown
 		}
 	}
-	for _, v := range m.values {
-		if len(v) >= minScrubLen {
-			s = strings.ReplaceAll(s, v, Redacted)
-		} else {
-			s = replaceWholeWord(s, v, Redacted)
+	return Redacted
+}
+
+// cover marks every byte of s that lies inside a qualifying match of any
+// pattern, and returns nil when nothing matched.
+//
+// Every occurrence counts, including ones that overlap each other or
+// themselves: each search restarts one byte past the last match. A pattern of
+// minScrubLen or more always qualifies. A shorter one qualifies only where it
+// stands as a whole word: not glued to a word character on either side. The
+// check applies only at an edge where the pattern itself starts or ends with
+// a word character, so a value like "a:b" is still found next to a letter,
+// and a neighboring byte that is already covered is not a word character,
+// since it is about to become [redacted]. Covering a short match can
+// therefore qualify another one beside it, on either side, so the short
+// patterns are rescanned until a pass covers nothing new.
+//
+// Cost: each pattern is one strings.Index scan per match plus one, so a
+// stream with few matches costs near-linear time whatever the values'
+// lengths. The short patterns are rescanned after every pass that covered
+// something new, and the loop ends on the first pass that covers nothing. Every match is verified in full, so a stream that repeats a long
+// value overlapping itself byte for byte costs that value's length per byte;
+// stdout is capped at maxStdoutBytes and stderr at maxStderrTail, and the
+// stream is the failing child's own output.
+func (m argMask) cover(s string) bitset {
+	var covered bitset
+	mark := func(from, to int) bool {
+		if covered == nil {
+			covered = newBitset(len(s))
+		}
+		return covered.set(from, to)
+	}
+	for _, p := range m.pats {
+		if len(p.text) < minScrubLen {
+			continue
+		}
+		done := 0 // bytes of this pattern's earlier matches already marked
+		for from := 0; ; {
+			rel := strings.Index(s[from:], p.text)
+			if rel < 0 {
+				break
+			}
+			i := from + rel
+			end := i + len(p.text)
+			mark(max(i, done), end)
+			done = end
+			from = i + 1
 		}
 	}
-	return s
+	isWord := func(i int) bool { return isWordByte(s[i]) && !covered.has(i) }
+	for changed := true; changed; {
+		changed = false
+		for _, p := range m.pats {
+			if len(p.text) >= minScrubLen {
+				continue
+			}
+			for from := 0; ; {
+				rel := strings.Index(s[from:], p.text)
+				if rel < 0 {
+					break
+				}
+				i := from + rel
+				end := i + len(p.text)
+				from = i + 1
+				gluedBefore := i > 0 && isWordByte(p.text[0]) && isWord(i-1)
+				gluedAfter := end < len(s) && isWordByte(p.text[len(p.text)-1]) && isWord(end)
+				if !gluedBefore && !gluedAfter && mark(i, end) {
+					changed = true
+				}
+			}
+		}
+	}
+	return covered
+}
+
+// bitset is one bit per byte of the text cover scans. A nil bitset has no
+// bit set.
+type bitset []uint64
+
+func newBitset(n int) bitset { return make(bitset, (n+63)/64) }
+
+func (b bitset) has(i int) bool { return b != nil && b[i/64]&(uint64(1)<<(i%64)) != 0 }
+
+// set sets the bits in [from, to) and reports whether any was clear.
+func (b bitset) set(from, to int) bool {
+	changed := false
+	for i := from; i < to; i++ {
+		w, bit := i/64, uint64(1)<<(i%64)
+		if b[w]&bit == 0 {
+			b[w] |= bit
+			changed = true
+		}
+	}
+	return changed
 }
 
 // straddleLen returns how many leading bytes of s to drop so that no masked
@@ -145,34 +288,6 @@ func longestFirst(xs []string) {
 		}
 		return xs[i] < xs[j]
 	})
-}
-
-// replaceWholeWord replaces each occurrence of v in s that is not glued to a
-// word character on either side. The check applies only at an edge where v
-// itself starts or ends with a word character, so a value like "a:b" is still
-// found next to a letter.
-func replaceWholeWord(s, v, with string) string {
-	var b strings.Builder
-	last := 0 // end of the text already copied to b
-	for from := 0; ; {
-		rel := strings.Index(s[from:], v)
-		if rel < 0 {
-			b.WriteString(s[last:])
-			return b.String()
-		}
-		i := from + rel
-		end := i + len(v)
-		// Neighbors are read from the original string, so a match right
-		// after another occurrence still sees the byte before it.
-		gluedBefore := i > 0 && isWordByte(v[0]) && isWordByte(s[i-1])
-		gluedAfter := end < len(s) && isWordByte(v[len(v)-1]) && isWordByte(s[end])
-		if !gluedBefore && !gluedAfter {
-			b.WriteString(s[last:i])
-			b.WriteString(with)
-			last = end
-		}
-		from = end
-	}
 }
 
 func isWordByte(c byte) bool {

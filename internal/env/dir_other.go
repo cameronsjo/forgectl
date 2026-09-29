@@ -66,6 +66,19 @@ func (d *dirPin) lstat(name string) (perm os.FileMode, regular, exists bool, err
 	return info.Mode().Perm(), info.Mode().IsRegular(), true, nil
 }
 
+// sameFile reports whether names a and b are one file; see the unix version.
+func (d *dirPin) sameFile(a, b string) (bool, error) {
+	ia, err := os.Lstat(filepath.Join(d.path, a))
+	if err != nil {
+		return false, err
+	}
+	ib, err := os.Lstat(filepath.Join(d.path, b))
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(ia, ib), nil
+}
+
 func (d *dirPin) createTemp(prefix string) (*os.File, string, error) {
 	f, err := os.CreateTemp(d.path, prefix+"*.tmp")
 	if err != nil {

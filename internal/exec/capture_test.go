@@ -247,3 +247,49 @@ func TestOSRunner_Run_LargeLegitimateStdoutPassesWhole(t *testing.T) {
 		t.Fatalf("stdout = %d bytes, want %d bytes of z", len(out), size)
 	}
 }
+
+// TestOSRunner_RunDiscardingStdout_PastTheCeilingSucceeds pins #661: a caller
+// that throws stdout away (a workflow `run` step) must not fail because the
+// command printed more than maxStdoutBytes. It writes 1 MiB past the real,
+// production ceiling.
+//
+// Mutation: pass r.ceiling() instead of discardStdout in RunDiscardingStdout
+// (or drop the discard branch in ceilingWriter.Write) and this fails with
+// ErrOutputTooLarge.
+func TestOSRunner_RunDiscardingStdout_PastTheCeilingSucceeds(t *testing.T) {
+	size := maxStdoutBytes + 1<<20
+	err := OSRunner{}.RunDiscardingStdout(t.Context(), "sh", "-c", fmt.Sprintf(`head -c %d /dev/zero`, size))
+	if err != nil {
+		t.Fatalf("RunDiscardingStdout: %v", err)
+	}
+}
+
+// TestOSRunner_RunDiscardingStdout_FailureKeepsMaskedStderr: discarding stdout
+// changes nothing else about the failure path. The error is a *CommandError
+// with the exit code and the masked stderr, and Output is empty because no
+// stdout was kept, even though the child printed the value there too.
+//
+// Mutation: pass argMask{} instead of maskFrom(ctx) in RunDiscardingStdout and
+// the value reaches Stderr and the error text.
+func TestOSRunner_RunDiscardingStdout_FailureKeepsMaskedStderr(t *testing.T) {
+	const value = "discard-secret-661" //nolint:gosec // G101: a fake value the mask must hide
+	entry := "K=" + value
+	ctx := WithMaskedAssignments(t.Context(), []string{entry})
+	err := OSRunner{}.RunDiscardingStdout(ctx, "sh", "-c", `echo "$1"; echo "bad $1" >&2; exit 4`, "sh", entry)
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error = %T (%v), want *CommandError", err, err)
+	}
+	if cmdErr.ExitCode != 4 {
+		t.Errorf("ExitCode = %d, want 4", cmdErr.ExitCode)
+	}
+	if cmdErr.Output != "" {
+		t.Errorf("Output = %q, want empty: stdout was discarded", cmdErr.Output)
+	}
+	if cmdErr.Stderr != "bad K="+Redacted {
+		t.Errorf("Stderr = %q, want %q", cmdErr.Stderr, "bad K="+Redacted)
+	}
+	if strings.Contains(err.Error(), value) {
+		t.Errorf("error text carries the masked value: %s", err)
+	}
+}

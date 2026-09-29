@@ -20,6 +20,9 @@ package env
 //       other (-race)
 //   [x] A legacy unscoped leftover warns on stderr, does not refuse, and is
 //       not deleted
+//   [x] A case twin sharing the scratch names is named in the refusal, and
+//       no twin is claimed when there is none, or when the "twin" is the
+//       target itself under another spelling
 //   [x] No refusal or warning carries the value
 
 import (
@@ -203,10 +206,59 @@ func TestScanRefusesScopedLeftovers(t *testing.T) {
 			if !strings.Contains(msg, "Nothing was removed") {
 				t.Errorf("refusal %q does not say nothing was removed", msg)
 			}
+			if strings.Contains(msg, "letter case") {
+				t.Errorf("refusal %q mentions a case twin that does not exist", msg)
+			}
 			// The target itself was not written.
 			assertStillThere(t, filepath.Join(dir, ".env"))
 			assertNoSecretInOutput(t, leftoverSecret, "", msg, warn.String())
 		})
+	}
+}
+
+// The scope tag lowercases the base, so on a case-sensitive volume .ENV and
+// .env share scratch names. The refusal says a leftover may be the twin's
+// (cameronsjo/forgectl#652).
+func TestScanNamesACaseTwin(t *testing.T) {
+	dir := t.TempDir()
+	plant(t, filepath.Join(dir, ".env"))
+	f, err := os.OpenFile(filepath.Join(dir, ".ENV"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // G304: a fixed name under t.TempDir
+	if err != nil {
+		t.Skipf("this volume folds case, so .ENV and .env are one file: %v", err)
+	}
+	_ = f.Close()
+	tg := pinnedTarget(t, dir, ".env")
+	plant(t, filepath.Join(dir, tg.sopsBackupName()))
+
+	err = setOn(t, dir, ".env")
+	if err == nil {
+		t.Fatal("set succeeded over a scoped leftover")
+	}
+	for _, want := range []string{".ENV", "differs only in letter case"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not mention %q", err, want)
+		}
+	}
+}
+
+// On a case-insensitive volume the directory listing can spell the target
+// itself in another case. A hard link stands in for that here: .ENV and .env
+// are two names for one file, so the refusal must not call either a twin.
+func TestScanDoesNotNameTheTargetAsItsOwnTwin(t *testing.T) {
+	dir := t.TempDir()
+	plant(t, filepath.Join(dir, ".env"))
+	if err := os.Link(filepath.Join(dir, ".env"), filepath.Join(dir, ".ENV")); err != nil {
+		t.Skipf("cannot give .env a second spelling here: %v", err)
+	}
+	tg := pinnedTarget(t, dir, ".env")
+	plant(t, filepath.Join(dir, tg.sopsBackupName()))
+
+	err := setOn(t, dir, ".env")
+	if err == nil {
+		t.Fatal("set succeeded over a scoped leftover")
+	}
+	if strings.Contains(err.Error(), "letter case") {
+		t.Errorf("refusal %q names the target's own other spelling as a case twin", err)
 	}
 }
 
