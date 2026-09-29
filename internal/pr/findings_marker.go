@@ -41,6 +41,12 @@ const maxFindingsMarkerBytes = 512
 // exists but cannot be what writeFindingsMarker wrote.
 var errFindingsMarkerInvalid = errors.New("findings owner marker is not valid")
 
+// errFindingsMarkerIncomplete is readFindingsMarker's report of a marker that
+// could be an unfinished write rather than a tampered one: an empty file, a
+// file with no terminating newline, or one that could not be read to the end.
+// It maps to findingsUnmarked (kept), not findingsStale.
+var errFindingsMarkerIncomplete = errors.New("findings owner marker is incomplete")
+
 // findingsLiveness is the removal verdict for one findings dir.
 type findingsLiveness int
 
@@ -51,34 +57,63 @@ const (
 	// findingsLive: the marker names a local record that still exists.
 	// Never removed.
 	findingsLive
-	// findingsUnmarked: no marker at all. That is a dir from a forgectl
-	// before #558, or one PrepareLocal created but has not marked yet (the
-	// marker is written only after the owning record exists). Refused with a
-	// warning, because neither case can be told apart from a live review.
+	// findingsUnmarked: no marker, or an incomplete one (empty, or cut off
+	// before its newline). That is a dir from a forgectl before #558, one
+	// PrepareLocal created but has not marked yet (the marker is written only
+	// after the owning record exists), or one whose marker write failed.
+	// Refused, because none of these can be told apart from a live review.
 	findingsUnmarked
 )
 
+// findingsMarkerTemp is the private name the marker is written under before
+// it is published. A crash can leave it behind; it is never read, so a dir
+// holding only the temp is unmarked, and kept.
+const findingsMarkerTemp = findingsOwnerMarker + ".tmp"
+
 // writeFindingsMarker records recordPath's file name as the owner of
-// findingsDir. The file is created exclusively and without following a
-// symlink (OpenExclusive), so a pre-placed entry fails the write rather than
-// being written through.
+// findingsDir, and publishes it ATOMICALLY: the complete, synced content
+// appears under findingsOwnerMarker in one step, or nothing does.
+//
+// That matters because a marker that exists with the wrong content is worse
+// than no marker. An unmarked dir is kept, but a marker that does not name a
+// live record makes the dir removable. Creating the marker in place and then
+// writing into it would leave a window, and after a failed write (ENOSPC, EIO)
+// or a crash a permanent state, in which a live review's dir carries an empty
+// or truncated marker.
+//
+// So the content goes to a temp file first: created through c.fs (O_EXCL and
+// O_NOFOLLOW, and the seam tests fail writes through), written in full,
+// synced, closed. It is then published with a hard link, which, unlike a
+// rename, refuses to replace an existing marker (EEXIST). The temp is removed
+// on every path. Any failure leaves the dir unmarked.
 //
 // PrepareLocal calls it only AFTER the owning record exists. Written any
 // earlier, the marker would name a record that is not there yet, and a
 // cleanup running in that window would read the dir as stale and remove it.
-func writeFindingsMarker(findingsDir, recordPath string) error {
+func (c *Client) writeFindingsMarker(findingsDir, recordPath string) error {
 	name := filepath.Base(recordPath)
 	if !validFindingsOwnerName(name) {
 		return fmt.Errorf("record name %q cannot be a findings owner", name)
 	}
-	f, err := osRecordFS{}.OpenExclusive(filepath.Join(findingsDir, findingsOwnerMarker))
+	tmp := filepath.Join(findingsDir, findingsMarkerTemp)
+	f, err := c.fs.OpenExclusive(tmp)
 	if err != nil {
 		return err
 	}
-	_, werr := io.WriteString(f, name+"\n")
-	serr := f.Sync()
-	cerr := f.Close()
-	return errors.Join(werr, serr, cerr)
+	defer func() { _ = c.fs.Remove(tmp) }()
+	content := name + "\n"
+	n, werr := io.WriteString(f, content)
+	if werr == nil && n != len(content) {
+		werr = io.ErrShortWrite
+	}
+	var serr error
+	if werr == nil {
+		serr = f.Sync()
+	}
+	if err := errors.Join(werr, serr, f.Close()); err != nil {
+		return err
+	}
+	return os.Link(tmp, filepath.Join(findingsDir, findingsOwnerMarker))
 }
 
 // validFindingsOwnerName reports whether name can be a session record's file
@@ -100,9 +135,21 @@ func validFindingsOwnerName(name string) bool {
 }
 
 // readFindingsMarker returns the record name dir's marker holds. A missing
-// marker is an error errors.Is matches to fs.ErrNotExist. Every other failure
-// (a symlink, a FIFO or other non-regular file, an oversized or garbled
-// content) is some other error.
+// marker is an error errors.Is matches to fs.ErrNotExist.
+//
+// An INCOMPLETE marker is errFindingsMarkerIncomplete, which the caller keeps:
+// an empty file, content with no terminating newline, or a read or stat that
+// failed partway. writeFindingsMarker emits the name and its newline as the
+// last bytes of one publish, so no write of ours that stopped short can end
+// in a newline. The newline is what separates "cut off" from "wrong". This is
+// defence in depth, since the atomic publish already means no truncated
+// marker of ours ever appears under the marker's name.
+//
+// Every other failure is errFindingsMarkerInvalid or an open error, which the
+// caller treats as stale: a symlink, a FIFO or other non-regular file,
+// content over the cap, or a newline-terminated line that is not a record
+// name. Only the dir's own reviewer can produce those, and making its own
+// dir removable is the only thing it gains.
 //
 // The open is openNoFollowNonblock, the repair-log opener's core: a symlinked
 // marker fails with ELOOP rather than being followed, and a FIFO opens
@@ -116,19 +163,22 @@ func readFindingsMarker(dir string) (string, error) {
 	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %w", errFindingsMarkerIncomplete, err)
 	}
 	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("%w: it is a %s", errFindingsMarkerInvalid, fileKind(info.Mode()))
 	}
 	data, err := io.ReadAll(io.LimitReader(f, maxFindingsMarkerBytes+1))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %w", errFindingsMarkerIncomplete, err)
 	}
 	if len(data) > maxFindingsMarkerBytes {
 		return "", fmt.Errorf("%w: it is over %d bytes", errFindingsMarkerInvalid, maxFindingsMarkerBytes)
 	}
-	name := strings.TrimSuffix(string(data), "\n")
+	name, terminated := strings.CutSuffix(string(data), "\n")
+	if !terminated {
+		return "", fmt.Errorf("%w: %d bytes and no terminating newline", errFindingsMarkerIncomplete, len(data))
+	}
 	if !validFindingsOwnerName(name) {
 		return "", fmt.Errorf("%w: it does not name a session record", errFindingsMarkerInvalid)
 	}
@@ -177,6 +227,9 @@ func (c *Client) findingsDirLiveness(full string) findingsLiveness {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return findingsUnmarked
+	case errors.Is(err, errFindingsMarkerIncomplete):
+		slog.Debug("Findings dir has an incomplete owner marker; treating it as unmarked.", "path", full, "error", err)
+		return findingsUnmarked
 	case err != nil:
 		slog.Warn("Findings dir has an unreadable owner marker; treating it as stale.", "path", full, "error", err)
 		return findingsStale
@@ -187,19 +240,32 @@ func (c *Client) findingsDirLiveness(full string) findingsLiveness {
 	}
 }
 
-// skipLiveFindingsDir logs and reports whether the dir at full must be kept
-// because a live review may still own it. It is the one place both the
-// preview and the apply-time re-check turn a verdict into a skip.
-func (c *Client) skipLiveFindingsDir(full string) bool {
+// skipLiveFindingsDir reports whether the dir at full must be kept because
+// a live review may still own it, logging a live skip at Info. An unmarked
+// dir is only counted into *unmarked; the caller logs one summary line per
+// run (warnUnmarkedFindings) instead of a warning per dir per run. It is the
+// one place both the preview and the apply-time re-check turn a verdict into
+// a skip.
+func (c *Client) skipLiveFindingsDir(full string, unmarked *int) bool {
 	switch c.findingsDirLiveness(full) {
 	case findingsLive:
 		slog.Info("Skipping findings dir: the review that owns it still has a session record.", "path", full)
 		return true
 	case findingsUnmarked:
-		slog.Warn("Skipping findings dir with no owner marker: it predates the marker or its review is still starting. "+
-			"Remove it by hand once no review is using it.", "path", full)
+		slog.Debug("Skipping findings dir with no complete owner marker.", "path", full)
+		*unmarked++
 		return true
 	default:
 		return false
 	}
+}
+
+// warnUnmarkedFindings is the one summary line for the unmarked dirs a run
+// skipped.
+func warnUnmarkedFindings(n int) {
+	if n == 0 {
+		return
+	}
+	slog.Warn("Skipped findings dirs with no owner marker: they predate the marker, or a review is still starting. "+
+		"Remove one by hand once no review is using it; see `pr findings` in docs/commands/pr.md.", "count", n)
 }

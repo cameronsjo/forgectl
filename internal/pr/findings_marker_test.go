@@ -20,6 +20,12 @@ package pr
 //   [x] An oversized marker: stale, removed
 //   [x] PrepareLocal writes a marker naming its own record; cleanup keeps the
 //       dir while the record lives and removes it once the record is gone
+//   [x] A marker write that fails partway (injected through WithRecordFS)
+//       publishes nothing: no marker, no temp, and the dir is kept
+//   [x] An empty, truncated, or newline-less marker next to a live record is
+//       incomplete, so unmarked, so kept
+//   [x] No session record is committed while any owner marker exists yet
+//       (a WithRecordFS double checks at the record's commit Rename)
 //   (findings_marker_unix_test.go)
 //   [x] A marker that is a symlink to a valid marker is not followed: stale
 //   [x] A marker that is a FIFO fails fast and reads as stale
@@ -292,4 +298,141 @@ func TestPrepareLocal_MarkerKeepsDirWhileRecordLives(t *testing.T) {
 		t.Fatalf("FindingsCleanup after the record is gone: %v", err)
 	}
 	wantGone(t, sess.FindingsDir)
+}
+
+// markerFaultFS is a recordFS double that short-writes only the owner
+// marker (its temp or its final name) (as ENOSPC or EIO would cut it off) and passes every
+// other call, including the session record's writes, to the real filesystem.
+type markerFaultFS struct{ osRecordFS }
+
+type shortWriteFile struct{ recordFile }
+
+func (f shortWriteFile) Write(p []byte) (int, error) {
+	n, err := f.recordFile.Write(p[:len(p)/2])
+	if err != nil {
+		return n, err
+	}
+	return n, errInjected
+}
+
+func (m markerFaultFS) OpenExclusive(path string) (recordFile, error) {
+	file, err := m.osRecordFS.OpenExclusive(path)
+	if err != nil {
+		return file, err
+	}
+	// Both names, so an in-place writer (no temp) is faulted too.
+	if base := filepath.Base(path); base != findingsMarkerTemp && base != findingsOwnerMarker {
+		return file, nil
+	}
+	return shortWriteFile{file}, nil
+}
+
+// A marker write that fails partway must leave the dir unmarked (kept), never
+// holding a partial marker that reads as stale next to a live record.
+//
+// Mutations that turn it red:
+//   - publish in place: OpenExclusive the final marker name and write into it,
+//     with no temp and no link (the partial marker is left under its real
+//     name, so the "no marker" assertion fails);
+//   - drop the werr check before the link (the half-written temp is
+//     published).
+func TestPrepareLocal_FailedMarkerWriteLeavesDirUnmarkedAndKept(t *testing.T) {
+	c := New(localGitRunner(),
+		WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+		WithRecordFS(markerFaultFS{}),
+		WithApprover(func(string) (bool, error) { return false, nil }),
+		WithTTYCheck(func() bool { return false }))
+	sess, err := c.PrepareLocal(context.Background(), t.TempDir(), PrepareLocalOpts{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("PrepareLocal: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(sess.Workspace)
+		_ = os.RemoveAll(sess.FindingsDir)
+	})
+
+	for _, name := range []string{findingsOwnerMarker, findingsMarkerTemp} {
+		if _, err := os.Lstat(filepath.Join(sess.FindingsDir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s exists after a failed marker write (lstat err %v), want it absent", name, err)
+		}
+	}
+	if _, err := c.FindingsCleanup(context.Background(), 0, true); err != nil {
+		t.Fatalf("FindingsCleanup: %v", err)
+	}
+	wantKept(t, sess.FindingsDir)
+}
+
+// Defence in depth behind the atomic publish: a marker that is empty, or cut
+// off before its newline, next to a live record keeps the dir.
+//
+// Mutation that turns it red: delete the errFindingsMarkerIncomplete case in
+// findingsDirLiveness, so an incomplete marker falls through to stale.
+func TestFindingsCleanup_IncompleteMarkerIsKept(t *testing.T) {
+	for label, content := range map[string]string{
+		"empty":     "",
+		"truncated": ownerRecord[:len(ownerRecord)/2],
+		"no-eol":    ownerRecord,
+	} {
+		t.Run(label, func(t *testing.T) {
+			store := t.TempDir()
+			c := findingsClient(t, store)
+			liveRecord(t, c, ownerRecord, `{"local":true}`)
+			d := markedDir(t, store, label, "")
+			writeMarker(t, d, content)
+
+			if _, err := c.FindingsCleanup(context.Background(), 0, true); err != nil {
+				t.Fatalf("FindingsCleanup: %v", err)
+			}
+			wantKept(t, d)
+		})
+	}
+}
+
+// orderFS fails the test if any findings dir already holds an owner marker at
+// the moment a session record is committed (the atomic writer's Rename into
+// the sessions dir). A marker that exists before its record would read as
+// stale, and a cleanup in that window would remove a live review's dir.
+type orderFS struct {
+	osRecordFS
+	t           *testing.T
+	sessionsDir string
+	findingsDir string
+	commits     int
+}
+
+func (o *orderFS) Rename(oldpath, newpath string) error {
+	if filepath.Dir(newpath) == o.sessionsDir && filepath.Ext(newpath) == ".json" {
+		o.commits++
+		markers, _ := filepath.Glob(filepath.Join(o.findingsDir, "*", findingsOwnerMarker))
+		if len(markers) != 0 {
+			o.t.Errorf("record %s committed while markers already exist: %v", filepath.Base(newpath), markers)
+		}
+	}
+	return o.osRecordFS.Rename(oldpath, newpath)
+}
+
+// Mutation that turns it red: write the marker right after MkdirTemp in
+// PrepareLocal, naming breadcrumbFilename(ref, sess.CreatedAt), instead of
+// after recordPrepared.
+func TestPrepareLocal_MarkerIsWrittenAfterTheRecord(t *testing.T) {
+	ofs := &orderFS{t: t, sessionsDir: t.TempDir(), findingsDir: t.TempDir()}
+	c := New(localGitRunner(),
+		WithSessionsDir(ofs.sessionsDir), WithFindingsDir(ofs.findingsDir),
+		WithRecordFS(ofs),
+		WithApprover(func(string) (bool, error) { return false, nil }),
+		WithTTYCheck(func() bool { return false }))
+	sess, err := c.PrepareLocal(context.Background(), t.TempDir(), PrepareLocalOpts{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("PrepareLocal: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(sess.Workspace)
+		_ = os.RemoveAll(sess.FindingsDir)
+	})
+	if ofs.commits == 0 {
+		t.Fatal("no record commit went through the double; the ordering check never ran")
+	}
+	if _, err := os.Stat(filepath.Join(sess.FindingsDir, findingsOwnerMarker)); err != nil {
+		t.Fatalf("no marker after PrepareLocal: %v", err)
+	}
 }

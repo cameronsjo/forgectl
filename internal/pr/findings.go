@@ -148,6 +148,7 @@ func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, a
 	}
 	cutoff := time.Now().Add(-olderThan)
 	var candidates []string
+	var unmarked int
 	for _, e := range entries {
 		full := filepath.Join(c.findingsDir, e.Name())
 		info, err := e.Info()
@@ -160,11 +161,12 @@ func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, a
 		}
 		// Advisory here, outside the lock, so the preview never offers a live
 		// review's dir. FindingsRemove re-asks under the lock before removing.
-		if c.skipLiveFindingsDir(full) {
+		if c.skipLiveFindingsDir(full, &unmarked) {
 			continue
 		}
 		candidates = append(candidates, full)
 	}
+	warnUnmarkedFindings(unmarked)
 	if !apply {
 		return candidates, nil
 	}
@@ -204,8 +206,10 @@ func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, a
 // is refused and the dir is left in place), or a failed removal.
 func (c *Client) FindingsRemove(ctx context.Context, paths []string) ([]string, error) {
 	var removed []string
+	var unmarked int
+	defer func() { warnUnmarkedFindings(unmarked) }()
 	for _, full := range paths {
-		got, err := c.removeFindingsDirAudited(ctx, full)
+		got, err := c.removeFindingsDirAudited(ctx, full, &unmarked)
 		if err != nil {
 			return removed, err
 		}
@@ -225,7 +229,7 @@ func (c *Client) FindingsRemove(ctx context.Context, paths []string) ([]string, 
 // record: RecordPath names the findings dir and Detail its size, while Ref,
 // Mode, FromPhase, and Workspace stay empty — filling any of them would make
 // the trail claim a session was involved.
-func (c *Client) removeFindingsDirAudited(ctx context.Context, full string) (string, error) {
+func (c *Client) removeFindingsDirAudited(ctx context.Context, full string, unmarked *int) (string, error) {
 	removed := ""
 	err := c.withLifecycleLock(ctx, auditVerbFindingsCleanup, func() error {
 		if !isFindingsStoreChild(c.findingsDir, full) {
@@ -258,7 +262,7 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, full string) (str
 		// reverse flip, a live record deleted mid-check, only keeps a dir
 		// that could have gone, and teardown deletes records under this same
 		// lock, so it cannot land inside this hold anyway.
-		if c.skipLiveFindingsDir(full) {
+		if c.skipLiveFindingsDir(full, unmarked) {
 			return nil
 		}
 		row := RepairRow{

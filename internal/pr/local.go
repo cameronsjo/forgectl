@@ -209,10 +209,13 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	// The owner marker is written only now that the record exists
 	// (forgectl#558): a marker naming a record that is not there yet reads as
 	// stale, and a cleanup in that window would remove this dir. Until the
-	// marker lands the dir is unmarked, which cleanup refuses. A failed write
-	// leaves it unmarked for good, so it is logged rather than fatal: the
-	// review itself is unaffected, and the dir errs toward being kept.
-	if err := writeFindingsMarker(findingsDir, bcPath); err != nil {
+	// marker is published the dir is unmarked, which cleanup refuses. The
+	// publish is atomic (writeFindingsMarker), so a failed or interrupted
+	// write leaves the dir unmarked, never holding an empty or partial marker
+	// that would read as stale. That is why a failure is logged rather than
+	// fatal: the review itself is unaffected, and the dir errs toward being
+	// kept.
+	if err := c.writeFindingsMarker(findingsDir, bcPath); err != nil {
 		slog.Warn("Could not write the findings dir's owner marker; `pr findings cleanup` will refuse this dir.",
 			"findings", findingsDir, "error", err)
 	}
