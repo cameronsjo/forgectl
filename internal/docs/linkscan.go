@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/parser"
+	goldmarkhtml "github.com/yuin/goldmark/renderer/html"
 	"github.com/yuin/goldmark/text"
 	"go.abhg.dev/goldmark/wikilink"
 	"gopkg.in/yaml.v3"
@@ -546,7 +548,8 @@ func headingText(n *ast.Heading, source []byte) string {
 	return b.String()
 }
 
-// appendNodeText flattens n's inline nodes into their text, in one walk.
+// appendNodeText flattens n's inline nodes into their rendered text, in one
+// walk: markup is gone, escapes and entities are resolved.
 // It is the one heading-text builder for both root kinds; a docs root reads
 // Text nowhere (its anchors match the slug), so both kinds share the rule
 // that a line break is a space. The vault-only
@@ -571,7 +574,7 @@ func appendNodeText(b *strings.Builder, n ast.Node, source []byte) {
 		b.WriteString(delim)
 		return
 	case *ast.Text:
-		b.Write(t.Segment.Value(source))
+		appendRenderedText(b, t, source)
 		// A setext heading's line break reads as a space, as it renders.
 		if t.SoftLineBreak() || t.HardLineBreak() {
 			b.WriteByte(' ')
@@ -581,6 +584,28 @@ func appendNodeText(b *strings.Builder, n ast.Node, source []byte) {
 	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
 		appendNodeText(b, c, source)
 	}
+}
+
+// appendRenderedText writes t's text as the page shows it. A raw segment
+// (a code span's) is written as is; any other goes through goldmark's own
+// text writer, which drops a backslash escape and resolves an entity
+// reference, and is then unescaped back from HTML. So "foo\_bar" reads
+// "foo_bar" and "&amp;" reads "&", as they render.
+func appendRenderedText(b *strings.Builder, t *ast.Text, source []byte) {
+	v := t.Segment.Value(source)
+	if t.IsRaw() {
+		b.Write(v)
+		return
+	}
+	var buf bytes.Buffer
+	w := bufio.NewWriter(&buf)
+	goldmarkhtml.DefaultWriter.Write(w, v)
+	if err := w.Flush(); err != nil {
+		// A bytes.Buffer never fails a write; keep the source text if it did.
+		b.Write(v)
+		return
+	}
+	b.WriteString(html.UnescapeString(buf.String()))
 }
 
 // pathUnescapeOrRaw percent-decodes s, or returns it unchanged when it is

@@ -3,7 +3,11 @@ package docs
 import (
 	"path"
 	"strings"
-	"unicode"
+	"sync"
+
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/text"
 )
 
 // RootKind classifies how a root's link syntax and anchor semantics must be
@@ -101,11 +105,11 @@ type LinkRef struct {
 // so a resolver whose slug disagreed with the rendered page's actual id
 // would confidently resolve to an anchor the browser can't find.
 type Heading struct {
-	// Text is the heading's text with its inline formatting flattened away
-	// (appendNodeText): "## a *b* `c`" holds "a b c", and a vault %%
-	// comment contributes nothing. A vault fragment is compared against it
-	// through normalizeHeadingKey, so a link written with or without the
-	// markup matches.
+	// Text is the heading's rendered text, its inline formatting flattened
+	// away (appendNodeText): "## a *b* `c`" holds "a b c", "## foo\_bar"
+	// holds "foo_bar", and a vault %% comment contributes nothing. A vault
+	// fragment is compared against it under foldHeadingKey (see
+	// matchFragment), so a link written with or without the markup matches.
 	Text string
 	// Slug is the id goldmark's auto-heading-id pass assigned this
 	// heading, lowercase per goldmark's own convention.
@@ -353,9 +357,12 @@ func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, from *Doc, path0 string) (
 // auto-ID slug, case-sensitively — the slug is what a browser matches
 // against "id=", and a browser does not fold (the Global Constraint's
 // slug-agreement pin); a vault root additionally accepts a case-folded
-// match on the slug or the heading's flattened text, and a match of the
-// two under normalizeHeadingKey, so "[[Note#a ==b==]]" and "[[Note#a b]]"
-// both reach "## a ==b==". Only the vault comparison normalizes.
+// match on the slug, or a match under foldHeadingKey (case and whitespace
+// only) between the heading's rendered Text and either the fragment as
+// written or the fragment's own rendered text (fragmentText), so
+// "[[Note#a ==b==]]" and "[[Note#a b]]" both reach "## a ==b==", while
+// "[[Note#snakecase]]" does not reach "## snake_case". Only the vault
+// comparison folds.
 //
 // matchFragment also returns the anchor a rendered link jumps to: the
 // matching heading's Slug, the id the page renders on it, or for a "^id"
@@ -383,10 +390,13 @@ func matchFragment(kind RootKind, doc *Doc, fragment string) (anchor string, ok 
 
 	if kind == RootVault {
 		lastLower := strings.ToLower(last)
-		lastKey := normalizeHeadingKey(last)
+		rawKey := foldHeadingKey(last)
+		textKey := foldHeadingKey(fragmentText(last))
 		for _, h := range doc.Headings {
-			if h.Slug == lastLower || strings.ToLower(h.Text) == lastLower ||
-				normalizeHeadingKey(h.Text) == lastKey {
+			// An empty key names no text: a heading that renders empty
+			// (all comment) is reached by its slug only.
+			key := foldHeadingKey(h.Text)
+			if h.Slug == lastLower || key != "" && (key == rawKey || key == textKey) {
 				return h.Slug, true
 			}
 		}
@@ -504,35 +514,35 @@ func (idx *Index) wikilinkTarget(from *Doc, ref LinkRef) (href string, miss Miss
 	return docHrefFragment(doc.RootLabel, doc.RelPath, anchor), MissNone
 }
 
-// normalizeHeadingKey is the ONE vault heading-matching normalizer, applied
-// to both the link fragment and the indexed heading text, so neither side
-// has to pick a text representation. Like Obsidian's own heading matching
-// (its stripHeading-style comparison), it ignores the markdown punctuation a
-// writer may or may not type: it lowercases, drops = ~ * _ ` [ ] | and a
-// backslash that escapes punctuation, collapses each whitespace run to one
-// space, and trims. "a ==b==", "a *b*" and "a b" all key to "a b".
-func normalizeHeadingKey(s string) string {
-	var b strings.Builder
-	space := false
-	rs := []rune(strings.ToLower(s))
-	for i := 0; i < len(rs); i++ {
-		r := rs[i]
-		if r == '\\' && i+1 < len(rs) && (unicode.IsPunct(rs[i+1]) || unicode.IsSymbol(rs[i+1])) {
-			continue
-		}
-		switch r {
-		case '=', '~', '*', '_', '`', '[', ']', '|':
-			continue
-		}
-		if unicode.IsSpace(r) {
-			space = b.Len() > 0
-			continue
-		}
-		if space {
-			b.WriteByte(' ')
-			space = false
-		}
-		b.WriteRune(r)
+// foldHeadingKey folds case and whitespace only: it lowercases, collapses
+// each whitespace run to one space, and trims. Every other character,
+// punctuation included, must match as written, so "snake_case" and
+// "snakecase" stay different headings.
+func foldHeadingKey(s string) string {
+	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
+}
+
+// fragmentMarkdown parses a vault heading fragment as a heading, with the
+// vault scan's inline set, so fragmentText flattens it exactly as the scan
+// flattens the heading itself. It has its own lock: matchFragment runs both
+// under renderMu (a page's wikilink resolver) and outside it (docs check).
+var (
+	fragmentMu       sync.Mutex
+	fragmentMarkdown = newMarkdown(false, true)
+)
+
+// fragmentText is a vault heading fragment's rendered text: the fragment
+// parsed as a heading's text and flattened by headingText, so a link
+// written with the heading's markup ("a ==b==", "e *f*") compares equal to
+// the heading's Text ("a b", "e f"). A fragment that does not parse as a
+// heading is returned as written.
+func fragmentText(fragment string) string {
+	src := []byte("## " + strings.Join(strings.Fields(fragment), " ") + "\n")
+	fragmentMu.Lock()
+	doc := fragmentMarkdown.Parser().Parse(text.NewReader(src), parser.WithContext(newParseContext()))
+	fragmentMu.Unlock()
+	if h, ok := doc.FirstChild().(*ast.Heading); ok {
+		return headingText(h, src)
 	}
-	return b.String()
+	return fragment
 }

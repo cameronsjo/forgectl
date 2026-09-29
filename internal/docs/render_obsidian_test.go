@@ -604,9 +604,9 @@ func TestScanVault_BlockIDInRemovedCommentParagraph(t *testing.T) {
 }
 
 // TestResolveVault_HeadingMatchNormalized: a vault heading link matches
-// when the fragment and the heading's flattened Text agree under
-// normalizeHeadingKey, so a link written with the heading's markup or
-// without it resolves. Comment text is in neither.
+// when the fragment, as written or as rendered, and the heading's rendered
+// Text agree under foldHeadingKey, so a link written with the heading's
+// markup or without it resolves. Comment text is in neither.
 func TestResolveVault_HeadingMatchNormalized(t *testing.T) {
 	vault := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
@@ -651,9 +651,49 @@ func TestResolveVault_HeadingMatchNormalized(t *testing.T) {
 	}
 }
 
+// TestResolveVault_HeadingMatchKeepsLiterals: vault heading matching folds
+// only case and whitespace, so a literal "_ * = ~ |" inside a heading's
+// text must be matched as written, while a backslash escape or an entity
+// matches the character it renders as. (A fragment equal to the heading's
+// slug still matches by slug, so each heading here has a slug no dropped
+// character can reach.) A heading that renders empty is reached by no text.
+func TestResolveVault_HeadingMatchKeepsLiterals(t *testing.T) {
+	vault := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	const note = "# Note\n\n## snake_case\n\n## 1_000\n\n## 2*3 n\n\n## a = b\n\n## x\\|y z\n\n## foo\\_bar\n\n## Q &amp; A\n\n## %%hidden%%\n"
+	for name, body := range map[string]string{"Note.md": note, "Linker.md": "# Linker\n"} {
+		if err := os.WriteFile(filepath.Join(vault, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	idx, err := NewIndex([]string{vault})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	from, ok := idx.Find(idx.Roots()[0].Label, "Linker.md")
+	if !ok {
+		t.Fatal("Linker.md not indexed")
+	}
+	for _, target := range []string{"Note#snakecase", "Note#1000", "Note#23 n", "Note#a  b", "Note#xy z", "Note#%%c%%"} {
+		if _, miss := idx.ResolveLink(&from, target); miss == MissNone {
+			t.Errorf("[[%s]] resolved to a heading its text does not name", target)
+		}
+	}
+	for _, target := range []string{
+		"Note#Snake_Case", "Note#1_000", "Note#2*3 n", "Note#a = b", "Note#x|y z",
+		"Note#foo_bar", "Note#foo\\_bar", "Note#q & a", "Note#Q &amp; A",
+	} {
+		if _, miss := idx.ResolveLink(&from, target); miss != MissNone {
+			t.Errorf("[[%s]]: miss %v", target, miss)
+		}
+	}
+}
+
 // TestResolveDocs_HeadingMatchNotNormalized pins the docs-root rule: an
 // anchor matches the exact slug only, so a fragment that would match under
-// normalizeHeadingKey still misses.
+// the vault's foldHeadingKey matching still misses.
 func TestResolveDocs_HeadingMatchNotNormalized(t *testing.T) {
 	dir := t.TempDir()
 	for name, body := range map[string]string{"Note.md": "# Note\n\n## a ==b==\n", "Linker.md": "# Linker\n"} {
