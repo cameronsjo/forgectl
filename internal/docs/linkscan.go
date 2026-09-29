@@ -125,7 +125,13 @@ func scanDocFor(kind RootKind, absPath, relPath string) (docMeta, error) {
 		// firstH1's line scan; a vault title is then parsed on its own to
 		// drop its comments. A "# " line inside a fence or a %% block of an
 		// over-cap document can still reach it.
-		title := firstH1(source)
+		// The scan runs on the body: a YAML "# comment" in the frontmatter
+		// is not a heading.
+		scanSrc := source
+		if fm, ok := splitFrontmatter(source); ok {
+			scanSrc = fm.body
+		}
+		title := firstH1(scanSrc)
 		if kind == RootVault && title != "" {
 			title = vaultLineTitle(title)
 		}

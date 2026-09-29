@@ -662,8 +662,10 @@ type wikilinkResolver func(LinkRef) (href string, miss Miss)
 var wikilinkResolverKey = parser.NewContextKey()
 
 // The title a wikilink that did not resolve carries, one per reason. They
-// are fixed text, so nothing an author writes reaches the attribute, and
-// colon-free, because the sanitizer drops a title holding a colon.
+// are fixed text, so nothing an author writes reaches the attribute. They are
+// also colon-free, which the <span> miss form needs: the sanitizer drops a
+// span title holding a colon. The <a class="wikilink wikilink-miss"> form
+// keeps one, since a link's title may carry a colon.
 const (
 	titleNoTarget     = "Broken link (no-target)"
 	titleAmbiguous    = "Broken link (ambiguous)"

@@ -542,10 +542,14 @@ func foldHeadingKey(s string) string {
 // fragmentMarkupBytes are the bytes that can make a fragment's rendered
 // text differ from the fragment as written: an escape, emphasis, a code
 // span, a highlight or strikethrough, a link, wikilink or image, raw HTML or
-// an autolink, an entity, a %% comment, and math. A fragment with none of
-// them renders as it is written (a GFM bare-URL autolink renders its own
-// text, see appendNodeText), so fragmentText would return it unchanged.
-const fragmentMarkupBytes = "\\*_`=~[<&%$!"
+// an autolink, an entity, and a %% comment. A fragment with none of them
+// renders as it is written (a GFM bare-URL autolink renders its own text,
+// see appendNodeText), so fragmentText would return it unchanged. "$" (math)
+// and "!" (an image) are absent on purpose: "$x$" and "!x" render as
+// written, and an image needs its "[", already in the set.
+// TestFragmentText_MarkupFreeRendersAsWritten pins that, and
+// TestResolveVault_HeadingMatchEveryMarkupByte pins each byte below.
+const fragmentMarkupBytes = "\\*_`=~[<&%"
 
 // maxRenderedFragment caps the fragment length fragmentText will parse;
 // above it, a fragment matches by slug and as written only. A heading link
