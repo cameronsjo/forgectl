@@ -385,7 +385,7 @@ func buildHome(idx *Index) *homeData {
 	}
 	for _, d := range all[:min(homeRecentCount, len(all))] {
 		home.Recent = append(home.Recent, homeDoc{
-			Href:     "/doc/" + d.RootLabel + "/" + d.RelPath,
+			Href:     docHref(d.RootLabel, d.RelPath),
 			Title:    d.Title,
 			Path:     d.RootLabel + "/" + d.RelPath,
 			Modified: modifiedLabel(d.ModTime, time.Now()),
@@ -602,7 +602,7 @@ func toLinks(docs []Doc, currentRoot, currentRel string) []sidenavLink {
 
 func toLink(d Doc, currentRoot, currentRel string) sidenavLink {
 	return sidenavLink{
-		Href:       "/doc/" + d.RootLabel + "/" + d.RelPath,
+		Href:       docHref(d.RootLabel, d.RelPath),
 		Title:      d.Title,
 		FilterText: strings.ToLower(d.Title + " " + d.RelPath),
 		Current:    d.RootLabel == currentRoot && d.RelPath == currentRel,
