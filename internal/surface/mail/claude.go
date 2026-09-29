@@ -3,8 +3,6 @@ package mail
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,8 +19,10 @@ import (
 // socket, the path Anthropic documents for "a script or hook to post into a
 // session".
 //
-// The frame format, the session registry (<config>/sessions/<pid>.json) and
-// the auth-key file are not documented. They follow what
+// The documented part is the socket itself, its CLAUDE_CODE_MESSAGING_SOCKET
+// export, and that an auth line is optional on macOS and Linux. The frame
+// format and the session registry (<config>/sessions/<pid>.json) are not
+// documented. They follow what
 // github.com/PeterSR/claude-code-socket-transport read out of Claude Code
 // v2.1.233 and moltenbits/sideband confirmed on v2.1.263. They are Claude Code
 // internals with no compatibility promise, so every failure here is soft: the
@@ -57,11 +57,6 @@ type claudeSession struct {
 	Kind       string `json:"kind"`
 }
 
-type claudeAuth struct {
-	Type  string `json:"type"`
-	Token string `json:"token"`
-}
-
 type claudeContent struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -94,7 +89,7 @@ func (a ClaudeAdapter) Deliver(ctx context.Context, w Worker, m Message, text st
 		Priority:  string(m.Priority),
 		SessionID: s.SessionID,
 	}
-	if err := a.post(ctx, s.Socket, a.token(s.PID, s.Socket), frame); err != nil {
+	if err := a.post(ctx, s.Socket, frame); err != nil {
 		return "", err
 	}
 	if s.PID > 0 {
@@ -204,41 +199,17 @@ func (a ClaudeAdapter) sessions() ([]claudeSession, error) {
 	return out, nil
 }
 
-// token reads the peer token the session published beside its registry entry,
-// <config>/sessions/<pid>.<sha256(socket path)>.key. Without one the frame goes
-// unauthenticated, which macOS and Linux accept; the token tells the receiver
-// which permission class the sender belongs to.
-func (a ClaudeAdapter) token(pid int, socket string) string {
-	if pid <= 0 || socket == "" {
-		return ""
-	}
-	var candidates []string
-	if abs, err := filepath.Abs(socket); err == nil {
-		candidates = append(candidates, abs)
-	}
-	if resolved, err := filepath.EvalSymlinks(socket); err == nil {
-		candidates = append(candidates, resolved)
-	}
-	for _, p := range candidates {
-		sum := sha256.Sum256([]byte(p))
-		keyPath := filepath.Join(a.ConfigDir, "sessions", fmt.Sprintf("%d.%s.key", pid, hex.EncodeToString(sum[:])))
-		data, err := os.ReadFile(keyPath) //nolint:gosec // G304: a key file name built from a pid and a hash, under the Claude config dir
-		if err != nil {
-			continue
-		}
-		var k struct {
-			PeerToken string `json:"peerToken"`
-		}
-		if json.Unmarshal(data, &k) == nil && k.PeerToken != "" {
-			return k.PeerToken
-		}
-	}
-	return ""
-}
-
-// post writes the optional auth line and one frame, half-closes, and waits for
-// the receiver to close its side.
-func (a ClaudeAdapter) post(ctx context.Context, socket, token string, frame claudeFrame) error {
+// post writes one frame, half-closes, and waits for the receiver to close its
+// side.
+//
+// It sends no auth line. The documented token (CLAUDE_CODE_MESSAGING_TOKEN) is
+// for a session's own child posting back to that session, and on macOS and
+// Linux the line is optional. Replaying a token read out of the receiver's
+// own files could pass forgectl off as the receiver's child, the one class of
+// sender Claude Code delivers without applying its inbound controls. forgectl
+// instead relies on the worker profile setting crossSessionInbound to accept,
+// and on the receiver's own rules everywhere else.
+func (a ClaudeAdapter) post(ctx context.Context, socket string, frame claudeFrame) error {
 	timeout := a.Timeout
 	if timeout <= 0 {
 		timeout = 5 * time.Second
@@ -246,11 +217,6 @@ func (a ClaudeAdapter) post(ctx context.Context, socket, token string, frame cla
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	if token != "" {
-		if err := enc.Encode(claudeAuth{Type: "auth", Token: token}); err != nil {
-			return err
-		}
-	}
 	if err := enc.Encode(frame); err != nil {
 		return err
 	}

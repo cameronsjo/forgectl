@@ -46,6 +46,33 @@ book (the ledger) and the launch-time wiring each transport depends on.
   them. `session.send` is reserved; feedback asking for a plugin-carried transport is
   on the issue.
 
+## Static checks (2026-09-29)
+
+Read from public sources only; nothing here was run against a live harness.
+
+- **Claude, documented.** The docs confirm the inbox socket, its
+  `CLAUDE_CODE_MESSAGING_SOCKET` export, the optional-on-Unix auth line
+  `{"type":"auth","token":...}` carrying the session's own
+  `CLAUDE_CODE_MESSAGING_TOKEN`, the 30 s first-line timeout,
+  `crossSessionInbound` for `-p` and interactive workers, and the bypass-class
+  hold with `dialogExpiry`. The frame fields (`msgV`, `message`, `session_id`)
+  and the registry layout stay undocumented and unchecked against 2.1.284.
+- **Claude, changed.** The adapter no longer reads `<pid>.<hash>.key` or sends
+  any auth line. A token replayed from the receiver's files could pass forgectl
+  off as the receiver's own child, the one sender class delivered without
+  inbound controls. Workers get `crossSessionInbound: "accept"` instead.
+- **Codex.** `codex queue --thread <uuid|exact name> --message <text>` landed in
+  openai/codex#39092 (merged 2026-08-17) and queues follow-ups only
+  (openai/codex#48928 asks for a steer mode). The notify payload's keys are
+  kebab-case: `type`, `thread-id`, `turn-id`, `cwd`, `client`, per a secondary
+  write-up; the parser tries `thread-id` first.
+- **pi.** `agent_start`/`agent_end` are extension events;
+  `sendUserMessage(content, {deliverAs})` throws while streaming without a
+  mode; `steer` skips the rest of the queued tool calls, `followUp` waits for
+  them; `pi -e <file>` loads an extension for one run. The package is
+  `@earendil-works/pi-coding-agent` (formerly `@mariozechner/...`). Not yet
+  type-checked against the real package.
+
 ## Design
 
 ### The worktree is the key

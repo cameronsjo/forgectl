@@ -5,7 +5,6 @@ package mail
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -78,16 +77,6 @@ func writeSession(t *testing.T, config string, pid int, fields map[string]any) {
 	}
 }
 
-func writeKey(t *testing.T, config string, pid int, socket, token string) {
-	t.Helper()
-	sum := sha256.Sum256([]byte(socket))
-	name := fmt.Sprintf("%d.%s.key", pid, hex.EncodeToString(sum[:]))
-	body := fmt.Sprintf(`{"peerToken":%q,"procStart":"x"}`, token)
-	if err := os.WriteFile(filepath.Join(config, "sessions", name), []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestClaudeDeliverByWorktree(t *testing.T) {
 	base := shortTempDir(t)
 	config := filepath.Join(base, "cfg")
@@ -100,7 +89,11 @@ func TestClaudeDeliverByWorktree(t *testing.T) {
 		"pid": 4242, "sessionId": "sess-1", "cwd": work, "name": "w1",
 		"status": "busy", "messagingSocketPath": inbox.path,
 	})
-	writeKey(t, config, 4242, inbox.path, "tok123")
+	// A key file beside the registry entry must not be read or replayed.
+	keyName := fmt.Sprintf("4242.%x.key", sha256.Sum256([]byte(inbox.path)))
+	if err := os.WriteFile(filepath.Join(config, "sessions", keyName), []byte(`{"peerToken":"tok123"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	a := ClaudeAdapter{ConfigDir: config, Timeout: 2 * time.Second}
 	w := Worker{Name: "w1", Harness: HarnessClaude, Worktree: work}
@@ -114,15 +107,11 @@ func TestClaudeDeliverByWorktree(t *testing.T) {
 		t.Errorf("detail %q", detail)
 	}
 	lines := inbox.next(t)
-	if len(lines) != 2 {
-		t.Fatalf("got %d lines, want auth and frame: %q", len(lines), lines)
-	}
-	var auth claudeAuth
-	if err := json.Unmarshal([]byte(lines[0]), &auth); err != nil || auth.Type != "auth" || auth.Token != "tok123" {
-		t.Fatalf("auth line %q (%v)", lines[0], err)
+	if len(lines) != 1 || strings.Contains(lines[0], "tok123") {
+		t.Fatalf("got %q, want the frame alone with no auth line", lines)
 	}
 	var f claudeFrame
-	if err := json.Unmarshal([]byte(lines[1]), &f); err != nil {
+	if err := json.Unmarshal([]byte(lines[0]), &f); err != nil {
 		t.Fatal(err)
 	}
 	want := claudeFrame{MsgV: 1, MsgID: "m-1", Type: "user", Message: claudeContent{Role: "user", Content: "hi there"}, Priority: "now", SessionID: "sess-1"}
