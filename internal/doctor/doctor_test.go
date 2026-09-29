@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -371,6 +372,48 @@ func TestCheckTrustStore_InvalidOrTamperedStoreFails(t *testing.T) {
 			}
 			if check.Hint == "" {
 				t.Error("Fail check has no remediation hint")
+			}
+		})
+	}
+}
+
+// TestCheckTrustStore_NoAnchorNoStoreSkips covers forgectl#635: a machine that
+// never set up blessed workflows has neither anchor nor store, and doctor must
+// not exit 1 for it. Every other anchor failure stays a fail.
+func TestCheckTrustStore_NoAnchorNoStoreSkips(t *testing.T) {
+	dir := t.TempDir()
+	absentStore := func() (string, error) { return filepath.Join(dir, "trust.toml"), nil }
+	presentPath := filepath.Join(dir, "present.toml")
+	if err := os.WriteFile(presentPath, []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notInstalled := fmt.Errorf("%w: %w", bless.ErrNoAnchor, &fs.PathError{Op: "lstat", Path: "/etc/forgectl/anchor", Err: fs.ErrNotExist})
+	unsafe := fmt.Errorf("%w: anchor is owned by uid 501, want 0 (root)", bless.ErrNoAnchor)
+
+	cases := []struct {
+		name      string
+		err       error
+		storePath func() (string, error)
+		want      State
+	}{
+		{"no anchor, no store: never set up", notInstalled, absentStore, StateSkip},
+		{"no anchor, store exists: broken", notInstalled, func() (string, error) { return presentPath, nil }, StateFail},
+		{"anchor present but unsafe", unsafe, absentStore, StateFail},
+		{"no anchor, store path unresolvable", notInstalled, func() (string, error) { return "", errors.New("no HOME") }, StateFail},
+		{"no anchor, store seam absent", notInstalled, nil, StateFail},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := Deps{
+				TrustedStore:   func() (bless.Store, error) { return bless.Store{}, c.err },
+				TrustStorePath: c.storePath,
+			}
+			check := checkTrustStore(d)
+			if check.State != c.want {
+				t.Errorf("state = %q, want %q (detail %q)", check.State, c.want, check.Detail)
+			}
+			if check.Hint == "" {
+				t.Error("check has no hint")
 			}
 		})
 	}

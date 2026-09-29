@@ -201,13 +201,18 @@ func notYetWiredStep(context.Context, exec.Runner, *Context, PlanStep) error {
 }
 
 // runStep is the arbitrary-command escape hatch: it shells out to step.Cmd
-// with step.Args via the injected Runner.
+// with step.Args via the injected Runner. Its stdout is never used, so it
+// runs through exec.DiscardingRunner when the Runner offers it: a step whose
+// command prints more than Run's stdout ceiling then still succeeds.
 func runStep(ctx context.Context, run exec.Runner, _ *Context, step PlanStep) error {
 	if step.Cmd == "" {
 		slog.Warn("Run step missing required cmd field.")
 		return errors.New("run step requires cmd")
 	}
 	slog.Debug("Running command.", "cmd", step.Cmd, "args", step.Args)
+	if d, ok := run.(exec.DiscardingRunner); ok {
+		return d.RunDiscardingStdout(ctx, step.Cmd, step.Args...)
+	}
 	_, err := run.Run(ctx, step.Cmd, step.Args...)
 	return err
 }

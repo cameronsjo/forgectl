@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -135,6 +136,32 @@ func TestVerify_AnchorFailures(t *testing.T) {
 			t.Fatalf("Verify = %v, want ErrNoAnchor", err)
 		}
 	})
+}
+
+// TestAnchor_MissingKeepsNotExistCause pins what doctor's trust-store check
+// keys on (forgectl#635): an anchor that was never installed is distinguishable
+// (fs.ErrNotExist on the chain) from one that is present but unsafe.
+func TestAnchor_MissingKeepsNotExistCause(t *testing.T) {
+	dir := t.TempDir()
+	missing := &Verifier{anchorPath: filepath.Join(dir, "no-anchor"), anchorCheck: checkAnchorOwnership}
+	_, _, err := missing.Anchor()
+	if !errors.Is(err, ErrNoAnchor) || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing anchor: err = %v, want ErrNoAnchor wrapping fs.ErrNotExist", err)
+	}
+
+	present := filepath.Join(dir, "anchor")
+	writeFile(t, present, []byte("junk"))
+	if err := os.Chmod(present, 0o666); err != nil { //nolint:gosec // G302: the test needs a group/world-writable anchor
+		t.Fatal(err)
+	}
+	unsafe := &Verifier{anchorPath: present, anchorCheck: checkAnchorOwnership}
+	_, _, err = unsafe.Anchor()
+	if !errors.Is(err, ErrNoAnchor) {
+		t.Fatalf("unsafe anchor: err = %v, want ErrNoAnchor", err)
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("unsafe anchor: err = %v must not read as never-installed", err)
+	}
 }
 
 func TestVerify_TrustStoreMissing(t *testing.T) {

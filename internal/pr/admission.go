@@ -117,9 +117,14 @@ func (c *Client) WindowLive(ctx context.Context, ref Ref) (live bool, ok bool) {
 // then PREFIX — which reports a sibling session as a match; see the
 // LiveReviews doc comment above for the full trace of why that fuzziness is
 // unsafe here.
+//
+// The read is bounded by lockedTmuxBudget: repair and prune call this under
+// the lifecycle lock, and a timeout reads as ok=false — "unknown", which every
+// caller already treats as a window that may exist.
 func (c *Client) WindowsLive(ctx context.Context, refs []Ref) (map[Ref]bool, bool) {
-	t := c.tmuxClient
-	wins, err := t.ListWindows(ctx)
+	tctx, done := boundedTmux(ctx)
+	wins, err := c.tmuxClient.ListWindows(tctx)
+	done()
 	if err != nil {
 		return nil, false
 	}
@@ -377,8 +382,14 @@ func (c *Client) occupancyFrom(ctx context.Context, summaries []SessionSummary) 
 // window names exist. Two separate reads (LiveReviews then WindowsLive) would
 // fork tmux twice per decision and — worse — could disagree with each other,
 // since the server moves between them.
+//
+// Every caller holds the lifecycle lock (admit, reserve, PrepareMany's batch
+// reserve, drain's claim), so the read is bounded by lockedTmuxBudget; a
+// timeout is ok=false, which refuses the admission rather than granting a slot.
 func (c *Client) reviewWindowSnapshot(ctx context.Context) (live int, names map[string]bool, ok bool) {
-	wins, err := c.tmuxClient.ListWindows(ctx)
+	tctx, done := boundedTmux(ctx)
+	wins, err := c.tmuxClient.ListWindows(tctx)
+	done()
 	if err != nil {
 		return 0, nil, false
 	}

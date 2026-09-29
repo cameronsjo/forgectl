@@ -153,6 +153,13 @@ func (c *Client) ensureSession(ctx context.Context) (tmux.SessionIdentity, error
 // predate native ids and carry none, and an id persisted across a tmux server
 // restart would name a different window anyway. What the breadcrumb supplies is
 // the NAME to look for; the identity is rebuilt from the live server every time.
+//
+// It adds NO deadline of its own: a caller under the lifecycle lock passes a
+// ctx already bounded by its tmuxBudget (killReviewWindow, and `pr repair
+// --adopt-window` through boundedTmux), so the bound covers the resolve AND
+// whatever the caller does with the window as one unit. `pr attach` runs
+// outside the lock and passes its own ctx. Two windows with the name refuse
+// with tmux.ErrAmbiguousWindow rather than resolving to either.
 func (c *Client) resolveReviewWindow(ctx context.Context, ref Ref) (tmux.WindowIdentity, error) {
 	name, err := ReviewWindowName(ref)
 	if err != nil {

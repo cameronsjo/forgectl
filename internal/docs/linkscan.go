@@ -64,14 +64,14 @@ var linkMarkdown = newLinkMarkdown()
 var linkMarkdownVault = newMarkdown(false, true)
 
 func newLinkMarkdown() goldmark.Markdown {
-	md := goldmark.New(
+	// No wikilink extender: the docs-root page has none, so "[[w]]" renders
+	// as literal text and must not be indexed as a link (#655). The index
+	// holds what the page shows, as the vault parser below does.
+	return goldmark.New(
 		goldmark.WithParserOptions(headingParserOptions(false)...),
 		// Parse-only: a $$ block's lines are TeX, not headings or links.
 		goldmark.WithParserOptions(mathBlockParserOptions()...),
 	)
-	// Parse-only: never render with this instance. The default resolver turns [[https://x/]] into an external href the sanitizer keeps.
-	(&wikilink.Extender{}).Extend(md)
-	return md
 }
 
 // blockIDPattern matches a trailing Obsidian block-id marker on a line:

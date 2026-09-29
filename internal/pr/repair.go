@@ -3,6 +3,7 @@ package pr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // Repair modes. Exactly one applies per `--apply`; the CLI refuses zero or
@@ -511,7 +513,15 @@ func (c *Client) repairAdoptLocked(ctx context.Context, member breadcrumbMember,
 			"use 'forgectl pr repair %s --apply %s' instead",
 			ref.String(), termsafe.QuotePath(bc.Workspace), member.displayPath, RepairModeRollback)
 	}
-	window, err := c.resolveReviewWindow(ctx, ref)
+	// Under the lifecycle lock, so the resolve is bounded (forgectl#656).
+	tctx, done := boundedTmux(ctx)
+	window, err := c.resolveReviewWindow(tctx, ref)
+	done()
+	if errors.Is(err, tmux.ErrAmbiguousWindow) {
+		item.Outcome = repairOutcomeRefused
+		return item, fmt.Errorf("refusing to adopt %s: %w — close the window that is not this review, then retry",
+			ref.String(), err)
+	}
 	if err != nil {
 		item.Outcome = "refused"
 		name, nameErr := ReviewWindowName(ref)

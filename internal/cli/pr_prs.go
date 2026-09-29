@@ -52,7 +52,7 @@ reviewed are dimmed; new activity on the PR auto-un-dims them.
 			// and escaped on the way.
 			renderDegradationNotes(cmd, notes)
 
-			store := pr.LoadReviewed(reviewedPath)
+			store := pr.LoadReviewed(reviewedPath, pr.WithDefaultHost(client.GitHubHost()))
 			if asJSON {
 				return emitPRsJSON(cmd.OutOrStdout(), prs, store)
 			}
