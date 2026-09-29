@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,6 +22,11 @@ import (
 // needs no external binary and still exercises fork/exec, pipes, and signals
 // for real.
 const helperModeEnv = "FORGECTL_SENSITIVE_HELPER_MODE"
+
+// partialMarkerEnv names a file the "partial" helper creates once its prefix
+// is written, so a test can stop it on that event rather than on a guess at
+// how long the child takes to start.
+const partialMarkerEnv = "FORGECTL_SENSITIVE_HELPER_PARTIAL_MARKER"
 
 func TestMain(m *testing.M) {
 	if mode := os.Getenv(helperModeEnv); mode != "" {
@@ -69,6 +75,13 @@ func helperMain(mode string) int {
 		// stall gets a prefix — and gets it after a clean io.EOF, because the
 		// kill closes this process's write ends too.
 		_, _ = fmt.Fprint(os.Stdout, "PARTIAL")
+		// Tell the test the prefix is in the pipe, so it can stop this
+		// process knowing there is a prefix to see.
+		if marker := os.Getenv(partialMarkerEnv); marker != "" {
+			if err := os.WriteFile(marker, nil, 0o600); err != nil {
+				return 97
+			}
+		}
 		d, err := time.ParseDuration(arg)
 		if err != nil {
 			return 98
@@ -433,26 +446,41 @@ func TestRunSensitive_ReturnsWithinBoundWhenDescendantHoldsThePipe(t *testing.T)
 // the bytes has to be told, because the seam's contract sends them to the
 // completeness flag rather than to the error.
 func TestRunSensitive_KilledProducerLeavesAnIncompletePrefix(t *testing.T) {
-	cases := map[string]func() (context.Context, context.CancelFunc){
-		"deadline": func() (context.Context, context.CancelFunc) {
-			return context.WithTimeout(context.Background(), 200*time.Millisecond)
+	// Each context fires once the child has written its prefix, not after a
+	// fixed delay. A fixed 200 ms raced the child's startup: under -race this
+	// re-executed test binary can take longer than that to write anything, so
+	// the kill landed first and stdout was empty (#661). A context whose
+	// deadline is set when it is made cannot wait for an event, so the
+	// deadline case uses a context that reports DeadlineExceeded once fired,
+	// which is all the runner reads of it.
+	cases := map[string]func(fired <-chan struct{}) context.Context{
+		"deadline": func(fired <-chan struct{}) context.Context {
+			return firedContext{Context: context.Background(), done: fired, err: context.DeadlineExceeded}
 		},
-		"cancellation": func() (context.Context, context.CancelFunc) {
+		"cancellation": func(fired <-chan struct{}) context.Context {
 			ctx, cancel := context.WithCancel(context.Background())
 			go func() {
-				time.Sleep(200 * time.Millisecond)
+				<-fired
 				cancel()
 			}()
-			return ctx, func() {}
+			return ctx
 		},
 	}
 
 	for name, mkCtx := range cases {
-		runner, self := helperRunner(t, "partial:60s", defaultRetireBound)
-		ctx, cancel := mkCtx()
+		marker := filepath.Join(t.TempDir(), "prefix-written")
+		runner, self := helperRunner(t, "partial:60s", defaultRetireBound, partialMarkerEnv+"="+marker)
+		fired := make(chan struct{})
+		go func() {
+			defer close(fired)
+			for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+				if _, err := os.Stat(marker); err == nil {
+					return
+				}
+			}
+		}()
 
-		res, err := runner.RunSensitive(ctx, helperCommand(KindTmuxCreate, self, 4096))
-		cancel()
+		res, err := runner.RunSensitive(mkCtx(fired), helperCommand(KindTmuxCreate, self, 4096))
 
 		if err == nil {
 			t.Errorf("%s: expected the kill to be reported", name)
@@ -485,6 +513,25 @@ func TestRunSensitive_KilledProducerLeavesAnIncompletePrefix(t *testing.T) {
 	}
 	if string(data) != "PARTIAL-REST" {
 		t.Errorf("control stdout = %q, want the whole stream", data)
+	}
+}
+
+// firedContext is done once fired closes, and from then on reports err. It
+// lets a test end a run with context.DeadlineExceeded at a moment it chooses.
+type firedContext struct {
+	context.Context
+	done <-chan struct{}
+	err  error
+}
+
+func (c firedContext) Done() <-chan struct{} { return c.done }
+
+func (c firedContext) Err() error {
+	select {
+	case <-c.done:
+		return c.err
+	default:
+		return nil
 	}
 }
 
