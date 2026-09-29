@@ -2,6 +2,7 @@ package pr
 
 import (
 	"context"
+	"errors"
 	"os"
 	"time"
 
@@ -25,15 +26,16 @@ type Client struct {
 	run        exec.Runner
 	tmuxClient *tmux.Client
 
-	// searchRun runs the @me-scoped `gh search prs` legs behind PRs and
-	// Dashboard. Those queries have no repository context, so nothing about the
-	// checkout names their host: internal/cli wires a runner pinned to the
-	// configured [github] host (githubauth.Runner), the same pin `forgectl
-	// review` applies to the same SearchPRs path. Every other gh call this
-	// package makes is repo-local and stays on run, resolving its host from the
-	// checkout's own remote. nil falls back to run. It is an Option rather than
-	// an import because internal/githubauth imports this package.
-	searchRun exec.Runner
+	// githubHost is the configured [github] host: what an empty Ref.Host
+	// means, and the host the @me searches (which name no repository) run
+	// on. pin returns a runner whose gh subprocesses are pinned to a given
+	// host — internal/cli passes githubauth.Runner, which this package
+	// cannot import (githubauth imports it). Every gh call about a PR runs
+	// on pin(host) AND names that host in --repo, so the pin and the
+	// argument can never disagree (#413). Defaults: defaultGitHubHost and
+	// an identity pin, which only tests rely on.
+	githubHost string
+	pin        func(host string) exec.Runner
 
 	// sessionsDir is the forgectl-owned breadcrumb directory
 	// (config.PrSessionsDir); the breadcrumb location check enforces that a
@@ -162,10 +164,42 @@ func WithWindowEnv(resolve func() ([]string, error)) Option {
 	return func(c *Client) { c.windowEnv = resolve }
 }
 
-// WithSearchRunner supplies the runner for the host-scoped `gh search prs`
-// legs (see Client.searchRun). Repo-local gh calls are unaffected.
-func WithSearchRunner(run exec.Runner) Option {
-	return func(c *Client) { c.searchRun = run }
+// WithGitHubHost supplies the configured [github] host and the host-pinning
+// runner factory (see Client.githubHost). host is validated where it is used,
+// so an invalid configured value fails each PR call categorically rather than
+// failing construction for verbs that never reach gh.
+func WithGitHubHost(host string, pin func(host string) exec.Runner) Option {
+	return func(c *Client) { c.githubHost, c.pin = host, pin }
+}
+
+// recordHost is the host a new record for ref persists: empty for a local
+// session, which has no forge, and otherwise the concrete host its gh calls
+// use — so the record keeps meaning that host if [github] host later changes.
+// An invalid host is left empty here; the gh call that needs it refuses.
+func (c *Client) recordHost(ref Ref) string {
+	if ref.IsLocal() {
+		return ""
+	}
+	host, _, err := c.prHost(ref)
+	if err != nil {
+		return ""
+	}
+	return host
+}
+
+// prHost returns the host a PR-scoped gh call for ref must use, and a runner
+// pinned to it. An empty Ref.Host means the configured host. The value is
+// re-validated here, at the last point before it becomes argv and GH_HOST,
+// whatever path produced it.
+func (c *Client) prHost(ref Ref) (string, exec.Runner, error) {
+	host := ref.Host
+	if host == "" {
+		host = c.githubHost
+	}
+	if !ValidHostSegment(host) {
+		return "", nil, errors.New("the PR's GitHub host failed validation; check [github] host in config.toml")
+	}
+	return host, c.pin(host), nil
 }
 
 // WithTmuxSession overrides the tmux session review windows are created under.
@@ -251,6 +285,8 @@ func WithNotifier(n interface {
 func New(run exec.Runner, opts ...Option) *Client {
 	c := &Client{
 		run:         run,
+		githubHost:  defaultGitHubHost,
+		pin:         func(string) exec.Runner { return run },
 		tmuxClient:  tmux.New(run),
 		tmuxSession: defaultTmuxSession,
 		fs:          osRecordFS{},

@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	neturl "net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -28,6 +29,21 @@ type Ref struct {
 	Owner  string
 	Repo   string
 	Number int
+
+	// Host is the GitHub host the PR lives on, as a validated lowercase
+	// hostname (ValidHostSegment). Empty means the client's configured
+	// [github] host (#413): a typed owner/repo#N, a row from the pinned @me
+	// search, and a session record written before records carried a host all
+	// mean that host. A PR URL carries its own host, and a bare number
+	// resolved from the checkout carries its remote's host. Every gh call
+	// about the PR names this host twice over — `--repo HOST/OWNER/REPO` and a
+	// runner pinned to the same host — so one PR can never be listed on one
+	// host and viewed, cloned, or posted to on another.
+	//
+	// Host is NOT part of the session identity (window name, record filename,
+	// session key): the same owner/repo#N on two hosts is one slot, and the
+	// second is refused as already having a record.
+	Host string
 
 	// local marks a synthetic, offline-review Ref. It is the SECURITY
 	// BOUNDARY behind IsLocal(), which decides whether PostReview may fire
@@ -63,8 +79,42 @@ type Ref struct {
 // remote ref and parses as one.
 const localOwnerSentinel = "local"
 
-// Slug renders the "owner/repo" form gh's --repo flag expects.
+// Slug renders the "owner/repo" form. gh's --repo flag is given
+// HostSlug instead, so the host is never left to gh's defaults.
 func (r Ref) Slug() string { return r.Owner + "/" + r.Repo }
+
+// sameIdentity reports whether a and b name the same session identity:
+// everything but Host, which is not part of it (see Ref.Host).
+func (a Ref) sameIdentity(b Ref) bool {
+	a.Host, b.Host = "", ""
+	return a == b
+}
+
+// defaultGitHubHost is the host an empty Ref.Host means when no [github] host
+// is wired in (tests; internal/cli always wires the configured one). It
+// mirrors githubauth.DefaultHost, which this package cannot import.
+const defaultGitHubHost = "github.com"
+
+// HostnamePattern is the anchored hostname charset for a GitHub host:
+// lowercase DNS labels only, no port, no scheme, no path. It lives here, not
+// in internal/githubauth, because githubauth imports this package and both
+// must apply the one pattern; githubauth compiles it for ResolveHost.
+const HostnamePattern = `^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`
+
+var reHostname = regexp.MustCompile(HostnamePattern)
+
+// MaxHostSegmentBytes bounds a hostname used as a path segment, store key, or
+// argv component: 253 is the DNS name limit. githubauth.MaxHostSegmentBytes
+// is this value.
+const MaxHostSegmentBytes = 253
+
+// ValidHostSegment reports whether s is a normalized hostname: non-empty, at
+// most MaxHostSegmentBytes, and inside HostnamePattern. It is a predicate, not
+// a normalizer — callers lowercase first. githubauth.ValidHostSegment
+// delegates here.
+func ValidHostSegment(s string) bool {
+	return s != "" && len(s) <= MaxHostSegmentBytes && reHostname.MatchString(s)
+}
 
 // String renders the canonical "owner/repo#N" breadcrumb form.
 func (r Ref) String() string { return fmt.Sprintf("%s/%s#%d", r.Owner, r.Repo, r.Number) }
@@ -97,8 +147,10 @@ const ownerRepoClass = `[A-Za-z0-9._-]+`
 var (
 	// owner/repo#N
 	reSlug = regexp.MustCompile(`^(` + ownerRepoClass + `)/(` + ownerRepoClass + `)#([0-9]+)$`)
-	// https://github.com/<owner>/<repo>/pull/<N>  (optional trailing slash)
-	reURL = regexp.MustCompile(`^https://github\.com/(` + ownerRepoClass + `)/(` + ownerRepoClass + `)/pull/([0-9]+)/?$`)
+	// https://<host>/<owner>/<repo>/pull/<N>  (optional trailing slash). The
+	// host capture is loose here and must then pass ValidHostSegment after
+	// lowercasing: no port, userinfo, or path can reach it.
+	reURL = regexp.MustCompile(`^https://([A-Za-z0-9.-]+)/(` + ownerRepoClass + `)/(` + ownerRepoClass + `)/pull/([0-9]+)/?$`)
 	// bare N
 	reBare = regexp.MustCompile(`^([0-9]+)$`)
 )
@@ -128,7 +180,16 @@ func ParseRef(s string) (Ref, error) {
 		return RefFromParts(m[1], m[2], m[3])
 	}
 	if m := reURL.FindStringSubmatch(s); m != nil {
-		return RefFromParts(m[1], m[2], m[3])
+		host := strings.ToLower(m[1])
+		if !ValidHostSegment(host) {
+			return Ref{}, errors.New("PR URL host is outside the allowed hostname charset (lowercase dns name, no port)")
+		}
+		ref, err := RefFromParts(m[2], m[3], m[4])
+		if err != nil {
+			return Ref{}, err
+		}
+		ref.Host = host
+		return ref, nil
 	}
 	if m := reBare.FindStringSubmatch(s); m != nil {
 		n, err := parseNumber(m[1])
@@ -139,7 +200,7 @@ func ParseRef(s string) (Ref, error) {
 	}
 	// s is argv the operator typed, or a record's ref string whose callers
 	// replace this error with a categorical one; echo it capped (#562).
-	return Ref{}, fmt.Errorf("unrecognized PR reference %s (want owner/repo#N, a github.com PR URL, or a bare number)", termsafe.QuoteArgMax(s, termsafe.ArgEchoMaxRunes))
+	return Ref{}, fmt.Errorf("unrecognized PR reference %s (want owner/repo#N, an https PR URL, or a bare number)", termsafe.QuoteArgMax(s, termsafe.ArgEchoMaxRunes))
 }
 
 // RefFromParts builds a validated Ref from separate owner/repo/number strings.
@@ -187,8 +248,8 @@ func parseNumber(s string) (int, error) {
 	return n, nil
 }
 
-// ResolveRef parses s and, when it is a bare number, resolves Owner/Repo from
-// the cwd repo's origin through the Runner. The resolved owner/repo are
+// ResolveRef parses s and, when it is a bare number, resolves Host/Owner/Repo
+// from the cwd repo's origin through the Runner. The resolved owner/repo are
 // re-validated with ValidOwnerRepoPart — the same bundled guard the typed-ref
 // path applies (anchored charset plus the leading-'-' and ".." rejections) —
 // because `gh`/`git` output is itself hostile input.
@@ -200,14 +261,14 @@ func (c *Client) ResolveRef(ctx context.Context, s string) (Ref, error) {
 	if ref.Complete() {
 		return ref, nil
 	}
-	owner, repo, err := c.resolveOrigin(ctx)
+	host, owner, repo, err := c.resolveOrigin(ctx)
 	if err != nil {
 		return Ref{}, fmt.Errorf("resolve bare PR number against origin: %w", err)
 	}
 	if !ValidOwnerRepoPart(owner) || !ValidOwnerRepoPart(repo) {
 		return Ref{}, errors.New("origin owner/repo is outside the allowed charset")
 	}
-	ref.Owner, ref.Repo = owner, repo
+	ref.Host, ref.Owner, ref.Repo = host, owner, repo
 	return ref, nil
 }
 
@@ -222,13 +283,17 @@ func ValidOwnerRepoPart(s string) bool {
 	return reOwner.MatchString(s) && !strings.HasPrefix(s, "-") && s != ".."
 }
 
-// resolveOrigin asks gh for the cwd repo's owner/name, falling back to parsing
-// the git origin URL. Both paths run through the Runner seam.
-func (c *Client) resolveOrigin(ctx context.Context) (owner, repo string, err error) {
-	out, ghErr := c.run.Run(ctx, "gh", "repo", "view", "--json", "owner,name", "-q", ".owner.login + \"/\" + .name")
+// resolveOrigin resolves the cwd repository's host, owner, and name. It asks
+// gh first (`gh repo view --json url`, which picks the checkout's base repo
+// from its git remotes) and falls back to parsing the git origin URL. Either
+// way the HOST comes from that remote URL, never from [github] host or gh's
+// defaults: a bare number names a PR on the checkout's own forge (#413).
+// Both paths run through the Runner seam, and both outputs are hostile input.
+func (c *Client) resolveOrigin(ctx context.Context) (host, owner, repo string, err error) {
+	out, ghErr := c.run.Run(ctx, "gh", "repo", "view", "--json", "url", "-q", ".url")
 	if ghErr == nil {
-		if o, r, ok := splitSlug(out); ok {
-			return o, r, nil
+		if h, o, r, ok := ParseRemoteURL(out); ok {
+			return h, o, r, nil
 		}
 	}
 	// Every error below is categorical (#562). The origin URL can embed a
@@ -236,13 +301,56 @@ func (c *Client) resolveOrigin(ctx context.Context) (owner, repo string, err err
 	// carry gh's and git's stderr verbatim, so none of that text is echoed.
 	url, gitErr := c.run.Run(ctx, "git", "remote", "get-url", "origin")
 	if gitErr != nil {
-		return "", "", errors.New("could not resolve the origin repository: gh repo view failed and git has no readable origin remote")
+		return "", "", "", errors.New("could not resolve the origin repository: gh repo view failed and git has no readable origin remote")
 	}
-	o, r, ok := parseRemoteURL(url)
+	h, o, r, ok := ParseRemoteURL(url)
 	if !ok {
-		return "", "", errors.New("origin URL is not a recognised GitHub remote")
+		return "", "", "", errors.New("origin URL is not a recognised GitHub remote")
 	}
-	return o, r, nil
+	return h, o, r, nil
+}
+
+// reSCPRemote matches git's scp-like remote form, user@host:owner/repo.
+var reSCPRemote = regexp.MustCompile(`^[A-Za-z0-9._-]+@([A-Za-z0-9.-]+):([^/]+)/([^/]+)$`)
+
+// ParseRemoteURL extracts host, owner, and repo from a git remote URL in any
+// of the three forms GitHub hands out — https://host/owner/repo,
+// ssh://user@host[:port]/owner/repo, and user@host:owner/repo — stripping a
+// trailing ".git". The host is lowercased and must pass ValidHostSegment.
+// Owner and repo are returned unvalidated; callers vet them with
+// ValidOwnerRepoPart.
+//
+// An https URL with a port is refused: a GitHub host is port-free by
+// HostnamePattern, and guessing which host a ported URL means is how a PR
+// ends up on the wrong forge. An ssh port is the ssh daemon's, not the web
+// host's, and is ignored. Userinfo (an https credential) is dropped, never
+// returned: callers must not echo the raw URL either (#562).
+func ParseRemoteURL(raw string) (host, owner, repo string, ok bool) {
+	raw = strings.TrimSuffix(strings.TrimSpace(raw), ".git")
+	var path string
+	switch {
+	case strings.HasPrefix(raw, "https://"), strings.HasPrefix(raw, "ssh://"):
+		u, err := neturl.Parse(raw)
+		if err != nil || (u.Scheme == "https" && u.Port() != "") {
+			return "", "", "", false
+		}
+		host, path = u.Hostname(), strings.TrimPrefix(u.Path, "/")
+	default:
+		m := reSCPRemote.FindStringSubmatch(raw)
+		if m == nil {
+			return "", "", "", false
+		}
+		host, path = m[1], m[2]+"/"+m[3]
+	}
+	host = strings.ToLower(host)
+	if !ValidHostSegment(host) {
+		return "", "", "", false
+	}
+	o, r, found := strings.Cut(path, "/")
+	if !found || o == "" || r == "" || strings.Contains(r, "/") {
+		return "", "", "", false
+	}
+	return host, o, r, true
 }
 
 // splitSlug splits a trimmed "owner/repo" into its parts.
@@ -253,22 +361,4 @@ func splitSlug(s string) (owner, repo string, ok bool) {
 		return "", "", false
 	}
 	return o, r, true
-}
-
-// parseRemoteURL extracts owner/repo from an https or ssh GitHub remote URL,
-// stripping any trailing ".git".
-func parseRemoteURL(url string) (owner, repo string, ok bool) {
-	url = strings.TrimSpace(url)
-	url = strings.TrimSuffix(url, ".git")
-	switch {
-	case strings.HasPrefix(url, "git@github.com:"):
-		url = strings.TrimPrefix(url, "git@github.com:")
-	case strings.HasPrefix(url, "https://github.com/"):
-		url = strings.TrimPrefix(url, "https://github.com/")
-	case strings.HasPrefix(url, "ssh://git@github.com/"):
-		url = strings.TrimPrefix(url, "ssh://git@github.com/")
-	default:
-		return "", "", false
-	}
-	return splitSlug(url)
 }

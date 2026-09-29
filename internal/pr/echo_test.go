@@ -12,6 +12,7 @@ package pr
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -121,8 +122,10 @@ func TestEcho_OriginURLCredentialNeverEchoed(t *testing.T) {
 		origin string
 		gitErr error
 	}{
-		{"token in https origin", "https://x:SECRET@github.com/o/r.git", nil},
-		{"token in enterprise origin", "https://oauth2:SECRET@ghe.example.test/o/r.git", nil},
+		// Origins the parser refuses, each carrying a credential.
+		{"token in ported https origin", "https://x:SECRET@ghe.example.test:8443/o/r.git", nil},
+		{"token in http origin", "http://oauth2:SECRET@ghe.example.test/o/r.git", nil},
+		{"token in malformed origin", "https://x:SECRET@ghe.example.test/o", nil},
 		{"git failure carrying stderr", "", &exec.CommandError{Name: "git", Stderr: "fatal: SECRET MARKER\x1b[2J", Err: errors.New("exit status 2")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -138,5 +141,27 @@ func TestEcho_OriginURLCredentialNeverEchoed(t *testing.T) {
 			_, err := New(fake).ResolveRef(context.Background(), "42")
 			assertNoEcho(t, err, "SECRET")
 		})
+	}
+}
+
+// TestEcho_OriginCredentialNeverReachesTheRef: an https origin with userinfo
+// resolves, and the credential is dropped — only the host survives into the
+// Ref, and from there into --repo and the record.
+func TestEcho_OriginCredentialNeverReachesTheRef(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "git" {
+			return "https://x:SECRET@GHE.example.test/o/r.git", nil
+		}
+		return "", errors.New("gh unavailable")
+	}}
+	ref, err := New(fake).ResolveRef(context.Background(), "42")
+	if err != nil {
+		t.Fatalf("ResolveRef: %v", err)
+	}
+	if ref.Host != "ghe.example.test" || ref.Owner != "o" || ref.Repo != "r" {
+		t.Fatalf("ref = %+v, want ghe.example.test o/r", ref)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", ref), "SECRET") {
+		t.Fatalf("ref %+v carries the origin credential", ref)
 	}
 }

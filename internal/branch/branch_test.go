@@ -36,9 +36,14 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
-// githubRepoView is `gh repo view --json owner,name,url` output for a
-// github.com checkout.
-const githubRepoView = `{"name":"forgectl","owner":{"login":"cameronsjo"},"url":"https://github.com/cameronsjo/forgectl"}`
+// githubRemoteURL is `git remote get-url origin` output for a github.com
+// checkout.
+const githubRemoteURL = "git@github.com:cameronsjo/forgectl.git"
+
+// isGetURL matches `git remote get-url <name>`.
+func isGetURL(name string, args []string) bool {
+	return name == "git" && len(args) >= 2 && args[0] == "remote" && args[1] == "get-url"
+}
 
 func contains(args []string, want string) bool {
 	for _, a := range args {
@@ -120,8 +125,8 @@ func TestPrune_RemoteDelete_VerifiesViaSingularEndpoint_NeverPlural(t *testing.T
 			switch {
 			case name == "git" && len(args) > 0 && args[0] == "push":
 				return "", nil
-			case name == "gh" && len(args) >= 2 && args[0] == "repo" && args[1] == "view":
-				return githubRepoView, nil
+			case isGetURL(name, args):
+				return githubRemoteURL, nil
 			case name == "gh" && len(args) > 0 && args[0] == "api":
 				// A real 404 from gh surfaces as a non-nil error whose message
 				// carries the HTTP status — that's the "confirmed gone" signal.
@@ -169,8 +174,8 @@ func TestPrune_RemoteDelete_StillExists_IsAFailure(t *testing.T) {
 			switch {
 			case name == "git" && len(args) > 0 && args[0] == "push":
 				return "", nil
-			case name == "gh" && len(args) >= 2 && args[0] == "repo" && args[1] == "view":
-				return githubRepoView, nil
+			case isGetURL(name, args):
+				return githubRemoteURL, nil
 			case name == "gh" && len(args) > 0 && args[0] == "api":
 				// 200 with a real ref object — the branch is still there.
 				return `{"ref":"refs/heads/feat/done"}`, nil
@@ -204,8 +209,10 @@ func TestPrune_RemoteDelete_VerifiesOnTheOriginHost(t *testing.T) {
 		view     string
 		wantHost string
 	}{
-		{"github.com origin", githubRepoView, "github.com"},
-		{"enterprise origin", `{"name":"tools","owner":{"login":"platform"},"url":"https://GHE.Example.test/platform/tools"}`, "ghe.example.test"},
+		{"github.com origin", githubRemoteURL, "github.com"},
+		{"enterprise https origin", "https://GHE.Example.test/platform/tools.git", "ghe.example.test"},
+		{"enterprise ssh origin with port", "ssh://git@ghe.example.test:2222/platform/tools.git", "ghe.example.test"},
+		{"credential in https origin", "https://x:SECRET@ghe.example.test/platform/tools.git", "ghe.example.test"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &exec.FakeRunner{
@@ -213,7 +220,7 @@ func TestPrune_RemoteDelete_VerifiesOnTheOriginHost(t *testing.T) {
 					switch {
 					case name == "git" && len(args) > 0 && args[0] == "push":
 						return "", nil
-					case name == "gh" && len(args) >= 2 && args[0] == "repo" && args[1] == "view":
+					case isGetURL(name, args):
 						return tc.view, nil
 					case name == "gh" && len(args) > 0 && args[0] == "api":
 						if contains(args, "--hostname="+tc.wantHost) {
@@ -234,7 +241,7 @@ func TestPrune_RemoteDelete_VerifiesOnTheOriginHost(t *testing.T) {
 				Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
 				Group: SafeToDelete,
 			}
-			results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
+			results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "upstream", Remote: true})
 			if len(results) != 1 || results[0].Err != nil || !results[0].Deleted {
 				t.Fatalf("expected a verified delete, got %+v", results)
 			}
@@ -247,28 +254,41 @@ func TestPrune_RemoteDelete_VerifiesOnTheOriginHost(t *testing.T) {
 			if !contains(apiArgs, "--hostname="+tc.wantHost) {
 				t.Fatalf("gh api argv = %q, want --hostname=%s (the origin's host, lowercased)", apiArgs, tc.wantHost)
 			}
+			if strings.Contains(strings.Join(apiArgs, " "), "SECRET") {
+				t.Fatalf("gh api argv %q carries the remote URL's credential", apiArgs)
+			}
+			var gotRemote string
+			for _, call := range fake.Calls {
+				if isGetURL(call.Name, call.Args) && len(call.Args) == 3 {
+					gotRemote = call.Args[2]
+				}
+			}
+			if gotRemote != "upstream" {
+				t.Fatalf("remote URL read from %q, want the remote the delete went to (upstream)", gotRemote)
+			}
 		})
 	}
 }
 
 // TestPrune_RemoteDelete_UnverifiableOriginIsAFailure: when gh's view of the
 // origin cannot name a usable host, verification must fail rather than fall
-// back to an unpinned query — and the error must not echo gh's text.
+// back to an unpinned query — and the error must not echo the URL.
 func TestPrune_RemoteDelete_UnverifiableOriginIsAFailure(t *testing.T) {
 	for _, tc := range []struct{ name, view string }{
-		{"not json", "cameronsjo/forgectl"},
-		{"port in url", `{"name":"r","owner":{"login":"o"},"url":"https://ghe.example.test:8443/o/r"}`},
-		{"http scheme", `{"name":"r","owner":{"login":"o"},"url":"http://ghe.example.test/o/r"}`},
-		{"option-like host", `{"name":"r","owner":{"login":"o"},"url":"https://-ghe.example.test/o/r"}`},
-		{"leading-dot host", `{"name":"r","owner":{"login":"o"},"url":"https://.hidden/o/r"}`},
-		{"hostile host", `{"name":"r","owner":{"login":"o"},"url":"https://gh\u001b[2Je.example.test/o/r"}`},
-		{"credential in url", `{"name":"r","owner":{"login":"o"},"url":"https://x:SECRET@gh e.test/o/r"}`},
-		{"hostile owner", `{"name":"r","owner":{"login":"o\u001b[2J"},"url":"https://github.com/o/r"}`},
+		{"not a url", "cameronsjo/forgectl"},
+		{"port in https url", "https://ghe.example.test:8443/o/r"},
+		{"http scheme", "http://ghe.example.test/o/r"},
+		{"option-like host", "https://-ghe.example.test/o/r"},
+		{"leading-dot host", "https://.hidden/o/r"},
+		{"hostile host", "https://gh\x1b[2Je.example.test/o/r"},
+		{"credential in unusable url", "https://x:SECRET@gh e.test/o/r"},
+		{"hostile owner", "https://github.com/-o/r"},
+		{"credential in ported url", "https://x:SECRET@ghe.example.test:8443/o/r"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &exec.FakeRunner{
 				RunFunc: func(name string, args []string) (string, error) {
-					if name == "gh" && len(args) >= 2 && args[0] == "repo" && args[1] == "view" {
+					if isGetURL(name, args) {
 						return tc.view, nil
 					}
 					if name == "gh" && len(args) > 0 && args[0] == "api" {
@@ -307,8 +327,8 @@ func TestPrune_RemoteDelete_StillExists_DoesNotEchoResponse(t *testing.T) {
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
 			switch {
-			case name == "gh" && len(args) >= 2 && args[0] == "repo" && args[1] == "view":
-				return githubRepoView, nil
+			case isGetURL(name, args):
+				return githubRemoteURL, nil
 			case name == "gh" && len(args) > 0 && args[0] == "api":
 				return "{\"ref\":\"MARKER\x1b[2J\"}", nil
 			}

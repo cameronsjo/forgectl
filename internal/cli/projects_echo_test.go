@@ -47,7 +47,7 @@ func TestEcho_ProjectsListHostFlagIsCapped(t *testing.T) {
 // failure (where the rejected org reached the message unquoted) and the
 // empty listing.
 func TestEcho_ProjectsCloneOrgIsCapped(t *testing.T) {
-	for name, listing := range map[string]string{"list failure": "", "no repos": "[]"} {
+	for name, listing := range map[string]string{"list failure": "", "no repos": "[]", "not a path segment": ""} {
 		t.Run(name, func(t *testing.T) {
 			client := cloneFixture(t, func(string, []string) (string, error) { return listing, nil })
 			cmd := newProjectsCloneCmd(client, theme.Theme{})
@@ -57,6 +57,11 @@ func TestEcho_ProjectsCloneOrgIsCapped(t *testing.T) {
 			if name == "no repos" {
 				// A valid owner reaches the listing; only length is hostile.
 				org = "MARKER" + strings.Repeat("a", 5000)
+			}
+			if name == "not a path segment" {
+				// A '/' fails ListOrg's validPathSegment, whose own refusal
+				// quoted the value uncapped before it rode out via %w.
+				org = "MARKER/" + strings.Repeat("a", 5000)
 			}
 			cmd.SetArgs([]string{"--org", org})
 			assertCappedArgEcho(t, cmd.ExecuteContext(context.Background()))

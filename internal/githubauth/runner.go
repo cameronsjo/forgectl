@@ -11,17 +11,18 @@
 // gh subprocess still has GH_HOST force-set to that validated value, and an
 // ambient GH_HOST never wins.
 //
-// The pin's scope is host-scoped calls, the ones with no repository behind
-// them, so configuration is the only thing that can name their host (#413):
-// the projects/review inventory, the @me searches behind `pr prs` and
-// `pr dash`, and doctor's `gh auth status`. Repo-local calls (`gh repo view`,
-// `gh pr view/list/review` in internal/pr and internal/branch) deliberately
-// stay OFF this runner. gh resolves their repository from the checkout's git
-// remotes and filters those remotes by GH_HOST, so pinning them would break
-// every checkout whose remote is on a different host from the configured one
-// — a GitHub Enterprise checkout under the github.com default, or the reverse.
-// A repo-local call that cannot infer its host from the checkout (`gh api`)
-// names the origin's host with --hostname instead.
+// Scope (#413). Host-scoped calls — those with no repository behind them —
+// are pinned to the configured host: the projects/review inventory, the @me
+// searches behind `pr prs` and `pr dash`, and doctor's `gh auth status`.
+// PR-scoped calls in internal/pr (view, review post) are pinned too, but to
+// the PR's OWN host, which internal/pr carries on Ref.Host and also names in
+// `--repo HOST/OWNER/REPO`: gh resolves a two-part --repo against GH_HOST or
+// its default host, never the checkout. Checkout-resolved calls (`gh repo
+// view` for a bare PR number, internal/branch's `gh pr list`) stay OFF this
+// runner: gh takes their repository from the checkout's git remotes and
+// filters those by GH_HOST with no fallback, so a pin would break every
+// checkout whose remote is on another host. internal/branch's `gh api`
+// verification, which infers no host, passes --hostname for its remote's URL.
 package githubauth
 
 import (
@@ -33,6 +34,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/pr"
 )
 
 // DefaultHost is the GitHub host forgectl's inventory talks to when no
@@ -54,7 +56,10 @@ const MaxHostBytes = 256
 // This is deliberately stricter than review's reGiteaHost (which allows a
 // port); the user-visible consequence is that a GitHub Enterprise host served
 // on a nonstandard port is unconfigurable.
-var reHost = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`)
+//
+// The pattern is pr.HostnamePattern, so a Ref's host (validated in internal/pr,
+// which this package imports) and a configured host share one charset.
+var reHost = regexp.MustCompile(pr.HostnamePattern)
 
 // ErrUnpinnableGhPath is returned when a `gh` command is routed through a
 // Runner method that cannot carry the host pin. exec.Runner's stdin and
@@ -101,7 +106,7 @@ func ResolveHost(configured string) (string, error) {
 // DROPS directory names over 255 bytes, so such a tree would also be invisible
 // to the launcher. 253 is the DNS name limit, which is the real ceiling for
 // anything that is genuinely a hostname.
-const MaxHostSegmentBytes = 253
+const MaxHostSegmentBytes = pr.MaxHostSegmentBytes
 
 // ValidHostSegment reports whether s is a normalized hostname safe to use
 // verbatim as a filesystem path segment and a store key.
@@ -120,7 +125,7 @@ const MaxHostSegmentBytes = 253
 // leading '.' (a tree invisible to ls), whitespace, ASCII control characters
 // and ANSI escapes, all non-ASCII homoglyphs, and any over-long value.
 func ValidHostSegment(s string) bool {
-	return s != "" && len(s) <= MaxHostSegmentBytes && reHost.MatchString(s)
+	return pr.ValidHostSegment(s)
 }
 
 // tokenEnvVars are the credential variables gh consults for a host. gh sends

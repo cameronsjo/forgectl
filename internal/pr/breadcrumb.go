@@ -34,8 +34,16 @@ var (
 // LoadBreadcrumb validates both its LOCATION and its CONTENT before any caller
 // touches Workspace.
 type Breadcrumb struct {
-	Workspace string    `json:"workspace"`
-	Ref       string    `json:"ref"` // canonical "owner/repo#N"
+	Workspace string `json:"workspace"`
+	Ref       string `json:"ref"` // canonical "owner/repo#N"
+	// Host persists Ref.Host, which the "owner/repo#N" form cannot carry
+	// (#413). Every remote record this build writes names its host
+	// concretely, so a later [github] host change cannot move an existing
+	// session's view or post to another forge. A record WITHOUT it — written
+	// before records carried a host, or a local session — means the
+	// configured [github] host at the time it is read. Omitted when empty so
+	// such a record stays byte-identical on rewrite.
+	Host      string    `json:"host,omitempty"`
 	Agent     string    `json:"agent"`
 	CreatedAt time.Time `json:"createdAt"`
 	// Local persists Ref.local, which Ref's own string form cannot carry.
@@ -451,6 +459,10 @@ func validateBreadcrumbRecord(bc Breadcrumb) error {
 	// resolved ref, so require one.
 	if !ref.Complete() {
 		return errors.New("ref is not a complete owner/repo#N reference")
+	}
+	if bc.Host != "" && (bc.Local || !ValidHostSegment(bc.Host)) {
+		// Categorical (#562): the value is read from disk and never echoed.
+		return errors.New("record host is not a valid GitHub hostname for this session")
 	}
 	// CROSS-REPRESENTATION CHECK. Locality is recorded twice — as the Local
 	// flag (authoritative) and as the ref's display owner — and the only

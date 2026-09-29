@@ -246,10 +246,10 @@ func TestDash_QueriesCarryExplicitLimitAndTruncationNote(t *testing.T) {
 	}
 }
 
-// TestSearchRunner_CarriesEveryAtMeSearch pins the #413 scope split inside the
-// package: every @me `gh search prs` leg behind PRs and Dash runs on the runner
-// WithSearchRunner supplied (internal/cli passes one pinned to [github] host),
-// and none reaches the base runner the repo-local gh calls use.
+// TestSearchRunner_CarriesEveryAtMeSearch pins the #413 search pin inside the
+// package: every @me `gh search prs` leg behind PRs and Dash runs on the
+// runner WithGitHubHost's pin returns for the configured host (internal/cli
+// passes githubauth.Runner), and none reaches the unpinned base runner.
 func TestSearchRunner_CarriesEveryAtMeSearch(t *testing.T) {
 	isSearch := func(name string, args []string) bool {
 		return name == "gh" && len(args) >= 2 && args[0] == "search" && args[1] == "prs"
@@ -263,7 +263,14 @@ func TestSearchRunner_CarriesEveryAtMeSearch(t *testing.T) {
 	search := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		return "[" + searchRow("cameronsjo/forgectl", 1) + "]", nil
 	}}
-	client := New(base, WithSessionsDir(t.TempDir()), WithSearchRunner(search))
+	var mu sync.Mutex
+	var pinnedTo []string
+	client := New(base, WithSessionsDir(t.TempDir()), WithGitHubHost("ghe.example.test", func(host string) exec.Runner {
+		mu.Lock()
+		defer mu.Unlock()
+		pinnedTo = append(pinnedTo, host)
+		return search
+	}))
 
 	_, prsNotes, err := client.PRs(context.Background())
 	if err != nil {
@@ -283,6 +290,11 @@ func TestSearchRunner_CarriesEveryAtMeSearch(t *testing.T) {
 	}
 	if got, want := len(search.Calls), 5; got != want {
 		t.Fatalf("search runner calls = %d, want %d (three PRs legs + two Dash legs)", got, want)
+	}
+	for _, h := range pinnedTo {
+		if h != "ghe.example.test" {
+			t.Fatalf("a search was pinned to %q, want the configured host", h)
+		}
 	}
 }
 
@@ -553,7 +565,7 @@ func TestPrepareMany_PerItemErrorCaptured(t *testing.T) {
 	}
 	var parked SessionSummary
 	for _, s := range summaries {
-		if s.Ref() == refs[1] {
+		if s.Ref().sameIdentity(refs[1]) {
 			parked = s
 		}
 	}

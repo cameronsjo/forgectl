@@ -196,14 +196,12 @@ func (c *Client) Dash(ctx context.Context) (Dashboard, []string, error) {
 // (search.go) — the one invocation/parse path this surface shares with
 // internal/review's owner-wide fan-out.
 //
-// It runs on searchRun, the host-pinned runner, because an @me search names no
-// repository and so has no checkout remote to take its host from.
+// It runs pinned to the configured [github] host, because an @me search names
+// no repository and so has nothing else to take a host from. Its rows keep an
+// empty Ref.Host, which means exactly that host, so viewing, cloning, and
+// posting a picked PR stay on the host it was listed from.
 func (c *Client) searchPRs(ctx context.Context, whoFlag string) ([]PR, bool, error) {
-	run := c.searchRun
-	if run == nil {
-		run = c.run
-	}
-	return SearchPRs(ctx, run, SearchOpts{WhoFlag: whoFlag})
+	return SearchPRs(ctx, c.pin(c.githubHost), SearchOpts{WhoFlag: whoFlag})
 }
 
 // parseSearchPRs decodes `gh search prs --json` output into PRs. gh output is

@@ -144,6 +144,9 @@ func refFromRecord(bc Breadcrumb) (Ref, error) {
 	if bc.Local {
 		ref = ref.asLocal()
 	}
+	// validateBreadcrumbRecord has already vetted a non-empty host; an empty
+	// one means the configured [github] host (see Breadcrumb.Host).
+	ref.Host = bc.Host
 	return ref, nil
 }
 

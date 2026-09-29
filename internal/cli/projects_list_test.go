@@ -37,6 +37,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	osexec "os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -504,6 +505,30 @@ func TestListCmd_Strict_CleanInventoryExitsZero(t *testing.T) {
 	cmd.SetArgs([]string{"--json"})
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("default (no --strict) on a degraded host: %v, want exit 0 unchanged", err)
+	}
+}
+
+// TestListCmd_Strict_TeaNotInstalledIsNotDegradation: with no tea binary the
+// Gitea source is simply not set up, so it adds no note and --strict exits 0.
+// A tea that runs and fails is still a degradation (covered above).
+func TestListCmd_Strict_TeaNotInstalledIsNotDegradation(t *testing.T) {
+	ghJSON := `[{"name":"forgectl","sshUrl":"git@github.com:cameronsjo/forgectl.git","isPrivate":false}]`
+	client := listFixture(t, func(name string, args []string) (string, error) {
+		if name == "tea" {
+			return "", &exec.CommandError{Name: "tea", Err: &osexec.Error{Name: "tea", Err: osexec.ErrNotFound}}
+		}
+		return twoHostRunFunc(ghJSON, "")(name, args)
+	})
+	cmd := newProjectsListCmd(client)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json", "--strict"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("--strict with tea not installed: %v (stderr %q)", err, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "note:") {
+		t.Fatalf("tea not installed produced a note: %q", stderr.String())
 	}
 }
 
