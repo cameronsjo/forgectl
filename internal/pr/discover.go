@@ -111,9 +111,9 @@ func (c *Client) PRs(ctx context.Context) ([]PR, []string, error) {
 		if res.err != nil {
 			// Categorical note, raw cause to the log only. res.err comes off
 			// `gh` as an *exec.CommandError whose Error() is that subprocess's
-			// stderr verbatim — text the responding host (this leg is not
-			// pinned to github.com) or any proxy or gh extension in between
-			// chooses. These notes are printed to a terminal, so interpolating
+			// stderr verbatim — text the responding host (the configured
+			// [github] host, which need not be github.com) or any proxy or gh
+			// extension in between chooses. These notes are printed to a terminal, so interpolating
 			// %v would hand that writer the operator's screen.
 			slog.Warn("PR query degraded.", "query", res.label, "error", res.err)
 			notes = append(notes, fmt.Sprintf("%s: query failed", res.label))
@@ -195,8 +195,13 @@ func (c *Client) Dash(ctx context.Context) (Dashboard, []string, error) {
 // --assignee, or --review-requested) through the shared SearchPRs helper
 // (search.go) — the one invocation/parse path this surface shares with
 // internal/review's owner-wide fan-out.
+//
+// It runs pinned to the configured [github] host, because an @me search names
+// no repository and so has nothing else to take a host from. Its rows keep an
+// empty Ref.Host, which means exactly that host, so viewing, cloning, and
+// posting a picked PR stay on the host it was listed from.
 func (c *Client) searchPRs(ctx context.Context, whoFlag string) ([]PR, bool, error) {
-	return SearchPRs(ctx, c.run, SearchOpts{WhoFlag: whoFlag})
+	return SearchPRs(ctx, c.pin(c.githubHost), SearchOpts{WhoFlag: whoFlag})
 }
 
 // parseSearchPRs decodes `gh search prs --json` output into PRs. gh output is

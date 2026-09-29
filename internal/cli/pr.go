@@ -12,6 +12,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/module"
 	netpkg "github.com/cameronsjo/forgectl/internal/net"
 	"github.com/cameronsjo/forgectl/internal/notify"
@@ -49,12 +51,32 @@ func newPrCmd(deps module.Deps) *cobra.Command {
 		// The drainer's review-started notification (#192). A no-op off
 		// macOS; `pr drain --no-notify` suppresses it per pass.
 		pr.WithNotifier(notify.New(deps.Runner)),
+		// Every PR-scoped gh call names its host explicitly and runs pinned
+		// to it (#413): the @me searches on the configured [github] host, and
+		// view/clone/post on the PR's own host (the configured one unless a
+		// URL or the checkout's remote named another). An invalid configured
+		// host is passed through unresolved: pr validates it at each use and
+		// fails that call categorically, and githubauth.Runner fails closed,
+		// so verbs that never reach gh keep working.
+		prGitHubHostOption(deps.Runner, cfg.Github.Host),
 	)
 	netClient := netpkg.New(deps.Runner, netpkg.WithNetConfig(cfg.Net))
 	// err discarded: a failed config-dir lookup yields "", which LoadReviewed
 	// reads as an empty store and persist() rejects loudly — never a silent bad write.
 	reviewedPath, _ := config.PrReviewedPath()
 	return newPrCmdForClient(cfg, client, netClient, reviewedPath, deps.Theme)
+}
+
+// prGitHubHostOption wires the pr client's host pin: the configured [github]
+// host, and githubauth.Runner as the per-host pin. An invalid configured value
+// is passed through raw, never replaced by github.com, so pr's own validation
+// refuses it at each use.
+func prGitHubHostOption(run exec.Runner, raw string) pr.Option {
+	host, err := githubauth.ResolveHost(raw)
+	if err != nil {
+		host = raw
+	}
+	return pr.WithGitHubHost(host, func(h string) exec.Runner { return githubauth.Runner(run, h) })
 }
 
 func newPrCmdForClient(cfg config.Config, client *pr.Client, netClient *netpkg.Client, reviewedPath string, th theme.Theme) *cobra.Command {
@@ -92,8 +114,9 @@ human approval gate.
   forgectl pr findings list|cleanup  reclaim durable local-review findings
   forgectl pr keys                 tmux-review cheatsheet
 
-The <ref> is validated by an anchored regex: owner/repo#N, a github.com PR
-URL, or a bare number. Fetched PR content is treated as hostile input.
+The <ref> is validated by an anchored regex: owner/repo#N (on [github] host),
+an https PR URL (on the URL's host), or a bare number (on the checkout
+remote's host). Fetched PR content is treated as hostile input.
 
 The concurrency cap ([pr] max_concurrent in config.toml) governs every launch
 path — this command, 'pr local', and 'pr pick' alike. At the cap this command

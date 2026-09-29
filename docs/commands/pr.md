@@ -28,6 +28,24 @@ Headless `pr pick` emits sanitized `owner/repo#N` rows and exits 1; each
 printed ref is directly usable with `forgectl pr <ref>`, while `pr prs --json`
 remains the stable inventory.
 
+`pr prs` and `pr dash` search as `@me` on the configured `[github] host`
+(github.com by default), whatever `GH_HOST` says in the surrounding shell.
+Every PR is then viewed, cloned, and reviewed on its own host, named
+explicitly: the configured host for a typed `owner/repo#N` or a listed row, a
+pasted URL's host, or the checkout remote's host for a bare `N`. See
+[the host pin](projects-and-review.md) for the rule.
+
+Any of these gh calls that goes to a host other than github.com ignores
+`GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and
+`GITHUB_ENTERPRISE_TOKEN`. The rule follows the host the call goes to, not
+`[github] host`: a pasted URL or a checkout remote on a GitHub Enterprise host
+needs `gh auth login --hostname <host>` for that host, even when
+`[github] host` is github.com.
+
+`forgectl branch` verifies a remote delete on the host in the remote's URL. A
+GitHub Enterprise remote over plain `http` or on a nonstandard https port is
+reported as unverifiable rather than checked against another host.
+
 The `[pr]` section configures `forgectl pr` independently of whatever repo a review happens to land in:
 
 ```toml

@@ -668,8 +668,14 @@ func (c *Client) PostReview(ctx context.Context, sess Session, review string, he
 
 	// --- Past this point, and ONLY past this point, a post argv reaches the
 	// Runner. No other code path in this package invokes `gh pr review`. ---
-	if _, err := c.run.Run(ctx, "gh", "pr", "review", fmt.Sprintf("%d", sess.Ref.Number),
-		"--repo", sess.Ref.Slug(), "--comment", "--body", review); err != nil {
+	// Host explicit, as in viewPR: the post goes to the host the session was
+	// prepared against, never to gh's default host (#413).
+	host, run, err := c.prHost(sess.Ref)
+	if err != nil {
+		return false, err
+	}
+	if _, err := run.Run(ctx, "gh", "pr", "review", fmt.Sprintf("%d", sess.Ref.Number),
+		"--repo", host+"/"+sess.Ref.Slug(), "--comment", "--body", review); err != nil {
 		return false, fmt.Errorf("post review: %w", err)
 	}
 	slog.Info("Posted approved review.", "ref", sess.Ref.String())

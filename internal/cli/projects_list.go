@@ -22,7 +22,7 @@ import (
 // list to stdout; per-host degradation notes and the human summary go to
 // stderr, so a `--json` pipe is never polluted by progress chatter.
 func newProjectsListCmd(client *projects.Client) *cobra.Command {
-	var asJSON bool
+	var asJSON, strict bool
 	var host string
 	cmd := &cobra.Command{
 		Use:   "list [query]",
@@ -39,9 +39,14 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 			"Examples:\n" +
 			"  forgectl projects list                         # human table, all hosts\n" +
 			"  forgectl projects list --json                  # machine-readable, for scripts\n" +
+			"  forgectl projects list --json --strict         # same, but exit 1 if any host degraded\n" +
 			"  forgectl projects list --host git.example.com  # only that host's repos\n" +
 			"  forgectl projects find homeclaw                # 'find' alias + a name filter",
 		Args: cobra.MaximumNArgs(1),
+		// Mirrors doctor: --strict can fail AFTER the --json payload is
+		// written, and cobra's usage text must never follow it onto stdout.
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
@@ -80,11 +85,11 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 				known := knownHosts(repos)
 				known[client.GitHubHost()] = true // valid even when it returned no rows
 				if !known[strings.ToLower(host)] {
-					// The operator typed this, so echoing it is safe and is the
-					// whole diagnostic; the suggestion list is derived from
-					// server-supplied hostnames, so it goes through termsafe.
-					return fmt.Errorf("unknown --host %q; this inventory has: %s",
-						host, termsafe.SafeLine(strings.Join(slices.Sorted(maps.Keys(known)), ", ")))
+					// The operator typed this, so echoing it back (capped, #562)
+					// is the whole diagnostic; the suggestion list is derived
+					// from server-supplied hostnames, so it goes through termsafe.
+					return fmt.Errorf("unknown --host %s; this inventory has: %s",
+						termsafe.QuoteArgMax(host, termsafe.ArgEchoMaxRunes), termsafe.SafeLine(strings.Join(slices.Sorted(maps.Keys(known)), ", ")))
 				}
 			}
 
@@ -100,12 +105,29 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 				}
 				enc := termsafe.JSONEncoder(cmd.OutOrStdout())
 				enc.SetIndent("", "  ")
-				return enc.Encode(repos)
+				if err := enc.Encode(repos); err != nil {
+					return err
+				}
+			} else if err := renderRepoTable(cmd.OutOrStdout(), cmd.ErrOrStderr(), repos); err != nil {
+				return err
 			}
-			return renderRepoTable(cmd.OutOrStdout(), cmd.ErrOrStderr(), repos)
+
+			// --strict turns a partial inventory into a non-zero exit, so a
+			// script can tell a degraded host from a small account without
+			// parsing stderr (#413). The output above is still written first:
+			// what did load stays usable. It judges the whole inventory, not
+			// the --host/query slice, because a filtered view cannot prove the
+			// failed host held nothing it would have matched. Opt-in because
+			// the default stays exit 0 on a partial result, matching `review`;
+			// ADR-0008 rule 3 argues for flipping both defaults together.
+			if strict && len(notes) > 0 {
+				return WithExitCode(fmt.Errorf("inventory is partial: %d degradation note(s) on stderr (--strict)", len(notes)), 1)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().BoolVar(&strict, "strict", false, "exit 1 when any host produced a degradation note (output is still written)")
 	cmd.Flags().StringVar(&host, "host", "", "filter by hostname (e.g. github.com, git.example.com) or \"local\"")
 	return cmd
 }

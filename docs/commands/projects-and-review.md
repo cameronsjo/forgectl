@@ -5,6 +5,7 @@
 ```sh
 forgectl projects list [query]           # list all projects: local clones + your GitHub repos + your Gitea repos
 forgectl projects list --json            # machine-readable JSON (safe to pipe; degradation notes go to stderr)
+forgectl projects list --json --strict   # same, but exit 1 when any host degraded (output still written)
 forgectl projects list --host github.com   # filter to one hostname (or "local")
 forgectl projects list --host git.example.com forge  # host filter + name substring
 forgectl projects pick [query]           # picker with both descriptors TTY; otherwise sanitized candidates on stdout + exit 1 (aliases: p, open)
@@ -28,7 +29,7 @@ candidate's `sshUrl` from `projects list --json` for an exact target, or rerun
 interactively when it has none. Project display rows are not universal command
 arguments.
 
-`projects` builds a unified inventory across local clones, GitHub, and whichever Gitea instance `tea` is logged into. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean.
+`projects` builds a unified inventory across local clones, GitHub, and whichever Gitea instance `tea` is logged into. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean. A degraded host still exits 0 by default, so a partial inventory reads the same as a small account to a script that only checks the exit code; pass `--strict` to exit 1 whenever any host produced a degradation note. The records that did load are written to stdout first either way. A machine with no `tea` binary has no Gitea source set up, which is not a degradation: it adds no note and does not trip `--strict`. A `tea` that runs and fails still does.
 
 ## On-disk layout
 
@@ -125,9 +126,31 @@ Two prerequisites and one consequence:
   a directory tree or a dedup identity with a github.com repo of the same
   owner and name.
 
-The pin covers the projects/review inventory path only — `branch`, `pr`, and
-`doctor` gh calls remain unpinned and github.com-shaped
-([forgectl#413](https://github.com/cameronsjo/forgectl/issues/413)).
+Every `gh` call names its host on purpose
+([forgectl#413](https://github.com/cameronsjo/forgectl/issues/413)):
+
+- **Host-scoped calls are pinned to `[github] host`.** A call with no
+  repository behind it has only configuration to name its host: the
+  projects/review inventory, the `@me` searches behind `pr prs` and `pr dash`,
+  and `doctor`'s `gh auth status --hostname <host>`.
+- **PR-scoped calls name the PR's own host.** Viewing and posting a review
+  pass `--repo HOST/OWNER/REPO` and run pinned to that same host, token
+  removal included; the clone is a plain `git clone` of `https://HOST/…`, so
+  git's credential setup for that host applies to it. gh resolves a
+  two-part `--repo` against `GH_HOST` or its default host, never the
+  checkout, so the host is never left to it. The PR's host is the configured
+  `[github] host` for a typed `owner/repo#N` and for a row from `pr prs`,
+  `pr dash`, or `pr pick`; the URL's host for a pasted PR URL; and the
+  checkout remote's host for a bare `N`. A session record stores that host,
+  so changing `[github] host` later does not move an existing session; a
+  record written before records carried a host means the configured
+  `[github] host`.
+- **Checkout-resolved calls stay ambient.** `gh repo view` (resolving a bare
+  `N`) and `branch`'s `gh pr list` take their repository from the checkout's
+  git remotes, and gh filters those remotes by `GH_HOST` with no fallback, so
+  pinning them would break every checkout whose remote is on another host.
+  `branch`'s post-delete verification (`gh api`, which never infers a host)
+  passes `--hostname` for the host in `git remote get-url <remote>`.
 
 The Gitea source no longer assumes a hostname. `tea repo ls` reports each repo's
 own clone URL, so every row's host is read from that URL rather than configured

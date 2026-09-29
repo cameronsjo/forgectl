@@ -294,3 +294,36 @@ func TestSafeLineMaxOutputIsInert(t *testing.T) {
 		t.Errorf("body is %d runes, want <= 57", n)
 	}
 }
+
+// TestQuoteArgMax_BoundsAndEscapes pins the #562 argv echo form: a hostile
+// 10 KB argument becomes a bounded, quoted, control-free echo that marks its
+// cut, and a short argument echoes whole with no marker.
+func TestQuoteArgMax_BoundsAndEscapes(t *testing.T) {
+	hostile := strings.Repeat("\x1b[2J\u202e\n\xff", 2048)
+	got := QuoteArgMax(hostile, ArgEchoMaxRunes)
+	if len(got) > ArgEchoMaxRunes*10+8 {
+		t.Fatalf("len = %d, want bounded by the %d-rune input budget", len(got), ArgEchoMaxRunes)
+	}
+	if !strings.HasSuffix(got, `"…`) {
+		t.Fatalf("cut echo %q does not end in a closing quote then the ellipsis", got)
+	}
+	for _, r := range got {
+		if IsUnsafeTerminalRune(r) || r == utf8.RuneError {
+			t.Fatalf("echo %q carries raw rune %U", got, r)
+		}
+	}
+
+	if got := QuoteArgMax("a\x1bb", ArgEchoMaxRunes); got != `"a\x1bb"` {
+		t.Fatalf("short hostile arg = %q, want it escaped with no cut", got)
+	}
+	if got := QuoteArgMax("owner/repo#x", ArgEchoMaxRunes); got != `"owner/repo#x"` {
+		t.Fatalf("short arg = %q, want it echoed whole with no marker", got)
+	}
+	exact := strings.Repeat("a", ArgEchoMaxRunes)
+	if got := QuoteArgMax(exact, ArgEchoMaxRunes); got != strconv.Quote(exact) {
+		t.Fatalf("exactly-at-budget arg = %q, want no cut", got)
+	}
+	if got := QuoteArgMax(exact+"é", ArgEchoMaxRunes); got != strconv.Quote(exact)+"…" {
+		t.Fatalf("one-over arg = %q, want the budget then the ellipsis", got)
+	}
+}
