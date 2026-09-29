@@ -64,6 +64,7 @@ func newDocsServeCmd(deps module.Deps) *cobra.Command {
 			if err != nil {
 				return WithExitCode(err, 2)
 			}
+			noteSkippedPaths(cmd.ErrOrStderr(), idx)
 			return runDocsServe(cmd, deps, idx, addr, openFlag, tokenFile)
 		},
 	}

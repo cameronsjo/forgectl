@@ -15,6 +15,9 @@ package cli
 //       than --limit results, or none
 //   [x] Unhappy: qmd output that is not one JSON array exits 2 under
 //       --json with stdout empty and one error object on stderr
+//   [x] Unhappy: a walk skip under --backend qmd --json fills skipped_paths
+//       with stderr empty on success, and leaves stderr exactly one JSON
+//       object when qmd then fails
 
 import (
 	"encoding/json"
@@ -24,6 +27,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	docspkg "github.com/cameronsjo/forgectl/internal/docs"
 	forgexec "github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
 )
@@ -198,6 +202,50 @@ func TestDocsSearchBadBackendExits2(t *testing.T) {
 
 func TestDocsSearchQMDImpureOutputExits2(t *testing.T) {
 	page := docsSearchFixture(t)
+	stubSearchLookPath(t, bothBackends)
+	runner := &searchRunner{FakeRunner: &forgexec.FakeRunner{}, stdout: "Loading models...\n" + qmdHitJSON(t, page)}
+
+	stdout, stderr, err := runDocsSearch(t, runner, "--json", "--backend", "qmd", "needle")
+	assertOneDocsJSONError(t, stdout, stderr, err, "not a JSON array")
+}
+
+// skipped_paths comes from the index, not the backend, so qmd carries it too,
+// and --json keeps the plain-text skip note off stderr.
+func TestDocsSearchQMDJSONCarriesSkippedPaths(t *testing.T) {
+	page := docsSearchFixture(t)
+	t.Cleanup(docspkg.InjectWalkFaultForTest())
+	stubSearchLookPath(t, bothBackends)
+	runner := &searchRunner{FakeRunner: &forgexec.FakeRunner{}, stdout: qmdHitJSON(t, page)}
+
+	stdout, stderr, err := runDocsSearch(t, runner, "--json", "--backend", "qmd", "needle")
+	if err != nil {
+		t.Fatalf("docs search: %v", err)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty under --json", stderr)
+	}
+	var resp struct {
+		Backend      string           `json:"backend"`
+		SkippedPaths []map[string]any `json:"skipped_paths"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
+		t.Fatalf("stdout: %v\n%s", err, stdout)
+	}
+	if resp.Backend != "qmd" || len(resp.SkippedPaths) != 2 {
+		t.Fatalf("response = %s, want backend qmd and 2 skipped_paths", stdout)
+	}
+	for _, sp := range resp.SkippedPaths {
+		for _, k := range []string{"root", "path", "reason"} {
+			if _, ok := sp[k]; !ok {
+				t.Errorf("skipped_paths entry lacks %q: %v", k, sp)
+			}
+		}
+	}
+}
+
+func TestDocsSearchQMDFailureWithSkippedPathOneJSONObject(t *testing.T) {
+	page := docsSearchFixture(t)
+	t.Cleanup(docspkg.InjectWalkFaultForTest())
 	stubSearchLookPath(t, bothBackends)
 	runner := &searchRunner{FakeRunner: &forgexec.FakeRunner{}, stdout: "Loading models...\n" + qmdHitJSON(t, page)}
 

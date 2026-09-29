@@ -109,6 +109,12 @@ exits 2.`,
 			if err != nil {
 				return docsFail(cmd, "docs search", deadlineRoot(err, ""), err, 2, asJSON)
 			}
+			// Under --json stderr is reserved for the one error object (#649),
+			// so the note stays out of it; the skipped paths travel in the
+			// stdout payload where it has room (docs search's skipped_paths).
+			if !asJSON {
+				noteSkippedPaths(cmd.ErrOrStderr(), idx)
+			}
 
 			searcher := docspkg.Searcher{Runner: streamer, LookPath: docsSearchLookPath, Backend: backend}
 			resp, err := searcher.Search(ctx, idx, query, limit)

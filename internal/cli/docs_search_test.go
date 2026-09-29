@@ -10,6 +10,10 @@ package cli
 //   [x] Unhappy: an empty query is rejected before rg runs
 //   [x] Unhappy: rg failing on a root that also matched prints the hit, puts
 //       the reason on stderr, and exits 1 (human and --json)
+//   [x] Unhappy: a walk skip plus a later failure keeps stderr to exactly one
+//       JSON object under --json (no backend: exit 2; partial search: exit 1),
+//       and the skipped paths ride in the response's skipped_paths
+//   [x] Unhappy: without --json a walk skip prints the stderr note
 
 import (
 	"bytes"
@@ -22,6 +26,7 @@ import (
 	"strings"
 	"testing"
 
+	docspkg "github.com/cameronsjo/forgectl/internal/docs"
 	forgexec "github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
 )
@@ -111,7 +116,7 @@ func TestDocsSearchJSONShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 		t.Fatalf("stdout is not a JSON object: %v\n%s", err, stdout)
 	}
-	for _, k := range []string{"backend", "query", "results", "truncated", "skipped", "errors"} {
+	for _, k := range []string{"backend", "query", "results", "truncated", "skipped", "errors", "skipped_paths"} {
 		if _, ok := got[k]; !ok {
 			t.Errorf("response lacks %q: %s", k, stdout)
 		}
@@ -244,6 +249,85 @@ func TestDocsSearchPartialFailureJSON(t *testing.T) {
 	}
 	if err := dec.Decode(&obj); err != nil || obj.Code != 1 || dec.More() {
 		t.Errorf("stderr = %q, want exactly one error object with code 1", stderr)
+	}
+}
+
+// A walk skip must not put a plain-text note ahead of the one JSON error
+// object a --json failure writes to stderr (#649).
+func TestDocsSearchNoBackendJSONErrorWithSkippedPath(t *testing.T) {
+	docsSearchFixture(t)
+	t.Cleanup(docspkg.InjectWalkFaultForTest())
+	stubSearchLookPath(t, func(string) (string, error) { return "", osexec.ErrNotFound })
+
+	stdout, stderr, err := runDocsSearch(t, &searchRunner{FakeRunner: &forgexec.FakeRunner{}}, "--json", "needle")
+	if code := ExitCode(err); code != 2 {
+		t.Errorf("exit code = %d (err %v), want 2", code, err)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	assertOneJSONObject(t, stderr, 2)
+}
+
+func TestDocsSearchPartialFailureJSONWithSkippedPath(t *testing.T) {
+	page := docsSearchFixture(t)
+	t.Cleanup(docspkg.InjectWalkFaultForTest())
+	stubSearchLookPath(t, func(string) (string, error) { return "/usr/bin/rg", nil })
+
+	stdout, stderr, err := runDocsSearch(t, partialFailureRunner(t, page), "--json", "needle")
+	if code := ExitCode(err); code != 1 {
+		t.Errorf("exit code = %d (err %v), want 1", code, err)
+	}
+	assertOneJSONObject(t, stderr, 1)
+	var resp struct {
+		SkippedPaths []map[string]any `json:"skipped_paths"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
+		t.Fatalf("stdout is not a JSON object: %v\n%s", err, stdout)
+	}
+	if len(resp.SkippedPaths) != 2 {
+		t.Fatalf("skipped_paths = %v, want 2 entries", resp.SkippedPaths)
+	}
+	for _, sp := range resp.SkippedPaths {
+		for _, k := range []string{"root", "path", "reason"} {
+			if _, ok := sp[k]; !ok {
+				t.Errorf("skipped_paths entry lacks %q: %v", k, sp)
+			}
+		}
+	}
+}
+
+func TestDocsSearchHumanSkippedPathPrintsNote(t *testing.T) {
+	page := docsSearchFixture(t)
+	t.Cleanup(docspkg.InjectWalkFaultForTest())
+	stubSearchLookPath(t, func(string) (string, error) { return "/usr/bin/rg", nil })
+	runner := &searchRunner{FakeRunner: &forgexec.FakeRunner{}, stdout: rgMatchLine(t, page, "needle here\n")}
+
+	_, stderr, err := runDocsSearch(t, runner, "needle")
+	if err != nil {
+		t.Fatalf("docs search: %v", err)
+	}
+	if !strings.Contains(stderr, "skipped 2 unreadable path(s) under") {
+		t.Errorf("stderr note missing: %q", stderr)
+	}
+}
+
+// assertOneJSONObject fails unless s is exactly one JSON object with the
+// given code: no text before it, nothing after it.
+func assertOneJSONObject(t *testing.T, s string, code int) {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(s))
+	var obj struct {
+		Code int `json:"code"`
+	}
+	if err := dec.Decode(&obj); err != nil {
+		t.Fatalf("stderr is not one JSON object: %v\n%q", err, s)
+	}
+	if obj.Code != code {
+		t.Errorf("code = %d, want %d", obj.Code, code)
+	}
+	if dec.More() {
+		t.Errorf("stderr holds more than one JSON value: %q", s)
 	}
 }
 
