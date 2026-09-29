@@ -121,16 +121,23 @@ func TestConfigParseGate_ValidOrAbsentConfigPasses(t *testing.T) {
 // TestExecute_MalformedConfigExitsTwo drives the real Execute wiring: process
 // argv, the real config load, the gate, and the stderr line.
 func TestExecute_MalformedConfigExitsTwo(t *testing.T) {
-	home := t.TempDir()
-	cfgDir := filepath.Join(home, ".config", "forgectl")
+	// os.UserConfigDir is where forgectl looks: $HOME/.config on Linux but
+	// $HOME/Library/Application Support on darwin. Ask it rather than
+	// hard-coding one layout, or the config is never found off Linux and the
+	// command runs against defaults.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	base, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("os.UserConfigDir: %v", err)
+	}
+	cfgDir := filepath.Join(base, "forgectl")
 	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte("this = = broken\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	withArgs(t, "docs", "list", "--json")
 
 	r, w, err := os.Pipe()
