@@ -152,7 +152,7 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 	}
 	sess.Workspace = workspace
 
-	if _, err := writeAllowlist(workspace); err != nil {
+	if _, err := writeAllowlist(workspace, host, ref); err != nil {
 		_ = sandbox.Teardown(ctx, c.run, workspace)
 		return Session{}, err
 	}

@@ -55,6 +55,10 @@ package pr
 //       findings dir, and writes no row (#575)
 //   [x] The returned path is the cleaned spelling removed, equal to the audit
 //       row's RecordPath, even when the caller passed a trailing slash (#575)
+//   [x] A store swapped for a symlink to an outside dir between the checks
+//       and the removal removes nothing outside the store: the removal goes
+//       through the store handle opened before the checks (#644,
+//       findings_remove_unix_test.go)
 //
 // isFindingsStoreChild (Classification: pure lexical shape check, #558)
 //   [x] Accepts only a prefixed direct child; refuses the store, trailing
@@ -495,11 +499,11 @@ func failRemovalOf(t *testing.T, path string) {
 	t.Helper()
 	orig := findingsRemoveAll
 	t.Cleanup(func() { findingsRemoveAll = orig })
-	findingsRemoveAll = func(p string) error {
-		if p == path {
-			return &os.PathError{Op: "unlinkat", Path: p, Err: syscall.EBUSY}
+	findingsRemoveAll = func(root *os.Root, name string) error {
+		if filepath.Join(root.Name(), name) == path {
+			return &os.PathError{Op: "unlinkat", Path: path, Err: syscall.EBUSY}
 		}
-		return orig(p)
+		return orig(root, name)
 	}
 }
 
