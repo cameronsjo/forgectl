@@ -698,17 +698,17 @@ func TestScan_LongSetextHeadingIsLinear(t *testing.T) {
 	heading := []byte(strings.Repeat("word line\n", 5000) + "===\n")
 	plain := []byte(strings.Repeat("word line\n", 5000))
 	best := func(kind RootKind, src []byte) time.Duration {
-		min := time.Duration(1<<63 - 1)
+		fastest := time.Duration(1<<63 - 1)
 		for range 5 {
 			start := time.Now()
 			if _, err := scanBodyFor(kind, src); err != nil {
 				t.Fatal(err)
 			}
-			if d := time.Since(start); d < min {
-				min = d
+			if d := time.Since(start); d < fastest {
+				fastest = d
 			}
 		}
-		return min
+		return fastest
 	}
 	for _, kind := range []RootKind{RootDocs, RootVault} {
 		base, got := best(kind, plain), best(kind, heading)
