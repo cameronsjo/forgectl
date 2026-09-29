@@ -54,7 +54,7 @@ func newPrFindingsListCmd(client *pr.Client) *cobra.Command {
 				return nil
 			}
 			for _, e := range entries {
-				fmt.Fprintf(out, "%s\t%s\t%s\n", e.Path, e.ModTime.Format(time.RFC3339), formatBytes(e.Size))
+				fmt.Fprintf(out, "%s\t%s\t%s\n", termsafe.QuotePathIfUnsafe(e.Path), e.ModTime.Format(time.RFC3339), formatBytes(e.Size))
 			}
 			return nil
 		},
@@ -157,8 +157,13 @@ func runPrFindingsCleanup(cmd *cobra.Command, client *pr.Client, olderThan time.
 		fmt.Fprintln(out, "nothing to reclaim")
 		return nil
 	}
+	// Every path below is a directory name read off disk, so each one goes
+	// through termsafe before reaching the terminal (forgectl#551): a name
+	// carrying ESC or a newline is shown escaped and quoted, never raw.
+	// QuotePathIfUnsafe rather than QuotePath keeps an ordinary path
+	// byte-identical, the same choice `pr list` makes for its path field.
 	for _, p := range preview {
-		fmt.Fprintln(out, p)
+		fmt.Fprintln(out, termsafe.QuotePathIfUnsafe(p))
 	}
 	fmt.Fprintf(out, "\n%d findings dir(s) reclaimable\n", len(preview))
 
@@ -167,7 +172,7 @@ func runPrFindingsCleanup(cmd *cobra.Command, client *pr.Client, olderThan time.
 		return nil
 	}
 
-	ok, err := confirm(th, fmt.Sprintf("Delete %d findings dir(s)?", len(preview)))
+	ok, err := confirmFn(th, fmt.Sprintf("Delete %d findings dir(s)?", len(preview)))
 	if err != nil {
 		return err
 	}
@@ -182,7 +187,7 @@ func runPrFindingsCleanup(cmd *cobra.Command, client *pr.Client, olderThan time.
 	}
 	fmt.Fprintln(out)
 	for _, p := range removed {
-		fmt.Fprintf(out, "reclaimed %s\n", p)
+		fmt.Fprintf(out, "reclaimed %s\n", termsafe.QuotePathIfUnsafe(p))
 	}
 	fmt.Fprintf(out, "\nreclaimed %d findings dir(s)\n", len(removed))
 	return nil
