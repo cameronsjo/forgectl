@@ -170,6 +170,16 @@ func (c *Client) commitSet(target Target, key, rawValue string) (tightened bool,
 			return errors.New("empty value; refusing to set an empty value — edit the file directly if intended")
 		}
 
+		// A carriage return inside the value (a trailing CRLF pair was
+		// already stripped above) is refused on NEW writes. It is written
+		// raw, and python-dotenv reads a raw \r back as \n, so the secret
+		// changes silently; in practice it is a paste accident (#566). Like
+		// the empty-value refusal, the message never echoes the value.
+		// Existing \r bytes on disk still parse and round-trip untouched.
+		if strings.Contains(value, "\r") {
+			return errors.New("value contains a carriage return (\\r); refusing to write it, because python-dotenv reads it back as a newline — strip it from the source and retry")
+		}
+
 		if setErr := doc.Set(key, value); setErr != nil {
 			return setErr
 		}
