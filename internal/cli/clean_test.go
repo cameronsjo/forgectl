@@ -596,10 +596,10 @@ func TestCleanCmd_JSON_ReportsItemsAndBytesWithoutDeleting(t *testing.T) {
 	root := t.TempDir()
 	nm := filepath.Join(root, "proj", "node_modules")
 	leaf := filepath.Join(nm, "leaf.js")
-	if err := os.MkdirAll(filepath.Dir(leaf), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(leaf), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(leaf, make([]byte, 100), 0o644); err != nil {
+	if err := os.WriteFile(leaf, make([]byte, 100), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	client := cleanpkg.New(&exec.FakeRunner{}, cleanpkg.WithRoot(root))
