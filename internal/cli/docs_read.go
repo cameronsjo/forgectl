@@ -30,10 +30,11 @@ var errDocNotIndexed = errors.New("not an indexed doc")
 
 // docsReadRuntime is the seam `docs read` is tested through. Production wires
 // the PATH lookup, a real child process, and `docs serve`; tests substitute the
-// fallback so no server binds and no browser opens, and the terminal check so
-// both sides of it run under `go test`.
+// fallback so no server binds and no browser opens, and the terminal checks so
+// both sides of them run under `go test`.
 type docsReadRuntime struct {
 	lookPath         func(string) (string, error)
+	stdinIsTerminal  func(io.Reader) bool
 	stdoutIsTerminal func(io.Writer) bool
 	fallback         func(cmd *cobra.Command, deps module.Deps, idx *docspkg.Index, doc docspkg.Doc) error
 }
@@ -41,6 +42,7 @@ type docsReadRuntime struct {
 func productionDocsReadRuntime() docsReadRuntime {
 	return docsReadRuntime{
 		lookPath:         osexec.LookPath,
+		stdinIsTerminal:  docsReadInputIsTerminal,
 		stdoutIsTerminal: docsReadOutputIsTerminal,
 		fallback:         serveDocsReadFallback,
 	}
@@ -51,6 +53,12 @@ func productionDocsReadRuntime() docsReadRuntime {
 func docsReadOutputIsTerminal(out io.Writer) bool {
 	fdWriter, ok := out.(interface{ Fd() uintptr })
 	return ok && term.IsTerminal(int(fdWriter.Fd()))
+}
+
+// docsReadInputIsTerminal is docsReadOutputIsTerminal for Cobra's input source.
+func docsReadInputIsTerminal(in io.Reader) bool {
+	fdReader, ok := in.(interface{ Fd() uintptr })
+	return ok && term.IsTerminal(int(fdReader.Fd()))
 }
 
 // newDocsReadCmd builds `forgectl docs read <file>`.
@@ -70,11 +78,11 @@ When mdroll (https://github.com/tokuhirom/mdroll) is on PATH, read runs it on
 the document with --watch, handing it the terminal unchanged so its own keys
 work. mdroll never fetches remote images for read (--no-remote-images).
 
-mdroll is optional. Without it, and with stdout a terminal, read serves the doc
-set as ` + "`forgectl docs serve --open`" + ` would and opens the browser on that
-document, holding the terminal until Ctrl-C. Without it and without a terminal
-(an agent, a pipe), read starts nothing: it prints the document's absolute path
-and exits 0.
+mdroll is optional. Without it, and with stdin and stdout both terminals, read
+serves the doc set as ` + "`forgectl docs serve --open`" + ` would and opens the
+browser on that document, holding the terminal until Ctrl-C. Without it and
+without both terminals (an agent, a pipe, </dev/null), read starts nothing: it
+prints the document's absolute path and exits 0.
 
   forgectl docs read README.md
   forgectl docs read docs/plans/thing.md
@@ -115,20 +123,24 @@ func runDocsRead(cmd *cobra.Command, deps module.Deps, target string, timeout ti
 		return runMdroll(cmd, mdroll, path)
 	}
 	errOut := cmd.ErrOrStderr()
+	// Refused, not absent: "not installed" would contradict the line above it.
+	why := "mdroll not installed"
 	if errors.Is(err, osexec.ErrDot) {
 		_, _ = fmt.Fprintln(errOut, "mdroll found only via a relative PATH entry; ignoring")
+		why = "mdroll unavailable"
 	}
 
 	// A server blocks until Ctrl-C. Started without a terminal it would hang the
 	// caller — an agent, a script — with nothing to interrupt it, which is the
-	// one thing ADR-0008 rules out. So without a terminal, answer with where the
+	// one thing ADR-0008 rules out. Its rule 1 asks for stdin AND stdout to be
+	// terminals, so either one redirected means no server: answer with where the
 	// document is and leave the browsing to a command that says it serves.
-	if !rt.stdoutIsTerminal(cmd.OutOrStdout()) {
-		_, _ = fmt.Fprintln(errOut, "mdroll not installed; not starting the HTML reader without a terminal; run `forgectl docs serve --open` to browse")
+	if !rt.stdinIsTerminal(cmd.InOrStdin()) || !rt.stdoutIsTerminal(cmd.OutOrStdout()) {
+		_, _ = fmt.Fprintln(errOut, why+"; not starting the HTML reader without a terminal; run `forgectl docs serve --open` to browse")
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), termsafe.SafeLine(path))
 		return nil
 	}
-	_, _ = fmt.Fprintf(errOut, "mdroll not installed; opening %s in the HTML reader\n", termsafe.QuotePath(doc.RelPath))
+	_, _ = fmt.Fprintf(errOut, "%s; opening %s in the HTML reader\n", why, termsafe.QuotePath(doc.RelPath))
 	return rt.fallback(cmd, deps, idx, doc)
 }
 

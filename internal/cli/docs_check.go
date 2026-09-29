@@ -52,7 +52,7 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 					if len(roots) > 0 {
 						fallback = roots[0]
 					}
-					return reportDocsListDeadline(cmd, deadlineRoot(err, fallback), err, asJSON)
+					return reportDocsListDeadline(cmd, "docs check", deadlineRoot(err, fallback), err, asJSON)
 				}
 				return WithExitCode(err, 2)
 			}

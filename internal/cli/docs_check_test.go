@@ -241,3 +241,26 @@ func TestDocsCheckCmd_StaleAfterExits1(t *testing.T) {
 		t.Errorf("future stale_after: exit = %d, stdout = %q; want 0 and empty", code, stdout)
 	}
 }
+
+// A deadline whose JSON error object cannot be written names docs check, not
+// docs list, whose helper it shares.
+func TestDocsCheckCmd_DeadlineEncodeFailureNamesCheck(t *testing.T) {
+	dir := t.TempDir()
+	docsCheckWrite(t, filepath.Join(dir, "README.md"), "# R\n")
+
+	cmd := newDocsCheckCmd(module.Deps{})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(failingWriter{err: errWriteFailed})
+	cmd.SetArgs([]string{"--json", "--timeout", "1ns", dir})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("expected a deadline error, got nil")
+	}
+	if !strings.HasPrefix(err.Error(), "docs check: encode deadline error") {
+		t.Errorf("err = %q, want it to name docs check", err.Error())
+	}
+	if got := ExitCode(err); got != 2 {
+		t.Errorf("ExitCode(err) = %d, want 2", got)
+	}
+}

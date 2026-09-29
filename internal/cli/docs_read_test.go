@@ -103,6 +103,12 @@ func runDocsReadForTest(t *testing.T, target string) docsReadResult {
 
 func runDocsReadForTestTTY(t *testing.T, target string, tty bool) docsReadResult {
 	t.Helper()
+	return runDocsReadForTestTTYs(t, target, tty, tty)
+}
+
+// runDocsReadForTestTTYs reports stdin and stdout as terminals independently.
+func runDocsReadForTestTTYs(t *testing.T, target string, stdinTTY, stdoutTTY bool) docsReadResult {
+	t.Helper()
 	var res docsReadResult
 	var stdout, stderr bytes.Buffer
 	cmd := testCmdWithContext(context.Background())
@@ -111,7 +117,8 @@ func runDocsReadForTestTTY(t *testing.T, target string, tty bool) docsReadResult
 	cmd.SetErr(&stderr)
 	rt := docsReadRuntime{
 		lookPath:         osexec.LookPath,
-		stdoutIsTerminal: func(io.Writer) bool { return tty },
+		stdinIsTerminal:  func(io.Reader) bool { return stdinTTY },
+		stdoutIsTerminal: func(io.Writer) bool { return stdoutTTY },
 		fallback: func(_ *cobra.Command, _ module.Deps, _ *docspkg.Index, doc docspkg.Doc) error {
 			res.fallbackDoc = &doc
 			return nil
@@ -271,6 +278,24 @@ func TestDocsRead_WithoutMdrollOrTerminalPrintsPathAndStartsNothing(t *testing.T
 	}
 }
 
+// ADR-0008 rule 1 needs stdin AND stdout to be terminals. A terminal stdout
+// with stdin from /dev/null is not enough to start a blocking server.
+func TestDocsRead_WithoutMdrollOrTerminalStdinStartsNothing(t *testing.T) {
+	cwd, _ := docsReadFixture(t)
+	t.Setenv("PATH", t.TempDir())
+
+	res := runDocsReadForTestTTYs(t, "notes/plan.md", false, true)
+	if res.err != nil {
+		t.Fatalf("docs read: %v", res.err)
+	}
+	if res.fallbackDoc != nil {
+		t.Fatal("docs read started the HTML reader with stdin not a terminal")
+	}
+	if want := canonical(t, filepath.Join(cwd, "notes", "plan.md")) + "\n"; res.stdout != want {
+		t.Errorf("stdout = %q, want exactly the resolved path %q", res.stdout, want)
+	}
+}
+
 // An mdroll reachable only through a relative PATH entry is refused, said so,
 // and never run: it would be whatever file of that name is in the cwd.
 func TestDocsRead_RefusesMdrollFoundOnlyViaRelativePATH(t *testing.T) {
@@ -290,6 +315,10 @@ func TestDocsRead_RefusesMdrollFoundOnlyViaRelativePATH(t *testing.T) {
 	}
 	if !strings.Contains(res.stderr, "relative PATH entry") {
 		t.Errorf("stderr = %q, want the relative-PATH refusal named", res.stderr)
+	}
+	// It was found, then refused: "not installed" would contradict the line above.
+	if strings.Contains(res.stderr, "not installed") || !strings.Contains(res.stderr, "mdroll unavailable; opening") {
+		t.Errorf("stderr = %q, want \"mdroll unavailable\" and no \"not installed\"", res.stderr)
 	}
 	if res.fallbackDoc == nil {
 		t.Error("docs read did not fall back after refusing the relative mdroll")

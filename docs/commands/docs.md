@@ -50,7 +50,7 @@ Links never resolve across roots. `[docs.root_kinds]` forces a kind when detecti
 
 ## Checking links
 
-`docs check` walks the same roots as `list` (no arguments: cwd, `./docs`, `$CADENCE_FIELD_REPORTS_DIR`, and any `[docs].roots`; naming paths replaces that set) and reports what would 404 in the reader, without binding a server.
+`docs check` walks the same roots as `list` (no arguments: cwd, `./docs`, `$CADENCE_FIELD_REPORTS_DIR`, and any `[docs].roots`; naming paths replaces that set) and reports links that are broken on disk (as GitHub would render them), without binding a server.
 
 | Finding kind | Meaning |
 |---|---|
@@ -59,7 +59,7 @@ Links never resolve across roots. `[docs.root_kinds]` forces a kind when detecti
 | `broken_anchor` | the file exists but the `#heading` or `#^block` fragment does not, including a fragment-only `#x` |
 | `orphan` | a doc in a directory root that no other doc links to |
 | `deprecated` | the doc's YAML frontmatter says `status: deprecated` (exact, lowercase) |
-| `stale` | the doc's frontmatter `stale_after` is an RFC 3339 instant with an explicit offset (`2026-09-23T00:00:00Z`) and now is at or past it; a date-only (`2026-09-23`) or offset-less value is ignored |
+| `stale` | the doc's YAML frontmatter `stale_after` is an RFC 3339 instant with an explicit offset (`2026-09-23T00:00:00Z`) and now is at or past it; a date-only (`2026-09-23`) or offset-less value is ignored; a TOML `stale_after` is ignored too |
 
 - **Existence fallback.** A link to a directory (`commands/`) or a non-markdown file (`LICENSE`, an image) resolves to no indexed doc. It is reported as broken only when nothing exists at that path inside the root. The check reads nothing and refuses a symlink that escapes the root.
 - **Out-of-root links are counted, not reported.** A link such as `../../README.md` that leaves its root works on GitHub, so it is not a finding. It is counted in `summary.outside_root_links`.
@@ -138,10 +138,10 @@ When [mdroll](https://github.com/tokuhirom/mdroll) is on `PATH`, `read` runs it 
 
 `--no-remote-images` keeps mdroll from fetching `http(s)` images, which it does by default: a remote image in a document is a tracking beacon, and the HTML reader blocks it with `img-src 'self' data:`. Beyond that one flag, `docs read` follows mdroll's own content policy, not the HTML reader's — mdroll does its own rendering, and forgectl's sanitizer and CSP do not apply to it.
 
-mdroll is optional. Without it, what `read` does depends on whether stdout is a terminal:
+mdroll is optional. Without it, what `read` does depends on whether stdin and stdout are both terminals:
 
-- **A terminal:** `read` serves the doc set as `docs serve --open` would, with the browser pointed at that document rather than the index. It holds the terminal until Ctrl-C, like `docs serve`.
-- **No terminal** (an agent, a script, a pipe): `read` starts nothing. It prints the document's resolved absolute path to stdout, a note on stderr naming `forgectl docs serve --open`, and exits 0. A server would block the caller with nothing to interrupt it ([ADR-0008](../adr/0008-agent-contract.md)).
+- **Both terminals:** `read` serves the doc set as `docs serve --open` would, with the browser pointed at that document rather than the index. It holds the terminal until Ctrl-C, like `docs serve`.
+- **Otherwise** (an agent, a script, a pipe, stdin from `/dev/null`): `read` starts nothing. It prints the document's resolved absolute path to stdout, a note on stderr naming `forgectl docs serve --open`, and exits 0. A server would block the caller with nothing to interrupt it ([ADR-0008](../adr/0008-agent-contract.md)).
 
 `forgectl doctor` reports mdroll as skipped, not failed, when it is absent or found only through a relative `PATH` entry.
 

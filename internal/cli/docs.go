@@ -48,12 +48,14 @@ diagram themed from the same Artificer tokens as the rest of the reader, and
 both those and inline SVG pan and zoom (drag to pan, modifier-scroll or
 click-then-scroll to zoom, double-click or 0 to reset).
 
-With no arguments, both verbs index cwd, ./docs (if present), and
-$CADENCE_FIELD_REPORTS_DIR (if set), plus any extra roots configured in the
-[docs] section of config.toml (macOS: ~/Library/Application
-Support/forgectl/config.toml). Naming directories or files on the command
-line replaces that default set entirely. docs check exits 0 when clean, 1 when
-it found problems (the full report is on stdout), and 2 when it could not run.
+serve, list, and check index cwd, ./docs (if present), and
+$CADENCE_FIELD_REPORTS_DIR (if set) when given no arguments, plus any extra
+roots configured in the [docs] section of config.toml (macOS:
+~/Library/Application Support/forgectl/config.toml). Naming directories or
+files on the command line replaces that default set entirely. read and search
+take no roots: they always use that default set. docs check exits 0 when
+clean, 1 when it found problems (the full report is on stdout), and 2 when it
+could not run.
 
 The server binds loopback-only by default and rejects any request whose
 Host header isn't 127.0.0.1/localhost/::1 — DNS rebinding defense, not just

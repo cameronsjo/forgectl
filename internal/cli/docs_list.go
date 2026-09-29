@@ -38,17 +38,19 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Exit contract, as docs check: 0 listed (an empty list included);
+			// 2 the list could not be produced (bad flag, bad root, deadline).
 			if limit < 0 {
-				return fmt.Errorf("--limit must be 0 or a positive count, not %d", limit)
+				return WithExitCode(fmt.Errorf("--limit must be 0 or a positive count, not %d", limit), 2)
 			}
 
 			roots, err := resolveDocsRoots(args, deps.Cfg.Docs)
 			if err != nil {
-				return err
+				return WithExitCode(err, 2)
 			}
 			opts, err := docsIndexOptions(deps.Cfg.Docs)
 			if err != nil {
-				return err
+				return WithExitCode(err, 2)
 			}
 
 			ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
@@ -86,9 +88,9 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 			timer.Stop()
 			if err != nil {
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-					return reportDocsListDeadline(cmd, deadlineRoot(err, progressRoot), err, asJSON)
+					return reportDocsListDeadline(cmd, "docs list", deadlineRoot(err, progressRoot), err, asJSON)
 				}
-				return err
+				return WithExitCode(err, 2)
 			}
 
 			docs := idx.List()
@@ -101,6 +103,9 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
 	cmd.Flags().DurationVar(&timeout, "timeout", 15*time.Second, "walk deadline, e.g. 15s or 2m")
 	cmd.Flags().IntVar(&limit, "limit", 0, "print only the first N entries, after the full walk completes (0 or unset: no limit)")
+	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		return WithExitCode(err, 2)
+	})
 	return cmd
 }
 
@@ -131,15 +136,16 @@ type docsListDeadlineJSON struct {
 // untouched (printDocsList is never called), then returns a silentCodedError
 // (execute.go) so termsafeErrorHandler renders nothing more; otherwise it lets the normal
 // human-readable error path render walkErr, which already names the root
-// (NewIndexContext). Either way the process exits 2.
-func reportDocsListDeadline(cmd *cobra.Command, root string, walkErr error, asJSON bool) error {
+// (NewIndexContext). Either way the process exits 2. verb names the command
+// ("docs list", "docs check") in the one message this function writes itself.
+func reportDocsListDeadline(cmd *cobra.Command, verb, root string, walkErr error, asJSON bool) error {
 	if !asJSON {
 		return WithExitCode(walkErr, 2)
 	}
 	obj := docsListDeadlineJSON{Error: walkErr.Error(), Code: 2, Root: root}
 	enc := termsafe.JSONEncoder(cmd.ErrOrStderr())
 	if encErr := enc.Encode(obj); encErr != nil {
-		return WithExitCode(fmt.Errorf("docs list: encode deadline error: %w", encErr), 2)
+		return WithExitCode(fmt.Errorf("%s: encode deadline error: %w", verb, encErr), 2)
 	}
 	return newSilentCodedError(2)
 }
@@ -168,8 +174,11 @@ func printDocsList(cmd *cobra.Command, docs []docspkg.Doc, asJSON bool) error {
 		fmt.Fprintln(out, "no docs found")
 		return nil
 	}
+	// Every field is escaped: RelPath is a filename and Title is the doc's own
+	// H1, so either can carry a terminal escape sequence (forgectl#598).
 	for _, d := range docs {
-		fmt.Fprintf(out, "%-16s %-48s %s\n", d.RootLabel, d.RelPath, d.Title)
+		_, _ = fmt.Fprintf(out, "%-16s %-48s %s\n",
+			termsafe.SafeLine(d.RootLabel), termsafe.SafeLine(d.RelPath), termsafe.SafeLine(d.Title))
 	}
 	return nil
 }
