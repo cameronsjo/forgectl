@@ -232,6 +232,71 @@ func TestPrRepairHistory_SaysWhenOlderRowsAreOmitted(t *testing.T) {
 	}
 }
 
+// TestPrRepairHistory_AnUnterminatedPrefixDoesNotHideTheNextRow is
+// forgectl#549 end to end: one stray byte left in the log, then a real forget
+// whose intent and completion must both show in the history, with the stray
+// line counted on stderr rather than dropped in silence.
+func TestPrRepairHistory_AnUnterminatedPrefixDoesNotHideTheNextRow(t *testing.T) {
+	dir := t.TempDir()
+	path := seedRepairRecord(t, dir, "o/r#1", "preparing", "")
+	if err := os.WriteFile(filepath.Join(dir, "repair.jsonl"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := repairCmdClient(t, dir)
+	if _, _, err := runPrRepair(t, client, path, "--apply", "--forget-if-absent"); err != nil {
+		t.Fatalf("forget: %v", err)
+	}
+	out, errOut, err := runPrRepair(t, client, "--history", "--json")
+	if err != nil {
+		t.Fatalf("pr repair --history --json: %v", err)
+	}
+	var rows []pr.RepairRow
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("stdout is not a bare array: %v\n%s", err, out)
+	}
+	if len(rows) != 2 || rows[0].Outcome != "intent" || rows[1].Outcome != "applied" {
+		t.Fatalf("rows = %+v, want the intent and its completion", rows)
+	}
+	if !strings.Contains(errOut, "1 unreadable lines skipped") {
+		t.Errorf("stderr = %q, want the stray line counted", errOut)
+	}
+}
+
+// TestPrRepairHistory_SaysWhenLinesAreSkipped: a garbage line must be counted
+// on stderr in both modes, and stdout must be exactly what the clean log
+// renders — the note never leaks into the --json array or the table.
+func TestPrRepairHistory_SaysWhenLinesAreSkipped(t *testing.T) {
+	data, err := json.Marshal(pr.RepairRow{TS: time.Unix(1_800_000_000, 0).UTC(), ID: "a", Verb: "teardown", Outcome: "applied", Ref: "o/r#1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := string(data) + "\n"
+	for _, args := range [][]string{{"--history"}, {"--history", "--json"}} {
+		render := func(log string) (string, string) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "repair.jsonl"), []byte(log), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, errOut, err := runPrRepair(t, repairCmdClient(t, dir), args...)
+			if err != nil {
+				t.Fatalf("%v: %v", args, err)
+			}
+			return out, errOut
+		}
+		cleanOut, cleanErr := render(row)
+		out, errOut := render("{not json\n" + row)
+		if out != cleanOut {
+			t.Errorf("%v: stdout = %q, want the clean log's %q", args, out, cleanOut)
+		}
+		if strings.Contains(cleanErr, "skipped") {
+			t.Errorf("%v: a clean log reported skipped lines: %q", args, cleanErr)
+		}
+		if !strings.Contains(errOut, "note: 1 unreadable lines skipped") || !strings.Contains(errOut, "repair.jsonl") {
+			t.Errorf("%v: stderr = %q, want the skipped count and the log path", args, errOut)
+		}
+	}
+}
+
 // TestPrRepair_UnreadableRecordIsReportedAndExitsNonzero is the survey verb
 // answering the opposite of the truth: an unreadable record refuses every
 // launch, and `pr repair` used to print "no records need repair" and exit 0.
