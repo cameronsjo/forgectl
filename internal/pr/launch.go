@@ -24,6 +24,18 @@ const reviewPrompt = "Review this pull request as a clean-room reviewer. " +
 	"(Critical / Important / Nit) with file:line and a concrete fix. " +
 	"Do NOT post, comment, merge, or push anything — output the review only."
 
+// remoteReviewPrompt is reviewPrompt plus the exact gh commands the agent's
+// allow-list permits (prGhReadCommands). Those rules are exact matches, so an
+// agent left to guess a spelling — a bare `gh pr view`, a reordered flag —
+// is refused every time; naming them is what keeps the review able to read
+// the PR's metadata at all.
+func remoteReviewPrompt(host string, ref Ref) string {
+	cmds := prGhReadCommands(host, ref)
+	return reviewPrompt + " To read the pull request's description, comments, diff, or checks, " +
+		"run these gh commands exactly as written; no other gh invocation is permitted: `" +
+		strings.Join(cmds, "`, `") + "`."
+}
+
 // Dispatch is the generation-qualified identity returned by one successful
 // detached review launch. WindowID is opaque outside this package.
 type Dispatch struct {
@@ -414,7 +426,7 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 	command := append([]string{codexPath}, codexArgs...)
 	// Same environment as the Claude half — see the note there. Two reviewers
 	// reaching the network by different paths would be a posture nobody chose.
-	windowEnv, err := c.resolveWindowEnv()
+	windowEnv, err := c.reviewWindowEnv(sess)
 	if err != nil {
 		return Dispatch{}, err
 	}
@@ -568,13 +580,19 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 		return Dispatch{}, fmt.Errorf("clean-room review profile invalid: %w", err)
 	}
 
-	prompt := reviewPrompt
+	var prompt string
 	if sess.Ref.IsLocal() {
 		// Grant --add-dir for the escape-hatch findings dir. Without this, the
 		// permission-scoped Write(<dir>/**) allowlist rule is moot — Claude Code
 		// won't expose a path outside the launch cwd at all.
 		profile.AddDir = append(profile.AddDir, sess.FindingsDir)
 		prompt = localReviewPrompt(sess.FindingsDir, true)
+	} else {
+		host, _, err := c.prHost(sess.Ref)
+		if err != nil {
+			return Dispatch{}, err
+		}
+		prompt = remoteReviewPrompt(host, sess.Ref)
 	}
 	claudeArgs := launch.BuilderArgs(profile, []string{"-p", prompt})
 
@@ -598,7 +616,9 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// its first request, and this file's own comment above names that failure
 	// mode: an empty pane and no error anywhere. Resolving here rather than at
 	// construction keeps a bad [proxy] launch_profile from failing `pr list`.
-	windowEnv, err := c.resolveWindowEnv()
+	// It also empties the gh token variables the review cannot need, and on a
+	// host other than github.com pins GH_HOST (reviewWindowEnv, forgectl#673).
+	windowEnv, err := c.reviewWindowEnv(sess)
 	if err != nil {
 		return Dispatch{}, err
 	}
