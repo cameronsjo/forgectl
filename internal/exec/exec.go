@@ -1,6 +1,7 @@
 // Package exec is the process-execution seam for the whole tool.
 //
-// Everything that shells out to tmux or sesh goes through a Runner. Production
+// Every non-interactive shell-out goes through one of this package's seams:
+// Runner, StreamingRunner, or SensitiveRunner. Production
 // uses OSRunner; tests inject a fake (see exec_test helpers / FakeRunner) so
 // command construction and branching can be asserted without a live tmux server.
 package exec
@@ -32,6 +33,33 @@ import (
 //     named variables from the inherited environment. Explicit overrides win
 //     over removals of the same name. This is the security boundary for a
 //     command that must not inherit ambient credentials.
+//
+// # Where a Runner records what a command prints
+//
+// The OSRunner methods that capture output (Run, RunWithInput, RunWithEnv,
+// RunWithEnvFiltered) keep a failed command's output in these places:
+//
+//   - stderr is logged by runAndWrap at Error level, so any enabled log_level
+//     records it (log_level defaults to off). With log_file unset it goes to
+//     the dated log file, or to stderr if that cannot be opened.
+//     CommandError.Error() also includes it, so it goes wherever a caller
+//     renders or logs the error.
+//   - stdout is kept in the exported CommandError.Output field. Error() does
+//     not include it, but any code that reaches the *CommandError, directly or
+//     through errors.As, can read it. Treat a CommandError from a command that
+//     may print a secret as secret-bearing; internal/tasks/token.go drops such
+//     an error for this reason.
+//   - neither stream is capped today, so a chatty child grows the heap.
+//
+// Two seams narrow this, and neither makes a true secret safe, because argv
+// stays readable through ps for the life of the process. WithMaskedAssignments
+// hides the values of marked KEY=VALUE argv elements and scrubs those values
+// from the stderr and failure-path stdout that CommandError keeps, and from
+// the stderr it logs. Stdout returned on success is not scrubbed, and a value
+// shorter than minScrubLen is scrubbed only where it stands as a whole word.
+// SensitiveRunner logs metadata only and caps both streams, but it serves only
+// its closed CommandKind set. A command whose output may carry a secret needs
+// its own path, not Runner.
 type Runner interface {
 	Run(ctx context.Context, name string, args ...string) (string, error)
 	RunInteractive(ctx context.Context, name string, args ...string) error
@@ -134,8 +162,9 @@ func filteredEnvironment(overrides map[string]string, unset []string) []string {
 // the captured stdout, and the exit code — on failure. Shared body behind
 // Run, RunWithInput, RunWithEnv, and RunWithEnvFiltered, which differ only in
 // how they configure cmd beforehand and which log messages they use. mask
-// governs every rendering of argv and stderr (WithMaskedAssignments); cmd
-// itself was built from the real args.
+// governs every rendering of argv and what the failure path keeps of stderr
+// and stdout, plus the stderr it logs (WithMaskedAssignments); cmd itself was
+// built from the real args.
 func runAndWrap(cmd *exec.Cmd, preparingMsg, successMsg, failureMsg string, mask argMask, name string, args []string) (string, error) {
 	shown := mask.args(args)
 	slog.Debug(preparingMsg, "cmd", name, "args", shown)
