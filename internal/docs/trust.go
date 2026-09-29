@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"regexp"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -78,12 +79,21 @@ func frontmatterTrust(fm frontmatterBlock) (status, staleAfter string) {
 	return trustFields(node.Content[0])
 }
 
+// rfc3339DateTime is RFC 3339 §5.6's date-time grammar, with uppercase T and
+// Z only, as time.Parse requires (the RFC also permits lowercase).
+// time.Parse(time.RFC3339, …) also accepts a comma fraction, a one-digit hour,
+// and an offset of +24:00 or with minute 60, none of which the grammar
+// allows; this check rejects them before the parse. Year 0000 is valid
+// (date-fullyear is 4DIGIT) and is kept.
+var rfc3339DateTime = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]([01]\d|2[0-3]):[0-5]\d)$`)
+
 // evalTrust evaluates raw trust fields at now. status matches "deprecated"
-// exactly (§5.4 is lowercase). staleAfter must parse as RFC 3339 with an
-// offset; anything else is not a timestamp and is never stale.
+// exactly (§5.4 is lowercase). staleAfter must match RFC 3339's date-time
+// grammar (so it carries an offset) and parse to a real instant; anything
+// else is not a timestamp and is never stale.
 func evalTrust(status, staleAfter string, now time.Time) trustState {
 	tr := trustState{Deprecated: status == "deprecated"}
-	if staleAfter == "" {
+	if !rfc3339DateTime.MatchString(staleAfter) {
 		return tr
 	}
 	t, err := time.Parse(time.RFC3339, staleAfter)

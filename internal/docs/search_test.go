@@ -17,6 +17,8 @@ package docs
 //   [x] Happy: rg exit 1 is an empty success with a non-nil Results
 //   [x] Unhappy: a failed root is recorded in Errors (capped, terminal-safe),
 //       never counted in Skipped, and its hits are kept
+//   [x] Unhappy: a failure with empty stderr reports the CommandError's Err
+//       (why rg never ran), and "exit N" only when Err is nil
 //   [x] Unhappy: a failure in either of two roots keeps the other's hits
 //   [x] Unhappy: an unparseable rg record is reported in Errors
 //   [x] Unhappy: a root that hit the limit still reports rg's diagnostic
@@ -307,6 +309,31 @@ func TestSearchRootFailureIsRecorded(t *testing.T) {
 	}
 	if resp.Skipped != 0 {
 		t.Errorf("Skipped = %d, want 0: a failed root is an error, not a skip", resp.Skipped)
+	}
+}
+
+// A run that fails with nothing on stderr (rg could not start, or was killed)
+// reads exit -1; the CommandError's Err is the only place the reason lives.
+func TestSearchSilentFailureReportsReason(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  *forgexec.CommandError
+		want string
+	}{
+		{"start failure", &forgexec.CommandError{Name: "rg", ExitCode: -1, Err: errors.New("exec format error")}, "rg failed: exec format error"},
+		{"nil Err", &forgexec.CommandError{Name: "rg", ExitCode: 2}, "rg failed: exit 2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			idx, _ := searchRoot(t, "a.md")
+			rg := &fakeRg{write: func(context.Context, io.Writer, io.Writer) error { return tc.err }}
+			resp, err := (Searcher{Runner: rg, LookPath: fakeLookPath}).Search(t.Context(), idx, "x", 10)
+			if err != nil {
+				t.Fatalf("Search: %v", err)
+			}
+			if len(resp.Errors) != 1 || resp.Errors[0].Message != tc.want {
+				t.Errorf("Errors = %+v, want one entry %q", resp.Errors, tc.want)
+			}
+		})
 	}
 }
 

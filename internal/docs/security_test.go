@@ -13,6 +13,9 @@ package docs
 //   [x] Unhappy: an absolute-looking rel ("/etc/passwd") stays anchored under root
 //   [x] Unhappy: a symlink inside root pointing outside it is rejected
 //   [x] Unhappy: a request for a nonexistent file is rejected (EvalSymlinks error denies, never falls through)
+//       as ErrNotFound (wrapping fs.ErrNotExist), never ErrOutsideRoot
+//   [x] Unhappy: a missing nested path is ErrNotFound; an existing file through
+//       an escaping directory symlink stays ErrOutsideRoot
 //   [x] Unhappy: root "/a/b" does not match a resolved path under sibling "/a/bc"
 //
 // AllowedExt (Classification: security gate — extension allowlist)
@@ -21,6 +24,7 @@ package docs
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -116,10 +120,12 @@ func TestResolveInRoot_AbsoluteLookingRel_StaysAnchoredUnderRoot(t *testing.T) {
 
 	// "/etc/passwd" as the rel path must be treated as root-relative, not
 	// filesystem-absolute — Join(root, Clean("/"+"/etc/passwd")) anchors it
-	// under root, where it then correctly 404s as nonexistent.
-	_, err := ResolveInRoot(root, "/etc/passwd")
-	if !errors.Is(err, ErrOutsideRoot) {
-		t.Errorf("ResolveInRoot(%q) = %v, want ErrOutsideRoot (nonexistent file under root)", "/etc/passwd", err)
+	// under root, where it then correctly 404s as nonexistent. ErrNotFound,
+	// not a path, is the proof it was looked up under root: the real
+	// /etc/passwd exists.
+	got, err := ResolveInRoot(root, "/etc/passwd")
+	if !errors.Is(err, ErrNotFound) || got != "" {
+		t.Errorf("ResolveInRoot(%q) = %q, %v, want \"\", ErrNotFound (nonexistent file under root)", "/etc/passwd", got, err)
 	}
 }
 
@@ -150,9 +156,39 @@ func TestResolveInRoot_NonexistentFile_DeniesRatherThanFallingThrough(t *testing
 	dir := t.TempDir()
 	root := mustCanonicalRoot(t, dir)
 
-	_, err := ResolveInRoot(root, "never-created.md")
-	if !errors.Is(err, ErrOutsideRoot) {
-		t.Errorf("ResolveInRoot on a nonexistent file: err = %v, want ErrOutsideRoot (EvalSymlinks error must deny, never fall through)", err)
+	got, err := ResolveInRoot(root, "never-created.md")
+	if got != "" || err == nil {
+		t.Fatalf("ResolveInRoot on a nonexistent file = %q, %v, want a denial (EvalSymlinks error must deny, never fall through)", got, err)
+	}
+	// A missing file is reported as missing, not as an escape.
+	if !errors.Is(err, ErrNotFound) || !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("ResolveInRoot on a nonexistent file: err = %v, want ErrNotFound wrapping fs.ErrNotExist", err)
+	}
+	if errors.Is(err, ErrOutsideRoot) {
+		t.Errorf("ResolveInRoot on a nonexistent file: err = %v, must not claim the path escapes its root", err)
+	}
+}
+
+// A missing file under a missing directory is still not-found, and a symlink
+// escaping the root keeps ErrOutsideRoot even where its target is a directory
+// the rel path descends into: the not-found split must not open a second
+// route out of the root.
+func TestResolveInRoot_NotFoundSplitKeepsEscapesClosed(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.md"), []byte("# s"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rootDir := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(rootDir, "out")); err != nil {
+		t.Skipf("symlink not supported in this environment: %v", err)
+	}
+	root := mustCanonicalRoot(t, rootDir)
+
+	if _, err := ResolveInRoot(root, "no/such/dir/page.md"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing nested path: err = %v, want ErrNotFound", err)
+	}
+	if got, err := ResolveInRoot(root, "out/secret.md"); !errors.Is(err, ErrOutsideRoot) || got != "" {
+		t.Errorf("existing file through an escaping dir symlink = %q, %v, want \"\", ErrOutsideRoot", got, err)
 	}
 }
 

@@ -18,6 +18,9 @@ package exec
 //
 // FakeRunner.RunWithEnvFiltered (Classification: test double)
 //   [x] Happy: both overrides and removals are observable on the recorded Call
+//
+// CommandError.Error (Classification: error formatting)
+//   [x] Unhappy: a nil Err with empty Stderr formats the exit code, no panic
 
 import (
 	"bytes"
@@ -246,5 +249,12 @@ func TestFakeRunner_RunWithInput_UsesRunFunc(t *testing.T) {
 	}
 	if out != "canned output" {
 		t.Errorf("RunWithInput output = %q, want %q", out, "canned output")
+	}
+}
+
+func TestCommandError_NilErrEmptyStderr_DoesNotPanic(t *testing.T) {
+	e := &CommandError{Name: "rg", Args: []string{"-n"}, ExitCode: 2}
+	if got, want := e.Error(), "rg -n: exit 2"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
 	}
 }
