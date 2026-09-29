@@ -149,12 +149,12 @@ func TestDocsCheckCmd_JSONSchemaFrozen(t *testing.T) {
 	if f, ok := byKind["broken_link"]; !ok {
 		t.Error("no broken_link finding in the report")
 	} else {
-		assertKeys(t, "link finding", f, "kind", "root", "path", "target", "line")
+		assertKeys(t, "link finding", f, "kind", "severity", "root", "path", "target", "line")
 	}
 	if f, ok := byKind["orphan"]; !ok {
 		t.Error("no orphan finding in the report")
 	} else {
-		assertKeys(t, "orphan finding", f, "kind", "root", "path")
+		assertKeys(t, "orphan finding", f, "kind", "severity", "root", "path")
 	}
 
 	roots := got["roots"].([]any)
@@ -263,5 +263,58 @@ func TestDocsCheckCmd_DeadlineEncodeFailureNamesCheck(t *testing.T) {
 	}
 	if got := ExitCode(err); got != 2 {
 		t.Errorf("ExitCode(err) = %d, want 2", got)
+	}
+}
+
+// A tree whose only finding is a deprecated page is informational: exit 0,
+// the finding still on stdout, and its JSON severity "info".
+func TestDocsCheckCmd_DeprecatedOnlyExitsZero(t *testing.T) {
+	dir := t.TempDir()
+	docsCheckWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[old](old.md)\n")
+	docsCheckWrite(t, filepath.Join(dir, "old.md"), "---\nstatus: deprecated\n---\n# Old\n")
+
+	stdout, stderr, code := runDocsCheck(t, "--json", dir)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 for a deprecated-only tree (stdout %q)", code, stdout)
+	}
+	var got struct {
+		Findings []struct {
+			Kind     string `json:"kind"`
+			Severity string `json:"severity"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if len(got.Findings) != 1 || got.Findings[0].Kind != "deprecated" || got.Findings[0].Severity != "info" {
+		t.Errorf("findings = %+v, want one deprecated with severity info", got.Findings)
+	}
+	if !strings.Contains(stderr, "1 informational finding(s), no errors") {
+		t.Errorf("stderr = %q, want the informational summary", stderr)
+	}
+}
+
+// A deprecated page beside an error finding still exits 1, and the summary
+// separates the informational count.
+func TestDocsCheckCmd_DeprecatedPlusErrorExits1(t *testing.T) {
+	dir := t.TempDir()
+	docsCheckWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[old](old.md)\n[x](gone.md)\n")
+	docsCheckWrite(t, filepath.Join(dir, "old.md"), "---\nstatus: deprecated\n---\n# Old\n")
+
+	stdout, _, code := runDocsCheck(t, dir)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stdout %q)", code, stdout)
+	}
+	if !strings.Contains(stdout, "old.md: deprecated") || !strings.Contains(stdout, "broken_link") {
+		t.Errorf("stdout = %q, want both the deprecated and broken_link lines", stdout)
+	}
+	// The error text carries the summary; ExitCode wraps it, so read it back.
+	cmd := newDocsCheckCmd(module.Deps{})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{dir})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "2 finding(s), 1 informational") {
+		t.Errorf("err = %v, want %q", err, "docs check: 2 finding(s), 1 informational")
 	}
 }

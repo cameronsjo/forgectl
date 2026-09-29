@@ -73,9 +73,10 @@ func newMarkdown(withFrontmatter, vault bool) goldmark.Markdown {
 		// never claims them — see mermaid.go for why a second renderer
 		// alongside the highlighting extension is not an option.
 		mermaidExtension{},
-		// $…$, $$…$$ and ```math fences become escaped math markup for a
-		// client-side renderer — see math.go.
-		mathExtension{},
+		// $$…$$ and ```math fences become escaped math markup for a
+		// client-side renderer, and so does $…$ on vault roots only — see
+		// math.go.
+		mathExtension{singleDollar: vault},
 	}
 	if withFrontmatter {
 		// Consumes a leading YAML/TOML frontmatter block at parse time, so the
@@ -682,8 +683,9 @@ func RenderDoc(source []byte) (RenderedDoc, error) {
 func RenderDocFor(kind RootKind, source []byte, idx *Index, from *Doc) (RenderedDoc, error) {
 	var resolve wikilinkResolver
 	if idx != nil && from != nil {
+		budget := newFragmentBudget()
 		resolve = wikilinkResolver(func(ref LinkRef) (string, Miss) {
-			return idx.wikilinkTarget(from, ref)
+			return idx.wikilinkTarget(from, ref, budget)
 		})
 	}
 	rendered, hidden, err := renderHidden(source, kind, resolve)

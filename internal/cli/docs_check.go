@@ -99,8 +99,18 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 				}
 			}
 
-			if n := len(report.Findings); n > 0 {
-				return WithExitCode(fmt.Errorf("docs check: %d finding(s)", n), 1)
+			// Only an error-severity finding fails the check; a deprecated page
+			// is informational and exits 0.
+			info := len(report.Findings) - report.Errors()
+			if n := report.Errors(); n > 0 {
+				msg := fmt.Sprintf("docs check: %d finding(s)", len(report.Findings))
+				if info > 0 {
+					msg += fmt.Sprintf(", %d informational", info)
+				}
+				return WithExitCode(errors.New(msg), 1)
+			}
+			if info > 0 {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "docs check: %d informational finding(s), no errors\n", info)
 			}
 			return nil
 		},
