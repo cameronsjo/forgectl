@@ -638,6 +638,18 @@ func (c SensitiveCommand) validate() error {
 		if _, dup := seen[m.key]; dup {
 			return fmt.Errorf("environment mutation %d duplicates an earlier key", i)
 		}
+		// TMPDIR moves where sops writes its decrypted copy of a whole
+		// document, so it is bound to the one call it exists for and to an
+		// absolute path: a relative one would resolve against the child's
+		// working directory, which is not the work directory it names.
+		if m.key == envKeySopsTmpdir {
+			if c.Kind != KindSopsEdit {
+				return fmt.Errorf("environment mutation %d is not permitted for this command kind", i)
+			}
+			if !filepath.IsAbs(m.value.reveal()) {
+				return fmt.Errorf("environment mutation %d needs an absolute path", i)
+			}
+		}
 		seen[m.key] = struct{}{}
 	}
 	if err := validCap("stdout", c.StdoutCap); err != nil {

@@ -219,6 +219,22 @@ func (d *dirPin) lstat(name string) (perm os.FileMode, regular, exists bool, err
 	return os.FileMode(st.Mode).Perm(), st.Mode&unix.S_IFMT == unix.S_IFREG, true, nil
 }
 
+// sameFile reports whether names a and b in the pinned directory are one
+// file, compared by device and inode without following a symlink. On a
+// case-insensitive volume `.ENV` and `.env` are the same file under two
+// spellings, which is what the leftover scan's case-twin note must not
+// mistake for two targets.
+func (d *dirPin) sameFile(a, b string) (bool, error) {
+	var sa, sb unix.Stat_t
+	if err := unix.Fstatat(d.fd, a, &sa, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return false, err
+	}
+	if err := unix.Fstatat(d.fd, b, &sb, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return false, err
+	}
+	return sa.Dev == sb.Dev && sa.Ino == sb.Ino, nil
+}
+
 // tempNameBytes is the random component of a temp file name. Ten bytes of
 // base32 is plenty to make a collision a non-event while keeping the name
 // short enough to stay readable if one is ever left behind.

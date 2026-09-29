@@ -180,7 +180,7 @@ func scanLeftovers(t Target) error {
 	msg := "refusing to write " + termsafe.QuotePath(t.Rel()) +
 		": a previous forgectl run on it was interrupted and left scratch behind. Nothing was removed:\n  - " +
 		strings.Join(lines, "\n  - ")
-	if twin := caseTwin(names, t.base); twin != "" {
+	if twin := caseTwin(t, names); twin != "" {
 		// The scope tag lowercases the base, so on a case-sensitive volume
 		// this target and its case twin share every scratch name, and the
 		// entries above may be the twin's (cameronsjo/forgectl#652).
@@ -189,16 +189,30 @@ func scanLeftovers(t Target) error {
 	return errors.New(msg)
 }
 
-// caseTwin returns an entry of names that equals base in every letter but
-// case, or "" when there is none. It lowercases exactly as scopeTag does, so
-// a twin it finds is one that really shares the tag. On a case-insensitive
-// volume there never is one, because the two names are one file.
-func caseTwin(names []string, base string) string {
-	lower := strings.ToLower(base)
+// caseTwin returns an entry of names that equals t's base in every letter but
+// case and is a DIFFERENT file, or "" when there is none. It lowercases exactly
+// as scopeTag does, so a twin it finds really shares the tag. On a
+// case-insensitive volume the listing can spell the target itself in another
+// case (the file is stored as `.ENV`, the target was named `.env`), so a
+// candidate that is the same file as the target is not a twin. A candidate
+// that cannot be compared is not claimed either: the note is advice, and a
+// false one would send the operator to the wrong file.
+func caseTwin(t Target, names []string) string {
+	lower := strings.ToLower(t.base)
 	for _, name := range names {
-		if name != base && strings.ToLower(name) == lower {
+		if name == t.base || strings.ToLower(name) != lower {
+			continue
+		}
+		// A target that does not exist yet cannot be the candidate: on a
+		// case-insensitive volume the candidate's existence would mean the
+		// target's.
+		if _, _, exists, err := t.dir.lstat(t.base); err == nil && !exists {
 			return name
 		}
+		if same, err := t.dir.sameFile(name, t.base); err != nil || same {
+			continue
+		}
+		return name
 	}
 	return ""
 }

@@ -62,7 +62,11 @@ func TestEditPointsSopsTmpdirAtTheWorkDir(t *testing.T) {
 	if workDir == "" {
 		t.Fatal("the edit ran with no work directory beside the target")
 	}
-	want := fcexec.ReplaceSopsTmpdir(workDir)
+	// The work directory is created under target.Abs(), which resolves
+	// symlinks: on macOS the repo sits under /var, a link to /private/var, so
+	// the directory found through the unresolved repo path spells the same
+	// directory differently.
+	want := fcexec.ReplaceSopsTmpdir(filepath.Join(filepath.Dir(target.Abs()), filepath.Base(workDir)))
 	for _, m := range got {
 		if m.Equal(want) {
 			return
@@ -123,7 +127,7 @@ func TestIntegration_SopsTempFileFollowsTmpdir(t *testing.T) {
 		t.Fatalf("Signal: %v", err)
 	}
 	_ = cmd.Wait()
-	if _, err := os.Stat(edited); err == nil {
+	if _, err := os.Stat(filepath.Clean(edited)); err == nil { //nolint:gosec // G703: the path this test's own editor stub recorded, checked above to lie under the test's TMPDIR
 		t.Logf("measured: sops left its decrypted copy after SIGHUP (%s); it is under the given TMPDIR, which is what confines it", edited)
 	} else {
 		t.Logf("measured: sops removed its decrypted copy on SIGHUP; the TMPDIR mitigation is now belt and braces")
