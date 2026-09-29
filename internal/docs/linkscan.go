@@ -364,10 +364,13 @@ func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 			if !ok {
 				return ast.WalkContinue, nil
 			}
-			if h.Level == 1 && h.Lines().Len() > 0 {
+			if kind == RootVault && h.Level == 1 && h.Lines().Len() > 0 {
+				// One visibleSource walk, over the first line only, per
+				// H1: linear in the heading, however many lines it has.
+				first := h.Lines().At(0)
 				h1s = append(h1s, h1Candidate{
-					at:      h.Lines().At(0).Start,
-					visible: headingSourceText(h, body),
+					at:      first.Start,
+					visible: strings.TrimSpace(string(visibleSource(h, first, body))),
 				})
 			}
 			slug := ""
@@ -376,12 +379,8 @@ func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 					slug = string(b)
 				}
 			}
-			text := headingText(h, body)
-			if kind == RootVault {
-				text = headingSourceText(h, body)
-			}
 			headings = append(headings, Heading{
-				Text: text,
+				Text: headingText(h, body),
 				Slug: slug,
 			})
 		case wikilink.Kind:
@@ -472,32 +471,35 @@ func headingText(n *ast.Heading, source []byte) string {
 	return b.String()
 }
 
+// appendNodeText flattens n's inline nodes into their text, in one walk.
+// It is the one heading-text builder for both root kinds. The vault-only
+// nodes a docs root never produces are handled here too: a %% comment
+// contributes nothing (it is not on the page), a tag contributes "#name",
+// and inline math its "$…$" source, since neither has a text child.
 func appendNodeText(b *strings.Builder, n ast.Node, source []byte) {
-	if t, ok := n.(*ast.Text); ok {
+	switch t := n.(type) {
+	case *commentSpanNode:
+		return
+	case *tagNode:
+		b.WriteByte('#')
+		b.Write(t.Name)
+		return
+	case *mathInline:
+		delim := "$"
+		if t.display {
+			delim = "$$"
+		}
+		b.WriteString(delim)
+		b.Write(t.tex)
+		b.WriteString(delim)
+		return
+	case *ast.Text:
 		b.Write(t.Segment.Value(source))
 		return
 	}
 	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
 		appendNodeText(b, c, source)
 	}
-}
-
-// headingSourceText is a vault heading's Text: its source, not its inline
-// nodes. goldmark's heading lines already exclude the ATX "#" markers, the
-// closing "#" sequence and the surrounding whitespace; each line then has
-// its comment ranges cut (visibleSource, as for ids and the title), and a
-// setext heading's lines are joined with a space. A vault link names a
-// heading by the text written in it ("[[Note#a ==b==]]"), so the markup
-// stays in, where flattening the inline nodes would drop it. Docs roots keep
-// headingText.
-func headingSourceText(h *ast.Heading, source []byte) string {
-	parts := make([]string, 0, h.Lines().Len())
-	for i := 0; i < h.Lines().Len(); i++ {
-		if t := strings.TrimSpace(string(visibleSource(h, h.Lines().At(i), source))); t != "" {
-			parts = append(parts, t)
-		}
-	}
-	return strings.Join(parts, " ")
 }
 
 // pathUnescapeOrRaw percent-decodes s, or returns it unchanged when it is

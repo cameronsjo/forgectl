@@ -51,7 +51,7 @@ Every root is classified as `docs` or `vault` when it is indexed. A root is a `v
 | Kind | Link target | Anchor |
 |---|---|---|
 | `docs` | relative markdown path from the linking file (`[x](../guide.md)`) | GitHub-style heading slug (`#getting-started`) |
-| `vault` | wikilink by vault-relative path, bare note name, or frontmatter alias (`[[Note]]`, `[[folder/Note]]`); a `./` or `../` markdown path resolves from the linking file | heading text or slug (`#Some Heading`), or a block id (`#^blk-1`) |
+| `vault` | wikilink by vault-relative path, bare note name, or frontmatter alias (`[[Note]]`, `[[folder/Note]]`); a `./` or `../` markdown path resolves from the linking file | heading text or slug (`#Some Heading`; text matches ignoring case, spacing and markdown punctuation such as `==`, `*` or backticks), or a block id (`#^blk-1`) |
 
 The kind also picks the markdown dialect: a `vault` root renders the Obsidian highlights, comments, tags and callout types described above, and a `docs` root stays plain GitHub-flavoured markdown. Links never resolve across roots. `[docs.root_kinds]` forces a kind when detection gets it wrong, keyed by the root path as you wrote it in `roots` or on the command line — relative spellings such as `.` match the same directory the CLI derives. A value other than `docs` or `vault` is a config error, and `forgectl launch doctor` reports it.
 

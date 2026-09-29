@@ -598,16 +598,18 @@ func TestScanVault_BlockIDInRemovedCommentParagraph(t *testing.T) {
 	}
 }
 
-// TestResolveVault_HeadingTextFromSource: a vault heading's Text is its
-// source text, so a wikilink written against the heading as typed
-// resolves, markup included. Comment text stays out.
-func TestResolveVault_HeadingTextFromSource(t *testing.T) {
+// TestResolveVault_HeadingMatchNormalized: a vault heading link matches
+// when the fragment and the heading's flattened Text agree under
+// normalizeHeadingKey, so a link written with the heading's markup or
+// without it resolves. Comment text is in neither.
+func TestResolveVault_HeadingMatchNormalized(t *testing.T) {
 	vault := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	const note = "# Note\n\n## a ==b==\n\n## c ~~d~~\n\n## $`q`$\n\n## see #tag\n\n## x %%c%% y\n"
-	for name, body := range map[string]string{"Note.md": note, "Linker.md": "# Linker\n"} {
+	const note = "# Note\n\n## a ==b==\n\n## e *f*\n\n## use `foo()`\n\n## see [[Other]]\n\n" +
+		"## [d](e.md) g\n\n## c ~~d~~\n\n## $`q`$\n\n## x %%c%% y\n\n## see #tag\n"
+	for name, body := range map[string]string{"Note.md": note, "Linker.md": "# Linker\n", "Other.md": "# Other\n"} {
 		if err := os.WriteFile(filepath.Join(vault, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -623,21 +625,96 @@ func TestResolveVault_HeadingTextFromSource(t *testing.T) {
 	}
 	// "[[Note#see #tag]]" is not in the list: resolveFragment reads every
 	// '#' in a fragment as Obsidian's nested-heading separator, so that link
-	// names a heading "tag" under "see ". The Text is still pinned below,
-	// and the heading resolves by its slug.
-	for _, target := range []string{"Note#a ==b==", "Note#c ~~d~~", "Note#$`q`$", "Note#see-tag", "Note#x  y"} {
+	// names a heading "tag" under "see ". The heading resolves by its slug.
+	for _, target := range []string{
+		"Note#a ==b==", "Note#a b", "Note#e f", "Note#e *f*", "Note#use foo()", "Note#use `foo()`",
+		"Note#see Other", "Note#see [[Other]]", "Note#d g", "Note#c ~~d~~", "Note#c d",
+		"Note#$`q`$", "Note#x y", "Note#X  Y", "Note#see-tag",
+	} {
 		if _, miss := idx.ResolveLink(&from, target); miss != MissNone {
 			t.Errorf("[[%s]]: miss %v", target, miss)
 		}
 	}
-	doc, _ := idx.Find(label, "Note.md")
-	var texts []string
-	for _, h := range doc.Headings {
-		texts = append(texts, h.Text)
+	if _, miss := idx.ResolveLink(&from, "Note#x c y"); miss == MissNone {
+		t.Errorf("[[Note#x c y]] resolved: comment text reached the heading")
 	}
-	want := "Note|a ==b==|c ~~d~~|$`q`$|see #tag|x  y"
-	if got := strings.Join(texts, "|"); got != want {
-		t.Errorf("heading texts %q, want %q", got, want)
+	doc, _ := idx.Find(label, "Note.md")
+	for _, h := range doc.Headings {
+		if strings.Contains(h.Text, "%%") || strings.Contains(h.Text, "c y") {
+			t.Errorf("comment reached heading text %q", h.Text)
+		}
+	}
+}
+
+// TestResolveDocs_HeadingMatchNotNormalized pins the docs-root rule: an
+// anchor matches the exact slug only, so a fragment that would match under
+// normalizeHeadingKey still misses.
+func TestResolveDocs_HeadingMatchNotNormalized(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{"Note.md": "# Note\n\n## a ==b==\n", "Linker.md": "# Linker\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	idx, err := NewIndexWithOptions([]string{dir}, IndexOptions{RootKinds: map[string]RootKind{dir: RootDocs}})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	if idx.Roots()[0].Kind != RootDocs {
+		t.Fatal("fixture is not a docs root")
+	}
+	from, _ := idx.Find(idx.Roots()[0].Label, "Linker.md")
+	if _, miss := idx.ResolveLink(&from, "Note.md#a b"); miss == MissNone {
+		t.Errorf("docs root resolved a normalized heading fragment")
+	}
+	if _, miss := idx.ResolveLink(&from, "Note.md#a-b"); miss != MissNone {
+		t.Errorf("docs root lost its exact-slug match: %v", miss)
+	}
+}
+
+// TestScanVault_TitleUnchanged pins the vault title against 02d1145's rule:
+// the first H1's first line, as written, with comment ranges cut and the
+// ends trimmed.
+func TestScanVault_TitleUnchanged(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "n.md")
+	if err := os.WriteFile(p, []byte("# Title ==x== *y* %%c%% end\n\nbody\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := scanDocFor(RootVault, p, "n.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Title ==x== *y*  end"; meta.Title != want {
+		t.Errorf("title %q, want %q", meta.Title, want)
+	}
+}
+
+// TestScan_LongSetextHeadingIsLinear: a 5000-line setext H1 must scan in
+// time proportional to its size, in both root kinds. The bound is relative
+// to a same-size document with no heading, best of several runs, so a slow
+// CI machine slows both sides alike; a per-line re-walk of the heading is
+// about a hundred times the baseline.
+func TestScan_LongSetextHeadingIsLinear(t *testing.T) {
+	heading := []byte(strings.Repeat("word line\n", 5000) + "===\n")
+	plain := []byte(strings.Repeat("word line\n", 5000))
+	best := func(kind RootKind, src []byte) time.Duration {
+		min := time.Duration(1<<63 - 1)
+		for range 5 {
+			start := time.Now()
+			if _, err := scanBodyFor(kind, src); err != nil {
+				t.Fatal(err)
+			}
+			if d := time.Since(start); d < min {
+				min = d
+			}
+		}
+		return min
+	}
+	for _, kind := range []RootKind{RootDocs, RootVault} {
+		base, got := best(kind, plain), best(kind, heading)
+		if got > 10*base+20*time.Millisecond {
+			t.Errorf("kind %v: setext heading scan %v against a %v baseline", kind, got, base)
+		}
 	}
 }
 
