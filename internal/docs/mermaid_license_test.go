@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Mermaid is vendored in the binary; its MIT notice must ship beside the
@@ -20,7 +22,27 @@ func TestMermaidLicenseShips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(string(y), "internal/docs/assets/font-licenses/*"); n != 2 {
-		t.Errorf("font-licenses glob in %d archive entries, want 2 (linux, darwin)", n)
+	var cfg struct {
+		Archives []struct {
+			ID    string `yaml:"id"`
+			Files []any  `yaml:"files"`
+		} `yaml:"archives"`
+	}
+	if err := yaml.Unmarshal(y, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Archives) == 0 {
+		t.Fatal("no archives in .goreleaser.yaml")
+	}
+	for _, a := range cfg.Archives {
+		found := false
+		for _, f := range a.Files {
+			if m, ok := f.(map[string]any); ok && m["src"] == "internal/docs/assets/font-licenses/*" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("archive %q does not ship font-licenses/*", a.ID)
+		}
 	}
 }
