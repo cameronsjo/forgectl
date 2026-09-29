@@ -1,10 +1,10 @@
 ---
-status: planned
-next: "Task 0: post the client surface on forgectl#536 and get it accepted; then Task 1"
+status: in-flight
+next: "Task 0 done -> Task 1 on feat/herdr-client (read client, error model, fixtures) -> Task 2 -> Task 3 -> Task 4"
 branch: plan/herdr-roadmap
 pr: cameronsjo/forgectl#721
 updated: 2026-09-29
-approved_session_id: "—"
+approved_session_id: a86d73e4-2c61-43bb-a377-9455a4c62f53
 date: 2026-09-29
 session_id: a86d73e4-2c61-43bb-a377-9455a4c62f53
 model: claude-sonnet-5-5
