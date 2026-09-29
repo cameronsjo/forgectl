@@ -27,8 +27,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOSRunner_RunStreaming_ConnectsStreamsWithoutBuffering(t *testing.T) {
@@ -256,5 +259,28 @@ func TestCommandError_NilErrEmptyStderr_DoesNotPanic(t *testing.T) {
 	e := &CommandError{Name: "rg", Args: []string{"-n"}, ExitCode: 2}
 	if got, want := e.Error(), "rg -n: exit 2"; got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+// TestOSRunner_ExitZeroWithADescendantHoldingThePipesSucceeds: a child that
+// exits 0 while a backgrounded grandchild still holds its stderr (git over ssh
+// ControlPersist does this) succeeded. pipeWaitDelay must stop Run waiting on
+// the pipe without turning that success into exec.ErrWaitDelay.
+func TestOSRunner_ExitZeroWithADescendantHoldingThePipesSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "holder")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho ok\nsleep 5 >/dev/null &\nexit 0\n"), 0o700); err != nil { //nolint:gosec // test-owned script
+		t.Fatal(err)
+	}
+	start := time.Now()
+	out, err := OSRunner{}.Run(context.Background(), script)
+	if err != nil {
+		t.Fatalf("a child that exited 0 must succeed, got %v", err)
+	}
+	if out != "ok" {
+		t.Errorf("out = %q, want %q", out, "ok")
+	}
+	if d := time.Since(start); d > time.Second+pipeWaitDelay {
+		t.Errorf("Run took %v; it waited on the descendant's pipe", d)
 	}
 }

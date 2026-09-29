@@ -601,6 +601,12 @@ func sameBreadcrumbRecord(a, b Breadcrumb) bool {
 // left in place; nothing was discarded.
 var ErrWindowKillTimedOut = errors.New("review window kill timed out (tmux unresponsive)")
 
+// ErrRecordNotParked is wrapped alongside ErrWindowKillTimedOut when the
+// timeout left the record exactly as it was because it could not be parked in
+// needs-repair (a legacy record with no version, or a failed write). Callers
+// must not tell the operator the record was parked when this is present.
+var ErrRecordNotParked = errors.New("the record could not be parked in needs-repair")
+
 // windowKillTimeoutReason is the needs-repair reason such a record carries.
 const windowKillTimeoutReason = "window kill timed out (tmux unresponsive)"
 
@@ -688,10 +694,11 @@ func (c *Client) discard(ctx context.Context, sess Session) error {
 	// state could leave a live orphan that a re-review collides with. The lock
 	// is held, so the *Locked park is the right form.
 	if c.killReviewWindow(ctx, sess.Ref) {
-		if sess.Path != "" {
-			if err := c.markNeedsRepairLocked(sess.Path, windowKillTimeoutReason); err != nil {
-				return fmt.Errorf("%w; and the record could not be parked in needs-repair: %w", ErrWindowKillTimedOut, err)
-			}
+		if sess.Path == "" {
+			return fmt.Errorf("%w; %w", ErrWindowKillTimedOut, ErrRecordNotParked)
+		}
+		if err := c.markNeedsRepairLocked(sess.Path, windowKillTimeoutReason); err != nil {
+			return fmt.Errorf("%w; %w: %w", ErrWindowKillTimedOut, ErrRecordNotParked, err)
 		}
 		return ErrWindowKillTimedOut
 	}

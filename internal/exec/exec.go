@@ -195,6 +195,12 @@ func runAndWrap(cmd *exec.Cmd, preparingMsg, successMsg, failureMsg string, mask
 	cmd.Stderr = &stderr
 	cmd.WaitDelay = pipeWaitDelay
 	out, err := cmd.Output()
+	// A child that exited 0 while a grandchild still held the pipes (git over
+	// ssh ControlPersist) succeeded; WaitDelay only stopped us waiting on them.
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		slog.Debug("Command succeeded but a descendant kept its output pipes open; stopped waiting.", "cmd", name)
+		err = nil
+	}
 	if err != nil {
 		trimmed := mask.text(strings.TrimRight(string(out), "\n"))
 		if msg := mask.text(strings.TrimSpace(stderr.String())); msg != "" {

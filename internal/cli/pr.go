@@ -535,21 +535,27 @@ func newPrOpenCmd(client *pr.Client) *cobra.Command {
 // for the same reason as unreadableRecordsNote: the slog warning that also
 // fires lands in a handler a default install discards, and the command's exit
 // would otherwise read as an ordinary failure with nothing removed and nothing
-// explained.
-func windowKillTimeoutNote(target string) string {
+// explained. parked says whether the record really was parked in needs-repair;
+// a legacy record cannot be, and claiming otherwise would send the operator
+// looking for a state that was never written.
+func windowKillTimeoutNote(target string, parked bool) string {
 	where := "a session"
 	if target != "" {
 		where = termsafe.QuotePathIfUnsafe(target)
 	}
+	state := "the record is parked as needs-repair"
+	if !parked {
+		state = "the record could not be parked as needs-repair and was left as it was"
+	}
 	return fmt.Sprintf("tmux did not answer in time, so the review window for %s may still be running: "+
-		"nothing was removed and the record is parked as needs-repair. "+
-		"Once tmux responds, run 'forgectl pr teardown' again, or see 'forgectl pr repair'", where)
+		"nothing was removed and %s. "+
+		"Once tmux responds, run 'forgectl pr teardown' again, or see 'forgectl pr repair'", where, state)
 }
 
 // noteWindowKillTimeout prints windowKillTimeoutNote when err is that failure.
 func noteWindowKillTimeout(cmd *cobra.Command, err error, target string) {
 	if errors.Is(err, pr.ErrWindowKillTimedOut) {
-		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), windowKillTimeoutNote(target))
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), windowKillTimeoutNote(target, !errors.Is(err, pr.ErrRecordNotParked)))
 	}
 }
 

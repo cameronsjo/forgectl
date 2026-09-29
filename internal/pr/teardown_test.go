@@ -13,6 +13,7 @@ package pr
 //   [x] Discards only sessions matching the given date
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io/fs"
@@ -638,6 +639,38 @@ func TestTeardown_HungTmuxParksTheRecordAndReleasesTheLock(t *testing.T) {
 				t.Errorf("the hanging tmux call was never issued; the test did not exercise the bound: %+v", h.FakeRunner.Calls)
 			}
 		})
+	}
+}
+
+// TestTeardown_HungTmuxOnALegacyRecordSaysItWasNotParked: a record with no
+// version cannot be moved to needs-repair, so the timeout leaves it exactly as
+// it was, and the error must say so (ErrRecordNotParked) rather than let a
+// caller report a parked record that was never written.
+func TestTeardown_HungTmuxOnALegacyRecordSaysItWasNotParked(t *testing.T) {
+	old := teardownTmuxBudget
+	teardownTmuxBudget = 100 * time.Millisecond
+	t.Cleanup(func() { teardownTmuxBudget = old })
+	ref := Ref{Owner: "o", Repo: "r", Number: 24}
+	h := &hangingTmux{FakeRunner: reviewServer(mustWindowName(t, ref))}
+	c := New(h, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+		WithApprover(func(string) (bool, error) { return false, nil }),
+		WithTTYCheck(func() bool { return false }))
+	path, ws := seedSession(t, c, ref, time.Now().UTC()) // legacy: no version
+	before, err := os.ReadFile(path)                     //nolint:gosec // test-owned temp dir
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = c.Teardown(context.Background(), path)
+	if !errors.Is(err, ErrWindowKillTimedOut) || !errors.Is(err, ErrRecordNotParked) {
+		t.Fatalf("err = %v, want ErrWindowKillTimedOut wrapping ErrRecordNotParked", err)
+	}
+	after, rerr := os.ReadFile(path) //nolint:gosec // test-owned temp dir
+	if rerr != nil || !bytes.Equal(before, after) {
+		t.Errorf("the legacy record must be left byte-identical: %v", rerr)
+	}
+	if _, serr := os.Stat(ws); serr != nil {
+		t.Errorf("workspace must be kept: %v", serr)
 	}
 }
 

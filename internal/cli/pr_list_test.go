@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -508,39 +509,79 @@ func (b blockingTmux) Run(ctx context.Context, name string, args ...string) (str
 }
 
 // TestPrTeardown_NotesAnUnresponsiveTmuxOnStderr: when tmux never answers, the
-// window's state is unknown, so teardown removes nothing, parks the record, and
-// says so on stderr — the slog warning alone is discarded by default.
+// window's state is unknown, so teardown removes nothing and says so on stderr
+// — the slog warning alone is discarded by default. The note claims the record
+// was parked only when it really was: a legacy record (no version) cannot be.
 func TestPrTeardown_NotesAnUnresponsiveTmuxOnStderr(t *testing.T) {
-	dir := t.TempDir()
-	ws, err := os.MkdirTemp("", "forgectl-workflow-test-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(ws) })
-	path := seedRepairRecord(t, dir, "o/r#1", "prepared", ws)
-	client := pr.New(blockingTmux{&exec.FakeRunner{}}, pr.WithSessionsDir(dir), pr.WithTmuxSession("forgectl"),
-		pr.WithTTYCheck(func() bool { return false }))
+	for _, tc := range []struct {
+		name       string
+		legacy     bool
+		wantParked bool
+	}{
+		{"v2 record is parked", false, true},
+		{"legacy record cannot be parked", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ws, err := os.MkdirTemp("", "forgectl-workflow-test-*")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(ws) })
+			var path string
+			if tc.legacy {
+				data, merr := json.Marshal(map[string]any{
+					"ref": "o/r#1", "agent": "claude", "workspace": ws,
+					"createdAt": time.Now().UTC().Format(time.RFC3339Nano),
+				})
+				if merr != nil {
+					t.Fatal(merr)
+				}
+				path = filepath.Join(dir, "o-r-1-1.json")
+				if werr := os.WriteFile(path, append(data, '\n'), 0o600); werr != nil {
+					t.Fatal(werr)
+				}
+			} else {
+				path = seedRepairRecord(t, dir, "o/r#1", "prepared", ws)
+			}
+			client := pr.New(blockingTmux{&exec.FakeRunner{}}, pr.WithSessionsDir(dir), pr.WithTmuxSession("forgectl"),
+				pr.WithTTYCheck(func() bool { return false }))
 
-	cmd := newPrTeardownCmd(client)
-	var out, errOut bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{path})
-	// The parent deadline stands in for the package's own (unexported) budget:
-	// either way the tmux call is cut off and its state is unknown.
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	defer cancel()
-	err = cmd.ExecuteContext(ctx)
-	if !errors.Is(err, pr.ErrWindowKillTimedOut) {
-		t.Fatalf("err = %v, want ErrWindowKillTimedOut", err)
-	}
-	if !strings.Contains(errOut.String(), "may still be running") || !strings.Contains(errOut.String(), "needs-repair") {
-		t.Errorf("stderr = %q, want the unresponsive-tmux note", errOut.String())
-	}
-	if _, serr := os.Stat(ws); serr != nil {
-		t.Errorf("workspace was removed: %v", serr)
-	}
-	if strings.Contains(out.String(), "torn down") {
-		t.Errorf("stdout claims a teardown: %q", out.String())
+			cmd := newPrTeardownCmd(client)
+			var out, errOut bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&errOut)
+			cmd.SetArgs([]string{path})
+			// The parent deadline stands in for the package's own (unexported)
+			// budget: either way the tmux call is cut off and its state unknown.
+			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+			defer cancel()
+			err = cmd.ExecuteContext(ctx)
+			if !errors.Is(err, pr.ErrWindowKillTimedOut) {
+				t.Fatalf("err = %v, want ErrWindowKillTimedOut", err)
+			}
+			if got := !errors.Is(err, pr.ErrRecordNotParked); got != tc.wantParked {
+				t.Errorf("parked = %v, want %v (err = %v)", got, tc.wantParked, err)
+			}
+			note := errOut.String()
+			if !strings.Contains(note, "may still be running") {
+				t.Errorf("stderr = %q, want the unresponsive-tmux note", note)
+			}
+			if tc.wantParked && !strings.Contains(note, "the record is parked as needs-repair") {
+				t.Errorf("stderr = %q, want it to say the record was parked", note)
+			}
+			if !tc.wantParked && (strings.Contains(note, "is parked") || !strings.Contains(note, "could not be parked")) {
+				t.Errorf("stderr = %q, must NOT claim the record was parked", note)
+			}
+			if _, serr := os.Stat(ws); serr != nil {
+				t.Errorf("workspace was removed: %v", serr)
+			}
+			if _, serr := os.Stat(path); serr != nil {
+				t.Errorf("record was removed: %v", serr)
+			}
+			if strings.Contains(out.String(), "torn down") {
+				t.Errorf("stdout claims a teardown: %q", out.String())
+			}
+		})
 	}
 }
