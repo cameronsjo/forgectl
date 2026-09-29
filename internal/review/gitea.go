@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -41,7 +42,11 @@ type Gitea struct {
 // per-query in Items rather than here.
 func NewGitea(run exec.Runner, host, login string, owners []string) (*Gitea, error) {
 	if !reGiteaHost.MatchString(host) {
-		return nil, fmt.Errorf("gitea source: host %q outside allowed charset", host)
+		// Categorical on purpose: the host is config-derived, so echoing it
+		// would put attacker-steerable text (control bytes, ANSI escapes, an
+		// arbitrarily long string) in an error a terminal renders. Mirrors
+		// githubauth.ResolveHost.
+		return nil, errors.New("gitea source: configured host is outside the allowed hostname charset (dns name, optional port, no scheme)")
 	}
 	return &Gitea{run: run, host: host, login: login, owners: owners}, nil
 }
