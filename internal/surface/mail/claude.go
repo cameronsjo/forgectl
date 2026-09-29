@@ -215,6 +215,7 @@ func (a ClaudeAdapter) post(ctx context.Context, socket string, frame claudeFram
 		timeout = 5 * time.Second
 	}
 	var buf bytes.Buffer
+	// termsafe:allow-raw-json an inbox socket frame; the receiving harness renders it, not a terminal
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(frame); err != nil {

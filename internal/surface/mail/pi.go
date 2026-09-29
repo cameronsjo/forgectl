@@ -77,6 +77,7 @@ func (a PiAdapter) call(ctx context.Context, socket string, req piRequest) (piRe
 	if timeout <= 0 {
 		timeout = 3 * time.Second
 	}
+	// termsafe:allow-raw-json a request line on the pi extension socket, never rendered
 	line, err := json.Marshal(req)
 	if err != nil {
 		return piResponse{}, err

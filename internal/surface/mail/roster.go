@@ -91,6 +91,7 @@ func (r FileRoster) load() (rosterFile, error) {
 }
 
 func (r FileRoster) save(f rosterFile) error {
+	// termsafe:allow-raw-json roster.json, written to a 0600 file and never rendered
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return err

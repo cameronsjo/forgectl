@@ -162,6 +162,7 @@ func (t *Tx) Mark(id string, st Status, detail string, attempt bool, now time.Ti
 
 func (t *Tx) append(recs ...record) error {
 	var buf bytes.Buffer
+	// termsafe:allow-raw-json mailbox.jsonl records, written to a 0600 file and never rendered
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	for _, r := range recs {
