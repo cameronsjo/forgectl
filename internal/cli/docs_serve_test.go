@@ -130,6 +130,37 @@ func TestDocsServe_FlagErrorRewriteIsNarrow(t *testing.T) {
 	}
 }
 
+// Every "could not set up the server" failure exits 2, as docs check/list do
+// (forgectl#577): a bad root, a bad config, and a flag error.
+func TestDocsServe_SetupFailuresExit2(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	badCfg := module.Deps{Cfg: config.Config{Docs: config.DocsConfig{RootKinds: map[string]string{"/x": "bogus-kind"}}}}
+	cases := map[string]struct {
+		deps module.Deps
+		args []string
+	}{
+		"nonexistent root": {module.Deps{}, []string{missing}},
+		"invalid config":   {badCfg, []string{t.TempDir()}},
+		"unknown flag":     {module.Deps{}, []string{"--unrelated-unknown"}},
+		"retired --token":  {module.Deps{}, []string{"--token", "x"}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			cmd := newDocsServeCmd(tc.deps)
+			cmd.SetOut(new(bytes.Buffer))
+			cmd.SetErr(new(bytes.Buffer))
+			cmd.SetArgs(tc.args)
+			err := cmd.ExecuteContext(context.Background())
+			if err == nil {
+				t.Fatal("expected a setup error")
+			}
+			if got := ExitCode(err); got != 2 {
+				t.Errorf("ExitCode(err) = %d, want 2 (err %v)", got, err)
+			}
+		})
+	}
+}
+
 func testCmdWithContext(ctx context.Context) *cobra.Command {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&bytes.Buffer{})

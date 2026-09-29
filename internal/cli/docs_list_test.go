@@ -269,6 +269,52 @@ func TestDocsListCmd_Deadline_Human_NamesRootExit2(t *testing.T) {
 	}
 }
 
+// A non-deadline failure under --json must take the same one-object shape as a
+// deadline, not fang's human error frame (forgectl#577).
+func TestDocsListCmd_NonDeadlineFailure_JSON_EmptyStdoutOneStderrObjectExit2(t *testing.T) {
+	cmd := newDocsListCmd(module.Deps{})
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json", filepath.Join(t.TempDir(), "missing")})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("expected an error for a nonexistent root")
+	}
+	if got := ExitCode(err); got != 2 {
+		t.Errorf("ExitCode(err) = %d, want 2", got)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+	var obj docsListDeadlineJSON
+	dec := json.NewDecoder(&stderr)
+	if decErr := dec.Decode(&obj); decErr != nil {
+		t.Fatalf("stderr is not a JSON object: %v\nstderr: %s", decErr, stderr.String())
+	}
+	if dec.More() {
+		t.Errorf("stderr carries more than one JSON value: %s", stderr.String())
+	}
+	if obj.Code != 2 || obj.Error == "" {
+		t.Errorf("error object = %+v, want code 2 and a message", obj)
+	}
+}
+
+func TestDocsListCmd_BadFlag_Exit2(t *testing.T) {
+	cmd := newDocsListCmd(module.Deps{})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--bogus"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("expected an error for an unknown flag")
+	}
+	if got := ExitCode(err); got != 2 {
+		t.Errorf("ExitCode(err) = %d, want 2", got)
+	}
+}
+
 func TestDocsListCmd_NegativeLimit_Errors(t *testing.T) {
 	dir := writeDocsListFixture(t, 1)
 

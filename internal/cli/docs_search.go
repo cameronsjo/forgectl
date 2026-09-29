@@ -103,6 +103,9 @@ reason goes to stderr, and the exit code is 1. A missing rg or an expired
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
 	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Second, "deadline for indexing plus search, e.g. 10s or 1m")
 	cmd.Flags().IntVar(&limit, "limit", 50, "return at most N results")
+	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		return WithExitCode(err, 2)
+	})
 	return cmd
 }
 

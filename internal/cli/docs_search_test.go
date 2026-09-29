@@ -243,3 +243,21 @@ func TestDocsSearchPartialFailureJSON(t *testing.T) {
 		t.Errorf("stderr = %q, want exactly one error object with code 1", stderr)
 	}
 }
+
+// An unknown flag is a usage failure: exit 2 like docs check and docs list,
+// and the backend never runs (forgectl#577).
+func TestDocsSearchBadFlagExits2(t *testing.T) {
+	docsSearchFixture(t)
+	runner := &searchRunner{FakeRunner: &forgexec.FakeRunner{}}
+
+	_, _, err := runDocsSearch(t, runner, "--bogus", "needle")
+	if err == nil {
+		t.Fatal("expected an error for an unknown flag")
+	}
+	if code := ExitCode(err); code != 2 {
+		t.Errorf("exit code = %d (err %v), want 2", code, err)
+	}
+	if runner.calls != 0 {
+		t.Errorf("rg ran %d times on a flag error", runner.calls)
+	}
+}
