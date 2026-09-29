@@ -78,7 +78,7 @@ func helperMain(mode string) int {
 		// Tell the test the prefix is in the pipe, so it can stop this
 		// process knowing there is a prefix to see.
 		if marker := os.Getenv(partialMarkerEnv); marker != "" {
-			if err := os.WriteFile(marker, nil, 0o600); err != nil {
+			if err := os.WriteFile(filepath.Clean(marker), nil, 0o600); err != nil { //nolint:gosec // G703: test-helper child writes the marker path its own test set
 				return 97
 			}
 		}
