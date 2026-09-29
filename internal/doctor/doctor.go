@@ -117,6 +117,7 @@ func Run(ctx context.Context, d Deps) Report {
 	checks = append(checks, checkBinary(d, "tmux", "tmux not found on PATH — install with `brew install tmux`"))
 	checks = append(checks, checkBinary(d, "ghostty", "ghostty not found on PATH — install from https://ghostty.org"))
 	checks = append(checks, checkBinary(d, "cmux", "cmux not found on PATH — see https://github.com/cameronsjo/cmux"))
+	checks = append(checks, checkMdroll(d))
 	checks = append(checks, checkSops(ctx, d))
 	checks = append(checks, checkGh(ctx, d))
 	checks = append(checks, benchChecks(ctx, d)...)
@@ -183,6 +184,22 @@ func checkBinary(d Deps, name, hint string) Check {
 		return Check{Name: name, State: StateOK, Detail: p}
 	}
 	return Check{Name: name, State: StateWarn, Detail: name + " not found on PATH", Hint: hint}
+}
+
+// checkMdroll reports whether the optional mdroll terminal reader resolves on
+// PATH. It is shaped like checkBinary, but a missing mdroll is StateSkip rather
+// than StateWarn: `forgectl docs read` falls back to the HTML reader without
+// it, so a machine that never installs it has nothing to fix.
+func checkMdroll(d Deps) Check {
+	if p, err := d.LookPath("mdroll"); err == nil {
+		return Check{Name: "mdroll", State: StateOK, Detail: p}
+	}
+	return Check{
+		Name:   "mdroll",
+		State:  StateSkip,
+		Detail: "not found on PATH — optional; `forgectl docs read` falls back to the HTML reader",
+		Hint:   "install from https://github.com/tokuhirom/mdroll to read docs in the terminal",
+	}
 }
 
 // checkGh reports whether the gh CLI is authenticated, via `gh auth status`

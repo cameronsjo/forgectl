@@ -9,6 +9,7 @@ forgectl docs serve [dir|file ...]       # render + serve, loopback-only (DNS-re
 forgectl docs serve --open               # also open the system browser
 forgectl docs open [path]                # point the browser at a doc on the already-running reader
 forgectl docs open --print-url [path]    # print the resolved URL instead of opening a browser
+forgectl docs read <file>                # read one doc in the terminal with mdroll, else in the HTML reader
 forgectl docs list [dir|file ...]        # list the indexed docs, no server (--json for scripting)
 ```
 
@@ -69,5 +70,13 @@ A token file must be:
 It uses the system browser, never a terminal's own browser command — the reader's entire premise is being terminal-agnostic (reachable from the machine, from an SSH session, from a phone), so coupling `open` to one terminal emulator would undo that.
 
 A legacy server (predating generation-owned discovery) has no freshness endpoint, so `open` cannot verify the listener at its recorded address is still the same server before handing it a token — it prints the URL and tells you to restart with `forgectl docs serve` instead.
+
+## `docs read` in the terminal
+
+`docs read <file>` opens one document from the default doc set (the same roots `docs serve` and `docs list` index with no arguments). `<file>` is a path on disk or a root-relative `<root>/<path>` name as `docs list` prints it, and either way it resolves through the index: a file outside the indexed roots, under an excluded directory, or not markdown is refused.
+
+When [mdroll](https://github.com/tokuhirom/mdroll) is on `PATH`, `read` runs it as `mdroll --watch -- <absolute path>`, with no shell and with forgectl's stdin, stdout, and stderr handed straight through, so mdroll's own keys (search, TOC, link picker) work. `--watch` stands in for the HTML reader's live reload, and `--` keeps a document named like a flag from being parsed as one (`forgectl docs read -- -odd.md` gets such a name past forgectl's own parser). mdroll's exit status becomes forgectl's.
+
+mdroll is optional. Without it, `read` serves the doc set exactly as `docs serve --open` would, with the browser pointed at that document rather than the index; it holds the terminal until Ctrl-C, like `docs serve`. `forgectl doctor` reports mdroll as skipped, not failed, when it is absent.
 
 How discovery records are written, where they live on disk, and how to clear them by hand after a crash: [docs server discovery — operations](../operations/docs-discovery.md).

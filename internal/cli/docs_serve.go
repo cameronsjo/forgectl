@@ -267,6 +267,32 @@ func runDocsServeWithRuntime(
 	tokenFile string,
 	rt docsServeRuntime,
 ) error {
+	var openURL func(addr string) string
+	if openFlag {
+		openURL = docsIndexURL
+	}
+	return runDocsServeOpening(cmd, deps, idx, addrFlag, openURL, tokenFile, rt)
+}
+
+// docsIndexURL is the page `docs serve --open` points the browser at: the
+// reader's index on the bound address.
+func docsIndexURL(addr string) string {
+	return docspkg.ServerInfo{Addr: addr}.BaseURL()
+}
+
+// runDocsServeOpening is runDocsServeWithRuntime with the browser target spelled
+// out: openURL maps the bound address onto the page to open, and nil opens
+// nothing. `docs serve --open` passes the index; `docs read`'s fallback passes
+// the one document it resolved.
+func runDocsServeOpening(
+	cmd *cobra.Command,
+	deps module.Deps,
+	idx *docspkg.Index,
+	addrFlag string,
+	openURL func(addr string) string,
+	tokenFile string,
+	rt docsServeRuntime,
+) error {
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 
@@ -453,7 +479,7 @@ func runDocsServeWithRuntime(
 		fmt.Fprintln(out, "  live reload: on")
 	}
 
-	if openFlag {
+	if openURL != nil {
 		// Don't open a tab that is guaranteed to 401. A browser navigation cannot
 		// carry an Authorization header, so on a token-protected server --open
 		// would reliably produce an unauthorized page and leave the operator
@@ -462,7 +488,7 @@ func runDocsServeWithRuntime(
 		// verbs consistent rather than correct in one place only.
 		if token != "" {
 			fmt.Fprintln(errOut, "note: not opening a browser — this server requires a bearer token, which a browser navigation cannot supply")
-		} else if openErr := docspkg.OpenBrowser(ctx, deps.Runner, url); openErr != nil {
+		} else if openErr := docspkg.OpenBrowser(ctx, deps.Runner, openURL(ln.Addr().String())); openErr != nil {
 			warnDocsServe(errOut, "warning: failed to open browser: %v", openErr)
 		}
 	}

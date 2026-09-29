@@ -168,6 +168,23 @@ func TestCheckGh(t *testing.T) {
 	}
 }
 
+func TestCheckMdroll(t *testing.T) {
+	// Absent is StateSkip, not StateWarn or StateFail: `docs read` falls back
+	// to the HTML reader, so a machine without mdroll is not unhealthy.
+	check := checkMdroll(Deps{LookPath: fakeLookPath()})
+	if check.State != StateSkip {
+		t.Errorf("mdroll absent: state = %q, want skip", check.State)
+	}
+	if check.Hint == "" {
+		t.Error("mdroll absent: hint is empty, want where to get it")
+	}
+
+	check = checkMdroll(Deps{LookPath: fakeLookPath("mdroll")})
+	if check.State != StateOK || check.Detail != "/usr/bin/mdroll" {
+		t.Errorf("mdroll present: state = %q, detail = %q; want ok with the resolved path", check.State, check.Detail)
+	}
+}
+
 func TestCheckSops(t *testing.T) {
 	// Absent is StateSkip, not StateFail: sops is needed only for
 	// `env set --sops`, and a machine that never writes an encrypted secret

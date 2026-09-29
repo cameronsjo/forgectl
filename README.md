@@ -13,7 +13,7 @@ Built for two hands and one thumb:
 brew install cameronsjo/tap/forgectl
 ```
 
-Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against whichever Gitea instance `tea` is logged into, and `review` when `[review.gitea]` is enabled), `kubectl` (`k8s logs`), `docker` (`bench status`/`up`, `docker build/run/shell`, and `clean --docker`), `npm`/`pnpm`/`pip`/`go`/`brew` (`clean --caches` — each is independently opt-in and skipped, not required, when absent). `update`'s roster shares that same `brew`/`go`/`npm` dependency (`softwareupdate` is a macOS built-in) — each step is independently scoped, so a missing tool fails only its own step, never the others.
+Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against whichever Gitea instance `tea` is logged into, and `review` when `[review.gitea]` is enabled), `kubectl` (`k8s logs`), `docker` (`bench status`/`up`, `docker build/run/shell`, and `clean --docker`), `npm`/`pnpm`/`pip`/`go`/`brew` (`clean --caches` — each is independently opt-in and skipped, not required, when absent), [`mdroll`](https://github.com/tokuhirom/mdroll) (`docs read` in the terminal; without it, `docs read` opens the HTML reader). `update`'s roster shares that same `brew`/`go`/`npm` dependency (`softwareupdate` is a macOS built-in) — each step is independently scoped, so a missing tool fails only its own step, never the others.
 
 Commands that actually launch a PR review — `forgectl pr <ref>`, `forgectl pr local`, and `forgectl pr pick` once admission establishes there is at least one ref to prepare — require **tmux 2.2 or newer**, for the dispatch-identity reasons in [docs/commands/pr.md](docs/commands/pr.md). Read-only PR commands, any `--dry-run`, `--queue`, and empty, all-reviewed, or cap-full selections do not acquire that floor.
 
@@ -231,6 +231,7 @@ forgectl docker shell                    # open a shell in the built (or --tag) 
 forgectl docs serve [dir|file ...]       # render + serve, loopback-only (DNS-rebinding-safe)
 forgectl docs serve --open               # also open the system browser
 forgectl docs open [path]                # point the browser at a doc on the already-running reader
+forgectl docs read <file>                # read one doc in the terminal with mdroll, else in the HTML reader
 forgectl docs list [dir|file ...]        # list the indexed docs, no server (--json for scripting)
 
 # net — check cached reachability of the configured probe endpoint
