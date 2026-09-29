@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -85,7 +86,12 @@ type Deps struct {
 	Runner       exec.Runner
 	LookPath     func(string) (string, error)
 	TrustedStore func() (bless.Store, error)
-	Prober       bench.Prober
+	// TrustStorePath resolves where the trust store would live. It lets the
+	// trust check tell a machine that never set up blessed workflows (no
+	// anchor, no store) from one whose store exists but has lost its anchor.
+	// Nil means unknown, and an absent anchor then reads as a failure.
+	TrustStorePath func() (string, error)
+	Prober         bench.Prober
 	// ResumePaths resolves the session-record locations `forgectl resume`
 	// reads. Seamed so the task-dialect check can run against a fixture
 	// tree rather than the machine's real ~/.claude.
@@ -96,12 +102,13 @@ type Deps struct {
 // bless.Verifier's trust-store read, and bench's real HTTP prober.
 func NewDeps(cfg config.Config, runner exec.Runner) Deps {
 	return Deps{
-		Cfg:          cfg,
-		Runner:       runner,
-		LookPath:     osexec.LookPath,
-		TrustedStore: bless.NewVerifier().TrustedStore,
-		Prober:       bench.NewHTTPProber(),
-		ResumePaths:  resume.DefaultPaths,
+		Cfg:            cfg,
+		Runner:         runner,
+		LookPath:       osexec.LookPath,
+		TrustedStore:   bless.NewVerifier().TrustedStore,
+		TrustStorePath: config.TrustStorePath,
+		Prober:         bench.NewHTTPProber(),
+		ResumePaths:    resume.DefaultPaths,
 	}
 }
 
@@ -313,6 +320,8 @@ func fromBenchComponent(c bench.Component) Check {
 // checkTrustStore reports whether the workflow-blessing trust store is
 // present and verifies under the compiled-in anchor (internal/bless).
 //
+// A machine with neither anchor nor store (never set up blessed workflows) is
+// StateSkip too, so doctor's exit code is not 1 on every fresh install.
 // A genuinely ABSENT store (bless.ErrTrustStoreMissing) is StateSkip, not
 // StateFail — trust/blessing is opt-in infrastructure for `workflow bless`
 // users, not every forgectl install. Any OTHER TrustedStore error —
@@ -334,9 +343,30 @@ func checkTrustStore(d Deps) Check {
 		return Check{Name: "trust store", State: StateOK, Detail: fmt.Sprintf("verified, %d enrolled key(s)", len(store.Keys))}
 	case errors.Is(err, bless.ErrTrustStoreMissing):
 		return Check{Name: "trust store", State: StateSkip, Detail: err.Error(), Hint: "run `forgectl workflow bless` to enroll a signing key, if you use blessed workflows"}
+	case errors.Is(err, bless.ErrNoAnchor) && errors.Is(err, fs.ErrNotExist) && trustStoreAbsent(d):
+		// No anchor AND no store: blessed workflows were never set up here, so
+		// there is nothing to verify (forgectl#635). Any other anchor failure
+		// — present but not root-owned, group/world-writable, unparseable — or
+		// a store that exists without its anchor falls through to fail.
+		return Check{Name: "trust store", State: StateSkip, Detail: "blessed workflows not set up (no trust anchor, no trust store)", Hint: "run `forgectl workflow bless` to set up blessed workflows, if you use them"}
 	default:
 		return Check{Name: "trust store", State: StateFail, Detail: err.Error(), Hint: "the trust store or its root of trust failed to verify — see `forgectl workflow trust list` and bless/verify.go's error taxonomy"}
 	}
+}
+
+// trustStoreAbsent reports whether the trust store file is confirmed absent.
+// Anything else, including an unresolvable path or a nil seam, is "not
+// confirmed": the caller keeps its failure rather than guess.
+func trustStoreAbsent(d Deps) bool {
+	if d.TrustStorePath == nil {
+		return false
+	}
+	path, err := d.TrustStorePath()
+	if err != nil {
+		return false
+	}
+	_, statErr := os.Lstat(filepath.Clean(path))
+	return errors.Is(statErr, fs.ErrNotExist)
 }
 
 // checkResumeTasks is the tripwire for `forgectl resume`'s one version
