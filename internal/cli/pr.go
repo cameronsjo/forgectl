@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/module"
 	netpkg "github.com/cameronsjo/forgectl/internal/net"
 	"github.com/cameronsjo/forgectl/internal/notify"
@@ -48,6 +49,12 @@ func newPrCmd(deps module.Deps) *cobra.Command {
 		// The drainer's review-started notification (#192). A no-op off
 		// macOS; `pr drain --no-notify` suppresses it per pass.
 		pr.WithNotifier(notify.New(deps.Runner)),
+		// The @me searches behind `pr prs` / `pr dash` name no repository, so
+		// they are pinned to the configured [github] host exactly as `review`
+		// pins the same SearchPRs path (#413). A host that fails validation
+		// yields a fail-closed runner: those searches degrade to a note, and
+		// the repo-local verbs, which never use this runner, keep working.
+		pr.WithSearchRunner(githubauth.Runner(deps.Runner, cfg.Github.Host)),
 	)
 	netClient := netpkg.New(deps.Runner, netpkg.WithNetConfig(cfg.Net))
 	// err discarded: a failed config-dir lookup yields "", which LoadReviewed

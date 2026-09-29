@@ -41,13 +41,16 @@ package branch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
@@ -315,11 +318,11 @@ func (c *Client) deleteRemote(ctx context.Context, remoteName string, info Info)
 		return fmt.Errorf("delete remote branch %s/%s: %w", remoteName, info.Name, err)
 	}
 
-	owner, repo, err := c.resolveOwnerRepo(ctx)
+	origin, err := c.resolveOrigin(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve owner/repo to verify remote delete of %s: %w", info.Name, err)
 	}
-	if err := c.verifyRemoteDeleted(ctx, owner, repo, info.Name); err != nil {
+	if err := c.verifyRemoteDeleted(ctx, origin, info.Name); err != nil {
 		slog.Error("Failed to verify remote branch deletion.", "remote", remoteName, "branch", info.Name, "error", err)
 		return err
 	}
@@ -333,23 +336,50 @@ const ownerRepoClass = `[A-Za-z0-9._-]+`
 
 var reOwnerRepo = regexp.MustCompile(`^` + ownerRepoClass + `$`)
 
-// resolveOwnerRepo asks gh for the cwd repo's owner/name, re-validating the
-// result against the same anchored charset internal/pr uses for the same
-// reason: gh's own output is hostile input before it's safe to interpolate
-// into another shell-out.
-func (c *Client) resolveOwnerRepo(ctx context.Context) (owner, repo string, err error) {
-	out, err := c.run.Run(ctx, "gh", "repo", "view", "--json", "owner,name", "-q", ".owner.login + \"/\" + .name")
+// originRepo is the cwd repository as gh resolves it: which GitHub host it
+// lives on, and its owner/name there.
+type originRepo struct {
+	host, owner, repo string
+}
+
+// resolveOrigin asks gh for the cwd repo's owner, name, and web URL, and takes
+// the host from the URL. The call itself stays ambient on purpose: `gh repo
+// view` resolves its repository from the checkout's git remotes, so the
+// checkout — not [github] host — decides which host it asks (#413).
+//
+// Every field is gh output and therefore hostile input: owner and name are
+// re-validated against the same anchored charset internal/pr uses before they
+// are interpolated into another shell-out, and the host must be a bare
+// lowercase DNS name (githubauth.ValidHostSegment) before it becomes a
+// --hostname value. Errors are categorical — the rejected text is never
+// rendered (#562).
+func (c *Client) resolveOrigin(ctx context.Context) (originRepo, error) {
+	out, err := c.run.Run(ctx, "gh", "repo", "view", "--json", "owner,name,url")
 	if err != nil {
-		return "", "", fmt.Errorf("gh repo view: %w", err)
+		return originRepo{}, fmt.Errorf("gh repo view: %w", err)
 	}
-	o, r, ok := strings.Cut(strings.TrimSpace(out), "/")
-	if !ok || o == "" || r == "" {
-		return "", "", fmt.Errorf("could not parse owner/repo from gh repo view output %q", out)
+	var view struct {
+		Name  string `json:"name"`
+		URL   string `json:"url"`
+		Owner struct {
+			Login string `json:"login"`
+		} `json:"owner"`
 	}
-	if !reOwnerRepo.MatchString(o) || !reOwnerRepo.MatchString(r) {
-		return "", "", fmt.Errorf("origin owner/repo %q/%q outside allowed charset", o, r)
+	if err := json.Unmarshal([]byte(out), &view); err != nil {
+		return originRepo{}, errors.New("could not parse gh repo view output")
 	}
-	return o, r, nil
+	if !reOwnerRepo.MatchString(view.Owner.Login) || !reOwnerRepo.MatchString(view.Name) {
+		return originRepo{}, errors.New("origin owner/repo reported by gh is outside the allowed charset")
+	}
+	u, err := url.Parse(view.URL)
+	if err != nil || u.Scheme != "https" || u.Port() != "" {
+		return originRepo{}, errors.New("origin URL reported by gh is not an https GitHub repository URL")
+	}
+	host := strings.ToLower(u.Hostname())
+	if !githubauth.ValidHostSegment(host) {
+		return originRepo{}, errors.New("origin host reported by gh is outside the allowed hostname charset")
+	}
+	return originRepo{host: host, owner: view.Owner.Login, repo: view.Name}, nil
 }
 
 // verifyRemoteDeleted confirms a remote branch is actually gone by querying
@@ -359,9 +389,17 @@ func (c *Client) resolveOwnerRepo(ctx context.Context) (owner, repo string, err 
 // used here: it is a prefix-match LIST endpoint that returns 200 with an
 // empty JSON array for a branch that no longer exists, which would mask a
 // failed delete as a success.
-func (c *Client) verifyRemoteDeleted(ctx context.Context, owner, repo, name string) error {
-	path := fmt.Sprintf("repos/%s/%s/git/ref/heads/%s", owner, repo, name)
-	out, err := c.run.Run(ctx, "gh", "api", path)
+//
+// The query names the origin's host with --hostname. `gh api` does not infer
+// a host from the checkout — it asks GH_HOST, else gh's default host — so in
+// a GitHub Enterprise checkout an unpinned call asked github.com, got a 404
+// for a repository that does not exist there, and reported a delete it never
+// verified (#413). The single `--hostname=<host>` token cannot be read as a
+// separate flag whatever the host spells, and resolveOrigin has already
+// validated it.
+func (c *Client) verifyRemoteDeleted(ctx context.Context, origin originRepo, name string) error {
+	path := fmt.Sprintf("repos/%s/%s/git/ref/heads/%s", origin.owner, origin.repo, name)
+	out, err := c.run.Run(ctx, "gh", "api", "--hostname="+origin.host, path)
 	if err == nil {
 		return fmt.Errorf("remote branch %q still exists after delete (GET %s succeeded: %s)", name, path, out)
 	}

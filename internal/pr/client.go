@@ -25,6 +25,16 @@ type Client struct {
 	run        exec.Runner
 	tmuxClient *tmux.Client
 
+	// searchRun runs the @me-scoped `gh search prs` legs behind PRs and
+	// Dashboard. Those queries have no repository context, so nothing about the
+	// checkout names their host: internal/cli wires a runner pinned to the
+	// configured [github] host (githubauth.Runner), the same pin `forgectl
+	// review` applies to the same SearchPRs path. Every other gh call this
+	// package makes is repo-local and stays on run, resolving its host from the
+	// checkout's own remote. nil falls back to run. It is an Option rather than
+	// an import because internal/githubauth imports this package.
+	searchRun exec.Runner
+
 	// sessionsDir is the forgectl-owned breadcrumb directory
 	// (config.PrSessionsDir); the breadcrumb location check enforces that a
 	// loaded path resolves to inside it. Injectable for tests.
@@ -150,6 +160,12 @@ func WithFindingsDir(dir string) Option {
 // a URL carrying user:pass@ before it gets here.
 func WithWindowEnv(resolve func() ([]string, error)) Option {
 	return func(c *Client) { c.windowEnv = resolve }
+}
+
+// WithSearchRunner supplies the runner for the host-scoped `gh search prs`
+// legs (see Client.searchRun). Repo-local gh calls are unaffected.
+func WithSearchRunner(run exec.Runner) Option {
+	return func(c *Client) { c.searchRun = run }
 }
 
 // WithTmuxSession overrides the tmux session review windows are created under.

@@ -10,6 +10,18 @@
 // path: the host may be configured per deployment ([github] host), but every
 // gh subprocess still has GH_HOST force-set to that validated value, and an
 // ambient GH_HOST never wins.
+//
+// The pin's scope is host-scoped calls, the ones with no repository behind
+// them, so configuration is the only thing that can name their host (#413):
+// the projects/review inventory, the @me searches behind `pr prs` and
+// `pr dash`, and doctor's `gh auth status`. Repo-local calls (`gh repo view`,
+// `gh pr view/list/review` in internal/pr and internal/branch) deliberately
+// stay OFF this runner. gh resolves their repository from the checkout's git
+// remotes and filters those remotes by GH_HOST, so pinning them would break
+// every checkout whose remote is on a different host from the configured one
+// — a GitHub Enterprise checkout under the github.com default, or the reverse.
+// A repo-local call that cannot infer its host from the checkout (`gh api`)
+// names the origin's host with --hostname instead.
 package githubauth
 
 import (

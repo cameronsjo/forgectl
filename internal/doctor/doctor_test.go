@@ -169,6 +169,55 @@ func TestCheckGh(t *testing.T) {
 	}
 }
 
+// TestCheckGh_PinnedToConfiguredHost is the #413 regression for doctor: the
+// auth question is host-scoped, so it must name the configured host with
+// --hostname AND pin GH_HOST through githubauth — an ambient GH_HOST must not
+// answer it for a host nobody configured.
+func TestCheckGh_PinnedToConfiguredHost(t *testing.T) {
+	t.Setenv("GH_HOST", "ambient.example.test")
+	for _, tc := range []struct{ configured, want string }{
+		{"", "github.com"},
+		{"GHE.Example.test", "ghe.example.test"},
+	} {
+		fr := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) { return "Logged in", nil }}
+		d := Deps{LookPath: fakeLookPath("gh"), Runner: fr}
+		d.Cfg.Github.Host = tc.configured
+		check := checkGh(context.Background(), d)
+		if check.State != StateOK {
+			t.Fatalf("configured %q: state = %q, want ok", tc.configured, check.State)
+		}
+		call := fr.Last()
+		if got := strings.Join(call.Args, " "); got != "auth status --hostname "+tc.want {
+			t.Errorf("configured %q: argv = %q, want auth status --hostname %s", tc.configured, got, tc.want)
+		}
+		if got := call.Env["GH_HOST"]; got != tc.want {
+			t.Errorf("configured %q: GH_HOST = %q, want %q", tc.configured, got, tc.want)
+		}
+		if !strings.Contains(check.Detail, tc.want) {
+			t.Errorf("configured %q: detail = %q, want it to name %s", tc.configured, check.Detail, tc.want)
+		}
+	}
+}
+
+// TestCheckGh_InvalidConfiguredHostIsCategorical: a [github] host that fails
+// validation fails the check without running gh and without rendering the
+// rejected value.
+func TestCheckGh_InvalidConfiguredHostIsCategorical(t *testing.T) {
+	fr := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) { return "Logged in", nil }}
+	d := Deps{LookPath: fakeLookPath("gh"), Runner: fr}
+	d.Cfg.Github.Host = "evil.test/\x1b[2J"
+	check := checkGh(context.Background(), d)
+	if check.State != StateFail {
+		t.Fatalf("state = %q, want fail", check.State)
+	}
+	if len(fr.Calls) != 0 {
+		t.Fatalf("gh ran %v under an invalid host", fr.Calls)
+	}
+	if strings.Contains(check.Detail+check.Hint, "evil.test") {
+		t.Fatalf("check echoes the rejected host: %+v", check)
+	}
+}
+
 func TestCheckMdroll(t *testing.T) {
 	// Absent is StateSkip, not StateWarn or StateFail: `docs read` falls back
 	// to the HTML reader, so a machine without mdroll is not unhealthy.

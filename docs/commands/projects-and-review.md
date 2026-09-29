@@ -125,9 +125,20 @@ Two prerequisites and one consequence:
   a directory tree or a dedup identity with a github.com repo of the same
   owner and name.
 
-The pin covers the projects/review inventory path only — `branch`, `pr`, and
-`doctor` gh calls remain unpinned and github.com-shaped
-([forgectl#413](https://github.com/cameronsjo/forgectl/issues/413)).
+The pin follows **scope**, not verb
+([forgectl#413](https://github.com/cameronsjo/forgectl/issues/413)):
+
+- **Host-scoped calls are pinned.** A call with no repository behind it has
+  nothing but configuration to name its host: the projects/review inventory,
+  the `@me` searches behind `pr prs` and `pr dash`, and `doctor`'s
+  `gh auth status --hostname <host>`.
+- **Repo-local calls stay ambient.** `pr <ref>`, `pr` launch and posting, and
+  `branch` resolve their repository from the checkout's own git remote, so the
+  checkout, not `[github] host`, decides the host. Pinning them would break
+  them: gh filters a checkout's remotes by `GH_HOST`, so a GitHub Enterprise
+  checkout would stop resolving under a github.com pin, and the reverse.
+  `branch`'s post-delete verification (`gh api`, which never infers a host)
+  names the origin's host with `--hostname` explicitly.
 
 The Gitea source no longer assumes a hostname. `tea repo ls` reports each repo's
 own clone URL, so every row's host is read from that URL rather than configured

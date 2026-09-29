@@ -28,6 +28,11 @@ Headless `pr pick` emits sanitized `owner/repo#N` rows and exits 1; each
 printed ref is directly usable with `forgectl pr <ref>`, while `pr prs --json`
 remains the stable inventory.
 
+`pr prs` and `pr dash` search as `@me` on the configured `[github] host`
+(github.com by default), whatever `GH_HOST` says in the surrounding shell. The
+other `pr` verbs work on one repository and take its host from the checkout's
+git remote instead. See [the host pin](projects-and-review.md) for the rule.
+
 The `[pr]` section configures `forgectl pr` independently of whatever repo a review happens to land in:
 
 ```toml
