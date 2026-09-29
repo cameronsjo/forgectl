@@ -16,7 +16,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/theme"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -707,4 +709,118 @@ func mustParseTime(t *testing.T, s string) time.Time {
 		t.Fatal(err)
 	}
 	return ts
+}
+
+func runPrHistory(t *testing.T, client *pr.Client, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	cmd := newPrHistoryCmd(client)
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs(args)
+	err = cmd.ExecuteContext(context.Background())
+	return out.String(), errOut.String(), err
+}
+
+// TestPrHistory_MatchesTheRepairHistoryAlias is forgectl#508: the leaf and the
+// older flag spelling must print byte-identical stdout AND stderr, in both
+// output shapes, over a log long enough to trigger the omitted note and with a
+// stray line to trigger the skipped note.
+func TestPrHistory_MatchesTheRepairHistoryAlias(t *testing.T) {
+	dir := t.TempDir()
+	var log bytes.Buffer
+	for i := 0; i < pr.MaxRepairHistoryRows+3; i++ {
+		data, err := json.Marshal(pr.RepairRow{TS: time.Unix(1700000000, 0).UTC(), ID: fmt.Sprintf("row%d", i), Verb: "teardown", Outcome: "applied"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		log.Write(data)
+		log.WriteByte('\n')
+	}
+	log.WriteString("not json\n")
+	if err := os.WriteFile(filepath.Join(dir, "repair.jsonl"), log.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := repairCmdClient(t, dir)
+	for _, asJSON := range []bool{true, false} {
+		var histArgs, repairArgs []string
+		histArgs = []string{}
+		repairArgs = []string{"--history"}
+		if asJSON {
+			histArgs = append(histArgs, "--json")
+			repairArgs = append(repairArgs, "--json")
+		}
+		hOut, hErr, err := runPrHistory(t, client, histArgs...)
+		if err != nil {
+			t.Fatalf("pr history %v: %v", histArgs, err)
+		}
+		rOut, rErr, err := runPrRepair(t, client, repairArgs...)
+		if err != nil {
+			t.Fatalf("pr repair %v: %v", repairArgs, err)
+		}
+		if hOut != rOut {
+			t.Errorf("json=%v: stdout differs between pr history and pr repair --history", asJSON)
+		}
+		if hErr != rErr {
+			t.Errorf("json=%v: stderr differs: %q vs %q", asJSON, hErr, rErr)
+		}
+		if !strings.Contains(hErr, "3 older rows") || !strings.Contains(hErr, "1 unreadable lines") {
+			t.Errorf("json=%v: stderr = %q, want the omitted and skipped notes", asJSON, hErr)
+		}
+		if asJSON {
+			var rows []pr.RepairRow
+			if err := json.Unmarshal([]byte(hOut), &rows); err != nil || len(rows) != pr.MaxRepairHistoryRows {
+				t.Errorf("stdout is not a bare array of %d rows: %v (%d)", pr.MaxRepairHistoryRows, err, len(rows))
+			}
+		}
+	}
+}
+
+// TestPrHistory_IsRegisteredUnderPr fails when the leaf is built but never
+// added to the pr group, which the direct-constructor test above cannot see.
+func TestPrHistory_IsRegisteredUnderPr(t *testing.T) {
+	prCmd := newPrCmdForClient(config.Config{}, repairCmdClient(t, t.TempDir()), nil, "", theme.Theme{})
+	sub, _, err := prCmd.Find([]string{"history"})
+	if err != nil || sub == nil || sub.Name() != "history" {
+		t.Fatalf("pr history is not registered: %v", err)
+	}
+}
+
+// TestPrHistory_NamesOmittedUnpairedIntentsOnStderrOnly (forgectl#570): the
+// count of displaced intents with no completion is on stderr, and --json
+// stdout stays a bare array of exactly the newest rows.
+func TestPrHistory_NamesOmittedUnpairedIntentsOnStderrOnly(t *testing.T) {
+	dir := t.TempDir()
+	var log bytes.Buffer
+	add := func(id, outcome string) {
+		data, err := json.Marshal(pr.RepairRow{TS: time.Unix(1700000000, 0).UTC(), ID: id, Outcome: outcome})
+		if err != nil {
+			t.Fatal(err)
+		}
+		log.Write(data)
+		log.WriteByte('\n')
+	}
+	add("lost", "intent")
+	add("paired", "intent")
+	add("paired", "applied")
+	for i := 0; i < pr.MaxRepairHistoryRows; i++ {
+		add(fmt.Sprintf("d%d", i), "applied")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "repair.jsonl"), log.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, errOut, err := runPrHistory(t, repairCmdClient(t, dir), "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errOut, "3 older rows") || !strings.Contains(errOut, "1 of the omitted rows are intents with no completion") {
+		t.Errorf("stderr = %q, want the omitted count and exactly one unpaired intent", errOut)
+	}
+	if strings.Contains(out, "unpaired") || strings.Contains(out, "no completion") {
+		t.Errorf("stdout carries the note: the bare array must not change")
+	}
+	var rows []pr.RepairRow
+	if err := json.Unmarshal([]byte(out), &rows); err != nil || len(rows) != pr.MaxRepairHistoryRows {
+		t.Errorf("stdout is not a bare array of %d rows: %v", pr.MaxRepairHistoryRows, err)
+	}
 }

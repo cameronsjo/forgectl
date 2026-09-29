@@ -106,7 +106,7 @@ confirmation prompt.
 
 This never touches the disposable review workspace or a live session — only
 findings dirs under the durable findings store. --apply records each removal
-in the audit log, which forgectl pr repair --history reads back.`,
+in the audit log, which forgectl pr history reads back.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := validateFindingsOlderThan(olderThan); err != nil {
