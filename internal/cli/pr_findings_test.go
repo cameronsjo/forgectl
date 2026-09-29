@@ -19,17 +19,25 @@ package cli
 //       look reclaimable)
 //   [x] Happy: --older-than 0 passes validation (0 is the explicit "reclaim
 //       everything" cutoff, still gated by --apply/confirm like any other)
+//
+// Terminal safety (forgectl#551)
+//   [x] A findings dir named with ESC and a newline reaches no output raw —
+//       not the list rows, not the cleanup preview, not the "reclaimed" line
+//       after --apply (driven through the confirmFn seam) — and each is shown
+//       in its QuotePath-escaped form
 
 import (
 	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -173,5 +181,51 @@ func TestPrFindingsCleanupCmd_NothingToReclaim_ShortCircuitsBeforeConfirm(t *tes
 	}
 	if got := out.String(); got != "nothing to reclaim\n" {
 		t.Errorf("output = %q, want %q", got, "nothing to reclaim\n")
+	}
+}
+
+// TestPrFindingsCmd_ControlCharacterDirNameNeverReachesOutputRaw pins
+// forgectl#551: every findings path printed by `pr findings list` and
+// `pr findings cleanup` (preview and --apply) is a directory name read off
+// disk, so one planted with ESC and a newline must come out escaped. The
+// name keeps the findings prefix so --apply really removes it and the
+// "reclaimed" line is exercised, not skipped.
+func TestPrFindingsCmd_ControlCharacterDirNameNeverReachesOutputRaw(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows filenames cannot hold a newline")
+	}
+	dir := t.TempDir()
+	evil := filepath.Join(dir, "forgectl-findings-\x1b[2J\nforged")
+	if err := os.MkdirAll(evil, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	client := pr.New(nil, pr.WithFindingsDir(dir), pr.WithSessionsDir(t.TempDir()))
+	withConfirmFn(t, func(string) (bool, error) { return true, nil })
+
+	for _, args := range [][]string{
+		{"list"},
+		{"cleanup", "--older-than=0"},
+		{"cleanup", "--older-than=0", "--apply"},
+	} {
+		cmd := newPrFindingsCmd(client, theme.Theme{})
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetArgs(args)
+		if err := cmd.ExecuteContext(context.Background()); err != nil {
+			t.Fatalf("%v: unexpected error: %v", args, err)
+		}
+		body := out.String()
+		if strings.Contains(body, "\x1b") {
+			t.Errorf("%v: output carries a raw ESC; got %q", args, body)
+		}
+		if strings.Contains(body, "\nforged") {
+			t.Errorf("%v: output carries the name's raw newline; got %q", args, body)
+		}
+		if !strings.Contains(body, termsafe.QuotePath(evil)) {
+			t.Errorf("%v: output missing the escaped path %s; got %q", args, termsafe.QuotePath(evil), body)
+		}
+	}
+	if _, err := os.Stat(evil); !os.IsNotExist(err) {
+		t.Errorf("--apply left %q in place (err=%v), want it reclaimed so the reclaimed line was exercised", evil, err)
 	}
 }
