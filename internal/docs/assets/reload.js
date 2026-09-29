@@ -180,6 +180,7 @@
       filter.dispatchEvent(new Event("input"));
     }
     if (window.ForgectlMermaid) { window.ForgectlMermaid.refresh(); }
+    if (window.ForgectlMath) { window.ForgectlMath.refresh(); }
     applyAnchor(anchor);
     restoreFocus(focus);
     return true;

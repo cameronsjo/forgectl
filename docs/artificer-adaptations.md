@@ -84,3 +84,11 @@ feedback issue filed upstream.
 - **Why necessary:** Artificer has no broken-link primitive. A miss has to read as different from a working link at a glance, and a plain link colour would hide it.
 - **Upstream issue:** none filed yet. Candidate for an upstream broken-link treatment.
 - **Retire when:** the vendored Artificer ships a broken-link style. Delete the two template rules marked "A10" and adopt the upstream class.
+
+## A11 — KaTeX output inherits its own face
+
+- **Dated:** 2026-09-29 · app @ pre-1.0 · Artificer @ 0.25.0
+- **What diverges:** the docs shell template sets `.katex * { font-family: inherit; }` (forgectl#587).
+- **Why necessary:** the same `.surface-document *` rule as A6. KaTeX sets `KaTeX_Main` on `.katex` and lets digits, operators and upright text inherit it, but the universal selector overrode the inheritance, so those glyphs drew in the body face beside italic variables in `KaTeX_Math`. Measured in Chromium: every digit in rendered math computed to `"iA Writer Quattro V", …` before the rule and to `KaTeX_Main` after it.
+- **Upstream issue:** none filed. The A6 upstream fix covers `pre` and `code` only.
+- **Retire when:** Artificer stops setting the prose face through a universal selector inside `.surface-document`. Delete the rule marked "A11".

@@ -84,6 +84,28 @@ var mermaidJS []byte
 //go:embed assets/mermaid-init.js
 var mermaidInitJS []byte
 
+// katexJS, katexCSS and katexFonts are vendored KaTeX (version, license, and a
+// sha256 per file in assets/provenance-katex.json; TestKatexProvenance holds
+// the embed to it). Embedded for the same no-network reason as mermaid. Only
+// the woff2 fonts are embedded: katex.min.css lists woff2 first in every
+// @font-face, so a browser that reads woff2 never asks for the woff or ttf
+// fallbacks, and they would only be dead weight in the binary.
+//
+//go:embed assets/katex/katex.min.js
+var katexJS []byte
+
+//go:embed assets/katex/katex.min.css
+var katexCSS []byte
+
+//go:embed assets/katex/fonts/*.woff2
+var katexFonts embed.FS
+
+// mathInitJS renders the math elements math.go emits with KaTeX (not
+// vendored).
+//
+//go:embed assets/math-init.js
+var mathInitJS []byte
+
 // panZoomJS gives both inline SVG and mermaid-rendered SVG pan/zoom.
 //
 //go:embed assets/svg-panzoom.js
