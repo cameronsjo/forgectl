@@ -3,6 +3,7 @@ package exec
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"math/rand"
 	"strconv"
@@ -224,5 +225,42 @@ func TestMaskText_ShortValueNextToAMaskedRunIsScrubbed(t *testing.T) {
 	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"L=LONGSECRET", "S=zz"}))
 	if got := m.text("LONGSECRETzz"); got != Redacted+Redacted {
 		t.Errorf("got %q", got)
+	}
+}
+
+// TestOSRunner_MaskedAssignments_FailureStdoutMaskedInOutput pins #664: a
+// failing command's stdout rides CommandError.Output, which any caller can
+// reach through errors.As, so a marked value echoed there must be masked like
+// the stderr tail. Every capturing Runner method shares runAndWrap, the only
+// constructor that sets Output, so each is checked.
+//
+// Mutation: drop the mask.text call on the failure-path stdout in runAndWrap
+// and every case carries the value in Output.
+func TestOSRunner_MaskedAssignments_FailureStdoutMaskedInOutput(t *testing.T) {
+	const value = "stdout-secret-664" //nolint:gosec // G101: a fake value the mask must hide
+	entry := "K=" + value
+	ctx := WithMaskedAssignments(context.Background(), []string{entry})
+	script := []string{"-c", `echo "saw $1"; echo "bare $2"; exit 5`, "sh", entry, value}
+	runs := map[string]func() (string, error){
+		"Run": func() (string, error) { return OSRunner{}.Run(ctx, "sh", script...) },
+		"RunWithInput": func() (string, error) {
+			return OSRunner{}.RunWithInput(ctx, "", "sh", script...)
+		},
+		"RunWithEnv": func() (string, error) {
+			return OSRunner{}.RunWithEnv(ctx, map[string]string{"X": "1"}, "sh", script...)
+		},
+		"RunWithEnvFiltered": func() (string, error) {
+			return OSRunner{}.RunWithEnvFiltered(ctx, nil, []string{"X"}, "sh", script...)
+		},
+	}
+	for name, run := range runs {
+		_, err := run()
+		var cmdErr *CommandError
+		if !errors.As(err, &cmdErr) {
+			t.Fatalf("%s: error = %T (%v), want *CommandError", name, err, err)
+		}
+		if want := "saw K=" + Redacted + "\nbare " + Redacted; cmdErr.Output != want {
+			t.Errorf("%s: Output = %q, want %q", name, cmdErr.Output, want)
+		}
 	}
 }
