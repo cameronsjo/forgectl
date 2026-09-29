@@ -58,8 +58,9 @@ import (
 //   - stdout is kept in the exported CommandError.Output field. Error() does
 //     not include it, but any code that reaches the *CommandError, directly or
 //     through errors.As, can read it. Treat a CommandError from a command that
-//     may print a secret as secret-bearing; internal/tasks/token.go drops such
-//     an error for this reason.
+//     may print a secret as secret-bearing: internal/tasks/token.go drops such
+//     an error whole, and internal/clip's Paste passes it through
+//     WithoutOutput.
 //   - both streams are bounded. stderr keeps its last 64 KiB (maxStderrTail),
 //     drains and discards the rest, and records the dropped count on
 //     CommandError.StderrDropped; a chatty stderr never fails a command.
@@ -338,6 +339,34 @@ func (e *CommandError) Error() string {
 }
 
 func (e *CommandError) Unwrap() error { return e.Err }
+
+// WithoutOutput returns err with the captured stdout removed from any
+// *CommandError it carries, for a caller whose command's stdout IS the
+// payload (pbpaste's is the clipboard): a nonzero exit does not mean stdout
+// was empty, and Output is readable by anything that holds the error. Stderr,
+// ExitCode and Err are kept, so errors.As and errors.Is behave as before.
+//
+// When err is itself the *CommandError, a copy is returned and err is left
+// alone. When it sits deeper in a chain, the chain cannot be rebuilt around a
+// copy, so its Output is cleared in place; the error was just returned by the
+// Runner call, so the caller is its only holder.
+func WithoutOutput(err error) error {
+	// A direct assertion, not errors.As: only the top-level case can be
+	// replaced by a copy.
+	if top, ok := err.(*CommandError); ok {
+		if top.Output == "" {
+			return err
+		}
+		cp := *top
+		cp.Output = ""
+		return &cp
+	}
+	var nested *CommandError
+	if errors.As(err, &nested) {
+		nested.Output = ""
+	}
+	return err
+}
 
 // exitCodeOf extracts the process exit code from err via *os/exec.ExitError,
 // or -1 when err doesn't wrap one (the command never started, the context

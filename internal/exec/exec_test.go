@@ -26,6 +26,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -300,5 +301,36 @@ func TestOSRunner_OverflowStillFailsClosedWhenTheChildExitsZeroWithHeldPipes(t *
 	}
 	if out != "" {
 		t.Errorf("out = %q, want no partial output", out)
+	}
+}
+
+// TestWithoutOutput_ClearsOutputKeepsTheRest: a top-level *CommandError comes
+// back as a copy with Output cleared and the original untouched; one wrapped
+// deeper is cleared in place so the chain, and errors.Is through it, survive.
+//
+// Mutation: return err unchanged from WithoutOutput and both Output checks
+// fail; clear the top-level case in place instead of copying and the
+// "original" check fails.
+func TestWithoutOutput_ClearsOutputKeepsTheRest(t *testing.T) {
+	sentinel := errors.New("exit status 3")
+	orig := &CommandError{Name: "pbpaste", Stderr: "why", Output: "secret", ExitCode: 3, Err: sentinel}
+	got := WithoutOutput(orig)
+	var ce *CommandError
+	if !errors.As(got, &ce) || ce.Output != "" || ce.Stderr != "why" || ce.ExitCode != 3 || !errors.Is(got, sentinel) {
+		t.Fatalf("top-level: got %+v", ce)
+	}
+	if orig.Output != "secret" {
+		t.Errorf("top-level: the original was modified; want a copy")
+	}
+
+	inner := &CommandError{Name: "pbpaste", Output: "secret", ExitCode: 3, Err: sentinel}
+	wrapped := fmt.Errorf("paste: %w", inner)
+	got = WithoutOutput(wrapped)
+	if !errors.As(got, &ce) || ce.Output != "" || !errors.Is(got, sentinel) || got.Error() != wrapped.Error() {
+		t.Fatalf("nested: got %v, Output %q", got, ce.Output)
+	}
+
+	if WithoutOutput(nil) != nil || !errors.Is(WithoutOutput(sentinel), sentinel) {
+		t.Errorf("an error with no *CommandError must pass through unchanged")
 	}
 }
