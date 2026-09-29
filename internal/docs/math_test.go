@@ -19,6 +19,12 @@ package docs
 //   [x] Happy: a $$ block never interrupts a paragraph; $$ lines straight
 //              after text pair up as inline display math
 //   [x] Happy: a $$ block after a blank line is a display div
+//   [x] Unhappy: a stray $$ closer (its paragraph ended by a blank line,
+//                heading, thematic break or setext underline) stays literal
+//                and swallows nothing; a later real block is still a div
+//   [x] Unhappy: a $$ between blank lines is literal
+//   [x] Happy: a multi-line $$ in a list item is an inline display span
+//   [x] Happy: $$ plus trailing spaces opens inline display math
 //   [x] Unhappy: a $$ that never opens (code span, autolink, "$$ 5") ahead of
 //                such math does not make a closer swallow later content, in
 //                Render or in scanBody
@@ -181,6 +187,88 @@ func TestRender_Math_BlockAfterBlankLine(t *testing.T) {
 
 	if !strings.Contains(out, "<p>para</p>") || !strings.Contains(out, mathDivOpen+"$$\nx\n$$</div>") {
 		t.Errorf("a $$ block after a blank line is not a display div: %s", out)
+	}
+}
+
+// A $$ followed only by spaces or tabs opens like a bare $$.
+func TestRender_Math_TrailingSpaceAfterInlineOpener(t *testing.T) {
+	out := renderOrFail(t, "para\n$$  \nx\n$$\n")
+
+	if want := `<span class="math math-display">$$`; !strings.Contains(out, want) {
+		t.Errorf("output missing %q: %s", want, out)
+	}
+}
+
+// strayCloserFixtures each leave a bare $$ closer behind: display math
+// written after text, whose paragraph something (a blank line, an ATX
+// heading, a thematic break, a setext underline) ends before the closer. That
+// stray $$ must stay literal rather than open a block that runs to the next
+// $$ or EOF, and the real display block later in the document must still be
+// one.
+var strayCloserFixtures = map[string]string{
+	"blank line":       "Intro:\n$$\na\n\n$$" + strayCloserTail,
+	"atx heading":      "para\n$$\n# x\n$$" + strayCloserTail,
+	"thematic break":   "Def:\n$$\n***\n$$" + strayCloserTail,
+	"setext underline": "para\n$$\nx\n===\n$$" + strayCloserTail,
+	"obsidian + blank": "$$x = 1\n\n$$" + strayCloserTail,
+}
+
+const strayCloserTail = "\n\n## After\n\n[link](a.md)\n\n$$\ny\n$$\n"
+
+func TestRender_Math_StrayCloserDoesNotSwallow(t *testing.T) {
+	for name, src := range strayCloserFixtures {
+		t.Run(name, func(t *testing.T) {
+			out := renderOrFail(t, src)
+			for _, want := range []string{
+				`<h2 id="after">After</h2>`,
+				`<a href="a.md" rel="nofollow">link</a>`,
+				mathDivOpen + "$$\ny\n$$</div>",
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("output missing %q: %s", want, out)
+				}
+			}
+
+			headings, links, _, err := scanBody([]byte(src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(headings) == 0 || headings[len(headings)-1].Slug != "after" {
+				t.Errorf("scan lost the heading after the stray closer: %+v", headings)
+			}
+			if len(links) != 1 || links[0].Path != "a.md" {
+				t.Errorf("scan lost the link after the stray closer: %+v", links)
+			}
+		})
+	}
+}
+
+// A $$ between blank lines has no closer before the next blank line, so it
+// is text.
+func TestRender_Math_LoneDelimiterIsLiteral(t *testing.T) {
+	out := renderOrFail(t, "a\n\n$$\n\nb\n")
+
+	if strings.Contains(out, `class="math`) {
+		t.Errorf("a lone $$ opened math: %s", out)
+	}
+	if !strings.Contains(out, "<p>$$</p>") || !strings.Contains(out, "<p>b</p>") {
+		t.Errorf("a lone $$ did not stay a literal paragraph: %s", out)
+	}
+}
+
+// Inside a container the look-ahead cannot see boundaries, so the multi-line
+// block does not open there; the inline parser renders a display span.
+func TestRender_Math_MultiLineInListItemIsInline(t *testing.T) {
+	out := renderOrFail(t, "- $$\n  x\n  $$\n\nafter\n")
+
+	if strings.Contains(out, mathDivOpen) {
+		t.Errorf("a multi-line block opened inside a list item: %s", out)
+	}
+	if want := `<span class="math math-display">$$` + "\nx\n$$</span>"; !strings.Contains(out, want) {
+		t.Errorf("output missing %q: %s", want, out)
+	}
+	if !strings.Contains(out, "<p>after</p>") {
+		t.Errorf("content after the list was swallowed: %s", out)
 	}
 }
 
@@ -418,11 +506,15 @@ func TestScanBody_MathBlockParity(t *testing.T) {
 		"heading in block": "$$\n# x\n$$\n\n# x\n",
 		"obsidian closer":  obsidianCloserFixture,
 		// A heading inside $$ lines that follow paragraph text interrupts the
-		// paragraph as CommonMark says; both parsers must see it.
-		"heading after para": "para\n$$\n# x\n$$\n",
+		// paragraph as CommonMark says; both parsers must see it, and what
+		// follows the stray closer.
+		"heading after para": "para\n$$\n# x\n$$\n\n## After\n\n[link](a.md)\n",
 	}
 	for k, v := range nonOpenerFixtures {
 		fixtures["non-opener "+k] = v
+	}
+	for k, v := range strayCloserFixtures {
+		fixtures["stray closer "+k] = v
 	}
 	for name, src := range fixtures {
 		t.Run(name, func(t *testing.T) {

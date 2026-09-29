@@ -79,16 +79,20 @@ func isMathSpace(b byte) bool {
 
 func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
 
-// opensMath reports whether the byte after an opener lets it open math. $…$
-// needs a non-space. $$ may also end its line, which is how display math
-// written straight after paragraph text reaches this parser ("text\n$$\nx\n$$"
-// is one paragraph, since a $$ block never interrupts one); a space after $$
+// opensMath reports whether the opener at the start of line may open math.
+// $…$ needs a non-space after it. $$ may also end its line (optionally after
+// spaces or tabs, the same test the block opener applies), which is how
+// display math written straight after paragraph text, or inside a list item
+// or blockquote, reaches this parser. A space followed by more text
 // ("costs $$ 5") still does not open.
-func opensMath(next byte, delim int) bool {
-	if delim == 2 && (next == '\n' || next == '\r') {
+func opensMath(line []byte, delim int) bool {
+	if len(line) <= delim {
+		return false
+	}
+	if delim == 2 && util.IsBlank(line[delim:]) {
 		return true
 	}
-	return !isMathSpace(next)
+	return !isMathSpace(line[delim])
 }
 
 // mathInlineParser parses $…$ and $$…$$ inside a paragraph.
@@ -121,7 +125,7 @@ func (mathInlineParser) Parse(_ ast.Node, block text.Reader, _ parser.Context) a
 	if len(line) > 1 && line[1] == '$' {
 		delim = 2
 	}
-	if len(line) <= delim || !opensMath(line[delim], delim) {
+	if !opensMath(line, delim) {
 		return nil
 	}
 
@@ -221,9 +225,10 @@ func crossesMarkdown(tex []byte) bool {
 // mathBlockParser parses $$ display blocks. Two opener shapes:
 //
 //   - a line that is exactly $$ (trailing spaces allowed) opens a block that
-//     runs to the next line ending in $$, or to the end of its container,
-//     like a fenced code block;
-//   - a line that is exactly $$…$$ is a one-line block.
+//     runs to the next line ending in $$ — but only at document top level,
+//     and only when that closing line comes before any blank line (see
+//     hasDisplayCloserAhead);
+//   - a line that is exactly $$…$$ is a one-line block, in any container.
 //
 // Anything else starting with $$ ($$x$$ followed by more text, or $$ followed
 // by TeX that closes on a later line) is left to mathInlineParser, which
@@ -232,22 +237,30 @@ func crossesMarkdown(tex []byte) bool {
 // document.
 //
 // A $$ block NEVER interrupts a paragraph (CanInterruptParagraph is false):
-// it opens only where a paragraph could start — after a blank line, at the
-// start of a container, or after another block. $$ lines that directly follow
+// it opens only where a paragraph could start. $$ lines that directly follow
 // paragraph text stay in that paragraph, where mathInlineParser pairs them
-// across soft breaks and renders a <span class="math math-display">. Only
-// that pairing decides what is math, so no $$ elsewhere in the paragraph (in
-// a code span, an autolink, "costs $$ 5") can turn a closer into an opener
-// that runs to the next $$ in the document. Letting a bare $$ interrupt was
-// tried twice, and each heuristic for telling opener from closer broke the
-// previous one. An ATX heading or fence inside such a sequence still
-// interrupts the paragraph as CommonMark says, leaving the math literal but
-// visible, and rendering and linkscan see the same heading.
+// across soft breaks and renders a <span class="math math-display">.
+//
+// Every earlier swallow bug had one root: an unterminated multi-line block
+// ran to the end of its container. A stray "$$" closer is easy to produce —
+// display math after text whose paragraph a blank line, heading, fence,
+// thematic break or setext underline ends before the closer — and it then
+// opened a block that ate everything to the next $$ or EOF. So the block is
+// keep-when-unsure, like the %% comment blocks: it opens only when it can see
+// its own closer before any blank line (a blank line is not valid inside
+// display math anyway), and so it never crosses a blank line or runs to EOF.
+// A stray closer followed by a blank line stays literal text.
+//
+// The look-ahead reads raw source lines, which is only sound where no
+// container prefix ("> ", list indentation) can hide a boundary — so the
+// multi-line form opens only at document top level. Inside a list item or
+// blockquote, "$$\nx\n$$" becomes a paragraph and the inline parser renders
+// it as a display span.
 type mathBlockParser struct{}
 
 func (mathBlockParser) Trigger() []byte { return []byte{'$'} }
 
-func (mathBlockParser) Open(_ ast.Node, reader text.Reader, pc parser.Context) (ast.Node, parser.State) {
+func (mathBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Context) (ast.Node, parser.State) {
 	line, segment := reader.PeekLine()
 	pos := pc.BlockOffset()
 	if pos < 0 || pos+len(mathDelim) > len(line) || !bytes.HasPrefix(line[pos:], []byte(mathDelim)) {
@@ -256,6 +269,9 @@ func (mathBlockParser) Open(_ ast.Node, reader text.Reader, pc parser.Context) (
 	rest := line[pos+len(mathDelim):]
 
 	if util.IsBlank(rest) {
+		if parent.Kind() != ast.KindDocument || !hasDisplayCloserAhead(reader.Source(), segment.Start) {
+			return nil, parser.NoChildren
+		}
 		reader.AdvanceToEOL()
 		return &mathBlock{}, parser.NoChildren
 	}
@@ -271,6 +287,39 @@ func (mathBlockParser) Open(_ ast.Node, reader text.Reader, pc parser.Context) (
 	node.Lines().Append(text.NewSegment(start, start+closer))
 	reader.AdvanceToEOL()
 	return node, parser.NoChildren
+}
+
+// hasDisplayCloserAhead reports whether, in the lines after the one starting
+// at from, a closing line (isDisplayCloserLine) comes before any blank line or
+// the end of the source. It reads raw lines, so callers only use it at
+// document top level.
+func hasDisplayCloserAhead(source []byte, from int) bool {
+	nl := bytes.IndexByte(source[from:], '\n')
+	if nl < 0 {
+		return false
+	}
+	for i := from + nl + 1; i < len(source); {
+		end := len(source)
+		if n := bytes.IndexByte(source[i:], '\n'); n >= 0 {
+			end = i + n
+		}
+		line := source[i:end]
+		if util.IsBlank(line) {
+			return false
+		}
+		if isDisplayCloserLine(line) {
+			return true
+		}
+		i = end + 1
+	}
+	return false
+}
+
+// isDisplayCloserLine is the one closing-line test, shared by the look-ahead
+// in Open and by Continue so the two cannot disagree about where a block
+// ends: the line, right-trimmed, ends in an unescaped $$.
+func isDisplayCloserLine(line []byte) bool {
+	return endsWithDisplayDelim(util.TrimRightSpace(line))
 }
 
 // endsWithDisplayDelim reports whether b ends in an unescaped $$, so a
@@ -307,8 +356,8 @@ func (mathBlockParser) Continue(node ast.Node, reader text.Reader, _ parser.Cont
 		return parser.Close
 	}
 	line, segment := reader.PeekLine()
-	trimmed := util.TrimRightSpace(line)
-	if endsWithDisplayDelim(trimmed) {
+	if isDisplayCloserLine(line) {
+		trimmed := util.TrimRightSpace(line)
 		// "x $$" closes the block with "x" as its last line.
 		if body := util.TrimRightSpace(trimmed[:len(trimmed)-len(mathDelim)]); !util.IsBlank(body) {
 			seg := text.NewSegmentPadding(segment.Start, segment.Start+len(body)-segment.Padding, segment.Padding)
