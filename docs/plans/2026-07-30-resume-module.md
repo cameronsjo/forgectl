@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # `forgectl resume` — cross-project Claude session resume + task rescue (forgectl#179)
 
 ## Context

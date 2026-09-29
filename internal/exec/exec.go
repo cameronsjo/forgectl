@@ -18,6 +18,7 @@ package exec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -59,7 +60,12 @@ import (
 //     through errors.As, can read it. Treat a CommandError from a command that
 //     may print a secret as secret-bearing; internal/tasks/token.go drops such
 //     an error for this reason.
-//   - neither stream is capped today, so a chatty child grows the heap.
+//   - both streams are bounded. stderr keeps its last 64 KiB (maxStderrTail),
+//     drains and discards the rest, and records the dropped count on
+//     CommandError.StderrDropped; a chatty stderr never fails a command.
+//     stdout has a hard ceiling (maxStdoutBytes) that kills the child and
+//     fails with ErrOutputTooLarge and no partial output, so a caller never
+//     parses a prefix as the whole stream.
 //
 // Two seams narrow this, and neither makes a true secret safe, because argv
 // stays readable through ps for the life of the process. WithMaskedAssignments
@@ -97,8 +103,20 @@ type StreamingRunner interface {
 // never drift apart on the exact env shape.
 var HomebrewNoAutoUpdate = map[string]string{"HOMEBREW_NO_AUTO_UPDATE": "1"}
 
-// OSRunner is the production Runner: it actually spawns processes.
-type OSRunner struct{}
+// OSRunner is the production Runner: it actually spawns processes. Its zero
+// value is the production configuration.
+type OSRunner struct {
+	// stdoutCeiling overrides maxStdoutBytes when positive. It exists so a
+	// test can prove the ceiling's kill without writing 64 MiB.
+	stdoutCeiling int
+}
+
+func (r OSRunner) ceiling() int {
+	if r.stdoutCeiling > 0 {
+		return r.stdoutCeiling
+	}
+	return maxStdoutBytes
+}
 
 // Run executes name+args and returns trimmed stdout. On failure the returned
 // error wraps stderr so callers (and fang's styled error output) stay useful;
@@ -106,38 +124,38 @@ type OSRunner struct{}
 // the returned *CommandError's Output field, since a nonzero exit doesn't
 // always mean the command produced nothing worth seeing (e.g. `npm outdated`
 // exits 1 precisely when its output has something to report).
-func (OSRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
-	return runAndWrap(exec.CommandContext(ctx, name, args...), "Preparing to run command.", "Successfully ran command.", "Failed to run command.", maskFrom(ctx), name, args) //nolint:gosec // structural argv is the purpose of this execution seam
+func (r OSRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	return runAndWrap(exec.CommandContext(ctx, name, args...), r.ceiling(), "Preparing to run command.", "Successfully ran command.", "Failed to run command.", maskFrom(ctx), name, args) //nolint:gosec // structural argv is the purpose of this execution seam
 }
 
 // RunWithInput executes name+args with stdin piped in and returns trimmed
 // stdout. Same error-wrapping behavior as Run; the only difference is the
 // child reads from stdin instead of relying purely on argv (e.g. pbcopy).
-func (OSRunner) RunWithInput(ctx context.Context, stdin string, name string, args ...string) (string, error) {
+func (r OSRunner) RunWithInput(ctx context.Context, stdin string, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = strings.NewReader(stdin)
-	return runAndWrap(cmd, "Preparing to run command with stdin.", "Successfully ran command with stdin.", "Failed to run command with stdin.", maskFrom(ctx), name, args)
+	return runAndWrap(cmd, r.ceiling(), "Preparing to run command with stdin.", "Successfully ran command with stdin.", "Failed to run command with stdin.", maskFrom(ctx), name, args)
 }
 
 // RunWithEnv executes name+args with env merged on top of the inherited
 // environment (os.Environ()) and returns trimmed stdout. Same error-wrapping
 // behavior as Run; the only difference is the child's environment.
-func (OSRunner) RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (string, error) {
+func (r OSRunner) RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = os.Environ()
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
-	return runAndWrap(cmd, "Preparing to run command with environment overrides.", "Successfully ran command with environment overrides.", "Failed to run command with environment overrides.", maskFrom(ctx), name, args)
+	return runAndWrap(cmd, r.ceiling(), "Preparing to run command with environment overrides.", "Successfully ran command with environment overrides.", "Failed to run command with environment overrides.", maskFrom(ctx), name, args)
 }
 
 // RunWithEnvFiltered executes name+args after removing unset from the inherited
 // environment and applying env overrides. An override wins when its key also
 // appears in unset, allowing callers to replace an ambient value deliberately.
-func (OSRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
+func (r OSRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // structural argv is the purpose of this execution seam
 	cmd.Env = filteredEnvironment(env, unset)
-	return runAndWrap(cmd, "Preparing to run command with a filtered environment.", "Successfully ran command with a filtered environment.", "Failed to run command with a filtered environment.", maskFrom(ctx), name, args)
+	return runAndWrap(cmd, r.ceiling(), "Preparing to run command with a filtered environment.", "Successfully ran command with a filtered environment.", "Failed to run command with a filtered environment.", maskFrom(ctx), name, args)
 }
 
 func filteredEnvironment(overrides map[string]string, unset []string) []string {
@@ -175,25 +193,39 @@ func filteredEnvironment(overrides map[string]string, unset []string) []string {
 // governs every rendering of argv and what the failure path keeps of stderr
 // and stdout, plus the stderr it logs (WithMaskedAssignments); cmd itself was
 // built from the real args.
-func runAndWrap(cmd *exec.Cmd, preparingMsg, successMsg, failureMsg string, mask argMask, name string, args []string) (string, error) {
+func runAndWrap(cmd *exec.Cmd, ceiling int, preparingMsg, successMsg, failureMsg string, mask argMask, name string, args []string) (string, error) {
 	shown := mask.args(args)
 	slog.Debug(preparingMsg, "cmd", name, "args", shown)
 	start := time.Now()
 
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	stderr := &tailBuffer{limit: maxStderrTail}
+	stdout := &ceilingWriter{limit: ceiling, proc: func() *os.Process { return cmd.Process }}
+	cmd.Stderr = stderr
+	cmd.Stdout = stdout
+	err := cmd.Run()
+	if stdout.over {
+		// Checked before err: the kill is ours, so err only says "signal:
+		// killed" or echoes the write error. No stdout rides along, masked or
+		// not, because a prefix is exactly what the ceiling refuses to return.
+		err = fmt.Errorf("%w (%d bytes)", ErrOutputTooLarge, ceiling)
+	}
 	if err != nil {
-		trimmed := mask.text(strings.TrimRight(string(out), "\n"))
-		if msg := mask.text(strings.TrimSpace(stderr.String())); msg != "" {
-			slog.Error(failureMsg, "cmd", name, "stderr", msg, "error", err)
-			return "", &CommandError{Name: name, Args: shown, Stderr: msg, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
+		// Empty after an overflow: ceilingWriter drops what it held.
+		trimmed := mask.text(strings.TrimRight(string(stdout.buf), "\n"))
+		tail, dropped := maskedTail(stderr, mask)
+		cmdErr := &CommandError{Name: name, Args: shown, Stderr: strings.TrimSpace(tail), StderrDropped: dropped, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
+		switch {
+		case cmdErr.Stderr != "" && dropped > 0:
+			slog.Error(failureMsg, "cmd", name, "stderr", cmdErr.Stderr, "stderr_dropped", dropped, "error", err)
+		case cmdErr.Stderr != "":
+			slog.Error(failureMsg, "cmd", name, "stderr", cmdErr.Stderr, "error", err)
+		default:
+			slog.Error(failureMsg, "cmd", name, "error", err)
 		}
-		slog.Error(failureMsg, "cmd", name, "error", err)
-		return "", &CommandError{Name: name, Args: shown, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
+		return "", cmdErr
 	}
 	slog.Debug(successMsg, "cmd", name, "duration", time.Since(start).Round(time.Millisecond))
-	return strings.TrimRight(string(out), "\n"), nil
+	return strings.TrimRight(string(stdout.buf), "\n"), nil
 }
 
 // RunInteractive wires the child to the real stdio so it can drive the tty.
@@ -208,37 +240,21 @@ func (OSRunner) RunInteractive(ctx context.Context, name string, args ...string)
 	return err
 }
 
-// RunStreaming connects a child to caller-supplied streams without buffering
-// stdout or stderr. Unlike the ordinary Runner methods it does not log or
-// return argv: kubectl's global flags can carry credentials, and a streaming
-// helper must not turn those into a second persistence surface. The child exit
-// code is retained on CommandError so an explicitly opted-in CLI can propagate
-// it.
-func (OSRunner) RunStreaming(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
-	slog.Debug("Preparing to run streaming command.", "cmd", name)
-	// name and args stay distinct all the way into os/exec; no shell parses
-	// them. StreamingRunner is the same process boundary as Runner.Run above.
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // structural argv is the purpose of this execution seam
-	cmd.Stdin = stdin
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	err := cmd.Run()
-	if err == nil {
-		slog.Debug("Streaming command exited.", "cmd", name)
-		return nil
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return &CommandError{Name: name, ExitCode: -1, Err: ctxErr}
-	}
-	return &CommandError{Name: name, ExitCode: exitCodeOf(err), Err: err}
-}
-
 // CommandError carries enough context to debug a failed shell-out without
 // leaking the whole environment.
 type CommandError struct {
-	Name   string
-	Args   []string
+	Name string
+	Args []string
+
+	// Stderr is the child's stderr, masked and trimmed. It is a tail, not
+	// the whole stream, whenever StderrDropped is nonzero.
 	Stderr string
+
+	// StderrDropped counts the bytes cut from the front of stderr before
+	// Stderr: those past the maxStderrTail cap, plus the few trimmed after
+	// masking so no fragment of a masked value survives the cut. Zero means
+	// Stderr is the whole stream.
+	StderrDropped int64
 
 	// Output is the child's captured stdout, even though the command
 	// failed — a nonzero exit doesn't mean stdout was empty (npm's
@@ -263,6 +279,9 @@ func (e *CommandError) Error() string {
 		cmd += " " + strings.Join(e.Args, " ")
 	}
 	if e.Stderr != "" {
+		if e.StderrDropped > 0 {
+			return cmd + ": [stderr truncated, " + strconv.FormatInt(e.StderrDropped, 10) + " earlier bytes dropped] " + e.Stderr
+		}
 		return cmd + ": " + e.Stderr
 	}
 	if e.Err == nil {

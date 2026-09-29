@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # forgectl `env` — safe .env management (forgectl#82)
 
 **Panel: 4 seats ran (plan-reviewer ×2, security-posture Opus, cameron-review) — 17 substantive findings, 15 folded in, 2 resolved by trimming the flagged surface. See § Panel review.**

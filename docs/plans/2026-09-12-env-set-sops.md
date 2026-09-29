@@ -1,5 +1,5 @@
 ---
-status: complete
+status: done
 branch: feat/env-set-sops
 base_branch: fix/any-file-confirm
 pr: forgectl#517

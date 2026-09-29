@@ -65,6 +65,24 @@ func trustFields(mapping *yaml.Node) (status, staleAfter string) {
 	return status, staleAfter
 }
 
+// orphanOKField reports whether a frontmatter mapping carries the boolean
+// scalar orphan_ok: true. Anything else (false, a string such as "yes", a
+// list, a mapping; yaml.v3 refuses to decode a string into a bool) is not an opt-out, so a typo leaves the orphan reported.
+func orphanOKField(mapping *yaml.Node) bool {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		key, value := mapping.Content[i], mapping.Content[i+1]
+		if key.Value != "orphan_ok" || value.Kind != yaml.ScalarNode {
+			continue
+		}
+		var ok bool
+		return value.Decode(&ok) == nil && ok
+	}
+	return false
+}
+
 // frontmatterTrust returns a YAML frontmatter block's raw status and
 // stale_after values. A TOML (+++) block yields none: OKF frontmatter is
 // YAML, the same scoping frontmatterRoot applies.

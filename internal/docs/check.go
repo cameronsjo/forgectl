@@ -83,10 +83,13 @@ type CheckedRoot struct {
 // CheckSummary counts findings by kind, plus the out-of-root links Check
 // deliberately did not report.
 type CheckSummary struct {
-	BrokenLinks      int `json:"broken_links"`
-	AmbiguousLinks   int `json:"ambiguous_links"`
-	BrokenAnchors    int `json:"broken_anchors"`
-	Orphans          int `json:"orphans"`
+	BrokenLinks    int `json:"broken_links"`
+	AmbiguousLinks int `json:"ambiguous_links"`
+	BrokenAnchors  int `json:"broken_anchors"`
+	Orphans        int `json:"orphans"`
+	// IgnoredOrphans counts orphans a page opted out of with orphan_ok: true.
+	// They are not findings and do not affect the exit code.
+	IgnoredOrphans   int `json:"ignored_orphans"`
 	OutsideRootLinks int `json:"outside_root_links"`
 	Deprecated       int `json:"deprecated"`
 	Stale            int `json:"stale"`
@@ -193,9 +196,13 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 			})
 		}
 		if root.OnlyFile == "" && len(idx.Backlinks(from)) == 0 && !dirInbound[i] && !isRootIndex(from.RelPath) {
-			report.Findings = append(report.Findings, Finding{
-				Kind: FindingOrphan, Root: from.RootLabel, Path: from.RelPath,
-			})
+			if from.OrphanOK {
+				report.Summary.IgnoredOrphans++
+			} else {
+				report.Findings = append(report.Findings, Finding{
+					Kind: FindingOrphan, Root: from.RootLabel, Path: from.RelPath,
+				})
+			}
 		}
 		tr := evalTrust(from.Status, from.StaleAfter, now)
 		if tr.Deprecated {
