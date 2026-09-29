@@ -229,10 +229,11 @@ func undatedReason(name string) string {
 	return "its name carries no readable set-aside timestamp, so nothing established its age"
 }
 
-// classifyRepairRows decides what compaction may drop, over the log's RAW
-// LINES. It is pure, and it is deliberately conservative in four directions at
-// once — every one of them a shape where dropping would destroy the only
-// pointer left to something on disk:
+// repairGroup is everything compaction needs to know about one row id, and
+// the only per-id state the two passes hold. What compaction may drop is
+// decided per group, over the log's RAW LINES, and it is deliberately
+// conservative in four directions at once — every one of them a shape where
+// dropping would destroy the only pointer left to something on disk:
 //
 //   - an UNPAIRED intent is kept at any age. That row is the signal that a
 //     repair died mid-delete, and its workspace field is the only thing naming
@@ -248,35 +249,134 @@ func undatedReason(name string) string {
 //
 // What is left is exactly the settled history: an intent with an applied or
 // failed completion beside it, both older than the cutoff.
-func classifyRepairRows(lines [][]byte, cutoff time.Time) ([][]byte, int) {
-	type group struct {
-		intent    bool
-		completed bool
-		// datable is false as soon as one row in the group carries no
-		// timestamp; old is false as soon as one row is inside the window.
-		datable bool
-		old     bool
+type repairGroup struct {
+	intent    bool
+	completed bool
+	// datable is false as soon as one row in the group carries no
+	// timestamp; old is false as soon as one row is inside the window.
+	datable bool
+	old     bool
+	// rows counts the lines carrying this id, so pass one can report what
+	// the copy will drop without holding a single one of them.
+	rows int
+}
+
+func (g *repairGroup) settled() bool { return g.intent && g.completed && g.datable && g.old }
+
+// errRepairLogChanged is pass two finding a different log from the one pass
+// one planned over. The lifecycle lock is what rules that out — every writer
+// of the log appends under it, and compaction holds it across both passes — so
+// this is a tripwire for a writer outside that contract (a hand edit, a second
+// host on a shared $HOME), not a path any forgectl process takes.
+var errRepairLogChanged = errors.New("the repair audit log changed between the compaction's two passes; " +
+	"nothing was dropped")
+
+// repairLogPlan is pass one's result: the per-id classification, and the
+// counts pass two must reproduce exactly.
+//
+// MEMORY IS BOUNDED BY THE NUMBER OF DISTINCT ROW IDS, not by the log's size:
+// one repairGroup plus its id string per distinct id that appears on a
+// parseable line. An id comes off a line under maxRepairLogLineBytes, so no
+// single id exceeds that bound either. No line is held: both passes read
+// through one maxRepairLogLineBytes buffer, and an over-long line — the only
+// kind that does not fit it — streams through in buffer-sized chunks.
+type repairLogPlan struct {
+	groups map[string]*repairGroup
+	// size is the bytes pass one read. Pass two refuses unless it reads the
+	// same number, which catches an append between the passes.
+	size    int64
+	kept    int
+	dropped int
+}
+
+// decodeRepairLine is the ONE parse both passes run, so pass two cannot
+// classify a line differently from pass one. A line with no id pairs with
+// nothing and is reported as not parsed.
+func decodeRepairLine(line []byte) (RepairRow, bool) {
+	var row RepairRow
+	if err := json.Unmarshal(line, &row); err != nil || row.ID == "" {
+		return RepairRow{}, false
 	}
-	groups := make(map[string]*group, len(lines))
-	ids := make([]string, len(lines))
-	for i, line := range lines {
-		// An over-long line is kept unparsed even if it would decode: every
-		// reader skips it (readRepairLogTail), so no reader could have seen
-		// it settle, and the rewriter must not be the one place it counts.
-		// The bound matches readRepairLogTail's buffer exactly.
-		if len(line) >= maxRepairLogLineBytes {
+	return row, true
+}
+
+// drops reports whether pass two leaves line out.
+func (p *repairLogPlan) drops(line []byte) bool {
+	row, ok := decodeRepairLine(line)
+	if !ok {
+		return false
+	}
+	g := p.groups[row.ID]
+	return g != nil && g.settled()
+}
+
+// walkRepairLog reads the log once, oldest line first, holding no more than
+// one maxRepairLogLineBytes buffer, and returns the bytes it read.
+//
+// A line under the bound goes to line, without its '\n' and only if it is not
+// empty; the slice is borrowed and valid only for the call. An over-long line
+// — maxRepairLogLineBytes or more before its '\n', the exact bound
+// readRepairLogTail skips at, since both read through the same buffer size —
+// goes to long in buffer-sized chunks instead, never assembled, with end set on
+// its last chunk (from which the '\n' is stripped). Only the '\n' is ever
+// stripped: a '\r' before it is content. A final line with no '\n' is
+// delivered like any other.
+func walkRepairLog(r io.Reader, line func([]byte) error, long func(chunk []byte, end bool) error) (int64, error) {
+	br := bufio.NewReaderSize(r, maxRepairLogLineBytes)
+	var n int64
+	for {
+		b, err := br.ReadSlice('\n')
+		n += int64(len(b))
+		if errors.Is(err, bufio.ErrBufferFull) {
+			for errors.Is(err, bufio.ErrBufferFull) {
+				if lerr := long(b, false); lerr != nil {
+					return n, lerr
+				}
+				b, err = br.ReadSlice('\n')
+				n += int64(len(b))
+			}
+			if err != nil && !errors.Is(err, io.EOF) {
+				return n, fmt.Errorf("read repair audit log: %w", err)
+			}
+			if lerr := long(bytes.TrimSuffix(b, []byte("\n")), true); lerr != nil {
+				return n, lerr
+			}
+			if err != nil {
+				return n, nil // io.EOF, after an over-long final line with no '\n'
+			}
 			continue
 		}
-		var row RepairRow
-		if err := json.Unmarshal(line, &row); err != nil || row.ID == "" {
-			continue
+		if err != nil && !errors.Is(err, io.EOF) {
+			return n, fmt.Errorf("read repair audit log: %w", err)
 		}
-		ids[i] = row.ID
-		g := groups[row.ID]
+		if b = bytes.TrimSuffix(b, []byte("\n")); len(b) > 0 {
+			if lerr := line(b); lerr != nil {
+				return n, lerr
+			}
+		}
+		if err != nil {
+			return n, nil // io.EOF, after a final line with no '\n'
+		}
+	}
+}
+
+// scanRepairLog is pass one: it classifies every id in r and counts what the
+// copy will keep and drop, holding nothing per line.
+func scanRepairLog(r io.Reader, cutoff time.Time) (*repairLogPlan, error) {
+	p := &repairLogPlan{groups: make(map[string]*repairGroup)}
+	lines := 0
+	size, err := walkRepairLog(r, func(line []byte) error {
+		lines++
+		row, ok := decodeRepairLine(line)
+		if !ok {
+			return nil
+		}
+		g := p.groups[row.ID]
 		if g == nil {
-			g = &group{datable: true, old: true}
-			groups[row.ID] = g
+			g = &repairGroup{datable: true, old: true}
+			p.groups[row.ID] = g
 		}
+		g.rows++
 		switch row.Outcome {
 		case repairOutcomeIntent:
 			g.intent = true
@@ -289,17 +389,78 @@ func classifyRepairRows(lines [][]byte, cutoff time.Time) ([][]byte, int) {
 		case !row.TS.Before(cutoff):
 			g.old = false
 		}
-	}
-	keep := make([][]byte, 0, len(lines))
-	dropped := 0
-	for i, line := range lines {
-		if g := groups[ids[i]]; g != nil && g.intent && g.completed && g.datable && g.old {
-			dropped++
-			continue
+		return nil
+	}, func(_ []byte, end bool) error {
+		// An over-long line is kept unparsed even if it would decode: every
+		// reader skips it (readRepairLogTail), so no reader could have seen
+		// it settle, and the rewriter must not be the one place it counts.
+		if end {
+			lines++
 		}
-		keep = append(keep, line)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return keep, dropped
+	p.size = size
+	for _, g := range p.groups {
+		if g.settled() {
+			p.dropped += g.rows
+		}
+	}
+	p.kept = lines - p.dropped
+	return p, nil
+}
+
+// copyKept is pass two: it re-reads r, which must be the log pass one planned
+// over, and writes every line the plan keeps to w, each terminated by '\n' —
+// so an unterminated final line gains one, and an empty line is gone. Kept
+// lines are written byte for byte, an over-long one included.
+//
+// It refuses with errRepairLogChanged when r is not the log the plan was made
+// over, measured by bytes read and by the kept and dropped counts; w then
+// holds a partial copy the caller must discard.
+func (p *repairLogPlan) copyKept(r io.Reader, w io.Writer) error {
+	bw := bufio.NewWriterSize(w, maxRepairLogLineBytes)
+	kept, dropped := 0, 0
+	write := func(b []byte) error {
+		if _, err := bw.Write(b); err != nil {
+			return fmt.Errorf("write temp audit log: %w", err)
+		}
+		return nil
+	}
+	nl := []byte("\n")
+	size, err := walkRepairLog(r, func(line []byte) error {
+		if p.drops(line) {
+			dropped++
+			return nil
+		}
+		kept++
+		if err := write(line); err != nil {
+			return err
+		}
+		return write(nl)
+	}, func(chunk []byte, end bool) error {
+		if err := write(chunk); err != nil {
+			return err
+		}
+		if !end {
+			return nil
+		}
+		kept++
+		return write(nl)
+	})
+	if err != nil {
+		return err
+	}
+	if size != p.size || kept != p.kept || dropped != p.dropped {
+		return fmt.Errorf("%w (planned %d bytes, %d kept, %d dropped; read %d bytes, %d kept, %d dropped)",
+			errRepairLogChanged, p.size, p.kept, p.dropped, size, kept, dropped)
+	}
+	if err := bw.Flush(); err != nil {
+		return fmt.Errorf("write temp audit log: %w", err)
+	}
+	return nil
 }
 
 // asideCandidate is one set-aside file the sweep enumerated, pinned at the
@@ -372,7 +533,7 @@ func (c *Client) pruneLocked(ctx context.Context, opts PruneOpts) (PruneReport, 
 	removable := c.screenLiveWindows(ctx, candidates)
 
 	cutoff := now.Add(-opts.LogRetention)
-	lines, readErr := c.readRepairLogLines()
+	plan, readErr := c.scanRepairLogFile(cutoff)
 	dropped := 0
 	if readErr != nil {
 		// An unreadable log refuses COMPACTION only. The removals below still
@@ -383,8 +544,7 @@ func (c *Client) pruneLocked(ctx context.Context, opts PruneOpts) (PruneReport, 
 		slog.Warn("Refusing to compact the repair audit log: it could not be read back.",
 			"path", c.repairLogPath(), "error", readErr)
 	} else {
-		keep, n := classifyRepairRows(lines, cutoff)
-		dropped, report.Log.Kept = n, len(keep)
+		dropped, report.Log.Kept = plan.dropped, plan.kept
 	}
 
 	// NOTHING REMOVABLE RETURNS BEFORE THE GATE. A no-op sweep has nothing to
@@ -716,16 +876,15 @@ func readFileInRoot(root *os.Root, name string) ([]byte, error) {
 // and recomputing over the file that is actually on disk is the only way to see
 // them at all.
 func (c *Client) compactRepairLog(cutoff time.Time, out *PruneLog) {
-	lines, err := c.readRepairLogLines()
+	plan, err := c.scanRepairLogFile(cutoff)
 	if err != nil {
 		out.Outcome = pruneOutcomeRefused
 		out.Error = termsafe.SafeLine(err.Error())
 		return
 	}
-	keep, dropped := classifyRepairRows(lines, cutoff)
-	if dropped == 0 {
+	if plan.dropped == 0 {
 		out.Outcome = pruneOutcomeUnchanged
-		out.Kept = len(keep)
+		out.Kept = plan.kept
 		return
 	}
 	// The count excludes this row itself, which is appended next and kept by
@@ -734,7 +893,7 @@ func (c *Client) compactRepairLog(cutoff time.Time, out *PruneLog) {
 		RecordPath: c.repairLogPath(),
 		Verb:       auditVerbPrune,
 		Mode:       RepairModePrune,
-		Detail:     fmt.Sprintf("dropped %d rows, kept %d", dropped, len(keep)),
+		Detail:     fmt.Sprintf("dropped %d rows, kept %d", plan.dropped, plan.kept),
 	}
 	rowID, err := c.beginRepairRow(row)
 	if err != nil {
@@ -742,15 +901,8 @@ func (c *Client) compactRepairLog(cutoff time.Time, out *PruneLog) {
 		out.Error = termsafe.SafeLine(err.Error())
 		return
 	}
-	lines, err = c.readRepairLogLines()
+	plan, err = c.rewriteRepairLog(cutoff)
 	if err != nil {
-		out.Outcome = pruneOutcomeFailed
-		out.Error = termsafe.SafeLine(err.Error())
-		c.completeRepairRow(rowID, row, err)
-		return
-	}
-	keep, dropped = classifyRepairRows(lines, cutoff)
-	if err := c.writeRepairLogAtomic(keep); err != nil {
 		out.Outcome = pruneOutcomeFailed
 		out.Error = termsafe.SafeLine(err.Error())
 		c.completeRepairRow(rowID, row, err)
@@ -760,24 +912,15 @@ func (c *Client) compactRepairLog(cutoff time.Time, out *PruneLog) {
 	}
 	c.completeRepairRow(rowID, row, nil)
 	out.Outcome = pruneOutcomeCompacted
-	out.Dropped = dropped
-	out.Kept = len(keep)
+	out.Dropped = plan.dropped
+	out.Kept = plan.kept
 	slog.Info("Successfully compacted the pr repair audit log.",
-		"path", c.repairLogPath(), "dropped", dropped, "kept", len(keep))
+		"path", c.repairLogPath(), "dropped", plan.dropped, "kept", plan.kept)
 }
 
-// readRepairLogLines returns the log's raw lines, oldest first, each without
-// its '\n'. It is the RAW-BYTES counterpart to readRepairLogTail, which decodes
-// and therefore skips what it cannot parse — the one thing a rewriter must
-// never do.
-//
-// A line is NOT bounded here, unlike in readRepairLogTail: an over-long line
-// is returned whole so compaction can carry it through byte for byte
-// (forgectl#544). Bounding it would either fail the read, which refused every
-// --prune from then on, or truncate the line, which is dropping by another
-// name. The whole log is already held in memory on this path; one more long
-// line changes nothing about that.
-func (c *Client) readRepairLogLines() ([][]byte, error) {
+// openRepairLog opens the log for a compaction pass. A missing log is not an
+// error: it reads as empty, and f is nil.
+func (c *Client) openRepairLog() (*os.File, error) {
 	f, err := os.Open(c.repairLogPath()) //nolint:gosec // inside the 0700 sessions dir
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -785,31 +928,68 @@ func (c *Client) readRepairLogLines() ([][]byte, error) {
 		}
 		return nil, fmt.Errorf("read repair audit log: %w", termsafe.Error(err))
 	}
-	defer func() { _ = f.Close() }()
-
-	var lines [][]byte
-	r := bufio.NewReaderSize(f, maxRepairLogLineBytes)
-	for {
-		// ReadBytes returns a fresh slice, so no clone is needed. Only the
-		// '\n' is stripped: a '\r' before it is content, kept verbatim.
-		line, rerr := r.ReadBytes('\n')
-		if rerr != nil && !errors.Is(rerr, io.EOF) {
-			return nil, fmt.Errorf("read repair audit log: %w", rerr)
-		}
-		if line = bytes.TrimSuffix(line, []byte("\n")); len(line) > 0 {
-			lines = append(lines, line)
-		}
-		if rerr != nil {
-			return lines, nil // io.EOF, after a final line with no '\n'
-		}
-	}
+	return f, nil
 }
 
-// writeRepairLogAtomic replaces the log with lines, mirroring
-// writeRecordAtomic's temp-write-sync-rename-dirsync shape. A failure at any
-// point leaves the previous log exactly as it was, which is the only acceptable
+// scanRepairLogFile runs pass one over the log on disk. It is the RAW-BYTES
+// counterpart to readRepairLogTail, which decodes and therefore skips what it
+// cannot parse — the one thing a rewriter must never do.
+//
+// A line is NOT refused for its length, unlike in readRepairLogTail: an
+// over-long line is counted as kept, so compaction carries it through byte for
+// byte (forgectl#544). Refusing it would refuse every --prune from then on, and
+// truncating it would be dropping by another name. It is not held either
+// (forgectl#554): walkRepairLog streams it, so a log with no '\n' at all costs
+// one buffer, not its size.
+func (c *Client) scanRepairLogFile(cutoff time.Time) (*repairLogPlan, error) {
+	f, err := c.openRepairLog()
+	if err != nil {
+		return nil, err
+	}
+	if f == nil {
+		return scanRepairLog(bytes.NewReader(nil), cutoff)
+	}
+	defer func() { _ = f.Close() }()
+	return scanRepairLog(f, cutoff)
+}
+
+// rewriteRepairLog runs both passes over ONE open descriptor — plan, rewind,
+// copy — and returns the plan the replacement was written from.
+//
+// The caller holds the lifecycle lock, and every writer of the log appends
+// under it, so the file cannot change between the passes; the one descriptor
+// additionally pins both passes to the same inode. copyKept still checks, and a
+// log that changed anyway refuses rather than dropping rows pass one never saw.
+func (c *Client) rewriteRepairLog(cutoff time.Time) (*repairLogPlan, error) {
+	f, err := c.openRepairLog()
+	if err != nil {
+		return nil, err
+	}
+	if f == nil {
+		plan, perr := scanRepairLog(bytes.NewReader(nil), cutoff)
+		if perr != nil {
+			return nil, perr
+		}
+		return plan, c.writeRepairLogAtomic(plan, bytes.NewReader(nil))
+	}
+	defer func() { _ = f.Close() }()
+	plan, err := scanRepairLog(f, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewind repair audit log for the copy: %w", err)
+	}
+	return plan, c.writeRepairLogAtomic(plan, f)
+}
+
+// writeRepairLogAtomic replaces the log with the lines plan keeps out of src,
+// mirroring writeRecordAtomic's temp-write-sync-rename-dirsync shape. The
+// kept lines stream from src into the temp file; nothing is assembled in
+// memory. A failure at any point, the copy's changed-log refusal included,
+// leaves the previous log exactly as it was, which is the only acceptable
 // failure mode for the file that is sometimes the last pointer to a clean room.
-func (c *Client) writeRepairLogAtomic(lines [][]byte) error {
+func (c *Client) writeRepairLogAtomic(plan *repairLogPlan, src io.Reader) error {
 	suffix, err := randomSuffix()
 	if err != nil {
 		return fmt.Errorf("derive temp audit log name: %w", err)
@@ -826,22 +1006,10 @@ func (c *Client) writeRepairLogAtomic(lines [][]byte) error {
 		}
 	}
 
-	var buf bytes.Buffer
-	for _, line := range lines {
-		buf.Write(line)
-		buf.WriteByte('\n')
-	}
-	data := buf.Bytes()
-	n, err := f.Write(data)
-	if err != nil {
+	if err := plan.copyKept(src, f); err != nil {
 		_ = f.Close()
 		discard()
-		return fmt.Errorf("write temp audit log: %w", err)
-	}
-	if n != len(data) {
-		_ = f.Close()
-		discard()
-		return fmt.Errorf("write temp audit log: %w (wrote %d of %d bytes)", io.ErrShortWrite, n, len(data))
+		return err
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
