@@ -16,11 +16,12 @@ package docs
 //       as ErrNotFound (wrapping fs.ErrNotExist), never ErrOutsideRoot
 //   [x] Unhappy: a missing nested path is ErrNotFound; an existing file through
 //       an escaping directory symlink stays ErrOutsideRoot
-//   [x] Unhappy: a missing path is ErrOutsideRoot, not ErrNotFound, when
-//       reached through a symlink that leaves the root (existing or dangling
-//       target alike), so the error is no oracle for outside paths; through an
-//       in-root symlink, including a chain and a dangling one, it stays
-//       ErrNotFound
+//   [x] Unhappy: a missing path reached through a symlink that leaves the root
+//       is ErrOutsideRoot whether the outside target exists or not, including
+//       a relative or absolute "s/../x" the kernel resolves outside
+//   [x] Happy: a miss reached through in-root symlinks is ErrNotFound, up to
+//       os.Root's 8-symlink limit; past it, or through an absolute target,
+//       it denies as ErrOutsideRoot
 //   [x] Unhappy: root "/a/b" does not match a resolved path under sibling "/a/bc"
 //
 // AllowedExt (Classification: security gate — extension allowlist)
@@ -29,6 +30,7 @@ package docs
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -199,28 +201,77 @@ func TestResolveInRoot_NotFoundSplitKeepsEscapesClosed(t *testing.T) {
 
 // Through an escaping symlink, ResolveInRoot must answer the same whether or
 // not the outside path exists; otherwise "no such file" versus "escapes"
-// reveals it. Only a miss the walk reaches without leaving the root is
-// ErrNotFound.
-func TestResolveInRoot_MissingPathClassifiedWithoutLookingOutside(t *testing.T) {
-	outside := t.TempDir()
-	if err := os.WriteFile(filepath.Join(outside, "exists.md"), []byte("# s"), 0o600); err != nil {
-		t.Fatal(err)
+// reveals it. Each escape case runs twice, outside target missing and then
+// present, and must be ErrOutsideRoot both times.
+func TestResolveInRoot_MissingPathThroughEscapeIsNoOracle(t *testing.T) {
+	for _, present := range []bool{false, true} {
+		outside := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(outside, "d1", "d2"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if present {
+			for _, f := range []string{filepath.Join("d1", "x"), "target.md", "gone.md"} {
+				if err := os.WriteFile(filepath.Join(outside, f), []byte("# s"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		rootDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(rootDir, "real"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		// Built with sep, never filepath.Join: Join would Clean "s/../x" to
+		// "x" and erase the case under test.
+		sep := string(filepath.Separator)
+		links := map[string]string{
+			"out":     outside,                                         // dir symlink leaving the root
+			"dangout": filepath.Join(outside, "gone.md"),               // dangling unless present
+			"s":       filepath.Join(outside, "d1", "d2"),              // the ".." below climbs from d2
+			"a":       "s" + sep + ".." + sep + "x",                    // kernel: outside/d1/x; lexical: root/x
+			"abs":     rootDir + sep + "s" + sep + ".." + sep + "x",    // the same, absolute
+			"hop":     "real" + sep + ".." + sep + "out" + sep + "tgt", // in-root hop onto an escape
+		}
+		for name, dest := range links {
+			if err := os.Symlink(dest, filepath.Join(rootDir, name)); err != nil {
+				t.Skipf("symlink not supported in this environment: %v", err)
+			}
+		}
+		root := mustCanonicalRoot(t, rootDir)
+
+		for _, rel := range []string{"a", "abs", "out/target.md", "out/no/such/dir.md", "dangout", "hop"} {
+			got, err := ResolveInRoot(root, rel)
+			if got != "" || !errors.Is(err, ErrOutsideRoot) || errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("outside present=%v: ResolveInRoot(%q) = %q, %v, want \"\", ErrOutsideRoot", present, rel, got, err)
+			}
+		}
 	}
+}
+
+// A miss reached without leaving the root is ErrNotFound, through in-root
+// symlinks too. os.Root is the judge: it follows at most 8 symlinks
+// (rootMaxSymlinks in go1.26) and reads any absolute symlink target as an
+// escape, so a longer chain or an absolute in-root target denies as
+// ErrOutsideRoot. Both are fail-closed and say nothing about outside paths.
+func TestResolveInRoot_MissingPathInsideRootIsNotFound(t *testing.T) {
 	rootDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(rootDir, "real"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	links := map[string]string{
-		"out":      outside,                              // dir symlink leaving the root
-		"dangout":  filepath.Join(outside, "gone.md"),    // dangling, pointing outside
-		"in":       "real",                               // relative, in-root
-		"chain":    "in",                                 // in-root symlink to a symlink
-		"dangin":   filepath.Join(rootDir, "missing.md"), // dangling, pointing inside
-		"inthenup": filepath.Join("real", "..", "out"),   // in-root hop onto an escape
+		"in":        "real",                               // relative, in-root
+		"chain":     "in",                                 // in-root symlink to a symlink
+		"dangin":    "missing.md",                         // dangling, relative, in-root
+		"danginabs": filepath.Join(rootDir, "missing.md"), // dangling, absolute, in-root
 	}
-	// Relative to real/, the directory holding it, not to the root: read from
-	// the root, "../in" would leave it.
+	// Relative to real/, the directory holding it: read from the root,
+	// "../in" would leave it.
 	links[filepath.Join("real", "up")] = filepath.Join("..", "in")
+	prev := "missing.md"
+	for i := 1; i <= 60; i++ {
+		name := fmt.Sprintf("c%d", i)
+		links[name] = prev
+		prev = name
+	}
 	for name, dest := range links {
 		if err := os.Symlink(dest, filepath.Join(rootDir, name)); err != nil {
 			t.Skipf("symlink not supported in this environment: %v", err)
@@ -232,24 +283,20 @@ func TestResolveInRoot_MissingPathClassifiedWithoutLookingOutside(t *testing.T) 
 		rel  string
 		want error
 	}{
-		{"out/missing.md", ErrOutsideRoot},
-		{"out/exists.md", ErrOutsideRoot},
-		{"out/no/such/dir.md", ErrOutsideRoot},
-		{"dangout", ErrOutsideRoot},
-		{"inthenup/missing.md", ErrOutsideRoot},
+		{"missing.md", ErrNotFound},
 		{"in/missing.md", ErrNotFound},
 		{"chain/missing.md", ErrNotFound},
 		{"dangin", ErrNotFound},
 		{"real/up/missing.md", ErrNotFound},
-		{"missing.md", ErrNotFound},
+		{"c8", ErrNotFound},
+		{"c9", ErrOutsideRoot},
+		{"c60", ErrOutsideRoot},
+		{"danginabs", ErrOutsideRoot},
 	}
 	for _, c := range cases {
 		got, err := ResolveInRoot(root, c.rel)
 		if got != "" || !errors.Is(err, c.want) {
 			t.Errorf("ResolveInRoot(%q) = %q, %v, want \"\", %v", c.rel, got, err, c.want)
-		}
-		if c.want == ErrOutsideRoot && errors.Is(err, fs.ErrNotExist) {
-			t.Errorf("ResolveInRoot(%q): err = %v must not wrap fs.ErrNotExist", c.rel, err)
 		}
 	}
 }

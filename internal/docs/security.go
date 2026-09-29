@@ -17,12 +17,12 @@ import (
 // interface).
 var ErrOutsideRoot = errors.New("path escapes its configured root")
 
-// ErrNotFound indicates that the requested path is missing, and that the
-// missing component lies inside its root: every directory above it, and every
-// symlink on the way, stays within the root. A path missing beyond a symlink
-// that leaves the root is ErrOutsideRoot instead, whether or not the outside
-// target exists, so the choice between the two errors never reveals anything
-// about the filesystem outside the root. It wraps fs.ErrNotExist, so
+// ErrNotFound indicates that the requested path is missing, and that os.Root
+// reached the missing component without leaving the root: no symlink or ".."
+// on the way pointed outside it. A path missing beyond a symlink that leaves
+// the root is ErrOutsideRoot instead, whether or not the outside target
+// exists, so the choice between the two errors never reveals anything about
+// the filesystem outside the root. It wraps fs.ErrNotExist, so
 // errors.Is(err, fs.ErrNotExist) holds. It is a denial like ErrOutsideRoot,
 // never a path to serve: it only keeps a missing file from being reported as
 // an escape.
@@ -87,8 +87,9 @@ func withinRoot(root, candidate string) bool {
 //  3. filepath.EvalSymlinks resolves any symlink IN the joined path — a
 //     symlink living inside root but pointing outside it. Every EvalSymlinks
 //     error denies; it never falls through to serving a not-yet-resolved
-//     path. A missing path (fs.ErrNotExist) denies with whatever
-//     classifyMissing decides, and any other failure with ErrOutsideRoot.
+//     path. A missing path (fs.ErrNotExist) is re-resolved through os.Root
+//     (classifyMissing) and denies with ErrNotFound only when the miss lies
+//     inside the root; every other failure denies with ErrOutsideRoot.
 //  4. The resolved path is re-checked against the canonical root with
 //     withinRoot's trailing-separator guard — step 2's Join alone doesn't
 //     catch a symlink hop discovered in step 3.
@@ -115,78 +116,31 @@ func ResolveInRoot(root, rel string) (string, error) {
 	return resolved, nil
 }
 
-// maxSymlinkHops bounds the symlinks classifyMissing follows, as the OS bounds
-// its own resolution (ELOOP). A path needing more denies as an escape.
-const maxSymlinkHops = 40
-
 // classifyMissing picks the denial for a path EvalSymlinks reported missing,
-// without letting the answer depend on anything outside root. It walks rel
-// (cleaned, rooted at root) one component at a time with Lstat, from root:
+// so the answer never depends on anything outside root. It re-resolves rel
+// (cleaned and rooted at root) through os.Root, which follows symlinks
+// component by component with openat and refuses, before touching the
+// target, any symlink or ".." that would leave the root. An absolute symlink
+// target counts as leaving, even one naming a path inside the root.
 //
-//   - A missing component is ErrNotFound. The walk reached its parent
-//     without leaving root, so the miss is inside the root.
-//   - A symlink whose target lies lexically outside root is ErrOutsideRoot,
-//     whether that target exists or not. It is never followed, so nothing
-//     outside the root is ever looked at.
-//   - A symlink whose target lies inside root restarts the walk at that
-//     target, so a chain of in-root symlinks is judged hop by hop.
-//   - Anything else (another Lstat error, too many hops, a walk that finds
-//     every component present after all) is ErrOutsideRoot: fail closed.
-//
-// The walk only descends through real directories: rel carries no ".."
-// after ResolveInRoot's Clean, and a relative symlink target is joined onto
-// the symlink-free directory holding it, so the lexical check is exact.
+// Only a miss os.Root reaches without leaving the root is ErrNotFound. In
+// go1.26 os.Root reports an escape as a *PathError wrapping the unexported
+// errPathEscapes ("path escapes from parent"), which does not match
+// fs.ErrNotExist, so errors.Is(err, fs.ErrNotExist) is exactly "missing
+// inside the root". Every other result, including os.Root's own 8-symlink
+// limit (ELOOP) and a Stat that now succeeds, is ErrOutsideRoot.
 func classifyMissing(root, rel string) error {
-	parts := splitRel(rel)
-	cur := root
-	hops := 0
-	for i := 0; i < len(parts); i++ {
-		next := filepath.Join(cur, parts[i])
-		info, err := os.Lstat(next)
-		if errors.Is(err, fs.ErrNotExist) {
-			return ErrNotFound
-		}
-		if err != nil {
-			return ErrOutsideRoot
-		}
-		if info.Mode()&fs.ModeSymlink == 0 {
-			cur = next
-			continue
-		}
-		hops++
-		if hops > maxSymlinkHops {
-			return ErrOutsideRoot
-		}
-		dest, err := os.Readlink(next)
-		if err != nil {
-			return ErrOutsideRoot
-		}
-		if !filepath.IsAbs(dest) {
-			dest = filepath.Join(cur, dest)
-		}
-		dest = filepath.Clean(dest)
-		if !withinRoot(root, dest) {
-			return ErrOutsideRoot
-		}
-		destRel, err := filepath.Rel(root, dest)
-		if err != nil {
-			return ErrOutsideRoot
-		}
-		parts = append(splitRel(destRel), parts[i+1:]...)
-		cur = root
-		i = -1
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return ErrOutsideRoot
+	}
+	defer func() { _ = r.Close() }()
+	name := strings.TrimPrefix(rel, string(filepath.Separator))
+	if name == "" {
+		name = "."
+	}
+	if _, err = r.Stat(name); errors.Is(err, fs.ErrNotExist) {
+		return ErrNotFound
 	}
 	return ErrOutsideRoot
-}
-
-// splitRel splits a root-relative path into its components, dropping empty
-// and "." ones, so the root itself splits to none.
-func splitRel(rel string) []string {
-	var out []string
-	for _, p := range strings.Split(rel, string(filepath.Separator)) {
-		if p != "" && p != "." {
-			out = append(out, p)
-		}
-	}
-	return out
 }
