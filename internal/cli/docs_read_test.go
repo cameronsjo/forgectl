@@ -80,7 +80,7 @@ func canonical(t *testing.T, path string) string {
 
 func readArgv(t *testing.T, argvFile string) []string {
 	t.Helper()
-	raw, err := os.ReadFile(argvFile)
+	raw, err := os.ReadFile(filepath.Clean(argvFile))
 	if err != nil {
 		t.Fatalf("fake mdroll never ran (no argv recorded): %v", err)
 	}
