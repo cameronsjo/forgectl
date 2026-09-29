@@ -682,8 +682,9 @@ func RenderDoc(source []byte) (RenderedDoc, error) {
 func RenderDocFor(kind RootKind, source []byte, idx *Index, from *Doc) (RenderedDoc, error) {
 	var resolve wikilinkResolver
 	if idx != nil && from != nil {
+		budget := newFragmentBudget()
 		resolve = wikilinkResolver(func(ref LinkRef) (string, Miss) {
-			return idx.wikilinkTarget(from, ref)
+			return idx.wikilinkTarget(from, ref, budget)
 		})
 	}
 	rendered, hidden, err := renderHidden(source, kind, resolve)

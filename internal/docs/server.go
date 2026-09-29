@@ -211,6 +211,7 @@ func NewHandler(store *Store, events *Broker) http.Handler {
 	// katex.min.css names its fonts as url(fonts/…), relative to itself.
 	mux.HandleFunc("GET /assets/katex/fonts/{name}", serveWoff2(katexFonts, "assets/katex/fonts/"))
 	mux.HandleFunc("GET /assets/math-init.js", serveStaticJS(mathInitJS))
+	mux.HandleFunc("GET /assets/copy.js", serveStaticJS(copyJS))
 
 	mux.HandleFunc("GET "+eventsPath, handleEvents(events))
 	mux.HandleFunc("GET "+locatePath, handleLocate(store))

@@ -4,6 +4,15 @@
 // Runner, StreamingRunner, or SensitiveRunner. Production
 // uses OSRunner; tests inject a fake (see exec_test helpers / FakeRunner) so
 // command construction and branching can be asserted without a live tmux server.
+//
+// Trust model for child binaries: OSRunner passes bare names (gh, git, tmux, …)
+// to os/exec, so they resolve through the inherited PATH, and PATH is trusted
+// (a PATH pin would move the trust, not remove it). Two exceptions are
+// deliberate: sops is resolved once with LookPath and its absolute path is what
+// runs (internal/sops/driver.go, enforced by SensitiveRunner's validate), and
+// forgectl re-invoking itself (the sops editor) uses os.Executable(), never
+// argv[0]. Go's LookPath also refuses a PATH entry resolving to the current
+// directory (exec.ErrDot), which closes the cwd-planted-binary case. See #513.
 package exec
 
 import (
