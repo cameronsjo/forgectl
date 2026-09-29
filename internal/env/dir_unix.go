@@ -257,6 +257,22 @@ func (d *dirPin) rename(from, to string) error {
 	return unix.Renameat(d.fd, from, d.fd, to)
 }
 
+// names lists the pinned directory's entries.
+//
+// It opens "." relative to the descriptor rather than reading the descriptor
+// itself. Reading a directory advances its offset, and the pin outlives this
+// call, so the listing gets a descriptor of its own on the same inode. It is
+// the same directory, whatever the path now spells.
+func (d *dirPin) names() ([]string, error) {
+	fd, err := unix.Openat(d.fd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), ".")
+	defer func() { _ = f.Close() }()
+	return f.Readdirnames(-1)
+}
+
 // remove unlinks name inside the pinned directory.
 func (d *dirPin) remove(name string) error {
 	return unix.Unlinkat(d.fd, name, 0)

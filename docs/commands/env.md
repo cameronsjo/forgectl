@@ -52,6 +52,14 @@ The two obvious alternatives both fail that. `sops set file '["a"]["b"]' '"value
 
 **Gitignore `*.sops.yaml.lock`.** The lock helper leaves a non-secret sibling beside whatever it locked, by design.
 
+**After an interrupted write, the next one refuses.** Every scratch file or directory forgectl creates beside a target carries a short hash of the target's name: `.env-<hash>.<random>.tmp` for the atomic write, and `.forgectl-sops-<hash>-<random>/` for the `--sops` work directory. A catchable signal (SIGINT, SIGTERM, SIGHUP, SIGQUIT, an external SIGABRT) removes the plaintext on the way out. If the signal lands once `--sops` has launched the sops edit, forgectl can't tell whether sops has written the file, so it also keeps the file's pre-run ciphertext beside it as `.forgectl-sops-<hash>.backup`. forgectl does not restore it, because a sops process may still be writing. SIGKILL, a crash, or a power loss can leave these files behind, and they can hold a secret in plaintext, inside the repository, visible to `git status`. The next `env set` on the **same** target finds them while holding that target's lock and refuses. The refusal names every leftover and deletes nothing. A sops process that outlived forgectl may still be using the work directory, and the leftover is the only evidence that a write died partway through. To clear it:
+
+1. Make sure no `sops` process is still running against the file (`pgrep -fl sops`).
+2. If the refusal names a ciphertext backup (`.forgectl-sops-<hash>.backup`, or `backup` inside a work directory), the target may hold a value forgectl never verified. Compare the target with the backup, or with git, and restore whichever is right. Both are ciphertext, so `cp` the backup over the target, or run `git checkout -- <file>`.
+3. Delete the named leftovers.
+
+Leftovers from a forgectl version that predates these names (`.env-<random>.tmp`, `.forgectl-sops-<digits>/`) can't be tied to a target. They draw a warning on stderr rather than a refusal. Delete them by hand after checking them.
+
 **`env check`'s exit codes are part of its contract, not incidental:** exit `1` means the file and its example both exist but disagree — missing and/or extra keys (drift); exit `2` means either the env file or the `--example` file is absent, so no comparison could run at all. `env check --json` emits the drift as a single object on stdout, `{"missing":[...],"extra":[...]}`, for scripted callers.
 
 **Blessed value producers** for `env set`, non-inline patterns first:
