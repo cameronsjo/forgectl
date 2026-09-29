@@ -648,6 +648,25 @@ var outlineHeading = regexp.MustCompile(`(?s)<h([23]) id="([^"]+)">(.*?)</h[23]>
 // stripTags removes inline markup from a heading's rendered text.
 var stripTags = regexp.MustCompile(`<[^>]*>`)
 
+// outlineMath matches the math span math.go emits inside a heading. The
+// outline is plain text the client never typesets, so the span is reduced to
+// its TeX source with the $ delimiters dropped ("Energy E=mc^2", not
+// "Energy $E=mc^2$"). The class attribute is the exact one math.go writes.
+var outlineMath = regexp.MustCompile(`<span class="math math-(inline|display)">(.*?)</span>`)
+
+// outlineText renders a heading's inner HTML as outline text.
+func outlineText(inner string) string {
+	inner = outlineMath.ReplaceAllStringFunc(inner, func(span string) string {
+		m := outlineMath.FindStringSubmatch(span)
+		delim := "$"
+		if m[1] == "display" {
+			delim = mathDelim
+		}
+		return strings.TrimSuffix(strings.TrimPrefix(m[2], delim), delim)
+	})
+	return strings.TrimSpace(html.UnescapeString(stripTags.ReplaceAllString(inner, "")))
+}
+
 func extractOutline(rendered string) []OutlineItem {
 	var items []OutlineItem
 	for _, m := range outlineHeading.FindAllStringSubmatch(rendered, -1) {
@@ -661,7 +680,7 @@ func extractOutline(rendered string) []OutlineItem {
 		// "Q&amp;A".
 		items = append(items, OutlineItem{
 			Level: level,
-			Text:  strings.TrimSpace(html.UnescapeString(stripTags.ReplaceAllString(m[3], ""))),
+			Text:  outlineText(m[3]),
 			ID:    m[2],
 		})
 	}
