@@ -58,7 +58,6 @@ var jsonContractExempt = map[string]string{
 	"pr teardown":            "reports no state; it changes something and the exit code is the outcome",
 	"projects clone":         "reports no state; it changes something and the exit code is the outcome",
 	"projects pick":          "opens or attaches an interactive surface (browser, tmux, shell, container, editor session); it reports no state",
-	"projects pull-all":      "reports no state; it changes something and the exit code is the outcome",
 	"projects worktree":      "reports no state; it changes something and the exit code is the outcome",
 	"proxy off":              "the raw output is the payload (a file, log, doc or shell text to eval); wrapping it in JSON would break its consumers",
 	"proxy use":              "the raw output is the payload (a file, log, doc or shell text to eval); wrapping it in JSON would break its consumers",
