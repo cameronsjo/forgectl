@@ -35,6 +35,8 @@ workbench — no terminal-specific rendering, no popping between windows.
                                          already-running reader
   forgectl docs list [dir|file ...]      list the indexed docs, no server
   forgectl docs list --json              machine-readable output for scripts
+  forgectl docs search <query> [--json]  full-text search the indexed docs
+                                         (ripgrep backend)
 
 Diagrams render in the page: a fenced code block tagged mermaid becomes a live
 diagram themed from the same Artificer tokens as the rest of the reader, and
@@ -61,6 +63,7 @@ navigation cannot attach an Authorization header.`,
 		newDocsServeCmd(deps),
 		newDocsOpenCmd(deps),
 		newDocsListCmd(deps),
+		newDocsSearchCmd(deps),
 	)
 	return cmd
 }
