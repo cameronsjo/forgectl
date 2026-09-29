@@ -364,6 +364,12 @@ const (
 	// travels; the secret itself never enters an environment, which is
 	// readable from /proc on Linux for the lifetime of the process.
 	envKeySopsEditor = "EDITOR"
+
+	// envKeySopsTmpdir is where sops puts the decrypted copy of the WHOLE
+	// document that its editor edits. It is not part of the editor protocol:
+	// it confines that copy to forgectl's work directory. See
+	// ReplaceSopsTmpdir.
+	envKeySopsTmpdir = "TMPDIR"
 )
 
 // The sops editor protocol's variable names, EXPORTED so the reading side
@@ -389,7 +395,7 @@ const (
 	envOpUnset
 )
 
-// EnvMutation is one permitted change to the inherited environment. The four
+// EnvMutation is one permitted change to the inherited environment. The
 // constructors below are the entire vocabulary: a mutation naming any other
 // key, or carrying a value on an unset, cannot be constructed at all. Every
 // other inherited entry — including a backend CLI's own authentication
@@ -441,6 +447,21 @@ func UnsetTmux() EnvMutation {
 // argument — measured on 3.13.3, including the self-exec case.
 func ReplaceSopsEditor(command string) EnvMutation {
 	return EnvMutation{key: envKeySopsEditor, value: Secret(command), op: envOpReplace}
+}
+
+// ReplaceSopsTmpdir points sops' temp directory at path, which the driver
+// sets to its own work directory.
+//
+// `sops edit` decrypts the whole document into a file under os.TempDir while
+// its editor runs. Measured on 3.13.3 (cameronsjo/forgectl#560): SIGINT and
+// SIGTERM make sops remove it, but SIGHUP and SIGQUIT leave it, plaintext and
+// whole, and SIGHUP is what closing the terminal sends to forgectl and sops
+// alike. Inside the work directory, the plaintext guard removes it on those
+// signals, and after an uncatchable one the leftover scan refuses on the
+// directory that holds it. os.TempDir reads TMPDIR on unix only, so this
+// confines nothing on Windows.
+func ReplaceSopsTmpdir(path string) EnvMutation {
+	return EnvMutation{key: envKeySopsTmpdir, value: Secret(path), op: envOpReplace}
 }
 
 // ReplaceSopsWorkdir names the private directory holding the value file, the

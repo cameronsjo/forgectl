@@ -184,6 +184,11 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 			exec.ReplaceSopsWorkdir(work.dir),
 			exec.ReplaceSopsPath(strings.Join(segments, ".")),
 			exec.ReplaceSopsNonce(work.nonce),
+			// sops' decrypted copy of the whole document goes in the work
+			// directory, where the guard and the leftover scan cover it,
+			// rather than in $TMPDIR, where sops leaves it on SIGHUP and
+			// SIGQUIT (cameronsjo/forgectl#560).
+			exec.ReplaceSopsTmpdir(work.dir),
 		},
 		StdoutCap: outputCap,
 		StderrCap: outputCap,
@@ -431,7 +436,8 @@ func selfEditorCommand() (string, error) {
 }
 
 // workDir is the private 0700 directory holding the value, the nonce, the
-// backup, and the outcome for one run.
+// backup, and the outcome for one run. It is also the edit call's TMPDIR, so
+// sops' decrypted copy of the whole document lives here while the editor runs.
 type workDir struct {
 	dir    string
 	nonce  string

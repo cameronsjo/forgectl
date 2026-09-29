@@ -161,7 +161,7 @@ func scanLeftovers(t Target) error {
 	}
 	for _, name := range workDirs {
 		line := fmt.Sprintf(
-			"%s: the work directory of an interrupted `env set --sops`; it may hold a plaintext value, and a sops process that outlived forgectl may still be using it. Make sure no sops process is running, then delete it",
+			"%s: the work directory of an interrupted `env set --sops`; it may hold a plaintext value or sops' decrypted copy of the whole file, and a sops process that outlived forgectl may still be using it. Make sure no sops process is running, then delete it",
 			rel(name))
 		if _, _, exists, err := t.dir.lstat(name + "/backup"); err == nil && exists {
 			line += fmt.Sprintf(". Its ciphertext backup of %s from before that run is %s", termsafe.QuotePath(t.Rel()), rel(name+"/backup"))
