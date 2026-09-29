@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"math/rand"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -113,6 +115,114 @@ func TestMaskText_AdjacentShortValuesStayGlued(t *testing.T) {
 func TestMaskText_ShortEntryOnlyAsWholeWord(t *testing.T) {
 	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"X=a"}))
 	if got := m.text("MAX=abc and X=a"); got != "MAX=abc and X="+Redacted {
+		t.Errorf("got %q", got)
+	}
+}
+
+// TestMaskText_OverlappingValuesLeaveNoFragment pins #661's example: the two
+// values share "E1", so masking one value at a time consumed the shared bytes
+// and left the other's unshared part ("SECRETON") in the clear.
+//
+// Mutation: restore the one-value-per-pass text (ReplaceAll per value,
+// longest then lexical) and "SECRETON" survives.
+func TestMaskText_OverlappingValuesLeaveNoFragment(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"A=SECRETONE1", "B=E1TWO22XYZ"}))
+	got := m.text("got SECRETONE1TWO22XYZ back")
+	if want := "got " + Redacted + " back"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestMaskText_OverlappingSelfMatchLeavesNoFragment: one value overlapping
+// its own next occurrence. A non-overlapping ReplaceAll takes the first and
+// leaves the second's tail.
+//
+// Mutation: advance past each whole match instead of byte by byte (i = pend-1
+// after a match) and the tail "AAB" of the second occurrence survives.
+func TestMaskText_OverlappingSelfMatchLeavesNoFragment(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"K=AABAABAAB"}))
+	got := m.text("AABAABAABAAB")
+	if got != Redacted {
+		t.Errorf("got %q, want %q", got, Redacted)
+	}
+}
+
+// TestMaskText_EntryKeepsItsKeyWhenAValueOverlapsItsEnd: a run that starts
+// with a whole entry still renders as KEY=[redacted] when another value
+// extends it.
+func TestMaskText_EntryKeepsItsKeyWhenAValueOverlapsItsEnd(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"KEY=SECRETONE1", "B=E1TWO22XYZ"}))
+	got := m.text("saw KEY=SECRETONE1TWO22XYZ.")
+	if want := "saw KEY=" + Redacted + "."; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestMaskText_OverlapDifferential builds seeded random text in which every
+// byte from the values' alphabet ("A", "B") lies inside at least one whole
+// occurrence of a marked value — values are laid down whole, often
+// overlapping the previous one's tail, between noise that never uses that
+// alphabet. So after masking, no "A" or "B" may remain: any that does is a
+// fragment of a value whose full occurrence was in the text, which is
+// stronger than asking that no 3-byte window of a value survives.
+//
+// Mutation: restore the one-value-per-pass text and this fails within the
+// first few hundred cases (overlapping values leave their unshared part).
+func TestMaskText_OverlapDifferential(t *testing.T) {
+	rng := rand.New(rand.NewSource(661)) //nolint:gosec // G404: deterministic test fixture, not crypto
+	randFrom := func(alphabet string, n int) string {
+		var b strings.Builder
+		for range n {
+			b.WriteByte(alphabet[rng.Intn(len(alphabet))])
+		}
+		return b.String()
+	}
+	for c := range 3000 {
+		values := make([]string, 1+rng.Intn(4))
+		entries := make([]string, len(values))
+		for i := range values {
+			values[i] = randFrom("AB", minScrubLen+rng.Intn(5))
+			entries[i] = "k" + strconv.Itoa(i) + "=" + values[i]
+		}
+		var text string
+		for range 1 + rng.Intn(8) {
+			switch rng.Intn(4) {
+			case 0:
+				text += randFrom("xy -=", 1+rng.Intn(4))
+			case 1:
+				i := rng.Intn(len(entries))
+				text += entries[i]
+			default:
+				// Lay the value down over the longest suffix of text that is
+				// a prefix of it, or a shorter one at random.
+				v := values[rng.Intn(len(values))]
+				overlaps := []int{0}
+				for k := 1; k < len(v) && k <= len(text); k++ {
+					if strings.HasSuffix(text, v[:k]) {
+						overlaps = append(overlaps, k)
+					}
+				}
+				k := overlaps[rng.Intn(len(overlaps))]
+				text += v[k:]
+			}
+		}
+		m := maskFrom(WithMaskedAssignments(context.Background(), entries))
+		if got := m.text(text); strings.ContainsAny(got, "AB") {
+			t.Fatalf("case %d: values %q\ntext %q\ngot  %q: a value fragment survived", c, values, text, got)
+		}
+	}
+}
+
+// TestMaskText_ShortValueNextToAMaskedRunIsScrubbed: a short value glued to
+// a longer masked value is glued to text that becomes [redacted], not to a
+// word, so it is scrubbed too — as it was when the longer value was replaced
+// first.
+//
+// Mutation: drop the coverage test from gluedBefore (the i-1 >= end term) and
+// "zz" survives after the [redacted].
+func TestMaskText_ShortValueNextToAMaskedRunIsScrubbed(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"L=LONGSECRET", "S=zz"}))
+	if got := m.text("LONGSECRETzz"); got != Redacted+Redacted {
 		t.Errorf("got %q", got)
 	}
 }
