@@ -60,7 +60,7 @@ func TestEcho_ConfiguredOwnerIsCategorical(t *testing.T) {
 // the operator sees the typo, but capped and escaped (#562).
 func TestEcho_WorkRefArgvIsCapped(t *testing.T) {
 	for _, in := range []string{
-		"MARKER" + strings.Repeat("\x1b[2J‮", 1500),                         // unrecognized form
+		"MARKER" + strings.Repeat("\x1b[2J\u202e", 1500),                         // unrecognized form
 		"MARKER" + strings.Repeat("a", 5000) + ".test/o/r#1",                // unconfigured host, slug form
 		"https://MARKER" + strings.Repeat("a", 5000) + ".test/o/r/issues/1", // unconfigured host, URL form
 	} {

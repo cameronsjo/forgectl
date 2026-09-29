@@ -22,7 +22,7 @@ import (
 
 // hostileEcho is a 10 KB value built to be noticed if echoed: a marker, raw
 // terminal controls, and a bidi override.
-var hostileEcho = "MARKER" + strings.Repeat("\x1b[2J‮", 1400)
+var hostileEcho = "MARKER" + strings.Repeat("\x1b[2J\u202e", 1400)
 
 // echoBudget bounds an error that quotes one capped argument plus fixed prose.
 const echoBudget = 2048

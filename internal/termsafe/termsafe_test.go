@@ -299,7 +299,7 @@ func TestSafeLineMaxOutputIsInert(t *testing.T) {
 // 10 KB argument becomes a bounded, quoted, control-free echo that marks its
 // cut, and a short argument echoes whole with no marker.
 func TestQuoteArgMax_BoundsAndEscapes(t *testing.T) {
-	hostile := strings.Repeat("\x1b[2J‮\n\xff", 2048)
+	hostile := strings.Repeat("\x1b[2J\u202e\n\xff", 2048)
 	got := QuoteArgMax(hostile, ArgEchoMaxRunes)
 	if len(got) > ArgEchoMaxRunes*10+8 {
 		t.Fatalf("len = %d, want bounded by the %d-rune input budget", len(got), ArgEchoMaxRunes)

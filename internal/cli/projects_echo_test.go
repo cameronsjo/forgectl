@@ -11,7 +11,7 @@ import (
 )
 
 // hostileArg is a 10 KB command-line value built to be noticed if echoed.
-var hostileArg = "MARKER" + strings.Repeat("\x1b[2J‮", 1400)
+var hostileArg = "MARKER" + strings.Repeat("\x1b[2J\u202e", 1400)
 
 // assertCappedArgEcho: argv the operator typed is echoed back so they can see
 // the typo, but capped and escaped (#562).
