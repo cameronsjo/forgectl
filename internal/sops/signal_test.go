@@ -1,0 +1,180 @@
+package sops
+
+// Unit tests for the plaintext guard's ordering, driven with an injected
+// signal channel, stop, and die so each interleaving is deterministic. The
+// real-signal, real-process test is in signal_unix_test.go.
+//
+//   [x] A caught signal removes the work directory, then dies with that signal
+//   [x] Release with no signal neither dies nor leaks the handler goroutine
+//   [x] A signal that lands between the handler stopping and delivery stopping
+//       is still acted on, not swallowed
+//   [x] A signal before the directory exists means it is never created
+//   [x] 130 for SIGINT, 143 for SIGTERM
+
+import (
+	"os"
+	"path/filepath"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+)
+
+// fakeDeath records what die was called with. In production die never
+// returns; here it records and returns so the test can inspect the aftermath.
+type fakeDeath struct {
+	mu    sync.Mutex
+	calls []os.Signal
+	fired chan struct{}
+}
+
+func newFakeDeath() *fakeDeath { return &fakeDeath{fired: make(chan struct{}, 4)} }
+
+func (d *fakeDeath) die(sig os.Signal) {
+	d.mu.Lock()
+	d.calls = append(d.calls, sig)
+	d.mu.Unlock()
+	d.fired <- struct{}{}
+}
+
+func (d *fakeDeath) snapshot() []os.Signal {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]os.Signal(nil), d.calls...)
+}
+
+// stagedWorkDir makes a work directory holding a plaintext value file, the
+// state the guard exists to clean up.
+func stagedWorkDir(t *testing.T) func() (*workDir, error) {
+	t.Helper()
+	return func() (*workDir, error) {
+		dir := filepath.Join(t.TempDir(), ".forgectl-sops-test")
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(dir, "value"), []byte("s3cr3t"), 0o600); err != nil {
+			return nil, err
+		}
+		return &workDir{dir: dir}, nil
+	}
+}
+
+func assertGone(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("work directory %s still exists (stat err %v)", dir, err)
+	}
+}
+
+func noStop(chan<- os.Signal) {}
+
+func TestGuard_SignalRemovesWorkDirThenDies(t *testing.T) {
+	ch := make(chan os.Signal, 1)
+	death := newFakeDeath()
+	g := startPlaintextGuard(ch, noStop, death.die)
+
+	work, err := g.track(stagedWorkDir(t))
+	if err != nil {
+		t.Fatalf("track: %v", err)
+	}
+	ch <- syscall.SIGTERM
+
+	select {
+	case <-death.fired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never ran")
+	}
+	assertGone(t, work.dir)
+	if got := death.snapshot(); len(got) != 1 || got[0] != syscall.SIGTERM {
+		t.Fatalf("die calls = %v, want exactly [SIGTERM]", got)
+	}
+
+	g.cleanup()
+	g.release()
+	if got := death.snapshot(); len(got) != 1 {
+		t.Fatalf("die was called %d times, want 1", len(got))
+	}
+}
+
+func TestGuard_ReleaseWithoutSignalStopsCleanly(t *testing.T) {
+	ch := make(chan os.Signal, 1)
+	death := newFakeDeath()
+	var stopped bool
+	g := startPlaintextGuard(ch, func(chan<- os.Signal) { stopped = true }, death.die)
+
+	work, err := g.track(stagedWorkDir(t))
+	if err != nil {
+		t.Fatalf("track: %v", err)
+	}
+	g.cleanup()
+	g.release()
+
+	assertGone(t, work.dir)
+	if !stopped {
+		t.Error("release did not stop signal delivery")
+	}
+	select {
+	case <-g.exited:
+	default:
+		t.Error("the handler goroutine outlived release")
+	}
+	if got := death.snapshot(); len(got) != 0 {
+		t.Fatalf("die was called with %v on a run with no signal", got)
+	}
+}
+
+// A signal that reaches the channel after the handler goroutine has stopped
+// but before signal.Stop takes effect must not vanish: nobody else will ever
+// read it, and the operator's Ctrl-C would be silently eaten. The injected
+// stop delivers exactly that signal, at exactly that point.
+func TestGuard_SignalAtReleaseIsNotSwallowed(t *testing.T) {
+	ch := make(chan os.Signal, 1)
+	death := newFakeDeath()
+	lateStop := func(c chan<- os.Signal) { c <- os.Interrupt }
+	g := startPlaintextGuard(ch, lateStop, death.die)
+
+	if _, err := g.track(stagedWorkDir(t)); err != nil {
+		t.Fatalf("track: %v", err)
+	}
+	g.cleanup()
+	g.release()
+
+	if got := death.snapshot(); len(got) != 1 || got[0] != os.Interrupt {
+		t.Fatalf("die calls = %v, want exactly [interrupt]", got)
+	}
+}
+
+func TestGuard_SignalBeforeTrackPreventsCreation(t *testing.T) {
+	ch := make(chan os.Signal, 1)
+	death := newFakeDeath()
+	g := startPlaintextGuard(ch, noStop, death.die)
+
+	ch <- syscall.SIGTERM
+	<-death.fired
+
+	created := false
+	_, err := g.track(func() (*workDir, error) {
+		created = true
+		return stagedWorkDir(t)()
+	})
+	if err == nil || created {
+		t.Fatalf("track after a fired signal: err=%v created=%v, want a refusal and no directory", err, created)
+	}
+	g.cleanup()
+	g.release()
+}
+
+func TestExitStatusFor(t *testing.T) {
+	cases := []struct {
+		sig  os.Signal
+		want int
+	}{
+		{os.Interrupt, 130},
+		{syscall.SIGTERM, 143},
+	}
+	for _, c := range cases {
+		if got := exitStatusFor(c.sig); got != c.want {
+			t.Errorf("exitStatusFor(%v) = %d, want %d", c.sig, got, c.want)
+		}
+	}
+}
