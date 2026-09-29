@@ -54,7 +54,7 @@ func newPrFindingsListCmd(client *pr.Client) *cobra.Command {
 				return nil
 			}
 			for _, e := range entries {
-				fmt.Fprintf(out, "%s\t%s\t%s\n", termsafe.QuotePathIfUnsafe(e.Path), e.ModTime.Format(time.RFC3339), formatBytes(e.Size))
+				_, _ = fmt.Fprintf(out, "%s\t%s\t%s\n", termsafe.QuotePathIfUnsafe(e.Path), e.ModTime.Format(time.RFC3339), formatBytes(e.Size))
 			}
 			return nil
 		},
@@ -163,7 +163,7 @@ func runPrFindingsCleanup(cmd *cobra.Command, client *pr.Client, olderThan time.
 	// QuotePathIfUnsafe rather than QuotePath keeps an ordinary path
 	// byte-identical, the same choice `pr list` makes for its path field.
 	for _, p := range preview {
-		fmt.Fprintln(out, termsafe.QuotePathIfUnsafe(p))
+		_, _ = fmt.Fprintln(out, termsafe.QuotePathIfUnsafe(p))
 	}
 	fmt.Fprintf(out, "\n%d findings dir(s) reclaimable\n", len(preview))
 
@@ -187,7 +187,7 @@ func runPrFindingsCleanup(cmd *cobra.Command, client *pr.Client, olderThan time.
 	}
 	fmt.Fprintln(out)
 	for _, p := range removed {
-		fmt.Fprintf(out, "reclaimed %s\n", termsafe.QuotePathIfUnsafe(p))
+		_, _ = fmt.Fprintf(out, "reclaimed %s\n", termsafe.QuotePathIfUnsafe(p))
 	}
 	fmt.Fprintf(out, "\nreclaimed %d findings dir(s)\n", len(removed))
 	return nil
