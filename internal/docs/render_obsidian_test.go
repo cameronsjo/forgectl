@@ -787,7 +787,7 @@ func TestResolveVault_HeadingMatchEveryMarkupByte(t *testing.T) {
 			t.Errorf("[[Note#%s]]: miss %v", c.fragment, miss)
 			continue
 		}
-		if _, anchor, _ := idx.resolveAnchor(&from, "Note", c.fragment); anchor != want || doc == nil {
+		if _, anchor, _ := idx.resolveAnchor(&from, "Note", c.fragment, nil); anchor != want || doc == nil {
 			t.Errorf("[[Note#%s]] anchor %q, want %q", c.fragment, anchor, want)
 		}
 	}
@@ -812,10 +812,10 @@ func TestResolveVault_HeadingMatchExactBeforeRendered(t *testing.T) {
 	if plain.Text != "a b" || escaped.Text != "a *b*" || plain.Slug == escaped.Slug {
 		t.Fatalf("fixture headings %+v, %+v", plain, escaped)
 	}
-	if _, anchor, miss := idx.resolveAnchor(&from, "Note", "a *b*"); miss != MissNone || anchor != escaped.Slug {
+	if _, anchor, miss := idx.resolveAnchor(&from, "Note", "a *b*", nil); miss != MissNone || anchor != escaped.Slug {
 		t.Errorf("[[Note#a *b*]] anchor %q (miss %v), want the escaped heading's %q", anchor, miss, escaped.Slug)
 	}
-	if _, anchor, miss := idx.resolveAnchor(&from, "Note", "a b"); miss != MissNone || anchor != plain.Slug {
+	if _, anchor, miss := idx.resolveAnchor(&from, "Note", "a b", nil); miss != MissNone || anchor != plain.Slug {
 		t.Errorf("[[Note#a b]] anchor %q (miss %v), want %q", anchor, miss, plain.Slug)
 	}
 }

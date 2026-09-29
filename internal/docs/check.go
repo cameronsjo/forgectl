@@ -125,7 +125,7 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 			continue
 		}
 		for _, l := range from.Links {
-			target, miss := idx.resolveParts(from, l.Path, l.Fragment)
+			target, miss := idx.resolveParts(from, l.Path, l.Fragment, nil)
 			var kind FindingKind
 			switch miss {
 			case MissNone:
@@ -296,7 +296,7 @@ func (idx *Index) dirLinkInbound(rootByLabel map[string]Root) map[int]bool {
 			}
 			// A path that resolves to a doc is a link to that doc, not to
 			// the directory.
-			if target, miss := idx.resolveParts(from, l.Path, l.Fragment); target != nil || miss != MissNoTarget {
+			if target, miss := idx.resolveParts(from, l.Path, l.Fragment, nil); target != nil || miss != MissNoTarget {
 				continue
 			}
 			for _, j := range hits {
