@@ -11,8 +11,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/tasks"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // mcpShutdownTimeout bounds the graceful HTTP shutdown after a signal. A
@@ -260,7 +263,9 @@ func serveMCPHTTP(cmd *cobra.Command, server *mcp.Server, addr string) error {
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", addr)
 	if err != nil {
-		return fmt.Errorf("tasks mcp: cannot listen on %s: %w", addr, err)
+		// Neither addr nor net's own text (which repeats it) is echoed: the
+		// value is the same --http string --ping refuses to print (#658).
+		return fmt.Errorf("tasks mcp: cannot listen on the --http address: %w", listenCause(err))
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "forgectl tasks mcp: serving streamable HTTP on %s/mcp\n", ln.Addr()) //nolint:errcheck // best-effort startup notice
 
@@ -313,7 +318,7 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: build request: %w", err), 1)
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: build request: %w", pingCause(err)), 1)
 	}
 	// Both Accept values are mandatory for a streamable-HTTP server. Naming
 	// only application/json is rejected by the transport, and the rejection
@@ -323,7 +328,7 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 
 	resp, err := (&http.Client{Timeout: pingTimeout}).Do(req)
 	if err != nil {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s did not answer: %w", url, err), exitTasksUnreachable)
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s did not answer: %w", pingURLLabel, pingCause(err)), exitTasksUnreachable)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// The read error is kept rather than discarded. Dropping it makes a body
@@ -332,7 +337,7 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 	// fault — a confident, wrong statement about the service being probed.
 	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d", url, resp.StatusCode), 1)
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d", pingURLLabel, resp.StatusCode), 1)
 	}
 	// Release the session this probe just created. The server also expires
 	// idle sessions (mcpSessionTimeout), which is the real defence — but a
@@ -346,10 +351,10 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 	releasePingSession(cmd.Context(), url, resp.Header.Get("Mcp-Session-Id"))
 
 	if readErr != nil {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body could not be read: %w", url, resp.StatusCode, readErr), exitTasksUnreachable)
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body could not be read: %w", pingURLLabel, resp.StatusCode, pingCause(readErr)), exitTasksUnreachable)
 	}
 	if !hasJSONRPCResult(raw) {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body carries no JSON-RPC result", url, resp.StatusCode), 1)
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body carries no JSON-RPC result", pingURLLabel, resp.StatusCode), 1)
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "ok") //nolint:errcheck // best-effort healthcheck output
 	return nil
@@ -386,15 +391,84 @@ func releasePingSession(parent context.Context, url, sessionID string) {
 // http://127.0.0.13000/mcp, which fails to connect — so the healthcheck
 // reports the service unreachable when the real fault is a typo in its own
 // argument, and the exit code claims a network verdict about a parse failure.
+//
+// The address and the URL are never echoed whole (#658). A URL built from the
+// address can carry credentials — `tok@127.0.0.1:3000` splits into host
+// "tok@127.0.0.1", and net/http then sends "tok" as userinfo and prints it in
+// its own errors (it masks only a password). So the host must be an IP or a
+// plain hostname, which cannot carry userinfo; this function's refusals repeat
+// none of the value; and later messages say pingURLLabel instead of the URL.
+// A later message can still name host:port through pingCause, which keeps a
+// dial or DNS error. That is bounded by the checks here: a validated host and
+// a numeric port.
 func pingURL(addr string) (string, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return "", fmt.Errorf("tasks mcp --ping: %q is not a host:port address (a bare port needs its colon, as in :3000): %w", addr, err)
+		// SplitHostPort's error repeats addr, so it is not wrapped.
+		return "", errors.New("tasks mcp --ping: the --http value is not a host:port address (a bare port needs its colon, as in :3000)")
+	}
+	// The Itoa round trip refuses what Atoi tolerates: a leading '+' or '-',
+	// and leading zeros.
+	if n, perr := strconv.Atoi(port); perr != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
+		return "", errors.New("tasks mcp --ping: the --http port is not a number from 1 to 65535")
+	}
+	if host != "" && net.ParseIP(host) == nil && !plainHostname(host) {
+		return "", errors.New("tasks mcp --ping: the --http host is not an IP address or a plain hostname (letters, digits, '.', '-', '_')")
 	}
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "127.0.0.1"
 	}
 	return "http://" + net.JoinHostPort(host, port) + "/mcp", nil
+}
+
+// pingURLLabel stands in for the probe URL in every --ping message (#658).
+const pingURLLabel = "the configured tasks URL"
+
+// plainHostname reports whether host is a DNS-style name: 1..253 bytes of
+// ASCII letters, digits, '.', '-' and '_' (compose service names use '_').
+// It admits no '@', ':', '/', '%' or space, so it cannot carry userinfo or
+// reshape the URL it is joined into.
+func plainHostname(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for i := 0; i < len(host); i++ {
+		c := host[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '.' && c != '-' && c != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+// pingCause drops net/http's *url.Error layer, whose text is the method and
+// the full URL, and keeps what it wraps (a dial or timeout error naming at
+// most host:port, which pingURL has already bounded).
+func pingCause(err error) error {
+	var urlErr *neturl.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		return urlErr.Err
+	}
+	return err
+}
+
+// listenCause reduces a net.Listen failure to the part that does not repeat
+// the address: the bare reason of an address or DNS error, or the OS error
+// under a *net.OpError ("address already in use").
+func listenCause(err error) error {
+	var addrErr *net.AddrError
+	if errors.As(err, &addrErr) {
+		return termsafe.Categorical(addrErr.Err, err)
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return termsafe.Categorical(dnsErr.Err, err)
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Err != nil {
+		return opErr.Err
+	}
+	return err
 }
 
 // hasJSONRPCResult reports whether raw carries a JSON-RPC response with a

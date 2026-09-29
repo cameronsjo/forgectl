@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // giteaList returns repos from the self-hosted Gitea via
@@ -105,7 +107,9 @@ func cloneFromGitea(ctx context.Context, run interface {
 		"-c", "protocol.fd.allow=never",
 		"clone", "--", sshURL, dest); err != nil {
 		slog.Error("Failed to clone over SSH.", "dest", dest, "error", err)
-		return fmt.Errorf("git clone %s: %w", sshURL, err)
+		// Categorical (#658): sshURL is server-supplied, and git's stderr
+		// (plus the argv CommandError renders) repeats it.
+		return termsafe.Categorical("git clone failed", err)
 	}
 	slog.Info("Successfully cloned over SSH.", "dest", dest)
 	return nil
@@ -129,7 +133,8 @@ func cloneBareFromURL(ctx context.Context, run interface {
 		"-c", "protocol.fd.allow=never",
 		"clone", "--bare", "--", sshURL, dest); err != nil {
 		slog.Error("Failed to bare-clone over SSH.", "dest", dest, "error", err)
-		return fmt.Errorf("git clone --bare %s: %w", sshURL, err)
+		// Categorical (#658), as cloneFromGitea.
+		return termsafe.Categorical("git clone --bare failed", err)
 	}
 	slog.Info("Successfully bare-cloned over SSH.", "dest", dest)
 	return nil

@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -246,7 +247,11 @@ func checkGh(ctx context.Context, d Deps) Check {
 		return Check{Name: "gh", State: StateFail, Detail: "configured [github] host failed validation", Hint: "set [github] host to a lowercase dns name with no port or scheme, or remove it for github.com"}
 	}
 	if _, err := githubauth.Runner(d.Runner, host).Run(ctx, "gh", "auth", "status", "--hostname", host); err != nil {
-		return Check{Name: "gh", State: StateFail, Detail: err.Error(), Hint: "run `gh auth login --hostname " + host + "`"}
+		// Categorical (#658): err is gh's stderr, text the host and any gh
+		// extension choose. SafeLine at the report bounds its runes, not
+		// its content, so it goes to the log instead.
+		slog.Warn("gh auth status failed.", "host", host, "error", err)
+		return Check{Name: "gh", State: StateFail, Detail: "gh auth status failed for " + host, Hint: "run `gh auth login --hostname " + host + "`"}
 	}
 	return Check{Name: "gh", State: StateOK, Detail: "authenticated to " + host}
 }

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // WorkspacePrefix is the os.MkdirTemp prefix every sandbox workspace carries.
@@ -78,7 +79,10 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		}
 		if _, err := run.Run(ctx, "git", args...); err != nil {
 			slog.Error("Failed to clone repo.", "repo", repo, "sandbox", dir, "error", err)
-			return "", fmt.Errorf("git clone: %w", err)
+			// Categorical (#658): the CommandError renders git's argv, whose
+			// repo URL can carry an https token, and git's stderr, which relays
+			// the remote's sideband text.
+			return "", termsafe.Categorical("git clone failed", err)
 		}
 	}
 
