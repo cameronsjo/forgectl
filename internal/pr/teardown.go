@@ -584,6 +584,7 @@ func (c *Client) freeAsideName(root *os.Root, name string) (string, error) {
 func sameBreadcrumbRecord(a, b Breadcrumb) bool {
 	return a.Workspace == b.Workspace &&
 		a.Ref == b.Ref &&
+		a.Host == b.Host &&
 		a.Agent == b.Agent &&
 		a.Local == b.Local &&
 		a.CreatedAt.Equal(b.CreatedAt) &&

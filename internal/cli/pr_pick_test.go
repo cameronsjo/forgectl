@@ -392,7 +392,7 @@ func TestLaunchPicked_CapQueuesTruncatedRemainder(t *testing.T) {
 	queuedRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 3}
 	found := false
 	for _, s := range summaries {
-		if s.Ref() == queuedRef {
+		if s.Ref().String() == queuedRef.String() {
 			found = true
 			if s.Phase() != pr.PhaseQueued {
 				t.Errorf("queued remainder phase = %q, want %q", s.Phase(), pr.PhaseQueued)

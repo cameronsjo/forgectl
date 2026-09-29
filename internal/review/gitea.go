@@ -21,7 +21,16 @@ import (
 // corrupt both the persisted reviewed-store key (Item.Key() embeds Host
 // verbatim) and the literal https://<host>/ prefix giteaItemURL compares
 // against.
+//
+// The charset has no length bound, so NewGitea caps the value at
+// MaxGiteaHostBytes first (#562).
 var reGiteaHost = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$`)
+
+// MaxGiteaHostBytes caps a configured Gitea host, port included. 253 is the
+// DNS name limit, the same ceiling githubauth.MaxHostSegmentBytes applies to
+// a GitHub host used as a path segment: the value lands in every Item.Host and
+// reviewed-store key, so it is bounded before anything stores it.
+const MaxGiteaHostBytes = 253
 
 // Gitea enumerates open issues and PRs, owner-scoped, from a self-hosted
 // Gitea instance over the tea CLI. It is the second Source review.Aggregate
@@ -41,6 +50,11 @@ type Gitea struct {
 // Owners are config input too, but — mirroring NewGitHub — are validated
 // per-query in Items rather than here.
 func NewGitea(run exec.Runner, host, login string, owners []string) (*Gitea, error) {
+	if len(host) > MaxGiteaHostBytes {
+		// Same categorical rule as the charset refusal below; checked first so
+		// an oversized value never reaches the regex at all.
+		return nil, fmt.Errorf("gitea source: configured host is longer than %d bytes", MaxGiteaHostBytes)
+	}
 	if !reGiteaHost.MatchString(host) {
 		// Categorical on purpose: the host is config-derived, so echoing it
 		// would put attacker-steerable text (control bytes, ANSI escapes, an
@@ -137,7 +151,8 @@ func (g *Gitea) Items(ctx context.Context) ([]Item, []string, error) {
 // "user does not exist"; that error degrades to a note same as any other.
 func (g *Gitea) issuesForOwner(ctx context.Context, owner string) ([]Item, bool, error) {
 	if !pr.ValidOwnerRepoPart(owner) {
-		return nil, false, fmt.Errorf("owner %q outside allowed charset", owner)
+		// Categorical (#562): owner is config-derived, so it is never echoed.
+		return nil, false, errors.New("configured owner is outside the allowed owner charset")
 	}
 	args := []string{"issues", "list",
 		"--owner", owner,
