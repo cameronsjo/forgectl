@@ -143,11 +143,19 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 		return OutcomeUnspecified, fmt.Errorf("refusing to write into %s: %s, so the value would be stored in the clear", target.Rel(), reason)
 	}
 
-	work, err := newWorkDir(target)
+	// The guard is armed BEFORE the work directory exists and released AFTER
+	// it is removed: defers run last-in first-out, so release (deferred first)
+	// runs after cleanup on every path, a panic included. A guarded signal
+	// (SIGINT, SIGTERM, SIGHUP, SIGQUIT on unix) anywhere in between removes
+	// the directory and then terminates the process. See signal.go.
+	guard := armPlaintextGuard()
+	defer guard.release()
+
+	work, err := guard.track(func() (*workDir, error) { return newWorkDir(target) })
 	if err != nil {
 		return OutcomeUnspecified, err
 	}
-	defer work.cleanup()
+	defer guard.cleanup()
 
 	if err := work.stage(before, value); err != nil {
 		return OutcomeUnspecified, err
@@ -210,13 +218,14 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 
 	// The staged plaintext has served its purpose the moment sops returns, so
 	// it goes now rather than at cleanup. The work directory is a sibling of
-	// the target and therefore INSIDE the repository, and there is no signal
-	// handler on this path — a Ctrl-C during a KMS round-trip skips the
-	// deferred cleanup and leaves `value` (0600, the secret verbatim) where
-	// `git add -A` will commit it. Measured: reproduced on the first of forty
-	// kill attempts. Shrinking the window to the span where the file must
-	// exist is most of the fix; a signal handler and a location outside the
-	// work tree are tracked separately.
+	// the target and therefore INSIDE the repository. Before the signal guard,
+	// a Ctrl-C during a KMS round-trip skipped the deferred cleanup and left
+	// `value` (0600, the secret verbatim) where `git add -A` will commit it —
+	// reproduced on the first of forty kill attempts. The guard now removes
+	// the directory on the catchable terminating signals; shrinking the window
+	// still matters, because SIGKILL, SIGSTOP, a power loss and any signal the
+	// guard does not cover run no handler at all and remain a residual (a
+	// sweep of stale work directories, cameronsjo/forgectl#520).
 	work.discardStagedValue()
 
 	outcome, err := c.verify(ctx, sopsBin, target, segments, value, work)
