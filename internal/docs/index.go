@@ -704,9 +704,12 @@ func (idx *Index) buildBacklinks() map[docKey][]int {
 	sets := make(map[docKey]map[int]bool)
 	for i := range idx.docs {
 		from := &idx.docs[i]
-		budget := newFragmentBudget()
 		for _, link := range from.Links {
-			target, _ := idx.resolveParts(from, link.Path, link.Fragment, budget)
+			// Doc-only: the anchor is discarded and a fragment miss still
+			// returns the doc, so matching the fragment (a rendered-text
+			// parse for a vault) would be cost with no effect (#645). The
+			// file-level miss outcomes do not depend on the fragment.
+			target, _ := idx.resolveParts(from, link.Path, "", nil)
 			if target == nil {
 				continue
 			}

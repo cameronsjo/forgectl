@@ -172,6 +172,10 @@ func WithGitHubHost(host string, pin func(host string) exec.Runner) Option {
 	return func(c *Client) { c.githubHost, c.pin = host, pin }
 }
 
+// GitHubHost is the configured [github] host: what an empty Ref.Host means,
+// and the default host the reviewed store reads legacy marks as.
+func (c *Client) GitHubHost() string { return c.githubHost }
+
 // recordHost is the host a new record for ref persists: empty for a local
 // session, which has no forge, and otherwise the concrete host its gh calls
 // use — so the record keeps meaning that host if [github] host later changes.

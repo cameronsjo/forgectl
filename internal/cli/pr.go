@@ -225,7 +225,7 @@ exits 0, to be started later by 'forgectl pr drain --once'.`,
 			// CLI-layer courtesy note: an explicitly named ref is always a
 			// deliberate launch (never skipped — that's the picker's job), but
 			// flag it if we've marked it reviewed before. No session.go change.
-			if at, ok := pr.LoadReviewed(reviewedPath).ReviewedAt(ref); ok {
+			if at, ok := pr.LoadReviewed(reviewedPath, pr.WithDefaultHost(client.GitHubHost())).ReviewedAt(ref); ok {
 				fmt.Fprintf(cmd.ErrOrStderr(), "note: previously marked reviewed (%s ago)\n",
 					time.Since(at).Round(time.Minute))
 			}
