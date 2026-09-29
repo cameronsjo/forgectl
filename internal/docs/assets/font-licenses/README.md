@@ -38,9 +38,13 @@ lives in this directory so it rides the same goreleaser `files` entries as the
 licenses above. The minified bundle also inlines mermaid's own dependencies (marked, the d3
 family, dagre-d3-es, dayjs, DOMPurify, and more), and its inline banner carries
 only a few of their notices. [`THIRD_PARTY_NOTICES-mermaid.txt`](THIRD_PARTY_NOTICES-mermaid.txt)
-reproduces the LICENSE text of every package in mermaid's production dependency
-tree. It is generated, not hand-edited: `scripts/vendor-mermaid.sh` downloads
-the pinned tarball, verifies its sha256 and that of `dist/mermaid.min.js`
-against `../provenance-mermaid.json`, rewrites `mermaid.min.js`, and regenerates
-the notices. Versions in the notices are resolved at generation time and can
-differ by a patch or minor from the inlined copies; the license texts do not.
+reproduces the LICENSE text of the packages in the dependency tree the bundle
+was built from (a superset: it also lists type-only packages). It is generated,
+not hand-edited: `scripts/vendor-mermaid.sh` downloads the pinned tarball,
+verifies its sha256 and that of `dist/mermaid.min.js` against
+`../provenance-mermaid.json`, resolves the tree at the versions mermaid's own
+lockfile used (recorded there under `notice_resolution`), regenerates the
+notices, and fails if a library marked in `bundle_markers` occurs in the bundle
+without a notice. Transitive packages resolve within their ranges, so their
+versions can differ by a patch or minor from the inlined copies; the license
+texts do not.
