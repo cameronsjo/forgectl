@@ -69,6 +69,16 @@ func (e *lockBusyError) Error() string {
 //   - KERNEL RELEASE. Closing the descriptor releases the lock, including on
 //     process death, so a crashed holder never wedges the next caller. The
 //     holder body left in the file is diagnostic text, never a liveness claim.
+//   - ADVISORY, SAME-UID. flock binds only processes that ask for it. The audit
+//     log's append (last-byte separator check, write, and a short-write
+//     rollback Truncate) is atomic only against holders of this lock; a
+//     same-uid writer that skips it can interleave with the check, and a
+//     rollback can then truncate that writer's bytes. That is an accepted
+//     residual, not a gap to close: the writer already owns the 0700 dir and
+//     every record and log in it, so it can forge or delete any row directly
+//     and the lock was never a defense against it. The log's file-type check
+//     (a FIFO or symlink is refused) covers the cases that could hang or
+//     redirect the appender. (forgectl#570)
 //
 // Two hosts sharing one $HOME (NFS, a synced volume) share this directory,
 // and flock over NFS is advisory at best. Out of scope; stated so it is on the
