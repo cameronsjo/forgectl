@@ -14,10 +14,10 @@ forgectl docs list [dir|file ...]        # list the indexed docs, no server (--j
 
 Documents in a `vault` root (see [Root kinds](#root-kinds)) also render Obsidian's inline syntax: `==text==` is highlighted, `#tags` show as tag chips, and `%%comments%%` are hidden. Comment text is kept out of the page body, the page title and sidenav entry, heading anchors and the "On this page" outline, and the index that links resolve against. Two forms are hidden:
 
-- An inline comment, `%%like this%%`, with both markers on the same line. A `%%` inside inline code (`` `…` ``) never ends a comment, and a comment containing a backtick with no closing backtick on that line stays visible.
-- A block comment: a line that starts with `%%`, through the next line containing `%%`, when that closing `%%` ends its line. A block comment is recognized only at the top level of a note, not inside a blockquote or list, and not directly under a paragraph line, where a `%%` line continues the paragraph.
+- An inline comment: two `%%` markers in the same paragraph, heading, table cell or link text, and everything between them, spaces and line breaks included (`%% like this %%`). Markdown decides first, so a `%%` inside inline code or an autolink is not a marker, and `\%` is a literal percent sign. A `%%` with no partner stays visible as text, and a paragraph that holds only a comment disappears.
+- A block comment: a line starting with `%%` and holding no other `%%`, at the top level of a note (not inside a blockquote or list), through the next line containing `%%`, when that closing `%%` ends its line.
 
-Anything the reader can't bound safely stays visible as text instead of being hidden: a `%%` with no closing `%%`, a closing line with text after its `%%`, and a block whose lines open a code fence (```` ``` ```` or `~~~`) or an HTML block (a line starting with `<`) before the closer. A stray marker therefore never hides the rest of a note. Docs roots render plain GitHub-flavoured markdown, where all of these stay literal.
+A block comment is not recognized, and its lines are read as ordinary text under the inline rule, when its closing line has text after the `%%`, or when a line before the closer opens a code fence (```` ``` ```` or `~~~`) or an HTML block (a line starting with `<`). A stray marker therefore never hides the rest of a note. Docs roots render plain GitHub-flavoured markdown, where all of these stay literal.
 
 Diagrams render in the page: a fenced code block tagged `mermaid` becomes a live diagram themed from the same Artificer tokens as the rest of the reader, and both those and inline SVG pan and zoom (drag to pan, modifier-scroll or click-then-scroll to zoom, double-click, `0`, or the diagram card's reset button to reset).
 

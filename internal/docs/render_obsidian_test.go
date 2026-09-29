@@ -88,12 +88,16 @@ func TestRenderVault_UnterminatedCommentStaysVisible(t *testing.T) {
 		{"a %%b\n\nc", []string{"a %%b", "c"}},
 		{"%%\nrest of doc\n", []string{"%%", "rest of doc"}},
 		{"%%\nrest\n\nmore rest\n", []string{"rest", "more rest"}},
-		// The first "%%" after the opener has text behind it: Obsidian
-		// would show that text, so the block declines rather than hide it.
-		{"%%\nh\nx %% shown\n\nz", []string{"h", "shown", "z"}},
-		// A one-line block with text after its closer: only the
-		// delimited part may go.
+		// The first "%%" after the opener has text behind it, so the block
+		// declines; the paragraph's own "%%" pair then hides only up to
+		// that "%%", and the text behind it stays.
+		{"%%\nh\nx %% shown\n\nz", []string{"shown", "z"}},
+		// A comment with text after its closer: only the delimited part
+		// may go.
 		{"%%gone%% tail", []string{"tail"}},
+		// An opener line that closes itself is a paragraph, not the start
+		// of a block that would run to the next "%%" line.
+		{"%%a%% bee\ncee\n%%\n", []string{"bee", "cee"}},
 		// Inside a container the closer may sit past the container's end.
 		{"> %%\n> quoted\n\nz %%\n", []string{"quoted", "z %%"}},
 	}
@@ -249,7 +253,14 @@ func TestRenderVault_CommentAroundBlockStaysVisible(t *testing.T) {
 		{"backtick fence", "%%\n```md\n%%\n```\n\n# Next\n\nbody", []string{`<h1 id="next">Next</h1>`, "<p>body</p>"}},
 		{"tilde fence", "%%\n~~~\n%%\n~~~\n\n# Next\n\nbody", []string{`<h1 id="next">Next</h1>`, "<p>body</p>"}},
 		{"html block", "%%\n<pre>\nkeep\n%%\n</pre>\n\nafter", []string{"keep", "after"}},
-		{"unclosed backtick in inline comment", "a %%b `c%% e", []string{"%%b `c%% e"}},
+		{"escaped backtick before a %%", "p %%x \\`%% visible text `%%", []string{"visible text"}},
+		{"escaped backtick then %%", "\\`%%", []string{"`%%"}},
+		// goldmark's escape makes the first '%' literal, and the '%' after
+		// it cannot open a run of exactly two, so nothing pairs.
+		{"escaped opener", "\\%%a%%", []string{"%%a%%"}},
+		// A run of three is not a marker, and its tail is not re-read as
+		// a run of two.
+		{"run of three", "a %%%x%% b", []string{"%%%x%%"}},
 	}
 	for _, c := range cases {
 		out := renderKind(t, c.src, RootVault)
@@ -265,14 +276,16 @@ func TestRenderVault_CommentAroundBlockStaysVisible(t *testing.T) {
 // on a long '=' run: re-scanning the run from every '=' is quadratic, which
 // at this length takes seconds rather than milliseconds.
 func TestRenderVault_LongEqualsRunIsLinear(t *testing.T) {
-	src := "x " + strings.Repeat("=", 80000)
-	start := time.Now()
-	out := renderKind(t, src, RootVault)
-	if d := time.Since(start); d > time.Second {
-		t.Errorf("rendering an 80000-byte '=' run took %v", d)
-	}
-	if strings.Contains(out, "<mark>") {
-		t.Errorf("an '=' run became a highlight")
+	for _, c := range []string{"=", "%"} {
+		src := "x " + strings.Repeat(c, 80000)
+		start := time.Now()
+		out := renderKind(t, src, RootVault)
+		if d := time.Since(start); d > time.Second {
+			t.Errorf("rendering an 80000-byte %q run took %v", c, d)
+		}
+		if strings.Contains(out, "<mark>") || !strings.Contains(out, strings.Repeat(c, 100)) {
+			t.Errorf("a %q run did not stay literal", c)
+		}
 	}
 }
 
@@ -315,7 +328,7 @@ func TestScanVault_SlugsMatchRenderedIDs(t *testing.T) {
 // comment stay out of a vault doc's index entry, and the title skips both a
 // commented-out H1 and a same-line comment span.
 func TestScanVault_CommentsNotIndexed(t *testing.T) {
-	const src = "%%\n# Secret title\n[[hidden]] [x](gone.md)\n## Hidden heading\nq ^hid\n%%\n\n# Meeting %%private%%\n\n[[shown]] %%[[inline]]%%\n\npara ^blk\n"
+	const src = "%%\n# Secret title\n[[hidden]] [x](gone.md)\n## Hidden heading\nq ^hid\n%%\n\n# Meeting %%private%%\n\n[[shown]] %%[[inline]]%%\n\npara ^blk\n\na %%x\ny ^inl\nz%% b\n"
 	p := filepath.Join(t.TempDir(), "n.md")
 	if err := os.WriteFile(p, []byte(src), 0o600); err != nil {
 		t.Fatal(err)
@@ -335,7 +348,7 @@ func TestScanVault_CommentsNotIndexed(t *testing.T) {
 		t.Errorf("links = %v, want only shown", paths)
 	}
 	for _, h := range meta.Headings {
-		if strings.Contains(h.Text, "Hidden") || strings.Contains(h.Text, "Secret") || strings.Contains(h.Slug, "private") {
+		if strings.Contains(h.Text, "Hidden") || strings.Contains(h.Text, "Secret") || strings.Contains(h.Slug, "private") || strings.Contains(h.Text, "private") {
 			t.Errorf("comment reached a heading: %+v", h)
 		}
 	}
@@ -344,15 +357,21 @@ func TestScanVault_CommentsNotIndexed(t *testing.T) {
 	}
 }
 
-// TestRenderVault_CommentWithCodeSpan: a comment's boundary is found
-// code-span-aware. A closed code span inside a comment is hidden with it, a
-// "%%" inside a code span is not the closer, and a backtick run with no
-// closer on the line leaves the comment visible.
-func TestRenderVault_CommentWithCodeSpan(t *testing.T) {
+// TestRenderVault_CommentsGoldmarkPairs: "%%" is a goldmark delimiter, so
+// the parse decides every boundary. A closed code span inside a comment is
+// hidden with it, a "%%" inside a code span is not the closer, a backtick
+// with no closer is literal text inside the comment, and spaced, link-text
+// and heading comments all pair.
+func TestRenderVault_CommentsGoldmarkPairs(t *testing.T) {
 	hidden := []struct{ name, src, gone, kept string }{
 		{"inline", "keep %%TODO rename `foo` later%% keep", "foo", "keep"},
-		{"one-line block", "%%a `bee` c%%\n\nafter", "bee", "after"},
+		{"comment-only paragraph", "%%a `bee` c%%\n\nafter", "bee", "after"},
 		{"percent inside code", "x %%a `%%` bee%% y", "bee", "y"},
+		{"unclosed backtick", "x %%a `bee%% y", "bee", "y"},
+		{"spaced", "%% spaced bee %%\n\nafter", "bee", "after"},
+		{"link text", "a [see %%bee%% it](x.md) e", "bee", `<a href="x.md" rel="nofollow">see  it</a>`},
+		{"heading", "## Head %%bee%% end\n", "bee", ">Head  end</h2>"},
+		{"across a soft break", "a %%bee\nbee%% d", "bee", "d"},
 	}
 	for _, c := range hidden {
 		out := renderKind(t, c.src, RootVault)
@@ -364,34 +383,37 @@ func TestRenderVault_CommentWithCodeSpan(t *testing.T) {
 	if !strings.Contains(out, `<h2 id="code">`) {
 		t.Errorf("heading id carries comment text: %s", out)
 	}
-	out = renderKind(t, "x %%a `bee%% y", RootVault)
-	if !strings.Contains(out, "%%a `bee%% y") {
-		t.Errorf("an unclosed backtick run did not keep the comment visible: %s", out)
+	// A paragraph holding only a comment leaves no empty <p> behind.
+	out = renderKind(t, "%%only%%\n\nafter", RootVault)
+	if strings.Contains(out, "<p></p>") || strings.Contains(out, "only") {
+		t.Errorf("comment-only paragraph left markup or text: %s", out)
 	}
 }
 
-// TestStripCommentSpans_AgreesWithRender checks, exhaustively over short
-// strings of '%', '`', '\\', 'a' and ' ', that stripCommentSpans removes
-// exactly what the render hides. Both sides drop backticks, backslashes and
-// spaces before comparing: code-span markup, escapes and whitespace are not
-// what is at issue.
-func TestStripCommentSpans_AgreesWithRender(t *testing.T) {
-	norm := strings.NewReplacer("`", "", "\\", "", " ", "", "\n", "")
+// TestScanVault_HeadingIDParity checks, exhaustively over every string of
+// length 1-7 made of '%', '`', '\\', 'a' and ' ', that a "## " heading's
+// scanned slug equals its rendered id: the heading-id transformer runs in
+// both instances, and this pins that nothing else feeds either side.
+func TestScanVault_HeadingIDParity(t *testing.T) {
 	alphabet := []byte("%`\\a ")
-	var walk func(prefix []byte)
+	idPattern := regexp.MustCompile(`<h2 id="([^"]*)"`)
 	checked := 0
+	var walk func(prefix []byte)
 	walk = func(prefix []byte) {
 		if len(prefix) > 0 {
-			src := "p " + string(prefix)
+			src := "## " + string(prefix) + "\n"
+			scan, err := scanBodyFor(RootVault, []byte(src))
+			if err != nil || len(scan.headings) != 1 {
+				t.Fatalf("%q: scan gave %v, %v", src, scan.headings, err)
+			}
 			out := renderKind(t, src, RootVault)
-			got := norm.Replace(stripTags.ReplaceAllString(out, ""))
-			want := norm.Replace(string(stripCommentSpans([]byte(src))))
-			if got != want {
-				t.Fatalf("%q: render shows %q, stripCommentSpans leaves %q (%s)", src, got, want, out)
+			m := idPattern.FindStringSubmatch(out)
+			if m == nil || m[1] != scan.headings[0].Slug {
+				t.Fatalf("%q: scan slug %q, rendered %s", src, scan.headings[0].Slug, out)
 			}
 			checked++
 		}
-		if len(prefix) == 6 {
+		if len(prefix) == 7 {
 			return
 		}
 		for _, c := range alphabet {
@@ -399,7 +421,7 @@ func TestStripCommentSpans_AgreesWithRender(t *testing.T) {
 		}
 	}
 	walk(nil)
-	if checked < 1000 {
+	if checked < 90000 {
 		t.Fatalf("only %d strings checked", checked)
 	}
 }
@@ -427,5 +449,22 @@ func TestScanVault_TableCellLinksMatchRender(t *testing.T) {
 	}
 	if !indexed["Other.md"] || !indexed["Live.md"] {
 		t.Errorf("fixture no longer exercises a live link beside %%%%: %v", scan.links)
+	}
+}
+
+// TestScanVault_OverCapTitleDropsComment: past the scan cap there is no
+// whole-document parse, so the title line is parsed on its own.
+func TestScanVault_OverCapTitleDropsComment(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "big.md")
+	src := "# Big %%secret%% note\n\n" + strings.Repeat("word ", maxScanBytes/5+10)
+	if err := os.WriteFile(p, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := scanDocFor(RootVault, p, "big.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Title != "Big  note" {
+		t.Errorf("title = %q, want %q", meta.Title, "Big  note")
 	}
 }

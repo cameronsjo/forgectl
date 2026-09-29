@@ -55,6 +55,9 @@ func (obsidianComments) Extend(m goldmark.Markdown) {
 		parser.WithInlineParsers(
 			util.Prioritized(commentInlineParser{}, 500),
 		),
+		parser.WithASTTransformers(
+			util.Prioritized(commentTransformer{}, 500),
+		),
 	)
 }
 
@@ -118,146 +121,176 @@ func (highlightParser) CloseBlock(ast.Node, parser.Context) {}
 
 // ── %%comment%% (inline) ───────────────────────────────────────────────────
 
-type commentSpanNode struct{ ast.BaseInline }
-
-// commentSpanEnd reports the length of the "%%…%%" span s opens (s starts
-// with "%%"), or false when there is none to hide. It walks the text after
-// the opener code-span-aware: a backtick run with a same-length closing run
-// later on the line is a code span and is skipped whole, so a "%%" inside it
-// is never the closer; a backtick run with no closing run makes the boundary
-// unknowable, and the span is declined (keep-when-unsure). The closer is the
-// first "%%" outside any code span. The inline parser, the one-line block
-// opener and stripCommentSpans all decide with this one helper, so the three
-// cannot disagree about where a comment ends.
-func commentSpanEnd(s []byte) (int, bool) {
-	for i := len(commentMarker); i < len(s); {
-		if s[i] == '`' {
-			run := 1
-			for i+run < len(s) && s[i+run] == '`' {
-				run++
-			}
-			closeAt := codeSpanClose(s[i+run:], run)
-			if closeAt == 0 {
-				return 0, false
-			}
-			i += run + closeAt
-			continue
-		}
-		if bytes.HasPrefix(s[i:], commentMarker) {
-			return i + len(commentMarker), true
-		}
-		i++
-	}
-	return 0, false
+// commentSpanNode is an inline comment: everything between a paired "%%"
+// opener and closer, moved under it as children by goldmark's delimiter
+// pass. It renders nothing and its children are skipped. Start and Stop are
+// its source range, markers included, which the heading-id transformer cuts
+// out of a heading line.
+type commentSpanNode struct {
+	ast.BaseInline
+	Start, Stop int
 }
-
-// stripCommentSpans returns line without the "%%…%%" spans the inline
-// parser would hide in it. It walks the line the way goldmark's inline pass
-// does for the constructs that matter here: a backslash escapes the next
-// byte, and a code span (a backtick run closed by a run of the same length)
-// is skipped whole, so a "%%" inside code is kept, as it is on the page. It
-// serves the heading-id generator and the vault title, which read the raw
-// source line rather than the parsed inline nodes.
-func stripCommentSpans(line []byte) []byte {
-	var out []byte
-	stripped := false
-	last := 0
-	for i := 0; i < len(line); {
-		switch line[i] {
-		case '\\':
-			i += 2
-			continue
-		case '`':
-			run := 1
-			for i+run < len(line) && line[i+run] == '`' {
-				run++
-			}
-			i += run + codeSpanClose(line[i+run:], run)
-			continue
-		case '%':
-			if bytes.HasPrefix(line[i:], commentMarker) {
-				if n, ok := commentSpanEnd(line[i:]); ok {
-					out = append(out, line[last:i]...)
-					i += n
-					last = i
-					stripped = true
-					continue
-				}
-			}
-		}
-		i++
-	}
-	if !stripped {
-		return line
-	}
-	return append(out, line[last:]...)
-}
-
-// codeSpanClose returns how far past rest the code span closes: the offset
-// just after the first backtick run in rest of exactly length run, or 0 when
-// there is none (the opening run is then literal text).
-func codeSpanClose(rest []byte, run int) int {
-	for j := 0; j < len(rest); {
-		if rest[j] != '`' {
-			j++
-			continue
-		}
-		k := j
-		for k < len(rest) && rest[k] == '`' {
-			k++
-		}
-		if k-j == run {
-			return k
-		}
-		j = k
-	}
-	return 0
-}
-
-// commentStrippingIDs is the vault heading-id generator: goldmark's own,
-// fed the heading line with its comment spans removed. goldmark builds an
-// id from the raw source line, not the parsed inline nodes, so without this
-// "## Plan %%secret%%" would get the id plan-secret, and the comment text
-// would reach the page's anchors and outline hrefs. Render and scan both use
-// it (newVaultIDs), which is what keeps an indexed slug equal to the id the
-// page renders.
-type commentStrippingIDs struct{ inner parser.IDs }
-
-// newVaultIDs returns a fresh id collection for one vault parse. goldmark's
-// default collection type is unexported, so it is taken from a new Context.
-func newVaultIDs() parser.IDs {
-	return commentStrippingIDs{inner: parser.NewContext().IDs()}
-}
-
-func (c commentStrippingIDs) Generate(value []byte, kind ast.NodeKind) []byte {
-	return c.inner.Generate(stripCommentSpans(value), kind)
-}
-
-func (c commentStrippingIDs) Put(value []byte) { c.inner.Put(value) }
 
 func (n *commentSpanNode) Kind() ast.NodeKind { return kindCommentSpan }
 
 func (n *commentSpanNode) Dump(source []byte, level int) { ast.DumpHelper(n, source, level, nil, nil) }
 
-// commentInlineParser hides "%%…%%" when BOTH markers sit on the same line
-// and commentSpanEnd can bound the span. Otherwise it declines, and
-// the text renders literally: a comment is hidden only once its boundary is
-// located, never on a guess.
+// commentDelimiters is the delimiter processor for one "%%" delimiter. The
+// inline form is a goldmark delimiter, like ==highlight==, so goldmark's own
+// inline pass settles every boundary question: a code span or autolink is
+// consumed before its '%' is ever seen, "\%" is an escape and never
+// triggers, delimiters inside link text pair within the link, and a "%%"
+// left unpaired at the end of the paragraph becomes literal text. There is
+// no hand-written scan to disagree with the parse.
+//
+// Each delimiter gets its own processor so the pairing can record the
+// comment's source range: goldmark asks the OPENER's processor
+// CanOpenCloser for a candidate closer and, for a run of two against a run of
+// two, always calls that same processor's OnMatch next.
+type commentDelimiters struct {
+	start int
+	stop  int
+}
+
+func (*commentDelimiters) IsDelimiter(b byte) bool { return b == '%' }
+
+func (p *commentDelimiters) CanOpenCloser(opener, closer *parser.Delimiter) bool {
+	if opener.Char != closer.Char || opener.Length < 2 || closer.Length < 2 {
+		return false
+	}
+	p.stop = closer.Segment.Start + len(commentMarker)
+	return true
+}
+
+func (p *commentDelimiters) OnMatch(int) ast.Node {
+	return &commentSpanNode{Start: p.start, Stop: p.stop}
+}
+
+// commentInlineParser pushes a "%%" delimiter. Obsidian allows spaces inside
+// ("%% note %%"), so every "%%" may both open and close, instead of
+// following CommonMark's flanking rules.
 type commentInlineParser struct{}
 
 func (commentInlineParser) Trigger() []byte { return []byte{'%'} }
 
-func (commentInlineParser) Parse(_ ast.Node, block text.Reader, _ parser.Context) ast.Node {
-	line, _ := block.PeekLine()
-	if !bytes.HasPrefix(line, commentMarker) {
+func (commentInlineParser) Parse(_ ast.Node, block text.Reader, pc parser.Context) ast.Node {
+	// A run the previous call declined is not re-scanned from its second
+	// '%', which keeps a long run linear, as for '='.
+	if block.PrecendingCharacter() == '%' {
 		return nil
 	}
-	n, ok := commentSpanEnd(line)
-	if !ok {
+	line, segment := block.PeekLine()
+	run := 0
+	for run < len(line) && line[run] == '%' {
+		run++
+	}
+	if run != len(commentMarker) {
 		return nil
 	}
-	block.Advance(n)
-	return &commentSpanNode{}
+	d := parser.NewDelimiter(true, true, run, '%', &commentDelimiters{start: segment.Start})
+	d.Segment = segment.WithStop(segment.Start + run)
+	block.Advance(run)
+	pc.PushDelimiter(d)
+	return d
+}
+
+func (commentInlineParser) CloseBlock(ast.Node, parser.Context) {}
+
+// commentTransformer runs after the parse on every vault instance, render
+// and scan alike:
+//
+//   - It gives each heading its id, the job WithAutoHeadingID does for a docs
+//     root, from the same input goldmark would use (the heading's last source
+//     line) with every comment's source range cut out, through the same
+//     parser.IDs collection, so duplicate suffixes work as before. A heading
+//     with no comment gets exactly the id goldmark would give it, and scan
+//     and render agree because both run this one transformer.
+//   - It drops a paragraph left holding nothing but comments, so a note line
+//     that is only a comment leaves no empty <p> behind.
+type commentTransformer struct{}
+
+func (commentTransformer) Transform(doc *ast.Document, reader text.Reader, pc parser.Context) {
+	source := reader.Source()
+	var headings []*ast.Heading
+	var empty []ast.Node
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch n.Kind() {
+		case ast.KindHeading:
+			if h, ok := n.(*ast.Heading); ok {
+				headings = append(headings, h)
+			}
+		case ast.KindParagraph:
+			if onlyComments(n, source) {
+				empty = append(empty, n)
+			}
+		}
+		return ast.WalkContinue, nil
+	})
+	for _, h := range headings {
+		var value []byte
+		if last := h.Lines().Len() - 1; last >= 0 {
+			value = visibleSource(h, h.Lines().At(last), source)
+		}
+		h.SetAttribute([]byte("id"), pc.IDs().Generate(value, ast.KindHeading))
+	}
+	for _, n := range empty {
+		n.Parent().RemoveChild(n.Parent(), n)
+	}
+}
+
+// onlyComments reports whether paragraph p holds at least one comment and
+// otherwise only whitespace text.
+func onlyComments(p ast.Node, source []byte) bool {
+	found := false
+	for c := p.FirstChild(); c != nil; c = c.NextSibling() {
+		switch c.Kind() {
+		case kindCommentSpan:
+			found = true
+		case ast.KindText:
+			t, ok := c.(*ast.Text)
+			if !ok || !util.IsBlank(t.Segment.Value(source)) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return found
+}
+
+// visibleSource returns the bytes of seg with the source range of every
+// comment under n cut out. It is how a heading's id and a vault note's title
+// leave comment text behind, with everything else exactly as written.
+func visibleSource(n ast.Node, seg text.Segment, source []byte) []byte {
+	var cuts [][2]int
+	_ = ast.Walk(n, func(c ast.Node, entering bool) (ast.WalkStatus, error) {
+		if entering {
+			if cs, ok := c.(*commentSpanNode); ok {
+				cuts = append(cuts, [2]int{cs.Start, cs.Stop})
+				return ast.WalkSkipChildren, nil
+			}
+		}
+		return ast.WalkContinue, nil
+	})
+	var out []byte
+	at := seg.Start
+	for _, cut := range cuts {
+		lo, hi := max(cut[0], seg.Start), min(cut[1], seg.Stop)
+		if lo >= hi {
+			continue
+		}
+		if lo > at {
+			out = append(out, source[at:lo]...)
+		}
+		at = max(at, hi)
+	}
+	if at < seg.Stop {
+		out = append(out, source[at:seg.Stop]...)
+	}
+	return out
 }
 
 // ── %%comment%% (block) ────────────────────────────────────────────────────
@@ -267,9 +300,6 @@ func (commentInlineParser) Parse(_ ast.Node, block text.Reader, _ parser.Context
 // from the block-id scan; the renderer never reads them.
 type commentBlockNode struct {
 	ast.BaseBlock
-	// oneLine marks a block whose opener line also carried its closer; the
-	// next Continue closes it without consuming anything.
-	oneLine bool
 }
 
 func (n *commentBlockNode) Kind() ast.NodeKind { return kindCommentBlock }
@@ -297,9 +327,9 @@ func commentCloser(line []byte) (found, clean bool) {
 // an unterminated "%%" must never hide the rest of the document, so Open
 // only commits after it has located the closing line.
 //
-//   - A one-line block ("%%note%%" alone on its line) closes immediately. If
-//     text follows the closer, it is declined and left to the paragraph and
-//     the inline comment parser, which hides only the delimited part.
+//   - An opener line that also holds a closer ("%%note%%") is declined: it
+//     is a paragraph, and the inline form pairs it (a paragraph left with
+//     only comments is then dropped by commentTransformer).
 //   - A multi-line block opens only at the top level of the document, where
 //     the lines Continue will see are exactly the source lines the look-ahead
 //     scans. Inside a blockquote or list item the container can end before
@@ -312,9 +342,6 @@ func commentCloser(line []byte) (found, clean bool) {
 //     "%%" it would close on may sit inside that fence or block; closing
 //     there would orphan the fence's own closer, which then opens a new
 //     fence that swallows the rest of the document into a code block.
-//   - A one-line block ends where the inline form would (commentSpanEnd):
-//     at the first "%%" outside a code span, declining on an unclosed
-//     backtick run.
 type commentBlockParser struct{}
 
 func (commentBlockParser) Trigger() []byte { return []byte{'%'} }
@@ -325,15 +352,10 @@ func (commentBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Co
 	if pos < 0 || !bytes.HasPrefix(line[pos:], commentMarker) {
 		return nil, parser.NoChildren
 	}
-	rest := line[pos+len(commentMarker):]
-	if found, _ := commentCloser(rest); found {
-		if n, ok := commentSpanEnd(line[pos:]); !ok || !util.IsBlank(line[pos+n:]) {
-			return nil, parser.NoChildren
-		}
-		node := &commentBlockNode{oneLine: true}
-		node.Lines().Append(segment)
-		reader.Advance(segment.Len() - 1)
-		return node, parser.NoChildren
+	// A "%%" line that also closes itself is the inline form's to pair, as
+	// a paragraph; this parser takes only an opener with no closer on it.
+	if found, _ := commentCloser(line[pos+len(commentMarker):]); found {
+		return nil, parser.NoChildren
 	}
 	if parent.Kind() != ast.KindDocument || !hasCleanCommentCloser(reader.Source(), segment.Stop) {
 		return nil, parser.NoChildren
@@ -378,9 +400,6 @@ func opensFenceOrHTML(line []byte) bool {
 }
 
 func (commentBlockParser) Continue(node ast.Node, reader text.Reader, _ parser.Context) parser.State {
-	if n, ok := node.(*commentBlockNode); ok && n.oneLine {
-		return parser.Close
-	}
 	line, segment := reader.PeekLine()
 	found, _ := commentCloser(line)
 	node.Lines().Append(segment)

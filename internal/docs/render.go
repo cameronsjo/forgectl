@@ -82,20 +82,9 @@ func newMarkdown(withFrontmatter, vault bool) goldmark.Markdown {
 	}
 	return goldmark.New(
 		goldmark.WithExtensions(extenders...),
-		goldmark.WithParserOptions(headingParserOptions()...),
+		goldmark.WithParserOptions(headingParserOptions(vault)...),
 		goldmark.WithRendererOptions(goldmarkhtml.WithUnsafe()),
 	)
-}
-
-// newParseContext returns the parser context for one parse of a document in
-// a root of the given kind. A vault root gets newVaultIDs, the heading-id
-// generator that leaves comment text out of ids; render and scanBodyFor both
-// build their context here, so an indexed slug is the id the page renders.
-func newParseContext(kind RootKind) parser.Context {
-	if kind == RootVault {
-		return parser.NewContext(parser.WithIDs(newVaultIDs()))
-	}
-	return parser.NewContext()
 }
 
 // headingParserOptions is the ONE place the heading-id rule is configured.
@@ -103,7 +92,15 @@ func newParseContext(kind RootKind) parser.Context {
 // build their goldmark instance from it, so the slug the resolver matches an
 // anchor against is, by construction, the id the browser is handed — the two
 // cannot drift apart through one call site being edited without the other.
-func headingParserOptions() []parser.Option {
+//
+// A vault instance turns goldmark's auto heading id off: it slugs the raw
+// source line, comments included. commentTransformer (obsidian.go), which
+// every vault instance carries through obsidianComments, sets the id instead
+// from the same line with its comments cut out.
+func headingParserOptions(vault bool) []parser.Option {
+	if vault {
+		return nil
+	}
 	return []parser.Option{parser.WithAutoHeadingID()}
 }
 
@@ -547,7 +544,7 @@ func render(source []byte, kind RootKind) (string, error) {
 	}
 	renderMu.Lock()
 	var buf bytes.Buffer
-	ctx := newParseContext(kind)
+	ctx := parser.NewContext()
 	err := md.Convert(source, &buf, parser.WithContext(ctx))
 	renderMu.Unlock()
 	if err != nil {
