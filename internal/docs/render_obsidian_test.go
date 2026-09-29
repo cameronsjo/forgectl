@@ -249,7 +249,7 @@ func TestRenderVault_CommentAroundBlockStaysVisible(t *testing.T) {
 		{"backtick fence", "%%\n```md\n%%\n```\n\n# Next\n\nbody", []string{`<h1 id="next">Next</h1>`, "<p>body</p>"}},
 		{"tilde fence", "%%\n~~~\n%%\n~~~\n\n# Next\n\nbody", []string{`<h1 id="next">Next</h1>`, "<p>body</p>"}},
 		{"html block", "%%\n<pre>\nkeep\n%%\n</pre>\n\nafter", []string{"keep", "after"}},
-		{"inline code span", "a %%b `c%%` d%% e", []string{"<code>c%%</code>", "b ", " e"}},
+		{"unclosed backtick in inline comment", "a %%b `c%% e", []string{"%%b `c%% e"}},
 	}
 	for _, c := range cases {
 		out := renderKind(t, c.src, RootVault)
@@ -341,5 +341,91 @@ func TestScanVault_CommentsNotIndexed(t *testing.T) {
 	}
 	if strings.Join(meta.BlockIDs, ",") != "blk" {
 		t.Errorf("block ids = %v, want only blk", meta.BlockIDs)
+	}
+}
+
+// TestRenderVault_CommentWithCodeSpan: a comment's boundary is found
+// code-span-aware. A closed code span inside a comment is hidden with it, a
+// "%%" inside a code span is not the closer, and a backtick run with no
+// closer on the line leaves the comment visible.
+func TestRenderVault_CommentWithCodeSpan(t *testing.T) {
+	hidden := []struct{ name, src, gone, kept string }{
+		{"inline", "keep %%TODO rename `foo` later%% keep", "foo", "keep"},
+		{"one-line block", "%%a `bee` c%%\n\nafter", "bee", "after"},
+		{"percent inside code", "x %%a `%%` bee%% y", "bee", "y"},
+	}
+	for _, c := range hidden {
+		out := renderKind(t, c.src, RootVault)
+		if strings.Contains(out, c.gone) || strings.Contains(out, "%%") || !strings.Contains(out, c.kept) {
+			t.Errorf("%s: want %q hidden and %q kept, got %s", c.name, c.gone, c.kept, out)
+		}
+	}
+	out := renderKind(t, "## Code %%a `bee` c%%\n", RootVault)
+	if !strings.Contains(out, `<h2 id="code">`) {
+		t.Errorf("heading id carries comment text: %s", out)
+	}
+	out = renderKind(t, "x %%a `bee%% y", RootVault)
+	if !strings.Contains(out, "%%a `bee%% y") {
+		t.Errorf("an unclosed backtick run did not keep the comment visible: %s", out)
+	}
+}
+
+// TestStripCommentSpans_AgreesWithRender checks, exhaustively over short
+// strings of '%', '`', '\\', 'a' and ' ', that stripCommentSpans removes
+// exactly what the render hides. Both sides drop backticks, backslashes and
+// spaces before comparing: code-span markup, escapes and whitespace are not
+// what is at issue.
+func TestStripCommentSpans_AgreesWithRender(t *testing.T) {
+	norm := strings.NewReplacer("`", "", "\\", "", " ", "", "\n", "")
+	alphabet := []byte("%`\\a ")
+	var walk func(prefix []byte)
+	checked := 0
+	walk = func(prefix []byte) {
+		if len(prefix) > 0 {
+			src := "p " + string(prefix)
+			out := renderKind(t, src, RootVault)
+			got := norm.Replace(stripTags.ReplaceAllString(out, ""))
+			want := norm.Replace(string(stripCommentSpans([]byte(src))))
+			if got != want {
+				t.Fatalf("%q: render shows %q, stripCommentSpans leaves %q (%s)", src, got, want, out)
+			}
+			checked++
+		}
+		if len(prefix) == 6 {
+			return
+		}
+		for _, c := range alphabet {
+			walk(append(prefix, c))
+		}
+	}
+	walk(nil)
+	if checked < 1000 {
+		t.Fatalf("only %d strings checked", checked)
+	}
+}
+
+// TestScanVault_TableCellLinksMatchRender: in a GFM table each cell is
+// parsed on its own, so a "%%" cannot reach across a '|', and an autolink
+// consumes the "%%" inside it. The vault scan must draw the same boundaries:
+// a link is indexed exactly when it renders.
+func TestScanVault_TableCellLinksMatchRender(t *testing.T) {
+	const src = "| h1 | h2 |\n|---|---|\n| a %%x | [see](Other.md) y%% |\n| %%c [gone](Gone.md) d%% | e |\n\nsee www.a.example/%%x [live](Live.md) y%%\n"
+	scan, err := scanBodyFor(RootVault, []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexed := map[string]bool{}
+	for _, l := range scan.links {
+		indexed[l.Path] = true
+	}
+	out := renderKind(t, src, RootVault)
+	for _, target := range []string{"Other.md", "Gone.md", "Live.md"} {
+		rendered := strings.Contains(out, `href="`+target+`"`)
+		if indexed[target] != rendered {
+			t.Errorf("%s: indexed = %v, rendered = %v (%s)", target, indexed[target], rendered, out)
+		}
+	}
+	if !indexed["Other.md"] || !indexed["Live.md"] {
+		t.Errorf("fixture no longer exercises a live link beside %%%%: %v", scan.links)
 	}
 }

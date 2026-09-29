@@ -121,17 +121,34 @@ func (highlightParser) CloseBlock(ast.Node, parser.Context) {}
 type commentSpanNode struct{ ast.BaseInline }
 
 // commentSpanEnd reports the length of the "%%…%%" span s opens (s starts
-// with "%%"), or false when there is none to hide: no closer in s, or a
-// backtick between the markers. A backtick there may open a code span that
-// the closer sits inside, so the span is left alone rather than guessed at.
-// Both the inline parser and stripCommentSpans decide with this one helper.
+// with "%%"), or false when there is none to hide. It walks the text after
+// the opener code-span-aware: a backtick run with a same-length closing run
+// later on the line is a code span and is skipped whole, so a "%%" inside it
+// is never the closer; a backtick run with no closing run makes the boundary
+// unknowable, and the span is declined (keep-when-unsure). The closer is the
+// first "%%" outside any code span. The inline parser, the one-line block
+// opener and stripCommentSpans all decide with this one helper, so the three
+// cannot disagree about where a comment ends.
 func commentSpanEnd(s []byte) (int, bool) {
-	body := s[len(commentMarker):]
-	end := bytes.Index(body, commentMarker)
-	if end < 0 || bytes.IndexByte(body[:end], '`') >= 0 {
-		return 0, false
+	for i := len(commentMarker); i < len(s); {
+		if s[i] == '`' {
+			run := 1
+			for i+run < len(s) && s[i+run] == '`' {
+				run++
+			}
+			closeAt := codeSpanClose(s[i+run:], run)
+			if closeAt == 0 {
+				return 0, false
+			}
+			i += run + closeAt
+			continue
+		}
+		if bytes.HasPrefix(s[i:], commentMarker) {
+			return i + len(commentMarker), true
+		}
+		i++
 	}
-	return len(commentMarker) + end + len(commentMarker), true
+	return 0, false
 }
 
 // stripCommentSpans returns line without the "%%…%%" spans the inline
@@ -223,7 +240,7 @@ func (n *commentSpanNode) Kind() ast.NodeKind { return kindCommentSpan }
 func (n *commentSpanNode) Dump(source []byte, level int) { ast.DumpHelper(n, source, level, nil, nil) }
 
 // commentInlineParser hides "%%…%%" when BOTH markers sit on the same line
-// with no backtick between them (commentSpanEnd). Otherwise it declines, and
+// and commentSpanEnd can bound the span. Otherwise it declines, and
 // the text renders literally: a comment is hidden only once its boundary is
 // located, never on a guess.
 type commentInlineParser struct{}
@@ -295,8 +312,9 @@ func commentCloser(line []byte) (found, clean bool) {
 //     "%%" it would close on may sit inside that fence or block; closing
 //     there would orphan the fence's own closer, which then opens a new
 //     fence that swallows the rest of the document into a code block.
-//   - A one-line block declines when a backtick sits between its markers,
-//     for the same reason the inline form does (commentSpanEnd).
+//   - A one-line block ends where the inline form would (commentSpanEnd):
+//     at the first "%%" outside a code span, declining on an unclosed
+//     backtick run.
 type commentBlockParser struct{}
 
 func (commentBlockParser) Trigger() []byte { return []byte{'%'} }

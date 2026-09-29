@@ -15,6 +15,7 @@ import (
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 	"go.abhg.dev/goldmark/wikilink"
@@ -60,6 +61,14 @@ func newLinkMarkdown(vault bool) goldmark.Markdown {
 	(&wikilink.Extender{}).Extend(md)
 	if vault {
 		obsidianComments{}.Extend(md)
+		// The render pipeline's GFM table and autolink parsers decide where
+		// an inline comment can reach: a table cell is parsed on its own, and
+		// an autolink consumes its "%%" before the comment parser sees it.
+		// Without them the scan would draw comment boundaries the page does
+		// not, and index or drop a link the page shows otherwise. Vault
+		// only: a docs root's scan instance is unchanged.
+		extension.Table.Extend(md)
+		extension.Linkify.Extend(md)
 	}
 	return md
 }
