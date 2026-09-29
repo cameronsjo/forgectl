@@ -318,10 +318,18 @@ var voidElements = map[string]bool{
 // outside the document, by the argument above (at worst "</p>" inserts an
 // empty paragraph). A <table>, cell or caption the document opens — the
 // elements a closer's scope search stops at — is always closed by name, so
-// the shell's "</div>" is never left out of scope. SVG and MathML follow
-// a browser's rules: a self-closing tag closes only in foreign content, and
-// an HTML tag that breaks out of foreign content closes the foreign
-// elements first. The elements whose parsing a tag stack cannot follow —
+// the shell's "</div>" is never left out of scope. Of the browser's rules
+// for SVG and MathML it models these: a self-closing tag closes only in
+// foreign content; an HTML tag that breaks out of foreign content (and a
+// "</p>" or "</br>" there) closes the foreign elements first, so a <b> in
+// an <svg> ends the <svg> and a later "<a/>" opens an HTML <a> it then
+// closes; the HTML integration points (SVG foreignObject and desc, MathML
+// annotation-xml with an HTML encoding) and MathML text integration points
+// read their children as HTML; and an <svg> under annotation-xml starts a
+// new SVG root. Not modelled: the case-adjusted tag and attribute names,
+// mglyph and malignmark, and SVG <title> as an integration point (it is
+// dropped below as raw text). The elements whose parsing a tag stack
+// cannot follow —
 // <select>, <template>, the other scope-stopping <object>, <applet> and
 // <marquee>, and the raw-text elements (script, style, textarea, title and
 // the like) — are dropped with their content kept, escaped where it is raw
@@ -371,6 +379,11 @@ func balanceDeep(src string) string {
 				continue
 			}
 			foreign := len(stack) > 0 && !htmlContext(stack[len(stack)-1])
+			if foreign && name == "svg" && stack[len(stack)-1].ns == "math" && stack[len(stack)-1].name == "annotation-xml" {
+				// A browser reads <svg> under <annotation-xml> by the HTML
+				// rules: a fresh SVG root, whose <desc> is an integration point.
+				foreign = false
+			}
 			if foreign && breaksOutOfForeign(tok) {
 				breakOut()
 				foreign = false

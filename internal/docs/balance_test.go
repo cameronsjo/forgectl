@@ -362,7 +362,7 @@ func deepSources() map[string]string {
 		_, _ = list.WriteString(strings.Repeat("  ", i) + "- x\n")
 	}
 	const esc = "\n\n</div></main>ESC\n"
-	return map[string]string{
+	m := map[string]string{
 		"600 unclosed b":            strings.Repeat("<b>", 600) + "z" + esc,
 		"closer before 600 b":       "</div></main>ESC\n\n" + strings.Repeat("<b>", 600) + "z\n",
 		"list 300 deep":             list.String() + esc,
@@ -372,18 +372,26 @@ func deepSources() map[string]string {
 		"600 div, 610 closers":      strings.Repeat("<div>", 600) + "z" + strings.Repeat("</div>", 610) + "ESC\n",
 		"li closes div under 600 b": strings.Repeat("<b>", 600) + "<ul><li><div><li>x</div></ul>ESC\n",
 	}
+	for i, src := range breakoutSources {
+		m[fmt.Sprintf("svg breakout %d under 600 b", i)] = strings.Repeat("<b>", 600) + src + "</div></main>ESC\n"
+	}
+	return m
 }
 
 // shellPage places body where the shell does — html > body > div > div >
 // main > div.doc-body — with shell content after it, as the served page has.
+// Every shell element carries data-shell, so an element without it outside
+// .doc-body came from the document.
 func shellPage(body string) string {
-	return `<!DOCTYPE html><html><head></head><body><div id="shell"><div class="content-grid"><main class="surface-document"><div class="doc-body">` +
-		body + `</div><div class="home">HOME</div></main><aside class="outline">OUTL</aside></div><footer class="statusbar">SENTINEL</footer></div></body></html>`
+	return `<!DOCTYPE html><html><head></head><body><div data-shell id="shell"><div data-shell class="content-grid"><main data-shell class="surface-document"><div data-shell class="doc-body">` +
+		body + `</div><div data-shell class="home">HOME</div></main><aside data-shell class="outline">OUTL</aside></div><footer data-shell class="statusbar">SENTINEL</footer></div></body></html>`
 }
 
 // requireContained parses body inside shellPage with the HTML5 tree builder
-// and fails unless .doc-body holds every character of the document's text
-// and none of the shell's content after it.
+// and fails unless .doc-body holds every character of the document's text,
+// none of the shell's content after it, and every element the document
+// produced — including one the tree builder reconstructs later, such as an
+// <a> left open that would wrap the shell's content in a document link.
 func requireContained(t *testing.T, label, body string) {
 	t.Helper()
 	page, err := html.Parse(strings.NewReader(shellPage(body)))
@@ -402,6 +410,9 @@ func requireContained(t *testing.T, label, body string) {
 	if main := findByClass(page, "surface-document"); main == nil || !isAncestor(main, doc) {
 		t.Errorf("%s: .doc-body escaped main\nbody: %q", label, body)
 	}
+	if n := strayDocElement(page, doc); n != nil {
+		t.Errorf("%s: document element <%s> outside .doc-body\nbody: %q", label, n.Data, body)
+	}
 	frag, err := html.Parse(strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("%s: parse body: %v", label, err)
@@ -409,6 +420,41 @@ func requireContained(t *testing.T, label, body string) {
 	if got, want := strings.Join(strings.Fields(textOf(doc)), " "), strings.Join(strings.Fields(textOf(frag)), " "); got != want {
 		t.Errorf("%s: .doc-body text %q, want the document's %q\nbody: %q", label, got, want, body)
 	}
+}
+
+// strayDocElement returns the first element under n, outside doc, that is
+// neither the page's html/head/body nor marked data-shell.
+func strayDocElement(n, doc *html.Node) *html.Node {
+	if n == doc {
+		return nil
+	}
+	if n.Type == html.ElementNode && n.Namespace == "" && n.Data != "html" && n.Data != "head" && n.Data != "body" {
+		shell := false
+		for _, a := range n.Attr {
+			shell = shell || a.Key == "data-shell"
+		}
+		if !shell {
+			return n
+		}
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if f := strayDocElement(c, doc); f != nil {
+			return f
+		}
+	}
+	return nil
+}
+
+// breakoutSources put an HTML tag inside SVG, which ends the SVG in a
+// browser, and then a self-closing <a>: once out of foreign content that
+// opens an HTML <a>, and one left open is reconstructed after .doc-body,
+// wrapping the shell's content in the document's link.
+var breakoutSources = []string{
+	`<svg><g><b></b><a href="https://e.com/"/>x`,
+	`<svg><path d="M0 0"/><i>i</i><a href="https://e.com/"/>x`,
+	`<svg><g><em>e</em><a href="https://e.com/"/>x</g></svg>`,
+	`<svg><text><span>s</span><a href="https://e.com/"/>t</text></svg>`,
+	`<svg><g><strong>s</strong><b/>x`,
 }
 
 // TestRender_DeepStrayCloser_Contained renders each deep source and checks
@@ -422,7 +468,8 @@ func requireContained(t *testing.T, label, body string) {
 // Mutations: in balancePasses, return sanitized unchanged when parseBody
 // fails (main's behaviour) — every case keeps a "</div>" and this goes red.
 // In balanceDeep, drop the div rename — the "</div>"s the stack matches come
-// back and this goes red.
+// back and this goes red. Make breakOut a no-op — the breakoutSources cases
+// keep their HTML tags inside <svg> and this goes red.
 func TestRender_DeepStrayCloser_Contained(t *testing.T) {
 	for name, src := range deepSources() {
 		out, err := Render([]byte(src))
@@ -447,8 +494,10 @@ func TestRender_DeepStrayCloser_Contained(t *testing.T) {
 }
 
 // tagsBalanced reports the first end tag in s that does not close the
-// innermost open element, or elements left open at the end. Void elements,
-// and self-closing tags inside SVG or MathML, open nothing.
+// innermost open element, elements left open at the end, or an HTML tag
+// that would break out of SVG or MathML (the sanitizer leaves no integration
+// point for it to sit in). Void elements, and self-closing tags inside SVG
+// or MathML, open nothing.
 func tagsBalanced(s string) error {
 	var stack []string
 	foreign := 0
@@ -463,6 +512,11 @@ func tagsBalanced(s string) error {
 		case html.StartTagToken, html.SelfClosingTagToken:
 			raw, _ := z.TagName()
 			name := string(raw)
+			if foreign > 0 && foreignBreakouts[name] {
+				// A browser ends the SVG here, so the stream no longer
+				// means what its nesting says.
+				return fmt.Errorf("<%s> inside foreign content", name)
+			}
 			if name == "svg" || name == "math" {
 				foreign++
 			}
@@ -497,8 +551,13 @@ func tagsBalanced(s string) error {
 // Mutations: in balanceDeep, drop the div rename — "<ul><li><div><li>x</div>"
 // keeps a "</div>" whose <div> the second <li> already closed, it closes
 // .doc-body, and this goes red. Skip the closeTo(0) at the end of input — an
-// unclosed <table> keeps .doc-body open and this goes red. Skip breakOut — a
-// <table> inside <svg> is left open and this goes red.
+// unclosed <table> keeps .doc-body open and this goes red. Make breakOut a
+// no-op — a breakoutSources "<a/>" is then read as self-closed inside SVG,
+// the browser's HTML <a> is never closed and is rebuilt around the shell's
+// content, and this goes red. Drop the annotation-xml <svg> case — the
+// <svg> takes MathML's namespace, its <desc> is not an integration point,
+// "<x/>" is taken as closed while the tree builder opens it, and this goes
+// red.
 func TestBalanceDeep_ContainsShallowSoup(t *testing.T) {
 	cases := []string{
 		"<ul><li><div><li>x</div></ul>ESC",
@@ -509,9 +568,13 @@ func TestBalanceDeep_ContainsShallowSoup(t *testing.T) {
 		"<svg><foreignObject><div>x</div></foreignObject></svg>ESC",
 		"<textarea></div></textarea>ESC",
 		"<main>m</main></body></html>ESC",
+		"<math><annotation-xml><svg><desc><x/>x</div></main>ESC",
 	}
 	for _, src := range strayCloserSources {
 		cases = append(cases, src)
+	}
+	for _, src := range breakoutSources {
+		cases = append(cases, src+"</div></main>ESC")
 	}
 	rng := rand.New(rand.NewSource(623)) //nolint:gosec // G404: deterministic test fixture, not crypto
 	tags := []string{
