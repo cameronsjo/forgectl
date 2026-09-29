@@ -13,6 +13,12 @@ package sops
 //       SIGQUIT, SIGABRT — and the table below is checked against that list,
 //       so a signal added there cannot go untested
 //   [x] The window was real: the staged value existed when the signal went in
+//   [x] The signal landed after the sops edit launched, so the ciphertext
+//       backup is kept beside the target and no plaintext survives anywhere
+//   [x] SIGKILL leaves the work directory; the next set refuses, names it and
+//       its backup, and deletes nothing
+//   [x] A signal in the read-back (sops already wrote the target) keeps the
+//       backup, and the next set refuses with the unverified-value message
 //
 // sops itself is not needed. The runner is a fake that blocks, which is the
 // point: the window under test is forgectl's, and a fake that parks forever
@@ -66,6 +72,40 @@ func (r parkingRunner) RunSensitive(context.Context, fcexec.SensitiveCommand) (f
 
 // findWorkDir returns the work directory, never the preserved backup beside
 // it, which shares the prefix.
+// childModeVerify parks the child in the read-back instead: the fake edit has
+// already rewritten the target, and a decrypted read-back sits in the work
+// directory. That is the late-signal window of cameronsjo/forgectl#560.
+const childModeVerify = "verify"
+
+// changedFixture is what the fake sops edit leaves in the target. It is
+// ciphertext-shaped and carries no plaintext value.
+const changedFixture = "a: ENC[AES256_GCM,data:changed,type:str]\nsops:\n    unencrypted_suffix: _unencrypted\n"
+
+type verifyParkingRunner struct{ repo string }
+
+func (r verifyParkingRunner) RunSensitive(_ context.Context, cmd fcexec.SensitiveCommand) (fcexec.SensitiveResult, error) {
+	if cmd.Kind == fcexec.KindSopsEdit {
+		if err := os.WriteFile(filepath.Join(r.repo, "secrets.sops.yaml"), []byte(changedFixture), 0o600); err != nil {
+			_, _ = os.Stdout.WriteString("NOEDIT\n")
+			os.Exit(3)
+		}
+		return fcexec.SensitiveResult{}, nil
+	}
+	dir := findWorkDir(r.repo)
+	if dir == "" {
+		_, _ = os.Stdout.WriteString("NOWORKDIR\n")
+		os.Exit(3)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "landed"), []byte("s3cr3t-value"), 0o600); err != nil {
+		_, _ = os.Stdout.WriteString("NOLANDED\n")
+		os.Exit(3)
+	}
+	_, _ = os.Stdout.WriteString("READY\n")
+	time.Sleep(time.Minute)
+	os.Exit(4)
+	return fcexec.SensitiveResult{}, nil
+}
+
 func findWorkDir(repo string) string {
 	entries, err := os.ReadDir(repo)
 	if err != nil {
@@ -87,7 +127,11 @@ func runSignalChild(repo string) {
 		_, _ = os.Stdout.WriteString("RESOLVE " + err.Error() + "\n")
 		os.Exit(3)
 	}
-	_, err = NewClient(parkingRunner{repo: repo}).SetValue(context.Background(), target, "a", "s3cr3t-value")
+	var runner fcexec.SensitiveRunner = parkingRunner{repo: repo}
+	if os.Getenv(signalChildModeEnv) == childModeVerify {
+		runner = verifyParkingRunner{repo: repo}
+	}
+	_, err = NewClient(runner).SetValue(context.Background(), target, "a", "s3cr3t-value")
 	_, _ = os.Stdout.WriteString("RETURNED\n")
 	_ = err
 	os.Exit(5)
@@ -213,6 +257,19 @@ func TestSignalDuringPlaintextWindowRemovesWorkDir(t *testing.T) {
 				t.Errorf("the work directory survived the signal: %s (stat err %v)", dir, err)
 			}
 			assertNoWorkDirLeft(t, repo)
+			assertNoPlaintextUnder(t, repo, "s3cr3t-value")
+			// The child was parked inside the edit call, after the mutation
+			// span opened, so it could not know whether sops had written the
+			// target: the ciphertext backup must be beside it.
+			target, err := env.ResolveTarget("secrets.sops.yaml", repo)
+			if err != nil {
+				t.Fatalf("ResolveTarget: %v", err)
+			}
+			defer target.Close()
+			got, err := os.ReadFile(filepath.Clean(target.SopsBackupPath()))
+			if err != nil || string(got) != signalFixture {
+				t.Errorf("kept backup = %q, %v; want the pre-run ciphertext", got, err)
+			}
 		})
 	}
 }
@@ -341,5 +398,92 @@ func TestSigkillLeftoverRefusesNextSet(t *testing.T) {
 	got, err := os.ReadFile(filepath.Clean(filepath.Join(repo, "secrets.sops.yaml")))
 	if err != nil || string(got) != signalFixture {
 		t.Errorf("the target changed under a refusal: %q, %v", got, err)
+	}
+}
+
+// A signal after sops wrote the target and before forgectl verified it: the
+// plaintext goes, the ciphertext backup stays beside the target, and the next
+// set refuses and points at it (cameronsjo/forgectl#560).
+func TestLateSignalKeepsBackupAndNextSetRefuses(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGINT} {
+		t.Run(sig.String(), func(t *testing.T) {
+			if signal.Ignored(sig) {
+				t.Skipf("%v is ignored in this process, so the child inherits the ignore", sig)
+			}
+			repo, path := signalRepo(t)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+
+			cmd := parkChild(ctx, t, repo, path, childModeVerify)
+			dir := findWorkDir(repo)
+			if dir == "" {
+				t.Fatal("no work directory while the child was parked")
+			}
+			if _, err := os.Stat(filepath.Join(dir, "landed")); err != nil {
+				t.Fatalf("the window was not real: no read-back on disk: %v", err)
+			}
+			if err := cmd.Process.Signal(sig); err != nil {
+				t.Fatalf("Signal: %v", err)
+			}
+			_ = cmd.Wait()
+			ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+			if !ok || !ws.Signaled() || ws.Signal() != sig {
+				t.Errorf("child status %v; want death by %v", cmd.ProcessState, sig)
+			}
+
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Errorf("the work directory survived: %s (stat err %v)", dir, err)
+			}
+			assertNoPlaintextUnder(t, repo, "s3cr3t-value")
+
+			t.Setenv("PATH", path)
+			target, err := env.ResolveTarget("secrets.sops.yaml", repo)
+			if err != nil {
+				t.Fatalf("ResolveTarget: %v", err)
+			}
+			defer target.Close()
+			keep := target.SopsBackupPath()
+			got, err := os.ReadFile(filepath.Clean(keep))
+			if err != nil {
+				t.Fatalf("the ciphertext backup was not kept at %s: %v", keep, err)
+			}
+			if string(got) != signalFixture {
+				t.Errorf("the kept backup = %q, want the pre-run ciphertext %q", got, signalFixture)
+			}
+
+			_, err = NewClient(refusingRunner{t}).SetValue(ctx, target, "a", "another-value")
+			if err == nil {
+				t.Fatal("SetValue succeeded with an interrupted run's backup beside the target")
+			}
+			for _, want := range []string{filepath.Base(keep), "unverified value"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal %q does not mention %q", err, want)
+				}
+			}
+			if _, err := os.Stat(keep); err != nil {
+				t.Errorf("the refusal removed the backup: %v", err)
+			}
+		})
+	}
+}
+
+// assertNoPlaintextUnder fails if any regular file under root holds secret.
+func assertNoPlaintextUnder(t *testing.T, root, secret string) {
+	t.Helper()
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return err
+		}
+		data, err := os.ReadFile(filepath.Clean(p))
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(data), secret) {
+			t.Errorf("plaintext survived the signal in %s", p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WalkDir: %v", err)
 	}
 }

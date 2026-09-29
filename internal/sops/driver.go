@@ -146,8 +146,10 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 	// The guard is armed BEFORE the work directory exists and released AFTER
 	// it is removed: defers run last-in first-out, so release (deferred first)
 	// runs after cleanup on every path, a panic included. A guarded signal
-	// (SIGINT, SIGTERM, SIGHUP, SIGQUIT on unix) anywhere in between removes
-	// the directory and then terminates the process. See signal.go.
+	// (SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGABRT on unix) anywhere in between
+	// removes the directory and then terminates the process. Between
+	// beginMutation and settle it first moves the ciphertext backup out beside
+	// the target, so the next run refuses and points at it. See signal.go.
 	guard := armPlaintextGuard()
 	defer guard.release()
 
@@ -169,6 +171,9 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 	editCtx, cancel := context.WithTimeout(ctx, editDeadline)
 	defer cancel()
 
+	// From here until settle, the target may hold something other than the
+	// backup, so a signal keeps the backup (see signal.go).
+	guard.beginMutation()
 	res, runErr := c.runner.RunSensitive(editCtx, exec.SensitiveCommand{
 		Kind: exec.KindSopsEdit,
 		Path: exec.Secret(sopsBin),
@@ -196,6 +201,7 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 		if restoreErr := work.restore(target); restoreErr != nil {
 			return OutcomeUnspecified, fmt.Errorf("sops refused the edit and the file could NOT be restored: %w", restoreErr)
 		}
+		guard.settle()
 		// The editor's own refusal, when there is one, is the actionable
 		// message — a typo'd block name is the commonest mistake and its
 		// reason lives only in the child. Every relayed message originates in
@@ -233,8 +239,10 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 		if restoreErr := work.restore(target); restoreErr != nil {
 			return OutcomeUnspecified, fmt.Errorf("%w — and the file could NOT be restored: %v", err, restoreErr)
 		}
+		guard.settle()
 		return OutcomeUnspecified, err
 	}
+	guard.settle()
 	return outcome, nil
 }
 
@@ -414,6 +422,9 @@ type workDir struct {
 	dir    string
 	nonce  string
 	backup string
+	// keep is where an interrupted run leaves the backup: beside the target,
+	// scoped to it, so the next run's leftover scan finds it.
+	keep string
 }
 
 // newWorkDir creates the directory as a SIBLING of the target.
@@ -448,6 +459,7 @@ func newWorkDir(target env.Target) (*workDir, error) {
 		dir:    dir,
 		nonce:  base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(buf),
 		backup: filepath.Join(dir, "backup"),
+		keep:   target.SopsBackupPath(),
 	}, nil
 }
 
@@ -579,6 +591,26 @@ func (w *workDir) discardStagedValue() {
 // has no reason to outlive the comparison it exists for.
 func (w *workDir) discardLandedValue() {
 	_ = os.Remove(filepath.Join(w.dir, "landed"))
+}
+
+// preserveBackup moves the ciphertext backup out of the work directory to
+// keep. The two are in the same directory, so the rename cannot fail with
+// EXDEV.
+//
+// It never replaces an existing file. Under the lock, the leftover scan has
+// already refused any earlier backup, so one appearing now was put there
+// outside the lock, and it is evidence too. If the rename cannot happen, the
+// backup goes with the directory, as it did before this existed: keeping the
+// directory instead would leave it open to a sops read-back that outlived
+// forgectl, which writes plaintext into it.
+func (w *workDir) preserveBackup() {
+	if w.keep == "" {
+		return
+	}
+	if _, err := os.Lstat(w.keep); !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	_ = os.Rename(w.backup, w.keep)
 }
 
 func (w *workDir) cleanup() { _ = os.RemoveAll(w.dir) }

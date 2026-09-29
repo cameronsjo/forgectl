@@ -33,6 +33,22 @@ import (
 // directory also takes the editor's value file away, so a sops child that
 // outlives forgectl finds nothing to write and refuses.
 //
+// # Keeping the backup when the target may have changed
+//
+// Not restoring used to mean losing the way back. The handler removed the
+// whole work directory, ciphertext backup included, so a signal after sops
+// wrote the target and before forgectl verified it left an unverified value
+// with nothing but git to return to (cameronsjo/forgectl#560). Now, inside the
+// span where the target may differ from the backup (from the moment the sops
+// edit is launched until the run settles, meaning verified or restore proven),
+// the handler removes the plaintext files first, then renames the backup out to
+// `.forgectl-sops-<tag>.backup` beside the target, and then removes the rest.
+// The rename stays inside one directory, so it cannot fail with EXDEV. The
+// next write to that target finds the backup through the leftover scan and
+// refuses, pointing at it. Ciphertext on disk exposes nothing the target
+// itself does not. Outside that span the target is untouched, or is proven,
+// so keeping a backup would only cause a false refusal.
+//
 // # What it cannot cover
 //
 // SIGKILL and SIGSTOP cannot be caught, a power loss runs no code, and a
@@ -62,6 +78,10 @@ type plaintextGuard struct {
 	mu    sync.Mutex
 	work  *workDir
 	fired bool
+	// mutating is true while the target may differ from the backup: from just
+	// before the sops edit is launched until settle. A signal inside that span
+	// keeps the ciphertext backup.
+	mutating bool
 
 	once sync.Once
 
@@ -136,6 +156,24 @@ func (g *plaintextGuard) track(create func() (*workDir, error)) (*workDir, error
 	return w, nil
 }
 
+// beginMutation opens the span in which the target may differ from the
+// backup. Call it immediately before launching anything that can write the
+// target. It takes the lock, so a signal is handled wholly before it or wholly
+// after it.
+func (g *plaintextGuard) beginMutation() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.mutating = true
+}
+
+// settle closes that span once the target is proven: verified, or restored
+// and the restore proven. A signal after this point has nothing to preserve.
+func (g *plaintextGuard) settle() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.mutating = false
+}
+
 // cleanup removes the work directory exactly once, whoever gets there first.
 // sync.Once also makes the loser WAIT for the winner: the deferred cleanup
 // cannot return while a handler-driven removal is half done, and the handler
@@ -147,10 +185,24 @@ func (g *plaintextGuard) track(create func() (*workDir, error)) (*workDir, error
 // the last listing fails that final rmdir with ENOTEMPTY and the directory
 // survives. Once the directory itself is gone, every later write into it fails
 // with ENOENT — nothing but track creates it — so a bounded retry converges.
-func (g *plaintextGuard) cleanup() {
+//
+// This is the path a normal return takes, and it keeps nothing. The signal
+// path goes through finish directly and may keep the backup.
+func (g *plaintextGuard) cleanup() { g.finish(false) }
+
+// finish is cleanup, with the choice of keeping the ciphertext backup. The
+// plaintext goes first, the backup is moved out second, and the directory is
+// removed last. Once the plaintext files are gone, nothing that follows can
+// expose them.
+func (g *plaintextGuard) finish(keepBackup bool) {
 	g.once.Do(func() {
 		if g.work == nil {
 			return
+		}
+		if keepBackup {
+			g.work.discardStagedValue()
+			g.work.discardLandedValue()
+			g.work.preserveBackup()
 		}
 		for range cleanupAttempts {
 			g.work.cleanup()
@@ -167,12 +219,13 @@ func (g *plaintextGuard) cleanup() {
 // us) from spinning forever.
 const cleanupAttempts = 16
 
-// fire runs on a caught signal: remove the plaintext, then die.
+// fire runs on a caught signal: remove the plaintext, keep the ciphertext
+// backup if the target may have changed, then die.
 func (g *plaintextGuard) fire(sig os.Signal) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.fired = true
-	g.cleanup()
+	g.finish(g.mutating)
 	g.die(sig)
 }
 
