@@ -15,7 +15,8 @@ import (
 // fails is reported and counted, so one bad repo doesn't abort the batch —
 // same aggregate-error contract as `clone --org` (see cloneOrg).
 func newProjectsPullAllCmd(client *projects.Client) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "pull-all [dir]",
 		Short: "Pull every project (skips dirty checkouts)",
 		Args:  cobra.MaximumNArgs(1),
@@ -31,9 +32,14 @@ func newProjectsPullAllCmd(client *projects.Client) *cobra.Command {
 			}
 
 			var failed int
+			rows := make([]pullResultJSON, 0, len(results))
 			for _, r := range results {
 				if r.Status == projects.PullFailed {
 					failed++
+				}
+				if asJSON {
+					rows = append(rows, pullResultJSON{Name: r.Name, Status: r.Status.String()})
+					continue
 				}
 				// r.Name is a raw os.ReadDir entry name, not a validated segment — any
 				// directory under the projects root can carry ANSI or bidi controls
@@ -41,12 +47,27 @@ func newProjectsPullAllCmd(client *projects.Client) *cobra.Command {
 				// termsafe error seam that covers returned errors.
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s %s (%s)\n", pullGlyph(r.Status), termsafe.SafeLine(r.Name), r.Status)
 			}
+			if asJSON {
+				if err := writeJSON(cmd.OutOrStdout(), rows); err != nil {
+					return err
+				}
+			}
 			if failed > 0 {
 				return fmt.Errorf("%d of %d repos failed to pull", failed, len(results))
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"name":...,"status":...}] to stdout; the exit code is unchanged (1 when any pull failed)`)
+	return cmd
+}
+
+// pullResultJSON is one `projects pull-all --json` row (additive-only,
+// ADR-0008). Status is PullStatus.String(), the same word the human line
+// prints in parentheses.
+type pullResultJSON struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
 }
 
 // pullGlyph renders a one-character status badge for the pull-all report.
