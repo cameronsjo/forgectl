@@ -108,6 +108,45 @@ func TestExecutor_RunOnlyWorkflow_ComposedArgv(t *testing.T) {
 	}
 }
 
+// discardingFake is a FakeRunner that also offers exec.DiscardingRunner and
+// records which of the two paths a step took.
+type discardingFake struct {
+	*exec.FakeRunner
+	discarded []exec.Call
+}
+
+func (d *discardingFake) RunDiscardingStdout(_ context.Context, name string, args ...string) error {
+	d.discarded = append(d.discarded, exec.Call{Name: name, Args: args})
+	return nil
+}
+
+// TestExecutor_RunStep_DiscardsStdoutWhenTheRunnerCan pins #661: a `run`
+// step throws its stdout away, so it must not go through Run, whose stdout
+// ceiling fails a step that prints more than 64 MiB. When the Runner offers
+// exec.DiscardingRunner the step uses it; the plain-FakeRunner tests above
+// cover the fallback to Run.
+//
+// Mutation: drop the DiscardingRunner type assertion in runStep and the step
+// goes through Run (one Calls entry, no discarded entry).
+func TestExecutor_RunStep_DiscardsStdoutWhenTheRunnerCan(t *testing.T) {
+	fake := &discardingFake{FakeRunner: &exec.FakeRunner{}}
+	wf := Workflow{
+		DSLVersion: 1,
+		Name:       "run-discard",
+		Steps:      []Step{{Uses: "run", Cmd: "echo", Args: []string{"hi"}}},
+	}
+	plan, err := BuildPlan(wf, nil, testRegistry(t))
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if err := NewExecutor(fake, testRegistry(t)).Run(context.Background(), plan, NewContext(nil)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(fake.Calls) != 0 || len(fake.discarded) != 1 || fake.discarded[0].Name != "echo" {
+		t.Fatalf("Run calls %+v, discarding calls %+v; want only one discarding call to echo", fake.Calls, fake.discarded)
+	}
+}
+
 // TestExecutor_DryRun_ZeroRunnerCalls is the spike's core acceptance
 // criterion: --dry-run builds the Plan and returns without invoking any
 // StepRunner, so the FakeRunner records zero calls.
