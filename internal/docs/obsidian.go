@@ -876,12 +876,7 @@ func wikilinkSourceRange(n ast.Node, source []byte) (start, stop int, ok bool) {
 
 // hasLinkAncestor reports whether n sits inside a markdown link or image.
 func hasLinkAncestor(n ast.Node) bool {
-	for p := n.Parent(); p != nil; p = p.Parent() {
-		if k := p.Kind(); k == ast.KindLink || k == ast.KindImage {
-			return true
-		}
-	}
-	return false
+	return hasAncestorOfKind(n, ast.KindLink, ast.KindImage)
 }
 
 // renderResolvedWikilink renders a wikilink wikilinkTransformer resolved. An
