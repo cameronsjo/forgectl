@@ -48,7 +48,14 @@ A query that starts with "-" must follow "--":
 
   forgectl docs search -- --flag-name
 
-No match exits 0 with no results. A missing rg or an expired --timeout exits 2.`,
+Results come in root order, then in path order within a root, so the same
+query over the same tree prints the same lines and --limit keeps a stable
+prefix. A doc reachable through two overlapping roots is printed once.
+
+No match exits 0 with no results. If rg could not fully search a root (an
+unreadable file, say), the results from every root are still printed, the
+reason goes to stderr, and the exit code is 1. A missing rg or an expired
+--timeout exits 2.`,
 		Args: cobra.ExactArgs(1),
 		// Same reason as docs list: under --json a failure has already put its
 		// ONE JSON object on stderr, and cobra's own error line would be a
@@ -133,13 +140,38 @@ func reportDocsSearchError(cmd *cobra.Command, err error, code int, asJSON bool)
 	return newSilentCodedError(code)
 }
 
+// printDocsSearch writes the results, then turns any per-root failure into
+// exit 1 with its reason on stderr: under --json one {"error","code"} object
+// (stdout still carries the full response, errors array included), otherwise
+// one line per failed root.
 func printDocsSearch(cmd *cobra.Command, resp docspkg.SearchResponse, limit int, asJSON bool) error {
+	if err := printDocsSearchResults(cmd, resp, limit, asJSON); err != nil {
+		return err
+	}
+	if len(resp.Errors) == 0 {
+		return nil
+	}
+	if asJSON {
+		msg := fmt.Sprintf("docs search: %d root(s) could not be fully searched; see errors in the response", len(resp.Errors))
+		return reportDocsSearchError(cmd, errors.New(msg), 1, true)
+	}
+	for _, e := range resp.Errors {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "docs search: root %s: %s\n",
+			termsafe.SafeLineMax(e.Root, docsSearchRootRunes),
+			termsafe.SafeLine(e.Message))
+	}
+	return newSilentCodedError(1)
+}
+
+func printDocsSearchResults(cmd *cobra.Command, resp docspkg.SearchResponse, limit int, asJSON bool) error {
 	out := cmd.OutOrStdout()
 	if asJSON {
 		return termsafe.JSONEncoder(out).Encode(resp)
 	}
 	if len(resp.Results) == 0 {
-		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "no matches")
+		if len(resp.Errors) == 0 {
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "no matches")
+		}
 		return nil
 	}
 	for _, r := range resp.Results {

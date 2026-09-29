@@ -8,6 +8,8 @@ package cli
 //       one JSON error object to stderr, and exits 2
 //   [x] Security: a snippet carrying an ESC sequence reaches stdout escaped
 //   [x] Unhappy: an empty query is rejected before rg runs
+//   [x] Unhappy: rg failing on a root that also matched prints the hit, puts
+//       the reason on stderr, and exits 1 (human and --json)
 
 import (
 	"bytes"
@@ -29,13 +31,16 @@ import (
 type searchRunner struct {
 	*forgexec.FakeRunner
 	stdout string
+	stderr string
+	err    error
 	calls  int
 }
 
-func (r *searchRunner) RunStreaming(_ context.Context, _ io.Reader, stdout, _ io.Writer, _ string, _ ...string) error {
+func (r *searchRunner) RunStreaming(_ context.Context, _ io.Reader, stdout, stderr io.Writer, _ string, _ ...string) error {
 	r.calls++
 	_, _ = io.WriteString(stdout, r.stdout)
-	return nil
+	_, _ = io.WriteString(stderr, r.stderr)
+	return r.err
 }
 
 // docsSearchFixture makes a temp cwd holding page.md, with the default-root
@@ -103,7 +108,7 @@ func TestDocsSearchJSONShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 		t.Fatalf("stdout is not a JSON object: %v\n%s", err, stdout)
 	}
-	for _, k := range []string{"backend", "query", "results", "truncated", "skipped"} {
+	for _, k := range []string{"backend", "query", "results", "truncated", "skipped", "errors"} {
 		if _, ok := got[k]; !ok {
 			t.Errorf("response lacks %q: %s", k, stdout)
 		}
@@ -178,5 +183,63 @@ func TestDocsSearchRejectsEmptyQuery(t *testing.T) {
 	}
 	if runner.calls != 0 {
 		t.Errorf("rg ran %d times for an empty query", runner.calls)
+	}
+}
+
+// partialFailureRunner matches page.md and then fails the way rg does on an
+// unreadable file beside it: stderr diagnostic, exit 2.
+func partialFailureRunner(t *testing.T, page string) *searchRunner {
+	t.Helper()
+	return &searchRunner{
+		FakeRunner: &forgexec.FakeRunner{},
+		stdout:     rgMatchLine(t, page, "needle here\n"),
+		stderr:     "rg: ./locked.md: Permission denied (os error 13)\n",
+		err:        &forgexec.CommandError{Name: "rg", ExitCode: 2},
+	}
+}
+
+func TestDocsSearchPartialFailureHuman(t *testing.T) {
+	page := docsSearchFixture(t)
+	stubSearchLookPath(t, func(string) (string, error) { return "/usr/bin/rg", nil })
+
+	stdout, stderr, err := runDocsSearch(t, partialFailureRunner(t, page), "needle")
+	if code := ExitCode(err); code != 1 {
+		t.Errorf("exit code = %d (err %v), want 1", code, err)
+	}
+	if !strings.Contains(stdout, "page.md:2") {
+		t.Errorf("stdout = %q, want the hit printed despite the failure", stdout)
+	}
+	if !strings.Contains(stderr, "Permission denied") {
+		t.Errorf("stderr = %q, want rg's reason", stderr)
+	}
+}
+
+func TestDocsSearchPartialFailureJSON(t *testing.T) {
+	page := docsSearchFixture(t)
+	stubSearchLookPath(t, func(string) (string, error) { return "/usr/bin/rg", nil })
+
+	stdout, stderr, err := runDocsSearch(t, partialFailureRunner(t, page), "--json", "needle")
+	if code := ExitCode(err); code != 1 {
+		t.Errorf("exit code = %d (err %v), want 1", code, err)
+	}
+	var resp struct {
+		Results []json.RawMessage `json:"results"`
+		Errors  []struct {
+			Root    string `json:"root"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
+		t.Fatalf("stdout is not a JSON object: %v\n%s", err, stdout)
+	}
+	if len(resp.Results) != 1 || len(resp.Errors) != 1 || !strings.Contains(resp.Errors[0].Message, "Permission denied") {
+		t.Errorf("response = %s, want 1 result and 1 error naming rg's reason", stdout)
+	}
+	dec := json.NewDecoder(strings.NewReader(stderr))
+	var obj struct {
+		Code int `json:"code"`
+	}
+	if err := dec.Decode(&obj); err != nil || obj.Code != 1 || dec.More() {
+		t.Errorf("stderr = %q, want exactly one error object with code 1", stderr)
 	}
 }

@@ -15,7 +15,13 @@ package docs
 //       next record still parses
 //   [x] Happy: a snippet from a long line is capped and valid UTF-8
 //   [x] Happy: rg exit 1 is an empty success with a non-nil Results
-//   [x] Unhappy: rg exit 2 with no hits is an error
+//   [x] Unhappy: a failed root is recorded in Errors (capped, terminal-safe),
+//       never counted in Skipped, and its hits are kept
+//   [x] Unhappy: a failure in either of two roots keeps the other's hits
+//   [x] Unhappy: an unparseable rg record is reported in Errors
+//   [x] Happy: overlapping roots return a shared doc once, first root wins
+//   [x] Unhappy: rg found only in a relative PATH entry is refused
+//   [x] Happy: real rg returns the same truncated prefix on every run
 //   [x] Unhappy: rg missing on PATH wraps ErrNoSearchBackend
 //   [x] Security: real rg under a RIPGREP_CONFIG_PATH holding --follow
 //       returns no symlinked file, and a --version query is searched as text
@@ -39,27 +45,46 @@ import (
 	"unicode/utf8"
 
 	forgexec "github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // requireRgEnv, when set to any non-empty value, turns the real-rg test's
 // skip into a failure. CI installs ripgrep and sets it.
 const requireRgEnv = "FORGECTL_REQUIRE_RG"
 
+type rgWrite func(ctx context.Context, stdout, stderr io.Writer) error
+
 // fakeRg is a func-typed StreamingRunner: it records the argv and the
 // context it was handed, then runs write against the stdout and stderr sinks.
+// byPath, when it has an entry for the searched path (the last argv
+// element), runs that instead, so one root can fail while another matches.
 type fakeRg struct {
-	calls [][]string
-	ctxs  []context.Context
-	write func(ctx context.Context, stdout, stderr io.Writer) error
+	calls  [][]string
+	ctxs   []context.Context
+	write  rgWrite
+	byPath map[string]rgWrite
 }
 
 func (f *fakeRg) RunStreaming(ctx context.Context, _ io.Reader, stdout, stderr io.Writer, _ string, args ...string) error {
 	f.calls = append(f.calls, slices.Clone(args))
 	f.ctxs = append(f.ctxs, ctx)
+	if w, ok := f.byPath[args[len(args)-1]]; ok {
+		return w(ctx, stdout, stderr)
+	}
 	if f.write == nil {
 		return nil
 	}
 	return f.write(ctx, stdout, stderr)
+}
+
+// rgFails is an rg run that prints diag to stderr and exits 2, after
+// writing records to stdout.
+func rgFails(diag string, records ...string) rgWrite {
+	return func(ctx context.Context, stdout, stderr io.Writer) error {
+		_ = writeAll(records...)(ctx, stdout, stderr)
+		_, _ = io.WriteString(stderr, diag)
+		return &forgexec.CommandError{Name: "rg", ExitCode: 2}
+	}
 }
 
 func fakeLookPath(string) (string, error) { return "/usr/bin/rg", nil }
@@ -103,7 +128,7 @@ func matchRecord(t *testing.T, path, line string, start int) string {
 	return string(b) + "\n"
 }
 
-func writeAll(records ...string) func(context.Context, io.Writer, io.Writer) error {
+func writeAll(records ...string) rgWrite {
 	return func(_ context.Context, stdout, _ io.Writer) error {
 		for _, r := range records {
 			_, _ = io.WriteString(stdout, r)
@@ -122,6 +147,9 @@ func TestSearchArgvEndsOptionsBeforeQuery(t *testing.T) {
 		t.Fatalf("rg ran %d times, want 1", len(rg.calls))
 	}
 	argv := rg.calls[0]
+	if !slices.Contains(argv, "--sort=path") {
+		t.Errorf("argv lacks --sort=path (results and truncation would be nondeterministic): %q", argv)
+	}
 	if !slices.Contains(argv, "--no-config") {
 		t.Errorf("argv lacks --no-config (RIPGREP_CONFIG_PATH could re-enable --follow): %q", argv)
 	}
@@ -258,18 +286,135 @@ func TestSearchExitOneIsEmptySuccess(t *testing.T) {
 	}
 }
 
-func TestSearchExitTwoNoResultsErrors(t *testing.T) {
+func TestSearchRootFailureIsRecorded(t *testing.T) {
 	idx, _ := searchRoot(t, "a.md")
-	rg := &fakeRg{write: func(_ context.Context, _, stderr io.Writer) error {
-		_, _ = io.WriteString(stderr, "rg: permission denied\u001b[31m\n")
-		return &forgexec.CommandError{Name: "rg", ExitCode: 2}
-	}}
-	_, err := (Searcher{Runner: rg, LookPath: fakeLookPath}).Search(t.Context(), idx, "x", 10)
-	if err == nil {
-		t.Fatal("Search succeeded on rg exit 2 with no hits")
+	rg := &fakeRg{write: rgFails("rg: permission denied\u001b[31m\n")}
+	resp, err := (Searcher{Runner: rg, LookPath: fakeLookPath}).Search(t.Context(), idx, "x", 10)
+	if err != nil {
+		t.Fatalf("Search: %v, want the failure recorded in Errors", err)
 	}
-	if strings.ContainsRune(err.Error(), '\u001b') {
-		t.Errorf("error carries a raw ESC from rg's stderr: %q", err)
+	if len(resp.Errors) != 1 || !strings.Contains(resp.Errors[0].Message, "permission denied") {
+		t.Fatalf("Errors = %+v, want one entry naming rg's reason", resp.Errors)
+	}
+	if strings.ContainsRune(resp.Errors[0].Message, '\u001b') {
+		t.Errorf("error message carries a raw ESC from rg's stderr: %q", resp.Errors[0].Message)
+	}
+	if resp.Skipped != 0 {
+		t.Errorf("Skipped = %d, want 0: a failed root is an error, not a skip", resp.Skipped)
+	}
+}
+
+func TestSearchErrorMessageIsCapped(t *testing.T) {
+	idx, _ := searchRoot(t, "a.md")
+	rg := &fakeRg{write: rgFails(strings.Repeat("e", 4000))}
+	resp, err := (Searcher{Runner: rg, LookPath: fakeLookPath}).Search(t.Context(), idx, "x", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(resp.Errors) != 1 {
+		t.Fatalf("Errors = %+v, want 1", resp.Errors)
+	}
+	if n := utf8.RuneCountInString(resp.Errors[0].Message); n > maxSearchErrorRunes+utf8.RuneCountInString(termsafe.TruncatedMarker) {
+		t.Errorf("error message is %d runes, want at most %d plus the marker", n, maxSearchErrorRunes)
+	}
+}
+
+// TestSearchPartialRootKeepsHitsAndReportsError: rg exit 2 alongside hits
+// (an unreadable file next to readable ones) keeps the hits AND reports the
+// root, so the failure is never silent.
+func TestSearchPartialRootKeepsHitsAndReportsError(t *testing.T) {
+	idx, root := searchRoot(t, "a.md")
+	rg := &fakeRg{write: rgFails("rg: ./b.md: Permission denied (os error 13)\n", matchRecord(t, filepath.Join(root, "a.md"), "x", 0))}
+	resp, err := (Searcher{Runner: rg, LookPath: fakeLookPath}).Search(t.Context(), idx, "x", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(resp.Results) != 1 || len(resp.Errors) != 1 || resp.Skipped != 0 {
+		t.Errorf("results %+v errors %+v skipped %d, want 1 result, 1 error, 0 skipped", resp.Results, resp.Errors, resp.Skipped)
+	}
+}
+
+// TestSearchFailedRootDoesNotAbortOthers: a failure in either of two roots
+// keeps the other root's hits.
+func TestSearchFailedRootDoesNotAbortOthers(t *testing.T) {
+	_, root1 := searchRoot(t, "a.md")
+	_, root2 := searchRoot(t, "b.md")
+	idx, err := NewIndex([]string{root1, root2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, failing := range []string{root1, root2} {
+		t.Run(filepath.Base(failing), func(t *testing.T) {
+			rg := &fakeRg{byPath: map[string]rgWrite{
+				root1: writeAll(matchRecord(t, filepath.Join(root1, "a.md"), "x", 0)),
+				root2: writeAll(matchRecord(t, filepath.Join(root2, "b.md"), "x", 0)),
+			}}
+			rg.byPath[failing] = rgFails("rg: unreadable\n")
+			resp, err := (Searcher{Runner: rg, LookPath: fakeLookPath}).Search(t.Context(), idx, "x", 10)
+			if err != nil {
+				t.Fatalf("Search: %v", err)
+			}
+			if len(rg.calls) != 2 {
+				t.Errorf("rg ran %d times, want once per root", len(rg.calls))
+			}
+			if len(resp.Results) != 1 || len(resp.Errors) != 1 {
+				t.Fatalf("results %+v errors %+v, want the healthy root's hit and one error", resp.Results, resp.Errors)
+			}
+			if resp.Results[0].Root == resp.Errors[0].Root {
+				t.Errorf("hit and error name the same root %q", resp.Results[0].Root)
+			}
+		})
+	}
+}
+
+func TestSearchCountsUnparseableRecords(t *testing.T) {
+	idx, root := searchRoot(t, "a.md")
+	rg := &fakeRg{write: writeAll("{not json\n", matchRecord(t, filepath.Join(root, "a.md"), "x", 0))}
+	resp, err := (Searcher{Runner: rg, LookPath: fakeLookPath}).Search(t.Context(), idx, "x", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(resp.Results) != 1 || resp.Skipped != 0 {
+		t.Errorf("results %+v skipped %d, want 1 result and 0 skipped", resp.Results, resp.Skipped)
+	}
+	if len(resp.Errors) != 1 || !strings.Contains(resp.Errors[0].Message, "1 rg output records could not be parsed") {
+		t.Errorf("Errors = %+v, want the unparseable record reported", resp.Errors)
+	}
+}
+
+// TestSearchDedupesOverlappingRoots: cwd and cwd/docs both index docs/a.md;
+// its hit comes back once, under the first root.
+func TestSearchDedupesOverlappingRoots(t *testing.T) {
+	_, dir := searchRoot(t, "docs/a.md")
+	idx, err := NewIndex([]string{dir, filepath.Join(dir, "docs")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := idx.Roots()
+	hit := matchRecord(t, filepath.Join(dir, "docs", "a.md"), "x", 0)
+	rg := &fakeRg{write: writeAll(hit)}
+	resp, err := (Searcher{Runner: rg, LookPath: fakeLookPath}).Search(t.Context(), idx, "x", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(resp.Results) != 1 {
+		t.Fatalf("results = %+v, want the shared doc once", resp.Results)
+	}
+	if resp.Results[0].Root != roots[0].Label || resp.Results[0].Path != "docs/a.md" {
+		t.Errorf("result = %+v, want root %q path docs/a.md", resp.Results[0], roots[0].Label)
+	}
+}
+
+func TestSearchRefusesRgInRelativePathEntry(t *testing.T) {
+	idx, _ := searchRoot(t, "a.md")
+	rg := &fakeRg{}
+	dot := func(string) (string, error) { return "rg", osexec.ErrDot }
+	_, err := (Searcher{Runner: rg, LookPath: dot}).Search(t.Context(), idx, "x", 10)
+	if !errors.Is(err, ErrNoSearchBackend) || !strings.Contains(err.Error(), "relative PATH entry") {
+		t.Fatalf("err = %v, want ErrNoSearchBackend naming the relative PATH entry", err)
+	}
+	if len(rg.calls) != 0 {
+		t.Errorf("rg ran %d times from a relative PATH entry", len(rg.calls))
 	}
 }
 
@@ -302,12 +447,7 @@ func TestValidateQuery(t *testing.T) {
 // outside the root when --no-config was missing), and a query that rg parses
 // as a flag when "--" is missing.
 func TestSearchRealRg(t *testing.T) {
-	if _, err := osexec.LookPath("rg"); err != nil {
-		if os.Getenv(requireRgEnv) != "" {
-			t.Fatalf("%s=1 but rg is not on PATH: %v", requireRgEnv, err)
-		}
-		t.Skipf("rg not on PATH: %v", err)
-	}
+	requireRg(t)
 	base := t.TempDir()
 	root := filepath.Join(base, "root")
 	outside := filepath.Join(base, "outside")
@@ -360,5 +500,51 @@ func TestSearchRealRg(t *testing.T) {
 	// then drops the hit: the gate is the backstop, --no-config the fix.
 	if len(resp.Results) != 0 || resp.Skipped != 0 {
 		t.Errorf("rg reached files outside the root through symlinks: results %+v, skipped %d", resp.Results, resp.Skipped)
+	}
+}
+
+// requireRg skips when rg is not on PATH, or fails when requireRgEnv says
+// this environment is meant to run the real-rg tests.
+func requireRg(t *testing.T) {
+	t.Helper()
+	if _, err := osexec.LookPath("rg"); err != nil {
+		if os.Getenv(requireRgEnv) != "" {
+			t.Fatalf("%s=1 but rg is not on PATH: %v", requireRgEnv, err)
+		}
+		t.Skipf("rg not on PATH: %v", err)
+	}
+}
+
+// TestSearchRealRgStableOrder: the same query over the same tree returns the
+// same truncated prefix every time. Unsorted, rg's parallel walk reorders
+// hits between runs (measured: 9 distinct sets in 10 runs of --limit 3).
+func TestSearchRealRgStableOrder(t *testing.T) {
+	requireRg(t)
+	files := make([]string, 60)
+	for i := range files {
+		files[i] = fmt.Sprintf("d%d/f%02d.md", i%7, i)
+	}
+	idx, _ := searchRoot(t, files...)
+	s := Searcher{Runner: forgexec.OSRunner{}}
+	var first []string
+	for run := range 10 {
+		resp, err := s.Search(t.Context(), idx, "body", 5)
+		if err != nil {
+			t.Fatalf("run %d: %v", run, err)
+		}
+		got := make([]string, len(resp.Results))
+		for i, r := range resp.Results {
+			got[i] = r.Path
+		}
+		if len(got) != 5 || !resp.Truncated {
+			t.Fatalf("run %d: got %q truncated=%v, want 5 truncated", run, got, resp.Truncated)
+		}
+		if run == 0 {
+			first = got
+			continue
+		}
+		if !slices.Equal(got, first) {
+			t.Fatalf("run %d returned %q, run 0 returned %q", run, got, first)
+		}
 	}
 }

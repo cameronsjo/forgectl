@@ -32,6 +32,8 @@ const (
 	maxSnippetRunes = 240
 	// maxSearchStderrBytes caps the rg diagnostics kept for an error message.
 	maxSearchStderrBytes = 4 << 10
+	// maxSearchErrorRunes caps one SearchError.Message after escaping.
+	maxSearchErrorRunes = 512
 )
 
 // SearchBackendRipgrep names the rg backend in SearchResponse.Backend.
@@ -53,18 +55,30 @@ type SearchResult struct {
 	Snippet string `json:"snippet"`
 }
 
-// SearchResponse is the full answer to one query. Results is never nil, so
-// it encodes as [] rather than null when nothing matched. Truncated is set
-// when at least one more indexed hit existed past the limit. Skipped counts
-// records that were dropped rather than returned: hits outside the index,
-// paths rg could only report as raw bytes, oversized records, and roots rg
-// could only partly search.
+// SearchError reports one root rg could not fully search: rg itself failed
+// on it (an unreadable file, say), or some of its output could not be
+// parsed. Hits from that root that did arrive are still in Results. Message
+// is terminal-safe and capped.
+type SearchError struct {
+	Root    string `json:"root"`
+	Message string `json:"message"`
+}
+
+// SearchResponse is the full answer to one query. Results and Errors are
+// never nil, so they encode as [] rather than null. Results are in root
+// order (the configured order), then in rg's path order within a root, so
+// a truncated answer is a stable prefix. Truncated is set when at least one
+// more indexed hit existed past the limit. Skipped counts hits that were
+// dropped rather than returned: hits outside the index, paths rg could only
+// report as raw bytes, and oversized records. A root that failed is never
+// counted in Skipped; it is listed in Errors.
 type SearchResponse struct {
 	Backend   string         `json:"backend"`
 	Query     string         `json:"query"`
 	Results   []SearchResult `json:"results"`
 	Truncated bool           `json:"truncated"`
 	Skipped   int            `json:"skipped"`
+	Errors    []SearchError  `json:"errors"`
 }
 
 // ValidateQuery rejects a query before any subprocess sees it: an empty or
@@ -104,7 +118,11 @@ type Searcher struct {
 //   - "--" before the query: without it a query such as --version is parsed
 //     as an rg flag (measured: rg printed its version and exited 0).
 //
-// Neither is the containment boundary. Every hit is gated through the Index
+// --sort=path makes rg walk single-threaded in path order, so the same
+// query over the same tree returns the same hits in the same order and a
+// truncated answer is a stable prefix. It also bounds rg to one worker.
+//
+// Neither security flag is the containment boundary. Every hit is gated through the Index
 // (Search), so a wrong flag here can make search miss a file but never
 // return one from outside a root.
 func rgArgs(query, path string) []string {
@@ -121,6 +139,7 @@ func rgArgs(query, path string) []string {
 		"--glob=!vendor/",
 		"--max-count=5",
 		"--max-filesize=1M",
+		"--sort=path",
 		"--",
 		query,
 		path,
@@ -135,11 +154,15 @@ func rgArgs(query, path string) []string {
 // it. That is the same membership gate the reader serves through, so search
 // returns nothing the reader would refuse to serve, whatever rg reports.
 //
-// rg exit 1 (no match) is an empty success. rg exit 2 on a root that yielded
-// hits keeps them and counts the root in Skipped; exit 2 with no hits is an
-// error. A missing rg wraps ErrNoSearchBackend.
+// A doc reachable through two overlapping roots (cwd and cwd/docs, say) is
+// returned once, under the first root in configuration order.
+//
+// rg exit 1 (no match) is an empty success. Any other rg failure on a root
+// is recorded in Errors, that root's hits are kept, and the remaining roots
+// are still searched; only an expired or cancelled ctx aborts the search. A
+// missing rg wraps ErrNoSearchBackend.
 func (s Searcher) Search(ctx context.Context, idx *Index, q string, limit int) (SearchResponse, error) {
-	resp := SearchResponse{Backend: SearchBackendRipgrep, Query: q, Results: []SearchResult{}}
+	resp := SearchResponse{Backend: SearchBackendRipgrep, Query: q, Results: []SearchResult{}, Errors: []SearchError{}}
 	if err := ValidateQuery(q); err != nil {
 		return resp, err
 	}
@@ -154,6 +177,9 @@ func (s Searcher) Search(ctx context.Context, idx *Index, q string, limit int) (
 		lookPath = osexec.LookPath
 	}
 	rgPath, err := lookPath("rg")
+	if errors.Is(err, osexec.ErrDot) {
+		return resp, fmt.Errorf("%w: rg found only in a relative PATH entry; refusing", ErrNoSearchBackend)
+	}
 	if err != nil {
 		return resp, fmt.Errorf("%w: rg not found on PATH (install ripgrep)", ErrNoSearchBackend)
 	}
@@ -166,8 +192,9 @@ func (s Searcher) Search(ctx context.Context, idx *Index, q string, limit int) (
 		titles[searchKey{root: d.RootLabel, rel: d.RelPath}] = d.Title
 	}
 
+	seen := make(map[hitKey]bool)
 	for _, root := range idx.Roots() {
-		done, err := s.searchRoot(ctx, idx, root, rgPath, q, limit, titles, &resp)
+		done, err := s.searchRoot(ctx, idx, root, rgPath, q, limit, titles, seen, &resp)
 		if err != nil {
 			return resp, err
 		}
@@ -178,9 +205,11 @@ func (s Searcher) Search(ctx context.Context, idx *Index, q string, limit int) (
 	return resp, nil
 }
 
-// searchRoot runs rg over one root, appending gated hits to resp. It reports
-// done once resp is truncated, so the caller starts no further rg process.
-func (s Searcher) searchRoot(ctx context.Context, idx *Index, root Root, rgPath, q string, limit int, titles map[searchKey]string, resp *SearchResponse) (bool, error) {
+// searchRoot runs rg over one root, appending gated hits to resp and any
+// failure to resp.Errors. It reports done once resp is truncated, so the
+// caller starts no further rg process, and returns an error only when ctx
+// itself expired or was cancelled.
+func (s Searcher) searchRoot(ctx context.Context, idx *Index, root Root, rgPath, q string, limit int, titles map[searchKey]string, seen map[hitKey]bool, resp *SearchResponse) (bool, error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -189,19 +218,27 @@ func (s Searcher) searchRoot(ctx context.Context, idx *Index, root Root, rgPath,
 		path = root.OnlyFile
 	}
 
-	matched := 0
+	unparsed := 0
 	stream := &rgStream{}
 	stream.handle = func(rec []byte) bool {
 		var m rgRecord
-		if err := json.Unmarshal(rec, &m); err != nil || m.Type != "match" {
+		if err := json.Unmarshal(rec, &m); err != nil {
+			unparsed++
 			return true
 		}
-		matched++
-		hit, ok := gateHit(idx, root, titles, m)
+		if m.Type != "match" {
+			return true
+		}
+		hit, abs, ok := gateHit(idx, root, titles, m)
 		if !ok {
 			resp.Skipped++
 			return true
 		}
+		key := hitKey{absPath: abs, line: hit.Line}
+		if seen[key] {
+			return true // already returned under an earlier, overlapping root
+		}
+		seen[key] = true
 		if len(resp.Results) >= limit {
 			// One indexed hit past the limit is proof there is more; stop
 			// rg rather than read the rest of its output.
@@ -224,25 +261,34 @@ func (s Searcher) searchRoot(ctx context.Context, idx *Index, root Root, rgPath,
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return false, fmt.Errorf("docs search: %w", ctxErr)
 	}
+	if unparsed > 0 {
+		resp.Errors = append(resp.Errors, searchError(root, fmt.Sprintf("%d rg output records could not be parsed", unparsed)))
+	}
 	if runErr == nil {
 		return false, nil
 	}
 	var cmdErr *forgexec.CommandError
-	if !errors.As(runErr, &cmdErr) {
-		return false, fmt.Errorf("docs search: run rg: %w", runErr)
-	}
-	switch {
-	case cmdErr.ExitCode == 1:
-		return false, nil
-	case cmdErr.ExitCode == 2 && matched > 0:
-		resp.Skipped++
+	if errors.As(runErr, &cmdErr) && cmdErr.ExitCode == 1 {
 		return false, nil
 	}
 	msg := strings.TrimSpace(stderr.String())
 	if msg == "" {
-		msg = fmt.Sprintf("exit %d", cmdErr.ExitCode)
+		msg = runErr.Error()
 	}
-	return false, fmt.Errorf("docs search: rg failed on root %s: %s", termsafe.SafeLine(root.Label), termsafe.SafeLine(msg))
+	resp.Errors = append(resp.Errors, searchError(root, "rg failed: "+msg))
+	return false, nil
+}
+
+// searchError builds a terminal-safe, capped SearchError for root.
+func searchError(root Root, msg string) SearchError {
+	return SearchError{Root: root.Label, Message: termsafe.SafeLineMax(msg, maxSearchErrorRunes)}
+}
+
+// hitKey identifies one returned hit by the doc's canonical path and line,
+// so overlapping roots do not return the same line twice.
+type hitKey struct {
+	absPath string
+	line    int
 }
 
 // searchKey names one indexed doc by root label and slash-separated relative
@@ -270,16 +316,17 @@ type rgData struct {
 	Bytes string  `json:"bytes"`
 }
 
-// gateHit turns one rg match into a result, or reports false when the hit
-// must not be returned: a path only expressible as bytes, a path outside the
-// root, or a path the Index does not hold at that exact (root, relPath).
-func gateHit(idx *Index, root Root, titles map[searchKey]string, m rgRecord) (SearchResult, bool) {
+// gateHit turns one rg match into a result plus the doc's canonical path,
+// or reports false when the hit must not be returned: a path only
+// expressible as bytes, a path outside the root, or a path the Index does
+// not hold at that exact (root, relPath).
+func gateHit(idx *Index, root Root, titles map[searchKey]string, m rgRecord) (SearchResult, string, bool) {
 	if m.Data.Path.Text == nil {
-		return SearchResult{}, false
+		return SearchResult{}, "", false
 	}
 	rel, err := filepath.Rel(root.Path, *m.Data.Path.Text)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return SearchResult{}, false
+		return SearchResult{}, "", false
 	}
 	relSlash := filepath.ToSlash(rel)
 	// Exact membership first: walkRoot never indexes a symlinked file, so a
@@ -287,16 +334,17 @@ func gateHit(idx *Index, root Root, titles map[searchKey]string, m rgRecord) (Se
 	// no entry here even where Resolve would follow it to an indexed target.
 	title, ok := titles[searchKey{root: root.Label, rel: relSlash}]
 	if !ok {
-		return SearchResult{}, false
+		return SearchResult{}, "", false
 	}
-	if _, err := idx.Resolve(root.Label, relSlash); err != nil {
-		return SearchResult{}, false
+	abs, err := idx.Resolve(root.Label, relSlash)
+	if err != nil {
+		return SearchResult{}, "", false
 	}
 	line := ""
 	if m.Data.Lines.Text != nil {
 		line = *m.Data.Lines.Text
 	} else if raw, err := base64.StdEncoding.DecodeString(m.Data.Lines.Bytes); err == nil {
-		line = strings.ToValidUTF8(string(raw), "�")
+		line = strings.ToValidUTF8(string(raw), "\uFFFD")
 	}
 	start := 0
 	if len(m.Data.Submatches) > 0 {
@@ -308,7 +356,7 @@ func gateHit(idx *Index, root Root, titles map[searchKey]string, m rgRecord) (Se
 		Title:   title,
 		Line:    m.Data.LineNumber,
 		Snippet: snippetAround(line, start, maxSnippetRunes),
-	}, true
+	}, abs, true
 }
 
 // snippetAround returns at most maxRunes runes of line, centred on byte

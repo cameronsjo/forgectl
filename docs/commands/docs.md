@@ -72,14 +72,16 @@ The backend is [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`), which mu
 - **Only indexed docs are returned.** Every hit rg reports is checked against the docs index, the same membership gate the reader serves through, so a file outside a root, under an excluded directory (`.git`, `node_modules`, `vendor`, any dot-directory), or reached through a symlink never appears. Hits dropped this way are counted in `skipped`.
 - **rg's own config file is ignored.** rg runs with `--no-config`, so `RIPGREP_CONFIG_PATH` cannot turn on `--follow` or otherwise change what is searched.
 - Files over 1 MB are not searched, and at most 5 hits are taken from one file.
+- Docs whose paths are not valid UTF-8 are not searchable; rg can only report such a path as raw bytes, and those hits are counted in `skipped`.
+- **Results are ordered and stable.** Roots are searched in their configured order, and rg walks each root in path order (`--sort=path`, which also keeps rg to a single worker), so the same query over the same tree returns the same results, and `--limit` always keeps the same prefix. A doc reachable through two overlapping roots (cwd and `./docs`, say) is returned once, under the first root.
 
-`--json` prints one object to stdout. `results` is always an array, and each result carries `root`, `path`, `title`, `line`, and `snippet`. `truncated` is true when more hits existed past `--limit`.
+`--json` prints one object to stdout. `results` is always an array, and each result carries `root`, `path`, `title`, `line`, and `snippet`. `truncated` is true when more hits existed past `--limit`. `errors` is always an array of `{root, message}`, one per root rg could not fully search (an unreadable file, say, or output that could not be parsed).
 
 ```json
-{"backend":"ripgrep","query":"needle","results":[{"root":"docs","path":"guide.md","title":"Guide","line":12,"snippet":"the needle in the guide"}],"truncated":false,"skipped":0}
+{"backend":"ripgrep","query":"needle","results":[{"root":"docs","path":"guide.md","title":"Guide","line":12,"snippet":"the needle in the guide"}],"truncated":false,"skipped":0,"errors":[]}
 ```
 
-Exit codes: no match exits 0 with an empty `results` (human output says `no matches` on stderr). A missing `rg`, an empty or invalid query, or an expired `--timeout` exits 2. Under `--json` a failure leaves stdout empty and writes exactly one `{"error","code"}` object to stderr.
+Exit codes: no match exits 0 with an empty `results` (human output says `no matches` on stderr). When rg could not fully search a root, the other roots are still searched and every hit found is printed, then the command exits 1 with the reason on stderr: one line per failed root, or under `--json` one `{"error","code"}` object on stderr alongside the full response, `errors` included, on stdout. A missing `rg`, an empty or invalid query, or an expired `--timeout` exits 2; under `--json` that leaves stdout empty and writes exactly one `{"error","code"}` object to stderr.
 
 ## `docs open` steers, never starts
 
