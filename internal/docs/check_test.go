@@ -506,8 +506,41 @@ func TestCheckAt_StaleFindingWireKeys(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	if got := strings.Join(keys, ","); got != "kind,path,root,stale_after" {
-		t.Errorf("stale finding keys = %s, want kind,path,root,stale_after", got)
+	if got := strings.Join(keys, ","); got != "kind,path,root,severity,stale_after" {
+		t.Errorf("stale finding keys = %s, want kind,path,root,severity,stale_after", got)
+	}
+}
+
+// Every kind carries a severity on the wire: deprecated is info, every other
+// kind is error (stale included).
+func TestCheckAt_Severity(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[a](a.md)\n[b](gone.md)\n[c](a.md#nope)\n")
+	checkWrite(t, filepath.Join(dir, "a.md"), "---\nstatus: deprecated\nstale_after: 2026-09-28T12:00:00Z\n---\n# A\n")
+	checkWrite(t, filepath.Join(dir, "lonely.md"), "# L\n")
+
+	r := checkIndex(t, dir).CheckAt(trustTestNow)
+	want := map[FindingKind]Severity{
+		FindingDeprecated:   SeverityInfo,
+		FindingStale:        SeverityError,
+		FindingBrokenLink:   SeverityError,
+		FindingBrokenAnchor: SeverityError,
+		FindingOrphan:       SeverityError,
+	}
+	seen := map[FindingKind]bool{}
+	for _, f := range r.Findings {
+		seen[f.Kind] = true
+		if w, ok := want[f.Kind]; ok && f.Severity != w {
+			t.Errorf("%s severity = %q, want %q", f.Kind, f.Severity, w)
+		}
+	}
+	for k := range want {
+		if !seen[k] {
+			t.Errorf("fixture produced no %s finding; findings = %+v", k, r.Findings)
+		}
+	}
+	if got := r.Errors(); got != len(r.Findings)-1 {
+		t.Errorf("Errors() = %d of %d findings, want all but the deprecated one", got, len(r.Findings))
 	}
 }
 

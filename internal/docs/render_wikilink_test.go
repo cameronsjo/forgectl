@@ -438,7 +438,7 @@ func TestRenderVault_WikilinkVerdictMatchesResolver(t *testing.T) {
 				continue
 			}
 			seen++
-			_, miss := idx.resolveParts(from, l.Path, l.Fragment)
+			_, miss := idx.resolveParts(from, l.Path, l.Fragment, nil)
 			out := renderVaultFrom(t, idx, from, "[["+l.Raw+"]]\n")
 			hit := strings.Contains(out, `<a class="wikilink" `) && !strings.Contains(out, "wikilink-miss")
 			if hit != (miss == MissNone) {
@@ -456,7 +456,7 @@ func TestRenderVault_WikilinkVerdictMatchesResolver(t *testing.T) {
 		"#Vault Index", "#Nowhere", "notes/anchors#^blk-1", "Alpha One",
 	} {
 		path0, frag := splitFirstHash(raw)
-		_, miss := idx.resolveParts(from, path0, frag)
+		_, miss := idx.resolveParts(from, path0, frag, nil)
 		out := renderVaultFrom(t, idx, from, "[["+raw+"]]\n")
 		hit := strings.Contains(out, `<a class="wikilink" `) && !strings.Contains(out, "wikilink-miss")
 		if hit != (miss == MissNone) {
