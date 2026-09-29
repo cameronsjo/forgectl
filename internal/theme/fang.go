@@ -7,30 +7,46 @@ import (
 	"github.com/charmbracelet/fang"
 )
 
-// Fang returns a fang.ColorSchemeFunc that ignores the lipgloss.LightDarkFunc
-// fang hands it and resolves every field from t.IsDark() instead — the same
-// reasoning as Huh(): fang's own dark-detection runs a single process-wide
-// probe at startup (mustColorscheme), which this Theme has already done (or
-// been told the answer to) more carefully via Detect.
-func (t Theme) Fang() fang.ColorSchemeFunc {
-	return func(lipgloss.LightDarkFunc) fang.ColorScheme {
+// Sentinels handed to fang's lipgloss.LightDarkFunc to read back which side it
+// chose. They must be distinct and comparable; the values are never rendered.
+var (
+	fangLightSentinel color.Color = color.RGBA{}
+	fangDarkSentinel  color.Color = color.RGBA{R: 1, G: 1, B: 1, A: 1}
+)
+
+// Fang returns a fang.ColorSchemeFunc drawing every field from t.
+//
+// The LightDarkFunc fang hands in is a detection result only sometimes. Fang
+// v1.0.0 (theme.go, mustColorscheme) probes the terminal background only when
+// os.Stdout is a TTY, via lipgloss.HasDarkBackground; otherwise it passes
+// lipgloss.LightDark(false), which is a placeholder and not a measurement. So
+// the caller says whether to trust it (trustProbe): when true, t is in
+// ModeAuto and ld is non-nil, the background fang chose wins over t.IsDark().
+// An explicit dark or light Mode always wins, and a nil ld falls back to
+// t.IsDark(). Re-check that gate whenever fang is bumped.
+func (t Theme) Fang(trustProbe bool) fang.ColorSchemeFunc {
+	return func(ld lipgloss.LightDarkFunc) fang.ColorScheme {
+		th := t
+		if ld != nil && trustProbe && t.Mode() == ModeAuto {
+			th = t.WithDark(ld(fangLightSentinel, fangDarkSentinel) == fangDarkSentinel)
+		}
 		return fang.ColorScheme{
-			Base:           t.Color(RoleFg),
-			Title:          t.Color(RoleAccent),
-			Description:    t.Color(RoleMeta),
-			Codeblock:      t.Color(RoleSurfaceRaised),
-			Program:        t.Color(RoleAccent),
-			DimmedArgument: t.Color(RoleMuted),
-			Comment:        t.Color(RoleMuted),
-			Flag:           t.Color(RoleSteel),
-			FlagDefault:    t.Color(RoleMeta),
-			Command:        t.Color(RoleAccent),
-			QuotedString:   t.Color(RoleSteel),
-			Argument:       t.Color(RoleFg),
-			Help:           t.Color(RoleMeta),
-			Dash:           t.Color(RoleMuted),
-			ErrorHeader:    [2]color.Color{t.Color(RoleOnUrgent), t.Color(RoleUrgentFill)},
-			ErrorDetails:   t.Color(RoleFg),
+			Base:           th.Color(RoleFg),
+			Title:          th.Color(RoleAccent),
+			Description:    th.Color(RoleMeta),
+			Codeblock:      th.Color(RoleSurfaceRaised),
+			Program:        th.Color(RoleAccent),
+			DimmedArgument: th.Color(RoleMuted),
+			Comment:        th.Color(RoleMuted),
+			Flag:           th.Color(RoleSteel),
+			FlagDefault:    th.Color(RoleMeta),
+			Command:        th.Color(RoleAccent),
+			QuotedString:   th.Color(RoleSteel),
+			Argument:       th.Color(RoleFg),
+			Help:           th.Color(RoleMeta),
+			Dash:           th.Color(RoleMuted),
+			ErrorHeader:    [2]color.Color{th.Color(RoleOnUrgent), th.Color(RoleUrgentFill)},
+			ErrorDetails:   th.Color(RoleFg),
 		}
 	}
 }
