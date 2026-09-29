@@ -19,7 +19,7 @@ import (
 // stale docs (OKF status / stale_after frontmatter) across the docs-kind
 // roots, without binding a server.
 //
-// Exit contract: 0 clean; 1 findings (the report is complete on stdout);
+// Exit contract: 0 clean; 1 error-severity findings (the report is complete on stdout);
 // 2 the check could not run (bad root, deadline, no docs-kind root, bad flag).
 func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 	var asJSON bool

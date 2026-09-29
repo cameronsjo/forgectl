@@ -19,7 +19,7 @@ import (
 // (ADR-0008 rule 2: additive only).
 //
 // Two things are deliberately outside it: a partial result (`docs search` with
-// a root rg could not fully search, `docs check` with findings) exits 1 because
+// a root rg could not fully search, `docs check` with error-severity findings) exits 1 because
 // the verb did run, and `docs read` hands mdroll's own exit status through once
 // the child has started.
 

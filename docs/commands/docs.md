@@ -58,7 +58,7 @@ Naming directories or files on the command line replaces that default set entire
 
 Every docs verb shares one "could not run" contract ([#604](https://github.com/cameronsjo/forgectl/issues/604)):
 
-- **Exit 2** when the verb fails before it starts its real work: an unreadable or missing root, a bad `[docs]` config, a bad flag or a wrong number of arguments, a `--timeout` deadline, no search backend, no reader to open, a bind failure, an unusable `--token-file`, the retired `--token`, or a discovery-record publish that fails while the server is starting.
+- **Exit 2** when the verb fails before it starts its real work: an unreadable or missing root, a bad `[docs]` config, a bad flag or a wrong number of arguments, a `--timeout` deadline, no search backend, no reader to open, a bind failure, an unusable `--token-file`, the retired `--token`, or a `docs serve` startup in which the server cannot confirm it is serving its own discovery generation.
 - **Under `--json`**, on the verbs that declare it (`list`, `check`, `search`), that failure leaves stdout empty and writes exactly one `{"error","code","root"}` object to stderr. This includes flag and argument errors, even a `--json` written after the bad flag. `root` is always present and is empty unless a deadline stopped on a specific root. Verbs without `--json` (`serve`, `open`, `read`) print the human error and exit 2.
 - The object's shape is additive-only ([ADR-0008](../adr/0008-agent-contract.md) rule 2): `root` was already documented for `docs list`, so it stays a fixed key rather than being omitted when empty, and `docs search` gained it.
 
@@ -69,7 +69,7 @@ Two things sit outside the contract, on purpose:
 
 In short: 2 = could not run; 1 = error findings or a partial search; 0 = clean, or `docs check` with only `info` findings.
 
-`docs serve` exits 0 after a clean Ctrl-C. The discovery-record publish is part of startup, not of serving: the banner is printed only after it succeeds and a failure tears the server down before any client is served, so it is "could not run" (exit 2). A failure after the server is up (the serve loop itself failing) is the server's own and exits 1.
+`docs serve` exits 0 after a clean Ctrl-C. Discovery has two failure modes. When the server cannot confirm it is serving its own discovery generation (its startup self-probe gets no answer, discovery publication reports success without a lease, or picking a fresh generation after a collision fails), startup is aborted before the banner and it is "could not run" (exit 2). A failed discovery-record write, an ordinary publish error or running out of collision retries only prints a warning: the server keeps serving without being discoverable by `docs open`, and exits 0 on a clean Ctrl-C. A failure after the server is up (the serve loop itself failing) is the server's own and exits 1.
 
 ### Root kinds
 
