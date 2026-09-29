@@ -243,6 +243,7 @@ A `forgectl pr local` review leaves one durable deliverable behind: a `forgectl-
 ```sh
 forgectl pr findings list [--json]                              # one row per findings dir: path, modified time, size
 forgectl pr findings cleanup [--older-than 720h]                # dry-run: what would be removed
+forgectl pr findings cleanup [--older-than 720h] --json         # {"paths":[...],"count":N}; refused with --apply
 forgectl pr findings cleanup [--older-than 720h] --apply        # remove them, after a confirmation prompt
 ```
 

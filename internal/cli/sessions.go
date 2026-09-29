@@ -124,16 +124,10 @@ the command exits non-zero — a skipped session is never silent.
 			if err != nil {
 				return err
 			}
-			if asJSON {
-				if err := writeJSON(cmd.OutOrStdout(), newReceiptJSON(receipt)); err != nil {
-					return err
-				}
-				return receiptError(receipt)
-			}
-			return printReceipt(cmd, receipt)
+			return finishSync(cmd.OutOrStdout(), receipt, asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `emit the completeness receipt as JSON to stdout (see receiptJSON); a MISSING session still exits non-zero`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit the completeness receipt as {"sessions_found","sessions_upserted","sessions_unchanged","invalid_rows","commit_rows_dropped","ledger_lines_bad","missing":[ids],"runbooks_found","runbooks_upserted","runbooks_pruned","dry_run","complete"} to stdout; a MISSING session still exits non-zero`)
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "read + transform + count; no DB connection")
 	cmd.Flags().BoolVar(&opts.Full, "full", false, "bypass the lastMessageId watermark and re-upsert every session")
 	cmd.Flags().StringVar(&opts.DSN, "dsn", "", "concordance DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
@@ -186,10 +180,22 @@ func receiptError(r *sessions.Receipt) error {
 	return fmt.Errorf("reconcile failed: %d local sessions absent from the concordance after flush", len(r.Missing))
 }
 
+// finishSync renders the receipt (JSON or human) and returns the sync's exit
+// error. Both renderings share the tail so the acceptance contract, a
+// MISSING session fails the run, cannot differ between them.
+func finishSync(out io.Writer, r *sessions.Receipt, asJSON bool) error {
+	if asJSON {
+		if err := writeJSON(out, newReceiptJSON(r)); err != nil {
+			return err
+		}
+		return receiptError(r)
+	}
+	return printReceipt(out, r)
+}
+
 // printReceipt renders the completeness receipt. MISSING sessions make the
 // command fail loudly — the acceptance contract of the sync.
-func printReceipt(cmd *cobra.Command, r *sessions.Receipt) error {
-	out := cmd.OutOrStdout()
+func printReceipt(out io.Writer, r *sessions.Receipt) error {
 	mode := ""
 	if r.DryRun {
 		mode = " (dry-run: no database connection made)"

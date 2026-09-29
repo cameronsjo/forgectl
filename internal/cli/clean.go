@@ -141,7 +141,7 @@ verb that clears only the cache.`,
 	cmd.Flags().BoolVar(&force, "force", false, "also clean projects with a dirty/uncommitted git tree")
 	cmd.Flags().BoolVar(&caches, "caches", false, "also reclaim detected package-manager caches (npm/pnpm/pip/go/brew) — opt-in, isolated per tool; brew ALSO clears old Cellar versions")
 	cmd.Flags().BoolVar(&docker, "docker", false, "also prune docker (containers/images/volumes/build cache) — opt-in, isolated per category")
-	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"root":...,"items":[{"path","kind","size_bytes","skipped","skip_reason"}],"total_reclaimable_bytes":...} to stdout; dry-run only, not valid with --apply/--caches/--docker`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"root":...,"items":[{"path","kind","size_bytes","skipped","skip_reason"}],"total_reclaimable_bytes":...} to stdout (the total counts non-skipped items only); dry-run only, not valid with --apply/--caches/--docker`)
 	return cmd
 }
 

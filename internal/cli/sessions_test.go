@@ -340,3 +340,32 @@ func TestSyncReceiptJSON_CleanRunHasEmptyMissingArray(t *testing.T) {
 		t.Errorf("clean run errored: %v", err)
 	}
 }
+
+func TestFinishSync_MissingFailsRunInBothRenderings(t *testing.T) {
+	for _, asJSON := range []bool{true, false} {
+		r := &sessions.Receipt{SessionsFound: 2, SessionsUpserted: 1, Missing: []string{"abc"}}
+		var buf bytes.Buffer
+		err := finishSync(&buf, r, asJSON)
+		if err == nil || !strings.Contains(err.Error(), "reconcile failed") {
+			t.Errorf("asJSON=%v: error = %v, want the reconcile failure", asJSON, err)
+		}
+		if asJSON {
+			var got map[string]any
+			if jerr := json.Unmarshal(buf.Bytes(), &got); jerr != nil || got["complete"] != false {
+				t.Errorf("JSON not emitted before the error: %v\n%s", jerr, buf.String())
+			}
+		} else if !strings.Contains(buf.String(), "MISSING abc") {
+			t.Errorf("human output = %q, want a MISSING line", buf.String())
+		}
+	}
+}
+
+func TestFinishSync_CompleteAndDryRunSucceed(t *testing.T) {
+	for _, r := range []*sessions.Receipt{{SessionsFound: 1, SessionsUpserted: 1}, {DryRun: true, Missing: []string{"x"}}} {
+		for _, asJSON := range []bool{true, false} {
+			if err := finishSync(&bytes.Buffer{}, r, asJSON); err != nil {
+				t.Errorf("asJSON=%v receipt=%+v: unexpected error %v", asJSON, r, err)
+			}
+		}
+	}
+}

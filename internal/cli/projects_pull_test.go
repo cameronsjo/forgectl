@@ -159,7 +159,7 @@ func TestPullAllCmd_JSON_RowsAndExitCodeUnchanged(t *testing.T) {
 	for _, r := range rows {
 		got[r["name"]] = r["status"]
 	}
-	if len(rows) != 2 || got["ok"] == "" || got["broken"] != "failed" {
+	if len(rows) != 2 || got["ok"] != "up-to-date" || got["broken"] != "failed" {
 		t.Errorf("rows = %v", rows)
 	}
 	if strings.Contains(stdout.String(), "✗") {

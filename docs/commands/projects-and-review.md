@@ -12,6 +12,7 @@ forgectl projects pick [query]           # picker with both descriptors TTY; oth
 forgectl projects                        # shorthand for pick; same headless candidate/exit-1 contract
 forgectl projects clone [query]          # picker with both descriptors TTY; otherwise candidates + exit 1 (use sshUrl from list --json)
 forgectl projects worktree <query> [branch] # same ambiguity contract as clone; use sshUrl from list --json
+forgectl projects pull-all --json          # [{"name","status"}]; exits 1 when any pull failed, as without --json
 forgectl projects clone --dry-run <target>  # print where it would land and exit, touching nothing
 forgectl projects clone --wing mcp <target> # override the wing table for this one clone
 
