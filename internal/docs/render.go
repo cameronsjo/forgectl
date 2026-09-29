@@ -60,6 +60,9 @@ func newMarkdown(withFrontmatter bool) goldmark.Markdown {
 		// never claims them — see mermaid.go for why a second renderer
 		// alongside the highlighting extension is not an option.
 		mermaidExtension{},
+		// $…$, $$…$$ and ```math fences become escaped math markup for a
+		// client-side renderer — see math.go.
+		mathExtension{},
 	}
 	if withFrontmatter {
 		// Consumes a leading YAML/TOML frontmatter block at parse time, so the

@@ -1,0 +1,369 @@
+package docs
+
+import (
+	"bytes"
+
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/renderer"
+	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
+)
+
+// Math support is split in two. This file is the Go half: it finds TeX in the
+// markdown ($…$, $$…$$, and ```math fences) and emits it as HTML-escaped text
+// inside an element a client-side renderer can find, with the original
+// delimiters kept. Without that renderer the reader shows exactly the TeX it
+// showed before, except that markdown no longer mangles it (a_1 * b_2 turning
+// into emphasis, \{ losing its backslash).
+//
+// The markup is deliberately plain, so the sanitizer needs no change: span and
+// div are already allowed, and AllowStyling (render.go) lets "class" through.
+const (
+	mathInlineClass  = "math math-inline"
+	mathDisplayClass = "math math-display"
+
+	// mathInfo is the fence info string that marks a display-math block.
+	mathInfo = "math"
+
+	// mathDelim is the display delimiter. A ```math fence is emitted with it
+	// too, so every display block reaches the client in one shape.
+	mathDelim = "$$"
+)
+
+// kindMathInline is inline math: $…$, or $$…$$ inside a paragraph.
+var kindMathInline = ast.NewNodeKind("MathInline")
+
+// mathInline holds the TeX between the delimiters, copied out of the source
+// because inline math may span a soft line break, and so more than one
+// segment.
+type mathInline struct {
+	ast.BaseInline
+	tex     []byte
+	display bool
+}
+
+func (*mathInline) Kind() ast.NodeKind { return kindMathInline }
+
+func (n *mathInline) Dump(source []byte, level int) {
+	ast.DumpHelper(n, source, level, nil, nil)
+}
+
+// kindMathBlock is display math that stands as its own block: a $$ block or a
+// ```math fence.
+var kindMathBlock = ast.NewNodeKind("MathBlock")
+
+// mathBlock holds the TeX lines of a display block. singleLine marks the
+// one-line $$…$$ form, which is emitted without the line breaks a multi-line
+// block gets around its body.
+type mathBlock struct {
+	ast.BaseBlock
+	singleLine bool
+}
+
+func (*mathBlock) Kind() ast.NodeKind { return kindMathBlock }
+
+// IsRaw keeps goldmark's inline pass off the TeX. Without it the block's lines
+// would be parsed as markdown after block parsing, which is the mangling this
+// file exists to stop.
+func (*mathBlock) IsRaw() bool { return true }
+
+func (n *mathBlock) Dump(source []byte, level int) {
+	ast.DumpHelper(n, source, level, nil, nil)
+}
+
+func isMathSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
+}
+
+func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
+
+// mathInlineParser parses $…$ and $$…$$ inside a paragraph.
+//
+// The dollar sign is ordinary prose far more often than it is math, so the
+// rules are pandoc's tex_math_dollars, chosen because they keep currency and
+// shell variables literal:
+//
+//   - the opening $ must be followed by a non-space;
+//   - for $…$, the FIRST unescaped $ after it decides: if it follows
+//     whitespace, or is followed by an ASCII digit, there is no math here and
+//     the parser gives up rather than scanning on for a later $.
+//
+// So "It costs $5 and $10" stays text (the second $ follows a space), and so
+// does "echo $HOME and $PATH". A backslash-escaped byte is skipped while
+// scanning, so \$ inside math never closes it.
+type mathInlineParser struct{}
+
+func (mathInlineParser) Trigger() []byte { return []byte{'$'} }
+
+func (mathInlineParser) Parse(_ ast.Node, block text.Reader, _ parser.Context) ast.Node {
+	line, _ := block.PeekLine()
+	delim := 1
+	if len(line) > 1 && line[1] == '$' {
+		delim = 2
+	}
+	if len(line) <= delim || isMathSpace(line[delim]) {
+		return nil
+	}
+
+	// The scan may cross soft line breaks, so remember where we started and
+	// put the reader back on every failure — the same save/restore goldmark's
+	// own code-span parser uses.
+	startLine, startPos := block.Position()
+	block.Advance(delim)
+
+	var tex []byte
+	prev := line[delim-1]
+	for {
+		line, _ := block.PeekLine()
+		if line == nil {
+			block.SetPosition(startLine, startPos)
+			return nil
+		}
+		for i := 0; i < len(line); i++ {
+			c := line[i]
+			if c == '\\' {
+				// Skip the escaped byte. Recording the backslash as prev is
+				// harmless: it is not whitespace.
+				prev = c
+				i++
+				continue
+			}
+			if c != '$' {
+				prev = c
+				continue
+			}
+			if delim == 2 {
+				if i+1 < len(line) && line[i+1] == '$' {
+					tex = append(tex, line[:i]...)
+					block.Advance(i + 2)
+					return newMathInline(tex, true, block, startLine, startPos)
+				}
+				prev = c
+				continue
+			}
+			if isMathSpace(prev) || (i+1 < len(line) && isASCIIDigit(line[i+1])) {
+				block.SetPosition(startLine, startPos)
+				return nil
+			}
+			tex = append(tex, line[:i]...)
+			block.Advance(i + 1)
+			return newMathInline(tex, false, block, startLine, startPos)
+		}
+		tex = append(tex, line...)
+		if len(line) > 0 {
+			prev = line[len(line)-1]
+		}
+		block.AdvanceLine()
+	}
+}
+
+// newMathInline builds the node, or rewinds and returns nil for empty math.
+// GitHub's $`…`$ form wraps the TeX in backticks to protect it from markdown;
+// the backticks are not TeX, so one is dropped from each end.
+func newMathInline(tex []byte, display bool, block text.Reader, line int, pos text.Segment) ast.Node {
+	if len(tex) >= 2 && tex[0] == '`' && tex[len(tex)-1] == '`' {
+		tex = tex[1 : len(tex)-1]
+	}
+	if len(tex) == 0 {
+		block.SetPosition(line, pos)
+		return nil
+	}
+	return &mathInline{tex: tex, display: display}
+}
+
+// mathBlockParser parses $$ display blocks. Two opener shapes:
+//
+//   - a line that is exactly $$ (trailing spaces allowed) opens a block that
+//     runs to the next line ending in $$, or to the end of its container,
+//     like a fenced code block;
+//   - a line that is exactly $$…$$ is a one-line block.
+//
+// Anything else starting with $$ ($$x$$ followed by more text, or $$ followed
+// by TeX that closes on a later line) is left to mathInlineParser, which
+// keeps it inside its paragraph. That bounds a stray "$$" in prose to the
+// paragraph it sits in instead of letting a block swallow the rest of the
+// document.
+//
+// Only the bare $$ line may interrupt a paragraph, mirroring a fence; a
+// one-line $$…$$ in the middle of a paragraph stays inline math.
+type mathBlockParser struct{}
+
+func (mathBlockParser) Trigger() []byte { return []byte{'$'} }
+
+func (mathBlockParser) Open(_ ast.Node, reader text.Reader, pc parser.Context) (ast.Node, parser.State) {
+	line, segment := reader.PeekLine()
+	pos := pc.BlockOffset()
+	if pos < 0 || pos+len(mathDelim) > len(line) || !bytes.HasPrefix(line[pos:], []byte(mathDelim)) {
+		return nil, parser.NoChildren
+	}
+	rest := line[pos+len(mathDelim):]
+
+	if util.IsBlank(rest) {
+		reader.AdvanceToEOL()
+		return &mathBlock{}, parser.NoChildren
+	}
+
+	// A one-line $$…$$ may not interrupt a paragraph.
+	if ast.IsParagraph(pc.LastOpenedBlock().Node) {
+		return nil, parser.NoChildren
+	}
+	closer := findDisplayCloser(rest)
+	if closer <= 0 || !util.IsBlank(rest[closer+len(mathDelim):]) {
+		return nil, parser.NoChildren
+	}
+	// line carries segment.Padding expanded-tab columns ahead of the source
+	// bytes, so line index k is source offset segment.Start - Padding + k.
+	start := segment.Start - segment.Padding + pos + len(mathDelim)
+	node := &mathBlock{singleLine: true}
+	node.Lines().Append(text.NewSegment(start, start+closer))
+	reader.AdvanceToEOL()
+	return node, parser.NoChildren
+}
+
+// findDisplayCloser returns the index of the first unescaped $$ in b, or -1.
+func findDisplayCloser(b []byte) int {
+	for i := 0; i < len(b); i++ {
+		switch {
+		case b[i] == '\\':
+			i++
+		case b[i] == '$' && i+1 < len(b) && b[i+1] == '$':
+			return i
+		}
+	}
+	return -1
+}
+
+func (mathBlockParser) Continue(node ast.Node, reader text.Reader, _ parser.Context) parser.State {
+	// A one-line block is complete at Open. Closing without consuming hands
+	// this line back to goldmark to open whatever block it starts.
+	if m, ok := node.(*mathBlock); ok && m.singleLine {
+		return parser.Close
+	}
+	line, segment := reader.PeekLine()
+	trimmed := util.TrimRightSpace(line)
+	if bytes.HasSuffix(trimmed, []byte(mathDelim)) {
+		// "x $$" closes the block with "x" as its last line.
+		if body := util.TrimRightSpace(trimmed[:len(trimmed)-len(mathDelim)]); !util.IsBlank(body) {
+			seg := text.NewSegmentPadding(segment.Start, segment.Start+len(body)-segment.Padding, segment.Padding)
+			seg.ForceNewline = true
+			node.Lines().Append(seg)
+		}
+		reader.AdvanceToEOL()
+		return parser.Close
+	}
+	seg := segment
+	seg.ForceNewline = true // the last line at EOF still ends in a newline
+	node.Lines().Append(seg)
+	reader.AdvanceToEOL()
+	return parser.Continue | parser.NoChildren
+}
+
+func (mathBlockParser) Close(ast.Node, text.Reader, parser.Context) {}
+
+func (mathBlockParser) CanInterruptParagraph() bool { return true }
+
+func (mathBlockParser) CanAcceptIndentedLine() bool { return false }
+
+// mathFenceTransformer promotes every ```math fence to a mathBlock, the same
+// collect-then-replace shape as mermaidTransformer and for the same reason:
+// the highlighting extension owns ast.KindFencedCodeBlock, so the fence has to
+// become a different node kind before render time.
+type mathFenceTransformer struct{}
+
+func (mathFenceTransformer) Transform(doc *ast.Document, reader text.Reader, _ parser.Context) {
+	var found []*ast.FencedCodeBlock
+
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		// Exact and case-sensitive, as for mermaid: "Math" or "mathml" is
+		// not this.
+		if fence, ok := n.(*ast.FencedCodeBlock); ok && string(fence.Language(reader.Source())) == mathInfo {
+			found = append(found, fence)
+		}
+		return ast.WalkContinue, nil
+	})
+
+	for _, fence := range found {
+		parent := fence.Parent()
+		if parent == nil {
+			continue
+		}
+		block := &mathBlock{}
+		block.SetLines(fence.Lines())
+		parent.ReplaceChild(parent, fence, block)
+	}
+}
+
+// mathRenderer emits math nodes. The TeX is ALWAYS HTML-escaped, for the
+// reason mermaidRenderer.render gives: TeX routinely contains < and >, the
+// renderer runs under goldmarkhtml.WithUnsafe(), and this file should not
+// depend on a policy in another file to stop "$</span><script>$" from
+// breaking out. A client renderer reads textContent, which decodes the
+// entities back to the TeX.
+type mathRenderer struct{}
+
+func (r mathRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
+	reg.Register(kindMathInline, r.renderInline)
+	reg.Register(kindMathBlock, r.renderBlock)
+}
+
+// renderInline keeps the element a <span> even for $$…$$ display math, since
+// a <div> is not allowed inside the <p> this node sits in.
+func (mathRenderer) renderInline(w util.BufWriter, _ []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
+	if !entering {
+		return ast.WalkContinue, nil
+	}
+	m, ok := n.(*mathInline)
+	if !ok {
+		return ast.WalkContinue, nil
+	}
+	class, delim := mathInlineClass, "$"
+	if m.display {
+		class, delim = mathDisplayClass, mathDelim
+	}
+	_, _ = w.WriteString(`<span class="` + class + `">` + delim)
+	_, _ = w.Write(util.EscapeHTML(m.tex))
+	_, _ = w.WriteString(delim + `</span>`)
+	return ast.WalkSkipChildren, nil
+}
+
+func (mathRenderer) renderBlock(w util.BufWriter, source []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
+	if !entering {
+		return ast.WalkContinue, nil
+	}
+	open := mathDelim + "\n"
+	if m, ok := n.(*mathBlock); ok && m.singleLine {
+		open = mathDelim
+	}
+	_, _ = w.WriteString(`<div class="` + mathDisplayClass + `">` + open)
+	lines := n.Lines()
+	for i := 0; i < lines.Len(); i++ {
+		segment := lines.At(i)
+		_, _ = w.Write(util.EscapeHTML(segment.Value(source)))
+	}
+	_, _ = w.WriteString(mathDelim + "</div>\n")
+	return ast.WalkSkipChildren, nil
+}
+
+// mathExtension wires the parsers, the fence transformer and the renderer as
+// one unit, so no node kind is ever produced without a renderer for it.
+type mathExtension struct{}
+
+func (mathExtension) Extend(m goldmark.Markdown) {
+	m.Parser().AddOptions(
+		// No other inline parser triggers on '$', so this priority only has to
+		// stay clear of the ones other extensions use.
+		parser.WithInlineParsers(util.Prioritized(mathInlineParser{}, 150)),
+		// Ahead of FencedCodeBlockParser (700). Nothing else triggers on '$'
+		// either; the paragraph parser is the fallback when this declines.
+		parser.WithBlockParsers(util.Prioritized(mathBlockParser{}, 650)),
+		parser.WithASTTransformers(util.Prioritized(mathFenceTransformer{}, 110)),
+	)
+	m.Renderer().AddOptions(renderer.WithNodeRenderers(
+		util.Prioritized(mathRenderer{}, 100),
+	))
+}
