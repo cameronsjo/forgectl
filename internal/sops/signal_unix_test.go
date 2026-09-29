@@ -45,14 +45,14 @@ type parkingRunner struct{ repo string }
 func (r parkingRunner) RunSensitive(context.Context, fcexec.SensitiveCommand) (fcexec.SensitiveResult, error) {
 	dir := findWorkDir(r.repo)
 	if dir == "" {
-		os.Stdout.WriteString("NOWORKDIR\n")
+		_, _ = os.Stdout.WriteString("NOWORKDIR\n")
 		os.Exit(3)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "value")); err != nil {
-		os.Stdout.WriteString("NOVALUE\n")
+		_, _ = os.Stdout.WriteString("NOVALUE\n")
 		os.Exit(3)
 	}
-	os.Stdout.WriteString("READY\n")
+	_, _ = os.Stdout.WriteString("READY\n")
 	time.Sleep(time.Minute)
 	os.Exit(4)
 	return fcexec.SensitiveResult{}, nil
@@ -76,11 +76,11 @@ func findWorkDir(repo string) string {
 func runSignalChild(repo string) {
 	target, err := env.ResolveTarget("secrets.sops.yaml", repo)
 	if err != nil {
-		os.Stdout.WriteString("RESOLVE " + err.Error() + "\n")
+		_, _ = os.Stdout.WriteString("RESOLVE " + err.Error() + "\n")
 		os.Exit(3)
 	}
 	_, err = NewClient(parkingRunner{repo: repo}).SetValue(context.Background(), target, "a", "s3cr3t-value")
-	os.Stdout.WriteString("RETURNED\n")
+	_, _ = os.Stdout.WriteString("RETURNED\n")
 	_ = err
 	os.Exit(5)
 }
