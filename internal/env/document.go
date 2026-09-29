@@ -662,8 +662,9 @@ func encode(export bool, key, value string) string {
 // order double-escapes (e.g. escaping '"' before '\\' would re-escape the
 // backslash the quote-escape just introduced).
 //
-// A carriage return is deliberately NOT escaped. A lone '\r' is written raw
-// inside single quotes, and this package's parser round-trips it (Parse
+// A carriage return is deliberately NOT escaped. A '\r' is written raw,
+// inside whichever quotes the rules above pick, and this package's parser
+// round-trips it (Parse
 // splits on '\n' only). It is not escaped because decodeQuotedBody has no
 // `\r` case, so adding one would change the meaning of double-quoted `\r`
 // already on disk. python-dotenv reading from a file normalizes a raw '\r'
