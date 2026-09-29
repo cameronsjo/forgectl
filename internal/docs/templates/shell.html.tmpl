@@ -75,7 +75,7 @@ main.surface-document { max-width: 820px; }
 /* Status chip: deliberately NOT Artificer's .chip, which is interactive
    (cursor: pointer, hover, and a 44px min-size under pointer: coarse). The
    value is a static label, so it gets none of that. */
-.props-row .v .status-chip { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; background: color-mix(in oklch, var(--accent-fill) 14%, transparent); color: var(--accent); font-size: 11px; }
+.props-row .v .status-chip { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; background: color-mix(in oklch, var(--accent-fill) 14%, transparent); color: var(--accent); font-size: 11px; border: 1px solid var(--border); font-family: var(--font-interface); font-weight: 500; white-space: nowrap; }
 .props-row .v.dt { font-variant-numeric: tabular-nums; }
 /* OKF trust badges (properties block + status bar). Deliberately NOT
    Artificer's .chip: that class is interactive (cursor, hover, aria-pressed,

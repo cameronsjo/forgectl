@@ -65,7 +65,7 @@ feedback issue filed upstream.
 
 - **Dated:** 2026-09-29 · app @ pre-1.0 · Artificer @ 0.25.0
 - **What diverges:** the properties block renders the frontmatter `status` value as `<span class="status-chip">`, styled by one template rule, and not as Artificer's `.chip`.
-- **Why necessary:** `.chip` is an interactive control. It sets `cursor: pointer`, a border and hover states, and under `@media (pointer: coarse)` a `min-height` and `min-width` of 44px. Measured at 375px with touch, the status label rendered 44px tall. It is a static label, not a control.
+- **Why necessary:** `.chip` is an interactive control. It sets `cursor: pointer`, a border and hover states, and under `@media (pointer: coarse)` a `min-height` and `min-width` of 44px. Measured at 375px with touch, the status label rendered 44px tall. It is a static label, not a control. The local rule keeps `.chip`'s look: the 1px `--border` border, `--font-interface` at weight 500, `white-space: nowrap`, with the tinted accent fill the properties block already used.
 - **Upstream issue:** none filed. Candidate for a non-interactive label primitive; `.badge` is the nearest but is solid-filled.
 - **Retire when:** the vendored Artificer ships a non-interactive label primitive with this tinted look. Delete the `.status-chip` rule and adopt the upstream class.
 
