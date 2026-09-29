@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/sandbox"
@@ -72,10 +73,41 @@ func findingsRemovalCandidate(findingsDir, full string, isDir bool, modTime, cut
 	if !isDir {
 		return false
 	}
+	if !isFindingsStoreChild(findingsDir, full) {
+		return false
+	}
 	if !sandbox.WithinWorkspace(findingsDir, full) {
 		return false
 	}
 	return !modTime.After(cutoff)
+}
+
+// isFindingsStoreChild reports whether full names exactly one directory
+// PrepareLocal could have created: a DIRECT child of findingsDir whose base
+// name carries findingsDirPrefix (forgectl#558). It is lexical by design and
+// runs before any filesystem call, so it refuses the store itself (full ==
+// findingsDir, a trailing slash, or "x/.." all clean to it), anything nested
+// deeper, anything that climbs out through "..", and any name PrepareLocal
+// never mints. sandbox.WithinWorkspace alone accepts all of those except the
+// climb: it answers "inside or equal", never "exactly one level down".
+//
+// The comparison is against the configured findingsDir as spelled, not its
+// symlink-resolved form. Every caller builds full with filepath.Join over that
+// same spelling, so a symlinked store still matches; a caller that resolved
+// the path first is refused, which is the safe direction. Case is compared
+// exactly, so on a case-insensitive volume a differently-cased spelling is
+// likewise refused rather than accepted.
+//
+// The clean == root test is belt and braces: filepath.Dir(clean) == root
+// already excludes the store everywhere but the filesystem root, and the
+// root's base name never carries the prefix.
+func isFindingsStoreChild(findingsDir, full string) bool {
+	root := filepath.Clean(findingsDir)
+	clean := filepath.Clean(full)
+	if clean == root || filepath.Dir(clean) != root {
+		return false
+	}
+	return strings.HasPrefix(filepath.Base(clean), findingsDirPrefix)
 }
 
 // FindingsCleanup reports findings directories older than olderThan. With
@@ -134,12 +166,14 @@ func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, a
 // log by rename under the same lock, so an unlocked appender could write to a
 // file that is about to be replaced and lose its row silently.
 //
-// The re-validation — it must exist, be a plain directory (not a symlink), and
-// remain contained within c.findingsDir after symlink resolution — means a path
-// that stopped qualifying between preview and apply (already removed, replaced
-// by something else) is skipped with a logged note rather than silently
-// re-scanned into a different set. A skip writes no row, because nothing
-// happened.
+// The re-validation — it must be a findings dir directly under c.findingsDir
+// (isFindingsStoreChild: never the store itself, never nested deeper, always
+// carrying the findings prefix), exist, be a plain directory (not a symlink),
+// and remain contained within c.findingsDir after symlink resolution — means a
+// path that never qualified, or stopped qualifying between preview and apply
+// (already removed, replaced by something else), is skipped with a logged note
+// rather than silently re-scanned into a different set. A skip writes no row,
+// because nothing happened.
 //
 // The first error stops the run and returns the paths removed so far: a busy
 // lock, a cancelled ctx, an intent row that could not be written (the removal
@@ -170,6 +204,14 @@ func (c *Client) FindingsRemove(ctx context.Context, paths []string) ([]string, 
 func (c *Client) removeFindingsDirAudited(ctx context.Context, full string) (bool, error) {
 	removed := false
 	err := c.withLifecycleLock(ctx, auditVerbFindingsCleanup, func() error {
+		if !isFindingsStoreChild(c.findingsDir, full) {
+			slog.Warn("Skipping findings removal target that is not a findings dir directly under the store.", "path", full)
+			return nil
+		}
+		// Every filesystem call below uses the cleaned spelling. A trailing
+		// slash would make Lstat follow a symlink to its target and report a
+		// plain directory, defeating the symlink check that follows.
+		full = filepath.Clean(full)
 		info, err := os.Lstat(full)
 		if err != nil {
 			slog.Warn("Skipping findings removal target that no longer exists.", "path", full, "error", err)

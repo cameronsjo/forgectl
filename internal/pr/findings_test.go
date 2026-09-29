@@ -43,6 +43,23 @@ package pr
 //       third dir survives with no row
 //   [x] A ctx cancelled while another holder has the lock returns the ctx
 //       error with no row and the dir intact (findings_lock_unix_test.go)
+//   [x] The #558 probe — a nested path, the store with a trailing slash, and
+//       the bare store — removes nothing, leaves the store intact, and writes
+//       no row; so do "." / ".." spellings and a nested prefixed dir
+//   [x] A direct child without the findings prefix is skipped with no row
+//   [x] A symlink passed with a trailing slash is not followed: the link and
+//       its in-store target both survive, no row
+//   [x] A store reached through a symlink still reclaims its own children
+//       (the shape check compares the configured spelling, not the resolved one)
+//
+// isFindingsStoreChild (Classification: pure lexical shape check, #558)
+//   [x] Accepts only a prefixed direct child; refuses the store, trailing
+//       slash and dot spellings of it, deeper nesting, a ".." climb to a
+//       sibling, an unprefixed name, and a differently-cased prefix
+//
+// FindingsCleanup preview
+//   [x] An unprefixed dir in the store is never offered as a candidate, so
+//       the preview and the apply-time re-check agree
 //
 // Tests that swap the findingsRemoveAll seam (failRemovalOf) must not call
 // t.Parallel.
@@ -54,6 +71,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -481,5 +499,181 @@ func mustMkdir(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatalf("MkdirAll(%q): %v", path, err)
+	}
+}
+
+// TestFindingsRemove_RefusesStoreRootAndNestedPaths replays the #558 probe:
+// sandbox.WithinWorkspace accepts rel == "." and any depth, so before the
+// shape check this call removed store/a/b and then the whole store.
+func TestFindingsRemove_RefusesStoreRootAndNestedPaths(t *testing.T) {
+	store := t.TempDir()
+	c := findingsClient(t, store)
+	sep := string(filepath.Separator)
+	nested := filepath.Join(store, "a", "b")
+	mustMkdir(t, nested)
+	keep := filepath.Join(store, findingsDirPrefix+"keep")
+	mustMkdir(t, filepath.Join(keep, findingsDirPrefix+"inner"))
+
+	probe := []string{
+		store + sep + "a" + sep + "b",
+		store + sep,
+		store,
+		store + sep + ".",
+		keep + sep + "..",
+		keep + sep + findingsDirPrefix + "inner",
+	}
+	removed, err := c.FindingsRemove(t.Context(), probe)
+	if err != nil {
+		t.Fatalf("FindingsRemove: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("FindingsRemove removed %v, want every probe path refused", removed)
+	}
+	for _, p := range []string{nested, filepath.Join(keep, findingsDirPrefix+"inner")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%q is gone, want the store left intact: %v", p, err)
+		}
+	}
+	if rows := auditRows(t, c); len(rows) != 0 {
+		t.Errorf("audit rows = %+v, want none for a refused path", rows)
+	}
+}
+
+func TestFindingsRemove_SkipsUnprefixedChild(t *testing.T) {
+	store := t.TempDir()
+	c := findingsClient(t, store)
+	notes := filepath.Join(store, "notes")
+	mustMkdir(t, notes)
+
+	removed, err := c.FindingsRemove(t.Context(), []string{notes})
+	if err != nil {
+		t.Fatalf("FindingsRemove: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("FindingsRemove removed %v, want the unprefixed dir skipped", removed)
+	}
+	if _, err := os.Stat(notes); err != nil {
+		t.Errorf("%q is gone, want it left alone: %v", notes, err)
+	}
+	if rows := auditRows(t, c); len(rows) != 0 {
+		t.Errorf("audit rows = %+v, want none for a skipped path", rows)
+	}
+}
+
+// TestFindingsRemove_TrailingSlashSymlinkIsNotFollowed pins the Clean before
+// Lstat: with a trailing slash, lstat(2) resolves the link and reports its
+// target as a plain directory, so the symlink check would pass. The target is
+// inside the store, so containment cannot catch it either.
+func TestFindingsRemove_TrailingSlashSymlinkIsNotFollowed(t *testing.T) {
+	store := t.TempDir()
+	c := findingsClient(t, store)
+	target := filepath.Join(store, findingsDirPrefix+"real")
+	mustMkdir(t, target)
+	if err := os.WriteFile(filepath.Join(target, "findings.md"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(store, findingsDirPrefix+"link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("Symlink: %v", err)
+	}
+
+	removed, err := c.FindingsRemove(t.Context(), []string{link + string(filepath.Separator)})
+	if err != nil {
+		t.Fatalf("FindingsRemove: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("FindingsRemove removed %v, want the symlink skipped", removed)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Errorf("symlink %q was removed, want it left alone: %v", link, err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "findings.md")); err != nil {
+		t.Errorf("the link's target lost its contents, want it untouched: %v", err)
+	}
+	if rows := auditRows(t, c); len(rows) != 0 {
+		t.Errorf("audit rows = %+v, want none for a skipped path", rows)
+	}
+}
+
+func TestIsFindingsStoreChild(t *testing.T) {
+	sep := string(filepath.Separator)
+	store := filepath.Join(t.TempDir(), "store")
+	child := filepath.Join(store, findingsDirPrefix+"abc")
+	sibling := filepath.Join(filepath.Dir(store), findingsDirPrefix+"abc")
+	cases := []struct {
+		name string
+		full string
+		want bool
+	}{
+		{"prefixed direct child", child, true},
+		{"prefixed child with trailing slash", child + sep, true},
+		{"store", store, false},
+		{"store with trailing slash", store + sep, false},
+		{"store dot", store + sep + ".", false},
+		{"child dot-dot", child + sep + "..", false},
+		{"nested prefixed", filepath.Join(child, findingsDirPrefix+"x"), false},
+		{"nested unprefixed", store + sep + "a" + sep + "b", false},
+		{"dot-dot climb to a sibling", store + sep + ".." + sep + findingsDirPrefix + "abc", false},
+		{"sibling of the store", sibling, false},
+		{"unprefixed child", filepath.Join(store, "notes"), false},
+		{"differently cased prefix", filepath.Join(store, strings.ToUpper(findingsDirPrefix)+"abc"), false},
+		{"bare prefix only", filepath.Join(store, findingsDirPrefix), true},
+	}
+	// Filesystem root as the store, the one spelling where filepath.Dir(x) ==
+	// x. The root's base name never carries the prefix, so the prefix check
+	// refuses this as well as the explicit equality check does.
+	if root := filepath.VolumeName(store) + sep; isFindingsStoreChild(root, root) {
+		t.Errorf("isFindingsStoreChild(%q, %q) = true, want the root store refused", root, root)
+	}
+	for _, tc := range cases {
+		if got := isFindingsStoreChild(store, tc.full); got != tc.want {
+			t.Errorf("%s: isFindingsStoreChild(%q, %q) = %v, want %v", tc.name, store, tc.full, got, tc.want)
+		}
+		if got := isFindingsStoreChild(store+sep, tc.full); got != tc.want {
+			t.Errorf("%s: with a trailing-slash store, isFindingsStoreChild(%q) = %v, want %v", tc.name, tc.full, got, tc.want)
+		}
+	}
+}
+
+func TestFindingsCleanup_PreviewSkipsUnprefixedDir(t *testing.T) {
+	store := t.TempDir()
+	c := findingsClient(t, store)
+	notes := filepath.Join(store, "notes")
+	mustMkdir(t, notes)
+	ours := filepath.Join(store, findingsDirPrefix+"ours")
+	mustMkdir(t, ours)
+
+	got, err := c.FindingsCleanup(t.Context(), 0, false)
+	if err != nil {
+		t.Fatalf("FindingsCleanup: %v", err)
+	}
+	if len(got) != 1 || got[0] != ours {
+		t.Errorf("FindingsCleanup preview = %v, want only %q", got, ours)
+	}
+}
+
+func TestFindingsCleanup_SymlinkedStoreStillReclaims(t *testing.T) {
+	realDir := t.TempDir()
+	store := filepath.Join(t.TempDir(), "store-link")
+	if err := os.Symlink(realDir, store); err != nil {
+		t.Skipf("Symlink: %v", err)
+	}
+	c := findingsClient(t, store)
+	target := filepath.Join(realDir, findingsDirPrefix+"old")
+	mustMkdir(t, target)
+
+	removed, err := c.FindingsCleanup(t.Context(), 0, true)
+	if err != nil {
+		t.Fatalf("FindingsCleanup: %v", err)
+	}
+	want := filepath.Join(store, findingsDirPrefix+"old")
+	if len(removed) != 1 || removed[0] != want {
+		t.Errorf("FindingsCleanup removed %v, want [%q]", removed, want)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Errorf("%q survived (err=%v), want it reclaimed through the symlinked store", target, err)
+	}
+	if _, err := os.Stat(realDir); err != nil {
+		t.Errorf("the store's real dir is gone, want it intact: %v", err)
 	}
 }
