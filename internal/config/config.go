@@ -818,7 +818,19 @@ type DocsConfig struct {
 	// RootKindVault; any other value is a config error (Validate names the
 	// key, the value, and the two allowed values).
 	RootKinds map[string]string `toml:"root_kinds"`
+	// SearchBackend picks the `docs search` backend when --backend is
+	// omitted: SearchBackendRipgrep (the default when empty) or
+	// SearchBackendQMD. qmd is opt-in only, never chosen because it is
+	// installed. Any other value is a config error.
+	SearchBackend string `toml:"search_backend"`
 }
+
+// The two values [docs].search_backend accepts. internal/docs names the same
+// backends with the same strings.
+const (
+	SearchBackendRipgrep = "ripgrep"
+	SearchBackendQMD     = "qmd"
+)
 
 // The two values [docs].root_kinds accepts.
 const (
@@ -827,10 +839,15 @@ const (
 )
 
 // Validate reports the first semantically invalid [docs] value, in key
-// order so the error is the same on every run. Only root_kinds carries a
-// closed value set today; Roots and Addr are validated by their consumers
+// order so the error is the same on every run. root_kinds and search_backend
+// carry closed value sets; Roots and Addr are validated by their consumers
 // against the filesystem and the network, which a config check cannot do.
 func (dc DocsConfig) Validate() error {
+	switch dc.SearchBackend {
+	case "", SearchBackendRipgrep, SearchBackendQMD:
+	default:
+		return fmt.Errorf("[docs].search_backend = %q: must be %q or %q", dc.SearchBackend, SearchBackendRipgrep, SearchBackendQMD)
+	}
 	keys := make([]string, 0, len(dc.RootKinds))
 	for key := range dc.RootKinds {
 		keys = append(keys, key)
@@ -848,7 +865,7 @@ func (dc DocsConfig) Validate() error {
 
 // IsZero reports whether the [docs] section was absent or empty.
 func (dc DocsConfig) IsZero() bool {
-	return len(dc.Roots) == 0 && dc.Addr == "" && len(dc.RootKinds) == 0
+	return len(dc.Roots) == 0 && dc.Addr == "" && len(dc.RootKinds) == 0 && dc.SearchBackend == ""
 }
 
 // ExpandHome returns a copy of dc with a leading "~" or "~/" expanded to home

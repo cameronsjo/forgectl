@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # forgectl bench interop — `bench status`, `launch` env-injection, `bench up|open`
 
 ## Context

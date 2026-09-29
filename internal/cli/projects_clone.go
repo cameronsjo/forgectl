@@ -123,10 +123,12 @@ interactively when no sshUrl is available.`,
 func cloneOrg(ctx context.Context, client *projects.Client, cmd *cobra.Command, org string, dryRun bool) error {
 	repos, err := client.ListOrg(ctx, org)
 	if err != nil {
-		return fmt.Errorf("listing %s's GitHub repos: %w", org, err)
+		// org is the --org argv, echoed capped and quoted (#562); it reaches
+		// here unvalidated when ListOrg is what rejected it.
+		return fmt.Errorf("listing %s's GitHub repos: %w", termsafe.QuoteArgMax(org, termsafe.ArgEchoMaxRunes), err)
 	}
 	if len(repos) == 0 {
-		return fmt.Errorf("no repos found for GitHub user/org %q", org)
+		return fmt.Errorf("no repos found for GitHub user/org %s", termsafe.QuoteArgMax(org, termsafe.ArgEchoMaxRunes))
 	}
 	var failed int
 	for _, r := range repos {

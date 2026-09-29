@@ -83,10 +83,13 @@ type CheckedRoot struct {
 // CheckSummary counts findings by kind, plus the out-of-root links Check
 // deliberately did not report.
 type CheckSummary struct {
-	BrokenLinks      int `json:"broken_links"`
-	AmbiguousLinks   int `json:"ambiguous_links"`
-	BrokenAnchors    int `json:"broken_anchors"`
-	Orphans          int `json:"orphans"`
+	BrokenLinks    int `json:"broken_links"`
+	AmbiguousLinks int `json:"ambiguous_links"`
+	BrokenAnchors  int `json:"broken_anchors"`
+	Orphans        int `json:"orphans"`
+	// IgnoredOrphans counts orphans a page opted out of with orphan_ok: true.
+	// They are not findings and do not affect the exit code.
+	IgnoredOrphans   int `json:"ignored_orphans"`
 	OutsideRootLinks int `json:"outside_root_links"`
 	Deprecated       int `json:"deprecated"`
 	Stale            int `json:"stale"`
@@ -98,6 +101,12 @@ type CheckReport struct {
 	Roots         []CheckedRoot `json:"roots"`
 	Findings      []Finding     `json:"findings"`
 	Summary       CheckSummary  `json:"summary"`
+	// Skipped lists paths under a checked root that the index walk could not
+	// read. A non-empty list means the report covers a partial tree: docs
+	// inside a skipped subtree were never checked and links into it read as
+	// broken. The command exits 2 on it. Always present, empty when nothing
+	// was skipped.
+	Skipped []SkippedPath `json:"skipped"`
 }
 
 const vaultSkipReason = "vault roots are not checked yet"
@@ -120,6 +129,7 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 		SchemaVersion: 1,
 		Roots:         make([]CheckedRoot, 0, len(idx.roots)),
 		Findings:      []Finding{},
+		Skipped:       []SkippedPath{},
 	}
 	rootOrder := make(map[string]int, len(idx.roots))
 	rootByLabel := make(map[string]Root, len(idx.roots))
@@ -139,6 +149,14 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 			cr.Skipped = vaultSkipReason
 		}
 		report.Roots = append(report.Roots, cr)
+	}
+
+	// Only checked (docs-kind) roots count: a skip under a vault root does not
+	// make a verdict that was never going to be given any less complete.
+	for _, sp := range idx.skipped {
+		if rootByLabel[sp.Root].Kind != RootVault {
+			report.Skipped = append(report.Skipped, sp)
+		}
 	}
 
 	dirInbound := idx.dirLinkInbound(rootByLabel)
@@ -178,9 +196,13 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 			})
 		}
 		if root.OnlyFile == "" && len(idx.Backlinks(from)) == 0 && !dirInbound[i] && !isRootIndex(from.RelPath) {
-			report.Findings = append(report.Findings, Finding{
-				Kind: FindingOrphan, Root: from.RootLabel, Path: from.RelPath,
-			})
+			if from.OrphanOK {
+				report.Summary.IgnoredOrphans++
+			} else {
+				report.Findings = append(report.Findings, Finding{
+					Kind: FindingOrphan, Root: from.RootLabel, Path: from.RelPath,
+				})
+			}
 		}
 		tr := evalTrust(from.Status, from.StaleAfter, now)
 		if tr.Deprecated {

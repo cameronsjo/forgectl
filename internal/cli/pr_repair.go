@@ -123,7 +123,7 @@ changed underfoot stops that file and nothing else.`,
 	cmd.Flags().BoolVar(&yes, "yes", false, "confirm a destructive repair without a terminal prompt")
 	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"items":[…]} to stdout`)
 	cmd.Flags().BoolVar(&history, "history", false,
-		"show the session audit trail (repair, teardown, cleanup) instead of the current state")
+		"show the session audit trail (repair, teardown, cleanup, prune) instead of the current state; alias of 'pr history'")
 	cmd.Flags().BoolVar(&prune, "prune", false, "remove set-aside records past their retention window and compact the audit log")
 	cmd.Flags().StringVar(&olderThan, "older-than", defaultAsideRetention,
 		"with --prune: how old a set-aside record's name must say it is before it is removed")
@@ -286,6 +286,17 @@ func runRepairHistory(cmd *cobra.Command, client *pr.Client, asJSON bool) error 
 	if trail.Omitted > 0 {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "note: showing the newest %d rows; %d older rows are in %s\n",
 			len(rows), trail.Omitted, termsafe.QuotePathIfUnsafe(trail.Path))
+		// The unpaired intents are the rows the log exists to keep visible, and
+		// prune keeps them at any age, so they pile up in exactly this window.
+		if trail.OmittedUnpaired > 0 {
+			atLeast := ""
+			if trail.OmittedUnpairedCapped {
+				atLeast = "at least "
+			}
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+				"note: %s%d of the omitted rows are intents with no completion (a mutation that died mid-way); read %s directly to find them\n",
+				atLeast, trail.OmittedUnpaired, termsafe.QuotePathIfUnsafe(trail.Path))
+		}
 	}
 	if trail.Skipped > 0 {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "note: %d unreadable lines skipped; they are still in %s\n",

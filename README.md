@@ -90,6 +90,7 @@ forgectl projects clone [query]          # picker with both descriptors TTY; oth
 forgectl projects clone --dry-run <target>  # print where it would land and exit, touching nothing
 forgectl projects clone --wing mcp <target> # override the [[projects.wings]] table for this clone
 forgectl projects worktree <query> [branch] # same ambiguity contract as clone; use sshUrl from list --json
+forgectl projects pull-all --json          # [{"name","status"}]; exits 1 when any pull failed, as without --json
 
 # pr — clean-room pull-request review (the flagship review family)
 forgectl pr <ref>                        # prepare + launch an isolated, deny-by-default review (owner/repo#N, a PR URL, or a bare N)
@@ -181,6 +182,7 @@ forgectl bench open [target]              # open a bench UI (hearth | grafana; d
 forgectl sessions sync --dry-run          # read + count the local JSONL WAL; no DB connection
 forgectl sessions sync                    # idempotent upsert into the concordance + rebuild the runbook index
 forgectl sessions sync --full             # bypass the lastMessageId watermark, re-upsert everything
+forgectl sessions sync --json             # the completeness receipt as JSON (missing ids as an array); a MISSING session still exits non-zero
 forgectl sessions search "<query>"        # full-text search the concordance's runbook index from any machine
 forgectl sessions why "<path|topic>"      # recent sessions whose runbooks explain a path or topic, newest first
 forgectl sessions last <repo>             # the newest session in a repo + the artifacts it left behind
@@ -205,12 +207,14 @@ forgectl env set a.b.key --sops [--file secrets.sops.yaml]   # one key into a SO
 forgectl branch                          # dry-run report: local + remote branches, classified against
                                           #   server-side PR truth (safe-to-delete | blocked | needs-attention)
 forgectl branch --include-gone           # also surface upstream-gone branches with no server-confirmed merge
+forgectl branch --json                   # the dry-run classification as JSON; refused with --apply
 forgectl branch --apply                  # DESTRUCTIVE: delete everything classified safe-to-delete,
                                           #   after a confirmation prompt
 
 # clean — reclaim dep/build directories under a project root (alias: cln)
 forgectl clean                           # dry-run report against ~/Projects (node_modules, .venv, target, …)
 forgectl clean --type node               # only one type: node|python|go|build
+forgectl clean --json                    # dry-run targets + reclaimable bytes as JSON; refused with --apply/--caches/--docker
 forgectl clean --apply                   # DESTRUCTIVE: delete everything reclaimable, after a confirmation
                                           #   prompt (skips dirty git trees unless --force)
 forgectl clean --caches --apply          # DESTRUCTIVE, opt-in: also clear detected package-manager
@@ -234,7 +238,7 @@ forgectl docs open [path]                # point the browser at a doc on the alr
 forgectl docs read <file>                # read one doc in the terminal with mdroll, else in the HTML reader
 forgectl docs list [dir|file ...]        # list the indexed docs, no server (--json for scripting)
 forgectl docs check [dir|file ...]       # broken links, broken anchors, orphan pages (exit 1 on error findings, 0 when only informational; --json)
-forgectl docs search <query> [--json]    # full-text search the indexed docs (ripgrep backend)
+forgectl docs search <query> [--json]    # full-text search the indexed docs (ripgrep, or opt-in qmd)
 
 # net — check cached reachability of the configured probe endpoint
 forgectl net                             # show the cached (or freshly probed) answer

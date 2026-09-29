@@ -149,7 +149,7 @@ func TestPrepare_RealDispatch(t *testing.T) {
 	if !ok {
 		t.Fatal("no gh call")
 	}
-	wantGh := []string{"pr", "view", "42", "--repo", "cameronsjo/forgectl", "--json", "headRefName,headRefOid,headRepositoryOwner,headRepository"}
+	wantGh := []string{"pr", "view", "42", "--repo", "github.com/cameronsjo/forgectl", "--json", "headRefName,headRefOid,headRepositoryOwner,headRepository"}
 	if !equalArgs(gh.Args, wantGh) {
 		t.Errorf("gh args = %v, want %v", gh.Args, wantGh)
 	}

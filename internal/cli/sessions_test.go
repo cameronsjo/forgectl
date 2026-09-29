@@ -305,3 +305,67 @@ func TestSessionsSearch_HasJSONFlag(t *testing.T) {
 		t.Error("sessions search has no --json flag (ADR-0008 rule 2)")
 	}
 }
+
+func TestSyncReceiptJSON_MissingIsArrayAndFailsExit(t *testing.T) {
+	r := &sessions.Receipt{SessionsFound: 3, SessionsUpserted: 2, Missing: []string{"abc"}}
+	var buf bytes.Buffer
+	if err := writeJSON(&buf, newReceiptJSON(r)); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v\n%s", err, buf.String())
+	}
+	if got["sessions_found"] != 3.0 || got["complete"] != false {
+		t.Errorf("receipt = %v", got)
+	}
+	if m, ok := got["missing"].([]any); !ok || len(m) != 1 || m[0] != "abc" {
+		t.Errorf("missing = %v", got["missing"])
+	}
+	if receiptError(r) == nil {
+		t.Error("a missing session must still fail the run")
+	}
+}
+
+func TestSyncReceiptJSON_CleanRunHasEmptyMissingArray(t *testing.T) {
+	r := &sessions.Receipt{SessionsFound: 1, SessionsUpserted: 1}
+	var buf bytes.Buffer
+	if err := writeJSON(&buf, newReceiptJSON(r)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"missing": []`) || !strings.Contains(buf.String(), `"complete": true`) {
+		t.Errorf("clean receipt = %s", buf.String())
+	}
+	if err := receiptError(r); err != nil {
+		t.Errorf("clean run errored: %v", err)
+	}
+}
+
+func TestFinishSync_MissingFailsRunInBothRenderings(t *testing.T) {
+	for _, asJSON := range []bool{true, false} {
+		r := &sessions.Receipt{SessionsFound: 2, SessionsUpserted: 1, Missing: []string{"abc"}}
+		var buf bytes.Buffer
+		err := finishSync(&buf, r, asJSON)
+		if err == nil || !strings.Contains(err.Error(), "reconcile failed") {
+			t.Errorf("asJSON=%v: error = %v, want the reconcile failure", asJSON, err)
+		}
+		if asJSON {
+			var got map[string]any
+			if jerr := json.Unmarshal(buf.Bytes(), &got); jerr != nil || got["complete"] != false {
+				t.Errorf("JSON not emitted before the error: %v\n%s", jerr, buf.String())
+			}
+		} else if !strings.Contains(buf.String(), "MISSING abc") {
+			t.Errorf("human output = %q, want a MISSING line", buf.String())
+		}
+	}
+}
+
+func TestFinishSync_CompleteAndDryRunSucceed(t *testing.T) {
+	for _, r := range []*sessions.Receipt{{SessionsFound: 1, SessionsUpserted: 1}, {DryRun: true, Missing: []string{"x"}}} {
+		for _, asJSON := range []bool{true, false} {
+			if err := finishSync(&bytes.Buffer{}, r, asJSON); err != nil {
+				t.Errorf("asJSON=%v receipt=%+v: unexpected error %v", asJSON, r, err)
+			}
+		}
+	}
+}

@@ -59,6 +59,7 @@ Read-only: writing a theme choice back to the config (--set) is deferred.`,
 // attached-session marker.
 func newGhosttyThemesCmd(client *ghosttypkg.Client) *cobra.Command {
 	var all bool
+	var asJSON bool
 
 	cmd := &cobra.Command{
 		Use:   "themes",
@@ -84,6 +85,13 @@ func newGhosttyThemesCmd(client *ghosttypkg.Client) *cobra.Command {
 			}
 
 			out := cmd.OutOrStdout()
+			if asJSON {
+				list := make([]ghosttyThemeJSON, 0, len(rows))
+				for _, th := range rows {
+					list = append(list, ghosttyThemeJSON{Name: th.Name, Custom: th.Custom, Active: th.Active})
+				}
+				return termsafe.JSONEncoder(out).Encode(list)
+			}
 			if len(rows) == 0 {
 				fmt.Fprintln(out, "no ghostty themes found")
 				return nil
@@ -105,7 +113,15 @@ func newGhosttyThemesCmd(client *ghosttypkg.Client) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "also list the built-in themes bundled with ghostty")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"name":...,"custom":...,"active":...}] to stdout (an empty list is [])`)
 	return cmd
+}
+
+// ghosttyThemeJSON is one `ghostty themes --json` row (additive-only, ADR-0008).
+type ghosttyThemeJSON struct {
+	Name   string `json:"name"`
+	Custom bool   `json:"custom"`
+	Active bool   `json:"active"`
 }
 
 // newGhosttyCheatCmd builds `ghostty cheat`: the keybind cheatsheet, parsed

@@ -36,8 +36,24 @@ const (
 	maxSearchErrorRunes = 512
 )
 
-// SearchBackendRipgrep names the rg backend in SearchResponse.Backend.
-const SearchBackendRipgrep = "ripgrep"
+// The search backends, as named in SearchResponse.Backend, Searcher.Backend,
+// `docs search --backend`, and [docs] search_backend. ripgrep is the default;
+// qmd is opt-in only and never picked because it happens to be installed
+// (ADR-0008 rule 4: no hidden mode switch).
+const (
+	SearchBackendRipgrep = "ripgrep"
+	SearchBackendQMD     = "qmd"
+)
+
+// ValidSearchBackend reports whether name is a backend Search accepts. The
+// empty string is valid and means the default, ripgrep.
+func ValidSearchBackend(name string) bool {
+	switch name {
+	case "", SearchBackendRipgrep, SearchBackendQMD:
+		return true
+	}
+	return false
+}
 
 // ErrNoSearchBackend reports that no search backend binary is installed.
 var ErrNoSearchBackend = errors.New("no search backend available")
@@ -67,11 +83,15 @@ type SearchError struct {
 // SearchResponse is the full answer to one query. Results and Errors are
 // never nil, so they encode as [] rather than null. Results are in root
 // order (the configured order), then in rg's path order within a root, so
-// a truncated answer is a stable prefix. Truncated is set when at least one
-// more indexed hit existed past the limit. Skipped counts hits that were
+// a truncated answer is a stable prefix (the qmd backend instead keeps qmd's
+// ranking order). Truncated is set when at least one more indexed hit existed
+// past the limit, and under qmd also when qmd's result window came back full. Skipped counts hits that were
 // dropped rather than returned: hits outside the index, paths rg could only
 // report as raw bytes, and oversized records. A root that failed is never
-// counted in Skipped; it is listed in Errors.
+// counted in Skipped; it is listed in Errors. SkippedPaths lists the paths
+// the index walk could not read ({root, path, reason}, as in `docs check`'s
+// skipped array, but including skips under vault roots, which check omits),
+// so docs under them were never searched; it is never nil.
 type SearchResponse struct {
 	Backend   string         `json:"backend"`
 	Query     string         `json:"query"`
@@ -79,6 +99,9 @@ type SearchResponse struct {
 	Truncated bool           `json:"truncated"`
 	Skipped   int            `json:"skipped"`
 	Errors    []SearchError  `json:"errors"`
+	// SkippedPaths is additive (ADR-0008): a separate key because Skipped
+	// already counts dropped hits.
+	SkippedPaths []SkippedPath `json:"skipped_paths"`
 }
 
 // ValidateQuery rejects a query before any subprocess sees it: an empty or
@@ -98,15 +121,50 @@ func ValidateQuery(q string) error {
 	return nil
 }
 
-// Searcher runs full-text queries over an Index's roots with ripgrep.
+// Searcher runs full-text queries over an Index's roots with ripgrep, or
+// with qmd when Backend is SearchBackendQMD (search_qmd.go).
 //
-// Runner must be a StreamingRunner: rg's output is consumed as it arrives
-// and capped (rgStream), never buffered whole, and StreamingRunner does not
-// log argv, so the query stays out of the logs. LookPath defaults to
-// os/exec.LookPath.
+// Runner must be a StreamingRunner: the backend's output is consumed as it
+// arrives and capped (rgStream, cappedBuffer), never buffered whole, and
+// StreamingRunner does not log argv, so the query stays out of the logs.
+// LookPath defaults to os/exec.LookPath and Getwd to os.Getwd; Getwd is read
+// only by the qmd backend.
 type Searcher struct {
 	Runner   forgexec.StreamingRunner
 	LookPath func(string) (string, error)
+	Backend  string
+	Getwd    func() (string, error)
+}
+
+// lookBinary resolves name to an absolute path, refusing one found only in
+// a relative PATH entry. Every failure wraps ErrNoSearchBackend; hint says
+// how to install the binary.
+func (s Searcher) lookBinary(name, hint string) (string, error) {
+	lookPath := s.LookPath
+	if lookPath == nil {
+		lookPath = osexec.LookPath
+	}
+	p, err := lookPath(name)
+	if errors.Is(err, osexec.ErrDot) {
+		return "", fmt.Errorf("%w: %s found only in a relative PATH entry; refusing", ErrNoSearchBackend, name)
+	}
+	if err != nil {
+		return "", fmt.Errorf("%w: %s not found on PATH (%s)", ErrNoSearchBackend, name, hint)
+	}
+	if p, err = filepath.Abs(p); err != nil {
+		return "", fmt.Errorf("%w: resolve %s path: %w", ErrNoSearchBackend, name, err)
+	}
+	return p, nil
+}
+
+// searchTitles maps every indexed doc's (root label, relative path) to its
+// title: the exact-membership table both backends gate hits through.
+func searchTitles(idx *Index) map[searchKey]string {
+	titles := make(map[searchKey]string, len(idx.docs))
+	for _, d := range idx.docs {
+		titles[searchKey{root: d.RootLabel, rel: d.RelPath}] = d.Title
+	}
+	return titles
 }
 
 // rgArgs is the fixed rg argv for one root; only the query and the path
@@ -161,8 +219,21 @@ func rgArgs(query, path string) []string {
 // is recorded in Errors, that root's hits are kept, and the remaining roots
 // are still searched; only an expired or cancelled ctx aborts the search. A
 // missing rg wraps ErrNoSearchBackend.
+//
+// With Backend set to SearchBackendQMD the query goes to qmd instead
+// (searchQMD); an unknown Backend is an error before anything runs.
 func (s Searcher) Search(ctx context.Context, idx *Index, q string, limit int) (SearchResponse, error) {
-	resp := SearchResponse{Backend: SearchBackendRipgrep, Query: q, Results: []SearchResult{}, Errors: []SearchError{}}
+	backend := s.Backend
+	if backend == "" {
+		backend = SearchBackendRipgrep
+	}
+	resp := SearchResponse{Backend: backend, Query: q, Results: []SearchResult{}, Errors: []SearchError{}, SkippedPaths: []SkippedPath{}}
+	if idx != nil {
+		resp.SkippedPaths = append(resp.SkippedPaths, idx.skipped...)
+	}
+	if !ValidSearchBackend(backend) {
+		return resp, fmt.Errorf("docs search: unknown search backend %q (want %q or %q)", backend, SearchBackendRipgrep, SearchBackendQMD)
+	}
 	if err := ValidateQuery(q); err != nil {
 		return resp, err
 	}
@@ -172,25 +243,15 @@ func (s Searcher) Search(ctx context.Context, idx *Index, q string, limit int) (
 	if s.Runner == nil {
 		return resp, errors.New("docs search: streaming runner is unavailable")
 	}
-	lookPath := s.LookPath
-	if lookPath == nil {
-		lookPath = osexec.LookPath
+	if backend == SearchBackendQMD {
+		return s.searchQMD(ctx, idx, q, limit, resp)
 	}
-	rgPath, err := lookPath("rg")
-	if errors.Is(err, osexec.ErrDot) {
-		return resp, fmt.Errorf("%w: rg found only in a relative PATH entry; refusing", ErrNoSearchBackend)
-	}
+	rgPath, err := s.lookBinary("rg", "install ripgrep")
 	if err != nil {
-		return resp, fmt.Errorf("%w: rg not found on PATH (install ripgrep)", ErrNoSearchBackend)
-	}
-	if rgPath, err = filepath.Abs(rgPath); err != nil {
-		return resp, fmt.Errorf("%w: resolve rg path: %w", ErrNoSearchBackend, err)
+		return resp, err
 	}
 
-	titles := make(map[searchKey]string, len(idx.docs))
-	for _, d := range idx.docs {
-		titles[searchKey{root: d.RootLabel, rel: d.RelPath}] = d.Title
-	}
+	titles := searchTitles(idx)
 
 	seen := make(map[hitKey]bool)
 	for _, root := range idx.Roots() {
@@ -358,20 +419,8 @@ func gateHit(idx *Index, root Root, titles map[searchKey]string, m rgRecord) (Se
 	if m.Data.Path.Text == nil {
 		return SearchResult{}, "", false
 	}
-	rel, err := filepath.Rel(root.Path, *m.Data.Path.Text)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return SearchResult{}, "", false
-	}
-	relSlash := filepath.ToSlash(rel)
-	// Exact membership first: walkRoot never indexes a symlinked file, so a
-	// symlink rg reported (under a config that re-enabled --follow, say) has
-	// no entry here even where Resolve would follow it to an indexed target.
-	title, ok := titles[searchKey{root: root.Label, rel: relSlash}]
+	relSlash, title, abs, ok := gatePath(idx, root, titles, *m.Data.Path.Text)
 	if !ok {
-		return SearchResult{}, "", false
-	}
-	abs, err := idx.Resolve(root.Label, relSlash)
-	if err != nil {
 		return SearchResult{}, "", false
 	}
 	line := ""
@@ -391,6 +440,33 @@ func gateHit(idx *Index, root Root, titles map[searchKey]string, m rgRecord) (Se
 		Line:    m.Data.LineNumber,
 		Snippet: snippetAround(line, start, maxSnippetRunes),
 	}, abs, true
+}
+
+// gatePath is the containment gate every backend's hit passes through. It
+// reports the slash-separated relative path, title, and canonical absolute
+// path of the doc at path under root, or false unless path is inside root,
+// names a doc the Index holds at exactly that (root, relative path), and
+// Index.Resolve accepts it. That is the reader's own membership rule, so no
+// backend can return a doc the reader would refuse to serve.
+func gatePath(idx *Index, root Root, titles map[searchKey]string, path string) (string, string, string, bool) {
+	rel, err := filepath.Rel(root.Path, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", "", "", false
+	}
+	relSlash := filepath.ToSlash(rel)
+	// Exact membership first: walkRoot never indexes a symlinked file, so a
+	// symlink a backend reported (rg under a config that re-enabled --follow,
+	// say) has no entry here even where Resolve would follow it to an
+	// indexed target.
+	title, ok := titles[searchKey{root: root.Label, rel: relSlash}]
+	if !ok {
+		return "", "", "", false
+	}
+	abs, err := idx.Resolve(root.Label, relSlash)
+	if err != nil {
+		return "", "", "", false
+	}
+	return relSlash, title, abs, true
 }
 
 // snippetAround returns at most maxRunes runes of line, centred on byte
@@ -485,15 +561,21 @@ func (w *rgStream) emit() {
 }
 
 // cappedBuffer keeps the first limit bytes written to it and discards the
-// rest, without ever failing a write (see rgStream).
+// rest, without ever failing a write (see rgStream). overflowed records that
+// something was discarded.
 type cappedBuffer struct {
-	limit int
-	buf   bytes.Buffer
+	limit      int
+	buf        bytes.Buffer
+	overflowed bool
 }
 
 func (b *cappedBuffer) Write(p []byte) (int, error) {
-	if room := b.limit - b.buf.Len(); room > 0 {
+	room := max(b.limit-b.buf.Len(), 0)
+	if room > 0 {
 		_, _ = b.buf.Write(p[:min(room, len(p))])
+	}
+	if len(p) > room {
+		b.overflowed = true
 	}
 	return len(p), nil
 }

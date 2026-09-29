@@ -87,6 +87,7 @@ func writeJSON(out io.Writer, v any) error {
 
 func newSessionsSyncCmd(cfg config.Config) *cobra.Command {
 	var opts sessions.SyncOptions
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Drain local JSONL + runbook markdown into the concordance (idempotent)",
@@ -123,9 +124,10 @@ the command exits non-zero — a skipped session is never silent.
 			if err != nil {
 				return err
 			}
-			return printReceipt(cmd, receipt)
+			return finishSync(cmd.OutOrStdout(), receipt, asJSON)
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit the completeness receipt as {"sessions_found","sessions_upserted","sessions_unchanged","invalid_rows","commit_rows_dropped","ledger_lines_bad","missing":[ids],"runbooks_found","runbooks_upserted","runbooks_pruned","dry_run","complete"} to stdout; a MISSING session still exits non-zero`)
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "read + transform + count; no DB connection")
 	cmd.Flags().BoolVar(&opts.Full, "full", false, "bypass the lastMessageId watermark and re-upsert every session")
 	cmd.Flags().StringVar(&opts.DSN, "dsn", "", "concordance DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
@@ -136,10 +138,64 @@ the command exits non-zero — a skipped session is never silent.
 	return cmd
 }
 
+// receiptJSON is the `sessions sync --json` shape (additive-only, ADR-0008).
+// Missing is always an array, never null.
+type receiptJSON struct {
+	SessionsFound     int      `json:"sessions_found"`
+	SessionsUpserted  int      `json:"sessions_upserted"`
+	SessionsUnchanged int      `json:"sessions_unchanged"`
+	InvalidRows       int      `json:"invalid_rows"`
+	CommitRowsDropped int      `json:"commit_rows_dropped"`
+	LedgerLinesBad    int      `json:"ledger_lines_bad"`
+	Missing           []string `json:"missing"`
+	RunbooksFound     int      `json:"runbooks_found"`
+	RunbooksUpserted  int      `json:"runbooks_upserted"`
+	RunbooksPruned    int64    `json:"runbooks_pruned"`
+	DryRun            bool     `json:"dry_run"`
+	Complete          bool     `json:"complete"`
+}
+
+func newReceiptJSON(r *sessions.Receipt) receiptJSON {
+	missing := r.Missing
+	if missing == nil {
+		missing = []string{}
+	}
+	return receiptJSON{
+		SessionsFound: r.SessionsFound, SessionsUpserted: r.SessionsUpserted,
+		SessionsUnchanged: r.SessionsUnchanged, InvalidRows: r.InvalidRows,
+		CommitRowsDropped: r.CommitRowsDropped, LedgerLinesBad: r.LedgerLinesBad,
+		Missing: missing, RunbooksFound: r.RunbooksFound,
+		RunbooksUpserted: r.RunbooksUpserted, RunbooksPruned: r.RunbooksPruned,
+		DryRun: r.DryRun, Complete: r.DryRun || r.Complete(),
+	}
+}
+
+// receiptError is the non-zero-exit half of the receipt contract, shared by
+// the human and JSON renderings: a session absent after the flush fails the
+// run. A dry-run makes no connection, so it cannot fail this way.
+func receiptError(r *sessions.Receipt) error {
+	if r.DryRun || r.Complete() {
+		return nil
+	}
+	return fmt.Errorf("reconcile failed: %d local sessions absent from the concordance after flush", len(r.Missing))
+}
+
+// finishSync renders the receipt (JSON or human) and returns the sync's exit
+// error. Both renderings share the tail so the acceptance contract, a
+// MISSING session fails the run, cannot differ between them.
+func finishSync(out io.Writer, r *sessions.Receipt, asJSON bool) error {
+	if asJSON {
+		if err := writeJSON(out, newReceiptJSON(r)); err != nil {
+			return err
+		}
+		return receiptError(r)
+	}
+	return printReceipt(out, r)
+}
+
 // printReceipt renders the completeness receipt. MISSING sessions make the
 // command fail loudly — the acceptance contract of the sync.
-func printReceipt(cmd *cobra.Command, r *sessions.Receipt) error {
-	out := cmd.OutOrStdout()
+func printReceipt(out io.Writer, r *sessions.Receipt) error {
 	mode := ""
 	if r.DryRun {
 		mode = " (dry-run: no database connection made)"
@@ -155,7 +211,7 @@ func printReceipt(cmd *cobra.Command, r *sessions.Receipt) error {
 		for _, id := range r.Missing {
 			fmt.Fprintf(out, "MISSING %s\n", id)
 		}
-		return fmt.Errorf("reconcile failed: %d local sessions absent from the concordance after flush", len(r.Missing))
+		return receiptError(r)
 	}
 	fmt.Fprintln(out, "reconciled: every local session is present in the concordance")
 	return nil

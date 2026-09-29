@@ -59,7 +59,8 @@ reading and switching the current context's namespace (ns).`,
 // plain cobra flag parsing, no forgectl-owned flags — because both kubectl
 // invocations it wraps take a single, unambiguous argument.
 func newK8sNsCmd(runner forgexec.Runner) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "ns [namespace]",
 		Short: "Get or set the current kubectl context's namespace",
 		Long: `ns reports the current context's namespace, or switches it when given one.
@@ -70,6 +71,9 @@ func newK8sNsCmd(runner forgexec.Runner) *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
+				if asJSON {
+					return errors.New("--json reports the current namespace; it cannot be combined with a namespace argument")
+				}
 				namespace := strings.TrimSpace(args[0])
 				if namespace == "" {
 					return errors.New("namespace must not be empty")
@@ -85,10 +89,20 @@ func newK8sNsCmd(runner forgexec.Runner) *cobra.Command {
 			if namespace == "" {
 				namespace = "default"
 			}
+			if asJSON {
+				return termsafe.JSONEncoder(cmd.OutOrStdout()).Encode(k8sNsJSON{Namespace: namespace})
+			}
 			_, err = fmt.Fprintln(cmd.OutOrStdout(), termsafe.SafeLine(namespace))
 			return err
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"namespace":...} to stdout (read only; not valid with a namespace argument)`)
+	return cmd
+}
+
+// k8sNsJSON is the `k8s ns --json` shape (additive-only, ADR-0008).
+type k8sNsJSON struct {
+	Namespace string `json:"namespace"`
 }
 
 // wrapK8sCommandError opts every k8s subcommand into kubectl's real exit

@@ -2,6 +2,7 @@ package projects
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -581,6 +583,14 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 	for _, host := range []string{sourceGitHub, sourceGitea} {
 		res := fetched[host]
 		notes = append(notes, res.notes...)
+		if host == sourceGitea && errors.Is(res.err, osexec.ErrNotFound) {
+			// No tea binary means no Gitea source is set up on this machine —
+			// the Gitea leg is config-free, so this is its "not configured"
+			// state, not a degraded host. It adds no note, so it neither
+			// prints on every run nor trips `projects list --strict`.
+			slog.Debug("Skipping Gitea: tea is not installed.")
+			continue
+		}
 		if res.err != nil {
 			// Categorical note, raw cause to the log only. res.err reaches here
 			// straight off a subprocess — gh stderr, or tea's, which is server-
@@ -634,7 +644,8 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 // Clone.
 func (c *Client) ListOrg(ctx context.Context, org string) ([]Repo, error) {
 	if !validPathSegment(org) {
-		return nil, fmt.Errorf("invalid GitHub org/user name %q", org)
+		// org is argv (`projects clone --org`), echoed capped (#562).
+		return nil, fmt.Errorf("invalid GitHub org/user name %s", termsafe.QuoteArgMax(org, termsafe.ArgEchoMaxRunes))
 	}
 	return githubListOrg(ctx, c.run, org, c.effectiveGitHubHost())
 }

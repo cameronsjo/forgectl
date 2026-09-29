@@ -207,7 +207,7 @@ func TestPostReview_ApprovedPosts(t *testing.T) {
 	if last.Name != "gh" {
 		t.Fatalf("expected gh post; got %+v", last)
 	}
-	want := []string{"pr", "review", "9", "--repo", "o/r", "--comment", "--body", "the review body"}
+	want := []string{"pr", "review", "9", "--repo", "github.com/o/r", "--comment", "--body", "the review body"}
 	if !equalArgs(last.Args, want) {
 		t.Errorf("post argv = %v, want %v", last.Args, want)
 	}

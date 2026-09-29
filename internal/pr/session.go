@@ -132,9 +132,15 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 	// is dead — it always begins with "https", never "-"). The branch reaches
 	// git as its own positional, so it still gets the option-like guard.
 	if !ValidOwnerRepoPart(headOwner) || !ValidOwnerRepoPart(headName) {
-		return Session{}, fmt.Errorf("PR head repo %q/%q outside allowed owner/repo charset", headOwner, headName)
+		// Categorical (#562): gh output is never echoed.
+		return Session{}, errors.New("PR head repo reported by gh is outside the allowed owner/repo charset")
 	}
-	repoURL := "https://github.com/" + headOwner + "/" + headName
+	// The clone comes from the PR's own host, the one viewPR just asked.
+	host, _, err := c.prHost(ref)
+	if err != nil {
+		return Session{}, err
+	}
+	repoURL := "https://" + host + "/" + headOwner + "/" + headName
 	if err := sandbox.RejectOptionLike("ref", view.HeadRefName); err != nil {
 		return Session{}, err
 	}
@@ -153,6 +159,7 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 	bc := Breadcrumb{
 		Workspace:  workspace,
 		Ref:        ref.String(),
+		Host:       host,
 		Agent:      opts.Agent,
 		CreatedAt:  sess.CreatedAt,
 		Provenance: provenance.persisted(),
@@ -192,6 +199,7 @@ func (c *Client) recordPrepared(ctx context.Context, ref Ref, bc Breadcrumb, rec
 	var createdAt time.Time
 	err := c.transition(ctx, recordPath, PhasePreparing, PhasePrepared, func(rec *Breadcrumb) error {
 		rec.Workspace = bc.Workspace
+		rec.Host = bc.Host
 		rec.Agent = bc.Agent
 		rec.Provenance = bc.Provenance
 		rec.Local = bc.Local
@@ -234,9 +242,17 @@ func (c *Client) sandboxAndQuarantine(ctx context.Context, repo, ref string, alw
 
 // viewPR fetches the head metadata for ref via gh. The PR number is a positional
 // int and the repo slug is charset-validated, so neither can smuggle a flag.
+//
+// A two-part --repo is resolved by gh against GH_HOST or its default host,
+// never the checkout, so the host is always explicit: HOST/OWNER/REPO, run on
+// a runner pinned to that same host (#413).
 func (c *Client) viewPR(ctx context.Context, ref Ref) (ghPRView, error) {
-	out, err := c.run.Run(ctx, "gh", "pr", "view", fmt.Sprintf("%d", ref.Number),
-		"--repo", ref.Slug(),
+	host, run, err := c.prHost(ref)
+	if err != nil {
+		return ghPRView{}, err
+	}
+	out, err := run.Run(ctx, "gh", "pr", "view", fmt.Sprintf("%d", ref.Number),
+		"--repo", host+"/"+ref.Slug(),
 		"--json", "headRefName,headRefOid,headRepositoryOwner,headRepository")
 	if err != nil {
 		return ghPRView{}, fmt.Errorf("gh pr view %s: %w", ref.String(), err)
@@ -372,6 +388,7 @@ func (c *Client) queueLocked(ref Ref, opts PrepareOpts) (string, error) {
 	}
 	bc := Breadcrumb{
 		Ref:        ref.String(),
+		Host:       c.recordHost(ref),
 		Agent:      opts.Agent,
 		CreatedAt:  time.Now().UTC(),
 		Local:      ref.IsLocal(),

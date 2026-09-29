@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Kind discriminates the two work-item shapes a tracker holds.
@@ -150,18 +151,20 @@ func ParseWorkRefForHosts(s, effectiveHost string, hosts []string) (key string, 
 	if m := reHostWorkURL.FindStringSubmatch(s); m != nil {
 		canonical, ok := allowedHostSpelling(m[1], effectiveHost, hosts)
 		if !ok {
-			return "", fmt.Errorf("work reference host %q is not configured", m[1])
+			return "", fmt.Errorf("work reference host %s is not configured", termsafe.QuoteArgMax(m[1], termsafe.ArgEchoMaxRunes))
 		}
 		return workKey(canonical, m[2], m[3], m[4])
 	}
 	if m := reHostSlug.FindStringSubmatch(s); m != nil {
 		canonical, ok := allowedHostSpelling(m[1], effectiveHost, hosts)
 		if !ok {
-			return "", fmt.Errorf("work reference host %q is not configured", m[1])
+			return "", fmt.Errorf("work reference host %s is not configured", termsafe.QuoteArgMax(m[1], termsafe.ArgEchoMaxRunes))
 		}
 		return workKey(canonical, m[2], m[3], m[4])
 	}
-	return "", fmt.Errorf("unrecognized work reference %q (want owner/repo#N, host/owner/repo#N, or an issue/PR URL)", s)
+	// The reference is argv the operator just typed (review mark/unmark), so
+	// it is echoed back, capped (#562).
+	return "", fmt.Errorf("unrecognized work reference %s (want owner/repo#N, host/owner/repo#N, or an issue/PR URL)", termsafe.QuoteArgMax(s, termsafe.ArgEchoMaxRunes))
 }
 
 // workKey validates owner/repo/num through pr.RefFromParts and renders the

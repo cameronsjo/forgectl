@@ -1,3 +1,7 @@
+---
+status: proposed
+---
+
 # Optional cmux Integration — Launch Surface, Session UX, Fleet Seam
 
 **Status:** planned · **Feeds:** roadmap issue #8 (`forgectl cmux` — workspace domain + session orchestration) · **Depends on:** #2 (launch, shipped)

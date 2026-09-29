@@ -36,6 +36,15 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
+// githubRemoteURL is `git remote get-url origin` output for a github.com
+// checkout.
+const githubRemoteURL = "git@github.com:cameronsjo/forgectl.git"
+
+// isGetURL matches `git remote get-url <name>`.
+func isGetURL(name string, args []string) bool {
+	return name == "git" && len(args) >= 2 && args[0] == "remote" && args[1] == "get-url"
+}
+
 func contains(args []string, want string) bool {
 	for _, a := range args {
 		if a == want {
@@ -116,8 +125,8 @@ func TestPrune_RemoteDelete_VerifiesViaSingularEndpoint_NeverPlural(t *testing.T
 			switch {
 			case name == "git" && len(args) > 0 && args[0] == "push":
 				return "", nil
-			case name == "gh" && len(args) >= 2 && args[0] == "repo" && args[1] == "view":
-				return "cameronsjo/forgectl", nil
+			case isGetURL(name, args):
+				return githubRemoteURL, nil
 			case name == "gh" && len(args) > 0 && args[0] == "api":
 				// A real 404 from gh surfaces as a non-nil error whose message
 				// carries the HTTP status — that's the "confirmed gone" signal.
@@ -165,8 +174,8 @@ func TestPrune_RemoteDelete_StillExists_IsAFailure(t *testing.T) {
 			switch {
 			case name == "git" && len(args) > 0 && args[0] == "push":
 				return "", nil
-			case name == "gh" && len(args) >= 2 && args[0] == "repo" && args[1] == "view":
-				return "cameronsjo/forgectl", nil
+			case isGetURL(name, args):
+				return githubRemoteURL, nil
 			case name == "gh" && len(args) > 0 && args[0] == "api":
 				// 200 with a real ref object — the branch is still there.
 				return `{"ref":"refs/heads/feat/done"}`, nil
@@ -183,6 +192,159 @@ func TestPrune_RemoteDelete_StillExists_IsAFailure(t *testing.T) {
 	results := client.Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
 	if len(results) != 1 || results[0].Err == nil || results[0].Deleted {
 		t.Fatalf("expected a reported failure when the branch still exists post-delete, got %+v", results)
+	}
+}
+
+// TestPrune_RemoteDelete_VerifiesOnTheOriginHost is the #413 regression: `gh
+// api` does not infer a host from the checkout, so the verification call must
+// name the origin's host. Without --hostname, a GitHub Enterprise checkout's
+// verification asked github.com, whose 404 for a repository that does not
+// exist there read as "confirmed gone" — a delete reported as verified that
+// was never checked. The fake answers 404 ONLY on github.com, so an unpinned
+// call is exactly the false success this test must refuse.
+func TestPrune_RemoteDelete_VerifiesOnTheOriginHost(t *testing.T) {
+	t.Setenv("GH_HOST", "")
+	for _, tc := range []struct {
+		name     string
+		view     string
+		wantHost string
+	}{
+		{"github.com origin", githubRemoteURL, "github.com"},
+		{"enterprise https origin", "https://GHE.Example.test/platform/tools.git", "ghe.example.test"},
+		{"enterprise ssh origin with port", "ssh://git@ghe.example.test:2222/platform/tools.git", "ghe.example.test"},
+		{"credential in https origin", "https://x:SECRET@ghe.example.test/platform/tools.git", "ghe.example.test"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &exec.FakeRunner{
+				RunFunc: func(name string, args []string) (string, error) {
+					switch {
+					case name == "git" && len(args) > 0 && args[0] == "push":
+						return "", nil
+					case isGetURL(name, args):
+						return tc.view, nil
+					case name == "gh" && len(args) > 0 && args[0] == "api":
+						if contains(args, "--hostname="+tc.wantHost) {
+							// The ref is gone on the host that owns the repo.
+							return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "HTTP 404: Not Found", Err: errors.New("exit status 1")}
+						}
+						if tc.wantHost == "github.com" {
+							return "", errors.New("verification did not name its host")
+						}
+						// Any other host: github.com answering for a repo it
+						// does not have. A 404 here is the false confirmation.
+						return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "HTTP 404: Not Found (https://api.github.com/...)", Err: errors.New("exit status 1")}
+					}
+					return "", nil
+				},
+			}
+			item := Classification{
+				Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+				Group: SafeToDelete,
+			}
+			results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "upstream", Remote: true})
+			if len(results) != 1 || results[0].Err != nil || !results[0].Deleted {
+				t.Fatalf("expected a verified delete, got %+v", results)
+			}
+			var apiArgs []string
+			for _, call := range fake.Calls {
+				if call.Name == "gh" && len(call.Args) > 0 && call.Args[0] == "api" {
+					apiArgs = call.Args
+				}
+			}
+			if !contains(apiArgs, "--hostname="+tc.wantHost) {
+				t.Fatalf("gh api argv = %q, want --hostname=%s (the origin's host, lowercased)", apiArgs, tc.wantHost)
+			}
+			if strings.Contains(strings.Join(apiArgs, " "), "SECRET") {
+				t.Fatalf("gh api argv %q carries the remote URL's credential", apiArgs)
+			}
+			var gotRemote string
+			for _, call := range fake.Calls {
+				if isGetURL(call.Name, call.Args) && len(call.Args) == 3 {
+					gotRemote = call.Args[2]
+				}
+			}
+			if gotRemote != "upstream" {
+				t.Fatalf("remote URL read from %q, want the remote the delete went to (upstream)", gotRemote)
+			}
+		})
+	}
+}
+
+// TestPrune_RemoteDelete_UnverifiableOriginIsAFailure: when gh's view of the
+// origin cannot name a usable host, verification must fail rather than fall
+// back to an unpinned query — and the error must not echo the URL.
+func TestPrune_RemoteDelete_UnverifiableOriginIsAFailure(t *testing.T) {
+	for _, tc := range []struct{ name, view string }{
+		{"not a url", "cameronsjo/forgectl"},
+		{"port in https url", "https://ghe.example.test:8443/o/r"},
+		{"http scheme", "http://ghe.example.test/o/r"},
+		{"option-like host", "https://-ghe.example.test/o/r"},
+		{"leading-dot host", "https://.hidden/o/r"},
+		{"hostile host", "https://gh\x1b[2Je.example.test/o/r"},
+		{"credential in unusable url", "https://x:SECRET@gh e.test/o/r"},
+		{"hostile owner", "https://github.com/-o/r"},
+		{"credential in ported url", "https://x:SECRET@ghe.example.test:8443/o/r"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &exec.FakeRunner{
+				RunFunc: func(name string, args []string) (string, error) {
+					if isGetURL(name, args) {
+						return tc.view, nil
+					}
+					if name == "gh" && len(args) > 0 && args[0] == "api" {
+						return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "HTTP 404: Not Found", Err: errors.New("exit status 1")}
+					}
+					return "", nil
+				},
+			}
+			item := Classification{
+				Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+				Group: SafeToDelete,
+			}
+			results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
+			if len(results) != 1 || results[0].Err == nil || results[0].Deleted {
+				t.Fatalf("expected an unverified delete to be a failure, got %+v", results)
+			}
+			for _, call := range fake.Calls {
+				if call.Name == "gh" && len(call.Args) > 0 && call.Args[0] == "api" {
+					t.Fatalf("gh api ran (%q) though the origin host was unusable", call.Args)
+				}
+			}
+			msg := results[0].Err.Error()
+			for _, leak := range []string{"SECRET", "\x1b", `\x1b`, "cameronsjo/forgectl"} {
+				if strings.Contains(msg, leak) {
+					t.Fatalf("error %q echoes gh output (%q)", msg, leak)
+				}
+			}
+		})
+	}
+}
+
+// TestPrune_RemoteDelete_StillExists_DoesNotEchoResponse: the "still exists"
+// failure names the branch and the endpoint, never gh's response body, which
+// is text the server chose (#562).
+func TestPrune_RemoteDelete_StillExists_DoesNotEchoResponse(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			switch {
+			case isGetURL(name, args):
+				return githubRemoteURL, nil
+			case name == "gh" && len(args) > 0 && args[0] == "api":
+				return "{\"ref\":\"MARKER\x1b[2J\"}", nil
+			}
+			return "", nil
+		},
+	}
+	item := Classification{
+		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Group: SafeToDelete,
+	}
+	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
+	if len(results) != 1 || results[0].Err == nil {
+		t.Fatalf("expected a reported failure, got %+v", results)
+	}
+	if msg := results[0].Err.Error(); strings.Contains(msg, "MARKER") || strings.Contains(msg, "\x1b") {
+		t.Fatalf("error %q echoes the gh response body", msg)
 	}
 }
 

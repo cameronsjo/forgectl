@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/module"
 	netpkg "github.com/cameronsjo/forgectl/internal/net"
 	"github.com/cameronsjo/forgectl/internal/notify"
@@ -48,12 +51,32 @@ func newPrCmd(deps module.Deps) *cobra.Command {
 		// The drainer's review-started notification (#192). A no-op off
 		// macOS; `pr drain --no-notify` suppresses it per pass.
 		pr.WithNotifier(notify.New(deps.Runner)),
+		// Every PR-scoped gh call names its host explicitly and runs pinned
+		// to it (#413): the @me searches on the configured [github] host, and
+		// view/clone/post on the PR's own host (the configured one unless a
+		// URL or the checkout's remote named another). An invalid configured
+		// host is passed through unresolved: pr validates it at each use and
+		// fails that call categorically, and githubauth.Runner fails closed,
+		// so verbs that never reach gh keep working.
+		prGitHubHostOption(deps.Runner, cfg.Github.Host),
 	)
 	netClient := netpkg.New(deps.Runner, netpkg.WithNetConfig(cfg.Net))
 	// err discarded: a failed config-dir lookup yields "", which LoadReviewed
 	// reads as an empty store and persist() rejects loudly — never a silent bad write.
 	reviewedPath, _ := config.PrReviewedPath()
 	return newPrCmdForClient(cfg, client, netClient, reviewedPath, deps.Theme)
+}
+
+// prGitHubHostOption wires the pr client's host pin: the configured [github]
+// host, and githubauth.Runner as the per-host pin. An invalid configured value
+// is passed through raw, never replaced by github.com, so pr's own validation
+// refuses it at each use.
+func prGitHubHostOption(run exec.Runner, raw string) pr.Option {
+	host, err := githubauth.ResolveHost(raw)
+	if err != nil {
+		host = raw
+	}
+	return pr.WithGitHubHost(host, func(h string) exec.Runner { return githubauth.Runner(run, h) })
 }
 
 func newPrCmdForClient(cfg config.Config, client *pr.Client, netClient *netpkg.Client, reviewedPath string, th theme.Theme) *cobra.Command {
@@ -91,8 +114,9 @@ human approval gate.
   forgectl pr findings list|cleanup  reclaim durable local-review findings
   forgectl pr keys                 tmux-review cheatsheet
 
-The <ref> is validated by an anchored regex: owner/repo#N, a github.com PR
-URL, or a bare number. Fetched PR content is treated as hostile input.
+The <ref> is validated by an anchored regex: owner/repo#N (on [github] host),
+an https PR URL (on the URL's host), or a bare number (on the checkout
+remote's host). Fetched PR content is treated as hostile input.
 
 The concurrency cap ([pr] max_concurrent in config.toml) governs every launch
 path — this command, 'pr local', and 'pr pick' alike. At the cap this command
@@ -223,6 +247,7 @@ exits 0, to be started later by 'forgectl pr drain --once'.`,
 		newPrOpenCmd(client),
 		newPrTeardownCmd(client),
 		newPrRepairCmd(client),
+		newPrHistoryCmd(client),
 		newPrCleanupCmd(client),
 		newPrQueueCmd(client),
 		newPrDrainCmd(client, cfg),
@@ -365,13 +390,19 @@ func windowStatus(live map[pr.Ref]bool, ref pr.Ref, tmuxOK bool) string {
 
 // prListRowJSON is the --json wire shape for one `pr list` row — the same
 // five fields as the human table's tab-separated columns, in the same order.
-// phase was added last (ADR-0008: additive only); it is "" on a legacy record.
+// phase and repair_reason were added last (ADR-0008: additive only); phase is ""
+// on a legacy record. repair_reason matches `pr dash`: always present, the same
+// capped text the human sinks show, "" unless the record is needs-repair.
 type prListRowJSON struct {
 	Ref       string `json:"ref"`
 	CreatedAt string `json:"created_at"`
 	Path      string `json:"path"`
 	Status    string `json:"status"`
 	Phase     string `json:"phase"`
+	// RepairReason has no omitempty, like prDashReviewJSON's, so a script reads
+	// both surfaces the same way. It is capped by repairReasonLine;
+	// `pr repair --json` carries the full value.
+	RepairReason string `json:"repair_reason"`
 }
 
 func newPrListCmd(client *pr.Client) *cobra.Command {
@@ -381,7 +412,7 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 		Short: "List active clean-room review sessions",
 		Long: `list prints one tab-separated row per recorded review session:
 
-  REF   CREATED   PATH   WINDOW   PHASE
+  REF   CREATED   PATH   WINDOW   PHASE   REASON
 
 WINDOW is what tmux reports RIGHT NOW — live, window gone, or ? when tmux
 could not be read at all. PHASE is what the record SAYS about how far the
@@ -391,7 +422,11 @@ beside 'no window' is a session that died between the two, and
 record written before phases existed.
 
 Fields are append-only: PATH is field 3 and stays there, because it is the
-operand 'forgectl pr teardown' takes.`,
+operand 'forgectl pr teardown' takes.
+
+REASON is field 6, appended like the others: why a needs-repair session needs
+repair, capped as 'forgectl pr dash' caps it, and empty on every other row.
+--json carries it as repair_reason ("" on every other row).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			summaries, unreadable, err := client.List(cmd.Context())
@@ -437,16 +472,21 @@ operand 'forgectl pr teardown' takes.`,
 				// ordinary path prints verbatim and field 3 stays exactly
 				// what teardown is fed, while a control-bearing one prints
 				// as a quoted literal instead of driving the terminal.
-				_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\n",
+				//
+				// REASON is a sixth column, appended (#542): empty on every
+				// row that is not needs-repair, and the same capped text
+				// `pr dash` shows (repairReasonLine, which also strips tabs and
+				// newlines, so it cannot add or split a column).
+				_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\t%s\n",
 					s.Ref().String(), s.CreatedAt().Format(time.RFC3339),
 					termsafe.QuotePathIfUnsafe(s.Path()),
 					sessionStatus(live, s, tmuxOK),
-					phaseLabel(s))
+					phaseLabel(s), repairReasonLine(s.RepairReason()))
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"ref":...,"created_at":...,"path":...,"status":...,"phase":...}] to stdout`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"ref":...,"created_at":...,"path":...,"status":...,"phase":...,"repair_reason":...}] to stdout`)
 	return cmd
 }
 
@@ -482,6 +522,8 @@ func writePrListJSON(out io.Writer, summaries []pr.SessionSummary, live map[pr.R
 			Path:      s.Path(),
 			Status:    sessionStatus(live, s, tmuxOK),
 			Phase:     string(s.Phase()),
+
+			RepairReason: repairReasonLine(s.RepairReason()),
 		})
 	}
 	enc := termsafe.JSONEncoder(out)
@@ -511,6 +553,35 @@ func newPrOpenCmd(client *pr.Client) *cobra.Command {
 	}
 }
 
+// windowKillTimeoutNote is what teardown and cleanup print on stderr when tmux
+// did not answer in time, so the review window's state is unknown. It exists
+// for the same reason as unreadableRecordsNote: the slog warning that also
+// fires lands in a handler a default install discards, and the command's exit
+// would otherwise read as an ordinary failure with nothing removed and nothing
+// explained. parked says whether the record really was parked in needs-repair;
+// a legacy record cannot be, and claiming otherwise would send the operator
+// looking for a state that was never written.
+func windowKillTimeoutNote(target string, parked bool) string {
+	where := "a session"
+	if target != "" {
+		where = termsafe.QuotePathIfUnsafe(target)
+	}
+	state := "the record is parked as needs-repair"
+	if !parked {
+		state = "the record could not be parked as needs-repair and was left as it was"
+	}
+	return fmt.Sprintf("tmux did not answer in time, so the review window for %s may still be running: "+
+		"nothing was removed and %s. "+
+		"Once tmux responds, run 'forgectl pr teardown' again, or see 'forgectl pr repair'", where, state)
+}
+
+// noteWindowKillTimeout prints windowKillTimeoutNote when err is that failure.
+func noteWindowKillTimeout(cmd *cobra.Command, err error, target string) {
+	if errors.Is(err, pr.ErrWindowKillTimedOut) {
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), windowKillTimeoutNote(target, !errors.Is(err, pr.ErrRecordNotParked)))
+	}
+}
+
 func newPrTeardownCmd(client *pr.Client) *cobra.Command {
 	// Deliberately no "close" alias: it collides with Bash(gh pr close:*)
 	// in the reviewer allowlist (internal/pr/allowlist.go) closely enough
@@ -522,6 +593,7 @@ func newPrTeardownCmd(client *pr.Client) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := client.Teardown(cmd.Context(), args[0]); err != nil {
+				noteWindowKillTimeout(cmd, err, args[0])
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "torn down %s\n", args[0])
@@ -540,6 +612,7 @@ func newPrCleanupCmd(client *pr.Client) *cobra.Command {
 				return fmt.Errorf("invalid date %q: want YYYY-MM-DD", args[0])
 			}
 			if err := client.Cleanup(cmd.Context(), args[0]); err != nil {
+				noteWindowKillTimeout(cmd, err, "")
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "cleaned up sessions from %s\n", args[0])

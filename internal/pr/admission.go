@@ -336,6 +336,7 @@ func (c *Client) reserveFrom(res *reservation, ref Ref, cfgMax int, opts Prepare
 	}
 	bc := Breadcrumb{
 		Ref:        ref.String(),
+		Host:       c.recordHost(ref),
 		Agent:      opts.Agent,
 		CreatedAt:  time.Now().UTC(),
 		Local:      ref.IsLocal(),
@@ -421,7 +422,10 @@ func occupancyFromSnapshot(summaries []SessionSummary, liveWindows int, names ma
 // session permanently un-relaunchable.
 func recordForRef(summaries []SessionSummary, ref Ref) (SessionSummary, bool) {
 	for _, s := range summaries {
-		if s.Ref() != ref {
+		// Host is not part of the session identity: the record and the new
+		// request share one window name and record slot whatever host each
+		// names, so a same-numbered PR on another host is a duplicate here.
+		if !s.Ref().sameIdentity(ref) {
 			continue
 		}
 		if s.Phase() == PhaseNeedsRepair {

@@ -608,3 +608,71 @@ func TestServer_VaultWikilinksResolve(t *testing.T) {
 		t.Error("linker.md does not link its alias to notes/Alpha.md")
 	}
 }
+
+// Test plan for the render cap (#565)
+//   [x] Unhappy: a doc of renderCapBytes+1 gets the notice, not the body
+//   [x] Happy: a doc of exactly renderCapBytes still renders
+//   [x] Unhappy: the notice names root/rel and the read hint, and leaks no
+//       absolute path and no raw-file link
+
+func serveDocOfSize(t *testing.T, size int) (body, absDir, label string) {
+	t.Helper()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "big.md"), padToSize("# Big Doc\n\nBODYSENTINEL\n\n", size))
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	label = idx.Roots()[0].Label
+	rec := httptest.NewRecorder()
+	testHandler(idx).ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/doc/"+label+"/big.md", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	return rec.Body.String(), dir, label
+}
+
+func TestServer_DocOverRenderCap_ServesNoticeNotBody(t *testing.T) {
+	body, _, _ := serveDocOfSize(t, renderCapBytes+1)
+	if strings.Contains(body, "BODYSENTINEL") {
+		t.Error("over-cap doc body was rendered")
+	}
+	if !strings.Contains(body, "does not render it") {
+		t.Errorf("notice missing from page")
+	}
+}
+
+func TestServer_DocAtRenderCap_StillRenders(t *testing.T) {
+	body, _, _ := serveDocOfSize(t, renderCapBytes)
+	if !strings.Contains(body, "BODYSENTINEL") {
+		t.Error("doc of exactly renderCapBytes did not render")
+	}
+	if strings.Contains(body, "does not render it") {
+		t.Error("doc of exactly renderCapBytes got the notice")
+	}
+}
+
+func TestServer_RenderCapNotice_NamesRootRelAndLeaksNothing(t *testing.T) {
+	body, dir, label := serveDocOfSize(t, renderCapBytes+1)
+	if want := "forgectl docs read " + label + "/big.md"; !strings.Contains(body, want) {
+		t.Errorf("notice missing hint %q", want)
+	}
+	if strings.Contains(body, dir) {
+		t.Errorf("notice leaked the absolute path %q", dir)
+	}
+	start := strings.Index(body, "This document is over")
+	end := strings.Index(body, "in a terminal with")
+	if start < 0 || end < start {
+		t.Fatal("could not locate the notice in the page")
+	}
+	if strings.Contains(body[start:end], "<a ") {
+		t.Error("notice must not link a raw file")
+	}
+}
+
+func TestTooLargeNoticeHTML_EscapesThePath(t *testing.T) {
+	got := tooLargeNoticeHTML(`root/<img src=x onerror=1>.md`)
+	if strings.Contains(got, "<img") {
+		t.Errorf("path was not escaped: %s", got)
+	}
+}

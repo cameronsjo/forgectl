@@ -100,6 +100,40 @@ func QuoteText(text string) string {
 	return strconv.QuoteToGraphic(text)
 }
 
+// ArgEchoMaxRunes is the input budget for echoing a rejected command-line
+// argument back to the operator (#562): enough to show a mistyped ref, host,
+// or owner in full, never enough to flood a terminal or a log.
+const ArgEchoMaxRunes = 80
+
+// argEchoEllipsis marks a QuoteArgMax result whose input was cut. It sits
+// OUTSIDE the closing quote, so it cannot be mistaken for input text.
+const argEchoEllipsis = "…"
+
+// QuoteArgMax is QuoteText over at most maxRunes runes of s, followed by an
+// ellipsis when s was longer. It is the echo form for a rejected value the
+// operator just typed on the command line, where showing it back is the whole
+// diagnostic. It is NOT for values from config, a subprocess, or disk: those
+// get a categorical error that never renders them, because nobody in front of
+// the terminal chose that text (#562).
+//
+// The cut counts INPUT runes, before escaping, so it never splits an escape;
+// escaping can lengthen the output (at most 10 bytes per rune, for \U0010ffff),
+// which keeps it bounded by the input budget. Invalid UTF-8 counts one rune
+// per bad byte, as range does. maxRunes < 1 means ArgEchoMaxRunes.
+func QuoteArgMax(s string, maxRunes int) string {
+	if maxRunes < 1 {
+		maxRunes = ArgEchoMaxRunes
+	}
+	n := 0
+	for i := range s {
+		if n == maxRunes {
+			return QuoteText(s[:i]) + argEchoEllipsis
+		}
+		n++
+	}
+	return QuoteText(s)
+}
+
 // QuotePath is QuoteText named for filesystem sinks, where the surrounding
 // quotes also keep spaces and path boundaries legible.
 func QuotePath(path string) string {

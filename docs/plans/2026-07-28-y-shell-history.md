@@ -1,7 +1,7 @@
 ---
 name: y-shell-history
 date: 2026-07-28
-status: scoped
+status: proposed
 ruled: 2026-07-29
 ---
 

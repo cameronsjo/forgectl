@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -90,6 +91,10 @@ type Doc struct {
 	// is stale depends on the clock, so readers call evalTrust at read time.
 	Status     string
 	StaleAfter string
+	// OrphanOK is true when the frontmatter says orphan_ok: true, the page's
+	// own statement that nothing is expected to link to it. Check counts it
+	// in Summary.IgnoredOrphans instead of reporting an orphan.
+	OrphanOK bool
 	// ModTime is the file's last-modified time, used to order "recents".
 	ModTime time.Time
 }
@@ -141,6 +146,83 @@ type Index struct {
 	// without this, Rebuild would silently drop them on the next filesystem
 	// change.
 	opts IndexOptions
+	// skipped records every path the walk could not index (an unreadable
+	// subdirectory, an entry that vanished mid-walk). It is the only channel
+	// that survives the default log_level "off": `docs check` reads it to
+	// refuse a verdict on a partial tree, and the other verbs print a note.
+	skipped []SkippedPath
+}
+
+// SkippedPath is one path the index walk skipped instead of failing the build.
+type SkippedPath struct {
+	// Root is the root label; Rel is the slash-separated path under it. The
+	// root itself is never skipped: an unreadable root is fatal.
+	Root   string `json:"root"`
+	Rel    string `json:"path"`
+	Reason string `json:"reason"`
+}
+
+// Skipped returns the paths the walk skipped, in walk order. The result is a
+// copy.
+func (idx *Index) Skipped() []SkippedPath {
+	return append([]SkippedPath(nil), idx.skipped...)
+}
+
+// skipReason is the recorded reason for a skipped path: the bare cause
+// ("permission denied"), not err.Error(), whose *fs.PathError form repeats
+// the absolute path. The skip entry already names the path as root label
+// plus relative path, and that is all `docs check` output may carry.
+func skipReason(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) && pe.Err != nil {
+		return pe.Err.Error()
+	}
+	return err.Error()
+}
+
+// walkDir is the directory walk walkRoot runs. It is a seam so tests can
+// inject a walk error without relying on file modes, which root ignores.
+var walkDir = filepath.WalkDir
+
+// faultEntry is the synthetic fs.DirEntry InjectWalkFaultForTest reports.
+type faultEntry struct {
+	dir  bool
+	path string
+}
+
+func (e faultEntry) Name() string { return "fault" }
+func (e faultEntry) IsDir() bool  { return e.dir }
+func (e faultEntry) Type() fs.FileMode {
+	if e.dir {
+		return fs.ModeDir
+	}
+	return 0
+}
+func (e faultEntry) Info() (fs.FileInfo, error) {
+	return nil, &fs.PathError{Op: "lstat", Path: e.path, Err: fs.ErrNotExist}
+}
+
+// InjectWalkFaultForTest makes every index walk additionally report a
+// permission error for the subdirectory "locked" and a vanished entry
+// "gone.md" under each walked root, on top of the real walk. It exists so
+// tests in other packages can exercise the skip path as root, where chmod
+// cannot produce an unreadable directory. The returned func restores the
+// real walk. Not safe for parallel tests.
+func InjectWalkFaultForTest() (restore func()) {
+	prev := walkDir
+	walkDir = func(root string, fn fs.WalkDirFunc) error {
+		if err := prev(root, fn); err != nil {
+			return err
+		}
+		// The errors carry the absolute path, as the real walk's do, so a test
+		// can prove the recorded reason drops it.
+		locked := filepath.Join(root, "locked")
+		_ = fn(locked, faultEntry{dir: true, path: locked}, &fs.PathError{Op: "open", Path: locked, Err: fs.ErrPermission})
+		gone := filepath.Join(root, "gone.md")
+		_ = fn(gone, faultEntry{path: gone}, nil)
+		return nil
+	}
+	return func() { walkDir = prev }
 }
 
 // IndexOptions carries construction-time overrides for NewIndexWithOptions.
@@ -253,12 +335,13 @@ func NewIndexContext(ctx context.Context, paths []string, opts IndexOptions) (*I
 		}
 
 		if info.IsDir() {
-			root, docs, err := indexDirRoot(ctx, labels, p, override, hasOverride)
+			root, docs, skipped, err := indexDirRoot(ctx, labels, p, override, hasOverride)
 			if err != nil {
 				return nil, err
 			}
 			idx.roots = append(idx.roots, root)
 			idx.docs = append(idx.docs, docs...)
+			idx.skipped = append(idx.skipped, skipped...)
 			continue
 		}
 
@@ -341,23 +424,23 @@ func resolveRootKind(canonical string, override RootKind, hasOverride bool) (Roo
 // error whenever the two race, discarding its "docs root %q" wrap for no
 // reason. Every other walkRoot error (a real filesystem fault) keeps the
 // existing wrap.
-func indexDirRoot(ctx context.Context, labels map[string]bool, dir string, override RootKind, hasOverride bool) (Root, []Doc, error) {
+func indexDirRoot(ctx context.Context, labels map[string]bool, dir string, override RootKind, hasOverride bool) (Root, []Doc, []SkippedPath, error) {
 	canonical, err := CanonicalizeRoot(dir)
 	if err != nil {
-		return Root{}, nil, fmt.Errorf("docs root %q: %w", dir, err)
+		return Root{}, nil, nil, fmt.Errorf("docs root %q: %w", dir, err)
 	}
 	label := uniqueLabel(labels, filepath.Base(canonical))
 	kind, vaultPath := resolveRootKind(canonical, override, hasOverride)
 	root := Root{Label: label, Path: canonical, Kind: kind, VaultPath: vaultPath}
-	docs, err := walkRoot(ctx, root)
+	docs, skipped, err := walkRoot(ctx, root)
 	if err != nil {
 		var deadline *WalkDeadlineError
 		if errors.As(err, &deadline) {
-			return Root{}, nil, err
+			return Root{}, nil, nil, err
 		}
-		return Root{}, nil, fmt.Errorf("docs root %q: %w", dir, err)
+		return Root{}, nil, nil, fmt.Errorf("docs root %q: %w", dir, err)
 	}
-	return root, docs, nil
+	return root, docs, skipped, nil
 }
 
 // indexFileRoot canonicalizes a single markdown file and indexes it alone.
@@ -417,6 +500,7 @@ func newDoc(rootLabel, relPath, absPath string, modTime time.Time, meta docMeta)
 		Links:      meta.Links,
 		Status:     meta.Status,
 		StaleAfter: meta.StaleAfter,
+		OrphanOK:   meta.OrphanOK,
 		ModTime:    modTime,
 	}
 }
@@ -489,11 +573,32 @@ func (e *WalkDeadlineError) Unwrap() error { return e.Err }
 // walking outside root. (Defense in depth only: the request-time
 // ResolveInRoot chain in security.go re-verifies every serve regardless of
 // what the index contains.)
-func walkRoot(ctx context.Context, root Root) ([]Doc, error) {
+func walkRoot(ctx context.Context, root Root) ([]Doc, []SkippedPath, error) {
 	var docs []Doc
-	err := filepath.WalkDir(root.Path, func(path string, d fs.DirEntry, err error) error {
+	var skipped []SkippedPath
+	skip := func(path, reason string) {
+		rel, err := filepath.Rel(root.Path, path)
 		if err != nil {
-			return err
+			rel = path
+		}
+		skipped = append(skipped, SkippedPath{Root: root.Label, Rel: filepath.ToSlash(rel), Reason: reason})
+	}
+	err := walkDir(root.Path, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// The root's own error stays fatal. Anything below it (an
+			// unreadable subdirectory, or an entry that vanished mid-walk)
+			// is skipped with a warning so one bad path cannot fail the
+			// whole build. A skipped subtree is not indexed.
+			if path == root.Path {
+				return err
+			}
+			slog.Warn("docs: skipped an unreadable path during the index walk.",
+				"root", root.Label, "path", path, "error", err)
+			skip(path, skipReason(err))
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return &WalkDeadlineError{Root: root.Path, Err: ctxErr}
@@ -521,6 +626,7 @@ func walkRoot(ctx context.Context, root Root) ([]Doc, error) {
 		// index-build failure.
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
+			skip(path, skipReason(err))
 			return nil
 		}
 		resolved = filepath.Clean(resolved)
@@ -532,7 +638,11 @@ func walkRoot(ctx context.Context, root Root) ([]Doc, error) {
 		relSlash := filepath.ToSlash(rel)
 		info, err := d.Info()
 		if err != nil {
-			return err
+			// The file vanished between the readdir and the stat.
+			slog.Warn("docs: skipped a file that vanished during the index walk.",
+				"root", root.Label, "path", path, "error", err)
+			skip(path, skipReason(err))
+			return nil
 		}
 
 		// A scan failure here (the file became unreadable between
@@ -550,9 +660,9 @@ func walkRoot(ctx context.Context, root Root) ([]Doc, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return docs, nil
+	return docs, skipped, nil
 }
 
 // Rebuild re-walks this index's original root arguments and returns a fresh

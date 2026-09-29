@@ -137,11 +137,16 @@ func (c *Client) loadSummary(path string) (SessionSummary, error) {
 func refFromRecord(bc Breadcrumb) (Ref, error) {
 	ref, err := ParseRef(bc.Ref)
 	if err != nil {
-		return Ref{}, fmt.Errorf("breadcrumb ref: %w", err)
+		// Categorical (#562): ParseRef's error echoes its input, and this
+		// input is read from disk.
+		return Ref{}, errors.New("breadcrumb ref is malformed")
 	}
 	if bc.Local {
 		ref = ref.asLocal()
 	}
+	// validateBreadcrumbRecord has already vetted a non-empty host; an empty
+	// one means the configured [github] host (see Breadcrumb.Host).
+	ref.Host = bc.Host
 	return ref, nil
 }
 

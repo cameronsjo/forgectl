@@ -25,6 +25,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/bless"
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/resume"
 	"github.com/cameronsjo/forgectl/internal/selfupdate"
@@ -216,19 +217,31 @@ func checkMdroll(d Deps) Check {
 	}
 }
 
-// checkGh reports whether the gh CLI is authenticated, via `gh auth status`
-// (report-only — never mutates). Absence of gh itself is folded into the
-// same check rather than a separate binary probe, since an unauthenticated
-// or missing gh means the same thing to every forgectl verb that shells out
-// to it (pr, projects, branch, review): none of them will work.
+// checkGh reports whether the gh CLI is authenticated to the configured
+// [github] host, via `gh auth status --hostname <host>` (report-only — never
+// mutates). Absence of gh itself is folded into the same check rather than a
+// separate binary probe, since an unauthenticated or missing gh means the
+// same thing to every forgectl verb that shells out to it (pr, projects,
+// branch, review): none of them will work.
+//
+// The question is host-scoped, so it runs through githubauth.Runner (#413): an
+// ambient GH_HOST cannot answer it for a host nobody configured, and on a
+// non-default host the ambient token variables are removed, so doctor reports
+// the hosts.yml credential the pinned inventory will actually use. A host that
+// fails validation is reported categorically — the rejected config value is
+// never rendered.
 func checkGh(ctx context.Context, d Deps) Check {
 	if _, err := d.LookPath("gh"); err != nil {
 		return Check{Name: "gh", State: StateFail, Detail: "gh not found on PATH", Hint: "install with `brew install gh`"}
 	}
-	if _, err := d.Runner.Run(ctx, "gh", "auth", "status"); err != nil {
-		return Check{Name: "gh", State: StateFail, Detail: err.Error(), Hint: "run `gh auth login`"}
+	host, err := githubauth.ResolveHost(d.Cfg.Github.Host)
+	if err != nil {
+		return Check{Name: "gh", State: StateFail, Detail: "configured [github] host failed validation", Hint: "set [github] host to a lowercase dns name with no port or scheme, or remove it for github.com"}
 	}
-	return Check{Name: "gh", State: StateOK, Detail: "authenticated"}
+	if _, err := githubauth.Runner(d.Runner, host).Run(ctx, "gh", "auth", "status", "--hostname", host); err != nil {
+		return Check{Name: "gh", State: StateFail, Detail: err.Error(), Hint: "run `gh auth login --hostname " + host + "`"}
+	}
+	return Check{Name: "gh", State: StateOK, Detail: "authenticated to " + host}
 }
 
 // checkSops reports the sops VERSION, not merely its presence.

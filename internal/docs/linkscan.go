@@ -34,6 +34,7 @@ type docMeta struct {
 	Links      []LinkRef
 	Status     string
 	StaleAfter string
+	OrphanOK   bool
 }
 
 // linkMarkdown is the goldmark instance scanDoc parses document BODIES
@@ -146,12 +147,14 @@ func scanDocFor(kind RootKind, absPath, relPath string) (docMeta, error) {
 	body := source
 	var aliases []string
 	var status, staleAfter string
+	var orphanOK bool
 	if fm, ok := splitFrontmatter(source); ok {
 		body = fm.body
 		// Decode the block once; aliases and trust both derive from it.
 		if root := frontmatterRoot(fm); root != nil {
 			aliases = aliasesFromNode(root)
 			status, staleAfter = trustFields(root)
+			orphanOK = orphanOKField(root)
 		}
 	}
 
@@ -188,6 +191,7 @@ func scanDocFor(kind RootKind, absPath, relPath string) (docMeta, error) {
 		Links:      links,
 		Status:     status,
 		StaleAfter: staleAfter,
+		OrphanOK:   orphanOK,
 	}, nil
 }
 

@@ -1,5 +1,5 @@
 ---
-status: "done"
+status: done
 updated: "2026-09-01"
 branch: "feat/docs-reader-v2"
 session: "deft-sonata"

@@ -34,8 +34,16 @@ var (
 // LoadBreadcrumb validates both its LOCATION and its CONTENT before any caller
 // touches Workspace.
 type Breadcrumb struct {
-	Workspace string    `json:"workspace"`
-	Ref       string    `json:"ref"` // canonical "owner/repo#N"
+	Workspace string `json:"workspace"`
+	Ref       string `json:"ref"` // canonical "owner/repo#N"
+	// Host persists Ref.Host, which the "owner/repo#N" form cannot carry
+	// (#413). Every remote record this build writes names its host
+	// concretely, so a later [github] host change cannot move an existing
+	// session's view or post to another forge. A record WITHOUT it — written
+	// before records carried a host, or a local session — means the
+	// configured [github] host at the time it is read. Omitted when empty so
+	// such a record stays byte-identical on rewrite.
+	Host      string    `json:"host,omitempty"`
 	Agent     string    `json:"agent"`
 	CreatedAt time.Time `json:"createdAt"`
 	// Local persists Ref.local, which Ref's own string form cannot carry.
@@ -442,14 +450,19 @@ func validateBreadcrumbRecord(bc Breadcrumb) error {
 	}
 	ref, err := ParseRef(bc.Ref)
 	if err != nil {
-		return fmt.Errorf("malformed ref %q: %w", bc.Ref, err)
+		// Categorical (#562): bc.Ref is read from disk and never echoed.
+		return errors.New("malformed ref")
 	}
 	// A bare number parses (ParseRef's third form) but leaves Owner/Repo empty,
 	// which would yield a Session whose Slug() is "/" and make the locality
 	// cross-check below read an empty Owner. A breadcrumb always records a
 	// resolved ref, so require one.
 	if !ref.Complete() {
-		return fmt.Errorf("ref %q is not a complete owner/repo#N reference", bc.Ref)
+		return errors.New("ref is not a complete owner/repo#N reference")
+	}
+	if bc.Host != "" && (bc.Local || !ValidHostSegment(bc.Host)) {
+		// Categorical (#562): the value is read from disk and never echoed.
+		return errors.New("record host is not a valid GitHub hostname for this session")
 	}
 	// CROSS-REPRESENTATION CHECK. Locality is recorded twice — as the Local
 	// flag (authoritative) and as the ref's display owner — and the only
@@ -464,8 +477,8 @@ func validateBreadcrumbRecord(bc Breadcrumb) error {
 	// pre-upgrade local breadcrumb written before the flag existed.
 	if bc.Local && ref.Owner != localOwnerSentinel {
 		return fmt.Errorf(
-			"breadcrumb claims a local session but its ref names owner %q, not %q",
-			ref.Owner, localOwnerSentinel,
+			"breadcrumb claims a local session but its ref names an owner other than %q",
+			localOwnerSentinel,
 		)
 	}
 	if bc.CreatedAt.IsZero() {
