@@ -11,19 +11,47 @@ import (
 	"strings"
 )
 
+// reviewSettingSources is the --setting-sources value the Claude reviewer
+// runs with: empty, so Claude Code loads NO settings file — not the user's,
+// not the project's `.claude/settings.json`, not `.claude/settings.local.json`
+// — and the --settings document (reviewSettingsJSON) is the reviewer's whole
+// configuration, below managed settings only.
+//
+// This is the structural half of forgectl#694. The workspace is the PR head,
+// and a settings file there is PR-authored: array keys such as
+// sandbox.filesystem.allowWrite or network.allowedDomains MERGE across every
+// source the session loads, so --settings outranking a file decides booleans
+// only; hooks in a loaded file run unsandboxed at session start; and `env`
+// and `apiKeyHelper` are honored in -p mode. Quarantine renames a PR's
+// `.claude/` aside before dispatch, but a name list is a denylist, and this
+// removes the whole class instead. Measured on Claude Code 2.1.284: with
+// `--setting-sources ""`, a SessionStart hook in either `.claude/settings.json`
+// or `.claude/settings.local.json` did not run; without it, both did.
+//
+// Excluding user settings is deliberate too. The operator's own sandbox
+// arrays (excludedCommands, allowWrite) would otherwise merge in and widen
+// this posture, and their hooks and plugins have no place in a clean room.
+// Authentication does not live in settings files, so it is unaffected; an
+// operator whose user settings carry an `apiKeyHelper` or an `env` block the
+// reviewer needs will find those absent here.
+const reviewSettingSources = ""
+
 // sandboxSettings is the `sandbox` block of the Claude reviewer's settings:
 // Claude Code's OS sandbox (Seatbelt on macOS, bubblewrap on Linux) around
 // every Bash command the reviewer runs, and every child process of one.
 //
 // It exists because the allow-list cannot bound what an allowed command DOES
-// (forgectl#694). A read-only git subcommand can take a flag that writes to
-// an arbitrary path; Claude Code's redirect check does not see a flag, and
-// git later runs commands its configuration names. A deny rule matches
-// command text and cannot close that. The sandbox is enforced by the OS on
-// the running process, so it holds whatever the command turns out to do.
+// (forgectl#694): a read-only git subcommand can take a flag that writes to
+// an arbitrary path, and git later runs commands its configuration names. A
+// deny rule matches command text and cannot close that; the sandbox is
+// enforced by the OS on the running process. What it enforces is exactly
+// this block and no more — write denies on the workspace and a linked
+// worktree's shared git dir, and egress limited to the PR's gh hosts. It
+// does NOT narrow reads: a sandboxed command can read anything the operator
+// can, and what it reads reaches the model provider as tool output.
 //
-// Every field is emitted explicitly, false included: the value written here
-// must not depend on a default Claude Code may change.
+// Every field is emitted explicitly, false included: the posture must not
+// depend on a default Claude Code may change.
 //
 //   - FailIfUnavailable: without it Claude Code prints a warning and runs
 //     commands UNSANDBOXED when the sandbox cannot start. The review runs in
@@ -35,14 +63,21 @@ import (
 //     approves any command that runs sandboxed, and before Claude Code
 //     v2.1.212 it did so in plan mode too, which would have admitted every
 //     command the allow-list refuses (`rg --pre`, for one).
+//   - The weakening switches (EnableWeakerNestedSandbox,
+//     EnableWeakerNetworkIsolation, AllowAppleEvents, and the network ones)
+//     are pinned false, so no lower source could turn one on even if one
+//     were loaded.
 //   - No excludedCommands: an excluded command runs outside the sandbox.
 type sandboxSettings struct {
-	Enabled                  bool              `json:"enabled"`
-	FailIfUnavailable        bool              `json:"failIfUnavailable"`
-	AllowUnsandboxedCommands bool              `json:"allowUnsandboxedCommands"`
-	AutoAllowBashIfSandboxed bool              `json:"autoAllowBashIfSandboxed"`
-	Filesystem               sandboxFilesystem `json:"filesystem"`
-	Network                  sandboxNetwork    `json:"network"`
+	Enabled                      bool              `json:"enabled"`
+	FailIfUnavailable            bool              `json:"failIfUnavailable"`
+	AllowUnsandboxedCommands     bool              `json:"allowUnsandboxedCommands"`
+	AutoAllowBashIfSandboxed     bool              `json:"autoAllowBashIfSandboxed"`
+	EnableWeakerNestedSandbox    bool              `json:"enableWeakerNestedSandbox"`
+	EnableWeakerNetworkIsolation bool              `json:"enableWeakerNetworkIsolation"`
+	AllowAppleEvents             bool              `json:"allowAppleEvents"`
+	Filesystem                   sandboxFilesystem `json:"filesystem"`
+	Network                      sandboxNetwork    `json:"network"`
 }
 
 // sandboxFilesystem narrows the sandbox's default write set, which is the
@@ -61,21 +96,20 @@ type sandboxFilesystem struct {
 
 // sandboxNetwork is the reviewer's egress. AllowedDomains names the hosts the
 // allow-listed gh reads reach, and nothing else; a local review gets none.
-// StrictAllowlist refuses any other host instead of prompting. Claude Code
-// honors it only from user, managed, and --settings, which is why the block
-// is also passed on the command line (reviewSandboxFlag).
+// StrictAllowlist refuses any other host instead of prompting; Claude Code
+// honors it only from user, managed, and --settings, which is where this
+// block lives. The socket and binding switches are pinned off.
 type sandboxNetwork struct {
-	AllowedDomains  []string `json:"allowedDomains"`
-	StrictAllowlist bool     `json:"strictAllowlist"`
+	AllowedDomains      []string `json:"allowedDomains"`
+	StrictAllowlist     bool     `json:"strictAllowlist"`
+	AllowLocalBinding   bool     `json:"allowLocalBinding"`
+	AllowAllUnixSockets bool     `json:"allowAllUnixSockets"`
+	AllowMachLookup     bool     `json:"allowMachLookup"`
 }
 
 // reviewSandbox builds the sandbox block for a review of workspace. ghHost is
 // the PR's host for a remote review, or "" for a local one, which reaches no
 // network at all.
-//
-// It is the single builder for both places the block lands: the workspace's
-// settings.local.json (written at prepare) and the --settings flag (at
-// dispatch). Both derive from the same inputs, so they cannot disagree.
 func reviewSandbox(workspace, ghHost string) (sandboxSettings, error) {
 	denyWrite, err := reviewDenyWrite(workspace)
 	if err != nil {
@@ -95,23 +129,19 @@ func reviewSandbox(workspace, ghHost string) (sandboxSettings, error) {
 	}, nil
 }
 
-// reviewSandboxFlag renders reviewSandbox as the inline JSON `claude
-// --settings` takes. The flag is what makes the block authoritative: it
-// outranks the local, project, and user settings files for every boolean
-// (only managed settings rank higher), and it is a scope that honors
-// strictAllowlist. It carries no permission rules; those stay in the
-// workspace's settings.local.json.
-func reviewSandboxFlag(workspace, ghHost string) (string, error) {
+// reviewSettingsJSON renders the reviewer's whole configuration — perms, the
+// sandbox block, and disableAllHooks — as the inline JSON `claude --settings`
+// takes. It is passed with --setting-sources reviewSettingSources, so nothing
+// else is merged into it but managed settings; see reviewSettingSources.
+func reviewSettingsJSON(workspace, ghHost string, perms permissions) (string, error) {
 	sb, err := reviewSandbox(workspace, ghHost)
 	if err != nil {
 		return "", err
 	}
 	// termsafe:allow-raw-json a claude argv value, never command output
-	data, err := json.Marshal(struct {
-		Sandbox sandboxSettings `json:"sandbox"`
-	}{sb})
+	data, err := json.Marshal(reviewSettings{Permissions: perms, Sandbox: sb, DisableAllHooks: true})
 	if err != nil {
-		return "", fmt.Errorf("marshal review sandbox settings: %w", err)
+		return "", fmt.Errorf("marshal review settings: %w", err)
 	}
 	return string(data), nil
 }
@@ -286,8 +316,10 @@ func claudeSandboxSupported() error {
 //
 // Other configured commands remain (diff and filter drivers, gpg.program,
 // among others). Enumerating them is the deny-by-text approach forgectl#694
-// rejects; the sandbox is what bounds them. GIT_CONFIG_GLOBAL is left alone:
-// the operator's own global config is not attacker-supplied.
+// rejects; the sandbox narrows what they can do. GIT_CONFIG_GLOBAL and
+// GIT_CONFIG_PARAMETERS are left alone: they are operator-controlled (the
+// operator's own global config, and whatever the tmux server's environment
+// carries), not PR-supplied, and tmux cannot unset a variable anyway.
 var reviewGitEnv = []string{
 	"GIT_CONFIG_NOSYSTEM=1",
 	"GIT_CONFIG_COUNT=2",
@@ -309,7 +341,10 @@ func pinReviewGitEnv(env []string) []string {
 	out := make([]string, 0, len(env)+len(reviewGitEnv))
 	for _, e := range env {
 		key, _, _ := strings.Cut(e, "=")
-		if drop[key] {
+		// Every indexed pair goes, not only the ones reviewGitEnv sets: a
+		// stale GIT_CONFIG_KEY_5 is inert under COUNT=2 today, and should
+		// not become live if the pin list grows.
+		if drop[key] || strings.HasPrefix(key, "GIT_CONFIG_KEY_") || strings.HasPrefix(key, "GIT_CONFIG_VALUE_") {
 			continue
 		}
 		out = append(out, e)

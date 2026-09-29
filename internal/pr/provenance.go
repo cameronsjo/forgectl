@@ -146,10 +146,11 @@ func EffectiveProvenance(ref Ref, declared ReviewProvenance) ReviewProvenance {
 //
 //   - Agent A (InlineSeeded) confines the reviewer with a deny-by-default
 //     Claude Code allowlist — four read tools plus a few Bash prefixes chosen
-//     for reading, under plan mode — and runs its Bash commands under Claude
-//     Code's OS sandbox: no workspace writes, no network beyond the PR's host
-//     (forgectl#694; an allowed prefix admits flags the list cannot bound).
-//     It needs no provenance gate and does not get one.
+//     for reading, under plan mode, loading no settings file — and runs its
+//     Bash commands under Claude Code's OS sandbox, which denies writes to
+//     the workspace and limits egress to the PR's gh hosts but does not
+//     narrow reads (forgectl#694: an allowed prefix admits flags the list
+//     cannot bound). It needs no provenance gate and does not get one.
 //   - CodexExec has no allowlist equivalent. `--sandbox read-only` scopes
 //     filesystem writes and network egress, NOT which commands run, so the
 //     reviewer gets arbitrary shell with host-wide read — `~/.ssh`,

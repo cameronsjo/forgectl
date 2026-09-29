@@ -296,26 +296,18 @@ func TestPrepareLocal_FindingsDirIsDurable(t *testing.T) {
 	}
 }
 
-// TestPrepareLocal_AllowlistOnlyForHarnessesThatReadIt pins the asymmetry:
-// .claude/settings.local.json is a Claude Code control, so a `--agent codex`
-// session must not get one. Writing it there would leave a file that looks
-// like the Codex reviewer's confinement and enforces nothing.
-func TestPrepareLocal_AllowlistOnlyForHarnessesThatReadIt(t *testing.T) {
-	for _, tc := range []struct {
-		agent string
-		want  bool
-	}{
-		{"claude", true},
-		{"", true}, // default → agent A
-		{"codex", false},
-	} {
-		t.Run("agent="+tc.agent, func(t *testing.T) {
+// TestPrepareLocal_WritesNoSettingsIntoTheWorkspace: for every harness,
+// PrepareLocal writes nothing into the workspace for the reviewer. The Claude
+// reviewer's whole profile goes on its command line (forgectl#694), and a
+// settings file here would be one a PR-authored `.claude` could redirect.
+func TestPrepareLocal_WritesNoSettingsIntoTheWorkspace(t *testing.T) {
+	for _, agent := range []string{"claude", "", "codex"} {
+		t.Run("agent="+agent, func(t *testing.T) {
 			c := testClient(t, localGitRunner())
-			// Asserted authorship: this test is about which harness gets an
-			// allowlist, so the Codex case must get PAST the #232 provenance
-			// gate to say anything about it.
+			// Asserted authorship, so the Codex case gets past the #232
+			// provenance gate and says something.
 			sess, err := c.PrepareLocal(context.Background(), t.TempDir(), PrepareLocalOpts{
-				Agent:      tc.agent,
+				Agent:      agent,
 				Provenance: ReviewProvenanceOperatorAuthored,
 			})
 			if err != nil {
@@ -325,10 +317,8 @@ func TestPrepareLocal_AllowlistOnlyForHarnessesThatReadIt(t *testing.T) {
 				os.RemoveAll(sess.Workspace)
 				os.RemoveAll(sess.FindingsDir)
 			})
-
-			_, statErr := os.Stat(filepath.Join(sess.Workspace, ".claude", "settings.local.json"))
-			if got := statErr == nil; got != tc.want {
-				t.Errorf("allowlist present = %v, want %v (agent %q)", got, tc.want, tc.agent)
+			if _, err := os.Lstat(filepath.Join(sess.Workspace, ".claude")); err == nil {
+				t.Errorf("PrepareLocal wrote %s/.claude (agent %q)", sess.Workspace, agent)
 			}
 		})
 	}

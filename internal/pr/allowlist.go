@@ -1,27 +1,32 @@
 package pr
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
-	"os"
-	"path/filepath"
 	"strconv"
 )
 
-// allowlistSettings is the Claude Code settings document written into a
-// clean-room workspace for agent A. It is DENY-BY-DEFAULT: the agent may only
-// read and run read-only inspection commands. It has NO permission to post a
-// review, comment, merge, or push — posting is gated exclusively by forgectl's
-// human approval gate, never by the agent itself.
-type allowlistSettings struct {
+// reviewSettings is the whole Claude Code settings document the clean-room
+// reviewer (agent A) runs under, passed as inline JSON with --settings
+// (reviewSettingsJSON). It is DENY-BY-DEFAULT: the agent may only read and
+// run the listed inspection commands. It has NO permission to post a review,
+// comment, merge, or push — posting is gated exclusively by forgectl's human
+// approval gate, never by the agent itself.
+//
+// It is never written into the workspace. The workspace holds the PR head,
+// which can commit a `.claude/` of its own, and Claude Code merges settings
+// arrays from every source it loads. So the reviewer loads NO settings file
+// at all (--setting-sources with an empty value) and this document is its
+// only configuration; see reviewSettingSources.
+type reviewSettings struct {
 	Permissions permissions `json:"permissions"`
 	// Sandbox is the OS sandbox the reviewer's Bash commands run under
-	// (reviewsandbox.go). Launch passes the same block with --settings, which
-	// is the copy that decides; this one records the posture beside the
-	// permission rules for anyone reading the workspace.
+	// (reviewsandbox.go).
 	Sandbox sandboxSettings `json:"sandbox"`
+	// DisableAllHooks is a backstop: with no settings file loaded there are
+	// no user, project, or local hooks to run, and this also turns off plugin
+	// hooks. Managed hooks are outside any non-managed setting's reach.
+	DisableAllHooks bool `json:"disableAllHooks"`
 }
 
 type permissions struct {
@@ -43,10 +48,12 @@ type permissions struct {
 // Claude Code's redirect check does not treat as a redirect), and git runs
 // commands its configuration names. An allowed command can therefore do more
 // than read, and no deny rule over the text can enumerate that away
-// (forgectl#694). What bounds it is the OS sandbox the reviewer runs under
-// (reviewsandbox.go): the workspace is not writable and the network is
-// limited to the PR's host. Treat this list as what the reviewer may ASK to
-// run, and the sandbox as what a run can reach.
+// (forgectl#694). Treat this list as what the reviewer may ASK to run. What
+// a run can then do is narrowed by the OS sandbox (reviewsandbox.go), and
+// only as far as that file says: its writes are denied in the workspace and
+// the shared git dir but still land in the findings dir and the per-user
+// temp dir, its network is limited to the PR's gh hosts, and its READS are
+// not narrowed at all.
 //
 // Neither mode grants `rg`. ripgrep's `--pre COMMAND` runs COMMAND on every
 // searched file, so `rg --pre sh x file` executes a script straight out of a
@@ -178,25 +185,19 @@ var denyPosting = []string{
 	"WebFetch",
 }
 
-// writeAllowlist writes the deny-by-default settings file into workspace's
-// .claude/ dir and returns its path. Written before the review agent is
-// dispatched, it is the agent's only permission surface inside the clean room.
-// host is the PR's own host (Client.prHost) and ref names the PR; together
-// they generate the only gh reads the agent may run (prGhReadRules).
-func writeAllowlist(workspace, host string, ref Ref) (string, error) {
+// remoteProfile builds the deny-by-default permission set for a PR review:
+// allowReadOnly plus the gh reads generated for this PR's own host and number
+// (prGhReadRules), which it refuses to build from an unvalidated value.
+func remoteProfile(host string, ref Ref) (permissions, error) {
 	ghReads, err := prGhReadRules(host, ref)
 	if err != nil {
-		return "", err
+		return permissions{}, err
 	}
-	sb, err := reviewSandbox(workspace, host)
-	if err != nil {
-		return "", err
-	}
-	return writeSettings(workspace, permissions{
+	return permissions{
 		DefaultMode: "plan",
 		Allow:       append(append([]string{}, allowReadOnly...), ghReads...),
 		Deny:        denyPosting,
-	}, sb)
+	}, nil
 }
 
 // localAllowReadOnly is the local session's permitted-action set: the same
@@ -250,39 +251,4 @@ func localProfile(findingsDir string) permissions {
 		Allow:       allow,
 		Deny:        localDenyNetwork,
 	}
-}
-
-// writeLocalAllowlist writes localProfile's settings into workspace's
-// .claude/ dir and returns its path. Mirrors writeAllowlist.
-func writeLocalAllowlist(workspace, findingsDir string) (string, error) {
-	sb, err := reviewSandbox(workspace, "")
-	if err != nil {
-		return "", err
-	}
-	return writeSettings(workspace, localProfile(findingsDir), sb)
-}
-
-// writeSettings writes perms and the sandbox block into workspace's
-// .claude/settings.local.json and returns its path — the shared write core for
-// writeAllowlist and writeLocalAllowlist.
-func writeSettings(workspace string, perms permissions, sb sandboxSettings) (string, error) {
-	slog.Debug("Preparing to write clean-room allowlist.", "workspace", workspace)
-	dir := filepath.Join(workspace, ".claude")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		slog.Error("Failed to create allowlist dir.", "dir", dir, "error", err)
-		return "", fmt.Errorf("create allowlist dir: %w", err)
-	}
-	settings := allowlistSettings{Permissions: perms, Sandbox: sb}
-	// termsafe:allow-raw-json persisted Claude settings file, never command output
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("marshal allowlist: %w", err)
-	}
-	path := filepath.Join(dir, "settings.local.json")
-	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
-		slog.Error("Failed to write allowlist.", "path", path, "error", err)
-		return "", fmt.Errorf("write allowlist %s: %w", path, err)
-	}
-	slog.Debug("Successfully wrote clean-room allowlist.", "path", path)
-	return path, nil
 }

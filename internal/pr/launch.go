@@ -60,8 +60,9 @@ func newDispatch(ref Ref, window tmux.WindowIdentity) Dispatch {
 // approval gate.
 //
 // writesEnforced says whether the harness actually confines writes to
-// findingsDir. Under agent A it does: the workspace allowlist grants exactly
-// one Write(findingsDir/**) rule, and --add-dir is what makes that grant
+// findingsDir. Under agent A it does: the reviewer's allowlist (passed with
+// --settings) grants exactly one Write(findingsDir/**) rule, the sandbox
+// denies Bash writes to the workspace, and --add-dir is what makes that grant
 // reachable at all — so the prompt may state the restriction as fact. Under
 // Codex it does not: --add-dir adds a writable root ALONGSIDE an
 // already-writable workspace, and approval_policy="never" removes the prompt
@@ -590,12 +591,14 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// Refuse before anything is dispatched when Claude Code's sandbox cannot
 	// run here. The allow-list alone does not confine the reviewer: an
 	// allowed read-only git command can write and then execute (forgectl#694),
-	// and the sandbox is what bounds that. There is deliberately no opt-out.
+	// and the sandbox is what denies that write. There is deliberately no
+	// opt-out.
 	if err := c.sandboxSupported(); err != nil {
 		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
 	}
 
 	var prompt, ghHost string
+	var perms permissions
 	if sess.Ref.IsLocal() {
 		// Grant --add-dir for the escape-hatch findings dir. Without this, the
 		// permission-scoped Write(<dir>/**) allowlist rule is moot — Claude Code
@@ -604,6 +607,7 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 		// writable root besides the per-user temp directory.
 		profile.AddDir = append(profile.AddDir, sess.FindingsDir)
 		prompt = localReviewPrompt(sess.FindingsDir, true)
+		perms = localProfile(sess.FindingsDir)
 	} else {
 		host, _, err := c.prHost(sess.Ref)
 		if err != nil {
@@ -611,15 +615,24 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 		}
 		ghHost = host
 		prompt = remoteReviewPrompt(host, sess.Ref)
+		if perms, err = remoteProfile(host, sess.Ref); err != nil {
+			return Dispatch{}, err
+		}
 	}
-	// The sandbox block goes on the command line as well as in the
-	// workspace's settings.local.json: --settings outranks every settings
-	// file but managed ones, and it is a scope where strictAllowlist counts.
-	sandboxFlag, err := reviewSandboxFlag(sess.Workspace, ghHost)
+	// The reviewer's whole configuration travels on the command line, and it
+	// loads no settings file at all (--setting-sources ""): the workspace is
+	// the PR head, so any settings file in it is PR-authored, and Claude Code
+	// merges settings arrays and runs hooks from every source it loads. See
+	// reviewSettingSources.
+	settingsJSON, err := reviewSettingsJSON(sess.Workspace, ghHost, perms)
 	if err != nil {
 		return Dispatch{}, err
 	}
-	claudeArgs := launch.BuilderArgs(profile, []string{"--settings", sandboxFlag, "-p", prompt})
+	claudeArgs := launch.BuilderArgs(profile, []string{
+		"--setting-sources", reviewSettingSources,
+		"--settings", settingsJSON,
+		"-p", prompt,
+	})
 
 	if err := c.CheckDispatchCapability(ctx); err != nil {
 		return Dispatch{}, err

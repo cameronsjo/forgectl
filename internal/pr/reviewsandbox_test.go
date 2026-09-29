@@ -2,21 +2,22 @@ package pr
 
 // Test plan for reviewsandbox.go (Classification: security control, #694)
 //
-//   [x] writeAllowlist writes the sandbox block: enabled, fail-closed, no
-//       unsandboxed retry, no auto-allow, no excludedCommands, workspace
-//       denied for writes, network limited to the PR's gh hosts, strict
-//   [x] writeLocalAllowlist writes the same block with no network at all and
-//       leaves the findings dir writable
-//   [x] every sandbox key is emitted explicitly, false values included
+//   [x] reviewSettingsJSON carries the whole profile: permissions, the
+//       sandbox block (enabled, fail-closed, no unsandboxed retry, no
+//       auto-allow, weakening switches pinned false, no excludedCommands,
+//       workspace denied for writes, network limited to the PR's gh hosts,
+//       strict), and disableAllHooks
+//   [x] a local review gets no network and a writable findings dir
 //   [x] a linked worktree's shared git dir is denied too (real git)
 //   [x] an unparseable .git file, a relative workspace, or a path the
 //       Linux sandbox would skip (glob characters) is refused
 //   [x] ghAPIDomains per host shape
-//   [x] launchInline passes the same block with --settings, remote and local
+//   [x] launchInline passes it with --settings after --setting-sources "",
+//       remote and local, and writes nothing into the workspace
 //   [x] launchInline refuses, before any window, when the sandbox is
 //       unsupported
 //   [x] claudeSandboxSupported platform table
-//   [x] pinReviewGitEnv replaces ambient entries and appends the pins
+//   [x] pinReviewGitEnv drops every ambient indexed pair and appends the pins
 //   [x] the pins stop a repo-configured core.fsmonitor from running (real git)
 
 import (
@@ -34,29 +35,29 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 )
 
-// readSettingsFile decodes a written settings file twice: typed, and as raw
-// maps so a test can see which keys are present at all.
-func readSettingsFile(t *testing.T, path string) (allowlistSettings, map[string]any) {
+// decodeSettings decodes a reviewSettingsJSON document twice: typed, and as
+// raw maps so a test can see which keys are present at all.
+func decodeSettings(t *testing.T, doc string) (reviewSettings, map[string]any) {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Clean(path))
-	if err != nil {
-		t.Fatalf("read settings: %v", err)
-	}
-	var typed allowlistSettings
-	if err := json.Unmarshal(data, &typed); err != nil {
-		t.Fatalf("unmarshal settings: %v", err)
+	var typed reviewSettings
+	if err := json.Unmarshal([]byte(doc), &typed); err != nil {
+		t.Fatalf("settings are not JSON: %v", err)
 	}
 	var raw map[string]any
-	if err := json.Unmarshal(data, &raw); err != nil {
-		t.Fatalf("unmarshal raw settings: %v", err)
+	if err := json.Unmarshal([]byte(doc), &raw); err != nil {
+		t.Fatalf("settings are not JSON: %v", err)
 	}
 	return typed, raw
 }
 
-// assertStrictSandbox checks the posture every review sandbox must carry,
-// whatever its mode. raw is the decoded `sandbox` object.
-func assertStrictSandbox(t *testing.T, sb sandboxSettings, raw map[string]any, workspace string) {
+// assertStrictSettings checks the posture every reviewer settings document
+// must carry, whatever its mode.
+func assertStrictSettings(t *testing.T, s reviewSettings, raw map[string]any, workspace string) {
 	t.Helper()
+	sb := s.Sandbox
+	if !s.DisableAllHooks {
+		t.Error("disableAllHooks must be true")
+	}
 	if !sb.Enabled || !sb.FailIfUnavailable {
 		t.Errorf("sandbox must be enabled and fail closed: %+v", sb)
 	}
@@ -72,13 +73,33 @@ func assertStrictSandbox(t *testing.T, sb sandboxSettings, raw map[string]any, w
 	if !slices.Contains(sb.Filesystem.DenyWrite, workspace) {
 		t.Errorf("denyWrite %v must name the workspace %s", sb.Filesystem.DenyWrite, workspace)
 	}
-	// Explicit false, not omitted: the posture must not ride a default.
-	for _, key := range []string{"enabled", "failIfUnavailable", "allowUnsandboxedCommands", "autoAllowBashIfSandboxed"} {
-		if _, ok := raw[key]; !ok {
+	if s.Permissions.DefaultMode != "plan" || len(s.Permissions.Allow) == 0 || len(s.Permissions.Deny) == 0 {
+		t.Errorf("the settings must carry the whole permission profile: %+v", s.Permissions)
+	}
+	sbRaw := rawSandbox(t, raw)
+	// Explicit false, not omitted: the posture must not ride a default, and
+	// every weakening switch is pinned off.
+	for _, key := range []string{
+		"enabled", "failIfUnavailable", "allowUnsandboxedCommands", "autoAllowBashIfSandboxed",
+		"enableWeakerNestedSandbox", "enableWeakerNetworkIsolation", "allowAppleEvents",
+	} {
+		v, ok := sbRaw[key]
+		if !ok {
 			t.Errorf("sandbox.%s must be written explicitly", key)
 		}
+		if strings.HasPrefix(key, "enableWeaker") || key == "allowAppleEvents" {
+			if v != false {
+				t.Errorf("sandbox.%s = %v, want false", key, v)
+			}
+		}
 	}
-	if _, ok := raw["excludedCommands"]; ok {
+	network, _ := sbRaw["network"].(map[string]any)
+	for _, key := range []string{"allowLocalBinding", "allowAllUnixSockets", "allowMachLookup"} {
+		if v, ok := network[key]; !ok || v != false {
+			t.Errorf("sandbox.network.%s = %v (present %v), want an explicit false", key, v, ok)
+		}
+	}
+	if _, ok := sbRaw["excludedCommands"]; ok {
 		t.Error("sandbox must carry no excludedCommands: an excluded command runs unsandboxed")
 	}
 }
@@ -92,30 +113,36 @@ func rawSandbox(t *testing.T, raw map[string]any) map[string]any {
 	return sb
 }
 
-func TestWriteAllowlist_WritesStrictSandboxScopedToThePRHost(t *testing.T) {
+func TestReviewSettingsJSON_RemoteIsStrictAndScopedToThePRHost(t *testing.T) {
 	ws := t.TempDir()
-	path, err := writeAllowlist(ws, "github.com", Ref{Owner: "o", Repo: "r", Number: 42})
+	perms, err := remoteProfile("github.com", Ref{Owner: "o", Repo: "r", Number: 42})
 	if err != nil {
-		t.Fatalf("writeAllowlist: %v", err)
+		t.Fatal(err)
 	}
-	typed, raw := readSettingsFile(t, path)
-	assertStrictSandbox(t, typed.Sandbox, rawSandbox(t, raw), ws)
+	doc, err := reviewSettingsJSON(ws, "github.com", perms)
+	if err != nil {
+		t.Fatalf("reviewSettingsJSON: %v", err)
+	}
+	typed, raw := decodeSettings(t, doc)
+	assertStrictSettings(t, typed, raw, ws)
 	if want := []string{"github.com", "api.github.com"}; !slices.Equal(typed.Sandbox.Network.AllowedDomains, want) {
 		t.Errorf("allowedDomains = %v, want %v", typed.Sandbox.Network.AllowedDomains, want)
 	}
+	if !slices.Equal(typed.Permissions.Allow, perms.Allow) || !slices.Equal(typed.Permissions.Deny, perms.Deny) {
+		t.Errorf("settings permissions = %+v, want the remote profile %+v", typed.Permissions, perms)
+	}
 }
 
-func TestWriteLocalAllowlist_WritesStrictSandboxWithNoNetwork(t *testing.T) {
+func TestReviewSettingsJSON_LocalReachesNoNetwork(t *testing.T) {
 	ws := t.TempDir()
 	findingsDir := filepath.Join(t.TempDir(), "findings")
-	path, err := writeLocalAllowlist(ws, findingsDir)
+	doc, err := reviewSettingsJSON(ws, "", localProfile(findingsDir))
 	if err != nil {
-		t.Fatalf("writeLocalAllowlist: %v", err)
+		t.Fatalf("reviewSettingsJSON: %v", err)
 	}
-	typed, raw := readSettingsFile(t, path)
-	sbRaw := rawSandbox(t, raw)
-	assertStrictSandbox(t, typed.Sandbox, sbRaw, ws)
-	network, _ := sbRaw["network"].(map[string]any)
+	typed, raw := decodeSettings(t, doc)
+	assertStrictSettings(t, typed, raw, ws)
+	network, _ := rawSandbox(t, raw)["network"].(map[string]any)
 	domains, ok := network["allowedDomains"].([]any)
 	if !ok || len(domains) != 0 {
 		t.Errorf("a local review's allowedDomains must be an explicit empty list, got %v", network["allowedDomains"])
@@ -215,28 +242,32 @@ func TestReviewDenyWrite_Refusals(t *testing.T) {
 	}
 }
 
-// settingsFlagFrom returns the sandbox block passed with --settings in a
-// tmux new-window argv.
-func settingsFlagFrom(t *testing.T, args []string) (sandboxSettings, map[string]any) {
+// settingsFlagFrom returns the settings document passed with --settings in a
+// tmux new-window argv, after asserting --setting-sources "" precedes it.
+func settingsFlagFrom(t *testing.T, args []string) (reviewSettings, map[string]any) {
 	t.Helper()
+	src := slices.Index(args, "--setting-sources")
+	if src < 0 || src+1 >= len(args) || args[src+1] != "" {
+		t.Fatalf("claude argv must carry --setting-sources with an empty value (load no settings file): %v", args)
+	}
 	i := slices.Index(args, "--settings")
 	if i < 0 || i+1 >= len(args) {
 		t.Fatalf("claude argv carries no --settings: %v", args)
 	}
-	var typed struct {
-		Sandbox sandboxSettings `json:"sandbox"`
-	}
-	if err := json.Unmarshal([]byte(args[i+1]), &typed); err != nil {
-		t.Fatalf("--settings value is not JSON: %v", err)
-	}
-	var raw map[string]any
-	if err := json.Unmarshal([]byte(args[i+1]), &raw); err != nil {
-		t.Fatalf("--settings value is not JSON: %v", err)
-	}
-	return typed.Sandbox, rawSandbox(t, raw)
+	return decodeSettings(t, args[i+1])
 }
 
-func TestLaunchInline_PassesTheSandboxWithSettings(t *testing.T) {
+// assertNoWorkspaceClaudeDir: the reviewer's configuration must never be
+// written into the workspace, which holds the PR head. A PR-committed
+// `.claude` symlink would otherwise redirect that write outside it.
+func assertNoWorkspaceClaudeDir(t *testing.T, ws string) {
+	t.Helper()
+	if _, err := os.Lstat(filepath.Join(ws, ".claude")); err == nil {
+		t.Errorf("forgectl wrote %s/.claude; the reviewer's settings belong on its command line only", ws)
+	}
+}
+
+func TestLaunchInline_PassesTheWholeProfileAndLoadsNoSettingsFile(t *testing.T) {
 	t.Setenv("FORGECTL_CLAUDE_BIN", fakeHarnessBin(t, "claude"))
 
 	fake := successfulLaunchRunner()
@@ -246,11 +277,15 @@ func TestLaunchInline_PassesTheSandboxWithSettings(t *testing.T) {
 	if _, err := c.Launch(context.Background(), sess, config.Config{}); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	sb, raw := settingsFlagFrom(t, fake.Last().Args)
-	assertStrictSandbox(t, sb, raw, ws)
-	if want := []string{"github.com", "api.github.com"}; !slices.Equal(sb.Network.AllowedDomains, want) {
-		t.Errorf("remote review allowedDomains = %v, want %v", sb.Network.AllowedDomains, want)
+	s, raw := settingsFlagFrom(t, fake.Last().Args)
+	assertStrictSettings(t, s, raw, ws)
+	if want := []string{"github.com", "api.github.com"}; !slices.Equal(s.Sandbox.Network.AllowedDomains, want) {
+		t.Errorf("remote review allowedDomains = %v, want %v", s.Sandbox.Network.AllowedDomains, want)
 	}
+	if !slices.Contains(s.Permissions.Allow, "Bash(gh pr view 42 --repo github.com/o/r)") {
+		t.Errorf("remote settings must carry the generated gh reads: %v", s.Permissions.Allow)
+	}
+	assertNoWorkspaceClaudeDir(t, ws)
 
 	fake2 := successfulLaunchRunner()
 	c2 := New(fake2, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
@@ -260,11 +295,15 @@ func TestLaunchInline_PassesTheSandboxWithSettings(t *testing.T) {
 	if _, err := c2.Launch(context.Background(), local, config.Config{}); err != nil {
 		t.Fatalf("Launch local: %v", err)
 	}
-	sb2, raw2 := settingsFlagFrom(t, fake2.Last().Args)
-	assertStrictSandbox(t, sb2, raw2, ws2)
-	if len(sb2.Network.AllowedDomains) != 0 {
-		t.Errorf("a local review must reach no host, got %v", sb2.Network.AllowedDomains)
+	s2, raw2 := settingsFlagFrom(t, fake2.Last().Args)
+	assertStrictSettings(t, s2, raw2, ws2)
+	if len(s2.Sandbox.Network.AllowedDomains) != 0 {
+		t.Errorf("a local review must reach no host, got %v", s2.Sandbox.Network.AllowedDomains)
 	}
+	if !slices.Equal(s2.Permissions.Allow, localProfile(findingsDir).Allow) {
+		t.Errorf("local settings allow = %v, want localProfile's", s2.Permissions.Allow)
+	}
+	assertNoWorkspaceClaudeDir(t, ws2)
 }
 
 func TestLaunchInline_RefusesWhenTheSandboxIsUnsupported(t *testing.T) {
@@ -326,7 +365,7 @@ func TestClaudeSandboxSupported(t *testing.T) {
 }
 
 func TestPinReviewGitEnv_ReplacesAmbientEntries(t *testing.T) {
-	in := []string{"HTTPS_PROXY=http://proxy:3128", "GIT_CONFIG_COUNT=5", "GIT_CONFIG_KEY_0=core.pager", "GIT_CONFIG_NOSYSTEM=0"}
+	in := []string{"HTTPS_PROXY=http://proxy:3128", "GIT_CONFIG_COUNT=5", "GIT_CONFIG_KEY_0=core.pager", "GIT_CONFIG_NOSYSTEM=0", "GIT_CONFIG_KEY_4=core.sshCommand", "GIT_CONFIG_VALUE_4=x"}
 	got := pinReviewGitEnv(in)
 	want := append([]string{"HTTPS_PROXY=http://proxy:3128"}, reviewGitEnv...)
 	if !slices.Equal(got, want) {

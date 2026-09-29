@@ -166,12 +166,14 @@ func TestPrepare_RealDispatch(t *testing.T) {
 		t.Errorf("git clone should target the head repo URL: %v", git.Args)
 	}
 
-	// Side effects: workspace exists, allowlist + breadcrumb written.
+	// Side effects: workspace and breadcrumb exist, and nothing was written
+	// into the workspace for the reviewer — its settings go on the command
+	// line (forgectl#694).
 	if _, err := os.Stat(sess.Workspace); err != nil {
 		t.Errorf("workspace missing: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(sess.Workspace, ".claude", "settings.local.json")); err != nil {
-		t.Errorf("allowlist missing: %v", err)
+	if _, err := os.Lstat(filepath.Join(sess.Workspace, ".claude")); err == nil {
+		t.Errorf("Prepare wrote %s/.claude; the reviewer's settings belong on its command line", sess.Workspace)
 	}
 	if _, err := os.Stat(sess.Path); err != nil {
 		t.Errorf("breadcrumb missing: %v", err)
