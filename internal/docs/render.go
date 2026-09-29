@@ -734,11 +734,13 @@ func frontmatterHTML(ctx parser.Context) string {
 	if mapping.Kind != yaml.MappingNode {
 		return frontmatterHTMLUnordered(fm)
 	}
+	status, staleAfter := trustFields(mapping)
+	tr := evalTrust(status, staleAfter, trustNow())
 	var b strings.Builder
 	pairs := 0
 	for i := 0; i+1 < len(mapping.Content); i += 2 {
 		key, value := mapping.Content[i], mapping.Content[i+1]
-		writeKV(&b, key.Value, yamlScalar(value))
+		writeKV(&b, key.Value, yamlScalar(value), tr)
 		pairs++
 	}
 	return wrapFrontmatter(b.String(), pairs)
@@ -761,7 +763,9 @@ func frontmatterHTMLUnordered(fm *frontmatter.Data) string {
 		if err != nil {
 			continue // badge counts rendered pairs, so a skipped key is not counted
 		}
-		writeKV(&b, k, strings.TrimSpace(string(b2)))
+		// No trust badges here: OKF frontmatter is YAML, and this fallback
+		// serves TOML and YAML the node decode could not read.
+		writeKV(&b, k, strings.TrimSpace(string(b2)), trustState{})
 		pairs++
 	}
 	return wrapFrontmatter(b.String(), pairs)
@@ -799,12 +803,27 @@ func propIconSVG(key string) string {
 	return `<svg viewBox="0 0 24 24" aria-hidden="true">` + body + `</svg>`
 }
 
-func writeKV(b *strings.Builder, key, value string) {
+// writeKV renders one properties row. tr carries the document's evaluated
+// OKF trust signals (trust.go): a deprecated status and a passed stale_after
+// get a trust badge. The badge classes and the "stale" text are our own
+// constants; every authored byte still goes through html.EscapeString.
+func writeKV(b *strings.Builder, key, value string, tr trustState) {
 	b.WriteString(`<div class="props-row"><span class="k">`)
 	b.WriteString(propIconSVG(key))
 	b.WriteString(html.EscapeString(key))
 	b.WriteString(`</span>`)
 	switch {
+	case key == "status" && tr.Deprecated:
+		b.WriteString(`<span class="v"><span class="trust-badge trust-badge--deprecated">`)
+		b.WriteString(html.EscapeString(value))
+		b.WriteString(`</span></span>`)
+	case key == "stale_after":
+		b.WriteString(`<span class="v dt">`)
+		b.WriteString(html.EscapeString(value))
+		if tr.Stale {
+			b.WriteString(`<span class="trust-badge trust-badge--stale">stale</span>`)
+		}
+		b.WriteString(`</span>`)
 	case key == "status":
 		// Enum-ish values read as a chip.
 		b.WriteString(`<span class="v"><span class="chip">`)

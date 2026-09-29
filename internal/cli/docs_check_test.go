@@ -12,6 +12,8 @@ package cli
 //   [x] Unhappy: only vault roots exits 2, with a skip note on stderr
 //   [x] Unhappy: an unknown flag exits 2
 //   [x] Unhappy: control characters in a path never reach stdout raw
+//   [x] Unhappy: a passed stale_after exits 1 with one stale line carrying the
+//       value; a future one exits 0 silent
 
 import (
 	"bytes"
@@ -22,6 +24,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/module"
 )
@@ -134,7 +137,8 @@ func TestDocsCheckCmd_JSONSchemaFrozen(t *testing.T) {
 		t.Errorf("schema_version = %v, want 1", got["schema_version"])
 	}
 	assertKeys(t, "summary", got["summary"].(map[string]any),
-		"broken_links", "ambiguous_links", "broken_anchors", "orphans", "outside_root_links")
+		"broken_links", "ambiguous_links", "broken_anchors", "orphans", "outside_root_links",
+		"deprecated", "stale")
 
 	byKind := map[string]map[string]any{}
 	for _, raw := range got["findings"].([]any) {
@@ -213,5 +217,27 @@ func TestDocsCheckCmd_ControlCharsInTargetEscaped(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "orphan") {
 		t.Errorf("stdout = %q, want the orphan finding still printed", stdout)
+	}
+}
+
+func TestDocsCheckCmd_StaleAfterExits1(t *testing.T) {
+	dir := t.TempDir()
+	past := time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	docsCheckWrite(t, filepath.Join(dir, "README.md"), "---\nstale_after: "+past+"\n---\n# R\n")
+
+	stdout, _, code := runDocsCheck(t, dir)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stdout %q)", code, stdout)
+	}
+	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+	if len(lines) != 1 || !strings.HasSuffix(lines[0], "/README.md: stale "+past) {
+		t.Errorf("stdout = %q, want one <label>/README.md: stale %s line", stdout, past)
+	}
+
+	future := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	docsCheckWrite(t, filepath.Join(dir, "README.md"), "---\nstale_after: "+future+"\n---\n# R\n")
+	stdout, _, code = runDocsCheck(t, dir)
+	if code != 0 || stdout != "" {
+		t.Errorf("future stale_after: exit = %d, stdout = %q; want 0 and empty", code, stdout)
 	}
 }

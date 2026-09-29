@@ -58,7 +58,7 @@ The spine is the pair that makes the vault render as its author sees it: nothing
 
 - **#6** Preview fidelity: scroll-preserving SSE reload, KaTeX, `<details>` through bluemonday, copy-as-rich-text. Polish; waits because each is independent and none blocks reading.
 - **#7** Backlinks panel in the reader, fed by #1's reverse index. Obsidian's own app and `obsidian backlinks` cover the data permanently; the only added value is seeing it inside the reader, so it waits for demand. A local graph is not planned.
-- **#8** Knowledge-bundle trust signals: `docs check` flags frontmatter `stale_after` in the past and `status: deprecated`; the reader badges them. Open Knowledge Format v0.2 (Google, emitted by langchain-ai/openwiki) uses exactly those keys and the properties block already renders them. Read-only, no dependency; verify the OKF field names at attune before building.
+- **#8** Knowledge-bundle trust signals: `docs check` flags frontmatter `stale_after` in the past and `status: deprecated`; the reader badges them. Open Knowledge Format v0.2 (Google, emitted by langchain-ai/openwiki) uses exactly those keys and the properties block already renders them. Read-only, no dependency; verify the OKF field names at attune before building. *Verified at #450 (2026-09-29):* the names hold, but OKF commit `3dc3029` (2026-08-20) changed `stale_after` inside v0.2 from a date-only `YYYY-MM-DD` to an RFC 3339 instant with an explicit offset, stale when now >= it; date-only values are ignored. Built in #450 against SPEC `ad30107`.
 - Upstreaming `.props`, `.callout`, `.embed`, and `.tree--dense` into Artificer proper (carried from the v2 plan, unchanged).
 
 ## Alternatives declined

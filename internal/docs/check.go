@@ -4,6 +4,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 )
 
 // FindingKind is the frozen wire enum for one Check finding. Adding a kind is
@@ -20,6 +21,12 @@ const (
 	FindingBrokenAnchor FindingKind = "broken_anchor"
 	// FindingOrphan is a doc in a directory root that no other doc links to.
 	FindingOrphan FindingKind = "orphan"
+	// FindingDeprecated is a doc whose frontmatter says status: deprecated
+	// (OKF v0.2 §5.4).
+	FindingDeprecated FindingKind = "deprecated"
+	// FindingStale is a doc whose frontmatter stale_after instant has passed
+	// (OKF v0.2 §5.5). Date-only and offset-less values are ignored.
+	FindingStale FindingKind = "stale"
 )
 
 // Finding is one problem Check found. Ambiguous candidates are never listed.
@@ -31,6 +38,8 @@ type Finding struct {
 	Path string `json:"path"`
 	// Target is the link's target as authored; link kinds only.
 	Target string `json:"target,omitempty"`
+	// StaleAfter is the passed stale_after value as authored; stale only.
+	StaleAfter string `json:"stale_after,omitempty"`
 }
 
 // CheckedRoot reports how one root fared. It carries no absolute path, so a
@@ -51,6 +60,8 @@ type CheckSummary struct {
 	BrokenAnchors    int `json:"broken_anchors"`
 	Orphans          int `json:"orphans"`
 	OutsideRootLinks int `json:"outside_root_links"`
+	Deprecated       int `json:"deprecated"`
+	Stale            int `json:"stale"`
 }
 
 // CheckReport is the wire shape of `forgectl docs check --json`.
@@ -63,14 +74,20 @@ type CheckReport struct {
 
 const vaultSkipReason = "vault roots are not checked yet"
 
-// Check reports broken links, ambiguous links, broken anchors, and orphan
-// pages across every docs-kind root. Vault roots are skipped. Links that
-// leave their root are counted, not reported: they work on GitHub.
+// Check reports broken links, ambiguous links, broken anchors, orphan pages,
+// and deprecated or stale docs across every docs-kind root. Vault roots are
+// skipped. Links that leave their root are counted, not reported: they work
+// on GitHub.
 //
 // It resolves through resolveParts, never ResolveLink, so a path containing a
 // literal '#' (authored "%23") is not re-split — the same reason
 // buildBacklinks calls resolveParts.
 func (idx *Index) Check() CheckReport {
+	return idx.CheckAt(trustNow())
+}
+
+// CheckAt is Check with the staleness clock pinned to now.
+func (idx *Index) CheckAt(now time.Time) CheckReport {
 	report := CheckReport{
 		SchemaVersion: 1,
 		Roots:         make([]CheckedRoot, 0, len(idx.roots)),
@@ -135,6 +152,17 @@ func (idx *Index) Check() CheckReport {
 				Kind: FindingOrphan, Root: from.RootLabel, Path: from.RelPath,
 			})
 		}
+		tr := evalTrust(from.Status, from.StaleAfter, now)
+		if tr.Deprecated {
+			report.Findings = append(report.Findings, Finding{
+				Kind: FindingDeprecated, Root: from.RootLabel, Path: from.RelPath,
+			})
+		}
+		if tr.Stale {
+			report.Findings = append(report.Findings, Finding{
+				Kind: FindingStale, Root: from.RootLabel, Path: from.RelPath, StaleAfter: tr.StaleAfter,
+			})
+		}
 	}
 
 	sort.SliceStable(report.Findings, func(a, b int) bool {
@@ -161,6 +189,10 @@ func (idx *Index) Check() CheckReport {
 			report.Summary.BrokenAnchors++
 		case FindingOrphan:
 			report.Summary.Orphans++
+		case FindingDeprecated:
+			report.Summary.Deprecated++
+		case FindingStale:
+			report.Summary.Stale++
 		}
 	}
 	return report
