@@ -52,16 +52,9 @@ const keychainTimeout = 15 * time.Second
 // spelled differently.
 var tokenShape = regexp.MustCompile(`^tk_[0-9a-fA-F]{40,}$`)
 
-// Token is an opaque bearer credential. The payload lives behind a closure —
-// not a plain string field — for the same reason internal/exec.SecretArg's
-// does: fmt, slog's TextHandler, and encoding/json all reach a value through
-// reflection only when it is NOT held behind an unexported field of a struct
-// with no redacting method set of its own, and a func value has nothing for
-// reflection to print but an address. The redacting methods below also apply
-// when a Token sits in a field of another struct, exported or not, so fmt,
-// slog, and encoding/json print the redaction marker there too. The value is
-// still reachable through Header(), so route it there and do not pass it
-// around as a string.
+// Token is an opaque bearer credential. The payload lives behind a closure,
+// not a plain string field, and the redacting methods below cover the Token's
+// own formatting. Header() is the only way to read the value.
 type Token struct {
 	reveal func() string
 }
@@ -232,10 +225,9 @@ func ReadToken(ctx context.Context, runner exec.Runner, service string) (Token, 
 		// retains the child's stdout in its exported Output field, and this
 		// child's stdout is the bearer token — a nonzero exit does not mean
 		// stdout was empty. Wrapping it to "improve the error context" would
-		// make the credential reachable by any code that holds the returned
-		// error, directly or through errors.As, since it could then read
-		// .Output. CommandError.Error() does not print Output, so rendering
-		// the error is not the exposure. Do not add %w here.
+		// put it where any code that holds the returned error, directly or
+		// through errors.As, can read or dump it, so the error is dropped
+		// whole and never wrapped, logged or rendered. Do not add %w here.
 		return Token{}, fmt.Errorf("%w: service %q", ErrTokenNotFound, service)
 	}
 	value := strings.TrimSpace(out)
