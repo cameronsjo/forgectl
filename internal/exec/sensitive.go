@@ -112,8 +112,9 @@ const (
 	// the ordinary path cannot satisfy: sops' stderr quotes the offending
 	// line of the document it failed to parse, and that line is
 	// `key: '<the secret>'`. Runner's runAndWrap logs stderr at Error level —
-	// which survives any configured log level and can be pointed at a file on
-	// disk — and retains it on *CommandError, which fang renders. Here,
+	// recorded at every enabled log_level (log_level defaults to off), and it
+	// can be pointed at a file on disk — and retains it on *CommandError,
+	// which fang renders. Here,
 	// nothing logged or returned can render a payload, and both streams are
 	// capped so the measured 8.4 MB of sops re-invocation stderr cannot grow
 	// the heap.
