@@ -124,9 +124,17 @@ func newSanitizer() *bluemonday.Policy {
 	// generating the classes, not the document author, so the usual UGC
 	// threat model doesn't apply).
 	p.AllowStyling()
+	// img alt: bluemonday's Paragraph pattern has no '#', so ![#1 chart](x.png)
+	// lost its alt entirely. This is Paragraph plus '#' and nothing else — no
+	// '<', '>', quotes, '&' or ';', and bluemonday still HTML-escapes the value
+	// on output — so an alt cannot close the attribute or open a tag or
+	// entity. '#' is inert in an alt string (unlike in href or style).
+	p.AllowAttrs("alt").Matching(imgAltPattern).OnElements("img")
 	allowInlineSVG(p)
 	return p
 }
+
+var imgAltPattern = regexp.MustCompile(`^[\p{L}\p{N}\s\-_',\[\]!\./\\\(\)#]*$`)
 
 // svgPaint matches the values a paint-ish SVG attribute (fill, stroke,
 // stop-color) may carry: a keyword, a hex or rgb() color, or a same-document
