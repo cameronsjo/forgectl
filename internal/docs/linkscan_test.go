@@ -5,6 +5,8 @@ package docs
 // scanDoc (Classification: one-pass parser — title/frontmatter/AST scan)
 //   [x] Happy: title extracted from the first "# " heading
 //   [x] Happy: title falls back to the filename when no heading is present
+//   [x] Unhappy: a "# " line in a fence, $$ block, indented code block or
+//       frontmatter comment is no docs-root title
 //   [x] Happy: frontmatter aliases as a YAML list
 //   [x] Happy: frontmatter aliases as a bare YAML scalar
 //   [x] Happy: headings, each carrying goldmark's auto-ID slug
@@ -70,6 +72,33 @@ func TestScanDoc_TitleFallsBackToFilename(t *testing.T) {
 	}
 	if meta.Title != "no-heading" {
 		t.Errorf("Title = %q, want %q", meta.Title, "no-heading")
+	}
+}
+
+// TestScanDoc_TitleFromParse: a docs-root title is a level-1 heading the
+// page renders, so a "# " line inside a code fence, a $$ block, an indented
+// code block or a YAML frontmatter comment is never the title. A real
+// heading's text is still taken verbatim, as firstH1 took it.
+func TestScanDoc_TitleFromParse(t *testing.T) {
+	cases := []struct{ name, src, want string }{
+		{"fence", "```sh\n# not a title\n```\n\n# Real\n", "Real"},
+		{"tilde fence", "~~~\n# not a title\n~~~\n", "t"},
+		{"math block", "$$\n# not a title\n$$\n\n# Real\n", "Real"},
+		{"indented code", "para\n\n    # not a title\n\n# Real\n", "Real"},
+		{"frontmatter comment", "---\n# not a title\nkey: v\n---\n\n# Real\n", "Real"},
+		{"verbatim text", "  # A *b* `c` \\_d\n", "A *b* `c` \\_d"},
+		{"setext is no title", "Setext\n===\n", "t"},
+	}
+	for _, tc := range cases {
+		path := filepath.Join(t.TempDir(), "t.md")
+		writeFile(t, path, tc.src)
+		meta, err := scanDoc(path, "t.md")
+		if err != nil {
+			t.Fatalf("%s: scanDoc: %v", tc.name, err)
+		}
+		if meta.Title != tc.want {
+			t.Errorf("%s: Title = %q, want %q", tc.name, meta.Title, tc.want)
+		}
 	}
 }
 
