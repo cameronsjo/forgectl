@@ -594,8 +594,9 @@ func (idx *Index) buildBacklinks() map[docKey][]int {
 	sets := make(map[docKey]map[int]bool)
 	for i := range idx.docs {
 		from := &idx.docs[i]
+		budget := newFragmentBudget()
 		for _, link := range from.Links {
-			target, _ := idx.resolveParts(from, link.Path, link.Fragment)
+			target, _ := idx.resolveParts(from, link.Path, link.Fragment, budget)
 			if target == nil {
 				continue
 			}

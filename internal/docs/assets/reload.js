@@ -175,7 +175,7 @@
     inlineOutline = document.querySelector("details.outline-inline");
     if (inlineOutline) { inlineOutline.open = inlineOpen; }
 
-    var filter = document.getElementById("doc-filter");
+    var filter = document.querySelector('[data-fc="doc-filter"]');
     if (filter && filter.value.trim() !== "") {
       filter.dispatchEvent(new Event("input"));
     }
@@ -221,11 +221,11 @@
   // The open doc was deleted or renamed. The banner sits inside .doc-body, so
   // the swap that restores the doc replaces it.
   function showMissing() {
-    if (document.getElementById("doc-missing")) { return; }
+    if (document.querySelector('[data-fc="doc-missing"]')) { return; }
     var body = document.querySelector(".doc-body");
     if (!body) { return; }
     var banner = document.createElement("div");
-    banner.id = "doc-missing";
+    banner.setAttribute("data-fc", "doc-missing");
     banner.className = "banner banner--attention";
     banner.setAttribute("role", "status");
     var text = document.createElement("div");
@@ -238,12 +238,14 @@
   // The stream gave up, so this page no longer updates. Say so where it said
   // "serving": the dot changes tier and the text changes with it.
   function showDisconnected() {
-    var item = document.getElementById("live-status");
+    var item = document.querySelector('[data-fc="live-status"]');
     if (!item) { return; }
     var dot = item.querySelector(".live-dot");
     var text = item.querySelector(".live-status__text");
     if (dot) { dot.classList.add("live-dot--down"); }
     if (text) { text.textContent = "disconnected — restart forgectl docs serve for live updates"; }
+    // The bar ellipsizes on a phone; the tooltip keeps the whole message.
+    if (text) { item.title = text.textContent; }
   }
 
   // Changes arrive in bursts (an editor's save is often several writes), so a

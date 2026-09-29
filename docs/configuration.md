@@ -71,6 +71,18 @@ query, so **everything renders dark inside tmux** regardless of the terminal
 behind it. On a light terminal inside tmux, set `mode = "light"` explicitly —
 that is the case auto-detection cannot see.
 
+**Help and errors still query the terminal.** The policy above governs
+forgectl's own detection. `--help`, `--version` and error output are rendered by
+[fang](https://github.com/charmbracelet/fang) v1.0.0, which asks the terminal
+for its background (an OSC 11 query plus a DA1 request) whenever stdout is a
+TTY. It does this even where forgectl's policy refuses to probe: inside
+tmux/screen, with `NO_COLOR` set, or with a forced `[theme] mode`. forgectl
+ignores the answer in those cases (it resolves the palette from `mode` or the
+dark default instead), so the colours are right; only the query itself is sent.
+Measured cost is under 50 ms and no hang has been reproduced. Piped output never
+queries. There is no fang option to turn the query off, so this is accepted
+until upstream adds one (tracked in #546).
+
 A bad `[theme]` never stops the binary starting: it is reported by `doctor` and
 `launch doctor`, and the default palette is used. Run `forgectl theme show` to
 see what actually resolved, including which roles came from an override and

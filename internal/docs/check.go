@@ -29,9 +29,34 @@ const (
 	FindingStale FindingKind = "stale"
 )
 
+// Severity is the wire enum for how a Finding weighs on the check's exit code.
+// Adding a value is additive (ADR-0008 rule 2).
+type Severity string
+
+const (
+	// SeverityError fails the check: the report exits 1.
+	SeverityError Severity = "error"
+	// SeverityInfo is reported but never fails the check. A deprecated page is
+	// kept on purpose (OKF v0.2 §5.4), so its own status: deprecated already
+	// states the author's intent.
+	SeverityInfo Severity = "info"
+)
+
+// severityFor is the one place a kind gets its severity. Every kind is an
+// error except deprecated.
+func severityFor(k FindingKind) Severity {
+	if k == FindingDeprecated {
+		return SeverityInfo
+	}
+	return SeverityError
+}
+
 // Finding is one problem Check found. Ambiguous candidates are never listed.
 type Finding struct {
 	Kind FindingKind `json:"kind"`
+	// Severity is "error" or "info"; only an error fails the check. Additive
+	// (ADR-0008 rule 2).
+	Severity Severity `json:"severity"`
 	// Root is the root label.
 	Root string `json:"root"`
 	// Path is the source doc's RelPath (the orphan's own for an orphan).
@@ -125,7 +150,7 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 			continue
 		}
 		for _, l := range from.Links {
-			target, miss := idx.resolveParts(from, l.Path, l.Fragment)
+			target, miss := idx.resolveParts(from, l.Path, l.Fragment, nil)
 			var kind FindingKind
 			switch miss {
 			case MissNone:
@@ -196,7 +221,9 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 		return fa.Kind < fb.Kind
 	})
 
-	for _, f := range report.Findings {
+	for i := range report.Findings {
+		f := &report.Findings[i]
+		f.Severity = severityFor(f.Kind)
 		switch f.Kind {
 		case FindingBrokenLink:
 			report.Summary.BrokenLinks++
@@ -296,7 +323,7 @@ func (idx *Index) dirLinkInbound(rootByLabel map[string]Root) map[int]bool {
 			}
 			// A path that resolves to a doc is a link to that doc, not to
 			// the directory.
-			if target, miss := idx.resolveParts(from, l.Path, l.Fragment); target != nil || miss != MissNoTarget {
+			if target, miss := idx.resolveParts(from, l.Path, l.Fragment, nil); target != nil || miss != MissNoTarget {
 				continue
 			}
 			for _, j := range hits {
@@ -323,4 +350,17 @@ func isIndexName(name string) bool {
 		base = base[:dot]
 	}
 	return base == "readme" || base == "index"
+}
+
+// Errors counts the findings that fail the check. It counts everything
+// that is not SeverityInfo, so a finding built without a severity fails
+// closed rather than silently passing.
+func (r CheckReport) Errors() int {
+	n := 0
+	for _, f := range r.Findings {
+		if f.Severity != SeverityInfo {
+			n++
+		}
+	}
+	return n
 }

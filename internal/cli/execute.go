@@ -296,6 +296,11 @@ func fangOptions(version, commit string, th theme.Theme) []fang.Option {
 		// fang renders --help, --version and every error frame, so without
 		// this the most-seen surface in the binary is the only one not drawing
 		// from the palette.
+		// fang v1.0.0 has no option to skip its terminal-background query
+		// (mustColorscheme, theme.go:115-118, runs on any stdout TTY, so an OSC
+		// 11 and DA1 request are sent even where theme.ShouldProbe refuses). We
+		// only ignore the answer here. Documented in docs/configuration.md;
+		// blocked on an upstream opt-out (#546).
 		fang.WithColorSchemeFunc(th.Fang(fangTrustsProbe())),
 	}
 }
