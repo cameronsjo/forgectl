@@ -24,8 +24,6 @@ import (
 var jsonContractExempt = map[string]string{
 	"bench open":             "opens or attaches an interactive surface (browser, tmux, shell, container, editor session); it reports no state",
 	"bench up":               "reports no state; it changes something and the exit code is the outcome",
-	"branch":                 "a dry-run/report arm of a mutating verb: a flag arm, out of scope for this walk (see the note above)",
-	"clean":                  "a dry-run/report arm of a mutating verb: a flag arm, out of scope for this walk (see the note above)",
 	"docker build":           "reports no state; it changes something and the exit code is the outcome",
 	"docker run":             "opens or attaches an interactive surface (browser, tmux, shell, container, editor session); it reports no state",
 	"docker shell":           "opens or attaches an interactive surface (browser, tmux, shell, container, editor session); it reports no state",

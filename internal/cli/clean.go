@@ -50,6 +50,7 @@ func newCleanCmdForClient(client *cleanpkg.Client, th theme.Theme) *cobra.Comman
 		force     bool
 		caches    bool
 		docker    bool
+		asJSON    bool
 	)
 
 	cmd := &cobra.Command{
@@ -74,6 +75,9 @@ prompt.
                                          caches (npm/pnpm/pip/go/brew)
   forgectl clean --docker --apply       also prune docker (containers,
                                          images, volumes, build cache)
+  forgectl clean --json                 the dep/build-dir dry-run report as
+                                         JSON; refused with --apply, --caches
+                                         or --docker
 
 A project with a dirty (uncommitted) git tree is skipped unless --force —
 a stray uncommitted file inside dist/ shouldn't be nuked silently. .git is
@@ -110,6 +114,9 @@ verb that clears only the cache.`,
 				// first letter of a styled error, and "--Type" is not a flag.
 				return fmt.Errorf("cannot combine --type with --caches or --docker: --type only filters the dep/build-dir pass (the other passes scan a fixed target set, not the node|python|go|build vocabulary)")
 			}
+			if asJSON && (apply || caches || docker) {
+				return fmt.Errorf("cannot combine --json with --apply, --caches or --docker: --json reports the dep/build-dir dry-run only")
+			}
 			var types []cleanpkg.Kind
 			if typeFlag != "" {
 				k, err := cleanpkg.ParseKind(typeFlag)
@@ -124,7 +131,7 @@ verb that clears only the cache.`,
 				OlderThan: olderThan,
 				Apply:     apply,
 				Force:     force,
-			}, caches, docker, th)
+			}, caches, docker, asJSON, th)
 		},
 	}
 	cmd.Flags().StringVar(&root, "root", "", "root directory to scan (default: ~/Projects, or [clean] default_root)")
@@ -134,6 +141,7 @@ verb that clears only the cache.`,
 	cmd.Flags().BoolVar(&force, "force", false, "also clean projects with a dirty/uncommitted git tree")
 	cmd.Flags().BoolVar(&caches, "caches", false, "also reclaim detected package-manager caches (npm/pnpm/pip/go/brew) — opt-in, isolated per tool; brew ALSO clears old Cellar versions")
 	cmd.Flags().BoolVar(&docker, "docker", false, "also prune docker (containers/images/volumes/build cache) — opt-in, isolated per category")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"root":...,"items":[{"path","kind","size_bytes","skipped","skip_reason"}],"total_reclaimable_bytes":...} to stdout; dry-run only, not valid with --apply/--caches/--docker`)
 	return cmd
 }
 
@@ -144,9 +152,9 @@ verb that clears only the cache.`,
 // prevents a later one from running — every error is combined and
 // surfaced together at the end (errors.Join returns nil when errs is
 // empty, so the all-success case is unaffected).
-func runClean(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.CleanOptions, includeCaches, includeDocker bool, th theme.Theme) error {
+func runClean(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.CleanOptions, includeCaches, includeDocker, asJSON bool, th theme.Theme) error {
 	var errs []error
-	if err := runCleanDirs(cmd, client, opts, th); err != nil {
+	if err := runCleanDirs(cmd, client, opts, asJSON, th); err != nil {
 		errs = append(errs, fmt.Errorf("dep/build-dir pass: %w", err))
 	}
 	if includeCaches {
@@ -165,7 +173,7 @@ func runClean(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.CleanOp
 // runCleanDirs is the original dep/build-dir reclaim pass: scans, prints
 // the report, and — only with --apply, after a confirmation prompt —
 // deletes everything reclaimable, then reports actual reclaimed bytes.
-func runCleanDirs(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.CleanOptions, th theme.Theme) error {
+func runCleanDirs(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.CleanOptions, asJSON bool, th theme.Theme) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
@@ -184,6 +192,10 @@ func runCleanDirs(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.Cle
 	preview, err := client.ApplyReport(ctx, resolvedRoot, report, previewOpts)
 	if err != nil {
 		return err
+	}
+
+	if asJSON {
+		return writeJSON(out, newCleanReportJSON(resolvedRoot, preview))
 	}
 
 	printCleanItems(out, preview.Items)
@@ -542,6 +554,32 @@ func printCleanItems(out io.Writer, items []cleanpkg.Item) {
 		}
 		fmt.Fprintf(out, "%-8s %s — %s\n", item.Kind, item.Path, formatBytes(item.Size))
 	}
+}
+
+// cleanItemJSON is one target in `clean --json` (additive-only, ADR-0008).
+type cleanItemJSON struct {
+	Path       string `json:"path"`
+	Kind       string `json:"kind"`
+	SizeBytes  int64  `json:"size_bytes"`
+	Skipped    bool   `json:"skipped"`
+	SkipReason string `json:"skip_reason"`
+}
+
+type cleanReportJSON struct {
+	Root                  string          `json:"root"`
+	Items                 []cleanItemJSON `json:"items"`
+	TotalReclaimableBytes int64           `json:"total_reclaimable_bytes"`
+}
+
+func newCleanReportJSON(root string, r cleanpkg.Result) cleanReportJSON {
+	items := make([]cleanItemJSON, 0, len(r.Items))
+	for _, it := range r.Items {
+		items = append(items, cleanItemJSON{
+			Path: it.Path, Kind: string(it.Kind), SizeBytes: it.Size,
+			Skipped: it.Skipped, SkipReason: it.SkipReason,
+		})
+	}
+	return cleanReportJSON{Root: root, Items: items, TotalReclaimableBytes: r.TotalReclaimable}
 }
 
 // countReclaimable counts the non-skipped items in items.

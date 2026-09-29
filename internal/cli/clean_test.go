@@ -41,6 +41,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -588,5 +589,73 @@ func TestCleanCmd_CachesApply_PnpmDetected_PromptCarriesMismatchCaveat(t *testin
 	}
 	if !strings.Contains(gotPrompt, "content-addressable store") {
 		t.Errorf("expected the pnpm preview/prune-mismatch caveat in the confirmation prompt, got: %q", gotPrompt)
+	}
+}
+
+func TestCleanCmd_JSON_ReportsItemsAndBytesWithoutDeleting(t *testing.T) {
+	root := t.TempDir()
+	nm := filepath.Join(root, "proj", "node_modules")
+	leaf := filepath.Join(nm, "leaf.js")
+	if err := os.MkdirAll(filepath.Dir(leaf), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(leaf, make([]byte, 100), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client := cleanpkg.New(&exec.FakeRunner{}, cleanpkg.WithRoot(root))
+	cmd := newCleanCmdForClient(client, theme.Theme{})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(leaf); err != nil {
+		t.Errorf("--json must not delete: %v", err)
+	}
+	var got struct {
+		Root  string `json:"root"`
+		Items []struct {
+			Path      string `json:"path"`
+			SizeBytes int64  `json:"size_bytes"`
+		} `json:"items"`
+		Total int64 `json:"total_reclaimable_bytes"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v\n%s", err, stdout.String())
+	}
+	if len(got.Items) != 1 || got.Items[0].SizeBytes < 100 || got.Total != got.Items[0].SizeBytes || got.Root == "" {
+		t.Errorf("report = %+v", got)
+	}
+}
+
+func TestCleanCmd_JSON_EmptyRootIsEmptyArray(t *testing.T) {
+	client := cleanpkg.New(&exec.FakeRunner{}, cleanpkg.WithRoot(t.TempDir()))
+	cmd := newCleanCmdForClient(client, theme.Theme{})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), `"items": []`) {
+		t.Errorf("stdout = %s, want an empty items array and no prose", stdout.String())
+	}
+}
+
+func TestCleanCmd_JSONRefusedWithApplyCachesDocker(t *testing.T) {
+	for _, flag := range []string{"--apply", "--caches", "--docker"} {
+		client := cleanpkg.New(&exec.FakeRunner{}, cleanpkg.WithRoot(t.TempDir()))
+		cmd := newCleanCmdForClient(client, theme.Theme{})
+		cmd.SetOut(new(bytes.Buffer))
+		cmd.SetErr(new(bytes.Buffer))
+		cmd.SilenceUsage = true
+		cmd.SetArgs([]string{"--json", flag})
+		err := cmd.ExecuteContext(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "--json") {
+			t.Errorf("%s: error = %v, want a --json refusal", flag, err)
+		}
 	}
 }
