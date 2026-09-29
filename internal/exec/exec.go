@@ -166,6 +166,17 @@ func filteredEnvironment(overrides map[string]string, unset []string) []string {
 	return filtered
 }
 
+// pipeWaitDelay bounds how long Wait lingers for the output pipes after the
+// child has exited or its context was cancelled. Without it, a grandchild that
+// inherits stdout/stderr (a script's `sleep 30 &`) keeps the pipe open, so
+// CommandContext's SIGKILL of the direct child does not end the call: Wait
+// blocks until the grandchild lets go. That defeats every context deadline
+// callers rely on, including the lifecycle-lock-held tmux budget in
+// internal/pr (#556). 500 ms is ample for a live child to flush what it already
+// wrote and short enough not to matter against the seconds-scale deadlines
+// above it.
+const pipeWaitDelay = 500 * time.Millisecond
+
 // runAndWrap runs an already-configured *exec.Cmd (Stdin/Env set by the
 // caller, Stderr not yet wired) and converts its outcome into the Runner
 // contract: trimmed stdout on success, or a *CommandError — carrying stderr,
@@ -182,6 +193,7 @@ func runAndWrap(cmd *exec.Cmd, preparingMsg, successMsg, failureMsg string, mask
 
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
+	cmd.WaitDelay = pipeWaitDelay
 	out, err := cmd.Output()
 	if err != nil {
 		trimmed := mask.text(strings.TrimRight(string(out), "\n"))
