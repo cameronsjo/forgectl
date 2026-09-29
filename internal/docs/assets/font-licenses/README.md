@@ -26,3 +26,14 @@ with every copy: [`KaTeX-MIT.txt`](KaTeX-MIT.txt), copied verbatim from the
 `LICENSE` in the katex 0.18.9 npm tarball. It lives in this directory so it
 rides the same goreleaser `files` entries as the font licenses above.
 `../provenance-katex.json` records the version and a sha256 per file.
+
+## Mermaid
+
+`forgectl docs serve` also embeds mermaid (`mermaid.min.js`, version 11.12.3)
+to render diagrams. It is under the MIT License, whose notice must travel with
+every copy: [`Mermaid-MIT.txt`](Mermaid-MIT.txt), copied verbatim from the
+`LICENSE` in the mermaid 11.12.3 npm tarball (the same tarball whose
+`dist/mermaid.min.js` matches the sha256 in `../provenance-mermaid.json`). It
+lives in this directory so it rides the same goreleaser `files` entries as the
+licenses above. The minified bundle also inlines mermaid's own dependencies;
+their notices are not reproduced here.

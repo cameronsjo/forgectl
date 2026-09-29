@@ -124,9 +124,20 @@ func newSanitizer() *bluemonday.Policy {
 	// generating the classes, not the document author, so the usual UGC
 	// threat model doesn't apply).
 	p.AllowStyling()
+	// img alt: UGCPolicy limits it to bluemonday's Paragraph pattern, which
+	// drops the whole alt for ordinary punctuation (':', '?', '%', '&', '"',
+	// '#', ...). Safety does not come from a character allowlist but from
+	// bluemonday HTML-escaping every attribute value on output (" becomes
+	// &#34;, < becomes &lt;, & becomes &amp;), so no alt can close the
+	// attribute or open a tag. The pattern therefore only refuses control
+	// characters; tab, LF and CR stay because a markdown alt may span a soft
+	// line break. Scoped to img alt: the global title pattern is untouched.
+	p.AllowAttrs("alt").Matching(imgAltPattern).OnElements("img")
 	allowInlineSVG(p)
 	return p
 }
+
+var imgAltPattern = regexp.MustCompile(`^[^\x00-\x08\x0B\x0C\x0E-\x1F\x7F]*$`)
 
 // svgPaint matches the values a paint-ish SVG attribute (fill, stroke,
 // stop-color) may carry: a keyword, a hex or rgb() color, or a same-document
@@ -640,6 +651,26 @@ var outlineHeading = regexp.MustCompile(`(?s)<h([23]) id="([^"]+)">(.*?)</h[23]>
 // stripTags removes inline markup from a heading's rendered text.
 var stripTags = regexp.MustCompile(`<[^>]*>`)
 
+// outlineMath matches the math span math.go emits inside a heading. The
+// outline is plain text the client never typesets, so the span is reduced to
+// its TeX source with the $ delimiters dropped ("Energy E=mc^2", not
+// "Energy $E=mc^2$"). The class attribute is the exact one math.go writes.
+var outlineMath = regexp.MustCompile(`<span class="(` + regexp.QuoteMeta(mathInlineClass) + `|` +
+	regexp.QuoteMeta(mathDisplayClass) + `)">(.*?)</span>`)
+
+// outlineText renders a heading's inner HTML as outline text.
+func outlineText(inner string) string {
+	inner = outlineMath.ReplaceAllStringFunc(inner, func(span string) string {
+		m := outlineMath.FindStringSubmatch(span)
+		delim := "$"
+		if m[1] == mathDisplayClass {
+			delim = mathDelim
+		}
+		return strings.TrimSuffix(strings.TrimPrefix(m[2], delim), delim)
+	})
+	return strings.TrimSpace(html.UnescapeString(stripTags.ReplaceAllString(inner, "")))
+}
+
 func extractOutline(rendered string) []OutlineItem {
 	var items []OutlineItem
 	for _, m := range outlineHeading.FindAllStringSubmatch(rendered, -1) {
@@ -653,7 +684,7 @@ func extractOutline(rendered string) []OutlineItem {
 		// "Q&amp;A".
 		items = append(items, OutlineItem{
 			Level: level,
-			Text:  strings.TrimSpace(html.UnescapeString(stripTags.ReplaceAllString(m[3], ""))),
+			Text:  outlineText(m[3]),
 			ID:    m[2],
 		})
 	}
