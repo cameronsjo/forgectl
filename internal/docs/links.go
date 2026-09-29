@@ -546,7 +546,10 @@ func foldHeadingKey(s string) string {
 // renders as it is written (a GFM bare-URL autolink renders its own text,
 // see appendNodeText), so fragmentText would return it unchanged. "$" (math)
 // and "!" (an image) are absent on purpose: "$x$" and "!x" render as
-// written, and an image needs its "[", already in the set.
+// written, and an image needs its "[", already in the set. "#" is absent
+// because it cannot occur: matchFragment splits on "#" first, so the segment
+// it parses never holds one, and an ATX closing run ("Foo #") never reaches
+// fragmentText (it leaves an empty last segment, which matches nothing).
 // TestFragmentText_MarkupFreeRendersAsWritten pins that, and
 // TestResolveVault_HeadingMatchEveryMarkupByte pins each byte below.
 const fragmentMarkupBytes = "\\*_`=~[<&%"
