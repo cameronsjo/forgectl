@@ -131,15 +131,22 @@ func newSanitizer() *bluemonday.Policy {
 	// '#', ...). Safety does not come from a character allowlist but from
 	// bluemonday HTML-escaping every attribute value on output (" becomes
 	// &#34;, < becomes &lt;, & becomes &amp;), so no alt can close the
-	// attribute or open a tag. The pattern therefore only refuses control
+	// attribute or open a tag. attrTextPattern therefore only refuses control
 	// characters; tab, LF and CR stay because a markdown alt may span a soft
-	// line break. Scoped to img alt: the global title pattern is untouched.
-	p.AllowAttrs("alt").Matching(imgAltPattern).OnElements("img")
+	// line break. bluemonday v1.0.27 ORs the policies registered for an
+	// attribute, so this rule widens what UGCPolicy admits and the global
+	// Paragraph rule still applies alongside it (it also admits \f).
+	p.AllowAttrs("alt").Matching(attrTextPattern).OnElements("img")
+	// title: same drop, same fix, on the two elements markdown emits a title
+	// for (link and image). The global title rule is untouched, and being
+	// OR'd with it this only ever admits more, never less, on a and img.
+	p.AllowAttrs("title").Matching(attrTextPattern).OnElements("a", "img")
 	allowInlineSVG(p)
 	return p
 }
 
-var imgAltPattern = regexp.MustCompile(`^[^\x00-\x08\x0B\x0C\x0E-\x1F\x7F]*$`)
+// attrTextPattern accepts any attribute text free of control characters.
+var attrTextPattern = regexp.MustCompile(`^[^\x00-\x08\x0B\x0C\x0E-\x1F\x7F]*$`)
 
 // svgPaint matches the values a paint-ish SVG attribute (fill, stroke,
 // stop-color) may carry: a keyword, a hex or rgb() color, or a same-document
