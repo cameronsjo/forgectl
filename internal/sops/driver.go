@@ -145,9 +145,9 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 
 	// The guard is armed BEFORE the work directory exists and released AFTER
 	// it is removed: defers run last-in first-out, so release (deferred first)
-	// runs after cleanup on every path, a panic included. A SIGINT or SIGTERM
-	// anywhere in between removes the directory and then terminates the
-	// process. See signal.go.
+	// runs after cleanup on every path, a panic included. A guarded signal
+	// (SIGINT, SIGTERM, SIGHUP, SIGQUIT on unix) anywhere in between removes
+	// the directory and then terminates the process. See signal.go.
 	guard := armPlaintextGuard()
 	defer guard.release()
 
@@ -222,9 +222,10 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 	// a Ctrl-C during a KMS round-trip skipped the deferred cleanup and left
 	// `value` (0600, the secret verbatim) where `git add -A` will commit it —
 	// reproduced on the first of forty kill attempts. The guard now removes
-	// the directory on SIGINT and SIGTERM; shrinking the window still matters,
-	// because SIGKILL and a power loss run no handler at all and remain a
-	// residual (a sweep of stale work directories, cameronsjo/forgectl#520).
+	// the directory on the catchable terminating signals; shrinking the window
+	// still matters, because SIGKILL, SIGSTOP, a power loss and any signal the
+	// guard does not cover run no handler at all and remain a residual (a
+	// sweep of stale work directories, cameronsjo/forgectl#520).
 	work.discardStagedValue()
 
 	outcome, err := c.verify(ctx, sopsBin, target, segments, value, work)

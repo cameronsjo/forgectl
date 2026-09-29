@@ -10,10 +10,10 @@ import (
 
 // # Why a scoped handler, and not a cancelled context
 //
-// Nothing upstream catches SIGINT or SIGTERM: fang installs signal.NotifyContext
-// only when given WithNotifySignal, and forgectl's root never passes it, so both
-// signals keep Go's default disposition and kill the process with every defer
-// unrun. That is the defect this closes: a signal while the work directory holds
+// Nothing upstream catches the terminating signals: fang installs
+// signal.NotifyContext only when given WithNotifySignal, and forgectl's root
+// never passes it, so each keeps Go's default disposition and kills the process
+// with every defer unrun. That is the defect this closes: a signal while the work directory holds
 // a plaintext value skips `defer work.cleanup()` and leaves the secret beside
 // the target, INSIDE the repository, where `git add -A` will commit it.
 //
@@ -35,11 +35,12 @@ import (
 //
 // # What it cannot cover
 //
-// SIGKILL cannot be caught and a power loss runs no code, so either can still
-// leave the directory behind. That residual is tracked in
+// SIGKILL and SIGSTOP cannot be caught, a power loss runs no code, and a
+// terminating signal missing from guardedSignals is not seen; any of them can
+// still leave the directory behind. That residual is tracked in
 // cameronsjo/forgectl#520 (a sweep of stale work directories), not here.
 
-// plaintextGuard runs the work directory's cleanup when SIGINT or SIGTERM
+// plaintextGuard runs the work directory's cleanup when one of guardedSignals
 // arrives inside the span it is armed for, then terminates the process with
 // that signal.
 //
@@ -70,15 +71,16 @@ type plaintextGuard struct {
 // production the process is gone before anyone reads it.
 var errInterrupted = errors.New("interrupted before the work directory was created")
 
-// armPlaintextGuard registers for SIGINT and SIGTERM and starts the handler.
+// armPlaintextGuard registers for guardedSignals and starts the handler.
 //
 // A signal the process inherited as IGNORED stays ignored. signal.Notify on
-// an ignored SIGINT re-enables it, and a job started with SIGINT ignored (a
-// background job in a non-interactive shell, nohup) must not become
-// interruptible for the length of this span.
+// an ignored signal re-enables it, and a job that was told to survive one
+// must not become killable by it for the length of this span: nohup ignores
+// SIGHUP, and a non-interactive shell starts a background job with SIGINT and
+// SIGQUIT ignored.
 func armPlaintextGuard() *plaintextGuard {
 	var sigs []os.Signal
-	for _, s := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
+	for _, s := range guardedSignals {
 		if !signal.Ignored(s) {
 			sigs = append(sigs, s)
 		}
@@ -191,16 +193,14 @@ func (g *plaintextGuard) release() {
 	}
 }
 
-// exitStatusFor is the conventional 128+N status for a caught signal: 130 for
-// SIGINT, 143 for SIGTERM. It is the fallback where re-raising is unavailable
-// or did not take.
+// exitStatusFor is the conventional 128+N status for a caught signal (130 for
+// SIGINT, 143 for SIGTERM, 129 for SIGHUP, 131 for SIGQUIT). It is the
+// fallback where re-raising is unavailable or did not take. Derived from the
+// signal number rather than tabled, so a signal added to guardedSignals cannot
+// ship without a status.
 func exitStatusFor(sig os.Signal) int {
-	switch sig {
-	case os.Interrupt:
-		return 130
-	case syscall.SIGTERM:
-		return 143
-	default:
-		return 1
+	if s, ok := sig.(syscall.Signal); ok {
+		return 128 + int(s)
 	}
+	return 1
 }

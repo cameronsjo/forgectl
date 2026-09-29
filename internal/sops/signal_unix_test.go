@@ -7,7 +7,9 @@ package sops
 // work directory, and the parent delivers a real SIGINT or SIGTERM to it.
 //
 //   [x] The work directory, plaintext included, is gone after the signal
-//   [x] The child died BY the signal it received (re-raised), not by exit
+//   [x] The child died BY the signal it received (re-raised), not by exit;
+//       for SIGQUIT, by Go's own default (goroutine dump, exit 2)
+//   [x] Every signal in guardedSignals on unix: SIGTERM, SIGINT, SIGHUP, SIGQUIT
 //   [x] The window was real: the staged value existed when the signal went in
 //
 // sops itself is not needed. The runner is a fake that blocks, which is the
@@ -92,16 +94,24 @@ func TestSignalDuringPlaintextWindowRemovesWorkDir(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		sig  syscall.Signal
+		// goExit2 marks SIGQUIT: after the guard re-raises it, the Go
+		// runtime's default takes over, which dumps goroutines and exits 2
+		// rather than dying by the signal. That is also what an unguarded
+		// forgectl does, so the status cannot tell the two apart — the
+		// work-directory assertion is what does.
+		goExit2 bool
 	}{
-		{"SIGTERM", syscall.SIGTERM},
-		{"SIGINT", syscall.SIGINT},
+		{"SIGTERM", syscall.SIGTERM, false},
+		{"SIGINT", syscall.SIGINT, false},
+		{"SIGHUP", syscall.SIGHUP, false},
+		{"SIGQUIT", syscall.SIGQUIT, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// A child inherits an ignored SIGINT, and the guard deliberately
-			// leaves an inherited ignore alone — so under a runner that
-			// ignores SIGINT there is nothing to test for it.
-			if tc.sig == syscall.SIGINT && signal.Ignored(os.Interrupt) {
-				t.Skip("SIGINT is ignored in this process, so the child inherits the ignore")
+			// A child inherits an ignored signal, and the guard deliberately
+			// leaves an inherited ignore alone (nohup's SIGHUP, a background
+			// job's SIGINT and SIGQUIT) — so there is nothing to test then.
+			if signal.Ignored(tc.sig) {
+				t.Skipf("%v is ignored in this process, so the child inherits the ignore", tc.sig)
 			}
 
 			repo, err := os.MkdirTemp("", "fcsig")
@@ -125,7 +135,7 @@ func TestSignalDuringPlaintextWindowRemovesWorkDir(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSignalDuringPlaintextWindowRemovesWorkDir$") //nolint:gosec // G204: re-exec of this test binary
-			cmd.Env = append(os.Environ(), signalChildEnv+"="+repo, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			cmd.Env = append(os.Environ(), signalChildEnv+"="+repo, "GOTRACEBACK=single", "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			stdout, err := cmd.StdoutPipe()
 			if err != nil {
 				t.Fatalf("StdoutPipe: %v", err)
@@ -168,7 +178,12 @@ func TestSignalDuringPlaintextWindowRemovesWorkDir(t *testing.T) {
 			if !ok {
 				t.Fatalf("unexpected process state %T", cmd.ProcessState.Sys())
 			}
-			if !ws.Signaled() || ws.Signal() != tc.sig {
+			switch {
+			case tc.goExit2:
+				if ws.Signaled() || ws.ExitStatus() != 2 {
+					t.Errorf("child status: signaled=%v signal=%v exit=%d; want Go's SIGQUIT default, exit 2", ws.Signaled(), ws.Signal(), ws.ExitStatus())
+				}
+			case !ws.Signaled() || ws.Signal() != tc.sig:
 				t.Errorf("child status: signaled=%v signal=%v exit=%d; want death by %v", ws.Signaled(), ws.Signal(), ws.ExitStatus(), tc.sig)
 			}
 			if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -176,5 +191,20 @@ func TestSignalDuringPlaintextWindowRemovesWorkDir(t *testing.T) {
 			}
 			assertNoWorkDirLeft(t, repo)
 		})
+	}
+}
+
+// Every guarded signal gets its 128+N fallback status, derived rather than
+// tabled, so a signal added to guardedSignals cannot fall through to 1.
+func TestExitStatusForGuardedSignals(t *testing.T) {
+	want := map[syscall.Signal]int{syscall.SIGINT: 130, syscall.SIGTERM: 143, syscall.SIGHUP: 129, syscall.SIGQUIT: 131}
+	for _, sig := range guardedSignals {
+		s, ok := sig.(syscall.Signal)
+		if !ok {
+			t.Fatalf("guarded signal %v is not a syscall.Signal", sig)
+		}
+		if got := exitStatusFor(sig); got != want[s] {
+			t.Errorf("exitStatusFor(%v) = %d, want %d", sig, got, want[s])
+		}
 	}
 }
