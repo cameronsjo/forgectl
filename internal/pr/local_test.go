@@ -345,10 +345,9 @@ func TestLocalProfile_DeniesAllNetworkCLI(t *testing.T) {
 		}
 	}
 	// rg's --pre flag executes an arbitrary program per searched file — a real
-	// command-execution primitive PR mode accepts behind its approval gate.
-	// Local mode has no such gate, so it must never grant rg.
+	// command-execution primitive neither review mode grants (see baseReadOnly).
 	if contains(perms.Allow, "Bash(rg:*)") {
-		t.Error("local allow list must not grant Bash(rg:*): rg --pre executes arbitrary commands and local mode has no approval-gate backstop")
+		t.Error("local allow list must not grant Bash(rg:*): rg --pre executes arbitrary commands")
 	}
 }
 
