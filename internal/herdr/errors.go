@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -25,7 +26,19 @@ type Error struct {
 }
 
 func (e *Error) Error() string {
-	return "herdr: " + e.Code + ": " + e.Message
+	return "herdr: " + printable(e.Code) + ": " + printable(e.Message)
+}
+
+// printable drops control characters. herdr's text can echo pane-controlled
+// values (labels, titles), and a decoded \u001b would otherwise reach a
+// terminal that prints the error.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // Unwrap returns the *[exec.CommandError] behind the refusal.

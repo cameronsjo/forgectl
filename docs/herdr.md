@@ -21,7 +21,9 @@
 | a move reply that lacks `move_result` (except an index move), lacks `changed`, or names no tab or workspace | an error; `MoveTab` fails closed |
 | the response has no `result`, or a list reply lacks its list (`panes`, `tabs`, ...) | an error. A renamed key must not read as an empty session; an empty `[]` is fine |
 
-`pane read` is the one call that prints raw text on success, so `ReadPane` returns stdout without decoding it. `exec.Runner` trims trailing newlines, so trailing blank terminal rows are not preserved.
+`pane read` is the one call that prints raw text on success, so `ReadPane` returns stdout without decoding it. `exec.Runner` trims trailing newlines, so trailing blank terminal rows are not preserved. The text is whatever another pane displays: it can hold secrets typed or printed there, and terminal control sequences, so do not log it or render it to a terminal unfiltered.
+
+`Error.Error()` and `Declined.Error()` drop control characters from herdr's text, because herdr can echo pane-controlled values (labels, titles) in a message. The `Code` and `Message` fields stay as herdr sent them.
 
 `MoveWorkspace`, `FocusWorkspace`, and `FocusTab` do not decode herdr's reply. If herdr declines one quietly the way `tab move` does, the client cannot report it.
 

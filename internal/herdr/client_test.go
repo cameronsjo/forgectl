@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -14,7 +15,16 @@ import (
 
 func fixture(t *testing.T, name string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("testdata", name))
+	root, err := os.OpenRoot("testdata")
+	if err != nil {
+		t.Fatalf("open testdata: %v", err)
+	}
+	defer func() {
+		if err := root.Close(); err != nil {
+			t.Errorf("close testdata: %v", err)
+		}
+	}()
+	b, err := root.ReadFile(name)
 	if err != nil {
 		t.Fatalf("read fixture %s: %v", name, err)
 	}
@@ -253,7 +263,16 @@ func TestFixturesJoin(t *testing.T) {
 }
 
 func TestFixturesContainNoLiveValues(t *testing.T) {
-	forbidden := []string{"cameron", "sjomba", "a86d73e4", "/Users/cam"}
+	// No personal literal is committed here. Home paths must be the placeholder
+	// user; the machine's own hostname is read at test time; ids are checked by
+	// shape (liveShapes).
+	var forbidden []string
+	if h, err := os.Hostname(); err == nil {
+		if short, _, _ := strings.Cut(h, "."); len(short) >= 4 {
+			forbidden = append(forbidden, short)
+		}
+	}
+	homePath := regexp.MustCompile(`/Users/[A-Za-z0-9._-]+`)
 	entries, err := os.ReadDir("testdata")
 	if err != nil {
 		t.Fatal(err)
@@ -266,7 +285,12 @@ func TestFixturesContainNoLiveValues(t *testing.T) {
 		s := string(b)
 		for _, f := range forbidden {
 			if strings.Contains(s, f) {
-				t.Errorf("%s contains %q", e.Name(), f)
+				t.Errorf("%s contains this machine's hostname %q", e.Name(), f)
+			}
+		}
+		for _, m := range homePath.FindAllString(s, -1) {
+			if m != "/Users/example" {
+				t.Errorf("%s has a home path %q, want only /Users/example", e.Name(), m)
 			}
 		}
 		for _, re := range liveShapes {

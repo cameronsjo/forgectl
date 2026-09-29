@@ -116,6 +116,10 @@ func (c *Client) TabGet(ctx context.Context, tabID string) (Tab, error) {
 // decode; only the failure path carries herdr's JSON error. The text is what
 // the runner captured: [exec.Runner] trims trailing newlines, so trailing
 // blank terminal rows are not preserved. lines <= 0 leaves herdr's default.
+//
+// The text is whatever another pane displays: it can hold secrets typed or
+// printed there, and terminal control sequences. Do not log it or render it to
+// a terminal unfiltered.
 func (c *Client) ReadPane(ctx context.Context, paneID string, src ReadSource, lines int) (string, error) {
 	if err := checkID("pane id", paneID); err != nil {
 		return "", err

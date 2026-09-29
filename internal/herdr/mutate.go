@@ -18,7 +18,7 @@ type Declined struct {
 }
 
 func (d *Declined) Error() string {
-	return "herdr declined to move tab " + d.TabID + ": " + d.Reason
+	return "herdr declined to move tab " + printable(d.TabID) + ": " + printable(d.Reason)
 }
 
 // MoveTarget says where a tab goes. Build one with [ToWorkspace],

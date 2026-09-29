@@ -116,13 +116,13 @@ func TestMoveTabFailsClosedOnUnexpectedReplies(t *testing.T) {
 	const tabs = `[{"tab_id":"w1:t1","workspace_id":"w1"}]`
 	// The passed-in id IS in this list: the index-move fallback would accept it,
 	// so a workspace move must be refused on its own, not because the lookup missed.
-	const tabsWithPassedInID = `[{"tab_id":"w1:t7","workspace_id":"w1"}]`
+	const tabsWithTheOldID = `[{"tab_id":"w1:t7","workspace_id":"w1"}]`
 	for name, tt := range map[string]struct {
 		target MoveTarget
 		reply  string
 	}{
-		"workspace move with no move_result":     {ToWorkspace("w1"), `{"id":"x","result":{"tabs":` + tabsWithPassedInID + `}}`},
-		"new workspace move with no move_result": {ToNewWorkspace("t"), `{"id":"x","result":{"tabs":` + tabsWithPassedInID + `}}`},
+		"workspace move with no move_result":     {ToWorkspace("w1"), `{"id":"x","result":{"tabs":` + tabsWithTheOldID + `}}`},
+		"new workspace move with no move_result": {ToNewWorkspace("t"), `{"id":"x","result":{"tabs":` + tabsWithTheOldID + `}}`},
 		"move_result without changed":            {ToWorkspace("w1"), `{"id":"x","result":{"move_result":{"tab_id":"w1:t9","workspace_id":"w1"}}}`},
 		"changed true but no tab id":             {ToWorkspace("w1"), `{"id":"x","result":{"move_result":{"changed":true,"workspace_id":"w1"}}}`},
 		"changed true but no workspace id":       {ToWorkspace("w1"), `{"id":"x","result":{"move_result":{"changed":true,"tab_id":"w1:t9"}}}`},

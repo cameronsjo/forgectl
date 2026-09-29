@@ -147,7 +147,7 @@ func TestProbeThroughTheRealStat(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "h.sock")
-	l, err := net.Listen("unix", sock)
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", sock)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}

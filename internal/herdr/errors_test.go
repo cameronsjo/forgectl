@@ -6,6 +6,7 @@ import (
 	"os"
 	"regexp"
 	"testing"
+	"unicode"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -68,6 +69,27 @@ func TestUnparsableStderrStaysTheWrappedCommandError(t *testing.T) {
 				t.Fatalf("err = %v, want the original *exec.CommandError", err)
 			}
 		})
+	}
+}
+
+func TestErrorTextCarriesNoControlCharacters(t *testing.T) {
+	// herdr can echo a pane-controlled value in a message; a decoded \u001b must not
+	// reach a terminal that prints the error.
+	ce := &exec.CommandError{Name: Binary, ExitCode: 1, Stderr: `{"error":{"code":"x\u001by","message":"a\u001b[31mred\u0007\nb"}}`}
+	_, err := New(runnerFor("", ce)).Workspaces(context.Background())
+	var he *Error
+	if !errors.As(err, &he) {
+		t.Fatalf("err = %v, want *Error", err)
+	}
+	for _, s := range []string{he.Error(), (&Declined{TabID: "w1:t\u001b1", Reason: "r\u001b[0m\n"}).Error()} {
+		for _, r := range s {
+			if unicode.IsControl(r) {
+				t.Errorf("%q contains control character %U", s, r)
+			}
+		}
+	}
+	if he.Code != "x\x1by" {
+		t.Errorf("Code = %q; the raw field must stay as herdr sent it", he.Code)
 	}
 }
 
