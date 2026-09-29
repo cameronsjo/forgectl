@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"unicode"
 	"unicode/utf8"
 
@@ -289,6 +290,11 @@ func onlyComments(p ast.Node, source []byte) bool {
 	return found
 }
 
+// visibleSourceVisits counts the nodes visibleSource has walked, process-wide.
+// It exists so a test can bound the scan's work by count rather than by wall
+// clock; nothing reads it in production.
+var visibleSourceVisits atomic.Int64
+
 // visibleSource returns the bytes of seg with the source range of every
 // comment under n cut out. It is how a heading's id and a vault note's title
 // leave comment text behind, with everything else exactly as written.
@@ -296,6 +302,7 @@ func visibleSource(n ast.Node, seg text.Segment, source []byte) []byte {
 	var cuts [][2]int
 	_ = ast.Walk(n, func(c ast.Node, entering bool) (ast.WalkStatus, error) {
 		if entering {
+			visibleSourceVisits.Add(1)
 			if cs, ok := c.(*commentSpanNode); ok {
 				cuts = append(cuts, [2]int{cs.Start, cs.Stop})
 				return ast.WalkSkipChildren, nil
