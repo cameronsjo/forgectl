@@ -942,7 +942,7 @@ func writeKV(b *strings.Builder, key, value string, tr trustState) {
 		b.WriteString(`</span>`)
 	case key == "status":
 		// Enum-ish values read as a chip.
-		b.WriteString(`<span class="v"><span class="chip">`)
+		b.WriteString(`<span class="v"><span class="status-chip">`)
 		b.WriteString(html.EscapeString(value))
 		b.WriteString(`</span></span>`)
 	case key == "branch" || strings.Contains(value, "/"):

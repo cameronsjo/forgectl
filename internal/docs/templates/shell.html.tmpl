@@ -72,7 +72,10 @@ main.surface-document { max-width: 820px; }
 .props-row .k { flex: 0 0 110px; display: flex; align-items: center; gap: 6px; color: var(--fg-secondary); font-size: 12px; padding-top: 3px; }
 .props-row .k svg { color: var(--fg-disabled); flex-shrink: 0; width: 11px; height: 11px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .props-row .v { flex: 1; min-width: 0; color: var(--fg); display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding-top: 1px; }
-.props-row .v .chip { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; background: color-mix(in oklch, var(--accent-fill) 14%, transparent); color: var(--accent); font-size: 11px; }
+/* Status chip: deliberately NOT Artificer's .chip, which is interactive
+   (cursor: pointer, hover, and a 44px min-size under pointer: coarse). The
+   value is a static label, so it gets none of that. */
+.props-row .v .status-chip { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; background: color-mix(in oklch, var(--accent-fill) 14%, transparent); color: var(--accent); font-size: 11px; border: 1px solid var(--border); font-family: var(--font-interface); font-weight: 500; white-space: nowrap; }
 .props-row .v.dt { font-variant-numeric: tabular-nums; }
 /* OKF trust badges (properties block + status bar). Deliberately NOT
    Artificer's .chip: that class is interactive (cursor, hover, aria-pressed,
@@ -87,7 +90,9 @@ main.surface-document { max-width: 820px; }
 
 /* ── Callouts (GFM > [!NOTE] etc; tiers: note→accent, warning→attention, danger→urgent, tip→success) ── */
 .callout { border-left: 2px solid var(--steel); background: color-mix(in oklch, var(--steel) 10%, transparent); padding: 12px 16px; border-radius: 0 var(--radius-md) var(--radius-md) 0; margin: 16px 0; }
-.callout.note { border-left-color: var(--accent); background: color-mix(in oklch, var(--accent) 8%, transparent); }
+/* Artificer's global .note (a footnote-scale label rule) also matches the
+   note-tier class; restore the size and colour the other tiers inherit. */
+.callout.note { font-size: inherit; color: inherit; border-left-color: var(--accent); background: color-mix(in oklch, var(--accent) 8%, transparent); }
 .callout.warning { border-left-color: var(--attention); background: color-mix(in oklch, var(--attention) 8%, transparent); }
 .callout.danger { border-left-color: var(--urgent); background: color-mix(in oklch, var(--urgent) 8%, transparent); }
 .callout.tip { border-left-color: var(--success); background: color-mix(in oklch, var(--success) 8%, transparent); }
@@ -128,6 +133,7 @@ main.surface-document { max-width: 820px; }
 .statusbar { display: flex; align-items: stretch; border-top: 1px solid var(--border); background: var(--bg); font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 11px; color: var(--fg-secondary); }
 .status-item { padding: 5px 12px; display: flex; align-items: center; gap: 6px; border-right: 1px solid var(--border); }
 .status-item:last-child { border-right: none; }
+.status-item.words { white-space: nowrap; }
 .status-spacer { flex: 1; }
 .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
 /* reload.js sets this when the live-reload stream gives up. The text changes
@@ -327,7 +333,7 @@ main.surface-document:focus-visible { outline: var(--focus-width) solid var(--ac
     {{if .Trust.Stale}}<div class="status-item"><span class="trust-badge trust-badge--stale" title="stale since {{.Trust.StaleAfter}}">stale</span></div>{{end}}
     <div class="status-spacer"></div>
     <div class="status-item opt">{{.DocCount}} {{if eq .DocCount 1}}doc{{else}}docs{{end}} indexed</div>
-    {{if .Words}}<div class="status-item">{{.Words}} words · {{.Minutes}} min</div>{{end}}
+    {{if .Words}}<div class="status-item words">{{.Words}} words · {{.Minutes}} min</div>{{end}}
   </footer>
 </div>
 </body>
