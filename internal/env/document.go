@@ -668,7 +668,9 @@ func encode(export bool, key, value string) string {
 // splits on '\n' only). It is not escaped because decodeQuotedBody has no
 // `\r` case, so adding one would change the meaning of double-quoted `\r`
 // already on disk. python-dotenv reading from a file normalizes a raw '\r'
-// to '\n'; changing the escape is tracked in #566.
+// to '\n'. No escape is added (it would change the meaning of existing
+// double-quoted `\r` on disk); instead `env set` refuses a \r in a NEW value
+// (commitSet), and docs/commands/env.md lists the consumer caveats (#566).
 func encodeValue(value string) string {
 	if bareValueRE.MatchString(value) {
 		return value
