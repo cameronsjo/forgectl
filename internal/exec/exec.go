@@ -1,10 +1,9 @@
 // Package exec is the process-execution seam for the whole tool.
 //
 // Every non-interactive shell-out goes through one of this package's seams:
-// Runner, StreamingRunner, or SensitiveRunner. Interactive runs go through
-// Runner.RunInteractive. Production uses OSRunner; tests inject a fake (see
-// exec_test helpers / FakeRunner) so command construction and branching can be
-// asserted without a live tmux server.
+// Runner, StreamingRunner, or SensitiveRunner. Production
+// uses OSRunner; tests inject a fake (see exec_test helpers / FakeRunner) so
+// command construction and branching can be asserted without a live tmux server.
 package exec
 
 import (
@@ -44,9 +43,7 @@ import (
 //     records it (log_level defaults to off). With log_file unset it goes to
 //     the dated log file, or to stderr if that cannot be opened.
 //     CommandError.Error() also includes it, so it goes wherever a caller
-//     renders or logs the error. forgectl update, for one, writes each failed
-//     step's error and output to its own on-disk transcript regardless of
-//     log_level (internal/cli/update.go).
+//     renders or logs the error.
 //   - stdout is kept in the exported CommandError.Output field. Error() does
 //     not include it, but any code that reaches the *CommandError, directly or
 //     through errors.As, can read it. Treat a CommandError from a command that
