@@ -91,7 +91,7 @@ func TestUnclosedSkipContent_MatchesSanitizer(t *testing.T) {
 		"<xmp>", "</xmp>", "<textarea>", "</textarea>", "<plaintext>",
 		"<svg><title>", "</title></svg>",
 	}
-	r := rand.New(rand.NewSource(622))
+	r := rand.New(rand.NewSource(622)) //nolint:gosec // G404: deterministic test fixture, not crypto
 	for i := 0; i < 20000; i++ {
 		var b strings.Builder
 		for j := r.Intn(8); j >= 0; j-- {
