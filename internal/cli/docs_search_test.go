@@ -34,10 +34,13 @@ type searchRunner struct {
 	stderr string
 	err    error
 	calls  int
+	name   string
+	args   []string
 }
 
-func (r *searchRunner) RunStreaming(_ context.Context, _ io.Reader, stdout, stderr io.Writer, _ string, _ ...string) error {
+func (r *searchRunner) RunStreaming(_ context.Context, _ io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
 	r.calls++
+	r.name, r.args = name, args
 	_, _ = io.WriteString(stdout, r.stdout)
 	_, _ = io.WriteString(stderr, r.stderr)
 	return r.err
