@@ -434,6 +434,9 @@ func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 				Slug: slug,
 			})
 		case wikilink.Kind:
+			if hasImageAncestor(n) {
+				return ast.WalkContinue, nil
+			}
 			if wl, ok := n.(*wikilink.Node); ok {
 				ref := wikilinkRef(wl, body)
 				ref.Line = lines.lineOf(n)
@@ -441,7 +444,7 @@ func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 			}
 		case ast.KindLink:
 			l, ok := n.(*ast.Link)
-			if !ok {
+			if !ok || hasImageAncestor(n) {
 				return ast.WalkContinue, nil
 			}
 			dest := string(l.Destination)
@@ -478,6 +481,26 @@ func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 	hidden = append(hidden, removedComments(ctx)...)
 
 	return bodyScan{headings: headings, links: links, masked: code, hidden: hidden, h1s: h1s}, nil
+}
+
+// hasAncestorOfKind reports whether any ancestor of n has one of kinds.
+func hasAncestorOfKind(n ast.Node, kinds ...ast.NodeKind) bool {
+	for p := n.Parent(); p != nil; p = p.Parent() {
+		for _, k := range kinds {
+			if p.Kind() == k {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasImageAncestor reports whether n sits inside an image. An image's
+// children become its alt text on the page, never a link, so a link or
+// wikilink written there is not indexed (forgectl#596). The walk still
+// descends into images, so a comment inside alt text stays masked.
+func hasImageAncestor(n ast.Node) bool {
+	return hasAncestorOfKind(n, ast.KindImage)
 }
 
 // lineIndex maps a byte offset in src to its 1-based line number. The
