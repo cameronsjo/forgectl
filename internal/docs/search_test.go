@@ -19,6 +19,9 @@ package docs
 //       never counted in Skipped, and its hits are kept
 //   [x] Unhappy: a failure in either of two roots keeps the other's hits
 //   [x] Unhappy: an unparseable rg record is reported in Errors
+//   [x] Unhappy: a root that hit the limit still reports rg's diagnostic
+//       and unparseable records (probes P1, P2); the limit's own cancel
+//       alone is not a failure
 //   [x] Happy: overlapping roots return a shared doc once, first root wins
 //   [x] Unhappy: rg found only in a relative PATH entry is refused
 //   [x] Happy: real rg returns the same truncated prefix on every run
@@ -284,6 +287,9 @@ func TestSearchExitOneIsEmptySuccess(t *testing.T) {
 	if resp.Results == nil || len(resp.Results) != 0 {
 		t.Errorf("Results = %#v, want a non-nil empty slice", resp.Results)
 	}
+	if len(resp.Errors) != 0 {
+		t.Errorf("Errors = %+v, want none: rg exit 1 means no match", resp.Errors)
+	}
 }
 
 func TestSearchRootFailureIsRecorded(t *testing.T) {
@@ -379,6 +385,71 @@ func TestSearchCountsUnparseableRecords(t *testing.T) {
 	}
 	if len(resp.Errors) != 1 || !strings.Contains(resp.Errors[0].Message, "1 rg output records could not be parsed") {
 		t.Errorf("Errors = %+v, want the unparseable record reported", resp.Errors)
+	}
+}
+
+// TestSearchTruncatedRootStillReportsFailure (probe P2): rg writes a
+// diagnostic, then more hits than the limit, then fails. Hitting the limit
+// must not hide the failure.
+func TestSearchTruncatedRootStillReportsFailure(t *testing.T) {
+	idx, root := searchRoot(t, "a.md", "b.md")
+	rg := &fakeRg{write: func(ctx context.Context, stdout, stderr io.Writer) error {
+		_, _ = io.WriteString(stderr, "rg: ./locked.md: Permission denied (os error 13)\n")
+		return rgFails("",
+			matchRecord(t, filepath.Join(root, "a.md"), "x", 0),
+			matchRecord(t, filepath.Join(root, "b.md"), "x", 0),
+		)(ctx, stdout, stderr)
+	}}
+	resp, err := (Searcher{Runner: rg, LookPath: fakeLookPath}).Search(t.Context(), idx, "x", 1)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(resp.Results) != 1 || !resp.Truncated {
+		t.Fatalf("results %+v truncated=%v, want 1 truncated", resp.Results, resp.Truncated)
+	}
+	if len(resp.Errors) != 1 || !strings.Contains(resp.Errors[0].Message, "Permission denied") {
+		t.Errorf("Errors = %+v, want rg's diagnostic reported despite truncation", resp.Errors)
+	}
+}
+
+// TestSearchTruncatedRootStillCountsUnparsed (probe P1): an unparseable
+// record before the limit is hit is still reported.
+func TestSearchTruncatedRootStillCountsUnparsed(t *testing.T) {
+	idx, root := searchRoot(t, "a.md", "b.md")
+	rg := &fakeRg{write: writeAll(
+		"{bad\n",
+		matchRecord(t, filepath.Join(root, "a.md"), "x", 0),
+		matchRecord(t, filepath.Join(root, "b.md"), "x", 0),
+	)}
+	resp, err := (Searcher{Runner: rg, LookPath: fakeLookPath}).Search(t.Context(), idx, "x", 1)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if !resp.Truncated {
+		t.Fatalf("truncated = false, want true")
+	}
+	if len(resp.Errors) != 1 || !strings.Contains(resp.Errors[0].Message, "could not be parsed") {
+		t.Errorf("Errors = %+v, want the unparseable record reported despite truncation", resp.Errors)
+	}
+}
+
+// TestSearchTruncationAloneIsNotAFailure: the cancel Search triggers at the
+// limit is not reported as an rg failure.
+func TestSearchTruncationAloneIsNotAFailure(t *testing.T) {
+	idx, root := searchRoot(t, "a.md", "b.md")
+	rg := &fakeRg{write: func(ctx context.Context, stdout, stderr io.Writer) error {
+		_ = writeAll(
+			matchRecord(t, filepath.Join(root, "a.md"), "x", 0),
+			matchRecord(t, filepath.Join(root, "b.md"), "x", 0),
+		)(ctx, stdout, stderr)
+		return &forgexec.CommandError{Name: "rg", ExitCode: -1, Err: ctx.Err()}
+	}}
+	resp, err := (Searcher{Runner: rg, LookPath: fakeLookPath}).Search(t.Context(), idx, "x", 1)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if !resp.Truncated || len(resp.Errors) != 0 {
+		t.Errorf("truncated=%v errors=%+v, want truncated with no errors", resp.Truncated, resp.Errors)
 	}
 }
 

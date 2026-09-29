@@ -119,8 +119,10 @@ func docsSearchExitCode(err error) int {
 	return 1
 }
 
-// docsSearchErrorJSON is the --json wire shape for a `docs search` failure:
-// stdout stays empty and this is the only thing written to stderr.
+// docsSearchErrorJSON is the --json wire shape for a `docs search` failure,
+// and the only thing written to stderr. On a fatal failure stdout stays
+// empty; on a partial one (some root in the response's errors) stdout
+// carries the full response.
 type docsSearchErrorJSON struct {
 	Error string `json:"error"`
 	Code  int    `json:"code"`

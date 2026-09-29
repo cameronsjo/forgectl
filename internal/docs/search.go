@@ -122,9 +122,9 @@ type Searcher struct {
 // query over the same tree returns the same hits in the same order and a
 // truncated answer is a stable prefix. It also bounds rg to one worker.
 //
-// Neither security flag is the containment boundary. Every hit is gated through the Index
-// (Search), so a wrong flag here can make search miss a file but never
-// return one from outside a root.
+// Neither security flag is the containment boundary. Every hit is gated
+// through the Index (Search), so a wrong flag here can make search miss a
+// file but never return one from outside a root.
 func rgArgs(query, path string) []string {
 	return []string{
 		"--no-config",
@@ -209,6 +209,11 @@ func (s Searcher) Search(ctx context.Context, idx *Index, q string, limit int) (
 // failure to resp.Errors. It reports done once resp is truncated, so the
 // caller starts no further rg process, and returns an error only when ctx
 // itself expired or was cancelled.
+//
+// It has exactly two returns: the ctx abort, and one tail that every other
+// outcome (success, no match, rg failure, truncation) passes through, where
+// rootFailures records what went wrong. A root that hit the limit is still
+// checked, so a failure is never hidden by truncation.
 func (s Searcher) searchRoot(ctx context.Context, idx *Index, root Root, rgPath, q string, limit int, titles map[searchKey]string, seen map[hitKey]bool, resp *SearchResponse) (bool, error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -255,28 +260,48 @@ func (s Searcher) searchRoot(ctx context.Context, idx *Index, root Root, rgPath,
 	stream.Close()
 	resp.Skipped += stream.oversized
 
-	if resp.Truncated {
-		return true, nil
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
+	if ctxErr := ctx.Err(); ctxErr != nil && !resp.Truncated {
 		return false, fmt.Errorf("docs search: %w", ctxErr)
 	}
+	resp.Errors = append(resp.Errors, rootFailures(root, unparsed, runErr, stderr.String(), resp.Truncated)...)
+	return resp.Truncated, nil
+}
+
+// rootFailures reports what went wrong on one root's rg run: records that
+// could not be parsed, and rg's own failure. rg exit 1 (no match) is not a
+// failure. On a truncated run runErr is the cancellation Search itself
+// triggered at the limit, so it is ignored there, but rg's stderr (fully
+// drained by the time the run returns) still is not: rg that wrote a
+// diagnostic before the limit stopped it had failed on something.
+func rootFailures(root Root, unparsed int, runErr error, stderr string, truncated bool) []SearchError {
+	var out []SearchError
 	if unparsed > 0 {
-		resp.Errors = append(resp.Errors, searchError(root, fmt.Sprintf("%d rg output records could not be parsed", unparsed)))
+		out = append(out, searchError(root, fmt.Sprintf("%d rg output records could not be parsed", unparsed)))
 	}
-	if runErr == nil {
-		return false, nil
+	msg := strings.TrimSpace(stderr)
+	switch {
+	case truncated:
+		// runErr is our own cancel; only a diagnostic counts.
+	case runErr == nil:
+		return out
+	default:
+		var cmdErr *forgexec.CommandError
+		isCmdErr := errors.As(runErr, &cmdErr)
+		if isCmdErr && cmdErr.ExitCode == 1 {
+			return out
+		}
+		if msg == "" && isCmdErr {
+			// The exit code, not cmdErr.Error(): that dereferences Err,
+			// which a CommandError from another runner may leave nil.
+			msg = fmt.Sprintf("exit %d", cmdErr.ExitCode)
+		} else if msg == "" {
+			msg = runErr.Error()
+		}
 	}
-	var cmdErr *forgexec.CommandError
-	if errors.As(runErr, &cmdErr) && cmdErr.ExitCode == 1 {
-		return false, nil
+	if msg != "" {
+		out = append(out, searchError(root, "rg failed: "+msg))
 	}
-	msg := strings.TrimSpace(stderr.String())
-	if msg == "" {
-		msg = runErr.Error()
-	}
-	resp.Errors = append(resp.Errors, searchError(root, "rg failed: "+msg))
-	return false, nil
+	return out
 }
 
 // searchError builds a terminal-safe, capped SearchError for root.
