@@ -294,7 +294,9 @@ func rootFailures(root Root, unparsed int, runErr error, stderr string, truncate
 		case msg != "":
 		case isCmdErr && cmdErr.Err != nil:
 			// The reason rg never ran or was killed (exec format error,
-			// EACCES, a signal we did not send), all of which read exit -1.
+			// EACCES, a signal we did not send), all of which read exit -1,
+			// or a real non-1 exit with nothing on stderr, where Err is the
+			// *exec.ExitError ("exit status 2") and ExitCode is 2.
 			// cmdErr.Err, not cmdErr.Error(): the latter prefixes the
 			// command line, which a runner that keeps Args would fill with
 			// the query.

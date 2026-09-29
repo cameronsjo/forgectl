@@ -313,7 +313,8 @@ func TestSearchRootFailureIsRecorded(t *testing.T) {
 }
 
 // A run that fails with nothing on stderr (rg could not start, or was killed)
-// reads exit -1; the CommandError's Err is the only place the reason lives.
+// reads exit -1, or exits non-1 (exit status 2); the CommandError's Err is the
+// only place the reason lives.
 func TestSearchSilentFailureReportsReason(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -321,6 +322,7 @@ func TestSearchSilentFailureReportsReason(t *testing.T) {
 		want string
 	}{
 		{"start failure", &forgexec.CommandError{Name: "rg", ExitCode: -1, Err: errors.New("exec format error")}, "rg failed: exec format error"},
+		{"real exit with empty stderr", &forgexec.CommandError{Name: "rg", ExitCode: 2, Err: errors.New("exit status 2")}, "rg failed: exit status 2"},
 		{"nil Err", &forgexec.CommandError{Name: "rg", ExitCode: 2}, "rg failed: exit 2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

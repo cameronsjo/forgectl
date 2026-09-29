@@ -139,8 +139,11 @@ func scanDocFor(kind RootKind, absPath, relPath string) (docMeta, error) {
 	var status, staleAfter string
 	if fm, ok := splitFrontmatter(source); ok {
 		body = fm.body
-		aliases = frontmatterAliases(fm)
-		status, staleAfter = frontmatterTrust(fm)
+		// Decode the block once; aliases and trust both derive from it.
+		if root := frontmatterRoot(fm); root != nil {
+			aliases = aliasesFromNode(root)
+			status, staleAfter = trustFields(root)
+		}
 	}
 
 	scan, err := scanBodyFor(kind, body)
@@ -213,16 +216,29 @@ func firstH1(source []byte) string {
 	return ""
 }
 
-// frontmatterAliases returns a YAML frontmatter block's `aliases` value,
-// accepting either a list or a bare scalar (folded to a one-element list).
-// A TOML (+++) block yields none: Obsidian aliases are a YAML convention,
-// and the plan scopes alias extraction to YAML.
-func frontmatterAliases(fm frontmatterBlock) []string {
+// frontmatterRoot decodes a YAML frontmatter block once into its top-level
+// node (the mapping, for a well-formed block), or nil for a TOML (+++) block,
+// an undecodable block, or an empty one. Aliases are a YAML convention and
+// OKF frontmatter is YAML, so a TOML block yields nothing.
+func frontmatterRoot(fm frontmatterBlock) *yaml.Node {
 	if fm.delim != '-' {
 		return nil
 	}
+	var node yaml.Node
+	if err := yaml.Unmarshal(fm.block, &node); err != nil || len(node.Content) == 0 {
+		return nil
+	}
+	return node.Content[0]
+}
+
+// aliasesFromNode returns a frontmatter mapping's `aliases` value, accepting
+// either a list or a bare scalar (folded to a one-element list). It decodes
+// the already-parsed node into a map, so it sees exactly what a fresh
+// yaml.Unmarshal of the block would (merge keys included); the trust fields
+// read raw scalars instead (see trustFields).
+func aliasesFromNode(mapping *yaml.Node) []string {
 	var m map[string]any
-	if err := yaml.Unmarshal(fm.block, &m); err != nil {
+	if err := mapping.Decode(&m); err != nil {
 		return nil
 	}
 	return toStringList(m["aliases"])
@@ -361,11 +377,17 @@ func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 			for i := 0; i < n.Lines().Len(); i++ {
 				code = append(code, n.Lines().At(i))
 			}
-		case kindMermaidBlock, kindMathBlock:
+		case kindMathBlock:
+			// A $$ block's lines are TeX, not block-id markers, in either
+			// root kind: the docs parser builds it too (mathBlockParserOptions).
+			for i := 0; i < n.Lines().Len(); i++ {
+				code = append(code, n.Lines().At(i))
+			}
+		case kindMermaidBlock:
 			// The vault scan parses with the render constructor, whose
-			// transformers promote mermaid and math fences off
-			// KindFencedCodeBlock; their lines are still code. Vault only:
-			// the docs-root scan's handling of a $$ block is unchanged.
+			// transformers promote mermaid fences off KindFencedCodeBlock;
+			// their lines are still code. Vault only: the docs-root parser
+			// builds no mermaid node.
 			if kind == RootVault {
 				for i := 0; i < n.Lines().Len(); i++ {
 					code = append(code, n.Lines().At(i))

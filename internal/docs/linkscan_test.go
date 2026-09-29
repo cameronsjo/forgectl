@@ -15,6 +15,9 @@ package docs
 //   [x] Unhappy: an unclosed fence masks the rest of the file
 //   [x] Unhappy: a document over maxScanBytes is indexed by title only
 //   [x] Edge: a document of exactly maxScanBytes is fully scanned
+//   [x] Unhappy: a ^id inside a $$ block is no block id in a docs root; one
+//       after the block still is
+//   [x] Happy: aliases and trust fields both come out of one frontmatter
 
 import (
 	"os"
@@ -285,5 +288,37 @@ func TestScanDoc_AtCap_FullyScanned(t *testing.T) {
 	}
 	if len(meta.Links) != 1 {
 		t.Errorf("Links = %+v, want 1 (a doc exactly at the cap is scanned)", meta.Links)
+	}
+}
+
+func TestScanDoc_BlockIDsIgnoreMathBlock(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "p.md")
+	if err := os.WriteFile(p, []byte("$$\nx ^blk\n$$\n\nafter ^keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := scanDoc(p, "p.md")
+	if err != nil {
+		t.Fatalf("scanDoc: %v", err)
+	}
+	if want := []string{"keep"}; !reflect.DeepEqual(meta.BlockIDs, want) {
+		t.Errorf("BlockIDs = %v, want %v", meta.BlockIDs, want)
+	}
+}
+
+func TestScanDoc_FrontmatterAliasesAndTrust(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "p.md")
+	src := "---\naliases:\n  - one\n  - two\nstatus: deprecated\nstale_after: 2026-09-23T00:00:00Z\n---\n# T\n"
+	if err := os.WriteFile(p, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := scanDoc(p, "p.md")
+	if err != nil {
+		t.Fatalf("scanDoc: %v", err)
+	}
+	if want := []string{"one", "two"}; !reflect.DeepEqual(meta.Aliases, want) {
+		t.Errorf("Aliases = %v, want %v", meta.Aliases, want)
+	}
+	if meta.Status != "deprecated" || meta.StaleAfter != "2026-09-23T00:00:00Z" {
+		t.Errorf("trust = (%q, %q), want (deprecated, 2026-09-23T00:00:00Z)", meta.Status, meta.StaleAfter)
 	}
 }

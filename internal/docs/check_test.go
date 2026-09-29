@@ -26,7 +26,8 @@ package docs
 //   [x] Happy: an out-of-root link is counted, never reported
 //   [x] Happy: a vault root is skipped and reported as unchecked
 //   [x] Happy: a single-file root has no orphans
-//   [x] Happy: findings sort by root, path, kind, target — not walk order
+//   [x] Happy: findings sort by root, path, then link findings by line, target
+//       and kind, then lineless findings by kind — not walk order
 //   [x] Happy: no findings encodes as [], never null
 //   [x] Unhappy: a passed stale_after is one stale finding carrying the value;
 //       a future one is none
@@ -39,6 +40,7 @@ package docs
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -357,8 +359,11 @@ func TestCheck_FindingsSorted(t *testing.T) {
 	dir := t.TempDir()
 	// The index orders docs by mtime, so make a.md the OLDER file: walk
 	// order then puts b.md first and only the sort can restore path order.
-	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[a](a.md) [b](b.md)\n")
+	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[a](a.md) [b](b.md) [c](c.md)\n")
 	checkWrite(t, filepath.Join(dir, "a.md"), "# A\n\n[z](zz.md) [y](yy.md)\n")
+	// c.md: line order must beat target and kind order (qq line 6, bb line 8,
+	// the anchor line 9), and its lineless deprecated finding comes last.
+	checkWrite(t, filepath.Join(dir, "c.md"), "---\nstatus: deprecated\n---\n# C\n\n[q](qq.md)\n\n[b](bb.md)\n[k](README.md#nope)\n")
 	checkWrite(t, filepath.Join(dir, "b.md"), "# B\n\n[m](mm.md)\n")
 	now := time.Now()
 	if err := os.Chtimes(filepath.Join(dir, "a.md"), now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
@@ -371,12 +376,16 @@ func TestCheck_FindingsSorted(t *testing.T) {
 	r := checkIndex(t, dir).Check()
 	var got []string
 	for _, f := range r.Findings {
-		got = append(got, f.Path+"|"+string(f.Kind)+"|"+f.Target)
+		got = append(got, fmt.Sprintf("%s|%s|%s|%d", f.Path, f.Kind, f.Target, f.Line))
 	}
 	want := []string{
-		"a.md|broken_link|yy.md",
-		"a.md|broken_link|zz.md",
-		"b.md|broken_link|mm.md",
+		"a.md|broken_link|yy.md|3",
+		"a.md|broken_link|zz.md|3",
+		"b.md|broken_link|mm.md|3",
+		"c.md|broken_link|qq.md|6",
+		"c.md|broken_link|bb.md|8",
+		"c.md|broken_anchor|README.md#nope|9",
+		"c.md|deprecated||0",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("findings order:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
