@@ -14,10 +14,18 @@ import (
 // so writeAtomic never needs an explicit chmod.
 const secureMode = 0o600
 
-// tempPrefix names the transient file. It deliberately does NOT match
+// tempPrefix begins the transient file's name. It deliberately does NOT match
 // IsEnvFileName, so a leftover cannot later be reached through --file without
-// --any-file, and it is covered by the usual `.env*` gitignore shape.
+// --any-file, and it is covered by the usual `.env*` gitignore shape. The full
+// name also carries the target's scope tag (Target.envTempPrefix), so a
+// leftover can be attributed to the target whose lock covers it. See
+// leftover.go.
 const tempPrefix = ".env-"
+
+// tempCreated observes the temp file's name the moment it exists. It is a
+// no-op in production. Tests replace it to see the name a run that died at
+// this point would leave behind, which nothing else exposes.
+var tempCreated = func(string) {}
 
 // writeAtomic writes data to the target by creating a temp file in the SAME
 // PINNED DIRECTORY, writing, syncing, closing, then renaming over the target's
@@ -49,10 +57,11 @@ func writeAtomic(target Target, data []byte) (tightened bool, err error) {
 		return false, fmt.Errorf("stat %s: %w", target.Rel(), statErr)
 	}
 
-	tmp, tmpName, err := target.dir.createTemp(tempPrefix)
+	tmp, tmpName, err := target.dir.createTemp(target.envTempPrefix())
 	if err != nil {
 		return false, fmt.Errorf("create a temp file beside %s: %w", target.Rel(), err)
 	}
+	tempCreated(tmpName)
 	cleanup := func() {
 		_ = tmp.Close()
 		_ = target.dir.remove(tmpName)

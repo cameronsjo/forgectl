@@ -224,8 +224,8 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 	// reproduced on the first of forty kill attempts. The guard now removes
 	// the directory on the catchable terminating signals; shrinking the window
 	// still matters, because SIGKILL, SIGSTOP, a power loss and any signal the
-	// guard does not cover run no handler at all and remain a residual (a
-	// sweep of stale work directories, cameronsjo/forgectl#520).
+	// guard does not cover run no handler at all. What they leave behind is
+	// refused, never swept, by the next write's leftover scan (internal/env).
 	work.discardStagedValue()
 
 	outcome, err := c.verify(ctx, sopsBin, target, segments, value, work)
@@ -425,7 +425,9 @@ type workDir struct {
 // same rules it would from the target itself.
 func newWorkDir(target env.Target) (*workDir, error) {
 	parent := filepath.Dir(target.Abs())
-	dir, err := os.MkdirTemp(parent, ".forgectl-sops-")
+	// Scoped to the target, so the next run's leftover scan (internal/env,
+	// under this same lock) can attribute a directory a SIGKILL left behind.
+	dir, err := os.MkdirTemp(parent, target.SopsWorkDirPattern())
 	if err != nil {
 		return nil, fmt.Errorf("create a work directory beside %s: %w", target.Rel(), err)
 	}

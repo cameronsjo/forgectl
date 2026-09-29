@@ -37,8 +37,10 @@ import (
 //
 // SIGKILL and SIGSTOP cannot be caught, a power loss runs no code, and a
 // terminating signal missing from guardedSignals is not seen; any of them can
-// still leave the directory behind. That residual is tracked in
-// cameronsjo/forgectl#520 (a sweep of stale work directories), not here.
+// still leave the directory behind. The directory's name is scoped to the
+// target, so the next write to that target finds it under the lock and
+// refuses, naming it (internal/env's scanLeftovers). Nothing deletes it
+// automatically: a sops child that outlived its parent may still be using it.
 
 // plaintextGuard runs the work directory's cleanup when one of guardedSignals
 // arrives inside the span it is armed for, then terminates the process with

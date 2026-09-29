@@ -36,6 +36,10 @@ import (
 
 const signalChildEnv = "FORGECTL_SOPS_SIGNAL_CHILD"
 
+// signalChildModeEnv selects the child runner's behaviour. Empty parks in the
+// edit call with the value staged and the target untouched.
+const signalChildModeEnv = "FORGECTL_SOPS_SIGNAL_CHILD_MODE"
+
 // A SOPS-shaped document with no real ciphertext: IsSOPSFile and
 // ReadPlaintextRules are all setLocked asks of it before staging.
 const signalFixture = "a: b\nsops:\n    unencrypted_suffix: _unencrypted\n"
@@ -60,13 +64,15 @@ func (r parkingRunner) RunSensitive(context.Context, fcexec.SensitiveCommand) (f
 	return fcexec.SensitiveResult{}, nil
 }
 
+// findWorkDir returns the work directory, never the preserved backup beside
+// it, which shares the prefix.
 func findWorkDir(repo string) string {
 	entries, err := os.ReadDir(repo)
 	if err != nil {
 		return ""
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".forgectl-sops-") {
+		if e.IsDir() && strings.HasPrefix(e.Name(), ".forgectl-sops-") {
 			return filepath.Join(repo, e.Name())
 		}
 	}
@@ -223,5 +229,117 @@ func TestExitStatusForGuardedSignals(t *testing.T) {
 		if got := exitStatusFor(sig); got != want[s] {
 			t.Errorf("exitStatusFor(%v) = %d, want %d", sig, got, want[s])
 		}
+	}
+}
+
+// signalRepo builds the fixture repository and a PATH holding a sops stub,
+// which SetValue's LookPath needs and the fake runners never execute.
+func signalRepo(t *testing.T) (repo, path string) {
+	t.Helper()
+	repo, err := os.MkdirTemp("", "fcsig")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(repo) })
+	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o750); err != nil {
+		t.Fatalf("Mkdir .git: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "secrets.sops.yaml"), []byte(signalFixture), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "sops"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil { //nolint:gosec // G306: an executable stub
+		t.Fatalf("WriteFile sops stub: %v", err)
+	}
+	return repo, binDir + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
+// parkChild starts a child SetValue that parks inside the sops edit call with
+// the value staged, and returns once it is parked. mode selects what the
+// child's runner does; see signalChildModeEnv.
+func parkChild(ctx context.Context, t *testing.T, repo, path, mode string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSignalDuringPlaintextWindowRemovesWorkDir$") //nolint:gosec // G204: re-exec of this test binary
+	cmd.Env = append(os.Environ(), signalChildEnv+"="+repo, signalChildModeEnv+"="+mode, "GOTRACEBACK=single", "PATH="+path)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	scanner := bufio.NewScanner(stdout)
+	var seen []string
+	for scanner.Scan() {
+		line := scanner.Text()
+		seen = append(seen, line)
+		if line == "READY" {
+			// Drain so the child never blocks on a full pipe.
+			go func() {
+				for scanner.Scan() {
+				}
+			}()
+			return cmd
+		}
+	}
+	_ = cmd.Wait()
+	t.Fatalf("the child never parked; it printed %q", seen)
+	return nil
+}
+
+// refusingRunner fails the test if SetValue ever reaches sops.
+type refusingRunner struct{ t *testing.T }
+
+func (r refusingRunner) RunSensitive(context.Context, fcexec.SensitiveCommand) (fcexec.SensitiveResult, error) {
+	r.t.Error("SetValue reached sops despite a previous run's leftover")
+	return fcexec.SensitiveResult{}, nil
+}
+
+// SIGKILL runs no handler, so the work directory, plaintext included, stays.
+// The next SetValue on the same target must refuse and name it, and must not
+// delete it: a sops child that outlived its parent may still be using it.
+func TestSigkillLeftoverRefusesNextSet(t *testing.T) {
+	repo, path := signalRepo(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	cmd := parkChild(ctx, t, repo, path, "")
+	dir := findWorkDir(repo)
+	if dir == "" {
+		t.Fatal("no work directory while the child was parked")
+	}
+	if err := cmd.Process.Signal(syscall.SIGKILL); err != nil {
+		t.Fatalf("Signal: %v", err)
+	}
+	_ = cmd.Wait()
+	if _, err := os.Stat(filepath.Join(dir, "value")); err != nil {
+		t.Fatalf("SIGKILL should have left the staged value behind (that is the residual under test): %v", err)
+	}
+
+	t.Setenv("PATH", path)
+	target, err := env.ResolveTarget("secrets.sops.yaml", repo)
+	if err != nil {
+		t.Fatalf("ResolveTarget: %v", err)
+	}
+	defer target.Close()
+	_, err = NewClient(refusingRunner{t}).SetValue(ctx, target, "a", "another-value")
+	if err == nil {
+		t.Fatal("SetValue succeeded over a SIGKILLed run's work directory")
+	}
+	if !strings.Contains(err.Error(), filepath.Base(dir)) {
+		t.Errorf("refusal %q does not name the leftover %s", err, filepath.Base(dir))
+	}
+	if !strings.Contains(err.Error(), filepath.Join(filepath.Base(dir), "backup")) {
+		t.Errorf("refusal %q does not name the ciphertext backup inside the leftover", err)
+	}
+	if strings.Contains(err.Error(), "s3cr3t-value") || strings.Contains(err.Error(), "another-value") {
+		t.Errorf("refusal %q carries a value", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "value")); err != nil {
+		t.Errorf("the refusal removed the leftover: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Clean(filepath.Join(repo, "secrets.sops.yaml")))
+	if err != nil || string(got) != signalFixture {
+		t.Errorf("the target changed under a refusal: %q, %v", got, err)
 	}
 }
