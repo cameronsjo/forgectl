@@ -161,7 +161,7 @@ func scanLeftovers(t Target) error {
 	}
 	for _, name := range workDirs {
 		line := fmt.Sprintf(
-			"%s: the work directory of an interrupted `env set --sops`; it may hold a plaintext value, and a sops process that outlived forgectl may still be using it. Make sure no sops process is running, then delete it",
+			"%s: the work directory of an interrupted `env set --sops`; it may hold a plaintext value or sops' decrypted copy of the whole file, and a sops process that outlived forgectl may still be using it. Make sure no sops process is running, then delete it",
 			rel(name))
 		if _, _, exists, err := t.dir.lstat(name + "/backup"); err == nil && exists {
 			line += fmt.Sprintf(". Its ciphertext backup of %s from before that run is %s", termsafe.QuotePath(t.Rel()), rel(name+"/backup"))
@@ -177,7 +177,42 @@ func scanLeftovers(t Target) error {
 	if extra := len(lines) - maxNamedLeftovers; extra > 0 {
 		lines = append(lines[:maxNamedLeftovers], fmt.Sprintf("and %d more", extra))
 	}
-	return errors.New("refusing to write " + termsafe.QuotePath(t.Rel()) +
+	msg := "refusing to write " + termsafe.QuotePath(t.Rel()) +
 		": a previous forgectl run on it was interrupted and left scratch behind. Nothing was removed:\n  - " +
-		strings.Join(lines, "\n  - "))
+		strings.Join(lines, "\n  - ")
+	if twin := caseTwin(t, names); twin != "" {
+		// The scope tag lowercases the base, so on a case-sensitive volume
+		// this target and its case twin share every scratch name, and the
+		// entries above may be the twin's (cameronsjo/forgectl#652).
+		msg += fmt.Sprintf("\n%s shares these scratch names because its name differs only in letter case, so they may belong to a run on it instead", rel(twin))
+	}
+	return errors.New(msg)
+}
+
+// caseTwin returns an entry of names that equals t's base in every letter but
+// case and is a DIFFERENT file, or "" when there is none. It lowercases exactly
+// as scopeTag does, so a twin it finds really shares the tag. On a
+// case-insensitive volume the listing can spell the target itself in another
+// case (the file is stored as `.ENV`, the target was named `.env`), so a
+// candidate that is the same file as the target is not a twin. A candidate
+// that cannot be compared is not claimed either: the note is advice, and a
+// false one would send the operator to the wrong file.
+func caseTwin(t Target, names []string) string {
+	lower := strings.ToLower(t.base)
+	for _, name := range names {
+		if name == t.base || strings.ToLower(name) != lower {
+			continue
+		}
+		// A target that does not exist yet cannot be the candidate: on a
+		// case-insensitive volume the candidate's existence would mean the
+		// target's.
+		if _, _, exists, err := t.dir.lstat(t.base); err == nil && !exists {
+			return name
+		}
+		if same, err := t.dir.sameFile(name, t.base); err != nil || same {
+			continue
+		}
+		return name
+	}
+	return ""
 }

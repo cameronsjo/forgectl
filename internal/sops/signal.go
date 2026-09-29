@@ -84,6 +84,9 @@ type plaintextGuard struct {
 	mutating bool
 
 	once sync.Once
+	// kept is where the ciphertext backup ended up when finish kept it, or
+	// "" when it did not. Written inside once, read after it.
+	kept string
 
 	done   chan struct{}
 	exited chan struct{}
@@ -186,23 +189,71 @@ func (g *plaintextGuard) settle() {
 // survives. Once the directory itself is gone, every later write into it fails
 // with ENOENT — nothing but track creates it — so a bounded retry converges.
 //
-// This is the path a normal return takes, and it keeps nothing. The signal
-// path goes through finish directly and may keep the backup.
-func (g *plaintextGuard) cleanup() { g.finish(false) }
+// This is the path a normal return takes. It keeps the ciphertext backup when
+// the return came from inside the mutation span, meaning the target was never
+// verified and no restore was proven: a failed restore, or a panic. Before
+// cameronsjo/forgectl#652 it kept nothing, so a restore that failed returned
+// "could NOT be restored" and then deleted the one copy that could.
+func (g *plaintextGuard) cleanup() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.mutating {
+		g.finish(keepBackupNoChild)
+		return
+	}
+	g.finish(discardAll)
+}
+
+// keepBackup is for a failure path that returns while the target is
+// unproven. It keeps the ciphertext backup, removes every plaintext file, and
+// reports where the backup now is so the error can name it, or "" if it could
+// not be kept. The deferred cleanup that follows finds the work already done.
+func (g *plaintextGuard) keepBackup() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.finish(keepBackupNoChild)
+}
+
+// finishMode is what finish does with the ciphertext backup.
+type finishMode int
+
+const (
+	// discardAll removes the whole work directory: the target is untouched,
+	// or it is proven.
+	discardAll finishMode = iota
+	// keepBackupSignal moves the backup out beside the target, then removes
+	// the directory whatever happens. A sops child may still be running, and
+	// a sops read-back that outlives forgectl writes plaintext into the
+	// directory, so the directory never stays.
+	keepBackupSignal
+	// keepBackupNoChild is the same, except that when the backup cannot be
+	// moved out, the directory stays with the backup as its only entry. The
+	// runner has waited for every sops child by the time a normal return
+	// runs, so nothing writes into it afterwards. A panic inside the runner is
+	// the one exception, and the next run's leftover scan refuses on the
+	// directory either way, naming the backup inside and warning that it may
+	// hold plaintext.
+	keepBackupNoChild
+)
 
 // finish is cleanup, with the choice of keeping the ciphertext backup. The
 // plaintext goes first, the backup is moved out second, and the directory is
 // removed last. Once the plaintext files are gone, nothing that follows can
-// expose them.
-func (g *plaintextGuard) finish(keepBackup bool) {
+// expose them. It returns where the backup was kept, or "".
+func (g *plaintextGuard) finish(mode finishMode) string {
 	g.once.Do(func() {
 		if g.work == nil {
 			return
 		}
-		if keepBackup {
+		if mode != discardAll {
 			g.work.discardStagedValue()
 			g.work.discardLandedValue()
-			g.work.preserveBackup()
+			if g.work.preserveBackup() {
+				g.kept = g.work.keep
+			} else if mode == keepBackupNoChild && g.work.pruneToBackup() {
+				g.kept = g.work.backup
+				return
+			}
 		}
 		for range cleanupAttempts {
 			g.work.cleanup()
@@ -211,6 +262,7 @@ func (g *plaintextGuard) finish(keepBackup bool) {
 			}
 		}
 	})
+	return g.kept
 }
 
 // cleanupAttempts bounds the retry in cleanup. Each attempt that fails lost a
@@ -225,7 +277,11 @@ func (g *plaintextGuard) fire(sig os.Signal) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.fired = true
-	g.finish(g.mutating)
+	mode := discardAll
+	if g.mutating {
+		mode = keepBackupSignal
+	}
+	g.finish(mode)
 	g.die(sig)
 }
 
