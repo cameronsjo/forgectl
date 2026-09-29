@@ -265,7 +265,7 @@ func NewIndexContext(ctx context.Context, paths []string, opts IndexOptions) (*I
 		idx.docs = append(idx.docs, doc)
 	}
 
-	sort.Slice(idx.docs, func(i, j int) bool { return idx.docs[i].ModTime.After(idx.docs[j].ModTime) })
+	sortByRecency(idx.docs)
 
 	idx.pathIndex = make(map[docKey]bool, len(idx.docs))
 	for _, d := range idx.docs {
@@ -275,6 +275,26 @@ func NewIndexContext(ctx context.Context, paths []string, opts IndexOptions) (*I
 	idx.byRoot = buildRootIndexes(idx.roots, idx.docs)
 	idx.backlinks = idx.buildBacklinks()
 	return idx, nil
+}
+
+// sortByRecency orders docs most-recently-modified first, breaking mtime
+// ties on (RootLabel, RelPath). The tie-break makes the order total: root
+// labels are unique per Index and a RelPath is unique within its root, so
+// no two docs compare equal and the result does not depend on the order
+// the docs arrived in. Without it, equal mtimes (a fresh git checkout, a tar
+// extraction) left sort.Slice's pdqsort free to scramble them, so the
+// "recent" lists showed them in an order no rule described.
+func sortByRecency(docs []Doc) {
+	sort.Slice(docs, func(i, j int) bool {
+		a, b := &docs[i], &docs[j]
+		if !a.ModTime.Equal(b.ModTime) {
+			return a.ModTime.After(b.ModTime)
+		}
+		if a.RootLabel != b.RootLabel {
+			return a.RootLabel < b.RootLabel
+		}
+		return a.RelPath < b.RelPath
+	})
 }
 
 // resolveRootKind decides one root's Kind: an override in opts.RootKinds
