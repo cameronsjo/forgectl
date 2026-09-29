@@ -43,8 +43,8 @@ func (s SessionSummary) Phase() Phase { return s.phase }
 // two together — so a non-empty value here always means needs-repair.
 func (s SessionSummary) RepairReason() string { return s.repairReason }
 
-// IsWorkspaceNone reports a queued or preparing record, which has no
-// workspace yet and is neither live nor missing.
+// IsWorkspaceNone reports a queued, preparing, or needs-repair record with
+// no workspace; it is neither live nor missing.
 func (s SessionSummary) IsWorkspaceNone() bool {
 	return s.availability == workspaceAvailabilityNone
 }

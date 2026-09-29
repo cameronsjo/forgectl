@@ -316,7 +316,7 @@ const workspaceUnclassifiedStatus = "internal error: unclassified workspace stat
 func sessionStatus(live map[pr.Ref]bool, s pr.SessionSummary, tmuxOK bool) string {
 	switch {
 	case s.IsWorkspaceNone():
-		// A queued or preparing record has no workspace by design; its phase
+		// A queued, preparing, or needs-repair record may have no workspace; its phase
 		// IS its status, and rendering "workspace missing" — the word for
 		// damage — over a healthy intended state would send a user to teardown.
 		return string(s.Phase())
