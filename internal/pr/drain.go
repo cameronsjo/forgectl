@@ -62,6 +62,9 @@ type DrainOpts struct {
 	// the drainer parks it in needs-repair instead of returning it to the
 	// queue. Non-positive resolves to DefaultDrainMaxAttempts.
 	MaxAttempts int
+	// NoNotify suppresses the per-launch desktop notification. A dry-run
+	// never notifies, whatever this is set to.
+	NoNotify bool
 }
 
 // DrainItem is one row of a drain pass report — the queued record claimed (or
@@ -147,11 +150,27 @@ func (c *Client) Drain(ctx context.Context, cfg config.Config, opts DrainOpts) (
 		report.Items = append(report.Items, item)
 		if item.Outcome == drainOutcomeLaunched {
 			report.Launched++
+			if !opts.NoNotify {
+				c.notifyLaunched(ctx, item.Ref)
+			}
 		} else {
 			report.Failed++
 		}
 	}
 	return report, nil
+}
+
+// notifyLaunched posts the review-started notification for one launched ref.
+// It is a courtesy, never a verdict: a nil notifier sends nothing, and a
+// failure to notify is logged and changes nothing in the item's outcome, the
+// pass counts, or the exit code — the review launched either way.
+func (c *Client) notifyLaunched(ctx context.Context, ref string) {
+	if c.notifier == nil {
+		return
+	}
+	if err := c.notifier.Notify(ctx, "Review started", ref); err != nil {
+		slog.Warn("Failed to send the review-started notification; the review launched.", "ref", ref, "error", err)
+	}
 }
 
 // claimQueuedPass takes the lifecycle lock once, counts occupancy, and — off
