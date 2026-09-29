@@ -27,8 +27,10 @@ addr  = ""                              # default bind address for `docs serve`
 
 [docs.root_kinds]                       # override per-root link semantics (see below)
 "/absolute/path/to/notes" = "vault"
-"." = "docs"                            # relative to where forgectl runs; "~" is not expanded
+"." = "docs"                            # relative to where forgectl runs
 ```
+
+A leading `~` or `~/` in `roots` and in the `root_kinds` keys expands to your home directory. Paths named on the command line are not expanded; your shell does that.
 
 Naming directories or files on the command line replaces that default set entirely.
 

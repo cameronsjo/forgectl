@@ -26,6 +26,11 @@ func resolveDocsRoots(args []string, cfg config.DocsConfig) ([]string, error) {
 		return args, nil
 	}
 
+	cfg, err := expandDocsConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("resolve cwd: %w", err)
@@ -43,6 +48,18 @@ func resolveDocsRoots(args []string, cfg config.DocsConfig) ([]string, error) {
 	return dedupPaths(roots), nil
 }
 
+// expandDocsConfig expands a leading ~ in [docs].roots and the root_kinds
+// keys to the home directory. When the home directory cannot be resolved it
+// returns cfg unchanged, as config's resolveDir does. Positional args are
+// never expanded: the shell already did.
+func expandDocsConfig(cfg config.DocsConfig) (config.DocsConfig, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return cfg, nil //nolint:nilerr // no home dir: leave the paths as written
+	}
+	return cfg.ExpandHome(home)
+}
+
 // docsIndexOptions converts a [docs] section's root_kinds map into the
 // docs.IndexOptions NewIndexWithOptions consumes, after config.DocsConfig's
 // own Validate has rejected any value outside "docs" | "vault". Keys pass
@@ -50,6 +67,10 @@ func resolveDocsRoots(args []string, cfg config.DocsConfig) ([]string, error) {
 // path, so a config file may spell a root relatively.
 func docsIndexOptions(cfg config.DocsConfig) (docspkg.IndexOptions, error) {
 	if err := cfg.Validate(); err != nil {
+		return docspkg.IndexOptions{}, err
+	}
+	cfg, err := expandDocsConfig(cfg)
+	if err != nil {
 		return docspkg.IndexOptions{}, err
 	}
 	if len(cfg.RootKinds) == 0 {
