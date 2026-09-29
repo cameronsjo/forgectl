@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"fmt"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/net/html"
 )
@@ -110,7 +112,7 @@ func TestRender_SVGBreakout_LeavesSVG(t *testing.T) {
 
 // TestRender_DeepNesting_NotEscaped requires a document nested past x/net's
 // 512-open-element parse limit to render as markup, not as escaped text:
-// balancing gives up on it and serves the sanitized body unchanged.
+// balanceDeep contains it without the tree builder.
 //
 // Mutation: in balancePasses, return html.EscapeString(sanitized) when
 // parseBody fails — each case then renders as "&lt;ul&gt;…" text and this
@@ -349,4 +351,322 @@ func textOf(n *html.Node) string {
 	}
 	walk(n)
 	return b.String()
+}
+
+// deepSources nest past x/net's parse limit, so balancePasses hands them to
+// balanceDeep, and each carries a stray closer aimed at the shell — "</div>"
+// survives the sanitizer; "</main>" does not — followed by the text ESC.
+func deepSources() map[string]string {
+	var list strings.Builder
+	for i := range 300 {
+		_, _ = list.WriteString(strings.Repeat("  ", i) + "- x\n")
+	}
+	const esc = "\n\n</div></main>ESC\n"
+	m := map[string]string{
+		"600 unclosed b":            strings.Repeat("<b>", 600) + "z" + esc,
+		"closer before 600 b":       "</div></main>ESC\n\n" + strings.Repeat("<b>", 600) + "z\n",
+		"list 300 deep":             list.String() + esc,
+		"520 blockquotes":           strings.Repeat(">", 520) + " q" + esc,
+		"closer inside quotes":      strings.Repeat(">", 520) + " q </div></main>ESC\n",
+		"600 unclosed div":          strings.Repeat("<div>", 600) + "z" + esc,
+		"600 div, 610 closers":      strings.Repeat("<div>", 600) + "z" + strings.Repeat("</div>", 610) + "ESC\n",
+		"li closes div under 600 b": strings.Repeat("<b>", 600) + "<ul><li><div><li>x</div></ul>ESC\n",
+	}
+	for i, src := range breakoutSources {
+		m[fmt.Sprintf("svg breakout %d under 600 b", i)] = strings.Repeat("<b>", 600) + src + "</div></main>ESC\n"
+	}
+	return m
+}
+
+// shellPage places body where the shell does — html > body > div > div >
+// main > div.doc-body — with shell content after it, as the served page has.
+// Every shell element carries data-shell, so an element without it outside
+// .doc-body came from the document.
+func shellPage(body string) string {
+	return `<!DOCTYPE html><html><head></head><body><div data-shell id="shell"><div data-shell class="content-grid"><main data-shell class="surface-document"><div data-shell class="doc-body">` +
+		body + `</div><div data-shell class="home">HOME</div></main><aside data-shell class="outline">OUTL</aside></div><footer data-shell class="statusbar">SENTINEL</footer></div></body></html>`
+}
+
+// requireContained parses body inside shellPage with the HTML5 tree builder
+// and fails unless .doc-body holds every character of the document's text,
+// none of the shell's content after it, and every element the document
+// produced — including one the tree builder reconstructs later, such as an
+// <a> left open that would wrap the shell's content in a document link.
+func requireContained(t *testing.T, label, body string) {
+	t.Helper()
+	page, err := html.Parse(strings.NewReader(shellPage(body)))
+	if err != nil {
+		t.Fatalf("%s: parse page: %v", label, err)
+	}
+	doc := findByClass(page, "doc-body")
+	if doc == nil {
+		t.Fatalf("%s: no .doc-body", label)
+	}
+	for _, class := range []string{"home", "outline", "statusbar"} {
+		if n := findByClass(page, class); n == nil || isAncestor(doc, n) {
+			t.Errorf("%s: .%s missing or inside .doc-body\nbody: %q", label, class, body)
+		}
+	}
+	if main := findByClass(page, "surface-document"); main == nil || !isAncestor(main, doc) {
+		t.Errorf("%s: .doc-body escaped main\nbody: %q", label, body)
+	}
+	if n := strayDocElement(page, doc); n != nil {
+		t.Errorf("%s: document element <%s> outside .doc-body\nbody: %q", label, n.Data, body)
+	}
+	frag, err := html.Parse(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("%s: parse body: %v", label, err)
+	}
+	if got, want := strings.Join(strings.Fields(textOf(doc)), " "), strings.Join(strings.Fields(textOf(frag)), " "); got != want {
+		t.Errorf("%s: .doc-body text %q, want the document's %q\nbody: %q", label, got, want, body)
+	}
+}
+
+// strayDocElement returns the first element under n, outside doc, that is
+// neither the page's html/head/body nor marked data-shell.
+func strayDocElement(n, doc *html.Node) *html.Node {
+	if n == doc {
+		return nil
+	}
+	if n.Type == html.ElementNode && n.Namespace == "" && n.Data != "html" && n.Data != "head" && n.Data != "body" {
+		shell := false
+		for _, a := range n.Attr {
+			shell = shell || a.Key == "data-shell"
+		}
+		if !shell {
+			return n
+		}
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if f := strayDocElement(c, doc); f != nil {
+			return f
+		}
+	}
+	return nil
+}
+
+// breakoutSources put an HTML tag inside SVG, which ends the SVG in a
+// browser, and then a self-closing <a>: once out of foreign content that
+// opens an HTML <a>, and one left open is reconstructed after .doc-body,
+// wrapping the shell's content in the document's link.
+var breakoutSources = []string{
+	`<svg><g><b></b><a href="https://e.com/"/>x`,
+	`<svg><path d="M0 0"/><i>i</i><a href="https://e.com/"/>x`,
+	`<svg><g><em>e</em><a href="https://e.com/"/>x</g></svg>`,
+	`<svg><text><span>s</span><a href="https://e.com/"/>t</text></svg>`,
+	`<svg><g><strong>s</strong><b/>x`,
+}
+
+// TestRender_DeepStrayCloser_Contained renders each deep source and checks
+// what the tree builder cannot: the served body never names a shell
+// ancestor in an end tag and is balanced tag for tag, so no closer in it
+// can reach .doc-body's ancestors. The rendered page itself is too deep for
+// x/net to build; Chromium, which caps its tree at 512 levels instead of
+// refusing it, kept every case's ESC and content inside .doc-body and the
+// status bar outside it (Playwright, against the served page shape).
+//
+// Mutations: in balancePasses, return sanitized unchanged when parseBody
+// fails (main's behaviour) — every case keeps a "</div>" and this goes red.
+// In balanceDeep, drop the div rename — the "</div>"s the stack matches come
+// back and this goes red. Make breakOut a no-op — the breakoutSources cases
+// keep their HTML tags inside <svg> and this goes red.
+func TestRender_DeepStrayCloser_Contained(t *testing.T) {
+	for name, src := range deepSources() {
+		out, err := Render([]byte(src))
+		if err != nil {
+			t.Fatalf("%s: render: %v", name, err)
+		}
+		if _, passes := balancePasses(string(sanitizer.SanitizeBytes([]byte(out)))); passes != passesDeep {
+			t.Errorf("%s: balancePasses = %d on the rendered body, want the deep fallback (%d)", name, passes, passesDeep)
+		}
+		for _, closer := range []string{"</div>", "</main>", "</body>", "</html>"} {
+			if strings.Contains(out, closer) {
+				t.Errorf("%s: output keeps %s", name, closer)
+			}
+		}
+		if !strings.Contains(out, "ESC") {
+			t.Errorf("%s: content after the stray closer lost", name)
+		}
+		if err := tagsBalanced(out); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// tagsBalanced reports the first end tag in s that does not close the
+// innermost open element, elements left open at the end, or an HTML tag
+// that would break out of SVG or MathML (the sanitizer leaves no integration
+// point for it to sit in). Void elements, and self-closing tags inside SVG
+// or MathML, open nothing.
+func tagsBalanced(s string) error {
+	var stack []string
+	foreign := 0
+	z := html.NewTokenizer(strings.NewReader(s))
+	for {
+		switch tt := z.Next(); tt {
+		case html.ErrorToken:
+			if len(stack) > 0 {
+				return fmt.Errorf("%d elements left open, innermost <%s>", len(stack), stack[len(stack)-1])
+			}
+			return nil
+		case html.StartTagToken, html.SelfClosingTagToken:
+			raw, _ := z.TagName()
+			name := string(raw)
+			if foreign > 0 && foreignBreakouts[name] {
+				// A browser ends the SVG here, so the stream no longer
+				// means what its nesting says.
+				return fmt.Errorf("<%s> inside foreign content", name)
+			}
+			if name == "svg" || name == "math" {
+				foreign++
+			}
+			if tt == html.SelfClosingTagToken && foreign > 0 || foreign == 0 && voidElements[name] {
+				if name == "svg" || name == "math" {
+					foreign--
+				}
+				continue
+			}
+			stack = append(stack, name)
+		case html.EndTagToken:
+			raw, _ := z.TagName()
+			name := string(raw)
+			if len(stack) == 0 || stack[len(stack)-1] != name {
+				return fmt.Errorf("</%s> does not close the innermost open element (stack depth %d)", name, len(stack))
+			}
+			stack = stack[:len(stack)-1]
+			if name == "svg" || name == "math" {
+				foreign--
+			}
+		}
+	}
+}
+
+// TestBalanceDeep_ContainsShallowSoup runs balanceDeep on inputs the tree
+// builder can still parse — its containment argument does not depend on
+// depth — and checks the page x/net builds around each: the unbalanced
+// sources, the li-closes-div shape, SVG breakouts, and random tag soup of
+// every element the policy allows plus the ones it strips (raw-text, shell
+// and frameset tags), each ending in a stray "</div></main>".
+//
+// Mutations: in balanceDeep, drop the div rename — "<ul><li><div><li>x</div>"
+// keeps a "</div>" whose <div> the second <li> already closed, it closes
+// .doc-body, and this goes red. Skip the closeTo(0) at the end of input — an
+// unclosed <table> keeps .doc-body open and this goes red. Make breakOut a
+// no-op — a breakoutSources "<a/>" is then read as self-closed inside SVG,
+// the browser's HTML <a> is never closed and is rebuilt around the shell's
+// content, and this goes red. Drop the annotation-xml <svg> case — the
+// <svg> takes MathML's namespace, its <desc> is not an integration point,
+// "<x/>" is taken as closed while the tree builder opens it, and this goes
+// red.
+func TestBalanceDeep_ContainsShallowSoup(t *testing.T) {
+	cases := []string{
+		"<ul><li><div><li>x</div></ul>ESC",
+		"<dl><dd><div><dt>x</div></dl>ESC",
+		"<table><tr><td><div><td>x</div></table>ESC",
+		"<svg><g><table><td>x</svg>ESC",
+		"<math><mi><table>x</math>ESC",
+		"<svg><foreignObject><div>x</div></foreignObject></svg>ESC",
+		"<textarea></div></textarea>ESC",
+		"<main>m</main></body></html>ESC",
+		"<math><annotation-xml><svg><desc><x/>x</div></main>ESC",
+	}
+	for _, src := range strayCloserSources {
+		cases = append(cases, src)
+	}
+	for _, src := range breakoutSources {
+		cases = append(cases, src+"</div></main>ESC")
+	}
+	rng := rand.New(rand.NewSource(623)) //nolint:gosec // G404: deterministic test fixture, not crypto
+	tags := []string{
+		"div", "section", "p", "span", "b", "i", "a", "blockquote", "ul", "ol", "li",
+		"dl", "dt", "dd", "table", "thead", "tbody", "tr", "td", "th", "caption", "col",
+		"pre", "code", "br", "img", "hr", "svg", "path", "g", "text", "math", "mi",
+		"foreignObject", "desc", "details", "summary", "h2", "h3", "em", "ruby", "rt",
+		"font color=red", "button", "select", "main", "body", "html", "textarea",
+		"title", "script", "template", "object", "frameset",
+	}
+	for range 3000 {
+		var b strings.Builder
+		for range 1 + rng.Intn(60) {
+			tag := tags[rng.Intn(len(tags))]
+			switch rng.Intn(5) {
+			case 0, 1:
+				_, _ = b.WriteString("<" + tag + ">")
+			case 2:
+				_, _ = b.WriteString("</" + strings.Fields(tag)[0] + ">")
+			case 3:
+				_, _ = b.WriteString("<" + tag + "/>")
+			default:
+				_, _ = b.WriteString("t ")
+			}
+		}
+		cases = append(cases, b.String()+"</div></main>ESC")
+	}
+	for i, src := range cases {
+		requireContained(t, fmt.Sprintf("case %d %q", i, src), balanceDeep(src))
+	}
+}
+
+// TestBalanceDeep_OutputIsSanitizerFixedPoint requires balanceDeep's output
+// on sanitized input to survive the sanitizer unchanged: the re-sanitize in
+// balancePasses is a backstop, and what the fallback writes — the renamed
+// <section>, its closers, escaped text — is already what the policy emits.
+//
+// Mutations: in balanceDeep, rename div to "center" (a tag the policy strips)
+// instead of "section" — the re-sanitize then removes it and this goes red.
+// Write z.Text() without html.EscapeString — an escaped "&lt;b&gt;" comes
+// back as a tag and this goes red.
+func TestBalanceDeep_OutputIsSanitizerFixedPoint(t *testing.T) {
+	srcs := []string{}
+	for _, src := range deepSources() {
+		out, err := Render([]byte(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		srcs = append(srcs, string(sanitizer.SanitizeBytes([]byte(out))))
+	}
+	srcs = append(srcs, sanitizer.Sanitize(strings.Repeat("<div class=\"x\">", 600)+"&lt;b&gt; it&#39;s &amp; <svg viewBox=\"0 0 1 1\"><g><path d=\"M0 0\"/></g></svg>"))
+	rng := rand.New(rand.NewSource(62)) //nolint:gosec // G404: deterministic test fixture, not crypto
+	tags := []string{"div", "section", "p", "b", "li", "ul", "table", "td", "svg", "g", "path", "br", "img", "pre", "code", "h2"}
+	for range 300 {
+		var b strings.Builder
+		for range 600 + rng.Intn(100) {
+			tag := tags[rng.Intn(len(tags))]
+			switch rng.Intn(4) {
+			case 0, 1:
+				_, _ = b.WriteString("<" + tag + ">")
+			case 2:
+				_, _ = b.WriteString("</" + tag + ">")
+			default:
+				_, _ = b.WriteString("&lt;t&gt; ")
+			}
+		}
+		srcs = append(srcs, sanitizer.Sanitize(b.String()))
+	}
+	for i, in := range srcs {
+		out := balanceDeep(in)
+		if again := sanitizer.Sanitize(out); again != out {
+			t.Fatalf("case %d: balanceDeep output changes under the sanitizer\n out: %.300q\nagain: %.300q", i, out, again)
+		}
+	}
+}
+
+// TestBalanceDeep_Linear bounds balanceDeep on about 1MB of adversarial
+// nesting: 170k open <b>, then 170k end tags naming nothing open. A stack
+// search per end tag is 170k squared steps (minutes); the count lookup is
+// linear (well under a second).
+//
+// Mutation: in balanceDeep, drop the count[name] == 0 early continue and
+// search the stack for every end tag (guarding i >= 0) — this goes red on
+// the time bound.
+func TestBalanceDeep_Linear(t *testing.T) {
+	src := strings.Repeat("<b>", 170_000) + "z" + strings.Repeat("</i>", 170_000)
+	start := time.Now()
+	out := balanceDeep(src)
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("balanceDeep took %v on %d bytes", d, len(src))
+	}
+	if strings.Contains(out, "</i>") || strings.Count(out, "</b>") != 170_000 {
+		t.Fatalf("stray </i> kept or <b> left open")
+	}
 }

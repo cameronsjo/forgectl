@@ -63,8 +63,17 @@ func balanceFragment(sanitized string) string {
 // TestBalanceFragment_RandomTagSoup for the measured bound.
 const maxBalancePasses = 4
 
+// Pass counts balancePasses reports for its two fallbacks.
+const (
+	// passesEscaped: the markup is served as escaped text.
+	passesEscaped = -1
+	// passesDeep: the body nested past x/net's parse limit and was balanced
+	// by balanceDeep instead.
+	passesDeep = -2
+)
+
 // balancePasses is balanceFragment reporting how many rebuilds it took: 0
-// for input returned unchanged, -1 for a fallback.
+// for input returned unchanged, passesDeep or passesEscaped for a fallback.
 //
 // Each pass costs a parse and a tokenize, and the tree builder's
 // adoption-agency steps are super-linear on adversarial misnesting; the
@@ -75,11 +84,12 @@ func balancePasses(sanitized string) (string, int) {
 		nodes, err := parseBody(s)
 		if err != nil {
 			// x/net refuses a tree more than 512 open elements deep: a list
-			// nested a few hundred levels, or hundreds of unclosed <b>. Serve
-			// the sanitized body as the renderer did before balancing
-			// existed. The shell's own closers still shut what it leaves
-			// open; a stray closer in such a document goes unbalanced.
-			return sanitized, -1
+			// nested a few hundred levels, or hundreds of unclosed <b>. The
+			// tree builder cannot vouch for such a body, so balanceDeep
+			// contains it from the token stream instead
+			// (cameronsjo/forgectl#623), and the result is sanitized again
+			// so the bytes served are the sanitizer's output.
+			return sanitizer.Sanitize(balanceDeep(sanitized)), passesDeep
 		}
 		if fragmentWellNested(s, nodes) {
 			return s, pass
@@ -95,7 +105,7 @@ func balancePasses(sanitized string) (string, int) {
 		var buf bytes.Buffer
 		for n := root.FirstChild; n != nil; n = n.NextSibling {
 			if err := html.Render(&buf, n); err != nil {
-				return html.EscapeString(sanitized), -1
+				return html.EscapeString(sanitized), passesEscaped
 			}
 		}
 		s = string(sanitizer.SanitizeBytes(buf.Bytes()))
@@ -103,7 +113,7 @@ func balancePasses(sanitized string) (string, int) {
 	// The rebuild converges well inside maxBalancePasses, and hoistVoidChildren
 	// leaves nothing html.Render refuses; if either ever does not hold, show
 	// the markup as text rather than let it reach the shell unbalanced.
-	return html.EscapeString(sanitized), -1
+	return html.EscapeString(sanitized), passesEscaped
 }
 
 // bodyDocPrefix places the body where the shell does: inside a <div> in a
@@ -277,4 +287,225 @@ var voidElements = map[string]bool{
 	"area": true, "base": true, "br": true, "col": true, "embed": true,
 	"hr": true, "img": true, "input": true, "keygen": true, "link": true,
 	"meta": true, "param": true, "source": true, "track": true, "wbr": true,
+}
+
+// balanceDeep balances a body too deep for the tree builder, from its token
+// stream alone (cameronsjo/forgectl#623). What it guarantees is containment:
+// nothing it emits can close an element the shell opened, and nothing it
+// opens stays open past its end. It does not promise the tree a browser
+// would build — a tokenizer stack cannot follow the tree builder's implied
+// closes and adoption-agency moves — only that the document stays inside
+// .doc-body however the browser builds it.
+//
+// Dropping stray end tags is not enough for that on its own. A browser pops
+// open elements that no end tag names: a second <li> closes the first and
+// every <div> inside it, so in "<li><div><li>x</div>" the "</div>", matched
+// on a tokenizer's stack, finds no <div> left in the document and closes
+// .doc-body (Chromium, checked with Playwright). No end tag reaches an
+// element that is not in the document if no end tag can name one: the
+// shell's ancestors of .doc-body are html, body, main and div, so <div>
+// becomes <section>, which renders as the same block and keeps its
+// attributes, and the other three names are dropped. No start tag reaches
+// one either: the implied closes of <li>, <dd> and <dt> stop at <main>, and
+// the shell leaves no <p>, heading, <a> or <button> open around the
+// document.
+//
+// Everything else is balance, so the shell's own closers find their
+// elements: an end tag with no open element of its name is dropped, one
+// that does have one closes everything opened after it, and at the end of
+// the body every element still open is closed, innermost first. An end tag
+// naming an element the browser already closed implicitly closes nothing
+// outside the document, by the argument above (at worst "</p>" inserts an
+// empty paragraph). A <table>, cell or caption the document opens — the
+// elements a closer's scope search stops at — is always closed by name, so
+// the shell's "</div>" is never left out of scope. Of the browser's rules
+// for SVG and MathML it models these: a self-closing tag closes only in
+// foreign content; an HTML tag that breaks out of foreign content (and a
+// "</p>" or "</br>" there) closes the foreign elements first, so a <b> in
+// an <svg> ends the <svg> and a later "<a/>" opens an HTML <a> it then
+// closes; the HTML integration points (SVG foreignObject and desc, MathML
+// annotation-xml with an HTML encoding) and MathML text integration points
+// read their children as HTML; and an <svg> under annotation-xml starts a
+// new SVG root. Not modelled: the case-adjusted tag and attribute names,
+// mglyph and malignmark, and SVG <title> as an integration point (it is
+// dropped below as raw text). The elements whose parsing a tag stack
+// cannot follow —
+// <select>, <template>, the other scope-stopping <object>, <applet> and
+// <marquee>, and the raw-text elements (script, style, textarea, title and
+// the like) — are dropped with their content kept, escaped where it is raw
+// text; the policy allows none of them.
+//
+// It is linear in the input: each element is pushed and popped once, and an
+// end tag with no element of its name is dropped on a count lookup rather
+// than a stack search. Its output is sanitized again by its caller.
+func balanceDeep(src string) string {
+	var (
+		b     strings.Builder
+		stack []deepElement
+		count = map[string]int{}
+	)
+	closeTo := func(depth int) {
+		for len(stack) > depth {
+			top := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			count[top.name]--
+			_, _ = b.WriteString("</" + top.emit + ">")
+		}
+	}
+	// breakOut pops foreign elements until the current node is HTML or an
+	// integration point, as a browser does for an HTML tag inside SVG.
+	breakOut := func() {
+		n := len(stack)
+		for n > 0 && !htmlContext(stack[n-1]) {
+			n--
+		}
+		closeTo(n)
+	}
+	b.Grow(len(src))
+	z := html.NewTokenizer(strings.NewReader(src))
+	for {
+		tt := z.Next()
+		switch tt {
+		case html.ErrorToken:
+			closeTo(0)
+			return b.String()
+		case html.TextToken:
+			_, _ = b.WriteString(html.EscapeString(string(z.Text())))
+		case html.StartTagToken, html.SelfClosingTagToken:
+			raw := string(z.Raw())
+			tok := z.Token()
+			name := tok.Data
+			if deepDropped[name] {
+				continue
+			}
+			foreign := len(stack) > 0 && !htmlContext(stack[len(stack)-1])
+			if foreign && name == "svg" && stack[len(stack)-1].ns == "math" && stack[len(stack)-1].name == "annotation-xml" {
+				// A browser reads <svg> under <annotation-xml> by the HTML
+				// rules: a fresh SVG root, whose <desc> is an integration point.
+				foreign = false
+			}
+			if foreign && breaksOutOfForeign(tok) {
+				breakOut()
+				foreign = false
+			}
+			el := deepElement{name: name, emit: name}
+			switch {
+			case foreign:
+				el.ns = stack[len(stack)-1].ns
+			case name == "svg" || name == "math":
+				el.ns = name
+			}
+			el.integration = el.ns == "svg" && (name == "foreignobject" || name == "desc") ||
+				el.ns == "math" && name == "annotation-xml" && htmlAnnotation(tok)
+			if name == "div" {
+				tok.Type, tok.Data, tok.DataAtom = html.StartTagToken, "section", atom.Section
+				raw, el.emit = tok.String(), "section"
+			}
+			_, _ = b.WriteString(raw)
+			if el.ns != "" && tt == html.SelfClosingTagToken || el.ns == "" && voidElements[name] {
+				continue
+			}
+			stack = append(stack, el)
+			count[name]++
+		case html.EndTagToken:
+			tok := z.Token()
+			name := tok.Data
+			if deepDropped[name] {
+				continue
+			}
+			if (name == "br" || name == "p") && len(stack) > 0 && !htmlContext(stack[len(stack)-1]) {
+				breakOut()
+			}
+			if count[name] == 0 {
+				continue
+			}
+			i := len(stack) - 1
+			for stack[i].name != name {
+				i--
+			}
+			closeTo(i)
+		}
+	}
+}
+
+// deepElement is an element balanceDeep has open.
+type deepElement struct {
+	name        string // the tag name end tags match against
+	emit        string // the tag name balanceDeep wrote, and closes with
+	ns          string // "" for HTML, "svg" or "math"
+	integration bool   // an HTML integration point
+}
+
+// htmlContext reports whether a start tag under el is read as HTML: el is an
+// HTML element, an HTML integration point, or a MathML text integration
+// point (mglyph and malignmark aside, which no policy allows).
+func htmlContext(el deepElement) bool {
+	if el.ns == "" || el.integration {
+		return true
+	}
+	if el.ns == "math" {
+		switch el.name {
+		case "mi", "mo", "mn", "ms", "mtext":
+			return true
+		}
+	}
+	return false
+}
+
+// breaksOutOfForeign reports whether a start tag inside SVG or MathML makes a
+// browser leave foreign content: the HTML tags the spec lists, and a <font>
+// carrying color, face or size.
+func breaksOutOfForeign(tok html.Token) bool {
+	if tok.Data == "font" {
+		for _, a := range tok.Attr {
+			if a.Key == "color" || a.Key == "face" || a.Key == "size" {
+				return true
+			}
+		}
+		return false
+	}
+	return foreignBreakouts[tok.Data]
+}
+
+// htmlAnnotation reports whether a MathML <annotation-xml> is an HTML
+// integration point: its encoding names HTML.
+func htmlAnnotation(tok html.Token) bool {
+	for _, a := range tok.Attr {
+		if a.Key == "encoding" {
+			e := strings.ToLower(a.Val)
+			return e == "text/html" || e == "application/xhtml+xml"
+		}
+	}
+	return false
+}
+
+// foreignBreakouts are the start tags that end foreign content (HTML's "in
+// foreign content" insertion rules).
+var foreignBreakouts = map[string]bool{
+	"b": true, "big": true, "blockquote": true, "body": true, "br": true,
+	"center": true, "code": true, "dd": true, "div": true, "dl": true,
+	"dt": true, "em": true, "embed": true, "h1": true, "h2": true, "h3": true,
+	"h4": true, "h5": true, "h6": true, "head": true, "hr": true, "i": true,
+	"img": true, "li": true, "listing": true, "menu": true, "meta": true,
+	"nobr": true, "ol": true, "p": true, "pre": true, "ruby": true, "s": true,
+	"small": true, "span": true, "strong": true, "strike": true, "sub": true,
+	"sup": true, "table": true, "tt": true, "u": true, "ul": true, "var": true,
+}
+
+// deepDropped are the tags balanceDeep drops, keeping their content: the
+// shell's ancestors of .doc-body other than div (which it renames); the
+// elements whose parsing a tag stack cannot follow — <select> ignores most
+// tags inside it, <template> holds its content out of the document, and
+// <object>, <applet> and <marquee> stop a closer's scope search; the
+// frameset tags, which can replace <body>; and the raw-text elements, whose
+// content the tokenizer hands back as text that balanceDeep escapes. The
+// policy allows none of them.
+var deepDropped = map[string]bool{
+	"html": true, "head": true, "body": true, "main": true,
+	"select": true, "option": true, "optgroup": true, "datalist": true,
+	"template": true, "object": true, "applet": true, "marquee": true,
+	"frameset": true, "frame": true,
+	"iframe": true, "noembed": true, "noframes": true, "noscript": true,
+	"plaintext": true, "script": true, "style": true, "textarea": true,
+	"title": true, "xmp": true,
 }
