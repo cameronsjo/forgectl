@@ -17,7 +17,7 @@
 (function () {
   "use strict";
 
-  var input = document.getElementById("doc-filter");
+  var input = document.querySelector('[data-fc="doc-filter"]');
   // Inline, this script sat directly beneath the markup it drove, so the input
   // was guaranteed present. A standalone asset is loaded by any page that links
   // it and cannot assume that adjacency.
@@ -72,7 +72,7 @@
     });
 
     // Say so when nothing matches, rather than leaving a blank sidebar.
-    var empty = document.getElementById("filter-empty");
+    var empty = document.querySelector('[data-fc="filter-empty"]');
     if (empty) {
       var anyLink = links.some(function (a) { return matches(a, q); });
       empty.hidden = anyLink;
