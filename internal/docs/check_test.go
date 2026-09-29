@@ -28,7 +28,7 @@ package docs
 //   [x] Happy: an out-of-root link is counted, never reported
 //   [x] Happy: a vault root is checked: broken/ambiguous wikilinks and broken
 //       heading and ^block anchors are findings, orphans are never
-//   [x] Happy: a vault wikilink to an attachment (bare or root-relative) is not broken
+//   [x] Parity: check's broken vault wikilinks equal the reader's wikilink-miss set
 //   [x] Happy: the checked-in vault fixture checks clean, its outside-root link counted
 //   [x] Happy: a single-file root has no orphans
 //   [x] Happy: findings sort by root, path, then link findings by line, target
@@ -381,17 +381,63 @@ func TestCheck_VaultRootChecked(t *testing.T) {
 	}
 }
 
-func TestCheck_VaultAttachmentLinkNotBroken(t *testing.T) {
+// The checker reports exactly the wikilinks the reader renders as a miss.
+func TestCheck_VaultParityWithReader(t *testing.T) {
 	vault := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	checkWrite(t, filepath.Join(vault, "notes/n.md"), "# N\n\n[[assets/logo.png]]\n[[assets/nope.png]]\n")
-	checkWrite(t, filepath.Join(vault, "assets/logo.png"), "x")
+	checkWrite(t, filepath.Join(vault, "t.md"), "---\naliases: [Tee]\n---\n# T\n\n## Some Heading\n\nPara. ^blk\n")
+	checkWrite(t, filepath.Join(vault, "assets/my pic.png"), "x")
+	checkWrite(t, filepath.Join(vault, "assets/doc.pdf"), "x")
+	checkWrite(t, filepath.Join(vault, "sub/inner.md"), "# Inner\n")
 
-	r := checkIndex(t, vault).Check()
-	if len(r.Findings) != 1 || r.Findings[0].Kind != FindingBrokenLink || r.Findings[0].Target != "assets/nope.png" {
-		t.Errorf("findings = %+v, want only the missing attachment as broken_link", r.Findings)
+	forms := []struct {
+		link string
+		want bool // broken
+	}{
+		{"[[t]]", false},
+		{"[[t|a]]", false},
+		{`[[t\|a]]`, false},
+		{"[[t#^blk]]", false},
+		{"[[t#^nope]]", true},
+		{"[[t#Some Heading]]", false},
+		{"[[t#some-heading]]", false},
+		{"[[t#No Such]]", true},
+		{"[[T]]", false},
+		{"[[t.md]]", false},
+		{"[[Tee]]", false},
+		{"[[assets/my pic.png]]", true},
+		{"[[assets/doc.pdf]]", true},
+		{"[[sub]]", true},
+		{"[[missing]]", true},
+	}
+	var src strings.Builder
+	src.WriteString("# N\n\n")
+	for _, f := range forms {
+		src.WriteString("- " + f.link + "\n")
+	}
+	checkWrite(t, filepath.Join(vault, "n.md"), src.String())
+
+	idx := checkIndex(t, vault)
+	from := mustFindDoc(t, idx, idx.roots[0].Label, "n.md")
+	broken := map[int]bool{}
+	for _, f := range idx.Check().Findings {
+		if f.Path == "n.md" {
+			broken[f.Line] = true
+		}
+	}
+	for i, f := range forms {
+		line := i + 3
+		// Render the one link alone so its miss is attributable.
+		doc, err := RenderDocFor(RootVault, []byte("# N\n\n"+f.link+"\n"), idx, from)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader := strings.Contains(doc.HTML, "wikilink-miss")
+		if reader != f.want || broken[line] != reader {
+			t.Errorf("%s: reader miss=%v, check broken=%v, want %v", f.link, reader, broken[line], f.want)
+		}
 	}
 }
 

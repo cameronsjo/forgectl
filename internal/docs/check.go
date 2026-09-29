@@ -173,7 +173,12 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 				switch {
 				case target != nil:
 					kind = FindingBrokenAnchor
-				case existsInRoot(root, from, l.Path, vault):
+				// A vault wikilink has no existence fallback: the reader has no
+				// attachment or directory resolution, so a wikilink to a file
+				// or folder shows as a miss there and is broken here. A plain
+				// markdown link in a vault keeps the fallback, as the reader
+				// renders it as an ordinary link.
+				case (!vault || l.Form == FormRelPath) && existsInRoot(root, from, l.Path):
 					// A directory or non-markdown file: real, just not a doc.
 					continue
 				default:
@@ -267,24 +272,13 @@ func isLinkFinding(k FindingKind) bool {
 // existsInRoot reports whether the link path names something on disk inside
 // root, for targets that resolve to no indexed doc (a directory, a LICENSE, an
 // image). The clean path is built the way resolveDocsDoc builds it. It reads
-// nothing; ResolveInRoot refuses a symlink that escapes the root. In a vault
-// a wikilink names a file from the vault root, not from the linking note, so
-// the root-relative spelling counts too ("[[assets/logo.png]]").
-func existsInRoot(root Root, from *Doc, linkPath string, vault bool) bool {
+// nothing; ResolveInRoot refuses a symlink that escapes the root.
+func existsInRoot(root Root, from *Doc, linkPath string) bool {
 	clean, ok := linkTargetPath(from, linkPath)
-	if ok {
-		if _, err := ResolveInRoot(root.Path, clean); err == nil {
-			return true
-		}
-	}
-	if !vault || linkPath == "" {
+	if !ok {
 		return false
 	}
-	rel := strings.TrimPrefix(path.Clean(linkPath), "/")
-	if escapesRoot(rel) {
-		return false
-	}
-	_, err := ResolveInRoot(root.Path, rel)
+	_, err := ResolveInRoot(root.Path, clean)
 	return err == nil
 }
 
@@ -315,7 +309,7 @@ func linkTargetPath(from *Doc, linkPath string) (string, bool) {
 // It lives here, not in buildBacklinks, because Backlinks promises to agree
 // with ResolveLink, and ResolveLink resolves a directory link to no doc: the
 // reader does not open sub/README.md for it. Only orphan detection counts it.
-// Vault roots are skipped, as Check skips them.
+// Vault roots are skipped: orphans are never reported there.
 func (idx *Index) dirLinkInbound(rootByLabel map[string]Root) map[int]bool {
 	type dirKey struct{ root, dir string }
 	pages := map[dirKey][]int{}
