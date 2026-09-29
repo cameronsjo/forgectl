@@ -3,6 +3,7 @@ package docs
 import (
 	"embed"
 	"fmt"
+	"html"
 	"html/template"
 	"io"
 	"log/slog"
@@ -431,7 +432,7 @@ func handleDoc(store *Store) http.HandlerFunc {
 			return
 		}
 
-		source, err := os.ReadFile(absPath)
+		source, tooLarge, err := readDocCapped(absPath)
 		if err != nil {
 			slog.Warn("docs: resolved path could not be read.", "error", err)
 			http.NotFound(w, r)
@@ -439,6 +440,21 @@ func handleDoc(store *Store) http.HandlerFunc {
 		}
 
 		doc, found := idx.Find(root, rest)
+		if tooLarge {
+			// Refuse rather than truncate: a cut through a fence or table would
+			// render something misleading. The notice names the doc as
+			// root/rel only, never absPath, and links no raw file (the server
+			// has no raw-file route).
+			slog.Debug("docs: document exceeds render cap; served a notice.", "root", root, "rest", rest, "limit", renderCapBytes)
+			renderShell(w, idx, pageContext{
+				CurrentRoot: root,
+				CurrentRel:  rest,
+				DocTitle:    doc.Title,
+				Host:        r.Host,
+				Content:     template.HTML(tooLargeNoticeHTML(root + "/" + rest)), //nolint:gosec // fixed markup plus one html.EscapeString'd fragment
+			})
+			return
+		}
 		// The root's kind picks the dialect: a vault root renders the
 		// Obsidian flavour, anything else (or a root this index does not
 		// know) renders plain GFM.
@@ -471,6 +487,41 @@ func handleDoc(store *Store) http.HandlerFunc {
 			Content:     template.HTML(rendered.HTML), //nolint:gosec // body is bluemonday-sanitized in render (vault highlight/tag nodes included; wikilink anchors are built from indexed Docs only); the frontmatter/callout additions are built there from html.EscapeString'd fragments and fixed markup only
 		})
 	}
+}
+
+// renderCapBytes is the largest document handleDoc renders. It is the index
+// scan's cap on purpose: an over-cap document is indexed by title only, so
+// rendering it in full would show links and anchors the index knows nothing
+// about. The cap bounds memory and the per-request read; it does NOT bound
+// render CPU, since the superlinear parse cases sit far below it.
+const renderCapBytes = maxScanBytes
+
+// readDocCapped reads at most renderCapBytes of path. tooLarge reports that
+// the file holds more than that, in which case source is nil.
+func readDocCapped(path string) (source []byte, tooLarge bool, err error) {
+	f, err := os.Open(path) //nolint:gosec // G304: path came from Index.Resolve, which re-verifies containment
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = f.Close() }()
+	// One byte past the cap detects an over-cap file without reading the rest.
+	source, err = io.ReadAll(io.LimitReader(f, renderCapBytes+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if len(source) > renderCapBytes {
+		return nil, true, nil
+	}
+	return source, false, nil
+}
+
+// tooLargeNoticeHTML is the page body for a document over renderCapBytes.
+// docPath is "root/rel" and is escaped here.
+func tooLargeNoticeHTML(docPath string) string {
+	p := html.EscapeString(docPath)
+	return "<p>This document is over 1 MiB, so the reader does not render it.</p>" +
+		"<p><code>" + p + "</code></p>" +
+		"<p>Read it in a terminal with <code>forgectl docs read " + p + "</code>.</p>"
 }
 
 // pageContext is what a request handler fills in before calling
