@@ -215,7 +215,10 @@ func TestServer_CopyJS_ServedAndLinked(t *testing.T) {
 	if len(copyJS) == 0 || !bytes.Equal(rec.Body.Bytes(), copyJS) {
 		t.Error("body is not the embedded copy.js")
 	}
-	if n := strings.Count(string(copyJS), `addEventListener("copy"`); n != 1 {
+	// Static guard: one addEventListener call whose first argument is "copy"
+	// or 'copy', whatever the spacing. The runtime guard is the Playwright
+	// check that instruments EventTarget.addEventListener on a live page.
+	if n := len(regexp.MustCompile(`addEventListener\(\s*["']copy["']`).FindAllString(string(copyJS), -1)); n != 1 {
 		t.Errorf("copy.js registers %d copy listeners, want exactly 1", n)
 	}
 

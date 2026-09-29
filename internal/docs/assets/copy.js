@@ -20,19 +20,48 @@
   "use strict";
 
   var XHTML = "http://www.w3.org/1999/xhtml";
+  var MERMAID = "pre.mermaid[data-mermaid-source]";
 
   function docBody(node) {
     var el = node && node.nodeType === 1 ? node : node && node.parentElement;
     return el ? el.closest(".doc-body") : null;
   }
 
-  // The selection's TeX when it lies wholly inside one rendered formula:
-  // cloneContents() would then return bare KaTeX spans with no .math ancestor
-  // left to substitute.
-  function enclosingMath(range) {
+  // The source when the selection lies wholly inside one rendered formula or
+  // diagram: cloneContents() would then return bare KaTeX or SVG pieces with
+  // no .math or pre.mermaid ancestor left to substitute. Returns a node.
+  function enclosingSource(range) {
     var n = range.commonAncestorContainer;
     var el = n.nodeType === 1 ? n : n.parentElement;
-    return el ? el.closest(".math") : null;
+    if (!el) { return null; }
+    var math = el.closest(".math");
+    if (math && math.getAttribute("data-math-source") !== null) {
+      var span = document.createElement("span");
+      span.textContent = math.getAttribute("data-math-source");
+      return span;
+    }
+    var dia = el.closest(MERMAID);
+    return dia ? codeBlock(dia.getAttribute("data-mermaid-source")) : null;
+  }
+
+  // A rendered diagram copies as its SOURCE, in a <pre><code>. The SVG cannot
+  // travel: mermaid scopes its <style> to #mermaid-N and its classes, and its
+  // markers use url(#id), so pasted into another page the ids and styles are
+  // gone and it draws as black rectangles. The whole frame (bar, body, pre)
+  // is replaced, and the source goes in through textContent, never as markup.
+  function codeBlock(text) {
+    var pre = document.createElement("pre");
+    var code = document.createElement("code");
+    code.textContent = text;
+    pre.appendChild(code);
+    return pre;
+  }
+
+  function substituteDiagrams(root) {
+    root.querySelectorAll(MERMAID).forEach(function (el) {
+      var frame = el.closest(".embed") || el;
+      frame.replaceWith(codeBlock(el.getAttribute("data-mermaid-source")));
+    });
   }
 
   // Swap each rendered formula for its TeX source, delimiters kept. The tag is
@@ -60,9 +89,14 @@
 
   // Strip what only the reader's own CSS and scripts use, then unwrap the
   // attribute-less <span>s that leaves behind (syntax-highlight tokens).
+  // An SVG subtree is skipped: author-written inline SVG depends on its own
+  // ids (markers, gradients, url(#id)), classes and style, so those stay. Only
+  // the reader's pan/zoom marker comes off it.
   function stripAttributes(root) {
     var drop = ["class", "id", "style", "tabindex", "role", "aria-label", "aria-hidden"];
+    root.querySelectorAll("svg").forEach(function (el) { el.removeAttribute("data-panzoom"); });
     root.querySelectorAll("*").forEach(function (el) {
+      if (el.namespaceURI !== XHTML) { return; }
       drop.forEach(function (a) { el.removeAttribute(a); });
       Array.prototype.slice.call(el.attributes).forEach(function (attr) {
         if (attr.name.indexOf("data-") === 0) { el.removeAttribute(attr.name); }
@@ -94,6 +128,20 @@
     }
   }
 
+  function build(ranges) {
+    var clone = document.createElement("div");
+    ranges.forEach(function (r) {
+      var part = ranges.length > 1 ? document.createElement("div") : clone;
+      part.appendChild(enclosingSource(r) || r.cloneContents());
+      if (part !== clone) { clone.appendChild(part); }
+    });
+    substituteDiagrams(clone);
+    substituteMath(clone);
+    dropChrome(clone);
+    stripAttributes(clone);
+    return { html: clone.innerHTML, text: plainText(clone) };
+  }
+
   function onCopy(e) {
     var sel = window.getSelection();
     if (!e.clipboardData || !sel || sel.isCollapsed || sel.rangeCount === 0) { return; }
@@ -107,25 +155,18 @@
       ranges.push(r);
     }
 
-    var clone = document.createElement("div");
-    ranges.forEach(function (r) {
-      var math = enclosingMath(r);
-      if (math && math.getAttribute("data-math-source") !== null) {
-        var src = document.createElement("span");
-        src.textContent = math.getAttribute("data-math-source");
-        clone.appendChild(src);
-      } else {
-        clone.appendChild(r.cloneContents());
-      }
-    });
-
-    substituteMath(clone);
-    dropChrome(clone);
-    stripAttributes(clone);
-
-    e.clipboardData.setData("text/html", clone.innerHTML);
-    e.clipboardData.setData("text/plain", plainText(clone));
-    e.preventDefault();
+    // Both payloads are built before either is set, and preventDefault is the
+    // last call. A throw anywhere returns with the event untouched, so the
+    // browser's native copy runs: a bug here costs the clean HTML, never the
+    // copy itself.
+    try {
+      var out = build(ranges);
+      e.clipboardData.setData("text/html", out.html);
+      e.clipboardData.setData("text/plain", out.text);
+      e.preventDefault();
+    } catch (err) {
+      console.warn("[forgectl docs] rich copy failed; falling back to native copy", err);
+    }
   }
 
   document.addEventListener("copy", onCopy);
