@@ -52,3 +52,11 @@ feedback issue filed upstream.
 - **Why necessary:** `.surface-document *` set the prose face on chroma's token `<span>`s, so code-block columns drifted; and `.search` drew two nested accent rings on keyboard focus.
 - **Upstream fix:** `cameronsjo/artificer-design-system` branch `claude/forgectl-docs-serve-ux-7kcvjz`, commit `ba42053`, with a Playwright regression guard. Unreleased as of 0.26.0.
 - **Retire when:** the vendored Artificer version includes that commit. Delete the two template rules marked "A6" and the `.doc-body pre` font rule.
+
+## A7 — `mark` and `.tag` styles for Obsidian vault flavour
+
+- **Dated:** 2026-09-29 · app @ pre-1.0 · Artificer @ 0.25.0
+- **What diverges:** the docs shell template styles `.doc-body mark` (a highlight wash from `--attention`) and `.doc-body .tag` (a pill-shaped mono chip on `--accent` and `--border`) for the `==highlight==` and `#tag` syntax vault roots render (forgectl#444).
+- **Why necessary:** Artificer has no highlight or inline-tag primitive. Its `.chip` is the nearest, but it carries hover and `aria-pressed` states and a 44px touch min-height, which would break a line of prose.
+- **Upstream issue:** none filed yet. Candidate for an upstream inline-tag and highlight primitive.
+- **Retire when:** the vendored Artificer ships an inline tag and highlight treatment. Delete the two template rules under "Obsidian inline flavour" and adopt the upstream classes.

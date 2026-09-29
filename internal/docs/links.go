@@ -3,6 +3,7 @@ package docs
 import (
 	"path"
 	"strings"
+	"unicode"
 )
 
 // RootKind classifies how a root's link syntax and anchor semantics must be
@@ -97,7 +98,11 @@ type LinkRef struct {
 // so a resolver whose slug disagreed with the rendered page's actual id
 // would confidently resolve to an anchor the browser can't find.
 type Heading struct {
-	// Text is the heading's rendered text (inline formatting stripped).
+	// Text is the heading's text with its inline formatting flattened away
+	// (appendNodeText): "## a *b* `c`" holds "a b c", and a vault %%
+	// comment contributes nothing. A vault fragment is compared against it
+	// through normalizeHeadingKey, so a link written with or without the
+	// markup matches.
 	Text string
 	// Slug is the id goldmark's auto-heading-id pass assigned this
 	// heading, lowercase per goldmark's own convention.
@@ -337,8 +342,9 @@ func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, from *Doc, path0 string) (
 // auto-ID slug, case-sensitively — the slug is what a browser matches
 // against "id=", and a browser does not fold (the Global Constraint's
 // slug-agreement pin); a vault root additionally accepts a case-folded
-// match on the slug or the heading's rendered text, mirroring Obsidian's
-// own case-insensitive heading links.
+// match on the slug or the heading's flattened text, and a match of the
+// two under normalizeHeadingKey, so "[[Note#a ==b==]]" and "[[Note#a b]]"
+// both reach "## a ==b==". Only the vault comparison normalizes.
 func (idx *Index) resolveFragment(kind RootKind, doc *Doc, fragment string) (*Doc, Miss) {
 	if fragment == "" {
 		return doc, MissNone
@@ -357,8 +363,10 @@ func (idx *Index) resolveFragment(kind RootKind, doc *Doc, fragment string) (*Do
 
 	if kind == RootVault {
 		lastLower := strings.ToLower(last)
+		lastKey := normalizeHeadingKey(last)
 		for _, h := range doc.Headings {
-			if h.Slug == lastLower || strings.ToLower(h.Text) == lastLower {
+			if h.Slug == lastLower || strings.ToLower(h.Text) == lastLower ||
+				normalizeHeadingKey(h.Text) == lastKey {
 				return doc, MissNone
 			}
 		}
@@ -432,4 +440,37 @@ func (idx *Index) resolveParts(from *Doc, path0, fragment string) (*Doc, Miss) {
 	}
 
 	return idx.resolveFragment(root.Kind, doc, fragment)
+}
+
+// normalizeHeadingKey is the ONE vault heading-matching normalizer, applied
+// to both the link fragment and the indexed heading text, so neither side
+// has to pick a text representation. Like Obsidian's own heading matching
+// (its stripHeading-style comparison), it ignores the markdown punctuation a
+// writer may or may not type: it lowercases, drops = ~ * _ ` [ ] | and a
+// backslash that escapes punctuation, collapses each whitespace run to one
+// space, and trims. "a ==b==", "a *b*" and "a b" all key to "a b".
+func normalizeHeadingKey(s string) string {
+	var b strings.Builder
+	space := false
+	rs := []rune(strings.ToLower(s))
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
+		if r == '\\' && i+1 < len(rs) && (unicode.IsPunct(rs[i+1]) || unicode.IsSymbol(rs[i+1])) {
+			continue
+		}
+		switch r {
+		case '=', '~', '*', '_', '`', '[', ']', '|':
+			continue
+		}
+		if unicode.IsSpace(r) {
+			space = b.Len() > 0
+			continue
+		}
+		if space {
+			b.WriteByte(' ')
+			space = false
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }

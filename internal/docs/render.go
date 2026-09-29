@@ -39,7 +39,7 @@ const chromaStyle = "monokai"
 // safe ONLY because every render is piped through sanitizer (below) before
 // it ever reaches a client; WithUnsafe alone, without the bluemonday pass,
 // would be an XSS hole.
-var markdown = newMarkdown(true)
+var markdown = newMarkdown(true, false)
 
 // markdownPlain is the same pipeline without the frontmatter extension. It
 // serves any document hasWellFormedFrontmatter rejects: the extension treats
@@ -47,9 +47,19 @@ var markdown = newMarkdown(true)
 // of file — so a doc that merely opens with a thematic break would otherwise
 // render empty. Two instances beat one instance plus source rewriting; the
 // gate decides which parser sees the bytes, and neither path mutates them.
-var markdownPlain = newMarkdown(false)
+var markdownPlain = newMarkdown(false, false)
 
-func newMarkdown(withFrontmatter bool) goldmark.Markdown {
+// markdownVault and markdownVaultPlain are the same two pipelines plus the
+// Obsidian flavour (obsidian.go: ==highlight==, %%comment%%, #tag, and
+// [[wikilink]] parsing shown as source text). They serve
+// RootVault roots only; a docs root never reaches them, so the docs-root
+// instances above stay plain GFM byte for byte.
+var (
+	markdownVault      = newMarkdown(true, true)
+	markdownVaultPlain = newMarkdown(false, true)
+)
+
+func newMarkdown(withFrontmatter, vault bool) goldmark.Markdown {
 	extenders := []goldmark.Extender{
 		extension.GFM,
 		highlighting.NewHighlighting(
@@ -71,9 +81,12 @@ func newMarkdown(withFrontmatter bool) goldmark.Markdown {
 		// as a collapsed metadata disclosure — see frontmatterHTML.
 		extenders = append(extenders, &frontmatter.Extender{})
 	}
+	if vault {
+		extenders = append(extenders, obsidianFlavor{})
+	}
 	return goldmark.New(
 		goldmark.WithExtensions(extenders...),
-		goldmark.WithParserOptions(headingParserOptions()...),
+		goldmark.WithParserOptions(headingParserOptions(vault)...),
 		goldmark.WithRendererOptions(goldmarkhtml.WithUnsafe()),
 	)
 }
@@ -83,7 +96,15 @@ func newMarkdown(withFrontmatter bool) goldmark.Markdown {
 // build their goldmark instance from it, so the slug the resolver matches an
 // anchor against is, by construction, the id the browser is handed — the two
 // cannot drift apart through one call site being edited without the other.
-func headingParserOptions() []parser.Option {
+//
+// A vault instance turns goldmark's auto heading id off: it slugs the raw
+// source line, comments included. commentTransformer (obsidian.go), which
+// every vault instance carries through obsidianFlavor, sets the id instead
+// from the same line with its comments cut out.
+func headingParserOptions(vault bool) []parser.Option {
+	if vault {
+		return nil
+	}
 	return []parser.Option{parser.WithAutoHeadingID()}
 }
 
@@ -499,14 +520,30 @@ var renderMu sync.Mutex
 // document-authored HTML; UGCPolicy has always allowed them, with only the
 // `open` attribute on <details>. TestRender_DetailsAllowedWithOpenOnly pins
 // that.)
+//
+// Render is the docs-root pipeline (plain GFM); render picks by root kind.
 func Render(source []byte) (string, error) {
+	return render(source, RootDocs)
+}
+
+// render is Render for a given root kind: a RootVault root gets the Obsidian
+// flavour and callout aliases, every other kind the plain GFM pipeline.
+func render(source []byte, kind RootKind) (string, error) {
 	// Route through the frontmatter-aware parser only when a well-formed
 	// block actually opens the document. The extension's opener is greedy —
 	// any leading --- fence starts a block, and an unterminated one consumes
 	// the REST OF THE FILE — so without this gate a doc opening with a
 	// thematic break renders as an empty page.
-	md := markdown
-	if !hasWellFormedFrontmatter(source) {
+	withFrontmatter := hasWellFormedFrontmatter(source)
+	var md goldmark.Markdown
+	switch {
+	case kind == RootVault && withFrontmatter:
+		md = markdownVault
+	case kind == RootVault:
+		md = markdownVaultPlain
+	case withFrontmatter:
+		md = markdown
+	default:
 		md = markdownPlain
 	}
 	renderMu.Lock()
@@ -518,7 +555,7 @@ func Render(source []byte) (string, error) {
 		return "", fmt.Errorf("render markdown: %w", err)
 	}
 	body := string(sanitizer.SanitizeBytes(dropDuplicateSVGNamespaces(buf.Bytes())))
-	return frontmatterHTML(ctx) + transformCallouts(body), nil
+	return frontmatterHTML(ctx) + transformCallouts(body, kind), nil
 }
 
 // OutlineItem is one "On this page" entry — an h2 or h3 with the id
@@ -540,9 +577,15 @@ type RenderedDoc struct {
 	Minutes int
 }
 
-// RenderDoc renders a document and derives its outline and reading stats.
+// RenderDoc renders a docs-root document and derives its outline and
+// reading stats.
 func RenderDoc(source []byte) (RenderedDoc, error) {
-	rendered, err := Render(source)
+	return RenderDocFor(RootDocs, source)
+}
+
+// RenderDocFor is RenderDoc for a document in a root of the given kind.
+func RenderDocFor(kind RootKind, source []byte) (RenderedDoc, error) {
+	rendered, err := render(source, kind)
 	if err != nil {
 		return RenderedDoc{}, err
 	}
@@ -601,17 +644,60 @@ func extractOutline(rendered string) []OutlineItem {
 // Tier colors per the v2 handoff: note→accent, tip→success,
 // warning→attention, danger→urgent; IMPORTANT reads as a note,
 // CAUTION as danger — GitHub's five kinds onto four tiers.
-var calloutTiers = map[string]struct{ tier, label, icon string }{
+var calloutTiers = map[string]calloutStyle{
 	"NOTE":      {"note", "Note", calloutStarIcon},
 	"IMPORTANT": {"note", "Important", calloutStarIcon},
-	"TIP":       {"tip", "Tip", `<circle cx="12" cy="12" r="9"/><path d="m9 12 2 2 4-4"/>`},
-	"WARNING":   {"warning", "Warning", `<path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 20h16a2 2 0 0 0 1.73-2Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>`},
+	"TIP":       {"tip", "Tip", calloutCheckIcon},
+	"WARNING":   {"warning", "Warning", calloutTriangleIcon},
 	"CAUTION":   {"danger", "Caution", calloutOctagonIcon},
 	"DANGER":    {"danger", "Danger", calloutOctagonIcon},
 }
 
+// calloutStyle is one callout kind's tier class, fixed title label, and
+// title icon. Every field is our own constant; none comes from the document.
+type calloutStyle struct{ tier, label, icon string }
+
+// obsidianCalloutTiers is the vault-root callout map, keyed lowercase and
+// matched case-insensitively: Obsidian's callout types and their aliases on
+// the same four tiers. The six GFM kinds keep their docs-root tier and label,
+// so an existing vault doc does not change colour. Labels come from this map,
+// never from the author's marker text.
+var obsidianCalloutTiers = map[string]calloutStyle{
+	"note":      {"note", "Note", calloutStarIcon},
+	"important": {"note", "Important", calloutStarIcon},
+	"abstract":  {"note", "Abstract", calloutStarIcon},
+	"summary":   {"note", "Summary", calloutStarIcon},
+	"tldr":      {"note", "Tldr", calloutStarIcon},
+	"info":      {"note", "Info", calloutStarIcon},
+	"todo":      {"note", "Todo", calloutStarIcon},
+	"question":  {"note", "Question", calloutStarIcon},
+	"help":      {"note", "Help", calloutStarIcon},
+	"faq":       {"note", "FAQ", calloutStarIcon},
+	"example":   {"note", "Example", calloutStarIcon},
+	"quote":     {"note", "Quote", calloutStarIcon},
+	"cite":      {"note", "Cite", calloutStarIcon},
+	"tip":       {"tip", "Tip", calloutCheckIcon},
+	"hint":      {"tip", "Hint", calloutCheckIcon},
+	"success":   {"tip", "Success", calloutCheckIcon},
+	"check":     {"tip", "Check", calloutCheckIcon},
+	"done":      {"tip", "Done", calloutCheckIcon},
+	"warning":   {"warning", "Warning", calloutTriangleIcon},
+	"attention": {"warning", "Attention", calloutTriangleIcon},
+	"caution":   {"danger", "Caution", calloutOctagonIcon},
+	"failure":   {"danger", "Failure", calloutOctagonIcon},
+	"fail":      {"danger", "Fail", calloutOctagonIcon},
+	"missing":   {"danger", "Missing", calloutOctagonIcon},
+	"danger":    {"danger", "Danger", calloutOctagonIcon},
+	"error":     {"danger", "Error", calloutOctagonIcon},
+	"bug":       {"danger", "Bug", calloutOctagonIcon},
+}
+
 // calloutStarIcon is the reference shell's note glyph.
 const calloutStarIcon = `<path d="M12 3l1.9 5.8H20l-4.9 3.6 1.9 5.8-5-3.6-5 3.6 1.9-5.8L4 8.8h6.1z"/>`
+
+const calloutCheckIcon = `<circle cx="12" cy="12" r="9"/><path d="m9 12 2 2 4-4"/>`
+
+const calloutTriangleIcon = `<path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 20h16a2 2 0 0 0 1.73-2Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>`
 
 const calloutOctagonIcon = `<path d="M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86L7.86 2Z"/><path d="M12 8v4"/><path d="M12 16h.01"/>`
 
@@ -619,15 +705,42 @@ const calloutOctagonIcon = `<path d="M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 1
 // with a GFM alert marker ([!NOTE] etc.).
 var calloutOpen = regexp.MustCompile(`(?s)<blockquote>\s*<p>\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION|DANGER)\]\s*`)
 
-// transformCallouts rewrites GFM alert blockquotes into tiered callout
-// markup. It runs AFTER sanitization on pipeline-produced HTML: the marker
-// arrives as escaped-safe text, and everything injected here is our own
-// fixed markup — the document author contributes only the already-sanitized
-// body that follows the marker.
-func transformCallouts(rendered string) string {
-	return calloutOpen.ReplaceAllStringFunc(rendered, func(m string) string {
-		kind := calloutOpen.FindStringSubmatch(m)[1]
-		c := calloutTiers[kind]
+// calloutOpenVault is calloutOpen for vault roots: any obsidianCalloutTiers
+// key in any case, plus Obsidian's optional fold marker ([!info]- or
+// [!info]+), which it swallows. The alternation is built from the map keys,
+// so the regexp and the map cannot disagree about which kinds exist.
+var calloutOpenVault = regexp.MustCompile(`(?s)<blockquote>\s*<p>\[!(?i:(` + calloutAlternation(obsidianCalloutTiers) + `))\][+-]?\s*`)
+
+// calloutAlternation joins the map's keys, regexp-quoted and sorted (for a
+// stable pattern), into an alternation.
+func calloutAlternation(m map[string]calloutStyle) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, regexp.QuoteMeta(k))
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, "|")
+}
+
+// transformCallouts rewrites alert blockquotes into tiered callout markup:
+// GFM's six uppercase kinds for a docs root, and Obsidian's callout types
+// (obsidianCalloutTiers) for a vault root. It runs AFTER sanitization on
+// pipeline-produced HTML: the marker arrives as escaped-safe text, and
+// everything injected here is our own fixed markup — the document author
+// contributes only the already-sanitized body that follows the marker.
+func transformCallouts(rendered string, kind RootKind) string {
+	open, tiers, fold := calloutOpen, calloutTiers, strings.ToUpper
+	if kind == RootVault {
+		open, tiers, fold = calloutOpenVault, obsidianCalloutTiers, strings.ToLower
+	}
+	return open.ReplaceAllStringFunc(rendered, func(m string) string {
+		c, ok := tiers[fold(open.FindStringSubmatch(m)[1])]
+		if !ok {
+			// (?i) folds more than ToLower undoes (U+017F LATIN SMALL
+			// LETTER LONG S matches 's'), so a match can miss the map.
+			// Leave that blockquote exactly as it was.
+			return m
+		}
 		return `<blockquote class="callout ` + c.tier + `"><div class="callout-title"><svg viewBox="0 0 24 24" aria-hidden="true">` + c.icon + `</svg> ` + c.label + `</div><p>`
 	})
 }
