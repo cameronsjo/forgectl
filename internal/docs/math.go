@@ -115,15 +115,23 @@ func opensMath(line []byte, delim int) bool {
 // text (see crossesMarkdown): math is found before links, code spans,
 // autolinks and raw HTML, so without that check "[$HOME](a.md) and
 // [$PATH](b.md)" would turn half of each link into math.
-type mathInlineParser struct{}
+//
+// singleDollar gates the $…$ form. It is on for vault roots, whose native
+// dialect (Obsidian) has it, and off for docs roots, where "$" is far more
+// often shell (PATH=$HOME/bin:$PATH) than math. With it off, only the $$…$$
+// form is inline math, and a lone $ is text.
+type mathInlineParser struct{ singleDollar bool }
 
 func (mathInlineParser) Trigger() []byte { return []byte{'$'} }
 
-func (mathInlineParser) Parse(_ ast.Node, block text.Reader, _ parser.Context) ast.Node {
+func (p mathInlineParser) Parse(_ ast.Node, block text.Reader, _ parser.Context) ast.Node {
 	line, _ := block.PeekLine()
 	delim := 1
 	if len(line) > 1 && line[1] == '$' {
 		delim = 2
+	}
+	if delim == 1 && !p.singleDollar {
+		return nil
 	}
 	if !opensMath(line, delim) {
 		return nil
@@ -489,14 +497,17 @@ func (mathRenderer) renderBlock(w util.BufWriter, source []byte, n ast.Node, ent
 
 // mathExtension wires the parsers, the fence transformer and the renderer as
 // one unit, so no node kind is ever produced without a renderer for it.
-type mathExtension struct{}
+//
+// singleDollar turns on inline $…$ (see mathInlineParser). The zero value is
+// the docs-root dialect.
+type mathExtension struct{ singleDollar bool }
 
-func (mathExtension) Extend(m goldmark.Markdown) {
+func (e mathExtension) Extend(m goldmark.Markdown) {
 	m.Parser().AddOptions(mathBlockParserOptions()...)
 	m.Parser().AddOptions(
 		// No other inline parser triggers on '$', so this priority only has to
 		// stay clear of the ones other extensions use.
-		parser.WithInlineParsers(util.Prioritized(mathInlineParser{}, 150)),
+		parser.WithInlineParsers(util.Prioritized(mathInlineParser{singleDollar: e.singleDollar}, 150)),
 		parser.WithASTTransformers(util.Prioritized(mathFenceTransformer{}, 110)),
 	)
 	m.Renderer().AddOptions(renderer.WithNodeRenderers(
