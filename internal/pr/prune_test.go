@@ -22,6 +22,8 @@ package pr
 //   [x] A byte mismatch against the pinned re-read refuses
 //   [x] A compaction rename failure leaves the old log intact and readable
 //   [x] Compaction's own intent row survives into the new file
+//   [x] An over-long line compacts and survives byte-identical, in place (#544)
+//   [x] A '\r' before the newline survives compaction, parsed or not
 //   [x] Nothing removable exits 0 off a TTY without --yes
 //   [x] --dry-run off a TTY without --yes touches nothing
 
@@ -586,6 +588,151 @@ func TestPrune_ACompactionRenameFailureLeavesTheOldLogIntact(t *testing.T) {
 		if strings.Contains(e.Name(), ".tmp-") {
 			t.Errorf("a temp log was left behind: %s", e.Name())
 		}
+	}
+}
+
+// appendRawLogLine writes line plus a newline straight onto the audit log,
+// bypassing appendRepairRowLocked's 8 KiB cap: an over-long line only ever
+// comes from a hand edit or a foreign writer, so the test plays that writer.
+func appendRawLogLine(t *testing.T, c *Client, line []byte) {
+	t.Helper()
+	f, err := os.OpenFile(c.repairLogPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // the test's own t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(append(bytes.Clone(line), '\n')); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPrune_CompactionCarriesAnOverLongLineThroughByteIdentical is
+// forgectl#544: one line over maxRepairLogLineBytes used to fail the whole
+// read, so --prune refused on every run from then on and the log grew without
+// limit. The line must neither block compaction nor be dropped by it — and
+// that holds even when the line happens to decode as a settled, expired row,
+// because no reader ever shows it, so no reader could have settled it.
+func TestPrune_CompactionCarriesAnOverLongLineThroughByteIdentical(t *testing.T) {
+	junk := func(*testing.T) []byte { return bytes.Repeat([]byte("x"), 9000) }
+	settledIntent := func(t *testing.T) []byte {
+		t.Helper()
+		row := RepairRow{
+			TS: time.Now().UTC().Add(-200 * 24 * time.Hour), ID: "big0000000000c",
+			Mode: RepairModeRollback, Outcome: repairOutcomeIntent, RecordPath: "/tmp/x.json",
+			Detail: "d",
+		}
+		base, err := json.Marshal(row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		row.Detail = strings.Repeat("d", 1+9000-len(base))
+		line, err := json.Marshal(row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(line) != 9000 {
+			t.Fatalf("fixture line is %d bytes, want 9000", len(line))
+		}
+		return line
+	}
+
+	for _, tc := range []struct {
+		name string
+		line func(*testing.T) []byte
+	}{
+		{"an unparseable line", junk},
+		{"a line that decodes as a settled expired intent", settledIntent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := pruneClient(t, repairRunner(nil))
+			big := tc.line(t)
+			seedSettledPair(t, c, "old00000000000a", 200*24*time.Hour)
+			appendRawLogLine(t, c, big)
+			seedSettledPair(t, c, "new00000000000b", time.Hour)
+			// The expired completion the over-long intent would pair with:
+			// were the big line parsed, the two would drop together.
+			if err := c.appendRepairRowLocked(RepairRow{
+				TS: time.Now().UTC().Add(-200 * 24 * time.Hour), ID: "big0000000000c",
+				Mode: RepairModeRollback, Outcome: repairOutcomeApplied, RecordPath: "/tmp/x.json",
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			report, err := c.Prune(context.Background(), defaultPruneOpts())
+			if err != nil {
+				t.Fatalf("Prune: %v", err)
+			}
+			if report.Log.Outcome != pruneOutcomeCompacted {
+				t.Fatalf("log outcome = %q (error %q), want %q", report.Log.Outcome, report.Log.Error, pruneOutcomeCompacted)
+			}
+			if report.Log.Dropped != 2 {
+				t.Errorf("dropped = %d, want only the settled pair past the window", report.Log.Dropped)
+			}
+			after, err := os.ReadFile(c.repairLogPath()) //nolint:gosec // the test's own t.TempDir
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := bytes.Split(bytes.TrimSuffix(after, []byte("\n")), []byte("\n"))
+			at := -1
+			for i, l := range lines {
+				if bytes.Equal(l, big) {
+					at = i
+				}
+			}
+			if at != 0 {
+				t.Fatalf("the over-long line is at index %d of the compacted log, want 0 (first, byte-identical) — log:\n%.300q",
+					at, after)
+			}
+			if bytes.Contains(after, []byte("old00000000000a")) {
+				t.Error("the settled pair past the window survived compaction")
+			}
+			if !bytes.Contains(lines[1], []byte("new00000000000b")) {
+				t.Errorf("the row after the over-long line moved: line 1 = %.200q", lines[1])
+			}
+		})
+	}
+}
+
+// TestPrune_CompactionKeepsACarriageReturnBeforeTheNewline pins the byte-level
+// half of "preserved byte for byte": a '\r' before a line's '\n' is content the
+// rewriter must carry through, on a line it cannot parse and on a row it keeps.
+// bufio.Scanner's line splitter strips it, which is how the pre-#544 reader
+// rewrote a CRLF line as LF.
+func TestPrune_CompactionKeepsACarriageReturnBeforeTheNewline(t *testing.T) {
+	c := pruneClient(t, repairRunner(nil))
+	unparseable := []byte("{not json\r")
+	kept, err := json.Marshal(RepairRow{
+		TS: time.Now().UTC().Add(-time.Hour), ID: "crlf000000000d",
+		Mode: RepairModeRollback, Outcome: repairOutcomeIntent, RecordPath: "/tmp/x.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept = append(kept, '\r')
+
+	seedSettledPair(t, c, "old00000000000a", 200*24*time.Hour)
+	appendRawLogLine(t, c, unparseable)
+	appendRawLogLine(t, c, kept)
+
+	report, err := c.Prune(context.Background(), defaultPruneOpts())
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if report.Log.Outcome != pruneOutcomeCompacted || report.Log.Dropped != 2 {
+		t.Fatalf("log outcome = %q, dropped = %d (error %q), want %q dropping the settled pair",
+			report.Log.Outcome, report.Log.Dropped, report.Log.Error, pruneOutcomeCompacted)
+	}
+	after, err := os.ReadFile(c.repairLogPath()) //nolint:gosec // the test's own t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append(append(bytes.Clone(unparseable), '\n'), append(bytes.Clone(kept), '\n')...)
+	if !bytes.HasPrefix(after, want) {
+		t.Fatalf("the CRLF lines did not survive compaction byte-identical and in order:\nwant prefix %q\ngot         %q",
+			want, after)
 	}
 }
 
