@@ -240,7 +240,8 @@ type ghSearchIssue struct {
 // gets the identical check inside pr.SearchPRs).
 func (g *GitHub) searchIssues(ctx context.Context, owner string) ([]Item, bool, error) {
 	if !pr.ValidOwnerRepoPart(owner) {
-		return nil, false, fmt.Errorf("owner %q outside allowed charset", owner)
+		// Categorical (#562): owner is config-derived, so it is never echoed.
+		return nil, false, errors.New("configured owner is outside the allowed owner charset")
 	}
 	out, err := g.run.Run(ctx, "gh", "search", "issues",
 		"--owner", owner,

@@ -2,6 +2,7 @@ package pr
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -187,7 +188,8 @@ func localSessionKey(oid string) (prSessionKey, error) {
 // preserves the operator's spelling for display.
 func remoteSessionKey(owner, repo string, number int) (prSessionKey, error) {
 	if !ValidOwnerRepoPart(owner) || !ValidOwnerRepoPart(repo) {
-		return prSessionKey{}, fmt.Errorf("session key owner/repo %q/%q outside allowed charset", owner, repo)
+		// Categorical (#562): owner/repo arrive from records and gh output.
+		return prSessionKey{}, errors.New("session key owner/repo outside allowed charset")
 	}
 	if err := checkFieldLength("owner", owner); err != nil {
 		return prSessionKey{}, err

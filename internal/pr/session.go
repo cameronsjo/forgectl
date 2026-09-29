@@ -132,7 +132,8 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 	// is dead — it always begins with "https", never "-"). The branch reaches
 	// git as its own positional, so it still gets the option-like guard.
 	if !ValidOwnerRepoPart(headOwner) || !ValidOwnerRepoPart(headName) {
-		return Session{}, fmt.Errorf("PR head repo %q/%q outside allowed owner/repo charset", headOwner, headName)
+		// Categorical (#562): gh output is never echoed.
+		return Session{}, errors.New("PR head repo reported by gh is outside the allowed owner/repo charset")
 	}
 	repoURL := "https://github.com/" + headOwner + "/" + headName
 	if err := sandbox.RejectOptionLike("ref", view.HeadRefName); err != nil {

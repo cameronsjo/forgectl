@@ -85,11 +85,11 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 				known := knownHosts(repos)
 				known[client.GitHubHost()] = true // valid even when it returned no rows
 				if !known[strings.ToLower(host)] {
-					// The operator typed this, so echoing it is safe and is the
-					// whole diagnostic; the suggestion list is derived from
-					// server-supplied hostnames, so it goes through termsafe.
-					return fmt.Errorf("unknown --host %q; this inventory has: %s",
-						host, termsafe.SafeLine(strings.Join(slices.Sorted(maps.Keys(known)), ", ")))
+					// The operator typed this, so echoing it back (capped, #562)
+					// is the whole diagnostic; the suggestion list is derived
+					// from server-supplied hostnames, so it goes through termsafe.
+					return fmt.Errorf("unknown --host %s; this inventory has: %s",
+						termsafe.QuoteArgMax(host, termsafe.ArgEchoMaxRunes), termsafe.SafeLine(strings.Join(slices.Sorted(maps.Keys(known)), ", ")))
 				}
 			}
 

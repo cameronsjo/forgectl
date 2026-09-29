@@ -2,6 +2,7 @@ package pr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -51,13 +52,14 @@ func SearchPRs(ctx context.Context, run exec.Runner, opts SearchOpts) (prs []PR,
 		return nil, false, fmt.Errorf("SearchOpts: WhoFlag and Owner are mutually exclusive")
 	case opts.WhoFlag != "":
 		if !searchWhoFlags[opts.WhoFlag] {
-			return nil, false, fmt.Errorf("SearchOpts: unsupported who-flag %q", opts.WhoFlag)
+			return nil, false, errors.New("SearchOpts: unsupported who-flag")
 		}
 		args = append(args, opts.WhoFlag, "@me")
 	case opts.Owner != "":
 		// Owner can come from config — low-trust input headed for an argv.
 		if !ValidOwnerRepoPart(opts.Owner) {
-			return nil, false, fmt.Errorf("SearchOpts: owner %q outside allowed charset", opts.Owner)
+			// Categorical (#562): the value is never echoed.
+			return nil, false, errors.New("SearchOpts: owner outside allowed charset")
 		}
 		args = append(args, "--owner", opts.Owner)
 	default:

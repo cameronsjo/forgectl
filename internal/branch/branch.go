@@ -399,9 +399,11 @@ func (c *Client) resolveOrigin(ctx context.Context) (originRepo, error) {
 // validated it.
 func (c *Client) verifyRemoteDeleted(ctx context.Context, origin originRepo, name string) error {
 	path := fmt.Sprintf("repos/%s/%s/git/ref/heads/%s", origin.owner, origin.repo, name)
-	out, err := c.run.Run(ctx, "gh", "api", "--hostname="+origin.host, path)
+	_, err := c.run.Run(ctx, "gh", "api", "--hostname="+origin.host, path)
 	if err == nil {
-		return fmt.Errorf("remote branch %q still exists after delete (GET %s succeeded: %s)", name, path, out)
+		// The response body is gh output and is not echoed (#562); the path
+		// is built from validated parts.
+		return fmt.Errorf("remote branch %q still exists after delete (GET %s succeeded)", name, path)
 	}
 	if !strings.Contains(err.Error(), "404") {
 		return fmt.Errorf("verify remote branch %q deletion: %w", name, err)

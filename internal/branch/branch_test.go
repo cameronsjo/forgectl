@@ -300,6 +300,34 @@ func TestPrune_RemoteDelete_UnverifiableOriginIsAFailure(t *testing.T) {
 	}
 }
 
+// TestPrune_RemoteDelete_StillExists_DoesNotEchoResponse: the "still exists"
+// failure names the branch and the endpoint, never gh's response body, which
+// is text the server chose (#562).
+func TestPrune_RemoteDelete_StillExists_DoesNotEchoResponse(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			switch {
+			case name == "gh" && len(args) >= 2 && args[0] == "repo" && args[1] == "view":
+				return githubRepoView, nil
+			case name == "gh" && len(args) > 0 && args[0] == "api":
+				return "{\"ref\":\"MARKER\x1b[2J\"}", nil
+			}
+			return "", nil
+		},
+	}
+	item := Classification{
+		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Group: SafeToDelete,
+	}
+	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
+	if len(results) != 1 || results[0].Err == nil {
+		t.Fatalf("expected a reported failure, got %+v", results)
+	}
+	if msg := results[0].Err.Error(); strings.Contains(msg, "MARKER") || strings.Contains(msg, "\x1b") {
+		t.Fatalf("error %q echoes the gh response body", msg)
+	}
+}
+
 // --- Prune gotcha (b): worktree removed before branch delete -----------
 
 func TestPrune_WorktreeRemovedBeforeLocalBranchDelete(t *testing.T) {

@@ -13,10 +13,13 @@ package pr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Ref identifies a single pull request. A bare-number form leaves Owner/Repo
@@ -134,7 +137,9 @@ func ParseRef(s string) (Ref, error) {
 		}
 		return Ref{Number: n}, nil
 	}
-	return Ref{}, fmt.Errorf("unrecognized PR reference %q (want owner/repo#N, a github.com PR URL, or a bare number)", s)
+	// s is argv the operator typed, or a record's ref string whose callers
+	// replace this error with a categorical one; echo it capped (#562).
+	return Ref{}, fmt.Errorf("unrecognized PR reference %s (want owner/repo#N, a github.com PR URL, or a bare number)", termsafe.QuoteArgMax(s, termsafe.ArgEchoMaxRunes))
 }
 
 // RefFromParts builds a validated Ref from separate owner/repo/number strings.
@@ -147,7 +152,9 @@ func ParseRef(s string) (Ref, error) {
 // The Ref it returns is always non-local — see ParseRef.
 func RefFromParts(owner, repo, num string) (Ref, error) {
 	if !reOwner.MatchString(owner) || !reOwner.MatchString(repo) {
-		return Ref{}, fmt.Errorf("reference owner/repo %q/%q outside allowed charset", owner, repo)
+		// Categorical (#562): RefFromParts is also fed gh output and review
+		// rows, so the rejected value is never echoed.
+		return Ref{}, errors.New("reference owner/repo outside allowed charset")
 	}
 	if owner == ".." || repo == ".." {
 		return Ref{}, fmt.Errorf("PR reference must not contain %q", "..")
@@ -170,7 +177,9 @@ func RefFromParts(owner, repo, num string) (Ref, error) {
 func parseNumber(s string) (int, error) {
 	n, err := strconv.Atoi(s)
 	if err != nil {
-		return 0, fmt.Errorf("PR number %q is not a valid integer: %w", s, err)
+		// strconv's error repeats the whole input, so it is dropped; s is a
+		// digit run (the regex admits nothing else), echoed capped (#562).
+		return 0, fmt.Errorf("PR number %s is out of range", termsafe.QuoteArgMax(s, termsafe.ArgEchoMaxRunes))
 	}
 	if n <= 0 {
 		return 0, fmt.Errorf("PR number must be positive, got %d", n)
@@ -196,7 +205,7 @@ func (c *Client) ResolveRef(ctx context.Context, s string) (Ref, error) {
 		return Ref{}, fmt.Errorf("resolve bare PR number against origin: %w", err)
 	}
 	if !ValidOwnerRepoPart(owner) || !ValidOwnerRepoPart(repo) {
-		return Ref{}, fmt.Errorf("origin owner/repo %q/%q outside allowed charset", owner, repo)
+		return Ref{}, errors.New("origin owner/repo is outside the allowed charset")
 	}
 	ref.Owner, ref.Repo = owner, repo
 	return ref, nil
@@ -222,13 +231,16 @@ func (c *Client) resolveOrigin(ctx context.Context) (owner, repo string, err err
 			return o, r, nil
 		}
 	}
+	// Every error below is categorical (#562). The origin URL can embed a
+	// credential (https://user:TOKEN@host/...), and the subprocess errors
+	// carry gh's and git's stderr verbatim, so none of that text is echoed.
 	url, gitErr := c.run.Run(ctx, "git", "remote", "get-url", "origin")
 	if gitErr != nil {
-		return "", "", fmt.Errorf("gh repo view and git remote both failed: %v; %w", ghErr, gitErr)
+		return "", "", errors.New("could not resolve the origin repository: gh repo view failed and git has no readable origin remote")
 	}
 	o, r, ok := parseRemoteURL(url)
 	if !ok {
-		return "", "", fmt.Errorf("could not parse owner/repo from origin URL %q", url)
+		return "", "", errors.New("origin URL is not a recognised GitHub remote")
 	}
 	return o, r, nil
 }
