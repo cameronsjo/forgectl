@@ -114,14 +114,14 @@ func countJumps(html string) int { return strings.Count(html, `.md#x"`) }
 // render red; a budget per link (built inside the closure) turns the hostile
 // case red; a bigger constant turns the exact count red.
 func TestRenderDocFor_FragmentBudgetPerRender(t *testing.T) {
-	const cap = maxFragmentParseBytes / maxRenderedFragment
+	const budgetLinks = maxFragmentParseBytes / maxRenderedFragment
 	for _, tc := range []struct {
 		name        string
 		links, want int
 	}{
 		{"normal note", 20, 20},
-		{"exactly at budget", cap, cap},
-		{"hostile note", cap + 50, cap},
+		{"exactly at budget", budgetLinks, budgetLinks},
+		{"hostile note", budgetLinks + 50, budgetLinks},
 	} {
 		note := budgetRenderNote(tc.links)
 		idx, _ := newMatchVault(t, note)
