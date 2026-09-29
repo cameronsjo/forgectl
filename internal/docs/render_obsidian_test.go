@@ -391,11 +391,12 @@ func TestRenderVault_CommentsGoldmarkPairs(t *testing.T) {
 }
 
 // TestScanVault_HeadingIDParity checks, exhaustively over every string of
-// length 1-7 made of '%', '`', '\\', 'a' and ' ', that a "## " heading's
+// length 1-5 made of '%', '`', '\\', 'a', ' ', '=', '~', '#', '[' and '$',
+// that a "## " heading's
 // scanned slug equals its rendered id: the heading-id transformer runs in
 // both instances, and this pins that nothing else feeds either side.
 func TestScanVault_HeadingIDParity(t *testing.T) {
-	alphabet := []byte("%`\\a ")
+	alphabet := []byte("%`\\a =~#[$")
 	idPattern := regexp.MustCompile(`<h2 id="([^"]*)"`)
 	checked := 0
 	var walk func(prefix []byte)
@@ -413,7 +414,7 @@ func TestScanVault_HeadingIDParity(t *testing.T) {
 			}
 			checked++
 		}
-		if len(prefix) == 7 {
+		if len(prefix) == 5 {
 			return
 		}
 		for _, c := range alphabet {
@@ -421,7 +422,7 @@ func TestScanVault_HeadingIDParity(t *testing.T) {
 		}
 	}
 	walk(nil)
-	if checked < 90000 {
+	if checked < 100000 {
 		t.Fatalf("only %d strings checked", checked)
 	}
 }
@@ -466,5 +467,100 @@ func TestScanVault_OverCapTitleDropsComment(t *testing.T) {
 	}
 	if meta.Title != "Big  note" {
 		t.Errorf("title = %q, want %q", meta.Title, "Big  note")
+	}
+}
+
+// TestScanVault_ParserSetParity: the vault scan and render parse with one
+// constructor, so every inline construct that can hold or cross a "%%"
+// (==, ~~, _, #tag, [[…]], $…$) pairs it the same way in both. Each case
+// checks scan slugs against rendered ids, and each candidate link is
+// indexed exactly when the page shows it: an href for a markdown link, the
+// "[[target" source text for a wikilink.
+func TestScanVault_ParserSetParity(t *testing.T) {
+	cases := []struct {
+		src   string
+		links []string
+	}{
+		{"## ==a %%b== c%%\n", nil},
+		{"## ~~a %%b~~ c%%\n", nil},
+		{"## _x %%y #t_ z%%\n", nil},
+		{"## a %%b [[c%%]] d\n", []string{"c%%"}},
+		{"## $a %%$ b %%\n", nil},
+		{"==a %%b== c%% d [[Hidden]] %%\n", []string{"Hidden"}},
+		{"~~a %%b [Target](target.md)~~ c%%\n", []string{"target.md"}},
+		{"$x %% y$ z %% [[L]]\n", []string{"L"}},
+		{"#t %%x [[T1]]%% [[T2]] ==y %%z== [w](w.md)%%\n", []string{"T1", "T2", "w.md"}},
+		{"## [[H1]] %%x [[H2]] ~~y%%~~ #t %%\n", []string{"H1", "H2"}},
+	}
+	idPattern := regexp.MustCompile(`<h[1-6] id="([^"]*)"`)
+	for _, c := range cases {
+		scan, err := scanBodyFor(RootVault, []byte(c.src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := renderKind(t, c.src, RootVault)
+		var slugs, ids []string
+		for _, h := range scan.headings {
+			slugs = append(slugs, h.Slug)
+		}
+		for _, m := range idPattern.FindAllStringSubmatch(out, -1) {
+			ids = append(ids, m[1])
+		}
+		if strings.Join(slugs, ",") != strings.Join(ids, ",") {
+			t.Errorf("%q: scan slugs %v, rendered ids %v", c.src, slugs, ids)
+		}
+		indexed := map[string]bool{}
+		for _, l := range scan.links {
+			indexed[l.Path] = true
+		}
+		for _, target := range c.links {
+			rendered := strings.Contains(out, `href="`+target+`"`) || strings.Contains(out, "[["+target)
+			if indexed[target] != rendered {
+				t.Errorf("%q: %s indexed = %v, rendered = %v (%s)", c.src, target, indexed[target], rendered, out)
+			}
+		}
+	}
+}
+
+// TestRenderVault_WikilinkShowsSource: a vault wikilink is parsed (so the
+// page and the index agree on what it consumes) but still shows as its own
+// escaped source text, as before.
+func TestRenderVault_WikilinkShowsSource(t *testing.T) {
+	out := renderKind(t, "see [[My Note#Part|label]] and ![[pic.png]] and [[a<b]]\n", RootVault)
+	for _, want := range []string{"[[My Note#Part|label]]", "![[pic.png]]", "[[a&lt;b]]"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("want %q in %s", want, out)
+		}
+	}
+	if strings.Contains(out, "<a ") || strings.Contains(out, "<img") {
+		t.Errorf("a wikilink became markup: %s", out)
+	}
+}
+
+// TestScanVault_BlockIDInRemovedCommentParagraph: a paragraph holding only
+// a comment is removed from the tree, and a block-id marker inside that
+// comment must stay out of the index.
+func TestScanVault_BlockIDInRemovedCommentParagraph(t *testing.T) {
+	for _, src := range []string{
+		"> %%x\n> text ^blk\n> more%%\n",
+		"- a\n\n  %%x\n  text ^blk2\n  more%%\n",
+		"%%x\n<b>\ntext ^blk3\n%%\n",
+		"para ^keep\n",
+		// Mermaid and math fences are code, though the render pipeline's
+		// transformers give them their own node kinds.
+		"```mermaid\nA ^mer\n```\n\n```math\nx ^mth\n```\n\n$$\ny ^dd\n$$\n",
+	} {
+		scan, err := scanBodyFor(RootVault, []byte(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids := scanBlockIDs([]byte(src), scan.masked, scan.hidden)
+		want := ""
+		if strings.Contains(src, "^keep") {
+			want = "keep"
+		}
+		if strings.Join(ids, ",") != want {
+			t.Errorf("%q: block ids %v, want %q", src, ids, want)
+		}
 	}
 }

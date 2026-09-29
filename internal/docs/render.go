@@ -98,7 +98,7 @@ func newMarkdown(withFrontmatter, vault bool) goldmark.Markdown {
 //
 // A vault instance turns goldmark's auto heading id off: it slugs the raw
 // source line, comments included. commentTransformer (obsidian.go), which
-// every vault instance carries through obsidianComments, sets the id instead
+// every vault instance carries through obsidianFlavor, sets the id instead
 // from the same line with its comments cut out.
 func headingParserOptions(vault bool) []parser.Option {
 	if vault {

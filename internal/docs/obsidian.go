@@ -11,12 +11,15 @@ import (
 	"github.com/yuin/goldmark/renderer"
 	"github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
+	"go.abhg.dev/goldmark/wikilink"
 )
 
 // obsidianFlavor is the vault-root-only markdown dialect: ==highlight==,
-// %%comment%% (inline and block), and #tag chips. It is registered only on
-// the vault goldmark instances (newMarkdown's vault flag), so a docs root keeps
-// rendering plain GFM byte for byte.
+// %%comment%% (inline and block), #tag chips, and [[wikilink]] parsing. It is
+// registered only on the vault goldmark instances (newMarkdown's vault flag),
+// so a docs root keeps rendering plain GFM byte for byte. linkscan's vault
+// parser is one of those instances too (linkMarkdownVault), so the index and
+// the page parse a vault note with the identical parser set.
 //
 // None of the renderers below call html.RenderAttributes, so no
 // author-controlled attribute can ride along on the new elements, and their
@@ -25,27 +28,6 @@ type obsidianFlavor struct{}
 
 // Extend implements goldmark.Extender.
 func (obsidianFlavor) Extend(m goldmark.Markdown) {
-	obsidianComments{}.Extend(m)
-	m.Parser().AddOptions(
-		parser.WithInlineParsers(
-			util.Prioritized(highlightParser{}, 500),
-			util.Prioritized(tagParser{}, 500),
-		),
-	)
-	m.Renderer().AddOptions(renderer.WithNodeRenderers(
-		util.Prioritized(obsidianRenderer{}, 500),
-	))
-}
-
-// obsidianComments registers only the %% comment parsers: the part of the
-// flavour that changes what a document CONTAINS, not how it looks. The render
-// instances get it through obsidianFlavor, and linkscan's vault instance gets
-// it directly, so the index (title, headings, links, block ids) sees exactly
-// the text the page shows.
-type obsidianComments struct{}
-
-// Extend implements goldmark.Extender.
-func (obsidianComments) Extend(m goldmark.Markdown) {
 	m.Parser().AddOptions(
 		parser.WithBlockParsers(
 			// Ahead of the paragraph parser (1000), behind nothing else that
@@ -53,12 +35,22 @@ func (obsidianComments) Extend(m goldmark.Markdown) {
 			util.Prioritized(commentBlockParser{}, 500),
 		),
 		parser.WithInlineParsers(
+			// Ahead of goldmark's link parser (200), the priority the
+			// library's own Extender uses. Only the Parser is taken: the
+			// library's Renderer and Extender resolve targets into hrefs,
+			// and renderWikilinkSource replaces them.
+			util.Prioritized(&wikilink.Parser{}, 199),
+			util.Prioritized(highlightParser{}, 500),
 			util.Prioritized(commentInlineParser{}, 500),
+			util.Prioritized(tagParser{}, 500),
 		),
 		parser.WithASTTransformers(
 			util.Prioritized(commentTransformer{}, 500),
 		),
 	)
+	m.Renderer().AddOptions(renderer.WithNodeRenderers(
+		util.Prioritized(obsidianRenderer{}, 500),
+	))
 }
 
 var (
@@ -236,9 +228,30 @@ func (commentTransformer) Transform(doc *ast.Document, reader text.Reader, pc pa
 		}
 		h.SetAttribute([]byte("id"), pc.IDs().Generate(value, ast.KindHeading))
 	}
+	var removed []text.Segment
 	for _, n := range empty {
+		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+			if cs, ok := c.(*commentSpanNode); ok {
+				removed = append(removed, text.NewSegment(cs.Start, cs.Stop))
+			}
+		}
 		n.Parent().RemoveChild(n.Parent(), n)
 	}
+	pc.Set(removedCommentsKey, removed)
+}
+
+// removedCommentsKey holds, in the parser context, the source range of each
+// comment in a paragraph commentTransformer removed. Those comments are no
+// longer in the tree, so linkscan reads them from here to keep a block-id
+// marker inside one out of the index.
+var removedCommentsKey = parser.NewContextKey()
+
+// removedComments returns the ranges commentTransformer recorded in pc.
+func removedComments(pc parser.Context) []text.Segment {
+	if v, ok := pc.Get(removedCommentsKey).([]text.Segment); ok {
+		return v
+	}
+	return nil
 }
 
 // onlyComments reports whether paragraph p holds at least one comment and
@@ -481,6 +494,32 @@ func (obsidianRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
 	reg.Register(kindCommentSpan, renderNothing)
 	reg.Register(kindCommentBlock, renderNothing)
 	reg.Register(kindTag, renderTag)
+	reg.Register(wikilink.Kind, renderWikilinkSource)
+}
+
+// renderWikilinkSource writes a wikilink back out as its own source text,
+// "[[…]]" or "![[…]]", HTML-escaped: exactly what a vault page showed before
+// wikilinks were parsed there. The parser is registered so the page and the
+// index agree on what a "[[" consumes; resolving links into anchors is a
+// later change. The text runs from the node's start to its label's end plus
+// the closing "]]", both set by the parser.
+func renderWikilinkSource(w util.BufWriter, source []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
+	if !entering {
+		return ast.WalkContinue, nil
+	}
+	label, ok := n.LastChild().(*ast.Text)
+	start := n.Pos()
+	stop := 0
+	if ok {
+		stop = label.Segment.Stop + len("]]")
+	}
+	if !ok || start < 0 || stop > len(source) || start >= stop {
+		// No source range to write: render the label as text instead,
+		// never nothing.
+		return ast.WalkContinue, nil
+	}
+	_, _ = w.Write(util.EscapeHTML(source[start:stop]))
+	return ast.WalkSkipChildren, nil
 }
 
 func renderHighlight(w util.BufWriter, _ []byte, _ ast.Node, entering bool) (ast.WalkStatus, error) {

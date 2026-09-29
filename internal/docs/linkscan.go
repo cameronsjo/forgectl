@@ -15,7 +15,7 @@ import (
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
-	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 	"go.abhg.dev/goldmark/wikilink"
 	"gopkg.in/yaml.v3"
@@ -47,32 +47,27 @@ type docMeta struct {
 // render.go serializes its twin behind renderMu because third-party
 // extensions may not be concurrency-safe; a parallel scan would need the
 // same treatment or one instance per worker.
-var linkMarkdown = newLinkMarkdown(false)
+var linkMarkdown = newLinkMarkdown()
 
-// linkMarkdownVault is linkMarkdown for vault roots: it also carries the %%
-// comment parsers (obsidianComments), so a heading, link or block id inside
-// a comment is not indexed, just as it is not rendered.
-var linkMarkdownVault = newLinkMarkdown(true)
+// linkMarkdownVault is the vault scan parser. It is built by the vault
+// render constructor itself (newMarkdown with the vault flag, without the
+// frontmatter extension because scanDoc strips frontmatter first), so the
+// index parses a vault note with exactly the inline, block and delimiter set
+// the page does: GFM, math, ==, ~~, #tag, [[…]] and the %% comment parsers
+// and transformer. A %% therefore pairs the same way in both, and the index
+// holds exactly the headings, slugs, links and block ids the page shows.
+// It is never used to render. Its own instance, not the render one, so an
+// index build never contends for renderMu.
+var linkMarkdownVault = newMarkdown(false, true)
 
-func newLinkMarkdown(vault bool) goldmark.Markdown {
+func newLinkMarkdown() goldmark.Markdown {
 	md := goldmark.New(
-		goldmark.WithParserOptions(headingParserOptions(vault)...),
+		goldmark.WithParserOptions(headingParserOptions(false)...),
 		// Parse-only: a $$ block's lines are TeX, not headings or links.
 		goldmark.WithParserOptions(mathBlockParserOptions()...),
 	)
 	// Parse-only: never render with this instance. The default resolver turns [[https://x/]] into an external href the sanitizer keeps.
 	(&wikilink.Extender{}).Extend(md)
-	if vault {
-		obsidianComments{}.Extend(md)
-		// The render pipeline's GFM table and autolink parsers decide where
-		// an inline comment can reach: a table cell is parsed on its own, and
-		// an autolink consumes its "%%" before the comment parser sees it.
-		// Without them the scan would draw comment boundaries the page does
-		// not, and index or drop a link the page shows otherwise. Vault
-		// only: a docs root's scan instance is unchanged.
-		extension.Table.Extend(md)
-		extension.Linkify.Extend(md)
-	}
 	return md
 }
 
@@ -321,7 +316,8 @@ func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 	if kind == RootVault {
 		md = linkMarkdownVault
 	}
-	doc := md.Parser().Parse(reader)
+	ctx := parser.NewContext()
+	doc := md.Parser().Parse(reader, parser.WithContext(ctx))
 
 	var headings []Heading
 	var links []LinkRef
@@ -352,6 +348,16 @@ func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 		case ast.KindCodeBlock, kindCommentBlock:
 			for i := 0; i < n.Lines().Len(); i++ {
 				code = append(code, n.Lines().At(i))
+			}
+		case kindMermaidBlock, kindMathBlock:
+			// The vault scan parses with the render constructor, whose
+			// transformers promote mermaid and math fences off
+			// KindFencedCodeBlock; their lines are still code. Vault only:
+			// the docs-root scan's handling of a $$ block is unchanged.
+			if kind == RootVault {
+				for i := 0; i < n.Lines().Len(); i++ {
+					code = append(code, n.Lines().At(i))
+				}
 			}
 		case ast.KindHeading:
 			h, ok := n.(*ast.Heading)
@@ -412,6 +418,10 @@ func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 		return bodyScan{}, err
 	}
 
+	// Comments in a paragraph commentTransformer removed are gone from the
+	// tree; it left their ranges in the context.
+	hidden = append(hidden, removedComments(ctx)...)
+
 	return bodyScan{headings: headings, links: links, masked: code, hidden: hidden, h1s: h1s}, nil
 }
 
@@ -460,7 +470,24 @@ func headingText(n *ast.Heading, source []byte) string {
 }
 
 func appendNodeText(b *strings.Builder, n ast.Node, source []byte) {
-	if n.Kind() == kindCommentSpan {
+	switch t := n.(type) {
+	case *commentSpanNode:
+		return
+	case *tagNode:
+		// A tag has no text child; its name is what the page shows.
+		b.WriteByte('#')
+		b.Write(t.Name)
+		return
+	case *mathInline:
+		// Written as its source delimiters, as a scan without the math
+		// parser would have read it.
+		delim := "$"
+		if t.display {
+			delim = "$$"
+		}
+		b.WriteString(delim)
+		b.Write(t.tex)
+		b.WriteString(delim)
 		return
 	}
 	if t, ok := n.(*ast.Text); ok {
