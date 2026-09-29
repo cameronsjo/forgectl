@@ -159,6 +159,64 @@ func composeRepairActor(name, sessionID string) string {
 	return truncateString(name, maxActorBytes)
 }
 
+// errRepairLogNotRegular is openRepairLogFile's refusal of a log that is not
+// a regular file: a symlink, a FIFO, a device, a directory.
+var errRepairLogNotRegular = errors.New("the repair audit log is not a regular file")
+
+// openRepairLogFile is the ONE way this package opens the repair audit log,
+// for reading and for appending alike (forgectl#614).
+//
+// Every opener runs under the lifecycle lock, so an open or a read that never
+// returns stalls every pr lifecycle verb, not just its own. A FIFO in the
+// log's place blocks a reader forever, and a symlink to /dev/zero feeds one an
+// endless stream; a symlink to a regular file lets the appender write through
+// it and prune's rename replace the link rather than what it points at. So the
+// open refuses a symlink (O_NOFOLLOW) and cannot block (O_NONBLOCK, cleared
+// afterwards), and the open descriptor is then Fstat'ed and refused unless it
+// is a regular file. Checking the descriptor, not the path, means the check
+// and every later read or write describe the same file.
+//
+// A missing log comes back as an error errors.Is matches to fs.ErrNotExist,
+// exactly as os.Open's did, so callers that read a missing log as empty keep
+// doing so.
+func openRepairLogFile(path string, flag int, perm os.FileMode) (*os.File, error) {
+	f, err := openRepairLogNoFollow(path, flag, perm)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("stat repair audit log: %w", termsafe.Error(err))
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: %s is a %s; refusing it",
+			errRepairLogNotRegular, termsafe.QuotePath(path), fileKind(info.Mode()))
+	}
+	return f, nil
+}
+
+// fileKind names a non-regular file's type for openRepairLogFile's refusal.
+func fileKind(mode os.FileMode) string {
+	switch {
+	case mode&os.ModeNamedPipe != 0:
+		return "named pipe (FIFO)"
+	case mode&os.ModeSymlink != 0:
+		return "symlink"
+	case mode.IsDir():
+		return "directory"
+	case mode&os.ModeCharDevice != 0:
+		return "character device"
+	case mode&os.ModeDevice != 0:
+		return "device"
+	case mode&os.ModeSocket != 0:
+		return "socket"
+	default:
+		return "non-regular file (" + mode.Type().String() + ")"
+	}
+}
+
 // appendRepairRowLocked appends one row, fsynced, to the repair log. The
 // caller must already hold the lifecycle lock — every writer of this file is
 // inside a repair hold, which is what makes an append-with-no-locking-of-its-
@@ -175,7 +233,7 @@ func (c *Client) appendRepairRowLocked(row RepairRow) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(c.repairLogPath(), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600) //nolint:gosec // inside the 0700 sessions dir
+	f, err := openRepairLogFile(c.repairLogPath(), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("open repair audit log: %w", termsafe.Error(err))
 	}
@@ -425,7 +483,7 @@ func (c *Client) readRepairLogTail(limit int) (rows []RepairRow, omitted, skippe
 	if limit < 1 {
 		limit = 1
 	}
-	f, err := os.Open(c.repairLogPath()) //nolint:gosec // inside the 0700 sessions dir
+	f, err := openRepairLogFile(c.repairLogPath(), os.O_RDONLY, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, 0, 0, nil

@@ -921,7 +921,7 @@ func (c *Client) compactRepairLog(cutoff time.Time, out *PruneLog) {
 // openRepairLog opens the log for a compaction pass. A missing log is not an
 // error: it reads as empty, and f is nil.
 func (c *Client) openRepairLog() (*os.File, error) {
-	f, err := os.Open(c.repairLogPath()) //nolint:gosec // inside the 0700 sessions dir
+	f, err := openRepairLogFile(c.repairLogPath(), os.O_RDONLY, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
