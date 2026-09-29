@@ -87,6 +87,17 @@ func newMarkdown(withFrontmatter, vault bool) goldmark.Markdown {
 	)
 }
 
+// newParseContext returns the parser context for one parse of a document in
+// a root of the given kind. A vault root gets newVaultIDs, the heading-id
+// generator that leaves comment text out of ids; render and scanBodyFor both
+// build their context here, so an indexed slug is the id the page renders.
+func newParseContext(kind RootKind) parser.Context {
+	if kind == RootVault {
+		return parser.NewContext(parser.WithIDs(newVaultIDs()))
+	}
+	return parser.NewContext()
+}
+
 // headingParserOptions is the ONE place the heading-id rule is configured.
 // Both the rendering pipeline above and scanDoc's link parser (linkscan.go)
 // build their goldmark instance from it, so the slug the resolver matches an
@@ -536,7 +547,7 @@ func render(source []byte, kind RootKind) (string, error) {
 	}
 	renderMu.Lock()
 	var buf bytes.Buffer
-	ctx := parser.NewContext()
+	ctx := newParseContext(kind)
 	err := md.Convert(source, &buf, parser.WithContext(ctx))
 	renderMu.Unlock()
 	if err != nil {
@@ -722,7 +733,13 @@ func transformCallouts(rendered string, kind RootKind) string {
 		open, tiers, fold = calloutOpenVault, obsidianCalloutTiers, strings.ToLower
 	}
 	return open.ReplaceAllStringFunc(rendered, func(m string) string {
-		c := tiers[fold(open.FindStringSubmatch(m)[1])]
+		c, ok := tiers[fold(open.FindStringSubmatch(m)[1])]
+		if !ok {
+			// (?i) folds more than ToLower undoes (U+017F LATIN SMALL
+			// LETTER LONG S matches 's'), so a match can miss the map.
+			// Leave that blockquote exactly as it was.
+			return m
+		}
 		return `<blockquote class="callout ` + c.tier + `"><div class="callout-title"><svg viewBox="0 0 24 24" aria-hidden="true">` + c.icon + `</svg> ` + c.label + `</div><p>`
 	})
 }

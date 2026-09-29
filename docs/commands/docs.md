@@ -12,7 +12,12 @@ forgectl docs open --print-url [path]    # print the resolved URL instead of ope
 forgectl docs list [dir|file ...]        # list the indexed docs, no server (--json for scripting)
 ```
 
-Documents in a `vault` root (see [Root kinds](#root-kinds)) also render Obsidian's inline syntax: `==text==` is highlighted, `%%comments%%` (inline, or a block of lines between two `%%` lines) are left out of the page, and `#tags` show as tag chips. A `%%` whose closing `%%` can't be found stays visible as text, so a stray marker never hides the rest of a note. Docs roots render plain GitHub-flavoured markdown, where all of these stay literal.
+Documents in a `vault` root (see [Root kinds](#root-kinds)) also render Obsidian's inline syntax: `==text==` is highlighted, `#tags` show as tag chips, and `%%comments%%` are hidden. Comment text is kept out of the page body, the page title and sidenav entry, heading anchors and the "On this page" outline, and the index that links resolve against. Two forms are hidden:
+
+- An inline comment, `%%like this%%`, with both markers on the same line and no backtick between them.
+- A block comment: a line that starts with `%%`, through the next line containing `%%`, when that closing `%%` ends its line. A block comment is recognized only at the top level of a note, not inside a blockquote or list, and not directly under a paragraph line, where a `%%` line continues the paragraph.
+
+Anything the reader can't bound safely stays visible as text instead of being hidden: a `%%` with no closing `%%`, a closing line with text after its `%%`, and a block whose lines open a code fence (```` ``` ```` or `~~~`) or an HTML block (a line starting with `<`) before the closer. A stray marker therefore never hides the rest of a note. Docs roots render plain GitHub-flavoured markdown, where all of these stay literal.
 
 Diagrams render in the page: a fenced code block tagged `mermaid` becomes a live diagram themed from the same Artificer tokens as the rest of the reader, and both those and inline SVG pan and zoom (drag to pan, modifier-scroll or click-then-scroll to zoom, double-click, `0`, or the diagram card's reset button to reset).
 

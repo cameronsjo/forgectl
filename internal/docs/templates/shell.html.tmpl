@@ -94,7 +94,7 @@ main.surface-document { max-width: 820px; }
    .tag is deliberately not Artificer's .chip: that carries hover/pressed
    states and a 44px touch min-height that would break a line of prose. */
 .doc-body mark { background: color-mix(in oklch, var(--attention) 28%, transparent); color: inherit; padding: 0 2px; border-radius: var(--radius-sm); }
-.doc-body .tag { font-family: var(--font-mono); font-size: .85em; color: var(--accent); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; white-space: nowrap; }
+.doc-body .tag { font-family: var(--font-mono); font-size: .85em; color: var(--accent); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; white-space: nowrap; unicode-bidi: isolate; }
 
 /* ── Outline pane ── */
 .outline { border-left: 1px solid var(--border); padding: var(--s-md) 0; font-family: var(--font-mono); overflow-y: auto; }

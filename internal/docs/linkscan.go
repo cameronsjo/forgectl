@@ -15,6 +15,7 @@ import (
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 	"go.abhg.dev/goldmark/wikilink"
 	"gopkg.in/yaml.v3"
@@ -44,14 +45,22 @@ type docMeta struct {
 // render.go serializes its twin behind renderMu because third-party
 // extensions may not be concurrency-safe; a parallel scan would need the
 // same treatment or one instance per worker.
-var linkMarkdown = newLinkMarkdown()
+var linkMarkdown = newLinkMarkdown(false)
 
-func newLinkMarkdown() goldmark.Markdown {
+// linkMarkdownVault is linkMarkdown for vault roots: it also carries the %%
+// comment parsers (obsidianComments), so a heading, link or block id inside
+// a comment is not indexed, just as it is not rendered.
+var linkMarkdownVault = newLinkMarkdown(true)
+
+func newLinkMarkdown(vault bool) goldmark.Markdown {
 	md := goldmark.New(
 		goldmark.WithParserOptions(headingParserOptions()...),
 	)
 	// Parse-only: never render with this instance. The default resolver turns [[https://x/]] into an external href the sanitizer keeps.
 	(&wikilink.Extender{}).Extend(md)
+	if vault {
+		obsidianComments{}.Extend(md)
+	}
 	return md
 }
 
@@ -77,7 +86,17 @@ func isURLLike(dest string) bool {
 // aliases, headings (with goldmark's auto-ID slug), Obsidian ^block-id
 // markers, and outbound links from both wikilinks and plain markdown links
 // whose destination carries no URL scheme.
+//
+// scanDoc scans as a docs root; scanDocFor takes the root's kind.
 func scanDoc(absPath, relPath string) (docMeta, error) {
+	return scanDocFor(RootDocs, absPath, relPath)
+}
+
+// scanDocFor is scanDoc for a document in a root of the given kind. A vault
+// root parses with linkMarkdownVault and newVaultIDs, and takes its title
+// from the parse (vaultTitle), so %% comment text reaches none of the title,
+// headings, slugs, links or block ids.
+func scanDocFor(kind RootKind, absPath, relPath string) (docMeta, error) {
 	f, err := os.Open(absPath) //nolint:gosec // G304: absPath is a doc walkRoot/indexFileRoot already resolved under a canonicalized, operator-configured root
 	if err != nil {
 		return docMeta{}, err
@@ -91,6 +110,12 @@ func scanDoc(absPath, relPath string) (docMeta, error) {
 	}
 
 	title := firstH1(source)
+	if kind == RootVault {
+		// Past the cap there is no parse, so the vault title is the line
+		// scan's with same-line comment spans removed; a heading inside a
+		// %% block of an over-cap note can still reach it.
+		title = strings.TrimSpace(string(stripCommentSpans([]byte(title))))
+	}
 	if title == "" {
 		title = titleFromFilename(relPath)
 	}
@@ -108,11 +133,18 @@ func scanDoc(absPath, relPath string) (docMeta, error) {
 		aliases = frontmatterAliases(fm)
 	}
 
-	headings, links, code, err := scanBody(body)
+	scan, err := scanBodyFor(kind, body)
 	if err != nil {
 		return docMeta{}, fmt.Errorf("scan %s: %w", relPath, err)
 	}
-	blockIDs := scanBlockIDs(body, code)
+	blockIDs := scanBlockIDs(body, scan.masked)
+	if kind == RootVault {
+		title = vaultTitle(source, len(source)-len(body), body, scan.h1s)
+		if title == "" {
+			title = titleFromFilename(relPath)
+		}
+	}
+	headings, links := scan.headings, scan.links
 
 	return docMeta{
 		Title:    title,
@@ -234,13 +266,38 @@ func overlapsAny(segs []text.Segment, start, end int) bool {
 // destination carries no URL scheme. It also returns the source segments of
 // every code block (fenced content, fence info strings, indented blocks) so
 // scanBlockIDs can mask them.
+//
+// scanBody scans as a docs root; scanBodyFor takes the root's kind.
 func scanBody(body []byte) ([]Heading, []LinkRef, []text.Segment, error) {
+	scan, err := scanBodyFor(RootDocs, body)
+	return scan.headings, scan.links, scan.masked, err
+}
+
+// bodyScan is scanBodyFor's result.
+type bodyScan struct {
+	headings []Heading
+	links    []LinkRef
+	// masked holds the segments scanBlockIDs must skip: code block content
+	// and fence info strings, plus, in a vault root, every line a %% block
+	// comment consumed.
+	masked []text.Segment
+	// h1s holds the source offset of each level-1 heading's first line,
+	// in document order, for vaultTitle.
+	h1s []int
+}
+
+func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 	reader := text.NewReader(body)
-	doc := linkMarkdown.Parser().Parse(reader)
+	md := linkMarkdown
+	if kind == RootVault {
+		md = linkMarkdownVault
+	}
+	doc := md.Parser().Parse(reader, parser.WithContext(newParseContext(kind)))
 
 	var headings []Heading
 	var links []LinkRef
 	var code []text.Segment
+	var h1s []int
 
 	err := ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
@@ -256,7 +313,7 @@ func scanBody(body []byte) ([]Heading, []LinkRef, []text.Segment, error) {
 					code = append(code, fb.Info.Segment)
 				}
 			}
-		case ast.KindCodeBlock:
+		case ast.KindCodeBlock, kindCommentBlock:
 			for i := 0; i < n.Lines().Len(); i++ {
 				code = append(code, n.Lines().At(i))
 			}
@@ -264,6 +321,9 @@ func scanBody(body []byte) ([]Heading, []LinkRef, []text.Segment, error) {
 			h, ok := n.(*ast.Heading)
 			if !ok {
 				return ast.WalkContinue, nil
+			}
+			if h.Level == 1 && h.Lines().Len() > 0 {
+				h1s = append(h1s, h.Lines().At(0).Start)
 			}
 			slug := ""
 			if v, ok := h.AttributeString("id"); ok {
@@ -309,10 +369,38 @@ func scanBody(body []byte) ([]Heading, []LinkRef, []text.Segment, error) {
 		return ast.WalkContinue, nil
 	})
 	if err != nil {
-		return nil, nil, nil, err
+		return bodyScan{}, err
 	}
 
-	return headings, links, code, nil
+	return bodyScan{headings: headings, links: links, masked: code, h1s: h1s}, nil
+}
+
+// vaultTitle is firstH1's rule applied to the parsed document instead of raw
+// lines: the first level-1 heading within titleScanLines lines whose line,
+// trimmed, starts with "# ", its text taken verbatim from that line but
+// without %% comment spans. Taking candidates from the parse means a "# "
+// line inside a %% block (or a code block) is never a title. bodyOffset is
+// where body starts in source, past any frontmatter; h1s are body offsets.
+func vaultTitle(source []byte, bodyOffset int, body []byte, h1s []int) string {
+	for _, at := range h1s {
+		if bytes.Count(source[:bodyOffset+at], []byte("\n")) >= titleScanLines {
+			break
+		}
+		start := bytes.LastIndexByte(body[:at], '\n') + 1
+		end := len(body)
+		if nl := bytes.IndexByte(body[at:], '\n'); nl >= 0 {
+			end = at + nl
+		}
+		line := strings.TrimSpace(string(body[start:end]))
+		after, ok := strings.CutPrefix(line, "# ")
+		if !ok {
+			continue
+		}
+		if t := strings.TrimSpace(string(stripCommentSpans([]byte(after)))); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 func headingText(n *ast.Heading, source []byte) string {

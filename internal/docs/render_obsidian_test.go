@@ -1,8 +1,12 @@
 package docs
 
 import (
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // renderKind is render with a test failure on error.
@@ -127,6 +131,9 @@ func TestRenderVault_TagNotAChip(t *testing.T) {
 	cases := map[string]string{
 		"after a letter": "C# is a language",
 		"mid-word":       "C#sharp and a#b",
+		"dash only":      "a #- b",
+		"slash only":     "a #/ b",
+		"underscore":     "a #_ b",
 		"digits only":    "issue #123 here",
 		"code span":      "a `#tag` b",
 		"fence":          "```\n#tag\n```\n",
@@ -227,5 +234,112 @@ func TestRenderVault_FlavorMarkupSurvivesSanitizer(t *testing.T) {
 	}
 	if strings.Contains(out, "onclick") {
 		t.Errorf("raw <mark> kept its onclick: %s", out)
+	}
+}
+
+// TestRenderVault_CommentAroundBlockStaysVisible pins keep-when-unsure for a
+// "%%" that may sit inside a fence or HTML block: closing on it would orphan
+// the block's own closer, and an orphaned fence swallows the rest of the
+// document into a code block.
+func TestRenderVault_CommentAroundBlockStaysVisible(t *testing.T) {
+	cases := []struct {
+		name, src string
+		want      []string
+	}{
+		{"backtick fence", "%%\n```md\n%%\n```\n\n# Next\n\nbody", []string{`<h1 id="next">Next</h1>`, "<p>body</p>"}},
+		{"tilde fence", "%%\n~~~\n%%\n~~~\n\n# Next\n\nbody", []string{`<h1 id="next">Next</h1>`, "<p>body</p>"}},
+		{"html block", "%%\n<pre>\nkeep\n%%\n</pre>\n\nafter", []string{"keep", "after"}},
+		{"inline code span", "a %%b `c%%` d%% e", []string{"<code>c%%</code>", "b ", " e"}},
+	}
+	for _, c := range cases {
+		out := renderKind(t, c.src, RootVault)
+		for _, want := range c.want {
+			if !strings.Contains(out, want) {
+				t.Errorf("%s: want %q visible, got %s", c.name, want, out)
+			}
+		}
+	}
+}
+
+// TestRenderVault_LongEqualsRunIsLinear guards the highlight parser's cost
+// on a long '=' run: re-scanning the run from every '=' is quadratic, which
+// at this length takes seconds rather than milliseconds.
+func TestRenderVault_LongEqualsRunIsLinear(t *testing.T) {
+	src := "x " + strings.Repeat("=", 80000)
+	start := time.Now()
+	out := renderKind(t, src, RootVault)
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("rendering an 80000-byte '=' run took %v", d)
+	}
+	if strings.Contains(out, "<mark>") {
+		t.Errorf("an '=' run became a highlight")
+	}
+}
+
+// TestRenderVault_CalloutFoldMissLeftAlone: (?i) matches U+017F (long s)
+// as 's', but ToLower leaves it alone, so the map lookup misses. The
+// blockquote must come through unchanged, not as an empty-tier callout.
+func TestRenderVault_CalloutFoldMissLeftAlone(t *testing.T) {
+	out := renderKind(t, "> [!ſummary]\n> body\n", RootVault)
+	if strings.Contains(out, "callout") || !strings.Contains(out, "[!ſummary]") {
+		t.Errorf("a callout-map miss was transformed: %s", out)
+	}
+}
+
+// TestScanVault_SlugsMatchRenderedIDs: a heading inside a %% block is
+// neither rendered nor indexed, so goldmark's duplicate-slug suffixes agree
+// between the scan and the page.
+func TestScanVault_SlugsMatchRenderedIDs(t *testing.T) {
+	const src = "## A\n\n%%\n## A\n%%\n\n## A\n\n## Plan %%secret%%\n"
+	scan, err := scanBodyFor(RootVault, []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var slugs []string
+	for _, h := range scan.headings {
+		slugs = append(slugs, h.Slug)
+	}
+	out := renderKind(t, src, RootVault)
+	ids := regexp.MustCompile(`<h2 id="([^"]+)"`).FindAllStringSubmatch(out, -1)
+	var rendered []string
+	for _, m := range ids {
+		rendered = append(rendered, m[1])
+	}
+	want := []string{"a", "a-1", "plan"}
+	if strings.Join(slugs, ",") != strings.Join(want, ",") || strings.Join(rendered, ",") != strings.Join(want, ",") {
+		t.Errorf("scan slugs %v, rendered ids %v, want both %v", slugs, rendered, want)
+	}
+}
+
+// TestScanVault_CommentsNotIndexed: links, headings and block ids inside a
+// comment stay out of a vault doc's index entry, and the title skips both a
+// commented-out H1 and a same-line comment span.
+func TestScanVault_CommentsNotIndexed(t *testing.T) {
+	const src = "%%\n# Secret title\n[[hidden]] [x](gone.md)\n## Hidden heading\nq ^hid\n%%\n\n# Meeting %%private%%\n\n[[shown]] %%[[inline]]%%\n\npara ^blk\n"
+	p := filepath.Join(t.TempDir(), "n.md")
+	if err := os.WriteFile(p, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := scanDocFor(RootVault, p, "n.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Title != "Meeting" {
+		t.Errorf("title = %q, want Meeting", meta.Title)
+	}
+	var paths []string
+	for _, l := range meta.Links {
+		paths = append(paths, l.Path)
+	}
+	if strings.Join(paths, ",") != "shown" {
+		t.Errorf("links = %v, want only shown", paths)
+	}
+	for _, h := range meta.Headings {
+		if strings.Contains(h.Text, "Hidden") || strings.Contains(h.Text, "Secret") || strings.Contains(h.Slug, "private") {
+			t.Errorf("comment reached a heading: %+v", h)
+		}
+	}
+	if strings.Join(meta.BlockIDs, ",") != "blk" {
+		t.Errorf("block ids = %v, want only blk", meta.BlockIDs)
 	}
 }

@@ -390,7 +390,7 @@ func indexFileRoot(labels map[string]bool, file string, override RootKind, hasOv
 	// Unlike walkRoot's per-file skip below, a scan failure on a single-file
 	// root IS a hard error: there is no "rest of the index" to fall back to
 	// serving without it.
-	meta, err := scanDoc(real, base)
+	meta, err := scanDocFor(kind, real, base)
 	if err != nil {
 		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
 	}
@@ -534,7 +534,7 @@ func walkRoot(ctx context.Context, root Root) ([]Doc, error) {
 		// the title-only scan always had. Dropping it would make a
 		// transient read error unlist a file that Resolve's request-time
 		// read may well succeed on a moment later.
-		meta, err := scanDoc(path, relSlash)
+		meta, err := scanDocFor(root.Kind, path, relSlash)
 		if err != nil {
 			meta = docMeta{Title: titleFromFilename(relSlash)}
 		}

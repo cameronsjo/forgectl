@@ -538,3 +538,38 @@ func TestServer_VaultRootRendersFlavor(t *testing.T) {
 		t.Fatalf("fixture did not build one vault and one docs root: %v", kinds)
 	}
 }
+
+// TestServer_VaultCommentTextStaysOutOfChrome: comment text must not reach
+// the page through the chrome built from the index and the heading ids —
+// <title>, the sidenav, heading ids, and outline hrefs — not only the body.
+func TestServer_VaultCommentTextStaysOutOfChrome(t *testing.T) {
+	vault := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	const body = "# Meeting %%private%%\n\n## Plan %%secret%%\n\ntext\n\n### Deep %%hush%% end\n\nmore\n"
+	if err := os.WriteFile(filepath.Join(vault, "note.md"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := NewIndex([]string{vault})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	h := testHandler(idx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/doc/"+idx.Roots()[0].Label+"/note.md", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	page := rec.Body.String()
+	for _, leak := range []string{"private", "secret", "hush", "%%"} {
+		if strings.Contains(page, leak) {
+			t.Errorf("comment text %q reached the page", leak)
+		}
+	}
+	for _, want := range []string{"<title>Meeting", `id="plan"`, `href="#plan"`, `id="deep-`, `href="#deep-`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page missing %q", want)
+		}
+	}
+}

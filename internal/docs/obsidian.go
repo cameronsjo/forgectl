@@ -25,6 +25,27 @@ type obsidianFlavor struct{}
 
 // Extend implements goldmark.Extender.
 func (obsidianFlavor) Extend(m goldmark.Markdown) {
+	obsidianComments{}.Extend(m)
+	m.Parser().AddOptions(
+		parser.WithInlineParsers(
+			util.Prioritized(highlightParser{}, 500),
+			util.Prioritized(tagParser{}, 500),
+		),
+	)
+	m.Renderer().AddOptions(renderer.WithNodeRenderers(
+		util.Prioritized(obsidianRenderer{}, 500),
+	))
+}
+
+// obsidianComments registers only the %% comment parsers: the part of the
+// flavour that changes what a document CONTAINS, not how it looks. The render
+// instances get it through obsidianFlavor, and linkscan's vault instance gets
+// it directly, so the index (title, headings, links, block ids) sees exactly
+// the text the page shows.
+type obsidianComments struct{}
+
+// Extend implements goldmark.Extender.
+func (obsidianComments) Extend(m goldmark.Markdown) {
 	m.Parser().AddOptions(
 		parser.WithBlockParsers(
 			// Ahead of the paragraph parser (1000), behind nothing else that
@@ -32,14 +53,9 @@ func (obsidianFlavor) Extend(m goldmark.Markdown) {
 			util.Prioritized(commentBlockParser{}, 500),
 		),
 		parser.WithInlineParsers(
-			util.Prioritized(highlightParser{}, 500),
 			util.Prioritized(commentInlineParser{}, 500),
-			util.Prioritized(tagParser{}, 500),
 		),
 	)
-	m.Renderer().AddOptions(renderer.WithNodeRenderers(
-		util.Prioritized(obsidianRenderer{}, 500),
-	))
 }
 
 var (
@@ -80,12 +96,16 @@ func (highlightParser) Trigger() []byte { return []byte{'='} }
 
 func (highlightParser) Parse(_ ast.Node, block text.Reader, pc parser.Context) ast.Node {
 	before := block.PrecendingCharacter()
+	// A run the previous call declined must not be re-scanned from its
+	// second '='. Checked BEFORE ScanDelimiter: scanning first would walk the
+	// rest of the run at every '=' in it, which is quadratic in its length.
+	if before == '=' {
+		return nil
+	}
 	line, segment := block.PeekLine()
 	node := parser.ScanDelimiter(line, before, 2, highlightDelimiters{})
-	// Exactly two: a run of three or more ("===") is not a highlight marker,
-	// and a run the previous call declined must not be re-scanned from its
-	// second '=' (before == '=').
-	if node == nil || node.OriginalLength != 2 || before == '=' {
+	// Exactly two: a run of three or more ("===") is not a highlight marker.
+	if node == nil || node.OriginalLength != 2 {
 		return nil
 	}
 	node.Segment = segment.WithStop(segment.Start + node.OriginalLength)
@@ -100,13 +120,112 @@ func (highlightParser) CloseBlock(ast.Node, parser.Context) {}
 
 type commentSpanNode struct{ ast.BaseInline }
 
+// commentSpanEnd reports the length of the "%%…%%" span s opens (s starts
+// with "%%"), or false when there is none to hide: no closer in s, or a
+// backtick between the markers. A backtick there may open a code span that
+// the closer sits inside, so the span is left alone rather than guessed at.
+// Both the inline parser and stripCommentSpans decide with this one helper.
+func commentSpanEnd(s []byte) (int, bool) {
+	body := s[len(commentMarker):]
+	end := bytes.Index(body, commentMarker)
+	if end < 0 || bytes.IndexByte(body[:end], '`') >= 0 {
+		return 0, false
+	}
+	return len(commentMarker) + end + len(commentMarker), true
+}
+
+// stripCommentSpans returns line without the "%%…%%" spans the inline
+// parser would hide in it. It walks the line the way goldmark's inline pass
+// does for the constructs that matter here: a backslash escapes the next
+// byte, and a code span (a backtick run closed by a run of the same length)
+// is skipped whole, so a "%%" inside code is kept, as it is on the page. It
+// serves the heading-id generator and the vault title, which read the raw
+// source line rather than the parsed inline nodes.
+func stripCommentSpans(line []byte) []byte {
+	var out []byte
+	stripped := false
+	last := 0
+	for i := 0; i < len(line); {
+		switch line[i] {
+		case '\\':
+			i += 2
+			continue
+		case '`':
+			run := 1
+			for i+run < len(line) && line[i+run] == '`' {
+				run++
+			}
+			i += run + codeSpanClose(line[i+run:], run)
+			continue
+		case '%':
+			if bytes.HasPrefix(line[i:], commentMarker) {
+				if n, ok := commentSpanEnd(line[i:]); ok {
+					out = append(out, line[last:i]...)
+					i += n
+					last = i
+					stripped = true
+					continue
+				}
+			}
+		}
+		i++
+	}
+	if !stripped {
+		return line
+	}
+	return append(out, line[last:]...)
+}
+
+// codeSpanClose returns how far past rest the code span closes: the offset
+// just after the first backtick run in rest of exactly length run, or 0 when
+// there is none (the opening run is then literal text).
+func codeSpanClose(rest []byte, run int) int {
+	for j := 0; j < len(rest); {
+		if rest[j] != '`' {
+			j++
+			continue
+		}
+		k := j
+		for k < len(rest) && rest[k] == '`' {
+			k++
+		}
+		if k-j == run {
+			return k
+		}
+		j = k
+	}
+	return 0
+}
+
+// commentStrippingIDs is the vault heading-id generator: goldmark's own,
+// fed the heading line with its comment spans removed. goldmark builds an
+// id from the raw source line, not the parsed inline nodes, so without this
+// "## Plan %%secret%%" would get the id plan-secret, and the comment text
+// would reach the page's anchors and outline hrefs. Render and scan both use
+// it (newVaultIDs), which is what keeps an indexed slug equal to the id the
+// page renders.
+type commentStrippingIDs struct{ inner parser.IDs }
+
+// newVaultIDs returns a fresh id collection for one vault parse. goldmark's
+// default collection type is unexported, so it is taken from a new Context.
+func newVaultIDs() parser.IDs {
+	return commentStrippingIDs{inner: parser.NewContext().IDs()}
+}
+
+func (c commentStrippingIDs) Generate(value []byte, kind ast.NodeKind) []byte {
+	return c.inner.Generate(stripCommentSpans(value), kind)
+}
+
+func (c commentStrippingIDs) Put(value []byte) { c.inner.Put(value) }
+
 func (n *commentSpanNode) Kind() ast.NodeKind { return kindCommentSpan }
 
 func (n *commentSpanNode) Dump(source []byte, level int) { ast.DumpHelper(n, source, level, nil, nil) }
 
-// commentInlineParser hides "%%…%%" when BOTH markers sit on the same line.
-// With no closer on that line it declines, and the text renders literally:
-// a comment is hidden only once its boundary is located, never on a guess.
+// commentInlineParser hides "%%…%%" when BOTH markers sit on the same line
+// with no backtick between them (commentSpanEnd). Otherwise it declines, and
+// the text renders literally: a comment is hidden only once its boundary is
+// located, never on a guess.
 type commentInlineParser struct{}
 
 func (commentInlineParser) Trigger() []byte { return []byte{'%'} }
@@ -116,16 +235,19 @@ func (commentInlineParser) Parse(_ ast.Node, block text.Reader, _ parser.Context
 	if !bytes.HasPrefix(line, commentMarker) {
 		return nil
 	}
-	end := bytes.Index(line[len(commentMarker):], commentMarker)
-	if end < 0 {
+	n, ok := commentSpanEnd(line)
+	if !ok {
 		return nil
 	}
-	block.Advance(len(commentMarker) + end + len(commentMarker))
+	block.Advance(n)
 	return &commentSpanNode{}
 }
 
 // ── %%comment%% (block) ────────────────────────────────────────────────────
 
+// commentBlockNode is a hidden block. Its Lines hold every source line it
+// consumed, opener and closer included, which is how linkscan masks them
+// from the block-id scan; the renderer never reads them.
 type commentBlockNode struct {
 	ast.BaseBlock
 	// oneLine marks a block whose opener line also carried its closer; the
@@ -134,6 +256,11 @@ type commentBlockNode struct {
 }
 
 func (n *commentBlockNode) Kind() ast.NodeKind { return kindCommentBlock }
+
+// IsRaw keeps goldmark's inline pass off the consumed lines: they are held
+// only for masking, and inline-parsing them would put the comment's links
+// back into the tree.
+func (n *commentBlockNode) IsRaw() bool { return true }
 
 func (n *commentBlockNode) Dump(source []byte, level int) { ast.DumpHelper(n, source, level, nil, nil) }
 
@@ -163,6 +290,13 @@ func commentCloser(line []byte) (found, clean bool) {
 //   - The look-ahead takes the first line containing "%%". If text follows
 //     the "%%" on that line it declines, rather than hide text Obsidian would
 //     show.
+//   - The look-ahead also declines when a line before the closer opens a
+//     fence (``` or ~~~) or an HTML block (a line starting with "<"). The
+//     "%%" it would close on may sit inside that fence or block; closing
+//     there would orphan the fence's own closer, which then opens a new
+//     fence that swallows the rest of the document into a code block.
+//   - A one-line block declines when a backtick sits between its markers,
+//     for the same reason the inline form does (commentSpanEnd).
 type commentBlockParser struct{}
 
 func (commentBlockParser) Trigger() []byte { return []byte{'%'} }
@@ -174,22 +308,27 @@ func (commentBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Co
 		return nil, parser.NoChildren
 	}
 	rest := line[pos+len(commentMarker):]
-	if found, clean := commentCloser(rest); found {
-		if !clean {
+	if found, _ := commentCloser(rest); found {
+		if n, ok := commentSpanEnd(line[pos:]); !ok || !util.IsBlank(line[pos+n:]) {
 			return nil, parser.NoChildren
 		}
+		node := &commentBlockNode{oneLine: true}
+		node.Lines().Append(segment)
 		reader.Advance(segment.Len() - 1)
-		return &commentBlockNode{oneLine: true}, parser.NoChildren
+		return node, parser.NoChildren
 	}
 	if parent.Kind() != ast.KindDocument || !hasCleanCommentCloser(reader.Source(), segment.Stop) {
 		return nil, parser.NoChildren
 	}
+	node := &commentBlockNode{}
+	node.Lines().Append(segment)
 	reader.Advance(segment.Len() - 1)
-	return &commentBlockNode{}, parser.NoChildren
+	return node, parser.NoChildren
 }
 
 // hasCleanCommentCloser scans source from offset line by line and reports
-// whether the first line containing "%%" is a clean closer.
+// whether the first line containing "%%" is a clean closer, with no fence or
+// HTML block opening on any line before it (opensFenceOrHTML).
 func hasCleanCommentCloser(source []byte, offset int) bool {
 	for offset < len(source) {
 		end := bytes.IndexByte(source[offset:], '\n')
@@ -197,7 +336,11 @@ func hasCleanCommentCloser(source []byte, offset int) bool {
 		if end >= 0 {
 			next = offset + end + 1
 		}
-		if found, clean := commentCloser(source[offset:next]); found {
+		line := source[offset:next]
+		if opensFenceOrHTML(line) {
+			return false
+		}
+		if found, clean := commentCloser(line); found {
 			return clean
 		}
 		offset = next
@@ -205,12 +348,24 @@ func hasCleanCommentCloser(source []byte, offset int) bool {
 	return false
 }
 
+// opensFenceOrHTML reports whether line, after at most three spaces of
+// indent, starts a code fence (``` or ~~~) or an HTML block ("<").
+func opensFenceOrHTML(line []byte) bool {
+	i := 0
+	for i < 3 && i < len(line) && line[i] == ' ' {
+		i++
+	}
+	rest := line[i:]
+	return bytes.HasPrefix(rest, []byte("```")) || bytes.HasPrefix(rest, []byte("~~~")) || bytes.HasPrefix(rest, []byte("<"))
+}
+
 func (commentBlockParser) Continue(node ast.Node, reader text.Reader, _ parser.Context) parser.State {
 	if n, ok := node.(*commentBlockNode); ok && n.oneLine {
 		return parser.Close
 	}
-	line, _ := reader.PeekLine()
+	line, segment := reader.PeekLine()
 	found, _ := commentCloser(line)
+	node.Lines().Append(segment)
 	reader.AdvanceToEOL()
 	if found {
 		return parser.Close
@@ -240,7 +395,8 @@ func (n *tagNode) Dump(source []byte, level int) {
 // tagParser turns "#name" into a tag chip, following Obsidian's rules: the
 // '#' starts a line or follows whitespace (so "C#" and "a#b" stay text), the
 // name is letters, digits, '_', '-' and '/', and it holds at least one
-// non-digit (so "#123" stays text). Code spans, code blocks, raw HTML,
+// non-digit (so "#123" stays text) and at least one letter or digit (so
+// "#-" and "#/" stay text). Code spans, code blocks, raw HTML,
 // headings and frontmatter never reach an inline parser.
 type tagParser struct{}
 
@@ -252,7 +408,7 @@ func (tagParser) Parse(_ ast.Node, block text.Reader, _ parser.Context) ast.Node
 	}
 	line, _ := block.PeekLine()
 	n := 1
-	nonDigit := false
+	nonDigit, letterOrDigit := false, false
 	for n < len(line) {
 		r, size := utf8.DecodeRune(line[n:])
 		if !isTagRune(r) {
@@ -261,9 +417,13 @@ func (tagParser) Parse(_ ast.Node, block text.Reader, _ parser.Context) ast.Node
 		if !unicode.IsDigit(r) {
 			nonDigit = true
 		}
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			letterOrDigit = true
+		}
 		n += size
 	}
-	if n == 1 || !nonDigit {
+	// A name of only punctuation ("#-", "#/", "#_") is not a tag.
+	if !nonDigit || !letterOrDigit {
 		return nil
 	}
 	name := append([]byte(nil), line[1:n]...)
