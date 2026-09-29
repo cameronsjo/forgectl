@@ -98,9 +98,11 @@ func findingsRemovalCandidate(findingsDir, full string, isDir bool, modTime, cut
 // exactly, so on a case-insensitive volume a differently-cased spelling is
 // likewise refused rather than accepted.
 //
-// An empty findingsDir is refused outright (forgectl#575): New leaves it empty
-// when config.PrFindingsDir fails, and filepath.Clean("") is ".", which would
-// make every bare "forgectl-findings-*" name a child of the process cwd. The
+// A store that cleans to "." is refused outright (forgectl#575): New leaves
+// findingsDir empty when config.PrFindingsDir fails, and filepath.Clean of "",
+// "./" or "x/.." is ".", which would make every bare "forgectl-findings-*"
+// name a child of the process cwd. The check is on the cleaned root, not the
+// raw spelling, so every spelling of the cwd is refused. The
 // base name must also be strictly longer than the prefix, because
 // os.MkdirTemp always appends a random suffix, so a dir named exactly
 // findingsDirPrefix is not one PrepareLocal made.
@@ -109,10 +111,10 @@ func findingsRemovalCandidate(findingsDir, full string, isDir bool, modTime, cut
 // already excludes the store everywhere but the filesystem root, and the
 // root's base name never carries the prefix.
 func isFindingsStoreChild(findingsDir, full string) bool {
-	if findingsDir == "" {
+	root := filepath.Clean(findingsDir)
+	if root == "." {
 		return false
 	}
-	root := filepath.Clean(findingsDir)
 	clean := filepath.Clean(full)
 	if clean == root || filepath.Dir(clean) != root {
 		return false

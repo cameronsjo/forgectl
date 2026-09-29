@@ -646,12 +646,15 @@ func TestIsFindingsStoreChild(t *testing.T) {
 // the predicate: filepath.Clean("") is ".", so without it a bare prefixed name
 // reads as a direct child of the cwd.
 func TestIsFindingsStoreChild_EmptyStoreRefused(t *testing.T) {
-	for _, full := range []string{
-		findingsDirPrefix + "x",
-		"." + string(filepath.Separator) + findingsDirPrefix + "x",
-	} {
-		if isFindingsStoreChild("", full) {
-			t.Errorf("isFindingsStoreChild(%q, %q) = true, want an empty store refused", "", full)
+	sep := string(filepath.Separator)
+	for _, store := range []string{"", ".", "." + sep, "x" + sep + ".."} {
+		for _, full := range []string{
+			findingsDirPrefix + "x",
+			"." + sep + findingsDirPrefix + "x",
+		} {
+			if isFindingsStoreChild(store, full) {
+				t.Errorf("isFindingsStoreChild(%q, %q) = true, want a store that cleans to %q refused", store, full, ".")
+			}
 		}
 	}
 }
