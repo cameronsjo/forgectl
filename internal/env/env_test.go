@@ -225,7 +225,7 @@ func TestSetValue_RefusesCarriageReturn(t *testing.T) {
 	if _, err := client.SetValue(target, "KEY", "plain\r\n"); err != nil {
 		t.Fatalf("a trailing CRLF must still strip and write: %v", err)
 	}
-	got, err := os.ReadFile(filepath.Join(repo, ".env"))
+	got, err := os.ReadFile(filepath.Clean(filepath.Join(repo, ".env")))
 	if err != nil {
 		t.Fatal(err)
 	}
