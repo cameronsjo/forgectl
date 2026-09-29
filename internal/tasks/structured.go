@@ -118,6 +118,7 @@ func structuredResult(res *mcp.CallToolResult, out any) (*mcp.CallToolResult, an
 // structuredVetted reports whether every string value in out's JSON form is a
 // known relation kind or matches doneAtPattern. A marshal failure is a fail.
 func structuredVetted(out any) bool {
+	// termsafe:allow-raw-json in-memory round-trip for vetting, never emitted
 	raw, err := json.Marshal(out)
 	if err != nil {
 		return false
