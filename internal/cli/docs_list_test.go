@@ -244,6 +244,32 @@ func TestDocsListCmd_Deadline_JSON_EmptyStdoutOneStderrObjectExit2(t *testing.T)
 	}
 }
 
+// The "indexing <root> …" progress line must not precede the deadline's JSON
+// error object under --json (#672). The timer races the walk, so the run is
+// repeated: the line, if emitted, lands in at least one iteration.
+func TestDocsListCmd_Deadline_JSON_ProgressLineNeverPrecedesObject(t *testing.T) {
+	orig := docsListProgressDelay
+	docsListProgressDelay = time.Nanosecond
+	t.Cleanup(func() { docsListProgressDelay = orig })
+	dir := writeDocsListFixture(t, 5)
+
+	for i := range 200 {
+		cmd := newDocsListCmd(module.Deps{})
+		var stdout, stderr bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"--json", "--timeout", "1ns", dir})
+		if err := cmd.ExecuteContext(context.Background()); err == nil {
+			t.Fatal("expected a deadline error, got nil")
+		}
+		dec := json.NewDecoder(strings.NewReader(stderr.String()))
+		var obj docsErrorJSON
+		if err := dec.Decode(&obj); err != nil || dec.More() {
+			t.Fatalf("iteration %d: stderr is not exactly one JSON object (decode err %v): %q", i, err, stderr.String())
+		}
+	}
+}
+
 func TestDocsListCmd_Deadline_Human_NamesRootExit2(t *testing.T) {
 	dir := writeDocsListFixture(t, 5)
 
