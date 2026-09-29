@@ -321,7 +321,7 @@ func TestLaunch_InlineDispatch(t *testing.T) {
 	// SECURITY: the review agent must launch HARDENED even though the launch
 	// default posture is AllowDanger=true (builtinAllowDanger). A leaked
 	// --allow-dangerously-skip-permissions would let the agent ignore the
-	// deny-by-default workspace allowlist. Assert it is forced off and plan mode on.
+	// deny-by-default reviewer allowlist. Assert it is forced off and plan mode on.
 	if contains(call.Args, "--allow-dangerously-skip-permissions") {
 		t.Errorf("clean-room review must never skip permissions; argv: %v", call.Args)
 	}
@@ -843,7 +843,7 @@ func TestLaunch_LocalSessionWithoutFindingsDirRefused(t *testing.T) {
 // review's cwd IS the workspace holding the PR author's checkout. A discovered
 // server's `command` + `args` are spawned at session START, before the agent
 // invokes any tool — so --permission-mode plan and the deny-by-default
-// workspace allowlist, which govern which TOOLS the agent may call, both sit
+// reviewer allowlist, which govern which TOOLS the agent may call, both sit
 // downstream of a boundary already crossed. Measured on 2.1.220: with the flag
 // a planted carrier did not spawn; without it, the same carrier did.
 //

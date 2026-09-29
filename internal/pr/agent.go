@@ -18,7 +18,7 @@ const (
 	// is a security one, not a plumbing one.
 	//
 	// Agent A confines the reviewer with a deny-by-default Claude Code
-	// allowlist (see allowlist.go): four read tools plus a few Bash prefixes
+	// allowlist (see allowlist.go): three read tools plus a few Bash prefixes
 	// chosen for reading, under plan mode, passed on the command line with no
 	// settings file loaded (reviewSettingSources). Its Bash commands run under
 	// Claude Code's OS sandbox (reviewsandbox.go). The allowlist grants no

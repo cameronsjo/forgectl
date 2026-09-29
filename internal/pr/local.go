@@ -172,9 +172,10 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	}
 	sess.FindingsDir = findingsDir
 
-	// Nothing is written into the workspace for the reviewer: its whole
-	// permission profile is passed on the command line at dispatch
-	// (reviewSettingsJSON in launchInline), for Claude and Codex alike.
+	// Nothing is written into the workspace for any reviewer. The Claude
+	// reviewer's whole profile goes on its command line at dispatch
+	// (reviewSettingsJSON in launchInline); Codex gets its posture from its
+	// own flags (launchCodex) and receives no settings document at all.
 
 	bc := Breadcrumb{
 		Workspace:  workspace,

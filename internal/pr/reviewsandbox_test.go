@@ -4,7 +4,7 @@ package pr
 //
 //   [x] reviewSettingsJSON carries the whole profile: permissions, the
 //       sandbox block (enabled, fail-closed, no unsandboxed retry, no
-//       auto-allow, weakening switches pinned false, no excludedCommands,
+//       auto-allow, boolean weakening switches false, no excludedCommands,
 //       workspace denied for writes, network limited to the PR's gh hosts,
 //       strict), and disableAllHooks
 //   [x] a local review gets no network and a writable findings dir
@@ -78,7 +78,8 @@ func assertStrictSettings(t *testing.T, s reviewSettings, raw map[string]any, wo
 	}
 	sbRaw := rawSandbox(t, raw)
 	// Explicit false, not omitted: the posture must not ride a default, and
-	// every weakening switch is pinned off.
+	// every BOOLEAN weakening switch is written false. The key types
+	// themselves are the schema test's job.
 	for _, key := range []string{
 		"enabled", "failIfUnavailable", "allowUnsandboxedCommands", "autoAllowBashIfSandboxed",
 		"enableWeakerNestedSandbox", "enableWeakerNetworkIsolation", "allowAppleEvents",
@@ -94,7 +95,7 @@ func assertStrictSettings(t *testing.T, s reviewSettings, raw map[string]any, wo
 		}
 	}
 	network, _ := sbRaw["network"].(map[string]any)
-	for _, key := range []string{"allowLocalBinding", "allowAllUnixSockets", "allowMachLookup"} {
+	for _, key := range []string{"allowLocalBinding", "allowAllUnixSockets"} {
 		if v, ok := network[key]; !ok || v != false {
 			t.Errorf("sandbox.network.%s = %v (present %v), want an explicit false", key, v, ok)
 		}

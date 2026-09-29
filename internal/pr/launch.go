@@ -491,8 +491,9 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// Clean-room review runs under a HARDENED posture regardless of the user's
 	// ambient launch profile: never --allow-dangerously-skip-permissions, always
 	// plan mode. Inheriting a permissive config (AllowDanger, a bypass permission
-	// mode) would let the review agent ignore the deny-by-default workspace
-	// allowlist — the whole clean-room control. Force the safe posture here.
+	// mode) would let the review agent ignore the deny-by-default allowlist
+	// passed with --settings — the whole clean-room control. Force the safe
+	// posture here.
 	profile := launch.Resolve(cfg.Launch, sess.Workspace)
 	profile.AllowDanger = false
 	profile.PermissionMode = "plan"

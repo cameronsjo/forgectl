@@ -63,10 +63,13 @@ const reviewSettingSources = ""
 //     approves any command that runs sandboxed, and before Claude Code
 //     v2.1.212 it did so in plan mode too, which would have admitted every
 //     command the allow-list refuses (`rg --pre`, for one).
-//   - The weakening switches (EnableWeakerNestedSandbox,
-//     EnableWeakerNetworkIsolation, AllowAppleEvents, and the network ones)
-//     are pinned false, so no lower source could turn one on even if one
-//     were loaded.
+//   - The boolean weakening switches (EnableWeakerNestedSandbox,
+//     EnableWeakerNetworkIsolation, AllowAppleEvents, and network
+//     AllowLocalBinding and AllowAllUnixSockets) are written false. That is
+//     not every widening key: the array ones (allowUnixSockets,
+//     allowMachLookup, allowWrite, excludedCommands) are simply not emitted,
+//     and with no settings file loaded nothing else supplies them — only
+//     managed settings could.
 //   - No excludedCommands: an excluded command runs outside the sandbox.
 type sandboxSettings struct {
 	Enabled                      bool              `json:"enabled"`
@@ -98,13 +101,22 @@ type sandboxFilesystem struct {
 // allow-listed gh reads reach, and nothing else; a local review gets none.
 // StrictAllowlist refuses any other host instead of prompting; Claude Code
 // honors it only from user, managed, and --settings, which is where this
-// block lives. The socket and binding switches are pinned off.
+// block lives. The two boolean socket and binding switches are written false.
+//
+// Every key here must carry the TYPE Claude Code's schema gives it. One
+// wrong-typed value makes Claude Code drop the whole --settings document
+// without a word in -p mode — permissions, sandbox, and disableAllHooks
+// together — and the reviewer then runs unconfined. That happened once:
+// allowMachLookup is an array of macOS service names, not a boolean, and
+// `false` voided the document. It is left out (absent means no extra
+// lookups). TestReviewSettingsJSON_ValidatesAgainstTheSettingsSchema checks
+// every emitted key against the vendored schema, and
+// TestReviewSettingsJSON_ClaudeDoctorAcceptsIt against the installed claude.
 type sandboxNetwork struct {
 	AllowedDomains      []string `json:"allowedDomains"`
 	StrictAllowlist     bool     `json:"strictAllowlist"`
 	AllowLocalBinding   bool     `json:"allowLocalBinding"`
 	AllowAllUnixSockets bool     `json:"allowAllUnixSockets"`
-	AllowMachLookup     bool     `json:"allowMachLookup"`
 }
 
 // reviewSandbox builds the sandbox block for a review of workspace. ghHost is
@@ -129,6 +141,11 @@ func reviewSandbox(workspace, ghHost string) (sandboxSettings, error) {
 	}, nil
 }
 
+// reviewSettingsJSON renders the reviewer's whole configuration. A value of
+// the wrong type anywhere in it voids the whole document (see
+// sandboxNetwork); the schema test is what stands between an edit here and
+// an unconfined reviewer.
+//
 // reviewSettingsJSON renders the reviewer's whole configuration — perms, the
 // sandbox block, and disableAllHooks — as the inline JSON `claude --settings`
 // takes. It is passed with --setting-sources reviewSettingSources, so nothing

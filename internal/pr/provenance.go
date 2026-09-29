@@ -145,7 +145,7 @@ func EffectiveProvenance(ref Ref, declared ReviewProvenance) ReviewProvenance {
 // asymmetry between the two agents is measured, not assumed:
 //
 //   - Agent A (InlineSeeded) confines the reviewer with a deny-by-default
-//     Claude Code allowlist — four read tools plus a few Bash prefixes chosen
+//     Claude Code allowlist — three read tools plus a few Bash prefixes chosen
 //     for reading, under plan mode, loading no settings file — and runs its
 //     Bash commands under Claude Code's OS sandbox, which denies writes to
 //     the workspace and limits egress to the PR's gh hosts but does not

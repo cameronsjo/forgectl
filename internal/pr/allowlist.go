@@ -71,7 +71,6 @@ var baseReadOnly = []string{
 	"Read",
 	"Grep",
 	"Glob",
-	"LS",
 	"Bash(git diff:*)",
 	"Bash(git log:*)",
 	"Bash(git show:*)",
