@@ -738,6 +738,88 @@ func TestResolveVault_HeadingMatchRenderedFragment(t *testing.T) {
 	}
 }
 
+// TestResolveVault_HeadingMatchEveryMarkupByte pins fragmentMarkupBytes byte
+// by byte. Each case's fragment holds exactly one markup byte and reaches a
+// heading only through its rendered text: no heading's slug or written text
+// equals the fragment, so the exact pass cannot be what matched. Dropping a
+// byte from the set skips the parse and loses its case. Adding one fails the
+// coverage check until it gets a case.
+func TestResolveVault_HeadingMatchEveryMarkupByte(t *testing.T) {
+	idx, from := newMatchVault(t, "# Note\n\n## a b\n\n## a.b\n\n## x y\n\n## Q & A\n\n## `x`\n\n## z\n\n## p q\n\n## m n\n")
+	doc, ok := idx.Find(idx.Roots()[0].Label, "Note.md")
+	if !ok {
+		t.Fatal("Note.md not indexed")
+	}
+	slugOf := map[string]string{}
+	for _, h := range doc.Headings {
+		slugOf[h.Text] = h.Slug
+	}
+	cases := []struct{ fragment, heading string }{
+		{`a\.b`, "a.b"},
+		{"a *b*", "a b"},
+		{"`x`", "x"},
+		{"_x_ y", "x y"},
+		{"a ==b==", "a b"},
+		{"a ~~b~~", "a b"},
+		{"[x](z)", "x"},
+		{"x <b>y</b>", "x y"},
+		{"Q &amp; A", "Q & A"},
+		{"%%c%% z", "z"},
+	}
+	covered := map[rune]bool{}
+	for _, c := range cases {
+		want, ok := slugOf[c.heading]
+		if !ok {
+			t.Fatalf("no heading %q", c.heading)
+		}
+		for _, h := range doc.Headings {
+			if h.Slug == strings.ToLower(c.fragment) || foldHeadingKey(h.Text) == foldHeadingKey(c.fragment) {
+				t.Fatalf("%q: heading %q matches without rendering; the case proves nothing", c.fragment, h.Text)
+			}
+		}
+		for _, r := range fragmentMarkupBytes {
+			if strings.ContainsRune(c.fragment, r) {
+				covered[r] = true
+			}
+		}
+		doc, miss := idx.ResolveLink(&from, "Note#"+c.fragment)
+		if miss != MissNone {
+			t.Errorf("[[Note#%s]]: miss %v", c.fragment, miss)
+			continue
+		}
+		if _, anchor, _ := idx.resolveAnchor(&from, "Note", c.fragment); anchor != want || doc == nil {
+			t.Errorf("[[Note#%s]] anchor %q, want %q", c.fragment, anchor, want)
+		}
+	}
+	for _, r := range fragmentMarkupBytes {
+		if !covered[r] {
+			t.Errorf("markup byte %q has no case", r)
+		}
+	}
+}
+
+// TestResolveVault_HeadingMatchExactBeforeRendered: when a fragment equals
+// one heading as written and renders to another, the written match wins
+// whatever the heading order. "a *b*" is the escaped heading's text, and
+// renders as the earlier "a b".
+func TestResolveVault_HeadingMatchExactBeforeRendered(t *testing.T) {
+	idx, from := newMatchVault(t, "# Note\n\n## a b\n\n## a \\*b\\*\n")
+	doc, ok := idx.Find(idx.Roots()[0].Label, "Note.md")
+	if !ok || len(doc.Headings) != 3 {
+		t.Fatalf("fixture: %v, %v", ok, doc.Headings)
+	}
+	plain, escaped := doc.Headings[1], doc.Headings[2]
+	if plain.Text != "a b" || escaped.Text != "a *b*" || plain.Slug == escaped.Slug {
+		t.Fatalf("fixture headings %+v, %+v", plain, escaped)
+	}
+	if _, anchor, miss := idx.resolveAnchor(&from, "Note", "a *b*"); miss != MissNone || anchor != escaped.Slug {
+		t.Errorf("[[Note#a *b*]] anchor %q (miss %v), want the escaped heading's %q", anchor, miss, escaped.Slug)
+	}
+	if _, anchor, miss := idx.resolveAnchor(&from, "Note", "a b"); miss != MissNone || anchor != plain.Slug {
+		t.Errorf("[[Note#a b]] anchor %q (miss %v), want %q", anchor, miss, plain.Slug)
+	}
+}
+
 // TestScanVault_HeadingTextRendered: Heading.Text is the text the page
 // shows: an entity resolved, an escape dropped, a code span kept verbatim,
 // and an autolink or bare URL showing its label.
@@ -766,7 +848,7 @@ func TestScanVault_HeadingTextRendered(t *testing.T) {
 func TestFragmentText_MarkupFreeRendersAsWritten(t *testing.T) {
 	for _, f := range []string{
 		"Step 1: Install", "see https://x.io/a now", "www.x.io", "mail a@b.io",
-		"a + b - c", "1. first", "> quote", "(parens) {braces} 'q' \"dq\"", "C#", "x ^blk", "  spaced   out ",
+		"a + b - c", "$x$", "!x", "a $ b", "$$x$$", "!! x", "1. first", "> quote", "(parens) {braces} 'q' \"dq\"", "C#", "x ^blk", "  spaced   out ",
 	} {
 		if strings.ContainsAny(f, fragmentMarkupBytes) {
 			t.Fatalf("%q holds a markup byte", f)
