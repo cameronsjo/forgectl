@@ -10,14 +10,14 @@ Tracker: —
 
 1 → 3 → 4
 
-Without a shared client nothing else can talk to herdr safely, without `inbox` there is no answer to "what needs me", and without `jump` there is no quick way to reach it. Everything else has a manual workaround. The scariest piece is **item 3**: herdr's own `blocked` and `idle` states have been observed wrong (`blocked` at a plain input prompt, `idle` on a stuck agent; see `docs/plans/2026-09-28-forgectl-herdr-coordinator.md`), so item 2 measures that before `inbox` trusts it.
+Without a shared client nothing else can talk to herdr safely, without `inbox` there is no answer to "what needs me", and without `jump` there is no quick way to reach it. Everything else has a manual workaround. The scariest piece is **item 3**: herdr's own `blocked` and `idle` states have been observed wrong (`blocked` at a plain input prompt, `idle` on a stuck agent; see `docs/plans/2026-09-28-forgectl-herdr-coordinator.md`), so `inbox` consumes the shared readiness checks (item 2) instead of trusting the raw state.
 
 ## Now
 
 | # | Item | Scope | Depends on | Must-have |
 |---|------|-------|-----------|-----------|
 | 1 | Shared `internal/herdr` client | Typed wrappers over `herdr workspace\|tab\|pane\|agent list\|get\|move\|focus`. Error model: exit 1 with `{"error":{"code","message"}}` on stderr, matched on `code`. Parse `move_result.changed` and `reason` (herdr exits 0 when it declines a move). Capability probe for `tab move` (present in the `cameronsjo/herdr` fork, absent upstream and hidden from `tab --help`) with a clear refusal. Session gate on `HERDR_ENV=1`. Fixtures captured read-only from a live session and sanitized. One package shared with the `herdr-coordinator` plan: agree the surface with that plan (forgectl#536) before either lands. | — | yes |
-| 2 | Status-reliability spike | Compare `agent_status` against an independent read of each pane (`herdr pane read`) across live claude, codex, and pi sessions. Output: a short note on which states to trust, which to cross-check, and the rule `inbox` will use. No shipped command. | 1 | |
+| 2 | Readiness checks, shared with forgectl#536 | Not built here. `forgectl#536` (T2) already designs per-harness screen checks kept as TOML rows, with herdr's `agent_status` treated as a hint. Land them as one shared `internal/herdr/ready` package that `inbox` consumes. This item tracks that dependency and the fixtures `inbox` needs from it. | 1, forgectl#536 T2 | |
 
 ## Next
 
