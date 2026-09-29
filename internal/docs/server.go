@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -441,7 +442,9 @@ func handleDoc(store *Store) http.HandlerFunc {
 
 		doc, found := idx.Find(root, rest)
 		if tooLarge {
-			// Refuse rather than truncate: a cut through a fence or table would
+			// 200, not 413 or 404: the doc exists and the server is working
+			// as designed; the reader shell (sidenav, outline chrome) must
+			// still render around the notice. Refuse rather than truncate: a cut through a fence or table would
 			// render something misleading. The notice names the doc as
 			// root/rel only, never absPath, and links no raw file (the server
 			// has no raw-file route).
@@ -519,7 +522,7 @@ func readDocCapped(path string) (source []byte, tooLarge bool, err error) {
 // docPath is "root/rel" and is escaped here.
 func tooLargeNoticeHTML(docPath string) string {
 	p := html.EscapeString(docPath)
-	return "<p>This document is over 1 MiB, so the reader does not render it.</p>" +
+	return "<p>This document is over " + strconv.Itoa(renderCapBytes>>20) + " MiB, so the reader does not render it.</p>" +
 		"<p><code>" + p + "</code></p>" +
 		"<p>Read it in a terminal with <code>forgectl docs read " + p + "</code>.</p>"
 }

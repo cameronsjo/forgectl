@@ -91,6 +91,7 @@ reason goes to stderr, and the exit code is 1. A missing rg or an expired
 			if err != nil {
 				return reportDocsSearchError(cmd, err, docsSearchExitCode(err), asJSON)
 			}
+			noteSkippedPaths(cmd.ErrOrStderr(), idx)
 
 			searcher := docspkg.Searcher{Runner: streamer, LookPath: docsSearchLookPath}
 			resp, err := searcher.Search(ctx, idx, query, limit)

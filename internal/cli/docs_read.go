@@ -112,6 +112,7 @@ func runDocsRead(cmd *cobra.Command, deps module.Deps, target string, timeout ti
 	if err != nil {
 		return err
 	}
+	noteSkippedPaths(cmd.ErrOrStderr(), idx)
 
 	doc, path, err := resolveDocsReadTarget(idx, target)
 	if err != nil {

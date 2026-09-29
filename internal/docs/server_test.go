@@ -660,7 +660,7 @@ func TestServer_RenderCapNotice_NamesRootRelAndLeaksNothing(t *testing.T) {
 	if strings.Contains(body, dir) {
 		t.Errorf("notice leaked the absolute path %q", dir)
 	}
-	start := strings.Index(body, "This document is over 1 MiB")
+	start := strings.Index(body, "This document is over")
 	end := strings.Index(body, "in a terminal with")
 	if start < 0 || end < start {
 		t.Fatal("could not locate the notice in the page")

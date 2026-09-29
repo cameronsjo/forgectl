@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	docspkg "github.com/cameronsjo/forgectl/internal/docs"
 	"github.com/cameronsjo/forgectl/internal/module"
 )
 
@@ -133,7 +134,7 @@ func TestDocsCheckCmd_JSONSchemaFrozen(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 		t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout)
 	}
-	assertKeys(t, "top-level", got, "schema_version", "roots", "findings", "summary")
+	assertKeys(t, "top-level", got, "schema_version", "roots", "findings", "summary", "skipped")
 	if v, _ := got["schema_version"].(float64); v != 1 {
 		t.Errorf("schema_version = %v, want 1", got["schema_version"])
 	}
@@ -263,5 +264,79 @@ func TestDocsCheckCmd_DeadlineEncodeFailureNamesCheck(t *testing.T) {
 	}
 	if got := ExitCode(err); got != 2 {
 		t.Errorf("ExitCode(err) = %d, want 2", got)
+	}
+}
+
+// Test plan for partial-tree handling (#568)
+//   [x] Unhappy: a skipped path makes docs check exit 2 and list it (human)
+//   [x] Unhappy: --json carries the skipped array and still exits 2
+//   [x] Happy: a clean tree's --json carries an empty skipped array
+//   [x] Unhappy: docs list, a tolerant verb, prints the note on stderr and exits 0
+// The fault is injected through docspkg.InjectWalkFaultForTest, so these run
+// as root, where chmod cannot make a directory unreadable.
+
+func TestDocsCheckCmd_SkippedPathExits2AndListsIt(t *testing.T) {
+	dir := t.TempDir()
+	docsCheckWrite(t, filepath.Join(dir, "README.md"), "# R\n")
+	t.Cleanup(docspkg.InjectWalkFaultForTest())
+
+	stdout, _, code := runDocsCheck(t, dir)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (a partial tree cannot be vouched for)", code)
+	}
+	if !strings.Contains(stdout, "/locked: skipped (") || !strings.Contains(stdout, "/gone.md: skipped (") {
+		t.Errorf("skipped paths not listed on stdout:\n%s", stdout)
+	}
+}
+
+func TestDocsCheckCmd_SkippedPathJSONField(t *testing.T) {
+	dir := t.TempDir()
+	docsCheckWrite(t, filepath.Join(dir, "README.md"), "# R\n")
+	t.Cleanup(docspkg.InjectWalkFaultForTest())
+
+	stdout, _, code := runDocsCheck(t, "--json", dir)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	var got struct {
+		Skipped []map[string]any `json:"skipped"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout)
+	}
+	if len(got.Skipped) != 2 {
+		t.Fatalf("skipped = %v, want 2 entries", got.Skipped)
+	}
+	assertKeys(t, "skipped entry", got.Skipped[0], "root", "path", "reason")
+}
+
+func TestDocsCheckCmd_CleanTreeJSONSkippedIsEmptyArray(t *testing.T) {
+	dir := t.TempDir()
+	docsCheckWrite(t, filepath.Join(dir, "README.md"), "# R\n")
+	stdout, _, code := runDocsCheck(t, "--json", dir)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if !strings.Contains(stdout, `"skipped":[]`) {
+		t.Errorf("clean report must carry an empty skipped array:\n%s", stdout)
+	}
+}
+
+func TestDocsListCmd_SkippedPathPrintsStderrNoteAndStaysTolerant(t *testing.T) {
+	dir := t.TempDir()
+	docsCheckWrite(t, filepath.Join(dir, "README.md"), "# R\n")
+	t.Cleanup(docspkg.InjectWalkFaultForTest())
+
+	cmd := newDocsListCmd(module.Deps{})
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{dir})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("docs list must stay tolerant: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "skipped 2 unreadable path(s) under") ||
+		!strings.Contains(stderr.String(), "(see docs check)") {
+		t.Errorf("stderr note missing: %q", stderr.String())
 	}
 }

@@ -92,6 +92,7 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 				}
 				return reportDocsListDeadline(cmd, "docs list", "", err, asJSON)
 			}
+			noteSkippedPaths(cmd.ErrOrStderr(), idx)
 
 			docs := idx.List()
 			if limit > 0 && limit < len(docs) {
