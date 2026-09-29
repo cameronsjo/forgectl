@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Task 0 done -> Task 1 on feat/herdr-client (read client, error model, fixtures) -> Task 2 -> Task 3 -> Task 4"
+next: "Tasks 0-4 done; review and merge cameronsjo/forgectl#723, then roadmap item 2 (shared readiness checks with forgectl#536 T2) and item 3 (inbox)"
 branch: plan/herdr-roadmap
 pr: cameronsjo/forgectl#721
 updated: 2026-09-29
@@ -108,8 +108,8 @@ Go per `go.mod`, `internal/exec` (`Runner`, `FakeRunner`, `CommandError`). No ne
 **Report:** —
 
 **Steps:**
-- [ ] Post the client surface block, the launch boundary (launch stays in `herdradapter`), and the proposed `internal/herdr/ready` package on forgectl#536, scanned with `cadence-hooks cadence redact-scan --audience public` first
-- [ ] Gate: Cameron confirms the surface or asks for changes. Do not start Task 1 before that
+- [x] Post the client surface block, the launch boundary (launch stays in `herdradapter`), and the proposed `internal/herdr/ready` package on forgectl#536, scanned with `cadence-hooks cadence redact-scan --audience public` first
+- [x] Gate: Cameron confirms the surface or asks for changes. Do not start Task 1 before that
 
 ### Task 1 — read client, error model, fixtures
 
@@ -126,12 +126,12 @@ Go per `go.mod`, `internal/exec` (`Runner`, `FakeRunner`, `CommandError`). No ne
 **Report:** —
 
 **Steps:**
-- [ ] Capture read-only fixtures: `workspace list`, `pane list`, `tab list --workspace <id>`, `agent list`, `pane get`, `tab get`, one `pane read` (text), and one failing call for the stderr envelope. Sanitize with the allowlist; add a fixture-join test on `workspace_id`, `tab_id`, and `terminal_id`, and a scan that greps `testdata/` for `$HOME`, the hostname, and the live session id and expects nothing
-- [ ] Write failing tests: each read decodes its fixture; an empty list, a null `cwd`, a null `agent`, unknown extra fields, and a missing or null `result` (fail closed); `ReadPane` returns text and passes `--format text`; `*exec.CommandError` with the stderr envelope becomes `*Error{Code:"workspace_not_found"}`; truncated stderr, log lines before the JSON, and non-JSON stderr each return the wrapped `*exec.CommandError`
-- [ ] Run `go test ./internal/herdr/...` — expect RED
-- [ ] Implement; run — expect GREEN
-- [ ] Mutation sweep: delete the envelope parse; `TestErrorEnvelopeBecomesTypedError` must go red; restore
-- [ ] Commit: `feat(herdr): read client and typed errors`
+- [x] Capture read-only fixtures: `workspace list`, `pane list`, `tab list --workspace <id>`, `agent list`, `pane get`, `tab get`, one `pane read` (text), and one failing call for the stderr envelope. Sanitize with the allowlist; add a fixture-join test on `workspace_id`, `tab_id`, and `terminal_id`, and a scan that greps `testdata/` for `$HOME`, the hostname, and the live session id and expects nothing
+- [x] Write failing tests: each read decodes its fixture; an empty list, a null `cwd`, a null `agent`, unknown extra fields, and a missing or null `result` (fail closed); `ReadPane` returns text and passes `--format text`; `*exec.CommandError` with the stderr envelope becomes `*Error{Code:"workspace_not_found"}`; truncated stderr, log lines before the JSON, and non-JSON stderr each return the wrapped `*exec.CommandError`
+- [x] Run `go test ./internal/herdr/...` — expect RED
+- [x] Implement; run — expect GREEN
+- [x] Mutation sweep: delete the envelope parse; `TestErrorEnvelopeBecomesTypedError` must go red; restore
+- [x] Commit: `feat(herdr): read client and typed errors`
 
 ### Task 2 — mutations and declined moves
 
@@ -148,11 +148,11 @@ Go per `go.mod`, `internal/exec` (`Runner`, `FakeRunner`, `CommandError`). No ne
 **Report:** —
 
 **Steps:**
-- [ ] Response shapes for `tab move`, `workspace move`, and the focus verbs change the live session and cannot be captured read-only. Ask Cameron to run one `tab move` in a throwaway workspace and capture the result, including a sole-tab move to see the decline; until then the fixture is synthetic and cites a fork commit SHA plus file path for the shape (not a search-index hit)
-- [ ] Failing tests: `changed:false` with `reason:last_tab_in_workspace` returns `*Declined`; `MoveTab` returns the post-move `TabID` and `WorkspaceID` from the response, not the input ids; `--new-workspace --label` returns the new workspace id; each `MoveTarget` builds the expected argv; `FocusTab` argv is `tab focus <id>` (no directional fallback); an unknown-method server error maps to the "needs the fork" message
-- [ ] Run — expect RED; implement; run — expect GREEN
-- [ ] Mutation sweep: delete the `changed` check; `TestMoveTabDeclinedReturnsDeclined` must go red; restore
-- [ ] Commit: `feat(herdr): mutations and declined-move handling`
+- [x] Response shapes for `tab move`, `workspace move`, and the focus verbs change the live session and cannot be captured read-only. Ask Cameron to run one `tab move` in a throwaway workspace and capture the result, including a sole-tab move to see the decline; until then the fixture is synthetic and cites a fork commit SHA plus file path for the shape (not a search-index hit)
+- [x] Failing tests: `changed:false` with `reason:last_tab_in_workspace` returns `*Declined`; `MoveTab` returns the post-move `TabID` and `WorkspaceID` from the response, not the input ids; `--new-workspace --label` returns the new workspace id; each `MoveTarget` builds the expected argv; `FocusTab` argv is `tab focus <id>` (no directional fallback); an unknown-method server error maps to the "needs the fork" message
+- [x] Run — expect RED; implement; run — expect GREEN
+- [x] Mutation sweep: delete the `changed` check; `TestMoveTabDeclinedReturnsDeclined` must go red; restore
+- [x] Commit: `feat(herdr): mutations and declined-move handling`
 
 ### Task 3 — capability probe and docs
 
@@ -169,10 +169,10 @@ Go per `go.mod`, `internal/exec` (`Runner`, `FakeRunner`, `CommandError`). No ne
 **Report:** —
 
 **Steps:**
-- [ ] The measurement is done (see Global Constraints): `herdr tab move --help` exits 2 with `usage: herdr tab move <tab_id> --index N` on stderr, stdout empty. Do not re-derive it from the tests; cite it in the test fixture
-- [ ] Failing tests: a real-shaped `*exec.CommandError{ExitCode: 2, Stderr: "usage: herdr tab move <tab_id> ..."}` -> ok (usage text is on `CommandError.Stderr`/`Output`, never the returned string); exit 0 with that prefix on stdout -> ok (clap-style help); `tab frobnicate --help` output with the fork's command list -> rejected (does not begin with the exact prefix); a stock-style listing without `move` -> error saying the `tab move` verb needs the `cameronsjo/herdr` fork; `HERDR_ENV` unset, empty, or not `1` -> error naming the variable, and the gate error wins over the fork error; `HERDR_SOCKET_PATH` unset or not an existing socket -> error naming it
-- [ ] Run — expect RED; implement; run — expect GREEN
-- [ ] Commit: `feat(herdr): session and fork-capability probe`
+- [x] The measurement is done (see Global Constraints): `herdr tab move --help` exits 2 with `usage: herdr tab move <tab_id> --index N` on stderr, stdout empty. Do not re-derive it from the tests; cite it in the test fixture
+- [x] Failing tests: a real-shaped `*exec.CommandError{ExitCode: 2, Stderr: "usage: herdr tab move <tab_id> ..."}` -> ok (usage text is on `CommandError.Stderr`/`Output`, never the returned string); exit 0 with that prefix on stdout -> ok (clap-style help); `tab frobnicate --help` output with the fork's command list -> rejected (does not begin with the exact prefix); a stock-style listing without `move` -> error saying the `tab move` verb needs the `cameronsjo/herdr` fork; `HERDR_ENV` unset, empty, or not `1` -> error naming the variable, and the gate error wins over the fork error; `HERDR_SOCKET_PATH` unset or not an existing socket -> error naming it
+- [x] Run — expect RED; implement; run — expect GREEN
+- [x] Commit: `feat(herdr): session and fork-capability probe`
 
 ### Task 4 — follow-ups and polish
 
@@ -187,11 +187,23 @@ Go per `go.mod`, `internal/exec` (`Runner`, `FakeRunner`, `CommandError`). No ne
 **Report:** —
 
 **Steps:**
-- [ ] File a follow-up issue to converge `herdradapter`'s `errorCode` and `parseWorkspaceList` onto the client
-- [ ] run a pre-PR polish pass over the diff (review, simplify, repo formatter and linter); fold findings (run from the implementation worktree)
+- [x] File a follow-up issue to converge `herdradapter`'s `errorCode` and `parseWorkspaceList` onto the client
+- [x] run a pre-PR polish pass over the diff (review, simplify, repo formatter and linter); fold findings (run from the implementation worktree)
 
 ---
 
 ## Deviations
 
+- **2026-09-29 — Task 2: move fixtures are real captures, not synthetic.** The plan expected a maintainer to capture one `tab move` in a throwaway workspace. The build did it: a workspace created for the purpose, moves exercised inside it, only that workspace closed, layout and focus verified unchanged. Reality-forced improvement.
+- **2026-09-29 — Task 2: `MoveResult` has no `Changed`/`Reason`; an index move has no `move_result`.** The measured reply to `tab move --index` is the workspace's tab list with no `move_result`. `MoveTab` derives the workspace from that list and fails closed if the tab is absent. Reality-forced.
+- **2026-09-29 — Task 2: the unknown-method to `ErrForkRequired` mapping is dropped.** herdr's code for a missing verb cannot be measured without a stock binary, so `MoveTab` returns the typed `*Error` with whatever code herdr sends; `docs/herdr.md` says so. Reality-forced.
+- **2026-09-29 — Task 3: the probe's discriminator is a line-start `usage: herdr tab move` match.** Measured: the fork's reply to an unknown subcommand also lists `herdr tab move` verbs, so exit 2 alone proves nothing. Reality-forced.
+- **2026-09-29 — Tasks 1-2: pre-PR review changes.** `MoveTab` fails closed on four more reply shapes; a list reply missing its list key is an error; an error envelope counts only from exit status 1; `*Error` unwraps to the `CommandError`; control characters are stripped from error text (security Nit). Chosen improvements, found by review.
+- **2026-09-29 — Task 4: docs arm of the pre-PR review skipped.** The only docs are new, for a package with no consumers. Recorded in the polish marker as skipped.
+- **2026-09-29 — Implementation ships in cameronsjo/forgectl#723**, a separate PR from this plan's branch, as the plan's header said.
+
 ## Learnings
+
+- **herdr renumbers on a cross-workspace move.** `MoveResult.TabID` is the id after the move (measured `w7D:t17` to `w7D:t19`); `terminal_id` is the stable key, and only `Panes()` and `Agents()` carry it.
+- **`exec.OSRunner` logs any non-zero exit at `ERROR`,** including the probe's expected exit 2.
+- **The polish conformance canary miscounts under this repo's lint config:** it splits every output line on `:`, so source and caret lines inflate the file count. Fixing the three real lint issues made it pass. Worth a fix in the polish script.
