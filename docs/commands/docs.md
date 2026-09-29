@@ -21,7 +21,7 @@ The landing page at `/` lists the most recently changed docs and each root's doc
 
 ## Doc discovery
 
-With no arguments, both `serve` and `list` index cwd, `./docs` (if present), and `$CADENCE_FIELD_REPORTS_DIR` (if set), plus any extra roots configured in the `[docs]` section of `config.toml`:
+With no arguments, `serve`, `list`, `check`, `read` and `search` all index cwd, `./docs` (if present), and `$CADENCE_FIELD_REPORTS_DIR` (if set), plus any extra roots configured in the `[docs]` section of `config.toml`:
 
 ```toml
 [docs]
@@ -36,6 +36,8 @@ addr  = ""                              # default bind address for `docs serve`
 A leading `~` or `~/` in `roots` and in the `root_kinds` keys expands to your home directory. Paths named on the command line are not expanded; your shell does that.
 
 Naming directories or files on the command line replaces that default set entirely.
+
+Exit codes: `docs list` exits 0 when it lists (an empty list included) and 2 when it could not produce the list (bad root, bad config, a bad flag or `--limit`, `--timeout` deadline); under `--json` a failure past flag parsing leaves stdout empty and writes exactly one `{"error","code","root"}` object to stderr (`root` is empty unless a deadline stopped on a specific root). `docs serve` exits 0 after a clean Ctrl-C and 2 when the server could not be set up (bad root, bad config, index failure, a bad flag, the retired `--token`). A bind failure or an unusable `--token-file` still exits 1. `docs check` and `docs search` have their own contracts, below.
 
 ### Root kinds
 

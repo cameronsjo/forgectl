@@ -41,16 +41,16 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 			// Exit contract, as docs check: 0 listed (an empty list included);
 			// 2 the list could not be produced (bad flag, bad root, deadline).
 			if limit < 0 {
-				return WithExitCode(fmt.Errorf("--limit must be 0 or a positive count, not %d", limit), 2)
+				return reportDocsListDeadline(cmd, "docs list", "", fmt.Errorf("--limit must be 0 or a positive count, not %d", limit), asJSON)
 			}
 
 			roots, err := resolveDocsRoots(args, deps.Cfg.Docs)
 			if err != nil {
-				return WithExitCode(err, 2)
+				return reportDocsListDeadline(cmd, "docs list", "", err, asJSON)
 			}
 			opts, err := docsIndexOptions(deps.Cfg.Docs)
 			if err != nil {
-				return WithExitCode(err, 2)
+				return reportDocsListDeadline(cmd, "docs list", "", err, asJSON)
 			}
 
 			ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
@@ -90,7 +90,7 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 					return reportDocsListDeadline(cmd, "docs list", deadlineRoot(err, progressRoot), err, asJSON)
 				}
-				return WithExitCode(err, 2)
+				return reportDocsListDeadline(cmd, "docs list", "", err, asJSON)
 			}
 
 			docs := idx.List()
@@ -138,6 +138,10 @@ type docsListDeadlineJSON struct {
 // human-readable error path render walkErr, which already names the root
 // (NewIndexContext). Either way the process exits 2. verb names the command
 // ("docs list", "docs check") in the one message this function writes itself.
+//
+// `docs list` also routes its other could-not-list failures (bad flag value,
+// bad root, config error) here with root "" so --json stays one object on
+// stderr whatever the failure; the object then carries an empty "root".
 func reportDocsListDeadline(cmd *cobra.Command, verb, root string, walkErr error, asJSON bool) error {
 	if !asJSON {
 		return WithExitCode(walkErr, 2)

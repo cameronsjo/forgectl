@@ -50,26 +50,28 @@ func newDocsServeCmd(deps module.Deps) *cobra.Command {
 		Short: "Index and serve markdown docs over loopback HTTP",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Exit contract, as docs check/list: 2 the server could not be
+			// set up (bad root, bad config, index failure, bad flag).
 			roots, err := resolveDocsRoots(args, deps.Cfg.Docs)
 			if err != nil {
-				return err
+				return WithExitCode(err, 2)
 			}
 			opts, err := docsIndexOptions(deps.Cfg.Docs)
 			if err != nil {
-				return err
+				return WithExitCode(err, 2)
 			}
 			idx, err := docspkg.NewIndexWithOptions(roots, opts)
 			if err != nil {
-				return err
+				return WithExitCode(err, 2)
 			}
 			return runDocsServe(cmd, deps, idx, addr, openFlag, tokenFile)
 		},
 	}
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		if err != nil && err.Error() == "unknown flag: --token" {
-			return errors.New("--token was removed because command-line values are visible to other processes; use --token-file instead")
+			return WithExitCode(errors.New("--token was removed because command-line values are visible to other processes; use --token-file instead"), 2)
 		}
-		return err
+		return WithExitCode(err, 2)
 	})
 	cmd.Flags().StringVar(&addr, "addr", "", "bind address (default: [docs].addr, else 127.0.0.1 with a random port)")
 	cmd.Flags().BoolVar(&openFlag, "open", false, "open the system browser once the server is listening")
