@@ -83,13 +83,15 @@ func NewVerifier() *Verifier {
 func (v *Verifier) Anchor() (*ecdsa.PublicKey, string, error) {
 	// (1) Anchor ownership.
 	if err := v.anchorCheck(v.anchorPath); err != nil {
-		return nil, "", fmt.Errorf("%w: %v", ErrNoAnchor, err)
+		// %w on the cause, so a caller can tell an anchor that was never
+		// installed (fs.ErrNotExist) from one that is present but unsafe.
+		return nil, "", fmt.Errorf("%w: %w", ErrNoAnchor, err)
 	}
 
 	// (2) Parse the anchor and fingerprint its canonical PKIX DER.
 	anchorBytes, err := os.ReadFile(v.anchorPath)
 	if err != nil {
-		return nil, "", fmt.Errorf("%w: read anchor %s: %v", ErrNoAnchor, v.anchorPath, err)
+		return nil, "", fmt.Errorf("%w: read anchor %s: %w", ErrNoAnchor, v.anchorPath, err)
 	}
 	anchorPub, err := ParseAnchorFile(anchorBytes)
 	if err != nil {
