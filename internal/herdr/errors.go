@@ -9,26 +9,38 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
+// exitFailure is the status herdr exits with when it refuses a request
+// (measured). A stream with the error envelope from any other status, such as
+// -1 for a killed or cancelled child, is not herdr's refusal.
+const exitFailure = 1
+
 // Error is herdr's structured refusal: {"error":{"code","message"}} on stderr
 // with exit 1. Code is herdr's own vocabulary (workspace_not_found,
-// server_not_running, ...); match on it, not on Message.
+// server_not_running, ...); match on it, not on Message. It unwraps to the
+// *[exec.CommandError] it came from.
 type Error struct {
 	Code    string
 	Message string
+	cause   error
 }
 
 func (e *Error) Error() string {
 	return "herdr: " + e.Code + ": " + e.Message
 }
 
-// classify turns a runner failure into an *Error when stderr carries herdr's
-// envelope, and otherwise wraps the original error with the command that ran.
-// Truncated stderr is never parsed: a cut tail can look like valid JSON with
-// the wrong code.
+// Unwrap returns the *[exec.CommandError] behind the refusal.
+func (e *Error) Unwrap() error { return e.cause }
+
+// classify turns a runner failure into an *Error when herdr exited with its
+// failure status and stderr carries its envelope, and otherwise wraps the
+// original error with the command that ran. Truncated stderr is never parsed:
+// a cut tail can look like valid JSON with the wrong code. Nor is a stream
+// from a child that was killed or timed out.
 func classify(args []string, err error) error {
 	var ce *exec.CommandError
-	if errors.As(err, &ce) && ce.StderrDropped == 0 {
+	if errors.As(err, &ce) && ce.ExitCode == exitFailure && ce.StderrDropped == 0 {
 		if e := parseEnvelope(ce.Stderr); e != nil {
+			e.cause = ce
 			return e
 		}
 	}

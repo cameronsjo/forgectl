@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"net"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -111,6 +113,57 @@ func TestProbeGate(t *testing.T) {
 				t.Fatalf("err = %v, want ErrNotInSession", err)
 			}
 		})
+	}
+}
+
+func TestProbeVerbMustEndAtTheVerb(t *testing.T) {
+	for name, stderr := range map[string]string{
+		"a longer verb":     "usage: herdr tab move-all <tab_id>",
+		"a longer verb (2)": "Usage: herdr tab moves <tab_id>",
+	} {
+		r := runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 2, Stderr: stderr})
+		if err := probe(context.Background(), r, envOf(inPane), statSocket); !errors.Is(err, ErrForkRequired) {
+			t.Errorf("%s: err = %v, want ErrForkRequired", name, err)
+		}
+	}
+}
+
+func TestProbeStatFailureKeepsItsCause(t *testing.T) {
+	stat := func(string) (fs.FileInfo, error) { return nil, os.ErrPermission }
+	err := probe(context.Background(), forkRunner(t), envOf(inPane), stat)
+	if !errors.Is(err, ErrNotInSession) || !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("err = %v, want both ErrNotInSession and the stat error", err)
+	}
+}
+
+// TestProbeThroughTheRealStat drives the exported Probe, which is the only
+// code that passes os.Stat, against a real unix socket. macOS caps a socket
+// path near 104 bytes and t.TempDir() overflows it, so the socket lives under
+// a short os.MkdirTemp directory.
+func TestProbeThroughTheRealStat(t *testing.T) {
+	dir, err := os.MkdirTemp("", "hp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "h.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	env := envOf(map[string]string{"HERDR_ENV": "1", "HERDR_SOCKET_PATH": sock})
+	if err := Probe(context.Background(), forkRunner(t), env); err != nil {
+		t.Fatalf("Probe with a real socket: %v", err)
+	}
+	notASocket := filepath.Join(dir, "plain")
+	if err := os.WriteFile(notASocket, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env = envOf(map[string]string{"HERDR_ENV": "1", "HERDR_SOCKET_PATH": notASocket})
+	if err := Probe(context.Background(), forkRunner(t), env); !errors.Is(err, ErrNotInSession) {
+		t.Fatalf("Probe with a regular file: err = %v, want ErrNotInSession", err)
 	}
 }
 

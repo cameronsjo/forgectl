@@ -92,7 +92,9 @@ func TestDecodeEdgeCases(t *testing.T) {
 		wantErr bool
 	}{
 		{"empty list", `{"id":"x","result":{"type":"pane_list","panes":[]}}`, 0, false},
-		{"list member missing", `{"id":"x","result":{"type":"pane_list"}}`, 0, false},
+		{"list member missing reads as a shape change, not an empty session", `{"id":"x","result":{"type":"pane_list"}}`, 0, true},
+		{"list member renamed", `{"id":"x","result":{"items":[]}}`, 0, true},
+		{"list member null", `{"id":"x","result":{"panes":null}}`, 0, true},
 		{"null cwd and agent", `{"id":"x","result":{"panes":[{"pane_id":"w1:p1","cwd":null,"agent":null,"agent_session":null}]}}`, 1, false},
 		{"unknown extra fields", `{"id":"x","extra":1,"result":{"panes":[{"pane_id":"w1:p1","brand_new_field":{"a":1}}],"more":true}}`, 1, false},
 		{"result missing", `{"id":"x"}`, 0, true},
@@ -172,14 +174,49 @@ func TestReadPaneFailurePathCarriesEnvelope(t *testing.T) {
 	}
 }
 
+// mustHaveRows stops a join test that would otherwise iterate zero rows and
+// pass without checking anything.
+func mustHaveRows(t *testing.T, what string, n int, err error) {
+	t.Helper()
+	if err != nil || n == 0 {
+		t.Fatalf("%s: %d rows, err %v; the join checks below would check nothing", what, n, err)
+	}
+}
+
+func TestCheckIDRefusesUnsafeOperands(t *testing.T) {
+	for name, id := range map[string]string{
+		"empty":       "",
+		"flag":        "--index",
+		"newline":     "w1:t1\nw1:t2",
+		"nul":         "w1\x00",
+		"tab char":    "w1\t",
+		"over length": strings.Repeat("a", maxIDLen+1),
+	} {
+		if err := checkID("id", id); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	for _, id := range []string{"w1", "w1:t3", "w7D:t17", "label with spaces", strings.Repeat("a", maxIDLen)} {
+		if err := checkID("id", id); err != nil {
+			t.Errorf("%q refused: %v", id, err)
+		}
+	}
+}
+
 func TestFixturesJoin(t *testing.T) {
 	ctx := context.Background()
-	ws, _ := New(runnerFor(fixture(t, "workspace_list.json"), nil)).Workspaces(ctx)
-	panes, _ := New(runnerFor(fixture(t, "pane_list.json"), nil)).Panes(ctx)
-	agents, _ := New(runnerFor(fixture(t, "agent_list.json"), nil)).Agents(ctx)
-	tabs, _ := New(runnerFor(fixture(t, "tab_list.json"), nil)).Tabs(ctx, "w1")
-	pane, _ := New(runnerFor(fixture(t, "pane_get.json"), nil)).PaneGet(ctx, "w1:p1")
-	tab, _ := New(runnerFor(fixture(t, "tab_get.json"), nil)).TabGet(ctx, "w1:t2")
+	ws, err := New(runnerFor(fixture(t, "workspace_list.json"), nil)).Workspaces(ctx)
+	mustHaveRows(t, "workspaces", len(ws), err)
+	panes, err := New(runnerFor(fixture(t, "pane_list.json"), nil)).Panes(ctx)
+	mustHaveRows(t, "panes", len(panes), err)
+	agents, err := New(runnerFor(fixture(t, "agent_list.json"), nil)).Agents(ctx)
+	mustHaveRows(t, "agents", len(agents), err)
+	tabs, err := New(runnerFor(fixture(t, "tab_list.json"), nil)).Tabs(ctx, "w1")
+	mustHaveRows(t, "tabs", len(tabs), err)
+	pane, err := New(runnerFor(fixture(t, "pane_get.json"), nil)).PaneGet(ctx, "w1:p1")
+	mustHaveRows(t, "pane_get", len(pane.PaneID), err)
+	tab, err := New(runnerFor(fixture(t, "tab_get.json"), nil)).TabGet(ctx, "w1:t2")
+	mustHaveRows(t, "tab_get", len(tab.TabID), err)
 
 	wsIDs, tabIDs, paneByID := map[string]bool{}, map[string]bool{}, map[string]Pane{}
 	for _, w := range ws {

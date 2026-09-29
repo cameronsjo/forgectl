@@ -71,6 +71,32 @@ func TestUnparsableStderrStaysTheWrappedCommandError(t *testing.T) {
 	}
 }
 
+func TestErrorUnwrapsToTheCommandError(t *testing.T) {
+	ce := &exec.CommandError{Name: Binary, ExitCode: 1, Stderr: `{"error":{"code":"tab_not_found","message":"m"}}`}
+	_, err := New(runnerFor("", ce)).Workspaces(context.Background())
+	var got *exec.CommandError
+	if !errors.As(err, &got) || got != ce {
+		t.Fatalf("errors.As(*exec.CommandError) = %v, want the original", got)
+	}
+}
+
+func TestEnvelopeFromAKilledChildIsNotHerdrsRefusal(t *testing.T) {
+	// The context deadline killed herdr after it wrote a complete error object.
+	// That is a timeout, not a herdr refusal, and callers must be able to tell.
+	ce := &exec.CommandError{
+		Name: Binary, ExitCode: -1, Err: context.DeadlineExceeded,
+		Stderr: `{"error":{"code":"workspace_not_found","message":"m"}}`,
+	}
+	_, err := New(runnerFor("", ce)).Workspaces(context.Background())
+	var he *Error
+	if errors.As(err, &he) {
+		t.Fatalf("got *Error %+v for a killed child", he)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want it to still match context.DeadlineExceeded", err)
+	}
+}
+
 func TestRunnerErrorWithoutCommandErrorIsWrappedNotSwallowed(t *testing.T) {
 	sentinel := errors.New("herdr not found on PATH")
 	_, err := New(runnerFor("", sentinel)).Workspaces(context.Background())

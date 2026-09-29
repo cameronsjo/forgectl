@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // Declined is returned when herdr answers a `tab move` with exit 0 and
@@ -116,48 +117,46 @@ func (c *Client) MoveTab(ctx context.Context, tabID string, to MoveTarget) (Move
 		return MoveResult{}, err
 	}
 	if mr := r.MoveResult; mr != nil {
-		if mr.Changed != nil && !*mr.Changed {
+		switch {
+		case mr.Changed == nil:
+			return MoveResult{}, fmt.Errorf("herdr %s: move_result has no \"changed\" field", strings.Join(args, " "))
+		case !*mr.Changed:
 			return MoveResult{}, &Declined{TabID: tabID, Reason: mr.Reason}
+		case mr.TabID == "" || mr.WorkspaceID == "":
+			return MoveResult{}, fmt.Errorf("herdr %s: move_result names no tab or workspace", strings.Join(args, " "))
 		}
 		return MoveResult{TabID: mr.TabID, WorkspaceID: mr.WorkspaceID, Tabs: r.Tabs}, nil
 	}
-	res := MoveResult{TabID: tabID, Tabs: r.Tabs}
+	// No move_result. Only an index move is measured to reply that way; for a
+	// move between workspaces the passed-in id would be stale, so fail closed.
+	if to.mode != modeIndex {
+		return MoveResult{}, fmt.Errorf("herdr %s: reply has no move_result", strings.Join(args, " "))
+	}
 	for _, t := range r.Tabs {
 		if t.TabID == tabID {
-			res.WorkspaceID = t.WorkspaceID
+			return MoveResult{TabID: tabID, WorkspaceID: t.WorkspaceID, Tabs: r.Tabs}, nil
 		}
 	}
-	return res, nil
+	return MoveResult{}, fmt.Errorf("herdr %s: tab is not in the reply's tab list", strings.Join(args, " "))
 }
 
 // MoveWorkspace reorders a workspace to index. The reply (the workspace list)
 // is not decoded; only failure is reported.
 func (c *Client) MoveWorkspace(ctx context.Context, workspaceID string, index int) error {
-	if err := checkID("workspace id", workspaceID); err != nil {
-		return err
-	}
 	if index < 0 {
 		return fmt.Errorf("herdr: negative workspace index %d", index)
 	}
-	_, err := c.run(ctx, "workspace", "move", workspaceID, "--index", strconv.Itoa(index))
-	return err
+	return c.act(ctx, "workspace id", workspaceID, "workspace", "move", workspaceID, "--index", strconv.Itoa(index))
 }
 
-// FocusWorkspace switches the UI to a workspace.
+// FocusWorkspace switches the UI to a workspace. The reply is not decoded.
 func (c *Client) FocusWorkspace(ctx context.Context, workspaceID string) error {
-	if err := checkID("workspace id", workspaceID); err != nil {
-		return err
-	}
-	_, err := c.run(ctx, "workspace", "focus", workspaceID)
-	return err
+	return c.act(ctx, "workspace id", workspaceID, "workspace", "focus", workspaceID)
 }
 
 // FocusTab switches the UI to a tab. It is the finest focus grain herdr
 // offers by id: `pane focus` is directional only, so there is no FocusPane.
+// The reply is not decoded.
 func (c *Client) FocusTab(ctx context.Context, tabID string) error {
-	if err := checkID("tab id", tabID); err != nil {
-		return err
-	}
-	_, err := c.run(ctx, "tab", "focus", tabID)
-	return err
+	return c.act(ctx, "tab id", tabID, "tab", "focus", tabID)
 }
