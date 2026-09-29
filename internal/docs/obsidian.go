@@ -9,6 +9,7 @@ import (
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
+	extast "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/renderer"
 	"github.com/yuin/goldmark/text"
@@ -458,9 +459,11 @@ func (commentBlockParser) CanAcceptIndentedLine() bool { return false }
 // only when the marker ends the block's last line, follows whitespace or
 // starts the line ("r^2" is text), leaves the block with other content of
 // any kind, and sits wholly in the block's trailing text. Anything else,
-// such as a heading (whose id is its slug), a standalone "^id" block, or a
-// marker under inline markup, keeps its text and gets no id: its link
-// still opens the note, at the top.
+// such as a heading (whose id is its slug), any other standalone "^id"
+// block, or a marker under inline markup, keeps its text and gets no id:
+// its link still opens the note, at the top. The one standalone form it
+// takes is Obsidian's "^id" line after a list, table or quote
+// (standaloneBlockID), which gives its id to that block.
 type blockIDTransformer struct{}
 
 func (blockIDTransformer) Transform(doc *ast.Document, reader text.Reader, _ parser.Context) {
@@ -478,6 +481,11 @@ func (blockIDTransformer) Transform(doc *ast.Document, reader text.Reader, _ par
 		return ast.WalkContinue, nil
 	})
 	for _, b := range blocks {
+		if prev, id, ok := standaloneBlockID(b, source); ok {
+			prev.SetAttributeString("id", []byte(blockAnchor(id)))
+			b.Parent().RemoveChild(b.Parent(), b)
+			continue
+		}
 		target := blockIDTarget(b, source)
 		if target == nil {
 			continue
@@ -489,6 +497,37 @@ func (blockIDTransformer) Transform(doc *ast.Document, reader text.Reader, _ par
 			target.SetAttributeString("id", []byte(blockAnchor(id)))
 		}
 	}
+}
+
+// standaloneBlockID reports whether paragraph b is a standalone "^id"
+// line that Obsidian attaches to the block before it: b holds nothing but
+// the marker, and its previous sibling is a list, a table or a blockquote
+// (a callout included) that has no id yet. It returns that block and the
+// id. It changes nothing; the caller moves the id and drops b. A "^id"
+// paragraph after anything else keeps its text, as before.
+func standaloneBlockID(b ast.Node, source []byte) (ast.Node, string, bool) {
+	if b.Kind() != ast.KindParagraph || b.Lines().Len() != 1 {
+		return nil, "", false
+	}
+	seg := b.Lines().At(0)
+	line := bytes.TrimSpace(seg.Value(source))
+	m := blockIDPattern.FindSubmatchIndex(line)
+	if m == nil || m[0] != 0 {
+		return nil, "", false
+	}
+	prev := b.PreviousSibling()
+	if prev == nil {
+		return nil, "", false
+	}
+	switch prev.Kind() {
+	case ast.KindList, ast.KindBlockquote, extast.KindTable:
+	default:
+		return nil, "", false
+	}
+	if _, taken := prev.AttributeString("id"); taken {
+		return nil, "", false
+	}
+	return prev, string(line[m[2]:m[3]]), true
 }
 
 // blockAnchor is the id a block with Obsidian block id id renders under:
