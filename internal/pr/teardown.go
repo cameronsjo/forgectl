@@ -170,9 +170,9 @@ func (c *Client) teardownLocked(ctx context.Context, path string) error {
 // arms: the row is the only pointer left to a clean room once the record is
 // gone.
 //
-// A live teardown whose tmux budget is already spent is SKIPPED here, with the
-// other refusals and before the intent row: tmux stopped answering earlier in
-// the same sweep, so asking again would only spend the lock hold on a call
+// A live teardown whose tmux budget is exhausted — a tmux call already timed
+// out earlier in the same sweep — is SKIPPED here, with the other refusals and
+// before the intent row: asking again would only spend the lock hold on a call
 // that will not return, and the record, window and workspace are all left
 // exactly as they were.
 func (c *Client) auditedTeardownLocked(ctx context.Context, verb, path string, budget *tmuxBudget) error {
@@ -622,8 +622,8 @@ var ErrWindowKillTimedOut = errors.New("review window kill timed out (tmux unres
 var ErrRecordNotParked = errors.New("the record could not be parked in needs-repair")
 
 // ErrTmuxBudgetSpent is what a sweep returns for a live session it did not
-// attempt: tmux already failed to answer within the sweep's shared budget, so
-// the session was left exactly as it was — record, window and workspace.
+// attempt: an earlier tmux call in the same sweep already timed out, so the
+// session was left exactly as it was — record, window and workspace.
 var ErrTmuxBudgetSpent = errors.New("skipped: tmux stopped answering earlier in this sweep")
 
 // windowKillTimeoutReason is the needs-repair reason such a record carries,
@@ -803,11 +803,13 @@ func (c *Client) discard(ctx context.Context, sess Session, budget *tmuxBudget) 
 // session's outcome, so a caller can describe each failure rather than only
 // the first (forgectl#666).
 //
-// Every live teardown in the sweep draws on ONE tmux budget (forgectl#648), so
-// a hung tmux holds the lock for one lockedTmuxBudget rather than one per
-// session. Once it is spent, the remaining LIVE sessions are skipped with
-// ErrTmuxBudgetSpent and left untouched; stale and record-only sessions never
-// call tmux, so the sweep still settles them.
+// Every live teardown in the sweep gets its own full lockedTmuxBudget, but the
+// sweep shares ONE tmuxBudget to notice an unresponsive tmux (forgectl#648):
+// once any teardown's tmux work actually times out, the remaining LIVE
+// sessions are skipped with ErrTmuxBudgetSpent and left untouched, so a hung
+// tmux holds the lock for one budget rather than one per session. A slow but
+// answering tmux never trips it. Stale and record-only sessions never call
+// tmux, so the sweep still settles them.
 func (c *Client) Cleanup(ctx context.Context, date string) (CleanupReport, error) {
 	var report CleanupReport
 	// One lock hold for the whole sweep: the lock is non-reentrant, so the

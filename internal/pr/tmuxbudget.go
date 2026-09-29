@@ -21,40 +21,37 @@ import (
 // up to 500 ms on top for that. It is a var only so a test can shrink it.
 var lockedTmuxBudget = 3 * time.Second
 
-// tmuxBudget is a pool of tmux time that one or more calls draw from. Each
-// bound() hands out a context limited to what is LEFT, and its done func
-// charges the time actually spent. Only tmux time is charged, never the work a
-// caller does between calls, so a long sweep of healthy calls does not run
-// dry on wall-clock time it spent elsewhere.
+// tmuxBudget hands every bounded unit of tmux work — one teardown's
+// resolve-and-kill, one liveness or occupancy read — its OWN full
+// lockedTmuxBudget deadline, and remembers whether any of them was cut off.
+// It detects an UNRESPONSIVE tmux; it does not cap total time. A slow but
+// healthy tmux therefore never runs a sweep down: every unit that answers
+// inside the bound leaves the next one a full bound of its own.
 //
-// A single call site takes a fresh budget through boundedTmux. A sweep that
-// makes tmux calls in a loop under one lock hold (Cleanup) shares ONE budget
-// across the whole loop, so a hung server costs the sweep one budget rather
-// than one per iteration.
+// A single call site takes a fresh one through boundedTmux. A sweep that makes
+// tmux calls in a loop under one lock hold (Cleanup) shares ONE across the
+// loop so that, once a call has actually timed out, it stops asking tmux for
+// the rest of the sweep. The lock hold is then at most the cost of the
+// sessions before the first timeout plus that one timeout, rather than one
+// timeout per session.
 //
 // Not safe for concurrent use; every holder is a single goroutine under the
 // lifecycle lock.
 type tmuxBudget struct {
-	remaining time.Duration
 	// cutOff is set once any bounded call ended with its context done — the
-	// budget ran out, or the caller cancelled. Either way tmux did not answer
+	// deadline passed, or the caller cancelled. Either way tmux did not answer
 	// in time, and a sweep stops asking it.
 	cutOff bool
 }
 
-func newTmuxBudget() *tmuxBudget { return &tmuxBudget{remaining: lockedTmuxBudget} }
+func newTmuxBudget() *tmuxBudget { return &tmuxBudget{} }
 
-// bound returns ctx limited to the remaining budget. The returned done func
-// must be called once the tmux work is over: it charges the elapsed time and
-// releases the context.
+// bound returns ctx limited to one full lockedTmuxBudget. The returned done
+// func must be called once the tmux work is over: it records whether the
+// deadline (or the caller) cut the work off, and releases the context.
 func (b *tmuxBudget) bound(ctx context.Context) (context.Context, func()) {
-	start := time.Now()
-	bctx, cancel := context.WithTimeout(ctx, b.remaining)
+	bctx, cancel := context.WithTimeout(ctx, lockedTmuxBudget)
 	return bctx, func() {
-		b.remaining -= time.Since(start)
-		if b.remaining < 0 {
-			b.remaining = 0
-		}
 		if bctx.Err() != nil {
 			b.cutOff = true
 		}
@@ -62,9 +59,9 @@ func (b *tmuxBudget) bound(ctx context.Context) (context.Context, func()) {
 	}
 }
 
-// exhausted reports whether a caller should stop asking tmux at all: a call
-// was already cut off, or no time is left to give the next one.
-func (b *tmuxBudget) exhausted() bool { return b.cutOff || b.remaining <= 0 }
+// exhausted reports whether a caller should stop asking tmux at all: an
+// earlier call under this budget was already cut off.
+func (b *tmuxBudget) exhausted() bool { return b.cutOff }
 
 // boundedTmux bounds one call site's tmux work with a fresh lockedTmuxBudget.
 func boundedTmux(ctx context.Context) (context.Context, func()) {

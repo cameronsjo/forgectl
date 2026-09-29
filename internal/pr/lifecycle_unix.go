@@ -65,13 +65,13 @@ func (e *lockBusyError) Error() string {
 //     audit log by rename under this lock. The carve-out covers local removal
 //     only; it never licenses the network or dispatch work above.
 //     SECOND CARVE-OUT: tmux, bounded rather than excluded. Every tmux call
-//     made under the hold draws on a lockedTmuxBudget (tmuxbudget.go), so a
-//     hung tmux server holds the lock for the budget plus exec's
+//     made under the hold is bounded by a lockedTmuxBudget (tmuxbudget.go), so
+//     a hung tmux server holds the lock for the budget plus exec's
 //     pipeWaitDelay (500 ms) per site, not indefinitely. The sites are
 //     teardown's window kill (killReviewWindow, through resolveReviewWindow),
-//     reached from `pr teardown`, from `pr cleanup` (which shares ONE budget
-//     across its whole sweep and skips the remaining live sessions once it
-//     is spent), and from `pr repair --rollback` and `--forget-if-absent`;
+//     reached from `pr teardown`, from `pr cleanup` (where each teardown gets
+//     a full budget and the first actual timeout skips the remaining live
+//     sessions), and from `pr repair --rollback` and `--forget-if-absent`;
 //     the occupancy read (reviewWindowSnapshot) in
 //     admit, reserve, PrepareMany's batch reserve, and drain's claim; the
 //     liveness read (WindowsLive, WindowLive) in `pr repair`'s inspect,

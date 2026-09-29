@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // TestPrCleanup_NamesEverySessionItDidNotDiscard is forgectl#666. A sweep
@@ -91,5 +93,30 @@ func TestPrCleanup_NamesEverySessionItDidNotDiscard(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "cleaned up sessions") {
 		t.Errorf("stdout = %q, must not report success on a failed sweep", out.String())
+	}
+}
+
+// TestCleanupFailureLine_AmbiguousWindowSaysWhetherTheRecordWasParked: a
+// teardown refused because two windows carry the review's name parks the
+// record like a timeout does, and its line must say so, or that it could not.
+func TestCleanupFailureLine_AmbiguousWindowSaysWhetherTheRecordWasParked(t *testing.T) {
+	refused := fmt.Errorf("refusing to tear down o/r#1, nothing was removed: %w", tmux.ErrAmbiguousWindow)
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"parked", refused, "the record is parked as needs-repair"},
+		{"not parked", fmt.Errorf("%w; %w", refused, pr.ErrRecordNotParked), "could not be parked"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line := cleanupFailureLine(pr.CleanupFailure{Path: "/s/o-r-1-1.json", Err: tc.err})
+			if !strings.Contains(line, "more than one tmux window") || !strings.Contains(line, tc.want) {
+				t.Errorf("line = %q, want the duplicate-name wording and %q", line, tc.want)
+			}
+			if tc.name == "not parked" && strings.Contains(line, "is parked") {
+				t.Errorf("line = %q claims a park that never happened", line)
+			}
+		})
 	}
 }

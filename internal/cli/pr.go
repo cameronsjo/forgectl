@@ -20,6 +20,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // prAgentEnv is the environment override for the review agent, honored when
@@ -639,6 +640,14 @@ func cleanupFailureLine(f pr.CleanupFailure) string {
 			termsafe.QuotePathIfUnsafe(f.Path))
 	case errors.Is(f.Err, pr.ErrWindowKillTimedOut):
 		return windowKillTimeoutNote(f.Path, !errors.Is(f.Err, pr.ErrRecordNotParked))
+	case errors.Is(f.Err, tmux.ErrAmbiguousWindow):
+		state := "the record is parked as needs-repair"
+		if errors.Is(f.Err, pr.ErrRecordNotParked) {
+			state = "the record could not be parked as needs-repair and was left as it was"
+		}
+		return fmt.Sprintf("refused %s: more than one tmux window carries its review's name, so neither was killed: "+
+			"nothing was removed and %s. Close the window that is not the review, then run 'forgectl pr teardown' "+
+			"again, or see 'forgectl pr repair'", termsafe.QuotePathIfUnsafe(f.Path), state)
 	default:
 		return fmt.Sprintf("failed %s: %s", termsafe.QuotePathIfUnsafe(f.Path), termsafe.SafeLine(f.Err.Error()))
 	}
