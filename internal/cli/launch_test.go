@@ -57,12 +57,12 @@ func TestMain(m *testing.M) {
 // under parent and prepends it to PATH. Only their presence is probed.
 func stubSandboxDeps(parent string) error {
 	bin := filepath.Join(parent, "sandbox-deps")
-	if err := os.Mkdir(bin, 0o700); err != nil {
+	if err := os.Mkdir(filepath.Clean(bin), 0o700); err != nil { //nolint:gosec // G703: bin is under the test's own MkdirTemp dir
 		return err
 	}
 	for _, name := range []string{"bwrap", "socat"} {
 		path := filepath.Join(bin, name)
-		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Clean(path), []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil { //nolint:gosec // G703: path is under the test's own MkdirTemp dir
 			return err
 		}
 		// G302: an executable stub needs its execute bit; 0700 is owner-only.
