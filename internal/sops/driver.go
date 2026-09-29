@@ -52,9 +52,9 @@ type Client struct {
 //
 // It takes SensitiveRunner rather than Runner deliberately. sops' stderr
 // quotes the offending line of a document it failed to parse, and that line is
-// `key: '<the secret>'`; Runner logs stderr at Error level, which survives any
-// log-level setting and can be pointed at a file, and retains it on an error
-// fang renders. This seam can render neither.
+// `key: '<the secret>'`; Runner logs stderr at Error level, recorded at every
+// enabled log_level (log_level defaults to off) and can be pointed at a file,
+// and retains it on an error fang renders. This seam can render neither.
 func NewClient(runner exec.SensitiveRunner) *Client {
 	return &Client{runner: runner}
 }

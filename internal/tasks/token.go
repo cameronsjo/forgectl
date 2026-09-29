@@ -52,15 +52,9 @@ const keychainTimeout = 15 * time.Second
 // spelled differently.
 var tokenShape = regexp.MustCompile(`^tk_[0-9a-fA-F]{40,}$`)
 
-// Token is an opaque bearer credential. The payload lives behind a closure —
-// not a plain string field — for the same reason internal/exec.SecretArg's
-// does: fmt, slog's TextHandler, and encoding/json all reach a value through
-// reflection only when it is NOT held behind an unexported field of a struct
-// with no redacting method set of its own, and a func value has nothing for
-// reflection to print but an address. Holding this type in an EXPORTED field
-// of another struct with no Format/MarshalJSON of its own would still print
-// verbatim under %+v — callers must hold a Token privately or route it
-// through Header(), never expose it on a public struct field.
+// Token is an opaque bearer credential. The payload lives behind a closure,
+// not a plain string field, and the redacting methods below cover the Token's
+// own formatting. Header() is the only way to read the value.
 type Token struct {
 	reveal func() string
 }
@@ -231,8 +225,9 @@ func ReadToken(ctx context.Context, runner exec.Runner, service string) (Token, 
 		// retains the child's stdout in its exported Output field, and this
 		// child's stdout is the bearer token — a nonzero exit does not mean
 		// stdout was empty. Wrapping it to "improve the error context" would
-		// put the credential into any error string, log line, or %+v that
-		// ever renders this error. Do not add %w here.
+		// put it where any code that holds the returned error, directly or
+		// through errors.As, can read or dump it, so the error is dropped
+		// whole and never wrapped, logged or rendered. Do not add %w here.
 		return Token{}, fmt.Errorf("%w: service %q", ErrTokenNotFound, service)
 	}
 	value := strings.TrimSpace(out)
