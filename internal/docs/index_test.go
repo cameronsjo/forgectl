@@ -341,7 +341,7 @@ func TestNewIndex_UnreadableSubdir_SkippedSiblingsIndexed(t *testing.T) {
 	if err := os.Chmod(locked, 0o000); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) }) //nolint:gosec // G302: a directory needs 0700; 0600 makes it non-traversable
 
 	idx, err := NewIndex([]string{dir})
 	if err != nil {
@@ -361,7 +361,7 @@ func TestNewIndex_UnreadableRoot_StillErrors(t *testing.T) {
 	if err := os.Chmod(dir, 0o000); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // G302: a directory needs 0700; 0600 makes it non-traversable
 
 	if _, err := NewIndex([]string{dir}); err == nil {
 		t.Fatal("an unreadable root must fail the build")
