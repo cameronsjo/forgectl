@@ -432,6 +432,81 @@ func TestListCmd_DegradationNotes_AppearOnStderrNotStdout(t *testing.T) {
 	}
 }
 
+// degradedGitHubRunFunc fails every gh call (a degraded GitHub host) while tea
+// serves one Gitea row.
+func degradedGitHubRunFunc(name string, args []string) (string, error) {
+	switch name {
+	case "gh":
+		return "", errors.New("gh: not authenticated")
+	case "tea":
+		return "owner\tname\ttype\tssh\n" +
+			"cameron\thomeclaw\tsource\tssh://git@git.example.test:222/cameron/homeclaw.git\n", nil
+	}
+	return "", nil
+}
+
+// TestListCmd_Strict_DegradedHostExitsOneAfterWritingOutput is the #413
+// degradation signal: with --strict, a partial inventory exits 1, and the rows
+// that did load are still on stdout as a valid JSON array.
+func TestListCmd_Strict_DegradedHostExitsOneAfterWritingOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"json", []string{"--json", "--strict"}},
+		{"table", []string{"--strict"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := listFixture(t, degradedGitHubRunFunc)
+			cmd := newProjectsListCmd(client)
+			var stdout, stderr bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			cmd.SetArgs(tc.args)
+
+			err := cmd.ExecuteContext(context.Background())
+			if err == nil {
+				t.Fatal("--strict with a degraded host returned nil, want an error")
+			}
+			if got := ExitCode(err); got != 1 {
+				t.Fatalf("ExitCode = %d, want 1", got)
+			}
+			if !strings.Contains(stdout.String(), "homeclaw") {
+				t.Fatalf("stdout = %q, want the rows that did load written before the exit", stdout.String())
+			}
+			if tc.name == "json" {
+				var repos []projects.Repo
+				if err := json.Unmarshal(stdout.Bytes(), &repos); err != nil {
+					t.Fatalf("stdout is not valid JSON under --strict: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// TestListCmd_Strict_CleanInventoryExitsZero: --strict is silent when no host
+// degraded, and the default (no --strict) stays exit 0 on a degraded host.
+func TestListCmd_Strict_CleanInventoryExitsZero(t *testing.T) {
+	ghJSON := `[{"name":"forgectl","sshUrl":"git@github.com:cameronsjo/forgectl.git","isPrivate":false}]`
+	client := listFixture(t, twoHostRunFunc(ghJSON, "owner\tname\ttype\tssh\n"))
+	cmd := newProjectsListCmd(client)
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--json", "--strict"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("--strict on a clean inventory: %v", err)
+	}
+
+	client = listFixture(t, degradedGitHubRunFunc)
+	cmd = newProjectsListCmd(client)
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("default (no --strict) on a degraded host: %v, want exit 0 unchanged", err)
+	}
+}
+
 // hostileRunes are the three shapes a note must never carry to a terminal: a
 // CSI sequence (here "erase display" + "cursor home", which blanks the screen
 // and repaints from the top), a bare carriage return (overwrites the line just

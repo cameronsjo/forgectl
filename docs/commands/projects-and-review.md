@@ -5,6 +5,7 @@
 ```sh
 forgectl projects list [query]           # list all projects: local clones + your GitHub repos + your Gitea repos
 forgectl projects list --json            # machine-readable JSON (safe to pipe; degradation notes go to stderr)
+forgectl projects list --json --strict   # same, but exit 1 when any host degraded (output still written)
 forgectl projects list --host github.com   # filter to one hostname (or "local")
 forgectl projects list --host git.example.com forge  # host filter + name substring
 forgectl projects pick [query]           # picker with both descriptors TTY; otherwise sanitized candidates on stdout + exit 1 (aliases: p, open)
@@ -28,7 +29,7 @@ candidate's `sshUrl` from `projects list --json` for an exact target, or rerun
 interactively when it has none. Project display rows are not universal command
 arguments.
 
-`projects` builds a unified inventory across local clones, GitHub, and whichever Gitea instance `tea` is logged into. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean.
+`projects` builds a unified inventory across local clones, GitHub, and whichever Gitea instance `tea` is logged into. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean. A degraded host still exits 0 by default, so a partial inventory reads the same as a small account to a script that only checks the exit code; pass `--strict` to exit 1 whenever any host produced a degradation note. The records that did load are written to stdout first either way.
 
 ## On-disk layout
 
