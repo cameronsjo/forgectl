@@ -79,7 +79,7 @@ func TestChrome_DocContentCannotCaptureOrForgeAHook(t *testing.T) {
 
 func chromeRead(t *testing.T, rel string) string {
 	t.Helper()
-	b, err := os.ReadFile(rel)
+	b, err := os.ReadFile(filepath.Clean(rel))
 	if err != nil {
 		t.Fatalf("read %s: %v", rel, err)
 	}
