@@ -36,6 +36,16 @@ package pr
 //       unix-only, like the lock itself)
 //   [x] An intent row that cannot be written refuses: the dir survives and
 //       the error is returned
+//   [x] A removal that fails completes its row as failed (not applied), is
+//       not reported removed, and returns the error (findingsRemoveAll seam —
+//       a chmod failure is invisible to root)
+//   [x] Stop-on-first-error: [ok, fail, ok] returns only the first path, the
+//       third dir survives with no row
+//   [x] A ctx cancelled while another holder has the lock returns the ctx
+//       error with no row and the dir intact (findings_lock_unix_test.go)
+//
+// Tests that swap the findingsRemoveAll seam (failRemovalOf) must not call
+// t.Parallel.
 //
 // Every client here carries its own sessions dir (findingsClient), so no test
 // appends to the real ~/.config/forgectl/pr-sessions audit log.
@@ -44,6 +54,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -387,6 +398,82 @@ func TestFindingsRemove_IntentWriteFailureRefuses(t *testing.T) {
 	}
 	if _, serr := os.Stat(target); serr != nil {
 		t.Errorf("dir %q was removed with no intent row written: %v", target, serr)
+	}
+}
+
+func TestFindingsRemove_RemoveFailureCompletesAsFailed(t *testing.T) {
+	dir := t.TempDir()
+	c := findingsClient(t, dir)
+	target := filepath.Join(dir, findingsDirPrefix+"stuck")
+	mustMkdir(t, target)
+	failRemovalOf(t, target)
+
+	removed, err := c.FindingsRemove(t.Context(), []string{target})
+	if err == nil {
+		t.Fatal("FindingsRemove succeeded though the removal failed, want the error")
+	}
+	if len(removed) != 0 {
+		t.Errorf("removed = %v, want a failed removal not reported as removed", removed)
+	}
+	rows := auditRows(t, c)
+	if len(rows) != 2 {
+		t.Fatalf("audit rows = %d, want intent + completion: %+v", len(rows), rows)
+	}
+	if rows[0].ID == "" || rows[0].ID != rows[1].ID {
+		t.Errorf("row IDs = %q, %q, want one shared non-empty ID", rows[0].ID, rows[1].ID)
+	}
+	if rows[1].Outcome != repairOutcomeFailed || rows[1].Error == "" {
+		t.Errorf("completion = outcome %q error %q, want %q with the cause", rows[1].Outcome, rows[1].Error, repairOutcomeFailed)
+	}
+	if _, serr := os.Stat(target); serr != nil {
+		t.Errorf("dir %q is gone, but the seam refused its removal: %v", target, serr)
+	}
+}
+
+func TestFindingsRemove_StopsAtFirstErrorReturningRemovedSoFar(t *testing.T) {
+	dir := t.TempDir()
+	c := findingsClient(t, dir)
+	first := filepath.Join(dir, findingsDirPrefix+"1-ok")
+	second := filepath.Join(dir, findingsDirPrefix+"2-fail")
+	third := filepath.Join(dir, findingsDirPrefix+"3-untouched")
+	for _, p := range []string{first, second, third} {
+		mustMkdir(t, p)
+	}
+	failRemovalOf(t, second)
+
+	removed, err := c.FindingsRemove(t.Context(), []string{first, second, third})
+	if err == nil {
+		t.Fatal("FindingsRemove returned no error, want the second path's failure")
+	}
+	if len(removed) != 1 || removed[0] != first {
+		t.Errorf("removed = %v, want only %q", removed, first)
+	}
+	if _, serr := os.Stat(third); serr != nil {
+		t.Errorf("%q was touched after the run stopped: %v", third, serr)
+	}
+	rows := auditRows(t, c)
+	if len(rows) != 4 {
+		t.Fatalf("audit rows = %d, want two pairs (first applied, second failed): %+v", len(rows), rows)
+	}
+	if rows[1].Outcome != repairOutcomeApplied || rows[1].RecordPath != first {
+		t.Errorf("first completion = %q for %q, want applied for %q", rows[1].Outcome, rows[1].RecordPath, first)
+	}
+	if rows[3].Outcome != repairOutcomeFailed || rows[3].RecordPath != second {
+		t.Errorf("second completion = %q for %q, want failed for %q", rows[3].Outcome, rows[3].RecordPath, second)
+	}
+}
+
+// failRemovalOf makes findingsRemoveAll refuse exactly path and remove
+// everything else normally, restoring the seam when the test ends.
+func failRemovalOf(t *testing.T, path string) {
+	t.Helper()
+	orig := findingsRemoveAll
+	t.Cleanup(func() { findingsRemoveAll = orig })
+	findingsRemoveAll = func(p string) error {
+		if p == path {
+			return &os.PathError{Op: "unlinkat", Path: p, Err: syscall.EBUSY}
+		}
+		return orig(p)
 	}
 }
 

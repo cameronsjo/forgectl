@@ -192,7 +192,7 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, full string) (boo
 		if err != nil {
 			return fmt.Errorf("remove findings dir %s: %w", full, err)
 		}
-		rerr := os.RemoveAll(full)
+		rerr := findingsRemoveAll(full)
 		c.completeRepairRow(rowID, row, rerr)
 		if rerr != nil {
 			slog.Error("Failed to remove findings dir.", "path", full, "error", rerr)
@@ -207,6 +207,12 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, full string) (boo
 	}
 	return removed, nil
 }
+
+// findingsRemoveAll is a seam over os.RemoveAll so a test can make one removal
+// fail and prove the completion row records it as failed — a chmod-based
+// failure is ignored by root, which is how this suite runs in some containers.
+// Tests that swap it must not call t.Parallel.
+var findingsRemoveAll = os.RemoveAll
 
 // findingsDirSize sums the size of every regular file under root,
 // recursively — a best-effort accounting for the `pr findings list` report
