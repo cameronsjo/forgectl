@@ -536,7 +536,9 @@ var renderMu sync.Mutex
 // parsed values with every fragment HTML-escaped, which is why prepending it
 // after sanitization does not reopen the XSS door the sanitizer closes: the
 // document author's bytes only ever reach it through html.EscapeString.
-// Building it post-sanitizer keeps the bluemonday allowlist untouched. (An
+// Building it post-sanitizer keeps the bluemonday allowlist untouched. The
+// same holds for the fixed skip-content banner (skipContentBanner) placed
+// above both when an unclosed skip-content element swallowed the tail. (An
 // earlier version of this comment said details/summary stay denied for
 // document-authored HTML; UGCPolicy has always allowed them, with only the
 // `open` attribute on <details>. TestRender_DetailsAllowedWithOpenOnly pins
@@ -600,8 +602,17 @@ func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (strin
 	if err != nil {
 		return "", nil, fmt.Errorf("render markdown: %w", err)
 	}
-	body := balanceFragment(string(sanitizer.SanitizeBytes(dropDuplicateSVGNamespaces(buf.Bytes()))))
-	return frontmatterHTML(ctx) + transformCallouts(body, kind), hidden, nil
+	input := dropDuplicateSVGNamespaces(buf.Bytes())
+	body := balanceFragment(string(sanitizer.SanitizeBytes(input)))
+	// An unclosed skip-content element makes the sanitizer drop the rest of
+	// the document (forgectl#622). The sanitizer is left exactly as it is,
+	// because that skip set is what keeps denied SVG containers' children
+	// inert; the reader is told instead, with a fixed banner.
+	notice := ""
+	if name, ok := unclosedSkipContent(input); ok {
+		notice = skipContentBanner(name)
+	}
+	return notice + frontmatterHTML(ctx) + transformCallouts(body, kind), hidden, nil
 }
 
 // hiddenComments returns the source range of every %% comment in a parsed
