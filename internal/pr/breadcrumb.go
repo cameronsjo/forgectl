@@ -487,7 +487,8 @@ func validateBreadcrumbRecord(bc Breadcrumb) error {
 	// The pathname shape is a RECORD property (it constrains what the string
 	// can ever mean); whether that path exists is an actionability question.
 	if bc.Workspace != "" && !filepath.IsAbs(bc.Workspace) {
-		return fmt.Errorf("workspace %q must be an absolute path", bc.Workspace)
+		// Categorical (#658): bc.Workspace is read from disk.
+		return errors.New("workspace must be an absolute path")
 	}
 	return nil
 }
@@ -512,7 +513,8 @@ func validateLifecycleFields(bc Breadcrumb) error {
 		return fmt.Errorf("version %d record has no phase", breadcrumbVersion)
 	}
 	if !bc.Phase.valid() {
-		return fmt.Errorf("unknown phase %q", string(bc.Phase))
+		// Categorical (#658): bc.Phase is read from disk.
+		return errors.New("unknown phase")
 	}
 	if bc.Revision < 1 {
 		return fmt.Errorf("version %d record has no revision", breadcrumbVersion)
@@ -524,7 +526,8 @@ func validateLifecycleFields(bc Breadcrumb) error {
 		return fmt.Errorf("windowId is only valid on an active record (phase is %q)", string(bc.Phase))
 	}
 	if bc.WindowID != "" && !validWindowID(bc.WindowID) {
-		return fmt.Errorf("windowId %q is not a generation-qualified window identity", bc.WindowID)
+		// Categorical (#658): bc.WindowID is read from disk.
+		return errors.New("windowId is not a generation-qualified window identity")
 	}
 	if bc.Phase == PhaseNeedsRepair && bc.RepairReason == "" {
 		return fmt.Errorf("needs-repair record has no repairReason")

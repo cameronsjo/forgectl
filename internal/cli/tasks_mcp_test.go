@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -213,6 +214,75 @@ func TestHasJSONRPCResult_RejectsAnErrorFrame(t *testing.T) {
 	for body, want := range cases {
 		if got := hasJSONRPCResult([]byte(body)); got != want {
 			t.Errorf("hasJSONRPCResult(%q) = %v, want %v", body, got, want)
+		}
+	}
+}
+
+// TestPingURL_NeverEchoesTheAddress: a --http value can carry credentials
+// (tok@127.0.0.1:3000 splits into host "tok@127.0.0.1", which net/http sends
+// as userinfo and prints unmasked), so pingURL refuses any host that is not an
+// IP or a plain hostname, and no refusal repeats the value (#658).
+func TestPingURL_NeverEchoesTheAddress(t *testing.T) {
+	for _, addr := range []string{
+		"SECRETTOK@127.0.0.1:3000",
+		"user:SECRETTOK@127.0.0.1:3000",
+		"SECRETTOK",
+		"127.0.0.1:SECRETTOK",
+		"SECRETTOK\x1b[2J:3000",
+		"[SECRETTOK%eth0]:3000",
+		"127.0.0.1:0",
+		"127.0.0.1:+3000",
+		"127.0.0.1:03000",
+	} {
+		got, err := pingURL(addr)
+		if err == nil {
+			t.Errorf("pingURL(%q) = %q with no error, want a refusal", addr, got)
+			continue
+		}
+		if strings.Contains(err.Error(), "SECRETTOK") || strings.Contains(err.Error(), "\x1b") {
+			t.Errorf("pingURL(%q) error %q echoes the address", addr, err)
+		}
+	}
+	if got, err := pingURL("tasks-mcp_1.internal:3000"); err != nil || got != "http://tasks-mcp_1.internal:3000/mcp" {
+		t.Errorf("pingURL(plain hostname) = %q, %v; want it accepted", got, err)
+	}
+}
+
+// TestRunMCPPing_UnreachableDoesNotEchoTheURL: net/http's *url.Error renders
+// the whole URL; the ping message names it only as pingURLLabel.
+func TestRunMCPPing_UnreachableDoesNotEchoTheURL(t *testing.T) {
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close() // nothing listens here now
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(io.Discard)
+	err = runMCPPing(cmd, addr)
+	if err == nil {
+		t.Fatal("--ping against a closed port = nil, want a failure")
+	}
+	if strings.Contains(err.Error(), "http://") || strings.Contains(err.Error(), "/mcp") {
+		t.Errorf("error %q echoes the probe URL", err)
+	}
+	if !strings.Contains(err.Error(), pingURLLabel) {
+		t.Errorf("error %q, want it to name %q", err, pingURLLabel)
+	}
+}
+
+// TestListenCause_DropsTheAddress: net's listen errors repeat the address,
+// which is the same --http value --ping refuses to print.
+func TestListenCause_DropsTheAddress(t *testing.T) {
+	for _, addr := range []string{"SECRETTOK:1:2", "[SECRETTOK:1"} {
+		_, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", addr)
+		if err == nil {
+			t.Fatalf("listen %q succeeded, want a failure", addr)
+		}
+		if got := listenCause(err).Error(); strings.Contains(got, "SECRETTOK") {
+			t.Errorf("listenCause(%v) = %q, echoes the address", err, got)
 		}
 	}
 }

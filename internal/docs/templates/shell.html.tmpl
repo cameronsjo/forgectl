@@ -304,7 +304,7 @@ main.surface-document:focus-visible { outline: var(--focus-width) solid var(--ac
         <input id="doc-filter" data-fc="doc-filter" type="search" placeholder="Filter docs…" autocomplete="off"/>
       </div>
       <p class="note sidenav-empty" id="filter-empty" data-fc="filter-empty" role="status" hidden></p>
-      <nav class="sidenav" aria-label="Indexed docs">
+      <nav class="sidenav" data-fc="sidenav" aria-label="Indexed docs">
         {{range .Groups}}
         <div class="sidenav__group">{{.Root}}</div>
         {{if .Tree}}
@@ -317,11 +317,11 @@ main.surface-document:focus-visible { outline: var(--focus-width) solid var(--ac
         {{end}}
       </nav>
     </aside>
-    <main id="doc-main" class="surface-document container container--lg">
+    <main id="doc-main" class="surface-document container container--lg" data-fc="doc-main">
       {{if .Outline}}
-      <details class="outline-inline"><summary>On this page</summary><nav aria-label="On this page">{{template "outlineItems" .Outline}}</nav></details>
+      <details class="outline-inline" data-fc="outline-inline"><summary>On this page</summary><nav aria-label="On this page">{{template "outlineItems" .Outline}}</nav></details>
       {{end}}
-      <div class="doc-body">
+      <div class="doc-body" data-fc="doc-body">
       {{if .Content}}{{.Content}}{{else if .Home}}{{if .Home.Recent}}
       <div class="home">
         <h1>Indexed docs</h1>
@@ -347,13 +347,13 @@ main.surface-document:focus-visible { outline: var(--focus-width) solid var(--ac
       </div>
     </main>
     {{if .Outline}}
-    <aside class="outline" aria-label="On this page">
+    <aside class="outline" data-fc="outline" aria-label="On this page">
       <div class="outline-h">On this page</div>
       {{template "outlineItems" .Outline}}
     </aside>
     {{end}}
   </div>
-  <footer class="statusbar" style="flex: none">
+  <footer class="statusbar" data-fc="statusbar" style="flex: none">
     <div class="status-item live-status" id="live-status" data-fc="live-status" role="status" title="serving · {{.Host}}"><span class="live-dot" aria-hidden="true"></span><span class="live-status__text">serving<span class="live-status__host"> · {{.Host}}</span></span></div>
     {{if .DocPath}}<div class="status-item opt">{{.DocPath}}</div>{{end}}
     {{if .Trust.Deprecated}}<div class="status-item"><span class="trust-badge trust-badge--deprecated">deprecated</span></div>{{end}}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/quarantine"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Session is one prepared (or planned, on dry-run) clean-room review. It
@@ -259,7 +260,10 @@ func (c *Client) viewPR(ctx context.Context, ref Ref) (ghPRView, error) {
 		"--repo", host+"/"+ref.Slug(),
 		"--json", "headRefName,headRefOid,headRepositoryOwner,headRepository")
 	if err != nil {
-		return ghPRView{}, fmt.Errorf("gh pr view %s: %w", ref.String(), err)
+		// Categorical (#658): gh's stderr is host-chosen text. ref passed
+		// ParseRef's charset, so it is safe to name.
+		slog.Error("Failed to view PR.", "ref", ref.String(), "error", err)
+		return ghPRView{}, fmt.Errorf("gh pr view %s: %w", ref.String(), termsafe.Categorical("gh failed", err))
 	}
 	var view ghPRView
 	if err := json.Unmarshal([]byte(out), &view); err != nil {

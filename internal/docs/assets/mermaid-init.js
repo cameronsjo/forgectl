@@ -93,6 +93,35 @@
   // useMaxWidth:true mermaid writes a percentage width that fights a transform,
   // so a zoomed diagram jitters as it rescales.
 
+  // The reader's scripts find chrome by data-fc (forgectl#617, #643), which
+  // holds only because a doc cannot plant one. The server's sanitizer strips
+  // every data-* attribute, but mermaid renders in the browser AFTER it, and
+  // mermaid's own DOMPurify pass keeps data-*: a classDiagram label, or a
+  // flowchart label under a doc's %%{init}%% htmlLabels:true, can emit
+  // <i data-fc="outline">. mermaid's dompurifyConfig cannot close that, since
+  // a doc's init directive can override it, so the rendered output is
+  // scrubbed here instead: inside every diagram, and inside the temporary
+  // container mermaid renders into (#dmermaid-N, appended to <body>).
+  var FORGED_HOOKS = 'pre.mermaid [data-fc], [id^="dmermaid-"] [data-fc]';
+
+  function scrubHooks() {
+    document.querySelectorAll(FORGED_HOOKS).forEach(function (el) {
+      el.removeAttribute("data-fc");
+    });
+  }
+
+  // Scrubbing only when mermaid.run resolves would leave the forged hooks up
+  // for the whole async render, and a filter keystroke or live-reload swap in
+  // that window would find them. A MutationObserver callback runs as a
+  // microtask straight after the insertion, before any event or network task
+  // can reach the reader's scripts. It watches <body> because the temporary
+  // container is outside the doc pane.
+  function watchForForgedHooks() {
+    new MutationObserver(scrubHooks).observe(document.body, {
+      childList: true, subtree: true, attributes: true, attributeFilter: ["data-fc"]
+    });
+  }
+
   function render() {
     mermaid.initialize(config());
     var blocks = document.querySelectorAll("pre.mermaid");
@@ -100,7 +129,8 @@
     // mermaid.run replaces each element's content with rendered SVG. Passing the
     // node list explicitly (rather than letting it scan) keeps it off anything
     // else on the page.
-    mermaid.run({ nodes: blocks }).catch(function (err) {
+    mermaid.run({ nodes: blocks }).then(scrubHooks, function (err) {
+      scrubHooks();
       console.warn("[forgectl docs] mermaid render failed", err);
     });
   }
@@ -173,6 +203,7 @@
     });
   }
 
+  watchForForgedHooks();
   stashSources();
   wrapEmbeds();
   render();

@@ -559,3 +559,27 @@ func TestWithinWorkspace_RejectsSymlinkEscape(t *testing.T) {
 		t.Error("expected WithinWorkspace to accept a target actually inside the workspace")
 	}
 }
+
+// TestSandbox_CloneFailure_DoesNotEchoURLOrStderr: the repo can be an https
+// URL carrying a token, and the CommandError renders it in its argv; git's
+// stderr relays the remote's sideband (#658).
+func TestSandbox_CloneFailure_DoesNotEchoURLOrStderr(t *testing.T) {
+	// Sandbox leaves its temp dir behind on a failed clone; keep it in ours.
+	t.Setenv("TMPDIR", t.TempDir())
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "", &exec.CommandError{Name: name, Args: args, Stderr: "remote: STDERRMARKER\x1b[2J", ExitCode: 128, Err: errors.New("exit status 128")}
+	}}
+	_, err := Sandbox(context.Background(), fake, "https://SECRETTOK@git.example.test/o/r.git", "", true)
+	if err == nil {
+		t.Fatal("want the clone failure")
+	}
+	for _, s := range []string{"SECRETTOK", "STDERRMARKER", "\x1b"} {
+		if strings.Contains(err.Error(), s) {
+			t.Fatalf("error %q echoes %q", err, s)
+		}
+	}
+	var cmdErr *exec.CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error %v lost the CommandError from its chain", err)
+	}
+}

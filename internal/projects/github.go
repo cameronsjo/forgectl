@@ -9,6 +9,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // ownerListResult is one owner's repo-list outcome, held only long enough to
@@ -88,7 +89,10 @@ func githubListOrg(ctx context.Context, run exec.Runner, org, host string) ([]Re
 		"--limit", "1000", "--json", "name,sshUrl,isPrivate")
 	if err != nil {
 		slog.Error("Failed to fetch GitHub repos.", "owner", org, "error", err)
-		return nil, err
+		// Categorical (#658): err is an *exec.CommandError whose text is gh's
+		// stderr, which the configured host chooses. The cause stays on the
+		// chain for errors.Is and in the log line above.
+		return nil, termsafe.Categorical("gh repo list failed", err)
 	}
 
 	var raw []struct {
@@ -137,7 +141,9 @@ func cloneRepo(ctx context.Context, run exec.Runner, name, dest, host string) er
 	_, err := githubauth.Runner(run, host).Run(ctx, "gh", "repo", "clone", name, dest)
 	if err != nil {
 		slog.Error("Failed to clone from GitHub.", "repo", name, "dest", dest, "error", err)
-		return fmt.Errorf("gh repo clone %s: %w", name, err)
+		// Categorical (#658): gh's stderr is host-chosen text. The caller
+		// already names the repo it was cloning.
+		return termsafe.Categorical("gh repo clone failed", err)
 	}
 	slog.Info("Successfully cloned from GitHub.", "repo", name, "dest", dest)
 	return nil
@@ -153,7 +159,8 @@ func cloneBareRepo(ctx context.Context, run exec.Runner, name, dest, host string
 	_, err := githubauth.Runner(run, host).Run(ctx, "gh", "repo", "clone", name, dest, "--", "--bare")
 	if err != nil {
 		slog.Error("Failed to bare-clone from GitHub.", "repo", name, "dest", dest, "error", err)
-		return fmt.Errorf("gh repo clone --bare %s: %w", name, err)
+		// Categorical (#658), as cloneRepo.
+		return termsafe.Categorical("gh repo clone --bare failed", err)
 	}
 	slog.Info("Successfully bare-cloned from GitHub.", "repo", name, "dest", dest)
 	return nil

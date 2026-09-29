@@ -168,6 +168,18 @@ type safeError struct {
 func (e safeError) Error() string { return e.message }
 func (e safeError) Unwrap() error { return e.cause }
 
+// Categorical returns an error whose text is exactly message and whose unwrap
+// chain is cause. It is the #562 form for a failure whose cause text carries
+// something nobody at the terminal chose: a subprocess's stderr (gh, git, tea
+// print what the server or transport sends), a server-supplied URL, or a
+// config value. The message never renders cause; errors.Is and errors.As
+// still reach it, so a caller's disposition (a missing binary, a canceled
+// context) keeps working. Log the cause at the call site if it is worth
+// keeping. message must be a fixed string, not built from untrusted text.
+func Categorical(message string, cause error) error {
+	return safeError{message: message, cause: cause}
+}
+
 // Error converts a nested filesystem/config error into terminal-safe text
 // while preserving its unwrap chain for errors.Is/errors.As disposition.
 // Known filesystem errors are reconstructed from individually escaped fields
