@@ -12,9 +12,11 @@ forgectl docs open --print-url [path]    # print the resolved URL instead of ope
 forgectl docs list [dir|file ...]        # list the indexed docs, no server (--json for scripting)
 ```
 
+Documents in a `vault` root (see [Root kinds](#root-kinds)) also render Obsidian's inline syntax: `==text==` is highlighted, `%%comments%%` (inline, or a block of lines between two `%%` lines) are left out of the page, and `#tags` show as tag chips. A `%%` whose closing `%%` can't be found stays visible as text, so a stray marker never hides the rest of a note. Docs roots render plain GitHub-flavoured markdown, where all of these stay literal.
+
 Diagrams render in the page: a fenced code block tagged `mermaid` becomes a live diagram themed from the same Artificer tokens as the rest of the reader, and both those and inline SVG pan and zoom (drag to pan, modifier-scroll or click-then-scroll to zoom, double-click, `0`, or the diagram card's reset button to reset).
 
-The landing page at `/` lists the most recently changed docs and each root's doc count. The reading surface: the sidenav renders each indexed root as a collapsible directory tree (per-directory counts, current path pre-expanded, filter box that hides empty branches), and a document's YAML/TOML frontmatter renders as an always-visible properties block above the body instead of leaking into it. Longer documents get an "On this page" outline of their h2 and h3 sections — a third column on wide viewports, an inline disclosure on narrow ones — GFM alert blockquotes (`> [!NOTE]` and kin) render as tiered callouts, and a status bar carries the serving address, document path, and reading time. Below 900px the sidenav becomes an off-canvas drawer behind the appbar toggle. When a watched file changes, the open page updates in place: the reading position, opened folders and collapsibles, and a live filter all survive the update.
+The landing page at `/` lists the most recently changed docs and each root's doc count. The reading surface: the sidenav renders each indexed root as a collapsible directory tree (per-directory counts, current path pre-expanded, filter box that hides empty branches), and a document's YAML/TOML frontmatter renders as an always-visible properties block above the body instead of leaking into it. Longer documents get an "On this page" outline of their h2 and h3 sections — a third column on wide viewports, an inline disclosure on narrow ones — GFM alert blockquotes (`> [!NOTE]` and kin) render as tiered callouts (in a vault root, Obsidian's callout types and aliases too, in any case, such as `> [!info]` or `> [!summary]-`), and a status bar carries the serving address, document path, and reading time. Below 900px the sidenav becomes an off-canvas drawer behind the appbar toggle. When a watched file changes, the open page updates in place: the reading position, opened folders and collapsibles, and a live filter all survive the update.
 
 ## Doc discovery
 
@@ -43,7 +45,7 @@ Every root is classified as `docs` or `vault` when it is indexed. A root is a `v
 | `docs` | relative markdown path from the linking file (`[x](../guide.md)`) | GitHub-style heading slug (`#getting-started`) |
 | `vault` | wikilink by vault-relative path, bare note name, or frontmatter alias (`[[Note]]`, `[[folder/Note]]`); a `./` or `../` markdown path resolves from the linking file | heading text or slug (`#Some Heading`), or a block id (`#^blk-1`) |
 
-Links never resolve across roots. `[docs.root_kinds]` forces a kind when detection gets it wrong, keyed by the root path as you wrote it in `roots` or on the command line — relative spellings such as `.` match the same directory the CLI derives. A value other than `docs` or `vault` is a config error, and `forgectl launch doctor` reports it.
+The kind also picks the markdown dialect: a `vault` root renders the Obsidian highlights, comments, tags and callout types described above, and a `docs` root stays plain GitHub-flavoured markdown. Links never resolve across roots. `[docs.root_kinds]` forces a kind when detection gets it wrong, keyed by the root path as you wrote it in `roots` or on the command line — relative spellings such as `.` match the same directory the CLI derives. A value other than `docs` or `vault` is a config error, and `forgectl launch doctor` reports it.
 
 ## Bearer-token surface
 

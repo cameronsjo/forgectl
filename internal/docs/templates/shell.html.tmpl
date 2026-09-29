@@ -90,6 +90,12 @@ main.surface-document { max-width: 820px; }
    these rules restate the reference's .callout-body treatment. */
 .callout > p { color: var(--fg); margin: 6px 0 0; line-height: 1.6; font-size: 0.95em; }
 
+/* ── Obsidian inline flavour (vault roots only: ==highlight==, #tag) ──
+   .tag is deliberately not Artificer's .chip: that carries hover/pressed
+   states and a 44px touch min-height that would break a line of prose. */
+.doc-body mark { background: color-mix(in oklch, var(--attention) 28%, transparent); color: inherit; padding: 0 2px; border-radius: var(--radius-sm); }
+.doc-body .tag { font-family: var(--font-mono); font-size: .85em; color: var(--accent); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; white-space: nowrap; }
+
 /* ── Outline pane ── */
 .outline { border-left: 1px solid var(--border); padding: var(--s-md) 0; font-family: var(--font-mono); overflow-y: auto; }
 .outline-h { padding: var(--s-sm) 14px var(--s-xs); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--fg-secondary); font-family: var(--font-interface); }

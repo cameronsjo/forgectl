@@ -50,6 +50,7 @@ func newLinkMarkdown() goldmark.Markdown {
 	md := goldmark.New(
 		goldmark.WithParserOptions(headingParserOptions()...),
 	)
+	// Parse-only: never render with this instance. The default resolver turns [[https://x/]] into an external href the sanitizer keeps.
 	(&wikilink.Extender{}).Extend(md)
 	return md
 }
