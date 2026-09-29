@@ -340,32 +340,44 @@ func (e *CommandError) Error() string {
 
 func (e *CommandError) Unwrap() error { return e.Err }
 
-// WithoutOutput returns err with the captured stdout removed from any
+// WithoutOutput returns err with the captured stdout removed from every
 // *CommandError it carries, for a caller whose command's stdout IS the
 // payload (pbpaste's is the clipboard): a nonzero exit does not mean stdout
 // was empty, and Output is readable by anything that holds the error. Stderr,
 // ExitCode and Err are kept, so errors.As and errors.Is behave as before.
 //
-// When err is itself the *CommandError, a copy is returned and err is left
-// alone. When it sits deeper in a chain, the chain cannot be rebuilt around a
-// copy, so its Output is cleared in place; the error was just returned by the
-// Runner call, so the caller is its only holder.
+// When err is itself a *CommandError, a copy is returned and err is left
+// alone. Every *CommandError deeper in the tree, through Unwrap() error and
+// through the Unwrap() []error of errors.Join or a multi-%w fmt.Errorf, is
+// cleared in place: a chain cannot be rebuilt around a copy, and the caller
+// that just received the error from the Runner is its only holder.
 func WithoutOutput(err error) error {
 	// A direct assertion, not errors.As: only the top-level case can be
 	// replaced by a copy.
 	if top, ok := err.(*CommandError); ok {
-		if top.Output == "" {
-			return err
-		}
 		cp := *top
 		cp.Output = ""
+		clearOutputs(cp.Err)
 		return &cp
 	}
-	var nested *CommandError
-	if errors.As(err, &nested) {
-		nested.Output = ""
-	}
+	clearOutputs(err)
 	return err
+}
+
+// clearOutputs clears Output on every *CommandError in err's tree, in place.
+func clearOutputs(err error) {
+	switch e := err.(type) {
+	case nil:
+	case *CommandError:
+		e.Output = ""
+		clearOutputs(e.Err)
+	case interface{ Unwrap() []error }:
+		for _, inner := range e.Unwrap() {
+			clearOutputs(inner)
+		}
+	case interface{ Unwrap() error }:
+		clearOutputs(e.Unwrap())
+	}
 }
 
 // exitCodeOf extracts the process exit code from err via *os/exec.ExitError,

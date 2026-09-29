@@ -308,9 +308,10 @@ func TestOSRunner_OverflowStillFailsClosedWhenTheChildExitsZeroWithHeldPipes(t *
 // back as a copy with Output cleared and the original untouched; one wrapped
 // deeper is cleared in place so the chain, and errors.Is through it, survive.
 //
-// Mutation: return err unchanged from WithoutOutput and both Output checks
+// Mutation: return err unchanged from WithoutOutput and the Output checks
 // fail; clear the top-level case in place instead of copying and the
-// "original" check fails.
+// "original" check fails; drop the Unwrap() []error case in clearOutputs and
+// the joined check fails.
 func TestWithoutOutput_ClearsOutputKeepsTheRest(t *testing.T) {
 	sentinel := errors.New("exit status 3")
 	orig := &CommandError{Name: "pbpaste", Stderr: "why", Output: "secret", ExitCode: 3, Err: sentinel}
@@ -328,6 +329,13 @@ func TestWithoutOutput_ClearsOutputKeepsTheRest(t *testing.T) {
 	got = WithoutOutput(wrapped)
 	if !errors.As(got, &ce) || ce.Output != "" || !errors.Is(got, sentinel) || got.Error() != wrapped.Error() {
 		t.Fatalf("nested: got %v, Output %q", got, ce.Output)
+	}
+
+	a := &CommandError{Name: "a", Output: "secret-a", Err: sentinel}
+	b := &CommandError{Name: "b", Output: "secret-b", Err: sentinel}
+	joined := fmt.Errorf("both: %w", errors.Join(a, fmt.Errorf("b: %w", b)))
+	if got = WithoutOutput(joined); a.Output != "" || b.Output != "" || !errors.Is(got, sentinel) {
+		t.Errorf("joined: Output a %q, b %q; want every *CommandError in the tree cleared", a.Output, b.Output)
 	}
 
 	if WithoutOutput(nil) != nil || !errors.Is(WithoutOutput(sentinel), sentinel) {

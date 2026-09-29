@@ -22,7 +22,7 @@ type argMask struct {
 	shown map[string]string
 	// pats is every string text scrubs, whole entries and bare values
 	// together, sorted longest first (entries before values at equal length),
-	// so the first pattern that matches at a position is the longest one.
+	// so runShown finds the longest entry that starts a run first.
 	pats []maskPat
 	// values is the bare values, for straddleLen.
 	values []string
@@ -99,91 +99,148 @@ func (m argMask) args(args []string) []string {
 	return out
 }
 
-// text scrubs every marked entry and value from s in one left-to-right pass.
+// text scrubs every marked entry and value from s.
 //
 // Masked values can overlap in the text (the end of one is the start of
 // another), so replacing one value at a time is not enough: whichever goes
 // first consumes the shared bytes, and the other no longer matches, leaving
-// its unshared part in the clear (#661). text instead looks, at every byte,
-// for any pattern that starts there, and treats the bytes each match covers as
-// one run: a match that starts inside the open run and ends past it extends
-// the run. Each run is replaced once, by the display form of the pattern it
-// started with, so an echoed entry keeps its key (KEY=[redacted]) and
-// everything else in the run becomes part of that one [redacted].
-//
-// A pattern shorter than minScrubLen counts only where it stands as a whole
-// word: not glued to a word character on either side. The check applies only
-// at an edge where the pattern itself starts or ends with a word character, so
-// a value like "a:b" is still found next to a letter. A byte before the match
-// that is already inside a run does not count as a word character, since it
-// is about to become [redacted].
-//
-// Cost is linear in s for realistic text. Its worst case is a stream that
-// repeats a long masked value byte for byte, where each position compares up
-// to that value's length; stdout is capped at maxStdoutBytes and stderr at
-// maxStderrTail, so that is bounded, and the stream is the failing child's
-// own output.
+// its unshared part in the clear (#661). text works in two phases instead.
+// cover finds every byte that lies inside a qualifying match of any pattern,
+// overlapping matches included; text then replaces each maximal run of
+// covered bytes once. A run that starts with a whole entry renders as
+// KEY=[redacted], so an echoed entry keeps its key; any other run renders as
+// [redacted].
 func (m argMask) text(s string) string {
 	if len(m.pats) == 0 {
 		return s
 	}
-	// Patterns by first byte, longest first within each, so most bytes of a
-	// long stream cost one table lookup.
-	var byFirst [256][]maskPat
-	for _, p := range m.pats {
-		byFirst[p.text[0]] = append(byFirst[p.text[0]], p)
+	covered := m.cover(s)
+	if covered == nil {
+		return s
 	}
 	var b strings.Builder
-	last := 0          // end of the text already copied to b
-	open := false      // whether a run is being extended
-	start, end := 0, 0 // the open run, or the last closed one
-	shown := ""        // what the open run renders as
-	closeRun := func() {
-		b.WriteString(s[last:start])
-		b.WriteString(shown)
-		last = end
-		open = false
-	}
-	for i := 0; i < len(s); i++ {
-		if open && i >= end {
-			closeRun()
+	last := 0 // end of the text already copied to b
+	for i := 0; i < len(s); {
+		if !covered.has(i) {
+			i++
+			continue
 		}
-		for _, p := range byFirst[s[i]] {
-			pend := i + len(p.text)
-			if open && pend <= end {
-				// Longest first: neither this match nor a shorter one at i
-				// could reach past the open run.
-				break
-			}
-			if !strings.HasPrefix(s[i:], p.text) {
-				continue
-			}
-			if len(p.text) < minScrubLen {
-				// The byte before is covered iff the open or last closed run
-				// reaches it. The byte after never is: this match ends past
-				// the open run, and no later run has started yet.
-				gluedBefore := i > 0 && i-1 >= end && isWordByte(p.text[0]) && isWordByte(s[i-1])
-				gluedAfter := pend < len(s) && isWordByte(p.text[len(p.text)-1]) && isWordByte(s[pend])
-				if gluedBefore || gluedAfter {
-					continue
-				}
-			}
-			if !open {
-				open, start, shown = true, i, p.shown
-			}
-			end = pend
-			// Longest first: no later pattern at i ends further out.
-			break
+		end := i + 1
+		for end < len(s) && covered.has(end) {
+			end++
 		}
-	}
-	if open {
-		closeRun()
-	}
-	if last == 0 {
-		return s
+		b.WriteString(s[last:i])
+		b.WriteString(m.runShown(s[i:end]))
+		last, i = end, end
 	}
 	b.WriteString(s[last:])
 	return b.String()
+}
+
+// runShown is what one covered run renders as: KEY=[redacted] when a whole
+// entry starts the run and lies inside it (the longest such entry), else
+// [redacted]. The key is the only text shown, and the argv rendering already
+// shows it.
+func (m argMask) runShown(run string) string {
+	for _, p := range m.pats {
+		if p.shown != Redacted && strings.HasPrefix(run, p.text) {
+			return p.shown
+		}
+	}
+	return Redacted
+}
+
+// cover marks every byte of s that lies inside a qualifying match of any
+// pattern, and returns nil when nothing matched.
+//
+// Every occurrence counts, including ones that overlap each other or
+// themselves: each search restarts one byte past the last match. A pattern of
+// minScrubLen or more always qualifies. A shorter one qualifies only where it
+// stands as a whole word: not glued to a word character on either side. The
+// check applies only at an edge where the pattern itself starts or ends with
+// a word character, so a value like "a:b" is still found next to a letter,
+// and a neighboring byte that is already covered is not a word character,
+// since it is about to become [redacted]. Covering a short match can
+// therefore qualify another one beside it, on either side, so the short
+// patterns are rescanned until a pass covers nothing new.
+//
+// Cost: each pattern is one strings.Index scan per match plus one, so a
+// stream with few matches costs near-linear time whatever the values'
+// lengths. The short patterns are rescanned after every pass that covered
+// something new, and the loop ends on the first pass that covers nothing. Every match is verified in full, so a stream that repeats a long
+// value overlapping itself byte for byte costs that value's length per byte;
+// stdout is capped at maxStdoutBytes and stderr at maxStderrTail, and the
+// stream is the failing child's own output.
+func (m argMask) cover(s string) bitset {
+	var covered bitset
+	mark := func(from, to int) bool {
+		if covered == nil {
+			covered = newBitset(len(s))
+		}
+		return covered.set(from, to)
+	}
+	for _, p := range m.pats {
+		if len(p.text) < minScrubLen {
+			continue
+		}
+		done := 0 // bytes of this pattern's earlier matches already marked
+		for from := 0; ; {
+			rel := strings.Index(s[from:], p.text)
+			if rel < 0 {
+				break
+			}
+			i := from + rel
+			end := i + len(p.text)
+			mark(max(i, done), end)
+			done = end
+			from = i + 1
+		}
+	}
+	isWord := func(i int) bool { return isWordByte(s[i]) && !covered.has(i) }
+	for changed := true; changed; {
+		changed = false
+		for _, p := range m.pats {
+			if len(p.text) >= minScrubLen {
+				continue
+			}
+			for from := 0; ; {
+				rel := strings.Index(s[from:], p.text)
+				if rel < 0 {
+					break
+				}
+				i := from + rel
+				end := i + len(p.text)
+				from = i + 1
+				gluedBefore := i > 0 && isWordByte(p.text[0]) && isWord(i-1)
+				gluedAfter := end < len(s) && isWordByte(p.text[len(p.text)-1]) && isWord(end)
+				if !gluedBefore && !gluedAfter && mark(i, end) {
+					changed = true
+				}
+			}
+		}
+	}
+	return covered
+}
+
+// bitset is one bit per byte of the text cover scans. A nil bitset has no
+// bit set.
+type bitset []uint64
+
+func newBitset(n int) bitset { return make(bitset, (n+63)/64) }
+
+func (b bitset) has(i int) bool { return b != nil && b[i/64]&(uint64(1)<<(i%64)) != 0 }
+
+// set sets the bits in [from, to) and reports whether any was clear.
+func (b bitset) set(from, to int) bool {
+	changed := false
+	for i := from; i < to; i++ {
+		w, bit := i/64, uint64(1)<<(i%64)
+		if b[w]&bit == 0 {
+			b[w] |= bit
+			changed = true
+		}
+	}
+	return changed
 }
 
 // straddleLen returns how many leading bytes of s to drop so that no masked

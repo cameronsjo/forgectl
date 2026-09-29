@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // captureLogs routes the default slog logger into a buffer at debug level for
@@ -138,8 +139,9 @@ func TestMaskText_OverlappingValuesLeaveNoFragment(t *testing.T) {
 // its own next occurrence. A non-overlapping ReplaceAll takes the first and
 // leaves the second's tail.
 //
-// Mutation: advance past each whole match instead of byte by byte (i = pend-1
-// after a match) and the tail "AAB" of the second occurrence survives.
+// Mutation: restart each search at the end of the last match instead of one
+// byte past its start (from = end in cover's long-pattern loop) and the tail
+// "AAB" of the second occurrence survives.
 func TestMaskText_OverlappingSelfMatchLeavesNoFragment(t *testing.T) {
 	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"K=AABAABAAB"}))
 	got := m.text("AABAABAABAAB")
@@ -216,15 +218,64 @@ func TestMaskText_OverlapDifferential(t *testing.T) {
 
 // TestMaskText_ShortValueNextToAMaskedRunIsScrubbed: a short value glued to
 // a longer masked value is glued to text that becomes [redacted], not to a
-// word, so it is scrubbed too — as it was when the longer value was replaced
-// first.
+// word, so it is scrubbed too, on either side. The #686 review found the
+// value-before-run side leaking ("zz" stayed visible in front of the run).
 //
-// Mutation: drop the coverage test from gluedBefore (the i-1 >= end term) and
-// "zz" survives after the [redacted].
+// Mutation: make cover's isWord ignore coverage (return isWordByte(s[i])) and
+// both cases leave "zz" visible.
 func TestMaskText_ShortValueNextToAMaskedRunIsScrubbed(t *testing.T) {
 	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"L=LONGSECRET", "S=zz"}))
-	if got := m.text("LONGSECRETzz"); got != Redacted+Redacted {
-		t.Errorf("got %q", got)
+	for _, in := range []string{"LONGSECRETzz", "zzLONGSECRET", "zzLONGSECRETzz"} {
+		if got := m.text(in); got != Redacted {
+			t.Errorf("text(%q) = %q, want %q", in, got, Redacted)
+		}
+	}
+}
+
+// TestMaskText_ShortValueOverlappingTheStartOfARunIsScrubbed: a short value
+// whose end overlaps the start of a longer masked value. Main's sequential
+// replace consumed the shared byte with the long value first, so the short
+// one no longer matched and its first byte stayed visible.
+//
+// Mutation: skip short patterns in cover (continue on len < minScrubLen in the
+// second loop) and "a" stays visible.
+func TestMaskText_ShortValueOverlappingTheStartOfARunIsScrubbed(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"S=ab", "L=bcdefghij"}))
+	if got := m.text("abcdefghij"); got != Redacted {
+		t.Errorf("got %q, want %q", got, Redacted)
+	}
+}
+
+// TestMaskText_ShortValuesQualifyEachOtherToAFixpoint: "-ab" qualifies
+// because the byte after it is covered by the long value. "!-a" ends right
+// before its "b", so it qualifies only once "-ab" is covered, but it sorts
+// first ("!" < "-") and is checked before "-ab" in any one pass. Only a
+// rescan reaches it.
+//
+// Mutation: run the short-pattern loop once (drop the changed fixpoint) and
+// "!" stays visible.
+func TestMaskText_ShortValuesQualifyEachOtherToAFixpoint(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"L=LONGSECRET", "A=-ab", "B=!-a"}))
+	if got := m.text("!-abLONGSECRET"); got != Redacted {
+		t.Errorf("got %q, want %q", got, Redacted)
+	}
+}
+
+// TestMaskText_LongValueWithNoMatchIsNearLinear: a 4 KiB value that almost
+// matches everywhere ("aaa…ab") against 8 MiB of "a". Comparing it at every
+// byte is 32 G byte-comparisons; one strings.Index scan is linear.
+//
+// Mutation: replace the long-pattern Index scan with a HasPrefix test at every
+// byte and this takes about 2.5 s (0.04 s as written, 0.19 s under -race).
+func TestMaskText_LongValueWithNoMatchIsNearLinear(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"K=" + strings.Repeat("a", 4095) + "b"}))
+	s := strings.Repeat("a", 8<<20)
+	start := time.Now()
+	if got := m.text(s); got != s {
+		t.Fatal("text changed a stream with no match")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("text took %v on 8 MiB with no match; want well under a second", elapsed)
 	}
 }
 
@@ -261,6 +312,158 @@ func TestOSRunner_MaskedAssignments_FailureStdoutMaskedInOutput(t *testing.T) {
 		}
 		if want := "saw K=" + Redacted + "\nbare " + Redacted; cmdErr.Output != want {
 			t.Errorf("%s: Output = %q, want %q", name, cmdErr.Output, want)
+		}
+	}
+}
+
+// mainMaskedBytes reproduces the masking argMask.text did before #661, one
+// pattern at a time over the running result (whole entries, then bare
+// values, each longest first then lexical; strings.ReplaceAll from
+// minScrubLen, else the whole-word replace), while tracking which byte of s
+// each output byte came from. It returns which bytes of s that algorithm hid.
+// The differential below holds the new cover to never showing one of them.
+func mainMaskedBytes(entries []string, s string) []bool {
+	type cell struct {
+		b    byte
+		orig int // index into s, or -1 for a byte of replacement text
+	}
+	cells := make([]cell, len(s))
+	for i := range len(s) { // bytes, not runes
+		cells[i] = cell{s[i], i}
+	}
+	bytesOf := func(cs []cell) string {
+		b := make([]byte, len(cs))
+		for i, c := range cs {
+			b[i] = c.b
+		}
+		return string(b)
+	}
+	replace := func(v, with string, wholeWord bool) {
+		cur := bytesOf(cells)
+		var out []cell
+		last := 0
+		for from := 0; ; {
+			rel := strings.Index(cur[from:], v)
+			if rel < 0 {
+				break
+			}
+			i := from + rel
+			end := i + len(v)
+			ok := true
+			if wholeWord {
+				gluedBefore := i > 0 && isWordByte(v[0]) && isWordByte(cur[i-1])
+				gluedAfter := end < len(cur) && isWordByte(v[len(v)-1]) && isWordByte(cur[end])
+				ok = !gluedBefore && !gluedAfter
+			}
+			if ok {
+				out = append(out, cells[last:i]...)
+				for j := range len(with) {
+					out = append(out, cell{with[j], -1})
+				}
+				last = end
+			}
+			from = end
+		}
+		cells = append(out, cells[last:]...)
+	}
+	var es, vs []string
+	shown := map[string]string{}
+	for _, e := range entries {
+		key, v, _ := strings.Cut(e, "=")
+		es, vs = append(es, e), append(vs, v)
+		shown[e] = key + "=" + Redacted
+	}
+	longestFirst(es)
+	longestFirst(vs)
+	for _, e := range es {
+		replace(e, shown[e], len(e) < minScrubLen)
+	}
+	for _, v := range vs {
+		replace(v, Redacted, len(v) < minScrubLen)
+	}
+	masked := make([]bool, len(s))
+	for i := range masked {
+		masked[i] = true
+	}
+	for _, c := range cells {
+		if c.orig >= 0 {
+			masked[c.orig] = false
+		}
+	}
+	return masked
+}
+
+// TestMaskText_DifferentialAgainstMain runs seeded random layouts over three
+// alphabets (plain letters, a two-byte rune, and "_" so word edges vary) with
+// short and long values, entries, and overlap, and holds cover to two rules:
+// every byte main's one-pattern-at-a-time algorithm hid stays hidden (no
+// regression), and every byte of every occurrence of a value of minScrubLen
+// or more is hidden (no fragment of a fully present value).
+//
+// Mutation: make cover's isWord ignore coverage and the first rule fails on
+// the #686 shape (a short value right before a long one); drop the
+// long-pattern loop's from = i + 1 in favor of from = end and the second rule
+// fails on self-overlap.
+func TestMaskText_DifferentialAgainstMain(t *testing.T) {
+	rng := rand.New(rand.NewSource(686)) //nolint:gosec // G404: deterministic test fixture, not crypto
+	for _, alphabet := range [][]string{{"A", "B"}, {"A", "é"}, {"A", "_", "B"}} {
+		randFrom := func(n int) string {
+			var b strings.Builder
+			for range n {
+				b.WriteString(alphabet[rng.Intn(len(alphabet))])
+			}
+			return b.String()
+		}
+		for c := range 4000 {
+			values := make([]string, 1+rng.Intn(4))
+			entries := make([]string, len(values))
+			for i := range values {
+				values[i] = randFrom(1 + rng.Intn(11))
+				entries[i] = "k" + strconv.Itoa(i) + "=" + values[i]
+			}
+			var text string
+			for range 1 + rng.Intn(8) {
+				switch rng.Intn(4) {
+				case 0:
+					text += []string{" ", "-", randFrom(1 + rng.Intn(3))}[rng.Intn(3)]
+				case 1:
+					text += entries[rng.Intn(len(entries))]
+				default:
+					v := values[rng.Intn(len(values))]
+					overlaps := []int{0}
+					for k := 1; k < len(v) && k <= len(text); k++ {
+						if strings.HasSuffix(text, v[:k]) {
+							overlaps = append(overlaps, k)
+						}
+					}
+					text += v[overlaps[rng.Intn(len(overlaps))]:]
+				}
+			}
+			m := maskFrom(WithMaskedAssignments(context.Background(), entries))
+			covered := m.cover(text)
+			for i, hid := range mainMaskedBytes(entries, text) {
+				if hid && !covered.has(i) {
+					t.Fatalf("alphabet %q case %d: entries %q\ntext %q\nmain hid byte %d, the new cover shows it: %q", alphabet, c, entries, text, i, m.text(text))
+				}
+			}
+			for _, v := range values {
+				if len(v) < minScrubLen {
+					continue
+				}
+				for from := 0; ; {
+					rel := strings.Index(text[from:], v)
+					if rel < 0 {
+						break
+					}
+					i := from + rel
+					for j := i; j < i+len(v); j++ {
+						if !covered.has(j) {
+							t.Fatalf("alphabet %q case %d: entries %q\ntext %q\nbyte %d of value %q is visible: %q", alphabet, c, entries, text, j, v, m.text(text))
+						}
+					}
+					from = i + 1
+				}
+			}
 		}
 	}
 }
