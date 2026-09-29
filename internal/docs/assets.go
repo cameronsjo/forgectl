@@ -106,6 +106,13 @@ var katexFonts embed.FS
 //go:embed assets/math-init.js
 var mathInitJS []byte
 
+// copyJS is the reader's one rich-copy listener (forgectl#588): clean HTML and
+// TeX-substituted formulas on the clipboard. It is the only `copy` listener;
+// KaTeX's contrib/copy-tex is deliberately not vendored.
+//
+//go:embed assets/copy.js
+var copyJS []byte
+
 // panZoomJS gives both inline SVG and mermaid-rendered SVG pan/zoom.
 //
 //go:embed assets/svg-panzoom.js

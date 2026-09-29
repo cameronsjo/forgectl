@@ -195,3 +195,33 @@ func TestKatexProvenance(t *testing.T) {
 		t.Errorf("provenance records %d files, want 22 (script, stylesheet, 20 fonts)", len(prov.Files))
 	}
 }
+
+// TestServer_CopyJS_ServedAndLinked pins the rich-copy script (forgectl#588) to
+// its route and to the shell. script-src 'self' forbids inline script, so an
+// unlinked or unserved file means copy silently falls back to Chromium's
+// theme-styled HTML.
+func TestServer_CopyJS_ServedAndLinked(t *testing.T) {
+	idx, _ := testIndex(t)
+	h := testHandler(idx)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/assets/copy.js", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/javascript; charset=utf-8" {
+		t.Errorf("Content-Type %q", ct)
+	}
+	if len(copyJS) == 0 || !bytes.Equal(rec.Body.Bytes(), copyJS) {
+		t.Error("body is not the embedded copy.js")
+	}
+	if n := strings.Count(string(copyJS), `addEventListener("copy"`); n != 1 {
+		t.Errorf("copy.js registers %d copy listeners, want exactly 1", n)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
+	if !strings.Contains(rec.Body.String(), `<script src="/assets/copy.js" defer></script>`) {
+		t.Error("shell does not link /assets/copy.js")
+	}
+}
