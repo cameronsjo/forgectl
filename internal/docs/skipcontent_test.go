@@ -87,6 +87,9 @@ func TestUnclosedSkipContent_MatchesSanitizer(t *testing.T) {
 		"<script>", "</script>", "<image href=x>", "</image>", "<desc>", "</desc>",
 		"<svg>", "</svg>", "<b>", "</b>", "<p>", "</p>", "<br/>", "x", " ", "\n",
 		"<foreignObject>", "</FOREIGNOBJECT>", "<noscript>", "</noscript>",
+		"<iframe>", "</iframe>", "<noembed>", "</noembed>", "<noframes>", "</noframes>",
+		"<xmp>", "</xmp>", "<textarea>", "</textarea>", "<plaintext>",
+		"<svg><title>", "</title></svg>",
 	}
 	r := rand.New(rand.NewSource(622))
 	for i := 0; i < 20000; i++ {
@@ -160,8 +163,8 @@ func TestRender_NoSkipContentBannerWhenNothingHidden(t *testing.T) {
 	}
 }
 
-// The banner's data attribute cannot come from a document: the sanitizer
-// strips data-* attributes. Mutation: p.AllowDataAttributes() in
+// The banner's data attribute is not author-forgeable as an attribute: the
+// sanitizer strips data-* attributes. Mutation: p.AllowDataAttributes() in
 // newSanitizer turns this red.
 func TestRender_SkipContentBannerNotForgeable(t *testing.T) {
 	out, err := Render([]byte(`<blockquote data-forgectl-notice="skip-content">fake</blockquote>`))

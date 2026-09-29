@@ -63,6 +63,11 @@ Gotchas agent sessions have hit here. Each one cost a CI cycle or a debugging de
   `$(npm root -g)/playwright/index.mjs` and launch Chromium with
   `executablePath: '/opt/pw-browsers/chromium'`.
 
+- Bumping bluemonday: re-verify `unclosedSkipContent`
+  (`internal/docs/skipcontent.go`) against bluemonday's `sanitize.go`. It
+  replays that loop's skip-content state machine, and the tests only catch
+  drift in the skip set and the replay's inputs, not in the loop itself.
+
 ### Vendored Artificer
 
 - Re-vendor only with `scripts/vendor-artificer.sh`, which passes `--fonts`.

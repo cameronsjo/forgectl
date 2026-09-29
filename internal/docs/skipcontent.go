@@ -142,9 +142,11 @@ func unclosedSkipContent(sanitizerInput []byte) (string, bool) {
 // skipContentBanner is the notice prepended above a body whose tail the
 // sanitizer dropped. It is a fixed template: the one varying part is name,
 // which the caller takes from skipContentElements (so it is never document
-// bytes), and it is HTML-escaped here anyway. The data attribute makes the
-// banner unforgeable by content, because the sanitizer never admits data-*
-// attributes from a document.
+// bytes), and it is HTML-escaped here anyway. The data attribute is not
+// author-forgeable as an attribute, because the sanitizer never admits data-*
+// attributes from a document. (An author can still imitate the banner's
+// look with class-styled markup; the attribute is what code and tests key
+// on.)
 func skipContentBanner(name string) string {
 	return `<blockquote class="callout warning" role="note" data-forgectl-notice="skip-content">` +
 		`<div class="callout-title"><svg viewBox="0 0 24 24" aria-hidden="true">` + calloutTriangleIcon + `</svg> Part of this document is hidden</div>` +
