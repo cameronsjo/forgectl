@@ -342,11 +342,13 @@ func truncateString(s string, n int) string {
 	return s[:n]
 }
 
-// repairLogFile is the seam appendRepairRow needs: append, roll back a partial
-// append, and flush. Production is *os.File; a test drives a short-writing
-// double through it, which is the only way to reach the truncation branch.
+// repairLogFile is the seam appendRepairRow needs: read the last byte, append,
+// roll back a partial append, and flush. Production is *os.File; a test drives
+// a short-writing double through it, which is the only way to reach the
+// truncation branch.
 type repairLogFile interface {
 	io.Writer
+	io.ReaderAt
 	Seek(offset int64, whence int) (int64, error)
 	Truncate(size int64) error
 	Sync() error
@@ -357,11 +359,21 @@ type repairLogFile interface {
 //
 // A SHORT WRITE MUST NOT SURVIVE. The previous form returned the error but left
 // the partial bytes in place, so the next append concatenated onto a truncated
-// line and readRepairLog dropped the merged result as unparseable — costing BOTH
-// rows. On an out-of-space tail that is the intent row naming a clean room, which
-// is the one line the log exists to preserve. So the offset is captured first and
-// the file is truncated back to it on any failure: the log loses the row it could
-// not write, and nothing else.
+// line and readRepairLogTail dropped the merged result as unparseable — costing
+// BOTH rows. On an out-of-space tail that is the intent row naming a clean room,
+// which is the one line the log exists to preserve. So the offset is captured
+// first and the file is truncated back to it on any failure: the log loses the
+// row it could not write, and nothing else.
+//
+// AN UNTERMINATED TAIL MUST NOT SWALLOW THE ROW. The log is hand-editable, so
+// the file can end mid-line through no fault of this writer — a stray byte, an
+// editor that drops the final newline — and appending straight onto it would
+// merge the row into one undecodable line the reader then skips (forgectl#549).
+// So when the last byte is not '\n' a separator goes first, in the SAME write
+// as the row: a short write of either rolls both back to the captured offset,
+// and the row itself, which marshalRepairRow capped, is unchanged. A last byte
+// that cannot be read gets the separator too — an empty line is skipped by
+// every reader, where a merged one costs a row.
 //
 // It is a var so a test can stage the crash this whole ordering exists for: an
 // append that fails BETWEEN an intent and its completion, leaving the dangling
@@ -377,6 +389,14 @@ var appendRepairRow = func(f repairLogFile, data []byte) error {
 		}
 		return cause
 	}
+	if start > 0 {
+		// io.ReaderAt may pair a full read at the end of the input with io.EOF,
+		// so n, not the error, says whether the byte was read.
+		last := make([]byte, 1)
+		if n, _ := f.ReadAt(last, start-1); n != 1 || last[0] != '\n' {
+			data = append([]byte{'\n'}, data...)
+		}
+	}
 	n, err := f.Write(data)
 	if err != nil {
 		return rollback(fmt.Errorf("append repair audit row: %w", err))
@@ -390,30 +410,31 @@ var appendRepairRow = func(f repairLogFile, data []byte) error {
 	return nil
 }
 
-// readRepairLogTail returns the newest limit decodable rows, oldest first, and
-// how many older decodable rows it displaced. A line that does not decode, or
-// that exceeds maxRepairLogLineBytes, is skipped with a warning rather than
-// failing the read: the history verb exists to answer "what happened", and one
-// bad line must not take the rest of the record with it. omitted counts rows
-// displaced by the limit, never skipped lines.
+// readRepairLogTail returns the newest limit decodable rows, oldest first, how
+// many older decodable rows it displaced, and how many lines it skipped. A line
+// that does not decode, or that exceeds maxRepairLogLineBytes, is skipped
+// rather than failing the read: the history verb exists to answer "what
+// happened", and one bad line must not take the rest of the record with it.
+// omitted counts rows displaced by the limit, never skipped lines; skipped is
+// returned rather than only logged, because the warning is discarded at the
+// default log level and a dropped line must not pass in silence.
 //
 // Memory is bounded by limit rows plus one line buffer. The slice is NOT
 // preallocated to limit, because a caller may pass math.MaxInt.
-func (c *Client) readRepairLogTail(limit int) (rows []RepairRow, omitted int, err error) {
+func (c *Client) readRepairLogTail(limit int) (rows []RepairRow, omitted, skipped int, err error) {
 	if limit < 1 {
 		limit = 1
 	}
 	f, err := os.Open(c.repairLogPath()) //nolint:gosec // inside the 0700 sessions dir
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, 0, nil
+			return nil, 0, 0, nil
 		}
-		return nil, 0, fmt.Errorf("read repair audit log: %w", termsafe.Error(err))
+		return nil, 0, 0, fmt.Errorf("read repair audit log: %w", termsafe.Error(err))
 	}
 	defer func() { _ = f.Close() }()
 
 	head := 0 // index of the oldest row once the ring is full
-	skipped := 0
 	keep := func(line []byte) {
 		line = bytes.TrimSuffix(line, []byte("\n"))
 		if len(line) == 0 {
@@ -457,7 +478,7 @@ func (c *Client) readRepairLogTail(limit int) (rows []RepairRow, omitted int, er
 			keep(line) // a final line with no trailing newline
 			break
 		}
-		return nil, 0, fmt.Errorf("read repair audit log: %w", rerr)
+		return nil, 0, 0, fmt.Errorf("read repair audit log: %w", rerr)
 	}
 	if head > 0 {
 		rows = append(rows[head:], rows[:head]...)
@@ -469,7 +490,7 @@ func (c *Client) readRepairLogTail(limit int) (rows []RepairRow, omitted int, er
 		}
 		slog.Warn("Skipped unreadable rows in the pr repair audit log.", attrs...)
 	}
-	return rows, omitted, nil
+	return rows, omitted, skipped, nil
 }
 
 // RepairTrail is the bounded result of RepairHistory.
@@ -478,6 +499,10 @@ type RepairTrail struct {
 	Rows []RepairRow
 	// Omitted counts older decodable rows the bound left out.
 	Omitted int
+	// Skipped counts lines that did not decode or were over-long. They are
+	// still in the file — nothing on the read path drops them — but they are
+	// not in Rows, so a caller must say so rather than show a gapless trail.
+	Skipped int
 	// Path is the log file, so a caller can say where the rest lives.
 	Path string
 }
@@ -489,7 +514,7 @@ func (c *Client) RepairHistory(ctx context.Context) (RepairTrail, error) {
 	trail := RepairTrail{Path: c.repairLogPath()}
 	err := c.withLifecycleLock(ctx, "repair-history", func() error {
 		var rerr error
-		trail.Rows, trail.Omitted, rerr = c.readRepairLogTail(MaxRepairHistoryRows)
+		trail.Rows, trail.Omitted, trail.Skipped, rerr = c.readRepairLogTail(MaxRepairHistoryRows)
 		return rerr
 	})
 	return trail, err

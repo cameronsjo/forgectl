@@ -279,11 +279,17 @@ func runRepairHistory(cmd *cobra.Command, client *pr.Client, asJSON bool) error 
 	}
 	rows := trail.Rows
 	out := cmd.OutOrStdout()
-	// One stderr line in both modes, so stdout keeps its shape (--json stays a
-	// bare array) while a truncated view can never read as the whole trail.
+	// stderr in both modes, so stdout keeps its shape (--json stays a bare
+	// array) while a truncated or gapped view can never read as the whole
+	// trail. A skipped line may be a real row a stray byte merged into
+	// garbage, so it is counted here rather than only in a debug log.
 	if trail.Omitted > 0 {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "note: showing the newest %d rows; %d older rows are in %s\n",
 			len(rows), trail.Omitted, termsafe.QuotePathIfUnsafe(trail.Path))
+	}
+	if trail.Skipped > 0 {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "note: %d unreadable lines skipped; they are still in %s\n",
+			trail.Skipped, termsafe.QuotePathIfUnsafe(trail.Path))
 	}
 	if asJSON {
 		if rows == nil {
