@@ -344,7 +344,7 @@ func NewMCPServer(client *Client, defaultClientName string) *mcp.Server {
 			fmt.Fprintf(&b, "  #%d %s\n", p.ID, f.wrapLine(truncateRunes(p.Title, maxTitleShowRunes)))
 			out.Projects = append(out.Projects, projectRef{ID: p.ID})
 		}
-		return toolText(b.String()), out, nil
+		return structuredResult(toolText(b.String()), out)
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -399,7 +399,7 @@ func NewMCPServer(client *Client, defaultClientName string) *mcp.Server {
 			header = fmt.Sprintf("%d task(s), showing the first %d — raise `limit` (cap %d) for more:\n", matched, shown, maxListLimit)
 		}
 		out.Total, out.Shown, out.Truncated = matched, shown, matched > shown
-		return toolText(header + b.String()), out, nil
+		return structuredResult(toolText(header+b.String()), out)
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -444,7 +444,7 @@ func NewMCPServer(client *Client, defaultClientName string) *mcp.Server {
 					f.wrapLine(kind), rel.ID, doneLabel(rel.Done), f.wrapLine(truncateRunes(rel.Title, maxTitleShowRunes)))
 			}
 		}
-		return toolText(b.String()), toGetTaskOutput(task), nil
+		return structuredResult(toolText(b.String()), toGetTaskOutput(task))
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -482,7 +482,7 @@ func NewMCPServer(client *Client, defaultClientName string) *mcp.Server {
 			fmt.Fprintf(&b, "  #%d project %d %s\n", task.ID, task.ProjectID, f.wrapLine(truncateRunes(task.Title, maxTitleShowRunes)))
 			out.Tasks = append(out.Tasks, toTaskRef(task))
 		}
-		return toolText(b.String()), out, nil
+		return structuredResult(toolText(b.String()), out)
 	})
 
 	mcp.AddTool(server, &mcp.Tool{

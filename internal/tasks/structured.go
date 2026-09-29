@@ -1,11 +1,14 @@
 package tasks
 
 import (
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Structured output for the read tools.
@@ -76,11 +79,75 @@ type (
 	}
 )
 
-// doneAtPattern is the only shape structuredTime emits. Declaring it in the
-// schema makes the SDK's output validation refuse any other string in done_at,
-// so a later edit that copies board bytes into the field fails the call
-// instead of shipping them.
+// doneAtPattern is the only shape structuredTime emits.
+//
+// It is also declared in the output schema, but that is a TRIPWIRE, not the
+// control: when the SDK's output validation fails, go-sdk returns a JSON-RPC
+// error whose message quotes the offending value unfenced ("validating tool
+// output: … enum: <value> does not equal any of …"), so a schema failure
+// would itself leak the board text. The real controls are the handler-side
+// filters (isRelationKind, structuredTime) and structuredResult's final check,
+// which refuses the output with a categorical error that echoes nothing.
 const doneAtPattern = `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$`
+
+var doneAtRe = regexp.MustCompile(doneAtPattern)
+
+// structuredRejected is the whole text of the error structuredResult returns.
+// It is fixed on purpose: naming the offending value would carry board text
+// out of the fence, which is the leak the check exists to stop.
+const structuredRejected = "structured output rejected: a field failed server-side validation; the text content is withheld too"
+
+// keepRelationKind is the relation-kind filter toGetTaskOutput applies. It is
+// a variable only so a test can switch the filter off and prove that
+// structuredResult still refuses the output without echoing the value.
+var keepRelationKind = isRelationKind
+
+// structuredResult is the last gate before a read tool returns. Every string
+// VALUE in out must be a known relation kind or a canonical done_at timestamp
+// — the only strings the output structs are meant to carry. Anything else
+// means a filter was bypassed, and the whole result is replaced by a fixed
+// tool error: never the value, and never the SDK's schema error, which would
+// quote it.
+func structuredResult(res *mcp.CallToolResult, out any) (*mcp.CallToolResult, any, error) {
+	if !structuredVetted(out) {
+		return toolError("%s", structuredRejected), nil, nil
+	}
+	return res, out, nil
+}
+
+// structuredVetted reports whether every string value in out's JSON form is a
+// known relation kind or matches doneAtPattern. A marshal failure is a fail.
+func structuredVetted(out any) bool {
+	raw, err := json.Marshal(out)
+	if err != nil {
+		return false
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return false
+	}
+	return stringsVetted(decoded)
+}
+
+func stringsVetted(v any) bool {
+	switch x := v.(type) {
+	case string:
+		return isRelationKind(x) || doneAtRe.MatchString(x)
+	case []any:
+		for _, e := range x {
+			if !stringsVetted(e) {
+				return false
+			}
+		}
+	case map[string]any:
+		for _, e := range x {
+			if !stringsVetted(e) {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 // outputSchema reflects T's schema and pins every done_at property to
 // doneAtPattern. It panics on failure: the output types are fixed at compile
@@ -110,8 +177,8 @@ func pinDoneAt(s *jsonschema.Schema) {
 }
 
 // getTaskSchema is the reflected getTaskOutput schema with the relation kind
-// narrowed to its enum, so the SDK's output validation rejects a kind that
-// bypassed isRelationKind rather than shipping it.
+// narrowed to its enum. Like doneAtPattern this documents the contract and
+// trips on a regression; it is not the control (see doneAtPattern).
 func getTaskSchema() *jsonschema.Schema {
 	schema := outputSchema[getTaskOutput]()
 	rels, ok := schema.Properties["relations"]
@@ -135,9 +202,13 @@ func getTaskSchema() *jsonschema.Schema {
 // never copied from the input, so no board byte survives the trip.
 //
 // The year bound matters: "9999-12-31T23:00:00-02:00" parses, but lands in
-// year 10000 in UTC, which renders outside doneAtPattern — and the SDK's
-// output validation would then fail the WHOLE call, letting one planted
+// year 10000 in UTC, which renders outside doneAtPattern — and
+// structuredResult would then refuse the WHOLE call, letting one planted
 // timestamp take down list_tasks for everyone reading that board.
+//
+// Anything time.Parse rejects is dropped rather than repaired: a lowercase
+// "t"/"z" separator (legal RFC 3339, refused by Go) and a leap second ("60")
+// both read as absent, which fails safe.
 func structuredTime(s string) string {
 	ts, err := time.Parse(time.RFC3339, s)
 	if err != nil {
@@ -150,14 +221,19 @@ func structuredTime(s string) string {
 	return ts.Format(time.RFC3339)
 }
 
+// toTaskRef emits done_at only for a done task, matching the schema's
+// "absent when not done": Vikunja keeps a stale done_at on a reopened task.
 func toTaskRef(t Task) taskRef {
-	return taskRef{
+	ref := taskRef{
 		ID:        t.ID,
 		ProjectID: t.ProjectID,
 		Done:      t.Done,
-		DoneAt:    structuredTime(t.DoneAt),
 		Priority:  t.Priority,
 	}
+	if t.Done {
+		ref.DoneAt = structuredTime(t.DoneAt)
+	}
+	return ref
 }
 
 func toGetTaskOutput(t Task) getTaskOutput {
@@ -167,7 +243,7 @@ func toGetTaskOutput(t Task) getTaskOutput {
 		Relations:      []relationRef{},
 	}
 	for kind, rels := range t.RelatedTasks {
-		if !isRelationKind(kind) {
+		if !keepRelationKind(kind) {
 			continue
 		}
 		for _, rel := range rels {

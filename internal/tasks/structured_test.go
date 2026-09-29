@@ -141,8 +141,8 @@ func TestListTasks_StructuredContentMirrorsTheListing(t *testing.T) {
 // from structured output; known kinds survive sorted by kind then id, and
 // Vikunja's zero done_at reads as absent.
 //
-// Mutation: drop the isRelationKind check — the SDK's output validation then
-// rejects the result against the kind enum and the call fails.
+// Mutation: drop the isRelationKind check in toGetTaskOutput — the kind key
+// then reaches structuredResult, which refuses the whole call.
 func TestGetTask_StructuredRelationsKeepOnlyKnownKinds(t *testing.T) {
 	cs := connectToStub(t)
 	res, raw := callStructured(t, cs, "get_task", map[string]any{"id": 11})
@@ -276,10 +276,77 @@ func TestStructuredTime(t *testing.T) {
 		"9999-12-31T23:00:00-02:00": "",
 		"0001-01-01T01:00:00+02:00": "",
 		"2026-09-01T08:00:00.5Z":    "2026-09-01T08:00:00Z",
+		// Legal RFC 3339 that time.Parse refuses: dropped, never repaired.
+		"2026-09-01t08:00:00z": "",
+		"2026-09-01T23:59:60Z": "",
 	}
 	for in, want := range cases {
 		if got := structuredTime(in); got != want {
 			t.Errorf("structuredTime(%q) = %q, want %q", in, got, want)
 		}
+	}
+
+	// A reopened task keeps Vikunja's stale done_at; structured output must
+	// not report a done time for a task that is not done.
+	// Mutation: drop the `if t.Done` gate in toTaskRef.
+	open := Task{ID: 1, Done: false, DoneAt: "2026-09-01T08:00:00Z"}
+	if got := toTaskRef(open).DoneAt; got != "" {
+		t.Errorf("toTaskRef(done=false).DoneAt = %q, want absent", got)
+	}
+	closed := Task{ID: 1, Done: true, DoneAt: "2026-09-01T08:00:00Z"}
+	if got := toTaskRef(closed).DoneAt; got != "2026-09-01T08:00:00Z" {
+		t.Errorf("toTaskRef(done=true).DoneAt = %q, want the timestamp", got)
+	}
+}
+
+// TestStructuredResult_RefusesUnvettedStringsWithoutEchoingThem: with the
+// relation-kind filter switched off, the injection key reaches the output.
+// The final check must turn that into a categorical tool error that names
+// nothing — not a JSON-RPC schema error, which would quote the value unfenced.
+//
+// Mutation: make structuredResult return (res, out, nil) unconditionally —
+// the SDK's schema validation then fails the call with a protocol error that
+// carries the marker.
+func TestStructuredResult_RefusesUnvettedStringsWithoutEchoingThem(t *testing.T) {
+	keepRelationKind = func(string) bool { return true }
+	t.Cleanup(func() { keepRelationKind = isRelationKind })
+
+	cs := connectToStub(t)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "get_task", Arguments: map[string]any{"id": 11}})
+	if err != nil {
+		t.Fatalf("get_task failed at the protocol level (the SDK schema error echoes board text): %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("get_task with an unvetted relation kind did not return a tool error")
+	}
+	if res.StructuredContent != nil {
+		t.Fatalf("refused result still carries structuredContent: %v", res.StructuredContent)
+	}
+	raw, err := json.Marshal(res)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	if strings.Contains(string(raw), injectionMarker) || strings.Contains(string(raw), "SYSTEM") {
+		t.Fatalf("refused result echoes board text: %s", raw)
+	}
+	if !strings.Contains(string(raw), "structured output rejected") {
+		t.Fatalf("refused result is not the categorical error: %s", raw)
+	}
+}
+
+func TestStructuredVetted(t *testing.T) {
+	ok := getTaskOutput{taskRef: taskRef{ID: 1, Done: true, DoneAt: "2026-09-01T08:00:00Z"}, Relations: []relationRef{{Kind: "blocked", ID: 2}}}
+	if !structuredVetted(ok) {
+		t.Fatal("a canonical output was refused")
+	}
+	badTime := ok
+	badTime.DoneAt = injectionMarker
+	if structuredVetted(badTime) {
+		t.Fatal("a done_at outside the pattern was accepted")
+	}
+	badKind := ok
+	badKind.Relations = []relationRef{{Kind: injectionMarker, ID: 2}}
+	if structuredVetted(badKind) {
+		t.Fatal("a relation kind outside the enum was accepted")
 	}
 }
