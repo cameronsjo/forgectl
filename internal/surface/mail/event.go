@@ -2,8 +2,13 @@ package mail
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
+
+// ErrNotTurnEvent marks a hook or notify payload that is well formed but is
+// not a turn boundary. A hook fires for more than turns, so callers ignore it.
+var ErrNotTurnEvent = errors.New("not a turn event")
 
 // ParseClaudeHook reads the JSON a Claude Code hook gets on stdin. Stop ends a
 // turn; UserPromptSubmit starts one. Anything else is not a turn event.
@@ -20,7 +25,7 @@ func ParseClaudeHook(data []byte) (WorkerState, error) {
 	case "UserPromptSubmit":
 		return StateBusy, nil
 	}
-	return "", fmt.Errorf("claude hook %s is not a turn event", quoteTrunc(p.Event))
+	return "", fmt.Errorf("claude hook %s is %w", quoteTrunc(p.Event), ErrNotTurnEvent)
 }
 
 // ParseCodexNotify reads the JSON Codex passes as the last argument to its
@@ -33,7 +38,7 @@ func ParseCodexNotify(data []byte) (WorkerState, string, error) {
 	}
 	typ, _ := p["type"].(string)
 	if typ != "agent-turn-complete" {
-		return "", "", fmt.Errorf("codex notify %s is not a turn event", quoteTrunc(typ))
+		return "", "", fmt.Errorf("codex notify %s is %w", quoteTrunc(typ), ErrNotTurnEvent)
 	}
 	for _, k := range []string{"thread-id", "thread_id", "threadId"} {
 		if v, ok := p[k].(string); ok && v != "" {

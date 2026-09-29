@@ -52,9 +52,18 @@ exists.
   forgectl surface launch forgectl --surface tmux
   forgectl surface launch ~/Projects/thing --surface tmux --name review
 
-The backend is always explicit. There is no default and no detection.`,
+The backend is always explicit. There is no default and no detection.
+
+send, inbox, flush and event carry messages between a coordinator and
+its workers across harnesses. See forgectl surface send --help.`,
 	}
-	cmd.AddCommand(newSurfaceLaunchCmd(deps))
+	cmd.AddCommand(
+		newSurfaceLaunchCmd(deps),
+		newSurfaceSendCmd(deps),
+		newSurfaceInboxCmd(deps),
+		newSurfaceFlushCmd(deps),
+		newSurfaceEventCmd(deps),
+	)
 	return cmd
 }
 

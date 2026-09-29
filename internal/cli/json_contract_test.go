@@ -24,7 +24,7 @@ var stateVerbNames = map[string]bool{
 	"list": true, "ls": true, "status": true, "show": true, "which": true,
 	"doctor": true, "dash": true, "tree": true, "windows": true, "keys": true,
 	"search": true, "check": true, "verify": true, "stats": true, "prs": true,
-	"history": true,
+	"history": true, "inbox": true,
 }
 
 // jsonContractExempt names state-shaped verbs that deliberately take no

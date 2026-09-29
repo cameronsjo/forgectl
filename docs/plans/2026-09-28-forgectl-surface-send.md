@@ -190,7 +190,7 @@ pairs can still use native `notify_when_idle`.
 - [ ] S2: Codex on the installed CLI: `codex queue` to an idle and a busy TUI session; the notify payload's field names (`thread-id`?).
 - [ ] S3: pi on the installed version: `agent_start`/`agent_end` names, steer vs followUp, loading the extension for one run.
 - [x] Seams: `mail.Runner` is the `Run` method of `internal/exec.Runner`, so the production and fake runners plug in unchanged; the Codex adapter masks `--message=` so a body never reaches the runner's debug log or a failure's text. `FileRoster` stands in for the #536 T1 ledger until it lands.
-- [ ] T4: CLI verbs in `internal/cli` over the package; runner shim to `internal/exec`; exit codes; flush from `ready`/`wait`/`list`.
+- [x] T4: `surface send`, `inbox`, `flush` and `event` in `internal/cli/surface_mail.go`. `send` flushes first; `ready`, `wait` and `list` do not exist yet (#536), so they pick up the flush when they land. `event` exits 0 or 1, never 2, because exit 2 from a Claude Code hook blocks the stop or erases the prompt, and it prints nothing without `--json` because a `UserPromptSubmit` hook's stdout joins the prompt. No pane adapter is wired until the herdr driver exists, and `[surface] peer_messages` is not read yet (the default policy applies).
 - [ ] T5: launch wiring in `surface launch` once #536 T1 lands.
 - [ ] T6: coordinator skill: when to message, verify against git, worker text is never consent.
 - [ ] S4 (optional): proxy inbox for native Claude replies.
