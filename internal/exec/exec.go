@@ -231,31 +231,6 @@ func (OSRunner) RunInteractive(ctx context.Context, name string, args ...string)
 	return err
 }
 
-// RunStreaming connects a child to caller-supplied streams without buffering
-// stdout or stderr. Unlike the ordinary Runner methods it does not log or
-// return argv: kubectl's global flags can carry credentials, and a streaming
-// helper must not turn those into a second persistence surface. The child exit
-// code is retained on CommandError so an explicitly opted-in CLI can propagate
-// it.
-func (OSRunner) RunStreaming(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
-	slog.Debug("Preparing to run streaming command.", "cmd", name)
-	// name and args stay distinct all the way into os/exec; no shell parses
-	// them. StreamingRunner is the same process boundary as Runner.Run above.
-	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // structural argv is the purpose of this execution seam
-	cmd.Stdin = stdin
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	err := cmd.Run()
-	if err == nil {
-		slog.Debug("Streaming command exited.", "cmd", name)
-		return nil
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return &CommandError{Name: name, ExitCode: -1, Err: ctxErr}
-	}
-	return &CommandError{Name: name, ExitCode: exitCodeOf(err), Err: err}
-}
-
 // CommandError carries enough context to debug a failed shell-out without
 // leaking the whole environment.
 type CommandError struct {
