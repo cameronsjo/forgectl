@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -388,7 +389,7 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 		Short: "List active clean-room review sessions",
 		Long: `list prints one tab-separated row per recorded review session:
 
-  REF   CREATED   PATH   WINDOW   PHASE
+  REF   CREATED   PATH   WINDOW   PHASE   REASON
 
 WINDOW is what tmux reports RIGHT NOW — live, window gone, or ? when tmux
 could not be read at all. PHASE is what the record SAYS about how far the
@@ -400,9 +401,9 @@ record written before phases existed.
 Fields are append-only: PATH is field 3 and stays there, because it is the
 operand 'forgectl pr teardown' takes.
 
-A needs-repair row ends with '  [needs-repair: <reason>]' after the fifth
-column, the same wording 'forgectl pr dash' uses; --json carries it as
-repair_reason ("" on every other row).`,
+REASON is field 6, appended like the others: why a needs-repair session needs
+repair, capped as 'forgectl pr dash' caps it, and empty on every other row.
+--json carries it as repair_reason ("" on every other row).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			summaries, unreadable, err := client.List(cmd.Context())
@@ -449,18 +450,15 @@ repair_reason ("" on every other row).`,
 				// what teardown is fed, while a control-bearing one prints
 				// as a quoted literal instead of driving the terminal.
 				//
-				// A needs-repair row gets its reason as a suffix AFTER the five
-				// columns (#542), worded exactly as `pr dash` words it, so no
-				// field moves and a script cutting by tab still sees five.
-				note := ""
-				if s.Phase() == pr.PhaseNeedsRepair {
-					note = needsRepairNote(s)
-				}
-				_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s%s\n",
+				// REASON is a sixth column, appended (#542): empty on every
+				// row that is not needs-repair, and the same capped text
+				// `pr dash` shows (repairReasonLine, which also strips tabs and
+				// newlines, so it cannot add or split a column).
+				_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\t%s\n",
 					s.Ref().String(), s.CreatedAt().Format(time.RFC3339),
 					termsafe.QuotePathIfUnsafe(s.Path()),
 					sessionStatus(live, s, tmuxOK),
-					phaseLabel(s), note)
+					phaseLabel(s), repairReasonLine(s.RepairReason()))
 			}
 			return nil
 		},
@@ -532,6 +530,29 @@ func newPrOpenCmd(client *pr.Client) *cobra.Command {
 	}
 }
 
+// windowKillTimeoutNote is what teardown and cleanup print on stderr when tmux
+// did not answer in time, so the review window's state is unknown. It exists
+// for the same reason as unreadableRecordsNote: the slog warning that also
+// fires lands in a handler a default install discards, and the command's exit
+// would otherwise read as an ordinary failure with nothing removed and nothing
+// explained.
+func windowKillTimeoutNote(target string) string {
+	where := "a session"
+	if target != "" {
+		where = termsafe.QuotePathIfUnsafe(target)
+	}
+	return fmt.Sprintf("tmux did not answer in time, so the review window for %s may still be running: "+
+		"nothing was removed and the record is parked as needs-repair. "+
+		"Once tmux responds, run 'forgectl pr teardown' again, or see 'forgectl pr repair'", where)
+}
+
+// noteWindowKillTimeout prints windowKillTimeoutNote when err is that failure.
+func noteWindowKillTimeout(cmd *cobra.Command, err error, target string) {
+	if errors.Is(err, pr.ErrWindowKillTimedOut) {
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), windowKillTimeoutNote(target))
+	}
+}
+
 func newPrTeardownCmd(client *pr.Client) *cobra.Command {
 	// Deliberately no "close" alias: it collides with Bash(gh pr close:*)
 	// in the reviewer allowlist (internal/pr/allowlist.go) closely enough
@@ -543,6 +564,7 @@ func newPrTeardownCmd(client *pr.Client) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := client.Teardown(cmd.Context(), args[0]); err != nil {
+				noteWindowKillTimeout(cmd, err, args[0])
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "torn down %s\n", args[0])
@@ -561,6 +583,7 @@ func newPrCleanupCmd(client *pr.Client) *cobra.Command {
 				return fmt.Errorf("invalid date %q: want YYYY-MM-DD", args[0])
 			}
 			if err := client.Cleanup(cmd.Context(), args[0]); err != nil {
+				noteWindowKillTimeout(cmd, err, "")
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "cleaned up sessions from %s\n", args[0])

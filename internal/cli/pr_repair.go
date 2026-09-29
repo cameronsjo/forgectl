@@ -123,7 +123,7 @@ changed underfoot stops that file and nothing else.`,
 	cmd.Flags().BoolVar(&yes, "yes", false, "confirm a destructive repair without a terminal prompt")
 	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"items":[…]} to stdout`)
 	cmd.Flags().BoolVar(&history, "history", false,
-		"show the session audit trail (repair, teardown, cleanup) instead of the current state; alias of 'pr history'")
+		"show the session audit trail (repair, teardown, cleanup, prune) instead of the current state; alias of 'pr history'")
 	cmd.Flags().BoolVar(&prune, "prune", false, "remove set-aside records past their retention window and compact the audit log")
 	cmd.Flags().StringVar(&olderThan, "older-than", defaultAsideRetention,
 		"with --prune: how old a set-aside record's name must say it is before it is removed")

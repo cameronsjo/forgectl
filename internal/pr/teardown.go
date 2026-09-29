@@ -44,8 +44,9 @@ var staleMemberIsRegular = func(info fs.FileInfo) bool { return info.Mode().IsRe
 //
 //	membership -> record validation -> workspace classification
 //	  missing -> identity/byte/field recheck -> breadcrumb-ONLY unlink
-//	  live    -> strict live reload -> quarantine restore -> sandbox teardown
-//	          -> best-effort tmux kill -> breadcrumb unlink
+//	  live    -> strict live reload -> bounded tmux kill (a timeout parks the
+//	          record in needs-repair and stops) -> quarantine restore
+//	          -> sandbox teardown -> breadcrumb unlink
 //	  invalid -> refusal
 //
 // The stale decision happens BEFORE any live teardown facility, and the live
@@ -594,6 +595,15 @@ func sameBreadcrumbRecord(a, b Breadcrumb) bool {
 		a.RepairReason == b.RepairReason
 }
 
+// ErrWindowKillTimedOut is what a live teardown returns when tmux did not
+// answer within teardownTmuxBudget, so it cannot say whether the review window
+// still exists. The record has been parked in needs-repair and the workspace
+// left in place; nothing was discarded.
+var ErrWindowKillTimedOut = errors.New("review window kill timed out (tmux unresponsive)")
+
+// windowKillTimeoutReason is the needs-repair reason such a record carries.
+const windowKillTimeoutReason = "window kill timed out (tmux unresponsive)"
+
 // teardownTmuxBudget bounds ALL the tmux work one teardown does under the
 // lifecycle lock — resolve the review session, resolve the window, revalidate
 // it, kill it — as a single deadline, not per call (forgectl#556).
@@ -611,48 +621,56 @@ func sameBreadcrumbRecord(a, b Breadcrumb) bool {
 // machine, while staying well under defaultLockWait (10 s) — a verb queued
 // behind one hung teardown still acquires the lock once the budget lapses,
 // instead of timing out with it. A single shared budget, not one per call, so
-// the worst case is 3 s rather than 4 x that. It is a var only so a test can
-// shrink it.
+// the deadline is 3 s rather than 4 x that.
+//
+// The deadline only bounds the tmux CLIENT process's lifetime if the runner
+// also stops waiting on pipes a grandchild inherited: exec's pipeWaitDelay adds
+// up to 500 ms on top for that. It is a var only so a test can shrink it.
 var teardownTmuxBudget = 3 * time.Second
 
-// killReviewWindowBestEffort kills the review window if it is still open, within
-// teardownTmuxBudget. Resolution is exact — the window must carry this review's
-// name AND sit under the review session's native id — and the kill revalidates
-// that before issuing. A failure to resolve means there is nothing of ours to
-// kill, which is the ordinary case after the reviewer exits; it must never
-// widen into killing whatever tmux would have matched. A timeout is treated the
-// same way: teardown proceeds, and the worst outcome is a window left running
-// after its record is gone, which tmux itself still lists.
+// killReviewWindow kills the review window if it is still open, within
+// teardownTmuxBudget, and reports whether the budget ran out before tmux could
+// say what state the window is in. Resolution is exact — the window must carry
+// this review's name AND sit under the review session's native id — and the
+// kill revalidates that before issuing. A failure to resolve means there is
+// nothing of ours to kill, which is the ordinary case after the reviewer exits;
+// it must never widen into killing whatever tmux would have matched. Other
+// kill failures stay best-effort, as before.
 //
-// The bounded context is used ONLY here; the caller's own ctx continues on to
-// the breadcrumb removal, so a spent budget cannot fail the teardown.
-func (c *Client) killReviewWindowBestEffort(ctx context.Context, ref Ref) {
+// A timeout (or the caller's cancellation, which leaves the window just as
+// unknown) is NOT treated as "nothing to kill": the window may be live, and
+// window names depend only on owner/repo/number, so discarding the record
+// would leave an orphan that a later same-ref review, teardown or repair could
+// collide with. The caller fails closed on true.
+//
+// The bounded context is used ONLY here; the caller's own ctx continues on.
+func (c *Client) killReviewWindow(ctx context.Context, ref Ref) (timedOut bool) {
 	tctx, cancel := context.WithTimeout(ctx, teardownTmuxBudget)
 	defer cancel()
 	window, err := c.resolveReviewWindow(tctx, ref)
 	if err != nil {
+		if tctx.Err() != nil {
+			slog.Warn("Timed out resolving the review window under the lifecycle lock.", "budget", teardownTmuxBudget)
+			return true
+		}
 		// The name is diagnostic only here; a ref that cannot even be keyed logs
 		// as such rather than shadowing the resolve failure being reported.
 		name, nameErr := ReviewWindowName(ref)
 		if nameErr != nil {
 			name = "<no derivable identity>"
 		}
-		if errors.Is(tctx.Err(), context.DeadlineExceeded) {
-			slog.Warn("Timed out resolving the review window under the lifecycle lock; leaving it.",
-				"window", name, "budget", teardownTmuxBudget)
-			return
-		}
 		slog.Debug("No review window to kill (already gone).", "window", name, "error", err)
-		return
+		return false
 	}
 	if err := c.tmuxClient.KillWindow(tctx, window); err != nil {
-		if errors.Is(tctx.Err(), context.DeadlineExceeded) {
-			slog.Warn("Timed out killing the review window under the lifecycle lock; it may still be running.",
+		if tctx.Err() != nil {
+			slog.Warn("Timed out killing the review window under the lifecycle lock.",
 				"window_id", window.ID, "budget", teardownTmuxBudget)
-			return
+			return true
 		}
 		slog.Debug("Review window could not be killed.", "window_id", window.ID, "error", err)
 	}
+	return false
 }
 
 // discard performs the actual teardown for an already-validated session: undo
@@ -662,7 +680,23 @@ func (c *Client) killReviewWindowBestEffort(ctx context.Context, ref Ref) {
 func (c *Client) discard(ctx context.Context, sess Session) error {
 	slog.Debug("Preparing to tear down review session.", "ref", sess.Ref.String(), "workspace", sess.Workspace)
 
-	// Restore quarantined files first, while the workspace still exists.
+	// The window goes first, so a tmux that cannot answer stops the teardown
+	// BEFORE anything is removed. Failing closed here means parking the record
+	// in needs-repair with the workspace intact: the record and the clean room
+	// are what let the operator find and finish this later, and window names
+	// depend only on owner/repo/number, so discarding them on an unknown window
+	// state could leave a live orphan that a re-review collides with. The lock
+	// is held, so the *Locked park is the right form.
+	if c.killReviewWindow(ctx, sess.Ref) {
+		if sess.Path != "" {
+			if err := c.markNeedsRepairLocked(sess.Path, windowKillTimeoutReason); err != nil {
+				return fmt.Errorf("%w; and the record could not be parked in needs-repair: %w", ErrWindowKillTimedOut, err)
+			}
+		}
+		return ErrWindowKillTimedOut
+	}
+
+	// Restore quarantined files, while the workspace still exists.
 	// ExpandTargets is the same call sandboxAndQuarantine made, and it finds a
 	// nested target by its RENAMED form as readily as its original — so the
 	// stable logical target list and move graph recomputed here match the ones
@@ -683,8 +717,6 @@ func (c *Client) discard(ctx context.Context, sess Session) error {
 	if err := sandboxTeardown(ctx, c.run, sess.Workspace); err != nil {
 		return fmt.Errorf("teardown workspace: %w", err)
 	}
-
-	c.killReviewWindowBestEffort(ctx, sess.Ref)
 
 	if sess.Path != "" {
 		if err := os.Remove(sess.Path); err != nil && !os.IsNotExist(err) {

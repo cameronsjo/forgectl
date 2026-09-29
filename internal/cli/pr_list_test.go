@@ -21,8 +21,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 
@@ -275,11 +277,12 @@ func TestPrList_MixedBatchesOnlyLiveRefs(t *testing.T) {
 	if liveLine == "" || staleLine == "" {
 		t.Fatalf("both rows must render:\n%s", got)
 	}
-	// Status is field 4; phase (field 5) is "-" on these legacy records.
-	if !strings.HasSuffix(liveLine, "\t?\t-") {
+	// Status is field 4; phase (field 5) is "-" on these legacy records; the
+	// reason (field 6) is empty.
+	if !strings.HasSuffix(liveLine, "\t?\t-\t") {
 		t.Errorf("the live row must degrade to %q under an unreadable tmux: %q", "?", liveLine)
 	}
-	if !strings.HasSuffix(staleLine, "\t"+workspaceMissingStatus+"\t-") {
+	if !strings.HasSuffix(staleLine, "\t"+workspaceMissingStatus+"\t-\t") {
 		t.Errorf("the stale row must report %q regardless of tmux: %q", workspaceMissingStatus, staleLine)
 	}
 }
@@ -343,7 +346,7 @@ func TestPrList_LiveWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pr list: %v", err)
 	}
-	if !strings.Contains(got, "\tlive\tprepared\n") {
+	if !strings.Contains(got, "\tlive\tprepared\t\n") {
 		t.Errorf("pr list output missing the \"live\" status column (field 4) before the phase column:\n%s", got)
 	}
 	if !strings.Contains(got, ref.String()) {
@@ -357,8 +360,8 @@ func TestPrList_LiveWindow(t *testing.T) {
 	// assertion here, and still hand `cut -f3` a timestamp.
 	line := strings.TrimSuffix(got, "\n")
 	fields := strings.Split(line, "\t")
-	if len(fields) != 5 {
-		t.Fatalf("pr list row has %d tab-separated fields, want exactly 5 (ref, created, breadcrumb, status, phase):\n%s", len(fields), got)
+	if len(fields) != 6 {
+		t.Fatalf("pr list row has %d tab-separated fields, want exactly 6 (ref, created, breadcrumb, status, phase, reason):\n%s", len(fields), got)
 	}
 	if fields[0] != ref.String() {
 		t.Errorf("field 1 = %q, want the ref %q", fields[0], ref.String())
@@ -403,7 +406,7 @@ func TestPrList_UnreadableTmux_DegradesAndSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pr list must succeed when tmux is unreadable, got: %v", err)
 	}
-	if !strings.Contains(got, "\t?\tprepared\n") {
+	if !strings.Contains(got, "\t?\tprepared\t\n") {
 		t.Errorf("pr list output missing the \"?\" status (field 4) for an unreadable tmux:\n%s", got)
 	}
 	if strings.Contains(got, "window gone") {
@@ -439,9 +442,9 @@ func listOverPhased(t *testing.T, recs []phasedRecord) (human string, jsonRows [
 
 // TestPrList_ShowsWhyASessionNeedsRepair is forgectl#542: the reason `pr dash`
 // and `pr repair` show must be on `pr list` too, worded and capped identically,
-// in both the human row (a suffix after the five columns) and --json.
+// in both the human row (a sixth column) and --json.
 func TestPrList_ShowsWhyASessionNeedsRepair(t *testing.T) {
-	long := "launch failed: " + strings.Repeat("stderr noise ", 100)
+	long := "launch failed:\tx\ny " + strings.Repeat("stderr noise ", 100)
 	repairRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 41}
 	queuedRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 43}
 	human, rows, summaries := listOverPhased(t, []phasedRecord{
@@ -464,8 +467,8 @@ func TestPrList_ShowsWhyASessionNeedsRepair(t *testing.T) {
 		t.Errorf("a queued row carries repair_reason %q, want empty", got)
 	}
 
-	// The suffix must be exactly what dash appends for the same summary, and
-	// must sit after five tab columns.
+	// REASON is the sixth tab-separated column, the dash-capped text on a
+	// needs-repair row and empty elsewhere; the first five are untouched.
 	for _, s := range summaries {
 		var line string
 		for _, l := range strings.Split(human, "\n") {
@@ -476,15 +479,68 @@ func TestPrList_ShowsWhyASessionNeedsRepair(t *testing.T) {
 		if line == "" {
 			t.Fatalf("no human row for %s:\n%s", s.Ref(), human)
 		}
-		if got := strings.Count(line, "\t"); got != 4 {
-			t.Errorf("%s: %d tabs, want 4 (five columns): %q", s.Ref(), got, line)
+		cols := strings.Split(line, "\t")
+		if len(cols) != 6 {
+			t.Fatalf("%s: %d columns, want 6: %q", s.Ref(), len(cols), line)
 		}
+		if cols[4] != phaseLabel(s) {
+			t.Errorf("%s: field 5 = %q, want the phase %q unchanged", s.Ref(), cols[4], phaseLabel(s))
+		}
+		wantReason := ""
 		if s.Phase() == pr.PhaseNeedsRepair {
-			if note := phaseNote(s); !strings.HasSuffix(line, phaseLabel(s)+note) {
-				t.Errorf("%s: row %q does not end with dash's note %q", s.Ref(), line, note)
-			}
-		} else if strings.Contains(line, "[") {
-			t.Errorf("%s: a non-needs-repair row grew a suffix: %q", s.Ref(), line)
+			wantReason = want
 		}
+		if cols[5] != wantReason {
+			t.Errorf("%s: field 6 = %q, want %q", s.Ref(), cols[5], wantReason)
+		}
+	}
+}
+
+// blockingTmux is a Runner whose tmux calls hang until their context ends.
+type blockingTmux struct{ *exec.FakeRunner }
+
+func (b blockingTmux) Run(ctx context.Context, name string, args ...string) (string, error) {
+	if name == "tmux" {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	return b.FakeRunner.Run(ctx, name, args...)
+}
+
+// TestPrTeardown_NotesAnUnresponsiveTmuxOnStderr: when tmux never answers, the
+// window's state is unknown, so teardown removes nothing, parks the record, and
+// says so on stderr — the slog warning alone is discarded by default.
+func TestPrTeardown_NotesAnUnresponsiveTmuxOnStderr(t *testing.T) {
+	dir := t.TempDir()
+	ws, err := os.MkdirTemp("", "forgectl-workflow-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(ws) })
+	path := seedRepairRecord(t, dir, "o/r#1", "prepared", ws)
+	client := pr.New(blockingTmux{&exec.FakeRunner{}}, pr.WithSessionsDir(dir), pr.WithTmuxSession("forgectl"),
+		pr.WithTTYCheck(func() bool { return false }))
+
+	cmd := newPrTeardownCmd(client)
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{path})
+	// The parent deadline stands in for the package's own (unexported) budget:
+	// either way the tmux call is cut off and its state is unknown.
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	err = cmd.ExecuteContext(ctx)
+	if !errors.Is(err, pr.ErrWindowKillTimedOut) {
+		t.Fatalf("err = %v, want ErrWindowKillTimedOut", err)
+	}
+	if !strings.Contains(errOut.String(), "may still be running") || !strings.Contains(errOut.String(), "needs-repair") {
+		t.Errorf("stderr = %q, want the unresponsive-tmux note", errOut.String())
+	}
+	if _, serr := os.Stat(ws); serr != nil {
+		t.Errorf("workspace was removed: %v", serr)
+	}
+	if strings.Contains(out.String(), "torn down") {
+		t.Errorf("stdout claims a teardown: %q", out.String())
 	}
 }

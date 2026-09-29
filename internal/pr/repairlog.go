@@ -515,9 +515,10 @@ func (c *Client) readRepairLogTail(limit int) (rows []RepairRow, omitted, skippe
 // still unpaired. An intent always precedes its completion in the file, and
 // the ring displaces oldest first, so a displaced intent's completion is either
 // still in the ring when the pass ends (checked at the end) or was displaced
-// too (cancelled in displaced, which runs after the intent's own displacement). trackCap bounds the
-// map of displaced intent IDs; past it an intent is counted but not tracked, so
-// it can no longer be cancelled and the total is reported as a lower bound.
+// too (cancelled in displaced, which runs after the intent's own displacement).
+// trackCap bounds the map of displaced intent IDs. Past it a displaced intent is
+// neither tracked nor counted — it is dropped — and unpairedCapped records that
+// the total is therefore only a lower bound.
 func (c *Client) scanRepairLogTail(limit, trackCap int) (tail repairTail, err error) {
 	if limit < 1 {
 		limit = 1

@@ -578,11 +578,37 @@ func (h *hangingTmux) Run(ctx context.Context, name string, args ...string) (str
 	return h.FakeRunner.Run(ctx, name, args...)
 }
 
-// TestTeardown_HungTmuxIsBoundedAndReleasesTheLock is forgectl#556. The tmux
-// kill stays under the lifecycle lock, so a wedged tmux must be cut off by
-// teardownTmuxBudget: teardown finishes its local work, the lock is free again
-// afterwards, and it does not wait on the caller's (unbounded) context.
-func TestTeardown_HungTmuxIsBoundedAndReleasesTheLock(t *testing.T) {
+// assertParkedNotDiscarded checks the fail-closed outcome of a teardown whose
+// tmux never answered: the error says so, the record is still there parked in
+// needs-repair with the exact reason, the workspace is untouched, and the lock
+// is free again.
+func assertParkedNotDiscarded(t *testing.T, c *Client, path, ws string, err error) {
+	t.Helper()
+	if !errors.Is(err, ErrWindowKillTimedOut) {
+		t.Fatalf("Teardown err = %v, want ErrWindowKillTimedOut", err)
+	}
+	if _, serr := os.Stat(ws); serr != nil {
+		t.Errorf("the workspace must be kept while the window state is unknown: %v", serr)
+	}
+	bc := readRecord(t, path)
+	if bc.Phase != PhaseNeedsRepair || bc.RepairReason != "window kill timed out (tmux unresponsive)" {
+		t.Errorf("record = phase %q reason %q, want needs-repair with the timeout reason", bc.Phase, bc.RepairReason)
+	}
+	start := time.Now()
+	if lerr := c.withLifecycleLock(context.Background(), "probe", func() error { return nil }); lerr != nil {
+		t.Fatalf("lifecycle lock still held after teardown: %v", lerr)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("re-acquiring the lock took %v", d)
+	}
+}
+
+// TestTeardown_HungTmuxParksTheRecordAndReleasesTheLock is forgectl#556. The
+// tmux kill stays under the lifecycle lock, so a wedged tmux must be cut off by
+// teardownTmuxBudget, and because the window's state is then unknown the
+// teardown fails closed: it parks the record in needs-repair and removes
+// nothing, rather than discarding a record whose window may still be live.
+func TestTeardown_HungTmuxParksTheRecordAndReleasesTheLock(t *testing.T) {
 	old := teardownTmuxBudget
 	teardownTmuxBudget = 100 * time.Millisecond
 	t.Cleanup(func() { teardownTmuxBudget = old })
@@ -597,38 +623,54 @@ func TestTeardown_HungTmuxIsBoundedAndReleasesTheLock(t *testing.T) {
 			c := New(h, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
 				WithApprover(func(string) (bool, error) { return false, nil }),
 				WithTTYCheck(func() bool { return false }))
-			path, ws := seedSession(t, c, ref, time.Now().UTC())
+			ws := fakeWorkspace(t)
+			path := seedPhaseRecord(t, c, ref, PhasePrepared, ws)
 
 			done := make(chan error, 1)
 			go func() { done <- c.Teardown(context.Background(), path) }()
 			select {
 			case err := <-done:
-				if err != nil {
-					t.Fatalf("a hung best-effort tmux kill must not fail the teardown: %v", err)
-				}
+				assertParkedNotDiscarded(t, c, path, ws, err)
 			case <-time.After(5 * time.Second):
 				t.Fatal("Teardown is still blocked on tmux; the lock would be held indefinitely")
-			}
-			if _, err := os.Stat(path); !os.IsNotExist(err) {
-				t.Error("breadcrumb should be removed even though tmux hung")
-			}
-			if _, err := os.Stat(ws); !os.IsNotExist(err) {
-				t.Error("workspace should be removed even though tmux hung")
-			}
-			// The lock must be free: a second acquisition returns at once
-			// rather than waiting out its own bounded wait.
-			start := time.Now()
-			if err := c.withLifecycleLock(context.Background(), "probe", func() error { return nil }); err != nil {
-				t.Fatalf("lifecycle lock still held after teardown: %v", err)
-			}
-			if d := time.Since(start); d > time.Second {
-				t.Errorf("re-acquiring the lock took %v", d)
 			}
 			if _, ok := findCallVerb(h.FakeRunner.Calls, "tmux", firstNonEmpty(tc.hang, "list-sessions")); !ok {
 				t.Errorf("the hanging tmux call was never issued; the test did not exercise the bound: %+v", h.FakeRunner.Calls)
 			}
 		})
 	}
+}
+
+// TestTeardown_RealTmuxGrandchildHoldingThePipesIsBounded reproduces the
+// reviewer's case with a REAL exec.OSRunner: a `tmux` whose script forks a
+// sleeping grandchild that inherits the output pipes. CommandContext's SIGKILL
+// only reaches the script, so without exec's WaitDelay Wait blocks until the
+// grandchild exits — long past the budget, with the lock held.
+func TestTeardown_RealTmuxGrandchildHoldingThePipesIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\nsleep 6 &\nwait\n"
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o700); err != nil { //nolint:gosec // test-owned script
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	old := teardownTmuxBudget
+	teardownTmuxBudget = 300 * time.Millisecond
+	t.Cleanup(func() { teardownTmuxBudget = old })
+
+	ref := Ref{Owner: "o", Repo: "r", Number: 23}
+	c := New(exec.OSRunner{}, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+		WithApprover(func(string) (bool, error) { return false, nil }),
+		WithTTYCheck(func() bool { return false }))
+	ws := fakeWorkspace(t)
+	path := seedPhaseRecord(t, c, ref, PhasePrepared, ws)
+
+	start := time.Now()
+	err := c.Teardown(context.Background(), path)
+	// budget + WaitDelay (500 ms) + slack; the grandchild sleeps 6 s.
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("Teardown took %v: a grandchild holding the pipes defeated the tmux budget", d)
+	}
+	assertParkedNotDiscarded(t, c, path, ws, err)
 }
 
 // TestTeardown_KillWindowRunsUnderTheLifecycleLock pins the #556 decision to
