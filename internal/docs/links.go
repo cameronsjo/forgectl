@@ -89,6 +89,9 @@ type LinkRef struct {
 	// Obsidian embed is Form == FormEmbed — there is no separate flag to
 	// keep in step with it.
 	Form LinkForm
+	// Line is the 1-based line of the link's opening bracket in the file as
+	// written, frontmatter included; 0 when the parser gave no position.
+	Line int
 }
 
 // Heading is one heading scanDoc found in a document: its rendered text and

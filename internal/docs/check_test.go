@@ -17,6 +17,12 @@ package docs
 //   [x] Unhappy: a symlink escaping the root is broken, not "exists"
 //   [x] Unhappy: an unlinked doc is an orphan; the root README is not
 //   [x] Happy: a README in a subdirectory is not a root index
+//   [x] Happy: a directory link counts as inbound to that directory's README
+//       or index page (any case, relative or root-relative); a sibling doc
+//       in the directory is still an orphan
+//   [x] Unhappy: a README's own "./" link does not make it inbound
+//   [x] Happy: a link finding carries the source line of the file as written,
+//       frontmatter lines included
 //   [x] Happy: an out-of-root link is counted, never reported
 //   [x] Happy: a vault root is skipped and reported as unchecked
 //   [x] Happy: a single-file root has no orphans
@@ -230,6 +236,52 @@ func TestCheck_SubdirReadmeIsNotRootIndex(t *testing.T) {
 	got := findingsOf(r, FindingOrphan)
 	if len(got) != 1 || got[0].Path != "sub/README.md" {
 		t.Fatalf("orphan findings = %+v, want sub/README.md only", got)
+	}
+}
+
+func TestCheck_DirectoryLinkCountsAsIndexInbound(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[plans](plans/)\n")
+	// Root-relative, from a subdirectory: resolves against the root, not plans/.
+	checkWrite(t, filepath.Join(dir, "plans", "README.md"), "# Plans\n\n[guides](/guides)\n")
+	checkWrite(t, filepath.Join(dir, "plans", "other.md"), "# Other\n")
+	checkWrite(t, filepath.Join(dir, "guides", "Index.md"), "# Guides\n")
+
+	r := checkIndex(t, dir).Check()
+	got := findingsOf(r, FindingOrphan)
+	if len(got) != 1 || got[0].Path != "plans/other.md" {
+		t.Fatalf("orphan findings = %+v, want plans/other.md only", got)
+	}
+	if n := len(findingsOf(r, FindingBrokenLink)); n != 0 {
+		t.Errorf("broken_link findings = %d, want 0 for directory links", n)
+	}
+}
+
+func TestCheck_ReadmeSelfDirectoryLinkIsNotInbound(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n")
+	checkWrite(t, filepath.Join(dir, "sub", "README.md"), "# Sub\n\n[here](./)\n")
+
+	r := checkIndex(t, dir).Check()
+	got := findingsOf(r, FindingOrphan)
+	if len(got) != 1 || got[0].Path != "sub/README.md" {
+		t.Fatalf("orphan findings = %+v, want sub/README.md", got)
+	}
+}
+
+func TestCheck_LinkFindingCarriesSourceLine(t *testing.T) {
+	dir := t.TempDir()
+	// Frontmatter is lines 1-3; the broken links sit on file lines 7 and 9.
+	checkWrite(t, filepath.Join(dir, "README.md"),
+		"---\ntitle: R\n---\n# R\n\ntext\nsee [gone](missing.md)\n\n[bad](README.md#nope)\n")
+
+	r := checkIndex(t, dir).Check()
+	lines := map[string]int{}
+	for _, f := range r.Findings {
+		lines[f.Target] = f.Line
+	}
+	if lines["missing.md"] != 7 || lines["README.md#nope"] != 9 {
+		t.Errorf("finding lines = %v, want missing.md:7 and README.md#nope:9", lines)
 	}
 }
 

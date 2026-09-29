@@ -147,6 +147,17 @@ func scanDocFor(kind RootKind, absPath, relPath string) (docMeta, error) {
 	if err != nil {
 		return docMeta{}, fmt.Errorf("scan %s: %w", relPath, err)
 	}
+	// scanBodyFor numbers lines within body; shift them past the stripped
+	// frontmatter so each Line is the line in the file as written. body is
+	// always a suffix of source that starts a line, so the lines before it
+	// are exactly the newlines before it.
+	if fmLines := bytes.Count(source[:len(source)-len(body)], []byte("\n")); fmLines > 0 {
+		for i := range scan.links {
+			if scan.links[i].Line > 0 {
+				scan.links[i].Line += fmLines
+			}
+		}
+	}
 	blockIDs := scanBlockIDs(body, scan.masked, scan.hidden)
 	if kind == RootVault {
 		title = vaultTitle(source, len(source)-len(body), body, scan.h1s)
@@ -323,6 +334,7 @@ func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 	var links []LinkRef
 	var code, hidden []text.Segment
 	var h1s []h1Candidate
+	lines := lineIndex{src: body}
 
 	err := ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
@@ -385,7 +397,9 @@ func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 			})
 		case wikilink.Kind:
 			if wl, ok := n.(*wikilink.Node); ok {
-				links = append(links, wikilinkRef(wl, body))
+				ref := wikilinkRef(wl, body)
+				ref.Line = lines.lineOf(n)
+				links = append(links, ref)
 			}
 		case ast.KindLink:
 			l, ok := n.(*ast.Link)
@@ -412,6 +426,7 @@ func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 				Path:     path0,
 				Fragment: frag0,
 				Form:     FormRelPath,
+				Line:     lines.lineOf(n),
 			})
 		}
 		return ast.WalkContinue, nil
@@ -425,6 +440,39 @@ func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 	hidden = append(hidden, removedComments(ctx)...)
 
 	return bodyScan{headings: headings, links: links, masked: code, hidden: hidden, h1s: h1s}, nil
+}
+
+// lineIndex maps a byte offset in src to its 1-based line number. The
+// line-start table is built on first use, so a document without links pays
+// nothing, and each lookup is a binary search rather than a rescan.
+type lineIndex struct {
+	src    []byte
+	starts []int
+}
+
+// lineOf returns the 1-based line of n's source position: the '[' that opens
+// a link. An inline node the parser left unpositioned takes its nearest
+// positioned ancestor's line; 0 means no position was found.
+func (li *lineIndex) lineOf(n ast.Node) int {
+	for ; n != nil; n = n.Parent() {
+		if p := n.Pos(); p >= 0 {
+			return li.line(p)
+		}
+	}
+	return 0
+}
+
+func (li *lineIndex) line(offset int) int {
+	if li.starts == nil {
+		li.starts = []int{0}
+		for i, b := range li.src {
+			if b == '\n' {
+				li.starts = append(li.starts, i+1)
+			}
+		}
+	}
+	// The count of line starts at or before offset is its 1-based line.
+	return sort.Search(len(li.starts), func(i int) bool { return li.starts[i] > offset })
 }
 
 // vaultTitle is firstH1's rule applied to the parsed document instead of raw

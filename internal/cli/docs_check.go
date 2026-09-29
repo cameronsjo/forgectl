@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -80,7 +81,11 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 			} else {
 				out := cmd.OutOrStdout()
 				for _, f := range report.Findings {
-					line := termsafe.SafeLine(f.Root) + "/" + termsafe.SafeLine(f.Path) + ": " + string(f.Kind)
+					line := termsafe.SafeLine(f.Root) + "/" + termsafe.SafeLine(f.Path)
+					if f.Line > 0 {
+						line += ":" + strconv.Itoa(f.Line)
+					}
+					line += ": " + string(f.Kind)
 					if f.Target != "" {
 						line += " " + termsafe.SafeLine(f.Target)
 					}

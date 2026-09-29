@@ -4,7 +4,8 @@ package cli
 //
 // newDocsCheckCmd (Classification: API handler / cobra command)
 //   [x] Happy: a clean tree exits 0 with no output
-//   [x] Unhappy: a seeded broken link exits 1 and prints the finding
+//   [x] Unhappy: a seeded broken link exits 1 and prints the finding as
+//       path:line
 //   [x] Unhappy: a seeded orphan exits 1
 //   [x] Happy: --json key sets are frozen at the top, finding, summary, and
 //       root levels (ADR-0008 rule 2: additive only)
@@ -95,7 +96,7 @@ func TestDocsCheckCmd_SeededBrokenLinkExits1(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
-	if !strings.Contains(stdout, "README.md: broken_link missing.md") {
+	if !strings.Contains(stdout, "README.md:3: broken_link missing.md") {
 		t.Errorf("stdout = %q, want the broken_link line", stdout)
 	}
 }
@@ -148,7 +149,7 @@ func TestDocsCheckCmd_JSONSchemaFrozen(t *testing.T) {
 	if f, ok := byKind["broken_link"]; !ok {
 		t.Error("no broken_link finding in the report")
 	} else {
-		assertKeys(t, "link finding", f, "kind", "root", "path", "target")
+		assertKeys(t, "link finding", f, "kind", "root", "path", "target", "line")
 	}
 	if f, ok := byKind["orphan"]; !ok {
 		t.Error("no orphan finding in the report")

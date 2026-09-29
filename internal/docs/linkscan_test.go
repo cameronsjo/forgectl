@@ -174,6 +174,36 @@ func TestScanDoc_RelativeMarkdownLinksInRepoIndex(t *testing.T) {
 	}
 }
 
+func TestScanDoc_LinkLineCountsFrontmatter(t *testing.T) {
+	for _, tc := range []struct {
+		name, src string
+		want      []int
+	}{
+		{"none", "[a](a.md)\n\ntext [b](b.md) [[c]]\n", []int{1, 3, 3}},
+		{"yaml", "---\nk: v\n---\n[a](a.md)\n\ntext [b](b.md) [[c]]\n", []int{4, 6, 6}},
+		{"toml", "+++\nk = 1\n+++\n\n[a](a.md)\n[b](b.md)\n[[c]]\n", []int{5, 6, 7}},
+		{"crlf", "---\r\nk: v\r\n---\r\n[a](a.md)\r\n\r\n[b](b.md)\r\n[[c]]\r\n", []int{4, 6, 7}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "p.md")
+			if err := os.WriteFile(p, []byte(tc.src), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			meta, err := scanDoc(p, "p.md")
+			if err != nil {
+				t.Fatalf("scanDoc: %v", err)
+			}
+			got := make([]int, 0, len(meta.Links))
+			for _, l := range meta.Links {
+				got = append(got, l.Line)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("link lines = %v, want %v (links %+v)", got, tc.want, meta.Links)
+			}
+		})
+	}
+}
+
 func TestScanDoc_PercentEncodedDestinationIsDecoded(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "page.md")
