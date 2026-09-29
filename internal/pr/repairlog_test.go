@@ -12,7 +12,9 @@ package pr
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -307,5 +309,104 @@ func TestComposeRepairActor_CutsOnARuneBoundary(t *testing.T) {
 	}
 	if strings.ContainsRune(back.Actor, utf8.RuneError) {
 		t.Errorf("actor carries U+FFFD, so json.Marshal rewrote bytes the field was supposed to preserve: %q", back.Actor)
+	}
+}
+
+// readRepairLog is the unbounded read the older tests were written against: the
+// tail reader with a limit nothing reaches.
+func (c *Client) readRepairLog() ([]RepairRow, error) {
+	rows, _, err := c.readRepairLogTail(math.MaxInt)
+	return rows, err
+}
+
+func writeRepairLogRaw(t *testing.T, c *Client, content string) {
+	t.Helper()
+	if err := os.WriteFile(c.repairLogPath(), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func repairRowLine(t *testing.T, row RepairRow) string {
+	t.Helper()
+	data, err := json.Marshal(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data) + "\n"
+}
+
+func TestReadRepairLogTail_KeepsTheNewestRowsInOrder(t *testing.T) {
+	c := testClient(t, nil)
+	var log strings.Builder
+	for i := 0; i < 8; i++ {
+		log.WriteString(repairRowLine(t, RepairRow{ID: fmt.Sprintf("r%d", i)}))
+	}
+	writeRepairLogRaw(t, c, log.String())
+
+	rows, omitted, err := c.readRepairLogTail(3)
+	if err != nil {
+		t.Fatalf("readRepairLogTail: %v", err)
+	}
+	var ids []string
+	for _, r := range rows {
+		ids = append(ids, r.ID)
+	}
+	if want := []string{"r5", "r6", "r7"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("ids = %v, want the newest three oldest-first %v", ids, want)
+	}
+	if omitted != 5 {
+		t.Errorf("omitted = %d, want 5", omitted)
+	}
+}
+
+func TestReadRepairLogTail_SkipsAnOverLongLineAndKeepsTheRest(t *testing.T) {
+	c := testClient(t, nil)
+	writeRepairLogRaw(t, c, repairRowLine(t, RepairRow{ID: "before"})+
+		strings.Repeat("x", 9000)+"\n"+
+		repairRowLine(t, RepairRow{ID: "after"}))
+
+	rows, omitted, err := c.readRepairLogTail(10)
+	if err != nil {
+		t.Fatalf("an over-long line must not fail the read: %v", err)
+	}
+	if len(rows) != 2 || rows[0].ID != "before" || rows[1].ID != "after" {
+		t.Errorf("rows = %+v, want before and after", rows)
+	}
+	if omitted != 0 {
+		t.Errorf("omitted = %d, want 0: a skipped line is not an omitted row", omitted)
+	}
+}
+
+func TestReadRepairLogTail_AcceptsARowAtExactlyTheLineLimit(t *testing.T) {
+	c := testClient(t, nil)
+	row := RepairRow{ID: "big", Detail: "a"}
+	base := repairRowLine(t, row)
+	row.Detail = strings.Repeat("a", 1+maxRepairLogLineBytes-len(base))
+	big := repairRowLine(t, row)
+	if len(big) != maxRepairLogLineBytes {
+		t.Fatalf("fixture line is %d bytes, want exactly %d", len(big), maxRepairLogLineBytes)
+	}
+	writeRepairLogRaw(t, c, big+repairRowLine(t, RepairRow{ID: "next"}))
+
+	rows, _, err := c.readRepairLogTail(10)
+	if err != nil {
+		t.Fatalf("readRepairLogTail: %v", err)
+	}
+	if len(rows) != 2 || rows[0].ID != "big" || rows[1].ID != "next" {
+		t.Errorf("rows = %d, want the at-limit row and the next one", len(rows))
+	}
+}
+
+func TestReadRepairLogTail_ReadsAFinalLineWithNoNewline(t *testing.T) {
+	c := testClient(t, nil)
+	writeRepairLogRaw(t, c, repairRowLine(t, RepairRow{ID: "a"})+
+		strings.TrimSuffix(repairRowLine(t, RepairRow{ID: "b"}), "\n"))
+
+	rows, _, err := c.readRepairLogTail(10)
+	if err != nil {
+		t.Fatalf("readRepairLogTail: %v", err)
+	}
+	if len(rows) != 2 || rows[1].ID != "b" {
+		t.Errorf("rows = %+v, want the unterminated final row kept", rows)
 	}
 }
