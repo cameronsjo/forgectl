@@ -21,6 +21,8 @@ package docs
 //       or index page (any case, relative or root-relative); a sibling doc
 //       in the directory is still an orphan
 //   [x] Unhappy: a README's own "./" link does not make it inbound
+//   [x] Happy: "sub/" and "/sub/." count for sub/README.md even when a
+//       sub.md sits beside the directory, and leave that sub.md an orphan
 //   [x] Happy: a link finding carries the source line of the file as written,
 //       frontmatter lines included
 //   [x] Happy: an out-of-root link is counted, never reported
@@ -256,6 +258,22 @@ func TestCheck_DirectoryLinkCountsAsIndexInbound(t *testing.T) {
 	}
 	if n := len(findingsOf(r, FindingBrokenLink)); n != 0 {
 		t.Errorf("broken_link findings = %d, want 0 for directory links", n)
+	}
+}
+
+func TestCheck_TrailingSlashLinkReachesReadmeNotSameStemFile(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[s](sub/) [t](/sub/.)\n")
+	checkWrite(t, filepath.Join(dir, "sub.md"), "# Sub file\n")
+	checkWrite(t, filepath.Join(dir, "sub", "README.md"), "# Sub dir\n")
+
+	r := checkIndex(t, dir).Check()
+	got := findingsOf(r, FindingOrphan)
+	if len(got) != 1 || got[0].Path != "sub.md" {
+		t.Fatalf("orphan findings = %+v, want sub.md only (sub/ is the directory)", got)
+	}
+	if n := len(findingsOf(r, FindingBrokenLink)); n != 0 {
+		t.Errorf("broken_link findings = %d, want 0 for a directory link", n)
 	}
 }
 

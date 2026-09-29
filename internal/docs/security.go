@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -16,10 +17,15 @@ import (
 // interface).
 var ErrOutsideRoot = errors.New("path escapes its configured root")
 
-// ErrNotFound indicates that nothing exists at the requested path under its
-// root. It wraps fs.ErrNotExist, so errors.Is(err, fs.ErrNotExist) holds. It
-// is a denial like ErrOutsideRoot, never a path to serve: it only keeps a
-// missing file from being reported as an escape.
+// ErrNotFound indicates that the requested path is missing, and that os.Root
+// reached the missing component without leaving the root: no symlink or ".."
+// on the way pointed outside it. A path missing beyond a symlink that leaves
+// the root is ErrOutsideRoot instead, whether or not the outside target
+// exists, so the choice between the two errors never reveals anything about
+// the filesystem outside the root. It wraps fs.ErrNotExist, so
+// errors.Is(err, fs.ErrNotExist) holds. It is a denial like ErrOutsideRoot,
+// never a path to serve: it only keeps a missing file from being reported as
+// an escape.
 var ErrNotFound = fmt.Errorf("no such file under its configured root: %w", fs.ErrNotExist)
 
 // ErrDisallowedExt indicates the resolved path's extension is not in the
@@ -81,8 +87,9 @@ func withinRoot(root, candidate string) bool {
 //  3. filepath.EvalSymlinks resolves any symlink IN the joined path — a
 //     symlink living inside root but pointing outside it. Every EvalSymlinks
 //     error denies; it never falls through to serving a not-yet-resolved
-//     path. A missing path (fs.ErrNotExist) denies with ErrNotFound, and
-//     any other failure with ErrOutsideRoot.
+//     path. A missing path (fs.ErrNotExist) is re-resolved through os.Root
+//     (classifyMissing) and denies with ErrNotFound only when the miss lies
+//     inside the root; every other failure denies with ErrOutsideRoot.
 //  4. The resolved path is re-checked against the canonical root with
 //     withinRoot's trailing-separator guard — step 2's Join alone doesn't
 //     catch a symlink hop discovered in step 3.
@@ -96,7 +103,7 @@ func ResolveInRoot(root, rel string) (string, error) {
 
 	resolved, err := filepath.EvalSymlinks(joined)
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", ErrNotFound
+		return "", classifyMissing(root, cleaned)
 	}
 	if err != nil {
 		return "", ErrOutsideRoot
@@ -107,4 +114,33 @@ func ResolveInRoot(root, rel string) (string, error) {
 		return "", ErrOutsideRoot
 	}
 	return resolved, nil
+}
+
+// classifyMissing picks the denial for a path EvalSymlinks reported missing,
+// so the answer never depends on anything outside root. It re-resolves rel
+// (cleaned and rooted at root) through os.Root, which follows symlinks
+// component by component with openat and refuses, before touching the
+// target, any symlink or ".." that would leave the root. An absolute symlink
+// target counts as leaving, even one naming a path inside the root.
+//
+// Only a miss os.Root reaches without leaving the root is ErrNotFound. In
+// go1.26 os.Root reports an escape as a *PathError wrapping the unexported
+// errPathEscapes ("path escapes from parent"), which does not match
+// fs.ErrNotExist, so errors.Is(err, fs.ErrNotExist) is exactly "missing
+// inside the root". Every other result, including os.Root's own 8-symlink
+// limit (ELOOP) and a Stat that now succeeds, is ErrOutsideRoot.
+func classifyMissing(root, rel string) error {
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return ErrOutsideRoot
+	}
+	defer func() { _ = r.Close() }()
+	name := strings.TrimPrefix(rel, string(filepath.Separator))
+	if name == "" {
+		name = "."
+	}
+	if _, err = r.Stat(name); errors.Is(err, fs.ErrNotExist) {
+		return ErrNotFound
+	}
+	return ErrOutsideRoot
 }

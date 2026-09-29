@@ -29,6 +29,11 @@ package docs
 //       from "notes.markdown"
 //   [x] Happy: a root-absolute markdown link ("/guide.md") resolves from
 //       the root, not the linking doc's directory
+//   [x] Unhappy: a docs-root target ending in "/", "/.", "." or ".." is a
+//       directory link and resolves to no doc, never a same-stem sibling
+//       file; without the "/" it still resolves to that file, and "../"
+//       still leaves the root
+//   [x] Happy: a vault root keeps its trailing-"/" resolution unchanged
 
 import (
 	"os"
@@ -397,6 +402,73 @@ func TestResolveLink_DocsRootAbsoluteLinkResolvesFromRoot(t *testing.T) {
 	}
 	if doc, miss := idx.ResolveLink(from, "/../guide.md"); miss != MissNone || doc == nil || doc.RelPath != "guide.md" {
 		t.Errorf("ResolveLink(/../guide.md) = (%+v, %v), want guide.md — a leading slash cannot climb above the root", doc, miss)
+	}
+}
+
+// A trailing "/" is directory intent: "sub/" must not land on sub.md even
+// though path.Clean reduces it to "sub", the same key "sub" looks up.
+func TestResolveLink_DocsTrailingSlashIsDirectoryNotSameStemFile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "sub.md"), "# Sub file\n")
+	writeFile(t, filepath.Join(dir, "sub", "README.md"), "# Sub dir\n")
+	writeFile(t, filepath.Join(dir, "sub", "deep", "n.md"), "# N\n")
+	writeFile(t, filepath.Join(dir, "index.md"), "[s](sub/)\n")
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	label := idx.Roots()[0].Label
+	from := mustFindDoc(t, idx, label, "index.md")
+
+	for _, target := range []string{"sub/", "./sub/", "/sub/", "sub/#x", "sub/.", "sub//"} {
+		if doc, miss := idx.ResolveLink(from, target); miss != MissNoTarget || doc != nil {
+			t.Errorf("ResolveLink(%q) = (%+v, %v), want (nil, MissNoTarget) — a directory link", target, doc, miss)
+		}
+	}
+	// "." from inside sub/ is sub/ itself, not the sibling sub.md.
+	inSub := mustFindDoc(t, idx, label, "sub/README.md")
+	if doc, miss := idx.ResolveLink(inSub, "."); miss != MissNoTarget || doc != nil {
+		t.Errorf("ResolveLink(.) from sub/README.md = (%+v, %v), want (nil, MissNoTarget)", doc, miss)
+	}
+	// ".." from sub/deep/ is sub/ too.
+	inDeep := mustFindDoc(t, idx, label, "sub/deep/n.md")
+	if doc, miss := idx.ResolveLink(inDeep, ".."); miss != MissNoTarget || doc != nil {
+		t.Errorf("ResolveLink(..) from sub/deep/n.md = (%+v, %v), want (nil, MissNoTarget)", doc, miss)
+	}
+	if doc, miss := idx.ResolveLink(from, "sub"); miss != MissNone || doc == nil || doc.RelPath != "sub.md" {
+		t.Errorf("ResolveLink(sub) = (%+v, %v), want sub.md — no slash, no directory intent", doc, miss)
+	}
+	if doc, miss := idx.ResolveLink(from, "../"); miss != MissOutsideRoot || doc != nil {
+		t.Errorf("ResolveLink(../) = (%+v, %v), want MissOutsideRoot", doc, miss)
+	}
+	if got := idx.Backlinks(mustFindDoc(t, idx, label, "sub.md")); len(got) != 0 {
+		t.Errorf("Backlinks(sub.md) = %+v, want none — sub/ does not link sub.md", got)
+	}
+}
+
+// The directory rule is docs-root only: a vault keeps its resolution as it
+// was, trailing "/" and all, so "./sub/" still lands on sub.md there.
+func TestResolveLink_VaultTrailingSlashUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "sub.md"), "# Sub file\n")
+	writeFile(t, filepath.Join(dir, "sub", "README.md"), "# Sub dir\n")
+	writeFile(t, filepath.Join(dir, "index.md"), "[s](./sub/)\n")
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	roots := idx.Roots()
+	if roots[0].Kind != RootVault {
+		t.Fatalf("Kind = %v, want RootVault", roots[0].Kind)
+	}
+	from := mustFindDoc(t, idx, roots[0].Label, "index.md")
+	for _, target := range []string{"./sub/", "sub/", "sub/."} {
+		if doc, miss := idx.ResolveLink(from, target); miss != MissNone || doc == nil || doc.RelPath != "sub.md" {
+			t.Errorf("vault ResolveLink(%q) = (%+v, %v), want sub.md as before", target, doc, miss)
+		}
 	}
 }
 

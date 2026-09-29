@@ -290,6 +290,14 @@ func (idx *Index) resolveDocsDoc(rootIdx *rootIndex, from *Doc, path0 string) (*
 	return idx.pickCandidate(rootIdx.byRel[key])
 }
 
+// namesDirectory reports whether a link path, as authored and before
+// path.Clean, names a directory: its last segment is empty (a trailing "/"),
+// "." or "..".
+func namesDirectory(path0 string) bool {
+	last := path0[strings.LastIndex(path0, "/")+1:]
+	return last == "" || last == "." || last == ".."
+}
+
 // isExplicitlyRelative reports whether a link target was authored relative
 // to the linking document — it starts with "./" or "../". Obsidian resolves
 // such markdown-link paths against the source file's own directory, not
@@ -450,6 +458,13 @@ func (idx *Index) resolveAnchor(from *Doc, path0, fragment string) (*Doc, string
 			doc, miss = idx.resolveVaultDoc(rootIdx, from, path0)
 		} else {
 			doc, miss = idx.resolveDocsDoc(rootIdx, from, path0)
+			// A directory link resolves to no doc. path.Clean has already
+			// dropped the trailing "/" or "/.", so "sub/" looked up "sub"
+			// and could land on a sibling sub.md. Docs roots only: a vault
+			// keeps Obsidian's own fallback chain.
+			if miss != MissOutsideRoot && namesDirectory(path0) {
+				doc, miss = nil, MissNoTarget
+			}
 		}
 		if miss != MissNone {
 			return doc, "", miss
