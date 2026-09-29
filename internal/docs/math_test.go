@@ -3,7 +3,12 @@ package docs
 // Test plan for math.go
 //
 // inline math (Classification: core logic)
-//   [x] Happy: $…$ renders as a math-inline span that keeps its delimiters
+//   [x] Happy: on a VAULT root $…$ renders as a math-inline span that keeps
+//              its delimiters (the single-dollar tests below use vault renders)
+//   [x] Unhappy: on a DOCS root a lone $…$ is never math ($5 and $10, shell
+//                variables, $x$); $$…$$ and ```math fences still are
+//   [x] Unhappy: a docs-root render of single-dollar text is byte-identical to
+//                a pipeline with no single-dollar parser at all
 //   [x] Happy: markdown inside math is left alone (no emphasis, backslashes kept)
 //   [x] Happy: GitHub's $`…`$ form drops the protecting backticks
 //   [x] Happy: a leading currency amount does not stop later math
@@ -58,8 +63,20 @@ import (
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/extension"
 	goldmarkhtml "github.com/yuin/goldmark/renderer/html"
 )
+
+// renderVaultOrFail renders src as a vault-root page, the only root kind where
+// single-dollar inline math is on.
+func renderVaultOrFail(t *testing.T, src string) string {
+	t.Helper()
+	out, err := render([]byte(src), RootVault)
+	if err != nil {
+		t.Fatalf("render(%q, RootVault): %v", src, err)
+	}
+	return out
+}
 
 const (
 	mathSpanOpen = `<span class="math math-inline">`
@@ -67,7 +84,7 @@ const (
 )
 
 func TestRender_Math_InlineKeepsDelimiters(t *testing.T) {
-	out := renderOrFail(t, "Euler $e^{i\\pi}+1=0$.")
+	out := renderVaultOrFail(t, "Euler $e^{i\\pi}+1=0$.")
 
 	if want := mathSpanOpen + `$e^{i\pi}+1=0$</span>`; !strings.Contains(out, want) {
 		t.Errorf("output missing %q: %s", want, out)
@@ -75,7 +92,7 @@ func TestRender_Math_InlineKeepsDelimiters(t *testing.T) {
 }
 
 func TestRender_Math_InlineIsNotMarkdown(t *testing.T) {
-	out := renderOrFail(t, "$a_1 * b_2 * c_3$ and $\\{a\\}$ and $\\$5$")
+	out := renderVaultOrFail(t, "$a_1 * b_2 * c_3$ and $\\{a\\}$ and $\\$5$")
 
 	if strings.Contains(out, "<em>") {
 		t.Errorf("math was parsed as emphasis: %s", out)
@@ -93,7 +110,7 @@ func TestRender_Math_InlineIsNotMarkdown(t *testing.T) {
 }
 
 func TestRender_Math_BacktickFormDropsBackticks(t *testing.T) {
-	out := renderOrFail(t, "$`x`$")
+	out := renderVaultOrFail(t, "$`x`$")
 
 	if want := mathSpanOpen + `$x$</span>`; !strings.Contains(out, want) {
 		t.Errorf("output missing %q: %s", want, out)
@@ -101,7 +118,7 @@ func TestRender_Math_BacktickFormDropsBackticks(t *testing.T) {
 }
 
 func TestRender_Math_CurrencyBeforeMath(t *testing.T) {
-	out := renderOrFail(t, "Pay $20, get $x$ back.")
+	out := renderVaultOrFail(t, "Pay $20, get $x$ back.")
 
 	if n := strings.Count(out, `class="math`); n != 1 {
 		t.Fatalf("want exactly one math element, got %d: %s", n, out)
@@ -112,7 +129,7 @@ func TestRender_Math_CurrencyBeforeMath(t *testing.T) {
 }
 
 func TestRender_Math_InlineAcrossSoftBreak(t *testing.T) {
-	out := renderOrFail(t, "Sum $a +\nb$ here.")
+	out := renderVaultOrFail(t, "Sum $a +\nb$ here.")
 
 	if want := mathSpanOpen + "$a +\nb$</span>"; !strings.Contains(out, want) {
 		t.Errorf("output missing %q: %s", want, out)
@@ -423,7 +440,7 @@ func TestMathRenderer_InlineEscapes(t *testing.T) {
 
 // Comparison operators that are not tag openers stay math, and are escaped.
 func TestRender_Math_SpacedComparisonStaysMath(t *testing.T) {
-	out := renderOrFail(t, "if $a < b$ and $c<1$ then")
+	out := renderVaultOrFail(t, "if $a < b$ and $c<1$ then")
 
 	if want := mathSpanOpen + "$a &lt; b$</span>"; !strings.Contains(out, want) {
 		t.Errorf("output missing %q: %s", want, out)
@@ -458,7 +475,7 @@ func TestRender_Math_DoesNotCrossOtherConstructs(t *testing.T) {
 // read "$HOME/bin:$" as math, because the second $ follows a non-space and is
 // not followed by a digit. The shell line has to go in a code span.
 func TestRender_Math_ShellAssignmentLimitation(t *testing.T) {
-	out := renderOrFail(t, "export PATH=$HOME/bin:$PATH")
+	out := renderVaultOrFail(t, "export PATH=$HOME/bin:$PATH")
 
 	if want := mathSpanOpen + "$HOME/bin:$</span>"; !strings.Contains(out, want) {
 		t.Errorf("the pinned limitation changed, want %q: %s", want, out)
@@ -562,12 +579,97 @@ func TestRender_Math_BlockMarkupEscaped(t *testing.T) {
 }
 
 func TestRender_Math_HeadingIDUnchanged(t *testing.T) {
-	out := renderOrFail(t, "## Energy $E=mc^2$\n")
+	out := renderVaultOrFail(t, "## Energy $E=mc^2$\n")
 
 	if !strings.Contains(out, `<h2 id="energy-emc2">`) {
 		t.Errorf("heading id changed: %s", out)
 	}
 	if !strings.Contains(out, mathSpanOpen+`$E=mc^2$</span>`) {
 		t.Errorf("math in a heading was not rendered: %s", out)
+	}
+}
+
+// singleDollarCorpus is prose that is math to a $…$ parser and text to a docs
+// root: the ecosystem-corpus shell strings from #600 plus plain currency and a
+// real-looking formula.
+var singleDollarCorpus = []string{
+	"It costs $5 and $10",
+	`"$RAW" and "$KIND"`,
+	"rm -rf $TMPDIR/$$ now",
+	"export PATH=$HOME/bin:$PATH",
+	"Euler $e^{i\\pi}+1=0$.",
+	"$a_1 * b_2 * c_3$",
+	"$`x`$",
+}
+
+// A docs root never turns a lone $…$ into math, and (the vault half of the
+// same gate) a vault root still does for the strings that are math under
+// pandoc's rules.
+func TestRender_Math_SingleDollarIsVaultOnly(t *testing.T) {
+	for _, src := range singleDollarCorpus {
+		t.Run(src, func(t *testing.T) {
+			if out := renderOrFail(t, src); strings.Contains(out, `class="math`) {
+				t.Errorf("docs root rendered single-dollar math: %s", out)
+			}
+		})
+	}
+	// The three #600 corpus strings stay literal in docs roots, byte for byte.
+	for src, want := range map[string]string{
+		"export PATH=$HOME/bin:$PATH": "<p>export PATH=$HOME/bin:$PATH</p>\n",
+		`"$RAW" and "$KIND"`:          "<p>&#34;$RAW&#34; and &#34;$KIND&#34;</p>\n",
+		"It costs $5 and $10":         "<p>It costs $5 and $10</p>\n",
+	} {
+		if got := renderOrFail(t, src); got != want {
+			t.Errorf("docs render of %q = %q, want %q", src, got, want)
+		}
+	}
+	// Vault roots keep the pandoc-rule behaviour: real math parses, currency
+	// does not.
+	if out := renderVaultOrFail(t, "Euler $e^{i\\pi}+1=0$."); !strings.Contains(out, mathSpanOpen) {
+		t.Errorf("vault root lost single-dollar math: %s", out)
+	}
+	if out := renderVaultOrFail(t, "It costs $5 and $10"); strings.Contains(out, `class="math`) {
+		t.Errorf("vault root rendered currency as math: %s", out)
+	}
+}
+
+// The docs-root dialect keeps every other math form.
+func TestRender_Math_DocsRootKeepsDoubleDollarAndFence(t *testing.T) {
+	if out := renderOrFail(t, "so $$x^2$$ here"); !strings.Contains(out, mathDisplayOpenSpan) {
+		t.Errorf("docs root lost inline $$…$$: %s", out)
+	}
+	if out := renderOrFail(t, "$$\nx^2\n$$\n"); !strings.Contains(out, mathDivOpen) {
+		t.Errorf("docs root lost a $$ block: %s", out)
+	}
+	if out := renderOrFail(t, "```math\nx^2\n```\n"); !strings.Contains(out, mathDivOpen) {
+		t.Errorf("docs root lost a math fence: %s", out)
+	}
+}
+
+const mathDisplayOpenSpan = `<span class="math math-display">`
+
+// Byte-identity: a docs root renders single-dollar text exactly as a pipeline
+// that has NO inline math parser would (same extensions and options as
+// newMarkdown(false, false), minus the single-dollar path), so the gate
+// changes nothing beyond dropping $…$. Both sides compare goldmark output
+// before sanitizing.
+func TestRender_Math_DocsRootByteIdenticalWithoutInlineMath(t *testing.T) {
+	ref := goldmark.New(
+		goldmark.WithExtensions(extension.GFM),
+		goldmark.WithParserOptions(headingParserOptions(false)...),
+		goldmark.WithRendererOptions(goldmarkhtml.WithUnsafe()),
+	)
+	for _, src := range singleDollarCorpus {
+		var want bytes.Buffer
+		if err := ref.Convert([]byte(src), &want); err != nil {
+			t.Fatal(err)
+		}
+		var got bytes.Buffer
+		if err := markdownPlain.Convert([]byte(src), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.String() != want.String() {
+			t.Errorf("docs root output for %q differs from a no-inline-math pipeline:\n got %q\nwant %q", src, got.String(), want.String())
+		}
 	}
 }

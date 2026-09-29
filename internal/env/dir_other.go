@@ -78,6 +78,15 @@ func (d *dirPin) rename(from, to string) error {
 	return os.Rename(filepath.Join(d.path, from), filepath.Join(d.path, to))
 }
 
+func (d *dirPin) names() ([]string, error) {
+	f, err := os.Open(d.path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return f.Readdirnames(-1)
+}
+
 func (d *dirPin) remove(name string) error {
 	return os.Remove(filepath.Join(d.path, name))
 }

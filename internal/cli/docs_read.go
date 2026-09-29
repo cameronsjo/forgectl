@@ -88,11 +88,21 @@ prints the document's absolute path and exits 0.
   forgectl docs read docs/plans/thing.md
   forgectl docs read -- -odd-name.md      a name starting with '-'
 `,
-		Args: cobra.ExactArgs(1),
+		Args: docsArgs("docs read", cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDocsRead(cmd, deps, args[0], timeout, productionDocsReadRuntime())
+			err := runDocsRead(cmd, deps, args[0], timeout, productionDocsReadRuntime())
+			// mdroll's own exit status (a silentCodedError) passes through
+			// unchanged: once the child has started, its code is not ours to
+			// reclassify. Everything else failed before there was anything to
+			// read, so it is "could not run" (exit 2, docs_errors.go).
+			var passthrough *silentCodedError
+			if err == nil || errors.As(err, &passthrough) {
+				return err
+			}
+			return docsFail(cmd, "docs read", "", err, 2, false)
 		},
 	}
+	cmd.SetFlagErrorFunc(docsFlagError("docs read"))
 	cmd.Flags().DurationVar(&timeout, "timeout", 15*time.Second, "index walk deadline, e.g. 15s or 2m")
 	return cmd
 }

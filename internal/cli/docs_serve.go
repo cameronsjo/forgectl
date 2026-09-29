@@ -68,11 +68,11 @@ func newDocsServeCmd(deps module.Deps) *cobra.Command {
 			return runDocsServe(cmd, deps, idx, addr, openFlag, tokenFile)
 		},
 	}
-	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+	cmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		if err != nil && err.Error() == "unknown flag: --token" {
-			return WithExitCode(errors.New("--token was removed because command-line values are visible to other processes; use --token-file instead"), 2)
+			err = errors.New("--token was removed because command-line values are visible to other processes; use --token-file instead")
 		}
-		return WithExitCode(err, 2)
+		return docsFlagError("docs serve")(cmd, err)
 	})
 	cmd.Flags().StringVar(&addr, "addr", "", "bind address (default: [docs].addr, else 127.0.0.1 with a random port)")
 	cmd.Flags().BoolVar(&openFlag, "open", false, "open the system browser once the server is listening")
@@ -306,15 +306,17 @@ func runDocsServeOpening(
 	if bindAddr == "" {
 		bindAddr = httpsrv.LoopbackAddr
 	}
+	// Failures up to and including the bind are "could not run" (exit 2, see
+	// docs_errors.go); once the listener exists, a failure is the server's own.
 	resolvedToken, err := resolveDocsToken(tokenFile, bindAddr)
 	if err != nil {
-		return err
+		return WithExitCode(err, 2)
 	}
 	token := resolvedToken.value
 
 	ln, err := rt.listen(bindAddr)
 	if err != nil {
-		return fmt.Errorf("bind %s: %w", bindAddr, err)
+		return WithExitCode(fmt.Errorf("bind %s: %w", bindAddr, err), 2)
 	}
 	defer ln.Close() //nolint:errcheck // best-effort; Shutdown below already closes it on the success path
 
@@ -360,7 +362,7 @@ func runDocsServeOpening(
 			// half-started server: nothing is listening and nothing was published.
 			events.Close()
 			ln.Close() //nolint:errcheck // returning a failure; best-effort release
-			return errDocsServeGeneration
+			return WithExitCode(errDocsServeGeneration, 2)
 		}
 		serversDir, initialInfo, eligible = dir, info, true
 		generation.Store(info.Generation)
@@ -448,7 +450,7 @@ func runDocsServeOpening(
 		outcome, publishErr := session.publish(ctx, initialInfo)
 		lease = outcome.lease
 		if publishErr != nil {
-			return abortDocsServeStartup(rt, srv, events, &background, lease, errOut, publishErr)
+			return abortDocsServeStartup(rt, srv, events, &background, lease, errOut, WithExitCode(publishErr, 2))
 		}
 		if outcome.primary != nil {
 			return finishDocsServeStartup(rt, srv, events, &background, lease, errOut, *outcome.primary)

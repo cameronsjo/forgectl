@@ -457,7 +457,9 @@ func assertNoWorkDirLeft(t *testing.T, dir string) {
 		t.Fatalf("ReadDir: %v", err)
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".forgectl-sops-") {
+		// Directories only: an interrupted run's kept ciphertext backup shares
+		// the prefix, and the tests that expect one assert it themselves.
+		if e.IsDir() && strings.HasPrefix(e.Name(), ".forgectl-sops-") {
 			t.Errorf("a work directory was left behind: %s", e.Name())
 		}
 	}

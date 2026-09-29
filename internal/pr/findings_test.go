@@ -346,7 +346,8 @@ func TestFindingsRemove_WritesIntentAndCompletion(t *testing.T) {
 			t.Errorf("rows[%d] claims a session (mode=%q ref=%q phase=%q ws=%q), want all empty",
 				i, r.Mode, r.Ref, r.FromPhase, r.Workspace)
 		}
-		if r.Detail != "findings dir, 5 bytes" {
+		// 5 bytes of findings plus the stale owner marker mustMkdir plants.
+		if want := "findings dir, " + strconv.Itoa(5+len(staleOwnerRecord)+1) + " bytes"; r.Detail != want {
 			t.Errorf("rows[%d].Detail = %q, want the dir's size", i, r.Detail)
 		}
 	}
@@ -502,10 +503,36 @@ func failRemovalOf(t *testing.T, path string) {
 	}
 }
 
+// mustMkdir creates path. When its base name carries the findings prefix it
+// also plants a STALE owner marker, one naming a record that does not exist,
+// so the dir reads the way a finished review leaves it: removable (#558).
+// A test that needs an unmarked dir uses mustMkdirUnmarked instead.
 func mustMkdir(t *testing.T, path string) {
+	t.Helper()
+	mustMkdirUnmarked(t, path)
+	if strings.HasPrefix(filepath.Base(path), findingsDirPrefix) {
+		writeMarker(t, path, staleOwnerRecord+"\n")
+	}
+}
+
+// staleOwnerRecord is a record name no test creates.
+const staleOwnerRecord = "local-gone000-1-1.json"
+
+func mustMkdirUnmarked(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatalf("MkdirAll(%q): %v", path, err)
+	}
+}
+
+// writeMarker writes content as dir's owner marker, replacing any marker
+// already there.
+func writeMarker(t *testing.T, dir, content string) {
+	t.Helper()
+	marker := filepath.Join(dir, findingsOwnerMarker)
+	_ = os.Remove(marker)
+	if err := os.WriteFile(marker, []byte(content), 0o600); err != nil {
+		t.Fatalf("write marker: %v", err)
 	}
 }
 

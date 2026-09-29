@@ -148,6 +148,7 @@ func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, a
 	}
 	cutoff := time.Now().Add(-olderThan)
 	var candidates []string
+	var unmarked int
 	for _, e := range entries {
 		full := filepath.Join(c.findingsDir, e.Name())
 		info, err := e.Info()
@@ -158,8 +159,14 @@ func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, a
 		if !findingsRemovalCandidate(c.findingsDir, full, e.IsDir(), info.ModTime(), cutoff) {
 			continue
 		}
+		// Advisory here, outside the lock, so the preview never offers a live
+		// review's dir. FindingsRemove re-asks under the lock before removing.
+		if c.skipLiveFindingsDir(full, &unmarked) {
+			continue
+		}
 		candidates = append(candidates, full)
 	}
+	warnUnmarkedFindings(unmarked)
 	if !apply {
 		return candidates, nil
 	}
@@ -182,7 +189,9 @@ func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, a
 // The re-validation — it must be a findings dir directly under c.findingsDir
 // (isFindingsStoreChild: never the store itself, never nested deeper, always
 // carrying the findings prefix), exist, be a plain directory (not a symlink),
-// and remain contained within c.findingsDir after symlink resolution — means a
+// remain contained within c.findingsDir after symlink resolution, and not be
+// owned by a review whose session record still exists or carry no owner
+// marker at all (findingsDirLiveness, forgectl#558) — means a
 // path that never qualified, or stopped qualifying between preview and apply
 // (already removed, replaced by something else), is skipped with a logged note
 // rather than silently re-scanned into a different set. A skip writes no row,
@@ -197,8 +206,10 @@ func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, a
 // is refused and the dir is left in place), or a failed removal.
 func (c *Client) FindingsRemove(ctx context.Context, paths []string) ([]string, error) {
 	var removed []string
+	var unmarked int
+	defer func() { warnUnmarkedFindings(unmarked) }()
 	for _, full := range paths {
-		got, err := c.removeFindingsDirAudited(ctx, full)
+		got, err := c.removeFindingsDirAudited(ctx, full, &unmarked)
 		if err != nil {
 			return removed, err
 		}
@@ -218,7 +229,7 @@ func (c *Client) FindingsRemove(ctx context.Context, paths []string) ([]string, 
 // record: RecordPath names the findings dir and Detail its size, while Ref,
 // Mode, FromPhase, and Workspace stay empty — filling any of them would make
 // the trail claim a session was involved.
-func (c *Client) removeFindingsDirAudited(ctx context.Context, full string) (string, error) {
+func (c *Client) removeFindingsDirAudited(ctx context.Context, full string, unmarked *int) (string, error) {
 	removed := ""
 	err := c.withLifecycleLock(ctx, auditVerbFindingsCleanup, func() error {
 		if !isFindingsStoreChild(c.findingsDir, full) {
@@ -240,6 +251,18 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, full string) (str
 		}
 		if !sandbox.WithinWorkspace(c.findingsDir, full) {
 			slog.Warn("Skipping findings removal target that escapes the findings dir.", "path", full)
+			return nil
+		}
+		// LIVENESS (forgectl#558), asked in the same lock hold as the removal,
+		// never trusted from the preview. A stale verdict cannot flip to live
+		// before the RemoveAll below. PrepareLocal writes a marker only after
+		// the record it names exists, so a marker never names a record that
+		// is still to come. Record names carry their creation nanosecond, so
+		// a record found gone is not recreated under the same name. The
+		// reverse flip, a live record deleted mid-check, only keeps a dir
+		// that could have gone, and teardown deletes records under this same
+		// lock, so it cannot land inside this hold anyway.
+		if c.skipLiveFindingsDir(full, unmarked) {
 			return nil
 		}
 		row := RepairRow{

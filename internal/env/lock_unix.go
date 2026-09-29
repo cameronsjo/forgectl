@@ -76,5 +76,10 @@ func withFileLock(t Target, fn func() error) error {
 	}
 	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
 
+	// Under the lock and before fn creates any scratch of its own: see
+	// scanLeftovers for why both orderings matter.
+	if err := scanLeftovers(t); err != nil {
+		return err
+	}
 	return fn()
 }
