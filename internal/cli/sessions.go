@@ -87,6 +87,7 @@ func writeJSON(out io.Writer, v any) error {
 
 func newSessionsSyncCmd(cfg config.Config) *cobra.Command {
 	var opts sessions.SyncOptions
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Drain local JSONL + runbook markdown into the concordance (idempotent)",
@@ -123,9 +124,16 @@ the command exits non-zero — a skipped session is never silent.
 			if err != nil {
 				return err
 			}
+			if asJSON {
+				if err := writeJSON(cmd.OutOrStdout(), newReceiptJSON(receipt)); err != nil {
+					return err
+				}
+				return receiptError(receipt)
+			}
 			return printReceipt(cmd, receipt)
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit the completeness receipt as JSON to stdout (see receiptJSON); a MISSING session still exits non-zero`)
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "read + transform + count; no DB connection")
 	cmd.Flags().BoolVar(&opts.Full, "full", false, "bypass the lastMessageId watermark and re-upsert every session")
 	cmd.Flags().StringVar(&opts.DSN, "dsn", "", "concordance DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
@@ -134,6 +142,48 @@ the command exits non-zero — a skipped session is never silent.
 	cmd.Flags().StringVar(&opts.RunbooksDir, "runbooks-dir", "", "runbook markdown corpus (default: Cadence XDG state)")
 	cmd.Flags().StringVar(&opts.SyncthingConfig, "syncthing-config", "", "Syncthing config.xml for the blobs-only guard (default: platform discovery)")
 	return cmd
+}
+
+// receiptJSON is the `sessions sync --json` shape (additive-only, ADR-0008).
+// Missing is always an array, never null.
+type receiptJSON struct {
+	SessionsFound     int      `json:"sessions_found"`
+	SessionsUpserted  int      `json:"sessions_upserted"`
+	SessionsUnchanged int      `json:"sessions_unchanged"`
+	InvalidRows       int      `json:"invalid_rows"`
+	CommitRowsDropped int      `json:"commit_rows_dropped"`
+	LedgerLinesBad    int      `json:"ledger_lines_bad"`
+	Missing           []string `json:"missing"`
+	RunbooksFound     int      `json:"runbooks_found"`
+	RunbooksUpserted  int      `json:"runbooks_upserted"`
+	RunbooksPruned    int64    `json:"runbooks_pruned"`
+	DryRun            bool     `json:"dry_run"`
+	Complete          bool     `json:"complete"`
+}
+
+func newReceiptJSON(r *sessions.Receipt) receiptJSON {
+	missing := r.Missing
+	if missing == nil {
+		missing = []string{}
+	}
+	return receiptJSON{
+		SessionsFound: r.SessionsFound, SessionsUpserted: r.SessionsUpserted,
+		SessionsUnchanged: r.SessionsUnchanged, InvalidRows: r.InvalidRows,
+		CommitRowsDropped: r.CommitRowsDropped, LedgerLinesBad: r.LedgerLinesBad,
+		Missing: missing, RunbooksFound: r.RunbooksFound,
+		RunbooksUpserted: r.RunbooksUpserted, RunbooksPruned: r.RunbooksPruned,
+		DryRun: r.DryRun, Complete: r.DryRun || r.Complete(),
+	}
+}
+
+// receiptError is the non-zero-exit half of the receipt contract, shared by
+// the human and JSON renderings: a session absent after the flush fails the
+// run. A dry-run makes no connection, so it cannot fail this way.
+func receiptError(r *sessions.Receipt) error {
+	if r.DryRun || r.Complete() {
+		return nil
+	}
+	return fmt.Errorf("reconcile failed: %d local sessions absent from the concordance after flush", len(r.Missing))
 }
 
 // printReceipt renders the completeness receipt. MISSING sessions make the
@@ -155,7 +205,7 @@ func printReceipt(cmd *cobra.Command, r *sessions.Receipt) error {
 		for _, id := range r.Missing {
 			fmt.Fprintf(out, "MISSING %s\n", id)
 		}
-		return fmt.Errorf("reconcile failed: %d local sessions absent from the concordance after flush", len(r.Missing))
+		return receiptError(r)
 	}
 	fmt.Fprintln(out, "reconciled: every local session is present in the concordance")
 	return nil

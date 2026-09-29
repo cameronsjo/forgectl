@@ -69,7 +69,6 @@ var jsonContractExempt = map[string]string{
 	"review mark":            "reports no state; it changes something and the exit code is the outcome",
 	"review sync":            "reports no state; it changes something and the exit code is the outcome",
 	"review unmark":          "reports no state; it changes something and the exit code is the outcome",
-	"sessions sync":          "reports no state; it changes something and the exit code is the outcome",
 	"surface launch":         "opens or attaches an interactive surface (browser, tmux, shell, container, editor session); it reports no state",
 	"tasks mcp":              "a long-running server (MCP or HTTP); it serves rather than reports",
 	"theme preview":          "a static cheatsheet; it reports no state",
