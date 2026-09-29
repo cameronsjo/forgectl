@@ -334,14 +334,14 @@ func TestNewIndex_UnreadableSubdir_SkippedSiblingsIndexed(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "ok.md"), "# Ok\n")
 	locked := filepath.Join(dir, "locked")
-	if err := os.Mkdir(locked, 0o755); err != nil {
+	if err := os.Mkdir(locked, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(locked, "hidden.md"), "# Hidden\n")
 	if err := os.Chmod(locked, 0o000); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
 
 	idx, err := NewIndex([]string{dir})
 	if err != nil {
@@ -361,7 +361,7 @@ func TestNewIndex_UnreadableRoot_StillErrors(t *testing.T) {
 	if err := os.Chmod(dir, 0o000); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
 	if _, err := NewIndex([]string{dir}); err == nil {
 		t.Fatal("an unreadable root must fail the build")
