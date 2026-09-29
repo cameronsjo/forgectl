@@ -691,6 +691,92 @@ func TestResolveVault_HeadingMatchKeepsLiterals(t *testing.T) {
 	}
 }
 
+// newMatchVault indexes a vault holding Note.md (note) and an empty
+// Linker.md, and returns the index with Linker.md to resolve from.
+func newMatchVault(t *testing.T, note string) (*Index, Doc) {
+	t.Helper()
+	vault := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{"Note.md": note, "Linker.md": "# Linker\n"} {
+		if err := os.WriteFile(filepath.Join(vault, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	idx, err := NewIndex([]string{vault})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	from, ok := idx.Find(idx.Roots()[0].Label, "Linker.md")
+	if !ok {
+		t.Fatal("Linker.md not indexed")
+	}
+	return idx, from
+}
+
+// TestResolveVault_HeadingMatchRenderedFragment pins both match paths. A
+// fragment written with markup reaches the heading its rendered text names;
+// an escaped-markup heading is reached by the fragment as written, which
+// renders differently; a fragment that renders to nothing reaches nothing;
+// and a fragment over maxRenderedFragment is never parsed.
+func TestResolveVault_HeadingMatchRenderedFragment(t *testing.T) {
+	idx, from := newMatchVault(t, "# Note\n\n## x\n\n## a \\*b\\*\n\n## %%all comment%%\n")
+	for _, target := range []string{"Note#[x](y)", "Note#`x`", "Note#%%c%% x", "Note#a *b*"} {
+		if _, miss := idx.ResolveLink(&from, target); miss != MissNone {
+			t.Errorf("[[%s]]: miss %v", target, miss)
+		}
+	}
+	long := "Note#**x**" + strings.Repeat(" ", maxRenderedFragment)
+	for _, target := range []string{"Note#<b>", "Note#%%c%%", long} {
+		if _, miss := idx.ResolveLink(&from, target); miss == MissNone {
+			t.Errorf("[[%.40q]] resolved", target)
+		}
+	}
+	if _, miss := idx.ResolveLink(&from, "Note#**x**"+strings.Repeat(" ", maxRenderedFragment-len("**x**"))); miss != MissNone {
+		t.Errorf("a fragment at the cap was not rendered: miss %v", miss)
+	}
+}
+
+// TestScanVault_HeadingTextRendered: Heading.Text is the text the page
+// shows: an entity resolved, an escape dropped, a code span kept verbatim,
+// and an autolink or bare URL showing its label.
+func TestScanVault_HeadingTextRendered(t *testing.T) {
+	for src, want := range map[string]string{
+		"## Q &amp; A\n":              "Q & A",
+		"## a \\*b\\*\n":              "a *b*",
+		"## `a\\_b &amp;`\n":          "a\\_b &amp;",
+		"## see <https://x.io/a>\n":   "see https://x.io/a",
+		"## see https://x.io/a now\n": "see https://x.io/a now",
+		"## mail a@b.io\n":            "mail a@b.io",
+	} {
+		scan, err := scanBodyFor(RootVault, []byte(src))
+		if err != nil || len(scan.headings) != 1 {
+			t.Fatalf("%q: %v, %v", src, scan.headings, err)
+		}
+		if got := scan.headings[0].Text; got != want {
+			t.Errorf("%q: Text %q, want %q", src, got, want)
+		}
+	}
+}
+
+// TestFragmentText_MarkupFreeRendersAsWritten backs matchFragment's fast
+// path: a fragment holding none of fragmentMarkupBytes renders as written,
+// so skipping its parse loses no match.
+func TestFragmentText_MarkupFreeRendersAsWritten(t *testing.T) {
+	for _, f := range []string{
+		"Step 1: Install", "see https://x.io/a now", "www.x.io", "mail a@b.io",
+		"a + b - c", "1. first", "> quote", "(parens) {braces} 'q' \"dq\"", "C#", "x ^blk", "  spaced   out ",
+	} {
+		if strings.ContainsAny(f, fragmentMarkupBytes) {
+			t.Fatalf("%q holds a markup byte", f)
+		}
+		if got := foldHeadingKey(fragmentText(f)); got != foldHeadingKey(f) {
+			t.Errorf("%q renders as %q", f, got)
+		}
+	}
+}
+
 // TestResolveDocs_HeadingMatchNotNormalized pins the docs-root rule: an
 // anchor matches the exact slug only, so a fragment that would match under
 // the vault's foldHeadingKey matching still misses.

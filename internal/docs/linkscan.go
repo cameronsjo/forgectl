@@ -580,6 +580,11 @@ func appendNodeText(b *strings.Builder, n ast.Node, source []byte) {
 			b.WriteByte(' ')
 		}
 		return
+	case *ast.AutoLink:
+		// "<https://x>" or a GFM bare URL has no Text child; the page
+		// shows its label, as written.
+		b.Write(t.Label(source))
+		return
 	}
 	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
 		appendNodeText(b, c, source)

@@ -361,8 +361,10 @@ func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, from *Doc, path0 string) (
 // only) between the heading's rendered Text and either the fragment as
 // written or the fragment's own rendered text (fragmentText), so
 // "[[Note#a ==b==]]" and "[[Note#a b]]" both reach "## a ==b==", while
-// "[[Note#snakecase]]" does not reach "## snake_case". Only the vault
-// comparison folds.
+// "[[Note#snakecase]]" does not reach "## snake_case". A slug or as-written
+// match anywhere in the note takes precedence over a rendered-text match;
+// the rendered text is computed only when needed (fragmentMayRender). Only
+// the vault comparison folds.
 //
 // matchFragment also returns the anchor a rendered link jumps to: the
 // matching heading's Slug, the id the page renders on it, or for a "^id"
@@ -389,14 +391,29 @@ func matchFragment(kind RootKind, doc *Doc, fragment string) (anchor string, ok 
 	last := segments[len(segments)-1]
 
 	if kind == RootVault {
+		// Two passes. The first compares the slug and the fragment as
+		// written, which costs no parse. Only when that misses, and the
+		// fragment could render differently from how it is written, is it
+		// parsed (fragmentText) for a second pass, so an exact match wins
+		// over a rendered one. An empty key names no text: a heading that
+		// renders empty (all comment) is reached by its slug only.
 		lastLower := strings.ToLower(last)
 		rawKey := foldHeadingKey(last)
-		textKey := foldHeadingKey(fragmentText(last))
 		for _, h := range doc.Headings {
-			// An empty key names no text: a heading that renders empty
-			// (all comment) is reached by its slug only.
 			key := foldHeadingKey(h.Text)
-			if h.Slug == lastLower || key != "" && (key == rawKey || key == textKey) {
+			if h.Slug == lastLower || key != "" && key == rawKey {
+				return h.Slug, true
+			}
+		}
+		if !fragmentMayRender(last) {
+			return "", false
+		}
+		textKey := foldHeadingKey(fragmentText(last))
+		if textKey == "" || textKey == rawKey {
+			return "", false
+		}
+		for _, h := range doc.Headings {
+			if foldHeadingKey(h.Text) == textKey {
 				return h.Slug, true
 			}
 		}
@@ -522,10 +539,35 @@ func foldHeadingKey(s string) string {
 	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
 }
 
+// fragmentMarkupBytes are the bytes that can make a fragment's rendered
+// text differ from the fragment as written: an escape, emphasis, a code
+// span, a highlight or strikethrough, a link, wikilink or image, raw HTML or
+// an autolink, an entity, a %% comment, and math. A fragment with none of
+// them renders as it is written (a GFM bare-URL autolink renders its own
+// text, see appendNodeText), so fragmentText would return it unchanged.
+const fragmentMarkupBytes = "\\*_`=~[<&%$!"
+
+// maxRenderedFragment caps the fragment length fragmentText will parse;
+// above it, a fragment matches by slug and as written only. A heading link
+// runs to tens of bytes, and 512 is past any heading written by hand. The
+// cap bounds what one crafted link costs, since goldmark's inline pass is
+// superlinear on unclosed-bracket input and the parse runs under renderMu
+// when a page renders: measured on "[x](" repeated, one 512-byte parse
+// takes about 0.6ms, while one 100 KB fragment took over 5s uncapped.
+const maxRenderedFragment = 512
+
+// fragmentMayRender reports whether fragmentText is worth running on
+// fragment: it is within maxRenderedFragment and holds a markup byte.
+func fragmentMayRender(fragment string) bool {
+	return len(fragment) <= maxRenderedFragment && strings.ContainsAny(fragment, fragmentMarkupBytes)
+}
+
 // fragmentMarkdown parses a vault heading fragment as a heading, with the
 // vault scan's inline set, so fragmentText flattens it exactly as the scan
-// flattens the heading itself. It has its own lock: matchFragment runs both
-// under renderMu (a page's wikilink resolver) and outside it (docs check).
+// flattens the heading itself. It has its own lock: matchFragment runs
+// under renderMu when a page's wikilink resolver calls it, and outside it
+// from buildBacklinks (NewIndex, and the watcher's Rebuild) and from
+// ResolveLink, which can overlap a render.
 var (
 	fragmentMu       sync.Mutex
 	fragmentMarkdown = newMarkdown(false, true)
