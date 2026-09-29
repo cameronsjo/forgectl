@@ -117,7 +117,7 @@ type onceCloser struct {
 	once sync.Once
 }
 
-func (c *onceCloser) close() { c.once.Do(func() { _ = c.File.Close() }) }
+func (c *onceCloser) close() { c.once.Do(func() { _ = c.Close() }) }
 
 type copyResult struct {
 	stdin bool

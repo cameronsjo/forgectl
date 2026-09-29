@@ -231,7 +231,7 @@ func TestOSRunner_RunStreaming_LeavesNoGoroutinesOrDescriptors(t *testing.T) {
 }
 
 func killPidFile(path string) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		return
 	}
