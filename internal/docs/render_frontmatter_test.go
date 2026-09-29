@@ -8,10 +8,15 @@ package docs
 //   [x] Sad: a mid-document thematic break still renders as <hr>
 //   [x] Sad: a LEADING thematic break (unterminated --- fence) keeps the body
 //   [x] Sad: a leading --- whose "block" is prose (not a YAML mapping) keeps the body
+//   [x] Unhappy: a passed stale_after badges once inside .props; a future one does not
+//   [x] Unhappy: status: deprecated badges; status: draft keeps the plain chip
+//   [x] Sad: a hostile stale_after is escaped, badge or not
+//   [x] Sad: a date-only stale_after in the past is not badged
 
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 const fmDoc = `---
@@ -199,5 +204,66 @@ func TestRenderDoc_OutlineAndWords(t *testing.T) {
 	}
 	if doc.Minutes < 1 {
 		t.Errorf("minutes = %d, want >= 1", doc.Minutes)
+	}
+}
+
+func renderFM(t *testing.T, fm string) string {
+	t.Helper()
+	got, err := Render([]byte("---\n" + fm + "---\n\n# Body\n"))
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	return got
+}
+
+func TestRender_StaleAfterBadge(t *testing.T) {
+	withTrustNow(t, trustTestNow)
+
+	got := renderFM(t, "stale_after: 2026-09-28T12:00:00Z\n")
+	if n := strings.Count(got, "trust-badge--stale"); n != 1 {
+		t.Errorf("stale badges = %d, want 1:\n%s", n, got)
+	}
+	props := got[strings.Index(got, `<div class="props">`):]
+	if !strings.Contains(props[:strings.Index(props, "<h1")], "trust-badge--stale") {
+		t.Errorf("stale badge is not inside the properties block:\n%s", got)
+	}
+
+	got = renderFM(t, "stale_after: 2026-09-30T12:00:00Z\n")
+	if strings.Contains(got, "trust-badge") {
+		t.Errorf("future stale_after was badged:\n%s", got)
+	}
+}
+
+func TestRender_DeprecatedBadge(t *testing.T) {
+	withTrustNow(t, trustTestNow)
+
+	got := renderFM(t, "status: deprecated\n")
+	if !strings.Contains(got, `<span class="trust-badge trust-badge--deprecated">deprecated</span>`) {
+		t.Errorf("deprecated status not badged:\n%s", got)
+	}
+	got = renderFM(t, "status: draft\n")
+	if !strings.Contains(got, `<span class="chip">draft</span>`) || strings.Contains(got, "trust-badge") {
+		t.Errorf("draft status should keep the plain chip:\n%s", got)
+	}
+}
+
+func TestRender_StaleAfterEscaped(t *testing.T) {
+	withTrustNow(t, trustTestNow)
+
+	got := renderFM(t, "stale_after: \"<img src=x onerror=alert(1)>\"\n")
+	if strings.Contains(got, "<img") {
+		t.Errorf("raw <img reached the output:\n%s", got)
+	}
+	if !strings.Contains(got, "&lt;img src=x onerror=alert(1)&gt;") {
+		t.Errorf("escaped value missing:\n%s", got)
+	}
+}
+
+func TestRender_DateOnlyStaleAfterNotBadged(t *testing.T) {
+	withTrustNow(t, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	got := renderFM(t, "stale_after: 2020-01-01\n")
+	if strings.Contains(got, "trust-badge") {
+		t.Errorf("date-only stale_after was badged:\n%s", got)
 	}
 }

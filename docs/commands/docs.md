@@ -9,8 +9,10 @@ forgectl docs serve [dir|file ...]       # render + serve, loopback-only (DNS-re
 forgectl docs serve --open               # also open the system browser
 forgectl docs open [path]                # point the browser at a doc on the already-running reader
 forgectl docs open --print-url [path]    # print the resolved URL instead of opening a browser
+forgectl docs read <file>                # read one doc in the terminal with mdroll, else in the HTML reader
 forgectl docs list [dir|file ...]        # list the indexed docs, no server (--json for scripting)
 forgectl docs check [dir|file ...]       # broken links, broken anchors, orphan pages (--json for scripting)
+forgectl docs search <query> [--json]    # full-text search the indexed docs (ripgrep backend)
 ```
 
 Diagrams render in the page: a fenced code block tagged `mermaid` becomes a live diagram themed from the same Artificer tokens as the rest of the reader, and both those and inline SVG pan and zoom (drag to pan, modifier-scroll or click-then-scroll to zoom, double-click, `0`, or the diagram card's reset button to reset).
@@ -48,7 +50,7 @@ Links never resolve across roots. `[docs.root_kinds]` forces a kind when detecti
 
 ## Checking links
 
-`docs check` walks the same roots as `list` (no arguments: cwd, `./docs`, `$CADENCE_FIELD_REPORTS_DIR`, and any `[docs].roots`; naming paths replaces that set) and reports what would 404 in the reader, without binding a server.
+`docs check` walks the same roots as `list` (no arguments: cwd, `./docs`, `$CADENCE_FIELD_REPORTS_DIR`, and any `[docs].roots`; naming paths replaces that set) and reports links that are broken on disk (as GitHub would render them), without binding a server.
 
 | Finding kind | Meaning |
 |---|---|
@@ -56,14 +58,17 @@ Links never resolve across roots. `[docs.root_kinds]` forces a kind when detecti
 | `ambiguous_link` | the target matches more than one doc (for example `notes.md` and `notes.markdown`); candidates are not listed |
 | `broken_anchor` | the file exists but the `#heading` or `#^block` fragment does not, including a fragment-only `#x` |
 | `orphan` | a doc in a directory root that no other doc links to |
+| `deprecated` | the doc's YAML frontmatter says `status: deprecated` (exact, lowercase) |
+| `stale` | the doc's YAML frontmatter `stale_after` is an RFC 3339 instant with an explicit offset (`2026-09-23T00:00:00Z`) and now is at or past it; a date-only (`2026-09-23`) or offset-less value is ignored; a TOML `stale_after` is ignored too |
 
 - **Existence fallback.** A link to a directory (`commands/`) or a non-markdown file (`LICENSE`, an image) resolves to no indexed doc. It is reported as broken only when nothing exists at that path inside the root. The check reads nothing and refuses a symlink that escapes the root.
 - **Out-of-root links are counted, not reported.** A link such as `../../README.md` that leaves its root works on GitHub, so it is not a finding. It is counted in `summary.outside_root_links`.
 - **Orphans.** A root-level `README` or `index` page is never an orphan, and a single-file root has no orphans. A `README.md` in a subdirectory is an ordinary doc.
 - **Vault roots are skipped.** A root detected or configured as a `vault` is not checked yet: a note on stderr says so, and if no docs-kind root remains the command exits 2.
+- **Trust signals.** `deprecated` and `stale` follow the Open Knowledge Format v0.2 §5.4/§5.5 (SPEC at `ad30107`). Both are findings, so they exit 1 like any other. The reader also badges them, in the properties block and in the status bar. OKF changed `stale_after` from a date to a datetime inside v0.2 without a version bump; date-only values written against the older text are ignored, per the current spec and its reference implementation. Coverage gaps: vault roots are not checked (see above), though the reader still badges their docs, and a doc over 1 MiB is indexed by title only, so it gets no finding and no status-bar badge, though its properties block still badges.
 - **Exit codes.** 0 clean; 1 findings (the complete report is on stdout); 2 the check could not run (unreadable root, `--timeout` deadline, no docs-kind root, bad flag).
 
-Human output is one line per finding, `<root>/<path>: <kind> <target>`. `--json` prints one object:
+Human output is one line per finding, `<root>/<path>: <kind> <target>`; a `stale` line ends with its `stale_after` value instead of a target. `--json` prints one object:
 
 ```json
 {
@@ -71,9 +76,10 @@ Human output is one line per finding, `<root>/<path>: <kind> <target>`. `--json`
   "roots": [{"label": "docs", "kind": "docs", "checked": true, "docs": 42}],
   "findings": [
     {"kind": "broken_link", "root": "docs", "path": "plans/x.md", "target": "gone.md"},
-    {"kind": "orphan", "root": "docs", "path": "notes.md"}
+    {"kind": "orphan", "root": "docs", "path": "notes.md"},
+    {"kind": "stale", "root": "docs", "path": "runbook.md", "stale_after": "2026-09-01T00:00:00Z"}
   ],
-  "summary": {"broken_links": 1, "ambiguous_links": 0, "broken_anchors": 0, "orphans": 1, "outside_root_links": 20}
+  "summary": {"broken_links": 1, "ambiguous_links": 0, "broken_anchors": 0, "orphans": 1, "outside_root_links": 20, "deprecated": 0, "stale": 1}
 }
 ```
 
@@ -96,6 +102,26 @@ A token file must be:
 
 **Protected servers cannot be `--open`ed directly**, because browser navigation cannot attach an `Authorization` header. `forgectl docs open` on a token-protected server prints the URL and a `curl -H 'Authorization: Bearer <token>' <url>` command instead of opening a browser.
 
+## Search
+
+`forgectl docs search <query>` runs a case-insensitive, fixed-string full-text query over the same roots `docs list` indexes with no arguments, and prints one line per hit: root, `path:line`, and a snippet of up to 240 characters around the match. `--limit N` (default 50) caps the results and `--timeout` (default 10s) bounds indexing plus search. A query that starts with `-` goes after `--`: `forgectl docs search -- --flag-name`.
+
+The backend is [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`), which must be on `PATH`. Support for qmd as a ranked backend is planned.
+
+- **Only indexed docs are returned.** Every hit rg reports is checked against the docs index, the same membership gate the reader serves through, so a file outside a root, under an excluded directory (`.git`, `node_modules`, `vendor`, any dot-directory), or reached through a symlink never appears. Hits dropped this way are counted in `skipped`.
+- **rg's own config file is ignored.** rg runs with `--no-config`, so `RIPGREP_CONFIG_PATH` cannot turn on `--follow` or otherwise change what is searched.
+- Files over 1 MB are not searched, and at most 5 hits are taken from one file.
+- Docs whose paths are not valid UTF-8 are not searchable; rg can only report such a path as raw bytes, and those hits are counted in `skipped`.
+- **Results are ordered and stable.** Roots are searched in their configured order, and rg walks each root in path order (`--sort=path`, which also keeps rg to a single worker), so the same query over the same tree returns the same results, and `--limit` always keeps the same prefix. A doc reachable through two overlapping roots (cwd and `./docs`, say) is returned once, under the first root.
+
+`--json` prints one object to stdout. `results` is always an array, and each result carries `root`, `path`, `title`, `line`, and `snippet`. `truncated` is true when more hits existed past `--limit`. `errors` is always an array of `{root, message}`, one per root rg could not fully search (an unreadable file, say, or output that could not be parsed).
+
+```json
+{"backend":"ripgrep","query":"needle","results":[{"root":"docs","path":"guide.md","title":"Guide","line":12,"snippet":"the needle in the guide"}],"truncated":false,"skipped":0,"errors":[]}
+```
+
+Exit codes: no match exits 0 with an empty `results` (human output says `no matches` on stderr). When rg could not fully search a root, the other roots are still searched and every hit found is printed, then the command exits 1 with the reason on stderr: one line per failed root, or under `--json` one `{"error","code"}` object on stderr alongside the full response, `errors` included, on stdout. A missing `rg`, an empty or invalid query, or an expired `--timeout` exits 2; under `--json` that leaves stdout empty and writes exactly one `{"error","code"}` object to stderr.
+
 ## `docs open` steers, never starts
 
 `docs open` points the system browser at an already-running `docs serve` reader; it never starts one. That is a deliberate boundary: `docs serve` is a foreground process the operator owns — it prints its address, holds the terminal, and stops on Ctrl-C. If `open` could spawn one, it would either fork a server nobody can see or block the terminal it was called from, and either way the operator would no longer know how many readers exist or which one their browser is pointed at. When nothing is running, `open` says so and names the command to run.
@@ -103,5 +129,20 @@ A token file must be:
 It uses the system browser, never a terminal's own browser command — the reader's entire premise is being terminal-agnostic (reachable from the machine, from an SSH session, from a phone), so coupling `open` to one terminal emulator would undo that.
 
 A legacy server (predating generation-owned discovery) has no freshness endpoint, so `open` cannot verify the listener at its recorded address is still the same server before handing it a token — it prints the URL and tells you to restart with `forgectl docs serve` instead.
+
+## `docs read` in the terminal
+
+`docs read <file>` opens one document from the default doc set (the same roots `docs serve` and `docs list` index with no arguments). `<file>` is a path on disk or a root-relative `<root>/<path>` name as `docs list` prints it, and either way it resolves through the index: a file outside the indexed roots, under an excluded directory, or not markdown is refused.
+
+When [mdroll](https://github.com/tokuhirom/mdroll) is on `PATH`, `read` runs it as `mdroll --watch --no-remote-images -- <absolute path>`, with no shell and with forgectl's stdin, stdout, and stderr handed straight through, so mdroll's own keys (search, TOC, link picker) work. `--watch` stands in for the HTML reader's live reload, and `--` keeps a document named like a flag from being parsed as one (`forgectl docs read -- -odd.md` gets such a name past forgectl's own parser). mdroll's exit status becomes forgectl's; if a signal kills mdroll, forgectl exits 128 plus the signal number, as a shell would. An mdroll reachable only through a relative `PATH` entry is refused and treated as absent.
+
+`--no-remote-images` keeps mdroll from fetching `http(s)` images, which it does by default: a remote image in a document is a tracking beacon, and the HTML reader blocks it with `img-src 'self' data:`. Beyond that one flag, `docs read` follows mdroll's own content policy, not the HTML reader's — mdroll does its own rendering, and forgectl's sanitizer and CSP do not apply to it.
+
+mdroll is optional. Without it, what `read` does depends on whether stdin and stdout are both terminals:
+
+- **Both terminals:** `read` serves the doc set as `docs serve --open` would, with the browser pointed at that document rather than the index. It holds the terminal until Ctrl-C, like `docs serve`.
+- **Otherwise** (an agent, a script, a pipe, stdin from `/dev/null`): `read` starts nothing. It prints the document's resolved absolute path to stdout, a note on stderr naming `forgectl docs serve --open`, and exits 0. A server would block the caller with nothing to interrupt it ([ADR-0008](../adr/0008-agent-contract.md)).
+
+`forgectl doctor` reports mdroll as skipped, not failed, when it is absent or found only through a relative `PATH` entry.
 
 How discovery records are written, where they live on disk, and how to clear them by hand after a crash: [docs server discovery — operations](../operations/docs-discovery.md).

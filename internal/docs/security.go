@@ -2,16 +2,25 @@ package docs
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"path/filepath"
 	"strings"
 )
 
 // ErrOutsideRoot indicates a resolved path escaped its declared root — via
 // ../ traversal, a symlink pointing outside the root, or an EvalSymlinks
-// failure. All three collapse to the same signal: the HTTP layer maps it to
-// a bare 404, never explaining which case it was (path structure is not a
-// debugging aid to hand a stranger on the loopback interface).
+// failure other than a missing path. All three collapse to the same signal:
+// the HTTP layer maps it to a bare 404, never explaining which case it was
+// (path structure is not a debugging aid to hand a stranger on the loopback
+// interface).
 var ErrOutsideRoot = errors.New("path escapes its configured root")
+
+// ErrNotFound indicates that nothing exists at the requested path under its
+// root. It wraps fs.ErrNotExist, so errors.Is(err, fs.ErrNotExist) holds. It
+// is a denial like ErrOutsideRoot, never a path to serve: it only keeps a
+// missing file from being reported as an escape.
+var ErrNotFound = fmt.Errorf("no such file under its configured root: %w", fs.ErrNotExist)
 
 // ErrDisallowedExt indicates the resolved path's extension is not in the
 // docs-serving allowlist.
@@ -70,9 +79,10 @@ func withinRoot(root, candidate string) bool {
 //     "/etc/passwd" before it ever touches the filesystem.
 //  2. filepath.Join(root, cleaned) anchors the cleaned path under root.
 //  3. filepath.EvalSymlinks resolves any symlink IN the joined path — a
-//     symlink living inside root but pointing outside it. An EvalSymlinks
-//     error (including "no such file") denies with ErrOutsideRoot; it never
-//     falls through to serving a not-yet-resolved path.
+//     symlink living inside root but pointing outside it. Every EvalSymlinks
+//     error denies; it never falls through to serving a not-yet-resolved
+//     path. A missing path (fs.ErrNotExist) denies with ErrNotFound, and
+//     any other failure with ErrOutsideRoot.
 //  4. The resolved path is re-checked against the canonical root with
 //     withinRoot's trailing-separator guard — step 2's Join alone doesn't
 //     catch a symlink hop discovered in step 3.
@@ -85,6 +95,9 @@ func ResolveInRoot(root, rel string) (string, error) {
 	joined := filepath.Join(root, cleaned)
 
 	resolved, err := filepath.EvalSymlinks(joined)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", ErrNotFound
+	}
 	if err != nil {
 		return "", ErrOutsideRoot
 	}

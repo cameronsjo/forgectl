@@ -22,13 +22,15 @@ import (
 
 // docMeta is scanDoc's one-pass result — everything Doc needs about a
 // document (Title, Aliases, Headings, BlockIDs, Links) read from a single
-// file open.
+// file open, plus the raw OKF trust fields (Status, StaleAfter; see trust.go).
 type docMeta struct {
-	Title    string
-	Aliases  []string
-	Headings []Heading
-	BlockIDs []string
-	Links    []LinkRef
+	Title      string
+	Aliases    []string
+	Headings   []Heading
+	BlockIDs   []string
+	Links      []LinkRef
+	Status     string
+	StaleAfter string
 }
 
 // linkMarkdown is the goldmark instance scanDoc parses document BODIES
@@ -104,9 +106,11 @@ func scanDoc(absPath, relPath string) (docMeta, error) {
 
 	body := source
 	var aliases []string
+	var status, staleAfter string
 	if fm, ok := splitFrontmatter(source); ok {
 		body = fm.body
 		aliases = frontmatterAliases(fm)
+		status, staleAfter = frontmatterTrust(fm)
 	}
 
 	headings, links, code, err := scanBody(body)
@@ -116,11 +120,13 @@ func scanDoc(absPath, relPath string) (docMeta, error) {
 	blockIDs := scanBlockIDs(body, code)
 
 	return docMeta{
-		Title:    title,
-		Aliases:  aliases,
-		Headings: headings,
-		BlockIDs: blockIDs,
-		Links:    links,
+		Title:      title,
+		Aliases:    aliases,
+		Headings:   headings,
+		BlockIDs:   blockIDs,
+		Links:      links,
+		Status:     status,
+		StaleAfter: staleAfter,
 	}, nil
 }
 

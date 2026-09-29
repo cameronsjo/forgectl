@@ -14,8 +14,9 @@ import (
 )
 
 // newDocsCheckCmd builds `forgectl docs check [dir|file ...]` — reports broken
-// links, broken anchors, ambiguous links, and orphan pages across the
-// docs-kind roots, without binding a server.
+// links, broken anchors, ambiguous links, orphan pages, and deprecated or
+// stale docs (OKF status / stale_after frontmatter) across the docs-kind
+// roots, without binding a server.
 //
 // Exit contract: 0 clean; 1 findings (the report is complete on stdout);
 // 2 the check could not run (bad root, deadline, no docs-kind root, bad flag).
@@ -25,7 +26,7 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "check [dir|file ...]",
-		Short: "Report broken links, broken anchors, and orphan pages in docs roots",
+		Short: "Report broken links, orphan pages, and deprecated or stale docs in docs roots",
 		Args:  cobra.ArbitraryArgs,
 		// Silenced for the same reason docs list is: a deadline under --json
 		// has already written its one JSON object to stderr.
@@ -51,7 +52,7 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 					if len(roots) > 0 {
 						fallback = roots[0]
 					}
-					return reportDocsListDeadline(cmd, deadlineRoot(err, fallback), err, asJSON)
+					return reportDocsListDeadline(cmd, "docs check", deadlineRoot(err, fallback), err, asJSON)
 				}
 				return WithExitCode(err, 2)
 			}
@@ -82,6 +83,9 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 					line := termsafe.SafeLine(f.Root) + "/" + termsafe.SafeLine(f.Path) + ": " + string(f.Kind)
 					if f.Target != "" {
 						line += " " + termsafe.SafeLine(f.Target)
+					}
+					if f.StaleAfter != "" {
+						line += " " + termsafe.SafeLine(f.StaleAfter)
 					}
 					_, _ = fmt.Fprintln(out, line)
 				}
