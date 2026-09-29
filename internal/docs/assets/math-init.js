@@ -45,6 +45,51 @@
     return src;
   }
 
+  // KaTeX builds its output straight into the DOM, which skips the HTML
+  // parser's nesting cap, and deeply nested TeX crashes the tab: Chromium
+  // dies at about 150 levels of \frac{…}{ or 200 nested matrix
+  // environments (forgectl#596). A formula over either bound is left as its
+  // TeX source instead. MAX_DEPTH counts brace groups, \begin…\end,
+  // \left…\right and the \begingroup/\bgroup forms together: each nests the
+  // output a level deeper (nested matrices crash with no brace nesting at
+  // all), and they can be mixed to dodge a per-kind count.
+  var MAX_SOURCE = 10000;
+  var MAX_DEPTH = 100;
+
+  // tooComplex reports whether src is over MAX_SOURCE characters or nests
+  // deeper than MAX_DEPTH. An escaped brace (\{, \}) is a literal, a
+  // control symbol (\\, \$, …) consumes the one character after it, and a
+  // % comment runs to the end of its line, as KaTeX reads them. A closer
+  // never takes the depth below zero, so surplus closers cannot bank credit
+  // for later openers.
+  function tooComplex(src) {
+    if (src.length > MAX_SOURCE) { return true; }
+    var depth = 0;
+    for (var i = 0; i < src.length; i++) {
+      var c = src.charAt(i);
+      if (c === "{") {
+        depth++;
+      } else if (c === "}") {
+        depth = Math.max(0, depth - 1);
+      } else if (c === "%") {
+        while (i + 1 < src.length && src.charAt(i + 1) !== "\n") { i++; }
+      } else if (c === "\\") {
+        var j = i + 1;
+        while (j < src.length && /[A-Za-z]/.test(src.charAt(j))) { j++; }
+        var name = src.slice(i + 1, j);
+        if (name === "begin" || name === "left" || name === "begingroup" || name === "bgroup") {
+          depth++;
+        } else if (name === "end" || name === "right" || name === "endgroup" || name === "egroup") {
+          depth = Math.max(0, depth - 1);
+        }
+        // A command name ends before j; a control symbol is one character.
+        i = name === "" ? i + 1 : j - 1;
+      }
+      if (depth > MAX_DEPTH) { return true; }
+    }
+    return false;
+  }
+
   // The TeX is stashed on first render, because katex.render replaces the
   // element's content and a re-render (theme change, refresh) needs the source
   // back.
@@ -55,6 +100,12 @@
       el.dataset.mathSource = src;
     }
     var display = el.classList.contains("math-display");
+    if (tooComplex(src)) {
+      el.textContent = src;
+      el.classList.add("math-skipped");
+      el.title = "Not rendered: this formula is too long or too deeply nested to render safely.";
+      return;
+    }
     try {
       katex.render(strip(src, display), el, {
         displayMode: display,
@@ -66,6 +117,10 @@
         // \href, \url, \includegraphics and \htmlClass/\htmlId/\htmlStyle/
         // \htmlData emit links, images and attributes from document text.
         trust: false,
+        // Caps every user-specified size (\rule, \kern, \rule{100000em}…)
+        // at 500em, so one command cannot build a page-sized box. maxExpand
+        // stays at KaTeX's default of 1000 macro expansions.
+        maxSize: 500,
         errorColor: color
       });
     } catch (err) {

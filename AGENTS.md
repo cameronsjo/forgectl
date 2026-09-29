@@ -48,7 +48,8 @@ Gotchas agent sessions have hit here. Each one cost a CI cycle or a debugging de
 
 - `internal/docs/assets/*.js` has no test harness and CI never runs it. Verify
   a change with a Playwright script against a running `docs serve`, and say so
-  in the PR.
+  in the PR. `scripts/verify-math-render.mjs` is the committed one for
+  `math-init.js`; run it after any math or KaTeX change.
 - Load pages with `waitUntil: 'load'`, never `'networkidle'`. The live-reload
   SSE stream never goes idle.
 - The reader scrolls inside `main.surface-document`, not `window`, so
