@@ -60,3 +60,19 @@ feedback issue filed upstream.
 - **Why necessary:** Artificer has no highlight or inline-tag primitive. Its `.chip` is the nearest, but it carries hover and `aria-pressed` states and a 44px touch min-height, which would break a line of prose.
 - **Upstream issue:** none filed yet. Candidate for an upstream inline-tag and highlight primitive.
 - **Retire when:** the vendored Artificer ships an inline tag and highlight treatment. Delete the two template rules under "Obsidian inline flavour" and adopt the upstream classes.
+
+## A8 — non-interactive `.status-chip` for the properties block
+
+- **Dated:** 2026-09-29 · app @ pre-1.0 · Artificer @ 0.25.0
+- **What diverges:** the properties block renders the frontmatter `status` value as `<span class="status-chip">`, styled by one template rule, and not as Artificer's `.chip`.
+- **Why necessary:** `.chip` is an interactive control. It sets `cursor: pointer`, a border and hover states, and under `@media (pointer: coarse)` a `min-height` and `min-width` of 44px. Measured at 375px with touch, the status label rendered 44px tall. It is a static label, not a control.
+- **Upstream issue:** none filed. Candidate for a non-interactive label primitive; `.badge` is the nearest but is solid-filled.
+- **Retire when:** the vendored Artificer ships a non-interactive label primitive with this tinted look. Delete the `.status-chip` rule and adopt the upstream class.
+
+## A9 — `.callout.note` restates the inherited body size and colour
+
+- **Dated:** 2026-09-29 · app @ pre-1.0 · Artificer @ 0.25.0
+- **What diverges:** the docs shell template sets `font-size: inherit; color: inherit` on `.callout.note`.
+- **Why necessary:** the callout tier class `note` collides with Artificer's global `.note` rule (`artificer.css:385`: `color: var(--fg-secondary); font-size: var(--t-label-sm-size)`). Note-tier callout body text measured 11.4px against 15.2px for the other tiers.
+- **Upstream issue:** none filed. Artificer's `.note` is unscoped, so any consumer class named `note` inherits it.
+- **Retire when:** Artificer scopes `.note`, or the callout tier class is renamed. Delete the two declarations.

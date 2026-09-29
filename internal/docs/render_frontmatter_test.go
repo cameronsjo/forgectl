@@ -37,7 +37,7 @@ func TestRender_FrontmatterBecomesDisclosure(t *testing.T) {
 	}
 	for _, want := range []string{
 		`<div class="props">`,
-		`<span class="chip">in-review</span>`,
+		`<span class="status-chip">in-review</span>`,
 		`>status</span>`,
 		`>branch</span>`,
 		`<span class="v dt">plan/docs-fix-up</span>`,
@@ -242,8 +242,17 @@ func TestRender_DeprecatedBadge(t *testing.T) {
 		t.Errorf("deprecated status not badged:\n%s", got)
 	}
 	got = renderFM(t, "status: draft\n")
-	if !strings.Contains(got, `<span class="chip">draft</span>`) || strings.Contains(got, "trust-badge") {
+	if !strings.Contains(got, `<span class="status-chip">draft</span>`) || strings.Contains(got, "trust-badge") {
 		t.Errorf("draft status should keep the plain chip:\n%s", got)
+	}
+}
+
+// The status value must not reuse Artificer's interactive .chip (pointer
+// cursor, hover, 44px touch min-size); it is a static label.
+func TestRender_StatusIsNotInteractiveChip(t *testing.T) {
+	got := renderFM(t, "status: draft\n")
+	if strings.Contains(got, `class="chip"`) {
+		t.Errorf("status emitted Artificer's interactive .chip:\n%s", got)
 	}
 }
 
