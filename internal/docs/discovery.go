@@ -388,6 +388,13 @@ func (info ServerInfo) DocURL(rootLabel, relPath string) string {
 	return u.String()
 }
 
+// docHref is the escaped, host-less reader path for a (root, relPath) pair,
+// for hrefs rendered into pages. A '#' or '?' in a filename would otherwise
+// start a fragment or query and truncate the link.
+func docHref(rootLabel, relPath string) string {
+	return (&url.URL{Path: "/doc/" + rootLabel + "/" + relPath}).String()
+}
+
 // BaseURL is the reader's index page.
 func (info ServerInfo) BaseURL() string {
 	return (&url.URL{Scheme: "http", Host: info.Addr, Path: "/"}).String()

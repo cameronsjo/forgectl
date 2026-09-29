@@ -10,6 +10,7 @@ forgectl docs serve --open               # also open the system browser
 forgectl docs open [path]                # point the browser at a doc on the already-running reader
 forgectl docs open --print-url [path]    # print the resolved URL instead of opening a browser
 forgectl docs list [dir|file ...]        # list the indexed docs, no server (--json for scripting)
+forgectl docs check [dir|file ...]       # broken links, broken anchors, orphan pages (--json for scripting)
 forgectl docs search <query> [--json]    # full-text search the indexed docs (ripgrep backend)
 ```
 
@@ -45,6 +46,43 @@ Every root is classified as `docs` or `vault` when it is indexed. A root is a `v
 | `vault` | wikilink by vault-relative path, bare note name, or frontmatter alias (`[[Note]]`, `[[folder/Note]]`); a `./` or `../` markdown path resolves from the linking file | heading text or slug (`#Some Heading`), or a block id (`#^blk-1`) |
 
 Links never resolve across roots. `[docs.root_kinds]` forces a kind when detection gets it wrong, keyed by the root path as you wrote it in `roots` or on the command line — relative spellings such as `.` match the same directory the CLI derives. A value other than `docs` or `vault` is a config error, and `forgectl launch doctor` reports it.
+
+## Checking links
+
+`docs check` walks the same roots as `list` (no arguments: cwd, `./docs`, `$CADENCE_FIELD_REPORTS_DIR`, and any `[docs].roots`; naming paths replaces that set) and reports what would 404 in the reader, without binding a server.
+
+| Finding kind | Meaning |
+|---|---|
+| `broken_link` | the target file does not exist |
+| `ambiguous_link` | the target matches more than one doc (for example `notes.md` and `notes.markdown`); candidates are not listed |
+| `broken_anchor` | the file exists but the `#heading` or `#^block` fragment does not, including a fragment-only `#x` |
+| `orphan` | a doc in a directory root that no other doc links to |
+| `deprecated` | the doc's YAML frontmatter says `status: deprecated` (exact, lowercase) |
+| `stale` | the doc's frontmatter `stale_after` is an RFC 3339 instant with an explicit offset (`2026-09-23T00:00:00Z`) and now is at or past it; a date-only (`2026-09-23`) or offset-less value is ignored |
+
+- **Existence fallback.** A link to a directory (`commands/`) or a non-markdown file (`LICENSE`, an image) resolves to no indexed doc. It is reported as broken only when nothing exists at that path inside the root. The check reads nothing and refuses a symlink that escapes the root.
+- **Out-of-root links are counted, not reported.** A link such as `../../README.md` that leaves its root works on GitHub, so it is not a finding. It is counted in `summary.outside_root_links`.
+- **Orphans.** A root-level `README` or `index` page is never an orphan, and a single-file root has no orphans. A `README.md` in a subdirectory is an ordinary doc.
+- **Vault roots are skipped.** A root detected or configured as a `vault` is not checked yet: a note on stderr says so, and if no docs-kind root remains the command exits 2.
+- **Trust signals.** `deprecated` and `stale` follow the Open Knowledge Format v0.2 §5.4/§5.5 (SPEC at `ad30107`). Both are findings, so they exit 1 like any other. The reader also badges them, in the properties block and in the status bar. OKF changed `stale_after` from a date to a datetime inside v0.2 without a version bump; date-only values written against the older text are ignored, per the current spec and its reference implementation. Coverage gaps: vault roots are not checked (see above), though the reader still badges their docs, and a doc over 1 MiB is indexed by title only, so it gets no finding and no status-bar badge, though its properties block still badges.
+- **Exit codes.** 0 clean; 1 findings (the complete report is on stdout); 2 the check could not run (unreadable root, `--timeout` deadline, no docs-kind root, bad flag).
+
+Human output is one line per finding, `<root>/<path>: <kind> <target>`; a `stale` line ends with its `stale_after` value instead of a target. `--json` prints one object:
+
+```json
+{
+  "schema_version": 1,
+  "roots": [{"label": "docs", "kind": "docs", "checked": true, "docs": 42}],
+  "findings": [
+    {"kind": "broken_link", "root": "docs", "path": "plans/x.md", "target": "gone.md"},
+    {"kind": "orphan", "root": "docs", "path": "notes.md"},
+    {"kind": "stale", "root": "docs", "path": "runbook.md", "stale_after": "2026-09-01T00:00:00Z"}
+  ],
+  "summary": {"broken_links": 1, "ambiguous_links": 0, "broken_anchors": 0, "orphans": 1, "outside_root_links": 20, "deprecated": 0, "stale": 1}
+}
+```
+
+The shape is additive-only ([ADR-0008](../adr/0008-agent-contract.md) rule 2): new keys and finding kinds may appear, existing ones are never renamed or removed. A skipped vault root also carries a `skipped` reason, and roots never carry an absolute path.
 
 ## Bearer-token surface
 

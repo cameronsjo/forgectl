@@ -35,6 +35,9 @@ workbench — no terminal-specific rendering, no popping between windows.
                                          already-running reader
   forgectl docs list [dir|file ...]      list the indexed docs, no server
   forgectl docs list --json              machine-readable output for scripts
+  forgectl docs check [dir|file ...]     report broken links, broken anchors,
+                                         and orphan pages; no server
+  forgectl docs check --json             the same report for scripts
   forgectl docs search <query> [--json]  full-text search the indexed docs
                                          (ripgrep backend)
 
@@ -47,7 +50,8 @@ With no arguments, both verbs index cwd, ./docs (if present), and
 $CADENCE_FIELD_REPORTS_DIR (if set), plus any extra roots configured in the
 [docs] section of config.toml (macOS: ~/Library/Application
 Support/forgectl/config.toml). Naming directories or files on the command
-line replaces that default set entirely.
+line replaces that default set entirely. docs check exits 0 when clean, 1 when
+it found problems (the full report is on stdout), and 2 when it could not run.
 
 The server binds loopback-only by default and rejects any request whose
 Host header isn't 127.0.0.1/localhost/::1 — DNS rebinding defense, not just
@@ -63,6 +67,7 @@ navigation cannot attach an Authorization header.`,
 		newDocsServeCmd(deps),
 		newDocsOpenCmd(deps),
 		newDocsListCmd(deps),
+		newDocsCheckCmd(deps),
 		newDocsSearchCmd(deps),
 	)
 	return cmd
