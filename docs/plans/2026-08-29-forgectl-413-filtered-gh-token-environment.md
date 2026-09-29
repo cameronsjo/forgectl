@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # Forgectl #413 — Remove Ambient Tokens from Pinned `gh` Processes
 
 ## Goal

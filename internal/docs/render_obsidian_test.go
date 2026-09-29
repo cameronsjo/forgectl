@@ -977,3 +977,31 @@ func TestRenderVault_WordsSkipComments(t *testing.T) {
 		t.Errorf("docs words = %d, want the raw count %d", docs.Words, want)
 	}
 }
+
+// TestRenderCallout_CustomTitle: plain text after the marker replaces the
+// fixed label, escaped once, and the body starts on the next line. A title
+// holding markup keeps the fixed label and leaves its line in the body.
+func TestRenderCallout_CustomTitle(t *testing.T) {
+	cases := []struct {
+		kind       RootKind
+		src, title string
+		body       string
+	}{
+		{RootVault, "> [!tip] My title\n> body\n", "My title", "<p>body</p>"},
+		{RootVault, "> [!tip]- Folded title\n> body\n", "Folded title", "<p>body</p>"},
+		{RootVault, "> [!info] A & B\n> body\n", "A &amp; B", "<p>body</p>"},
+		{RootVault, "> [!info] \\<b\\>x\\</b\\>\n> body\n", "&lt;b&gt;x&lt;/b&gt;", "<p>body</p>"},
+		{RootVault, "> [!tip] Hard  \n> body\n", "Hard", "<p>body</p>"},
+		{RootVault, "> [!tip] Only\n", "Only", "<p></p>"},
+		{RootVault, "> [!tip] *em* t\n> body\n", "Tip", "<p><em>em</em> t\nbody</p>"},
+		{RootVault, "> [!tip] see [[x]]\n> body\n", "Tip", "<p>see "},
+		{RootVault, "> [!tip]\n> body\n", "Tip", "<p>body</p>"},
+		{RootDocs, "> [!NOTE] Heads up\n> body\n", "Heads up", "<p>body</p>"},
+	}
+	for _, c := range cases {
+		out := renderKind(t, c.src, c.kind)
+		if !strings.Contains(out, "</svg> "+c.title+"</div>"+c.body) {
+			t.Errorf("%q: want title %q then %q, got %s", c.src, c.title, c.body, out)
+		}
+	}
+}

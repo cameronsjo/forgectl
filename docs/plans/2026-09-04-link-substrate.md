@@ -8,7 +8,7 @@ harness: "claude-code 2.1.261"
 machine: "cf6e768835c7"
 approved_in: "woven-lyre"
 approved_session_id: "1488f160-f360-414b-952e-1f3846a08602"
-status: review
+status: done
 next: "forgectl#451 ready → reviewer pass → merge"
 branch: plan/link-substrate
 pr: "cameronsjo/forgectl#451"

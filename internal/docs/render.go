@@ -825,15 +825,24 @@ const calloutTriangleIcon = `<path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 
 
 const calloutOctagonIcon = `<path d="M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86L7.86 2Z"/><path d="M12 8v4"/><path d="M12 16h.01"/>`
 
+// calloutBlockquote opens a callout's blockquote: bare, or carrying the one
+// attribute the vault pipeline gives a blockquote, a block id from a
+// standalone "^id" line after it (standaloneBlockID). Its character class
+// is blockIDPattern's, so the kept id holds nothing that needs escaping.
+// Group 1 is the id attribute, kept on the rewritten blockquote.
+const calloutBlockquote = `<blockquote( id="\^[A-Za-z0-9_-]+")?>`
+
 // calloutOpen matches a sanitized blockquote whose first paragraph opens
-// with a GFM alert marker ([!NOTE] etc.).
-var calloutOpen = regexp.MustCompile(`(?s)<blockquote>\s*<p>\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION|DANGER)\]\s*`)
+// with a GFM alert marker ([!NOTE] etc.). Whatever follows the marker is
+// left for calloutTitle.
+var calloutOpen = regexp.MustCompile(`(?s)` + calloutBlockquote + `\s*<p>\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION|DANGER)\]`)
 
 // calloutOpenVault is calloutOpen for vault roots: any obsidianCalloutTiers
 // key in any case, plus Obsidian's optional fold marker ([!info]- or
-// [!info]+), which it swallows. The alternation is built from the map keys,
+// [!info]+), which it swallows: folding is not rendered, so a foldable
+// callout shows open. The alternation is built from the map keys,
 // so the regexp and the map cannot disagree about which kinds exist.
-var calloutOpenVault = regexp.MustCompile(`(?s)<blockquote>\s*<p>\[!(?i:(` + calloutAlternation(obsidianCalloutTiers) + `))\][+-]?\s*`)
+var calloutOpenVault = regexp.MustCompile(`(?s)` + calloutBlockquote + `\s*<p>\[!(?i:(` + calloutAlternation(obsidianCalloutTiers) + `))\][+-]?`)
 
 // calloutAlternation joins the map's keys, regexp-quoted and sorted (for a
 // stable pattern), into an alternation.
@@ -850,23 +859,79 @@ func calloutAlternation(m map[string]calloutStyle) string {
 // GFM's six uppercase kinds for a docs root, and Obsidian's callout types
 // (obsidianCalloutTiers) for a vault root. It runs AFTER sanitization on
 // pipeline-produced HTML: the marker arrives as escaped-safe text, and
-// everything injected here is our own fixed markup — the document author
-// contributes only the already-sanitized body that follows the marker.
+// everything injected here is our own fixed markup plus, for a custom
+// title, plain text that calloutTitle re-escapes. The document author
+// contributes only the already-sanitized body that follows the marker,
+// which stays where it was.
 func transformCallouts(rendered string, kind RootKind) string {
 	open, tiers, fold := calloutOpen, calloutTiers, strings.ToUpper
 	if kind == RootVault {
 		open, tiers, fold = calloutOpenVault, obsidianCalloutTiers, strings.ToLower
 	}
-	return open.ReplaceAllStringFunc(rendered, func(m string) string {
-		c, ok := tiers[fold(open.FindStringSubmatch(m)[1])]
+	var b strings.Builder
+	last := 0
+	for _, m := range open.FindAllStringSubmatchIndex(rendered, -1) {
+		c, ok := tiers[fold(rendered[m[4]:m[5]])]
 		if !ok {
 			// (?i) folds more than ToLower undoes (U+017F LATIN SMALL
 			// LETTER LONG S matches 's'), so a match can miss the map.
 			// Leave that blockquote exactly as it was.
-			return m
+			continue
 		}
-		return `<blockquote class="callout ` + c.tier + `"><div class="callout-title"><svg viewBox="0 0 24 24" aria-hidden="true">` + c.icon + `</svg> ` + c.label + `</div><p>`
-	})
+		title, n := calloutTitle(rendered[m[1]:])
+		if title == "" {
+			title = c.label
+		}
+		b.WriteString(rendered[last:m[0]])
+		b.WriteString(`<blockquote`)
+		if m[2] >= 0 {
+			b.WriteString(rendered[m[2]:m[3]])
+		}
+		b.WriteString(` class="callout ` + c.tier + `"><div class="callout-title"><svg viewBox="0 0 24 24" aria-hidden="true">` + c.icon + `</svg> ` + title + `</div><p>`)
+		last = m[1] + n
+	}
+	if last == 0 {
+		return rendered
+	}
+	b.WriteString(rendered[last:])
+	return b.String()
+}
+
+// calloutTitle reads an Obsidian custom callout title ("> [!tip] My title")
+// from rest, the sanitized HTML right after a callout marker. It returns
+// the title as escaped text, and how many bytes of rest it takes up (the
+// title and the line break after it, so the body starts on the next line).
+//
+// Only plain text qualifies: the run up to the first '<' or newline, and
+// only when that run ends the line (a newline, a hard break, or the end of
+// the paragraph). A title holding any markup, such as emphasis, a code span,
+// a link or a tag, returns "" and consumes only the whitespace after the
+// marker, which is today's rendering: the fixed label, with the line left
+// in the body. The text is unescaped and escaped again, so an entity the
+// sanitizer wrote (&amp;) is neither doubled nor turned back into markup.
+func calloutTitle(rest string) (string, int) {
+	ws := len(rest) - len(strings.TrimLeft(rest, " \t\n\f\r"))
+	end := strings.IndexAny(rest, "<\n")
+	if end < 0 {
+		return "", ws
+	}
+	raw := strings.TrimSpace(rest[:end])
+	if raw == "" {
+		return "", ws
+	}
+	tail := rest[end:]
+	switch {
+	case strings.HasPrefix(tail, "\n"):
+		end++
+	case strings.HasPrefix(tail, "<br>\n"):
+		end += len("<br>\n")
+	case strings.HasPrefix(tail, "</p>"):
+		// A title-only callout: the paragraph closes here, as it does
+		// after a bare marker.
+	default:
+		return "", ws
+	}
+	return html.EscapeString(html.UnescapeString(raw)), end
 }
 
 // hasWellFormedFrontmatter reports whether source opens with a frontmatter

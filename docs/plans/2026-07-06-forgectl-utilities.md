@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # forgectl utilities batch — implementation plan
 
 > Plan PR (draft). One `Refs cameronsjo/forgectl#N` line per module below — do **not** use `Closes` on any of these (batch ships incrementally; the umbrella #1 stays open). Implementer note: you have zero prior context — read this document top to bottom, then the cited source files, before writing a line. Planned 2026-07-06 against `forgectl` @ `main` (`go 1.25.0`, verified `go build ./...` green at plan time).

@@ -13,11 +13,12 @@ import (
 )
 
 var (
-	blockIDAttr = regexp.MustCompile(`<(?:p|li) id="([^"]*)"`)
+	blockIDAttr = regexp.MustCompile(`<(?:p|li|ul|ol|table|blockquote) id="([^"]*)"`)
 	anyTag      = regexp.MustCompile(`<[^>]*>`)
 )
 
-// blockIDAttrs returns every id attribute on a <p> or <li> in out, as
+// blockIDAttrs returns every id attribute on a <p> or <li>, or on a list,
+// table or blockquote (a standalone "^id" line's target), in out, as
 // rendered ("^blk-1").
 func blockIDAttrs(out string) []string {
 	var ids []string
@@ -200,12 +201,58 @@ func TestRenderDocs_BlockIDStaysLiteral(t *testing.T) {
 	}
 }
 
+// standaloneBlockIDCases is a "^id" line on its own after each block kind
+// that takes it: the source and the opening tag the id lands on.
+var standaloneBlockIDCases = []struct{ src, want string }{
+	{"- a\n- b\n\n^lst\n", `<ul id="^lst">`},
+	{"1. a\n\n^ord\n", `<ol id="^ord">`},
+	{"| h |\n|---|\n| c |\n\n^tbl\n", `<table id="^tbl">`},
+	{"> q\n\n^qt\n", `<blockquote id="^qt">`},
+	{"> [!tip] Title\n> b\n\n^co\n", `<blockquote id="^co" class="callout tip"><div class="callout-title">`},
+	{"> - nested\n>\n> ^nst\n", `<ul id="^nst">`},
+}
+
+// TestRenderVault_StandaloneBlockID: a "^id" line on its own right after a
+// list, table or quote (a callout included) gives that block its id and
+// leaves the page. After a paragraph, or after a block that already took
+// one, it keeps its text and places no id.
+func TestRenderVault_StandaloneBlockID(t *testing.T) {
+	for _, c := range standaloneBlockIDCases {
+		out := renderKind(t, c.src, RootVault)
+		if !strings.Contains(out, c.want) {
+			t.Errorf("%q: want %q in %s", c.src, c.want, out)
+		}
+		if strings.Contains(pageText(out), "^") {
+			t.Errorf("%q: the marker is still on the page: %s", c.src, out)
+		}
+	}
+	for _, c := range []struct{ src, ids string }{
+		{"para\n\n^solo\n", ""},
+		{"- a\n\n^one\n\n^two\n", "^one"},
+	} {
+		out := renderKind(t, c.src, RootVault)
+		if ids := strings.Join(blockIDAttrs(out), ","); ids != c.ids {
+			t.Errorf("%q: rendered ids %q, want %q: %s", c.src, ids, c.ids, out)
+		}
+		if !strings.Contains(pageText(out), "^") {
+			t.Errorf("%q: marker text dropped with no id placed: %s", c.src, out)
+		}
+	}
+	// A marker trailing text after a list is that paragraph's own.
+	if out := renderKind(t, "- a\n\npara ^pp\n", RootVault); !strings.Contains(out, "<ul>") || !strings.Contains(out, `<p id="^pp">para</p>`) {
+		t.Errorf("a trailing marker after a list moved off its paragraph: %s", out)
+	}
+}
+
 // TestScanVault_RenderedBlockIDsAreIndexed: every id the page renders is
 // one the index holds, so a link to it resolves; for the forms the render
 // handles, the two sets are equal, each rendered as "^" plus the id.
 func TestScanVault_RenderedBlockIDsAreIndexed(t *testing.T) {
 	srcs := []string{"# T\n\npara ^p1\n\n> quote ^q1\n\n- item ^l1\n- loose\n\n  more ^l2\n\nsplit ^s_1\n\n```\ncode ^c1\n```\n"}
 	for _, c := range blockIDAfterInlineCases {
+		srcs = append(srcs, c.src)
+	}
+	for _, c := range standaloneBlockIDCases {
 		srcs = append(srcs, c.src)
 	}
 	for i, src := range srcs {

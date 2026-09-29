@@ -8,7 +8,7 @@ approved_session_id: "bcffd4ae-076f-40f2-8c6d-b7c2835e4e52"
 status: done
 next: "All forgectl tasks (1, 3, 4, 5, 6) merged. Task 7 (using-forgectl skill catch-up) remains as its own cadence-monorepo session, tracked separately — not a forgectl-repo obligation."
 branch: plan/hub-menu
-pr: merged: cameronsjo/forgectl#484, #485, #486, #487, #488, #490
+pr: "merged: cameronsjo/forgectl#484, #485, #486, #487, #488, #490"
 updated: 2026-09-11
 date: 2026-09-09
 ---

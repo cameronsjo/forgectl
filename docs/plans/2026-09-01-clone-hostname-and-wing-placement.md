@@ -1,5 +1,5 @@
 ---
-status: "done"
+status: done
 updated: "2026-09-01"
 next: "PR #433 open and ready — awaiting Cameron's review and merge"
 branch: "feat/hostname-and-wing-placement"
