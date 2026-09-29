@@ -542,7 +542,9 @@ func headingText(n *ast.Heading, source []byte) string {
 }
 
 // appendNodeText flattens n's inline nodes into their text, in one walk.
-// It is the one heading-text builder for both root kinds. The vault-only
+// It is the one heading-text builder for both root kinds; a docs root reads
+// Text nowhere (its anchors match the slug), so both kinds share the rule
+// that a line break is a space. The vault-only
 // nodes a docs root never produces are handled here too: a %% comment
 // contributes nothing (it is not on the page), a tag contributes "#name",
 // and inline math its "$…$" source, since neither has a text child.
@@ -565,6 +567,10 @@ func appendNodeText(b *strings.Builder, n ast.Node, source []byte) {
 		return
 	case *ast.Text:
 		b.Write(t.Segment.Value(source))
+		// A setext heading's line break reads as a space, as it renders.
+		if t.SoftLineBreak() || t.HardLineBreak() {
+			b.WriteByte(' ')
+		}
 		return
 	}
 	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
@@ -605,8 +611,6 @@ func wikilinkRef(wl *wikilink.Node, source []byte) LinkRef {
 	if frag != "" {
 		raw = target + "#" + frag
 	}
-	path0, frag0 := splitFirstHash(raw)
-
 	isAlias := false
 	if c := wl.FirstChild(); c != nil {
 		if tn, ok := c.(*ast.Text); ok {
@@ -614,6 +618,13 @@ func wikilinkRef(wl *wikilink.Node, source []byte) LinkRef {
 			isAlias = label != raw
 		}
 	}
+	// "[[note\|alias]]" is Obsidian's alias escaped for a table cell, and
+	// it reads the same outside one. The library splits on the '|' and
+	// keeps the backslash in the target, so drop that one backslash.
+	if isAlias && strings.HasSuffix(raw, `\`) {
+		raw = strings.TrimSuffix(raw, `\`)
+	}
+	path0, frag0 := splitFirstHash(raw)
 
 	form := FormPlain
 	switch {

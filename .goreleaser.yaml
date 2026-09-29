@@ -74,7 +74,9 @@ archives:
       - README*
       - CHANGELOG*
       # The binary embeds the Artificer web fonts (docs serve), and their SIL
-      # OFL requires the license to travel with them.
+      # OFL requires the license to travel with them. KaTeX's MIT notice
+      # (KaTeX-MIT.txt, math rendering) sits in the same directory for the
+      # same reason and rides this entry.
       - src: internal/docs/assets/font-licenses/*
         dst: font-licenses
 

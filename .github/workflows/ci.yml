@@ -10,6 +10,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege for every job: they only check out, build and test. A job
+# that needs more declares its own block (lint already does).
+permissions:
+  contents: read
+
 jobs:
   build-test:
     runs-on: ubuntu-latest

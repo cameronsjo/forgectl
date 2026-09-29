@@ -149,8 +149,13 @@
     // Inline SVG authored in the doc, plus whatever mermaid has rendered by
     // now. aria-hidden svgs are excluded: those are the reader's own chrome
     // (property-block and callout icons), and wrapping an 11px icon in a
-    // pan/zoom viewport renders it as a giant bordered capsule.
-    document.querySelectorAll('main svg:not([aria-hidden="true"])').forEach(enhance);
+    // pan/zoom viewport renders it as a giant bordered capsule. KaTeX output is
+    // excluded too: it draws radicals, stretchy arrows and wide accents as
+    // small inline SVGs sized to the formula, and a viewport around one
+    // crops the glyph.
+    document.querySelectorAll('main svg:not([aria-hidden="true"])').forEach(function (svg) {
+      if (!svg.closest(".katex")) { enhance(svg); }
+    });
   }
 
   // Mermaid renders asynchronously and replaces pre.mermaid contents, so the

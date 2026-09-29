@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"embed"
 	"fmt"
 	"html/template"
 	"io"
@@ -56,13 +57,16 @@ const locatePath = "/api/locate"
 //     short-circuits on a real `globalThis` before ever constructing anything
 //     in any browser this reader targets. Nothing here needs eval, so nobody
 //     should add 'unsafe-eval' back "just in case" — the correct response to a
-//     CSP eval violation is to find what started evaluating code.
+//     CSP eval violation is to find what started evaluating code. The
+//     vendored KaTeX bundle has no eval and no Function constructor at all.
 //   - style-src 'self' 'unsafe-inline' — FORCED, from two independent
 //     directions, which is why neither can be fixed away alone. The shell
 //     template carries layout style= attributes, and mermaid injects a <style>
 //     element per rendered diagram with theme-computed CSS: it exposes no nonce
 //     hook, and the content varies with the Artificer tokens, so no hash is
-//     knowable ahead of the render. Note what this does NOT reopen: the classic
+//     knowable ahead of the render. KaTeX output leans on it as well: every
+//     rendered formula carries style= attributes for its measured heights and
+//     offsets. Note what this does NOT reopen: the classic
 //     CSS-based exfiltration (a selector whose background-image URL leaks what
 //     it matched) is closed by img-src 'self', not by style-src.
 //   - img-src 'self' data: — the one behavior CHANGE in this policy. A doc
@@ -201,7 +205,12 @@ func NewHandler(store *Store, events *Broker) http.Handler {
 	mux.HandleFunc("GET /assets/diagram.css", serveStaticCSS(diagramCSS))
 	// artificer.css names its fonts as url('assets/fonts/…') relative to
 	// itself, which resolves to this doubled path.
-	mux.HandleFunc("GET /assets/assets/fonts/{name}", serveFont)
+	mux.HandleFunc("GET /assets/assets/fonts/{name}", serveWoff2(artificerFonts, "assets/artificer/assets/fonts/"))
+	mux.HandleFunc("GET /assets/katex/katex.min.js", serveStaticJS(katexJS))
+	mux.HandleFunc("GET /assets/katex/katex.min.css", serveStaticCSS(katexCSS))
+	// katex.min.css names its fonts as url(fonts/…), relative to itself.
+	mux.HandleFunc("GET /assets/katex/fonts/{name}", serveWoff2(katexFonts, "assets/katex/fonts/"))
+	mux.HandleFunc("GET /assets/math-init.js", serveStaticJS(mathInitJS))
 
 	mux.HandleFunc("GET "+eventsPath, handleEvents(events))
 	mux.HandleFunc("GET "+locatePath, handleLocate(store))
@@ -314,25 +323,29 @@ func serveStaticCSS(body []byte) http.HandlerFunc {
 	}
 }
 
-// serveFont serves one vendored woff2 by file name. {name} is a single path
-// segment, and embed.FS refuses any name that is not a file in that one
-// directory, so there is no traversal to guard beyond the suffix check.
-func serveFont(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	if !strings.HasSuffix(name, ".woff2") {
-		http.NotFound(w, r)
-		return
+// serveWoff2 serves one vendored woff2 from dir in fonts by file name. {name}
+// is a single path segment, and embed.FS refuses any name that is not a file
+// in that one directory, so there is no traversal to guard beyond the suffix
+// check. Each font set is its own embed.FS holding only *.woff2, so one
+// route cannot reach the other set or any non-font file.
+func serveWoff2(fonts embed.FS, dir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if !strings.HasSuffix(name, ".woff2") {
+			http.NotFound(w, r)
+			return
+		}
+		body, err := fonts.ReadFile(dir + name)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "font/woff2")
+		w.Header().Set("Cache-Control", "no-cache") // same as every other asset here
+		// body is one of the embedded woff2 files, served as font/woff2 with
+		// nosniff from SecurityHeaders: a browser never parses it as HTML.
+		_, _ = w.Write(body) //nolint:gosec // G705: embedded font bytes, not request-derived content
 	}
-	body, err := artificerFonts.ReadFile("assets/artificer/assets/fonts/" + name)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "font/woff2")
-	w.Header().Set("Cache-Control", "no-cache") // same as every other asset here
-	// body is one of the nine embedded woff2 files, served as font/woff2 with
-	// nosniff from SecurityHeaders: a browser never parses it as HTML.
-	_, _ = w.Write(body) //nolint:gosec // G705: embedded font bytes, not request-derived content
 }
 
 func serveStaticJS(body []byte) http.HandlerFunc {

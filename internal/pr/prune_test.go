@@ -7,7 +7,8 @@ package pr
 //   [x] An unparseable name yields no time, so the caller lists and keeps it
 // parseRetention (Classification: pure, operator-supplied window)
 //   [x] <N>d and every time.ParseDuration form; zero and negative refuse
-// classifyRepairRows (Classification: pure, what compaction may drop)
+// classifyRepairRows (Classification: what compaction may drop, through both
+//   streaming passes — scanRepairLog and copyKept)
 //   [x] A settled pair past the cutoff drops
 //   [x] An UNPAIRED intent is kept at any age — it is the dangling signal
 //   [x] An unparseable line is kept — nothing may drop what it cannot read
@@ -144,6 +145,26 @@ func rowLine(t *testing.T, id, outcome string, ts time.Time) []byte {
 	return bytes.TrimSuffix(data, []byte("\n"))
 }
 
+// classifyRepairRows runs lines through both streaming passes and splits the
+// copy back into lines, so the classification cases below exercise exactly
+// the code a compaction runs.
+func classifyRepairRows(t *testing.T, lines [][]byte, cutoff time.Time) ([][]byte, int) {
+	t.Helper()
+	var data []byte
+	for _, line := range lines {
+		data = append(append(data, line...), '\n')
+	}
+	out, kept, dropped := streamCompact(t, data, cutoff)
+	keep := [][]byte{}
+	if len(out) > 0 {
+		keep = bytes.Split(bytes.TrimSuffix(out, []byte("\n")), []byte("\n"))
+	}
+	if len(keep) != kept {
+		t.Fatalf("pass one planned %d kept, the copy holds %d", kept, len(keep))
+	}
+	return keep, dropped
+}
+
 func TestClassifyRepairRows(t *testing.T) {
 	now := fixedTime()
 	cutoff := now.Add(-24 * time.Hour)
@@ -155,7 +176,7 @@ func TestClassifyRepairRows(t *testing.T) {
 			rowLine(t, "aaa", repairOutcomeIntent, old),
 			rowLine(t, "aaa", repairOutcomeApplied, old),
 		}
-		keep, dropped := classifyRepairRows(lines, cutoff)
+		keep, dropped := classifyRepairRows(t, lines, cutoff)
 		if dropped != 2 || len(keep) != 0 {
 			t.Fatalf("dropped = %d, kept = %d, want the whole settled pair dropped", dropped, len(keep))
 		}
@@ -166,7 +187,7 @@ func TestClassifyRepairRows(t *testing.T) {
 			rowLine(t, "bbb", repairOutcomeIntent, old),
 			rowLine(t, "bbb", repairOutcomeFailed, old),
 		}
-		keep, dropped := classifyRepairRows(lines, cutoff)
+		keep, dropped := classifyRepairRows(t, lines, cutoff)
 		if dropped != 2 || len(keep) != 0 {
 			t.Fatalf("dropped = %d, kept = %d, want a failed pair dropped too", dropped, len(keep))
 		}
@@ -174,7 +195,7 @@ func TestClassifyRepairRows(t *testing.T) {
 
 	t.Run("an unpaired intent is kept at any age", func(t *testing.T) {
 		lines := [][]byte{rowLine(t, "ccc", repairOutcomeIntent, old)}
-		keep, dropped := classifyRepairRows(lines, cutoff)
+		keep, dropped := classifyRepairRows(t, lines, cutoff)
 		if dropped != 0 || len(keep) != 1 {
 			t.Fatalf("dropped = %d, kept = %d — a dangling intent is the only pointer left to a clean room",
 				dropped, len(keep))
@@ -183,7 +204,7 @@ func TestClassifyRepairRows(t *testing.T) {
 
 	t.Run("an unparseable line is kept", func(t *testing.T) {
 		lines := [][]byte{[]byte("{not json"), rowLine(t, "ddd", repairOutcomeIntent, old), rowLine(t, "ddd", repairOutcomeApplied, old)}
-		keep, dropped := classifyRepairRows(lines, cutoff)
+		keep, dropped := classifyRepairRows(t, lines, cutoff)
 		if dropped != 2 {
 			t.Fatalf("dropped = %d, want only the settled pair", dropped)
 		}
@@ -197,7 +218,7 @@ func TestClassifyRepairRows(t *testing.T) {
 			rowLine(t, "eee", repairOutcomeIntent, time.Time{}),
 			rowLine(t, "eee", repairOutcomeApplied, time.Time{}),
 		}
-		keep, dropped := classifyRepairRows(lines, cutoff)
+		keep, dropped := classifyRepairRows(t, lines, cutoff)
 		if dropped != 0 || len(keep) != 2 {
 			t.Fatalf("dropped = %d, kept = %d — no age could be established, so nothing may drop", dropped, len(keep))
 		}
@@ -208,7 +229,7 @@ func TestClassifyRepairRows(t *testing.T) {
 			rowLine(t, "fff", repairOutcomeIntent, recent),
 			rowLine(t, "fff", repairOutcomeApplied, recent),
 		}
-		keep, dropped := classifyRepairRows(lines, cutoff)
+		keep, dropped := classifyRepairRows(t, lines, cutoff)
 		if dropped != 0 || len(keep) != 2 {
 			t.Fatalf("dropped = %d, kept = %d, want an in-window pair kept", dropped, len(keep))
 		}
@@ -219,7 +240,7 @@ func TestClassifyRepairRows(t *testing.T) {
 			rowLine(t, "ggg", repairOutcomeIntent, old),
 			rowLine(t, "ggg", repairOutcomeApplied, recent),
 		}
-		keep, dropped := classifyRepairRows(lines, cutoff)
+		keep, dropped := classifyRepairRows(t, lines, cutoff)
 		if dropped != 0 || len(keep) != 2 {
 			t.Fatalf("dropped = %d, kept = %d, want the whole pair kept", dropped, len(keep))
 		}
@@ -227,7 +248,7 @@ func TestClassifyRepairRows(t *testing.T) {
 
 	t.Run("a row with no id is kept", func(t *testing.T) {
 		lines := [][]byte{rowLine(t, "", repairOutcomeApplied, old)}
-		keep, dropped := classifyRepairRows(lines, cutoff)
+		keep, dropped := classifyRepairRows(t, lines, cutoff)
 		if dropped != 0 || len(keep) != 1 {
 			t.Fatalf("dropped = %d, kept = %d — an id-less row can be paired with nothing", dropped, len(keep))
 		}
