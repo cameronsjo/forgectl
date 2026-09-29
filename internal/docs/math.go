@@ -79,13 +79,26 @@ func isMathSpace(b byte) bool {
 
 func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
 
+// opensMath reports whether the byte after an opener lets it open math. $…$
+// needs a non-space. $$ may also end its line, which is how display math
+// written straight after paragraph text reaches this parser ("text\n$$\nx\n$$"
+// is one paragraph, since a $$ block never interrupts one); a space after $$
+// ("costs $$ 5") still does not open.
+func opensMath(next byte, delim int) bool {
+	if delim == 2 && (next == '\n' || next == '\r') {
+		return true
+	}
+	return !isMathSpace(next)
+}
+
 // mathInlineParser parses $…$ and $$…$$ inside a paragraph.
 //
 // The dollar sign is ordinary prose far more often than it is math, so the
 // rules are pandoc's tex_math_dollars, chosen because they keep currency and
 // shell variables literal:
 //
-//   - the opening $ must be followed by a non-space;
+//   - the opening $ must be followed by a non-space (an opening $$ may also
+//     end its line; see opensMath);
 //   - for $…$, the FIRST unescaped $ after it decides: if it follows
 //     whitespace, or is followed by an ASCII digit, there is no math here and
 //     the parser gives up rather than scanning on for a later $.
@@ -108,7 +121,7 @@ func (mathInlineParser) Parse(_ ast.Node, block text.Reader, _ parser.Context) a
 	if len(line) > 1 && line[1] == '$' {
 		delim = 2
 	}
-	if len(line) <= delim || isMathSpace(line[delim]) {
+	if len(line) <= delim || !opensMath(line[delim], delim) {
 		return nil
 	}
 
@@ -218,8 +231,18 @@ func crossesMarkdown(tex []byte) bool {
 // paragraph it sits in instead of letting a block swallow the rest of the
 // document.
 //
-// Only the bare $$ line may interrupt a paragraph, mirroring a fence; a
-// one-line $$…$$ in the middle of a paragraph stays inline math.
+// A $$ block NEVER interrupts a paragraph (CanInterruptParagraph is false):
+// it opens only where a paragraph could start — after a blank line, at the
+// start of a container, or after another block. $$ lines that directly follow
+// paragraph text stay in that paragraph, where mathInlineParser pairs them
+// across soft breaks and renders a <span class="math math-display">. Only
+// that pairing decides what is math, so no $$ elsewhere in the paragraph (in
+// a code span, an autolink, "costs $$ 5") can turn a closer into an opener
+// that runs to the next $$ in the document. Letting a bare $$ interrupt was
+// tried twice, and each heuristic for telling opener from closer broke the
+// previous one. An ATX heading or fence inside such a sequence still
+// interrupts the paragraph as CommonMark says, leaving the math literal but
+// visible, and rendering and linkscan see the same heading.
 type mathBlockParser struct{}
 
 func (mathBlockParser) Trigger() []byte { return []byte{'$'} }
@@ -233,22 +256,10 @@ func (mathBlockParser) Open(_ ast.Node, reader text.Reader, pc parser.Context) (
 	rest := line[pos+len(mathDelim):]
 
 	if util.IsBlank(rest) {
-		// A paragraph holding an unclosed $$ (Obsidian's "$$x = 1" then a
-		// bare "$$" closer) owns this line: it is that math's closer, and
-		// opening a block here would run it to the NEXT $$ in the document.
-		// Declining lets the paragraph continue and the inline parser close
-		// the math across the soft break.
-		if last := pc.LastOpenedBlock().Node; ast.IsParagraph(last) && countDisplayDelims(last.Lines(), reader.Source())%2 == 1 {
-			return nil, parser.NoChildren
-		}
 		reader.AdvanceToEOL()
 		return &mathBlock{}, parser.NoChildren
 	}
 
-	// A one-line $$…$$ may not interrupt a paragraph.
-	if ast.IsParagraph(pc.LastOpenedBlock().Node) {
-		return nil, parser.NoChildren
-	}
 	closer := findDisplayCloser(rest)
 	if closer <= 0 || !util.IsBlank(rest[closer+len(mathDelim):]) {
 		return nil, parser.NoChildren
@@ -260,25 +271,6 @@ func (mathBlockParser) Open(_ ast.Node, reader text.Reader, pc parser.Context) (
 	node.Lines().Append(text.NewSegment(start, start+closer))
 	reader.AdvanceToEOL()
 	return node, parser.NoChildren
-}
-
-// countDisplayDelims counts the unescaped, non-overlapping $$ in lines.
-func countDisplayDelims(lines *text.Segments, source []byte) int {
-	n := 0
-	for i := 0; i < lines.Len(); i++ {
-		seg := lines.At(i)
-		b := seg.Value(source)
-		for j := 0; j < len(b); j++ {
-			switch {
-			case b[j] == '\\':
-				j++
-			case b[j] == '$' && j+1 < len(b) && b[j+1] == '$':
-				n++
-				j++
-			}
-		}
-	}
-	return n
 }
 
 // endsWithDisplayDelim reports whether b ends in an unescaped $$, so a
@@ -335,7 +327,8 @@ func (mathBlockParser) Continue(node ast.Node, reader text.Reader, _ parser.Cont
 
 func (mathBlockParser) Close(ast.Node, text.Reader, parser.Context) {}
 
-func (mathBlockParser) CanInterruptParagraph() bool { return true }
+// CanInterruptParagraph is false by design; see mathBlockParser.
+func (mathBlockParser) CanInterruptParagraph() bool { return false }
 
 func (mathBlockParser) CanAcceptIndentedLine() bool { return false }
 

@@ -16,7 +16,12 @@ package docs
 //   [x] Happy: a $$ … $$ block becomes a math-display div
 //   [x] Happy: a one-line $$…$$ block ends at its line
 //   [x] Happy: a one-line block after a tab-indented container marker
-//   [x] Happy: a bare $$ line interrupts a paragraph; $$x$$ does not
+//   [x] Happy: a $$ block never interrupts a paragraph; $$ lines straight
+//              after text pair up as inline display math
+//   [x] Happy: a $$ block after a blank line is a display div
+//   [x] Unhappy: a $$ that never opens (code span, autolink, "$$ 5") ahead of
+//                such math does not make a closer swallow later content, in
+//                Render or in scanBody
 //   [x] Happy: a ```math fence becomes a math-display div, not a chroma <pre>
 //   [x] Happy: a ```go fence and a ```mermaid fence are untouched
 //   [x] Unhappy: a stray "$$$" in prose does not open a block that swallows
@@ -158,11 +163,64 @@ func TestRender_Math_OneLineBlockAfterTab(t *testing.T) {
 	}
 }
 
-func TestRender_Math_BareOpenerInterruptsParagraph(t *testing.T) {
+// A $$ block never interrupts a paragraph: $$ lines straight after paragraph
+// text stay in it and pair up as inline display math.
+func TestRender_Math_BareOpenerDoesNotInterruptParagraph(t *testing.T) {
 	out := renderOrFail(t, "para\n$$\nx\n$$\n")
 
+	if strings.Contains(out, mathDivOpen) {
+		t.Errorf("a bare $$ line interrupted the paragraph: %s", out)
+	}
+	if want := "<p>para\n" + `<span class="math math-display">$$` + "\nx\n$$</span></p>"; !strings.Contains(out, want) {
+		t.Errorf("output missing %q: %s", want, out)
+	}
+}
+
+func TestRender_Math_BlockAfterBlankLine(t *testing.T) {
+	out := renderOrFail(t, "para\n\n$$\nx\n$$\n")
+
 	if !strings.Contains(out, "<p>para</p>") || !strings.Contains(out, mathDivOpen+"$$\nx\n$$</div>") {
-		t.Errorf("a bare $$ line did not interrupt the paragraph: %s", out)
+		t.Errorf("a $$ block after a blank line is not a display div: %s", out)
+	}
+}
+
+// nonOpenerFixtures put a $$ that the inline parser never opens (in a code
+// span, in an autolink, followed by a space) ahead of display math written
+// straight after the text. That $$ must not change how the math pairs, or the
+// closer becomes an opener that swallows everything to the next $$.
+var nonOpenerFixtures = map[string]string{
+	"code span": "Write display math with `$$`:" + nonOpenerTail,
+	"autolink":  "See <http://x/$$>:" + nonOpenerTail,
+	"spaced":    "It costs $$ 5:" + nonOpenerTail,
+}
+
+const nonOpenerTail = "\n$$\nx_1 * y_2\n$$\n\n## After\n\n[link](a.md)\n"
+
+func TestRender_Math_NonOpenerDollarsDoNotSwallow(t *testing.T) {
+	for name, src := range nonOpenerFixtures {
+		t.Run(name, func(t *testing.T) {
+			out := renderOrFail(t, src)
+			for _, want := range []string{
+				`<span class="math math-display">$$` + "\nx_1 * y_2\n$$</span>",
+				`<h2 id="after">After</h2>`,
+				`<a href="a.md" rel="nofollow">link</a>`,
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("output missing %q: %s", want, out)
+				}
+			}
+
+			headings, links, _, err := scanBody([]byte(src))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(headings) != 1 || headings[0].Slug != "after" {
+				t.Errorf("scan lost the heading after the math: %+v", headings)
+			}
+			if len(links) != 1 || links[0].Path != "a.md" {
+				t.Errorf("scan lost the link after the math: %+v", links)
+			}
+		})
 	}
 }
 
@@ -356,10 +414,17 @@ func renderedIDs(t *testing.T, src string) []string {
 // linkscan must see the block structure the renderer does, or the resolver
 // indexes headings and links the rendered page does not have.
 func TestScanBody_MathBlockParity(t *testing.T) {
-	for name, src := range map[string]string{
+	fixtures := map[string]string{
 		"heading in block": "$$\n# x\n$$\n\n# x\n",
 		"obsidian closer":  obsidianCloserFixture,
-	} {
+		// A heading inside $$ lines that follow paragraph text interrupts the
+		// paragraph as CommonMark says; both parsers must see it.
+		"heading after para": "para\n$$\n# x\n$$\n",
+	}
+	for k, v := range nonOpenerFixtures {
+		fixtures["non-opener "+k] = v
+	}
+	for name, src := range fixtures {
 		t.Run(name, func(t *testing.T) {
 			headings, _, _, err := scanBody([]byte(src))
 			if err != nil {
