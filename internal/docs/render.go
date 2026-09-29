@@ -13,9 +13,11 @@ import (
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/yuin/goldmark"
 	highlighting "github.com/yuin/goldmark-highlighting/v2"
+	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	goldmarkhtml "github.com/yuin/goldmark/renderer/html"
+	"github.com/yuin/goldmark/text"
 	"go.abhg.dev/goldmark/frontmatter"
 	"gopkg.in/yaml.v3"
 )
@@ -124,9 +126,27 @@ func newSanitizer() *bluemonday.Policy {
 	// generating the classes, not the document author, so the usual UGC
 	// threat model doesn't apply).
 	p.AllowStyling()
+	// img alt: UGCPolicy limits it to bluemonday's Paragraph pattern, which
+	// drops the whole alt for ordinary punctuation (':', '?', '%', '&', '"',
+	// '#', ...). Safety does not come from a character allowlist but from
+	// bluemonday HTML-escaping every attribute value on output (" becomes
+	// &#34;, < becomes &lt;, & becomes &amp;), so no alt can close the
+	// attribute or open a tag. attrTextPattern therefore only refuses control
+	// characters; tab, LF and CR stay because a markdown alt may span a soft
+	// line break. bluemonday v1.0.27 ORs the policies registered for an
+	// attribute, so this rule widens what UGCPolicy admits and the global
+	// Paragraph rule still applies alongside it (it also admits \f).
+	p.AllowAttrs("alt").Matching(attrTextPattern).OnElements("img")
+	// title: same drop, same fix, on the two elements markdown emits a title
+	// for (link and image). The global title rule is untouched, and being
+	// OR'd with it this only ever admits more, never less, on a and img.
+	p.AllowAttrs("title").Matching(attrTextPattern).OnElements("a", "img")
 	allowInlineSVG(p)
 	return p
 }
+
+// attrTextPattern accepts any attribute text free of control characters.
+var attrTextPattern = regexp.MustCompile(`^[^\x00-\x08\x0B\x0C\x0E-\x1F\x7F]*$`)
 
 // svgPaint matches the values a paint-ish SVG attribute (fill, stroke,
 // stop-color) may carry: a keyword, a hex or rgb() color, or a same-document
@@ -537,6 +557,15 @@ func render(source []byte, kind RootKind) (string, error) {
 // resolve, or any other root kind, renders exactly as render does. resolve
 // runs under renderMu, so it must never render.
 func renderWith(source []byte, kind RootKind, resolve wikilinkResolver) (string, error) {
+	rendered, _, err := renderHidden(source, kind, resolve)
+	return rendered, err
+}
+
+// renderHidden is renderWith that also returns the source range of every
+// %% comment the page hides (vault roots only; nil otherwise), taken from
+// the same parse the page is rendered from, so countWords can leave comment
+// text out of the reading estimate.
+func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (string, []text.Segment, error) {
 	// Route through the frontmatter-aware parser only when a well-formed
 	// block actually opens the document. The extension's opener is greedy —
 	// any leading --- fence starts a block, and an unterminated one consumes
@@ -560,13 +589,65 @@ func renderWith(source []byte, kind RootKind, resolve wikilinkResolver) (string,
 	if kind == RootVault && resolve != nil {
 		ctx.Set(wikilinkResolverKey, resolve)
 	}
-	err := md.Convert(source, &buf, parser.WithContext(ctx))
+	// md.Convert split in two, so the parsed tree can be read for comments.
+	doc := md.Parser().Parse(text.NewReader(source), parser.WithContext(ctx))
+	err := md.Renderer().Render(&buf, source, doc)
+	var hidden []text.Segment
+	if err == nil && kind == RootVault {
+		hidden = hiddenComments(doc, ctx)
+	}
 	renderMu.Unlock()
 	if err != nil {
-		return "", fmt.Errorf("render markdown: %w", err)
+		return "", nil, fmt.Errorf("render markdown: %w", err)
 	}
 	body := balanceFragment(string(sanitizer.SanitizeBytes(dropDuplicateSVGNamespaces(buf.Bytes()))))
-	return frontmatterHTML(ctx) + transformCallouts(body, kind), nil
+	return frontmatterHTML(ctx) + transformCallouts(body, kind), hidden, nil
+}
+
+// hiddenComments returns the source range of every %% comment in a parsed
+// vault document: each inline comment span, each block comment's lines
+// (opener and closer included), and each comment in a paragraph
+// commentTransformer removed from the tree.
+func hiddenComments(doc ast.Node, pc parser.Context) []text.Segment {
+	var hidden []text.Segment
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch c := n.(type) {
+		case *commentSpanNode:
+			hidden = append(hidden, text.NewSegment(c.Start, c.Stop))
+			return ast.WalkSkipChildren, nil
+		case *commentBlockNode:
+			if lines := c.Lines(); lines.Len() > 0 {
+				hidden = append(hidden, text.NewSegment(lines.At(0).Start, lines.At(lines.Len()-1).Stop))
+			}
+			return ast.WalkSkipChildren, nil
+		}
+		return ast.WalkContinue, nil
+	})
+	return append(hidden, removedComments(pc)...)
+}
+
+// cutSegments returns source with every segment in cuts removed; cuts may
+// overlap and come in any order.
+func cutSegments(source []byte, cuts []text.Segment) []byte {
+	if len(cuts) == 0 {
+		return source
+	}
+	sorted := append([]text.Segment(nil), cuts...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Start < sorted[j].Start })
+	out := make([]byte, 0, len(source))
+	at := 0
+	for _, c := range sorted {
+		lo, hi := max(c.Start, at), min(c.Stop, len(source))
+		if lo >= hi {
+			continue
+		}
+		out = append(out, source[at:lo]...)
+		at = hi
+	}
+	return append(out, source[at:]...)
 }
 
 // OutlineItem is one "On this page" entry — an h2 or h3 with the id
@@ -605,11 +686,12 @@ func RenderDocFor(kind RootKind, source []byte, idx *Index, from *Doc) (Rendered
 			return idx.wikilinkTarget(from, ref)
 		})
 	}
-	rendered, err := renderWith(source, kind, resolve)
+	rendered, hidden, err := renderHidden(source, kind, resolve)
 	if err != nil {
 		return RenderedDoc{}, err
 	}
-	words := countWords(source)
+	// A vault page's %% comments are not on the page, so they are not read.
+	words := countWords(cutSegments(source, hidden))
 	minutes := (words + 199) / 200
 	if minutes < 1 {
 		minutes = 1
@@ -640,6 +722,26 @@ var outlineHeading = regexp.MustCompile(`(?s)<h([23]) id="([^"]+)">(.*?)</h[23]>
 // stripTags removes inline markup from a heading's rendered text.
 var stripTags = regexp.MustCompile(`<[^>]*>`)
 
+// outlineMath matches the math span math.go emits inside a heading. The
+// outline is plain text the client never typesets, so the span is reduced to
+// its TeX source with the $ delimiters dropped ("Energy E=mc^2", not
+// "Energy $E=mc^2$"). The class attribute is the exact one math.go writes.
+var outlineMath = regexp.MustCompile(`<span class="(` + regexp.QuoteMeta(mathInlineClass) + `|` +
+	regexp.QuoteMeta(mathDisplayClass) + `)">(.*?)</span>`)
+
+// outlineText renders a heading's inner HTML as outline text.
+func outlineText(inner string) string {
+	inner = outlineMath.ReplaceAllStringFunc(inner, func(span string) string {
+		m := outlineMath.FindStringSubmatch(span)
+		delim := "$"
+		if m[1] == mathDisplayClass {
+			delim = mathDelim
+		}
+		return strings.TrimSuffix(strings.TrimPrefix(m[2], delim), delim)
+	})
+	return strings.TrimSpace(html.UnescapeString(stripTags.ReplaceAllString(inner, "")))
+}
+
 func extractOutline(rendered string) []OutlineItem {
 	var items []OutlineItem
 	for _, m := range outlineHeading.FindAllStringSubmatch(rendered, -1) {
@@ -653,7 +755,7 @@ func extractOutline(rendered string) []OutlineItem {
 		// "Q&amp;A".
 		items = append(items, OutlineItem{
 			Level: level,
-			Text:  strings.TrimSpace(html.UnescapeString(stripTags.ReplaceAllString(m[3], ""))),
+			Text:  outlineText(m[3]),
 			ID:    m[2],
 		})
 	}

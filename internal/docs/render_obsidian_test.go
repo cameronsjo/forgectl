@@ -604,9 +604,9 @@ func TestScanVault_BlockIDInRemovedCommentParagraph(t *testing.T) {
 }
 
 // TestResolveVault_HeadingMatchNormalized: a vault heading link matches
-// when the fragment and the heading's flattened Text agree under
-// normalizeHeadingKey, so a link written with the heading's markup or
-// without it resolves. Comment text is in neither.
+// when the fragment, as written or as rendered, and the heading's rendered
+// Text agree under foldHeadingKey, so a link written with the heading's
+// markup or without it resolves. Comment text is in neither.
 func TestResolveVault_HeadingMatchNormalized(t *testing.T) {
 	vault := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
@@ -651,9 +651,135 @@ func TestResolveVault_HeadingMatchNormalized(t *testing.T) {
 	}
 }
 
+// TestResolveVault_HeadingMatchKeepsLiterals: vault heading matching folds
+// only case and whitespace, so a literal "_ * = ~ |" inside a heading's
+// text must be matched as written, while a backslash escape or an entity
+// matches the character it renders as. (A fragment equal to the heading's
+// slug still matches by slug, so each heading here has a slug no dropped
+// character can reach.) A heading that renders empty is reached by no text.
+func TestResolveVault_HeadingMatchKeepsLiterals(t *testing.T) {
+	vault := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	const note = "# Note\n\n## snake_case\n\n## 1_000\n\n## 2*3 n\n\n## a = b\n\n## x\\|y z\n\n## foo\\_bar\n\n## Q &amp; A\n\n## %%hidden%%\n"
+	for name, body := range map[string]string{"Note.md": note, "Linker.md": "# Linker\n"} {
+		if err := os.WriteFile(filepath.Join(vault, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	idx, err := NewIndex([]string{vault})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	from, ok := idx.Find(idx.Roots()[0].Label, "Linker.md")
+	if !ok {
+		t.Fatal("Linker.md not indexed")
+	}
+	for _, target := range []string{"Note#snakecase", "Note#1000", "Note#23 n", "Note#a  b", "Note#xy z", "Note#%%c%%"} {
+		if _, miss := idx.ResolveLink(&from, target); miss == MissNone {
+			t.Errorf("[[%s]] resolved to a heading its text does not name", target)
+		}
+	}
+	for _, target := range []string{
+		"Note#Snake_Case", "Note#1_000", "Note#2*3 n", "Note#a = b", "Note#x|y z",
+		"Note#foo_bar", "Note#foo\\_bar", "Note#q & a", "Note#Q &amp; A",
+	} {
+		if _, miss := idx.ResolveLink(&from, target); miss != MissNone {
+			t.Errorf("[[%s]]: miss %v", target, miss)
+		}
+	}
+}
+
+// newMatchVault indexes a vault holding Note.md (note) and an empty
+// Linker.md, and returns the index with Linker.md to resolve from.
+func newMatchVault(t *testing.T, note string) (*Index, Doc) {
+	t.Helper()
+	vault := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{"Note.md": note, "Linker.md": "# Linker\n"} {
+		if err := os.WriteFile(filepath.Join(vault, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	idx, err := NewIndex([]string{vault})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	from, ok := idx.Find(idx.Roots()[0].Label, "Linker.md")
+	if !ok {
+		t.Fatal("Linker.md not indexed")
+	}
+	return idx, from
+}
+
+// TestResolveVault_HeadingMatchRenderedFragment pins both match paths. A
+// fragment written with markup reaches the heading its rendered text names;
+// an escaped-markup heading is reached by the fragment as written, which
+// renders differently; a fragment that renders to nothing reaches nothing;
+// and a fragment over maxRenderedFragment is never parsed.
+func TestResolveVault_HeadingMatchRenderedFragment(t *testing.T) {
+	idx, from := newMatchVault(t, "# Note\n\n## x\n\n## a \\*b\\*\n\n## %%all comment%%\n")
+	for _, target := range []string{"Note#[x](y)", "Note#`x`", "Note#%%c%% x", "Note#a *b*"} {
+		if _, miss := idx.ResolveLink(&from, target); miss != MissNone {
+			t.Errorf("[[%s]]: miss %v", target, miss)
+		}
+	}
+	long := "Note#**x**" + strings.Repeat(" ", maxRenderedFragment)
+	for _, target := range []string{"Note#<b>", "Note#%%c%%", long} {
+		if _, miss := idx.ResolveLink(&from, target); miss == MissNone {
+			t.Errorf("[[%.40q]] resolved", target)
+		}
+	}
+	if _, miss := idx.ResolveLink(&from, "Note#**x**"+strings.Repeat(" ", maxRenderedFragment-len("**x**"))); miss != MissNone {
+		t.Errorf("a fragment at the cap was not rendered: miss %v", miss)
+	}
+}
+
+// TestScanVault_HeadingTextRendered: Heading.Text is the text the page
+// shows: an entity resolved, an escape dropped, a code span kept verbatim,
+// and an autolink or bare URL showing its label.
+func TestScanVault_HeadingTextRendered(t *testing.T) {
+	for src, want := range map[string]string{
+		"## Q &amp; A\n":              "Q & A",
+		"## a \\*b\\*\n":              "a *b*",
+		"## `a\\_b &amp;`\n":          "a\\_b &amp;",
+		"## see <https://x.io/a>\n":   "see https://x.io/a",
+		"## see https://x.io/a now\n": "see https://x.io/a now",
+		"## mail a@b.io\n":            "mail a@b.io",
+	} {
+		scan, err := scanBodyFor(RootVault, []byte(src))
+		if err != nil || len(scan.headings) != 1 {
+			t.Fatalf("%q: %v, %v", src, scan.headings, err)
+		}
+		if got := scan.headings[0].Text; got != want {
+			t.Errorf("%q: Text %q, want %q", src, got, want)
+		}
+	}
+}
+
+// TestFragmentText_MarkupFreeRendersAsWritten backs matchFragment's fast
+// path: a fragment holding none of fragmentMarkupBytes renders as written,
+// so skipping its parse loses no match.
+func TestFragmentText_MarkupFreeRendersAsWritten(t *testing.T) {
+	for _, f := range []string{
+		"Step 1: Install", "see https://x.io/a now", "www.x.io", "mail a@b.io",
+		"a + b - c", "1. first", "> quote", "(parens) {braces} 'q' \"dq\"", "C#", "x ^blk", "  spaced   out ",
+	} {
+		if strings.ContainsAny(f, fragmentMarkupBytes) {
+			t.Fatalf("%q holds a markup byte", f)
+		}
+		if got := foldHeadingKey(fragmentText(f)); got != foldHeadingKey(f) {
+			t.Errorf("%q renders as %q", f, got)
+		}
+	}
+}
+
 // TestResolveDocs_HeadingMatchNotNormalized pins the docs-root rule: an
 // anchor matches the exact slug only, so a fragment that would match under
-// normalizeHeadingKey still misses.
+// the vault's foldHeadingKey matching still misses.
 func TestResolveDocs_HeadingMatchNotNormalized(t *testing.T) {
 	dir := t.TempDir()
 	for name, body := range map[string]string{"Note.md": "# Note\n\n## a ==b==\n", "Linker.md": "# Linker\n"} {
@@ -744,5 +870,28 @@ func TestRenderVault_PercentInsideWikilinkIsNotACloser(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("want %q visible, got %s", want, out)
 		}
+	}
+}
+
+// TestRenderVault_WordsSkipComments: a vault page's reading estimate counts
+// only what the page shows. Inline comments, a block comment (opener and
+// closer lines included), and a line holding only a comment all drop out;
+// a docs root, which renders %% as text, still counts it.
+func TestRenderVault_WordsSkipComments(t *testing.T) {
+	const src = "---\ntitle: x y z\n---\n# Title %%one two%%\n\nshown%%glued%%word %%three%%\n\n%%\nfour five six\n%%\n\n%%seven eight%%\n\nlast\n"
+	vault, err := RenderDocFor(RootVault, []byte(src), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "#", "Title", "shownword", "last".
+	if vault.Words != 4 {
+		t.Errorf("vault words = %d, want 4", vault.Words)
+	}
+	docs, err := RenderDocFor(RootDocs, []byte(src), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := countWords([]byte(src)); docs.Words != want {
+		t.Errorf("docs words = %d, want the raw count %d", docs.Words, want)
 	}
 }
