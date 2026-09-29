@@ -64,6 +64,14 @@ func (e *lockBusyError) Error() string {
 //     must be atomic with respect to `pr repair --prune`, which compacts the
 //     audit log by rename under this lock. The carve-out covers local removal
 //     only; it never licenses the network or dispatch work above.
+//     SECOND CARVE-OUT: that same teardown's BOUNDED, best-effort tmux
+//     kill-window (killReviewWindowBestEffort, capped at teardownTmuxBudget).
+//     It cannot move out from under the lock: the window is found by the
+//     review's name, so after release a new admission of the same ref could
+//     create a same-named window and the kill would hit it. The bound, not the
+//     release, is what keeps a hung tmux from holding the lock. Local removal
+//     (restore renames, os.RemoveAll) is os work with no subprocess and no
+//     context to bound, which is why it is a carve-out rather than a budget.
 //   - BOUNDED WAIT. flock has no timeout, so acquisition polls LOCK_NB every
 //     lockPollInterval up to c.lockWait and then returns *lockBusyError.
 //   - KERNEL RELEASE. Closing the descriptor releases the lock, including on

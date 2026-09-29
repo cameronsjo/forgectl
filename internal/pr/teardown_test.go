@@ -14,6 +14,7 @@ package pr
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -557,5 +558,115 @@ func TestTeardown_AuditLogIsNotEnumerated(t *testing.T) {
 	}
 	if _, err := c.reserve(context.Background(), Ref{Owner: "o", Repo: "r", Number: 52}, 4, PrepareOpts{Agent: "claude"}); err != nil {
 		t.Errorf("reserve refuses with the audit log present: %v", err)
+	}
+}
+
+// hangingTmux is a Runner whose tmux calls block until their context is done,
+// the way a wedged tmux server does. blockVerb picks which subcommand hangs;
+// "" hangs every one. Everything else delegates to the wrapped fake.
+type hangingTmux struct {
+	*exec.FakeRunner
+	blockVerb string
+}
+
+func (h *hangingTmux) Run(ctx context.Context, name string, args ...string) (string, error) {
+	if name == "tmux" && len(args) > 0 && (h.blockVerb == "" || args[0] == h.blockVerb) {
+		h.FakeRunner.Run(ctx, name, args...) //nolint:errcheck // only the call ledger matters
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	return h.FakeRunner.Run(ctx, name, args...)
+}
+
+// TestTeardown_HungTmuxIsBoundedAndReleasesTheLock is forgectl#556. The tmux
+// kill stays under the lifecycle lock, so a wedged tmux must be cut off by
+// teardownTmuxBudget: teardown finishes its local work, the lock is free again
+// afterwards, and it does not wait on the caller's (unbounded) context.
+func TestTeardown_HungTmuxIsBoundedAndReleasesTheLock(t *testing.T) {
+	old := teardownTmuxBudget
+	teardownTmuxBudget = 100 * time.Millisecond
+	t.Cleanup(func() { teardownTmuxBudget = old })
+
+	for _, tc := range []struct{ name, hang string }{
+		{"resolution hangs", ""},
+		{"only the kill hangs", "kill-window"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ref := Ref{Owner: "o", Repo: "r", Number: 21}
+			h := &hangingTmux{FakeRunner: reviewServer(mustWindowName(t, ref)), blockVerb: tc.hang}
+			c := New(h, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+				WithApprover(func(string) (bool, error) { return false, nil }),
+				WithTTYCheck(func() bool { return false }))
+			path, ws := seedSession(t, c, ref, time.Now().UTC())
+
+			done := make(chan error, 1)
+			go func() { done <- c.Teardown(context.Background(), path) }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("a hung best-effort tmux kill must not fail the teardown: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Teardown is still blocked on tmux; the lock would be held indefinitely")
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Error("breadcrumb should be removed even though tmux hung")
+			}
+			if _, err := os.Stat(ws); !os.IsNotExist(err) {
+				t.Error("workspace should be removed even though tmux hung")
+			}
+			// The lock must be free: a second acquisition returns at once
+			// rather than waiting out its own bounded wait.
+			start := time.Now()
+			if err := c.withLifecycleLock(context.Background(), "probe", func() error { return nil }); err != nil {
+				t.Fatalf("lifecycle lock still held after teardown: %v", err)
+			}
+			if d := time.Since(start); d > time.Second {
+				t.Errorf("re-acquiring the lock took %v", d)
+			}
+			if _, ok := findCallVerb(h.FakeRunner.Calls, "tmux", firstNonEmpty(tc.hang, "list-sessions")); !ok {
+				t.Errorf("the hanging tmux call was never issued; the test did not exercise the bound: %+v", h.FakeRunner.Calls)
+			}
+		})
+	}
+}
+
+// TestTeardown_KillWindowRunsUnderTheLifecycleLock pins the #556 decision to
+// keep the kill under the lock rather than release it first: with the lock
+// released, a new admission of the same ref could create a same-named window
+// that the kill would then take out. From inside the kill, a second client
+// must find the lock busy.
+func TestTeardown_KillWindowRunsUnderTheLifecycleLock(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 22}
+	server := reviewServer(mustWindowName(t, ref))
+	inner := server.RunFunc
+	dir := t.TempDir()
+	var other *Client
+	var probeErr error
+	probed := false
+	fake := &exec.FakeRunner{}
+	fake.RunFunc = func(name string, args []string) (string, error) {
+		if name == "tmux" && len(args) > 0 && args[0] == "kill-window" {
+			probed = true
+			probeErr = other.withLifecycleLock(context.Background(), "probe", func() error { return nil })
+		}
+		return inner(name, args)
+	}
+	opts := []Option{WithSessionsDir(dir), WithFindingsDir(t.TempDir()),
+		WithApprover(func(string) (bool, error) { return false, nil }),
+		WithTTYCheck(func() bool { return false })}
+	c := New(fake, opts...)
+	other = New(&exec.FakeRunner{}, append(opts, WithLockWait(50*time.Millisecond))...)
+	path, _ := seedSession(t, c, ref, time.Now().UTC())
+
+	if err := c.Teardown(context.Background(), path); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if !probed {
+		t.Fatal("kill-window never ran; the test did not exercise the lock")
+	}
+	var busy *lockBusyError
+	if !errors.As(probeErr, &busy) {
+		t.Errorf("a second client acquired the lock during the kill (err = %v); the kill has left the lock", probeErr)
 	}
 }

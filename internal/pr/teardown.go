@@ -594,6 +594,67 @@ func sameBreadcrumbRecord(a, b Breadcrumb) bool {
 		a.RepairReason == b.RepairReason
 }
 
+// teardownTmuxBudget bounds ALL the tmux work one teardown does under the
+// lifecycle lock — resolve the review session, resolve the window, revalidate
+// it, kill it — as a single deadline, not per call (forgectl#556).
+//
+// The kill stays under the lock on purpose. The window is found by the review's
+// NAME under the shared review session, so once the lock is released a new
+// admission for the same ref can create a same-named window, and an unlocked
+// kill would then take out the live review that replaced this one. Keeping it
+// under the lock costs a bound instead: a hung tmux server would otherwise hold
+// the lock until the operator killed the process, and every other pr verb would
+// fail with a busy error after its own wait.
+//
+// 3 s: a healthy tmux answers each of the four calls in single-digit
+// milliseconds, so this is three orders of magnitude of headroom for a loaded
+// machine, while staying well under defaultLockWait (10 s) — a verb queued
+// behind one hung teardown still acquires the lock once the budget lapses,
+// instead of timing out with it. A single shared budget, not one per call, so
+// the worst case is 3 s rather than 4 x that. It is a var only so a test can
+// shrink it.
+var teardownTmuxBudget = 3 * time.Second
+
+// killReviewWindowBestEffort kills the review window if it is still open, within
+// teardownTmuxBudget. Resolution is exact — the window must carry this review's
+// name AND sit under the review session's native id — and the kill revalidates
+// that before issuing. A failure to resolve means there is nothing of ours to
+// kill, which is the ordinary case after the reviewer exits; it must never
+// widen into killing whatever tmux would have matched. A timeout is treated the
+// same way: teardown proceeds, and the worst outcome is a window left running
+// after its record is gone, which tmux itself still lists.
+//
+// The bounded context is used ONLY here; the caller's own ctx continues on to
+// the breadcrumb removal, so a spent budget cannot fail the teardown.
+func (c *Client) killReviewWindowBestEffort(ctx context.Context, ref Ref) {
+	tctx, cancel := context.WithTimeout(ctx, teardownTmuxBudget)
+	defer cancel()
+	window, err := c.resolveReviewWindow(tctx, ref)
+	if err != nil {
+		// The name is diagnostic only here; a ref that cannot even be keyed logs
+		// as such rather than shadowing the resolve failure being reported.
+		name, nameErr := ReviewWindowName(ref)
+		if nameErr != nil {
+			name = "<no derivable identity>"
+		}
+		if errors.Is(tctx.Err(), context.DeadlineExceeded) {
+			slog.Warn("Timed out resolving the review window under the lifecycle lock; leaving it.",
+				"window", name, "budget", teardownTmuxBudget)
+			return
+		}
+		slog.Debug("No review window to kill (already gone).", "window", name, "error", err)
+		return
+	}
+	if err := c.tmuxClient.KillWindow(tctx, window); err != nil {
+		if errors.Is(tctx.Err(), context.DeadlineExceeded) {
+			slog.Warn("Timed out killing the review window under the lifecycle lock; it may still be running.",
+				"window_id", window.ID, "budget", teardownTmuxBudget)
+			return
+		}
+		slog.Debug("Review window could not be killed.", "window_id", window.ID, "error", err)
+	}
+}
+
 // discard performs the actual teardown for an already-validated session: undo
 // the quarantine (recomputed precisely from the sandbox's canonical
 // scheme+targets), remove the workspace, kill the window, delete the
@@ -623,24 +684,7 @@ func (c *Client) discard(ctx context.Context, sess Session) error {
 		return fmt.Errorf("teardown workspace: %w", err)
 	}
 
-	// Best-effort: kill the review window if it is still open. Resolution is
-	// exact — the window must carry this review's name AND sit under the review
-	// session's native id — and the kill revalidates that before issuing. A
-	// failure to resolve means there is nothing of ours to kill, which is the
-	// ordinary case after the reviewer exits; it must never widen into killing
-	// whatever tmux would have matched.
-	window, err := c.resolveReviewWindow(ctx, sess.Ref)
-	if err != nil {
-		// The name is diagnostic only here; a ref that cannot even be keyed logs
-		// as such rather than shadowing the resolve failure being reported.
-		name, nameErr := ReviewWindowName(sess.Ref)
-		if nameErr != nil {
-			name = "<no derivable identity>"
-		}
-		slog.Debug("No review window to kill (already gone).", "window", name, "error", err)
-	} else if err := c.tmuxClient.KillWindow(ctx, window); err != nil {
-		slog.Debug("Review window could not be killed.", "window_id", window.ID, "error", err)
-	}
+	c.killReviewWindowBestEffort(ctx, sess.Ref)
 
 	if sess.Path != "" {
 		if err := os.Remove(sess.Path); err != nil && !os.IsNotExist(err) {
