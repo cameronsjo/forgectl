@@ -2,6 +2,7 @@ package docs
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -51,6 +52,10 @@ func (obsidianFlavor) Extend(m goldmark.Markdown) {
 		),
 		parser.WithASTTransformers(
 			util.Prioritized(commentTransformer{}, 500),
+			// After commentTransformer, so a comment-only paragraph is
+			// already gone and a marker inside a comment is never a Text
+			// child of the block it sits in.
+			util.Prioritized(blockIDTransformer{}, 550),
 			// After commentTransformer, so a heading's id is settled
 			// before any wikilink in it is replaced.
 			util.Prioritized(wikilinkTransformer{}, 600),
@@ -438,6 +443,154 @@ func (commentBlockParser) CanInterruptParagraph() bool { return false }
 
 func (commentBlockParser) CanAcceptIndentedLine() bool { return false }
 
+// ── ^block-id ──────────────────────────────────────────────────────────────
+
+// blockIDTransformer renders Obsidian's trailing block-id marker
+// ("text ^blk-1") as an id on the block (blockAnchor: id="^blk-1"), so a
+// [[note#^blk-1]] link can jump to it, and removes the marker text from
+// the page. It runs on every vault instance, render and scan alike; the
+// scan's BlockIDs still come from scanBlockIDs, and every id placed here
+// is one of them: the same blockIDPattern on a line that is neither code
+// nor comment.
+//
+// It is deliberately narrower than the scan. It handles only a paragraph
+// (the id goes on its <p>) and a tight list item's text (on its <li>), and
+// only when the marker ends the block's last line, follows whitespace or
+// starts the line ("r^2" is text), leaves the block with other content of
+// any kind, and sits wholly in the block's trailing text. Anything else,
+// such as a heading (whose id is its slug), a standalone "^id" block, or a
+// marker under inline markup, keeps its text and gets no id: its link
+// still opens the note, at the top.
+type blockIDTransformer struct{}
+
+func (blockIDTransformer) Transform(doc *ast.Document, reader text.Reader, _ parser.Context) {
+	source := reader.Source()
+	var blocks []ast.Node
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch n.Kind() {
+		case ast.KindParagraph, ast.KindTextBlock:
+			blocks = append(blocks, n)
+			return ast.WalkSkipChildren, nil
+		}
+		return ast.WalkContinue, nil
+	})
+	for _, b := range blocks {
+		target := blockIDTarget(b, source)
+		if target == nil {
+			continue
+		}
+		if _, taken := target.AttributeString("id"); taken {
+			continue
+		}
+		if id, ok := stripBlockID(b, source); ok {
+			target.SetAttributeString("id", []byte(blockAnchor(id)))
+		}
+	}
+}
+
+// blockAnchor is the id a block with Obsidian block id id renders under:
+// "^id", as Obsidian writes it. The '^' keeps it in its own namespace: a
+// heading's id is a goldmark slug, which never holds a '^', and neither
+// does any id the reader's own page furniture uses, so a block can never
+// take either one's id.
+func blockAnchor(id string) string {
+	return "^" + id
+}
+
+// blockIDTarget is the node a marker at the end of block b gives its id to:
+// a paragraph itself, or the list item a tight item's text sits in. It is
+// nil for a callout's first paragraph, because transformCallouts only
+// recognizes a callout whose first <p> carries no attribute, and for any
+// other text block.
+func blockIDTarget(b ast.Node, source []byte) ast.Node {
+	switch b.Kind() {
+	case ast.KindParagraph:
+		if p := b.Parent(); p != nil && p.Kind() == ast.KindBlockquote && p.FirstChild() == b && b.Lines().Len() > 0 {
+			first := b.Lines().At(0)
+			if bytes.HasPrefix(bytes.TrimSpace(first.Value(source)), []byte("[!")) {
+				return nil
+			}
+		}
+		return b
+	case ast.KindTextBlock:
+		if p := b.Parent(); p != nil && p.Kind() == ast.KindListItem {
+			return p
+		}
+	}
+	return nil
+}
+
+// stripBlockID removes a trailing " ^id" from block b's inline text and
+// returns id. It changes nothing and reports false unless the marker, from
+// its '^' to the end of the id, sits in b's trailing Text children and some
+// content, of any kind, is left before it.
+func stripBlockID(b ast.Node, source []byte) (string, bool) {
+	lines := b.Lines()
+	if lines.Len() == 0 {
+		return "", false
+	}
+	last := lines.At(lines.Len() - 1)
+	line := last.Value(source)
+	m := blockIDPattern.FindSubmatchIndex(line)
+	if m == nil || (m[0] > 0 && line[m[0]-1] != ' ' && line[m[0]-1] != '\t') {
+		return "", false
+	}
+	caret := last.Start + m[0]
+	cut := caret
+	for cut > last.Start && (source[cut-1] == ' ' || source[cut-1] == '\t') {
+		cut--
+	}
+	// Walk back over the trailing Text children from the end of the line
+	// to cut, dropping each one wholly past it and trimming the one that
+	// straddles it. The walk stops at the first child that is not Text:
+	// whatever it is (emphasis, a code span, a link, a comment), it is
+	// the content before the marker, left as it is.
+	var drop []ast.Node
+	var trim *ast.Text
+	start := -1
+	c := b.LastChild()
+	for ; c != nil; c = c.PreviousSibling() {
+		t, ok := c.(*ast.Text)
+		if !ok {
+			break
+		}
+		start = t.Segment.Start
+		if t.Segment.Start >= cut {
+			drop = append(drop, t)
+			continue
+		}
+		if t.Segment.Stop > cut {
+			trim = t
+		}
+		break
+	}
+	// The Text walked must reach the '^'; if it does not, some other node
+	// holds part of the marker, and it is not one.
+	if start < 0 || start > caret {
+		return "", false
+	}
+	if c == nil {
+		// Nothing precedes the marker: a standalone "^id" block.
+		return "", false
+	}
+	if trim != nil {
+		trim.Segment = trim.Segment.WithStop(cut)
+	}
+	for _, n := range drop {
+		b.RemoveChild(b, n)
+	}
+	// "para\n^id" leaves "para" ending in the line break it had before
+	// the marker's line.
+	if t, ok := b.LastChild().(*ast.Text); ok {
+		t.SetSoftLineBreak(false)
+		t.SetHardLineBreak(false)
+	}
+	return string(line[m[2]:m[3]]), true
+}
+
 // ── #tag ───────────────────────────────────────────────────────────────────
 
 type tagNode struct {
@@ -560,9 +713,11 @@ func (n *resolvedWikilinkNode) Dump(source []byte, level int) {
 // resolver in the parser context, replacing it with a resolvedWikilinkNode.
 // With no resolver it leaves the tree exactly as parsed: the link scan runs
 // this same parser set, and reads its links off the wikilink nodes. It never
-// touches an embed, a wikilink inside a markdown link or image, or one inside
-// a comment; renderWikilinkSource renders the first two as source text, and
-// a comment renders nothing.
+// touches an embed, a wikilink inside a markdown link or image, one after a
+// raw-HTML <a> still open in the same block, or one inside a comment;
+// renderWikilinkSource renders the first three as source text, and a
+// comment renders nothing. An <a> opened in one block and closed in a later
+// one is not tracked.
 type wikilinkTransformer struct{}
 
 func (wikilinkTransformer) Transform(doc *ast.Document, reader text.Reader, pc parser.Context) {
@@ -572,16 +727,32 @@ func (wikilinkTransformer) Transform(doc *ast.Document, reader text.Reader, pc p
 	}
 	source := reader.Source()
 	var links []*wikilink.Node
+	// rawAnchors counts the raw-HTML <a> tags open so far in the current
+	// block's inline content. Inline containers hold no blocks, so it
+	// restarts at every block.
+	rawAnchors := 0
 	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
 		}
+		if n.Type() == ast.TypeBlock {
+			rawAnchors = 0
+		}
 		switch n.Kind() {
 		case kindCommentSpan, kindCommentBlock, ast.KindLink, ast.KindImage:
 			return ast.WalkSkipChildren, nil
+		case ast.KindRawHTML:
+			if raw, isRaw := n.(*ast.RawHTML); isRaw {
+				rawAnchors = rawAnchorDepth(rawAnchors, raw, source)
+			}
 		case wikilink.Kind:
 			if wl, isWikilink := n.(*wikilink.Node); isWikilink && !wl.Embed {
-				links = append(links, wl)
+				if rawAnchors > 0 {
+					// Inside an author's <a>: an anchor here would nest.
+					wl.SetAttribute(inRawAnchorAttr, true)
+				} else {
+					links = append(links, wl)
+				}
 			}
 			return ast.WalkSkipChildren, nil
 		}
@@ -603,6 +774,37 @@ func (wikilinkTransformer) Transform(doc *ast.Document, reader text.Reader, pc p
 		}
 		wl.Parent().ReplaceChild(wl.Parent(), wl, node)
 	}
+}
+
+// inRawAnchorAttr marks a wikilink wikilinkTransformer found inside a
+// raw-HTML <a> the author opened earlier in the same block. It is never
+// rendered as an attribute: renderWikilinkSource reads it and writes the
+// link's source text.
+var inRawAnchorAttr = []byte("forgectl-in-raw-anchor")
+
+var (
+	rawAnchorOpen  = regexp.MustCompile(`(?i)^<a[\s/>]`)
+	rawAnchorClose = regexp.MustCompile(`(?i)^</a[\s>]`)
+)
+
+// rawAnchorDepth is depth after raw, an inline raw-HTML tag: one more for
+// an <a> open tag, one fewer (never below zero) for its close tag.
+// Known divergence: HTML5 also ends a comment at "--!>", which goldmark's
+// comment rule does not, so an "<a" the browser reads as commented out can
+// still count here; that only ever leaves a wikilink as source text.
+func rawAnchorDepth(depth int, raw *ast.RawHTML, source []byte) int {
+	var tag []byte
+	for i := 0; i < raw.Segments.Len(); i++ {
+		seg := raw.Segments.At(i)
+		tag = append(tag, seg.Value(source)...)
+	}
+	switch {
+	case rawAnchorOpen.Match(tag):
+		return depth + 1
+	case rawAnchorClose.Match(tag) && depth > 0:
+		return depth - 1
+	}
+	return depth
 }
 
 // ── rendering ──────────────────────────────────────────────────────────────
@@ -629,7 +831,8 @@ func (obsidianRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
 // by the parser.
 func renderWikilinkSource(w util.BufWriter, source []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
 	wl, isWikilink := n.(*wikilink.Node)
-	literal := !isWikilink || wl.Embed || hasLinkAncestor(n)
+	_, inRawAnchor := n.Attribute(inRawAnchorAttr)
+	literal := !isWikilink || wl.Embed || hasLinkAncestor(n) || inRawAnchor
 	start, stop, ok := wikilinkSourceRange(n, source)
 	if !entering {
 		// Reached after the children rendered: only a span opened with no
