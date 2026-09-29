@@ -51,7 +51,8 @@ var markdownPlain = newMarkdown(false, false)
 
 // markdownVault and markdownVaultPlain are the same two pipelines plus the
 // Obsidian flavour (obsidian.go: ==highlight==, %%comment%%, #tag, and
-// [[wikilink]] parsing shown as source text). They serve
+// [[wikilink]]s rendered as links to the notes they resolve to when the
+// render has an index, and as marked source text otherwise). They serve
 // RootVault roots only; a docs root never reaches them, so the docs-root
 // instances above stay plain GFM byte for byte.
 var (
@@ -529,6 +530,13 @@ func Render(source []byte) (string, error) {
 // render is Render for a given root kind: a RootVault root gets the Obsidian
 // flavour and callout aliases, every other kind the plain GFM pipeline.
 func render(source []byte, kind RootKind) (string, error) {
+	return renderWith(source, kind, nil)
+}
+
+// renderWith is render with a wikilink resolver for a vault page. A nil
+// resolve, or any other root kind, renders exactly as render does. resolve
+// runs under renderMu, so it must never render.
+func renderWith(source []byte, kind RootKind, resolve wikilinkResolver) (string, error) {
 	// Route through the frontmatter-aware parser only when a well-formed
 	// block actually opens the document. The extension's opener is greedy —
 	// any leading --- fence starts a block, and an unterminated one consumes
@@ -549,6 +557,9 @@ func render(source []byte, kind RootKind) (string, error) {
 	renderMu.Lock()
 	var buf bytes.Buffer
 	ctx := parser.NewContext()
+	if kind == RootVault && resolve != nil {
+		ctx.Set(wikilinkResolverKey, resolve)
+	}
 	err := md.Convert(source, &buf, parser.WithContext(ctx))
 	renderMu.Unlock()
 	if err != nil {
@@ -580,12 +591,21 @@ type RenderedDoc struct {
 // RenderDoc renders a docs-root document and derives its outline and
 // reading stats.
 func RenderDoc(source []byte) (RenderedDoc, error) {
-	return RenderDocFor(RootDocs, source)
+	return RenderDocFor(RootDocs, source, nil, nil)
 }
 
-// RenderDocFor is RenderDoc for a document in a root of the given kind.
-func RenderDocFor(kind RootKind, source []byte) (RenderedDoc, error) {
-	rendered, err := render(source, kind)
+// RenderDocFor is RenderDoc for a document in a root of the given kind. For
+// a vault page, idx and from (the page's own indexed Doc) resolve its
+// wikilinks into links; with either nil, every wikilink renders as an
+// unresolved miss instead.
+func RenderDocFor(kind RootKind, source []byte, idx *Index, from *Doc) (RenderedDoc, error) {
+	var resolve wikilinkResolver
+	if idx != nil && from != nil {
+		resolve = wikilinkResolver(func(ref LinkRef) (string, Miss) {
+			return idx.wikilinkTarget(from, ref)
+		})
+	}
+	rendered, err := renderWith(source, kind, resolve)
 	if err != nil {
 		return RenderedDoc{}, err
 	}

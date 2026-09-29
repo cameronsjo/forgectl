@@ -388,7 +388,13 @@ func (info ServerInfo) DocURL(rootLabel, relPath string) string {
 // would otherwise start a fragment or query and truncate the link, and a
 // space could truncate the path a browser sends.
 func docHref(rootLabel, relPath string) string {
-	return (&url.URL{Path: "/doc/" + rootLabel + "/" + relPath}).String()
+	return docHrefFragment(rootLabel, relPath, "")
+}
+
+// docHrefFragment is docHref with a fragment, escaped by url.URL like the
+// path. A rendered wikilink passes the Slug of the heading it resolved to.
+func docHrefFragment(rootLabel, relPath, fragment string) string {
+	return (&url.URL{Path: "/doc/" + rootLabel + "/" + relPath, Fragment: fragment}).String()
 }
 
 // BaseURL is the reader's index page.

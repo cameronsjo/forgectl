@@ -425,7 +425,7 @@ func handleDoc(store *Store) http.HandlerFunc {
 			return
 		}
 
-		doc, _ := idx.Find(root, rest)
+		doc, found := idx.Find(root, rest)
 		// The root's kind picks the dialect: a vault root renders the
 		// Obsidian flavour, anything else (or a root this index does not
 		// know) renders plain GFM.
@@ -433,7 +433,14 @@ func handleDoc(store *Store) http.HandlerFunc {
 		if rt, ok := idx.rootByLabel(root); ok {
 			kind = rt.Kind
 		}
-		rendered, err := RenderDocFor(kind, source)
+		// A vault page's wikilinks resolve against this same index, from
+		// the page's own Doc; an unindexed page has none to resolve from,
+		// so its wikilinks render as unresolved.
+		var from *Doc
+		if found {
+			from = &doc
+		}
+		rendered, err := RenderDocFor(kind, source, idx, from)
 		if err != nil {
 			slog.Error("docs: markdown render failed.", "root", root, "rest", rest, "error", err)
 			http.Error(w, "render failed", http.StatusInternalServerError)
@@ -448,7 +455,7 @@ func handleDoc(store *Store) http.HandlerFunc {
 			Outline:     rendered.Outline,
 			Words:       rendered.Words,
 			Minutes:     rendered.Minutes,
-			Content:     template.HTML(rendered.HTML), //nolint:gosec // body is bluemonday-sanitized in render (vault highlight/tag nodes included); the frontmatter/callout additions are built there from html.EscapeString'd fragments and fixed markup only
+			Content:     template.HTML(rendered.HTML), //nolint:gosec // body is bluemonday-sanitized in render (vault highlight/tag nodes included; wikilink anchors are built from indexed Docs only); the frontmatter/callout additions are built there from html.EscapeString'd fragments and fixed markup only
 		})
 	}
 }

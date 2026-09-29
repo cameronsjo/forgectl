@@ -573,3 +573,38 @@ func TestServer_VaultCommentTextStaysOutOfChrome(t *testing.T) {
 		}
 	}
 }
+
+// TestServer_VaultWikilinksResolve: a vault page served by the reader has
+// its wikilinks resolved against the served index, from the page's own doc.
+func TestServer_VaultWikilinksResolve(t *testing.T) {
+	h := testHandler(newLinksTestIndex(t))
+	get := func(path string) string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: status %d", path, rec.Code)
+		}
+		return rec.Body.String()
+	}
+	page := get("/doc/vault/index.md")
+	for _, want := range []string{
+		`href="/doc/vault/notes/orphan.md"`,
+		`href="/doc/vault/notes/beta.md" rel="nofollow">Beta Note</a>`,
+		`href="/doc/vault/notes/anchors.md#some-heading"`,
+		`href="/doc/vault/notes/anchors.md#sub"`,
+		`href="/doc/vault/notes/deep/Alpha.md"`,
+		`title="Broken link (outside-root)"`,
+		"![[notes/anchors]]",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("index.md missing %q", want)
+		}
+	}
+	if strings.Contains(page, "Broken link (unresolved)") {
+		t.Error("index.md rendered without its resolver")
+	}
+	if page := get("/doc/vault/notes/linker.md"); !strings.Contains(page, `href="/doc/vault/notes/Alpha.md"`) {
+		t.Error("linker.md does not link its alias to notes/Alpha.md")
+	}
+}

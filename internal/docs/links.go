@@ -334,7 +334,7 @@ func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, from *Doc, path0 string) (
 	return idx.pickCandidate(rootIdx.byAlias[strings.ToLower(clean)])
 }
 
-// resolveFragment checks target's fragment against doc's anchors, once the
+// matchFragment checks target's fragment against doc's anchors, once the
 // file itself has resolved (or the link was fragment-only, in which case
 // doc is the calling doc itself). An empty fragment always succeeds — the
 // caller only wanted the file. A "^id" fragment is an Obsidian block-id
@@ -348,17 +348,24 @@ func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, from *Doc, path0 string) (
 // match on the slug or the heading's flattened text, and a match of the
 // two under normalizeHeadingKey, so "[[Note#a ==b==]]" and "[[Note#a b]]"
 // both reach "## a ==b==". Only the vault comparison normalizes.
-func (idx *Index) resolveFragment(kind RootKind, doc *Doc, fragment string) (*Doc, Miss) {
+//
+// matchFragment also returns the anchor a rendered link jumps to: the
+// matching heading's Slug, the id the page renders on it. A vault fragment
+// takes the FIRST heading that matches, so a duplicate heading's link lands
+// where the resolver says it does, never on its "-1" twin. An empty fragment
+// or a "^id" block reference yields no anchor: a block id has no rendered id
+// to jump to, so its link opens the note.
+func matchFragment(kind RootKind, doc *Doc, fragment string) (anchor string, ok bool) {
 	if fragment == "" {
-		return doc, MissNone
+		return "", true
 	}
-	if id, ok := strings.CutPrefix(fragment, "^"); ok {
+	if id, isBlock := strings.CutPrefix(fragment, "^"); isBlock {
 		for _, b := range doc.BlockIDs {
 			if b == id {
-				return doc, MissNone
+				return "", true
 			}
 		}
-		return doc, MissNoTarget
+		return "", false
 	}
 
 	segments := strings.Split(fragment, "#")
@@ -370,18 +377,18 @@ func (idx *Index) resolveFragment(kind RootKind, doc *Doc, fragment string) (*Do
 		for _, h := range doc.Headings {
 			if h.Slug == lastLower || strings.ToLower(h.Text) == lastLower ||
 				normalizeHeadingKey(h.Text) == lastKey {
-				return doc, MissNone
+				return h.Slug, true
 			}
 		}
-		return doc, MissNoTarget
+		return "", false
 	}
 
 	for _, h := range doc.Headings {
 		if h.Slug == last {
-			return doc, MissNone
+			return h.Slug, true
 		}
 	}
-	return doc, MissNoTarget
+	return "", false
 }
 
 // ResolveLink resolves target — a link's raw target text, first-'#' split
@@ -417,16 +424,23 @@ func (idx *Index) ResolveLink(from *Doc, target string) (*Doc, Miss) {
 // "%23" in a markdown link and decoded by scanDoc) is looked up as the
 // path it is, rather than re-split at that '#'.
 func (idx *Index) resolveParts(from *Doc, path0, fragment string) (*Doc, Miss) {
+	doc, _, miss := idx.resolveAnchor(from, path0, fragment)
+	return doc, miss
+}
+
+// resolveAnchor is resolveParts plus the anchor matchFragment found, which
+// only a hit carries.
+func (idx *Index) resolveAnchor(from *Doc, path0, fragment string) (*Doc, string, Miss) {
 	if from == nil {
-		return nil, MissNoTarget
+		return nil, "", MissNoTarget
 	}
 	root, ok := idx.rootByLabel(from.RootLabel)
 	if !ok {
-		return nil, MissNoTarget
+		return nil, "", MissNoTarget
 	}
 	rootIdx := idx.byRoot[from.RootLabel]
 	if rootIdx == nil {
-		return nil, MissNoTarget
+		return nil, "", MissNoTarget
 	}
 
 	doc := from
@@ -438,11 +452,38 @@ func (idx *Index) resolveParts(from *Doc, path0, fragment string) (*Doc, Miss) {
 			doc, miss = idx.resolveDocsDoc(rootIdx, from, path0)
 		}
 		if miss != MissNone {
-			return doc, miss
+			return doc, "", miss
 		}
 	}
 
-	return idx.resolveFragment(root.Kind, doc, fragment)
+	anchor, ok := matchFragment(root.Kind, doc, fragment)
+	if !ok {
+		return doc, "", MissNoTarget
+	}
+	return doc, anchor, MissNone
+}
+
+// wikilinkTarget is the href a rendered wikilink gets, and its verdict. The
+// href is built ONLY from the indexed Doc the link resolved to and the Slug
+// of the heading it matched, through docHrefFragment; nothing in ref reaches
+// it. A hit links to the doc and its heading. A doc that resolved while its
+// heading or block id did not still links to the doc, without a fragment.
+// Every other miss has no href at all.
+func (idx *Index) wikilinkTarget(from *Doc, ref LinkRef) (href string, miss Miss) {
+	doc, anchor, miss := idx.resolveAnchor(from, ref.Path, ref.Fragment)
+	if doc == nil {
+		if miss == MissNone {
+			miss = MissNoTarget
+		}
+		return "", miss
+	}
+	if miss == MissNoTarget {
+		return docHref(doc.RootLabel, doc.RelPath), miss
+	}
+	if miss != MissNone {
+		return "", miss
+	}
+	return docHrefFragment(doc.RootLabel, doc.RelPath, anchor), MissNone
 }
 
 // normalizeHeadingKey is the ONE vault heading-matching normalizer, applied

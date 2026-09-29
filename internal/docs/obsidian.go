@@ -2,6 +2,7 @@ package docs
 
 import (
 	"bytes"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 
@@ -23,7 +24,10 @@ import (
 //
 // None of the renderers below call html.RenderAttributes, so no
 // author-controlled attribute can ride along on the new elements, and their
-// output still passes the bluemonday sanitizer like every other render.
+// output still passes the bluemonday sanitizer like every other render. A
+// wikilink becomes an anchor only when the render put a resolver in the
+// parser context (wikilinkTransformer), and its href is then built from the
+// indexed doc it resolved to, never from the link's own text.
 type obsidianFlavor struct{}
 
 // Extend implements goldmark.Extender.
@@ -37,8 +41,9 @@ func (obsidianFlavor) Extend(m goldmark.Markdown) {
 		parser.WithInlineParsers(
 			// Ahead of goldmark's link parser (200), the priority the
 			// library's own Extender uses. Only the Parser is taken: the
-			// library's Renderer and Extender resolve targets into hrefs,
-			// and renderWikilinkSource replaces them.
+			// library's Renderer and Extender build hrefs from the link's
+			// own text. wikilinkTransformer and the renderers below
+			// replace them.
 			util.Prioritized(&wikilink.Parser{}, 199),
 			util.Prioritized(highlightParser{}, 500),
 			util.Prioritized(commentInlineParser{}, 500),
@@ -46,6 +51,9 @@ func (obsidianFlavor) Extend(m goldmark.Markdown) {
 		),
 		parser.WithASTTransformers(
 			util.Prioritized(commentTransformer{}, 500),
+			// After commentTransformer, so a heading's id is settled
+			// before any wikilink in it is replaced.
+			util.Prioritized(wikilinkTransformer{}, 600),
 		),
 	)
 	m.Renderer().AddOptions(renderer.WithNodeRenderers(
@@ -58,6 +66,7 @@ var (
 	kindCommentSpan  = ast.NewNodeKind("ObsidianCommentSpan")
 	kindCommentBlock = ast.NewNodeKind("ObsidianCommentBlock")
 	kindTag          = ast.NewNodeKind("ObsidianTag")
+	kindWikilink     = ast.NewNodeKind("ObsidianWikilink")
 )
 
 // commentMarker is Obsidian's comment delimiter, for both forms.
@@ -485,6 +494,117 @@ func isTagRune(r rune) bool {
 	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '/'
 }
 
+// ── [[wikilink]] resolution ────────────────────────────────────────────────
+
+// wikilinkResolver resolves one wikilink for the page being rendered,
+// returning the href to link it to ("" for none) and its verdict. The render
+// stores it in the parser context under wikilinkResolverKey, as this named
+// type: wikilinkTransformer's type assertion matches nothing else, and
+// without it the render fails closed.
+type wikilinkResolver func(LinkRef) (href string, miss Miss)
+
+// wikilinkResolverKey holds the page's wikilinkResolver in the parser
+// context. Only a vault render with an index sets it; the link scan never
+// does.
+var wikilinkResolverKey = parser.NewContextKey()
+
+// The title a wikilink that did not resolve carries, one per reason. They
+// are fixed text, so nothing an author writes reaches the attribute, and
+// colon-free, because the sanitizer drops a title holding a colon.
+const (
+	titleNoTarget     = "Broken link (no-target)"
+	titleAmbiguous    = "Broken link (ambiguous)"
+	titleOutsideRoot  = "Broken link (outside-root)"
+	titleAnchorMissed = "Broken link (heading or block not found)"
+	titleUnresolved   = "Broken link (unresolved)"
+)
+
+// missTitle is the title for a wikilink that missed. docResolved is whether
+// the note itself resolved, in which case only its heading or block id did
+// not.
+func missTitle(miss Miss, docResolved bool) string {
+	switch {
+	case miss == MissNoTarget && docResolved:
+		return titleAnchorMissed
+	case miss == MissAmbiguous:
+		return titleAmbiguous
+	case miss == MissOutsideRoot:
+		return titleOutsideRoot
+	default:
+		return titleNoTarget
+	}
+}
+
+// isDocHref reports whether href is a reader page path, the only kind of
+// href a wikilink may carry.
+func isDocHref(href string) bool {
+	return strings.HasPrefix(href, "/doc/")
+}
+
+// resolvedWikilinkNode is a wikilink after resolution. Href is set only from
+// the resolver and only when it is a reader page path; Title is set only for
+// a miss, from missTitle. The children are the wikilink's label.
+type resolvedWikilinkNode struct {
+	ast.BaseInline
+	Href  string
+	Title string
+}
+
+func (n *resolvedWikilinkNode) Kind() ast.NodeKind { return kindWikilink }
+
+func (n *resolvedWikilinkNode) Dump(source []byte, level int) {
+	ast.DumpHelper(n, source, level, map[string]string{"Href": n.Href, "Title": n.Title}, nil)
+}
+
+// wikilinkTransformer resolves each wikilink on the page through the
+// resolver in the parser context, replacing it with a resolvedWikilinkNode.
+// With no resolver it leaves the tree exactly as parsed: the link scan runs
+// this same parser set, and reads its links off the wikilink nodes. It never
+// touches an embed, a wikilink inside a markdown link or image, or one inside
+// a comment; renderWikilinkSource renders the first two as source text, and
+// a comment renders nothing.
+type wikilinkTransformer struct{}
+
+func (wikilinkTransformer) Transform(doc *ast.Document, reader text.Reader, pc parser.Context) {
+	resolve, ok := pc.Get(wikilinkResolverKey).(wikilinkResolver)
+	if !ok || resolve == nil {
+		return
+	}
+	source := reader.Source()
+	var links []*wikilink.Node
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch n.Kind() {
+		case kindCommentSpan, kindCommentBlock, ast.KindLink, ast.KindImage:
+			return ast.WalkSkipChildren, nil
+		case wikilink.Kind:
+			if wl, isWikilink := n.(*wikilink.Node); isWikilink && !wl.Embed {
+				links = append(links, wl)
+			}
+			return ast.WalkSkipChildren, nil
+		}
+		return ast.WalkContinue, nil
+	})
+	for _, wl := range links {
+		href, miss := resolve(wikilinkRef(wl, source))
+		node := &resolvedWikilinkNode{}
+		if isDocHref(href) {
+			node.Href = href
+		}
+		if miss != MissNone || node.Href == "" {
+			node.Title = missTitle(miss, node.Href != "")
+		}
+		for c := wl.FirstChild(); c != nil; {
+			next := c.NextSibling()
+			node.AppendChild(node, c)
+			c = next
+		}
+		wl.Parent().ReplaceChild(wl.Parent(), wl, node)
+	}
+}
+
 // ── rendering ──────────────────────────────────────────────────────────────
 
 type obsidianRenderer struct{}
@@ -495,31 +615,116 @@ func (obsidianRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
 	reg.Register(kindCommentBlock, renderNothing)
 	reg.Register(kindTag, renderTag)
 	reg.Register(wikilink.Kind, renderWikilinkSource)
+	reg.Register(kindWikilink, renderResolvedWikilink)
 }
 
-// renderWikilinkSource writes a wikilink back out as its own source text,
-// "[[…]]" or "![[…]]", HTML-escaped: exactly what a vault page showed before
-// wikilinks were parsed there. The parser is registered so the page and the
-// index agree on what a "[[" consumes; resolving links into anchors is a
-// later change. The text runs from the node's start to its label's end plus
-// the closing "]]", both set by the parser.
+// renderWikilinkSource renders a wikilink wikilinkTransformer left in the
+// tree, as its own source text, "[[…]]" or "![[…]]", HTML-escaped. An embed,
+// and a wikilink inside a markdown link or image, is exactly that text: an
+// embed is not rendered yet, and an anchor inside a link would nest one <a>
+// in another. Any other wikilink reaching here was rendered without a
+// resolver, so its target was never checked: it fails closed, as its source
+// text inside an unresolved miss span, and never as a link. The text runs
+// from the node's start to its label's end plus the closing "]]", both set
+// by the parser.
 func renderWikilinkSource(w util.BufWriter, source []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
+	wl, isWikilink := n.(*wikilink.Node)
+	literal := !isWikilink || wl.Embed || hasLinkAncestor(n)
+	start, stop, ok := wikilinkSourceRange(n, source)
 	if !entering {
+		// Reached after the children rendered: only a span opened with no
+		// source range to write still needs closing.
+		if !literal && !ok {
+			_, _ = w.WriteString(`</span>`)
+		}
 		return ast.WalkContinue, nil
 	}
-	label, ok := n.LastChild().(*ast.Text)
-	start := n.Pos()
-	stop := 0
-	if ok {
-		stop = label.Segment.Stop + len("]]")
+	if !literal {
+		writeMissSpanOpen(w, titleUnresolved)
 	}
-	if !ok || start < 0 || stop > len(source) || start >= stop {
+	if !ok {
 		// No source range to write: render the label as text instead,
 		// never nothing.
 		return ast.WalkContinue, nil
 	}
 	_, _ = w.Write(util.EscapeHTML(source[start:stop]))
+	if !literal {
+		_, _ = w.WriteString(`</span>`)
+	}
 	return ast.WalkSkipChildren, nil
+}
+
+// wikilinkSourceRange is the source range of wikilink n, "[[" (or "![[")
+// through "]]", when the parser recorded one.
+func wikilinkSourceRange(n ast.Node, source []byte) (start, stop int, ok bool) {
+	label, isText := n.LastChild().(*ast.Text)
+	if !isText {
+		return 0, 0, false
+	}
+	start = n.Pos()
+	stop = label.Segment.Stop + len("]]")
+	if start < 0 || stop > len(source) || start >= stop {
+		return 0, 0, false
+	}
+	return start, stop, true
+}
+
+// hasLinkAncestor reports whether n sits inside a markdown link or image.
+func hasLinkAncestor(n ast.Node) bool {
+	for p := n.Parent(); p != nil; p = p.Parent() {
+		if k := p.Kind(); k == ast.KindLink || k == ast.KindImage {
+			return true
+		}
+	}
+	return false
+}
+
+// renderResolvedWikilink renders a wikilink wikilinkTransformer resolved. An
+// href, which only ever comes from an indexed doc, makes an anchor: a plain
+// one for a hit, a marked one for a doc whose heading or block id is missing.
+// Anything else is a miss span with no href. The href is checked for the
+// /doc/ prefix again here, so an href that did not come from docHref can
+// never reach the page. The label renders as the node's children, which
+// goldmark escapes as text.
+func renderResolvedWikilink(w util.BufWriter, _ []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
+	rw, ok := n.(*resolvedWikilinkNode)
+	if !ok {
+		return ast.WalkContinue, nil
+	}
+	anchor := isDocHref(rw.Href)
+	if !entering {
+		if anchor {
+			_, _ = w.WriteString(`</a>`)
+		} else {
+			_, _ = w.WriteString(`</span>`)
+		}
+		return ast.WalkContinue, nil
+	}
+	if !anchor {
+		title := rw.Title
+		if title == "" {
+			title = titleNoTarget
+		}
+		writeMissSpanOpen(w, title)
+		return ast.WalkContinue, nil
+	}
+	if rw.Title == "" {
+		_, _ = w.WriteString(`<a class="wikilink" href="`)
+	} else {
+		_, _ = w.WriteString(`<a class="wikilink wikilink-miss" title="`)
+		_, _ = w.Write(util.EscapeHTML([]byte(rw.Title)))
+		_, _ = w.WriteString(`" href="`)
+	}
+	_, _ = w.Write(util.EscapeHTML([]byte(rw.Href)))
+	_, _ = w.WriteString(`">`)
+	return ast.WalkContinue, nil
+}
+
+// writeMissSpanOpen opens the span a wikilink with no link renders in.
+func writeMissSpanOpen(w util.BufWriter, title string) {
+	_, _ = w.WriteString(`<span class="wikilink wikilink-miss" title="`)
+	_, _ = w.Write(util.EscapeHTML([]byte(title)))
+	_, _ = w.WriteString(`">`)
 }
 
 func renderHighlight(w util.BufWriter, _ []byte, _ ast.Node, entering bool) (ast.WalkStatus, error) {

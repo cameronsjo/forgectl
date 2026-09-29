@@ -555,9 +555,9 @@ func renderedLinks(t *testing.T, src, out string) []string {
 	return links
 }
 
-// TestRenderVault_WikilinkShowsSource: a vault wikilink is parsed (so the
-// page and the index agree on what it consumes) but still shows as its own
-// escaped source text, as before.
+// TestRenderVault_WikilinkShowsSource: a vault wikilink rendered without a
+// resolver is parsed (so the page and the index agree on what it consumes)
+// and shows as its own escaped source text, never as a link.
 func TestRenderVault_WikilinkShowsSource(t *testing.T) {
 	out := renderKind(t, "see [[My Note#Part|label]] and ![[pic.png]] and [[a<b]]\n", RootVault)
 	for _, want := range []string{"[[My Note#Part|label]]", "![[pic.png]]", "[[a&lt;b]]"} {
@@ -567,6 +567,11 @@ func TestRenderVault_WikilinkShowsSource(t *testing.T) {
 	}
 	if strings.Contains(out, "<a ") || strings.Contains(out, "<img") {
 		t.Errorf("a wikilink became markup: %s", out)
+	}
+	// Rendered with no resolver, a link fails closed as an unresolved miss;
+	// an embed stays bare source.
+	if !strings.Contains(out, `<span class="wikilink wikilink-miss" title="Broken link (unresolved)">[[My Note#Part|label]]</span>`) {
+		t.Errorf("an unresolved wikilink is not marked as a miss: %s", out)
 	}
 }
 
@@ -623,7 +628,7 @@ func TestResolveVault_HeadingMatchNormalized(t *testing.T) {
 	if !ok {
 		t.Fatal("Linker.md not indexed")
 	}
-	// "[[Note#see #tag]]" is not in the list: resolveFragment reads every
+	// "[[Note#see #tag]]" is not in the list: matchFragment reads every
 	// '#' in a fragment as Obsidian's nested-heading separator, so that link
 	// names a heading "tag" under "see ". The heading resolves by its slug.
 	for _, target := range []string{
