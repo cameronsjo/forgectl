@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -29,6 +31,7 @@ for a in "$@"; do printf '%s\n' "$a" >> "$FAKE_MDROLL_ARGV"; done
 IFS= read -r line
 printf 'stdin:%s\n' "$line"
 printf 'stderr-marker\n' >&2
+if [ -n "$FAKE_MDROLL_SIGNAL" ]; then kill -TERM $$; fi
 exit "${FAKE_MDROLL_EXIT:-0}"
 `
 
@@ -90,9 +93,15 @@ type docsReadResult struct {
 	fallbackDoc    *docspkg.Doc
 }
 
-// runDocsReadForTest runs the verb with the production PATH lookup and a
-// recording fallback, so nothing binds a port or opens a browser.
+// runDocsReadForTest runs the verb with the production PATH lookup, stdout
+// reported as a terminal, and a recording fallback, so nothing binds a port or
+// opens a browser.
 func runDocsReadForTest(t *testing.T, target string) docsReadResult {
+	t.Helper()
+	return runDocsReadForTestTTY(t, target, true)
+}
+
+func runDocsReadForTestTTY(t *testing.T, target string, tty bool) docsReadResult {
 	t.Helper()
 	var res docsReadResult
 	var stdout, stderr bytes.Buffer
@@ -101,7 +110,8 @@ func runDocsReadForTest(t *testing.T, target string) docsReadResult {
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	rt := docsReadRuntime{
-		lookPath: osexec.LookPath,
+		lookPath:         osexec.LookPath,
+		stdoutIsTerminal: func(io.Writer) bool { return tty },
 		fallback: func(_ *cobra.Command, _ module.Deps, _ *docspkg.Index, doc docspkg.Doc) error {
 			res.fallbackDoc = &doc
 			return nil
@@ -122,7 +132,7 @@ func TestDocsRead_LaunchesMdrollWithWatchAndPassesStdio(t *testing.T) {
 	if res.fallbackDoc != nil {
 		t.Fatal("docs read fell back to the HTML reader with mdroll on PATH")
 	}
-	want := []string{"--watch", "--", canonical(t, filepath.Join(cwd, "README.md"))}
+	want := []string{"--watch", "--no-remote-images", "--", canonical(t, filepath.Join(cwd, "README.md"))}
 	if got := readArgv(t, argvFile); strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Errorf("mdroll argv = %q, want %q", got, want)
 	}
@@ -232,11 +242,95 @@ func TestDocsRead_FallsBackToHTMLReaderWithoutMdroll(t *testing.T) {
 	if res.fallbackDoc == nil || res.fallbackDoc.RelPath != "notes/plan.md" {
 		t.Fatalf("fallback doc = %+v, want notes/plan.md", res.fallbackDoc)
 	}
-	if !strings.Contains(res.stderr, "mdroll not found on PATH") {
+	if !strings.Contains(res.stderr, "mdroll not installed; opening") {
 		t.Errorf("stderr = %q, want it to say why the HTML reader opened", res.stderr)
 	}
 	if _, err := os.Stat(argvFile); err == nil {
 		t.Error("mdroll ran although it was not on PATH")
+	}
+}
+
+// Without mdroll and without a terminal, read must not become a server: an
+// agent's call would block forever. It prints the path and exits 0.
+func TestDocsRead_WithoutMdrollOrTerminalPrintsPathAndStartsNothing(t *testing.T) {
+	cwd, _ := docsReadFixture(t)
+	t.Setenv("PATH", t.TempDir())
+
+	res := runDocsReadForTestTTY(t, "notes/plan.md", false)
+	if res.err != nil {
+		t.Fatalf("docs read: %v", res.err)
+	}
+	if res.fallbackDoc != nil {
+		t.Fatal("docs read started the HTML reader without a terminal")
+	}
+	if want := canonical(t, filepath.Join(cwd, "notes", "plan.md")) + "\n"; res.stdout != want {
+		t.Errorf("stdout = %q, want exactly the resolved path %q", res.stdout, want)
+	}
+	if !strings.Contains(res.stderr, "not starting the HTML reader without a terminal") {
+		t.Errorf("stderr = %q, want it to say why nothing was started", res.stderr)
+	}
+}
+
+// An mdroll reachable only through a relative PATH entry is refused, said so,
+// and never run: it would be whatever file of that name is in the cwd.
+func TestDocsRead_RefusesMdrollFoundOnlyViaRelativePATH(t *testing.T) {
+	cwd, argvFile := docsReadFixture(t)
+	//nolint:gosec // G306: the planted binary must be executable to prove it is not run
+	if err := os.WriteFile(filepath.Join(cwd, "mdroll"), []byte(fakeMdrollScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", ".")
+
+	res := runDocsReadForTest(t, "README.md")
+	if res.err != nil {
+		t.Fatalf("docs read: %v", res.err)
+	}
+	if _, err := os.Stat(argvFile); err == nil {
+		t.Fatal("docs read ran an mdroll found through a relative PATH entry")
+	}
+	if !strings.Contains(res.stderr, "relative PATH entry") {
+		t.Errorf("stderr = %q, want the relative-PATH refusal named", res.stderr)
+	}
+	if res.fallbackDoc == nil {
+		t.Error("docs read did not fall back after refusing the relative mdroll")
+	}
+}
+
+// The label form names a root; the fallback must open the doc under THAT root
+// even when an overlapping root indexes the same file first.
+func TestDocsRead_LabelFormKeepsItsRootForTheFallback(t *testing.T) {
+	cwd, _ := docsReadFixture(t)
+	reports := filepath.Join(cwd, "zz", "reports")
+	if err := os.MkdirAll(reports, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(reports, "r.md"), []byte("# r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(cadenceFieldReportsEnv, reports)
+	t.Setenv("PATH", t.TempDir())
+	idx, err := docspkg.NewIndex([]string{cwd, reports})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportsLabel := idx.Roots()[1].Label
+
+	res := runDocsReadForTest(t, reportsLabel+"/r.md")
+	if res.err != nil {
+		t.Fatalf("docs read: %v", res.err)
+	}
+	if res.fallbackDoc == nil || res.fallbackDoc.RootLabel != reportsLabel || res.fallbackDoc.RelPath != "r.md" {
+		t.Errorf("fallback doc = %+v, want %s/r.md", res.fallbackDoc, reportsLabel)
+	}
+}
+
+func TestDocsRead_MapsASignalKilledMdrollTo128PlusSigno(t *testing.T) {
+	docsReadFixture(t)
+	t.Setenv("FAKE_MDROLL_SIGNAL", "1")
+
+	res := runDocsReadForTest(t, "README.md")
+	if got := ExitCode(res.err); got != 128+int(syscall.SIGTERM) {
+		t.Errorf("ExitCode = %d (err %v), want %d", got, res.err, 128+int(syscall.SIGTERM))
 	}
 }
 

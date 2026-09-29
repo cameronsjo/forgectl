@@ -75,8 +75,15 @@ A legacy server (predating generation-owned discovery) has no freshness endpoint
 
 `docs read <file>` opens one document from the default doc set (the same roots `docs serve` and `docs list` index with no arguments). `<file>` is a path on disk or a root-relative `<root>/<path>` name as `docs list` prints it, and either way it resolves through the index: a file outside the indexed roots, under an excluded directory, or not markdown is refused.
 
-When [mdroll](https://github.com/tokuhirom/mdroll) is on `PATH`, `read` runs it as `mdroll --watch -- <absolute path>`, with no shell and with forgectl's stdin, stdout, and stderr handed straight through, so mdroll's own keys (search, TOC, link picker) work. `--watch` stands in for the HTML reader's live reload, and `--` keeps a document named like a flag from being parsed as one (`forgectl docs read -- -odd.md` gets such a name past forgectl's own parser). mdroll's exit status becomes forgectl's.
+When [mdroll](https://github.com/tokuhirom/mdroll) is on `PATH`, `read` runs it as `mdroll --watch --no-remote-images -- <absolute path>`, with no shell and with forgectl's stdin, stdout, and stderr handed straight through, so mdroll's own keys (search, TOC, link picker) work. `--watch` stands in for the HTML reader's live reload, and `--` keeps a document named like a flag from being parsed as one (`forgectl docs read -- -odd.md` gets such a name past forgectl's own parser). mdroll's exit status becomes forgectl's; if a signal kills mdroll, forgectl exits 128 plus the signal number, as a shell would. An mdroll reachable only through a relative `PATH` entry is refused and treated as absent.
 
-mdroll is optional. Without it, `read` serves the doc set exactly as `docs serve --open` would, with the browser pointed at that document rather than the index; it holds the terminal until Ctrl-C, like `docs serve`. `forgectl doctor` reports mdroll as skipped, not failed, when it is absent.
+`--no-remote-images` keeps mdroll from fetching `http(s)` images, which it does by default: a remote image in a document is a tracking beacon, and the HTML reader blocks it with `img-src 'self' data:`. Beyond that one flag, `docs read` follows mdroll's own content policy, not the HTML reader's — mdroll does its own rendering, and forgectl's sanitizer and CSP do not apply to it.
+
+mdroll is optional. Without it, what `read` does depends on whether stdout is a terminal:
+
+- **A terminal:** `read` serves the doc set as `docs serve --open` would, with the browser pointed at that document rather than the index. It holds the terminal until Ctrl-C, like `docs serve`.
+- **No terminal** (an agent, a script, a pipe): `read` starts nothing. It prints the document's resolved absolute path to stdout, a note on stderr naming `forgectl docs serve --open`, and exits 0. A server would block the caller with nothing to interrupt it ([ADR-0008](../adr/0008-agent-contract.md)).
+
+`forgectl doctor` reports mdroll as skipped, not failed, when it is absent or found only through a relative `PATH` entry.
 
 How discovery records are written, where they live on disk, and how to clear them by hand after a crash: [docs server discovery — operations](../operations/docs-discovery.md).

@@ -190,9 +190,23 @@ func checkBinary(d Deps, name, hint string) Check {
 // PATH. It is shaped like checkBinary, but a missing mdroll is StateSkip rather
 // than StateWarn: `forgectl docs read` falls back to the HTML reader without
 // it, so a machine that never installs it has nothing to fix.
+//
+// A hit only through a relative PATH entry (exec.ErrDot) is reported as its
+// own case: `docs read` refuses to run it, so reporting it as OK would be
+// wrong, and reporting it as absent would send the operator to install a
+// binary they already have.
 func checkMdroll(d Deps) Check {
-	if p, err := d.LookPath("mdroll"); err == nil {
+	p, err := d.LookPath("mdroll")
+	if err == nil {
 		return Check{Name: "mdroll", State: StateOK, Detail: p}
+	}
+	if errors.Is(err, osexec.ErrDot) {
+		return Check{
+			Name:   "mdroll",
+			State:  StateSkip,
+			Detail: "mdroll found only via a relative PATH entry; ignoring",
+			Hint:   "put mdroll's directory on PATH as an absolute path",
+		}
 	}
 	return Check{
 		Name:   "mdroll",

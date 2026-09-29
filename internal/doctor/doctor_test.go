@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -177,6 +178,14 @@ func TestCheckMdroll(t *testing.T) {
 	}
 	if check.Hint == "" {
 		t.Error("mdroll absent: hint is empty, want where to get it")
+	}
+
+	// Found only through a relative PATH entry: docs read refuses to run it,
+	// so the row says that rather than OK or "not found".
+	relative := func(string) (string, error) { return "mdroll", osexec.ErrDot }
+	check = checkMdroll(Deps{LookPath: relative})
+	if check.State != StateSkip || !strings.Contains(check.Detail, "relative PATH entry") {
+		t.Errorf("mdroll via relative PATH: state = %q, detail = %q; want skip naming the relative entry", check.State, check.Detail)
 	}
 
 	check = checkMdroll(Deps{LookPath: fakeLookPath("mdroll")})
