@@ -90,6 +90,10 @@ type Doc struct {
 	// is stale depends on the clock, so readers call evalTrust at read time.
 	Status     string
 	StaleAfter string
+	// OrphanOK is true when the frontmatter says orphan_ok: true, the page's
+	// own statement that nothing is expected to link to it. Check counts it
+	// in Summary.IgnoredOrphans instead of reporting an orphan.
+	OrphanOK bool
 	// ModTime is the file's last-modified time, used to order "recents".
 	ModTime time.Time
 }
@@ -417,6 +421,7 @@ func newDoc(rootLabel, relPath, absPath string, modTime time.Time, meta docMeta)
 		Links:      meta.Links,
 		Status:     meta.Status,
 		StaleAfter: meta.StaleAfter,
+		OrphanOK:   meta.OrphanOK,
 		ModTime:    modTime,
 	}
 }

@@ -510,3 +510,39 @@ func TestCheckAt_StaleFindingWireKeys(t *testing.T) {
 		t.Errorf("stale finding keys = %s, want kind,path,root,stale_after", got)
 	}
 }
+
+func TestCheck_OrphanOKSuppressesOrphanAndIsCounted(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n")
+	checkWrite(t, filepath.Join(dir, "kept.md"), "---\norphan_ok: true\n---\n# Kept\n")
+	checkWrite(t, filepath.Join(dir, "linked-off.md"), "---\norphan_ok: false\n---\n# Off\n")
+	checkWrite(t, filepath.Join(dir, "typo.md"), "---\norphan_ok: \"true\"\n---\n# Typo\n")
+	checkWrite(t, filepath.Join(dir, "plain.md"), "# Plain\n")
+
+	r := checkIndex(t, dir).Check()
+	var got []string
+	for _, f := range findingsOf(r, FindingOrphan) {
+		got = append(got, f.Path)
+	}
+	sort.Strings(got)
+	if want := "linked-off.md plain.md typo.md"; strings.Join(got, " ") != want {
+		t.Errorf("orphans = %v, want %s (only the boolean true opts out)", got, want)
+	}
+	if r.Summary.Orphans != 3 || r.Summary.IgnoredOrphans != 1 {
+		t.Errorf("Summary orphans/ignored = %d/%d, want 3/1", r.Summary.Orphans, r.Summary.IgnoredOrphans)
+	}
+}
+
+func TestCheck_OrphanOKDoesNotHideLinkFindings(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n")
+	checkWrite(t, filepath.Join(dir, "kept.md"), "---\norphan_ok: true\n---\n# Kept\n\n[gone](missing.md)\n")
+
+	r := checkIndex(t, dir).Check()
+	if len(findingsOf(r, FindingBrokenLink)) != 1 {
+		t.Errorf("findings = %+v, want the broken link still reported", r.Findings)
+	}
+	if len(findingsOf(r, FindingOrphan)) != 0 {
+		t.Errorf("findings = %+v, want no orphan", r.Findings)
+	}
+}
