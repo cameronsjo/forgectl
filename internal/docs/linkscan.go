@@ -51,6 +51,8 @@ var linkMarkdown = newLinkMarkdown()
 func newLinkMarkdown() goldmark.Markdown {
 	md := goldmark.New(
 		goldmark.WithParserOptions(headingParserOptions()...),
+		// Parse-only: a $$ block's lines are TeX, not headings or links.
+		goldmark.WithParserOptions(mathBlockParserOptions()...),
 	)
 	(&wikilink.Extender{}).Extend(md)
 	return md
