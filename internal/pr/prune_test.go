@@ -23,6 +23,7 @@ package pr
 //   [x] A compaction rename failure leaves the old log intact and readable
 //   [x] Compaction's own intent row survives into the new file
 //   [x] An over-long line compacts and survives byte-identical, in place (#544)
+//   [x] A '\r' before the newline survives compaction, parsed or not
 //   [x] Nothing removable exits 0 off a TTY without --yes
 //   [x] --dry-run off a TTY without --yes touches nothing
 
@@ -692,6 +693,46 @@ func TestPrune_CompactionCarriesAnOverLongLineThroughByteIdentical(t *testing.T)
 				t.Errorf("the row after the over-long line moved: line 1 = %.200q", lines[1])
 			}
 		})
+	}
+}
+
+// TestPrune_CompactionKeepsACarriageReturnBeforeTheNewline pins the byte-level
+// half of "preserved byte for byte": a '\r' before a line's '\n' is content the
+// rewriter must carry through, on a line it cannot parse and on a row it keeps.
+// bufio.Scanner's line splitter strips it, which is how the pre-#544 reader
+// rewrote a CRLF line as LF.
+func TestPrune_CompactionKeepsACarriageReturnBeforeTheNewline(t *testing.T) {
+	c := pruneClient(t, repairRunner(nil))
+	unparseable := []byte("{not json\r")
+	kept, err := json.Marshal(RepairRow{
+		TS: time.Now().UTC().Add(-time.Hour), ID: "crlf000000000d",
+		Mode: RepairModeRollback, Outcome: repairOutcomeIntent, RecordPath: "/tmp/x.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept = append(kept, '\r')
+
+	seedSettledPair(t, c, "old00000000000a", 200*24*time.Hour)
+	appendRawLogLine(t, c, unparseable)
+	appendRawLogLine(t, c, kept)
+
+	report, err := c.Prune(context.Background(), defaultPruneOpts())
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if report.Log.Outcome != pruneOutcomeCompacted || report.Log.Dropped != 2 {
+		t.Fatalf("log outcome = %q, dropped = %d (error %q), want %q dropping the settled pair",
+			report.Log.Outcome, report.Log.Dropped, report.Log.Error, pruneOutcomeCompacted)
+	}
+	after, err := os.ReadFile(c.repairLogPath()) //nolint:gosec // the test's own t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append(append(bytes.Clone(unparseable), '\n'), append(bytes.Clone(kept), '\n')...)
+	if !bytes.HasPrefix(after, want) {
+		t.Fatalf("the CRLF lines did not survive compaction byte-identical and in order:\nwant prefix %q\ngot         %q",
+			want, after)
 	}
 }
 
