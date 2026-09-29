@@ -38,6 +38,8 @@ workbench — no terminal-specific rendering, no popping between windows.
   forgectl docs check [dir|file ...]     report broken links, broken anchors,
                                          and orphan pages; no server
   forgectl docs check --json             the same report for scripts
+  forgectl docs search <query> [--json]  full-text search the indexed docs
+                                         (ripgrep backend)
 
 Diagrams render in the page: a fenced code block tagged mermaid becomes a live
 diagram themed from the same Artificer tokens as the rest of the reader, and
@@ -66,6 +68,7 @@ navigation cannot attach an Authorization header.`,
 		newDocsOpenCmd(deps),
 		newDocsListCmd(deps),
 		newDocsCheckCmd(deps),
+		newDocsSearchCmd(deps),
 	)
 	return cmd
 }

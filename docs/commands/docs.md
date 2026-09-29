@@ -11,6 +11,7 @@ forgectl docs open [path]                # point the browser at a doc on the alr
 forgectl docs open --print-url [path]    # print the resolved URL instead of opening a browser
 forgectl docs list [dir|file ...]        # list the indexed docs, no server (--json for scripting)
 forgectl docs check [dir|file ...]       # broken links, broken anchors, orphan pages (--json for scripting)
+forgectl docs search <query> [--json]    # full-text search the indexed docs (ripgrep backend)
 ```
 
 Diagrams render in the page: a fenced code block tagged `mermaid` becomes a live diagram themed from the same Artificer tokens as the rest of the reader, and both those and inline SVG pan and zoom (drag to pan, modifier-scroll or click-then-scroll to zoom, double-click, `0`, or the diagram card's reset button to reset).
@@ -99,6 +100,26 @@ A token file must be:
 `--token` (a command-line value) was removed — command-line values are visible to other processes on the same host — so `--token-file` is the only way to supply one explicitly.
 
 **Protected servers cannot be `--open`ed directly**, because browser navigation cannot attach an `Authorization` header. `forgectl docs open` on a token-protected server prints the URL and a `curl -H 'Authorization: Bearer <token>' <url>` command instead of opening a browser.
+
+## Search
+
+`forgectl docs search <query>` runs a case-insensitive, fixed-string full-text query over the same roots `docs list` indexes with no arguments, and prints one line per hit: root, `path:line`, and a snippet of up to 240 characters around the match. `--limit N` (default 50) caps the results and `--timeout` (default 10s) bounds indexing plus search. A query that starts with `-` goes after `--`: `forgectl docs search -- --flag-name`.
+
+The backend is [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`), which must be on `PATH`. Support for qmd as a ranked backend is planned.
+
+- **Only indexed docs are returned.** Every hit rg reports is checked against the docs index, the same membership gate the reader serves through, so a file outside a root, under an excluded directory (`.git`, `node_modules`, `vendor`, any dot-directory), or reached through a symlink never appears. Hits dropped this way are counted in `skipped`.
+- **rg's own config file is ignored.** rg runs with `--no-config`, so `RIPGREP_CONFIG_PATH` cannot turn on `--follow` or otherwise change what is searched.
+- Files over 1 MB are not searched, and at most 5 hits are taken from one file.
+- Docs whose paths are not valid UTF-8 are not searchable; rg can only report such a path as raw bytes, and those hits are counted in `skipped`.
+- **Results are ordered and stable.** Roots are searched in their configured order, and rg walks each root in path order (`--sort=path`, which also keeps rg to a single worker), so the same query over the same tree returns the same results, and `--limit` always keeps the same prefix. A doc reachable through two overlapping roots (cwd and `./docs`, say) is returned once, under the first root.
+
+`--json` prints one object to stdout. `results` is always an array, and each result carries `root`, `path`, `title`, `line`, and `snippet`. `truncated` is true when more hits existed past `--limit`. `errors` is always an array of `{root, message}`, one per root rg could not fully search (an unreadable file, say, or output that could not be parsed).
+
+```json
+{"backend":"ripgrep","query":"needle","results":[{"root":"docs","path":"guide.md","title":"Guide","line":12,"snippet":"the needle in the guide"}],"truncated":false,"skipped":0,"errors":[]}
+```
+
+Exit codes: no match exits 0 with an empty `results` (human output says `no matches` on stderr). When rg could not fully search a root, the other roots are still searched and every hit found is printed, then the command exits 1 with the reason on stderr: one line per failed root, or under `--json` one `{"error","code"}` object on stderr alongside the full response, `errors` included, on stdout. A missing `rg`, an empty or invalid query, or an expired `--timeout` exits 2; under `--json` that leaves stdout empty and writes exactly one `{"error","code"}` object to stderr.
 
 ## `docs open` steers, never starts
 
