@@ -374,7 +374,11 @@ func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, from *Doc, path0 string) (
 // takes the FIRST heading that matches, so a duplicate heading's link lands
 // where the resolver says it does, never on its "-1" twin. An empty
 // fragment yields no anchor.
-func matchFragment(kind RootKind, doc *Doc, fragment string) (anchor string, ok bool) {
+//
+// budget bounds the parse work one source document can cause (see
+// fragmentBudget); nil is unlimited. A fragment the budget cannot cover is
+// not parsed: it matches by slug or as written, or it misses.
+func matchFragment(kind RootKind, doc *Doc, fragment string, budget *fragmentBudget) (anchor string, ok bool) {
 	if fragment == "" {
 		return "", true
 	}
@@ -405,7 +409,7 @@ func matchFragment(kind RootKind, doc *Doc, fragment string) (anchor string, ok 
 				return h.Slug, true
 			}
 		}
-		if !fragmentMayRender(last) {
+		if !fragmentMayRender(last) || !budget.take(len(last)) {
 			return "", false
 		}
 		textKey := foldHeadingKey(fragmentText(last))
@@ -452,7 +456,7 @@ func matchFragment(kind RootKind, doc *Doc, fragment string) (anchor string, ok 
 // unchanged, not a defect in this resolver.
 func (idx *Index) ResolveLink(from *Doc, target string) (*Doc, Miss) {
 	path0, fragment := splitFirstHash(target)
-	return idx.resolveParts(from, path0, fragment)
+	return idx.resolveParts(from, path0, fragment, nil)
 }
 
 // resolveParts is ResolveLink after the split: path0 and fragment arrive
@@ -460,14 +464,14 @@ func (idx *Index) ResolveLink(from *Doc, target string) (*Doc, Miss) {
 // calls this directly so a path containing a literal '#' (authored as
 // "%23" in a markdown link and decoded by scanDoc) is looked up as the
 // path it is, rather than re-split at that '#'.
-func (idx *Index) resolveParts(from *Doc, path0, fragment string) (*Doc, Miss) {
-	doc, _, miss := idx.resolveAnchor(from, path0, fragment)
+func (idx *Index) resolveParts(from *Doc, path0, fragment string, budget *fragmentBudget) (*Doc, Miss) {
+	doc, _, miss := idx.resolveAnchor(from, path0, fragment, budget)
 	return doc, miss
 }
 
 // resolveAnchor is resolveParts plus the anchor matchFragment found, which
 // only a hit carries.
-func (idx *Index) resolveAnchor(from *Doc, path0, fragment string) (*Doc, string, Miss) {
+func (idx *Index) resolveAnchor(from *Doc, path0, fragment string, budget *fragmentBudget) (*Doc, string, Miss) {
 	if from == nil {
 		return nil, "", MissNoTarget
 	}
@@ -500,7 +504,7 @@ func (idx *Index) resolveAnchor(from *Doc, path0, fragment string) (*Doc, string
 		}
 	}
 
-	anchor, ok := matchFragment(root.Kind, doc, fragment)
+	anchor, ok := matchFragment(root.Kind, doc, fragment, budget)
 	if !ok {
 		return doc, "", MissNoTarget
 	}
@@ -514,8 +518,8 @@ func (idx *Index) resolveAnchor(from *Doc, path0, fragment string) (*Doc, string
 // that resolved while its heading or block id did not still links to the
 // doc, without a fragment.
 // Every other miss has no href at all.
-func (idx *Index) wikilinkTarget(from *Doc, ref LinkRef) (href string, miss Miss) {
-	doc, anchor, miss := idx.resolveAnchor(from, ref.Path, ref.Fragment)
+func (idx *Index) wikilinkTarget(from *Doc, ref LinkRef, budget *fragmentBudget) (href string, miss Miss) {
+	doc, anchor, miss := idx.resolveAnchor(from, ref.Path, ref.Fragment, budget)
 	if doc == nil {
 		if miss == MissNone {
 			miss = MissNoTarget
@@ -562,6 +566,41 @@ const fragmentMarkupBytes = "\\*_`=~[<&%"
 // when a page renders: measured on "[x](" repeated, one 512-byte parse
 // takes about 0.6ms, while one 100 KB fragment took over 5s uncapped.
 const maxRenderedFragment = 512
+
+// maxFragmentParseBytes is the parsed-fragment text one source document may
+// spend (fragmentBudget). A heading link runs to tens of bytes, so 64 KiB is
+// about 2000 realistic 30-byte fragments and no real note reaches it; a
+// hostile note of about 2000 maximal (maxRenderedFragment) fragments would
+// otherwise hold renderMu for about 1s (#630).
+const maxFragmentParseBytes = 64 << 10
+
+// fragmentBudget is the remaining parse allowance of ONE source document:
+// one per render, and one per document while the index builds. A nil budget
+// is unlimited, which ResolveLink's single lookups use.
+//
+// The bound makes resolution order-dependent: once a note has spent its
+// budget, its LATER heading links with markup no longer match by rendered
+// text, while earlier ones did. That is deliberate and fail-closed: a link
+// past the budget misses (its slug and as-written match still work), and
+// never lands on a different heading.
+type fragmentBudget struct{ remaining int }
+
+func newFragmentBudget() *fragmentBudget {
+	return &fragmentBudget{remaining: maxFragmentParseBytes}
+}
+
+// take charges n bytes and reports whether they were covered. A refusal
+// charges nothing, so a later, shorter fragment can still fit.
+func (b *fragmentBudget) take(n int) bool {
+	if b == nil {
+		return true
+	}
+	if n > b.remaining {
+		return false
+	}
+	b.remaining -= n
+	return true
+}
 
 // fragmentMayRender reports whether fragmentText is worth running on
 // fragment: it is within maxRenderedFragment and holds a markup byte.

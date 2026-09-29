@@ -52,6 +52,14 @@ The two obvious alternatives both fail that. `sops set file '["a"]["b"]' '"value
 
 **Gitignore `*.sops.yaml.lock`.** The lock helper leaves a non-secret sibling beside whatever it locked, by design.
 
+**After an interrupted write, the next one refuses.** Every scratch file or directory forgectl creates beside a target carries a short hash of the target's name: `.env-<hash>.<random>.tmp` for the atomic write, and `.forgectl-sops-<hash>-<random>/` for the `--sops` work directory. A catchable signal (SIGINT, SIGTERM, SIGHUP, SIGQUIT, an external SIGABRT) removes the plaintext on the way out. If the signal lands once `--sops` has launched the sops edit, forgectl can't tell whether sops has written the file, so it also keeps the file's pre-run ciphertext beside it as `.forgectl-sops-<hash>.backup`. forgectl does not restore it, because a sops process may still be writing. SIGKILL, a crash, or a power loss can leave these files behind, and they can hold a secret in plaintext, inside the repository, visible to `git status`. The next `env set` on the **same** target finds them while holding that target's lock and refuses. The refusal names every leftover and deletes nothing. A sops process that outlived forgectl may still be using the work directory, and the leftover is the only evidence that a write died partway through. To clear it:
+
+1. Make sure no `sops` process is still running against the file (`pgrep -fl sops`).
+2. If the refusal names a ciphertext backup (`.forgectl-sops-<hash>.backup`, or `backup` inside a work directory), the target may hold a value forgectl never verified. Compare the target with the backup, or with git, and restore whichever is right. Both are ciphertext, so `cp` the backup over the target, or run `git checkout -- <file>`.
+3. Delete the named leftovers.
+
+Leftovers from a forgectl version that predates these names (`.env-<random>.tmp`, `.forgectl-sops-<digits>/`) can't be tied to a target. They draw a warning on stderr rather than a refusal. Delete them by hand after checking them.
+
 **`env check`'s exit codes are part of its contract, not incidental:** exit `1` means the file and its example both exist but disagree — missing and/or extra keys (drift); exit `2` means either the env file or the `--example` file is absent, so no comparison could run at all. `env check --json` emits the drift as a single object on stdout, `{"missing":[...],"extra":[...]}`, for scripted callers.
 
 **Blessed value producers** for `env set`, non-inline patterns first:
@@ -76,6 +84,18 @@ forgectl env set API_KEY                                   # interactive, no ech
   **What remains:** the directory is pinned by path immediately after resolution, so its own components are walked once more at that instant — a window of microseconds rather than of operator think-time, and the same ordinary same-uid local race that predates this command. Closing even that would need a component-by-component walk from the repository root.
 - **`--sops` widens the authority `env set` grants, and the paragraph below predates it.** Granting a session `env set` now also grants write authority over repo-contained **SOPS documents** — a materially larger thing than a `.env`, because a SOPS file typically holds production credentials rather than local development ones. The bounds are the same in shape (repo containment, a filename allowlist, a content check) and there is no `--any-file` override on that route, but the *blast radius* of the authority is bigger. Grant it deliberately.
 - **Agent-write threat model, one line:** running `env set`/`env get` under an agent grants that agent write authority over repo-contained **env files** for the duration of the session — containment (refuses outside the git repo), the env-file-name rule (below), 0600 permissions, and atomic writes bound the blast radius, but they don't remove the authority itself. The two subcommands grant distinct authorities: `env set` is **write** authority (the agent can create or overwrite a key in the file); `env get --clipboard` is **read/exfil** authority (the agent can copy an existing secret to the clipboard, where — see the residual-risk note above — any local process or clipboard manager can then read it too). Granting one does not imply granting the other.
+
+**Consumer compatibility: what round-trips, and where other parsers differ.** forgectl's own parser round-trips every value it writes. Other consumers of the same file do not always agree, and three cases matter (each measured against stock `bash` and `python-dotenv`):
+
+| Case | forgectl | bash (`. ./file`) | python-dotenv |
+|---|---|---|---|
+| A value with a raw `\r` inside quotes (e.g. `A='x<CR>y'`) | round-trips | keeps the `\r` | reads it back as `\n`, a **silent change to the secret** |
+| A multi-line value, written as `KEY="l1\nl2"` | round-trips | keeps the two characters `\` `n`; a multi-line PEM breaks | decodes to a real newline |
+| A file with CRLF line endings (forgectl preserves them on edit) | round-trips | keeps a trailing `\r` on **every** value | strips it |
+
+Workarounds. For bash, do not `source` the file when a value is multi-line or the file is CRLF: read it through forgectl, or convert (`dos2unix`) and use `$'...'` for a value that needs a real newline. For python-dotenv, avoid `\r` in values entirely. `env set` therefore **refuses a new value that contains a carriage return** with a clear error (a trailing `\n` or `\r\n` from the producing command is still stripped as before). This guards new writes only: a `\r` already on disk still parses and rewrites untouched, and there is no `\r` escape, because adding one would change the meaning of existing double-quoted `\r` text on disk.
+
+**`PATH` is trusted.** forgectl resolves `gh`, `git`, `tmux` and the other tools it runs through the inherited `PATH`, the same as any shell would, and does not pin them in config. An attacker who can put an executable earlier on your `PATH` already controls what your shell runs, so a pin would only move the trust. Two narrower properties hold and are worth knowing: `sops` is resolved to an absolute path **once** per `env set --sops` and that path is what runs (the `sops` binary the value is written with is the one the write started with), and the `$EDITOR` re-invocation uses forgectl's own executable path (`os.Executable()`), never `argv[0]` or a `PATH` lookup. Go also refuses a `PATH` entry that resolves to the current directory (`exec.ErrDot`), so a binary planted in a cloned repo is not picked up by a relative `PATH` entry.
 
 **Safety notes:**
 

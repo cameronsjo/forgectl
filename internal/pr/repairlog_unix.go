@@ -22,12 +22,22 @@ import (
 // cleared before the descriptor is handed back, so a regular file reads and
 // writes exactly as it did through a plain open.
 func openRepairLogNoFollow(path string, flag int, perm os.FileMode) (*os.File, error) {
+	f, err := openNoFollowNonblock(path, flag, perm)
+	if errors.Is(err, unix.ELOOP) {
+		return nil, fmt.Errorf("%w: %s is a symlink; refusing to follow it",
+			errRepairLogNotRegular, termsafe.QuotePath(path))
+	}
+	return f, err
+}
+
+// openNoFollowNonblock is the open under openRepairLogNoFollow, shared with the
+// findings owner-marker reader (forgectl#558): O_NOFOLLOW on the final
+// component, O_NONBLOCK for the open only (cleared before return), O_CLOEXEC.
+// A symlink comes back as a *os.PathError wrapping ELOOP, and the caller still
+// owes an Fstat regular-file check on the returned handle.
+func openNoFollowNonblock(path string, flag int, perm os.FileMode) (*os.File, error) {
 	fd, err := unix.Open(path, flag|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, uint32(perm.Perm()))
 	if err != nil {
-		if errors.Is(err, unix.ELOOP) {
-			return nil, fmt.Errorf("%w: %s is a symlink; refusing to follow it",
-				errRepairLogNotRegular, termsafe.QuotePath(path))
-		}
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
 	if err := unix.SetNonblock(fd, false); err != nil {
