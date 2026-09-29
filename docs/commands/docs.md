@@ -22,7 +22,11 @@ Documents in a `vault` root (see [Root kinds](#root-kinds)) also render Obsidian
 
 A block comment is not recognized, and its lines are read as ordinary text under the inline rule, when its closing line has text after the `%%`, or when a line before the closer opens a code fence (```` ``` ```` or `~~~`) or an HTML block (a line starting with `<`). A stray marker therefore never hides the rest of a note. Docs roots render plain GitHub-flavoured markdown, where all of these stay literal.
 
-Vault `[[wikilinks]]` render as links to the note they resolve to, by the rules in [Root kinds](#root-kinds): a heading link jumps to the heading, and a block link opens the note. A link that does not resolve, is ambiguous, or leaves the root shows dashed and red, with the reason on hover. A link whose note exists but whose heading or block does not still opens the note, marked the same way. `![[embeds]]`, and a wikilink inside a markdown link, still show as their source text.
+Vault `[[wikilinks]]` render as links to the note they resolve to, by the rules in [Root kinds](#root-kinds): a heading link jumps to the heading, and a block link jumps to the block. A link that does not resolve, is ambiguous, or leaves the root shows dashed and red, with the reason on hover. A link whose note exists but whose heading or block does not still opens the note, marked the same way. `[[note\|alias]]`, the escaped form a table cell needs, links like `[[note|alias]]`. `![[embeds]]`, a wikilink inside a markdown link, and one after a raw-HTML `<a>` opened earlier in the same paragraph show as their source text.
+
+A block id (`^blk-1`) at the end of a paragraph or list item, after a space, is hidden and becomes that block's anchor. Elsewhere in a note's text, such as on its own line, on a heading, or in a callout's first paragraph, a `^id` stays visible; a link to it still resolves, and opens the note at the top. A `^id` inside code, a math block or a comment is not a block id.
+
+A page served in the moment between a file changing and the index rebuilding shows every wikilink as unresolved. This fails closed by design, and the live reload that follows the rebuild shows the resolved links.
 
 Diagrams render in the page: a fenced code block tagged `mermaid` becomes a live diagram themed from the same Artificer tokens as the rest of the reader, and both those and inline SVG pan and zoom (drag to pan, modifier-scroll or click-then-scroll to zoom, double-click, `0`, or the diagram card's reset button to reset).
 
@@ -55,7 +59,7 @@ Every root is classified as `docs` or `vault` when it is indexed. A root is a `v
 | Kind | Link target | Anchor |
 |---|---|---|
 | `docs` | relative markdown path from the linking file (`[x](../guide.md)`) | GitHub-style heading slug (`#getting-started`) |
-| `vault` | wikilink by vault-relative path, bare note name, or frontmatter alias (`[[Note]]`, `[[folder/Note]]`); a `./` or `../` markdown path resolves from the linking file | heading text or slug (`#Some Heading`; text matches ignoring case, spacing and markdown punctuation such as `==`, `*` or backticks), or a block id (`#^blk-1`) |
+| `vault` | wikilink by vault-relative path, bare note name, or frontmatter alias (`[[Note]]`, `[[folder/Note]]`); a `./` or `../` markdown path resolves from the linking file | heading text or slug (`#Some Heading`; text matches ignoring case, spacing and markdown punctuation such as `==`, `*` or backticks; a heading whose text contains `#` can only be linked by its slug, because `#` separates nested headings), or a block id (`#^blk-1`) |
 
 The kind also picks the markdown dialect: a `vault` root renders the Obsidian highlights, comments, tags, callout types and wikilinks described above, resolving and rendering each wikilink by these rules, and a `docs` root stays plain GitHub-flavoured markdown. Links never resolve across roots. `[docs.root_kinds]` forces a kind when detection gets it wrong, keyed by the root path as you wrote it in `roots` or on the command line — relative spellings such as `.` match the same directory the CLI derives. A value other than `docs` or `vault` is a config error, and `forgectl launch doctor` reports it.
 

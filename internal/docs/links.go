@@ -358,11 +358,13 @@ func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, from *Doc, path0 string) (
 // both reach "## a ==b==". Only the vault comparison normalizes.
 //
 // matchFragment also returns the anchor a rendered link jumps to: the
-// matching heading's Slug, the id the page renders on it. A vault fragment
+// matching heading's Slug, the id the page renders on it, or for a "^id"
+// block reference the indexed block id itself, which a vault page renders
+// as the block's id (blockIDTransformer). The anchor is always a value
+// from the indexed Doc, never the fragment as written. A vault fragment
 // takes the FIRST heading that matches, so a duplicate heading's link lands
-// where the resolver says it does, never on its "-1" twin. An empty fragment
-// or a "^id" block reference yields no anchor: a block id has no rendered id
-// to jump to, so its link opens the note.
+// where the resolver says it does, never on its "-1" twin. An empty
+// fragment yields no anchor.
 func matchFragment(kind RootKind, doc *Doc, fragment string) (anchor string, ok bool) {
 	if fragment == "" {
 		return "", true
@@ -370,7 +372,7 @@ func matchFragment(kind RootKind, doc *Doc, fragment string) (anchor string, ok 
 	if id, isBlock := strings.CutPrefix(fragment, "^"); isBlock {
 		for _, b := range doc.BlockIDs {
 			if b == id {
-				return "", true
+				return b, true
 			}
 		}
 		return "", false
@@ -480,9 +482,10 @@ func (idx *Index) resolveAnchor(from *Doc, path0, fragment string) (*Doc, string
 
 // wikilinkTarget is the href a rendered wikilink gets, and its verdict. The
 // href is built ONLY from the indexed Doc the link resolved to and the Slug
-// of the heading it matched, through docHrefFragment; nothing in ref reaches
-// it. A hit links to the doc and its heading. A doc that resolved while its
-// heading or block id did not still links to the doc, without a fragment.
+// of the heading or block id it matched, through docHrefFragment; nothing
+// in ref reaches it. A hit links to the doc and its heading or block. A doc
+// that resolved while its heading or block id did not still links to the
+// doc, without a fragment.
 // Every other miss has no href at all.
 func (idx *Index) wikilinkTarget(from *Doc, ref LinkRef) (href string, miss Miss) {
 	doc, anchor, miss := idx.resolveAnchor(from, ref.Path, ref.Fragment)
