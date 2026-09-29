@@ -4,8 +4,10 @@ package docs
 //
 // The reader's JS and CSS find chrome elements by a data-fc attribute, never
 // by id. A document can produce any id (a heading slug, or raw HTML), so an id
-// lookup can be captured by content; the sanitizer strips every data-*
-// attribute, so a doc cannot produce a data-fc.
+// lookup can be captured by content. A doc cannot plant a data-fc: the
+// sanitizer strips every data-* attribute, and mermaid-init.js scrubs data-fc
+// from rendered diagrams after render, because mermaid's own sanitizer keeps
+// data-* (forgectl#643).
 //
 //   [x] Happy: a doc whose headings slug to every chrome id leaves each
 //              data-fc hook on exactly one element, the chrome's
@@ -14,8 +16,33 @@ package docs
 //              getElementById on a chrome id, and every data-fc they query
 //              exists in the shell
 //   [x] Happy: the shell CSS does not style chrome by id
+//   [x] Happy: every DOM lookup in the reader's scripts (querySelector,
+//              querySelectorAll, closest, matches, getElementsBy*) is either
+//              rooted at a data-fc hook or on a reviewed list of content-level
+//              lookups with its reason, so a new class- or tag-based chrome
+//              lookup fails here (forgectl#643). doc-main and doc-body are
+//              content roots: a lookup UNDER them reaches the doc's own
+//              elements, so it needs a listed reason too
+//   [x] Edge:  a lookup the scan cannot resolve (a variable selector, a
+//              wrapper's parameter) is listed too, and a wrapper's call sites
+//              are checked in its place
+//   [x] Edge:  a listed lookup the scripts no longer make fails, so the list
+//              cannot rot into a blanket pass
+//   [x] Happy: the shell has no inline <script> the scan would miss
+//   [x] Happy: the raw-HTML chrome classes and tags a doc can plant survive
+//              the sanitizer or not as this file assumes, and none carries a
+//              data-fc hook
 //   [x] Happy: the live-status item keeps the full text in a title and wraps
 //              the host in a span the 480px rule can hide
+//
+// Known limits of the lookup scan, accepted rather than solved:
+//   - contentLookups is keyed by selector, not call site, so a reviewed
+//     selector reused elsewhere in the same script passes unreviewed;
+//   - it sees only dotted method calls: bracket access
+//     (document["querySelector"](…)), an aliased or bound method, or a
+//     selector built outside a string constant and + escapes it.
+// The browser half of this is scripts/verify-reader-chrome.mjs, which also
+// covers the client-side mermaid render a Go test cannot see.
 
 import (
 	"net/http"
@@ -23,13 +50,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
 
 var chromeIDs = []string{
 	"shell", "nav-toggle", "drawer-scrim", "docs-nav", "doc-filter",
-	"filter-empty", "live-status", "doc-missing",
+	"filter-empty", "doc-main", "live-status", "doc-missing",
 }
 
 func chromePage(t *testing.T, md string) string {
@@ -86,10 +114,20 @@ func chromeRead(t *testing.T, rel string) string {
 	return string(b)
 }
 
+// chromeScripts is every first-party script the shell loads. The vendored
+// ones (mermaid.min.js, KaTeX, Artificer) are not listed: they find their
+// targets by data-* attributes or by the elements this repo's scripts hand
+// them.
+var chromeScripts = []string{
+	"copy.js", "math-init.js", "mermaid-init.js", "nav-toggle.js",
+	"reload.js", "sidenav-filter.js", "svg-panzoom.js",
+}
+
 func TestChrome_ScriptsLookUpByDataFcNotID(t *testing.T) {
-	body := chromePage(t, "# x\n")
+	// An h2 gives the page an outline, so the outline hooks are present.
+	body := chromePage(t, "# x\n\n## y\n")
 	hook := regexp.MustCompile(`\[data-fc="([a-z-]+)"\]`)
-	for _, f := range []string{"reload.js", "nav-toggle.js", "sidenav-filter.js"} {
+	for _, f := range chromeScripts {
 		src := chromeRead(t, filepath.Join("assets", f))
 		for _, id := range chromeIDs {
 			for _, q := range []string{`getElementById("` + id + `")`, `getElementById('` + id + `')`, `banner.id = "` + id + `"`} {
@@ -130,5 +168,323 @@ func TestChrome_LiveStatusHostIsHideableAndKeepsATooltip(t *testing.T) {
 	tmpl := chromeRead(t, filepath.Join("templates", "shell.html.tmpl"))
 	if !regexp.MustCompile(`@media \(max-width: 480px\) \{\s*\.live-status__host \{ display: none; \}`).MatchString(tmpl) {
 		t.Errorf("no <=480px rule hides the host")
+	}
+}
+
+// contentLookups is every DOM lookup in chromeScripts that is not rooted at a
+// data-fc hook, keyed by script and then by selector, with the reason a doc
+// cannot use it to reach chrome. A selector the scan cannot resolve is keyed
+// by its raw source text.
+//
+// A doc can carry any class and some tags (see
+// TestChrome_PlantedChromeSurvivesOnlyAsContent), so a lookup that finds
+// CHROME by class or tag can return the doc's copy. Before adding an entry,
+// make sure the lookup finds document content by design or runs on a root
+// that was itself found by data-fc. A lookup for chrome gets a data-fc hook in
+// the shell instead.
+var contentLookups = map[string]map[string]string{
+	"copy.js": {
+		"pre.mermaid[data-mermaid-source]": "content: diagrams in the copied selection",
+		".math":                            "content: formulas in the copied selection",
+		".embed":                           "content: the frame mermaid-init.js wraps around a diagram",
+		".embed-bar":                       "runs on the detached clone of the selection",
+		".dia-viewport, .dia-stage":        "runs on the detached clone of the selection",
+		"svg":                              "runs on the detached clone of the selection",
+		"*":                                "runs on the detached clone of the selection",
+		"span":                             "runs on the detached clone of the selection",
+	},
+	"math-init.js": {
+		".math": "content: the formulas it renders",
+	},
+	"mermaid-init.js": {
+		`pre.mermaid [data-fc], [id^="dmermaid-"] [data-fc]`: "scrubs hooks forged inside rendered diagrams",
+		"pre.mermaid":   "content: the diagrams it renders",
+		".embed":        "content: the frame it wraps around a diagram",
+		".dia-viewport": "scoped to an .embed this script created",
+	},
+	"reload.js": {
+		":is(h1,h2,h3,h4,h5,h6)[id]":  "content: headings, on the doc-main root",
+		`"#" + CSS.escape(anchor.id)`: "content: a heading, on the doc-main root",
+		"details":                     "on a sidenav or doc-body root found by data-fc, or up from one",
+		":scope > summary .label":     "under a <details> from a data-fc root",
+		".label":                      "under the focused element or a <summary>",
+		"[data-fc]":                   "focus restore: the nearest hook above the focused control, recorded as its region",
+		`'[data-fc="' + CSS.escape(key.region) + '"]'`: "focus restore: the region recorded from a real hook",
+		`"#" + CSS.escape(key.id)`:                     "focus restore: inside the recorded region",
+		"a[href]":                                      "focus restore: inside the recorded region",
+		"summary":                                      "focus restore: inside the recorded region",
+		".live-dot":                                    "under the live-status data-fc hook",
+		".live-status__text":                           "under the live-status data-fc hook",
+		"sel":                                          "replace()'s and within()'s parameter; their call sites are checked instead",
+	},
+	"sidenav-filter.js": {
+		"sel":                 "all()'s parameter; its call sites are checked instead",
+		"li":                  "up from a link or folder under the sidenav data-fc hook",
+		"a[data-filter-text]": "under a sidenav node; data-filter-text is server-set and the sanitizer strips data-*",
+	},
+	"svg-panzoom.js": {
+		`[data-fc="doc-main"] svg:not([aria-hidden="true"])`: "content: inline and rendered SVG in the doc pane",
+		".katex":     "content: KaTeX output inside the doc",
+		".dia-stage": "scoped to a viewport this script created",
+	},
+}
+
+// selectorWrappers names each script's helpers that take a selector and
+// query the document with it, and which argument (0-based) the selector is.
+// Their call sites are scanned like the query methods themselves.
+var selectorWrappers = map[string]map[string]int{
+	"reload.js":         {"replace": 0, "within": 1},
+	"sidenav-filter.js": {"all": 0},
+}
+
+var (
+	domQueryCall = regexp.MustCompile(`\.(querySelector|querySelectorAll|closest|matches|getElementsByTagName|getElementsByClassName|getElementsByName)\(`)
+	jsStringVar  = regexp.MustCompile(`(?m)^\s*var ([A-Z_]+) = (?:"([^"]*)"|'([^']*)');`)
+)
+
+// jsArg returns the source text of the n-th (0-based) argument of the call
+// whose argument list starts at src[i], or "" when the call has fewer. It
+// skips string literals, so a paren or comma inside a selector string does
+// not end an argument.
+func jsArg(src string, i, n int) string {
+	depth := 0
+	for j := i; j < len(src); j++ {
+		switch c := src[j]; c {
+		case '"', '\'', '`':
+			for j++; j < len(src) && src[j] != c; j++ {
+				if src[j] == '\\' {
+					j++
+				}
+			}
+		case '(', '[':
+			depth++
+		case ')', ']':
+			if depth == 0 {
+				if n == 0 {
+					return strings.TrimSpace(src[i:j])
+				}
+				return ""
+			}
+			depth--
+		case ',':
+			if depth == 0 {
+				if n == 0 {
+					return strings.TrimSpace(src[i:j])
+				}
+				n--
+				i = j + 1
+			}
+		}
+	}
+	return ""
+}
+
+// jsResolve evaluates a selector expression made of string literals and the
+// file's string constants joined by +. ok is false for anything else.
+func jsResolve(expr string, consts map[string]string) (sel string, ok bool) {
+	var b strings.Builder
+	for _, part := range strings.Split(expr, "+") {
+		part = strings.TrimSpace(part)
+		switch {
+		case len(part) >= 2 && (part[0] == '"' || part[0] == '\'') && part[len(part)-1] == part[0]:
+			b.WriteString(part[1 : len(part)-1])
+		case consts[part] != "":
+			b.WriteString(consts[part])
+		default:
+			return "", false
+		}
+	}
+	return b.String(), true
+}
+
+// contentRoots are the hooks whose subtree is the document itself. The hook
+// alone is chrome, but a selector descending from it reaches doc content.
+var contentRoots = []string{`[data-fc="doc-main"]`, `[data-fc="doc-body"]`}
+
+// dataFcRooted reports whether every comma-separated selector in sel starts
+// with a compound carrying a data-fc attribute, so it can only match inside
+// (or on) a shell element, and none descends from a content root. Commas
+// inside brackets or parens do not split.
+func dataFcRooted(sel string) bool {
+	depth := 0
+	start := 0
+	var parts []string
+	for i := 0; i < len(sel); i++ {
+		switch sel[i] {
+		case '(', '[':
+			depth++
+		case ')', ']':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, sel[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, sel[start:])
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		depth = 0
+		end := len(p)
+		for i := 0; i < len(p) && end == len(p); i++ {
+			switch p[i] {
+			case '(', '[':
+				depth++
+			case ')', ']':
+				depth--
+			case ' ', '>', '+', '~':
+				if depth == 0 {
+					end = i
+				}
+			}
+		}
+		if !strings.Contains(p[:end], `[data-fc="`) {
+			return false
+		}
+		for _, root := range contentRoots {
+			if end < len(p) && strings.Contains(p[:end], root) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+type chromeLookup struct {
+	key    string // the resolved selector, or the raw expression
+	rooted bool
+	line   int
+}
+
+// scanChromeLookups returns every DOM query call in src, and every call to the
+// script's selector wrappers in place of the query inside them. wrapperCalls
+// counts the latter per wrapper, so a renamed wrapper cannot pass unseen.
+func scanChromeLookups(src string, wrappers map[string]int) (out []chromeLookup, wrapperCalls map[string]int) {
+	consts := map[string]string{}
+	for _, m := range jsStringVar.FindAllStringSubmatch(src, -1) {
+		consts[m[1]] = m[2] + m[3]
+	}
+	add := func(argStart, n int) {
+		expr := jsArg(src, argStart, n)
+		l := chromeLookup{key: expr, line: strings.Count(src[:argStart], "\n") + 1}
+		if sel, ok := jsResolve(expr, consts); ok {
+			l.key, l.rooted = sel, dataFcRooted(sel)
+		}
+		out = append(out, l)
+	}
+	for _, m := range domQueryCall.FindAllStringIndex(src, -1) {
+		add(m[1], 0)
+	}
+	wrapperCalls = map[string]int{}
+	for wrapper, n := range wrappers {
+		call := regexp.MustCompile(`(?:^|[^.\w])` + wrapper + `\(`)
+		for _, m := range call.FindAllStringIndex(src, -1) {
+			if strings.HasSuffix(src[:m[1]], "function "+wrapper+"(") {
+				continue
+			}
+			wrapperCalls[wrapper]++
+			add(m[1], n)
+		}
+	}
+	return out, wrapperCalls
+}
+
+func TestChrome_ScriptsFindChromeOnlyByDataFc(t *testing.T) {
+	for _, f := range chromeScripts {
+		src := chromeRead(t, filepath.Join("assets", f))
+		lookups, calls := scanChromeLookups(src, selectorWrappers[f])
+		for w := range selectorWrappers[f] {
+			if calls[w] == 0 {
+				t.Errorf("%s: no call to its selector wrapper %s(); update selectorWrappers", f, w)
+			}
+		}
+		if len(lookups) == 0 {
+			t.Errorf("%s: the scan found no DOM lookups; it has stopped seeing them", f)
+		}
+		seen := map[string]bool{}
+		for _, l := range lookups {
+			if l.rooted {
+				continue
+			}
+			seen[l.key] = true
+			if _, ok := contentLookups[f][l.key]; !ok {
+				t.Errorf("%s:%d looks up %q, which is not rooted at a data-fc hook. "+
+					"A doc can carry any class and some tags, so a chrome lookup "+
+					"by class or tag can return the doc's copy (forgectl#643). "+
+					"Give the chrome element a data-fc hook, or, if this finds "+
+					"document content by design, list it in contentLookups with why.",
+					f, l.line, l.key)
+			}
+		}
+		for key := range contentLookups[f] {
+			if !seen[key] {
+				t.Errorf("%s: contentLookups lists %q, which the script no longer looks up; drop the entry", f, key)
+			}
+		}
+	}
+	for f := range contentLookups {
+		if !slices.Contains(chromeScripts, f) {
+			t.Errorf("contentLookups names %s, which is not in chromeScripts", f)
+		}
+	}
+}
+
+// The scan reads served script files only. An inline <script> would escape
+// it (and the CSP's script-src 'self' blocks one anyway).
+func TestChrome_ShellHasNoInlineScript(t *testing.T) {
+	tmpl := chromeRead(t, filepath.Join("templates", "shell.html.tmpl"))
+	tags := regexp.MustCompile(`<script\b[^>]*>`).FindAllString(tmpl, -1)
+	if len(tags) == 0 {
+		t.Fatal("no <script> tags found; the scan has stopped seeing them")
+	}
+	for _, tag := range tags {
+		if !strings.Contains(tag, ` src="`) {
+			t.Errorf("inline script %q in the shell; the chrome lookup guard only scans served assets", tag)
+		}
+	}
+}
+
+// Pins the premise of the guard above: a doc can plant each chrome class the
+// scripts once looked up (on a tag the sanitizer keeps, or on a div where it
+// drops the tag), and no planted element carries a data-fc hook. If the
+// sanitizer starts stripping class, this test fails and the guard is merely
+// belt and braces; if it starts keeping data-*, the guard's whole premise is
+// gone.
+func TestChrome_PlantedChromeSurvivesOnlyAsContent(t *testing.T) {
+	planted := []string{
+		`<aside class="outline" data-fc="outline">p1</aside>`,
+		`<details class="outline-inline" data-fc="outline-inline"><summary>p2</summary>x</details>`,
+		`<div class="sidenav" data-fc="sidenav"><div class="sidenav__group">p3</div></div>`,
+		`<div class="doc-body" data-fc="doc-body">p4</div>`,
+		`<main class="surface-document" data-fc="doc-main">p5</main>`,
+		`<nav class="sidenav" data-fc="sidenav">p6</nav>`,
+		`<footer class="statusbar" data-fc="statusbar">p7</footer>`,
+	}
+	// The h2 gives the page an outline, so the shell carries both outline hooks.
+	body := chromePage(t, "# hostile\n\n## real\n\n"+strings.Join(planted, "\n\n")+"\n")
+	start := strings.Index(body, `data-fc="doc-body">`)
+	end := strings.Index(body, "</main>")
+	if start < 0 || end < start {
+		t.Fatalf("no doc-body in the page")
+	}
+	doc := body[start+len(`data-fc="doc-body">`) : end]
+	for _, want := range []string{`<aside class="outline">`, `<details class="outline-inline">`, `<div class="sidenav">`, `<div class="doc-body">`} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("doc content lost %q; the fixture no longer plants it, so the guard's premise is unpinned", want)
+		}
+	}
+	// The planted outline precedes the shell's in document order, so a
+	// class-based querySelector returns the doc's copy.
+	if strings.Index(body, `<aside class="outline">`) > strings.Index(body, `<aside class="outline" data-fc=`) {
+		t.Errorf("the planted aside no longer precedes the shell's outline")
+	}
+	if strings.Contains(doc, "data-fc") {
+		t.Errorf("a planted data-fc survived the sanitizer:\n%s", doc)
+	}
+	for _, hook := range []string{"doc-main", "sidenav", "doc-body", "outline", "outline-inline", "statusbar"} {
+		if got := strings.Count(body, `data-fc="`+hook+`"`); got != 1 {
+			t.Errorf(`data-fc=%q appears %d times, want the shell's one`, hook, got)
+		}
 	}
 }

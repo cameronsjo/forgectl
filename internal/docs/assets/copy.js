@@ -24,7 +24,9 @@
 
   function docBody(node) {
     var el = node && node.nodeType === 1 ? node : node && node.parentElement;
-    return el ? el.closest(".doc-body") : null;
+    // The shell's doc pane by its data-fc hook: a doc can carry
+    // class="doc-body" on its own div (forgectl#643).
+    return el ? el.closest('[data-fc="doc-body"]') : null;
   }
 
   // The source when the selection lies wholly inside one rendered formula or
