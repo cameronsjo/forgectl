@@ -507,7 +507,7 @@ func (e mathExtension) Extend(m goldmark.Markdown) {
 	m.Parser().AddOptions(
 		// No other inline parser triggers on '$', so this priority only has to
 		// stay clear of the ones other extensions use.
-		parser.WithInlineParsers(util.Prioritized(mathInlineParser{singleDollar: e.singleDollar}, 150)),
+		parser.WithInlineParsers(util.Prioritized(mathInlineParser(e), 150)),
 		parser.WithASTTransformers(util.Prioritized(mathFenceTransformer{}, 110)),
 	)
 	m.Renderer().AddOptions(renderer.WithNodeRenderers(

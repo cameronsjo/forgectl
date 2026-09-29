@@ -352,11 +352,13 @@ func isIndexName(name string) bool {
 	return base == "readme" || base == "index"
 }
 
-// Errors counts the findings that fail the check (severity error).
+// Errors counts the findings that fail the check. It counts everything
+// that is not SeverityInfo, so a finding built without a severity fails
+// closed rather than silently passing.
 func (r CheckReport) Errors() int {
 	n := 0
 	for _, f := range r.Findings {
-		if f.Severity == SeverityError {
+		if f.Severity != SeverityInfo {
 			n++
 		}
 	}
