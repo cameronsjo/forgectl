@@ -3,6 +3,8 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -48,27 +50,36 @@ func docsFail(cmd *cobra.Command, verb, root string, err error, code int, asJSON
 	return newSilentCodedError(code)
 }
 
-// docsWantsJSON reports whether cmd was asked for --json. The flag value is
-// authoritative once parsed; when a flag-parse failure stops pflag before it
-// reached --json the value is still false, so it then scans the raw arguments
-// (up to a "--" terminator). A verb that does not declare --json never wants it.
+// docsWantsJSON reports whether cmd was asked for --json. It scans the raw
+// arguments (up to a "--" terminator) because a flag-parse failure stops pflag
+// before it reached --json, leaving the parsed value false. The scan mirrors
+// pflag: a bare --json is true, --json=<v> is strconv.ParseBool(v) (an
+// unparseable value is ignored, as pflag would have rejected it), and the LAST
+// occurrence wins. With no occurrence in the arguments the parsed flag value
+// decides. A verb that does not declare --json never wants it.
 func docsWantsJSON(cmd *cobra.Command) bool {
-	f := cmd.Flags().Lookup("json")
-	if f == nil {
+	if cmd.Flags().Lookup("json") == nil {
 		return false
 	}
-	if v, err := cmd.Flags().GetBool("json"); err == nil && v {
-		return true
-	}
+	seen, want := false, false
+scan:
 	for _, a := range docsOSArgs() {
-		switch a {
-		case "--":
-			return false
-		case "--json", "--json=true":
-			return true
+		switch {
+		case a == "--":
+			break scan
+		case a == "--json":
+			seen, want = true, true
+		case strings.HasPrefix(a, "--json="):
+			if v, err := strconv.ParseBool(strings.TrimPrefix(a, "--json=")); err == nil {
+				seen, want = true, v
+			}
 		}
 	}
-	return false
+	if seen {
+		return want
+	}
+	v, err := cmd.Flags().GetBool("json")
+	return err == nil && v
 }
 
 // docsFlagError is the SetFlagErrorFunc every docs leaf installs: a bad flag

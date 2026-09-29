@@ -159,21 +159,76 @@ func TestDocsLeaves_BadFlagBeforeJSON_StillJSON(t *testing.T) {
 	}
 }
 
-// A "--" ends option parsing, so a later --json is an operand. Mutation: drop
-// the "--" case in docsWantsJSON and a JSON object appears where a human error
-// belongs.
-func TestDocsWantsJSON_StopsAtTerminator(t *testing.T) {
-	cmd := newDocsListCmd(module.Deps{})
-	setDocsOSArgs(t, "docs", "list", "--", "--json")
-	if docsWantsJSON(cmd) {
-		t.Error("docsWantsJSON = true past a -- terminator, want false")
+// A "--" ends option parsing, so a later --json is an operand; --json=<v> is
+// parsed with strconv.ParseBool and the last occurrence wins. Mutations: drop
+// the "--" case and the terminator row goes red; treat any --json= prefix as
+// true and the =false/=0 rows go red; make the first occurrence win and the
+// double-flag rows go red.
+func TestDocsWantsJSON_ParsesArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"bare", []string{"list", "--json"}, true},
+		{"absent", []string{"list"}, false},
+		{"terminator", []string{"list", "--", "--json"}, false},
+		{"=true", []string{"--json=true"}, true},
+		{"=1", []string{"--json=1"}, true},
+		{"=false", []string{"--json=false"}, false},
+		{"=0", []string{"--json=0"}, false},
+		{"garbage ignored", []string{"--json=maybe"}, false},
+		{"double bare", []string{"--json", "--json"}, true},
+		{"true then false", []string{"--json", "--json=false"}, false},
+		{"false then true", []string{"--json=false", "--json"}, true},
 	}
-	setDocsOSArgs(t, "docs", "list", "--json")
-	if !docsWantsJSON(cmd) {
-		t.Error("docsWantsJSON = false for a bare --json, want true")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			setDocsOSArgs(t, c.args...)
+			if got := docsWantsJSON(newDocsListCmd(module.Deps{})); got != c.want {
+				t.Errorf("docsWantsJSON(%v) = %v, want %v", c.args, got, c.want)
+			}
+		})
 	}
+	setDocsOSArgs(t, "serve", "--json")
 	if docsWantsJSON(newDocsServeCmd(module.Deps{})) {
 		t.Error("docsWantsJSON = true on serve, which declares no --json")
+	}
+}
+
+// A token file's contents must never reach the error output, whichever way it
+// is refused. Mutation: include the file contents in the error (for example
+// `%s` of raw in readDocsTokenFile's failure) and the leak assertion goes red.
+func TestDocsServe_TokenFileContentsNeverInErrorOutput(t *testing.T) {
+	const secret = "s3cr3t-token-value"
+	dir := t.TempDir()
+	cases := map[string]struct {
+		body string
+		mode os.FileMode
+	}{
+		"bad grammar":    {secret + " with spaces\n", 0o600},
+		"too permissive": {secret + "\n", 0o644},
+		"two lines":      {secret + "\n" + secret + "\n", 0o600},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, strings.ReplaceAll(name, " ", "-"))
+			if err := os.WriteFile(path, []byte(c.body), c.mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, c.mode); err != nil {
+				t.Fatal(err)
+			}
+			stdout, stderr, err := execDocsLeaf(t, newDocsServeCmd(module.Deps{}), "--token-file", path, dir)
+			if err == nil || ExitCode(err) != 2 {
+				t.Fatalf("err = %v, exit %d, want a refusal with exit 2", err, ExitCode(err))
+			}
+			for label, got := range map[string]string{"stdout": stdout, "stderr": stderr, "error": err.Error()} {
+				if strings.Contains(got, secret) {
+					t.Errorf("%s leaks the token file contents: %q", label, got)
+				}
+			}
+		})
 	}
 }
 
@@ -296,7 +351,7 @@ func TestDocsRead_MdrollExitStatusPassesThrough(t *testing.T) {
 func TestDocsServe_BindFailure_Exit2(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,4 +382,6 @@ func jsonSuffix(asJSON bool) string {
 	return "/human"
 }
 
-func chmodExec(p string) error { return os.Chmod(p, 0o700) }
+func chmodExec(p string) error {
+	return os.Chmod(p, 0o700) //nolint:gosec // G302: the stub mdroll must be executable
+}
