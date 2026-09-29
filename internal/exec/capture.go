@@ -16,11 +16,13 @@ const maxStderrTail = 64 << 10
 // maxStdoutBytes is the stdout ceiling for runAndWrap. Stdout is the result a
 // caller parses, so it is never cut to a prefix: a child that writes past the
 // ceiling is killed and the call fails with ErrOutputTooLarge and no output.
-// The largest callers today (`gh repo list --limit 1000 --json …`, `tea repo
-// ls --limit 1000`, `git for-each-ref`, `kubectl describe`) write well under
-// 1 MiB, and a workflow `run` step's stdout is discarded, so the ceiling sits
-// orders of magnitude above them. It exists to bound the heap against a
-// runaway child, not to shape any real output.
+// The largest parsing callers today (`gh repo list --limit 1000 --json …`,
+// `tea repo ls --limit 1000`, `git for-each-ref`, `kubectl describe`) write
+// well under 1 MiB, so the ceiling sits orders of magnitude above them. It
+// exists to bound the heap against a runaway child, not to shape any real
+// output. The one caller that can meet it legitimately is a workflow `run`
+// step, whose command is user-chosen; it discards stdout, but Runner still
+// captures it, so a step that prints more than this fails.
 const maxStdoutBytes = 64 << 20
 
 // ErrOutputTooLarge reports that a child's stdout passed maxStdoutBytes. The
