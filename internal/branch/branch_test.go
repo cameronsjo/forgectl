@@ -638,3 +638,27 @@ func TestPrHeadsByState_GhFailure_DoesNotEchoStderr(t *testing.T) {
 	_, err := New(fake).prHeadsByState(context.Background(), "open")
 	assertNoSubprocessEcho(t, err)
 }
+
+// TestPrune_RemoteDeleteVerifyFailure_DoesNotEchoGhStderr: a non-404 failure
+// of the verification GET is reported categorically; its text is gh's
+// stderr, which the host chooses (#658).
+func TestPrune_RemoteDeleteVerifyFailure_DoesNotEchoGhStderr(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		switch {
+		case isGetURL(name, args):
+			return githubRemoteURL, nil
+		case name == "gh" && len(args) > 0 && args[0] == "api":
+			return "", subprocessFailure(name, args)
+		}
+		return "", nil
+	}}
+	item := Classification{
+		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Group: SafeToDelete,
+	}
+	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
+	if len(results) != 1 || results[0].Deleted {
+		t.Fatalf("results = %+v, want one unverified failure", results)
+	}
+	assertNoSubprocessEcho(t, results[0].Err)
+}

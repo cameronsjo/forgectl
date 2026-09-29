@@ -89,12 +89,22 @@ func TestEcho_WorktreeSubprocessFailuresAreCategorical(t *testing.T) {
 	c := &Client{Dir: t.TempDir(), run: &exec.FakeRunner{RunFunc: worktreeFailAt("fetch origin", "main")}, gitBin: "git"}
 	_, err := c.Worktree(context.Background(), r, "")
 	assertCategorical(t, err, "git fetch origin failed")
+	// The bare dir is forgectl-composed, so it is named, and it is the one
+	// locating detail left once git's text is withheld.
+	if !strings.Contains(err.Error(), ".bare") {
+		t.Errorf("error %q, want it to name the bare dir", err)
+	}
 
 	// The branch is what the REMOTE reported as HEAD, so it is not echoed
 	// when either worktree add fails.
 	c = &Client{Dir: t.TempDir(), run: &exec.FakeRunner{RunFunc: worktreeFailAt("worktree add", "BRANCHMARKER\x1b[2J")}, gitBin: "git"}
 	_, err = c.Worktree(context.Background(), r, "")
 	assertCategorical(t, err, "git worktree add failed")
+	// The bare dir is forgectl-composed, so it is named, and it is the one
+	// locating detail left once git's text is withheld.
+	if !strings.Contains(err.Error(), ".bare") {
+		t.Errorf("error %q, want it to name the bare dir", err)
+	}
 }
 
 func TestEcho_UnsafeRemoteDefaultBranchIsNotEchoed(t *testing.T) {

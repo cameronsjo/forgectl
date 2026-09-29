@@ -231,6 +231,8 @@ func TestPingURL_NeverEchoesTheAddress(t *testing.T) {
 		"SECRETTOK\x1b[2J:3000",
 		"[SECRETTOK%eth0]:3000",
 		"127.0.0.1:0",
+		"127.0.0.1:+3000",
+		"127.0.0.1:03000",
 	} {
 		got, err := pingURL(addr)
 		if err == nil {

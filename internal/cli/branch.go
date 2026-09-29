@@ -9,6 +9,7 @@ import (
 
 	branchpkg "github.com/cameronsjo/forgectl/internal/branch"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -154,17 +155,26 @@ func runBranch(cmd *cobra.Command, client *branchpkg.Client, opts branchRunOptio
 	})
 
 	fmt.Fprintln(out)
+	printPruneResults(out, results)
+	return nil
+}
+
+// printPruneResults writes one line per prune outcome. r.Name can be a
+// remote-derived refname, which git allows to carry bidi overrides and C1
+// controls, and r.Err can carry a path or a subprocess cause, so every
+// value goes through termsafe (#658).
+func printPruneResults(out io.Writer, results []branchpkg.PruneResult) {
 	for _, r := range results {
+		name := termsafe.SafeLine(r.Name)
 		switch {
 		case r.Err != nil:
-			fmt.Fprintf(out, "FAILED  %s: %v\n", r.Name, r.Err)
+			_, _ = fmt.Fprintf(out, "FAILED  %s: %v\n", name, termsafe.Error(r.Err))
 		case r.Skipped:
-			fmt.Fprintf(out, "skipped %s: %s\n", r.Name, r.Reason)
+			_, _ = fmt.Fprintf(out, "skipped %s: %s\n", name, termsafe.SafeLine(r.Reason))
 		case r.Deleted:
-			fmt.Fprintf(out, "deleted %s\n", r.Name)
+			_, _ = fmt.Fprintf(out, "deleted %s\n", name)
 		}
 	}
-	return nil
 }
 
 // branchJSON is one classified branch in `branch --json` (additive-only,
@@ -212,6 +222,7 @@ func printBranchGroup(out io.Writer, label string, items []branchpkg.Classificat
 	}
 	fmt.Fprintf(out, "%s (%d):\n", label, len(items))
 	for _, item := range items {
-		fmt.Fprintf(out, "  %s — %s\n", item.Info.Name, item.Reason)
+		// Same rule as printPruneResults: the name can be remote-derived.
+		_, _ = fmt.Fprintf(out, "  %s — %s\n", termsafe.SafeLine(item.Info.Name), termsafe.SafeLine(item.Reason))
 	}
 }

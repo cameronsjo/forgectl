@@ -392,19 +392,24 @@ func releasePingSession(parent context.Context, url, sessionID string) {
 // reports the service unreachable when the real fault is a typo in its own
 // argument, and the exit code claims a network verdict about a parse failure.
 //
-// The address is never echoed (#658), in this refusal or in any later
-// message. A URL built from it can carry credentials — `tok@127.0.0.1:3000`
-// splits into host "tok@127.0.0.1", and net/http then sends "tok" as userinfo
-// and prints it in its own errors (it masks only a password). So the host must
-// be an IP or a plain hostname, which cannot carry userinfo, and every later
-// message says pingURLLabel instead of the URL.
+// The address and the URL are never echoed whole (#658). A URL built from the
+// address can carry credentials — `tok@127.0.0.1:3000` splits into host
+// "tok@127.0.0.1", and net/http then sends "tok" as userinfo and prints it in
+// its own errors (it masks only a password). So the host must be an IP or a
+// plain hostname, which cannot carry userinfo; this function's refusals repeat
+// none of the value; and later messages say pingURLLabel instead of the URL.
+// A later message can still name host:port through pingCause, which keeps a
+// dial or DNS error. That is bounded by the checks here: a validated host and
+// a numeric port.
 func pingURL(addr string) (string, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		// SplitHostPort's error repeats addr, so it is not wrapped.
 		return "", errors.New("tasks mcp --ping: the --http value is not a host:port address (a bare port needs its colon, as in :3000)")
 	}
-	if n, perr := strconv.Atoi(port); perr != nil || n < 1 || n > 65535 {
+	// The Itoa round trip refuses what Atoi tolerates: a leading '+' or '-',
+	// and leading zeros.
+	if n, perr := strconv.Atoi(port); perr != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
 		return "", errors.New("tasks mcp --ping: the --http port is not a number from 1 to 65535")
 	}
 	if host != "" && net.ParseIP(host) == nil && !plainHostname(host) {

@@ -391,7 +391,10 @@ func (c *Client) verifyRemoteDeleted(ctx context.Context, origin originRepo, nam
 		return fmt.Errorf("remote branch %q still exists after delete (GET %s succeeded)", name, path)
 	}
 	if !strings.Contains(err.Error(), "404") {
-		return fmt.Errorf("verify remote branch %q deletion: %w", name, err)
+		// Categorical cause (#658), as the git push leg: err is gh's stderr,
+		// text the host chooses.
+		slog.Error("Failed to verify remote branch deletion.", "branch", name, "error", err)
+		return fmt.Errorf("verify remote branch %q deletion: %w", name, termsafe.Categorical("gh api failed", err))
 	}
 	return nil
 }

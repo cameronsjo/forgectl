@@ -109,7 +109,9 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 		// Categorical (#658): git relays the remote's sideband ("remote: …")
 		// on stderr, which is server-chosen text.
 		slog.Error("Failed to fetch origin.", "dest", bareDir, "error", err)
-		return "", termsafe.Categorical("git fetch origin failed", err)
+		// bareDir is composed by forgectl from validated segments, so it is
+		// named; only git's text is withheld.
+		return "", fmt.Errorf("fetching origin for %s: %w", termsafe.QuotePath(bareDir), termsafe.Categorical("git fetch origin failed", err))
 	}
 
 	if branch == "" {
@@ -128,7 +130,8 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 		if _, ferr := c.run.Run(ctx, "git", "-C", bareDir, "worktree", "add", worktreeDir, "origin/"+branch, "-b", branch); ferr != nil {
 			slog.Error("Failed to add worktree.", "dest", worktreeDir, "branch", branch, "error", ferr)
 			// Categorical (#658): branch may be remote-derived (see above).
-			return "", termsafe.Categorical("git worktree add failed", ferr)
+			// bareDir is forgectl-composed and named, as for the fetch.
+			return "", fmt.Errorf("adding worktree in %s: %w", termsafe.QuotePath(bareDir), termsafe.Categorical("git worktree add failed", ferr))
 		}
 	}
 
