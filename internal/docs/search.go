@@ -290,11 +290,18 @@ func rootFailures(root Root, unparsed int, runErr error, stderr string, truncate
 		if isCmdErr && cmdErr.ExitCode == 1 {
 			return out
 		}
-		if msg == "" && isCmdErr {
-			// The exit code, not cmdErr.Error(): that dereferences Err,
-			// which a CommandError from another runner may leave nil.
+		switch {
+		case msg != "":
+		case isCmdErr && cmdErr.Err != nil:
+			// The reason rg never ran or was killed (exec format error,
+			// EACCES, a signal we did not send), all of which read exit -1.
+			// cmdErr.Err, not cmdErr.Error(): the latter prefixes the
+			// command line, which a runner that keeps Args would fill with
+			// the query.
+			msg = cmdErr.Err.Error()
+		case isCmdErr:
 			msg = fmt.Sprintf("exit %d", cmdErr.ExitCode)
-		} else if msg == "" {
+		default:
 			msg = runErr.Error()
 		}
 	}

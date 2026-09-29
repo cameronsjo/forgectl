@@ -10,6 +10,10 @@ package docs
 //   [x] Unhappy: a target matching two docs is ambiguous_link
 //   [x] Happy: a directory link and a non-markdown file link are not broken
 //       (the existence fallback)
+//   [x] Happy: a root-relative /LICENSE from a subdirectory doc is not broken
+//       when only the root has a LICENSE; a missing /NOPE is
+//   [x] Contract: a target's control bytes reach Finding.Target raw (the CLI
+//       escapes them)
 //   [x] Unhappy: a symlink escaping the root is broken, not "exists"
 //   [x] Unhappy: an unlinked doc is an orphan; the root README is not
 //   [x] Happy: a README in a subdirectory is not a root index
@@ -151,6 +155,37 @@ func TestCheck_DirectoryAndAssetLinksAreNotBroken(t *testing.T) {
 	got := findingsOf(r, FindingBrokenLink)
 	if len(got) != 1 || got[0].Target != "nope.txt" {
 		t.Fatalf("broken_link findings = %+v, want only nope.txt", got)
+	}
+}
+
+// A root-relative target resolves from the root, not from the linking doc's
+// directory: /LICENSE from sub/x.md names the root's LICENSE, and there is no
+// sub/LICENSE for a doc-relative reading to find.
+func TestCheck_RootRelativeAssetLinkIsNotBroken(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[x](sub/x.md)\n")
+	checkWrite(t, filepath.Join(dir, "sub", "x.md"), "# X\n\n[l](/LICENSE) [gone](/NOPE)\n")
+	checkWrite(t, filepath.Join(dir, "LICENSE"), "MIT\n")
+
+	r := checkIndex(t, dir).Check()
+	got := findingsOf(r, FindingBrokenLink)
+	if len(got) != 1 || got[0].Path != "sub/x.md" || got[0].Target != "/NOPE" {
+		t.Fatalf("broken_link findings = %+v, want only sub/x.md -> /NOPE", got)
+	}
+}
+
+// Check reports a link target as authored, control bytes included: escaping
+// is the presentation layer's job (internal/cli/docs_check.go runs every
+// Target through termsafe.SafeLine). This pins the raw value that layer
+// receives, so a change that pre-escapes or drops it here is deliberate.
+func TestCheck_TargetCarriesRawControlBytes(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[e](<bad\x1b[31m.md>)\n")
+
+	r := checkIndex(t, dir).Check()
+	got := findingsOf(r, FindingBrokenLink)
+	if len(got) != 1 || got[0].Target != "bad\x1b[31m.md" {
+		t.Fatalf("broken_link findings = %+v, want one whose Target is the raw bad\\x1b[31m.md", got)
 	}
 }
 

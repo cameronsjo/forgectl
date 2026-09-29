@@ -7,6 +7,9 @@ package docs
 //   [x] Unhappy: stale_after exactly now is stale (>=, not >)
 //   [x] Unhappy: a +02:00 offset is compared as an instant, not as a string
 //   [x] Happy: date-only, offset-less, garbage, and empty values are never stale
+//   [x] Happy: values time.Parse accepts but RFC 3339's grammar rejects (comma
+//       fraction, +24:00, offset minute 60, one-digit hour) are never stale;
+//       year 0000 is grammatical and is
 //   [x] Unhappy: only the exact lowercase "deprecated" is deprecated
 //
 // frontmatterTrust (Classification: parser)
@@ -47,6 +50,14 @@ func TestEvalTrust_StaleAfter(t *testing.T) {
 		{"date_only_past", "2026-01-01", false},
 		{"no_offset_past", "2026-01-01T00:00:00", false},
 		{"garbage", "garbage", false},
+		// time.Parse accepts these; RFC 3339's grammar does not.
+		{"comma_fraction", "2026-09-28T12:00:00,5Z", false},
+		{"offset_24h", "2026-09-28T12:00:00+24:00", false},
+		{"offset_minute_60", "2026-09-28T12:00:00+00:60", false},
+		{"one_digit_hour", "2026-09-28T1:00:00Z", false},
+		{"lowercase_t", "2026-09-28t12:00:00Z", false},
+		// date-fullyear is 4DIGIT, so year 0000 is valid, and long past.
+		{"year_0000", "0000-01-01T00:00:00Z", true},
 		{"empty", "", false},
 	}
 	for _, tc := range cases {

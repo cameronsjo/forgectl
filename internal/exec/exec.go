@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -254,6 +255,12 @@ func (e *CommandError) Error() string {
 	}
 	if e.Stderr != "" {
 		return cmd + ": " + e.Stderr
+	}
+	if e.Err == nil {
+		// Production constructors always set Err; a hand-built CommandError
+		// (a test fake, another runner) may not, and formatting it must not
+		// panic.
+		return cmd + ": exit " + strconv.Itoa(e.ExitCode)
 	}
 	return cmd + ": " + e.Err.Error()
 }
