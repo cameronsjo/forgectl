@@ -38,6 +38,9 @@ type Finding struct {
 	Path string `json:"path"`
 	// Target is the link's target as authored; link kinds only.
 	Target string `json:"target,omitempty"`
+	// Line is the 1-based line of the link in the source file as written,
+	// frontmatter included; link kinds only. Additive (ADR-0008 rule 2).
+	Line int `json:"line,omitempty"`
 	// StaleAfter is the passed stale_after value as authored; stale only.
 	StaleAfter string `json:"stale_after,omitempty"`
 }
@@ -113,6 +116,8 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 		report.Roots = append(report.Roots, cr)
 	}
 
+	dirInbound := idx.dirLinkInbound(rootByLabel)
+
 	for i := range idx.docs {
 		from := &idx.docs[i]
 		root := rootByLabel[from.RootLabel]
@@ -144,10 +149,10 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 				continue
 			}
 			report.Findings = append(report.Findings, Finding{
-				Kind: kind, Root: from.RootLabel, Path: from.RelPath, Target: l.Raw,
+				Kind: kind, Root: from.RootLabel, Path: from.RelPath, Target: l.Raw, Line: l.Line,
 			})
 		}
-		if root.OnlyFile == "" && len(idx.Backlinks(from)) == 0 && !isRootIndex(from.RelPath) {
+		if root.OnlyFile == "" && len(idx.Backlinks(from)) == 0 && !dirInbound[i] && !isRootIndex(from.RelPath) {
 			report.Findings = append(report.Findings, Finding{
 				Kind: FindingOrphan, Root: from.RootLabel, Path: from.RelPath,
 			})
@@ -176,7 +181,10 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 		if fa.Kind != fb.Kind {
 			return fa.Kind < fb.Kind
 		}
-		return fa.Target < fb.Target
+		if fa.Target != fb.Target {
+			return fa.Target < fb.Target
+		}
+		return fa.Line < fb.Line
 	})
 
 	for _, f := range report.Findings {
@@ -203,8 +211,20 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 // image). The clean path is built the way resolveDocsDoc builds it. It reads
 // nothing; ResolveInRoot refuses a symlink that escapes the root.
 func existsInRoot(root Root, from *Doc, linkPath string) bool {
-	if linkPath == "" {
+	clean, ok := linkTargetPath(from, linkPath)
+	if !ok {
 		return false
+	}
+	_, err := ResolveInRoot(root.Path, clean)
+	return err == nil
+}
+
+// linkTargetPath is the root-relative clean path a link names, built the way
+// resolveDocsDoc builds it; ok is false for an empty path or one that leaves
+// the root.
+func linkTargetPath(from *Doc, linkPath string) (string, bool) {
+	if linkPath == "" {
+		return "", false
 	}
 	var clean string
 	if path.IsAbs(linkPath) {
@@ -213,19 +233,77 @@ func existsInRoot(root Root, from *Doc, linkPath string) bool {
 		clean = path.Clean(path.Join(path.Dir(from.RelPath), linkPath))
 	}
 	if escapesRoot(clean) {
-		return false
+		return "", false
 	}
-	_, err := ResolveInRoot(root.Path, clean)
-	return err == nil
+	return clean, true
+}
+
+// dirLinkInbound marks, by doc index, each README or index page that a
+// directory link from another doc in its root reaches: "[x](sub/)" counts as
+// inbound to sub/README.md, sub/index.md, or any case-insensitive readme or
+// index doc directly in sub/, the page GitHub shows for that directory.
+//
+// It lives here, not in buildBacklinks, because Backlinks promises to agree
+// with ResolveLink, and ResolveLink resolves a directory link to no doc: the
+// reader does not open sub/README.md for it. Only orphan detection counts it.
+// Vault roots are skipped, as Check skips them.
+func (idx *Index) dirLinkInbound(rootByLabel map[string]Root) map[int]bool {
+	type dirKey struct{ root, dir string }
+	pages := map[dirKey][]int{}
+	for i := range idx.docs {
+		d := &idx.docs[i]
+		if rootByLabel[d.RootLabel].Kind == RootVault || !isIndexName(path.Base(d.RelPath)) {
+			continue
+		}
+		k := dirKey{d.RootLabel, path.Dir(d.RelPath)}
+		pages[k] = append(pages[k], i)
+	}
+	out := map[int]bool{}
+	if len(pages) == 0 {
+		return out
+	}
+	for i := range idx.docs {
+		from := &idx.docs[i]
+		if rootByLabel[from.RootLabel].Kind == RootVault {
+			continue
+		}
+		for _, l := range from.Links {
+			if l.Form != FormRelPath {
+				continue
+			}
+			clean, ok := linkTargetPath(from, l.Path)
+			if !ok {
+				continue
+			}
+			hits := pages[dirKey{from.RootLabel, clean}]
+			if len(hits) == 0 {
+				continue
+			}
+			// A path that resolves to a doc is a link to that doc, not to
+			// the directory.
+			if target, miss := idx.resolveParts(from, l.Path, l.Fragment); target != nil || miss != MissNoTarget {
+				continue
+			}
+			for _, j := range hits {
+				if j != i {
+					out[j] = true
+				}
+			}
+		}
+	}
+	return out
 }
 
 // isRootIndex reports whether relPath is a root-level README or index page:
 // the entry point of a tree, which nothing is expected to link to.
 func isRootIndex(relPath string) bool {
-	if strings.Contains(relPath, "/") {
-		return false
-	}
-	base := strings.ToLower(relPath)
+	return !strings.Contains(relPath, "/") && isIndexName(relPath)
+}
+
+// isIndexName reports whether a file name is a README or index page, ignoring
+// case and extension.
+func isIndexName(name string) bool {
+	base := strings.ToLower(name)
 	if dot := strings.LastIndex(base, "."); dot >= 0 {
 		base = base[:dot]
 	}
