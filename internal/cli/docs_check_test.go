@@ -479,8 +479,44 @@ func TestDocsCheckCmd_DeprecatedOnlyExitsZero(t *testing.T) {
 	if len(got.Findings) != 1 || got.Findings[0].Kind != "deprecated" || got.Findings[0].Severity != "info" {
 		t.Errorf("findings = %+v, want one deprecated with severity info", got.Findings)
 	}
-	if !strings.Contains(stderr, "1 informational finding(s), no errors") {
-		t.Errorf("stderr = %q, want the informational summary", stderr)
+	// Under --json stderr is reserved for the one error object (#649); an
+	// exit-0 run writes nothing to it (#672).
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty under --json", stderr)
+	}
+	// Human mode keeps the one-line summary.
+	_, humanStderr, humanCode := runDocsCheck(t, dir)
+	if humanCode != 0 || !strings.Contains(humanStderr, "1 informational finding(s), no errors") {
+		t.Errorf("human: exit %d, stderr %q, want the informational summary", humanCode, humanStderr)
+	}
+}
+
+// Under --json a vault-only run writes the "no docs-kind root" error object
+// and nothing before it: the skip stays visible in roots[].skipped (#672).
+func TestDocsCheckCmd_OnlyVaultRoot_JSON_StderrIsExactlyOneObject(t *testing.T) {
+	vault := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	docsCheckWrite(t, filepath.Join(vault, "n.md"), "# N\n")
+
+	stdout, stderr, code := runDocsCheck(t, "--json", vault)
+	if code != 2 {
+		t.Errorf("exit = %d, want 2", code)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	dec := json.NewDecoder(strings.NewReader(stderr))
+	var obj docsErrorJSON
+	if err := dec.Decode(&obj); err != nil {
+		t.Fatalf("stderr is not a JSON object: %v\n%s", err, stderr)
+	}
+	if dec.More() || strings.Contains(stderr, "skipping vault root") {
+		t.Errorf("stderr holds more than the one error object: %s", stderr)
+	}
+	if obj.Code != 2 || !strings.Contains(obj.Error, "no docs-kind root") {
+		t.Errorf("error object = %+v, want code 2 naming the missing docs-kind root", obj)
 	}
 }
 
