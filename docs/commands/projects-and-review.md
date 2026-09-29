@@ -133,9 +133,10 @@ Every `gh` call names its host on purpose
   repository behind it has only configuration to name its host: the
   projects/review inventory, the `@me` searches behind `pr prs` and `pr dash`,
   and `doctor`'s `gh auth status --hostname <host>`.
-- **PR-scoped calls name the PR's own host.** Viewing, cloning, and posting a
-  review pass `--repo HOST/OWNER/REPO` (and clone from `https://HOST/…`) and
-  run pinned to that same host, token removal included. gh resolves a
+- **PR-scoped calls name the PR's own host.** Viewing and posting a review
+  pass `--repo HOST/OWNER/REPO` and run pinned to that same host, token
+  removal included; the clone is a plain `git clone` of `https://HOST/…`, so
+  git's credential setup for that host applies to it. gh resolves a
   two-part `--repo` against `GH_HOST` or its default host, never the
   checkout, so the host is never left to it. The PR's host is the configured
   `[github] host` for a typed `owner/repo#N` and for a row from `pr prs`,

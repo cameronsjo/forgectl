@@ -80,7 +80,8 @@ type Ref struct {
 const localOwnerSentinel = "local"
 
 // Slug renders the "owner/repo" form. gh's --repo flag is given
-// HostSlug instead, so the host is never left to gh's defaults.
+// HOST/OWNER/REPO instead (see Client.prHost), so the host is never left to
+// gh's defaults.
 func (r Ref) Slug() string { return r.Owner + "/" + r.Repo }
 
 // sameIdentity reports whether a and b name the same session identity:

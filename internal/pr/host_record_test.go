@@ -84,3 +84,52 @@ func TestRecordHost_HostileRecordHostRefused(t *testing.T) {
 		}
 	}
 }
+
+// TestRecordHost_QueuedAndReservedRecordsKeepTheirHost: a record written
+// before the clean room exists (a `pr queue` entry, or a reserved slot) must
+// already name the PR's host. Drain and repair rebuild the Ref from that
+// record, so a queued PR from a URL on another host would otherwise be viewed,
+// cloned, and posted to on the configured host (#413).
+//
+// Mutation that turns it red: write `Host: ""` in Queue's record
+// (session.go) or in reserveFrom's record (admission.go); the reloaded ref
+// then means ghe.example.test and the view names it.
+func TestRecordHost_QueuedAndReservedRecordsKeepTheirHost(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write func(c *Client, ref Ref) (string, error)
+	}{
+		{"queued", func(c *Client, ref Ref) (string, error) {
+			return c.Queue(context.Background(), ref, PrepareOpts{Agent: "claude"})
+		}},
+		{"reserved", func(c *Client, ref Ref) (string, error) {
+			return c.Reserve(context.Background(), ref, 4, PrepareOpts{Agent: "claude"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := ghViewRunner()
+			c := New(fake, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+				WithGitHubHost("ghe.example.test", identityPin(fake)))
+			ref, err := ParseRef("https://github.com/cameronsjo/forgectl/pull/42")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tc.write(c, ref); err != nil {
+				t.Fatalf("write record: %v", err)
+			}
+			summaries, _, err := c.List(context.Background())
+			if err != nil || len(summaries) != 1 {
+				t.Fatalf("List = %+v, %v; want one record", summaries, err)
+			}
+			if got := summaries[0].Ref().Host; got != "github.com" {
+				t.Fatalf("reloaded ref host = %q, want the URL's host github.com", got)
+			}
+			if _, err := c.viewPR(context.Background(), summaries[0].Ref()); err != nil {
+				t.Fatalf("viewPR: %v", err)
+			}
+			if got := strings.Join(fake.Last().Args, " "); !strings.Contains(got, "--repo github.com/cameronsjo/forgectl ") {
+				t.Fatalf("view argv = %q, want the recorded host github.com", got)
+			}
+		})
+	}
+}

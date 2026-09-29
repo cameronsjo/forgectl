@@ -145,12 +145,30 @@ func TestPrPickViewPost_OneHostEndToEnd(t *testing.T) {
 			},
 			wantHost: "github.com",
 		},
+		{
+			// A bare N takes the checkout remote's host, not [github] host.
+			// Mutation that turns it red: resolveOrigin (internal/pr/ref.go)
+			// returning an empty host, so the Ref falls back to the configured
+			// ghe.example.test while the checkout is on git.other.test.
+			name:       "bare N from a checkout on another host",
+			configured: "ghe.example.test",
+			pick: func(t *testing.T, c *pr.Client) pr.Ref {
+				ref, err := c.ResolveRef(context.Background(), "7")
+				if err != nil {
+					t.Fatal(err)
+				}
+				return ref
+			},
+			wantHost: "git.other.test",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 				switch {
 				case name == "gh" && len(args) >= 2 && args[0] == "search":
 					return "[" + prSearchRow("platform/tools", 7) + "]", nil
+				case name == "gh" && len(args) >= 2 && args[0] == "repo" && args[1] == "view":
+					return "https://git.other.test/platform/tools", nil
 				case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
 					return `{"headRefName":"feature","headRefOid":"abc123",` +
 						`"headRepositoryOwner":{"login":"platform"},"headRepository":{"name":"tools"}}`, nil
@@ -180,6 +198,14 @@ func TestPrPickViewPost_OneHostEndToEnd(t *testing.T) {
 				argv := strings.Join(call.Args, " ")
 				switch call.Name {
 				case "gh":
+					if len(call.Args) >= 2 && call.Args[0] == "repo" && call.Args[1] == "view" {
+						// Checkout-resolved: gh picks the repo from the cwd's
+						// remotes, so this one call stays off the pin.
+						if _, pinned := call.Env["GH_HOST"]; pinned {
+							t.Errorf("gh %s: checkout-resolved call is pinned", argv)
+						}
+						continue
+					}
 					if got := call.Env["GH_HOST"]; got != tc.wantHost {
 						t.Errorf("gh %s: GH_HOST = %q, want %q", argv, got, tc.wantHost)
 					}

@@ -35,9 +35,12 @@ explicitly: the configured host for a typed `owner/repo#N` or a listed row, a
 pasted URL's host, or the checkout remote's host for a bare `N`. See
 [the host pin](projects-and-review.md) for the rule.
 
-On a non-default `[github] host`, these calls ignore `GH_TOKEN`,
-`GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN`, so run
-`gh auth login --hostname <host>` first.
+Any of these gh calls that goes to a host other than github.com ignores
+`GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and
+`GITHUB_ENTERPRISE_TOKEN`. The rule follows the host the call goes to, not
+`[github] host`: a pasted URL or a checkout remote on a GitHub Enterprise host
+needs `gh auth login --hostname <host>` for that host, even when
+`[github] host` is github.com.
 
 `forgectl branch` verifies a remote delete on the host in the remote's URL. A
 GitHub Enterprise remote over plain `http` or on a nonstandard https port is
