@@ -161,6 +161,16 @@ func TestCheckGh(t *testing.T) {
 		t.Errorf("gh unauthenticated: state = %q, hint = %q; want fail with a hint", check.State, check.Hint)
 	}
 
+	// gh's stderr is host-chosen text: the Detail says gh failed without
+	// repeating it (#658).
+	fr = &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
+		return "", &exec.CommandError{Name: "gh", Stderr: "STDERRMARKER\x1b[2J", Err: errors.New("exit status 1")}
+	}}
+	d = Deps{LookPath: fakeLookPath("gh"), Runner: fr}
+	if check := checkGh(context.Background(), d); strings.Contains(check.Detail, "STDERRMARKER") || !strings.Contains(check.Detail, "gh auth status failed") {
+		t.Errorf("gh failure detail = %q, want the categorical failure without gh's stderr", check.Detail)
+	}
+
 	// gh present and authenticated.
 	fr = &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) { return "Logged in", nil }}
 	d = Deps{LookPath: fakeLookPath("gh"), Runner: fr}

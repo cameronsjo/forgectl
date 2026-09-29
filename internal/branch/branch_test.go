@@ -591,3 +591,50 @@ func TestEnumerate_GoneBranch_OmittedByDefault_SurfacedWithIncludeGone(t *testin
 		t.Fatalf("expected feat/deleted-upstream in NeedsAttention with --include-gone, got report: %+v", report)
 	}
 }
+
+// subprocessFailure is a failed call as the real runner reports it: its text
+// is the subprocess's stderr, which for `git push` relays the remote's
+// sideband and for gh is host-chosen text (#658).
+func subprocessFailure(name string, args []string) error {
+	return &exec.CommandError{Name: name, Args: args, Stderr: "remote: MARKER\x1b[2J", ExitCode: 1, Err: errors.New("exit status 1")}
+}
+
+func assertNoSubprocessEcho(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if msg := err.Error(); strings.Contains(msg, "MARKER") || strings.Contains(msg, "\x1b") {
+		t.Fatalf("error %q echoes the subprocess's stderr", msg)
+	}
+	var cmdErr *exec.CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error %v lost the CommandError from its chain", err)
+	}
+}
+
+func TestPrune_RemoteDeleteFailure_DoesNotEchoGitStderr(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "git" && len(args) > 0 && args[0] == "push" {
+			return "", subprocessFailure(name, args)
+		}
+		return "", nil
+	}}
+	item := Classification{
+		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Group: SafeToDelete,
+	}
+	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
+	if len(results) != 1 {
+		t.Fatalf("results = %+v, want one", results)
+	}
+	assertNoSubprocessEcho(t, results[0].Err)
+}
+
+func TestPrHeadsByState_GhFailure_DoesNotEchoStderr(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "", subprocessFailure(name, args)
+	}}
+	_, err := New(fake).prHeadsByState(context.Background(), "open")
+	assertNoSubprocessEcho(t, err)
+}

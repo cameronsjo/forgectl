@@ -312,8 +312,10 @@ func TestPrRefCmd_PrepareFailureParksTheReservation(t *testing.T) {
 	if err == nil {
 		t.Fatal("want the gh failure to propagate, got nil")
 	}
-	if !strings.Contains(err.Error(), "boom: gh could not reach the forge") {
-		t.Errorf("error = %q, want the original gh failure, not a bookkeeping error", err.Error())
+	// The gh failure itself, not a bookkeeping error. gh's own text stays
+	// out of it: that is host-chosen stderr (#658).
+	if !strings.Contains(err.Error(), "gh pr view cameronsjo/forgectl#42: gh failed") || strings.Contains(err.Error(), "boom") {
+		t.Errorf("error = %q, want the categorical gh failure, not a bookkeeping error", err.Error())
 	}
 
 	summaries, unreadable, listErr := client.List(context.Background())
@@ -327,7 +329,7 @@ func TestPrRefCmd_PrepareFailureParksTheReservation(t *testing.T) {
 		t.Fatalf("phase = %q, want %q — a failed reservation must be parked, not left preparing",
 			summaries[0].Phase(), pr.PhaseNeedsRepair)
 	}
-	if !strings.Contains(summaries[0].RepairReason(), "boom: gh could not reach the forge") {
+	if reason := summaries[0].RepairReason(); !strings.Contains(reason, "gh pr view cameronsjo/forgectl#42: gh failed") || strings.Contains(reason, "boom") {
 		t.Errorf("reason = %q, want it to carry why the prepare failed", summaries[0].RepairReason())
 	}
 

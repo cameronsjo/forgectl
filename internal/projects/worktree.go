@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Worktree initializes a bare-repo worktree layout for r under the canonical
@@ -104,14 +106,19 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 		return "", fmt.Errorf("configuring fetch refspec for %s: %w", bareDir, err)
 	}
 	if _, err := c.run.Run(ctx, "git", "-C", bareDir, "fetch", "origin"); err != nil {
-		return "", fmt.Errorf("fetching origin for %s: %w", bareDir, err)
+		// Categorical (#658): git relays the remote's sideband ("remote: …")
+		// on stderr, which is server-chosen text.
+		slog.Error("Failed to fetch origin.", "dest", bareDir, "error", err)
+		return "", termsafe.Categorical("git fetch origin failed", err)
 	}
 
 	if branch == "" {
 		branch = defaultBranch(ctx, c.run, bareDir)
 	}
 	if !validBranch(branch) {
-		return "", fmt.Errorf("refusing to create worktree for branch %q: unsafe branch name", branch)
+		// Categorical (#658): branch may be the remote's default branch, read
+		// from `git remote show origin`, rather than anything typed.
+		return "", errors.New("refusing to create worktree: unsafe branch name")
 	}
 
 	worktreeDir := filepath.Join(base, branch)
@@ -120,7 +127,8 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 		// origin/<branch> instead.
 		if _, ferr := c.run.Run(ctx, "git", "-C", bareDir, "worktree", "add", worktreeDir, "origin/"+branch, "-b", branch); ferr != nil {
 			slog.Error("Failed to add worktree.", "dest", worktreeDir, "branch", branch, "error", ferr)
-			return "", fmt.Errorf("adding worktree for branch %q: %w", branch, ferr)
+			// Categorical (#658): branch may be remote-derived (see above).
+			return "", termsafe.Categorical("git worktree add failed", ferr)
 		}
 	}
 

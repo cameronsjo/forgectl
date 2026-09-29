@@ -676,7 +676,9 @@ func (c *Client) PostReview(ctx context.Context, sess Session, review string, he
 	}
 	if _, err := run.Run(ctx, "gh", "pr", "review", fmt.Sprintf("%d", sess.Ref.Number),
 		"--repo", host+"/"+sess.Ref.Slug(), "--comment", "--body", review); err != nil {
-		return false, fmt.Errorf("post review: %w", err)
+		// Categorical (#658): gh's stderr is host-chosen text.
+		slog.Error("Failed to post review.", "ref", sess.Ref.String(), "error", err)
+		return false, termsafe.Categorical("post review: gh pr review failed", err)
 	}
 	slog.Info("Posted approved review.", "ref", sess.Ref.String())
 	return true, nil

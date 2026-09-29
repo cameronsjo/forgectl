@@ -50,6 +50,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // defaultRemoteName and defaultBranchName are New's built-in defaults, both
@@ -313,7 +314,9 @@ func (c *Client) deleteRemote(ctx context.Context, remoteName string, info Info)
 	slog.Debug("Preparing to delete remote branch.", "remote", remoteName, "branch", info.Name)
 	if _, err := c.run.Run(ctx, "git", "push", remoteName, "--delete", "--", info.Name); err != nil {
 		slog.Error("Failed to delete remote branch.", "remote", remoteName, "branch", info.Name, "error", err)
-		return fmt.Errorf("delete remote branch %s/%s: %w", remoteName, info.Name, err)
+		// Categorical cause (#658): git relays the remote's sideband
+		// ("remote: …") on stderr, which is server-chosen text.
+		return fmt.Errorf("delete remote branch %s/%s: %w", remoteName, info.Name, termsafe.Categorical("git push --delete failed", err))
 	}
 
 	origin, err := c.resolveRemote(ctx, remoteName)
@@ -532,7 +535,9 @@ func (c *Client) prHeadsByState(ctx context.Context, state string) (map[string]i
 		"--json", "number,headRefName",
 		"--limit", ghListLimit)
 	if err != nil {
-		return nil, fmt.Errorf("gh pr list --state %s: %w", state, err)
+		// Categorical cause (#658): gh's stderr is host-chosen text.
+		slog.Error("Failed to list PRs.", "state", state, "error", err)
+		return nil, fmt.Errorf("gh pr list --state %s: %w", state, termsafe.Categorical("gh failed", err))
 	}
 	out = strings.TrimSpace(out)
 	if out == "" {
