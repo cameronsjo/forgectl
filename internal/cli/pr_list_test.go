@@ -21,8 +21,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/pr"
@@ -44,7 +49,7 @@ func TestPrListJSON_KeySet(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d, want 1: %s", len(rows), got)
 	}
-	want := []string{"ref", "created_at", "path", "status", "phase"}
+	want := []string{"ref", "created_at", "path", "status", "phase", "repair_reason"}
 	if len(rows[0]) != len(want) {
 		t.Fatalf("row keys = %v, want exactly %v", keysOf(rows[0]), want)
 	}
@@ -273,11 +278,12 @@ func TestPrList_MixedBatchesOnlyLiveRefs(t *testing.T) {
 	if liveLine == "" || staleLine == "" {
 		t.Fatalf("both rows must render:\n%s", got)
 	}
-	// Status is field 4; phase (field 5) is "-" on these legacy records.
-	if !strings.HasSuffix(liveLine, "\t?\t-") {
+	// Status is field 4; phase (field 5) is "-" on these legacy records; the
+	// reason (field 6) is empty.
+	if !strings.HasSuffix(liveLine, "\t?\t-\t") {
 		t.Errorf("the live row must degrade to %q under an unreadable tmux: %q", "?", liveLine)
 	}
-	if !strings.HasSuffix(staleLine, "\t"+workspaceMissingStatus+"\t-") {
+	if !strings.HasSuffix(staleLine, "\t"+workspaceMissingStatus+"\t-\t") {
 		t.Errorf("the stale row must report %q regardless of tmux: %q", workspaceMissingStatus, staleLine)
 	}
 }
@@ -341,7 +347,7 @@ func TestPrList_LiveWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pr list: %v", err)
 	}
-	if !strings.Contains(got, "\tlive\tprepared\n") {
+	if !strings.Contains(got, "\tlive\tprepared\t\n") {
 		t.Errorf("pr list output missing the \"live\" status column (field 4) before the phase column:\n%s", got)
 	}
 	if !strings.Contains(got, ref.String()) {
@@ -355,8 +361,8 @@ func TestPrList_LiveWindow(t *testing.T) {
 	// assertion here, and still hand `cut -f3` a timestamp.
 	line := strings.TrimSuffix(got, "\n")
 	fields := strings.Split(line, "\t")
-	if len(fields) != 5 {
-		t.Fatalf("pr list row has %d tab-separated fields, want exactly 5 (ref, created, breadcrumb, status, phase):\n%s", len(fields), got)
+	if len(fields) != 6 {
+		t.Fatalf("pr list row has %d tab-separated fields, want exactly 6 (ref, created, breadcrumb, status, phase, reason):\n%s", len(fields), got)
 	}
 	if fields[0] != ref.String() {
 		t.Errorf("field 1 = %q, want the ref %q", fields[0], ref.String())
@@ -401,11 +407,181 @@ func TestPrList_UnreadableTmux_DegradesAndSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pr list must succeed when tmux is unreadable, got: %v", err)
 	}
-	if !strings.Contains(got, "\t?\tprepared\n") {
+	if !strings.Contains(got, "\t?\tprepared\t\n") {
 		t.Errorf("pr list output missing the \"?\" status (field 4) for an unreadable tmux:\n%s", got)
 	}
 	if strings.Contains(got, "window gone") {
 		t.Errorf("an unreadable tmux must NOT render \"window gone\" — that would flag every "+
 			"healthy review as dead:\n%s", got)
+	}
+}
+
+// listOverPhased runs `pr list` (human and --json) over records seeded through
+// the real loader, and returns both outputs plus the summaries for dash.
+func listOverPhased(t *testing.T, recs []phasedRecord) (human string, jsonRows []prListRowJSON, summaries []pr.SessionSummary) {
+	t.Helper()
+	dir := t.TempDir()
+	summaries = seedPhasedSummaries(t, dir, recs)
+	run := func(args ...string) string {
+		client := pr.New(prListRunner(nil), pr.WithSessionsDir(dir), pr.WithTmuxSession("forgectl"))
+		cmd := newPrListCmd(client)
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(new(bytes.Buffer))
+		cmd.SetArgs(args)
+		if err := cmd.ExecuteContext(context.Background()); err != nil {
+			t.Fatalf("pr list %v: %v", args, err)
+		}
+		return out.String()
+	}
+	human = run()
+	if err := json.Unmarshal([]byte(run("--json")), &jsonRows); err != nil {
+		t.Fatalf("--json did not parse: %v", err)
+	}
+	return human, jsonRows, summaries
+}
+
+// TestPrList_ShowsWhyASessionNeedsRepair is forgectl#542: the reason `pr dash`
+// and `pr repair` show must be on `pr list` too, worded and capped identically,
+// in both the human row (a sixth column) and --json.
+func TestPrList_ShowsWhyASessionNeedsRepair(t *testing.T) {
+	long := "launch failed:\tx\ny " + strings.Repeat("stderr noise ", 100)
+	repairRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 41}
+	queuedRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 43}
+	human, rows, summaries := listOverPhased(t, []phasedRecord{
+		{ref: repairRef, phase: pr.PhaseNeedsRepair, repairReason: long},
+		{ref: queuedRef, phase: pr.PhaseQueued},
+	})
+
+	byRef := map[string]prListRowJSON{}
+	for _, r := range rows {
+		byRef[r.Ref] = r
+	}
+	want := repairReasonLine(long)
+	if !strings.HasSuffix(want, termsafe.TruncatedMarker) {
+		t.Fatalf("fixture reason should be capped: %q", want)
+	}
+	if got := byRef[repairRef.String()].RepairReason; got != want {
+		t.Errorf("json repair_reason = %q, want the dash-capped %q", got, want)
+	}
+	if got := byRef[queuedRef.String()].RepairReason; got != "" {
+		t.Errorf("a queued row carries repair_reason %q, want empty", got)
+	}
+
+	// REASON is the sixth tab-separated column, the dash-capped text on a
+	// needs-repair row and empty elsewhere; the first five are untouched.
+	for _, s := range summaries {
+		var line string
+		for _, l := range strings.Split(human, "\n") {
+			if strings.HasPrefix(l, s.Ref().String()+"\t") {
+				line = l
+			}
+		}
+		if line == "" {
+			t.Fatalf("no human row for %s:\n%s", s.Ref(), human)
+		}
+		cols := strings.Split(line, "\t")
+		if len(cols) != 6 {
+			t.Fatalf("%s: %d columns, want 6: %q", s.Ref(), len(cols), line)
+		}
+		if cols[4] != phaseLabel(s) {
+			t.Errorf("%s: field 5 = %q, want the phase %q unchanged", s.Ref(), cols[4], phaseLabel(s))
+		}
+		wantReason := ""
+		if s.Phase() == pr.PhaseNeedsRepair {
+			wantReason = want
+		}
+		if cols[5] != wantReason {
+			t.Errorf("%s: field 6 = %q, want %q", s.Ref(), cols[5], wantReason)
+		}
+	}
+}
+
+// blockingTmux is a Runner whose tmux calls hang until their context ends.
+type blockingTmux struct{ *exec.FakeRunner }
+
+func (b blockingTmux) Run(ctx context.Context, name string, args ...string) (string, error) {
+	if name == "tmux" {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	return b.FakeRunner.Run(ctx, name, args...)
+}
+
+// TestPrTeardown_NotesAnUnresponsiveTmuxOnStderr: when tmux never answers, the
+// window's state is unknown, so teardown removes nothing and says so on stderr
+// — the slog warning alone is discarded by default. The note claims the record
+// was parked only when it really was: a legacy record (no version) cannot be.
+func TestPrTeardown_NotesAnUnresponsiveTmuxOnStderr(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		legacy     bool
+		wantParked bool
+	}{
+		{"v2 record is parked", false, true},
+		{"legacy record cannot be parked", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ws, err := os.MkdirTemp("", "forgectl-workflow-test-*")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(ws) })
+			var path string
+			if tc.legacy {
+				data, merr := json.Marshal(map[string]any{
+					"ref": "o/r#1", "agent": "claude", "workspace": ws,
+					"createdAt": time.Now().UTC().Format(time.RFC3339Nano),
+				})
+				if merr != nil {
+					t.Fatal(merr)
+				}
+				path = filepath.Join(dir, "o-r-1-1.json")
+				if werr := os.WriteFile(path, append(data, '\n'), 0o600); werr != nil {
+					t.Fatal(werr)
+				}
+			} else {
+				path = seedRepairRecord(t, dir, "o/r#1", "prepared", ws)
+			}
+			client := pr.New(blockingTmux{&exec.FakeRunner{}}, pr.WithSessionsDir(dir), pr.WithTmuxSession("forgectl"),
+				pr.WithTTYCheck(func() bool { return false }))
+
+			cmd := newPrTeardownCmd(client)
+			var out, errOut bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&errOut)
+			cmd.SetArgs([]string{path})
+			// The parent deadline stands in for the package's own (unexported)
+			// budget: either way the tmux call is cut off and its state unknown.
+			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+			defer cancel()
+			err = cmd.ExecuteContext(ctx)
+			if !errors.Is(err, pr.ErrWindowKillTimedOut) {
+				t.Fatalf("err = %v, want ErrWindowKillTimedOut", err)
+			}
+			if got := !errors.Is(err, pr.ErrRecordNotParked); got != tc.wantParked {
+				t.Errorf("parked = %v, want %v (err = %v)", got, tc.wantParked, err)
+			}
+			note := errOut.String()
+			if !strings.Contains(note, "may still be running") {
+				t.Errorf("stderr = %q, want the unresponsive-tmux note", note)
+			}
+			if tc.wantParked && !strings.Contains(note, "the record is parked as needs-repair") {
+				t.Errorf("stderr = %q, want it to say the record was parked", note)
+			}
+			if !tc.wantParked && (strings.Contains(note, "is parked") || !strings.Contains(note, "could not be parked")) {
+				t.Errorf("stderr = %q, must NOT claim the record was parked", note)
+			}
+			if _, serr := os.Stat(ws); serr != nil {
+				t.Errorf("workspace was removed: %v", serr)
+			}
+			if _, serr := os.Stat(path); serr != nil {
+				t.Errorf("record was removed: %v", serr)
+			}
+			if strings.Contains(out.String(), "torn down") {
+				t.Errorf("stdout claims a teardown: %q", out.String())
+			}
+		})
 	}
 }

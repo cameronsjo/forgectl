@@ -15,8 +15,8 @@ import (
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
-// docsSearchLookPath resolves the rg binary. Tests replace the seam to
-// simulate a host without ripgrep.
+// docsSearchLookPath resolves the backend binary (rg or qmd). Tests replace
+// the seam to simulate a host without it.
 var docsSearchLookPath = osexec.LookPath
 
 // Human-output caps for the untrusted fields of one result line.
@@ -27,15 +27,17 @@ const (
 )
 
 // newDocsSearchCmd builds `forgectl docs search <query>` — full-text search
-// over the default docs roots with the ripgrep backend.
+// over the default docs roots with the ripgrep backend, or with qmd when
+// --backend or [docs] search_backend asks for it.
 func newDocsSearchCmd(deps module.Deps) *cobra.Command {
 	var asJSON bool
 	var timeout time.Duration
 	var limit int
+	var backend string
 
 	cmd := &cobra.Command{
 		Use:   "search <query>",
-		Short: "Full-text search the indexed docs (ripgrep backend)",
+		Short: "Full-text search the indexed docs (ripgrep, or opt-in qmd)",
 		Long: `search runs a case-insensitive, fixed-string full-text query over the
 same roots docs list indexes with no arguments, using ripgrep (rg), and
 prints one line per hit: root, path:line, snippet.
@@ -56,7 +58,15 @@ No match exits 0 with no results. If rg could not fully search a root (an
 unreadable file, say), the results from every root are still printed, the
 reason goes to stderr, and the exit code is 1. A missing rg, a root or
 config error, or an expired --timeout exits 2, and under --json writes one
-{"error","code","root"} object to stderr with stdout empty.`,
+{"error","code","root"} object to stderr with stdout empty.
+
+--backend qmd (or search_backend = "qmd" in the [docs] config section)
+sends the query to qmd's BM25 search ("qmd search") instead of rg. qmd
+searches its own default collections, not the roots, so every hit is
+checked against the docs index the same way and anything outside it is
+dropped. qmd is used only when asked for, never because it is installed.
+A missing qmd, a failed qmd run, or qmd output that is not one JSON array
+exits 2.`,
 		Args: docsArgs("docs search", cobra.ExactArgs(1)),
 		// Same reason as docs list: under --json a failure has already put its
 		// ONE JSON object on stderr, and cobra's own error line would be a
@@ -65,6 +75,13 @@ config error, or an expired --timeout exits 2, and under --json writes one
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			query := args[0]
+			// The flag wins; without it [docs] search_backend decides, and
+			// docsIndexOptions below rejects a bad config value by name.
+			if !cmd.Flags().Changed("backend") {
+				backend = deps.Cfg.Docs.SearchBackend
+			} else if !docspkg.ValidSearchBackend(backend) {
+				return docsFail(cmd, "docs search", "", fmt.Errorf("--backend must be %q or %q, not %q", docspkg.SearchBackendRipgrep, docspkg.SearchBackendQMD, backend), 2, asJSON)
+			}
 			if limit < 1 {
 				return docsFail(cmd, "docs search", "", fmt.Errorf("--limit must be at least 1, not %d", limit), 2, asJSON)
 			}
@@ -99,17 +116,18 @@ config error, or an expired --timeout exits 2, and under --json writes one
 				noteSkippedPaths(cmd.ErrOrStderr(), idx)
 			}
 
-			searcher := docspkg.Searcher{Runner: streamer, LookPath: docsSearchLookPath}
+			searcher := docspkg.Searcher{Runner: streamer, LookPath: docsSearchLookPath, Backend: backend}
 			resp, err := searcher.Search(ctx, idx, query, limit)
 			if err != nil {
 				return docsFail(cmd, "docs search", "", err, 2, asJSON)
 			}
-			return printDocsSearch(cmd, resp, limit, asJSON)
+			return printDocsSearch(cmd, resp, asJSON)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
 	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Second, "deadline for indexing plus search, e.g. 10s or 1m")
 	cmd.Flags().IntVar(&limit, "limit", 50, "return at most N results")
+	cmd.Flags().StringVar(&backend, "backend", "", `search backend, "ripgrep" or "qmd" (default: [docs] search_backend, else ripgrep)`)
 	cmd.SetFlagErrorFunc(docsFlagError("docs search"))
 	return cmd
 }
@@ -125,8 +143,8 @@ type docsSearchPartialJSON = docsErrorJSON
 // exit 1 with its reason on stderr: under --json one {"error","code","root"} object
 // (stdout still carries the full response, errors array included), otherwise
 // one line per failed root.
-func printDocsSearch(cmd *cobra.Command, resp docspkg.SearchResponse, limit int, asJSON bool) error {
-	if err := printDocsSearchResults(cmd, resp, limit, asJSON); err != nil {
+func printDocsSearch(cmd *cobra.Command, resp docspkg.SearchResponse, asJSON bool) error {
+	if err := printDocsSearchResults(cmd, resp, asJSON); err != nil {
 		return err
 	}
 	if len(resp.Errors) == 0 {
@@ -148,16 +166,13 @@ func printDocsSearch(cmd *cobra.Command, resp docspkg.SearchResponse, limit int,
 	return newSilentCodedError(1)
 }
 
-func printDocsSearchResults(cmd *cobra.Command, resp docspkg.SearchResponse, limit int, asJSON bool) error {
+func printDocsSearchResults(cmd *cobra.Command, resp docspkg.SearchResponse, asJSON bool) error {
 	out := cmd.OutOrStdout()
 	if asJSON {
 		return termsafe.JSONEncoder(out).Encode(resp)
 	}
-	if len(resp.Results) == 0 {
-		if len(resp.Errors) == 0 {
-			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "no matches")
-		}
-		return nil
+	if len(resp.Results) == 0 && len(resp.Errors) == 0 {
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "no matches")
 	}
 	for _, r := range resp.Results {
 		_, _ = fmt.Fprintf(out, "%s  %s:%d  %s\n",
@@ -167,7 +182,9 @@ func printDocsSearchResults(cmd *cobra.Command, resp docspkg.SearchResponse, lim
 			termsafe.SafeLineMax(r.Snippet, docsSearchSnippetRunes))
 	}
 	if resp.Truncated {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "showing the first %d results; raise --limit for more\n", limit)
+		// Worded for both backends: under qmd, truncated can be set with
+		// fewer than limit results shown (qmd's window came back full).
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "more matches may exist; narrow the query or raise --limit")
 	}
 	return nil
 }

@@ -155,7 +155,9 @@ per-response `<board-text-NONCE>` fence (8 hex, `crypto/rand`), with any
 occurrence of the delimiter inside the text escaped — keyed on the delimiter
 *prefix*, not on this response's nonce, so a title carrying some other
 response's delimiter cannot survive either. Text that cannot be safely fenced
-is dropped, never returned raw.
+is dropped, never returned raw. A read tool's `structuredContent` sits outside
+the fence, so it never carries board text: only ids, enums, counts, bools, and
+server-canonicalised timestamps.
 
 State the limit plainly: this gives the reading agent a stated frame and stops
 the text from closing that frame itself. It does not make the text safe, and
