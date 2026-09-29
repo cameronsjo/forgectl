@@ -661,6 +661,20 @@ func encode(export bool, key, value string) string {
 // FIRST, then '"', then '$', then newline→"\n" — escaping in any other
 // order double-escapes (e.g. escaping '"' before '\\' would re-escape the
 // backslash the quote-escape just introduced).
+//
+// A carriage return is deliberately NOT escaped. Only '\n' can end a
+// logical line here (Parse splits on '\n' alone), so a lone '\r' — or the
+// '\r' of a "\r\n" pair, whose '\n' is escaped — never splits the encoded
+// line, and this package's parser and a bash `. file` both read it back
+// byte-exact. Escaping it would also need decodeQuotedBody to learn a `\r`
+// escape, which would silently change the meaning of any existing
+// double-quoted `\r` already on disk. Known limit: a consumer that opens
+// the file in universal-newline mode (python-dotenv) translates the raw
+// '\r' to '\n'; that is the consumer's normalisation, not something this
+// encoder can prevent short of an escape those consumers don't decode
+// either. This is a .env decision only: a YAML scalar treats a raw control
+// character differently, so the SOPS/YAML writer refuses C0 bytes rather
+// than passing them through, on purpose (see #498, #513).
 func encodeValue(value string) string {
 	if bareValueRE.MatchString(value) {
 		return value

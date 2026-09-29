@@ -1040,3 +1040,46 @@ func TestDocument_CROnly_PathologicalInput_RoundTripsUntouchedThenCollapsesOnSet
 		t.Errorf("Get(A) = %q, %v, want %q, true (documented: bare CR is not a terminator)", v, ok, "1\rB=2\rC=3")
 	}
 }
+
+func TestEncodeValue_CarriageReturn_RoundTripsOnOneLine(t *testing.T) {
+	cases := []struct {
+		name      string
+		value     string
+		wantQuote string // expected encoding of the value part
+	}{
+		{"lone CR mid-value", "a\rb", "'a\rb'"},
+		{"trailing lone CR", "abc\r", "'abc\r'"},
+		{"leading lone CR", "\rabc", "'\rabc'"},
+		{"CRLF inside value", "a\r\nb", `"a` + "\r" + `\nb"`},
+		{"lone CR plus apostrophe", "it's\r", `"it's` + "\r" + `"`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			doc, err := Parse(strings.NewReader("K=old\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := doc.Set("K", c.value); err != nil {
+				t.Fatal(err)
+			}
+			out := doc.Bytes()
+			if want := "K=" + c.wantQuote + "\n"; string(out) != want {
+				t.Fatalf("Bytes() = %q, want %q", out, want)
+			}
+			// One logical line: exactly one LF, the terminator.
+			if n := strings.Count(string(out), "\n"); n != 1 {
+				t.Errorf("encoded output has %d LFs, want 1: %q", n, out)
+			}
+			re, err := Parse(bytes.NewReader(out))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := re.Get("K"); !ok || got != c.value {
+				t.Errorf("round-trip Get = %q, %v; want %q", got, ok, c.value)
+			}
+			if !bytes.Equal(re.Bytes(), out) {
+				t.Errorf("re-serialise not byte-stable: %q vs %q", re.Bytes(), out)
+			}
+		})
+	}
+}
