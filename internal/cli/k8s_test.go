@@ -489,3 +489,38 @@ func TestK8sInspect_HelpDoesNotInvokeKubectl(t *testing.T) {
 
 var _ forgexec.StreamingRunner = (*cliStreamingRunner)(nil)
 var _ forgexec.Runner = (*forgexec.FakeRunner)(nil)
+
+func TestK8sNs_JSON(t *testing.T) {
+	runner := &forgexec.FakeRunner{RunFunc: func(string, []string) (string, error) {
+		return "staging", nil
+	}}
+	stdout, err := executeK8sNs(t, runner, "--json")
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got, want := stdout.String(), "{\"namespace\":\"staging\"}\n"; got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestK8sNs_JSONFallsBackToDefault(t *testing.T) {
+	runner := &forgexec.FakeRunner{RunFunc: func(string, []string) (string, error) { return "", nil }}
+	stdout, err := executeK8sNs(t, runner, "--json")
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got, want := stdout.String(), "{\"namespace\":\"default\"}\n"; got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestK8sNs_JSONWithNamespaceArgRefusedBeforeKubectl(t *testing.T) {
+	runner := &forgexec.FakeRunner{}
+	_, err := executeK8sNs(t, runner, "--json", "prod")
+	if err == nil {
+		t.Fatal("want an error for --json with a namespace argument")
+	}
+	if runner.Last().Name != "" {
+		t.Errorf("kubectl ran: %#v", runner.Last())
+	}
+}
