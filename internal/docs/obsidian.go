@@ -462,9 +462,8 @@ func (commentBlockParser) CanAcceptIndentedLine() bool { return false }
 // such as a heading (whose id is its slug), any other standalone "^id"
 // block, or a marker under inline markup, keeps its text and gets no id:
 // its link still opens the note, at the top. The one standalone form it
-// takes is
-// Obsidian's "^id" line after a list, table or quote (standaloneBlockID),
-// which gives its id to that block.
+// takes is Obsidian's "^id" line after a list, table or quote
+// (standaloneBlockID), which gives its id to that block.
 type blockIDTransformer struct{}
 
 func (blockIDTransformer) Transform(doc *ast.Document, reader text.Reader, _ parser.Context) {
