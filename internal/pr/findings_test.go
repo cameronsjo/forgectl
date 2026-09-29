@@ -21,21 +21,44 @@ package pr
 //       second, currently-unreached line of defense for this exact case)
 //   [x] A plain file at the top level is ignored, never removed
 //
-// FindingsRemove (Classification: TOCTOU-safe apply over an explicit, already-confirmed set)
+// FindingsRemove (Classification: TOCTOU-safe apply over an explicit, already-confirmed set;
+// destructive verb, audited under the lifecycle lock)
 //   [x] Removes exactly the given paths
 //   [x] A path that stopped qualifying since the confirm (already gone) is
 //       skipped, not treated as an error
+//   [x] Writes the intent-then-completion pair, sharing one ID, verb
+//       findings-cleanup, RecordPath = the dir, Mode empty
+//   [x] A skipped path (already gone, or a symlink) writes no row — the
+//       re-checks run before the intent
+//   [x] The removal happens inside the lock hold, not merely the row appends
+//   [x] A busy lock refuses with *lockBusyError: the dir survives, no row
+//       (findings_lock_unix_test.go — lockClient and lockBusyError are
+//       unix-only, like the lock itself)
+//   [x] An intent row that cannot be written refuses: the dir survives and
+//       the error is returned
+//
+// Every client here carries its own sessions dir (findingsClient), so no test
+// appends to the real ~/.config/forgectl/pr-sessions audit log.
 
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
 
+// findingsClient is a client over dir with a private sessions dir, so the
+// audit log and lifecycle lock an --apply path touches live in the test's own
+// temp tree.
+func findingsClient(t *testing.T, dir string) *Client {
+	t.Helper()
+	return New(nil, WithFindingsDir(dir), WithSessionsDir(t.TempDir()))
+}
+
 func TestFindingsList_ReturnsCreatedDirs(t *testing.T) {
 	dir := t.TempDir()
-	c := New(nil, WithFindingsDir(dir))
+	c := findingsClient(t, dir)
 
 	mustMkdir(t, filepath.Join(dir, findingsDirPrefix+"aaa"))
 	mustMkdir(t, filepath.Join(dir, findingsDirPrefix+"bbb"))
@@ -50,7 +73,7 @@ func TestFindingsList_ReturnsCreatedDirs(t *testing.T) {
 }
 
 func TestFindingsList_EmptyOnAbsentDir(t *testing.T) {
-	c := New(nil, WithFindingsDir(filepath.Join(t.TempDir(), "does-not-exist")))
+	c := findingsClient(t, filepath.Join(t.TempDir(), "does-not-exist"))
 
 	entries, err := c.FindingsList()
 	if err != nil {
@@ -63,7 +86,7 @@ func TestFindingsList_EmptyOnAbsentDir(t *testing.T) {
 
 func TestFindingsCleanup_RemovesOnlyOldDirsUnderApply(t *testing.T) {
 	dir := t.TempDir()
-	c := New(nil, WithFindingsDir(dir))
+	c := findingsClient(t, dir)
 
 	oldDir := filepath.Join(dir, findingsDirPrefix+"old")
 	newDir := filepath.Join(dir, findingsDirPrefix+"new")
@@ -75,7 +98,7 @@ func TestFindingsCleanup_RemovesOnlyOldDirsUnderApply(t *testing.T) {
 		t.Fatalf("Chtimes: %v", err)
 	}
 
-	removed, err := c.FindingsCleanup(24*time.Hour, true)
+	removed, err := c.FindingsCleanup(t.Context(), 24*time.Hour, true)
 	if err != nil {
 		t.Fatalf("FindingsCleanup: %v", err)
 	}
@@ -92,7 +115,7 @@ func TestFindingsCleanup_RemovesOnlyOldDirsUnderApply(t *testing.T) {
 
 func TestFindingsCleanup_DryRunDeletesNothing(t *testing.T) {
 	dir := t.TempDir()
-	c := New(nil, WithFindingsDir(dir))
+	c := findingsClient(t, dir)
 
 	oldDir := filepath.Join(dir, findingsDirPrefix+"old")
 	mustMkdir(t, oldDir)
@@ -101,7 +124,7 @@ func TestFindingsCleanup_DryRunDeletesNothing(t *testing.T) {
 		t.Fatalf("Chtimes: %v", err)
 	}
 
-	removed, err := c.FindingsCleanup(24*time.Hour, false)
+	removed, err := c.FindingsCleanup(t.Context(), 24*time.Hour, false)
 	if err != nil {
 		t.Fatalf("FindingsCleanup: %v", err)
 	}
@@ -123,7 +146,7 @@ func TestFindingsCleanup_SkipsTopLevelSymlink(t *testing.T) {
 	// this test structurally can't.
 	dir := t.TempDir()
 	outside := t.TempDir()
-	c := New(nil, WithFindingsDir(dir))
+	c := findingsClient(t, dir)
 
 	link := filepath.Join(dir, findingsDirPrefix+"escape")
 	if err := os.Symlink(outside, link); err != nil {
@@ -137,7 +160,7 @@ func TestFindingsCleanup_SkipsTopLevelSymlink(t *testing.T) {
 		t.Fatalf("Chtimes: %v", err)
 	}
 
-	removed, err := c.FindingsCleanup(24*time.Hour, true)
+	removed, err := c.FindingsCleanup(t.Context(), 24*time.Hour, true)
 	if err != nil {
 		t.Fatalf("FindingsCleanup: %v", err)
 	}
@@ -182,7 +205,7 @@ func TestFindingsRemovalCandidate_AcceptsOldContainedDir(t *testing.T) {
 
 func TestFindingsCleanup_IgnoresPlainFile(t *testing.T) {
 	dir := t.TempDir()
-	c := New(nil, WithFindingsDir(dir))
+	c := findingsClient(t, dir)
 
 	file := filepath.Join(dir, findingsDirPrefix+"stray.txt")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
@@ -193,7 +216,7 @@ func TestFindingsCleanup_IgnoresPlainFile(t *testing.T) {
 		t.Fatalf("Chtimes: %v", err)
 	}
 
-	removed, err := c.FindingsCleanup(24*time.Hour, true)
+	removed, err := c.FindingsCleanup(t.Context(), 24*time.Hour, true)
 	if err != nil {
 		t.Fatalf("FindingsCleanup: %v", err)
 	}
@@ -207,14 +230,14 @@ func TestFindingsCleanup_IgnoresPlainFile(t *testing.T) {
 
 func TestFindingsRemove_RemovesGivenPaths(t *testing.T) {
 	dir := t.TempDir()
-	c := New(nil, WithFindingsDir(dir))
+	c := findingsClient(t, dir)
 
 	a := filepath.Join(dir, findingsDirPrefix+"a")
 	b := filepath.Join(dir, findingsDirPrefix+"b")
 	mustMkdir(t, a)
 	mustMkdir(t, b)
 
-	removed, err := c.FindingsRemove([]string{a, b})
+	removed, err := c.FindingsRemove(t.Context(), []string{a, b})
 	if err != nil {
 		t.Fatalf("FindingsRemove: %v", err)
 	}
@@ -235,14 +258,14 @@ func TestFindingsRemove_SkipsPathThatNoLongerQualifies(t *testing.T) {
 	// must not cause the other (still-valid) path to be re-scanned or
 	// dropped.
 	dir := t.TempDir()
-	c := New(nil, WithFindingsDir(dir))
+	c := findingsClient(t, dir)
 
 	gone := filepath.Join(dir, findingsDirPrefix+"gone")
 	stillHere := filepath.Join(dir, findingsDirPrefix+"still-here")
 	mustMkdir(t, stillHere)
 	// gone is never created — stands in for "removed between preview and apply".
 
-	removed, err := c.FindingsRemove([]string{gone, stillHere})
+	removed, err := c.FindingsRemove(t.Context(), []string{gone, stillHere})
 	if err != nil {
 		t.Fatalf("FindingsRemove: %v", err)
 	}
@@ -251,6 +274,119 @@ func TestFindingsRemove_SkipsPathThatNoLongerQualifies(t *testing.T) {
 	}
 	if _, err := os.Stat(stillHere); !os.IsNotExist(err) {
 		t.Errorf("%q still exists, want it removed", stillHere)
+	}
+}
+
+func TestFindingsRemove_WritesIntentAndCompletion(t *testing.T) {
+	dir := t.TempDir()
+	c := findingsClient(t, dir)
+	target := filepath.Join(dir, findingsDirPrefix+"audited")
+	mustMkdir(t, target)
+	if err := os.WriteFile(filepath.Join(target, "findings.md"), []byte("12345"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.FindingsRemove(t.Context(), []string{target}); err != nil {
+		t.Fatalf("FindingsRemove: %v", err)
+	}
+	rows := auditRows(t, c)
+	if len(rows) != 2 {
+		t.Fatalf("audit rows = %d, want intent + completion: %+v", len(rows), rows)
+	}
+	if rows[0].ID == "" || rows[0].ID != rows[1].ID {
+		t.Errorf("row IDs = %q, %q, want one shared non-empty ID", rows[0].ID, rows[1].ID)
+	}
+	if rows[0].Outcome != repairOutcomeIntent || rows[1].Outcome != repairOutcomeApplied {
+		t.Errorf("outcomes = %q, %q, want intent then applied", rows[0].Outcome, rows[1].Outcome)
+	}
+	for i, r := range rows {
+		if r.Verb != auditVerbFindingsCleanup {
+			t.Errorf("rows[%d].Verb = %q, want %q", i, r.Verb, auditVerbFindingsCleanup)
+		}
+		if r.RecordPath != target {
+			t.Errorf("rows[%d].RecordPath = %q, want %q", i, r.RecordPath, target)
+		}
+		if r.Mode != "" || r.Ref != "" || r.FromPhase != "" || r.Workspace != "" {
+			t.Errorf("rows[%d] claims a session (mode=%q ref=%q phase=%q ws=%q), want all empty",
+				i, r.Mode, r.Ref, r.FromPhase, r.Workspace)
+		}
+		if r.Detail != "findings dir, 5 bytes" {
+			t.Errorf("rows[%d].Detail = %q, want the dir's size", i, r.Detail)
+		}
+	}
+}
+
+func TestFindingsRemove_SkippedPathWritesNoRow(t *testing.T) {
+	dir := t.TempDir()
+	c := findingsClient(t, dir)
+	gone := filepath.Join(dir, findingsDirPrefix+"gone")
+	link := filepath.Join(dir, findingsDirPrefix+"link")
+	if err := os.Symlink(t.TempDir(), link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	removed, err := c.FindingsRemove(t.Context(), []string{gone, link})
+	if err != nil {
+		t.Fatalf("FindingsRemove: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("FindingsRemove removed %v, want both skipped", removed)
+	}
+	if rows := auditRows(t, c); len(rows) != 0 {
+		t.Errorf("audit rows = %+v, want none for a skipped path", rows)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Errorf("symlink %q was removed, want it left alone: %v", link, err)
+	}
+}
+
+func TestFindingsRemove_RemovesInsideLockHold(t *testing.T) {
+	dir := t.TempDir()
+	c := findingsClient(t, dir)
+	target := filepath.Join(dir, findingsDirPrefix+"held")
+	mustMkdir(t, target)
+	var events []string
+	c.onLock = func(verb, event string) {
+		_, statErr := os.Stat(target)
+		events = append(events, event+":"+verb+":exists="+strconv.FormatBool(statErr == nil))
+	}
+
+	if _, err := c.FindingsRemove(t.Context(), []string{target}); err != nil {
+		t.Fatalf("FindingsRemove: %v", err)
+	}
+	want := []string{
+		"acquire:" + auditVerbFindingsCleanup + ":exists=true",
+		"release:" + auditVerbFindingsCleanup + ":exists=false",
+	}
+	if len(events) != len(want) {
+		t.Fatalf("lock events = %v, want exactly one hold %v", events, want)
+	}
+	for i := range want {
+		if events[i] != want[i] {
+			t.Errorf("lock events = %v, want %v (the removal must fall inside one hold)", events, want)
+			break
+		}
+	}
+}
+
+func TestFindingsRemove_IntentWriteFailureRefuses(t *testing.T) {
+	dir := t.TempDir()
+	c := findingsClient(t, dir)
+	target := filepath.Join(dir, findingsDirPrefix+"unlogged")
+	mustMkdir(t, target)
+	// A directory where the log should be: OpenFile(O_RDWR) fails, so the
+	// intent cannot be written.
+	mustMkdir(t, c.repairLogPath())
+
+	removed, err := c.FindingsRemove(t.Context(), []string{target})
+	if err == nil {
+		t.Fatal("FindingsRemove succeeded with an unwritable audit log, want a refusal")
+	}
+	if len(removed) != 0 {
+		t.Errorf("removed = %v, want nothing without an intent row", removed)
+	}
+	if _, serr := os.Stat(target); serr != nil {
+		t.Errorf("dir %q was removed with no intent row written: %v", target, serr)
 	}
 }
 

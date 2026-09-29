@@ -1,6 +1,7 @@
 package pr
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -79,7 +80,9 @@ func findingsRemovalCandidate(findingsDir, full string, isDir bool, modTime, cut
 
 // FindingsCleanup reports findings directories older than olderThan. With
 // apply==false (the default posture everywhere in forgectl) it returns what
-// WOULD be removed and deletes nothing.
+// WOULD be removed and deletes nothing. With apply==true it hands exactly that
+// candidate set to FindingsRemove, so there is one delete path and it is the
+// audited one.
 //
 // DELETION GUARD: there is no path parameter — every removal target is
 // re-derived from c.findingsDir by directory listing, and a candidate is
@@ -90,7 +93,7 @@ func findingsRemovalCandidate(findingsDir, full string, isDir bool, modTime, cut
 // with apply=false and hand it to FindingsRemove, rather than calling
 // FindingsCleanup a second time with apply=true — a second call re-derives
 // its set from a fresh ReadDir and could diverge from what was confirmed.
-func (c *Client) FindingsCleanup(olderThan time.Duration, apply bool) ([]string, error) {
+func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, apply bool) ([]string, error) {
 	entries, err := os.ReadDir(c.findingsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -99,7 +102,7 @@ func (c *Client) FindingsCleanup(olderThan time.Duration, apply bool) ([]string,
 		return nil, fmt.Errorf("read pr findings dir: %w", err)
 	}
 	cutoff := time.Now().Add(-olderThan)
-	var removed []string
+	var candidates []string
 	for _, e := range entries {
 		full := filepath.Join(c.findingsDir, e.Name())
 		info, err := e.Info()
@@ -110,57 +113,104 @@ func (c *Client) FindingsCleanup(olderThan time.Duration, apply bool) ([]string,
 		if !findingsRemovalCandidate(c.findingsDir, full, e.IsDir(), info.ModTime(), cutoff) {
 			continue
 		}
-		removed = append(removed, full)
-		if !apply {
-			continue
+		candidates = append(candidates, full)
+	}
+	if !apply {
+		return candidates, nil
+	}
+	return c.FindingsRemove(ctx, candidates)
+}
+
+// FindingsRemove removes exactly the given findings-dir paths — the set a
+// caller already derived via FindingsCleanup(ctx, olderThan, false) and had a
+// human confirm. This is the apply half of the scan-once precedent: the
+// confirmed set and the deleted set must be the same set, never
+// independently re-derived.
+//
+// Each removal is audited the way every other destructive pr verb is: it takes
+// the lifecycle lock, and inside that one hold it re-validates the path, writes
+// an intent row to the repair log, removes the dir, and completes the row. The
+// lock is what makes the row safe to append — `pr repair --prune` rewrites the
+// log by rename under the same lock, so an unlocked appender could write to a
+// file that is about to be replaced and lose its row silently.
+//
+// The re-validation — it must exist, be a plain directory (not a symlink), and
+// remain contained within c.findingsDir after symlink resolution — means a path
+// that stopped qualifying between preview and apply (already removed, replaced
+// by something else) is skipped with a logged note rather than silently
+// re-scanned into a different set. A skip writes no row, because nothing
+// happened.
+//
+// The first error stops the run and returns the paths removed so far: a busy
+// lock, a cancelled ctx, an intent row that could not be written (the removal
+// is refused and the dir is left in place), or a failed removal.
+func (c *Client) FindingsRemove(ctx context.Context, paths []string) ([]string, error) {
+	var removed []string
+	for _, full := range paths {
+		ok, err := c.removeFindingsDirAudited(ctx, full)
+		if err != nil {
+			return removed, err
 		}
-		if err := os.RemoveAll(full); err != nil {
-			slog.Error("Failed to remove findings dir.", "path", full, "error", err)
-			return removed, fmt.Errorf("remove findings dir %s: %w", full, err)
+		if ok {
+			removed = append(removed, full)
 		}
-		slog.Info("Reclaimed findings dir.", "path", full)
 	}
 	return removed, nil
 }
 
-// FindingsRemove removes exactly the given findings-dir paths — the set a
-// caller already derived via FindingsCleanup(olderThan, false) and had a
-// human confirm. This is the apply half of the scan-once precedent: the
-// confirmed set and the deleted set must be the same set, never
-// independently re-derived. Each path is still re-validated at removal
-// time — it must exist, be a plain directory (not a symlink), and remain
-// contained within c.findingsDir after symlink resolution — so a path that
-// stopped qualifying between preview and apply (already removed, replaced
-// by something else) is skipped with a logged note rather than silently
-// re-scanned into a different set.
-func (c *Client) FindingsRemove(paths []string) ([]string, error) {
-	var removed []string
-	for _, full := range paths {
+// removeFindingsDirAudited is FindingsRemove's per-path body: one lock hold
+// covering the re-checks, the intent row, the removal, and the completion row,
+// in that order. It reports whether the dir was removed; a skipped path is
+// (false, nil).
+//
+// The row mirrors teardownRowFor's shape for a subject that is not a session
+// record: RecordPath names the findings dir and Detail its size, while Ref,
+// Mode, FromPhase, and Workspace stay empty — filling any of them would make
+// the trail claim a session was involved.
+func (c *Client) removeFindingsDirAudited(ctx context.Context, full string) (bool, error) {
+	removed := false
+	err := c.withLifecycleLock(ctx, auditVerbFindingsCleanup, func() error {
 		info, err := os.Lstat(full)
 		if err != nil {
 			slog.Warn("Skipping findings removal target that no longer exists.", "path", full, "error", err)
-			continue
+			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			slog.Warn("Skipping findings removal target that is no longer a plain directory.", "path", full)
-			continue
+			return nil
 		}
 		if !sandbox.WithinWorkspace(c.findingsDir, full) {
 			slog.Warn("Skipping findings removal target that escapes the findings dir.", "path", full)
-			continue
+			return nil
 		}
-		if err := os.RemoveAll(full); err != nil {
-			slog.Error("Failed to remove findings dir.", "path", full, "error", err)
-			return removed, fmt.Errorf("remove findings dir %s: %w", full, err)
+		row := RepairRow{
+			Verb:       auditVerbFindingsCleanup,
+			RecordPath: full,
+			Detail:     fmt.Sprintf("findings dir, %d bytes", findingsDirSize(full)),
+		}
+		rowID, err := c.beginRepairRow(row)
+		if err != nil {
+			return fmt.Errorf("remove findings dir %s: %w", full, err)
+		}
+		rerr := os.RemoveAll(full)
+		c.completeRepairRow(rowID, row, rerr)
+		if rerr != nil {
+			slog.Error("Failed to remove findings dir.", "path", full, "error", rerr)
+			return fmt.Errorf("remove findings dir %s: %w", full, rerr)
 		}
 		slog.Info("Reclaimed findings dir.", "path", full)
-		removed = append(removed, full)
+		removed = true
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
 	return removed, nil
 }
 
 // findingsDirSize sums the size of every regular file under root,
-// recursively — a best-effort accounting for the `pr findings list` report.
+// recursively — a best-effort accounting for the `pr findings list` report
+// and the size detail on a `pr findings cleanup --apply` audit row.
 // A walk error on any individual entry is swallowed, and symlinks are
 // skipped rather than counted (mirrors internal/clean's dirSize).
 func findingsDirSize(root string) int64 {

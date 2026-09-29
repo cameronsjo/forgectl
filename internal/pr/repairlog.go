@@ -21,8 +21,8 @@ import (
 )
 
 // repairLogName is the write-ahead intent and audit trail every destructive
-// session verb appends to — `pr repair --apply`, `pr teardown`, and
-// `pr cleanup` — a sibling of the records it describes. The name is historical:
+// session verb appends to — `pr repair --apply`, `pr teardown`, `pr cleanup`,
+// and `pr findings cleanup --apply` — a sibling of the records it describes. The name is historical:
 // it is kept as-is so existing trails stay readable, and each row says which
 // verb wrote it.
 //
@@ -62,10 +62,20 @@ const (
 // removed the thing, which is a different question from repair's Mode: Mode
 // holds the flag spelling `pr repair --apply` was given, and is empty for every
 // other verb. A new destructive verb adds a constant here and nothing else.
+//
+// A prepare-failure rollback — removing artifacts the SAME call created moments
+// earlier (local.go's teardownLocalArtifacts, session.go's sandboxAndQuarantine
+// teardown-on-failure) — is deliberately not a destructive verb and writes no
+// row: nothing it removes was ever handed to the operator, so there is nothing
+// a trail could help recover.
 const (
 	auditVerbRepair   = "repair"
 	auditVerbTeardown = "teardown"
 	auditVerbCleanup  = "cleanup"
+	// auditVerbFindingsCleanup is `pr findings cleanup --apply`. Its subject is
+	// a findings dir, not a session record: RecordPath names the dir, Detail
+	// carries its size, and Ref, FromPhase, and Workspace stay empty.
+	auditVerbFindingsCleanup = "findings-cleanup"
 	// auditVerbPrune is the housekeeping sweep. It is its own verb rather than a
 	// spelling of repair because it is the only one that UNLINKS: a reader
 	// scanning the trail for what destroyed something needs to tell "a record
@@ -223,7 +233,7 @@ var boundedRowFields = map[string]string{
 	"ID":         "16 hex characters from randomSuffix",
 	"FromPhase":  "a package constant or repairPhaseUnreadable",
 	"Verb":       "one of the auditVerb constants",
-	"Mode":       "one of the three RepairMode constants",
+	"Mode":       "one of the RepairMode constants, or empty for every verb but repair",
 	"Outcome":    "one of the repairOutcome constants",
 	"RecordNote": "derived here from fixed templates and two decimal ints per clause, ASCII, and recomputed inside the measurement",
 }
