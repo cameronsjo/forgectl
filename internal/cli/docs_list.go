@@ -177,7 +177,7 @@ func printDocsList(cmd *cobra.Command, docs []docspkg.Doc, asJSON bool) error {
 	// Every field is escaped: RelPath is a filename and Title is the doc's own
 	// H1, so either can carry a terminal escape sequence (forgectl#598).
 	for _, d := range docs {
-		fmt.Fprintf(out, "%-16s %-48s %s\n",
+		_, _ = fmt.Fprintf(out, "%-16s %-48s %s\n",
 			termsafe.SafeLine(d.RootLabel), termsafe.SafeLine(d.RelPath), termsafe.SafeLine(d.Title))
 	}
 	return nil
