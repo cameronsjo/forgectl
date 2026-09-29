@@ -35,5 +35,12 @@ every copy: [`Mermaid-MIT.txt`](Mermaid-MIT.txt), copied verbatim from the
 `LICENSE` in the mermaid 11.12.3 npm tarball (the same tarball whose
 `dist/mermaid.min.js` matches the sha256 in `../provenance-mermaid.json`). It
 lives in this directory so it rides the same goreleaser `files` entries as the
-licenses above. The minified bundle also inlines mermaid's own dependencies;
-their notices are not reproduced here.
+licenses above. The minified bundle also inlines mermaid's own dependencies (marked, the d3
+family, dagre-d3-es, dayjs, DOMPurify, and more), and its inline banner carries
+only a few of their notices. [`THIRD_PARTY_NOTICES-mermaid.txt`](THIRD_PARTY_NOTICES-mermaid.txt)
+reproduces the LICENSE text of every package in mermaid's production dependency
+tree. It is generated, not hand-edited: `scripts/vendor-mermaid.sh` downloads
+the pinned tarball, verifies its sha256 and that of `dist/mermaid.min.js`
+against `../provenance-mermaid.json`, rewrites `mermaid.min.js`, and regenerates
+the notices. Versions in the notices are resolved at generation time and can
+differ by a patch or minor from the inlined copies; the license texts do not.
