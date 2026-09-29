@@ -283,6 +283,12 @@ func (idx *Index) resolveDocsDoc(rootIdx *rootIndex, from *Doc, path0 string) (*
 	if escapesRoot(clean) {
 		return nil, MissOutsideRoot
 	}
+	// A trailing "/" is directory intent, and a directory link resolves to
+	// no doc. path.Clean has already dropped the "/", so without this check
+	// "sub/" would look up "sub" and land on a sibling sub.md.
+	if strings.HasSuffix(path0, "/") {
+		return nil, MissNoTarget
+	}
 	key := clean
 	if rootIdx.fold || !AllowedExt(clean) {
 		key = rootIdx.relKey(clean)
