@@ -339,6 +339,34 @@ func TestNewGitea_RejectsMalformedHost(t *testing.T) {
 	}
 }
 
+// TestNewGitea_RejectionDoesNotEchoHost pins that the rejection error is
+// categorical: no fragment of a hostile host (control bytes, ANSI escape,
+// oversized value) may reach the error text.
+func TestNewGitea_RejectionDoesNotEchoHost(t *testing.T) {
+	for name, host := range map[string]string{
+		"ansi":    "evil\x1b[31mRED\x1b[0m.example",
+		"control": "bad\x00host\r\nInjected: 1",
+		"long":    strings.Repeat("a", 5000) + "/",
+		"marker":  "SENTINEL-HOST/x",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := NewGitea(&exec.FakeRunner{}, host, "cameron", nil)
+			if err == nil {
+				t.Fatal("want error, got nil")
+			}
+			msg := err.Error()
+			for _, frag := range []string{"\x1b", "\x00", "\r", "\n", "SENTINEL", "evil", "aaaa"} {
+				if strings.Contains(msg, frag) {
+					t.Errorf("error echoes host fragment %q: %q", frag, msg)
+				}
+			}
+			if len(msg) > 200 {
+				t.Errorf("error length %d suggests echoed input", len(msg))
+			}
+		})
+	}
+}
+
 // TestNewGitea_AcceptsPortedHost pins Fix B's premise: a host:port
 // construction succeeds (reGiteaHost already allowed this) — the bug was
 // that ParseWorkRefForHosts couldn't parse the resulting keys back, fixed
