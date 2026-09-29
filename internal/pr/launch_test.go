@@ -309,7 +309,7 @@ func TestLaunch_InlineDispatch(t *testing.T) {
 	if !contains(call.Args, mustWindowName(t, sess.Ref)) || !contains(call.Args, ws) || !contains(call.Args, claudeBin) {
 		t.Errorf("tmux argv missing window/workspace/claude: %v", call.Args)
 	}
-	if !contains(call.Args, "-p") || !contains(call.Args, reviewPrompt) {
+	if !contains(call.Args, "-p") || !contains(call.Args, remoteReviewPrompt("github.com", sess.Ref)) {
 		t.Errorf("tmux argv missing seeded -p prompt: %v", call.Args)
 	}
 	if !contains(call.Args, "--") {
@@ -683,7 +683,7 @@ func TestLaunchInline_LocalSessionAddsFindingsDirAndPrompt(t *testing.T) {
 	if !contains(call.Args, localReviewPrompt(findingsDir, true)) {
 		t.Errorf("local session argv missing localReviewPrompt: %v", call.Args)
 	}
-	if contains(call.Args, reviewPrompt) {
+	if slices.ContainsFunc(call.Args, func(a string) bool { return strings.HasPrefix(a, reviewPrompt) }) {
 		t.Errorf("local session must not use the PR reviewPrompt: %v", call.Args)
 	}
 
@@ -699,7 +699,7 @@ func TestLaunchInline_LocalSessionAddsFindingsDirAndPrompt(t *testing.T) {
 	if contains(call2.Args, "--add-dir") {
 		t.Errorf("non-local session argv must not carry --add-dir: %v", call2.Args)
 	}
-	if !contains(call2.Args, reviewPrompt) {
+	if !contains(call2.Args, remoteReviewPrompt("github.com", prSess.Ref)) {
 		t.Errorf("non-local session argv missing reviewPrompt: %v", call2.Args)
 	}
 }
