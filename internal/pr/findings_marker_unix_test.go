@@ -10,17 +10,19 @@ import (
 	"testing"
 )
 
-// The link points at a regular file holding a VALID marker for a live local
-// record, so a followed link would keep the dir.
+// The link points at a regular file holding a VALID marker for a record that
+// is GONE, so a followed link would read the dir as stale and remove it. Not
+// followed, the open fails with ELOOP, which cannot classify the dir, so it is
+// kept (forgectl#659).
 //
-// Mutation that turns it red: drop O_NOFOLLOW from openNoFollowNonblock in
-// repairlog_unix.go.
-func TestFindingsCleanup_SymlinkMarkerIsNotFollowed(t *testing.T) {
+// Mutations that turn it red: drop O_NOFOLLOW from openNoFollowNonblock in
+// repairlog_unix.go (the link is followed to a stale marker); or map
+// errFindingsMarkerUnreadable to findingsStale in findingsDirLiveness.
+func TestFindingsCleanup_SymlinkMarkerIsNotFollowedAndIsKept(t *testing.T) {
 	store := t.TempDir()
 	c := findingsClient(t, store)
-	liveRecord(t, c, ownerRecord, `{"local":true}`)
 	target := filepath.Join(t.TempDir(), "valid-marker")
-	if err := os.WriteFile(target, []byte(ownerRecord+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(target, []byte(staleOwnerRecord+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	d := filepath.Join(store, findingsDirPrefix+"linked-marker")
@@ -32,7 +34,7 @@ func TestFindingsCleanup_SymlinkMarkerIsNotFollowed(t *testing.T) {
 	if _, err := c.FindingsCleanup(context.Background(), 0, true); err != nil {
 		t.Fatalf("FindingsCleanup: %v", err)
 	}
-	wantGone(t, d)
+	wantKept(t, d)
 	if _, err := os.Stat(target); err != nil {
 		t.Errorf("the link's target was touched: %v", err)
 	}

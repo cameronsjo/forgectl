@@ -26,8 +26,15 @@ package pr
 //       incomplete, so unmarked, so kept
 //   [x] No session record is committed while any owner marker exists yet
 //       (a WithRecordFS double checks at the record's commit Rename)
+//   [x] A marker that exists but fails to open (EACCES, EISDIR, ELOOP,
+//       EMFILE, EIO) cannot be classified, so it is kept, never stale (#659)
+//   [x] A marker write whose Sync or Close fails publishes nothing and the
+//       dir is kept (sync-before-publish, #659)
+//   [x] A marker write into a dir that already holds a marker fails and
+//       leaves the existing marker untouched (link, not rename, #659)
 //   (findings_marker_unix_test.go)
-//   [x] A marker that is a symlink to a valid marker is not followed: stale
+//   [x] A marker that is a symlink to a valid marker is not followed, and
+//       its ELOOP keeps the dir (#659)
 //   [x] A marker that is a FIFO fails fast and reads as stale
 
 import (
@@ -35,6 +42,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -300,10 +308,28 @@ func TestPrepareLocal_MarkerKeepsDirWhileRecordLives(t *testing.T) {
 	wantGone(t, sess.FindingsDir)
 }
 
-// markerFaultFS is a recordFS double that short-writes only the owner
-// marker (its temp or its final name) (as ENOSPC or EIO would cut it off) and passes every
-// other call, including the session record's writes, to the real filesystem.
-type markerFaultFS struct{ osRecordFS }
+// markerFaultFS is a recordFS double that faults only the owner marker (its
+// temp or its final name) and passes every other call, including the session
+// record's writes, to the real filesystem. fault picks the failing step:
+// "" or "write" short-writes (as ENOSPC or EIO would cut it off), "sync"
+// fails the fsync, "close" fails the close.
+type markerFaultFS struct {
+	osRecordFS
+	fault string
+}
+
+// syncFaultFile fails Sync; closeFaultFile closes the real file and then
+// reports a failure, the way a deferred write error surfaces at close.
+type syncFaultFile struct{ recordFile }
+
+func (syncFaultFile) Sync() error { return errInjected }
+
+type closeFaultFile struct{ recordFile }
+
+func (f closeFaultFile) Close() error {
+	_ = f.recordFile.Close()
+	return errInjected
+}
 
 type shortWriteFile struct{ recordFile }
 
@@ -324,7 +350,14 @@ func (m markerFaultFS) OpenExclusive(path string) (recordFile, error) {
 	if base := filepath.Base(path); base != findingsMarkerTemp && base != findingsOwnerMarker {
 		return file, nil
 	}
-	return shortWriteFile{file}, nil
+	switch m.fault {
+	case "sync":
+		return syncFaultFile{file}, nil
+	case "close":
+		return closeFaultFile{file}, nil
+	default:
+		return shortWriteFile{file}, nil
+	}
 }
 
 // A marker write that fails partway must leave the dir unmarked (kept), never
@@ -336,10 +369,20 @@ func (m markerFaultFS) OpenExclusive(path string) (recordFile, error) {
 //     name, so the "no marker" assertion fails);
 //   - drop the werr check before the link (the half-written temp is
 //     published).
+//
+// The sync and close subtests pin sync-before-publish (#659). Mutations that
+// turn them red: drop serr from the errors.Join before the link (sync); drop
+// f.Close() from it (close).
 func TestPrepareLocal_FailedMarkerWriteLeavesDirUnmarkedAndKept(t *testing.T) {
+	for _, fault := range []string{"write", "sync", "close"} {
+		t.Run(fault, func(t *testing.T) { failedMarkerWriteKeepsDir(t, fault) })
+	}
+}
+
+func failedMarkerWriteKeepsDir(t *testing.T, fault string) {
 	c := New(localGitRunner(),
 		WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
-		WithRecordFS(markerFaultFS{}),
+		WithRecordFS(markerFaultFS{fault: fault}),
 		WithApprover(func(string) (bool, error) { return false, nil }),
 		WithTTYCheck(func() bool { return false }))
 	sess, err := c.PrepareLocal(context.Background(), t.TempDir(), PrepareLocalOpts{Agent: "claude"})
@@ -434,5 +477,78 @@ func TestPrepareLocal_MarkerIsWrittenAfterTheRecord(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(sess.FindingsDir, findingsOwnerMarker)); err != nil {
 		t.Fatalf("no marker after PrepareLocal: %v", err)
+	}
+}
+
+// A marker is published with a hard link, which refuses to replace an
+// existing marker. A rename would silently overwrite it.
+//
+// Mutation that turns it red: publish with os.Rename instead of os.Link in
+// writeFindingsMarker (the call succeeds and the marker now names the new
+// record).
+func TestWriteFindingsMarker_LeavesExistingMarkerUntouched(t *testing.T) {
+	store := t.TempDir()
+	c := findingsClient(t, store)
+	d := markedDir(t, store, "existing", ownerRecord)
+
+	err := c.writeFindingsMarker(d, filepath.Join(c.sessionsDir, staleOwnerRecord))
+	if err == nil {
+		t.Fatal("writeFindingsMarker over an existing marker succeeded, want EEXIST")
+	}
+	got, rerr := os.ReadFile(filepath.Clean(filepath.Join(d, findingsOwnerMarker)))
+	if rerr != nil {
+		t.Fatalf("read marker: %v", rerr)
+	}
+	if string(got) != ownerRecord+"\n" {
+		t.Errorf("marker = %q, want the original %q untouched", got, ownerRecord+"\n")
+	}
+	if _, lerr := os.Lstat(filepath.Join(d, findingsMarkerTemp)); !os.IsNotExist(lerr) {
+		t.Errorf("the temp survived the refused publish (lstat err %v)", lerr)
+	}
+}
+
+// failMarkerOpenWith makes openFindingsMarker fail every open with errno,
+// restoring the seam when the test ends. Tests using it must not call
+// t.Parallel.
+func failMarkerOpenWith(t *testing.T, errno syscall.Errno) {
+	t.Helper()
+	orig := openFindingsMarker
+	t.Cleanup(func() { openFindingsMarker = orig })
+	openFindingsMarker = func(path string, _ int, _ os.FileMode) (*os.File, error) {
+		return nil, &os.PathError{Op: "open", Path: path, Err: errno}
+	}
+}
+
+// A marker that exists but cannot be opened says nothing about what it
+// holds, so the dir is kept, never read as stale (forgectl#659). The marker
+// on disk names a GONE record, so a verdict read from it would be stale.
+//
+// Mutation that turns it red: map errFindingsMarkerUnreadable to
+// findingsStale in findingsDirLiveness, or return the raw open error from
+// readFindingsMarker (it then falls through to the stale case).
+func TestFindingsCleanup_MarkerOpenErrorKeepsDir(t *testing.T) {
+	for _, errno := range []syscall.Errno{syscall.EACCES, syscall.EISDIR, syscall.ELOOP, syscall.EMFILE, syscall.EIO} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			store := t.TempDir()
+			c := findingsClient(t, store)
+			d := markedDir(t, store, "open-fault", staleOwnerRecord)
+			failMarkerOpenWith(t, errno)
+
+			preview, err := c.FindingsCleanup(context.Background(), 0, false)
+			if err != nil {
+				t.Fatalf("FindingsCleanup preview: %v", err)
+			}
+			if contains558(preview, d) {
+				t.Errorf("preview offers %q though its marker failed to open", d)
+			}
+			removed, err := c.FindingsRemove(context.Background(), []string{d})
+			if err != nil {
+				t.Fatalf("FindingsRemove: %v", err)
+			}
+			if len(removed) != 0 {
+				t.Errorf("removed %v, want nothing", removed)
+			}
+			wantKept(t, d)
+		})
 	}
 }
