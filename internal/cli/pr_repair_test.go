@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"os"
 	"path/filepath"
@@ -192,6 +193,42 @@ func TestPrRepairHistory_ReturnsTheRows(t *testing.T) {
 	}
 	if len(rows) < 2 {
 		t.Errorf("history rows = %d, want the intent and its completion: %s", len(rows), out)
+	}
+}
+
+// TestPrRepairHistory_SaysWhenOlderRowsAreOmitted: the view is bounded, so a
+// truncated trail must say so on stderr while stdout keeps its bare-array shape.
+func TestPrRepairHistory_SaysWhenOlderRowsAreOmitted(t *testing.T) {
+	dir := t.TempDir()
+	var log bytes.Buffer
+	for i := 0; i < pr.MaxRepairHistoryRows+3; i++ {
+		data, err := json.Marshal(pr.RepairRow{TS: time.Now().UTC(), ID: fmt.Sprintf("row%d", i), Outcome: "applied"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		log.Write(data)
+		log.WriteByte('\n')
+	}
+	if err := os.WriteFile(filepath.Join(dir, "repair.jsonl"), log.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, errOut, err := runPrRepair(t, repairCmdClient(t, dir), "--history", "--json")
+	if err != nil {
+		t.Fatalf("pr repair --history --json: %v", err)
+	}
+	var rows []pr.RepairRow
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("stdout is not a bare array: %v", err)
+	}
+	if len(rows) != pr.MaxRepairHistoryRows {
+		t.Fatalf("rows = %d, want %d", len(rows), pr.MaxRepairHistoryRows)
+	}
+	if rows[0].ID != "row3" {
+		t.Errorf("first id = %q, want row3 (the three oldest were left out)", rows[0].ID)
+	}
+	if !strings.Contains(errOut, "3 older rows") || !strings.Contains(errOut, "repair.jsonl") {
+		t.Errorf("stderr = %q, want the omitted count and the log path", errOut)
 	}
 }
 

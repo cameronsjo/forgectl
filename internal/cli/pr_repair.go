@@ -273,11 +273,18 @@ func writePruneHuman(out io.Writer, report pr.PruneReport) error {
 // mode of the report because the two answer different questions — what is
 // wrong now, versus what was done about it.
 func runRepairHistory(cmd *cobra.Command, client *pr.Client, asJSON bool) error {
-	rows, err := client.RepairHistory(cmd.Context())
+	trail, err := client.RepairHistory(cmd.Context())
 	if err != nil {
 		return err
 	}
+	rows := trail.Rows
 	out := cmd.OutOrStdout()
+	// One stderr line in both modes, so stdout keeps its shape (--json stays a
+	// bare array) while a truncated view can never read as the whole trail.
+	if trail.Omitted > 0 {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "note: showing the newest %d rows; %d older rows are in %s\n",
+			len(rows), trail.Omitted, termsafe.QuotePathIfUnsafe(trail.Path))
+	}
 	if asJSON {
 		if rows == nil {
 			rows = []pr.RepairRow{}

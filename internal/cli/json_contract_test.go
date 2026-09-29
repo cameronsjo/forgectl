@@ -16,7 +16,9 @@ import (
 // "Unknown flag: --json", read as "nothing there").
 //
 // The check keys on the leaf NAME, so a state verb named anything else (an
-// "info", a "why") is not covered. Add its name here when one ships.
+// "info", a "why") is not covered. Add its name here when one ships. It also
+// matches leaf names only, so a state-reporting flag arm (e.g. `pr repair
+// --history`) is not covered by this test.
 var stateVerbNames = map[string]bool{
 	"list": true, "ls": true, "status": true, "show": true, "which": true,
 	"doctor": true, "dash": true, "tree": true, "windows": true, "keys": true,

@@ -2,6 +2,7 @@ package pr
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,14 @@ const repairLogName = "repair.jsonl"
 // hand-editable like every other file in a 0700 dir, so the reader treats it
 // as input rather than as its own output.
 const maxRepairLogLineBytes = 8 << 10
+
+// MaxRepairHistoryRows bounds how many rows RepairHistory returns: the newest
+// N are kept and the older ones are counted, not held. The log grows without
+// bound between compactions, and a reader that materializes every row spends
+// heap proportional to the file. At the writer's per-row ceiling this bound is
+// about 16 MiB; a typical row is near 300 B. It is exported so a caller's test
+// can seed past it.
+const MaxRepairHistoryRows = 2000
 
 // maxActorBytes bounds the actor field, whose session-id half comes from the
 // environment. See repairActor for why an unbounded field here is a hazard.
@@ -371,53 +380,107 @@ var appendRepairRow = func(f repairLogFile, data []byte) error {
 	return nil
 }
 
-// readRepairLog returns every row in the log, oldest first. A line that does
-// not decode is skipped with a warning rather than failing the read: the
-// history verb exists to answer "what happened", and one bad line must not
-// take the rest of the record with it.
-func (c *Client) readRepairLog() ([]RepairRow, error) {
+// readRepairLogTail returns the newest limit decodable rows, oldest first, and
+// how many older decodable rows it displaced. A line that does not decode, or
+// that exceeds maxRepairLogLineBytes, is skipped with a warning rather than
+// failing the read: the history verb exists to answer "what happened", and one
+// bad line must not take the rest of the record with it. omitted counts rows
+// displaced by the limit, never skipped lines.
+//
+// Memory is bounded by limit rows plus one line buffer. The slice is NOT
+// preallocated to limit, because a caller may pass math.MaxInt.
+func (c *Client) readRepairLogTail(limit int) (rows []RepairRow, omitted int, err error) {
+	if limit < 1 {
+		limit = 1
+	}
 	f, err := os.Open(c.repairLogPath()) //nolint:gosec // inside the 0700 sessions dir
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
+			return nil, 0, nil
 		}
-		return nil, fmt.Errorf("read repair audit log: %w", termsafe.Error(err))
+		return nil, 0, fmt.Errorf("read repair audit log: %w", termsafe.Error(err))
 	}
 	defer func() { _ = f.Close() }()
 
-	var rows []RepairRow
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 4096), maxRepairLogLineBytes)
+	head := 0 // index of the oldest row once the ring is full
 	skipped := 0
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	keep := func(line []byte) {
+		line = bytes.TrimSuffix(line, []byte("\n"))
 		if len(line) == 0 {
-			continue
+			return
 		}
 		var row RepairRow
 		if err := json.Unmarshal(line, &row); err != nil {
 			skipped++
+			return
+		}
+		if len(rows) < limit {
+			rows = append(rows, row)
+			return
+		}
+		rows[head] = row
+		head = (head + 1) % limit
+		omitted++
+	}
+
+	// The buffer holds exactly one maximum row: marshalRepairRow guarantees a
+	// written row, newline included, is at most maxRepairLogLineBytes.
+	r := bufio.NewReaderSize(f, maxRepairLogLineBytes)
+	for {
+		line, rerr := r.ReadSlice('\n')
+		if errors.Is(rerr, bufio.ErrBufferFull) {
+			// Over-long: drain the remainder of the line without keeping it.
+			for errors.Is(rerr, bufio.ErrBufferFull) {
+				_, rerr = r.ReadSlice('\n')
+			}
+			skipped++
+			if rerr == nil {
+				continue
+			}
+			line = nil
+		}
+		if rerr == nil {
+			keep(line)
 			continue
 		}
-		rows = append(rows, row)
+		if errors.Is(rerr, io.EOF) {
+			keep(line) // a final line with no trailing newline
+			break
+		}
+		return nil, 0, fmt.Errorf("read repair audit log: %w", rerr)
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read repair audit log: %w", err)
+	if head > 0 {
+		rows = append(rows[head:], rows[:head]...)
 	}
 	if skipped > 0 {
-		slog.Warn("Skipped unreadable rows in the pr repair audit log.", "skipped", skipped, "path", c.repairLogPath())
+		attrs := []any{"skipped", skipped, "path", c.repairLogPath()}
+		if omitted > 0 {
+			attrs = append(attrs, "omitted", omitted)
+		}
+		slog.Warn("Skipped unreadable rows in the pr repair audit log.", attrs...)
 	}
-	return rows, nil
+	return rows, omitted, nil
 }
 
-// RepairHistory returns the repair audit trail, oldest first, under the
-// lifecycle lock so it never reads a row mid-append.
-func (c *Client) RepairHistory(ctx context.Context) ([]RepairRow, error) {
-	var rows []RepairRow
+// RepairTrail is the bounded result of RepairHistory.
+type RepairTrail struct {
+	// Rows is the newest rows, oldest first.
+	Rows []RepairRow
+	// Omitted counts older decodable rows the bound left out.
+	Omitted int
+	// Path is the log file, so a caller can say where the rest lives.
+	Path string
+}
+
+// RepairHistory returns the newest MaxRepairHistoryRows rows of the repair
+// audit trail, oldest first, under the lifecycle lock so it never reads a row
+// mid-append. It only reads under the lock; callers print after it returns.
+func (c *Client) RepairHistory(ctx context.Context) (RepairTrail, error) {
+	trail := RepairTrail{Path: c.repairLogPath()}
 	err := c.withLifecycleLock(ctx, "repair-history", func() error {
 		var rerr error
-		rows, rerr = c.readRepairLog()
+		trail.Rows, trail.Omitted, rerr = c.readRepairLogTail(MaxRepairHistoryRows)
 		return rerr
 	})
-	return rows, err
+	return trail, err
 }
