@@ -177,7 +177,28 @@ func scanLeftovers(t Target) error {
 	if extra := len(lines) - maxNamedLeftovers; extra > 0 {
 		lines = append(lines[:maxNamedLeftovers], fmt.Sprintf("and %d more", extra))
 	}
-	return errors.New("refusing to write " + termsafe.QuotePath(t.Rel()) +
+	msg := "refusing to write " + termsafe.QuotePath(t.Rel()) +
 		": a previous forgectl run on it was interrupted and left scratch behind. Nothing was removed:\n  - " +
-		strings.Join(lines, "\n  - "))
+		strings.Join(lines, "\n  - ")
+	if twin := caseTwin(names, t.base); twin != "" {
+		// The scope tag lowercases the base, so on a case-sensitive volume
+		// this target and its case twin share every scratch name, and the
+		// entries above may be the twin's (cameronsjo/forgectl#652).
+		msg += fmt.Sprintf("\n%s shares these scratch names because its name differs only in letter case, so they may belong to a run on it instead", rel(twin))
+	}
+	return errors.New(msg)
+}
+
+// caseTwin returns an entry of names that equals base in every letter but
+// case, or "" when there is none. It lowercases exactly as scopeTag does, so
+// a twin it finds is one that really shares the tag. On a case-insensitive
+// volume there never is one, because the two names are one file.
+func caseTwin(names []string, base string) string {
+	lower := strings.ToLower(base)
+	for _, name := range names {
+		if name != base && strings.ToLower(name) == lower {
+			return name
+		}
+	}
+	return ""
 }
