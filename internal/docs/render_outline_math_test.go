@@ -5,7 +5,7 @@ import (
 )
 
 func TestExtractOutline_MathHeadings(t *testing.T) {
-	doc, err := RenderDoc([]byte("## Energy $E=mc^2$\n\n### Bound $a < b$ and $$\\sum x$$\n\n## Cost `$5` here\n\n## Price \\$5 and $x$ and $y$\n"))
+	doc, err := RenderDocFor(RootVault, []byte("## Energy $E=mc^2$\n\n### Bound $a < b$ and $$\\sum x$$\n\n## Cost `$5` here\n\n## Price \\$5 and $x$ and $y$\n"), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
