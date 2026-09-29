@@ -90,20 +90,40 @@
     return false;
   }
 
+  // DEFINER matches a control word that defines a macro: \def and its
+  // \gdef/\edef/\xdef forms, the \newcommand family, \let, \futurelet,
+  // and the \global prefix. A formula that defines a macro is not rendered
+  // (forgectl#675). Macros are how a short source multiplies KaTeX's work
+  // without tripping maxExpand: \def\a{\binom11…} applied 10×10×4 times
+  // is 445 expansions and 882 characters, and KaTeX takes about 30 s to
+  // build 1.44M nodes before tooBig can reject them. They are also the only
+  // way past the source scan to deep output, whose layout cost grows about
+  // with the cube of its depth.
+  //
+  // The match runs over the raw source, not the tokens tooComplex walks:
+  // it ignores % comments and does not pair backslashes, so a \def inside
+  // a comment, or read after \\, still counts. That only ever skips a
+  // formula it could have rendered; a scan that tried to tokenize could be
+  // steered past a real definition (\verb, for one, lexes its own
+  // delimiter). The trailing (?![A-Za-z]) makes it a whole control word, so
+  // \define and \letter are not definitions. KaTeX's lexer also counts @
+  // as a letter, so \def@ is over-matched here, harmlessly.
+  var DEFINER = /\\(?:[gex]?def|(?:re)?newcommand|providecommand|(?:future)?let|global)(?![A-Za-z])/;
+
   // The post-render bound. The source scan above cannot see macro
-  // expansion: \def\a#1{\frac1{#1}} and a few macros that each apply the
-  // one before four times nest 256 fractions from a formula whose braces
-  // never go 10 deep (forgectl#596). So KaTeX renders into a detached
-  // element, where nothing is laid out, and the output is attached only if
-  // its DOM is at most MAX_DOM_DEPTH levels deep and MAX_NODES nodes in
-  // all. Measured in Chromium, a tab crashes at about 960 levels of
-  // \frac output and about 990 of nested subscripts; 500 leaves about half
-  // of that as margin for constructs whose layout costs more per level.
-  // Each \frac level is 7 DOM levels, so 70 nested fractions render and 71
-  // do not. MAX_NODES bounds how much a formula's macros can multiply its
-  // output. The largest macro-free output seen from a source under
-  // MAX_SOURCE is about 60,000 nodes (a+a+…+a, 10,000 characters).
-  var MAX_DOM_DEPTH = 500;
+  // expansion, and DEFINER is a pre-scan of the source, so this is the
+  // backstop: KaTeX renders into a detached element, where nothing is laid
+  // out, and the output is attached only if its DOM is at most
+  // MAX_DOM_DEPTH levels deep and MAX_NODES nodes in all. Measured in
+  // Chromium, a tab crashes at about 960 levels of \frac output, and
+  // layout time grows about with the cube of depth: nested \mathinner
+  // takes 2 to 3 s to lay out at 250 levels and 19 s at 491, and the cost
+  // is paid again on every theme toggle (forgectl#675). Each \frac level is
+  // 7 DOM levels, so 34 nested fractions render and 35 do not. MAX_NODES
+  // bounds how much output a formula can build. A macro-free source under
+  // MAX_SOURCE can still pass it: an empty matrix row of 9,900 & builds
+  // about 170,000 nodes, in about 2 s.
+  var MAX_DOM_DEPTH = 250;
   var MAX_NODES = 100000;
 
   // tooBig reports whether the tree under root is deeper than MAX_DOM_DEPTH
@@ -126,11 +146,17 @@
     return false;
   }
 
-  // skip leaves the formula as its TeX source, marked .math-skipped.
-  function skip(el, src) {
+  // The reasons skip gives, as the skipped formula's tooltip.
+  var TOO_COMPLEX = "Not rendered: this formula is too long, too large or too deeply nested to render safely.";
+  var DEFINES_MACRO = "Not rendered: this formula defines a macro (\\def, \\newcommand, \\let, …), which could make it too slow to render safely.";
+  var RENDER_FAILED = "Not rendered: the math renderer failed on this formula.";
+
+  // skip leaves the formula as its TeX source, marked .math-skipped, with
+  // reason as its tooltip.
+  function skip(el, src, reason) {
     el.textContent = src;
     el.classList.add("math-skipped");
-    el.title = "Not rendered: this formula is too long or too deeply nested to render safely.";
+    el.title = reason;
   }
 
   // The TeX is stashed on first render, because a render replaces the
@@ -145,8 +171,12 @@
     }
     if (el.classList.contains("math-skipped")) { return; }
     var display = el.classList.contains("math-display");
+    if (DEFINER.test(src)) {
+      skip(el, src, DEFINES_MACRO);
+      return;
+    }
     if (tooComplex(src)) {
-      skip(el, src);
+      skip(el, src, TOO_COMPLEX);
       return;
     }
     // Detached: KaTeX builds into holder, which is in no document, so no
@@ -166,10 +196,12 @@
         // Caps every user-specified size (\rule, \kern, \rule{100000em}…)
         // at 500em, so one command cannot build a page-sized box.
         maxSize: 500,
-        // Half of KaTeX's default of 1000 macro expansions, to bound the
-        // work a formula's macros make before tooBig sees the output.
-        // KaTeX's own macros (\dots, \neq, \iff, …) count toward it too;
-        // a formula over it renders as a parse error, source visible.
+        // Half of KaTeX's default of 1000. It bounds the number of macro
+        // expansions, not the tokens they produce or the work those tokens
+        // cost, so it cannot bound render time by itself; DEFINER does
+        // that for user macros. KaTeX's own macros (\dots is two
+        // expansions, \neq four, \iff eight) count toward it; a formula
+        // over it renders as a parse error, source visible.
         maxExpand: 500,
         errorColor: color
       });
@@ -177,12 +209,12 @@
       // Only a non-parse failure reaches here (a JavaScript stack overflow
       // in KaTeX's builders on macro-nested input is one). Put the source
       // back so the formula stays readable.
-      skip(el, src);
+      skip(el, src, RENDER_FAILED);
       console.warn("[forgectl docs] math render failed", err);
       return;
     }
     if (tooBig(holder)) {
-      skip(el, src);
+      skip(el, src, TOO_COMPLEX);
       return;
     }
     el.textContent = "";
