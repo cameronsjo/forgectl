@@ -456,3 +456,50 @@ func assertFenced(t *testing.T, text string) string {
 	}
 	return nonce
 }
+
+func TestListTasks_SchemaDeclaresTheLimitBounds(t *testing.T) {
+	cs := connectToStub(t)
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	for _, tool := range res.Tools {
+		if tool.Name != "list_tasks" {
+			continue
+		}
+		raw, _ := json.Marshal(tool.InputSchema)
+		var schema struct {
+			Properties map[string]struct {
+				Minimum *float64 `json:"minimum"`
+				Maximum *float64 `json:"maximum"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("decode schema: %v", err)
+		}
+		lim := schema.Properties["limit"]
+		if lim.Maximum == nil || *lim.Maximum != maxListLimit {
+			t.Errorf("limit maximum = %v, want %d; schema: %s", lim.Maximum, maxListLimit, raw)
+		}
+		if lim.Minimum == nil || *lim.Minimum != 0 {
+			t.Errorf("limit minimum = %v, want 0 (0 means default); schema: %s", lim.Minimum, raw)
+		}
+		return
+	}
+	t.Fatal("list_tasks not registered")
+}
+
+func TestListTasks_LimitBoundsAreEnforcedBySchemaValidation(t *testing.T) {
+	cs := connectToStub(t)
+	for _, limit := range []int{maxListLimit + 1, 500, -1} {
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_tasks", Arguments: map[string]any{"limit": limit}})
+		if err == nil && !res.IsError {
+			t.Errorf("limit %d was accepted; the schema should reject it", limit)
+		}
+	}
+	for _, limit := range []int{0, 1, maxListLimit} {
+		if text, isErr := callText(t, cs, "list_tasks", map[string]any{"limit": limit}); isErr {
+			t.Errorf("limit %d rejected: %s", limit, text)
+		}
+	}
+}
