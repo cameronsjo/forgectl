@@ -159,7 +159,7 @@ func TestScanDoc_BlockIDs(t *testing.T) {
 }
 
 func TestScanDoc_WikilinkFormsInVaultIndex(t *testing.T) {
-	meta, err := scanDoc(fixtureAbs(t, "vault/index.md"), "index.md")
+	meta, err := scanDocFor(RootVault, fixtureAbs(t, "vault/index.md"), "index.md")
 	if err != nil {
 		t.Fatalf("scanDoc: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestScanDoc_LinkLineCountsFrontmatter(t *testing.T) {
 			if err := os.WriteFile(p, []byte(tc.src), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			meta, err := scanDoc(p, "p.md")
+			meta, err := scanDocFor(RootVault, p, "p.md")
 			if err != nil {
 				t.Fatalf("scanDoc: %v", err)
 			}
@@ -335,7 +335,7 @@ func TestScanDoc_AtCap_FullyScanned(t *testing.T) {
 	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	meta, err := scanDoc(p, "edge.md")
+	meta, err := scanDocFor(RootVault, p, "edge.md")
 	if err != nil {
 		t.Fatalf("scanDoc: %v", err)
 	}
