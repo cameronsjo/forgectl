@@ -196,7 +196,7 @@ const blockIDsInCodeBody = "# T\n\nreal para ^keep\n\n```\ncode x^2\nfence ^fenc
 
 func TestScanDoc_BlockIDsIgnoreCode(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "p.md")
-	if err := os.WriteFile(p, []byte(blockIDsInCodeBody), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte(blockIDsInCodeBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	meta, err := scanDoc(p, "p.md")
@@ -210,7 +210,7 @@ func TestScanDoc_BlockIDsIgnoreCode(t *testing.T) {
 
 func TestScanDoc_UnclosedFenceMasksToEOF(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "p.md")
-	if err := os.WriteFile(p, []byte("```\n^ghost"), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte("```\n^ghost"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	meta, err := scanDoc(p, "p.md")
@@ -225,7 +225,7 @@ func TestScanDoc_UnclosedFenceMasksToEOF(t *testing.T) {
 func TestScanDoc_OverCap_TitleFromPrefixNoLinkMeta(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "big.md")
 	content := padToSize("# Big\n\n[[target]] ^blk\n", maxScanBytes+1)
-	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	meta, err := scanDoc(p, "big.md")
@@ -246,7 +246,7 @@ func TestScanDoc_AtCap_FullyScanned(t *testing.T) {
 	if len(content) != maxScanBytes {
 		t.Fatalf("fixture is %d bytes, want %d", len(content), maxScanBytes)
 	}
-	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	meta, err := scanDoc(p, "edge.md")

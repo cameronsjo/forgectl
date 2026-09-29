@@ -191,10 +191,10 @@ func TestDocsIndexOptions_ExpandsTildeKeys(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	vault := filepath.Join(home, "v")
-	if err := os.MkdirAll(vault, 0o755); err != nil {
+	if err := os.MkdirAll(vault, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(vault, "a.md"), []byte("# A\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(vault, "a.md"), []byte("# A\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
