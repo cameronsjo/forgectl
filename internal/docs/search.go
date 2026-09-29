@@ -90,7 +90,7 @@ type SearchError struct {
 // report as raw bytes, and oversized records. A root that failed is never
 // counted in Skipped; it is listed in Errors. SkippedPaths lists the paths
 // the index walk could not read ({root, path, reason}, as in `docs check`'s
-// skipped array, but including skips under vault roots, which check omits),
+// skipped array; both include skips under vault roots),
 // so docs under them were never searched; it is never nil.
 type SearchResponse struct {
 	Backend   string         `json:"backend"`
