@@ -1,6 +1,6 @@
 package docs
 
-// Test plan for the reader's chrome lookups (forgectl#617)
+// Test plan for the reader's chrome lookups (forgectl#617, #583)
 //
 // The reader's JS and CSS find chrome elements by a data-fc attribute, never
 // by id. A document can produce any id (a heading slug, or raw HTML), so an id
@@ -116,5 +116,19 @@ func TestChrome_CSSDoesNotStyleChromeByID(t *testing.T) {
 		if strings.Contains(style, "#"+id+" ") || strings.Contains(style, "#"+id+"{") {
 			t.Errorf("shell CSS selects #%s; content can carry that id and be styled as chrome", id)
 		}
+	}
+}
+
+func TestChrome_LiveStatusHostIsHideableAndKeepsATooltip(t *testing.T) {
+	body := chromePage(t, "# x\n")
+	if !strings.Contains(body, `<span class="live-status__host"> · `) {
+		t.Errorf("live-status host is not in its own span")
+	}
+	if !regexp.MustCompile(`data-fc="live-status"[^>]* title="serving · [^"]+"`).MatchString(body) {
+		t.Errorf("live-status lacks a title carrying the full text")
+	}
+	tmpl := chromeRead(t, filepath.Join("templates", "shell.html.tmpl"))
+	if !regexp.MustCompile(`@media \(max-width: 480px\) \{\s*\.live-status__host \{ display: none; \}`).MatchString(tmpl) {
+		t.Errorf("no <=480px rule hides the host")
 	}
 }

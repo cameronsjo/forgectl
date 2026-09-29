@@ -244,6 +244,8 @@
     var text = item.querySelector(".live-status__text");
     if (dot) { dot.classList.add("live-dot--down"); }
     if (text) { text.textContent = "disconnected — restart forgectl docs serve for live updates"; }
+    // The bar ellipsizes on a phone; the tooltip keeps the whole message.
+    if (text) { item.title = text.textContent; }
   }
 
   // Changes arrive in bursts (an editor's save is often several writes), so a

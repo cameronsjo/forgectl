@@ -256,6 +256,17 @@ main.surface-document:focus-visible { outline: var(--focus-width) solid var(--ac
 @media (max-width: 640px) {
   .status-item.opt { display: none; }
 }
+/* One line at phone width. A stale or deprecated badge beside "serving · host:port"
+   wrapped the bar to ~45px at 375px. Drop the host (the title tooltip keeps the
+   full text) and forbid wrapping. */
+.live-status, .live-status__text { white-space: nowrap; }
+/* The disconnected message is long; let it ellipsize (its title carries it all)
+   rather than push the bar wider than the viewport. */
+.live-status { min-width: 0; }
+.live-status__text { overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 480px) {
+  .live-status__host { display: none; }
+}
 </style>
 <script src="/assets/artificer-theme.js" defer></script>
 <script src="/assets/reload.js" defer></script>
@@ -342,7 +353,7 @@ main.surface-document:focus-visible { outline: var(--focus-width) solid var(--ac
     {{end}}
   </div>
   <footer class="statusbar" style="flex: none">
-    <div class="status-item" id="live-status" data-fc="live-status" role="status"><span class="live-dot" aria-hidden="true"></span><span class="live-status__text">serving · {{.Host}}</span></div>
+    <div class="status-item live-status" id="live-status" data-fc="live-status" role="status" title="serving · {{.Host}}"><span class="live-dot" aria-hidden="true"></span><span class="live-status__text">serving<span class="live-status__host"> · {{.Host}}</span></span></div>
     {{if .DocPath}}<div class="status-item opt">{{.DocPath}}</div>{{end}}
     {{if .Trust.Deprecated}}<div class="status-item"><span class="trust-badge trust-badge--deprecated">deprecated</span></div>{{end}}
     {{if .Trust.Stale}}<div class="status-item"><span class="trust-badge trust-badge--stale" title="stale since {{.Trust.StaleAfter}}">stale</span></div>{{end}}
