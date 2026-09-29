@@ -129,11 +129,11 @@ func (n *commentSpanNode) Dump(source []byte, level int) { ast.DumpHelper(n, sou
 
 // commentDelimiters is the delimiter processor for one "%%" delimiter. The
 // inline form is a goldmark delimiter, like ==highlight==, so goldmark's own
-// inline pass settles every boundary question: a code span or autolink is
-// consumed before its '%' is ever seen, "\%" is an escape and never
-// triggers, delimiters inside link text pair within the link, and a "%%"
-// left unpaired at the end of the paragraph becomes literal text. There is
-// no hand-written scan to disagree with the parse.
+// inline pass settles every boundary question: a code span, autolink or
+// [[wikilink]] is consumed before its '%' is ever seen, "\%" is an escape
+// and never triggers, delimiters inside link text pair within the link, and
+// a "%%" left unpaired at the end of the paragraph becomes literal text.
+// There is no hand-written scan to disagree with the parse.
 //
 // Each delimiter gets its own processor so the pairing can record the
 // comment's source range: goldmark asks the OPENER's processor

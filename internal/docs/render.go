@@ -50,7 +50,8 @@ var markdown = newMarkdown(true, false)
 var markdownPlain = newMarkdown(false, false)
 
 // markdownVault and markdownVaultPlain are the same two pipelines plus the
-// Obsidian flavour (obsidian.go: ==highlight==, %%comment%%, #tag). They serve
+// Obsidian flavour (obsidian.go: ==highlight==, %%comment%%, #tag, and
+// [[wikilink]] parsing shown as source text). They serve
 // RootVault roots only; a docs root never reaches them, so the docs-root
 // instances above stay plain GFM byte for byte.
 var (

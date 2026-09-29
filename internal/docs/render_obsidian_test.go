@@ -4,9 +4,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/text"
+	"go.abhg.dev/goldmark/wikilink"
 )
 
 // renderKind is render with a test failure on error.
@@ -473,9 +478,8 @@ func TestScanVault_OverCapTitleDropsComment(t *testing.T) {
 // TestScanVault_ParserSetParity: the vault scan and render parse with one
 // constructor, so every inline construct that can hold or cross a "%%"
 // (==, ~~, _, #tag, [[…]], $…$) pairs it the same way in both. Each case
-// checks scan slugs against rendered ids, and each candidate link is
-// indexed exactly when the page shows it: an href for a markdown link, the
-// "[[target" source text for a wikilink.
+// checks scan slugs against rendered ids, and that the indexed link set
+// equals the set the page shows (renderedLinks) and the case's expected set.
 func TestScanVault_ParserSetParity(t *testing.T) {
 	cases := []struct {
 		src   string
@@ -486,11 +490,11 @@ func TestScanVault_ParserSetParity(t *testing.T) {
 		{"## _x %%y #t_ z%%\n", nil},
 		{"## a %%b [[c%%]] d\n", []string{"c%%"}},
 		{"## $a %%$ b %%\n", nil},
-		{"==a %%b== c%% d [[Hidden]] %%\n", []string{"Hidden"}},
+		{"==a %%b== c%% d [[Hidden]] %%\n", nil},
 		{"~~a %%b [Target](target.md)~~ c%%\n", []string{"target.md"}},
 		{"$x %% y$ z %% [[L]]\n", []string{"L"}},
-		{"#t %%x [[T1]]%% [[T2]] ==y %%z== [w](w.md)%%\n", []string{"T1", "T2", "w.md"}},
-		{"## [[H1]] %%x [[H2]] ~~y%%~~ #t %%\n", []string{"H1", "H2"}},
+		{"#t %%x [[T1]]%% [[T2]] ==y %%z== [w](w.md)%%\n", []string{"T2", "w.md"}},
+		{"## [[H1]] %%x [[H2]] ~~y%%~~ #t %%\n", []string{"H1"}},
 	}
 	idPattern := regexp.MustCompile(`<h[1-6] id="([^"]*)"`)
 	for _, c := range cases {
@@ -509,17 +513,46 @@ func TestScanVault_ParserSetParity(t *testing.T) {
 		if strings.Join(slugs, ",") != strings.Join(ids, ",") {
 			t.Errorf("%q: scan slugs %v, rendered ids %v", c.src, slugs, ids)
 		}
-		indexed := map[string]bool{}
+		var indexed []string
 		for _, l := range scan.links {
-			indexed[l.Path] = true
+			indexed = append(indexed, l.Path)
 		}
-		for _, target := range c.links {
-			rendered := strings.Contains(out, `href="`+target+`"`) || strings.Contains(out, "[["+target)
-			if indexed[target] != rendered {
-				t.Errorf("%q: %s indexed = %v, rendered = %v (%s)", c.src, target, indexed[target], rendered, out)
-			}
+		rendered := renderedLinks(t, c.src, out)
+		sort.Strings(indexed)
+		want := append([]string(nil), c.links...)
+		sort.Strings(want)
+		if strings.Join(indexed, ",") != strings.Join(rendered, ",") || strings.Join(rendered, ",") != strings.Join(want, ",") {
+			t.Errorf("%q: indexed %v, rendered %v, want %v (%s)", c.src, indexed, rendered, want, out)
 		}
 	}
+}
+
+// renderedLinks returns, sorted, the link targets a vault page shows: each
+// markdown link's href from the rendered HTML, plus each wikilink the
+// render pipeline's own parse keeps outside a comment (a comment's subtree
+// never renders).
+func renderedLinks(t *testing.T, src, out string) []string {
+	t.Helper()
+	var links []string
+	for _, m := range regexp.MustCompile(`href="([^"]*)"`).FindAllStringSubmatch(out, -1) {
+		links = append(links, m[1])
+	}
+	source := []byte(src)
+	doc := markdownVaultPlain.Parser().Parse(text.NewReader(source))
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		if n.Kind() == kindCommentSpan {
+			return ast.WalkSkipChildren, nil
+		}
+		if wl, ok := n.(*wikilink.Node); ok {
+			links = append(links, wikilinkRef(wl, source).Path)
+		}
+		return ast.WalkContinue, nil
+	})
+	sort.Strings(links)
+	return links
 }
 
 // TestRenderVault_WikilinkShowsSource: a vault wikilink is parsed (so the
@@ -561,6 +594,73 @@ func TestScanVault_BlockIDInRemovedCommentParagraph(t *testing.T) {
 		}
 		if strings.Join(ids, ",") != want {
 			t.Errorf("%q: block ids %v, want %q", src, ids, want)
+		}
+	}
+}
+
+// TestResolveVault_HeadingTextFromSource: a vault heading's Text is its
+// source text, so a wikilink written against the heading as typed
+// resolves, markup included. Comment text stays out.
+func TestResolveVault_HeadingTextFromSource(t *testing.T) {
+	vault := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	const note = "# Note\n\n## a ==b==\n\n## c ~~d~~\n\n## $`q`$\n\n## see #tag\n\n## x %%c%% y\n"
+	for name, body := range map[string]string{"Note.md": note, "Linker.md": "# Linker\n"} {
+		if err := os.WriteFile(filepath.Join(vault, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	idx, err := NewIndex([]string{vault})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	label := idx.Roots()[0].Label
+	from, ok := idx.Find(label, "Linker.md")
+	if !ok {
+		t.Fatal("Linker.md not indexed")
+	}
+	// "[[Note#see #tag]]" is not in the list: resolveFragment reads every
+	// '#' in a fragment as Obsidian's nested-heading separator, so that link
+	// names a heading "tag" under "see ". The Text is still pinned below,
+	// and the heading resolves by its slug.
+	for _, target := range []string{"Note#a ==b==", "Note#c ~~d~~", "Note#$`q`$", "Note#see-tag", "Note#x  y"} {
+		if _, miss := idx.ResolveLink(&from, target); miss != MissNone {
+			t.Errorf("[[%s]]: miss %v", target, miss)
+		}
+	}
+	doc, _ := idx.Find(label, "Note.md")
+	var texts []string
+	for _, h := range doc.Headings {
+		texts = append(texts, h.Text)
+	}
+	want := "Note|a ==b==|c ~~d~~|$`q`$|see #tag|x  y"
+	if got := strings.Join(texts, "|"); got != want {
+		t.Errorf("heading texts %q, want %q", got, want)
+	}
+}
+
+// TestScanDocs_HeadingTextUnchanged pins the docs-root Text rule: inline
+// nodes flattened to their text, as before vault roots got source text.
+func TestScanDocs_HeadingTextUnchanged(t *testing.T) {
+	headings, _, _, err := scanBody([]byte("## a *b* `c` [d](e.md) ==f== #g\n"))
+	if err != nil || len(headings) != 1 {
+		t.Fatalf("scanBody: %v, %v", headings, err)
+	}
+	if want := "a b c d ==f== #g"; headings[0].Text != want {
+		t.Errorf("docs heading text %q, want %q", headings[0].Text, want)
+	}
+}
+
+// TestRenderVault_PercentInsideWikilinkIsNotACloser: a wikilink is
+// consumed before its '%' is seen, as a code span is, so a "%%" inside
+// "[[…]]" neither opens nor closes a comment.
+func TestRenderVault_PercentInsideWikilinkIsNotACloser(t *testing.T) {
+	out := renderKind(t, "%% s [[x %% y]] z\n", RootVault)
+	for _, want := range []string{"%% s", "[[x %% y]]", "z"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("want %q visible, got %s", want, out)
 		}
 	}
 }
