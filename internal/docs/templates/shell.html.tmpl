@@ -110,6 +110,11 @@ main.surface-document { max-width: 820px; }
    states and a 44px touch min-height that would break a line of prose. */
 .doc-body mark { background: color-mix(in oklch, var(--attention) 28%, transparent); color: inherit; padding: 0 2px; border-radius: var(--radius-sm); }
 .doc-body .tag { font-family: var(--font-mono); font-size: .85em; color: var(--accent); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; white-space: nowrap; unicode-bidi: isolate; }
+/* A10: a [[wikilink]] that did not resolve. A span (no note) gets the help
+   cursor for its hover reason; an anchor (note found, heading or block
+   missing) keeps the pointer, since it still opens the note. */
+.doc-body .wikilink-miss { color: var(--urgent-text); text-decoration: underline dashed; }
+.doc-body span.wikilink-miss { cursor: help; }
 
 /* ── Outline pane ── */
 .outline { border-left: 1px solid var(--border); padding: var(--s-md) 0; font-family: var(--font-mono); overflow-y: auto; }

@@ -76,3 +76,11 @@ feedback issue filed upstream.
 - **Why necessary:** the callout tier class `note` collides with Artificer's global `.note` rule (`artificer.css:385`: `color: var(--fg-secondary); font-size: var(--t-label-sm-size)`). Note-tier callout body text measured 11.4px against 15.2px for the other tiers.
 - **Upstream issue:** none filed. Artificer's `.note` is unscoped, so any consumer class named `note` inherits it.
 - **Retire when:** Artificer scopes `.note`, or the callout tier class is renamed. Delete the two declarations.
+
+## A10 — `.wikilink-miss` style for unresolved vault wikilinks
+
+- **Dated:** 2026-09-29 · app @ pre-1.0 · Artificer @ 0.25.0
+- **What diverges:** the docs shell template styles `.doc-body .wikilink-miss` (a dashed underline in `--urgent-text`) for a vault `[[wikilink]]` that did not resolve, and gives the `span` form a help cursor for its hover reason (forgectl#444).
+- **Why necessary:** Artificer has no broken-link primitive. A miss has to read as different from a working link at a glance, and a plain link colour would hide it.
+- **Upstream issue:** none filed yet. Candidate for an upstream broken-link treatment.
+- **Retire when:** the vendored Artificer ships a broken-link style. Delete the two template rules marked "A10" and adopt the upstream class.
