@@ -28,9 +28,11 @@ import (
 // symlink, never blocked on as a FIFO, and must name a plain record file name.
 // Tampering can only move the reviewer's OWN dir between states. Rewriting
 // the marker to name another live record pins the dir. Garbling it, or
-// swapping in a symlink or FIFO, makes it stale and removable. Deleting it
-// makes the dir unmarked, which is refused. None of those reaches another
-// dir, and none makes cleanup remove a dir that another review still owns.
+// swapping in a FIFO, makes it stale and removable. Swapping in a symlink,
+// or anything else that makes the marker fail to open, and deleting it both
+// leave the dir unclassifiable, which is refused. None of those reaches
+// another dir, and none makes cleanup remove a dir that another review still
+// owns.
 const findingsOwnerMarker = ".forgectl-owner"
 
 // maxFindingsMarkerBytes caps the marker read. A record name is well under
@@ -47,18 +49,30 @@ var errFindingsMarkerInvalid = errors.New("findings owner marker is not valid")
 // It maps to findingsUnmarked (kept), not findingsStale.
 var errFindingsMarkerIncomplete = errors.New("findings owner marker is incomplete")
 
+// errFindingsMarkerUnreadable is readFindingsMarker's report of a marker that
+// exists but could not be opened: a symlink (ELOOP), a permission error, fd
+// exhaustion, an I/O fault. None of those says what the marker holds, so the
+// dir cannot be classified and maps to findingsUnmarked (kept), never
+// findingsStale (forgectl#659). Only ENOENT is left unwrapped.
+var errFindingsMarkerUnreadable = errors.New("findings owner marker cannot be opened")
+
+// openFindingsMarker is the marker opener, a seam so a test can inject open
+// errors (EACCES, EMFILE) that root and a healthy process cannot produce.
+var openFindingsMarker = openNoFollowNonblock
+
 // findingsLiveness is the removal verdict for one findings dir.
 type findingsLiveness int
 
 const (
-	// findingsStale: the marker names no existing local record, or the
-	// marker is unreadable or garbled. Removable.
+	// findingsStale: the marker names no existing local record, or it opens
+	// but is garbled, oversized, or not a regular file. Removable.
 	findingsStale findingsLiveness = iota
 	// findingsLive: the marker names a local record that still exists.
 	// Never removed.
 	findingsLive
-	// findingsUnmarked: no marker, or an incomplete one (empty, or cut off
-	// before its newline). That is a dir from a forgectl before #558, one
+	// findingsUnmarked: no marker, an incomplete one (empty, or cut off
+	// before its newline), or one that exists but cannot be opened (#659).
+	// That is a dir from a forgectl before #558, one
 	// PrepareLocal created but has not marked yet (the marker is written only
 	// after the owning record exists), or one whose marker write failed.
 	// Refused, because none of these can be told apart from a live review.
@@ -145,20 +159,28 @@ func validFindingsOwnerName(name string) bool {
 // defence in depth, since the atomic publish already means no truncated
 // marker of ours ever appears under the marker's name.
 //
-// Every other failure is errFindingsMarkerInvalid or an open error, which the
-// caller treats as stale: a symlink, a FIFO or other non-regular file,
-// content over the cap, or a newline-terminated line that is not a record
-// name. Only the dir's own reviewer can produce those, and making its own
-// dir removable is the only thing it gains.
+// An open error other than ENOENT is errFindingsMarkerUnreadable, which the
+// caller also keeps: it says nothing about what the marker holds, and a
+// transient one (EMFILE, EIO) next to a live record must not delete that
+// review's findings (forgectl#659).
+//
+// Every other failure is errFindingsMarkerInvalid, which the caller treats as
+// stale: a FIFO or other non-regular file, content over the cap, or a
+// newline-terminated line that is not a record name. Only the dir's own
+// reviewer can produce those, and making its own dir removable is the only
+// thing it gains.
 //
 // The open is openNoFollowNonblock, the repair-log opener's core: a symlinked
-// marker fails with ELOOP rather than being followed, and a FIFO opens
-// without blocking and is then refused by the Fstat check. The read is capped
-// before it allocates.
+// marker fails with ELOOP rather than being followed (so it is unreadable,
+// and kept), and a FIFO opens without blocking and is then refused by the
+// Fstat check. The read is capped before it allocates.
 func readFindingsMarker(dir string) (string, error) {
-	f, err := openNoFollowNonblock(filepath.Join(dir, findingsOwnerMarker), os.O_RDONLY, 0)
-	if err != nil {
+	f, err := openFindingsMarker(filepath.Join(dir, findingsOwnerMarker), os.O_RDONLY, 0)
+	if errors.Is(err, fs.ErrNotExist) {
 		return "", err
+	}
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", errFindingsMarkerUnreadable, err)
 	}
 	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
@@ -230,8 +252,11 @@ func (c *Client) findingsDirLiveness(full string) findingsLiveness {
 	case errors.Is(err, errFindingsMarkerIncomplete):
 		slog.Debug("Findings dir has an incomplete owner marker; treating it as unmarked.", "path", full, "error", err)
 		return findingsUnmarked
+	case errors.Is(err, errFindingsMarkerUnreadable):
+		slog.Warn("Findings dir has an owner marker that cannot be opened; keeping it.", "path", full, "error", err)
+		return findingsUnmarked
 	case err != nil:
-		slog.Warn("Findings dir has an unreadable owner marker; treating it as stale.", "path", full, "error", err)
+		slog.Warn("Findings dir has an invalid owner marker; treating it as stale.", "path", full, "error", err)
 		return findingsStale
 	case c.ownerRecordLive(name):
 		return findingsLive
@@ -266,6 +291,7 @@ func warnUnmarkedFindings(n int) {
 	if n == 0 {
 		return
 	}
-	slog.Warn("Skipped findings dirs with no owner marker: they predate the marker, or a review is still starting. "+
+	slog.Warn("Skipped findings dirs with no usable owner marker (missing, incomplete, or failed to open): "+
+		"they predate the marker, a review is still starting, or its marker write failed. "+
 		"Remove one by hand once no review is using it; see `pr findings` in docs/commands/pr.md.", "count", n)
 }
