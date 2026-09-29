@@ -27,6 +27,8 @@
   // (reload.js) swaps the whole sidenav in place, and a list captured at load
   // would keep filtering rows that are no longer in the page. reload.js
   // re-applies a live query by dispatching an input event after each swap.
+  var NAV = '[data-fc="sidenav"]';
+
   function all(sel) {
     return Array.prototype.slice.call(document.querySelectorAll(sel));
   }
@@ -38,9 +40,12 @@
 
   input.addEventListener("input", function () {
     var q = input.value.trim().toLowerCase();
-    var links = all(".sidenav a[data-filter-text]");
-    var groups = all(".sidenav .sidenav__group");
-    var dirs = all(".sidenav details");
+    // Scoped to the sidenav by its data-fc hook, not its class: a doc can
+    // carry class="sidenav", and the filter would then fold and hide the
+    // doc's own <details> and headings (forgectl#643).
+    var links = all(NAV + " a[data-filter-text]");
+    var groups = all(NAV + " .sidenav__group");
+    var dirs = all(NAV + " details");
 
     // Remember each directory's server-rendered open state (the path to the
     // current doc) the first time a query touches it, so clearing the filter
