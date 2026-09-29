@@ -41,6 +41,19 @@ import (
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
+// mkStaleFindingsDir creates a findings dir whose owner marker names a
+// session record that does not exist, the way a finished review leaves it.
+// `pr findings cleanup` refuses a dir with no marker at all (forgectl#558).
+func mkStaleFindingsDir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, ".forgectl-owner"), []byte("local-gone000-1-1.json\n"), 0o600); err != nil {
+		t.Fatalf("write owner marker: %v", err)
+	}
+}
+
 func TestPrFindingsListCmd_PrintsPaths(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "forgectl-findings-aaa"), 0o700); err != nil {
@@ -80,9 +93,7 @@ func TestPrFindingsListCmd_NoFindings(t *testing.T) {
 func TestPrFindingsCleanupCmd_DryRun_ReportsAndDeletesNothing(t *testing.T) {
 	dir := t.TempDir()
 	oldDir := filepath.Join(dir, "forgectl-findings-old")
-	if err := os.MkdirAll(oldDir, 0o700); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
+	mkStaleFindingsDir(t, oldDir)
 	old := time.Now().Add(-48 * time.Hour)
 	if err := os.Chtimes(oldDir, old, old); err != nil {
 		t.Fatalf("Chtimes: %v", err)
@@ -119,9 +130,7 @@ func TestPrFindingsCleanupCmd_NegativeOlderThan_ErrorsWithoutScanning(t *testing
 	// cobra's behavior, not this command's.
 	dir := t.TempDir()
 	oldDir := filepath.Join(dir, "forgectl-findings-old")
-	if err := os.MkdirAll(oldDir, 0o700); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
+	mkStaleFindingsDir(t, oldDir)
 	client := pr.New(nil, pr.WithFindingsDir(dir), pr.WithSessionsDir(t.TempDir()))
 
 	cmd := newPrFindingsCmd(client, theme.Theme{})
@@ -145,9 +154,7 @@ func TestPrFindingsCleanupCmd_NegativeOlderThan_ErrorsWithoutScanning(t *testing
 func TestPrFindingsCleanupCmd_ZeroOlderThan_PassesValidation(t *testing.T) {
 	dir := t.TempDir()
 	oldDir := filepath.Join(dir, "forgectl-findings-old")
-	if err := os.MkdirAll(oldDir, 0o700); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
+	mkStaleFindingsDir(t, oldDir)
 	client := pr.New(nil, pr.WithFindingsDir(dir), pr.WithSessionsDir(t.TempDir()))
 
 	cmd := newPrFindingsCmd(client, theme.Theme{})
@@ -196,9 +203,7 @@ func TestPrFindingsCmd_ControlCharacterDirNameNeverReachesOutputRaw(t *testing.T
 	}
 	dir := t.TempDir()
 	evil := filepath.Join(dir, "forgectl-findings-\x1b[2J\nforged")
-	if err := os.MkdirAll(evil, 0o700); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
+	mkStaleFindingsDir(t, evil)
 	client := pr.New(nil, pr.WithFindingsDir(dir), pr.WithSessionsDir(t.TempDir()))
 	withConfirmFn(t, func(string) (bool, error) { return true, nil })
 

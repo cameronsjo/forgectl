@@ -13,3 +13,9 @@ import "os"
 func openRepairLogNoFollow(path string, flag int, perm os.FileMode) (*os.File, error) {
 	return os.OpenFile(path, flag, perm) //nolint:gosec // inside the 0700 sessions dir
 }
+
+// openNoFollowNonblock off Unix is the same plain open; see
+// openRepairLogNoFollow above for why that is acceptable here.
+func openNoFollowNonblock(path string, flag int, perm os.FileMode) (*os.File, error) {
+	return os.OpenFile(path, flag, perm) //nolint:gosec // callers pass a validated path
+}
