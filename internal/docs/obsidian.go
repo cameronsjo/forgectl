@@ -53,6 +53,9 @@ func (obsidianFlavor) Extend(m goldmark.Markdown) {
 			util.Prioritized(tagParser{}, 500),
 		),
 		parser.WithASTTransformers(
+			// First, so every later transformer and the renderer see the
+			// text runs a docs root would have (see textRejoinTransformer).
+			util.Prioritized(textRejoinTransformer{}, 400),
 			util.Prioritized(commentTransformer{}, 500),
 			// After commentTransformer, so a comment-only paragraph is
 			// already gone and a marker inside a comment is never a Text
@@ -450,6 +453,45 @@ func (commentBlockParser) Close(ast.Node, text.Reader, parser.Context) {}
 func (commentBlockParser) CanInterruptParagraph() bool { return false }
 
 func (commentBlockParser) CanAcceptIndentedLine() bool { return false }
+
+// ── text rejoin ────────────────────────────────────────────────────────────
+
+// textRejoinTransformer merges each pair of sibling Text nodes that are
+// adjacent in the source back into one node.
+//
+// goldmark flushes the text before every trigger byte into its own node, and
+// the vault flavour adds '#' as a trigger (tagParser). Mid-line, the next
+// flush merges that node back (ast.MergeOrAppendTextSegment), but the text
+// that ends a line is appended unmerged. So in "x&#62;" at the end of a line
+// the tag parser's '#' split the character reference into "x&" and "#62;",
+// the renderer resolves references per node, and neither half is one: the
+// page showed "x&amp;#62;" where a docs root, with no '#' trigger, showed
+// "x&gt;" (forgectl#665). Callout titles, read from the rendered paragraph,
+// inherited it.
+//
+// ast.Text.Merge refuses anything but a source-contiguous pair of the same
+// rawness, and a node that ends its line is never merged into the next, so
+// the rejoin only undoes splits that no markdown construct made.
+type textRejoinTransformer struct{}
+
+func (textRejoinTransformer) Transform(doc *ast.Document, reader text.Reader, _ parser.Context) {
+	source := reader.Source()
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		for c := n.FirstChild(); c != nil; {
+			t, ok := c.(*ast.Text)
+			next := c.NextSibling()
+			if ok && next != nil && !t.SoftLineBreak() && !t.HardLineBreak() && t.Merge(next, source) {
+				n.RemoveChild(n, next)
+				continue // t may merge with its new next sibling too
+			}
+			c = next
+		}
+		return ast.WalkContinue, nil
+	})
+}
 
 // ── ^block-id ──────────────────────────────────────────────────────────────
 

@@ -54,7 +54,7 @@ to stdout and exits 1; each printed ref works with forgectl pr <ref>.`,
 				return fmt.Errorf("no open PRs to pick from")
 			}
 
-			store := pr.LoadReviewed(reviewedPath)
+			store := pr.LoadReviewed(reviewedPath, pr.WithDefaultHost(client.GitHubHost()))
 			selected, err := choosePRs(cmd, prs, store, th)
 			if err != nil {
 				return err

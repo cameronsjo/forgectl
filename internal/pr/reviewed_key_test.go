@@ -51,7 +51,7 @@ func TestReviewedStore_RefAndKeyShareOneMap(t *testing.T) {
 	if err := store.Mark(ref); err != nil {
 		t.Fatalf("Mark: %v", err)
 	}
-	if !store.IsReviewedKey(ref.String(), markAt) {
+	if !store.IsReviewedKey("github.com/"+ref.String(), markAt) {
 		t.Error("a Ref mark must be visible through the key path (one map)")
 	}
 }
