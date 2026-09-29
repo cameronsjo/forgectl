@@ -114,32 +114,44 @@ func TestRender_DuplicateHeadings_LinearTime(t *testing.T) {
 	}
 	dup := []byte(strings.Repeat("## a\n", n))
 
-	work := func(src []byte) {
+	// work reports rather than calling t: on a timeout the goroutine below
+	// outlives the test, and a t method called after the test returns panics.
+	work := func(src []byte) error {
 		if _, err := render(src, RootDocs); err != nil {
-			t.Errorf("render: %v", err)
+			return fmt.Errorf("render: %w", err)
 		}
 		if _, err := scanBodyFor(RootVault, src); err != nil {
-			t.Errorf("scan: %v", err)
+			return fmt.Errorf("scan: %w", err)
 		}
+		return nil
 	}
 
 	start := time.Now()
-	work([]byte(distinct.String()))
+	if err := work([]byte(distinct.String())); err != nil {
+		t.Fatal(err)
+	}
 	baseline := time.Since(start)
 
 	budget := 10*baseline + 2*time.Second
-	done := make(chan time.Duration, 1)
+	type result struct {
+		took time.Duration
+		err  error
+	}
+	done := make(chan result, 1)
 	go func() {
 		s := time.Now()
-		work(dup)
-		done <- time.Since(s)
+		err := work(dup)
+		done <- result{time.Since(s), err}
 	}()
 	select {
-	case took := <-done:
-		if took > budget {
-			t.Fatalf("%d duplicate headings took %v, over the %v budget (baseline %v)", n, took, budget, baseline)
+	case r := <-done:
+		if r.err != nil {
+			t.Fatal(r.err)
 		}
-		t.Logf("%d duplicate headings: %v (baseline %v)", n, took, baseline)
+		if r.took > budget {
+			t.Fatalf("%d duplicate headings took %v, over the %v budget (baseline %v)", n, r.took, budget, baseline)
+		}
+		t.Logf("%d duplicate headings: %v (baseline %v)", n, r.took, baseline)
 	case <-time.After(budget):
 		t.Fatalf("%d duplicate headings did not finish within %v (baseline %v)", n, budget, baseline)
 	}

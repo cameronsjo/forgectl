@@ -14,23 +14,29 @@ import (
 
 // strayCloserSources are documents whose HTML is not balanced, each ending
 // in a paragraph carrying the marker the tests look for inside .doc-body.
+// The svg cases are balanced to a tokenizer but not to a browser: the HTML
+// tag inside the <svg> breaks out of foreign content, and an open <table>
+// left behind swallows the shell's closers.
 var strayCloserSources = map[string]string{
-	"stray div":            "</div>\n\nMARKER",
-	"stray section div":    "</section></div>\n\nMARKER",
-	"unclosed div":         "<div>\n\nMARKER",
-	"nested stray closers": "<div><section>\n\n</section></div></div></div>\n\nMARKER",
-	"shell ancestors":      "</main></div></div></body></html>\n\nMARKER",
-	"misnested p and div":  "<p>x<div>y</p></div>\n\nMARKER",
-	"stray in callout":     "> [!NOTE]\n> </div></blockquote>\n> body\n\nMARKER",
-	"unclosed in list":     "- <div>item\n- two\n\nMARKER",
+	"stray div":             "</div>\n\nMARKER",
+	"stray section div":     "</section></div>\n\nMARKER",
+	"unclosed div":          "<div>\n\nMARKER",
+	"nested stray closers":  "<div><section>\n\n</section></div></div></div>\n\nMARKER",
+	"shell ancestors":       "</main></div></div></body></html>\n\nMARKER",
+	"misnested p and div":   "<p>x<div>y</p></div>\n\nMARKER",
+	"stray in callout":      "> [!NOTE]\n> </div></blockquote>\n> body\n\nMARKER",
+	"unclosed in list":      "- <div>item\n- two\n\nMARKER",
+	"svg self-closed table": "<svg><table/></svg>\n\nMARKER",
+	"svg open table":        "<svg><table>\n\nMARKER",
+	"svg p breakout":        "<svg><p>x</p></svg>\n\nMARKER",
 }
 
 // wellNested reports whether s passes balanceFragment's own test.
 func wellNested(t *testing.T, s string) bool {
 	t.Helper()
-	nodes, err := html.ParseFragment(strings.NewReader(s), fragmentContext())
+	nodes, err := parseBody(s)
 	if err != nil {
-		t.Fatalf("ParseFragment: %v", err)
+		t.Fatalf("parseBody: %v", err)
 	}
 	return fragmentWellNested(s, nodes)
 }
@@ -71,6 +77,64 @@ func TestRender_StrayDivDropped(t *testing.T) {
 	}
 	if strings.Contains(out, "</div>") || !strings.Contains(out, "<p>x</p>") {
 		t.Fatalf("render = %q, want the stray </div> dropped and <p>x</p> kept", out)
+	}
+}
+
+// TestRender_SVGBreakout_LeavesSVG pins the tree a browser builds when an
+// HTML tag appears inside SVG: the <svg> closes and the HTML element follows
+// it, rather than nesting inside it as an SVG element of the same name
+// (compared against Chromium's DOM with Playwright).
+//
+// Mutation: in parseBody, build the tree with html.ParseFragment in a <div>
+// context instead of html.Parse on the wrapped document — x/net then skips
+// the breakout, "<svg><table/></svg>" reads as well nested, comes back
+// unchanged, and this goes red.
+func TestRender_SVGBreakout_LeavesSVG(t *testing.T) {
+	for _, src := range []string{
+		"<svg><table/></svg>\n\nMARKER",
+		"<svg><table>\n\nMARKER",
+		"<svg><p>x</p></svg>\n\nMARKER",
+	} {
+		out, err := Render([]byte(src))
+		if err != nil {
+			t.Fatalf("%q: render: %v", src, err)
+		}
+		if !strings.Contains(out, "<svg></svg>") || strings.Contains(out, "<svg><table") || strings.Contains(out, "<svg><p") {
+			t.Errorf("%q: HTML tag left inside svg, want it broken out:\n%s", src, out)
+		}
+		if !strings.Contains(out, "MARKER") || !wellNested(t, out) {
+			t.Errorf("%q: marker lost or output not well nested:\n%s", src, out)
+		}
+	}
+}
+
+// TestRender_DeepNesting_NotEscaped requires a document nested past x/net's
+// 512-open-element parse limit to render as markup, not as escaped text:
+// balancing gives up on it and serves the sanitized body unchanged.
+//
+// Mutation: in balancePasses, return html.EscapeString(sanitized) when
+// parseBody fails — each case then renders as "&lt;ul&gt;…" text and this
+// goes red.
+func TestRender_DeepNesting_NotEscaped(t *testing.T) {
+	var list strings.Builder
+	for i := range 300 {
+		_, _ = list.WriteString(strings.Repeat("  ", i) + "- x\n")
+	}
+	for _, tc := range []struct {
+		name, src, tag string
+		want           int
+	}{
+		{"list 300 deep", list.String(), "<ul>", 300},
+		{"520 blockquotes", strings.Repeat(">", 520) + " q\n", "<blockquote>", 520},
+		{"600 unclosed b", strings.Repeat("<b>", 600) + "z\n", "<b>", 600},
+	} {
+		out, err := Render([]byte(tc.src))
+		if err != nil {
+			t.Fatalf("%s: render: %v", tc.name, err)
+		}
+		if got := strings.Count(out, tc.tag); got != tc.want || strings.Contains(out, "&lt;") {
+			t.Errorf("%s: %d %s tags (want %d), escaped=%v", tc.name, got, tc.tag, tc.want, strings.Contains(out, "&lt;"))
+		}
 	}
 }
 
