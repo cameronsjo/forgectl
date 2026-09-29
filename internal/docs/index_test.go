@@ -318,3 +318,50 @@ func TestIndex_Resolve_DisallowedExtension_Rejected(t *testing.T) {
 		t.Errorf("Resolve disallowed ext: err = %v, want ErrDisallowedExt", err)
 	}
 }
+
+// Test plan for walk tolerance (#568)
+//   [x] Unhappy: an unreadable subdirectory is skipped with a warning; siblings still index
+//   [x] Unhappy: an unreadable root itself still fails the build
+//   Not covered: a file vanishing between readdir and stat (d.Info error) —
+//   a race with no deterministic trigger; the branch is a two-line skip.
+
+func TestNewIndex_UnreadableSubdir_SkippedSiblingsIndexed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ok.md"), "# Ok\n")
+	locked := filepath.Join(dir, "locked")
+	if err := os.Mkdir(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(locked, "hidden.md"), "# Hidden\n")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex must survive an unreadable subdirectory: %v", err)
+	}
+	if got := len(idx.List()); got != 1 {
+		t.Errorf("indexed %d docs, want 1 (ok.md only)", got)
+	}
+}
+
+func TestNewIndex_UnreadableRoot_StillErrors(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ok.md"), "# Ok\n")
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	if _, err := NewIndex([]string{dir}); err == nil {
+		t.Fatal("an unreadable root must fail the build")
+	}
+}

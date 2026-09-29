@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -493,7 +494,19 @@ func walkRoot(ctx context.Context, root Root) ([]Doc, error) {
 	var docs []Doc
 	err := filepath.WalkDir(root.Path, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			// The root's own error stays fatal. Anything below it (an
+			// unreadable subdirectory, or an entry that vanished mid-walk)
+			// is skipped with a warning so one bad path cannot fail the
+			// whole build. A skipped subtree is not indexed.
+			if path == root.Path {
+				return err
+			}
+			slog.Warn("docs: skipped an unreadable path during the index walk.",
+				"root", root.Label, "path", path, "error", err)
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return &WalkDeadlineError{Root: root.Path, Err: ctxErr}
@@ -532,7 +545,10 @@ func walkRoot(ctx context.Context, root Root) ([]Doc, error) {
 		relSlash := filepath.ToSlash(rel)
 		info, err := d.Info()
 		if err != nil {
-			return err
+			// The file vanished between the readdir and the stat.
+			slog.Warn("docs: skipped a file that vanished during the index walk.",
+				"root", root.Label, "path", path, "error", err)
+			return nil
 		}
 
 		// A scan failure here (the file became unreadable between
