@@ -672,7 +672,9 @@ func TestPrune_RemoteDeleteVerifyFailure_DoesNotEchoGhStderr(t *testing.T) {
 //
 // Mutation: restore strings.Contains(err.Error(), "404") in
 // verifyRemoteDeleted and the 502 reads as a successful delete; match a bare
-// "HTTP 404" in stderr and the 502 that mentions one does.
+// "HTTP 404" in stderr and the 502 that mentions one does; match
+// "(HTTP 404)" anywhere and the "(HTTP 404) (HTTP 502)" row does; drop the
+// "gh: HTTP 404" arm and gh's no-message 404 reads as a failure.
 func TestPrune_VerifyFailureOnABranchNamed404IsNotADelete(t *testing.T) {
 	for _, tc := range []struct {
 		stderr      string
@@ -680,6 +682,9 @@ func TestPrune_VerifyFailureOnABranchNamed404IsNotADelete(t *testing.T) {
 	}{
 		{"gh: Server Error (HTTP 502)", false},
 		{"gh: Bad Gateway (HTTP 502): upstream said HTTP 404", false},
+		{"gh: upstream (HTTP 404) (HTTP 502)", false},
+		{"gh: HTTP 404", true},
+		{"{\"message\":\"x\"}\ngh: Not Found (HTTP 404)\n", true},
 		{"gh: Not Found (HTTP 404)", true},
 	} {
 		fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {

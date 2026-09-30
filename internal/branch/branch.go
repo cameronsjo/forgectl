@@ -415,16 +415,28 @@ func (c *Client) verifyRemoteDeleted(ctx context.Context, origin originRepo, nam
 	return nil
 }
 
-// isGhNotFound reports whether a failed `gh api` call was an HTTP 404. It
-// reads gh's own stderr for its "(HTTP 404)" status suffix ("gh: Not Found
-// (HTTP 404)"), not err.Error(): that text also carries the argv, whose ref
-// path holds the branch name, so a branch named fix-404 whose verification
-// failed for another reason read as deleted (#749). gh exits 1 for every
-// HTTP error, so the exit code cannot tell a 404 apart. An error that is not
-// a *exec.CommandError is not a 404.
+// isGhNotFound reports whether a failed `gh api` call was an HTTP 404. gh
+// ends its error line with the status: "gh: Not Found (HTTP 404)" when the
+// body carries a message, "gh: HTTP 404" when it does not. So a stderr line
+// must end with "(HTTP 404)" or be exactly "gh: HTTP 404"; a server message
+// that merely contains "(HTTP 404)" ahead of the real status does not count.
+// It reads gh's stderr, not err.Error(): that text also carries the argv,
+// whose ref path holds the branch name, so a branch named fix-404 whose
+// verification failed for another reason read as deleted (#749). gh exits 1
+// for every HTTP error, so the exit code cannot tell a 404 apart. An error
+// that is not a *exec.CommandError is not a 404.
 func isGhNotFound(err error) bool {
 	var cmdErr *exec.CommandError
-	return errors.As(err, &cmdErr) && strings.Contains(cmdErr.Stderr, "(HTTP 404)")
+	if !errors.As(err, &cmdErr) {
+		return false
+	}
+	for _, line := range strings.Split(cmdErr.Stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasSuffix(line, "(HTTP 404)") || line == "gh: HTTP 404" {
+			return true
+		}
+	}
+	return false
 }
 
 // localRow is one parsed `git for-each-ref refs/heads` row.
