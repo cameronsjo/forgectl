@@ -6,6 +6,8 @@
 forgectl launch                    # drop straight into the resolved profile (no prompt)
 forgectl launch <harness args…>    # apply the project profile, then exec the configured harness
 forgectl launch agents --json      # pure passthrough (byte-clean); posture injected only when interactive
+forgectl launch mcp list           # Claude subcommands and -p/--print runs pass through with no posture
+forgectl launch -- <harness args…> # `--` ends launch verbs: `-- doctor` is claude's, not forgectl's
 forgectl launch which              # show the profile resolved for the current directory (alias: config)
 forgectl launch init               # scaffold the [launch] section into config.toml
 forgectl launch migrate            # explicitly import an existing claunch.conf without retiring it
@@ -68,6 +70,16 @@ An `effort` outside the five accepted levels is rejected before anything is laun
 **Design invariants** (verified against `claude` v2.1.183):
 
 - **Injected posture first, user args last** — a user-supplied flag (e.g. `--model`) overrides the profile because Claude Code is last-flag-wins.
+- **Claude subcommands and print mode pass through byte-clean** — when the first
+  argument is a Claude subcommand (`mcp`, `doctor`, `update`, …), or any
+  argument before Claude's own `--` is `-p`/`--print`/`--output-format` (or
+  `-h`/`--help`/`-v`/`--version`), claude runs with no injected flags and no
+  banner, as plain `claude` would. The profile environment still applies. The
+  subcommand list is pinned against the installed `claude --help` by a test.
+- **One leading `--` belongs to forgectl** — `forgectl launch -- <args>` skips
+  launch's own verbs (`which`, `doctor`, `edit`, …) and drops the separator, so
+  the harness never sees it. A shell wrapper that should behave like `claude`
+  is `claude() { forgectl launch -- "$@"; }`.
 - **`agents` is Claude-only** — Codex and Pi profiles reject the passthrough and
   point out that no adapter ships. Claude retains its agents-valid injection
   and byte-clean `--json`/`--help` passthrough.

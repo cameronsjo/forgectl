@@ -77,7 +77,9 @@ func ResumeArgs(p Profile, sessionID string, fork bool) []string {
 // BuilderArgs applies the profile's core posture, then appends the user's claude
 // args verbatim. Injected flags go first so a user override (e.g. --model) wins
 // under Claude Code's last-flag-wins parsing. Interactive-only flags (--ide,
-// --exclude-…, --resume) are intentionally omitted — they break -p/--print.
+// --exclude-…, --resume) are intentionally omitted — they break -p/--print,
+// which `forgectl launch` no longer routes here (see IsClaudePassthrough) but
+// the `forgectl pr` review dispatch still does.
 //
 // --strict-mcp-config is GATED on Profile.StrictMCP, never unconditional: this
 // function also serves the operator's ordinary `forgectl launch`, which must

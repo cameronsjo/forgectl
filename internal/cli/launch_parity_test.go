@@ -306,7 +306,7 @@ func TestParity_PiOrdinaryLaunch(t *testing.T) {
 // this branch prints no banner at all.
 func TestParity_ClaudeBuilderLaunch(t *testing.T) {
 	h := newParityHarness(t, parityClaudeConfig)
-	stdout, stderr := h.run(t, "-p", "summarize this")
+	stdout, stderr := h.run(t, "summarize this")
 
 	_, gotArgv, _ := h.recorded(t)
 
@@ -316,7 +316,7 @@ func TestParity_ClaudeBuilderLaunch(t *testing.T) {
 		"--model", "sonnet",
 		"--effort", "high",
 		"--add-dir", "/tmp/parity-shared",
-		"-p", "summarize this",
+		"summarize this",
 	})
 
 	if stderr != "" {

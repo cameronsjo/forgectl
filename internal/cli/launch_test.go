@@ -566,7 +566,7 @@ func TestIntegration_Launch_NoTelemetryWhenDisabled(t *testing.T) {
 
 func TestIntegration_Builder_AppliesProfileAndPassesThrough(t *testing.T) {
 	h := newHarness(t)
-	h.run(t, "-p", "hi")
+	h.run(t, "hi")
 
 	got := h.recordedArgs(t)
 	want := []string{
@@ -575,13 +575,97 @@ func TestIntegration_Builder_AppliesProfileAndPassesThrough(t *testing.T) {
 		"--model", "sonnet",
 		"--effort", "high", // derived from sonnet; the fixture sets no effort
 		"--add-dir", h.cwd + "/shared",
-		"-p", "hi",
+		"hi",
 	}
 	if !equalArgs(got, want) {
 		t.Errorf("recorded args = %v, want %v", got, want)
 	}
 	if otel := h.recordedOTEL(t); otel != "otlp" {
 		t.Errorf("OTEL_EXPORTER = %q, want %q", otel, "otlp")
+	}
+}
+
+// TestIntegration_ClaudePassthrough_NoPostureNoBanner pins #676's passthrough
+// end to end. The fixture profile carries an add_dir, which is the case that
+// breaks a subcommand for real: `--add-dir <directories...>` is variadic, so
+// an injected `--add-dir X mcp list` hands claude "mcp" and "list" as
+// directories and it opens a session instead.
+//
+// Mutation that turns it red: drop the IsClaudePassthrough case from
+// selectPosture (argv gains the profile flags), or move
+// PostureClaudePassthrough into EmitBanner's banner case (stderr is non-empty).
+func TestIntegration_ClaudePassthrough_NoPostureNoBanner(t *testing.T) {
+	for _, args := range [][]string{
+		{"mcp", "list"},
+		{"-p", "hi"},
+		{"--output-format=json", "-p", "hi"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			h := newHarness(t)
+			stdout, stderr := h.run(t, args...)
+			if got := h.recordedArgs(t); !equalArgs(got, args) {
+				t.Errorf("recorded args = %v, want exactly %v", got, args)
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q, want empty: a passthrough prints no banner", stderr)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+		})
+	}
+}
+
+// TestIntegration_LeadingSeparatorIsConsumed pins the other half of #676. A
+// leading `--` keeps "which" away from `forgectl launch which` and then never
+// reaches claude; only ONE is consumed, so `-- --` still gives claude its own.
+//
+// Mutation that turns it red: delete the ConsumeLeadingSeparator call in
+// launchExec (claude receives the `--`), or make it strip every leading `--`
+// (the second case loses claude's separator).
+func TestIntegration_LeadingSeparatorIsConsumed(t *testing.T) {
+	profile := func(h *harness) []string {
+		return []string{
+			"--permission-mode", "plan",
+			"--allow-dangerously-skip-permissions",
+			"--model", "sonnet",
+			"--effort", "high",
+			"--add-dir", h.cwd + "/shared",
+		}
+	}
+	tests := []struct {
+		name string
+		args []string
+		want func(h *harness) []string
+	}{
+		{"prompt named like a launch verb", []string{"--", "which"}, func(h *harness) []string {
+			return append(profile(h), "which")
+		}},
+		{"only one separator is forgectl's", []string{"--", "--", "-p"}, func(h *harness) []string {
+			return append(profile(h), "--", "-p")
+		}},
+		{"claude subcommand after the separator", []string{"--", "doctor"}, func(*harness) []string {
+			return []string{"doctor"}
+		}},
+		{"a lone separator is a bare launch", []string{"--"}, func(h *harness) []string {
+			return []string{
+				"--permission-mode", "plan",
+				"--allow-dangerously-skip-permissions",
+				"--ide", "--exclude-dynamic-system-prompt-sections",
+				"--model", "sonnet",
+				"--effort", "high",
+				"--add-dir", h.cwd + "/shared",
+			}
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.run(t, tc.args...)
+			if got, want := h.recordedArgs(t), tc.want(h); !equalArgs(got, want) {
+				t.Errorf("recorded args = %v, want %v", got, want)
+			}
+		})
 	}
 }
 
@@ -679,11 +763,11 @@ func TestIntegration_ClaudeBinOverride(t *testing.T) {
 		env := stripFromPath(h.env, h.binDir)
 		env = append(env, "FORGECTL_CLAUDE_BIN="+filepath.Join(h.binDir, "claude"))
 
-		cmd := exec.Command(h.bin, "launch", "-p", "x")
+		cmd := exec.Command(h.bin, "launch", "x")
 		cmd.Dir = h.cwd
 		cmd.Env = env
 		if err := cmd.Run(); err != nil {
-			t.Fatalf("forgectl launch -p x with FORGECTL_CLAUDE_BIN set: %v", err)
+			t.Fatalf("forgectl launch x with FORGECTL_CLAUDE_BIN set: %v", err)
 		}
 
 		got := h.recordedArgs(t)
@@ -796,7 +880,7 @@ func TestIntegration_LaunchShadow_DoctorAutoMigrates(t *testing.T) {
 // is what now actually reaches claude.
 func TestIntegration_LaunchShadow_ExecAutoMigrates(t *testing.T) {
 	h := newShadowHarness(t)
-	_, stderr := h.run(t, "-p", "hi")
+	_, stderr := h.run(t, "hi")
 
 	if strings.Contains(stderr, "present but ignored") {
 		t.Errorf("stderr = %q, still shows the old recurring warning instead of auto-migrating", stderr)
@@ -810,7 +894,7 @@ func TestIntegration_LaunchShadow_ExecAutoMigrates(t *testing.T) {
 		"--allow-dangerously-skip-permissions",
 		"--model", "sonnet",
 		"--effort", "high", // derived from sonnet — the merged-in project now applies
-		"-p", "hi",
+		"hi",
 	}
 	if !equalArgs(got, want) {
 		t.Errorf("recorded args = %v, want %v (the merged-in project profile, no longer shadowed)", got, want)
@@ -831,7 +915,7 @@ func TestIntegration_LaunchShadow_DuplicateProjectMatch_NoOverwrite(t *testing.T
 		t.Fatalf("read config.toml before run: %v", err)
 	}
 
-	_, stderr := h.run(t, "-p", "hi")
+	_, stderr := h.run(t, "hi")
 
 	if !strings.Contains(stderr, "fully superseded by config.toml") {
 		t.Errorf("stderr = %q, want the fully-superseded notice (nothing new to merge)", stderr)
@@ -863,7 +947,7 @@ func TestIntegration_LaunchShadow_DuplicateProjectMatch_NoOverwrite(t *testing.T
 		"--allow-dangerously-skip-permissions",
 		"--model", "opus",
 		"--effort", "medium", // derived from opus, not the legacy sonnet entry
-		"-p", "hi",
+		"hi",
 	}
 	if !equalArgs(got, want) {
 		t.Errorf("recorded args = %v, want %v (config.toml's own project must win)", got, want)
