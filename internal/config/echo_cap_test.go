@@ -36,3 +36,24 @@ func TestValidationEchoIsCapped(t *testing.T) {
 		}
 	}
 }
+
+// TestColorOverrideUnknownKeysAreCapped: the unknown-key list in a colour
+// table is quoted, capped per key, and cut after a few keys (#706).
+func TestColorOverrideUnknownKeysAreCapped(t *testing.T) {
+	table := map[string]any{"dark": "#000000"}
+	for i := 0; i < 20; i++ {
+		table[string(rune('a'+i))+"\x1b"+strings.Repeat("K", 200)] = "#ffffff"
+	}
+	var co ColorOverride
+	err := co.UnmarshalTOML(table)
+	if err == nil {
+		t.Fatal("UnmarshalTOML accepted unknown keys")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "\x1b") || strings.Contains(msg, strings.Repeat("K", 81)) {
+		t.Errorf("error echoes a key uncapped or unescaped: %q", msg)
+	}
+	if n := strings.Count(msg, `\x1b`); n != 5 {
+		t.Errorf("error shows %d keys, want 5 then an ellipsis: %q", n, msg)
+	}
+}

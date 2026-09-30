@@ -809,8 +809,20 @@ func (co *ColorOverride) UnmarshalTOML(data any) error {
 		}
 		if len(unknown) > 0 {
 			sort.Strings(unknown)
+			// Keys are the operator's own text: quoted and capped (#706),
+			// and at most a few of them, so a pasted table cannot flood
+			// the error.
+			const maxShown = 5
+			shown := make([]string, 0, maxShown)
+			for i, k := range unknown {
+				if i == maxShown {
+					shown = append(shown, "…")
+					break
+				}
+				shown = append(shown, quoteConfigValue(k))
+			}
 			return fmt.Errorf("[theme.colors]: unknown key(s) %s; a colour table takes only dark and light",
-				strings.Join(unknown, ", "))
+				strings.Join(shown, ", "))
 		}
 		return nil
 	default:
@@ -1120,48 +1132,6 @@ func describeReadError(path string, err error) error {
 // scrubTOMLError's text). The underlying error stays on the chain.
 func describeDecodeError(path string, err error) error {
 	return fmt.Errorf("config file %s does not parse: %w", termsafe.QuotePath(path), scrubTOMLError(err))
-}
-
-// tomlQuotedFragment matches one Go-quoted string, the form BurntSushi/toml's
-// lexer renders the text it choked on in (`found "ghp" instead`).
-var tomlQuotedFragment = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
-
-// scrubTOMLError rewords a toml.ParseError without the value text it quotes.
-//
-// The lexer's messages quote the leading bare word of an invalid unquoted
-// value, so `token = ghp_…` fails with `found "ghp"` and an AWS-style key
-// with up to twelve of its characters (#687). That text reaches stderr through
-// the loader's warning, the parse gate, `forgectl config` and `doctor`. The
-// rewording keeps what locates the fault — the line, the column and the last
-// key, capped — and replaces every double-quoted fragment of the message with
-// "…". A single-quoted rune ('[' or '\n') is one character of syntax and
-// stays. Anything that is not a ParseError (a type mismatch names the key
-// and the two types, never the value) passes through unchanged, and the
-// original error stays on the chain for errors.As.
-func scrubTOMLError(err error) error {
-	var pe toml.ParseError
-	if err == nil || !errors.As(err, &pe) {
-		return err
-	}
-	line := pe.Position.Line
-	if line == 0 {
-		line = pe.Line
-	}
-	var b strings.Builder
-	b.WriteString("toml: line ")
-	b.WriteString(strconv.Itoa(line))
-	if pe.Position.Col > 0 {
-		b.WriteString(", column ")
-		b.WriteString(strconv.Itoa(pe.Position.Col))
-	}
-	if pe.LastKey != "" {
-		b.WriteString(" (last key ")
-		b.WriteString(termsafe.QuoteArgMax(pe.LastKey, 0))
-		b.WriteString(")")
-	}
-	b.WriteString(": ")
-	b.WriteString(termsafe.SafeLine(tomlQuotedFragment.ReplaceAllString(pe.Message, `"…"`)))
-	return termsafe.Categorical(b.String(), err)
 }
 
 // quoteConfigValue is how a validation error echoes a value from config.toml
