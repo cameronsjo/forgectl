@@ -17,6 +17,15 @@ import (
 // finish, with a generous limit so a hang reads red. None bounds how long a
 // render takes (#879); slowness comes from the render seams.
 
+// TestMain lifts the render deadline for the whole package, so a test that
+// renders a heavy document never meets the production 5 s deadline on a
+// slow or -race run and reads the too-slow notice as a wrong page. The
+// deadline tests set their own through trackRenders.
+func TestMain(m *testing.M) {
+	renderDeadline = time.Hour
+	os.Exit(m.Run())
+}
+
 // renderTracker installs the render seams for one test: renders block in
 // the goldmark stage while stall is set and until release is called, and
 // every render goroutine is counted in and out. At cleanup it releases
@@ -32,7 +41,7 @@ func trackRenders(t *testing.T, deadline time.Duration, stall bool) *renderTrack
 	t.Helper()
 	rt := &renderTracker{gate: make(chan struct{})}
 	oldDeadline := renderDeadline
-	oldStall, oldPost, oldExit := renderStallHook, renderPostHook, renderExitHook
+	oldAcquire, oldStall, oldEnd, oldPost, oldExit := renderAcquireHook, renderStallHook, renderGoldmarkEndHook, renderPostHook, renderExitHook
 	renderDeadline = deadline
 	renderStallHook = func() {
 		rt.starts.Add(1)
@@ -45,7 +54,7 @@ func trackRenders(t *testing.T, deadline time.Duration, stall bool) *renderTrack
 		rt.release()
 		waitFor(t, "every render goroutine to exit", func() bool { return rt.exits.Load() == rt.starts.Load() })
 		renderDeadline = oldDeadline
-		renderStallHook, renderPostHook, renderExitHook = oldStall, oldPost, oldExit
+		renderAcquireHook, renderStallHook, renderGoldmarkEndHook, renderPostHook, renderExitHook = oldAcquire, oldStall, oldEnd, oldPost, oldExit
 	})
 	return rt
 }
@@ -235,6 +244,16 @@ func TestRenderDeadline_PostProcessingRunsOutsideTheSlot(t *testing.T) {
 	trackRenders(t, time.Hour, false)
 	inPost := make(chan struct{})
 	postGate := make(chan struct{})
+	// Registered after trackRenders, so it runs first: a failing assertion
+	// below still frees the first render, and fails one test rather than
+	// hanging the suite.
+	var gateClosed atomic.Bool
+	openGate := func() {
+		if gateClosed.CompareAndSwap(false, true) {
+			close(postGate)
+		}
+	}
+	t.Cleanup(openGate)
 	var first atomic.Bool
 	renderPostHook = func() {
 		if first.CompareAndSwap(false, true) {
@@ -253,11 +272,20 @@ func TestRenderDeadline_PostProcessingRunsOutsideTheSlot(t *testing.T) {
 		r, err := RenderDocForContext(context.Background(), RootDocs, []byte("first *page*\n"), nil, nil)
 		firstDone <- result{r, err}
 	}()
-	<-inPost
+	select {
+	case <-inPost:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first render never reached post-processing")
+	}
 	renderDeadline = 200 * time.Millisecond
 	assertFormatted(t, mustRender(t, "second *page*\n"), "<em>page</em>")
-	close(postGate)
-	res := <-firstDone
+	openGate()
+	var res result
+	select {
+	case res = <-firstDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first render never finished")
+	}
 	if res.err != nil {
 		t.Fatal(res.err)
 	}
@@ -413,4 +441,146 @@ func TestRenderDeadline_MarkupGuardWaitIsInsideTheDeadline(t *testing.T) {
 	markupGuardMu.Unlock()
 	locked = false
 	waitFor(t, "the abandoned render goroutine to exit", func() bool { return rt.exits.Load() == 1 })
+}
+
+// The in-flight flag is clear before parsed closes: a request that sees its
+// goldmark stage end, and the next request it lets through, must never
+// find that stage still in flight. renderGoldmarkEndHook runs between the
+// two steps. Mutation: closing parsed before clearing the flag leaves the
+// flag set when the hook runs.
+func TestRenderDeadline_FlagClearsBeforeParsedCloses(t *testing.T) {
+	trackRenders(t, time.Hour, false)
+	var sawInFlight, ran atomic.Bool
+	renderGoldmarkEndHook = func() {
+		ran.Store(true)
+		sawInFlight.Store(renderInFlight.Load())
+	}
+	assertFormatted(t, mustRender(t, "order *check*\n"), "<em>check</em>")
+	if !ran.Load() {
+		t.Fatal("renderGoldmarkEndHook never ran")
+	}
+	if sawInFlight.Load() {
+		t.Fatal("renderInFlight was still set when the goldmark stage signalled its end")
+	}
+}
+
+// A request whose context ends while its goldmark stage runs stops
+// waiting at once, with ctx's error. Mutation: dropping the ctx case from
+// the goldmark wait holds the request until the (hour-long) deadline.
+func TestRenderDeadline_CancelDuringGoldmarkStage(t *testing.T) {
+	rt := trackRenders(t, time.Hour, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	errs := make(chan error, 1)
+	go func() {
+		_, err := RenderDocForContext(ctx, RootDocs, []byte("g\n"), nil, nil)
+		errs <- err
+	}()
+	waitFor(t, "the render to reach its goldmark stage", func() bool { return rt.starts.Load() == 1 })
+	cancel()
+	select {
+	case err := <-errs:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a request cancelled during its goldmark stage did not return")
+	}
+}
+
+// A request whose context ends while its post-processing runs stops
+// waiting at once, with ctx's error. Mutation: dropping the ctx case from
+// the post-processing wait holds the request until the deadline.
+func TestRenderDeadline_CancelDuringPostProcessing(t *testing.T) {
+	trackRenders(t, time.Hour, false)
+	inPost := make(chan struct{})
+	postGate := make(chan struct{})
+	var gateClosed atomic.Bool
+	openGate := func() {
+		if gateClosed.CompareAndSwap(false, true) {
+			close(postGate)
+		}
+	}
+	t.Cleanup(openGate)
+	renderPostHook = func() {
+		close(inPost)
+		<-postGate
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	errs := make(chan error, 1)
+	go func() {
+		_, err := RenderDocForContext(ctx, RootDocs, []byte("p\n"), nil, nil)
+		errs <- err
+	}()
+	select {
+	case <-inPost:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the render never reached post-processing")
+	}
+	cancel()
+	select {
+	case err := <-errs:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a request cancelled during post-processing did not return")
+	}
+}
+
+// A render whose request gave up during its goldmark stage skips
+// post-processing even when a slot is free. The acquire alone would pick
+// the free slot or the abandon at random; the check before it makes the
+// skip certain, and the rounds catch its absence. Mutation: dropping the
+// abandoned pre-check runs post-processing in about half the rounds.
+func TestRenderDeadline_AbandonedRenderSkipsPostProcessing(t *testing.T) {
+	for round := range 20 {
+		rt := trackRenders(t, 20*time.Millisecond, true)
+		var posts atomic.Int32
+		renderPostHook = func() { posts.Add(1) }
+		if r := mustRender(t, "abandon\n"); r.Notice != noticeRenderDeadline {
+			t.Fatalf("round %d: notice = %q, want %q", round, r.Notice, noticeRenderDeadline)
+		}
+		rt.release()
+		waitFor(t, "the abandoned render goroutine to exit", func() bool { return rt.exits.Load() == rt.starts.Load() })
+		if n := posts.Load(); n != 0 {
+			t.Fatalf("round %d: an abandoned render ran post-processing", round)
+		}
+	}
+}
+
+// A render goroutine uses the seams its request captured, never the
+// globals: it can outlive its request and its test, and a global read then
+// races the next test's writes. Swapping the globals while a render is
+// stalled makes a global read call the wrong hook every time, where the
+// race itself shows only now and then. Mutations: reading renderExitHook
+// or renderPostHook on the goroutine calls the swapped-in hook.
+func TestRenderDeadline_GoroutineUsesCapturedHooks(t *testing.T) {
+	rt := trackRenders(t, time.Hour, true)
+	var captured, swapped atomic.Int32
+	renderPostHook = func() { captured.Add(1) }
+	errs := make(chan error, 1)
+	go func() {
+		_, err := RenderDocForContext(context.Background(), RootDocs, []byte("hooks\n"), nil, nil)
+		errs <- err
+	}()
+	waitFor(t, "the render to reach its goldmark stage", func() bool { return rt.starts.Load() == 1 })
+	// What the next test's trackRenders would do, while this render runs.
+	renderPostHook = func() { swapped.Add(1) }
+	renderExitHook = func() { swapped.Add(1) }
+	rt.release()
+	select {
+	case err := <-errs:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("render did not finish")
+	}
+	waitFor(t, "the render goroutine to exit", func() bool { return rt.exits.Load()+swapped.Load() >= 1 })
+	if n := swapped.Load(); n != 0 {
+		t.Fatalf("the render goroutine called %d hook(s) set after it started", n)
+	}
+	if captured.Load() != 1 || rt.exits.Load() != 1 {
+		t.Fatalf("captured post hook ran %d time(s), exit hook %d, want 1 each", captured.Load(), rt.exits.Load())
+	}
 }

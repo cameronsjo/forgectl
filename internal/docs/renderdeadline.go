@@ -67,15 +67,31 @@ var renderInFlight atomic.Bool
 // Test seams; production never sets them. renderAcquireHook runs on the
 // request's goroutine just before it waits for renderMu. The rest run on
 // the render goroutine: renderStallHook before the goldmark stage,
-// renderPostHook after it and before the post-processing, and
-// renderExitHook as the goroutine exits, after it has handed back its
-// result.
+// renderGoldmarkEndHook between clearing renderInFlight and closing
+// parsed, renderPostHook before the post-processing, and renderExitHook as
+// the goroutine exits, after it has handed back its result. The request
+// reads them into renderHooks before it starts the goroutine, which uses
+// only that copy: it can outlive its request and its test, and must never
+// read a global the next test is setting.
 var (
-	renderAcquireHook func()
-	renderStallHook   func()
-	renderPostHook    func()
-	renderExitHook    func()
+	renderAcquireHook     func()
+	renderStallHook       func()
+	renderGoldmarkEndHook func()
+	renderPostHook        func()
+	renderExitHook        func()
 )
+
+// renderHooks is one render goroutine's copy of the seams above.
+type renderHooks struct {
+	stall, goldmarkEnd, post, exit func()
+}
+
+// run calls hook when it is set.
+func (renderHooks) run(hook func()) {
+	if hook != nil {
+		hook()
+	}
+}
 
 // The data-forgectl-notice value of each page shown as source text.
 const (
@@ -144,11 +160,10 @@ func renderBounded(ctx context.Context, md goldmark.Markdown, source []byte, kin
 	// Buffered, so an abandoned goroutine's send never blocks and the
 	// goroutine always exits.
 	done := make(chan renderOutcome, 1)
+	hooks := renderHooks{stall: renderStallHook, goldmarkEnd: renderGoldmarkEndHook, post: renderPostHook, exit: renderExitHook}
 	go func() {
-		done <- runRender(md, source, kind, resolve, parsed, abandoned)
-		if hook := renderExitHook; hook != nil {
-			hook()
-		}
+		done <- runRender(md, source, kind, resolve, parsed, abandoned, hooks)
+		hooks.run(hooks.exit)
 	}()
 	select {
 	case <-parsed:
@@ -173,12 +188,13 @@ func renderBounded(ctx context.Context, md goldmark.Markdown, source []byte, kin
 // next request after it, never see that stage as still in flight. A panic
 // becomes an error: a render goroutine is not under net/http's per-request
 // recover, so one would otherwise take the whole server down.
-func runRender(md goldmark.Markdown, source []byte, kind RootKind, resolve wikilinkResolver, parsed chan<- struct{}, abandoned <-chan struct{}) (out renderOutcome) {
+func runRender(md goldmark.Markdown, source []byte, kind RootKind, resolve wikilinkResolver, parsed chan<- struct{}, abandoned <-chan struct{}, hooks renderHooks) (out renderOutcome) {
 	goldmarkDone := false
 	endGoldmark := func() {
 		if !goldmarkDone {
 			goldmarkDone = true
 			renderInFlight.Store(false)
+			hooks.run(hooks.goldmarkEnd)
 			close(parsed)
 		}
 	}
@@ -188,9 +204,7 @@ func runRender(md goldmark.Markdown, source []byte, kind RootKind, resolve wikil
 		}
 		endGoldmark()
 	}()
-	if hook := renderStallHook; hook != nil {
-		hook()
-	}
+	hooks.run(hooks.stall)
 	// A document goldmark would take superlinear time on is shown as plain
 	// text instead. The guard measures the block structure md itself gives
 	// source (markupguard.go). It runs here, inside the deadline, because
@@ -219,9 +233,7 @@ func runRender(md goldmark.Markdown, source []byte, kind RootKind, resolve wikil
 		return renderOutcome{err: errRenderAbandoned}
 	}
 	defer func() { <-renderPostSlots }()
-	if hook := renderPostHook; hook != nil {
-		hook()
-	}
+	hooks.run(hooks.post)
 	return renderOutcome{html: renderPost(g, kind), hidden: g.hidden}
 }
 
