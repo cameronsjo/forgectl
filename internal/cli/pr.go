@@ -560,8 +560,8 @@ func newPrOpenCmd(client *pr.Client) *cobra.Command {
 // fires lands in a handler a default install discards, and the command's exit
 // would otherwise read as an ordinary failure with nothing removed and nothing
 // explained. parked says whether the record really was parked in needs-repair;
-// a legacy record cannot be, and claiming otherwise would send the operator
-// looking for a state that was never written.
+// a failed park write leaves it as it was, and claiming otherwise would send
+// the operator looking for a state that was never written.
 func windowKillTimeoutNote(target string, parked bool) string {
 	where := "a session"
 	if target != "" {
@@ -576,10 +576,15 @@ func windowKillTimeoutNote(target string, parked bool) string {
 		"Once tmux responds, run 'forgectl pr teardown' again, or see 'forgectl pr repair'", where, state)
 }
 
-// noteWindowKillTimeout prints windowKillTimeoutNote when err is that failure.
-func noteWindowKillTimeout(cmd *cobra.Command, err error, target string) {
-	if errors.Is(err, pr.ErrWindowKillTimedOut) {
-		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), windowKillTimeoutNote(target, !errors.Is(err, pr.ErrRecordNotParked)))
+// noteTeardownRefusal prints, for a single `pr teardown`, the same
+// per-session note `pr cleanup` prints when a teardown failed closed — a
+// timeout, an unreadable window state, or a duplicate window name — so the
+// operator learns whether the record is now needs-repair. Other failures get
+// no note; the returned error already says everything.
+func noteTeardownRefusal(cmd *cobra.Command, err error, target string) {
+	if errors.Is(err, pr.ErrWindowKillTimedOut) || errors.Is(err, pr.ErrWindowStateUnreadable) ||
+		errors.Is(err, tmux.ErrAmbiguousWindow) {
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), cleanupFailureLine(pr.CleanupFailure{Path: target, Err: err}))
 	}
 }
 
@@ -594,7 +599,7 @@ func newPrTeardownCmd(client *pr.Client) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := client.Teardown(cmd.Context(), args[0]); err != nil {
-				noteWindowKillTimeout(cmd, err, args[0])
+				noteTeardownRefusal(cmd, err, args[0])
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "torn down %s\n", args[0])
@@ -645,9 +650,17 @@ func cleanupFailureLine(f pr.CleanupFailure) string {
 		if errors.Is(f.Err, pr.ErrRecordNotParked) {
 			state = "the record could not be parked as needs-repair and was left as it was"
 		}
-		return fmt.Sprintf("refused %s: more than one tmux window carries its review's name, so neither was killed: "+
+		return fmt.Sprintf("refused %s: more than one tmux window carries its review's name, so none was killed: "+
 			"nothing was removed and %s. Close the window that is not the review, then run 'forgectl pr teardown' "+
 			"again, or see 'forgectl pr repair'", termsafe.QuotePathIfUnsafe(f.Path), state)
+	case errors.Is(f.Err, pr.ErrWindowStateUnreadable):
+		state := "the record is parked as needs-repair"
+		if errors.Is(f.Err, pr.ErrRecordNotParked) {
+			state = "the record could not be parked as needs-repair and was left as it was"
+		}
+		return fmt.Sprintf("refused %s: tmux could not say whether its review window still exists, so it was not "+
+			"treated as gone: nothing was removed and %s (%s). Once tmux reads cleanly, run 'forgectl pr teardown' "+
+			"again, or see 'forgectl pr repair'", termsafe.QuotePathIfUnsafe(f.Path), state, termsafe.SafeLine(f.Err.Error()))
 	default:
 		return fmt.Sprintf("failed %s: %s", termsafe.QuotePathIfUnsafe(f.Path), termsafe.SafeLine(f.Err.Error()))
 	}
