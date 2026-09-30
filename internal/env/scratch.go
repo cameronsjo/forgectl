@@ -29,10 +29,52 @@
 package env
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
+
+// errScratchNotEmpty reports a scratch directory left in place because
+// something besides its .gitignore is still inside it.
+var errScratchNotEmpty = errors.New("the scratch directory still holds something besides its .gitignore, so it and its .gitignore were left in place")
+
+// scratchIgnoreRemovable is the teardown rule every scratch directory follows,
+// whichever code removes it: the .gitignore is removed last, and only when it
+// is the directory's sole remaining entry (or the directory is already
+// empty). While anything else is inside, above all a plaintext file whose
+// unlink failed, the .gitignore stays, so git still neither lists nor stages
+// it, and the next write's leftover scan still refuses on the directory.
+// Removing the .gitignore first would turn exactly that failure into a
+// committable file.
+func scratchIgnoreRemovable(names []string) bool {
+	return len(names) == 0 || (len(names) == 1 && names[0] == ScratchIgnoreName)
+}
+
+// RemoveScratchDir removes the scratch directory dir by the teardown rule
+// (scratchIgnoreRemovable): its .gitignore and then the directory, only when
+// nothing else is left in it. It removes no other entry; a caller empties the
+// directory of its own files first. When something is left, it returns an
+// error and leaves the directory and its .gitignore in place.
+func RemoveScratchDir(dir string) error {
+	entries, err := os.ReadDir(filepath.Clean(dir))
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if !scratchIgnoreRemovable(names) {
+		return errScratchNotEmpty
+	}
+	// The rule above is the only gate: nothing below checks again.
+	if err := os.Remove(filepath.Join(dir, ScratchIgnoreName)); err != nil && !errors.Is(err, fs.ErrNotExist) { //nolint:gosec // G703: inside a scratch directory this process created
+		return err
+	}
+	return os.Remove(filepath.Clean(dir)) //nolint:gosec // G703: a scratch directory this process created
+}
 
 // ScratchIgnoreName and ScratchIgnore are the .gitignore every scratch
 // directory carries from the moment it exists. See the file comment.
@@ -84,12 +126,19 @@ func MakeScratchDir(parent, pattern string) (string, error) {
 	}
 	// MkdirTemp creates 0700 before umask, and umask can only narrow it, so
 	// this chmod is about an unusual umask that strips the owner's own bits.
+	// Before the .gitignore exists nothing inside is this process's, so a
+	// failure removes the directory only if it is still empty.
 	if err := os.Chmod(dir, scratchDirMode); err != nil { //nolint:gosec // G302: a directory needs 0700; 0600 makes it non-traversable
-		_ = os.RemoveAll(dir) //nolint:gosec // G703: dir is the MkdirTemp directory this process just created
+		_ = os.Remove(dir) //nolint:gosec // G703: dir is the MkdirTemp directory this process just created
 		return "", fmt.Errorf("secure: %w", err)
 	}
 	if err := WriteFileExclusive(filepath.Join(dir, ScratchIgnoreName), []byte(ScratchIgnore)); err != nil {
-		_ = os.RemoveAll(dir) //nolint:gosec // G703: dir is the MkdirTemp directory this process just created
+		if errors.Is(err, fs.ErrExist) {
+			// Not this process's file: never unlink it.
+			_ = os.Remove(dir) //nolint:gosec // G703: dir is the MkdirTemp directory this process just created
+		} else {
+			_ = RemoveScratchDir(dir)
+		}
 		return "", fmt.Errorf("write its .gitignore: %w", err)
 	}
 	return dir, nil

@@ -16,6 +16,9 @@ package env
 //       staged content carries the value; `git status` does not list it
 //   [x] The next set refuses, naming the directory, and removes nothing
 //   [x] A successful write leaves no scratch directory behind
+//   [x] A failed write whose temp-file unlink also fails keeps the
+//       .gitignore beside the stranded document; `git add -A` stages nothing
+//   [x] RemoveScratchDir removes the .gitignore only when it is alone
 
 import (
 	"os"
@@ -182,5 +185,97 @@ func TestSuccessfulWriteLeavesNoScratchDirectory(t *testing.T) {
 	// And the next write is not refused on anything the first one left.
 	if err := setOn(t, dir, ".env"); err != nil {
 		t.Errorf("a second set was refused: %v", err)
+	}
+}
+
+// A failed write whose temp-file unlink also fails (EIO, a read-only
+// remount) leaves the document in the scratch directory. The .gitignore must
+// outlive it, or `git add -A` commits the document: the teardown removes the
+// .gitignore last, and only when it is the sole entry left (the #750 review).
+func TestFailedWriteWhoseUnlinkFailsKeepsTheIgnore(t *testing.T) {
+	repo := envGitRepo(t)
+	prev := unlinkScratchEntry
+	unlinkScratchEntry = func(sub *dirPin, name string) error {
+		if strings.HasPrefix(name, scratchTempPrefix) {
+			return os.ErrPermission
+		}
+		return prev(sub, name)
+	}
+	t.Cleanup(func() { unlinkScratchEntry = prev })
+
+	// A non-empty directory at the target's name makes the rename fail, so
+	// writeAtomic takes its error path with the whole document on disk.
+	if err := os.MkdirAll(filepath.Join(repo, "blocked", "inside"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tg := pinnedTarget(t, repo, "blocked")
+	if _, err := writeAtomic(tg, []byte("K="+leftoverSecret+"\n")); err == nil {
+		t.Fatal("writeAtomic succeeded over a non-empty directory")
+	}
+
+	var scratch string
+	entries, err := os.ReadDir(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), envScratchPrefix) {
+			scratch = e.Name()
+		}
+	}
+	if scratch == "" {
+		t.Fatal("the scratch directory is gone although its temp file could not be unlinked")
+	}
+	inside, err := os.ReadDir(filepath.Join(repo, scratch))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range inside {
+		names = append(names, e.Name())
+	}
+	if len(names) != 2 || names[0] != ScratchIgnoreName || !strings.HasPrefix(names[1], scratchTempPrefix) {
+		t.Fatalf("the scratch directory holds %v, want its .gitignore beside the stranded temp file", names)
+	}
+
+	if out, err := runEnvGit(t, repo, "add", "-A"); err != nil {
+		t.Fatalf("git add -A: %v\n%s", err, out)
+	}
+	staged, err := runEnvGit(t, repo, "diff", "--cached", "--name-only")
+	if err != nil {
+		t.Fatalf("git diff --cached: %v\n%s", err, staged)
+	}
+	if !strings.Contains(staged, "control.txt") {
+		t.Fatalf("git add -A staged %q; the control file is missing, so the probe proves nothing", staged)
+	}
+	if strings.Contains(staged, envScratchPrefix) {
+		t.Errorf("git staged the stranded document: %q", staged)
+	}
+}
+
+// RemoveScratchDir, the path-based form of the rule, leaves the .gitignore and
+// the directory beside anything else, and removes both when it is alone.
+func TestRemoveScratchDirRemovesTheIgnoreOnlyWhenAlone(t *testing.T) {
+	dir, err := MakeScratchDir(t.TempDir(), "scratch-")
+	if err != nil {
+		t.Fatalf("MakeScratchDir: %v", err)
+	}
+	plant(t, filepath.Join(dir, "stranded"))
+	if err := RemoveScratchDir(dir); err == nil {
+		t.Error("RemoveScratchDir reported success with an entry left inside")
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, ScratchIgnoreName)); err != nil || string(got) != ScratchIgnore { //nolint:gosec // G304: a fixed name under t.TempDir
+		t.Fatalf("the .gitignore did not survive beside a stranded entry: %q, %v", got, err)
+	}
+	assertStillThere(t, filepath.Join(dir, "stranded"))
+
+	if err := os.Remove(filepath.Join(dir, "stranded")); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveScratchDir(dir); err != nil {
+		t.Fatalf("RemoveScratchDir with only the .gitignore left: %v", err)
+	}
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Errorf("the scratch directory is still there: %v", err)
 	}
 }

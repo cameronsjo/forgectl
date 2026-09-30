@@ -266,13 +266,6 @@ func (d *dirPin) createTemp(prefix string) (*os.File, string, error) {
 	return nil, "", errors.New("could not create a uniquely named temp file")
 }
 
-// rename moves from to to, both inside the pinned directory. Renameat with the
-// same descriptor on both sides is what keeps the swap atomic AND anchored:
-// neither name is re-resolved from the process working directory.
-func (d *dirPin) rename(from, to string) error {
-	return unix.Renameat(d.fd, from, d.fd, to)
-}
-
 // names lists the pinned directory's entries.
 //
 // It opens "." relative to the descriptor rather than reading the descriptor
@@ -296,7 +289,7 @@ func (d *dirPin) remove(name string) error {
 
 // mkScratchDir creates a uniquely named 0700 directory inside the pinned
 // directory, writes its `*` .gitignore exclusively, and returns a pin on the
-// new directory with its name. On any failure it removes what it created.
+// new directory with its name. On a failure it removes only what it created.
 // See scratch.go for why the .gitignore comes first.
 //
 // Everything is relative to a descriptor, for the reason dirPin exists: the
@@ -305,6 +298,10 @@ func (d *dirPin) remove(name string) error {
 // the two calls is refused), and the .gitignore is created with openat
 // against the new directory's own descriptor. MakeScratchDir, which takes
 // paths, is the --sops work directory's version of the same steps.
+//
+// Between mkdirat and openat the name could be replaced by another directory
+// of the same user. So the opened directory must be owned by this process's
+// user and empty, or it is not the one just made, and it is left alone.
 func (d *dirPin) mkScratchDir(prefix string) (*dirPin, string, error) {
 	buf := make([]byte, tempNameBytes)
 	name := ""
@@ -327,37 +324,75 @@ func (d *dirPin) mkScratchDir(prefix string) (*dirPin, string, error) {
 	}
 	fd, err := unix.Openat(d.fd, name, dirFlags, 0)
 	if err != nil {
+		// rmdir, which fails on anything that is not an empty directory, so
+		// it can only remove the one made above.
 		_ = unix.Unlinkat(d.fd, name, unix.AT_REMOVEDIR)
 		return nil, "", err
 	}
 	sub := &dirPin{fd: fd}
-	fail := func(err error) (*dirPin, string, error) {
-		_ = d.removeScratchDir(sub, name)
+	// Before the .gitignore exists, nothing in the directory is this
+	// process's, so a failure removes only the directory, and only if empty.
+	abandon := func(err error) (*dirPin, string, error) {
+		sub.close()
+		_ = unix.Unlinkat(d.fd, name, unix.AT_REMOVEDIR)
 		return nil, "", err
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return abandon(err)
+	}
+	if int(st.Uid) != unix.Geteuid() {
+		return abandon(errors.New("the new scratch directory is not owned by this user"))
+	}
+	if names, err := sub.names(); err != nil || len(names) != 0 {
+		return abandon(errors.New("the new scratch directory is not empty"))
 	}
 	// mkdirat's mode passes through umask, which can only narrow 0700, but an
 	// unusual umask can narrow it past what forgectl itself needs to write.
 	if err := unix.Fchmod(fd, scratchDirMode); err != nil {
-		return fail(err)
+		return abandon(err)
 	}
+	// O_EXCL: an EEXIST here is a file this process did not create, and it is
+	// never unlinked.
 	ignoreFd, err := openatCreate(fd, ScratchIgnoreName, unix.O_EXCL|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
-		return fail(err)
+		return abandon(err)
 	}
 	if err := writeAndClose(os.NewFile(uintptr(ignoreFd), ScratchIgnoreName), []byte(ScratchIgnore)); err != nil {
-		return fail(err)
+		_ = d.removeScratchDir(sub, name)
+		return nil, "", err
 	}
 	return sub, name, nil
 }
 
-// removeScratchDir removes the scratch directory name, which sub pins, once
-// the file written in it has been renamed out. It unlinks the .gitignore,
-// releases sub, then removes the directory itself; the last step fails if
-// anything else is still inside, which is the point: nothing here recurses
-// into a directory that might hold plaintext it did not expect.
-func (d *dirPin) removeScratchDir(sub *dirPin, name string) error {
-	_ = unix.Unlinkat(sub.fd, ScratchIgnoreName, 0)
-	sub.close()
+// unlinkScratchEntry unlinks one entry this process created in a scratch
+// directory. It is a variable only so tests can make one unlink fail, the way
+// EIO or a read-only remount would, and prove the .gitignore outlives it.
+var unlinkScratchEntry = func(sub *dirPin, name string) error { return sub.remove(name) }
+
+// removeScratchDir tears down the scratch directory name, which sub pins, and
+// releases sub. It unlinks each of own, the entries this process created
+// there, then applies the teardown rule (scratchIgnoreRemovable): the
+// .gitignore goes last, and only when nothing else is left. If anything is,
+// an own entry whose unlink failed or something this process never made, the
+// .gitignore and the directory stay, so a stranded plaintext stays ignored by
+// git and the next write's leftover scan refuses on it.
+func (d *dirPin) removeScratchDir(sub *dirPin, name string, own ...string) error {
+	defer sub.close()
+	for _, n := range own {
+		_ = unlinkScratchEntry(sub, n)
+	}
+	names, err := sub.names()
+	if err != nil {
+		return err
+	}
+	if !scratchIgnoreRemovable(names) {
+		return errScratchNotEmpty
+	}
+	// The rule above is the only gate: nothing below checks again.
+	if err := sub.remove(ScratchIgnoreName); err != nil && !errors.Is(err, unix.ENOENT) {
+		return err
+	}
 	return unix.Unlinkat(d.fd, name, unix.AT_REMOVEDIR)
 }
 

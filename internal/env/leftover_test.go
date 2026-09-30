@@ -111,6 +111,9 @@ func TestScratchNamesAreNotEnvFilesAndFitNameMax(t *testing.T) {
 	}
 }
 
+// plantedScratchTemp is the temp file planted in a scoped scratch directory.
+const plantedScratchTemp = scratchTempPrefix + "QRSTUVWXYZ234567.tmp"
+
 func TestScanRefusesScopedLeftovers(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -124,7 +127,7 @@ func TestScanRefusesScopedLeftovers(t *testing.T) {
 				if err := os.Mkdir(filepath.Join(dir, n), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				plant(t, filepath.Join(dir, n, scratchTempPrefix+"QRSTUVWXYZ234567.tmp"))
+				plant(t, filepath.Join(dir, n, plantedScratchTemp))
 				return []string{n}
 			},
 			want: "the scratch directory of an interrupted write",
@@ -186,8 +189,13 @@ func TestScanRefusesScopedLeftovers(t *testing.T) {
 				}
 			}
 			for _, n := range named {
-				if info, err := os.Lstat(filepath.Join(dir, n)); err == nil && info.IsDir() && strings.HasPrefix(n, sopsScratchPrefix) {
-					assertStillThere(t, filepath.Join(dir, n, "value"))
+				if info, err := os.Lstat(filepath.Join(dir, n)); err == nil && info.IsDir() {
+					switch {
+					case strings.HasPrefix(n, sopsScratchPrefix):
+						assertStillThere(t, filepath.Join(dir, n, "value"))
+					case strings.HasPrefix(n, envScratchPrefix):
+						assertStillThere(t, filepath.Join(dir, n, plantedScratchTemp))
+					}
 				}
 			}
 			if !strings.Contains(msg, "Nothing was removed") {

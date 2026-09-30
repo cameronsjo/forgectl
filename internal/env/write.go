@@ -24,8 +24,9 @@ const tempPrefix = ".env-"
 
 // envScratchPrefix begins the name of writeAtomic's scratch directory. It
 // deliberately does NOT match IsEnvFileName, so a leftover cannot later be
-// reached through --file without --any-file, and it shares no prefix with
-// sopsScratchPrefix, which internal/cli's __sops-edit checks on its own. The
+// reached through --file without --any-file, and neither it nor
+// sopsScratchPrefix (which internal/cli's __sops-edit checks on its own) is a
+// prefix of the other, so no name matches both. The
 // full name also carries the target's scope tag (Target.envScratchDirPrefix),
 // so a leftover can be attributed to the target whose lock covers it. See
 // leftover.go.
@@ -57,8 +58,9 @@ var scratchWritten = func(string) {}
 // is then an untracked file that `git add -A` commits. The scratch directory
 // carries a `*` .gitignore written before the temp file exists, so git neither
 // lists nor stages what a killed run leaves (cameronsjo/forgectl#737, the same
-// mechanism as the --sops work directory's, #698). The rename stays atomic:
-// the directory is a child of the target's directory, on the same filesystem.
+// mechanism as the --sops work directory's, #698). The rename stays atomic
+// because the directory is a child of the target's directory, so both names
+// are on the same filesystem.
 //
 // Every filesystem call goes through target.dir, or through the scratch
 // directory's own descriptor, rather than through a path. That is not
@@ -79,9 +81,13 @@ var scratchWritten = func(string) {}
 // below replaces the LINK, so following one would report on an inode forgectl
 // never writes.
 //
-// A scratch directory that will not come down after a successful rename holds
-// only its .gitignore, never the document, so it is not reported as a failed
-// write; the next write's leftover scan names it.
+// Teardown follows the scratch rule (scratchIgnoreRemovable): the temp file
+// is unlinked, and the .gitignore and the directory go only if nothing else is
+// left. If the unlink fails (EIO, a read-only remount), the document stays
+// under its .gitignore, still ignored by git, and the next write's leftover
+// scan refuses on it. After a successful rename the temp file is already
+// gone, so a directory that will not come down then is not reported as a
+// failed write; the scan names it.
 //
 // Every error here carries paths only — data is never interpolated into any
 // error string.
@@ -95,16 +101,15 @@ func writeAtomic(target Target, data []byte) (tightened bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("create a scratch directory beside %s: %w", target.Rel(), err)
 	}
-	removeScratch := func() { _ = target.dir.removeScratchDir(scratch, scratchName) }
 
 	tmp, tmpName, err := scratch.createTemp(scratchTempPrefix)
 	if err != nil {
-		removeScratch()
-		return false, fmt.Errorf("create a temp file beside %s: %w", target.Rel(), err)
+		_ = target.dir.removeScratchDir(scratch, scratchName)
+		return false, fmt.Errorf("create a temp file in the scratch directory beside %s: %w", target.Rel(), err)
 	}
+	removeScratch := func() { _ = target.dir.removeScratchDir(scratch, scratchName, tmpName) }
 	cleanup := func() {
 		_ = tmp.Close()
-		_ = scratch.remove(tmpName)
 		removeScratch()
 	}
 
@@ -117,18 +122,18 @@ func writeAtomic(target Target, data []byte) (tightened bool, err error) {
 		return false, fmt.Errorf("sync %s: %w", target.Rel(), err)
 	}
 	if err := tmp.Close(); err != nil {
-		_ = scratch.remove(tmpName)
 		removeScratch()
 		return false, fmt.Errorf("close %s: %w", target.Rel(), err)
 	}
 	scratchWritten(scratchName)
 
 	if err := target.dir.renameFrom(scratch, tmpName, target.base); err != nil {
-		_ = scratch.remove(tmpName)
 		removeScratch()
 		return false, fmt.Errorf("rename into place %s: %w", target.Rel(), err)
 	}
-	removeScratch()
+	// The temp file is renamed out, so there is nothing of this process's
+	// left to unlink but the .gitignore.
+	_ = target.dir.removeScratchDir(scratch, scratchName)
 
 	tightened = hadPrior && priorMode&^os.FileMode(secureMode) != 0
 	return tightened, nil

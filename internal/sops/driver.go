@@ -659,4 +659,28 @@ func (w *workDir) pruneToBackup() bool {
 	return sawBackup
 }
 
-func (w *workDir) cleanup() { _ = os.RemoveAll(w.dir) }
+// cleanup removes every entry of the work directory except its .gitignore,
+// then the .gitignore and the directory by the scratch teardown rule
+// (env.RemoveScratchDir): only when nothing else is left. A plaintext entry
+// that cannot be removed therefore stays under the .gitignore, still ignored
+// by git, and the next run's leftover scan refuses on it. os.RemoveAll on the
+// whole directory would delete the .gitignore and leave that entry
+// committable.
+func (w *workDir) cleanup() {
+	entries, err := os.ReadDir(w.dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.Name() == env.ScratchIgnoreName && e.Type().IsRegular() {
+			continue
+		}
+		_ = removeWorkDirEntry(filepath.Join(w.dir, e.Name()))
+	}
+	_ = env.RemoveScratchDir(w.dir)
+}
+
+// removeWorkDirEntry removes one entry of the work directory, recursively. It
+// is a variable only so a test can make one removal fail, the way EIO or a
+// read-only remount would, and prove the .gitignore outlives it.
+var removeWorkDirEntry = os.RemoveAll

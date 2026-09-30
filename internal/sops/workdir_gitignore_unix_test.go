@@ -16,6 +16,8 @@ package sops
 //       and removes nothing
 //   [x] stage fails, writing nothing through it, on anything already at the
 //       backup, value or nonce name (not git: the #736 review's O_EXCL nit)
+//   [x] cleanup keeps the .gitignore beside an entry whose removal fails, and
+//       `git add -A` stages nothing
 
 import (
 	"os"
@@ -150,5 +152,61 @@ func TestStageRefusesAnythingAlreadyAtItsNames(t *testing.T) {
 				t.Errorf("stage wrote %d bytes through the symlink planted at %s", len(got), name)
 			}
 		})
+	}
+}
+
+// cleanup removes everything but the .gitignore, then the .gitignore only
+// when it is alone. A plaintext entry whose removal fails stays under it,
+// so `git add -A` still stages nothing (the #750 review; os.RemoveAll on the
+// whole directory deleted the .gitignore and left the entry committable).
+func TestCleanupKeepsTheIgnoreBesideAnEntryThatWillNotGo(t *testing.T) {
+	repo, _ := gitRepo(t)
+	target, err := env.ResolveTarget("secrets.sops.yaml", repo)
+	if err != nil {
+		t.Fatalf("ResolveTarget: %v", err)
+	}
+	defer target.Close()
+	work, err := newWorkDir(target)
+	if err != nil {
+		t.Fatalf("newWorkDir: %v", err)
+	}
+	if err := work.stage([]byte(signalFixture), "s3cr3t-value"); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+
+	prev := removeWorkDirEntry
+	removeWorkDirEntry = func(path string) error {
+		if filepath.Base(path) == "value" {
+			return os.ErrPermission
+		}
+		return prev(path)
+	}
+	t.Cleanup(func() { removeWorkDirEntry = prev })
+	work.cleanup()
+
+	entries, err := os.ReadDir(work.dir)
+	if err != nil {
+		t.Fatalf("the work directory is gone although its value could not be removed: %v", err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != 2 || names[0] != env.ScratchIgnoreName || names[1] != "value" {
+		t.Fatalf("the work directory holds %v, want only [%s value]", names, env.ScratchIgnoreName)
+	}
+
+	if out, err := runGit(t, repo, "add", "-A"); err != nil {
+		t.Fatalf("git add -A: %v\n%s", err, out)
+	}
+	staged, err := runGit(t, repo, "diff", "--cached", "--name-only")
+	if err != nil {
+		t.Fatalf("git diff --cached: %v\n%s", err, staged)
+	}
+	if !strings.Contains(staged, "secrets.sops.yaml") {
+		t.Fatalf("git add -A staged %q; the control file is missing, so the probe proves nothing", staged)
+	}
+	if strings.Contains(staged, ".forgectl-sops-") {
+		t.Errorf("git staged the stranded plaintext: %q", staged)
 	}
 }

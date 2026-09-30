@@ -240,7 +240,7 @@ const (
 	// must never also keep plaintext: a directory that will not prune down to
 	// the backup is removed whole, and one holding an entry that cannot be
 	// deleted loses everything else, the backup included, and stays behind
-	// (docs/commands/env.md).
+	// under its .gitignore (docs/commands/env.md).
 	//
 	// On a normal return the runner has waited for every sops child, so
 	// nothing writes into a kept directory afterwards; a panic inside the
