@@ -629,6 +629,14 @@ func TestLogRepo(t *testing.T) {
 		{"https://x:SECRETTOK@host:notaport/o/r", unloggableRepo},
 		{"https://x:SECRET/TOK@host/o/r", unloggableRepo},
 		{"https://github.com/o/r.git", "https://github.com/o/r.git"},
+		// Go parses these with an empty Host and a nil User, and git sends the
+		// userinfo as Basic auth: the structural rule must still find it.
+		{"http:///USER:SECRETTOK@host:8080/r", "http:///[redacted]@host:8080/r"},
+		{"https:////SECRETTOK@host/r", "https:////[redacted]@host/r"},
+		{"https:///SECRETTOK@host/r", "https:///[redacted]@host/r"},
+		{"https://////SECRETTOK@host/r", "https://////[redacted]@host/r"},
+		{"https://SECRETTOK@host?q=a@b", "https://[redacted]@host?q=a@b"},
+		{"https://host/p@SECRETNOT", "https://host/p@SECRETNOT"},
 		{"user:SECRETTOK@github.com:/o/r://x", "[redacted]@github.com:/o/r://x"},
 		{"git@github.com:o/r.git", "[redacted]@github.com:o/r.git"},
 		{"SECRETTOK:pw@github.com:o/r.git", "[redacted]@github.com:o/r.git"},

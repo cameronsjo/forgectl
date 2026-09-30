@@ -97,8 +97,8 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 	return dir, nil
 }
 
-// unloggableRepo stands in for a URL-shaped repo that does not parse: its
-// userinfo cannot be located, so none of it is logged.
+// unloggableRepo stands in for a URL-shaped repo that does not parse, so
+// none of it is logged.
 const unloggableRepo = "[unparseable repo URL withheld]"
 
 // logRepo renders repo for a log line without any credential it carries
@@ -107,41 +107,70 @@ const unloggableRepo = "[unparseable repo URL withheld]"
 // masking covers only KEY=VALUE elements a caller registers, not these
 // fields.
 //
-//   - A URL (a hierarchical "scheme://host" parse) has its WHOLE userinfo
-//     replaced, username included: url.URL.Redacted keeps the username, which
-//     is where a bare-username token sits. One that does not parse is
-//     withheld entirely.
-//   - A local path (the forms isLocalRepo accepts by prefix) is logged as is.
-//   - Anything else is treated as scp-like ([user@]host:path): everything up
-//     to the last '@' before the first '/' is replaced. That over-redacts an
-//     '@' in a relative path's first component, which is the safe direction.
+// A local path (hasLocalPathPrefix) is logged as is. A "://" form that
+// net/url cannot parse is withheld entirely. Everything else goes through
+// redactUserinfo, one structural rule with no per-form cases. A parse is NOT
+// trusted to have found the userinfo: Go reads http:///USER:PASS@host/r with
+// an empty Host and a nil User, while git sends USER:PASS as Basic auth.
 func logRepo(repo string) string {
-	if strings.Contains(repo, "://") {
-		u, err := url.Parse(repo)
-		switch {
-		case err != nil:
-			return unloggableRepo
-		case u.User != nil:
-			u.User = nil
-			return u.Scheme + "://" + exec.Redacted + "@" + strings.TrimPrefix(u.String(), u.Scheme+"://")
-		case u.Host != "":
-			return repo
-		}
-		// An opaque parse (scheme:rest with "://" only later, as in
-		// user:TOKEN@host:/p://x) has no userinfo field to clear; the
-		// scp-like rule below handles it.
-	}
-	if strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, "./") || strings.HasPrefix(repo, "../") || repo == "." {
+	if hasLocalPathPrefix(repo) {
 		return repo
 	}
-	head := repo
-	if i := strings.IndexByte(repo, '/'); i >= 0 {
-		head = repo[:i]
+	if strings.Contains(repo, "://") {
+		if _, err := url.Parse(repo); err != nil {
+			return unloggableRepo
+		}
 	}
-	if at := strings.LastIndexByte(head, '@'); at >= 0 {
-		return exec.Redacted + "@" + repo[at+1:]
+	return redactUserinfo(repo)
+}
+
+// redactUserinfo replaces the userinfo of a URL or scp-like remote with
+// [redacted], username included. url.URL.Redacted keeps the username,
+// which is where a bare-username token sits.
+//
+// The rule is structural. Skip an optional "scheme:" and every '/' after it.
+// Then replace everything up to and including the last '@' that comes before
+// the first '/', '?' or '#' of what remains. The scheme and its slashes are
+// kept only when at least one slash follows: without one, the form is
+// scp-like (TOKEN:x@host:path) and the "scheme" may itself be the
+// credential, so it is replaced as well. Taking the LAST '@' over-redacts,
+// relative to git's first-'@' split, and that is the safe direction.
+//
+// It has no dependency beyond exec.Redacted's text, so it can be lifted
+// unchanged into a shared package.
+func redactUserinfo(s string) string {
+	keep, rest := "", s
+	if i := strings.IndexByte(s, ':'); i > 0 && isURLScheme(s[:i]) {
+		after := s[i+1:]
+		trimmed := strings.TrimLeft(after, "/")
+		if len(trimmed) < len(after) {
+			keep = s[:len(s)-len(trimmed)]
+		}
+		rest = trimmed
 	}
-	return repo
+	head := rest
+	if j := strings.IndexAny(rest, "/?#"); j >= 0 {
+		head = rest[:j]
+	}
+	at := strings.LastIndexByte(head, '@')
+	if at < 0 {
+		return s
+	}
+	return keep + exec.Redacted + "@" + rest[at+1:]
+}
+
+// isURLScheme reports whether s is an RFC 3986 scheme: ALPHA followed by
+// ALPHA, DIGIT, '+', '-' or '.'.
+func isURLScheme(s string) bool {
+	for i, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+		case i > 0 && (r >= '0' && r <= '9' || r == '+' || r == '-' || r == '.'):
+		default:
+			return false
+		}
+	}
+	return s != ""
 }
 
 // exitCode is what a checkout failure's log line keeps of err: the exit code
@@ -166,11 +195,17 @@ func discardSandbox(ctx context.Context, run exec.Runner, dir string) {
 	}
 }
 
+// hasLocalPathPrefix reports whether repo is spelled as a filesystem path:
+// absolute, ./ or ../ relative, or ".". isLocalRepo and logRepo share it.
+func hasLocalPathPrefix(repo string) bool {
+	return strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, "./") || strings.HasPrefix(repo, "../") || repo == "."
+}
+
 // isLocalRepo reports whether repo looks like a filesystem path (vs. an
 // owner/repo remote reference) — an absolute/relative path, or one that
 // exists on disk.
 func isLocalRepo(repo string) bool {
-	if strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, "./") || strings.HasPrefix(repo, "../") || repo == "." {
+	if hasLocalPathPrefix(repo) {
 		return true
 	}
 	if _, err := os.Stat(repo); err == nil {
