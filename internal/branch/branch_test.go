@@ -593,9 +593,6 @@ func TestEnumerate_GoneBranch_OmittedByDefault_SurfacedWithIncludeGone(t *testin
 	}
 }
 
-// subprocessFailure is a failed call as the real runner reports it: its text
-// is the subprocess's stderr, which for `git push` relays the remote's
-// sideband and for gh is host-chosen text (#658).
 // ghNotFound is what `gh api -i` returns for a ref that is gone: exit 1, the
 // status line and headers on stdout, and gh's error line on stderr.
 func ghNotFound(args []string) error {
@@ -606,6 +603,9 @@ func ghNotFound(args []string) error {
 	}
 }
 
+// subprocessFailure is a failed call as the real runner reports it: its text
+// is the subprocess's stderr, which for `git push` relays the remote's
+// sideband and for gh is host-chosen text (#658).
 func subprocessFailure(name string, args []string) error {
 	return &exec.CommandError{Name: name, Args: args, Stderr: "remote: MARKER\x1b[2J", ExitCode: 1, Err: errors.New("exit status 1")}
 }
